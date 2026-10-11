@@ -986,10 +986,12 @@ fn sm120_module_selection_is_a_complete_same_target_artifact_transaction() {
         .map(|start| &MODULE_SOURCE[start..])
         .expect("whole-artifact SM120 selector");
     for required in [
-        "ModuleKind::Fixed",
+        "ModuleKind::Inference",
         "ModuleKind::TriadScalar",
         "ModuleKind::TriadSm80",
         "ModuleKind::TriadSm120",
+        "ModuleKind::Mamba1",
+        "ModuleKind::Shared",
         "qualify_specialized_module",
     ] {
         assert!(
@@ -999,7 +1001,7 @@ fn sm120_module_selection_is_a_complete_same_target_artifact_transaction() {
     }
     assert!(
         selector.find("candidate.nvrtc_arch").unwrap()
-            < selector.find("ModuleKind::Fixed").unwrap(),
+            < selector.find("ModuleKind::Inference").unwrap(),
         "one accepted target must bind every module in the artifact set"
     );
 }

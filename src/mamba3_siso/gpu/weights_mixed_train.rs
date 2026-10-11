@@ -11,10 +11,9 @@
 //!   `input_proj_w` (bulk); D2D copy for everything else (norm weights,
 //!   biases, `d_param`, `dt_bias`, `b_bias`, `c_bias`, `norm_gate_weight`).
 //!
-//! Uses M1's existing `cast_f32_to_bf16` / `cast_f32_to_f16` NVRTC kernels
-//! (elementwise.cu is compiled into both `MambaKernels` and `Mamba3Kernels`
-//! modules, so the cast launch against `ctx.kernels` is safe from either
-//! callsite).
+//! Uses the `cast_f32_to_bf16` / `cast_f32_to_f16` NVRTC kernels (casts.cu
+//! is compiled into both the context's Inference module and `Mamba3Kernels`,
+//! so the cast launch against `ctx.kernels` is safe from either callsite).
 
 use std::sync::Arc;
 

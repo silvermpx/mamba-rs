@@ -1,8 +1,8 @@
 //! The Mamba-2 CUDA module: `kernels/mamba2_ops.cu`, `mamba2_ssd.cu` and
 //! `mamba2_bwd.cu` after the typed prelude, compiled with NVRTC and cached
-//! under its own module kind, so adding it moves no identity of the Fixed
+//! under its own module kind, so adding it moves no identity of the Inference
 //! or Mamba-3 modules. The norms, the residual adds and the optimizer come
-//! from the Fixed module through the context.
+//! from the Common module through the context.
 
 use std::sync::Arc;
 

@@ -403,12 +403,12 @@ fn launch(
         Arm::N128 => &ctx.kernels.gemm_bi_f32_f32_n128_s2,
         Arm::Candidate => ctx
             .kernels
-            .fixed_sm89_f32_n64_copyplan
+            .inference_sm89_f32_n64_copyplan
             .as_ref()
             .ok_or_else(|| {
                 format!(
                     "missing exact N64 holder: {:?}",
-                    ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection
+                    ctx.kernels.inference_sm89_f32_n64_copyplan_rejection
                 )
             })?,
     };
@@ -694,18 +694,22 @@ fn admit_context() -> Option<GpuCtx> {
         );
         return None;
     }
-    let ctx = GpuCtx::new(&device).expect("actual NVRTC Fixed context");
+    let ctx = GpuCtx::new(&device).expect("actual NVRTC Inference context");
     let function = ctx
         .kernels
-        .fixed_sm89_f32_n64_copyplan
+        .inference_sm89_f32_n64_copyplan
         .as_ref()
         .unwrap_or_else(|| {
             panic!(
                 "production optional holder declined: {:?}",
-                ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection
+                ctx.kernels.inference_sm89_f32_n64_copyplan_rejection
             )
         });
-    assert!(ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection.is_none());
+    assert!(
+        ctx.kernels
+            .inference_sm89_f32_n64_copyplan_rejection
+            .is_none()
+    );
     let local = function.local_size_bytes().unwrap();
     let registers = function.num_regs().unwrap();
     let shared = function.shared_size_bytes().unwrap();
@@ -727,7 +731,7 @@ fn admit_context() -> Option<GpuCtx> {
     let version = ctx.kernels.compiler_identity().nvrtc_version;
     println!(
         concat!(
-            "{{\"record\":\"FixedSm89ExactN64LiveAdmissionV1\",\"symbol\":\"{}\",",
+            "{{\"record\":\"InferenceSm89ExactN64LiveAdmissionV1\",\"symbol\":\"{}\",",
             "\"cc\":[8,9],\"sm\":{},\"registers\":{},\"static_shared\":{},",
             "\"dynamic_shared\":0,\"local\":{},\"max_threads\":{},",
             "\"active_ctas\":{},\"carveout\":{},\"nvrtc\":[{},{}]}}"
@@ -761,7 +765,7 @@ fn run_fixture(ctx: &GpuCtx, f: Fixture) {
         if matches!(arm, Arm::Candidate) {
             println!(
                 concat!(
-                    "{{\"record\":\"FixedSm89ExactN64ForcePreflightV1\",",
+                    "{{\"record\":\"InferenceSm89ExactN64ForcePreflightV1\",",
                     "\"dims_mkn\":[{},{},{}],\"three_incumbents_eager_graph_raw\":true,",
                     "\"independent_cpu_reference\":{},\"public_force\":{}}}"
                 ),
@@ -814,7 +818,7 @@ fn run_fixture(ctx: &GpuCtx, f: Fixture) {
     }
     println!(
         concat!(
-            "{{\"record\":\"FixedSm89ExactN64CorrectnessV1\",\"dtype\":\"f32\",\"op\":\"nn\",",
+            "{{\"record\":\"InferenceSm89ExactN64CorrectnessV1\",\"dtype\":\"f32\",\"op\":\"nn\",",
             "\"requested\":\"{:?}\",\"actual\":\"{}\",\"dims_mkn\":[{},{},{}],",
             "\"strides_lda_ldb_ldc\":[{},{},{}],\"storage_rows\":{},\"row_view\":{},",
             "\"float_offsets_abc\":[{},{},{}],\"bias\":{},\"alpha_bits\":{},\"beta_bits\":{},",
@@ -846,7 +850,7 @@ fn run_fixture(ctx: &GpuCtx, f: Fixture) {
 
 #[test]
 #[ignore = "requires actual Ada NVRTC exact N64 holder and implemented forced launcher"]
-fn fixed_sm89_exact_n64_forced_bits_graph_views() {
+fn inference_sm89_exact_n64_forced_bits_graph_views() {
     let Some(ctx) = admit_context() else {
         return;
     };
@@ -949,7 +953,7 @@ fn fixed_sm89_exact_n64_forced_bits_graph_views() {
 
 #[test]
 #[ignore = "bounded actual Ada NVRTC exact N64 subset for four compute-sanitizer tools"]
-fn fixed_sm89_exact_n64_sanitizer_smoke() {
+fn inference_sm89_exact_n64_sanitizer_smoke() {
     let Some(ctx) = admit_context() else {
         return;
     };
@@ -989,7 +993,7 @@ fn fixed_sm89_exact_n64_sanitizer_smoke() {
 
 #[test]
 #[ignore = "requires actual Ada exact N64 force; rejects unsafe operands before enqueue"]
-fn fixed_sm89_exact_n64_rejects_unsafe_inputs_and_empty_is_noop() {
+fn inference_sm89_exact_n64_rejects_unsafe_inputs_and_empty_is_noop() {
     let Some(ctx) = admit_context() else {
         return;
     };
@@ -1208,7 +1212,7 @@ fn run_auto_view(
     };
     println!(
         concat!(
-            "{{\"record\":\"FixedSm89ExactN64AutoBoundaryV1\",\"dtype\":\"f32\",\"op\":\"nn\",",
+            "{{\"record\":\"InferenceSm89ExactN64AutoBoundaryV1\",\"dtype\":\"f32\",\"op\":\"nn\",",
             "\"requested\":\"AUTO\",\"expected\":\"{:?}\",\"actual\":\"{:?}\",\"symbol\":\"{}\",",
             "\"dims_mkn\":[{},{},{}],\"storage_rows\":{},\"row_view\":{},\"float_offsets_abc\":[{},{},{}],",
             "\"bias\":{},\"alpha_bits\":1065353216,\"beta_bits\":0,\"full_old_legacy_reference\":true,",
@@ -1236,7 +1240,7 @@ fn run_auto_view(
 
 #[test]
 #[ignore = "actual Ada CUDA12.8/13.0/13.2 AUTO promotion, full-hot Legacy prefix/view raw-bit boundaries"]
-fn fixed_sm89_exact_n64_auto_prefix_view_graph_bits() {
+fn inference_sm89_exact_n64_auto_prefix_view_graph_bits() {
     let Some(ctx) = admit_context() else {
         return;
     };

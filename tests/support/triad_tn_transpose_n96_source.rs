@@ -80,8 +80,8 @@ pub fn validate_transposed_words(
     Ok(())
 }
 
-pub fn candidate_source(fixed_n96: &str) -> Result<String, String> {
-    let mut source = fixed_n96.to_owned();
+pub fn candidate_source(inference_n96: &str) -> Result<String, String> {
+    let mut source = inference_n96.to_owned();
     replace_exactly_once(
         &mut source,
         "nn_sm89_rna_tf32_m128n96_bk32_s3",
@@ -222,7 +222,8 @@ void tn_test_transpose_raw_u32_32x32(
 mod tests {
     use super::*;
 
-    const FIXED_N96: &str = include_str!("../../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu");
+    const INFERENCE_N96: &str =
+        include_str!("../../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu");
 
     #[test]
     fn transpose_stride_and_indices_cover_raw_words_and_padding() {
@@ -258,7 +259,7 @@ mod tests {
 
     #[test]
     fn candidate_changes_only_symbol_and_exact_tn_epilogue_and_adds_raw_transpose() {
-        let source = candidate_source(FIXED_N96).unwrap();
+        let source = candidate_source(INFERENCE_N96).unwrap();
         assert_eq!(source.matches(GEMM_SYMBOL).count(), 1);
         assert_eq!(source.matches(TRANSPOSE_SYMBOL).count(), 1);
         assert!(source.contains("cvt.rna.tf32.f32"));
@@ -280,7 +281,7 @@ mod tests {
 
     #[test]
     fn candidate_adapter_rejects_changed_n96_boundaries() {
-        let changed = FIXED_N96.replacen(
+        let changed = INFERENCE_N96.replacen(
             "__fmaf_rn(params.beta, *destination, value)",
             "__fadd_rn(*destination, value)",
             1,

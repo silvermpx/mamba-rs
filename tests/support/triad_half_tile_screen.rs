@@ -8,9 +8,9 @@ pub enum BracketOrder {
 pub enum AdaHalfArm {
     PortableTc64,
     PortableTc128,
-    FixedSm89Tc128Pipeline,
-    FixedSm89Tc128Swizzle,
-    FixedSm89Tc128S3,
+    InferenceSm89Tc128Pipeline,
+    InferenceSm89Tc128Swizzle,
+    InferenceSm89Tc128S3,
 }
 
 impl AdaHalfArm {
@@ -18,9 +18,9 @@ impl AdaHalfArm {
         match self {
             Self::PortableTc64 => "forced_tc64",
             Self::PortableTc128 => "forced_tc128",
-            Self::FixedSm89Tc128Pipeline => "fixed_sm89_tc128_pipeline",
-            Self::FixedSm89Tc128Swizzle => "fixed_sm89_tc128_swizzle",
-            Self::FixedSm89Tc128S3 => "fixed_sm89_tc128_s3",
+            Self::InferenceSm89Tc128Pipeline => "inference_sm89_tc128_pipeline",
+            Self::InferenceSm89Tc128Swizzle => "inference_sm89_tc128_swizzle",
+            Self::InferenceSm89Tc128S3 => "inference_sm89_tc128_s3",
         }
     }
 
@@ -28,16 +28,16 @@ impl AdaHalfArm {
         match self {
             Self::PortableTc64 => (128, 36_864, 0, 1),
             Self::PortableTc128 => (256, 0, 71_680, 1),
-            Self::FixedSm89Tc128Pipeline => (256, 0, 71_680, 1),
-            Self::FixedSm89Tc128Swizzle => (256, 0, 69_632, 1),
-            Self::FixedSm89Tc128S3 => (256, 0, 98_304, 1),
+            Self::InferenceSm89Tc128Pipeline => (256, 0, 71_680, 1),
+            Self::InferenceSm89Tc128Swizzle => (256, 0, 69_632, 1),
+            Self::InferenceSm89Tc128S3 => (256, 0, 98_304, 1),
         }
     }
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FixedHalfS3Params {
+pub struct InferenceHalfS3Params {
     pub alpha: f32,
     pub beta: f32,
     pub m: i32,
@@ -97,51 +97,54 @@ pub fn retain_decision(strata: &[[f64; 2]]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdaHalfArm, BracketOrder, FixedHalfS3Params, candidate_over_reference, retain_decision,
+        AdaHalfArm, BracketOrder, InferenceHalfS3Params, candidate_over_reference, retain_decision,
         retain_stratum,
     };
     use std::mem::{offset_of, size_of};
 
     #[test]
-    fn fixed_s3_arm_has_distinct_identity_and_resource_boundary() {
+    fn inference_s3_arm_has_distinct_identity_and_resource_boundary() {
         assert_eq!(AdaHalfArm::PortableTc64.name(), "forced_tc64");
         assert_eq!(AdaHalfArm::PortableTc128.name(), "forced_tc128");
-        assert_eq!(AdaHalfArm::FixedSm89Tc128S3.name(), "fixed_sm89_tc128_s3");
+        assert_eq!(
+            AdaHalfArm::InferenceSm89Tc128S3.name(),
+            "inference_sm89_tc128_s3"
+        );
         assert_eq!(AdaHalfArm::PortableTc64.resources(), (128, 36_864, 0, 1));
         assert_eq!(AdaHalfArm::PortableTc128.resources(), (256, 0, 71_680, 1));
         assert_eq!(
-            AdaHalfArm::FixedSm89Tc128S3.resources(),
+            AdaHalfArm::InferenceSm89Tc128S3.resources(),
             (256, 0, 98_304, 1)
         );
         assert_eq!(
-            AdaHalfArm::FixedSm89Tc128Pipeline.name(),
-            "fixed_sm89_tc128_pipeline"
+            AdaHalfArm::InferenceSm89Tc128Pipeline.name(),
+            "inference_sm89_tc128_pipeline"
         );
         assert_eq!(
-            AdaHalfArm::FixedSm89Tc128Pipeline.resources(),
+            AdaHalfArm::InferenceSm89Tc128Pipeline.resources(),
             (256, 0, 71_680, 1)
         );
         assert_eq!(
-            AdaHalfArm::FixedSm89Tc128Swizzle.name(),
-            "fixed_sm89_tc128_swizzle"
+            AdaHalfArm::InferenceSm89Tc128Swizzle.name(),
+            "inference_sm89_tc128_swizzle"
         );
         assert_eq!(
-            AdaHalfArm::FixedSm89Tc128Swizzle.resources(),
+            AdaHalfArm::InferenceSm89Tc128Swizzle.resources(),
             (256, 0, 69_632, 1)
         );
     }
 
     #[test]
-    fn fixed_s3_parameter_bundle_is_exactly_eight_words() {
-        assert_eq!(size_of::<FixedHalfS3Params>(), 32);
-        assert_eq!(offset_of!(FixedHalfS3Params, alpha), 0);
-        assert_eq!(offset_of!(FixedHalfS3Params, beta), 4);
-        assert_eq!(offset_of!(FixedHalfS3Params, m), 8);
-        assert_eq!(offset_of!(FixedHalfS3Params, n), 12);
-        assert_eq!(offset_of!(FixedHalfS3Params, k), 16);
-        assert_eq!(offset_of!(FixedHalfS3Params, lda), 20);
-        assert_eq!(offset_of!(FixedHalfS3Params, ldb), 24);
-        assert_eq!(offset_of!(FixedHalfS3Params, ldc), 28);
+    fn inference_s3_parameter_bundle_is_exactly_eight_words() {
+        assert_eq!(size_of::<InferenceHalfS3Params>(), 32);
+        assert_eq!(offset_of!(InferenceHalfS3Params, alpha), 0);
+        assert_eq!(offset_of!(InferenceHalfS3Params, beta), 4);
+        assert_eq!(offset_of!(InferenceHalfS3Params, m), 8);
+        assert_eq!(offset_of!(InferenceHalfS3Params, n), 12);
+        assert_eq!(offset_of!(InferenceHalfS3Params, k), 16);
+        assert_eq!(offset_of!(InferenceHalfS3Params, lda), 20);
+        assert_eq!(offset_of!(InferenceHalfS3Params, ldb), 24);
+        assert_eq!(offset_of!(InferenceHalfS3Params, ldc), 28);
     }
 
     #[test]

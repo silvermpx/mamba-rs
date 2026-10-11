@@ -77,9 +77,20 @@ fn sequential_family_is_state_cap_invariant() {
     let sc = det(b * ds, 24, 0.5);
 
     let mut reference: Option<SequentialFamilyOutputs> = None;
+    let mut gemm_identity = None;
+    let mut mamba1_keys = Vec::new();
     for cap in [16usize, 64, 256] {
         let ctx = GpuCtx::new_with_state_cap(&device, cap).unwrap();
         let k = &ctx.kernels;
+        // Only the Mamba-1 module takes the capacity: the GEMM artifact set
+        // and the Inference compiler identity stay the same at every cap,
+        // while the Mamba-1 compile key moves with it.
+        let gemm = (k.artifact_set_identity(), k.compiler_identity());
+        match &gemm_identity {
+            None => gemm_identity = Some(gemm),
+            Some(first) => assert_eq!(*first, gemm, "the GEMM identities moved with cap {cap}"),
+        }
+        mamba1_keys.push(k.mamba1_artifact_identity().compile_key);
         let mut h = buf(&ctx, &h0);
         let mut y = GpuBuffer::zeros(&ctx.stream, bt * di).unwrap();
         let delta_b = buf(&ctx, &delta);
@@ -147,4 +158,8 @@ fn sequential_family_is_state_cap_invariant() {
             }
         }
     }
+    assert!(
+        mamba1_keys[0] != mamba1_keys[1] && mamba1_keys[1] != mamba1_keys[2],
+        "the Mamba-1 compile key must carry the state cap"
+    );
 }

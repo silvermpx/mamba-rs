@@ -1,5 +1,5 @@
-// Batch-invariant bf16/f16/f32 GEMM — the single FIXED-TILE family
-// (BiGemmFamily::Fixed). Forward-only NN; the triad in gemm_bi_triad.cu
+// Batch-invariant bf16/f16/f32 GEMM — the single fixed-tile family
+// (BiGemmFamily::Inference). Forward-only NN; the triad in gemm_bi_triad.cu
 // carries the backward layouts.
 //
 // Problem: cuBLAS `cublasGemmEx` selects different algorithms per M
@@ -91,7 +91,7 @@ __device__ __forceinline__ float zero_f32() { return 0.0f; }
 // and a transposed-A layout were all measured slower at those shapes.
 // The launcher's block/thread constants MUST equal the ones here - a
 // launch that disagrees fills part of the tile and returns plausible
-// garbage. `gemm_bi_fixed_correctness` is the gate.
+// garbage. `gemm_bi_inference_correctness` is the gate.
 // ---------------------------------------------------------------------------
 // GBF safety layer (adopted from the audited fix set; every item is
 // bit-preserving - the packed store uses the same per-element RNE, the

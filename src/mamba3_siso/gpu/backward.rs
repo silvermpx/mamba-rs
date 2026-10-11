@@ -345,7 +345,7 @@ pub fn gpu_backward_mamba3_layer(
                     .map_err(|e| format!("m3_dstate_passing_bwd: {:?}", e))?;
             }
             // t-split: blockDim.y lanes stride the per-timestep
-            // loops. Fixed launch geometry (never data-shaped); any T_SPLIT
+            // loops. Inference launch geometry (never data-shaped); any T_SPLIT
             // yields identical bits since each output keeps one owning lane
             // with the same inner order. Chunks ride grid z.
             let t_split = 16.min(1024 / hd.max(1)).max(1) as u32;

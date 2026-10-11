@@ -1058,13 +1058,13 @@ fn qualified_tn_m16n16_facts() -> ScalarLaunchFacts {
             numeric_abi_revision: NUMERIC_ABI_REVISION,
             schedule_revision: SCHEDULE_REVISION,
         },
-        fixed_artifact: ArtifactIdentity {
-            module_kind: ModuleKind::Fixed,
+        inference_artifact: ArtifactIdentity {
+            module_kind: ModuleKind::Inference,
             artifact_kind: ArtifactKind::Ptx,
             compile_key: [0; 32],
             artifact_digest: [0; 32],
         },
-        fixed_compiler: CompilerIdentity {
+        inference_compiler: CompilerIdentity {
             source_digest: [0; 32],
             invocation_digest: [0; 32],
             header_manifest_digest: [0; 32],
@@ -1078,7 +1078,7 @@ fn qualified_tn_m16n16_facts() -> ScalarLaunchFacts {
             numeric_abi_revision: NUMERIC_ABI_REVISION,
             schedule_revision: SCHEDULE_REVISION,
         },
-        fixed_copyplan_loaded: false,
+        inference_copyplan_loaded: false,
         sm89_exact_f32_artifact: None,
         sm89_exact_f32_compiler: None,
         sm89_exact_f32_symbols_loaded: [false; 3],

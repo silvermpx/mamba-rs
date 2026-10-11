@@ -62,7 +62,7 @@ impl HalfKernel {
 
 /// Standalone deterministic TF32 NN-forward tiles owned by the inference
 /// module. No training layout is compiled into this holder.
-pub struct FixedTf32Kernels {
+pub struct InferenceTf32Kernels {
     pub m128n64_s2: CudaFunction,
     pub m128n64_s3: CudaFunction,
     pub m64n64_s2: CudaFunction,
@@ -71,7 +71,7 @@ pub struct FixedTf32Kernels {
 }
 
 /// SM120 TMA TF32 NN-forward tiles owned by the inference module.
-pub struct FixedSm120Tf32Kernels {
+pub struct InferenceSm120Tf32Kernels {
     pub m128n64_s2: CudaFunction,
     pub m128n64_s3: CudaFunction,
     pub m64n128_s2: CudaFunction,
@@ -82,7 +82,7 @@ pub struct FixedSm120Tf32Kernels {
 }
 
 /// Qualified SM120 TMA half-precision NN-forward tiles.
-pub struct FixedSm120HalfKernels {
+pub struct InferenceSm120HalfKernels {
     pub m64n64_bk64_s2: HalfKernel,
     pub m64n128_bk64_s2: HalfKernel,
     pub m128n64_bk32_s3: HalfKernel,
@@ -92,7 +92,7 @@ pub struct FixedSm120HalfKernels {
 
 /// Inference-owned exact-F32 TMA tiles with post-dot bias or no-bias epilogues,
 /// matching the deterministic inference arithmetic contract.
-pub struct FixedSm120FmaPostbiasKernels {
+pub struct InferenceSm120FmaPostbiasKernels {
     pub m128n64: CudaFunction,
     pub m64n128: CudaFunction,
     pub m128n96: CudaFunction,
@@ -114,6 +114,12 @@ pub struct MambaKernels {
     _modules: CudaModuleAnchors,
 
     compiler_identity: super::kernel_identity::CompilerIdentity,
+    /// The Mamba-1 and shared modules' identities. They stay out of the
+    /// GEMM artifact set, so neither takes part in GEMM route admission.
+    mamba1_compiler_identity: super::kernel_identity::CompilerIdentity,
+    mamba1_artifact_identity: super::kernel_identity::ArtifactIdentity,
+    shared_compiler_identity: super::kernel_identity::CompilerIdentity,
+    shared_artifact_identity: super::kernel_identity::ArtifactIdentity,
     triad: GemmBiKernels,
 
     /// State-dimension capacity the kernels were compiled with (the
@@ -216,7 +222,7 @@ pub struct MambaKernels {
 
     // -- Typed training-backward kernels --
     /// Typed dispatch (f32/bf16/f16) for `gating_backward`. dx/dy/d_y/d_gate
-    /// typed; matches DEFINE_GATING_BWD macro in elementwise.cu.
+    /// typed; matches DEFINE_GATING_BWD macro in mamba_ssm_elementwise.cu.
     pub gating_bwd_typed: TypedKernel,
     /// Typed dispatch for `rmsnorm_backward`. dx/dy typed; d_scale stays f32
     /// (Rule-B per-sample partials + reduce). Matches DEFINE_RMSNORM_BWD macro in
@@ -373,7 +379,7 @@ pub struct MambaKernels {
 
     // -- Batch-invariant GEMM (bf16 cross-batch determinism fix) --
     /// Batch-invariant GEMM bf16×bf16→bf16. Tensor-Core inner GEMM via
-    /// `nvcuda::wmma` (m16n16k16 fragments, f32 accumulator). Fixed
+    /// `nvcuda::wmma` (m16n16k16 fragments, f32 accumulator). Inference
     /// 64x64x32 tile, no split-K. `C[i, j]` is bit-identical regardless
     /// of batch size M of A.
     pub gemm_bi_bf16_bf16: CudaFunction,
@@ -389,59 +395,59 @@ pub struct MambaKernels {
     pub gemm_bi_f32_f32_s2: CudaFunction,
     /// Exact-f32 64x128 route for the measured A/B AUTO points and forced tests.
     pub gemm_bi_f32_f32_n128_s2: CudaFunction,
-    /// Deterministic TF32 NN-forward tile ladder owned by Fixed/inference.
-    pub gemm_bi_nn_tf32: FixedTf32Kernels,
+    /// Deterministic TF32 NN-forward tile ladder owned by Inference/inference.
+    pub gemm_bi_nn_tf32: InferenceTf32Kernels,
     /// SM120 TMA counterpart of the deterministic inference TF32 ladder.
-    pub gemm_bi_nn_tf32_sm120: Option<FixedSm120Tf32Kernels>,
+    pub gemm_bi_nn_tf32_sm120: Option<InferenceSm120Tf32Kernels>,
     /// SM120 TMA BF16/F16 inference candidates.
-    pub gemm_bi_nn_half_sm120: Option<FixedSm120HalfKernels>,
+    pub gemm_bi_nn_half_sm120: Option<InferenceSm120HalfKernels>,
     /// SM120 TMA BF16/F16-input, F32-output inference candidates.
-    pub gemm_bi_nn_half_sm120_f32out: Option<FixedSm120HalfKernels>,
+    pub gemm_bi_nn_half_sm120_f32out: Option<InferenceSm120HalfKernels>,
     /// Independently admitted Ada Tc128 half pipeline; used by qualified AUTO rows.
-    pub fixed_sm89_half_pipeline: Option<HalfKernel>,
+    pub inference_sm89_half_pipeline: Option<HalfKernel>,
     /// Why the optional Ada pipeline is absent (including non-Ada targets).
-    pub fixed_sm89_half_pipeline_rejection: Option<String>,
+    pub inference_sm89_half_pipeline_rejection: Option<String>,
     /// Independent Ada-only packed/XOR homogeneous-half candidate.
-    pub fixed_sm89_half_swizzle: Option<HalfKernel>,
+    pub inference_sm89_half_swizzle: Option<HalfKernel>,
     /// Why only the swizzle holder is absent; never disables the incumbent.
-    pub fixed_sm89_half_swizzle_rejection: Option<String>,
+    pub inference_sm89_half_swizzle_rejection: Option<String>,
     /// Independently admitted Ada three-stage homogeneous-half pair.
-    pub fixed_sm89_half_s3: Option<HalfKernel>,
-    pub fixed_sm89_half_s3_rejection: Option<String>,
-    /// Fixed-owned Ada RNA-wide TF32 route; retains qualified AUTO rows and fallbacks.
-    pub fixed_sm89_tf32_rna_wide: Option<CudaFunction>,
-    pub fixed_sm89_tf32_rna_wide_rejection: Option<String>,
-    /// Fixed-owned Ada RNA M128xN96 TF32; qualified E0 AUTO since revision 45.
-    pub fixed_sm89_tf32_rna_n96: Option<CudaFunction>,
-    pub fixed_sm89_tf32_rna_n96_rejection: Option<String>,
+    pub inference_sm89_half_s3: Option<HalfKernel>,
+    pub inference_sm89_half_s3_rejection: Option<String>,
+    /// Inference-owned Ada RNA-wide TF32 route; retains qualified AUTO rows and fallbacks.
+    pub inference_sm89_tf32_rna_wide: Option<CudaFunction>,
+    pub inference_sm89_tf32_rna_wide_rejection: Option<String>,
+    /// Inference-owned Ada RNA M128xN96 TF32; qualified E0 AUTO since revision 45.
+    pub inference_sm89_tf32_rna_n96: Option<CudaFunction>,
+    pub inference_sm89_tf32_rna_n96_rejection: Option<String>,
     /// Independently admitted Ada F16 D route; qualified CUDA13.2 AUTO since revision 45.
-    pub fixed_sm89_half_m64n64_s3_f16: Option<CudaFunction>,
-    pub fixed_sm89_half_m64n64_s3_f16_rejection: Option<String>,
+    pub inference_sm89_half_m64n64_s3_f16: Option<CudaFunction>,
+    pub inference_sm89_half_m64n64_s3_f16_rejection: Option<String>,
     /// Independently admitted Ada F16 E route; qualified CUDA13.2 AUTO since revision 45.
-    pub fixed_sm89_half_m128n64_s2_f16: Option<CudaFunction>,
-    pub fixed_sm89_half_m128n64_s2_f16_rejection: Option<String>,
+    pub inference_sm89_half_m128n64_s2_f16: Option<CudaFunction>,
+    pub inference_sm89_half_m128n64_s2_f16_rejection: Option<String>,
     /// Optional Ada exact-F32 N64 copy-plan; admitted independently of incumbents.
-    pub fixed_sm89_f32_n64_copyplan: Option<CudaFunction>,
-    pub fixed_sm89_f32_n64_copyplan_rejection: Option<String>,
+    pub inference_sm89_f32_n64_copyplan: Option<CudaFunction>,
+    pub inference_sm89_f32_n64_copyplan_rejection: Option<String>,
     /// The Ada-measured inference cells, by symbol, from their own module.
-    pub(crate) fixed_sm89_cells: std::collections::HashMap<&'static str, CudaFunction>,
+    pub(crate) inference_sm89_cells: std::collections::HashMap<&'static str, CudaFunction>,
     /// The compiler identity of the inference cells module, when composed.
     pub(crate) sm89_cells_compiler_identity: Option<super::kernel_identity::CompilerIdentity>,
     pub(crate) inference_sm89_bundle: InferenceSm89Bundle,
     /// Optional CC12.0 exact-F32 N64 copy-plan, separate from the Ada route.
-    pub fixed_sm120_f32_n64_copyplan: Option<CudaFunction>,
-    pub fixed_sm120_f32_n64_copyplan_rejection: Option<String>,
+    pub inference_sm120_f32_n64_copyplan: Option<CudaFunction>,
+    pub inference_sm120_f32_n64_copyplan_rejection: Option<String>,
     /// Independently admitted force-only 256-thread CopyPlan twin.
-    pub fixed_sm120_f32_n64_copyplan_t256: Option<CudaFunction>,
-    pub fixed_sm120_f32_n64_copyplan_t256_rejection: Option<String>,
-    pub fixed_sm120_f32_m128n64_copyplan_t256: Option<CudaFunction>,
-    pub fixed_sm120_f32_m128n64_copyplan_t256_rejection: Option<String>,
+    pub inference_sm120_f32_n64_copyplan_t256: Option<CudaFunction>,
+    pub inference_sm120_f32_n64_copyplan_t256_rejection: Option<String>,
+    pub inference_sm120_f32_m128n64_copyplan_t256: Option<CudaFunction>,
+    pub inference_sm120_f32_m128n64_copyplan_t256_rejection: Option<String>,
     /// Independent compute_120 sliced exact-F32 route; no scratch.
-    pub fixed_sm120_f32_n64_sliced: Option<CudaFunction>,
-    pub fixed_sm120_f32_n64_sliced_rejection: Option<String>,
-    /// Optional CC12.0 exact-FMA tiles with Fixed's post-dot bias order.
-    pub fixed_sm120_fma_postbias: Option<FixedSm120FmaPostbiasKernels>,
-    pub fixed_sm120_fma_postbias_rejection: Option<String>,
+    pub inference_sm120_f32_n64_sliced: Option<CudaFunction>,
+    pub inference_sm120_f32_n64_sliced_rejection: Option<String>,
+    /// Optional CC12.0 exact-FMA tiles with Inference's post-dot bias order.
+    pub inference_sm120_fma_postbias: Option<InferenceSm120FmaPostbiasKernels>,
+    pub inference_sm120_fma_postbias_rejection: Option<String>,
 
     // -- Batch-invariant matvec (M=1 specialization) --
     /// Specialized M=1 matvec. The GEMM kernels above waste 98% of smem
@@ -564,7 +570,7 @@ impl MambaKernels {
         match symbol {
             "f32_f32_s2" => Some(&self.gemm_bi_f32_f32_s2),
             "f32_f32_n128_s2" => Some(&self.gemm_bi_f32_f32_n128_s2),
-            "nn_sm89_f32_n64_copyplan" => self.fixed_sm89_f32_n64_copyplan.as_ref(),
+            "nn_sm89_f32_n64_copyplan" => self.inference_sm89_f32_n64_copyplan.as_ref(),
             "nn_sm89_tc128_f32out_s3_bf16" => {
                 self.inference_sm89_bundle.half_f32out_s3_bf16.as_ref().ok()
             }
@@ -574,12 +580,12 @@ impl MambaKernels {
             "nn_sm89_f32_m128n64_tail_copyplan" => {
                 self.inference_sm89_bundle.exact_m128n64_tail.as_ref().ok()
             }
-            "nn_sm120_f32_n64_copyplan" => self.fixed_sm120_f32_n64_copyplan.as_ref(),
-            "nn_sm120_f32_n64_copyplan_t256" => self.fixed_sm120_f32_n64_copyplan_t256.as_ref(),
+            "nn_sm120_f32_n64_copyplan" => self.inference_sm120_f32_n64_copyplan.as_ref(),
+            "nn_sm120_f32_n64_copyplan_t256" => self.inference_sm120_f32_n64_copyplan_t256.as_ref(),
             "nn_sm120_f32_n64_copyplan_m128n64_t256" => {
-                self.fixed_sm120_f32_m128n64_copyplan_t256.as_ref()
+                self.inference_sm120_f32_m128n64_copyplan_t256.as_ref()
             }
-            "nn_sm120_f32_n64_sliced" => self.fixed_sm120_f32_n64_sliced.as_ref(),
+            "nn_sm120_f32_n64_sliced" => self.inference_sm120_f32_n64_sliced.as_ref(),
             "bf16_bf16" => Some(&self.gemm_bi_bf16_bf16),
             "matvec_bi_bf16_bf16" => Some(&self.matvec_bi_bf16_bf16),
             "bf16_f32" => Some(&self.gemm_bi_bf16_f32),
@@ -592,9 +598,11 @@ impl MambaKernels {
             "nn_tc64_f32out_bf16" => Some(&self.gemm_bi_nn_tc64_f32out.bf16),
             "nn_tc16_bf16" => Some(&self.gemm_bi_nn_tc16_typed.bf16),
             "nn_tc16_f32out_bf16" => Some(&self.gemm_bi_nn_tc16_f32out.bf16),
-            "nn_sm89_tc128_pipeline_bf16" => Some(&self.fixed_sm89_half_pipeline.as_ref()?.bf16),
-            "nn_sm89_tc128_swizzle_bf16" => Some(&self.fixed_sm89_half_swizzle.as_ref()?.bf16),
-            "nn_sm89_tc128_s3_bf16" => Some(&self.fixed_sm89_half_s3.as_ref()?.bf16),
+            "nn_sm89_tc128_pipeline_bf16" => {
+                Some(&self.inference_sm89_half_pipeline.as_ref()?.bf16)
+            }
+            "nn_sm89_tc128_swizzle_bf16" => Some(&self.inference_sm89_half_swizzle.as_ref()?.bf16),
+            "nn_sm89_tc128_s3_bf16" => Some(&self.inference_sm89_half_s3.as_ref()?.bf16),
             "nn_sm120_tma_64x64_bk64_s2_bf16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m64n64_bk64_s2.bf16)
             }
@@ -659,9 +667,9 @@ impl MambaKernels {
             "nn_tc64_f32out_f16" => Some(&self.gemm_bi_nn_tc64_f32out.f16),
             "nn_tc16_f16" => Some(&self.gemm_bi_nn_tc16_typed.f16),
             "nn_tc16_f32out_f16" => Some(&self.gemm_bi_nn_tc16_f32out.f16),
-            "nn_sm89_tc128_pipeline_f16" => Some(&self.fixed_sm89_half_pipeline.as_ref()?.f16),
-            "nn_sm89_tc128_swizzle_f16" => Some(&self.fixed_sm89_half_swizzle.as_ref()?.f16),
-            "nn_sm89_tc128_s3_f16" => Some(&self.fixed_sm89_half_s3.as_ref()?.f16),
+            "nn_sm89_tc128_pipeline_f16" => Some(&self.inference_sm89_half_pipeline.as_ref()?.f16),
+            "nn_sm89_tc128_swizzle_f16" => Some(&self.inference_sm89_half_swizzle.as_ref()?.f16),
+            "nn_sm89_tc128_s3_f16" => Some(&self.inference_sm89_half_s3.as_ref()?.f16),
             "nn_sm120_tma_64x64_bk64_s2_f16" => {
                 Some(&self.gemm_bi_nn_half_sm120.as_ref()?.m64n64_bk64_s2.f16)
             }
@@ -715,15 +723,15 @@ impl MambaKernels {
             "nn_sm90a_wgmma_wg1_f16" => Some(&self.gemm_bi_nn_sm90_typed.as_ref()?.f16),
             "nn_sm100_tcgen_c4_f16" => Some(&self.gemm_bi_nn_sm100_typed.as_ref()?.f16),
             "matvec_bi_f32_f32" => Some(&self.matvec_bi_f32_f32),
-            "nn_sm89_m64n64_bk64_s3_f16" => self.fixed_sm89_half_m64n64_s3_f16.as_ref(),
-            "nn_sm89_m128n64_bk64_s2_f16" => self.fixed_sm89_half_m128n64_s2_f16.as_ref(),
+            "nn_sm89_m64n64_bk64_s3_f16" => self.inference_sm89_half_m64n64_s3_f16.as_ref(),
+            "nn_sm89_m128n64_bk64_s2_f16" => self.inference_sm89_half_m128n64_s2_f16.as_ref(),
             "nn_tf32_m128n64_bk32_s2" => Some(&self.gemm_bi_nn_tf32.m128n64_s2),
             "nn_tf32_m128n64_bk32_s3" => Some(&self.gemm_bi_nn_tf32.m128n64_s3),
             "nn_tf32_m64n64_bk32_s2" => Some(&self.gemm_bi_nn_tf32.m64n64_s2),
             "nn_tf32_m64n64_bk32_s3" => Some(&self.gemm_bi_nn_tf32.m64n64_s3),
             "nn_tf32_m16n32_bk32_s4" => Some(&self.gemm_bi_nn_tf32.m16n32_s4),
-            "nn_rna_wide_tf32_m128n128_bk32_s3" => self.fixed_sm89_tf32_rna_wide.as_ref(),
-            "nn_sm89_rna_tf32_m128n96_bk32_s3" => self.fixed_sm89_tf32_rna_n96.as_ref(),
+            "nn_rna_wide_tf32_m128n128_bk32_s3" => self.inference_sm89_tf32_rna_wide.as_ref(),
+            "nn_sm89_rna_tf32_m128n96_bk32_s3" => self.inference_sm89_tf32_rna_n96.as_ref(),
             "nn_sm80_mma_tf32_m128n128_bk32_s3" => self.triad_kernels().tf32_function(symbol),
             "nn_sm120_tma_tf32_m128n64_bk32_s2" => {
                 Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m128n64_s2)
@@ -747,28 +755,30 @@ impl MambaKernels {
                 Some(&self.gemm_bi_nn_tf32_sm120.as_ref()?.m64n64_s2_pair_store)
             }
             "nn_sm120_tma_fma_postbias_m128n64_bk16_s2" => {
-                Some(&self.fixed_sm120_fma_postbias.as_ref()?.m128n64)
+                Some(&self.inference_sm120_fma_postbias.as_ref()?.m128n64)
             }
             "nn_sm120_tma_fma_postbias_m64n128_bk16_s2" => {
-                Some(&self.fixed_sm120_fma_postbias.as_ref()?.m64n128)
+                Some(&self.inference_sm120_fma_postbias.as_ref()?.m64n128)
             }
             "nn_sm120_tma_fma_postbias_m128n96_bk16_s2" => {
-                Some(&self.fixed_sm120_fma_postbias.as_ref()?.m128n96)
+                Some(&self.inference_sm120_fma_postbias.as_ref()?.m128n96)
             }
-            "nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4" => {
-                self.fixed_sm120_fma_postbias.as_ref()?.m128n64_k4.as_ref()
-            }
+            "nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4" => self
+                .inference_sm120_fma_postbias
+                .as_ref()?
+                .m128n64_k4
+                .as_ref(),
             "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2" => self
-                .fixed_sm120_fma_postbias
+                .inference_sm120_fma_postbias
                 .as_ref()?
                 .m128n64_t256
                 .as_ref(),
             "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2" => self
-                .fixed_sm120_fma_postbias
+                .inference_sm120_fma_postbias
                 .as_ref()?
                 .nobias_m128n64_t256
                 .as_ref(),
-            other => self.fixed_sm89_cells.get(other),
+            other => self.inference_sm89_cells.get(other),
         }
     }
 
@@ -875,9 +885,11 @@ impl MambaKernels {
         };
         let plan = Self::triad_module_plan(arch, device_cc, nvrtc_version());
         let (
-            fixed,
+            inference,
             scalar,
             sm80,
+            mamba1,
+            shared,
             finalist,
             finalist_rejection,
             sm89_half,
@@ -895,7 +907,7 @@ impl MambaKernels {
             // was compiled with (CC 12.1 may have fallen back to compute_120),
             // and admits them through the first-use proof like every other
             // board.
-            let set_target = artifacts.fixed.compiler_identity.target;
+            let set_target = artifacts.inference.compiler_identity.target;
             let tier_arch = device_cc
                 .and_then(|device_cc| {
                     super::gemm_bi_triad::sm120_target_candidates(device_cc, nvrtc_version())
@@ -932,9 +944,11 @@ impl MambaKernels {
             let (sm89_tf32_joint, sm89_tf32_joint_rejection) =
                 portable_tier(super::kernel_identity::ModuleKind::TriadSm89Tf32Joint);
             (
-                artifacts.fixed,
+                artifacts.inference,
                 artifacts.scalar,
                 artifacts.sm80,
+                artifacts.mamba1,
+                artifacts.shared,
                 finalist,
                 finalist_rejection,
                 sm89_half,
@@ -948,9 +962,14 @@ impl MambaKernels {
                 artifacts.specialized,
             )
         } else {
-            let fixed = compile(super::kernel_identity::ModuleKind::Fixed)?;
+            let inference = compile(super::kernel_identity::ModuleKind::Inference)?;
             let scalar = compile(super::kernel_identity::ModuleKind::TriadScalar)?;
             let sm80 = compile(super::kernel_identity::ModuleKind::TriadSm80)?;
+            // The Mamba-1 kernels (compiled with the state capacity) and the
+            // shared kernels, each in its own module beside the GEMMs:
+            // neither moves a GEMM identity.
+            let mamba1 = compile(super::kernel_identity::ModuleKind::Mamba1)?;
+            let shared = compile(super::kernel_identity::ModuleKind::Shared)?;
             let (finalist, finalist_rejection) = if plan.common {
                 match compile(super::kernel_identity::ModuleKind::TriadSm89Finalist) {
                     Ok(module) => (Some(module), None),
@@ -1025,9 +1044,11 @@ impl MambaKernels {
                 _ => None,
             };
             (
-                fixed,
+                inference,
                 scalar,
                 sm80,
+                mamba1,
+                shared,
                 finalist,
                 finalist_rejection,
                 sm89_half,
@@ -1041,11 +1062,11 @@ impl MambaKernels {
                 specialized,
             )
         };
-        // The inference cells are their own module on every board the Fixed
-        // overlay serves; the CC 12.x family, whose Fixed module stays
-        // byte-identical to its cohorts, composes neither.
+        // The inference cells are their own module on every board the
+        // Inference overlay serves; the CC 12.x family, whose Inference module
+        // stays byte-identical to its cohorts, composes neither.
         let (sm89_cells_module, sm89_cells_rejection) = if plan.common
-            && super::gemm_bi_triad::modules::fixed_portable_overlay_composed(arch)
+            && super::gemm_bi_triad::modules::inference_portable_overlay_composed(arch)
         {
             match compile(super::kernel_identity::ModuleKind::InferenceSm89Cells) {
                 Ok(module) => (Some(module), None),
@@ -1058,58 +1079,68 @@ impl MambaKernels {
             static CELLS: std::sync::Once = std::sync::Once::new();
             super::diagnostics::warn_once(&CELLS, || {
                 format!(
-                    "the SM89 inference cells module did not compile ({error}); the Fixed \
+                    "the SM89 inference cells module did not compile ({error}); the Inference \
                      overlay serves its shapes without the cells"
                 )
             });
         }
-        let compiler_identity = fixed.compiler_identity;
+        let compiler_identity = inference.compiler_identity;
+        // The fold clones live in the Mamba1 module, so its own target and
+        // toolkit decide whether they were composed.
         let fold_transport_admitted = super::fold_transport::compiler_admitted(
             device_cc,
-            arch,
+            mamba1.compiler_identity.target.as_str(),
             state_cap,
-            compiler_identity.nvrtc_version,
+            mamba1.compiler_identity.nvrtc_version,
         );
-        let (fixed_sm89_half_pipeline, fixed_sm89_half_pipeline_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm89_half_pipeline(ctx, &fixed);
-        let (fixed_sm89_half_swizzle, fixed_sm89_half_swizzle_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm89_half_swizzle(ctx, &fixed);
-        let (fixed_sm89_half_s3, fixed_sm89_half_s3_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm89_half_s3(ctx, &fixed);
-        let (fixed_sm89_tf32_rna_wide, fixed_sm89_tf32_rna_wide_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm89_rna_wide(ctx, &fixed);
-        let (fixed_sm89_tf32_rna_n96, fixed_sm89_tf32_rna_n96_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm89_rna_n96(ctx, &fixed);
-        let (fixed_sm89_half_m64n64_s3_f16, fixed_sm89_half_m64n64_s3_f16_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm89_half_m64n64_s3(ctx, &fixed);
-        let (fixed_sm89_half_m128n64_s2_f16, fixed_sm89_half_m128n64_s2_f16_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm89_half_m128n64_s2(ctx, &fixed);
-        let (fixed_sm89_f32_n64_copyplan, fixed_sm89_f32_n64_copyplan_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm89_f32_n64_copyplan(ctx, &fixed);
-        let (fixed_sm89_cells, fixed_sm89_cell_rejections) = match sm89_cells_module.as_ref() {
-            Some(module) => super::gemm_bi_triad::modules::load_fixed_sm89_cells(ctx, module),
+        let (inference_sm89_half_pipeline, inference_sm89_half_pipeline_rejection) =
+            super::gemm_bi_triad::modules::load_inference_sm89_half_pipeline(ctx, &inference);
+        let (inference_sm89_half_swizzle, inference_sm89_half_swizzle_rejection) =
+            super::gemm_bi_triad::modules::load_inference_sm89_half_swizzle(ctx, &inference);
+        let (inference_sm89_half_s3, inference_sm89_half_s3_rejection) =
+            super::gemm_bi_triad::modules::load_inference_sm89_half_s3(ctx, &inference);
+        let (inference_sm89_tf32_rna_wide, inference_sm89_tf32_rna_wide_rejection) =
+            super::gemm_bi_triad::modules::load_inference_sm89_rna_wide(ctx, &inference);
+        let (inference_sm89_tf32_rna_n96, inference_sm89_tf32_rna_n96_rejection) =
+            super::gemm_bi_triad::modules::load_inference_sm89_rna_n96(ctx, &inference);
+        let (inference_sm89_half_m64n64_s3_f16, inference_sm89_half_m64n64_s3_f16_rejection) =
+            super::gemm_bi_triad::modules::load_inference_sm89_half_m64n64_s3(ctx, &inference);
+        let (inference_sm89_half_m128n64_s2_f16, inference_sm89_half_m128n64_s2_f16_rejection) =
+            super::gemm_bi_triad::modules::load_inference_sm89_half_m128n64_s2(ctx, &inference);
+        let (inference_sm89_f32_n64_copyplan, inference_sm89_f32_n64_copyplan_rejection) =
+            super::gemm_bi_triad::modules::load_inference_sm89_f32_n64_copyplan(ctx, &inference);
+        let (inference_sm89_cells, inference_sm89_cell_rejections) = match sm89_cells_module
+            .as_ref()
+        {
+            Some(module) => super::gemm_bi_triad::modules::load_inference_sm89_cells(ctx, module),
             None => (std::collections::HashMap::new(), Vec::new()),
         };
-        let (fixed_sm120_f32_n64_copyplan, fixed_sm120_f32_n64_copyplan_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm120_f32_n64_copyplan(ctx, &fixed);
-        let (fixed_sm120_f32_n64_copyplan_t256, fixed_sm120_f32_n64_copyplan_t256_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm120_f32_n64_copyplan_t256(ctx, &fixed);
+        let (inference_sm120_f32_n64_copyplan, inference_sm120_f32_n64_copyplan_rejection) =
+            super::gemm_bi_triad::modules::load_inference_sm120_f32_n64_copyplan(ctx, &inference);
         let (
-            fixed_sm120_f32_m128n64_copyplan_t256,
-            fixed_sm120_f32_m128n64_copyplan_t256_rejection,
-        ) = super::gemm_bi_triad::modules::load_fixed_sm120_f32_m128n64_copyplan_t256(ctx, &fixed);
-        let (fixed_sm120_f32_n64_sliced, fixed_sm120_f32_n64_sliced_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm120_f32_n64_sliced(ctx, &fixed);
-        let (fixed_sm120_fma_postbias, fixed_sm120_fma_postbias_rejection) =
-            super::gemm_bi_triad::modules::load_fixed_sm120_fma_postbias(ctx, &fixed);
+            inference_sm120_f32_n64_copyplan_t256,
+            inference_sm120_f32_n64_copyplan_t256_rejection,
+        ) = super::gemm_bi_triad::modules::load_inference_sm120_f32_n64_copyplan_t256(
+            ctx, &inference,
+        );
+        let (
+            inference_sm120_f32_m128n64_copyplan_t256,
+            inference_sm120_f32_m128n64_copyplan_t256_rejection,
+        ) = super::gemm_bi_triad::modules::load_inference_sm120_f32_m128n64_copyplan_t256(
+            ctx, &inference,
+        );
+        let (inference_sm120_f32_n64_sliced, inference_sm120_f32_n64_sliced_rejection) =
+            super::gemm_bi_triad::modules::load_inference_sm120_f32_n64_sliced(ctx, &inference);
+        let (inference_sm120_fma_postbias, inference_sm120_fma_postbias_rejection) =
+            super::gemm_bi_triad::modules::load_inference_sm120_fma_postbias(ctx, &inference);
         let inference_sm89_bundle =
             super::gemm_bi_triad::modules::inference_bundle::load_inference_sm89_bundle(
-                ctx, &fixed, state_cap,
+                ctx, &inference,
             );
         let triad = GemmBiKernels::load(
             ctx,
             super::gemm_bi_triad::modules::GemmBiModuleSet {
-                fixed_artifact: fixed.artifact_identity,
+                inference_artifact: inference.artifact_identity,
                 scalar,
                 sm80,
                 finalist,
@@ -1168,11 +1199,11 @@ impl MambaKernels {
         }
         // The Ada inference cells are optional on every board, but a cell the
         // overlay composed and the loader still declined should be said aloud.
-        if super::gemm_bi_triad::modules::fixed_portable_overlay_composed(arch)
-            && !fixed_sm89_cell_rejections.is_empty()
+        if super::gemm_bi_triad::modules::inference_portable_overlay_composed(arch)
+            && !inference_sm89_cell_rejections.is_empty()
         {
             static CELLS: std::sync::Once = std::sync::Once::new();
-            let listed = fixed_sm89_cell_rejections
+            let listed = inference_sm89_cell_rejections
                 .iter()
                 .map(|(symbol, reason)| format!("{symbol} ({reason})"))
                 .collect::<Vec<_>>()
@@ -1331,12 +1362,32 @@ impl MambaKernels {
                 )
             });
         }
-        let module = fixed.module;
-
+        let (mamba1_compiler_identity, mamba1_artifact_identity) =
+            (mamba1.compiler_identity, mamba1.artifact_identity);
+        let (shared_compiler_identity, shared_artifact_identity) =
+            (shared.compiler_identity, shared.artifact_identity);
+        let modules = [
+            (inference.module, "Inference"),
+            (mamba1.module, "Mamba1"),
+            (shared.module, "Shared"),
+        ];
+        // Each symbol lives in exactly one of the three; one exported twice
+        // would make the choice of module an accident, so it is refused.
         let get = |name: &str| -> Result<CudaFunction, String> {
-            module
-                .load_function(name)
-                .map_err(|e| format!("Kernel '{name}' not found: {e:?}"))
+            let mut found: Option<(CudaFunction, &str)> = None;
+            for (module, kind) in &modules {
+                if let Ok(function) = module.load_function(name) {
+                    if let Some((_, first)) = &found {
+                        return Err(format!(
+                            "Kernel '{name}' is exported by both {first} and {kind}"
+                        ));
+                    }
+                    found = Some((function, kind));
+                }
+            }
+            found.map(|(function, _)| function).ok_or_else(|| {
+                format!("Kernel '{name}' not found in the Inference, Mamba1 or Shared module")
+            })
         };
         let load_typed = |base: &str| -> Result<TypedKernel, String> {
             Ok(TypedKernel {
@@ -1366,8 +1417,8 @@ impl MambaKernels {
             }
             Ok(k)
         };
-        let load_sm120_half = |suffix: &str| -> Result<FixedSm120HalfKernels, String> {
-            let kernels = FixedSm120HalfKernels {
+        let load_sm120_half = |suffix: &str| -> Result<InferenceSm120HalfKernels, String> {
+            let kernels = InferenceSm120HalfKernels {
                 m64n64_bk64_s2: load_half(&format!("nn_sm120_tma_64x64_bk64_s2{suffix}"))?,
                 m64n128_bk64_s2: load_half(&format!("nn_sm120_tma_64x128_bk64_s2{suffix}"))?,
                 m128n64_bk32_s3: load_half(&format!("nn_sm120_tma_128x64_bk32_s3{suffix}"))?,
@@ -1389,7 +1440,7 @@ impl MambaKernels {
                         )
                         .map_err(|error| {
                             format!(
-                                "set MAX_DYNAMIC_SHARED for Fixed SM120 half{suffix}: {error:?}"
+                                "set MAX_DYNAMIC_SHARED for Inference SM120 half{suffix}: {error:?}"
                             )
                         })?;
                 }
@@ -1400,6 +1451,10 @@ impl MambaKernels {
         Ok(Self {
             state_cap,
             compiler_identity,
+            mamba1_compiler_identity,
+            mamba1_artifact_identity,
+            shared_compiler_identity,
+            shared_artifact_identity,
             triad,
             // SSM
             ssm_step_fwd: get("ssm_step_forward")?,
@@ -1529,39 +1584,39 @@ impl MambaKernels {
             gemm_bi_f32_f32: get("f32_f32")?,
             gemm_bi_f32_f32_s2: get("f32_f32_s2")?,
             gemm_bi_f32_f32_n128_s2: get("f32_f32_n128_s2")?,
-            fixed_sm89_half_pipeline,
-            fixed_sm89_half_pipeline_rejection,
-            fixed_sm89_half_swizzle,
-            fixed_sm89_half_swizzle_rejection,
-            fixed_sm89_half_s3,
-            fixed_sm89_half_s3_rejection,
-            fixed_sm89_tf32_rna_wide,
-            fixed_sm89_tf32_rna_wide_rejection,
-            fixed_sm89_tf32_rna_n96,
-            fixed_sm89_tf32_rna_n96_rejection,
-            fixed_sm89_half_m64n64_s3_f16,
-            fixed_sm89_half_m64n64_s3_f16_rejection,
-            fixed_sm89_half_m128n64_s2_f16,
-            fixed_sm89_half_m128n64_s2_f16_rejection,
-            fixed_sm89_f32_n64_copyplan,
-            fixed_sm89_f32_n64_copyplan_rejection,
-            fixed_sm89_cells,
+            inference_sm89_half_pipeline,
+            inference_sm89_half_pipeline_rejection,
+            inference_sm89_half_swizzle,
+            inference_sm89_half_swizzle_rejection,
+            inference_sm89_half_s3,
+            inference_sm89_half_s3_rejection,
+            inference_sm89_tf32_rna_wide,
+            inference_sm89_tf32_rna_wide_rejection,
+            inference_sm89_tf32_rna_n96,
+            inference_sm89_tf32_rna_n96_rejection,
+            inference_sm89_half_m64n64_s3_f16,
+            inference_sm89_half_m64n64_s3_f16_rejection,
+            inference_sm89_half_m128n64_s2_f16,
+            inference_sm89_half_m128n64_s2_f16_rejection,
+            inference_sm89_f32_n64_copyplan,
+            inference_sm89_f32_n64_copyplan_rejection,
+            inference_sm89_cells,
             sm89_cells_compiler_identity: sm89_cells_module
                 .as_ref()
                 .map(|module| module.compiler_identity),
             inference_sm89_bundle,
-            fixed_sm120_f32_n64_copyplan,
-            fixed_sm120_f32_n64_copyplan_rejection,
-            fixed_sm120_f32_n64_copyplan_t256,
-            fixed_sm120_f32_n64_copyplan_t256_rejection,
-            fixed_sm120_f32_m128n64_copyplan_t256,
-            fixed_sm120_f32_m128n64_copyplan_t256_rejection,
-            fixed_sm120_f32_n64_sliced,
-            fixed_sm120_f32_n64_sliced_rejection,
-            fixed_sm120_fma_postbias,
-            fixed_sm120_fma_postbias_rejection,
+            inference_sm120_f32_n64_copyplan,
+            inference_sm120_f32_n64_copyplan_rejection,
+            inference_sm120_f32_n64_copyplan_t256,
+            inference_sm120_f32_n64_copyplan_t256_rejection,
+            inference_sm120_f32_m128n64_copyplan_t256,
+            inference_sm120_f32_m128n64_copyplan_t256_rejection,
+            inference_sm120_f32_n64_sliced,
+            inference_sm120_f32_n64_sliced_rejection,
+            inference_sm120_fma_postbias,
+            inference_sm120_fma_postbias_rejection,
             gemm_bi_nn_tf32: {
-                let kernels = FixedTf32Kernels {
+                let kernels = InferenceTf32Kernels {
                     m128n64_s2: get("nn_tf32_m128n64_bk32_s2")?,
                     m128n64_s3: get("nn_tf32_m128n64_bk32_s3")?,
                     m64n64_s2: get("nn_tf32_m64n64_bk32_s2")?,
@@ -1581,7 +1636,7 @@ impl MambaKernels {
                             bytes,
                         )
                         .map_err(|error| {
-                            format!("set MAX_DYNAMIC_SHARED for Fixed TF32: {error:?}")
+                            format!("set MAX_DYNAMIC_SHARED for Inference TF32: {error:?}")
                         })?;
                 }
                 kernels
@@ -1589,7 +1644,7 @@ impl MambaKernels {
             gemm_bi_nn_tf32_sm120: if sm120_board
                 && matches!(arch, "sm_120" | "sm_121" | "compute_120" | "compute_121")
             {
-                let kernels = FixedSm120Tf32Kernels {
+                let kernels = InferenceSm120Tf32Kernels {
                     m128n64_s2: get("nn_sm120_tma_tf32_m128n64_bk32_s2")?,
                     m128n64_s3: get("nn_sm120_tma_tf32_m128n64_bk32_s3")?,
                     m64n128_s2: get("nn_sm120_tma_tf32_m64n128_bk32_s2")?,
@@ -1613,7 +1668,7 @@ impl MambaKernels {
                             bytes,
                         )
                         .map_err(|error| {
-                            format!("set MAX_DYNAMIC_SHARED for Fixed SM120 TF32: {error:?}")
+                            format!("set MAX_DYNAMIC_SHARED for Inference SM120 TF32: {error:?}")
                         })?;
                 }
                 Some(kernels)
@@ -1704,16 +1759,38 @@ impl MambaKernels {
             } else {
                 None
             },
-            _modules: CudaModuleAnchors::new(vec![module]),
+            _modules: CudaModuleAnchors::new(
+                modules.into_iter().map(|(module, _)| module).collect(),
+            ),
         })
     }
 
-    /// Compiler invocation that produced the loaded Fixed module.
+    /// Compiler invocation that produced the loaded Inference module.
     ///
     /// Scalar and SM80 triad compiler identities are exposed through the
     /// embedded [`GemmBiKernels`] aggregate.
     pub fn compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
         self.compiler_identity
+    }
+
+    /// Compiler invocation that produced the Mamba-1 module.
+    pub fn mamba1_compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
+        self.mamba1_compiler_identity
+    }
+
+    /// Loaded artifact of the Mamba-1 module.
+    pub fn mamba1_artifact_identity(&self) -> super::kernel_identity::ArtifactIdentity {
+        self.mamba1_artifact_identity
+    }
+
+    /// Compiler invocation that produced the shared-kernels module.
+    pub fn shared_compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
+        self.shared_compiler_identity
+    }
+
+    /// Loaded artifact of the shared-kernels module.
+    pub fn shared_artifact_identity(&self) -> super::kernel_identity::ArtifactIdentity {
+        self.shared_artifact_identity
     }
 
     pub fn ssm_parallel_bwd_fold_for_shape(
@@ -1824,8 +1901,8 @@ impl MambaKernels {
         self.triad.sm89_half_function(route, dtype)
     }
 
-    pub(crate) fn fixed_sm89_cell_function(&self, symbol: &str) -> Option<&CudaFunction> {
-        self.fixed_sm89_cells.get(symbol)
+    pub(crate) fn inference_sm89_cell_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        self.inference_sm89_cells.get(symbol)
     }
 
     pub(in crate::mamba_ssm::gpu) fn triad_sm89_half_runtime_function(
@@ -2015,7 +2092,7 @@ mod module_plan_tests {
     }
 
     #[test]
-    fn the_wgmma_module_waits_for_the_fixed_ptxas() {
+    fn the_wgmma_module_waits_for_the_inference_ptxas() {
         for nvrtc in [(13, 0), (13, 1), (13, 2)] {
             let plan = MambaKernels::triad_module_plan("sm_90a", Some((9, 0)), nvrtc);
             assert!(plan.common);

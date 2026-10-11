@@ -53,7 +53,6 @@ struct InferenceSm89EnvelopeFacts<'a> {
     compiler_output_kind: ArtifactKind,
     compile_key_matches: bool,
     target: &'a str,
-    state_cap: usize,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     nvrtc_library_current: bool,
@@ -315,7 +314,7 @@ fn validate_inference_sm89_driver_abi(
 }
 
 fn validate_inference_sm89_envelope(facts: InferenceSm89EnvelopeFacts<'_>) -> Result<(), String> {
-    if facts.module_kind != ModuleKind::Fixed
+    if facts.module_kind != ModuleKind::Inference
         || facts.artifact_kind != ArtifactKind::Ptx
         || facts.compiler_output_kind != ArtifactKind::Ptx
         || !facts.compile_key_matches
@@ -324,7 +323,6 @@ fn validate_inference_sm89_envelope(facts: InferenceSm89EnvelopeFacts<'_>) -> Re
         || !crate::mamba_ssm::gpu::gemm_bi_inference::source_bundle::compiler_supported(
             facts.device_cc,
             facts.target,
-            facts.state_cap,
             facts.nvrtc,
         )
     {
@@ -384,9 +382,9 @@ pub(super) fn census_inference_sm89_driver_abi(
     arch: &str,
     ptx: &str,
 ) -> InferenceSm89DriverAbiCensus {
-    if kind != ModuleKind::Fixed || !super::fixed_portable_overlay_composed(arch) {
+    if kind != ModuleKind::Inference || !super::inference_portable_overlay_composed(arch) {
         return InferenceSm89DriverAbiCensus::rejected(
-            "retained Inference ABI census requires a Fixed module with the portable overlay"
+            "retained Inference ABI census requires an Inference module with the portable overlay"
                 .into(),
         );
     }
@@ -416,7 +414,7 @@ pub(super) fn census_inference_sm89_driver_abi(
         let name = std::ffi::CString::new(symbol)
             .map_err(|_| format!("retained Inference symbol {symbol} contains NUL"))?;
         let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
-            .map_err(|error| format!("load Fixed/{symbol} for Driver ABI: {error:?}"))?;
+            .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
         let abi = super::query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
             get(function, index, offset, size)
         })?;
@@ -427,17 +425,17 @@ pub(super) fn census_inference_sm89_driver_abi(
         half_f32out_s3_bf16: query(
             HALF_BF16_SYMBOL,
             admission.half_f32out_s3_bf16,
-            super::super::super::gemm_bi_inference::FIXED_SM89_HALF_PARAMS_SIZE,
+            super::super::super::gemm_bi_inference::INFERENCE_SM89_HALF_PARAMS_SIZE,
         ),
         half_f32out_s3_f16: query(
             HALF_F16_SYMBOL,
             admission.half_f32out_s3_f16,
-            super::super::super::gemm_bi_inference::FIXED_SM89_HALF_PARAMS_SIZE,
+            super::super::super::gemm_bi_inference::INFERENCE_SM89_HALF_PARAMS_SIZE,
         ),
         exact_m128n64_tail: query(
             EXACT_SYMBOL,
             admission.exact_m128n64_tail,
-            super::super::super::gemm_bi_inference::FIXED_SM89_EXACT_F32_PARAMS_SIZE,
+            super::super::super::gemm_bi_inference::INFERENCE_SM89_EXACT_F32_PARAMS_SIZE,
         ),
     };
     if let Err(error) = module.unload() {
@@ -480,7 +478,7 @@ fn load_half_member(
     validate_inference_sm89_driver_abi(
         symbol,
         abi.as_ref().map_err(Clone::clone)?,
-        super::super::super::gemm_bi_inference::FIXED_SM89_HALF_PARAMS_SIZE,
+        super::super::super::gemm_bi_inference::INFERENCE_SM89_HALF_PARAMS_SIZE,
         4,
     )?;
     let optin_shared_bytes = ctx
@@ -488,7 +486,7 @@ fn load_half_member(
             cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
         )
         .map_err(|error| format!("query {symbol} opt-in shared capacity: {error:?}"))?;
-    let function = super::load_function(&module.module, ModuleKind::Fixed, symbol)?;
+    let function = super::load_function(&module.module, ModuleKind::Inference, symbol)?;
     super::set_dynamic_shared(&function, symbol, 98_304)?;
     set_max_shared_carveout(&function, symbol)?;
     let query_error = |label, error| format!("query {symbol} {label}: {error:?}");
@@ -521,10 +519,10 @@ fn load_exact_member(
     validate_inference_sm89_driver_abi(
         EXACT_SYMBOL,
         abi.as_ref().map_err(Clone::clone)?,
-        super::super::super::gemm_bi_inference::FIXED_SM89_EXACT_F32_PARAMS_SIZE,
+        super::super::super::gemm_bi_inference::INFERENCE_SM89_EXACT_F32_PARAMS_SIZE,
         4,
     )?;
-    let function = super::load_function(&module.module, ModuleKind::Fixed, EXACT_SYMBOL)?;
+    let function = super::load_function(&module.module, ModuleKind::Inference, EXACT_SYMBOL)?;
     set_max_shared_carveout(&function, EXACT_SYMBOL)?;
     let query_error = |label, error| format!("query {EXACT_SYMBOL} {label}: {error:?}");
     let resources = InferenceSm89ResourceFacts {
@@ -561,7 +559,6 @@ fn set_max_shared_carveout(function: &CudaFunction, symbol: &str) -> Result<(), 
 pub(crate) fn load_inference_sm89_bundle(
     ctx: &CudaContext,
     module: &CompiledModule,
-    state_cap: usize,
 ) -> InferenceSm89Bundle {
     let device_cc = ctx.compute_capability().ok();
     let envelope = InferenceSm89EnvelopeFacts {
@@ -571,7 +568,6 @@ pub(crate) fn load_inference_sm89_bundle(
         compile_key_matches: module.artifact_identity.compile_key
             == module.compiler_identity.invocation_digest,
         target: module.compiler_identity.target.as_str(),
-        state_cap,
         nvrtc: module.compiler_identity.nvrtc_version,
         nvrtc_library_known: module.compiler_identity.nvrtc_library_known,
         nvrtc_library_current: current_nvrtc_library_matches(module),
@@ -965,12 +961,11 @@ mod tests {
     #[test]
     fn inference_bundle_admission_declines_outside_the_exact_compiler_envelope() {
         let valid = InferenceSm89EnvelopeFacts {
-            module_kind: ModuleKind::Fixed,
+            module_kind: ModuleKind::Inference,
             artifact_kind: ArtifactKind::Ptx,
             compiler_output_kind: ArtifactKind::Ptx,
             compile_key_matches: true,
             target: "sm_89",
-            state_cap: 16,
             nvrtc: (12, 8),
             nvrtc_library_known: true,
             nvrtc_library_current: true,
@@ -1004,10 +999,6 @@ mod tests {
             },
             InferenceSm89EnvelopeFacts {
                 target: "compute_89",
-                ..valid
-            },
-            InferenceSm89EnvelopeFacts {
-                state_cap: 32,
                 ..valid
             },
             InferenceSm89EnvelopeFacts {

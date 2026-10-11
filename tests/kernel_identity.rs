@@ -25,7 +25,7 @@ fn digest(seed: u8) -> [u8; 32] {
 
 fn compile_material() -> CompileKeyMaterial {
     CompileKeyMaterial {
-        module_kind: ModuleKind::Fixed,
+        module_kind: ModuleKind::Inference,
         source: b"source".to_vec(),
         target: b"sm_89".to_vec(),
         argv: vec![
@@ -45,7 +45,7 @@ fn compile_material() -> CompileKeyMaterial {
 
 #[test]
 fn module_kind_discriminants_are_stable() {
-    assert_eq!(ModuleKind::Fixed as u8, 1);
+    assert_eq!(ModuleKind::Inference as u8, 1);
     assert_eq!(ModuleKind::TriadScalar as u8, 2);
     assert_eq!(ModuleKind::TriadSm80 as u8, 3);
     assert_eq!(ModuleKind::TriadSm90a as u8, 4);
@@ -60,6 +60,8 @@ fn module_kind_discriminants_are_stable() {
     assert_eq!(ModuleKind::InferenceSm89Cells as u8, 13);
     assert_eq!(ModuleKind::Mamba2Combined as u8, 14);
     assert_eq!(ModuleKind::Mamba3MimoCombined as u8, 15);
+    assert_eq!(ModuleKind::Mamba1 as u8, 16);
+    assert_eq!(ModuleKind::Shared as u8, 17);
 }
 
 #[test]
@@ -187,9 +189,9 @@ fn backend_contract_sets_match_reachable_dispatch_trees() {
         let (backends, contracts) =
             route_backend_contract_sets(policy(true, tc, BiGemmFamily::Triad));
         assert!(backends.contains(BackendSet::TRIAD));
-        assert!(backends.contains(BackendSet::FIXED));
+        assert!(backends.contains(BackendSet::INFERENCE));
         assert!(contracts.contains(NumericContractSet::TRIAD_SCALAR_FMA));
-        assert!(contracts.contains(NumericContractSet::FIXED_MATVEC_TREE));
+        assert!(contracts.contains(NumericContractSet::INFERENCE_MATVEC_TREE));
         assert_eq!(contracts.contains(NumericContractSet::TRIAD_MMA_SYNC), tc);
     }
 
@@ -197,10 +199,10 @@ fn backend_contract_sets_match_reachable_dispatch_trees() {
         let (backends, contracts) =
             route_backend_contract_sets(policy(true, tc, BiGemmFamily::Inference));
         assert!(backends.contains(BackendSet::TRIAD));
-        assert!(backends.contains(BackendSet::FIXED));
-        assert!(!contracts.contains(NumericContractSet::FIXED_MATVEC_TREE));
-        assert!(contracts.contains(NumericContractSet::FIXED_SCALAR_FMA));
-        assert!(contracts.contains(NumericContractSet::FIXED_MMA_SYNC));
+        assert!(backends.contains(BackendSet::INFERENCE));
+        assert!(!contracts.contains(NumericContractSet::INFERENCE_MATVEC_TREE));
+        assert!(contracts.contains(NumericContractSet::INFERENCE_SCALAR_FMA));
+        assert!(contracts.contains(NumericContractSet::INFERENCE_MMA_SYNC));
         assert!(contracts.contains(NumericContractSet::TRIAD_SCALAR_FMA));
         assert_eq!(contracts.contains(NumericContractSet::TRIAD_MMA_SYNC), tc);
     }
@@ -233,10 +235,10 @@ fn gemm_policy_keeps_cublas_and_deterministic_triad_tf32_independent() {
     assert!(!exact_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32));
     assert!(allow_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32));
 
-    let mut fixed_allow = allow;
-    fixed_allow.bi_gemm_family = BiGemmFamily::Inference;
-    let (_, fixed_contracts) = route_backend_contract_sets(fixed_allow);
-    assert!(!fixed_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32));
+    let mut inference_allow = allow;
+    inference_allow.bi_gemm_family = BiGemmFamily::Inference;
+    let (_, inference_contracts) = route_backend_contract_sets(inference_allow);
+    assert!(!inference_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32));
 }
 
 #[test]
@@ -318,28 +320,43 @@ fn artifact(kind: ModuleKind, seed: u8) -> ArtifactIdentity {
     }
 }
 
+/// The Mamba-1 and shared modules take no part in GEMM route admission, so
+/// the GEMM artifact set never holds them, wherever they would sit.
 #[test]
-fn artifact_set_is_ordered_and_rejects_duplicate_module_kinds() {
-    let fixed = artifact(ModuleKind::Fixed, 1);
+fn artifact_set_refuses_the_mamba1_and_shared_modules() {
+    let inference = artifact(ModuleKind::Inference, 1);
     let scalar = artifact(ModuleKind::TriadScalar, 3);
     let sm80 = artifact(ModuleKind::TriadSm80, 5);
-    let first = build_artifact_set(&[fixed, scalar, sm80]).unwrap();
+    for kind in [ModuleKind::Mamba1, ModuleKind::Shared] {
+        let model = artifact(kind, 9);
+        assert!(build_artifact_set(&[inference, scalar, sm80, model]).is_err());
+        assert!(build_artifact_set(&[model, scalar, sm80]).is_err());
+        assert!(build_artifact_set(&[inference, model, sm80]).is_err());
+    }
+}
+
+#[test]
+fn artifact_set_is_ordered_and_rejects_duplicate_module_kinds() {
+    let inference = artifact(ModuleKind::Inference, 1);
+    let scalar = artifact(ModuleKind::TriadScalar, 3);
+    let sm80 = artifact(ModuleKind::TriadSm80, 5);
+    let first = build_artifact_set(&[inference, scalar, sm80]).unwrap();
     assert_eq!(first.module_count, 3);
-    assert_eq!(first.fixed, fixed);
+    assert_eq!(first.inference, inference);
     assert_eq!(first.triad_scalar, scalar);
     assert_eq!(first.triad_sm80, sm80);
     assert_eq!(first.specialized, None);
-    assert!(build_artifact_set(&[scalar, fixed, sm80]).is_err());
-    assert!(build_artifact_set(&[fixed, scalar]).is_err());
-    assert!(build_artifact_set(&[fixed, fixed]).is_err());
+    assert!(build_artifact_set(&[scalar, inference, sm80]).is_err());
+    assert!(build_artifact_set(&[inference, scalar]).is_err());
+    assert!(build_artifact_set(&[inference, inference]).is_err());
     let sm90a = artifact(ModuleKind::TriadSm90a, 7);
-    let specialized = build_artifact_set(&[fixed, scalar, sm80, sm90a]).unwrap();
+    let specialized = build_artifact_set(&[inference, scalar, sm80, sm90a]).unwrap();
     assert_eq!(specialized.module_count, 4);
     assert_eq!(specialized.specialized, Some(sm90a));
     assert_eq!(specialized.sm89_finalist, None);
     assert!(
         build_artifact_set(&[
-            fixed,
+            inference,
             scalar,
             sm80,
             sm90a,
@@ -351,7 +368,7 @@ fn artifact_set_is_ordered_and_rejects_duplicate_module_kinds() {
 
 #[test]
 fn artifact_set_carries_the_common_finalist_beside_every_architecture_module() {
-    let fixed = artifact(ModuleKind::Fixed, 1);
+    let inference = artifact(ModuleKind::Inference, 1);
     let scalar = artifact(ModuleKind::TriadScalar, 3);
     let sm80 = artifact(ModuleKind::TriadSm80, 5);
     let finalist = artifact(ModuleKind::TriadSm89Finalist, 7);
@@ -365,9 +382,10 @@ fn artifact_set_carries_the_common_finalist_beside_every_architecture_module() {
         (ModuleKind::TriadSm120, 21),
     ] {
         let own = artifact(kind, seed);
-        let set =
-            build_artifact_set(&[fixed, scalar, sm80, finalist, own, half, exact, d128, joint])
-                .unwrap_or_else(|error| panic!("{kind:?} beside the common modules: {error}"));
+        let set = build_artifact_set(&[
+            inference, scalar, sm80, finalist, own, half, exact, d128, joint,
+        ])
+        .unwrap_or_else(|error| panic!("{kind:?} beside the common modules: {error}"));
         assert_eq!(set.module_count, 9);
         assert_eq!(set.sm89_finalist, Some(finalist));
         assert_eq!(set.specialized, Some(own));
@@ -377,25 +395,25 @@ fn artifact_set_carries_the_common_finalist_beside_every_architecture_module() {
         assert_eq!(set.sm89_tf32_joint, Some(joint));
         let cells = artifact(ModuleKind::InferenceSm89Cells, 23);
         let with_cells = build_artifact_set(&[
-            fixed, scalar, sm80, finalist, own, half, exact, d128, joint, cells,
+            inference, scalar, sm80, finalist, own, half, exact, d128, joint, cells,
         ])
         .unwrap();
         assert_eq!(with_cells.module_count, 10);
         assert_eq!(with_cells.sm89_cells, Some(cells));
         assert_ne!(with_cells.ordered_digest, set.ordered_digest);
-        assert!(build_artifact_set(&[fixed, scalar, sm80, cells, joint]).is_err());
+        assert!(build_artifact_set(&[inference, scalar, sm80, cells, joint]).is_err());
         let without_finalist =
-            build_artifact_set(&[fixed, scalar, sm80, own, half, exact, d128, joint]).unwrap();
+            build_artifact_set(&[inference, scalar, sm80, own, half, exact, d128, joint]).unwrap();
         assert_eq!(without_finalist.sm89_finalist, None);
         assert_eq!(without_finalist.specialized, Some(own));
         assert_ne!(set.ordered_digest, without_finalist.ordered_digest);
-        assert!(build_artifact_set(&[fixed, scalar, sm80, own, finalist]).is_err());
+        assert!(build_artifact_set(&[inference, scalar, sm80, own, finalist]).is_err());
     }
 }
 
 #[test]
 fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
-    let fixed = artifact(ModuleKind::Fixed, 1);
+    let inference = artifact(ModuleKind::Inference, 1);
     let scalar = artifact(ModuleKind::TriadScalar, 3);
     let sm80 = artifact(ModuleKind::TriadSm80, 5);
     let finalist = artifact(ModuleKind::TriadSm89Finalist, 7);
@@ -404,9 +422,10 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
     let joint = artifact(ModuleKind::TriadSm89Tf32Joint, 13);
     let d128 = artifact(ModuleKind::TriadSm89ExactF32D128, 15);
 
-    let prior = build_artifact_set(&[fixed, scalar, sm80, finalist, half, exact, joint]).unwrap();
+    let prior =
+        build_artifact_set(&[inference, scalar, sm80, finalist, half, exact, joint]).unwrap();
     let all =
-        build_artifact_set(&[fixed, scalar, sm80, finalist, half, exact, d128, joint]).unwrap();
+        build_artifact_set(&[inference, scalar, sm80, finalist, half, exact, d128, joint]).unwrap();
     assert_eq!(all.module_count, 8);
     assert_eq!(all.sm89_finalist, Some(finalist));
     assert_eq!(all.specialized, None);
@@ -424,7 +443,7 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
         "omitting d128 must preserve the pinned pre-d128 artifact-set digest"
     );
 
-    let half_only = build_artifact_set(&[fixed, scalar, sm80, half]).unwrap();
+    let half_only = build_artifact_set(&[inference, scalar, sm80, half]).unwrap();
     assert_eq!(half_only.module_count, 4);
     assert_eq!(half_only.sm89_finalist, None);
     assert_eq!(half_only.specialized, None);
@@ -434,10 +453,10 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
     assert_eq!(half_only.sm89_tf32_joint, None);
 
     for artifacts in [
-        vec![fixed, scalar, sm80, joint],
-        vec![fixed, scalar, sm80, exact, joint],
-        vec![fixed, scalar, sm80, finalist, exact, joint],
-        vec![fixed, scalar, sm80, half, exact, joint],
+        vec![inference, scalar, sm80, joint],
+        vec![inference, scalar, sm80, exact, joint],
+        vec![inference, scalar, sm80, finalist, exact, joint],
+        vec![inference, scalar, sm80, half, exact, joint],
     ] {
         let set = build_artifact_set(&artifacts).unwrap();
         assert_eq!(set.sm89_tf32_joint, Some(joint));
@@ -446,24 +465,40 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
     let changed_exact = artifact(ModuleKind::TriadSm89ExactF32, 13);
     assert_ne!(
         all.ordered_digest,
-        build_artifact_set(&[fixed, scalar, sm80, finalist, half, changed_exact, joint])
-            .unwrap()
-            .ordered_digest
+        build_artifact_set(&[
+            inference,
+            scalar,
+            sm80,
+            finalist,
+            half,
+            changed_exact,
+            joint
+        ])
+        .unwrap()
+        .ordered_digest
     );
 
     let changed_joint = artifact(ModuleKind::TriadSm89Tf32Joint, 15);
     assert_ne!(
         all.ordered_digest,
-        build_artifact_set(&[fixed, scalar, sm80, finalist, half, exact, changed_joint])
-            .unwrap()
-            .ordered_digest
+        build_artifact_set(&[
+            inference,
+            scalar,
+            sm80,
+            finalist,
+            half,
+            exact,
+            changed_joint
+        ])
+        .unwrap()
+        .ordered_digest
     );
 
     let changed_d128 = artifact(ModuleKind::TriadSm89ExactF32D128, 17);
     assert_ne!(
         all.ordered_digest,
         build_artifact_set(&[
-            fixed,
+            inference,
             scalar,
             sm80,
             finalist,
@@ -476,18 +511,18 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
         .ordered_digest
     );
 
-    assert!(build_artifact_set(&[fixed, scalar, sm80, half, finalist]).is_err());
-    assert!(build_artifact_set(&[fixed, scalar, sm80, exact, half]).is_err());
-    assert!(build_artifact_set(&[fixed, scalar, sm80, exact, finalist]).is_err());
-    assert!(build_artifact_set(&[fixed, scalar, sm80, exact, exact]).is_err());
-    assert!(build_artifact_set(&[fixed, scalar, sm80, joint, exact]).is_err());
-    assert!(build_artifact_set(&[fixed, scalar, sm80, joint, d128]).is_err());
-    assert!(build_artifact_set(&[fixed, scalar, sm80, d128, exact]).is_err());
-    assert!(build_artifact_set(&[fixed, scalar, sm80, exact, joint, d128]).is_err());
-    assert!(build_artifact_set(&[fixed, scalar, sm80, d128, d128]).is_err());
-    assert!(build_artifact_set(&[fixed, scalar, sm80, joint, joint]).is_err());
+    assert!(build_artifact_set(&[inference, scalar, sm80, half, finalist]).is_err());
+    assert!(build_artifact_set(&[inference, scalar, sm80, exact, half]).is_err());
+    assert!(build_artifact_set(&[inference, scalar, sm80, exact, finalist]).is_err());
+    assert!(build_artifact_set(&[inference, scalar, sm80, exact, exact]).is_err());
+    assert!(build_artifact_set(&[inference, scalar, sm80, joint, exact]).is_err());
+    assert!(build_artifact_set(&[inference, scalar, sm80, joint, d128]).is_err());
+    assert!(build_artifact_set(&[inference, scalar, sm80, d128, exact]).is_err());
+    assert!(build_artifact_set(&[inference, scalar, sm80, exact, joint, d128]).is_err());
+    assert!(build_artifact_set(&[inference, scalar, sm80, d128, d128]).is_err());
+    assert!(build_artifact_set(&[inference, scalar, sm80, joint, joint]).is_err());
     let beside_own = build_artifact_set(&[
-        fixed,
+        inference,
         scalar,
         sm80,
         artifact(ModuleKind::TriadSm90a, 13),
@@ -499,7 +534,7 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
         Some(artifact(ModuleKind::TriadSm90a, 13))
     );
     assert_eq!(beside_own.sm89_exact_f32, Some(exact));
-    assert!(build_artifact_set(&[fixed, scalar, sm80, finalist, finalist]).is_err());
+    assert!(build_artifact_set(&[inference, scalar, sm80, finalist, finalist]).is_err());
 }
 
 #[test]
@@ -664,7 +699,7 @@ fn route() -> GemmRouteIdentity {
         schedule_revision: SCHEDULE_REVISION,
     };
     let artifacts = build_artifact_set(&[
-        artifact(ModuleKind::Fixed, 5),
+        artifact(ModuleKind::Inference, 5),
         artifact(ModuleKind::TriadScalar, 7),
         artifact(ModuleKind::TriadSm80, 9),
     ])
@@ -781,16 +816,16 @@ fn route_guard_rejects_every_policy_artifact_and_device_field() {
     value.artifacts.ordered_digest[0] ^= 1;
     changed.push(value);
     let mut value = captured;
-    value.artifacts.fixed.module_kind = ModuleKind::TriadScalar;
+    value.artifacts.inference.module_kind = ModuleKind::TriadScalar;
     changed.push(value);
     let mut value = captured;
-    value.artifacts.fixed.artifact_kind = ArtifactKind::Cubin;
+    value.artifacts.inference.artifact_kind = ArtifactKind::Cubin;
     changed.push(value);
     let mut value = captured;
-    value.artifacts.fixed.compile_key[0] ^= 1;
+    value.artifacts.inference.compile_key[0] ^= 1;
     changed.push(value);
     let mut value = captured;
-    value.artifacts.fixed.artifact_digest[0] ^= 1;
+    value.artifacts.inference.artifact_digest[0] ^= 1;
     changed.push(value);
     let mut value = captured;
     value.artifacts.triad_scalar.module_kind = ModuleKind::TriadSm80;

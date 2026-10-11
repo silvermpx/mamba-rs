@@ -1,11 +1,11 @@
-// Fixed-owned NN wide TF32 candidate. This is the production adaptation of
+// Inference-owned NN wide TF32 candidate. This is the production adaptation of
 // internal/experiments/sm89-nn-wide-rna-compatible.cu at SHA256
 // c0c9eb735374620eaf8a023345ee86359af9f748df53fc5cf7d07ee7051f65c4.
 // The 128x128/BK32/S3 pipeline, ascending k8 MMA sequence, explicit
 // cvt.rna.tf32.f32 conversion, bias initialization, tail handling, and
-// scalar/vector epilogues are unchanged. Only Fixed-private dependency names,
+// scalar/vector epilogues are unchanged. Only Inference-private dependency names,
 // the production export, and the self-contained parameter/store helpers differ.
-// Compose this fragment after Fixed common.cuh and tf32.cu, on sm_89 only.
+// Compose this fragment after Inference common.cuh and tf32.cu, on sm_89 only.
 //
 // Export: nn_rna_wide_tf32_m128n128_bk32_s3
 // ABI: (float* output, const float* a, const float* b, const float* bias,
@@ -16,11 +16,11 @@
 // Same vector-input admission as the existing wide body: A/B base alignment
 // 16 bytes and lda/ldb divisible by four, valid row-major extents/strides,
 // dimensions/tile counts within device and signed-int limits. Host skips
-// empty output. K=0 uses the unchanged zero-reduction epilogue. Fixed callers
+// empty output. K=0 uses the unchanged zero-reduction epilogue. Inference callers
 // must pass this 32-byte struct with alpha=1,beta=0, not GbfTf32Params.
 //
 // Byte-level conversion rationale:
-// Fixed's gbf_tf32_rna(float) applies exactly cvt.rna.tf32.f32 to the input
+// Inference's gbf_tf32_rna(float) applies exactly cvt.rna.tf32.f32 to the input
 // register and returns its .b32 result. The new helper bit-reinterprets the
 // incoming unsigned fragment as float, then uses the same PTX and constraints.
 // This preserves all input bits until that instruction, including signed zero,
@@ -54,10 +54,10 @@ struct GbfTf32WideParams {
     int ldc;
 };
 
-static_assert(sizeof(GbfTf32WideParams) == 32, "Fixed RNA-wide parameter ABI drift");
-static_assert(alignof(GbfTf32WideParams) == 4, "Fixed RNA-wide parameter alignment drift");
+static_assert(sizeof(GbfTf32WideParams) == 32, "Inference RNA-wide parameter ABI drift");
+static_assert(alignof(GbfTf32WideParams) == 4, "Inference RNA-wide parameter alignment drift");
 static_assert(__is_standard_layout(GbfTf32WideParams),
-              "Fixed RNA-wide parameters must remain standard layout");
+              "Inference RNA-wide parameters must remain standard layout");
 
 __device__ __forceinline__ int tf32wrc_a_index(int row, int k) {
     int chunk = (k >> 2) ^ (row & 7);
@@ -417,4 +417,4 @@ using GbfRnaWideSignature = void (*)(
     float*, const float*, const float*, const float*, GbfTf32WideParams);
 static_assert(GbfRnaSameType<
     decltype(&nn_rna_wide_tf32_m128n128_bk32_s3),
-    GbfRnaWideSignature>::value, "Fixed NN RNA-wide ABI");
+    GbfRnaWideSignature>::value, "Inference NN RNA-wide ABI");

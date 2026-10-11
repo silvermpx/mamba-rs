@@ -19,8 +19,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
-#[path = "support/fixed_full_mantissa.rs"]
-mod fixed_full_mantissa;
+#[path = "support/inference_full_mantissa.rs"]
+mod inference_full_mantissa;
 
 fn synth(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed;
@@ -51,7 +51,7 @@ fn cpu_ref(x: &[f32], w: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
 
 #[test]
 #[ignore = "needs a CUDA device"]
-fn fixed_tile_matches_cpu_across_tails() {
+fn inference_tile_matches_cpu_across_tails() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
     let stream = ctx.stream.clone();
@@ -82,7 +82,7 @@ fn fixed_tile_matches_cpu_across_tails() {
         ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
         ctx.route_controls().set_family(BiGemmFamily::Inference);
         gpu_gemm_bi_forward_raw(&ctx, &mut y, &x, w.raw_ptr(&stream), None, (m, k, n))
-            .expect("fixed forward");
+            .expect("inference forward");
         let got = y.to_cpu(&stream).expect("d2h");
         ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
         ctx.route_controls().set_family(BiGemmFamily::Triad);
@@ -104,7 +104,7 @@ fn fixed_tile_matches_cpu_across_tails() {
         );
         assert!(
             worst <= 2e-4 * scale,
-            "m={m} k={k} n={n}: fixed tile differs from the CPU reference by {worst:.3e} \
+            "m={m} k={k} n={n}: inference tile differs from the CPU reference by {worst:.3e} \
              at {worst_at:?} (scale {scale:.3e})"
         );
     }
@@ -127,8 +127,8 @@ fn output_bits(ctx: &GpuCtx, output: &GpuBuffer) -> Vec<u32> {
 }
 
 #[test]
-#[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
-fn fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
+#[ignore = "requires exclusive CC8.9 Ada with the Inference RNA-wide symbol admitted"]
+fn inference_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
@@ -239,7 +239,7 @@ fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: In
     assert_eq!(
         unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes(),
         symbol,
-        "forced Fixed wide silently captured another route",
+        "forced Inference wide silently captured another route",
     );
     for (index, expected) in [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
         .into_iter()
@@ -301,11 +301,11 @@ fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: In
 
 #[test]
 #[ignore = "requires a CUDA device with the Triad TF32 wide symbol bound"]
-fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
+fn inference_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability.0 == 12 {
         eprintln!(
-            "skip: the Fixed module composes no wide TF32 tile on CC 12.x, this board is {:?}",
+            "skip: the Inference module composes no wide TF32 tile on CC 12.x, this board is {:?}",
             device.compute_capability
         );
         return;
@@ -329,7 +329,7 @@ fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
     for exceptional in [false, true] {
         let mut a_host = finite_a.clone();
         if exceptional {
-            // Payloads are compared within wide: the old Fixed converter has
+            // Payloads are compared within wide: the old Inference converter has
             // a different NaN contract. Include signed zeros and both infinities.
             let values = [
                 0.0,
@@ -366,7 +366,7 @@ fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
                         .any(|bits| f32::from_bits(*bits).is_infinite())
                 );
             } else {
-                let baseline = GpuBuffer::zeros(&ctx.stream, rows * n).expect("Fixed baseline");
+                let baseline = GpuBuffer::zeros(&ctx.stream, rows * n).expect("Inference baseline");
                 inference_forward_with_tile(
                     &ctx,
                     InferenceFwdOperands {
@@ -376,11 +376,11 @@ fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
                     full_shape,
                     InferenceTile::Tf32M64S2,
                 )
-                .expect("finite Fixed baseline launch");
+                .expect("finite Inference baseline launch");
                 assert_eq!(
                     reference,
                     output_bits(&ctx, &baseline),
-                    "finite wide/Fixed arithmetic differs; bias={has_bias}"
+                    "finite wide/Inference arithmetic differs; bias={has_bias}"
                 );
                 let want = cpu_ref(&a_host, &b_host, rows, k, n);
                 for (index, (&bits, expected)) in reference.iter().zip(want).enumerate() {
@@ -459,11 +459,11 @@ fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
 
 #[test]
 #[ignore = "requires a CUDA device with the Triad TF32 wide symbol bound"]
-fn fixed_tf32_forced_wide_keeps_gpu_nan_operands_nan() {
+fn inference_tf32_forced_wide_keeps_gpu_nan_operands_nan() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability.0 == 12 {
         eprintln!(
-            "skip: the Fixed module composes no wide TF32 tile on CC 12.x, this board is {:?}",
+            "skip: the Inference module composes no wide TF32 tile on CC 12.x, this board is {:?}",
             device.compute_capability
         );
         return;
@@ -525,11 +525,11 @@ fn fixed_tf32_forced_wide_keeps_gpu_nan_operands_nan() {
 
 #[test]
 #[ignore = "requires a CUDA device with the Triad TF32 wide symbol bound"]
-fn fixed_tf32_forced_wide_rejects_unsafe_loads_and_handles_zero_reduction() {
+fn inference_tf32_forced_wide_rejects_unsafe_loads_and_handles_zero_reduction() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability.0 == 12 {
         eprintln!(
-            "skip: the Fixed module composes no wide TF32 tile on CC 12.x, this board is {:?}",
+            "skip: the Inference module composes no wide TF32 tile on CC 12.x, this board is {:?}",
             device.compute_capability
         );
         return;
@@ -635,14 +635,14 @@ fn fixed_tf32_forced_wide_rejects_unsafe_loads_and_handles_zero_reduction() {
 }
 
 #[test]
-#[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
-fn fixed_tf32_rna_wide_matches_all_fixed_rungs_prefix_views_and_graph_bits() {
+#[ignore = "requires exclusive CC8.9 Ada with the Inference RNA-wide symbol admitted"]
+fn inference_tf32_rna_wide_matches_all_inference_rungs_prefix_views_and_graph_bits() {
     check_rna_wide_prefix_views_and_graph_bits(false, InferenceTile::Tf32RnaM128N128S3);
 }
 
 #[test]
 #[ignore = "requires CC8.9 Ada and a qualified forced N96 holder; all-three-toolkit finalist gate"]
-fn fixed_sm89_rna_n96_forced_prefix_views_and_graph_bits() {
+fn inference_sm89_rna_n96_forced_prefix_views_and_graph_bits() {
     check_rna_wide_prefix_views_and_graph_bits(false, InferenceTile::Tf32RnaM128N96S3);
 }
 
@@ -786,14 +786,14 @@ fn rna_wide_force_corpus_contains_every_hot_shape_family() {
 }
 
 #[test]
-#[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
-fn fixed_sm89_rna_wide_actual_auto_all_cells_prefix_views_and_graph_bits() {
+#[ignore = "requires exclusive CC8.9 Ada with the Inference RNA-wide symbol admitted"]
+fn inference_sm89_rna_wide_actual_auto_all_cells_prefix_views_and_graph_bits() {
     check_rna_wide_prefix_views_and_graph_bits(true, InferenceTile::Tf32RnaM128N128S3);
 }
 
 #[test]
 #[ignore = "requires CC8.9/142SM Ada and qualified CUDA12.8/13.0/13.2 AUTO45"]
-fn fixed_sm89_rna_n96_actual_auto_prefix_views_and_graph_bits() {
+fn inference_sm89_rna_n96_actual_auto_prefix_views_and_graph_bits() {
     check_rna_wide_prefix_views_and_graph_bits(true, InferenceTile::Tf32RnaM128N96S3);
 }
 
@@ -819,7 +819,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
     let shape_cases = rna_qualification_shapes(tile);
     let n96 = tile == InferenceTile::Tf32RnaM128N96S3;
     let symbol = rna_qualification_symbol(tile);
-    let fixed_rungs = rna_qualification_rungs(tile);
+    let inference_rungs = rna_qualification_rungs(tile);
     let special_bits = [
         0x0000_0000,
         0x8000_0000,
@@ -841,7 +841,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
         for exceptional in [false, true] {
             let corpus = |len, seed| {
                 if n96 {
-                    fixed_full_mantissa::finite_full_mantissa_values(len, seed)
+                    inference_full_mantissa::finite_full_mantissa_values(len, seed)
                 } else {
                     synth(len, seed)
                 }
@@ -893,7 +893,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
                 inference_forward_with_tile(&ctx, operands, shape, tile)
                     .expect("RNA-wide full reference launch");
                 let reference_bits = output_bits(&ctx, &reference);
-                for &incumbent in &fixed_rungs {
+                for &incumbent in &inference_rungs {
                     let output =
                         GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("incumbent output");
                     inference_forward_with_tile(
@@ -971,7 +971,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
                     expected[output_offset..output_offset + m * shape.n].copy_from_slice(
                         &reference_bits[row_offset * shape.n..(row_offset + m) * shape.n],
                     );
-                    for &incumbent in &fixed_rungs {
+                    for &incumbent in &inference_rungs {
                         output
                             .upload(&ctx.stream, &initial)
                             .expect("poison incumbent prefix/view C");
@@ -1216,14 +1216,14 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
 }
 
 #[test]
-#[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
-fn fixed_tf32_rna_wide_rejects_unsafe_inputs_and_handles_k0() {
+#[ignore = "requires exclusive CC8.9 Ada with the Inference RNA-wide symbol admitted"]
+fn inference_tf32_rna_wide_rejects_unsafe_inputs_and_handles_k0() {
     check_rna_rejects_unsafe_inputs_and_handles_k0(InferenceTile::Tf32RnaM128N128S3);
 }
 
 #[test]
 #[ignore = "requires CC8.9 Ada and the independently admitted forced N96 holder"]
-fn fixed_sm89_rna_n96_rejects_unsafe_inputs_and_handles_k0() {
+fn inference_sm89_rna_n96_rejects_unsafe_inputs_and_handles_k0() {
     check_rna_rejects_unsafe_inputs_and_handles_k0(InferenceTile::Tf32RnaM128N96S3);
 }
 
@@ -1337,7 +1337,7 @@ fn check_rna_rejects_unsafe_inputs_and_handles_k0(tile: InferenceTile) {
         .map(|index| f32::from_bits([0, 0x8000_0000, 0x7f80_0001, 0xffff_ffff][index % 4]))
         .collect();
     let bias = GpuBuffer::from_cpu(&ctx.stream, &bias_host).expect("RNA K0 bias");
-    let fixed_rungs = rna_qualification_rungs(tile);
+    let inference_rungs = rna_qualification_rungs(tile);
     let k0_shape = InferenceShape { k: 0, ..shape };
     for has_bias in [false, true] {
         let output_offset = 1;
@@ -1362,7 +1362,7 @@ fn check_rna_rejects_unsafe_inputs_and_handles_k0(tile: InferenceTile) {
             .to_bits();
         }
 
-        for &incumbent in &fixed_rungs {
+        for &incumbent in &inference_rungs {
             for repeat in 0..2 {
                 k0_output
                     .upload(&ctx.stream, &initial)

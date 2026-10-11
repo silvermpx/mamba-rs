@@ -1,4 +1,4 @@
-// Production Fixed SM89 homogeneous-half swizzle layout. Shared by the CUDA twin and
+// Production Inference SM89 homogeneous-half swizzle layout. Shared by the CUDA twin and
 // pure-host address/ldmatrix tests; no CUDA toolkit is needed by the latter.
 #pragma once
 #if defined(__CUDACC__)
@@ -6,7 +6,7 @@
 #else
 #define SM89_FHS_HD
 #endif
-namespace sm89_fixed_half_swizzle_layout {
+namespace sm89_inference_half_swizzle_layout {
 constexpr int kStageElements = 8192;
 constexpr int kOutputStride = 136;
 constexpr int kSharedBytes = 69632;
@@ -38,5 +38,5 @@ SM89_FHS_HD constexpr unsigned b_fragment_issue(unsigned base, int issue) {
     // Advancing K by 16 leaves the low-three-row-bit permutation unchanged.
     return base + unsigned(issue * 16 * 128 * 2);
 }
-} // namespace sm89_fixed_half_swizzle_layout
+} // namespace sm89_inference_half_swizzle_layout
 #undef SM89_FHS_HD

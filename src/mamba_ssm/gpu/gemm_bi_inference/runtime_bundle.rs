@@ -7,8 +7,8 @@ use super::super::kernel_identity::{
     PhysicalLaunchObserver, PolicyDtype, enqueue_with_physical_observation,
 };
 use super::{
-    FixedArgs, FixedSm89ExactF32Params, FixedSm89HalfParams, InferenceFwdOperands, InferenceShape,
-    InferenceTile, identity, source_bundle,
+    InferenceArgs, InferenceFwdOperands, InferenceShape, InferenceSm89ExactF32Params,
+    InferenceSm89HalfParams, InferenceTile, identity, source_bundle,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,7 +22,6 @@ struct InferenceBundleStack<'a> {
     compute_capability: (u32, u32),
     multiprocessors: u32,
     target: &'a str,
-    state_cap: usize,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     half_bf16_available: bool,
@@ -31,8 +30,8 @@ struct InferenceBundleStack<'a> {
 }
 
 enum InferenceBundleParams {
-    Half(FixedSm89HalfParams),
-    Exact(FixedSm89ExactF32Params),
+    Half(InferenceSm89HalfParams),
+    Exact(InferenceSm89ExactF32Params),
 }
 
 trait BundleParameterWords {
@@ -60,11 +59,11 @@ macro_rules! bundle_parameter_words {
     };
 }
 
-bundle_parameter_words!(FixedSm89HalfParams);
-bundle_parameter_words!(FixedSm89ExactF32Params);
+bundle_parameter_words!(InferenceSm89HalfParams);
+bundle_parameter_words!(InferenceSm89ExactF32Params);
 
 struct PreparedInferenceBundleLaunch {
-    args: FixedArgs,
+    args: InferenceArgs,
     params: InferenceBundleParams,
     config: LaunchConfig,
 }
@@ -81,7 +80,6 @@ fn select_inference_bundle_route(
         || !source_bundle::compiler_supported(
             i32::try_from(major).ok().zip(i32::try_from(minor).ok()),
             stack.target,
-            stack.state_cap,
             stack.nvrtc,
         )
         || [operands.c.ptr, operands.x.ptr, operands.w.ptr]
@@ -138,7 +136,6 @@ pub(super) fn select_for_context(
             compute_capability: ctx.compute_capability(),
             multiprocessors: ctx.kernels.multiprocessor_count(),
             target: compiler.target.as_str(),
-            state_cap: ctx.state_cap(),
             nvrtc: compiler.nvrtc_version,
             nvrtc_library_known: compiler.nvrtc_library_known,
             half_bf16_available: ctx
@@ -163,7 +160,7 @@ fn prepare_inference_bundle_launch(
     if shape.m == 0 || shape.n == 0 {
         return Ok(None);
     }
-    let args = FixedArgs::try_new(operands, shape)?;
+    let args = InferenceArgs::try_new(operands, shape)?;
     let (params, tile_n, dynamic_shared) = match route {
         InferenceBundleRoute::HalfF32S3 => {
             if operands.x.dtype == WeightDtype::F32
@@ -212,7 +209,7 @@ fn prepare_inference_bundle_launch(
                 validate_byte_end(args.bias, 1, args.n, 4, "mixed bias")?;
             }
             (
-                InferenceBundleParams::Half(FixedSm89HalfParams {
+                InferenceBundleParams::Half(InferenceSm89HalfParams {
                     alpha: 1.0,
                     beta: 0.0,
                     m: args.m,
@@ -269,7 +266,7 @@ fn prepare_inference_bundle_launch(
                 validate_byte_end(args.bias, 1, args.n, 4, "exact bias")?;
             }
             (
-                InferenceBundleParams::Exact(FixedSm89ExactF32Params::forward(&args)),
+                InferenceBundleParams::Exact(InferenceSm89ExactF32Params::forward(&args)),
                 64,
                 0,
             )
@@ -465,12 +462,11 @@ mod inference_bundle_runtime_tests {
         }
     }
 
-    fn stack(nvrtc: (i32, i32), state_cap: usize) -> InferenceBundleStack<'static> {
+    fn stack(nvrtc: (i32, i32)) -> InferenceBundleStack<'static> {
         InferenceBundleStack {
             compute_capability: (8, 9),
             multiprocessors: 142,
             target: "sm_89",
-            state_cap,
             nvrtc,
             nvrtc_library_known: true,
             half_bf16_available: true,
@@ -489,18 +485,9 @@ mod inference_bundle_runtime_tests {
     }
 
     #[test]
-    fn inference_bundle_runtime_selects_all_literal_six_compiler_cohorts() {
-        let cohorts = [
-            ((12, 8), 16),
-            ((12, 8), 64),
-            ((13, 0), 16),
-            ((13, 0), 64),
-            ((13, 2), 16),
-            ((13, 2), 64),
-        ];
-        assert_eq!(cohorts.len(), 6);
-        for (nvrtc, state_cap) in cohorts {
-            let compiler = stack(nvrtc, state_cap);
+    fn inference_bundle_runtime_selects_all_three_compiler_cohorts() {
+        for nvrtc in [(12, 8), (13, 0), (13, 2)] {
+            let compiler = stack(nvrtc);
             for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
                 for shape in [HOT_B, HOT_C, HOT_E] {
                     for bias in [None, Some(0x4004)] {
@@ -512,7 +499,7 @@ mod inference_bundle_runtime_tests {
                                 F32TriadPolicy::ExactScalarFma,
                             ),
                             Some(InferenceBundleRoute::HalfF32S3),
-                            "mixed winner missing for {nvrtc:?}/cap{state_cap} {dtype:?} {shape:?} bias={bias:?}"
+                            "mixed winner missing for {nvrtc:?} {dtype:?} {shape:?} bias={bias:?}"
                         );
                     }
                 }
@@ -529,7 +516,7 @@ mod inference_bundle_runtime_tests {
                         F32TriadPolicy::ExactScalarFma,
                     ),
                     Some(InferenceBundleRoute::ExactF32M128N64Tail),
-                    "exact winner missing for {nvrtc:?}/cap{state_cap} bias={bias:?}"
+                    "exact winner missing for {nvrtc:?} bias={bias:?}"
                 );
             }
         }
@@ -537,7 +524,7 @@ mod inference_bundle_runtime_tests {
 
     #[test]
     fn inference_bundle_runtime_declines_each_closed_selector_gate() {
-        let good = stack((13, 2), 64);
+        let good = stack((13, 2));
         let mixed_ops = mixed(WeightDtype::Bf16, Some(0x4004));
         let exact_ops = exact();
         for other_board in [
@@ -571,10 +558,6 @@ mod inference_bundle_runtime_tests {
             );
         }
         let bad_stacks = [
-            InferenceBundleStack {
-                state_cap: 32,
-                ..good
-            },
             InferenceBundleStack {
                 compute_capability: (7, 5),
                 ..good
@@ -701,7 +684,7 @@ mod inference_bundle_runtime_tests {
 
     #[test]
     fn inference_bundle_runtime_requires_only_the_selected_individual_holder() {
-        let good = stack((13, 2), 64);
+        let good = stack((13, 2));
         let without_bf16 = InferenceBundleStack {
             half_bf16_available: false,
             ..good
@@ -800,34 +783,34 @@ mod inference_bundle_runtime_tests {
         }
         for (size, align) in [
             (
-                size_of::<FixedSm89HalfParams>(),
-                align_of::<FixedSm89HalfParams>(),
+                size_of::<InferenceSm89HalfParams>(),
+                align_of::<InferenceSm89HalfParams>(),
             ),
             (
-                size_of::<FixedSm89ExactF32Params>(),
-                align_of::<FixedSm89ExactF32Params>(),
+                size_of::<InferenceSm89ExactF32Params>(),
+                align_of::<InferenceSm89ExactF32Params>(),
             ),
         ] {
             assert_eq!(size, 32);
             assert_eq!(align, 4);
             assert_eq!(4 * size_of::<u64>() + size, 64);
         }
-        assert_eq!(offset_of!(FixedSm89HalfParams, alpha), 0);
-        assert_eq!(offset_of!(FixedSm89HalfParams, beta), 4);
-        assert_eq!(offset_of!(FixedSm89HalfParams, m), 8);
-        assert_eq!(offset_of!(FixedSm89HalfParams, n), 12);
-        assert_eq!(offset_of!(FixedSm89HalfParams, k), 16);
-        assert_eq!(offset_of!(FixedSm89HalfParams, lda), 20);
-        assert_eq!(offset_of!(FixedSm89HalfParams, ldb), 24);
-        assert_eq!(offset_of!(FixedSm89HalfParams, ldc), 28);
-        assert_eq!(offset_of!(FixedSm89ExactF32Params, alpha), 0);
-        assert_eq!(offset_of!(FixedSm89ExactF32Params, beta), 4);
-        assert_eq!(offset_of!(FixedSm89ExactF32Params, m), 8);
-        assert_eq!(offset_of!(FixedSm89ExactF32Params, n), 12);
-        assert_eq!(offset_of!(FixedSm89ExactF32Params, k), 16);
-        assert_eq!(offset_of!(FixedSm89ExactF32Params, lda), 20);
-        assert_eq!(offset_of!(FixedSm89ExactF32Params, ldb), 24);
-        assert_eq!(offset_of!(FixedSm89ExactF32Params, ldc), 28);
+        assert_eq!(offset_of!(InferenceSm89HalfParams, alpha), 0);
+        assert_eq!(offset_of!(InferenceSm89HalfParams, beta), 4);
+        assert_eq!(offset_of!(InferenceSm89HalfParams, m), 8);
+        assert_eq!(offset_of!(InferenceSm89HalfParams, n), 12);
+        assert_eq!(offset_of!(InferenceSm89HalfParams, k), 16);
+        assert_eq!(offset_of!(InferenceSm89HalfParams, lda), 20);
+        assert_eq!(offset_of!(InferenceSm89HalfParams, ldb), 24);
+        assert_eq!(offset_of!(InferenceSm89HalfParams, ldc), 28);
+        assert_eq!(offset_of!(InferenceSm89ExactF32Params, alpha), 0);
+        assert_eq!(offset_of!(InferenceSm89ExactF32Params, beta), 4);
+        assert_eq!(offset_of!(InferenceSm89ExactF32Params, m), 8);
+        assert_eq!(offset_of!(InferenceSm89ExactF32Params, n), 12);
+        assert_eq!(offset_of!(InferenceSm89ExactF32Params, k), 16);
+        assert_eq!(offset_of!(InferenceSm89ExactF32Params, lda), 20);
+        assert_eq!(offset_of!(InferenceSm89ExactF32Params, ldb), 24);
+        assert_eq!(offset_of!(InferenceSm89ExactF32Params, ldc), 28);
     }
 
     #[test]
@@ -931,7 +914,7 @@ mod inference_bundle_runtime_tests {
         let source = include_str!("../../../../kernels/gemm_bi_inference/sm80/half_f32out_s3.cu");
         let bias_seed = source.find("float first = bias != nullptr").unwrap();
         let first_mma = source
-            .find("sm89_fixed_half_swizzle::consume_fragments<T>")
+            .find("sm89_inference_half_swizzle::consume_fragments<T>")
             .unwrap();
         assert!(bias_seed < first_mma);
     }

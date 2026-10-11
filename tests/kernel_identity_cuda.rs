@@ -132,8 +132,8 @@ const SM80_TN_SPLITK_ENTRIES: &[&str] = &[
 ];
 
 #[cfg(target_os = "linux")]
-/// The portable TF32 entries every Fixed PTX carries, whatever its target.
-const FIXED_TF32_ENTRIES_PORTABLE: &[&str] = &[
+/// The portable TF32 entries every Inference PTX carries, whatever its target.
+const INFERENCE_TF32_ENTRIES_PORTABLE: &[&str] = &[
     "nn_tf32_m128n64_bk32_s2",
     "nn_tf32_m128n64_bk32_s3",
     "nn_tf32_m64n64_bk32_s2",
@@ -141,10 +141,10 @@ const FIXED_TF32_ENTRIES_PORTABLE: &[&str] = &[
     "nn_tf32_m16n32_bk32_s4",
 ];
 
-/// The TMA entries the Fixed source compiles only for the 12.0 and 12.1
+/// The TMA entries the Inference source compiles only for the 12.0 and 12.1
 /// architectures; every other target's PTX must not carry them.
 #[cfg(target_os = "linux")]
-const FIXED_TF32_ENTRIES_SM120: &[&str] = &[
+const INFERENCE_TF32_ENTRIES_SM120: &[&str] = &[
     "nn_sm120_tma_tf32_m128n64_bk32_s2",
     "nn_sm120_tma_tf32_m128n64_bk32_s3",
     "nn_sm120_tma_tf32_m64n128_bk32_s2",
@@ -156,22 +156,23 @@ const FIXED_TF32_ENTRIES_SM120: &[&str] = &[
 
 /// The Ada-measured RNA TF32 tiles, composed with the inference overlay on
 /// every SM80-tier target except CC 12.x.
-const FIXED_TF32_ENTRIES_SM89: &[&str] = &[
+#[cfg(target_os = "linux")]
+const INFERENCE_TF32_ENTRIES_SM89: &[&str] = &[
     "nn_rna_wide_tf32_m128n128_bk32_s3",
     "nn_sm89_rna_tf32_m128n96_bk32_s3",
 ];
 
-/// The Fixed TF32 entries a PTX compiled for `target` carries: the portable
+/// The Inference TF32 entries a PTX compiled for `target` carries: the portable
 /// set on every architecture, the RNA tiles wherever the overlay composes,
 /// plus the TMA set on the two SM120 targets the kernel source admits.
 #[cfg(target_os = "linux")]
-fn expected_fixed_tf32_entries(target: &str) -> std::collections::BTreeSet<String> {
+fn expected_inference_tf32_entries(target: &str) -> std::collections::BTreeSet<String> {
     let sm120 = matches!(target, "compute_120" | "compute_121");
     let overlay = !matches!(target, "compute_120" | "compute_121" | "sm_120" | "sm_121");
-    FIXED_TF32_ENTRIES_PORTABLE
+    INFERENCE_TF32_ENTRIES_PORTABLE
         .iter()
-        .chain(FIXED_TF32_ENTRIES_SM89.iter().filter(|_| overlay))
-        .chain(FIXED_TF32_ENTRIES_SM120.iter().filter(|_| sm120))
+        .chain(INFERENCE_TF32_ENTRIES_SM89.iter().filter(|_| overlay))
+        .chain(INFERENCE_TF32_ENTRIES_SM120.iter().filter(|_| sm120))
         .map(|name| (*name).to_string())
         .collect()
 }
@@ -231,20 +232,20 @@ fn expected_cuda_module_fixtures_are_unique() {
         SM80_TYPED_ENTRIES.len() + SM80_SPLITK_ENTRIES.len() + SM80_TF32_ROUTE_SPECS.len()
     );
     assert_eq!(
-        expected_fixed_tf32_entries("compute_120").len(),
-        FIXED_TF32_ENTRIES_PORTABLE.len() + FIXED_TF32_ENTRIES_SM120.len()
+        expected_inference_tf32_entries("compute_120").len(),
+        INFERENCE_TF32_ENTRIES_PORTABLE.len() + INFERENCE_TF32_ENTRIES_SM120.len()
     );
     assert_eq!(
-        expected_fixed_tf32_entries("sm_89").len(),
-        FIXED_TF32_ENTRIES_PORTABLE.len() + FIXED_TF32_ENTRIES_SM89.len()
+        expected_inference_tf32_entries("sm_89").len(),
+        INFERENCE_TF32_ENTRIES_PORTABLE.len() + INFERENCE_TF32_ENTRIES_SM89.len()
     );
     assert_eq!(
-        expected_fixed_tf32_entries("compute_80").len(),
-        FIXED_TF32_ENTRIES_PORTABLE.len() + FIXED_TF32_ENTRIES_SM89.len()
+        expected_inference_tf32_entries("compute_80").len(),
+        INFERENCE_TF32_ENTRIES_PORTABLE.len() + INFERENCE_TF32_ENTRIES_SM89.len()
     );
     assert_eq!(
-        expected_fixed_tf32_entries("sm_120").len(),
-        FIXED_TF32_ENTRIES_PORTABLE.len()
+        expected_inference_tf32_entries("sm_120").len(),
+        INFERENCE_TF32_ENTRIES_PORTABLE.len()
     );
     let specialized: std::collections::BTreeSet<_> = SM120_KERNEL_SPECS
         .iter()
@@ -382,7 +383,7 @@ fn active_artifacts(artifacts: ArtifactSetIdentity) -> Vec<ArtifactIdentity> {
         "artifact-set count must match specialized-module presence"
     );
     let mut active = vec![
-        artifacts.fixed,
+        artifacts.inference,
         artifacts.triad_scalar,
         artifacts.triad_sm80,
     ];
@@ -681,7 +682,7 @@ fn half_physical_trace_records_complete_upcast_routes() {
                 nodes
                     .iter()
                     .filter(|node| node.kind != PhysicalLaunchKind::Gemm)
-                    .all(|node| node.module_kind == ModuleKind::Fixed)
+                    .all(|node| node.module_kind == ModuleKind::Inference)
             );
         }
     }
@@ -769,11 +770,14 @@ fn assert_exact_n64_resources(function: &cudarc::driver::CudaFunction) {
     );
 }
 
-fn assert_fixed_exact_n64_optional_holders(ctx: &GpuCtx, compute_capability: (u32, u32)) {
+fn assert_inference_exact_n64_optional_holders(ctx: &GpuCtx, compute_capability: (u32, u32)) {
     // The inference overlay composes on every SM80-tier target except
-    // CC 12.x, whose Fixed module stays byte-identical to its cohorts.
-    let overlay_holder = ctx.kernels.fixed_sm89_f32_n64_copyplan.as_ref();
-    let overlay_reason = ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection.as_ref();
+    // CC 12.x, whose Inference module stays byte-identical to its cohorts.
+    let overlay_holder = ctx.kernels.inference_sm89_f32_n64_copyplan.as_ref();
+    let overlay_reason = ctx
+        .kernels
+        .inference_sm89_f32_n64_copyplan_rejection
+        .as_ref();
     if compute_capability.0 == 12 {
         assert!(
             overlay_holder.is_none(),
@@ -790,8 +794,11 @@ fn assert_fixed_exact_n64_optional_holders(ctx: &GpuCtx, compute_capability: (u3
         assert_exact_n64_resources(function);
     }
 
-    let sm120_holder = ctx.kernels.fixed_sm120_f32_n64_copyplan.as_ref();
-    let sm120_reason = ctx.kernels.fixed_sm120_f32_n64_copyplan_rejection.as_ref();
+    let sm120_holder = ctx.kernels.inference_sm120_f32_n64_copyplan.as_ref();
+    let sm120_reason = ctx
+        .kernels
+        .inference_sm120_f32_n64_copyplan_rejection
+        .as_ref();
     let owns_sm120 = ctx.kernels.compiler_identity().target.as_str() == "compute_120"
         && compute_capability == (12, 0);
     if owns_sm120 {
@@ -810,8 +817,11 @@ fn assert_fixed_exact_n64_optional_holders(ctx: &GpuCtx, compute_capability: (u3
         );
     }
 
-    let sliced_holder = ctx.kernels.fixed_sm120_f32_n64_sliced.as_ref();
-    let sliced_reason = ctx.kernels.fixed_sm120_f32_n64_sliced_rejection.as_ref();
+    let sliced_holder = ctx.kernels.inference_sm120_f32_n64_sliced.as_ref();
+    let sliced_reason = ctx
+        .kernels
+        .inference_sm120_f32_n64_sliced_rejection
+        .as_ref();
     let owns_sliced = ctx.kernels.compiler_identity().target.as_str() == "compute_120"
         && compute_capability == (12, 0);
     if owns_sliced {
@@ -867,10 +877,18 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
 
     let device = GpuDevice::new(0).expect("CUDA device");
     let first = GpuCtx::new(&device).expect("first context");
-    assert_fixed_exact_n64_optional_holders(&first, device.compute_capability);
+    assert_inference_exact_n64_optional_holders(&first, device.compute_capability);
     let first_artifacts = first.kernels.artifact_set_identity();
+    // The Mamba-1 and shared modules sit outside the GEMM artifact set but
+    // share its cache, so they count among the envelopes and their cold
+    // compiles are held to the same determinism.
     #[cfg(target_os = "linux")]
-    let active_artifacts = active_artifacts(first_artifacts);
+    let active_artifacts = {
+        let mut active = active_artifacts(first_artifacts);
+        active.push(first.kernels.mamba1_artifact_identity());
+        active.push(first.kernels.shared_artifact_identity());
+        active
+    };
     #[cfg(target_os = "linux")]
     let cached_entries = cache_entries(
         &root.path().join("cache"),
@@ -888,7 +906,7 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
         .map(|artifact| (*artifact, artifact_payload(&cached_entries, *artifact)))
         .collect();
     let second = GpuCtx::new(&device).expect("second context");
-    assert_fixed_exact_n64_optional_holders(&second, device.compute_capability);
+    assert_inference_exact_n64_optional_holders(&second, device.compute_capability);
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;
@@ -910,8 +928,8 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
     );
     let second_artifacts = second.kernels.artifact_set_identity();
     assert_eq!(first_artifacts, second_artifacts);
-    assert_eq!(first_artifacts.fixed.module_kind, ModuleKind::Fixed);
-    assert_eq!(first_artifacts.fixed.artifact_kind, ArtifactKind::Ptx);
+    assert_eq!(first_artifacts.inference.module_kind, ModuleKind::Inference);
+    assert_eq!(first_artifacts.inference.artifact_kind, ArtifactKind::Ptx);
     assert_eq!(
         first_artifacts.triad_scalar.module_kind,
         ModuleKind::TriadScalar
@@ -921,7 +939,7 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
         ModuleKind::TriadSm80
     );
     assert_eq!(
-        first_artifacts.fixed.compile_key,
+        first_artifacts.inference.compile_key,
         first.kernels.compiler_identity().invocation_digest
     );
     assert_eq!(
@@ -934,8 +952,11 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
     );
     #[cfg(target_os = "linux")]
     {
-        let fixed_entries = ptx_entries(&artifact_payload(&cached_entries, first_artifacts.fixed));
-        let exact_n64_entries: std::collections::BTreeSet<_> = fixed_entries
+        let inference_entries = ptx_entries(&artifact_payload(
+            &cached_entries,
+            first_artifacts.inference,
+        ));
+        let exact_n64_entries: std::collections::BTreeSet<_> = inference_entries
             .iter()
             .filter(|name| name.starts_with("nn_sm89_f32_n64_copyplan"))
             .map(String::as_str)
@@ -951,7 +972,7 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
             exact_n64_entries, expected_exact_n64,
             "cached exact N64 inventory"
         );
-        let sm120_exact_n64_entries: std::collections::BTreeSet<_> = fixed_entries
+        let sm120_exact_n64_entries: std::collections::BTreeSet<_> = inference_entries
             .iter()
             .filter(|name| name.starts_with("nn_sm120_f32_n64_copyplan"))
             .map(String::as_str)
@@ -970,7 +991,7 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
             sm120_exact_n64_entries, expected_sm120_exact_n64,
             "cached SM120 exact N64 inventory"
         );
-        let sm120_sliced_entries: std::collections::BTreeSet<_> = fixed_entries
+        let sm120_sliced_entries: std::collections::BTreeSet<_> = inference_entries
             .iter()
             .filter(|name| name.starts_with("nn_sm120_f32_n64_sliced"))
             .map(String::as_str)
@@ -986,17 +1007,19 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
             "cached SM120 sliced N64 inventory"
         );
         assert!(
-            fixed_entries.iter().all(|name| !name.starts_with("sgemm_")),
-            "Fixed unexpectedly exports legacy sgemm symbols: {fixed_entries:?}"
+            inference_entries
+                .iter()
+                .all(|name| !name.starts_with("sgemm_")),
+            "Inference unexpectedly exports legacy sgemm symbols: {inference_entries:?}"
         );
-        let fixed_tf32_entries: std::collections::BTreeSet<_> = fixed_entries
+        let inference_tf32_entries: std::collections::BTreeSet<_> = inference_entries
             .iter()
             .filter(|name| name.contains("_tf32_"))
             .cloned()
             .collect();
-        let expected_fixed_tf32 =
-            expected_fixed_tf32_entries(first.kernels.compiler_identity().target.as_str());
-        assert_eq!(fixed_tf32_entries, expected_fixed_tf32);
+        let expected_inference_tf32 =
+            expected_inference_tf32_entries(first.kernels.compiler_identity().target.as_str());
+        assert_eq!(inference_tf32_entries, expected_inference_tf32);
 
         let scalar_entries = ptx_entries(&artifact_payload(
             &cached_entries,
@@ -1071,6 +1094,14 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
         assert_eq!(
             first.kernels.artifact_set_identity(),
             third.kernels.artifact_set_identity()
+        );
+        assert_eq!(
+            first.kernels.mamba1_artifact_identity(),
+            third.kernels.mamba1_artifact_identity()
+        );
+        assert_eq!(
+            first.kernels.shared_artifact_identity(),
+            third.kernels.shared_artifact_identity()
         );
     }
 

@@ -599,7 +599,7 @@ impl CudaTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ModuleKind {
-    Fixed = 1,
+    Inference = 1,
     TriadScalar = 2,
     TriadSm80 = 3,
     TriadSm90a = 4,
@@ -608,7 +608,7 @@ pub enum ModuleKind {
     Mamba3Combined = 7,
     TriadSm89Finalist = 8,
     /// Exact-SM89 half-precision Triad finalists. Kept separate from both
-    /// Fixed and the TF32 finalist so every loaded module has an independent
+    /// Inference and the TF32 finalist so every loaded module has an independent
     /// artifact identity.
     TriadSm89Half = 9,
     /// Exact-F32 SM89 TN finalists. This optional module is independent from
@@ -623,14 +623,23 @@ pub enum ModuleKind {
     TriadSm89ExactF32D128 = 12,
     /// The Ada-measured inference cells, in their own module so a cell
     /// that compiles differently between two NVRTC runs moves only its
-    /// own artifact, never the Fixed module's frozen identities. Cells are
+    /// own artifact, never the Inference module's frozen identities. Cells are
     /// admitted by symbol, not by digest.
     InferenceSm89Cells = 13,
     /// The Mamba-2 kernels, in their own module so adding them moves no
-    /// identity of the Fixed or Mamba-3 modules.
+    /// identity of the Inference or Mamba-3 modules.
     Mamba2Combined = 14,
     /// The Mamba-3 MIMO kernels, in their own module for the same reason.
     Mamba3MimoCombined = 15,
+    /// The Mamba-1 kernels (scan, parallel scan, conv, activations),
+    /// compiled with the model's state capacity. Apart from the Inference
+    /// GEMMs, so editing them or choosing a capacity moves no GEMM identity.
+    Mamba1 = 16,
+    /// The kernels the families share through the context (norms,
+    /// element-wise, the loss scaler, gradient clipping, AdamW; Mamba-3 SISO
+    /// composes its own copies), apart from the Inference GEMMs for the same
+    /// reason.
+    Shared = 17,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -645,7 +654,7 @@ pub struct ArtifactIdentity {
 pub struct ArtifactSetIdentity {
     pub module_count: u8,
     pub ordered_digest: Sha256Digest,
-    pub fixed: ArtifactIdentity,
+    pub inference: ArtifactIdentity,
     pub triad_scalar: ArtifactIdentity,
     pub triad_sm80: ArtifactIdentity,
     /// The common TF32 finalist module, measured on the Ada and compiled
@@ -663,14 +672,14 @@ pub struct ArtifactSetIdentity {
 
 pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetIdentity, String> {
     if !(3..=10).contains(&artifacts.len()) {
-        return Err("artifact set must contain fixed, scalar triad, SM80 triad, one optional SM89 finalist module, one optional architecture-specialized module, one optional SM89 half module, one optional SM89 exact-F32 module, one optional SM89 exact-F32 d128 module, one optional SM89 TF32 joint module, and one optional SM89 inference cells module".into());
+        return Err("artifact set must contain inference, scalar triad, SM80 triad, one optional SM89 finalist module, one optional architecture-specialized module, one optional SM89 half module, one optional SM89 exact-F32 module, one optional SM89 exact-F32 d128 module, one optional SM89 TF32 joint module, and one optional SM89 inference cells module".into());
     }
-    if artifacts[0].module_kind != ModuleKind::Fixed
+    if artifacts[0].module_kind != ModuleKind::Inference
         || artifacts[1].module_kind != ModuleKind::TriadScalar
         || artifacts[2].module_kind != ModuleKind::TriadSm80
     {
         return Err(
-            "artifact set must start with Fixed, TriadScalar, and TriadSm80 in order".into(),
+            "artifact set must start with Inference, TriadScalar, and TriadSm80 in order".into(),
         );
     }
     let mut sm89_finalist = None;
@@ -750,7 +759,7 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
     Ok(ArtifactSetIdentity {
         module_count,
         ordered_digest: hash.finish(),
-        fixed: artifacts[0],
+        inference: artifacts[0],
         triad_scalar: artifacts[1],
         triad_sm80: artifacts[2],
         sm89_finalist,
@@ -1577,9 +1586,9 @@ impl PasteAnalysis {
                 }
             }
         }
-        let mut fixed_slots = BTreeMap::<String, Vec<Vec<String>>>::new();
+        let mut inference_slots = BTreeMap::<String, Vec<Vec<String>>>::new();
         for (name, analysis) in &self.macros {
-            let slots = fixed_slots.entry(name.clone()).or_default();
+            let slots = inference_slots.entry(name.clone()).or_default();
             for flow in &analysis.parameter_flows {
                 let callee_parameters: BTreeSet<usize> = if is_builtin_paste_macro(&flow.callee) {
                     (0..flow.arguments.len()).collect()
@@ -1639,8 +1648,8 @@ impl PasteAnalysis {
                         .map(|token| vec![token]),
                 );
             }
-            if let Some(fixed) = fixed_slots.get(name) {
-                slots.extend(fixed.iter().cloned());
+            if let Some(inference) = inference_slots.get(name) {
+                slots.extend(inference.iter().cloned());
             }
             paste_slots_form_volatile(&slots)
         })
@@ -2853,7 +2862,7 @@ pub struct BackendSet(u8);
 impl BackendSet {
     pub const CUBLAS: Self = Self(1 << 0);
     pub const TRIAD: Self = Self(1 << 1);
-    pub const FIXED: Self = Self(1 << 2);
+    pub const INFERENCE: Self = Self(1 << 2);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -2871,9 +2880,9 @@ impl NumericContractSet {
     pub const CUBLAS_ONE_CONTRACT: Self = Self(1 << 0);
     pub const TRIAD_SCALAR_FMA: Self = Self(1 << 1);
     pub const TRIAD_MMA_SYNC: Self = Self(1 << 2);
-    pub const FIXED_SCALAR_FMA: Self = Self(1 << 3);
-    pub const FIXED_MMA_SYNC: Self = Self(1 << 4);
-    pub const FIXED_MATVEC_TREE: Self = Self(1 << 5);
+    pub const INFERENCE_SCALAR_FMA: Self = Self(1 << 3);
+    pub const INFERENCE_MMA_SYNC: Self = Self(1 << 4);
+    pub const INFERENCE_MATVEC_TREE: Self = Self(1 << 5);
     pub const TRIAD_DETERMINISTIC_TF32: Self = Self(1 << 6);
     pub const TRIAD_DETERMINISTIC_TF32_SPLIT_K: Self = Self(1 << 7);
     /// The stream-K half routes: a persistent grid whose per-CTA partials
@@ -2881,8 +2890,8 @@ impl NumericContractSet {
     pub const TRIAD_MMA_SYNC_STREAM_K: Self = Self(1 << 8);
     /// Context-aware cuBLAS policy with distinct Fast and Pedantic contracts.
     pub const CUBLAS_FAST_AND_PEDANTIC: Self = Self(1 << 9);
-    /// Fixed-module explicit deterministic TF32, independent of the Triad tier.
-    pub const FIXED_DETERMINISTIC_TF32: Self = Self(1 << 10);
+    /// Inference-module explicit deterministic TF32, independent of the Triad tier.
+    pub const INFERENCE_DETERMINISTIC_TF32: Self = Self(1 << 10);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -2902,25 +2911,25 @@ pub fn route_backend_contract_sets(policy: GemmPolicy) -> (BackendSet, NumericCo
     }
     let (backends, contracts) = match (policy.bi_gemm_family, policy.bi_tensor_cores) {
         (BiGemmFamily::Triad, false) => (
-            BackendSet::TRIAD.union(BackendSet::FIXED),
-            NumericContractSet::TRIAD_SCALAR_FMA.union(NumericContractSet::FIXED_MATVEC_TREE),
+            BackendSet::TRIAD.union(BackendSet::INFERENCE),
+            NumericContractSet::TRIAD_SCALAR_FMA.union(NumericContractSet::INFERENCE_MATVEC_TREE),
         ),
         (BiGemmFamily::Triad, true) => (
-            BackendSet::TRIAD.union(BackendSet::FIXED),
+            BackendSet::TRIAD.union(BackendSet::INFERENCE),
             NumericContractSet::TRIAD_SCALAR_FMA
                 .union(NumericContractSet::TRIAD_MMA_SYNC)
-                .union(NumericContractSet::FIXED_MATVEC_TREE),
+                .union(NumericContractSet::INFERENCE_MATVEC_TREE),
         ),
         (BiGemmFamily::Inference, false) => (
-            BackendSet::FIXED.union(BackendSet::TRIAD),
-            NumericContractSet::FIXED_SCALAR_FMA
-                .union(NumericContractSet::FIXED_MMA_SYNC)
+            BackendSet::INFERENCE.union(BackendSet::TRIAD),
+            NumericContractSet::INFERENCE_SCALAR_FMA
+                .union(NumericContractSet::INFERENCE_MMA_SYNC)
                 .union(NumericContractSet::TRIAD_SCALAR_FMA),
         ),
         (BiGemmFamily::Inference, true) => (
-            BackendSet::FIXED.union(BackendSet::TRIAD),
-            NumericContractSet::FIXED_SCALAR_FMA
-                .union(NumericContractSet::FIXED_MMA_SYNC)
+            BackendSet::INFERENCE.union(BackendSet::TRIAD),
+            NumericContractSet::INFERENCE_SCALAR_FMA
+                .union(NumericContractSet::INFERENCE_MMA_SYNC)
                 .union(NumericContractSet::TRIAD_SCALAR_FMA)
                 .union(NumericContractSet::TRIAD_MMA_SYNC),
         ),
@@ -2934,7 +2943,7 @@ pub fn route_backend_contract_sets(policy: GemmPolicy) -> (BackendSet, NumericCo
     } else if policy.bi_gemm_family == BiGemmFamily::Inference
         && policy.f32_triad_policy == F32TriadPolicy::AllowDeterministicTf32
     {
-        contracts.union(NumericContractSet::FIXED_DETERMINISTIC_TF32)
+        contracts.union(NumericContractSet::INFERENCE_DETERMINISTIC_TF32)
     } else {
         contracts
     };
@@ -3008,7 +3017,7 @@ pub enum PhysicalGemmBackend {
     Sm120TmaMmaTf32RnaStreamKV1 = 19,
     Sm120TmaFmaExact = 20,
     Sm89MmaTf32Compact8 = 21,
-    ScalarFmaSm89FixedCopyPlan = 22,
+    ScalarFmaSm89InferenceCopyPlan = 22,
     Sm89Mma16HalfS3 = 23,
     ScalarFmaSm89ExactF32DualChunkFused = 24,
     ScalarFmaSm89ExactF32DirectSplitMPartial = 25,
@@ -3026,15 +3035,15 @@ pub enum PhysicalGemmBackend {
     InferenceSm120TmaFma = 37,
     InferenceSm120TmaMma16 = 38,
     InferenceSm120TmaMmaTf32Rna = 39,
-    FixedMatvecEightWarp = 40,
+    InferenceMatvecEightWarp = 40,
     Sm89Mma16HalfS4 = 41,
     Sm89MmaTf32NtRna = 42,
     Sm89MmaTf32TnDirectRna = 43,
 }
 
 /// Scoped route epoch for the Ada scalar NN reuse of the already-qualified
-/// Fixed CopyPlan kernel. This must not invalidate unrelated tuning-45 routes.
-pub(crate) const SM89_FIXED_COPYPLAN_ROUTE_REVISION: u16 = 1;
+/// Inference CopyPlan kernel. This must not invalidate unrelated tuning-45 routes.
+pub(crate) const SM89_INFERENCE_COPYPLAN_ROUTE_REVISION: u16 = 1;
 /// Scoped route epoch for the isolated Ada half-Triad S2/S3 AUTO cohort.
 pub(crate) const SM89_HALF_ROUTE_REVISION: u16 = 2;
 /// Scoped route epoch for the isolated Ada exact-F32 large-TN family.
@@ -3634,7 +3643,7 @@ impl PhysicalLaunchObservation {
                 Ok(ResolvedPhysicalKernelLaunch {
                     kind,
                     symbol,
-                    module_kind: ModuleKind::Fixed,
+                    module_kind: ModuleKind::Inference,
                     logical_op,
                     logical_dtype,
                     execution_dtype: PolicyDtype::F32,
@@ -4369,14 +4378,14 @@ impl PhysicalConversionModuleBinding {
     #[cfg(test)]
     fn from_context(context: GemmRouteIdentity) -> Self {
         Self {
-            artifact: context.artifacts.fixed,
+            artifact: context.artifacts.inference,
             compiler: context.compiler,
         }
     }
 
     fn from_gpu_ctx(ctx: &GpuCtx) -> Self {
         Self {
-            artifact: ctx.kernels.artifact_set_identity().fixed,
+            artifact: ctx.kernels.artifact_set_identity().inference,
             compiler: ctx.kernels.compiler_identity(),
         }
     }
@@ -4546,7 +4555,7 @@ impl CapturedPhysicalGraphIdentity {
                     PhysicalLaunchKind::InputUpcast | PhysicalLaunchKind::OutputDowncast,
                     None,
                     None,
-                ) if node.module_kind == ModuleKind::Fixed => {}
+                ) if node.module_kind == ModuleKind::Inference => {}
                 (PhysicalLaunchKind::InputTransform, None, Some(transform))
                     if node.module_kind == ModuleKind::TriadSm89Tf32Joint =>
                 {
@@ -5118,8 +5127,8 @@ fn validate_physical_launch(
                 | PhysicalGemmBackend::InferenceSm120TmaFma
                 | PhysicalGemmBackend::InferenceSm120TmaMma16
                 | PhysicalGemmBackend::InferenceSm120TmaMmaTf32Rna
-                | PhysicalGemmBackend::FixedMatvecEightWarp
-        ) || (route.backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+                | PhysicalGemmBackend::InferenceMatvecEightWarp
+        ) || (route.backend == PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan
             && route.numeric_contract == ResolvedNumericContract::ScalarFmaPostDotBias)
     });
     if let Some(route) = inference_route {
@@ -5197,7 +5206,7 @@ fn validate_physical_launch(
             ))
         }
         (PhysicalLaunchKind::InputUpcast | PhysicalLaunchKind::OutputDowncast, None, None)
-            if node.module_kind != ModuleKind::Fixed =>
+            if node.module_kind != ModuleKind::Inference =>
         {
             Err(format!(
                 "resolved physical conversion launch {} has an unresolved module owner",
@@ -5417,7 +5426,7 @@ mod physical_launch_tests {
                 PhysicalGemmBackend::Sm120TmaMmaTf32RnaStreamKV1 as u8,
                 PhysicalGemmBackend::Sm120TmaFmaExact as u8,
                 PhysicalGemmBackend::Sm89MmaTf32Compact8 as u8,
-                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan as u8,
+                PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan as u8,
                 PhysicalGemmBackend::Sm89Mma16HalfS3 as u8,
                 PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused as u8,
                 PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial as u8,
@@ -5435,7 +5444,7 @@ mod physical_launch_tests {
                 PhysicalGemmBackend::InferenceSm120TmaFma as u8,
                 PhysicalGemmBackend::InferenceSm120TmaMma16 as u8,
                 PhysicalGemmBackend::InferenceSm120TmaMmaTf32Rna as u8,
-                PhysicalGemmBackend::FixedMatvecEightWarp as u8,
+                PhysicalGemmBackend::InferenceMatvecEightWarp as u8,
                 PhysicalGemmBackend::Sm89Mma16HalfS4 as u8,
                 PhysicalGemmBackend::Sm89MmaTf32NtRna as u8,
                 PhysicalGemmBackend::Sm89MmaTf32TnDirectRna as u8
@@ -5490,7 +5499,7 @@ mod physical_launch_tests {
             ],
             [1, 2, 3, 4, 5]
         );
-        assert_eq!(NumericContractSet::FIXED_DETERMINISTIC_TF32.0, 1 << 10);
+        assert_eq!(NumericContractSet::INFERENCE_DETERMINISTIC_TF32.0, 1 << 10);
         assert_eq!(NumericContractSet::CUBLAS_FAST_AND_PEDANTIC.0, 1 << 9);
     }
 
@@ -5501,7 +5510,7 @@ mod physical_launch_tests {
         ResolvedPhysicalKernelLaunch {
             kind,
             symbol,
-            module_kind: ModuleKind::Fixed,
+            module_kind: ModuleKind::Inference,
             logical_op: ResolvedGemmOp::Nn,
             logical_dtype: PolicyDtype::Bf16,
             execution_dtype: PolicyDtype::F32,
@@ -5554,7 +5563,7 @@ mod physical_launch_tests {
             numeric_contracts: NumericContractSet::TRIAD_SCALAR_FMA,
             compiler,
             artifacts: build_artifact_set(&[
-                artifact(ModuleKind::Fixed, 5),
+                artifact(ModuleKind::Inference, 5),
                 artifact(ModuleKind::TriadScalar, 7),
                 artifact(ModuleKind::TriadSm80, 9),
             ])
@@ -5598,18 +5607,18 @@ mod physical_launch_tests {
             current.schedule_set_revision
         );
         let error = captured
-            .ensure_current(current, "revision39 Fixed AUTO graph replay")
+            .ensure_current(current, "revision39 Inference AUTO graph replay")
             .expect_err("RNA AUTO promotion reused the revision39 graph identity");
         assert!(error.contains("re-capture before replay"));
         current
-            .ensure_current(current, "current Fixed AUTO graph replay")
+            .ensure_current(current, "current Inference AUTO graph replay")
             .unwrap();
     }
 
     #[test]
     fn ada_finalist_is_an_optional_fourth_artifact_without_changing_three_module_identity() {
         let base = physical_context().artifacts;
-        let unchanged = build_artifact_set(&[base.fixed, base.triad_scalar, base.triad_sm80])
+        let unchanged = build_artifact_set(&[base.inference, base.triad_scalar, base.triad_sm80])
             .expect("three-module artifact set");
         assert_eq!(unchanged, base);
         let finalist = ArtifactIdentity {
@@ -5619,13 +5628,13 @@ mod physical_launch_tests {
             artifact_digest: [24; 32],
         };
         let with_finalist =
-            build_artifact_set(&[base.fixed, base.triad_scalar, base.triad_sm80, finalist])
+            build_artifact_set(&[base.inference, base.triad_scalar, base.triad_sm80, finalist])
                 .expect("Ada finalist fourth artifact");
         assert_eq!(with_finalist.module_count, 4);
         assert_eq!(with_finalist.sm89_finalist, Some(finalist));
         assert_eq!(with_finalist.specialized, None);
         assert_ne!(with_finalist.ordered_digest, base.ordered_digest);
-        assert_eq!(with_finalist.fixed, base.fixed);
+        assert_eq!(with_finalist.inference, base.inference);
         assert_eq!(with_finalist.triad_scalar, base.triad_scalar);
         assert_eq!(with_finalist.triad_sm80, base.triad_sm80);
         let foreign = ArtifactIdentity {
@@ -5633,12 +5642,13 @@ mod physical_launch_tests {
             ..finalist
         };
         assert!(
-            build_artifact_set(&[base.fixed, base.triad_scalar, base.triad_sm80, foreign]).is_err(),
+            build_artifact_set(&[base.inference, base.triad_scalar, base.triad_sm80, foreign])
+                .is_err(),
             "an unrelated module occupied the optional triad artifact slot"
         );
         assert!(
             build_artifact_set(&[
-                base.fixed,
+                base.inference,
                 base.triad_scalar,
                 base.triad_sm80,
                 finalist,
@@ -5649,7 +5659,10 @@ mod physical_launch_tests {
         );
         assert_eq!(ModuleKind::TriadSm89Finalist as u8, 8);
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32Compact8 as u8, 21);
-        assert_eq!(PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan as u8, 22);
+        assert_eq!(
+            PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan as u8,
+            22
+        );
         assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS3 as u8, 23);
         assert_eq!(
             PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused as u8,
@@ -5696,11 +5709,11 @@ mod physical_launch_tests {
             current.schedule_set_revision
         );
         let error = captured
-            .ensure_current(current, "revision40 Fixed replay")
+            .ensure_current(current, "revision40 Inference replay")
             .expect_err("toolkit AUTO reused an old captured route");
         assert!(error.contains("re-capture before replay"));
         current
-            .ensure_current(current, "current Fixed replay")
+            .ensure_current(current, "current Inference replay")
             .unwrap();
     }
 
@@ -5736,11 +5749,11 @@ mod physical_launch_tests {
             current.schedule_set_revision
         );
         let error = captured
-            .ensure_current(current, "revision41 Fixed replay")
+            .ensure_current(current, "revision41 Inference replay")
             .expect_err("Ada half AUTO promotion reused a revision41 graph identity");
         assert!(error.contains("re-capture before replay"));
         current
-            .ensure_current(current, "current revision45 Fixed replay")
+            .ensure_current(current, "current revision45 Inference replay")
             .unwrap();
     }
 
@@ -5758,11 +5771,11 @@ mod physical_launch_tests {
             current.schedule_set_revision
         );
         let error = captured
-            .ensure_current(current, "revision42 Fixed replay")
+            .ensure_current(current, "revision42 Inference replay")
             .expect_err("Ada half S3 AUTO promotion reused a revision42 graph identity");
         assert!(error.contains("re-capture before replay"));
         current
-            .ensure_current(current, "current revision45 Fixed replay")
+            .ensure_current(current, "current revision45 Inference replay")
             .unwrap();
     }
 
@@ -5780,11 +5793,11 @@ mod physical_launch_tests {
             current.schedule_set_revision
         );
         let error = captured
-            .ensure_current(current, "revision43 Fixed replay")
+            .ensure_current(current, "revision43 Inference replay")
             .expect_err("Ada exact toolkit AUTO promotion reused a revision43 graph identity");
         assert!(error.contains("re-capture before replay"));
         current
-            .ensure_current(current, "current revision45 Fixed replay")
+            .ensure_current(current, "current revision45 Inference replay")
             .unwrap();
     }
 
@@ -5802,22 +5815,22 @@ mod physical_launch_tests {
             current.schedule_set_revision
         );
         let error = captured
-            .ensure_current(current, "revision44 Fixed finalist replay")
+            .ensure_current(current, "revision44 Inference finalist replay")
             .expect_err("Ada finalist AUTO promotion reused a revision44 graph identity");
         assert!(error.contains("re-capture before replay"));
         current
-            .ensure_current(current, "current revision45 Fixed replay")
+            .ensure_current(current, "current revision45 Inference replay")
             .unwrap();
     }
 
     #[test]
-    fn fixed_only_artifact_replacement_invalidates_graph_at_unchanged_epoch45() {
+    fn inference_only_artifact_replacement_invalidates_graph_at_unchanged_epoch45() {
         let captured = physical_context();
         let mut current = captured;
-        let mut replaced_fixed = captured.artifacts.fixed;
-        replaced_fixed.artifact_digest[0] ^= 1;
+        let mut replaced_inference = captured.artifacts.inference;
+        replaced_inference.artifact_digest[0] ^= 1;
         current.artifacts = build_artifact_set(&[
-            replaced_fixed,
+            replaced_inference,
             captured.artifacts.triad_scalar,
             captured.artifacts.triad_sm80,
         ])
@@ -5839,14 +5852,14 @@ mod physical_launch_tests {
         );
         assert_eq!(current.numeric_contracts, captured.numeric_contracts);
         captured
-            .ensure_current(captured, "unchanged Fixed graph")
+            .ensure_current(captured, "unchanged Inference graph")
             .unwrap();
         let error = captured
-            .ensure_current(current, "replaced Fixed artifact graph")
-            .expect_err("Fixed-only source replacement reused a stale captured graph");
+            .ensure_current(current, "replaced Inference artifact graph")
+            .expect_err("Inference-only source replacement reused a stale captured graph");
         assert!(error.contains("re-capture before replay"));
         current
-            .ensure_current(current, "recaptured Fixed graph")
+            .ensure_current(current, "recaptured Inference graph")
             .unwrap();
     }
 
@@ -6370,11 +6383,11 @@ mod physical_launch_tests {
         let mut gemm_without_route = physical_gemm_launch();
         gemm_without_route.gemm_route = None;
         invalid.push(gemm_without_route);
-        let mut unsuffixed_half = physical_gemm_launch();
-        unsuffixed_half.logical_dtype = PolicyDtype::Bf16;
-        unsuffixed_half.execution_dtype = PolicyDtype::Bf16;
-        unsuffixed_half.gemm_route.as_mut().unwrap().dtype = PolicyDtype::Bf16;
-        invalid.push(unsuffixed_half);
+        let mut unsufinference_half = physical_gemm_launch();
+        unsufinference_half.logical_dtype = PolicyDtype::Bf16;
+        unsufinference_half.execution_dtype = PolicyDtype::Bf16;
+        unsufinference_half.gemm_route.as_mut().unwrap().dtype = PolicyDtype::Bf16;
+        invalid.push(unsufinference_half);
         let mut post_hoc_tile = physical_gemm_launch();
         post_hoc_tile.tile = Some((64, 64));
         invalid.push(post_hoc_tile);
@@ -6395,7 +6408,7 @@ mod physical_launch_tests {
     }
 
     #[test]
-    fn native_half_manifest_rejects_unsuffixed_and_post_hoc_selector_metadata() {
+    fn native_half_manifest_rejects_unsufinference_and_post_hoc_selector_metadata() {
         let mut native = physical_gemm_launch();
         native.symbol = "nn_big_bf16";
         native.logical_dtype = PolicyDtype::Bf16;
@@ -6405,10 +6418,10 @@ mod physical_launch_tests {
         route.dtype = PolicyDtype::Bf16;
         ResolvedPhysicalLaunchSet::from_nodes(&[native]).unwrap();
 
-        let mut unsuffixed = native;
-        unsuffixed.symbol = "nn_big";
-        unsuffixed.gemm_route.as_mut().unwrap().symbol = unsuffixed.symbol;
-        assert!(ResolvedPhysicalLaunchSet::from_nodes(&[unsuffixed]).is_err());
+        let mut unsufinference = native;
+        unsufinference.symbol = "nn_big";
+        unsufinference.gemm_route.as_mut().unwrap().symbol = unsufinference.symbol;
+        assert!(ResolvedPhysicalLaunchSet::from_nodes(&[unsufinference]).is_err());
 
         let mut post_hoc_tile = native;
         post_hoc_tile.tile = Some((64, 64));
@@ -6713,19 +6726,19 @@ mod cache_and_header_tests {
 
     #[test]
     #[ignore = "requires a CUDA device and NVRTC"]
-    fn fixed_policy_accepts_only_declared_triad_fallback_contracts() {
+    fn inference_policy_accepts_only_declared_triad_fallback_contracts() {
         let ctx = graph_test_context();
         ctx.set_bi_gemm_family(BiGemmFamily::Inference);
         for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
-            ctx.validate_resolved_gemm_route(&scalar_test_route(&ctx, op), "fixed scalar")
+            ctx.validate_resolved_gemm_route(&scalar_test_route(&ctx, op), "inference scalar")
                 .unwrap();
         }
 
         let mut tf32 = scalar_test_route(&ctx, ResolvedGemmOp::Nn);
         tf32.numeric_contract = ResolvedNumericContract::MmaTf32Rna;
         let error = ctx
-            .validate_resolved_gemm_route(&tf32, "fixed TF32")
-            .expect_err("Fixed policy must not admit a Triad TF32 contract");
+            .validate_resolved_gemm_route(&tf32, "inference TF32")
+            .expect_err("Inference policy must not admit a Triad TF32 contract");
         assert!(error.contains("numeric contract"), "{error}");
     }
 
@@ -7096,7 +7109,7 @@ mod cache_and_header_tests {
 
         let key_for = |domain: Vec<u8>| {
             CompileKeyMaterial {
-                module_kind: ModuleKind::Fixed,
+                module_kind: ModuleKind::Inference,
                 source: b"source".to_vec(),
                 target: b"sm_89".to_vec(),
                 argv: vec![b"--gpu-architecture=sm_89".to_vec()],
@@ -7375,7 +7388,7 @@ const char *stamp = CAT(__TI, ME__);";
         assert!(header_manifest_analysis(&manifest).is_some());
         assert!(
             CompileKeyMaterial {
-                module_kind: ModuleKind::Fixed,
+                module_kind: ModuleKind::Inference,
                 source: source.to_vec(),
                 target: b"sm_80".to_vec(),
                 argv: vec![],
@@ -7472,7 +7485,7 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
     #[test]
     fn volatile_predefined_macros_in_compile_material_disable_persistent_keys() {
         let material = |source: &[u8], argv: Vec<Vec<u8>>| CompileKeyMaterial {
-            module_kind: ModuleKind::Fixed,
+            module_kind: ModuleKind::Inference,
             source: source.to_vec(),
             target: b"sm_89".to_vec(),
             argv,
@@ -7522,7 +7535,7 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
         let root = tempfile::tempdir().unwrap();
         let include_root = root.path().to_string_lossy().into_owned();
         let material = |manifest: Vec<u8>, argv: Vec<Vec<u8>>| CompileKeyMaterial {
-            module_kind: ModuleKind::Fixed,
+            module_kind: ModuleKind::Inference,
             source: b"extern \"C\" __global__ void stable() {}".to_vec(),
             target: b"sm_89".to_vec(),
             argv,
@@ -7568,7 +7581,7 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
         let include_root = root.path().to_string_lossy().into_owned();
         let digest = || {
             CompileKeyMaterial {
-                module_kind: ModuleKind::Fixed,
+                module_kind: ModuleKind::Inference,
                 source: b"#if CHECK\nint selected;\n#endif".to_vec(),
                 target: b"sm_89".to_vec(),
                 argv: vec![b"-DCHECK=__has_include(\"probe_optional.h\")".to_vec()],
@@ -7595,7 +7608,7 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
     #[test]
     fn has_include_fragments_and_paste_combine_across_source_and_argv() {
         let material = |source: &[u8], argv: Vec<Vec<u8>>| CompileKeyMaterial {
-            module_kind: ModuleKind::Fixed,
+            module_kind: ModuleKind::Inference,
             source: source.to_vec(),
             target: b"sm_89".to_vec(),
             argv,

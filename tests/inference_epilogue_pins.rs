@@ -16,7 +16,7 @@ mod source_scan;
 use std::path::Path;
 
 #[test]
-fn fixed_family_epilogues_spell_alpha_and_beta_through_intrinsics() {
+fn inference_family_epilogues_spell_alpha_and_beta_through_intrinsics() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernels/gemm_bi_inference");
     let mut offenders = Vec::new();
     // The family keeps its architecture-specific kernels in per-card
@@ -64,7 +64,7 @@ fn fixed_family_epilogues_spell_alpha_and_beta_through_intrinsics() {
     }
     assert!(
         offenders.is_empty(),
-        "bare alpha/beta multiplication in the fixed family - route it \
+        "bare alpha/beta multiplication in the inference family - route it \
          through __fmul_rn/__fmaf_rn so ptxas cannot re-contract the \
          epilogue per target:\n{}",
         offenders.join("\n")

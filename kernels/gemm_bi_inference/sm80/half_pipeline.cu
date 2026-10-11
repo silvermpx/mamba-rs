@@ -1,13 +1,13 @@
-// OWN Ada-only Fixed homogeneous-half inference pipeline.
+// OWN Ada-only Inference homogeneous-half inference pipeline.
 // Derived from the repository's measured pipe_vec experiment: same
 // 128x128/BK64/S2 geometry, ascending k16 MMA chain and bias-seeded F32
 // accumulators. The experiment's false scheduling branches are absent.
 // Existing portable and CC12 CUDA fragments are deliberately unchanged.
 //
-// The Rust composer appends this fragment ONLY for ModuleKind::Fixed/sm_89.
+// The Rust composer appends this fragment ONLY for ModuleKind::Inference/sm_89.
 // No other architecture is admitted by source composition or this fragment.
 // The two exports have five arguments: C, A, B, F32 bias, and the by-value
-// 32-byte/align-4 params below. Fixed callers use alpha=1, beta=0.
+// 32-byte/align-4 params below. Inference callers use alpha=1, beta=0.
 // block=256; grid=ceil(M/128)*ceil(N/128); dynamic shared=71,680 bytes.
 // Loader: zero local memory, <=224 registers, >=1 resident CTA per SM.
 //
@@ -15,9 +15,9 @@
 // Vector stores require C16, ldc divisible8, beta0 and a full128-column
 // tile; tails/misaligned C use the incumbent scalar/pair RNE epilogue.
 // K0 does not read A/B. No scratch, numeric atomics or split reduction.
-// Requires the existing Fixed common.cuh typed/alignment/store helpers.
+// Requires the existing Inference common.cuh typed/alignment/store helpers.
 
-struct FixedSm89HalfParams {
+struct InferenceSm89HalfParams {
     float alpha;
     float beta;
     int m;
@@ -27,14 +27,14 @@ struct FixedSm89HalfParams {
     int ldb;
     int ldc;
 };
-static_assert(sizeof(FixedSm89HalfParams) == 32, "Fixed SM89 half parameter size");
-static_assert(alignof(FixedSm89HalfParams) == 4, "Fixed SM89 half parameter alignment");
-static_assert(__is_standard_layout(FixedSm89HalfParams), "Fixed SM89 half standard layout");
+static_assert(sizeof(InferenceSm89HalfParams) == 32, "Inference SM89 half parameter size");
+static_assert(alignof(InferenceSm89HalfParams) == 4, "Inference SM89 half parameter alignment");
+static_assert(__is_standard_layout(InferenceSm89HalfParams), "Inference SM89 half standard layout");
 // Eight ordered four-byte fields in 32 bytes leave no internal or tail
 // padding. Host offset_of assertions independently freeze the field layout.
-static_assert(sizeof(float) == 4 && sizeof(int) == 4, "Fixed SM89 half field widths");
+static_assert(sizeof(float) == 4 && sizeof(int) == 4, "Inference SM89 half field widths");
 
-namespace fixed_sm89_half_pipeline {
+namespace inference_sm89_half_pipeline {
 
 static constexpr int kSharedBytes = 71680;
 static constexpr int kOutputStride = 136;
@@ -287,10 +287,10 @@ static __device__ __forceinline__ void kernel(
     float alpha, float beta, int M, int N, int K, int lda, int ldb, int ldc) {
     static_assert(sizeof(T) == 2, "homogeneous half pipeline only");
     assert(alpha == 1.0f || bias == nullptr);
-    extern __shared__ __align__(16) unsigned char fixed_sm89_hp_shared[];
-    T (*As)[128][72] = reinterpret_cast<T (*)[128][72]>(fixed_sm89_hp_shared);
+    extern __shared__ __align__(16) unsigned char inference_sm89_hp_shared[];
+    T (*As)[128][72] = reinterpret_cast<T (*)[128][72]>(inference_sm89_hp_shared);
     T (*Bs)[64][136] = reinterpret_cast<T (*)[64][136]>(
-        fixed_sm89_hp_shared + 2 * 128 * 72 * (int)sizeof(T));
+        inference_sm89_hp_shared + 2 * 128 * 72 * (int)sizeof(T));
     int num_pid_n = (N + 127) / 128;
     int pid_m = (int)blockIdx.x / num_pid_n;
     int pid_n = (int)blockIdx.x % num_pid_n;
@@ -360,7 +360,7 @@ static __device__ __forceinline__ void kernel(
         bool vector_output = beta == 0.0f && (ldc & 7) == 0 && gbf_aligned16(C)
             && pid_n * 128 + 128 <= N;
         if (vector_output) {
-            vector_epilogue(C, reinterpret_cast<float*>(fixed_sm89_hp_shared), acc, alpha,
+            vector_epilogue(C, reinterpret_cast<float*>(inference_sm89_hp_shared), acc, alpha,
                 M, ldc, pid_m, pid_n, warpM, warpN);
             return;
         }
@@ -368,14 +368,14 @@ static __device__ __forceinline__ void kernel(
     scalar_epilogue(C, acc, alpha, beta, M, N, ldc, pid_m, pid_n, warpM, warpN);
 }
 
-} // namespace fixed_sm89_half_pipeline
+} // namespace inference_sm89_half_pipeline
 
 extern "C" __global__ __launch_bounds__(256, 1)
 void nn_sm89_tc128_pipeline_bf16(
     __nv_bfloat16* __restrict__ C, const __nv_bfloat16* __restrict__ A,
     const __nv_bfloat16* __restrict__ B, const float* __restrict__ bias,
-    FixedSm89HalfParams params) {
-    fixed_sm89_half_pipeline::kernel<__nv_bfloat16>(C, A, B, bias,
+    InferenceSm89HalfParams params) {
+    inference_sm89_half_pipeline::kernel<__nv_bfloat16>(C, A, B, bias,
         params.alpha, params.beta, params.m, params.n, params.k,
         params.lda, params.ldb, params.ldc);
 }
@@ -384,8 +384,8 @@ extern "C" __global__ __launch_bounds__(256, 1)
 void nn_sm89_tc128_pipeline_f16(
     __half* __restrict__ C, const __half* __restrict__ A,
     const __half* __restrict__ B, const float* __restrict__ bias,
-    FixedSm89HalfParams params) {
-    fixed_sm89_half_pipeline::kernel<__half>(C, A, B, bias,
+    InferenceSm89HalfParams params) {
+    inference_sm89_half_pipeline::kernel<__half>(C, A, B, bias,
         params.alpha, params.beta, params.m, params.n, params.k,
         params.lda, params.ldb, params.ldc);
 }

@@ -1,4 +1,4 @@
-pub const FIXED_N96_SYMBOL: &str = "nn_sm89_rna_tf32_m128n96_bk32_s3";
+pub const INFERENCE_N96_SYMBOL: &str = "nn_sm89_rna_tf32_m128n96_bk32_s3";
 pub const TRIAD_NN_N96_SYMBOL: &str = "nn_triad_sm89_add_half_tf32_exp_m128n96_bk32_s3";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,7 +30,7 @@ pub fn logical_alignment_guard_elements(
     Ok(alignment_bytes / element_bytes)
 }
 
-pub const FIXED_RNA_ROUND: &str = r#"__device__ __forceinline__ unsigned tf32n96_round(unsigned bits) {
+pub const INFERENCE_RNA_ROUND: &str = r#"__device__ __forceinline__ unsigned tf32n96_round(unsigned bits) {
     float value = __uint_as_float(bits);
     unsigned result;
     asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(result) : "f"(value));
@@ -125,7 +125,7 @@ __device__ __forceinline__ void tf32n96_tile(
 
 "#;
 
-pub const FIXED_MAIN_LOOP: &str = r#"    int read_stage = 0;
+pub const INFERENCE_MAIN_LOOP: &str = r#"    int read_stage = 0;
     for (unsigned tile = 0; tile < tile_count; ++tile) {
         asm volatile("cp.async.wait_group 1;\n" ::);
         __syncthreads();
@@ -194,10 +194,10 @@ fn replace_exactly_once(source: &str, old: &str, new: &str, label: &str) -> Resu
     Ok(source.replacen(old, new, 1))
 }
 
-pub fn compose_triad_nn_n96_source(fixed_source: &str) -> Result<String, String> {
+pub fn compose_triad_nn_n96_source(inference_source: &str) -> Result<String, String> {
     let source = replace_exactly_once(
-        fixed_source,
-        FIXED_RNA_ROUND,
+        inference_source,
+        INFERENCE_RNA_ROUND,
         TRIAD_ADD_HALF_ROUND,
         "operand conversion",
     )?;
@@ -215,27 +215,29 @@ pub fn compose_triad_nn_n96_source(fixed_source: &str) -> Result<String, String>
     )?;
     let source = replace_exactly_once(
         &source,
-        FIXED_MAIN_LOOP,
+        INFERENCE_MAIN_LOOP,
         TRIAD_ROTATED_MAIN_LOOP,
         "main loop",
     )?;
     let source = replace_exactly_once(
         &source,
-        FIXED_N96_SYMBOL,
+        INFERENCE_N96_SYMBOL,
         TRIAD_NN_N96_SYMBOL,
         "export symbol",
     )?;
-    if restore_fixed_n96_source(&source)? != fixed_source {
-        return Err("Triad NN N96 transform does not restore the immutable Fixed source".into());
+    if restore_inference_n96_source(&source)? != inference_source {
+        return Err(
+            "Triad NN N96 transform does not restore the immutable Inference source".into(),
+        );
     }
     Ok(source)
 }
 
-pub fn restore_fixed_n96_source(candidate_source: &str) -> Result<String, String> {
+pub fn restore_inference_n96_source(candidate_source: &str) -> Result<String, String> {
     let source = replace_exactly_once(
         candidate_source,
         TRIAD_ADD_HALF_ROUND,
-        FIXED_RNA_ROUND,
+        INFERENCE_RNA_ROUND,
         "restored operand conversion",
     )?;
     let source = replace_exactly_once(
@@ -253,13 +255,13 @@ pub fn restore_fixed_n96_source(candidate_source: &str) -> Result<String, String
     let source = replace_exactly_once(
         &source,
         TRIAD_ROTATED_MAIN_LOOP,
-        FIXED_MAIN_LOOP,
+        INFERENCE_MAIN_LOOP,
         "restored main loop",
     )?;
     replace_exactly_once(
         &source,
         TRIAD_NN_N96_SYMBOL,
-        FIXED_N96_SYMBOL,
+        INFERENCE_N96_SYMBOL,
         "restored export symbol",
     )
 }
@@ -381,28 +383,33 @@ pub fn expected_nn_auto_grid(
 mod tests {
     use super::*;
 
-    const FIXED_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu");
+    const INFERENCE_SOURCE: &str =
+        include_str!("../../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu");
 
     #[test]
     fn triad_nn_n96_transform_is_exact_and_reversible() {
-        let transformed = compose_triad_nn_n96_source(FIXED_SOURCE).expect("transform Fixed N96");
-        assert_eq!(transformed.matches(FIXED_N96_SYMBOL).count(), 0);
+        let transformed =
+            compose_triad_nn_n96_source(INFERENCE_SOURCE).expect("transform Inference N96");
+        assert_eq!(transformed.matches(INFERENCE_N96_SYMBOL).count(), 0);
         assert_eq!(transformed.matches(TRIAD_NN_N96_SYMBOL).count(), 1);
-        assert_eq!(transformed.matches(FIXED_RNA_ROUND).count(), 0);
+        assert_eq!(transformed.matches(INFERENCE_RNA_ROUND).count(), 0);
         assert_eq!(transformed.matches(TRIAD_ADD_HALF_ROUND).count(), 1);
         assert_eq!(
-            restore_fixed_n96_source(&transformed).unwrap(),
-            FIXED_SOURCE
+            restore_inference_n96_source(&transformed).unwrap(),
+            INFERENCE_SOURCE
         );
     }
 
     #[test]
     fn triad_nn_n96_transform_rejects_missing_or_duplicate_seams() {
         assert!(compose_triad_nn_n96_source("").is_err());
-        assert!(compose_triad_nn_n96_source(&format!("{FIXED_SOURCE}\n{FIXED_SOURCE}")).is_err());
+        assert!(
+            compose_triad_nn_n96_source(&format!("{INFERENCE_SOURCE}\n{INFERENCE_SOURCE}"))
+                .is_err()
+        );
 
-        let transformed = compose_triad_nn_n96_source(FIXED_SOURCE).unwrap();
-        assert!(restore_fixed_n96_source(&format!("{transformed}\n{transformed}")).is_err());
+        let transformed = compose_triad_nn_n96_source(INFERENCE_SOURCE).unwrap();
+        assert!(restore_inference_n96_source(&format!("{transformed}\n{transformed}")).is_err());
     }
 
     #[test]

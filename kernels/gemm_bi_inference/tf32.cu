@@ -10,10 +10,10 @@ struct GbfTf32Params {
     int ldc;
 };
 
-static_assert(sizeof(GbfTf32Params) == 24, "Fixed TF32 parameter ABI drift");
-static_assert(alignof(GbfTf32Params) == 4, "Fixed TF32 parameter alignment drift");
+static_assert(sizeof(GbfTf32Params) == 24, "Inference TF32 parameter ABI drift");
+static_assert(alignof(GbfTf32Params) == 4, "Inference TF32 parameter alignment drift");
 static_assert(__is_standard_layout(GbfTf32Params),
-              "Fixed TF32 parameters must remain standard layout");
+              "Inference TF32 parameters must remain standard layout");
 
 template <int BM, int BN, int Stages, bool CompactXor = false>
 struct __align__(16) GbfTf32Storage {

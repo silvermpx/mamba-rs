@@ -1,4 +1,4 @@
-//! Actual NVRTC Fixed half pipeline admission, arithmetic and launch gates.
+//! Actual NVRTC Inference half pipeline admission, arithmetic and launch gates.
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::{CudaGraph, sys};
@@ -75,13 +75,13 @@ fn expected_ada_half_auto(
 }
 
 #[test]
-fn fixed_sm89_half_swizzle_has_a_distinct_forced_route() {
+fn inference_sm89_half_swizzle_has_a_distinct_forced_route() {
     assert_ne!(SWIZZLE_CANDIDATE, CANDIDATE);
     assert_eq!(format!("{SWIZZLE_CANDIDATE:?}"), "Tc128Sm89Swizzle");
 }
 
 #[test]
-fn fixed_sm89_half_s3_has_a_distinct_forced_route() {
+fn inference_sm89_half_s3_has_a_distinct_forced_route() {
     assert_ne!(S3_CANDIDATE, CANDIDATE);
     assert_ne!(S3_CANDIDATE, SWIZZLE_CANDIDATE);
     assert_eq!(format!("{S3_CANDIDATE:?}"), "Tc128Sm89S3");
@@ -89,7 +89,7 @@ fn fixed_sm89_half_s3_has_a_distinct_forced_route() {
 
 #[test]
 #[ignore = "requires exact Ada CC8.9 and live independent half holders"]
-fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
+fn inference_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
@@ -104,19 +104,19 @@ fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
         ctx.kernels.compiler_identity(),
         ctx.kernels.artifact_set_identity()
     );
-    assert!(ctx.kernels.fixed_sm89_half_pipeline.is_some());
-    assert!(ctx.kernels.fixed_sm89_half_pipeline_rejection.is_none());
+    assert!(ctx.kernels.inference_sm89_half_pipeline.is_some());
+    assert!(ctx.kernels.inference_sm89_half_pipeline_rejection.is_none());
     let swizzle = ctx
         .kernels
-        .fixed_sm89_half_swizzle
+        .inference_sm89_half_swizzle
         .as_ref()
         .unwrap_or_else(|| {
             panic!(
                 "swizzle holder rejected: {:?}",
-                ctx.kernels.fixed_sm89_half_swizzle_rejection
+                ctx.kernels.inference_sm89_half_swizzle_rejection
             )
         });
-    assert!(ctx.kernels.fixed_sm89_half_swizzle_rejection.is_none());
+    assert!(ctx.kernels.inference_sm89_half_swizzle_rejection.is_none());
     for (dtype, function) in [
         (WeightDtype::Bf16, &swizzle.bf16),
         (WeightDtype::F16, &swizzle.f16),
@@ -143,13 +143,17 @@ fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
             occupancy
         );
     }
-    let s3 = ctx.kernels.fixed_sm89_half_s3.as_ref().unwrap_or_else(|| {
-        panic!(
-            "s3 holder rejected: {:?}",
-            ctx.kernels.fixed_sm89_half_s3_rejection
-        )
-    });
-    assert!(ctx.kernels.fixed_sm89_half_s3_rejection.is_none());
+    let s3 = ctx
+        .kernels
+        .inference_sm89_half_s3
+        .as_ref()
+        .unwrap_or_else(|| {
+            panic!(
+                "s3 holder rejected: {:?}",
+                ctx.kernels.inference_sm89_half_s3_rejection
+            )
+        });
+    assert!(ctx.kernels.inference_sm89_half_s3_rejection.is_none());
     for (dtype, function) in [(WeightDtype::Bf16, &s3.bf16), (WeightDtype::F16, &s3.f16)] {
         let local = function.local_size_bytes().expect("local bytes");
         let registers = function.num_regs().expect("registers");
@@ -176,8 +180,8 @@ fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
     for (label, function, rejection, register_cap, threads, shared, active_blocks) in [
         (
             "rna_n96",
-            ctx.kernels.fixed_sm89_tf32_rna_n96.as_ref(),
-            &ctx.kernels.fixed_sm89_tf32_rna_n96_rejection,
+            ctx.kernels.inference_sm89_tf32_rna_n96.as_ref(),
+            &ctx.kernels.inference_sm89_tf32_rna_n96_rejection,
             136,
             256,
             86_016,
@@ -185,8 +189,8 @@ fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
         ),
         (
             "half_m64n64_s3_f16",
-            ctx.kernels.fixed_sm89_half_m64n64_s3_f16.as_ref(),
-            &ctx.kernels.fixed_sm89_half_m64n64_s3_f16_rejection,
+            ctx.kernels.inference_sm89_half_m64n64_s3_f16.as_ref(),
+            &ctx.kernels.inference_sm89_half_m64n64_s3_f16_rejection,
             110,
             128,
             49_152,
@@ -194,8 +198,8 @@ fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
         ),
         (
             "half_m128n64_s2_f16",
-            ctx.kernels.fixed_sm89_half_m128n64_s2_f16.as_ref(),
-            &ctx.kernels.fixed_sm89_half_m128n64_s2_f16_rejection,
+            ctx.kernels.inference_sm89_half_m128n64_s2_f16.as_ref(),
+            &ctx.kernels.inference_sm89_half_m128n64_s2_f16_rejection,
             132,
             128,
             49_152,
@@ -224,37 +228,37 @@ fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
 
 #[test]
 #[ignore = "requires exact Ada 142SM CUDA12.8/13.0/13.2 and qualified hot-cell AUTO promotion"]
-fn fixed_sm89_half_pipeline_auto_hot_cell_prefix_view_graph_bits() {
-    fixed_sm89_half_hot_cell_prefix_view_graph_bits(None, None);
+fn inference_sm89_half_pipeline_auto_hot_cell_prefix_view_graph_bits() {
+    inference_sm89_half_hot_cell_prefix_view_graph_bits(None, None);
 }
 
 #[test]
 #[ignore = "requires exact Ada CC8.9 and the admitted forced half swizzle"]
-fn fixed_sm89_half_swizzle_forced_hot_a_e_prefix_view_graph_bits() {
-    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(SWIZZLE_CANDIDATE), None);
+fn inference_sm89_half_swizzle_forced_hot_a_e_prefix_view_graph_bits() {
+    inference_sm89_half_hot_cell_prefix_view_graph_bits(Some(SWIZZLE_CANDIDATE), None);
 }
 
 #[test]
 #[ignore = "requires exact Ada CC8.9 and the admitted forced half s3"]
-fn fixed_sm89_half_s3_forced_hot_a_e_prefix_view_graph_bits() {
-    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(S3_CANDIDATE), None);
+fn inference_sm89_half_s3_forced_hot_a_e_prefix_view_graph_bits() {
+    inference_sm89_half_hot_cell_prefix_view_graph_bits(Some(S3_CANDIDATE), None);
 }
 
 #[test]
 #[ignore = "requires exact Ada CC8.9 and the admitted forced F16 D finalist"]
-fn fixed_sm89_half_d_finalist_prefix_view_graph_bits() {
-    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(D_FINALIST), Some((768, 2304)));
+fn inference_sm89_half_d_finalist_prefix_view_graph_bits() {
+    inference_sm89_half_hot_cell_prefix_view_graph_bits(Some(D_FINALIST), Some((768, 2304)));
 }
 
 #[test]
 #[ignore = "requires exact Ada CC8.9 and the admitted forced F16 E finalist"]
-fn fixed_sm89_half_e_finalist_prefix_view_graph_bits() {
-    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(E_FINALIST), Some((2304, 768)));
+fn inference_sm89_half_e_finalist_prefix_view_graph_bits() {
+    inference_sm89_half_hot_cell_prefix_view_graph_bits(Some(E_FINALIST), Some((2304, 768)));
 }
 
 #[test]
 #[ignore = "requires exact Ada CC8.9; finalist launchers must reject before touching tiny buffers"]
-fn fixed_sm89_half_finalists_fail_closed_outside_exact_forced_contract() {
+fn inference_sm89_half_finalists_fail_closed_outside_exact_forced_contract() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
@@ -340,7 +344,7 @@ fn fixed_sm89_half_finalists_fail_closed_outside_exact_forced_contract() {
     }
 }
 
-fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
+fn inference_sm89_half_hot_cell_prefix_view_graph_bits(
     forced: Option<InferenceTile>,
     finalist: Option<(usize, usize)>,
 ) {
@@ -362,10 +366,10 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
             compiler.nvrtc_version,
             (12, 8) | (13, 0) | (13, 2)
         ));
-        assert!(ctx.kernels.fixed_sm89_half_pipeline.is_some());
-        assert!(ctx.kernels.fixed_sm89_half_pipeline_rejection.is_none());
-        assert!(ctx.kernels.fixed_sm89_half_swizzle.is_some());
-        assert!(ctx.kernels.fixed_sm89_half_swizzle_rejection.is_none());
+        assert!(ctx.kernels.inference_sm89_half_pipeline.is_some());
+        assert!(ctx.kernels.inference_sm89_half_pipeline_rejection.is_none());
+        assert!(ctx.kernels.inference_sm89_half_swizzle.is_some());
+        assert!(ctx.kernels.inference_sm89_half_swizzle_rejection.is_none());
     }
     let dtypes = if finalist.is_some() {
         vec![WeightDtype::F16]
@@ -563,8 +567,8 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
 }
 
 #[test]
-#[ignore = "requires exact Ada CC8.9 and the admitted Fixed half pipeline"]
-fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
+#[ignore = "requires exact Ada CC8.9 and the admitted Inference half pipeline"]
+fn inference_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
@@ -897,10 +901,10 @@ fn launch_raw_half(
     use cudarc::driver::PushKernelArg;
     let (holder, shared) = match tile {
         SWIZZLE_CANDIDATE => (
-            ctx.kernels.fixed_sm89_half_swizzle.as_ref().unwrap(),
+            ctx.kernels.inference_sm89_half_swizzle.as_ref().unwrap(),
             69_632,
         ),
-        S3_CANDIDATE => (ctx.kernels.fixed_sm89_half_s3.as_ref().unwrap(), 98_304),
+        S3_CANDIDATE => (ctx.kernels.inference_sm89_half_s3.as_ref().unwrap(), 98_304),
         _ => panic!("unsupported raw half route"),
     };
     let bias = ops.bias_ptr.unwrap_or(0);
@@ -923,7 +927,7 @@ fn launch_raw_half(
 
 #[test]
 #[ignore = "requires Ada production NVRTC holders; nonunit scalars and independent physical strides"]
-fn fixed_sm89_half_s3_raw_alpha_beta_strides_graph_bits() {
+fn inference_sm89_half_s3_raw_alpha_beta_strides_graph_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
@@ -1069,7 +1073,7 @@ fn fixed_sm89_half_s3_raw_alpha_beta_strides_graph_bits() {
 
 #[test]
 #[ignore = "requires exact Ada CC8.9; cold NVRTC loaded symbol, not an NVCC experiment"]
-fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
+fn inference_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
@@ -1307,7 +1311,7 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
 
 #[test]
 #[ignore = "requires exact Ada CC8.9; bounded half rounding-edge corpus"]
-fn fixed_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths() {
+fn inference_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
@@ -1408,7 +1412,7 @@ fn fixed_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths() {
 
 #[test]
 #[ignore = "requires exact Ada CC8.9; bounded actual-NVRTC smoke for all four sanitizer tools"]
-fn fixed_sm89_half_pipeline_sanitizer_smoke() {
+fn inference_sm89_half_pipeline_sanitizer_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
@@ -1589,7 +1593,7 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
 /// The cells are reached only through the automatic selection, so a cell
 /// whose launch faults or whose epilogue drifts is caught here.
 #[test]
-fn fixed_sm89_cells_launch_on_their_measured_shapes() {
+fn inference_sm89_cells_launch_on_their_measured_shapes() {
     use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw;
     use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
 

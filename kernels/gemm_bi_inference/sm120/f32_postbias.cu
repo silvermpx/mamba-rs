@@ -1,13 +1,13 @@
-// Deterministic exact-F32 post-dot-bias TMA kernels for Fixed inference.
+// Deterministic exact-F32 post-dot-bias TMA kernels for the Inference module.
 // This fragment is composed after sm120_tma.cu and reuses its SM120 map,
 // barrier, and TMA helpers.
 #if __CUDA_ARCH__ == 1200
 
-// Exact-F32 Fixed inference specializations. These deliberately live in the
-// Fixed module rather than sharing the Triad exact body: Fixed applies bias
+// Exact-F32 Inference specializations. These deliberately live in the
+// Inference module rather than sharing the Triad exact body: Inference applies bias
 // after the dot product, while the Triad one-split contract seeds the FMA
 // chain with bias. The seven-argument entry ABI matches the measured SM120
-// TMA variants even though one-split Fixed does not use partials or flags.
+// TMA variants even though one-split Inference does not use partials or flags.
 struct GbfSm120FmaParams {
     float alpha;
     float beta;
@@ -24,11 +24,11 @@ static __device__ __forceinline__ bool gbf_sm120_fma_aligned16(const void* point
 }
 
 static_assert(sizeof(GbfSm120FmaParams) == 32,
-              "Fixed SM120 exact-F32 parameter ABI drift");
+              "Inference SM120 exact-F32 parameter ABI drift");
 static_assert(alignof(GbfSm120FmaParams) == 4,
-              "Fixed SM120 exact-F32 parameter alignment drift");
+              "Inference SM120 exact-F32 parameter alignment drift");
 static_assert(__is_standard_layout(GbfSm120FmaParams),
-              "Fixed SM120 exact-F32 parameters must remain standard layout");
+              "Inference SM120 exact-F32 parameters must remain standard layout");
 
 #define GBF_SM120_FMA_BK 16
 #define GBF_SM120_FMA_GROUP_M 16
@@ -46,11 +46,11 @@ struct GbfSm120FmaStorage {
 };
 
 static_assert(GbfSm120FmaStorage<128, 64>::dynamic_bytes == 24592,
-              "Fixed SM120 m128n64 exact-F32 shared size drift");
+              "Inference SM120 m128n64 exact-F32 shared size drift");
 static_assert(GbfSm120FmaStorage<64, 128>::dynamic_bytes == 24592,
-              "Fixed SM120 m64n128 exact-F32 shared size drift");
+              "Inference SM120 m64n128 exact-F32 shared size drift");
 static_assert(GbfSm120FmaStorage<128, 96>::dynamic_bytes == 28688,
-              "Fixed SM120 m128n96 exact-F32 shared size drift");
+              "Inference SM120 m128n96 exact-F32 shared size drift");
 
 template <int BM, int BN, int WM, int WN, int TM, int TN, int THREADS>
 static __device__ __forceinline__ void gbf_sm120_fma_postbias_body(
@@ -67,13 +67,13 @@ static __device__ __forceinline__ void gbf_sm120_fma_postbias_body(
     constexpr int LANE_COLUMNS = WN / TN;
     constexpr int LANE_ROWS = WM / TM;
     static_assert(THREADS / 32 == (BM / WM) * (BN / WN),
-                  "Fixed SM120 exact-F32 warp grid does not cover the tile");
+                  "Inference SM120 exact-F32 warp grid does not cover the tile");
     static_assert(LANE_COLUMNS * LANE_ROWS == 32,
-                  "Fixed SM120 exact-F32 lane grid does not cover the warp");
+                  "Inference SM120 exact-F32 lane grid does not cover the warp");
     static_assert(THREADS * TM * TN == BM * BN,
-                  "Fixed SM120 exact-F32 microtiles do not cover the tile");
+                  "Inference SM120 exact-F32 microtiles do not cover the tile");
     static_assert(STAGE_BYTES % 1024 == 0,
-                  "Fixed SM120 exact-F32 stages must remain aligned");
+                  "Inference SM120 exact-F32 stages must remain aligned");
 
     extern __shared__ __align__(1024) float gbf_sm120_fma_smem[];
     float* stages = gbf_sm120_fma_smem;
@@ -183,7 +183,7 @@ static __device__ __forceinline__ void gbf_sm120_fma_postbias_body(
             }
 
             // This row-major result nest and the surrounding dot loop are the
-            // Fixed scalar contract's ascending-k __fmaf_rn chain.
+            // Inference scalar contract's ascending-k __fmaf_rn chain.
 #pragma unroll
             for (int i = 0; i < TM; ++i) {
                 float a = a_fragment[i][dot_index % 4];
@@ -289,13 +289,13 @@ static __device__ __forceinline__ void gbf_sm120_fma_nobias_body(
     constexpr int LANE_COLUMNS = WN / TN;
     constexpr int LANE_ROWS = WM / TM;
     static_assert(THREADS / 32 == (BM / WM) * (BN / WN),
-                  "Fixed SM120 exact-F32 warp grid does not cover the tile");
+                  "Inference SM120 exact-F32 warp grid does not cover the tile");
     static_assert(LANE_COLUMNS * LANE_ROWS == 32,
-                  "Fixed SM120 exact-F32 lane grid does not cover the warp");
+                  "Inference SM120 exact-F32 lane grid does not cover the warp");
     static_assert(THREADS * TM * TN == BM * BN,
-                  "Fixed SM120 exact-F32 microtiles do not cover the tile");
+                  "Inference SM120 exact-F32 microtiles do not cover the tile");
     static_assert(STAGE_BYTES % 1024 == 0,
-                  "Fixed SM120 exact-F32 stages must remain aligned");
+                  "Inference SM120 exact-F32 stages must remain aligned");
 
     extern __shared__ __align__(1024) float gbf_sm120_fma_smem[];
     float* stages = gbf_sm120_fma_smem;
@@ -405,7 +405,7 @@ static __device__ __forceinline__ void gbf_sm120_fma_nobias_body(
             }
 
             // This row-major result nest and the surrounding dot loop are the
-            // Fixed scalar contract's ascending-k __fmaf_rn chain.
+            // Inference scalar contract's ascending-k __fmaf_rn chain.
 #pragma unroll
             for (int i = 0; i < TM; ++i) {
                 float a = a_fragment[i][dot_index % 4];
@@ -485,13 +485,13 @@ static __device__ __forceinline__ void gbf_sm120_fma_postbias_k4_body(
     constexpr int LANE_COLUMNS = WN / TN;
     constexpr int LANE_ROWS = WM / TM;
     static_assert(THREADS / 32 == (BM / WM) * (BN / WN),
-                  "Fixed SM120 exact-F32 warp grid does not cover the tile");
+                  "Inference SM120 exact-F32 warp grid does not cover the tile");
     static_assert(LANE_COLUMNS * LANE_ROWS == 32,
-                  "Fixed SM120 exact-F32 lane grid does not cover the warp");
+                  "Inference SM120 exact-F32 lane grid does not cover the warp");
     static_assert(THREADS * TM * TN == BM * BN,
-                  "Fixed SM120 exact-F32 microtiles do not cover the tile");
+                  "Inference SM120 exact-F32 microtiles do not cover the tile");
     static_assert(STAGE_BYTES % 1024 == 0,
-                  "Fixed SM120 exact-F32 stages must remain aligned");
+                  "Inference SM120 exact-F32 stages must remain aligned");
 
     extern __shared__ __align__(1024) float gbf_sm120_fma_smem[];
     float* stages = gbf_sm120_fma_smem;

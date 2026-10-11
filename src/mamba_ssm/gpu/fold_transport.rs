@@ -64,7 +64,7 @@ pub(crate) fn route_for_shape(
     }
 }
 
-pub(crate) fn compose_fixed_source(
+pub(crate) fn compose_mamba1_source(
     composed: String,
     device_cc: Option<(i32, i32)>,
     target: &str,
@@ -355,12 +355,12 @@ mod tests {
     #[test]
     fn source_composition_is_scoped_and_retains_legacy_entries() {
         let unchanged =
-            compose_fixed_source("unchanged".to_string(), Some((8, 9)), "sm_89", 64, (13, 2))
+            compose_mamba1_source("unchanged".to_string(), Some((8, 9)), "sm_89", 64, (13, 2))
                 .unwrap();
         assert_eq!(unchanged, "unchanged");
 
         let composed =
-            compose_fixed_source(OWNER_SOURCE.to_string(), Some((8, 9)), "sm_89", 16, (13, 2))
+            compose_mamba1_source(OWNER_SOURCE.to_string(), Some((8, 9)), "sm_89", 16, (13, 2))
                 .unwrap();
         assert!(composed.contains(LEGACY_INVOCATIONS));
         for invocation in [

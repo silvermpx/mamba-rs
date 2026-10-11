@@ -1,6 +1,6 @@
 //! One NVRTC module composed from kernel sources, cached under its own
 //! module kind: the identity, cache and header-closure flow every family
-//! module beyond the Fixed and Mamba-3 ones shares.
+//! module beyond the Inference and Mamba-3 ones shares.
 
 use std::sync::Arc;
 

@@ -240,7 +240,7 @@ correctness check.
 
 ```toml
 [dependencies]
-mamba-rs = { version = "0.7", features = ["cuda"] }
+mamba-rs = { version = "0.8", features = ["cuda"] }
 ```
 
 ```rust

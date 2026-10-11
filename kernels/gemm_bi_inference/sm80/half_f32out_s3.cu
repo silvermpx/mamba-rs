@@ -1,4 +1,4 @@
-namespace sm89_fixed_half_swizzle {
+namespace sm89_inference_half_swizzle {
 static __device__ __forceinline__ void f32_scalar_epilogue(
     float* C, float (&acc)[4][4][4], float alpha,
     int M, int N, int ldc, int pid_m, int pid_n, int warpM, int warpN) {
@@ -67,7 +67,7 @@ static __device__ __forceinline__ void f32_vector_epilogue(
     }
 }
 
-} // namespace sm89_fixed_half_swizzle
+} // namespace sm89_inference_half_swizzle
 
 // This F32-output variant reuses the retained Ada CTA128x128/BK64/S3 mainloop
 // so matching half inputs keep its qualified staging and MMA order.
@@ -108,33 +108,33 @@ static __device__ __forceinline__ void kernel(
             acc[fm][fn][3] = second;
         }
     }
-    sm89_fixed_half_swizzle::FragmentOffsets offsets = sm89_fixed_half_swizzle::fragment_offsets(warpM, warpN);
-    sm89_fixed_half_swizzle::CopyPlan plan;
-    if (fast_stage) plan = sm89_fixed_half_swizzle::copy_plan(As_sbase, Bs_sbase, pid_m, pid_n, M, N, lda, ldb);
+    sm89_inference_half_swizzle::FragmentOffsets offsets = sm89_inference_half_swizzle::fragment_offsets(warpM, warpN);
+    sm89_inference_half_swizzle::CopyPlan plan;
+    if (fast_stage) plan = sm89_inference_half_swizzle::copy_plan(As_sbase, Bs_sbase, pid_m, pid_n, M, N, lda, ldb);
     int num_k_tiles = (K + 63) / 64;
     if (num_k_tiles > 0) {
         if (fast_stage) {
 #pragma unroll
-            for (int slice = 0; slice < 4; ++slice) sm89_fixed_half_swizzle::copy_slice(plan, A, B, 0, 0, 0, K, slice);
+            for (int slice = 0; slice < 4; ++slice) sm89_inference_half_swizzle::copy_slice(plan, A, B, 0, 0, 0, K, slice);
             asm volatile("cp.async.commit_group;\n" ::);
             if (num_k_tiles > 1) {
 #pragma unroll
                 for (int slice = 0; slice < 4; ++slice)
-                    sm89_fixed_half_swizzle::copy_slice(plan, A, B, 1, 64, (long long)64 * ldb, K, slice);
+                    sm89_inference_half_swizzle::copy_slice(plan, A, B, 1, 64, (long long)64 * ldb, K, slice);
                 asm volatile("cp.async.commit_group;\n" ::);
             }
         } else {
-            sm89_fixed_half_swizzle::stage_scalar(&As[0][0][0], &Bs[0][0][0], A, B, 0, 0, pid_m, pid_n, M, N, K, lda, ldb);
+            sm89_inference_half_swizzle::stage_scalar(&As[0][0][0], &Bs[0][0][0], A, B, 0, 0, pid_m, pid_n, M, N, K, lda, ldb);
         }
     }
     int read_buf = 0;
     if (fast_stage) {
-        sm89_fixed_half_swizzle::Fragments fragments[2];
+        sm89_inference_half_swizzle::Fragments fragments[2];
         if (num_k_tiles > 0) {
             if (num_k_tiles > 1) asm volatile("cp.async.wait_group 1;\n" ::);
             else asm volatile("cp.async.wait_group 0;\n" ::);
             __syncthreads();
-            sm89_fixed_half_swizzle::load_fragments(As_sbase, Bs_sbase, 0, offsets, fragments[0]);
+            sm89_inference_half_swizzle::load_fragments(As_sbase, Bs_sbase, 0, offsets, fragments[0]);
         }
         int write_buf = 2;
         for (int kt = 0; kt < num_k_tiles; ++kt) {
@@ -145,20 +145,20 @@ static __device__ __forceinline__ void kernel(
             unsigned a_read = As_sbase + (unsigned)(read_buf * 128 * 64 * 2);
             unsigned b_read = Bs_sbase + (unsigned)(read_buf * 64 * 128 * 2);
 
-            if (refill) sm89_fixed_half_swizzle::copy_slice(plan, A, B, write_buf, next_k, next_b, K, 0);
-            sm89_fixed_half_swizzle::load_fragments(a_read, b_read, 1, offsets, fragments[1]);
-            sm89_fixed_half_swizzle::consume_fragments<T>(fragments[0], acc);
+            if (refill) sm89_inference_half_swizzle::copy_slice(plan, A, B, write_buf, next_k, next_b, K, 0);
+            sm89_inference_half_swizzle::load_fragments(a_read, b_read, 1, offsets, fragments[1]);
+            sm89_inference_half_swizzle::consume_fragments<T>(fragments[0], acc);
 
-            if (refill) sm89_fixed_half_swizzle::copy_slice(plan, A, B, write_buf, next_k, next_b, K, 1);
-            sm89_fixed_half_swizzle::load_fragments(a_read, b_read, 2, offsets, fragments[0]);
-            sm89_fixed_half_swizzle::consume_fragments<T>(fragments[1], acc);
+            if (refill) sm89_inference_half_swizzle::copy_slice(plan, A, B, write_buf, next_k, next_b, K, 1);
+            sm89_inference_half_swizzle::load_fragments(a_read, b_read, 2, offsets, fragments[0]);
+            sm89_inference_half_swizzle::consume_fragments<T>(fragments[1], acc);
 
             if (refill) {
-                sm89_fixed_half_swizzle::copy_slice(plan, A, B, write_buf, next_k, next_b, K, 2);
-                sm89_fixed_half_swizzle::copy_slice(plan, A, B, write_buf, next_k, next_b, K, 3);
+                sm89_inference_half_swizzle::copy_slice(plan, A, B, write_buf, next_k, next_b, K, 2);
+                sm89_inference_half_swizzle::copy_slice(plan, A, B, write_buf, next_k, next_b, K, 3);
             }
-            sm89_fixed_half_swizzle::load_fragments(a_read, b_read, 3, offsets, fragments[1]);
-            sm89_fixed_half_swizzle::consume_fragments<T>(fragments[0], acc);
+            sm89_inference_half_swizzle::load_fragments(a_read, b_read, 3, offsets, fragments[1]);
+            sm89_inference_half_swizzle::consume_fragments<T>(fragments[0], acc);
 
             if (refill) asm volatile("cp.async.commit_group;\n" ::);
             if (next) {
@@ -169,9 +169,9 @@ static __device__ __forceinline__ void kernel(
                 write_buf = write_buf == 2 ? 0 : write_buf + 1;
                 unsigned next_a_read = As_sbase + (unsigned)(read_buf * 128 * 64 * 2);
                 unsigned next_b_read = Bs_sbase + (unsigned)(read_buf * 64 * 128 * 2);
-                sm89_fixed_half_swizzle::load_fragments(next_a_read, next_b_read, 0, offsets, fragments[0]);
+                sm89_inference_half_swizzle::load_fragments(next_a_read, next_b_read, 0, offsets, fragments[0]);
             }
-            sm89_fixed_half_swizzle::consume_fragments<T>(fragments[1], acc);
+            sm89_inference_half_swizzle::consume_fragments<T>(fragments[1], acc);
         }
     } else {
         for (int kt = 0; kt < num_k_tiles; ++kt) {
@@ -179,18 +179,18 @@ static __device__ __forceinline__ void kernel(
             bool next = kt + 1 < num_k_tiles;
             int next_k = (kt + 1) * 64;
             if (next) {
-                sm89_fixed_half_swizzle::stage_scalar(&As[0][0][0], &Bs[0][0][0], A, B, read_buf ^ 1, next_k,
+                sm89_inference_half_swizzle::stage_scalar(&As[0][0][0], &Bs[0][0][0], A, B, read_buf ^ 1, next_k,
                     pid_m, pid_n, M, N, K, lda, ldb);
             }
             unsigned a_read = As_sbase + (unsigned)(read_buf * 128 * 64 * 2);
             unsigned b_read = Bs_sbase + (unsigned)(read_buf * 64 * 128 * 2);
-            sm89_fixed_half_swizzle::Fragments fragments[2];
-            sm89_fixed_half_swizzle::load_fragments(a_read, b_read, 0, offsets, fragments[0]);
+            sm89_inference_half_swizzle::Fragments fragments[2];
+            sm89_inference_half_swizzle::load_fragments(a_read, b_read, 0, offsets, fragments[0]);
 #pragma unroll
             for (int issue = 0; issue < 4; ++issue) {
                 if (issue < 3)
-                    sm89_fixed_half_swizzle::load_fragments(a_read, b_read, issue + 1, offsets, fragments[(issue + 1) & 1]);
-                sm89_fixed_half_swizzle::consume_fragments<T>(fragments[issue & 1], acc);
+                    sm89_inference_half_swizzle::load_fragments(a_read, b_read, issue + 1, offsets, fragments[(issue + 1) & 1]);
+                sm89_inference_half_swizzle::consume_fragments<T>(fragments[issue & 1], acc);
             }
             read_buf ^= 1;
         }
@@ -198,11 +198,11 @@ static __device__ __forceinline__ void kernel(
     bool vector_output = VectorStore && (ldc & 3) == 0 && gbf_aligned16(C)
         && pid_n * 128 + 128 <= N;
     if (vector_output) {
-        sm89_fixed_half_swizzle::f32_vector_epilogue(C, reinterpret_cast<float*>(sm89_fhs_shared), acc, alpha,
+        sm89_inference_half_swizzle::f32_vector_epilogue(C, reinterpret_cast<float*>(sm89_fhs_shared), acc, alpha,
             M, ldc, pid_m, pid_n, warpM, warpN);
         return;
     }
-    sm89_fixed_half_swizzle::f32_scalar_epilogue(C, acc, alpha, M, N, ldc, pid_m, pid_n, warpM, warpN);
+    sm89_inference_half_swizzle::f32_scalar_epilogue(C, acc, alpha, M, N, ldc, pid_m, pid_n, warpM, warpN);
 }
 
 } // namespace sm89_inference_half_s3_f32out
@@ -211,7 +211,7 @@ extern "C" __global__ __launch_bounds__(256, 1)
 void nn_sm89_tc128_f32out_s3_bf16(
     float* __restrict__ C, const __nv_bfloat16* __restrict__ A,
     const __nv_bfloat16* __restrict__ B, const float* __restrict__ bias,
-    FixedSm89HalfSwizzleParams params) {
+    InferenceSm89HalfSwizzleParams params) {
     sm89_inference_half_s3_f32out::kernel<__nv_bfloat16, true>(C, A, B, bias,
         params.alpha, params.beta, params.m, params.n, params.k,
         params.lda, params.ldb, params.ldc);
@@ -220,7 +220,7 @@ extern "C" __global__ __launch_bounds__(256, 1)
 void nn_sm89_tc128_f32out_s3_f16(
     float* __restrict__ C, const __half* __restrict__ A,
     const __half* __restrict__ B, const float* __restrict__ bias,
-    FixedSm89HalfSwizzleParams params) {
+    InferenceSm89HalfSwizzleParams params) {
     sm89_inference_half_s3_f32out::kernel<__half, true>(C, A, B, bias,
         params.alpha, params.beta, params.m, params.n, params.k,
         params.lda, params.ldb, params.ldc);

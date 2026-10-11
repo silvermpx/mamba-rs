@@ -1,11 +1,11 @@
-//! The Ada-measured inference cells: one Fixed-overlay kernel per (shape,
+//! The Ada-measured inference cells: one Inference-overlay kernel per (shape,
 //! operand dtypes, policy) that beat the ladder route on the Ada board. The
 //! Ada board takes them as evidence; every other sm_80-tier board proves a
 //! cell's output words against the ladder route at first use.
 
 use super::super::context::F32TriadPolicy;
 use super::super::dtype::WeightDtype;
-use super::{FixedTileDevice, InferenceFwdOperands, InferenceShape};
+use super::{InferenceFwdOperands, InferenceShape, InferenceTileDevice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sm89CellRoute {
@@ -220,7 +220,7 @@ pub(crate) const SM89_CELLS: [Sm89Cell; 6] = [
 
 #[derive(Clone, Copy)]
 pub(super) struct Sm89CellStack {
-    pub(super) device: FixedTileDevice,
+    pub(super) device: InferenceTileDevice,
     pub(super) nvrtc: (i32, i32),
     pub(super) nvrtc_library_known: bool,
     pub(super) policy: F32TriadPolicy,
@@ -262,7 +262,7 @@ pub(super) fn select_sm89_cell(
     loaded: impl Fn(&str) -> bool,
 ) -> Option<&'static Sm89CellSpec> {
     if !stack.nvrtc_library_known
-        || !super::fixed_portable_overlay_board(stack.device.compute_capability)
+        || !super::inference_portable_overlay_board(stack.device.compute_capability)
         || stack.device.multiprocessors == 0
         || !matches!(stack.nvrtc, (12, 8) | (13, 0) | (13, 2))
         || [operands.c.ptr, operands.x.ptr, operands.w.ptr]
@@ -350,7 +350,7 @@ mod tests {
 
     fn stack(cc: (u32, u32), policy: F32TriadPolicy) -> Sm89CellStack {
         Sm89CellStack {
-            device: FixedTileDevice {
+            device: InferenceTileDevice {
                 multiprocessors: 142,
                 compute_capability: cc,
             },

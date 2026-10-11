@@ -20,6 +20,8 @@ fn compiled_fold_routes_keep_legacy_and_specialized_entries_available() {
         device.context().disable_event_tracking();
     }
     let caps = std::env::var("M1_FOLD_CAPS").unwrap_or_else(|_| "16,32,64".to_owned());
+    let mut mamba1_sources = std::collections::BTreeMap::new();
+    let mut inference_compilers = Vec::new();
     for cap in caps.split(',').map(|value| value.parse::<usize>().unwrap()) {
         assert!([16, 32, 64].contains(&cap));
         let kernels =
@@ -27,14 +29,26 @@ fn compiled_fold_routes_keep_legacy_and_specialized_entries_available() {
                 .unwrap();
         let artifacts = kernels.artifact_set_identity();
         eprintln!(
-            "PRODUCTION_FIXED_ARTIFACT state_cap={} module_kind={:?} artifact_kind={:?} compile_key={} artifact_digest={} ordered_set_digest={}",
+            "PRODUCTION_INFERENCE_ARTIFACT state_cap={} module_kind={:?} artifact_kind={:?} compile_key={} artifact_digest={} ordered_set_digest={}",
             kernels.state_cap,
-            artifacts.fixed.module_kind,
-            artifacts.fixed.artifact_kind,
-            digest_hex(&artifacts.fixed.compile_key),
-            digest_hex(&artifacts.fixed.artifact_digest),
+            artifacts.inference.module_kind,
+            artifacts.inference.artifact_kind,
+            digest_hex(&artifacts.inference.compile_key),
+            digest_hex(&artifacts.inference.artifact_digest),
             digest_hex(&artifacts.ordered_digest),
         );
+        let mamba1 = kernels.mamba1_artifact_identity();
+        eprintln!(
+            "PRODUCTION_MAMBA1_ARTIFACT state_cap={} module_kind={:?} artifact_kind={:?} compile_key={} artifact_digest={} source_digest={}",
+            kernels.state_cap,
+            mamba1.module_kind,
+            mamba1.artifact_kind,
+            digest_hex(&mamba1.compile_key),
+            digest_hex(&mamba1.artifact_digest),
+            digest_hex(&kernels.mamba1_compiler_identity().source_digest),
+        );
+        mamba1_sources.insert(cap, kernels.mamba1_compiler_identity().source_digest);
+        inference_compilers.push(kernels.compiler_identity());
         for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
             let legacy = kernels.ssm_parallel_bwd_fold_typed.get(dtype);
             let short = kernels.ssm_parallel_bwd_fold_for_shape(dtype, 8, 33, 768, 16);
@@ -59,22 +73,21 @@ fn compiled_fold_routes_keep_legacy_and_specialized_entries_available() {
         }
         if cap == 16 {
             raw::qualify(&device, &kernels);
-        } else {
-            // Capacity 32 compiles the legacy Fixed composition unchanged.
-            // Capacity 64 carries the retained inference overlay on top of it,
-            // so its source is the qualified capacity-64 identity that the
-            // dispatcher's cohorts bind, not the legacy base.
-            let expected = if cap == 64 {
-                "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab"
-            } else {
-                "ed45b82ec0a49deaede546707e230c537e6fd45c2a19d2ae89fd1ae358c9c317"
-            };
-            assert_eq!(
-                mamba_rs::mamba_ssm::gpu::kernel_identity::digest_hex(
-                    &kernels.compiler_identity().source_digest
-                ),
-                expected,
-            );
         }
     }
+    // The fold clones compose into the Mamba1 module at capacity 16 only;
+    // every other capacity compiles the plain Mamba1 composition, whose
+    // source carries no capacity (the capacity is a compile option).
+    if let (Some(plain32), Some(plain64)) = (mamba1_sources.get(&32), mamba1_sources.get(&64)) {
+        assert_eq!(plain32, plain64);
+    }
+    if let (Some(folded), Some(plain)) = (mamba1_sources.get(&16), mamba1_sources.get(&32)) {
+        assert_ne!(folded, plain);
+    }
+    // The Inference module does not depend on the state capacity at all.
+    assert!(
+        inference_compilers
+            .windows(2)
+            .all(|pair| pair[0] == pair[1])
+    );
 }

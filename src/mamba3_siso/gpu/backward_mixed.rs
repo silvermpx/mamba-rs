@@ -430,7 +430,7 @@ fn gpu_backward_mamba3_layer_mixed(
             ));
         }
         // t-split: blockDim.y lanes stride the per-timestep
-        // loops. Fixed launch geometry (never data-shaped); any T_SPLIT
+        // loops. Inference launch geometry (never data-shaped); any T_SPLIT
         // yields identical bits since each output keeps one owning lane
         // with the same inner order.
         let nc = dims.n_chunks();

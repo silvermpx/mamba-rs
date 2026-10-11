@@ -1,6 +1,6 @@
 //! The WMMA / mma.sync arithmetic-contract check.
 //!
-//! Question 1: is the WMMA m16n16k16 tile (the Fixed family's bf16/f16
+//! Question 1: is the WMMA m16n16k16 tile (the Inference family's bf16/f16
 //! path, `kernels/gemm_bi_inference/`) bit-identical to the inline
 //! `mma.sync.m16n8k16` K-slab (the triad's TC tier)? `wmma::mma_sync` on
 //! an m16n16k16 fragment lowers to a pair of m16n8k16 covering the full
@@ -75,7 +75,7 @@ fn census_wmma_vs_mma_sync() {
         let c_wmma = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("Cw");
         let c_tc = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("Ct");
 
-        // Route 1: the Fixed family's WMMA tile.
+        // Route 1: the Inference family's WMMA tile.
         ctx.route_controls().set_family(BiGemmFamily::Inference);
         let run_wmma = |c: &DtypedBuf| {
             gemm_bi_forward_raw(
@@ -374,7 +374,7 @@ fn census_matvec_vs_thin16() {
     let ctx = GpuCtx::new(&dev).expect("ctx");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Inference);
-    // Force matvec through the typed route: the Fixed check is first, so
+    // Force matvec through the typed route: the Inference check is first, so
     // flip family to Triad only for the matvec launch below.
 
     let shapes: &[(usize, usize, usize)] = &[

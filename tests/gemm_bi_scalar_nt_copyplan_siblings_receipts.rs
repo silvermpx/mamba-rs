@@ -58,7 +58,7 @@ struct Identity {
 #[derive(Clone, Debug)]
 struct Composed {
     scalar: Identity,
-    fixed: Identity,
+    inference: Identity,
 }
 
 #[derive(Clone, Debug)]
@@ -128,22 +128,22 @@ fn measured(receipt: &str) -> Measured {
         receipt_frame_sha256: record["receipt_frame_sha256"].as_str().unwrap().to_owned(),
         composed: Composed {
             scalar: measured_identity(&record["scalar"]),
-            fixed: measured_identity(&record["fixed"]),
+            inference: measured_identity(&record["fixed"]),
         },
     }
 }
 
 fn frozen() -> Vec<Composed> {
-    let fixed_source_cap16 = bytes(
+    let inference_source_cap16 = bytes(
         DISPATCH
-            .split_once("const FIXED_COPYPLAN_SOURCE_DIGEST_CAP16: [u8; 32] =")
+            .split_once("const INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16: [u8; 32] =")
             .unwrap()
             .1,
         "",
     );
-    let fixed_source_cap64 = bytes(
+    let inference_source_cap64 = bytes(
         DISPATCH
-            .split_once("const FIXED_COPYPLAN_SOURCE_DIGEST_CAP64: [u8; 32] =")
+            .split_once("const INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64: [u8; 32] =")
             .unwrap()
             .1,
         "",
@@ -155,21 +155,21 @@ fn frozen() -> Vec<Composed> {
             .1,
         "",
     );
-    let fixed = between(
+    let inference = between(
         DISPATCH,
-        "const FIXED_COPYPLAN_EVIDENCE_COHORTS:",
+        "const INFERENCE_COPYPLAN_EVIDENCE_COHORTS:",
         "struct ScalarTransposeQualificationIdentity",
     )
-    .split("\n    FixedCopyPlanQualificationIdentity {")
+    .split("\n    InferenceCopyPlanQualificationIdentity {")
     .skip(1)
     .map(|block| {
         let source_digest = match (
-            block.contains("source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,"),
-            block.contains("source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,"),
+            block.contains("source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16,"),
+            block.contains("source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64,"),
         ) {
-            (true, false) => fixed_source_cap16,
-            (false, true) => fixed_source_cap64,
-            _ => panic!("Fixed cohort must bind exactly one capacity source digest"),
+            (true, false) => inference_source_cap16,
+            (false, true) => inference_source_cap64,
+            _ => panic!("Inference cohort must bind exactly one capacity source digest"),
         };
         Identity {
             version: version(block),
@@ -206,10 +206,10 @@ fn frozen() -> Vec<Composed> {
     .collect::<Vec<_>>();
     let composed = between(
         DISPATCH,
-        "const NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES:",
+        "const NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES:",
         "// The six measured complete-module pairs",
     )
-    .split("NtFixedCopyPlanComposedQualificationIdentity {")
+    .split("NtInferenceCopyPlanComposedQualificationIdentity {")
     .skip(1)
     .collect::<Vec<_>>();
     let aliases = [
@@ -220,18 +220,18 @@ fn frozen() -> Vec<Composed> {
         ("TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2", 2, 4),
         ("TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2", 2, 5),
     ];
-    assert_eq!((fixed.len(), scalar.len(), composed.len()), (6, 3, 6));
+    assert_eq!((inference.len(), scalar.len(), composed.len()), (6, 3, 6));
     composed
         .into_iter()
         .zip(aliases)
-        .map(|(block, (scalar_name, scalar_index, fixed_index))| {
+        .map(|(block, (scalar_name, scalar_index, inference_index))| {
             assert!(block.contains(&format!("scalar: {scalar_name},")));
             assert!(block.contains(&format!(
-                "fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[{fixed_index}]"
+                "inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[{inference_index}]"
             )));
             Composed {
                 scalar: scalar[scalar_index].clone(),
-                fixed: fixed[fixed_index].clone(),
+                inference: inference[inference_index].clone(),
             }
         })
         .collect()
@@ -264,31 +264,31 @@ fn admitted_composed_cohorts_match_independent_live_identity_receipts() {
             "{cohort} scalar"
         );
         assert_eq!(
-            mismatch(&receipt.composed.fixed, &frozen.fixed),
+            mismatch(&receipt.composed.inference, &frozen.inference),
             None,
-            "{cohort} Fixed"
+            "{cohort} Inference"
         );
     }
 
     for index in [0, 2, 4] {
         assert_eq!(dispatch[index].scalar, dispatch[index + 1].scalar);
-        assert_ne!(dispatch[index].fixed, dispatch[index + 1].fixed);
+        assert_ne!(dispatch[index].inference, dispatch[index + 1].inference);
         assert_ne!(
-            dispatch[index].fixed.fields[2],
-            dispatch[index + 1].fixed.fields[2],
-            "{} Fixed source must remain capacity-specific",
+            dispatch[index].inference.fields[2],
+            dispatch[index + 1].inference.fields[2],
+            "{} Inference source must remain capacity-specific",
             COHORTS[index].0
         );
     }
 
     // Mutation proof for the original CUDA12.8/13.0 admission bug: a
-    // Fixed-module header cannot stand in for the scalar-module header.
+    // Inference-module header cannot stand in for the scalar-module header.
     for cohort in 0..COHORTS.len() {
         assert_ne!(
             dispatch[cohort].scalar.fields[3],
-            dispatch[cohort].fixed.fields[3]
+            dispatch[cohort].inference.fields[3]
         );
-        dispatch[cohort].scalar.fields[3] = dispatch[cohort].fixed.fields[3];
+        dispatch[cohort].scalar.fields[3] = dispatch[cohort].inference.fields[3];
         assert_eq!(
             mismatch(&receipts[cohort].composed.scalar, &dispatch[cohort].scalar),
             Some("header_manifest_digest"),

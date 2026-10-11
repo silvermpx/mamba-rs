@@ -17,7 +17,7 @@ use crate::mamba_ssm::gpu::kernel_identity::{
     ResolvedKernelLaunch, ResolvedNumericContract, ResolvedOperandConversion,
     ResolvedOutputOwnership, ResolvedPhysicalKernelLaunch, ResolvedTransformOutputOwnership,
     SCHEDULE_REVISION, SM89_EXACT_F32_D128_ROUTE_REVISION, SM89_EXACT_F32_TN_ROUTE_REVISION,
-    SM89_FIXED_COPYPLAN_ROUTE_REVISION, SM89_HALF_ROUTE_REVISION, Sha256Digest,
+    SM89_HALF_ROUTE_REVISION, SM89_INFERENCE_COPYPLAN_ROUTE_REVISION, Sha256Digest,
     TUNING_TABLE_REVISION, build_resolved_gemm_launch_set, build_zero_reduction_route_identity,
     enqueue_prepared_physical_launch, enqueue_with_physical_observation,
     prepare_recording_physical_observer, resolve_physical_launch_observation,
@@ -2133,10 +2133,10 @@ fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
         | ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified => 2,
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
-        | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
-        | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
-        | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
-        | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified
+        | ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified
+        | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
+        | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => 2,
@@ -2152,13 +2152,13 @@ fn scalar_plan_requires_zero_beta(plan: ScalarDispatchPlan) -> bool {
             | ScalarDispatchPlan::NnSplitKThin
             | ScalarDispatchPlan::NnSplitKSlim { .. }
             | ScalarDispatchPlan::NnM32N64SplitK32Qualified
-            | ScalarDispatchPlan::NnSm89FixedCopyPlanQualified
+            | ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified
             | ScalarDispatchPlan::NtD768TransposeM64N64Qualified
             | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
-            | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
-            | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
-            | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
-            | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+            | ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified
+            | ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified
+            | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
+            | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
             | ScalarDispatchPlan::NtPrismVectorQualified
             | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified
@@ -2179,7 +2179,7 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NnSplitKSlim { chunks } => (7, chunks as u64, 0),
         ScalarDispatchPlan::NnM32N64SplitK32Qualified => (36, 0, 0),
         ScalarDispatchPlan::NnM64N64Qualified => (24, 0, 0),
-        ScalarDispatchPlan::NnSm89FixedCopyPlanQualified => (37, 0, 0),
+        ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified => (37, 0, 0),
         ScalarDispatchPlan::NnFinal { slim } => (8, u64::from(slim), 0),
         ScalarDispatchPlan::TnGemv => (9, 0, 0),
         ScalarDispatchPlan::TnNarrow => (10, 0, 0),
@@ -2204,10 +2204,10 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NtM2N16SplitK32Qualified => (31, 0, 0),
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified => (25, 0, 0),
         ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified => (26, 0, 0),
-        ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified => (38, 0, 0),
-        ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified => (39, 0, 0),
-        ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified => (40, 0, 0),
-        ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified => (46, 0, 0),
+        ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified => (38, 0, 0),
+        ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified => (39, 0, 0),
+        ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified => (40, 0, 0),
+        ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified => (46, 0, 0),
         ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified => (27, 0, 0),
         ScalarDispatchPlan::NtPrismVectorQualified => (30, 0, 0),
         ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => (29, 0, 0),
@@ -2250,7 +2250,7 @@ fn scalar_argument_layout(
         },
         (
             ScalarDispatchPlan::NnM64N64Qualified
-            | ScalarDispatchPlan::NnSm89FixedCopyPlanQualified,
+            | ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified,
             _,
         ) => ScalarArgumentLayout {
             null_pointer_mask: bias_null << 3,
@@ -2260,10 +2260,10 @@ fn scalar_argument_layout(
         (ScalarDispatchPlan::TnM16N16SplitM16Qualified, _) => ScalarArgumentLayout::default(),
         (ScalarDispatchPlan::NtD768TransposeM64N64Qualified, 1)
         | (ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified, 1)
-        | (ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified, 1)
-        | (ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified, 1)
-        | (ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified, 1)
-        | (ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified, 1)
+        | (ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified, 1)
+        | (ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified, 1)
+        | (ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified, 1)
+        | (ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified, 1)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 1)
         | (ScalarDispatchPlan::NtPrismVectorQualified, 1)
         | (ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified, 1) => ScalarArgumentLayout {
@@ -2272,10 +2272,10 @@ fn scalar_argument_layout(
         },
         (ScalarDispatchPlan::NtD768TransposeM64N64Qualified, 0)
         | (ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified, 0)
-        | (ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified, 0)
-        | (ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified, 0)
-        | (ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified, 0)
-        | (ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified, 0)
+        | (ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified, 0)
+        | (ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified, 0)
+        | (ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified, 0)
+        | (ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified, 0)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 0)
         | (ScalarDispatchPlan::NtPrismVectorQualified, 0)
         | (ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified, 0) => {
@@ -2597,7 +2597,7 @@ fn scalar_physical_nodes(
                 super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
             ),
         ),
-        ScalarDispatchPlan::NnSm89FixedCopyPlanQualified => push_scalar_node(
+        ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified => push_scalar_node(
             &mut nodes,
             context,
             "nn_sm89_f32_n64_copyplan",
@@ -2880,10 +2880,10 @@ fn scalar_physical_nodes(
         ),
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
-        | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
-        | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
-        | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
-        | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified
+        | ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified
+        | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
+        | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => {
@@ -2896,10 +2896,10 @@ fn scalar_physical_nodes(
                     )
                 } else if matches!(
                     plan,
-                    ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
-                        | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
-                        | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
-                        | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+                    ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified
+                        | ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified
+                        | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
+                        | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
                 ) {
                     ("nn_sm89_f32_n64_copyplan", 32, 0)
                 } else {
@@ -3131,7 +3131,7 @@ fn scalar_route_contract(
     }
     if symbol == "nn_sm89_f32_n64_copyplan" {
         return (
-            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan,
+            PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan,
             ResolvedNumericContract::ScalarFma,
             ResolvedOutputOwnership::OneCtaPerOutputTile,
         );
@@ -3195,13 +3195,13 @@ fn scalar_resolved_routes(
     for node in nodes {
         let (backend, numeric_contract, ownership) = scalar_route_contract(node.symbol);
         let (module_kind, artifact, compiler, tuning_table_revision) = if backend
-            == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+            == PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan
         {
             (
-                ModuleKind::Fixed,
-                context.artifacts.fixed,
+                ModuleKind::Inference,
+                context.artifacts.inference,
                 ctx.kernels.compiler_identity(),
-                SM89_FIXED_COPYPLAN_ROUTE_REVISION,
+                SM89_INFERENCE_COPYPLAN_ROUTE_REVISION,
             )
         } else if backend == PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 {
             (
@@ -3999,10 +3999,10 @@ fn scalar_transpose_scratch_elements(
         | ScalarDispatchPlan::NtSplitKSlim { .. }
         | ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
-        | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
-        | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
-        | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
-        | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+        | ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified
+        | ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified
+        | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
+        | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => request.shape.k,
@@ -4029,9 +4029,9 @@ fn scalar_launch_facts(kernels: &GpuKernels) -> ScalarLaunchFacts {
     ScalarLaunchFacts {
         scalar_artifact: kernels.artifact_set_identity().triad_scalar,
         scalar_compiler: kernels.triad_scalar_compiler_identity(),
-        fixed_artifact: kernels.artifact_set_identity().fixed,
-        fixed_compiler: kernels.compiler_identity(),
-        fixed_copyplan_loaded: kernels.fixed_sm89_f32_n64_copyplan.is_some(),
+        inference_artifact: kernels.artifact_set_identity().inference,
+        inference_compiler: kernels.compiler_identity(),
+        inference_copyplan_loaded: kernels.inference_sm89_f32_n64_copyplan.is_some(),
         sm89_exact_f32_artifact: kernels.triad_sm89_exact_f32_artifact_identity(),
         sm89_exact_f32_compiler: kernels.triad_sm89_exact_f32_compiler_identity(),
         sm89_exact_f32_symbols_loaded: [
@@ -5679,20 +5679,22 @@ where
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FixedSm120ExactTmaTile {
+pub(crate) enum InferenceSm120ExactTmaTile {
     M128N64,
     M64N128,
 }
 
-/// Reuses the qualified Triad SM120 exact-TMA implementation from the Fixed
+/// Reuses the qualified Triad SM120 exact-TMA implementation from the Inference
 /// family without entering Triad AUTO. The prepared-cache key seals the
 /// literal physical route, pointers, policy and shape, so graph capture keeps
 /// the same descriptor binding as the eager warmup.
-pub(in crate::mamba_ssm::gpu) fn launch_cached_fixed_sm120_exact_tma<O: PhysicalLaunchObserver>(
+pub(in crate::mamba_ssm::gpu) fn launch_cached_inference_sm120_exact_tma<
+    O: PhysicalLaunchObserver,
+>(
     ctx: &GpuCtx,
     shape: (usize, usize, usize),
     operands: F32TriadOperands,
-    tile: FixedSm120ExactTmaTile,
+    tile: InferenceSm120ExactTmaTile,
     observer: &mut O,
 ) -> Result<bool, String> {
     let request = F32TriadRequest {
@@ -5701,8 +5703,8 @@ pub(in crate::mamba_ssm::gpu) fn launch_cached_fixed_sm120_exact_tma<O: Physical
     };
     let route = Tf32PhysicalRoute::Sm120TmaFmaExact(Sm120FmaRoute {
         tile: match tile {
-            FixedSm120ExactTmaTile::M128N64 => Sm120FmaTile::M128N64,
-            FixedSm120ExactTmaTile::M64N128 => Sm120FmaTile::M64N128,
+            InferenceSm120ExactTmaTile::M128N64 => Sm120FmaTile::M128N64,
+            InferenceSm120ExactTmaTile::M64N128 => Sm120FmaTile::M64N128,
         },
         kvec: false,
         splits: 1,
@@ -5725,7 +5727,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_cached_fixed_sm120_exact_tma<O: Physical
         request,
         operands,
         (observer, PolicyDtype::F32),
-        |_| Err("Fixed exact-TMA bridge unexpectedly entered the scalar fallback".into()),
+        |_| Err("Inference exact-TMA bridge unexpectedly entered the scalar fallback".into()),
     )?;
     Ok(true)
 }
@@ -9565,7 +9567,7 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
 
     if matches!(
         scalar_plan,
-        ScalarDispatchPlan::NnSm89FixedCopyPlanQualified
+        ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified
     ) {
         let params = SgbNnM64N64Params {
             alpha,
@@ -9584,9 +9586,9 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             shared_mem_bytes: 0,
         };
         let function = kernels
-            .fixed_sm89_f32_n64_copyplan
+            .inference_sm89_f32_n64_copyplan
             .as_ref()
-            .ok_or_else(|| "qualified Fixed CopyPlan kernel is unavailable".to_string())?;
+            .ok_or_else(|| "qualified Inference CopyPlan kernel is unavailable".to_string())?;
         let mut builder = scalar_launch_builder(stream, function, &control);
         builder.arg_buffer_mut(y);
         builder.arg(&x_ptr);
@@ -10430,10 +10432,10 @@ fn gemm_bi_backward_dx_with_control<
         scalar_plan,
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
             | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
-            | ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
-            | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
-            | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
-            | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+            | ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified
+            | ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified
+            | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
+            | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
             | ScalarDispatchPlan::NtPrismVectorQualified
             | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified
@@ -10493,12 +10495,12 @@ fn gemm_bi_backward_dx_with_control<
             ldb: checked_dims.k_i32,
             ldc: checked_dims.k_i32,
         };
-        let uses_fixed_copyplan = matches!(
+        let uses_inference_copyplan = matches!(
             scalar_plan,
-            ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified
-                | ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified
-                | ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified
-                | ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+            ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified
+                | ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified
+                | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
+                | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
         );
         let m64_cfg = cudarc::driver::LaunchConfig {
             grid_dim: (
@@ -10511,19 +10513,21 @@ fn gemm_bi_backward_dx_with_control<
                 1,
             ),
             block_dim: (128, 1, 1),
-            shared_mem_bytes: if uses_fixed_copyplan {
+            shared_mem_bytes: if uses_inference_copyplan {
                 0
             } else {
                 super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES
             },
         };
         let bias = 0_u64;
-        let (m64_function, m64_symbol) = if uses_fixed_copyplan {
+        let (m64_function, m64_symbol) = if uses_inference_copyplan {
             (
                 kernels
-                    .fixed_sm89_f32_n64_copyplan
+                    .inference_sm89_f32_n64_copyplan
                     .as_ref()
-                    .ok_or_else(|| "qualified Fixed CopyPlan kernel is unavailable".to_string())?,
+                    .ok_or_else(|| {
+                        "qualified Inference CopyPlan kernel is unavailable".to_string()
+                    })?,
                 "nn_sm89_f32_n64_copyplan",
             )
         } else if scalar_plan == ScalarDispatchPlan::NtPrismVectorQualified {
@@ -14523,7 +14527,7 @@ mod prepared_f32_launch_tests {
             numeric_contracts: NumericContractSet::TRIAD_MMA_SYNC,
             compiler,
             artifacts: build_artifact_set(&[
-                artifact(ModuleKind::Fixed, 5),
+                artifact(ModuleKind::Inference, 5),
                 artifact(ModuleKind::TriadScalar, 7),
                 artifact(ModuleKind::TriadSm80, 9),
                 artifact(ModuleKind::TriadSm120, 11),
@@ -15857,13 +15861,13 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
-    fn scalar_nn_fixed_copyplan_plan_has_a_distinct_fixed_physical_identity() {
+    fn scalar_nn_inference_copyplan_plan_has_a_distinct_inference_physical_identity() {
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nn,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (2_048, 1_536, 768)),
         };
         let operands = scalar_test_operands(ResolvedGemmOp::Nn, 1.0);
-        let plan = ScalarDispatchPlan::NnSm89FixedCopyPlanQualified;
+        let plan = ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified;
         assert_eq!(scalar_plan_fields(plan), (37, 0, 0));
         assert!(scalar_plan_requires_zero_beta(plan));
         let nodes = scalar_physical_nodes(request, operands, plan).unwrap();
@@ -15877,7 +15881,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(
             scalar_route_contract(nodes[0].symbol),
             (
-                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan,
+                PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan,
                 ResolvedNumericContract::ScalarFma,
                 ResolvedOutputOwnership::OneCtaPerOutputTile,
             )
@@ -16334,7 +16338,7 @@ mod prepared_f32_launch_tests {
         };
         let operands = scalar_test_operands(ResolvedGemmOp::Tn, 1.0);
         let mut ada = super::super::dispatch::scalar_sm89_composed_test_facts(2);
-        ada.fixed_copyplan_loaded = false;
+        ada.inference_copyplan_loaded = false;
         for (environment, facts) in [("SM120", scalar_tn_admission_facts()), ("Ada", ada)] {
             let raw_plan = scalar_launch_plan(facts, request, operands).unwrap();
             let prepared_plan = scalar_launch_plan(facts, request, operands).unwrap();
@@ -16484,7 +16488,7 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
-    fn triad_retained_scalar_ada_large_deep_freezes_two_fixed_owned_nodes() {
+    fn triad_retained_scalar_ada_large_deep_freezes_two_inference_owned_nodes() {
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nt,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (4_096, 3_072, 1_536)),
@@ -16495,7 +16499,7 @@ mod prepared_f32_launch_tests {
         let prepared_plan = scalar_launch_plan(facts, request, operands).unwrap();
         assert_eq!(
             raw_plan,
-            ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+            ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
         );
         assert_eq!(prepared_plan, raw_plan);
         assert_eq!(scalar_plan_fields(raw_plan), (46, 0, 0));
@@ -16535,7 +16539,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(
             scalar_route_contract(raw_nodes[1].symbol),
             (
-                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan,
+                PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan,
                 ResolvedNumericContract::ScalarFma,
                 ResolvedOutputOwnership::OneCtaPerOutputTile,
             )
@@ -16618,13 +16622,13 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
-    fn scalar_nt_d768_out_fixed_copyplan_preserves_outer_and_inner_geometry() {
+    fn scalar_nt_d768_out_inference_copyplan_preserves_outer_and_inner_geometry() {
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nt,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (2_048, 1_536, 768)),
         };
         let operands = scalar_test_operands(ResolvedGemmOp::Nt, 1.0);
-        let plan = ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified;
+        let plan = ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified;
         assert_eq!(
             (request.shape.m, request.shape.k, request.shape.n),
             (2_048, 1_536, 768),
@@ -16661,7 +16665,7 @@ mod prepared_f32_launch_tests {
         );
         assert_eq!(
             scalar_route_contract(nodes[1].symbol).0,
-            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+            PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan
         );
         assert_ne!(
             nodes[0].launch.arguments_digest,
@@ -16670,11 +16674,11 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
-    fn scalar_nt_fixed_copyplan_siblings_preserve_two_node_identity_and_geometry() {
+    fn scalar_nt_inference_copyplan_siblings_preserve_two_node_identity_and_geometry() {
         for (dims, plan, tag, scratch, transpose_grid, fixed_grid) in [
             (
                 (2_048, 768, 3_072),
-                ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified,
+                ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified,
                 39,
                 2_359_296,
                 (96, 24, 1),
@@ -16682,7 +16686,7 @@ mod prepared_f32_launch_tests {
             ),
             (
                 (4_621, 384, 1_928),
-                ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified,
+                ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified,
                 40,
                 740_352,
                 (61, 12, 1),
@@ -16725,7 +16729,7 @@ mod prepared_f32_launch_tests {
             );
             assert_eq!(
                 scalar_route_contract(raw_nodes[1].symbol).0,
-                PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+                PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan
             );
             assert_ne!(
                 raw_nodes[0].launch.arguments_digest,
@@ -17312,14 +17316,14 @@ mod prepared_f32_launch_tests {
                 artifact_digest: [5; 32],
             },
             scalar_compiler: compiler,
-            fixed_artifact: ArtifactIdentity {
-                module_kind: ModuleKind::Fixed,
+            inference_artifact: ArtifactIdentity {
+                module_kind: ModuleKind::Inference,
                 artifact_kind: ArtifactKind::Ptx,
                 compile_key: [0; 32],
                 artifact_digest: [0; 32],
             },
-            fixed_compiler: compiler,
-            fixed_copyplan_loaded: false,
+            inference_compiler: compiler,
+            inference_copyplan_loaded: false,
             sm89_exact_f32_artifact: None,
             sm89_exact_f32_compiler: None,
             sm89_exact_f32_symbols_loaded: [false; 3],
@@ -17642,7 +17646,7 @@ mod half_physical_trace_tests {
             numeric_contracts,
             compiler,
             artifacts: build_artifact_set(&[
-                artifact(ModuleKind::Fixed, 1),
+                artifact(ModuleKind::Inference, 1),
                 artifact(ModuleKind::TriadScalar, 3),
                 artifact(ModuleKind::TriadSm80, 5),
                 artifact(ModuleKind::TriadSm89Half, 7),

@@ -1,16 +1,16 @@
-// Production Fixed SM89 homogeneous-half packed/XOR staging twin.
+// Production Inference SM89 homogeneous-half packed/XOR staging twin.
 // Only staging addresses change; exact ascending k16 chain, copy issue
 // schedule, bias seed, alpha/beta, conversion and 136-float output stride stay.
 // Dynamic shared is 69,632 bytes: packed S2 inputs use 65,536, then the
 // unchanged vector epilogue aliases 128*136*4 bytes. Threads=256.
 // Every scalar and cp.async staging path uses the SAME tested layout helper.
 // Actual GPU output, sanitizer and speed qualification remain required.
-// Composed only in the Fixed/sm_89 suffix; every other target remains byte-identical.
+// Composed only in the Inference/sm_89 suffix; every other target remains byte-identical.
 // Exports: nn_sm89_tc128_swizzle_bf16 and
 // nn_sm89_tc128_swizzle_f16.
 #include "sm89_half_swizzle_layout.cuh"
 
-struct FixedSm89HalfSwizzleParams {
+struct InferenceSm89HalfSwizzleParams {
     float alpha;
     float beta;
     int m;
@@ -20,14 +20,14 @@ struct FixedSm89HalfSwizzleParams {
     int ldb;
     int ldc;
 };
-static_assert(sizeof(FixedSm89HalfSwizzleParams) == 32, "Fixed SM89 swizzle parameter size");
-static_assert(alignof(FixedSm89HalfSwizzleParams) == 4, "Fixed SM89 swizzle parameter alignment");
-static_assert(__is_standard_layout(FixedSm89HalfSwizzleParams), "Fixed SM89 swizzle standard layout");
-static_assert(sizeof(float) == 4 && sizeof(int) == 4, "Fixed SM89 swizzle field widths");
+static_assert(sizeof(InferenceSm89HalfSwizzleParams) == 32, "Inference SM89 swizzle parameter size");
+static_assert(alignof(InferenceSm89HalfSwizzleParams) == 4, "Inference SM89 swizzle parameter alignment");
+static_assert(__is_standard_layout(InferenceSm89HalfSwizzleParams), "Inference SM89 swizzle standard layout");
+static_assert(sizeof(float) == 4 && sizeof(int) == 4, "Inference SM89 swizzle field widths");
 
-namespace sm89_fixed_half_swizzle {
+namespace sm89_inference_half_swizzle {
 
-namespace layout = sm89_fixed_half_swizzle_layout;
+namespace layout = sm89_inference_half_swizzle_layout;
 static constexpr int kSharedBytes = layout::kSharedBytes;
 static constexpr int kOutputStride = 136;
 static_assert(2 * (128 * 64 + 64 * 128) * 2 <= kSharedBytes, "packed S2 shared ABI");
@@ -356,15 +356,15 @@ static __device__ __forceinline__ void kernel(
     scalar_epilogue(C, acc, alpha, beta, M, N, ldc, pid_m, pid_n, warpM, warpN);
 }
 
-} // namespace sm89_fixed_half_swizzle
+} // namespace sm89_inference_half_swizzle
 
 #define SM89_FHS_EXPORT(TYPE, SUFFIX)                                      \
 extern "C" __global__ __launch_bounds__(256, 1)                            \
 void nn_sm89_tc128_swizzle_##SUFFIX(                      \
     TYPE* __restrict__ C, const TYPE* __restrict__ A,                       \
     const TYPE* __restrict__ B, const float* __restrict__ bias,             \
-    FixedSm89HalfSwizzleParams params) {                                    \
-    sm89_fixed_half_swizzle::kernel<TYPE>(C, A, B, bias, params.alpha,      \
+    InferenceSm89HalfSwizzleParams params) {                                    \
+    sm89_inference_half_swizzle::kernel<TYPE>(C, A, B, bias, params.alpha,      \
         params.beta, params.m, params.n, params.k, params.lda, params.ldb,   \
         params.ldc);                                                         \
 }

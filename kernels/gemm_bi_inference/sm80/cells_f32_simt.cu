@@ -40,7 +40,7 @@ struct Geometry {
 template <int BM, int BN, int BK, int STAGES, int THREADS, int TN>
 __device__ __forceinline__ void kernel(
     float* __restrict__ c, const float* __restrict__ a, const float* __restrict__ b,
-    const float* __restrict__ bias, FixedSm89HalfParams p) {
+    const float* __restrict__ bias, InferenceSm89HalfParams p) {
     using G = Geometry<BM, BN, BK, STAGES, THREADS, TN>;
     extern __shared__ __align__(16) float sm89_cell_f32_shared[];
     float* a_stages = sm89_cell_f32_shared;
@@ -211,7 +211,7 @@ __device__ __forceinline__ void kernel(
 #define SM89_CELL_F32_SIMT(NAME, BM, BN, BK, STAGES, THREADS, MIN_BLOCKS)                 \
 extern "C" __global__ __launch_bounds__(THREADS, MIN_BLOCKS)                                \
 void NAME(float* __restrict__ c, const float* __restrict__ a, const float* __restrict__ b, \
-          const float* __restrict__ bias, FixedSm89HalfParams p) {                         \
+          const float* __restrict__ bias, InferenceSm89HalfParams p) {                         \
     sm89_cell_f32_simt::kernel<BM, BN, BK, STAGES, THREADS, 4>(c, a, b, bias, p);           \
 }
 

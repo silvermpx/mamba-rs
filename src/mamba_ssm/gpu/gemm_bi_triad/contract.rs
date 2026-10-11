@@ -3299,7 +3299,7 @@ pub fn tf32_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
         ModuleKind::TriadSm90a => &SM90A_TF32_ROUTE_SPECS,
         ModuleKind::TriadSm100 => &SM100_TF32_ROUTE_SPECS,
         ModuleKind::TriadSm120 => &SM120_TF32_ROUTE_SPECS,
-        ModuleKind::Fixed
+        ModuleKind::Inference
         | ModuleKind::TriadScalar
         | ModuleKind::TriadSm89Half
         | ModuleKind::TriadSm89ExactF32
@@ -3307,7 +3307,9 @@ pub fn tf32_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
         | ModuleKind::InferenceSm89Cells
         | ModuleKind::Mamba3Combined
         | ModuleKind::Mamba2Combined
-        | ModuleKind::Mamba3MimoCombined => &[],
+        | ModuleKind::Mamba3MimoCombined
+        | ModuleKind::Mamba1
+        | ModuleKind::Shared => &[],
     }
 }
 
@@ -7596,7 +7598,7 @@ mod tests {
                 "the NT-only finalist unexpectedly accepts {op:?}"
             );
         }
-        assert!(tf32_route_specs(ModuleKind::Fixed).is_empty());
+        assert!(tf32_route_specs(ModuleKind::Inference).is_empty());
         assert!(tf32_route_specs(ModuleKind::TriadScalar).is_empty());
         assert!(tf32_route_specs(ModuleKind::Mamba3Combined).is_empty());
     }

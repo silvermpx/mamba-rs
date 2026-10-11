@@ -42,7 +42,7 @@ struct Geometry {
 template <int BM, int BN, int BK, int STAGES, int WM, int WN, bool Prefetch = false>
 __device__ __forceinline__ void kernel(
     float* __restrict__ c, const float* __restrict__ a, const float* __restrict__ b,
-    const float* __restrict__ bias, FixedSm89HalfParams p) {
+    const float* __restrict__ bias, InferenceSm89HalfParams p) {
     using G = Geometry<BM, BN, BK, STAGES, WM, WN>;
     extern __shared__ __align__(16) float sm89_cell_tf32_shared[];
     float* a_stages = sm89_cell_tf32_shared;
@@ -258,7 +258,7 @@ __device__ __forceinline__ void kernel(
 #define SM89_CELL_TF32_MMA(NAME, BM, BN, BK, STAGES, WM, WN, MIN_BLOCKS)                      \
 extern "C" __global__ __launch_bounds__((WM) * (WN) * 32, MIN_BLOCKS)                          \
 void NAME(float* __restrict__ c, const float* __restrict__ a, const float* __restrict__ b,    \
-          const float* __restrict__ bias, FixedSm89HalfParams p) {                             \
+          const float* __restrict__ bias, InferenceSm89HalfParams p) {                             \
     sm89_cell_tf32_mma::kernel<BM, BN, BK, STAGES, WM, WN>(c, a, b, bias, p);                  \
 }
 

@@ -1,17 +1,17 @@
 // SM120-only sliced next-stage exact F32 N64 extension.
 // Frozen standalone 7f3499c24e61f3071c45cfed6dc7bb5fcce73e4761a9c5c68740559346db7133:
 // only private names/constants and compact five-argument ABI unpacking differ.
-struct FixedSm120SlicedF32Params {
+struct InferenceSm120SlicedF32Params {
     float alpha, beta;
     int m, n, k, lda, ldb, ldc;
 };
-static_assert(sizeof(FixedSm120SlicedF32Params) == 32, "sliced parameter size");
-static_assert(alignof(FixedSm120SlicedF32Params) == 4, "sliced parameter alignment");
+static_assert(sizeof(InferenceSm120SlicedF32Params) == 32, "sliced parameter size");
+static_assert(alignof(InferenceSm120SlicedF32Params) == 4, "sliced parameter alignment");
 #define SM120_EXACT_N64_SLICED_BM 64
 #define SM120_EXACT_N64_SLICED_BN 64
 #define SM120_EXACT_N64_SLICED_BK 32
 #define SM120_EXACT_N64_SLICED_GROUP_M 8
-namespace fixed_sm120_n64_sliced {
+namespace inference_sm120_n64_sliced {
 __host__ __device__ constexpr int next_copy_slice(int kk) {
     return kk >= 0 && kk < 32 && (kk & 7) == 0 ? kk / 8 : -1;
 }
@@ -24,7 +24,7 @@ __host__ __device__ constexpr bool full_mn_tile(int m, int n, int row0, int col0
 // FMA chain and epilogue are retained. The only specialization is producer
 // planning for aligned full-K slabs. No tensor operations, split reduction,
 // scratch or atomics. Actual registers/spills/residency require parent testing.
-// Includes expect the unchanged production Fixed common.cuh helpers/constants.
+// Includes expect the unchanged production Inference common.cuh helpers/constants.
 static_assert(SM120_EXACT_N64_SLICED_BM == 64 && SM120_EXACT_N64_SLICED_BN == 64 && SM120_EXACT_N64_SLICED_BK == 32,
               "N64 copy-plan experiment requires the incumbent geometry");
 #define SM120_EXACT_N64_SLICED_THREADS 128
@@ -167,7 +167,7 @@ nn_sm120_f32_n64_sliced(
     const float* __restrict__ a,
     const float* __restrict__ b,
     const float* __restrict__ bias,
-    FixedSm120SlicedF32Params params
+    InferenceSm120SlicedF32Params params
 ) {
     const float alpha = params.alpha, beta = params.beta;
     const int m = params.m, n = params.n, k = params.k;
@@ -226,7 +226,7 @@ nn_sm120_f32_n64_sliced(
 
         // Uniform CTA split. Only this branch can omit zero-fill operands.
         // The outer aligned/full-K admission remains exactly the v1 condition.
-        if (fixed_sm120_n64_sliced::full_mn_tile(m, n, row0, col0)) {
+        if (inference_sm120_n64_sliced::full_mn_tile(m, n, row0, col0)) {
             SM120_EXACT_N64_SLICED_UNMASKED_STAGE(0);
             a_next += SM120_EXACT_N64_SLICED_BK * 4ULL;
             b_next += b_slab_stride;
@@ -239,7 +239,7 @@ nn_sm120_f32_n64_sliced(
 
         #pragma unroll
                 for (int kk = 0; kk < SM120_EXACT_N64_SLICED_BK; kk++) {
-                    const int next_slice = fixed_sm120_n64_sliced::next_copy_slice(kk);
+                    const int next_slice = inference_sm120_n64_sliced::next_copy_slice(kk);
                     if (kt + 1 < num_k_tiles && next_slice >= 0) {
                         SM120_EXACT_N64_SLICED_NEXT_SLICE(read_buf ^ 1, next_slice);
                         // The group contains all four disjoint A/B pairs.

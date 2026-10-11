@@ -6,7 +6,7 @@
 //! state the window started from, dt and its chunk cumsum, the C.B
 //! products, the state entering every chunk, the scan output and the gated
 //! rows. The backward walks the layers in reverse through the kernels of
-//! `kernels/mamba2_bwd.cu` and the Fixed module's GEMM, norm and reduction
+//! `kernels/mamba2_bwd.cu` and the Inference module's GEMMs and the Common module's norm and reduction
 //! kernels. The weights, their gradients and the AdamW moments are three
 //! flat buffers in one layout, so the optimizer runs per tensor with no
 //! copies.
@@ -945,7 +945,7 @@ impl Mamba2GpuTrainer {
             .map_err(|e| format!("Mamba-2 rounding rows: {e:?}"))
     }
 
-    /// `g[j] += sum_r dy[r][j]` over f32 rows, the Fixed column sum.
+    /// `g[j] += sum_r dy[r][j]` over f32 rows, the Inference column sum.
     fn column_sum_f32(&self, g: u64, dy: u64, (rows, n): (usize, usize)) -> Result<(), String> {
         let (rows_i, n_i) = (rows as i32, n as i32);
         let mut bld = self

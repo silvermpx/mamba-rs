@@ -20,7 +20,7 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::mint_module_identity;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{ModuleKind, digest_hex};
 
 /// One module the cohorts can pin: kind, target, state capacity, and the
-/// device compute capability the Fixed composition is gated on.
+/// device compute capability the Inference composition is gated on.
 struct MintedModule {
     kind: ModuleKind,
     target: &'static str,
@@ -46,13 +46,21 @@ const fn module(
 #[ignore = "prints the identities of the toolkit on PATH; run on demand"]
 fn print_module_identities() {
     let table = [
-        module(ModuleKind::Fixed, "sm_80", 16, Some((8, 0))),
-        module(ModuleKind::Fixed, "sm_89", 16, Some((8, 9))),
-        module(ModuleKind::Fixed, "sm_89", 32, Some((8, 9))),
-        module(ModuleKind::Fixed, "sm_89", 64, Some((8, 9))),
-        module(ModuleKind::Fixed, "compute_120", 16, Some((12, 0))),
-        module(ModuleKind::Fixed, "compute_120", 32, Some((12, 0))),
-        module(ModuleKind::Fixed, "compute_120", 64, Some((12, 0))),
+        // The Inference module takes no state capacity: one row per target.
+        module(ModuleKind::Inference, "sm_80", 16, Some((8, 0))),
+        module(ModuleKind::Inference, "sm_89", 16, Some((8, 9))),
+        module(ModuleKind::Inference, "compute_120", 16, Some((12, 0))),
+        // The Mamba-1 kernels compile with the capacity; the fold clones
+        // compose on Ada at capacity 16 only.
+        module(ModuleKind::Mamba1, "sm_80", 16, Some((8, 0))),
+        module(ModuleKind::Mamba1, "sm_89", 16, Some((8, 9))),
+        module(ModuleKind::Mamba1, "sm_89", 32, Some((8, 9))),
+        module(ModuleKind::Mamba1, "sm_89", 64, Some((8, 9))),
+        module(ModuleKind::Mamba1, "compute_120", 16, Some((12, 0))),
+        // The shared kernels take no state capacity either.
+        module(ModuleKind::Shared, "sm_80", 16, None),
+        module(ModuleKind::Shared, "sm_89", 16, None),
+        module(ModuleKind::Shared, "compute_120", 16, None),
         module(ModuleKind::TriadScalar, "sm_80", 16, None),
         module(ModuleKind::TriadScalar, "sm_89", 16, None),
         module(ModuleKind::TriadScalar, "compute_120", 16, None),
@@ -81,7 +89,11 @@ fn print_module_identities() {
                 "IDENTITY {{\"module\":\"{:?}\",\"target\":\"{}\",\"cap\":{},\"device_cc\":{},\"nvrtc\":[{},{}],\"source\":\"{}\",\"compile_key\":\"{}\",\"invocation\":\"{}\",\"artifact\":\"{}\",\"header\":\"{}\",\"library\":\"{}\"}}",
                 id.module_kind,
                 id.target,
-                id.state_cap,
+                if matches!(kind, ModuleKind::Inference | ModuleKind::Shared) {
+                    "null".to_string()
+                } else {
+                    id.state_cap.to_string()
+                },
                 id.device_cc
                     .map_or("null".to_string(), |(major, minor)| format!(
                         "[{major},{minor}]"

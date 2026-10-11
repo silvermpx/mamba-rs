@@ -1,16 +1,16 @@
 const PRODUCTION_SYMBOL: &str = "nn_m64n64_bk16_s2";
-const FIXED_COPYPLAN_SYMBOL: &str = "nn_sm89_f32_n64_copyplan";
+const INFERENCE_COPYPLAN_SYMBOL: &str = "nn_sm89_f32_n64_copyplan";
 const GENERIC_SYMBOL: &str = "nn_big";
 const PRODUCTION_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/scalar_nn_m64n64.cu");
 const TEST_SOURCE: &str = include_str!("gemm_bi_scalar_nn_m64n64_qualification.rs");
 #[cfg(feature = "cuda")]
 const SCALAR_SOURCE: &str = include_str!("../../kernels/gemm_bi_triad/scalar.cu");
 #[cfg(feature = "cuda")]
-#[path = "../../tests/support/fixed_full_mantissa.rs"]
-mod fixed_full_mantissa;
-#[cfg(feature = "cuda")]
 #[path = "../../tests/common/gpu_quiet.rs"]
 mod gpu_quiet;
+#[cfg(feature = "cuda")]
+#[path = "../../tests/support/inference_full_mantissa.rs"]
+mod inference_full_mantissa;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AdaShortScreenCell {
@@ -55,7 +55,7 @@ fn ada_copyplan_screen_cells() -> Vec<AdaShortScreenCell> {
     ada_short_screen_cells()
         .into_iter()
         .map(|cell| AdaShortScreenCell {
-            symbol: FIXED_COPYPLAN_SYMBOL,
+            symbol: INFERENCE_COPYPLAN_SYMBOL,
             ..cell
         })
         .collect()
@@ -68,14 +68,14 @@ fn ada_copyplan_deep_cells() -> Vec<AdaShortScreenCell> {
     vec![AdaShortScreenCell {
         id: "large_deep",
         dims: (4_096, 3_072, 1_536),
-        symbol: FIXED_COPYPLAN_SYMBOL,
+        symbol: INFERENCE_COPYPLAN_SYMBOL,
     }]
 }
 
 fn ada_candidate_shared(symbol: &str) -> Result<(usize, usize), String> {
     match symbol {
         PRODUCTION_SYMBOL => Ok((0, 17_408)),
-        FIXED_COPYPLAN_SYMBOL => Ok((32_768, 0)),
+        INFERENCE_COPYPLAN_SYMBOL => Ok((32_768, 0)),
         _ => Err(format!("unknown Ada exact NN candidate {symbol}")),
     }
 }
@@ -98,7 +98,7 @@ impl LiveCopyPlanStage {
     fn expected_auto_symbol(self) -> &'static str {
         match self {
             Self::Discovery => GENERIC_SYMBOL,
-            Self::Integrated => FIXED_COPYPLAN_SYMBOL,
+            Self::Integrated => INFERENCE_COPYPLAN_SYMBOL,
         }
     }
 
@@ -111,7 +111,7 @@ impl LiveCopyPlanStage {
 }
 
 #[test]
-fn integrated_copyplan_must_use_actual_fixed_auto_and_confirmation_windows() {
+fn integrated_copyplan_must_use_actual_inference_auto_and_confirmation_windows() {
     assert_eq!(
         LiveCopyPlanStage::Discovery.expected_auto_symbol(),
         GENERIC_SYMBOL
@@ -119,7 +119,7 @@ fn integrated_copyplan_must_use_actual_fixed_auto_and_confirmation_windows() {
     assert_eq!(LiveCopyPlanStage::Discovery.windows(), 7);
     assert_eq!(
         LiveCopyPlanStage::Integrated.expected_auto_symbol(),
-        FIXED_COPYPLAN_SYMBOL
+        INFERENCE_COPYPLAN_SYMBOL
     );
     assert_eq!(LiveCopyPlanStage::Integrated.windows(), 21);
 }
@@ -188,7 +188,7 @@ fn copyplan_discovery_uses_its_static_shared_abi_for_all_three_cells() {
         (4_621, 384, 1_928),
     ]) {
         assert_eq!(cell.dims, dims);
-        assert_eq!(cell.symbol, FIXED_COPYPLAN_SYMBOL);
+        assert_eq!(cell.symbol, INFERENCE_COPYPLAN_SYMBOL);
         assert_eq!(ada_candidate_shared(cell.symbol).unwrap(), (32_768, 0));
     }
     assert_eq!(
@@ -391,11 +391,11 @@ mod cuda_qualification {
     use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
     use super::{
-        AdaShortScreenCell, FIXED_COPYPLAN_SYMBOL, GENERIC_SYMBOL, LiveCopyPlanStage,
+        AdaShortScreenCell, GENERIC_SYMBOL, INFERENCE_COPYPLAN_SYMBOL, LiveCopyPlanStage,
         PRODUCTION_SYMBOL, ada_candidate_shared, ada_copyplan_deep_cells,
         ada_copyplan_screen_cells, ada_live_toolkit_supported, ada_short_screen_cells,
         ada_short_screen_retains, compose_cuda_source, copyplan_epilogue_supported,
-        fixed_full_mantissa,
+        inference_full_mantissa,
     };
 
     const GUARD_ELEMENTS: usize = 32;
@@ -800,10 +800,10 @@ mod cuda_qualification {
 
     fn new_ada_fixture(runtime: &Runtime, case: Case) -> Result<Fixture, String> {
         let (m, k, n) = case.dims;
-        let a_values = fixed_full_mantissa::finite_full_mantissa_values(m * k, 0xa89a_0001);
-        let b_values = fixed_full_mantissa::finite_full_mantissa_values(k * n, 0xb89a_0002);
-        let bias_values = fixed_full_mantissa::finite_full_mantissa_values(n, 0xd89a_0003);
-        let output_seed = fixed_full_mantissa::finite_full_mantissa_values(m * n, 0xc89a_0004);
+        let a_values = inference_full_mantissa::finite_full_mantissa_values(m * k, 0xa89a_0001);
+        let b_values = inference_full_mantissa::finite_full_mantissa_values(k * n, 0xb89a_0002);
+        let bias_values = inference_full_mantissa::finite_full_mantissa_values(n, 0xd89a_0003);
+        let output_seed = inference_full_mantissa::finite_full_mantissa_values(m * n, 0xc89a_0004);
         let oracle = case
             .cpu_oracle
             .then(|| nn_oracle(case, &a_values, &b_values, &bias_values, &output_seed));
@@ -869,7 +869,7 @@ mod cuda_qualification {
     ) -> Result<Kernel, String> {
         let (_, dynamic_shared) = ada_candidate_shared(symbol)?;
         let function = match runtime.live_copyplan.as_ref() {
-            Some(live) if symbol == FIXED_COPYPLAN_SYMBOL => live.clone(),
+            Some(live) if symbol == INFERENCE_COPYPLAN_SYMBOL => live.clone(),
             _ => runtime
                 .module
                 .load_function(symbol)
@@ -1201,10 +1201,10 @@ mod cuda_qualification {
         case: Case,
         candidate_symbol: &'static str,
     ) -> Result<AdaPair, String> {
-        if candidate_symbol == FIXED_COPYPLAN_SYMBOL
+        if candidate_symbol == INFERENCE_COPYPLAN_SYMBOL
             && !copyplan_epilogue_supported(case.alpha, case.beta, case.bias)
         {
-            return Err("Fixed CopyPlan reuse is limited to alpha1/beta+0/no-bias; other Triad epilogues retain their prior route".into());
+            return Err("Inference CopyPlan reuse is limited to alpha1/beta+0/no-bias; other Triad epilogues retain their prior route".into());
         }
         let candidate = load_ada_candidate(runtime, case, candidate_symbol)?;
         let generic = load_kernel(runtime, Arm::Generic, case)?;
@@ -1590,7 +1590,7 @@ mod cuda_qualification {
         let pre = quiet.require_pre_context(&format!("{cohort}/pre-context"))?;
         let copyplan = cells
             .iter()
-            .any(|cell| cell.symbol == FIXED_COPYPLAN_SYMBOL);
+            .any(|cell| cell.symbol == INFERENCE_COPYPLAN_SYMBOL);
         let runtime = new_ada_runtime(copyplan)?;
 
         for case in [
@@ -1980,14 +1980,14 @@ mod cuda_qualification {
     }
 
     #[test]
-    #[ignore = "requires quiet Ada and one of CUDA12.8/13.0/13.2; live Fixed/AUTO/Fast comparison"]
-    fn ada_live_fixed_copyplan_vs_auto_and_fast_three_cell_once7() -> Result<(), String> {
+    #[ignore = "requires quiet Ada and one of CUDA12.8/13.0/13.2; live Inference/AUTO/Fast comparison"]
+    fn ada_live_inference_copyplan_vs_auto_and_fast_three_cell_once7() -> Result<(), String> {
         run_live_copyplan_comparison(LiveCopyPlanStage::Discovery, &ada_copyplan_screen_cells())
     }
 
     #[test]
-    #[ignore = "requires quiet Ada and one of CUDA12.8/13.0/13.2; live Fixed/AUTO/Fast comparison on the deep cell"]
-    fn ada_live_fixed_copyplan_vs_auto_and_fast_large_deep_once7() -> Result<(), String> {
+    #[ignore = "requires quiet Ada and one of CUDA12.8/13.0/13.2; live Inference/AUTO/Fast comparison on the deep cell"]
+    fn ada_live_inference_copyplan_vs_auto_and_fast_large_deep_once7() -> Result<(), String> {
         run_live_copyplan_comparison(LiveCopyPlanStage::Discovery, &ada_copyplan_deep_cells())
     }
 
@@ -2047,18 +2047,18 @@ mod cuda_qualification {
         runtime.stream = ctx.stream.clone();
         runtime.live_copyplan = Some(
             ctx.kernels
-                .fixed_sm89_f32_n64_copyplan
+                .inference_sm89_f32_n64_copyplan
                 .as_ref()
                 .ok_or_else(|| {
                     format!(
-                        "live Fixed CopyPlan unavailable: {:?}",
-                        ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection
+                        "live Inference CopyPlan unavailable: {:?}",
+                        ctx.kernels.inference_sm89_f32_n64_copyplan_rejection
                     )
                 })?
                 .clone(),
         );
         let compiler = ctx.kernels.compiler_identity();
-        let artifact = ctx.kernels.artifact_set_identity().fixed;
+        let artifact = ctx.kernels.artifact_set_identity().inference;
         let identity = runtime._device.identity();
         if !ada_live_toolkit_supported(
             identity.compute_capability,
@@ -2069,13 +2069,13 @@ mod cuda_qualification {
             || compiler.source_digest == [0; 32]
             || compiler.invocation_digest == [0; 32]
             || compiler.nvrtc_library_domain == [0; 32]
-            || artifact.module_kind != ModuleKind::Fixed
+            || artifact.module_kind != ModuleKind::Inference
             || artifact.artifact_digest == [0; 32]
             || artifact.compile_key != compiler.invocation_digest
             || artifact.artifact_kind != compiler.output_kind
         {
             return Err(format!(
-                "live Fixed artifact mismatch: {compiler:?} {artifact:?}"
+                "live Inference artifact mismatch: {compiler:?} {artifact:?}"
             ));
         }
         // Deterministic mode leaves the context handle in pedantic math for
@@ -2104,8 +2104,8 @@ mod cuda_qualification {
         }
         println!(
             "{}",
-            json!({"schema":"MambaBiLiveCopyPlanBindingV1", "symbol":FIXED_COPYPLAN_SYMBOL,
-            "module":"Fixed", "stage":format!("{stage:?}"), "compiler":format!("{compiler:?}"), "artifact":format!("{artifact:?}"),
+            json!({"schema":"MambaBiLiveCopyPlanBindingV1", "symbol":INFERENCE_COPYPLAN_SYMBOL,
+            "module":"Inference", "stage":format!("{stage:?}"), "compiler":format!("{compiler:?}"), "artifact":format!("{artifact:?}"),
             "fast_compute":"CUBLAS_COMPUTE_32F_FAST_TF32", "fast_math":format!("{math:?}"), "fast_algorithm":"CUBLAS_GEMM_DEFAULT"})
         );
         // A different compiled module is a new bit domain: repeat bounded tail
@@ -2121,7 +2121,7 @@ mod cuda_qualification {
                     bias: false,
                     cpu_oracle: false,
                 },
-                FIXED_COPYPLAN_SYMBOL,
+                INFERENCE_COPYPLAN_SYMBOL,
             )?;
         }
         quiet.require_cohort("live-copyplan-auto-fast/timed")?;
@@ -2135,7 +2135,7 @@ mod cuda_qualification {
                 cpu_oracle: false,
             };
             let (candidate, generic, candidate_graph, generic_graph, mut fixture, golden) =
-                check_ada_pair(&runtime, case, FIXED_COPYPLAN_SYMBOL)?;
+                check_ada_pair(&runtime, case, INFERENCE_COPYPLAN_SYMBOL)?;
             let words = |buffer: &GuardedBuffer| {
                 buffer.expected[buffer.active_offset..buffer.active_offset + buffer.active_len]
                     .iter()
@@ -2157,7 +2157,7 @@ mod cuda_qualification {
                 || evidence.single_launch_symbol() != Some(stage.expected_auto_symbol())
                 || evidence.uniform_module_kind()
                     != Some(if integrated {
-                        ModuleKind::Fixed
+                        ModuleKind::Inference
                     } else {
                         ModuleKind::TriadScalar
                     })
@@ -2340,8 +2340,8 @@ mod cuda_qualification {
                         println!(
                             "{}",
                             json!({"schema":screen_schema, "cell":cell.id,"shape":cell.dims,"stage":format!("{stage:?}"),
-                            "candidate_path":if integrated { "public_auto_with_separate_qualified_preflight" } else { "direct_fixed_holder" },
-                            "candidate_symbol":FIXED_COPYPLAN_SYMBOL,"candidate_module":"Fixed","comparator":comparator,
+                            "candidate_path":if integrated { "public_auto_with_separate_qualified_preflight" } else { "direct_inference_holder" },
+                            "candidate_symbol":INFERENCE_COPYPLAN_SYMBOL,"candidate_module":"Inference","comparator":comparator,
                             "path":path.name(),"order":order.name(),"candidate_first":arms[0],"windows":windows,
                             "warmup_brackets":ADA_WARMUPS,"logical_gemms_per_observation":1,"reseed_scope":"C+A+B",
                             "raw_observations_us":raw,"ratio_direction":"candidate_over_reference","ratio_p50":pair[0],"ratio_p95":pair[1]})
@@ -2386,7 +2386,11 @@ mod cuda_qualification {
 
     #[test]
     #[ignore = "requires an exclusive quiet CC 8.9 142-SM GPU; inference reuse discovery only"]
-    fn ada_exact_nn_fixed_copyplan_overwrite_three_cell_discovery_once7() -> Result<(), String> {
-        run_ada_discovery(&ada_copyplan_screen_cells(), "scalar-nn-fixed-copyplan-ada")
+    fn ada_exact_nn_inference_copyplan_overwrite_three_cell_discovery_once7() -> Result<(), String>
+    {
+        run_ada_discovery(
+            &ada_copyplan_screen_cells(),
+            "scalar-nn-inference-copyplan-ada",
+        )
     }
 }

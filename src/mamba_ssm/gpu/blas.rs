@@ -2038,7 +2038,7 @@ pub(super) fn prepare_half_physical_graph_package<'a>(
             None,
             Vec::new(),
         ),
-        (PhysicalLaunchKind::InputUpcast, ModuleKind::Fixed) => {
+        (PhysicalLaunchKind::InputUpcast, ModuleKind::Inference) => {
             let (prefix, triad, suffix) = prepare_fallback_graph_segments(ctx, &observer, request)?;
             (prefix, Some(triad), suffix)
         }
@@ -4081,7 +4081,7 @@ pub fn gemm_bi_forward_raw(
 /// The Inference family's LEGACY tile (64x64x32, strict, no buckets): the
 /// narrow-N fallback of the inference ladder and the whole f32 arm (the
 /// shipped serve route - its bits never move with ladder work).
-pub(in crate::mamba_ssm::gpu) fn fixed_legacy_forward<O: PhysicalLaunchObserver>(
+pub(in crate::mamba_ssm::gpu) fn inference_legacy_forward<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     operands: super::gemm_bi_inference::InferenceFwdOperands,
     shape: super::gemm_bi_inference::InferenceShape,
@@ -4191,7 +4191,7 @@ fn launch_bi_matvec<O: PhysicalLaunchObserver>(
             )
         })?;
     unsafe { enqueue_with_physical_observation(observer, &mut builder, cfg, observation) }
-        .map_err(|error| error.with_driver_context(format_args!("Fixed matvec launch")))?;
+        .map_err(|error| error.with_driver_context(format_args!("Inference matvec launch")))?;
     Ok(())
 }
 
@@ -4588,7 +4588,7 @@ mod matvec_inventory_cuda_tests {
                         assert_eq!(trace.nodes().len(), 1);
                         let node = trace.nodes()[0];
                         let route = node.gemm_route().unwrap();
-                        assert_eq!(route.backend, PhysicalGemmBackend::FixedMatvecEightWarp);
+                        assert_eq!(route.backend, PhysicalGemmBackend::InferenceMatvecEightWarp);
                         assert_eq!(
                             route.numeric_contract,
                             ResolvedNumericContract::ScalarFmaEightWarpTreePostDotBias

@@ -101,7 +101,7 @@ fn apply_delta_bits(initial: &[f32], delta: &[f32], repeats: usize) -> Vec<u32> 
 }
 
 #[cfg(feature = "cuda")]
-#[path = "../../tests/support/fixed_full_mantissa.rs"]
+#[path = "../../tests/support/inference_full_mantissa.rs"]
 mod full_mantissa;
 
 #[cfg(feature = "cuda")]

@@ -7,7 +7,7 @@ use super::super::kernel_identity::{
     PhysicalLaunchObserver, PolicyDtype, ResolvedGemmOp, ResolvedGemmRoute,
     ResolvedInstructionFamily, ResolvedInstructionShape, ResolvedKernelLaunch,
     ResolvedNumericContract, ResolvedOperandConversion, ResolvedOutputOwnership, SCHEDULE_REVISION,
-    SM89_FIXED_COPYPLAN_ROUTE_REVISION, Sha256Digest, TUNING_TABLE_REVISION,
+    SM89_INFERENCE_COPYPLAN_ROUTE_REVISION, Sha256Digest, TUNING_TABLE_REVISION,
 };
 use cudarc::driver::{CudaFunction, LaunchConfig};
 
@@ -22,7 +22,7 @@ pub(in crate::mamba_ssm::gpu) enum AbiKind {
     Sm120Tf32 = 6,
     Sm120Half = 7,
     Sm120PostBias = 8,
-    /// The Fixed sm89 32-byte parameter bundle under a TF32 kernel.
+    /// The Inference sm89 32-byte parameter bundle under a TF32 kernel.
     Tf32Sm89 = 9,
 }
 
@@ -92,7 +92,7 @@ const TERMINALS: &[TerminalSpec] = &[
     terminal!(
         "nn_sm89_f32_n64_copyplan",
         (F32, F32),
-        ScalarFmaSm89FixedCopyPlan,
+        ScalarFmaSm89InferenceCopyPlan,
         (64, 64, 32, 2, 128, 0),
         ExactF32,
         Optional
@@ -164,7 +164,7 @@ const TERMINALS: &[TerminalSpec] = &[
     terminal!(
         "matvec_bi_bf16_bf16",
         (Bf16, Bf16),
-        FixedMatvecEightWarp,
+        InferenceMatvecEightWarp,
         (1, 32, 0, 1, 256, 0),
         Legacy,
         Optional
@@ -180,7 +180,7 @@ const TERMINALS: &[TerminalSpec] = &[
     terminal!(
         "matvec_bi_bf16_f32",
         (Bf16, F32),
-        FixedMatvecEightWarp,
+        InferenceMatvecEightWarp,
         (1, 32, 0, 1, 256, 0),
         Legacy,
         Optional
@@ -380,7 +380,7 @@ const TERMINALS: &[TerminalSpec] = &[
     terminal!(
         "matvec_bi_f16_f16",
         (F16, F16),
-        FixedMatvecEightWarp,
+        InferenceMatvecEightWarp,
         (1, 32, 0, 1, 256, 0),
         Legacy,
         Optional
@@ -396,7 +396,7 @@ const TERMINALS: &[TerminalSpec] = &[
     terminal!(
         "matvec_bi_f16_f32",
         (F16, F32),
-        FixedMatvecEightWarp,
+        InferenceMatvecEightWarp,
         (1, 32, 0, 1, 256, 0),
         Legacy,
         Optional
@@ -588,7 +588,7 @@ const TERMINALS: &[TerminalSpec] = &[
     terminal!(
         "matvec_bi_f32_f32",
         (F32, F32),
-        FixedMatvecEightWarp,
+        InferenceMatvecEightWarp,
         (1, 32, 0, 1, 256, 0),
         Legacy,
         Optional
@@ -848,7 +848,7 @@ pub(in crate::mamba_ssm::gpu) fn terminal(symbol: &str) -> Option<&'static Termi
 }
 
 /// The cached bridge keeps the existing prepared Triad identity. These are
-/// its two actual NN/single-split entries, not aliases in the Fixed table.
+/// its two actual NN/single-split entries, not aliases in the Inference table.
 pub(in crate::mamba_ssm::gpu) fn validate_cached_bridge(
     route: &ResolvedGemmRoute,
 ) -> Result<(), String> {
@@ -913,7 +913,7 @@ impl TerminalSpec {
         use ResolvedNumericContract as N;
         use ResolvedOperandConversion as C;
         let (numeric, instruction, (m, n, k), conversion) = match self.backend {
-            B::InferenceScalarFma | B::ScalarFmaSm89FixedCopyPlan | B::InferenceSm120TmaFma => {
+            B::InferenceScalarFma | B::ScalarFmaSm89InferenceCopyPlan | B::InferenceSm120TmaFma => {
                 (N::ScalarFmaPostDotBias, I::ScalarFma, (1, 1, 1), C::None)
             }
             B::InferenceWmma => (N::WmmaF32PostDotBias, I::WmmaApi, (16, 16, 16), C::None),
@@ -934,7 +934,7 @@ impl TerminalSpec {
                 (16, 8, 8),
                 C::TensorMapUint32ThenCvtRnaTf32F32,
             ),
-            B::FixedMatvecEightWarp => (
+            B::InferenceMatvecEightWarp => (
                 N::ScalarFmaEightWarpTreePostDotBias,
                 I::ScalarFma,
                 (1, 1, 1),
@@ -960,13 +960,13 @@ impl TerminalSpec {
         if self.backend == PhysicalGemmBackend::MmaTf32Rna {
             ModuleKind::TriadSm80
         } else {
-            ModuleKind::Fixed
+            ModuleKind::Inference
         }
     }
 
     fn tuning_revision(&self) -> u16 {
-        if self.backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan {
-            SM89_FIXED_COPYPLAN_ROUTE_REVISION
+        if self.backend == PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan {
+            SM89_INFERENCE_COPYPLAN_ROUTE_REVISION
         } else {
             TUNING_TABLE_REVISION
         }
@@ -1011,7 +1011,7 @@ impl TerminalSpec {
         }
         let m = u32::try_from(m).map_err(|_| "Inference M exceeds u32")?;
         let n = u32::try_from(n).map_err(|_| "Inference N exceeds u32")?;
-        let (grid, shared) = if self.backend == PhysicalGemmBackend::FixedMatvecEightWarp {
+        let (grid, shared) = if self.backend == PhysicalGemmBackend::InferenceMatvecEightWarp {
             let shared = u32::try_from(k)
                 .ok()
                 .and_then(|k| k.checked_mul(width(self.storage[0]) as u32))
@@ -1047,7 +1047,7 @@ impl TerminalSpec {
         family: BiGemmFamily,
     ) -> Result<NumericContractSet, String> {
         use PhysicalGemmBackend as B;
-        let expected_family = if self.backend == B::FixedMatvecEightWarp {
+        let expected_family = if self.backend == B::InferenceMatvecEightWarp {
             BiGemmFamily::Triad
         } else {
             BiGemmFamily::Inference
@@ -1056,18 +1056,18 @@ impl TerminalSpec {
             return Err("Inference terminal has the wrong live GEMM family".into());
         }
         Ok(match self.backend {
-            B::InferenceScalarFma | B::ScalarFmaSm89FixedCopyPlan | B::InferenceSm120TmaFma => {
-                NumericContractSet::FIXED_SCALAR_FMA
+            B::InferenceScalarFma | B::ScalarFmaSm89InferenceCopyPlan | B::InferenceSm120TmaFma => {
+                NumericContractSet::INFERENCE_SCALAR_FMA
             }
             B::InferenceWmma
             | B::InferenceMma16
             | B::InferenceSm90aWgmma
             | B::InferenceSm100Tcgen05
-            | B::InferenceSm120TmaMma16 => NumericContractSet::FIXED_MMA_SYNC,
+            | B::InferenceSm120TmaMma16 => NumericContractSet::INFERENCE_MMA_SYNC,
             B::InferenceMmaTf32Rna | B::InferenceSm120TmaMmaTf32Rna | B::MmaTf32Rna => {
-                NumericContractSet::FIXED_DETERMINISTIC_TF32
+                NumericContractSet::INFERENCE_DETERMINISTIC_TF32
             }
-            B::FixedMatvecEightWarp => NumericContractSet::FIXED_MATVEC_TREE,
+            B::InferenceMatvecEightWarp => NumericContractSet::INFERENCE_MATVEC_TREE,
             _ => unreachable!("closed Inference terminal table"),
         })
     }
@@ -1351,9 +1351,9 @@ pub(in crate::mamba_ssm::gpu) fn observation<O: PhysicalLaunchObserver>(
             .ok_or("selected function is not a loaded Inference terminal")?;
         let arithmetic = spec.arithmetic();
         let context = ctx.gemm_route();
-        let (artifact, compiler) = if spec.module() == ModuleKind::Fixed {
+        let (artifact, compiler) = if spec.module() == ModuleKind::Inference {
             (
-                ctx.kernels.artifact_set_identity().fixed,
+                ctx.kernels.artifact_set_identity().inference,
                 ctx.kernels.compiler_identity(),
             )
         } else {
@@ -1461,7 +1461,7 @@ mod tests {
             maps: spec.uses_maps().then_some([[7; 16], [9; 16]]),
             auxiliary: [0; 2],
         };
-        let matvec = spec.backend == PhysicalGemmBackend::FixedMatvecEightWarp;
+        let matvec = spec.backend == PhysicalGemmBackend::InferenceMatvecEightWarp;
         let config = LaunchConfig {
             grid_dim: if matvec {
                 (3, 3, 1)
@@ -2050,7 +2050,7 @@ mod tests {
                 if backend == 5 {
                     ModuleKind::TriadSm80
                 } else {
-                    ModuleKind::Fixed
+                    ModuleKind::Inference
                 }
             );
             assert_eq!(
@@ -2342,14 +2342,14 @@ mod tests {
             bad.ownership = ResolvedOutputOwnership::OwnerCtaPerOutputTileFixedSplitFold;
             assert!(validate_cached_bridge(&bad).is_err());
             let mut bad = route;
-            bad.module_kind = ModuleKind::Fixed;
+            bad.module_kind = ModuleKind::Inference;
             assert!(validate_cached_bridge(&bad).is_err());
             let mut bad = route;
             bad.launch.grid_dim.0 += 1;
             assert!(validate_cached_bridge(&bad).is_err());
             assert!(
                 terminal(symbol).is_none(),
-                "bridge must not get a Fixed alias"
+                "bridge must not get an Inference alias"
             );
         }
     }
@@ -2484,7 +2484,7 @@ mod tests {
                     let (_, contracts) = route_backend_contract_sets(policy);
                     for spec in TERMINALS {
                         let expected_family =
-                            if spec.backend == PhysicalGemmBackend::FixedMatvecEightWarp {
+                            if spec.backend == PhysicalGemmBackend::InferenceMatvecEightWarp {
                                 BiGemmFamily::Triad
                             } else {
                                 BiGemmFamily::Inference
@@ -2510,7 +2510,7 @@ mod tests {
                     }
                     if family == BiGemmFamily::Inference {
                         assert_eq!(
-                            contracts.contains(NumericContractSet::FIXED_DETERMINISTIC_TF32),
+                            contracts.contains(NumericContractSet::INFERENCE_DETERMINISTIC_TF32),
                             allow_tf32
                         );
                         assert!(!contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32));

@@ -337,9 +337,10 @@ pub struct GpuCtx {
     sm120_prepared_launches: RefCell<Sm120PreparedLaunchCache>,
     sm100_prepared_launches: RefCell<Sm100PreparedLaunchCache>,
     sm90a_prepared_launches: RefCell<Sm90aPreparedLaunchCache>,
-    pub(crate) fixed_tf32_maps: RefCell<super::gemm_bi_inference::FixedTf32MapCache>,
-    pub(crate) fixed_postbias_maps: RefCell<super::gemm_bi_inference::FixedPostBiasMapCache>,
-    pub(crate) fixed_half_maps: RefCell<super::gemm_bi_inference::FixedHalfMapCache>,
+    pub(crate) inference_tf32_maps: RefCell<super::gemm_bi_inference::InferenceTf32MapCache>,
+    pub(crate) inference_postbias_maps:
+        RefCell<super::gemm_bi_inference::InferencePostBiasMapCache>,
+    pub(crate) inference_half_maps: RefCell<super::gemm_bi_inference::InferenceHalfMapCache>,
     /// Canonical GEMM route and vendor-math authority.
     gemm_mode: Cell<GemmMode>,
     /// Diagnostic retained after an unverified cuBLAS math rollback.
@@ -632,11 +633,15 @@ impl GpuCtx {
             sm120_prepared_launches: RefCell::new(Sm120PreparedLaunchCache::default()),
             sm100_prepared_launches: RefCell::new(Sm100PreparedLaunchCache::default()),
             sm90a_prepared_launches: RefCell::new(Sm90aPreparedLaunchCache::default()),
-            fixed_tf32_maps: RefCell::new(super::gemm_bi_inference::FixedTf32MapCache::default()),
-            fixed_postbias_maps: RefCell::new(
-                super::gemm_bi_inference::FixedPostBiasMapCache::default(),
+            inference_tf32_maps: RefCell::new(
+                super::gemm_bi_inference::InferenceTf32MapCache::default(),
             ),
-            fixed_half_maps: RefCell::new(super::gemm_bi_inference::FixedHalfMapCache::default()),
+            inference_postbias_maps: RefCell::new(
+                super::gemm_bi_inference::InferencePostBiasMapCache::default(),
+            ),
+            inference_half_maps: RefCell::new(
+                super::gemm_bi_inference::InferenceHalfMapCache::default(),
+            ),
             gemm_mode: Cell::new(config.mode),
             gemm_unusable: RefCell::new(None),
             bi_tensor_cores: Cell::new(config.tensor_cores),
@@ -1259,7 +1264,7 @@ impl GpuCtx {
     ) -> Option<(ArtifactIdentity, CompilerIdentity)> {
         let artifacts = self.kernels.artifact_set_identity();
         match module_kind {
-            ModuleKind::Fixed => Some((artifacts.fixed, self.kernels.compiler_identity())),
+            ModuleKind::Inference => Some((artifacts.inference, self.kernels.compiler_identity())),
             ModuleKind::TriadScalar => Some((
                 artifacts.triad_scalar,
                 self.kernels.triad_scalar_compiler_identity(),
@@ -1294,7 +1299,9 @@ impl GpuCtx {
                 .zip(self.kernels.specialized_compiler_identity()),
             ModuleKind::Mamba3Combined
             | ModuleKind::Mamba2Combined
-            | ModuleKind::Mamba3MimoCombined => None,
+            | ModuleKind::Mamba3MimoCombined
+            | ModuleKind::Mamba1
+            | ModuleKind::Shared => None,
         }
     }
 
@@ -1347,9 +1354,9 @@ impl GpuCtx {
                 | PhysicalGemmBackend::InferenceSm120TmaFma
                 | PhysicalGemmBackend::InferenceSm120TmaMma16
                 | PhysicalGemmBackend::InferenceSm120TmaMmaTf32Rna
-                | PhysicalGemmBackend::FixedMatvecEightWarp
+                | PhysicalGemmBackend::InferenceMatvecEightWarp
         ) || (route.backend
-            == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+            == PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan
             && route.numeric_contract == ResolvedNumericContract::ScalarFmaPostDotBias)
             || (context.policy.bi_gemm_family == BiGemmFamily::Inference
                 && route.backend == PhysicalGemmBackend::MmaTf32Rna
@@ -1367,7 +1374,7 @@ impl GpuCtx {
                 ));
             }
         }
-        if route.backend == PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+        if route.backend == PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan
             && (route.numeric_contract != ResolvedNumericContract::ScalarFma
                 || context.policy.bi_gemm_family != BiGemmFamily::Triad
                 || route.symbol != "nn_sm89_f32_n64_copyplan"
@@ -1377,7 +1384,7 @@ impl GpuCtx {
                     .is_none())
         {
             return Err(format!(
-                "{label}: Fixed copy-plan backend/family/numeric binding changed"
+                "{label}: Inference copy-plan backend/family/numeric binding changed"
             ));
         }
         if !context.policy.batch_invariant || !context.backend_set.contains(BackendSet::TRIAD) {
@@ -1559,15 +1566,15 @@ impl GpuCtx {
             .ok_or_else(|| format!("{label}: unknown Inference terminal"))?;
         spec.validate_route(route)?;
         let required = spec.required_contract(context.policy.bi_gemm_family)?;
-        let backend = if route.module_kind == ModuleKind::Fixed {
-            BackendSet::FIXED
+        let backend = if route.module_kind == ModuleKind::Inference {
+            BackendSet::INFERENCE
         } else {
             BackendSet::TRIAD
         };
         if !context.policy.batch_invariant
             || !context.backend_set.contains(backend)
             || !context.numeric_contracts.contains(required)
-            || (required == NumericContractSet::FIXED_DETERMINISTIC_TF32
+            || (required == NumericContractSet::INFERENCE_DETERMINISTIC_TF32
                 && self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32)
         {
             return Err(format!(
@@ -1904,7 +1911,7 @@ const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
             ModuleKind::TriadSm89ExactF32
         }
         PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 => ModuleKind::TriadSm89ExactF32D128,
-        PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+        PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan
         | PhysicalGemmBackend::InferenceScalarFma
         | PhysicalGemmBackend::InferenceWmma
         | PhysicalGemmBackend::InferenceMma16
@@ -1914,7 +1921,7 @@ const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
         | PhysicalGemmBackend::InferenceSm120TmaFma
         | PhysicalGemmBackend::InferenceSm120TmaMma16
         | PhysicalGemmBackend::InferenceSm120TmaMmaTf32Rna
-        | PhysicalGemmBackend::FixedMatvecEightWarp => ModuleKind::Fixed,
+        | PhysicalGemmBackend::InferenceMatvecEightWarp => ModuleKind::Inference,
         PhysicalGemmBackend::Sm80Mma16
         | PhysicalGemmBackend::MmaTf32Rna
         | PhysicalGemmBackend::MmaTf32RnaSplitK2
@@ -1954,8 +1961,8 @@ fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) ->
         | PhysicalGemmBackend::Sm89MmaTf32TnDirectRna => {
             super::gemm_bi_triad::SM89_TF32_JOINT_TUNING_REVISION
         }
-        PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan => {
-            super::kernel_identity::SM89_FIXED_COPYPLAN_ROUTE_REVISION
+        PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan => {
+            super::kernel_identity::SM89_INFERENCE_COPYPLAN_ROUTE_REVISION
         }
         PhysicalGemmBackend::Sm89Mma16HalfS3
         | PhysicalGemmBackend::Sm89Mma16HalfS2
@@ -1979,7 +1986,7 @@ const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bo
             | PhysicalGemmBackend::ScalarFmaSplitKF32Reduce
             | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial
             | PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce
-            | PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+            | PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan
             | PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused
             | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial
             | PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89
@@ -2177,15 +2184,15 @@ mod tests {
     }
 
     #[test]
-    fn sm89_fixed_copyplan_routes_use_a_private_revision_without_moving_global_46() {
+    fn sm89_inference_copyplan_routes_use_a_private_revision_without_moving_global_46() {
         let generic = super::super::gemm_bi_triad::F32_TF32_TUNING_REVISION;
         let copyplan = expected_route_tuning_revision(
-            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan,
+            PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan,
             generic,
         );
         assert_eq!(
             copyplan,
-            crate::mamba_ssm::gpu::kernel_identity::SM89_FIXED_COPYPLAN_ROUTE_REVISION
+            crate::mamba_ssm::gpu::kernel_identity::SM89_INFERENCE_COPYPLAN_ROUTE_REVISION
         );
         assert_ne!(copyplan, 0);
         assert_ne!(copyplan, 2);
@@ -2194,8 +2201,8 @@ mod tests {
             46
         );
         assert_eq!(
-            expected_route_module(PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan),
-            ModuleKind::Fixed
+            expected_route_module(PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan),
+            ModuleKind::Inference
         );
         assert_eq!(
             expected_route_module(PhysicalGemmBackend::ScalarFma),
@@ -2260,7 +2267,7 @@ mod tests {
             PhysicalGemmBackend::ScalarFmaSplitKF32Reduce,
             PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial,
             PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce,
-            PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan,
+            PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan,
             PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused,
             PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial,
             PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89,

@@ -44,32 +44,32 @@ struct Config {
 
 fn parse_config(environment: &BTreeMap<String, String>) -> Result<Config, String> {
     const ALLOWED: [&str; 16] = [
-        "MAMBA_FIXED_ADA_TOOLKIT_ADMISSION",
-        "MAMBA_FIXED_ADA_VENDOR",
-        "MAMBA_FIXED_ADA_ROWS",
-        "MAMBA_FIXED_ADA_LITERALS",
-        "MAMBA_FIXED_ADA_WINDOWS",
-        "MAMBA_FIXED_ADA_TOOLKIT",
-        "MAMBA_FIXED_ADA_TUNING_REVISION",
-        "MAMBA_FIXED_ADA_STAGE",
-        "MAMBA_FIXED_ADA_SOURCE_SHA",
-        "MAMBA_FIXED_ADA_BINARY_SHA",
-        "MAMBA_FIXED_ADA_SCREEN_SHA",
-        "MAMBA_FIXED_ADA_SCREEN_ARTIFACT_SHA",
-        "MAMBA_FIXED_ADA_JSONL",
-        "MAMBA_FIXED_VENDOR_TILES",
-        "MAMBA_FIXED_VENDOR_PATHS",
-        "MAMBA_FIXED_VENDOR_EXACT_CC",
+        "MAMBA_INFERENCE_ADA_TOOLKIT_ADMISSION",
+        "MAMBA_INFERENCE_ADA_VENDOR",
+        "MAMBA_INFERENCE_ADA_ROWS",
+        "MAMBA_INFERENCE_ADA_LITERALS",
+        "MAMBA_INFERENCE_ADA_WINDOWS",
+        "MAMBA_INFERENCE_ADA_TOOLKIT",
+        "MAMBA_INFERENCE_ADA_TUNING_REVISION",
+        "MAMBA_INFERENCE_ADA_STAGE",
+        "MAMBA_INFERENCE_ADA_SOURCE_SHA",
+        "MAMBA_INFERENCE_ADA_BINARY_SHA",
+        "MAMBA_INFERENCE_ADA_SCREEN_SHA",
+        "MAMBA_INFERENCE_ADA_SCREEN_ARTIFACT_SHA",
+        "MAMBA_INFERENCE_ADA_JSONL",
+        "MAMBA_INFERENCE_VENDOR_TILES",
+        "MAMBA_INFERENCE_VENDOR_PATHS",
+        "MAMBA_INFERENCE_VENDOR_EXACT_CC",
     ];
     for key in environment.keys() {
-        let scoped = key.starts_with("MAMBA_FIXED_ADA_")
-            || key.starts_with("MAMBA_FIXED_VENDOR_")
+        let scoped = key.starts_with("MAMBA_INFERENCE_ADA_")
+            || key.starts_with("MAMBA_INFERENCE_VENDOR_")
             || matches!(
                 key.as_str(),
-                "MAMBA_FIXED_HALF_TILE_CANDIDATE"
-                    | "MAMBA_FIXED_AUTO_VENDOR_ROW"
-                    | "MAMBA_FIXED_AUTO_VENDOR_CELL"
-                    | "MAMBA_FIXED_AUTO_VENDOR_BIAS"
+                "MAMBA_INFERENCE_HALF_TILE_CANDIDATE"
+                    | "MAMBA_INFERENCE_AUTO_VENDOR_ROW"
+                    | "MAMBA_INFERENCE_AUTO_VENDOR_CELL"
+                    | "MAMBA_INFERENCE_AUTO_VENDOR_BIAS"
                     | "NVIDIA_TF32_OVERRIDE"
             );
         if scoped && !ALLOWED.contains(&key.as_str()) {
@@ -82,40 +82,40 @@ fn parse_config(environment: &BTreeMap<String, String>) -> Result<Config, String
             .map(String::as_str)
             .ok_or_else(|| format!("missing {key}"))
     };
-    if required("MAMBA_FIXED_ADA_TOOLKIT_ADMISSION")? != "1" {
-        return Err("MAMBA_FIXED_ADA_TOOLKIT_ADMISSION must be exactly 1".into());
+    if required("MAMBA_INFERENCE_ADA_TOOLKIT_ADMISSION")? != "1" {
+        return Err("MAMBA_INFERENCE_ADA_TOOLKIT_ADMISSION must be exactly 1".into());
     }
-    if required("MAMBA_FIXED_ADA_VENDOR")? != "1" {
-        return Err("MAMBA_FIXED_ADA_VENDOR must be exactly 1".into());
+    if required("MAMBA_INFERENCE_ADA_VENDOR")? != "1" {
+        return Err("MAMBA_INFERENCE_ADA_VENDOR must be exactly 1".into());
     }
-    if required("MAMBA_FIXED_VENDOR_PATHS")? != "eager,graph" {
-        return Err("MAMBA_FIXED_VENDOR_PATHS must be exactly eager,graph".into());
+    if required("MAMBA_INFERENCE_VENDOR_PATHS")? != "eager,graph" {
+        return Err("MAMBA_INFERENCE_VENDOR_PATHS must be exactly eager,graph".into());
     }
-    if required("MAMBA_FIXED_VENDOR_EXACT_CC")? != "8.9" {
-        return Err("MAMBA_FIXED_VENDOR_EXACT_CC must be exactly 8.9".into());
+    if required("MAMBA_INFERENCE_VENDOR_EXACT_CC")? != "8.9" {
+        return Err("MAMBA_INFERENCE_VENDOR_EXACT_CC must be exactly 8.9".into());
     }
-    if required("MAMBA_FIXED_ADA_TUNING_REVISION")? != "43" {
-        return Err("MAMBA_FIXED_ADA_TUNING_REVISION must be exactly 43".into());
+    if required("MAMBA_INFERENCE_ADA_TUNING_REVISION")? != "43" {
+        return Err("MAMBA_INFERENCE_ADA_TUNING_REVISION must be exactly 43".into());
     }
-    let toolkit = required("MAMBA_FIXED_ADA_TOOLKIT")?;
+    let toolkit = required("MAMBA_INFERENCE_ADA_TOOLKIT")?;
     if !matches!(toolkit, "12.8" | "13.0") {
         return Err(format!("unsupported Task7 toolkit {toolkit:?}"));
     }
-    let (family, inventory, expected_tile) = match required("MAMBA_FIXED_ADA_ROWS")? {
+    let (family, inventory, expected_tile) = match required("MAMBA_INFERENCE_ADA_ROWS")? {
         "f32_exact_fast" => (Family::Exact, &EXACT_LITERALS[..], "F32Sm89N64CopyPlan"),
         "tf32" => (Family::Tf32, &TF32_LITERALS[..], "Tf32M64S2"),
         row => return Err(format!("unsupported Task7 row {row:?}")),
     };
-    if required("MAMBA_FIXED_VENDOR_TILES")? != expected_tile {
+    if required("MAMBA_INFERENCE_VENDOR_TILES")? != expected_tile {
         return Err(format!("wrong Task7 candidate for {family:?}"));
     }
-    let (stage, windows) = match required("MAMBA_FIXED_ADA_STAGE")? {
+    let (stage, windows) = match required("MAMBA_INFERENCE_ADA_STAGE")? {
         "smoke1" => (Stage::Smoke1, 1),
         "screen21" => (Stage::Screen21, 21),
         "confirm101" => (Stage::Confirm101, 101),
         value => return Err(format!("unknown Task7 stage {value:?}")),
     };
-    if required("MAMBA_FIXED_ADA_WINDOWS")? != windows.to_string() {
+    if required("MAMBA_INFERENCE_ADA_WINDOWS")? != windows.to_string() {
         return Err(format!("stage/window mismatch for {stage:?}"));
     }
     let parse_sha = |key: &str| -> Result<String, String> {
@@ -129,16 +129,18 @@ fn parse_config(environment: &BTreeMap<String, String>) -> Result<Config, String
         }
         Ok(value.to_owned())
     };
-    let source_sha = parse_sha("MAMBA_FIXED_ADA_SOURCE_SHA")?;
-    let binary_sha = parse_sha("MAMBA_FIXED_ADA_BINARY_SHA")?;
-    let jsonl = required("MAMBA_FIXED_ADA_JSONL")?;
+    let source_sha = parse_sha("MAMBA_INFERENCE_ADA_SOURCE_SHA")?;
+    let binary_sha = parse_sha("MAMBA_INFERENCE_ADA_BINARY_SHA")?;
+    let jsonl = required("MAMBA_INFERENCE_ADA_JSONL")?;
     if !jsonl.starts_with('/') || !jsonl.ends_with(".jsonl") || jsonl.contains(char::is_whitespace)
     {
-        return Err("MAMBA_FIXED_ADA_JSONL must be an absolute whitespace-free .jsonl path".into());
+        return Err(
+            "MAMBA_INFERENCE_ADA_JSONL must be an absolute whitespace-free .jsonl path".into(),
+        );
     }
-    let literal_text = required("MAMBA_FIXED_ADA_LITERALS")?;
+    let literal_text = required("MAMBA_INFERENCE_ADA_LITERALS")?;
     if literal_text.is_empty() {
-        return Err("MAMBA_FIXED_ADA_LITERALS must not be empty".into());
+        return Err("MAMBA_INFERENCE_ADA_LITERALS must not be empty".into());
     }
     let mut literals = Vec::new();
     for literal in literal_text.split(',') {
@@ -161,16 +163,16 @@ fn parse_config(environment: &BTreeMap<String, String>) -> Result<Config, String
                     "{stage:?} requires the complete canonical literal inventory"
                 ));
             }
-            if environment.contains_key("MAMBA_FIXED_ADA_SCREEN_SHA")
-                || environment.contains_key("MAMBA_FIXED_ADA_SCREEN_ARTIFACT_SHA")
+            if environment.contains_key("MAMBA_INFERENCE_ADA_SCREEN_SHA")
+                || environment.contains_key("MAMBA_INFERENCE_ADA_SCREEN_ARTIFACT_SHA")
             {
                 return Err(format!("{stage:?} must not bind a prior screen"));
             }
             (None, None)
         }
         Stage::Confirm101 => (
-            Some(parse_sha("MAMBA_FIXED_ADA_SCREEN_SHA")?),
-            Some(parse_sha("MAMBA_FIXED_ADA_SCREEN_ARTIFACT_SHA")?),
+            Some(parse_sha("MAMBA_INFERENCE_ADA_SCREEN_SHA")?),
+            Some(parse_sha("MAMBA_INFERENCE_ADA_SCREEN_ARTIFACT_SHA")?),
         ),
         Stage::PostSmoke1 | Stage::Post101 => unreachable!("Task7 parser produced Task8 stage"),
     };
@@ -191,29 +193,29 @@ fn parse_config(environment: &BTreeMap<String, String>) -> Result<Config, String
 
 fn parse_post_config(environment: &BTreeMap<String, String>) -> Result<Config, String> {
     const ALLOWED: [&str; 13] = [
-        "MAMBA_FIXED_ADA_EXACT_POST_AUTO",
-        "MAMBA_FIXED_ADA_VENDOR",
-        "MAMBA_FIXED_ADA_EXACT_POST_STAGE",
-        "MAMBA_FIXED_ADA_EXACT_POST_WINDOWS",
-        "MAMBA_FIXED_ADA_EXACT_POST_TOOLKIT",
-        "MAMBA_FIXED_ADA_EXACT_POST_LITERALS",
-        "MAMBA_FIXED_ADA_EXACT_POST_TUNING_REVISION",
-        "MAMBA_FIXED_ADA_EXACT_POST_SOURCE_SHA",
-        "MAMBA_FIXED_ADA_EXACT_POST_BINARY_SHA",
-        "MAMBA_FIXED_ADA_EXACT_POST_JSONL",
-        "MAMBA_FIXED_VENDOR_TILES",
-        "MAMBA_FIXED_VENDOR_PATHS",
-        "MAMBA_FIXED_VENDOR_EXACT_CC",
+        "MAMBA_INFERENCE_ADA_EXACT_POST_AUTO",
+        "MAMBA_INFERENCE_ADA_VENDOR",
+        "MAMBA_INFERENCE_ADA_EXACT_POST_STAGE",
+        "MAMBA_INFERENCE_ADA_EXACT_POST_WINDOWS",
+        "MAMBA_INFERENCE_ADA_EXACT_POST_TOOLKIT",
+        "MAMBA_INFERENCE_ADA_EXACT_POST_LITERALS",
+        "MAMBA_INFERENCE_ADA_EXACT_POST_TUNING_REVISION",
+        "MAMBA_INFERENCE_ADA_EXACT_POST_SOURCE_SHA",
+        "MAMBA_INFERENCE_ADA_EXACT_POST_BINARY_SHA",
+        "MAMBA_INFERENCE_ADA_EXACT_POST_JSONL",
+        "MAMBA_INFERENCE_VENDOR_TILES",
+        "MAMBA_INFERENCE_VENDOR_PATHS",
+        "MAMBA_INFERENCE_VENDOR_EXACT_CC",
     ];
     for key in environment.keys() {
-        let scoped = key.starts_with("MAMBA_FIXED_ADA_")
-            || key.starts_with("MAMBA_FIXED_VENDOR_")
+        let scoped = key.starts_with("MAMBA_INFERENCE_ADA_")
+            || key.starts_with("MAMBA_INFERENCE_VENDOR_")
             || matches!(
                 key.as_str(),
-                "MAMBA_FIXED_HALF_TILE_CANDIDATE"
-                    | "MAMBA_FIXED_AUTO_VENDOR_ROW"
-                    | "MAMBA_FIXED_AUTO_VENDOR_CELL"
-                    | "MAMBA_FIXED_AUTO_VENDOR_BIAS"
+                "MAMBA_INFERENCE_HALF_TILE_CANDIDATE"
+                    | "MAMBA_INFERENCE_AUTO_VENDOR_ROW"
+                    | "MAMBA_INFERENCE_AUTO_VENDOR_CELL"
+                    | "MAMBA_INFERENCE_AUTO_VENDOR_BIAS"
                     | "NVIDIA_TF32_OVERRIDE"
             );
         if scoped && !ALLOWED.contains(&key.as_str()) {
@@ -227,27 +229,27 @@ fn parse_post_config(environment: &BTreeMap<String, String>) -> Result<Config, S
             .ok_or_else(|| format!("missing {key}"))
     };
     for (key, expected) in [
-        ("MAMBA_FIXED_ADA_EXACT_POST_AUTO", "1"),
-        ("MAMBA_FIXED_ADA_VENDOR", "1"),
-        ("MAMBA_FIXED_ADA_EXACT_POST_TUNING_REVISION", "44"),
-        ("MAMBA_FIXED_VENDOR_TILES", "Legacy,F32Sm89N64CopyPlan"),
-        ("MAMBA_FIXED_VENDOR_PATHS", "eager,graph"),
-        ("MAMBA_FIXED_VENDOR_EXACT_CC", "8.9"),
+        ("MAMBA_INFERENCE_ADA_EXACT_POST_AUTO", "1"),
+        ("MAMBA_INFERENCE_ADA_VENDOR", "1"),
+        ("MAMBA_INFERENCE_ADA_EXACT_POST_TUNING_REVISION", "44"),
+        ("MAMBA_INFERENCE_VENDOR_TILES", "Legacy,F32Sm89N64CopyPlan"),
+        ("MAMBA_INFERENCE_VENDOR_PATHS", "eager,graph"),
+        ("MAMBA_INFERENCE_VENDOR_EXACT_CC", "8.9"),
     ] {
         if required(key)? != expected {
             return Err(format!("{key} must be exactly {expected}"));
         }
     }
-    let toolkit = required("MAMBA_FIXED_ADA_EXACT_POST_TOOLKIT")?;
+    let toolkit = required("MAMBA_INFERENCE_ADA_EXACT_POST_TOOLKIT")?;
     if !matches!(toolkit, "12.8" | "13.0") {
         return Err(format!("unsupported Task8 toolkit {toolkit:?}"));
     }
-    let (stage, windows) = match required("MAMBA_FIXED_ADA_EXACT_POST_STAGE")? {
+    let (stage, windows) = match required("MAMBA_INFERENCE_ADA_EXACT_POST_STAGE")? {
         "smoke1" => (Stage::PostSmoke1, 1),
         "post101" => (Stage::Post101, 101),
         value => return Err(format!("unknown Task8 stage {value:?}")),
     };
-    if required("MAMBA_FIXED_ADA_EXACT_POST_WINDOWS")? != windows.to_string() {
+    if required("MAMBA_INFERENCE_ADA_EXACT_POST_WINDOWS")? != windows.to_string() {
         return Err(format!("Task8 stage/window mismatch for {stage:?}"));
     }
     let parse_sha = |key: &str| -> Result<String, String> {
@@ -261,18 +263,18 @@ fn parse_post_config(environment: &BTreeMap<String, String>) -> Result<Config, S
         }
         Ok(value.to_owned())
     };
-    let literal_text = required("MAMBA_FIXED_ADA_EXACT_POST_LITERALS")?;
+    let literal_text = required("MAMBA_INFERENCE_ADA_EXACT_POST_LITERALS")?;
     let literals = literal_text.split(',').collect::<Vec<_>>();
     if literals != EXACT_LITERALS {
         return Err(
             "Task8 post-AUTO requires the complete canonical exact literal inventory".into(),
         );
     }
-    let jsonl = required("MAMBA_FIXED_ADA_EXACT_POST_JSONL")?;
+    let jsonl = required("MAMBA_INFERENCE_ADA_EXACT_POST_JSONL")?;
     if !jsonl.starts_with('/') || !jsonl.ends_with(".jsonl") || jsonl.contains(char::is_whitespace)
     {
         return Err(
-            "MAMBA_FIXED_ADA_EXACT_POST_JSONL must be an absolute whitespace-free .jsonl path"
+            "MAMBA_INFERENCE_ADA_EXACT_POST_JSONL must be an absolute whitespace-free .jsonl path"
                 .into(),
         );
     }
@@ -283,8 +285,8 @@ fn parse_post_config(environment: &BTreeMap<String, String>) -> Result<Config, S
         windows,
         toolkit: toolkit.to_owned(),
         literals: literals.into_iter().map(str::to_owned).collect(),
-        source_sha: parse_sha("MAMBA_FIXED_ADA_EXACT_POST_SOURCE_SHA")?,
-        binary_sha: parse_sha("MAMBA_FIXED_ADA_EXACT_POST_BINARY_SHA")?,
+        source_sha: parse_sha("MAMBA_INFERENCE_ADA_EXACT_POST_SOURCE_SHA")?,
+        binary_sha: parse_sha("MAMBA_INFERENCE_ADA_EXACT_POST_BINARY_SHA")?,
         screen_sha: None,
         screen_artifact_sha: None,
         jsonl: jsonl.to_owned(),
@@ -420,7 +422,7 @@ fn launch_json(actual: &LaunchContract<'_>) -> String {
         .join(",");
     format!(
         "{{\"symbol\":\"{}\",\"grid\":[{},{},{}],\"block\":[{},{},{}],\"dynamic_shared\":{},\"pointers\":{:?},\"parameter_words\":{:?},\"driver_abi\":[{abi}],\"terminal_rejected\":{}}}",
-        fixed_sm120_tf32_bd_json_escape(actual.symbol),
+        inference_sm120_tf32_bd_json_escape(actual.symbol),
         actual.grid.0,
         actual.grid.1,
         actual.grid.2,
@@ -500,8 +502,8 @@ fn validate_configuration(
     Ok(recomputed)
 }
 
-const SCHEMA: &str = "MambaBiFixedAdaToolkitAdmissionV1";
-const POST_SCHEMA: &str = "MambaBiFixedAdaExactPostAutoV1";
+const SCHEMA: &str = "MambaBiInferenceAdaToolkitAdmissionV1";
+const POST_SCHEMA: &str = "MambaBiInferenceAdaExactPostAutoV1";
 const GUARD_WORDS: usize = 64;
 const CANARY: u32 = 0x5a5a_5a5a;
 
@@ -699,7 +701,7 @@ impl Guarded {
     }
 
     fn words(&self, ctx: &GpuCtx) -> Result<Vec<u32>, String> {
-        let bytes = fixed_explicit_vendor_raw_bytes(ctx, &self.device);
+        let bytes = inference_explicit_vendor_raw_bytes(ctx, &self.device);
         let words = bytes
             .as_chunks::<4>()
             .0
@@ -831,7 +833,7 @@ impl Case {
         let operands = self.operands(arm);
         match (self.mode, arm) {
             (RunMode::Task7, 0) | (RunMode::PostAuto44, 1) => {
-                let selected = launch_fixed_auto_vendor_custom(ctx, operands, self.shape);
+                let selected = launch_inference_auto_vendor_custom(ctx, operands, self.shape);
                 let expected = match self.mode {
                     RunMode::Task7 => self.family.incumbent(),
                     RunMode::PostAuto44 => InferenceTile::F32Sm89N64CopyPlan,
@@ -859,7 +861,7 @@ impl Case {
                 inference_forward_with_tile(ctx, operands, self.shape, InferenceTile::Legacy)
             }
             (_, 2) => {
-                fixed_ada_vendor_launch(
+                inference_ada_vendor_launch(
                     ctx,
                     operands,
                     self.shape,
@@ -868,7 +870,7 @@ impl Case {
                 Ok(())
             }
             (_, 3) => {
-                fixed_ada_vendor_launch(
+                inference_ada_vendor_launch(
                     ctx,
                     operands,
                     self.shape,
@@ -1116,7 +1118,7 @@ fn inspect_custom_graph(
             terminal_rejected,
         };
         if case.family == Family::Tf32 && arm == 0 {
-            fixed_explicit_vendor_rna_wide_graph_contract(
+            inference_explicit_vendor_rna_wide_graph_contract(
                 1,
                 actual.symbol,
                 actual.grid,
@@ -1198,7 +1200,7 @@ fn inspect_vendor_graph(
         }
         rendered.push(format!(
             "{{\"symbol\":\"{}\",\"grid\":[{},{},{}],\"block\":[{},{},{}],\"shared_bytes\":{}}}",
-            fixed_sm120_tf32_bd_json_escape(symbol),
+            inference_sm120_tf32_bd_json_escape(symbol),
             params.gridDimX,
             params.gridDimY,
             params.gridDimZ,
@@ -1249,7 +1251,7 @@ fn source_sha() -> Result<String, String> {
         "src/mamba_ssm/gpu/gemm_bi_inference.rs",
         "src/mamba_ssm/gpu/kernel_identity.rs",
         "tests/gemm_bi_inference_performance.rs",
-        "tests/support/fixed_sm89_toolkit_admission.rs",
+        "tests/support/inference_sm89_toolkit_admission.rs",
     ] {
         digest.update(path.as_bytes());
         digest.update([0]);
@@ -1270,7 +1272,7 @@ fn literal(literal: &str) -> Result<(InferenceShape, bool), String> {
     let (cell, bias) = literal
         .split_once(':')
         .ok_or_else(|| format!("malformed Task7 literal {literal}"))?;
-    let shape = FIXED_AUTO_VENDOR_EXACT_CELLS
+    let shape = INFERENCE_AUTO_VENDOR_EXACT_CELLS
         .iter()
         .find(|candidate| candidate.label == cell)
         .map(|candidate| candidate.shape)
@@ -1423,7 +1425,7 @@ fn prelaunch_gate<T>(
     }
     if expected_artifact.is_some_and(|expected| expected != actual_artifact) {
         return Err(format!(
-            "Task7 Fixed artifact differs from bound screen: {actual_artifact}"
+            "Task7 Inference artifact differs from bound screen: {actual_artifact}"
         ));
     }
     launch()
@@ -1481,9 +1483,9 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
             compiler.nvrtc_library_known, compiler.target
         ));
     }
-    configure_fixed_auto_vendor_custom(&ctx, config.family.policy());
+    configure_inference_auto_vendor_custom(&ctx, config.family.policy());
     let modes = cublas_modes(&ctx)?;
-    let artifact = ctx.kernels.artifact_set_identity().fixed;
+    let artifact = ctx.kernels.artifact_set_identity().inference;
     let artifact_sha = digest_hex(&artifact.artifact_digest);
     let promotion_basis = match config.mode {
         RunMode::Task7 => String::new(),
@@ -1514,8 +1516,8 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
             "\"uuid\":\"{}\",\"cc\":\"8.9\",\"sm_count\":142,",
             "\"compiler_target\":\"sm_89\",\"nvrtc_library_known\":true,",
             "\"source_sha\":\"{}\",\"binary_sha\":\"{}\",",
-            "\"screen_sha\":{},\"screen_artifact_sha\":{},\"fixed_source_digest\":\"{}\",",
-            "\"fixed_invocation_digest\":\"{}\",\"fixed_artifact_digest\":\"{}\",",
+            "\"screen_sha\":{},\"screen_artifact_sha\":{},\"inference_source_digest\":\"{}\",",
+            "\"inference_invocation_digest\":\"{}\",\"inference_artifact_digest\":\"{}\",",
             "\"header_manifest_digest\":\"{}\",\"nvrtc_library_domain\":\"{}\",",
             "\"literal_control\":\"{}\",\"paths\":[\"eager\",\"graph\"],",
             "\"start_parities\":[0,1],\"warmup_eager\":128,\"logical_ops\":20,{}{}"
@@ -1579,13 +1581,13 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
             ));
         }
         finite_order_control(&case, &expected)?;
-        fixed_ada_normalized_error(
+        inference_ada_normalized_error(
             &expected[0],
             &expected[3],
             config.family.custom_tolerance(),
             &format!("Task7 custom numerical {literal_name}"),
         );
-        fixed_ada_normalized_error(
+        inference_ada_normalized_error(
             &expected[2],
             &expected[3],
             0.0025,
@@ -1624,7 +1626,7 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
                 )
             } else {
                 let bias_symbol = has_bias.then_some("bias_broadcast");
-                let existing = fixed_explicit_vendor_graph_inventory(
+                let existing = inference_explicit_vendor_graph_inventory(
                     &graph,
                     "Task7 Fast",
                     None,
@@ -1725,11 +1727,11 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
                 for mut observation in scheduled {
                     let arm = observation.arm;
                     observation.us = if path == "eager" {
-                        fixed_ada_event_window_us(&ctx, 20, || {
+                        inference_ada_event_window_us(&ctx, 20, || {
                             case.launch(&ctx, arm).expect("Task7 timed eager launch")
                         })
                     } else {
-                        fixed_ada_event_window_us(&ctx, 1, || {
+                        inference_ada_event_window_us(&ctx, 1, || {
                             twenty[arm].launch().expect("Task7 timed graph launch")
                         }) / 20.0
                     };
@@ -1900,56 +1902,65 @@ mod tests {
 
     fn exact_screen() -> BTreeMap<String, String> {
         BTreeMap::from([
-            ("MAMBA_FIXED_ADA_TOOLKIT_ADMISSION".into(), "1".into()),
-            ("MAMBA_FIXED_ADA_VENDOR".into(), "1".into()),
-            ("MAMBA_FIXED_ADA_ROWS".into(), "f32_exact_fast".into()),
-            ("MAMBA_FIXED_ADA_LITERALS".into(), EXACT_LITERALS.join(",")),
-            ("MAMBA_FIXED_ADA_WINDOWS".into(), "21".into()),
-            ("MAMBA_FIXED_ADA_TOOLKIT".into(), "12.8".into()),
-            ("MAMBA_FIXED_ADA_TUNING_REVISION".into(), "43".into()),
-            ("MAMBA_FIXED_ADA_STAGE".into(), "screen21".into()),
-            ("MAMBA_FIXED_ADA_SOURCE_SHA".into(), sha('a')),
-            ("MAMBA_FIXED_ADA_BINARY_SHA".into(), sha('b')),
+            ("MAMBA_INFERENCE_ADA_TOOLKIT_ADMISSION".into(), "1".into()),
+            ("MAMBA_INFERENCE_ADA_VENDOR".into(), "1".into()),
+            ("MAMBA_INFERENCE_ADA_ROWS".into(), "f32_exact_fast".into()),
             (
-                "MAMBA_FIXED_ADA_JSONL".into(),
+                "MAMBA_INFERENCE_ADA_LITERALS".into(),
+                EXACT_LITERALS.join(","),
+            ),
+            ("MAMBA_INFERENCE_ADA_WINDOWS".into(), "21".into()),
+            ("MAMBA_INFERENCE_ADA_TOOLKIT".into(), "12.8".into()),
+            ("MAMBA_INFERENCE_ADA_TUNING_REVISION".into(), "43".into()),
+            ("MAMBA_INFERENCE_ADA_STAGE".into(), "screen21".into()),
+            ("MAMBA_INFERENCE_ADA_SOURCE_SHA".into(), sha('a')),
+            ("MAMBA_INFERENCE_ADA_BINARY_SHA".into(), sha('b')),
+            (
+                "MAMBA_INFERENCE_ADA_JSONL".into(),
                 "/root/evidence/task7-screen.jsonl".into(),
             ),
             (
-                "MAMBA_FIXED_VENDOR_TILES".into(),
+                "MAMBA_INFERENCE_VENDOR_TILES".into(),
                 "F32Sm89N64CopyPlan".into(),
             ),
-            ("MAMBA_FIXED_VENDOR_PATHS".into(), "eager,graph".into()),
-            ("MAMBA_FIXED_VENDOR_EXACT_CC".into(), "8.9".into()),
+            ("MAMBA_INFERENCE_VENDOR_PATHS".into(), "eager,graph".into()),
+            ("MAMBA_INFERENCE_VENDOR_EXACT_CC".into(), "8.9".into()),
         ])
     }
 
     fn exact_post(stage: &str, windows: &str) -> BTreeMap<String, String> {
         BTreeMap::from([
-            ("MAMBA_FIXED_ADA_EXACT_POST_AUTO".into(), "1".into()),
-            ("MAMBA_FIXED_ADA_VENDOR".into(), "1".into()),
-            ("MAMBA_FIXED_ADA_EXACT_POST_STAGE".into(), stage.into()),
-            ("MAMBA_FIXED_ADA_EXACT_POST_WINDOWS".into(), windows.into()),
-            ("MAMBA_FIXED_ADA_EXACT_POST_TOOLKIT".into(), "12.8".into()),
+            ("MAMBA_INFERENCE_ADA_EXACT_POST_AUTO".into(), "1".into()),
+            ("MAMBA_INFERENCE_ADA_VENDOR".into(), "1".into()),
+            ("MAMBA_INFERENCE_ADA_EXACT_POST_STAGE".into(), stage.into()),
             (
-                "MAMBA_FIXED_ADA_EXACT_POST_LITERALS".into(),
+                "MAMBA_INFERENCE_ADA_EXACT_POST_WINDOWS".into(),
+                windows.into(),
+            ),
+            (
+                "MAMBA_INFERENCE_ADA_EXACT_POST_TOOLKIT".into(),
+                "12.8".into(),
+            ),
+            (
+                "MAMBA_INFERENCE_ADA_EXACT_POST_LITERALS".into(),
                 EXACT_LITERALS.join(","),
             ),
             (
-                "MAMBA_FIXED_ADA_EXACT_POST_TUNING_REVISION".into(),
+                "MAMBA_INFERENCE_ADA_EXACT_POST_TUNING_REVISION".into(),
                 "44".into(),
             ),
-            ("MAMBA_FIXED_ADA_EXACT_POST_SOURCE_SHA".into(), sha('c')),
-            ("MAMBA_FIXED_ADA_EXACT_POST_BINARY_SHA".into(), sha('d')),
+            ("MAMBA_INFERENCE_ADA_EXACT_POST_SOURCE_SHA".into(), sha('c')),
+            ("MAMBA_INFERENCE_ADA_EXACT_POST_BINARY_SHA".into(), sha('d')),
             (
-                "MAMBA_FIXED_ADA_EXACT_POST_JSONL".into(),
+                "MAMBA_INFERENCE_ADA_EXACT_POST_JSONL".into(),
                 "/root/evidence/task8-post.jsonl".into(),
             ),
             (
-                "MAMBA_FIXED_VENDOR_TILES".into(),
+                "MAMBA_INFERENCE_VENDOR_TILES".into(),
                 "Legacy,F32Sm89N64CopyPlan".into(),
             ),
-            ("MAMBA_FIXED_VENDOR_PATHS".into(), "eager,graph".into()),
-            ("MAMBA_FIXED_VENDOR_EXACT_CC".into(), "8.9".into()),
+            ("MAMBA_INFERENCE_VENDOR_PATHS".into(), "eager,graph".into()),
+            ("MAMBA_INFERENCE_VENDOR_EXACT_CC".into(), "8.9".into()),
         ])
     }
 
@@ -1961,7 +1972,7 @@ mod tests {
         assert_eq!(smoke.stage, Stage::PostSmoke1);
         assert_eq!(smoke.windows, 1);
         assert_eq!(smoke.literals, EXACT_LITERALS.map(str::to_owned));
-        assert_eq!(smoke.mode.schema(), "MambaBiFixedAdaExactPostAutoV1");
+        assert_eq!(smoke.mode.schema(), "MambaBiInferenceAdaExactPostAutoV1");
         assert_eq!(smoke.mode.tuning_revision(), 44);
         assert_eq!(smoke.mode.arms(), ["Legacy", "AUTO", "Fast"]);
         assert_eq!(
@@ -1979,19 +1990,19 @@ mod tests {
     #[test]
     fn post44_controls_reject_missing_malformed_stale_family_or_subset() {
         for key in [
-            "MAMBA_FIXED_ADA_EXACT_POST_AUTO",
-            "MAMBA_FIXED_ADA_VENDOR",
-            "MAMBA_FIXED_ADA_EXACT_POST_STAGE",
-            "MAMBA_FIXED_ADA_EXACT_POST_WINDOWS",
-            "MAMBA_FIXED_ADA_EXACT_POST_TOOLKIT",
-            "MAMBA_FIXED_ADA_EXACT_POST_LITERALS",
-            "MAMBA_FIXED_ADA_EXACT_POST_TUNING_REVISION",
-            "MAMBA_FIXED_ADA_EXACT_POST_SOURCE_SHA",
-            "MAMBA_FIXED_ADA_EXACT_POST_BINARY_SHA",
-            "MAMBA_FIXED_ADA_EXACT_POST_JSONL",
-            "MAMBA_FIXED_VENDOR_TILES",
-            "MAMBA_FIXED_VENDOR_PATHS",
-            "MAMBA_FIXED_VENDOR_EXACT_CC",
+            "MAMBA_INFERENCE_ADA_EXACT_POST_AUTO",
+            "MAMBA_INFERENCE_ADA_VENDOR",
+            "MAMBA_INFERENCE_ADA_EXACT_POST_STAGE",
+            "MAMBA_INFERENCE_ADA_EXACT_POST_WINDOWS",
+            "MAMBA_INFERENCE_ADA_EXACT_POST_TOOLKIT",
+            "MAMBA_INFERENCE_ADA_EXACT_POST_LITERALS",
+            "MAMBA_INFERENCE_ADA_EXACT_POST_TUNING_REVISION",
+            "MAMBA_INFERENCE_ADA_EXACT_POST_SOURCE_SHA",
+            "MAMBA_INFERENCE_ADA_EXACT_POST_BINARY_SHA",
+            "MAMBA_INFERENCE_ADA_EXACT_POST_JSONL",
+            "MAMBA_INFERENCE_VENDOR_TILES",
+            "MAMBA_INFERENCE_VENDOR_PATHS",
+            "MAMBA_INFERENCE_VENDOR_EXACT_CC",
         ] {
             let mut environment = exact_post("smoke1", "1");
             environment.remove(key);
@@ -2001,13 +2012,13 @@ mod tests {
             );
         }
         for (key, value) in [
-            ("MAMBA_FIXED_ADA_EXACT_POST_AUTO", "true"),
-            ("MAMBA_FIXED_ADA_EXACT_POST_STAGE", "confirm101"),
-            ("MAMBA_FIXED_ADA_EXACT_POST_WINDOWS", "21"),
-            ("MAMBA_FIXED_ADA_EXACT_POST_TOOLKIT", "13.2"),
-            ("MAMBA_FIXED_ADA_EXACT_POST_TUNING_REVISION", "43"),
-            ("MAMBA_FIXED_ADA_EXACT_POST_LITERALS", "hot_a:0"),
-            ("MAMBA_FIXED_VENDOR_TILES", "F32Sm89N64CopyPlan"),
+            ("MAMBA_INFERENCE_ADA_EXACT_POST_AUTO", "true"),
+            ("MAMBA_INFERENCE_ADA_EXACT_POST_STAGE", "confirm101"),
+            ("MAMBA_INFERENCE_ADA_EXACT_POST_WINDOWS", "21"),
+            ("MAMBA_INFERENCE_ADA_EXACT_POST_TOOLKIT", "13.2"),
+            ("MAMBA_INFERENCE_ADA_EXACT_POST_TUNING_REVISION", "43"),
+            ("MAMBA_INFERENCE_ADA_EXACT_POST_LITERALS", "hot_a:0"),
+            ("MAMBA_INFERENCE_VENDOR_TILES", "F32Sm89N64CopyPlan"),
         ] {
             let mut environment = exact_post("smoke1", "1");
             environment.insert(key.into(), value.into());
@@ -2017,10 +2028,10 @@ mod tests {
             );
         }
         for stale in [
-            "MAMBA_FIXED_ADA_TOOLKIT_ADMISSION",
-            "MAMBA_FIXED_ADA_ROWS",
-            "MAMBA_FIXED_ADA_SCREEN_SHA",
-            "MAMBA_FIXED_ADA_EXACT_POST_FAMILY",
+            "MAMBA_INFERENCE_ADA_TOOLKIT_ADMISSION",
+            "MAMBA_INFERENCE_ADA_ROWS",
+            "MAMBA_INFERENCE_ADA_SCREEN_SHA",
+            "MAMBA_INFERENCE_ADA_EXACT_POST_FAMILY",
             "NVIDIA_TF32_OVERRIDE",
         ] {
             let mut environment = exact_post("smoke1", "1");
@@ -2053,12 +2064,15 @@ mod tests {
         );
 
         let mut tf32 = exact_screen();
-        tf32.insert("MAMBA_FIXED_ADA_ROWS".into(), "tf32".into());
-        tf32.insert("MAMBA_FIXED_ADA_LITERALS".into(), TF32_LITERALS.join(","));
-        tf32.insert("MAMBA_FIXED_VENDOR_TILES".into(), "Tf32M64S2".into());
-        tf32.insert("MAMBA_FIXED_ADA_TOOLKIT".into(), "13.0".into());
-        tf32.insert("MAMBA_FIXED_ADA_STAGE".into(), "smoke1".into());
-        tf32.insert("MAMBA_FIXED_ADA_WINDOWS".into(), "1".into());
+        tf32.insert("MAMBA_INFERENCE_ADA_ROWS".into(), "tf32".into());
+        tf32.insert(
+            "MAMBA_INFERENCE_ADA_LITERALS".into(),
+            TF32_LITERALS.join(","),
+        );
+        tf32.insert("MAMBA_INFERENCE_VENDOR_TILES".into(), "Tf32M64S2".into());
+        tf32.insert("MAMBA_INFERENCE_ADA_TOOLKIT".into(), "13.0".into());
+        tf32.insert("MAMBA_INFERENCE_ADA_STAGE".into(), "smoke1".into());
+        tf32.insert("MAMBA_INFERENCE_ADA_WINDOWS".into(), "1".into());
         let config = parse_config(&tf32).unwrap();
         assert_eq!(
             (config.family, config.stage, config.windows),
@@ -2069,20 +2083,20 @@ mod tests {
     #[test]
     fn strict_controls_reject_missing_malformed_stale_or_cartesian_inputs() {
         for key in [
-            "MAMBA_FIXED_ADA_TOOLKIT_ADMISSION",
-            "MAMBA_FIXED_ADA_VENDOR",
-            "MAMBA_FIXED_ADA_ROWS",
-            "MAMBA_FIXED_ADA_LITERALS",
-            "MAMBA_FIXED_ADA_WINDOWS",
-            "MAMBA_FIXED_ADA_TOOLKIT",
-            "MAMBA_FIXED_ADA_TUNING_REVISION",
-            "MAMBA_FIXED_ADA_STAGE",
-            "MAMBA_FIXED_ADA_SOURCE_SHA",
-            "MAMBA_FIXED_ADA_BINARY_SHA",
-            "MAMBA_FIXED_ADA_JSONL",
-            "MAMBA_FIXED_VENDOR_TILES",
-            "MAMBA_FIXED_VENDOR_PATHS",
-            "MAMBA_FIXED_VENDOR_EXACT_CC",
+            "MAMBA_INFERENCE_ADA_TOOLKIT_ADMISSION",
+            "MAMBA_INFERENCE_ADA_VENDOR",
+            "MAMBA_INFERENCE_ADA_ROWS",
+            "MAMBA_INFERENCE_ADA_LITERALS",
+            "MAMBA_INFERENCE_ADA_WINDOWS",
+            "MAMBA_INFERENCE_ADA_TOOLKIT",
+            "MAMBA_INFERENCE_ADA_TUNING_REVISION",
+            "MAMBA_INFERENCE_ADA_STAGE",
+            "MAMBA_INFERENCE_ADA_SOURCE_SHA",
+            "MAMBA_INFERENCE_ADA_BINARY_SHA",
+            "MAMBA_INFERENCE_ADA_JSONL",
+            "MAMBA_INFERENCE_VENDOR_TILES",
+            "MAMBA_INFERENCE_VENDOR_PATHS",
+            "MAMBA_INFERENCE_VENDOR_EXACT_CC",
         ] {
             let mut environment = exact_screen();
             environment.remove(key);
@@ -2092,18 +2106,18 @@ mod tests {
             );
         }
         for (key, value) in [
-            ("MAMBA_FIXED_ADA_TOOLKIT_ADMISSION", "true"),
-            ("MAMBA_FIXED_ADA_VENDOR", "0"),
-            ("MAMBA_FIXED_ADA_ROWS", "f32_exact"),
-            ("MAMBA_FIXED_ADA_WINDOWS", "101"),
-            ("MAMBA_FIXED_ADA_TOOLKIT", "13.2"),
-            ("MAMBA_FIXED_ADA_TUNING_REVISION", "42"),
-            ("MAMBA_FIXED_ADA_STAGE", "screen"),
-            ("MAMBA_FIXED_ADA_SOURCE_SHA", "ABC"),
-            ("MAMBA_FIXED_ADA_BINARY_SHA", "abc"),
-            ("MAMBA_FIXED_VENDOR_TILES", "Legacy"),
-            ("MAMBA_FIXED_VENDOR_PATHS", "graph,eager"),
-            ("MAMBA_FIXED_VENDOR_EXACT_CC", "89"),
+            ("MAMBA_INFERENCE_ADA_TOOLKIT_ADMISSION", "true"),
+            ("MAMBA_INFERENCE_ADA_VENDOR", "0"),
+            ("MAMBA_INFERENCE_ADA_ROWS", "f32_exact"),
+            ("MAMBA_INFERENCE_ADA_WINDOWS", "101"),
+            ("MAMBA_INFERENCE_ADA_TOOLKIT", "13.2"),
+            ("MAMBA_INFERENCE_ADA_TUNING_REVISION", "42"),
+            ("MAMBA_INFERENCE_ADA_STAGE", "screen"),
+            ("MAMBA_INFERENCE_ADA_SOURCE_SHA", "ABC"),
+            ("MAMBA_INFERENCE_ADA_BINARY_SHA", "abc"),
+            ("MAMBA_INFERENCE_VENDOR_TILES", "Legacy"),
+            ("MAMBA_INFERENCE_VENDOR_PATHS", "graph,eager"),
+            ("MAMBA_INFERENCE_VENDOR_EXACT_CC", "89"),
         ] {
             let mut environment = exact_screen();
             environment.insert(key.into(), value.into());
@@ -2113,12 +2127,12 @@ mod tests {
             );
         }
         for stale in [
-            "MAMBA_FIXED_ADA_CELLS",
-            "MAMBA_FIXED_ADA_BIAS",
-            "MAMBA_FIXED_HALF_TILE_CANDIDATE",
-            "MAMBA_FIXED_AUTO_VENDOR_ROW",
-            "MAMBA_FIXED_ADA_S3_PAIR",
-            "MAMBA_FIXED_VENDOR_FORCE_CANDIDATE",
+            "MAMBA_INFERENCE_ADA_CELLS",
+            "MAMBA_INFERENCE_ADA_BIAS",
+            "MAMBA_INFERENCE_HALF_TILE_CANDIDATE",
+            "MAMBA_INFERENCE_AUTO_VENDOR_ROW",
+            "MAMBA_INFERENCE_ADA_S3_PAIR",
+            "MAMBA_INFERENCE_VENDOR_FORCE_CANDIDATE",
             "NVIDIA_TF32_OVERRIDE",
         ] {
             let mut environment = exact_screen();
@@ -2139,22 +2153,25 @@ mod tests {
             "hot_a:0,hot_a:1,hot_b:0,hot_b:1,hot_d:0,hot_d:1,hot_e:0",
         ] {
             let mut environment = exact_screen();
-            environment.insert("MAMBA_FIXED_ADA_LITERALS".into(), literals.into());
+            environment.insert("MAMBA_INFERENCE_ADA_LITERALS".into(), literals.into());
             assert!(parse_config(&environment).is_err(), "accepted {literals:?}");
         }
 
         let mut confirm = exact_screen();
-        confirm.insert("MAMBA_FIXED_ADA_STAGE".into(), "confirm101".into());
-        confirm.insert("MAMBA_FIXED_ADA_WINDOWS".into(), "101".into());
-        confirm.insert("MAMBA_FIXED_ADA_LITERALS".into(), "hot_b:1,hot_e:0".into());
-        confirm.insert("MAMBA_FIXED_ADA_SCREEN_SHA".into(), sha('c'));
-        confirm.insert("MAMBA_FIXED_ADA_SCREEN_ARTIFACT_SHA".into(), sha('d'));
+        confirm.insert("MAMBA_INFERENCE_ADA_STAGE".into(), "confirm101".into());
+        confirm.insert("MAMBA_INFERENCE_ADA_WINDOWS".into(), "101".into());
+        confirm.insert(
+            "MAMBA_INFERENCE_ADA_LITERALS".into(),
+            "hot_b:1,hot_e:0".into(),
+        );
+        confirm.insert("MAMBA_INFERENCE_ADA_SCREEN_SHA".into(), sha('c'));
+        confirm.insert("MAMBA_INFERENCE_ADA_SCREEN_ARTIFACT_SHA".into(), sha('d'));
         assert_eq!(
             parse_config(&confirm).unwrap().literals,
             ["hot_b:1", "hot_e:0"]
         );
         for bad in ["", "hot_c:0", "hot_b:1,hot_b:1"] {
-            confirm.insert("MAMBA_FIXED_ADA_LITERALS".into(), bad.into());
+            confirm.insert("MAMBA_INFERENCE_ADA_LITERALS".into(), bad.into());
             assert!(parse_config(&confirm).is_err(), "accepted confirm {bad:?}");
         }
     }
@@ -2276,7 +2293,7 @@ mod tests {
         assert_eq!(Family::Tf32.incumbent(), InferenceTile::Tf32RnaM128N128S3);
         assert_ne!(Family::Tf32.incumbent(), InferenceTile::Tf32M128S2);
         let bundle = [1.0f32.to_bits(), 0, 4621, 1928, 384, 1928, 384, 384];
-        fixed_explicit_vendor_rna_wide_graph_contract(
+        inference_explicit_vendor_rna_wide_graph_contract(
             1,
             "nn_rna_wide_tf32_m128n128_bk32_s3",
             (111, 1, 1),
@@ -2305,7 +2322,7 @@ mod tests {
         };
         assert!(validate_launch(&old_incumbent, &expected).is_err());
         assert!(
-            fixed_explicit_vendor_rna_wide_graph_contract(
+            inference_explicit_vendor_rna_wide_graph_contract(
                 1,
                 expected.symbol,
                 expected.grid,

@@ -269,12 +269,12 @@ const SHAPES: &[(usize, usize)] = &[
     (768, 384),
 ];
 
-/// Fixed family, f32 FFMA tile: batch-invariant BY CONSTRUCTION — the
+/// Inference family, f32 FFMA tile: batch-invariant BY CONSTRUCTION — the
 /// declaration is Strict, and this test is what turns that phrase from
 /// prose into a gate (its only prior test was tolerance-based).
 #[test]
 #[ignore = "needs a CUDA device"]
-fn fixed_f32_is_strictly_invariant() {
+fn inference_f32_is_strictly_invariant() {
     let (_dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Inference);
@@ -298,20 +298,20 @@ fn fixed_f32_is_strictly_invariant() {
                 None,
                 (m, k, n),
             )
-            .expect("fixed f32 forward");
+            .expect("inference f32 forward");
             fx.prefix_bits(&ctx, m)
         };
         let obs = observed_boundaries(&mut launch, k, n);
-        assert_contract("Fixed/f32", k, n, Invariance::Strict, &obs);
-        println!("Fixed/f32   K={k:<5} N={n:<5} boundaries: {obs:?}");
+        assert_contract("Inference/f32", k, n, Invariance::Strict, &obs);
+        println!("Inference/f32   K={k:<5} N={n:<5} boundaries: {obs:?}");
     }
 }
 
-/// Fixed family, WMMA bf16 tile (contract C3): also declared Strict — one
+/// Inference family, WMMA bf16 tile (contract C3): also declared Strict — one
 /// CTA per tile, fixed K sequence, no M anywhere in the dispatch.
 #[test]
 #[ignore = "needs a CUDA device"]
-fn fixed_bf16_is_strictly_invariant() {
+fn inference_bf16_is_strictly_invariant() {
     let (_dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Inference);
@@ -335,12 +335,12 @@ fn fixed_bf16_is_strictly_invariant() {
                 None,
                 (m, k, n),
             )
-            .expect("fixed bf16 forward");
+            .expect("inference bf16 forward");
             fx.prefix_bits(&ctx, m)
         };
         let obs = observed_boundaries(&mut launch, k, n);
-        assert_contract("Fixed/bf16", k, n, Invariance::Strict, &obs);
-        println!("Fixed/bf16  K={k:<5} N={n:<5} boundaries: {obs:?}");
+        assert_contract("Inference/bf16", k, n, Invariance::Strict, &obs);
+        println!("Inference/bf16  K={k:<5} N={n:<5} boundaries: {obs:?}");
     }
 }
 
@@ -514,7 +514,7 @@ fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
 /// every position (L2: bits depend on the row's vector, not its index).
 #[test]
 #[ignore = "needs a CUDA device"]
-fn fixed_f32_row_position_invariance() {
+fn inference_f32_row_position_invariance() {
     let (_dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Inference);
@@ -546,7 +546,7 @@ fn fixed_f32_row_position_invariance() {
             None,
             (m, k, n),
         )
-        .expect("fixed f32 forward");
+        .expect("inference f32 forward");
         let full = c.to_cpu(&ctx.stream).expect("C D2H");
         let bits: Vec<u32> = full[pos * n..(pos + 1) * n]
             .iter()
@@ -563,7 +563,7 @@ fn fixed_f32_row_position_invariance() {
         let _ = &mut c;
     }
     println!(
-        "Fixed/f32 position invariance: {} positions identical",
+        "Inference/f32 position invariance: {} positions identical",
         positions.len()
     );
 }

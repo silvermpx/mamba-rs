@@ -1,11 +1,11 @@
-//! Independent SM120 exact-N64 production qualification with current incumbent AUTO.
-//! Observed/unlocked telemetry; no Ada qualification source or semantics are changed.
+//! Independent exact-N64 protocol; no historical comparator semantics are changed.
 
 use super::{
     CStr, CudaGraph, DtypedBuf, F32TriadPolicy, GpuCtx, GpuDevice, InferenceFwdOperands,
     InferenceShape, InferenceTile, TypedPtr, WeightDtype, capture_into_graph, digest_hex,
-    inference_forward_f32_legacy_baseline, inference_forward_with_tile, launch_sm120_exact_auto,
-    percentile, sm120_exact_event_window_us, sm120_exact_vendor_launch,
+    inference_ada_event_window_us, inference_ada_vendor_launch,
+    inference_forward_f32_legacy_baseline, inference_forward_with_tile,
+    launch_inference_auto_vendor_custom, percentile,
 };
 use cudarc::driver::{CudaFunction, sys};
 use sha2::{Digest, Sha256};
@@ -174,248 +174,8 @@ fn certificate(corpus: Corpus, words: [u32; 4], input: ProofInput<'_>) -> Result
     Ok(proof)
 }
 
-const CANDIDATE: &str = "nn_sm120_f32_n64_copyplan";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Candidate {
-    CopyPlan,
-    Sliced,
-}
-
-impl Candidate {
-    fn parse(value: Option<&str>) -> Result<Self, String> {
-        match value {
-            None | Some("copyplan") => Ok(Self::CopyPlan),
-            Some("sliced") => Ok(Self::Sliced),
-            Some(other) => Err(format!(
-                "MAMBA_FIXED_SM120_EXACT_N64_CANDIDATE only accepts copyplan or sliced, got {other:?}"
-            )),
-        }
-    }
-
-    fn tile(self) -> InferenceTile {
-        match self {
-            Self::CopyPlan => InferenceTile::F32Sm120N64CopyPlan,
-            Self::Sliced => InferenceTile::F32Sm120N64Sliced,
-        }
-    }
-
-    fn symbol(self) -> &'static str {
-        match self {
-            Self::CopyPlan => CANDIDATE,
-            Self::Sliced => "nn_sm120_f32_n64_sliced",
-        }
-    }
-}
-
-#[test]
-fn exact_n64_candidate_cpu_selection_defaults_and_rejects_unknown_values() {
-    assert_eq!(Candidate::parse(None).unwrap(), Candidate::CopyPlan);
-    assert_eq!(
-        Candidate::parse(Some("copyplan")).unwrap(),
-        Candidate::CopyPlan
-    );
-    assert_eq!(Candidate::parse(Some("sliced")).unwrap(), Candidate::Sliced);
-    for bad in [
-        "",
-        "auto",
-        "CopyPlan",
-        "SLICED",
-        "sliced ",
-        "copyplan,sliced",
-    ] {
-        assert!(
-            Candidate::parse(Some(bad)).is_err(),
-            "invalid candidate {bad:?}"
-        );
-    }
-    assert_eq!(
-        Candidate::CopyPlan.tile(),
-        InferenceTile::F32Sm120N64CopyPlan
-    );
-    assert_eq!(Candidate::CopyPlan.symbol(), "nn_sm120_f32_n64_copyplan");
-    assert_eq!(Candidate::Sliced.tile(), InferenceTile::F32Sm120N64Sliced);
-    assert_eq!(Candidate::Sliced.symbol(), "nn_sm120_f32_n64_sliced");
-}
-
-fn candidate_own_admission(
-    candidate: Candidate,
-    actual_auto: InferenceTile,
-    cell: &str,
-    has_bias: bool,
-    protocol: &Protocol,
-    legacy_p95: &[f64],
-    auto_p95: &[f64],
-) -> bool {
-    if protocol.diagnostic_fast {
-        return false;
-    }
-    if candidate == Candidate::Sliced {
-        // Sliced was withdrawn from AUTO after its production vendor gate.
-        // A fresh force qualification must beat the retained actual copyplan
-        // as well as Legacy; it may never excuse a sliced self-comparison.
-        return cell == "hot_b"
-            && !has_bias
-            && matches!(
-                actual_auto,
-                InferenceTile::F32Sm120N64CopyPlan | InferenceTile::F32Sm120TmaFmaM128N64
-            )
-            && own_admission(
-                cell,
-                protocol.windows,
-                &protocol.paths,
-                legacy_p95,
-                auto_p95,
-            );
-    }
-    if protocol.auto_phase.as_deref() == Some("promoted") && actual_auto == candidate.tile() {
-        admission(cell, protocol.windows, &protocol.paths, legacy_p95)
-    } else {
-        own_admission(
-            cell,
-            protocol.windows,
-            &protocol.paths,
-            legacy_p95,
-            auto_p95,
-        )
-    }
-}
-
-#[test]
-fn exact_n64_candidate_cpu_sliced_b0_requires_independent_auto_comparison() {
-    let mut protocol = Protocol {
-        diagnostic_fast: false,
-        cells: vec![1],
-        biases: vec![0],
-        paths: vec![0, 1],
-        windows: 101,
-        auto_phase: Some("promoted".into()),
-    };
-    let win = [0.9; 4];
-    let self_noise = [1.02; 4];
-    assert!(!candidate_own_admission(
-        Candidate::Sliced,
-        InferenceTile::F32Sm120N64Sliced,
-        "hot_b",
-        false,
-        &protocol,
-        &win,
-        &self_noise
-    ));
-    assert!(
-        !candidate_own_admission(
-            Candidate::Sliced,
-            InferenceTile::F32Sm120N64Sliced,
-            "hot_b",
-            false,
-            &protocol,
-            &win,
-            &win
-        ),
-        "unqualified sliced AUTO cannot certify itself"
-    );
-    assert!(candidate_own_admission(
-        Candidate::Sliced,
-        InferenceTile::F32Sm120N64CopyPlan,
-        "hot_b",
-        false,
-        &protocol,
-        &win,
-        &win
-    ));
-    assert!(candidate_own_admission(
-        Candidate::Sliced,
-        InferenceTile::F32Sm120TmaFmaM128N64,
-        "hot_b",
-        false,
-        &protocol,
-        &win,
-        &win
-    ));
-    assert!(!candidate_own_admission(
-        Candidate::CopyPlan,
-        InferenceTile::F32Sm120N64Sliced,
-        "hot_b",
-        false,
-        &protocol,
-        &win,
-        &self_noise
-    ));
-    assert!(!candidate_own_admission(
-        Candidate::Sliced,
-        InferenceTile::F32Sm120N64CopyPlan,
-        "hot_b",
-        false,
-        &protocol,
-        &win,
-        &self_noise
-    ));
-    assert!(candidate_own_admission(
-        Candidate::CopyPlan,
-        InferenceTile::F32Sm120N64CopyPlan,
-        "hot_e",
-        true,
-        &protocol,
-        &win,
-        &self_noise
-    ));
-    for (cell, bias) in [("hot_b", true), ("hot_e", false), ("hot_a", false)] {
-        assert!(!candidate_own_admission(
-            Candidate::Sliced,
-            InferenceTile::F32Sm120N64Sliced,
-            cell,
-            bias,
-            &protocol,
-            &win,
-            &win
-        ));
-    }
-    for bad in [vec![0.9; 3], vec![1.0; 4], vec![f64::NAN; 4], vec![0.0; 4]] {
-        assert!(!candidate_own_admission(
-            Candidate::Sliced,
-            InferenceTile::F32Sm120N64Sliced,
-            "hot_b",
-            false,
-            &protocol,
-            &bad,
-            &win
-        ));
-    }
-    protocol.windows = 21;
-    assert!(!candidate_own_admission(
-        Candidate::Sliced,
-        InferenceTile::F32Sm120N64Sliced,
-        "hot_b",
-        false,
-        &protocol,
-        &win,
-        &win
-    ));
-    protocol.windows = 101;
-    protocol.paths = vec![0];
-    assert!(!candidate_own_admission(
-        Candidate::Sliced,
-        InferenceTile::F32Sm120N64Sliced,
-        "hot_b",
-        false,
-        &protocol,
-        &win,
-        &win
-    ));
-    protocol.paths = vec![0, 1];
-    protocol.auto_phase = None;
-    assert!(!candidate_own_admission(
-        Candidate::Sliced,
-        InferenceTile::F32Sm120N64Sliced,
-        "hot_b",
-        false,
-        &protocol,
-        &win,
-        &self_noise
-    ));
-}
+const CANDIDATE: &str = "nn_sm89_f32_n64_copyplan";
 const LEGACY: &str = "f32_f32_s2";
-const N128: &str = "f32_f32_n128_s2";
 const ORACLE: &str = "f32_f32";
 const GUARD: usize = 32;
 const CANARY: u32 = 0x419a0000; // 19.25, checked as raw words.
@@ -434,7 +194,7 @@ fn resource_contract(observed: [i32; 6]) -> Result<(), String> {
     Ok(())
 }
 fn admission(cell: &str, windows: usize, paths: &[usize], own_ratios: &[f64]) -> bool {
-    matches!(cell, "hot_e" | "hot_b")
+    matches!(cell, "hot_a" | "hot_b" | "hot_d" | "hot_e")
         && windows == 101
         && paths.len() == 2
         && paths.contains(&0)
@@ -445,67 +205,30 @@ fn admission(cell: &str, windows: usize, paths: &[usize], own_ratios: &[f64]) ->
             .all(|r| r.is_finite() && *r > 0.0 && *r < 1.0)
 }
 
-// Independent literals: neither phase may be inferred from the route returned
-// by production or from the selected timing subset.
-fn expected_auto(
-    phase: &str,
-    shape: InferenceShape,
-    has_bias: bool,
-    t256_loaded: bool,
-) -> Result<InferenceTile, String> {
-    let dims = (shape.m, shape.k, shape.n);
-    match phase {
-        "incumbent" => Ok(if matches!(dims, (4621, 384, 1928) | (4621, 768, 2304)) {
-            InferenceTile::F32N128S2
-        } else {
-            InferenceTile::Legacy
-        }),
-        "promoted" => Ok(if dims == (4621, 384, 1928) && !has_bias {
-            InferenceTile::F32Sm120TmaFmaM64N128
-        } else if dims == (4621, 384, 1928) && t256_loaded {
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
-        } else if dims == (4621, 384, 1928) {
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
-        } else if dims == (4621, 768, 2304) && !has_bias {
-            InferenceTile::F32Sm120TmaFmaM128N64
-        } else if dims == (4621, 768, 2304) && has_bias {
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
-        } else if dims == (4621, 1928, 384) && has_bias {
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96
-        } else if matches!(dims, (2048, 2304, 768) | (2048, 768, 2304)) {
-            InferenceTile::F32Sm120N64CopyPlan
-        } else {
-            InferenceTile::Legacy
-        }),
-        other => Err(format!(
-            "MAMBA_FIXED_SM120_EXACT_N64_AUTO only accepts incumbent or promoted, got {other:?}"
-        )),
-    }
-}
 fn auto_phase(
     requested: Option<&str>,
-    shape: InferenceShape,
-    has_bias: bool,
-    actual: InferenceTile,
-    t256_loaded: bool,
-) -> Result<(), String> {
-    let phase = requested.unwrap_or("incumbent");
-    let expected = expected_auto(phase, shape, has_bias, t256_loaded)?;
-    if actual != expected {
-        return Err(format!(
-            "SM120 AUTO mismatch: shape={shape:?}, expected={expected:?}, actual={actual:?}"
-        ));
-    }
-    Ok(())
-}
-fn own_admission(
     cell: &str,
-    windows: usize,
-    paths: &[usize],
-    legacy_p95: &[f64],
-    auto_p95: &[f64],
-) -> bool {
-    admission(cell, windows, paths, legacy_p95) && admission(cell, windows, paths, auto_p95)
+    selected: bool,
+    candidate: bool,
+) -> Result<(), String> {
+    match requested.unwrap_or("legacy") {
+        "legacy" if !candidate => Ok(()),
+        "candidate"
+            if matches!(cell, "hot_a" | "hot_b" | "hot_d" | "hot_e")
+                && (!selected || candidate) =>
+        {
+            Ok(())
+        }
+        "candidate" if !matches!(cell, "hot_a" | "hot_b" | "hot_d" | "hot_e") && !candidate => {
+            Ok(())
+        }
+        "legacy" | "candidate" => Err(format!(
+            "AUTO phase mismatch: cell={cell}, selected={selected}, actual_candidate={candidate}"
+        )),
+        other => Err(format!(
+            "MAMBA_INFERENCE_EXACT_N64_AUTO must be legacy or candidate, got {other:?}"
+        )),
+    }
 }
 
 fn complete_inventory(actual: &[String], expected: &[String]) -> Result<(), String> {
@@ -542,120 +265,14 @@ fn exact_n64_admission_cpu_completion_rejects_duplicate_missing_or_foreign_pair(
 }
 
 #[test]
-fn exact_n64_admission_cpu_auto_phase_is_explicit_and_fail_closed() {
-    for (shape, expected) in [
-        (
-            InferenceShape {
-                m: 4621,
-                k: 384,
-                n: 1928,
-            },
-            InferenceTile::F32N128S2,
-        ),
-        (
-            InferenceShape {
-                m: 4621,
-                k: 768,
-                n: 2304,
-            },
-            InferenceTile::F32N128S2,
-        ),
-        (
-            InferenceShape {
-                m: 4621,
-                k: 1928,
-                n: 384,
-            },
-            InferenceTile::Legacy,
-        ),
-        (
-            InferenceShape {
-                m: 2048,
-                k: 768,
-                n: 2304,
-            },
-            InferenceTile::Legacy,
-        ),
-        (
-            InferenceShape {
-                m: 2048,
-                k: 2304,
-                n: 768,
-            },
-            InferenceTile::Legacy,
-        ),
-        (InferenceShape { m: 65, k: 1, n: 65 }, InferenceTile::Legacy),
-        (
-            InferenceShape {
-                m: 4620,
-                k: 768,
-                n: 2304,
-            },
-            InferenceTile::Legacy,
-        ),
-        (
-            InferenceShape {
-                m: 4622,
-                k: 768,
-                n: 2304,
-            },
-            InferenceTile::Legacy,
-        ),
-    ] {
-        auto_phase(None, shape, false, expected, true).unwrap();
-        auto_phase(Some("incumbent"), shape, false, expected, true).unwrap();
-        for wrong in [
-            InferenceTile::Legacy,
-            InferenceTile::F32N128S2,
-            InferenceTile::F32Sm120N64CopyPlan,
-            InferenceTile::F32Sm120TmaFmaM128N64,
-            InferenceTile::F32Sm120TmaFmaM64N128,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128,
-        ] {
-            if wrong != expected {
-                assert!(auto_phase(None, shape, false, wrong, true).is_err());
-            }
-        }
-        let promoted = expected_auto("promoted", shape, false, true).unwrap();
-        auto_phase(Some("promoted"), shape, false, promoted, true).unwrap();
-        for wrong in [
-            InferenceTile::Legacy,
-            InferenceTile::F32N128S2,
-            InferenceTile::F32Sm120N64CopyPlan,
-            InferenceTile::F32Sm120TmaFmaM128N64,
-            InferenceTile::F32Sm120TmaFmaM64N128,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128,
-        ] {
-            if wrong != promoted {
-                assert!(auto_phase(Some("promoted"), shape, false, wrong, true).is_err());
-            }
-        }
-        for invalid in ["", "auto", "legacy", "candidate", "incumbent ", "promoted "] {
-            assert!(auto_phase(Some(invalid), shape, false, expected, true).is_err());
-        }
-    }
-}
-
-#[test]
-fn exact_n64_admission_cpu_current_auto_and_legacy_must_both_win() {
-    assert!(own_admission("hot_b", 101, &[0, 1], &[0.8; 4], &[0.9; 4]));
-    assert!(!own_admission("hot_b", 101, &[0, 1], &[0.8; 4], &[1.01; 4]));
-    assert!(!own_admission("hot_b", 101, &[0, 1], &[1.01; 4], &[0.8; 4]));
-    assert!(!own_admission("hot_b", 21, &[0, 1], &[0.8; 4], &[0.8; 4]));
-    assert!(!own_admission("hot_b", 101, &[0], &[0.8; 4], &[0.8; 4]));
-    assert!(!own_admission("hot_b", 101, &[0, 1], &[0.8; 4], &[0.8; 3]));
-    for value in [1.0, 0.0, f64::NAN, f64::INFINITY] {
-        assert!(!own_admission(
-            "hot_b",
-            101,
-            &[0, 1],
-            &[0.8; 4],
-            &[value; 4]
-        ));
+fn exact_n64_admission_cpu_auto_phase_rejects_premature_or_broadened_route() {
+    auto_phase(None, "hot_e", true, false).unwrap();
+    assert!(auto_phase(None, "hot_e", true, true).is_err());
+    auto_phase(Some("candidate"), "hot_e", true, true).unwrap();
+    assert!(auto_phase(Some("candidate"), "hot_e", true, false).is_err());
+    assert!(auto_phase(Some("candidate"), "hot_c", false, true).is_err());
+    for invalid in ["", "auto", "Legacy", "candidate "] {
+        assert!(auto_phase(Some(invalid), "hot_e", true, true).is_err());
     }
 }
 
@@ -681,11 +298,20 @@ fn exact_n64_admission_cpu_resources_decline_unknown_spills_and_residency() {
 }
 
 #[test]
+fn exact_n64_admission_cpu_preserves_a_and_d_qualification_and_auto_phase() {
+    for cell in ["hot_a", "hot_d"] {
+        assert!(admission(cell, 101, &[0, 1], &[0.9; 4]));
+        auto_phase(Some("candidate"), cell, true, true).unwrap();
+        assert!(auto_phase(Some("candidate"), cell, true, false).is_err());
+    }
+}
+
+#[test]
 fn exact_n64_admission_cpu_screen_partial_paths_and_controls_never_admit() {
     assert!(admission("hot_e", 101, &[0, 1], &[0.9; 4]));
     assert!(!admission("hot_e", 21, &[0, 1], &[0.9; 4]));
     assert!(!admission("hot_e", 101, &[0], &[0.9; 2]));
-    for cell in ["hot_a", "hot_c", "hot_d"] {
+    for cell in ["hot_c", "", "unknown"] {
         assert!(!admission(cell, 101, &[0, 1], &[0.9; 4]));
     }
     for ratios in [vec![], vec![0.9; 3], vec![1.0; 4], vec![f64::NAN; 4]] {
@@ -1049,16 +675,16 @@ fn exact_n64_admission_cpu_proof_rejects_foreign_corpus_and_bounds() {
     );
 }
 
-const SCHEMA: &str = "MambaBiFixedSm120ExactN64AdmissionV1";
+const SCHEMA: &str = "MambaBiInferenceSm89ExactN64AdmissionV1";
 const POISON: u32 = 0xa5a5a5a5;
-const MISSING_LAUNCH_RED: &str = "SM120_EXACT_N64_MISSING_LAUNCH_RED";
+const MISSING_LAUNCH_RED: &str = "EXACT_N64_MISSING_LAUNCH_RED";
 
 fn poison_red_requested(value: Option<&str>) -> Result<bool, String> {
     match value {
         None => Ok(false),
         Some("1") => Ok(true),
         Some(other) => Err(format!(
-            "MAMBA_FIXED_SM120_EXACT_N64_POISON_RED only accepts 1, got {other:?}"
+            "MAMBA_INFERENCE_EXACT_N64_POISON_RED only accepts 1, got {other:?}"
         )),
     }
 }
@@ -1154,7 +780,7 @@ const CELLS: [(&str, InferenceShape); 5] = [
 ];
 
 fn quoted(value: &str) -> String {
-    format!("\"{}\"", super::sm120_exact_json_escape(value))
+    format!("\"{}\"", super::inference_sm120_tf32_bd_json_escape(value))
 }
 fn env(name: &str) -> Result<Option<String>, String> {
     match std::env::var(name) {
@@ -1179,47 +805,29 @@ fn words_digest(words: &[u32]) -> String {
 }
 
 struct Evidence {
-    candidate: Candidate,
-    diagnostic_fast: bool,
     writer: BufWriter<std::fs::File>,
     digest: Sha256,
     lines: usize,
     pair_keys: Vec<String>,
-    environment: EnvironmentIdentity,
 }
 impl Evidence {
-    fn new(preflight: &str, candidate: Candidate, diagnostic_fast: bool) -> Result<Self, String> {
-        let environment = environment_identity(preflight)?;
-        let path = env("MAMBA_FIXED_SM120_EXACT_N64_JSONL")?
-            .ok_or("set MAMBA_FIXED_SM120_EXACT_N64_JSONL to a new evidence file")?;
+    fn new() -> Result<Self, String> {
+        let path = env("MAMBA_INFERENCE_EXACT_N64_JSONL")?
+            .ok_or("set MAMBA_INFERENCE_EXACT_N64_JSONL to a new evidence file")?;
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
             .map_err(|e| e.to_string())?;
         Ok(Self {
-            candidate,
-            diagnostic_fast,
             writer: BufWriter::new(file),
             digest: Sha256::new(),
             lines: 0,
             pair_keys: Vec::new(),
-            environment,
         })
     }
-    fn telemetry(&self, label: &str) -> Result<String, String> {
-        let value = telemetry(label)?;
-        environment_unchanged(&self.environment, &value)?;
-        Ok(value)
-    }
     fn emit(&mut self, fields: String) -> Result<(), String> {
-        let line = format!(
-            "{{\"schema\":\"{SCHEMA}\",\"candidate\":\"{:?}\",\"candidate_symbol\":{},\"diagnostic_fast\":{},\"admission_enabled\":{}, {fields}}}\n",
-            self.candidate.tile(),
-            quoted(self.candidate.symbol()),
-            self.diagnostic_fast,
-            !self.diagnostic_fast,
-        );
+        let line = format!("{{\"schema\":\"{SCHEMA}\",{fields}}}\n");
         self.writer
             .write_all(line.as_bytes())
             .map_err(|e| e.to_string())?;
@@ -1300,7 +908,6 @@ impl Guarded {
 }
 
 struct Case {
-    candidate: Candidate,
     shape: InferenceShape,
     corpus: Corpus,
     has_bias: bool,
@@ -1316,7 +923,6 @@ impl Case {
         shape: InferenceShape,
         corpus: Corpus,
         has_bias: bool,
-        candidate: Candidate,
     ) -> Result<Self, String> {
         let a = Guarded::new(
             ctx,
@@ -1338,7 +944,6 @@ impl Case {
             .map(|_| Guarded::new(ctx, vec![f32::from_bits(POISON); shape.m * shape.n]))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            candidate,
             shape,
             corpus,
             has_bias,
@@ -1369,9 +974,20 @@ impl Case {
     fn launch(&self, ctx: &GpuCtx, arm: usize) -> Result<(), String> {
         let operands = self.operands(arm);
         match arm {
-            0 => inference_forward_with_tile(ctx, operands, self.shape, self.candidate.tile()),
+            0 => inference_forward_with_tile(
+                ctx,
+                operands,
+                self.shape,
+                InferenceTile::F32Sm89N64CopyPlan,
+            ),
             1 => {
-                let selected = launch_sm120_exact_auto(ctx, operands, self.shape);
+                let selected = launch_inference_auto_vendor_custom(ctx, operands, self.shape);
+                if !matches!(
+                    selected,
+                    InferenceTile::Legacy | InferenceTile::F32Sm89N64CopyPlan
+                ) {
+                    return Err(format!("unapproved Ada AUTO physical route {selected:?}"));
+                }
                 if self.auto.get().is_some_and(|previous| previous != selected) {
                     return Err("AUTO route drift".into());
                 }
@@ -1383,7 +999,7 @@ impl Case {
             3 | 5 => {
                 // Every invocation includes bias broadcast + beta1, or beta0
                 // without bias. Reference has its own separately reset output.
-                sm120_exact_vendor_launch(
+                inference_ada_vendor_launch(
                     ctx,
                     operands,
                     self.shape,
@@ -1450,41 +1066,17 @@ fn resources(function: &CudaFunction, threads: u32) -> Result<[i32; 6], String> 
             .map_err(error)?,
     ])
 }
-fn incumbent_carveouts(values: [i32; 3]) -> Result<(), String> {
-    if values != [-1; 3] {
-        return Err(format!(
-            "SM120 incumbents must retain default carveouts: {values:?}"
-        ));
-    }
-    Ok(())
-}
-
-#[test]
-fn exact_n64_admission_cpu_incumbent_default_carveout_is_not_candidate_policy() {
-    incumbent_carveouts([-1; 3]).unwrap();
-    for index in 0..3 {
-        for value in [0, 100] {
-            let mut observed = [-1; 3];
-            observed[index] = value;
-            assert!(incumbent_carveouts(observed).is_err());
-        }
-    }
-}
-
-fn resource_snapshot(ctx: &GpuCtx, selected: Candidate) -> Result<[[i32; 6]; 4], String> {
-    let (holder, rejection) = match selected {
-        Candidate::CopyPlan => (
-            &ctx.kernels.fixed_sm120_f32_n64_copyplan,
-            &ctx.kernels.fixed_sm120_f32_n64_copyplan_rejection,
-        ),
-        Candidate::Sliced => (
-            &ctx.kernels.fixed_sm120_f32_n64_sliced,
-            &ctx.kernels.fixed_sm120_f32_n64_sliced_rejection,
-        ),
-    };
-    let candidate = holder
+fn resource_snapshot(ctx: &GpuCtx) -> Result<[[i32; 6]; 4], String> {
+    let candidate = ctx
+        .kernels
+        .inference_sm89_f32_n64_copyplan
         .as_ref()
-        .ok_or_else(|| format!("{} not admitted: {rejection:?}", selected.symbol()))?;
+        .ok_or_else(|| {
+            format!(
+                "exact N64 not admitted: {:?}",
+                ctx.kernels.inference_sm89_f32_n64_copyplan_rejection
+            )
+        })?;
     let snapshot = [
         resources(candidate, 128)?,
         resources(&ctx.kernels.gemm_bi_f32_f32_s2, 128)?,
@@ -1492,7 +1084,6 @@ fn resource_snapshot(ctx: &GpuCtx, selected: Candidate) -> Result<[[i32; 6]; 4],
         resources(&ctx.kernels.gemm_bi_f32_f32, 256)?,
     ];
     resource_contract(snapshot[0])?;
-    incumbent_carveouts([snapshot[1][5], snapshot[2][5], snapshot[3][5]])?;
     Ok(snapshot)
 }
 
@@ -1567,292 +1158,6 @@ fn kernel_params(
     Ok((name, params))
 }
 
-#[cfg(test)]
-fn own_kernel(
-    arm: usize,
-    auto: Option<InferenceTile>,
-) -> Result<(&'static str, usize, u32), String> {
-    own_kernel_for_candidate(arm, auto, Candidate::CopyPlan)
-}
-
-fn own_kernel_for_candidate(
-    arm: usize,
-    auto: Option<InferenceTile>,
-    candidate: Candidate,
-) -> Result<(&'static str, usize, u32), String> {
-    match (arm, auto) {
-        (0, _) => Ok((candidate.symbol(), 64, 128)),
-        (1, Some(InferenceTile::F32Sm120N64CopyPlan)) => Ok((CANDIDATE, 64, 128)),
-        (1, Some(InferenceTile::F32Sm120M128N64CopyPlanT256)) => {
-            Ok(("nn_sm120_f32_n64_copyplan_m128n64_t256", 64, 256))
-        }
-        (1, Some(InferenceTile::F32Sm120N64CopyPlanT256)) => {
-            Ok(("nn_sm120_f32_n64_copyplan_t256", 64, 256))
-        }
-        (1, Some(InferenceTile::F32Sm120N64Sliced)) => Ok(("nn_sm120_f32_n64_sliced", 64, 128)),
-        (1, Some(InferenceTile::F32Sm120TmaFmaM128N64)) => {
-            Ok(("nn_sm120_tma_fma_m128n64_bk16_s2", 64, 128))
-        }
-        (1, Some(InferenceTile::F32Sm120TmaFmaM64N128)) => {
-            Ok(("nn_sm120_tma_fma_m64n128_bk16_s2", 128, 128))
-        }
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64)) => {
-            Ok(("nn_sm120_tma_fma_postbias_m128n64_bk16_s2", 64, 128))
-        }
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4)) => {
-            Ok(("nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4", 64, 128))
-        }
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256)) => {
-            Ok(("nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2", 64, 256))
-        }
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256)) => {
-            Ok(("nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2", 64, 256))
-        }
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96)) => {
-            Ok(("nn_sm120_tma_fma_postbias_m128n96_bk16_s2", 96, 256))
-        }
-        (1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128)) => {
-            Ok(("nn_sm120_tma_fma_postbias_m64n128_bk16_s2", 128, 128))
-        }
-        (1, Some(InferenceTile::F32N128S2)) => Ok((N128, 128, 256)),
-        (1, Some(InferenceTile::Legacy)) | (2, _) => Ok((LEGACY, 64, 128)),
-        (4, _) => Ok((ORACLE, 64, 256)),
-        _ => Err("missing or unqualified SM120 own route".into()),
-    }
-}
-
-#[test]
-fn exact_n64_admission_cpu_copyplan_t256_force_mapping_preserves_auto() {
-    assert_eq!(
-        own_kernel(1, Some(InferenceTile::F32Sm120M128N64CopyPlanT256)).unwrap(),
-        ("nn_sm120_f32_n64_copyplan_m128n64_t256", 64, 256)
-    );
-    assert_eq!(
-        own_kernel(1, Some(InferenceTile::F32Sm120N64CopyPlanT256)).unwrap(),
-        ("nn_sm120_f32_n64_copyplan_t256", 64, 256)
-    );
-    assert_eq!(
-        expected_auto(
-            "promoted",
-            InferenceShape {
-                m: 2048,
-                k: 2304,
-                n: 768
-            },
-            false,
-            true
-        )
-        .unwrap(),
-        InferenceTile::F32Sm120N64CopyPlan
-    );
-}
-
-#[test]
-fn exact_n64_admission_cpu_nobias_t256_force_mapping_is_distinct() {
-    assert_eq!(
-        own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256)).unwrap(),
-        ("nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2", 64, 256)
-    );
-    assert_eq!(
-        expected_auto(
-            "promoted",
-            InferenceShape {
-                m: 2048,
-                k: 2304,
-                n: 768
-            },
-            false,
-            true
-        )
-        .unwrap(),
-        InferenceTile::F32Sm120N64CopyPlan,
-    );
-}
-
-#[test]
-fn exact_n64_admission_cpu_n128_graph_geometry_is_not_legacy() {
-    let (symbol, tile_n, threads) = own_kernel(1, Some(InferenceTile::F32N128S2)).unwrap();
-    assert_eq!(symbol, "f32_f32_n128_s2");
-    assert_eq!(tile_n, 128);
-    assert_eq!(threads, 256);
-    assert_eq!(4621usize.div_ceil(64) * 2304usize.div_ceil(tile_n), 1314);
-    assert_eq!(
-        own_kernel(2, Some(InferenceTile::F32N128S2)).unwrap(),
-        (LEGACY, 64, 128)
-    );
-    assert_eq!(
-        own_kernel(1, Some(InferenceTile::F32Sm120N64CopyPlan)).unwrap(),
-        (CANDIDATE, 64, 128)
-    );
-    assert_eq!(
-        own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaM64N128)).unwrap(),
-        ("nn_sm120_tma_fma_m64n128_bk16_s2", 128, 128)
-    );
-    assert_eq!(
-        own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4)).unwrap(),
-        ("nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4", 64, 128)
-    );
-    assert!(own_kernel(1, None).is_err());
-    assert_eq!(
-        own_kernel(
-            1,
-            Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256)
-        )
-        .unwrap(),
-        ("nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2", 64, 256)
-    );
-    assert_eq!(
-        own_kernel(1, Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96)).unwrap(),
-        ("nn_sm120_tma_fma_postbias_m128n96_bk16_s2", 96, 256)
-    );
-    let expected = LaunchProof {
-        symbol: symbol.into(),
-        grid: (1314, 1, 1),
-        block: (256, 1, 1),
-        shared: 0,
-        pointers: [0x1000, 0x2000, 0x3000, 0],
-        parameters: [0x3f800000, 0, 4621, 2304, 768, 768, 2304, 2304],
-        abi: (0..4)
-            .map(|i| (i * 8, 8))
-            .chain((0..8).map(|i| (32 + i * 4, 4)))
-            .collect(),
-        terminal_rejected: true,
-    };
-    launch_contract(&expected, &expected).unwrap();
-    for field in 0..8 {
-        let mut wrong = expected.clone();
-        match field {
-            0 => wrong.symbol = LEGACY.into(),
-            1 => wrong.grid.0 = 2628,
-            2 => wrong.block.0 = 128,
-            3 => wrong.abi = vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)],
-            4 => wrong.parameters[1] = (-0.0f32).to_bits(),
-            5 => wrong.parameters[6] += 1,
-            6 => wrong.pointers[1] += 4,
-            _ => wrong.terminal_rejected = false,
-        }
-        assert!(launch_contract(&wrong, &expected).is_err());
-    }
-}
-
-#[test]
-fn exact_n64_admission_cpu_a1_promotion_requires_loaded_t256_with_control_fallback() {
-    let shape = InferenceShape {
-        m: 4621,
-        k: 384,
-        n: 1928,
-    };
-    for (loaded, expected, rejected) in [
-        (
-            true,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-        ),
-        (
-            false,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
-        ),
-    ] {
-        assert_eq!(
-            expected_auto("promoted", shape, true, loaded).unwrap(),
-            expected
-        );
-        auto_phase(Some("promoted"), shape, true, expected, loaded).unwrap();
-        assert!(auto_phase(Some("promoted"), shape, true, rejected, loaded).is_err());
-        let (symbol, tile_n, threads) = own_kernel(1, Some(expected)).unwrap();
-        assert_eq!(tile_n, 64);
-        assert_eq!(threads, if loaded { 256 } else { 128 });
-        assert_eq!(
-            symbol,
-            if loaded {
-                "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2"
-            } else {
-                "nn_sm120_tma_fma_postbias_m128n64_bk16_s2"
-            }
-        );
-    }
-}
-
-#[test]
-fn exact_n64_sliced_cpu_promoted_route_retains_copyplan_and_graph_compact() {
-    for (m, k, n, bias, want) in [
-        (2048, 768, 2304, false, InferenceTile::F32Sm120N64CopyPlan),
-        (2048, 768, 2304, true, InferenceTile::F32Sm120N64CopyPlan),
-        (4621, 768, 2304, false, InferenceTile::F32Sm120TmaFmaM128N64),
-        (
-            4621,
-            768,
-            2304,
-            true,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-        ),
-        (4621, 1928, 384, false, InferenceTile::Legacy),
-        (
-            4621,
-            1928,
-            384,
-            true,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96,
-        ),
-        (2048, 2304, 768, false, InferenceTile::F32Sm120N64CopyPlan),
-        (2048, 2304, 768, true, InferenceTile::F32Sm120N64CopyPlan),
-        (4621, 384, 1928, false, InferenceTile::F32Sm120TmaFmaM64N128),
-        (
-            4621,
-            384,
-            1928,
-            true,
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
-        ),
-        (4620, 768, 2304, false, InferenceTile::Legacy),
-        (4622, 768, 2304, false, InferenceTile::Legacy),
-    ] {
-        assert_eq!(
-            expected_auto("promoted", InferenceShape { m, k, n }, bias, true).unwrap(),
-            want
-        );
-    }
-    assert_eq!(
-        own_kernel(1, Some(InferenceTile::F32Sm120N64Sliced)).unwrap(),
-        ("nn_sm120_f32_n64_sliced", 64, 128)
-    );
-    // Explicit candidate stays old copyplan. A different AUTO is not a self comparison.
-    assert_eq!(
-        own_kernel(0, None).unwrap(),
-        ("nn_sm120_f32_n64_copyplan", 64, 128)
-    );
-    assert_eq!(own_kernel(2, None).unwrap(), ("f32_f32_s2", 64, 128));
-}
-
-#[test]
-fn exact_n64_candidate_cpu_graph_candidate_and_auto_are_independent() {
-    for (candidate, symbol) in [
-        (Candidate::CopyPlan, "nn_sm120_f32_n64_copyplan"),
-        (Candidate::Sliced, "nn_sm120_f32_n64_sliced"),
-    ] {
-        assert_eq!(
-            own_kernel_for_candidate(0, None, candidate).unwrap(),
-            (symbol, 64, 128)
-        );
-        assert_eq!(
-            own_kernel_for_candidate(1, Some(InferenceTile::F32Sm120N64Sliced), candidate).unwrap(),
-            ("nn_sm120_f32_n64_sliced", 64, 128)
-        );
-        assert_eq!(
-            own_kernel_for_candidate(1, Some(InferenceTile::F32Sm120N64CopyPlan), candidate)
-                .unwrap(),
-            ("nn_sm120_f32_n64_copyplan", 64, 128)
-        );
-        assert_eq!(
-            own_kernel_for_candidate(2, None, candidate).unwrap(),
-            ("f32_f32_s2", 64, 128)
-        );
-        assert!(own_kernel_for_candidate(1, None, candidate).is_err());
-        assert!(own_kernel_for_candidate(1, Some(InferenceTile::Tf32M128S2), candidate).is_err());
-    }
-}
-
 fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, String> {
     let nodes = graph_nodes(graph.cu_graph())?;
     if nodes.len() != 1 {
@@ -1867,95 +1172,14 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
         return Err("non-kernel node in own graph".into());
     }
     let (symbol, params) = kernel_params(nodes[0])?;
-    let (expected_symbol, tile_n, threads) =
-        own_kernel_for_candidate(arm, case.auto.get(), case.candidate)?;
-    let exact_tma_tile = match expected_symbol {
-        "nn_sm120_tma_fma_m128n64_bk16_s2" => Some((128usize, 64usize)),
-        "nn_sm120_tma_fma_m64n128_bk16_s2" => Some((64, 128)),
-        "nn_sm120_tma_fma_postbias_m128n64_bk16_s2" => Some((128, 64)),
-        "nn_sm120_tma_fma_postbias_m128n64_bk16_s2_k4" => Some((128, 64)),
-        "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2" => Some((128, 64)),
-        "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2" => Some((128, 64)),
-        "nn_sm120_tma_fma_postbias_m128n96_bk16_s2" => Some((128, 96)),
-        "nn_sm120_tma_fma_postbias_m64n128_bk16_s2" => Some((64, 128)),
-        _ => None,
+    let expected_symbol = match arm {
+        0 => CANDIDATE,
+        1 if case.auto.get() == Some(InferenceTile::F32Sm89N64CopyPlan) => CANDIDATE,
+        1 | 2 => LEGACY,
+        4 => ORACLE,
+        _ => return Err("not an own arm".into()),
     };
-    if let Some((tile_m, tile_n)) = exact_tma_tile {
-        let expected_abi = vec![
-            (0, 8),
-            (8, 8),
-            (16, 8),
-            (128, 128),
-            (256, 128),
-            (384, 8),
-            (392, 32),
-        ];
-        let layout = abi_layout(params.func, 7)?;
-        if layout != expected_abi {
-            return Err(format!("captured exact-TMA ABI differs: {layout:?}"));
-        }
-        let output: u64 = captured(&params, 0)?;
-        let partial: u64 = captured(&params, 1)?;
-        let flags: u64 = captured(&params, 2)?;
-        let map_a: [u8; 128] = captured(&params, 3)?;
-        let map_b: [u8; 128] = captured(&params, 4)?;
-        let bias: u64 = captured(&params, 5)?;
-        let values: [u32; 8] = captured(&params, 6)?;
-        let s = case.shape;
-        let ops = case.operands(arm);
-        let expected_grid = ((s.m.div_ceil(tile_m) * s.n.div_ceil(tile_n)) as u32, 1, 1);
-        let actual_grid = (params.gridDimX, params.gridDimY, params.gridDimZ);
-        let actual_block = (params.blockDimX, params.blockDimY, params.blockDimZ);
-        let expected_shared = if tile_n == 96 { 28_688 } else { 24_592 };
-        let expected_values = [
-            1.0f32.to_bits(),
-            0,
-            s.m as u32,
-            s.n as u32,
-            s.k as u32,
-            s.n as u32,
-            1,
-            s.k.div_ceil(16) as u32,
-        ];
-        if symbol != expected_symbol
-            || actual_grid != expected_grid
-            || actual_block != (threads, 1, 1)
-            || params.sharedMemBytes != expected_shared
-            || output != ops.c.ptr
-            || partial != 0
-            || flags != 0
-            || bias != ops.bias_ptr.unwrap_or(0)
-            || map_a.iter().all(|byte| *byte == 0)
-            || map_b.iter().all(|byte| *byte == 0)
-            || values != expected_values
-        {
-            return Err(format!(
-                "captured exact-TMA launch differs: symbol={symbol:?} grid={actual_grid:?} block={actual_block:?} shared={} output={output:#x} partial={partial:#x} flags={flags:#x} bias={bias:#x} values={values:?}",
-                params.sharedMemBytes,
-            ));
-        }
-        return Ok(format!(
-            "{{\"symbol\":{},\"grid\":[{},{},{}],\"block\":[{},{},{}],\"dynamic_shared\":{},\"output\":{},\"partial\":{},\"flags\":{},\"bias\":{},\"parameter_words\":{:?},\"driver_abi\":{:?},\"terminal_probe\":true}}",
-            quoted(&symbol),
-            actual_grid.0,
-            actual_grid.1,
-            actual_grid.2,
-            actual_block.0,
-            actual_block.1,
-            actual_block.2,
-            params.sharedMemBytes,
-            output,
-            partial,
-            flags,
-            bias,
-            values,
-            layout,
-        ));
-    }
-    let compact = expected_symbol == CANDIDATE
-        || expected_symbol == "nn_sm120_f32_n64_copyplan_m128n64_t256"
-        || expected_symbol == "nn_sm120_f32_n64_copyplan_t256"
-        || expected_symbol == "nn_sm120_f32_n64_sliced";
+    let compact = expected_symbol == CANDIDATE;
     let expected_abi = if compact {
         vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
     } else {
@@ -1992,18 +1216,8 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
     let ops = case.operands(arm);
     let expected = LaunchProof {
         symbol: expected_symbol.into(),
-        grid: (
-            (s.m.div_ceil(
-                if expected_symbol == "nn_sm120_f32_n64_copyplan_m128n64_t256" {
-                    128
-                } else {
-                    64
-                },
-            ) * s.n.div_ceil(tile_n)) as u32,
-            1,
-            1,
-        ),
-        block: (threads, 1, 1),
+        grid: ((s.m.div_ceil(64) * s.n.div_ceil(64)) as u32, 1, 1),
+        block: (if arm == 4 { 256 } else { 128 }, 1, 1),
         shared: 0,
         pointers: [ops.c.ptr, ops.x.ptr, ops.w.ptr, ops.bias_ptr.unwrap_or(0)],
         parameters: [
@@ -2307,60 +1521,8 @@ fn replay_checked(
     Ok(last)
 }
 
-const TELEMETRY_POLICY: &str = "observed_unlocked_no_clock_or_power_mutation";
-
-#[derive(Clone, Debug, PartialEq)]
-struct EnvironmentIdentity {
-    uuid: String,
-    name: String,
-    driver: String,
-    power_limit: f64,
-}
-fn environment_identity(value: &str) -> Result<EnvironmentIdentity, String> {
-    let fields: Vec<_> = value.trim().split(',').map(str::trim).collect();
-    if fields.len() != 7
-        || !fields[0].starts_with("GPU-")
-        || fields[0].len() <= 4
-        || fields[1].is_empty()
-        || fields[2].is_empty()
-        || !fields[6].starts_with('P')
-        || fields[6].len() <= 1
-        || !fields[6][1..].bytes().all(|b| b.is_ascii_digit())
-    {
-        return Err(format!("malformed observed SM120 telemetry: {value:?}"));
-    }
-    let positive = |index: usize| -> Result<f64, String> {
-        let number = fields[index]
-            .parse::<f64>()
-            .map_err(|e| format!("SM120 telemetry field {index}: {e}"))?;
-        if !number.is_finite() || number <= 0.0 {
-            return Err(format!(
-                "nonpositive/nonfinite SM120 telemetry field {index}"
-            ));
-        }
-        Ok(number)
-    };
-    positive(3)?; // Observed SM clock; deliberately not pinned to Ada's value.
-    let power_limit = positive(4)?;
-    positive(5)?; // Temperature is recorded, not frozen.
-    Ok(EnvironmentIdentity {
-        uuid: fields[0].into(),
-        name: fields[1].into(),
-        driver: fields[2].into(),
-        power_limit,
-    })
-}
-fn environment_unchanged(initial: &EnvironmentIdentity, value: &str) -> Result<(), String> {
-    let observed = environment_identity(value)?;
-    if &observed != initial {
-        return Err(format!(
-            "SM120 UUID/name/driver/power-limit drift: initial={initial:?}, observed={observed:?}"
-        ));
-    }
-    Ok(())
-}
 fn telemetry(label: &str) -> Result<String, String> {
-    super::sm120_exact_environment_preflight(label)?;
+    super::inference_sm120_tf32_bd_environment_preflight(label)?;
     let snapshot = std::process::Command::new("nvidia-smi")
         .args([
             "--id=0",
@@ -2370,46 +1532,22 @@ fn telemetry(label: &str) -> Result<String, String> {
         .output()
         .map_err(|e| e.to_string())?;
     if !snapshot.status.success() {
-        return Err("SM120 exact admission nvidia-smi telemetry failed".into());
+        return Err("exact admission nvidia-smi telemetry failed".into());
     }
     let value = String::from_utf8(snapshot.stdout).map_err(|e| e.to_string())?;
-    environment_identity(&value)?;
+    let fields = value.trim().split(',').map(str::trim).collect::<Vec<_>>();
+    if fields.len() != 7
+        || fields[3].parse::<u32>().ok() != Some(1800)
+        || fields[4].parse::<f64>().ok() != Some(300.0)
+    {
+        return Err(format!(
+            "expected pinned 1800 MHz/300 W Ada environment: {value:?}"
+        ));
+    }
     Ok(value.trim().to_owned())
 }
 
-#[test]
-fn exact_n64_admission_cpu_observed_telemetry_freezes_board_not_clock() {
-    let first = "GPU-test, NVIDIA GeForce RTX 5090, 595.58.03, 2500, 575.0, 60, P0";
-    let identity = environment_identity(first).unwrap();
-    environment_unchanged(
-        &identity,
-        "GPU-test, NVIDIA GeForce RTX 5090, 595.58.03, 2400, 575.00, 70, P2",
-    )
-    .unwrap();
-    for changed in [
-        first.replace("GPU-test", "GPU-other"),
-        first.replace("RTX 5090", "RTX 5080"),
-        first.replace("595.58.03", "595.58.04"),
-        first.replace("575.0", "570.0"),
-    ] {
-        assert!(environment_unchanged(&identity, &changed).is_err());
-    }
-    for malformed in [
-        first.replace("2500", "0"),
-        first.replace("2500", "NaN"),
-        first.replace("575.0", "inf"),
-        first.replace("575.0", "-1"),
-        first.replace("60", "NaN"),
-        first.replace("P0", "unknown"),
-        first.replace("GPU-test", "GPU-"),
-        first.to_owned() + ", extra",
-    ] {
-        assert!(environment_identity(&malformed).is_err());
-    }
-}
-
 struct Protocol {
-    diagnostic_fast: bool,
     cells: Vec<usize>,
     biases: Vec<usize>,
     paths: Vec<usize>,
@@ -2420,9 +1558,6 @@ struct Protocol {
 fn jobs(protocol: &Protocol) -> Vec<(usize, usize, Corpus, bool)> {
     let mut jobs = Vec::new();
     for index in 0..CELLS.len() {
-        if protocol.diagnostic_fast && index != 1 {
-            continue;
-        }
         for &bias in &protocol.biases {
             for corpus in [Corpus::Representable, Corpus::Nonrepresentable] {
                 jobs.push((index, bias, corpus, false));
@@ -2440,7 +1575,6 @@ fn jobs(protocol: &Protocol) -> Vec<(usize, usize, Corpus, bool)> {
 #[test]
 fn exact_n64_admission_cpu_all_finite_controls_precede_any_timing() {
     let protocol = Protocol {
-        diagnostic_fast: false,
         cells: vec![1],
         biases: vec![0],
         paths: vec![0, 1],
@@ -2462,22 +1596,21 @@ fn exact_n64_admission_cpu_all_finite_controls_precede_any_timing() {
 
 impl Protocol {
     fn from_env() -> Result<Self, String> {
-        let auto_phase = env("MAMBA_FIXED_SM120_EXACT_N64_AUTO")?;
-        if let Some(value) = auto_phase.as_deref() {
-            expected_auto(value, InferenceShape { m: 1, k: 1, n: 1 }, false, true)?;
+        let auto_phase = env("MAMBA_INFERENCE_EXACT_N64_AUTO")?;
+        if auto_phase
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "legacy" | "candidate"))
+        {
+            return Err("MAMBA_INFERENCE_EXACT_N64_AUTO must be legacy or candidate".into());
         }
         Ok(Self {
-            diagnostic_fast: false,
             cells: selection(
-                env("MAMBA_FIXED_SM120_EXACT_N64_CELLS")?.as_deref(),
+                env("MAMBA_INFERENCE_ADA_CELLS")?.as_deref(),
                 &CELLS.map(|cell| cell.0),
             )?,
-            biases: selection(
-                env("MAMBA_FIXED_SM120_EXACT_N64_BIAS")?.as_deref(),
-                &["0", "1"],
-            )?,
-            paths: selection(env("MAMBA_FIXED_SM120_EXACT_N64_PATHS")?.as_deref(), &PATHS)?,
-            windows: window_count(env("MAMBA_FIXED_SM120_EXACT_N64_WINDOWS")?.as_deref())?,
+            biases: selection(env("MAMBA_INFERENCE_ADA_BIAS")?.as_deref(), &["0", "1"])?,
+            paths: selection(env("MAMBA_INFERENCE_VENDOR_PATHS")?.as_deref(), &PATHS)?,
+            windows: window_count(env("MAMBA_INFERENCE_ADA_WINDOWS")?.as_deref())?,
             auto_phase,
         })
     }
@@ -2501,106 +1634,6 @@ impl Protocol {
     }
 }
 
-fn diagnostic_fast_requested(
-    value: Option<&str>,
-    candidate: Candidate,
-    protocol: &Protocol,
-    poison_red: bool,
-) -> Result<bool, String> {
-    match value {
-        None => Ok(false),
-        Some("1") if candidate == Candidate::Sliced
-            && protocol.cells == [1] && protocol.biases == [0]
-            && protocol.windows == 21 && protocol.paths.len() == 2
-            && protocol.paths.contains(&0) && protocol.paths.contains(&1)
-            && !poison_red => Ok(true),
-        _ => Err("MAMBA_FIXED_SM120_EXACT_N64_DIAGNOSTIC_FAST requires exactly 1, candidate=sliced, cell=hot_b, bias=0, windows=21, both eager+graph paths, and no POISON_RED".into()),
-    }
-}
-
-#[cfg(test)]
-fn diagnostic_protocol() -> Protocol {
-    Protocol {
-        diagnostic_fast: false,
-        cells: vec![1],
-        biases: vec![0],
-        paths: vec![0, 1],
-        windows: 21,
-        auto_phase: Some("promoted".into()),
-    }
-}
-
-#[test]
-fn exact_n64_diagnostic_cpu_parser_requires_explicit_b0_sliced_screen() {
-    let good = diagnostic_protocol();
-    assert!(!diagnostic_fast_requested(None, Candidate::CopyPlan, &good, false).unwrap());
-    assert!(diagnostic_fast_requested(Some("1"), Candidate::Sliced, &good, false).unwrap());
-    for bad in ["", "0", "true", " 1", "1 "] {
-        assert!(diagnostic_fast_requested(Some(bad), Candidate::Sliced, &good, false).is_err());
-    }
-    assert!(diagnostic_fast_requested(Some("1"), Candidate::CopyPlan, &good, false).is_err());
-    assert!(diagnostic_fast_requested(Some("1"), Candidate::Sliced, &good, true).is_err());
-    for field in 0..7 {
-        let mut bad = diagnostic_protocol();
-        match field {
-            0 => bad.cells = vec![4],
-            1 => bad.cells = vec![1, 4],
-            2 => bad.biases = vec![1],
-            3 => bad.biases = vec![0, 1],
-            4 => bad.windows = 101,
-            5 => bad.paths = vec![0],
-            _ => bad.paths = vec![1],
-        }
-        assert!(
-            diagnostic_fast_requested(Some("1"), Candidate::Sliced, &bad, false).is_err(),
-            "restricted field {field}"
-        );
-    }
-}
-
-#[test]
-fn exact_n64_diagnostic_cpu_keeps_both_corpora_and_all_twelve_pairs() {
-    let mut protocol = diagnostic_protocol();
-    protocol.diagnostic_fast = true;
-    assert_eq!(
-        jobs(&protocol),
-        vec![
-            (1, 0, Corpus::Representable, false),
-            (1, 0, Corpus::Nonrepresentable, false),
-            (1, 0, Corpus::Representable, true)
-        ]
-    );
-    let expected: Vec<String> = ["eager", "graph"]
-        .into_iter()
-        .flat_map(|path| {
-            ["ABBA", "BAAB"].into_iter().flat_map(move |order| {
-                ["current_auto", "explicit_legacy", "pedantic"]
-                    .into_iter()
-                    .map(move |control| format!("hot_b/0/{path}/{order}/{control}"))
-            })
-        })
-        .collect();
-    assert_eq!(protocol.expected_pairs(), expected);
-}
-
-#[test]
-fn exact_n64_diagnostic_cpu_never_admits_even_if_windows_are_tampered() {
-    let mut protocol = diagnostic_protocol();
-    protocol.diagnostic_fast = true;
-    protocol.windows = 101;
-    for candidate in [Candidate::CopyPlan, Candidate::Sliced] {
-        assert!(!candidate_own_admission(
-            candidate,
-            InferenceTile::F32Sm120N64CopyPlan,
-            "hot_b",
-            false,
-            &protocol,
-            &[0.5; 4],
-            &[0.5; 4]
-        ));
-    }
-}
-
 fn input_manifest(case: &Case, ctx: &GpuCtx) -> Result<String, String> {
     case.inputs(ctx)?;
     let a = case.a.read(ctx)?;
@@ -2617,75 +1650,17 @@ fn input_manifest(case: &Case, ctx: &GpuCtx) -> Result<String, String> {
     ))
 }
 
-fn identity_contract(
-    cc: (u32, u32),
-    sm_count: u32,
-    nvrtc: (i32, i32),
-    known_library: bool,
-    target: &str,
-) -> Result<(), String> {
-    if cc != (12, 0)
-        || sm_count != 170
-        || nvrtc != (13, 2)
-        || !known_library
-        || target != "compute_120"
-    {
-        return Err(format!(
-            "unqualified SM120 identity: cc={cc:?}, SMs={sm_count}, NVRTC={nvrtc:?}, known={known_library}, target={target}"
-        ));
-    }
-    Ok(())
-}
-fn profile_request(enabled: Option<&str>, cc: Option<&str>) -> Result<(), String> {
-    if enabled != Some("1") || cc != Some("12.0") {
-        return Err(
-            "set MAMBA_FIXED_SM120_EXACT_N64_ENABLE=1 and MAMBA_FIXED_SM120_EXACT_N64_CC=12.0"
-                .into(),
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn exact_n64_admission_cpu_profile_identity_is_exact_and_explicit() {
-    profile_request(Some("1"), Some("12.0")).unwrap();
-    for (enabled, cc) in [
-        (None, Some("12.0")),
-        (Some("0"), Some("12.0")),
-        (Some("1"), None),
-        (Some("1"), Some("8.9")),
-        (Some("1"), Some("12.1")),
-        (Some("1"), Some("12.0 ")),
-    ] {
-        assert!(profile_request(enabled, cc).is_err());
-    }
-    identity_contract((12, 0), 170, (13, 2), true, "compute_120").unwrap();
-    for (cc, sms, nvrtc, known, target) in [
-        ((12, 1), 170, (13, 2), true, "compute_120"),
-        ((8, 9), 170, (13, 2), true, "compute_120"),
-        ((12, 0), 169, (13, 2), true, "compute_120"),
-        ((12, 0), 171, (13, 2), true, "compute_120"),
-        ((12, 0), 170, (12, 8), true, "compute_120"),
-        ((12, 0), 170, (13, 0), true, "compute_120"),
-        ((12, 0), 170, (13, 2), false, "compute_120"),
-        ((12, 0), 170, (13, 2), true, "sm_120"),
-    ] {
-        assert!(identity_contract(cc, sms, nvrtc, known, target).is_err());
-    }
-}
-
 fn identity(ctx: &GpuCtx, device: &GpuDevice) -> Result<String, String> {
     let compiler = ctx.kernels.compiler_identity();
     let artifacts = ctx.kernels.artifact_set_identity();
     let driver = device.identity().driver;
-    identity_contract(
-        device.compute_capability,
-        device.multiprocessor_count(),
-        compiler.nvrtc_version,
-        compiler.nvrtc_library_known,
-        compiler.target.as_str(),
-    )?;
-    if driver.build_sources == 0 {
+    if device.compute_capability != (8, 9)
+        || device.multiprocessor_count() != 142
+        || compiler.nvrtc_version != (13, 2)
+        || !compiler.nvrtc_library_known
+        || compiler.target.as_str() != "sm_89"
+        || driver.build_sources == 0
+    {
         return Err(format!(
             "unqualified exact-N64 production identity: {compiler:?}, device={:?}",
             device.identity()
@@ -2699,9 +1674,9 @@ fn identity(ctx: &GpuCtx, device: &GpuDevice) -> Result<String, String> {
     }
     Ok(format!(
         concat!(
-            "{{\"cc\":[12,0],\"sm_count\":170,\"nvrtc\":[13,2],\"nvrtc_library_known\":true,\"nvrtc_library_domain\":{},",
-            "\"compiler_target\":\"compute_120\",\"state_capacity\":{},\"source_sha256\":{},\"invocation_sha256\":{},\"headers_sha256\":{},",
-            "\"fixed_compile_key\":{},\"fixed_artifact\":{},\"aggregate_artifact\":{},\"driver_api\":{},\"driver_build_sources\":{},\"driver_build_digest\":{},",
+            "{{\"cc\":[8,9],\"sm_count\":142,\"nvrtc\":[13,2],\"nvrtc_library_known\":true,\"nvrtc_library_domain\":{},",
+            "\"compiler_target\":\"sm_89\",\"state_capacity\":{},\"source_sha256\":{},\"invocation_sha256\":{},\"headers_sha256\":{},",
+            "\"inference_compile_key\":{},\"inference_artifact\":{},\"aggregate_artifact\":{},\"driver_api\":{},\"driver_build_sources\":{},\"driver_build_digest\":{},",
             "\"composer_revision\":{},\"compiler_revision\":{},\"numeric_abi_revision\":{},\"schedule_revision\":{},\"tuning_revision\":{},\"cublas_version\":{version}}}"
         ),
         quoted(&digest_hex(&compiler.nvrtc_library_domain)),
@@ -2709,8 +1684,8 @@ fn identity(ctx: &GpuCtx, device: &GpuDevice) -> Result<String, String> {
         quoted(&digest_hex(&compiler.source_digest)),
         quoted(&digest_hex(&compiler.invocation_digest)),
         quoted(&digest_hex(&compiler.header_manifest_digest)),
-        quoted(&digest_hex(&artifacts.fixed.compile_key)),
-        quoted(&digest_hex(&artifacts.fixed.artifact_digest)),
+        quoted(&digest_hex(&artifacts.inference.compile_key)),
+        quoted(&digest_hex(&artifacts.inference.artifact_digest)),
         quoted(&digest_hex(&artifacts.ordered_digest)),
         driver.api_version,
         driver.build_sources,
@@ -2728,7 +1703,6 @@ fn single_term_preflight(
     ctx: &GpuCtx,
     evidence: &mut Evidence,
     poison_red: bool,
-    candidate: Candidate,
 ) -> Result<(), String> {
     for has_bias in [false, true] {
         let mut case = Case::new(
@@ -2736,7 +1710,6 @@ fn single_term_preflight(
             InferenceShape { m: 65, k: 1, n: 65 },
             Corpus::Representable,
             has_bias,
-            candidate,
         )?;
         let a_len = case.a.active;
         let b_len = case.b.active;
@@ -2801,23 +1774,16 @@ fn run_case(
     timed: bool,
 ) -> Result<usize, String> {
     let s = case.shape;
-    if case.candidate != evidence.candidate || protocol.diagnostic_fast != evidence.diagnostic_fast
-    {
-        return Err("case/evidence candidate or diagnostic-mode drift".into());
-    }
     for arm in [5, 4, 0, 1, 2, 3] {
         case.outputs[arm].reset(ctx)?;
         case.launch(ctx, arm)?;
     }
+    let cell_selected = protocol.cells.iter().any(|index| CELLS[*index].0 == label);
     auto_phase(
         protocol.auto_phase.as_deref(),
-        case.shape,
-        case.has_bias,
-        case.auto.get().ok_or("AUTO was not launched")?,
-        ctx.kernels
-            .fixed_sm120_fma_postbias
-            .as_ref()
-            .is_some_and(|kernels| kernels.m128n64_t256.is_some()),
+        label,
+        cell_selected,
+        case.auto.get() == Some(InferenceTile::F32Sm89N64CopyPlan),
     )?;
     let (expected, pre_numeric) = verify(case, ctx, None, evidence, "eager_first")?;
     for arm in 0..6 {
@@ -2848,7 +1814,7 @@ fn run_case(
         "\"raw_bits\":true,\"all_guards\":true,\"eager_repeat\":true,\"poisoned_graph_replays\":2,\"ordered_numeric_exceptions\":{},\"worst_ordered_exact_error\":{}"),
         quoted(label),s.m,s.k,s.n,case.has_bias,quoted(&format!("{:?}",case.corpus)),quoted(&format!("{selected:?}")),physical,inputs,output_digests,
         pre_numeric.exceptions,pre_numeric.worst_ordered_exact_error))?;
-    if resource_snapshot(ctx, case.candidate)? != initial_resources {
+    if resource_snapshot(ctx)? != initial_resources {
         return Err(
             "candidate/incumbent function attributes drifted during correctness gates".into(),
         );
@@ -2882,14 +1848,14 @@ fn run_case(
                     launch(arm)?;
                 }
                 verify(case, ctx, Some(&expected), evidence, "pair_pre_timing")?;
-                let preflight = evidence.telemetry("SM120 exact N64 pair preflight")?;
+                let preflight = telemetry("exact N64 pair preflight")?;
                 let mut raw = Vec::with_capacity(protocol.windows);
                 let mut ratios = Vec::with_capacity(protocol.windows);
                 for _ in 0..protocol.windows {
                     let mut positions = [0.0; 4];
                     for (position, slot) in slots(order)?.into_iter().enumerate() {
                         let arm = if slot == 0 { 0 } else { control };
-                        positions[position] = sm120_exact_event_window_us(ctx, 20, || {
+                        positions[position] = inference_ada_event_window_us(ctx, 20, || {
                             launch(arm).expect("exact-N64 complete timed workflow")
                         });
                     }
@@ -2903,10 +1869,10 @@ fn run_case(
                     verify(case, ctx, Some(&expected), evidence, "pair_post_timing")?;
                 // Re-poison/replay after timing as well as checking the timed outputs.
                 replay_checked(case, ctx, &graphs, &expected, evidence, "pair_post_timing")?;
-                if resource_snapshot(ctx, case.candidate)? != initial_resources {
+                if resource_snapshot(ctx)? != initial_resources {
                     return Err("incumbent/candidate attributes changed during timing".into());
                 }
-                let postflight = evidence.telemetry("SM120 exact N64 pair postflight")?;
+                let postflight = telemetry("exact N64 pair postflight")?;
                 let mut sorted = ratios.clone();
                 sorted.sort_by(f64::total_cmp);
                 let p50 = percentile(&sorted, 0.5);
@@ -2918,7 +1884,7 @@ fn run_case(
                     _ => unreachable!(),
                 }
                 evidence.pair(format!("{label}/{}/{}/{order}/{}",usize::from(case.has_bias),PATHS[path],ARMS[control]),format!(concat!("\"record\":\"pair\",\"cell\":{},\"m\":{},\"k\":{},\"n\":{},\"bias\":{},\"corpus\":\"signed_representable\",",
-                    "\"control\":{},\"actual_auto_tile\":{},\"path\":{},\"order\":{},\"windows\":{},\"eager_warmups_per_arm\":128,",
+                    "\"candidate\":\"F32Sm89N64CopyPlan\",\"control\":{},\"actual_auto_tile\":{},\"path\":{},\"order\":{},\"windows\":{},\"eager_warmups_per_arm\":128,",
                     "\"operations_per_event_window\":20,\"captured_operations_per_graph\":1,\"graph_replays_per_event_window\":{},\"raw_position_arm_indices\":{:?},",
                     "\"raw_position_us_per_operation\":{:?},\"raw_window_ratios\":{:?},\"paired_ratio_p50\":{},\"paired_ratio_p95\":{},",
                     "\"vendor_compute\":\"CUBLAS_COMPUTE_32F_PEDANTIC\",\"vendor_algorithm\":\"CUBLAS_GEMM_DEFAULT\",\"vendor_bias_every_call\":{},\"vendor_beta\":{},",
@@ -2932,95 +1898,62 @@ fn run_case(
             }
         }
     }
-    let promoted = !protocol.diagnostic_fast && protocol.auto_phase.as_deref() == Some("promoted");
-    let auto_is_candidate = selected == case.candidate.tile();
-    let own_win = candidate_own_admission(
-        case.candidate,
-        selected,
-        label,
-        case.has_bias,
-        protocol,
-        &legacy_p95,
-        &auto_p95,
-    );
-    let vendor_win = !protocol.diagnostic_fast
-        && own_win
-        && vendor_p95.len() == 4
-        && vendor_p95.iter().all(|r| r.is_finite() && *r <= 1.0);
-    evidence.emit(format!("\"record\":\"cell_summary\",\"cell\":{},\"bias\":{},\"windows\":{},\"legacy_paired_p95\":{:?},\"auto_paired_p95\":{:?},\"pedantic_paired_p95\":{:?},\"auto_is_candidate_self_comparison\":{auto_is_candidate},\"eligible_own_win\":{own_win},\"vendor_win\":{vendor_win},\"host_auto_not_changed\":{},\"host_auto_promoted\":{promoted}",
-        quoted(label),case.has_bias,protocol.windows,legacy_p95,auto_p95,vendor_p95,!promoted))?;
+    let auto_admitted = selected == InferenceTile::F32Sm89N64CopyPlan
+        || admission(label, protocol.windows, &protocol.paths, &auto_p95);
+    let own_win = admission(label, protocol.windows, &protocol.paths, &legacy_p95) && auto_admitted;
+    let vendor_win =
+        own_win && vendor_p95.len() == 4 && vendor_p95.iter().all(|r| r.is_finite() && *r <= 1.0);
+    evidence.emit(format!("\"record\":\"cell_summary\",\"cell\":{},\"bias\":{},\"windows\":{},\"legacy_paired_p95\":{:?},\"auto_paired_p95\":{:?},\"pedantic_paired_p95\":{:?},\"auto_is_candidate_self_comparison\":{},\"eligible_own_win\":{own_win},\"vendor_win\":{vendor_win},\"host_auto_not_changed\":true",
+        quoted(label),case.has_bias,protocol.windows,legacy_p95,auto_p95,vendor_p95,selected==InferenceTile::F32Sm89N64CopyPlan))?;
     Ok(records)
 }
 
 pub(super) fn run() {
-    run_checked().expect("SM120 exact N64 production paired admission failed");
+    run_checked().expect("exact N64 production paired admission failed");
 }
 fn run_checked() -> Result<(), String> {
     if cfg!(debug_assertions) {
         return Err("paired admission requires --release".into());
     }
-    profile_request(
-        env("MAMBA_FIXED_SM120_EXACT_N64_ENABLE")?.as_deref(),
-        env("MAMBA_FIXED_SM120_EXACT_N64_CC")?.as_deref(),
-    )?;
+    if env("MAMBA_INFERENCE_ADA_VENDOR")?.as_deref() != Some("1") {
+        return Err("set MAMBA_INFERENCE_ADA_VENDOR=1".into());
+    }
+    if env("MAMBA_INFERENCE_VENDOR_EXACT_CC")?
+        .as_deref()
+        .is_some_and(|cc| cc != "8.9")
+    {
+        return Err("this new test admits only exact CC8.9".into());
+    }
     // These legacy filters are not meaningful in this single-candidate protocol.
-    for unsupported in [
-        "MAMBA_FIXED_SM120_EXACT_N64_TILES",
-        "MAMBA_FIXED_SM120_EXACT_N64_ROWS",
-        "MAMBA_FIXED_ADA_VENDOR",
-        "MAMBA_FIXED_ADA_ROWS",
-        "MAMBA_FIXED_ADA_CELLS",
-        "MAMBA_FIXED_ADA_BIAS",
-        "MAMBA_FIXED_ADA_WINDOWS",
-        "MAMBA_FIXED_VENDOR_TILES",
-        "MAMBA_FIXED_VENDOR_PATHS",
-        "MAMBA_FIXED_VENDOR_EXACT_CC",
-        "MAMBA_FIXED_EXACT_N64_AUTO",
-        "MAMBA_FIXED_EXACT_N64_JSONL",
-        "MAMBA_FIXED_EXACT_N64_POISON_RED",
-    ] {
+    for unsupported in ["MAMBA_INFERENCE_VENDOR_TILES", "MAMBA_INFERENCE_ADA_ROWS"] {
         if env(unsupported)?.is_some() {
             return Err(format!(
                 "unset unrelated {unsupported} for exact-N64 admission"
             ));
         }
     }
-    let mut protocol = Protocol::from_env()?;
-    let candidate = Candidate::parse(env("MAMBA_FIXED_SM120_EXACT_N64_CANDIDATE")?.as_deref())?;
-    let poison_red =
-        poison_red_requested(env("MAMBA_FIXED_SM120_EXACT_N64_POISON_RED")?.as_deref())?;
-    protocol.diagnostic_fast = diagnostic_fast_requested(
-        env("MAMBA_FIXED_SM120_EXACT_N64_DIAGNOSTIC_FAST")?.as_deref(),
-        candidate,
-        &protocol,
-        poison_red,
-    )?;
-    let preflight = telemetry("SM120 exact N64 run preflight")?;
+    let protocol = Protocol::from_env()?;
+    let poison_red = poison_red_requested(env("MAMBA_INFERENCE_EXACT_N64_POISON_RED")?.as_deref())?;
+    let preflight = telemetry("exact N64 run preflight")?;
     let device = GpuDevice::new(0)?;
-    if device.compute_capability != (12, 0) || device.multiprocessor_count() != 170 {
-        return Err("SM120 paired qualification requires exact CC12.0/170 SMs".into());
-    }
     let ctx = GpuCtx::new(&device)?;
-    super::configure_sm120_exact_custom(&ctx, F32TriadPolicy::ExactScalarFma);
+    super::configure_inference_auto_vendor_custom(&ctx, F32TriadPolicy::ExactScalarFma);
     let identity = identity(&ctx, &device)?;
-    let initial_resources = resource_snapshot(&ctx, candidate)?;
-    let mut evidence = Evidence::new(&preflight, candidate, protocol.diagnostic_fast)?;
-    let auto_phase = protocol.auto_phase.as_deref().unwrap_or("incumbent");
+    let initial_resources = resource_snapshot(&ctx)?;
+    let mut evidence = Evidence::new()?;
     evidence.emit(format!(concat!("\"record\":\"manifest\",\"identity\":{},\"preflight\":{},\"resources_candidate_legacy_n128_oracle\":{:?},\"selected_cells\":{:?},\"selected_biases\":{:?},\"selected_paths\":{:?},\"windows\":{},",
-        "\"telemetry_policy\":{},\"auto_phase\":{},\"support_source_sha256\":{},\"wrapper_source_sha256\":{},\"warmups\":128,\"event_window_operations\":20,\"all_five_hot_cells_both_finite_corpora_are_untimed_controls\":{},\"single_term_preflight_performed\":{},",
+        "\"support_source_sha256\":{},\"wrapper_source_sha256\":{},\"warmups\":128,\"event_window_operations\":20,\"all_five_hot_cells_both_finite_corpora_are_untimed_controls\":true,",
         "\"timed_corpus\":\"signed_representable\",\"source\":\"actual_loaded_production_NVRTC\",\"standalone_evidence_reused\":false,\"accuracy_exceptions_are_not_all_element_tolerance_success\":true"),
         identity,quoted(&preflight),initial_resources,protocol.cells,protocol.biases,protocol.paths,protocol.windows,
-        quoted(TELEMETRY_POLICY),quoted(auto_phase),quoted(&format!("{:x}",Sha256::digest(include_bytes!("fixed_sm120_exact_n64_admission.rs")))),
-        quoted(&format!("{:x}",Sha256::digest(include_bytes!("../gemm_bi_inference_sm120_performance.rs")))),!protocol.diagnostic_fast,!protocol.diagnostic_fast))?;
-    if !protocol.diagnostic_fast {
-        single_term_preflight(&ctx, &mut evidence, poison_red, candidate)?;
-    }
+        quoted(&format!("{:x}",Sha256::digest(include_bytes!("inference_sm89_exact_n64_admission.rs")))),
+        quoted(&format!("{:x}",Sha256::digest(include_bytes!("../gemm_bi_inference_performance.rs"))))))?;
+    single_term_preflight(&ctx, &mut evidence, poison_red)?;
     let mut records = 0;
-    // Full admission retains all five controls; diagnostic-only mode retains
-    // both B0 corpora and all B0 paired checks without admitting any route.
+    // All five cells remain numerical/graph controls, even when only a subset
+    // of the qualified A/B/D/E copy-plan rows are timed.
     for (index, bias, corpus, timed) in jobs(&protocol) {
         let (label, shape) = CELLS[index];
-        let case = Case::new(&ctx, shape, corpus, bias == 1, candidate)?;
+        let case = Case::new(&ctx, shape, corpus, bias == 1)?;
         records += run_case(
             &ctx,
             &case,
@@ -3031,10 +1964,10 @@ fn run_checked() -> Result<(), String> {
             timed,
         )?;
     }
-    if resource_snapshot(&ctx, candidate)? != initial_resources {
+    if resource_snapshot(&ctx)? != initial_resources {
         return Err("final candidate/incumbent attribute drift".into());
     }
-    let postflight = evidence.telemetry("SM120 exact N64 run postflight")?;
+    let postflight = telemetry("exact N64 run postflight")?;
     evidence.emit(format!("\"record\":\"final_gates\",\"postflight\":{},\"incumbent_attributes_unchanged\":true,\"all_inputs_outputs_guards_replays_checked\":true",quoted(&postflight)))?;
     evidence.complete(records, &protocol.expected_pairs())
 }

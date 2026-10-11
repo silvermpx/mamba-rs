@@ -19,9 +19,9 @@ mod tn_raw;
 
 const NT_A_LDMATRIX_N96_SECTION: &str = "NT_A_LDMATRIX_N96";
 
-const FIXED_N96: &str = include_str!("../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu");
-const FIXED_TF32: &str = include_str!("../kernels/gemm_bi_inference/tf32.cu");
-const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_inference/common.cuh");
+const INFERENCE_N96: &str = include_str!("../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu");
+const INFERENCE_TF32: &str = include_str!("../kernels/gemm_bi_inference/tf32.cu");
+const INFERENCE_COMMON: &str = include_str!("../kernels/gemm_bi_inference/common.cuh");
 const SM80_TF32: &str = include_str!("../kernels/gemm_bi_triad/sm80/mma.cu");
 
 const TN_N96_SECTION: &str = "TN_N96";
@@ -30,12 +30,12 @@ const TN_M64N96_S2_SECTION: &str = "TN_M64N96_S2";
 const NN_DIRECT_N96_SECTION: &str = "NN_DIRECT_N96";
 
 fn retained_tn_n96() -> String {
-    let raw = tn_raw::candidate_source(FIXED_N96).expect("compose raw TN N96 parent");
+    let raw = tn_raw::candidate_source(INFERENCE_N96).expect("compose raw TN N96 parent");
     tn_n96::compose_candidate_source(&raw).expect("compose retained pre-RNA TN N96")
 }
 
 fn retained_tn_m64n64() -> String {
-    let raw = tn_raw::candidate_source(FIXED_N96).expect("compose raw TN N96 parent");
+    let raw = tn_raw::candidate_source(INFERENCE_N96).expect("compose raw TN N96 parent");
     tn_m64n64::candidate_source(&raw).expect("compose retained pre-RNA TN M64N64")
 }
 
@@ -63,7 +63,7 @@ fn retained_tn_m64n96_s2() -> String {
 
 fn retained_nn_direct_n96() -> String {
     let add_half =
-        nn_parent::compose_triad_nn_n96_source(FIXED_N96).expect("compose add-half NN N96");
+        nn_parent::compose_triad_nn_n96_source(INFERENCE_N96).expect("compose add-half NN N96");
     nn_direct::compose_candidate_source(&add_half).expect("compose retained direct NN N96")
 }
 
@@ -449,7 +449,7 @@ fn retained_nn_d768_out_body_is_not_lost_from_joint_source() {
             .unwrap()
             .contains(&symbol)
     );
-    let retained = nn_parent::compose_triad_nn_n96_source(FIXED_N96)
+    let retained = nn_parent::compose_triad_nn_n96_source(INFERENCE_N96)
         .expect("retained NN d768-out N96 body")
         .replace(nn_parent::TRIAD_NN_N96_SYMBOL, symbol);
     assert_eq!(extract_section(joint::SOURCE, "NN_N96"), retained);
@@ -458,11 +458,11 @@ fn retained_nn_d768_out_body_is_not_lost_from_joint_source() {
 #[test]
 fn retained_transforms_are_reversible_and_joint_source_has_no_discovery_markers() {
     let retained_tn = retained_tn_n96();
-    let raw = tn_raw::candidate_source(FIXED_N96).unwrap();
+    let raw = tn_raw::candidate_source(INFERENCE_N96).unwrap();
     assert_eq!(tn_n96::restore_retained_source(&retained_tn).unwrap(), raw);
 
     let retained_nn = retained_nn_direct_n96();
-    let add_half = nn_parent::compose_triad_nn_n96_source(FIXED_N96).unwrap();
+    let add_half = nn_parent::compose_triad_nn_n96_source(INFERENCE_N96).unwrap();
     assert_eq!(
         nn_direct::restore_retained_source(&retained_nn).unwrap(),
         add_half
@@ -498,7 +498,7 @@ fn composed_source_contains_the_sealed_seven_and_the_five_wide_exports() {
 }
 
 #[test]
-fn primitive_owner_is_frozen_and_byte_equal_to_fixed_tf32_definitions() {
+fn primitive_owner_is_frozen_and_byte_equal_to_inference_tf32_definitions() {
     assert_eq!(
         digest_hex(sha256(joint::PRIMITIVES.as_bytes())),
         joint::PRIMITIVES_SHA256
@@ -507,8 +507,8 @@ fn primitive_owner_is_frozen_and_byte_equal_to_fixed_tf32_definitions() {
     for name in [joint::COPY_CG_PRIMITIVE, joint::MMA_M16N8K8_PRIMITIVE] {
         assert_eq!(
             extract_device_function(joint::PRIMITIVES, name),
-            extract_device_function(FIXED_TF32, name),
-            "primitive {name} drifted from the proven Fixed TF32 definition"
+            extract_device_function(INFERENCE_TF32, name),
+            "primitive {name} drifted from the proven Inference TF32 definition"
         );
     }
     assert_eq!(
@@ -520,7 +520,7 @@ fn primitive_owner_is_frozen_and_byte_equal_to_fixed_tf32_definitions() {
 #[test]
 fn standalone_primitives_include_the_retained_alignment_dependency() {
     let helper = "static __device__ __forceinline__ bool gbf_aligned16(const void* p) {\n    return (reinterpret_cast<unsigned long long>(p) & 15ull) == 0ull;\n}";
-    assert_eq!(FIXED_COMMON.matches(helper).count(), 1);
+    assert_eq!(INFERENCE_COMMON.matches(helper).count(), 1);
     assert_eq!(joint::PRIMITIVES.matches(helper).count(), 1);
 }
 

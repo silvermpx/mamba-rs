@@ -314,6 +314,7 @@ impl Mamba3Kernels {
             // Shared kernels needed by training pipeline
             include_str!("../../../kernels/norms.cu"),
             include_str!("../../../kernels/elementwise.cu"),
+            include_str!("../../../kernels/gemm_bi_inference/casts.cu"),
             include_str!("../../../kernels/adamw.cu"),
         ];
 

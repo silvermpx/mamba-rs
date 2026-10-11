@@ -14,13 +14,13 @@ struct alignas(64) GbfSm120HalfTensorMap {
 };
 
 static_assert(sizeof(GbfSm120HalfTensorMap) == 128,
-              "Fixed SM120 half tensor-map size changed");
+              "Inference SM120 half tensor-map size changed");
 #if __CUDACC_VER_MAJOR__ >= 13
 static_assert(alignof(GbfSm120HalfTensorMap) == 128,
-              "Fixed SM120 half tensor-map alignment changed");
+              "Inference SM120 half tensor-map alignment changed");
 #else
 static_assert(alignof(GbfSm120HalfTensorMap) == 64,
-              "Fixed SM120 half tensor-map alignment changed");
+              "Inference SM120 half tensor-map alignment changed");
 #endif
 
 struct GbfSm120HalfParams {
@@ -37,11 +37,11 @@ struct GbfSm120HalfParams {
 };
 
 static_assert(sizeof(GbfSm120HalfParams) == 40,
-              "Fixed SM120 half parameter size changed");
+              "Inference SM120 half parameter size changed");
 static_assert(alignof(GbfSm120HalfParams) == 4,
-              "Fixed SM120 half parameter alignment changed");
+              "Inference SM120 half parameter alignment changed");
 static_assert(__is_standard_layout(GbfSm120HalfParams),
-              "Fixed SM120 half parameters must remain standard layout");
+              "Inference SM120 half parameters must remain standard layout");
 
 #define GBF_SM120_HALF_SWIZZLE_64B 4
 #define GBF_SM120_HALF_SWIZZLE_128B 8
@@ -60,7 +60,7 @@ struct GbfSm120HalfStorage {
 #define GBF_SM120_HALF_CHECK_STORAGE(M, N, BK, STAGES, BYTES)                \
     static_assert(                                                           \
         GbfSm120HalfStorage<M, N, BK, STAGES>::dynamic_bytes == BYTES,       \
-        "Fixed SM120 half dynamic shared size changed")
+        "Inference SM120 half dynamic shared size changed")
 
 GBF_SM120_HALF_CHECK_STORAGE(64, 64, 32, 2, 16512);
 GBF_SM120_HALF_CHECK_STORAGE(64, 64, 32, 3, 24704);
@@ -147,7 +147,7 @@ static __device__ __forceinline__ unsigned gbf_sm120_half_swizzled_address(
             GBF_SM120_HALF_SWIZZLE_64B>(
                 shared_address, logical_row, element);
     } else {
-        static_assert(BK == 64, "Fixed SM120 half BK must be 32 or 64");
+        static_assert(BK == 64, "Inference SM120 half BK must be 32 or 64");
         return gbf_sm120_half_swizzled_address_impl<
             GBF_SM120_HALF_SWIZZLE_128B>(
                 shared_address, logical_row, element);

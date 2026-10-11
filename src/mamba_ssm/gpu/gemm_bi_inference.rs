@@ -78,7 +78,7 @@ pub enum InferenceTile {
     Tf32Sm120M64S2PairStore,
     /// SM120 TMA BF16/F16 route selected from the qualified tile matrix.
     Sm120Half(InferenceSm120HalfTile),
-    /// Ada-measured inference cell of the Fixed sm89 overlay: one kernel per
+    /// Ada-measured inference cell of the Inference sm89 overlay: one kernel per
     /// (shape, operand dtypes, policy), proven at first use off the Ada board.
     Sm89Cell(Sm89CellRoute),
     /// 128x128 CTA, 256 threads, 2-stage cp.async, dynamic smem 71 680 B.
@@ -124,17 +124,17 @@ pub enum InferenceTile {
     /// Inference bridge to exact-TMA M64xN128, AUTO at qualified SM120 A0.
     F32Sm120TmaFmaM64N128,
     /// Inference-local exact-TMA M128xN64 post-dot-bias fallback at qualified SM120 A1.
-    F32Sm120TmaFmaFixedPostBiasM128N64,
-    /// Force-only exact-TMA M64xN128 with Fixed-compatible post-dot bias.
-    F32Sm120TmaFmaFixedPostBiasM64N128,
+    F32Sm120TmaFmaInferencePostBiasM128N64,
+    /// Force-only exact-TMA M64xN128 with Inference-compatible post-dot bias.
+    F32Sm120TmaFmaInferencePostBiasM64N128,
     /// Force-only exact-TMA M128xN96 screening tile with 256 threads.
-    F32Sm120TmaFmaFixedPostBiasM128N96,
+    F32Sm120TmaFmaInferencePostBiasM128N96,
     /// Force-only exact-TMA M128xN64 post-dot bias with four-value K chunks.
-    F32Sm120TmaFmaFixedPostBiasM128N64K4,
+    F32Sm120TmaFmaInferencePostBiasM128N64K4,
     /// Exact-TMA M128xN64 post-dot bias with eight compute warps, AUTO at qualified SM120 A1.
-    F32Sm120TmaFmaFixedPostBiasM128N64T256,
+    F32Sm120TmaFmaInferencePostBiasM128N64T256,
     /// Force-only exact-TMA M128xN64 with eight compute warps and no bias epilogue.
-    F32Sm120TmaFmaFixedNoBiasM128N64T256,
+    F32Sm120TmaFmaInferenceNoBiasM128N64T256,
 }
 
 /// Forced SM120 TMA BF16/F16 tile used by qualification and dispatch.
@@ -240,26 +240,26 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: Physica
     }
     if matches!(
         tile,
-        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
-            | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
-            | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
-            | InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
-            | InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128
-            | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96
+        InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64
+            | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64K4
+            | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64T256
+            | InferenceTile::F32Sm120TmaFmaInferenceNoBiasM128N64T256
+            | InferenceTile::F32Sm120TmaFmaInferencePostBiasM64N128
+            | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N96
     ) {
         return launch_sm120_tma_postbias(ctx, operands, shape, tile, observer);
     }
     if tile == InferenceTile::Legacy {
-        return super::blas::fixed_legacy_forward(ctx, operands, shape, observer);
+        return super::blas::inference_legacy_forward(ctx, operands, shape, observer);
     }
     if tile == InferenceTile::Tc128Sm89Pipeline {
         if operands.x.dtype == WeightDtype::F32
             || operands.x.dtype != operands.w.dtype
             || operands.x.dtype != operands.c.dtype
         {
-            return Err("Fixed Ada half pipeline requires matching bf16/f16 operands".into());
+            return Err("Inference Ada half pipeline requires matching bf16/f16 operands".into());
         }
-        let args = FixedArgs::try_new(operands, shape)?;
+        let args = InferenceArgs::try_new(operands, shape)?;
         return launch_sm89_half_pipeline(ctx, operands.x.dtype, &args, observer);
     }
     if tile == InferenceTile::Tc128Sm89Swizzle {
@@ -267,16 +267,16 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: Physica
             || operands.x.dtype != operands.w.dtype
             || operands.x.dtype != operands.c.dtype
         {
-            return Err("Fixed Ada half swizzle requires matching bf16/f16 operands".into());
+            return Err("Inference Ada half swizzle requires matching bf16/f16 operands".into());
         }
-        let args = FixedArgs::try_new(operands, shape)?;
+        let args = InferenceArgs::try_new(operands, shape)?;
         return launch_sm89_half_swizzle(ctx, operands.x.dtype, &args, observer);
     }
     if tile == InferenceTile::Tc128Sm89S3 {
         if !runtime_bundle::legacy_force_s3_dtype_supported(operands) {
-            return Err("Fixed Ada half s3 requires matching bf16/f16 operands".into());
+            return Err("Inference Ada half s3 requires matching bf16/f16 operands".into());
         }
-        let args = FixedArgs::try_new(operands, shape)?;
+        let args = InferenceArgs::try_new(operands, shape)?;
         return launch_sm89_half_s3(ctx, operands.x.dtype, &args, observer);
     }
     if matches!(
@@ -287,9 +287,9 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: Physica
             || operands.w.dtype != WeightDtype::F16
             || operands.c.dtype != WeightDtype::F16
         {
-            return Err("Fixed Ada N64 finalists require matching f16 operands".into());
+            return Err("Inference Ada N64 finalists require matching f16 operands".into());
         }
-        let args = FixedArgs::try_new(operands, shape)?;
+        let args = InferenceArgs::try_new(operands, shape)?;
         return launch_sm89_half_n64(ctx, tile, &args, observer);
     }
     if tile == InferenceTile::F32N128S2 {
@@ -297,9 +297,9 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: Physica
             || operands.x.dtype != WeightDtype::F32
             || operands.w.dtype != WeightDtype::F32
         {
-            return Err("forced Fixed F32 N128 launch requires f32 operands".into());
+            return Err("forced Inference F32 N128 launch requires f32 operands".into());
         }
-        let args = FixedArgs::try_new(operands, shape)?;
+        let args = InferenceArgs::try_new(operands, shape)?;
         return launch_f32_n128_s2(ctx, &args, observer);
     }
     if matches!(
@@ -324,7 +324,7 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: Physica
             || operands.x.dtype != WeightDtype::F32
             || operands.w.dtype != WeightDtype::F32
         {
-            return Err("forced Fixed TF32 launch requires f32 operands".into());
+            return Err("forced Inference TF32 launch requires f32 operands".into());
         }
         if matches!(
             tile,
@@ -333,23 +333,25 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: Physica
         {
             return Ok(());
         }
-        let args = FixedArgs::try_new(operands, shape)?;
+        let args = InferenceArgs::try_new(operands, shape)?;
         return launch_tf32(ctx, tile, &args, false, observer);
     }
     if let InferenceTile::Sm89Cell(route) = tile {
         let spec = sm89_cells::spec_for_route(route, operands.x.dtype).ok_or_else(|| {
             format!(
-                "forced Fixed Ada cell {route:?} has no {:?} member",
+                "forced Inference Ada cell {route:?} has no {:?} member",
                 operands.x.dtype
             )
         })?;
         if !sm89_cells::operands_match(spec, operands) {
-            return Err("forced Fixed Ada cell launch requires the cell's operand dtypes".into());
+            return Err(
+                "forced Inference Ada cell launch requires the cell's operand dtypes".into(),
+            );
         }
         if shape.m == 0 || shape.n == 0 {
             return Ok(());
         }
-        let args = FixedArgs::try_new(operands, shape)?;
+        let args = InferenceArgs::try_new(operands, shape)?;
         return launch_sm89_cell(ctx, spec, &args, observer);
     }
     if let InferenceTile::Sm120Half(sm120_tile) = tile {
@@ -359,11 +361,11 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: Physica
             operands.c.dtype == WeightDtype::F32 || operands.c.dtype == operands.x.dtype;
         if !half_inputs || !supported_output {
             return Err(
-                "forced Fixed SM120 half launch requires bf16/f16 inputs and matching-half or f32 output"
+                "forced Inference SM120 half launch requires bf16/f16 inputs and matching-half or f32 output"
                     .into(),
             );
         }
-        let args = FixedArgs::try_new(operands, shape)?;
+        let args = InferenceArgs::try_new(operands, shape)?;
         return launch_sm120_half(
             ctx,
             sm120_tile,
@@ -381,7 +383,7 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: Physica
             | InferenceTile::TcW64
             | InferenceTile::TcWn64
     ) {
-        return Err(format!("forced Fixed tile {tile:?} is not qualified"));
+        return Err(format!("forced Inference tile {tile:?} is not qualified"));
     }
     let half_inputs = operands.x.dtype != WeightDtype::F32 && operands.x.dtype == operands.w.dtype;
     let mixed_f32_output = operands.c.dtype == WeightDtype::F32;
@@ -393,9 +395,11 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_with_tile_observed<O: Physica
                 InferenceTile::Tc16 | InferenceTile::Tc64 | InferenceTile::Tc128
             ))
     {
-        return Err("forced Fixed tensor-core launch has an unsupported dtype/tile pair".into());
+        return Err(
+            "forced Inference tensor-core launch has an unsupported dtype/tile pair".into(),
+        );
     }
-    let args = FixedArgs::try_new(operands, shape)?;
+    let args = InferenceArgs::try_new(operands, shape)?;
     if mixed_f32_output {
         launch_f32out_ladder(ctx, tile, operands.x.dtype, &args, observer)
     } else {
@@ -415,13 +419,14 @@ fn launch_sm120_tf32_custom_ldc_for_test(
         || operands.x.dtype != WeightDtype::F32
         || operands.w.dtype != WeightDtype::F32
     {
-        return Err("Fixed SM120 TF32 custom-ldc test launch requires f32 operands".into());
+        return Err("Inference SM120 TF32 custom-ldc test launch requires f32 operands".into());
     }
     if ldc < shape.n {
-        return Err("Fixed SM120 TF32 custom-ldc test launch requires ldc >= N".into());
+        return Err("Inference SM120 TF32 custom-ldc test launch requires ldc >= N".into());
     }
-    let ldc = i32::try_from(ldc).map_err(|_| "Fixed SM120 TF32 custom-ldc test ldc exceeds i32")?;
-    let args = FixedArgs::try_new(operands, shape)?;
+    let ldc =
+        i32::try_from(ldc).map_err(|_| "Inference SM120 TF32 custom-ldc test ldc exceeds i32")?;
+    let args = InferenceArgs::try_new(operands, shape)?;
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
@@ -429,13 +434,13 @@ fn launch_sm120_tf32_custom_ldc_for_test(
         .kernels
         .gemm_bi_nn_tf32_sm120
         .as_ref()
-        .ok_or("Fixed SM120 TF32 kernels are not loaded")?;
-    let rows = u32::try_from(args.m).map_err(|_| "Fixed SM120 TF32 M is negative")?;
-    let cols = u32::try_from(args.n).map_err(|_| "Fixed SM120 TF32 N is negative")?;
+        .ok_or("Inference SM120 TF32 kernels are not loaded")?;
+    let rows = u32::try_from(args.m).map_err(|_| "Inference SM120 TF32 M is negative")?;
+    let cols = u32::try_from(args.n).map_err(|_| "Inference SM120 TF32 N is negative")?;
     let grid = rows
         .div_ceil(64)
         .checked_mul(cols.div_ceil(64))
-        .ok_or("Fixed SM120 TF32 launch grid exceeds u32")?;
+        .ok_or("Inference SM120 TF32 launch grid exceeds u32")?;
     let config = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (128, 1, 1),
@@ -443,13 +448,13 @@ fn launch_sm120_tf32_custom_ldc_for_test(
     };
     let maps = if args.k == 0 {
         let zero = unsafe {
-            FixedTensorMap(std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed().assume_init())
+            InferenceTensorMap(std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed().assume_init())
         };
         [zero, zero]
     } else {
-        fixed_sm120_tf32_maps(ctx, &args, 64)?
+        inference_sm120_tf32_maps(ctx, &args, 64)?
     };
-    let params = FixedSm120Tf32Params {
+    let params = InferenceSm120Tf32Params {
         m: args.m,
         k: args.k,
         n: args.n,
@@ -468,7 +473,7 @@ fn launch_sm120_tf32_custom_ldc_for_test(
     builder.arg(&params);
     unsafe { builder.launch(config) }
         .map(|_| ())
-        .map_err(|error| format!("gemm_bi Fixed SM120 TF32 custom-ldc test: {error:?}"))
+        .map_err(|error| format!("gemm_bi Inference SM120 TF32 custom-ldc test: {error:?}"))
 }
 
 /// Launch the former exact-f32 kernel for qualification against the
@@ -483,19 +488,19 @@ pub fn inference_forward_f32_legacy_baseline(
         || operands.x.dtype != WeightDtype::F32
         || operands.w.dtype != WeightDtype::F32
     {
-        return Err("Fixed f32 legacy baseline requires f32 operands".into());
+        return Err("Inference f32 legacy baseline requires f32 operands".into());
     }
     if shape.m == 0 || shape.n == 0 {
         return Ok(());
     }
-    let m = i32::try_from(shape.m).map_err(|_| "Fixed M exceeds i32")?;
-    let n = i32::try_from(shape.n).map_err(|_| "Fixed N exceeds i32")?;
-    let k = i32::try_from(shape.k).map_err(|_| "Fixed K exceeds i32")?;
-    let grid_m = u32::try_from(shape.m.div_ceil(64)).map_err(|_| "Fixed M grid exceeds u32")?;
-    let grid_n = u32::try_from(shape.n.div_ceil(64)).map_err(|_| "Fixed N grid exceeds u32")?;
+    let m = i32::try_from(shape.m).map_err(|_| "Inference M exceeds i32")?;
+    let n = i32::try_from(shape.n).map_err(|_| "Inference N exceeds i32")?;
+    let k = i32::try_from(shape.k).map_err(|_| "Inference K exceeds i32")?;
+    let grid_m = u32::try_from(shape.m.div_ceil(64)).map_err(|_| "Inference M grid exceeds u32")?;
+    let grid_n = u32::try_from(shape.n.div_ceil(64)).map_err(|_| "Inference N grid exceeds u32")?;
     let grid = grid_m
         .checked_mul(grid_n)
-        .ok_or("Fixed launch grid exceeds u32")?;
+        .ok_or("Inference launch grid exceeds u32")?;
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (256, 1, 1),
@@ -533,14 +538,14 @@ fn wave_eff(tiles: u32, multiprocessors: u32) -> f64 {
 }
 
 #[derive(Clone, Copy)]
-struct FixedTileDevice {
+struct InferenceTileDevice {
     multiprocessors: u32,
     compute_capability: (u32, u32),
 }
 
-/// Which of the Fixed SM89 half-precision holders this context has bound.
+/// Which of the Inference SM89 half-precision holders this context has bound.
 #[derive(Clone, Copy)]
-struct FixedSm89HalfHolders {
+struct InferenceSm89HalfHolders {
     pipeline_available: bool,
     swizzle_available: bool,
     s3_available: bool,
@@ -548,7 +553,7 @@ struct FixedSm89HalfHolders {
 
 /// The board and toolkit facts the TF32 tile pick reads.
 #[derive(Clone, Copy)]
-struct FixedTf32Stack {
+struct InferenceTf32Stack {
     multiprocessors: u32,
     compute_capability: (u32, u32),
     nvrtc_version: (i32, i32),
@@ -560,15 +565,15 @@ struct FixedTf32Stack {
 // The preferred route is the reviewed direct-pair winner; compatibility
 // fallback remains limited to independently qualified holders. Returning None
 // preserves the general architecture/portable ladder below this overlay.
-fn fixed_select_sm89_half_auto_tile(
+fn inference_select_sm89_half_auto_tile(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
-    holders: FixedSm89HalfHolders,
+    holders: InferenceSm89HalfHolders,
 ) -> Option<InferenceTile> {
-    let FixedSm89HalfHolders {
+    let InferenceSm89HalfHolders {
         pipeline_available,
         swizzle_available,
         s3_available,
@@ -578,7 +583,7 @@ fn fixed_select_sm89_half_auto_tile(
     };
 
     if !nvrtc_library_known
-        || !fixed_portable_overlay_board(device.compute_capability)
+        || !inference_portable_overlay_board(device.compute_capability)
         || device.multiprocessors == 0
         || !matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
         || operands.c.dtype == WeightDtype::F32
@@ -639,17 +644,17 @@ fn fixed_select_sm89_half_auto_tile(
 // Literal phase-2 rows from the three-toolkit forced qualification. A missing
 // optional holder declines only its own row; the revision-43 selector remains
 // the independent compatibility fallback.
-fn fixed_select_sm89_half_finalist_auto_tile(
+fn inference_select_sm89_half_finalist_auto_tile(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     d_available: bool,
     e_available: bool,
 ) -> Option<InferenceTile> {
     if !nvrtc_library_known
-        || !fixed_portable_overlay_board(device.compute_capability)
+        || !inference_portable_overlay_board(device.compute_capability)
         || device.multiprocessors == 0
         || nvrtc != (13, 2)
         || operands.c.dtype != WeightDtype::F16
@@ -692,16 +697,16 @@ mod sm89_pipeline_auto_tests {
         dims: (usize, usize, usize),
         has_bias: bool,
         known_library: bool,
-        holders: FixedSm89HalfHolders,
+        holders: InferenceSm89HalfHolders,
     ) -> Option<InferenceTile> {
-        fixed_select_sm89_half_auto_tile(
+        inference_select_sm89_half_auto_tile(
             operands(dtype, has_bias),
             InferenceShape {
                 m: dims.0,
                 k: dims.1,
                 n: dims.2,
             },
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: 142,
                 compute_capability: (8, 9),
             },
@@ -721,7 +726,7 @@ mod sm89_pipeline_auto_tests {
                     (4621, 768, 2304),
                     false,
                     true,
-                    FixedSm89HalfHolders {
+                    InferenceSm89HalfHolders {
                         pipeline_available: true,
                         swizzle_available: true,
                         s3_available: true
@@ -735,7 +740,7 @@ mod sm89_pipeline_auto_tests {
 
     #[test]
     fn sm89_half_auto_promotes_only_measured_cuda132_f16_n64_cells() {
-        let device = FixedTileDevice {
+        let device = InferenceTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
         };
@@ -749,7 +754,7 @@ mod sm89_pipeline_auto_tests {
                 n: dims.2,
             };
             assert_eq!(
-                fixed_select_sm89_half_finalist_auto_tile(
+                inference_select_sm89_half_finalist_auto_tile(
                     operands(WeightDtype::F16, false),
                     shape,
                     device,
@@ -766,7 +771,7 @@ mod sm89_pipeline_auto_tests {
 
     #[test]
     fn sm89_half_auto_declines_unmeasured_or_unavailable_finalist_rows() {
-        let device = FixedTileDevice {
+        let device = InferenceTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
         };
@@ -781,7 +786,7 @@ mod sm89_pipeline_auto_tests {
             n: 768,
         };
         let select_finalist = |operands, shape, device, nvrtc, known, d_available, e_available| {
-            fixed_select_sm89_half_finalist_auto_tile(
+            inference_select_sm89_half_finalist_auto_tile(
                 operands,
                 shape,
                 device,
@@ -819,11 +824,11 @@ mod sm89_pipeline_auto_tests {
                 );
             }
             for other_board in [
-                FixedTileDevice {
+                InferenceTileDevice {
                     compute_capability: (8, 6),
                     ..device
                 },
-                FixedTileDevice {
+                InferenceTileDevice {
                     multiprocessors: 141,
                     ..device
                 },
@@ -834,15 +839,15 @@ mod sm89_pipeline_auto_tests {
                 );
             }
             for bad_device in [
-                FixedTileDevice {
+                InferenceTileDevice {
                     compute_capability: (7, 5),
                     ..device
                 },
-                FixedTileDevice {
+                InferenceTileDevice {
                     compute_capability: (12, 0),
                     ..device
                 },
-                FixedTileDevice {
+                InferenceTileDevice {
                     multiprocessors: 0,
                     ..device
                 },
@@ -1003,7 +1008,7 @@ mod sm89_pipeline_auto_tests {
                                 dims,
                                 has_bias,
                                 true,
-                                FixedSm89HalfHolders {
+                                InferenceSm89HalfHolders {
                                     pipeline_available,
                                     swizzle_available,
                                     s3_available
@@ -1020,7 +1025,7 @@ mod sm89_pipeline_auto_tests {
 
     #[test]
     fn sm89_half_auto_declines_every_common_gate_failure() {
-        let device = FixedTileDevice {
+        let device = InferenceTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
         };
@@ -1031,13 +1036,13 @@ mod sm89_pipeline_auto_tests {
         };
         let ops = operands(WeightDtype::Bf16, false);
         let choose = |o, s, d, v, known, pipeline, swizzle| {
-            fixed_select_sm89_half_auto_tile(
+            inference_select_sm89_half_auto_tile(
                 o,
                 s,
                 d,
                 v,
                 known,
-                FixedSm89HalfHolders {
+                InferenceSm89HalfHolders {
                     pipeline_available: pipeline,
                     swizzle_available: swizzle,
                     s3_available: true,
@@ -1047,13 +1052,13 @@ mod sm89_pipeline_auto_tests {
 
         assert_eq!(choose(ops, shape, device, (13, 2), false, true, true), None);
         assert_eq!(
-            fixed_select_sm89_half_auto_tile(
+            inference_select_sm89_half_auto_tile(
                 ops,
                 shape,
                 device,
                 (13, 2),
                 true,
-                FixedSm89HalfHolders {
+                InferenceSm89HalfHolders {
                     pipeline_available: false,
                     swizzle_available: false,
                     s3_available: false
@@ -1065,7 +1070,7 @@ mod sm89_pipeline_auto_tests {
             assert_eq!(choose(ops, shape, device, version, true, true, true), None);
         }
         for cc in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0)] {
-            let board = FixedTileDevice {
+            let board = InferenceTileDevice {
                 compute_capability: cc,
                 ..device
             };
@@ -1079,7 +1084,7 @@ mod sm89_pipeline_auto_tests {
                 choose(
                     ops,
                     shape,
-                    FixedTileDevice {
+                    InferenceTileDevice {
                         compute_capability: cc,
                         ..device
                     },
@@ -1092,7 +1097,7 @@ mod sm89_pipeline_auto_tests {
             );
         }
         for multiprocessors in [141, 143, 170] {
-            let board = FixedTileDevice {
+            let board = InferenceTileDevice {
                 multiprocessors,
                 ..device
             };
@@ -1107,7 +1112,7 @@ mod sm89_pipeline_auto_tests {
                 choose(
                     ops,
                     shape,
-                    FixedTileDevice {
+                    InferenceTileDevice {
                         multiprocessors,
                         ..device
                     },
@@ -1214,11 +1219,11 @@ mod sm89_pipeline_auto_tests {
 /// Shape-keyed pick for the bf16/f16 inference ladder.
 /// The reduction depth `k` keys only the wide fragment-reuse rung - a
 /// legal key like every other, since the rungs are bit-identical.
-fn fixed_pick_tile(
+fn inference_pick_tile(
     rows: usize,
     cols: usize,
     k: usize,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
 ) -> Option<InferenceTile> {
     if cols < 32 {
         return Some(InferenceTile::Tc16);
@@ -1267,11 +1272,11 @@ fn fixed_pick_tile(
     Some(InferenceTile::Tc64)
 }
 
-fn fixed_pick_f32out_tile(
+fn inference_pick_f32out_tile(
     rows: usize,
     k: usize,
     cols: usize,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
 ) -> InferenceTile {
     if cols < 32 {
         return InferenceTile::Tc16;
@@ -1307,7 +1312,7 @@ fn fixed_pick_f32out_tile(
     }
 }
 
-fn fixed_adjust_arch_tile(
+fn inference_adjust_arch_tile(
     tile: InferenceTile,
     k: usize,
     compute_capability: (u32, u32),
@@ -1340,12 +1345,12 @@ fn ladder_cfg(tile: InferenceTile, rows: usize, cols: usize) -> cudarc::driver::
         | InferenceTile::F32Sm120N64Sliced
         | InferenceTile::F32Sm120TmaFmaM128N64
         | InferenceTile::F32Sm120TmaFmaM64N128
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
-        | InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64K4
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64T256
+        | InferenceTile::F32Sm120TmaFmaInferenceNoBiasM128N64T256
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM64N128
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N96
         | InferenceTile::Tf32M128S2
         | InferenceTile::Tf32M128S3
         | InferenceTile::Tf32M128N128S3
@@ -1377,9 +1382,9 @@ fn ladder_cfg(tile: InferenceTile, rows: usize, cols: usize) -> cudarc::driver::
     }
 }
 
-/// Arguments shared by every fixed-family kernel (row-major NN).
+/// Arguments shared by every Inference-family kernel (row-major NN).
 #[derive(Clone, Copy)]
-struct FixedArgs {
+struct InferenceArgs {
     c: CUptr,
     a: CUptr,
     b: CUptr,
@@ -1389,25 +1394,25 @@ struct FixedArgs {
     k: i32,
 }
 
-impl FixedArgs {
+impl InferenceArgs {
     fn try_new(operands: InferenceFwdOperands, shape: InferenceShape) -> Result<Self, String> {
         Ok(Self {
             c: operands.c.ptr,
             a: operands.x.ptr,
             b: operands.w.ptr,
             bias: operands.bias_ptr.unwrap_or(0),
-            m: i32::try_from(shape.m).map_err(|_| "Fixed M exceeds i32")?,
-            n: i32::try_from(shape.n).map_err(|_| "Fixed N exceeds i32")?,
-            k: i32::try_from(shape.k).map_err(|_| "Fixed K exceeds i32")?,
+            m: i32::try_from(shape.m).map_err(|_| "Inference M exceeds i32")?,
+            n: i32::try_from(shape.n).map_err(|_| "Inference N exceeds i32")?,
+            k: i32::try_from(shape.k).map_err(|_| "Inference K exceeds i32")?,
         })
     }
 }
 
 /// The boards that carry the Ada inference kernels: the sm_80 tier with
-/// the CC 12 family left out, because that family keeps its Fixed module
+/// the CC 12 family left out, because that family keeps its Inference module
 /// byte-identical to the one its copy-plan cohorts were minted on and so
 /// composes no portable overlay.
-fn fixed_portable_overlay_board(compute_capability: (u32, u32)) -> bool {
+fn inference_portable_overlay_board(compute_capability: (u32, u32)) -> bool {
     compute_capability.0 >= 8 && !super::device::is_sm120_family(compute_capability)
 }
 
@@ -1415,25 +1420,27 @@ fn prepare_sm89_exact_n64_launch(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
     compute_capability: (u32, u32),
-) -> Result<Option<(FixedArgs, u32)>, String> {
-    if !fixed_portable_overlay_board(compute_capability) {
-        return Err("Fixed Ada exact N64 requires an SM80+ board outside the CC 12 family".into());
+) -> Result<Option<(InferenceArgs, u32)>, String> {
+    if !inference_portable_overlay_board(compute_capability) {
+        return Err(
+            "Inference Ada exact N64 requires an SM80+ board outside the CC 12 family".into(),
+        );
     }
     if [operands.c.dtype, operands.x.dtype, operands.w.dtype]
         .into_iter()
         .any(|dtype| dtype != WeightDtype::F32)
     {
-        return Err("Fixed Ada exact N64 requires homogeneous f32 operands".into());
+        return Err("Inference Ada exact N64 requires homogeneous f32 operands".into());
     }
     // No output means no pointer arithmetic, shape conversion or work. This
     // deliberately also admits null pointers and an unused unrepresentable K.
     if shape.m == 0 || shape.n == 0 {
         return Ok(None);
     }
-    let args = FixedArgs::try_new(operands, shape)?;
+    let args = InferenceArgs::try_new(operands, shape)?;
     if args.c == 0 || !args.c.is_multiple_of(4) || !args.bias.is_multiple_of(4) {
         return Err(
-            "Fixed Ada exact N64 requires non-null f32-aligned C and null-or-f32-aligned bias"
+            "Inference Ada exact N64 requires non-null f32-aligned C and null-or-f32-aligned bias"
                 .into(),
         );
     }
@@ -1443,37 +1450,37 @@ fn prepare_sm89_exact_n64_launch(
             .any(|pointer| pointer == 0 || !pointer.is_multiple_of(4))
     {
         return Err(
-            "Fixed Ada exact N64 requires non-null f32-aligned A and B for nonzero K".into(),
+            "Inference Ada exact N64 requires non-null f32-aligned A and B for nonzero K".into(),
         );
     }
     args.m
         .checked_add(63)
-        .ok_or("Fixed Ada exact N64 padded M exceeds i32")?;
+        .ok_or("Inference Ada exact N64 padded M exceeds i32")?;
     args.n
         .checked_add(63)
-        .ok_or("Fixed Ada exact N64 padded N exceeds i32")?;
+        .ok_or("Inference Ada exact N64 padded N exceeds i32")?;
     args.k
         .checked_add(31)
-        .ok_or("Fixed Ada exact N64 padded K exceeds i32")?;
+        .ok_or("Inference Ada exact N64 padded K exceeds i32")?;
     let grid = (args.m as u32)
         .div_ceil(64)
         .checked_mul((args.n as u32).div_ceil(64))
         .filter(|grid| *grid <= i32::MAX as u32)
-        .ok_or("Fixed Ada exact N64 launch grid exceeds i32")?;
-    fixed_sm89_exact_n64_byte_end(args.c, args.m, args.n, "C")?;
+        .ok_or("Inference Ada exact N64 launch grid exceeds i32")?;
+    inference_sm89_exact_n64_byte_end(args.c, args.m, args.n, "C")?;
     if args.k != 0 {
-        fixed_sm89_exact_n64_byte_end(args.a, args.m, args.k, "A")?;
-        fixed_sm89_exact_n64_byte_end(args.b, args.k, args.n, "B")?;
+        inference_sm89_exact_n64_byte_end(args.a, args.m, args.k, "A")?;
+        inference_sm89_exact_n64_byte_end(args.b, args.k, args.n, "B")?;
     }
     if args.bias != 0 {
-        fixed_sm89_exact_n64_byte_end(args.bias, 1, args.n, "bias")?;
+        inference_sm89_exact_n64_byte_end(args.bias, 1, args.n, "bias")?;
     }
     // Allocation length, residency and nonaliasing remain the caller's raw
     // pointer contract; this gate rules out numeric/address wrap before launch.
     Ok(Some((args, grid)))
 }
 
-fn fixed_sm89_exact_n64_byte_end(
+fn inference_sm89_exact_n64_byte_end(
     pointer: u64,
     rows: i32,
     cols: i32,
@@ -1487,10 +1494,10 @@ fn fixed_sm89_exact_n64_byte_end(
                 .and_then(|cols| rows.checked_mul(cols))
         })
         .and_then(|elements| elements.checked_mul(4))
-        .ok_or_else(|| format!("Fixed Ada exact N64 {label} byte extent exceeds u64"))?;
+        .ok_or_else(|| format!("Inference Ada exact N64 {label} byte extent exceeds u64"))?;
     pointer
         .checked_add(bytes)
-        .ok_or_else(|| format!("Fixed Ada exact N64 {label} byte endpoint exceeds u64"))?;
+        .ok_or_else(|| format!("Inference Ada exact N64 {label} byte endpoint exceeds u64"))?;
     Ok(())
 }
 
@@ -1509,15 +1516,15 @@ fn launch_sm89_exact_n64<O: PhysicalLaunchObserver>(
     // and candidate-only carveout preference. Capture configures nothing.
     let function = ctx
         .kernels
-        .fixed_sm89_f32_n64_copyplan
+        .inference_sm89_f32_n64_copyplan
         .as_ref()
         .ok_or_else(|| {
             ctx.kernels
-                .fixed_sm89_f32_n64_copyplan_rejection
+                .inference_sm89_f32_n64_copyplan_rejection
                 .clone()
-                .unwrap_or_else(|| "Fixed Ada exact N64 copy-plan is not admitted".into())
+                .unwrap_or_else(|| "Inference Ada exact N64 copy-plan is not admitted".into())
         })?;
-    let params = FixedSm89ExactF32Params::forward(&args);
+    let params = InferenceSm89ExactF32Params::forward(&args);
     let config = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (128, 1, 1),
@@ -1563,23 +1570,23 @@ fn prepare_sm120_exact_n64_launch(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
     compute_capability: (u32, u32),
-) -> Result<Option<(FixedArgs, u32)>, String> {
+) -> Result<Option<(InferenceArgs, u32)>, String> {
     if compute_capability != (12, 0) {
-        return Err("Fixed SM120 exact N64 requires CC12.0".into());
+        return Err("Inference SM120 exact N64 requires CC12.0".into());
     }
     if [operands.c.dtype, operands.x.dtype, operands.w.dtype]
         .into_iter()
         .any(|dtype| dtype != WeightDtype::F32)
     {
-        return Err("Fixed SM120 exact N64 requires homogeneous f32 operands".into());
+        return Err("Inference SM120 exact N64 requires homogeneous f32 operands".into());
     }
     if shape.m == 0 || shape.n == 0 {
         return Ok(None);
     }
-    let args = FixedArgs::try_new(operands, shape)?;
+    let args = InferenceArgs::try_new(operands, shape)?;
     if args.c == 0 || !args.c.is_multiple_of(4) || !args.bias.is_multiple_of(4) {
         return Err(
-            "Fixed SM120 exact N64 requires non-null f32-aligned C and null-or-f32-aligned bias"
+            "Inference SM120 exact N64 requires non-null f32-aligned C and null-or-f32-aligned bias"
                 .into(),
         );
     }
@@ -1589,35 +1596,35 @@ fn prepare_sm120_exact_n64_launch(
             .any(|pointer| pointer == 0 || !pointer.is_multiple_of(4))
     {
         return Err(
-            "Fixed SM120 exact N64 requires non-null f32-aligned A and B for nonzero K".into(),
+            "Inference SM120 exact N64 requires non-null f32-aligned A and B for nonzero K".into(),
         );
     }
     args.m
         .checked_add(63)
-        .ok_or("Fixed SM120 exact N64 padded M exceeds i32")?;
+        .ok_or("Inference SM120 exact N64 padded M exceeds i32")?;
     args.n
         .checked_add(63)
-        .ok_or("Fixed SM120 exact N64 padded N exceeds i32")?;
+        .ok_or("Inference SM120 exact N64 padded N exceeds i32")?;
     args.k
         .checked_add(31)
-        .ok_or("Fixed SM120 exact N64 padded K exceeds i32")?;
+        .ok_or("Inference SM120 exact N64 padded K exceeds i32")?;
     let grid = (args.m as u32)
         .div_ceil(64)
         .checked_mul((args.n as u32).div_ceil(64))
         .filter(|grid| *grid <= i32::MAX as u32)
-        .ok_or("Fixed SM120 exact N64 launch grid exceeds i32")?;
-    fixed_sm120_exact_n64_byte_end(args.c, args.m, args.n, "C")?;
+        .ok_or("Inference SM120 exact N64 launch grid exceeds i32")?;
+    inference_sm120_exact_n64_byte_end(args.c, args.m, args.n, "C")?;
     if args.k != 0 {
-        fixed_sm120_exact_n64_byte_end(args.a, args.m, args.k, "A")?;
-        fixed_sm120_exact_n64_byte_end(args.b, args.k, args.n, "B")?;
+        inference_sm120_exact_n64_byte_end(args.a, args.m, args.k, "A")?;
+        inference_sm120_exact_n64_byte_end(args.b, args.k, args.n, "B")?;
     }
     if args.bias != 0 {
-        fixed_sm120_exact_n64_byte_end(args.bias, 1, args.n, "bias")?;
+        inference_sm120_exact_n64_byte_end(args.bias, 1, args.n, "bias")?;
     }
     Ok(Some((args, grid)))
 }
 
-fn fixed_sm120_exact_n64_byte_end(
+fn inference_sm120_exact_n64_byte_end(
     pointer: u64,
     rows: i32,
     cols: i32,
@@ -1631,10 +1638,10 @@ fn fixed_sm120_exact_n64_byte_end(
                 .and_then(|cols| rows.checked_mul(cols))
         })
         .and_then(|elements| elements.checked_mul(4))
-        .ok_or_else(|| format!("Fixed SM120 exact N64 {label} byte extent exceeds u64"))?;
+        .ok_or_else(|| format!("Inference SM120 exact N64 {label} byte extent exceeds u64"))?;
     pointer
         .checked_add(bytes)
-        .ok_or_else(|| format!("Fixed SM120 exact N64 {label} byte endpoint exceeds u64"))?;
+        .ok_or_else(|| format!("Inference SM120 exact N64 {label} byte endpoint exceeds u64"))?;
     Ok(())
 }
 
@@ -1651,15 +1658,15 @@ fn launch_sm120_exact_n64<O: PhysicalLaunchObserver>(
     };
     let function = ctx
         .kernels
-        .fixed_sm120_f32_n64_copyplan
+        .inference_sm120_f32_n64_copyplan
         .as_ref()
         .ok_or_else(|| {
             ctx.kernels
-                .fixed_sm120_f32_n64_copyplan_rejection
+                .inference_sm120_f32_n64_copyplan_rejection
                 .clone()
-                .unwrap_or_else(|| "Fixed SM120 exact N64 copy-plan is not admitted".into())
+                .unwrap_or_else(|| "Inference SM120 exact N64 copy-plan is not admitted".into())
         })?;
-    let params = FixedSm89ExactF32Params::forward(&args);
+    let params = InferenceSm89ExactF32Params::forward(&args);
     let config = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (128, 1, 1),
@@ -1706,17 +1713,19 @@ fn launch_sm120_copyplan_t256<O: PhysicalLaunchObserver>(
     tile: InferenceTile,
     observer: &mut O,
 ) -> Result<(), String> {
-    if !fixed_sm120_tma_fma_force_physical_eligible(
+    if !inference_sm120_tma_fma_force_physical_eligible(
         operands,
         shape,
-        FixedTileDevice {
+        InferenceTileDevice {
             multiprocessors: ctx.kernels.multiprocessor_count(),
             compute_capability: ctx.compute_capability(),
         },
         ctx.f32_triad_policy(),
         tile,
     ) {
-        return Err("Fixed SM120 CopyPlan T256 is outside its force-only hot-row contract".into());
+        return Err(
+            "Inference SM120 CopyPlan T256 is outside its force-only hot-row contract".into(),
+        );
     }
     let Some((args, grid64)) =
         prepare_sm120_exact_n64_launch(operands, shape, ctx.compute_capability())?
@@ -1725,23 +1734,24 @@ fn launch_sm120_copyplan_t256<O: PhysicalLaunchObserver>(
     };
     let (function, rejection, grid) = if tile == InferenceTile::F32Sm120M128N64CopyPlanT256 {
         (
-            &ctx.kernels.fixed_sm120_f32_m128n64_copyplan_t256,
-            &ctx.kernels.fixed_sm120_f32_m128n64_copyplan_t256_rejection,
+            &ctx.kernels.inference_sm120_f32_m128n64_copyplan_t256,
+            &ctx.kernels
+                .inference_sm120_f32_m128n64_copyplan_t256_rejection,
             (args.m as u32).div_ceil(128) * (args.n as u32).div_ceil(64),
         )
     } else {
         (
-            &ctx.kernels.fixed_sm120_f32_n64_copyplan_t256,
-            &ctx.kernels.fixed_sm120_f32_n64_copyplan_t256_rejection,
+            &ctx.kernels.inference_sm120_f32_n64_copyplan_t256,
+            &ctx.kernels.inference_sm120_f32_n64_copyplan_t256_rejection,
             grid64,
         )
     };
     let function = function.as_ref().ok_or_else(|| {
         rejection
             .clone()
-            .unwrap_or_else(|| format!("Fixed SM120 {tile:?} is not admitted"))
+            .unwrap_or_else(|| format!("Inference SM120 {tile:?} is not admitted"))
     })?;
-    let params = FixedSm89ExactF32Params::forward(&args);
+    let params = InferenceSm89ExactF32Params::forward(&args);
     let config = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (256, 1, 1),
@@ -1796,15 +1806,15 @@ fn launch_sm120_sliced<O: PhysicalLaunchObserver>(
     };
     let function = ctx
         .kernels
-        .fixed_sm120_f32_n64_sliced
+        .inference_sm120_f32_n64_sliced
         .as_ref()
         .ok_or_else(|| {
             ctx.kernels
-                .fixed_sm120_f32_n64_sliced_rejection
+                .inference_sm120_f32_n64_sliced_rejection
                 .clone()
-                .unwrap_or_else(|| "Fixed SM120 sliced N64 is not admitted".into())
+                .unwrap_or_else(|| "Inference SM120 sliced N64 is not admitted".into())
         })?;
-    let params = FixedSm89ExactF32Params::forward(&args);
+    let params = InferenceSm89ExactF32Params::forward(&args);
     let config = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (128, 1, 1),
@@ -1851,10 +1861,10 @@ fn launch_sm120_tma_fma<O: PhysicalLaunchObserver>(
     tile: InferenceTile,
     observer: &mut O,
 ) -> Result<(), String> {
-    if !fixed_sm120_tma_fma_force_physical_eligible(
+    if !inference_sm120_tma_fma_force_physical_eligible(
         operands,
         shape,
-        FixedTileDevice {
+        InferenceTileDevice {
             multiprocessors: ctx.kernels.multiprocessor_count(),
             compute_capability: ctx.compute_capability(),
         },
@@ -1862,20 +1872,20 @@ fn launch_sm120_tma_fma<O: PhysicalLaunchObserver>(
         tile,
     ) {
         return Err(
-            "Fixed SM120 exact-TMA forced launch is outside its tile-specific hot-shape and bias contract"
+            "Inference SM120 exact-TMA forced launch is outside its tile-specific hot-shape and bias contract"
                 .into(),
         );
     }
     let physical_tile = match tile {
         InferenceTile::F32Sm120TmaFmaM128N64 => {
-            super::gemm_bi_triad::FixedSm120ExactTmaTile::M128N64
+            super::gemm_bi_triad::InferenceSm120ExactTmaTile::M128N64
         }
         InferenceTile::F32Sm120TmaFmaM64N128 => {
-            super::gemm_bi_triad::FixedSm120ExactTmaTile::M64N128
+            super::gemm_bi_triad::InferenceSm120ExactTmaTile::M64N128
         }
-        _ => unreachable!("exact-TMA launcher received a non-TMA Fixed tile"),
+        _ => unreachable!("exact-TMA launcher received a non-TMA Inference tile"),
     };
-    let launched = super::gemm_bi_triad::launch_cached_fixed_sm120_exact_tma(
+    let launched = super::gemm_bi_triad::launch_cached_inference_sm120_exact_tma(
         ctx,
         (shape.m, shape.k, shape.n),
         super::gemm_bi_triad::F32TriadOperands {
@@ -1890,7 +1900,7 @@ fn launch_sm120_tma_fma<O: PhysicalLaunchObserver>(
         observer,
     )?;
     if !launched {
-        return Err("Fixed SM120 exact-TMA symbol is not qualified on this context".into());
+        return Err("Inference SM120 exact-TMA symbol is not qualified on this context".into());
     }
     Ok(())
 }
@@ -1902,78 +1912,85 @@ fn launch_sm120_tma_postbias<O: PhysicalLaunchObserver>(
     tile: InferenceTile,
     observer: &mut O,
 ) -> Result<(), String> {
-    if !fixed_sm120_tma_fma_force_physical_eligible(
+    if !inference_sm120_tma_fma_force_physical_eligible(
         operands,
         shape,
-        FixedTileDevice {
+        InferenceTileDevice {
             multiprocessors: ctx.kernels.multiprocessor_count(),
             compute_capability: ctx.compute_capability(),
         },
         ctx.f32_triad_policy(),
         tile,
     ) {
-        return Err("Fixed SM120 post-bias launch is outside its exact measured contract".into());
+        return Err(
+            "Inference SM120 post-bias launch is outside its exact measured contract".into(),
+        );
     }
-    let args = FixedArgs::try_new(operands, shape)?;
+    let args = InferenceArgs::try_new(operands, shape)?;
     let kernels = ctx
         .kernels
-        .fixed_sm120_fma_postbias
+        .inference_sm120_fma_postbias
         .as_ref()
         .ok_or_else(|| {
             ctx.kernels
-                .fixed_sm120_fma_postbias_rejection
+                .inference_sm120_fma_postbias_rejection
                 .clone()
-                .unwrap_or_else(|| "Fixed SM120 post-bias kernels are not admitted".into())
+                .unwrap_or_else(|| "Inference SM120 post-bias kernels are not admitted".into())
         })?;
     let (function, tile_m, tile_n) = match tile {
-        InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => (
+        InferenceTile::F32Sm120TmaFmaInferenceNoBiasM128N64T256 => (
             kernels.nobias_m128n64_t256.as_ref().ok_or_else(|| {
                 kernels
                     .nobias_m128n64_t256_rejection
                     .clone()
-                    .unwrap_or_else(|| "Fixed SM120 no-bias T256 kernel is not admitted".into())
+                    .unwrap_or_else(|| "Inference SM120 no-bias T256 kernel is not admitted".into())
             })?,
             128_u32,
             64_u32,
         ),
-        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64 => (&kernels.m128n64, 128_u32, 64_u32),
-        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => (
+        InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64 => {
+            (&kernels.m128n64, 128_u32, 64_u32)
+        }
+        InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64T256 => (
             kernels.m128n64_t256.as_ref().ok_or_else(|| {
-                kernels
-                    .m128n64_t256_rejection
-                    .clone()
-                    .unwrap_or_else(|| "Fixed SM120 post-bias T256 kernel is not admitted".into())
+                kernels.m128n64_t256_rejection.clone().unwrap_or_else(|| {
+                    "Inference SM120 post-bias T256 kernel is not admitted".into()
+                })
             })?,
             128_u32,
             64_u32,
         ),
-        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4 => (
+        InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64K4 => (
             kernels.m128n64_k4.as_ref().ok_or_else(|| {
                 kernels
                     .m128n64_k4_rejection
                     .clone()
-                    .unwrap_or_else(|| "Fixed SM120 post-bias K4 kernel is not admitted".into())
+                    .unwrap_or_else(|| "Inference SM120 post-bias K4 kernel is not admitted".into())
             })?,
             128_u32,
             64_u32,
         ),
-        InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128 => (&kernels.m64n128, 64_u32, 128_u32),
-        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96 => (&kernels.m128n96, 128_u32, 96_u32),
-        _ => unreachable!("post-bias launcher received a non-post-bias Fixed tile"),
+        InferenceTile::F32Sm120TmaFmaInferencePostBiasM64N128 => {
+            (&kernels.m64n128, 64_u32, 128_u32)
+        }
+        InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N96 => {
+            (&kernels.m128n96, 128_u32, 96_u32)
+        }
+        _ => unreachable!("post-bias launcher received a non-post-bias Inference tile"),
     };
-    let rows = u32::try_from(args.m).map_err(|_| "Fixed post-bias M is negative")?;
-    let cols = u32::try_from(args.n).map_err(|_| "Fixed post-bias N is negative")?;
+    let rows = u32::try_from(args.m).map_err(|_| "Inference post-bias M is negative")?;
+    let cols = u32::try_from(args.n).map_err(|_| "Inference post-bias N is negative")?;
     let grid = rows
         .div_ceil(tile_m)
         .checked_mul(cols.div_ceil(tile_n))
-        .ok_or("Fixed post-bias launch grid exceeds u32")?;
-    let maps = fixed_sm120_postbias_maps(ctx, &args, tile_m, tile_n)?;
+        .ok_or("Inference post-bias launch grid exceeds u32")?;
+    let maps = inference_sm120_postbias_maps(ctx, &args, tile_m, tile_n)?;
     let tiles_per_split = args
         .k
         .checked_add(15)
-        .ok_or("Fixed post-bias K tile count exceeds i32")?
+        .ok_or("Inference post-bias K tile count exceeds i32")?
         / 16;
-    let params = FixedSm120PostBiasParams {
+    let params = InferenceSm120PostBiasParams {
         alpha: 1.0,
         beta: 0.0,
         m: args.m,
@@ -1984,9 +2001,9 @@ fn launch_sm120_tma_postbias<O: PhysicalLaunchObserver>(
         tiles_per_split,
     };
     let (threads, shared_mem_bytes) = match tile {
-        InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => (256, 24_592),
-        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => (256, 24_592),
-        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96 => (256, 28_688),
+        InferenceTile::F32Sm120TmaFmaInferenceNoBiasM128N64T256 => (256, 24_592),
+        InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64T256 => (256, 24_592),
+        InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N96 => (256, 28_688),
         _ => (128, 24_592),
     };
     let config = cudarc::driver::LaunchConfig {
@@ -2036,7 +2053,7 @@ fn launch_sm120_tma_postbias<O: PhysicalLaunchObserver>(
 /// Exact F32 owns its compact ABI independently of the half and TF32 bundles.
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct FixedSm89ExactF32Params {
+struct InferenceSm89ExactF32Params {
     alpha: f32,
     beta: f32,
     m: i32,
@@ -2046,12 +2063,12 @@ struct FixedSm89ExactF32Params {
     ldb: i32,
     ldc: i32,
 }
-unsafe impl DeviceRepr for FixedSm89ExactF32Params {}
-pub(crate) const FIXED_SM89_EXACT_F32_PARAMS_SIZE: usize =
-    std::mem::size_of::<FixedSm89ExactF32Params>();
+unsafe impl DeviceRepr for InferenceSm89ExactF32Params {}
+pub(crate) const INFERENCE_SM89_EXACT_F32_PARAMS_SIZE: usize =
+    std::mem::size_of::<InferenceSm89ExactF32Params>();
 
-impl FixedSm89ExactF32Params {
-    fn forward(args: &FixedArgs) -> Self {
+impl InferenceSm89ExactF32Params {
+    fn forward(args: &InferenceArgs) -> Self {
         Self {
             alpha: 1.0,
             beta: 0.0,
@@ -2065,32 +2082,32 @@ impl FixedSm89ExactF32Params {
     }
 }
 const _: () = {
-    assert!(FIXED_SM89_EXACT_F32_PARAMS_SIZE == 32);
-    assert!(std::mem::align_of::<FixedSm89ExactF32Params>() == 4);
-    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, alpha) == 0);
-    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, beta) == 4);
-    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, m) == 8);
-    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, n) == 12);
-    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, k) == 16);
-    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, lda) == 20);
-    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, ldb) == 24);
-    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, ldc) == 28);
+    assert!(INFERENCE_SM89_EXACT_F32_PARAMS_SIZE == 32);
+    assert!(std::mem::align_of::<InferenceSm89ExactF32Params>() == 4);
+    assert!(std::mem::offset_of!(InferenceSm89ExactF32Params, alpha) == 0);
+    assert!(std::mem::offset_of!(InferenceSm89ExactF32Params, beta) == 4);
+    assert!(std::mem::offset_of!(InferenceSm89ExactF32Params, m) == 8);
+    assert!(std::mem::offset_of!(InferenceSm89ExactF32Params, n) == 12);
+    assert!(std::mem::offset_of!(InferenceSm89ExactF32Params, k) == 16);
+    assert!(std::mem::offset_of!(InferenceSm89ExactF32Params, lda) == 20);
+    assert!(std::mem::offset_of!(InferenceSm89ExactF32Params, ldb) == 24);
+    assert!(std::mem::offset_of!(InferenceSm89ExactF32Params, ldc) == 28);
 };
 
 fn launch_f32_n128_s2<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     observer: &mut O,
 ) -> Result<(), String> {
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
-    let rows = u32::try_from(args.m).map_err(|_| "Fixed F32 N128 M is negative")?;
-    let cols = u32::try_from(args.n).map_err(|_| "Fixed F32 N128 N is negative")?;
+    let rows = u32::try_from(args.m).map_err(|_| "Inference F32 N128 M is negative")?;
+    let cols = u32::try_from(args.n).map_err(|_| "Inference F32 N128 N is negative")?;
     let grid = rows
         .div_ceil(64)
         .checked_mul(cols.div_ceil(128))
-        .ok_or("Fixed F32 N128 launch grid exceeds u32")?;
+        .ok_or("Inference F32 N128 launch grid exceeds u32")?;
     let config = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (256, 1, 1),
@@ -2150,7 +2167,7 @@ fn launch_f32_n128_s2<O: PhysicalLaunchObserver>(
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct FixedTf32Params {
+struct InferenceTf32Params {
     m: i32,
     k: i32,
     n: i32,
@@ -2159,15 +2176,15 @@ struct FixedTf32Params {
     ldc: i32,
 }
 
-unsafe impl DeviceRepr for FixedTf32Params {}
+unsafe impl DeviceRepr for InferenceTf32Params {}
 
-pub(crate) const FIXED_TF32_PARAMS_SIZE: usize = std::mem::size_of::<FixedTf32Params>();
+pub(crate) const INFERENCE_TF32_PARAMS_SIZE: usize = std::mem::size_of::<InferenceTf32Params>();
 
 /// The borrowed Triad symbol takes alpha/beta before the six dimensions;
-/// its 32-byte parameter block is not the 24-byte Fixed TF32 ABI above.
+/// its 32-byte parameter block is not the 24-byte Inference TF32 ABI above.
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct FixedTf32WideParams {
+struct InferenceTf32WideParams {
     alpha: f32,
     beta: f32,
     m: i32,
@@ -2178,28 +2195,29 @@ struct FixedTf32WideParams {
     ldc: i32,
 }
 
-unsafe impl DeviceRepr for FixedTf32WideParams {}
+unsafe impl DeviceRepr for InferenceTf32WideParams {}
 
-pub(crate) const FIXED_TF32_WIDE_PARAMS_SIZE: usize = std::mem::size_of::<FixedTf32WideParams>();
+pub(crate) const INFERENCE_TF32_WIDE_PARAMS_SIZE: usize =
+    std::mem::size_of::<InferenceTf32WideParams>();
 
 const _: () = {
-    assert!(FIXED_TF32_WIDE_PARAMS_SIZE == 32);
-    assert!(std::mem::align_of::<FixedTf32WideParams>() == 4);
-    assert!(std::mem::offset_of!(FixedTf32WideParams, alpha) == 0);
-    assert!(std::mem::offset_of!(FixedTf32WideParams, beta) == 4);
-    assert!(std::mem::offset_of!(FixedTf32WideParams, m) == 8);
-    assert!(std::mem::offset_of!(FixedTf32WideParams, k) == 12);
-    assert!(std::mem::offset_of!(FixedTf32WideParams, n) == 16);
-    assert!(std::mem::offset_of!(FixedTf32WideParams, lda) == 20);
-    assert!(std::mem::offset_of!(FixedTf32WideParams, ldb) == 24);
-    assert!(std::mem::offset_of!(FixedTf32WideParams, ldc) == 28);
+    assert!(INFERENCE_TF32_WIDE_PARAMS_SIZE == 32);
+    assert!(std::mem::align_of::<InferenceTf32WideParams>() == 4);
+    assert!(std::mem::offset_of!(InferenceTf32WideParams, alpha) == 0);
+    assert!(std::mem::offset_of!(InferenceTf32WideParams, beta) == 4);
+    assert!(std::mem::offset_of!(InferenceTf32WideParams, m) == 8);
+    assert!(std::mem::offset_of!(InferenceTf32WideParams, k) == 12);
+    assert!(std::mem::offset_of!(InferenceTf32WideParams, n) == 16);
+    assert!(std::mem::offset_of!(InferenceTf32WideParams, lda) == 20);
+    assert!(std::mem::offset_of!(InferenceTf32WideParams, ldb) == 24);
+    assert!(std::mem::offset_of!(InferenceTf32WideParams, ldc) == 28);
 };
 
-/// Ada Fixed half owns a distinct five-argument ABI. Its dimension order is
+/// Ada Inference half owns a distinct five-argument ABI. Its dimension order is
 /// M,N,K, unlike the borrowed Triad TF32 wide bundle's M,K,N order.
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct FixedSm89HalfParams {
+struct InferenceSm89HalfParams {
     alpha: f32,
     beta: f32,
     m: i32,
@@ -2210,36 +2228,37 @@ struct FixedSm89HalfParams {
     ldc: i32,
 }
 
-unsafe impl DeviceRepr for FixedSm89HalfParams {}
+unsafe impl DeviceRepr for InferenceSm89HalfParams {}
 
-pub(crate) const FIXED_SM89_HALF_PARAMS_SIZE: usize = std::mem::size_of::<FixedSm89HalfParams>();
-pub(crate) const FIXED_SM89_HALF_SWIZZLE_PARAMS_SIZE: usize =
-    std::mem::size_of::<FixedSm89HalfParams>();
+pub(crate) const INFERENCE_SM89_HALF_PARAMS_SIZE: usize =
+    std::mem::size_of::<InferenceSm89HalfParams>();
+pub(crate) const INFERENCE_SM89_HALF_SWIZZLE_PARAMS_SIZE: usize =
+    std::mem::size_of::<InferenceSm89HalfParams>();
 
 const _: () = {
-    assert!(FIXED_SM89_HALF_PARAMS_SIZE == 32);
-    assert!(std::mem::align_of::<FixedSm89HalfParams>() == 4);
-    assert!(std::mem::offset_of!(FixedSm89HalfParams, alpha) == 0);
-    assert!(std::mem::offset_of!(FixedSm89HalfParams, beta) == 4);
-    assert!(std::mem::offset_of!(FixedSm89HalfParams, m) == 8);
-    assert!(std::mem::offset_of!(FixedSm89HalfParams, n) == 12);
-    assert!(std::mem::offset_of!(FixedSm89HalfParams, k) == 16);
-    assert!(std::mem::offset_of!(FixedSm89HalfParams, lda) == 20);
-    assert!(std::mem::offset_of!(FixedSm89HalfParams, ldb) == 24);
-    assert!(std::mem::offset_of!(FixedSm89HalfParams, ldc) == 28);
+    assert!(INFERENCE_SM89_HALF_PARAMS_SIZE == 32);
+    assert!(std::mem::align_of::<InferenceSm89HalfParams>() == 4);
+    assert!(std::mem::offset_of!(InferenceSm89HalfParams, alpha) == 0);
+    assert!(std::mem::offset_of!(InferenceSm89HalfParams, beta) == 4);
+    assert!(std::mem::offset_of!(InferenceSm89HalfParams, m) == 8);
+    assert!(std::mem::offset_of!(InferenceSm89HalfParams, n) == 12);
+    assert!(std::mem::offset_of!(InferenceSm89HalfParams, k) == 16);
+    assert!(std::mem::offset_of!(InferenceSm89HalfParams, lda) == 20);
+    assert!(std::mem::offset_of!(InferenceSm89HalfParams, ldb) == 24);
+    assert!(std::mem::offset_of!(InferenceSm89HalfParams, ldc) == 28);
 };
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
-struct FixedTensorMap(sys::CUtensorMap);
+struct InferenceTensorMap(sys::CUtensorMap);
 
-unsafe impl DeviceRepr for FixedTensorMap {}
+unsafe impl DeviceRepr for InferenceTensorMap {}
 
-pub(crate) const FIXED_TENSOR_MAP_SIZE: usize = std::mem::size_of::<sys::CUtensorMap>();
-pub(crate) const FIXED_TENSOR_MAP_ALIGN: usize = std::mem::align_of::<sys::CUtensorMap>();
+pub(crate) const INFERENCE_TENSOR_MAP_SIZE: usize = std::mem::size_of::<sys::CUtensorMap>();
+pub(crate) const INFERENCE_TENSOR_MAP_ALIGN: usize = std::mem::align_of::<sys::CUtensorMap>();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FixedTf32MapKey {
+struct InferenceTf32MapKey {
     a: CUptr,
     b: CUptr,
     m: usize,
@@ -2248,19 +2267,19 @@ struct FixedTf32MapKey {
     tile_rows: u32,
 }
 
-struct FixedTf32MapEntry {
-    key: FixedTf32MapKey,
-    maps: [FixedTensorMap; 2],
+struct InferenceTf32MapEntry {
+    key: InferenceTf32MapKey,
+    maps: [InferenceTensorMap; 2],
     epoch: ManagedAllocationEpochStamp,
 }
 
 #[derive(Default)]
-pub(crate) struct FixedTf32MapCache {
-    entries: VecDeque<FixedTf32MapEntry>,
+pub(crate) struct InferenceTf32MapCache {
+    entries: VecDeque<InferenceTf32MapEntry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FixedPostBiasMapKey {
+struct InferencePostBiasMapKey {
     a: CUptr,
     b: CUptr,
     m: usize,
@@ -2270,19 +2289,19 @@ struct FixedPostBiasMapKey {
     tile_n: u32,
 }
 
-struct FixedPostBiasMapEntry {
-    key: FixedPostBiasMapKey,
-    maps: [FixedTensorMap; 2],
+struct InferencePostBiasMapEntry {
+    key: InferencePostBiasMapKey,
+    maps: [InferenceTensorMap; 2],
     epoch: ManagedAllocationEpochStamp,
 }
 
 #[derive(Default)]
-pub(crate) struct FixedPostBiasMapCache {
-    entries: VecDeque<FixedPostBiasMapEntry>,
+pub(crate) struct InferencePostBiasMapCache {
+    entries: VecDeque<InferencePostBiasMapEntry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FixedHalfMapKey {
+struct InferenceHalfMapKey {
     a: CUptr,
     b: CUptr,
     m: usize,
@@ -2291,19 +2310,19 @@ struct FixedHalfMapKey {
     tile: InferenceSm120HalfTile,
 }
 
-struct FixedHalfMapEntry {
-    key: FixedHalfMapKey,
-    maps: [FixedTensorMap; 2],
+struct InferenceHalfMapEntry {
+    key: InferenceHalfMapKey,
+    maps: [InferenceTensorMap; 2],
     epoch: ManagedAllocationEpochStamp,
 }
 
 #[derive(Default)]
-pub(crate) struct FixedHalfMapCache {
-    entries: VecDeque<FixedHalfMapEntry>,
+pub(crate) struct InferenceHalfMapCache {
+    entries: VecDeque<InferenceHalfMapEntry>,
 }
 
-impl FixedHalfMapCache {
-    fn get(&mut self, key: FixedHalfMapKey) -> Option<[FixedTensorMap; 2]> {
+impl InferenceHalfMapCache {
+    fn get(&mut self, key: InferenceHalfMapKey) -> Option<[InferenceTensorMap; 2]> {
         self.entries.retain(|entry| entry.epoch.is_current());
         let index = self.entries.iter().position(|entry| entry.key == key)?;
         let entry = self.entries.remove(index)?;
@@ -2314,18 +2333,18 @@ impl FixedHalfMapCache {
 
     fn insert(
         &mut self,
-        key: FixedHalfMapKey,
-        maps: [FixedTensorMap; 2],
+        key: InferenceHalfMapKey,
+        maps: [InferenceTensorMap; 2],
         epoch: ManagedAllocationEpochStamp,
     ) {
         self.entries.retain(|entry| entry.key != key);
         self.entries
-            .push_front(FixedHalfMapEntry { key, maps, epoch });
+            .push_front(InferenceHalfMapEntry { key, maps, epoch });
     }
 }
 
-impl FixedTf32MapCache {
-    fn get(&mut self, key: FixedTf32MapKey) -> Option<[FixedTensorMap; 2]> {
+impl InferenceTf32MapCache {
+    fn get(&mut self, key: InferenceTf32MapKey) -> Option<[InferenceTensorMap; 2]> {
         self.entries.retain(|entry| entry.epoch.is_current());
         let index = self.entries.iter().position(|entry| entry.key == key)?;
         let entry = self.entries.remove(index)?;
@@ -2336,18 +2355,18 @@ impl FixedTf32MapCache {
 
     fn insert(
         &mut self,
-        key: FixedTf32MapKey,
-        maps: [FixedTensorMap; 2],
+        key: InferenceTf32MapKey,
+        maps: [InferenceTensorMap; 2],
         epoch: ManagedAllocationEpochStamp,
     ) {
         self.entries.retain(|entry| entry.key != key);
         self.entries
-            .push_front(FixedTf32MapEntry { key, maps, epoch });
+            .push_front(InferenceTf32MapEntry { key, maps, epoch });
     }
 }
 
-impl FixedPostBiasMapCache {
-    fn get(&mut self, key: FixedPostBiasMapKey) -> Option<[FixedTensorMap; 2]> {
+impl InferencePostBiasMapCache {
+    fn get(&mut self, key: InferencePostBiasMapKey) -> Option<[InferenceTensorMap; 2]> {
         self.entries.retain(|entry| entry.epoch.is_current());
         let index = self.entries.iter().position(|entry| entry.key == key)?;
         let entry = self.entries.remove(index)?;
@@ -2358,32 +2377,33 @@ impl FixedPostBiasMapCache {
 
     fn insert(
         &mut self,
-        key: FixedPostBiasMapKey,
-        maps: [FixedTensorMap; 2],
+        key: InferencePostBiasMapKey,
+        maps: [InferenceTensorMap; 2],
         epoch: ManagedAllocationEpochStamp,
     ) {
         self.entries.retain(|entry| entry.key != key);
         self.entries
-            .push_front(FixedPostBiasMapEntry { key, maps, epoch });
+            .push_front(InferencePostBiasMapEntry { key, maps, epoch });
     }
 }
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct FixedSm120Tf32Params {
+struct InferenceSm120Tf32Params {
     m: i32,
     k: i32,
     n: i32,
     ldc: i32,
 }
 
-unsafe impl DeviceRepr for FixedSm120Tf32Params {}
+unsafe impl DeviceRepr for InferenceSm120Tf32Params {}
 
-pub(crate) const FIXED_SM120_TF32_PARAMS_SIZE: usize = std::mem::size_of::<FixedSm120Tf32Params>();
+pub(crate) const INFERENCE_SM120_TF32_PARAMS_SIZE: usize =
+    std::mem::size_of::<InferenceSm120Tf32Params>();
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct FixedSm120PostBiasParams {
+struct InferenceSm120PostBiasParams {
     alpha: f32,
     beta: f32,
     m: i32,
@@ -2394,27 +2414,27 @@ struct FixedSm120PostBiasParams {
     tiles_per_split: i32,
 }
 
-unsafe impl DeviceRepr for FixedSm120PostBiasParams {}
+unsafe impl DeviceRepr for InferenceSm120PostBiasParams {}
 
-pub(crate) const FIXED_SM120_POSTBIAS_PARAMS_SIZE: usize =
-    std::mem::size_of::<FixedSm120PostBiasParams>();
+pub(crate) const INFERENCE_SM120_POSTBIAS_PARAMS_SIZE: usize =
+    std::mem::size_of::<InferenceSm120PostBiasParams>();
 
 const _: () = {
-    assert!(FIXED_SM120_POSTBIAS_PARAMS_SIZE == 32);
-    assert!(std::mem::align_of::<FixedSm120PostBiasParams>() == 4);
-    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, alpha) == 0);
-    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, beta) == 4);
-    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, m) == 8);
-    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, n) == 12);
-    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, k) == 16);
-    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, ldc) == 20);
-    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, splits) == 24);
-    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, tiles_per_split) == 28);
+    assert!(INFERENCE_SM120_POSTBIAS_PARAMS_SIZE == 32);
+    assert!(std::mem::align_of::<InferenceSm120PostBiasParams>() == 4);
+    assert!(std::mem::offset_of!(InferenceSm120PostBiasParams, alpha) == 0);
+    assert!(std::mem::offset_of!(InferenceSm120PostBiasParams, beta) == 4);
+    assert!(std::mem::offset_of!(InferenceSm120PostBiasParams, m) == 8);
+    assert!(std::mem::offset_of!(InferenceSm120PostBiasParams, n) == 12);
+    assert!(std::mem::offset_of!(InferenceSm120PostBiasParams, k) == 16);
+    assert!(std::mem::offset_of!(InferenceSm120PostBiasParams, ldc) == 20);
+    assert!(std::mem::offset_of!(InferenceSm120PostBiasParams, splits) == 24);
+    assert!(std::mem::offset_of!(InferenceSm120PostBiasParams, tiles_per_split) == 28);
 };
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-struct FixedSm120HalfParams {
+struct InferenceSm120HalfParams {
     a_x: i32,
     a_y: i32,
     b_x: i32,
@@ -2427,25 +2447,26 @@ struct FixedSm120HalfParams {
     ldc: i32,
 }
 
-unsafe impl DeviceRepr for FixedSm120HalfParams {}
+unsafe impl DeviceRepr for InferenceSm120HalfParams {}
 
-pub(crate) const FIXED_SM120_HALF_PARAMS_SIZE: usize = std::mem::size_of::<FixedSm120HalfParams>();
+pub(crate) const INFERENCE_SM120_HALF_PARAMS_SIZE: usize =
+    std::mem::size_of::<InferenceSm120HalfParams>();
 
-fn encode_fixed_tf32_map(
+fn encode_inference_tf32_map(
     base: CUptr,
     global_dimensions: [u64; 2],
     outer_byte_stride: u64,
     box_dimensions: [u32; 2],
-) -> Result<FixedTensorMap, String> {
+) -> Result<InferenceTensorMap, String> {
     if base == 0 || !base.is_multiple_of(16) {
-        return Err("Fixed SM120 TF32 map base must be non-null and 16-byte aligned".into());
+        return Err("Inference SM120 TF32 map base must be non-null and 16-byte aligned".into());
     }
     if global_dimensions.contains(&0)
         || outer_byte_stride == 0
         || !outer_byte_stride.is_multiple_of(16)
         || outer_byte_stride >= (1_u64 << 40)
     {
-        return Err("Fixed SM120 TF32 map dimensions or stride are unsupported".into());
+        return Err("Inference SM120 TF32 map dimensions or stride are unsupported".into());
     }
     let mut raw = std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed();
     let global_strides = [outer_byte_stride];
@@ -2466,17 +2487,17 @@ fn encode_fixed_tf32_map(
             sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
         )
         .result()
-        .map_err(|error| format!("Fixed SM120 TF32 tensor-map encode: {error:?}"))?;
-        Ok(FixedTensorMap(raw.assume_init()))
+        .map_err(|error| format!("Inference SM120 TF32 tensor-map encode: {error:?}"))?;
+        Ok(InferenceTensorMap(raw.assume_init()))
     }
 }
 
-fn fixed_sm120_tf32_maps(
+fn inference_sm120_tf32_maps(
     ctx: &GpuCtx,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     tile_rows: u32,
-) -> Result<[FixedTensorMap; 2], String> {
-    let key = FixedTf32MapKey {
+) -> Result<[InferenceTensorMap; 2], String> {
+    let key = InferenceTf32MapKey {
         a: args.a,
         b: args.b,
         m: args.m as usize,
@@ -2484,58 +2505,68 @@ fn fixed_sm120_tf32_maps(
         n: args.n as usize,
         tile_rows,
     };
-    if let Some(maps) = ctx.fixed_tf32_maps.borrow_mut().get(key) {
+    if let Some(maps) = ctx.inference_tf32_maps.borrow_mut().get(key) {
         return Ok(maps);
     }
     if ctx
         .stream
         .capture_status()
-        .map_err(|error| format!("query Fixed TF32 capture status: {error:?}"))?
+        .map_err(|error| format!("query Inference TF32 capture status: {error:?}"))?
         != sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
     {
-        return Err("Fixed SM120 TF32 tensor maps must be prepared before graph capture".into());
+        return Err(
+            "Inference SM120 TF32 tensor maps must be prepared before graph capture".into(),
+        );
     }
-    let m = u64::try_from(args.m).map_err(|_| "Fixed TF32 M is negative")?;
-    let k = u64::try_from(args.k).map_err(|_| "Fixed TF32 K is negative")?;
-    let n = u64::try_from(args.n).map_err(|_| "Fixed TF32 N is negative")?;
-    let a_stride = k.checked_mul(4).ok_or("Fixed TF32 A stride overflows")?;
-    let b_stride = n.checked_mul(4).ok_or("Fixed TF32 B stride overflows")?;
+    let m = u64::try_from(args.m).map_err(|_| "Inference TF32 M is negative")?;
+    let k = u64::try_from(args.k).map_err(|_| "Inference TF32 K is negative")?;
+    let n = u64::try_from(args.n).map_err(|_| "Inference TF32 N is negative")?;
+    let a_stride = k
+        .checked_mul(4)
+        .ok_or("Inference TF32 A stride overflows")?;
+    let b_stride = n
+        .checked_mul(4)
+        .ok_or("Inference TF32 B stride overflows")?;
     let maps = [
-        encode_fixed_tf32_map(args.a, [k, m], a_stride, [32, tile_rows])?,
-        encode_fixed_tf32_map(args.b, [n, k], b_stride, [32, 32])?,
+        encode_inference_tf32_map(args.a, [k, m], a_stride, [32, tile_rows])?,
+        encode_inference_tf32_map(args.b, [n, k], b_stride, [32, 32])?,
     ];
     let a_bytes = m
         .checked_mul(k)
         .and_then(|elements| elements.checked_mul(4))
-        .ok_or("Fixed TF32 A span overflows")?;
+        .ok_or("Inference TF32 A span overflows")?;
     let b_bytes = k
         .checked_mul(n)
         .and_then(|elements| elements.checked_mul(4))
-        .ok_or("Fixed TF32 B span overflows")?;
+        .ok_or("Inference TF32 B span overflows")?;
     let context_handle = ctx.stream.context().cu_ctx() as usize;
     if let Some(epoch) =
         managed_allocation_epoch_for_ranges(context_handle, &[(args.a, a_bytes), (args.b, b_bytes)])
     {
-        ctx.fixed_tf32_maps.borrow_mut().insert(key, maps, epoch);
+        ctx.inference_tf32_maps
+            .borrow_mut()
+            .insert(key, maps, epoch);
     }
     Ok(maps)
 }
 
-fn encode_fixed_postbias_map(
+fn encode_inference_postbias_map(
     base: CUptr,
     global_dimensions: [u64; 2],
     outer_byte_stride: u64,
     box_dimensions: [u32; 2],
-) -> Result<FixedTensorMap, String> {
+) -> Result<InferenceTensorMap, String> {
     if base == 0 || !base.is_multiple_of(16) {
-        return Err("Fixed SM120 post-bias map base must be non-null and 16-byte aligned".into());
+        return Err(
+            "Inference SM120 post-bias map base must be non-null and 16-byte aligned".into(),
+        );
     }
     let row_bytes = global_dimensions[0]
         .checked_mul(4)
-        .ok_or("Fixed SM120 post-bias map row width overflows")?;
+        .ok_or("Inference SM120 post-bias map row width overflows")?;
     let inner_bytes = box_dimensions[0]
         .checked_mul(4)
-        .ok_or("Fixed SM120 post-bias map box width overflows")?;
+        .ok_or("Inference SM120 post-bias map box width overflows")?;
     if global_dimensions.contains(&0)
         || box_dimensions.contains(&0)
         || box_dimensions[1] > 256
@@ -2545,7 +2576,7 @@ fn encode_fixed_postbias_map(
         || !inner_bytes.is_multiple_of(16)
         || inner_bytes > 1024
     {
-        return Err("Fixed SM120 post-bias map dimensions or stride are unsupported".into());
+        return Err("Inference SM120 post-bias map dimensions or stride are unsupported".into());
     }
     let mut raw = std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed();
     let global_strides = [outer_byte_stride];
@@ -2566,18 +2597,18 @@ fn encode_fixed_postbias_map(
             sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
         )
         .result()
-        .map_err(|error| format!("Fixed SM120 post-bias tensor-map encode: {error:?}"))?;
-        Ok(FixedTensorMap(raw.assume_init()))
+        .map_err(|error| format!("Inference SM120 post-bias tensor-map encode: {error:?}"))?;
+        Ok(InferenceTensorMap(raw.assume_init()))
     }
 }
 
-fn fixed_sm120_postbias_maps(
+fn inference_sm120_postbias_maps(
     ctx: &GpuCtx,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     tile_m: u32,
     tile_n: u32,
-) -> Result<[FixedTensorMap; 2], String> {
-    let key = FixedPostBiasMapKey {
+) -> Result<[InferenceTensorMap; 2], String> {
+    let key = InferencePostBiasMapKey {
         a: args.a,
         b: args.b,
         m: args.m as usize,
@@ -2586,71 +2617,71 @@ fn fixed_sm120_postbias_maps(
         tile_m,
         tile_n,
     };
-    if let Some(maps) = ctx.fixed_postbias_maps.borrow_mut().get(key) {
+    if let Some(maps) = ctx.inference_postbias_maps.borrow_mut().get(key) {
         return Ok(maps);
     }
     if ctx
         .stream
         .capture_status()
-        .map_err(|error| format!("query Fixed post-bias capture status: {error:?}"))?
+        .map_err(|error| format!("query Inference post-bias capture status: {error:?}"))?
         != sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
     {
         return Err(
-            "Fixed SM120 post-bias tensor maps must be prepared before graph capture".into(),
+            "Inference SM120 post-bias tensor maps must be prepared before graph capture".into(),
         );
     }
-    let m = u64::try_from(args.m).map_err(|_| "Fixed post-bias M is negative")?;
-    let k = u64::try_from(args.k).map_err(|_| "Fixed post-bias K is negative")?;
-    let n = u64::try_from(args.n).map_err(|_| "Fixed post-bias N is negative")?;
+    let m = u64::try_from(args.m).map_err(|_| "Inference post-bias M is negative")?;
+    let k = u64::try_from(args.k).map_err(|_| "Inference post-bias K is negative")?;
+    let n = u64::try_from(args.n).map_err(|_| "Inference post-bias N is negative")?;
     let a_stride = k
         .checked_mul(4)
-        .ok_or("Fixed post-bias A stride overflows")?;
+        .ok_or("Inference post-bias A stride overflows")?;
     let b_stride = n
         .checked_mul(4)
-        .ok_or("Fixed post-bias B stride overflows")?;
+        .ok_or("Inference post-bias B stride overflows")?;
     let maps = [
-        encode_fixed_postbias_map(args.a, [k, m], a_stride, [16, tile_m])?,
-        encode_fixed_postbias_map(args.b, [n, k], b_stride, [tile_n, 16])?,
+        encode_inference_postbias_map(args.a, [k, m], a_stride, [16, tile_m])?,
+        encode_inference_postbias_map(args.b, [n, k], b_stride, [tile_n, 16])?,
     ];
     let a_bytes = m
         .checked_mul(k)
         .and_then(|elements| elements.checked_mul(4))
-        .ok_or("Fixed post-bias A span overflows")?;
+        .ok_or("Inference post-bias A span overflows")?;
     let b_bytes = k
         .checked_mul(n)
         .and_then(|elements| elements.checked_mul(4))
-        .ok_or("Fixed post-bias B span overflows")?;
+        .ok_or("Inference post-bias B span overflows")?;
     let context_handle = ctx.stream.context().cu_ctx() as usize;
     if let Some(epoch) =
         managed_allocation_epoch_for_ranges(context_handle, &[(args.a, a_bytes), (args.b, b_bytes)])
     {
-        ctx.fixed_postbias_maps
+        ctx.inference_postbias_maps
             .borrow_mut()
             .insert(key, maps, epoch);
     }
     Ok(maps)
 }
 
-fn encode_fixed_half_map(
+fn encode_inference_half_map(
     base: CUptr,
     global_dimensions: [u64; 2],
     outer_byte_stride: u64,
     box_dimensions: [u32; 2],
     swizzle: sys::CUtensorMapSwizzle,
-) -> Result<FixedTensorMap, String> {
+) -> Result<InferenceTensorMap, String> {
     if base == 0 || !base.is_multiple_of(16) {
-        return Err("Fixed SM120 half map base must be non-null and 16-byte aligned".into());
+        return Err("Inference SM120 half map base must be non-null and 16-byte aligned".into());
     }
     let row_bytes = global_dimensions[0]
         .checked_mul(2)
-        .ok_or("Fixed SM120 half map row width overflows")?;
+        .ok_or("Inference SM120 half map row width overflows")?;
     if global_dimensions.contains(&0)
         || box_dimensions.contains(&0)
         || outer_byte_stride < row_bytes
         || !outer_byte_stride.is_multiple_of(16)
         || outer_byte_stride >= (1_u64 << 40)
     {
-        return Err("Fixed SM120 half map dimensions or stride are unsupported".into());
+        return Err("Inference SM120 half map dimensions or stride are unsupported".into());
     }
     let mut raw = std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed();
     let global_strides = [outer_byte_stride];
@@ -2671,17 +2702,17 @@ fn encode_fixed_half_map(
             sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
         )
         .result()
-        .map_err(|error| format!("Fixed SM120 half tensor-map encode: {error:?}"))?;
-        Ok(FixedTensorMap(raw.assume_init()))
+        .map_err(|error| format!("Inference SM120 half tensor-map encode: {error:?}"))?;
+        Ok(InferenceTensorMap(raw.assume_init()))
     }
 }
 
-fn fixed_sm120_half_maps(
+fn inference_sm120_half_maps(
     ctx: &GpuCtx,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     tile: InferenceSm120HalfTile,
-) -> Result<[FixedTensorMap; 2], String> {
-    let key = FixedHalfMapKey {
+) -> Result<[InferenceTensorMap; 2], String> {
+    let key = InferenceHalfMapKey {
         a: args.a,
         b: args.b,
         m: args.m as usize,
@@ -2689,23 +2720,29 @@ fn fixed_sm120_half_maps(
         n: args.n as usize,
         tile,
     };
-    if let Some(maps) = ctx.fixed_half_maps.borrow_mut().get(key) {
+    if let Some(maps) = ctx.inference_half_maps.borrow_mut().get(key) {
         return Ok(maps);
     }
     if ctx
         .stream
         .capture_status()
-        .map_err(|error| format!("query Fixed half capture status: {error:?}"))?
+        .map_err(|error| format!("query Inference half capture status: {error:?}"))?
         != sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
     {
-        return Err("Fixed SM120 half tensor maps must be prepared before graph capture".into());
+        return Err(
+            "Inference SM120 half tensor maps must be prepared before graph capture".into(),
+        );
     }
-    let m = u64::try_from(args.m).map_err(|_| "Fixed half M is negative")?;
-    let k = u64::try_from(args.k).map_err(|_| "Fixed half K is negative")?;
-    let n = u64::try_from(args.n).map_err(|_| "Fixed half N is negative")?;
+    let m = u64::try_from(args.m).map_err(|_| "Inference half M is negative")?;
+    let k = u64::try_from(args.k).map_err(|_| "Inference half K is negative")?;
+    let n = u64::try_from(args.n).map_err(|_| "Inference half N is negative")?;
     let (tile_m, tile_n, bk, _) = tile.geometry();
-    let a_stride = k.checked_mul(2).ok_or("Fixed half A stride overflows")?;
-    let b_stride = n.checked_mul(2).ok_or("Fixed half B stride overflows")?;
+    let a_stride = k
+        .checked_mul(2)
+        .ok_or("Inference half A stride overflows")?;
+    let b_stride = n
+        .checked_mul(2)
+        .ok_or("Inference half B stride overflows")?;
     let a_swizzle = if bk == 32 {
         sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B
     } else {
@@ -2719,34 +2756,36 @@ fn fixed_sm120_half_maps(
         sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B
     };
     let maps = [
-        encode_fixed_half_map(args.a, [k, m], a_stride, [bk, tile_m], a_swizzle)?,
-        encode_fixed_half_map(args.b, [n, k], b_stride, b_box, b_swizzle)?,
+        encode_inference_half_map(args.a, [k, m], a_stride, [bk, tile_m], a_swizzle)?,
+        encode_inference_half_map(args.b, [n, k], b_stride, b_box, b_swizzle)?,
     ];
     let a_bytes = m
         .checked_mul(k)
         .and_then(|elements| elements.checked_mul(2))
-        .ok_or("Fixed half A span overflows")?;
+        .ok_or("Inference half A span overflows")?;
     let b_bytes = k
         .checked_mul(n)
         .and_then(|elements| elements.checked_mul(2))
-        .ok_or("Fixed half B span overflows")?;
+        .ok_or("Inference half B span overflows")?;
     let context_handle = ctx.stream.context().cu_ctx() as usize;
     if let Some(epoch) =
         managed_allocation_epoch_for_ranges(context_handle, &[(args.a, a_bytes), (args.b, b_bytes)])
     {
-        ctx.fixed_half_maps.borrow_mut().insert(key, maps, epoch);
+        ctx.inference_half_maps
+            .borrow_mut()
+            .insert(key, maps, epoch);
     }
     Ok(maps)
 }
 
-fn fixed_pick_tf32(
+fn inference_pick_tf32(
     dims: (usize, usize, usize),
-    stack: FixedTf32Stack,
+    stack: InferenceTf32Stack,
     has_bias: bool,
     output_aligned: bool,
 ) -> InferenceTile {
     let (rows, inner, cols) = dims;
-    let FixedTf32Stack {
+    let InferenceTf32Stack {
         multiprocessors,
         compute_capability,
         nvrtc_version,
@@ -2822,11 +2861,11 @@ fn fixed_pick_tf32(
     }
 }
 
-fn fixed_pick_f32_exact(
+fn inference_pick_f32_exact(
     rows: usize,
     k: usize,
     cols: usize,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
 ) -> InferenceTile {
     if device.compute_capability == (12, 0)
         && device.multiprocessors == 170
@@ -2841,7 +2880,7 @@ fn fixed_pick_f32_exact(
 fn launch_tf32<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     tile: InferenceTile,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     allow_schedule_select: bool,
     observer: &mut O,
 ) -> Result<(), String> {
@@ -2892,20 +2931,20 @@ fn launch_tf32<O: PhysicalLaunchObserver>(
         InferenceTile::Tf32M64S2 => (&ctx.kernels.gemm_bi_nn_tf32.m64n64_s2, 64, 64, 128, 32_768),
         InferenceTile::Tf32M64S3 => (&ctx.kernels.gemm_bi_nn_tf32.m64n64_s3, 64, 64, 128, 55_296),
         InferenceTile::Tf32M16S4 => (&ctx.kernels.gemm_bi_nn_tf32.m16n32_s4, 16, 32, 128, 29_696),
-        _ => return Err(format!("{tile:?} is not a Fixed TF32 tile")),
+        _ => return Err(format!("{tile:?} is not an Inference TF32 tile")),
     };
-    let rows = u32::try_from(args.m).map_err(|_| "Fixed TF32 M is negative")?;
-    let cols = u32::try_from(args.n).map_err(|_| "Fixed TF32 N is negative")?;
+    let rows = u32::try_from(args.m).map_err(|_| "Inference TF32 M is negative")?;
+    let cols = u32::try_from(args.n).map_err(|_| "Inference TF32 N is negative")?;
     let grid = rows
         .div_ceil(bm)
         .checked_mul(cols.div_ceil(bn))
-        .ok_or("Fixed TF32 launch grid exceeds u32")?;
+        .ok_or("Inference TF32 launch grid exceeds u32")?;
     let config = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (threads, 1, 1),
         shared_mem_bytes,
     };
-    let params = FixedTf32Params {
+    let params = InferenceTf32Params {
         m: args.m,
         k: args.k,
         n: args.n,
@@ -2946,53 +2985,54 @@ fn launch_tf32<O: PhysicalLaunchObserver>(
 
 fn launch_tf32_rna_n96<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     observer: &mut O,
 ) -> Result<(), String> {
-    if !fixed_portable_overlay_board(ctx.compute_capability()) {
-        return Err("Fixed Ada TF32 RNA N96 requires an SM80+ board".into());
+    if !inference_portable_overlay_board(ctx.compute_capability()) {
+        return Err("Inference Ada TF32 RNA N96 requires an SM80+ board".into());
     }
     if args.k % 4 != 0 || args.n % 4 != 0 {
-        return Err("Fixed Ada TF32 RNA N96 requires K and N divisible by four".into());
+        return Err("Inference Ada TF32 RNA N96 requires K and N divisible by four".into());
     }
     args.k
         .checked_add(31)
-        .ok_or("Fixed Ada TF32 RNA N96 padded K exceeds i32")?;
+        .ok_or("Inference Ada TF32 RNA N96 padded K exceeds i32")?;
     if args.k != 0
         && [args.a, args.b]
             .into_iter()
             .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))
     {
-        return Err("Fixed Ada TF32 RNA N96 requires non-null, 16-byte-aligned A and B".into());
+        return Err("Inference Ada TF32 RNA N96 requires non-null, 16-byte-aligned A and B".into());
     }
     if args.c == 0 || !args.c.is_multiple_of(4) || !args.bias.is_multiple_of(4) {
         return Err(
-            "Fixed Ada TF32 RNA N96 requires non-null f32-aligned C and f32-aligned bias".into(),
+            "Inference Ada TF32 RNA N96 requires non-null f32-aligned C and f32-aligned bias"
+                .into(),
         );
     }
-    let rows = u32::try_from(args.m).map_err(|_| "Fixed Ada TF32 RNA N96 M is negative")?;
+    let rows = u32::try_from(args.m).map_err(|_| "Inference Ada TF32 RNA N96 M is negative")?;
     let padded_columns = args
         .n
         .checked_add(95)
-        .ok_or("Fixed Ada TF32 RNA N96 padded N exceeds i32")?;
+        .ok_or("Inference Ada TF32 RNA N96 padded N exceeds i32")?;
     let column_tiles =
-        u32::try_from(padded_columns).map_err(|_| "Fixed Ada TF32 RNA N96 N is negative")? / 96;
+        u32::try_from(padded_columns).map_err(|_| "Inference Ada TF32 RNA N96 N is negative")? / 96;
     let grid = rows
         .div_ceil(128)
         .checked_mul(column_tiles)
         .filter(|grid| *grid <= i32::MAX as u32)
-        .ok_or("Fixed Ada TF32 RNA N96 launch grid exceeds i32")?;
+        .ok_or("Inference Ada TF32 RNA N96 launch grid exceeds i32")?;
     let function = ctx
         .kernels
-        .fixed_sm89_tf32_rna_n96
+        .inference_sm89_tf32_rna_n96
         .as_ref()
         .ok_or_else(|| {
             ctx.kernels
-                .fixed_sm89_tf32_rna_n96_rejection
+                .inference_sm89_tf32_rna_n96_rejection
                 .clone()
-                .unwrap_or_else(|| "Fixed Ada TF32 RNA N96 symbol is not admitted".into())
+                .unwrap_or_else(|| "Inference Ada TF32 RNA N96 symbol is not admitted".into())
         })?;
-    let params = FixedTf32WideParams {
+    let params = InferenceTf32WideParams {
         alpha: 1.0,
         beta: 0.0,
         m: args.m,
@@ -3042,12 +3082,12 @@ fn launch_tf32_rna_n96<O: PhysicalLaunchObserver>(
 
 fn launch_tf32_wide<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
-    args: &FixedArgs,
-    fixed_rna: bool,
+    args: &InferenceArgs,
+    inference_rna: bool,
     observer: &mut O,
 ) -> Result<(), String> {
     if args.k % 4 != 0 || args.n % 4 != 0 {
-        return Err("Fixed TF32 wide requires K and N divisible by four".into());
+        return Err("Inference TF32 wide requires K and N divisible by four".into());
     }
     // The wide body has vector-only input staging. K=0 does not issue any
     // input copies and may use null A/B; C and bias use scalar-safe stores/loads.
@@ -3056,47 +3096,49 @@ fn launch_tf32_wide<O: PhysicalLaunchObserver>(
             .into_iter()
             .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))
     {
-        return Err("Fixed TF32 wide requires non-null, 16-byte-aligned A and B".into());
+        return Err("Inference TF32 wide requires non-null, 16-byte-aligned A and B".into());
     }
     if args.c == 0 || !args.c.is_multiple_of(4) || !args.bias.is_multiple_of(4) {
-        return Err("Fixed TF32 wide requires non-null f32-aligned C and f32-aligned bias".into());
+        return Err(
+            "Inference TF32 wide requires non-null f32-aligned C and f32-aligned bias".into(),
+        );
     }
-    let rows = u32::try_from(args.m).map_err(|_| "Fixed TF32 wide M is negative")?;
+    let rows = u32::try_from(args.m).map_err(|_| "Inference TF32 wide M is negative")?;
     // The CUDA body computes (N + 127) in signed 32-bit arithmetic.
     let padded_columns = args
         .n
         .checked_add(127)
-        .ok_or("Fixed TF32 wide padded N exceeds i32")?;
+        .ok_or("Inference TF32 wide padded N exceeds i32")?;
     let column_tiles =
-        u32::try_from(padded_columns).map_err(|_| "Fixed TF32 wide N is negative")? / 128;
+        u32::try_from(padded_columns).map_err(|_| "Inference TF32 wide N is negative")? / 128;
     let grid = rows
         .div_ceil(128)
         .checked_mul(column_tiles)
         .filter(|grid| *grid <= i32::MAX as u32)
-        .ok_or("Fixed TF32 wide launch grid exceeds i32")?;
+        .ok_or("Inference TF32 wide launch grid exceeds i32")?;
     // The loader already admits this exact function's driver ABI, registers,
     // local memory and occupancy. No module is loaded or reconfigured here.
-    let function = if fixed_rna {
+    let function = if inference_rna {
         ctx.kernels
-            .fixed_sm89_tf32_rna_wide
+            .inference_sm89_tf32_rna_wide
             .as_ref()
             .ok_or_else(|| {
                 ctx.kernels
-                    .fixed_sm89_tf32_rna_wide_rejection
+                    .inference_sm89_tf32_rna_wide_rejection
                     .clone()
-                    .unwrap_or_else(|| "Fixed SM89 RNA-wide symbol is not admitted".into())
+                    .unwrap_or_else(|| "Inference SM89 RNA-wide symbol is not admitted".into())
             })?
     } else {
         ctx.kernels
             .tf32_function("nn_sm80_mma_tf32_m128n128_bk32_s3")
-            .ok_or("Fixed TF32 wide Triad symbol is not bound")?
+            .ok_or("Inference TF32 wide Triad symbol is not bound")?
     };
     let config = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (256, 1, 1),
         shared_mem_bytes: 98_304,
     };
-    let params = FixedTf32WideParams {
+    let params = InferenceTf32WideParams {
         alpha: 1.0,
         beta: 0.0,
         m: args.m,
@@ -3137,7 +3179,7 @@ fn launch_tf32_wide<O: PhysicalLaunchObserver>(
         .map_err(|error| error.with_driver_context(format_args!("Inference TF32 wide")))
 }
 
-fn fixed_sm120_pair_store_schedule_cell(
+fn inference_sm120_pair_store_schedule_cell(
     dims: (usize, usize, usize),
     compute_capability: (u32, u32),
     multiprocessors: u32,
@@ -3164,7 +3206,7 @@ fn fixed_sm120_pair_store_schedule_cell(
 fn launch_sm120_tf32<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     tile: InferenceTile,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     allow_schedule_select: bool,
     observer: &mut O,
 ) -> Result<(), String> {
@@ -3175,7 +3217,7 @@ fn launch_sm120_tf32<O: PhysicalLaunchObserver>(
         .kernels
         .gemm_bi_nn_tf32_sm120
         .as_ref()
-        .ok_or("Fixed SM120 TF32 kernels are not loaded")?;
+        .ok_or("Inference SM120 TF32 kernels are not loaded")?;
     let (function, bm, bn, threads, shared_mem_bytes) = match tile {
         InferenceTile::Tf32Sm120M128S2 => (&kernels.m128n64_s2, 128, 64, 128, 49_280),
         InferenceTile::Tf32Sm120M128S3 => (&kernels.m128n64_s3, 128, 64, 256, 73_856),
@@ -3189,7 +3231,7 @@ fn launch_sm120_tf32<O: PhysicalLaunchObserver>(
         }
         InferenceTile::Tf32Sm120M64S2 => {
             let pair_store = allow_schedule_select
-                && fixed_sm120_pair_store_schedule_cell(
+                && inference_sm120_pair_store_schedule_cell(
                     (args.m as usize, args.k as usize, args.n as usize),
                     ctx.compute_capability(),
                     ctx.kernels.multiprocessor_count(),
@@ -3203,14 +3245,14 @@ fn launch_sm120_tf32<O: PhysicalLaunchObserver>(
             };
             (function, 64, 64, 128, 32_896)
         }
-        _ => return Err(format!("{tile:?} is not a Fixed SM120 TF32 tile")),
+        _ => return Err(format!("{tile:?} is not an Inference SM120 TF32 tile")),
     };
-    let rows = u32::try_from(args.m).map_err(|_| "Fixed SM120 TF32 M is negative")?;
-    let cols = u32::try_from(args.n).map_err(|_| "Fixed SM120 TF32 N is negative")?;
+    let rows = u32::try_from(args.m).map_err(|_| "Inference SM120 TF32 M is negative")?;
+    let cols = u32::try_from(args.n).map_err(|_| "Inference SM120 TF32 N is negative")?;
     let grid = rows
         .div_ceil(bm)
         .checked_mul(cols.div_ceil(bn))
-        .ok_or("Fixed SM120 TF32 launch grid exceeds u32")?;
+        .ok_or("Inference SM120 TF32 launch grid exceeds u32")?;
     let config = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (threads, 1, 1),
@@ -3218,13 +3260,13 @@ fn launch_sm120_tf32<O: PhysicalLaunchObserver>(
     };
     let maps = if args.k == 0 {
         let zero = unsafe {
-            FixedTensorMap(std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed().assume_init())
+            InferenceTensorMap(std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed().assume_init())
         };
         [zero, zero]
     } else {
-        fixed_sm120_tf32_maps(ctx, args, bm)?
+        inference_sm120_tf32_maps(ctx, args, bm)?
     };
-    let params = FixedSm120Tf32Params {
+    let params = InferenceSm120Tf32Params {
         m: args.m,
         k: args.k,
         n: args.n,
@@ -3263,7 +3305,7 @@ fn launch_sm120_tf32<O: PhysicalLaunchObserver>(
         })
 }
 
-fn fixed_sm120_half_eligible(ctx: &GpuCtx, args: &FixedArgs) -> bool {
+fn inference_sm120_half_eligible(ctx: &GpuCtx, args: &InferenceArgs) -> bool {
     ctx.kernels.gemm_bi_nn_half_sm120.is_some()
         && super::device::is_sm120_family(ctx.compute_capability())
         && args.k > 0
@@ -3274,7 +3316,7 @@ fn fixed_sm120_half_eligible(ctx: &GpuCtx, args: &FixedArgs) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FixedSm120HalfExactRequest {
+struct InferenceSm120HalfExactRequest {
     dims: (usize, usize, usize),
     dtype: WeightDtype,
     output_aligned: bool,
@@ -3282,15 +3324,15 @@ struct FixedSm120HalfExactRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FixedSm120HalfExactDevice {
+struct InferenceSm120HalfExactDevice {
     compute_capability: (u32, u32),
     multiprocessors: u32,
     nvrtc_version: (i32, i32),
 }
 
-fn fixed_pick_sm120_half_exact(
-    request: FixedSm120HalfExactRequest,
-    device: FixedSm120HalfExactDevice,
+fn inference_pick_sm120_half_exact(
+    request: InferenceSm120HalfExactRequest,
+    device: InferenceSm120HalfExactDevice,
 ) -> Option<InferenceSm120HalfTile> {
     if device.compute_capability != (12, 0)
         || device.multiprocessors != 170
@@ -3336,7 +3378,7 @@ fn fixed_pick_sm120_half_exact(
     }
 }
 
-fn fixed_pick_sm120_half(
+fn inference_pick_sm120_half(
     rows: usize,
     cols: usize,
     k: usize,
@@ -3426,16 +3468,16 @@ fn fixed_pick_sm120_half(
     Some(InferenceSm120HalfTile::M64N64Bk64S2)
 }
 
-fn fixed_pick_sm120_f32out(
+fn inference_pick_sm120_f32out(
     rows: usize,
     cols: usize,
     k: usize,
-    device: FixedSm120HalfExactDevice,
+    device: InferenceSm120HalfExactDevice,
 ) -> Option<InferenceSm120HalfTile> {
     if !super::device::is_sm120_family(device.compute_capability) {
         return None;
     }
-    let fallback = fixed_pick_sm120_half(rows, cols, k, device.multiprocessors);
+    let fallback = inference_pick_sm120_half(rows, cols, k, device.multiprocessors);
     if device.compute_capability != (12, 0)
         || device.multiprocessors != 170
         || device.nvrtc_version != (13, 2)
@@ -3462,7 +3504,7 @@ fn launch_sm120_half<O: PhysicalLaunchObserver>(
     tile: InferenceSm120HalfTile,
     input_dtype: WeightDtype,
     output_dtype: WeightDtype,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     observer: &mut O,
 ) -> Result<(), String> {
     if args.m == 0 || args.n == 0 {
@@ -3470,30 +3512,30 @@ fn launch_sm120_half<O: PhysicalLaunchObserver>(
     }
     if input_dtype == WeightDtype::F32
         || !matches!(output_dtype, WeightDtype::F32) && output_dtype != input_dtype
-        || !fixed_sm120_half_eligible(ctx, args)
+        || !inference_sm120_half_eligible(ctx, args)
     {
-        return Err("Fixed SM120 half route is unavailable for these operands".into());
+        return Err("Inference SM120 half route is unavailable for these operands".into());
     }
     let kernels = if output_dtype == WeightDtype::F32 {
         ctx.kernels.gemm_bi_nn_half_sm120_f32out.as_ref()
     } else {
         ctx.kernels.gemm_bi_nn_half_sm120.as_ref()
     }
-    .ok_or("Fixed SM120 half kernels are not loaded")?;
+    .ok_or("Inference SM120 half kernels are not loaded")?;
     let (bm, bn, _, _) = tile.geometry();
-    let rows = u32::try_from(args.m).map_err(|_| "Fixed SM120 half M is negative")?;
-    let cols = u32::try_from(args.n).map_err(|_| "Fixed SM120 half N is negative")?;
+    let rows = u32::try_from(args.m).map_err(|_| "Inference SM120 half M is negative")?;
+    let cols = u32::try_from(args.n).map_err(|_| "Inference SM120 half N is negative")?;
     let grid = rows
         .div_ceil(bm)
         .checked_mul(cols.div_ceil(bn))
-        .ok_or("Fixed SM120 half launch grid exceeds u32")?;
+        .ok_or("Inference SM120 half launch grid exceeds u32")?;
     let config = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (tile.threads(), 1, 1),
         shared_mem_bytes: tile.shared_mem_bytes(),
     };
-    let maps = fixed_sm120_half_maps(ctx, args, tile)?;
-    let params = FixedSm120HalfParams {
+    let maps = inference_sm120_half_maps(ctx, args, tile)?;
+    let params = InferenceSm120HalfParams {
         a_x: 0,
         a_y: 0,
         b_x: 0,
@@ -3553,18 +3595,19 @@ fn launch_sm120_half<O: PhysicalLaunchObserver>(
 fn launch_sm89_half_pipeline<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     dtype: WeightDtype,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     observer: &mut O,
 ) -> Result<(), String> {
-    if !fixed_portable_overlay_board(ctx.compute_capability()) {
-        return Err("Fixed Ada half pipeline requires an SM80+ board".into());
+    if !inference_portable_overlay_board(ctx.compute_capability()) {
+        return Err("Inference Ada half pipeline requires an SM80+ board".into());
     }
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
     if args.c == 0 || !args.c.is_multiple_of(2) || !args.bias.is_multiple_of(4) {
         return Err(
-            "Fixed Ada half pipeline requires non-null half-aligned C and f32-aligned bias".into(),
+            "Inference Ada half pipeline requires non-null half-aligned C and f32-aligned bias"
+                .into(),
         );
     }
     // Scalar staging supports odd strides and independently two-byte-aligned
@@ -3574,36 +3617,36 @@ fn launch_sm89_half_pipeline<O: PhysicalLaunchObserver>(
             .into_iter()
             .any(|p| p == 0 || !p.is_multiple_of(2))
     {
-        return Err("Fixed Ada half pipeline requires non-null half-aligned A and B".into());
+        return Err("Inference Ada half pipeline requires non-null half-aligned A and B".into());
     }
     args.m
         .checked_add(127)
-        .ok_or("Fixed Ada half padded M exceeds i32")?;
+        .ok_or("Inference Ada half padded M exceeds i32")?;
     let padded_n = args
         .n
         .checked_add(127)
-        .ok_or("Fixed Ada half padded N exceeds i32")?;
+        .ok_or("Inference Ada half padded N exceeds i32")?;
     args.k
         .checked_add(63)
-        .ok_or("Fixed Ada half padded K exceeds i32")?;
+        .ok_or("Inference Ada half padded K exceeds i32")?;
     let grid = (args.m as u32)
         .div_ceil(128)
         .checked_mul(padded_n as u32 / 128)
         .filter(|grid| *grid <= i32::MAX as u32)
-        .ok_or("Fixed Ada half launch grid exceeds i32")?;
+        .ok_or("Inference Ada half launch grid exceeds i32")?;
     // Opt-in, live Driver ABI and resource admission happened during module
     // loading. Capture performs no allocation or function reconfiguration.
     let kernels = ctx
         .kernels
-        .fixed_sm89_half_pipeline
+        .inference_sm89_half_pipeline
         .as_ref()
         .ok_or_else(|| {
             ctx.kernels
-                .fixed_sm89_half_pipeline_rejection
+                .inference_sm89_half_pipeline_rejection
                 .clone()
-                .unwrap_or_else(|| "Fixed Ada half pipeline is not admitted".into())
+                .unwrap_or_else(|| "Inference Ada half pipeline is not admitted".into())
         })?;
-    let params = FixedSm89HalfParams {
+    let params = InferenceSm89HalfParams {
         alpha: 1.0,
         beta: 0.0,
         m: args.m,
@@ -3655,18 +3698,19 @@ fn launch_sm89_half_pipeline<O: PhysicalLaunchObserver>(
 fn launch_sm89_half_swizzle<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     dtype: WeightDtype,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     observer: &mut O,
 ) -> Result<(), String> {
-    if !fixed_portable_overlay_board(ctx.compute_capability()) {
-        return Err("Fixed Ada half swizzle requires an SM80+ board".into());
+    if !inference_portable_overlay_board(ctx.compute_capability()) {
+        return Err("Inference Ada half swizzle requires an SM80+ board".into());
     }
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
     if args.c == 0 || !args.c.is_multiple_of(2) || !args.bias.is_multiple_of(4) {
         return Err(
-            "Fixed Ada half swizzle requires non-null half-aligned C and f32-aligned bias".into(),
+            "Inference Ada half swizzle requires non-null half-aligned C and f32-aligned bias"
+                .into(),
         );
     }
     if args.k != 0
@@ -3674,34 +3718,34 @@ fn launch_sm89_half_swizzle<O: PhysicalLaunchObserver>(
             .into_iter()
             .any(|p| p == 0 || !p.is_multiple_of(2))
     {
-        return Err("Fixed Ada half swizzle requires non-null half-aligned A and B".into());
+        return Err("Inference Ada half swizzle requires non-null half-aligned A and B".into());
     }
     args.m
         .checked_add(127)
-        .ok_or("Fixed Ada half swizzle padded M exceeds i32")?;
+        .ok_or("Inference Ada half swizzle padded M exceeds i32")?;
     let padded_n = args
         .n
         .checked_add(127)
-        .ok_or("Fixed Ada half swizzle padded N exceeds i32")?;
+        .ok_or("Inference Ada half swizzle padded N exceeds i32")?;
     args.k
         .checked_add(63)
-        .ok_or("Fixed Ada half swizzle padded K exceeds i32")?;
+        .ok_or("Inference Ada half swizzle padded K exceeds i32")?;
     let grid = (args.m as u32)
         .div_ceil(128)
         .checked_mul(padded_n as u32 / 128)
         .filter(|grid| *grid <= i32::MAX as u32)
-        .ok_or("Fixed Ada half swizzle launch grid exceeds i32")?;
+        .ok_or("Inference Ada half swizzle launch grid exceeds i32")?;
     let kernels = ctx
         .kernels
-        .fixed_sm89_half_swizzle
+        .inference_sm89_half_swizzle
         .as_ref()
         .ok_or_else(|| {
             ctx.kernels
-                .fixed_sm89_half_swizzle_rejection
+                .inference_sm89_half_swizzle_rejection
                 .clone()
-                .unwrap_or_else(|| "Fixed Ada half swizzle is not admitted".into())
+                .unwrap_or_else(|| "Inference Ada half swizzle is not admitted".into())
         })?;
-    let params = FixedSm89HalfParams {
+    let params = InferenceSm89HalfParams {
         alpha: 1.0,
         beta: 0.0,
         m: args.m,
@@ -3755,7 +3799,7 @@ fn validate_sm89_half_s3_k(k: i32) -> Result<(), &'static str> {
     // Protect that lookahead as well as the usual (K + 63) tile-count rounding.
     k.checked_add(127)
         .map(|_| ())
-        .ok_or("Fixed Ada half S3 padded K exceeds i32")
+        .ok_or("Inference Ada half S3 padded K exceeds i32")
 }
 
 #[test]
@@ -3773,18 +3817,18 @@ fn sm89_half_s3_rejects_overflow_in_unconditional_refill_index() {
 fn launch_sm89_half_s3<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     dtype: WeightDtype,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     observer: &mut O,
 ) -> Result<(), String> {
-    if !fixed_portable_overlay_board(ctx.compute_capability()) {
-        return Err("Fixed Ada half s3 requires an SM80+ board".into());
+    if !inference_portable_overlay_board(ctx.compute_capability()) {
+        return Err("Inference Ada half s3 requires an SM80+ board".into());
     }
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
     if args.c == 0 || !args.c.is_multiple_of(2) || !args.bias.is_multiple_of(4) {
         return Err(
-            "Fixed Ada half s3 requires non-null half-aligned C and f32-aligned bias".into(),
+            "Inference Ada half s3 requires non-null half-aligned C and f32-aligned bias".into(),
         );
     }
     if args.k != 0
@@ -3792,28 +3836,28 @@ fn launch_sm89_half_s3<O: PhysicalLaunchObserver>(
             .into_iter()
             .any(|p| p == 0 || !p.is_multiple_of(2))
     {
-        return Err("Fixed Ada half s3 requires non-null half-aligned A and B".into());
+        return Err("Inference Ada half s3 requires non-null half-aligned A and B".into());
     }
     args.m
         .checked_add(127)
-        .ok_or("Fixed Ada half s3 padded M exceeds i32")?;
+        .ok_or("Inference Ada half s3 padded M exceeds i32")?;
     let padded_n = args
         .n
         .checked_add(127)
-        .ok_or("Fixed Ada half s3 padded N exceeds i32")?;
+        .ok_or("Inference Ada half s3 padded N exceeds i32")?;
     validate_sm89_half_s3_k(args.k)?;
     let grid = (args.m as u32)
         .div_ceil(128)
         .checked_mul(padded_n as u32 / 128)
         .filter(|grid| *grid <= i32::MAX as u32)
-        .ok_or("Fixed Ada half s3 launch grid exceeds i32")?;
-    let kernels = ctx.kernels.fixed_sm89_half_s3.as_ref().ok_or_else(|| {
+        .ok_or("Inference Ada half s3 launch grid exceeds i32")?;
+    let kernels = ctx.kernels.inference_sm89_half_s3.as_ref().ok_or_else(|| {
         ctx.kernels
-            .fixed_sm89_half_s3_rejection
+            .inference_sm89_half_s3_rejection
             .clone()
-            .unwrap_or_else(|| "Fixed Ada half s3 is not admitted".into())
+            .unwrap_or_else(|| "Inference Ada half s3 is not admitted".into())
     })?;
-    let params = FixedSm89HalfParams {
+    let params = InferenceSm89HalfParams {
         alpha: 1.0,
         beta: 0.0,
         m: args.m,
@@ -3865,61 +3909,65 @@ fn launch_sm89_half_s3<O: PhysicalLaunchObserver>(
 fn launch_sm89_half_n64<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     tile: InferenceTile,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     observer: &mut O,
 ) -> Result<(), String> {
-    if !fixed_portable_overlay_board(ctx.compute_capability()) {
-        return Err("Fixed Ada half N64 finalist requires an SM80+ board".into());
+    if !inference_portable_overlay_board(ctx.compute_capability()) {
+        return Err("Inference Ada half N64 finalist requires an SM80+ board".into());
     }
     if args.bias != 0 {
-        return Err("Fixed Ada half N64 finalist does not admit bias".into());
+        return Err("Inference Ada half N64 finalist does not admit bias".into());
     }
     if !(1..=2048).contains(&args.m) {
-        return Err("Fixed Ada half N64 finalist requires 1 <= M <= 2048".into());
+        return Err("Inference Ada half N64 finalist requires 1 <= M <= 2048".into());
     }
     if [args.c, args.a, args.b]
         .into_iter()
         .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))
     {
         return Err(
-            "Fixed Ada half N64 finalist requires non-null, 16-byte-aligned C, A, and B".into(),
+            "Inference Ada half N64 finalist requires non-null, 16-byte-aligned C, A, and B".into(),
         );
     }
     let (function, rejection, bm, k, n) = match tile {
         InferenceTile::TcM64N64Sm89S3 => (
-            ctx.kernels.fixed_sm89_half_m64n64_s3_f16.as_ref(),
-            &ctx.kernels.fixed_sm89_half_m64n64_s3_f16_rejection,
+            ctx.kernels.inference_sm89_half_m64n64_s3_f16.as_ref(),
+            &ctx.kernels.inference_sm89_half_m64n64_s3_f16_rejection,
             64_u32,
             768,
             2304,
         ),
         InferenceTile::TcM128N64Sm89S2 => (
-            ctx.kernels.fixed_sm89_half_m128n64_s2_f16.as_ref(),
-            &ctx.kernels.fixed_sm89_half_m128n64_s2_f16_rejection,
+            ctx.kernels.inference_sm89_half_m128n64_s2_f16.as_ref(),
+            &ctx.kernels.inference_sm89_half_m128n64_s2_f16_rejection,
             128_u32,
             2304,
             768,
         ),
-        _ => return Err(format!("{tile:?} is not a Fixed Ada half N64 finalist")),
+        _ => {
+            return Err(format!(
+                "{tile:?} is not an Inference Ada half N64 finalist"
+            ));
+        }
     };
     if args.k != k || args.n != n {
         return Err(format!(
-            "Fixed Ada half N64 finalist {tile:?} requires exact K={k}, N={n}"
+            "Inference Ada half N64 finalist {tile:?} requires exact K={k}, N={n}"
         ));
     }
     let function = function.ok_or_else(|| {
         rejection
             .clone()
-            .unwrap_or_else(|| format!("Fixed Ada half N64 finalist {tile:?} is not admitted"))
+            .unwrap_or_else(|| format!("Inference Ada half N64 finalist {tile:?} is not admitted"))
     })?;
-    let rows = u32::try_from(args.m).map_err(|_| "Fixed Ada half N64 M is negative")?;
-    let columns = u32::try_from(args.n).map_err(|_| "Fixed Ada half N64 N is negative")?;
+    let rows = u32::try_from(args.m).map_err(|_| "Inference Ada half N64 M is negative")?;
+    let columns = u32::try_from(args.n).map_err(|_| "Inference Ada half N64 N is negative")?;
     let grid = rows
         .div_ceil(bm)
         .checked_mul(columns / 64)
         .filter(|grid| *grid <= i32::MAX as u32)
-        .ok_or("Fixed Ada half N64 launch grid exceeds i32")?;
-    let params = FixedSm89HalfParams {
+        .ok_or("Inference Ada half N64 launch grid exceeds i32")?;
+    let params = InferenceSm89HalfParams {
         alpha: 1.0,
         beta: 0.0,
         m: args.m,
@@ -3971,7 +4019,7 @@ fn launch_ladder<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     tile: InferenceTile,
     dt: WeightDtype,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     observer: &mut O,
 ) -> Result<(), String> {
     if args.m == 0 || args.n == 0 {
@@ -4006,12 +4054,12 @@ fn launch_ladder<O: PhysicalLaunchObserver>(
         | InferenceTile::F32Sm120N64Sliced
         | InferenceTile::F32Sm120TmaFmaM128N64
         | InferenceTile::F32Sm120TmaFmaM64N128
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
-        | InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64K4
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64T256
+        | InferenceTile::F32Sm120TmaFmaInferenceNoBiasM128N64T256
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM64N128
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N96
         | InferenceTile::Tf32M128S3
         | InferenceTile::Tf32M128N128S3
         | InferenceTile::Tf32RnaM128N128S3
@@ -4079,7 +4127,7 @@ fn launch_f32out_ladder<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     tile: InferenceTile,
     input_dtype: WeightDtype,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     observer: &mut O,
 ) -> Result<(), String> {
     if args.m == 0 || args.n == 0 {
@@ -4373,7 +4421,7 @@ fn arch_rung_self_check(ctx: &GpuCtx, tile: InferenceTile) -> Result<(), String>
     let c_ref = DtypedBuf::zeros(st, m * n, dt)?;
     let c_arch = DtypedBuf::zeros(st, m * n, dt)?;
     let run = |tile_sel: InferenceTile, c: &DtypedBuf| -> Result<(), String> {
-        let args = FixedArgs {
+        let args = InferenceArgs {
             c: c.cached_ptr(),
             a: a.cached_ptr(),
             b: b.cached_ptr(),
@@ -4419,10 +4467,10 @@ fn arch_rung_self_check(ctx: &GpuCtx, tile: InferenceTile) -> Result<(), String>
 // RNA wins all ten internal p50/p95 cohorts on each toolkit; FAST wins are
 // only A1 on12.8/13.0 and A1/B1 on13.2. C16 is the measured output alignment;
 // forced RNA supports C4, but those views retain the ordinary AUTO picker.
-fn fixed_sm89_rna_wide_auto_eligible(
+fn inference_sm89_rna_wide_auto_eligible(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc_version: (i32, i32),
     nvrtc_library_known: bool,
     admitted: bool,
@@ -4430,7 +4478,7 @@ fn fixed_sm89_rna_wide_auto_eligible(
 ) -> bool {
     admitted
         && policy == super::context::F32TriadPolicy::AllowDeterministicTf32
-        && fixed_portable_overlay_board(device.compute_capability)
+        && inference_portable_overlay_board(device.compute_capability)
         && device.multiprocessors > 0
         && matches!(nvrtc_version, (12, 8) | (13, 0) | (13, 2))
         && nvrtc_library_known
@@ -4454,16 +4502,16 @@ fn fixed_sm89_rna_wide_auto_eligible(
 // The N96 finalist replaces the wide RNA route only at the measured E0/no-bias
 // row. If its independently admitted holder is absent, the wide selector below
 // remains available without changing the numeric family.
-fn fixed_sm89_rna_n96_auto_eligible(
+fn inference_sm89_rna_n96_auto_eligible(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc_version: (i32, i32),
     nvrtc_library_known: bool,
     admitted: bool,
     policy: super::context::F32TriadPolicy,
 ) -> bool {
-    fixed_sm89_rna_wide_auto_eligible(
+    inference_sm89_rna_wide_auto_eligible(
         operands,
         shape,
         device,
@@ -4481,7 +4529,7 @@ mod sm89_rna_auto_tests {
     use super::*;
 
     #[test]
-    fn fixed_sm89_rna_auto_exact_cells_and_independent_declines() {
+    fn inference_sm89_rna_auto_exact_cells_and_independent_declines() {
         let ptr = |ptr| TypedPtr {
             ptr,
             dtype: WeightDtype::F32,
@@ -4492,13 +4540,13 @@ mod sm89_rna_auto_tests {
             w: ptr(0x3000),
             bias_ptr: None,
         };
-        let device = FixedTileDevice {
+        let device = InferenceTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
         };
         let policy = F32TriadPolicy::AllowDeterministicTf32;
         let eligible = |o, s, d, v, known, admitted, p| {
-            fixed_sm89_rna_wide_auto_eligible(o, s, d, v, known, admitted, p)
+            inference_sm89_rna_wide_auto_eligible(o, s, d, v, known, admitted, p)
         };
         for (m, k, n) in [
             (4621, 384, 1928),
@@ -4531,7 +4579,7 @@ mod sm89_rna_auto_tests {
                     F32TriadPolicy::ExactScalarFma
                 ));
                 for cc in [(8, 0), (8, 6), (9, 0), (10, 0)] {
-                    let board = FixedTileDevice {
+                    let board = InferenceTileDevice {
                         compute_capability: cc,
                         ..device
                     };
@@ -4544,7 +4592,7 @@ mod sm89_rna_auto_tests {
                     assert!(!eligible(
                         operands,
                         shape,
-                        FixedTileDevice {
+                        InferenceTileDevice {
                             compute_capability: cc,
                             ..device
                         },
@@ -4555,7 +4603,7 @@ mod sm89_rna_auto_tests {
                     ));
                 }
                 for sms in [141, 143] {
-                    let board = FixedTileDevice {
+                    let board = InferenceTileDevice {
                         multiprocessors: sms,
                         ..device
                     };
@@ -4569,7 +4617,7 @@ mod sm89_rna_auto_tests {
                     assert!(!eligible(
                         operands,
                         shape,
-                        FixedTileDevice {
+                        InferenceTileDevice {
                             multiprocessors: sms,
                             ..device
                         },
@@ -4646,7 +4694,7 @@ mod sm89_rna_auto_tests {
     }
 
     #[test]
-    fn fixed_sm89_rna_n96_auto_is_exactly_e0_all_three_toolkits() {
+    fn inference_sm89_rna_n96_auto_is_exactly_e0_all_three_toolkits() {
         let ptr = |ptr| TypedPtr {
             ptr,
             dtype: WeightDtype::F32,
@@ -4662,34 +4710,34 @@ mod sm89_rna_auto_tests {
             k: 2304,
             n: 768,
         };
-        let device = FixedTileDevice {
+        let device = InferenceTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
         };
         let policy = F32TriadPolicy::AllowDeterministicTf32;
         for nvrtc in [(12, 8), (13, 0), (13, 2)] {
-            assert!(fixed_sm89_rna_n96_auto_eligible(
+            assert!(inference_sm89_rna_n96_auto_eligible(
                 operands, shape, device, nvrtc, true, true, policy,
             ));
             assert!(
-                !fixed_sm89_rna_n96_auto_eligible(
+                !inference_sm89_rna_n96_auto_eligible(
                     operands, shape, device, nvrtc, true, false, policy,
                 ),
                 "missing N96 holder must decline independently"
             );
             assert!(
-                fixed_sm89_rna_wide_auto_eligible(
+                inference_sm89_rna_wide_auto_eligible(
                     operands, shape, device, nvrtc, true, true, policy,
                 ),
                 "missing N96 must retain the old admitted RNA-wide fallback"
             );
         }
         for nvrtc in [(12, 7), (12, 9), (13, 1), (13, 3)] {
-            assert!(!fixed_sm89_rna_n96_auto_eligible(
+            assert!(!inference_sm89_rna_n96_auto_eligible(
                 operands, shape, device, nvrtc, true, true, policy,
             ));
         }
-        assert!(!fixed_sm89_rna_n96_auto_eligible(
+        assert!(!inference_sm89_rna_n96_auto_eligible(
             InferenceFwdOperands {
                 bias_ptr: Some(0x4000),
                 ..operands
@@ -4701,7 +4749,7 @@ mod sm89_rna_auto_tests {
             true,
             policy,
         ));
-        assert!(!fixed_sm89_rna_n96_auto_eligible(
+        assert!(!inference_sm89_rna_n96_auto_eligible(
             operands,
             InferenceShape { m: 2047, ..shape },
             device,
@@ -4736,7 +4784,7 @@ pub fn inference_forward(
     inference_forward_observed(ctx, operands, shape, &mut NoPhysicalObserver)
 }
 
-/// Whether this context runs on the board the Fixed sm89 evidence was
+/// Whether this context runs on the board the Inference sm89 evidence was
 /// minted on; every other board proves an Ada-found route at first use.
 /// The Ada inference cell this context serves for a forward request, if the
 /// shape, operand dtypes, policy and the bound kernels name one.
@@ -4750,7 +4798,7 @@ fn select_sm89_cell_for_context(
         operands,
         shape,
         sm89_cells::Sm89CellStack {
-            device: FixedTileDevice {
+            device: InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
@@ -4758,17 +4806,17 @@ fn select_sm89_cell_for_context(
             nvrtc_library_known: compiler.nvrtc_library_known,
             policy: ctx.f32_triad_policy(),
         },
-        |symbol| ctx.kernels.fixed_sm89_cell_function(symbol).is_some(),
+        |symbol| ctx.kernels.inference_sm89_cell_function(symbol).is_some(),
     )
 }
 
 /// Launches one Ada inference cell: the grid covers the output with the
-/// cell's tile, the parameter bundle is the Fixed sm89 layout with the
+/// cell's tile, the parameter bundle is the Inference sm89 layout with the
 /// unit epilogue every inference launch submits.
 fn launch_sm89_cell<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     spec: &sm89_cells::Sm89CellSpec,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     observer: &mut O,
 ) -> Result<(), String> {
     if args.m == 0 || args.n == 0 {
@@ -4776,16 +4824,16 @@ fn launch_sm89_cell<O: PhysicalLaunchObserver>(
     }
     let function = ctx
         .kernels
-        .fixed_sm89_cell_function(spec.symbol)
-        .ok_or_else(|| format!("Fixed Ada cell {} is not bound", spec.symbol))?;
-    let rows = u32::try_from(args.m).map_err(|_| "Fixed Ada cell M is negative")?;
-    let columns = u32::try_from(args.n).map_err(|_| "Fixed Ada cell N is negative")?;
+        .inference_sm89_cell_function(spec.symbol)
+        .ok_or_else(|| format!("Inference Ada cell {} is not bound", spec.symbol))?;
+    let rows = u32::try_from(args.m).map_err(|_| "Inference Ada cell M is negative")?;
+    let columns = u32::try_from(args.n).map_err(|_| "Inference Ada cell N is negative")?;
     let grid = rows
         .div_ceil(spec.tile.0)
         .checked_mul(columns.div_ceil(spec.tile.1))
         .filter(|grid| *grid <= i32::MAX as u32)
-        .ok_or("Fixed Ada cell launch grid exceeds i32")?;
-    let params = FixedSm89HalfParams {
+        .ok_or("Inference Ada cell launch grid exceeds i32")?;
+    let params = InferenceSm89HalfParams {
         alpha: 1.0,
         beta: 0.0,
         m: args.m,
@@ -4853,10 +4901,10 @@ fn launch_sm89_cell_reference<O: PhysicalLaunchObserver>(
     spec: &sm89_cells::Sm89CellSpec,
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    scratch: &FixedArgs,
+    scratch: &InferenceArgs,
     observer: &mut O,
 ) -> Result<(), String> {
-    let device = FixedTileDevice {
+    let device = InferenceTileDevice {
         multiprocessors: ctx.kernels.multiprocessor_count(),
         compute_capability: ctx.compute_capability(),
     };
@@ -4870,14 +4918,14 @@ fn launch_sm89_cell_reference<O: PhysicalLaunchObserver>(
                 },
                 ..operands
             };
-            super::blas::fixed_legacy_forward(ctx, scratch_operands, shape, observer)
+            super::blas::inference_legacy_forward(ctx, scratch_operands, shape, observer)
         }
         sm89_cells::Sm89CellFamily::HalfMma if spec.output == sm89_cells::Sm89CellOutput::F32 => {
-            let tile = fixed_pick_f32out_tile(batch, n_in, n_out, device);
+            let tile = inference_pick_f32out_tile(batch, n_in, n_out, device);
             launch_f32out_ladder(ctx, tile, operands.x.dtype, scratch, observer)
         }
         sm89_cells::Sm89CellFamily::HalfMma => {
-            let tile = fixed_pick_tile(batch, n_out, n_in, device)
+            let tile = inference_pick_tile(batch, n_out, n_in, device)
                 .ok_or_else(|| "no portable ladder tile for this shape".to_string())?;
             launch_ladder(ctx, tile, operands.c.dtype, scratch, observer)
         }
@@ -4890,9 +4938,9 @@ fn launch_sm89_cell_reference<O: PhysicalLaunchObserver>(
                 && operands.w.ptr.is_multiple_of(16)
                 && n_in.is_multiple_of(4)
                 && n_out.is_multiple_of(4);
-            let tile = fixed_pick_tf32(
+            let tile = inference_pick_tf32(
                 (batch, n_in, n_out),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: device.multiprocessors,
                     compute_capability: device.compute_capability,
                     nvrtc_version: compiler.nvrtc_version,
@@ -4916,14 +4964,14 @@ fn ada_evidence_board(ctx: &GpuCtx) -> bool {
 fn proven_inference_candidate<Candidate, Reference>(
     ctx: &GpuCtx,
     symbol: &'static str,
-    args: &FixedArgs,
+    args: &InferenceArgs,
     dtype: WeightDtype,
     candidate: Candidate,
     reference: Reference,
 ) -> Result<bool, String>
 where
-    Candidate: FnOnce(&FixedArgs) -> Result<(), String>,
-    Reference: FnOnce(&FixedArgs) -> Result<(), String>,
+    Candidate: FnOnce(&InferenceArgs) -> Result<(), String>,
+    Reference: FnOnce(&InferenceArgs) -> Result<(), String>,
 {
     if ada_evidence_board(ctx) {
         return Ok(true);
@@ -4950,13 +4998,13 @@ where
         elements,
         dtype,
         |scratch| {
-            candidate(&FixedArgs {
+            candidate(&InferenceArgs {
                 c: scratch,
                 ..*args
             })
         },
         |scratch| {
-            reference(&FixedArgs {
+            reference(&InferenceArgs {
                 c: scratch,
                 ..*args
             })
@@ -4974,7 +5022,7 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
     let InferenceFwdOperands { c, x, w, bias_ptr } = operands;
     let (batch, n_in, n_out) = (shape.m, shape.k, shape.n);
     let dims = (batch, n_in, n_out);
-    let args = FixedArgs::try_new(operands, shape)?;
+    let args = InferenceArgs::try_new(operands, shape)?;
     let homogeneous_f32 =
         c.dtype == WeightDtype::F32 && x.dtype == WeightDtype::F32 && w.dtype == WeightDtype::F32;
     if let Some(spec) = select_sm89_cell_for_context(ctx, operands, shape) {
@@ -5024,11 +5072,11 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
             },
             |scratch| match route {
                 runtime_bundle::InferenceBundleRoute::HalfF32S3 => {
-                    let tile = fixed_pick_f32out_tile(
+                    let tile = inference_pick_f32out_tile(
                         batch,
                         n_in,
                         n_out,
-                        FixedTileDevice {
+                        InferenceTileDevice {
                             multiprocessors: ctx.kernels.multiprocessor_count(),
                             compute_capability: ctx.compute_capability(),
                         },
@@ -5043,7 +5091,7 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
                         },
                         ..operands
                     };
-                    super::blas::fixed_legacy_forward(
+                    super::blas::inference_legacy_forward(
                         ctx,
                         scratch_operands,
                         shape,
@@ -5068,36 +5116,36 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
             && n_in.is_multiple_of(4)
             && n_out.is_multiple_of(4);
         let compiler = ctx.kernels.compiler_identity();
-        let tile = if fixed_sm89_rna_n96_auto_eligible(
+        let tile = if inference_sm89_rna_n96_auto_eligible(
             operands,
             shape,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
             compiler.nvrtc_version,
             compiler.nvrtc_library_known,
-            ctx.kernels.fixed_sm89_tf32_rna_n96.is_some(),
+            ctx.kernels.inference_sm89_tf32_rna_n96.is_some(),
             ctx.f32_triad_policy(),
         ) {
             InferenceTile::Tf32RnaM128N96S3
-        } else if fixed_sm89_rna_wide_auto_eligible(
+        } else if inference_sm89_rna_wide_auto_eligible(
             operands,
             shape,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
             compiler.nvrtc_version,
             compiler.nvrtc_library_known,
-            ctx.kernels.fixed_sm89_tf32_rna_wide.is_some(),
+            ctx.kernels.inference_sm89_tf32_rna_wide.is_some(),
             ctx.f32_triad_policy(),
         ) {
             InferenceTile::Tf32RnaM128N128S3
         } else {
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (batch, n_in, n_out),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: ctx.kernels.multiprocessor_count(),
                     compute_capability: ctx.compute_capability(),
                     nvrtc_version: ctx.kernels.compiler_identity().nvrtc_version,
@@ -5110,9 +5158,9 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
         };
         let tile = match tile {
             InferenceTile::Tf32RnaM128N96S3 | InferenceTile::Tf32RnaM128N128S3 => {
-                let portable = fixed_pick_tf32(
+                let portable = inference_pick_tf32(
                     (batch, n_in, n_out),
-                    FixedTf32Stack {
+                    InferenceTf32Stack {
                         multiprocessors: ctx.kernels.multiprocessor_count(),
                         compute_capability: ctx.compute_capability(),
                         nvrtc_version: compiler.nvrtc_version,
@@ -5147,10 +5195,10 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
     }
     if homogeneous_f32 {
         let compiler = ctx.kernels.compiler_identity();
-        if fixed_sm120_tma_fma_a0_auto_eligible(
+        if inference_sm120_tma_fma_a0_auto_eligible(
             operands,
             shape,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
@@ -5159,7 +5207,7 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
             ctx.f32_triad_policy(),
         ) {
             let tile = InferenceTile::F32Sm120TmaFmaM64N128;
-            if super::gemm_bi_triad::launch_cached_fixed_sm120_exact_tma(
+            if super::gemm_bi_triad::launch_cached_inference_sm120_exact_tma(
                 ctx,
                 (shape.m, shape.k, shape.n),
                 super::gemm_bi_triad::F32TriadOperands {
@@ -5170,16 +5218,16 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
                     alpha: 1.0,
                     beta: 0.0,
                 },
-                super::gemm_bi_triad::FixedSm120ExactTmaTile::M64N128,
+                super::gemm_bi_triad::InferenceSm120ExactTmaTile::M64N128,
                 observer,
             )? {
                 return Ok(tile);
             }
-        } else if let Some(tile) = fixed_sm120_tma_fma_a1_auto_tile(
-            fixed_sm120_tma_fma_a1_auto_eligible(
+        } else if let Some(tile) = inference_sm120_tma_fma_a1_auto_tile(
+            inference_sm120_tma_fma_a1_auto_eligible(
                 operands,
                 shape,
-                FixedTileDevice {
+                InferenceTileDevice {
                     multiprocessors: ctx.kernels.multiprocessor_count(),
                     compute_capability: ctx.compute_capability(),
                 },
@@ -5188,30 +5236,30 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
                 ctx.f32_triad_policy(),
             ),
             ctx.kernels
-                .fixed_sm120_fma_postbias
+                .inference_sm120_fma_postbias
                 .as_ref()
                 .map(|kernels| kernels.m128n64_t256.is_some()),
         ) {
             launch_sm120_tma_postbias(ctx, operands, shape, tile, observer)?;
             return Ok(tile);
-        } else if let Some(tile) = fixed_sm120_tma_fma_bc1_auto_tile(
+        } else if let Some(tile) = inference_sm120_tma_fma_bc1_auto_tile(
             operands,
             shape,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
             compiler.nvrtc_version,
             compiler.nvrtc_library_known,
-            ctx.kernels.fixed_sm120_fma_postbias.is_some(),
+            ctx.kernels.inference_sm120_fma_postbias.is_some(),
             ctx.f32_triad_policy(),
         ) {
             launch_sm120_tma_postbias(ctx, operands, shape, tile, observer)?;
             return Ok(tile);
-        } else if fixed_sm120_tma_fma_b0_auto_eligible(
+        } else if inference_sm120_tma_fma_b0_auto_eligible(
             operands,
             shape,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
@@ -5220,7 +5268,7 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
             ctx.f32_triad_policy(),
         ) {
             let tile = InferenceTile::F32Sm120TmaFmaM128N64;
-            if super::gemm_bi_triad::launch_cached_fixed_sm120_exact_tma(
+            if super::gemm_bi_triad::launch_cached_inference_sm120_exact_tma(
                 ctx,
                 (shape.m, shape.k, shape.n),
                 super::gemm_bi_triad::F32TriadOperands {
@@ -5231,52 +5279,52 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
                     alpha: 1.0,
                     beta: 0.0,
                 },
-                super::gemm_bi_triad::FixedSm120ExactTmaTile::M128N64,
+                super::gemm_bi_triad::InferenceSm120ExactTmaTile::M128N64,
                 observer,
             )? {
                 return Ok(tile);
             }
         }
-        if fixed_sm120_sliced_auto_eligible(
+        if inference_sm120_sliced_auto_eligible(
             operands,
             shape,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
             compiler.nvrtc_version,
             compiler.nvrtc_library_known,
-            ctx.kernels.fixed_sm120_f32_n64_sliced.is_some(),
+            ctx.kernels.inference_sm120_f32_n64_sliced.is_some(),
             ctx.f32_triad_policy(),
         ) {
             launch_sm120_sliced(ctx, operands, shape, observer)?;
             return Ok(InferenceTile::F32Sm120N64Sliced);
         }
-        if fixed_sm120_exact_n64_auto_eligible(
+        if inference_sm120_exact_n64_auto_eligible(
             operands,
             shape,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
             compiler.nvrtc_version,
             compiler.nvrtc_library_known,
-            ctx.kernels.fixed_sm120_f32_n64_copyplan.is_some(),
+            ctx.kernels.inference_sm120_f32_n64_copyplan.is_some(),
             ctx.f32_triad_policy(),
         ) {
             launch_sm120_exact_n64(ctx, operands, shape, observer)?;
             return Ok(InferenceTile::F32Sm120N64CopyPlan);
         }
-        if fixed_sm89_exact_n64_auto_eligible(
+        if inference_sm89_exact_n64_auto_eligible(
             operands,
             shape,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
             compiler.nvrtc_version,
             compiler.nvrtc_library_known,
-            ctx.kernels.fixed_sm89_f32_n64_copyplan.is_some(),
+            ctx.kernels.inference_sm89_f32_n64_copyplan.is_some(),
             ctx.f32_triad_policy(),
         ) && proven_inference_candidate(
             ctx,
@@ -5301,7 +5349,7 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
                     },
                     ..operands
                 };
-                super::blas::fixed_legacy_forward(
+                super::blas::inference_legacy_forward(
                     ctx,
                     scratch_operands,
                     shape,
@@ -5312,11 +5360,11 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
             launch_sm89_exact_n64(ctx, operands, shape, observer)?;
             return Ok(InferenceTile::F32Sm89N64CopyPlan);
         }
-        let tile = fixed_pick_f32_exact(
+        let tile = inference_pick_f32_exact(
             batch,
             n_in,
             n_out,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
@@ -5324,7 +5372,7 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
         if tile == InferenceTile::F32N128S2 {
             launch_f32_n128_s2(ctx, &args, observer)?;
         } else {
-            super::blas::fixed_legacy_forward(ctx, operands, shape, observer)?;
+            super::blas::inference_legacy_forward(ctx, operands, shape, observer)?;
         }
         return Ok(tile);
     }
@@ -5333,35 +5381,35 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
         c.dtype == WeightDtype::F32 && x.dtype != WeightDtype::F32 && x.dtype == w.dtype;
     let compiler = ctx.kernels.compiler_identity();
     if homogeneous_half {
-        let device = FixedTileDevice {
+        let device = InferenceTileDevice {
             multiprocessors: ctx.kernels.multiprocessor_count(),
             compute_capability: ctx.compute_capability(),
         };
-        let selected = fixed_select_sm89_half_finalist_auto_tile(
+        let selected = inference_select_sm89_half_finalist_auto_tile(
             operands,
             shape,
             device,
             compiler.nvrtc_version,
             compiler.nvrtc_library_known,
-            ctx.kernels.fixed_sm89_half_m64n64_s3_f16.is_some(),
-            ctx.kernels.fixed_sm89_half_m128n64_s2_f16.is_some(),
+            ctx.kernels.inference_sm89_half_m64n64_s3_f16.is_some(),
+            ctx.kernels.inference_sm89_half_m128n64_s2_f16.is_some(),
         )
         .or_else(|| {
-            fixed_select_sm89_half_auto_tile(
+            inference_select_sm89_half_auto_tile(
                 operands,
                 shape,
                 device,
                 compiler.nvrtc_version,
                 compiler.nvrtc_library_known,
-                FixedSm89HalfHolders {
-                    pipeline_available: ctx.kernels.fixed_sm89_half_pipeline.is_some(),
-                    swizzle_available: ctx.kernels.fixed_sm89_half_swizzle.is_some(),
-                    s3_available: ctx.kernels.fixed_sm89_half_s3.is_some(),
+                InferenceSm89HalfHolders {
+                    pipeline_available: ctx.kernels.inference_sm89_half_pipeline.is_some(),
+                    swizzle_available: ctx.kernels.inference_sm89_half_swizzle.is_some(),
+                    s3_available: ctx.kernels.inference_sm89_half_s3.is_some(),
                 },
             )
         });
         if let Some(tile) = selected {
-            let run = |tile: InferenceTile, args: &FixedArgs| -> Result<(), String> {
+            let run = |tile: InferenceTile, args: &InferenceArgs| -> Result<(), String> {
                 match tile {
                     InferenceTile::Tc128Sm89Pipeline => {
                         launch_sm89_half_pipeline(ctx, c.dtype, args, &mut NoPhysicalObserver)
@@ -5393,7 +5441,7 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
                 c.dtype,
                 |scratch| run(tile, scratch),
                 |scratch| {
-                    let portable = fixed_pick_tile(batch, n_out, n_in, device)
+                    let portable = inference_pick_tile(batch, n_out, n_in, device)
                         .ok_or_else(|| "no portable ladder tile for this shape".to_string())?;
                     launch_ladder(ctx, portable, c.dtype, scratch, &mut NoPhysicalObserver)
                 },
@@ -5424,21 +5472,23 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
     // inside each). Unaligned operands fall back to the portable
     // ladder, whose kernels carry their own scalar staging.
     if homogeneous_half
-        && fixed_sm120_half_eligible(ctx, &args)
-        && let Some(tile) = fixed_pick_sm120_half_exact(
-            FixedSm120HalfExactRequest {
+        && inference_sm120_half_eligible(ctx, &args)
+        && let Some(tile) = inference_pick_sm120_half_exact(
+            InferenceSm120HalfExactRequest {
                 dims,
                 dtype: c.dtype,
                 output_aligned: c.ptr.is_multiple_of(4),
                 has_bias: bias_ptr.is_some(),
             },
-            FixedSm120HalfExactDevice {
+            InferenceSm120HalfExactDevice {
                 compute_capability: ctx.compute_capability(),
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 nvrtc_version: ctx.kernels.compiler_identity().nvrtc_version,
             },
         )
-        .or_else(|| fixed_pick_sm120_half(batch, n_out, n_in, ctx.kernels.multiprocessor_count()))
+        .or_else(|| {
+            inference_pick_sm120_half(batch, n_out, n_in, ctx.kernels.multiprocessor_count())
+        })
     {
         launch_sm120_half(ctx, tile, x.dtype, c.dtype, &args, observer)?;
         return Ok(InferenceTile::Sm120Half(tile));
@@ -5454,12 +5504,12 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
         return Ok(tile);
     }
     if mixed_half_f32 {
-        if fixed_sm120_half_eligible(ctx, &args)
-            && let Some(tile) = fixed_pick_sm120_f32out(
+        if inference_sm120_half_eligible(ctx, &args)
+            && let Some(tile) = inference_pick_sm120_f32out(
                 batch,
                 n_out,
                 n_in,
-                FixedSm120HalfExactDevice {
+                InferenceSm120HalfExactDevice {
                     compute_capability: ctx.compute_capability(),
                     multiprocessors: ctx.kernels.multiprocessor_count(),
                     nvrtc_version: ctx.kernels.compiler_identity().nvrtc_version,
@@ -5469,11 +5519,11 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
             launch_sm120_half(ctx, tile, x.dtype, c.dtype, &args, observer)?;
             return Ok(InferenceTile::Sm120Half(tile));
         }
-        let tile = fixed_pick_f32out_tile(
+        let tile = inference_pick_f32out_tile(
             batch,
             n_in,
             n_out,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
@@ -5482,23 +5532,23 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
         return Ok(tile);
     }
     if homogeneous_half
-        && let Some(tile) = fixed_pick_tile(
+        && let Some(tile) = inference_pick_tile(
             batch,
             n_out,
             n_in,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: ctx.kernels.multiprocessor_count(),
                 compute_capability: ctx.compute_capability(),
             },
         )
     {
-        let tile = fixed_adjust_arch_tile(tile, n_in, ctx.compute_capability());
+        let tile = inference_adjust_arch_tile(tile, n_in, ctx.compute_capability());
         launch_ladder(ctx, tile, c.dtype, &args, observer)?;
         return Ok(tile);
     }
     // Unsupported dtype triples retain the legacy implementation.
     let _ = args;
-    super::blas::fixed_legacy_forward(ctx, operands, shape, observer)?;
+    super::blas::inference_legacy_forward(ctx, operands, shape, observer)?;
     Ok(InferenceTile::Legacy)
 }
 
@@ -5507,10 +5557,10 @@ pub(in crate::mamba_ssm::gpu) fn inference_forward_observed<O: PhysicalLaunchObs
 // 1.013953/1.013734 graph. Retain force qualification only; the separately
 // qualified exact-TMA bridge owns B0. Any future sliced admission must pass
 // the production paired gate afresh.
-fn fixed_sm120_sliced_auto_eligible(
+fn inference_sm120_sliced_auto_eligible(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     loaded: bool,
@@ -5519,7 +5569,7 @@ fn fixed_sm120_sliced_auto_eligible(
     const QUALIFIED_ROWS: &[InferenceShape] = &[];
     QUALIFIED_ROWS.contains(&shape)
         && operands.bias_ptr.is_none()
-        && fixed_sm120_exact_n64_auto_eligible(
+        && inference_sm120_exact_n64_auto_eligible(
             operands,
             shape,
             device,
@@ -5530,7 +5580,7 @@ fn fixed_sm120_sliced_auto_eligible(
         )
 }
 
-// Production NVRTC13.2 / 170-SM CC12.0 Fixed B0 qualification. The forced
+// Production NVRTC13.2 / 170-SM CC12.0 Inference B0 qualification. The forced
 // bridge retained exact scalar-FMA bits and beat both the prior copy-plan and
 // CUBLAS_COMPUTE_32F_PEDANTIC in all eager/graph ABBA/BAAB cohorts at 101
 // windows. Worst paired p95: 0.894265 versus copy-plan, 0.909778 versus
@@ -5538,15 +5588,15 @@ fn fixed_sm120_sliced_auto_eligible(
 // sm120-fixed-auto-b0-post101-v1.log, SHA256
 // 20245b1fe378434130f0e74bdfe3117790506afccf34224c27fd516bdf480932.
 // B1 has a separate post-dot-bias admission below.
-fn fixed_sm120_tma_fma_b0_auto_eligible(
+fn inference_sm120_tma_fma_b0_auto_eligible(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     policy: super::context::F32TriadPolicy,
 ) -> bool {
-    fixed_sm120_tma_fma_force_eligible(
+    inference_sm120_tma_fma_force_eligible(
         operands,
         shape,
         device,
@@ -5563,8 +5613,8 @@ fn fixed_sm120_tma_fma_b0_auto_eligible(
         && operands.bias_ptr.is_none()
 }
 
-// Production NVRTC13.2 / 170-SM CC12.0 Fixed A0 qualification. The literal
-// M64xN128 one-split route retained exact Fixed bits and won all eager/graph
+// Production NVRTC13.2 / 170-SM CC12.0 Inference A0 qualification. The literal
+// M64xN128 one-split route retained exact Inference bits and won all eager/graph
 // ABBA/BAAB cohorts at 101 windows. Before promotion its worst paired p95 was
 // 0.953899 versus prior AUTO and 0.881677 versus PEDANTIC cuBLAS; evidence:
 // measurement archive packet sm120-fixed-tma-fma-a0-20260906/
@@ -5573,17 +5623,17 @@ fn fixed_sm120_tma_fma_b0_auto_eligible(
 // Post-AUTO worst p95 was 0.895330 versus Legacy and 0.880051 versus
 // PEDANTIC cuBLAS; sm120-fixed-fma-a0-postauto101-v1.log, SHA256
 // 0974cae2ed67c3b1c1b0325c662b882b7d832f09c8c2f7ca6644675e3c5f410c.
-// Bias is excluded because Triad seeds it before the FMA chain while Fixed
+// Bias is excluded because Triad seeds it before the FMA chain while Inference
 // adds it after the dot product.
-fn fixed_sm120_tma_fma_a0_auto_eligible(
+fn inference_sm120_tma_fma_a0_auto_eligible(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     policy: super::context::F32TriadPolicy,
 ) -> bool {
-    fixed_sm120_tma_fma_force_eligible(
+    inference_sm120_tma_fma_force_eligible(
         operands,
         shape,
         device,
@@ -5600,8 +5650,8 @@ fn fixed_sm120_tma_fma_a0_auto_eligible(
         && operands.bias_ptr.is_none()
 }
 
-// Production NVRTC13.2 / 170-SM CC12.0 Fixed A1 qualification. The dedicated
-// post-dot-bias M128xN64 route preserves the Fixed arithmetic order and won
+// Production NVRTC13.2 / 170-SM CC12.0 Inference A1 qualification. The dedicated
+// post-dot-bias M128xN64 route preserves the Inference arithmetic order and won
 // every eager/graph ABBA/BAAB cohort at 101 windows. Before promotion its
 // worst paired p95 was 0.978964 versus prior AUTO, 0.917294 versus Legacy,
 // and 0.765625 versus PEDANTIC cuBLAS; evidence:
@@ -5611,22 +5661,22 @@ fn fixed_sm120_tma_fma_a0_auto_eligible(
 // Post-AUTO worst p95 was 0.914063 versus Legacy and 0.765326 versus
 // PEDANTIC cuBLAS; sm120-fixed-fma-a1-postbias-postauto101-v1.log, SHA256
 // 7af2dd4afc99448ec530102f2b7aaec771bbf9833dbd97c033de8ef91d561ac4.
-fn fixed_sm120_tma_fma_a1_auto_eligible(
+fn inference_sm120_tma_fma_a1_auto_eligible(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     policy: super::context::F32TriadPolicy,
 ) -> bool {
-    fixed_sm120_tma_fma_force_eligible(
+    inference_sm120_tma_fma_force_eligible(
         operands,
         shape,
         device,
         nvrtc,
         nvrtc_library_known,
         policy,
-        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+        InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64,
     ) && shape
         == (InferenceShape {
             m: 4_621,
@@ -5638,7 +5688,7 @@ fn fixed_sm120_tma_fma_a1_auto_eligible(
 
 // The holder retains the qualified control even if T256 resource admission
 // declines. None denotes a missing holder; Some(false) selects that control.
-fn fixed_sm120_tma_fma_a1_auto_tile(
+fn inference_sm120_tma_fma_a1_auto_tile(
     eligible: bool,
     t256_loaded: Option<bool>,
 ) -> Option<InferenceTile> {
@@ -5647,17 +5697,17 @@ fn fixed_sm120_tma_fma_a1_auto_tile(
     }
     t256_loaded.map(|loaded| {
         if loaded {
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+            InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64T256
         } else {
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
+            InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64
         }
     })
 }
 
-fn fixed_sm120_tma_fma_bc1_auto_tile(
+fn inference_sm120_tma_fma_bc1_auto_tile(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     loaded: bool,
@@ -5672,12 +5722,12 @@ fn fixed_sm120_tma_fma_bc1_auto_tile(
     // fixed-internal-winners-confirm101-cuda13.2-f32_exact-c1-v1.log SHA256
     // 164c083bd962c54402b6360104aaba8a7324f1b79be1cdedd6ec0a6a704ac2e1.
     let tile = match (shape.m, shape.k, shape.n) {
-        (4621, 768, 2304) => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
-        (4621, 1928, 384) => InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+        (4621, 768, 2304) => InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64,
+        (4621, 1928, 384) => InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N96,
         _ => return None,
     };
     (loaded
-        && fixed_sm120_tma_fma_force_eligible(
+        && inference_sm120_tma_fma_force_eligible(
             operands,
             shape,
             device,
@@ -5695,10 +5745,10 @@ fn fixed_sm120_tma_fma_bc1_auto_tile(
 // forced launches inside the kernel's CC, row, dtype, alignment, policy, and
 // bias contract. AUTO remains independently bound to the fully qualified
 // NVRTC13.2 / 170-SM cohort below.
-fn fixed_sm120_tma_fma_force_physical_eligible(
+fn inference_sm120_tma_fma_force_physical_eligible(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     policy: super::context::F32TriadPolicy,
     tile: InferenceTile,
 ) -> bool {
@@ -5737,12 +5787,12 @@ fn fixed_sm120_tma_fma_force_physical_eligible(
         }
         InferenceTile::F32Sm120TmaFmaM128N64
         | InferenceTile::F32Sm120TmaFmaM64N128
-        | InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => operands.bias_ptr.is_none(),
-        InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
-        | InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96 => operands
+        | InferenceTile::F32Sm120TmaFmaInferenceNoBiasM128N64T256 => operands.bias_ptr.is_none(),
+        InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM64N128
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64K4
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64T256
+        | InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N96 => operands
             .bias_ptr
             .is_some_and(|bias| bias != 0 && bias.is_multiple_of(4)),
         _ => false,
@@ -5760,10 +5810,10 @@ fn fixed_sm120_tma_fma_force_physical_eligible(
             })
 }
 
-fn fixed_sm120_tma_fma_force_eligible(
+fn inference_sm120_tma_fma_force_eligible(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     policy: super::context::F32TriadPolicy,
@@ -5772,7 +5822,7 @@ fn fixed_sm120_tma_fma_force_eligible(
     nvrtc_library_known
         && nvrtc == (13, 2)
         && device.multiprocessors == 170
-        && fixed_sm120_tma_fma_force_physical_eligible(operands, shape, device, policy, tile)
+        && inference_sm120_tma_fma_force_physical_eligible(operands, shape, device, policy, tile)
 }
 
 // Actual production NVRTC13.2 / 170-SM CC12.0 paired qualification, 101
@@ -5788,10 +5838,10 @@ fn fixed_sm120_tma_fma_force_eligible(
 // de1144e0a91626fe254fe89dde92f8ca956ecedb52aec109bbdca046b91812bb;
 // d1-current-copyplan-fast-confirm101-v1.log, SHA256
 // 479d08e9d78f3439bb9a7e9a504d074d8d1952e8b79969a7297eacd78f3ff0e8.
-fn fixed_sm120_exact_n64_auto_eligible(
+fn inference_sm120_exact_n64_auto_eligible(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     loaded: bool,
@@ -5829,7 +5879,7 @@ mod sm120_exact_n64_auto_tests {
     use super::super::context::F32TriadPolicy;
     use super::*;
 
-    const DEVICE: FixedTileDevice = FixedTileDevice {
+    const DEVICE: InferenceTileDevice = InferenceTileDevice {
         multiprocessors: 170,
         compute_capability: (12, 0),
     };
@@ -5848,7 +5898,7 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_bc1_postbias_auto_promotes_only_confirmed_tiles() {
+    fn inference_sm120_bc1_postbias_auto_promotes_only_confirmed_tiles() {
         for (shape, expected) in [
             (
                 InferenceShape {
@@ -5856,7 +5906,7 @@ mod sm120_exact_n64_auto_tests {
                     k: 768,
                     n: 2304,
                 },
-                InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+                InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64,
             ),
             (
                 InferenceShape {
@@ -5864,11 +5914,13 @@ mod sm120_exact_n64_auto_tests {
                     k: 1928,
                     n: 384,
                 },
-                InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+                InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N96,
             ),
         ] {
             let pick = |ops, shape, device, nvrtc, known, loaded, policy| {
-                fixed_sm120_tma_fma_bc1_auto_tile(ops, shape, device, nvrtc, known, loaded, policy)
+                inference_sm120_tma_fma_bc1_auto_tile(
+                    ops, shape, device, nvrtc, known, loaded, policy,
+                )
             };
             assert_eq!(
                 pick(
@@ -5923,11 +5975,11 @@ mod sm120_exact_n64_auto_tests {
                 );
             }
             for device in [
-                FixedTileDevice {
+                InferenceTileDevice {
                     multiprocessors: 169,
                     ..DEVICE
                 },
-                FixedTileDevice {
+                InferenceTileDevice {
                     compute_capability: (12, 1),
                     ..DEVICE
                 },
@@ -6038,7 +6090,7 @@ mod sm120_exact_n64_auto_tests {
         }
         for (m, k, n) in [(4621, 384, 1928), (2048, 768, 2304), (2048, 2304, 768)] {
             assert_eq!(
-                fixed_sm120_tma_fma_bc1_auto_tile(
+                inference_sm120_tma_fma_bc1_auto_tile(
                     operands(true),
                     InferenceShape { m, k, n },
                     DEVICE,
@@ -6053,7 +6105,7 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_force_physical_gate_is_independent_of_nvrtc_and_sm_cohort() {
+    fn inference_sm120_force_physical_gate_is_independent_of_nvrtc_and_sm_cohort() {
         let shape = InferenceShape {
             m: 4_621,
             k: 768,
@@ -6061,10 +6113,10 @@ mod sm120_exact_n64_auto_tests {
         };
         let tile = InferenceTile::F32Sm120TmaFmaM128N64;
         for multiprocessors in [1, 169, 170, 256] {
-            assert!(fixed_sm120_tma_fma_force_physical_eligible(
+            assert!(inference_sm120_tma_fma_force_physical_eligible(
                 operands(false),
                 shape,
-                FixedTileDevice {
+                InferenceTileDevice {
                     multiprocessors,
                     compute_capability: (12, 0),
                 },
@@ -6075,10 +6127,10 @@ mod sm120_exact_n64_auto_tests {
 
         // The production AUTO gate remains bound to its qualified compiler and
         // device cohort even though force-only screening is not.
-        assert!(!fixed_sm120_tma_fma_force_eligible(
+        assert!(!inference_sm120_tma_fma_force_eligible(
             operands(false),
             shape,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: 169,
                 compute_capability: (12, 0),
             },
@@ -6088,17 +6140,17 @@ mod sm120_exact_n64_auto_tests {
             tile,
         ));
 
-        assert!(!fixed_sm120_tma_fma_force_physical_eligible(
+        assert!(!inference_sm120_tma_fma_force_physical_eligible(
             operands(false),
             shape,
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: 170,
                 compute_capability: (8, 9),
             },
             F32TriadPolicy::ExactScalarFma,
             tile,
         ));
-        assert!(!fixed_sm120_tma_fma_force_physical_eligible(
+        assert!(!inference_sm120_tma_fma_force_physical_eligible(
             operands(true),
             shape,
             DEVICE,
@@ -6108,7 +6160,7 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_sliced_auto_is_withdrawn_and_copyplan_retained() {
+    fn inference_sm120_sliced_auto_is_withdrawn_and_copyplan_retained() {
         for (m, k, n, bias, want) in [
             (4621, 768, 2304, false, false),
             (4621, 768, 2304, true, false),
@@ -6119,7 +6171,7 @@ mod sm120_exact_n64_auto_tests {
             (2048, 768, 2304, false, false),
         ] {
             assert_eq!(
-                fixed_sm120_sliced_auto_eligible(
+                inference_sm120_sliced_auto_eligible(
                     operands(bias),
                     InferenceShape { m, k, n },
                     DEVICE,
@@ -6133,7 +6185,7 @@ mod sm120_exact_n64_auto_tests {
             );
         }
         assert!(
-            fixed_sm120_exact_n64_auto_eligible(
+            inference_sm120_exact_n64_auto_eligible(
                 operands(false),
                 InferenceShape {
                     m: 4621,
@@ -6151,13 +6203,13 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_tma_fma_b0_gate_is_exact_and_cohort_bound() {
+    fn inference_sm120_tma_fma_b0_gate_is_exact_and_cohort_bound() {
         let b0 = InferenceShape {
             m: 4621,
             k: 768,
             n: 2304,
         };
-        assert!(fixed_sm120_tma_fma_b0_auto_eligible(
+        assert!(inference_sm120_tma_fma_b0_auto_eligible(
             operands(false),
             b0,
             DEVICE,
@@ -6165,7 +6217,7 @@ mod sm120_exact_n64_auto_tests {
             true,
             F32TriadPolicy::ExactScalarFma,
         ));
-        assert!(!fixed_sm120_tma_fma_b0_auto_eligible(
+        assert!(!inference_sm120_tma_fma_b0_auto_eligible(
             operands(true),
             b0,
             DEVICE,
@@ -6186,7 +6238,7 @@ mod sm120_exact_n64_auto_tests {
                 n: 768,
             },
         ] {
-            assert!(!fixed_sm120_tma_fma_b0_auto_eligible(
+            assert!(!inference_sm120_tma_fma_b0_auto_eligible(
                 operands(false),
                 shape,
                 DEVICE,
@@ -6198,13 +6250,13 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_tma_fma_a0_gate_is_exact_and_cohort_bound() {
+    fn inference_sm120_tma_fma_a0_gate_is_exact_and_cohort_bound() {
         let a0 = InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         };
-        assert!(fixed_sm120_tma_fma_a0_auto_eligible(
+        assert!(inference_sm120_tma_fma_a0_auto_eligible(
             operands(false),
             a0,
             DEVICE,
@@ -6212,7 +6264,7 @@ mod sm120_exact_n64_auto_tests {
             true,
             F32TriadPolicy::ExactScalarFma,
         ));
-        assert!(!fixed_sm120_tma_fma_a0_auto_eligible(
+        assert!(!inference_sm120_tma_fma_a0_auto_eligible(
             operands(true),
             a0,
             DEVICE,
@@ -6220,7 +6272,7 @@ mod sm120_exact_n64_auto_tests {
             true,
             F32TriadPolicy::ExactScalarFma,
         ));
-        assert!(!fixed_sm120_tma_fma_a0_auto_eligible(
+        assert!(!inference_sm120_tma_fma_a0_auto_eligible(
             operands(false),
             InferenceShape { m: 4620, ..a0 },
             DEVICE,
@@ -6231,17 +6283,17 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_tma_fma_a1_auto_prefers_t256_and_retains_control_fallback() {
+    fn inference_sm120_tma_fma_a1_auto_prefers_t256_and_retains_control_fallback() {
         for (eligible, t256_loaded, expected) in [
             (
                 true,
                 Some(true),
-                Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256),
+                Some(InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64T256),
             ),
             (
                 true,
                 Some(false),
-                Some(InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64),
+                Some(InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64),
             ),
             (true, None, None),
             (false, Some(true), None),
@@ -6249,7 +6301,7 @@ mod sm120_exact_n64_auto_tests {
             (false, None, None),
         ] {
             assert_eq!(
-                fixed_sm120_tma_fma_a1_auto_tile(eligible, t256_loaded),
+                inference_sm120_tma_fma_a1_auto_tile(eligible, t256_loaded),
                 expected,
                 "eligibility={eligible}, loaded={t256_loaded:?}"
             );
@@ -6257,13 +6309,13 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_tma_fma_a1_postbias_gate_is_exact_and_cohort_bound() {
+    fn inference_sm120_tma_fma_a1_postbias_gate_is_exact_and_cohort_bound() {
         let a1 = InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         };
-        assert!(fixed_sm120_tma_fma_a1_auto_eligible(
+        assert!(inference_sm120_tma_fma_a1_auto_eligible(
             operands(true),
             a1,
             DEVICE,
@@ -6271,7 +6323,7 @@ mod sm120_exact_n64_auto_tests {
             true,
             F32TriadPolicy::ExactScalarFma,
         ));
-        assert!(!fixed_sm120_tma_fma_a1_auto_eligible(
+        assert!(!inference_sm120_tma_fma_a1_auto_eligible(
             operands(false),
             a1,
             DEVICE,
@@ -6279,7 +6331,7 @@ mod sm120_exact_n64_auto_tests {
             true,
             F32TriadPolicy::ExactScalarFma,
         ));
-        assert!(!fixed_sm120_tma_fma_a1_auto_eligible(
+        assert!(!inference_sm120_tma_fma_a1_auto_eligible(
             operands(true),
             InferenceShape { n: 1929, ..a1 },
             DEVICE,
@@ -6290,7 +6342,7 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_copyplan_t256_force_gate_keeps_hot_rows_and_bias_contract() {
+    fn inference_sm120_copyplan_t256_force_gate_keeps_hot_rows_and_bias_contract() {
         for (m, k, n) in [
             (4621, 384, 1928),
             (4621, 768, 2304),
@@ -6300,7 +6352,7 @@ mod sm120_exact_n64_auto_tests {
         ] {
             for bias in [false, true] {
                 let eligible = |ops, shape| {
-                    fixed_sm120_tma_fma_force_eligible(
+                    inference_sm120_tma_fma_force_eligible(
                         ops,
                         shape,
                         DEVICE,
@@ -6338,10 +6390,10 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_nobias_force_gate_accepts_only_qualified_unbiased_hot_rows() {
-        let tile = InferenceTile::F32Sm120TmaFmaFixedNoBiasM128N64T256;
+    fn inference_sm120_nobias_force_gate_accepts_only_qualified_unbiased_hot_rows() {
+        let tile = InferenceTile::F32Sm120TmaFmaInferenceNoBiasM128N64T256;
         let eligible = |ops, shape, device, nvrtc, known, policy| {
-            fixed_sm120_tma_fma_force_eligible(ops, shape, device, nvrtc, known, policy, tile)
+            inference_sm120_tma_fma_force_eligible(ops, shape, device, nvrtc, known, policy, tile)
         };
         for (m, k, n) in [
             (4621, 384, 1928),
@@ -6390,7 +6442,7 @@ mod sm120_exact_n64_auto_tests {
             (
                 operands(false),
                 shape,
-                FixedTileDevice {
+                InferenceTileDevice {
                     compute_capability: (12, 1),
                     ..DEVICE
                 },
@@ -6401,7 +6453,7 @@ mod sm120_exact_n64_auto_tests {
             (
                 operands(false),
                 shape,
-                FixedTileDevice {
+                InferenceTileDevice {
                     multiprocessors: 169,
                     ..DEVICE
                 },
@@ -6477,7 +6529,7 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_tma_fma_force_gate_admits_only_unbiased_hot_rows() {
+    fn inference_sm120_tma_fma_force_gate_admits_only_unbiased_hot_rows() {
         for (m, k, n) in [
             (4621, 384, 1928),
             (4621, 768, 2304),
@@ -6486,7 +6538,7 @@ mod sm120_exact_n64_auto_tests {
             (2048, 2304, 768),
         ] {
             let shape = InferenceShape { m, k, n };
-            assert!(fixed_sm120_tma_fma_force_eligible(
+            assert!(inference_sm120_tma_fma_force_eligible(
                 operands(false),
                 shape,
                 DEVICE,
@@ -6495,7 +6547,7 @@ mod sm120_exact_n64_auto_tests {
                 F32TriadPolicy::ExactScalarFma,
                 InferenceTile::F32Sm120TmaFmaM128N64,
             ));
-            assert!(!fixed_sm120_tma_fma_force_eligible(
+            assert!(!inference_sm120_tma_fma_force_eligible(
                 operands(true),
                 shape,
                 DEVICE,
@@ -6527,7 +6579,7 @@ mod sm120_exact_n64_auto_tests {
                 n: 2303,
             },
         ] {
-            assert!(!fixed_sm120_tma_fma_force_eligible(
+            assert!(!inference_sm120_tma_fma_force_eligible(
                 operands(false),
                 shape,
                 DEVICE,
@@ -6540,14 +6592,14 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_tma_fma_force_gate_separates_bias_arithmetic_variants() {
+    fn inference_sm120_tma_fma_force_gate_separates_bias_arithmetic_variants() {
         let shape = InferenceShape {
             m: 4621,
             k: 384,
             n: 1928,
         };
         let eligible = |ops, tile| {
-            fixed_sm120_tma_fma_force_eligible(
+            inference_sm120_tma_fma_force_eligible(
                 ops,
                 shape,
                 DEVICE,
@@ -6567,32 +6619,32 @@ mod sm120_exact_n64_auto_tests {
         ));
         assert!(eligible(
             operands(true),
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128
+            InferenceTile::F32Sm120TmaFmaInferencePostBiasM64N128
         ));
         assert!(!eligible(
             operands(false),
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM64N128
+            InferenceTile::F32Sm120TmaFmaInferencePostBiasM64N128
         ));
         assert!(eligible(
             operands(true),
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
+            InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64K4
         ));
         assert!(!eligible(
             operands(false),
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
+            InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64K4
         ));
         assert!(eligible(
             operands(true),
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+            InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64T256
         ));
         assert!(!eligible(
             operands(false),
-            InferenceTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+            InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64T256
         ));
     }
 
     #[test]
-    fn fixed_sm120_tma_fma_force_declines_identity_neighbors_and_operand_drift() {
+    fn inference_sm120_tma_fma_force_declines_identity_neighbors_and_operand_drift() {
         let shape = InferenceShape {
             m: 4621,
             k: 768,
@@ -6600,7 +6652,7 @@ mod sm120_exact_n64_auto_tests {
         };
         let ops = operands(false);
         let accept = |ops, shape, device, nvrtc, known, policy| {
-            fixed_sm120_tma_fma_force_eligible(
+            inference_sm120_tma_fma_force_eligible(
                 ops,
                 shape,
                 device,
@@ -6612,7 +6664,7 @@ mod sm120_exact_n64_auto_tests {
         };
         for (device, nvrtc, known, policy) in [
             (
-                FixedTileDevice {
+                InferenceTileDevice {
                     compute_capability: (12, 1),
                     ..DEVICE
                 },
@@ -6621,7 +6673,7 @@ mod sm120_exact_n64_auto_tests {
                 F32TriadPolicy::ExactScalarFma,
             ),
             (
-                FixedTileDevice {
+                InferenceTileDevice {
                     compute_capability: (8, 9),
                     ..DEVICE
                 },
@@ -6630,7 +6682,7 @@ mod sm120_exact_n64_auto_tests {
                 F32TriadPolicy::ExactScalarFma,
             ),
             (
-                FixedTileDevice {
+                InferenceTileDevice {
                     multiprocessors: 169,
                     ..DEVICE
                 },
@@ -6639,7 +6691,7 @@ mod sm120_exact_n64_auto_tests {
                 F32TriadPolicy::ExactScalarFma,
             ),
             (
-                FixedTileDevice {
+                InferenceTileDevice {
                     multiprocessors: 171,
                     ..DEVICE
                 },
@@ -6728,20 +6780,22 @@ mod sm120_exact_n64_auto_tests {
     fn eligible(
         operands: InferenceFwdOperands,
         shape: InferenceShape,
-        device: FixedTileDevice,
+        device: InferenceTileDevice,
         nvrtc: (i32, i32),
         known: bool,
         loaded: bool,
         policy: F32TriadPolicy,
     ) -> bool {
-        fixed_sm120_exact_n64_auto_eligible(operands, shape, device, nvrtc, known, loaded, policy)
+        inference_sm120_exact_n64_auto_eligible(
+            operands, shape, device, nvrtc, known, loaded, policy,
+        )
     }
 
     #[test]
-    fn fixed_sm120_exact_n64_auto_admits_the_six_qualified_rows() {
+    fn inference_sm120_exact_n64_auto_admits_the_six_qualified_rows() {
         for (m, k, n) in [(2048, 2304, 768), (4621, 768, 2304), (2048, 768, 2304)] {
             for bias in [false, true] {
-                assert!(fixed_sm120_exact_n64_auto_eligible(
+                assert!(inference_sm120_exact_n64_auto_eligible(
                     operands(bias),
                     InferenceShape { m, k, n },
                     DEVICE,
@@ -6755,7 +6809,7 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_exact_n64_auto_declines_unqualified_identity_or_policy() {
+    fn inference_sm120_exact_n64_auto_declines_unqualified_identity_or_policy() {
         let shape = InferenceShape {
             m: 4621,
             k: 768,
@@ -6766,7 +6820,7 @@ mod sm120_exact_n64_auto_tests {
             assert!(!eligible(
                 ops,
                 shape,
-                FixedTileDevice {
+                InferenceTileDevice {
                     compute_capability: cc,
                     ..DEVICE
                 },
@@ -6780,7 +6834,7 @@ mod sm120_exact_n64_auto_tests {
             assert!(!eligible(
                 ops,
                 shape,
-                FixedTileDevice {
+                InferenceTileDevice {
                     multiprocessors,
                     ..DEVICE
                 },
@@ -6824,7 +6878,7 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_exact_n64_auto_declines_unmeasured_shape_alignment_and_dtype() {
+    fn inference_sm120_exact_n64_auto_declines_unmeasured_shape_alignment_and_dtype() {
         for (m, k, n) in [(2048, 2304, 768), (4621, 768, 2304), (2048, 768, 2304)] {
             for bias in [false, true] {
                 let shape = InferenceShape { m, k, n };
@@ -6935,11 +6989,11 @@ mod sm120_exact_n64_auto_tests {
 // eb3b0abee0e336c7c93f9c5eddec698dae8a3fc1d8363ca337047b835758ad96.
 // CUDA13.0 screen/confirm: cae9db1864bd64700ee3033196eae4c6f8a0abd7a3a1cf09a407889cb7727682 /
 // 0b27351512f3265b156a29aaf7fadcaf4a84870cac06e1c1b36ce3e358f20711.
-// This dispatch-only promotion reuses the unchanged loaded Fixed artifact.
-fn fixed_sm89_exact_n64_auto_eligible(
+// This dispatch-only promotion reuses the unchanged loaded Inference artifact.
+fn inference_sm89_exact_n64_auto_eligible(
     operands: InferenceFwdOperands,
     shape: InferenceShape,
-    device: FixedTileDevice,
+    device: InferenceTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     loaded: bool,
@@ -6948,7 +7002,7 @@ fn fixed_sm89_exact_n64_auto_eligible(
     loaded
         && nvrtc_library_known
         && matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
-        && fixed_portable_overlay_board(device.compute_capability)
+        && inference_portable_overlay_board(device.compute_capability)
         && device.multiprocessors > 0
         && policy == super::context::F32TriadPolicy::ExactScalarFma
         && [operands.c, operands.x, operands.w]
@@ -6979,7 +7033,7 @@ mod sm89_exact_n64_auto_tests {
     use super::super::context::F32TriadPolicy;
     use super::*;
 
-    const DEVICE: FixedTileDevice = FixedTileDevice {
+    const DEVICE: InferenceTileDevice = InferenceTileDevice {
         multiprocessors: 142,
         compute_capability: (8, 9),
     };
@@ -7019,7 +7073,7 @@ mod sm89_exact_n64_auto_tests {
         operands: InferenceFwdOperands,
         shape: InferenceShape,
     ) -> bool {
-        fixed_sm89_exact_n64_auto_eligible(
+        inference_sm89_exact_n64_auto_eligible(
             operands,
             shape,
             DEVICE,
@@ -7035,7 +7089,7 @@ mod sm89_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_auto_routes_all_twenty_four_qualified_toolkit_literals() {
+    fn inference_sm89_exact_n64_auto_routes_all_twenty_four_qualified_toolkit_literals() {
         for nvrtc in QUALIFIED_NVRTC {
             for (m, k, n, bias) in ROWS {
                 assert!(
@@ -7047,7 +7101,7 @@ mod sm89_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_auto_routes_a_and_d_copyplan_winners() {
+    fn inference_sm89_exact_n64_auto_routes_a_and_d_copyplan_winners() {
         for (m, k, n) in [(4621, 384, 1928), (2048, 768, 2304)] {
             for bias in [false, true] {
                 assert!(
@@ -7059,7 +7113,7 @@ mod sm89_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_auto_admits_only_eight_measured_positive_rows() {
+    fn inference_sm89_exact_n64_auto_admits_only_eight_measured_positive_rows() {
         let observed =
             ROWS.map(|(m, k, n, bias)| eligible(operands(bias), InferenceShape { m, k, n }));
         assert_eq!(observed, [true; 8], "measured A0/A1/B0/B1/D0/D1/E0/E1 rows");
@@ -7078,7 +7132,7 @@ mod sm89_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_auto_declines_adjacent_unmeasured_and_thin_shapes() {
+    fn inference_sm89_exact_n64_auto_declines_adjacent_unmeasured_and_thin_shapes() {
         for nvrtc in QUALIFIED_NVRTC {
             for (m, k, n, bias) in ROWS {
                 for (m, k, n) in [
@@ -7111,16 +7165,18 @@ mod sm89_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_auto_declines_unknown_device_toolchain_holder_and_policy() {
+    fn inference_sm89_exact_n64_auto_declines_unknown_device_toolchain_holder_and_policy() {
         for (m, k, n, bias) in ROWS {
             let ops = operands(bias);
             let shape = InferenceShape { m, k, n };
             let check = |device, nvrtc, known, loaded, policy| {
-                fixed_sm89_exact_n64_auto_eligible(ops, shape, device, nvrtc, known, loaded, policy)
+                inference_sm89_exact_n64_auto_eligible(
+                    ops, shape, device, nvrtc, known, loaded, policy,
+                )
             };
             for nvrtc in QUALIFIED_NVRTC {
                 for cc in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0), (10, 3), (11, 0)] {
-                    let board = FixedTileDevice {
+                    let board = InferenceTileDevice {
                         compute_capability: cc,
                         ..DEVICE
                     };
@@ -7131,7 +7187,7 @@ mod sm89_exact_n64_auto_tests {
                 }
                 for cc in [(7, 5), (12, 0), (12, 1)] {
                     assert!(!check(
-                        FixedTileDevice {
+                        InferenceTileDevice {
                             compute_capability: cc,
                             ..DEVICE
                         },
@@ -7142,7 +7198,7 @@ mod sm89_exact_n64_auto_tests {
                     ));
                 }
                 for multiprocessors in [1, 141, 143, 170] {
-                    let board = FixedTileDevice {
+                    let board = InferenceTileDevice {
                         multiprocessors,
                         ..DEVICE
                     };
@@ -7154,7 +7210,7 @@ mod sm89_exact_n64_auto_tests {
                 {
                     let multiprocessors = 0;
                     assert!(!check(
-                        FixedTileDevice {
+                        InferenceTileDevice {
                             multiprocessors,
                             ..DEVICE
                         },
@@ -7194,7 +7250,7 @@ mod sm89_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_auto_declines_invalid_alignment_null_bias_and_dtype() {
+    fn inference_sm89_exact_n64_auto_declines_invalid_alignment_null_bias_and_dtype() {
         for nvrtc in QUALIFIED_NVRTC {
             for (m, k, n, bias) in ROWS {
                 let good = operands(bias);
@@ -7271,9 +7327,9 @@ mod sm89_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_auto_keeps_old_cc12_exact_selector_cells() {
+    fn inference_sm89_exact_n64_auto_keeps_old_cc12_exact_selector_cells() {
         for cc in [(12, 0), (12, 1)] {
-            let device = FixedTileDevice {
+            let device = InferenceTileDevice {
                 compute_capability: cc,
                 multiprocessors: 170,
             };
@@ -7285,7 +7341,7 @@ mod sm89_exact_n64_auto_tests {
                 (2048, 2304, 768, InferenceTile::Legacy),
             ] {
                 for bias in [false, true] {
-                    assert!(!fixed_sm89_exact_n64_auto_eligible(
+                    assert!(!inference_sm89_exact_n64_auto_eligible(
                         operands(bias),
                         InferenceShape { m, k, n },
                         device,
@@ -7300,7 +7356,7 @@ mod sm89_exact_n64_auto_tests {
                 } else {
                     InferenceTile::Legacy
                 };
-                assert_eq!(fixed_pick_f32_exact(m, k, n, device), expected);
+                assert_eq!(inference_pick_f32_exact(m, k, n, device), expected);
             }
         }
     }
@@ -7332,12 +7388,12 @@ mod sm89_exact_n64_request_tests {
     fn prepare(
         ops: InferenceFwdOperands,
         dims: InferenceShape,
-    ) -> Result<Option<(FixedArgs, u32)>, String> {
+    ) -> Result<Option<(InferenceArgs, u32)>, String> {
         prepare_sm89_exact_n64_launch(ops, dims, (8, 9))
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_operand_and_arch_guards_are_fail_closed() {
+    fn inference_sm89_exact_n64_operand_and_arch_guards_are_fail_closed() {
         assert!(prepare(operands(), shape()).unwrap().is_some());
         for cc in [(8, 0), (8, 6), (9, 0), (10, 0), (11, 0)] {
             assert!(
@@ -7416,7 +7472,7 @@ mod sm89_exact_n64_request_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_signed_padding_and_grid_boundaries() {
+    fn inference_sm89_exact_n64_signed_padding_and_grid_boundaries() {
         let good = operands();
         let (_, grid) = prepare(good, shape()).unwrap().unwrap();
         assert_eq!(grid, 6, "65x136 needs 2x3 N64 CTAs");
@@ -7494,7 +7550,7 @@ mod sm89_exact_n64_request_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_operand_byte_endpoints_cannot_wrap() {
+    fn inference_sm89_exact_n64_operand_byte_endpoints_cannot_wrap() {
         let good = operands();
         assert!(prepare(good, shape()).unwrap().is_some());
         for bad in [
@@ -7576,7 +7632,7 @@ mod sm89_exact_n64_request_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_empty_and_k0_requests_do_not_require_inputs() {
+    fn inference_sm89_exact_n64_empty_and_k0_requests_do_not_require_inputs() {
         let good = operands();
         assert!(prepare(good, shape()).unwrap().is_some());
         let null = TypedPtr {
@@ -7618,24 +7674,24 @@ mod sm89_exact_n64_request_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_forward_bundle_has_exact_m_n_k_and_stride_words() {
+    fn inference_sm89_exact_n64_forward_bundle_has_exact_m_n_k_and_stride_words() {
         let (args, _) = prepare(operands(), shape()).unwrap().unwrap();
-        let params = FixedSm89ExactF32Params::forward(&args);
+        let params = InferenceSm89ExactF32Params::forward(&args);
         let words = unsafe {
-            (&params as *const FixedSm89ExactF32Params)
+            (&params as *const InferenceSm89ExactF32Params)
                 .cast::<[u32; 8]>()
                 .read()
         };
         assert_eq!(words, [0x3f80_0000, 0, 65, 136, 96, 96, 136, 136]);
         assert_eq!(std::mem::size_of_val(&params), 32);
-        assert_eq!(std::mem::align_of::<FixedSm89ExactF32Params>(), 4);
+        assert_eq!(std::mem::align_of::<InferenceSm89ExactF32Params>(), 4);
     }
 }
 
 #[cfg(test)]
 mod pair_store_schedule_tests {
     use super::{
-        InferenceFwdOperands, InferenceShape, fixed_sm120_pair_store_schedule_cell,
+        InferenceFwdOperands, InferenceShape, inference_sm120_pair_store_schedule_cell,
         launch_sm120_tf32_custom_ldc_for_test,
     };
     use crate::mamba_ssm::gpu::{
@@ -7652,77 +7708,77 @@ mod pair_store_schedule_tests {
             (2048, 2304, 768),
         ];
         for cell in cells {
-            assert!(fixed_sm120_pair_store_schedule_cell(
+            assert!(inference_sm120_pair_store_schedule_cell(
                 cell,
                 (12, 0),
                 170,
                 (13, 0),
                 true,
             ));
-            assert!(!fixed_sm120_pair_store_schedule_cell(
+            assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0 + 1, cell.1, cell.2),
                 (12, 0),
                 170,
                 (13, 0),
                 true,
             ));
-            assert!(!fixed_sm120_pair_store_schedule_cell(
+            assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0 - 1, cell.1, cell.2),
                 (12, 0),
                 170,
                 (13, 0),
                 true,
             ));
-            assert!(!fixed_sm120_pair_store_schedule_cell(
+            assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0, cell.1 + 1, cell.2),
                 (12, 0),
                 170,
                 (13, 0),
                 true,
             ));
-            assert!(!fixed_sm120_pair_store_schedule_cell(
+            assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0, cell.1 - 1, cell.2),
                 (12, 0),
                 170,
                 (13, 0),
                 true,
             ));
-            assert!(!fixed_sm120_pair_store_schedule_cell(
+            assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0, cell.1, cell.2 + 1),
                 (12, 0),
                 170,
                 (13, 0),
                 true,
             ));
-            assert!(!fixed_sm120_pair_store_schedule_cell(
+            assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0, cell.1, cell.2 - 1),
                 (12, 0),
                 170,
                 (13, 0),
                 true,
             ));
-            assert!(!fixed_sm120_pair_store_schedule_cell(
+            assert!(!inference_sm120_pair_store_schedule_cell(
                 cell,
                 (12, 1),
                 170,
                 (13, 0),
                 true,
             ));
-            assert!(!fixed_sm120_pair_store_schedule_cell(
+            assert!(!inference_sm120_pair_store_schedule_cell(
                 cell,
                 (12, 0),
                 171,
                 (13, 0),
                 true,
             ));
-            assert!(!fixed_sm120_pair_store_schedule_cell(
+            assert!(!inference_sm120_pair_store_schedule_cell(
                 cell,
                 (12, 0),
                 169,
                 (13, 0),
                 true,
             ));
-            assert!(!fixed_sm120_pair_store_schedule_cell(
+            assert!(!inference_sm120_pair_store_schedule_cell(
                 cell,
                 (12, 0),
                 170,
@@ -7730,21 +7786,21 @@ mod pair_store_schedule_tests {
                 false,
             ));
         }
-        assert!(!fixed_sm120_pair_store_schedule_cell(
+        assert!(!inference_sm120_pair_store_schedule_cell(
             (4621, 768, 2304),
             (12, 0),
             170,
             (12, 8),
             true,
         ));
-        assert!(fixed_sm120_pair_store_schedule_cell(
+        assert!(inference_sm120_pair_store_schedule_cell(
             (2048, 768, 2304),
             (12, 0),
             170,
             (12, 8),
             true,
         ));
-        assert!(fixed_sm120_pair_store_schedule_cell(
+        assert!(inference_sm120_pair_store_schedule_cell(
             (2048, 2304, 768),
             (12, 0),
             170,
@@ -7752,7 +7808,7 @@ mod pair_store_schedule_tests {
             true,
         ));
         for cell in [(4621, 384, 1928), (4621, 1928, 384)] {
-            assert!(!fixed_sm120_pair_store_schedule_cell(
+            assert!(!inference_sm120_pair_store_schedule_cell(
                 cell,
                 (12, 0),
                 170,
@@ -7760,21 +7816,21 @@ mod pair_store_schedule_tests {
                 true,
             ));
         }
-        assert!(!fixed_sm120_pair_store_schedule_cell(
+        assert!(!inference_sm120_pair_store_schedule_cell(
             (2048, 768, 2304),
             (12, 0),
             170,
             (12, 7),
             true,
         ));
-        assert!(!fixed_sm120_pair_store_schedule_cell(
+        assert!(!inference_sm120_pair_store_schedule_cell(
             (2048, 768, 2304),
             (12, 0),
             170,
             (13, 2),
             true,
         ));
-        assert!(!fixed_sm120_pair_store_schedule_cell(
+        assert!(!inference_sm120_pair_store_schedule_cell(
             (2048, 768, 2304),
             (12, 0),
             170,
@@ -7917,12 +7973,13 @@ mod pair_store_schedule_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        FixedHalfMapCache, FixedHalfMapKey, FixedPostBiasMapCache, FixedPostBiasMapKey,
-        FixedSm120HalfExactDevice, FixedSm120HalfExactRequest, FixedTensorMap, FixedTf32MapCache,
-        FixedTf32MapKey, FixedTf32Stack, FixedTileDevice, InferenceSm120HalfTile, InferenceTile,
-        fixed_adjust_arch_tile, fixed_pick_f32_exact, fixed_pick_f32out_tile,
-        fixed_pick_sm120_f32out, fixed_pick_sm120_half, fixed_pick_sm120_half_exact,
-        fixed_pick_tf32, fixed_pick_tile,
+        InferenceHalfMapCache, InferenceHalfMapKey, InferencePostBiasMapCache,
+        InferencePostBiasMapKey, InferenceSm120HalfExactDevice, InferenceSm120HalfExactRequest,
+        InferenceSm120HalfTile, InferenceTensorMap, InferenceTf32MapCache, InferenceTf32MapKey,
+        InferenceTf32Stack, InferenceTile, InferenceTileDevice, inference_adjust_arch_tile,
+        inference_pick_f32_exact, inference_pick_f32out_tile, inference_pick_sm120_f32out,
+        inference_pick_sm120_half, inference_pick_sm120_half_exact, inference_pick_tf32,
+        inference_pick_tile,
     };
     use crate::mamba_ssm::gpu::buffers::{
         managed_allocation_epoch_for_ranges, register_managed_allocation_range,
@@ -7932,8 +7989,8 @@ mod tests {
         NUMERIC_ABI_REVISION, SCHEDULE_REVISION, TUNING_TABLE_REVISION,
     };
 
-    fn zero_tensor_maps() -> [FixedTensorMap; 2] {
-        let map = unsafe { FixedTensorMap(std::mem::MaybeUninit::zeroed().assume_init()) };
+    fn zero_tensor_maps() -> [InferenceTensorMap; 2] {
+        let map = unsafe { InferenceTensorMap(std::mem::MaybeUninit::zeroed().assume_init()) };
         [map, map]
     }
 
@@ -7949,8 +8006,8 @@ mod tests {
     #[test]
     fn sm120_map_caches_retain_all_live_graph_entries() {
         let context_handle = 0x12_0120;
-        let mut half = FixedHalfMapCache::default();
-        let mut tf32 = FixedTf32MapCache::default();
+        let mut half = InferenceHalfMapCache::default();
+        let mut tf32 = InferenceTf32MapCache::default();
         let mut registrations = Vec::new();
         let mut first_half_key = None;
         let mut first_tf32_key = None;
@@ -7966,7 +8023,7 @@ mod tests {
                 &[(base, 0x1000), (base + 0x4000, 0x1000)],
             )
             .expect("live allocation epoch");
-            let half_key = FixedHalfMapKey {
+            let half_key = InferenceHalfMapKey {
                 a: base,
                 b: base + 0x4000,
                 m: 128,
@@ -7974,7 +8031,7 @@ mod tests {
                 n: 1536,
                 tile: InferenceSm120HalfTile::M64N64Bk64S2,
             };
-            let tf32_key = FixedTf32MapKey {
+            let tf32_key = InferenceTf32MapKey {
                 a: base,
                 b: base + 0x4000,
                 m: 128,
@@ -8001,7 +8058,7 @@ mod tests {
 
     #[test]
     fn sm120_postbias_bk16_maps_are_isolated_from_tf32_bk32_maps() {
-        let tf32 = FixedTf32MapKey {
+        let tf32 = InferenceTf32MapKey {
             a: 0x1000,
             b: 0x2000,
             m: 4621,
@@ -8009,7 +8066,7 @@ mod tests {
             n: 1928,
             tile_rows: 128,
         };
-        let postbias = FixedPostBiasMapKey {
+        let postbias = InferencePostBiasMapKey {
             a: tf32.a,
             b: tf32.b,
             m: tf32.m,
@@ -8018,8 +8075,8 @@ mod tests {
             tile_m: 128,
             tile_n: 64,
         };
-        let tf32_cache = FixedTf32MapCache::default();
-        let postbias_cache = FixedPostBiasMapCache::default();
+        let tf32_cache = InferenceTf32MapCache::default();
+        let postbias_cache = InferencePostBiasMapCache::default();
         assert!(tf32_cache.entries.is_empty());
         assert!(postbias_cache.entries.is_empty());
         assert_eq!([32, tf32.tile_rows], [32, 128]);
@@ -8032,42 +8089,42 @@ mod tests {
         let sms = 170;
         for cols in [8, 16, 24] {
             assert_eq!(
-                fixed_pick_sm120_half(8192, cols, 768, sms),
+                inference_pick_sm120_half(8192, cols, 768, sms),
                 None,
                 "N={cols} must stay in the all-M narrow numeric family"
             );
         }
-        assert_eq!(fixed_pick_sm120_half(64, 1536, 768, sms), None);
+        assert_eq!(inference_pick_sm120_half(64, 1536, 768, sms), None);
         assert_eq!(
-            fixed_pick_sm120_half(128, 1536, 768, sms),
+            inference_pick_sm120_half(128, 1536, 768, sms),
             Some(InferenceSm120HalfTile::M64N64Bk64S2)
         );
         assert_eq!(
-            fixed_pick_sm120_half(512, 1536, 384, sms),
+            inference_pick_sm120_half(512, 1536, 384, sms),
             Some(InferenceSm120HalfTile::M128N64Bk32S3)
         );
         assert_eq!(
-            fixed_pick_sm120_half(1024, 1536, 384, sms),
+            inference_pick_sm120_half(1024, 1536, 384, sms),
             Some(InferenceSm120HalfTile::M64N64Bk64S2)
         );
         assert_eq!(
-            fixed_pick_sm120_half(1024, 2304, 1928, sms),
+            inference_pick_sm120_half(1024, 2304, 1928, sms),
             Some(InferenceSm120HalfTile::M128N128Bk32S2)
         );
         assert_eq!(
-            fixed_pick_sm120_half(2048, 2304, 768, sms),
+            inference_pick_sm120_half(2048, 2304, 768, sms),
             Some(InferenceSm120HalfTile::M64N64Bk64S2)
         );
         assert_eq!(
-            fixed_pick_sm120_half(4621, 1928, 384, sms),
+            inference_pick_sm120_half(4621, 1928, 384, sms),
             Some(InferenceSm120HalfTile::M128N64Bk32S3)
         );
         assert_eq!(
-            fixed_pick_sm120_half(4621, 2304, 768, sms),
+            inference_pick_sm120_half(4621, 2304, 768, sms),
             Some(InferenceSm120HalfTile::M128N128Bk32S2)
         );
         assert_eq!(
-            fixed_pick_sm120_half(2048, 2304, 1928, sms),
+            inference_pick_sm120_half(2048, 2304, 1928, sms),
             Some(InferenceSm120HalfTile::M128N128Bk32S2)
         );
     }
@@ -8076,7 +8133,7 @@ mod tests {
     fn sm120_half_exact_overlay_promotes_only_qualified_full_context_cells() {
         use InferenceSm120HalfTile::{M64N64Bk64S2 as C, M64N128Bk64S2 as D, M128N64Bk32S3 as A};
 
-        let qualified_device = FixedSm120HalfExactDevice {
+        let qualified_device = InferenceSm120HalfExactDevice {
             compute_capability: (12, 0),
             multiprocessors: 170,
             nvrtc_version: (13, 2),
@@ -8124,12 +8181,12 @@ mod tests {
         }
 
         let generic = |dims: (usize, usize, usize)| {
-            fixed_pick_sm120_half(dims.0, dims.2, dims.1, 170)
+            inference_pick_sm120_half(dims.0, dims.2, dims.1, 170)
                 .expect("qualified dimensions have a generic half tile")
         };
         let overlay = |dims, dtype, output_aligned, has_bias, device| {
-            fixed_pick_sm120_half_exact(
-                FixedSm120HalfExactRequest {
+            inference_pick_sm120_half_exact(
+                InferenceSm120HalfExactRequest {
                     dims,
                     dtype,
                     output_aligned,
@@ -8207,35 +8264,35 @@ mod tests {
             }
 
             for device in [
-                FixedSm120HalfExactDevice {
+                InferenceSm120HalfExactDevice {
                     compute_capability: (12, 1),
                     ..qualified_device
                 },
-                FixedSm120HalfExactDevice {
+                InferenceSm120HalfExactDevice {
                     multiprocessors: 169,
                     ..qualified_device
                 },
-                FixedSm120HalfExactDevice {
+                InferenceSm120HalfExactDevice {
                     multiprocessors: 171,
                     ..qualified_device
                 },
-                FixedSm120HalfExactDevice {
+                InferenceSm120HalfExactDevice {
                     nvrtc_version: (13, 1),
                     ..qualified_device
                 },
-                FixedSm120HalfExactDevice {
+                InferenceSm120HalfExactDevice {
                     nvrtc_version: (13, 0),
                     ..qualified_device
                 },
-                FixedSm120HalfExactDevice {
+                InferenceSm120HalfExactDevice {
                     nvrtc_version: (12, 8),
                     ..qualified_device
                 },
-                FixedSm120HalfExactDevice {
+                InferenceSm120HalfExactDevice {
                     nvrtc_version: (13, 3),
                     ..qualified_device
                 },
-                FixedSm120HalfExactDevice {
+                InferenceSm120HalfExactDevice {
                     nvrtc_version: (0, 0),
                     ..qualified_device
                 },
@@ -8342,7 +8399,7 @@ mod tests {
 
         for (rows, cols, k, expected) in cases {
             assert_eq!(
-                fixed_pick_sm120_half(rows, cols, k, sms),
+                inference_pick_sm120_half(rows, cols, k, sms),
                 Some(expected),
                 "M={rows}, N={cols}, K={k}"
             );
@@ -8384,7 +8441,7 @@ mod tests {
 
         for (rows, cols, k, sms, expected) in cases {
             assert_eq!(
-                fixed_pick_sm120_half(rows, cols, k, sms),
+                inference_pick_sm120_half(rows, cols, k, sms),
                 Some(expected),
                 "M={rows}, N={cols}, K={k}, SMs={sms}"
             );
@@ -8393,13 +8450,13 @@ mod tests {
 
     #[test]
     fn exact_f32_selector_promotes_only_measured_cc120_170_sm_points() {
-        let measured_device = FixedTileDevice {
+        let measured_device = InferenceTileDevice {
             multiprocessors: 170,
             compute_capability: (12, 0),
         };
         for (rows, k, cols) in [(4621, 384, 1928), (4621, 768, 2304)] {
             assert_eq!(
-                fixed_pick_f32_exact(rows, k, cols, measured_device),
+                inference_pick_f32_exact(rows, k, cols, measured_device),
                 InferenceTile::F32N128S2,
                 "measured point M={rows}, K={k}, N={cols}"
             );
@@ -8423,37 +8480,37 @@ mod tests {
             (4621, 768, 2305),
         ] {
             assert_eq!(
-                fixed_pick_f32_exact(rows, k, cols, measured_device),
+                inference_pick_f32_exact(rows, k, cols, measured_device),
                 InferenceTile::Legacy,
                 "unmeasured point M={rows}, K={k}, N={cols}"
             );
         }
 
         for device in [
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: 169,
                 compute_capability: (12, 0),
             },
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: 171,
                 compute_capability: (12, 0),
             },
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: 170,
                 compute_capability: (12, 1),
             },
-            FixedTileDevice {
+            InferenceTileDevice {
                 multiprocessors: 170,
                 compute_capability: (8, 9),
             },
         ] {
             assert_eq!(
-                fixed_pick_f32_exact(4621, 384, 1928, device),
+                inference_pick_f32_exact(4621, 384, 1928, device),
                 InferenceTile::Legacy,
                 "A must remain Legacy off the measured device"
             );
             assert_eq!(
-                fixed_pick_f32_exact(4621, 768, 2304, device),
+                inference_pick_f32_exact(4621, 768, 2304, device),
                 InferenceTile::Legacy,
                 "B must remain Legacy off the measured device"
             );
@@ -8462,16 +8519,16 @@ mod tests {
 
     #[test]
     fn exact_f32_selector_keeps_cc121_a_and_b_on_legacy() {
-        let cc121 = FixedTileDevice {
+        let cc121 = InferenceTileDevice {
             multiprocessors: 170,
             compute_capability: (12, 1),
         };
         assert_eq!(
-            fixed_pick_f32_exact(4621, 384, 1928, cc121),
+            inference_pick_f32_exact(4621, 384, 1928, cc121),
             InferenceTile::Legacy
         );
         assert_eq!(
-            fixed_pick_f32_exact(4621, 768, 2304, cc121),
+            inference_pick_f32_exact(4621, 768, 2304, cc121),
             InferenceTile::Legacy
         );
     }
@@ -8479,9 +8536,9 @@ mod tests {
     #[test]
     fn sm120_tf32_selector_promotes_only_the_qualified_cuda_132_b_and_d_cells() {
         assert_eq!(
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (4621, 768, 2304),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: 170,
                     compute_capability: (12, 0),
                     nvrtc_version: (13, 2),
@@ -8495,9 +8552,9 @@ mod tests {
         );
         for has_bias in [false, true] {
             assert_eq!(
-                fixed_pick_tf32(
+                inference_pick_tf32(
                     (2048, 768, 2304),
-                    FixedTf32Stack {
+                    InferenceTf32Stack {
                         multiprocessors: 170,
                         compute_capability: (12, 0),
                         nvrtc_version: (13, 2),
@@ -8511,9 +8568,9 @@ mod tests {
                 "both D0 and D1 have independent confirmation"
             );
             assert_eq!(
-                fixed_pick_tf32(
+                inference_pick_tf32(
                     (2048, 768, 2304),
-                    FixedTf32Stack {
+                    InferenceTf32Stack {
                         multiprocessors: 170,
                         compute_capability: (12, 0),
                         nvrtc_version: (13, 2),
@@ -8539,9 +8596,9 @@ mod tests {
                 (2048, 768, 2304, 170, (12, 0), (13, 2), false),
             ] {
                 assert_eq!(
-                    fixed_pick_tf32(
+                    inference_pick_tf32(
                         (m, k, n),
-                        FixedTf32Stack {
+                        InferenceTf32Stack {
                             multiprocessors: sms,
                             compute_capability: cc,
                             nvrtc_version: nvrtc,
@@ -8561,9 +8618,9 @@ mod tests {
         }
         for nvrtc_version in [(12, 8), (13, 0), (13, 1), (13, 3)] {
             assert_eq!(
-                fixed_pick_tf32(
+                inference_pick_tf32(
                     (4621, 768, 2304),
-                    FixedTf32Stack {
+                    InferenceTf32Stack {
                         multiprocessors: 170,
                         compute_capability: (12, 0),
                         nvrtc_version,
@@ -8577,9 +8634,9 @@ mod tests {
                 "unqualified compiler {nvrtc_version:?} must use the portable SM120 schedule"
             );
             assert_eq!(
-                fixed_pick_tf32(
+                inference_pick_tf32(
                     (2048, 768, 2304),
-                    FixedTf32Stack {
+                    InferenceTf32Stack {
                         multiprocessors: 170,
                         compute_capability: (12, 0),
                         nvrtc_version,
@@ -8594,9 +8651,9 @@ mod tests {
             );
         }
         assert_eq!(
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (4621, 768, 2304),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: 169,
                     compute_capability: (12, 0),
                     nvrtc_version: (13, 2),
@@ -8609,9 +8666,9 @@ mod tests {
             InferenceTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (4621, 768, 2304),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: 170,
                     compute_capability: (12, 1),
                     nvrtc_version: (13, 2),
@@ -8624,9 +8681,9 @@ mod tests {
             InferenceTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (4622, 768, 2304),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: 170,
                     compute_capability: (12, 0),
                     nvrtc_version: (13, 2),
@@ -8639,9 +8696,9 @@ mod tests {
             InferenceTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (4621, 769, 2304),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: 170,
                     compute_capability: (12, 0),
                     nvrtc_version: (13, 2),
@@ -8654,9 +8711,9 @@ mod tests {
             InferenceTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (4621, 768, 2305),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: 170,
                     compute_capability: (12, 0),
                     nvrtc_version: (13, 2),
@@ -8688,9 +8745,9 @@ mod tests {
                 (4621, 384, 1928, 170, (12, 0), (13, 2), false, true, true),
             ] {
                 assert_eq!(
-                    fixed_pick_tf32(
+                    inference_pick_tf32(
                         (m, k, n),
-                        FixedTf32Stack {
+                        InferenceTf32Stack {
                             multiprocessors: sms,
                             compute_capability: cc,
                             nvrtc_version: nvrtc,
@@ -8709,9 +8766,9 @@ mod tests {
             }
             // Unknown libraries do not change previously qualified B/D behavior.
             assert_eq!(
-                fixed_pick_tf32(
+                inference_pick_tf32(
                     (4621, 768, 2304),
-                    FixedTf32Stack {
+                    InferenceTf32Stack {
                         multiprocessors: 170,
                         compute_capability: (12, 0),
                         nvrtc_version: (13, 2),
@@ -8724,9 +8781,9 @@ mod tests {
                 InferenceTile::Tf32Sm120M128S2
             );
             assert_eq!(
-                fixed_pick_tf32(
+                inference_pick_tf32(
                     (2048, 768, 2304),
-                    FixedTf32Stack {
+                    InferenceTf32Stack {
                         multiprocessors: 170,
                         compute_capability: (12, 0),
                         nvrtc_version: (13, 2),
@@ -8739,9 +8796,9 @@ mod tests {
                 InferenceTile::Tf32Sm120M64S2PairStore
             );
             assert_eq!(
-                fixed_pick_tf32(
+                inference_pick_tf32(
                     (4621, 384, 1928),
-                    FixedTf32Stack {
+                    InferenceTf32Stack {
                         multiprocessors: 170,
                         compute_capability: (12, 0),
                         nvrtc_version: (13, 2),
@@ -8754,9 +8811,9 @@ mod tests {
                 InferenceTile::Tf32Sm120M128S2
             );
             assert_eq!(
-                fixed_pick_tf32(
+                inference_pick_tf32(
                     (4621, 384, 1928),
-                    FixedTf32Stack {
+                    InferenceTf32Stack {
                         multiprocessors: 170,
                         compute_capability: (12, 0),
                         nvrtc_version: (13, 2),
@@ -8775,9 +8832,9 @@ mod tests {
     fn sm89_tf32_selector_promotes_only_confirmed_c_bias_rows() {
         for has_bias in [false, true] {
             assert_eq!(
-                fixed_pick_tf32(
+                inference_pick_tf32(
                     (16, 1928, 384),
-                    FixedTf32Stack {
+                    InferenceTf32Stack {
                         multiprocessors: 142,
                         compute_capability: (8, 9),
                         nvrtc_version: (13, 2),
@@ -8792,9 +8849,9 @@ mod tests {
             );
             for output_aligned in [false, true] {
                 assert_eq!(
-                    fixed_pick_tf32(
+                    inference_pick_tf32(
                         (4621, 1928, 384),
-                        FixedTf32Stack {
+                        InferenceTf32Stack {
                             multiprocessors: 142,
                             compute_capability: (8, 9),
                             nvrtc_version: (13, 2),
@@ -8826,9 +8883,9 @@ mod tests {
                 (4621, 1928, 384, 142, (8, 9), (13, 2), false),
             ] {
                 assert_eq!(
-                    fixed_pick_tf32(
+                    inference_pick_tf32(
                         (m, k, n),
-                        FixedTf32Stack {
+                        InferenceTf32Stack {
                             multiprocessors: sms,
                             compute_capability: cc,
                             nvrtc_version: nvrtc,
@@ -8848,9 +8905,9 @@ mod tests {
     #[test]
     fn tf32_selector_keeps_portable_and_thin_fallbacks() {
         assert_eq!(
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (4621, 768, 1928),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: 170,
                     compute_capability: (12, 0),
                     nvrtc_version: (13, 2),
@@ -8863,9 +8920,9 @@ mod tests {
             InferenceTile::Tf32M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (4621, 768, 1928),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: 170,
                     compute_capability: (12, 0),
                     nvrtc_version: (13, 2),
@@ -8878,9 +8935,9 @@ mod tests {
             InferenceTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (1, 768, 1928),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: 170,
                     compute_capability: (12, 0),
                     nvrtc_version: (13, 2),
@@ -8893,9 +8950,9 @@ mod tests {
             InferenceTile::Tf32M16S4
         );
         assert_eq!(
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (4621, 768, 2304),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: 142,
                     compute_capability: (8, 9),
                     nvrtc_version: (13, 2),
@@ -8908,9 +8965,9 @@ mod tests {
             InferenceTile::Tf32M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(
+            inference_pick_tf32(
                 (4621, 768, 384),
-                FixedTf32Stack {
+                InferenceTf32Stack {
                     multiprocessors: 142,
                     compute_capability: (8, 9),
                     nvrtc_version: (13, 2),
@@ -8926,7 +8983,7 @@ mod tests {
 
     #[test]
     fn selector_uses_measured_sm89_thin_wave_boundary() {
-        let ada = FixedTileDevice {
+        let ada = InferenceTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
         };
@@ -8938,7 +8995,7 @@ mod tests {
             (96, 768, 1928),
             (112, 768, 2304),
         ] {
-            assert_eq!(fixed_pick_tile(m, n, k, ada), Some(InferenceTile::Tc16));
+            assert_eq!(inference_pick_tile(m, n, k, ada), Some(InferenceTile::Tc16));
         }
         for (m, k, n) in [
             (576, 768, 512),
@@ -8947,40 +9004,40 @@ mod tests {
             (112, 768, 1928),
             (128, 768, 2304),
         ] {
-            assert_eq!(fixed_pick_tile(m, n, k, ada), Some(InferenceTile::Tc64));
+            assert_eq!(inference_pick_tile(m, n, k, ada), Some(InferenceTile::Tc64));
         }
     }
 
     #[test]
     fn mixed_f32_output_selector_follows_sm120_wave_balance() {
-        let blackwell = FixedTileDevice {
+        let blackwell = InferenceTileDevice {
             multiprocessors: 170,
             compute_capability: (12, 0),
         };
         for (m, n) in [(1, 17), (128, 2304), (512, 512)] {
             assert_eq!(
-                fixed_pick_f32out_tile(m, 768, n, blackwell),
+                inference_pick_f32out_tile(m, 768, n, blackwell),
                 InferenceTile::Tc16
             );
         }
         for (m, n) in [(512, 768), (1536, 2304), (4621, 768)] {
             assert_eq!(
-                fixed_pick_f32out_tile(m, 768, n, blackwell),
+                inference_pick_f32out_tile(m, 768, n, blackwell),
                 InferenceTile::Tc64
             );
         }
         for (m, n) in [(768, 2304), (2048, 2304), (4621, 2304)] {
             assert_eq!(
-                fixed_pick_f32out_tile(m, 768, n, blackwell),
+                inference_pick_f32out_tile(m, 768, n, blackwell),
                 InferenceTile::Tc128
             );
         }
         assert_eq!(
-            fixed_pick_f32out_tile(4621, 1928, 384, blackwell),
+            inference_pick_f32out_tile(4621, 1928, 384, blackwell),
             InferenceTile::Tc64
         );
         assert_eq!(
-            fixed_pick_f32out_tile(4621, 2304, 384, blackwell),
+            inference_pick_f32out_tile(4621, 2304, 384, blackwell),
             InferenceTile::Tc128
         );
     }
@@ -8989,7 +9046,7 @@ mod tests {
     fn sm120_mixed_f32_output_selector_retains_measured_winners() {
         use InferenceSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A, M128N128Bk32S3 as E};
 
-        let device = FixedSm120HalfExactDevice {
+        let device = InferenceSm120HalfExactDevice {
             compute_capability: (12, 0),
             multiprocessors: 170,
             nvrtc_version: (13, 2),
@@ -9003,27 +9060,27 @@ mod tests {
             ((4096, 3072, 1536), InferenceSm120HalfTile::M64N128Bk64S2),
         ] {
             assert_eq!(
-                fixed_pick_sm120_f32out(dims.0, dims.2, dims.1, device),
+                inference_pick_sm120_f32out(dims.0, dims.2, dims.1, device),
                 Some(expected),
                 "mixed-output selector changed at {dims:?}",
             );
         }
         assert_eq!(
-            fixed_pick_sm120_half(4096, 1536, 3072, 170),
+            inference_pick_sm120_half(4096, 1536, 3072, 170),
             Some(InferenceSm120HalfTile::M128N128Bk32S2),
             "the generic comparator still extrapolates on the deep wide projection"
         );
         assert_eq!(
-            fixed_pick_sm120_f32out(
+            inference_pick_sm120_f32out(
                 4621,
                 2304,
                 768,
-                FixedSm120HalfExactDevice {
+                InferenceSm120HalfExactDevice {
                     nvrtc_version: (12, 8),
                     ..device
                 },
             ),
-            fixed_pick_sm120_half(4621, 2304, 768, 170),
+            inference_pick_sm120_half(4621, 2304, 768, 170),
         );
     }
 
@@ -9057,32 +9114,32 @@ mod tests {
 
     #[test]
     fn selector_keeps_unmeasured_architectures_on_two_thin_waves() {
-        let ampere = FixedTileDevice {
+        let ampere = InferenceTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 0),
         };
         assert_eq!(
-            fixed_pick_tile(320, 512, 768, ampere),
+            inference_pick_tile(320, 512, 768, ampere),
             Some(InferenceTile::Tc64)
         );
     }
 
     #[test]
     fn selector_uses_live_sm_count_for_wide_wave_efficiency() {
-        let ada = FixedTileDevice {
+        let ada = InferenceTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
         };
-        let blackwell = FixedTileDevice {
+        let blackwell = InferenceTileDevice {
             multiprocessors: 170,
             compute_capability: (12, 0),
         };
         assert_eq!(
-            fixed_pick_tile(384, 6144, 768, ada),
+            inference_pick_tile(384, 6144, 768, ada),
             Some(InferenceTile::TcWn64)
         );
         assert_eq!(
-            fixed_pick_tile(384, 6144, 768, blackwell),
+            inference_pick_tile(384, 6144, 768, blackwell),
             Some(InferenceTile::Tc128)
         );
     }
@@ -9090,19 +9147,19 @@ mod tests {
     #[test]
     fn sm120_uses_fragment_reuse_for_deep_square_tiles() {
         assert_eq!(
-            fixed_adjust_arch_tile(InferenceTile::Tc128, 1024, (12, 0)),
+            inference_adjust_arch_tile(InferenceTile::Tc128, 1024, (12, 0)),
             InferenceTile::TcW64
         );
         assert_eq!(
-            fixed_adjust_arch_tile(InferenceTile::Tc128, 768, (12, 0)),
+            inference_adjust_arch_tile(InferenceTile::Tc128, 768, (12, 0)),
             InferenceTile::Tc128
         );
         assert_eq!(
-            fixed_adjust_arch_tile(InferenceTile::Tc128, 2304, (8, 9)),
+            inference_adjust_arch_tile(InferenceTile::Tc128, 2304, (8, 9)),
             InferenceTile::Tc128
         );
         assert_eq!(
-            fixed_adjust_arch_tile(InferenceTile::TcWn64, 2304, (12, 0)),
+            inference_adjust_arch_tile(InferenceTile::TcWn64, 2304, (12, 0)),
             InferenceTile::TcWn64
         );
     }
@@ -9240,7 +9297,7 @@ mod observed_inventory_cuda_tests {
         let expected_module = if case.tile == Some(InferenceTile::Tf32M128N128S3) {
             ModuleKind::TriadSm80
         } else {
-            ModuleKind::Fixed
+            ModuleKind::Inference
         };
         assert_eq!(route.module_kind, expected_module);
         let physical = finish_recording_physical_observer(observer, ctx.gemm_route()).unwrap();
@@ -9252,7 +9309,7 @@ mod observed_inventory_cuda_tests {
         );
         assert_ne!(node.launch.arguments_digest, route.launch.arguments_digest);
         if route.backend
-            == super::super::kernel_identity::PhysicalGemmBackend::ScalarFmaSm89FixedCopyPlan
+            == super::super::kernel_identity::PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan
         {
             use super::super::kernel_identity::ResolvedNumericContract;
             let mut legacy = route;

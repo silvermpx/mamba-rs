@@ -1,11 +1,11 @@
 // Ada-only exact F32 N64 copy-plan extension. The immutable standalone
 // 713a575 candidate supplies the body; only names and compact ABI unpacking differ.
-struct FixedSm89ExactF32Params {
+struct InferenceSm89ExactF32Params {
     float alpha, beta;
     int m, n, k, lda, ldb, ldc;
 };
-static_assert(sizeof(FixedSm89ExactF32Params) == 32, "exact N64 parameter size");
-static_assert(alignof(FixedSm89ExactF32Params) == 4, "exact N64 parameter alignment");
+static_assert(sizeof(InferenceSm89ExactF32Params) == 32, "exact N64 parameter size");
+static_assert(alignof(InferenceSm89ExactF32Params) == 4, "exact N64 parameter alignment");
 // mma16.cu has already undefined the incumbent tile macros at this boundary.
 // Private constants preserve the incumbent geometry without leaking ambient macros.
 #define SM89_EXACT_N64_CP_BM 64
@@ -16,7 +16,7 @@ static_assert(alignof(FixedSm89ExactF32Params) == 4, "exact N64 parameter alignm
 // FMA chain and epilogue are retained. The only specialization is producer
 // planning for aligned full-K slabs. No tensor operations, split reduction,
 // scratch or atomics. Actual registers/spills/residency require parent testing.
-// Includes expect the unchanged production Fixed common.cuh helpers/constants.
+// Includes expect the unchanged production Inference common.cuh helpers/constants.
 static_assert(SM89_EXACT_N64_CP_BM == 64 && SM89_EXACT_N64_CP_BN == 64 && SM89_EXACT_N64_CP_BK == 32,
               "N64 copy-plan experiment requires the incumbent geometry");
 #define SM89_EXACT_N64_CP_THREADS 128
@@ -119,7 +119,7 @@ nn_sm89_f32_n64_copyplan(
     const float* __restrict__ a,
     const float* __restrict__ b,
     const float* __restrict__ bias,
-    FixedSm89ExactF32Params params
+    InferenceSm89ExactF32Params params
 ) {
     const float alpha = params.alpha, beta = params.beta;
     const int m = params.m, n = params.n, k = params.k;

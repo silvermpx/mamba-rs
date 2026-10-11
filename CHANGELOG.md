@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.0 (unreleased)
+
+### Changed
+
+- The GPU kernels compile as three modules instead of one: `Inference`
+  holds the inference GEMMs and the casts their routes launch, `Mamba1`
+  the Mamba-1 scan, convolution and element-wise kernels, and `Shared` the
+  kernels the model families share (norms, element-wise, loss scaler,
+  gradient clipping, AdamW). A change to a Mamba-1 or shared kernel no
+  longer closes the qualified GEMM routes, and only `Mamba1` compiles with
+  the model's state capacity.
+- Public renames from the old `Fixed` name to `Inference`:
+  `ArtifactSetIdentity::fixed` is now `inference`, `BackendSet::FIXED` is
+  `INFERENCE`, the `PhysicalGemmBackend` variants `ScalarFmaSm89FixedCopyPlan`
+  and `FixedMatvecEightWarp` are `ScalarFmaSm89InferenceCopyPlan` and
+  `InferenceMatvecEightWarp`, and the `MambaKernels` fields and the
+  `MAMBA_FIXED_*` qualification variables follow. `ModuleKind` gains
+  `Mamba1` and `Shared`.
+- The Inference retained bundle and the Ada copy-plan routes no longer
+  depend on the state capacity; they are admitted at every capacity
+  instead of only 16 and 64.
+
 ## 0.7.5 (2026-09-23)
 
 ### Fixed

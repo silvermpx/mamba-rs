@@ -87,7 +87,7 @@ template <typename T, typename TOut, int BM, int BN, int BK, int STAGES, int WM,
           bool VectorStore = false, bool Prefetch = false>
 __device__ __forceinline__ void kernel(
     TOut* __restrict__ c, const T* __restrict__ a, const T* __restrict__ b,
-    const float* __restrict__ bias, FixedSm89HalfParams p) {
+    const float* __restrict__ bias, InferenceSm89HalfParams p) {
     using G = Geometry<BM, BN, BK, STAGES, WM, WN>;
     extern __shared__ __align__(16) unsigned char sm89_cell_half_shared[];
     T* a_stages = reinterpret_cast<T*>(sm89_cell_half_shared);
@@ -329,13 +329,13 @@ __device__ __forceinline__ void kernel(
 #define SM89_CELL_HALF_MMA(NAME, T, TOUT, BM, BN, BK, STAGES, WM, WN, MIN_BLOCKS)             \
 extern "C" __global__ __launch_bounds__((WM) * (WN) * 32, MIN_BLOCKS)                          \
 void NAME(TOUT* __restrict__ c, const T* __restrict__ a, const T* __restrict__ b,             \
-          const float* __restrict__ bias, FixedSm89HalfParams p) {                             \
+          const float* __restrict__ bias, InferenceSm89HalfParams p) {                             \
     sm89_cell_half_mma::kernel<T, TOUT, BM, BN, BK, STAGES, WM, WN>(c, a, b, bias, p);         \
 }
 #define SM89_CELL_HALF_MMA_VEC(NAME, T, BM, BN, BK, STAGES, WM, WN, MIN_BLOCKS)               \
 extern "C" __global__ __launch_bounds__((WM) * (WN) * 32, MIN_BLOCKS)                          \
 void NAME(T* __restrict__ c, const T* __restrict__ a, const T* __restrict__ b,                \
-          const float* __restrict__ bias, FixedSm89HalfParams p) {                             \
+          const float* __restrict__ bias, InferenceSm89HalfParams p) {                             \
     sm89_cell_half_mma::kernel<T, T, BM, BN, BK, STAGES, WM, WN, true>(c, a, b, bias, p);      \
 }
 

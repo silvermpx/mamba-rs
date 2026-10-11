@@ -164,9 +164,13 @@ the full qualification once for the promoted domains:
    the module composes, a reworded comment included, and the closure is
    silent: the admission is a predicate over the live identity, so the route
    falls back to the plain kernel and every functional test stays green.
-   The Fixed module in particular composes the Mamba kernels, so a scan or
-   norm edit closes the copy-plan cohorts. Keep a host test that holds each
-   cohort's source digest to the source the tree composes, run the
+   The Inference module therefore holds only GEMM sources, the shared
+   prelude and the casts its routes launch; the Mamba-1 kernels and the
+   kernels the families share compile in modules of their own, which no
+   cohort pins, so a scan or norm edit moves nothing. `tests/gemm_source_freeze.rs`
+   pins every file the GEMM modules compose and names the one that moved.
+   Keep a host test that holds each cohort's source digest to the source
+   the tree composes, run the
    discovery stage before repopulating a cohort (it expects the plain route
    to still be the automatic one), and re-read the paired matrix for the
    selected symbol, not only the timing.

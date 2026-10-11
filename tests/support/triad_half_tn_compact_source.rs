@@ -1,6 +1,6 @@
 pub const SYMBOL_PREFIX: &str = "tn_test_tc64_bk64_s2_xor_";
 
-/// Reuses Fixed's row*64 + (column XOR ((row&7)*8)) half layout for both
+/// Reuses Inference's row*64 + (column XOR ((row&7)*8)) half layout for both
 /// TN operands. Only shared addresses change; incumbent BK64/S2 math remains.
 pub fn candidate_source(production: &str) -> Result<String, String> {
     const START: &str = "#define GEMM_BI_TC64_STAGE_TN_ASYNC";
@@ -68,7 +68,7 @@ mod tests {
     use super::*;
 
     const PRODUCTION: &str = include_str!("../../kernels/gemm_bi_triad/sm80/mma.cu");
-    const FIXED_LAYOUT: &str =
+    const INFERENCE_LAYOUT: &str =
         include_str!("../../kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh");
 
     fn offset(row: usize, column: usize) -> usize {
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn compact_tn_layout_is_bijective_and_preserves_every_vector_chunk() {
-        assert!(FIXED_LAYOUT.contains("row * 64 + (k ^ ((row & 7) * 8))"));
+        assert!(INFERENCE_LAYOUT.contains("row * 64 + (k ^ ((row & 7) * 8))"));
         let mut owners = [0u8; 64 * 64];
         for row in 0..64 {
             for column in 0..64 {

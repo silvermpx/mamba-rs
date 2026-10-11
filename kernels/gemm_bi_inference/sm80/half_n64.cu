@@ -1,6 +1,6 @@
-// Ada Fixed F16 N64 finalists. Optional forced routes until qualified.
+// Ada Inference F16 N64 finalists. Optional forced routes until qualified.
 
-namespace sm89_fixed_half_n64 {
+namespace sm89_inference_half_n64 {
 
 template <int BM, int STAGES> struct RectTraits {
     static constexpr int kBn = 64;
@@ -95,7 +95,7 @@ static __device__ __forceinline__ void rect_consume(
     for (int fm = 0; fm < R::kMAtoms; ++fm)
 #pragma unroll
         for (int fn = 0; fn < 4; ++fn)
-            sm89_fixed_half_swizzle::HalfOps<T>::mma(acc[fm][fn], fragments.a[fm], fragments.b[fn]);
+            sm89_inference_half_swizzle::HalfOps<T>::mma(acc[fm][fn], fragments.a[fm], fragments.b[fn]);
 }
 
 template <int BM, int STAGES, typename T>
@@ -235,22 +235,22 @@ static __device__ __forceinline__ void rect_kernel(
         M, N, ldc, pid_m, pid_n, warp_m, warp_n);
 }
 
-} // namespace sm89_fixed_half_n64
+} // namespace sm89_inference_half_n64
 
 extern "C" __global__ __launch_bounds__(128, 2)
 void nn_sm89_m64n64_bk64_s3_f16(
     __half* C, const __half* A, const __half* B, const float* bias,
-    FixedSm89HalfSwizzleParams params) {
+    InferenceSm89HalfSwizzleParams params) {
     if (bias != nullptr || params.alpha != 1.0f || params.beta != 0.0f
         || params.m < 1 || params.m > 2048
         || params.k != 768 || params.n != 2304
         || params.lda != 768 || params.ldb != 2304 || params.ldc != 2304
         || !gbf_aligned16(A) || !gbf_aligned16(B) || !gbf_aligned16(C)) return;
     if (params.m == 2048) {
-        sm89_fixed_half_n64::rect_kernel<64, 3, true, false>(C, A, B,
+        sm89_inference_half_n64::rect_kernel<64, 3, true, false>(C, A, B,
             2048, 2304, 768, 768, 2304, 2304);
     } else {
-        sm89_fixed_half_n64::rect_kernel<64, 3, true, true>(C, A, B,
+        sm89_inference_half_n64::rect_kernel<64, 3, true, true>(C, A, B,
             params.m, 2304, 768, 768, 2304, 2304);
     }
 }
@@ -258,17 +258,17 @@ void nn_sm89_m64n64_bk64_s3_f16(
 extern "C" __global__ __launch_bounds__(128, 2)
 void nn_sm89_m128n64_bk64_s2_f16(
     __half* C, const __half* A, const __half* B, const float* bias,
-    FixedSm89HalfSwizzleParams params) {
+    InferenceSm89HalfSwizzleParams params) {
     if (bias != nullptr || params.alpha != 1.0f || params.beta != 0.0f
         || params.m < 1 || params.m > 2048
         || params.k != 2304 || params.n != 768
         || params.lda != 2304 || params.ldb != 768 || params.ldc != 768
         || !gbf_aligned16(A) || !gbf_aligned16(B) || !gbf_aligned16(C)) return;
     if (params.m == 2048) {
-        sm89_fixed_half_n64::rect_kernel<128, 2, false, false>(C, A, B,
+        sm89_inference_half_n64::rect_kernel<128, 2, false, false>(C, A, B,
             2048, 768, 2304, 2304, 768, 768);
     } else {
-        sm89_fixed_half_n64::rect_kernel<128, 2, false, true>(C, A, B,
+        sm89_inference_half_n64::rect_kernel<128, 2, false, true>(C, A, B,
             params.m, 768, 2304, 2304, 768, 768);
     }
 }

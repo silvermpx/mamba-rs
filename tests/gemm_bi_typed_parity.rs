@@ -31,9 +31,9 @@ use std::mem::size_of;
 mod triad_half_tile_screen;
 
 use mamba_rs::mamba_ssm::gpu::GemmMode;
-use triad_half_tile_screen::FixedHalfS3Params;
+use triad_half_tile_screen::InferenceHalfS3Params;
 
-unsafe impl cudarc::driver::DeviceRepr for FixedHalfS3Params {}
+unsafe impl cudarc::driver::DeviceRepr for InferenceHalfS3Params {}
 
 fn cuda_braced_scope_after<'a>(source: &'a str, marker: &str) -> &'a str {
     let marker_start = source.find(marker).expect("CUDA scope marker");
@@ -360,7 +360,7 @@ fn typed_full_coverage_bit_match_f32_triad() {
 }
 
 #[test]
-fn fixed_family_keeps_uncovered_typed_scalar_fallbacks() {
+fn inference_family_keeps_uncovered_typed_scalar_fallbacks() {
     let t = Ctx::new();
     t.ctx.route_controls().set_family(BiGemmFamily::Inference);
     let dims = (64, 128, 128);
@@ -903,7 +903,7 @@ impl AdaHalfNtCell {
         }
     }
 
-    fn fixed_s3_grid(self) -> u32 {
+    fn inference_s3_grid(self) -> u32 {
         let (m, k_out, _) = self.dims();
         m.div_ceil(128).checked_mul(k_out.div_ceil(128)).unwrap() as u32
     }
@@ -952,7 +952,7 @@ fn ada_half_nt_cells_freeze_storage_strides_and_launch_grids() {
                 cell.dims(),
                 lengths,
                 strides,
-                cell.fixed_s3_grid(),
+                cell.inference_s3_grid(),
                 current_grid,
             ),
             expected

@@ -17,18 +17,18 @@ const SCALAR_NN_M32N64_SPLITK32_SYMBOL: &str = "nn_splitk32_m32n64_exact";
 const SCALAR_NN_M32N64_SPLITK32_FRAGMENT: &str = "kernels/gemm_bi_triad/scalar_nn_splitk_m32n64.cu";
 
 #[test]
-fn fixed_sm89_half_s3_production_source_contract() {
+fn inference_sm89_half_s3_production_source_contract() {
     let source = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/kernels/gemm_bi_inference/sm80/half_s3.cu"
     ))
-    .expect("production S3 source must be available to the Fixed composer");
+    .expect("production S3 source must be available to the Inference composer");
     for token in [
         "kSharedBytes = 98304",
         "cp.async.wait_group 1",
         "cp.async.wait_group 0",
         "cp.async.commit_group",
-        "sm89_fixed_half_swizzle::",
+        "sm89_inference_half_swizzle::",
         "nn_sm89_tc128_s3_bf16",
         "nn_sm89_tc128_s3_f16",
     ] {
@@ -54,7 +54,7 @@ fn fixed_sm89_half_s3_production_source_contract() {
 }
 
 #[test]
-fn fixed_sm89_finalist_production_source_contract() {
+fn inference_sm89_finalist_production_source_contract() {
     let n96 = include_str!("../kernels/gemm_bi_inference/sm80/tf32_rna_n96.cu");
     for required in [
         "nn_sm89_rna_tf32_m128n96_bk32_s3",
@@ -98,11 +98,11 @@ fn fixed_sm89_finalist_production_source_contract() {
 }
 
 #[test]
-fn fixed_sm89_half_swizzle_production_source_and_layout_contract() {
+fn inference_sm89_half_swizzle_production_source_and_layout_contract() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let host_proof =
-        std::fs::read_to_string(root.join("tests/cuda/gemm_bi_fixed_sm89_swizzle_layout.cpp"))
-            .expect("production-bound Fixed SM89 half-swizzle host layout proof");
+        std::fs::read_to_string(root.join("tests/cuda/gemm_bi_inference_sm89_swizzle_layout.cpp"))
+            .expect("production-bound Inference SM89 half-swizzle host layout proof");
     assert!(
         host_proof.contains("../../kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh"),
         "host layout proof must include the production header directly"
@@ -110,10 +110,10 @@ fn fixed_sm89_half_swizzle_production_source_and_layout_contract() {
     let layout = std::fs::read_to_string(
         root.join("kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh"),
     )
-    .expect("production Fixed SM89 half-swizzle layout header");
+    .expect("production Inference SM89 half-swizzle layout header");
     let source =
         std::fs::read_to_string(root.join("kernels/gemm_bi_inference/sm80/half_swizzle.cu"))
-            .expect("production Fixed SM89 half-swizzle source");
+            .expect("production Inference SM89 half-swizzle source");
 
     for required in [
         "row * 64 + (k ^ ((row & 7) * 8))",
@@ -174,37 +174,38 @@ fn compose(fragments: &[&str]) -> String {
 }
 
 #[test]
-fn fixed_tf32_source_is_forward_only_and_self_contained() {
+fn inference_tf32_source_is_forward_only_and_self_contained() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/kernels/gemm_bi_inference/tf32.cu"
     );
-    let source = std::fs::read_to_string(path).expect("standalone Fixed TF32 source");
+    let source = std::fs::read_to_string(path).expect("standalone Inference TF32 source");
     assert!(source.contains("nn_tf32_m128n64_bk32_s2"));
     assert!(source.contains("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32"));
     for forbidden in ["void tn_", "void nt_", "backward", "atomic", "split_k"] {
         assert!(
             !source.to_ascii_lowercase().contains(forbidden),
-            "Fixed TF32 source contains training-only token {forbidden}"
+            "Inference TF32 source contains training-only token {forbidden}"
         );
     }
     let sm120_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/kernels/gemm_bi_inference/sm120/tf32.cu"
     );
-    let sm120 = std::fs::read_to_string(sm120_path).expect("standalone Fixed SM120 TF32 source");
+    let sm120 =
+        std::fs::read_to_string(sm120_path).expect("standalone Inference SM120 TF32 source");
     assert!(sm120.contains("nn_sm120_tma_tf32_m64n64_bk32_s2"));
     for forbidden in ["void tn_", "void nt_", "backward", "atomic", "split_k"] {
         assert!(
             !sm120.to_ascii_lowercase().contains(forbidden),
-            "Fixed SM120 TF32 source contains training-only token {forbidden}"
+            "Inference SM120 TF32 source contains training-only token {forbidden}"
         );
     }
     let half_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/kernels/gemm_bi_inference/sm120/tma.cu"
     );
-    let half = std::fs::read_to_string(half_path).expect("standalone Fixed SM120 half source");
+    let half = std::fs::read_to_string(half_path).expect("standalone Inference SM120 half source");
     assert!(half.contains("GBF_SM120_HALF_DEFINE_PAIR(64, 64, 64, 2)"));
     assert!(half.contains("GBF_SM120_HALF_DEFINE_PAIR(64, 128, 64, 2)"));
     assert!(half.contains("GBF_SM120_HALF_DEFINE_PAIR(128, 64, 32, 3)"));
@@ -215,15 +216,15 @@ fn fixed_tf32_source_is_forward_only_and_self_contained() {
     for forbidden in ["void tn_", "void nt_", "backward", "split_k"] {
         assert!(
             !half.to_ascii_lowercase().contains(forbidden),
-            "Fixed SM120 half source contains training-only token {forbidden}"
+            "Inference SM120 half source contains training-only token {forbidden}"
         );
     }
     let postbias_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/kernels/gemm_bi_inference/sm120/f32_postbias.cu"
     );
-    let postbias =
-        std::fs::read_to_string(postbias_path).expect("standalone Fixed SM120 post-bias source");
+    let postbias = std::fs::read_to_string(postbias_path)
+        .expect("standalone Inference SM120 post-bias source");
     for symbol in [
         "nn_sm120_tma_fma_postbias_m128n64_bk16_s2",
         "nn_sm120_tma_fma_postbias_m64n128_bk16_s2",
@@ -250,23 +251,39 @@ fn fixed_tf32_source_is_forward_only_and_self_contained() {
     for forbidden in ["void tn_", "void nt_", "atomic", "split_k"] {
         assert!(
             !postbias.to_ascii_lowercase().contains(forbidden),
-            "Fixed SM120 post-bias source contains training-only token {forbidden}"
+            "Inference SM120 post-bias source contains training-only token {forbidden}"
         );
     }
 }
 
-fn fixed_blob() -> String {
+/// The Mamba-1 kernels; the only module that takes the state capacity.
+fn mamba1_blob() -> String {
     compose(&[
         include_str!("../kernels/_typed_prelude.cuh"),
         include_str!("../kernels/mamba_ssm.cu"),
         include_str!("../kernels/mamba_ssm_parallel.cu"),
         include_str!("../kernels/conv1d.cu"),
         include_str!("../kernels/activations.cu"),
+        include_str!("../kernels/mamba_ssm_elementwise.cu"),
+    ])
+}
+
+/// The kernels the families share through the context.
+fn shared_blob() -> String {
+    compose(&[
+        include_str!("../kernels/_typed_prelude.cuh"),
         include_str!("../kernels/norms.cu"),
         include_str!("../kernels/elementwise.cu"),
         include_str!("../kernels/loss_scaler.cu"),
         include_str!("../kernels/grad_clip.cu"),
         include_str!("../kernels/adamw.cu"),
+    ])
+}
+
+fn inference_blob() -> String {
+    compose(&[
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/gemm_bi_inference/casts.cu"),
         include_str!("../kernels/gemm_bi_inference/common.cuh"),
         include_str!("../kernels/gemm_bi_inference/ffma.cu"),
         include_str!("../kernels/gemm_bi_inference/tf32.cu"),
@@ -281,8 +298,8 @@ fn fixed_blob() -> String {
     ])
 }
 
-fn fixed_blob_for(arch: &str) -> String {
-    let mut source = fixed_blob();
+fn inference_blob_for(arch: &str) -> String {
+    let mut source = inference_blob();
     if arch == "sm_89" {
         source.push('\n');
         source.push_str(include_str!(
@@ -1904,8 +1921,8 @@ fn assemble_sm120(ptx: &str, target: &str) -> std::process::Output {
 
 fn assemble_and_disassemble_sm120(ptx: &str) -> (String, String) {
     let directory = tempfile::tempdir().expect("SM120 ptxas tempdir");
-    let input = directory.path().join("fixed-sm120.ptx");
-    let output = directory.path().join("fixed-sm120.cubin");
+    let input = directory.path().join("inference-sm120.ptx");
+    let output = directory.path().join("inference-sm120.cubin");
     std::fs::write(&input, ptx).expect("write SM120 PTX");
     let assembly = std::process::Command::new(ptxas())
         .arg("-arch=sm_120")
@@ -1915,10 +1932,10 @@ fn assemble_and_disassemble_sm120(ptx: &str) -> (String, String) {
         .arg("-o")
         .arg(&output)
         .output()
-        .expect("run ptxas for Fixed SM120 module");
+        .expect("run ptxas for Inference SM120 module");
     assert!(
         assembly.status.success(),
-        "ptxas failed for the Fixed SM120 module: {}",
+        "ptxas failed for the Inference SM120 module: {}",
         String::from_utf8_lossy(&assembly.stderr)
     );
     let disassembly = std::process::Command::new(cuda_tool("nvdisasm"))
@@ -1926,10 +1943,10 @@ fn assemble_and_disassemble_sm120(ptx: &str) -> (String, String) {
         .arg("-hex")
         .arg(&output)
         .output()
-        .expect("run nvdisasm for Fixed SM120 module");
+        .expect("run nvdisasm for Inference SM120 module");
     assert!(
         disassembly.status.success(),
-        "nvdisasm failed for the Fixed SM120 module: {}",
+        "nvdisasm failed for the Inference SM120 module: {}",
         String::from_utf8_lossy(&disassembly.stderr)
     );
     (
@@ -2415,7 +2432,7 @@ fn scalar_big_nn_and_tn_epilogues_have_no_terminal_cta_barrier() {
 }
 
 /// One NVRTC compile per (module, target, source): the gates ask for the
-/// same PTX many times over, and a compile of the Fixed blob costs seconds.
+/// same PTX many times over, and a compile of the Inference blob costs seconds.
 fn compile_module_for(kind: &str, source: String, arch: &'static str) -> String {
     type CompileMemo = std::collections::HashMap<(String, &'static str, String), String>;
     static MEMO: std::sync::OnceLock<std::sync::Mutex<CompileMemo>> = std::sync::OnceLock::new();
@@ -2435,16 +2452,22 @@ fn compile_module_uncached(kind: &str, source: String, arch: &'static str) -> St
     } else {
         16
     };
+    let mut options = vec![
+        "--fmad=true".to_string(),
+        "--extra-device-vectorization".to_string(),
+        "--generate-line-info".to_string(),
+        "-DNDEBUG".to_string(),
+    ];
+    // Production options per module: the GEMM tiles read the group size,
+    // and only the Mamba-1 kernels read the state capacity.
+    match kind {
+        "Mamba1" => options.push("-DMAMBA_RS_STATE_CAP=256".to_string()),
+        "Shared" => {}
+        _ => options.push(format!("-DGEMM_BI_GROUP_M={group_m}")),
+    }
     let opts = cudarc::nvrtc::CompileOptions {
         arch: Some(arch),
-        options: vec![
-            "--fmad=true".to_string(),
-            "--extra-device-vectorization".to_string(),
-            "--generate-line-info".to_string(),
-            "-DNDEBUG".to_string(),
-            format!("-DGEMM_BI_GROUP_M={group_m}"),
-            "-DMAMBA_RS_STATE_CAP=256".to_string(),
-        ],
+        options,
         include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
         ..Default::default()
     };
@@ -2454,9 +2477,11 @@ fn compile_module_uncached(kind: &str, source: String, arch: &'static str) -> St
     }
 }
 
-fn module_sources(arch: &str) -> [(&'static str, String); 4] {
+fn module_sources(arch: &str) -> [(&'static str, String); 6] {
     [
-        ("Fixed", fixed_blob_for(arch)),
+        ("Inference", inference_blob_for(arch)),
+        ("Mamba1", mamba1_blob()),
+        ("Shared", shared_blob()),
         ("TriadScalar", scalar_blob()),
         ("TriadSm80", sm80_blob()),
         ("TriadSm80+extensions", sm80_streamk_blob()),
@@ -2466,14 +2491,14 @@ fn module_sources(arch: &str) -> [(&'static str, String); 4] {
 fn compile_for(arch: &'static str) {
     for (kind, source) in module_sources(arch) {
         let ptx = compile_module_for(kind, source, arch);
-        if kind == "Fixed" {
-            assert_fixed_tf32_ptx(arch, &ptx);
+        if kind == "Inference" {
+            assert_inference_tf32_ptx(arch, &ptx);
         }
     }
 }
 
-fn compile_fixed_for(arch: &'static str) -> String {
-    compile_module_for("Fixed", fixed_blob_for(arch), arch)
+fn compile_inference_for(arch: &'static str) -> String {
+    compile_module_for("Inference", inference_blob_for(arch), arch)
 }
 
 fn normalized_whitespace(source: &str) -> String {
@@ -2481,7 +2506,7 @@ fn normalized_whitespace(source: &str) -> String {
 }
 
 #[test]
-fn fixed_sm120_tf32_pair_store_production_source_contract() {
+fn inference_sm120_tf32_pair_store_production_source_contract() {
     const CANDIDATE: &str = "nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store";
     let source = include_str!("../kernels/gemm_bi_inference/sm120/tf32.cu");
     assert_eq!(source.matches(CANDIDATE).count(), 1, "pair-store export");
@@ -2542,7 +2567,7 @@ fn fixed_sm120_tf32_pair_store_production_source_contract() {
 }
 
 #[test]
-fn fixed_sm120_tf32_producer_warp_candidate_source_contract() {
+fn inference_sm120_tf32_producer_warp_candidate_source_contract() {
     const M64_CANDIDATE: &str = "nn_sm120_tma_tf32_m64n64_bk32_s2_producer_warp";
     let source = include_str!("../kernels/gemm_bi_inference/sm120/tf32.cu");
     assert_eq!(
@@ -2566,13 +2591,13 @@ fn fixed_sm120_tf32_producer_warp_candidate_source_contract() {
         );
     }
 
-    let fixed = include_str!("../src/mamba_ssm/gpu/gemm_bi_inference.rs");
+    let inference = include_str!("../src/mamba_ssm/gpu/gemm_bi_inference.rs");
     assert!(
-        fixed.contains("Tf32Sm120M64S2ProducerWarp"),
+        inference.contains("Tf32Sm120M64S2ProducerWarp"),
         "forced M64 candidate tile"
     );
     assert!(
-        fixed.contains("(&kernels.m64n64_s2_producer_warp, 64, 64, 160, 32_896)"),
+        inference.contains("(&kernels.m64n64_s2_producer_warp, 64, 64, 160, 32_896)"),
         "M64 candidate launch geometry"
     );
 
@@ -2583,7 +2608,7 @@ fn fixed_sm120_tf32_producer_warp_candidate_source_contract() {
 }
 
 #[test]
-fn fixed_sm120_tf32_pair_store_production_target_matrix() {
+fn inference_sm120_tf32_pair_store_production_target_matrix() {
     const INCUMBENT: &str = "nn_sm120_tma_tf32_m64n64_bk32_s2";
     const PAIR_STORE: &str = "nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store";
     let targets: &[&str] = if nvrtc_version() >= (12, 9) {
@@ -2597,8 +2622,8 @@ fn fixed_sm120_tf32_pair_store_production_target_matrix() {
         std::fs::create_dir_all(directory).expect("create pair-store artifact directory");
     }
     for &target in targets {
-        let ptx = compile_fixed_for(target);
-        assert_fixed_tf32_ptx(target, &ptx);
+        let ptx = compile_inference_for(target);
+        assert_inference_tf32_ptx(target, &ptx);
         let parsed = parse_compile_gate_ptx(&ptx).expect("parse pair-store target PTX");
         let incumbent = parsed.entry(INCUMBENT);
         let pair_store = parsed.entry(PAIR_STORE);
@@ -2630,10 +2655,10 @@ fn fixed_sm120_tf32_pair_store_production_target_matrix() {
 }
 
 #[test]
-fn fixed_sm120_tf32_pair_store_production_codegen_contract() {
+fn inference_sm120_tf32_pair_store_production_codegen_contract() {
     const INCUMBENT: &str = "nn_sm120_tma_tf32_m64n64_bk32_s2";
     const CANDIDATE: &str = "nn_sm120_tma_tf32_m64n64_bk32_s2_pair_store";
-    let source = fixed_blob_for("compute_120");
+    let source = inference_blob_for("compute_120");
     let fast_store_line = source
         .lines()
         .position(|line| line.contains("output + (long long)row * params.ldc + column) = pair;"))
@@ -2646,8 +2671,8 @@ fn fixed_sm120_tf32_pair_store_production_codegen_contract() {
         .map(|(line, _)| line + 1)
         .last()
         .expect("scalar-fallback source line");
-    let ptx = compile_module_for("Fixed", source, "compute_120");
-    let parsed = parse_compile_gate_ptx(&ptx).expect("parse Fixed SM120 PTX");
+    let ptx = compile_module_for("Inference", source, "compute_120");
+    let parsed = parse_compile_gate_ptx(&ptx).expect("parse Inference SM120 PTX");
     let incumbent = parsed.entry(INCUMBENT);
     let candidate = parsed.entry(CANDIDATE);
     assert!(has_exact_maxntid(&candidate.text, 128), "candidate maxntid");
@@ -2659,7 +2684,7 @@ fn fixed_sm120_tf32_pair_store_production_codegen_contract() {
         "candidate ABI"
     );
     assert_compile_gate_entry_tokens(
-        "Fixed SM120 TF32 pair-store production schedule",
+        "Inference SM120 TF32 pair-store production schedule",
         candidate,
         &[
             "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
@@ -2711,9 +2736,15 @@ fn fixed_sm120_tf32_pair_store_production_codegen_contract() {
 
     let (report, sass) = assemble_and_disassemble_sm120(&ptx);
     let incumbent_resources = function_resource_report(&report, INCUMBENT);
-    assert_zero_local_resources(incumbent_resources, "Fixed SM120 TF32 pair-store incumbent");
+    assert_zero_local_resources(
+        incumbent_resources,
+        "Inference SM120 TF32 pair-store incumbent",
+    );
     let resources = function_resource_report(&report, CANDIDATE);
-    assert_zero_local_resources(resources, "Fixed SM120 TF32 pair-store production schedule");
+    assert_zero_local_resources(
+        resources,
+        "Inference SM120 TF32 pair-store production schedule",
+    );
     let incumbent_registers = incumbent_resources
         .lines()
         .find_map(|line| metric_before(line, " registers"))
@@ -2764,7 +2795,7 @@ fn fixed_sm120_tf32_pair_store_production_codegen_contract() {
 }
 
 #[test]
-fn fixed_f32_n128_s2_source_and_ptx_contract() {
+fn inference_f32_n128_s2_source_and_ptx_contract() {
     const SYMBOL: &str = "f32_f32_n128_s2";
     const BEGIN: &str = "// BEGIN exact-f32 N128 S2 candidate";
     const END: &str = "// END exact-f32 N128 S2 candidate";
@@ -2845,8 +2876,8 @@ fn fixed_f32_n128_s2_source_and_ptx_contract() {
         architectures.push("sm_107a");
     }
     for arch in architectures {
-        let ptx = compile_fixed_for(arch);
-        let parsed = parse_compile_gate_ptx(&ptx).expect("parse Fixed PTX");
+        let ptx = compile_inference_for(arch);
+        let parsed = parse_compile_gate_ptx(&ptx).expect("parse Inference PTX");
         assert_eq!(
             parsed
                 .entries
@@ -2889,22 +2920,22 @@ fn fixed_f32_n128_s2_source_and_ptx_contract() {
     }
 }
 
-const FIXED_SM89_EXACT_N64_COPYPLAN: &str = "nn_sm89_f32_n64_copyplan";
-const FIXED_SM89_RNA_WIDE: &str = "nn_rna_wide_tf32_m128n128_bk32_s3";
-const FIXED_SM89_RNA_N96: &str = "nn_sm89_rna_tf32_m128n96_bk32_s3";
-const FIXED_SM89_HALF_M64N64_S3: &str = "nn_sm89_m64n64_bk64_s3_f16";
-const FIXED_SM89_HALF_M128N64_S2: &str = "nn_sm89_m128n64_bk64_s2_f16";
-const FIXED_SM120_EXACT_N64_COPYPLAN: &str = "nn_sm120_f32_n64_copyplan";
-const FIXED_SM120_N64_SLICED: &str = "nn_sm120_f32_n64_sliced";
+const INFERENCE_SM89_EXACT_N64_COPYPLAN: &str = "nn_sm89_f32_n64_copyplan";
+const INFERENCE_SM89_RNA_WIDE: &str = "nn_rna_wide_tf32_m128n128_bk32_s3";
+const INFERENCE_SM89_RNA_N96: &str = "nn_sm89_rna_tf32_m128n96_bk32_s3";
+const INFERENCE_SM89_HALF_M64N64_S3: &str = "nn_sm89_m64n64_bk64_s3_f16";
+const INFERENCE_SM89_HALF_M128N64_S2: &str = "nn_sm89_m128n64_bk64_s2_f16";
+const INFERENCE_SM120_EXACT_N64_COPYPLAN: &str = "nn_sm120_f32_n64_copyplan";
+const INFERENCE_SM120_N64_SLICED: &str = "nn_sm120_f32_n64_sliced";
 
-fn assert_fixed_exact_n64_copyplan_ptx(
+fn assert_inference_exact_n64_copyplan_ptx(
     arch: &str,
     admitted_arch: &str,
     prefix: &str,
     symbol: &str,
     ptx: &str,
 ) {
-    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed exact N64 copy-plan PTX");
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Inference exact N64 copy-plan PTX");
     let actual: Vec<_> = parsed
         .entries
         .iter()
@@ -2912,7 +2943,7 @@ fn assert_fixed_exact_n64_copyplan_ptx(
         .map(|entry| entry.symbol.as_str())
         .collect();
     let expected = if arch == admitted_arch {
-        if symbol == FIXED_SM120_EXACT_N64_COPYPLAN {
+        if symbol == INFERENCE_SM120_EXACT_N64_COPYPLAN {
             vec![
                 symbol,
                 "nn_sm120_f32_n64_copyplan_t256",
@@ -2924,7 +2955,7 @@ fn assert_fixed_exact_n64_copyplan_ptx(
     } else {
         vec![]
     };
-    assert_eq!(actual, expected, "{arch} Fixed exact N64 inventory");
+    assert_eq!(actual, expected, "{arch} Inference exact N64 inventory");
     if arch != admitted_arch {
         return;
     }
@@ -2957,7 +2988,7 @@ fn assert_fixed_exact_n64_copyplan_ptx(
             "exact N64 compact parameter ABI"
         );
         assert_compile_gate_entry_tokens(
-            "Fixed exact N64 copy-plan",
+            "Inference exact N64 copy-plan",
             entry,
             &[
                 "cp.async.cg.shared.global",
@@ -2990,16 +3021,16 @@ fn assert_fixed_exact_n64_copyplan_ptx(
 }
 
 #[test]
-fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
+fn inference_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
     let candidate = include_str!("../kernels/gemm_bi_inference/sm80/f32_n64_copyplan.cu");
     assert_eq!(
         candidate
-            .matches(&format!("{FIXED_SM89_EXACT_N64_COPYPLAN}("))
+            .matches(&format!("{INFERENCE_SM89_EXACT_N64_COPYPLAN}("))
             .count(),
         1
     );
     let parameters = candidate
-        .split_once(&format!("{FIXED_SM89_EXACT_N64_COPYPLAN}("))
+        .split_once(&format!("{INFERENCE_SM89_EXACT_N64_COPYPLAN}("))
         .and_then(|(_, tail)| tail.split_once(") {").map(|(parameters, _)| parameters))
         .unwrap();
     assert_eq!(
@@ -3008,8 +3039,8 @@ fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
         "production maximum-seven ABI"
     );
     for required in [
-        "sizeof(FixedSm89ExactF32Params) == 32",
-        "alignof(FixedSm89ExactF32Params) == 4",
+        "sizeof(InferenceSm89ExactF32Params) == 32",
+        "alignof(InferenceSm89ExactF32Params) == 4",
         "float alpha, beta;",
         "int m, n, k, lda, ldb, ldc;",
         "__launch_bounds__(SM89_EXACT_N64_CP_THREADS, 2)",
@@ -3025,7 +3056,7 @@ fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
             "exact N64 source omitted {required}"
         );
     }
-    let base = fixed_blob();
+    let base = inference_blob();
     for arch in [
         "sm_80",
         "sm_86",
@@ -3040,14 +3071,18 @@ fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
         "sm_121",
         "compute_121",
     ] {
-        assert_eq!(fixed_blob_for(arch), base, "{arch} Fixed base bytes");
+        assert_eq!(
+            inference_blob_for(arch),
+            base,
+            "{arch} Inference base bytes"
+        );
     }
     let mut retained = base;
     retained.push('\n');
     retained.push_str(include_str!(
         "../kernels/gemm_bi_inference/sm80/half_pipeline.cu"
     ));
-    let ada = fixed_blob_for("sm_89");
+    let ada = inference_blob_for("sm_89");
     let rna_wide = include_str!("../kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu");
     assert!(
         ada.strip_prefix(&retained)
@@ -3058,11 +3093,11 @@ fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
 }
 
 #[test]
-fn fixed_sm89_rna_wide_source_contract_and_target_boundary() {
+fn inference_sm89_rna_wide_source_contract_and_target_boundary() {
     let candidate = include_str!("../kernels/gemm_bi_inference/sm80/tf32_rna_wide.cu");
     assert_eq!(
         candidate
-            .matches(&format!("void {FIXED_SM89_RNA_WIDE}("))
+            .matches(&format!("void {INFERENCE_SM89_RNA_WIDE}("))
             .count(),
         1
     );
@@ -3102,24 +3137,24 @@ fn fixed_sm89_rna_wide_source_contract_and_target_boundary() {
         "compute_121",
     ] {
         assert!(
-            !fixed_blob_for(arch).contains(FIXED_SM89_RNA_WIDE),
-            "foreign target {arch} composed Fixed RNA-wide"
+            !inference_blob_for(arch).contains(INFERENCE_SM89_RNA_WIDE),
+            "foreign target {arch} composed Inference RNA-wide"
         );
     }
-    assert!(fixed_blob_for("sm_89").contains(FIXED_SM89_RNA_WIDE));
+    assert!(inference_blob_for("sm_89").contains(INFERENCE_SM89_RNA_WIDE));
 }
 
 #[test]
-fn fixed_sm120_exact_n64_copyplan_source_contract_and_target_boundary() {
+fn inference_sm120_exact_n64_copyplan_source_contract_and_target_boundary() {
     let candidate = include_str!("../kernels/gemm_bi_inference/sm120/f32_n64_copyplan.cu");
     assert_eq!(
         candidate
-            .matches(&format!("{FIXED_SM120_EXACT_N64_COPYPLAN}("))
+            .matches(&format!("{INFERENCE_SM120_EXACT_N64_COPYPLAN}("))
             .count(),
         1
     );
     let parameters = candidate
-        .split_once(&format!("{FIXED_SM120_EXACT_N64_COPYPLAN}("))
+        .split_once(&format!("{INFERENCE_SM120_EXACT_N64_COPYPLAN}("))
         .and_then(|(_, tail)| tail.split_once(") {").map(|(parameters, _)| parameters))
         .expect("SM120 production export with a real parameter list");
     assert_eq!(
@@ -3128,8 +3163,8 @@ fn fixed_sm120_exact_n64_copyplan_source_contract_and_target_boundary() {
         "compact production ABI"
     );
     for required in [
-        "sizeof(FixedSm120ExactF32Params) == 32",
-        "alignof(FixedSm120ExactF32Params) == 4",
+        "sizeof(InferenceSm120ExactF32Params) == 32",
+        "alignof(InferenceSm120ExactF32Params) == 4",
         "float alpha, beta;",
         "int m, n, k, lda, ldb, ldc;",
         "__launch_bounds__(SM120_EXACT_N64_CP_THREADS, 2)",
@@ -3145,8 +3180,8 @@ fn fixed_sm120_exact_n64_copyplan_source_contract_and_target_boundary() {
             "SM120 exact N64 source omitted {required}"
         );
     }
-    let base = fixed_blob();
-    let production = fixed_blob_for("compute_120");
+    let base = inference_blob();
+    let production = inference_blob_for("compute_120");
     let postbias = include_str!("../kernels/gemm_bi_inference/sm120/f32_postbias.cu");
     let sliced = include_str!("../kernels/gemm_bi_inference/sm120/f32_n64_sliced.cu");
     assert_eq!(
@@ -3155,27 +3190,27 @@ fn fixed_sm120_exact_n64_copyplan_source_contract_and_target_boundary() {
     );
     for arch in ["sm_89", "compute_89", "sm_120", "sm_121", "compute_121"] {
         assert!(
-            !fixed_blob_for(arch).contains(FIXED_SM120_EXACT_N64_COPYPLAN),
+            !inference_blob_for(arch).contains(INFERENCE_SM120_EXACT_N64_COPYPLAN),
             "foreign target {arch} composed the SM120 exact-N64 route"
         );
     }
 }
 
 #[test]
-fn fixed_sm89_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
-    let ptx = compile_fixed_for("sm_89");
-    assert_fixed_exact_n64_copyplan_ptx(
+fn inference_sm89_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
+    let ptx = compile_inference_for("sm_89");
+    assert_inference_exact_n64_copyplan_ptx(
         "sm_89",
         "sm_89",
         "nn_sm89_f32_n64_copyplan",
-        FIXED_SM89_EXACT_N64_COPYPLAN,
+        INFERENCE_SM89_EXACT_N64_COPYPLAN,
         &ptx,
     );
     // Existing assembler utility accepts a whole PTX module; its temporary names
-    // do not affect the Fixed artifact or the exact per-symbol resource census.
+    // do not affect the Inference artifact or the exact per-symbol resource census.
     let (report, sass) = assemble_and_disassemble_sm89_scalar(&ptx);
-    let resources = function_resource_report(&report, FIXED_SM89_EXACT_N64_COPYPLAN);
-    assert_zero_local_resources(resources, "SM89 Fixed exact N64 copy-plan");
+    let resources = function_resource_report(&report, INFERENCE_SM89_EXACT_N64_COPYPLAN);
+    assert_zero_local_resources(resources, "SM89 Inference exact N64 copy-plan");
     for marker in [
         " bytes stack frame",
         " bytes spill stores",
@@ -3200,7 +3235,7 @@ fn fixed_sm89_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
         .find_map(|line| metric_before(line, " bytes smem"))
         .unwrap();
     assert_eq!(shared, 32_768, "exact N64 static shared contract");
-    let entry = sass_entry(&sass, FIXED_SM89_EXACT_N64_COPYPLAN);
+    let entry = sass_entry(&sass, INFERENCE_SM89_EXACT_N64_COPYPLAN);
     for forbidden in ["LDL", "STL", "ATOM", "RED", "REDUX", "HMMA", "IMMA", "DMMA"] {
         assert!(
             !contains_opcode_prefix(entry, forbidden),
@@ -3216,11 +3251,11 @@ fn fixed_sm89_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
         "exact N64 SASS omitted asynchronous copy"
     );
     println!(
-        "SM89 Fixed exact N64 copy-plan: registers={registers} static_shared={shared} stack=0 spills=0"
+        "SM89 Inference exact N64 copy-plan: registers={registers} static_shared={shared} stack=0 spills=0"
     );
 
-    let rna_resources = function_resource_report(&report, FIXED_SM89_RNA_WIDE);
-    assert_zero_local_resources(rna_resources, "SM89 Fixed RNA-wide");
+    let rna_resources = function_resource_report(&report, INFERENCE_SM89_RNA_WIDE);
+    assert_zero_local_resources(rna_resources, "SM89 Inference RNA-wide");
     let rna_registers = rna_resources
         .lines()
         .find_map(|line| metric_before(line, " registers"))
@@ -3237,7 +3272,7 @@ fn fixed_sm89_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
         rna_static_shared, 0,
         "RNA-wide must use only dynamic shared"
     );
-    let rna_sass = sass_entry(&sass, FIXED_SM89_RNA_WIDE);
+    let rna_sass = sass_entry(&sass, INFERENCE_SM89_RNA_WIDE);
     for forbidden in ["LDL", "STL", "ATOM", "RED", "REDUX"] {
         assert!(
             !contains_opcode_prefix(rna_sass, forbidden),
@@ -3253,26 +3288,26 @@ fn fixed_sm89_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
         "RNA-wide SASS omitted asynchronous copy"
     );
     println!(
-        "SM89 Fixed RNA-wide: registers={rna_registers} static_shared={rna_static_shared} stack=0 spills=0"
+        "SM89 Inference RNA-wide: registers={rna_registers} static_shared={rna_static_shared} stack=0 spills=0"
     );
 }
 
 #[test]
-fn fixed_sm120_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
-    let ptx = compile_fixed_for("compute_120");
-    if let Some(path) = std::env::var_os("MAMBA_FIXED_SM120_EXACT_N64_PTX") {
+fn inference_sm120_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
+    let ptx = compile_inference_for("compute_120");
+    if let Some(path) = std::env::var_os("MAMBA_INFERENCE_SM120_EXACT_N64_PTX") {
         std::fs::write(path, &ptx).expect("write requested SM120 exact-N64 PTX");
     }
-    assert_fixed_exact_n64_copyplan_ptx(
+    assert_inference_exact_n64_copyplan_ptx(
         "compute_120",
         "compute_120",
         "nn_sm120_f32_n64_copyplan",
-        FIXED_SM120_EXACT_N64_COPYPLAN,
+        INFERENCE_SM120_EXACT_N64_COPYPLAN,
         &ptx,
     );
     let (report, sass) = assemble_and_disassemble_sm120(&ptx);
-    let resources = function_resource_report(&report, FIXED_SM120_EXACT_N64_COPYPLAN);
-    assert_zero_local_resources(resources, "SM120 Fixed exact N64 copy-plan");
+    let resources = function_resource_report(&report, INFERENCE_SM120_EXACT_N64_COPYPLAN);
+    assert_zero_local_resources(resources, "SM120 Inference exact N64 copy-plan");
     for marker in [
         " bytes stack frame",
         " bytes spill stores",
@@ -3301,7 +3336,7 @@ fn fixed_sm120_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
         .find_map(|line| metric_before(line, " bytes smem"))
         .unwrap();
     assert_eq!(shared, 32_768, "SM120 exact N64 static shared contract");
-    let entry = sass_entry(&sass, FIXED_SM120_EXACT_N64_COPYPLAN);
+    let entry = sass_entry(&sass, INFERENCE_SM120_EXACT_N64_COPYPLAN);
     for forbidden in ["LDL", "STL", "ATOM", "RED", "REDUX", "HMMA", "IMMA", "DMMA"] {
         assert!(
             !contains_opcode_prefix(entry, forbidden),
@@ -3317,26 +3352,26 @@ fn fixed_sm120_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
         "SM120 exact N64 omitted asynchronous copy"
     );
     println!(
-        "SM120 Fixed exact N64 copy-plan: registers={registers} static_shared={shared} stack=0 spills=0"
+        "SM120 Inference exact N64 copy-plan: registers={registers} static_shared={shared} stack=0 spills=0"
     );
 }
 
 #[test]
-fn fixed_sm120_sliced_nvrtc_ptx_and_zero_spill_resources() {
-    let ptx = compile_fixed_for("compute_120");
-    if let Some(path) = std::env::var_os("MAMBA_FIXED_SM120_SLICED_PTX") {
+fn inference_sm120_sliced_nvrtc_ptx_and_zero_spill_resources() {
+    let ptx = compile_inference_for("compute_120");
+    if let Some(path) = std::env::var_os("MAMBA_INFERENCE_SM120_SLICED_PTX") {
         std::fs::write(path, &ptx).expect("write requested SM120 exact-N64 PTX");
     }
-    assert_fixed_exact_n64_copyplan_ptx(
+    assert_inference_exact_n64_copyplan_ptx(
         "compute_120",
         "compute_120",
         "nn_sm120_f32_n64_sliced",
-        FIXED_SM120_N64_SLICED,
+        INFERENCE_SM120_N64_SLICED,
         &ptx,
     );
     let (report, sass) = assemble_and_disassemble_sm120(&ptx);
-    let resources = function_resource_report(&report, FIXED_SM120_N64_SLICED);
-    assert_zero_local_resources(resources, "SM120 Fixed exact N64 copy-plan");
+    let resources = function_resource_report(&report, INFERENCE_SM120_N64_SLICED);
+    assert_zero_local_resources(resources, "SM120 Inference exact N64 copy-plan");
     for marker in [
         " bytes stack frame",
         " bytes spill stores",
@@ -3365,7 +3400,7 @@ fn fixed_sm120_sliced_nvrtc_ptx_and_zero_spill_resources() {
         .find_map(|line| metric_before(line, " bytes smem"))
         .unwrap();
     assert_eq!(shared, 32_768, "SM120 sliced N64 static shared contract");
-    let entry = sass_entry(&sass, FIXED_SM120_N64_SLICED);
+    let entry = sass_entry(&sass, INFERENCE_SM120_N64_SLICED);
     for forbidden in ["LDL", "STL", "ATOM", "RED", "REDUX", "HMMA", "IMMA", "DMMA"] {
         assert!(
             !contains_opcode_prefix(entry, forbidden),
@@ -3381,13 +3416,13 @@ fn fixed_sm120_sliced_nvrtc_ptx_and_zero_spill_resources() {
         "SM120 sliced N64 omitted asynchronous copy"
     );
     println!(
-        "SM120 Fixed exact N64 copy-plan: registers={registers} static_shared={shared} stack=0 spills=0"
+        "SM120 Inference exact N64 copy-plan: registers={registers} static_shared={shared} stack=0 spills=0"
     );
 }
 
-fn assert_fixed_sm89_half_pipeline_ptx(arch: &str, ptx: &str) {
+fn assert_inference_sm89_half_pipeline_ptx(arch: &str, ptx: &str) {
     const SYMBOLS: [&str; 2] = ["nn_sm89_tc128_pipeline_bf16", "nn_sm89_tc128_pipeline_f16"];
-    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed half pipeline PTX");
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Inference half pipeline PTX");
     let actual: Vec<_> = parsed
         .entries
         .iter()
@@ -3403,11 +3438,11 @@ fn assert_fixed_sm89_half_pipeline_ptx(arch: &str, ptx: &str) {
     assert_eq!(
         actual.len(),
         unique.len(),
-        "{arch} duplicated Fixed half pipeline export"
+        "{arch} duplicated Inference half pipeline export"
     );
     assert_eq!(
         unique, expected,
-        "{arch} Fixed half pipeline export inventory"
+        "{arch} Inference half pipeline export inventory"
     );
     for symbol in expected {
         let entry = parsed.entry(symbol);
@@ -3417,7 +3452,7 @@ fn assert_fixed_sm89_half_pipeline_ptx(arch: &str, ptx: &str) {
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
         };
         assert_compile_gate_entry_tokens(
-            "Fixed SM89 half pipeline",
+            "Inference SM89 half pipeline",
             entry,
             &[
                 mma,
@@ -3458,9 +3493,9 @@ fn assert_fixed_sm89_half_pipeline_ptx(arch: &str, ptx: &str) {
     }
 }
 
-fn assert_fixed_sm89_half_swizzle_ptx(arch: &str, ptx: &str) {
+fn assert_inference_sm89_half_swizzle_ptx(arch: &str, ptx: &str) {
     const SYMBOLS: [&str; 2] = ["nn_sm89_tc128_swizzle_bf16", "nn_sm89_tc128_swizzle_f16"];
-    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed half swizzle PTX");
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Inference half swizzle PTX");
     let actual: Vec<_> = parsed
         .entries
         .iter()
@@ -3476,11 +3511,11 @@ fn assert_fixed_sm89_half_swizzle_ptx(arch: &str, ptx: &str) {
     assert_eq!(
         actual.len(),
         unique.len(),
-        "{arch} duplicated Fixed half swizzle export"
+        "{arch} duplicated Inference half swizzle export"
     );
     assert_eq!(
         unique, expected,
-        "{arch} Fixed half swizzle export inventory"
+        "{arch} Inference half swizzle export inventory"
     );
     for symbol in expected {
         let entry = parsed.entry(symbol);
@@ -3490,7 +3525,7 @@ fn assert_fixed_sm89_half_swizzle_ptx(arch: &str, ptx: &str) {
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
         };
         assert_compile_gate_entry_tokens(
-            "Fixed SM89 half swizzle",
+            "Inference SM89 half swizzle",
             entry,
             &[
                 mma,
@@ -3531,9 +3566,9 @@ fn assert_fixed_sm89_half_swizzle_ptx(arch: &str, ptx: &str) {
     }
 }
 
-fn assert_fixed_sm89_half_s3_ptx(arch: &str, ptx: &str) {
+fn assert_inference_sm89_half_s3_ptx(arch: &str, ptx: &str) {
     const SYMBOLS: [&str; 2] = ["nn_sm89_tc128_s3_bf16", "nn_sm89_tc128_s3_f16"];
-    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed half s3 PTX");
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Inference half s3 PTX");
     let actual: Vec<_> = parsed
         .entries
         .iter()
@@ -3549,9 +3584,12 @@ fn assert_fixed_sm89_half_s3_ptx(arch: &str, ptx: &str) {
     assert_eq!(
         actual.len(),
         unique.len(),
-        "{arch} duplicated Fixed half s3 export"
+        "{arch} duplicated Inference half s3 export"
     );
-    assert_eq!(unique, expected, "{arch} Fixed half s3 export inventory");
+    assert_eq!(
+        unique, expected,
+        "{arch} Inference half s3 export inventory"
+    );
     for symbol in expected {
         let entry = parsed.entry(symbol);
         let mma = if symbol.ends_with("_bf16") {
@@ -3560,7 +3598,7 @@ fn assert_fixed_sm89_half_s3_ptx(arch: &str, ptx: &str) {
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
         };
         assert_compile_gate_entry_tokens(
-            "Fixed SM89 half s3",
+            "Inference SM89 half s3",
             entry,
             &[
                 mma,
@@ -3615,8 +3653,8 @@ fn assert_fixed_sm89_half_s3_ptx(arch: &str, ptx: &str) {
     }
 }
 
-fn assert_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) {
-    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed RNA-wide PTX");
+fn assert_inference_sm89_rna_wide_ptx(arch: &str, ptx: &str) {
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Inference RNA-wide PTX");
     let actual: Vec<_> = parsed
         .entries
         .iter()
@@ -3627,10 +3665,10 @@ fn assert_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) {
         return;
     }
     let entry = actual[0];
-    assert_eq!(entry.symbol, FIXED_SM89_RNA_WIDE);
+    assert_eq!(entry.symbol, INFERENCE_SM89_RNA_WIDE);
     assert!(has_exact_maxntid(&entry.text, 256));
     assert!(has_exact_minnctapersm(&entry.text, 1));
-    let parameters = ptx_parameters(&entry.text, FIXED_SM89_RNA_WIDE);
+    let parameters = ptx_parameters(&entry.text, INFERENCE_SM89_RNA_WIDE);
     let declarations: Vec<_> = parameters
         .lines()
         .map(str::trim)
@@ -3646,7 +3684,7 @@ fn assert_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) {
         declarations[4].starts_with(".param .align 4 .b8 ") && declarations[4].contains("[32]")
     );
     assert_compile_gate_entry_tokens(
-        "Fixed SM89 RNA-wide",
+        "Inference SM89 RNA-wide",
         entry,
         &[
             "cvt.rna.tf32.f32",
@@ -3679,23 +3717,23 @@ fn assert_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) {
     }
 }
 
-fn assert_fixed_sm89_finalist_ptx(arch: &str, ptx: &str) {
-    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed SM89 finalist PTX");
+fn assert_inference_sm89_finalist_ptx(arch: &str, ptx: &str) {
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Inference SM89 finalist PTX");
     let specs = [
         (
-            FIXED_SM89_RNA_N96,
+            INFERENCE_SM89_RNA_N96,
             256,
             1,
             "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
         ),
         (
-            FIXED_SM89_HALF_M64N64_S3,
+            INFERENCE_SM89_HALF_M64N64_S3,
             128,
             2,
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
         ),
         (
-            FIXED_SM89_HALF_M128N64_S2,
+            INFERENCE_SM89_HALF_M128N64_S2,
             128,
             2,
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
@@ -3737,13 +3775,13 @@ fn assert_fixed_sm89_finalist_ptx(arch: &str, ptx: &str) {
             declarations[4].starts_with(".param .align 4 .b8 ") && declarations[4].contains("[32]")
         );
         assert_compile_gate_entry_tokens(
-            "Fixed SM89 finalist",
+            "Inference SM89 finalist",
             entry,
             &[mma, "cp.async.commit_group", "cp.async.wait_group"],
         );
-        if symbol == FIXED_SM89_RNA_N96 {
+        if symbol == INFERENCE_SM89_RNA_N96 {
             assert_compile_gate_entry_tokens(
-                "Fixed SM89 RNA N96 finalist",
+                "Inference SM89 RNA N96 finalist",
                 entry,
                 &["cvt.rna.tf32.f32"],
             );
@@ -3771,24 +3809,24 @@ fn assert_fixed_sm89_finalist_ptx(arch: &str, ptx: &str) {
     }
 }
 
-fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
-    assert_fixed_sm89_half_pipeline_ptx(arch, ptx);
-    assert_fixed_sm89_half_swizzle_ptx(arch, ptx);
-    assert_fixed_sm89_half_s3_ptx(arch, ptx);
-    assert_fixed_sm89_rna_wide_ptx(arch, ptx);
-    assert_fixed_sm89_finalist_ptx(arch, ptx);
-    assert_fixed_exact_n64_copyplan_ptx(
+fn assert_inference_tf32_ptx(arch: &str, ptx: &str) {
+    assert_inference_sm89_half_pipeline_ptx(arch, ptx);
+    assert_inference_sm89_half_swizzle_ptx(arch, ptx);
+    assert_inference_sm89_half_s3_ptx(arch, ptx);
+    assert_inference_sm89_rna_wide_ptx(arch, ptx);
+    assert_inference_sm89_finalist_ptx(arch, ptx);
+    assert_inference_exact_n64_copyplan_ptx(
         arch,
         "sm_89",
         "nn_sm89_f32_n64_copyplan",
-        FIXED_SM89_EXACT_N64_COPYPLAN,
+        INFERENCE_SM89_EXACT_N64_COPYPLAN,
         ptx,
     );
-    assert_fixed_exact_n64_copyplan_ptx(
+    assert_inference_exact_n64_copyplan_ptx(
         arch,
         "compute_120",
         "nn_sm120_f32_n64_copyplan",
-        FIXED_SM120_EXACT_N64_COPYPLAN,
+        INFERENCE_SM120_EXACT_N64_COPYPLAN,
         ptx,
     );
     const PORTABLE: [&str; 5] = [
@@ -3822,7 +3860,7 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
         "nn_sm120_tma_fma_postbias_m128n64_t256_bk16_s2",
         "nn_sm120_tma_fma_nobias_m128n64_t256_bk16_s2",
     ];
-    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed PTX");
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Inference PTX");
     let actual_postbias = parsed
         .entries
         .iter()
@@ -3836,7 +3874,7 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
     };
     assert_eq!(
         actual_postbias, expected_postbias,
-        "{arch} Fixed post-bias inventory"
+        "{arch} Inference post-bias inventory"
     );
     for symbol in expected_postbias {
         let entry = parsed.entry(symbol);
@@ -3857,17 +3895,17 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
             "{arch}/{symbol} Driver parameter count"
         );
         assert_compile_gate_entry_tokens(
-            "Fixed SM120 post-bias",
+            "Inference SM120 post-bias",
             entry,
             &["fma.rn.f32", "mul.rn.f32"],
         );
         if symbol.contains("_nobias_") {
-            assert_compile_gate_entry_excludes("Fixed SM120 no-bias", entry, &["add.rn.f32"]);
+            assert_compile_gate_entry_excludes("Inference SM120 no-bias", entry, &["add.rn.f32"]);
         } else {
-            assert_compile_gate_entry_tokens("Fixed SM120 post-bias", entry, &["add.rn.f32"]);
+            assert_compile_gate_entry_tokens("Inference SM120 post-bias", entry, &["add.rn.f32"]);
         }
         assert_compile_gate_entry_excludes(
-            "Fixed SM120 post-bias",
+            "Inference SM120 post-bias",
             entry,
             &[
                 "mma.sync",
@@ -3888,10 +3926,10 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
     let owns_sm120 = matches!(arch, "sm_120" | "sm_121" | "compute_120" | "compute_121");
     let mut expected = PORTABLE.to_vec();
     if arch == "sm_89" {
-        expected.push(FIXED_SM89_RNA_WIDE);
+        expected.push(INFERENCE_SM89_RNA_WIDE);
         // The N96 finalist is exported by the same module and carries its
-        // own contract checks in assert_fixed_sm89_finalist_ptx.
-        expected.push(FIXED_SM89_RNA_N96);
+        // own contract checks in assert_inference_sm89_finalist_ptx.
+        expected.push(INFERENCE_SM89_RNA_N96);
     }
     if owns_sm120 {
         expected.extend(SM120);
@@ -3905,15 +3943,15 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
     assert_eq!(
         actual,
         expected.iter().copied().collect(),
-        "{arch} Fixed TF32 export inventory"
+        "{arch} Inference TF32 export inventory"
     );
     for symbol in expected {
-        if symbol == FIXED_SM89_RNA_N96 {
+        if symbol == INFERENCE_SM89_RNA_N96 {
             continue;
         }
         let entry = parsed.entry(symbol);
         assert_compile_gate_entry_tokens(
-            "Fixed TF32",
+            "Inference TF32",
             entry,
             &[
                 "cvt.rna.tf32.f32",
@@ -3942,7 +3980,7 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
     if owns_sm120 {
         for symbol in SM120 {
             assert_compile_gate_entry_tokens(
-                "Fixed SM120 TF32",
+                "Inference SM120 TF32",
                 parsed.entry(symbol),
                 &["cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes"],
             );
@@ -3975,7 +4013,7 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         actual_half, expected_half,
-        "{arch} Fixed SM120 half export inventory"
+        "{arch} Inference SM120 half export inventory"
     );
     for symbol in expected_half {
         let entry = parsed.entry(&symbol);
@@ -3985,7 +4023,7 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
         };
         assert_compile_gate_entry_tokens(
-            "Fixed SM120 half",
+            "Inference SM120 half",
             entry,
             &[
                 "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
@@ -4760,7 +4798,7 @@ fn family_targets_assemble_under_ptxas() {
 }
 
 #[test]
-fn fixed_tcgen05_only_in_blackwell_family_ptx() {
+fn inference_tcgen05_only_in_blackwell_family_ptx() {
     let version = nvrtc_version();
     let mut tcgen_architectures = vec!["sm_100a"];
     if version.0 == 12 && version >= (12, 8) {
@@ -4773,10 +4811,10 @@ fn fixed_tcgen05_only_in_blackwell_family_ptx() {
         tcgen_architectures.push("sm_110a");
     }
     for arch in tcgen_architectures {
-        let ptx = compile_fixed_for(arch);
+        let ptx = compile_inference_for(arch);
         assert!(
             ptx.contains("tcgen05.mma") && ptx.contains("tcgen05.alloc"),
-            "{arch} Fixed PTX lost the tcgen05 rung"
+            "{arch} Inference PTX lost the tcgen05 rung"
         );
     }
     let mut baseline_architectures = vec!["sm_80", "sm_89", "sm_90a", "sm_120"];
@@ -4784,10 +4822,10 @@ fn fixed_tcgen05_only_in_blackwell_family_ptx() {
         baseline_architectures.push("sm_110");
     }
     for arch in baseline_architectures {
-        let ptx = compile_fixed_for(arch);
+        let ptx = compile_inference_for(arch);
         assert!(
             !ptx.contains("tcgen05"),
-            "{arch} Fixed PTX must not contain tcgen05 instructions"
+            "{arch} Inference PTX must not contain tcgen05 instructions"
         );
     }
 }

@@ -286,7 +286,7 @@ fn expected_nodes(
                 let tile =
                     expected_ada_half_auto(nvrtc, words::dtype(case.storage[0])?, shape, case.bias)
                         .ok_or("missing literal homogeneous-half AUTO expectation")?;
-                let symbol = fixed_force_spec(case.row, (8, 9), tile)?
+                let symbol = inference_force_spec(case.row, (8, 9), tile)?
                     .expected_symbol
                     .to_owned();
                 let (extent, threads, dynamic) = match tile {
@@ -299,7 +299,7 @@ fn expected_nodes(
                 };
                 let mut node = tiled_node(
                     symbol,
-                    ModuleKind::Fixed,
+                    ModuleKind::Inference,
                     (m, n),
                     extent,
                     (threads, dynamic, Some(0)),
@@ -320,7 +320,7 @@ fn expected_nodes(
                 if matches!((m, k, n), (4621, 768, 2304) | (4621, 1928, 384)) {
                     let mut node = tiled_node(
                         format!("nn_sm89_tc128_f32out_s3_{}", case.storage[0]),
-                        ModuleKind::Fixed,
+                        ModuleKind::Inference,
                         (m, n),
                         (128, 128),
                         (256, 98_304, Some(0)),
@@ -337,7 +337,7 @@ fn expected_nodes(
                             if large { 128 } else { 64 },
                             case.storage[0]
                         ),
-                        ModuleKind::Fixed,
+                        ModuleKind::Inference,
                         (m, n),
                         if large { (128, 128) } else { (64, 64) },
                         if large {
@@ -358,7 +358,7 @@ fn expected_nodes(
                         "nn_rna_wide_tf32_m128n128_bk32_s3"
                     }
                     .into(),
-                    ModuleKind::Fixed,
+                    ModuleKind::Inference,
                     (m, n),
                     if narrow { (128, 96) } else { (128, 128) },
                     (256, if narrow { 86_016 } else { 98_304 }, Some(0)),
@@ -372,7 +372,7 @@ fn expected_nodes(
                     if case.bias {
                         tiled_node(
                             "f32_f32_s2".into(),
-                            ModuleKind::Fixed,
+                            ModuleKind::Inference,
                             (m, n),
                             (64, 64),
                             (128, 0, None),
@@ -381,7 +381,7 @@ fn expected_nodes(
                     } else {
                         tiled_node(
                             "nn_sm89_f32_m128n64_tail_copyplan".into(),
-                            ModuleKind::Fixed,
+                            ModuleKind::Inference,
                             (m, n),
                             (128, 64),
                             (256, 0, Some(49_152)),
@@ -391,7 +391,7 @@ fn expected_nodes(
                 } else {
                     tiled_node(
                         "nn_sm89_f32_n64_copyplan".into(),
-                        ModuleKind::Fixed,
+                        ModuleKind::Inference,
                         (m, n),
                         (64, 64),
                         (128, 0, Some(32_768)),
@@ -480,7 +480,7 @@ fn expected_nodes(
     } else {
         tiled_node(
             "nn_sm89_f32_n64_copyplan".into(),
-            ModuleKind::Fixed,
+            ModuleKind::Inference,
             (m, if case.op == "nt" { k } else { n }),
             (64, 64),
             (128, 0, Some(32_768)),
@@ -730,7 +730,7 @@ fn module_identity(
 ) -> Result<(CompilerIdentity, ArtifactIdentity), String> {
     let artifacts = ctx.kernels.artifact_set_identity();
     match kind {
-        ModuleKind::Fixed => Ok((ctx.kernels.compiler_identity(), artifacts.fixed)),
+        ModuleKind::Inference => Ok((ctx.kernels.compiler_identity(), artifacts.inference)),
         ModuleKind::TriadScalar => Ok((
             ctx.kernels.triad_scalar_compiler_identity(),
             artifacts.triad_scalar,
@@ -857,7 +857,7 @@ impl Census {
         let ctx = &runtime.ctx;
         eprintln!(
             "{}",
-            json!({"record":"actual-module-identities","identity":runtime.metadata,"fixed":format!("{:?}",module_identity(ctx,ModuleKind::Fixed)?),"scalar":format!("{:?}",module_identity(ctx,ModuleKind::TriadScalar)?),"half":format!("{:?}",module_identity(ctx,ModuleKind::TriadSm89Half)?),"joint":format!("{:?}",module_identity(ctx,ModuleKind::TriadSm89Tf32Joint)?),"finalist":format!("{:?}",ctx.kernels.f32_triad_availability().finalist),"finalist_loader_rejection":ctx.kernels.finalist_tf32_rejection(),"half_loader_rejection":ctx.kernels.triad_sm89_half_rejection(),"half_exclusions":ctx.kernels.triad_sm89_half_exclusions(),"finalist_live_function_complete":false,"promotion_eligible":false})
+            json!({"record":"actual-module-identities","identity":runtime.metadata,"inference":format!("{:?}",module_identity(ctx,ModuleKind::Inference)?),"scalar":format!("{:?}",module_identity(ctx,ModuleKind::TriadScalar)?),"half":format!("{:?}",module_identity(ctx,ModuleKind::TriadSm89Half)?),"joint":format!("{:?}",module_identity(ctx,ModuleKind::TriadSm89Tf32Joint)?),"finalist":format!("{:?}",ctx.kernels.f32_triad_availability().finalist),"finalist_loader_rejection":ctx.kernels.finalist_tf32_rejection(),"half_loader_rejection":ctx.kernels.triad_sm89_half_rejection(),"half_exclusions":ctx.kernels.triad_sm89_half_exclusions(),"finalist_live_function_complete":false,"promotion_eligible":false})
         );
         let mut census = Self {
             anchors: Vec::new(),
@@ -870,13 +870,13 @@ impl Census {
         let mut case = words::inventory()?
             .into_iter()
             .find(|c| c.id == "inference.nn.f32_exact.hot_c.bias1")
-            .ok_or("fixed anchor template")?;
+            .ok_or("inference anchor template")?;
         case.dims = (64, 32, 64);
         case.bias = false;
         words::configure(ctx, &case)?;
         let spec = tiled_node(
             "f32_f32_s2".into(),
-            ModuleKind::Fixed,
+            ModuleKind::Inference,
             (64, 64),
             (64, 64),
             (128, 0, None),
@@ -1123,7 +1123,7 @@ fn verify_inference_holder(
     ctx: &GpuCtx,
     fixture: &words::Fixture,
     routes: &[ResolvedGemmRoute],
-) -> Result<Option<FixedAutoPhysicalDescriptor>, String> {
+) -> Result<Option<InferenceAutoPhysicalDescriptor>, String> {
     if fixture.case.family != "inference" {
         return Ok(None);
     }
@@ -1150,8 +1150,8 @@ fn verify_inference_holder(
     } else {
         InferenceTile::Tc128Sm89S3
     };
-    fixed_auto_bundle_physical_descriptor(
-        FixedAutoPhysicalRequest {
+    inference_auto_bundle_physical_descriptor(
+        InferenceAutoPhysicalRequest {
             row: fixture.case.row,
             operands,
             shape: InferenceShape { m, k, n },
@@ -1166,7 +1166,7 @@ fn verify_inference_holder(
         },
         &routes
             .iter()
-            .map(FixedAutoRecordedRoute::from)
+            .map(InferenceAutoRecordedRoute::from)
             .collect::<Vec<_>>(),
     )
 }
@@ -1453,9 +1453,9 @@ impl words::Observer for Census {
                     .try_into()
                     .map_err(|_| "retained holder bundle length")?;
                 let (m, k, n) = fixture.case.dims;
-                fixed_auto_bundle_graph_contract(
+                inference_auto_bundle_graph_contract(
                     descriptor,
-                    &FixedAutoGraphObservation {
+                    &InferenceAutoGraphObservation {
                         node_count: observed.count,
                         symbol: &node.symbol,
                         grid: spec.grid,
@@ -1486,7 +1486,7 @@ impl words::Observer for Census {
 fn identity_receipt(runtime: &words::Runtime, census: &Census) -> Result<Value, String> {
     let mut modules = BTreeMap::new();
     for kind in [
-        ModuleKind::Fixed,
+        ModuleKind::Inference,
         ModuleKind::TriadScalar,
         ModuleKind::TriadSm89Half,
         ModuleKind::TriadSm89Tf32Joint,
@@ -1498,7 +1498,7 @@ fn identity_receipt(runtime: &words::Runtime, census: &Census) -> Result<Value, 
         );
     }
     Ok(
-        json!({"schema":"combined-gemm-census.v1","device_scope":runtime.device_scope(),"identity":runtime.metadata,"modules":modules,"scalar_fixed_pair":[modules["TriadScalar"],modules["Fixed"]],"functions":census.functions.iter().map(|(symbol,function)|(symbol,&function.json)).collect::<BTreeMap<_,_>>(),"anchors":census.anchors.iter().map(|anchor|json!({"graph":anchor.graph.cu_graph() as usize,"managed_pointers":anchor.fixture.pointers(),"replayed":false})).collect::<Vec<_>>(),"auto_cases_complete":if census.auto_complete {99}else{0},"finalist_live_function_complete":census.auto_complete,"promotion_eligible":false,"performance_timing_certified":false}),
+        json!({"schema":"combined-gemm-census.v1","device_scope":runtime.device_scope(),"identity":runtime.metadata,"modules":modules,"scalar_inference_pair":[modules["TriadScalar"],modules["Inference"]],"functions":census.functions.iter().map(|(symbol,function)|(symbol,&function.json)).collect::<BTreeMap<_,_>>(),"anchors":census.anchors.iter().map(|anchor|json!({"graph":anchor.graph.cu_graph() as usize,"managed_pointers":anchor.fixture.pointers(),"replayed":false})).collect::<Vec<_>>(),"auto_cases_complete":if census.auto_complete {99}else{0},"finalist_live_function_complete":census.auto_complete,"promotion_eligible":false,"performance_timing_certified":false}),
     )
 }
 
@@ -1513,7 +1513,7 @@ fn require_staged_identity(runtime: &words::Runtime, census: &Census) -> Result<
     let current = identity_receipt(runtime, census)?;
     if previous["schema"] != "combined-gemm-census.v1"
         || previous["modules"] != current["modules"]
-        || previous["scalar_fixed_pair"] != current["scalar_fixed_pair"]
+        || previous["scalar_inference_pair"] != current["scalar_inference_pair"]
         || previous["identity"]["cohort"] != current["identity"]["cohort"]
         || previous["device_scope"] != current["device_scope"]
         || previous["identity"]["device_scope"] != current["identity"]["device_scope"]
@@ -1635,7 +1635,7 @@ fn negative_controls(runtime: &words::Runtime) -> Result<(), String> {
         .iter()
         .any(|node| node.symbol == "nn_sm89_f32_n64_copyplan")
     {
-        return Err("biased NN request entered no-bias Fixed copyplan AUTO".into());
+        return Err("biased NN request entered no-bias Inference copyplan AUTO".into());
     }
     eprintln!(
         "{}",
@@ -1683,7 +1683,6 @@ fn validate_six_current(receipts: &[Value]) -> Result<(), String> {
         return Err("six complete current cohorts are required".into());
     }
     let mut cohorts = std::collections::BTreeSet::new();
-    let mut fixed = std::collections::BTreeSet::new();
     let mut invariant: BTreeMap<(String, String), String> = BTreeMap::new();
     let mut common: BTreeMap<&str, String> = BTreeMap::new();
     let mut device_scope = None;
@@ -1744,17 +1743,14 @@ fn validate_six_current(receipts: &[Value]) -> Result<(), String> {
             }
         }
         let modules = &census["modules"];
-        let fixed_identity = modules["Fixed"]
-            .as_str()
-            .ok_or("missing Fixed identity")?
-            .to_owned();
-        if !fixed.insert(fixed_identity.clone()) {
-            return Err("Fixed identities must distinguish all six toolkit/cap cohorts".into());
+        if census["scalar_inference_pair"] != json!([modules["TriadScalar"], modules["Inference"]])
+        {
+            return Err("missing explicit same-toolkit scalar+Inference pair".into());
         }
-        if census["scalar_fixed_pair"] != json!([modules["TriadScalar"], fixed_identity]) {
-            return Err("missing explicit same-toolkit scalar+Fixed pair".into());
-        }
+        // No module here takes the state capacity: each must keep one
+        // identity per toolkit across both capacities.
         for module in [
+            "Inference",
             "TriadScalar",
             "TriadSm89Half",
             "TriadSm89Finalist",
@@ -1774,10 +1770,15 @@ fn validate_six_current(receipts: &[Value]) -> Result<(), String> {
             }
         }
     }
-    if cohorts.len() != 6 || fixed.len() != 6 || invariant.len() != 12 || device_scope.is_none() {
+    if cohorts.len() != 6 || invariant.len() != 15 || device_scope.is_none() {
         return Err("cohort module closure incomplete".into());
     }
-    for module in ["TriadScalar", "TriadSm89Half", "TriadSm89Finalist"] {
+    for module in [
+        "Inference",
+        "TriadScalar",
+        "TriadSm89Half",
+        "TriadSm89Finalist",
+    ] {
         if invariant
             .iter()
             .filter(|((_, kind), _)| kind == module)
@@ -1918,7 +1919,7 @@ mod combined_gemm_host {
     }
 
     #[test]
-    fn triad_retained_identity_fixed_n64_manifest_binds_static_shared_bytes() {
+    fn triad_retained_identity_inference_n64_manifest_binds_static_shared_bytes() {
         let cases = words::inventory().unwrap();
         let mut occurrences = 0;
         for toolkit in [(12, 8), (13, 0), (13, 2)] {
@@ -1936,7 +1937,10 @@ mod combined_gemm_host {
                 }
             }
         }
-        assert!(occurrences > 0, "the acceptance inventory lost FixedN64");
+        assert!(
+            occurrences > 0,
+            "the acceptance inventory lost InferenceN64"
+        );
     }
 
     #[test]
@@ -1947,7 +1951,7 @@ mod combined_gemm_host {
         assert_eq!(
             symbols
                 .values()
-                .filter(|node| node.module == ModuleKind::Fixed)
+                .filter(|node| node.module == ModuleKind::Inference)
                 .count(),
             19
         );
@@ -2096,13 +2100,13 @@ mod combined_gemm_host {
             ("13.2", 16),
             ("13.2", 64),
         ] {
-            let fixed = format!("fixed-{toolkit}-{cap}");
+            let inference = format!("inference-{toolkit}");
             let scalar = format!("scalar-{toolkit}");
             let functions = literal_symbols
                 .iter()
                 .map(|symbol| (*symbol, json!({})))
                 .collect::<BTreeMap<_, _>>();
-            receipts.push(json!({"device_scope":"shared-functional","reference_records":198,"case_cohort_keys":99,"independent_runs_per_case_corpus":6,"identity":{"device_scope":"shared-functional","toolkit":toolkit,"state_capacity":cap,"cohort":format!("cuda{toolkit}-cap{cap}"),"released":false,"case_schema_sha256":"a".repeat(64),"shared_payload_sha256":"b".repeat(64),"harness_source_sha256":"c".repeat(64),"production_source_snapshot_sha256":"d".repeat(64),"physical_census":{"device_scope":"shared-functional","auto_cases_complete":99,"finalist_live_function_complete":true,"functions":functions,"modules":{"Fixed":fixed,"TriadScalar":scalar,"TriadSm89Half":format!("half-{toolkit}"),"TriadSm89Finalist":format!("finalist-{toolkit}"),"TriadSm89Tf32Joint":format!("joint-{toolkit}")},"scalar_fixed_pair":[scalar,fixed]}}}));
+            receipts.push(json!({"device_scope":"shared-functional","reference_records":198,"case_cohort_keys":99,"independent_runs_per_case_corpus":6,"identity":{"device_scope":"shared-functional","toolkit":toolkit,"state_capacity":cap,"cohort":format!("cuda{toolkit}-cap{cap}"),"released":false,"case_schema_sha256":"a".repeat(64),"shared_payload_sha256":"b".repeat(64),"harness_source_sha256":"c".repeat(64),"production_source_snapshot_sha256":"d".repeat(64),"physical_census":{"device_scope":"shared-functional","auto_cases_complete":99,"finalist_live_function_complete":true,"functions":functions,"modules":{"Inference":inference,"TriadScalar":scalar,"TriadSm89Half":format!("half-{toolkit}"),"TriadSm89Finalist":format!("finalist-{toolkit}"),"TriadSm89Tf32Joint":format!("joint-{toolkit}")},"scalar_inference_pair":[scalar,inference]}}}));
         }
         for receipt in &mut receipts {
             receipt["identity"]["current_acceptance_source_sha256"] = json!("e".repeat(64));
@@ -2196,6 +2200,13 @@ mod combined_gemm_host {
         let mut drift = receipts.clone();
         drift[1]["identity"]["physical_census"]["modules"]["TriadSm89Half"] = json!("changed-half");
         assert!(validate_six_current(&drift).is_err());
+        // The Inference module takes no capacity: a second identity within
+        // one toolkit is drift, even with a matching scalar pair.
+        let mut inference_drift = receipts.clone();
+        let census = &mut inference_drift[1]["identity"]["physical_census"];
+        census["modules"]["Inference"] = json!("changed-inference");
+        census["scalar_inference_pair"][1] = json!("changed-inference");
+        assert!(validate_six_current(&inference_drift).is_err());
         receipts[0]["identity"]["physical_census"]["finalist_live_function_complete"] =
             json!(false);
         assert!(validate_six_current(&receipts).is_err());

@@ -1,4 +1,4 @@
-//! The bridge census between the two kernels: the FIXED inference
+//! The bridge census between the two kernels: the Inference
 //! ladder (`kernels/gemm_bi_inference/`, GBF namespace) must stay
 //! byte-identical to the triad forward tiles it was copied from at the
 //! split point. This suite is permanent - it is what makes the
@@ -60,11 +60,11 @@ fn bits(ctx: &GpuCtx, buf: &DtypedBuf, n: usize) -> Vec<u32> {
 
 #[test]
 #[ignore = "needs a CUDA device"]
-fn bridge_fixed_ladder_bit_identical_to_triad() {
+fn bridge_inference_ladder_bit_identical_to_triad() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
 
-    // (m, k, n, expected fixed tile, matching forced triad tile)
+    // (m, k, n, expected inference tile, matching forced triad tile)
     let cases: &[(usize, usize, usize, InferenceTile, TcTile)] = &[
         (5, 768, 2560, InferenceTile::Tc16, TcTile::Thin16),
         (64, 384, 384, InferenceTile::Tc16, TcTile::Thin16),
@@ -75,14 +75,14 @@ fn bridge_fixed_ladder_bit_identical_to_triad() {
         (2048, 1024, 3072, InferenceTile::Tc128, TcTile::Tile128),
     ];
     for dt in [WeightDtype::Bf16, WeightDtype::F16] {
-        for &(m, k, n, want_fixed, force_triad) in cases {
+        for &(m, k, n, want_inference, force_triad) in cases {
             let a = DtypedBuf::zeros(&ctx.stream, m * k, dt).unwrap();
             a.upload_f32(&ctx.stream, &exposing(m * k, 0xA11CE ^ m as u64))
                 .unwrap();
             let w = DtypedBuf::zeros(&ctx.stream, k * n, dt).unwrap();
             w.upload_f32(&ctx.stream, &synth(k * n, 0xB0B ^ n as u64))
                 .unwrap();
-            let c_fixed = DtypedBuf::zeros(&ctx.stream, m * n, dt).unwrap();
+            let c_inference = DtypedBuf::zeros(&ctx.stream, m * n, dt).unwrap();
             let c_triad = DtypedBuf::zeros(&ctx.stream, m * n, dt).unwrap();
 
             let tp = |b: &DtypedBuf| TypedPtr {
@@ -92,15 +92,15 @@ fn bridge_fixed_ladder_bit_identical_to_triad() {
             inference_forward_with_tile(
                 &ctx,
                 InferenceFwdOperands {
-                    c: tp(&c_fixed),
+                    c: tp(&c_inference),
                     x: tp(&a),
                     w: tp(&w),
                     bias_ptr: None,
                 },
                 InferenceShape { m, k, n },
-                want_fixed,
+                want_inference,
             )
-            .expect("forced Fixed bridge launch");
+            .expect("forced Inference bridge launch");
             gemm_bi_forward_tc_with_tile(
                 &ctx.stream,
                 &ctx.kernels,
@@ -116,18 +116,18 @@ fn bridge_fixed_ladder_bit_identical_to_triad() {
             .expect("triad forced tile");
             ctx.stream.synchronize().unwrap();
 
-            let bf = bits(&ctx, &c_fixed, m * n);
+            let bf = bits(&ctx, &c_inference, m * n);
             let bt = bits(&ctx, &c_triad, m * n);
             let bad = bf.iter().zip(&bt).filter(|(x, y)| x != y).count();
             assert_eq!(
                 bad,
                 0,
-                "{dt:?} M{m} K{k} N{n} {want_fixed:?}: {bad}/{} bits differ from the triad twin",
+                "{dt:?} M{m} K{k} N{n} {want_inference:?}: {bad}/{} bits differ from the triad twin",
                 m * n
             );
         }
     }
-    println!("bridge: fixed ladder == triad tiles, all cases bitwise");
+    println!("bridge: inference ladder == triad tiles, all cases bitwise");
 }
 
 #[test]

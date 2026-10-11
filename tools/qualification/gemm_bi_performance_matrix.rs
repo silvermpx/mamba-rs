@@ -45,8 +45,8 @@ use production_auto_cohort::{
 };
 use sha2::{Digest as _, Sha256};
 
-#[path = "../../tests/support/fixed_full_mantissa.rs"]
-mod fixed_full_mantissa;
+#[path = "../../tests/support/inference_full_mantissa.rs"]
+mod inference_full_mantissa;
 
 const DEFAULT_WINDOWS: usize = 101;
 const TARGET_WINDOW_MS: f64 = 5.0;
@@ -2949,7 +2949,7 @@ fn physical_kind_name(kind: PhysicalLaunchKind) -> &'static str {
 
 fn module_kind_name(kind: ModuleKind) -> &'static str {
     match kind {
-        ModuleKind::Fixed => "inference",
+        ModuleKind::Inference => "inference",
         ModuleKind::TriadScalar => "triad_scalar",
         ModuleKind::TriadSm80 => "triad_sm80",
         ModuleKind::TriadSm89Finalist => "triad_sm89_finalist",
@@ -2964,6 +2964,8 @@ fn module_kind_name(kind: ModuleKind) -> &'static str {
         ModuleKind::Mamba3Combined => "mamba3_combined",
         ModuleKind::Mamba2Combined => "mamba2_combined",
         ModuleKind::Mamba3MimoCombined => "mamba3_mimo_combined",
+        ModuleKind::Mamba1 => "mamba1",
+        ModuleKind::Shared => "shared",
     }
 }
 
@@ -11056,7 +11058,7 @@ mod sm89_nt_finalist_once21 {
     }
 
     fn words(len: usize, seed: u64) -> Vec<u32> {
-        fixed_full_mantissa::finite_full_mantissa_values(len, seed)
+        inference_full_mantissa::finite_full_mantissa_values(len, seed)
             .into_iter()
             .map(f32::to_bits)
             .collect()
@@ -11319,7 +11321,7 @@ mod sm89_nt_finalist_once21 {
             identity.compiler.schedule_revision,
             identity.artifacts.module_count,
             digest_hex(&identity.artifacts.ordered_digest),
-            artifact(identity.artifacts.fixed),
+            artifact(identity.artifacts.inference),
             artifact(identity.artifacts.triad_scalar),
             artifact(identity.artifacts.triad_sm80),
             specialized,

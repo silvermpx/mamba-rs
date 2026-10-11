@@ -1,7 +1,7 @@
 #[path = "triad_half_nt_m64n192_s3_source.rs"]
 pub mod m64n192;
 
-pub const SYMBOL: &str = "nt_test_fixed_s3_m96n128_f16";
+pub const SYMBOL: &str = "nt_test_inference_s3_m96n128_f16";
 pub const RETAINED_SYMBOL: &str = m64n192::SYMBOL;
 pub const TARGET: (usize, usize, usize) = (2_048, 1_536, 768);
 pub const TARGET_GRID: u32 = 264;
@@ -83,8 +83,8 @@ pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
     )?;
     replace_exact(
         &mut source,
-        "                sm89_fixed_half_swizzle::nt_m64n192_copy_slice(plan, A, B, write_buf, next_k, N, 4);\n                sm89_fixed_half_swizzle::nt_m64n192_copy_slice(plan, A, B, write_buf, next_k, N, 5);\n                asm volatile(\"cp.async.commit_group;\\n\" ::);",
-        "                sm89_fixed_half_swizzle::nt_m64n192_copy_slice(plan, A, B, write_buf, next_k, N, 4);\n                asm volatile(\"cp.async.commit_group;\\n\" ::);",
+        "                sm89_inference_half_swizzle::nt_m64n192_copy_slice(plan, A, B, write_buf, next_k, N, 4);\n                sm89_inference_half_swizzle::nt_m64n192_copy_slice(plan, A, B, write_buf, next_k, N, 5);\n                asm volatile(\"cp.async.commit_group;\\n\" ::);",
+        "                sm89_inference_half_swizzle::nt_m64n192_copy_slice(plan, A, B, write_buf, next_k, N, 4);\n                asm volatile(\"cp.async.commit_group;\\n\" ::);",
     )?;
     replace_all_exact(
         &mut source,
@@ -101,7 +101,7 @@ pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
     replace_range(
         &mut source,
         "static constexpr int kM64N192OutputStride = 200;",
-        "} // namespace sm89_fixed_half_swizzle\n\nnamespace sm89_test_half_nt_m64n192_s3 {",
+        "} // namespace sm89_inference_half_swizzle\n\nnamespace sm89_test_half_nt_m64n192_s3 {",
         M96N128_VECTOR_EPILOGUE,
     )?;
     replace_exact(&mut source, M64N192_EXPORT, M96N128_EXPORT)?;
@@ -326,19 +326,19 @@ static __device__ __forceinline__ void nt_m96n128_vector_epilogue(
     }
 }
 
-} // namespace sm89_fixed_half_swizzle
+} // namespace sm89_inference_half_swizzle
 
 namespace sm89_test_half_nt_m96n128_s3 {"#;
 
 const M96N128_EXPORT: &str = r#"extern "C" __global__ __launch_bounds__(384, 1)
-void nt_test_fixed_s3_m96n128_f16(
+void nt_test_inference_s3_m96n128_f16(
     __half* __restrict__ C, const __half* __restrict__ A,
     const __half* __restrict__ B, float alpha, int M, int N, int K_out) {
     sm89_test_half_nt_m96n128_s3::kernel<__half>(C, A, B, alpha, M, N, K_out);
 }"#;
 
 const M64N192_EXPORT: &str = r#"extern "C" __global__ __launch_bounds__(384, 1)
-void nt_test_fixed_s3_m64n192_f16(
+void nt_test_inference_s3_m64n192_f16(
     __half* __restrict__ C, const __half* __restrict__ A,
     const __half* __restrict__ B, float alpha, int M, int N, int K_out) {
     sm89_test_half_nt_m64n192_s3::kernel<__half>(C, A, B, alpha, M, N, K_out);

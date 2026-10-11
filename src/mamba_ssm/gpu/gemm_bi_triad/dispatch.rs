@@ -164,14 +164,14 @@ mod sm89_exact_f32_tn_admission_tests {
                 artifact_digest: [2; 32],
             },
             scalar_compiler: compiler,
-            fixed_artifact: ArtifactIdentity {
-                module_kind: ModuleKind::Fixed,
+            inference_artifact: ArtifactIdentity {
+                module_kind: ModuleKind::Inference,
                 artifact_kind: ArtifactKind::Ptx,
                 compile_key: [3; 32],
                 artifact_digest: [4; 32],
             },
-            fixed_compiler: compiler,
-            fixed_copyplan_loaded: false,
+            inference_compiler: compiler,
+            inference_copyplan_loaded: false,
             sm89_exact_f32_artifact: Some(ArtifactIdentity {
                 module_kind: ModuleKind::TriadSm89ExactF32,
                 artifact_kind: ArtifactKind::Ptx,
@@ -500,14 +500,14 @@ mod sm89_exact_f32_d128_admission_tests {
                 artifact_digest: [2; 32],
             },
             scalar_compiler: compiler,
-            fixed_artifact: ArtifactIdentity {
-                module_kind: ModuleKind::Fixed,
+            inference_artifact: ArtifactIdentity {
+                module_kind: ModuleKind::Inference,
                 artifact_kind: ArtifactKind::Ptx,
                 compile_key: [3; 32],
                 artifact_digest: [4; 32],
             },
-            fixed_compiler: compiler,
-            fixed_copyplan_loaded: false,
+            inference_compiler: compiler,
+            inference_copyplan_loaded: false,
             sm89_exact_f32_artifact: None,
             sm89_exact_f32_compiler: None,
             sm89_exact_f32_symbols_loaded: [false; 3],
@@ -6481,9 +6481,9 @@ fn qualified_tn_narrow_splitm_cell(request: F32TriadRequest) -> Option<TnNarrowS
 pub(super) struct ScalarLaunchFacts {
     pub scalar_artifact: ArtifactIdentity,
     pub scalar_compiler: CompilerIdentity,
-    pub fixed_artifact: ArtifactIdentity,
-    pub fixed_compiler: CompilerIdentity,
-    pub fixed_copyplan_loaded: bool,
+    pub inference_artifact: ArtifactIdentity,
+    pub inference_compiler: CompilerIdentity,
+    pub inference_copyplan_loaded: bool,
     pub sm89_exact_f32_artifact: Option<ArtifactIdentity>,
     pub sm89_exact_f32_compiler: Option<CompilerIdentity>,
     pub sm89_exact_f32_symbols_loaded: [bool; 3],
@@ -6512,13 +6512,13 @@ fn scalar_proof_board(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability.0 >= 8
 }
 
-/// The boards whose Fixed module composes the Ada overlay and so may prove
+/// The boards whose Inference module composes the Ada overlay and so may prove
 /// its copy-plan routes: the sm_80 tier without the CC 12 family, which
-/// keeps its Fixed module byte-identical to the one its own cohorts pin.
-fn fixed_overlay_proof_board(facts: ScalarLaunchFacts) -> bool {
+/// keeps its Inference module byte-identical to the one its own cohorts pin.
+fn inference_overlay_proof_board(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability.0 >= 8
         && !crate::mamba_ssm::gpu::device::is_sm120_family(facts.compute_capability)
-        && facts.fixed_copyplan_loaded
+        && facts.inference_copyplan_loaded
 }
 
 fn scalar_admitted(
@@ -6532,14 +6532,14 @@ fn scalar_admitted(
     }
 }
 
-fn fixed_overlay_admitted(
+fn inference_overlay_admitted(
     admission: ScalarAdmission,
     facts: ScalarLaunchFacts,
     evidence: fn(ScalarLaunchFacts) -> bool,
 ) -> bool {
     match admission {
         ScalarAdmission::Evidence | ScalarAdmission::Candidate => evidence(facts),
-        ScalarAdmission::Proof => fixed_overlay_proof_board(facts),
+        ScalarAdmission::Proof => inference_overlay_proof_board(facts),
     }
 }
 
@@ -6818,7 +6818,7 @@ fn qualified_sm89_exact_f32_candidate_environment(facts: ScalarLaunchFacts) -> b
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FixedCopyPlanQualificationIdentity {
+struct InferenceCopyPlanQualificationIdentity {
     nvrtc_version: (i32, i32),
     compile_key: [u8; 32],
     artifact_digest: [u8; 32],
@@ -6827,44 +6827,44 @@ struct FixedCopyPlanQualificationIdentity {
     nvrtc_library_domain: [u8; 32],
 }
 
-impl FixedCopyPlanQualificationIdentity {
+impl InferenceCopyPlanQualificationIdentity {
     fn matches(self, facts: ScalarLaunchFacts) -> bool {
-        facts.fixed_copyplan_loaded
-            && facts.fixed_artifact.module_kind == ModuleKind::Fixed
-            && facts.fixed_artifact.artifact_kind == ArtifactKind::Ptx
-            && facts.fixed_artifact.compile_key == self.compile_key
-            && facts.fixed_artifact.artifact_digest == self.artifact_digest
-            && facts.fixed_compiler.source_digest == self.source_digest
-            && facts.fixed_compiler.invocation_digest == self.compile_key
-            && facts.fixed_compiler.header_manifest_digest == self.header_manifest_digest
-            && facts.fixed_compiler.target.as_str() == "sm_89"
-            && facts.fixed_compiler.nvrtc_version == self.nvrtc_version
-            && facts.fixed_compiler.nvrtc_library_domain == self.nvrtc_library_domain
-            && facts.fixed_compiler.nvrtc_library_known
-            && facts.fixed_compiler.output_kind == ArtifactKind::Ptx
-            && facts.fixed_compiler.composer_revision == COMPOSER_REVISION
-            && facts.fixed_compiler.compiler_revision == COMPILER_REVISION
-            && facts.fixed_compiler.numeric_abi_revision == NUMERIC_ABI_REVISION
-            && facts.fixed_compiler.schedule_revision == SCHEDULE_REVISION
+        facts.inference_copyplan_loaded
+            && facts.inference_artifact.module_kind == ModuleKind::Inference
+            && facts.inference_artifact.artifact_kind == ArtifactKind::Ptx
+            && facts.inference_artifact.compile_key == self.compile_key
+            && facts.inference_artifact.artifact_digest == self.artifact_digest
+            && facts.inference_compiler.source_digest == self.source_digest
+            && facts.inference_compiler.invocation_digest == self.compile_key
+            && facts.inference_compiler.header_manifest_digest == self.header_manifest_digest
+            && facts.inference_compiler.target.as_str() == "sm_89"
+            && facts.inference_compiler.nvrtc_version == self.nvrtc_version
+            && facts.inference_compiler.nvrtc_library_domain == self.nvrtc_library_domain
+            && facts.inference_compiler.nvrtc_library_known
+            && facts.inference_compiler.output_kind == ArtifactKind::Ptx
+            && facts.inference_compiler.composer_revision == COMPOSER_REVISION
+            && facts.inference_compiler.compiler_revision == COMPILER_REVISION
+            && facts.inference_compiler.numeric_abi_revision == NUMERIC_ABI_REVISION
+            && facts.inference_compiler.schedule_revision == SCHEDULE_REVISION
     }
 }
 
-const FIXED_COPYPLAN_SOURCE_DIGEST_CAP16: [u8; 32] = [
+const INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16: [u8; 32] = [
     228, 106, 241, 227, 21, 211, 35, 219, 106, 191, 90, 209, 117, 105, 54, 113, 80, 182, 50, 5,
     169, 247, 81, 115, 170, 248, 8, 29, 180, 94, 14, 144,
 ];
 
-const FIXED_COPYPLAN_SOURCE_DIGEST_CAP64: [u8; 32] = [
+const INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64: [u8; 32] = [
     115, 17, 29, 85, 12, 211, 55, 120, 203, 161, 47, 39, 235, 56, 204, 139, 48, 228, 23, 180, 11,
     100, 105, 243, 243, 109, 220, 56, 21, 224, 220, 171,
 ];
 
-/// Exact Fixed identities from the six initial complete-module compilations,
-/// ordered by CUDA toolkit and then state capacity (16, 64). Fixed carries the
+/// Exact Inference identities from the six initial complete-module compilations,
+/// ordered by CUDA toolkit and then state capacity (16, 64). Inference carries the
 /// fold and Inference overlays, so its source, key and artifact remain
 /// capacity-specific even when the toolkit is unchanged.
-const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &[
-    FixedCopyPlanQualificationIdentity {
+const INFERENCE_COPYPLAN_EVIDENCE_COHORTS: &[InferenceCopyPlanQualificationIdentity] = &[
+    InferenceCopyPlanQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
             40, 38, 84, 166, 63, 118, 16, 227, 231, 122, 248, 220, 26, 188, 177, 61, 237, 52, 57,
@@ -6874,7 +6874,7 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
             48, 83, 107, 208, 145, 221, 237, 54, 223, 79, 190, 228, 100, 240, 151, 149, 253, 214,
             106, 122, 60, 135, 46, 108, 179, 206, 192, 180, 64, 5, 242, 211,
         ],
-        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
+        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
             41, 90, 28, 248, 109, 177, 114, 166, 101, 88, 33, 169, 246, 40, 246, 75, 177, 57, 3,
             231, 218, 127, 19, 175, 21, 243, 133, 66, 41, 157, 25, 172,
@@ -6884,7 +6884,7 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
             146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
         ],
     },
-    FixedCopyPlanQualificationIdentity {
+    InferenceCopyPlanQualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
             232, 157, 8, 230, 245, 198, 87, 201, 15, 189, 133, 47, 195, 181, 46, 144, 211, 254,
@@ -6894,7 +6894,7 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
             199, 51, 148, 167, 38, 145, 169, 213, 65, 27, 87, 115, 57, 69, 247, 254, 13, 109, 196,
             198, 236, 53, 133, 214, 87, 161, 11, 100, 241, 142, 119, 132,
         ],
-        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
+        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
             95, 72, 218, 83, 232, 0, 212, 34, 241, 28, 99, 193, 37, 110, 226, 125, 210, 6, 31, 25,
             126, 59, 205, 91, 114, 143, 133, 18, 228, 74, 197, 153,
@@ -6904,7 +6904,7 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
             146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
         ],
     },
-    FixedCopyPlanQualificationIdentity {
+    InferenceCopyPlanQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
             150, 113, 145, 232, 99, 212, 108, 81, 23, 216, 108, 167, 29, 147, 58, 37, 156, 181, 43,
@@ -6914,7 +6914,7 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
             29, 145, 211, 101, 64, 243, 47, 108, 137, 22, 198, 148, 235, 117, 224, 190, 140, 112,
             250, 179, 89, 41, 112, 176, 171, 69, 120, 30, 171, 37, 19, 160,
         ],
-        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
+        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
             65, 180, 50, 8, 184, 220, 49, 112, 66, 46, 53, 126, 16, 203, 46, 224, 202, 8, 75, 10,
             147, 239, 224, 31, 241, 212, 227, 195, 159, 211, 60, 194,
@@ -6924,7 +6924,7 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
             238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
         ],
     },
-    FixedCopyPlanQualificationIdentity {
+    InferenceCopyPlanQualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
             62, 106, 196, 94, 150, 126, 236, 129, 124, 167, 163, 234, 112, 121, 152, 206, 148, 171,
@@ -6934,7 +6934,7 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
             158, 250, 100, 169, 63, 150, 216, 122, 162, 206, 190, 241, 203, 158, 124, 66, 11, 185,
             233, 12, 5, 198, 216, 146, 192, 166, 218, 120, 200, 171, 152, 196,
         ],
-        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
+        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
             183, 131, 32, 166, 164, 22, 77, 115, 215, 224, 240, 101, 40, 121, 115, 97, 216, 132,
             213, 100, 168, 50, 100, 145, 188, 188, 120, 143, 170, 210, 18, 158,
@@ -6944,7 +6944,7 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
             238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
         ],
     },
-    FixedCopyPlanQualificationIdentity {
+    InferenceCopyPlanQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
             64, 234, 181, 34, 254, 181, 41, 162, 25, 207, 72, 187, 38, 9, 49, 174, 162, 202, 121,
@@ -6954,7 +6954,7 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
             131, 208, 156, 113, 96, 92, 98, 221, 166, 89, 8, 187, 182, 255, 28, 237, 233, 149, 91,
             19, 107, 164, 240, 185, 24, 217, 4, 77, 77, 30, 69, 228,
         ],
-        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
+        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16,
         header_manifest_digest: [
             156, 37, 38, 105, 194, 169, 155, 210, 128, 109, 239, 74, 65, 38, 170, 164, 62, 150, 7,
             243, 164, 210, 107, 112, 158, 60, 159, 9, 61, 122, 244, 54,
@@ -6964,7 +6964,7 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
             34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
         ],
     },
-    FixedCopyPlanQualificationIdentity {
+    InferenceCopyPlanQualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
             244, 82, 102, 107, 95, 169, 215, 120, 179, 137, 166, 13, 212, 20, 14, 130, 251, 162,
@@ -6974,7 +6974,7 @@ const FIXED_COPYPLAN_EVIDENCE_COHORTS: &[FixedCopyPlanQualificationIdentity] = &
             57, 155, 175, 93, 19, 222, 42, 191, 85, 198, 183, 206, 85, 176, 97, 9, 104, 146, 163,
             110, 155, 78, 19, 186, 32, 82, 251, 4, 105, 154, 91, 115,
         ],
-        source_digest: FIXED_COPYPLAN_SOURCE_DIGEST_CAP64,
+        source_digest: INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64,
         header_manifest_digest: [
             245, 204, 65, 250, 5, 45, 192, 124, 0, 78, 252, 37, 44, 87, 101, 38, 109, 151, 163, 65,
             14, 251, 78, 249, 166, 229, 159, 54, 190, 91, 84, 79,
@@ -7018,16 +7018,16 @@ impl ScalarTransposeQualificationIdentity {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct NtFixedCopyPlanComposedQualificationIdentity {
+struct NtInferenceCopyPlanComposedQualificationIdentity {
     scalar: ScalarTransposeQualificationIdentity,
-    fixed: FixedCopyPlanQualificationIdentity,
+    inference: InferenceCopyPlanQualificationIdentity,
 }
 
-impl NtFixedCopyPlanComposedQualificationIdentity {
+impl NtInferenceCopyPlanComposedQualificationIdentity {
     fn matches(self, facts: ScalarLaunchFacts) -> bool {
-        self.scalar.nvrtc_version == self.fixed.nvrtc_version
+        self.scalar.nvrtc_version == self.inference.nvrtc_version
             && self.scalar.matches(facts)
-            && self.fixed.matches(facts)
+            && self.inference.matches(facts)
     }
 }
 
@@ -7103,55 +7103,55 @@ const TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2: ScalarTransposeQualificationIde
     };
 
 /// Frozen whole-pipeline identities for the portable transpose followed by
-/// the Fixed CopyPlan kernel. Each entry binds both modules to the same live
-/// toolkit domain; a Fixed-only match is intentionally insufficient.
-const NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES:
-    &[NtFixedCopyPlanComposedQualificationIdentity] = &[
-    NtFixedCopyPlanComposedQualificationIdentity {
+/// the Inference CopyPlan kernel. Each entry binds both modules to the same live
+/// toolkit domain; an Inference-only match is intentionally insufficient.
+const NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES:
+    &[NtInferenceCopyPlanComposedQualificationIdentity] = &[
+    NtInferenceCopyPlanComposedQualificationIdentity {
         scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_12_8,
-        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[0],
+        inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[0],
     },
-    NtFixedCopyPlanComposedQualificationIdentity {
+    NtInferenceCopyPlanComposedQualificationIdentity {
         scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_12_8,
-        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[1],
+        inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[1],
     },
-    NtFixedCopyPlanComposedQualificationIdentity {
+    NtInferenceCopyPlanComposedQualificationIdentity {
         scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0,
-        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[2],
+        inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[2],
     },
-    NtFixedCopyPlanComposedQualificationIdentity {
+    NtInferenceCopyPlanComposedQualificationIdentity {
         scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_0,
-        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[3],
+        inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[3],
     },
-    NtFixedCopyPlanComposedQualificationIdentity {
+    NtInferenceCopyPlanComposedQualificationIdentity {
         scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2,
-        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[4],
+        inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[4],
     },
-    NtFixedCopyPlanComposedQualificationIdentity {
+    NtInferenceCopyPlanComposedQualificationIdentity {
         scalar: TRIAD_SCALAR_TRANSPOSE_IDENTITY_CUDA_13_2,
-        fixed: FIXED_COPYPLAN_EVIDENCE_COHORTS[5],
+        inference: INFERENCE_COPYPLAN_EVIDENCE_COHORTS[5],
     },
 ];
 
 // The six measured complete-module pairs cover cap16/cap64 on each retained
 // toolkit. Admission is an alias of that sealed set so no unmeasured pair can
 // be appended here.
-const NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS:
-    &[NtFixedCopyPlanComposedQualificationIdentity] =
-    NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES;
+const NT_INFERENCE_COPYPLAN_COMPOSED_EVIDENCE_COHORTS:
+    &[NtInferenceCopyPlanComposedQualificationIdentity] =
+    NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES;
 
-// These three toolkit projections keep TN independent of the Fixed holder and
-// of the paired cap-specific Fixed identity.
+// These three toolkit projections keep TN independent of the Inference holder and
+// of the paired cap-specific Inference identity.
 const TN_M16N16_SPLITM16_SM89_BINDINGS: [ScalarTransposeQualificationIdentity; 3] = [
-    NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[0].scalar,
-    NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[2].scalar,
-    NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[4].scalar,
+    NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[0].scalar,
+    NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[2].scalar,
+    NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[4].scalar,
 ];
 
-fn qualified_nt_fixed_copyplan_sibling_environment(facts: ScalarLaunchFacts) -> bool {
+fn qualified_nt_inference_copyplan_sibling_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
         && facts.multiprocessor_count == 142
-        && NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS
+        && NT_INFERENCE_COPYPLAN_COMPOSED_EVIDENCE_COHORTS
             .iter()
             .copied()
             .any(|identity| identity.matches(facts))
@@ -7168,7 +7168,7 @@ fn qualified_scalar_sm89_ada142_tn_environment(facts: ScalarLaunchFacts) -> bool
 
 #[cfg(test)]
 pub(super) fn scalar_sm89_composed_test_facts(index: usize) -> ScalarLaunchFacts {
-    let identity = NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[index];
+    let identity = NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[index];
     let compiler = |source_digest,
                     invocation_digest,
                     header_manifest_digest,
@@ -7201,20 +7201,20 @@ pub(super) fn scalar_sm89_composed_test_facts(index: usize) -> ScalarLaunchFacts
             identity.scalar.nvrtc_version,
             identity.scalar.nvrtc_library_domain,
         ),
-        fixed_artifact: ArtifactIdentity {
-            module_kind: ModuleKind::Fixed,
+        inference_artifact: ArtifactIdentity {
+            module_kind: ModuleKind::Inference,
             artifact_kind: ArtifactKind::Ptx,
-            compile_key: identity.fixed.compile_key,
-            artifact_digest: identity.fixed.artifact_digest,
+            compile_key: identity.inference.compile_key,
+            artifact_digest: identity.inference.artifact_digest,
         },
-        fixed_compiler: compiler(
-            identity.fixed.source_digest,
-            identity.fixed.compile_key,
-            identity.fixed.header_manifest_digest,
-            identity.fixed.nvrtc_version,
-            identity.fixed.nvrtc_library_domain,
+        inference_compiler: compiler(
+            identity.inference.source_digest,
+            identity.inference.compile_key,
+            identity.inference.header_manifest_digest,
+            identity.inference.nvrtc_version,
+            identity.inference.nvrtc_library_domain,
         ),
-        fixed_copyplan_loaded: true,
+        inference_copyplan_loaded: true,
         sm89_exact_f32_artifact: None,
         sm89_exact_f32_compiler: None,
         sm89_exact_f32_symbols_loaded: [false; 3],
@@ -7226,16 +7226,16 @@ pub(super) fn scalar_sm89_composed_test_facts(index: usize) -> ScalarLaunchFacts
     }
 }
 
-fn qualified_fixed_copyplan_environment(facts: ScalarLaunchFacts) -> bool {
+fn qualified_inference_copyplan_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
         && facts.multiprocessor_count == 142
-        && FIXED_COPYPLAN_EVIDENCE_COHORTS
+        && INFERENCE_COPYPLAN_EVIDENCE_COHORTS
             .iter()
             .copied()
             .any(|identity| identity.matches(facts))
 }
 
-const NN_FIXED_COPYPLAN_SM89_CELLS: [F32TriadShape; 4] = [
+const NN_INFERENCE_COPYPLAN_SM89_CELLS: [F32TriadShape; 4] = [
     F32TriadShape {
         m: 2048,
         k: 768,
@@ -7273,7 +7273,7 @@ const NN_FIXED_COPYPLAN_SM89_CELLS: [F32TriadShape; 4] = [
     },
 ];
 
-const NT_D768_OUT_FIXED_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
+const NT_D768_OUT_INFERENCE_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
     m: 2048,
     k: 1536,
     n: 768,
@@ -7282,7 +7282,7 @@ const NT_D768_OUT_FIXED_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
     ldc: 1536,
 };
 
-const NT_D768_IN_FIXED_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
+const NT_D768_IN_INFERENCE_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
     m: 2048,
     k: 768,
     n: 3072,
@@ -7291,7 +7291,7 @@ const NT_D768_IN_FIXED_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
     ldc: 768,
 };
 
-const NT_PRISM_FIXED_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
+const NT_PRISM_INFERENCE_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
     m: 4621,
     k: 384,
     n: 1928,
@@ -7808,56 +7808,56 @@ fn scalar_plan_with_admission(
         }
     }
     if fallback == (ScalarDispatchPlan::NnFinal { slim: false })
-        && fixed_overlay_admitted(admission, facts, qualified_fixed_copyplan_environment)
+        && inference_overlay_admitted(admission, facts, qualified_inference_copyplan_environment)
         && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nn
-        && NN_FIXED_COPYPLAN_SM89_CELLS.contains(&request.shape)
+        && NN_INFERENCE_COPYPLAN_SM89_CELLS.contains(&request.shape)
         && qualified_nn_m64n64_operands(operands)
     {
-        return Ok(ScalarDispatchPlan::NnSm89FixedCopyPlanQualified);
+        return Ok(ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
-        && fixed_overlay_admitted(admission, facts, qualified_fixed_copyplan_environment)
+        && inference_overlay_admitted(admission, facts, qualified_inference_copyplan_environment)
         && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
-        && request.shape == NT_D768_OUT_FIXED_COPYPLAN_SM89_CELL
+        && request.shape == NT_D768_OUT_INFERENCE_COPYPLAN_SM89_CELL
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
-        return Ok(ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified);
+        return Ok(ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
-        && fixed_overlay_admitted(
+        && inference_overlay_admitted(
             admission,
             facts,
-            qualified_nt_fixed_copyplan_sibling_environment,
+            qualified_nt_inference_copyplan_sibling_environment,
         )
         && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
-        && request.shape == NT_D768_IN_FIXED_COPYPLAN_SM89_CELL
+        && request.shape == NT_D768_IN_INFERENCE_COPYPLAN_SM89_CELL
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
-        return Ok(ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified);
+        return Ok(ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: true })
-        && fixed_overlay_admitted(
+        && inference_overlay_admitted(
             admission,
             facts,
-            qualified_nt_fixed_copyplan_sibling_environment,
+            qualified_nt_inference_copyplan_sibling_environment,
         )
         && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
-        && request.shape == NT_PRISM_FIXED_COPYPLAN_SM89_CELL
+        && request.shape == NT_PRISM_INFERENCE_COPYPLAN_SM89_CELL
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
-        return Ok(ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified);
+        return Ok(ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
-        && fixed_overlay_admitted(
+        && inference_overlay_admitted(
             admission,
             facts,
-            qualified_nt_fixed_copyplan_sibling_environment,
+            qualified_nt_inference_copyplan_sibling_environment,
         )
         && request.op == crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp::Nt
         && qualified_nt_large_deep_transpose_m64n64_request(request)
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
-        return Ok(ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified);
+        return Ok(ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified);
     }
     if fallback
         == (ScalarDispatchPlan::NtSplitKMain {
@@ -7998,7 +7998,7 @@ pub(super) enum ScalarDispatchPlan {
     NnSplitKSlim { chunks: u32 },
     NnM32N64SplitK32Qualified,
     NnM64N64Qualified,
-    NnSm89FixedCopyPlanQualified,
+    NnSm89InferenceCopyPlanQualified,
     NnFinal { slim: bool },
     TnGemv,
     TnNarrow,
@@ -8021,10 +8021,10 @@ pub(super) enum ScalarDispatchPlan {
     NtM2N16SplitK32Qualified,
     NtD768TransposeM64N64Qualified,
     NtD768OutTransposeM64N64Qualified,
-    NtD768OutSm89FixedCopyPlanQualified,
-    NtD768InSm89FixedCopyPlanQualified,
-    NtPrismSm89FixedCopyPlanQualified,
-    NtLargeDeepSm89FixedCopyPlanQualified,
+    NtD768OutSm89InferenceCopyPlanQualified,
+    NtD768InSm89InferenceCopyPlanQualified,
+    NtPrismSm89InferenceCopyPlanQualified,
+    NtLargeDeepSm89InferenceCopyPlanQualified,
     NtLargeDeepTransposeM64N64Qualified,
     NtPrismVectorQualified,
     NtD128OutTransposeM64N64Qualified,
@@ -8057,10 +8057,10 @@ impl ScalarDispatchPlan {
                 | Self::NtSplitKSlim { .. }
                 | Self::NtD768TransposeM64N64Qualified
                 | Self::NtD768OutTransposeM64N64Qualified
-                | Self::NtD768OutSm89FixedCopyPlanQualified
-                | Self::NtD768InSm89FixedCopyPlanQualified
-                | Self::NtPrismSm89FixedCopyPlanQualified
-                | Self::NtLargeDeepSm89FixedCopyPlanQualified
+                | Self::NtD768OutSm89InferenceCopyPlanQualified
+                | Self::NtD768InSm89InferenceCopyPlanQualified
+                | Self::NtPrismSm89InferenceCopyPlanQualified
+                | Self::NtLargeDeepSm89InferenceCopyPlanQualified
                 | Self::NtLargeDeepTransposeM64N64Qualified
                 | Self::NtPrismVectorQualified
                 | Self::NtD128OutTransposeM64N64Qualified
@@ -8396,12 +8396,13 @@ pub(super) fn nt_routes_to_big(
 #[cfg(test)]
 mod scalar_wave_policy_tests {
     use super::{
-        FIXED_COPYPLAN_EVIDENCE_COHORTS, FixedCopyPlanQualificationIdentity,
-        NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
-        NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES,
-        NtFixedCopyPlanComposedQualificationIdentity, ScalarDispatchPlan, ScalarLaunchFacts,
+        INFERENCE_COPYPLAN_EVIDENCE_COHORTS, InferenceCopyPlanQualificationIdentity,
+        NT_INFERENCE_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
+        NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES,
+        NtInferenceCopyPlanComposedQualificationIdentity, ScalarDispatchPlan, ScalarLaunchFacts,
         ScalarTransposeQualificationIdentity, TN_M16N16_SPLITM16_SM89_BINDINGS,
-        qualified_fixed_copyplan_environment, qualified_nt_fixed_copyplan_sibling_environment,
+        qualified_inference_copyplan_environment,
+        qualified_nt_inference_copyplan_sibling_environment,
         qualified_scalar_sm89_ada142_tn_environment, scalar_dispatch_plan, scalar_launch_plan,
         scalar_proof_plan,
     };
@@ -8416,10 +8417,10 @@ mod scalar_wave_policy_tests {
     #[derive(Clone, Copy)]
     struct MeasuredComposedRow {
         nvrtc: (i32, i32),
-        fixed_source: &'static str,
-        fixed_key: &'static str,
-        fixed_artifact: &'static str,
-        fixed_header: &'static str,
+        inference_source: &'static str,
+        inference_key: &'static str,
+        inference_artifact: &'static str,
+        inference_header: &'static str,
         scalar_key: &'static str,
         scalar_artifact: &'static str,
         scalar_header: &'static str,
@@ -8431,16 +8432,16 @@ mod scalar_wave_policy_tests {
         std::array::from_fn(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap())
     }
 
-    fn measured_composed_identities() -> [NtFixedCopyPlanComposedQualificationIdentity; 6] {
+    fn measured_composed_identities() -> [NtInferenceCopyPlanComposedQualificationIdentity; 6] {
         const SCALAR_SOURCE: &str =
             "9416834ab136a18f0b3a3bbf8eb0ffb3c03ff5cc4ffe6170d41243cc0b47978b";
         let rows = [
             MeasuredComposedRow {
                 nvrtc: (12, 8),
-                fixed_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
-                fixed_key: "282654a63f7610e3e77af8dc1abcb13ded34395aedfdb226726b9b9dd942f3f6",
-                fixed_artifact: "30536bd091dded36df4fbee464f09795fdd66a7a3c872e6cb3cec0b44005f2d3",
-                fixed_header: "295a1cf86db172a6655821a9f628f64bb13903e7da7f13af15f38542299d19ac",
+                inference_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
+                inference_key: "282654a63f7610e3e77af8dc1abcb13ded34395aedfdb226726b9b9dd942f3f6",
+                inference_artifact: "30536bd091dded36df4fbee464f09795fdd66a7a3c872e6cb3cec0b44005f2d3",
+                inference_header: "295a1cf86db172a6655821a9f628f64bb13903e7da7f13af15f38542299d19ac",
                 scalar_key: "5e6b98f74bd8a327400662febd1af4c553411ed887cba2793109540e80eb9ec2",
                 scalar_artifact: "e1719fb6d24412f4648b4de9078b418136db11cae9775d94a50b23f88fef4c2f",
                 scalar_header: "78ef000e57af74d26711e06bd0db8875623078b8a2f723a5d08267cc8b618c1b",
@@ -8448,10 +8449,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (12, 8),
-                fixed_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
-                fixed_key: "e89d08e6f5c657c90fbd852fc3b52e90d3feb7095be6093a2998915d3f39c4db",
-                fixed_artifact: "c73394a72691a9d5411b57733945f7fe0d6dc4c6ec3585d657a10b64f18e7784",
-                fixed_header: "5f48da53e800d422f11c63c1256ee27dd2061f197e3bcd5b728f8512e44ac599",
+                inference_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
+                inference_key: "e89d08e6f5c657c90fbd852fc3b52e90d3feb7095be6093a2998915d3f39c4db",
+                inference_artifact: "c73394a72691a9d5411b57733945f7fe0d6dc4c6ec3585d657a10b64f18e7784",
+                inference_header: "5f48da53e800d422f11c63c1256ee27dd2061f197e3bcd5b728f8512e44ac599",
                 scalar_key: "5e6b98f74bd8a327400662febd1af4c553411ed887cba2793109540e80eb9ec2",
                 scalar_artifact: "e1719fb6d24412f4648b4de9078b418136db11cae9775d94a50b23f88fef4c2f",
                 scalar_header: "78ef000e57af74d26711e06bd0db8875623078b8a2f723a5d08267cc8b618c1b",
@@ -8459,10 +8460,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 0),
-                fixed_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
-                fixed_key: "967191e863d46c5117d86ca71d933a259cb52b66fde2a889a927889e0d025799",
-                fixed_artifact: "1d91d36540f32f6c8916c694eb75e0be8c70fab3592970b0ab45781eab2513a0",
-                fixed_header: "41b43208b8dc3170422e357e10cb2ee0ca084b0a93efe01ff1d4e3c39fd33cc2",
+                inference_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
+                inference_key: "967191e863d46c5117d86ca71d933a259cb52b66fde2a889a927889e0d025799",
+                inference_artifact: "1d91d36540f32f6c8916c694eb75e0be8c70fab3592970b0ab45781eab2513a0",
+                inference_header: "41b43208b8dc3170422e357e10cb2ee0ca084b0a93efe01ff1d4e3c39fd33cc2",
                 scalar_key: "51c9efaa276bcc2ac1ce6b30b3e6927024c64a687e941ca05874530c32768a71",
                 scalar_artifact: "fc62774bb7949fdfd110fa3cf5c5ba247aa155d100fb5c2750fcd537711220fe",
                 scalar_header: "475e4e498b296f3e90a23e225826d1e980d8b2c5d1f4ebfd3d6471af6f081aaa",
@@ -8470,10 +8471,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 0),
-                fixed_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
-                fixed_key: "3e6ac45e967eec817ca7a3ea707998ce94ab3ce7ce4fd35c9e99670ad10c32d9",
-                fixed_artifact: "9efa64a93f96d87aa2cebef1cb9e7c420bb9e90c05c6d892c0a6da78c8ab98c4",
-                fixed_header: "b78320a6a4164d73d7e0f06528797361d884d564a8326491bcbc788faad2129e",
+                inference_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
+                inference_key: "3e6ac45e967eec817ca7a3ea707998ce94ab3ce7ce4fd35c9e99670ad10c32d9",
+                inference_artifact: "9efa64a93f96d87aa2cebef1cb9e7c420bb9e90c05c6d892c0a6da78c8ab98c4",
+                inference_header: "b78320a6a4164d73d7e0f06528797361d884d564a8326491bcbc788faad2129e",
                 scalar_key: "51c9efaa276bcc2ac1ce6b30b3e6927024c64a687e941ca05874530c32768a71",
                 scalar_artifact: "fc62774bb7949fdfd110fa3cf5c5ba247aa155d100fb5c2750fcd537711220fe",
                 scalar_header: "475e4e498b296f3e90a23e225826d1e980d8b2c5d1f4ebfd3d6471af6f081aaa",
@@ -8481,10 +8482,10 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 2),
-                fixed_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
-                fixed_key: "40eab522feb529a219cf48bb260931aea2ca79e3ef0b8ca7dead893ae1df3f18",
-                fixed_artifact: "83d09c71605c62dda65908bbb6ff1cede9955b136ba4f0b918d9044d4d1e45e4",
-                fixed_header: "9c252669c2a99bd2806def4a4126aaa43e9607f3a4d26b709e3c9f093d7af436",
+                inference_source: "e46af1e315d323db6abf5ad17569367150b63205a9f75173aaf8081db45e0e90",
+                inference_key: "40eab522feb529a219cf48bb260931aea2ca79e3ef0b8ca7dead893ae1df3f18",
+                inference_artifact: "83d09c71605c62dda65908bbb6ff1cede9955b136ba4f0b918d9044d4d1e45e4",
+                inference_header: "9c252669c2a99bd2806def4a4126aaa43e9607f3a4d26b709e3c9f093d7af436",
                 scalar_key: "4da75847635f4807e90eaf615d17288b5c9435f1f878b9740a3d2f05420564d1",
                 scalar_artifact: "ce10ede6e5367d9ffb3ed76ebf6e63232b7fe2b9d4ee45b8b705bd64cf97dc90",
                 scalar_header: "060fa778005317eab70870f54eb8f6b81ef6a768a7bd81ee0a7220dd5a53e754",
@@ -8492,17 +8493,17 @@ mod scalar_wave_policy_tests {
             },
             MeasuredComposedRow {
                 nvrtc: (13, 2),
-                fixed_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
-                fixed_key: "f452666b5fa9d778b389a60dd4140e82fba2b7ad9b115375ec8f78d51e56c9da",
-                fixed_artifact: "399baf5d13de2abf55c6b7ce55b061096892a36e9b4e13ba2052fb04699a5b73",
-                fixed_header: "f5cc41fa052dc07c004efc252c5765266d97a3410efb4ef9a6e59f36be5b544f",
+                inference_source: "73111d550cd33778cba12f27eb38cc8b30e417b40b6469f3f36ddc3815e0dcab",
+                inference_key: "f452666b5fa9d778b389a60dd4140e82fba2b7ad9b115375ec8f78d51e56c9da",
+                inference_artifact: "399baf5d13de2abf55c6b7ce55b061096892a36e9b4e13ba2052fb04699a5b73",
+                inference_header: "f5cc41fa052dc07c004efc252c5765266d97a3410efb4ef9a6e59f36be5b544f",
                 scalar_key: "4da75847635f4807e90eaf615d17288b5c9435f1f878b9740a3d2f05420564d1",
                 scalar_artifact: "ce10ede6e5367d9ffb3ed76ebf6e63232b7fe2b9d4ee45b8b705bd64cf97dc90",
                 scalar_header: "060fa778005317eab70870f54eb8f6b81ef6a768a7bd81ee0a7220dd5a53e754",
                 library: "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
             },
         ];
-        rows.map(|row| NtFixedCopyPlanComposedQualificationIdentity {
+        rows.map(|row| NtInferenceCopyPlanComposedQualificationIdentity {
             scalar: ScalarTransposeQualificationIdentity {
                 nvrtc_version: row.nvrtc,
                 compile_key: digest(row.scalar_key),
@@ -8511,19 +8512,19 @@ mod scalar_wave_policy_tests {
                 header_manifest_digest: digest(row.scalar_header),
                 nvrtc_library_domain: digest(row.library),
             },
-            fixed: FixedCopyPlanQualificationIdentity {
+            inference: InferenceCopyPlanQualificationIdentity {
                 nvrtc_version: row.nvrtc,
-                compile_key: digest(row.fixed_key),
-                artifact_digest: digest(row.fixed_artifact),
-                source_digest: digest(row.fixed_source),
-                header_manifest_digest: digest(row.fixed_header),
+                compile_key: digest(row.inference_key),
+                artifact_digest: digest(row.inference_artifact),
+                source_digest: digest(row.inference_source),
+                header_manifest_digest: digest(row.inference_header),
                 nvrtc_library_domain: digest(row.library),
             },
         })
     }
 
     fn facts_for_measured_pair(
-        identity: NtFixedCopyPlanComposedQualificationIdentity,
+        identity: NtInferenceCopyPlanComposedQualificationIdentity,
     ) -> ScalarLaunchFacts {
         let compiler = |source_digest,
                         invocation_digest,
@@ -8557,20 +8558,20 @@ mod scalar_wave_policy_tests {
                 identity.scalar.nvrtc_version,
                 identity.scalar.nvrtc_library_domain,
             ),
-            fixed_artifact: ArtifactIdentity {
-                module_kind: ModuleKind::Fixed,
+            inference_artifact: ArtifactIdentity {
+                module_kind: ModuleKind::Inference,
                 artifact_kind: ArtifactKind::Ptx,
-                compile_key: identity.fixed.compile_key,
-                artifact_digest: identity.fixed.artifact_digest,
+                compile_key: identity.inference.compile_key,
+                artifact_digest: identity.inference.artifact_digest,
             },
-            fixed_compiler: compiler(
-                identity.fixed.source_digest,
-                identity.fixed.compile_key,
-                identity.fixed.header_manifest_digest,
-                identity.fixed.nvrtc_version,
-                identity.fixed.nvrtc_library_domain,
+            inference_compiler: compiler(
+                identity.inference.source_digest,
+                identity.inference.compile_key,
+                identity.inference.header_manifest_digest,
+                identity.inference.nvrtc_version,
+                identity.inference.nvrtc_library_domain,
             ),
-            fixed_copyplan_loaded: true,
+            inference_copyplan_loaded: true,
             sm89_exact_f32_artifact: None,
             sm89_exact_f32_compiler: None,
             sm89_exact_f32_symbols_loaded: [false; 3],
@@ -8628,14 +8629,14 @@ mod scalar_wave_policy_tests {
                 artifact_digest: [6; 32],
             },
             scalar_compiler: compiler,
-            fixed_artifact: ArtifactIdentity {
-                module_kind: ModuleKind::Fixed,
+            inference_artifact: ArtifactIdentity {
+                module_kind: ModuleKind::Inference,
                 artifact_kind: ArtifactKind::Ptx,
                 compile_key: [0; 32],
                 artifact_digest: [0; 32],
             },
-            fixed_compiler: compiler,
-            fixed_copyplan_loaded: false,
+            inference_compiler: compiler,
+            inference_copyplan_loaded: false,
             sm89_exact_f32_artifact: None,
             sm89_exact_f32_compiler: None,
             sm89_exact_f32_symbols_loaded: [false; 3],
@@ -8691,8 +8692,8 @@ mod scalar_wave_policy_tests {
         }
     }
 
-    fn fixed_copyplan_facts(index: usize) -> ScalarLaunchFacts {
-        let identity = FIXED_COPYPLAN_EVIDENCE_COHORTS[index];
+    fn inference_copyplan_facts(index: usize) -> ScalarLaunchFacts {
+        let identity = INFERENCE_COPYPLAN_EVIDENCE_COHORTS[index];
         let compiler = CompilerIdentity {
             source_digest: identity.source_digest,
             invocation_digest: identity.compile_key,
@@ -8718,14 +8719,14 @@ mod scalar_wave_policy_tests {
                 invocation_digest: [8; 32],
                 ..compiler
             },
-            fixed_artifact: ArtifactIdentity {
-                module_kind: ModuleKind::Fixed,
+            inference_artifact: ArtifactIdentity {
+                module_kind: ModuleKind::Inference,
                 artifact_kind: ArtifactKind::Ptx,
                 compile_key: identity.compile_key,
                 artifact_digest: identity.artifact_digest,
             },
-            fixed_compiler: compiler,
-            fixed_copyplan_loaded: true,
+            inference_compiler: compiler,
+            inference_copyplan_loaded: true,
             sm89_exact_f32_artifact: None,
             sm89_exact_f32_compiler: None,
             sm89_exact_f32_symbols_loaded: [false; 3],
@@ -8737,9 +8738,9 @@ mod scalar_wave_policy_tests {
         }
     }
 
-    fn nt_fixed_copyplan_sibling_facts(index: usize) -> ScalarLaunchFacts {
-        let identity = NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[index];
-        let mut facts = fixed_copyplan_facts(index);
+    fn nt_inference_copyplan_sibling_facts(index: usize) -> ScalarLaunchFacts {
+        let identity = NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES[index];
+        let mut facts = inference_copyplan_facts(index);
         facts.scalar_artifact = ArtifactIdentity {
             module_kind: ModuleKind::TriadScalar,
             artifact_kind: ArtifactKind::Ptx,
@@ -9346,7 +9347,7 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nn_fixed_copyplan_selector_admits_only_the_exact_measured_cells() {
+    fn nn_inference_copyplan_selector_admits_only_the_exact_measured_cells() {
         let operands = nn_qualified_operands();
         let cells = [
             (2_048, 768, 3_072),
@@ -9354,13 +9355,13 @@ mod scalar_wave_policy_tests {
             (4_621, 384, 1_928),
             (4_096, 3_072, 1_536),
         ];
-        for cohort in 0..FIXED_COPYPLAN_EVIDENCE_COHORTS.len() {
-            let facts = fixed_copyplan_facts(cohort);
+        for cohort in 0..INFERENCE_COPYPLAN_EVIDENCE_COHORTS.len() {
+            let facts = inference_copyplan_facts(cohort);
             for dims in cells {
                 let plan = scalar_launch_plan(facts, nn_qualified_request(dims), operands).unwrap();
                 assert_eq!(
                     format!("{plan:?}"),
-                    "NnSm89FixedCopyPlanQualified",
+                    "NnSm89InferenceCopyPlanQualified",
                     "cohort {cohort} cell {dims:?}"
                 );
             }
@@ -9368,9 +9369,9 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nn_fixed_copyplan_selector_fails_closed_to_the_prior_plan() {
-        const SELECTED: &str = "NnSm89FixedCopyPlanQualified";
-        let facts = fixed_copyplan_facts(2);
+    fn nn_inference_copyplan_selector_fails_closed_to_the_prior_plan() {
+        const SELECTED: &str = "NnSm89InferenceCopyPlanQualified";
+        let facts = inference_copyplan_facts(2);
         let operands = nn_qualified_operands();
         let request = nn_qualified_request((2_048, 1_536, 768));
         let fallback = scalar_dispatch_plan(request, facts.multiprocessor_count).unwrap();
@@ -9498,31 +9499,31 @@ mod scalar_wave_policy_tests {
         mutation.multiprocessor_count = 141;
         mutations.push(mutation);
         mutation = facts;
-        mutation.fixed_copyplan_loaded = false;
+        mutation.inference_copyplan_loaded = false;
         mutations.push(mutation);
         mutation = facts;
-        mutation.fixed_compiler.nvrtc_version = (13, 1);
+        mutation.inference_compiler.nvrtc_version = (13, 1);
         mutations.push(mutation);
         mutation = facts;
-        mutation.fixed_compiler.source_digest[0] ^= 1;
+        mutation.inference_compiler.source_digest[0] ^= 1;
         mutations.push(mutation);
         mutation = facts;
-        mutation.fixed_compiler.invocation_digest[0] ^= 1;
+        mutation.inference_compiler.invocation_digest[0] ^= 1;
         mutations.push(mutation);
         mutation = facts;
-        mutation.fixed_compiler.header_manifest_digest[0] ^= 1;
+        mutation.inference_compiler.header_manifest_digest[0] ^= 1;
         mutations.push(mutation);
         mutation = facts;
-        mutation.fixed_compiler.nvrtc_library_domain[0] ^= 1;
+        mutation.inference_compiler.nvrtc_library_domain[0] ^= 1;
         mutations.push(mutation);
         mutation = facts;
-        mutation.fixed_artifact.compile_key[0] ^= 1;
+        mutation.inference_artifact.compile_key[0] ^= 1;
         mutations.push(mutation);
         mutation = facts;
-        mutation.fixed_artifact.artifact_digest[0] ^= 1;
+        mutation.inference_artifact.artifact_digest[0] ^= 1;
         mutations.push(mutation);
         mutation = facts;
-        mutation.fixed_artifact.module_kind = ModuleKind::TriadScalar;
+        mutation.inference_artifact.module_kind = ModuleKind::TriadScalar;
         mutations.push(mutation);
         for mutation in mutations {
             assert_eq!(
@@ -9678,14 +9679,14 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn other_sm80_boards_reach_the_fixed_copyplan_routes_through_the_proof_tier() {
-        let ada = fixed_copyplan_facts(2);
+    fn other_sm80_boards_reach_the_inference_copyplan_routes_through_the_proof_tier() {
+        let ada = inference_copyplan_facts(2);
         let operands = nn_qualified_operands();
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nt,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (2_048, 1_536, 768)),
         };
-        let selected = ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified;
+        let selected = ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified;
         assert_eq!(
             scalar_proof_plan(ada, request, operands).unwrap(),
             Some(selected)
@@ -9719,7 +9720,7 @@ mod scalar_wave_policy_tests {
         }
         let unloaded = ScalarLaunchFacts {
             compute_capability: (9, 0),
-            fixed_copyplan_loaded: false,
+            inference_copyplan_loaded: false,
             ..ada
         };
         assert_eq!(
@@ -9729,14 +9730,14 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nt_d768_out_fixed_copyplan_selector_is_one_exact_measured_cell() {
-        let facts = fixed_copyplan_facts(2);
+    fn nt_d768_out_inference_copyplan_selector_is_one_exact_measured_cell() {
+        let facts = inference_copyplan_facts(2);
         let operands = nn_qualified_operands();
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nt,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (2_048, 1_536, 768)),
         };
-        let selected = ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified;
+        let selected = ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified;
         assert_eq!(
             scalar_dispatch_plan(request, facts.multiprocessor_count).unwrap(),
             ScalarDispatchPlan::NtFinal { slim: false }
@@ -9771,15 +9772,15 @@ mod scalar_wave_policy_tests {
                 "neighbor {dims:?}"
             );
         }
-        for cohort in 0..FIXED_COPYPLAN_EVIDENCE_COHORTS.len() {
+        for cohort in 0..INFERENCE_COPYPLAN_EVIDENCE_COHORTS.len() {
             assert_eq!(
-                scalar_launch_plan(fixed_copyplan_facts(cohort), request, operands).unwrap(),
+                scalar_launch_plan(inference_copyplan_facts(cohort), request, operands).unwrap(),
                 selected,
                 "cohort {cohort}"
             );
         }
         let mut absent = facts;
-        absent.fixed_copyplan_loaded = false;
+        absent.inference_copyplan_loaded = false;
         assert_eq!(
             scalar_launch_plan(absent, request, operands).unwrap(),
             ScalarDispatchPlan::NtFinal { slim: false }
@@ -9787,33 +9788,33 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nt_fixed_copyplan_sibling_selector_admits_only_all_six_measured_cohorts() {
+    fn nt_inference_copyplan_sibling_selector_admits_only_all_six_measured_cohorts() {
         assert_eq!(
-            NT_FIXED_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
-            NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES,
+            NT_INFERENCE_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
+            NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES,
             "admission must contain exactly the six measured composed candidates"
         );
     }
 
     #[test]
-    fn triad_retained_identity_fixed_scalar_pairs_match_the_six_measured_cohorts() {
+    fn triad_retained_identity_inference_scalar_pairs_match_the_six_measured_cohorts() {
         let expected = measured_composed_identities();
         assert_eq!(
-            NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len(),
+            NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len(),
             6,
             "the six capacity-specific measured pairs must all be staged"
         );
-        assert_eq!(FIXED_COPYPLAN_EVIDENCE_COHORTS.len(), 6);
+        assert_eq!(INFERENCE_COPYPLAN_EVIDENCE_COHORTS.len(), 6);
 
         for (index, identity) in expected.iter().copied().enumerate() {
             let facts = facts_for_measured_pair(identity);
             assert!(
-                qualified_fixed_copyplan_environment(facts),
-                "Fixed cohort {index}"
+                qualified_inference_copyplan_environment(facts),
+                "Inference cohort {index}"
             );
             assert!(
-                qualified_nt_fixed_copyplan_sibling_environment(facts),
-                "scalar+Fixed cohort {index}"
+                qualified_nt_inference_copyplan_sibling_environment(facts),
+                "scalar+Inference cohort {index}"
             );
             assert!(
                 qualified_scalar_sm89_ada142_tn_environment(facts),
@@ -9822,19 +9823,27 @@ mod scalar_wave_policy_tests {
 
             let mut changed = facts;
             changed.scalar_compiler.nvrtc_version.1 += 1;
-            changed.fixed_compiler.nvrtc_version.1 += 1;
-            assert!(!qualified_nt_fixed_copyplan_sibling_environment(changed));
+            changed.inference_compiler.nvrtc_version.1 += 1;
+            assert!(!qualified_nt_inference_copyplan_sibling_environment(
+                changed
+            ));
             let mut changed = facts;
-            changed.fixed_compiler.source_digest[0] ^= 1;
-            assert!(!qualified_fixed_copyplan_environment(changed));
-            assert!(!qualified_nt_fixed_copyplan_sibling_environment(changed));
+            changed.inference_compiler.source_digest[0] ^= 1;
+            assert!(!qualified_inference_copyplan_environment(changed));
+            assert!(!qualified_nt_inference_copyplan_sibling_environment(
+                changed
+            ));
             let mut changed = facts;
             changed.scalar_artifact.compile_key[0] ^= 1;
-            assert!(!qualified_nt_fixed_copyplan_sibling_environment(changed));
+            assert!(!qualified_nt_inference_copyplan_sibling_environment(
+                changed
+            ));
             let mut changed = facts;
-            changed.fixed_artifact.artifact_digest[0] ^= 1;
-            assert!(!qualified_fixed_copyplan_environment(changed));
-            assert!(!qualified_nt_fixed_copyplan_sibling_environment(changed));
+            changed.inference_artifact.artifact_digest[0] ^= 1;
+            assert!(!qualified_inference_copyplan_environment(changed));
+            assert!(!qualified_nt_inference_copyplan_sibling_environment(
+                changed
+            ));
 
             let other_toolkit = expected[(index + 2) % expected.len()].scalar;
             let mut crossed = facts;
@@ -9845,16 +9854,18 @@ mod scalar_wave_policy_tests {
             crossed.scalar_compiler.header_manifest_digest = other_toolkit.header_manifest_digest;
             crossed.scalar_compiler.nvrtc_version = other_toolkit.nvrtc_version;
             crossed.scalar_compiler.nvrtc_library_domain = other_toolkit.nvrtc_library_domain;
-            assert!(qualified_fixed_copyplan_environment(crossed));
-            assert!(!qualified_nt_fixed_copyplan_sibling_environment(crossed));
+            assert!(qualified_inference_copyplan_environment(crossed));
+            assert!(!qualified_nt_inference_copyplan_sibling_environment(
+                crossed
+            ));
         }
 
         assert_eq!(
-            NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES,
+            NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES,
             expected.as_slice()
         );
         assert_eq!(
-            NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES
+            NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES
                 .iter()
                 .map(|identity| identity.scalar.compile_key)
                 .collect::<std::collections::BTreeSet<_>>()
@@ -9868,25 +9879,25 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nt_fixed_copyplan_sibling_selector_admits_both_retained_cells() {
+    fn nt_inference_copyplan_sibling_selector_admits_both_retained_cells() {
         let operands = nn_qualified_operands();
         let cells = [
             (
                 (2_048, 768, 3_072),
-                ScalarDispatchPlan::NtD768InSm89FixedCopyPlanQualified,
+                ScalarDispatchPlan::NtD768InSm89InferenceCopyPlanQualified,
                 ScalarDispatchPlan::NtFinal { slim: false },
             ),
             (
                 (4_621, 384, 1_928),
-                ScalarDispatchPlan::NtPrismSm89FixedCopyPlanQualified,
+                ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified,
                 ScalarDispatchPlan::NtFinal { slim: true },
             ),
         ];
-        for (cohort, candidate) in NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES
+        for (cohort, candidate) in NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES
             .iter()
             .enumerate()
         {
-            let facts = nt_fixed_copyplan_sibling_facts(cohort);
+            let facts = nt_inference_copyplan_sibling_facts(cohort);
             assert!(
                 candidate.matches(facts),
                 "cohort {cohort} candidate identity"
@@ -9911,17 +9922,17 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nt_fixed_copyplan_sibling_admission_does_not_change_existing_nn_or_d768_out_routes() {
+    fn nt_inference_copyplan_sibling_admission_does_not_change_existing_nn_or_d768_out_routes() {
         let operands = nn_qualified_operands();
-        for cohort in 0..NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len() {
-            let facts = nt_fixed_copyplan_sibling_facts(cohort);
+        for cohort in 0..NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len() {
+            let facts = nt_inference_copyplan_sibling_facts(cohort);
             let nn = F32TriadRequest {
                 op: ResolvedGemmOp::Nn,
                 shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (2_048, 768, 3_072)),
             };
             assert_eq!(
                 scalar_launch_plan(facts, nn, operands).unwrap(),
-                ScalarDispatchPlan::NnSm89FixedCopyPlanQualified,
+                ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified,
                 "cohort {cohort} NN"
             );
             let d768_out = F32TriadRequest {
@@ -9930,14 +9941,14 @@ mod scalar_wave_policy_tests {
             };
             assert_eq!(
                 scalar_launch_plan(facts, d768_out, operands).unwrap(),
-                ScalarDispatchPlan::NtD768OutSm89FixedCopyPlanQualified,
+                ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified,
                 "cohort {cohort} d768-out"
             );
         }
     }
 
     #[test]
-    fn triad_retained_scalar_ada_tn_m16n16_is_exact_and_fixed_holder_independent() {
+    fn triad_retained_scalar_ada_tn_m16n16_is_exact_and_inference_holder_independent() {
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Tn,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Tn, (256, 512, 384)),
@@ -9947,10 +9958,10 @@ mod scalar_wave_policy_tests {
             ..nn_qualified_operands()
         };
         for cohort in [0, 2, 4] {
-            let mut facts = nt_fixed_copyplan_sibling_facts(cohort);
-            facts.fixed_copyplan_loaded = false;
-            facts.fixed_artifact.compile_key = [0; 32];
-            facts.fixed_artifact.artifact_digest = [0; 32];
+            let mut facts = nt_inference_copyplan_sibling_facts(cohort);
+            facts.inference_copyplan_loaded = false;
+            facts.inference_artifact.compile_key = [0; 32];
+            facts.inference_artifact.artifact_digest = [0; 32];
             assert_eq!(
                 scalar_launch_plan(facts, request, operands).unwrap(),
                 ScalarDispatchPlan::TnM16N16SplitM16Qualified,
@@ -9966,7 +9977,7 @@ mod scalar_wave_policy_tests {
                 chunks: 16,
             }
         );
-        let facts = nt_fixed_copyplan_sibling_facts(2);
+        let facts = nt_inference_copyplan_sibling_facts(2);
         for dims in [(257, 512, 384), (256, 513, 384), (256, 512, 385)] {
             assert_ne!(
                 scalar_launch_plan(
@@ -10111,22 +10122,26 @@ mod scalar_wave_policy_tests {
         let operands = nn_qualified_operands();
         let fallback = scalar_dispatch_plan(request, RTX_6000_ADA_SMS).unwrap();
         assert_eq!(fallback, ScalarDispatchPlan::NtFinal { slim: false });
-        for cohort in 0..NT_FIXED_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len() {
+        for cohort in 0..NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len() {
             assert_eq!(
-                scalar_launch_plan(nt_fixed_copyplan_sibling_facts(cohort), request, operands,)
-                    .unwrap(),
-                ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified,
+                scalar_launch_plan(
+                    nt_inference_copyplan_sibling_facts(cohort),
+                    request,
+                    operands,
+                )
+                .unwrap(),
+                ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified,
                 "composed cohort {cohort}"
             );
         }
 
-        let facts = nt_fixed_copyplan_sibling_facts(2);
-        let other = nt_fixed_copyplan_sibling_facts(1);
+        let facts = nt_inference_copyplan_sibling_facts(2);
+        let other = nt_inference_copyplan_sibling_facts(1);
         let mut pair_mismatch = facts;
-        pair_mismatch.fixed_artifact = other.fixed_artifact;
-        pair_mismatch.fixed_compiler = other.fixed_compiler;
+        pair_mismatch.inference_artifact = other.inference_artifact;
+        pair_mismatch.inference_compiler = other.inference_compiler;
         let mut holder_missing = facts;
-        holder_missing.fixed_copyplan_loaded = false;
+        holder_missing.inference_copyplan_loaded = false;
         for mutation in [pair_mismatch, holder_missing] {
             assert_eq!(
                 scalar_launch_plan(mutation, request, operands).unwrap(),
@@ -10150,7 +10165,7 @@ mod scalar_wave_policy_tests {
                     operands,
                 )
                 .unwrap(),
-                ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+                ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
             );
         }
         for shape in [
@@ -10177,7 +10192,7 @@ mod scalar_wave_policy_tests {
                     operands,
                 )
                 .unwrap(),
-                ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+                ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
             );
         }
         for shape in [
@@ -10213,7 +10228,7 @@ mod scalar_wave_policy_tests {
             };
             assert_ne!(
                 scalar_launch_plan(facts, wrong_op, operands).unwrap(),
-                ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+                ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
             );
         }
         for mutation in [
@@ -10250,14 +10265,14 @@ mod scalar_wave_policy_tests {
         ] {
             assert_ne!(
                 scalar_launch_plan(facts, request, mutation).unwrap(),
-                ScalarDispatchPlan::NtLargeDeepSm89FixedCopyPlanQualified
+                ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
             );
         }
     }
 
     #[test]
-    fn nt_fixed_copyplan_sibling_selector_fails_closed_on_contract_mutations() {
-        let facts = nt_fixed_copyplan_sibling_facts(2);
+    fn nt_inference_copyplan_sibling_selector_fails_closed_on_contract_mutations() {
+        let facts = nt_inference_copyplan_sibling_facts(2);
         let operands = nn_qualified_operands();
         for (dims, fallback) in [
             (
@@ -10367,43 +10382,43 @@ mod scalar_wave_policy_tests {
             mutation.multiprocessor_count = 141;
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_copyplan_loaded = false;
+            mutation.inference_copyplan_loaded = false;
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_compiler.nvrtc_version = (13, 1);
+            mutation.inference_compiler.nvrtc_version = (13, 1);
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_compiler.source_digest[0] ^= 1;
+            mutation.inference_compiler.source_digest[0] ^= 1;
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_compiler.invocation_digest[0] ^= 1;
+            mutation.inference_compiler.invocation_digest[0] ^= 1;
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_compiler.header_manifest_digest[0] ^= 1;
+            mutation.inference_compiler.header_manifest_digest[0] ^= 1;
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_compiler.nvrtc_library_domain[0] ^= 1;
+            mutation.inference_compiler.nvrtc_library_domain[0] ^= 1;
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_artifact.compile_key[0] ^= 1;
+            mutation.inference_artifact.compile_key[0] ^= 1;
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_artifact.artifact_digest[0] ^= 1;
+            mutation.inference_artifact.artifact_digest[0] ^= 1;
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_artifact.module_kind = ModuleKind::TriadScalar;
+            mutation.inference_artifact.module_kind = ModuleKind::TriadScalar;
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_artifact.artifact_kind = ArtifactKind::Cubin;
+            mutation.inference_artifact.artifact_kind = ArtifactKind::Cubin;
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_compiler.target = CudaTarget::new("compute_89").unwrap();
+            mutation.inference_compiler.target = CudaTarget::new("compute_89").unwrap();
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_compiler.nvrtc_library_known = false;
+            mutation.inference_compiler.nvrtc_library_known = false;
             environment_mutations.push(mutation);
             mutation = facts;
-            mutation.fixed_compiler.output_kind = ArtifactKind::Cubin;
+            mutation.inference_compiler.output_kind = ArtifactKind::Cubin;
             environment_mutations.push(mutation);
             mutation = facts;
             mutation.scalar_artifact.module_kind = ModuleKind::TriadSm80;
@@ -13068,8 +13083,8 @@ mod sm120_tests {
 #[cfg(test)]
 mod tf32_tests {
     use super::{
-        FIXED_COPYPLAN_EVIDENCE_COHORTS, FIXED_COPYPLAN_SOURCE_DIGEST_CAP16,
-        FIXED_COPYPLAN_SOURCE_DIGEST_CAP64, SM89_EXACT_F32_D128_EVIDENCE_COHORTS,
+        INFERENCE_COPYPLAN_EVIDENCE_COHORTS, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16,
+        INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64, SM89_EXACT_F32_D128_EVIDENCE_COHORTS,
         SM89_EXACT_F32_EVIDENCE_COHORTS, SM89_FINALIST_TF32_EVIDENCE_COHORTS,
         SM89_JOINT_TF32_EVIDENCE_COHORTS, SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
         SM89_JOINT_TF32_IDENTITY_CUDA_13_0, SM89_JOINT_TF32_IDENTITY_CUDA_13_2,
@@ -13702,9 +13717,9 @@ mod tf32_tests {
 
     fn sm120_identity_mutations() -> [fn(&mut Tf32QualifiedModule); 26] {
         [
-            |module| module.module_kind = ModuleKind::Fixed,
+            |module| module.module_kind = ModuleKind::Inference,
             |module| module.target = CudaTarget::new("compute_121").unwrap(),
-            |module| module.artifact.module_kind = ModuleKind::Fixed,
+            |module| module.artifact.module_kind = ModuleKind::Inference,
             |module| module.artifact.artifact_kind = ArtifactKind::Cubin,
             |module| module.artifact.compile_key[0] ^= 1,
             |module| module.artifact.artifact_digest[0] ^= 1,
@@ -13756,8 +13771,8 @@ mod tf32_tests {
                 module.device_caps.nvrtc_version = (13, 1);
             },
             |module| {
-                module.module_kind = ModuleKind::Fixed;
-                module.artifact.module_kind = ModuleKind::Fixed;
+                module.module_kind = ModuleKind::Inference;
+                module.artifact.module_kind = ModuleKind::Inference;
             },
         ]
     }
@@ -15441,44 +15456,44 @@ mod tf32_tests {
         }
     }
 
-    /// The Fixed module is composed from the Mamba kernels and the portable
-    /// module carries the stream-K kernel; an edit to any of those sources
-    /// moves the module identity these Ada cohorts pin, and the routes they
-    /// admit fall back without any test noticing. Hold every Ada cohort to
-    /// the source this tree composes so such an edit fails here first.
+    /// The portable module carries the stream-K kernel and the Inference
+    /// module the copy-plan GEMMs; an edit to any of those sources moves the
+    /// module identity these Ada cohorts pin, and the routes they admit fall
+    /// back without any test noticing. Hold every Ada cohort to the source
+    /// this tree composes so such an edit fails here first.
     #[test]
     fn every_ada_cohort_matches_the_source_this_tree_composes() {
         let live = |kind| {
             super::super::modules::module_source_digest(kind, "sm_89")
                 .unwrap_or_else(|error| panic!("compose {kind:?} for sm_89: {error}"))
         };
-        let fixed = [
-            ((12, 8), 16, FIXED_COPYPLAN_SOURCE_DIGEST_CAP16),
-            ((12, 8), 64, FIXED_COPYPLAN_SOURCE_DIGEST_CAP64),
-            ((13, 0), 16, FIXED_COPYPLAN_SOURCE_DIGEST_CAP16),
-            ((13, 0), 64, FIXED_COPYPLAN_SOURCE_DIGEST_CAP64),
-            ((13, 2), 16, FIXED_COPYPLAN_SOURCE_DIGEST_CAP16),
-            ((13, 2), 64, FIXED_COPYPLAN_SOURCE_DIGEST_CAP64),
+        let inference = [
+            ((12, 8), 16, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16),
+            ((12, 8), 64, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64),
+            ((13, 0), 16, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16),
+            ((13, 0), 64, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64),
+            ((13, 2), 16, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP16),
+            ((13, 2), 64, INFERENCE_COPYPLAN_SOURCE_DIGEST_CAP64),
         ];
-        assert_eq!(FIXED_COPYPLAN_EVIDENCE_COHORTS.len(), fixed.len());
+        assert_eq!(INFERENCE_COPYPLAN_EVIDENCE_COHORTS.len(), inference.len());
         for (cohort, (nvrtc, state_cap, expected_source)) in
-            FIXED_COPYPLAN_EVIDENCE_COHORTS.iter().zip(fixed)
+            INFERENCE_COPYPLAN_EVIDENCE_COHORTS.iter().zip(inference)
         {
             assert_eq!(cohort.nvrtc_version, nvrtc);
             assert_eq!(cohort.source_digest, expected_source);
             let digest = super::super::modules::module_source_digest_for_compile(
-                ModuleKind::Fixed,
+                ModuleKind::Inference,
                 Some((8, 9)),
                 "sm_89",
                 state_cap,
                 nvrtc,
             )
             .unwrap_or_else(|error| {
-                panic!("compose Fixed for CUDA {nvrtc:?} cap{state_cap}: {error}")
+                panic!("compose Inference for CUDA {nvrtc:?} cap{state_cap}: {error}")
             });
             assert_eq!(
                 cohort.source_digest, digest,
-                "a Fixed copy-plan cohort pins a pre-overlay or stale source"
+                "an Inference copy-plan cohort pins a pre-overlay or stale source"
             );
         }
         let tf32 = [
@@ -16442,9 +16457,9 @@ mod tf32_tests {
             beta: 0.0,
         };
         let mutations: [fn(&mut Tf32QualifiedModule); 26] = [
-            |module| module.module_kind = ModuleKind::Fixed,
+            |module| module.module_kind = ModuleKind::Inference,
             |module| module.target = CudaTarget::new("sm_80").unwrap(),
-            |module| module.artifact.module_kind = ModuleKind::Fixed,
+            |module| module.artifact.module_kind = ModuleKind::Inference,
             |module| module.artifact.artifact_kind = ArtifactKind::Cubin,
             |module| module.artifact.compile_key[0] ^= 1,
             |module| module.artifact.artifact_digest[0] ^= 1,

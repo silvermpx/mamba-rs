@@ -1,4 +1,4 @@
-//! Finite storage-bit corpus for Fixed F32/TF32 qualification.
+//! Finite storage-bit corpus for Inference F32/TF32 qualification.
 //! Kept independent of CUDA so its coverage can be checked with native rustc.
 
 /// Retains the test-only W4 discovery generator's exact bits. This finite

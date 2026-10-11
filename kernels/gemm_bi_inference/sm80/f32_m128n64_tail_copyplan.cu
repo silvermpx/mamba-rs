@@ -1,12 +1,12 @@
 // Four A and two B vectors per thread preserve the retained M128N64 T256 transport.
-// Local macro names prevent earlier Fixed fragments from changing this geometry.
+// Local macro names prevent earlier Inference fragments from changing this geometry.
 #define SM89_EXACT_N64_CP_M128_T256_BM 128
 #define SM89_EXACT_N64_CP_M128_T256_BN 64
 #define SM89_EXACT_N64_CP_M128_T256_BK 32
 #define SM89_EXACT_N64_CP_M128_T256_GROUP_M 4
 // Full slabs use planned copies, while the final partial slab keeps masked staging.
 // The ascending-K FMA chain and post-dot bias epilogue remain unchanged.
-// The composed Fixed prefix supplies the common helpers and compact parameter layout.
+// The composed Inference prefix supplies the common helpers and compact parameter layout.
 static_assert(SM89_EXACT_N64_CP_M128_T256_BM == 128 && SM89_EXACT_N64_CP_M128_T256_BN == 64 && SM89_EXACT_N64_CP_M128_T256_BK == 32,
               "N64 copy-plan requires the retained geometry");
 #define SM89_EXACT_N64_CP_M128_T256_THREADS 256
@@ -109,7 +109,7 @@ void nn_sm89_f32_m128n64_tail_copyplan(
     const float* __restrict__ a,
     const float* __restrict__ b,
     const float* __restrict__ bias,
-    FixedSm89ExactF32Params params
+    InferenceSm89ExactF32Params params
 ) {
     const float alpha = params.alpha, beta = params.beta;
     const int m = params.m, n = params.n, k = params.k;

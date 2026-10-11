@@ -128,7 +128,7 @@ impl GpuDevice {
             (10, 3) => "sm_103a",
             (10, 7) => "sm_107a",
             // The arch-specific target, like the CC 10.x parts: the baseline
-            // sm_110 compiles the portable ladder only and leaves the Fixed
+            // sm_110 compiles the portable ladder only and leaves the Inference
             // tcgen05 rung out of the PTX.
             (11, 0) => "sm_110a",
             (12, 0) => "sm_120",

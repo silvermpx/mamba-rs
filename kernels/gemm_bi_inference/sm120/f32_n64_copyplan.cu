@@ -1,11 +1,11 @@
 // SM120-only exact F32 N64 copy-plan extension. The immutable standalone
 // 713a575 candidate supplies the body; only names and compact ABI unpacking differ.
-struct FixedSm120ExactF32Params {
+struct InferenceSm120ExactF32Params {
     float alpha, beta;
     int m, n, k, lda, ldb, ldc;
 };
-static_assert(sizeof(FixedSm120ExactF32Params) == 32, "exact N64 parameter size");
-static_assert(alignof(FixedSm120ExactF32Params) == 4, "exact N64 parameter alignment");
+static_assert(sizeof(InferenceSm120ExactF32Params) == 32, "exact N64 parameter size");
+static_assert(alignof(InferenceSm120ExactF32Params) == 4, "exact N64 parameter alignment");
 // mma16.cu has already undefined the incumbent tile macros at this boundary.
 // Private constants preserve the incumbent geometry without leaking ambient macros.
 #define SM120_EXACT_N64_CP_BM 64
@@ -16,7 +16,7 @@ static_assert(alignof(FixedSm120ExactF32Params) == 4, "exact N64 parameter align
 // FMA chain and epilogue are retained. The only specialization is producer
 // planning for aligned full-K slabs. No tensor operations, split reduction,
 // scratch or atomics. Actual registers/spills/residency require parent testing.
-// Includes expect the unchanged production Fixed common.cuh helpers/constants.
+// Includes expect the unchanged production Inference common.cuh helpers/constants.
 static_assert(SM120_EXACT_N64_CP_BM == 64 && SM120_EXACT_N64_CP_BN == 64 && SM120_EXACT_N64_CP_BK == 32,
               "N64 copy-plan experiment requires the incumbent geometry");
 #define SM120_EXACT_N64_CP_THREADS 128
@@ -119,7 +119,7 @@ nn_sm120_f32_n64_copyplan(
     const float* __restrict__ a,
     const float* __restrict__ b,
     const float* __restrict__ bias,
-    FixedSm120ExactF32Params params
+    InferenceSm120ExactF32Params params
 ) {
     const float alpha = params.alpha, beta = params.beta;
     const int m = params.m, n = params.n, k = params.k;
@@ -323,7 +323,7 @@ nn_sm120_f32_n64_copyplan(
 // N64/BK32/S2 and ascending-K FMA arithmetic are retained. This T256 twin
 // changes accumulator ownership from 8x4 to 4x4 outputs per thread and uses
 // two planned A plus two planned B vectors per thread. Resources require live testing.
-// Includes expect the unchanged production Fixed common.cuh helpers/constants.
+// Includes expect the unchanged production Inference common.cuh helpers/constants.
 static_assert(SM120_EXACT_N64_CP_T256_BM == 64 && SM120_EXACT_N64_CP_T256_BN == 64 && SM120_EXACT_N64_CP_T256_BK == 32,
               "N64 copy-plan experiment requires the incumbent geometry");
 #define SM120_EXACT_N64_CP_T256_THREADS 256
@@ -426,7 +426,7 @@ nn_sm120_f32_n64_copyplan_t256(
     const float* __restrict__ a,
     const float* __restrict__ b,
     const float* __restrict__ bias,
-    FixedSm120ExactF32Params params
+    InferenceSm120ExactF32Params params
 ) {
     const float alpha = params.alpha, beta = params.beta;
     const int m = params.m, n = params.n, k = params.k;
@@ -630,7 +630,7 @@ nn_sm120_f32_n64_copyplan_t256(
 // M128/N64/BK32/S2 uses eight rows and four columns per thread. Planned
 // transport copies the whole next stage before one commit. Ascending-K FMA
 // arithmetic and the exact epilogue are retained; resources require live testing.
-// Includes expect the unchanged production Fixed common.cuh helpers/constants.
+// Includes expect the unchanged production Inference common.cuh helpers/constants.
 static_assert(SM120_EXACT_N64_CP_M128_T256_BM == 128 && SM120_EXACT_N64_CP_M128_T256_BN == 64 && SM120_EXACT_N64_CP_M128_T256_BK == 32,
               "N64 copy-plan experiment requires the incumbent geometry");
 #define SM120_EXACT_N64_CP_M128_T256_THREADS 256
@@ -733,7 +733,7 @@ nn_sm120_f32_n64_copyplan_m128n64_t256(
     const float* __restrict__ a,
     const float* __restrict__ b,
     const float* __restrict__ bias,
-    FixedSm120ExactF32Params params
+    InferenceSm120ExactF32Params params
 ) {
     const float alpha = params.alpha, beta = params.beta;
     const int m = params.m, n = params.n, k = params.k;

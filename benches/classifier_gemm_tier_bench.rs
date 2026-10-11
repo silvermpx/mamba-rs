@@ -1,6 +1,6 @@
 //! Vision-classifier serve shapes: cuBLAS vs the deterministic `triad` and
 //! `fixed` routes — latency and cross-route drift at the exact f32 GEMMs the
-//! m3 classify prefill runs. Fixed is the forward-only deterministic inference
+//! m3 classify prefill runs. Inference is the forward-only deterministic inference
 //! ladder; Triad is the three-layout deterministic training family.
 //!
 //! M = T_TOTAL per page (4621 = 57x81 patches + 4 registers); the batched
@@ -34,7 +34,7 @@ fn synth(n: usize, seed: u64) -> Vec<f32> {
         .collect()
 }
 
-fn classifier_shapes_cublas_vs_triad_vs_fixed() {
+fn classifier_shapes_cublas_vs_triad_vs_inference() {
     let dev = GpuDevice::new(0).expect("cuda device");
 
     // The three projections of one m3 classify layer at d_model=384,
@@ -87,7 +87,7 @@ fn classifier_shapes_cublas_vs_triad_vs_fixed() {
             let _ = us_cublas_f32;
             let (us_triad, y_triad) =
                 timed("bi:triad", GemmMode::Deterministic, BiGemmFamily::Triad);
-            let (us_fixed, y_fixed) =
+            let (us_inference, y_inference) =
                 timed("bi:fixed", GemmMode::Deterministic, BiGemmFamily::Inference);
 
             let drift = |a: &[f32], b: &[f32]| -> f32 {
@@ -99,9 +99,9 @@ fn classifier_shapes_cublas_vs_triad_vs_fixed() {
             println!(
                 "  ratios vs cuBLAS: triad {:.2}x, fixed {:.2}x | drift triad {:.2e}, fixed {:.2e}",
                 us_triad / us_cublas,
-                us_fixed / us_cublas,
+                us_inference / us_cublas,
                 drift(&y_cublas, &y_triad),
-                drift(&y_cublas, &y_fixed),
+                drift(&y_cublas, &y_inference),
             );
         }
     }
@@ -117,7 +117,7 @@ fn main() {
         .filter(|arg| !arg.starts_with("--"))
         .collect();
     let run = |name: &str| selected.is_empty() || selected.iter().any(|s| s == name);
-    if run("classifier_shapes_cublas_vs_triad_vs_fixed") {
-        classifier_shapes_cublas_vs_triad_vs_fixed();
+    if run("classifier_shapes_cublas_vs_triad_vs_inference") {
+        classifier_shapes_cublas_vs_triad_vs_inference();
     }
 }

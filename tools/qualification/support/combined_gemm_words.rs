@@ -787,7 +787,7 @@ impl Runtime {
             "case_schema_sha256":sha(schema.as_bytes()), "lock_sha256":sha(&std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock")).map_err(|e| e.to_string())?),
             "executable_sha256":sha(&std::fs::read(&executable).map_err(|e| e.to_string())?), "executable":executable,
             "rustc":String::from_utf8(rustc.stdout).map_err(|e| e.to_string())?, "device":format!("{:?}",device.identity()), "gpu_uuid":monitor.uuid(), "device_scope":scope.as_str(), "preflight":preflight,
-            "fixed_compiler":format!("{compiler:?}"), "artifact_set":format!("{:?}",ctx.kernels.artifact_set_identity()), "logical_cases":99, "required_cases":14, "additional_cases":85});
+            "inference_compiler":format!("{compiler:?}"), "artifact_set":format!("{:?}",ctx.kernels.artifact_set_identity()), "logical_cases":99, "required_cases":14, "additional_cases":85});
         Ok(Self {
             ctx,
             device,

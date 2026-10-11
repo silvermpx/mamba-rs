@@ -1372,7 +1372,7 @@ fn tc64_forward_and_backward_match_f32_reference_small_shapes() {
 
 /// Gate-boundary sweep with launch-reality routing asserts: every Ok must
 /// report which tile actually launched, every below-gate shape must be the
-/// exact `UNCOVERED`-prefixed Err the blas.rs fallback chain keys on.
+/// exact `UNCOVERED`-preinference Err the blas.rs fallback chain keys on.
 #[test]
 fn tc_route_gate_boundary_sweep() {
     use gemm_bi_triad::TcTile;

@@ -1,5 +1,5 @@
-pub const DUAL_RAW_SYMBOL: &str = "tn_test_fixed_sm89_f32_n64_dual_chunk_raw";
-pub const DUAL_FUSED_SYMBOL: &str = "tn_test_fixed_sm89_f32_n64_dual_chunk_fused_finalize";
+pub const DUAL_RAW_SYMBOL: &str = "tn_test_inference_sm89_f32_n64_dual_chunk_raw";
+pub const DUAL_FUSED_SYMBOL: &str = "tn_test_inference_sm89_f32_n64_dual_chunk_fused_finalize";
 
 const PRELUDE: &str = include_str!("../../kernels/_typed_prelude.cuh");
 
@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn dual_params_are_fixed_32_byte_compact_abi() {
+    fn dual_params_are_inference_32_byte_compact_abi() {
         let source = compose_fused_source();
         assert!(source.contains("static_assert(sizeof(DualChunkParams) == 32"));
         assert!(source.contains("static_assert(alignof(DualChunkParams) == 4"));

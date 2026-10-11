@@ -971,7 +971,7 @@ fn screen_nn_candidate_vs_actual(
         observe_ada_half(
             t,
             fixture,
-            AdaHalfArm::FixedSm89Tc128S3,
+            AdaHalfArm::InferenceSm89Tc128S3,
             candidate_graph,
             path,
             Some(expected),
@@ -993,7 +993,7 @@ fn screen_nn_candidate_vs_actual(
                 observe_ada_half(
                     t,
                     fixture,
-                    AdaHalfArm::FixedSm89Tc128S3,
+                    AdaHalfArm::InferenceSm89Tc128S3,
                     candidate_graph,
                     path,
                     Some(expected),
@@ -1010,8 +1010,8 @@ fn screen_nn_candidate_vs_actual(
     let p95 = ada_percentile(&ratios, 0.95).ok_or("invalid half NN actual-AUTO p95")?;
     let order_name = if candidate_first { "ABBA" } else { "BAAB" };
     println!(
-        "{{\"schema\":\"MambaBiHalfNnActualAutoScreenV1\",\"cell\":\"d768_in_proj\",\"dtype\":\"F16\",\"shape\":[2048,768,3072],\"candidate\":\"fixed_sm89_tc128_s3\",\"candidate_symbol\":\"{}\",\"comparator\":\"actual_public_auto\",\"path\":\"{}\",\"order\":\"{order_name}\",\"windows\":{ADA_HALF_WINDOWS},\"raw_observations_us\":{:?},\"ratio_direction\":\"candidate_over_actual_auto\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9}}}",
-        ada_half_symbol(AdaHalfArm::FixedSm89Tc128S3, WeightDtype::F16),
+        "{{\"schema\":\"MambaBiHalfNnActualAutoScreenV1\",\"cell\":\"d768_in_proj\",\"dtype\":\"F16\",\"shape\":[2048,768,3072],\"candidate\":\"inference_sm89_tc128_s3\",\"candidate_symbol\":\"{}\",\"comparator\":\"actual_public_auto\",\"path\":\"{}\",\"order\":\"{order_name}\",\"windows\":{ADA_HALF_WINDOWS},\"raw_observations_us\":{:?},\"ratio_direction\":\"candidate_over_actual_auto\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9}}}",
+        ada_half_symbol(AdaHalfArm::InferenceSm89Tc128S3, WeightDtype::F16),
         path.name(),
         raw_windows,
     );
@@ -1022,7 +1022,7 @@ fn screen_nn_candidate_vs_actual(
 fn qualify_nn_case(t: &Ctx) -> Result<Option<String>, String> {
     let case = nn_case();
     let dtype = weight_dtype(case.dtype);
-    ada_half_resource_gate(t, AdaHalfArm::FixedSm89Tc128S3, dtype)?;
+    ada_half_resource_gate(t, AdaHalfArm::InferenceSm89Tc128S3, dtype)?;
     ada_half_resource_gate(t, AdaHalfArm::PortableTc128, dtype)?;
     let actual_evidence = qualify_and_print_auto_evidence(
         t,
@@ -1044,7 +1044,7 @@ fn qualify_nn_case(t: &Ctx) -> Result<Option<String>, String> {
             "half NN F16 d768-in fixture is not 256-byte aligned: {pointer_mod_256:?}"
         ));
     }
-    let candidate_graph = capture_ada_half(t, &fixture, AdaHalfArm::FixedSm89Tc128S3)?;
+    let candidate_graph = capture_ada_half(t, &fixture, AdaHalfArm::InferenceSm89Tc128S3)?;
     let reference_graph = capture_ada_half(t, &fixture, AdaHalfArm::PortableTc128)?;
     fixture.reset_fast(t)?;
     enqueue_ada_half_nn_fast(t, &fixture)?;
@@ -1086,7 +1086,7 @@ fn qualify_nn_case(t: &Ctx) -> Result<Option<String>, String> {
         observe_ada_half(
             t,
             &fixture,
-            AdaHalfArm::FixedSm89Tc128S3,
+            AdaHalfArm::InferenceSm89Tc128S3,
             &candidate_graph,
             path,
             Some(&expected),
@@ -1130,7 +1130,7 @@ fn qualify_nn_case(t: &Ctx) -> Result<Option<String>, String> {
     let actual_win = retain_decision(&actual_strata);
     let fast_win = retain_decision(&fast_strata);
     println!(
-        "{{\"schema\":\"MambaBiHalfNnActualAutoDecisionV1\",\"cell\":\"{}\",\"dtype\":\"F16\",\"shape\":[{},{},{}],\"candidate\":\"fixed_sm89_tc128_s3\",\"pointer_mod_256\":{:?},\"actual_auto_strata\":{:?},\"fast_strata\":{:?},\"strata_order\":[\"eager/ABBA\",\"eager/BAAB\",\"graph/ABBA\",\"graph/BAAB\"],\"actual_auto_win\":{actual_win},\"fast_win\":{fast_win},\"promotion\":false}}",
+        "{{\"schema\":\"MambaBiHalfNnActualAutoDecisionV1\",\"cell\":\"{}\",\"dtype\":\"F16\",\"shape\":[{},{},{}],\"candidate\":\"inference_sm89_tc128_s3\",\"pointer_mod_256\":{:?},\"actual_auto_strata\":{:?},\"fast_strata\":{:?},\"strata_order\":[\"eager/ABBA\",\"eager/BAAB\",\"graph/ABBA\",\"graph/BAAB\"],\"actual_auto_win\":{actual_win},\"fast_win\":{fast_win},\"promotion\":false}}",
         case.cell,
         case.dims.0,
         case.dims.1,

@@ -301,9 +301,9 @@ pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
 /// idle at the production shape (24 blocks); tiling fills the machine while
 /// every output element keeps the identical 4-tap arithmetic.
 /// Tile depth of `gather_bc_cols_tmajor_tiled` (must match GBC_TILE_T in
-/// elementwise.cu). One block per (t-tile, b); dynamic smem carries the
-/// B and C tiles at `[d_state][GBC_TILE_T + 1]` each (+1 pad kills bank
-/// conflicts on the transposed read).
+/// mamba_ssm_elementwise.cu). One block per (t-tile, b); dynamic smem
+/// carries the B and C tiles at `[d_state][GBC_TILE_T + 1]` each (+1 pad
+/// kills bank conflicts on the transposed read).
 pub const GBC_TILE_T: usize = 32;
 
 /// Grid for the staged t-major B/C gather.

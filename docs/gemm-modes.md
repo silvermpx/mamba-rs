@@ -249,7 +249,7 @@ rule above: it is composed on every SM80-tier target except CC 12.x, whose
 own kernels serve there and whose module must stay byte-identical to the
 artifact its frozen cohorts were minted against. The overlay's measured
 cells compile as a module of their own, `InferenceSm89Cells`, admitted by
-symbol; the Fixed module holds only the kernels its frozen cohorts pin.
+symbol; the Inference module holds only the kernels its frozen cohorts pin.
 The `sm89` in a kernel's symbol names the board its tile was measured
 on; its source lives in the `sm80` folder of its family, the tier every
 supported board runs, beside the portable kernels it is proven against

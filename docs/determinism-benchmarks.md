@@ -384,9 +384,8 @@ packet per run, named by board, program and date.
 ## Per-kernel tables: Inference family
 
 The five serving shapes are the projections of a vision classifier page
-(4621 rows) and two batched training-class projections (2048 rows). Kernel
-names keep the `fixed` prefix of the family's old name; the family is
-selected as `inference`. Columns: mamba-rs and cuBLAS microseconds per
+(4621 rows) and two batched training-class projections (2048 rows). The
+family is selected as `inference`. Columns: mamba-rs and cuBLAS microseconds per
 launch, and the speedup, for the eager and the graph path.
 
 ### RTX 6000 Ada

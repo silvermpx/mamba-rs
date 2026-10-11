@@ -1,12 +1,12 @@
-#[path = "triad_half_nt_fixed_s3_source.rs"]
-pub mod fixed_s3;
+#[path = "triad_half_nt_inference_s3_source.rs"]
+pub mod inference_s3;
 
 pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
-    let mut source = fixed_s3::candidate_source(swizzle, s3)?;
+    let mut source = inference_s3::candidate_source(swizzle, s3)?;
     for anchor in [
-        "} // namespace sm89_fixed_half_swizzle\n\nnamespace sm89_test_half_nt_s3 {",
+        "} // namespace sm89_inference_half_swizzle\n\nnamespace sm89_test_half_nt_s3 {",
         "} // namespace sm89_test_half_nt_s3",
-        "void nt_test_fixed_s3_bxor_##SUFFIX",
+        "void nt_test_inference_s3_bxor_##SUFFIX",
         "sm89_test_half_nt_s3::kernel<TYPE>",
     ] {
         require_count(&source, anchor, 1)?;
@@ -14,9 +14,9 @@ pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
 
     replace_exact(
         &mut source,
-        "} // namespace sm89_fixed_half_swizzle\n\nnamespace sm89_test_half_nt_s3 {",
+        "} // namespace sm89_inference_half_swizzle\n\nnamespace sm89_test_half_nt_s3 {",
         &format!(
-            "{M64_SUPPORT}\n}} // namespace sm89_fixed_half_swizzle\n\nnamespace sm89_test_half_nt_m64n128_s3 {{"
+            "{M64_SUPPORT}\n}} // namespace sm89_inference_half_swizzle\n\nnamespace sm89_test_half_nt_m64n128_s3 {{"
         ),
     )?;
     replace_exact(
@@ -47,36 +47,36 @@ pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
     replace_range(
         &mut source,
         "    float acc[4][4][4];",
-        "        sm89_fixed_half_swizzle::nt_fragment_offsets(warpM, warpN);",
+        "        sm89_inference_half_swizzle::nt_fragment_offsets(warpM, warpN);",
         M64_ACCUMULATORS,
     )?;
     replace_exact(
         &mut source,
-        "    sm89_fixed_half_swizzle::NtCopyPlan plan;\n    if (fast_stage) plan = sm89_fixed_half_swizzle::nt_copy_plan(As_sbase, Bs_sbase, pid_m, pid_n, M, K_out, N);",
-        "    sm89_fixed_half_swizzle::NtM64N128CopyPlan plan;\n    if (fast_stage) plan = sm89_fixed_half_swizzle::nt_m64n128_copy_plan(As_sbase, Bs_sbase, pid_m, pid_n, M, K_out, N);",
+        "    sm89_inference_half_swizzle::NtCopyPlan plan;\n    if (fast_stage) plan = sm89_inference_half_swizzle::nt_copy_plan(As_sbase, Bs_sbase, pid_m, pid_n, M, K_out, N);",
+        "    sm89_inference_half_swizzle::NtM64N128CopyPlan plan;\n    if (fast_stage) plan = sm89_inference_half_swizzle::nt_m64n128_copy_plan(As_sbase, Bs_sbase, pid_m, pid_n, M, K_out, N);",
     )?;
     replace_all_exact(
         &mut source,
-        "sm89_fixed_half_swizzle::nt_copy_slice",
-        "sm89_fixed_half_swizzle::nt_m64n128_copy_slice",
+        "sm89_inference_half_swizzle::nt_copy_slice",
+        "sm89_inference_half_swizzle::nt_m64n128_copy_slice",
         6,
     )?;
     replace_all_exact(
         &mut source,
-        "sm89_fixed_half_swizzle::nt_stage_scalar",
-        "sm89_fixed_half_swizzle::nt_m64n128_stage_scalar",
+        "sm89_inference_half_swizzle::nt_stage_scalar",
+        "sm89_inference_half_swizzle::nt_m64n128_stage_scalar",
         2,
     )?;
     replace_all_exact(
         &mut source,
-        "sm89_fixed_half_swizzle::nt_load_fragments",
-        "sm89_fixed_half_swizzle::nt_m64n128_load_fragments",
+        "sm89_inference_half_swizzle::nt_load_fragments",
+        "sm89_inference_half_swizzle::nt_m64n128_load_fragments",
         7,
     )?;
     replace_all_exact(
         &mut source,
-        "sm89_fixed_half_swizzle::consume_fragments<T>",
-        "sm89_fixed_half_swizzle::nt_m64n128_consume_fragments<T>",
+        "sm89_inference_half_swizzle::consume_fragments<T>",
+        "sm89_inference_half_swizzle::nt_m64n128_consume_fragments<T>",
         5,
     )?;
     replace_all_exact(
@@ -92,18 +92,18 @@ pub fn candidate_source(swizzle: &str, s3: &str) -> Result<String, String> {
     )?;
     replace_exact(
         &mut source,
-        "sm89_fixed_half_swizzle::vector_epilogue(C, reinterpret_cast<float*>(sm89_fhs_shared), acc, alpha,",
-        "sm89_fixed_half_swizzle::nt_m64n128_vector_epilogue(C, reinterpret_cast<float*>(sm89_fhs_shared), acc, alpha,",
+        "sm89_inference_half_swizzle::vector_epilogue(C, reinterpret_cast<float*>(sm89_fhs_shared), acc, alpha,",
+        "sm89_inference_half_swizzle::nt_m64n128_vector_epilogue(C, reinterpret_cast<float*>(sm89_fhs_shared), acc, alpha,",
     )?;
     replace_exact(
         &mut source,
-        "sm89_fixed_half_swizzle::scalar_epilogue(C, acc, alpha, 0.0f, M, K_out, K_out,",
-        "sm89_fixed_half_swizzle::nt_m64n128_scalar_epilogue(C, acc, alpha, M, K_out,",
+        "sm89_inference_half_swizzle::scalar_epilogue(C, acc, alpha, 0.0f, M, K_out, K_out,",
+        "sm89_inference_half_swizzle::nt_m64n128_scalar_epilogue(C, acc, alpha, M, K_out,",
     )?;
     replace_exact(
         &mut source,
-        "void nt_test_fixed_s3_bxor_##SUFFIX",
-        "void nt_test_fixed_s3_m64n128_##SUFFIX",
+        "void nt_test_inference_s3_bxor_##SUFFIX",
+        "void nt_test_inference_s3_m64n128_##SUFFIX",
     )?;
     replace_exact(
         &mut source,
@@ -120,8 +120,8 @@ const M64_ACCUMULATORS: &str = r#"    float acc[2][4][4];
         for (int fn = 0; fn < 4; ++fn)
 #pragma unroll
             for (int e = 0; e < 4; ++e) acc[fm][fn][e] = 0.0f;
-    sm89_fixed_half_swizzle::NtM64N128FragmentOffsets offsets =
-        sm89_fixed_half_swizzle::nt_m64n128_fragment_offsets(warpM, warpN);
+    sm89_inference_half_swizzle::NtM64N128FragmentOffsets offsets =
+        sm89_inference_half_swizzle::nt_m64n128_fragment_offsets(warpM, warpN);
 "#;
 
 const M64_SUPPORT: &str = r#"
@@ -476,23 +476,23 @@ mod tests {
 
     #[test]
     fn composed_source_changes_only_the_m64_mapping_around_the_s3_loop() {
-        let parent = fixed_s3::candidate_source(SWIZZLE, S3).unwrap();
+        let parent = inference_s3::candidate_source(SWIZZLE, S3).unwrap();
         let source = candidate_source(SWIZZLE, S3).unwrap();
         assert_eq!(k_loop(&source), k_loop(&parent));
         assert!(source.contains("static_assert(3 * (64 * 64 + 128 * 64) * 2 == kSharedBytes"));
         assert!(source.contains("float acc[2][4][4];"));
         assert!(source.contains("for (int fm = 0; fm < 2; ++fm)"));
-        assert!(source.contains("void nt_test_fixed_s3_m64n128_##SUFFIX"));
+        assert!(source.contains("void nt_test_inference_s3_m64n128_##SUFFIX"));
         assert!(source.contains("gbf_store_pair_rne(destination, first, second);"));
         assert!(source.contains("*output = HalfOps<T>::from_float(value);"));
-        assert!(!source.contains("void nt_test_fixed_s3_bxor_##SUFFIX"));
+        assert!(!source.contains("void nt_test_inference_s3_bxor_##SUFFIX"));
     }
 
     #[test]
     fn missing_or_duplicated_parent_anchor_fails_closed() {
-        let missing = S3.replacen("namespace sm89_fixed_half_s3 {", "", 1);
+        let missing = S3.replacen("namespace sm89_inference_half_s3 {", "", 1);
         assert!(candidate_source(SWIZZLE, &missing).is_err());
-        let duplicate = format!("{S3}\nnamespace sm89_fixed_half_s3 {{\n");
+        let duplicate = format!("{S3}\nnamespace sm89_inference_half_s3 {{\n");
         assert!(candidate_source(SWIZZLE, &duplicate).is_err());
     }
 }

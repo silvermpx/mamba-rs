@@ -1,5 +1,5 @@
 // ============================================================================
-// The inference tile ladder - the fixed family's fast NN forward.
+// The inference tile ladder - the Inference family's fast NN forward.
 // ============================================================================
 // Three tensor-core tiles, all mma.sync m16n8k16 over ascending 64-wide
 // K-slabs with f32 accumulators: GBF128 (128x128, dynamic smem) for large

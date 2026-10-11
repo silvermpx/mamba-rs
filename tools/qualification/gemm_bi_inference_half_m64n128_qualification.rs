@@ -26,8 +26,8 @@ use mamba_rs::mamba_ssm::gpu::kernel_identity::{
 };
 use sha2::{Digest as _, Sha256};
 
-const OUTPUT_ENV: &str = "MAMBA_RS_FIXED_HALF_M64N128_JSONL";
-const SCHEMA: &str = "MambaBiFixedHalfM64N128Qualification";
+const OUTPUT_ENV: &str = "MAMBA_RS_INFERENCE_HALF_M64N128_JSONL";
+const SCHEMA: &str = "MambaBiInferenceHalfM64N128Qualification";
 const QUALIFICATION_SOURCE: &str = include_str!("gemm_bi_inference_half_m64n128_qualification.rs");
 const RUST_DISPATCH_SOURCE: &str = include_str!("../../src/mamba_ssm/gpu/gemm_bi_inference.rs");
 const CUDA_SOURCE: &str = include_str!("../../kernels/gemm_bi_inference/sm120/tma.cu");
@@ -328,7 +328,7 @@ impl JsonlSink {
             .sync_all()
             .map_err(|error| format!("sync qualification sink {:?}: {error}", self.path))?;
         eprintln!(
-            "Fixed HALF M64N128 qualification wrote {} records to {:?}",
+            "Inference HALF M64N128 qualification wrote {} records to {:?}",
             self.records, self.path
         );
         Ok(())
@@ -374,8 +374,8 @@ impl RunMetadata {
         let mut hasher = Sha256::new();
         hasher.update(compiler.source_digest);
         hasher.update(compiler.invocation_digest);
-        hasher.update(artifacts.fixed.compile_key);
-        hasher.update(artifacts.fixed.artifact_digest);
+        hasher.update(artifacts.inference.compile_key);
+        hasher.update(artifacts.inference.artifact_digest);
         hasher.update(artifacts.ordered_digest);
         hasher.update(identity.compute_capability.0.to_le_bytes());
         hasher.update(identity.compute_capability.1.to_le_bytes());
@@ -390,7 +390,7 @@ impl RunMetadata {
         Ok(Self {
             run_identity: format!("{:x}", hasher.finalize()),
             compiler,
-            artifact: artifacts.fixed,
+            artifact: artifacts.inference,
             artifact_set_digest: digest_hex(&artifacts.ordered_digest),
             device: identity,
             nvrtc_target: device.nvrtc_target().to_owned(),
@@ -722,7 +722,7 @@ fn launch_arm(
             )?;
             if !matches!(selected, InferenceTile::Sm120Half(_)) {
                 return Err(format!(
-                    "production Fixed AUTO selected {selected:?}, expected an SM120 half tile"
+                    "production Inference AUTO selected {selected:?}, expected an SM120 half tile"
                 ));
             }
             Ok(())
@@ -1021,7 +1021,7 @@ fn validate_physical(
                 snapshot.symbol
             )
         })?,
-        Arm::FastCublas => return Err("vendor arm has no Fixed physical route".into()),
+        Arm::FastCublas => return Err("vendor arm has no Inference physical route".into()),
     };
     let (bm, bn, block_threads, dynamic_shared) = half_contract(tile);
     let symbol = half_symbol(tile, cell.dtype);
@@ -1685,20 +1685,20 @@ fn emit_run_preflight(sink: &mut JsonlSink, metadata: &RunMetadata) -> Result<()
             "\"device\":{{\"cc\":\"{}.{}\",\"sm_count\":{},\"nvrtc_target\":\"{}\",",
             "\"driver_api_version\":{},\"driver_build_sources\":{},",
             "\"driver_build_sha256\":\"{}\"}},",
-            "\"fixed_compiler\":{{\"nvrtc_version\":\"{}.{}\",\"target\":\"{}\",",
+            "\"inference_compiler\":{{\"nvrtc_version\":\"{}.{}\",\"target\":\"{}\",",
             "\"source_sha256\":\"{}\",\"invocation_sha256\":\"{}\",",
             "\"header_manifest_sha256\":\"{}\",\"nvrtc_library_sha256\":\"{}\",",
             "\"nvrtc_library_known\":{},\"output_kind\":\"{}\",",
             "\"composer_revision\":{},\"compiler_revision\":{},",
             "\"numeric_abi_revision\":{},\"schedule_revision\":{}}},",
-            "\"fixed_artifact\":{{\"kind\":\"{}\",\"compile_key_sha256\":\"{}\",",
+            "\"inference_artifact\":{{\"kind\":\"{}\",\"compile_key_sha256\":\"{}\",",
             "\"artifact_sha256\":\"{}\",\"artifact_set_sha256\":\"{}\"}},",
             "\"qualification_source_sha256\":\"{}\",",
             "\"rust_dispatch_source_sha256\":\"{}\",",
             "\"cuda_source_sha256\":\"{}\",\"executable_sha256\":\"{}\",",
             "\"candidate_symbols\":[\"{}\",\"{}\"],",
             "\"candidate_tile\":\"M64N128Bk64S2\",",
-            "\"production_route\":\"Fixed_AUTO\",",
+            "\"production_route\":\"Inference_AUTO\",",
             "\"vendor_route\":\"fast_cublas_half\",\"timing_warmups\":{},",
             "\"windows_per_order\":{},\"orders_per_comparison\":2,",
             "\"atomics\":false,\"split_k\":false,\"custom_fast_math\":false,",
@@ -1848,14 +1848,14 @@ fn require_sm120_nvrtc(version: (i32, i32)) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "Fixed SM120 qualification requires NVRTC 12.8 or newer, got {version:?}"
+            "Inference SM120 qualification requires NVRTC 12.8 or newer, got {version:?}"
         ))
     }
 }
 
 fn require_environment(device: &GpuDevice, metadata: &RunMetadata) -> Result<(), String> {
     if cfg!(debug_assertions) {
-        return Err("Fixed HALF M64N128 qualification requires --release".into());
+        return Err("Inference HALF M64N128 qualification requires --release".into());
     }
     if device.compute_capability != (12, 0) || device.multiprocessor_count() != 170 {
         return Err(format!(
@@ -1868,19 +1868,19 @@ fn require_environment(device: &GpuDevice, metadata: &RunMetadata) -> Result<(),
     require_sm120_nvrtc(metadata.compiler.nvrtc_version)?;
     if metadata.compiler.target.as_str() != metadata.nvrtc_target {
         return Err(format!(
-            "loaded Fixed compiler target {} differs from device target {}",
+            "loaded Inference compiler target {} differs from device target {}",
             metadata.compiler.target.as_str(),
             metadata.nvrtc_target
         ));
     }
     if !metadata.compiler.nvrtc_library_known {
-        return Err("loaded Fixed compiler has an unknown NVRTC library identity".into());
+        return Err("loaded Inference compiler has an unknown NVRTC library identity".into());
     }
-    if metadata.artifact.module_kind != ModuleKind::Fixed
+    if metadata.artifact.module_kind != ModuleKind::Inference
         || metadata.compiler.output_kind != metadata.artifact.artifact_kind
     {
         return Err(format!(
-            "loaded Fixed compiler/artifact identity is incoherent: {:?} / {:?}",
+            "loaded Inference compiler/artifact identity is incoherent: {:?} / {:?}",
             metadata.compiler.output_kind, metadata.artifact
         ));
     }
@@ -1889,7 +1889,7 @@ fn require_environment(device: &GpuDevice, metadata: &RunMetadata) -> Result<(),
 
 #[test]
 #[ignore = "requires an idle RTX 5090 CC12.0/170SM with NVRTC 12.8+ and a new JSONL path"]
-fn fixed_half_m64n128_vs_production_auto_qualification() -> Result<(), String> {
+fn inference_half_m64n128_vs_production_auto_qualification() -> Result<(), String> {
     let output_path = require_output_path()?;
     let device = GpuDevice::new(0)?;
     let ctx = GpuCtx::new(&device)?;
@@ -1902,7 +1902,10 @@ fn fixed_half_m64n128_vs_production_auto_qualification() -> Result<(), String> {
     let mut cumulative = CumulativeResults::default();
     let cells = qualification_cells();
     for cell in cells.iter().copied() {
-        eprintln!("Fixed HALF M64N128 qualification cell {}", cell_id(cell));
+        eprintln!(
+            "Inference HALF M64N128 qualification cell {}",
+            cell_id(cell)
+        );
         let buffers = CellBuffers::new(&ctx, cell)?;
         if !buffers
             .operands(cell, Arm::ProductionAuto)
@@ -1950,7 +1953,7 @@ mod tests {
             schedule_revision: 6,
         };
         let artifact = ArtifactIdentity {
-            module_kind: ModuleKind::Fixed,
+            module_kind: ModuleKind::Inference,
             artifact_kind: ArtifactKind::Cubin,
             compile_key: [5; 32],
             artifact_digest: [6; 32],
@@ -2227,7 +2230,7 @@ mod tests {
         };
         assert_eq!(
             cell_json(&metadata, cell),
-            r#""schema":"MambaBiFixedHalfM64N128Qualification","run_identity_sha256":"run\"\\\n","cell":"shape\tname_f16_synthesized","shape_name":"shape\tname","shape":{"m":1,"k":2,"n":3},"dtype":"f16","bias":"synthesized""#
+            r#""schema":"MambaBiInferenceHalfM64N128Qualification","run_identity_sha256":"run\"\\\n","cell":"shape\tname_f16_synthesized","shape_name":"shape\tname","shape":{"m":1,"k":2,"n":3},"dtype":"f16","bias":"synthesized""#
         );
     }
 }

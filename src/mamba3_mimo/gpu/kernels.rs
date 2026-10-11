@@ -2,7 +2,7 @@
 //! `kernels/mamba3_mimo.cu`, `kernels/mamba3_mimo_chunked.cu`,
 //! `kernels/mamba3_mimo_bwd.cu` and `kernels/mamba3_mimo_chunked_bwd.cu`
 //! after the typed prelude, under its own module kind. The norms, the
-//! residual adds and the optimizer come from the Fixed module through the
+//! residual adds and the optimizer come from the Common module through the
 //! context.
 
 use std::sync::Arc;

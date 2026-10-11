@@ -74,7 +74,7 @@ fn validate_batch_receipt(receipt: &BatchReceipt) -> Result<(), String> {
 }
 
 #[cfg(feature = "cuda")]
-#[path = "../../tests/support/fixed_full_mantissa.rs"]
+#[path = "../../tests/support/inference_full_mantissa.rs"]
 mod full_mantissa;
 #[cfg(feature = "cuda")]
 #[path = "support/sm89_exact_f32_tn_admission.rs"]

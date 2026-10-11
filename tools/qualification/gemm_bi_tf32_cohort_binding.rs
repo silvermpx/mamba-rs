@@ -18,8 +18,8 @@ use mamba_rs::mamba_ssm::gpu::kernel_identity::{
 };
 use sha2::{Digest as _, Sha256};
 
-#[path = "../../tests/support/fixed_full_mantissa.rs"]
-mod fixed_full_mantissa;
+#[path = "../../tests/support/inference_full_mantissa.rs"]
+mod inference_full_mantissa;
 
 const SM89_NT_FINALIST_SYMBOL: &str = "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2";
 const SM89_NN_PORTABLE_M128N128_SYMBOL: &str = "nn_sm80_mma_tf32_m128n128_bk32_s3";
@@ -276,7 +276,7 @@ fn nt_portable_request(
 }
 
 fn full_mantissa_words(len: usize, seed: u64) -> Vec<u32> {
-    fixed_full_mantissa::finite_full_mantissa_values(len, seed)
+    inference_full_mantissa::finite_full_mantissa_values(len, seed)
         .into_iter()
         .map(f32::to_bits)
         .collect()

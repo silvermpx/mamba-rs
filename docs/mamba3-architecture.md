@@ -133,7 +133,8 @@ Where `in_proj_dim = 2·d_inner + 2·ngroups·d_state + 3·nheads + num_rope_ang
 | mamba3_ops.cu | 19 | Split, BCNorm, RoPE, ABG, gating |
 | mamba3_chunked.cu | 16 | Chunked parallel scan (T>64) |
 | norms.cu | 3 | RMSNorm forward/backward |
-| elementwise.cu | 13 | Residual, fill, casts, gather, column sums, vec ops |
+| elementwise.cu | 12 | Residual, fill, last-step gather, column sums, vec ops |
+| gemm_bi_inference/casts.cu | 4 | Casts between f32 and bf16/f16 |
 
 Counted by kernel family; the typed variants (f32, bf16, f16) of a family
 share one row.

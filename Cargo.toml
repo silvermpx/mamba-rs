@@ -1,6 +1,6 @@
 [package]
 name = "mamba-rs"
-version = "0.7.5"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.97"
 authors = ["silvermpx"]
@@ -235,8 +235,8 @@ path = "tests/f32_training_graph_parity.rs"
 required-features = ["cuda"]
 
 [[test]]
-name = "fixed_epilogue_pins"
-path = "tests/fixed_epilogue_pins.rs"
+name = "inference_epilogue_pins"
+path = "tests/inference_epilogue_pins.rs"
 
 [[test]]
 name = "gemm_bi_async_allocation"
@@ -286,6 +286,10 @@ required-features = ["cuda"]
 [[test]]
 name = "gemm_bi_scalar_nt_copyplan_siblings_receipts"
 path = "tests/gemm_bi_scalar_nt_copyplan_siblings_receipts.rs"
+
+[[test]]
+name = "gemm_source_freeze"
+path = "tests/gemm_source_freeze.rs"
 
 [[test]]
 name = "gemm_bi_sm100_contract"

@@ -1,16 +1,16 @@
 #[path = "support/triad_half_nt_m96n128_s3_source.rs"]
 mod m96;
 
-use m96::m64n192::m64n128::fixed_s3 as bxor;
+use m96::m64n192::m64n128::inference_s3 as bxor;
 
 const PRODUCTION: &str = include_str!("../kernels/gemm_bi_triad/sm80/half.cu");
-const FIXED_COMMON: &str = include_str!("../kernels/gemm_bi_inference/common.cuh");
+const INFERENCE_COMMON: &str = include_str!("../kernels/gemm_bi_inference/common.cuh");
 const LAYOUT: &str = include_str!("../kernels/gemm_bi_inference/sm80/half_swizzle_layout.cuh");
 const SWIZZLE: &str = include_str!("../kernels/gemm_bi_inference/sm80/half_swizzle.cu");
 const S3: &str = include_str!("../kernels/gemm_bi_inference/sm80/half_s3.cu");
 
 #[test]
-fn standalone_source_defines_each_fixed_common_half_helper_once() {
+fn standalone_source_defines_each_inference_common_half_helper_once() {
     for definition in [
         "static __device__ __forceinline__ bool gbf_aligned16(const void* p) {\n    return (reinterpret_cast<unsigned long long>(p) & 15ull) == 0ull;\n}",
         "static __device__ __forceinline__ bool gbf_aligned4(const void* p) {\n    return (reinterpret_cast<unsigned long long>(p) & 3ull) == 0ull;\n}",
@@ -18,7 +18,7 @@ fn standalone_source_defines_each_fixed_common_half_helper_once() {
         "static __device__ __forceinline__ void gbf_store_pair_rne(\n    __half* dst, float v0, float v1) {\n    *reinterpret_cast<__half2*>(dst) = __floats2half2_rn(v0, v1);\n}",
         "static __device__ __forceinline__ void gbf_store_pair_rne(\n    float* dst, float v0, float v1) {\n    if ((reinterpret_cast<unsigned long long>(dst) & 7ull) == 0ull) {\n        *reinterpret_cast<float2*>(dst) = make_float2(v0, v1);\n    } else {\n        dst[0] = v0;\n        dst[1] = v1;\n    }\n}",
     ] {
-        assert_eq!(FIXED_COMMON.matches(definition).count(), 1);
+        assert_eq!(INFERENCE_COMMON.matches(definition).count(), 1);
         assert_eq!(
             PRODUCTION.matches(definition).count(),
             1,
@@ -84,8 +84,15 @@ fn production_source_exposes_only_the_six_owned_callable_symbols() {
     assert_eq!(callable_exports(PRODUCTION), expected);
 }
 
+/// The frozen Triad copy keeps the module's former name in the comments and
+/// assertion texts it took over from these sources.
+const FORMER_MODULE_NAME: &[(&str, &str)] = &[
+    ("Inference SM89", "Fixed SM89"),
+    ("Inference/sm_89", "Fixed/sm_89"),
+];
+
 fn renamed(mut source: String, replacements: &[(&str, &str)]) -> String {
-    for (from, to) in replacements {
+    for (from, to) in FORMER_MODULE_NAME.iter().chain(replacements) {
         assert!(
             source.contains(from),
             "missing measured-source anchor {from:?}"
@@ -120,10 +127,13 @@ fn production_source_is_the_measured_three_family_composition() {
             S3
         ),
         &[
-            ("FixedSm89HalfSwizzleParams", "Sm89HalfNnS3Params"),
-            ("sm89_fixed_half_swizzle_layout", "sm89_half_nn_s3_layout"),
-            ("sm89_fixed_half_swizzle", "sm89_half_nn_s3_support"),
-            ("sm89_fixed_half_s3", "sm89_half_nn_s3"),
+            ("InferenceSm89HalfSwizzleParams", "Sm89HalfNnS3Params"),
+            (
+                "sm89_inference_half_swizzle_layout",
+                "sm89_half_nn_s3_layout",
+            ),
+            ("sm89_inference_half_swizzle", "sm89_half_nn_s3_support"),
+            ("sm89_inference_half_s3", "sm89_half_nn_s3"),
             ("nn_sm89_tc128_s3_bf16", "nn_sm89_m128n128_bk64_s3_bf16"),
             ("nn_sm89_tc128_s3_f16", "nn_sm89_m128n128_bk64_s3_f16"),
         ],
@@ -131,28 +141,34 @@ fn production_source_is_the_measured_three_family_composition() {
     let bxor = without_legacy_exports(renamed(
         bxor::candidate_source(SWIZZLE, S3).unwrap(),
         &[
-            ("FixedSm89HalfSwizzleParams", "Sm89HalfNtBxorS3Params"),
+            ("InferenceSm89HalfSwizzleParams", "Sm89HalfNtBxorS3Params"),
             (
-                "sm89_fixed_half_swizzle_layout",
+                "sm89_inference_half_swizzle_layout",
                 "sm89_half_nt_bxor_s3_layout",
             ),
-            ("sm89_fixed_half_swizzle", "sm89_half_nt_bxor_s3_support"),
+            (
+                "sm89_inference_half_swizzle",
+                "sm89_half_nt_bxor_s3_support",
+            ),
             ("sm89_test_half_nt_s3", "sm89_half_nt_bxor_s3"),
-            ("nt_test_fixed_s3_bxor_", "nt_sm89_m128n128_bk64_s3_bxor_"),
+            (
+                "nt_test_inference_s3_bxor_",
+                "nt_sm89_m128n128_bk64_s3_bxor_",
+            ),
         ],
     ));
     let m96 = without_legacy_exports(renamed(
         m96::candidate_source(SWIZZLE, S3).unwrap(),
         &[
-            ("FixedSm89HalfSwizzleParams", "Sm89HalfNtM96S3Params"),
+            ("InferenceSm89HalfSwizzleParams", "Sm89HalfNtM96S3Params"),
             (
-                "sm89_fixed_half_swizzle_layout",
+                "sm89_inference_half_swizzle_layout",
                 "sm89_half_nt_m96_s3_layout",
             ),
-            ("sm89_fixed_half_swizzle", "sm89_half_nt_m96_s3_support"),
+            ("sm89_inference_half_swizzle", "sm89_half_nt_m96_s3_support"),
             ("sm89_test_half_nt_m96n128_s3", "sm89_half_nt_m96n128_s3"),
             (
-                "nt_test_fixed_s3_m96n128_f16",
+                "nt_test_inference_s3_m96n128_f16",
                 "nt_sm89_m96n128_bk64_s3_f16",
             ),
         ],

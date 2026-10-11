@@ -21,12 +21,12 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_inference::{
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{TUNING_TABLE_REVISION, digest_hex};
 
-#[path = "support/fixed_sm120_exact_n64_admission.rs"]
+#[path = "support/inference_sm120_exact_n64_admission.rs"]
 mod exact_n64_admission;
 
 #[test]
 #[ignore = "requires exclusive SM120, actual NVRTC candidate admission and observed-unlocked paired evidence"]
-fn fixed_sm120_exact_n64_paired_admission() {
+fn inference_sm120_exact_n64_paired_admission() {
     exact_n64_admission::run();
 }
 
@@ -156,7 +156,7 @@ fn launch_sm120_exact_auto(
         operands.bias_ptr,
         (shape.m, shape.k, shape.n),
     )
-    .expect("production Fixed AUTO launch")
+    .expect("production Inference AUTO launch")
 }
 
 fn sm120_exact_vendor_launch(
