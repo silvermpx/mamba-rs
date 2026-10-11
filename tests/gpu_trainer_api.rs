@@ -362,89 +362,104 @@ fn every_family_trains_through_the_trait() {
         n_layers: 2,
         ..Mamba3Config::default()
     };
-    let opts = GpuOptions::default();
     let s = TrainSessionCfg {
         lr: 3e-3,
         ..session()
     };
-    let mut trainers: Vec<(&str, Box<dyn GpuTrainer>)> = vec![
-        (
-            "Mamba-1",
-            Box::new(
-                MambaGpuTrainer::new(&MambaWeights::init(&m1_cfg, INPUT_DIM, 51), m1_cfg, s, opts)
+    for dtype in [
+        WeightDtype::F32,
+        WeightDtype::Tf32,
+        WeightDtype::Bf16,
+        WeightDtype::F16,
+    ] {
+        let opts = GpuOptions::default().dtype(dtype);
+        let mut trainers: Vec<(&str, Box<dyn GpuTrainer>)> = vec![
+            (
+                "Mamba-1",
+                Box::new(
+                    MambaGpuTrainer::new(
+                        &MambaWeights::init(&m1_cfg, INPUT_DIM, 51),
+                        m1_cfg,
+                        s,
+                        opts,
+                    )
                     .unwrap(),
+                ),
             ),
-        ),
-        (
-            "Mamba-2",
-            Box::new(
-                Mamba2GpuTrainer::new(
-                    &Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 52),
-                    m2_cfg(),
-                    s,
-                    opts,
-                )
-                .unwrap(),
+            (
+                "Mamba-2",
+                Box::new(
+                    Mamba2GpuTrainer::new(
+                        &Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 52),
+                        m2_cfg(),
+                        s,
+                        opts,
+                    )
+                    .unwrap(),
+                ),
             ),
-        ),
-        (
-            "Mamba-3 SISO",
-            Box::new(
-                Mamba3GpuTrainer::new(
-                    &Mamba3Weights::init(&siso_cfg, INPUT_DIM, 53),
-                    siso_cfg,
-                    s,
-                    opts,
-                )
-                .unwrap(),
+            (
+                "Mamba-3 SISO",
+                Box::new(
+                    Mamba3GpuTrainer::new(
+                        &Mamba3Weights::init(&siso_cfg, INPUT_DIM, 53),
+                        siso_cfg,
+                        s,
+                        opts,
+                    )
+                    .unwrap(),
+                ),
             ),
-        ),
-        (
-            "Mamba-3 MIMO",
-            Box::new(
-                Mamba3MimoGpuTrainer::new(
-                    &Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 54),
-                    mimo_cfg(),
-                    s,
-                    opts,
-                )
-                .unwrap(),
+            (
+                "Mamba-3 MIMO",
+                Box::new(
+                    Mamba3MimoGpuTrainer::new(
+                        &Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 54),
+                        mimo_cfg(),
+                        s,
+                        opts,
+                    )
+                    .unwrap(),
+                ),
             ),
-        ),
-    ];
-    let input = values(BATCH * SEQ_LEN * INPUT_DIM, 7);
-    let target = values(BATCH * SEQ_LEN * D_MODEL, 8);
-    for (name, t) in &mut trainers {
-        assert_eq!(
-            (t.batch(), t.seq_len(), t.input_dim(), t.d_model()),
-            (BATCH, SEQ_LEN, INPUT_DIM, D_MODEL),
-            "{name}"
-        );
-        assert_eq!(t.lr(), 3e-3, "{name}");
-        t.set_lr(2e-3).unwrap();
-        assert_eq!(t.lr(), 2e-3, "{name}");
-        assert!(t.set_lr(f32::NAN).is_err(), "{name}");
-        let n = (BATCH * SEQ_LEN * D_MODEL) as f32;
-        let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
-        let mut losses = Vec::new();
-        for _ in 0..6 {
-            t.reset_state().unwrap();
-            t.forward(&input, &mut out).unwrap();
-            let loss: f32 = out
-                .iter()
-                .zip(&target)
-                .map(|(o, y)| (o - y) * (o - y))
-                .sum::<f32>()
-                / n;
-            let d: Vec<f32> = out
-                .iter()
-                .zip(&target)
-                .map(|(o, y)| 2.0 * (o - y) / n)
-                .collect();
-            t.backward_step(&d, BackwardOpts::default()).unwrap();
-            losses.push(loss);
+        ];
+        let input = values(BATCH * SEQ_LEN * INPUT_DIM, 7);
+        let target = values(BATCH * SEQ_LEN * D_MODEL, 8);
+        for (name, t) in &mut trainers {
+            assert_eq!(
+                (t.batch(), t.seq_len(), t.input_dim(), t.d_model()),
+                (BATCH, SEQ_LEN, INPUT_DIM, D_MODEL),
+                "{name}"
+            );
+            assert_eq!(t.lr(), 3e-3, "{name}");
+            t.set_lr(2e-3).unwrap();
+            assert_eq!(t.lr(), 2e-3, "{name}");
+            assert!(t.set_lr(f32::NAN).is_err(), "{name}");
+            let n = (BATCH * SEQ_LEN * D_MODEL) as f32;
+            let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
+            let mut losses = Vec::new();
+            for _ in 0..6 {
+                t.reset_state().unwrap();
+                t.forward(&input, &mut out).unwrap();
+                let loss: f32 = out
+                    .iter()
+                    .zip(&target)
+                    .map(|(o, y)| (o - y) * (o - y))
+                    .sum::<f32>()
+                    / n;
+                let d: Vec<f32> = out
+                    .iter()
+                    .zip(&target)
+                    .map(|(o, y)| 2.0 * (o - y) / n)
+                    .collect();
+                t.backward_step(&d, BackwardOpts::default()).unwrap();
+                losses.push(loss);
+            }
+            eprintln!(
+                "{name} {dtype:?}: loss {:.5} -> {:.5}",
+                losses[0], losses[5]
+            );
+            assert!(losses[5] < losses[0], "{name} {dtype:?}: {losses:?}");
         }
-        eprintln!("{name}: loss {:.5} -> {:.5}", losses[0], losses[5]);
-        assert!(losses[5] < losses[0], "{name}: {losses:?}");
     }
 }

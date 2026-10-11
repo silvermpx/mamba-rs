@@ -15,6 +15,14 @@ use mamba_rs::{
     Mamba3Weights, MambaConfig, MambaGpuBackbone, MambaWeights, ModelFamily, WeightDtype,
 };
 
+/// Every storage precision; each path runs in all four.
+const DTYPES: [WeightDtype; 4] = [
+    WeightDtype::F32,
+    WeightDtype::Tf32,
+    WeightDtype::Bf16,
+    WeightDtype::F16,
+];
+
 const BATCH: usize = 2;
 const D_MODEL: usize = 32;
 /// Wider than the model, so every family runs its input projection.
@@ -179,7 +187,7 @@ fn prompts_continue_like_steps_in_every_family() {
 fn graph_replays_eager_steps_in_every_family() {
     let t = 64;
     let prompt = values(BATCH * t * D_MODEL, 4);
-    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+    for dtype in DTYPES {
         for mut bb in every_family(D_MODEL, dtype) {
             let family = bb.family();
             let rows = BATCH * bb.d_model();
@@ -223,7 +231,7 @@ fn graph_replays_eager_steps_in_every_family() {
 fn a_longer_prompt_runs_after_the_capture_in_every_family() {
     let t = 600;
     let prompt = values(BATCH * t * D_MODEL, 9);
-    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+    for dtype in DTYPES {
         let captured = every_family(D_MODEL, dtype);
         let plain = every_family(D_MODEL, dtype);
         for (mut a, mut b) in captured.into_iter().zip(plain) {
@@ -293,7 +301,7 @@ fn siso_prompt_from_zero_state_matches_the_stateless_window() {
     let weights = Mamba3Weights::init(&cfg, D_MODEL, 21);
     let prompt = values(BATCH * t * D_MODEL, 6);
     let next = values(BATCH * D_MODEL, 7);
-    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+    for dtype in DTYPES {
         let opts = GpuOptions::default().dtype(dtype);
         let mut bb = Mamba3GpuBackbone::new(&weights, cfg, D_MODEL, BATCH, opts).unwrap();
         let rows = BATCH * D_MODEL;
@@ -408,7 +416,7 @@ mod language_model {
         };
         let short: Vec<u32> = (0..9).map(|i| (i * 11 % VOCAB) as u32).collect();
         let long: Vec<u32> = (0..300).map(|i| (i * 13 % VOCAB) as u32).collect();
-        for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+        for dtype in DTYPES {
             let opts = GpuOptions::default().dtype(dtype);
             for ((_, mut graphed), (_, mut eager)) in models(opts).into_iter().zip(models(opts)) {
                 let family = graphed.family();
