@@ -359,6 +359,13 @@ DEFINE_CONV1D_BURNIN_NOSAVE_TILED(f16,  __half,        from_f_f16)
 // accumulators in registers (an array indexed by a runtime bound anywhere
 // lives in local memory everywhere). Every step's arithmetic is the one
 // the step-by-step walk did, in the same order.
+//
+// On the half types the typed values of a batch land in registers of their
+// own before any is converted: with the conversion beside its load inside
+// the branch that picks x or the carry-in, they reused one register for
+// all eight x loads, so each waited for the one before. A value outside
+// the walk loads as zero, which converts to the 0.0f the walk used before.
+// f32 loads need no conversion and keep the one select per step.
 #define CONV1D_BWD_BATCH 8
 
 // The descending walk from ts_top to t0 with DC taps over the arrays WIN,
@@ -367,17 +374,41 @@ DEFINE_CONV1D_BURNIN_NOSAVE_TILED(f16,  __half,        from_f_f16)
     for (int tb = ts_top; tb >= t0; tb -= CONV1D_BWD_BATCH) {                \
         float xs[CONV1D_BWD_BATCH];                                          \
         float dus[CONV1D_BWD_BATCH];                                         \
-        _Pragma("unroll")                                                    \
-        for (int j = 0; j < CONV1D_BWD_BATCH; j++) {                         \
-            int ts = tb - j;                                                 \
-            int tx = ts - ((DC) - 1);                                        \
-            bool live = (ts >= t0) && (ts < T_);                             \
-            xs[j] = (live && ts < ts0)                                       \
-                ? ((tx >= 0)                                                 \
-                    ? to_f(x_branch[(b * T_ + tx) * x_stride + d])          \
-                    : conv_init[init_base + tx + d_conv])                    \
-                : 0.0f;                                                      \
-            dus[j] = live ? to_f(d_u[(b * T_ + ts) * d_inner + d]) : 0.0f;   \
+        if constexpr (sizeof(TY) == sizeof(float)) {                         \
+            _Pragma("unroll")                                                \
+            for (int j = 0; j < CONV1D_BWD_BATCH; j++) {                     \
+                int ts = tb - j;                                             \
+                int tx = ts - ((DC) - 1);                                    \
+                bool live = (ts >= t0) && (ts < T_);                         \
+                xs[j] = (live && ts < ts0)                                   \
+                    ? ((tx >= 0)                                             \
+                        ? to_f(x_branch[(b * T_ + tx) * x_stride + d])      \
+                        : conv_init[init_base + tx + d_conv])                \
+                    : 0.0f;                                                  \
+                dus[j] = live ? to_f(d_u[(b * T_ + ts) * d_inner + d])       \
+                              : 0.0f;                                        \
+            }                                                                \
+        } else {                                                             \
+            TY xr[CONV1D_BWD_BATCH];                                         \
+            TY dur[CONV1D_BWD_BATCH];                                        \
+            _Pragma("unroll")                                                \
+            for (int j = 0; j < CONV1D_BWD_BATCH; j++) {                     \
+                int ts = tb - j;                                             \
+                int tx = ts - ((DC) - 1);                                    \
+                bool live = (ts >= t0) && (ts < T_);                         \
+                bool windowed = live && ts < ts0;                            \
+                xr[j] = (windowed && tx >= 0)                                \
+                    ? x_branch[(b * T_ + tx) * x_stride + d] : FROM_F(0.0f); \
+                xs[j] = (windowed && tx < 0)                                 \
+                    ? conv_init[init_base + tx + d_conv] : 0.0f;             \
+                dur[j] = live ? d_u[(b * T_ + ts) * d_inner + d]             \
+                              : FROM_F(0.0f);                                \
+            }                                                                \
+            _Pragma("unroll")                                                \
+            for (int j = 0; j < CONV1D_BWD_BATCH; j++) {                     \
+                if (tb - j - ((DC) - 1) >= 0) xs[j] = to_f(xr[j]);           \
+                dus[j] = to_f(dur[j]);                                       \
+            }                                                                \
         }                                                                    \
         _Pragma("unroll")                                                    \
         for (int j = 0; j < CONV1D_BWD_BATCH; j++) {                         \
