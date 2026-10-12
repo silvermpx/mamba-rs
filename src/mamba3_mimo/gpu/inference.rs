@@ -25,7 +25,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d, grid_norm, launch_elems, validate_rows_capacity};
+use crate::gpu::launch::{check_int_args, grid_1d_cover, grid_norm, launch_elems};
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 
@@ -204,6 +204,7 @@ impl Mamba3MimoGpuEngine {
         (dtype, mode): (WeightDtype, Option<GemmMode>),
     ) -> Result<Self, String> {
         w.validate(&cfg, input_dim)?;
+        check_window_ints(&cfg, input_dim, (batch, 1))?;
         let act = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
             half => half,
@@ -378,19 +379,11 @@ impl Mamba3MimoGpuEngine {
     /// decode steps.
     pub fn alloc_window(&self, seq_len: usize) -> Result<Mamba3MimoGpuWindow, String> {
         let c = &self.cfg;
+        if seq_len == 0 || self.batch == 0 {
+            return Err("a window needs at least one row".into());
+        }
+        check_window_ints(c, self.input_dim, (self.batch, seq_len))?;
         let rows = self.batch * seq_len;
-        let widest = [
-            self.input_dim,
-            c.in_proj_out_dim(),
-            c.bc_width(),
-            c.d_inner(),
-            2 * c.mlp_hidden(),
-            c.d_model,
-        ]
-        .into_iter()
-        .max()
-        .unwrap_or(0);
-        validate_rows_capacity(rows, widest)?;
         let s = &self.ctx.stream;
         let z = |n: usize| GpuBuffer::zeros(s, n.max(1));
         let typed = |n: usize| DtypedBuf::zeros(s, n.max(1), self.act);
@@ -519,7 +512,7 @@ impl Mamba3MimoGpuEngine {
         bld.arg(&b);
         bld.arg(&t);
         bld.arg(&dm);
-        unsafe { bld.launch(grid_1d(self.batch * self.cfg.d_model)) }
+        unsafe { bld.launch(grid_1d_cover(self.batch * self.cfg.d_model)?) }
             .map_err(|e| format!("MIMO last rows: {e:?}"))?;
         Ok(())
     }
@@ -925,7 +918,7 @@ impl Mamba3MimoGpuEngine {
                 bld.arg(&upp);
                 bld.arg(&rows_i);
                 bld.arg(&h_i);
-                unsafe { bld.launch(grid_1d(rows * m.hidden)) }
+                unsafe { bld.launch(grid_1d_cover(rows * m.hidden)?) }
                     .map_err(|e| format!("MIMO MLP gate L{l}: {e:?}"))?;
                 gpu_gemm_typed_forward_raw(
                     &self.ctx,
@@ -948,6 +941,35 @@ impl Mamba3MimoGpuEngine {
             (rows, false),
         )
     }
+}
+
+/// The values the MIMO kernels take as `int` over windows of `seq_len`
+/// tokens of `batch` sequences: the batch, the window, its rows, and the
+/// widest row, which bounds every column offset and width the kernels take.
+/// Element counts and offsets are 64-bit, so a window is bounded by memory
+/// alone past these.
+pub(crate) fn check_window_ints(
+    cfg: &Mamba3MimoConfig,
+    input_dim: usize,
+    (batch, seq_len): (usize, usize),
+) -> Result<(), String> {
+    let widest = [
+        input_dim,
+        cfg.in_proj_out_dim(),
+        cfg.bc_width(),
+        cfg.mimo_rank * cfg.d_inner(),
+        2 * cfg.mlp_hidden(),
+        cfg.d_model,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    check_int_args(&[
+        ("batch", batch),
+        ("seq_len", seq_len),
+        ("rows", batch.saturating_mul(seq_len)),
+        ("widest row", widest),
+    ])
 }
 
 /// The context, module, shape and activation dtype a MIMO launch needs,

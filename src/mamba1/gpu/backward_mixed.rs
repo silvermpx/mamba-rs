@@ -66,7 +66,7 @@ use crate::gpu::blas::{
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm, launch_cast};
 use cudarc::driver::PushKernelArg;
 
 // ---------------------------------------------------------------------------
@@ -912,7 +912,6 @@ pub fn gpu_backward_mamba_backbone_mixed(
         // its forward value has no remaining consumer.
         let dy_ptr = acts.input_proj_outputs.cached_ptr();
         {
-            let n = (bt * dm) as i32;
             let cast = match dtype {
                 WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
                 WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
@@ -920,13 +919,14 @@ pub fn gpu_backward_mamba_backbone_mixed(
                     return Err("mixed backward: unexpected f32 compute dtype".into());
                 }
             };
-            let src = d_temporal.cached_ptr();
-            let mut bld = ctx.stream.launch_builder(cast);
-            bld.arg(&dy_ptr);
-            bld.arg(&src);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * dm)) }
-                .map_err(|e| format!("input_proj dY cast: {e:?}"))?;
+            launch_cast(
+                &ctx.stream,
+                cast,
+                (dy_ptr, dtype.size_bytes()),
+                (d_temporal.cached_ptr(), 4),
+                bt * dm,
+                format_args!("input_proj dY cast"),
+            )?;
         }
         // db: typed accumulating reduction of dY over (b, t) into the f32
         // grad slice (deterministic — one block per bias index, no atomics).

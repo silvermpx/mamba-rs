@@ -32,8 +32,8 @@ use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
-use super::inference::check_device_envelope;
 use super::inference::{LayerPtrs, M2Exec, Mamba2GpuState, MlpPtrs, WindowPtrs};
+use super::inference::{check_device_envelope, check_window_ints};
 use super::kernels::{
     CHUNK, Mamba2Kernels, SeqBwdRoute, bc_tiles_smem_bytes, dx_tiles_geom,
     gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes, seq_bwd_tiles_smem_bytes, seq_bwd_tiles_threads,
@@ -47,7 +47,7 @@ use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
 use crate::gpu::context::{GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_colsum, grid_norm, validate_rows_capacity};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_colsum, grid_norm, launch_cast};
 use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -475,13 +475,7 @@ impl Mamba2GpuTrainer {
         );
         let (nh, hd, ds) = (c.nheads(), c.headdim, c.d_state);
         let hidden = c.mlp_hidden();
-        validate_rows_capacity(
-            rows,
-            [input_dim, ip, cd, di, dm, 2 * hidden]
-                .into_iter()
-                .max()
-                .unwrap_or(0),
-        )?;
+        check_window_ints(c, input_dim, (batch, seq_len))?;
         let per_chunk = batch * nc * nh;
         let nseg = seq_len.div_ceil(stride);
         // The chunked path's per-chunk buffers, or the sequential path's
@@ -716,13 +710,14 @@ impl Mamba2GpuTrainer {
         };
         let (base, copy) = (self.master.cached_ptr(), mirror.cached_ptr());
         for &(src, dst) in &self.mirror_pairs {
-            let (d, s_ptr, n) = (copy + (dst.off * 2) as u64, at(base, src), src.len as i32);
-            let mut bld = self.ctx.stream.launch_builder(cast);
-            bld.arg(&d);
-            bld.arg(&s_ptr);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(src.len)) }
-                .map_err(|e| format!("Mamba-2 half weight copy: {e:?}"))?;
+            launch_cast(
+                &self.ctx.stream,
+                cast,
+                (copy + (dst.off * 2) as u64, 2),
+                (at(base, src), 4),
+                src.len,
+                format_args!("Mamba-2 half weight copy"),
+            )?;
         }
         Ok(())
     }
@@ -1150,14 +1145,14 @@ impl Mamba2GpuTrainer {
             WeightDtype::Bf16 => &self.ctx.kernels.cast_f32_to_bf16,
             _ => &self.ctx.kernels.cast_f32_to_f16,
         };
-        let n_i = n as i32;
-        let mut bld = self.ctx.stream.launch_builder(cast);
-        bld.arg(&dst);
-        bld.arg(&src);
-        bld.arg(&n_i);
-        unsafe { bld.launch(grid_1d(n)) }
-            .map(|_| ())
-            .map_err(|e| format!("Mamba-2 rounding rows: {e:?}"))
+        launch_cast(
+            &self.ctx.stream,
+            cast,
+            (dst, 2),
+            (src, 4),
+            n,
+            format_args!("Mamba-2 rounding rows"),
+        )
     }
 
     /// `g[j] += sum_r dy[r][j]` over f32 rows, the Inference column sum.
@@ -1450,7 +1445,7 @@ impl Mamba2GpuTrainer {
             let d_ssm_i = d_ssm as i32;
             go!(
                 k.gate_only.get(act),
-                grid_1d(rows * d_ssm),
+                grid_1d_cover(rows * d_ssm)?,
                 "gate",
                 [
                     dy, d_proj, ld_proj, z_off, d_gated, ld_out, out_col, y, proj, rows_l, d_ssm_i
@@ -1461,7 +1456,7 @@ impl Mamba2GpuTrainer {
             let d_mlp_i = d_mlp as i32;
             go!(
                 k.mlp_gate.get(act),
-                grid_1d(rows * d_mlp),
+                grid_1d_cover(rows * d_mlp)?,
                 "inner MLP",
                 [d_proj, ld_proj, d_gated, ld_out, proj, rows_l, d_mlp_i]
             );
@@ -1716,7 +1711,7 @@ impl Mamba2GpuTrainer {
             if self.seq_bwd != SeqBwdRoute::Shared {
                 go!(
                     k.seq_scalars.get(act),
-                    grid_1d(rows * nh),
+                    grid_1d_cover(rows * nh)?,
                     "sequential step scalars",
                     [
                         scal, xbc, proj, ld_proj, dt_off, dt_bias, a_neg, rows_l, nh_i, ng_i, hd_i,
@@ -1856,7 +1851,7 @@ impl Mamba2GpuTrainer {
             let n = rows * ng * ds * 2;
             go!(
                 &k.seq_bc_groups,
-                grid_1d(n),
+                grid_1d_cover(n)?,
                 "B and C groups",
                 [
                     dxbc, db_h, dc_h, rows_l, nh_i, ng_i, ds_i, ld_xbc, b_col, c_col
@@ -1888,7 +1883,7 @@ impl Mamba2GpuTrainer {
             let (xbc_col_i, cd_i, dconv_i) = (xbc_col as i32, cd as i32, c.d_conv as i32);
             go!(
                 k.conv_dv.get(act),
-                grid_1d(rows * cd),
+                grid_1d_cover(rows * cd)?,
                 "conv dv",
                 [
                     dv, dxbc, conv0, proj, ld_proj, xbc_col_i, cw, cbias, b_i, t_i, cd_i, dconv_i
@@ -1896,7 +1891,7 @@ impl Mamba2GpuTrainer {
             );
             go!(
                 k.conv_dx.get(act),
-                grid_1d(rows * cd),
+                grid_1d_cover(rows * cd)?,
                 "conv dx",
                 [d_proj, ld_proj, xbc_col_i, dv, cw, b_i, t_i, cd_i, dconv_i]
             );
@@ -2070,7 +2065,7 @@ impl Mamba2GpuTrainer {
         bld.arg(&up);
         bld.arg(&rows_i);
         bld.arg(&hidden_i);
-        unsafe { bld.launch(grid_1d(rows * hidden)) }
+        unsafe { bld.launch(grid_1d_cover(rows * hidden)?) }
             .map_err(|e| format!("Mamba-2 MLP gate backward L{l}: {e:?}"))?;
         if act == WeightDtype::F32 {
             let m = self.acts[l].mlp.as_ref().ok_or(no_mlp)?;

@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use cudarc::driver::{CudaStream, PushKernelArg};
+use cudarc::driver::CudaStream;
 use rayon::prelude::*;
 
 use crate::config::ModelFamily;
@@ -16,7 +16,7 @@ use crate::gpu::blas::{
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::context::{GemmMode, GpuCtx};
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::grid_1d;
+use crate::gpu::launch::launch_cast;
 use crate::hf::embed::embed_lookup;
 use crate::hf::load::{HfModel, load_hf};
 use crate::hf::load_mamba2::load_hf_mamba2;
@@ -548,13 +548,14 @@ impl MambaGpuLM {
                         } else {
                             &ctx.kernels.cast_f32_to_f16
                         };
-                        let n = (b * d) as i32;
-                        let mut bld = stream.launch_builder(cast);
-                        bld.arg(&rows_ptr);
-                        bld.arg(&temporal_ptr);
-                        bld.arg(&n);
-                        unsafe { bld.launch(grid_1d(b * d)) }
-                            .map_err(|e| format!("cast rows for the head: {e:?}"))?;
+                        launch_cast(
+                            &stream,
+                            cast,
+                            (rows_ptr, dt.size_bytes()),
+                            (temporal_ptr, 4),
+                            b * d,
+                            format_args!("cast rows for the head"),
+                        )?;
                         rows_ptr
                     }
                 };

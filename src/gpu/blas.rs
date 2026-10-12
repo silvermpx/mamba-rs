@@ -20,28 +20,31 @@ use super::kernel_identity::{
     enqueue_with_physical_observation, finish_recording_physical_observer,
     resolve_physical_launch_observation,
 };
-use super::launch::{grid_1d, grid_colsum};
+use super::launch::{check_int_args, grid_1d, grid_1d_wide, grid_colsum, launch_cast};
 use cudarc::driver::{CudaFunction, DeviceRepr, LaunchArgs, LaunchConfig, PushKernelArg};
 use std::ffi::{c_int, c_void};
 
-/// The sizes a 32-bit kernel takes, and the element count it indexes with
-/// them: an error when either is past an i32, where a plain cast would
-/// wrap it silently.
-fn kernel_ints<const N: usize>(
-    sizes: [usize; N],
-    elems: usize,
-    kernel: &str,
-) -> Result<[i32; N], String> {
-    if i32::try_from(elems).is_err() {
-        return Err(format!(
-            "{kernel}: {elems} elements are past the 32-bit indexing the kernel takes"
-        ));
-    }
+/// The sizes a kernel takes as `int`, within the range
+/// [`check_int_args`] keeps: an error past it, where a plain cast would
+/// wrap them silently.
+fn kernel_ints<const N: usize>(sizes: [usize; N], kernel: &str) -> Result<[i32; N], String> {
     let mut out = [0i32; N];
     for (o, size) in out.iter_mut().zip(sizes) {
-        *o = i32::try_from(size).map_err(|_| format!("{kernel}: size {size} is past an i32"))?;
+        check_int_args(&[("size", size)]).map_err(|e| format!("{kernel}: {e}"))?;
+        *o = size as i32;
     }
     Ok(out)
+}
+
+/// The element count of a kernel that indexes with 32 bits: an error past
+/// an i32, where its index would wrap.
+fn kernel_elems(elems: usize, kernel: &str) -> Result<(), String> {
+    match i32::try_from(elems) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(format!(
+            "{kernel}: {elems} elements are past the 32-bit indexing the kernel takes"
+        )),
+    }
 }
 
 /// The sizes of a cuBLAS call as the 32-bit ints its API takes, or an error
@@ -280,13 +283,13 @@ pub(crate) unsafe fn gpu_gemm_f32_forward_ptrs(
     super::gemm_bi_triad::validate_f32_triad_pointer_request(ctx, request, operands)?;
     ctx.ensure_vendor_gemm("gpu_gemm_f32_forward_ptrs")?;
     let beta = if let Some(b_ptr) = bias {
-        let [b_i, n_i] = kernel_ints([batch, n_out], batch * n_out, "bias_broadcast")?;
+        let [b_i, n_i] = kernel_ints([batch, n_out], "bias_broadcast")?;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.bias_broadcast);
         builder.arg(&y);
         builder.arg(&b_ptr);
         builder.arg(&b_i);
         builder.arg(&n_i);
-        unsafe { builder.launch(grid_1d(batch * n_out)) }
+        unsafe { builder.launch(grid_1d_wide(batch * n_out)) }
             .map_err(|e| format!("bias_broadcast_ptrs: {e:?}"))?;
         1.0f32
     } else {
@@ -2427,7 +2430,7 @@ pub fn gpu_gemm_bi_backward_grad_raw(
     gpu_gemm_bi_backward_dx_raw(ctx, dx, dy, w_ptr, batch, n_in, n_out)?;
 
     if let Some(db) = db {
-        let [b_i, n_i] = kernel_ints([batch, n_out], batch * n_out, "colsum_accumulate")?;
+        let [b_i, n_i] = kernel_ints([batch, n_out], "colsum_accumulate")?;
         let db_ptr = db.ptr();
         let dy_ptr = dy.cached_ptr();
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.colsum_accumulate);
@@ -2467,19 +2470,19 @@ pub fn gpu_gemm_forward_dispatch(
             let (batch, n_in, _) = dims;
             let half_bytes = batch * n_in * w_dtype.size_bytes();
             let half_ptr = ctx.half_staging_for(half_bytes)?;
-            let [n] = kernel_ints([batch * n_in], batch * n_in, "cast_f32_to_half")?;
-            let src_ptr = x.cached_ptr();
             let kernel = match w_dtype {
                 WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
                 WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
                 _ => unreachable!(),
             };
-            let mut builder = ctx.stream.launch_builder(kernel);
-            builder.arg(&half_ptr);
-            builder.arg(&src_ptr);
-            builder.arg(&n);
-            unsafe { builder.launch(grid_1d(batch * n_in)) }
-                .map_err(|e| format!("cast_f32_to_half: {e:?}"))?;
+            launch_cast(
+                &ctx.stream,
+                kernel,
+                (half_ptr, w_dtype.size_bytes()),
+                (x.cached_ptr(), 4),
+                batch * n_in,
+                format_args!("cast_f32_to_half"),
+            )?;
             gpu_gemm_ex_forward_raw(
                 ctx,
                 y,
@@ -4313,11 +4316,11 @@ pub fn gpu_gemm_typed_forward_raw(
         && let Some(kernel) = pick_bi_matvec(ctx, x.dtype, w.dtype, c.dtype)
     {
         let bias_arg = bias_ptr.unwrap_or(0);
-        let [m_i, n_i, k_i] = kernel_ints(
-            [batch, n_out, n_in],
+        kernel_elems(
             (batch * n_out).max(batch * n_in).max(n_out * n_in),
             "matvec_bi",
         )?;
+        let [m_i, n_i, k_i] = kernel_ints([batch, n_out, n_in], "matvec_bi")?;
         return launch_bi_matvec(
             ctx,
             kernel,
@@ -4349,7 +4352,7 @@ pub fn gpu_gemm_typed_forward_raw(
     }
 
     let beta = if let Some(b_ptr) = bias_ptr {
-        let [b_i, n_i] = kernel_ints([batch, n_out], batch * n_out, "bias_broadcast typed")?;
+        let [b_i, n_i] = kernel_ints([batch, n_out], "bias_broadcast typed")?;
         let c_ptr = c.ptr;
         let bias_kernel = match c.dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => &ctx.kernels.bias_broadcast,
@@ -4360,7 +4363,7 @@ pub fn gpu_gemm_typed_forward_raw(
         builder.arg(&b_ptr);
         builder.arg(&b_i);
         builder.arg(&n_i);
-        unsafe { builder.launch(grid_1d(batch * n_out)) }
+        unsafe { builder.launch(grid_1d_wide(batch * n_out)) }
             .map_err(|e| format!("bias_broadcast_typed: {:?}", e))?;
         1.0f32
     } else {

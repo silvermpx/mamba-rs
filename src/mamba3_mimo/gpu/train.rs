@@ -30,7 +30,7 @@ use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
-use super::inference::{MimoChunkedPtrs, MimoExec, launch_chunked_scan};
+use super::inference::{MimoChunkedPtrs, MimoExec, check_window_ints, launch_chunked_scan};
 use super::kernels::{
     CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, chunked_geom,
     scan_bwd_global_geom, scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
@@ -45,7 +45,7 @@ use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer, GradSlice};
 use crate::gpu::context::{GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_norm, launch_elems, validate_rows_capacity};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_norm, launch_cast, launch_elems};
 use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -488,19 +488,7 @@ impl Mamba3MimoGpuTrainer {
         if batch == 0 || seq_len == 0 {
             return Err("a training window needs at least one sequence and one token".into());
         }
-        validate_rows_capacity(
-            batch * seq_len,
-            [
-                input_dim,
-                cfg.in_proj_out_dim(),
-                cfg.mimo_rank * cfg.d_inner(),
-                2 * cfg.mlp_hidden(),
-                cfg.d_model,
-            ]
-            .into_iter()
-            .max()
-            .unwrap_or(0),
-        )?;
+        check_window_ints(&cfg, input_dim, (batch, seq_len))?;
         let stride = stride.clamp(1, seq_len);
         let (hd, ds, rank, na) = (
             cfg.headdim,
@@ -979,13 +967,14 @@ impl Mamba3MimoGpuTrainer {
         };
         let (base, copy) = (self.master.cached_ptr(), mirror.cached_ptr());
         for &(src, dst) in &self.mirror_pairs {
-            let (d, s_ptr, n) = (copy + (dst.off * 2) as u64, at(base, src), src.len as i32);
-            let mut bld = self.ctx.stream.launch_builder(cast);
-            bld.arg(&d);
-            bld.arg(&s_ptr);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(src.len)) }
-                .map_err(|e| format!("MIMO half weight copy: {e:?}"))?;
+            launch_cast(
+                &self.ctx.stream,
+                cast,
+                (copy + (dst.off * 2) as u64, 2),
+                (at(base, src), 4),
+                src.len,
+                format_args!("MIMO half weight copy"),
+            )?;
         }
         Ok(())
     }
@@ -1345,7 +1334,7 @@ impl Mamba3MimoGpuTrainer {
                 bld.arg(&upp);
                 bld.arg(&rows_i);
                 bld.arg(&h_i);
-                unsafe { bld.launch(grid_1d(rows * hidden)) }
+                unsafe { bld.launch(grid_1d_cover(rows * hidden)?) }
                     .map_err(|e| format!("MIMO MLP gate L{l}: {e:?}"))?;
                 self.gemm(
                     (out_rows, actp, self.gemm_weight(ms.fc2_w)?),
@@ -1484,13 +1473,14 @@ impl Mamba3MimoGpuTrainer {
             WeightDtype::Bf16 => &self.ctx.kernels.cast_f32_to_bf16,
             _ => &self.ctx.kernels.cast_f32_to_f16,
         };
-        let n = rows * self.cfg.d_model;
-        let (src, n_i) = (self.bwd.d_temp.cached_ptr(), n as i32);
-        let mut bld = self.ctx.stream.launch_builder(cast);
-        bld.arg(&dth);
-        bld.arg(&src);
-        bld.arg(&n_i);
-        unsafe { bld.launch(grid_1d(n)) }.map_err(|e| format!("MIMO rounding rows: {e:?}"))?;
+        launch_cast(
+            &self.ctx.stream,
+            cast,
+            (dth, 2),
+            (self.bwd.d_temp.cached_ptr(), 4),
+            rows * self.cfg.d_model,
+            format_args!("MIMO rounding rows"),
+        )?;
         Ok(dth)
     }
 
@@ -1683,7 +1673,7 @@ impl Mamba3MimoGpuTrainer {
             bld.arg(&up);
             bld.arg(&rows_i);
             bld.arg(&h_i);
-            unsafe { bld.launch(grid_1d(rows * hidden)) }
+            unsafe { bld.launch(grid_1d_cover(rows * hidden)?) }
                 .map_err(|e| format!("MIMO MLP gate backward L{l}: {e:?}"))?;
         }
         let gw1 = self.grad(ms.fc1_w);
@@ -1919,7 +1909,7 @@ impl Mamba3MimoGpuTrainer {
             if !normed {
                 go!(
                     k.cb.gate.get(act),
-                    grid_1d(rows * nh * hd),
+                    grid_1d_cover(rows * nh * hd)?,
                     "gate",
                     [
                         dy, du, d_proj, ld_proj, gphi, gz, gd, d_o, y, proj, w_d, w_x, w_z, w_o,
@@ -2142,7 +2132,7 @@ impl Mamba3MimoGpuTrainer {
             }
             go!(
                 k.cb.scalars.get(act),
-                grid_1d(rows * nh),
+                grid_1d_cover(rows * nh)?,
                 "step scalars",
                 [
                     d_proj, gdtb, dsc3, ddt_ang, de0, coef, proj, ld_proj, w_dtb, rows_l, t_i,
@@ -2151,7 +2141,7 @@ impl Mamba3MimoGpuTrainer {
             );
             go!(
                 k.cb.u_bwd.get(act),
-                grid_1d(rows * nh * hd),
+                grid_1d_cover(rows * nh * hd)?,
                 "rank inputs",
                 [
                     d_proj, gpsi, du, proj, ld_proj, w_x, rows_l, nh_i, hd_i, r_i
@@ -2166,7 +2156,7 @@ impl Mamba3MimoGpuTrainer {
                 let (gp, count_b, n_l) = (at(g_base, ls.mimo_x), b_i, n_rp as i64);
                 go!(
                     &k.sum_rows,
-                    grid_1d(n_rp),
+                    grid_1d_cover(n_rp)?,
                     "entering Psi",
                     [gp, gpsi_init, count_b, n_l]
                 );
@@ -2294,7 +2284,7 @@ impl Mamba3MimoGpuTrainer {
                 bld.arg(&part);
                 bld.arg(&count);
                 bld.arg(&n_l);
-                unsafe { bld.launch(grid_1d(n)) }
+                unsafe { bld.launch(grid_1d_cover(n)?) }
                     .map_err(|e| format!("MIMO weight partials L{l}: {e:?}"))?;
             }
             if normed {
@@ -2359,7 +2349,7 @@ impl Mamba3MimoGpuTrainer {
             bld.arg(&rows_l);
             bld.arg(&nh_i);
             bld.arg(&na_i);
-            unsafe { bld.launch(grid_1d(rows * na)) }
+            unsafe { bld.launch(grid_1d_cover(rows * na)?) }
                 .map_err(|e| format!("MIMO angle backward L{l}: {e:?}"))?;
         }
         // in_proj, the block norm, the residual.

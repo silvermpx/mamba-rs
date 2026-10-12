@@ -30,9 +30,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::CapturedGemmGraphPlan;
-use crate::gpu::launch::{
-    grid_1d, grid_1d_cover, grid_1d_wide, grid_colsum, grid_norm, grid_parallel_scan,
-};
+use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_colsum, grid_norm, grid_parallel_scan};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
 
@@ -946,7 +944,7 @@ fn gather_last(
     builder.arg(&b_i);
     builder.arg(&t_i);
     builder.arg(&dm_i);
-    unsafe { builder.launch(grid_1d(b * dm)) }
+    unsafe { builder.launch(grid_1d_cover(b * dm)?) }
         .map_err(|e| format!("gather_last prefill: {e:?}"))?;
     Ok(())
 }
@@ -1457,7 +1455,7 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
         bld.arg(&b_i);
         bld.arg(&t_i);
         bld.arg(&dm_i);
-        unsafe { bld.launch(grid_1d(b * dm)) }
+        unsafe { bld.launch(grid_1d_cover(b * dm)?) }
             .map_err(|e| format!("gather_last_typed prefill: {e:?}"))?;
     }
 

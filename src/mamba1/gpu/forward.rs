@@ -21,7 +21,7 @@ use super::weights::{GpuMambaTrainLayerWeights, GpuMambaTrainWeights};
 use crate::gpu::blas::gpu_gemm_bi_forward_raw;
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
-use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm, grid_parallel_scan};
+use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_norm, grid_parallel_scan};
 use cudarc::driver::PushKernelArg;
 use std::sync::Arc;
 
@@ -1217,7 +1217,7 @@ pub fn gpu_forward_mamba_target_burnin(
         builder.arg(&b_i);
         builder.arg(&t_i);
         builder.arg(&dm_i);
-        unsafe { builder.launch(grid_1d(b * dm)) }
+        unsafe { builder.launch(grid_1d_cover(b * dm)?) }
             .map_err(|e| format!("gather_last target: {:?}", e))?;
     }
 

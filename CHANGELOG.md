@@ -168,14 +168,17 @@
   on every instruction set. They used the instruction set's horizontal
   add and its own exponential polynomial, so NEON, AVX2 and AVX-512
   machines disagreed. On some machines their bits differ from 0.7.5.
-- The Mamba-1 kernels and the element kernels the families share index
-  with 64 bits, so a window is bounded by device memory, not by 2^31
-  elements. `gpu::launch::validate_kernel_arg_capacity` is gone:
-  `GpuMambaDims::check_int_args` refuses only the dimensions, row counts
-  and row widths the kernels still take as 32-bit ints, and every Mamba-1
-  entry calls it. `gpu::launch` gains `grid_1d_cover` and `check_int_args`,
-  and `grid_conv_fwd_tiled` and `grid_conv_tiled` return a `Result` that
-  names a grid past its extent.
+- The Mamba-1, Mamba-2 and MIMO kernels and the element kernels the
+  families share index with 64 bits, so a window is bounded by device
+  memory, not by 2^31 elements. `gpu::launch::validate_kernel_arg_capacity`
+  and `gpu::launch::validate_rows_capacity` are gone: every entry refuses
+  only the dimensions, row counts and row widths the kernels still take as
+  32-bit ints (`GpuMambaDims::check_int_args` for Mamba-1), and those stay
+  2^16 under `i32::MAX`, the headroom a block-strided loop steps past its
+  bound with. The casts of the Inference module keep their 32-bit count
+  and run in pieces past it. `gpu::launch` gains `grid_1d_cover`,
+  `check_int_args` and `launch_cast`, and `grid_conv_fwd_tiled` and
+  `grid_conv_tiled` return a `Result` that names a grid past its extent.
 
 ### Fixed
 

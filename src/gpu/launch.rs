@@ -9,37 +9,24 @@ use cudarc::driver::LaunchConfig;
 /// Standard block size for 1D element-wise kernels.
 const BLOCK_1D: u32 = 256;
 
+/// The largest value [`check_int_args`] lets a kernel take as an `int`:
+/// `i32::MAX` less the headroom kernels step past their bounds with. A loop
+/// counter strided by the block ends up to a block past its bound, and a
+/// time row is padded by a few elements, so a value right under `i32::MAX`
+/// would wrap them.
+const INT_ARG_MAX: usize = i32::MAX as usize - (1 << 16);
+
 /// Refuse a launch whose 32-bit kernel arguments would wrap. Each named value
 /// is a dimension, a row count or a row width a kernel takes as an `int`;
 /// element counts and offsets are 64-bit in the kernels that check with
 /// this, so the size of a tensor is bounded by memory alone.
 pub fn check_int_args(args: &[(&str, usize)]) -> Result<(), String> {
-    match args.iter().find(|(_, v)| *v > i32::MAX as usize) {
+    match args.iter().find(|(_, v)| *v > INT_ARG_MAX) {
         Some((name, v)) => Err(format!(
             "{name} {v} is past the 32-bit range the kernels take it in"
         )),
         None => Ok(()),
     }
-}
-
-/// A window of `rows` token rows whose widest row holds `widest` elements
-/// must stay within the 32-bit element counts the kernels take, so a
-/// window too large for them is refused when its buffers are sized rather
-/// than at a launch.
-pub fn validate_rows_capacity(rows: usize, widest: usize) -> Result<(), String> {
-    if rows == 0 {
-        return Err("a window needs at least one row".into());
-    }
-    let elems = rows
-        .checked_mul(widest)
-        .ok_or("rows * row width overflows usize")?;
-    if elems > i32::MAX as usize {
-        return Err(format!(
-            "a window of {rows} rows of up to {widest} elements holds {elems} elements, past \
-             i32::MAX; the kernels take element counts as 32-bit ints"
-        ));
-    }
-    Ok(())
 }
 
 /// Let `f` stage as much dynamic shared memory as the device's per-block
@@ -178,6 +165,55 @@ pub(crate) fn launch_fill(
     bld.arg(&val);
     bld.arg(&count);
     unsafe { bld.launch(grid_1d_wide(n)) }.map_err(|e| format!("{what}: {e:?}"))?;
+    Ok(())
+}
+
+/// The most elements one launch of a 32-bit counted element kernel takes:
+/// whole blocks within `i32::MAX`.
+const I32_PIECE: usize = (i32::MAX as usize / BLOCK_1D as usize) * BLOCK_1D as usize;
+
+/// Launch a conversion kernel `(dst, src, int n)` over `n` elements, each
+/// pointer with the size of its element in bytes. These are the casts of the
+/// Inference module, whose source is pinned with its 32-bit count, so past
+/// `i32::MAX` elements they run in pieces the kernel can count, each piece
+/// moving both pointers past the elements before it. Every element is
+/// converted alone, so the pieces write what one launch would, and below
+/// `i32::MAX` this is the one launch of [`grid_1d`].
+pub fn launch_cast(
+    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+    f: &cudarc::driver::CudaFunction,
+    dst: (u64, usize),
+    src: (u64, usize),
+    n: usize,
+    what: std::fmt::Arguments<'_>,
+) -> Result<(), String> {
+    launch_cast_pieces(stream, f, (dst, src), (n, I32_PIECE), what)
+}
+
+/// [`launch_cast`] in pieces of at most `piece` elements.
+fn launch_cast_pieces(
+    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+    f: &cudarc::driver::CudaFunction,
+    ((dst, dst_bytes), (src, src_bytes)): ((u64, usize), (u64, usize)),
+    (n, piece): (usize, usize),
+    what: std::fmt::Arguments<'_>,
+) -> Result<(), String> {
+    use cudarc::driver::PushKernelArg;
+    let mut done = 0;
+    while done < n {
+        let len = (n - done).min(piece);
+        let (d, s) = (
+            dst + (done * dst_bytes) as u64,
+            src + (done * src_bytes) as u64,
+        );
+        let count = len as i32;
+        let mut bld = stream.launch_builder(f);
+        bld.arg(&d);
+        bld.arg(&s);
+        bld.arg(&count);
+        unsafe { bld.launch(grid_1d(len)) }.map_err(|e| format!("{what}: {e:?}"))?;
+        done += len;
+    }
     Ok(())
 }
 
@@ -505,8 +541,66 @@ mod tests {
     /// wrapped.
     #[test]
     fn the_int_argument_check_names_what_would_wrap() {
-        assert!(check_int_args(&[("a", 1), ("b", i32::MAX as usize)]).is_ok());
+        assert!(check_int_args(&[("a", 1), ("b", INT_ARG_MAX)]).is_ok());
+        assert!(check_int_args(&[("b", INT_ARG_MAX + 1)]).is_err());
         let err = check_int_args(&[("a", 1), ("rows", PAST_I32), ("c", PAST_I32)]).unwrap_err();
         assert!(err.starts_with("rows "), "{err}");
+    }
+
+    /// The pieces of a cast move each pointer by its own element size: a
+    /// downcast and an upcast in pieces of three blocks and a tail write the
+    /// bits of one launch over every element.
+    #[test]
+    fn a_cast_in_pieces_writes_what_one_launch_writes() {
+        use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
+        use crate::gpu::context::GpuCtx;
+        use crate::gpu::device::GpuDevice;
+        use crate::gpu::dtype::WeightDtype;
+
+        let device = GpuDevice::new(0).expect("open CUDA device");
+        let ctx = GpuCtx::new(&device).expect("context");
+        let s = &ctx.stream;
+        let n = 2500;
+        let values: Vec<f32> = (0..n).map(|i| (i as f32 - 1250.0) * 0.3711).collect();
+        let mut src = GpuBuffer::zeros(s, n).expect("src");
+        src.upload(s, &values).expect("upload");
+        let half = |piece: usize| -> DtypedBuf {
+            let dst = DtypedBuf::zeros(s, n, WeightDtype::Bf16).expect("dst");
+            launch_cast_pieces(
+                s,
+                &ctx.kernels.cast_f32_to_bf16,
+                ((dst.cached_ptr(), 2), (src.cached_ptr(), 4)),
+                (n, piece),
+                format_args!("downcast"),
+            )
+            .expect("downcast");
+            dst
+        };
+        let (one, pieces) = (half(n), half(3 * 256));
+        let bits = |b: &DtypedBuf| -> Vec<u32> {
+            let mut v = vec![0f32; n];
+            b.download_f32(s, &mut v).expect("download");
+            s.synchronize().expect("sync");
+            v.iter().map(|x| x.to_bits()).collect()
+        };
+        assert_eq!(bits(&pieces), bits(&one), "downcast");
+        let full = |piece: usize| -> Vec<u32> {
+            let dst = GpuBuffer::zeros(s, n).expect("dst");
+            launch_cast_pieces(
+                s,
+                &ctx.kernels.cast_bf16_to_f32,
+                ((dst.cached_ptr(), 4), (one.cached_ptr(), 2)),
+                (n, piece),
+                format_args!("upcast"),
+            )
+            .expect("upcast");
+            s.synchronize().expect("sync");
+            dst.to_cpu(s)
+                .expect("download")
+                .iter()
+                .map(|x| x.to_bits())
+                .collect()
+        };
+        assert_eq!(full(3 * 256), full(n), "upcast");
     }
 }

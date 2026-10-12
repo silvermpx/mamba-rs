@@ -32,7 +32,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d, grid_norm, launch_elems, validate_rows_capacity};
+use crate::gpu::launch::{check_int_args, grid_1d_cover, grid_norm, launch_elems};
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 use crate::mlp::GatedMlpLayerWeights;
@@ -224,6 +224,34 @@ pub(crate) fn check_device_envelope(
     Ok(())
 }
 
+/// The values the Mamba-2 kernels take as `int` over windows of `seq_len`
+/// tokens of `batch` sequences: the batch, the window, its rows, and the
+/// widest row, which bounds every column offset and width the kernels take.
+/// Element counts and offsets are 64-bit, so a window is bounded by memory
+/// alone past these.
+pub(crate) fn check_window_ints(
+    cfg: &Mamba2Config,
+    input_dim: usize,
+    (batch, seq_len): (usize, usize),
+) -> Result<(), String> {
+    let widest = [
+        input_dim,
+        cfg.in_proj_out_dim(),
+        cfg.d_inner(),
+        cfg.d_model,
+        2 * cfg.mlp_hidden(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    check_int_args(&[
+        ("batch", batch),
+        ("seq_len", seq_len),
+        ("rows", batch.saturating_mul(seq_len)),
+        ("widest row", widest),
+    ])
+}
+
 /// What the engine and the trainer share to launch a layer: the context,
 /// the Mamba-2 module, the shape and the activation dtype.
 #[derive(Clone, Copy)]
@@ -338,7 +366,7 @@ impl M2Exec<'_> {
             bld.arg(&z_off);
             bld.arg(&rows_l);
             bld.arg(&d_ssm_i);
-            unsafe { bld.launch(grid_1d(rows * d_ssm)) }
+            unsafe { bld.launch(grid_1d_cover(rows * d_ssm)?) }
                 .map_err(|e| format!("Mamba-2 gate: {e:?}"))?;
         }
         if d_mlp > 0 {
@@ -350,7 +378,7 @@ impl M2Exec<'_> {
             bld.arg(&ld_proj);
             bld.arg(&rows_l);
             bld.arg(&d_mlp_i);
-            unsafe { bld.launch(grid_1d(rows * d_mlp)) }
+            unsafe { bld.launch(grid_1d_cover(rows * d_mlp)?) }
                 .map_err(|e| format!("Mamba-2 inner MLP: {e:?}"))?;
         }
         let t = |ptr| TypedPtr {
@@ -401,7 +429,7 @@ impl M2Exec<'_> {
         bld.arg(&up);
         bld.arg(&rows_i);
         bld.arg(&hidden_i);
-        unsafe { bld.launch(grid_1d(rows * m.hidden)) }
+        unsafe { bld.launch(grid_1d_cover(rows * m.hidden)?) }
             .map_err(|e| format!("Mamba-2 MLP gate: {e:?}"))?;
         gpu_gemm_typed_forward_raw(
             self.ctx,
@@ -488,7 +516,7 @@ impl M2Exec<'_> {
                 run(cfg).map_err(|e| format!("Mamba-2 window {what} L{l}: {e:?}"))
             };
         let (cw, cbias) = (lw.conv_w, lw.conv_b);
-        launch(grid_1d(rows * cd), "conv", l, &|g| unsafe {
+        launch(grid_1d_cover(rows * cd)?, "conv", l, &|g| unsafe {
             let mut bld = stream.launch_builder(self.kernels.conv_prefill.get(self.act));
             bld.arg(&xbc);
             bld.arg(&conv);
@@ -503,7 +531,7 @@ impl M2Exec<'_> {
             bld.arg(&dconv_i);
             bld.launch(g).map(|_| ())
         })?;
-        launch(grid_1d(b * cd), "conv state", l, &|g| unsafe {
+        launch(grid_1d_cover(b * cd)?, "conv state", l, &|g| unsafe {
             let mut bld = stream.launch_builder(self.kernels.conv_state.get(self.act));
             bld.arg(&conv_next);
             bld.arg(&conv);
@@ -834,6 +862,7 @@ impl Mamba2GpuEngine {
         (dtype, mode): (WeightDtype, Option<GemmMode>),
     ) -> Result<Self, String> {
         w.validate(&cfg, input_dim)?;
+        check_window_ints(&cfg, input_dim, (batch, 1))?;
         let act = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
             half => half,
@@ -1196,7 +1225,7 @@ impl Mamba2GpuEngine {
                 bld.arg(&b_i);
                 bld.arg(&cd_i);
                 bld.arg(&dconv_i);
-                unsafe { bld.launch(grid_1d(b * cd)) }
+                unsafe { bld.launch(grid_1d_cover(b * cd)?) }
                     .map_err(|e| format!("Mamba-2 conv step L{l}: {e:?}"))?;
             }
             let y = scratch.y.cached_ptr();
@@ -1272,19 +1301,12 @@ impl Mamba2GpuEngine {
     /// Buffers for prompt windows of `seq_len` tokens.
     pub fn alloc_prefill(&self, seq_len: usize) -> Result<Mamba2GpuPrefill, String> {
         let c = &self.cfg;
+        if seq_len == 0 || self.batch == 0 {
+            return Err("a window needs at least one row".into());
+        }
+        check_window_ints(c, self.input_dim, (self.batch, seq_len))?;
         let rows = self.batch * seq_len;
         let hidden = c.mlp_hidden();
-        let widest = [
-            self.input_dim,
-            c.in_proj_out_dim(),
-            c.d_inner(),
-            c.d_model,
-            2 * hidden,
-        ]
-        .into_iter()
-        .max()
-        .unwrap_or(0);
-        validate_rows_capacity(rows, widest)?;
         let nc = seq_len.div_ceil(CHUNK);
         let s = &self.ctx.stream;
         let z = |n: usize| GpuBuffer::zeros(s, n.max(1));
@@ -1352,7 +1374,7 @@ impl Mamba2GpuEngine {
         bld.arg(&b);
         bld.arg(&t);
         bld.arg(&dm);
-        unsafe { bld.launch(grid_1d(self.batch * self.cfg.d_model)) }
+        unsafe { bld.launch(grid_1d_cover(self.batch * self.cfg.d_model)?) }
             .map_err(|e| format!("Mamba-2 prefill last rows: {e:?}"))?;
         Ok(())
     }

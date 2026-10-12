@@ -2,8 +2,8 @@
 //! parameter model trains with: the clip norm and the f16 overflow check see
 //! every element. Before the counts were 64-bit, the norm of such an arena
 //! came out 0 (no clip, no spike skip) and the overflow check panicked. And
-//! the Mamba-1 element kernels over a window of that many elements: each one
-//! is processed once, those past 2^31 included.
+//! the Mamba-1 element kernels and the last-row gather over a window of that
+//! many elements: each one is processed once, those past 2^31 included.
 #![cfg(feature = "cuda")]
 
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::grad_clip::{alloc_partials, clip_grads_device};
-use mamba_rs::gpu::launch::grid_1d_wide;
+use mamba_rs::gpu::launch::{grid_1d_cover, grid_1d_wide};
 use mamba_rs::gpu::loss_scaler::{OverflowFlag, check_inf_nan_gpu};
 
 /// Set `n` floats at `ptr` to `value` on the device.
@@ -152,4 +152,51 @@ fn m1_element_kernels_run_every_row_past_i32_max() {
         .map(|&i| if i < low { HALF } else { TWO })
         .collect();
     assert_eq!(got, want, "every element reads its own source element");
+}
+
+/// The last-row gather over more than `i32::MAX` outputs, the rows of a
+/// prompt batch that wide: every output reads its own row, those past 2^31
+/// included.
+#[test]
+#[ignore = "allocates 8 GiB of device memory"]
+fn the_last_row_gather_reaches_every_output_past_i32_max() {
+    let device = GpuDevice::new(0).expect("open CUDA device");
+    let ctx = GpuCtx::new(&device).expect("context");
+    let s = &ctx.stream;
+    // Two sequences of one step, rows of half the outputs each.
+    let d = (i32::MAX as usize).div_ceil(2) + 2049;
+    let n = 2 * d;
+    let at = [
+        0,
+        d - 1,
+        d,
+        i32::MAX as usize - 1,
+        i32::MAX as usize,
+        i32::MAX as usize + 1,
+        n - 1,
+    ];
+    let src = DtypedBuf::zeros(s, n, WeightDtype::Bf16).expect("4 GiB of bf16");
+    let dst = DtypedBuf::zeros(s, n, WeightDtype::Bf16).expect("4 GiB of bf16");
+    let (sp, dp) = (src.cached_ptr(), dst.cached_ptr());
+    let low = i32::MAX as usize + 1;
+    fill16(s, sp, HALF, low);
+    fill16(s, sp + (low * 2) as u64, TWO, n - low);
+    let (b, t, d_i) = (2i32, 1i32, d as i32);
+    let mut bld = s.launch_builder(
+        ctx.kernels
+            .gather_last_timestep_typed
+            .get(WeightDtype::Bf16),
+    );
+    bld.arg(&dp);
+    bld.arg(&sp);
+    bld.arg(&b);
+    bld.arg(&t);
+    bld.arg(&d_i);
+    unsafe { bld.launch(grid_1d_cover(n).expect("grid")) }.expect("gather");
+    let got = read16(s, dp, &at);
+    let want: Vec<u16> = at
+        .iter()
+        .map(|&i| if i < low { HALF } else { TWO })
+        .collect();
+    assert_eq!(got, want, "every output reads its own row");
 }

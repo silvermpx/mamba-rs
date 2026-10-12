@@ -179,11 +179,11 @@ extern "C" __global__ void gather_last_timestep(
     const float* __restrict__ src, // [B * T * D]
     int B, int T, int D
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= B * D) return;
-    int b = idx / D;
-    int d = idx % D;
-    dst[idx] = src[((long long)b * T + (T - 1)) * D + d];
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (long long)B * D) return;
+    long long b = idx / D;
+    long long d = idx - b * D;
+    dst[idx] = src[(b * T + (T - 1)) * D + d];
 }
 
 // Templated gather_last_timestep — T_out may differ from T_in (e.g., f32 dst
@@ -195,11 +195,11 @@ extern "C" __global__ void gather_last_timestep_##SUFFIX(                     \
     const T* __restrict__ src,                                                \
     int B, int Tlen, int D                                                    \
 ) {                                                                           \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
-    if (idx >= B * D) return;                                                 \
-    int b = idx / D;                                                          \
-    int d = idx % D;                                                          \
-    dst[idx] = src[((long long)b * Tlen + (Tlen - 1)) * D + d];               \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;         \
+    if (idx >= (long long)B * D) return;                                      \
+    long long b = idx / D;                                                    \
+    long long d = idx - b * D;                                                \
+    dst[idx] = src[(b * Tlen + (Tlen - 1)) * D + d];                          \
 }
 
 DEFINE_GATHER_LAST_TIMESTEP(f32,  float)

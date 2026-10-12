@@ -25,7 +25,7 @@ use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm};
+use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_norm, launch_cast};
 use crate::mamba1::gpu::forward::{GpuMambaDims, GpuRecurrentState};
 use crate::mamba1::gpu::weights::GpuMambaMixedWeights;
 use crate::mamba1::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
@@ -384,7 +384,6 @@ pub fn gpu_forward_mamba_backbone_mixed(
         // every residual carry stay f32).
         let mid = dims.mamba_input_dim;
         {
-            let n = (bt * mid) as i32;
             let cast = match dt {
                 WeightDtype::Bf16 => &k.cast_f32_to_bf16,
                 WeightDtype::F16 => &k.cast_f32_to_f16,
@@ -392,14 +391,14 @@ pub fn gpu_forward_mamba_backbone_mixed(
                     return Err("mixed forward: unexpected f32 compute dtype".into());
                 }
             };
-            let dst = acts.input_proj_inputs.cached_ptr();
-            let src = mamba_input.cached_ptr();
-            let mut bld = ctx.stream.launch_builder(cast);
-            bld.arg(&dst);
-            bld.arg(&src);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * mid)) }
-                .map_err(|e| format!("input_proj input cast: {e:?}"))?;
+            launch_cast(
+                &ctx.stream,
+                cast,
+                (acts.input_proj_inputs.cached_ptr(), dt.size_bytes()),
+                (mamba_input.cached_ptr(), 4),
+                bt * mid,
+                format_args!("input_proj input cast"),
+            )?;
         }
         gpu_gemm_typed_forward_raw(
             ctx,
@@ -419,7 +418,6 @@ pub fn gpu_forward_mamba_backbone_mixed(
             (bt, mid, dm),
         )?;
         {
-            let n = (bt * dm) as i32;
             let cast = match dt {
                 WeightDtype::Bf16 => &k.cast_bf16_to_f32,
                 WeightDtype::F16 => &k.cast_f16_to_f32,
@@ -427,14 +425,14 @@ pub fn gpu_forward_mamba_backbone_mixed(
                     return Err("mixed forward: unexpected f32 compute dtype".into());
                 }
             };
-            let dst = acts.layers[0].residual.cached_ptr();
-            let src = acts.input_proj_outputs.cached_ptr();
-            let mut bld = ctx.stream.launch_builder(cast);
-            bld.arg(&dst);
-            bld.arg(&src);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * dm)) }
-                .map_err(|e| format!("input_proj residual upcast: {e:?}"))?;
+            launch_cast(
+                &ctx.stream,
+                cast,
+                (acts.layers[0].residual.cached_ptr(), 4),
+                (acts.input_proj_outputs.cached_ptr(), dt.size_bytes()),
+                bt * dm,
+                format_args!("input_proj residual upcast"),
+            )?;
         }
     }
 

@@ -64,7 +64,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d, grid_1d_wide};
+use crate::gpu::launch::{grid_1d_wide, launch_cast};
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::gpu::backward::gpu_backward_mamba_backbone;
 use crate::mamba1::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
@@ -1292,22 +1292,22 @@ impl MambaTrainerMixed {
         self.staged_upload(0, input)?;
         self.eager_forward()?;
         {
-            let dst = self.temporal_f32.cached_ptr();
-            let src = self.scratch.temporal_typed.cached_ptr();
-            let kernel = match self.scratch.temporal_typed.dtype() {
+            let typed = &self.scratch.temporal_typed;
+            let kernel = match typed.dtype() {
                 WeightDtype::Bf16 => &self.ctx.kernels.cast_bf16_to_f32,
                 WeightDtype::F16 => &self.ctx.kernels.cast_f16_to_f32,
                 WeightDtype::F32 | WeightDtype::Tf32 => {
                     return Err("forward_split: unexpected f32 temporal_typed in Mixed".into());
                 }
             };
-            let n = self.temporal_f32.len() as i32;
-            let mut b = self.ctx.stream.launch_builder(kernel);
-            b.arg(&dst);
-            b.arg(&src);
-            b.arg(&n);
-            unsafe { b.launch(grid_1d(self.temporal_f32.len())) }
-                .map_err(|e| format!("forward_split: temporal upcast: {e:?}"))?;
+            launch_cast(
+                &self.ctx.stream,
+                kernel,
+                (self.temporal_f32.cached_ptr(), 4),
+                (typed.cached_ptr(), typed.dtype().size_bytes()),
+                self.temporal_f32.len(),
+                format_args!("forward_split: temporal upcast"),
+            )?;
         }
         // Sync AFTER the async D2H enqueue: cuMemcpyDtoHAsync into
         // pageable memory happens to block in the driver, but the
