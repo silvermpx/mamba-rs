@@ -87,6 +87,60 @@ is for contributors who change kernels. Users do not need it.
   keep the ascending chain in one owning thread. The bits stay, the
   memory pipeline widens.
 
+## Index width
+
+- A tensor past 2^31 elements must compute correctly at every shape the
+  model's `validate()` accepts, never with a silent wrap and never with a
+  refusal. That does not make every index 64-bit. Unconditional `long long`
+  indexing cost Mamba-1's prefill 18 % on an RTX 6000 Ada: the parallel
+  scan went from about 76 to about 90 registers, a 128-thread block lost
+  one resident block per SM (6 to 5), and the 768-block grid of a
+  one-sequence prefill needed a second wave on 142 SMs. The 170-SM
+  RTX 5090 kept its single wave and showed nothing, so an index-width
+  change is measured on both boards.
+- Pick per kernel, and compare `ptxas -v` against the 32-bit source first:
+  1. A 64-bit base once per block, chunk or row, and 32-bit offsets inside
+     the hot loop, when every offset inside is provably below 2^31 for
+     every accepted shape. Write the bound next to the base. The reference
+     Mamba scan, FlashAttention and CUTLASS index this way.
+  2. When that still costs registers in a register-bound kernel, compile
+     the body twice from one template on the index type. The `int`
+     instantiation is the 32-bit code, bits and speed included. The host
+     picks it whenever every index the launch computes fits under the
+     `check_int_args` headroom, and the `long long` one otherwise. PyTorch
+     dispatches its fast kernels the same way.
+  3. Element-wise kernels whose source is pinned run in pieces under 2^31
+     (`launch_cast`). Pieces are bit-identical along independent axes only,
+     never along a reduced or scanned one.
+  4. One-time 64-bit arithmetic per thread or block costs nothing
+     measurable and stays.
+- No 64-bit division or modulo per element in a hot loop. A 2-D grid or a
+  row base replaces the decomposition of a flat index.
+- Cast before the first multiply that can pass 2^31, check every
+  intermediate product, and size the host predicate by the largest tensor
+  the launch touches. The full scan tape `[B, D, N, T + 1]` passes 2^31 long
+  before the activations do.
+- The same change moves registers both ways. The 64-bit SISO patch made
+  some chunk kernels 36 % faster at one shape and the sequential angle
+  backward 25 % slower at another, so the decision is per kernel and
+  measured.
+- Both instantiations are tested: the wide one forced at small shapes and
+  compared bit for bit with the narrow one, and one real test past 2^31
+  per family (8 GiB of f32 fits a 48 GB board).
+
+## Graph capture and other threads
+
+- A synchronize of the device or of the context is invalid while any stream
+  of that context captures a CUDA graph, and it ends that capture whichever
+  thread issues it (CUDA Programming Guide, CUDA Graphs). Library code
+  waits on its own stream only. `cublasDestroy` synchronizes the device, so
+  cuBLAS handles live in a list the process keeps and are never destroyed
+  (`src/gpu/cublas_pool.rs`). `cuCtxSynchronize` and a synchronous
+  `cuMemFree` are the same hazard.
+- `tests/capture_beside_teardown.rs` captures in one thread while another
+  builds and drops models, and fails within seconds when anything brings a
+  device-wide wait back.
+
 ## Bit discipline
 
 - Before changing a kernel without digest coverage, add an output-hash arm:
