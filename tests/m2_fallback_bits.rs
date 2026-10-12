@@ -4,6 +4,8 @@
 //! - the gated norm streamed for a group too wide to stage, forward and
 //!   backward, against the staged kernel,
 //! - the chunk state in narrow channel tiles against the whole head,
+//! - the fused dx and token sums in register tiles against the dx kernel
+//!   and the token sums it replaces,
 //! - the conv weight gradient with its taps spread over blocks against one
 //!   block,
 //! - the sequential backward that reads its states from the replay tape
@@ -21,8 +23,8 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba2::gpu::kernels::{
-    CHUNK, Mamba2Kernels, chunk_state_geom, gated_norm_bwd_smem_bytes, gated_norm_cfg,
-    seq_bwd_smem_bytes,
+    CHUNK, Mamba2Kernels, chunk_state_geom, dx_tiles_geom, gated_norm_bwd_smem_bytes,
+    gated_norm_cfg, seq_bwd_smem_bytes,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -271,6 +273,167 @@ fn m2_chunk_state_tiles_are_the_whole_head() {
                 runs.push(bits_f32(&ctx, &states));
             }
             assert_eq!(runs[0], runs[1], "{dtype:?} head {hd} state {ds}");
+        }
+    }
+}
+
+/// The register-tile dx and token sums against `m2b_dx` and `m2b_rowsums`:
+/// a head of 4 channels, one no multiple of 4 over two groups, and one of
+/// 40 over a state of 24, with D per head and per channel. The tiled kernel
+/// serves only heads its block holds, so past that the backward takes the
+/// pair, and both give every output the same bits.
+#[test]
+fn m2_dx_tiles_are_the_dx_and_token_sums() {
+    let (_dev, ctx, k) = setup();
+    let (batch, seq) = (2usize, 100usize);
+    let nc = seq.div_ceil(CHUNK);
+    let pairs = CHUNK * (CHUNK + 1) / 2;
+    for (nh, ng, hd, ds, per_channel) in [
+        (2usize, 1usize, 4usize, 16usize, 0i32),
+        (4, 2, 18, 8, 1),
+        (2, 1, 40, 24, 1),
+    ] {
+        let d_ssm = nh * hd;
+        let (b_col, c_col) = (d_ssm, d_ssm + ng * ds);
+        let ld_xbc = d_ssm + 2 * ng * ds;
+        let rows = batch * seq;
+        let per = batch * nc * nh * CHUNK;
+        let (nk, smem) = dx_tiles_geom(hd, ds, k.smem_optin, k.bwd.dx_tiles_threads)
+            .expect("the tiled dx serves this head");
+        let dy = f32_buf(&ctx, &det(rows * d_ssm, 21, 1.0));
+        let states = f32_buf(&ctx, &det(batch * nc * nh * hd * ds, 22, 1.0));
+        let ds_in = f32_buf(&ctx, &det(batch * nc * nh * hd * ds, 23, 1.0));
+        let cb = f32_buf(&ctx, &det(batch * nc * ng * pairs, 24, 0.5));
+        let dt = f32_buf(
+            &ctx,
+            &det(per, 25, 0.5)
+                .iter()
+                .map(|v| v.abs())
+                .collect::<Vec<_>>(),
+        );
+        let acs = f32_buf(&ctx, &det(per, 26, 2.0));
+        let d = f32_buf(&ctx, &det(nh * hd, 27, 1.0));
+        let ints = |v: &[usize]| -> Vec<i32> { v.iter().map(|&x| x as i32).collect() };
+        for dtype in DTYPES {
+            let xbc = typed_buf(&ctx, &det(rows * ld_xbc, 28, 1.0), dtype);
+            let ld = ld_xbc as i64;
+            let (b_col_i, c_col_i) = (b_col as i32, c_col as i32);
+            let ptrs = [
+                dy.cached_ptr(),
+                xbc.cached_ptr(),
+                states.cached_ptr(),
+                ds_in.cached_ptr(),
+                cb.cached_ptr(),
+                dt.cached_ptr(),
+                acs.cached_ptr(),
+                d.cached_ptr(),
+            ];
+            let mut runs = Vec::new();
+            for tiled in [false, true] {
+                let dxbc = GpuBuffer::zeros(&ctx.stream, rows * ld_xbc).unwrap();
+                let sums: Vec<GpuBuffer> = (0..3)
+                    .map(|_| GpuBuffer::zeros(&ctx.stream, per).unwrap())
+                    .collect();
+                let (dxp, ddtx, qv, inter) = (
+                    dxbc.cached_ptr(),
+                    sums[0].cached_ptr(),
+                    sums[1].cached_ptr(),
+                    sums[2].cached_ptr(),
+                );
+                if tiled {
+                    let head = [dxp, ddtx, qv, inter, ptrs[0], ptrs[1]];
+                    let mut b = ctx.stream.launch_builder(k.bwd.dx_tiles.get(dtype));
+                    for p in &head {
+                        b.arg(p);
+                    }
+                    b.arg(&ld);
+                    b.arg(&b_col_i);
+                    b.arg(&c_col_i);
+                    let rest = [ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6], ptrs[7]];
+                    for p in &rest {
+                        b.arg(p);
+                    }
+                    b.arg(&per_channel);
+                    let tail = ints(&[seq, nh, ng, hd, ds, nk]);
+                    for v in &tail {
+                        b.arg(v);
+                    }
+                    let cfg = LaunchConfig {
+                        grid_dim: ((batch * nc) as u32, nh as u32, 1),
+                        block_dim: ((16 * hd.div_ceil(4)) as u32, 1, 1),
+                        shared_mem_bytes: smem as u32,
+                    };
+                    unsafe { b.launch(cfg) }.unwrap();
+                } else {
+                    let scratch: Vec<GpuBuffer> = (0..3)
+                        .map(|_| GpuBuffer::zeros(&ctx.stream, rows * d_ssm).unwrap())
+                        .collect();
+                    let (acc, ste, yi) = (
+                        scratch[0].cached_ptr(),
+                        scratch[1].cached_ptr(),
+                        scratch[2].cached_ptr(),
+                    );
+                    let head = [dxp, acc, ste, yi, ptrs[0], ptrs[1]];
+                    let mut b = ctx.stream.launch_builder(k.bwd.dx.get(dtype));
+                    for p in &head {
+                        b.arg(p);
+                    }
+                    b.arg(&ld);
+                    b.arg(&b_col_i);
+                    b.arg(&c_col_i);
+                    let rest = [ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6], ptrs[7]];
+                    for p in &rest {
+                        b.arg(p);
+                    }
+                    b.arg(&per_channel);
+                    let tail = ints(&[batch, seq, nh, ng, hd, ds]);
+                    for v in &tail {
+                        b.arg(v);
+                    }
+                    let cfg = LaunchConfig {
+                        grid_dim: (
+                            (batch * nc) as u32,
+                            nh as u32,
+                            (CHUNK * hd).div_ceil(128) as u32,
+                        ),
+                        block_dim: (128, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    unsafe { b.launch(cfg) }.unwrap();
+                    let sums_head = [ddtx, qv, inter, acc, ste, yi, ptrs[0], ptrs[1]];
+                    let mut b = ctx.stream.launch_builder(k.bwd.rowsums.get(dtype));
+                    for p in &sums_head {
+                        b.arg(p);
+                    }
+                    b.arg(&ld);
+                    b.arg(&ptrs[5]);
+                    let tail = ints(&[batch, seq, nh, hd]);
+                    for v in &tail {
+                        b.arg(v);
+                    }
+                    let cfg = LaunchConfig {
+                        grid_dim: ((batch * nc) as u32, nh as u32, 1),
+                        block_dim: (CHUNK as u32, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    unsafe { b.launch(cfg) }.unwrap();
+                }
+                runs.push([
+                    bits_f32(&ctx, &dxbc),
+                    bits_f32(&ctx, &sums[0]),
+                    bits_f32(&ctx, &sums[1]),
+                    bits_f32(&ctx, &sums[2]),
+                ]);
+            }
+            for (i, name) in ["dx", "dt token sums", "decay sums", "inter-chunk sums"]
+                .iter()
+                .enumerate()
+            {
+                assert!(
+                    runs[1][i] == runs[0][i],
+                    "{dtype:?} head {hd} state {ds} groups {ng}: {name}"
+                );
+            }
         }
     }
 }

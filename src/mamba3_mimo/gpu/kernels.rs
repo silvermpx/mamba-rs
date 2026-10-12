@@ -58,10 +58,9 @@ pub struct Mamba3MimoKernels {
     /// 48 KB may use: the device's per-block opt-in less the largest
     /// static stage among those kernels.
     pub smem_optin: usize,
-    /// The widest block the chunked path's channel-parallel kernels
-    /// (chunk state, chunk scan, the local state gradient, the lead)
-    /// launch, from their register use.
-    pub chunk_threads: usize,
+    /// The widest blocks the chunked path's kernels launch, from their
+    /// register use.
+    pub chunk_threads: ChunkThreads,
     pub compiler_identity: ki::CompilerIdentity,
     pub artifact_identity: ki::ArtifactIdentity,
 }
@@ -112,8 +111,8 @@ pub struct ChunkedGeom {
     pub state: (usize, usize, usize),
     /// `m3m_chunk_state_tiles`: key columns per lane (1, 2 or 4; 0 when a
     /// head of more than 128 channels leaves it to `m3m_chunk_state`),
-    /// tokens staged per pass, bytes.
-    pub state_tiles: (usize, usize, usize),
+    /// tokens staged per pass, channels per block, bytes.
+    pub state_tiles: (usize, usize, usize, usize),
     /// `m3m_chunk_scan`: query tokens per block, key tokens per pass, bytes.
     pub scan: (usize, usize, usize),
     /// `m3m_chunk_scan_tiles`: query tokens per block (0 when a head of
@@ -125,8 +124,8 @@ pub struct ChunkedGeom {
     pub dsloc: (usize, usize),
     /// `m3mb_dsloc_tiles`: key columns per lane (0 when a head of more than
     /// 128 channels leaves it to `m3mb_dsloc`), tokens staged per pass,
-    /// bytes.
-    pub dsloc_tiles: (usize, usize, usize),
+    /// channels per block, bytes.
+    pub dsloc_tiles: (usize, usize, usize, usize),
     /// `m3mb_inter_tiles` and `m3mb_state_terms_tiles`: tokens per block
     /// and bytes, (0, 0) when a head of more than 128 channels or state
     /// indices, or a rank past 64, leaves them to the per-token kernels.
@@ -148,20 +147,79 @@ pub struct ChunkedGeom {
     pub pairs_tiles: (usize, usize),
 }
 
+/// The widest blocks the chunked path launches, a whole number of warps
+/// each, from the registers every dtype of its kernels compiled to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkThreads {
+    /// The channel-parallel kernels: the chunk state and scan, the local
+    /// state gradient and the lead.
+    pub generic: usize,
+    /// The register-tile chunk state, `m3m_chunk_state_tiles`.
+    pub state_tiles: usize,
+    /// The register-tile local state gradient, `m3mb_dsloc_tiles`.
+    pub dsloc_tiles: usize,
+}
+
+impl ChunkThreads {
+    /// One limit for every kernel.
+    pub fn uniform(threads: usize) -> Self {
+        Self {
+            generic: threads,
+            state_tiles: threads,
+            dsloc_tiles: threads,
+        }
+    }
+}
+
+/// The register-tile geometry of the chunk state and the local state
+/// gradient for a head of `hd` channels, `ds` state indices and rank `rank`
+/// under blocks of at most `threads`: key columns per lane, tokens staged
+/// per pass, channels per block and bytes, or zeros for a head of more than
+/// 128 channels. A warp holds 4 channels, so a block of the whole head needs
+/// 8 threads per channel; past `threads` the head goes in groups as even as
+/// the limit allows. The staged rows are the group's channels and the keys:
+/// ut [sl][R][pg], kt [sl][R][32 jc], wt [sl]. The largest pass that leaves
+/// room for a second block on the multiprocessor is taken, else the largest
+/// that fits.
+fn tiles_geom(
+    (hd, ds, rank): (usize, usize, usize),
+    cap: usize,
+    threads: usize,
+) -> (usize, usize, usize, usize) {
+    if hd > 128 {
+        return (0, 0, 0, 0);
+    }
+    let quads = hd.div_ceil(4);
+    let groups = quads.div_ceil((threads / 32).max(1));
+    let pg = 4 * quads.div_ceil(groups);
+    let jc = match ds.div_ceil(32) {
+        1 => 1,
+        2 => 2,
+        _ => 4,
+    };
+    let bytes = |sl: usize| (sl * rank * (pg + 32 * jc) + sl) * 4;
+    let passes = [CHUNK, 32, 16, 8, 4, 2, 1];
+    passes
+        .into_iter()
+        .find(|&sl| bytes(sl) <= cap / 2)
+        .or_else(|| passes.into_iter().find(|&sl| bytes(sl) <= cap))
+        .map_or((0, 0, 0, 0), |sl| (jc, sl, pg, bytes(sl)))
+}
+
 /// The chunked geometry of a head of `hd` channels, `ds` state indices and
-/// rank `rank` within `cap` bytes of shared memory and blocks of at most
-/// `threads`, or `None` when a kernel of the path cannot fit. The
-/// backward's kernels count only when `training`.
+/// rank `rank` within `cap` bytes of shared memory and the blocks `threads`
+/// allows, or `None` when a kernel of the path cannot fit. The backward's
+/// kernels count only when `training`.
 pub fn chunked_geom(
     (hd, ds, rank): (usize, usize, usize),
     cap: usize,
     training: bool,
-    threads: usize,
+    threads: ChunkThreads,
 ) -> Option<ChunkedGeom> {
     if hd == 0 || ds == 0 || rank == 0 {
         return None;
     }
-    let pt = hd.min((threads / 32 * 32).max(32));
+    let pt = hd.min((threads.generic / 32 * 32).max(32));
     let wide = (256 / pt).max(1);
     // The state kernel: kt [sl][R][nt], xt [sl][P], wt [sl].
     let state = (1..=wide.min(ds)).rev().find_map(|nt| {
@@ -170,26 +228,7 @@ pub fn chunked_geom(
             (bytes <= cap).then_some((nt, sl, bytes))
         })
     })?;
-    // The register-tile state kernel: ut [sl][R][P rounded up to 4],
-    // kt [sl][R][32 jc], wt [sl]. The largest pass that leaves room for a
-    // second block on the multiprocessor, else the largest that fits. The
-    // backward's local state gradient has the same shape.
-    let state_tiles = if hd <= 128 {
-        let jc = match ds.div_ceil(32) {
-            1 => 1,
-            2 => 2,
-            _ => 4,
-        };
-        let bytes = |sl: usize| (sl * rank * (hd.next_multiple_of(4) + 32 * jc) + sl) * 4;
-        let passes = [CHUNK, 32, 16, 8, 4, 2, 1];
-        passes
-            .into_iter()
-            .find(|&sl| bytes(sl) <= cap / 2)
-            .or_else(|| passes.into_iter().find(|&sl| bytes(sl) <= cap))
-            .map_or((0, 0, 0), |sl| (jc, sl, bytes(sl)))
-    } else {
-        (0, 0, 0)
-    };
+    let state_tiles = tiles_geom((hd, ds, rank), cap, threads.state_tiles);
     // The output kernel: queries [tt][R][N], keys [st][R][N + 1], their
     // block [tt R][st R], the keys' inputs [st][P].
     let scan = (1..=wide.min(CHUNK)).rev().find_map(|tt| {
@@ -228,7 +267,7 @@ pub fn chunked_geom(
             scan,
             scan_tiles,
             dsloc: (0, 0),
-            dsloc_tiles: (0, 0, 0),
+            dsloc_tiles: (0, 0, 0, 0),
             inter_tiles: (0, 0),
             terms_tiles: (0, 0),
             pairs: (0, 0),
@@ -306,7 +345,7 @@ pub fn chunked_geom(
         scan,
         scan_tiles,
         dsloc,
-        dsloc_tiles: state_tiles,
+        dsloc_tiles: tiles_geom((hd, ds, rank), cap, threads.dsloc_tiles),
         inter_tiles,
         terms_tiles,
         pairs,
@@ -570,15 +609,21 @@ impl Mamba3MimoKernels {
         let chunk_scan = typed("m3m_chunk_scan")?;
         let dsloc = get("m3mb_dsloc")?;
         let lead = get("m3mb_lead")?;
-        let chunk_threads = max_block(&chunk_state, "chunk state")?
-            .min(max_block(&chunk_scan, "chunk scan")?)
-            .min(max_block_of(&[&dsloc, &lead], "chunked backward")?);
+        let chunk_state_tiles = typed("m3m_chunk_state_tiles")?;
+        let dsloc_tiles = get("m3mb_dsloc_tiles")?;
+        let chunk_threads = ChunkThreads {
+            generic: max_block(&chunk_state, "chunk state")?
+                .min(max_block(&chunk_scan, "chunk scan")?)
+                .min(max_block_of(&[&dsloc, &lead], "chunked backward")?),
+            state_tiles: max_block(&chunk_state_tiles, "chunk state tiles")?,
+            dsloc_tiles: max_block_of(&[&dsloc_tiles], "local state gradient tiles")?,
+        };
         let mut kernels = Self {
             bc_norm: typed("mimo_bc_norm")?,
             scan,
             chunk_prep: typed("m3m_prep")?,
             chunk_state,
-            chunk_state_tiles: typed("m3m_chunk_state_tiles")?,
+            chunk_state_tiles,
             state_pass: get("m3m_state_pass")?,
             chunk_scan,
             chunk_scan_tiles: typed("m3m_chunk_scan_tiles")?,
@@ -602,7 +647,7 @@ impl Mamba3MimoKernels {
                 inter_tiles: get("m3mb_inter_tiles")?,
                 state_terms_tiles: typed("m3mb_state_terms_tiles")?,
                 dsloc,
-                dsloc_tiles: get("m3mb_dsloc_tiles")?,
+                dsloc_tiles,
                 pass: get("m3mb_pass")?,
                 chunk_dot: get("m3mb_chunk_dot")?,
                 state_terms: typed("m3mb_state_terms")?,
@@ -690,10 +735,18 @@ mod tests {
     /// terms cannot stage keeps them in global memory.
     #[test]
     fn chunked_geometry_fits_the_shared_memory() {
+        let all = ChunkThreads::uniform(1024);
         let cap = 99 * 1024;
-        let released = chunked_geom((64, 128, 4), cap, true, 1024).unwrap();
+        let released = chunked_geom((64, 128, 4), cap, true, all).unwrap();
         assert_eq!((released.state.0, released.state.1), (4, CHUNK));
-        assert_eq!((released.state_tiles.0, released.state_tiles.1), (4, 16));
+        assert_eq!(
+            (
+                released.state_tiles.0,
+                released.state_tiles.1,
+                released.state_tiles.2
+            ),
+            (4, 16, 64)
+        );
         let tiles = released.scan_tiles;
         assert_eq!((tiles.0, tiles.1, tiles.2), (16, 16, 64));
         assert_eq!(released.pairs_tiles, (38784, 66304));
@@ -701,7 +754,7 @@ mod tests {
         assert_eq!(released.terms_tiles.0, 8);
         assert_eq!((released.scan.0, released.scan.1), (4, 8));
         assert_eq!((released.pt, released.pairs_global), (64, false));
-        let wide = chunked_geom((16, 16, 16), cap, true, 1024).unwrap();
+        let wide = chunked_geom((16, 16, 16), cap, true, all).unwrap();
         assert_eq!((wide.scan.0, wide.scan.1), (16, 4));
         assert_eq!(wide.dsloc.0, 16);
         for shape in [
@@ -716,12 +769,13 @@ mod tests {
             (1280, 256, 16),
         ] {
             for cap in [48 * 1024, 64 * 1024, 99 * 1024, 227 * 1024] {
-                let Some(g) = chunked_geom(shape, cap, true, 1024) else {
+                let Some(g) = chunked_geom(shape, cap, true, all) else {
                     continue;
                 };
                 let sizes = [
                     g.state.2,
-                    g.state_tiles.2,
+                    g.state_tiles.3,
+                    g.dsloc_tiles.3,
                     g.scan.2,
                     g.scan_tiles.3,
                     g.dsloc.1,
@@ -739,10 +793,40 @@ mod tests {
                 assert_eq!(g.state_tiles.0 == 0, shape.0 > 128, "{shape:?}: {g:?}");
             }
         }
-        let tiled = chunked_geom((2048, 16, 1), 227 * 1024, true, 1024).unwrap();
+        let tiled = chunked_geom((2048, 16, 1), 227 * 1024, true, all).unwrap();
         assert_eq!((tiled.pt, tiled.state.0, tiled.scan.0), (1024, 1, 1));
-        let staged = chunked_geom((1024, 256, 16), 99 * 1024, true, 1024).unwrap();
+        let staged = chunked_geom((1024, 256, 16), 99 * 1024, true, all).unwrap();
         assert!(staged.pairs_global, "{staged:?}");
         assert_eq!(staged.pairs_tiles, (0, 0));
+    }
+
+    /// Register tiles under a kernel that holds fewer threads than the whole
+    /// head needs take the head in channel groups as even as the limit
+    /// allows, each within the limit and together covering the head.
+    #[test]
+    fn register_tiles_take_the_head_in_groups_under_their_register_limit() {
+        let cap = 99 * 1024;
+        for (hd, state, dsloc) in [(128, 416, 384), (64, 416, 384), (72, 256, 64), (40, 32, 32)] {
+            let threads = ChunkThreads {
+                generic: 1024,
+                state_tiles: state,
+                dsloc_tiles: dsloc,
+            };
+            let g = chunked_geom((hd, 64, 4), cap, true, threads).unwrap();
+            for (tiles, limit) in [(g.state_tiles, state), (g.dsloc_tiles, dsloc)] {
+                let pg = tiles.2;
+                assert!(pg > 0 && pg % 4 == 0, "{hd}: {tiles:?}");
+                assert!(8 * pg <= limit, "{hd} under {limit}: {tiles:?}");
+                let groups = hd.div_ceil(pg);
+                assert!(
+                    groups * pg >= hd && (groups - 1) * pg < hd,
+                    "{hd}: {tiles:?}"
+                );
+                assert!(tiles.3 <= cap);
+            }
+        }
+        // The whole head when it fits: one group of every channel.
+        let g = chunked_geom((72, 24, 4), cap, true, ChunkThreads::uniform(1024)).unwrap();
+        assert_eq!((g.state_tiles.2, g.dsloc_tiles.2), (72, 72));
     }
 }

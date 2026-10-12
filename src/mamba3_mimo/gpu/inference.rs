@@ -1077,8 +1077,9 @@ pub(crate) fn launch_chunked_scan(
         unsafe { bld.launch(cfg) }.map_err(err("prep"))?;
     }
     if geom.state_tiles.0 > 0 {
-        let (jc, sl, smem) = geom.state_tiles;
-        let (bb, px, jc_i, sl_i) = (b_bias, mimo_x, jc as i32, sl as i32);
+        let (jc, sl, pg, smem) = geom.state_tiles;
+        let (bb, px) = (b_bias, mimo_x);
+        let (jc_i, sl_i, pg_i) = (jc as i32, sl as i32, pg as i32);
         let mut bld = stream.launch_builder(x.kernels.chunk_state_tiles.get(x.act));
         bld.arg(&contrib);
         bld.arg(&proj);
@@ -1098,9 +1099,14 @@ pub(crate) fn launch_chunked_scan(
         bld.arg(&na_i);
         bld.arg(&jc_i);
         bld.arg(&sl_i);
+        bld.arg(&pg_i);
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((b * nc) as u32, nh as u32, ds.div_ceil(32 * jc) as u32),
-            block_dim: ((32 * hd.div_ceil(4)) as u32, 1, 1),
+            grid_dim: (
+                (b * nc) as u32,
+                nh as u32,
+                (ds.div_ceil(32 * jc) * hd.div_ceil(pg)) as u32,
+            ),
+            block_dim: ((8 * pg) as u32, 1, 1),
             shared_mem_bytes: smem as u32,
         };
         unsafe { bld.launch(cfg) }.map_err(err("chunk state"))?;

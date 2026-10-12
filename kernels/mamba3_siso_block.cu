@@ -386,7 +386,9 @@ __device__ __forceinline__ void m3_backward_seq_block_tpl(
                 x_val = to_f(x_flat[x_idx]);
                 v_prev = v_prev_saved[x_idx];
             }
-            sum_d_D += dy_val * x_val;
+            // One FMA per step, spelled out as in the warp kernels, so the
+            // two tiers keep the same last bit on every architecture.
+            sum_d_D = __fmaf_rn(dy_val, x_val, sum_d_D);
             float d_x_val = d_skip * dy_val;
             d_x_val += d_v_carry;
             float d_alpha_acc = 0.0f;

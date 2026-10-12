@@ -184,6 +184,19 @@
   tensor read and wrote the wrong elements without an error.
 - The chunked backward of MIMO could not launch on an RTX 4090 or RTX 6000
   Ada: its pair-gradient kernel took more registers than its block allows.
+- More launches asked for more threads than their kernels' registers
+  allow. On an RTX 4090 or RTX 6000 Ada the chunked path of a MIMO model
+  with a head of 64 channels, the released mimo-187m's, could not run its
+  register-tiled state kernels, and past 96 channels they failed on an RTX
+  5090 too. Mamba-2's fused dx failed past 168 to 200 channels, by GPU.
+  Each such launch now takes the widest block its kernel compiles to:
+  the MIMO tiles take the head in channel groups, and a Mamba-2 head the
+  fused dx cannot hold takes the dx kernel and the token sums, with the
+  same bits.
+- On an RTX 4090 or RTX 6000 Ada the D gradient of SISO's block-tier
+  backward differed from the warp tier's in the last bit: that compiler
+  split the accumulation into a product and a sum. Both tiers now spell
+  the one fused multiply-add they compile to on an RTX 5090.
 - A NaN in Mamba-3's `dd_A` reached the state as the finite decay
   `-a_floor`, because the clamp returned its non-NaN operand. The NaN now
   goes through, as the reference's `torch.clamp` lets it.

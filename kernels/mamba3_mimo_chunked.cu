@@ -347,7 +347,7 @@ __device__ __forceinline__ void m3m_prep_body(
 }
 
 #define DEFINE_M3M_PREP(NAME, TI)                                               \
-extern "C" __global__ void NAME(                                                \
+extern "C" __global__ void __launch_bounds__(512) NAME(                         \
     float* __restrict__ coef, float* __restrict__ sn, float* __restrict__ cs,   \
     float* __restrict__ e0, float* __restrict__ ang,                            \
     const TI* __restrict__ proj, long long ld_proj,                             \
@@ -462,13 +462,16 @@ DEFINE_M3M_CHUNK_STATE(m3m_chunk_state_f16, __half)
 
 // The same contributions as register tiles: a warp takes 4 channels p and a
 // lane the state indices lane + 32 j of the block's tile (JC of them), so a
-// step of (s, r) loads one float4 of u and JC keys for 4 JC products. The
-// block computes u = (w_s x_s[p]) Psi_r[p] and the rotated keys once and
-// stages them `sl` tokens at a time: ut [sl R][P4] (P rounded up to 4, the
-// pad zero), kt [sl R][32 JC], wt [sl]. Every output keeps the chain above,
-// acc = 0 then fma(u, k, acc) over s ascending and r ascending, across the
-// passes. Grid (B * nc, H, ceil(N / (32 JC))), block 32 ceil(P / 4)
-// threads.
+// step of (s, r) loads one float4 of u and JC keys for 4 JC products. A
+// block takes a group of `pg` channels (a multiple of 4), the whole head
+// when the kernel's registers let one block hold it, else groups sized so
+// that they do. The block computes u = (w_s x_s[p]) Psi_r[p] for its
+// channels and the rotated keys once and stages them `sl` tokens at a time:
+// ut [sl R][pg] (the channels past the head zero), kt [sl R][32 JC],
+// wt [sl]. Every output keeps the chain above, acc = 0 then fma(u, k, acc)
+// over s ascending and r ascending, across the passes, whatever the group.
+// Grid (B * nc, H, ceil(N / (32 JC)) ceil(P / pg)), the state tiles
+// innermost, block 8 pg threads.
 template <int JC, typename TI>
 __device__ __forceinline__ void m3m_chunk_state_tiles_body(
     float* __restrict__ contrib,
@@ -476,14 +479,17 @@ __device__ __forceinline__ void m3m_chunk_state_tiles_body(
     const float* __restrict__ bn, const float* __restrict__ coef,
     const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ b_bias, const float* __restrict__ mimo_x,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int sl
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int sl, int pg
 ) {
     extern __shared__ float4 m3m_sm4[];
     constexpr int NT = 32 * JC;
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
     const int h = blockIdx.y;
-    const int n0 = blockIdx.z * NT;
+    const int nz = (ds + NT - 1) / NT;
+    const int grp = blockIdx.z / nz;
+    const int n0 = (blockIdx.z - grp * nz) * NT;
+    const int pb = grp * pg;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -492,9 +498,8 @@ __device__ __forceinline__ void m3m_chunk_state_tiles_body(
     const int di = nh * hd;
     const int rgn = rank * ng * ds;
     const int half = ds / 2;
-    const int p4 = (hd + 3) & ~3;
-    float* ut = reinterpret_cast<float*>(m3m_sm4);  // [sl R][p4]
-    float* kt = ut + sl * rank * p4;                // [sl R][NT]
+    float* ut = reinterpret_cast<float*>(m3m_sm4);  // [sl R][pg]
+    float* kt = ut + sl * rank * pg;                // [sl R][NT]
     float* wt = kt + sl * rank * NT;                // [sl]
     const int tid = threadIdx.x;
     const int lane = tid & 31;
@@ -530,17 +535,19 @@ __device__ __forceinline__ void m3m_chunk_state_tiles_body(
         __syncthreads();
         for (int sr = warp; sr < sn_ * rank; sr += nw) {
             const int s = sr / rank, r = sr % rank;
-            const TI* xr = proj + (b * seq + t0 + s0 + s) * ld_proj + di + (long long)h * hd;
-            const float* mx = mimo_x + ((long long)h * rank + r) * hd;
+            const TI* xr =
+                proj + (b * seq + t0 + s0 + s) * ld_proj + di + (long long)h * hd + pb;
+            const float* mx = mimo_x + ((long long)h * rank + r) * hd + pb;
             const float w = wt[s];
+            const int pn = hd - pb;
 #pragma unroll 4
-            for (int pp = lane; pp < p4; pp += 32)
-                ut[sr * p4 + pp] = pp < hd ? __fmul_rn(__fmul_rn(w, to_f(xr[pp])), mx[pp]) : 0.0f;
+            for (int pp = lane; pp < pg; pp += 32)
+                ut[sr * pg + pp] = pp < pn ? __fmul_rn(__fmul_rn(w, to_f(xr[pp])), mx[pp]) : 0.0f;
         }
         __syncthreads();
         const int kd = sn_ * rank;
         for (int k = 0; k < kd; k++) {
-            const float4 lv = *reinterpret_cast<const float4*>(ut + k * p4 + p0);
+            const float4 lv = *reinterpret_cast<const float4*>(ut + k * pg + p0);
             float rv[JC];
 #pragma unroll
             for (int j = 0; j < JC; j++) rv[j] = kt[k * NT + lane + 32 * j];
@@ -555,7 +562,7 @@ __device__ __forceinline__ void m3m_chunk_state_tiles_body(
     }
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-        const int p = p0 + i;
+        const int p = pb + p0 + i;
         if (p >= hd) continue;
 #pragma unroll
         for (int j = 0; j < JC; j++) {
@@ -572,17 +579,18 @@ extern "C" __global__ void NAME(                                                
     const float* __restrict__ bn, const float* __restrict__ coef,               \
     const float* __restrict__ sn, const float* __restrict__ cs,                 \
     const float* __restrict__ b_bias, const float* __restrict__ mimo_x,         \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int jc, int sl   \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int jc, int sl,  \
+    int pg                                                                      \
 ) {                                                                             \
     if (jc == 1)                                                                \
         m3m_chunk_state_tiles_body<1, TI>(contrib, proj, ld_proj, bn, coef, sn, \
-            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl);             \
+            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl, pg);         \
     else if (jc == 2)                                                           \
         m3m_chunk_state_tiles_body<2, TI>(contrib, proj, ld_proj, bn, coef, sn, \
-            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl);             \
+            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl, pg);         \
     else                                                                        \
         m3m_chunk_state_tiles_body<4, TI>(contrib, proj, ld_proj, bn, coef, sn, \
-            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl);             \
+            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl, pg);         \
 }
 DEFINE_M3M_CHUNK_STATE_TILES(m3m_chunk_state_tiles, float)
 DEFINE_M3M_CHUNK_STATE_TILES(m3m_chunk_state_tiles_bf16, __nv_bfloat16)

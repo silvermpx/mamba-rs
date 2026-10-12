@@ -450,25 +450,31 @@ extern "C" __global__ void m3mb_dsloc(
 
 // m3mb_dsloc as register tiles, the shape of m3m_chunk_state_tiles: a
 // warp takes 4 channels p and a lane the state indices lane + 32 j of the
-// block's tile; d = dy e^Acs_t and the rotated queries are computed once
-// per block and staged `sl` tokens at a time, dt [sl R][P4] and
-// qt [sl R][32 JC], with e^Acs [sl]. Each output keeps the chain above:
-// acc = 0, then fma(d, q, acc) over t ascending and r ascending.
-// Grid (B * nc, H, ceil(N / (32 JC))), block 32 ceil(P / 4) threads.
+// block's tile, and a block a group of `pg` channels (the whole head, or
+// groups sized to the kernel's registers); d = dy e^Acs_t for its channels
+// and the rotated queries are computed once per block and staged `sl`
+// tokens at a time, dt [sl R][pg] and qt [sl R][32 JC], with e^Acs [sl].
+// Each output keeps the chain above: acc = 0, then fma(d, q, acc) over t
+// ascending and r ascending, whatever the group.
+// Grid (B * nc, H, ceil(N / (32 JC)) ceil(P / pg)), the state tiles
+// innermost, block 8 pg threads.
 template <int JC>
 __device__ __forceinline__ void m3mb_dsloc_tiles_body(
     float* __restrict__ dsl,
     const float* __restrict__ dy,
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int sl
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int sl, int pg
 ) {
     extern __shared__ float4 m3mb_sm4[];
     constexpr int NT = 32 * JC;
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
     const int h = blockIdx.y;
-    const int n0 = blockIdx.z * NT;
+    const int nz = (ds + NT - 1) / NT;
+    const int grp = blockIdx.z / nz;
+    const int n0 = (blockIdx.z - grp * nz) * NT;
+    const int pb = grp * pg;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -476,9 +482,8 @@ __device__ __forceinline__ void m3mb_dsloc_tiles_body(
     const int g = h / (nh / ng);
     const int rgn = rank * ng * ds;
     const int half = ds / 2;
-    const int p4 = (hd + 3) & ~3;
-    float* dt = reinterpret_cast<float*>(m3mb_sm4);  // [sl R][p4]
-    float* qt = dt + sl * rank * p4;                 // [sl R][NT]
+    float* dt = reinterpret_cast<float*>(m3mb_sm4);  // [sl R][pg]
+    float* qt = dt + sl * rank * pg;                 // [sl R][NT]
     float* et = qt + sl * rank * NT;                 // [sl]
     const int tid = threadIdx.x;
     const int lane = tid & 31;
@@ -513,15 +518,16 @@ __device__ __forceinline__ void m3mb_dsloc_tiles_body(
         for (int tr = warp; tr < sn_ * rank; tr += nw) {
             const int r = tr % rank;
             const long long row = row0 + tr / rank;
-            const float* dyr = dy + ((row * nh + h) * rank + r) * hd;
+            const float* dyr = dy + ((row * nh + h) * rank + r) * hd + pb;
             const float e = et[tr / rank];
-            for (int pp = lane; pp < p4; pp += 32)
-                dt[tr * p4 + pp] = pp < hd ? __fmul_rn(dyr[pp], e) : 0.0f;
+            const int pn = hd - pb;
+            for (int pp = lane; pp < pg; pp += 32)
+                dt[tr * pg + pp] = pp < pn ? __fmul_rn(dyr[pp], e) : 0.0f;
         }
         __syncthreads();
         const int kd = sn_ * rank;
         for (int k = 0; k < kd; k++) {
-            const float4 l4 = *reinterpret_cast<const float4*>(dt + k * p4 + p0);
+            const float4 l4 = *reinterpret_cast<const float4*>(dt + k * pg + p0);
             const float lv[4] = {l4.x, l4.y, l4.z, l4.w};
             float rv[JC];
 #pragma unroll
@@ -535,7 +541,7 @@ __device__ __forceinline__ void m3mb_dsloc_tiles_body(
     }
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-        const int p = p0 + i;
+        const int p = pb + p0 + i;
         if (p >= hd) continue;
 #pragma unroll
         for (int j = 0; j < JC; j++) {
@@ -550,17 +556,17 @@ extern "C" __global__ void m3mb_dsloc_tiles(
     const float* __restrict__ dy,
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int jc, int sl
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int jc, int sl, int pg
 ) {
     if (jc == 1)
         m3mb_dsloc_tiles_body<1>(dsl, dy, cn, c_bias, coef, sn, cs, seq, nh, ng, hd, ds,
-                                 rank, na, sl);
+                                 rank, na, sl, pg);
     else if (jc == 2)
         m3mb_dsloc_tiles_body<2>(dsl, dy, cn, c_bias, coef, sn, cs, seq, nh, ng, hd, ds,
-                                 rank, na, sl);
+                                 rank, na, sl, pg);
     else
         m3mb_dsloc_tiles_body<4>(dsl, dy, cn, c_bias, coef, sn, cs, seq, nh, ng, hd, ds,
-                                 rank, na, sl);
+                                 rank, na, sl, pg);
 }
 
 // The state passing backward, in place: dS holds dS_loc on entry and the

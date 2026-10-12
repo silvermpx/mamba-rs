@@ -950,8 +950,11 @@ __device__ __forceinline__ void m3_backward_seq_tpl(
         if (p == 0) gamma_h = gamma_flat[(b * T + t) * nh + h];
         gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);
 
-        // Skip connection: d_D accumulation + d_x from D path
-        sum_d_D += dy_val * x_val;
+        // Skip connection: d_D accumulation + d_x from D path. The
+        // accumulation is spelled as the one FMA per step it compiles to, so
+        // no compiler can split it into a product and a sum and move the
+        // last bit away from the block tier's.
+        sum_d_D = __fmaf_rn(dy_val, x_val, sum_d_D);
         float d_x_val = d_skip * dy_val;
 
         // Add v_prev carry from t+1: v_prev[t+1] = x[t]

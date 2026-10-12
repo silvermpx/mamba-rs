@@ -509,7 +509,7 @@ fn m3_mimo_gpu_chunked_prefill_tracks_the_recurrence() {
 #[test]
 fn m3_mimo_gpu_chunked_prefill_fits_a_wide_rank() {
     use mamba_rs::config::ScanMode;
-    use mamba_rs::mamba3_mimo::gpu::kernels::chunked_geom;
+    use mamba_rs::mamba3_mimo::gpu::kernels::{ChunkThreads, chunked_geom};
     let device = GpuDevice::new(0).unwrap();
     let base = Mamba3MimoConfig {
         d_model: 64,
@@ -525,7 +525,7 @@ fn m3_mimo_gpu_chunked_prefill_fits_a_wide_rank() {
             cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
         )
         .unwrap() as usize;
-    let geom = chunked_geom((16, 16, 16), optin, true, 1024).unwrap();
+    let geom = chunked_geom((16, 16, 16), optin, true, ChunkThreads::uniform(1024)).unwrap();
     eprintln!("rank-16 geometry at {optin} bytes: {geom:?}");
     assert!(geom.scan.1 < 8, "the key tile should shrink: {geom:?}");
     let input_dim = 40usize;

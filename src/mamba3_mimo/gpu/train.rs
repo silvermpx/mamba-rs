@@ -698,7 +698,7 @@ impl Mamba3MimoGpuTrainer {
                     }
                 }))?,
                 lead_leaves: z(chunked.map_or(1, |_| {
-                    if hd.next_multiple_of(32) > kernels.chunk_threads {
+                    if hd.next_multiple_of(32) > kernels.chunk_threads.generic {
                         batch * nh * hd.next_multiple_of(32)
                     } else {
                         1
@@ -1957,15 +1957,21 @@ impl Mamba3MimoGpuTrainer {
                 );
             }
             if geom.dsloc_tiles.0 > 0 {
-                let (jc, sl, smem) = geom.dsloc_tiles;
-                let (jc_i, sl_i) = (jc as i32, sl as i32);
+                let (jc, sl, pg, smem) = geom.dsloc_tiles;
+                let (jc_i, sl_i, pg_i) = (jc as i32, sl as i32, pg as i32);
                 go!(
                     &k.cb.dsloc_tiles,
-                    cfg3(b * nc, nh, ds.div_ceil(32 * jc), 32 * hd.div_ceil(4), smem),
+                    cfg3(
+                        b * nc,
+                        nh,
+                        ds.div_ceil(32 * jc) * hd.div_ceil(pg),
+                        8 * pg,
+                        smem
+                    ),
                     "local state gradient",
                     [
                         dsl, dy, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i,
-                        jc_i, sl_i
+                        jc_i, sl_i, pg_i
                     ]
                 );
             } else {
@@ -2090,9 +2096,9 @@ impl Mamba3MimoGpuTrainer {
             // A thread per channel, or for a head wider than the block a
             // power of two of them taking the channels in turns.
             let lanes = hd.next_multiple_of(32);
-            let lead_wide = lanes > k.chunk_threads;
+            let lead_wide = lanes > k.chunk_threads.generic;
             let lead_threads = if lead_wide {
-                1usize << k.chunk_threads.ilog2()
+                1usize << k.chunk_threads.generic.ilog2()
             } else {
                 lanes
             };

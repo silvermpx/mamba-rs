@@ -10,7 +10,9 @@
 //!   with the head's channels in tiles against the whole head, the state
 //!   terms and pair terms staging their rows in global memory against
 //!   shared memory, and the entering lead over a block narrower than the
-//!   head against a thread per channel.
+//!   head against a thread per channel,
+//! - the register-tile chunk state and local state gradient, the whole head
+//!   in a block and in channel groups, against the channel-parallel kernels.
 //!
 //! Each pair runs on shapes both routes serve, at a compiled rank and a
 //! runtime one, in f32, bf16 and f16.
@@ -749,6 +751,121 @@ fn mimo_chunked_tiles_are_the_whole_head() {
                     assert!(
                         run[i] == runs[0][i],
                         "{dtype:?} head {hd} rank {rank}, channel tile {pt}: {name}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The register-tile chunk state and local state gradient against the
+/// channel-parallel kernels, with the head in one block where the tile
+/// kernel's registers allow it and in groups of 4, 8 and 12 channels: the
+/// groups a block narrower than the head takes on a GPU whose registers do
+/// not hold it.
+#[test]
+fn mimo_chunked_register_tiles_are_the_channel_parallel_kernels() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let s = &ctx.stream;
+    for sh in SCAN_SHAPES {
+        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
+        let inp = ChunkedInputs::new(&ctx, sh);
+        let (b, nh, hd, ds, rank) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank);
+        let rows = b * inp.seq;
+        let ints = |extra: &[i32]| -> Vec<Arg> {
+            [
+                inp.seq as i32,
+                nh as i32,
+                sh.ng as i32,
+                hd as i32,
+                ds as i32,
+                rank as i32,
+                sh.na as i32,
+            ]
+            .iter()
+            .chain(extra)
+            .map(|&v| Arg::I(v))
+            .collect()
+        };
+        let whole = hd.next_multiple_of(4);
+        let mut groups = vec![4usize, 8, 12];
+        if 8 * whole <= k.chunk_threads.state_tiles.min(k.chunk_threads.dsloc_tiles) {
+            groups.push(whole);
+        }
+        let jc = 1usize.max(ds.div_ceil(32).next_power_of_two().min(4));
+        let sl = 16usize;
+        for dtype in DTYPES {
+            let proj = typed_buf(&ctx, &det(rows * inp.ld_proj, 86, 1.0), dtype);
+            let state_args = |out: &GpuBuffer| {
+                vec![
+                    Arg::P(out.cached_ptr()),
+                    Arg::P(proj.cached_ptr()),
+                    Arg::L(inp.ld_proj as i64),
+                    Arg::P(inp.bn.cached_ptr()),
+                    Arg::P(inp.coef.cached_ptr()),
+                    Arg::P(inp.sn.cached_ptr()),
+                    Arg::P(inp.cs.cached_ptr()),
+                    Arg::P(inp.b_bias.cached_ptr()),
+                    Arg::P(inp.mx.cached_ptr()),
+                ]
+            };
+            let dsloc_args = |out: &GpuBuffer| {
+                vec![
+                    Arg::P(out.cached_ptr()),
+                    Arg::P(inp.dy.cached_ptr()),
+                    Arg::P(inp.cn.cached_ptr()),
+                    Arg::P(inp.c_bias.cached_ptr()),
+                    Arg::P(inp.coef.cached_ptr()),
+                    Arg::P(inp.sn.cached_ptr()),
+                    Arg::P(inp.cs.cached_ptr()),
+                ]
+            };
+            let per = b * inp.nc * nh * hd * ds;
+            // The channel-parallel kernels over the whole head.
+            let contrib = GpuBuffer::zeros(s, per).unwrap();
+            let mut args = state_args(&contrib);
+            args.extend(ints(&[1, sl as i32, hd as i32]));
+            launch(
+                &ctx,
+                k.chunk_state.get(dtype),
+                cfg((b * inp.nc, nh, ds), hd, (sl * rank + sl * hd + sl) * 4),
+                &args,
+            );
+            let dsl = GpuBuffer::zeros(s, per).unwrap();
+            let mut args = dsloc_args(&dsl);
+            args.extend(ints(&[1, hd as i32]));
+            launch(
+                &ctx,
+                &k.cb.dsloc,
+                cfg((b * inp.nc, nh, ds), hd, (64 * rank + 64) * 4),
+                &args,
+            );
+            let want = [bits_f32(&ctx, &contrib), bits_f32(&ctx, &dsl)];
+            for &pg in &groups {
+                let grid = (b * inp.nc, nh, ds.div_ceil(32 * jc) * hd.div_ceil(pg));
+                let smem = (sl * rank * (pg + 32 * jc) + sl) * 4;
+                let tile_ints = [jc as i32, sl as i32, pg as i32];
+                let contrib = GpuBuffer::zeros(s, per).unwrap();
+                let mut args = state_args(&contrib);
+                args.extend(ints(&tile_ints));
+                launch(
+                    &ctx,
+                    k.chunk_state_tiles.get(dtype),
+                    cfg(grid, 8 * pg, smem),
+                    &args,
+                );
+                let dsl = GpuBuffer::zeros(s, per).unwrap();
+                let mut args = dsloc_args(&dsl);
+                args.extend(ints(&tile_ints));
+                launch(&ctx, &k.cb.dsloc_tiles, cfg(grid, 8 * pg, smem), &args);
+                for (i, (name, got)) in [("chunk state", &contrib), ("local dS", &dsl)]
+                    .iter()
+                    .enumerate()
+                {
+                    assert!(
+                        bits_f32(&ctx, got) == want[i],
+                        "{dtype:?} head {hd} rank {rank}, groups of {pg}: {name}"
                     );
                 }
             }

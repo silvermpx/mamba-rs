@@ -492,7 +492,7 @@ impl Mamba2GpuTrainer {
         let dx_tiles = if seq_mode {
             None
         } else {
-            dx_tiles_geom(hd, ds, optin)
+            dx_tiles_geom(hd, ds, optin, kernels.bwd.dx_tiles_threads)
         };
         let unfused = |n: usize| if dx_tiles.is_some() { 1 } else { chunked(n) };
         let seq_bwd = kernels.seq_bwd_route(hd, ds);
