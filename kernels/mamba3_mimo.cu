@@ -397,7 +397,7 @@ __device__ __forceinline__ void mimo_scan_body(
     int seq, int nh, int ng, int hd, int ds, int rank, int na, float a_floor,
     float* __restrict__ ck_ssm, float* __restrict__ ck_k,
     float* __restrict__ ck_v, float* __restrict__ ck_ang, int stride,
-    int tile, unsigned int* __restrict__ done
+    int tile, unsigned int* __restrict__ done, float* __restrict__ y_out
 ) {
     extern __shared__ float mimo_sm[];
     const int b = blockIdx.x;
@@ -493,6 +493,11 @@ __device__ __forceinline__ void mimo_scan_body(
             mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev, kcur, kprev, qv,
                              sc.alpha, sc.beta, sc.gamma, dval, rank, ds);
             mimo_put(&out[row * di + h * hd + pch], mimo_tok_gate<RK>(y, pz, po, z, rank));
+            if (y_out != nullptr) {
+#pragma unroll
+                for (int r = 0; r < R; r++)
+                    y_out[((row * nh + h) * rank + r) * hd + pch] = y[r];
+            }
             v_prev = x;
         }
         __syncthreads();
@@ -535,7 +540,7 @@ __device__ __forceinline__ void mimo_scan_pipe_body(
     int seq, int nh, int ng, int hd, int ds, int rank, int na, float a_floor,
     float* __restrict__ ck_ssm, float* __restrict__ ck_k,
     float* __restrict__ ck_v, float* __restrict__ ck_ang, int stride,
-    int tile, unsigned int* __restrict__ done
+    int tile, unsigned int* __restrict__ done, float* __restrict__ y_out
 ) {
     extern __shared__ float mimo_sm[];
     const int b = blockIdx.x;
@@ -649,6 +654,11 @@ __device__ __forceinline__ void mimo_scan_pipe_body(
                              kbuf + (t % 3) * rn, kbuf + ((t + 2) % 3) * rn,
                              qbuf + (t % 2) * rn, sd[0], sd[1], sd[2], dval, rank, ds);
             mimo_put(&out[row * di + h * hd + pch], mimo_tok_gate<RK>(y, pz, po, z, rank));
+            if (y_out != nullptr) {
+#pragma unroll
+                for (int r = 0; r < R; r++)
+                    y_out[((row * nh + h) * rank + r) * hd + pch] = y[r];
+            }
             v_prev = x;
         } else if (builder && t + 1 < seq) {
             build(t + 1);
@@ -682,18 +692,18 @@ __device__ __forceinline__ void mimo_scan_any(
     int seq, int nh, int ng, int hd, int ds, int rank, int na, float a_floor,
     float* __restrict__ ck_ssm, float* __restrict__ ck_k,
     float* __restrict__ ck_v, float* __restrict__ ck_ang, int stride,
-    int tile, int allow_pipe, unsigned int* __restrict__ done
+    int tile, int allow_pipe, unsigned int* __restrict__ done, float* __restrict__ y_out
 ) {
     const int pc = min(tile, hd - (int)blockIdx.z * tile);
     const int spare = (int)blockDim.x - ((pc + 31) & ~31);
     if (allow_pipe && spare >= 32 && spare >= na)
         mimo_scan_pipe_body<TI, CKPT, RK>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,
             dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd, ds, rank,
-            na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride, tile, done);
+            na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride, tile, done, y_out);
     else
         mimo_scan_body<TI, CKPT, RK>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,
             dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd, ds, rank,
-            na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride, tile, done);
+            na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride, tile, done, y_out);
 }
 
 #define DEFINE_MIMO_SCAN(NAME, TI)                                             \
@@ -709,12 +719,13 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,        \
     const float* __restrict__ mimo_o,                                          \
     int seq, int nh, int ng, int hd, int ds, int rank, int na,                 \
-    float a_floor, int tile, int allow_pipe, unsigned int* __restrict__ done   \
+    float a_floor, int tile, int allow_pipe, unsigned int* __restrict__ done,  \
+    float* __restrict__ y_out                                                  \
 ) {                                                                            \
     MIMO_RANK_DISPATCH(rank, mimo_scan_any<TI, false, RK>(out, ssm, kst, vst,  \
         ang, proj, ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x,        \
         mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, a_floor, nullptr,       \
-        nullptr, nullptr, nullptr, 1, tile, allow_pipe, done))                 \
+        nullptr, nullptr, nullptr, 1, tile, allow_pipe, done, y_out))          \
 }
 
 DEFINE_MIMO_SCAN(mimo_scan, float)
@@ -739,14 +750,70 @@ extern "C" __global__ void NAME(                                               \
     float a_floor,                                                             \
     float* __restrict__ ck_ssm, float* __restrict__ ck_k,                      \
     float* __restrict__ ck_v, float* __restrict__ ck_ang, int stride,          \
-    int tile, int allow_pipe, unsigned int* __restrict__ done                  \
+    int tile, int allow_pipe, unsigned int* __restrict__ done,                 \
+    float* __restrict__ y_out                                                  \
 ) {                                                                            \
     MIMO_RANK_DISPATCH(rank, mimo_scan_any<TI, true, RK>(out, ssm, kst, vst,   \
         ang, proj, ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x,        \
         mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, a_floor, ck_ssm, ck_k,  \
-        ck_v, ck_ang, stride, tile, allow_pipe, done))                         \
+        ck_v, ck_ang, stride, tile, allow_pipe, done, y_out))                  \
 }
 
 DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt, float)
 DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt_bf16, __nv_bfloat16)
 DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt_f16, __half)
+
+// The gate with the per-rank output norm (is_outproj_norm), over the
+// readouts y [B, T, H, R, P] (D included) the scans write: each rank's row
+// over the head's channels normalised, its sum of squares one chain over p
+// ascending as the CPU folds it, scaled by the head's norm weight, then
+// gated, o = sum_r (((y_r rstd_r) w) silu(Z_r z)) Phi_r, r ascending.
+// Grid (rows, H), block a whole number of warps.
+template <typename TI>
+__device__ __forceinline__ void mimo_gate_normed_body(
+    TI* __restrict__ out, const float* __restrict__ y,
+    const TI* __restrict__ proj, long long ld_proj, const float* __restrict__ norm_w,
+    const float* __restrict__ mimo_z, const float* __restrict__ mimo_o,
+    int nh, int hd, int rank, float eps
+) {
+    __shared__ float rstd[MIMO_MAX_RANK];
+    const long long row = blockIdx.x;
+    const int h = blockIdx.y;
+    const float* yr = y + (row * nh + h) * (long long)rank * hd;
+    for (int r = threadIdx.x; r < rank; r += blockDim.x) {
+        float acc = 0.0f;
+        for (int p = 0; p < hd; p++) acc = __fmaf_rn(yr[r * hd + p], yr[r * hd + p], acc);
+        rstd[r] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(acc, (float)hd), eps)));
+    }
+    __syncthreads();
+    const long long di = (long long)nh * hd;
+    for (int p = threadIdx.x; p < hd; p += blockDim.x) {
+        const float z = to_f(proj[row * ld_proj + (long long)h * hd + p]);
+        const float w = norm_w[(long long)h * hd + p];
+        float o = 0.0f;
+        for (int r = 0; r < rank; r++) {
+            const long long q = ((long long)h * rank + r) * hd + p;
+            const float v = __fmul_rn(mimo_z[q], z);
+            const float sg = __fdiv_rn(v, __fadd_rn(1.0f, mimo_exp(-v)));
+            const float a = __fmul_rn(__fmul_rn(yr[r * hd + p], rstd[r]), w);
+            const float t = __fmul_rn(__fmul_rn(a, sg), mimo_o[q]);
+            o = r == 0 ? t : __fadd_rn(o, t);
+        }
+        mimo_put(&out[row * di + (long long)h * hd + p], o);
+    }
+}
+
+#define DEFINE_MIMO_GATE_NORMED(NAME, TI)                                      \
+extern "C" __global__ void NAME(                                               \
+    TI* __restrict__ out, const float* __restrict__ y,                         \
+    const TI* __restrict__ proj, long long ld_proj,                            \
+    const float* __restrict__ norm_w,                                          \
+    const float* __restrict__ mimo_z, const float* __restrict__ mimo_o,        \
+    int nh, int hd, int rank, float eps                                        \
+) {                                                                            \
+    mimo_gate_normed_body<TI>(out, y, proj, ld_proj, norm_w, mimo_z, mimo_o,   \
+        nh, hd, rank, eps);                                                    \
+}
+DEFINE_MIMO_GATE_NORMED(mimo_gate_normed, float)
+DEFINE_MIMO_GATE_NORMED(mimo_gate_normed_bf16, __nv_bfloat16)
+DEFINE_MIMO_GATE_NORMED(mimo_gate_normed_f16, __half)

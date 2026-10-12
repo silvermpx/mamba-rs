@@ -1,7 +1,7 @@
 //! Mamba-3 MIMO on the GPU against the CPU: decode and windows over ranks,
-//! groups, rope fractions, the MLP after the mixer, head widths that are
-//! not a whole number of warps and heads the recurrence runs in tiles of
-//! channels. Batch rows against the same sequence alone, the bit-exact
+//! groups, rope fractions, the MLP after the mixer, the gated output norm,
+//! head widths that are not a whole number of warps and heads the
+//! recurrence runs in tiles of channels. Batch rows against the same sequence alone, the bit-exact
 //! seams (a decode step continues a window, and split windows give the
 //! whole window), and the half and tf32 storage lanes.
 #![cfg(feature = "cuda")]
@@ -87,12 +87,20 @@ fn cases() -> Vec<(&'static str, Mamba3MimoConfig)> {
                 ..base
             },
         ),
+        (
+            "rank 4, the gated output norm",
+            Mamba3MimoConfig {
+                is_outproj_norm: true,
+                ..base
+            },
+        ),
     ]
 }
 
 /// Heads whose recurrence runs its channels in tiles over several blocks:
-/// one wider than a block, and a rank-16 head over 256 states whose keys
-/// leave room for only part of its state rows.
+/// one wider than a block, a rank-16 head over 256 states whose keys leave
+/// room for only part of its state rows, and a rank-16 head wider than a
+/// block under the output norm.
 fn tile_heads() -> Vec<(&'static str, Mamba3MimoConfig)> {
     let base = cases()[0].1;
     vec![
@@ -114,6 +122,16 @@ fn tile_heads() -> Vec<(&'static str, Mamba3MimoConfig)> {
                 ..base
             },
         ),
+        (
+            "rank 16, a head wider than a block, the output norm",
+            Mamba3MimoConfig {
+                d_model: 640,
+                headdim: 1280,
+                mimo_rank: 16,
+                is_outproj_norm: true,
+                ..base
+            },
+        ),
     ]
 }
 
@@ -132,6 +150,7 @@ fn drawn(cfg: &Mamba3MimoConfig, input_dim: usize, seed: u64) -> Mamba3MimoWeigh
             (&mut lw.mimo_z, 7, 1.0, 0.5),
             (&mut lw.mimo_o, 8, 0.0, 0.8),
             (&mut lw.norm_weight, 9, 1.0, 0.2),
+            (&mut lw.norm_gate_weight, 10, 1.0, 0.3),
         ] {
             let d = det(v.len(), s + k, scale);
             for (x, dv) in v.iter_mut().zip(d) {
@@ -371,21 +390,6 @@ fn m3_mimo_gpu_typed_lanes_track_cpu() {
             );
         }
     }
-}
-
-/// The gated output norm is refused rather than run wrong.
-#[test]
-fn m3_mimo_gpu_refuses_the_output_norm() {
-    let device = GpuDevice::new(0).unwrap();
-    let cfg = Mamba3MimoConfig {
-        is_outproj_norm: true,
-        ..cases()[0].1
-    };
-    let w = drawn(&cfg, 40, 3);
-    let err = Mamba3MimoGpuEngine::new(&device, &w, cfg, 40, 1, WeightDtype::F32)
-        .err()
-        .unwrap();
-    assert!(err.contains("output norm"), "{err}");
 }
 
 /// The chunked prefill (ScanMode::Parallel) of windows that end inside a

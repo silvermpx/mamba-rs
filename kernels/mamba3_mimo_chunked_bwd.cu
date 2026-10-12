@@ -98,6 +98,109 @@ DEFINE_M3MB_GATE(m3mb_gate, float)
 DEFINE_M3MB_GATE(m3mb_gate_bf16, __nv_bfloat16)
 DEFINE_M3MB_GATE(m3mb_gate_f16, __half)
 
+// The gate backward with the per-rank output norm, one block per (row,
+// head): rstd as mimo_gate_normed computes it, then per (r, p), with
+// yn = y rstd, a = yn w and s = silu(Z z):
+//   gphi = dO a s,  d_a = dO Phi s,  gw += d_a yn,  dyn = d_a w,
+//   dv = dO Phi a silu'(Z z): gz = dv z and dz += dv Z (r ascending),
+// then per rank c = sum_p dyn yn / P (p ascending) and the readouts'
+// gradient dy = rstd (dyn - yn c), du = D dy and the D partial
+// sum_r dy u, as m3mb_gate's outputs. The norm weight's partials go to gw
+// [rows, H, P]. Grid (rows, H), block a whole number of warps.
+template <typename T>
+__device__ __forceinline__ void m3mb_gate_normed_body(
+    float* __restrict__ dy, float* __restrict__ du, T* __restrict__ d_proj, long long ld_proj,
+    float* __restrict__ gphi, float* __restrict__ gz, float* __restrict__ gd,
+    float* __restrict__ gw,
+    const T* __restrict__ d_o, const float* __restrict__ y, const T* __restrict__ proj,
+    const float* __restrict__ D, const float* __restrict__ norm_w,
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
+    const float* __restrict__ mimo_o,
+    int nh, int hd, int rank, float eps
+) {
+    __shared__ float rstd[MIMO_MAX_RANK];
+    __shared__ float cfac[MIMO_MAX_RANK];
+    const long long row = blockIdx.x;
+    const int h = blockIdx.y;
+    const long long di = (long long)nh * hd;
+    const long long base = (row * nh + h) * (long long)rank * hd;
+    const float* yr = y + base;
+    for (int r = threadIdx.x; r < rank; r += blockDim.x) {
+        float acc = 0.0f;
+        for (int p = 0; p < hd; p++) acc = __fmaf_rn(yr[r * hd + p], yr[r * hd + p], acc);
+        rstd[r] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(acc, (float)hd), eps)));
+    }
+    __syncthreads();
+    for (int p = threadIdx.x; p < hd; p += blockDim.x) {
+        const float z = to_f(proj[row * ld_proj + (long long)h * hd + p]);
+        const float d_out = to_f(d_o[row * di + (long long)h * hd + p]);
+        const float w = norm_w[(long long)h * hd + p];
+        float dz = 0.0f, gwv = 0.0f;
+        for (int r = 0; r < rank; r++) {
+            const long long q = ((long long)h * rank + r) * hd + p;
+            const long long o = base + (long long)r * hd + p;
+            const float v = __fmul_rn(mimo_z[q], z);
+            const float sg = mimo_sigmoid(v);
+            const float silu = __fmul_rn(v, sg);
+            const float yn = __fmul_rn(yr[r * hd + p], rstd[r]);
+            const float a = __fmul_rn(yn, w);
+            gphi[o] = __fmul_rn(d_out, __fmul_rn(a, silu));
+            const float d_a = __fmul_rn(__fmul_rn(d_out, mimo_o[q]), silu);
+            gwv = __fmaf_rn(d_a, yn, gwv);
+            dy[o] = __fmul_rn(d_a, w);
+            const float dv = __fmul_rn(__fmul_rn(__fmul_rn(d_out, mimo_o[q]), a), mimo_silu_grad(v));
+            gz[o] = __fmul_rn(dv, z);
+            dz = __fmaf_rn(dv, mimo_z[q], dz);
+        }
+        mimo_put(&d_proj[row * ld_proj + (long long)h * hd + p], dz);
+        gw[(row * nh + h) * hd + p] = gwv;
+    }
+    __syncthreads();
+    for (int r = threadIdx.x; r < rank; r += blockDim.x) {
+        float dot = 0.0f;
+        for (int p = 0; p < hd; p++)
+            dot = __fadd_rn(dot, __fmul_rn(dy[base + (long long)r * hd + p],
+                                           __fmul_rn(yr[r * hd + p], rstd[r])));
+        cfac[r] = __fdiv_rn(dot, (float)hd);
+    }
+    __syncthreads();
+    const float dval = D[h];
+    for (int p = threadIdx.x; p < hd; p += blockDim.x) {
+        const float x = to_f(proj[row * ld_proj + di + (long long)h * hd + p]);
+        float gdv = 0.0f;
+        for (int r = 0; r < rank; r++) {
+            const long long q = ((long long)h * rank + r) * hd + p;
+            const long long o = base + (long long)r * hd + p;
+            const float yn = __fmul_rn(yr[r * hd + p], rstd[r]);
+            const float dyv = __fmul_rn(rstd[r], __fsub_rn(dy[o], __fmul_rn(yn, cfac[r])));
+            dy[o] = dyv;
+            du[o] = __fmul_rn(dval, dyv);
+            gdv = __fmaf_rn(dyv, __fmul_rn(mimo_x[q], x), gdv);
+        }
+        gd[(row * nh + h) * hd + p] = gdv;
+    }
+}
+
+#define DEFINE_M3MB_GATE_NORMED(NAME, T)                                        \
+extern "C" __global__ void NAME(                                                \
+    float* __restrict__ dy, float* __restrict__ du, T* __restrict__ d_proj,     \
+    long long ld_proj,                                                          \
+    float* __restrict__ gphi, float* __restrict__ gz, float* __restrict__ gd,   \
+    float* __restrict__ gw,                                                     \
+    const T* __restrict__ d_o, const float* __restrict__ y,                     \
+    const T* __restrict__ proj, const float* __restrict__ D,                    \
+    const float* __restrict__ norm_w,                                           \
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,         \
+    const float* __restrict__ mimo_o,                                           \
+    int nh, int hd, int rank, float eps                                         \
+) {                                                                             \
+    m3mb_gate_normed_body<T>(dy, du, d_proj, ld_proj, gphi, gz, gd, gw, d_o, y, \
+        proj, D, norm_w, mimo_x, mimo_z, mimo_o, nh, hd, rank, eps);            \
+}
+DEFINE_M3MB_GATE_NORMED(m3mb_gate_normed, float)
+DEFINE_M3MB_GATE_NORMED(m3mb_gate_normed_bf16, __nv_bfloat16)
+DEFINE_M3MB_GATE_NORMED(m3mb_gate_normed_f16, __half)
+
 // The inter-chunk part of dq and its decay term, one block per (chunk,
 // head, token): dq_t[r][n] = e^Acs_t sum_p dy_t[r][p] S_enter[p][n] (the
 // start of dq), and I_t = sum_{r, n} dq_t[r][n] q_t[r][n] by a fixed tree.

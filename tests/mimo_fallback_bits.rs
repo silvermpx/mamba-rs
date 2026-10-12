@@ -186,6 +186,7 @@ fn mimo_scan_tiles_are_the_whole_head() {
                     let ck_v = GpuBuffer::zeros(s, batch * nseg * nh * hd).unwrap();
                     let ck_ang = GpuBuffer::zeros(s, batch * nseg * nh * na).unwrap();
                     let done = GpuByteBuffer::zeros(s, batch * nh * 4).unwrap();
+                    let y = GpuBuffer::zeros(s, rows * nh * rank * hd).unwrap();
                     let ptrs = [
                         out.cached_ptr(),
                         ssm.cached_ptr(),
@@ -223,7 +224,7 @@ fn mimo_scan_tiles_are_the_whole_head() {
                         ck_ang.cached_ptr(),
                     ];
                     let (stride_i, tile, pipe) = (stride as i32, g.tile as i32, i32::from(g.pipe));
-                    let done_ptr = done.cached_ptr();
+                    let (done_ptr, y_ptr) = (done.cached_ptr(), y.cached_ptr());
                     let kernel = if ckpt { &k.scan_ckpt } else { &k.scan };
                     let mut b = s.launch_builder(kernel.get(dtype));
                     for p in &ptrs {
@@ -246,9 +247,11 @@ fn mimo_scan_tiles_are_the_whole_head() {
                     b.arg(&tile);
                     b.arg(&pipe);
                     b.arg(&done_ptr);
+                    b.arg(&y_ptr);
                     unsafe { b.launch(g.cfg(batch, nh, hd)) }.unwrap();
                     let mut got = vec![
                         bits_typed(&ctx, &out),
+                        bits_f32(&ctx, &y),
                         bits_f32(&ctx, &ssm),
                         bits_f32(&ctx, &kst),
                         bits_f32(&ctx, &vst),
@@ -264,6 +267,7 @@ fn mimo_scan_tiles_are_the_whole_head() {
                 let want = run(&geoms[0]);
                 let names = [
                     "rows",
+                    "readouts",
                     "state",
                     "keys",
                     "input",
@@ -370,8 +374,10 @@ fn mimo_scan_bwd_global_is_the_shared_kernel() {
         for dtype in DTYPES {
             let proj = typed_buf(&ctx, &det(rows * ld_proj, 64, 1.0), dtype);
             let d_o = typed_buf(&ctx, &det(rows * di, 65, 1.0), dtype);
-            // None runs mimo_scan_bwd, Some(geometry) the global kernel.
-            let run = |g: Option<&ScanBwdGlobalGeom>| -> Vec<Vec<u32>> {
+            let dy_given = f32_buf(&ctx, &det(rows * nh * rank * hd, 66, 1.0));
+            // None runs mimo_scan_bwd, Some(geometry) the global kernel. A
+            // given readout gradient skips the gate, as the output norm does.
+            let run = |g: Option<&ScanBwdGlobalGeom>, dy_in: u64| -> Vec<Vec<u32>> {
                 let z = |n: usize| GpuBuffer::zeros(s, n.max(1)).unwrap();
                 let d_proj = DtypedBuf::zeros(s, rows * ld_proj, dtype).unwrap();
                 let (d_bn_h, d_cn_h) = (z(rows * nh * rn), z(rows * nh * rn));
@@ -466,6 +472,7 @@ fn mimo_scan_bwd_global_is_the_shared_kernel() {
                     b.arg(v);
                 }
                 b.arg(&a_floor);
+                b.arg(&dy_in);
                 let (threads, smem) = match g {
                     None => (
                         scan_bwd_threads(hd),
@@ -494,7 +501,6 @@ fn mimo_scan_bwd_global_is_the_shared_kernel() {
                     bits_f32(&ctx, &rec),
                 ]
             };
-            let want = run(None);
             let names = [
                 "d_proj",
                 "dB",
@@ -509,17 +515,22 @@ fn mimo_scan_bwd_global_is_the_shared_kernel() {
                 "g c bias",
                 "record",
             ];
-            for g in &geoms {
-                let got = run(Some(g));
-                for (i, name) in names.iter().enumerate() {
-                    assert!(
-                        got[i] == want[i],
-                        "{dtype:?} head {hd} rank {rank}, block {} groups shared {} {} {}: {name}",
-                        g.threads,
-                        g.ds_shared,
-                        g.keys_shared,
-                        g.tiles_shared
-                    );
+            for dy_in in [0u64, dy_given.cached_ptr()] {
+                let want = run(None, dy_in);
+                for g in &geoms {
+                    let got = run(Some(g), dy_in);
+                    for (i, name) in names.iter().enumerate() {
+                        assert!(
+                            got[i] == want[i],
+                            "{dtype:?} head {hd} rank {rank}, given dy {}, block {} groups \
+                             shared {} {} {}: {name}",
+                            dy_in != 0,
+                            g.threads,
+                            g.ds_shared,
+                            g.keys_shared,
+                            g.tiles_shared
+                        );
+                    }
                 }
             }
         }

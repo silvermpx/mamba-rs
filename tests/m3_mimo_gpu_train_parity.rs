@@ -1,9 +1,9 @@
 //! Mamba-3 MIMO training on the GPU, the chunked path and the sequential
 //! one, against the CPU trainer: the training forward's rows, every weight
 //! gradient and the input gradient over ranks, groups, rope fractions, the
-//! MLP after the mixer, a head that is not a whole number of warps, the
-//! released head shape and heads past what one block holds, in f32 and in
-//! the tf32, bf16 and f16 lanes. The gradients do not depend on the
+//! MLP after the mixer, the gated output norm, a head that is not a whole
+//! number of warps, the released head shape and heads past what one block
+//! holds, in f32 and in the tf32, bf16 and f16 lanes. The gradients do not depend on the
 //! checkpoint stride, a repeated backward gives the same bits, and AdamW
 //! lowers a loss in every lane.
 #![cfg(feature = "cuda")]
@@ -84,6 +84,13 @@ fn cases() -> Vec<(&'static str, Mamba3MimoConfig)> {
                 ..base
             },
         ),
+        (
+            "rank 4, the gated output norm",
+            Mamba3MimoConfig {
+                is_outproj_norm: true,
+                ..base
+            },
+        ),
     ]
 }
 
@@ -101,6 +108,7 @@ fn drawn(cfg: &Mamba3MimoConfig, input_dim: usize, seed: u64) -> Mamba3MimoWeigh
             (&mut lw.mimo_z, 7, 1.0, 0.5),
             (&mut lw.mimo_o, 8, 0.0, 0.8),
             (&mut lw.norm_weight, 9, 1.0, 0.2),
+            (&mut lw.norm_gate_weight, 10, 1.0, 0.3),
         ] {
             let d = det(v.len(), s + k, scale);
             for (x, dv) in v.iter_mut().zip(d) {
@@ -141,6 +149,7 @@ fn named(w: &Mamba3MimoWeights) -> Vec<(String, &[f32])> {
             ("mimo_x", &lw.mimo_x),
             ("mimo_z", &lw.mimo_z),
             ("mimo_o", &lw.mimo_o),
+            ("norm_gate", &lw.norm_gate_weight),
             ("out_proj_w", &lw.out_proj_w),
         ] {
             out.push((format!("layer{l}.{name}"), v.as_slice()));
@@ -467,8 +476,9 @@ fn m3_mimo_gpu_train_fits_a_wide_rank() {
 }
 
 /// Heads past what one block holds, against the CPU trainer on both
-/// paths: two heads wider than a block, and rank 16 over 256 states, whose
-/// keys and state rows pass shared memory together. The sequential path
+/// paths: two heads wider than a block, rank 16 over 256 states, whose
+/// keys and state rows pass shared memory together, and two rank-16 heads
+/// wider than a block under the output norm. The sequential path
 /// runs the global backward and the forward in tiles of channels, the
 /// chunked one its kernels in channel tiles.
 #[test]
@@ -497,6 +507,17 @@ fn m3_mimo_gpu_train_wide_heads_match_the_cpu_trainer() {
                 mimo_rank: 16,
                 d_state: 256,
                 headdim: 64,
+                ..base
+            },
+        ),
+        (
+            "rank 16 heads wider than a block, the output norm",
+            Mamba3MimoConfig {
+                d_model: 640,
+                expand: 4,
+                headdim: 1280,
+                mimo_rank: 16,
+                is_outproj_norm: true,
                 ..base
             },
         ),

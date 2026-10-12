@@ -126,14 +126,18 @@ num_rope_angles`. Projections are stored `[in, out]`. A model with
 The decode step and the sequential prefill are one kernel: one block per
 batch row and head walks the window token by token, so a decode step is a
 window of one and continues a prefill bit for bit. The state rows live in
-shared memory. The released ranks (1, 2, 4 and 8) are compiled with their
-rank as a constant, which unrolls the per-rank arrays into registers. Any
-other rank up to 16 runs the same arithmetic in the same order.
+shared memory; a head whose rows do not fit there runs its channels in
+tiles over several blocks, with the same bits. The released ranks (1, 2, 4
+and 8) are compiled with their rank as a constant, which unrolls the
+per-rank arrays into registers. Any other rank up to 16 runs the same
+arithmetic in the same order.
 
 A prompt longer than 64 tokens runs the chunked scan (chunks of 64), and
 so does every training window unless the configuration asks for
 `ScanMode::Sequential`. The trainer runs in f32, tf32, bf16 and f16 with
-f32 master weights, chunked or sequential.
+f32 master weights, chunked or sequential. With `is_outproj_norm` either
+scan also writes its readouts, and a kernel of its own normalises and
+gates them; in training its backward runs ahead of the scan's.
 
 | file | purpose |
 |---|---|

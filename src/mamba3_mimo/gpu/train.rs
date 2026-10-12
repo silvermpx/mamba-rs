@@ -73,6 +73,9 @@ struct LayerSpans {
     mimo_z: Span,
     mimo_o: Span,
     out_proj_w: Span,
+    /// The output norm's weight, empty for a model without the norm (the
+    /// tensor is in every model but trains only where it runs).
+    norm_gate: Span,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -95,7 +98,7 @@ struct Layout {
 }
 
 impl Layout {
-    fn of(w: &Mamba3MimoWeights) -> Self {
+    fn of(w: &Mamba3MimoWeights, with_norm: bool) -> Self {
         let mut at = 0usize;
         let mut take = |len: usize| {
             let span = Span { off: at, len };
@@ -120,6 +123,11 @@ impl Layout {
                 mimo_z: take(lw.mimo_z.len()),
                 mimo_o: take(lw.mimo_o.len()),
                 out_proj_w: take(lw.out_proj_w.len()),
+                norm_gate: take(if with_norm {
+                    lw.norm_gate_weight.len()
+                } else {
+                    0
+                }),
             })
             .collect();
         let mlp = w
@@ -163,6 +171,11 @@ impl Layout {
                 (lw.mimo_z.as_slice(), ls.mimo_z, true),
                 (lw.mimo_o.as_slice(), ls.mimo_o, true),
                 (lw.out_proj_w.as_slice(), ls.out_proj_w, true),
+                (
+                    &lw.norm_gate_weight[..ls.norm_gate.len],
+                    ls.norm_gate,
+                    false,
+                ),
             ]);
         }
         for (m, ms) in w.mlp.iter().zip(&self.mlp) {
@@ -204,6 +217,9 @@ impl Layout {
             read(&mut lw.mimo_z, ls.mimo_z);
             read(&mut lw.mimo_o, ls.mimo_o);
             read(&mut lw.out_proj_w, ls.out_proj_w);
+            if ls.norm_gate.len > 0 {
+                read(&mut lw.norm_gate_weight, ls.norm_gate);
+            }
         }
         for (m, ms) in w.mlp.iter_mut().zip(&self.mlp) {
             read(&mut m.norm_weight, ms.norm_weight);
@@ -360,6 +376,8 @@ struct ChunkedBwd {
     gd: GpuBuffer,
     gdtb: GpuBuffer,
     tmp: GpuBuffer,
+    /// The output norm's weight partials per row `[rows, d_inner]`.
+    gw: GpuBuffer,
     /// The generic state terms' keys and inputs, the generic pair terms'
     /// staged rows and the lead's block-sum leaves, each in global memory
     /// only when the head needs it (one element otherwise).
@@ -467,9 +485,6 @@ impl Mamba3MimoGpuTrainer {
         let device = GpuDevice::new(opts.device)?;
         let device = &device;
         w.validate(&cfg, input_dim)?;
-        if cfg.is_outproj_norm {
-            return Err("the gated output norm does not train on the GPU yet".into());
-        }
         if batch == 0 || seq_len == 0 {
             return Err("a training window needs at least one sequence and one token".into());
         }
@@ -531,7 +546,7 @@ impl Mamba3MimoGpuTrainer {
             .then(|| {
                 scan_bwd_global_geom((hd, ds, rank, na), kernels.scan_bwd_global_block, optin)
             });
-        let layout = Layout::of(w);
+        let layout = Layout::of(w, cfg.is_outproj_norm);
         let s = &ctx.stream;
         let scan_done = GpuByteBuffer::zeros(s, (batch * cfg.nheads() * 4).max(4))?;
         let z = |n: usize| GpuBuffer::zeros(s, n.max(1));
@@ -551,6 +566,15 @@ impl Mamba3MimoGpuTrainer {
         // Each path's buffers; the other path's are left one element long.
         let seq_n = |n: usize| if chunked.is_some() { 1 } else { n };
         let ch_n = |n: usize| if chunked.is_some() { n } else { 1 };
+        // The gate's backward buffers: the chunked path's, and the output
+        // norm's on both paths.
+        let gate_n = |n: usize| {
+            if chunked.is_some() || cfg.is_outproj_norm {
+                n
+            } else {
+                1
+            }
+        };
         let state_n = batch * nc * nh * hd * ds;
         let acts = (0..c.n_layers)
             .map(|l| -> Result<LayerActs, String> {
@@ -571,7 +595,11 @@ impl Mamba3MimoGpuTrainer {
                     cs: z(ch_n(rows * nh * na))?,
                     e0: z(ch_n(batch * nh))?,
                     enter: z(ch_n(state_n))?,
-                    y: z(ch_n(rows * nh * rank * hd))?,
+                    y: z(if chunked.is_some() || cfg.is_outproj_norm {
+                        rows * nh * rank * hd
+                    } else {
+                        1
+                    })?,
                     k0: z(ch_n(batch * nh * rank * ds))?,
                     v0: z(ch_n(batch * nh * hd))?,
                     mlp: if l < w.mlp.len() {
@@ -633,8 +661,8 @@ impl Mamba3MimoGpuTrainer {
             axis0: z(rows * dm)?,
             d_input: z(rows * input_dim)?,
             cb: ChunkedBwd {
-                dy: z(ch_n(rows * nh * rank * hd))?,
-                du: z(ch_n(rows * nh * rank * hd))?,
+                dy: z(gate_n(rows * nh * rank * hd))?,
+                du: z(gate_n(rows * nh * rank * hd))?,
                 dq: z(ch_n(rows * nh * rank * ds))?,
                 dk: z(ch_n(rows * nh * rank * ds))?,
                 dsl: z(ch_n(state_n))?,
@@ -648,12 +676,13 @@ impl Mamba3MimoGpuTrainer {
                 ddt_ang: z(ch_n(rows * nh))?,
                 de0: z(ch_n(batch * nh))?,
                 gpsi_init: z(ch_n(batch * nh * rank * hd))?,
-                gphi: z(ch_n(rows * nh * rank * hd))?,
-                gz: z(ch_n(rows * nh * rank * hd))?,
+                gphi: z(gate_n(rows * nh * rank * hd))?,
+                gz: z(gate_n(rows * nh * rank * hd))?,
                 gpsi: z(ch_n(rows * nh * rank * hd))?,
-                gd: z(ch_n(rows * nh * hd))?,
+                gd: z(gate_n(rows * nh * hd))?,
                 gdtb: z(ch_n(rows * nh))?,
-                tmp: z(ch_n(nh * rank * hd))?,
+                tmp: z(gate_n(nh * rank * hd))?,
+                gw: z(if cfg.is_outproj_norm { rows * di } else { 1 })?,
                 terms_glob: z(chunked.map_or(1, |_| {
                     if (rank * ds + rank * hd) * 4 > optin {
                         batch * nc * nh * CHUNK.div_ceil(TERMS_GROUP) * (rank * ds + rank * hd)
@@ -1259,11 +1288,41 @@ impl Mamba3MimoGpuTrainer {
                 bld.arg(&stride_i);
                 let (tile, pipe) = (self.scan.tile as i32, i32::from(self.scan.pipe));
                 let done = self.scan_done.cached_ptr();
+                let y_out = if ls.norm_gate.len > 0 {
+                    a.y.cached_ptr()
+                } else {
+                    0u64
+                };
                 bld.arg(&tile);
                 bld.arg(&pipe);
                 bld.arg(&done);
+                bld.arg(&y_out);
                 unsafe { bld.launch(self.scan.cfg(b, nh, hd)) }
                     .map_err(|e| format!("MIMO scan L{l}: {e:?}"))?;
+            }
+            // The output norm gates the scans' readouts again, over the plain
+            // gate's rows.
+            if ls.norm_gate.len > 0 {
+                let (o, y, nw) = (a.o.ptr(), a.y.cached_ptr(), at(base, ls.norm_gate));
+                let (mz, mo) = (at(base, ls.mimo_z), at(base, ls.mimo_o));
+                let mut bld = stream.launch_builder(self.kernels.gate_normed.get(self.act));
+                bld.arg(&o);
+                bld.arg(&y);
+                bld.arg(&proj);
+                bld.arg(&ld_proj);
+                bld.arg(&nw);
+                bld.arg(&mz);
+                bld.arg(&mo);
+                bld.arg(&nh_i);
+                bld.arg(&hd_i);
+                bld.arg(&r_i);
+                bld.arg(&eps);
+                let cfg = LaunchConfig {
+                    grid_dim: (rows as u32, nh as u32, 1),
+                    block_dim: (hd.next_multiple_of(32).min(256) as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                unsafe { bld.launch(cfg) }.map_err(|e| format!("MIMO output norm L{l}: {e:?}"))?;
             }
             self.gemm(
                 (out_rows, a.o.ptr(), self.gemm_weight(ls.out_proj_w)?),
@@ -1740,6 +1799,60 @@ impl Mamba3MimoGpuTrainer {
             s.d_cn_h.cached_ptr(),
             s.d_tanh_h.cached_ptr(),
         );
+        // The output norm's gate backward runs ahead of either path's scan
+        // backward. It leaves the readouts' gradient, du, the z column and
+        // the gate's weight partials where the plain gate would, and the norm
+        // weight's partials in rows of their own.
+        let normed = ls.norm_gate.len > 0;
+        if normed {
+            let cbuf = &s.cb;
+            let (dy, du, gphi, gz, gd, gw) = (
+                cbuf.dy.cached_ptr(),
+                cbuf.du.cached_ptr(),
+                cbuf.gphi.cached_ptr(),
+                cbuf.gz.cached_ptr(),
+                cbuf.gd.cached_ptr(),
+                cbuf.gw.cached_ptr(),
+            );
+            let (d_o, y) = (s.d_o.ptr(), a.y.cached_ptr());
+            let (w_d, w_norm, w_x, w_z, w_o) = (
+                at(base, ls.d_param),
+                at(base, ls.norm_gate),
+                at(base, ls.mimo_x),
+                at(base, ls.mimo_z),
+                at(base, ls.mimo_o),
+            );
+            let eps = c.ssm_norm_eps;
+            let mut bld = stream.launch_builder(k.cb.gate_normed.get(act));
+            bld.arg(&dy);
+            bld.arg(&du);
+            bld.arg(&d_proj);
+            bld.arg(&ld_proj);
+            bld.arg(&gphi);
+            bld.arg(&gz);
+            bld.arg(&gd);
+            bld.arg(&gw);
+            bld.arg(&d_o);
+            bld.arg(&y);
+            bld.arg(&proj);
+            bld.arg(&w_d);
+            bld.arg(&w_norm);
+            bld.arg(&w_x);
+            bld.arg(&w_z);
+            bld.arg(&w_o);
+            bld.arg(&nh_i);
+            bld.arg(&hd_i);
+            bld.arg(&r_i);
+            bld.arg(&eps);
+            let cfg = LaunchConfig {
+                grid_dim: (rows as u32, nh as u32, 1),
+                block_dim: (hd.next_multiple_of(32).min(256) as u32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            unsafe { bld.launch(cfg) }
+                .map_err(|e| format!("MIMO output norm backward L{l}: {e:?}"))?;
+            self.reduce_axis0(at(g_base, ls.norm_gate), gw, (rows, di))?;
+        }
         if let Some(geom) = self.chunked {
             // The chunked path's backward, see kernels/mamba3_mimo_chunked_bwd.cu.
             let nc = t_len.div_ceil(CHUNK);
@@ -1816,15 +1929,17 @@ impl Mamba3MimoGpuTrainer {
                 block_dim: (block as u32, 1, 1),
                 shared_mem_bytes: smem as u32,
             };
-            go!(
-                k.cb.gate.get(act),
-                grid_1d(rows * nh * hd),
-                "gate",
-                [
-                    dy, du, d_proj, ld_proj, gphi, gz, gd, d_o, y, proj, w_d, w_x, w_z, w_o,
-                    rows_l, nh_i, hd_i, r_i
-                ]
-            );
+            if !normed {
+                go!(
+                    k.cb.gate.get(act),
+                    grid_1d(rows * nh * hd),
+                    "gate",
+                    [
+                        dy, du, d_proj, ld_proj, gphi, gz, gd, d_o, y, proj, w_d, w_x, w_z, w_o,
+                        rows_l, nh_i, hd_i, r_i
+                    ]
+                );
+            }
             if geom.inter_tiles.0 > 0 {
                 let (tt, smem) = geom.inter_tiles;
                 let tt_i = tt as i32;
@@ -2161,19 +2276,25 @@ impl Mamba3MimoGpuTrainer {
                 bld.arg(&r_i);
                 bld.arg(&na_i);
                 bld.arg(&a_floor);
+                let dy_in = if normed { s.cb.dy.cached_ptr() } else { 0u64 };
+                bld.arg(&dy_in);
                 unsafe { bld.launch(cfg) }
                     .map_err(|e| format!("MIMO scan backward L{l}: {e:?}"))?;
             }
-            // The per-sequence partials into the gradients.
-            for (g, part, n) in [
-                (ls.mimo_x, s.g_x.cached_ptr(), nh * rank * hd),
-                (ls.mimo_z, s.g_z.cached_ptr(), nh * rank * hd),
-                (ls.mimo_o, s.g_o.cached_ptr(), nh * rank * hd),
-                (ls.d_param, s.g_d.cached_ptr(), nh),
-                (ls.dt_bias, s.g_dtb.cached_ptr(), nh),
-                (ls.b_bias, s.g_bb.cached_ptr(), nh * rank * ds),
-                (ls.c_bias, s.g_cb.cached_ptr(), nh * rank * ds),
+            // The per-sequence partials into the gradients. Under the output
+            // norm the gate's three come from its pre-pass instead.
+            for (g, part, n, gate) in [
+                (ls.mimo_x, s.g_x.cached_ptr(), nh * rank * hd, false),
+                (ls.mimo_z, s.g_z.cached_ptr(), nh * rank * hd, true),
+                (ls.mimo_o, s.g_o.cached_ptr(), nh * rank * hd, true),
+                (ls.d_param, s.g_d.cached_ptr(), nh, true),
+                (ls.dt_bias, s.g_dtb.cached_ptr(), nh, false),
+                (ls.b_bias, s.g_bb.cached_ptr(), nh * rank * ds, false),
+                (ls.c_bias, s.g_cb.cached_ptr(), nh * rank * ds, false),
             ] {
+                if gate && normed {
+                    continue;
+                }
                 let (gp, count, n_l) = (at(g_base, g), b as i32, n as i64);
                 let mut bld = stream.launch_builder(&k.sum_rows);
                 bld.arg(&gp);
@@ -2182,6 +2303,21 @@ impl Mamba3MimoGpuTrainer {
                 bld.arg(&n_l);
                 unsafe { bld.launch(grid_1d(n)) }
                     .map_err(|e| format!("MIMO weight partials L{l}: {e:?}"))?;
+            }
+            if normed {
+                let n_rp = nh * rank * hd;
+                let tmp = s.cb.tmp.cached_ptr();
+                self.reduce_axis0(at(g_base, ls.mimo_o), s.cb.gphi.cached_ptr(), (rows, n_rp))?;
+                self.reduce_axis0(at(g_base, ls.mimo_z), s.cb.gz.cached_ptr(), (rows, n_rp))?;
+                self.reduce_axis0_set(tmp, s.cb.gd.cached_ptr(), (rows, nh * hd))?;
+                let gp = at(g_base, ls.d_param);
+                let mut bld = stream.launch_builder(&k.cb.sum_inner);
+                bld.arg(&gp);
+                bld.arg(&tmp);
+                bld.arg(&nh_i);
+                bld.arg(&hd_i);
+                unsafe { bld.launch(grid_1d(nh)) }
+                    .map_err(|e| format!("MIMO output norm D L{l}: {e:?}"))?;
             }
         }
         // The B and C norms, then their weights.

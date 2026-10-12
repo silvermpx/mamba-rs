@@ -31,6 +31,8 @@ pub struct Mamba3MimoKernels {
     pub chunk_writeback: TypedKernel,
     /// The MLP's gate, `value * silu(gate)`.
     pub mlp_gate: TypedKernel,
+    /// The gate with the per-rank output norm over the scans' readouts.
+    pub gate_normed: TypedKernel,
     /// The training forward's scan, writing the replay checkpoints.
     pub scan_ckpt: TypedKernel,
     /// The widest block both scans launch, from their register use.
@@ -66,6 +68,8 @@ pub struct Mamba3MimoKernels {
 /// The chunked path's backward kernels (`kernels/mamba3_mimo_chunked_bwd.cu`).
 pub struct MimoChunkedBwd {
     pub gate: TypedKernel,
+    /// The gate's backward with the output norm, per (row, head).
+    pub gate_normed: TypedKernel,
     pub inter: CudaFunction,
     /// `m3mb_inter` and `m3mb_state_terms` for a tile of tokens at once,
     /// when [`ChunkedGeom::inter_tiles`] and [`ChunkedGeom::terms_tiles`]
@@ -568,6 +572,7 @@ impl Mamba3MimoKernels {
             chunk_scan_tiles: typed("m3m_chunk_scan_tiles")?,
             chunk_writeback: typed("m3m_writeback")?,
             mlp_gate: typed("mlp_gate_fwd")?,
+            gate_normed: typed("mimo_gate_normed")?,
             scan_ckpt,
             scan_threads,
             scan_bwd,
@@ -580,6 +585,7 @@ impl Mamba3MimoKernels {
             sum_rows: get("mimo_sum_rows")?,
             cb: MimoChunkedBwd {
                 gate: typed("m3mb_gate")?,
+                gate_normed: typed("m3mb_gate_normed")?,
                 inter: get("m3mb_inter")?,
                 inter_tiles: get("m3mb_inter_tiles")?,
                 state_terms_tiles: typed("m3mb_state_terms_tiles")?,

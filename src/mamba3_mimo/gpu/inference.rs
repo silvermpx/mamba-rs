@@ -42,6 +42,9 @@ struct GpuMimoLayer {
     mimo_z: GpuBuffer,
     mimo_o: GpuBuffer,
     out_proj_w: DtypedBuf,
+    /// The output norm's weight `[d_inner]`, for a model with
+    /// `is_outproj_norm`.
+    norm_gate: Option<GpuBuffer>,
     mlp: Option<GpuMlp>,
 }
 
@@ -83,6 +86,9 @@ pub struct Mamba3MimoGpuWindow {
     bn: GpuBuffer,
     cn: GpuBuffer,
     gated: DtypedBuf,
+    /// The scans' readouts `[B, T, H, R, P]` the output norm gates (one
+    /// element for a model without it).
+    y: GpuBuffer,
     out: DtypedBuf,
     mlp_up: DtypedBuf,
     mlp_act: DtypedBuf,
@@ -198,9 +204,6 @@ impl Mamba3MimoGpuEngine {
         (dtype, mode): (WeightDtype, Option<GemmMode>),
     ) -> Result<Self, String> {
         w.validate(&cfg, input_dim)?;
-        if cfg.is_outproj_norm {
-            return Err("the gated output norm does not run on the GPU yet".into());
-        }
         let act = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
             half => half,
@@ -269,6 +272,11 @@ impl Mamba3MimoGpuEngine {
                 mimo_z: up(&lw.mimo_z)?,
                 mimo_o: up(&lw.mimo_o)?,
                 out_proj_w: typed(&lw.out_proj_w)?,
+                norm_gate: if cfg.is_outproj_norm {
+                    Some(up(&lw.norm_gate_weight)?)
+                } else {
+                    None
+                },
                 mlp,
             })
         };
@@ -402,6 +410,11 @@ impl Mamba3MimoGpuEngine {
             bn: z(rows * c.bc_width())?,
             cn: z(rows * c.bc_width())?,
             gated: typed(rows * c.d_inner())?,
+            y: z(if c.is_outproj_norm {
+                rows * c.mimo_rank * c.d_inner()
+            } else {
+                1
+            })?,
             out: typed(rows * c.d_model)?,
             mlp_up: typed(rows * 2 * hidden)?,
             mlp_act: typed(rows * hidden)?,
@@ -680,7 +693,11 @@ impl Mamba3MimoGpuEngine {
             bn: win.bn.cached_ptr(),
             cn: win.cn.cached_ptr(),
             out: win.gated.cached_ptr(),
-            y_out: 0,
+            y_out: if lw.norm_gate.is_some() {
+                win.y.cached_ptr()
+            } else {
+                0
+            },
             coef: win.coef.cached_ptr(),
             sn: win.sn.cached_ptr(),
             cs: win.cs.cached_ptr(),
@@ -847,11 +864,45 @@ impl Mamba3MimoGpuEngine {
                 bld.arg(&a_floor);
                 let (tile, pipe) = (self.scan.tile as i32, i32::from(self.scan.pipe));
                 let done = self.scan_done.cached_ptr();
+                let y_out = if lw.norm_gate.is_some() {
+                    win.y.cached_ptr()
+                } else {
+                    0u64
+                };
                 bld.arg(&tile);
                 bld.arg(&pipe);
                 bld.arg(&done);
+                bld.arg(&y_out);
                 unsafe { bld.launch(self.scan.cfg(b, nh, hd)) }
                     .map_err(|e| format!("MIMO scan L{l}: {e:?}"))?;
+            }
+            // The output norm gates the scans' readouts again, over the
+            // plain gate's rows.
+            if let Some(nw) = &lw.norm_gate {
+                let (y, nw, mz, mo) = (
+                    win.y.cached_ptr(),
+                    nw.cached_ptr(),
+                    lw.mimo_z.cached_ptr(),
+                    lw.mimo_o.cached_ptr(),
+                );
+                let mut bld = stream.launch_builder(self.kernels.gate_normed.get(self.act));
+                bld.arg(&gated);
+                bld.arg(&y);
+                bld.arg(&proj);
+                bld.arg(&ld_proj);
+                bld.arg(&nw);
+                bld.arg(&mz);
+                bld.arg(&mo);
+                bld.arg(&nh_i);
+                bld.arg(&hd_i);
+                bld.arg(&r_i);
+                bld.arg(&eps);
+                let cfg = cudarc::driver::LaunchConfig {
+                    grid_dim: ((b * t_len) as u32, nh as u32, 1),
+                    block_dim: (hd.next_multiple_of(32).min(256) as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                unsafe { bld.launch(cfg) }.map_err(|e| format!("MIMO output norm L{l}: {e:?}"))?;
             }
             gpu_gemm_typed_forward_raw(
                 &self.ctx,

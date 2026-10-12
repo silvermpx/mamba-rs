@@ -140,7 +140,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
     const float* __restrict__ mimo_o,
     int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,
-    float a_floor
+    float a_floor, const float* __restrict__ dy_in
 ) {
     extern __shared__ float mb_sm[];
     const int b = blockIdx.x;
@@ -488,8 +488,19 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
             mimo_cp_commit();
 
             // Gate, D and the readout: dy, dz, du; dS rows take sum_r dy q_r.
+            // With dy_in the readouts' gradient comes in, the gate (an
+            // output norm's) and its partials already walked.
             float du[MIMO_RA(RK)], dup[MIMO_RA(RK)];
-            if (own) {
+            if (own && dy_in != nullptr) {
+                _Pragma("unroll") for (int r = 0; r < R; r++) {
+                    const float dyv = dy_in[((row * nh + h) * rank + r) * hd + tid];
+                    dyS[tid * rank + r] = dyv;
+                    du[r] = __fmul_rn(dyv, dval);
+                    dup[r] = 0.0f;
+                    bvS[tid * rank + r] = __fmul_rn(beta, r_up[tid * rank + r]);
+                    gxS[tid * rank + r] = __fmul_rn(gamma, r_u[tid * rank + r]);
+                }
+            } else if (own) {
                 const float z = to_f(pr[h * hd + tid]);
                 const float d_o_v = to_f(d_o[row * di + h * hd + tid]);
                 float dz = 0.0f;
@@ -772,13 +783,13 @@ extern "C" __global__ void NAME(                                                
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,         \
     const float* __restrict__ mimo_o,                                           \
     int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,      \
-    float a_floor                                                               \
+    float a_floor, const float* __restrict__ dy_in                              \
 ) {                                                                             \
     MIMO_RANK_DISPATCH(rank, mimo_scan_bwd_body<T, RK>(d_proj, ld_proj, d_bn_h, \
         d_cn_h, d_tanh_h, g_x, g_z, g_o, g_d, g_dtb, g_bb, g_cb, rec, d_o,      \
         proj, bn, cn, ck_ssm, ck_k, ck_v, ck_ang, dt_bias, b_bias, c_bias, D,   \
         mimo_x, mimo_z, mimo_o, seq, stride, nh, ng, hd, ds, rank, na,          \
-        a_floor))                                                               \
+        a_floor, dy_in))                                                        \
 }
 DEFINE_MIMO_SCAN_BWD(mimo_scan_bwd, float)
 DEFINE_MIMO_SCAN_BWD(mimo_scan_bwd_bf16, __nv_bfloat16)
@@ -908,7 +919,7 @@ __device__ __forceinline__ void mimo_scan_bwd_global_body(
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
     const float* __restrict__ mimo_o,
     int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,
-    float a_floor
+    float a_floor, const float* __restrict__ dy_in
 ) {
     extern __shared__ float mb_sm[];
     const int b = blockIdx.x;
@@ -1106,8 +1117,16 @@ __device__ __forceinline__ void mimo_scan_bwd_global_body(
             const float a_val = r_sc[4], lam = r_sc[5], lam_c = r_sc[6];
 
             // Gate, D and the readout per channel: dy, dz, the weight partials
-            // of z and o, dD, and the tiles of dy, beta up and gamma u.
-            for (int p = tid; p < hd; p += nt) {
+            // of z and o, dD, and the tiles of dy, beta up and gamma u. With
+            // dy_in the readouts' gradient comes in, the gate already walked.
+            for (int p = tid; p < hd && dy_in != nullptr; p += nt) {
+                _Pragma("unroll") for (int r = 0; r < R; r++) {
+                    dyS[p * rank + r] = dy_in[((row * nh + h) * rank + r) * hd + p];
+                    bvS[p * rank + r] = __fmul_rn(beta, r_up[p * rank + r]);
+                    gxS[p * rank + r] = __fmul_rn(gamma, r_u[p * rank + r]);
+                }
+            }
+            for (int p = tid; p < hd && dy_in == nullptr; p += nt) {
                 const float z = to_f(pr[h * hd + p]);
                 const float d_o_v = to_f(d_o[row * di + h * hd + p]);
                 float dz = 0.0f;
@@ -1367,13 +1386,13 @@ extern "C" __global__ void NAME(                                                
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,         \
     const float* __restrict__ mimo_o,                                           \
     int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,      \
-    float a_floor                                                               \
+    float a_floor, const float* __restrict__ dy_in                              \
 ) {                                                                             \
     MIMO_RANK_DISPATCH(rank, mimo_scan_bwd_global_body<T, RK>(d_proj, ld_proj,  \
         d_bn_h, d_cn_h, d_tanh_h, g_x, g_z, g_o, g_d, g_dtb, g_bb, g_cb, rec,   \
         ds_glob, kg_glob, pr_glob, ch, leaves, d_o, proj, bn, cn, ck_ssm, ck_k, \
         ck_v, ck_ang, dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq,  \
-        stride, nh, ng, hd, ds, rank, na, a_floor))                             \
+        stride, nh, ng, hd, ds, rank, na, a_floor, dy_in))                      \
 }
 DEFINE_MIMO_SCAN_BWD_GLOBAL(mimo_scan_bwd_global, float)
 DEFINE_MIMO_SCAN_BWD_GLOBAL(mimo_scan_bwd_global_bf16, __nv_bfloat16)
