@@ -627,3 +627,28 @@ fn m3_backward_mixed_parity_gated_mlp_f16() {
         check_cfg(gated_mlp_cfg(mode), WeightDtype::F16, 64);
     }
 }
+
+/// Heads wider than a block in the half lanes on both scans: the typed
+/// fallback tiles of the chunked forward and the block-tier sequential
+/// kernels in slices, and at 1100 the typed gated norm past 1024 channels.
+/// Four heads each: a head's D gradient is one sum over every step and
+/// channel, and a single such sum that happens to cancel leaves only the
+/// half-precision rounding, which no relative bound can hold.
+#[test]
+fn m3_backward_mixed_parity_heads_wider_than_a_block() {
+    for (headdim, scan_mode, dtype) in [
+        (640usize, ScanMode::Auto, WeightDtype::Bf16),
+        (640, ScanMode::Sequential, WeightDtype::F16),
+        (1100, ScanMode::Auto, WeightDtype::F16),
+        (1100, ScanMode::Sequential, WeightDtype::Bf16),
+    ] {
+        let cfg = Mamba3Config {
+            d_model: 2 * headdim,
+            d_state: 16,
+            headdim,
+            scan_mode,
+            ..cfg_for_step10()
+        };
+        check_cfg(cfg, dtype, 64);
+    }
+}

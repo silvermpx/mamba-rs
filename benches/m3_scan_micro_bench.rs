@@ -153,7 +153,15 @@ fn scan_trio_time_and_hash() {
         unsafe { b.launch(cfg) }.unwrap();
     };
     let chunk_state = || {
-        let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(batch, nc, nh, hd, ds, cs);
+        let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(
+            batch,
+            nc,
+            nh,
+            hd,
+            ds,
+            cs,
+            m3k.chunk_tile_threads,
+        );
         let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
         b.arg(chunk_states.inner());
         b.arg(x.inner());
@@ -168,7 +176,7 @@ fn scan_trio_time_and_hash() {
         unsafe { b.launch(cfg) }.unwrap();
     };
     let scan = || {
-        let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs);
+        let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads);
         assert!(coop, "serve shape must ride the coop kernel");
         let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd_coop);
         b.arg(y.inner());
@@ -242,7 +250,15 @@ fn scan_trio_time_and_hash() {
     // fused kernel computes for itself.
     let chunk_states_real = GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap();
     {
-        let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(batch, nc, nh, hd, ds, cs);
+        let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(
+            batch,
+            nc,
+            nh,
+            hd,
+            ds,
+            cs,
+            m3k.chunk_tile_threads,
+        );
         let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
         b.arg(chunk_states_real.inner());
         b.arg(x.inner());
@@ -373,8 +389,15 @@ fn scan_trio_time_and_hash() {
                 b.arg(&ds_i);
                 b.arg(&cs_i);
                 unsafe { b.launch(cfg) }.unwrap();
-                let cfg =
-                    mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(batch, nc, nh, hd, ds, cs);
+                let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(
+                    batch,
+                    nc,
+                    nh,
+                    hd,
+                    ds,
+                    cs,
+                    m3k.chunk_tile_threads,
+                );
                 let mut b = ctx
                     .stream
                     .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
@@ -460,7 +483,7 @@ fn scan_trio_time_and_hash() {
     // bf16 parity test only measures within tolerance.
     let y_t = GpuBuffer::zeros(st, batch * t * d_inner).unwrap();
     let scan_typed = || {
-        let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs);
+        let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads);
         assert!(coop, "serve shape must ride the coop kernel");
         let mut b = ctx
             .stream

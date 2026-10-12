@@ -668,8 +668,15 @@ pub fn gpu_forward_mamba3_layer_mixed(
             // f32 chunk_states (acts.chunk_states_saved, mutated in place
             // by K4 into the entering states).
             {
-                let cfg =
-                    super::kernels::chunk_state_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+                let cfg = super::kernels::chunk_state_cfg(
+                    dims.batch,
+                    nc,
+                    nh,
+                    hd,
+                    ds,
+                    dims.chunk_size(),
+                    m3k.chunk_tile_threads,
+                );
                 let mut bld = ctx
                     .stream
                     .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
@@ -731,8 +738,15 @@ pub fn gpu_forward_mamba3_layer_mixed(
         // K5: m3_chunk_scan_fwd_typed — typed y_out, x, q, K_scaled +
         // f32 qk_dot/da_cumsum/prev_states/D.
         {
-            let (coop, cfg) =
-                super::kernels::chunk_scan_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+            let (coop, cfg) = super::kernels::chunk_scan_cfg(
+                dims.batch,
+                nc,
+                nh,
+                hd,
+                ds,
+                dims.chunk_size(),
+                m3k.chunk_tile_threads,
+            );
             let kern = if coop {
                 m3k.m3_chunk_scan_fwd_coop_typed.get(dtype)
             } else {
@@ -776,7 +790,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 headdim: hd,
                 d_state: ds,
             },
-        )?;
+        );
         let mut bld = ctx.stream.launch_builder(kernel);
         bld.arg(&ssm_state);
         bld.arg(&k_state);

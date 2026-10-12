@@ -398,7 +398,6 @@ impl Mamba3GpuEngine {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         cfg.validate()?;
-        crate::mamba3_siso::route::check_config(&cfg)?;
         // GpuCtx disables cudarc's per-slice event tracking itself (the
         // CUDA-Graph capture prerequisite) and owns the cuBLAS handle plus
         // its Graph-safe workspace.
@@ -857,8 +856,9 @@ impl Mamba3GpuEngine {
 
         // F6: m3_step_fwd (trapezoidal SSM recurrence)
         {
-            let tier = crate::mamba3_siso::route::head_tier(hd)?;
-            let grid = super::kernels::step_head_cfg(tier, b, nh, hd, ds);
+            let tier = crate::mamba3_siso::route::head_tier(hd);
+            let grid =
+                super::kernels::step_head_cfg(tier, b, nh, hd, ds, self.kernels.step_block_threads);
             let kernel = match tier {
                 crate::mamba3_siso::route::HeadTier::Warp => &self.kernels.m3_step_fwd,
                 crate::mamba3_siso::route::HeadTier::Block => {
@@ -1641,8 +1641,8 @@ impl Mamba3GpuEngineMixed {
 
             // F6: m3_step_fwd typed — f32 state, bf16 x/k_cur/q_cur/y, f32 α/β/γ/D.
             {
-                let tier = crate::mamba3_siso::route::head_tier(hd)?;
-                let grid = super::kernels::step_head_cfg(tier, b, nh, hd, ds);
+                let tier = crate::mamba3_siso::route::head_tier(hd);
+                let grid = super::kernels::step_head_cfg(tier, b, nh, hd, ds, k.step_block_threads);
                 let kernel = match tier {
                     crate::mamba3_siso::route::HeadTier::Warp => k.m3_step_fwd_typed.get(dt),
                     crate::mamba3_siso::route::HeadTier::Block => k.m3_step_fwd_block_typed.get(dt),

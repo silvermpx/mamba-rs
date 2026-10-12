@@ -1,6 +1,7 @@
 //! The block tier of the Mamba-3 head kernels: bit-equal to the warp tier
 //! at the widths both serve, and agreeing with the CPU at the widths only
-//! the block tier serves, the official checkpoints' headdim 64 among them.
+//! the block tier serves, the official checkpoints' headdim 64 among them
+//! and heads wider than a block.
 #![cfg(feature = "cuda")]
 
 #[path = "common/arch.rs"]
@@ -148,7 +149,7 @@ fn m3_step_block_matches_warp_bits() {
                             HeadTier::Warp => m3k.m3_step_fwd_typed.get(dtype),
                             HeadTier::Block => m3k.m3_step_fwd_block_typed.get(dtype),
                         };
-                        let cfg = step_head_cfg(*tier, batch, nh, hd, ds);
+                        let cfg = step_head_cfg(*tier, batch, nh, hd, ds, m3k.step_block_threads);
                         let ptrs = [
                             st.ssm.cached_ptr(),
                             st.k.cached_ptr(),
@@ -354,6 +355,23 @@ fn m3_gated_norm_wide_and_ragged_prefill_matches_cpu() {
     let device = GpuDevice::new(0).unwrap();
     for (d_model, hd, ds) in [(640usize, 64usize, 32usize), (96, 48, 16)] {
         let (cfg, w) = block_cfg(d_model, hd, ds, true);
+        check_prefill_then_decode(&device, cfg, &w);
+    }
+}
+
+/// Heads wider than a block: the decode step, the chunked forward's
+/// fallback tiles and the gated output norm take a head's elements in
+/// turns. Heads of 640 and 1100, the second a gated norm group past 1024
+/// channels.
+#[test]
+fn m3_heads_wider_than_a_block_prefill_then_decode_matches_cpu() {
+    let device = GpuDevice::new(0).unwrap();
+    for (d_model, hd, ds, gated) in [
+        (320usize, 640usize, 32usize, true),
+        (550, 1100, 16, false),
+        (550, 1100, 16, true),
+    ] {
+        let (cfg, w) = block_cfg(d_model, hd, ds, gated);
         check_prefill_then_decode(&device, cfg, &w);
     }
 }

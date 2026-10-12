@@ -165,10 +165,8 @@ impl Mamba3GpuTrainer {
         dtype: WeightDtype,
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
-        // Hoisted here so both branches get it: the model envelope, then the
-        // head width, shared memory and norm limits the kernels rely on.
+        // Hoisted here so both branches get the model envelope.
         cfg.validate()?;
-        crate::mamba3_siso::route::check_config(&cfg)?;
         // The index ranges are checked against the scan this window runs
         // when its dims are built (`GpuMamba3Dims::validate_index_budget`):
         // the chunked path has no sequential tape to count.
@@ -804,7 +802,6 @@ impl Mamba3TrainerMixed {
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
         cfg.validate()?;
-        crate::mamba3_siso::route::check_config(&cfg)?;
         let TrainSessionCfg {
             input_dim,
             batch,

@@ -922,13 +922,16 @@ extern "C" __global__ void silu_gate_bwd(
 // of `group_size` channels, out = y * rstd(group) * weight * silu(z).
 //
 // Grid: (N, ceil(n_groups / groups_per_block)). Block: groups_per_block
-// times the group rounded up to a power of two (`gated_norm_cfg` on the
-// host). Dynamic shared memory: one float per thread. Each group sums with
-// a pairwise tree over the rounded-up width, lanes past the group holding
-// -0.0, which leaves every sum as it is: a power-of-two group runs the tree
-// the one-block-per-row kernel ran, and any other group one fixed order.
-// Every thread reaches every barrier, and threads past the groups only
-// feed the tree.
+// times the group rounded up to a power of two, or 1024 threads for a
+// wider group (`gated_norm_cfg` on the host). Dynamic shared memory: one
+// float per thread. A group's lanes are its rounded-up width, at most the
+// block; a lane takes the group's channels lane, lane + lanes, and so on,
+// chains their terms in that order, and the group sums the lanes' chains
+// with a pairwise tree, lanes without a channel holding -0.0, which leaves
+// every sum as it is. A group of at most 1024 channels gives each lane one
+// channel, so a power-of-two group runs the tree the one-block-per-row
+// kernel ran, and any other group one fixed order. Every thread reaches
+// every barrier, and threads past the groups only feed the tree.
 __device__ __forceinline__ int m3g_group_width(int group_size) {
     int width = 1;
     while (width < group_size) width <<= 1;
@@ -957,18 +960,26 @@ extern "C" __global__ void NAME(                                               \
     int N, int d_inner, int group_size, float eps, int z_stride                \
 ) {                                                                            \
     const int width = m3g_group_width(group_size);                             \
-    const int local_group = threadIdx.x / width;                               \
-    const int local = threadIdx.x - local_group * width;                       \
+    const int lanes = width < (int)blockDim.x ? width : (int)blockDim.x;       \
+    const int local_group = threadIdx.x / lanes;                               \
+    const int local = threadIdx.x - local_group * lanes;                       \
     const int n_groups = d_inner / group_size;                                 \
-    const int group = blockIdx.y * (blockDim.x / width) + local_group;         \
+    const int group = blockIdx.y * (blockDim.x / lanes) + local_group;         \
     const int sample = blockIdx.x;                                             \
     const bool live = sample < N && group < n_groups && local < group_size;    \
-    const int d = group * group_size + local;                                  \
+    const int d0 = group * group_size + local;                                 \
     const long long base = (long long)sample * d_inner;                        \
     extern __shared__ float m3g_sm[];                                          \
-    const float y_val = live ? to_f(y[base + d]) : 0.0f;                       \
-    const float sum = m3g_group_sum(m3g_sm, live ? y_val * y_val : -0.0f,      \
-                                   local, width);                              \
+    /* The lane's first channel stays in a register for the output. */        \
+    const float y0 = live ? to_f(y[base + d0]) : 0.0f;                         \
+    float chain = live ? y0 * y0 : -0.0f;                                      \
+    if (live) {                                                                \
+        for (int c = local + lanes; c < group_size; c += lanes) {              \
+            const float y_val = to_f(y[base + group * group_size + c]);        \
+            chain += y_val * y_val;                                            \
+        }                                                                      \
+    }                                                                          \
+    const float sum = m3g_group_sum(m3g_sm, chain, local, lanes);              \
     /* IEEE sqrtf and division, the rstd form of every norm in the tree. */    \
     float rstd = 1.0f / sqrtf(sum / (float)group_size + eps);                  \
     /* A non-finite y would turn rstd into NaN and carry it through the */     \
@@ -976,13 +987,19 @@ extern "C" __global__ void NAME(                                               \
     if (!isfinite(rstd) || rstd > 1e20f) rstd = 1.0f;                          \
     if (!live) return;                                                         \
     if (local == 0) rms_vals[(long long)sample * n_groups + group] = rstd;     \
-    const float z_val = to_f(z[(long long)sample * z_stride + d]);             \
-    const float silu_z = z_val / (1.0f + FAST_EXP(-z_val));                    \
-    out[base + d] = FROM_F(y_val * rstd * weight[d] * silu_z);                 \
+    for (int c = local; c < group_size; c += lanes) {                          \
+        const int d = group * group_size + c;                                  \
+        const float y_val = c == local ? y0 : to_f(y[base + d]);               \
+        const float z_val = to_f(z[(long long)sample * z_stride + d]);         \
+        const float silu_z = z_val / (1.0f + FAST_EXP(-z_val));                \
+        out[base + d] = FROM_F(y_val * rstd * weight[d] * silu_z);             \
+    }                                                                          \
 }
 
 // The backward, after layernorm_gated.py's NORM_BEFORE_GATE path: d_weight
-// is per row ([N * d_inner]), reduced over the rows by the caller.
+// is per row ([N * d_inner]), reduced over the rows by the caller. A lane's
+// first channel keeps its terms in registers for d_y; the others, present
+// only in a group wider than 1024, are read again.
 #define DEFINE_RMSNORM_GATED_BWD(NAME, T_ACT, FROM_F)                          \
 extern "C" __global__ void NAME(                                               \
     T_ACT* d_y, T_ACT* d_z, float* d_weight,                                   \
@@ -991,39 +1008,61 @@ extern "C" __global__ void NAME(                                               \
     int N, int d_inner, int group_size                                         \
 ) {                                                                            \
     const int width = m3g_group_width(group_size);                             \
-    const int local_group = threadIdx.x / width;                               \
-    const int local = threadIdx.x - local_group * width;                       \
+    const int lanes = width < (int)blockDim.x ? width : (int)blockDim.x;       \
+    const int local_group = threadIdx.x / lanes;                               \
+    const int local = threadIdx.x - local_group * lanes;                       \
     const int n_groups = d_inner / group_size;                                 \
-    const int group = blockIdx.y * (blockDim.x / width) + local_group;         \
+    const int group = blockIdx.y * (blockDim.x / lanes) + local_group;         \
     const int sample = blockIdx.x;                                             \
     const bool live = sample < N && group < n_groups && local < group_size;    \
-    const int d = group * group_size + local;                                  \
     const long long base = (long long)sample * d_inner;                        \
     extern __shared__ float m3g_sm[];                                          \
-    float rstd = 0.0f, y_hat = 0.0f, w = 0.0f, dy_scaled = 0.0f;               \
-    float contrib = -0.0f;                                                     \
+    float rstd = 0.0f, y_hat0 = 0.0f, w0 = 0.0f, dy_scaled0 = 0.0f;            \
+    float chain = -0.0f;                                                       \
     if (live) {                                                                \
         rstd = rms_vals[(long long)sample * n_groups + group];                 \
-        const float y_val = to_f(y[base + d]);                                 \
-        const float z_val = to_f(z[base + d]);                                 \
-        w = weight[d];                                                         \
-        const float d_out_val = to_f(d_out[base + d]);                         \
-        y_hat = y_val * rstd;                                                  \
-        const float y_normed = y_hat * w;                                      \
-        const float sig_z = 1.0f / (1.0f + FAST_EXP(-z_val));                  \
-        const float silu_z = z_val * sig_z;                                    \
-        const float d_silu = sig_z + z_val * sig_z * (1.0f - sig_z);           \
-        d_z[base + d] = FROM_F(d_out_val * y_normed * d_silu);                 \
-        /* The gradient through the gate, then the norm's per-row weight */    \
-        /* gradient and the group's c1 sum. */                                 \
-        dy_scaled = d_out_val * silu_z;                                        \
-        d_weight[base + d] = dy_scaled * y_hat;                                \
-        contrib = y_hat * w * dy_scaled;                                       \
+        for (int c = local; c < group_size; c += lanes) {                      \
+            const int d = group * group_size + c;                              \
+            const float y_val = to_f(y[base + d]);                             \
+            const float z_val = to_f(z[base + d]);                             \
+            const float w = weight[d];                                         \
+            const float d_out_val = to_f(d_out[base + d]);                     \
+            const float y_hat = y_val * rstd;                                  \
+            const float y_normed = y_hat * w;                                  \
+            const float sig_z = 1.0f / (1.0f + FAST_EXP(-z_val));              \
+            const float silu_z = z_val * sig_z;                                \
+            const float d_silu = sig_z + z_val * sig_z * (1.0f - sig_z);       \
+            d_z[base + d] = FROM_F(d_out_val * y_normed * d_silu);             \
+            /* The gradient through the gate, then the norm's per-row */       \
+            /* weight gradient and the group's c1 sum. */                      \
+            const float dy_scaled = d_out_val * silu_z;                        \
+            d_weight[base + d] = dy_scaled * y_hat;                            \
+            const float contrib = y_hat * w * dy_scaled;                       \
+            if (c == local) {                                                  \
+                y_hat0 = y_hat;                                                \
+                w0 = w;                                                        \
+                dy_scaled0 = dy_scaled;                                        \
+                chain = contrib;                                               \
+            } else {                                                           \
+                chain += contrib;                                              \
+            }                                                                  \
+        }                                                                      \
     }                                                                          \
-    const float sum = m3g_group_sum(m3g_sm, contrib, local, width);            \
+    const float sum = m3g_group_sum(m3g_sm, chain, local, lanes);              \
     if (!live) return;                                                         \
     const float c1 = sum / (float)group_size;                                  \
-    d_y[base + d] = FROM_F((w * dy_scaled - y_hat * c1) * rstd);               \
+    for (int c = local; c < group_size; c += lanes) {                          \
+        const int d = group * group_size + c;                                  \
+        float y_hat = y_hat0, w = w0, dy_scaled = dy_scaled0;                  \
+        if (c != local) {                                                      \
+            const float z_val = to_f(z[base + d]);                             \
+            w = weight[d];                                                     \
+            y_hat = to_f(y[base + d]) * rstd;                                  \
+            const float sig_z = 1.0f / (1.0f + FAST_EXP(-z_val));              \
+            dy_scaled = to_f(d_out[base + d]) * (z_val * sig_z);               \
+        }                                                                      \
+        d_y[base + d] = FROM_F((w * dy_scaled - y_hat * c1) * rstd);           \
+    }                                                                          \
 }
 
 DEFINE_RMSNORM_GATED_FWD(rmsnorm_gated_forward, float, from_f_f32)

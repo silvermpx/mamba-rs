@@ -387,7 +387,7 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                 let nc = t.div_ceil(cs);
                 let fused_cfg = chunk_fused_cfg(batch, nc, nh, hd, ds, cs)
                     .unwrap_or_else(|| panic!("{label}: fused launch must be supported"));
-                let state_cfg = chunk_state_cfg(batch, nc, nh, hd, ds, cs);
+                let state_cfg = chunk_state_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads);
                 assert!(ds <= m3k.state_cap, "{label}: state capacity");
                 for cfg in [&fused_cfg, &state_cfg] {
                     let (bx, by, bz) = cfg.block_dim;

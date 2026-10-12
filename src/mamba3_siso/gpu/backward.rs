@@ -130,7 +130,7 @@ pub fn gpu_backward_mamba3_layer(
                 headdim: hd,
                 d_state: ds,
             },
-        )?;
+        );
         let mut builder = ctx.stream.launch_builder(kernel);
         builder.arg(acts.h_saved.inner());
         builder.arg(acts.k_prev_saved.inner());

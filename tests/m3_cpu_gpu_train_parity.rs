@@ -36,6 +36,7 @@
 //!   - the sequential scan's block-tier kernels (headdim 48 and 64)
 //!   - the gated output norm past 1024 channels and on a head of 48
 //!   - the gated MLP after every mixer, on both scans
+//!   - heads wider than a block, the gated norm past 1024 channels a head
 //!
 //! The chunked window is stateless by design (chunk 0 starts from zero
 //! state) which matches the zero-state CPU run exactly.
@@ -923,5 +924,32 @@ fn m3_cpu_gpu_train_parity_gated_mlp() {
             use_parallel_scan: parallel,
         };
         check_scenario(&format!("mlp parallel={parallel}"), &scn);
+    }
+}
+
+/// Heads wider than a block on both scans: the sequential kernels run them
+/// in slices, the chunked forward's fallback tiles take their elements in
+/// turns, and at 1100 the gated output norm runs a group past 1024
+/// channels.
+#[test]
+fn m3_cpu_gpu_train_parity_heads_wider_than_a_block() {
+    for (d_model, headdim, parallel, outproj_norm) in [
+        (320usize, 640usize, true, true),
+        (320, 640, false, false),
+        (550, 1100, true, false),
+        (550, 1100, false, true),
+    ] {
+        let scn = Scenario {
+            cfg: Mamba3Config {
+                d_model,
+                d_state: 16,
+                headdim,
+                ..base_cfg(outproj_norm)
+            },
+            batch: 1,
+            seq_len: if parallel { 128 } else { 40 },
+            use_parallel_scan: parallel,
+        };
+        check_scenario(&format!("hd{headdim} parallel={parallel}"), &scn);
     }
 }

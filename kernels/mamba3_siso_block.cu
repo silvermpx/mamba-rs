@@ -14,7 +14,8 @@
 // fma(gx, kc, fma(h, alpha, bv*kp)) but would fuse the same source here
 // the other way round, one ulp apart. The router still sends those widths
 // to the warp tier; the block tier carries the official checkpoints'
-// headdim 64 and any other width up to 512.
+// headdim 64 and every other width. A head wider than a block takes its
+// elements in turns, each element's arithmetic unchanged.
 //
 // Composed after mamba3_chunked.cu in the Mamba-3 module.
 
@@ -31,8 +32,10 @@
 // m3_step_fwd_block: one decode step of a head wider than a warp.
 //
 // Arguments as m3_step_fwd. Grid: (B, nh). Block: headdim rounded up to
-// whole warps. Dynamic shared memory: (4 + 3 * ds) floats, the four step
-// coefficients then the current K, previous K and current Q rows.
+// whole warps, at most the threads the kernel's registers allow in a block;
+// a wider head takes its elements in turns. Dynamic shared memory:
+// (4 + 3 * ds) floats, the four step coefficients then the current K,
+// previous K and current Q rows.
 //
 // The previous K is staged by every thread before the barrier, so the
 // head's new K may overwrite k_state right after it: no thread reads
@@ -57,12 +60,12 @@ extern "C" __global__ void NAME(                                              \
     float* qc_sm = kp_sm + ds;                                                \
     int b = blockIdx.x;                                                       \
     int h = blockIdx.y;                                                       \
-    int p = threadIdx.x;                                                      \
+    int tid = threadIdx.x;                                                    \
     /* Uniform across the block, so every thread reaches the barrier. */      \
     if (b >= batch || h >= nh || ds > MAMBA_RS_STATE_CAP) return;             \
     int d_inner = nh * hd;                                                    \
     int row = b * nh * ds + h * ds;                                           \
-    if (p == 0) {                                                             \
+    if (tid == 0) {                                                           \
         float dt_v = dt[b * nh + h];                                          \
         float a_v = a_val[b * nh + h];                                        \
         float t_v = trap[b * nh + h];                                         \
@@ -72,38 +75,39 @@ extern "C" __global__ void NAME(                                              \
         coef[2] = t_v * dt_v;                                                 \
         coef[3] = D[h];                                                       \
     }                                                                         \
-    for (int n = p; n < ds; n += blockDim.x) {                                \
+    for (int n = tid; n < ds; n += blockDim.x) {                              \
         kc_sm[n] = to_f(k_cur[row + n]);                                      \
         kp_sm[n] = k_state[row + n];                                          \
         qc_sm[n] = to_f(q_cur[row + n]);                                      \
     }                                                                         \
     __syncthreads();                                                          \
-    for (int n = p; n < ds; n += blockDim.x) k_state[row + n] = kc_sm[n];     \
-    if (p >= hd) return;                                                      \
+    for (int n = tid; n < ds; n += blockDim.x) k_state[row + n] = kc_sm[n];   \
     float alpha_h = coef[0];                                                  \
     float beta_h = coef[1];                                                   \
     float gamma_h = coef[2];                                                  \
     float d_skip = coef[3];                                                   \
-    float h_local[MAMBA_RS_STATE_CAP];                                        \
-    int h_base = (b * nh * hd + h * hd + p) * ds;                             \
-    for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];          \
-    float x_val = to_f(x[b * d_inner + h * hd + p]);                          \
-    float v_prev = v_state[b * nh * hd + h * hd + p];                         \
-    float y_val = d_skip * x_val;                                             \
-    float bv = beta_h * v_prev;                                               \
-    float gx = gamma_h * x_val;                                               \
-    for (int n = 0; n < ds; n++) {                                            \
-        float kc_n = kc_sm[n];                                                \
-        float kp_n = kp_sm[n];                                                \
-        float qc_n = qc_sm[n];                                                \
-        h_local[n] = __fmaf_rn(gx, kc_n,                                      \
-                               __fmaf_rn(h_local[n], alpha_h,                 \
-                                         __fmul_rn(bv, kp_n)));               \
-        y_val = __fmaf_rn(h_local[n], qc_n, y_val);                           \
+    for (int p = tid; p < hd; p += blockDim.x) {                              \
+        float h_local[MAMBA_RS_STATE_CAP];                                    \
+        int h_base = (b * nh * hd + h * hd + p) * ds;                         \
+        for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];      \
+        float x_val = to_f(x[b * d_inner + h * hd + p]);                      \
+        float v_prev = v_state[b * nh * hd + h * hd + p];                     \
+        float y_val = d_skip * x_val;                                         \
+        float bv = beta_h * v_prev;                                           \
+        float gx = gamma_h * x_val;                                           \
+        for (int n = 0; n < ds; n++) {                                        \
+            float kc_n = kc_sm[n];                                            \
+            float kp_n = kp_sm[n];                                            \
+            float qc_n = qc_sm[n];                                            \
+            h_local[n] = __fmaf_rn(gx, kc_n,                                  \
+                                   __fmaf_rn(h_local[n], alpha_h,             \
+                                             __fmul_rn(bv, kp_n)));           \
+            y_val = __fmaf_rn(h_local[n], qc_n, y_val);                       \
+        }                                                                     \
+        for (int n = 0; n < ds; n++) ssm_state[h_base + n] = h_local[n];      \
+        y[b * d_inner + h * hd + p] = FROM_F(y_val);                          \
+        v_state[b * nh * hd + h * hd + p] = x_val;                            \
     }                                                                         \
-    for (int n = 0; n < ds; n++) ssm_state[h_base + n] = h_local[n];          \
-    y[b * d_inner + h * hd + p] = FROM_F(y_val);                              \
-    v_state[b * nh * hd + h * hd + p] = x_val;                                \
 }
 
 DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block, float, from_f_f32)
@@ -131,8 +135,14 @@ __device__ __forceinline__ void m3b_store(__half* p, float v) { *p = __float2hal
 // m3_burnin_fwd_block: the sequential training forward. Arguments as
 // m3_burnin_fwd. SAVE false drops the three saves, for the target
 // network's forward. Grid: (B, nh). Block: headdim rounded up to whole
-// warps.
+// warps, at most 512 threads.
 // Dynamic shared memory: (4 + 3 * ds) floats.
+//
+// A head wider than the block runs in slices of the block's width, each
+// over the whole window. A step's previous K is the state's K at the first
+// step and the window's K of the step before at every later one, so every
+// slice reads the same rows, and the state takes the window's last K once
+// all slices are done.
 //
 // The recurrence is spelled with the roundings the warp kernel compiles to:
 // the previous-state term rounded on its own, then two fused steps, and the
@@ -158,81 +168,88 @@ __device__ __forceinline__ void m3_burnin_block_tpl(
     float* qc_sm = kp_sm + ds;
     const int b = blockIdx.x;
     const int h = blockIdx.y;
-    const int p = threadIdx.x;
+    const int tid = threadIdx.x;
     /* Uniform across the block, so every thread reaches the barriers. */
     if (b >= batch || h >= nh || ds > MAMBA_RS_STATE_CAP) return;
     const int sw = (DS > 0) ? DS : ds;
-    const bool live = p < hd;
     const long long d_inner = (long long)nh * hd;
     const long long nhd_ds = d_inner * ds;
     const long long head_ds = (long long)h * ds;
-    const long long k_row = (long long)b * nh * ds + head_ds;
-    const long long v_idx = (long long)b * nh * hd + (long long)h * hd + p;
-    const long long h_base = v_idx * ds;
-    const long long h_tape = (long long)b * (T + 1) * nhd_ds + (long long)h * hd + p;
+    const long long row_stride = (long long)nh * ds;
+    const long long k_row = (long long)b * row_stride + head_ds;
     const float d_skip = D[h];
-    float h_local[(DS > 0) ? DS : MAMBA_RS_STATE_CAP];
-    if (live) {
-        _Pragma("unroll")
-        for (int n = 0; n < sw; n++) h_local[n] = ssm_state[h_base + n];
-        if (SAVE) {
-            _Pragma("unroll")
-            for (int n = 0; n < sw; n++) h_saved[h_tape + n * d_inner] = h_local[n];
-        }
-    }
-    for (int t = 0; t < T; t++) {
-        const long long bt = (long long)b * T + t;
-        const long long kq_row = bt * nh * ds + head_ds;
-        if (p == 0) {
-            coef[0] = alpha_flat[bt * nh + h];
-            coef[1] = beta_flat[bt * nh + h];
-            coef[2] = gamma_flat[bt * nh + h];
-        }
-        for (int n = p; n < ds; n += blockDim.x) {
-            const float kp = k_state[k_row + n];
-            kp_sm[n] = kp;
-            if (SAVE) k_prev_saved[kq_row + n] = kp;
-            kc_sm[n] = to_f(k_flat[kq_row + n]);
-            qc_sm[n] = to_f(q_flat[kq_row + n]);
-        }
-        __syncthreads();
-        /* Every thread reads the previous K from shared memory now, so the
-           step's K may replace it in the state at once. */
-        for (int n = p; n < ds; n += blockDim.x) k_state[k_row + n] = kc_sm[n];
+    for (int p0 = 0; p0 < hd; p0 += blockDim.x) {
+        const int p = p0 + tid;
+        const bool live = p < hd;
+        const long long v_idx = (long long)b * nh * hd + (long long)h * hd + p;
+        const long long h_base = v_idx * ds;
+        const long long h_tape = (long long)b * (T + 1) * nhd_ds + (long long)h * hd + p;
+        float h_local[(DS > 0) ? DS : MAMBA_RS_STATE_CAP];
         if (live) {
-            const float alpha_h = coef[0];
-            const float beta_h = coef[1];
-            const float gamma_h = coef[2];
-            const long long x_idx = bt * d_inner + (long long)h * hd + p;
-            const float x_val = to_f(x_flat[x_idx]);
-            const float v_prev = v_state[v_idx];
-            if (SAVE) v_prev_saved[x_idx] = v_prev;
-            float y_val = __fmul_rn(d_skip, x_val);
-            const float bv = __fmul_rn(beta_h, v_prev);
-            const float gx = __fmul_rn(gamma_h, x_val);
             _Pragma("unroll")
-            for (int n = 0; n < sw; n++) {
-                h_local[n] = __fmaf_rn(gx, kc_sm[n],
-                    __fmaf_rn(alpha_h, h_local[n], __fmul_rn(bv, kp_sm[n])));
-                if (FOLD_SKIP && n == 0)
-                    y_val = __fmaf_rn(d_skip, x_val, __fmul_rn(qc_sm[0], h_local[0]));
-                else
-                    y_val = __fmaf_rn(qc_sm[n], h_local[n], y_val);
-            }
-            m3b_store(&y_out[x_idx], y_val);
+            for (int n = 0; n < sw; n++) h_local[n] = ssm_state[h_base + n];
             if (SAVE) {
-                const long long step = h_tape + (long long)(t + 1) * nhd_ds;
                 _Pragma("unroll")
-                for (int n = 0; n < sw; n++) h_saved[step + n * d_inner] = h_local[n];
+                for (int n = 0; n < sw; n++) h_saved[h_tape + n * d_inner] = h_local[n];
             }
-            v_state[v_idx] = x_val;
         }
-        /* The next step restages the rows. */
-        __syncthreads();
+        for (int t = 0; t < T; t++) {
+            const long long bt = (long long)b * T + t;
+            const long long kq_row = bt * row_stride + head_ds;
+            if (tid == 0) {
+                coef[0] = alpha_flat[bt * nh + h];
+                coef[1] = beta_flat[bt * nh + h];
+                coef[2] = gamma_flat[bt * nh + h];
+            }
+            for (int n = tid; n < ds; n += blockDim.x) {
+                const float kp = (t == 0) ? k_state[k_row + n]
+                                          : to_f(k_flat[kq_row - row_stride + n]);
+                kp_sm[n] = kp;
+                if (SAVE && p0 == 0) k_prev_saved[kq_row + n] = kp;
+                kc_sm[n] = to_f(k_flat[kq_row + n]);
+                qc_sm[n] = to_f(q_flat[kq_row + n]);
+            }
+            __syncthreads();
+            if (live) {
+                const float alpha_h = coef[0];
+                const float beta_h = coef[1];
+                const float gamma_h = coef[2];
+                const long long x_idx = bt * d_inner + (long long)h * hd + p;
+                const float x_val = to_f(x_flat[x_idx]);
+                const float v_prev = v_state[v_idx];
+                if (SAVE) v_prev_saved[x_idx] = v_prev;
+                float y_val = __fmul_rn(d_skip, x_val);
+                const float bv = __fmul_rn(beta_h, v_prev);
+                const float gx = __fmul_rn(gamma_h, x_val);
+                _Pragma("unroll")
+                for (int n = 0; n < sw; n++) {
+                    h_local[n] = __fmaf_rn(gx, kc_sm[n],
+                        __fmaf_rn(alpha_h, h_local[n], __fmul_rn(bv, kp_sm[n])));
+                    if (FOLD_SKIP && n == 0)
+                        y_val = __fmaf_rn(d_skip, x_val, __fmul_rn(qc_sm[0], h_local[0]));
+                    else
+                        y_val = __fmaf_rn(qc_sm[n], h_local[n], y_val);
+                }
+                m3b_store(&y_out[x_idx], y_val);
+                if (SAVE) {
+                    const long long step = h_tape + (long long)(t + 1) * nhd_ds;
+                    _Pragma("unroll")
+                    for (int n = 0; n < sw; n++) h_saved[step + n * d_inner] = h_local[n];
+                }
+                v_state[v_idx] = x_val;
+            }
+            /* The next step restages the rows. */
+            __syncthreads();
+        }
+        if (live) {
+            _Pragma("unroll")
+            for (int n = 0; n < sw; n++) ssm_state[h_base + n] = h_local[n];
+        }
     }
-    if (live) {
-        _Pragma("unroll")
-        for (int n = 0; n < sw; n++) ssm_state[h_base + n] = h_local[n];
+    /* Every slice has read the state's K by now. */
+    if (T > 0) {
+        const long long last = ((long long)b * T + T - 1) * row_stride + head_ds;
+        for (int n = tid; n < ds; n += blockDim.x) k_state[k_row + n] = to_f(k_flat[last + n]);
     }
 }
 
@@ -284,16 +301,20 @@ __device__ __forceinline__ float m3b_warp_tree(float v, int width) {
 
 // m3_backward_seq_block: the sequential backward through time. Arguments as
 // m3_backward_seq, with dO, x, K and Q in the activation type and every
-// gradient in f32. Grid: (B, nh). Block: headdim rounded up to whole warps.
-// Dynamic shared memory, in floats: 4 + 3 * ds for the step's values, ds
-// for the carried previous-K gradient, and (3 * ds + 3) * warps for the
-// warps' sums.
+// gradient in f32. Grid: (B, nh). Block: headdim rounded up to whole warps,
+// at most 512 threads. Dynamic shared memory, in floats: 4 + 3 * ds for the
+// step's values, ds for the carried previous-K gradient, and
+// (3 * ds + 3) * warps for the warps' sums.
 //
 // Each step: the rows are staged, every thread runs its element's terms in
 // the warp kernel's source form (each fused add has one product, so it
 // compiles to the warp kernel's roundings), every warp reduces its sums,
 // and one thread per state element (and one per scalar) adds the warps'
 // sums in order and writes the step's dQ, dK, dalpha, dbeta and dgamma.
+//
+// A head wider than the block runs in slices of the block's width, each
+// over the whole window; a slice after the first adds its sums to the
+// gradients the slices before it wrote.
 template <typename T_ACT, int DS>
 __device__ __forceinline__ void m3_backward_seq_block_tpl(
     const float* __restrict__ h_saved, const float* __restrict__ k_prev_saved,
@@ -316,141 +337,154 @@ __device__ __forceinline__ void m3_backward_seq_block_tpl(
     float* red = carry_sm + ds;            /* [(3 * ds + 3) * warps] */
     const int b = blockIdx.x;
     const int h = blockIdx.y;
-    const int p = threadIdx.x;
+    const int tid = threadIdx.x;
     /* Uniform across the block, so every thread reaches the barriers. */
     if (b >= batch || h >= nh || ds > MAMBA_RS_STATE_CAP) return;
     const int sw = (DS > 0) ? DS : ds;
-    const bool live = p < hd;
-    const int warp = p >> 5;
-    const int lane = p & 31;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
     const int warps = blockDim.x >> 5;
     const int width = hd < 32 ? hd : 32;
     const long long d_inner = (long long)nh * hd;
     const long long nhd_ds = d_inner * ds;
     const long long head_ds = (long long)h * ds;
-    const long long h_tape = (long long)b * (T + 1) * nhd_ds + (long long)h * hd + p;
     const float d_skip = D[h];
-    for (int n = p; n < ds; n += blockDim.x) carry_sm[n] = 0.0f;
+    for (int p0 = 0; p0 < hd; p0 += blockDim.x) {
+        const int p = p0 + tid;
+        const bool live = p < hd;
+        const bool first = p0 == 0;
+        const long long h_tape = (long long)b * (T + 1) * nhd_ds + (long long)h * hd + p;
+        for (int n = tid; n < ds; n += blockDim.x) carry_sm[n] = 0.0f;
 
-    float d_h_reg[(DS > 0) ? DS : MAMBA_RS_STATE_CAP];
-    _Pragma("unroll")
-    for (int n = 0; n < sw; n++) d_h_reg[n] = 0.0f;
-    float d_v_carry = 0.0f;
-    float sum_d_D = 0.0f;
-
-    for (int t = T - 1; t >= 0; t--) {
-        const long long bt = (long long)b * T + t;
-        const long long kq_row = bt * nh * ds + head_ds;
-        if (p == 0) {
-            coef[0] = alpha_flat[bt * nh + h];
-            coef[1] = beta_flat[bt * nh + h];
-            coef[2] = gamma_flat[bt * nh + h];
-        }
-        for (int n = p; n < ds; n += blockDim.x) {
-            kc_sm[n] = to_f(k_flat[kq_row + n]);
-            kp_sm[n] = k_prev_saved[kq_row + n];
-            qc_sm[n] = to_f(q_flat[kq_row + n]);
-        }
-        __syncthreads();
-        const float alpha_h = coef[0];
-        const float beta_h = coef[1];
-        const float gamma_h = coef[2];
-        const long long x_idx = bt * d_inner + (long long)h * hd + p;
-        float dy_val = 0.0f, x_val = 0.0f, v_prev = 0.0f;
-        if (live) {
-            dy_val = to_f(d_y_flat[x_idx]);
-            x_val = to_f(x_flat[x_idx]);
-            v_prev = v_prev_saved[x_idx];
-        }
-        sum_d_D += dy_val * x_val;
-        float d_x_val = d_skip * dy_val;
-        d_x_val += d_v_carry;
-        float d_alpha_acc = 0.0f;
-        float d_beta_acc = 0.0f;
-        float d_gamma_acc = 0.0f;
-        float d_v_prev_acc = 0.0f;
-        const long long prev = h_tape + (long long)t * nhd_ds;
-        const long long curr = prev + nhd_ds;
+        float d_h_reg[(DS > 0) ? DS : MAMBA_RS_STATE_CAP];
         _Pragma("unroll")
-        for (int n = 0; n < sw; n++) {
-            const float kc_n = kc_sm[n];
-            const float kp_n = kp_sm[n];
-            const float qc_n = qc_sm[n];
-            float d_q_val = -0.0f, d_kp_val = -0.0f, d_kc_val = -0.0f;
+        for (int n = 0; n < sw; n++) d_h_reg[n] = 0.0f;
+        float d_v_carry = 0.0f;
+        float sum_d_D = 0.0f;
+
+        for (int t = T - 1; t >= 0; t--) {
+            const long long bt = (long long)b * T + t;
+            const long long kq_row = bt * nh * ds + head_ds;
+            if (tid == 0) {
+                coef[0] = alpha_flat[bt * nh + h];
+                coef[1] = beta_flat[bt * nh + h];
+                coef[2] = gamma_flat[bt * nh + h];
+            }
+            for (int n = tid; n < ds; n += blockDim.x) {
+                kc_sm[n] = to_f(k_flat[kq_row + n]);
+                kp_sm[n] = k_prev_saved[kq_row + n];
+                qc_sm[n] = to_f(q_flat[kq_row + n]);
+            }
+            __syncthreads();
+            const float alpha_h = coef[0];
+            const float beta_h = coef[1];
+            const float gamma_h = coef[2];
+            const long long x_idx = bt * d_inner + (long long)h * hd + p;
+            float dy_val = 0.0f, x_val = 0.0f, v_prev = 0.0f;
             if (live) {
-                const float h_prev_n = h_saved[prev + n * d_inner];
-                const float h_curr_n = h_saved[curr + n * d_inner];
-                d_h_reg[n] += dy_val * qc_n;
-                d_q_val = dy_val * h_curr_n;
-                const float dh_n = d_h_reg[n];
-                d_alpha_acc += dh_n * h_prev_n;
-                d_beta_acc += dh_n * v_prev * kp_n;
-                d_gamma_acc += dh_n * x_val * kc_n;
-                d_v_prev_acc += dh_n * beta_h * kp_n;
-                d_kp_val = dh_n * beta_h * v_prev;
-                d_x_val += dh_n * gamma_h * kc_n;
-                d_kc_val = dh_n * gamma_h * x_val;
-                d_h_reg[n] = alpha_h * dh_n;
+                dy_val = to_f(d_y_flat[x_idx]);
+                x_val = to_f(x_flat[x_idx]);
+                v_prev = v_prev_saved[x_idx];
             }
-            d_q_val = m3b_warp_tree(d_q_val, width);
-            d_kp_val = m3b_warp_tree(d_kp_val, width);
-            d_kc_val = m3b_warp_tree(d_kc_val, width);
+            sum_d_D += dy_val * x_val;
+            float d_x_val = d_skip * dy_val;
+            d_x_val += d_v_carry;
+            float d_alpha_acc = 0.0f;
+            float d_beta_acc = 0.0f;
+            float d_gamma_acc = 0.0f;
+            float d_v_prev_acc = 0.0f;
+            const long long prev = h_tape + (long long)t * nhd_ds;
+            const long long curr = prev + nhd_ds;
+            _Pragma("unroll")
+            for (int n = 0; n < sw; n++) {
+                const float kc_n = kc_sm[n];
+                const float kp_n = kp_sm[n];
+                const float qc_n = qc_sm[n];
+                float d_q_val = -0.0f, d_kp_val = -0.0f, d_kc_val = -0.0f;
+                if (live) {
+                    const float h_prev_n = h_saved[prev + n * d_inner];
+                    const float h_curr_n = h_saved[curr + n * d_inner];
+                    d_h_reg[n] += dy_val * qc_n;
+                    d_q_val = dy_val * h_curr_n;
+                    const float dh_n = d_h_reg[n];
+                    d_alpha_acc += dh_n * h_prev_n;
+                    d_beta_acc += dh_n * v_prev * kp_n;
+                    d_gamma_acc += dh_n * x_val * kc_n;
+                    d_v_prev_acc += dh_n * beta_h * kp_n;
+                    d_kp_val = dh_n * beta_h * v_prev;
+                    d_x_val += dh_n * gamma_h * kc_n;
+                    d_kc_val = dh_n * gamma_h * x_val;
+                    d_h_reg[n] = alpha_h * dh_n;
+                }
+                d_q_val = m3b_warp_tree(d_q_val, width);
+                d_kp_val = m3b_warp_tree(d_kp_val, width);
+                d_kc_val = m3b_warp_tree(d_kc_val, width);
+                if (lane == 0) {
+                    red[(3 * n) * warps + warp] = d_q_val;
+                    red[(3 * n + 1) * warps + warp] = d_kp_val;
+                    red[(3 * n + 2) * warps + warp] = d_kc_val;
+                }
+            }
+            if (!live) {
+                d_alpha_acc = -0.0f;
+                d_beta_acc = -0.0f;
+                d_gamma_acc = -0.0f;
+            }
+            d_alpha_acc = m3b_warp_tree(d_alpha_acc, width);
+            d_beta_acc = m3b_warp_tree(d_beta_acc, width);
+            d_gamma_acc = m3b_warp_tree(d_gamma_acc, width);
             if (lane == 0) {
-                red[(3 * n) * warps + warp] = d_q_val;
-                red[(3 * n + 1) * warps + warp] = d_kp_val;
-                red[(3 * n + 2) * warps + warp] = d_kc_val;
+                red[(3 * ds) * warps + warp] = d_alpha_acc;
+                red[(3 * ds + 1) * warps + warp] = d_beta_acc;
+                red[(3 * ds + 2) * warps + warp] = d_gamma_acc;
+            }
+            if (live) {
+                d_x[x_idx] = d_x_val;
+                d_v_carry = d_v_prev_acc;
+            }
+            __syncthreads();
+            /* One thread per state element and per scalar adds the warps'
+               sums in order. The rows are restaged only after the next
+               barrier. */
+            for (int i = tid; i < ds + 3; i += blockDim.x) {
+                if (i < ds) {
+                    const int n = i;
+                    float q = red[(3 * n) * warps];
+                    float kp = red[(3 * n + 1) * warps];
+                    float kc = red[(3 * n + 2) * warps];
+                    for (int w = 1; w < warps; w++) {
+                        q += red[(3 * n) * warps + w];
+                        kp += red[(3 * n + 1) * warps + w];
+                        kc += red[(3 * n + 2) * warps + w];
+                    }
+                    float d_k_write = 0.0f;
+                    if (t < T - 1) {
+                        d_k_write += carry_sm[n];
+                        carry_sm[n] = 0.0f;
+                    }
+                    carry_sm[n] += kp;
+                    d_k_write += kc;
+                    if (first) {
+                        d_q[kq_row + n] = q;
+                        d_k[kq_row + n] = d_k_write;
+                    } else {
+                        d_q[kq_row + n] += q;
+                        d_k[kq_row + n] += d_k_write;
+                    }
+                } else {
+                    const int s = i - ds;
+                    float total = red[(3 * ds + s) * warps];
+                    for (int w = 1; w < warps; w++) total += red[(3 * ds + s) * warps + w];
+                    float* out = (s == 0) ? d_alpha : (s == 1) ? d_beta : d_gamma;
+                    if (first)
+                        out[bt * nh + h] = total;
+                    else
+                        out[bt * nh + h] += total;
+                }
             }
         }
-        if (!live) {
-            d_alpha_acc = -0.0f;
-            d_beta_acc = -0.0f;
-            d_gamma_acc = -0.0f;
-        }
-        d_alpha_acc = m3b_warp_tree(d_alpha_acc, width);
-        d_beta_acc = m3b_warp_tree(d_beta_acc, width);
-        d_gamma_acc = m3b_warp_tree(d_gamma_acc, width);
-        if (lane == 0) {
-            red[(3 * ds) * warps + warp] = d_alpha_acc;
-            red[(3 * ds + 1) * warps + warp] = d_beta_acc;
-            red[(3 * ds + 2) * warps + warp] = d_gamma_acc;
-        }
-        if (live) {
-            d_x[x_idx] = d_x_val;
-            d_v_carry = d_v_prev_acc;
-        }
-        __syncthreads();
-        /* One thread per state element and per scalar adds the warps' sums
-           in order. The rows are restaged only after the next barrier. */
-        for (int i = p; i < ds + 3; i += blockDim.x) {
-            if (i < ds) {
-                const int n = i;
-                float q = red[(3 * n) * warps];
-                float kp = red[(3 * n + 1) * warps];
-                float kc = red[(3 * n + 2) * warps];
-                for (int w = 1; w < warps; w++) {
-                    q += red[(3 * n) * warps + w];
-                    kp += red[(3 * n + 1) * warps + w];
-                    kc += red[(3 * n + 2) * warps + w];
-                }
-                d_q[kq_row + n] = q;
-                float d_k_write = 0.0f;
-                if (t < T - 1) {
-                    d_k_write += carry_sm[n];
-                    carry_sm[n] = 0.0f;
-                }
-                carry_sm[n] += kp;
-                d_k_write += kc;
-                d_k[kq_row + n] = d_k_write;
-            } else {
-                const int s = i - ds;
-                float total = red[(3 * ds + s) * warps];
-                for (int w = 1; w < warps; w++) total += red[(3 * ds + s) * warps + w];
-                float* out = (s == 0) ? d_alpha : (s == 1) ? d_beta : d_gamma;
-                out[bt * nh + h] = total;
-            }
-        }
+        if (live) d_D_local[(long long)b * d_inner + (long long)h * hd + p] = sum_d_D;
     }
-    if (live) d_D_local[(long long)b * d_inner + (long long)h * hd + p] = sum_d_D;
 }
 
 #define M3_BACKWARD_SEQ_BLOCK_ENTRY(NAME, T_ACT)                               \

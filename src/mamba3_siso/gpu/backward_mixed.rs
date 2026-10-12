@@ -1085,7 +1085,7 @@ fn sequential_ssm_backward_mixed(
         headdim: hd,
         d_state: ds,
     };
-    let (kernel, cfg) = m3k.sequential_backward(dtype, shape)?;
+    let (kernel, cfg) = m3k.sequential_backward(dtype, shape);
     let (x, k, q, dy) = (
         acts.x.cached_ptr(),
         acts.k.cached_ptr(),

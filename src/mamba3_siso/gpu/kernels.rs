@@ -22,7 +22,8 @@ pub struct SequentialShape {
 
 impl SequentialShape {
     /// One block per (sequence, head): the head's width in threads on the
-    /// warp tier, rounded up to whole warps on the block tier.
+    /// warp tier, rounded up to whole warps on the block tier, whose kernels
+    /// take a wider head than their launch bound in slices.
     fn launch(&self, warp: bool, shared_mem_bytes: usize) -> LaunchConfig {
         let threads = if warp {
             self.headdim
@@ -267,6 +268,12 @@ pub struct Mamba3Kernels {
     /// Intra-chunk output: typed y_out/x/Q/K_scaled; f32 qk_dot/dA_cumsum/
     /// prev_states/D.
     pub m3_chunk_scan_fwd_typed: TypedKernel,
+    /// The most threads one block of the chunked forward's scalar fallback
+    /// tiles may run: the fewest any of their f32, bf16 and f16 kernels can
+    /// launch with the registers its state capacity compiled to.
+    pub chunk_tile_threads: usize,
+    /// The same bound for the block-tier decode step.
+    pub step_block_threads: usize,
     /// Cooperative typed twin (see `m3_chunk_scan_fwd_coop`).
     pub m3_chunk_scan_fwd_coop_typed: TypedKernel,
 
@@ -346,33 +353,33 @@ impl Mamba3Kernels {
         &self,
         dtype: WeightDtype,
         shape: SequentialShape,
-    ) -> Result<(&CudaFunction, LaunchConfig), String> {
-        if head_tier(shape.headdim)? == HeadTier::Warp {
+    ) -> (&CudaFunction, LaunchConfig) {
+        if head_tier(shape.headdim) == HeadTier::Warp {
             let kernel = match dtype {
                 WeightDtype::F32 | WeightDtype::Tf32 => self.burnin_fwd_for_state(shape.d_state),
                 WeightDtype::Bf16 | WeightDtype::F16 => {
                     self.burnin_fwd_typed_for_state(dtype, shape.d_state)
                 }
             };
-            return Ok((kernel, shape.launch(true, 0)));
+            return (kernel, shape.launch(true, 0));
         }
         let smem = crate::mamba3_siso::route::sequential_forward_block_smem_bytes(shape.d_state);
-        Ok((
+        (
             self.m3_burnin_fwd_block.get(dtype),
             shape.launch(false, smem),
-        ))
+        )
     }
 
     /// The target network's sequential forward for a shape, with its launch.
     pub fn sequential_target_forward(
         &self,
         shape: SequentialShape,
-    ) -> Result<(&CudaFunction, LaunchConfig), String> {
-        if head_tier(shape.headdim)? == HeadTier::Warp {
-            return Ok((&self.m3_burnin_fwd_nosave, shape.launch(true, 0)));
+    ) -> (&CudaFunction, LaunchConfig) {
+        if head_tier(shape.headdim) == HeadTier::Warp {
+            return (&self.m3_burnin_fwd_nosave, shape.launch(true, 0));
         }
         let smem = crate::mamba3_siso::route::sequential_forward_block_smem_bytes(shape.d_state);
-        Ok((&self.m3_burnin_fwd_nosave_block, shape.launch(false, smem)))
+        (&self.m3_burnin_fwd_nosave_block, shape.launch(false, smem))
     }
 
     /// The sequential backward for a shape, with its launch. The f32 warp
@@ -382,22 +389,22 @@ impl Mamba3Kernels {
         &self,
         dtype: WeightDtype,
         shape: SequentialShape,
-    ) -> Result<(&CudaFunction, LaunchConfig), String> {
-        let warp = head_tier(shape.headdim)? == HeadTier::Warp;
+    ) -> (&CudaFunction, LaunchConfig) {
+        let warp = head_tier(shape.headdim) == HeadTier::Warp;
         if warp && matches!(dtype, WeightDtype::F32 | WeightDtype::Tf32) {
-            return Ok((
+            return (
                 self.backward_seq_for_state(shape.d_state),
                 shape.launch(true, 0),
-            ));
+            );
         }
         let smem = crate::mamba3_siso::route::sequential_backward_block_smem_bytes(
             shape.headdim,
             shape.d_state,
         );
-        Ok((
+        (
             self.m3_backward_seq_block.get(dtype),
             shape.launch(false, smem),
-        ))
+        )
     }
 
     /// Compile all Mamba-3 kernels. `state_cap` sizes the per-thread
@@ -595,6 +602,25 @@ impl Mamba3Kernels {
                 .load_function(name)
                 .map_err(|e| format!("M3 kernel '{name}' not found: {e:?}"))
         };
+        let chunk_tile_threads = block_threads_bound(
+            &[
+                &get("m3_chunk_state_fwd")?,
+                &get("m3_chunk_state_fwd_bf16")?,
+                &get("m3_chunk_state_fwd_f16")?,
+                &get("m3_chunk_scan_fwd")?,
+                &get("m3_chunk_scan_fwd_bf16")?,
+                &get("m3_chunk_scan_fwd_f16")?,
+            ],
+            "chunked forward's fallback tiles",
+        )?;
+        let step_block_threads = block_threads_bound(
+            &[
+                &get("m3_step_fwd_block")?,
+                &get("m3_step_fwd_block_bf16")?,
+                &get("m3_step_fwd_block_f16")?,
+            ],
+            "block-tier decode step",
+        )?;
 
         // PTX targeting Ada can also run on newer devices. Admission checks
         // the actual device because preserving a compiler's FMA graph alone
@@ -880,6 +906,8 @@ impl Mamba3Kernels {
                 f16: get("gather_last_timestep_f16")?,
             },
 
+            chunk_tile_threads,
+            step_block_threads,
             _modules: CudaModuleAnchors::new(vec![module]),
         };
 
@@ -963,8 +991,10 @@ pub fn bcnorm_fwd_bc_cfg(rows: usize, d_state: usize) -> cudarc::driver::LaunchC
 /// Launch geometry for the gated output norm (`rmsnorm_gated_*`) over `rows`
 /// rows of `d_inner` channels in groups of `group_size`: every group takes
 /// its width rounded up to a power of two, a block holds as many groups as
-/// fit in 256 threads (one when a group is wider), and shared memory holds
-/// one float per thread. The kernels derive their mapping from this shape.
+/// fit in 256 threads (one when a group is wider, in at most 1024 threads
+/// whose lanes a wider group's channels take in turns), and shared memory
+/// holds one float per thread. The kernels derive their mapping from this
+/// shape.
 pub fn gated_norm_cfg(
     rows: usize,
     d_inner: usize,
@@ -972,8 +1002,8 @@ pub fn gated_norm_cfg(
 ) -> cudarc::driver::LaunchConfig {
     assert!(rows > 0 && group_size > 0 && d_inner.is_multiple_of(group_size));
     let width = group_size.next_power_of_two();
-    let threads = width.max(256);
-    let per_block = threads / width;
+    let threads = width.clamp(256, 1024);
+    let per_block = (threads / width).max(1);
     cudarc::driver::LaunchConfig {
         grid_dim: (
             rows as u32,
@@ -985,7 +1015,29 @@ pub fn gated_norm_cfg(
     }
 }
 
-/// Launch geometry for `m3_chunk_state_fwd`.
+/// The most threads one block of every kernel in `kernels` can launch with
+/// the registers it compiled to, in whole warps.
+fn block_threads_bound(kernels: &[&CudaFunction], what: &str) -> Result<usize, String> {
+    use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
+    let mut threads = 1024usize;
+    for f in kernels {
+        let max = f
+            .get_attribute(FnAttr::CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+            .map_err(|e| format!("threads per block of the {what}: {e:?}"))?;
+        threads = threads.min(max.max(32) as usize);
+    }
+    Ok(threads / 32 * 32)
+}
+
+/// Lanes per head in the chunked forward's scalar fallback tiles: two heads
+/// share a block of at most `threads` threads, and a head wider than its
+/// half takes the lanes in turns.
+fn chunk_fallback_lanes(hd: usize, threads: usize) -> usize {
+    hd.min((threads / 2 / 32 * 32).max(32))
+}
+
+/// Launch geometry for `m3_chunk_state_fwd`, its blocks at most `threads`
+/// wide ([`Mamba3Kernels::chunk_tile_threads`]).
 ///
 /// The kernel derives its thread layout from this block shape. When the
 /// shared tile fits and `ds` is divisible by four, each thread owns four
@@ -997,6 +1049,7 @@ pub fn chunk_state_cfg(
     hd: usize,
     ds: usize,
     chunk_size: usize,
+    threads: usize,
 ) -> cudarc::driver::LaunchConfig {
     // Quad layout: block (hd, ds/4, 2 heads) with the block's x/K/dA
     // chunk slices staged in dynamic smem (the kernel is L2-bound; the
@@ -1004,7 +1057,7 @@ pub fn chunk_state_cfg(
     // shapes that don't fit the smem budget or an odd ds.
     let heads = 2usize;
     let smem_bytes = heads * (chunk_size * hd + chunk_size * ds + chunk_size) * 4;
-    if ds.is_multiple_of(4) && hd * (ds / 4) * heads <= 1024 && smem_bytes <= 48 * 1024 {
+    if ds.is_multiple_of(4) && hd * (ds / 4) * heads <= threads && smem_bytes <= 48 * 1024 {
         cudarc::driver::LaunchConfig {
             grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(heads) as u32, 1),
             block_dim: (hd as u32, (ds / 4) as u32, heads as u32),
@@ -1013,7 +1066,7 @@ pub fn chunk_state_cfg(
     } else {
         cudarc::driver::LaunchConfig {
             grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(2) as u32, 1),
-            block_dim: (hd as u32, 2, 1),
+            block_dim: (chunk_fallback_lanes(hd, threads) as u32, 2, 1),
             shared_mem_bytes: 0,
         }
     }
@@ -1021,14 +1074,17 @@ pub fn chunk_state_cfg(
 
 /// Launch geometry for the decode step of a head: the warp tier's one
 /// warp of `headdim` lanes, or the block tier's CTA of `headdim` threads
-/// rounded up to whole warps with the step coefficients and the K and Q
-/// rows staged in shared memory.
+/// rounded up to whole warps, at most `block_threads`
+/// ([`Mamba3Kernels::step_block_threads`]) whose threads a wider head's
+/// elements take in turns, with the step coefficients and the K and Q rows
+/// staged in shared memory.
 pub fn step_head_cfg(
     tier: crate::mamba3_siso::route::HeadTier,
     batch: usize,
     nh: usize,
     hd: usize,
     ds: usize,
+    block_threads: usize,
 ) -> cudarc::driver::LaunchConfig {
     use crate::mamba3_siso::route::HeadTier;
     match tier {
@@ -1039,7 +1095,7 @@ pub fn step_head_cfg(
         },
         HeadTier::Block => cudarc::driver::LaunchConfig {
             grid_dim: (batch as u32, nh as u32, 1),
-            block_dim: (hd.next_multiple_of(32) as u32, 1, 1),
+            block_dim: (hd.next_multiple_of(32).min(block_threads) as u32, 1, 1),
             shared_mem_bytes: ((4 + 3 * ds) * std::mem::size_of::<f32>()) as u32,
         },
     }
@@ -1088,7 +1144,8 @@ pub fn chunk_fused_cfg(
 }
 
 /// Select the cooperative chunk scan when its shared tile fits the default
-/// 48 KiB budget. Wider shapes keep the two-head static-tile kernel.
+/// 48 KiB budget. Wider shapes keep the two-head static-tile kernel, its
+/// blocks at most `threads` wide ([`Mamba3Kernels::chunk_tile_threads`]).
 /// Returns `(use_coop, config)`; both kernels take the same arguments.
 pub fn chunk_scan_cfg(
     batch: usize,
@@ -1097,6 +1154,7 @@ pub fn chunk_scan_cfg(
     hd: usize,
     ds: usize,
     chunk_size: usize,
+    threads: usize,
 ) -> (bool, cudarc::driver::LaunchConfig) {
     // q/k rows are padded to ds + 4 floats and the transposed entering
     // state's rows to hd + 4, to avoid bank conflicts. Keep this host
@@ -1121,7 +1179,7 @@ pub fn chunk_scan_cfg(
             false,
             cudarc::driver::LaunchConfig {
                 grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(2) as u32, 1),
-                block_dim: (hd as u32, 2, 1),
+                block_dim: (chunk_fallback_lanes(hd, threads) as u32, 2, 1),
                 shared_mem_bytes: 0,
             },
         )

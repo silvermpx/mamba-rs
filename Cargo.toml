@@ -611,6 +611,11 @@ path = "tests/m3_gated_norm_digest.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m3_head_width_digest"
+path = "tests/m3_head_width_digest.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "identity_input_training"
 path = "tests/identity_input_training.rs"
 required-features = ["cuda"]

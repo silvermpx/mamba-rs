@@ -1,32 +1,24 @@
-//! Which Mamba-3 SISO shapes the GPU kernels can run.
+//! Which Mamba-3 SISO kernels a shape takes on the GPU.
 //!
-//! [`Mamba3Config::validate`] holds the model envelope: every shape the
-//! official implementation accepts, all of which the CPU runs. The GPU
-//! kernels have narrower limits of their own:
+//! [`Mamba3Config::validate`](crate::mamba3_siso::config::Mamba3Config::validate)
+//! holds the model envelope: every shape the official implementation
+//! accepts. The GPU runs all of them, and this module picks the kernels:
 //! - The warp-tier head kernels (step, burn-in, sequential backward,
 //!   chunked backward) broadcast across a head with warp shuffles of width
-//!   `headdim`, so a head must fit one warp and be a power of two wide.
-//!   Wider heads take the block tier: the step and the sequential scan's
-//!   training kernels have block-tier twins, and the chunked backward a
-//!   tiled one.
-//! - The chunked forward's fallback tiles run `2 * headdim` threads.
+//!   `headdim`, so they serve a head that fits one warp and is a power of
+//!   two wide. Every other head takes the block tier: the step and the
+//!   sequential scan's training kernels have block-tier twins, and the
+//!   chunked backward a tiled one. A head wider than a block takes its
+//!   elements in turns.
+//! - The chunked backward's dQKV stage takes the tiled kernels wherever
+//!   the warp kernel's tiles do not fit its shared-memory budget.
 //!
-//! Every GPU entry point checks its shape here first, so a shape the
-//! kernels cannot run is refused with the reason instead of computing
-//! wrong values.
-//!
-//! The module needs no CUDA feature: a CPU caller can ask whether a model
-//! will run on the GPU before building anything.
-
-use super::config::Mamba3Config;
+//! The module needs no CUDA feature: a CPU caller can ask which kernels a
+//! model takes before building anything.
 
 /// The widest head the warp-shuffle kernels serve: one lane per head
 /// element in a single warp.
 pub const WARP_HEADDIM_MAX: usize = 32;
-
-/// The widest head the GPU serves: the chunked forward's fallback tiles
-/// launch two heads of `headdim` threads in one 1024-thread block.
-pub const GPU_HEADDIM_MAX: usize = 512;
 
 /// Which head kernels a width takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,16 +31,11 @@ pub enum HeadTier {
 
 /// The head tier a width takes on the GPU. Every width the warp kernels
 /// serve stays on them, so no existing shape changes kernels.
-pub fn head_tier(headdim: usize) -> Result<HeadTier, String> {
+pub fn head_tier(headdim: usize) -> HeadTier {
     if headdim <= WARP_HEADDIM_MAX && headdim.is_power_of_two() {
-        Ok(HeadTier::Warp)
-    } else if (1..=GPU_HEADDIM_MAX).contains(&headdim) {
-        Ok(HeadTier::Block)
+        HeadTier::Warp
     } else {
-        Err(format!(
-            "headdim {headdim} is wider than the {GPU_HEADDIM_MAX} the GPU kernels serve; \
-             the CPU runs this shape"
-        ))
+        HeadTier::Block
     }
 }
 
@@ -92,10 +79,14 @@ pub fn chunked_backward_tiled(headdim: usize, d_state: usize) -> bool {
         && chunked_backward_smem_bytes(headdim, d_state) <= CHUNKED_BACKWARD_SMEM_MAX)
 }
 
-/// Threads per block of a block-tier head kernel: the head rounded up to
-/// whole warps.
+/// The most threads a block-tier sequential kernel runs, its launch bound.
+/// A wider head runs in slices of this many elements.
+pub const BLOCK_TIER_THREADS_MAX: usize = 512;
+
+/// Threads per block of a block-tier sequential kernel: the head rounded up
+/// to whole warps, at most [`BLOCK_TIER_THREADS_MAX`].
 pub fn block_tier_threads(headdim: usize) -> usize {
-    headdim.next_multiple_of(32)
+    headdim.next_multiple_of(32).min(BLOCK_TIER_THREADS_MAX)
 }
 
 /// The shared memory of the block-tier sequential forward in bytes: the
@@ -106,10 +97,10 @@ pub fn sequential_forward_block_smem_bytes(d_state: usize) -> usize {
 
 /// The shared memory of the block-tier sequential backward in bytes: the
 /// step's coefficients and rows, the carried previous-K gradient, and each
-/// warp's sums of the 3 * d_state + 3 per-step gradients. The widest GPU
-/// head with the largest state needs about 53 KB, inside the opt-in budget.
+/// warp's sums of the 3 * d_state + 3 per-step gradients. The widest block
+/// with the largest state needs about 53 KB, inside the opt-in budget.
 pub fn sequential_backward_block_smem_bytes(headdim: usize, d_state: usize) -> usize {
-    let warps = headdim.div_ceil(32);
+    let warps = block_tier_threads(headdim) / 32;
     (4 + 4 * d_state + (3 * d_state + 3) * warps) * 4
 }
 
@@ -126,24 +117,13 @@ pub fn require_warp(headdim: usize, kernel: &str) -> Result<(), String> {
     }
 }
 
-/// Checks that the GPU kernels can run a model whose heads are `headdim`
-/// wide, for inference and for training alike.
-pub fn check(headdim: usize) -> Result<(), String> {
-    head_tier(headdim).map(|_| ())
-}
-
-/// [`check`] for a whole config.
-pub fn check_config(cfg: &Mamba3Config) -> Result<(), String> {
-    check(cfg.headdim)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mamba3_siso::config::Mamba3Config;
 
-    /// The official checkpoint shape runs on the block tier, for inference
-    /// and for training on either scan: the chunked one through the tiled
-    /// backward, the sequential one on the block-tier kernels.
+    /// The official checkpoint shape runs on the block tier, its chunked
+    /// training through the tiled backward.
     #[test]
     fn official_shape_runs_on_the_block_tier() {
         let cfg = Mamba3Config {
@@ -153,24 +133,36 @@ mod tests {
             ..Mamba3Config::default()
         };
         cfg.validate().unwrap();
-        assert_eq!(head_tier(cfg.headdim), Ok(HeadTier::Block));
-        check_config(&cfg).unwrap();
+        assert_eq!(head_tier(cfg.headdim), HeadTier::Block);
         assert!(chunked_backward_tiled(cfg.headdim, cfg.d_state));
     }
 
-    /// Every width the warp kernels serve stays on them; other widths take
-    /// the block tier up to the GPU ceiling, and wider heads are refused.
+    /// Every width the warp kernels serve stays on them, and every other
+    /// width takes the block tier, however wide.
     #[test]
     fn head_tier_keeps_every_warp_width_on_the_warp_tier() {
-        for hd in 1..=1024usize {
-            let tier = head_tier(hd);
-            if hd <= 32 && hd.is_power_of_two() {
-                assert_eq!(tier, Ok(HeadTier::Warp), "headdim {hd}");
-            } else if hd <= GPU_HEADDIM_MAX {
-                assert_eq!(tier, Ok(HeadTier::Block), "headdim {hd}");
+        for hd in (1..=1024usize).chain([1056, 2048, 4096]) {
+            let want = if hd <= 32 && hd.is_power_of_two() {
+                HeadTier::Warp
             } else {
-                assert!(tier.is_err(), "headdim {hd}");
-            }
+                HeadTier::Block
+            };
+            assert_eq!(head_tier(hd), want, "headdim {hd}");
+        }
+    }
+
+    /// The block-tier sequential kernels take a head of up to 512 in one
+    /// slice and a wider one in slices of 512, and their backward fits the
+    /// opt-in budget at the largest state whatever the head.
+    #[test]
+    fn block_tier_slices_stay_inside_the_launch_bound() {
+        assert_eq!(block_tier_threads(48), 64);
+        assert_eq!(block_tier_threads(512), 512);
+        assert_eq!(block_tier_threads(513), 512);
+        assert_eq!(block_tier_threads(4096), 512);
+        for hd in [100usize, 512, 640, 4096] {
+            let smem = sequential_backward_block_smem_bytes(hd, 256);
+            assert!(smem <= 99 * 1024, "headdim {hd}: {smem} B");
         }
     }
 
@@ -184,7 +176,6 @@ mod tests {
             ..Mamba3Config::default()
         };
         cfg.validate().unwrap();
-        check_config(&cfg).unwrap();
         assert!(chunked_backward_tiled(cfg.headdim, cfg.d_state));
     }
 
@@ -200,23 +191,6 @@ mod tests {
         assert!(chunked_backward_tiled(48, 16));
         assert!(chunked_backward_tiled(64, 16));
         assert!(!chunked_backward_tiled(32, 16));
-    }
-
-    /// The gated output norm serves every width: past 1024 channels and on
-    /// heads that are no power of two.
-    #[test]
-    fn gated_norm_serves_every_width() {
-        for (d_model, headdim) in [(1024usize, 32usize), (768, 64), (48, 48), (300, 100)] {
-            let cfg = Mamba3Config {
-                d_model,
-                expand: 2,
-                headdim,
-                is_outproj_norm: true,
-                ..Mamba3Config::default()
-            };
-            cfg.validate().unwrap();
-            check_config(&cfg).unwrap();
-        }
     }
 
     /// Every head width the warp kernels serve passes, and nothing else.

@@ -611,8 +611,15 @@ pub fn gpu_forward_mamba3_layer(
                     .map_err(|e| format!("m3_preprocess_chunks F6 K1: {:?}", e))?;
             }
             {
-                let cfg =
-                    super::kernels::chunk_state_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+                let cfg = super::kernels::chunk_state_cfg(
+                    dims.batch,
+                    nc,
+                    nh,
+                    hd,
+                    ds,
+                    dims.chunk_size(),
+                    m3k.chunk_tile_threads,
+                );
                 let mut builder = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
                 builder.arg(acts.chunk_states_saved.inner_mut());
                 builder.arg(acts.x.inner());
@@ -663,8 +670,15 @@ pub fn gpu_forward_mamba3_layer(
                 .map_err(|e| format!("m3_state_pass_fused F6 K4: {:?}", e))?;
         }
         {
-            let (coop, cfg) =
-                super::kernels::chunk_scan_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+            let (coop, cfg) = super::kernels::chunk_scan_cfg(
+                dims.batch,
+                nc,
+                nh,
+                hd,
+                ds,
+                dims.chunk_size(),
+                m3k.chunk_tile_threads,
+            );
             let kern = if coop {
                 &m3k.m3_chunk_scan_fwd_coop
             } else {
@@ -706,7 +720,7 @@ pub fn gpu_forward_mamba3_layer(
                 headdim: hd,
                 d_state: ds,
             },
-        )?;
+        );
         let mut builder = ctx.stream.launch_builder(kernel);
         builder.arg(&layer_ptrs.ssm_state);
         builder.arg(&layer_ptrs.k_state);
@@ -1175,7 +1189,7 @@ pub fn gpu_forward_mamba3_target_burnin(
                 nheads: nh,
                 headdim: hd,
                 d_state: ds,
-            })?;
+            });
             let mut builder = ctx.stream.launch_builder(kernel);
             builder.arg(&ssm_ptr);
             builder.arg(&k_ptr);

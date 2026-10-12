@@ -176,7 +176,6 @@ impl Mamba3Prefill {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         dims.validate_index_budget()?;
-        crate::mamba3_siso::route::check(dims.headdim)?;
         let typed = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => None,
             _ => Some(Mamba3PrefillTypedScratch::new(stream, dims, dtype)?),
@@ -857,6 +856,7 @@ impl Mamba3Prefill {
                         hd,
                         ds,
                         dims.chunk_size(),
+                        m3k.chunk_tile_threads,
                     );
                     if let Some(ts) = typed.as_deref_mut() {
                         let xp = ts.x.cached_ptr();
@@ -940,8 +940,15 @@ impl Mamba3Prefill {
             }
             {
                 let dp = lw.d_param;
-                let (coop, cfg) =
-                    super::kernels::chunk_scan_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+                let (coop, cfg) = super::kernels::chunk_scan_cfg(
+                    dims.batch,
+                    nc,
+                    nh,
+                    hd,
+                    ds,
+                    dims.chunk_size(),
+                    m3k.chunk_tile_threads,
+                );
                 if let Some(ts) = typed.as_deref_mut() {
                     let kern = if coop {
                         m3k.m3_chunk_scan_fwd_coop_typed.get(dtype)
