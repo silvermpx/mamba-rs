@@ -635,6 +635,11 @@ path = "tests/m2_fallback_bits.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "mimo_fallback_bits"
+path = "tests/mimo_fallback_bits.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "identity_input_training"
 path = "tests/identity_input_training.rs"
 required-features = ["cuda"]

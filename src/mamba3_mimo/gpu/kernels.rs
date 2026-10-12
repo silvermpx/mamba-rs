@@ -33,6 +33,8 @@ pub struct Mamba3MimoKernels {
     pub mlp_gate: TypedKernel,
     /// The training forward's scan, writing the replay checkpoints.
     pub scan_ckpt: TypedKernel,
+    /// The widest block both scans launch, from their register use.
+    pub scan_threads: usize,
     /// The sequential backward of the scan (replay per segment).
     pub scan_bwd: TypedKernel,
     pub bc_norm_bwd: TypedKernel,
@@ -271,12 +273,19 @@ pub fn chunked_geom(
     })
 }
 
-/// The scan's shared memory for a head: the state rows padded by one, the
-/// keys starting on 16 bytes in three buffers (the previous token's, the
-/// current one's and the next one's while it is built), the queries and
-/// the step scalars in two. The angles stay in their threads' registers.
-pub fn scan_smem_bytes(hd: usize, ds: usize, rank: usize) -> usize {
-    ((hd * (ds + 1)).next_multiple_of(4) + 5 * rank * ds + 8) * 4
+/// The scan's shared memory for `rows` state rows: the rows padded by one,
+/// the keys starting on 16 bytes, then with `pipe` the pipelined body's
+/// three key buffers (the previous token's, the current one's and the next
+/// one's while it is built) and two of queries and of step scalars, else
+/// the plain body's two key buffers and one of queries. The angles stay in
+/// their threads' registers.
+pub fn scan_smem_bytes(rows: usize, ds: usize, rank: usize, pipe: bool) -> usize {
+    let keys = if pipe {
+        5 * rank * ds + 8
+    } else {
+        3 * rank * ds
+    };
+    ((rows * (ds + 1)).next_multiple_of(4) + keys) * 4
 }
 
 /// The training backward's shared memory for a head: the replay state rows
@@ -310,21 +319,84 @@ pub fn scan_bwd_record_floats(hd: usize, ds: usize, rank: usize, na: usize) -> u
     hd * ds + 4 * rank * ds + 3 * hd * rank + hd + 2 * na + 8
 }
 
-/// Launch geometry of the scan: one block per (batch, head), a whole
-/// number of warps covering the head's channels and at least eight, so a
-/// decode step moves the head's state through shared memory in a few
-/// vector loads per thread (the scan has no block-wide reduction, so its
-/// bits do not depend on the block size).
-pub fn scan_cfg(
-    batch: usize,
-    nh: usize,
-    (hd, ds, rank, na): (usize, usize, usize, usize),
-) -> LaunchConfig {
-    LaunchConfig {
-        grid_dim: (batch as u32, nh as u32, 1),
-        block_dim: (hd.max(na).next_multiple_of(32).max(256) as u32, 1, 1),
-        shared_mem_bytes: scan_smem_bytes(hd, ds, rank) as u32,
+/// The sequential scan's launch for a head (see [`scan_geom`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanGeom {
+    /// Channels per block: the whole head, or a tile of it.
+    pub tile: usize,
+    pub threads: usize,
+    pub smem: usize,
+    /// The shared memory holds the pipelined body's keys, so a block with
+    /// builders to spare may run it.
+    pub pipe: bool,
+}
+
+impl ScanGeom {
+    /// The launch for `batch` sequences of `nh` heads of `hd` channels: a
+    /// block per (sequence, head, tile).
+    pub fn cfg(&self, batch: usize, nh: usize, hd: usize) -> LaunchConfig {
+        LaunchConfig {
+            grid_dim: (batch as u32, nh as u32, hd.div_ceil(self.tile) as u32),
+            block_dim: (self.threads as u32, 1, 1),
+            shared_mem_bytes: self.smem as u32,
+        }
     }
+}
+
+/// The sequential scan's geometry for a head of `hd` channels, `ds` states,
+/// rank `rank` and `na` angles, within `cap` bytes of shared memory and
+/// blocks of at most `max_threads`. The whole head takes one block, a whole
+/// number of warps covering its channels and the angles and at least
+/// eight, when that fits: a decode step then moves the head's state
+/// through shared memory in a few vector loads per thread. Otherwise the
+/// head runs in the fewest tiles of channels that fit, the pipelined body
+/// preferred, the tiles evened out. The scan has no block-wide reduction
+/// and its channels share nothing but the keys, which every block builds
+/// alike, so no choice here changes a value. None when not even one
+/// channel fits.
+pub fn scan_geom(
+    (hd, ds, rank, na): (usize, usize, usize, usize),
+    cap: usize,
+    max_threads: usize,
+) -> Option<ScanGeom> {
+    let max_threads = max_threads / 32 * 32;
+    let whole = ScanGeom {
+        tile: hd,
+        threads: hd.max(na).next_multiple_of(32).max(256),
+        smem: scan_smem_bytes(hd, ds, rank, true),
+        pipe: true,
+    };
+    if hd == 0 || (whole.threads <= max_threads && whole.smem <= cap) {
+        return Some(whole);
+    }
+    // The pipelined body needs a builder per angle (and at least a warp)
+    // past the tile's channels, the plain one a thread per angle.
+    let threads = |pt: usize, pipe: bool| {
+        if pipe {
+            (pt.next_multiple_of(32) + na.max(32).next_multiple_of(32)).max(256)
+        } else {
+            pt.max(na).next_multiple_of(32)
+        }
+    };
+    let fits = |pt: usize, pipe: bool| {
+        threads(pt, pipe) <= max_threads && scan_smem_bytes(pt, ds, rank, pipe) <= cap
+    };
+    let (tiles, pipe) = [true, false]
+        .into_iter()
+        .filter_map(|pipe| {
+            (1..=hd.min(max_threads))
+                .rev()
+                .find(|&pt| fits(pt, pipe))
+                .map(|pt| (hd.div_ceil(pt), pipe))
+        })
+        .min_by_key(|&(tiles, pipe)| (tiles, !pipe))?;
+    let tile = hd.div_ceil(tiles);
+    Some(ScanGeom {
+        tile,
+        threads: threads(tile, pipe),
+        smem: scan_smem_bytes(tile, ds, rank, pipe),
+        pipe,
+    })
 }
 
 impl Mamba3MimoKernels {
@@ -370,9 +442,13 @@ impl Mamba3MimoKernels {
             )
             .map_err(|e| format!("query opt-in shared memory: {e:?}"))?
             .max(0) as usize;
+        let scan = typed("mimo_scan")?;
+        let scan_ckpt = typed("mimo_scan_ckpt")?;
+        let scan_threads =
+            max_block(&scan, "scan")?.min(max_block(&scan_ckpt, "checkpointing scan")?);
         let mut kernels = Self {
             bc_norm: typed("mimo_bc_norm")?,
-            scan: typed("mimo_scan")?,
+            scan,
             chunk_prep: typed("m3m_prep")?,
             chunk_state: typed("m3m_chunk_state")?,
             chunk_state_tiles: typed("m3m_chunk_state_tiles")?,
@@ -381,7 +457,8 @@ impl Mamba3MimoKernels {
             chunk_scan_tiles: typed("m3m_chunk_scan_tiles")?,
             chunk_writeback: typed("m3m_writeback")?,
             mlp_gate: typed("mlp_gate_fwd")?,
-            scan_ckpt: typed("mimo_scan_ckpt")?,
+            scan_ckpt,
+            scan_threads,
             scan_bwd: typed("mimo_scan_bwd")?,
             bc_norm_bwd: typed("mimo_bc_norm_bwd")?,
             angle_bwd: typed("mimo_angle_bwd")?,
@@ -448,6 +525,20 @@ impl Mamba3MimoKernels {
         };
         Ok(kernels)
     }
+}
+
+/// The widest block every dtype of `k` launches, from its register use, a
+/// whole number of warps.
+fn max_block(k: &TypedKernel, what: &str) -> Result<usize, String> {
+    use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
+    let mut threads = 1024usize;
+    for f in [&k.f32, &k.bf16, &k.f16] {
+        let max = f
+            .get_attribute(FnAttr::CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+            .map_err(|e| format!("threads per block of the MIMO {what}: {e:?}"))?;
+        threads = threads.min(max.max(32) as usize);
+    }
+    Ok(threads / 32 * 32)
 }
 
 #[cfg(test)]

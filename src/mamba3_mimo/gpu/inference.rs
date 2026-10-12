@@ -12,12 +12,10 @@ use std::cell::Cell;
 
 use cudarc::driver::PushKernelArg;
 
-use super::kernels::{
-    CHUNK, ChunkedGeom, Mamba3MimoKernels, chunked_geom, scan_cfg, scan_smem_bytes,
-};
+use super::kernels::{CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunked_geom, scan_geom};
 use crate::config::ScanMode;
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
-use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
+use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer};
 use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
@@ -128,6 +126,12 @@ pub struct Mamba3MimoGpuEngine {
     /// The chunked scan's launch geometry on this device, `None` when one
     /// of its kernels cannot fit (the windows then run the recurrence).
     chunked: Option<ChunkedGeom>,
+    /// The recurrence's launch: the whole head per block, or tiles of its
+    /// channels.
+    scan: ScanGeom,
+    /// One counter per (sequence, head) for a head in tiles, so the last
+    /// tile to finish carries the keys and angles out.
+    scan_done: GpuByteBuffer,
     /// One window's kernels as a CUDA graph, once [`Self::capture_graph`]
     /// ran.
     graph: Option<(cudarc::driver::CudaGraph, CapturedWindow)>,
@@ -209,14 +213,18 @@ impl Mamba3MimoGpuEngine {
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = Mamba3MimoKernels::compile(device.context(), arch)?;
         let (hd, ds, rank) = (cfg.headdim, cfg.d_state, cfg.mimo_rank);
-        let smem = scan_smem_bytes(hd, ds, rank);
-        if smem > kernels.smem_optin || hd > 1024 {
-            return Err(format!(
-                "a head of {hd} channels and {ds} states needs {smem} bytes of shared memory; \
-                 this GPU serves {}",
+        let scan = scan_geom(
+            (hd, ds, rank, cfg.num_rope_angles()),
+            kernels.smem_optin,
+            kernels.scan_threads,
+        )
+        .ok_or_else(|| {
+            format!(
+                "not one channel of a rank-{rank} scan with {ds} states fits this GPU's {} \
+                 bytes of shared memory",
                 kernels.smem_optin
-            ));
-        }
+            )
+        })?;
         let chunked = chunked_geom((hd, ds, rank), kernels.smem_optin, false);
         if cfg.scan_mode == ScanMode::Parallel && chunked.is_none() {
             return Err(format!(
@@ -271,6 +279,7 @@ impl Mamba3MimoGpuEngine {
             Some((up(&w.input_proj_w)?, up(&w.input_proj_b)?))
         };
         let norm_f_weight = up(&w.norm_f_weight)?;
+        let scan_done = GpuByteBuffer::zeros(s, (batch * cfg.nheads() * 4).max(4))?;
         Ok(Self {
             kernels,
             ctx,
@@ -282,6 +291,8 @@ impl Mamba3MimoGpuEngine {
             input_proj,
             norm_f_weight,
             chunked,
+            scan,
+            scan_done,
             graph: None,
             eager_gemm_manifest: Cell::new(None),
         })
@@ -829,7 +840,12 @@ impl Mamba3MimoGpuEngine {
                 bld.arg(&r_i);
                 bld.arg(&na_i);
                 bld.arg(&a_floor);
-                unsafe { bld.launch(scan_cfg(b, nh, (hd, ds, r, na))) }
+                let (tile, pipe) = (self.scan.tile as i32, i32::from(self.scan.pipe));
+                let done = self.scan_done.cached_ptr();
+                bld.arg(&tile);
+                bld.arg(&pipe);
+                bld.arg(&done);
+                unsafe { bld.launch(self.scan.cfg(b, nh, hd)) }
                     .map_err(|e| format!("MIMO scan L{l}: {e:?}"))?;
             }
             gpu_gemm_typed_forward_raw(

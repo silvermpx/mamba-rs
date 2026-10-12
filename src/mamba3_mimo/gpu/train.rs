@@ -32,8 +32,8 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::{MimoChunkedPtrs, MimoExec, launch_chunked_scan};
 use super::kernels::{
-    CHUNK, ChunkedGeom, Mamba3MimoKernels, chunked_geom, scan_bwd_record_floats,
-    scan_bwd_smem_bytes, scan_bwd_threads, scan_cfg,
+    CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunked_geom, scan_bwd_record_floats,
+    scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
 };
 use crate::config::ScanMode;
 use crate::gpu::adamw::GpuAdamW;
@@ -41,7 +41,7 @@ use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_bi_backward_grad_raw,
     gpu_gemm_ex_backward_dx_typed, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw,
 };
-use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
+use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer, GradSlice};
 use crate::gpu::context::{GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
@@ -369,6 +369,10 @@ pub struct Mamba3MimoGpuTrainer {
     /// Sequential, when its kernels fit the device (Auto otherwise runs the
     /// recurrence).
     chunked: Option<ChunkedGeom>,
+    /// The sequential forward's launch: the whole head per block, or tiles
+    /// of its channels, and its counters (see the engine's).
+    scan: ScanGeom,
+    scan_done: GpuByteBuffer,
     /// The chunked forward's chunk contributions, one layer's worth.
     contrib: GpuBuffer,
     dtype: WeightDtype,
@@ -488,6 +492,12 @@ impl Mamba3MimoGpuTrainer {
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = Mamba3MimoKernels::compile(device.context(), arch)?;
         let optin = kernels.smem_optin;
+        let scan = scan_geom((hd, ds, rank, na), optin, kernels.scan_threads).ok_or_else(|| {
+            format!(
+                "not one channel of a rank-{rank} scan with {ds} states fits this GPU's \
+                 {optin} bytes of shared memory"
+            )
+        })?;
         let fitted = chunked_geom((hd, ds, rank), optin, true);
         let chunked = if cfg.train_use_parallel_scan() {
             fitted
@@ -512,6 +522,7 @@ impl Mamba3MimoGpuTrainer {
         }
         let layout = Layout::of(w);
         let s = &ctx.stream;
+        let scan_done = GpuByteBuffer::zeros(s, (batch * cfg.nheads() * 4).max(4))?;
         let z = |n: usize| GpuBuffer::zeros(s, n.max(1));
         let typed = |n: usize| Rows::zeros(s, n, act);
         let c = &cfg;
@@ -686,6 +697,8 @@ impl Mamba3MimoGpuTrainer {
             input_dim,
             stride,
             chunked,
+            scan,
+            scan_done,
             contrib,
             dtype,
             act,
@@ -1200,7 +1213,12 @@ impl Mamba3MimoGpuTrainer {
                     bld.arg(p);
                 }
                 bld.arg(&stride_i);
-                unsafe { bld.launch(scan_cfg(b, nh, (hd, ds, rank, na))) }
+                let (tile, pipe) = (self.scan.tile as i32, i32::from(self.scan.pipe));
+                let done = self.scan_done.cached_ptr();
+                bld.arg(&tile);
+                bld.arg(&pipe);
+                bld.arg(&done);
+                unsafe { bld.launch(self.scan.cfg(b, nh, hd)) }
                     .map_err(|e| format!("MIMO scan L{l}: {e:?}"))?;
             }
             self.gemm(

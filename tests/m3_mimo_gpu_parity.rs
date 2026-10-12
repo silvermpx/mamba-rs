@@ -1,8 +1,9 @@
 //! Mamba-3 MIMO on the GPU against the CPU: decode and windows over ranks,
-//! groups, rope fractions, the MLP after the mixer and head widths that are
-//! not a whole number of warps; batch rows against the same sequence alone;
-//! the bit-exact seams (a decode step continues a window, and split windows
-//! give the whole window); and the half and tf32 storage lanes.
+//! groups, rope fractions, the MLP after the mixer, head widths that are
+//! not a whole number of warps and heads the recurrence runs in tiles of
+//! channels. Batch rows against the same sequence alone, the bit-exact
+//! seams (a decode step continues a window, and split windows give the
+//! whole window), and the half and tf32 storage lanes.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::gpu::device::GpuDevice;
@@ -89,6 +90,33 @@ fn cases() -> Vec<(&'static str, Mamba3MimoConfig)> {
     ]
 }
 
+/// Heads whose recurrence runs its channels in tiles over several blocks:
+/// one wider than a block, and a rank-16 head over 256 states whose keys
+/// leave room for only part of its state rows.
+fn tile_heads() -> Vec<(&'static str, Mamba3MimoConfig)> {
+    let base = cases()[0].1;
+    vec![
+        (
+            "a head wider than a block",
+            Mamba3MimoConfig {
+                d_model: 640,
+                headdim: 1280,
+                mimo_rank: 2,
+                ..base
+            },
+        ),
+        (
+            "rank 16 over 256 states, the head in tiles",
+            Mamba3MimoConfig {
+                mimo_rank: 16,
+                d_state: 256,
+                headdim: 64,
+                ..base
+            },
+        ),
+    ]
+}
+
 /// Weights with every small parameter drawn away from its init.
 fn drawn(cfg: &Mamba3MimoConfig, input_dim: usize, seed: u64) -> Mamba3MimoWeights {
     let mut w = Mamba3MimoWeights::init(cfg, input_dim, seed);
@@ -134,7 +162,7 @@ fn engine(
 fn m3_mimo_gpu_decode_matches_cpu() {
     let device = GpuDevice::new(0).unwrap();
     let input_dim = 40usize;
-    for (label, cfg) in cases() {
+    for (label, cfg) in cases().into_iter().chain(tile_heads()) {
         cfg.validate().unwrap();
         let w = drawn(&cfg, input_dim, 13);
         let dm = cfg.d_model;
@@ -163,7 +191,7 @@ fn m3_mimo_gpu_window_matches_cpu() {
     let device = GpuDevice::new(0).unwrap();
     let input_dim = 40usize;
     let (batch, seq) = (2usize, 45usize);
-    for (label, cfg) in cases() {
+    for (label, cfg) in cases().into_iter().chain(tile_heads()) {
         let w = drawn(&cfg, input_dim, 19);
         let dm = cfg.d_model;
         let inputs = det(batch * seq * input_dim, 600, 1.0);
@@ -215,7 +243,7 @@ fn m3_mimo_gpu_seams_and_batch_rows_are_bit_exact() {
     let device = GpuDevice::new(0).unwrap();
     let input_dim = 40usize;
     for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
-        for (label, cfg) in cases() {
+        for (label, cfg) in cases().into_iter().chain(tile_heads()) {
             let w = drawn(&cfg, input_dim, 17);
             let dm = cfg.d_model;
             let (batch, seq) = (3usize, 33usize);
@@ -306,7 +334,7 @@ fn m3_mimo_gpu_typed_lanes_track_cpu() {
         (WeightDtype::F16, 5e-3),
         (WeightDtype::Bf16, 3e-2),
     ] {
-        for (label, cfg) in cases() {
+        for (label, cfg) in cases().into_iter().chain(tile_heads()) {
             let w = drawn(&cfg, input_dim, 23);
             let dm = cfg.d_model;
             let inputs = det(seq * input_dim, 900, 1.0);
