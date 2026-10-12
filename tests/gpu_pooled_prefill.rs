@@ -1,24 +1,29 @@
 //! Pooled-prefill oracle: the on-device pooled-sum prefill must reproduce
 //! the full-temporal download + host column-sum BIT-FOR-BIT (the kernel
 //! walks ascending t accumulating pure f32 adds from 0.0 — the same
-//! reduction order as a per-column host loop), and the pinned staging
-//! buffer must be transfer-transparent (same bytes as a pageable Vec).
+//! reduction order as a per-column host loop), in a batch each sequence's
+//! row is the one it gets alone, the raw-input entries take half input
+//! projections and models without one, and the pinned staging buffer must
+//! be transfer-transparent (same bytes as a pageable Vec).
 
 #![cfg(feature = "cuda")]
 
 use mamba_rs::gpu::GemmMode;
+use mamba_rs::gpu::blas::gpu_gemm_forward_dispatch;
 use mamba_rs::gpu::buffers::{GpuBuffer, PinnedHostBuf};
 use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba1::MambaWeights;
 use mamba_rs::mamba1::gpu::backward::GpuMambaTargetScratch;
 use mamba_rs::mamba1::gpu::forward::GpuMambaDims;
 use mamba_rs::mamba1::gpu::inference::MambaGpuState;
 use mamba_rs::mamba1::gpu::prefill::{
-    PrefillOutputs, PrefillPooledGraph, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
+    PrefillInputs, PrefillOutputs, PrefillPooledGraph, PrefillRawInputs,
+    gpu_forward_inference_prefill_from_raw, gpu_forward_inference_prefill_full,
     gpu_forward_inference_prefill_pooled_sum_from_raw,
 };
-use mamba_rs::mamba1::gpu::weights::GpuMambaWeights;
+use mamba_rs::mamba1::gpu::weights::{GpuMambaMixedWeights, GpuMambaWeights, MambaWeightsView};
 use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -44,7 +49,11 @@ struct Rig {
 }
 
 fn rig(seq_len: usize) -> Rig {
-    let cfg = MambaConfig {
+    rig_batch(seq_len, 1)
+}
+
+fn rig_cfg() -> MambaConfig {
+    MambaConfig {
         d_model: 48,
         n_layers: 2,
         d_state: 16,
@@ -52,15 +61,34 @@ fn rig(seq_len: usize) -> Rig {
         expand: 2,
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
-    };
-    let mid = 96usize;
-    let mut w = MambaWeights::init(&cfg, mid, 0xBEEF);
+    }
+}
+
+/// The rig's host weights, a_neg filled.
+fn rig_weights(cfg: &MambaConfig, mid: usize) -> MambaWeights {
+    let mut w = MambaWeights::init(cfg, mid, 0xBEEF);
     for lw in w.layers.iter_mut() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
+    w
+}
+
+fn rig_batch(seq_len: usize, batch: usize) -> Rig {
+    rig_with(seq_len, batch, 96, false)
+}
+
+/// A rig of `batch` sequences of `seq_len` raw rows of `mid`; `identity`
+/// drops the input projection (then `mid` must be d_model).
+fn rig_with(seq_len: usize, batch: usize, mid: usize, identity: bool) -> Rig {
+    let cfg = rig_cfg();
+    let mut w = rig_weights(&cfg, mid);
+    if identity {
+        w.input_proj_w.clear();
+        w.input_proj_b.clear();
+    }
     let (di, ds, nl) = (cfg.d_inner(), cfg.d_state, cfg.n_layers);
     let dims = GpuMambaDims {
-        batch: 1,
+        batch,
         d_model: cfg.d_model,
         d_inner: di,
         d_state: ds,
@@ -77,14 +105,14 @@ fn rig(seq_len: usize) -> Rig {
     let ctx = GpuCtx::new(&device).expect("ctx");
     let weights = GpuMambaWeights::from_cpu(&ctx.stream, &w, &cfg).expect("weights");
     let scratch = GpuMambaTargetScratch::new(&ctx.stream, &dims).expect("scratch");
-    let state = MambaGpuState::zeros(&ctx.stream, 1, &cfg).expect("state");
+    let state = MambaGpuState::zeros(&ctx.stream, batch, &cfg).expect("state");
     let mut a_neg_flat = vec![0.0f32; nl * di * ds];
     for (l, lw) in w.layers.iter().enumerate() {
         a_neg_flat[l * di * ds..(l + 1) * di * ds].copy_from_slice(&lw.a_neg);
     }
     let mut a_neg = GpuBuffer::zeros(&ctx.stream, nl * di * ds).unwrap();
     a_neg.upload(&ctx.stream, &a_neg_flat).unwrap();
-    let host_input = det(seq_len * mid, 0x51, 0.05);
+    let host_input = det(batch * seq_len * mid, 0x51, 0.05);
     let mut input = GpuBuffer::zeros(&ctx.stream, host_input.len()).unwrap();
     input.upload(&ctx.stream, &host_input).unwrap();
     Rig {
@@ -157,6 +185,249 @@ fn pooled_sum_matches_host_colsum_bitwise() {
             );
         }
     }
+}
+
+/// A batch of three: each sequence's pooled row is the host column sum of
+/// its own rows of the full temporal, and the bits it gets alone.
+#[test]
+fn pooled_sum_of_a_batch_is_each_sequence_alone() {
+    let batch = 3usize;
+    for t in [64usize, 333] {
+        let mut r = rig_batch(t, batch);
+        let (dm, mid) = (r.dims.d_model, r.dims.mamba_input_dim);
+        let mut last = GpuBuffer::zeros(&r.ctx.stream, batch * dm).unwrap();
+        let mut full = GpuBuffer::zeros(&r.ctx.stream, batch * t * dm).unwrap();
+        r.state.reset(&r.ctx.stream).unwrap();
+        gpu_forward_inference_prefill_from_raw(
+            &r.ctx,
+            PrefillOutputs {
+                last_temporal: &mut last,
+                full_temporal: Some(&mut full),
+            },
+            PrefillRawInputs {
+                input_flat: &r.input,
+                weights: &r.weights,
+                a_neg_all: &r.a_neg,
+            },
+            &mut r.state,
+            &mut r.scratch,
+        )
+        .expect("full prefill");
+        let mut temporal = vec![0.0f32; batch * t * dm];
+        full.download(&r.ctx.stream, &mut temporal).unwrap();
+        let mut pooled = GpuBuffer::zeros(&r.ctx.stream, batch * dm).unwrap();
+        r.state.reset(&r.ctx.stream).unwrap();
+        gpu_forward_inference_prefill_pooled_sum_from_raw(
+            &r.ctx,
+            &mut pooled,
+            PrefillRawInputs {
+                input_flat: &r.input,
+                weights: &r.weights,
+                a_neg_all: &r.a_neg,
+            },
+            &mut r.state,
+            &mut r.scratch,
+        )
+        .expect("pooled prefill");
+        let mut device_sum = vec![0.0f32; batch * dm];
+        pooled.download(&r.ctx.stream, &mut device_sum).unwrap();
+        let host_input = det(batch * t * mid, 0x51, 0.05);
+        for s in 0..batch {
+            let mut host_sum = vec![0.0f32; dm];
+            for (j, acc) in host_sum.iter_mut().enumerate() {
+                for row in 0..t {
+                    *acc += temporal[(s * t + row) * dm + j];
+                }
+            }
+            let mut one = rig(t);
+            one.input
+                .upload(&one.ctx.stream, &host_input[s * t * mid..(s + 1) * t * mid])
+                .unwrap();
+            let mut alone = GpuBuffer::zeros(&one.ctx.stream, dm).unwrap();
+            one.state.reset(&one.ctx.stream).unwrap();
+            gpu_forward_inference_prefill_pooled_sum_from_raw(
+                &one.ctx,
+                &mut alone,
+                PrefillRawInputs {
+                    input_flat: &one.input,
+                    weights: &one.weights,
+                    a_neg_all: &one.a_neg,
+                },
+                &mut one.state,
+                &mut one.scratch,
+            )
+            .expect("pooled prefill alone");
+            let mut alone_sum = vec![0.0f32; dm];
+            alone.download(&one.ctx.stream, &mut alone_sum).unwrap();
+            let row = &device_sum[s * dm..(s + 1) * dm];
+            for (j, ((d, h), a)) in row.iter().zip(&host_sum).zip(&alone_sum).enumerate() {
+                assert_eq!(
+                    d.to_bits(),
+                    h.to_bits(),
+                    "T={t} sequence {s} dim {j}: device {d} vs host {h}"
+                );
+                assert_eq!(
+                    d.to_bits(),
+                    a.to_bits(),
+                    "T={t} sequence {s} dim {j}: in the batch {d} vs alone {a}"
+                );
+            }
+        }
+    }
+}
+
+fn bits(v: &[f32]) -> Vec<u32> {
+    v.iter().map(|x| x.to_bits()).collect()
+}
+
+/// The full rows and the last rows of one prefill, raw or projected.
+fn full_and_last(r: &mut Rig, prefill: impl FnOnce(&mut Rig, PrefillOutputs<'_>)) -> Vec<f32> {
+    let (b, t, dm) = (r.dims.batch, r.dims.seq_len, r.dims.d_model);
+    let mut last = GpuBuffer::zeros(&r.ctx.stream, b * dm).unwrap();
+    let mut full = GpuBuffer::zeros(&r.ctx.stream, b * t * dm).unwrap();
+    r.state.reset(&r.ctx.stream).unwrap();
+    prefill(
+        r,
+        PrefillOutputs {
+            last_temporal: &mut last,
+            full_temporal: Some(&mut full),
+        },
+    );
+    let mut rows = vec![0.0f32; b * t * dm];
+    full.download(&r.ctx.stream, &mut rows).unwrap();
+    let mut tail = vec![0.0f32; b * dm];
+    last.download(&r.ctx.stream, &mut tail).unwrap();
+    rows.extend(tail);
+    rows
+}
+
+/// The raw-input entries take a half input projection: the rows cast to
+/// the weights' dtype through the GEMM the engine's prompts take, so a raw
+/// prefill gives the bits of one handed that projection, and its pooled
+/// sum is the host column sum of its rows.
+#[test]
+fn raw_input_takes_a_half_input_projection() {
+    let t = 333usize;
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        let mut r = rig(t);
+        let cfg = rig_cfg();
+        let (dm, mid) = (r.dims.d_model, r.dims.mamba_input_dim);
+        let w = rig_weights(&cfg, mid);
+        let half = GpuMambaMixedWeights::from_cpu(&r.ctx.stream, &w, &cfg, dtype).unwrap();
+        let mut projected = GpuBuffer::zeros(&r.ctx.stream, t * dm).unwrap();
+        let (ipw, ipw_dt) = half.input_proj_w();
+        gpu_gemm_forward_dispatch(
+            &r.ctx,
+            &mut projected,
+            &r.input,
+            ipw,
+            ipw_dt,
+            Some(half.input_proj_b()),
+            (t, mid, dm),
+        )
+        .unwrap();
+        let want = full_and_last(&mut r, |r, outputs| {
+            gpu_forward_inference_prefill_full(
+                &r.ctx,
+                outputs,
+                PrefillInputs {
+                    ip_out_flat: &projected,
+                    weights: &half,
+                    a_neg_all: &r.a_neg,
+                },
+                &mut r.state,
+                &mut r.scratch,
+            )
+            .expect("projected prefill");
+        });
+        let got = full_and_last(&mut r, |r, outputs| {
+            gpu_forward_inference_prefill_from_raw(
+                &r.ctx,
+                outputs,
+                PrefillRawInputs {
+                    input_flat: &r.input,
+                    weights: &half,
+                    a_neg_all: &r.a_neg,
+                },
+                &mut r.state,
+                &mut r.scratch,
+            )
+            .expect("raw prefill");
+        });
+        assert!(
+            bits(&got) == bits(&want),
+            "{dtype:?}: the raw prefill moved off the projected one"
+        );
+        let mut pooled = GpuBuffer::zeros(&r.ctx.stream, dm).unwrap();
+        r.state.reset(&r.ctx.stream).unwrap();
+        gpu_forward_inference_prefill_pooled_sum_from_raw(
+            &r.ctx,
+            &mut pooled,
+            PrefillRawInputs {
+                input_flat: &r.input,
+                weights: &half,
+                a_neg_all: &r.a_neg,
+            },
+            &mut r.state,
+            &mut r.scratch,
+        )
+        .expect("pooled prefill");
+        let mut device_sum = vec![0.0f32; dm];
+        pooled.download(&r.ctx.stream, &mut device_sum).unwrap();
+        for (j, d) in device_sum.iter().enumerate() {
+            let h = (0..t).fold(0.0f32, |acc, row| acc + got[row * dm + j]);
+            assert_eq!(
+                d.to_bits(),
+                h.to_bits(),
+                "{dtype:?} dim {j}: device {d} vs host {h}"
+            );
+        }
+    }
+}
+
+/// A model without an input projection takes its rows as they are: the
+/// bits of a prefill handed those rows.
+#[test]
+fn raw_input_without_an_input_projection_is_the_rows() {
+    let t = 64usize;
+    let dm = rig_cfg().d_model;
+    let mut r = rig_with(t, 2, dm, true);
+    assert!(!r.weights.has_input_proj());
+    let rows = det(2 * t * dm, 0x51, 0.05);
+    let mut given = GpuBuffer::zeros(&r.ctx.stream, rows.len()).unwrap();
+    given.upload(&r.ctx.stream, &rows).unwrap();
+    let want = full_and_last(&mut r, |r, outputs| {
+        gpu_forward_inference_prefill_full(
+            &r.ctx,
+            outputs,
+            PrefillInputs {
+                ip_out_flat: &given,
+                weights: &r.weights,
+                a_neg_all: &r.a_neg,
+            },
+            &mut r.state,
+            &mut r.scratch,
+        )
+        .expect("prefill of the rows");
+    });
+    let got = full_and_last(&mut r, |r, outputs| {
+        gpu_forward_inference_prefill_from_raw(
+            &r.ctx,
+            outputs,
+            PrefillRawInputs {
+                input_flat: &r.input,
+                weights: &r.weights,
+                a_neg_all: &r.a_neg,
+            },
+            &mut r.state,
+            &mut r.scratch,
+        )
+        .expect("raw prefill");
+    });
+    assert!(
+        bits(&got) == bits(&want),
+        "the raw rows were not taken as they are"
+    );
 }
 
 /// Pinned staging is transfer-transparent: uploading through a

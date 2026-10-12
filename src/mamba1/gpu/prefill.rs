@@ -20,9 +20,7 @@ use super::backward::{GpuMambaTargetMixedScratch, GpuMambaTargetScratch};
 use super::forward::GpuMambaDims;
 use super::inference::MambaGpuState;
 use super::weights::{MambaLayerWeightsView, MambaWeightsView};
-use crate::gpu::blas::{
-    TypedPtr, gpu_gemm_bi_forward_raw, gpu_gemm_forward_dispatch, gpu_gemm_typed_forward_raw,
-};
+use crate::gpu::blas::{TypedPtr, gpu_gemm_forward_dispatch, gpu_gemm_typed_forward_raw};
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
@@ -138,11 +136,9 @@ pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
 }
 
 /// `gpu_forward_inference_prefill` with the all-T output surface: identical
-/// kernel chain, plus the optional full post-norm_f temporal out.
-///
-/// The `_mixed` prefill deliberately has no all-T twin yet: its temporal
-/// lives in a typed (bf16/f16) scratch and no mixed consumer pools over the
-/// full sequence today — the entry is added when one exists.
+/// kernel chain, plus the optional full post-norm_f temporal out. The bf16
+/// and f16 prefill has its twin in
+/// [`gpu_forward_inference_prefill_mixed_full`].
 pub fn gpu_forward_inference_prefill_full<W: MambaWeightsView>(
     ctx: &GpuCtx,
     outputs: PrefillOutputs<'_>,
@@ -177,10 +173,12 @@ pub fn gpu_forward_inference_prefill_full<W: MambaWeightsView>(
 }
 
 /// Prefill from RAW (pre-projection) input: applies `input_proj` internally
-/// through the SAME `gpu_gemm_bi_forward_raw` call the training forward makes
-/// (`gpu_forward_mamba_backbone`), so the projected bits equal training's
-/// `ip_out` — then runs the shared prefill body. This is the one-call GPU
-/// serving entry for classifier-style consumers.
+/// through the GEMM the engine's prompts take (for f32 weights the same
+/// `gpu_gemm_bi_forward_raw` call the training forward makes, so the
+/// projected bits equal training's `ip_out`; half weights take the rows
+/// cast to their dtype), or takes the rows as they are for a model without
+/// an input projection, then runs the shared prefill body. This is the
+/// one-call GPU serving entry for classifier-style consumers.
 pub fn gpu_forward_inference_prefill_from_raw<W: MambaWeightsView>(
     ctx: &GpuCtx,
     outputs: PrefillOutputs<'_>,
@@ -193,33 +191,10 @@ pub fn gpu_forward_inference_prefill_from_raw<W: MambaWeightsView>(
         weights,
         a_neg_all,
     } = inputs;
-    let dims: GpuMambaDims = scratch.dims;
-    let bt = dims.batch * dims.seq_len;
-    let expected = bt * dims.mamba_input_dim;
-    if input_flat.len() != expected {
-        return Err(format!(
-            "prefill_from_raw: input_flat len {} != batch*seq_len*mamba_input_dim = {expected}",
-            input_flat.len()
-        ));
-    }
-    let (ipw, ipw_dt) = weights.input_proj_w();
-    if ipw_dt != WeightDtype::F32 {
-        return Err(format!(
-            "prefill_from_raw: input_proj weight must be f32 (got {ipw_dt:?}) — \
-             the mixed prefill has no raw-input entry"
-        ));
-    }
     // Projected values land directly in the working temporal; the body's
     // first step snapshots it into the residual, exactly as if it had been
     // copied from a caller-provided ip_out buffer.
-    gpu_gemm_bi_forward_raw(
-        ctx,
-        &mut scratch.out_flat,
-        input_flat,
-        ipw,
-        Some(weights.input_proj_b()),
-        (bt, dims.mamba_input_dim, dims.d_model),
-    )?;
+    project_raw_input(ctx, weights, input_flat, scratch, "prefill_from_raw")?;
     let PrefillOutputs {
         last_temporal,
         mut full_temporal,
@@ -240,17 +215,18 @@ pub fn gpu_forward_inference_prefill_from_raw<W: MambaWeightsView>(
     gather_last(ctx, src, last_temporal, scratch.dims)
 }
 
-/// Raw-input prefill emitting the COLUMN SUM of the post-`norm_f` temporal
-/// over all T positions (`pooled_sum[d] = sum_t temporal[t][d]`, batch=1
-/// serving shape; `[B * d_model]` generally, summed within each sample's
-/// T block only when B=1 — multi-batch consumers slice per sample).
+/// Raw-input prefill emitting each sequence's COLUMN SUM of the post-`norm_f`
+/// temporal over its T positions (`pooled_sum[b][d] = sum_t
+/// temporal[b][t][d]`, `[B * d_model]`).
 ///
-/// Mean-pool consumers divide by T on the HOST: the on-device
-/// `colsum_accumulate` walks ascending `t` accumulating pure f32 adds from
-/// 0.0 — character-identical to a CPU per-column mean_pool accumulation —
-/// so `download(1.5 KB) / T` reproduces the CPU pooled vector BIT-FOR-BIT
+/// Mean-pool consumers divide by T on the HOST: the on-device column sum
+/// walks ascending `t` accumulating pure f32 adds from 0.0 — character-
+/// identical to a CPU per-column mean_pool accumulation — so
+/// `download(1.5 KB) / T` reproduces the CPU pooled vector BIT-FOR-BIT
 /// while skipping the full `[T * d_model]` device-to-host transfer
-/// (7.1 MB -> 1.5 KB at the classifier shape).
+/// (7.1 MB -> 1.5 KB at the classifier shape). In a batch each sequence
+/// sums its own rows in that order, so its row does not depend on its
+/// batch neighbours.
 pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
     ctx: &GpuCtx,
     pooled_sum: &mut GpuBuffer,
@@ -259,18 +235,12 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
     scratch: &mut GpuMambaTargetScratch,
 ) -> Result<(), String> {
     let dims: GpuMambaDims = scratch.dims;
-    if dims.batch != 1 {
+    let (b, dm) = (dims.batch, dims.d_model);
+    if pooled_sum.len() != b * dm {
         return Err(format!(
-            "prefill_pooled_sum: batch {} unsupported — the column sum would mix samples; \
-             pool per sample with batch=1 (the serving shape)",
-            dims.batch
-        ));
-    }
-    if pooled_sum.len() != dims.d_model {
-        return Err(format!(
-            "prefill_pooled_sum: pooled_sum len {} != d_model = {}",
+            "prefill_pooled_sum: pooled_sum len {} != batch*d_model = {}",
             pooled_sum.len(),
-            dims.d_model
+            b * dm
         ));
     }
     let PrefillRawInputs {
@@ -278,45 +248,83 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
         weights,
         a_neg_all,
     } = inputs;
+    project_raw_input(ctx, weights, input_flat, scratch, "prefill_pooled_sum")?;
+    prefill_body(ctx, weights, a_neg_all, state, scratch, None)?;
+    let (db_ptr, dy_ptr) = (pooled_sum.cached_ptr(), scratch.out_flat.cached_ptr());
+    let cols = dm as i32;
+    if b == 1 {
+        // colsum_accumulate does `db[j] += sum` — zero the target first so
+        // the result is exactly the sum over T.
+        pooled_sum.zero(&ctx.stream)?;
+        let rows = dims.seq_len as i32;
+        let mut builder = ctx.stream.launch_builder(&ctx.kernels.colsum_accumulate);
+        builder.arg(&db_ptr);
+        builder.arg(&dy_ptr);
+        builder.arg(&rows);
+        builder.arg(&cols);
+        unsafe { builder.launch(grid_colsum(dm)) }
+            .map_err(|e| format!("prefill_pooled_sum colsum: {e:?}"))?;
+    } else {
+        // Each sequence sums its own rows in the same order.
+        let (segments, seg_len) = (b as i32, dims.seq_len as i32);
+        const BLOCK: u32 = 256;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: ((dm as u32).div_ceil(BLOCK), b as u32, 1),
+            block_dim: (BLOCK, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut builder = ctx.stream.launch_builder(&ctx.kernels.colsum_segments);
+        builder.arg(&db_ptr);
+        builder.arg(&dy_ptr);
+        builder.arg(&segments);
+        builder.arg(&seg_len);
+        builder.arg(&cols);
+        unsafe { builder.launch(cfg) }
+            .map_err(|e| format!("prefill_pooled_sum colsum per sequence: {e:?}"))?;
+    }
+    Ok(())
+}
+
+/// The raw prompt rows into the working temporal: their projection through
+/// the GEMM the engine's prompts take, the rows cast to the weights' dtype
+/// for half weights, or the rows themselves for a model without an input
+/// projection.
+fn project_raw_input<W: MambaWeightsView>(
+    ctx: &GpuCtx,
+    weights: &W,
+    input_flat: &GpuBuffer,
+    scratch: &mut GpuMambaTargetScratch,
+    what: &str,
+) -> Result<(), String> {
+    let dims: GpuMambaDims = scratch.dims;
     let bt = dims.batch * dims.seq_len;
     let expected = bt * dims.mamba_input_dim;
     if input_flat.len() != expected {
         return Err(format!(
-            "prefill_pooled_sum: input_flat len {} != batch*seq_len*mamba_input_dim = {expected}",
+            "{what}: input_flat len {} != batch*seq_len*mamba_input_dim = {expected}",
             input_flat.len()
         ));
     }
-    let (ipw, ipw_dt) = weights.input_proj_w();
-    if ipw_dt != WeightDtype::F32 {
-        return Err(format!(
-            "prefill_pooled_sum: input_proj weight must be f32 (got {ipw_dt:?}) — \
-             the mixed prefill has no raw-input entry"
-        ));
+    if !weights.has_input_proj() {
+        if dims.mamba_input_dim != dims.d_model {
+            return Err(format!(
+                "{what}: a model without an input projection takes rows of d_model {}, \
+                 not {}",
+                dims.d_model, dims.mamba_input_dim
+            ));
+        }
+        return scratch.out_flat.copy_from_raw(input_flat, &ctx.stream);
     }
-    gpu_gemm_bi_forward_raw(
+    let (ipw, ipw_dt) = weights.input_proj_w();
+    gpu_gemm_forward_dispatch(
         ctx,
         &mut scratch.out_flat,
         input_flat,
         ipw,
+        ipw_dt,
         Some(weights.input_proj_b()),
         (bt, dims.mamba_input_dim, dims.d_model),
-    )?;
-    prefill_body(ctx, weights, a_neg_all, state, scratch, None)?;
-    // colsum_accumulate does `db[j] += sum` — zero the target first so the
-    // result is exactly the sum over T.
-    pooled_sum.zero(&ctx.stream)?;
-    let b_i = bt as i32;
-    let n_i = dims.d_model as i32;
-    let db_ptr = pooled_sum.cached_ptr();
-    let dy_ptr = scratch.out_flat.cached_ptr();
-    let mut builder = ctx.stream.launch_builder(&ctx.kernels.colsum_accumulate);
-    builder.arg(&db_ptr);
-    builder.arg(&dy_ptr);
-    builder.arg(&b_i);
-    builder.arg(&n_i);
-    unsafe { builder.launch(grid_colsum(dims.d_model)) }
-        .map_err(|e| format!("prefill_pooled_sum colsum: {e:?}"))?;
-    Ok(())
+    )
 }
 
 /// A CUDA Graph capture of the ENTIRE per-page pooled-prefill sequence —
@@ -980,18 +988,66 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
     state: &mut MambaGpuState,
     scratch: &mut GpuMambaTargetMixedScratch,
 ) -> Result<(), String> {
+    gpu_forward_inference_prefill_mixed_full(
+        ctx,
+        PrefillMixedOutputs {
+            last_temporal: target_temporal,
+            full_temporal: None,
+        },
+        inputs,
+        state,
+        scratch,
+    )
+}
+
+/// The outputs of the bf16/f16 prefill, in the weights' dtype.
+pub struct PrefillMixedOutputs<'a> {
+    /// `[B * d_model]`, the last timestep's post-norm_f row.
+    pub last_temporal: &'a crate::gpu::buffers::DtypedBuf,
+    /// `[B * T * d_model]`, every position's post-norm_f row; the last row
+    /// of each sequence is its `last_temporal` row.
+    pub full_temporal: Option<&'a crate::gpu::buffers::DtypedBuf>,
+}
+
+/// [`gpu_forward_inference_prefill_mixed`] with the all-T output: the same
+/// kernels, `norm_f` writing every position into `full_temporal` when it
+/// is given.
+pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
+    ctx: &GpuCtx,
+    outputs: PrefillMixedOutputs<'_>,
+    inputs: PrefillInputs<'_, W>,
+    state: &mut MambaGpuState,
+    scratch: &mut GpuMambaTargetMixedScratch,
+) -> Result<(), String> {
     let PrefillInputs {
         ip_out_flat,
         weights,
         a_neg_all,
     } = inputs;
+    let PrefillMixedOutputs {
+        last_temporal: target_temporal,
+        full_temporal,
+    } = outputs;
     let dt = scratch.dtype;
-    assert_eq!(
-        target_temporal.dtype(),
-        dt,
-        "target_temporal dtype must match mixed scratch dtype"
-    );
     let dims: GpuMambaDims = scratch.dims;
+    let last_len = dims.batch * dims.d_model;
+    if target_temporal.dtype() != dt || target_temporal.len_elems() != last_len {
+        return Err(format!(
+            "mixed prefill: last_temporal holds {} {:?} elements, not {last_len} {dt:?}",
+            target_temporal.len_elems(),
+            target_temporal.dtype()
+        ));
+    }
+    if let Some(full) = full_temporal
+        && (full.dtype() != dt || full.len_elems() != last_len * dims.seq_len)
+    {
+        return Err(format!(
+            "mixed prefill: full_temporal holds {} {:?} elements, not {} {dt:?}",
+            full.len_elems(),
+            full.dtype(),
+            last_len * dims.seq_len
+        ));
+    }
     dims.check_for(ctx)?;
     let seq_len = dims.seq_len;
     let b = dims.batch;
@@ -1366,9 +1422,10 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt))
         };
         let out_ptr = scratch.out_flat.cached_ptr();
+        let y_ptr = full_temporal.map_or(out_ptr, |full| full.cached_ptr());
         let rms_ptr = scratch.rms_discard.cached_ptr();
         let res_ptr = scratch.residual.cached_ptr();
-        bld.arg(&out_ptr);
+        bld.arg(&y_ptr);
         bld.arg(&rms_ptr);
         bld.arg(&res_ptr);
         if fused {
@@ -1392,7 +1449,7 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             .stream
             .launch_builder(k.gather_last_timestep_typed.get(dt));
         let dst_ptr = target_temporal.cached_ptr();
-        let src_ptr = scratch.out_flat.cached_ptr();
+        let src_ptr = full_temporal.map_or(scratch.out_flat.cached_ptr(), |full| full.cached_ptr());
         bld.arg(&dst_ptr);
         bld.arg(&src_ptr);
         bld.arg(&b_i);

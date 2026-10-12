@@ -40,6 +40,10 @@ pub trait MambaLayerWeightsView {
 /// Abstraction over backbone-level weights.
 pub trait MambaWeightsView {
     type Layer: MambaLayerWeightsView;
+    /// Whether the model projects its input rows; without the projection
+    /// (an official checkpoint's identity input) the rows are the
+    /// residual stream itself and `input_proj_w` holds nothing.
+    fn has_input_proj(&self) -> bool;
     fn input_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype);
     fn input_proj_b(&self) -> cudarc::driver::sys::CUdeviceptr;
     fn norm_f_weight(&self) -> cudarc::driver::sys::CUdeviceptr;
@@ -82,6 +86,9 @@ impl MambaLayerWeightsView for GpuMambaLayerWeights {
 
 impl MambaWeightsView for GpuMambaWeights {
     type Layer = GpuMambaLayerWeights;
+    fn has_input_proj(&self) -> bool {
+        !self.input_proj_w.is_empty()
+    }
     fn input_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
         (self.input_proj_w.ptr(), WeightDtype::F32)
     }
@@ -134,6 +141,9 @@ impl MambaLayerWeightsView for GpuMambaMixedLayerWeights {
 
 impl MambaWeightsView for GpuMambaMixedWeights {
     type Layer = GpuMambaMixedLayerWeights;
+    fn has_input_proj(&self) -> bool {
+        self.input_proj_w.len_elems() > 0
+    }
     fn input_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
         (self.input_proj_w.ptr(), self.input_proj_w.dtype())
     }
