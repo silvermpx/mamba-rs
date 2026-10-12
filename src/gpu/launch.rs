@@ -423,6 +423,76 @@ pub fn scan_fwd_nosave_index_width(
     ])
 }
 
+/// Offset width of the Mamba-1 sequential scan kernels over `(batch, seq,
+/// d_inner, d_state)`. Their offsets reach the state `[batch, d_inner,
+/// d_state]`, the rows `[batch, seq, widest_row]` (the activations, B and C,
+/// the in_proj rows a fused gate reads, the x_proj rows a decode step reads
+/// B and C from) and, with `tape`, the h tape `[batch, seq + 1, d_inner,
+/// d_state]` the saving forward writes and the backward reads. A decode
+/// step is `seq` 1.
+pub fn seq_scan_index_width(
+    batch: usize,
+    seq: usize,
+    d_inner: usize,
+    d_state: usize,
+    widest_row: usize,
+    tape: bool,
+) -> IndexWidth {
+    let tape = if tape {
+        batch
+            .saturating_mul(seq.saturating_add(1))
+            .saturating_mul(d_inner)
+            .saturating_mul(d_state)
+    } else {
+        0
+    };
+    IndexWidth::covering(&[
+        batch.saturating_mul(d_inner).saturating_mul(d_state),
+        batch
+            .saturating_mul(seq)
+            .saturating_mul(widest_row.max(d_inner).max(d_state))
+            .saturating_add(d_inner.saturating_mul(2)),
+        tape,
+    ])
+}
+
+/// Offset width of the parallel scan backward, the fold when `fold`. Its
+/// offsets reach the rows `[batch, T, d_inner]`, the B and C rows `[batch,
+/// d_state, T]`, the h tape (the chunk rows of the slim tape or every step
+/// of the full one) and the B and C gradient rows, one per channel, or one
+/// per group of SCAN_BWD_DGROUP channels in the fold.
+pub fn scan_bwd_index_width(
+    batch: usize,
+    seq_len: usize,
+    d_inner: usize,
+    d_state: usize,
+    slim_tape: bool,
+    fold: bool,
+) -> IndexWidth {
+    let state = batch.saturating_mul(d_inner).saturating_mul(d_state);
+    let tape = if slim_tape {
+        state
+            .saturating_mul(3)
+            .saturating_mul(seq_len.div_ceil(SCAN_CHUNK))
+    } else {
+        state.saturating_mul(seq_len.saturating_add(1))
+    };
+    let rows = if fold {
+        d_inner.div_ceil(SCAN_BWD_DGROUP)
+    } else {
+        d_inner
+    };
+    IndexWidth::covering(&[
+        batch.saturating_mul(seq_len).saturating_mul(d_inner),
+        batch.saturating_mul(d_state).saturating_mul(seq_len),
+        tape,
+        batch
+            .saturating_mul(d_state)
+            .saturating_mul(rows)
+            .saturating_mul(seq_len),
+    ])
+}
+
 /// Launch config for the M1 parallel scan BACKWARD kernel.
 ///
 /// Smem layout = forward layout + reverse-scan workspace + postfix carry +
@@ -698,6 +768,37 @@ mod tests {
         // C rows end past 2^31 does not.
         assert_eq!(scan_fwd_index_width(2, 4621, 768, 16, true), I32);
         assert_eq!(scan_fwd_index_width(8193, 1024, 1, 256, true), I64);
+    }
+
+    /// The sequential scans and the backward take the int build while
+    /// every offset fits: the rows, the state, the tape and, in the
+    /// backward, the B and C gradient rows, a group's in the fold.
+    #[test]
+    fn the_backward_and_sequential_scans_take_the_int_build_while_they_fit() {
+        use IndexWidth::{I32, I64};
+        let m = INT_ARG_MAX;
+        // The sequential tape [batch, T + 1, d_inner, d_state] outgrows the
+        // rows by one step of states.
+        assert_eq!(seq_scan_index_width(1, m / 64 - 1, 1, 64, 1, true), I32);
+        assert_eq!(seq_scan_index_width(1, m / 64, 1, 64, 1, true), I64);
+        assert_eq!(seq_scan_index_width(1, m / 64, 1, 64, 1, false), I32);
+        // A decode step's x_proj rows.
+        assert_eq!(seq_scan_index_width(2, 1, 1, 1, m / 2 - 1, false), I32);
+        assert_eq!(seq_scan_index_width(2, 1, 1, 1, m / 2 + 1, false), I64);
+        // The backward's B and C gradient rows [batch, d_state, rows, T]:
+        // a group of channels each in the fold, a channel each otherwise.
+        let (b, t, di, ds) = (1, 1 << 15, 4 * SCAN_BWD_DGROUP, 1 << 12);
+        assert_eq!(scan_bwd_index_width(b, t, di, ds, true, true), I32);
+        assert_eq!(scan_bwd_index_width(b, t, di, ds, true, false), I64);
+        // The full tape counts every step, the slim one a few per chunk.
+        assert_eq!(scan_bwd_index_width(1, m - 1, 1, 1, false, true), I32);
+        assert_eq!(scan_bwd_index_width(1, m, 1, 1, false, true), I64);
+        assert_eq!(scan_bwd_index_width(1, m, 1, 1, true, true), I32);
+        // The vision classifier's training shape fits every route.
+        for fold in [true, false] {
+            assert_eq!(scan_bwd_index_width(2, 4621, 768, 16, true, fold), I32);
+        }
+        assert_eq!(seq_scan_index_width(2, 4621, 768, 16, 768, true), I32);
     }
 
     /// A conv launch takes the int build while its rows, its windows and its

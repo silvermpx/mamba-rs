@@ -605,7 +605,7 @@ fn run_ssm_backward_local(
     let dsi = ds as i32;
     let mut bld = ctx
         .stream
-        .launch_builder(ctx.kernels.ssm_backward_local_typed.get(dtype));
+        .launch_builder(ctx.kernels.ssm_backward_local_typed.i32.get(dtype));
     let h_ptr = h_saved.cached_ptr();
     let dl_ptr = delta.cached_ptr();
     let u_ptr = u.cached_ptr();

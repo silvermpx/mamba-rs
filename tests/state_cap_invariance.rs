@@ -73,8 +73,12 @@ fn sequential_family_is_state_cap_invariant() {
     let h0 = det(b * di * ds, 17, 0.1);
     let sd = det(b * di, 21, 1.0);
     let su = det(b * di, 22, 1.0);
-    let sb = det(b * ds, 23, 0.5);
-    let sc = det(b * ds, 24, 0.5);
+    // The decode step reads B and C from an x_proj row past dt_rank
+    // columns and its gate from the second half of an in_proj row.
+    let dt_rank = 4usize;
+    let xdbl_stride = dt_rank + 2 * ds;
+    let sx = det(b * xdbl_stride, 23, 0.5);
+    let sg = det(b * 2 * di, 24, 1.0);
 
     let mut reference: Option<SequentialFamilyOutputs> = None;
     let mut gemm_identity = None;
@@ -105,7 +109,9 @@ fn sequential_family_is_state_cap_invariant() {
         // plain y store; the gate pointer is never dereferenced.
         {
             let gate_stride = 0i32;
-            let mut bld = ctx.stream.launch_builder(&k.ssm_burnin_fwd_nosave);
+            let mut bld = ctx
+                .stream
+                .launch_builder(&k.ssm_burnin_nosave_typed.i32.f32);
             bld.arg(h.inner_mut());
             bld.arg(y.inner_mut());
             bld.arg(delta_b.inner());
@@ -123,26 +129,34 @@ fn sequential_family_is_state_cap_invariant() {
             unsafe { bld.launch(grid_1d(b * di)) }.unwrap();
         }
 
-        // Decode step on a fresh state.
+        // Decode step on a fresh state, the f32 step of the decode routes.
         let mut hs = buf(&ctx, &h0);
         let mut ys = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
         {
             let sdb = buf(&ctx, &sd);
             let sub = buf(&ctx, &su);
-            let sbb = buf(&ctx, &sb);
-            let scb = buf(&ctx, &sc);
-            let mut bld = ctx.stream.launch_builder(&k.ssm_step_fwd);
+            let sxb = buf(&ctx, &sx);
+            let sgb = buf(&ctx, &sg);
+            let (xs_i, gs_i) = (xdbl_stride as i32, (2 * di) as i32);
+            let (b_off, c_off) = (dt_rank as i32, (dt_rank + ds) as i32);
+            let mut bld = ctx
+                .stream
+                .launch_builder(&k.ssm_step_fwd_fused_typed.i32.f32);
             bld.arg(hs.inner_mut());
             bld.arg(ys.inner_mut());
             bld.arg(sdb.inner());
             bld.arg(sub.inner());
-            bld.arg(sbb.inner());
-            bld.arg(scb.inner());
+            bld.arg(sxb.inner());
+            bld.arg(sgb.inner());
+            bld.arg(&gs_i);
             bld.arg(ab.inner());
             bld.arg(db.inner());
             bld.arg(&b_i);
             bld.arg(&di_i);
             bld.arg(&ds_i);
+            bld.arg(&xs_i);
+            bld.arg(&b_off);
+            bld.arg(&c_off);
             unsafe { bld.launch(grid_1d(b * di)) }.unwrap();
         }
         ctx.stream.synchronize().unwrap();

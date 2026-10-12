@@ -3,15 +3,18 @@ use super::kernel_identity::{FramedSha256, digest_hex};
 
 const OWNER_SOURCE: &str = include_str!("../../kernels/mamba_ssm_parallel.cu");
 const OWNER_SOURCE_SHA256: &str =
-    "8693947ddecd4c2c308fee9aab0ce5bb727722fc4074a148a65ce34d978591fe";
+    "15a86ee968b1f16d61eac98937651afdf1ca3b4f2ecc97f76ce4704e1d82f952";
 const FOLD_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD";
 const SHORT_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT";
 const STAGED_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED";
 const STAGE_INDEX_MACRO: &str = "M1_HALF_STAGE_INDEX";
 const LEGACY_INVOCATIONS: &str = concat!(
-    "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(f32,  float,         from_f_f32,  2, 1, 3)\n",
-    "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(bf16, __nv_bfloat16, from_f_bf16, 3, 0, 4)\n",
-    "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(f16,  __half,        from_f_f16,  3, 0, 4)\n",
+    "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f32, int, float, from_f_f32, 2, 1, 3)\n",
+    "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f32_i64, long long, float, from_f_f32, 2, 1, 3)\n",
+    "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4)\n",
+    "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16_i64, long long, __nv_bfloat16, from_f_bf16, 3, 0, 4)\n",
+    "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16, int, __half, from_f_f16, 3, 0, 4)\n",
+    "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16_i64, long long, __half, from_f_f16, 3, 0, 4)\n",
 );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,7 +91,7 @@ fn compose_retained_fold_source(
         ));
     }
     let macro_anchor = format!("#define {FOLD_MACRO}(");
-    let invocation_anchor = format!("\n{FOLD_MACRO}(f32,");
+    let invocation_anchor = format!("\n{FOLD_MACRO}(ssm_parallel_scan_bwd_fold_f32,");
     let macro_start = unique_index(&composed, &macro_anchor, "fold macro")?;
     let invocation_start = macro_start
         + unique_index(
@@ -116,11 +119,13 @@ fn compose_retained_fold_source(
     composed.insert_str(invocation_start, &definitions);
 
     let invocation_start = unique_index(&composed, LEGACY_INVOCATIONS, "legacy fold invocations")?;
+    // The short and staged routes serve shapes whose offsets all fit 32
+    // bits (route_for_shape), so each clone is built with int alone.
     let additions = concat!(
-        "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT(short_bf16, __nv_bfloat16, from_f_bf16, 3, 0, 4)\n",
-        "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT(short_f16,  __half,        from_f_f16,  3, 0, 4)\n",
-        "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED(staged_bf16, __nv_bfloat16, from_f_bf16, 3, 0, 4)\n",
-        "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED(staged_f16,  __half,        from_f_f16,  3, 0, 4)\n",
+        "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT(ssm_parallel_scan_bwd_fold_short_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4)\n",
+        "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT(ssm_parallel_scan_bwd_fold_short_f16, int, __half, from_f_f16, 3, 0, 4)\n",
+        "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED(ssm_parallel_scan_bwd_fold_staged_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4)\n",
+        "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED(ssm_parallel_scan_bwd_fold_staged_f16, int, __half, from_f_f16, 3, 0, 4)\n",
         "#undef DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT\n",
         "#undef DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED\n",
         "#undef M1_HALF_STAGE_INDEX\n",
@@ -153,7 +158,7 @@ fn make_short_clone(original: &str) -> Result<String, String> {
     }
     let replacement = macro_lines(&[
         "            /* Short rows need no shared store transpose; arithmetic is unchanged. */",
-        "            long long row_bc = ((bid * d_state + n) * (d_inner / G) + gid) * T;",
+        "            IDX row_bc = ((bid * d_state + n) * (d_inner / G) + gid) * T;",
         "            _Pragma(\"unroll\")",
         "            for (int i = 0; i < NITEMS; i++) {",
         "                int t = chunk_start + threadIdx.x * NITEMS + i;",
@@ -364,10 +369,10 @@ mod tests {
                 .unwrap();
         assert!(composed.contains(LEGACY_INVOCATIONS));
         for invocation in [
-            "FOLD_SHORT(short_bf16, __nv_bfloat16, from_f_bf16, 3, 0, 4)",
-            "FOLD_SHORT(short_f16,  __half,        from_f_f16,  3, 0, 4)",
-            "FOLD_STAGED(staged_bf16, __nv_bfloat16, from_f_bf16, 3, 0, 4)",
-            "FOLD_STAGED(staged_f16,  __half,        from_f_f16,  3, 0, 4)",
+            "FOLD_SHORT(ssm_parallel_scan_bwd_fold_short_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4)",
+            "FOLD_SHORT(ssm_parallel_scan_bwd_fold_short_f16, int, __half, from_f_f16, 3, 0, 4)",
+            "FOLD_STAGED(ssm_parallel_scan_bwd_fold_staged_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4)",
+            "FOLD_STAGED(ssm_parallel_scan_bwd_fold_staged_f16, int, __half, from_f_f16, 3, 0, 4)",
         ] {
             assert!(composed.contains(invocation));
         }

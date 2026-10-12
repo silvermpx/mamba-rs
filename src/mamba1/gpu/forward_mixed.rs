@@ -654,11 +654,8 @@ pub fn gpu_forward_mamba_backbone_mixed(
                         k.state_cap
                     ));
                 }
-                let kernel = match dt {
-                    WeightDtype::F32 | WeightDtype::Tf32 => &k.ssm_burnin_fwd,
-                    WeightDtype::Bf16 => &k.ssm_burnin_fwd_bf16,
-                    WeightDtype::F16 => &k.ssm_burnin_fwd_f16,
-                };
+                let width = crate::gpu::launch::seq_scan_index_width(b, t, di, ds, di, true);
+                let kernel = k.ssm_burnin_fwd_typed.get(width).get(dt);
                 let mut bld = ctx.stream.launch_builder(kernel);
                 let y = layer_acts.y.cached_ptr();
                 let hs = layer_acts.h_saved.cached_ptr();

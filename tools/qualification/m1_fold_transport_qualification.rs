@@ -50,7 +50,7 @@ fn compiled_fold_routes_keep_legacy_and_specialized_entries_available() {
         mamba1_sources.insert(cap, kernels.mamba1_compiler_identity().source_digest);
         inference_compilers.push(kernels.compiler_identity());
         for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
-            let legacy = kernels.ssm_parallel_bwd_fold_typed.get(dtype);
+            let legacy = kernels.ssm_parallel_bwd_fold_typed.i32.get(dtype);
             let short = kernels.ssm_parallel_bwd_fold_for_shape(dtype, 8, 33, 768, 16);
             let long = kernels.ssm_parallel_bwd_fold_for_shape(dtype, 8, 1300, 768, 16);
             let admitted = cap == 16 && dtype != WeightDtype::F32;

@@ -928,9 +928,9 @@ DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave_f16_i64,  long 
 // kernels (reduce_d_B, reduce_d_C, reduce_d_D, reduce_d_a_log) work unchanged.
 // ============================================================================
 
-#define DEFINE_SSM_PARALLEL_SCAN_BWD(SUFFIX, T_ACT, FROM_F)                   \
+#define DEFINE_SSM_PARALLEL_SCAN_BWD(NAME, IDX, T_ACT, FROM_F)                \
 extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void                          \
-ssm_parallel_scan_bwd_##SUFFIX(                                               \
+NAME(                                                                         \
     const float* __restrict__ h_saved,    /* [B*(T+1)*di*ds] */               \
     const T_ACT* __restrict__ delta,                                          \
     const T_ACT* __restrict__ u,                                              \
@@ -950,7 +950,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
     const float* run_tape,                                                    \
     int slim_tape                                                             \
 ) {                                                                           \
-    long long bid = blockIdx.x;                                               \
+    IDX bid = blockIdx.x;                                                     \
     int did = blockIdx.y;                                                     \
     if (bid >= batch || did >= d_inner) return;                               \
     if (d_state > MAX_DSTATE) return;                                         \
@@ -984,7 +984,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
     float D_d = D[did];                                                       \
     /* T-major tape: per-(b,d) row base; +n*(T+1) selects the state
      * lane's contiguous t-run. */                                            \
-    long long hsave_row_bd = (bid * d_inner + did) * d_state;                 \
+    IDX hsave_row_bd = (bid * d_inner + did) * d_state;                       \
     /* Initialize inter-chunk reverse-scan postfix to identity (1, 0). The   \
        chunk_first_a buffer is set to 1.0 to act as `a_{t+1}=1` for the      \
        very-last timestep of the very-last chunk (no future). */              \
@@ -1030,7 +1030,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
         }                                                                     \
         /* ---- Outer d_state loop ---- */                                    \
         for (int n = 0; n < d_state; n++) {                                   \
-            float a_dn = a_neg[(long long)did * d_state + n];                 \
+            float a_dn = a_neg[(IDX)did * d_state + n];                       \
             float a_dn_log2 = a_dn * LOG2E;                                   \
             float b_vals[NITEMS];                                             \
             load_row8(B_in + (bid * d_state + n) * T,                         \
@@ -1063,7 +1063,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             float H_vals[NITEMS];                                             \
             float h_prev_boundary = 0.0f;                                     \
             if (slim_tape) {                                                  \
-                long long row = (hsave_row_bd + n) * 3 * n_chunks;            \
+                IDX row = (hsave_row_bd + n) * 3 * n_chunks;                  \
                 float f_run_a = run_tape[row + 3 * chunk + 0];                \
                 float f_run_b = run_tape[row + 3 * chunk + 1];                \
                 float f_hentry = run_tape[row + 3 * chunk + 2];               \
@@ -1230,14 +1230,14 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
                 /* T-major: locals go [b][n][d][t] so this kernel's
                  * lane-over-t stores and the tmajor reducer's
                  * lane-over-t reads both coalesce. */                        \
-                long long btdn_typed = ((bid * d_state + n) * d_inner + did) * T \
+                IDX btdn_typed = ((bid * d_state + n) * d_inner + did) * T    \
                                  + t;                                         \
                 float h_curr, h_prev;                                         \
                 if (slim_tape) {                                              \
                     h_curr = H_vals[i];                                       \
                     h_prev = (i > 0) ? H_vals[i - 1] : h_prev_boundary;       \
                 } else {                                                      \
-                    long long h_row = (hsave_row_bd + n) * (T + 1);           \
+                    IDX h_row = (hsave_row_bd + n) * (T + 1);                 \
                     h_curr = h_saved[h_row + (t + 1)];                        \
                     h_prev = h_saved[h_row + t];                              \
                 }                                                             \
@@ -1327,9 +1327,12 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
     }                                                                         \
 }
 
-DEFINE_SSM_PARALLEL_SCAN_BWD(f32,  float,         from_f_f32)
-DEFINE_SSM_PARALLEL_SCAN_BWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_SSM_PARALLEL_SCAN_BWD(f16,  __half,        from_f_f16)
+DEFINE_SSM_PARALLEL_SCAN_BWD(ssm_parallel_scan_bwd_f32, int, float, from_f_f32)
+DEFINE_SSM_PARALLEL_SCAN_BWD(ssm_parallel_scan_bwd_f32_i64, long long, float, from_f_f32)
+DEFINE_SSM_PARALLEL_SCAN_BWD(ssm_parallel_scan_bwd_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_SSM_PARALLEL_SCAN_BWD(ssm_parallel_scan_bwd_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_SSM_PARALLEL_SCAN_BWD(ssm_parallel_scan_bwd_f16, int, __half, from_f_f16)
+DEFINE_SSM_PARALLEL_SCAN_BWD(ssm_parallel_scan_bwd_f16_i64, long long, __half, from_f_f16)
 
 // ============================================================================
 // Parallel reverse-scan backward, d-group fold variant.
@@ -1360,10 +1363,10 @@ DEFINE_SSM_PARALLEL_SCAN_BWD(f16,  __half,        from_f_f16)
 // per SM within 168 registers, and read the rows back from the tile at
 // each use so nothing spills. The launcher's byte count mirrors STAGED.
 
-#define DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(SUFFIX, T_ACT, FROM_F, MINB,        \
+#define DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(NAME, IDX, T_ACT, FROM_F, MINB,     \
                                           HOLD_ROWS, STAGED)                  \
 extern "C" __global__ __launch_bounds__(NTHREADS, MINB) void                  \
-ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
+NAME(                                                                         \
     const float* __restrict__ h_saved,                                        \
     const T_ACT* __restrict__ delta,                                          \
     const T_ACT* __restrict__ u,                                              \
@@ -1389,7 +1392,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
     int slim_tape                                                             \
 ) {                                                                           \
     const int G = SCAN_BWD_DGROUP;                                            \
-    long long bid = blockIdx.x;                                               \
+    IDX bid = blockIdx.x;                                                     \
     int gid = blockIdx.y; /* d group */                                       \
     int did0 = gid * G;                                                       \
     if (bid >= batch || did0 >= d_inner) return;                              \
@@ -1451,7 +1454,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
             __align__(16) T_ACT pk_u[G];                                      \
             __align__(16) T_ACT pk_dy[G];                                     \
             if (t < T) {                                                      \
-                long long row = (bid * T + t) * d_inner + did0;               \
+                IDX row = (bid * T + t) * d_inner + did0;                     \
                 if (sizeof(T_ACT) == 4) {                                     \
                     *reinterpret_cast<uint4 *>(pk_delta) =                    \
                         *reinterpret_cast<const uint4 *>(&delta[row]);        \
@@ -1498,7 +1501,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                         uv = to_f(stage_u[gg * CHUNK_SIZE +                   \
                                           threadIdx.x * NITEMS + i]);         \
                     } else {                                                  \
-                        long long row = (bid * T + t) * d_inner + did0 + gg;  \
+                        IDX row = (bid * T + t) * d_inner + did0 + gg;        \
                         dyv = to_f(dy[row]);                                  \
                         uv = to_f(u[row]);                                    \
                     }                                                         \
@@ -1536,7 +1539,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
             _Pragma("unroll")                                                 \
             for (int gg = 0; gg < G; gg++) {                                  \
                 int did = did0 + gg;                                          \
-                float a_dn = a_neg[(long long)did * d_state + n];             \
+                float a_dn = a_neg[(IDX)did * d_state + n];                   \
                 float a_dn_log2 = a_dn * LOG2E;                               \
                 float delta_h[NITEMS];                                        \
                 float u_h[NITEMS];                                            \
@@ -1556,7 +1559,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                         /* The lane the block does not stage: its rows come   \
                            straight from global memory, the same values the   \
                            tile would have held. */                           \
-                        long long row = (bid * T + t) * d_inner + did;        \
+                        IDX row = (bid * T + t) * d_inner + did;              \
                         delta_h[i] = to_f(delta[row]);                        \
                         u_h[i] = to_f(u[row]);                                \
                         dy_h[i] = to_f(dy[row]);                              \
@@ -1586,12 +1589,12 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                 if ((threadIdx.x & 31) == 0) {                                \
                     smem_next_a[threadIdx.x >> 5] = da_vals[0];               \
                 }                                                             \
-                long long hsave_row = (bid * d_inner + did) * d_state;        \
+                IDX hsave_row = (bid * d_inner + did) * d_state;              \
                 float f_hentry = 0.0f;                                        \
                 float H_vals[NITEMS];                                         \
                 if (slim_tape) {                                              \
                     /* Slim-tape replay pairs (see the ungrouped kernel). */  \
-                    long long row = (hsave_row + n) * 3 * n_chunks;           \
+                    IDX row = (hsave_row + n) * 3 * n_chunks;                 \
                     float f_run_a = run_tape[row + 3 * chunk + 0];            \
                     float f_run_b = run_tape[row + 3 * chunk + 1];            \
                     f_hentry = run_tape[row + 3 * chunk + 2];                 \
@@ -1724,7 +1727,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                         h_prev =                                              \
                             (i > 0) ? H_vals[i - 1] : h_prev_boundary;        \
                     } else {                                                  \
-                        long long h_row = (hsave_row + n) * (T + 1);          \
+                        IDX h_row = (hsave_row + n) * (T + 1);                \
                         h_curr = h_saved[h_row + (t + 1)];                    \
                         h_prev = h_saved[h_row + t];                          \
                     }                                                         \
@@ -1787,7 +1790,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                store spans 16 sectors per warp instruction. Stage through     \
                the CHUNK tile and store striped: consecutive lanes then       \
                write consecutive addresses. Values unchanged.            */   \
-            long long row_bc = ((bid * d_state + n) * (d_inner / G) + gid) * T; \
+            IDX row_bc = ((bid * d_state + n) * (d_inner / G) + gid) * T;     \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
                 stage_bc[threadIdx.x * NITEMS + i] = FROM_F(acc_B[i]);        \
@@ -1822,7 +1825,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                 __align__(16) T_ACT pack_d[G];                                \
                 __align__(16) T_ACT pack_u[G];                                \
                 __align__(16) T_ACT pack_raw[G];                              \
-                long long row = (bid * T + t) * d_inner + did0;               \
+                IDX row = (bid * T + t) * d_inner + did0;                     \
                 if (sizeof(T_ACT) == 4) {                                     \
                     *reinterpret_cast<uint4 *>(pack_raw) =                    \
                         *reinterpret_cast<const uint4 *>(&dt_raw[row]);       \
@@ -1881,9 +1884,12 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
     }                                                                         \
 }
 
-DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(f32,  float,         from_f_f32,  2, 1, 3)
-DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(bf16, __nv_bfloat16, from_f_bf16, 3, 0, 4)
-DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(f16,  __half,        from_f_f16,  3, 0, 4)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f32, int, float, from_f_f32, 2, 1, 3)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f32_i64, long long, float, from_f_f32, 2, 1, 3)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16_i64, long long, __nv_bfloat16, from_f_bf16, 3, 0, 4)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16, int, __half, from_f_f16, 3, 0, 4)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16_i64, long long, __half, from_f_f16, 3, 0, 4)
 
 
 // Clean up macros to avoid polluting subsequent translation units

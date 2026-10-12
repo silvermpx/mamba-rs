@@ -20,7 +20,9 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{conv_index_width, grid_1d_cover, grid_1d_wide, grid_norm};
+use crate::gpu::launch::{
+    conv_index_width, grid_1d_cover, grid_1d_wide, grid_norm, seq_scan_index_width,
+};
 use crate::gpu::options::GpuOptions;
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::weights::MambaWeights;
@@ -1393,10 +1395,18 @@ impl MambaGpuEngine {
                     ));
                 }
                 let dp = lw.d_param();
-                let mut bld = self
-                    .ctx
-                    .stream
-                    .launch_builder(&k.ssm_step_fwd_fused_typed.f32);
+                let mut bld = self.ctx.stream.launch_builder(
+                    &k.ssm_step_fwd_fused_typed
+                        .get(seq_scan_index_width(
+                            b,
+                            1,
+                            di,
+                            ds,
+                            xdbl_dim.max(2 * di),
+                            false,
+                        ))
+                        .f32,
+                );
                 let y_ssm_ptr = scratch.y.cached_ptr();
                 let delta_ssm_ptr = scratch.delta.cached_ptr();
                 let u_ssm_ptr = scratch.u.cached_ptr();
@@ -2050,10 +2060,18 @@ impl MambaGpuEngineMixed {
                 let b_off = dt_rank as i32;
                 let c_off = (dt_rank + ds) as i32;
                 let dp = lw.d_param();
-                let mut bld = engine
-                    .ctx
-                    .stream
-                    .launch_builder(k.ssm_step_fwd_fused_typed.get(dt));
+                let mut bld = engine.ctx.stream.launch_builder(
+                    k.ssm_step_fwd_fused_typed
+                        .get(seq_scan_index_width(
+                            b,
+                            1,
+                            di,
+                            ds,
+                            xdbl_dim.max(2 * di),
+                            false,
+                        ))
+                        .get(dt),
+                );
                 let y_ssm_ptr = scratch.y.cached_ptr();
                 let delta_ssm_ptr = scratch.delta.cached_ptr();
                 let u_ssm_ptr = scratch.u.cached_ptr();

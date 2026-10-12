@@ -198,7 +198,7 @@ fn run_seq_f32(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs) -> BwdOuts {
     let ti = t as i32;
     let di_i = di as i32;
     let ds_i = ds as i32;
-    let mut bld = ctx.stream.launch_builder(&k.ssm_backward_local);
+    let mut bld = ctx.stream.launch_builder(&k.ssm_backward_local.i32);
     let h = h_saved.cached_ptr();
     let dl = delta.cached_ptr();
     let uu = u.cached_ptr();
@@ -296,7 +296,7 @@ fn run_par_typed(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs, dtype: WeightD
     let ds_i = ds as i32;
     let mut bld = ctx
         .stream
-        .launch_builder(k.ssm_parallel_bwd_typed.get(dtype));
+        .launch_builder(k.ssm_parallel_bwd_typed.i32.get(dtype));
     let h = h_saved.cached_ptr();
     let dl = delta.cached_ptr();
     let uu = u.cached_ptr();
@@ -559,7 +559,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
     {
         let mut bld = ctx
             .stream
-            .launch_builder(k.ssm_parallel_bwd_fold_typed.get(dtype));
+            .launch_builder(k.ssm_parallel_bwd_fold_typed.i32.get(dtype));
         let hs = h_saved.cached_ptr();
         let tp = tape.cached_ptr();
         let dl = delta_saved.cached_ptr();
@@ -785,9 +785,9 @@ fn diag_fold_slim_vs_full_positions() {
         let d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * nc_fold * di * ds).unwrap();
         ctx.stream.synchronize().unwrap();
         let mut bld = ctx.stream.launch_builder(if fold {
-            k.ssm_parallel_bwd_fold_typed.get(dtype)
+            k.ssm_parallel_bwd_fold_typed.i32.get(dtype)
         } else {
-            k.ssm_parallel_bwd_typed.get(dtype)
+            k.ssm_parallel_bwd_typed.i32.get(dtype)
         });
         let hs = h_saved.cached_ptr();
         let tp = tape.cached_ptr();

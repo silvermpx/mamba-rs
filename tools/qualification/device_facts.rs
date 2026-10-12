@@ -62,7 +62,7 @@ fn device_and_kernel_facts() {
     let facts: Vec<(&str, &cudarc::driver::CudaFunction, u32, usize)> = vec![
         (
             "ssm_parallel_bwd_fold_bf16 (production)",
-            ctx.kernels.ssm_parallel_bwd_fold_typed.get(dtype),
+            ctx.kernels.ssm_parallel_bwd_fold_typed.i32.get(dtype),
             block_of(&fold_cfg),
             fold_cfg.shared_mem_bytes as usize,
         ),
@@ -70,13 +70,14 @@ fn device_and_kernel_facts() {
             "ssm_parallel_bwd_fold_f32 (f32 training)",
             ctx.kernels
                 .ssm_parallel_bwd_fold_typed
+                .i32
                 .get(WeightDtype::F32),
             block_of(&fold_f32_cfg),
             fold_f32_cfg.shared_mem_bytes as usize,
         ),
         (
             "ssm_parallel_bwd_bf16 (legacy route)",
-            ctx.kernels.ssm_parallel_bwd_typed.get(dtype),
+            ctx.kernels.ssm_parallel_bwd_typed.i32.get(dtype),
             block_of(&plain_cfg),
             plain_cfg.shared_mem_bytes as usize,
         ),

@@ -149,14 +149,11 @@ pub struct MambaKernels {
     pub state_cap: usize,
 
     // -- SSM recurrence --
-    /// Single-step SSM forward (T=1 inference).
-    pub ssm_step_fwd: CudaFunction,
-    /// Multi-step SSM forward with activation saves for backward.
-    pub ssm_burnin_fwd: CudaFunction,
-    /// Multi-step SSM forward without activation saves (target network).
-    pub ssm_burnin_fwd_nosave: CudaFunction,
+    /// Multi-step SSM forward with activation saves for backward: f32 and
+    /// the typed I/O builds with f32 saves, in both offset widths.
+    pub ssm_burnin_fwd_typed: ByIndexWidth<TypedKernel>,
     /// Per-(b,t,d,n) local SSM backward: dh, du, d_delta contributions.
-    pub ssm_backward_local: CudaFunction,
+    pub ssm_backward_local: ByIndexWidth<CudaFunction>,
     /// Fused dB+dC reduction `[B*T*d_state]` each, `=`-store (no memset
     /// precondition); .get(dtype) picks the input promotion variant.
     pub ssm_reduce_d_bc_typed: TypedKernel,
@@ -234,12 +231,6 @@ pub struct MambaKernels {
     /// f32 → f16 downcast for weight storage.
     pub cast_f32_to_f16: CudaFunction,
 
-    // -- Typed training-forward kernels (bf16/f16 variants of burnin save) --
-    /// bf16 multi-step SSM forward with typed I/O + f32 saves.
-    pub ssm_burnin_fwd_bf16: CudaFunction,
-    /// f16 multi-step SSM forward with typed I/O + f32 saves.
-    pub ssm_burnin_fwd_f16: CudaFunction,
-
     // -- Typed training-backward kernels --
     /// Typed dispatch (f32/bf16/f16) for `gating_backward`. dx/dy/d_y/d_gate
     /// typed; matches DEFINE_GATING_BWD macro in mamba_ssm_elementwise.cu.
@@ -270,7 +261,7 @@ pub struct MambaKernels {
     /// typed; h_saved/a_neg/D/d_D_local/d_a_log_local stay f32 (BPTT state +
     /// T-length accumulators). Matches DEFINE_SSM_BACKWARD_LOCAL_BWD macro
     /// in mamba_ssm.cu. Validated against state-spaces/mamba reference.
-    pub ssm_backward_local_typed: TypedKernel,
+    pub ssm_backward_local_typed: ByIndexWidth<TypedKernel>,
     /// One-kernel d_xdbl assembly (dt|B|C ranges tile the row): dt source
     /// typed, B/C sources f32 reduce outputs, FROM_F(0.0f + v) stores.
     pub pack_xdbl_cols_typed: TypedKernel,
@@ -307,11 +298,13 @@ pub struct MambaKernels {
     pub softplus_copy_typed: TypedKernel,
     /// The decode SSM step with softplus, the B/C gather and the gating
     /// folded in: the decode routes' only step kernel.
-    pub ssm_step_fwd_fused_typed: TypedKernel,
+    pub ssm_step_fwd_fused_typed: ByIndexWidth<TypedKernel>,
     /// Conv1d step with the SiLU fused into its store: the decode routes'
     /// only conv step kernel, one launch per layer.
     pub conv1d_step_fwd_silu_typed: ByIndexWidth<TypedKernel>,
-    pub ssm_burnin_nosave_typed: TypedKernel,
+    /// Multi-step SSM forward without activation saves (target network and
+    /// prefill), every activation type in both offset widths.
+    pub ssm_burnin_nosave_typed: ByIndexWidth<TypedKernel>,
     pub softplus_bwd_typed: TypedKernel,
     pub gather_last_timestep_typed: TypedKernel,
     pub vec_cast_zplus_typed: TypedKernel,
@@ -362,12 +355,12 @@ pub struct MambaKernels {
     /// to skip forward re-derivation. Outputs follow the existing _local
     /// convention so the existing reduction kernels work unchanged.
     /// f32 / bf16 / f16 instantiations from one DEFINE_* macro.
-    pub ssm_parallel_bwd_typed: TypedKernel,
+    pub ssm_parallel_bwd_typed: ByIndexWidth<TypedKernel>,
     /// d-group fold variant: each block folds SCAN_BWD_DGROUP d lanes'
     /// dB/dC terms and writes one partial row per group. Used when
     /// d_inner is divisible by the group size; f32 staging needs the
     /// MAX_DYNAMIC_SHARED opt-in (~65 KB).
-    pub ssm_parallel_bwd_fold_typed: TypedKernel,
+    pub ssm_parallel_bwd_fold_typed: ByIndexWidth<TypedKernel>,
     ssm_parallel_bwd_fold_short_typed: Option<HalfKernel>,
     ssm_parallel_bwd_fold_staged_typed: Option<HalfKernel>,
 
@@ -1499,10 +1492,11 @@ impl MambaKernels {
             shared_artifact_identity,
             triad,
             // SSM
-            ssm_step_fwd: get("ssm_step_forward")?,
-            ssm_burnin_fwd: get("ssm_burnin_forward")?,
-            ssm_burnin_fwd_nosave: get("ssm_burnin_forward_nosave")?,
-            ssm_backward_local: get("ssm_backward_local")?,
+            ssm_burnin_fwd_typed: load_widths("ssm_burnin_forward")?,
+            ssm_backward_local: ByIndexWidth {
+                i32: get("ssm_backward_local")?,
+                i64: get("ssm_backward_local_i64")?,
+            },
             ssm_reduce_d_bc_typed: TypedKernel {
                 f32: get("ssm_reduce_d_BC_f32")?,
                 bf16: get("ssm_reduce_d_BC_bf16")?,
@@ -1546,8 +1540,6 @@ impl MambaKernels {
             cast_f32_to_f16: get("cast_f32_to_f16")?,
             cast_bf16_to_f32: get("cast_bf16_to_f32")?,
             cast_f16_to_f32: get("cast_f16_to_f32")?,
-            ssm_burnin_fwd_bf16: get("ssm_burnin_forward_bf16")?,
-            ssm_burnin_fwd_f16: get("ssm_burnin_forward_f16")?,
 
             // parallel scan
             ssm_parallel_fwd: ByIndexWidth {
@@ -1582,20 +1574,15 @@ impl MambaKernels {
                     f16: get("ssm_parallel_scan_fwd_nosave_f16_i64")?,
                 },
             },
-            ssm_parallel_bwd_typed: TypedKernel {
-                f32: get("ssm_parallel_scan_bwd_f32")?,
-                bf16: get("ssm_parallel_scan_bwd_bf16")?,
-                f16: get("ssm_parallel_scan_bwd_f16")?,
-            },
+            ssm_parallel_bwd_typed: load_widths("ssm_parallel_scan_bwd")?,
             ssm_parallel_bwd_fold_typed: {
-                let k = TypedKernel {
-                    f32: get("ssm_parallel_scan_bwd_fold_f32")?,
-                    bf16: get("ssm_parallel_scan_bwd_fold_bf16")?,
-                    f16: get("ssm_parallel_scan_bwd_fold_f16")?,
-                };
+                let k = load_widths("ssm_parallel_scan_bwd_fold")?;
                 // The f32 delta/u/dy stage is ~49 KB on top of the ~16 KB
                 // f32 workspace — past the 48 KB static cap.
-                for f in [&k.f32, &k.bf16, &k.f16] {
+                for f in [&k.i32, &k.i64]
+                    .into_iter()
+                    .flat_map(|w| [&w.f32, &w.bf16, &w.f16])
+                {
                     f.set_attribute(
                         cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                         67_584,
@@ -1775,9 +1762,9 @@ impl MambaKernels {
             gate_mul_silu_v_typed: load_typed("gate_mul_silu_v")?,
             elementwise_mul_v_typed: load_typed("elementwise_mul_v")?,
             softplus_copy_typed: load_typed("softplus_copy")?,
-            ssm_step_fwd_fused_typed: load_typed("ssm_step_forward_fused")?,
+            ssm_step_fwd_fused_typed: load_widths("ssm_step_forward_fused")?,
             conv1d_step_fwd_silu_typed: load_widths("conv1d_step_forward_silu")?,
-            ssm_burnin_nosave_typed: load_typed("ssm_burnin_forward_nosave")?,
+            ssm_burnin_nosave_typed: load_widths("ssm_burnin_forward_nosave")?,
             softplus_bwd_typed: load_typed("softplus_backward")?,
             gather_last_timestep_typed: load_typed("gather_last_timestep")?,
             vec_cast_zplus_typed: load_typed("vec_cast_zplus")?,
@@ -1794,7 +1781,7 @@ impl MambaKernels {
             conv1d_bwd_dco_typed: load_typed("conv1d_bwd_dco")?,
             conv1d_bwd_any_typed: load_widths("conv1d_bwd_any")?,
             // ssm_backward_local typed + typed-input reducers
-            ssm_backward_local_typed: load_typed("ssm_backward_local")?,
+            ssm_backward_local_typed: load_widths("ssm_backward_local")?,
             pack_xdbl_cols_typed: TypedKernel {
                 f32: get("pack_xdbl_cols_f32")?,
                 bf16: get("pack_xdbl_cols_bf16")?,
@@ -1867,7 +1854,20 @@ impl MambaKernels {
         inner: usize,
         state: usize,
     ) -> &CudaFunction {
-        let legacy = self.ssm_parallel_bwd_fold_typed.get(dtype);
+        let width = super::launch::scan_bwd_index_width(
+            batch,
+            time,
+            inner,
+            state,
+            super::launch::scan_tape_slim(),
+            true,
+        );
+        let legacy = self.ssm_parallel_bwd_fold_typed.get(width).get(dtype);
+        // The short and staged routes are built with int offsets alone; the
+        // shapes they serve always fit them.
+        if width == IndexWidth::I64 {
+            return legacy;
+        }
         match super::fold_transport::route_for_shape(dtype, batch, time, inner, state) {
             super::fold_transport::FoldRoute::Short => self
                 .ssm_parallel_bwd_fold_short_typed

@@ -192,6 +192,17 @@
   the backward are built the same way and pick their build per launch
   (`gpu::launch::conv_index_width`). Their fields in `MambaKernels` hold
   both builds as a `ByIndexWidth`.
+- The Mamba-1 sequential scans (the saving and the gated forward, the
+  decode step and both backwards), the parallel scan backward and its fold
+  are built the same way and pick their build per launch
+  (`gpu::launch::seq_scan_index_width` and `scan_bwd_index_width`). The
+  fold's short and staged routes on an RTX 4090 or RTX 6000 Ada keep their
+  32-bit code: the shapes they serve always fit it.
+  `MambaKernels::ssm_burnin_fwd_typed` replaces `ssm_burnin_fwd`,
+  `ssm_burnin_fwd_bf16` and `ssm_burnin_fwd_f16`. `ssm_burnin_fwd_nosave`
+  and `ssm_step_fwd` are gone with their kernels: the first was a second
+  f32 copy of the forward without saves, the second a decode step no path
+  launched. The other fields hold both builds as a `ByIndexWidth`.
 - `MambaKernels::conv1d_burnin_bwd_typed` and its kernel are gone: no path
   launched the serial conv backward since the tiled backward replaced it.
 - `GpuCtx::cublas()` hands the context's cuBLAS handle, which the context

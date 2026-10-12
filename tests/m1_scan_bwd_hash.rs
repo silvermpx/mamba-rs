@@ -165,7 +165,7 @@ fn m1_scan_bwd_output_hashes() {
             let mut bld = ctx.stream.launch_builder(if fold {
                 k.ssm_parallel_bwd_fold_for_shape(dtype, b, t, di, ds)
             } else {
-                k.ssm_parallel_bwd_typed.get(dtype)
+                k.ssm_parallel_bwd_typed.i32.get(dtype)
             });
             let hs = h_saved.cached_ptr();
             let tp = tape.cached_ptr();

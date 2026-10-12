@@ -23,7 +23,7 @@ use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::launch::{
     grid_1d_cover, grid_1d_wide, grid_norm, grid_parallel_scan, scan_fwd_index_width,
-    scan_fwd_nosave_index_width,
+    scan_fwd_nosave_index_width, seq_scan_index_width,
 };
 use cudarc::driver::PushKernelArg;
 use std::sync::Arc;
@@ -663,7 +663,10 @@ pub fn gpu_forward_mamba_layer(
                 .map_err(|e| format!("ssm_parallel_fwd mamba: {:?}", e))?;
         } else {
             // Sequential kernel: each thread handles one (b, d) pair over all T steps.
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_burnin_fwd);
+            let width = seq_scan_index_width(b, t, di, ds, di, true);
+            let mut builder = ctx
+                .stream
+                .launch_builder(&ctx.kernels.ssm_burnin_fwd_typed.get(width).f32);
             builder.arg(&layer_ptrs.ssm_state);
             builder.arg(acts.y.inner_mut());
             builder.arg(acts.h_saved.inner_mut());
@@ -1150,9 +1153,10 @@ pub fn gpu_forward_mamba_target_burnin(
                         .map_err(|e| format!("gate_from_tmajor target L{layer_idx}: {:?}", e))?;
                 }
             } else {
+                let width = seq_scan_index_width(b, t, di, ds, 2 * di, false);
                 let mut builder = ctx
                     .stream
-                    .launch_builder(&ctx.kernels.ssm_burnin_fwd_nosave);
+                    .launch_builder(&ctx.kernels.ssm_burnin_nosave_typed.get(width).f32);
                 builder.arg(&ssm_ptr);
                 builder.arg(scratch.gated.inner_mut());
                 builder.arg(scratch.delta.inner());

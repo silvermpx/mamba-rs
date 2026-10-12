@@ -646,7 +646,7 @@ pub(crate) fn qualify(device: &GpuDevice, kernels: &MambaKernels) {
             let selected = kernels
                 .ssm_parallel_bwd_fold_for_shape(dtype, shape.b, shape.t, shape.di, shape.ds);
             let specialized =
-                !std::ptr::eq(selected, kernels.ssm_parallel_bwd_fold_typed.get(dtype));
+                !std::ptr::eq(selected, kernels.ssm_parallel_bwd_fold_typed.i32.get(dtype));
             eprintln!("ROUTE shape={shape:?} dtype={dtype:?} specialized={specialized}");
             use cudarc::driver::sys::CUfunction_attribute_enum as Attribute;
             let optin = selected

@@ -739,6 +739,11 @@ path = "tests/m1_conv_index_width.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m1_scan_bwd_index_width"
+path = "tests/m1_scan_bwd_index_width.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "state_cap_refusal"
 path = "tests/state_cap_refusal.rs"
 required-features = ["cuda"]

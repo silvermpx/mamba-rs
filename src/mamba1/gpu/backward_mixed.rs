@@ -292,7 +292,16 @@ pub fn gpu_backward_mamba_layer_mixed(
             let mut bld = ctx.stream.launch_builder(if use_fold {
                 k.ssm_parallel_bwd_fold_for_shape(dtype, b, t, di, ds)
             } else {
-                k.ssm_parallel_bwd_typed.get(dtype)
+                k.ssm_parallel_bwd_typed
+                    .get(crate::gpu::launch::scan_bwd_index_width(
+                        b,
+                        t,
+                        di,
+                        ds,
+                        crate::gpu::launch::scan_tape_slim(),
+                        false,
+                    ))
+                    .get(dtype)
             });
             bld.arg(&h_p);
             bld.arg(&delta_p);
@@ -329,9 +338,13 @@ pub fn gpu_backward_mamba_layer_mixed(
             unsafe { bld.launch(cfg) }.map_err(|e| format!("ssm_parallel_bwd_typed: {e:?}"))?;
         } else {
             // Sequential typed bwd.
-            let mut bld = ctx
-                .stream
-                .launch_builder(k.ssm_backward_local_typed.get(dtype));
+            let mut bld = ctx.stream.launch_builder(
+                k.ssm_backward_local_typed
+                    .get(crate::gpu::launch::seq_scan_index_width(
+                        b, t, di, ds, di, true,
+                    ))
+                    .get(dtype),
+            );
             bld.arg(&h_p);
             bld.arg(&delta_p);
             bld.arg(&u_p);

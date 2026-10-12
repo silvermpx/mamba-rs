@@ -145,16 +145,27 @@ pub fn gpu_backward_mamba_layer(
         let ds_i = ds as i32;
         let use_parallel = dims.scan_mode.use_parallel(t, ds);
         let use_fold = use_parallel && di.is_multiple_of(crate::gpu::launch::SCAN_BWD_DGROUP);
+        let slim = crate::gpu::launch::scan_tape_slim();
         let kernel = if use_fold {
             ctx.kernels
                 .ssm_parallel_bwd_fold_typed
+                .get(crate::gpu::launch::scan_bwd_index_width(
+                    b, t, di, ds, slim, true,
+                ))
                 .get(crate::gpu::dtype::WeightDtype::F32)
         } else if use_parallel {
             ctx.kernels
                 .ssm_parallel_bwd_typed
+                .get(crate::gpu::launch::scan_bwd_index_width(
+                    b, t, di, ds, slim, false,
+                ))
                 .get(crate::gpu::dtype::WeightDtype::F32)
         } else {
-            &ctx.kernels.ssm_backward_local
+            ctx.kernels
+                .ssm_backward_local
+                .get(crate::gpu::launch::seq_scan_index_width(
+                    b, t, di, ds, di, true,
+                ))
         };
         if use_parallel && !use_fold {
             // The ungrouped parallel kernel accumulates its per-sample
