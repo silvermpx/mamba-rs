@@ -1,10 +1,11 @@
 //! Mamba-3 MIMO training on the GPU, the chunked path and the sequential
-//! one, against the CPU trainer: the training forward's rows, every weight gradient and the
-//! input gradient over ranks, groups, rope fractions, the MLP after the
-//! mixer, a head that is not a whole number of warps and the released head
-//! shape, in f32 and in the tf32, bf16 and f16 lanes; the gradients do not
-//! depend on the checkpoint stride and a repeated backward gives the same
-//! bits; AdamW lowers a loss in every lane.
+//! one, against the CPU trainer: the training forward's rows, every weight
+//! gradient and the input gradient over ranks, groups, rope fractions, the
+//! MLP after the mixer, a head that is not a whole number of warps, the
+//! released head shape and heads the sequential backward serves from
+//! global memory, in f32 and in the tf32, bf16 and f16 lanes. The gradients
+//! do not depend on the checkpoint stride, a repeated backward gives the
+//! same bits, and AdamW lowers a loss in every lane.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::ScanMode;
@@ -458,6 +459,95 @@ fn m3_mimo_gpu_train_fits_a_wide_rank() {
             assert!(
                 worst.0 < grad_tol,
                 "{mode:?} {dtype:?}: gradient {} {:.3e}",
+                worst.1,
+                worst.0
+            );
+        }
+    }
+}
+
+/// Heads the sequential backward serves from global memory, against the
+/// CPU trainer: two heads wider than a block, and rank 16 over 256 states,
+/// whose keys and state rows pass shared memory together. The forward runs
+/// the first in tiles of channels.
+#[test]
+fn m3_mimo_gpu_train_global_backward_matches_the_cpu_trainer() {
+    let base = Mamba3MimoConfig {
+        d_model: 64,
+        d_state: 16,
+        headdim: 16,
+        n_layers: 2,
+        scan_mode: ScanMode::Sequential,
+        ..Mamba3MimoConfig::default()
+    };
+    let heads = [
+        (
+            "heads wider than a block",
+            Mamba3MimoConfig {
+                d_model: 640,
+                expand: 4,
+                headdim: 1280,
+                mimo_rank: 2,
+                ..base
+            },
+        ),
+        (
+            "rank 16 over 256 states",
+            Mamba3MimoConfig {
+                mimo_rank: 16,
+                d_state: 256,
+                headdim: 64,
+                ..base
+            },
+        ),
+    ];
+    let (input_dim, batch, seq) = (40usize, 2usize, 100usize);
+    for (label, cfg) in heads {
+        cfg.validate().unwrap();
+        for (dtype, fwd_tol, grad_tol) in [
+            (WeightDtype::F32, 5e-5, 5e-4),
+            (WeightDtype::Bf16, 3e-2, 2e-1),
+        ] {
+            let w = drawn(&cfg, input_dim, 17);
+            let dm = cfg.d_model;
+            let inputs = det(batch * seq * input_dim, 530, 1.0);
+            let d_out = det(batch * seq * dm, 531, 1.0);
+            let (want_rows, want_grads, want_d_in) =
+                cpu_reference(&cfg, &w, (&inputs, &d_out), (input_dim, batch, seq));
+            let mut tr = Mamba3MimoGpuTrainer::new_with_stride(
+                &w,
+                cfg,
+                TrainSessionCfg::new(input_dim, batch, seq),
+                GpuOptions::default().dtype(dtype),
+                8,
+            )
+            .unwrap();
+            let mut rows = vec![0f32; batch * seq * dm];
+            tr.forward(&inputs, &mut rows).unwrap();
+            let mut d_in = vec![0f32; batch * seq * input_dim];
+            tr.backward(&d_out, Some(&mut d_in)).unwrap();
+            let grads = tr.grads().unwrap();
+            tr.backward(&d_out, None).unwrap();
+            assert!(
+                tr.grads().unwrap() == grads,
+                "{dtype:?} {label}: a repeated backward moved"
+            );
+            let fwd = rel_l2(&rows, &want_rows);
+            let din = rel_l2(&d_in, &want_d_in);
+            let worst = worst_gradient(&grads, &want_grads);
+            eprintln!(
+                "{dtype:?} {label}: forward {fwd:.2e}, input gradient {din:.2e}, worst weight \
+                 gradient {:.2e} ({})",
+                worst.0, worst.1
+            );
+            assert!(fwd < fwd_tol, "{dtype:?} {label}: forward {fwd:.3e}");
+            assert!(
+                din < grad_tol,
+                "{dtype:?} {label}: input gradient {din:.3e}"
+            );
+            assert!(
+                worst.0 < grad_tol,
+                "{dtype:?} {label}: gradient {} {:.3e}",
                 worst.1,
                 worst.0
             );

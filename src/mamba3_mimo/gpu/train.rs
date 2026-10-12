@@ -32,8 +32,8 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::{MimoChunkedPtrs, MimoExec, launch_chunked_scan};
 use super::kernels::{
-    CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunked_geom, scan_bwd_record_floats,
-    scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
+    CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, chunked_geom,
+    scan_bwd_global_geom, scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
 };
 use crate::config::ScanMode;
 use crate::gpu::adamw::GpuAdamW;
@@ -313,6 +313,14 @@ struct BwdScratch {
     d_cn_h: GpuBuffer,
     d_tanh_h: GpuBuffer,
     rec: GpuBuffer,
+    /// The global sequential backward's scratch: dS, the key gradients,
+    /// the [P, R] tiles (each one element when in shared memory), the
+    /// channels' own accumulators and the block sums' leaves.
+    bwd_ds: GpuBuffer,
+    bwd_kg: GpuBuffer,
+    bwd_pr: GpuBuffer,
+    bwd_ch: GpuBuffer,
+    bwd_leaves: GpuBuffer,
     g_x: GpuBuffer,
     g_z: GpuBuffer,
     g_o: GpuBuffer,
@@ -372,6 +380,9 @@ pub struct Mamba3MimoGpuTrainer {
     /// The sequential forward's launch: the whole head per block, or tiles
     /// of its channels, and its counters (see the engine's).
     scan: ScanGeom,
+    /// The sequential backward's global kernel and its launch, when the
+    /// head does not fit the shared one.
+    seq_bwd: Option<ScanBwdGlobalGeom>,
     scan_done: GpuByteBuffer,
     /// The chunked forward's chunk contributions, one layer's worth.
     contrib: GpuBuffer,
@@ -473,13 +484,6 @@ impl Mamba3MimoGpuTrainer {
             cfg.mimo_rank,
             cfg.num_rope_angles(),
         );
-        let threads = hd.next_multiple_of(32);
-        if threads > 1024 || na > 256 {
-            return Err(format!(
-                "the GPU trainer serves heads of up to 1024 channels and 256 rotation angles, \
-                 got {hd} and {na}"
-            ));
-        }
         let role = GemmRole::triad(dtype);
         let ctx = match opts.mode {
             Some(mode) => GpuCtx::new_with_state_cap_mode_and_role(device, 64, mode, role)?,
@@ -504,22 +508,20 @@ impl Mamba3MimoGpuTrainer {
         } else {
             None
         };
-        if chunked.is_none() {
-            if cfg.scan_mode == ScanMode::Parallel {
-                return Err(format!(
-                    "the chunked training scan of a rank-{rank} head of {hd} channels and {ds} \
-                     states does not fit this GPU's {optin} bytes of shared memory; \
-                     ScanMode::Auto trains it by the recurrence"
-                ));
-            }
-            let smem = scan_bwd_smem_bytes((hd, ds, rank, na));
-            if smem > optin {
-                return Err(format!(
-                    "a head of {hd} channels and {ds} states needs {smem} bytes of shared \
-                     memory for the backward; this GPU serves {optin}"
-                ));
-            }
+        if chunked.is_none() && cfg.scan_mode == ScanMode::Parallel {
+            return Err(format!(
+                "the chunked training scan of a rank-{rank} head of {hd} channels and {ds} \
+                 states does not fit this GPU's {optin} bytes of shared memory; \
+                 ScanMode::Auto trains it by the recurrence"
+            ));
         }
+        // The sequential backward: the head in shared memory when it fits
+        // there and in the kernel's block, else the global kernel.
+        let seq_bwd = (scan_bwd_smem_bytes((hd, ds, rank, na)) > optin
+            || scan_bwd_threads(hd) > kernels.scan_bwd_block)
+            .then(|| {
+                scan_bwd_global_geom((hd, ds, rank, na), kernels.scan_bwd_global_block, optin)
+            });
         let layout = Layout::of(w);
         let s = &ctx.stream;
         let scan_done = GpuByteBuffer::zeros(s, (batch * cfg.nheads() * 4).max(4))?;
@@ -578,6 +580,12 @@ impl Mamba3MimoGpuTrainer {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let per_bh = batch * nh;
+        // The global sequential backward's buffers: one element each unless
+        // that kernel runs and keeps the group in global memory.
+        let global = |keep: fn(&ScanBwdGlobalGeom) -> bool, n: usize| match seq_bwd {
+            Some(g) if chunked.is_none() && keep(&g) => n,
+            _ => 1,
+        };
         let bwd = BwdScratch {
             d_rows: z(rows * dm)?,
             d_temp: z(rows * dm)?,
@@ -599,6 +607,11 @@ impl Mamba3MimoGpuTrainer {
             rec: z(seq_n(
                 per_bh * stride * scan_bwd_record_floats(hd, ds, rank, na),
             ))?,
+            bwd_ds: z(global(|g| !g.ds_shared, per_bh * hd * ds))?,
+            bwd_kg: z(global(|g| !g.keys_shared, per_bh * 5 * rank * ds))?,
+            bwd_pr: z(global(|g| !g.tiles_shared, per_bh * 3 * hd * rank))?,
+            bwd_ch: z(global(|_| true, per_bh * 2 * hd))?,
+            bwd_leaves: z(global(|g| g.wide, per_bh * 4 * hd.next_multiple_of(32)))?,
             g_x: z(per_bh * rank * hd)?,
             g_z: z(per_bh * rank * hd)?,
             g_o: z(per_bh * rank * hd)?,
@@ -699,6 +712,7 @@ impl Mamba3MimoGpuTrainer {
             chunked,
             scan,
             scan_done,
+            seq_bwd,
             contrib,
             dtype,
             act,
@@ -2025,12 +2039,33 @@ impl Mamba3MimoGpuTrainer {
                     at(base, ls.mimo_z),
                     at(base, ls.mimo_o),
                 ];
+                let (kernel, threads, smem) = match self.seq_bwd {
+                    None => (
+                        &k.scan_bwd,
+                        scan_bwd_threads(hd),
+                        scan_bwd_smem_bytes((hd, ds, rank, na)),
+                    ),
+                    Some(g) => (&k.scan_bwd_global, g.threads, g.smem),
+                };
                 let cfg = LaunchConfig {
                     grid_dim: (b as u32, nh as u32, 1),
-                    block_dim: (scan_bwd_threads(hd) as u32, 1, 1),
-                    shared_mem_bytes: scan_bwd_smem_bytes((hd, ds, rank, na)) as u32,
+                    block_dim: (threads as u32, 1, 1),
+                    shared_mem_bytes: smem as u32,
                 };
-                let mut bld = stream.launch_builder(k.scan_bwd.get(act));
+                // A null scratch keeps its group in shared memory.
+                let scratch = self.seq_bwd.map(|g| {
+                    let home = |global: bool, buf: &GpuBuffer| {
+                        if global { buf.cached_ptr() } else { 0u64 }
+                    };
+                    [
+                        home(!g.ds_shared, &s.bwd_ds),
+                        home(!g.keys_shared, &s.bwd_kg),
+                        home(!g.tiles_shared, &s.bwd_pr),
+                        s.bwd_ch.cached_ptr(),
+                        home(g.wide, &s.bwd_leaves),
+                    ]
+                });
+                let mut bld = stream.launch_builder(kernel.get(act));
                 bld.arg(&d_proj);
                 bld.arg(&ld_proj);
                 bld.arg(&d_bn_h);
@@ -2040,6 +2075,11 @@ impl Mamba3MimoGpuTrainer {
                     bld.arg(p);
                 }
                 bld.arg(&rec);
+                if let Some(ptrs) = &scratch {
+                    for p in ptrs {
+                        bld.arg(p);
+                    }
+                }
                 bld.arg(&d_o);
                 bld.arg(&proj);
                 bld.arg(&bn);

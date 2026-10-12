@@ -37,6 +37,13 @@ pub struct Mamba3MimoKernels {
     pub scan_threads: usize,
     /// The sequential backward of the scan (replay per segment).
     pub scan_bwd: TypedKernel,
+    /// `mimo_scan_bwd` for a head whose rows, keys or tiles do not fit
+    /// shared memory (see [`scan_bwd_global_geom`]).
+    pub scan_bwd_global: TypedKernel,
+    /// The widest block each sequential backward launches, from its
+    /// register use.
+    pub scan_bwd_block: usize,
+    pub scan_bwd_global_block: usize,
     pub bc_norm_bwd: TypedKernel,
     pub angle_bwd: TypedKernel,
     pub mlp_gate_bwd: TypedKernel,
@@ -311,6 +318,68 @@ pub fn scan_bwd_threads(hd: usize) -> usize {
     hd.next_multiple_of(32).max(256)
 }
 
+/// The launch of `mimo_scan_bwd_global` for a head (see
+/// [`scan_bwd_global_geom`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScanBwdGlobalGeom {
+    pub threads: usize,
+    /// dS rows, the key gradients (5 R N) and the [P, R] tiles each in
+    /// shared memory, else in a global scratch.
+    pub ds_shared: bool,
+    pub keys_shared: bool,
+    pub tiles_shared: bool,
+    /// The head is wider than the block: the block sums keep their leaves
+    /// past the block in a global scratch of 4 lanes floats per sequence
+    /// and head.
+    pub wide: bool,
+    pub smem: usize,
+}
+
+/// The launch of `mimo_scan_bwd_global` for a head of `hd` channels, `ds`
+/// states, rank `rank` and `na` angles, its blocks at most `max_threads`
+/// wide with `cap` bytes of shared memory. A head that fits the block gets
+/// a thread per channel, at least one per (rank, state) chain up to a
+/// thousand and at least 256 for the passes over the state. The groups go
+/// into shared memory while they fit, dS first (four passes a token read
+/// it), then the key gradients, then the tiles.
+pub fn scan_bwd_global_geom(
+    (hd, ds, rank, na): (usize, usize, usize, usize),
+    max_threads: usize,
+    cap: usize,
+) -> ScanBwdGlobalGeom {
+    let lanes = hd.next_multiple_of(32);
+    let max_threads = (max_threads / 32 * 32).max(32);
+    let wide = lanes > max_threads;
+    let threads = if wide {
+        1usize << max_threads.ilog2()
+    } else {
+        lanes
+            .max((rank * ds).min(1024).next_multiple_of(32))
+            .max(256)
+            .min(max_threads)
+    };
+    let leaves = if wide { threads } else { lanes };
+    let mut floats = 3 * na + 3 * leaves;
+    let mut take = |n: usize| {
+        let fits = (floats + n) * 4 <= cap;
+        if fits {
+            floats += n;
+        }
+        fits
+    };
+    let ds_shared = take((hd * (ds + 1)).next_multiple_of(4));
+    let keys_shared = take(5 * rank * ds);
+    let tiles_shared = take(3 * hd * rank);
+    ScanBwdGlobalGeom {
+        threads,
+        ds_shared,
+        keys_shared,
+        tiles_shared,
+        wide,
+        smem: floats * 4,
+    }
+}
+
 /// Tokens per chunk of the chunked path.
 pub const CHUNK: usize = 64;
 
@@ -446,6 +515,10 @@ impl Mamba3MimoKernels {
         let scan_ckpt = typed("mimo_scan_ckpt")?;
         let scan_threads =
             max_block(&scan, "scan")?.min(max_block(&scan_ckpt, "checkpointing scan")?);
+        let scan_bwd = typed("mimo_scan_bwd")?;
+        let scan_bwd_global = typed("mimo_scan_bwd_global")?;
+        let scan_bwd_block = max_block(&scan_bwd, "scan backward")?;
+        let scan_bwd_global_block = max_block(&scan_bwd_global, "global scan backward")?;
         let mut kernels = Self {
             bc_norm: typed("mimo_bc_norm")?,
             scan,
@@ -459,7 +532,10 @@ impl Mamba3MimoKernels {
             mlp_gate: typed("mlp_gate_fwd")?,
             scan_ckpt,
             scan_threads,
-            scan_bwd: typed("mimo_scan_bwd")?,
+            scan_bwd,
+            scan_bwd_global,
+            scan_bwd_block,
+            scan_bwd_global_block,
             bc_norm_bwd: typed("mimo_bc_norm_bwd")?,
             angle_bwd: typed("mimo_angle_bwd")?,
             mlp_gate_bwd: typed("mlp_gate_bwd")?,
@@ -497,6 +573,7 @@ impl Mamba3MimoKernels {
                 (&kernels.scan, "scan"),
                 (&kernels.scan_ckpt, "scan_ckpt"),
                 (&kernels.scan_bwd, "scan_bwd"),
+                (&kernels.scan_bwd_global, "scan_bwd_global"),
                 (&kernels.chunk_state, "chunk_state"),
                 (&kernels.chunk_state_tiles, "chunk_state_tiles"),
                 (&kernels.chunk_scan, "chunk_scan"),
