@@ -375,7 +375,7 @@ mod ada_s3_pair {
         let beta = 0.0f32;
         unsafe {
             result::gemm_ex(
-                *ctx.blas.handle(),
+                *ctx.take_cublas().expect("cuBLAS handle").handle(),
                 sys::cublasOperation_t::CUBLAS_OP_N,
                 sys::cublasOperation_t::CUBLAS_OP_N,
                 shape.n as i32,
@@ -401,7 +401,7 @@ mod ada_s3_pair {
 
     fn modes(ctx: &GpuCtx) -> String {
         use cudarc::cublas::sys::*;
-        let handle = *ctx.blas.handle();
+        let handle = *ctx.take_cublas().expect("cuBLAS handle").handle();
         let success = cublasStatus_t::CUBLAS_STATUS_SUCCESS;
         let mut math = cublasMath_t::CUBLAS_DEFAULT_MATH;
         let mut pointer = cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
@@ -10883,7 +10883,7 @@ fn inference_ada_vendor_launch(
     let alpha = 1.0f32;
     unsafe {
         cudarc::cublas::result::gemm_ex(
-            *ctx.blas.handle(),
+            *ctx.take_cublas().expect("cuBLAS handle").handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             shape.n as c_int,
@@ -15363,7 +15363,7 @@ fn inference_ada_production_auto_paired_precision_cublas() {
     let cohort = render_cohort_fragment(
         ProductionAutoInventory::Release070,
         ctx.state_cap(),
-        ctx._blas_workspace.len(),
+        ctx.cublas_workspace_bytes(),
     );
     let compiler = ctx.kernels.compiler_identity();
     assert_eq!(

@@ -1218,7 +1218,7 @@ fn inspect_vendor_graph(
 
 fn cublas_modes(ctx: &GpuCtx) -> Result<String, String> {
     use cudarc::cublas::sys::*;
-    let handle = *ctx.blas.handle();
+    let handle = *ctx.take_cublas().expect("cuBLAS handle").handle();
     let success = cublasStatus_t::CUBLAS_STATUS_SUCCESS;
     let mut math = cublasMath_t::CUBLAS_DEFAULT_MATH;
     let mut pointer = cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;

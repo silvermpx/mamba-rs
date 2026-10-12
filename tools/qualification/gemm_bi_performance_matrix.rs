@@ -2237,7 +2237,7 @@ mod cublaslt_tn_nt_qualification {
             let geometry = sm120_paired_gemm_ex_geometry(self.cell);
             unsafe {
                 cudarc::cublas::result::gemm_ex(
-                    *ctx.blas.handle(),
+                    *ctx.take_cublas().expect("cuBLAS handle").handle(),
                     geometry.trans_a,
                     geometry.trans_b,
                     geometry.m,
@@ -4962,7 +4962,7 @@ fn launch_cublas_denominator(
     };
     unsafe {
         cudarc::cublas::result::gemm_ex(
-            *ctx.blas.handle(),
+            *ctx.take_cublas().expect("cuBLAS handle").handle(),
             geometry.trans_a,
             geometry.trans_b,
             geometry.m,
@@ -5761,7 +5761,7 @@ fn emit_final_auto_record(
         source_sha,
         escape_json_string(variant),
         inventory.label(),
-        ctx._blas_workspace.len(),
+        ctx.cublas_workspace_bytes(),
         quiet_gpu.uuid,
         cc.0,
         cc.1,
@@ -6599,7 +6599,7 @@ mod tn_narrow_cublas_pair {
         let beta = 1.0f32;
         unsafe {
             cudarc::cublas::result::gemm_ex(
-                *ctx.blas.handle(),
+                *ctx.take_cublas().expect("cuBLAS handle").handle(),
                 geometry.trans_a,
                 geometry.trans_b,
                 geometry.m,
@@ -8808,11 +8808,11 @@ fn run_gemm_bi_production_auto_paired_cublas(
         "final AUTO context ignored requested state capacity"
     );
     assert_eq!(
-        auto_ctx._blas_workspace.len(),
-        vendor_ctx._blas_workspace.len(),
+        auto_ctx.cublas_workspace_bytes(),
+        vendor_ctx.cublas_workspace_bytes(),
         "final AUTO contexts disagree on cuBLAS workspace size"
     );
-    let cublas_workspace_bytes = auto_ctx._blas_workspace.len();
+    let cublas_workspace_bytes = auto_ctx.cublas_workspace_bytes();
     auto_ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     auto_ctx.route_controls().set_family(BiGemmFamily::Triad);
     auto_ctx
@@ -11507,7 +11507,7 @@ mod sm89_nt_finalist_once21 {
 
     fn cublas_modes(ctx: &GpuCtx) -> Result<String, String> {
         use cudarc::cublas::sys::*;
-        let handle = *ctx.blas.handle();
+        let handle = *ctx.take_cublas().expect("cuBLAS handle").handle();
         let success = cublasStatus_t::CUBLAS_STATUS_SUCCESS;
         let mut math = cublasMath_t::CUBLAS_DEFAULT_MATH;
         let mut pointer = cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;

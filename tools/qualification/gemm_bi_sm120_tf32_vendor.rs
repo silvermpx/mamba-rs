@@ -429,7 +429,7 @@ mod gpu {
             // Row-major NN is transposed as column-major C^T = B^T * A^T.
             unsafe {
                 cudarc::cublas::result::gemm_ex(
-                    *ctx.blas.handle(),
+                    *ctx.take_cublas().expect("cuBLAS handle").handle(),
                     CUBLAS_OP_N,
                     CUBLAS_OP_N,
                     n as i32,
@@ -871,7 +871,10 @@ mod gpu {
         let mut vendor = Vendor::new(&vendor_ctx, cell)?;
         let mut version = 0;
         let status = unsafe {
-            cudarc::cublas::sys::cublasGetVersion_v2(*vendor_ctx.blas.handle(), &mut version)
+            cudarc::cublas::sys::cublasGetVersion_v2(
+                *vendor_ctx.take_cublas().expect("cuBLAS handle").handle(),
+                &mut version,
+            )
         };
         if status != cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS || version <= 0 {
             return Err(format!("cuBLAS version: {status:?}/{version}"));

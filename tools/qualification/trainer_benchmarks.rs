@@ -1064,7 +1064,7 @@ fn bench_bwd_kernels_isolated() {
         bld.arg(&stride_i);
         bld.arg(&off_i);
         bld.arg(&dii); // x row stride
-        unsafe { bld.launch(grid_conv_tiled(b, di, t)) }.unwrap();
+        unsafe { bld.launch(grid_conv_tiled(b, di, t).unwrap()) }.unwrap();
     });
 
     // gating backward

@@ -1667,8 +1667,12 @@ fn identity(ctx: &GpuCtx, device: &GpuDevice) -> Result<String, String> {
         ));
     }
     let mut version = 0;
-    let status =
-        unsafe { cudarc::cublas::sys::cublasGetVersion_v2(*ctx.blas.handle(), &mut version) };
+    let status = unsafe {
+        cudarc::cublas::sys::cublasGetVersion_v2(
+            *ctx.take_cublas().expect("cuBLAS handle").handle(),
+            &mut version,
+        )
+    };
     if status != cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS || version <= 0 {
         return Err("installed cuBLAS version query failed".into());
     }

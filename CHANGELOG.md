@@ -180,7 +180,10 @@
   `check_int_args` and `launch_cast`, and `grid_conv_fwd_tiled` and
   `grid_conv_tiled` return a `Result` that names a grid past its extent.
 - `GpuCtx::cublas()` hands the context's cuBLAS handle, which the context
-  takes when it enters a cuBLAS GEMM mode and keeps. The `blas` and
+  takes when it enters a cuBLAS GEMM mode and keeps. `GpuCtx::take_cublas()`
+  takes one for a context that stays in the deterministic mode, for a
+  comparison against cuBLAS, and `GpuCtx::cublas_workspace_bytes()` gives
+  the workspace a handle runs with. The `blas` and
   `_blas_workspace` fields and `GpuDevice::create_cublas` are gone, and
   `Mamba3GpuBackbone::blas` returns a `Result`. `GradSlice::to_cpu` and
   `GradSlice::upload_from_cpu` take the stream the slice's kernels run on.

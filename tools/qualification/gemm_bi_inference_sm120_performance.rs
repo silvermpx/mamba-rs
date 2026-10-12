@@ -191,7 +191,7 @@ fn sm120_exact_vendor_launch(
     let alpha = 1.0f32;
     unsafe {
         cudarc::cublas::result::gemm_ex(
-            *ctx.blas.handle(),
+            *ctx.take_cublas().expect("cuBLAS handle").handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             shape.n as c_int,

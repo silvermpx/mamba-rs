@@ -116,6 +116,39 @@ fn gpu_context_constructors_use_explicit_modes_and_deterministic_defaults() {
     assert_eq!(ctx.state_cap(), 96);
 }
 
+/// A comparison against cuBLAS takes the handle of a deterministic context
+/// without leaving the mode: the handle comes with the pedantic math of the
+/// deterministic mode, a second request hands the same handle, and a cuBLAS
+/// mode entered later keeps it and sets its math.
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_deterministic_context_takes_a_cublas_handle_on_request() {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    let ctx = GpuCtx::new(&device).expect("default GPU context");
+    assert!(ctx.cublas().is_err(), "no handle before the request");
+    let handle = *ctx.take_cublas().expect("take a handle").handle();
+    assert_mode(&ctx, GemmMode::Deterministic);
+    assert_eq!(
+        actual_cublas_math(&ctx),
+        Some(cublasMath_t::CUBLAS_PEDANTIC_MATH),
+        "the deterministic mode's handle math"
+    );
+    assert_eq!(
+        *ctx.take_cublas().expect("the held handle").handle(),
+        handle,
+        "a second request hands the same handle"
+    );
+    ctx.set_gemm_mode(GemmMode::CublasFast)
+        .expect("enter the fast mode");
+    assert_eq!(
+        *ctx.cublas().expect("the held handle").handle(),
+        handle,
+        "the mode keeps the handle"
+    );
+    assert_mode(&ctx, GemmMode::CublasFast);
+    assert_eq!(ctx.cublas_workspace_bytes(), 32 << 20);
+}
+
 #[test]
 #[ignore = "needs a CUDA device"]
 fn gpu_context_supports_all_nine_canonical_mode_transitions() {

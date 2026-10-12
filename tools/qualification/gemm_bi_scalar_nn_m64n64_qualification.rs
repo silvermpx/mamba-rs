@@ -1706,7 +1706,7 @@ mod cuda_qualification {
         // qualification holder has been dropped.
         unsafe {
             result::gemm_ex(
-                *ctx.blas.handle(),
+                *ctx.take_cublas().expect("cuBLAS handle").handle(),
                 blas::cublasOperation_t::CUBLAS_OP_N,
                 blas::cublasOperation_t::CUBLAS_OP_N,
                 p.n,
@@ -2083,12 +2083,16 @@ mod cuda_qualification {
         let mut math = blas::cublasMath_t::CUBLAS_DEFAULT_MATH;
         let mut pointer = blas::cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
         unsafe {
-            if blas::cublasSetMathMode(*ctx.blas.handle(), math)
+            if blas::cublasSetMathMode(*ctx.take_cublas().expect("cuBLAS handle").handle(), math)
                 != blas::cublasStatus_t::CUBLAS_STATUS_SUCCESS
-                || blas::cublasGetMathMode(*ctx.blas.handle(), &mut math)
-                    != blas::cublasStatus_t::CUBLAS_STATUS_SUCCESS
-                || blas::cublasGetPointerMode_v2(*ctx.blas.handle(), &mut pointer)
-                    != blas::cublasStatus_t::CUBLAS_STATUS_SUCCESS
+                || blas::cublasGetMathMode(
+                    *ctx.take_cublas().expect("cuBLAS handle").handle(),
+                    &mut math,
+                ) != blas::cublasStatus_t::CUBLAS_STATUS_SUCCESS
+                || blas::cublasGetPointerMode_v2(
+                    *ctx.take_cublas().expect("cuBLAS handle").handle(),
+                    &mut pointer,
+                ) != blas::cublasStatus_t::CUBLAS_STATUS_SUCCESS
             {
                 return Err("set/query live Fast handle modes failed".into());
             }

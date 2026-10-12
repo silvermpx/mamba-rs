@@ -1220,7 +1220,7 @@ mod cuda_suite {
         let beta = 0.0_f32;
         unsafe {
             cudarc::cublas::result::gemm_ex(
-                *ctx.blas.handle(),
+                *ctx.take_cublas().expect("cuBLAS handle").handle(),
                 cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
                 cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
                 geometry.m,
@@ -2047,8 +2047,12 @@ mod cuda_suite {
 
     fn cublas_version(ctx: &GpuCtx) -> Result<i32, String> {
         let mut version = 0;
-        let status =
-            unsafe { cudarc::cublas::sys::cublasGetVersion_v2(*ctx.blas.handle(), &mut version) };
+        let status = unsafe {
+            cudarc::cublas::sys::cublasGetVersion_v2(
+                *ctx.take_cublas().expect("cuBLAS handle").handle(),
+                &mut version,
+            )
+        };
         if status == cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
             Ok(version)
         } else {

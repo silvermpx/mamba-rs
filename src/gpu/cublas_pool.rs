@@ -18,7 +18,7 @@ use cudarc::driver::{CudaSlice, CudaStream, DevicePtr};
 
 /// The workspace a handle runs with. Without one cuBLAS allocates its own
 /// inside a captured GEMM. 32 MiB covers the Hopper kernels.
-const WORKSPACE_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const WORKSPACE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Idle handles, each with the CUDA context it was created in.
 static IDLE: Mutex<Vec<(usize, CudaBlas)>> = Mutex::new(Vec::new());

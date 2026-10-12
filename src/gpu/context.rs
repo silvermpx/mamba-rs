@@ -1062,6 +1062,44 @@ impl GpuCtx {
         .map_err(|_| "the context holds no cuBLAS handle: it runs the deterministic GEMMs".into())
     }
 
+    /// The context's cuBLAS handle, taken now when it holds none, with the
+    /// math of its GEMM mode. A comparison against cuBLAS calls it beside
+    /// the deterministic GEMMs, whose mode it leaves as it is.
+    pub fn take_cublas(&self) -> Result<std::cell::Ref<'_, cudarc::cublas::CudaBlas>, String> {
+        let held = self
+            .blas
+            .try_borrow()
+            .map_err(|_| "the cuBLAS handle is in use".to_string())?
+            .is_some();
+        if !held {
+            let capture_status = self
+                .stream
+                .capture_status()
+                .map_err(|error| format!("query CUDA stream capture state: {error:?}"))?;
+            if capture_status
+                != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
+            {
+                return Err(format!(
+                    "cannot take a cuBLAS handle while CUDA stream capture state is {capture_status:?}"
+                ));
+            }
+            let pooled = super::cublas_pool::PooledBlas::take(
+                &self.stream,
+                self.gemm_mode.get().cublas_math(),
+            )?;
+            *self
+                .blas
+                .try_borrow_mut()
+                .map_err(|_| "the cuBLAS handle is in use".to_string())? = Some(pooled);
+        }
+        self.cublas()
+    }
+
+    /// Bytes of workspace a cuBLAS handle of the context runs with.
+    pub fn cublas_workspace_bytes(&self) -> usize {
+        super::cublas_pool::WORKSPACE_BYTES
+    }
+
     /// The raw handle of [`Self::cublas`], for a cuBLAS call.
     pub(crate) fn cublas_handle(&self) -> Result<cudarc::cublas::sys::cublasHandle_t, String> {
         Ok(*self.cublas()?.handle())
