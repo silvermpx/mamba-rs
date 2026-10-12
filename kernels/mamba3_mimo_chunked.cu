@@ -675,7 +675,7 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
     const int g = h / (nh / ng);
     const int di = nh * hd;
     const int rgn = rank * ng * ds;
-    const int R = MIMO_R(RK, rank);
+    constexpr int R = RK;
     const int half = ds / 2;
     const int ST = st;
     // Key rows padded to N + 1: the block's G entries read one key row per
@@ -699,9 +699,9 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
                         sn + (row * nh + h) * na, cs + (row * nh + h) * na);
     }
     __syncthreads();
-    float y[MIMO_RA(RK)];
-    float u_t[MIMO_RA(RK)];
-    float px[MIMO_RA(RK)];
+    float y[RK];
+    float u_t[RK];
+    float px[RK];
     const int t = tile0 + tl;
     const long long row_t = b * seq + t0 + t;
     float acs_t = 0.0f, gamma_t = 0.0f;
@@ -778,7 +778,7 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
             _Pragma("unroll") for (int r = 0; r < R; r++)
                 y_out[((row_t * nh + h) * rank + r) * hd + p] = y[r];
         }
-        float pz[MIMO_RA(RK)], po[MIMO_RA(RK)];
+        float pz[RK], po[RK];
         _Pragma("unroll") for (int r = 0; r < R; r++) {
             pz[r] = mimo_z[((long long)h * rank + r) * hd + p];
             po[r] = mimo_o[((long long)h * rank + r) * hd + p];
@@ -803,9 +803,9 @@ extern "C" __global__ void NAME(                                                
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt, int st,  \
     int pt                                                                      \
 ) {                                                                             \
-    MIMO_RANK_DISPATCH(rank, m3m_chunk_scan_body<TI, RK>(out, y_out, proj,      \
-        ld_proj, bn, cn, coef, sn, cs, enter, b_bias, c_bias, D, mimo_x,        \
-        mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, tt, st, pt))             \
+    m3m_chunk_scan_body<TI, MIMO_RANK>(out, y_out, proj, ld_proj, bn, cn,       \
+        coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq,    \
+        nh, ng, hd, ds, rank, na, tt, st, pt);                                  \
 }
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan, float)
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan_bf16, __nv_bfloat16)

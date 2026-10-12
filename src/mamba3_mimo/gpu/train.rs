@@ -518,7 +518,7 @@ impl Mamba3MimoGpuTrainer {
             half => half,
         };
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
-        let kernels = Mamba3MimoKernels::compile(device.context(), arch)?;
+        let kernels = Mamba3MimoKernels::compile(device.context(), arch, cfg.mimo_rank)?;
         let optin = kernels.smem_optin;
         let scan = scan_geom((hd, ds, rank, na), optin, kernels.scan_threads).ok_or_else(|| {
             format!(

@@ -22,27 +22,20 @@
 
 #define MIMO_MAX_RANK 16
 
-// A body templated on RK runs at rank RK when RK > 0, its rank arrays then
-// unrolled into registers; RK = 0 runs at the runtime rank, its arrays in
-// local memory. The arithmetic is the same either way.
-#define MIMO_R(RK, rank) ((RK) > 0 ? (RK) : (rank))
-#define MIMO_RA(RK) ((RK) > 0 ? (RK) : MIMO_MAX_RANK)
+// The module is compiled for one rank, MIMO_RANK, which the host defines:
+// the bodies templated on RK run at that rank as a constant, their rank
+// arrays unrolled into registers.
+#ifndef MIMO_RANK
+#error "MIMO_RANK, the rank the module serves, is not defined"
+#endif
+#if MIMO_RANK < 1 || MIMO_RANK > MIMO_MAX_RANK
+#error "MIMO_RANK lies outside 1..MIMO_MAX_RANK"
+#endif
 
 // The state indices a batch of a channel's row loop takes: four at ranks
-// up to 4, two at rank 8, so a batch's rank arrays stay in registers; one
-// (no batching) at a runtime rank.
-#define MIMO_ROW_BATCH(RK) ((RK) == 0 ? 1 : ((RK) <= 4 ? 4 : 2))
-
-// Run the statement with `RK` bound to the runtime rank when it is one of
-// the compiled ranks, else to 0.
-#define MIMO_RANK_DISPATCH(rank, ...)                                          \
-    switch (rank) {                                                            \
-    case 1: { constexpr int RK = 1; __VA_ARGS__; } break;                      \
-    case 2: { constexpr int RK = 2; __VA_ARGS__; } break;                      \
-    case 4: { constexpr int RK = 4; __VA_ARGS__; } break;                      \
-    case 8: { constexpr int RK = 8; __VA_ARGS__; } break;                      \
-    default: { constexpr int RK = 0; __VA_ARGS__; } break;                     \
-    }
+// up to 4, two up to 8 and one past that, so a batch's rank arrays stay in
+// registers.
+#define MIMO_ROW_BATCH(RK) ((RK) <= 4 ? 4 : ((RK) <= 8 ? 2 : 1))
 
 __device__ __forceinline__ float mimo_exp(float x) {
     return exp2f(__fmul_rn(x, LOG2E));
@@ -185,9 +178,10 @@ __device__ __forceinline__ void mimo_split4(float (&dst)[J][RA], int r, const fl
 
 // One channel's row: u_r = Psi_r x, up_r = Psi_r x_prev, the state row
 // s = alpha s + sum_r (gamma u_r kc_r + beta up_r kp_r), and the readouts
-// y_r = s . q_r + D u_r. At a compiled rank the state indices go in
-// batches, every load of a batch issued before its chains run: the row's
-// own store would otherwise hold the next index's loads back a round trip.
+// y_r = s . q_r + D u_r. The state indices go in batches of
+// MIMO_ROW_BATCH, every load of a batch issued before its chains run: the
+// row's own store would otherwise hold the next index's loads back a round
+// trip.
 // The keys and queries of a batch of four, the same for every channel of a
 // warp, come as one float4 per rank when their rows are 16-byte aligned.
 // The chains are the same, n ascending.
@@ -199,8 +193,8 @@ __device__ __forceinline__ void mimo_tok_row(
     float alpha, float beta, float gamma, float dval, int rank, int ds
 ) {
     constexpr int J = MIMO_ROW_BATCH(RK);
-    const int R = MIMO_R(RK, rank);
-    float bv[MIMO_RA(RK)], gx[MIMO_RA(RK)];
+    constexpr int R = RK;
+    float bv[RK], gx[RK];
 #pragma unroll
     for (int r = 0; r < R; r++) {
         u[r] = __fmul_rn(px[r], x);
@@ -212,7 +206,7 @@ __device__ __forceinline__ void mimo_tok_row(
     const bool vec = J == 4 && mimo_rows_aligned(kc, kp, qv, ds);
     int n = 0;
     for (; J > 1 && n + J <= ds; n += J) {
-        float sv[J], kcv[J][MIMO_RA(RK)], kpv[J][MIMO_RA(RK)], qvv[J][MIMO_RA(RK)];
+        float sv[J], kcv[J][RK], kpv[J][RK], qvv[J][RK];
 #pragma unroll
         for (int j = 0; j < J; j++) sv[j] = srow[n + j];
         if (vec) {
@@ -272,7 +266,7 @@ __device__ __forceinline__ float mimo_tok_gate(
 ) {
     float o = 0.0f;
 #pragma unroll
-    for (int r = 0; r < MIMO_R(RK, rank); r++) {
+    for (int r = 0; r < RK; r++) {
         float v = __fmul_rn(pz[r], z);
         float sg = __fdiv_rn(v, __fadd_rn(1.0f, mimo_exp(-v)));
         float term = __fmul_rn(__fmul_rn(y[r], sg), po[r]);
@@ -422,8 +416,8 @@ __device__ __forceinline__ void mimo_scan_body(
     const bool own = tid < pc;
     const int pch = p0 + tid;
     float v_prev = own ? vst[bh * hd + pch] : 0.0f;
-    const int R = MIMO_R(RK, rank);
-    float px[MIMO_RA(RK)], pz[MIMO_RA(RK)], po[MIMO_RA(RK)];
+    constexpr int R = RK;
+    float px[RK], pz[RK], po[RK];
 #pragma unroll
     for (int r = 0; r < R; r++) {
         const long long o = ((long long)h * rank + r) * hd + pch;
@@ -489,7 +483,7 @@ __device__ __forceinline__ void mimo_scan_body(
         if (own) {
             const float x = to_f(pr[di + h * hd + pch]);
             const float z = to_f(pr[h * hd + pch]);
-            float u[MIMO_RA(RK)], up[MIMO_RA(RK)], y[MIMO_RA(RK)];
+            float u[RK], up[RK], y[RK];
             mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev, kcur, kprev, qv,
                              sc.alpha, sc.beta, sc.gamma, dval, rank, ds);
             mimo_put(&out[row * di + h * hd + pch], mimo_tok_gate<RK>(y, pz, po, z, rank));
@@ -569,8 +563,8 @@ __device__ __forceinline__ void mimo_scan_pipe_body(
     mimo_state_load(st, ssm + so, pc, ds);
     for (int i = tid; i < rn; i += blockDim.x) kbuf[2 * rn + i] = kst[bh * rn + i];
     float v_prev = own ? vst[bh * hd + pch] : 0.0f;
-    const int R = MIMO_R(RK, rank);
-    float px[MIMO_RA(RK)], pz[MIMO_RA(RK)], po[MIMO_RA(RK)];
+    constexpr int R = RK;
+    float px[RK], pz[RK], po[RK];
 #pragma unroll
     for (int r = 0; r < R; r++) {
         const long long o = ((long long)h * rank + r) * hd + pch;
@@ -649,7 +643,7 @@ __device__ __forceinline__ void mimo_scan_pipe_body(
             const float* sd = scal + (t % 2) * 4;
             const float x = to_f(pr[di + h * hd + pch]);
             const float z = to_f(pr[h * hd + pch]);
-            float u[MIMO_RA(RK)], up[MIMO_RA(RK)], y[MIMO_RA(RK)];
+            float u[RK], up[RK], y[RK];
             mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev,
                              kbuf + (t % 3) * rn, kbuf + ((t + 2) % 3) * rn,
                              qbuf + (t % 2) * rn, sd[0], sd[1], sd[2], dval, rank, ds);
@@ -722,10 +716,10 @@ extern "C" __global__ void NAME(                                               \
     float a_floor, int tile, int allow_pipe, unsigned int* __restrict__ done,  \
     float* __restrict__ y_out                                                  \
 ) {                                                                            \
-    MIMO_RANK_DISPATCH(rank, mimo_scan_any<TI, false, RK>(out, ssm, kst, vst,  \
-        ang, proj, ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x,        \
-        mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, a_floor, nullptr,       \
-        nullptr, nullptr, nullptr, 1, tile, allow_pipe, done, y_out))          \
+    mimo_scan_any<TI, false, MIMO_RANK>(out, ssm, kst, vst, ang, proj,         \
+        ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,   \
+        seq, nh, ng, hd, ds, rank, na, a_floor, nullptr, nullptr, nullptr,     \
+        nullptr, 1, tile, allow_pipe, done, y_out);                            \
 }
 
 DEFINE_MIMO_SCAN(mimo_scan, float)
@@ -753,10 +747,10 @@ extern "C" __global__ void NAME(                                               \
     int tile, int allow_pipe, unsigned int* __restrict__ done,                 \
     float* __restrict__ y_out                                                  \
 ) {                                                                            \
-    MIMO_RANK_DISPATCH(rank, mimo_scan_any<TI, true, RK>(out, ssm, kst, vst,   \
-        ang, proj, ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x,        \
-        mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, a_floor, ck_ssm, ck_k,  \
-        ck_v, ck_ang, stride, tile, allow_pipe, done, y_out))                  \
+    mimo_scan_any<TI, true, MIMO_RANK>(out, ssm, kst, vst, ang, proj,          \
+        ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,   \
+        seq, nh, ng, hd, ds, rank, na, a_floor, ck_ssm, ck_k, ck_v, ck_ang,    \
+        stride, tile, allow_pipe, done, y_out);                                \
 }
 
 DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt, float)

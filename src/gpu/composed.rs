@@ -23,6 +23,8 @@ pub(crate) struct ComposedSpec<'a> {
     pub kind: ki::ModuleKind,
     pub cache_prefix: &'a str,
     pub seed: &'a str,
+    /// Extra NVRTC options, such as the defines the module is compiled for.
+    pub options: &'a [String],
     pub label: &'a str,
 }
 
@@ -49,6 +51,7 @@ pub(crate) fn compile_composed(
         "--extra-device-vectorization".to_string(),
         "-DNDEBUG".to_string(),
     ];
+    option_strings.extend(spec.options.iter().cloned());
     option_strings.extend(ki::deterministic_nvrtc_options(
         (nv_major, nv_minor),
         spec.seed,
@@ -120,7 +123,10 @@ pub(crate) fn compile_composed(
                 &include_paths,
                 &header_manifest,
             ) {
-                return Err("CUDA headers changed during the Mamba-2 compilation; retry".into());
+                return Err(format!(
+                    "CUDA headers changed during the {} compilation; retry",
+                    spec.label
+                ));
             }
             if let Some(domain) = nvrtc_library_domain.as_deref()
                 && !ki::nvrtc_library_domain_is_current(domain)

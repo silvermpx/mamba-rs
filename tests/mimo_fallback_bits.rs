@@ -116,7 +116,6 @@ const SCAN_SHAPES: [Shape; 2] = [
 fn mimo_scan_tiles_are_the_whole_head() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0()).unwrap();
     let s = &ctx.stream;
     let stride = 16usize;
     for Shape {
@@ -130,6 +129,7 @@ fn mimo_scan_tiles_are_the_whole_head() {
         na,
     } in SCAN_SHAPES
     {
+        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), rank).unwrap();
         let rows = batch * seq;
         let di = nh * hd;
         let rgn = rank * ng * ds;
@@ -303,7 +303,6 @@ fn mimo_scan_tiles_are_the_whole_head() {
 fn mimo_scan_bwd_global_is_the_shared_kernel() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0()).unwrap();
     let s = &ctx.stream;
     let stride = 16usize;
     for Shape {
@@ -317,6 +316,7 @@ fn mimo_scan_bwd_global_is_the_shared_kernel() {
         na,
     } in SCAN_SHAPES
     {
+        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), rank).unwrap();
         let rows = batch * seq;
         let di = nh * hd;
         let rgn = rank * ng * ds;
@@ -628,9 +628,9 @@ impl ChunkedInputs {
 fn mimo_chunked_tiles_are_the_whole_head() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0()).unwrap();
     let s = &ctx.stream;
     for sh in SCAN_SHAPES {
+        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
         let inp = ChunkedInputs::new(&ctx, sh);
         let (b, nh, hd, ds, rank) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank);
         let rows = b * inp.seq;
@@ -764,9 +764,9 @@ fn mimo_chunked_tiles_are_the_whole_head() {
 fn mimo_chunked_staging_in_global_is_the_shared_staging() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0()).unwrap();
     let s = &ctx.stream;
     for sh in SCAN_SHAPES {
+        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
         let inp = ChunkedInputs::new(&ctx, sh);
         let (b, nh, hd, ds, rank, na) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank, sh.na);
         let rows = b * inp.seq;

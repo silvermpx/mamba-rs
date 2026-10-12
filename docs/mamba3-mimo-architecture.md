@@ -127,10 +127,9 @@ The decode step and the sequential prefill are one kernel: one block per
 batch row and head walks the window token by token, so a decode step is a
 window of one and continues a prefill bit for bit. The state rows live in
 shared memory; a head whose rows do not fit there runs its channels in
-tiles over several blocks, with the same bits. The released ranks (1, 2, 4
-and 8) are compiled with their rank as a constant, which unrolls the
-per-rank arrays into registers. Any other rank up to 16 runs the same
-arithmetic in the same order.
+tiles over several blocks, with the same bits. The module is compiled for
+the model's rank, so every rank from 1 to 16 runs as a constant, its
+per-rank arrays unrolled into registers.
 
 A prompt longer than 64 tokens runs the chunked scan (chunks of 64), and
 so does every training window unless the configuration asks for

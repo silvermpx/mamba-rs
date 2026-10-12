@@ -214,7 +214,7 @@ impl Mamba3MimoGpuEngine {
             None => GpuCtx::new_from_env_with_state_cap_and_role(device, 64, role)?,
         };
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
-        let kernels = Mamba3MimoKernels::compile(device.context(), arch)?;
+        let kernels = Mamba3MimoKernels::compile(device.context(), arch, cfg.mimo_rank)?;
         let (hd, ds, rank) = (cfg.headdim, cfg.d_state, cfg.mimo_rank);
         let scan = scan_geom(
             (hd, ds, rank, cfg.num_rope_angles()),

@@ -13,6 +13,7 @@ use crate::gpu::composed::{ComposedModule, ComposedSpec, compile_composed};
 use crate::gpu::kernel_identity as ki;
 use crate::gpu::kernels::TypedKernel;
 use crate::gpu::launch::opt_in_dynamic_smem;
+use crate::mamba3_mimo::config::MAX_MIMO_RANK;
 
 /// The compiled MIMO kernels.
 pub struct Mamba3MimoKernels {
@@ -504,8 +505,18 @@ pub fn scan_geom(
 }
 
 impl Mamba3MimoKernels {
-    /// Compile (or load from the cache) the MIMO module for `arch`.
-    pub fn compile(ctx: &Arc<CudaContext>, arch: &'static str) -> Result<Self, String> {
+    /// Compile (or load from the cache) the MIMO module for `arch` at
+    /// `rank`: the kernels whose arrays the rank sizes run at it as a
+    /// constant, so the module serves models of that rank.
+    pub fn compile(
+        ctx: &Arc<CudaContext>,
+        arch: &'static str,
+        rank: usize,
+    ) -> Result<Self, String> {
+        if !(1..=MAX_MIMO_RANK).contains(&rank) {
+            return Err(format!("MIMO rank {rank} lies outside 1..={MAX_MIMO_RANK}"));
+        }
+        let rank_define = [format!("-DMIMO_RANK={rank}")];
         let ComposedModule {
             module,
             compiler_identity,
@@ -525,6 +536,7 @@ impl Mamba3MimoKernels {
                 kind: ki::ModuleKind::Mamba3MimoCombined,
                 cache_prefix: "mamba3-mimo-kernels-v1-",
                 seed: "2603155690",
+                options: &rank_define,
                 label: "Mamba-3 MIMO",
             },
         )?;

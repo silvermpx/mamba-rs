@@ -226,6 +226,7 @@ impl Mamba2Kernels {
                 kind: ki::ModuleKind::Mamba2Combined,
                 cache_prefix: "mamba2-kernels-v1-",
                 seed: "2405210601",
+                options: &[],
                 label: "Mamba-2",
             },
         )?;

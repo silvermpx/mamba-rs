@@ -150,7 +150,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     const int di = nh * hd;
     const int rgn = rank * ng * ds;
     const int rn = rank * ds;
-    const int R = MIMO_R(RK, rank);
+    constexpr int R = RK;
     constexpr int RB = MIMO_ROW_BATCH(RK);
     const int heads = 2 * di + 2 * rgn;
     const int ang_col = heads + 3 * nh;
@@ -181,8 +181,8 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     const int lanes = (hd + 31) & ~31;
 
     const bool own = tid < hd;
-    float px[MIMO_RA(RK)], pz[MIMO_RA(RK)], po[MIMO_RA(RK)];
-    float gx_loc[MIMO_RA(RK)], gz_loc[MIMO_RA(RK)], go_loc[MIMO_RA(RK)];
+    float px[RK], pz[RK], po[RK];
+    float gx_loc[RK], gz_loc[RK], go_loc[RK];
     _Pragma("unroll") for (int r = 0; r < R; r++) {
         const long long o = ((long long)h * rank + r) * hd + tid;
         px[r] = own ? mimo_x[o] : 0.0f;
@@ -320,7 +320,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                     float* r_xp = r_y + hd * rank;
                     const float* sd = red + (k % 2) * 4;
                     const float x = to_f(pr[di + h * hd + tid]);
-                    float u[MIMO_RA(RK)], up[MIMO_RA(RK)], y[MIMO_RA(RK)];
+                    float u[RK], up[RK], y[RK];
                     float* srow = st + tid * (ds + 1);
                     mimo_tok_row<RK>(srow, y, u, up, px, x, v_prev, kb[k % 3], kb[(k + 2) % 3],
                                      qb[k % 2], sd[0], sd[1], sd[2], dval, rank, ds);
@@ -433,7 +433,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                 __syncthreads();
                 if (own) {
                     const float x = to_f(pr[di + h * hd + tid]);
-                    float u[MIMO_RA(RK)], up[MIMO_RA(RK)], y[MIMO_RA(RK)];
+                    float u[RK], up[RK], y[RK];
                     float* srow = st + tid * (ds + 1);
                     mimo_tok_row<RK>(srow, y, u, up, px, x, v_prev, kcur, kprev, qv,
                                  sc.alpha, sc.beta, sc.gamma, dval, rank, ds);
@@ -490,7 +490,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
             // Gate, D and the readout: dy, dz, du; dS rows take sum_r dy q_r.
             // With dy_in the readouts' gradient comes in, the gate (an
             // output norm's) and its partials already walked.
-            float du[MIMO_RA(RK)], dup[MIMO_RA(RK)];
+            float du[RK], dup[RK];
             if (own && dy_in != nullptr) {
                 _Pragma("unroll") for (int r = 0; r < R; r++) {
                     const float dyv = dy_in[((row * nh + h) * rank + r) * hd + tid];
@@ -637,7 +637,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                 const float* __restrict__ prow = st + tid * (ds + 1);
                 const float* __restrict__ kpr = kp;
                 const float* __restrict__ kcr = kc;
-                float upv[MIMO_RA(RK)], uv[MIMO_RA(RK)];
+                float upv[RK], uv[RK];
                 _Pragma("unroll") for (int r = 0; r < R; r++) {
                     upv[r] = r_up[tid * rank + r];
                     uv[r] = r_u[tid * rank + r];
@@ -645,7 +645,7 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                 const bool vec = RB == 4 && mimo_rows_aligned(kpr, kcr, kcr, ds);
                 int n = 0;
                 for (; RB > 1 && n + RB <= ds; n += RB) {
-                    float dsb[RB], pb[RB], kpb[RB][MIMO_RA(RK)], kcb[RB][MIMO_RA(RK)];
+                    float dsb[RB], pb[RB], kpb[RB][RK], kcb[RB][RK];
                     _Pragma("unroll") for (int j = 0; j < RB; j++) {
                         dsb[j] = drow[n + j];
                         pb[j] = prow[n + j];
@@ -785,11 +785,10 @@ extern "C" __global__ void NAME(                                                
     int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,      \
     float a_floor, const float* __restrict__ dy_in                              \
 ) {                                                                             \
-    MIMO_RANK_DISPATCH(rank, mimo_scan_bwd_body<T, RK>(d_proj, ld_proj, d_bn_h, \
-        d_cn_h, d_tanh_h, g_x, g_z, g_o, g_d, g_dtb, g_bb, g_cb, rec, d_o,      \
-        proj, bn, cn, ck_ssm, ck_k, ck_v, ck_ang, dt_bias, b_bias, c_bias, D,   \
-        mimo_x, mimo_z, mimo_o, seq, stride, nh, ng, hd, ds, rank, na,          \
-        a_floor, dy_in))                                                        \
+    mimo_scan_bwd_body<T, MIMO_RANK>(d_proj, ld_proj, d_bn_h, d_cn_h,          \
+        d_tanh_h, g_x, g_z, g_o, g_d, g_dtb, g_bb, g_cb, rec, d_o, proj, bn,    \
+        cn, ck_ssm, ck_k, ck_v, ck_ang, dt_bias, b_bias, c_bias, D, mimo_x,     \
+        mimo_z, mimo_o, seq, stride, nh, ng, hd, ds, rank, na, a_floor, dy_in); \
 }
 DEFINE_MIMO_SCAN_BWD(mimo_scan_bwd, float)
 DEFINE_MIMO_SCAN_BWD(mimo_scan_bwd_bf16, __nv_bfloat16)
@@ -806,8 +805,8 @@ __device__ __forceinline__ void mimo_tok_row_to(
     float alpha, float beta, float gamma, float dval, int rank, int ds
 ) {
     constexpr int J = MIMO_ROW_BATCH(RK);
-    const int R = MIMO_R(RK, rank);
-    float bv[MIMO_RA(RK)], gx[MIMO_RA(RK)];
+    constexpr int R = RK;
+    float bv[RK], gx[RK];
     _Pragma("unroll") for (int r = 0; r < R; r++) {
         u[r] = __fmul_rn(px[r], x);
         gx[r] = __fmul_rn(gamma, u[r]);
@@ -818,7 +817,7 @@ __device__ __forceinline__ void mimo_tok_row_to(
     const bool vec = J == 4 && mimo_rows_aligned(kc, kp, qv, ds);
     int n = 0;
     for (; J > 1 && n + J <= ds; n += J) {
-        float sv[J], kcv[J][MIMO_RA(RK)], kpv[J][MIMO_RA(RK)], qvv[J][MIMO_RA(RK)];
+        float sv[J], kcv[J][RK], kpv[J][RK], qvv[J][RK];
         _Pragma("unroll") for (int j = 0; j < J; j++) sv[j] = src[n + j];
         if (vec) {
             _Pragma("unroll") for (int r = 0; r < R; r++) {
@@ -930,7 +929,7 @@ __device__ __forceinline__ void mimo_scan_bwd_global_body(
     const int di = nh * hd;
     const int rgn = rank * ng * ds;
     const int rn = rank * ds;
-    const int R = MIMO_R(RK, rank);
+    constexpr int R = RK;
     constexpr int RB = MIMO_ROW_BATCH(RK);
     const int heads = 2 * di + 2 * rgn;
     const int ang_col = heads + 3 * nh;
@@ -1075,7 +1074,7 @@ __device__ __forceinline__ void mimo_scan_bwd_global_body(
                 const float x = to_f(pr[di + h * hd + p]);
                 const float v_prev = t > t0 ? to_f(pr[di + h * hd + p - ld_proj])
                                             : ck_v[q * hd + p];
-                float px[MIMO_RA(RK)], u[MIMO_RA(RK)], up[MIMO_RA(RK)], y[MIMO_RA(RK)];
+                float px[RK], u[RK], up[RK], y[RK];
                 _Pragma("unroll") for (int r = 0; r < R; r++)
                     px[r] = mimo_x[((long long)h * rank + r) * hd + p];
                 const float* src = prev ? prev + (long long)p * ds : ck_s + (long long)p * ds;
@@ -1220,7 +1219,7 @@ __device__ __forceinline__ void mimo_scan_bwd_global_body(
                 if (p < hd) {
                     float* __restrict__ drow = dsr + (long long)p * ld;
                     const float* __restrict__ prow = s_prev + (long long)p * ds;
-                    float upv[MIMO_RA(RK)], uv[MIMO_RA(RK)], du[MIMO_RA(RK)], dup[MIMO_RA(RK)];
+                    float upv[RK], uv[RK], du[RK], dup[RK];
                     _Pragma("unroll") for (int r = 0; r < R; r++) {
                         upv[r] = r_up[p * rank + r];
                         uv[r] = r_u[p * rank + r];
@@ -1230,7 +1229,7 @@ __device__ __forceinline__ void mimo_scan_bwd_global_body(
                     const bool vec = RB == 4 && mimo_rows_aligned(k_prev, r_kc, r_kc, ds);
                     int n = 0;
                     for (; RB > 1 && n + RB <= ds; n += RB) {
-                        float dsb[RB], pb[RB], kpb[RB][MIMO_RA(RK)], kcb[RB][MIMO_RA(RK)];
+                        float dsb[RB], pb[RB], kpb[RB][RK], kcb[RB][RK];
                         _Pragma("unroll") for (int j = 0; j < RB; j++) {
                             dsb[j] = drow[n + j];
                             pb[j] = prow[n + j];
@@ -1388,11 +1387,11 @@ extern "C" __global__ void NAME(                                                
     int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,      \
     float a_floor, const float* __restrict__ dy_in                              \
 ) {                                                                             \
-    MIMO_RANK_DISPATCH(rank, mimo_scan_bwd_global_body<T, RK>(d_proj, ld_proj,  \
-        d_bn_h, d_cn_h, d_tanh_h, g_x, g_z, g_o, g_d, g_dtb, g_bb, g_cb, rec,   \
-        ds_glob, kg_glob, pr_glob, ch, leaves, d_o, proj, bn, cn, ck_ssm, ck_k, \
-        ck_v, ck_ang, dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq,  \
-        stride, nh, ng, hd, ds, rank, na, a_floor, dy_in))                      \
+    mimo_scan_bwd_global_body<T, MIMO_RANK>(d_proj, ld_proj, d_bn_h, d_cn_h,   \
+        d_tanh_h, g_x, g_z, g_o, g_d, g_dtb, g_bb, g_cb, rec, ds_glob, kg_glob, \
+        pr_glob, ch, leaves, d_o, proj, bn, cn, ck_ssm, ck_k, ck_v, ck_ang,     \
+        dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, stride, nh,    \
+        ng, hd, ds, rank, na, a_floor, dy_in);                                  \
 }
 DEFINE_MIMO_SCAN_BWD_GLOBAL(mimo_scan_bwd_global, float)
 DEFINE_MIMO_SCAN_BWD_GLOBAL(mimo_scan_bwd_global_bf16, __nv_bfloat16)
