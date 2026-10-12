@@ -1036,7 +1036,7 @@ fn bench_bwd_kernels_isolated() {
     time_it("conv_bwd_tiled", &|| {
         let mut bld = ctx
             .stream
-            .launch_builder(k.conv1d_bwd_tiled_typed.get(dtype));
+            .launch_builder(k.conv1d_bwd_tiled_typed.i32.get(dtype));
         let dxp = d_x_branch.cached_ptr();
         let wpp = wp.cached_ptr();
         let bpp = bp.cached_ptr();

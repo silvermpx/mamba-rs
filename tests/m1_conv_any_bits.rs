@@ -2,9 +2,9 @@
 //! hold the window in registers, at widths both serve: the training
 //! forward (outputs, carry-out, saved window), the prefill forward with
 //! its t-major copy, and the backward (the x gradient into a strided
-//! destination, the tap and bias partials), in every activation type.
-//! They run the same chains in the same order, so every output keeps its
-//! bits.
+//! destination, the tap and bias partials), in every activation type and
+//! both offset widths. They run the same chains in the same order, so
+//! every output keeps the bits of the tiled kernel's int build.
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::PushKernelArg;
@@ -12,7 +12,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::launch::{grid_1d, grid_conv_fwd_tiled, grid_conv_tiled};
+use mamba_rs::gpu::launch::{IndexWidth, grid_1d, grid_conv_fwd_tiled, grid_conv_tiled};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -25,6 +25,14 @@ fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
 }
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
+
+/// The builds checked against the tiled kernel's int build: the kernel of
+/// any width in both offset widths and the tiled kernel's `_i64` build.
+const BUILDS: [(bool, IndexWidth); 3] = [
+    (true, IndexWidth::I32),
+    (false, IndexWidth::I64),
+    (true, IndexWidth::I64),
+];
 
 /// A kernel argument: a device pointer or an int.
 enum Arg {
@@ -104,7 +112,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
             let (w, bs) = (weight.cached_ptr(), bias.cached_ptr());
 
             // The training forward: outputs, carry-out, saved window.
-            let train = |any: bool| -> Vec<Vec<u32>> {
+            let train = |any: bool, width: IndexWidth| -> Vec<Vec<u32>> {
                 let u = DtypedBuf::zeros(s, bt * di, dtype).unwrap();
                 let state = f32b(&state0);
                 let saved = GpuBuffer::zeros(s, b * di * dc).unwrap();
@@ -126,7 +134,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     args.push(Arg::I(32));
                     launch(
                         &ctx,
-                        k.conv1d_fwd_any_typed.get(dtype),
+                        k.conv1d_fwd_any_typed.get(width).get(dtype),
                         grid_conv_fwd_tiled(b, di, t).unwrap(),
                         &args,
                     );
@@ -135,7 +143,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     args.extend(common);
                     launch(
                         &ctx,
-                        k.conv1d_burnin_fwd_tiled_typed.get(dtype),
+                        k.conv1d_burnin_fwd_tiled_typed.get(width).get(dtype),
                         grid_conv_fwd_tiled(b, di, t).unwrap(),
                         &args,
                     );
@@ -146,17 +154,20 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     bits_f32(&ctx, &saved),
                 ]
             };
-            let (want, got) = (train(false), train(true));
-            for (i, name) in ["outputs", "carry-out", "saved window"].iter().enumerate() {
-                assert!(
-                    got[i] == want[i],
-                    "{dtype:?} d_conv {dc}: training forward {name}"
-                );
+            let want = train(false, IndexWidth::I32);
+            for (any, width) in BUILDS {
+                let got = train(any, width);
+                for (i, name) in ["outputs", "carry-out", "saved window"].iter().enumerate() {
+                    assert!(
+                        got[i] == want[i],
+                        "{dtype:?} d_conv {dc}: training forward {name}, any {any} {width:?}"
+                    );
+                }
             }
 
             // The prefill forward with its t-major copy (rows of 152).
             let uts = t.next_multiple_of(8);
-            let prefill = |any: bool| -> Vec<Vec<u32>> {
+            let prefill = |any: bool, width: IndexWidth| -> Vec<Vec<u32>> {
                 let u = DtypedBuf::zeros(s, bt * di, dtype).unwrap();
                 let u_t = DtypedBuf::zeros(s, b * di * uts, dtype).unwrap();
                 let state = f32b(&state0);
@@ -183,7 +194,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     args.push(Arg::I(32));
                     launch(
                         &ctx,
-                        k.conv1d_fwd_any_typed.get(dtype),
+                        k.conv1d_fwd_any_typed.get(width).get(dtype),
                         grid_conv_fwd_tiled(b, di, t).unwrap(),
                         &args,
                     );
@@ -193,7 +204,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     args.push(Arg::I(uts as i32));
                     launch(
                         &ctx,
-                        k.conv1d_burnin_nosave_tiled_typed.get(dtype),
+                        k.conv1d_burnin_nosave_tiled_typed.get(width).get(dtype),
                         grid_conv_fwd_tiled(b, di, t).unwrap(),
                         &args,
                     );
@@ -204,21 +215,24 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     bits_f32(&ctx, &state),
                 ]
             };
-            let (want, got) = (prefill(false), prefill(true));
-            for (i, name) in ["outputs", "t-major outputs", "carry-out"]
-                .iter()
-                .enumerate()
-            {
-                assert!(
-                    got[i] == want[i],
-                    "{dtype:?} d_conv {dc}: prefill forward {name}"
-                );
+            let want = prefill(false, IndexWidth::I32);
+            for (any, width) in BUILDS {
+                let got = prefill(any, width);
+                for (i, name) in ["outputs", "t-major outputs", "carry-out"]
+                    .iter()
+                    .enumerate()
+                {
+                    assert!(
+                        got[i] == want[i],
+                        "{dtype:?} d_conv {dc}: prefill forward {name}, any {any} {width:?}"
+                    );
+                }
             }
 
             // The backward into the x half of a [bt, 2 * di] gradient.
             let conv_init = f32b(&state0);
             let n_tiles = t.div_ceil(128);
-            let backward = |any: bool| -> Vec<Vec<u32>> {
+            let backward = |any: bool, width: IndexWidth| -> Vec<Vec<u32>> {
                 let d_x = DtypedBuf::zeros(s, bt * xs, dtype).unwrap();
                 let wp = GpuBuffer::zeros(s, b * n_tiles * di * dc).unwrap();
                 let bp = GpuBuffer::zeros(s, b * n_tiles * di).unwrap();
@@ -266,7 +280,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     args.extend(tail);
                     launch(
                         &ctx,
-                        k.conv1d_bwd_any_typed.get(dtype),
+                        k.conv1d_bwd_any_typed.get(width).get(dtype),
                         grid_conv_tiled(b, di, t).unwrap(),
                         &args,
                     );
@@ -284,7 +298,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     args.extend(tail);
                     launch(
                         &ctx,
-                        k.conv1d_bwd_tiled_typed.get(dtype),
+                        k.conv1d_bwd_tiled_typed.get(width).get(dtype),
                         grid_conv_tiled(b, di, t).unwrap(),
                         &args,
                     );
@@ -295,12 +309,18 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     bits_f32(&ctx, &bp),
                 ]
             };
-            let (want, got) = (backward(false), backward(true));
-            for (i, name) in ["x gradient", "tap partials", "bias partials"]
-                .iter()
-                .enumerate()
-            {
-                assert!(got[i] == want[i], "{dtype:?} d_conv {dc}: backward {name}");
+            let want = backward(false, IndexWidth::I32);
+            for (any, width) in BUILDS {
+                let got = backward(any, width);
+                for (i, name) in ["x gradient", "tap partials", "bias partials"]
+                    .iter()
+                    .enumerate()
+                {
+                    assert!(
+                        got[i] == want[i],
+                        "{dtype:?} d_conv {dc}: backward {name}, any {any} {width:?}"
+                    );
+                }
             }
         }
     }

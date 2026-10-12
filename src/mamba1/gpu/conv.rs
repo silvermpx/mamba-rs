@@ -8,7 +8,9 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{blocks_1d, grid_1d_wide, grid_conv_fwd_tiled, grid_conv_tiled, tiles_y};
+use crate::gpu::launch::{
+    blocks_1d, conv_index_width, grid_1d_wide, grid_conv_fwd_tiled, grid_conv_tiled, tiles_y,
+};
 
 /// The widest window the tiled conv kernels hold per thread.
 pub const CONV_WINDOW_TAPS: usize = 8;
@@ -46,10 +48,13 @@ pub(crate) fn conv_forward(
     let k = &ctx.kernels;
     let (b_i, t_i, di_i, dc_i) = (batch as i32, seq as i32, d_inner as i32, d_conv as i32);
     let (xs_i, uts_i) = (p.x.1 as i32, p.u_t.1 as i32);
+    let width = conv_index_width(batch, seq, d_inner, d_conv, p.x.1);
     if d_conv > CONV_WINDOW_TAPS {
         let tile = d_conv.max(FWD_TILE);
         let tile_i = tile as i32;
-        let mut bld = ctx.stream.launch_builder(k.conv1d_fwd_any_typed.get(dtype));
+        let mut bld = ctx
+            .stream
+            .launch_builder(k.conv1d_fwd_any_typed.get(width).get(dtype));
         bld.arg(&p.u);
         bld.arg(&p.u_t.0);
         bld.arg(&uts_i);
@@ -80,7 +85,7 @@ pub(crate) fn conv_forward(
     if p.saved != 0 {
         let mut bld = ctx
             .stream
-            .launch_builder(k.conv1d_burnin_fwd_tiled_typed.get(dtype));
+            .launch_builder(k.conv1d_burnin_fwd_tiled_typed.get(width).get(dtype));
         bld.arg(&p.u);
         bld.arg(&p.state);
         bld.arg(&p.saved);
@@ -96,7 +101,7 @@ pub(crate) fn conv_forward(
     } else {
         let mut bld = ctx
             .stream
-            .launch_builder(k.conv1d_burnin_nosave_tiled_typed.get(dtype));
+            .launch_builder(k.conv1d_burnin_nosave_tiled_typed.get(width).get(dtype));
         bld.arg(&p.u);
         bld.arg(&p.u_t.0);
         bld.arg(&p.state);
@@ -145,6 +150,7 @@ pub(crate) fn conv_backward(
     let k = &ctx.kernels;
     let (b_i, t_i, di_i, dc_i) = (batch as i32, seq as i32, d_inner as i32, d_conv as i32);
     let (os_i, oo_i, xs_i) = (p.d_x.1 as i32, p.d_x.2 as i32, p.x.1 as i32);
+    let width = conv_index_width(batch, seq, d_inner, d_conv, p.d_x.1.max(p.x.1));
     let cfg =
         grid_conv_tiled(batch, d_inner, seq).map_err(|e| format!("{what} conv backward: {e}"))?;
     if d_conv > CONV_WINDOW_TAPS {
@@ -162,7 +168,9 @@ pub(crate) fn conv_backward(
         bld.arg(&xs_i);
         unsafe { bld.launch(grid_1d_wide(batch * seq * d_inner)) }
             .map_err(|e| format!("{what} conv pre-activation gradient: {e:?}"))?;
-        let mut bld = ctx.stream.launch_builder(k.conv1d_bwd_any_typed.get(dtype));
+        let mut bld = ctx
+            .stream
+            .launch_builder(k.conv1d_bwd_any_typed.get(width).get(dtype));
         bld.arg(&p.d_x.0);
         bld.arg(&p.d_weight_partials);
         bld.arg(&p.d_bias_partials);
@@ -182,7 +190,7 @@ pub(crate) fn conv_backward(
     }
     let mut bld = ctx
         .stream
-        .launch_builder(k.conv1d_bwd_tiled_typed.get(dtype));
+        .launch_builder(k.conv1d_bwd_tiled_typed.get(width).get(dtype));
     bld.arg(&p.d_x.0);
     bld.arg(&p.d_weight_partials);
     bld.arg(&p.d_bias_partials);

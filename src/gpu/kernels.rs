@@ -174,7 +174,7 @@ pub struct MambaKernels {
     /// Nosave tiled twin (inference prefill): tile-0 seeds from the
     /// carry-in state, later tiles from the x_branch halo - bit-identical
     /// to the serial nosave walk at two orders more parallelism.
-    pub conv1d_burnin_nosave_tiled_typed: TypedKernel,
+    pub conv1d_burnin_nosave_tiled_typed: ByIndexWidth<TypedKernel>,
 
     // -- Activations --
     /// Softplus forward: `ln(1 + exp(x))`.
@@ -250,23 +250,23 @@ pub struct MambaKernels {
     pub rmsnorm_bwd_typed: TypedKernel,
     /// Tiled conv1d forward (S-conv): grid (b*di blocks, T tiles); the
     /// window seeds from x_branch halo — bit-identical to the serial walk.
-    pub conv1d_burnin_fwd_tiled_typed: TypedKernel,
+    pub conv1d_burnin_fwd_tiled_typed: ByIndexWidth<TypedKernel>,
     /// Tiled conv backward: d_x (anticausal FIR, carry-seeded at the tile
     /// boundaries with the serial association order), the tap partials and
     /// the bias partials in one walk, the pre-activation recomputed from
     /// the x window.
-    pub conv1d_bwd_tiled_typed: TypedKernel,
+    pub conv1d_bwd_tiled_typed: ByIndexWidth<TypedKernel>,
     /// Typed dispatch for `conv1d_burnin_backward`, the serial reference
     /// the typed backward parity test drives; production runs the tiled
     /// kernel above. Matches DEFINE_CONV1D_BURNIN_BWD in conv1d.cu.
     pub conv1d_burnin_bwd_typed: TypedKernel,
     /// The conv forward of any width, its window read from the rows: the
     /// tiled kernels' chains for a conv wider than they hold.
-    pub conv1d_fwd_any_typed: TypedKernel,
+    pub conv1d_fwd_any_typed: ByIndexWidth<TypedKernel>,
     /// The conv backward of any width: the pre-activation gradients, then
     /// the tiled walk's d_x, tap and bias partials from them.
     pub conv1d_bwd_dco_typed: TypedKernel,
-    pub conv1d_bwd_any_typed: TypedKernel,
+    pub conv1d_bwd_any_typed: ByIndexWidth<TypedKernel>,
 
     // -- Typed training-backward kernels (the HOTTEST kernel) --
     /// Typed dispatch (f32/bf16/f16) for `ssm_backward_local` — the BPTT
@@ -314,7 +314,7 @@ pub struct MambaKernels {
     pub ssm_step_fwd_fused_typed: TypedKernel,
     /// Conv1d step with the SiLU fused into its store: the decode routes'
     /// only conv step kernel, one launch per layer.
-    pub conv1d_step_fwd_silu_typed: TypedKernel,
+    pub conv1d_step_fwd_silu_typed: ByIndexWidth<TypedKernel>,
     pub ssm_burnin_nosave_typed: TypedKernel,
     pub softplus_bwd_typed: TypedKernel,
     pub gather_last_timestep_typed: TypedKernel,
@@ -1430,6 +1430,18 @@ impl MambaKernels {
                 f16: get(&format!("{base}_f16"))?,
             })
         };
+        // Both offset widths of a typed kernel: `base_{type}` and
+        // `base_{type}_i64`.
+        let load_widths = |base: &str| -> Result<ByIndexWidth<TypedKernel>, String> {
+            Ok(ByIndexWidth {
+                i32: load_typed(base)?,
+                i64: TypedKernel {
+                    f32: get(&format!("{base}_f32_i64"))?,
+                    bf16: get(&format!("{base}_bf16_i64"))?,
+                    f16: get(&format!("{base}_f16_i64"))?,
+                },
+            })
+        };
         let load_half = |base: &str| -> Result<HalfKernel, String> {
             Ok(HalfKernel {
                 bf16: get(&format!("{base}_bf16"))?,
@@ -1509,7 +1521,7 @@ impl MambaKernels {
             ssm_reduce_d_a_log: get("ssm_reduce_d_a_log")?,
             ssm_reduce_d_a_log_chunks: get("ssm_reduce_d_a_log_chunks")?,
             // conv1d
-            conv1d_burnin_nosave_tiled_typed: load_typed("conv1d_burnin_forward_nosave_tiled")?,
+            conv1d_burnin_nosave_tiled_typed: load_widths("conv1d_burnin_forward_nosave_tiled")?,
             // activations
             softplus_fwd: get("softplus_forward")?,
             softplus_bwd: get("softplus_backward")?,
@@ -1768,7 +1780,7 @@ impl MambaKernels {
             elementwise_mul_v_typed: load_typed("elementwise_mul_v")?,
             softplus_copy_typed: load_typed("softplus_copy")?,
             ssm_step_fwd_fused_typed: load_typed("ssm_step_forward_fused")?,
-            conv1d_step_fwd_silu_typed: load_typed("conv1d_step_forward_silu")?,
+            conv1d_step_fwd_silu_typed: load_widths("conv1d_step_forward_silu")?,
             ssm_burnin_nosave_typed: load_typed("ssm_burnin_forward_nosave")?,
             softplus_bwd_typed: load_typed("softplus_backward")?,
             gather_last_timestep_typed: load_typed("gather_last_timestep")?,
@@ -1781,11 +1793,11 @@ impl MambaKernels {
             gating_bwd_typed: load_typed("gating_backward")?,
             rmsnorm_bwd_typed: load_typed("rmsnorm_backward")?,
             conv1d_burnin_bwd_typed: load_typed("conv1d_burnin_backward")?,
-            conv1d_burnin_fwd_tiled_typed: load_typed("conv1d_burnin_forward_tiled")?,
-            conv1d_bwd_tiled_typed: load_typed("conv1d_bwd_tiled")?,
-            conv1d_fwd_any_typed: load_typed("conv1d_fwd_any")?,
+            conv1d_burnin_fwd_tiled_typed: load_widths("conv1d_burnin_forward_tiled")?,
+            conv1d_bwd_tiled_typed: load_widths("conv1d_bwd_tiled")?,
+            conv1d_fwd_any_typed: load_widths("conv1d_fwd_any")?,
             conv1d_bwd_dco_typed: load_typed("conv1d_bwd_dco")?,
-            conv1d_bwd_any_typed: load_typed("conv1d_bwd_any")?,
+            conv1d_bwd_any_typed: load_widths("conv1d_bwd_any")?,
             // ssm_backward_local typed + typed-input reducers
             ssm_backward_local_typed: load_typed("ssm_backward_local")?,
             pack_xdbl_cols_typed: TypedKernel {

@@ -542,15 +542,45 @@ pub fn grid_tmajor_tiles(batch: usize, t: usize, d: usize) -> LaunchConfig {
     }
 }
 
+/// CONV1D_TILE_T (kernels/conv1d.cu): the tile depth of the conv backward,
+/// which also fixes how many partial rows the tap gradients reduce.
+const CONV_BWD_TILE_T: usize = 128;
+
 /// Grid of the tiled conv backward: tiles of CONV1D_TILE_T = 128, the depth
 /// that also fixes how many partial rows the tap gradients reduce.
 pub fn grid_conv_tiled(batch: usize, d_inner: usize, t: usize) -> Result<LaunchConfig, String> {
-    const TILE_T: usize = 128;
+    const TILE_T: usize = CONV_BWD_TILE_T;
     Ok(LaunchConfig {
         grid_dim: (blocks_1d(batch * d_inner)?, tiles_y(t, TILE_T)?, 1),
         block_dim: (BLOCK_1D, 1, 1),
         shared_mem_bytes: 0,
     })
+}
+
+/// Offset width of the Mamba-1 conv kernels over `(batch, seq, d_inner,
+/// d_conv)`. Their offsets reach the rows they read and write, `[batch,
+/// seq, widest_row]` with the widest row stride of the launch (the in_proj
+/// rows the x half is read from, the d_proj rows the x gradient lands in),
+/// the state and carry-in windows `[batch, d_inner, d_conv]` and the tap
+/// partials of the backward, one window per tile. A decode step is `seq`
+/// 1.
+pub fn conv_index_width(
+    batch: usize,
+    seq: usize,
+    d_inner: usize,
+    d_conv: usize,
+    widest_row: usize,
+) -> IndexWidth {
+    let tiles = seq.div_ceil(CONV_BWD_TILE_T).max(1);
+    IndexWidth::covering(&[
+        batch
+            .saturating_mul(seq)
+            .saturating_mul(widest_row.max(d_inner)),
+        batch
+            .saturating_mul(d_inner)
+            .saturating_mul(d_conv)
+            .saturating_mul(tiles),
+    ])
 }
 
 /// Elements per 16-byte vector for an activation dtype.
@@ -668,6 +698,31 @@ mod tests {
         // C rows end past 2^31 does not.
         assert_eq!(scan_fwd_index_width(2, 4621, 768, 16, true), I32);
         assert_eq!(scan_fwd_index_width(8193, 1024, 1, 256, true), I64);
+    }
+
+    /// A conv launch takes the int build while its rows, its windows and its
+    /// tap partials fit, whichever crosses first.
+    #[test]
+    fn a_conv_launch_takes_the_int_build_while_its_offsets_fit() {
+        use IndexWidth::{I32, I64};
+        let m = INT_ARG_MAX;
+        // Rows [batch, seq, widest row]: the in_proj stride counts.
+        assert_eq!(conv_index_width(1, m / 2, 1, 1, 2), I32);
+        assert_eq!(conv_index_width(1, m / 2 + 1, 1, 1, 2), I64);
+        // Windows of one tile [batch, d_inner, d_conv].
+        assert_eq!(conv_index_width(m / 4, 1, 1, 4, 1), I32);
+        assert_eq!(conv_index_width(m / 4 + 1, 1, 1, 4, 1), I64);
+        // The tap partials hold a window per tile of the backward: a window
+        // wider than a tile is deep outgrows the rows.
+        let (seq, dc) = (3 * CONV_BWD_TILE_T, 2 * CONV_BWD_TILE_T);
+        assert_eq!(conv_index_width(m / (3 * dc), seq, 1, dc, 1), I32);
+        assert_eq!(conv_index_width(m / (3 * dc) + 1, seq, 1, dc, 1), I64);
+        // The vision classifier's shape and a decode step of 512 sequences
+        // fit; 1025 sequences of 1024 steps read through 2048-column rows
+        // do not.
+        assert_eq!(conv_index_width(2, 4621, 768, 4, 1536), I32);
+        assert_eq!(conv_index_width(512, 1, 2048, 4, 4096), I32);
+        assert_eq!(conv_index_width(1025, 1024, 1024, 4, 2048), I64);
     }
 
     /// The pieces of a cast move each pointer by its own element size: a

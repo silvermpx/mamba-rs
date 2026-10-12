@@ -76,7 +76,7 @@ fn run(dtype: WeightDtype) {
     {
         let mut bld = ctx
             .stream
-            .launch_builder(k.conv1d_burnin_fwd_tiled_typed.get(dtype));
+            .launch_builder(k.conv1d_burnin_fwd_tiled_typed.i32.get(dtype));
         let up = u.cached_ptr();
         let sp = state.cached_ptr();
         let csp = conv_states.cached_ptr();
@@ -99,7 +99,7 @@ fn run(dtype: WeightDtype) {
     {
         let mut bld = ctx
             .stream
-            .launch_builder(k.conv1d_bwd_tiled_typed.get(dtype));
+            .launch_builder(k.conv1d_bwd_tiled_typed.i32.get(dtype));
         let dxp = d_proj.cached_ptr();
         let wpp = wp.cached_ptr();
         let bpp = bp.cached_ptr();

@@ -29,8 +29,8 @@
 //
 // Training kernels (conv1d_burnin_*) keep silu separate so the silu
 // backward gets its own activation save buffer — DO NOT fuse those.
-#define DEFINE_CONV1D_STEP_FWD_SILU(SUFFIX, T, FROM_F)                     \
-extern "C" __global__ void conv1d_step_forward_silu_##SUFFIX(               \
+#define DEFINE_CONV1D_STEP_FWD_SILU(NAME, IDX, T, FROM_F)                  \
+extern "C" __global__ void NAME(                                           \
     T* __restrict__ out,                                                   \
     float* __restrict__ state,                                             \
     /* Row stride of new_x: d_inner for a packed input, 2 * d_inner when   \
@@ -41,13 +41,13 @@ extern "C" __global__ void conv1d_step_forward_silu_##SUFFIX(               \
     const float* __restrict__ bias,                                        \
     int batch, int d_inner, int d_conv                                     \
 ) {                                                                        \
-    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;      \
-    long long total = (long long)batch * d_inner;                          \
+    IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                  \
+    IDX total = (IDX)batch * d_inner;                                      \
     if (idx >= total) return;                                              \
-    long long b = idx / d_inner;                                           \
+    IDX b = idx / d_inner;                                                 \
     int d = (int)(idx % d_inner);                                          \
-    long long x_idx = b * x_stride + d;                                    \
-    long long state_base = (b * d_inner + d) * d_conv;                     \
+    IDX x_idx = b * x_stride + d;                                          \
+    IDX state_base = (b * d_inner + d) * d_conv;                           \
     /* Registerized d_conv == 4 fast path - see the note above. */          \
     if (d_conv == 4) {                                                     \
         float s0 = state[state_base + 1];                                  \
@@ -80,9 +80,12 @@ extern "C" __global__ void conv1d_step_forward_silu_##SUFFIX(               \
     out[idx] = FROM_F(silu);                                               \
 }
 
-DEFINE_CONV1D_STEP_FWD_SILU(f32,  float,         from_f_f32)
-DEFINE_CONV1D_STEP_FWD_SILU(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_CONV1D_STEP_FWD_SILU(f16,  __half,        from_f_f16)
+DEFINE_CONV1D_STEP_FWD_SILU(conv1d_step_forward_silu_f32, int, float, from_f_f32)
+DEFINE_CONV1D_STEP_FWD_SILU(conv1d_step_forward_silu_f32_i64, long long, float, from_f_f32)
+DEFINE_CONV1D_STEP_FWD_SILU(conv1d_step_forward_silu_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_STEP_FWD_SILU(conv1d_step_forward_silu_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_STEP_FWD_SILU(conv1d_step_forward_silu_f16, int, __half, from_f_f16)
+DEFINE_CONV1D_STEP_FWD_SILU(conv1d_step_forward_silu_f16_i64, long long, __half, from_f_f16)
 
 // ======================== BURNIN (T>1) ========================
 
@@ -240,8 +243,8 @@ __device__ __forceinline__ void conv_store_row8(T* p, int n_valid, const T v[8])
                             t_end - tb, us);                                 \
     }
 
-#define DEFINE_CONV1D_BURNIN_TILED(SUFFIX, TY, FROM_F)                        \
-extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
+#define DEFINE_CONV1D_BURNIN_TILED(NAME, IDX, TY, FROM_F)                     \
+extern "C" __global__ void NAME(                                              \
     TY* __restrict__ u_out, float* __restrict__ state,                       \
     float* __restrict__ conv_states_saved,                                   \
     const TY* __restrict__ x_branch, const float* __restrict__ weight,       \
@@ -250,16 +253,16 @@ extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
     int x_stride /* row stride of x_branch: d_inner, or 2*d_inner when        \
                     reading the in_proj output directly */                    \
 ) {                                                                          \
-    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;        \
-    long long total = (long long)batch * d_inner;                            \
+    IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                     \
+    IDX total = (IDX)batch * d_inner;                                         \
     if (idx >= total) return;                                                \
     if (d_conv > 8) return;                                                  \
-    long long b = idx / d_inner;                                             \
+    IDX b = idx / d_inner;                                                    \
     int d = (int)(idx % d_inner);                                            \
     int t0 = blockIdx.y * CONV1D_FWD_TILE_T;                                 \
     if (t0 >= T_len) return;                                                 \
     int t_end = min(t0 + CONV1D_FWD_TILE_T, T_len);                          \
-    long long state_base = (b * d_inner + d) * d_conv;                       \
+    IDX state_base = (b * d_inner + d) * d_conv;                              \
     float win[8];                                                            \
     if (t0 == 0) {                                                           \
         for (int k = 0; k < d_conv; k++) {                                   \
@@ -303,9 +306,12 @@ extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
     }                                                                        \
 }
 
-DEFINE_CONV1D_BURNIN_TILED(f32,  float,         from_f_f32)
-DEFINE_CONV1D_BURNIN_TILED(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_CONV1D_BURNIN_TILED(f16,  __half,        from_f_f16)
+DEFINE_CONV1D_BURNIN_TILED(conv1d_burnin_forward_tiled_f32, int, float, from_f_f32)
+DEFINE_CONV1D_BURNIN_TILED(conv1d_burnin_forward_tiled_f32_i64, long long, float, from_f_f32)
+DEFINE_CONV1D_BURNIN_TILED(conv1d_burnin_forward_tiled_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BURNIN_TILED(conv1d_burnin_forward_tiled_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BURNIN_TILED(conv1d_burnin_forward_tiled_f16, int, __half, from_f_f16)
+DEFINE_CONV1D_BURNIN_TILED(conv1d_burnin_forward_tiled_f16_i64, long long, __half, from_f_f16)
 
 // Nosave tiled twin for the inference prefill: same tile-0 state seeding,
 // same x_branch halo, same k-ascending FMA chain - bit-identical to the
@@ -314,8 +320,8 @@ DEFINE_CONV1D_BURNIN_TILED(f16,  __half,        from_f_f16)
 // so a continued prefill sees exactly the serial walk's final window.
 // u_t, when not null, receives the same values in t-major rows of
 // u_t_stride for the parallel scan.
-#define DEFINE_CONV1D_BURNIN_NOSAVE_TILED(SUFFIX, TY, FROM_F)                 \
-extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
+#define DEFINE_CONV1D_BURNIN_NOSAVE_TILED(NAME, IDX, TY, FROM_F)              \
+extern "C" __global__ void NAME(                                              \
     TY* __restrict__ u_out, TY* __restrict__ u_t, float* __restrict__ state, \
     const TY* __restrict__ x_branch, const float* __restrict__ weight,       \
     const float* __restrict__ bias,                                          \
@@ -324,16 +330,16 @@ extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
                      reading the in_proj output directly */                  \
     int u_t_stride /* row stride of u_t, a multiple of eight */              \
 ) {                                                                          \
-    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;        \
-    long long total = (long long)batch * d_inner;                            \
+    IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                     \
+    IDX total = (IDX)batch * d_inner;                                         \
     if (idx >= total) return;                                                \
     if (d_conv > 8) return;                                                  \
-    long long b = idx / d_inner;                                             \
+    IDX b = idx / d_inner;                                                    \
     int d = (int)(idx % d_inner);                                            \
     int t0 = blockIdx.y * CONV1D_FWD_TILE_T;                                 \
     if (t0 >= T_len) return;                                                 \
     int t_end = min(t0 + CONV1D_FWD_TILE_T, T_len);                          \
-    long long state_base = (b * d_inner + d) * d_conv;                       \
+    IDX state_base = (b * d_inner + d) * d_conv;                              \
     float win[8];                                                            \
     if (t0 == 0) {                                                           \
         for (int k = 0; k < d_conv; k++) {                                   \
@@ -371,9 +377,12 @@ extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
     }                                                                        \
 }
 
-DEFINE_CONV1D_BURNIN_NOSAVE_TILED(f32,  float,         from_f_f32)
-DEFINE_CONV1D_BURNIN_NOSAVE_TILED(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_CONV1D_BURNIN_NOSAVE_TILED(f16,  __half,        from_f_f16)
+DEFINE_CONV1D_BURNIN_NOSAVE_TILED(conv1d_burnin_forward_nosave_tiled_f32, int, float, from_f_f32)
+DEFINE_CONV1D_BURNIN_NOSAVE_TILED(conv1d_burnin_forward_nosave_tiled_f32_i64, long long, float, from_f_f32)
+DEFINE_CONV1D_BURNIN_NOSAVE_TILED(conv1d_burnin_forward_nosave_tiled_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BURNIN_NOSAVE_TILED(conv1d_burnin_forward_nosave_tiled_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BURNIN_NOSAVE_TILED(conv1d_burnin_forward_nosave_tiled_f16, int, __half, from_f_f16)
+DEFINE_CONV1D_BURNIN_NOSAVE_TILED(conv1d_burnin_forward_nosave_tiled_f16_i64, long long, __half, from_f_f16)
 
 // The conv backward as one kernel per (b, d, tile). The pre-activation
 // is recomputed from the x window instead of read from a tape, so the
@@ -494,8 +503,8 @@ DEFINE_CONV1D_BURNIN_NOSAVE_TILED(f16,  __half,        from_f_f16)
         }                                                                    \
     }
 
-#define DEFINE_CONV1D_BWD_TILED(SUFFIX, TY, FROM_F)                           \
-extern "C" __global__ void conv1d_bwd_tiled_##SUFFIX(                         \
+#define DEFINE_CONV1D_BWD_TILED(NAME, IDX, TY, FROM_F)                        \
+extern "C" __global__ void NAME(                                              \
     TY* __restrict__ d_x_branch,                                              \
     float* __restrict__ d_weight_partials, /* [B*n_tiles, di*d_conv] */       \
     float* __restrict__ d_bias_partials,   /* [B*n_tiles, di] */              \
@@ -510,19 +519,19 @@ extern "C" __global__ void conv1d_bwd_tiled_##SUFFIX(                         \
     int out_stride, int out_offset,                                           \
     int x_stride /* row stride of x_branch, as in the forward */              \
 ) {                                                                           \
-    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;         \
-    long long total = (long long)batch * d_inner;                             \
+    IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                     \
+    IDX total = (IDX)batch * d_inner;                                         \
     if (idx >= total) return;                                                 \
     if (d_conv > 8) return;                                                   \
-    long long b = idx / d_inner;                                              \
+    IDX b = idx / d_inner;                                                    \
     int d = (int)(idx % d_inner);                                             \
     int n_tiles = (T_ + CONV1D_TILE_T - 1) / CONV1D_TILE_T;                   \
     int tile = blockIdx.y;                                                    \
     int t0 = tile * CONV1D_TILE_T;                                            \
     if (t0 >= T_) return;                                                     \
     int t_end = min(t0 + CONV1D_TILE_T, T_);                                  \
-    long long row = b * n_tiles + tile;                                       \
-    long long init_base = (b * d_inner + d) * d_conv;                         \
+    IDX row = b * n_tiles + tile;                                             \
+    IDX init_base = (b * d_inner + d) * d_conv;                               \
     int carry_len = d_conv - 1;                                               \
     float local_d_bias = 0.0f;                                                \
     float bias_d = bias[d];                                                   \
@@ -572,9 +581,12 @@ extern "C" __global__ void conv1d_bwd_tiled_##SUFFIX(                         \
     d_bias_partials[row * d_inner + d] = local_d_bias;                        \
 }                                                                             \
 
-DEFINE_CONV1D_BWD_TILED(f32,  float,         from_f_f32)
-DEFINE_CONV1D_BWD_TILED(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_CONV1D_BWD_TILED(f16,  __half,        from_f_f16)
+DEFINE_CONV1D_BWD_TILED(conv1d_bwd_tiled_f32, int, float, from_f_f32)
+DEFINE_CONV1D_BWD_TILED(conv1d_bwd_tiled_f32_i64, long long, float, from_f_f32)
+DEFINE_CONV1D_BWD_TILED(conv1d_bwd_tiled_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BWD_TILED(conv1d_bwd_tiled_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BWD_TILED(conv1d_bwd_tiled_f16, int, __half, from_f_f16)
+DEFINE_CONV1D_BWD_TILED(conv1d_bwd_tiled_f16_i64, long long, __half, from_f_f16)
 
 // ============================================================================
 // Any number of taps. The tiled kernels above keep a channel's window, its
@@ -592,17 +604,17 @@ DEFINE_CONV1D_BWD_TILED(f16,  __half,        from_f_f16)
 // conv_states_saved, when not null, receives the carry-in window, the
 // training tape; u_t, when not null, the outputs in t-major rows of
 // u_t_stride. Grid (ceil(B * d_inner / 256), ceil(T / tile)).
-#define DEFINE_CONV1D_FWD_ANY(SUFFIX, TY, FROM_F)                              \
-extern "C" __global__ void conv1d_fwd_any_##SUFFIX(                           \
+#define DEFINE_CONV1D_FWD_ANY(NAME, IDX, TY, FROM_F)                           \
+extern "C" __global__ void NAME(                                               \
     TY* __restrict__ u_out, TY* __restrict__ u_t, int u_t_stride,             \
     float* __restrict__ state, float* __restrict__ conv_states_saved,         \
     const TY* __restrict__ x_branch, const float* __restrict__ weight,        \
     const float* __restrict__ bias,                                           \
     int batch, int T_len, int d_inner, int d_conv, int x_stride, int tile     \
 ) {                                                                           \
-    const long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;   \
-    if (idx >= (long long)batch * d_inner) return;                            \
-    const long long b = idx / d_inner;                                        \
+    const IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                \
+    if (idx >= (IDX)batch * d_inner) return;                                   \
+    const IDX b = idx / d_inner;                                               \
     const int d = (int)(idx % d_inner);                                       \
     const int t0 = blockIdx.y * tile;                                         \
     if (t0 >= T_len) return;                                                  \
@@ -642,9 +654,12 @@ extern "C" __global__ void conv1d_fwd_any_##SUFFIX(                           \
     }                                                                         \
 }
 
-DEFINE_CONV1D_FWD_ANY(f32,  float,         from_f_f32)
-DEFINE_CONV1D_FWD_ANY(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_CONV1D_FWD_ANY(f16,  __half,        from_f_f16)
+DEFINE_CONV1D_FWD_ANY(conv1d_fwd_any_f32, int, float, from_f_f32)
+DEFINE_CONV1D_FWD_ANY(conv1d_fwd_any_f32_i64, long long, float, from_f_f32)
+DEFINE_CONV1D_FWD_ANY(conv1d_fwd_any_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_FWD_ANY(conv1d_fwd_any_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_FWD_ANY(conv1d_fwd_any_f16, int, __half, from_f_f16)
+DEFINE_CONV1D_FWD_ANY(conv1d_fwd_any_f16_i64, long long, __half, from_f_f16)
 
 // The backward of any width, first half: every step's pre-activation
 // gradient dco = d_u silu'(v) into an f32 scratch [B * T, d_inner], v
@@ -700,8 +715,8 @@ __device__ __forceinline__ float conv_dco_at(
 // step's own product added with two roundings. Each tap's gradient and the
 // bias's run their descending-t chains over the tile into the same partial
 // rows. Grid (ceil(B * d_inner / 256), ceil(T / CONV1D_TILE_T)).
-#define DEFINE_CONV1D_BWD_ANY(SUFFIX, TY, FROM_F)                              \
-extern "C" __global__ void conv1d_bwd_any_##SUFFIX(                           \
+#define DEFINE_CONV1D_BWD_ANY(NAME, IDX, TY, FROM_F)                           \
+extern "C" __global__ void NAME(                                               \
     TY* __restrict__ d_x_branch,                                              \
     float* __restrict__ d_weight_partials, /* [B*n_tiles, di*d_conv] */       \
     float* __restrict__ d_bias_partials,   /* [B*n_tiles, di] */              \
@@ -712,9 +727,9 @@ extern "C" __global__ void conv1d_bwd_any_##SUFFIX(                           \
     int batch, int T_, int d_inner, int d_conv,                               \
     int out_stride, int out_offset, int x_stride                              \
 ) {                                                                           \
-    const long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;   \
-    if (idx >= (long long)batch * d_inner) return;                            \
-    const long long b = idx / d_inner;                                        \
+    const IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                \
+    if (idx >= (IDX)batch * d_inner) return;                                   \
+    const IDX b = idx / d_inner;                                               \
     const int d = (int)(idx % d_inner);                                       \
     const int n_tiles = (T_ + CONV1D_TILE_T - 1) / CONV1D_TILE_T;             \
     const int tile = blockIdx.y;                                              \
@@ -757,6 +772,9 @@ extern "C" __global__ void conv1d_bwd_any_##SUFFIX(                           \
     d_bias_partials[row * d_inner + d] = bacc;                                \
 }
 
-DEFINE_CONV1D_BWD_ANY(f32,  float,         from_f_f32)
-DEFINE_CONV1D_BWD_ANY(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_CONV1D_BWD_ANY(f16,  __half,        from_f_f16)
+DEFINE_CONV1D_BWD_ANY(conv1d_bwd_any_f32, int, float, from_f_f32)
+DEFINE_CONV1D_BWD_ANY(conv1d_bwd_any_f32_i64, long long, float, from_f_f32)
+DEFINE_CONV1D_BWD_ANY(conv1d_bwd_any_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BWD_ANY(conv1d_bwd_any_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BWD_ANY(conv1d_bwd_any_f16, int, __half, from_f_f16)
+DEFINE_CONV1D_BWD_ANY(conv1d_bwd_any_f16_i64, long long, __half, from_f_f16)

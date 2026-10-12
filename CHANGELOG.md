@@ -188,6 +188,10 @@
   `ssm_parallel_fwd_nosave` and their `_typed` twins hold both builds as a
   `ByIndexWidth`, and `gpu::launch` gains `IndexWidth`,
   `scan_fwd_index_width` and `scan_fwd_nosave_index_width`.
+- The Mamba-1 conv kernels of the forward, the prefill, the decode step and
+  the backward are built the same way and pick their build per launch
+  (`gpu::launch::conv_index_width`). Their fields in `MambaKernels` hold
+  both builds as a `ByIndexWidth`.
 - `GpuCtx::cublas()` hands the context's cuBLAS handle, which the context
   takes when it enters a cuBLAS GEMM mode and keeps. `GpuCtx::take_cublas()`
   takes one for a context that stays in the deterministic mode, for a

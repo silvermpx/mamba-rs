@@ -20,7 +20,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_norm};
+use crate::gpu::launch::{conv_index_width, grid_1d_cover, grid_1d_wide, grid_norm};
 use crate::gpu::options::GpuOptions;
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::weights::MambaWeights;
@@ -1305,10 +1305,11 @@ impl MambaGpuEngine {
                 let di_i = di as i32;
                 let dc_i = d_conv as i32;
                 let x_stride_i = (2 * di) as i32;
+                let width = conv_index_width(b, 1, di, d_conv, 2 * di);
                 let mut bld = self
                     .ctx
                     .stream
-                    .launch_builder(&k.conv1d_step_fwd_silu_typed.f32);
+                    .launch_builder(&k.conv1d_step_fwd_silu_typed.get(width).f32);
                 let u_ptr = scratch.u.cached_ptr();
                 let proj_ptr = scratch.proj.cached_ptr();
                 bld.arg(&u_ptr);
@@ -1939,10 +1940,11 @@ impl MambaGpuEngineMixed {
                 let di_i = di as i32;
                 let dc_i = d_conv as i32;
                 let x_stride_i = (2 * di) as i32;
+                let width = conv_index_width(b, 1, di, d_conv, 2 * di);
                 let mut bld = engine
                     .ctx
                     .stream
-                    .launch_builder(k.conv1d_step_fwd_silu_typed.get(dt));
+                    .launch_builder(k.conv1d_step_fwd_silu_typed.get(width).get(dt));
                 let u_ptr = scratch.u.cached_ptr();
                 let proj_ptr = scratch.proj.cached_ptr();
                 bld.arg(&u_ptr);
