@@ -165,8 +165,11 @@ impl Mamba3GpuTrainer {
         dtype: WeightDtype,
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
-        // Hoisted here so both branches get the model envelope.
+        // Hoisted here so both branches get the model envelope, and
+        // weights of the config's shapes: a model without an input
+        // projection takes rows d_model wide.
         cfg.validate()?;
+        cpu_weights.validate(&cfg, session.input_dim)?;
         // The index ranges are checked against the scan this window runs
         // when its dims are built (`GpuMamba3Dims::validate_index_budget`):
         // the chunked path has no sequential tape to count.

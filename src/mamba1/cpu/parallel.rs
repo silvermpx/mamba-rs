@@ -772,20 +772,6 @@ mod tests {
             }
         }
 
-        // Compare input_proj_outputs.
-        for b in 0..b_sz {
-            let seq_ipo = &seq_acts[b].input_proj_outputs;
-            let par_ipo = &par_acts[b].input_proj_outputs;
-            for (i, (&s, &p)) in seq_ipo.iter().zip(par_ipo.iter()).enumerate() {
-                let diff = (s - p).abs();
-                assert!(
-                    diff <= tol,
-                    "input_proj_outputs mismatch at sample {b}, idx {i}: \
-                     seq={s}, par={p}, diff={diff}",
-                );
-            }
-        }
-
         // Compare layer activation data for all layers.
         for b in 0..b_sz {
             for layer_idx in 0..n_layers {

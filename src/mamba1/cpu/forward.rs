@@ -365,23 +365,24 @@ pub fn forward_mamba_backbone_batched(
     let n_layers = dims.n_layers;
 
     // --- Batched input projection: [T * mid] -> [T * dm] ---
-    // Save inputs for backward
-    acts.input_proj_inputs
-        .copy_from_slice(&mamba_input_flat[..seq_len * mid]);
-
-    // Single batched SGEMM call
-    sgemm_forward(
-        &mut temporal_flat[..seq_len * dm],
-        &mamba_input_flat[..seq_len * mid],
-        &mamba_w.input_proj_w,
-        Some(&mamba_w.input_proj_b),
-        seq_len,
-        mid,
-        dm,
-    );
-
-    // Save outputs for backward
-    acts.input_proj_outputs[..seq_len * dm].copy_from_slice(&temporal_flat[..seq_len * dm]);
+    // A model without one (the official checkpoints, whose embedding feeds
+    // the first norm) takes its input as the rows themselves.
+    if mamba_w.input_proj_w.is_empty() {
+        temporal_flat[..seq_len * dm].copy_from_slice(&mamba_input_flat[..seq_len * dm]);
+    } else {
+        // Save inputs for backward
+        acts.input_proj_inputs
+            .copy_from_slice(&mamba_input_flat[..seq_len * mid]);
+        sgemm_forward(
+            &mut temporal_flat[..seq_len * dm],
+            &mamba_input_flat[..seq_len * mid],
+            &mamba_w.input_proj_w,
+            Some(&mamba_w.input_proj_b),
+            seq_len,
+            mid,
+            dm,
+        );
+    }
 
     // --- Mamba layers (batched) ---
     let conv_per_layer = di * dc;

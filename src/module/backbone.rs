@@ -311,7 +311,9 @@ impl MambaBackbone {
 
     /// Batched single-step forward through the backbone.
     ///
-    /// Processes B independent samples with the same weights.
+    /// Processes B independent samples with the same weights, each through
+    /// [`Self::forward_step`]: the packed projections when the backbone
+    /// has them, and no input projection when the model has none.
     /// `inputs`: `[B * input_dim]`, `outputs`: `[B * d_model]`.
     pub fn forward_step_batch(
         &self,
@@ -320,14 +322,11 @@ impl MambaBackbone {
         states: &mut [MambaState],
         scratches: &mut [MambaStepScratch],
     ) {
-        crate::inference::mamba_step_batch(
-            inputs,
-            outputs,
-            &self.weights,
-            states,
-            scratches,
-            &self.cfg,
-            self.input_dim,
+        crate::mamba1::cpu::inference::step_batch_by(
+            (inputs, outputs),
+            (states, scratches),
+            (self.cfg.d_model, self.input_dim),
+            |inp, out, state, scratch| self.forward_step(inp, out, state, scratch),
         );
     }
 

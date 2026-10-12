@@ -170,8 +170,6 @@ pub struct GpuMambaLayerActs {
 pub struct GpuMambaBackboneActs {
     /// Saved input to input_proj: `[B*T*mamba_input_dim]`.
     pub input_proj_inputs: GpuBuffer,
-    /// Saved output of input_proj: `[B*T*d_model]`.
-    pub input_proj_outputs: GpuBuffer,
     /// Per-layer activations.
     pub layers: Vec<GpuMambaLayerActs>,
     /// Saved pre-norm_f input for backward: `[B*T*d_model]`.
@@ -236,7 +234,6 @@ impl GpuMambaBackboneActs {
 
         Ok(Self {
             input_proj_inputs: GpuBuffer::zeros(stream, bt * mamba_input_dim)?,
-            input_proj_outputs: GpuBuffer::zeros(stream, bt * d_model)?,
             layers,
             norm_f_input: GpuBuffer::zeros(stream, bt * d_model)?,
             norm_f_rms: GpuBuffer::zeros(stream, bt)?,
@@ -782,21 +779,24 @@ pub fn gpu_forward_mamba_backbone(
     dims.check_for(ctx)?;
     let bt = dims.bt();
 
-    // Save input for backward
-    acts.input_proj_inputs.copy_from(mamba_input, &ctx.stream)?;
+    if mamba_w.input_proj_w.is_empty() {
+        // A model without an input projection (the official checkpoints,
+        // whose embedding feeds the first norm) takes its input as the rows.
+        temporal.copy_from(mamba_input, &ctx.stream)?;
+    } else {
+        // Save input for backward
+        acts.input_proj_inputs.copy_from(mamba_input, &ctx.stream)?;
 
-    // Batched input_proj: [B*T, mamba_input_dim] -> [B*T, d_model]
-    gpu_gemm_bi_forward_raw(
-        ctx,
-        temporal,
-        mamba_input,
-        mamba_w.input_proj_w.cached_ptr(),
-        Some(mamba_w.input_proj_b.cached_ptr()),
-        (bt, dims.mamba_input_dim, dims.d_model),
-    )?;
-
-    // Save output for backward
-    acts.input_proj_outputs.copy_from(temporal, &ctx.stream)?;
+        // Batched input_proj: [B*T, mamba_input_dim] -> [B*T, d_model]
+        gpu_gemm_bi_forward_raw(
+            ctx,
+            temporal,
+            mamba_input,
+            mamba_w.input_proj_w.cached_ptr(),
+            Some(mamba_w.input_proj_b.cached_ptr()),
+            (bt, dims.mamba_input_dim, dims.d_model),
+        )?;
+    }
 
     // Seed the residual chain: layer 0's residual slot gets the
     // input_proj output ONCE; from there every layer's residual_add

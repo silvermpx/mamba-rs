@@ -455,7 +455,9 @@ fn mamba_blocks_and_norm(
     }
 }
 
-/// Batched T=1 inference: processes B independent samples through the same weights.
+/// Batched T=1 inference: processes B independent samples through the same
+/// weights. A model without an input projection takes each sample's input
+/// as its rows.
 pub fn mamba_step_batch(
     inputs: &[f32],
     outputs: &mut [f32],
@@ -465,8 +467,42 @@ pub fn mamba_step_batch(
     cfg: &MambaConfig,
     input_dim: usize,
 ) {
+    let identity = weights.input_proj_w.is_empty();
+    step_batch_by(
+        (inputs, outputs),
+        (states, scratches),
+        (cfg.d_model, input_dim),
+        |inp, out, state, scratch| {
+            if identity {
+                mamba_step_no_proj(inp, out, weights, &mut state.layers, scratch, cfg);
+            } else {
+                mamba_step(
+                    inp,
+                    out,
+                    weights,
+                    &mut state.layers,
+                    scratch,
+                    cfg,
+                    input_dim,
+                );
+            }
+        },
+    );
+}
+
+/// B independent samples through `step`, one T=1 step each: in parallel
+/// when the batch fills the pool, one after another otherwise.
+pub(crate) fn step_batch_by(
+    (inputs, outputs): (&[f32], &mut [f32]),
+    (states, scratches): (
+        &mut [crate::mamba1::state::MambaState],
+        &mut [MambaStepScratch],
+    ),
+    (d_model, input_dim): (usize, usize),
+    step: impl Fn(&[f32], &mut [f32], &mut crate::mamba1::state::MambaState, &mut MambaStepScratch)
+    + Sync,
+) {
     let batch = states.len();
-    let d_model = cfg.d_model;
     assert_eq!(
         inputs.len(),
         batch * input_dim,
@@ -500,30 +536,26 @@ pub fn mamba_step_batch(
             .zip(scratches.par_iter_mut())
             .enumerate()
             .for_each(|(b, ((out, state), scratch))| {
-                let inp = &inputs[b * input_dim..(b + 1) * input_dim];
-                mamba_step(
-                    inp,
+                step(
+                    &inputs[b * input_dim..(b + 1) * input_dim],
                     out,
-                    weights,
-                    &mut state.layers,
+                    state,
                     scratch,
-                    cfg,
-                    input_dim,
                 );
             });
     } else {
         // Sequential: rayon overhead > compute for small batches
-        for b in 0..batch {
-            let inp = &inputs[b * input_dim..(b + 1) * input_dim];
-            let out = &mut outputs[b * d_model..(b + 1) * d_model];
-            mamba_step(
-                inp,
+        for (b, ((out, state), scratch)) in outputs
+            .chunks_mut(d_model)
+            .zip(states.iter_mut())
+            .zip(scratches.iter_mut())
+            .enumerate()
+        {
+            step(
+                &inputs[b * input_dim..(b + 1) * input_dim],
                 out,
-                weights,
-                &mut states[b].layers,
-                &mut scratches[b],
-                cfg,
-                input_dim,
+                state,
+                scratch,
             );
         }
     }

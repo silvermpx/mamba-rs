@@ -95,17 +95,16 @@ pub struct BackwardOpts {
     /// and leaves the gradients as they are.
     /// [`BackwardMetrics::optimizer_stepped`] reports the skip.
     pub step_skip_above: Option<f32>,
-    /// `Some(c)`: before the global clip, clip the Mamba-3 CONTROL
-    /// channels (the dd_dt/dd_A/trap/angle columns of every layer's
-    /// in_proj gradient plus dt_bias) to their own max norm `c`. Those
-    /// 80-of-1648 columns carry the only gradients whose magnitude
-    /// scales with the sequence length; without a separate bound one
-    /// resonant page rescales the ENTIRE arena through the global clip
-    /// and starves the representational columns. Honored by the M3 f32
-    /// and mixed lanes; the M1 lanes ignore it (their dt path has no
-    /// such route).
-    /// Read by the Mamba-3 trainer only: Mamba-1 has no control region
-    /// and leaves this unset regardless of what a caller passes.
+    /// `Some(c)`: before the global clip, clip the CONTROL channels to
+    /// their own max norm `c`: the gradients of the step size and the
+    /// decay, the only ones whose magnitude scales with the sequence
+    /// length. Without a separate bound one resonant page rescales the
+    /// ENTIRE arena through the global clip and starves the
+    /// representational columns. For Mamba-3 SISO they are the
+    /// dd_dt/dd_A/trap/angle columns of every layer's in_proj gradient
+    /// plus dt_bias; for Mamba-1 the step-size columns of x_proj, dt_proj
+    /// and A_log. Every lane of those two trainers honors it; the
+    /// Mamba-2 and MIMO trainers refuse it.
     pub control_clip_max_norm: Option<f32>,
 }
 

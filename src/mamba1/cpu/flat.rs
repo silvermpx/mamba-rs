@@ -500,8 +500,6 @@ impl MambaLayerFlat {
 pub struct MambaBackboneFlat {
     /// Input projection inputs across all timesteps: `[seq_len * mamba_input_dim]`.
     pub input_proj_inputs: Vec<f32>,
-    /// Input projection outputs across all timesteps: `[seq_len * d_model]`.
-    pub input_proj_outputs: Vec<f32>,
     /// Per-layer flat activation buffers.
     pub layers: Vec<MambaLayerFlat>,
     /// Saved pre-norm_f input for backward: `[seq_len * d_model]`.
@@ -515,7 +513,6 @@ impl MambaBackboneFlat {
     pub fn zeros(dims: MambaDims) -> Self {
         Self {
             input_proj_inputs: vec![0.0; dims.seq_len * dims.mamba_input_dim],
-            input_proj_outputs: vec![0.0; dims.seq_len * dims.d_model],
             layers: (0..dims.n_layers)
                 .map(|_| MambaLayerFlat::zeros(dims))
                 .collect(),
@@ -815,10 +812,6 @@ mod tests {
         assert_eq!(
             backbone.input_proj_inputs.len(),
             dims.seq_len * dims.mamba_input_dim
-        );
-        assert_eq!(
-            backbone.input_proj_outputs.len(),
-            dims.seq_len * dims.d_model
         );
         assert_eq!(backbone.layers.len(), dims.n_layers);
 

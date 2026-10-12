@@ -51,12 +51,14 @@ use crate::gpu::adamw::{
     AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, build_multi_plan, m1_specs, m1_specs_mixed,
     step_multi,
 };
-use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer};
+use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer, GradSlice};
 use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
-use crate::gpu::grad_clip::{alloc_partials, clip_grads_device, norm_limit, scale_grads};
+use crate::gpu::grad_clip::{
+    GradRegionGeom, alloc_partials, clip_grads_device, clip_region_device, norm_limit, scale_grads,
+};
 use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
@@ -232,8 +234,11 @@ impl MambaGpuTrainer {
     ) -> Result<Self, String> {
         // The kernels assume the dimensions the config validator checks
         // (a d_inner divisible by four above all); an unchecked config used
-        // to reach the launchers and pick inconsistent kernel pairs.
+        // to reach the launchers and pick inconsistent kernel pairs. The
+        // weights must have the config's shapes, and a model without an
+        // input projection rows d_model wide.
         cfg.validate()?;
+        cpu_weights.validate(&cfg, session.input_dim)?;
         crate::gpu::launch::validate_kernel_arg_capacity(
             session.batch,
             session.seq_len,
@@ -457,6 +462,17 @@ impl MambaGpuTrainer {
         clip_max_norm: Option<f32>,
         step_skip_above: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
+        self.apply_step_full(clip_max_norm, step_skip_above, None)
+    }
+
+    /// [`Self::apply_step_with`] plus the control-channel clip (see
+    /// [`BackwardOpts::control_clip_max_norm`]).
+    pub fn apply_step_full(
+        &mut self,
+        clip_max_norm: Option<f32>,
+        step_skip_above: Option<f32>,
+        control_clip_max_norm: Option<f32>,
+    ) -> Result<BackwardMetrics, String> {
         if matches!(self.dtype(), WeightDtype::F16) {
             return Err(
                 "apply_step is not defined for f16: the loss-scaler protocol (overflow \
@@ -472,7 +488,7 @@ impl MambaGpuTrainer {
                          backward_step(accumulate_only = true) first"
                         .into());
                 }
-                t.apply_step_inner(clip_max_norm, step_skip_above)
+                t.apply_step_inner(clip_max_norm, step_skip_above, control_clip_max_norm)
             }
             TrainerInner::Mixed(t) => {
                 if !t.grads_dirty {
@@ -480,7 +496,7 @@ impl MambaGpuTrainer {
                          backward_step(accumulate_only = true) first"
                         .into());
                 }
-                t.apply_step_inner(clip_max_norm, step_skip_above)
+                t.apply_step_inner(clip_max_norm, step_skip_above, control_clip_max_norm)
             }
         }
     }
@@ -532,7 +548,7 @@ impl MambaGpuTrainer {
             TrainerInner::F32(t) => scale_grads(&t.ctx, &mut t.grads.flat, inv_w)?,
             TrainerInner::Mixed(t) => scale_grads(&t.ctx, &mut t.grads.flat, inv_w)?,
         }
-        self.apply_step_with(clip, opts.step_skip_above)
+        self.apply_step_full(clip, opts.step_skip_above, opts.control_clip_max_norm)
     }
 
     /// Download the carried recurrence (conv + SSM state) — the TBPTT
@@ -733,6 +749,36 @@ impl MambaGpuTrainer {
         if let TrainerInner::Mixed(ref mut t) = self.inner {
             t.load_scaler_state(scale, growth_tracker);
         }
+    }
+}
+
+/// The CONTROL region of the M1 grad arena: the step-size columns of every
+/// layer's x_proj gradient, then its dt_proj weight and bias and A_log,
+/// which lie one after another. These are the gradients of the step size
+/// and the decay, whose magnitude grows with the sequence length as the
+/// Mamba-3 control channels' does. The offsets come from the arena's own
+/// views, so they follow its layout with or without an input projection.
+fn m1_control_region_geom(grads: &GpuMambaGrads, cfg: &MambaConfig) -> GradRegionGeom {
+    let base = grads.flat.cached_ptr();
+    let at = |s: &GradSlice| ((s.ptr() - base) / std::mem::size_of::<f32>() as u64) as i64;
+    let l0 = &grads.layers[0];
+    debug_assert_eq!(
+        at(&l0.dt_proj_b),
+        at(&l0.dt_proj_w) + l0.dt_proj_w.len() as i64
+    );
+    debug_assert_eq!(at(&l0.a_log), at(&l0.dt_proj_b) + l0.dt_proj_b.len() as i64);
+    GradRegionGeom {
+        n_layers: cfg.n_layers as i32,
+        layer_stride: grads
+            .layers
+            .get(1)
+            .map_or(0, |l1| at(&l1.norm_weight) - at(&l0.norm_weight)),
+        a_off: at(&l0.x_proj_w),
+        a_rows: cfg.d_inner() as i32,
+        a_cols: cfg.dt_rank() as i32,
+        a_row_stride: cfg.xdbl_dim() as i64,
+        b_off: at(&l0.dt_proj_w),
+        b_len: (l0.dt_proj_w.len() + l0.dt_proj_b.len() + l0.a_log.len()) as i32,
     }
 }
 
@@ -1317,8 +1363,7 @@ impl MambaTrainerMixed {
                         .into(),
                 );
             }
-            let m =
-                self.backward_split_f16(d_temporal, opts.clip_max_norm, opts.step_skip_above)?;
+            let m = self.backward_split_f16(d_temporal, opts)?;
             return Ok(m);
         }
 
@@ -1338,7 +1383,11 @@ impl MambaTrainerMixed {
                 overflow_skipped: None,
             })
         } else {
-            self.apply_step_inner(opts.clip_max_norm, opts.step_skip_above)
+            self.apply_step_inner(
+                opts.clip_max_norm,
+                opts.step_skip_above,
+                opts.control_clip_max_norm,
+            )
         }
     }
 
@@ -1350,7 +1399,22 @@ impl MambaTrainerMixed {
         &mut self,
         clip_max_norm: Option<f32>,
         step_skip_above: Option<f32>,
+        control_clip_max_norm: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
+        // The control channels first, so a window whose step-size and
+        // decay gradients grow with its length cannot rescale the whole
+        // arena through the global clip below.
+        if let Some(cb) = control_clip_max_norm {
+            let geom = m1_control_region_geom(&self.grads, &self.cfg);
+            clip_region_device(
+                &self.ctx,
+                &mut self.grads.flat,
+                &mut self.clip_partials,
+                &mut self.clip_scratch,
+                geom,
+                cb,
+            )?;
+        }
         let grad_norm = match norm_limit(clip_max_norm, step_skip_above) {
             Some(c) => Some(self.apply_clip(c)?),
             None => None,
@@ -1414,9 +1478,14 @@ impl MambaTrainerMixed {
     fn backward_split_f16(
         &mut self,
         d_temporal: &[f32],
-        clip_max_norm: Option<f32>,
-        step_skip_above: Option<f32>,
+        opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
+        let BackwardOpts {
+            clip_max_norm,
+            step_skip_above,
+            control_clip_max_norm,
+            ..
+        } = opts;
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
         self.staged_upload(2, d_temporal)?;
         {
@@ -1468,6 +1537,19 @@ impl MambaTrainerMixed {
                 &mut self.grads.flat,
                 unscale,
             )?;
+            // Control-channel clip first, then the global one: the same
+            // order the f32 and bf16 lanes use in `apply_step_inner`.
+            if let Some(cb) = control_clip_max_norm {
+                let geom = m1_control_region_geom(&self.grads, &self.cfg);
+                clip_region_device(
+                    &self.ctx,
+                    &mut self.grads.flat,
+                    &mut self.clip_partials,
+                    &mut self.clip_scratch,
+                    geom,
+                    cb,
+                )?;
+            }
             if let Some(c) = norm_limit(clip_max_norm, step_skip_above) {
                 grad_norm = Some(self.apply_clip(c)?);
             }
@@ -2177,7 +2259,12 @@ impl MambaTrainerF32 {
         let temporal = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
         let mamba_input = GpuBuffer::zeros(&ctx.stream, batch * seq_len * input_dim)?;
         let d_temporal = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
-        let grads = GpuMambaGrads::new(&ctx.stream, &cfg, input_dim)?;
+        let grads = GpuMambaGrads::new_sized(
+            &ctx.stream,
+            &cfg,
+            input_dim,
+            !cpu_weights.input_proj_w.is_empty(),
+        )?;
 
         let adam = GpuAdamW::new(&ctx.stream, grads.flat.len())?
             .with_lr(lr)
@@ -2431,7 +2518,11 @@ impl MambaTrainerF32 {
                 overflow_skipped: None,
             })
         } else {
-            self.apply_step_inner(opts.clip_max_norm, opts.step_skip_above)
+            self.apply_step_inner(
+                opts.clip_max_norm,
+                opts.step_skip_above,
+                opts.control_clip_max_norm,
+            )
         }
     }
 
@@ -2443,7 +2534,22 @@ impl MambaTrainerF32 {
         &mut self,
         clip_max_norm: Option<f32>,
         step_skip_above: Option<f32>,
+        control_clip_max_norm: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
+        // The control channels first, so a window whose step-size and
+        // decay gradients grow with its length cannot rescale the whole
+        // arena through the global clip below.
+        if let Some(cb) = control_clip_max_norm {
+            let geom = m1_control_region_geom(&self.grads, &self.cfg);
+            clip_region_device(
+                &self.ctx,
+                &mut self.grads.flat,
+                &mut self.clip_partials,
+                &mut self.clip_scratch,
+                geom,
+                cb,
+            )?;
+        }
         let grad_norm = match norm_limit(clip_max_norm, step_skip_above) {
             Some(c) => Some(self.apply_clip(c)?),
             None => None,

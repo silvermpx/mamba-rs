@@ -621,6 +621,15 @@ path = "tests/mixed_engine_memory.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "control_clip"
+path = "tests/control_clip.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m1_identity_input_cpu"
+path = "tests/m1_identity_input_cpu.rs"
+
+[[test]]
 name = "identity_input_training"
 path = "tests/identity_input_training.rs"
 required-features = ["cuda"]

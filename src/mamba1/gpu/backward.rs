@@ -656,16 +656,19 @@ pub fn gpu_backward_mamba_backbone(
         )?;
     }
 
-    // Input projection backward (dx discarded — input embedding detached)
-    gpu_gemm_bi_backward_grad_raw(
-        ctx,
-        &mut scratch.d_input_proj_dx,
-        (&d_mamba.input_proj_w, Some(&d_mamba.input_proj_b)),
-        d_temporal,
-        &acts.input_proj_inputs,
-        mamba_w.input_proj_w.cached_ptr(),
-        (bt, dims.mamba_input_dim, dims.d_model),
-    )?;
+    // Input projection backward (dx discarded — input embedding detached);
+    // a model without one has no weight gradient here.
+    if !mamba_w.input_proj_w.is_empty() {
+        gpu_gemm_bi_backward_grad_raw(
+            ctx,
+            &mut scratch.d_input_proj_dx,
+            (&d_mamba.input_proj_w, Some(&d_mamba.input_proj_b)),
+            d_temporal,
+            &acts.input_proj_inputs,
+            mamba_w.input_proj_w.cached_ptr(),
+            (bt, dims.mamba_input_dim, dims.d_model),
+        )?;
+    }
 
     Ok(())
 }

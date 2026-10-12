@@ -118,7 +118,9 @@ fn run_case(cfg: &MambaConfig, input_dim: usize, seq_len: usize, seed: u64, labe
         .download(&ctx.stream, &mut train_out)
         .expect("train temporal");
     let mut ip_out = vec![0.0f32; n_temporal];
-    acts.input_proj_outputs
+    // The first layer's residual rows are the input projection's output.
+    acts.layers[0]
+        .residual
         .download(&ctx.stream, &mut ip_out)
         .expect("ip_out download");
 

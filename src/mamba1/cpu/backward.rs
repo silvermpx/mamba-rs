@@ -407,14 +407,16 @@ pub fn backward_mamba_backbone_batched(
     // --- Batched input projection backward ---
     // dx is discarded (input embedding is detached from the Mamba graph).
     // Use d_input_proj_scratch from BackwardPhaseScratch for the discarded dx.
-    sgemm_backward(
-        &mut scratch.d_input_proj_scratch,
-        &mut d_mamba.input_proj_w,
-        Some(&mut d_mamba.input_proj_b),
-        &d_temporal_flat[..seq_len * dm],
-        &acts.input_proj_inputs[..seq_len * mid],
-        &mamba_w.input_proj_w,
-        (seq_len, mid, dm),
-    );
-    // d_input_proj_scratch is intentionally discarded (input embedding detached)
+    // A model without an input projection has no weight gradient here.
+    if !mamba_w.input_proj_w.is_empty() {
+        sgemm_backward(
+            &mut scratch.d_input_proj_scratch,
+            &mut d_mamba.input_proj_w,
+            Some(&mut d_mamba.input_proj_b),
+            &d_temporal_flat[..seq_len * dm],
+            &acts.input_proj_inputs[..seq_len * mid],
+            &mamba_w.input_proj_w,
+            (seq_len, mid, dm),
+        );
+    }
 }

@@ -84,15 +84,19 @@ pub fn forward_mamba_target_step(
     let (dm, di, ds, dc, dr, mid) = dims;
     let xdbl_dim = dr + 2 * ds;
 
-    // Input projection
-    matvec_forward(
-        &mut output[..dm],
-        input,
-        &w.input_proj_w,
-        Some(&w.input_proj_b),
-        mid,
-        dm,
-    );
+    // Input projection, or the input itself for a model without one.
+    if w.input_proj_w.is_empty() {
+        output[..dm].copy_from_slice(&input[..dm]);
+    } else {
+        matvec_forward(
+            &mut output[..dm],
+            input,
+            &w.input_proj_w,
+            Some(&w.input_proj_b),
+            mid,
+            dm,
+        );
+    }
 
     for lw in &w.layers {
         // Save residual
