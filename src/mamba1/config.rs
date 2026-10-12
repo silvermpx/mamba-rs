@@ -55,8 +55,8 @@ impl MambaConfig {
 impl MambaConfig {
     /// Validate configuration constraints.
     ///
-    /// Returns `Err` if any dimension would cause kernel failures
-    /// (e.g., d_inner not divisible by 4 for vectorized CUDA kernels).
+    /// Returns `Err` for a zero dimension, one whose products would
+    /// overflow, or one past what the kernels or the reference serve.
     pub fn validate(&self) -> Result<(), String> {
         if self.d_model == 0 {
             return Err("d_model must be > 0".into());
@@ -108,15 +108,6 @@ impl MambaConfig {
             return Err(format!(
                 "d_conv ({}) must be <= 8 (CUDA kernel limit)",
                 self.d_conv
-            ));
-        }
-        // CUDA float4 kernels require d_inner divisible by 4
-        if !self.d_inner().is_multiple_of(4) {
-            return Err(format!(
-                "d_inner ({}) must be divisible by 4 (d_model={} * expand={})",
-                self.d_inner(),
-                self.d_model,
-                self.expand
             ));
         }
         Ok(())

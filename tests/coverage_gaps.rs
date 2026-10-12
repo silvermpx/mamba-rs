@@ -21,8 +21,8 @@
 //!   decay values forever. Without the fix this test fails because
 //!   `a_neg_all` is identical to its initialization after any number of
 //!   steps (only `a_log` changes).
-//! * `m1_trainer_rejects_a_config_the_kernels_cannot_serve` — a d_inner
-//!   that is not a multiple of four never reaches the launchers: the
+//! * `m1_trainer_rejects_a_config_the_kernels_cannot_serve` — a config
+//!   past the reference's envelope never reaches the launchers: the
 //!   trainer validates the config first, as the Mamba-3 trainer does.
 
 #![cfg(feature = "cuda")]
@@ -442,13 +442,11 @@ fn m1_trainer_rejects_a_config_the_kernels_cannot_serve() {
     use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
     use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
-    // d_model 5 with expand 2 gives d_inner 10: the vectorized kernels need
-    // a multiple of four, and the parallel backward pairs its kernels and
-    // reducers on that assumption.
+    // 257 states lie past the reference's 256.
     let cfg = MambaConfig {
-        d_model: 5,
+        d_model: 8,
         n_layers: 1,
-        d_state: 16,
+        d_state: 257,
         d_conv: 4,
         expand: 2,
         scan_mode: ScanMode::Parallel,
@@ -462,9 +460,6 @@ fn m1_trainer_rejects_a_config_the_kernels_cannot_serve() {
         GpuOptions::default().dtype(WeightDtype::F32),
     )
     .err()
-    .expect("a d_inner of 10 must be rejected before any kernel runs");
-    assert!(
-        error.contains("divisible by 4"),
-        "unexpected rejection: {error}"
-    );
+    .expect("257 states must be rejected before any kernel runs");
+    assert!(error.contains("d_state"), "unexpected rejection: {error}");
 }
