@@ -22,6 +22,7 @@ use super::weights::{GpuMamba3LayerWeights, GpuMamba3Weights};
 use crate::gpu::blas::gpu_gemm_bi_forward_raw;
 use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::gpu::context::GpuCtx;
+use crate::gpu::dtype::WeightDtype;
 use crate::gpu::launch::{grid_1d, grid_norm};
 use cudarc::driver::PushKernelArg;
 
@@ -697,13 +698,16 @@ pub fn gpu_forward_mamba3_layer(
         let nh_i = nh as i32;
         let hd_i = hd as i32;
         let ds_i = ds as i32;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (dims.batch as u32, nh as u32, 1),
-            block_dim: (hd as u32, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        crate::mamba3_siso::route::require_warp(hd, "m3_burnin_fwd")?;
-        let mut builder = ctx.stream.launch_builder(m3k.burnin_fwd_for_state(ds));
+        let (kernel, cfg) = m3k.sequential_forward(
+            WeightDtype::F32,
+            super::kernels::SequentialShape {
+                batch: dims.batch,
+                nheads: nh,
+                headdim: hd,
+                d_state: ds,
+            },
+        )?;
+        let mut builder = ctx.stream.launch_builder(kernel);
         builder.arg(&layer_ptrs.ssm_state);
         builder.arg(&layer_ptrs.k_state);
         builder.arg(&layer_ptrs.v_state);
@@ -728,19 +732,11 @@ pub fn gpu_forward_mamba3_layer(
 
     // F7: Output gating
     if dims.is_outproj_norm {
-        assert!(
-            di <= 1024,
-            "d_inner ({di}) exceeds rmsnorm_gated shared memory limit (1024)"
-        );
         let nw_ptr = lw.norm_gate_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;
         let di_i = di as i32;
         let hd_i = dims.headdim as i32;
-        let grid = cudarc::driver::LaunchConfig {
-            grid_dim: (bt as u32, 1, 1),
-            block_dim: (di as u32, 1, 1),
-            shared_mem_bytes: (di * std::mem::size_of::<f32>()) as u32,
-        };
+        let grid = super::kernels::gated_norm_cfg(bt, di, dims.headdim);
         let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_gated_fwd);
         builder.arg(acts.gated.inner_mut());
         builder.arg(acts.gated_rms_vals.inner_mut());
@@ -752,6 +748,7 @@ pub fn gpu_forward_mamba3_layer(
         builder.arg(&hd_i);
         let eps_g5: f32 = dims.rms_norm_eps;
         builder.arg(&eps_g5);
+        builder.arg(&di_i);
         unsafe { builder.launch(grid) }.map_err(|e| format!("rmsnorm_gated_fwd m3 F7: {:?}", e))?;
     } else {
         let n = (bt * di) as i32;
@@ -835,18 +832,22 @@ pub fn gpu_forward_mamba3_backbone(
         states.angle.zero(&ctx.stream)?;
     }
 
-    acts.input_proj_inputs
-        .copy_from_raw(mamba_input, &ctx.stream)?;
-    gpu_gemm_bi_forward_raw(
-        ctx,
-        temporal,
-        mamba_input,
-        mamba_w.input_proj_w.raw_ptr(&ctx.stream),
-        Some(mamba_w.input_proj_b.raw_ptr(&ctx.stream)),
-        (bt, dims.mamba_input_dim, dm),
-    )?;
-    acts.input_proj_outputs
-        .copy_from_raw(temporal, &ctx.stream)?;
+    if mamba_w.input_proj_w.is_empty() {
+        // No input projection (the official checkpoints' layout): the
+        // input rows are the residual stream as they are.
+        temporal.copy_from_raw(mamba_input, &ctx.stream)?;
+    } else {
+        acts.input_proj_inputs
+            .copy_from_raw(mamba_input, &ctx.stream)?;
+        gpu_gemm_bi_forward_raw(
+            ctx,
+            temporal,
+            mamba_input,
+            mamba_w.input_proj_w.raw_ptr(&ctx.stream),
+            Some(mamba_w.input_proj_b.raw_ptr(&ctx.stream)),
+            (bt, dims.mamba_input_dim, dm),
+        )?;
+    }
     // Seed the residual chain: layer 0's slot gets the input_proj output
     // once; from there every layer's residual_add writes the next slot.
     acts.layers[0]
@@ -944,14 +945,18 @@ pub fn gpu_forward_mamba3_target_burnin(
     tgt.v_states.zero(&ctx.stream)?;
     tgt.angle_states.zero(&ctx.stream)?;
 
-    gpu_gemm_bi_forward_raw(
-        ctx,
-        &mut tgt.temporal_work,
-        mamba_input,
-        mamba_w.input_proj_w.raw_ptr(&ctx.stream),
-        Some(mamba_w.input_proj_b.raw_ptr(&ctx.stream)),
-        (bt, dims.mamba_input_dim, dm),
-    )?;
+    if mamba_w.input_proj_w.is_empty() {
+        tgt.temporal_work.copy_from_raw(mamba_input, &ctx.stream)?;
+    } else {
+        gpu_gemm_bi_forward_raw(
+            ctx,
+            &mut tgt.temporal_work,
+            mamba_input,
+            mamba_w.input_proj_w.raw_ptr(&ctx.stream),
+            Some(mamba_w.input_proj_b.raw_ptr(&ctx.stream)),
+            (bt, dims.mamba_input_dim, dm),
+        )?;
+    }
 
     for l in 0..dims.n_layers {
         let lw = &mamba_w.layers[l];
@@ -1146,13 +1151,13 @@ pub fn gpu_forward_mamba3_target_burnin(
             let nh_i = nh as i32;
             let hd_i = hd as i32;
             let ds_i = ds as i32;
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (dims.batch as u32, nh as u32, 1),
-                block_dim: (hd as u32, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            crate::mamba3_siso::route::require_warp(hd, "m3_burnin_fwd_nosave")?;
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_burnin_fwd_nosave);
+            let (kernel, cfg) = m3k.sequential_target_forward(super::kernels::SequentialShape {
+                batch: dims.batch,
+                nheads: nh,
+                headdim: hd,
+                d_state: ds,
+            })?;
+            let mut builder = ctx.stream.launch_builder(kernel);
             builder.arg(&ssm_ptr);
             builder.arg(&k_ptr);
             builder.arg(&v_ptr);
@@ -1173,19 +1178,11 @@ pub fn gpu_forward_mamba3_target_burnin(
                 .map_err(|e| format!("m3_burnin_fwd_nosave tgt L{l}: {:?}", e))?;
         }
         if dims.is_outproj_norm {
-            assert!(
-                di <= 1024,
-                "d_inner ({di}) exceeds rmsnorm_gated shared memory limit"
-            );
             let nw_ptr = lw.norm_gate_weight.raw_ptr(&ctx.stream);
             let bt_i = bt as i32;
             let di_i = di as i32;
             let hd_i = dims.headdim as i32;
-            let grid = cudarc::driver::LaunchConfig {
-                grid_dim: (bt as u32, 1, 1),
-                block_dim: (di as u32, 1, 1),
-                shared_mem_bytes: (di * std::mem::size_of::<f32>()) as u32,
-            };
+            let grid = super::kernels::gated_norm_cfg(bt, di, dims.headdim);
             let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_gated_fwd);
             builder.arg(tgt.gated.inner_mut());
             builder.arg(tgt.rms_discard.inner_mut());
@@ -1197,6 +1194,7 @@ pub fn gpu_forward_mamba3_target_burnin(
             builder.arg(&hd_i);
             let eps_g5: f32 = dims.rms_norm_eps;
             builder.arg(&eps_g5);
+            builder.arg(&di_i);
             unsafe { builder.launch(grid) }
                 .map_err(|e| format!("rmsnorm_gated_fwd m3 tgt L{l}: {:?}", e))?;
         } else {

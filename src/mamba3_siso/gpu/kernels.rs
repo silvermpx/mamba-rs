@@ -7,8 +7,35 @@
 use super::transport::{TransportAdmission, TransportKernels, transport_environment_admitted};
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::kernels::{CudaModuleAnchors, HalfKernel, TypedKernel};
-use cudarc::driver::{CudaContext, CudaFunction};
+use crate::mamba3_siso::route::{HeadTier, head_tier};
+use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig};
 use std::sync::Arc;
+
+/// The launch shape of the sequential scan's head kernels.
+#[derive(Clone, Copy, Debug)]
+pub struct SequentialShape {
+    pub batch: usize,
+    pub nheads: usize,
+    pub headdim: usize,
+    pub d_state: usize,
+}
+
+impl SequentialShape {
+    /// One block per (sequence, head): the head's width in threads on the
+    /// warp tier, rounded up to whole warps on the block tier.
+    fn launch(&self, warp: bool, shared_mem_bytes: usize) -> LaunchConfig {
+        let threads = if warp {
+            self.headdim
+        } else {
+            crate::mamba3_siso::route::block_tier_threads(self.headdim)
+        };
+        LaunchConfig {
+            grid_dim: (self.batch as u32, self.nheads as u32, 1),
+            block_dim: (threads as u32, 1, 1),
+            shared_mem_bytes: shared_mem_bytes as u32,
+        }
+    }
+}
 
 /// All compiled Mamba-3 SISO CUDA kernels.
 pub struct Mamba3Kernels {
@@ -40,6 +67,15 @@ pub struct Mamba3Kernels {
     /// carry a constant trip count. One per width the models here use; a
     /// width with no entry runs the general `m3_backward_seq` above.
     pub m3_backward_seq_by_state: [(usize, CudaFunction); 4],
+    /// The sequential training forward for heads the warp kernels cannot
+    /// hold: one CTA per head, the step's rows staged in shared memory.
+    pub m3_burnin_fwd_block: TypedKernel,
+    /// The target network's sequential forward on the block tier.
+    pub m3_burnin_fwd_nosave_block: CudaFunction,
+    /// The sequential backward on the block tier: the warp kernel's tree in
+    /// every warp, the warps' sums added in order. It also serves every
+    /// head of the bf16 and f16 sequential backward.
+    pub m3_backward_seq_block: TypedKernel,
     pub m3_reduce_d_d: CudaFunction,
 
     // ── Shared ops (mamba3_ops.cu) ──
@@ -126,6 +162,16 @@ pub struct Mamba3Kernels {
     /// Serial per-(b,h,p,n) reverse fold producing each chunk's
     /// entering d_state.
     pub m3_dstate_passing_bwd: CudaFunction,
+    /// The per-chunk terms of the reverse state pass for any head and state
+    /// width, in 16 x 16 output tiles: the bits of the warp kernel wherever
+    /// that one runs.
+    pub m3_dqkv_state_terms_tiled: TypedKernel,
+    /// The flat chain a chunk's saved state adds to dADT, one thread per
+    /// (sequence, chunk, head).
+    pub m3_dqkv_dm_chain: CudaFunction,
+    /// The chunked backward's dQKV stage for any head and state width:
+    /// `m3_dqkv`'s outputs in its order, through tiles of a fixed budget.
+    pub m3_dqkv_tiled: TypedKernel,
     pub m3_dqktheta: CudaFunction,
     pub m3_ddt_dtrap: CudaFunction,
     pub m3_final_grads: CudaFunction,
@@ -173,6 +219,9 @@ pub struct Mamba3Kernels {
     pub bc_bias_add_bwd_typed: TypedKernel,
     /// RoPE rotation backward, typed B/C grads + saved B/C, f32 angle saves.
     pub rope_bwd_typed: TypedKernel,
+    /// RoPE rotation backward with f32 gradients against the bf16 or f16
+    /// pre-RoPE B and C, for the sequential mixed backward.
+    pub rope_bwd_mixed: HalfKernel,
     /// 8-way split backward: assemble typed d_proj from typed d_z/d_x/
     /// d_B_raw/d_C_raw plus f32 dd_dt/dd_a/trap/angles.
     pub m3_split_bwd_typed: TypedKernel,
@@ -286,6 +335,67 @@ impl Mamba3Kernels {
             WeightDtype::F16 => &self.m3_burnin_fwd_typed_f16,
             WeightDtype::F32 | WeightDtype::Tf32 => unreachable!("F32 uses its own selector"),
         }
+    }
+
+    /// The sequential training forward for a shape, with its launch. A head
+    /// of one warp keeps the warp kernels; every other head takes the block
+    /// tier, which gives the warp kernels' bits where both serve.
+    pub fn sequential_forward(
+        &self,
+        dtype: WeightDtype,
+        shape: SequentialShape,
+    ) -> Result<(&CudaFunction, LaunchConfig), String> {
+        if head_tier(shape.headdim)? == HeadTier::Warp {
+            let kernel = match dtype {
+                WeightDtype::F32 | WeightDtype::Tf32 => self.burnin_fwd_for_state(shape.d_state),
+                WeightDtype::Bf16 | WeightDtype::F16 => {
+                    self.burnin_fwd_typed_for_state(dtype, shape.d_state)
+                }
+            };
+            return Ok((kernel, shape.launch(true, 0)));
+        }
+        let smem = crate::mamba3_siso::route::sequential_forward_block_smem_bytes(shape.d_state);
+        Ok((
+            self.m3_burnin_fwd_block.get(dtype),
+            shape.launch(false, smem),
+        ))
+    }
+
+    /// The target network's sequential forward for a shape, with its launch.
+    pub fn sequential_target_forward(
+        &self,
+        shape: SequentialShape,
+    ) -> Result<(&CudaFunction, LaunchConfig), String> {
+        if head_tier(shape.headdim)? == HeadTier::Warp {
+            return Ok((&self.m3_burnin_fwd_nosave, shape.launch(true, 0)));
+        }
+        let smem = crate::mamba3_siso::route::sequential_forward_block_smem_bytes(shape.d_state);
+        Ok((&self.m3_burnin_fwd_nosave_block, shape.launch(false, smem)))
+    }
+
+    /// The sequential backward for a shape, with its launch. The f32 warp
+    /// kernels keep every head of one warp; the block tier serves every
+    /// other head, and every head of the bf16 and f16 backward.
+    pub fn sequential_backward(
+        &self,
+        dtype: WeightDtype,
+        shape: SequentialShape,
+    ) -> Result<(&CudaFunction, LaunchConfig), String> {
+        let warp = head_tier(shape.headdim)? == HeadTier::Warp;
+        if warp && matches!(dtype, WeightDtype::F32 | WeightDtype::Tf32) {
+            return Ok((
+                self.backward_seq_for_state(shape.d_state),
+                shape.launch(true, 0),
+            ));
+        }
+        let smem = crate::mamba3_siso::route::sequential_backward_block_smem_bytes(
+            shape.headdim,
+            shape.d_state,
+        );
+        Ok((
+            self.m3_backward_seq_block.get(dtype),
+            shape.launch(false, smem),
+        ))
     }
 
     /// Compile all Mamba-3 kernels. `state_cap` sizes the per-thread
@@ -527,6 +637,17 @@ impl Mamba3Kernels {
             ],
             m3_burnin_fwd_nosave: get("m3_burnin_fwd_nosave")?,
             m3_backward_seq: get("m3_backward_seq")?,
+            m3_burnin_fwd_block: TypedKernel {
+                f32: get("m3_burnin_fwd_block")?,
+                bf16: get("m3_burnin_fwd_block_bf16")?,
+                f16: get("m3_burnin_fwd_block_f16")?,
+            },
+            m3_burnin_fwd_nosave_block: get("m3_burnin_fwd_nosave_block")?,
+            m3_backward_seq_block: TypedKernel {
+                f32: get("m3_backward_seq_block")?,
+                bf16: get("m3_backward_seq_block_bf16")?,
+                f16: get("m3_backward_seq_block_f16")?,
+            },
             m3_backward_seq_by_state: [
                 (8, get("m3_backward_seq_ds8")?),
                 (16, get("m3_backward_seq_ds16")?),
@@ -598,6 +719,17 @@ impl Mamba3Kernels {
                 f16: get("m3_dqkv_state_terms_f16")?,
             },
             m3_dstate_passing_bwd: get("m3_dstate_passing_bwd")?,
+            m3_dqkv_state_terms_tiled: TypedKernel {
+                f32: get("m3_dqkv_state_terms_tiled")?,
+                bf16: get("m3_dqkv_state_terms_tiled_bf16")?,
+                f16: get("m3_dqkv_state_terms_tiled_f16")?,
+            },
+            m3_dqkv_dm_chain: get("m3_dqkv_dm_chain")?,
+            m3_dqkv_tiled: TypedKernel {
+                f32: get("m3_dqkv_tiled")?,
+                bf16: get("m3_dqkv_tiled_bf16")?,
+                f16: get("m3_dqkv_tiled_f16")?,
+            },
             m3_dqktheta: get("m3_dqktheta")?,
             m3_ddt_dtrap: get("m3_ddt_dtrap")?,
             m3_final_grads: get("m3_final_grads")?,
@@ -665,6 +797,10 @@ impl Mamba3Kernels {
                 f32: get("rope_bwd")?,
                 bf16: get("rope_bwd_bf16")?,
                 f16: get("rope_bwd_f16")?,
+            },
+            rope_bwd_mixed: HalfKernel {
+                bf16: get("rope_bwd_mixed_bf16")?,
+                f16: get("rope_bwd_mixed_f16")?,
             },
             m3_split_bwd_typed: TypedKernel {
                 f32: get("m3_split_bwd")?,
@@ -762,6 +898,12 @@ impl Mamba3Kernels {
                 &kernels.m3_dqkv_typed.f32,
                 &kernels.m3_dqkv_typed.bf16,
                 &kernels.m3_dqkv_typed.f16,
+                &kernels.m3_dqkv_tiled.f32,
+                &kernels.m3_dqkv_tiled.bf16,
+                &kernels.m3_dqkv_tiled.f16,
+                &kernels.m3_backward_seq_block.f32,
+                &kernels.m3_backward_seq_block.bf16,
+                &kernels.m3_backward_seq_block.f16,
             ] {
                 let _ = f.set_attribute(
                     FnAttr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
@@ -808,6 +950,31 @@ pub fn bcnorm_fwd_bc_cfg(rows: usize, d_state: usize) -> cudarc::driver::LaunchC
             block_dim: (d_state as u32, 1, 1),
             shared_mem_bytes: (d_state * 4) as u32,
         }
+    }
+}
+
+/// Launch geometry for the gated output norm (`rmsnorm_gated_*`) over `rows`
+/// rows of `d_inner` channels in groups of `group_size`: every group takes
+/// its width rounded up to a power of two, a block holds as many groups as
+/// fit in 256 threads (one when a group is wider), and shared memory holds
+/// one float per thread. The kernels derive their mapping from this shape.
+pub fn gated_norm_cfg(
+    rows: usize,
+    d_inner: usize,
+    group_size: usize,
+) -> cudarc::driver::LaunchConfig {
+    assert!(rows > 0 && group_size > 0 && d_inner.is_multiple_of(group_size));
+    let width = group_size.next_power_of_two();
+    let threads = width.max(256);
+    let per_block = threads / width;
+    cudarc::driver::LaunchConfig {
+        grid_dim: (
+            rows as u32,
+            (d_inner / group_size).div_ceil(per_block) as u32,
+            1,
+        ),
+        block_dim: (threads as u32, 1, 1),
+        shared_mem_bytes: (threads * std::mem::size_of::<f32>()) as u32,
     }
 }
 

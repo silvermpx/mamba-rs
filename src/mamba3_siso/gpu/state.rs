@@ -277,8 +277,7 @@ pub struct GpuMamba3LayerActs {
 
 /// Backbone activations (all layers + input proj + norm_f).
 pub struct GpuMamba3BackboneActs {
-    pub input_proj_inputs: GpuBuffer,  // [B*T*mamba_input_dim]
-    pub input_proj_outputs: GpuBuffer, // [B*T*d_model]
+    pub input_proj_inputs: GpuBuffer, // [B*T*mamba_input_dim]
     pub layers: Vec<GpuMamba3LayerActs>,
     pub norm_f_input: GpuBuffer, // [B*T*d_model]
     pub norm_f_rms: GpuBuffer,   // [B*T]
@@ -346,6 +345,9 @@ pub struct GpuMamba3Scratch {
     /// Entering d_state per chunk (m3_dstate_passing_bwd output).
     /// [B * n_chunks * nh * hd * ds]
     pub dstate_enter: GpuBuffer,
+    /// The chain each chunk's saved state adds to dADT, for the tiled
+    /// backward. [B * n_chunks * nh]
+    pub dm_chain: GpuBuffer,
     // Parallel backward intermediate buffers (Steps 2-6)
     pub d_scale: GpuBuffer,     // [B * T * nh] -- dScale from dqktheta
     pub d_gamma_par: GpuBuffer, // [B * T * nh] -- dGamma from dqktheta
@@ -510,7 +512,6 @@ impl GpuMamba3BackboneActs {
         let bt = dims.bt();
         Ok(Self {
             input_proj_inputs: GpuBuffer::zeros(stream, bt * dims.mamba_input_dim)?,
-            input_proj_outputs: GpuBuffer::zeros(stream, bt * dims.d_model)?,
             layers: (0..dims.n_layers)
                 .map(|_| GpuMamba3LayerActs::new(stream, bt, dims))
                 .collect::<Result<_, _>>()?,
@@ -581,6 +582,7 @@ impl GpuMamba3Scratch {
                 let nc = dims.n_chunks();
                 GpuBuffer::zeros(stream, b * nc * nh * hd * ds)?
             },
+            dm_chain: GpuBuffer::zeros(stream, b * dims.n_chunks() * nh)?,
             d_scale: GpuBuffer::zeros(stream, bt * nh)?,
             d_gamma_par: GpuBuffer::zeros(stream, bt * nh)?,
             // Rule-B axis-0 partials — sized to fit largest M3 consumer.

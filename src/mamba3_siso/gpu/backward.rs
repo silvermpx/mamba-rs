@@ -57,19 +57,11 @@ pub fn gpu_backward_mamba3_layer(
 
     // B7: Output gating backward (matches F7 forward branch).
     if dims.is_outproj_norm {
-        assert!(
-            di <= 1024,
-            "d_inner ({di}) exceeds rmsnorm_gated shared memory limit"
-        );
         let nw_ptr = lw.norm_gate_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;
         let di_i = di as i32;
         let hd_i = dims.headdim as i32;
-        let grid = cudarc::driver::LaunchConfig {
-            grid_dim: (bt as u32, 1, 1),
-            block_dim: (di as u32, 1, 1),
-            shared_mem_bytes: (di * std::mem::size_of::<f32>()) as u32,
-        };
+        let grid = super::kernels::gated_norm_cfg(bt, di, dims.headdim);
         let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_gated_bwd);
         builder.arg(scratch.d_y.inner_mut());
         builder.arg(scratch.d_z.inner_mut());
@@ -127,13 +119,16 @@ pub fn gpu_backward_mamba3_layer(
         let nh_i = nh as i32;
         let hd_i = hd as i32;
         let ds_i = ds as i32;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (dims.batch as u32, nh as u32, 1),
-            block_dim: (hd as u32, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        crate::mamba3_siso::route::require_warp(hd, "m3_backward_seq")?;
-        let mut builder = ctx.stream.launch_builder(m3k.backward_seq_for_state(ds));
+        let (kernel, cfg) = m3k.sequential_backward(
+            WeightDtype::F32,
+            super::kernels::SequentialShape {
+                batch: dims.batch,
+                nheads: nh,
+                headdim: hd,
+                d_state: ds,
+            },
+        )?;
+        let mut builder = ctx.stream.launch_builder(kernel);
         builder.arg(acts.h_saved.inner());
         builder.arg(acts.k_prev_saved.inner());
         builder.arg(acts.v_prev_saved.inner());
@@ -279,8 +274,38 @@ pub fn gpu_backward_mamba3_layer(
         // No-atomics partials rule: dD_partials[B*nh] via axis0_partials,
         // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1 across
         // layers since GpuMamba3Grads::zero runs once per step).
-        {
-            let cs_u = dims.chunk_size();
+        let cs_u = dims.chunk_size();
+        if crate::mamba3_siso::route::chunked_backward_tiled(hd, ds) {
+            let io = super::dqkv_tiled::DqkvTiledIo {
+                d_q: scratch.d_q.cached_ptr(),
+                d_k: scratch.d_k.cached_ptr(),
+                d_v: scratch.d_x.cached_ptr(),
+                d_adt: scratch.d_alpha.cached_ptr(),
+                d_qk_dot: scratch.d_beta.cached_ptr(),
+                d_partials: scratch.axis0_partials.cached_ptr(),
+                q_rot: acts.q.cached_ptr(),
+                k_scaled: acts.k_scaled_saved.cached_ptr(),
+                v: acts.x.cached_ptr(),
+                da_cs: acts.da_cumsum_saved.cached_ptr(),
+                da_cs_sum: scratch.da_cs_sum.cached_ptr(),
+                qk_dot: acts.qk_dot_saved.cached_ptr(),
+                chunk_states: acts.chunk_states_saved.cached_ptr(),
+                d_o: scratch.d_y.cached_ptr(),
+                d_param: dp_ptr,
+                state_terms: scratch.dstate_terms.cached_ptr(),
+                enter_state: scratch.dstate_enter.cached_ptr(),
+                dm_chain: scratch.dm_chain.cached_ptr(),
+            };
+            let shape = super::dqkv_tiled::DqkvShape {
+                batch: dims.batch,
+                seq_len: dims.seq_len,
+                nheads: nh,
+                headdim: hd,
+                d_state: ds,
+                chunk: cs_u,
+            };
+            super::dqkv_tiled::launch(&ctx.stream, m3k, WeightDtype::F32, shape, &io)?;
+        } else {
             // Two chunk-by-state operand tiles and the V/dO tiles, each row
             // padded by one float so a warp reading consecutive rows spreads
             // over the banks; two per-step lanes, the da/qk lanes, and TWO
@@ -930,16 +955,18 @@ pub fn gpu_backward_mamba3_backbone(
         )?;
     }
 
-    // input_proj bwd.
-    gpu_gemm_bi_backward_grad_raw(
-        ctx,
-        &mut scratch.d_input_proj_dx,
-        (&grads.input_proj_w, Some(&grads.input_proj_b)),
-        d_temporal,
-        &acts.input_proj_inputs,
-        mamba_w.input_proj_w.raw_ptr(&ctx.stream),
-        (bt, dims.mamba_input_dim, dm),
-    )?;
+    // input_proj bwd. Without a projection there is nothing to train.
+    if !mamba_w.input_proj_w.is_empty() {
+        gpu_gemm_bi_backward_grad_raw(
+            ctx,
+            &mut scratch.d_input_proj_dx,
+            (&grads.input_proj_w, Some(&grads.input_proj_b)),
+            d_temporal,
+            &acts.input_proj_inputs,
+            mamba_w.input_proj_w.raw_ptr(&ctx.stream),
+            (bt, dims.mamba_input_dim, dm),
+        )?;
+    }
 
     Ok(())
 }

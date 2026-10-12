@@ -596,6 +596,26 @@ path = "tests/m3_final_grads_unit_parity.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m3_dqkv_tiled_parity"
+path = "tests/m3_dqkv_tiled_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_sequential_block_parity"
+path = "tests/m3_sequential_block_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "m3_gated_norm_digest"
+path = "tests/m3_gated_norm_digest.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "identity_input_training"
+path = "tests/identity_input_training.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "m3_forward_mixed_parity"
 path = "tests/m3_forward_mixed_parity.rs"
 required-features = ["cuda"]

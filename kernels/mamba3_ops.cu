@@ -918,135 +918,122 @@ extern "C" __global__ void silu_gate_bwd(
     d_z[i] = d_out_val * y[i] * sigma * (1.0f + z_val * (1.0f - sigma));
 }
 
-// Per-group RMSNormGated forward (group_size = headdim).
-// Each block processes one sample. Threads are partitioned into groups of `group_size`.
-// Each group computes its own RMS normalization independently.
-// rms_vals: [N * n_groups] where n_groups = d_inner / group_size.
+// Per-group gated RMSNorm, norm before gate (Mamba-3): a group is one head
+// of `group_size` channels, out = y * rstd(group) * weight * silu(z).
 //
-// Block: d_inner threads (one per channel). Each block processes one sample.
-extern "C" __global__ void rmsnorm_gated_forward(
-    float* out,           // [N * d_inner]
-    float* rms_vals,      // [N * n_groups] — saved rstd per group for backward
-    const float* y,       // [N * d_inner]
-    const float* z,       // [N * d_inner]
-    const float* weight,  // [d_inner]
-    int N, int d_inner, int group_size,
-    float eps             // config-driven eps (was a compile-time #define)
-) {
-    if (d_inner > 1024) return; // Guard: shared memory limit
-    int sample = blockIdx.x;
-    if (sample >= N) return;
-    int d = threadIdx.x;
-    if (d >= d_inner) return;
-
-    int n_groups = d_inner / group_size;
-    int group_id = d / group_size;
-    int local_id = d % group_size;
-
-    int base = sample * d_inner;
-    float y_val = y[base + d];
-
-    // Shared memory: one region per group, each of size group_size
-    // Layout: shared[group_id * group_size + local_id]
-    extern __shared__ float shared_sum[];
-    shared_sum[group_id * group_size + local_id] = y_val * y_val;
-    __syncthreads();
-
-    // Per-group parallel reduction
-    int stride = 1;
-    while (stride < group_size) stride <<= 1;
-    stride >>= 1;
-    for (; stride > 0; stride >>= 1) {
-        if (local_id < stride) {
-            int idx = group_id * group_size + local_id;
-            shared_sum[idx] += shared_sum[idx + stride];
-        }
-        __syncthreads();
-    }
-
-    float rstd = 1.0f / sqrtf(shared_sum[group_id * group_size] / (float)group_size + eps); // IEEE sqrtf + div, not the approximate MUFU.RSQ intrinsic - unifies the rstd form with every other norm in the tree.
-    // Finite-guard (mirrors norms.cu RMSNorm fix): NaN/Inf in y would produce
-    // rstd=NaN and cascade through the output gating into residual stream.
-    if (!isfinite(rstd) || rstd > 1e20f) rstd = 1.0f;
-    if (local_id == 0) rms_vals[sample * n_groups + group_id] = rstd;
-    __syncthreads();
-
-    // output = (y * rstd * weight) * SiLU(z)
-    float z_val = z[base + d];
-    float silu_z = z_val / (1.0f + FAST_EXP(-z_val));
-    out[base + d] = y_val * rstd * weight[d] * silu_z;
+// Grid: (N, ceil(n_groups / groups_per_block)). Block: groups_per_block
+// times the group rounded up to a power of two (`gated_norm_cfg` on the
+// host). Dynamic shared memory: one float per thread. Each group sums with
+// a pairwise tree over the rounded-up width, lanes past the group holding
+// -0.0, which leaves every sum as it is: a power-of-two group runs the tree
+// the one-block-per-row kernel ran, and any other group one fixed order.
+// Every thread reaches every barrier, and threads past the groups only
+// feed the tree.
+__device__ __forceinline__ int m3g_group_width(int group_size) {
+    int width = 1;
+    while (width < group_size) width <<= 1;
+    return width;
 }
 
-// Per-group RMSNormGated backward (norm_before_gate=True, Mamba-3 style).
-// Forward: out = (y * rstd_group * weight) * SiLU(z)
-// Follows layernorm_gated.py _layer_norm_bwd_kernel NORM_BEFORE_GATE=True path.
-// Per-group: each group of `group_size` elements has its own rstd.
-extern "C" __global__ void rmsnorm_gated_backward(
-    float* d_y,           // [N * d_inner] output
-    float* d_z,           // [N * d_inner] output
-    float* d_weight,      // [N * d_inner] per-sample (needs reduction across N)
-    const float* d_out,   // [N * d_inner] incoming gradient
-    const float* y,       // [N * d_inner] saved from forward
-    const float* z,       // [N * d_inner] saved from forward
-    const float* weight,  // [d_inner]
-    const float* rms_vals,// [N * n_groups] — saved rstd per group from forward
-    int N, int d_inner, int group_size
-) {
-    if (d_inner > 1024) return; // Guard: shared memory limit
-    int sample = blockIdx.x;
-    if (sample >= N) return;
-    int d = threadIdx.x;
-    if (d >= d_inner) return;
-
-    int n_groups = d_inner / group_size;
-    int group_id = d / group_size;
-    int local_id = d % group_size;
-
-    int base = sample * d_inner;
-    float rstd = rms_vals[sample * n_groups + group_id];
-    float y_val = y[base + d];
-    float z_val = z[base + d];
-    float w = weight[d];
-    float d_out_val = d_out[base + d];
-
-    // Recompute: y_hat = y * rstd, y_normed = y_hat * w
-    float y_hat = y_val * rstd;
-    float y_normed = y_hat * w;
-
-    // d_z: gradient through SiLU gate
-    // out = y_normed * SiLU(z), so d_z = d_out * y_normed * d_SiLU(z)
-    float sig_z = 1.0f / (1.0f + FAST_EXP(-z_val));
-    float silu_z = z_val * sig_z;
-    float d_silu = sig_z + z_val * sig_z * (1.0f - sig_z);
-    d_z[base + d] = d_out_val * y_normed * d_silu;
-
-    // dy_scaled = d_out * SiLU(z) — gradient passed through the gate for RMSNorm backward
-    float dy_scaled = d_out_val * silu_z;
-
-    // d_weight (per-sample): d_w = dy_scaled * y_hat
-    d_weight[base + d] = dy_scaled * y_hat;
-
-    // RMSNorm backward per group: d_y = (w * dy_scaled - y_hat * c1) * rstd
-    // c1 = sum(y_hat * w * dy_scaled) / group_size (within group only)
-    extern __shared__ float shared_sum[];
-    shared_sum[group_id * group_size + local_id] = y_hat * w * dy_scaled;
+__device__ __forceinline__ float m3g_group_sum(float* sm, float v, int local, int width) {
+    sm[threadIdx.x] = v;
     __syncthreads();
-
-    // Per-group parallel reduction
-    int stride = 1;
-    while (stride < group_size) stride <<= 1;
-    stride >>= 1;
-    for (; stride > 0; stride >>= 1) {
-        if (local_id < stride) {
-            int idx = group_id * group_size + local_id;
-            shared_sum[idx] += shared_sum[idx + stride];
-        }
+    for (int stride = width >> 1; stride > 0; stride >>= 1) {
+        if (local < stride) sm[threadIdx.x] += sm[threadIdx.x + stride];
         __syncthreads();
     }
-
-    float c1 = shared_sum[group_id * group_size] / (float)group_size;
-    d_y[base + d] = (w * dy_scaled - y_hat * c1) * rstd;
+    return sm[threadIdx.x - local];
 }
+
+// rms_vals: [N * n_groups], the rstd of every group for the backward.
+// z_stride: the row stride of z, d_inner when z is dense.
+#define DEFINE_RMSNORM_GATED_FWD(NAME, T_ACT, FROM_F)                          \
+extern "C" __global__ void NAME(                                               \
+    T_ACT* __restrict__ out,                                                   \
+    float* __restrict__ rms_vals,                                              \
+    const T_ACT* __restrict__ y,                                               \
+    const T_ACT* __restrict__ z,                                               \
+    const float* __restrict__ weight,                                          \
+    int N, int d_inner, int group_size, float eps, int z_stride                \
+) {                                                                            \
+    const int width = m3g_group_width(group_size);                             \
+    const int local_group = threadIdx.x / width;                               \
+    const int local = threadIdx.x - local_group * width;                       \
+    const int n_groups = d_inner / group_size;                                 \
+    const int group = blockIdx.y * (blockDim.x / width) + local_group;         \
+    const int sample = blockIdx.x;                                             \
+    const bool live = sample < N && group < n_groups && local < group_size;    \
+    const int d = group * group_size + local;                                  \
+    const long long base = (long long)sample * d_inner;                        \
+    extern __shared__ float m3g_sm[];                                          \
+    const float y_val = live ? to_f(y[base + d]) : 0.0f;                       \
+    const float sum = m3g_group_sum(m3g_sm, live ? y_val * y_val : -0.0f,      \
+                                   local, width);                              \
+    /* IEEE sqrtf and division, the rstd form of every norm in the tree. */    \
+    float rstd = 1.0f / sqrtf(sum / (float)group_size + eps);                  \
+    /* A non-finite y would turn rstd into NaN and carry it through the */     \
+    /* gate into the residual stream. */                                       \
+    if (!isfinite(rstd) || rstd > 1e20f) rstd = 1.0f;                          \
+    if (!live) return;                                                         \
+    if (local == 0) rms_vals[(long long)sample * n_groups + group] = rstd;     \
+    const float z_val = to_f(z[(long long)sample * z_stride + d]);             \
+    const float silu_z = z_val / (1.0f + FAST_EXP(-z_val));                    \
+    out[base + d] = FROM_F(y_val * rstd * weight[d] * silu_z);                 \
+}
+
+// The backward, after layernorm_gated.py's NORM_BEFORE_GATE path: d_weight
+// is per row ([N * d_inner]), reduced over the rows by the caller.
+#define DEFINE_RMSNORM_GATED_BWD(NAME, T_ACT, FROM_F)                          \
+extern "C" __global__ void NAME(                                               \
+    T_ACT* d_y, T_ACT* d_z, float* d_weight,                                   \
+    const T_ACT* d_out, const T_ACT* y, const T_ACT* z,                        \
+    const float* weight, const float* rms_vals,                                \
+    int N, int d_inner, int group_size                                         \
+) {                                                                            \
+    const int width = m3g_group_width(group_size);                             \
+    const int local_group = threadIdx.x / width;                               \
+    const int local = threadIdx.x - local_group * width;                       \
+    const int n_groups = d_inner / group_size;                                 \
+    const int group = blockIdx.y * (blockDim.x / width) + local_group;         \
+    const int sample = blockIdx.x;                                             \
+    const bool live = sample < N && group < n_groups && local < group_size;    \
+    const int d = group * group_size + local;                                  \
+    const long long base = (long long)sample * d_inner;                        \
+    extern __shared__ float m3g_sm[];                                          \
+    float rstd = 0.0f, y_hat = 0.0f, w = 0.0f, dy_scaled = 0.0f;               \
+    float contrib = -0.0f;                                                     \
+    if (live) {                                                                \
+        rstd = rms_vals[(long long)sample * n_groups + group];                 \
+        const float y_val = to_f(y[base + d]);                                 \
+        const float z_val = to_f(z[base + d]);                                 \
+        w = weight[d];                                                         \
+        const float d_out_val = to_f(d_out[base + d]);                         \
+        y_hat = y_val * rstd;                                                  \
+        const float y_normed = y_hat * w;                                      \
+        const float sig_z = 1.0f / (1.0f + FAST_EXP(-z_val));                  \
+        const float silu_z = z_val * sig_z;                                    \
+        const float d_silu = sig_z + z_val * sig_z * (1.0f - sig_z);           \
+        d_z[base + d] = FROM_F(d_out_val * y_normed * d_silu);                 \
+        /* The gradient through the gate, then the norm's per-row weight */    \
+        /* gradient and the group's c1 sum. */                                 \
+        dy_scaled = d_out_val * silu_z;                                        \
+        d_weight[base + d] = dy_scaled * y_hat;                                \
+        contrib = y_hat * w * dy_scaled;                                       \
+    }                                                                          \
+    const float sum = m3g_group_sum(m3g_sm, contrib, local, width);            \
+    if (!live) return;                                                         \
+    const float c1 = sum / (float)group_size;                                  \
+    d_y[base + d] = FROM_F((w * dy_scaled - y_hat * c1) * rstd);               \
+}
+
+DEFINE_RMSNORM_GATED_FWD(rmsnorm_gated_forward, float, from_f_f32)
+DEFINE_RMSNORM_GATED_FWD(rmsnorm_gated_forward_bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_RMSNORM_GATED_FWD(rmsnorm_gated_forward_f16, __half, from_f_f16)
+DEFINE_RMSNORM_GATED_BWD(rmsnorm_gated_backward, float, from_f_f32)
+DEFINE_RMSNORM_GATED_BWD(rmsnorm_gated_backward_bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_RMSNORM_GATED_BWD(rmsnorm_gated_backward_f16, __half, from_f_f16)
+#undef DEFINE_RMSNORM_GATED_FWD
+#undef DEFINE_RMSNORM_GATED_BWD
 
 // ============================================================================
 // Templated variants for end-to-end bf16/f16 activations (inference only).
@@ -1443,57 +1430,6 @@ extern "C" __global__ void silu_gate_bwd_##SUFFIX(                              
 DEFINE_SILU_GATE_BWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SILU_GATE_BWD(f16,  __half,        from_f_f16)
 
-// ------- rmsnorm_gated_forward typed -------
-// y, z, out: T_ACT; weight, rms_vals: f32. Per-group RMSNorm * SiLU(z).
-#define DEFINE_RMSNORM_GATED_FWD(SUFFIX, T_ACT, FROM_F)                        \
-extern "C" __global__ void rmsnorm_gated_forward_##SUFFIX(                      \
-    T_ACT* __restrict__ out,                                                    \
-    float* __restrict__ rms_vals,                                               \
-    const T_ACT* __restrict__ y,                                                \
-    const T_ACT* __restrict__ z,                                                \
-    const float* __restrict__ weight,                                           \
-    int N, int d_inner, int group_size,                                         \
-    float eps, /* config-driven eps */                                          \
-    int z_stride /* row stride of z (d_inner when dense) */                     \
-) {                                                                             \
-    if (d_inner > 1024) return;                                                 \
-    int sample = blockIdx.x;                                                    \
-    if (sample >= N) return;                                                    \
-    int d = threadIdx.x;                                                        \
-    if (d >= d_inner) return;                                                   \
-    int n_groups = d_inner / group_size;                                        \
-    int group_id = d / group_size;                                              \
-    int local_id = d % group_size;                                              \
-    int base = sample * d_inner;                                                \
-    float y_val = to_f(y[base + d]);                                            \
-    extern __shared__ float shared_sum[];                                       \
-    shared_sum[group_id * group_size + local_id] = y_val * y_val;               \
-    __syncthreads();                                                            \
-    int stride = 1;                                                             \
-    while (stride < group_size) stride <<= 1;                                   \
-    stride >>= 1;                                                               \
-    for (; stride > 0; stride >>= 1) {                                          \
-        if (local_id < stride) {                                                \
-            int sidx = group_id * group_size + local_id;                        \
-            shared_sum[sidx] += shared_sum[sidx + stride];                      \
-        }                                                                       \
-        __syncthreads();                                                        \
-    }                                                                           \
-    float rstd = 1.0f / sqrtf(shared_sum[group_id * group_size] / (float)group_size + eps); /* IEEE form, see the f32 twin above */ \
-    /* Finite-guard: match the f32 rmsnorm_gated_forward guard at line 982.    \
-     * Without this, bf16 overflow upstream produces rstd=Inf/NaN and silently \
-     * zeroes the entire gated output, cascading NaN through the rest of the   \
-     * stack. Mirrors the bf16 stability fix applied to bcnorm_fwd_bc. */      \
-    if (!isfinite(rstd) || rstd > 1e20f) rstd = 1.0f;                           \
-    if (local_id == 0) rms_vals[sample * n_groups + group_id] = rstd;           \
-    __syncthreads();                                                            \
-    float z_val = to_f(z[(long long)sample * z_stride + d]);                    \
-    float silu_z = z_val / (1.0f + FAST_EXP(-z_val));                           \
-    out[base + d] = FROM_F(y_val * rstd * weight[d] * silu_z);                  \
-}
-
-DEFINE_RMSNORM_GATED_FWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_RMSNORM_GATED_FWD(f16,  __half,        from_f_f16)
 
 // ============================================================================
 // Typed M3 backward kernels (bcnorm + rope + bc_bias + split).
@@ -1585,15 +1521,15 @@ DEFINE_BC_BIAS_ADD_BWD(f16,  __half,        from_f_f16)
 // typed B/C_biased saved; angle_cumsum + d_angle_cumsum stay f32
 // (accumulator precision critical — the rotation angles are summed
 // over T timesteps, f32 atomicAdd at the reducer).
-#define DEFINE_ROPE_BWD(SUFFIX, T_ACT, FROM_F)                                 \
-extern "C" __global__ void rope_bwd_##SUFFIX(                                  \
-    T_ACT* __restrict__ d_B_pre_rope,                                          \
-    T_ACT* __restrict__ d_C_pre_rope,                                          \
+#define DEFINE_ROPE_BWD_IO(NAME, T_GRAD, FROM_F, T_PRE)                        \
+extern "C" __global__ void NAME(                                               \
+    T_GRAD* __restrict__ d_B_pre_rope,                                         \
+    T_GRAD* __restrict__ d_C_pre_rope,                                         \
     float* __restrict__ d_angle_cumsum,                                        \
-    const T_ACT* __restrict__ d_B_rotated,                                     \
-    const T_ACT* __restrict__ d_C_rotated,                                     \
-    const T_ACT* __restrict__ B_biased,                                        \
-    const T_ACT* __restrict__ C_biased,                                        \
+    const T_GRAD* __restrict__ d_B_rotated,                                    \
+    const T_GRAD* __restrict__ d_C_rotated,                                    \
+    const T_PRE* __restrict__ B_biased,                                        \
+    const T_PRE* __restrict__ C_biased,                                        \
     const float* __restrict__ angle_cumsum,                                    \
     int N, int nh, int ds, int n_angles                                        \
 ) {                                                                            \
@@ -1645,8 +1581,13 @@ extern "C" __global__ void rope_bwd_##SUFFIX(                                  \
     }                                                                          \
 }
 
-DEFINE_ROPE_BWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_ROPE_BWD(f16,  __half,        from_f_f16)
+DEFINE_ROPE_BWD_IO(rope_bwd_bf16, __nv_bfloat16, from_f_bf16, __nv_bfloat16)
+DEFINE_ROPE_BWD_IO(rope_bwd_f16, __half, from_f_f16, __half)
+// The sequential mixed backward: f32 gradients, as its backward through
+// time writes them, against the bf16 or f16 pre-RoPE B and C.
+DEFINE_ROPE_BWD_IO(rope_bwd_mixed_bf16, float, from_f_f32, __nv_bfloat16)
+DEFINE_ROPE_BWD_IO(rope_bwd_mixed_f16, float, from_f_f32, __half)
+#undef DEFINE_ROPE_BWD_IO
 
 // m3_split_bwd typed: assembles d_proj (T_ACT, feeds in_proj dX GEMM)
 // from 8 gradient components. Layout: d_z, d_x, d_B_raw,
@@ -1706,61 +1647,3 @@ extern "C" __global__ void m3_split_bwd_##SUFFIX(                              \
 DEFINE_M3_SPLIT_BWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_SPLIT_BWD(f16,  __half,        from_f_f16)
 
-// Typed rmsnorm_gated_backward. Typed d_y/d_z/d_out/y/z; f32
-// weight/d_weight (master grad, atomicAdd-free per-sample write —
-// reducer accumulates across N later) and f32 rms_vals. All
-// recurrence math (SiLU gradient, RMSNorm c1 reduction) in f32
-// registers; typed only at I/O boundaries.
-#define DEFINE_RMSNORM_GATED_BWD(SUFFIX, T_ACT, FROM_F)                        \
-extern "C" __global__ void rmsnorm_gated_backward_##SUFFIX(                    \
-    T_ACT* d_y,                                                                \
-    T_ACT* d_z,                                                                \
-    float* d_weight,                                                           \
-    const T_ACT* d_out,                                                        \
-    const T_ACT* y,                                                            \
-    const T_ACT* z,                                                            \
-    const float* weight,                                                       \
-    const float* rms_vals,                                                     \
-    int N, int d_inner, int group_size                                         \
-) {                                                                            \
-    if (d_inner > 1024) return;                                                \
-    int sample = blockIdx.x;                                                   \
-    if (sample >= N) return;                                                   \
-    int d = threadIdx.x;                                                       \
-    if (d >= d_inner) return;                                                  \
-    int n_groups = d_inner / group_size;                                       \
-    int group_id = d / group_size;                                             \
-    int local_id = d % group_size;                                             \
-    int base = sample * d_inner;                                               \
-    float rstd = rms_vals[sample * n_groups + group_id];                       \
-    float y_val = to_f(y[base + d]);                                           \
-    float z_val = to_f(z[base + d]);                                           \
-    float w = weight[d];                                                       \
-    float d_out_val = to_f(d_out[base + d]);                                   \
-    float y_hat = y_val * rstd;                                                \
-    float y_normed = y_hat * w;                                                \
-    float sig_z = 1.0f / (1.0f + FAST_EXP(-z_val));                            \
-    float silu_z = z_val * sig_z;                                              \
-    float d_silu = sig_z + z_val * sig_z * (1.0f - sig_z);                     \
-    d_z[base + d] = FROM_F(d_out_val * y_normed * d_silu);                     \
-    float dy_scaled = d_out_val * silu_z;                                      \
-    d_weight[base + d] = dy_scaled * y_hat;                                    \
-    extern __shared__ float shared_sum[];                                      \
-    shared_sum[group_id * group_size + local_id] = y_hat * w * dy_scaled;      \
-    __syncthreads();                                                           \
-    int stride = 1;                                                            \
-    while (stride < group_size) stride <<= 1;                                  \
-    stride >>= 1;                                                              \
-    for (; stride > 0; stride >>= 1) {                                         \
-        if (local_id < stride) {                                               \
-            int idx = group_id * group_size + local_id;                        \
-            shared_sum[idx] += shared_sum[idx + stride];                       \
-        }                                                                      \
-        __syncthreads();                                                       \
-    }                                                                          \
-    float c1 = shared_sum[group_id * group_size] / (float)group_size;          \
-    d_y[base + d] = FROM_F((w * dy_scaled - y_hat * c1) * rstd);               \
-}
-
-DEFINE_RMSNORM_GATED_BWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_RMSNORM_GATED_BWD(f16,  __half,        from_f_f16)

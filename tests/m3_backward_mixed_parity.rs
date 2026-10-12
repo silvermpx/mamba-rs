@@ -19,6 +19,7 @@
 #[path = "common/arch.rs"]
 mod arch;
 
+use mamba_rs::config::ScanMode;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
@@ -70,7 +71,7 @@ fn dims_for(cfg: &Mamba3Config, batch: usize, seq_len: usize) -> GpuMamba3Dims {
         a_floor: cfg.a_floor,
         rms_norm_eps: cfg.rms_norm_eps,
         is_outproj_norm: cfg.is_outproj_norm,
-        use_parallel_scan: true, // the chunked path is the one with a mixed backward
+        use_parallel_scan: cfg.train_use_parallel_scan(),
     }
 }
 
@@ -501,4 +502,92 @@ fn m3_backward_mixed_parity_input_proj_f16() {
     let cfg = cfg_for_step10();
     let w = Mamba3Weights::init(&cfg, cfg.d_model, 0xC0FFEE);
     check_cfg_weights(cfg, WeightDtype::F16, 128, &w, &w, false);
+}
+
+/// Heads and states the warp kernel cannot hold take the tiled dQKV stage
+/// in the mixed backward too: headdim 48 with d_state 17, over a ragged
+/// last chunk.
+#[test]
+fn m3_backward_mixed_parity_tiled_stage_bf16() {
+    let cfg = Mamba3Config {
+        d_model: 48,
+        d_state: 17,
+        headdim: 48,
+        is_outproj_norm: false,
+        ..cfg_for_step10()
+    };
+    check_cfg(cfg, WeightDtype::Bf16, 100);
+}
+
+#[test]
+fn m3_backward_mixed_parity_tiled_stage_f16() {
+    let cfg = Mamba3Config {
+        d_model: 48,
+        d_state: 17,
+        headdim: 48,
+        is_outproj_norm: false,
+        ..cfg_for_step10()
+    };
+    check_cfg(cfg, WeightDtype::F16, 100);
+}
+
+/// A head of 64 with the gated output norm, on the tiled stage.
+#[test]
+fn m3_backward_mixed_parity_wide_head_bf16() {
+    let cfg = Mamba3Config {
+        d_model: 64,
+        d_state: 32,
+        headdim: 64,
+        ..cfg_for_step10()
+    };
+    check_cfg(cfg, WeightDtype::Bf16, 128);
+}
+
+/// The sequential scan in mixed precision: the bf16 and f16 backward
+/// through time against the f32 one, on a warp head.
+#[test]
+fn m3_backward_mixed_parity_sequential_bf16() {
+    let cfg = Mamba3Config {
+        scan_mode: ScanMode::Sequential,
+        ..cfg_for_step10()
+    };
+    check_cfg(cfg, WeightDtype::Bf16, 48);
+}
+
+#[test]
+fn m3_backward_mixed_parity_sequential_f16() {
+    let cfg = Mamba3Config {
+        scan_mode: ScanMode::Sequential,
+        ..cfg_for_step10()
+    };
+    check_cfg(cfg, WeightDtype::F16, 48);
+}
+
+/// The sequential scan in mixed precision on a head wider than a warp,
+/// with the SiLU gate.
+#[test]
+fn m3_backward_mixed_parity_sequential_wide_head_bf16() {
+    let cfg = Mamba3Config {
+        d_model: 48,
+        d_state: 17,
+        headdim: 48,
+        is_outproj_norm: false,
+        scan_mode: ScanMode::Sequential,
+        ..cfg_for_step10()
+    };
+    check_cfg(cfg, WeightDtype::Bf16, 37);
+}
+
+/// The typed gated output norm past 1024 channels and on a head of 48.
+#[test]
+fn m3_backward_mixed_parity_gated_norm_wide_bf16() {
+    for (d_model, headdim) in [(640usize, 64usize), (48, 48)] {
+        let cfg = Mamba3Config {
+            d_model,
+            d_state: 16,
+            headdim,
+            ..cfg_for_step10()
+        };
+        check_cfg(cfg, WeightDtype::Bf16, 100);
+    }
 }

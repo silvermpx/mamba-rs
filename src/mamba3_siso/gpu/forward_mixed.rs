@@ -193,11 +193,10 @@ impl GpuMamba3BackboneMixedActs {
                     // `.max(1)` — defense in depth, same rationale as
                     // `angles_raw` above and the f32 `angle_cumsum` path.
                     angle_cumsum: GpuBuffer::zeros(stream, bt * nh * na.max(1))?,
-                    // Sequential-scan tapes, consumed only by the
-                    // sequential forward branch (the mixed backward
-                    // supports the chunked path only). On the chunked
-                    // path they shrink to 1-element sentinels — the h
-                    // tape alone is B*(T+1)*d_inner*d_state floats of
+                    // Sequential-scan tapes, written by the sequential
+                    // forward and read by the sequential backward. On the
+                    // chunked path they shrink to 1-element sentinels: the
+                    // h tape alone is B*(T+1)*d_inner*d_state floats of
                     // dead VRAM otherwise.
                     h_saved: GpuBuffer::zeros(
                         stream,
@@ -257,11 +256,8 @@ impl GpuMamba3BackboneMixedActs {
 /// state, and small coefficient paths (see field-level comments on
 /// `GpuMamba3LayerMixedActs`).
 ///
-/// **Scope**: BOTH scan routes dispatch here (`dims.use_parallel_scan`
-/// selects sequential vs chunked — the chunked typed kernels shipped after
-/// this header was first written). The remaining asymmetry lives in the
-/// BACKWARD: mixed sequential SSM backward is a documented non-goal (see
-/// `backward_mixed.rs`), so mixed TRAINING must run the chunked route.
+/// **Scope**: both scans dispatch here (`dims.use_parallel_scan` selects
+/// sequential or chunked), and the mixed backward follows either.
 pub fn gpu_forward_mamba3_layer_mixed(
     exec: &M3Exec<'_>,
     stream_out: cudarc::driver::sys::CUdeviceptr,
@@ -507,8 +503,8 @@ pub fn gpu_forward_mamba3_layer_mixed(
 
     // F5b: m3_compute_abg, all f32. Only the sequential burn-in forward
     // below reads alpha/beta/gamma; the chunked pipeline derives its own
-    // coefficients and the mixed backward never runs the sequential
-    // branch, so nothing is saved for it.
+    // coefficients, and the sequential backward recomputes them from the
+    // saved dt, A and trap, so nothing is saved for it.
     if !dims.use_parallel_scan {
         let n_total = (bt * nh) as i32;
         let mut bld = ctx.stream.launch_builder(&m3k.m3_compute_abg);
@@ -747,13 +743,15 @@ pub fn gpu_forward_mamba3_layer_mixed(
         let nh_i = nh as i32;
         let hd_i = hd as i32;
         let ds_i = ds as i32;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (dims.batch as u32, nh as u32, 1),
-            block_dim: (hd as u32, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        crate::mamba3_siso::route::require_warp(hd, "m3_burnin_fwd typed")?;
-        let kernel = m3k.burnin_fwd_typed_for_state(dtype, ds);
+        let (kernel, cfg) = m3k.sequential_forward(
+            dtype,
+            super::kernels::SequentialShape {
+                batch: dims.batch,
+                nheads: nh,
+                headdim: hd,
+                d_state: ds,
+            },
+        )?;
         let mut bld = ctx.stream.launch_builder(kernel);
         bld.arg(&ssm_state);
         bld.arg(&k_state);
@@ -783,16 +781,11 @@ pub fn gpu_forward_mamba3_layer_mixed(
 
     // F7: gating — silu_gate_fwd_typed or rmsnorm_gated_fwd_typed.
     if dims.is_outproj_norm {
-        assert!(di <= 1024, "d_inner {di} > 1024 rmsnorm_gated shm limit");
         let nw_ptr = w.norm_gate_weight.ptr();
         let bt_i = bt as i32;
         let di_i = di as i32;
         let hd_i = hd as i32;
-        let grid = cudarc::driver::LaunchConfig {
-            grid_dim: (bt as u32, 1, 1),
-            block_dim: (di as u32, 1, 1),
-            shared_mem_bytes: (di * std::mem::size_of::<f32>()) as u32,
-        };
+        let grid = super::kernels::gated_norm_cfg(bt, di, hd);
         let mut bld = ctx
             .stream
             .launch_builder(m3k.rmsnorm_gated_fwd_typed.get(dtype));

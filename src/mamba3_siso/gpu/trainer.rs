@@ -168,10 +168,7 @@ impl Mamba3GpuTrainer {
         // Hoisted here so both branches get it: the model envelope, then the
         // head width, shared memory and norm limits the kernels rely on.
         cfg.validate()?;
-        crate::mamba3_siso::route::check_config(
-            &cfg,
-            crate::mamba3_siso::route::RoutePurpose::Training,
-        )?;
+        crate::mamba3_siso::route::check_config(&cfg)?;
         // The index ranges are checked against the scan this window runs
         // when its dims are built (`GpuMamba3Dims::validate_index_budget`):
         // the chunked path has no sequential tape to count.
@@ -179,28 +176,9 @@ impl Mamba3GpuTrainer {
             return Err("a training window needs at least one sequence and one token".into());
         }
         let inner = match dtype {
-            WeightDtype::F32 | WeightDtype::Tf32 => {
-                // The f32 backbone runs the input projection GEMM
-                // unconditionally; an empty weight is a zero-size device
-                // allocation whose null pointer only surfaces later as
-                // CUDA_ERROR_ILLEGAL_ADDRESS inside a GEMM kernel. The
-                // empty-means-identity convention belongs to the mixed
-                // trainer — refuse it here while the cause is nameable.
-                if cpu_weights.input_proj_w.is_empty() {
-                    return Err("f32 M3 trainer requires an explicit input projection: \
-                         pass an identity matrix for a pass-through (the \
-                         empty-input_proj identity convention is mixed-only)"
-                        .into());
-                }
-                Trainer3Inner::F32(Box::new(Mamba3TrainerF32::new_full(
-                    gpu_ordinal,
-                    cpu_weights,
-                    cfg,
-                    session,
-                    mode,
-                    dtype,
-                )?))
-            }
+            WeightDtype::F32 | WeightDtype::Tf32 => Trainer3Inner::F32(Box::new(
+                Mamba3TrainerF32::new_full(gpu_ordinal, cpu_weights, cfg, session, mode, dtype)?,
+            )),
             WeightDtype::Bf16 | WeightDtype::F16 => Trainer3Inner::Mixed(Box::new(
                 Mamba3TrainerMixed::new_full(gpu_ordinal, cpu_weights, cfg, session, dtype, mode)?,
             )),
@@ -826,10 +804,7 @@ impl Mamba3TrainerMixed {
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
         cfg.validate()?;
-        crate::mamba3_siso::route::check_config(
-            &cfg,
-            crate::mamba3_siso::route::RoutePurpose::Training,
-        )?;
+        crate::mamba3_siso::route::check_config(&cfg)?;
         let TrainSessionCfg {
             input_dim,
             batch,

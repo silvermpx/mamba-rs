@@ -398,10 +398,7 @@ impl Mamba3GpuEngine {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         cfg.validate()?;
-        crate::mamba3_siso::route::check_config(
-            &cfg,
-            crate::mamba3_siso::route::RoutePurpose::Inference,
-        )?;
+        crate::mamba3_siso::route::check_config(&cfg)?;
         // GpuCtx disables cudarc's per-slice event tracking itself (the
         // CUDA-Graph capture prerequisite) and owns the cuBLAS handle plus
         // its Graph-safe workspace.
@@ -894,7 +891,7 @@ impl Mamba3GpuEngine {
 
         // F7: Output gating
         if self.cfg.is_outproj_norm {
-            let grid = crate::gpu::launch::grid_norm(b, di);
+            let grid = super::kernels::gated_norm_cfg(b, di, self.cfg.headdim);
             let mut builder = self
                 .ctx
                 .stream
@@ -909,6 +906,7 @@ impl Mamba3GpuEngine {
             builder.arg(&hd_i);
             let eps_g5: f32 = self.cfg.rms_norm_eps;
             builder.arg(&eps_g5);
+            builder.arg(&di_i);
             unsafe { builder.launch(grid) }.map_err(|e| format!("F7 rmsnorm_gated: {e:?}"))?;
         } else {
             let n = b * di;
@@ -1682,7 +1680,7 @@ impl Mamba3GpuEngineMixed {
 
             // F7: output gating (typed).
             if cfg.is_outproj_norm {
-                let grid = crate::gpu::launch::grid_norm(b, di);
+                let grid = super::kernels::gated_norm_cfg(b, di, cfg.headdim);
                 let mut bld = engine
                     .ctx
                     .stream

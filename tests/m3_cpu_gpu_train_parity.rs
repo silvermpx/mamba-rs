@@ -29,6 +29,10 @@
 //!     is_outproj_norm = false → SiLU gate branch)
 //!   - chunked parallel scan (`use_parallel_scan = true`, T = 256 =
 //!     4 chunks, is_outproj_norm = true → RMSNormGated branch)
+//!   - the chunked backward's tiled dQKV stage, at heads and states the
+//!     warp kernel cannot hold (d_state 256, headdim 48, 64 and 100)
+//!   - the sequential scan's block-tier kernels (headdim 48 and 64)
+//!   - the gated output norm past 1024 channels and on a head of 48
 //!
 //! The chunked window is stateless by design (chunk 0 starts from zero
 //! state) which matches the zero-state CPU run exactly.
@@ -676,22 +680,141 @@ fn m3_cpu_gpu_train_parity_sequential_d_state_256() {
     check_scenario("seq_ds256", &scn);
 }
 
-/// d_state = 256 on the CHUNKED path exceeds the chunked-backward
-/// kernel's shared-memory budget. The shape is a valid model, so the GPU
-/// route must refuse it loudly for chunked training (the ceiling falls
-/// with the state-tiled redesign of that kernel).
+/// d_state = 256, the top of the reference range, on the chunked path.
+/// The warp kernel's tiles cannot hold it; the tiled backward can.
 #[test]
-fn m3_chunked_d_state_256_is_refused_loudly() {
-    let cfg = Mamba3Config {
-        d_state: 256,
-        headdim: 16,
-        ..base_cfg(true)
+fn m3_cpu_gpu_train_parity_chunked_d_state_256() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            d_state: 256,
+            headdim: 16,
+            ..base_cfg(true)
+        },
+        batch: 1,
+        seq_len: 128,
+        use_parallel_scan: true,
     };
-    cfg.validate().unwrap();
-    let err = mamba_rs::mamba3_siso::route::check_config(
-        &cfg,
-        mamba_rs::mamba3_siso::route::RoutePurpose::Training,
-    )
-    .unwrap_err();
-    assert!(err.contains("shared memory"), "{err}");
+    check_scenario("chunked_ds256", &scn);
+}
+
+/// The official checkpoints' head: headdim 64 with d_state 128, two heads,
+/// with the gated output norm.
+#[test]
+fn m3_cpu_gpu_train_parity_chunked_official_head() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            d_state: 128,
+            headdim: 64,
+            ..base_cfg(true)
+        },
+        batch: 2,
+        seq_len: 128,
+        use_parallel_scan: true,
+    };
+    check_scenario("chunked_hd64_ds128", &scn);
+}
+
+/// A head and a state no tile width divides, over a ragged last chunk:
+/// headdim 48 (wider than a warp, not a power of two) with d_state 17.
+#[test]
+fn m3_cpu_gpu_train_parity_chunked_ragged_head_and_state() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            d_model: 48,
+            d_state: 17,
+            headdim: 48,
+            ..base_cfg(false)
+        },
+        batch: 2,
+        seq_len: 100,
+        use_parallel_scan: true,
+    };
+    check_scenario("chunked_hd48_ds17", &scn);
+}
+
+/// A wide head: headdim 100 with d_state 16.
+#[test]
+fn m3_cpu_gpu_train_parity_chunked_wide_head() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            d_model: 100,
+            headdim: 100,
+            ..base_cfg(false)
+        },
+        batch: 1,
+        seq_len: 128,
+        use_parallel_scan: true,
+    };
+    check_scenario("chunked_hd100", &scn);
+}
+
+/// A head wider than a warp on the sequential scan: the block-tier forward
+/// and backward, headdim 64 with the gated output norm.
+#[test]
+fn m3_cpu_gpu_train_parity_sequential_wide_head() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            d_state: 32,
+            headdim: 64,
+            ..base_cfg(true)
+        },
+        batch: 2,
+        seq_len: 64,
+        use_parallel_scan: false,
+    };
+    check_scenario("seq_hd64_ds32", &scn);
+}
+
+/// A head no warp divides on the sequential scan: headdim 48 with d_state
+/// 17, over a window that is no multiple of anything.
+#[test]
+fn m3_cpu_gpu_train_parity_sequential_ragged_head() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            d_model: 48,
+            d_state: 17,
+            headdim: 48,
+            ..base_cfg(false)
+        },
+        batch: 2,
+        seq_len: 37,
+        use_parallel_scan: false,
+    };
+    check_scenario("seq_hd48_ds17", &scn);
+}
+
+/// The gated output norm past 1024 channels: 1280 channels in heads of 64.
+#[test]
+fn m3_cpu_gpu_train_parity_gated_norm_wide_inner() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            d_model: 640,
+            d_state: 16,
+            headdim: 64,
+            ..base_cfg(true)
+        },
+        batch: 1,
+        seq_len: 64,
+        use_parallel_scan: true,
+    };
+    check_scenario("gated_di1280_hd64", &scn);
+}
+
+/// The gated output norm on heads that are no power of two, on both scans.
+#[test]
+fn m3_cpu_gpu_train_parity_gated_norm_ragged_head() {
+    for parallel in [true, false] {
+        let scn = Scenario {
+            cfg: Mamba3Config {
+                d_model: 48,
+                d_state: 16,
+                headdim: 48,
+                ..base_cfg(true)
+            },
+            batch: 2,
+            seq_len: 37,
+            use_parallel_scan: parallel,
+        };
+        check_scenario(&format!("gated_hd48 parallel={parallel}"), &scn);
+    }
 }

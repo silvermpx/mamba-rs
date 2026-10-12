@@ -3,13 +3,11 @@
 //! `_backbone` with typed activation I/O routed through the typed kernel
 //! variants from Steps 9a/9b/9c/9d.
 //!
-//! ## Production-config scope
-//! - `dims.use_parallel_scan = true` (chunked SSM bwd via Steps 9b + 9d)
-//! - `dims.is_outproj_norm = true` (the typed gated-norm backward)
-//! - `dims.n_angles > 0` (the typed RoPE backward)
-//!
-//! Non-production configs return `Err(...)` — fall back to the f32 path
-//! [`super::mamba3_gpu::gpu_backward_mamba3_backbone`].
+//! ## Scope
+//! - both scans: the chunked SSM backward, and the sequential one through
+//!   the block-tier backward through time with f32 gradients
+//! - both output gates: the typed gated-norm backward and the SiLU gate
+//! - RoPE on or off
 //!
 //! ## Precision invariants
 //! - **Activations**: typed (bf16/f16) — read via `cached_ptr()` from
@@ -32,7 +30,7 @@ use crate::gpu::launch::{grid_1d, grid_colsum, grid_norm};
 use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3LayerMixedActs, GpuMamba3MixedScratch,
 };
-use crate::mamba3_siso::gpu::kernels::Mamba3Kernels;
+use crate::mamba3_siso::gpu::kernels::{Mamba3Kernels, SequentialShape};
 use crate::mamba3_siso::gpu::mamba3_gpu::GpuMamba3Scratch;
 use crate::mamba3_siso::gpu::state::M3Exec;
 use crate::mamba3_siso::gpu::weights::{
@@ -230,22 +228,6 @@ fn gpu_backward_mamba3_layer_mixed(
         lw_master,
         lg,
     } = *layer;
-    if !dims.use_parallel_scan {
-        // Deliberate non-goal, not a gap: a sequential mixed backward
-        // needs the full per-timestep h tape (B*(T+1)*d_inner*d_state
-        // floats — CHUNK_SIZE times the chunked tape), and the chunked
-        // path is bitwise-deterministic and faster at every measured T.
-        // Revisit only if one of these appears: (a) a model whose
-        // recurrence cannot be chunk-decomposed, (b) a debugging need
-        // for per-step gradient taps, (c) a VRAM regime where the
-        // chunked saves no longer fit but the sequential tape somehow
-        // would (it will not at current shapes).
-        return Err(
-            "m3_mixed bwd: sequential SSM bwd is unsupported by design; \
-             use the chunked parallel scan (ScanMode::Auto)"
-                .into(),
-        );
-    }
 
     let bt = dims.bt();
     let dm = dims.d_model;
@@ -304,11 +286,7 @@ fn gpu_backward_mamba3_layer_mixed(
     if dims.is_outproj_norm {
         {
             let nw_ptr = lw.norm_gate_weight.ptr();
-            let grid = LaunchConfig {
-                grid_dim: (bt as u32, 1, 1),
-                block_dim: (di as u32, 1, 1),
-                shared_mem_bytes: (di * std::mem::size_of::<f32>()) as u32,
-            };
+            let grid = crate::mamba3_siso::gpu::kernels::gated_norm_cfg(bt, di, hd);
             let mut builder = ctx
                 .stream
                 .launch_builder(m3k.rmsnorm_gated_bwd_typed.get(dtype));
@@ -368,274 +346,309 @@ fn gpu_backward_mamba3_layer_mixed(
             .map_err(|e| format!("silu_gate_bwd typed B7: {:?}", e))?;
     }
 
-    // ----------------------------------------------------------------
-    // B6: Chunked parallel SSM backward (Steps 9b + 9d typed).
-    //   Reuses saved intermediates from forward (k_scaled_saved, etc.).
-    // ----------------------------------------------------------------
-    let dp_ptr = lw_master.d_param.raw_ptr(&ctx.stream);
-    let cs = dims.chunk_size() as i32;
-    let nc = dims.n_chunks();
-    let cs_u = dims.chunk_size();
-
-    // The forward saved da_cumsum, scale, gamma, qk_dot and the chunk
-    // states in f32 in the layer acts; the kernels read them from there,
-    // and the scale and gamma gradients get their own scratch.
-
-    // Extract per-chunk dA cumsum end values.
-    {
-        let block_x = nh.min(256) as u32;
-        let grid_z = nh.div_ceil(block_x as usize) as u32;
-        let cfg = LaunchConfig {
-            grid_dim: (dims.batch as u32, nc as u32, grid_z),
-            block_dim: (block_x, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        let mut builder = ctx.stream.launch_builder(&m3k.m3_extract_da_cs_sum);
-        builder.arg(sc.da_cs_sum.inner_mut());
-        builder.arg(acts.da_cumsum_saved.inner());
-        builder.arg(&b);
-        builder.arg(&t);
-        builder.arg(&nh_i);
-        builder.arg(&cs);
-        unsafe { builder.launch(cfg) }
-            .map_err(|e| format!("m3_extract_da_cs_sum mixed: {:?}", e))?;
-    }
-
-    // m3_dqkv typed assigns every element of d_q, d_k and d_x it owns, so
-    // the three buffers need no zeroing first.
-    // No-atomics partials rule: dD_partials[B*nh] via axis0_partials,
-    // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1).
-    {
-        // Two chunk-by-state operand tiles and the V/dO tiles, each row
-        // padded by one float so a warp reading consecutive rows spreads
-        // over the banks; two per-step lanes, the da/qk lanes, and TWO
-        // head-state tiles (true states + d_state staging for the
-        // warp-parallel dADT). The kernel lays its tiles out the same way,
-        // and the route bounds the same tile, so a shape it admits runs.
-        let legacy_floats = crate::mamba3_siso::route::chunked_backward_smem_bytes(hd, ds) / 4;
-        let mats_floats = legacy_floats + cs_u * (cs_u - 1) * 3 / 2 + 2 * cs_u;
-        // Consumer GPUs cap the per-block dynamic-smem opt-in near 99 KB.
-        // One head per block: pair matrices when the tile
-        // fits, legacy inline dots otherwise (bit-identical, slower).
-        let cap_floats = 99 * 1024 / 4;
-        let (per_head_floats, use_pair_mats): (usize, i32) = if mats_floats <= cap_floats {
-            (mats_floats, 1)
-        } else {
-            (legacy_floats, 0)
-        };
-        let smem = per_head_floats * 4;
-        if smem > 99 * 1024 {
-            return Err(format!(
-                "m3_dqkv shared-memory tile {} B exceeds the 99 KB opt-in \
-                     (CS={cs_u} hd={hd} ds={ds}) even without the pair matrices",
-                smem
-            ));
-        }
-        // t-split: blockDim.y lanes stride the per-timestep
-        // loops. Inference launch geometry (never data-shaped); any T_SPLIT
-        // yields identical bits since each output keeps one owning lane
-        // with the same inner order.
+    if !dims.use_parallel_scan {
+        sequential_ssm_backward_mixed(exec, layer, sc, msc, dtype)?;
+    } else {
+        // ----------------------------------------------------------------
+        // B6: Chunked parallel SSM backward (Steps 9b + 9d typed).
+        //   Reuses saved intermediates from forward (k_scaled_saved, etc.).
+        // ----------------------------------------------------------------
+        let dp_ptr = lw_master.d_param.raw_ptr(&ctx.stream);
+        let cs = dims.chunk_size() as i32;
         let nc = dims.n_chunks();
-        // Reverse d_state decomposition (see the f32 lane).
+        let cs_u = dims.chunk_size();
+
+        // The forward saved da_cumsum, scale, gamma, qk_dot and the chunk
+        // states in f32 in the layer acts; the kernels read them from there,
+        // and the scale and gamma gradients get their own scratch.
+
+        // Extract per-chunk dA cumsum end values.
         {
-            let st_cfg = LaunchConfig {
-                grid_dim: (nh as u32, dims.batch as u32, nc as u32),
-                block_dim: (hd as u32, 4, 1),
-                shared_mem_bytes: ((cs_u * ds + cs_u * hd + cs_u) * std::mem::size_of::<f32>())
-                    as u32,
+            let block_x = nh.min(256) as u32;
+            let grid_z = nh.div_ceil(block_x as usize) as u32;
+            let cfg = LaunchConfig {
+                grid_dim: (dims.batch as u32, nc as u32, grid_z),
+                block_dim: (block_x, 1, 1),
+                shared_mem_bytes: 0,
             };
-            let mut sb = ctx
-                .stream
-                .launch_builder(m3k.m3_dqkv_state_terms_typed.get(dtype));
-            let q_p = acts.q.cached_ptr();
-            let dy_p = msc.d_y_typed.cached_ptr();
-            sb.arg(sc.dstate_terms.inner_mut());
-            sb.arg(&q_p);
-            sb.arg(acts.da_cumsum_saved.inner());
-            sb.arg(&dy_p);
-            sb.arg(&b);
-            sb.arg(&t);
-            sb.arg(&nh_i);
-            sb.arg(&hd_i);
-            sb.arg(&ds_i);
-            sb.arg(&cs);
-            unsafe { sb.launch(st_cfg) }
-                .map_err(|e| format!("m3_dqkv_state_terms typed: {:?}", e))?;
-
-            let nc_i = nc as i32;
-            let mut pb = ctx.stream.launch_builder(&m3k.m3_dstate_passing_bwd);
-            pb.arg(sc.dstate_enter.inner_mut());
-            pb.arg(sc.dstate_terms.inner());
-            pb.arg(sc.da_cs_sum.inner());
-            pb.arg(&b);
-            pb.arg(&nh_i);
-            pb.arg(&hd_i);
-            pb.arg(&ds_i);
-            pb.arg(&nc_i);
-            unsafe { pb.launch(grid_1d(dims.batch * nh * hd * ds)) }
-                .map_err(|e| format!("m3_dstate_passing_bwd typed: {:?}", e))?;
+            let mut builder = ctx.stream.launch_builder(&m3k.m3_extract_da_cs_sum);
+            builder.arg(sc.da_cs_sum.inner_mut());
+            builder.arg(acts.da_cumsum_saved.inner());
+            builder.arg(&b);
+            builder.arg(&t);
+            builder.arg(&nh_i);
+            builder.arg(&cs);
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("m3_extract_da_cs_sum mixed: {:?}", e))?;
         }
-        let t_split = 16.min(1024 / hd.max(1)).max(1) as u32;
-        let cfg = LaunchConfig {
-            grid_dim: (nh as u32, dims.batch as u32, nc as u32),
-            block_dim: (hd as u32, t_split, 1),
-            shared_mem_bytes: smem as u32,
-        };
-        crate::mamba3_siso::route::require_warp(hd, "m3_dqkv typed")?;
-        let dqkv = m3k.dqkv_for_shape(dtype, ds, hd, cs_u, dims.seq_len, use_pair_mats == 1);
-        let mut builder = ctx.stream.launch_builder(dqkv);
-        builder.arg(sc.d_q.inner_mut()); // dQ_mid
-        builder.arg(sc.d_k.inner_mut()); // dK_mid
-        builder.arg(sc.d_x.inner_mut()); // dV
-        builder.arg(sc.d_alpha.inner_mut()); // dADT
-        builder.arg(sc.d_beta.inner_mut()); // dQK_dot
-        builder.arg(sc.axis0_partials.inner_mut()); // dD_partials [B*nh] (no-atomics partials)
-        let q_p = acts.q.cached_ptr(); // typed Q_rot
-        let ks_p = acts.k_scaled_saved.cached_ptr(); // typed K_scaled
-        let v_p = acts.x.cached_ptr(); // typed V = x
-        let dy_p = msc.d_y_typed.cached_ptr(); // typed dO = d_y
-        builder.arg(&q_p);
-        builder.arg(&ks_p);
-        builder.arg(&v_p);
-        builder.arg(acts.da_cumsum_saved.inner());
-        builder.arg(sc.da_cs_sum.inner());
-        builder.arg(acts.qk_dot_saved.inner());
-        builder.arg(acts.chunk_states_saved.inner());
-        builder.arg(&dy_p);
-        builder.arg(&dp_ptr);
-        builder.arg(sc.dstate_enter.inner());
-        builder.arg(&b);
-        builder.arg(&t);
-        builder.arg(&nh_i);
-        builder.arg(&hd_i);
-        builder.arg(&ds_i);
-        builder.arg(&cs);
-        builder.arg(&use_pair_mats);
-        unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv_typed B6: {:?}", e))?;
-    }
-    // Stage 2: reduce dD_partials[B*nc, nh] → lg.d_param[nh] (accumulate=1).
-    {
-        let rows = dims.batch * dims.n_chunks();
-        let rows_i = rows as i32;
-        let block_dim = (rows as u32).next_power_of_two().clamp(32, 256);
-        let accumulate_i: i32 = 1;
-        let d_dp_ptr = lg.d_param.ptr();
-        let mut rb = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
-        rb.arg(&d_dp_ptr);
-        rb.arg(sc.axis0_partials.inner());
-        rb.arg(&rows_i);
-        rb.arg(&nh_i);
-        rb.arg(&accumulate_i);
-        let red_cfg = LaunchConfig {
-            grid_dim: (nh as u32, 1, 1),
-            block_dim: (block_dim, 1, 1),
-            shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
-        };
-        unsafe { rb.launch(red_cfg) }.map_err(|e| format!("m3_dqkv_typed dD reduce: {:?}", e))?;
-    }
 
-    // Zero d_angle_cumsum before m3_dqktheta.
-    if na > 0 {
-        let n_ac = (dims.batch * dims.seq_len * nh * na) as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.fill_scalar);
-        builder.arg(sc.d_angle_cumsum.inner_mut());
-        let zero: f32 = 0.0;
-        builder.arg(&zero);
-        builder.arg(&n_ac);
-        unsafe { builder.launch(grid_1d(n_ac as usize)) }
-            .map_err(|e| format!("zero d_angle_cumsum mixed: {:?}", e))?;
-    }
-
-    // m3_dqktheta typed — dQ_bias/dK_bias removed from args
-    // (caller does colsum_accumulate on dQ_pre/dK_pre scratch below).
-    {
-        let na_i = na as i32;
-        // The selected route owns its staging-tile count. The retained
-        // half transport uses four; the legacy path uses six.
-        // Large-d_state tiles overflow the 48 KB no-opt-in dynamic
-        // limit — fall back to the direct-global path (staging = 0).
-        let (dqktheta, dqkt_tiles) = m3k.dqktheta_for_shape(dtype, ds, cs_u, na);
-        let dqkt_smem = dqkt_tiles * cs_u * ds * 4;
-        let dqkt_staging: i32 = i32::from(dqkt_smem <= 48 * 1024);
-        let cfg = LaunchConfig {
-            grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
-            block_dim: (cs_u as u32, 1, 1),
-            shared_mem_bytes: if dqkt_staging == 1 {
-                dqkt_smem as u32
+        // m3_dqkv typed assigns every element of d_q, d_k and d_x it owns, so
+        // the three buffers need no zeroing first.
+        // No-atomics partials rule: dD_partials[B*nh] via axis0_partials,
+        // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1).
+        if crate::mamba3_siso::route::chunked_backward_tiled(hd, ds) {
+            let io = super::dqkv_tiled::DqkvTiledIo {
+                d_q: sc.d_q.cached_ptr(),
+                d_k: sc.d_k.cached_ptr(),
+                d_v: sc.d_x.cached_ptr(),
+                d_adt: sc.d_alpha.cached_ptr(),
+                d_qk_dot: sc.d_beta.cached_ptr(),
+                d_partials: sc.axis0_partials.cached_ptr(),
+                q_rot: acts.q.cached_ptr(),
+                k_scaled: acts.k_scaled_saved.cached_ptr(),
+                v: acts.x.cached_ptr(),
+                da_cs: acts.da_cumsum_saved.cached_ptr(),
+                da_cs_sum: sc.da_cs_sum.cached_ptr(),
+                qk_dot: acts.qk_dot_saved.cached_ptr(),
+                chunk_states: acts.chunk_states_saved.cached_ptr(),
+                d_o: msc.d_y_typed.cached_ptr(),
+                d_param: dp_ptr,
+                state_terms: sc.dstate_terms.cached_ptr(),
+                enter_state: sc.dstate_enter.cached_ptr(),
+                dm_chain: sc.dm_chain.cached_ptr(),
+            };
+            let shape = super::dqkv_tiled::DqkvShape {
+                batch: dims.batch,
+                seq_len: dims.seq_len,
+                nheads: nh,
+                headdim: hd,
+                d_state: ds,
+                chunk: cs_u,
+            };
+            super::dqkv_tiled::launch(&ctx.stream, m3k, dtype, shape, &io)?;
+        } else {
+            // Two chunk-by-state operand tiles and the V/dO tiles, each row
+            // padded by one float so a warp reading consecutive rows spreads
+            // over the banks; two per-step lanes, the da/qk lanes, and TWO
+            // head-state tiles (true states + d_state staging for the
+            // warp-parallel dADT). The kernel lays its tiles out the same way,
+            // and the route bounds the same tile, so a shape it admits runs.
+            let legacy_floats = crate::mamba3_siso::route::chunked_backward_smem_bytes(hd, ds) / 4;
+            let mats_floats = legacy_floats + cs_u * (cs_u - 1) * 3 / 2 + 2 * cs_u;
+            // Consumer GPUs cap the per-block dynamic-smem opt-in near 99 KB.
+            // One head per block: pair matrices when the tile
+            // fits, legacy inline dots otherwise (bit-identical, slower).
+            let cap_floats = 99 * 1024 / 4;
+            let (per_head_floats, use_pair_mats): (usize, i32) = if mats_floats <= cap_floats {
+                (mats_floats, 1)
             } else {
-                0
-            },
-        };
-        let mut builder = ctx.stream.launch_builder(dqktheta);
-        builder.arg(sc.d_c_pre_rope.inner_mut());
-        builder.arg(sc.d_b_pre_rope.inner_mut());
-        builder.arg(sc.d_angle_cumsum.inner_mut());
-        let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
-        let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
-        builder.arg(sc.d_scale.inner_mut());
-        builder.arg(sc.d_gamma_par.inner_mut());
-        let cb_p = acts.c_biased.cached_ptr(); // typed Q_raw
-        let bb_p = acts.b_biased.cached_ptr(); // typed K_raw
-        builder.arg(&cb_p);
-        builder.arg(&bb_p);
-        builder.arg(&scale_in_ptr);
-        builder.arg(&gamma_in_ptr);
-        builder.arg(acts.angle_cumsum.inner());
-        builder.arg(sc.d_q.inner());
-        builder.arg(sc.d_k.inner());
-        builder.arg(sc.d_beta.inner());
-        builder.arg(&b);
-        builder.arg(&t);
-        builder.arg(&nh_i);
-        builder.arg(&ds_i);
-        builder.arg(&na_i);
-        builder.arg(&cs);
-        builder.arg(&dqkt_staging);
-        unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqktheta_typed B6: {:?}", e))?;
-    }
-    // colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
-    {
-        let d_cb_ptr = lg.c_bias.ptr();
-        let nhds_i = (nh * ds) as i32;
-        let mut cb = ctx.stream.launch_builder(&m3k.colsum_accumulate);
-        cb.arg(&d_cb_ptr);
-        cb.arg(sc.d_c_pre_rope.inner());
-        cb.arg(&bt_i);
-        cb.arg(&nhds_i);
-        unsafe { cb.launch(grid_colsum(nh * ds)) }
-            .map_err(|e| format!("colsum d_c_bias mixed: {:?}", e))?;
-    }
-    {
-        let d_bb_ptr = lg.b_bias.ptr();
-        let nhds_i = (nh * ds) as i32;
-        let mut cb = ctx.stream.launch_builder(&m3k.colsum_accumulate);
-        cb.arg(&d_bb_ptr);
-        cb.arg(sc.d_b_pre_rope.inner());
-        cb.arg(&bt_i);
-        cb.arg(&nhds_i);
-        unsafe { cb.launch(grid_colsum(nh * ds)) }
-            .map_err(|e| format!("colsum d_b_bias mixed: {:?}", e))?;
-    }
+                (legacy_floats, 0)
+            };
+            let smem = per_head_floats * 4;
+            if smem > 99 * 1024 {
+                return Err(format!(
+                    "m3_dqkv shared-memory tile {} B exceeds the 99 KB opt-in \
+                     (CS={cs_u} hd={hd} ds={ds}) even without the pair matrices",
+                    smem
+                ));
+            }
+            // t-split: blockDim.y lanes stride the per-timestep
+            // loops. Inference launch geometry (never data-shaped); any T_SPLIT
+            // yields identical bits since each output keeps one owning lane
+            // with the same inner order.
+            let nc = dims.n_chunks();
+            // Reverse d_state decomposition (see the f32 lane).
+            {
+                let st_cfg = LaunchConfig {
+                    grid_dim: (nh as u32, dims.batch as u32, nc as u32),
+                    block_dim: (hd as u32, 4, 1),
+                    shared_mem_bytes: ((cs_u * ds + cs_u * hd + cs_u) * std::mem::size_of::<f32>())
+                        as u32,
+                };
+                let mut sb = ctx
+                    .stream
+                    .launch_builder(m3k.m3_dqkv_state_terms_typed.get(dtype));
+                let q_p = acts.q.cached_ptr();
+                let dy_p = msc.d_y_typed.cached_ptr();
+                sb.arg(sc.dstate_terms.inner_mut());
+                sb.arg(&q_p);
+                sb.arg(acts.da_cumsum_saved.inner());
+                sb.arg(&dy_p);
+                sb.arg(&b);
+                sb.arg(&t);
+                sb.arg(&nh_i);
+                sb.arg(&hd_i);
+                sb.arg(&ds_i);
+                sb.arg(&cs);
+                unsafe { sb.launch(st_cfg) }
+                    .map_err(|e| format!("m3_dqkv_state_terms typed: {:?}", e))?;
 
-    // (the d_q/d_k identity round trip is gone — m3_ddt_dtrap
-    // touches neither pair and every downstream consumer reads
-    // d_b/c_pre_rope directly; the f32 twin dropped its copy pair in the
-    // dead-work pass.)
+                let nc_i = nc as i32;
+                let mut pb = ctx.stream.launch_builder(&m3k.m3_dstate_passing_bwd);
+                pb.arg(sc.dstate_enter.inner_mut());
+                pb.arg(sc.dstate_terms.inner());
+                pb.arg(sc.da_cs_sum.inner());
+                pb.arg(&b);
+                pb.arg(&nh_i);
+                pb.arg(&hd_i);
+                pb.arg(&ds_i);
+                pb.arg(&nc_i);
+                unsafe { pb.launch(grid_1d(dims.batch * nh * hd * ds)) }
+                    .map_err(|e| format!("m3_dstate_passing_bwd typed: {:?}", e))?;
+            }
+            let t_split = 16.min(1024 / hd.max(1)).max(1) as u32;
+            let cfg = LaunchConfig {
+                grid_dim: (nh as u32, dims.batch as u32, nc as u32),
+                block_dim: (hd as u32, t_split, 1),
+                shared_mem_bytes: smem as u32,
+            };
+            crate::mamba3_siso::route::require_warp(hd, "m3_dqkv typed")?;
+            let dqkv = m3k.dqkv_for_shape(dtype, ds, hd, cs_u, dims.seq_len, use_pair_mats == 1);
+            let mut builder = ctx.stream.launch_builder(dqkv);
+            builder.arg(sc.d_q.inner_mut()); // dQ_mid
+            builder.arg(sc.d_k.inner_mut()); // dK_mid
+            builder.arg(sc.d_x.inner_mut()); // dV
+            builder.arg(sc.d_alpha.inner_mut()); // dADT
+            builder.arg(sc.d_beta.inner_mut()); // dQK_dot
+            builder.arg(sc.axis0_partials.inner_mut()); // dD_partials [B*nh] (no-atomics partials)
+            let q_p = acts.q.cached_ptr(); // typed Q_rot
+            let ks_p = acts.k_scaled_saved.cached_ptr(); // typed K_scaled
+            let v_p = acts.x.cached_ptr(); // typed V = x
+            let dy_p = msc.d_y_typed.cached_ptr(); // typed dO = d_y
+            builder.arg(&q_p);
+            builder.arg(&ks_p);
+            builder.arg(&v_p);
+            builder.arg(acts.da_cumsum_saved.inner());
+            builder.arg(sc.da_cs_sum.inner());
+            builder.arg(acts.qk_dot_saved.inner());
+            builder.arg(acts.chunk_states_saved.inner());
+            builder.arg(&dy_p);
+            builder.arg(&dp_ptr);
+            builder.arg(sc.dstate_enter.inner());
+            builder.arg(&b);
+            builder.arg(&t);
+            builder.arg(&nh_i);
+            builder.arg(&hd_i);
+            builder.arg(&ds_i);
+            builder.arg(&cs);
+            builder.arg(&use_pair_mats);
+            unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv_typed B6: {:?}", e))?;
+        }
+        // Stage 2: reduce dD_partials[B*nc, nh] → lg.d_param[nh] (accumulate=1).
+        {
+            let rows = dims.batch * dims.n_chunks();
+            let rows_i = rows as i32;
+            let block_dim = (rows as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 1;
+            let d_dp_ptr = lg.d_param.ptr();
+            let mut rb = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            rb.arg(&d_dp_ptr);
+            rb.arg(sc.axis0_partials.inner());
+            rb.arg(&rows_i);
+            rb.arg(&nh_i);
+            rb.arg(&accumulate_i);
+            let red_cfg = LaunchConfig {
+                grid_dim: (nh as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { rb.launch(red_cfg) }
+                .map_err(|e| format!("m3_dqkv_typed dD reduce: {:?}", e))?;
+        }
 
-    // S3: m3_ddt_dtrap (pure f32) — produces dDT, dTrap.
-    {
-        let mut builder = ctx.stream.launch_builder(&m3k.m3_ddt_dtrap);
-        builder.arg(sc.d_gamma.inner_mut()); // dDT → d_gamma scratch
-        builder.arg(sc.d_trap_raw.inner_mut());
-        builder.arg(sc.d_scale.inner());
-        builder.arg(sc.d_gamma_par.inner());
-        builder.arg(acts.dt.inner());
-        builder.arg(acts.trap.inner());
-        builder.arg(&b);
-        builder.arg(&t);
-        builder.arg(&nh_i);
-        unsafe { builder.launch(grid_1d(bt * nh)) }
-            .map_err(|e| format!("m3_ddt_dtrap mixed: {:?}", e))?;
+        // Zero d_angle_cumsum before m3_dqktheta.
+        if na > 0 {
+            let n_ac = (dims.batch * dims.seq_len * nh * na) as i32;
+            let mut builder = ctx.stream.launch_builder(&m3k.fill_scalar);
+            builder.arg(sc.d_angle_cumsum.inner_mut());
+            let zero: f32 = 0.0;
+            builder.arg(&zero);
+            builder.arg(&n_ac);
+            unsafe { builder.launch(grid_1d(n_ac as usize)) }
+                .map_err(|e| format!("zero d_angle_cumsum mixed: {:?}", e))?;
+        }
+
+        // m3_dqktheta typed — dQ_bias/dK_bias removed from args
+        // (caller does colsum_accumulate on dQ_pre/dK_pre scratch below).
+        {
+            let na_i = na as i32;
+            // The selected route owns its staging-tile count. The retained
+            // half transport uses four; the legacy path uses six.
+            // Large-d_state tiles overflow the 48 KB no-opt-in dynamic
+            // limit — fall back to the direct-global path (staging = 0).
+            let (dqktheta, dqkt_tiles) = m3k.dqktheta_for_shape(dtype, ds, cs_u, na);
+            let dqkt_smem = dqkt_tiles * cs_u * ds * 4;
+            let dqkt_staging: i32 = i32::from(dqkt_smem <= 48 * 1024);
+            let cfg = LaunchConfig {
+                grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
+                block_dim: (cs_u as u32, 1, 1),
+                shared_mem_bytes: if dqkt_staging == 1 {
+                    dqkt_smem as u32
+                } else {
+                    0
+                },
+            };
+            let mut builder = ctx.stream.launch_builder(dqktheta);
+            builder.arg(sc.d_c_pre_rope.inner_mut());
+            builder.arg(sc.d_b_pre_rope.inner_mut());
+            builder.arg(sc.d_angle_cumsum.inner_mut());
+            let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
+            let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
+            builder.arg(sc.d_scale.inner_mut());
+            builder.arg(sc.d_gamma_par.inner_mut());
+            let cb_p = acts.c_biased.cached_ptr(); // typed Q_raw
+            let bb_p = acts.b_biased.cached_ptr(); // typed K_raw
+            builder.arg(&cb_p);
+            builder.arg(&bb_p);
+            builder.arg(&scale_in_ptr);
+            builder.arg(&gamma_in_ptr);
+            builder.arg(acts.angle_cumsum.inner());
+            builder.arg(sc.d_q.inner());
+            builder.arg(sc.d_k.inner());
+            builder.arg(sc.d_beta.inner());
+            builder.arg(&b);
+            builder.arg(&t);
+            builder.arg(&nh_i);
+            builder.arg(&ds_i);
+            builder.arg(&na_i);
+            builder.arg(&cs);
+            builder.arg(&dqkt_staging);
+            unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqktheta_typed B6: {:?}", e))?;
+        }
+        // colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
+        {
+            let d_cb_ptr = lg.c_bias.ptr();
+            let nhds_i = (nh * ds) as i32;
+            let mut cb = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+            cb.arg(&d_cb_ptr);
+            cb.arg(sc.d_c_pre_rope.inner());
+            cb.arg(&bt_i);
+            cb.arg(&nhds_i);
+            unsafe { cb.launch(grid_colsum(nh * ds)) }
+                .map_err(|e| format!("colsum d_c_bias mixed: {:?}", e))?;
+        }
+        {
+            let d_bb_ptr = lg.b_bias.ptr();
+            let nhds_i = (nh * ds) as i32;
+            let mut cb = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+            cb.arg(&d_bb_ptr);
+            cb.arg(sc.d_b_pre_rope.inner());
+            cb.arg(&bt_i);
+            cb.arg(&nhds_i);
+            unsafe { cb.launch(grid_colsum(nh * ds)) }
+                .map_err(|e| format!("colsum d_b_bias mixed: {:?}", e))?;
+        }
+
+        // (the d_q/d_k identity round trip is gone — m3_ddt_dtrap
+        // touches neither pair and every downstream consumer reads
+        // d_b/c_pre_rope directly; the f32 twin dropped its copy pair in the
+        // dead-work pass.)
+
+        // S3: m3_ddt_dtrap (pure f32) — produces dDT, dTrap.
+        {
+            let mut builder = ctx.stream.launch_builder(&m3k.m3_ddt_dtrap);
+            builder.arg(sc.d_gamma.inner_mut()); // dDT → d_gamma scratch
+            builder.arg(sc.d_trap_raw.inner_mut());
+            builder.arg(sc.d_scale.inner());
+            builder.arg(sc.d_gamma_par.inner());
+            builder.arg(acts.dt.inner());
+            builder.arg(acts.trap.inner());
+            builder.arg(&b);
+            builder.arg(&t);
+            builder.arg(&nh_i);
+            unsafe { builder.launch(grid_1d(bt * nh)) }
+                .map_err(|e| format!("m3_ddt_dtrap mixed: {:?}", e))?;
+        }
     }
 
     // ----------------------------------------------------------------
@@ -705,9 +718,33 @@ fn gpu_backward_mamba3_layer_mixed(
     }
 
     // ----------------------------------------------------------------
-    // B5b: m3_final_grads (pure f32) — combine dADT + dDT + dDT_angle.
+    // B5b: m3_abg_bwd on the sequential scan, m3_final_grads on the
+    // chunked one (pure f32).
     // ----------------------------------------------------------------
-    {
+    if !dims.use_parallel_scan {
+        let n_total = (bt * nh) as i32;
+        let dtb_ptr = lw_master.dt_bias.raw_ptr(&ctx.stream);
+        let mut builder = ctx.stream.launch_builder(&m3k.m3_abg_bwd);
+        builder.arg(sc.d_dd_dt.inner_mut());
+        builder.arg(sc.d_dd_a.inner_mut());
+        builder.arg(sc.d_trap_raw.inner_mut());
+        builder.arg(sc.d_alpha.inner());
+        builder.arg(sc.d_beta.inner());
+        builder.arg(sc.d_gamma.inner());
+        builder.arg(sc.d_dt_angle.inner());
+        builder.arg(acts.dt.inner());
+        builder.arg(acts.a_val.inner());
+        builder.arg(msc.alpha.inner());
+        builder.arg(acts.dd_dt_raw.inner());
+        builder.arg(acts.dd_a_raw.inner());
+        builder.arg(acts.trap_raw.inner());
+        builder.arg(&dtb_ptr);
+        builder.arg(&dims.a_floor);
+        builder.arg(&n_total);
+        builder.arg(&nh_i);
+        unsafe { builder.launch(grid_1d(bt * nh)) }
+            .map_err(|e| format!("m3_abg_bwd mixed: {:?}", e))?;
+    } else {
         let n_total = (bt * nh) as i32;
         let dtb_ptr = lw_master.dt_bias.raw_ptr(&ctx.stream);
         let mut builder = ctx.stream.launch_builder(&m3k.m3_final_grads);
@@ -987,6 +1024,136 @@ fn gpu_backward_mamba3_layer_mixed(
             .map_err(|e| format!("vec_add d_temporal mixed: {:?}", e))?;
     }
 
+    Ok(())
+}
+
+/// The sequential scan's B6 in mixed precision: the backward through time
+/// on the block tier, reading the bf16 or f16 activations and writing f32
+/// gradients, then the inverse RoPE, the B and C bias gradients and the D
+/// gradient. The step coefficients are recomputed from the saved dt, A and
+/// trap into the mixed scratch, where B5b reads alpha back.
+fn sequential_ssm_backward_mixed(
+    exec: &M3Exec<'_>,
+    layer: &M3MixedLayerBwd<'_>,
+    sc: &mut GpuMamba3Scratch,
+    msc: &mut GpuMamba3MixedScratch,
+    dtype: WeightDtype,
+) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
+    let M3MixedLayerBwd {
+        acts,
+        lw_master,
+        lg,
+        ..
+    } = *layer;
+    let bt = dims.bt();
+    let (nh, hd, ds, na) = (dims.nheads, dims.headdim, dims.d_state, dims.n_angles);
+    let (b_i, t_i) = (dims.batch as i32, dims.seq_len as i32);
+    let (bt_i, nh_i, hd_i, ds_i) = (bt as i32, nh as i32, hd as i32, ds as i32);
+    let n_coef = (bt * nh) as i32;
+
+    let mut abg = ctx.stream.launch_builder(&m3k.m3_compute_abg);
+    abg.arg(msc.alpha.inner_mut());
+    abg.arg(msc.beta.inner_mut());
+    abg.arg(msc.gamma.inner_mut());
+    abg.arg(acts.dt.inner());
+    abg.arg(acts.a_val.inner());
+    abg.arg(acts.trap.inner());
+    abg.arg(&n_coef);
+    unsafe { abg.launch(grid_1d(bt * nh)) }
+        .map_err(|e| format!("m3_compute_abg seq mixed B6: {e:?}"))?;
+
+    let shape = SequentialShape {
+        batch: dims.batch,
+        nheads: nh,
+        headdim: hd,
+        d_state: ds,
+    };
+    let (kernel, cfg) = m3k.sequential_backward(dtype, shape)?;
+    let (x, k, q, dy) = (
+        acts.x.cached_ptr(),
+        acts.k.cached_ptr(),
+        acts.q.cached_ptr(),
+        msc.d_y_typed.cached_ptr(),
+    );
+    let dp_ptr = lw_master.d_param.raw_ptr(&ctx.stream);
+    let mut bptt = ctx.stream.launch_builder(kernel);
+    bptt.arg(acts.h_saved.inner());
+    bptt.arg(acts.k_prev_saved.inner());
+    bptt.arg(acts.v_prev_saved.inner());
+    bptt.arg(&x);
+    bptt.arg(&k);
+    bptt.arg(&q);
+    bptt.arg(msc.alpha.inner());
+    bptt.arg(msc.beta.inner());
+    bptt.arg(msc.gamma.inner());
+    bptt.arg(&dp_ptr);
+    bptt.arg(&dy);
+    bptt.arg(sc.d_x.inner_mut());
+    bptt.arg(sc.d_k.inner_mut());
+    bptt.arg(sc.d_q.inner_mut());
+    bptt.arg(sc.d_alpha.inner_mut());
+    bptt.arg(sc.d_beta.inner_mut());
+    bptt.arg(sc.d_gamma.inner_mut());
+    bptt.arg(sc.d_d_local.inner_mut());
+    for d in [&b_i, &t_i, &nh_i, &hd_i, &ds_i] {
+        bptt.arg(d);
+    }
+    unsafe { bptt.launch(cfg) }.map_err(|e| format!("m3_backward_seq mixed B6: {e:?}"))?;
+
+    if na > 0 {
+        let na_i = na as i32;
+        let (b_pre, c_pre) = (acts.b_biased.cached_ptr(), acts.c_biased.cached_ptr());
+        let mut rope = ctx.stream.launch_builder(m3k.rope_bwd_mixed.get(dtype));
+        rope.arg(sc.d_b_pre_rope.inner_mut());
+        rope.arg(sc.d_c_pre_rope.inner_mut());
+        rope.arg(sc.d_angle_cumsum.inner_mut());
+        rope.arg(sc.d_k.inner());
+        rope.arg(sc.d_q.inner());
+        rope.arg(&b_pre);
+        rope.arg(&c_pre);
+        rope.arg(acts.angle_cumsum.inner());
+        for d in [&bt_i, &nh_i, &ds_i, &na_i] {
+            rope.arg(d);
+        }
+        unsafe { rope.launch(grid_1d(bt * nh * ds)) }
+            .map_err(|e| format!("rope_bwd seq mixed B6: {e:?}"))?;
+    } else {
+        sc.d_b_pre_rope.copy_from_raw(&sc.d_k, &ctx.stream)?;
+        sc.d_c_pre_rope.copy_from_raw(&sc.d_q, &ctx.stream)?;
+    }
+
+    let nhds_i = (nh * ds) as i32;
+    for (dst, src, what) in [
+        (lg.b_bias.ptr(), &sc.d_b_pre_rope, "b"),
+        (lg.c_bias.ptr(), &sc.d_c_pre_rope, "c"),
+    ] {
+        let mut cb = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+        cb.arg(&dst);
+        cb.arg(src.inner());
+        cb.arg(&bt_i);
+        cb.arg(&nhds_i);
+        unsafe { cb.launch(grid_colsum(nh * ds)) }
+            .map_err(|e| format!("colsum d_{what}_bias seq mixed: {e:?}"))?;
+    }
+
+    let d_dp = lg.d_param.ptr();
+    let mut red = ctx.stream.launch_builder(&m3k.m3_reduce_d_d);
+    red.arg(&d_dp);
+    red.arg(sc.d_d_local.inner());
+    for d in [&b_i, &nh_i, &hd_i] {
+        red.arg(d);
+    }
+    let red_cfg = LaunchConfig {
+        grid_dim: (nh as u32, 1, 1),
+        block_dim: (32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    unsafe { red.launch(red_cfg) }.map_err(|e| format!("m3_reduce_d_D seq mixed B6: {e:?}"))?;
     Ok(())
 }
 

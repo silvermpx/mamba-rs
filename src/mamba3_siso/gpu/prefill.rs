@@ -176,16 +176,7 @@ impl Mamba3Prefill {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         dims.validate_index_budget()?;
-        crate::mamba3_siso::route::check(
-            &crate::mamba3_siso::route::RouteShape {
-                headdim: dims.headdim,
-                d_state: dims.d_state,
-                d_inner: dims.d_inner,
-                is_outproj_norm: dims.is_outproj_norm,
-                chunked_training: false,
-            },
-            crate::mamba3_siso::route::RoutePurpose::Inference,
-        )?;
+        crate::mamba3_siso::route::check(dims.headdim)?;
         let typed = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => None,
             _ => Some(Mamba3PrefillTypedScratch::new(stream, dims, dtype)?),
@@ -1005,18 +996,10 @@ impl Mamba3Prefill {
             }
             // Output gate + out_proj + residual.
             if dims.is_outproj_norm {
-                assert!(
-                    di <= 1024,
-                    "d_inner ({di}) exceeds rmsnorm_gated shared memory limit"
-                );
                 let nw = lw.norm_gate_weight;
                 let bt_i = bt as i32;
                 let di_i = di as i32;
-                let grid = cudarc::driver::LaunchConfig {
-                    grid_dim: (bt as u32, 1, 1),
-                    block_dim: (di as u32, 1, 1),
-                    shared_mem_bytes: (di * std::mem::size_of::<f32>()) as u32,
-                };
+                let grid = super::kernels::gated_norm_cfg(bt, di, dims.headdim);
                 let eps: f32 = dims.rms_norm_eps;
                 if let Some(ts) = typed.as_deref_mut() {
                     let g = ts.gated.cached_ptr();
@@ -1051,6 +1034,7 @@ impl Mamba3Prefill {
                     b.arg(&di_i);
                     b.arg(&hd_i);
                     b.arg(&eps);
+                    b.arg(&di_i);
                     unsafe { b.launch(grid) }.map_err(|e| format!("prefill gated L{l}: {e:?}"))?;
                 }
             } else if let Some(ts) = typed.as_deref_mut() {

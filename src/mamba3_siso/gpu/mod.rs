@@ -7,6 +7,7 @@
 
 pub mod backward;
 pub mod backward_mixed;
+mod dqkv_tiled;
 pub mod forward;
 pub mod forward_mixed;
 pub mod inference;

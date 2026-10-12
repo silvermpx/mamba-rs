@@ -6,11 +6,10 @@
 //! - The warp-tier head kernels (step, burn-in, sequential backward,
 //!   chunked backward) broadcast across a head with warp shuffles of width
 //!   `headdim`, so a head must fit one warp and be a power of two wide.
-//!   Wider heads take the block tier, which so far serves inference only.
+//!   Wider heads take the block tier: the step and the sequential scan's
+//!   training kernels have block-tier twins, and the chunked backward a
+//!   tiled one.
 //! - The chunked forward's fallback tiles run `2 * headdim` threads.
-//! - The chunked backward stages its tiles in shared memory.
-//! - The fused output norm runs one thread per channel and reduces each
-//!   head with a tree that assumes a power-of-two head.
 //!
 //! Every GPU entry point checks its shape here first, so a shape the
 //! kernels cannot run is refused with the reason instead of computing
@@ -20,39 +19,6 @@
 //! will run on the GPU before building anything.
 
 use super::config::Mamba3Config;
-
-/// What the GPU runs the model for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RoutePurpose {
-    /// Decode steps and prompt prefill.
-    Inference,
-    /// The training forward and backward.
-    Training,
-}
-
-/// The shape facts the GPU kernels depend on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RouteShape {
-    pub headdim: usize,
-    pub d_state: usize,
-    pub d_inner: usize,
-    pub is_outproj_norm: bool,
-    /// The training forward and backward run the chunked scan. Ignored for
-    /// inference.
-    pub chunked_training: bool,
-}
-
-impl RouteShape {
-    pub fn of(cfg: &Mamba3Config) -> Self {
-        Self {
-            headdim: cfg.headdim,
-            d_state: cfg.d_state,
-            d_inner: cfg.d_inner(),
-            is_outproj_norm: cfg.is_outproj_norm,
-            chunked_training: cfg.train_use_parallel_scan(),
-        }
-    }
-}
 
 /// The widest head the warp-shuffle kernels serve: one lane per head
 /// element in a single warp.
@@ -106,9 +72,46 @@ pub fn chunked_backward_smem_bytes(headdim: usize, d_state: usize) -> usize {
 /// The chunked backward's shared-memory ceiling.
 pub const CHUNKED_BACKWARD_SMEM_MAX: usize = 99 * 1024;
 
-/// The widest channel count the fused gated output norm serves: it runs
-/// one thread per channel in a single block.
-pub const FUSED_OUT_NORM_D_INNER_MAX: usize = 1024;
+/// The shared memory of the tiled dQKV kernel in bytes, for tiles `tile`
+/// columns wide: nine per-step lanes, the three pair triangles of a chunk,
+/// four chunk-by-tile operand tiles and two tile-by-tile state tiles, each
+/// row padded by one float. It does not depend on headdim or d_state.
+pub fn chunked_backward_tiled_smem_bytes(tile: usize) -> usize {
+    let cs = CHUNKED_CHUNK_SIZE;
+    let row = tile + 1;
+    (9 * cs + 3 * (cs * (cs - 1) / 2) + 4 * cs * row + 2 * tile * row) * 4
+}
+
+/// Whether the chunked backward's dQKV stage takes the tiled kernels. The
+/// warp kernel serves a head of one warp whose tiles fit its budget; every
+/// other shape takes the tiled kernels, which fit any shape. Where both
+/// serve they give the same bits.
+pub fn chunked_backward_tiled(headdim: usize, d_state: usize) -> bool {
+    !(headdim <= WARP_HEADDIM_MAX
+        && headdim.is_power_of_two()
+        && chunked_backward_smem_bytes(headdim, d_state) <= CHUNKED_BACKWARD_SMEM_MAX)
+}
+
+/// Threads per block of a block-tier head kernel: the head rounded up to
+/// whole warps.
+pub fn block_tier_threads(headdim: usize) -> usize {
+    headdim.next_multiple_of(32)
+}
+
+/// The shared memory of the block-tier sequential forward in bytes: the
+/// step's coefficients and its K, previous K and Q rows.
+pub fn sequential_forward_block_smem_bytes(d_state: usize) -> usize {
+    (4 + 3 * d_state) * 4
+}
+
+/// The shared memory of the block-tier sequential backward in bytes: the
+/// step's coefficients and rows, the carried previous-K gradient, and each
+/// warp's sums of the 3 * d_state + 3 per-step gradients. The widest GPU
+/// head with the largest state needs about 53 KB, inside the opt-in budget.
+pub fn sequential_backward_block_smem_bytes(headdim: usize, d_state: usize) -> usize {
+    let warps = headdim.div_ceil(32);
+    (4 + 4 * d_state + (3 * d_state + 3) * warps) * 4
+}
 
 /// Refuses a head the warp-shuffle kernels cannot run, naming the kernel.
 pub fn require_warp(headdim: usize, kernel: &str) -> Result<(), String> {
@@ -123,60 +126,26 @@ pub fn require_warp(headdim: usize, kernel: &str) -> Result<(), String> {
     }
 }
 
-/// Checks that the GPU kernels can run `shape` for `purpose`.
-pub fn check(shape: &RouteShape, purpose: RoutePurpose) -> Result<(), String> {
-    let tier = head_tier(shape.headdim)?;
-    if purpose == RoutePurpose::Training {
-        require_warp(
-            shape.headdim,
-            "Mamba-3 GPU training (its burn-in and backward kernels have no block tier yet)",
-        )?;
-    }
-    if shape.is_outproj_norm && shape.d_inner > FUSED_OUT_NORM_D_INNER_MAX {
-        return Err(format!(
-            "is_outproj_norm on the GPU needs d_inner ({}) <= {FUSED_OUT_NORM_D_INNER_MAX}: \
-             the fused gated norm runs one thread per channel in a single block",
-            shape.d_inner
-        ));
-    }
-    if shape.is_outproj_norm && tier == HeadTier::Block && !shape.headdim.is_power_of_two() {
-        return Err(format!(
-            "is_outproj_norm on the GPU needs a power-of-two headdim, got {}: the fused \
-             gated norm's per-head reduction tree assumes one",
-            shape.headdim
-        ));
-    }
-    if purpose == RoutePurpose::Training && shape.chunked_training {
-        let smem = chunked_backward_smem_bytes(shape.headdim, shape.d_state);
-        if smem > CHUNKED_BACKWARD_SMEM_MAX {
-            return Err(format!(
-                "headdim {} with d_state {} needs {} KB of shared memory in the chunked \
-                 backward, over the 99 KB opt-in budget; train it with the sequential \
-                 scan or wait for the state-tiled backward",
-                shape.headdim,
-                shape.d_state,
-                smem / 1024
-            ));
-        }
-    }
-    Ok(())
+/// Checks that the GPU kernels can run a model whose heads are `headdim`
+/// wide, for inference and for training alike.
+pub fn check(headdim: usize) -> Result<(), String> {
+    head_tier(headdim).map(|_| ())
 }
 
 /// [`check`] for a whole config.
-pub fn check_config(cfg: &Mamba3Config, purpose: RoutePurpose) -> Result<(), String> {
-    check(&RouteShape::of(cfg), purpose)
+pub fn check_config(cfg: &Mamba3Config) -> Result<(), String> {
+    check(cfg.headdim)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ScanMode;
 
-    /// The official checkpoint shape runs inference on the block tier,
-    /// and its GPU training is refused until the block tier has training
-    /// kernels, with the reason.
+    /// The official checkpoint shape runs on the block tier, for inference
+    /// and for training on either scan: the chunked one through the tiled
+    /// backward, the sequential one on the block-tier kernels.
     #[test]
-    fn official_shape_runs_inference_on_the_block_tier() {
+    fn official_shape_runs_on_the_block_tier() {
         let cfg = Mamba3Config {
             d_model: 768,
             headdim: 64,
@@ -185,9 +154,8 @@ mod tests {
         };
         cfg.validate().unwrap();
         assert_eq!(head_tier(cfg.headdim), Ok(HeadTier::Block));
-        check_config(&cfg, RoutePurpose::Inference).unwrap();
-        let err = check_config(&cfg, RoutePurpose::Training).unwrap_err();
-        assert!(err.contains("headdim"), "{err}");
+        check_config(&cfg).unwrap();
+        assert!(chunked_backward_tiled(cfg.headdim, cfg.d_state));
     }
 
     /// Every width the warp kernels serve stays on them; other widths take
@@ -206,64 +174,49 @@ mod tests {
         }
     }
 
-    /// Shapes whose chunked-backward tiles exceed the opt-in budget are
-    /// refused for chunked training, naming the resource, and accepted for
-    /// inference and for sequential training.
+    /// A shape whose warp-kernel tiles exceed the opt-in budget runs, and its
+    /// chunked training takes the tiled backward.
     #[test]
-    fn chunked_backward_smem_budget_rejected_loudly() {
+    fn chunked_training_takes_the_tiled_backward_past_the_warp_budget() {
         let cfg = Mamba3Config {
             d_state: 256,
             headdim: 32,
             ..Mamba3Config::default()
         };
         cfg.validate().unwrap();
-        let err = check_config(&cfg, RoutePurpose::Training).unwrap_err();
-        assert!(err.contains("shared memory"), "{err}");
-        check_config(&cfg, RoutePurpose::Inference).unwrap();
-        let sequential = Mamba3Config {
-            scan_mode: ScanMode::Sequential,
-            ..cfg
-        };
-        check_config(&sequential, RoutePurpose::Training).unwrap();
+        check_config(&cfg).unwrap();
+        assert!(chunked_backward_tiled(cfg.headdim, cfg.d_state));
     }
 
-    /// The bound is the kernel's tile with its padded rows. Headdim 16
-    /// trains chunked up to d_state 142 and is refused at 143, whose padded
-    /// tile is past 99 KB; the unpadded bound admitted it and the backward
-    /// refused it at the first step.
+    /// The warp kernel's bound is its tile with its padded rows. Headdim 16
+    /// keeps the warp kernel up to d_state 142 and takes the tiled one at
+    /// 143, whose padded tile is past 99 KB.
     #[test]
     fn chunked_backward_bound_counts_the_padded_rows() {
-        let at = |d_state| Mamba3Config {
-            d_state,
-            headdim: 16,
-            ..Mamba3Config::default()
-        };
         assert_eq!(chunked_backward_smem_bytes(16, 142), 101_120);
         assert_eq!(chunked_backward_smem_bytes(16, 143), 101_760);
-        check_config(&at(142), RoutePurpose::Training).unwrap();
-        let err = check_config(&at(143), RoutePurpose::Training).unwrap_err();
-        assert!(err.contains("shared memory"), "{err}");
+        assert!(!chunked_backward_tiled(16, 142));
+        assert!(chunked_backward_tiled(16, 143));
+        assert!(chunked_backward_tiled(48, 16));
+        assert!(chunked_backward_tiled(64, 16));
+        assert!(!chunked_backward_tiled(32, 16));
     }
 
-    /// The fused gated norm cannot serve more than 1024 channels; without
-    /// the norm, wide models run.
+    /// The gated output norm serves every width: past 1024 channels and on
+    /// heads that are no power of two.
     #[test]
-    fn gated_norm_d_inner_cap_rejected_loudly() {
-        let big_gated = Mamba3Config {
-            d_model: 1024,
-            expand: 2,
-            headdim: 32,
-            is_outproj_norm: true,
-            ..Mamba3Config::default()
-        };
-        big_gated.validate().unwrap();
-        let err = check_config(&big_gated, RoutePurpose::Inference).unwrap_err();
-        assert!(err.contains("is_outproj_norm"), "{err}");
-        let big_silu = Mamba3Config {
-            is_outproj_norm: false,
-            ..big_gated
-        };
-        check_config(&big_silu, RoutePurpose::Inference).unwrap();
+    fn gated_norm_serves_every_width() {
+        for (d_model, headdim) in [(1024usize, 32usize), (768, 64), (48, 48), (300, 100)] {
+            let cfg = Mamba3Config {
+                d_model,
+                expand: 2,
+                headdim,
+                is_outproj_norm: true,
+                ..Mamba3Config::default()
+            };
+            cfg.validate().unwrap();
+            check_config(&cfg).unwrap();
+        }
     }
 
     /// Every head width the warp kernels serve passes, and nothing else.

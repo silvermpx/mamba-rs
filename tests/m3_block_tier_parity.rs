@@ -196,8 +196,14 @@ fn m3_step_block_matches_warp_bits() {
 }
 
 /// A small model at a width only the block tier serves, with a live input
-/// projection: the CPU step always runs it.
-fn block_cfg(d_model: usize, headdim: usize, d_state: usize) -> (Mamba3Config, Mamba3Weights) {
+/// projection: the CPU step always runs it. `gated` puts the gated output
+/// norm in place of the SiLU gate.
+fn block_cfg(
+    d_model: usize,
+    headdim: usize,
+    d_state: usize,
+    gated: bool,
+) -> (Mamba3Config, Mamba3Weights) {
     let cfg = Mamba3Config {
         d_model,
         d_state,
@@ -207,7 +213,7 @@ fn block_cfg(d_model: usize, headdim: usize, d_state: usize) -> (Mamba3Config, M
         n_layers: 2,
         rope_fraction: 0.5,
         a_floor: 1e-4,
-        is_outproj_norm: false,
+        is_outproj_norm: gated,
         ..Mamba3Config::default()
     };
     cfg.validate().unwrap();
@@ -225,8 +231,14 @@ const REL_TOL: f64 = 2e-3;
 #[test]
 fn m3_block_tier_decode_matches_cpu() {
     let device = GpuDevice::new(0).unwrap();
-    for (d_model, hd, ds) in [(128usize, 64usize, 128usize), (96, 48, 64), (128, 128, 32)] {
-        let (cfg, w) = block_cfg(d_model, hd, ds);
+    for (d_model, hd, ds, gated) in [
+        (128usize, 64usize, 128usize, false),
+        (96, 48, 64, false),
+        (128, 128, 32, false),
+        (640, 64, 32, true),
+        (96, 48, 16, true),
+    ] {
+        let (cfg, w) = block_cfg(d_model, hd, ds, gated);
         let engine = Mamba3GpuEngine::new(&device, &w, cfg, d_model, 1).unwrap();
         let mut gpu_state = engine.alloc_state().unwrap();
         let mut gpu_scratch = engine.alloc_scratch().unwrap();
@@ -257,13 +269,10 @@ fn m3_block_tier_decode_matches_cpu() {
     }
 }
 
-/// A prompt window prefilled on the GPU at headdim 64 / d_state 128, its
-/// length not a whole number of chunks, then decoded step by step, against
-/// the CPU prefill and step chain.
-#[test]
-fn m3_block_tier_prefill_then_decode_matches_cpu() {
-    let device = GpuDevice::new(0).unwrap();
-    let (cfg, w) = block_cfg(128, 64, 128);
+/// A prompt window prefilled on the GPU, its length not a whole number of
+/// chunks, then decoded step by step, against the CPU prefill and step
+/// chain.
+fn check_prefill_then_decode(device: &GpuDevice, cfg: Mamba3Config, w: &Mamba3Weights) {
     let d_model = cfg.d_model;
     let seq_len = 37usize;
     let prompt = det(seq_len * d_model, 7, 0.5);
@@ -275,13 +284,13 @@ fn m3_block_tier_prefill_then_decode_matches_cpu() {
     forward_mamba3_backbone_prefill(
         &mut cpu_rows,
         &prompt,
-        &w,
+        w,
         &mut cpu_state.layers,
         &mut cpu_prefill,
         &dims,
     );
 
-    let engine = Mamba3GpuEngine::new(&device, &w, cfg, d_model, 1).unwrap();
+    let engine = Mamba3GpuEngine::new(device, w, cfg, d_model, 1).unwrap();
     let stream = &engine.ctx().stream;
     let mut prefill = engine.alloc_prefill(seq_len).unwrap();
     let mut gpu_state = engine.alloc_state().unwrap();
@@ -314,7 +323,7 @@ fn m3_block_tier_prefill_then_decode_matches_cpu() {
             &mut cpu_out,
             &input,
             &mut cpu_scratch,
-            &w,
+            w,
             &mut cpu_state.layers,
             &cfg,
         );
@@ -327,5 +336,24 @@ fn m3_block_tier_prefill_then_decode_matches_cpu() {
             &cpu_out,
             REL_TOL,
         );
+    }
+}
+
+/// Headdim 64 with d_state 128, the official checkpoints' head.
+#[test]
+fn m3_block_tier_prefill_then_decode_matches_cpu() {
+    let device = GpuDevice::new(0).unwrap();
+    let (cfg, w) = block_cfg(128, 64, 128, false);
+    check_prefill_then_decode(&device, cfg, &w);
+}
+
+/// The gated output norm at widths the one-block-per-row kernel never
+/// served: 1280 channels in heads of 64, and heads of 48.
+#[test]
+fn m3_gated_norm_wide_and_ragged_prefill_matches_cpu() {
+    let device = GpuDevice::new(0).unwrap();
+    for (d_model, hd, ds) in [(640usize, 64usize, 32usize), (96, 48, 16)] {
+        let (cfg, w) = block_cfg(d_model, hd, ds, true);
+        check_prefill_then_decode(&device, cfg, &w);
     }
 }
