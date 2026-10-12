@@ -203,9 +203,9 @@ fn decode_graphs_reject_route_drift(family: BiGemmFamily) {
     let mut mixed =
         Mamba3GpuEngineMixed::new(&device, &weights, cfg, cfg.d_model, 1, WeightDtype::Bf16)
             .expect("M3 mixed");
-    configure_decode_route(mixed.engine_ref().ctx(), true, family);
-    assert_decode_route(mixed.engine_ref().ctx(), "M3 BF16", true, family);
-    let captured_route = mixed.engine_ref().ctx().gemm_route();
+    configure_decode_route(mixed.ctx(), true, family);
+    assert_decode_route(mixed.ctx(), "M3 BF16", true, family);
+    let captured_route = mixed.ctx().gemm_route();
     let mut state = mixed.alloc_state().expect("M3 mixed state");
     let mut scratch = mixed.alloc_mixed_scratch().expect("M3 mixed scratch");
     mixed
@@ -216,7 +216,7 @@ fn decode_graphs_reject_route_drift(family: BiGemmFamily) {
         .expect("M3 mixed capture");
     assert!(mixed.has_graph(), "M3 BF16 graph exists after capture");
     assert_eq!(
-        mixed.engine_ref().ctx().gemm_route(),
+        mixed.ctx().gemm_route(),
         captured_route,
         "M3 BF16 route pin"
     );
@@ -225,11 +225,7 @@ fn decode_graphs_reject_route_drift(family: BiGemmFamily) {
         .step_mixed_native(&input, &mut output, &mut state, &mut scratch)
         .expect("M3 BF16 positive graph replay");
     assert_positive_graph_output(&output, "M3 BF16");
-    mixed
-        .engine_ref()
-        .ctx()
-        .set_gemm_mode(GemmMode::CublasPedantic)
-        .unwrap();
+    mixed.ctx().set_gemm_mode(GemmMode::CublasPedantic).unwrap();
     assert!(
         mixed
             .step_mixed_native(&input, &mut output, &mut state, &mut scratch)

@@ -797,6 +797,23 @@ impl Drop for MambaGpuEngine {
     }
 }
 
+/// The context an engine for `cfg` runs on, its kernels compiled for the
+/// model's state and its GEMMs following the numeric contract of `dtype`.
+fn engine_ctx(
+    device: &GpuDevice,
+    cfg: &MambaConfig,
+    mode: Option<GemmMode>,
+    dtype: WeightDtype,
+) -> Result<GpuCtx, String> {
+    cfg.validate()?;
+    let state_cap = crate::gpu::kernels::state_capacity(cfg.d_state)?;
+    let role = GemmRole::inference(dtype);
+    match mode {
+        Some(mode) => GpuCtx::new_with_state_cap_mode_and_role(device, state_cap, mode, role),
+        None => GpuCtx::new_from_env_with_state_cap_and_role(device, state_cap, role),
+    }
+}
+
 impl MambaGpuEngine {
     fn dims(&self, seq_len: usize) -> GpuMambaDims {
         GpuMambaDims {
@@ -880,14 +897,7 @@ impl MambaGpuEngine {
         mode: Option<GemmMode>,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
-        cfg.validate()?;
-        let state_cap = crate::gpu::kernels::state_capacity(cfg.d_state)?;
-        let role = GemmRole::inference(dtype);
-        let ctx = match mode {
-            Some(mode) => GpuCtx::new_with_state_cap_mode_and_role(device, state_cap, mode, role)?,
-            None => GpuCtx::new_from_env_with_state_cap_and_role(device, state_cap, role)?,
-        };
-
+        let ctx = engine_ctx(device, &cfg, mode, dtype)?;
         let weights = GpuMambaWeights::from_cpu(&ctx.stream, cpu_weights, &cfg)?;
 
         // Precompute a_neg = -exp(a_log) for all layers
@@ -908,9 +918,29 @@ impl MambaGpuEngine {
                 .map_err(|e| format!("exp_negate layer {layer_idx}: {e:?}"))?;
         }
 
-        let identity_proj = cpu_weights.input_proj_w.is_empty();
+        Ok(Self::from_parts(
+            ctx,
+            weights,
+            a_neg_all,
+            cfg,
+            input_dim,
+            batch,
+            cpu_weights.input_proj_w.is_empty(),
+        ))
+    }
 
-        Ok(Self {
+    /// The engine around a built context, weights and `-exp(a_log)` arena,
+    /// with no graph captured yet.
+    fn from_parts(
+        ctx: GpuCtx,
+        weights: GpuMambaWeights,
+        a_neg_all: GpuBuffer,
+        cfg: MambaConfig,
+        input_dim: usize,
+        batch: usize,
+        identity_proj: bool,
+    ) -> Self {
+        Self {
             ctx,
             weights,
             a_neg_all,
@@ -924,7 +954,7 @@ impl MambaGpuEngine {
             eager_gemm_manifest: Cell::new(None),
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
-        })
+        }
     }
 
     /// Capture CUDA Graph for the inference step.
@@ -1595,20 +1625,23 @@ impl MambaGpuEngineMixed {
         bulk_dtype: WeightDtype,
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
-        cfg.validate()?;
-        // Create f32 engine first (builds ctx, kernels, a_neg_all via CPU upload path).
-        // We'll then discard its `weights` flat buffer and replace with mixed arena.
-        let engine = MambaGpuEngine::new_inner(
-            device,
-            cpu_weights,
+        // The f32 engine's context and shapes without its weights: every
+        // kernel here reads `mixed_weights` and the arena of -exp(a_log)
+        // built from them below.
+        let ctx = engine_ctx(device, &cfg, mode, WeightDtype::F32)?;
+        let mixed_weights =
+            GpuMambaMixedWeights::from_cpu(&ctx.stream, cpu_weights, &cfg, bulk_dtype)?;
+        let weights = GpuMambaWeights::empty(&ctx.stream)?;
+        let no_a_neg = GpuBuffer::zeros(&ctx.stream, 0)?;
+        let engine = MambaGpuEngine::from_parts(
+            ctx,
+            weights,
+            no_a_neg,
             cfg,
             input_dim,
             batch,
-            mode,
-            WeightDtype::F32,
-        )?;
-        let mixed_weights =
-            GpuMambaMixedWeights::from_cpu(&engine.ctx.stream, cpu_weights, &cfg, bulk_dtype)?;
+            cpu_weights.input_proj_w.is_empty(),
+        );
 
         // Pre-size half_staging for the worst-case step-time GEMM operand.
         // Eliminates lazy-grow during graph capture (a re-allocation would
@@ -2369,9 +2402,9 @@ impl MambaGpuEngineMixed {
         Ok(())
     }
 
-    /// Access the underlying f32 inference engine (used by unified backbone
-    /// wrapper to read cfg/batch/input_dim).
-    pub fn engine_ref(&self) -> &MambaGpuEngine {
+    /// The shell this engine runs on: the context and the shapes, read by
+    /// the backbone wrapper. It holds no weights of its own.
+    pub(crate) fn engine_ref(&self) -> &MambaGpuEngine {
         &self.engine
     }
 

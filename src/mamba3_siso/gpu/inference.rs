@@ -334,6 +334,32 @@ impl Drop for Mamba3GpuEngine {
     }
 }
 
+/// The context and the compiled kernels an engine for `cfg` runs on, its
+/// GEMMs following the numeric contract of `dtype`.
+fn engine_ctx_and_kernels(
+    device: &GpuDevice,
+    cfg: &Mamba3Config,
+    mode: Option<GemmMode>,
+    dtype: WeightDtype,
+) -> Result<(GpuCtx, Mamba3Kernels), String> {
+    cfg.validate()?;
+    // GpuCtx disables cudarc's per-slice event tracking itself (the
+    // CUDA-Graph capture prerequisite) and owns the cuBLAS handle plus
+    // its Graph-safe workspace.
+    let role = GemmRole::inference(dtype);
+    let ctx = match mode {
+        Some(mode) => GpuCtx::new_with_state_cap_mode_and_role(device, 64, mode, role)?,
+        None => GpuCtx::new_from_env_with_state_cap_and_role(device, 64, role)?,
+    };
+    let arch = GpuDevice::nvrtc_arch(device.compute_capability);
+    let kernels = Mamba3Kernels::compile_with_state_cap(
+        device.context(),
+        arch,
+        crate::gpu::kernels::state_capacity(cfg.d_state)?,
+    )?;
+    Ok((ctx, kernels))
+}
+
 impl Mamba3GpuEngine {
     /// Create an f32 M3 inference engine in the GEMM mode `MAMBA_RS_GEMM_MODE`
     /// names (`deterministic` when unset). Use [`Self::new_with_mode`] to pick the
@@ -397,25 +423,31 @@ impl Mamba3GpuEngine {
         mode: Option<GemmMode>,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
-        cfg.validate()?;
-        // GpuCtx disables cudarc's per-slice event tracking itself (the
-        // CUDA-Graph capture prerequisite) and owns the cuBLAS handle plus
-        // its Graph-safe workspace.
-        let role = GemmRole::inference(dtype);
-        let ctx = match mode {
-            Some(mode) => GpuCtx::new_with_state_cap_mode_and_role(device, 64, mode, role)?,
-            None => GpuCtx::new_from_env_with_state_cap_and_role(device, 64, role)?,
-        };
-        let arch = GpuDevice::nvrtc_arch(device.compute_capability);
-        let kernels = Mamba3Kernels::compile_with_state_cap(
-            device.context(),
-            arch,
-            crate::gpu::kernels::state_capacity(cfg.d_state)?,
-        )?;
+        let (ctx, kernels) = engine_ctx_and_kernels(device, &cfg, mode, dtype)?;
         let weights = GpuMamba3WeightsInf::from_cpu(&ctx.stream, cpu_weights, input_dim)?;
-        let identity_proj = cpu_weights.input_proj_w.is_empty();
+        Ok(Self::from_parts(
+            ctx,
+            kernels,
+            weights,
+            cfg,
+            batch,
+            input_dim,
+            cpu_weights.input_proj_w.is_empty(),
+        ))
+    }
 
-        Ok(Self {
+    /// The engine around a built context, kernels and weights, with no
+    /// graph captured yet.
+    fn from_parts(
+        ctx: GpuCtx,
+        kernels: Mamba3Kernels,
+        weights: GpuMamba3WeightsInf,
+        cfg: Mamba3Config,
+        batch: usize,
+        input_dim: usize,
+        identity_proj: bool,
+    ) -> Self {
+        Self {
             kernels,
             weights,
             ctx,
@@ -429,7 +461,7 @@ impl Mamba3GpuEngine {
             eager_gemm_manifest: Cell::new(None),
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
-        })
+        }
     }
 
     /// Capture CUDA Graph for the inference step.
@@ -1241,22 +1273,21 @@ impl Mamba3GpuEngineMixed {
         bulk_dtype: WeightDtype,
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
-        cfg.validate()?;
-        // Reuse the f32 engine constructor to compile kernels + upload f32
-        // weights (needed because the mixed path still consumes f32 biases
-        // and per-head coefficients via the f32 engine's weight-agnostic
-        // pointer views).
-        let engine = Mamba3GpuEngine::new_inner(
-            device,
-            cpu_weights,
+        // The f32 engine's context, kernels and shapes without its weights:
+        // every kernel here reads `mixed_weights`, whose f32 arena holds the
+        // norms, biases and per-head coefficients.
+        let (ctx, kernels) = engine_ctx_and_kernels(device, &cfg, mode, WeightDtype::F32)?;
+        let mixed_weights = GpuMamba3MixedWeights::from_cpu(&ctx.stream, cpu_weights, bulk_dtype)?;
+        let weights = GpuMamba3WeightsInf::empty(&ctx.stream)?;
+        let engine = Mamba3GpuEngine::from_parts(
+            ctx,
+            kernels,
+            weights,
             cfg,
-            input_dim,
             batch,
-            mode,
-            WeightDtype::F32,
-        )?;
-        let mixed_weights =
-            GpuMamba3MixedWeights::from_cpu(&engine.ctx.stream, cpu_weights, bulk_dtype)?;
+            input_dim,
+            cpu_weights.input_proj_w.is_empty(),
+        );
         Ok(Self {
             engine,
             mixed_weights,
@@ -1293,7 +1324,9 @@ impl Mamba3GpuEngineMixed {
         self.mixed_weights.bulk_dtype
     }
 
-    pub fn engine_ref(&self) -> &Mamba3GpuEngine {
+    /// The shell this engine runs on: the context, the kernels and the
+    /// shapes. It holds no weights of its own.
+    pub(crate) fn engine_ref(&self) -> &Mamba3GpuEngine {
         &self.engine
     }
 

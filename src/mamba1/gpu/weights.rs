@@ -265,6 +265,20 @@ impl GpuMambaWeights {
             norm_f_weight,
         })
     }
+
+    /// A container holding no weights, for an engine whose kernels read the
+    /// weights of another container, so none of the model is uploaded.
+    pub(crate) fn empty(stream: &Arc<cudarc::driver::CudaStream>) -> Result<Self, String> {
+        let flat = GpuBuffer::zeros(stream, 0)?;
+        let base = flat.cached_ptr();
+        Ok(Self {
+            input_proj_w: WeightSlice::from_offset(base, 0, 0),
+            input_proj_b: WeightSlice::from_offset(base, 0, 0),
+            layers: Vec::new(),
+            norm_f_weight: WeightSlice::from_offset(base, 0, 0),
+            flat,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

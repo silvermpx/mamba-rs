@@ -592,29 +592,26 @@ fn explicit_overloads_preserve_validation_errors() {
     );
     assert_eq!(env_error, explicit_error);
 
-    let cfg = small_m3_cfg();
-    let identity = m3_weights(&cfg, true);
-    let expected = "f32 M3 trainer requires an explicit input projection";
     let env_error = construction_error(
         Mamba3GpuTrainer::new(
-            &identity,
-            cfg,
-            session(cfg.d_model),
+            &invalid_m3_weights,
+            invalid_m3,
+            session(invalid_m3.d_model),
             GpuOptions::default().dtype(WeightDtype::F32),
         ),
-        "M3 f32 env projection rejection",
+        "M3 f32 trainer invalid state capacity",
     );
     let explicit_error = construction_error(
         Mamba3GpuTrainer::new(
-            &identity,
-            cfg,
-            session(cfg.d_model),
+            &invalid_m3_weights,
+            invalid_m3,
+            session(invalid_m3.d_model),
             GpuOptions::default()
                 .dtype(WeightDtype::F32)
                 .mode(GemmMode::CublasFast),
         ),
-        "M3 f32 explicit projection rejection",
+        "M3 f32 trainer explicit invalid state capacity",
     );
-    assert!(env_error.contains(expected), "{env_error}");
+    assert!(env_error.contains("d_state"), "{env_error}");
     assert_eq!(env_error, explicit_error);
 }

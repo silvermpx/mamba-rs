@@ -616,6 +616,11 @@ path = "tests/m3_head_width_digest.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "mixed_engine_memory"
+path = "tests/mixed_engine_memory.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "identity_input_training"
 path = "tests/identity_input_training.rs"
 required-features = ["cuda"]
