@@ -7,8 +7,8 @@
 //! rows, in_proj rows and gated rows, and the whole layer state every
 //! `stride` tokens. The backward replays each segment of each head from
 //! its checkpoint through the same step functions, keeping that segment's
-//! intermediates, and walks every stage back in a fixed order. The gated
-//! output norm (`is_outproj_norm`) does not train yet.
+//! intermediates, and walks every stage back in a fixed order, the gated
+//! output norm (`is_outproj_norm`) included.
 
 use super::super::config::Mamba3MimoConfig;
 use super::super::state::Mamba3MimoLayerState;
@@ -186,9 +186,6 @@ pub fn forward_mamba3_mimo_train(
     tape: &mut Mamba3MimoTape,
     (cfg, s): (&Mamba3MimoConfig, &mut Mamba3MimoTrainScratch),
 ) -> Result<(), String> {
-    if cfg.is_outproj_norm {
-        return Err("the gated output norm does not train on the CPU yet".into());
-    }
     let n = cfg.n_layers;
     if w.layers.len() != n || states.len() != n || tape.layers.len() != n {
         return Err(format!(
@@ -357,9 +354,6 @@ pub fn backward_mamba3_mimo_train(
     tape: &Mamba3MimoTape,
     (cfg, s): (&Mamba3MimoConfig, &mut Mamba3MimoTrainScratch),
 ) -> Result<(), String> {
-    if cfg.is_outproj_norm {
-        return Err("the gated output norm does not train on the CPU yet".into());
-    }
     if !tape.filled {
         return Err("the tape holds no completed forward window".into());
     }
@@ -567,6 +561,59 @@ fn replay_head(
     }
 }
 
+/// The backward of the gate with the per-rank output norm (core's
+/// `gate_normed`): with yn_r = y_r rstd_r over the head's channels and
+/// a_r = yn_r w, o = sum_r (a_r s_r) Phi_r. Phi, Z, the norm weight and the
+/// z column take their gradients, and `dy` the readouts', through the RMS
+/// backward per rank: dy_r = rstd_r (dyn_r - yn_r sum_p (dyn_r yn_r) / P).
+fn gate_normed_backward(
+    dy: &mut [f32],
+    (dp, gw, d_o): (&mut [f32], &mut Mamba3MimoLayerWeights, &[f32]),
+    (lw, y, z_h): (&Mamba3MimoLayerWeights, &[f32], &[f32]),
+    (h, r, p_len, eps): (usize, usize, usize, f32),
+) {
+    let proj = h * r * p_len;
+    let w = &lw.norm_gate_weight[h * p_len..(h + 1) * p_len];
+    let mut rstd = [0f32; crate::mamba3_mimo::config::MAX_MIMO_RANK];
+    for (i, rs) in rstd[..r].iter_mut().enumerate() {
+        let sum_sq = y
+            .iter()
+            .skip(i)
+            .step_by(r)
+            .fold(0.0f32, |acc, &v| v.mul_add(v, acc));
+        *rs = 1.0 / (sum_sq / p_len as f32 + eps).sqrt();
+    }
+    for p in 0..p_len {
+        for i in 0..r {
+            let zr = lw.mimo_z[proj + i * p_len + p];
+            let phi = lw.mimo_o[proj + i * p_len + p];
+            let v = zr * z_h[p];
+            let sg = 1.0 / (1.0 + fast_exp_scalar(-v));
+            let silu = v * sg;
+            let yn = y[p * r + i] * rstd[i];
+            let a = yn * w[p];
+            gw.mimo_o[proj + i * p_len + p] += d_o[p] * (a * silu);
+            let d_a = d_o[p] * phi * silu;
+            gw.norm_gate_weight[h * p_len + p] += d_a * yn;
+            dy[p * r + i] = d_a * w[p];
+            let dv = d_o[p] * phi * a * (sg * (1.0 + v * (1.0 - sg)));
+            gw.mimo_z[proj + i * p_len + p] += dv * z_h[p];
+            dp[h * p_len + p] += dv * zr;
+        }
+    }
+    for i in 0..r {
+        let mut dot = 0f32;
+        for p in 0..p_len {
+            dot += dy[p * r + i] * (y[p * r + i] * rstd[i]);
+        }
+        let c = dot / p_len as f32;
+        for p in 0..p_len {
+            let yn = y[p * r + i] * rstd[i];
+            dy[p * r + i] = rstd[i] * (dy[p * r + i] - yn * c);
+        }
+    }
+}
+
 fn layer_backward(
     d_rows: &mut [f32],
     (lw, gw, lt): (
@@ -654,21 +701,31 @@ fn layer_backward(
                 let d_o = &s.d_o[t * di + h * p_len..t * di + (h + 1) * p_len];
                 let dp = &mut s.d_proj[t * ip..(t + 1) * ip];
 
-                // The gate: o = sum_r ((y_r s_r) Phi_r), s_r = silu(Z_r z).
+                // The gate: o = sum_r ((y_r s_r) Phi_r), s_r = silu(Z_r z),
+                // with the output norm y_r taking (y_r rstd_r) w first.
                 let mut dy = vec![0f32; p_len * r];
-                for p in 0..p_len {
-                    for i in 0..r {
-                        let zr = lw.mimo_z[proj_rows.start + i * p_len + p];
-                        let phi = lw.mimo_o[proj_rows.start + i * p_len + p];
-                        let v = zr * z_h[p];
-                        let sg = 1.0 / (1.0 + fast_exp_scalar(-v));
-                        let silu = v * sg;
-                        let y = rr.y[p * r + i];
-                        gw.mimo_o[proj_rows.start + i * p_len + p] += d_o[p] * (y * silu);
-                        dy[p * r + i] = d_o[p] * phi * silu;
-                        let dv = d_o[p] * phi * y * (sg * (1.0 + v * (1.0 - sg)));
-                        gw.mimo_z[proj_rows.start + i * p_len + p] += dv * z_h[p];
-                        dp[h * p_len + p] += dv * zr;
+                if cfg.is_outproj_norm {
+                    gate_normed_backward(
+                        &mut dy,
+                        (&mut *dp, &mut *gw, d_o),
+                        (lw, &rr.y, z_h),
+                        (h, r, p_len, cfg.ssm_norm_eps),
+                    );
+                } else {
+                    for p in 0..p_len {
+                        for i in 0..r {
+                            let zr = lw.mimo_z[proj_rows.start + i * p_len + p];
+                            let phi = lw.mimo_o[proj_rows.start + i * p_len + p];
+                            let v = zr * z_h[p];
+                            let sg = 1.0 / (1.0 + fast_exp_scalar(-v));
+                            let silu = v * sg;
+                            let y = rr.y[p * r + i];
+                            gw.mimo_o[proj_rows.start + i * p_len + p] += d_o[p] * (y * silu);
+                            dy[p * r + i] = d_o[p] * phi * silu;
+                            let dv = d_o[p] * phi * y * (sg * (1.0 + v * (1.0 - sg)));
+                            gw.mimo_z[proj_rows.start + i * p_len + p] += dv * z_h[p];
+                            dp[h * p_len + p] += dv * zr;
+                        }
                     }
                 }
                 // D and the readout.

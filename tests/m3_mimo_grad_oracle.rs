@@ -49,6 +49,10 @@ fn drawn(cfg: &Mamba3MimoConfig, input_dim: usize, seed: u64) -> Mamba3MimoWeigh
         for v in &mut lw.out_proj_w {
             *v *= 3.0;
         }
+        let d = det(lw.norm_gate_weight.len(), s + 10, 0.3);
+        for (x, dv) in lw.norm_gate_weight.iter_mut().zip(d) {
+            *x = 1.0 + dv;
+        }
     }
     w.input_proj_b = det(cfg.d_model, seed + 7, 0.1);
     for (i, m) in w.mlp.iter_mut().enumerate() {
@@ -97,7 +101,9 @@ fn loss64(
         .sum()
 }
 
-fn tensors(w: &mut Mamba3MimoWeights) -> Vec<(String, &mut Vec<f32>)> {
+/// Every trained tensor of `w` with its name. The output norm's weight is
+/// in the model whether or not it runs, so it counts only `with_norm`.
+fn tensors(w: &mut Mamba3MimoWeights, with_norm: bool) -> Vec<(String, &mut Vec<f32>)> {
     let mut out: Vec<(String, &mut Vec<f32>)> = vec![
         ("input_proj_w".into(), &mut w.input_proj_w),
         ("input_proj_b".into(), &mut w.input_proj_b),
@@ -116,9 +122,12 @@ fn tensors(w: &mut Mamba3MimoWeights) -> Vec<(String, &mut Vec<f32>)> {
             ("mimo_x", &mut lw.mimo_x),
             ("mimo_z", &mut lw.mimo_z),
             ("mimo_o", &mut lw.mimo_o),
+            ("norm_gate", &mut lw.norm_gate_weight),
             ("out_proj_w", &mut lw.out_proj_w),
         ] {
-            out.push((format!("layer{l}.{name}"), v));
+            if name != "norm_gate" || with_norm {
+                out.push((format!("layer{l}.{name}"), v));
+            }
         }
     }
     for (l, m) in w.mlp.iter_mut().enumerate() {
@@ -182,6 +191,14 @@ fn cases() -> Vec<(&'static str, Mamba3MimoConfig)> {
             Mamba3MimoConfig {
                 mimo_rank: 2,
                 a_floor: 0.5,
+                ..base
+            },
+        ),
+        (
+            "rank 2, the gated output norm",
+            Mamba3MimoConfig {
+                mimo_rank: 2,
+                is_outproj_norm: true,
                 ..base
             },
         ),
@@ -324,7 +341,7 @@ fn m3_mimo_gradients_match_f64_central_differences() {
             )
             .unwrap();
 
-            let grad_tensors: Vec<(String, Vec<f32>)> = tensors(&mut grads)
+            let grad_tensors: Vec<(String, Vec<f32>)> = tensors(&mut grads, cfg.is_outproj_norm)
                 .into_iter()
                 .map(|(n, v)| (n, v.clone()))
                 .collect();
@@ -339,7 +356,7 @@ fn m3_mimo_gradients_match_f64_central_differences() {
                 for i in probe_indices(&cfg, name, g) {
                     let perturb = |sign: f32| -> (Mamba3MimoWeights, f64) {
                         let mut wp = w.clone();
-                        let mut tp = tensors(&mut wp);
+                        let mut tp = tensors(&mut wp, cfg.is_outproj_norm);
                         let v = &mut tp.iter_mut().find(|(n, _)| n == name).unwrap().1;
                         v[i] += sign * 1e-3 * v[i].abs().max(1.0);
                         let at = f64::from(v[i]);
