@@ -6,9 +6,12 @@
 //!
 //! For mixed-precision (bf16/f16) backward see [`super::backward_mixed`].
 
-use super::state::{GpuMamba3BackboneActs, GpuMamba3LayerActs, GpuMamba3Scratch, M3Exec};
+use super::state::{
+    GpuMamba3BackboneActs, GpuMamba3LayerActs, GpuMamba3MlpActs, GpuMamba3Scratch, M3Exec,
+};
 use super::weights::{
-    GpuMamba3Grads, GpuMamba3LayerGrads, GpuMamba3LayerWeights, GpuMamba3Weights,
+    GpuMamba3Grads, GpuMamba3LayerGrads, GpuMamba3LayerWeights, GpuMamba3MlpGrads,
+    GpuMamba3MlpWeights, GpuMamba3Weights,
 };
 use crate::gpu::blas::gpu_gemm_bi_backward_grad_raw;
 use crate::gpu::buffers::GpuBuffer;
@@ -887,6 +890,7 @@ pub fn gpu_backward_mamba3_backbone(
     scratch: &mut GpuMamba3Scratch,
 ) -> Result<(), String> {
     exec.check_state_cap()?;
+    super::forward::check_mlp_buffers(mamba_w, acts.mlp.as_ref().map(|m| m.hidden))?;
     let M3Exec {
         ctx,
         kernels: m3k,
@@ -945,6 +949,15 @@ pub fn gpu_backward_mamba3_backbone(
     d_temporal.copy_from_raw(&scratch.d_norm, &ctx.stream)?;
 
     for l in (0..dims.n_layers).rev() {
+        // The MLP came after the mixer, so its backward comes first.
+        if let Some(m) = acts.mlp.as_ref() {
+            let layer = MlpBwd {
+                acts: &m.layers[l],
+                w: &mamba_w.mlp[l],
+                g: &grads.mlp[l],
+            };
+            gpu_backward_mamba3_mlp(exec, d_temporal, &layer, scratch)?;
+        }
         gpu_backward_mamba3_layer(
             exec,
             d_temporal,
@@ -968,5 +981,96 @@ pub fn gpu_backward_mamba3_backbone(
         )?;
     }
 
+    Ok(())
+}
+
+/// One layer's gated MLP as the backward reads it.
+struct MlpBwd<'a> {
+    acts: &'a GpuMamba3MlpActs,
+    w: &'a GpuMamba3MlpWeights,
+    g: &'a GpuMamba3MlpGrads,
+}
+
+/// The backward of one layer's gated MLP: `d_temporal` holds the gradient
+/// of the layer's output and leaves holding the gradient of the MLP's
+/// input, the residual included. The down projection, the gate, the up
+/// projection, then the norm, whose input gradient the norm kernel adds
+/// into `d_temporal` itself.
+fn gpu_backward_mamba3_mlp(
+    exec: &M3Exec<'_>,
+    d_temporal: &mut GpuBuffer,
+    layer: &MlpBwd<'_>,
+    scratch: &mut GpuMamba3Scratch,
+) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
+    let MlpBwd { acts, w, g } = *layer;
+    let (bt, dm, h) = (dims.bt(), dims.d_model, w.hidden());
+    if scratch.mlp_d_act.len() != bt * h {
+        return Err(format!(
+            "the scratch has no buffers for the {h}-wide gated MLP (build it with `with_mlp`)"
+        ));
+    }
+    let (bt_i, dm_i, h_i) = (bt as i32, dm as i32, h as i32);
+    gpu_gemm_bi_backward_grad_raw(
+        ctx,
+        &mut scratch.mlp_d_act,
+        (&g.fc2_w, None),
+        d_temporal,
+        &acts.act,
+        w.fc2_w.raw_ptr(&ctx.stream),
+        (bt, h, dm),
+    )?;
+    let mut gate = ctx.stream.launch_builder(&m3k.mlp_gate_bwd.f32);
+    gate.arg(scratch.mlp_d_up.inner_mut());
+    gate.arg(scratch.mlp_d_act.inner());
+    gate.arg(acts.up.inner());
+    gate.arg(&bt_i);
+    gate.arg(&h_i);
+    unsafe { gate.launch(grid_1d(bt * h)) }.map_err(|e| format!("MLP gate bwd m3: {e:?}"))?;
+    gpu_gemm_bi_backward_grad_raw(
+        ctx,
+        &mut scratch.mlp_d_post,
+        (&g.fc1_w, None),
+        &scratch.mlp_d_up,
+        &acts.post,
+        w.fc1_w.raw_ptr(&ctx.stream),
+        (bt, dm, 2 * h),
+    )?;
+    let nw = w.norm_weight.raw_ptr(&ctx.stream);
+    let partials = scratch.axis0_partials.cached_ptr();
+    let mut norm = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
+    norm.arg(d_temporal.inner_mut());
+    norm.arg(&partials);
+    norm.arg(scratch.mlp_d_post.inner());
+    norm.arg(acts.x_in.inner());
+    norm.arg(&nw);
+    norm.arg(acts.rms.inner());
+    norm.arg(&bt_i);
+    norm.arg(&dm_i);
+    // Accumulate: the norm's input gradient adds into the residual's.
+    let accumulate: i32 = 1;
+    norm.arg(&accumulate);
+    let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
+    norm.arg(&no_mirror);
+    unsafe { norm.launch(grid_norm(bt, dm)) }.map_err(|e| format!("MLP norm bwd m3: {e:?}"))?;
+    let block = (bt as u32).next_power_of_two().clamp(32, 256);
+    let d_nw = g.norm_weight.ptr();
+    let reduce_acc: i32 = 1;
+    let mut reduce = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+    reduce.arg(&d_nw);
+    reduce.arg(&partials);
+    reduce.arg(&bt_i);
+    reduce.arg(&dm_i);
+    reduce.arg(&reduce_acc);
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (dm as u32, 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: block * 4,
+    };
+    unsafe { reduce.launch(cfg) }.map_err(|e| format!("MLP norm reduce m3: {e:?}"))?;
     Ok(())
 }

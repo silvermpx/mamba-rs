@@ -981,6 +981,14 @@ pub fn m3_specs(
         specs.push(f32_spec(&lw.out_proj_w, &lg.out_proj_w, false));
     }
     specs.push(f32_spec(&weights.norm_f_weight, &grads.norm_f_weight, true));
+    // The gated MLP after every mixer tensor, as the gradient arena lays it
+    // out: the norm scale undecayed like every norm, the projections
+    // decayed like in_proj and out_proj.
+    for (mw, mg) in weights.mlp.iter().zip(&grads.mlp) {
+        specs.push(f32_spec(&mw.norm_weight, &mg.norm_weight, true));
+        specs.push(f32_spec(&mw.fc1_w, &mg.fc1_w, false));
+        specs.push(f32_spec(&mw.fc2_w, &mg.fc2_w, false));
+    }
     specs
 }
 
@@ -1006,8 +1014,13 @@ pub fn m3_specs_mixed(
         wire(base + 1, &cw.in_proj_w);
         wire(base + 9, &cw.out_proj_w);
     }
+    let norm_f = 2 + weights.compute.layers.len() * 10;
+    for (mi, cm) in weights.compute.mlp.iter().enumerate() {
+        let base = norm_f + 1 + mi * 3;
+        wire(base + 1, &cm.fc1_w);
+        wire(base + 2, &cm.fc2_w);
+    }
     // f32-stays-f32 shadows ride the same kernel (see the M1 twin).
-    let last = specs.len() - 1;
     let mut wire_f32 = |idx: usize, slot: &crate::gpu::buffers::WeightSliceDyn| {
         debug_assert_eq!(specs[idx].len, slot.len_elems());
         specs[idx].out = slot.ptr();
@@ -1026,6 +1039,9 @@ pub fn m3_specs_mixed(
         wire_f32(base + 7, &cw.d_param);
         wire_f32(base + 8, &cw.norm_gate_weight);
     }
-    wire_f32(last, &weights.compute.norm_f_weight);
+    wire_f32(norm_f, &weights.compute.norm_f_weight);
+    for (mi, cm) in weights.compute.mlp.iter().enumerate() {
+        wire_f32(norm_f + 1 + mi * 3, &cm.norm_weight);
+    }
     specs
 }

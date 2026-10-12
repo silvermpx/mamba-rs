@@ -275,12 +275,54 @@ pub struct GpuMamba3LayerActs {
     pub gated: GpuBuffer,          // [B*T*d_inner]
 }
 
+/// One layer's gated MLP saves for the backward.
+pub struct GpuMamba3MlpActs {
+    pub x_in: GpuBuffer, // [B*T*d_model] the rows entering the MLP
+    pub post: GpuBuffer, // [B*T*d_model] the rows after its norm
+    pub rms: GpuBuffer,  // [B*T]
+    pub up: GpuBuffer,   // [B*T*2*hidden] value columns, then gate
+    pub act: GpuBuffer,  // [B*T*hidden]
+}
+
+/// The gated MLP's saves for every layer, for a model with one.
+pub struct GpuMamba3MlpBufs {
+    pub hidden: usize,
+    pub layers: Vec<GpuMamba3MlpActs>,
+}
+
+impl GpuMamba3MlpBufs {
+    pub fn new(
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dims: &GpuMamba3Dims,
+        hidden: usize,
+    ) -> Result<Self, String> {
+        let (bt, dm) = (dims.bt(), dims.d_model);
+        let z = |n: usize| GpuBuffer::zeros(stream, n);
+        Ok(Self {
+            hidden,
+            layers: (0..dims.n_layers)
+                .map(|_| {
+                    Ok(GpuMamba3MlpActs {
+                        x_in: z(bt * dm)?,
+                        post: z(bt * dm)?,
+                        rms: z(bt)?,
+                        up: z(bt * 2 * hidden)?,
+                        act: z(bt * hidden)?,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        })
+    }
+}
+
 /// Backbone activations (all layers + input proj + norm_f).
 pub struct GpuMamba3BackboneActs {
     pub input_proj_inputs: GpuBuffer, // [B*T*mamba_input_dim]
     pub layers: Vec<GpuMamba3LayerActs>,
     pub norm_f_input: GpuBuffer, // [B*T*d_model]
     pub norm_f_rms: GpuBuffer,   // [B*T]
+    /// The gated MLP's buffers; `None` for a model without one.
+    pub mlp: Option<GpuMamba3MlpBufs>,
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +406,12 @@ pub struct GpuMamba3Scratch {
     ///
     /// The buffer is reused across kernels; only one consumer writes at a time.
     pub axis0_partials: GpuBuffer,
+    /// The gated MLP backward's gradients of its activation `[B*T*hidden]`,
+    /// up projection `[B*T*2*hidden]` and normed rows `[B*T*d_model]`;
+    /// empty unless [`Self::with_mlp`] sized them.
+    pub mlp_d_act: GpuBuffer,
+    pub mlp_d_up: GpuBuffer,
+    pub mlp_d_post: GpuBuffer,
 }
 
 /// Layer pointers for persistent state (ssm + k_state + v_state + angle_state).
@@ -407,6 +455,10 @@ pub struct GpuMamba3TargetScratch {
     pub out_flat: GpuBuffer,      // [B*T*d_model]
     pub residual: GpuBuffer,      // [B*T*d_model]
     pub rms_discard: GpuBuffer,   // [B*T*nheads] — per-group rstd (discarded in target)
+    /// The gated MLP's up projection `[B*T*2*hidden]` and activation
+    /// `[B*T*hidden]`, empty unless [`Self::with_mlp`] sized them.
+    pub mlp_up: GpuBuffer,
+    pub mlp_act: GpuBuffer,
     // Persistent state for target burn-in
     pub ssm_states: GpuBuffer,   // [B*n_layers*nh*hd*ds]
     pub k_states: GpuBuffer,     // [B*n_layers*nh*ds]
@@ -517,7 +569,24 @@ impl GpuMamba3BackboneActs {
                 .collect::<Result<_, _>>()?,
             norm_f_input: GpuBuffer::zeros(stream, bt * dims.d_model)?,
             norm_f_rms: GpuBuffer::zeros(stream, bt)?,
+            mlp: None,
         })
+    }
+
+    /// The same activations with the gated MLP's buffers, for a model whose
+    /// MLP is `hidden` wide (0 leaves them out).
+    pub fn with_mlp(
+        mut self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dims: &GpuMamba3Dims,
+        hidden: usize,
+    ) -> Result<Self, String> {
+        self.mlp = if hidden > 0 {
+            Some(GpuMamba3MlpBufs::new(stream, dims, hidden)?)
+        } else {
+            None
+        };
+        Ok(self)
     }
 }
 
@@ -593,7 +662,25 @@ impl GpuMamba3Scratch {
                 let d_d_sz = b * dims.n_chunks() * nh;
                 GpuBuffer::zeros(stream, angle_dt_sz.max(rmsnorm_sz).max(d_d_sz))?
             },
+            mlp_d_act: GpuBuffer::zeros(stream, 0)?,
+            mlp_d_up: GpuBuffer::zeros(stream, 0)?,
+            mlp_d_post: GpuBuffer::zeros(stream, 0)?,
         })
+    }
+
+    /// The same scratch with the gated MLP backward's buffers, for a model
+    /// whose MLP is `hidden` wide.
+    pub fn with_mlp(
+        mut self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dims: &GpuMamba3Dims,
+        hidden: usize,
+    ) -> Result<Self, String> {
+        let bt = dims.bt();
+        self.mlp_d_act = GpuBuffer::zeros(stream, bt * hidden)?;
+        self.mlp_d_up = GpuBuffer::zeros(stream, bt * 2 * hidden)?;
+        self.mlp_d_post = GpuBuffer::zeros(stream, bt * dims.d_model)?;
+        Ok(self)
     }
 }
 
@@ -648,11 +735,26 @@ impl GpuMamba3TargetScratch {
             out_flat: GpuBuffer::zeros(stream, bt * dm)?,
             residual: GpuBuffer::zeros(stream, bt * dm)?,
             rms_discard: GpuBuffer::zeros(stream, bt * nh)?,
+            mlp_up: GpuBuffer::zeros(stream, 0)?,
+            mlp_act: GpuBuffer::zeros(stream, 0)?,
             ssm_states: GpuBuffer::zeros(stream, b * nl * nh * hd * ds)?,
             k_states: GpuBuffer::zeros(stream, b * nl * nh * ds)?,
             v_states: GpuBuffer::zeros(stream, b * nl * nh * hd)?,
             angle_states: GpuBuffer::zeros(stream, b * nl * nh * na.max(1))?,
         })
+    }
+
+    /// The same scratch with the gated MLP's buffers, for a model whose MLP
+    /// is `hidden` wide.
+    pub fn with_mlp(
+        mut self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dims: &GpuMamba3Dims,
+        hidden: usize,
+    ) -> Result<Self, String> {
+        self.mlp_up = GpuBuffer::zeros(stream, dims.bt() * 2 * hidden)?;
+        self.mlp_act = GpuBuffer::zeros(stream, dims.bt() * hidden)?;
+        Ok(self)
     }
 }
 

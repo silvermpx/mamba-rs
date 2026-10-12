@@ -15,10 +15,10 @@
 
 use super::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg};
 use super::state::{
-    CHUNK_SIZE, GpuMamba3BackboneActs, GpuMamba3LayerActs, GpuMamba3Scratch, GpuMamba3StateBufs,
-    GpuMamba3TargetScratch, M3Exec, Mamba3LayerPtrs,
+    CHUNK_SIZE, GpuMamba3BackboneActs, GpuMamba3LayerActs, GpuMamba3MlpActs, GpuMamba3Scratch,
+    GpuMamba3StateBufs, GpuMamba3TargetScratch, M3Exec, Mamba3LayerPtrs,
 };
-use super::weights::{GpuMamba3LayerWeights, GpuMamba3Weights};
+use super::weights::{GpuMamba3LayerWeights, GpuMamba3MlpWeights, GpuMamba3Weights};
 use crate::gpu::blas::gpu_gemm_bi_forward_raw;
 use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::gpu::context::GpuCtx;
@@ -808,6 +808,7 @@ pub fn gpu_forward_mamba3_backbone(
     scratch: &mut GpuMamba3Scratch,
 ) -> Result<(), String> {
     exec.check_state_cap()?;
+    check_mlp_buffers(mamba_w, acts.mlp.as_ref().map(|m| m.hidden))?;
     let M3Exec {
         ctx,
         kernels: m3k,
@@ -876,14 +877,23 @@ pub fn gpu_forward_mamba3_backbone(
         } else {
             acts.norm_f_input.raw_ptr(&ctx.stream)
         };
+        // With an MLP the mixer's sum lands in the MLP's input rows, and the
+        // MLP writes the layer's output.
+        let mixer_out = match &acts.mlp {
+            Some(m) => m.layers[l].x_in.raw_ptr(&ctx.stream),
+            None => stream_out,
+        };
         gpu_forward_mamba3_layer(
             exec,
-            stream_out,
+            mixer_out,
             &mut acts.layers[l],
             &mamba_w.layers[l],
             &layer_ptrs,
             scratch,
         )?;
+        if let Some(m) = acts.mlp.as_mut() {
+            gpu_forward_mamba3_mlp(exec, stream_out, &mut m.layers[l], &mamba_w.mlp[l], scratch)?;
+        }
     }
 
     // The last layer's residual_add already wrote acts.norm_f_input.
@@ -918,6 +928,15 @@ pub fn gpu_forward_mamba3_target_burnin(
     tgt: &mut GpuMamba3TargetScratch,
 ) -> Result<(), String> {
     exec.check_state_cap()?;
+    let mlp_hidden = mamba_w.mlp.first().map(GpuMamba3MlpWeights::hidden);
+    if let Some(h) = mlp_hidden
+        && tgt.mlp_act.len() != exec.dims.bt() * h
+    {
+        return Err(format!(
+            "the target scratch has no buffers for the {h}-wide gated MLP \
+             (build it with `with_mlp`)"
+        ));
+    }
     let M3Exec {
         ctx,
         kernels: m3k,
@@ -1225,6 +1244,9 @@ pub fn gpu_forward_mamba3_target_burnin(
             unsafe { builder.launch(grid_1d(bt * dm)) }
                 .map_err(|e| format!("residual_add m3 tgt L{l}: {:?}", e))?;
         }
+        if let Some(mw) = mamba_w.mlp.get(l) {
+            gpu_target_mlp(exec, mw, tgt)?;
+        }
     }
 
     {
@@ -1260,6 +1282,138 @@ pub fn gpu_forward_mamba3_target_burnin(
             .map_err(|e| format!("gather_last_timestep m3 tgt: {:?}", e))?;
     }
 
+    Ok(())
+}
+
+/// The weights and the buffers built for them must agree on the gated MLP:
+/// buffers of another width would be indexed past their end.
+pub(super) fn check_mlp_buffers(w: &GpuMamba3Weights, hidden: Option<usize>) -> Result<(), String> {
+    let model = w.mlp.first().map(GpuMamba3MlpWeights::hidden);
+    if model != hidden {
+        return Err(format!(
+            "the gated MLP is {model:?} wide in the weights and {hidden:?} in the activations \
+             (build them with `with_mlp` for the model's MLP)"
+        ));
+    }
+    Ok(())
+}
+
+/// One layer's gated MLP in the training forward: the rows the mixer left
+/// in `m.x_in` through the MLP norm, the up projection, the gate and the
+/// down projection, added back into the layer's output `stream_out`. The
+/// norm's rows, its rms, the up projection and the activation stay saved
+/// for the backward.
+fn gpu_forward_mamba3_mlp(
+    exec: &M3Exec<'_>,
+    stream_out: cudarc::driver::sys::CUdeviceptr,
+    m: &mut GpuMamba3MlpActs,
+    w: &GpuMamba3MlpWeights,
+    scratch: &mut GpuMamba3Scratch,
+) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
+    let (bt, dm, h) = (dims.bt(), dims.d_model, w.hidden());
+    let (bt_i, dm_i, h_i) = (bt as i32, dm as i32, h as i32);
+    let eps: f32 = dims.rms_norm_eps;
+    let nw = w.norm_weight.raw_ptr(&ctx.stream);
+    let mut norm = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
+    norm.arg(m.post.inner_mut());
+    norm.arg(m.rms.inner_mut());
+    norm.arg(m.x_in.inner());
+    norm.arg(&nw);
+    norm.arg(&bt_i);
+    norm.arg(&dm_i);
+    norm.arg(&eps);
+    unsafe { norm.launch(grid_norm(bt, dm)) }.map_err(|e| format!("MLP norm m3: {e:?}"))?;
+    gpu_gemm_bi_forward_raw(
+        ctx,
+        &mut m.up,
+        &m.post,
+        w.fc1_w.raw_ptr(&ctx.stream),
+        None,
+        (bt, dm, 2 * h),
+    )?;
+    let mut gate = ctx.stream.launch_builder(&m3k.mlp_gate_fwd_typed.f32);
+    gate.arg(m.act.inner_mut());
+    gate.arg(m.up.inner());
+    gate.arg(&bt_i);
+    gate.arg(&h_i);
+    unsafe { gate.launch(grid_1d(bt * h)) }.map_err(|e| format!("MLP gate m3: {e:?}"))?;
+    gpu_gemm_bi_forward_raw(
+        ctx,
+        &mut scratch.out_flat,
+        &m.act,
+        w.fc2_w.raw_ptr(&ctx.stream),
+        None,
+        (bt, h, dm),
+    )?;
+    let ne = (bt * dm) as i32;
+    let mut add = ctx.stream.launch_builder(&m3k.residual_add);
+    add.arg(&stream_out);
+    add.arg(scratch.out_flat.inner());
+    add.arg(m.x_in.inner());
+    add.arg(&ne);
+    unsafe { add.launch(grid_1d(bt * dm)) }.map_err(|e| format!("MLP residual m3: {e:?}"))?;
+    Ok(())
+}
+
+/// One layer's gated MLP in the target forward, nothing saved: the norm
+/// into `out_flat`, the up projection, the gate and the down projection
+/// back into `out_flat`, then added to the running rows.
+fn gpu_target_mlp(
+    exec: &M3Exec<'_>,
+    w: &GpuMamba3MlpWeights,
+    tgt: &mut GpuMamba3TargetScratch,
+) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
+    let (bt, dm, h) = (dims.bt(), dims.d_model, w.hidden());
+    let (bt_i, dm_i, h_i) = (bt as i32, dm as i32, h as i32);
+    let eps: f32 = dims.rms_norm_eps;
+    let nw = w.norm_weight.raw_ptr(&ctx.stream);
+    let mut norm = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
+    norm.arg(tgt.out_flat.inner_mut());
+    norm.arg(tgt.rms_discard.inner_mut());
+    norm.arg(tgt.temporal_work.inner());
+    norm.arg(&nw);
+    norm.arg(&bt_i);
+    norm.arg(&dm_i);
+    norm.arg(&eps);
+    unsafe { norm.launch(grid_norm(bt, dm)) }.map_err(|e| format!("MLP norm m3 tgt: {e:?}"))?;
+    gpu_gemm_bi_forward_raw(
+        ctx,
+        &mut tgt.mlp_up,
+        &tgt.out_flat,
+        w.fc1_w.raw_ptr(&ctx.stream),
+        None,
+        (bt, dm, 2 * h),
+    )?;
+    let mut gate = ctx.stream.launch_builder(&m3k.mlp_gate_fwd_typed.f32);
+    gate.arg(tgt.mlp_act.inner_mut());
+    gate.arg(tgt.mlp_up.inner());
+    gate.arg(&bt_i);
+    gate.arg(&h_i);
+    unsafe { gate.launch(grid_1d(bt * h)) }.map_err(|e| format!("MLP gate m3 tgt: {e:?}"))?;
+    gpu_gemm_bi_forward_raw(
+        ctx,
+        &mut tgt.out_flat,
+        &tgt.mlp_act,
+        w.fc2_w.raw_ptr(&ctx.stream),
+        None,
+        (bt, h, dm),
+    )?;
+    let ne = (bt * dm) as i32;
+    let mut add = ctx.stream.launch_builder(&m3k.vec_add_inplace);
+    add.arg(tgt.temporal_work.inner_mut());
+    add.arg(tgt.out_flat.inner());
+    add.arg(&ne);
+    unsafe { add.launch(grid_1d(bt * dm)) }.map_err(|e| format!("MLP residual m3 tgt: {e:?}"))?;
     Ok(())
 }
 

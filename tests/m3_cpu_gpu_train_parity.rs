@@ -12,9 +12,11 @@
 //!      upstream gradient, all recurrent state starting at zero.
 //!      The CPU path has no backbone-level entry point, so the test
 //!      composes it the same way the GPU backbone does: input_proj
-//!      SGEMM → per-layer forward (`parallel_mamba3_forward`) → norm_f
-//!      RMSNorm, and the mirrored backward (norm_f bwd →
-//!      `parallel_mamba3_backward` → input_proj bwd).
+//!      SGEMM → each layer through `parallel_mamba3_forward`, followed by
+//!      its gated MLP (`gated_mlp_rows`) when the model has one → norm_f
+//!      RMSNorm, and the mirrored backward (norm_f bwd → per layer the
+//!      MLP's `gated_mlp_rows_backward`, then `parallel_mamba3_backward`
+//!      → input_proj bwd).
 //!   3. Per-tensor comparison in the canonical `GpuMamba3Grads.flat`
 //!      ordering (src/mamba3_siso/gpu/weights.rs): cosine >= 0.9999 and
 //!      relative L2 error < 1e-3 per tensor — loose enough for the f32
@@ -33,6 +35,7 @@
 //!     warp kernel cannot hold (d_state 256, headdim 48, 64 and 100)
 //!   - the sequential scan's block-tier kernels (headdim 48 and 64)
 //!   - the gated output norm past 1024 channels and on a head of 48
+//!   - the gated MLP after every mixer, on both scans
 //!
 //! The chunked window is stateless by design (chunk 0 starts from zero
 //! state) which matches the zero-state CPU run exactly.
@@ -61,8 +64,13 @@ use mamba_rs::mamba3_siso::gpu::state::{
 };
 use mamba_rs::mamba3_siso::gpu::weights::{GpuMamba3Grads, GpuMamba3Weights};
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
+use mamba_rs::mlp::GatedMlpLayerWeights;
+use mamba_rs::mlp::cpu::{
+    GatedMlpBackwardScratch, GatedMlpRowsScratch, gated_mlp_rows, gated_mlp_rows_backward,
+};
 use mamba_rs::ops::blas::{sgemm_backward, sgemm_forward};
 use mamba_rs::ops::fast_math::RMS_NORM_EPS;
+use mamba_rs::ops::norms::rms_norm_weighted;
 
 /// Per-tensor directional agreement floor.
 const COS_MIN: f32 = 0.9999;
@@ -152,8 +160,9 @@ fn train_weights_from(w: &Mamba3Weights) -> TrainMamba3Weights {
 }
 
 /// Flatten CPU grads into the `GpuMamba3Grads.flat` linear order
-/// (src/mamba3_siso/gpu/weights.rs `GpuMamba3Grads::new`).
-fn flatten_cpu_grads(g: &TrainMamba3Weights) -> Vec<f32> {
+/// (src/mamba3_siso/gpu/weights.rs `GpuMamba3Grads::new`): the gated MLPs
+/// come after norm_f.
+fn flatten_cpu_grads(g: &TrainMamba3Weights, mlp: &[GatedMlpLayerWeights]) -> Vec<f32> {
     let mut out = Vec::new();
     out.extend_from_slice(&g.input_proj_w);
     out.extend_from_slice(&g.input_proj_b);
@@ -170,6 +179,11 @@ fn flatten_cpu_grads(g: &TrainMamba3Weights) -> Vec<f32> {
         out.extend_from_slice(&l.out_proj_w);
     }
     out.extend_from_slice(&g.norm_f_weight);
+    for m in mlp {
+        out.extend_from_slice(&m.norm_weight);
+        out.extend_from_slice(&m.fc1_w);
+        out.extend_from_slice(&m.fc2_w);
+    }
     out
 }
 
@@ -199,6 +213,14 @@ fn grad_segments(cfg: &Mamba3Config, input_dim: usize) -> Vec<(String, usize)> {
         ]);
     }
     segs.push(("norm_f_weight".into(), dm));
+    let h = cfg.mlp_hidden();
+    for li in (0..cfg.n_layers).filter(|_| h > 0) {
+        segs.extend([
+            (format!("L{li}.mlp.norm_weight"), dm),
+            (format!("L{li}.mlp.fc1_w"), dm * 2 * h),
+            (format!("L{li}.mlp.fc2_w"), h * dm),
+        ]);
+    }
     segs
 }
 
@@ -336,13 +358,14 @@ fn rmsnorm_rows_bwd(
 
 /// CPU full-backbone forward + backward composed exactly like the GPU
 /// backbone: input_proj → layers → norm_f, then the mirrored backward.
-/// Returns (forward output, gradients incl. input_proj/norm_f).
+/// Returns (forward output, gradients incl. input_proj/norm_f, the gated
+/// MLPs' gradients).
 fn run_cpu(
     scn: &Scenario,
-    tw: &TrainMamba3Weights,
+    (tw, mlp): (&TrainMamba3Weights, &[GatedMlpLayerWeights]),
     input: &[f32],
     d_out: &[f32],
-) -> (Vec<f32>, TrainMamba3Weights) {
+) -> (Vec<f32>, TrainMamba3Weights, Vec<GatedMlpLayerWeights>) {
     let dims = Mamba3Dims::from_config(&scn.cfg, scn.seq_len);
     let bt = scn.bt();
     let dm = dims.d_model;
@@ -363,27 +386,64 @@ fn run_cpu(
         dm,
     );
 
-    // Forward: layers (per-sample, zero initial state on every buffer).
-    let mut acts: Vec<Vec<Mamba3LayerFlat>> = (0..scn.batch)
-        .map(|_| (0..nl).map(|_| Mamba3LayerFlat::zeros(dims)).collect())
-        .collect();
-    let mut ssm = vec![0.0f32; scn.batch * nl * nh * hd * ds];
-    let mut k_st = vec![0.0f32; scn.batch * nl * nh * ds];
-    let mut v_st = vec![0.0f32; scn.batch * nl * nh * hd];
-    let mut angle_st = vec![0.0f32; scn.batch * nl * nh * na];
-    parallel_mamba3_forward(
-        &mut temporal,
-        &mut acts,
-        Mamba3States {
-            ssm: &mut ssm,
-            k: &mut k_st,
-            v: &mut v_st,
-            angle: &mut angle_st,
+    // Forward: the layers one at a time (per-sample, zero initial state on
+    // every buffer), each followed by its gated MLP when the model has one:
+    // `x += mixer(norm(x)); x += mlp(norm2(x))`.
+    let one = Mamba3Dims::from_config(
+        &Mamba3Config {
+            n_layers: 1,
+            ..scn.cfg
         },
-        tw,
-        &dims,
-        scn.batch,
+        scn.seq_len,
     );
+    let single = |l: usize| TrainMamba3Weights {
+        input_proj_w: Vec::new(),
+        input_proj_b: Vec::new(),
+        layers: vec![tw.layers[l].clone()],
+        norm_f_weight: Vec::new(),
+    };
+    let eps = scn.cfg.rms_norm_eps;
+    let mut layer_acts = Vec::with_capacity(nl);
+    let mut mlp_in = Vec::with_capacity(mlp.len());
+    let mut mlp_scratch = GatedMlpRowsScratch::default();
+    for l in 0..nl {
+        let mut acts: Vec<Vec<Mamba3LayerFlat>> = (0..scn.batch)
+            .map(|_| vec![Mamba3LayerFlat::zeros(one)])
+            .collect();
+        let mut ssm = vec![0.0f32; scn.batch * nh * hd * ds];
+        let mut k_st = vec![0.0f32; scn.batch * nh * ds];
+        let mut v_st = vec![0.0f32; scn.batch * nh * hd];
+        let mut angle_st = vec![0.0f32; scn.batch * nh * na];
+        parallel_mamba3_forward(
+            &mut temporal,
+            &mut acts,
+            Mamba3States {
+                ssm: &mut ssm,
+                k: &mut k_st,
+                v: &mut v_st,
+                angle: &mut angle_st,
+            },
+            &single(l),
+            &one,
+            scn.batch,
+        );
+        layer_acts.push(acts);
+        if let Some(m) = mlp.get(l) {
+            mlp_in.push(temporal.clone());
+            gated_mlp_rows(
+                &mut temporal,
+                bt,
+                m,
+                &mut mlp_scratch,
+                sgemm_forward,
+                |dst, src| {
+                    for (d_row, s_row) in dst.chunks_exact_mut(dm).zip(src.chunks_exact(dm)) {
+                        rms_norm_weighted(d_row, s_row, &m.norm_weight, eps);
+                    }
+                },
+            );
+        }
+    }
 
     // Forward: norm_f RMSNorm.
     let norm_f_input = temporal.clone();
@@ -401,15 +461,38 @@ fn run_cpu(
         (&tw.norm_f_weight, &norm_f_rms),
     );
 
-    parallel_mamba3_backward(
-        &mut d_temporal,
-        &acts,
-        tw,
-        &mut grads,
-        &dims,
-        scn.batch,
-        input_dim,
-    );
+    let mut mlp_grads: Vec<GatedMlpLayerWeights> = mlp
+        .iter()
+        .map(|m| GatedMlpLayerWeights {
+            norm_weight: vec![0.0; dm],
+            fc1_w: vec![0.0; m.fc1_w.len()],
+            fc2_w: vec![0.0; m.fc2_w.len()],
+        })
+        .collect();
+    let mut mlp_bwd = GatedMlpBackwardScratch::default();
+    for l in (0..nl).rev() {
+        if let Some(m) = mlp.get(l) {
+            gated_mlp_rows_backward(
+                &mut d_temporal,
+                &mlp_in[l],
+                bt,
+                (m, &mut mlp_grads[l]),
+                &mut mlp_bwd,
+                eps,
+            );
+        }
+        let mut g = TrainMamba3Weights::zeros(&one, input_dim);
+        parallel_mamba3_backward(
+            &mut d_temporal,
+            &layer_acts[l],
+            &single(l),
+            &mut g,
+            &one,
+            scn.batch,
+            input_dim,
+        );
+        grads.layers[l] = g.layers.remove(0);
+    }
 
     let mut d_input = vec![0.0f32; bt * input_dim];
     sgemm_backward(
@@ -422,7 +505,7 @@ fn run_cpu(
         (bt, input_dim, dm),
     );
 
-    (out, grads)
+    (out, grads, mlp_grads)
 }
 
 // ─── GPU path ───────────────────────────────────────────────────────────
@@ -457,8 +540,13 @@ fn run_gpu(
 
     let gpu_w = GpuMamba3Weights::from_cpu(&ctx.stream, cpu_w, &scn.cfg, scn.input_dim())
         .expect("GpuMamba3Weights::from_cpu");
-    let mut acts = GpuMamba3BackboneActs::new(&ctx.stream, &dims).expect("gpu acts");
-    let mut scratch = GpuMamba3Scratch::new(&ctx.stream, &dims).expect("gpu scratch");
+    let hidden = scn.cfg.mlp_hidden();
+    let mut acts = GpuMamba3BackboneActs::new(&ctx.stream, &dims)
+        .and_then(|a| a.with_mlp(&ctx.stream, &dims, hidden))
+        .expect("gpu acts");
+    let mut scratch = GpuMamba3Scratch::new(&ctx.stream, &dims)
+        .and_then(|s| s.with_mlp(&ctx.stream, &dims, hidden))
+        .expect("gpu scratch");
 
     let mut ssm = GpuBuffer::zeros(&ctx.stream, scn.batch * nl * nh * hd * ds).unwrap();
     let mut k_st = GpuBuffer::zeros(&ctx.stream, scn.batch * nl * nh * ds).unwrap();
@@ -520,7 +608,7 @@ fn check_scenario(label: &str, scn: &Scenario) {
     let input = det(n_in, 0xAA, 1.0);
     let d_out = det(n_out, 0xBB, 0.1);
 
-    let (cpu_out, cpu_grads) = run_cpu(scn, &tw, &input, &d_out);
+    let (cpu_out, cpu_grads, cpu_mlp_grads) = run_cpu(scn, (&tw, &cpu_w.mlp), &input, &d_out);
     let (gpu_out, gpu_flat) = run_gpu(scn, &cpu_w, &input, &d_out);
 
     // Forward parity first — a forward mismatch makes gradient diffs
@@ -528,7 +616,7 @@ fn check_scenario(label: &str, scn: &Scenario) {
     let fwd_segs = vec![("forward_output".to_string(), n_out)];
     assert_parity(label, &cpu_out, &gpu_out, &fwd_segs);
 
-    let cpu_flat = flatten_cpu_grads(&cpu_grads);
+    let cpu_flat = flatten_cpu_grads(&cpu_grads, &cpu_mlp_grads);
     let segs = grad_segments(&scn.cfg, input_dim);
     assert_parity(label, &cpu_flat, &gpu_flat, &segs);
 
@@ -816,5 +904,24 @@ fn m3_cpu_gpu_train_parity_gated_norm_ragged_head() {
             use_parallel_scan: parallel,
         };
         check_scenario(&format!("gated_hd48 parallel={parallel}"), &scn);
+    }
+}
+
+/// The gated MLP after every mixer, the layout of the official checkpoints,
+/// on both scans with both output gates. A d_intermediate of 160 rounds up
+/// to a hidden width of 256.
+#[test]
+fn m3_cpu_gpu_train_parity_gated_mlp() {
+    for (parallel, outproj_norm) in [(true, true), (false, false)] {
+        let scn = Scenario {
+            cfg: Mamba3Config {
+                d_intermediate: 160,
+                ..base_cfg(outproj_norm)
+            },
+            batch: 2,
+            seq_len: if parallel { 128 } else { 64 },
+            use_parallel_scan: parallel,
+        };
+        check_scenario(&format!("mlp parallel={parallel}"), &scn);
     }
 }

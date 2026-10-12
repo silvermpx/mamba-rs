@@ -115,6 +115,16 @@ pub struct GpuMamba3LayerMixedActs {
     pub gated: DtypedBuf,
 }
 
+/// One layer's gated MLP saves in the mixed lane: the residual rows and the
+/// rms in f32, the normed rows, the up projection and the activation typed.
+pub struct GpuMamba3MlpMixedActs {
+    pub x_in: GpuBuffer, // [B*T*d_model]
+    pub post: DtypedBuf, // [B*T*d_model]
+    pub rms: GpuBuffer,  // [B*T]
+    pub up: DtypedBuf,   // [B*T*2*hidden]
+    pub act: DtypedBuf,  // [B*T*hidden]
+}
+
 /// Full M3 backbone mixed-precision activations.
 pub struct GpuMamba3BackboneMixedActs {
     /// typed — input to input_proj.
@@ -126,6 +136,8 @@ pub struct GpuMamba3BackboneMixedActs {
     pub norm_f_input: GpuBuffer,
     /// f32 — RMS values per sample for norm_f backward.
     pub norm_f_rms: GpuBuffer,
+    /// The gated MLP saves of every layer; empty for a model without one.
+    pub mlp: Vec<GpuMamba3MlpMixedActs>,
     pub dtype: WeightDtype,
 }
 
@@ -233,6 +245,19 @@ impl GpuMamba3BackboneMixedActs {
             layers,
             norm_f_input: GpuBuffer::zeros(stream, bt * dm)?,
             norm_f_rms: GpuBuffer::zeros(stream, bt)?,
+            mlp: (0..cfg.n_layers)
+                .filter(|_| cfg.mlp_hidden() > 0)
+                .map(|_| {
+                    let h = cfg.mlp_hidden();
+                    Ok(GpuMamba3MlpMixedActs {
+                        x_in: GpuBuffer::zeros(stream, bt * dm)?,
+                        post: DtypedBuf::zeros(stream, bt * dm, dtype)?,
+                        rms: GpuBuffer::zeros(stream, bt)?,
+                        up: DtypedBuf::zeros(stream, bt * 2 * h, dtype)?,
+                        act: DtypedBuf::zeros(stream, bt * h, dtype)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
             dtype,
         };
 
@@ -905,6 +930,12 @@ pub struct GpuMamba3MixedScratch {
     /// f32 `[B*nh]` — adt = a_val · dt, fed into m3_dA_cumsum.
     pub adt_temp: GpuBuffer,
 
+    /// The gated MLP backward's typed gradients of its activation
+    /// `[B*T*hidden]`, up projection `[B*T*2*hidden]` and normed rows
+    /// `[B*T*d_model]`; empty for a model without an MLP.
+    pub mlp_d_act: DtypedBuf,
+    pub mlp_d_up: DtypedBuf,
+    pub mlp_d_post: DtypedBuf,
     pub dtype: WeightDtype,
 }
 
@@ -941,6 +972,13 @@ impl GpuMamba3MixedScratch {
             d_proj_typed: DtypedBuf::zeros(stream, bt * ip, dtype)?,
             d_post_norm_typed: DtypedBuf::zeros(stream, bt * dm, dtype)?,
             adt_temp: GpuBuffer::zeros(stream, bt * nh)?,
+            mlp_d_act: DtypedBuf::zeros(stream, bt * cfg.mlp_hidden(), dtype)?,
+            mlp_d_up: DtypedBuf::zeros(stream, bt * 2 * cfg.mlp_hidden(), dtype)?,
+            mlp_d_post: DtypedBuf::zeros(
+                stream,
+                if cfg.mlp_hidden() > 0 { bt * dm } else { 0 },
+                dtype,
+            )?,
             angle_chunk_sums: crate::gpu::buffers::GpuByteBuffer::zeros(
                 stream,
                 batch
@@ -978,6 +1016,7 @@ pub fn gpu_forward_mamba3_backbone_mixed(
     scratch: &mut GpuMamba3MixedScratch,
 ) -> Result<(), String> {
     exec.check_state_cap()?;
+    check_mixed_mlp(w, acts)?;
     let M3Exec {
         ctx,
         kernels: m3k,
@@ -1128,15 +1167,26 @@ pub fn gpu_forward_mamba3_backbone_mixed(
             // backward replays from; norm_f below writes the public output.
             acts.norm_f_input.cached_ptr()
         };
+        // With an MLP the mixer's sum lands in the MLP's input rows, and the
+        // MLP writes the layer's output.
+        let mixer_out = acts.mlp.get(l).map_or(stream_out, |m| m.x_in.cached_ptr());
         gpu_forward_mamba3_layer_mixed(
             exec,
-            stream_out,
+            mixer_out,
             &mut acts.layers[l],
             &w.compute.layers[l],
             &layer_ptrs,
             scratch,
             dtype,
         )?;
+        if let Some(m) = acts.mlp.get(l) {
+            let mw = w
+                .compute
+                .mlp
+                .get(l)
+                .ok_or("the weights carry no MLP for this layer")?;
+            mixed_mlp_forward(exec, stream_out, m, mw, scratch, dtype)?;
+        }
     }
 
     // norm_f — the f32 rmsnorm from the saved pre-norm residual into the
@@ -1162,5 +1212,98 @@ pub fn gpu_forward_mamba3_backbone_mixed(
         unsafe { bld.launch(grid_norm(bt, dm)) }.map_err(|e| format!("m3_mixed norm_f: {e:?}"))?;
     }
 
+    Ok(())
+}
+
+/// One layer's gated MLP in the mixed training forward: the f32 rows the
+/// mixer left in `m.x_in` through the typed MLP norm, the typed up
+/// projection, the gate and the typed down projection, added in f32 into
+/// the layer's output `stream_out`.
+fn mixed_mlp_forward(
+    exec: &M3Exec<'_>,
+    stream_out: cudarc::driver::sys::CUdeviceptr,
+    m: &GpuMamba3MlpMixedActs,
+    w: &crate::mamba3_siso::gpu::weights::GpuMamba3MixedMlpWeights,
+    scratch: &GpuMamba3MixedScratch,
+    dtype: WeightDtype,
+) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
+    let (bt, dm, h) = (dims.bt(), dims.d_model, w.hidden);
+    let (bt_i, dm_i, h_i) = (bt as i32, dm as i32, h as i32);
+    let eps: f32 = dims.rms_norm_eps;
+    let (x_in, post, rms, up, act) = (
+        m.x_in.cached_ptr(),
+        m.post.cached_ptr(),
+        m.rms.cached_ptr(),
+        m.up.cached_ptr(),
+        m.act.cached_ptr(),
+    );
+    let nw = w.norm_weight.ptr();
+    let mut norm = ctx
+        .stream
+        .launch_builder(m3k.rmsnorm_fwd_f32in_typed.get(dtype));
+    for p in [&post, &rms, &x_in, &nw] {
+        norm.arg(p);
+    }
+    norm.arg(&bt_i);
+    norm.arg(&dm_i);
+    norm.arg(&eps);
+    unsafe { norm.launch(grid_norm(bt, dm)) }.map_err(|e| format!("m3_mixed MLP norm: {e:?}"))?;
+    let typed = |ptr| TypedPtr { ptr, dtype };
+    gpu_gemm_typed_forward_raw(
+        ctx,
+        typed(up),
+        typed(post),
+        typed(w.fc1_w.ptr()),
+        None,
+        (bt, dm, 2 * h),
+    )?;
+    let mut gate = ctx.stream.launch_builder(m3k.mlp_gate_fwd_typed.get(dtype));
+    gate.arg(&act);
+    gate.arg(&up);
+    gate.arg(&bt_i);
+    gate.arg(&h_i);
+    unsafe { gate.launch(grid_1d(bt * h)) }.map_err(|e| format!("m3_mixed MLP gate: {e:?}"))?;
+    let out = scratch.out_flat.cached_ptr();
+    gpu_gemm_typed_forward_raw(
+        ctx,
+        typed(out),
+        typed(act),
+        typed(w.fc2_w.ptr()),
+        None,
+        (bt, h, dm),
+    )?;
+    let ne = (bt * dm) as i32;
+    let mut add = ctx
+        .stream
+        .launch_builder(m3k.residual_add_f32_typed.get(dtype));
+    add.arg(&stream_out);
+    add.arg(&x_in);
+    add.arg(&out);
+    add.arg(&ne);
+    unsafe { add.launch(grid_1d(bt * dm)) }.map_err(|e| format!("m3_mixed MLP residual: {e:?}"))?;
+    Ok(())
+}
+
+/// The weights and the activations built for them must agree on the gated
+/// MLP: buffers of another width would be indexed past their end.
+pub(super) fn check_mixed_mlp(
+    w: &GpuMamba3TrainMixedWeights,
+    acts: &GpuMamba3BackboneMixedActs,
+) -> Result<(), String> {
+    let model: Vec<usize> = w.compute.mlp.iter().map(|m| m.hidden).collect();
+    let built: Vec<usize> = acts.mlp.iter().map(|m| m.act.len_elems()).collect();
+    let rows = acts.norm_f_rms.len();
+    if model.len() != built.len() || model.iter().zip(&built).any(|(h, n)| h * rows != *n) {
+        return Err(format!(
+            "the gated MLP widths {model:?} of the weights do not match the activations \
+             built for {} rows",
+            rows
+        ));
+    }
     Ok(())
 }

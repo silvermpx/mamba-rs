@@ -385,7 +385,7 @@ impl Mamba3MimoKernels {
             scan_bwd: typed("mimo_scan_bwd")?,
             bc_norm_bwd: typed("mimo_bc_norm_bwd")?,
             angle_bwd: typed("mimo_angle_bwd")?,
-            mlp_gate_bwd: typed("mimo_mlp_gate_bwd")?,
+            mlp_gate_bwd: typed("mlp_gate_bwd")?,
             sum_rows: get("mimo_sum_rows")?,
             cb: MimoChunkedBwd {
                 gate: typed("m3mb_gate")?,

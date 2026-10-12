@@ -168,8 +168,13 @@ fn run_f32(
     mi.upload(&ctx.stream, mamba_input).unwrap();
 
     let mut temporal = GpuBuffer::zeros(&ctx.stream, bt * dims.d_model).unwrap();
-    let mut acts = GpuMamba3BackboneActs::new(&ctx.stream, dims).unwrap();
-    let mut scratch = GpuMamba3Scratch::new(&ctx.stream, dims).unwrap();
+    let hidden = cfg.mlp_hidden();
+    let mut acts = GpuMamba3BackboneActs::new(&ctx.stream, dims)
+        .and_then(|a| a.with_mlp(&ctx.stream, dims, hidden))
+        .unwrap();
+    let mut scratch = GpuMamba3Scratch::new(&ctx.stream, dims)
+        .and_then(|s| s.with_mlp(&ctx.stream, dims, hidden))
+        .unwrap();
     ctx.stream.synchronize().unwrap();
 
     gpu_forward_mamba3_backbone(
@@ -325,6 +330,12 @@ fn grad_layout(cfg: &Mamba3Config, input_dim: usize) -> Vec<(&'static str, usize
         out.push(("out_proj_w", di * dm));
     }
     out.push(("norm_f_weight", dm));
+    let h = cfg.mlp_hidden();
+    for _ in (0..cfg.n_layers).filter(|_| h > 0) {
+        out.push(("mlp.norm_weight", dm));
+        out.push(("mlp.fc1_w", dm * 2 * h));
+        out.push(("mlp.fc2_w", h * dm));
+    }
     out
 }
 
@@ -589,5 +600,30 @@ fn m3_backward_mixed_parity_gated_norm_wide_bf16() {
             ..cfg_for_step10()
         };
         check_cfg(cfg, WeightDtype::Bf16, 100);
+    }
+}
+
+/// The gated MLP after every mixer over two layers, on both scans:
+/// d_intermediate 100 rounds up to a hidden width of 128.
+fn gated_mlp_cfg(scan_mode: ScanMode) -> Mamba3Config {
+    Mamba3Config {
+        d_intermediate: 100,
+        n_layers: 2,
+        scan_mode,
+        ..cfg_for_step10()
+    }
+}
+
+#[test]
+fn m3_backward_mixed_parity_gated_mlp_bf16() {
+    for mode in [ScanMode::Auto, ScanMode::Sequential] {
+        check_cfg(gated_mlp_cfg(mode), WeightDtype::Bf16, 64);
+    }
+}
+
+#[test]
+fn m3_backward_mixed_parity_gated_mlp_f16() {
+    for mode in [ScanMode::Auto, ScanMode::Sequential] {
+        check_cfg(gated_mlp_cfg(mode), WeightDtype::F16, 64);
     }
 }

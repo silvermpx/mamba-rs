@@ -123,6 +123,7 @@
 "gpu_backbone_api" = "gate"
 "gpu_trainer_api" = "gate"
 "identity_input_training" = "gate"
+"m3_gpu_mlp_training" = "gate"
 "gpu_inference_prefill_parity" = "gate"
 "gpu_lm_bf16_test" = "record"
 "gpu_lm_profile" = "qualification"

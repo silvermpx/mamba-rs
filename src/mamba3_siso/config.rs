@@ -165,13 +165,10 @@ impl Mamba3Config {
 
     /// Resolve the training-time scan choice from `scan_mode`.
     ///
-    /// M3 semantics differ from Mamba-1's length-threshold `Auto`: the
-    /// chunked path is the only one with a mixed-precision backward (the
-    /// sequential mixed backward is a documented non-goal — its activation
-    /// tape costs CHUNK_SIZE x VRAM), and the trainers have always run
-    /// chunked. `Auto` therefore resolves to the chunked parallel path
-    /// regardless of T; `Sequential` is honored for the f32 lane only
-    /// (the mixed forward/backward reject it loudly downstream).
+    /// M3 semantics differ from Mamba-1's length-threshold `Auto`: training
+    /// takes the chunked parallel scan regardless of T, because the
+    /// sequential scan's activation tape costs about the chunk length times
+    /// more memory. `Sequential` runs the sequential scan in every lane.
     pub fn train_use_parallel_scan(&self) -> bool {
         !matches!(self.scan_mode, ScanMode::Sequential)
     }

@@ -204,6 +204,8 @@ pub struct Mamba3Kernels {
     /// The gated MLP's activation `value * silu(gate)` over the up
     /// projection's rows (value columns, then gate columns).
     pub mlp_gate_fwd_typed: TypedKernel,
+    /// The gate's backward into the up projection's row gradient.
+    pub mlp_gate_bwd: TypedKernel,
     /// M3 burnin forward (training) — sequential T-loop SSM with activation
     /// saves. Typed x/k/q/y; f32 state + alpha/beta/gamma + D + saves.
     pub m3_burnin_fwd_typed_bf16: CudaFunction,
@@ -780,6 +782,11 @@ impl Mamba3Kernels {
                 f32: get("mlp_gate_fwd")?,
                 bf16: get("mlp_gate_fwd_bf16")?,
                 f16: get("mlp_gate_fwd_f16")?,
+            },
+            mlp_gate_bwd: TypedKernel {
+                f32: get("mlp_gate_bwd")?,
+                bf16: get("mlp_gate_bwd_bf16")?,
+                f16: get("mlp_gate_bwd_f16")?,
             },
             m3_burnin_fwd_typed_bf16: get("m3_burnin_fwd_bf16")?,
             m3_burnin_fwd_typed_f16: get("m3_burnin_fwd_f16")?,

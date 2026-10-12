@@ -29,6 +29,7 @@ use crate::gpu::dtype::WeightDtype;
 use crate::gpu::launch::{grid_1d, grid_colsum, grid_norm};
 use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3LayerMixedActs, GpuMamba3MixedScratch,
+    GpuMamba3MlpMixedActs,
 };
 use crate::mamba3_siso::gpu::kernels::{Mamba3Kernels, SequentialShape};
 use crate::mamba3_siso::gpu::mamba3_gpu::GpuMamba3Scratch;
@@ -60,6 +61,7 @@ pub fn gpu_backward_mamba3_backbone_mixed(
     mixed_scratch: &mut GpuMamba3MixedScratch,
 ) -> Result<(), String> {
     exec.check_state_cap()?;
+    crate::mamba3_siso::gpu::forward_mixed::check_mixed_mlp(mamba_w, acts)?;
     let M3Exec {
         ctx,
         kernels: m3k,
@@ -116,8 +118,18 @@ pub fn gpu_backward_mamba3_backbone_mixed(
     }
     d_temporal.copy_from_raw(&f32_scratch.d_norm, &ctx.stream)?;
 
-    // Per-layer bwd in REVERSE order.
+    // Per-layer bwd in REVERSE order; the MLP came after the mixer, so its
+    // backward comes first.
     for l in (0..dims.n_layers).rev() {
+        if let Some(m) = acts.mlp.get(l) {
+            let layer = MixedMlpBwd {
+                acts: m,
+                cw: &mamba_w.compute.mlp[l],
+                norm_master: &mamba_w.master.mlp[l].norm_weight,
+                g: &grads.mlp[l],
+            };
+            mixed_mlp_backward(exec, d_temporal, &layer, f32_scratch, mixed_scratch)?;
+        }
         gpu_backward_mamba3_layer_mixed(
             exec,
             d_temporal,
@@ -1154,6 +1166,133 @@ fn sequential_ssm_backward_mixed(
         shared_mem_bytes: 0,
     };
     unsafe { red.launch(red_cfg) }.map_err(|e| format!("m3_reduce_d_D seq mixed B6: {e:?}"))?;
+    Ok(())
+}
+
+/// One layer's gated MLP as the mixed backward reads it.
+struct MixedMlpBwd<'a> {
+    acts: &'a GpuMamba3MlpMixedActs,
+    cw: &'a crate::mamba3_siso::gpu::weights::GpuMamba3MixedMlpWeights,
+    norm_master: &'a GpuBuffer,
+    g: &'a crate::mamba3_siso::gpu::weights::GpuMamba3MlpGrads,
+}
+
+/// The backward of one layer's gated MLP in the mixed lane: `d_temporal`
+/// holds the f32 gradient of the layer's output and leaves holding that of
+/// the MLP's input, the residual included. The projections and the gate
+/// run typed with f32 weight gradients, as the mixer's projections do; the
+/// norm runs in f32 and adds its input gradient into `d_temporal` itself.
+fn mixed_mlp_backward(
+    exec: &M3Exec<'_>,
+    d_temporal: &mut GpuBuffer,
+    layer: &MixedMlpBwd<'_>,
+    sc: &mut GpuMamba3Scratch,
+    msc: &mut GpuMamba3MixedScratch,
+) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
+    let MixedMlpBwd {
+        acts,
+        cw,
+        norm_master,
+        g,
+    } = *layer;
+    let dtype = msc.dtype;
+    let (bt, dm, h) = (dims.bt(), dims.d_model, cw.hidden);
+    if msc.mlp_d_act.len_elems() != bt * h {
+        return Err(format!(
+            "the mixed scratch has no buffers for the {h}-wide gated MLP"
+        ));
+    }
+    let (bt_i, dm_i, h_i) = (bt as i32, dm as i32, h as i32);
+    cast_f32_to_typed(ctx, m3k, &mut msc.d_temporal_typed, d_temporal, bt * dm)?;
+    let (dt, d_act, d_up, d_post) = (
+        msc.d_temporal_typed.cached_ptr(),
+        msc.mlp_d_act.cached_ptr(),
+        msc.mlp_d_up.cached_ptr(),
+        msc.mlp_d_post.cached_ptr(),
+    );
+    gpu_gemm_bi_backward_dw_grad_typed(
+        ctx,
+        &g.fc2_w,
+        tp(dt, dtype),
+        tp(acts.act.cached_ptr(), dtype),
+        bt,
+        h,
+        dm,
+    )?;
+    gpu_gemm_ex_backward_dx_typed(
+        ctx,
+        tp(d_act, dtype),
+        tp(dt, dtype),
+        tp(cw.fc2_w.ptr(), dtype),
+        bt,
+        h,
+        dm,
+    )?;
+    let up = acts.up.cached_ptr();
+    let mut gate = ctx.stream.launch_builder(m3k.mlp_gate_bwd.get(dtype));
+    for p in [&d_up, &d_act, &up] {
+        gate.arg(p);
+    }
+    gate.arg(&bt_i);
+    gate.arg(&h_i);
+    unsafe { gate.launch(grid_1d(bt * h)) }.map_err(|e| format!("m3_mixed MLP gate bwd: {e:?}"))?;
+    gpu_gemm_bi_backward_dw_grad_typed(
+        ctx,
+        &g.fc1_w,
+        tp(d_up, dtype),
+        tp(acts.post.cached_ptr(), dtype),
+        bt,
+        dm,
+        2 * h,
+    )?;
+    gpu_gemm_ex_backward_dx_typed(
+        ctx,
+        tp(d_post, dtype),
+        tp(d_up, dtype),
+        tp(cw.fc1_w.ptr(), dtype),
+        bt,
+        dm,
+        2 * h,
+    )?;
+    cast_typed_to_f32(ctx, m3k, &mut sc.d_norm, &msc.mlp_d_post, bt * dm)?;
+    let nw = norm_master.cached_ptr();
+    let partials = sc.axis0_partials.cached_ptr();
+    let mut norm = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
+    norm.arg(d_temporal.inner_mut());
+    norm.arg(&partials);
+    norm.arg(sc.d_norm.inner());
+    norm.arg(acts.x_in.inner());
+    norm.arg(&nw);
+    norm.arg(acts.rms.inner());
+    norm.arg(&bt_i);
+    norm.arg(&dm_i);
+    // Accumulate: the norm's input gradient adds into the residual's.
+    let accumulate: i32 = 1;
+    norm.arg(&accumulate);
+    let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
+    norm.arg(&no_mirror);
+    unsafe { norm.launch(grid_norm(bt, dm)) }
+        .map_err(|e| format!("m3_mixed MLP norm bwd: {e:?}"))?;
+    let block = (bt as u32).next_power_of_two().clamp(32, 256);
+    let d_nw = g.norm_weight.ptr();
+    let reduce_acc: i32 = 1;
+    let mut reduce = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+    reduce.arg(&d_nw);
+    reduce.arg(&partials);
+    reduce.arg(&bt_i);
+    reduce.arg(&dm_i);
+    reduce.arg(&reduce_acc);
+    let cfg = LaunchConfig {
+        grid_dim: (dm as u32, 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: block * 4,
+    };
+    unsafe { reduce.launch(cfg) }.map_err(|e| format!("m3_mixed MLP norm reduce: {e:?}"))?;
     Ok(())
 }
 

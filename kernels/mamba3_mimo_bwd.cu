@@ -916,34 +916,3 @@ extern "C" __global__ void mimo_sum_rows(
     g[i] = __fadd_rn(g[i], acc);
 }
 
-// The MLP gate backward, act = v silu(gate): dv = d silu(gate),
-// d gate = d v silu'(gate), into the up gradient [rows, 2 hidden].
-// Grid 1-D over rows * hidden.
-template <typename T>
-__device__ __forceinline__ void mimo_mlp_gate_bwd_body(
-    T* __restrict__ d_up, const T* __restrict__ d_act, const T* __restrict__ up,
-    int rows, int hidden
-) {
-    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    const long long n = (long long)rows * hidden;
-    if (i >= n) return;
-    const long long r = i / hidden;
-    const long long j = i - r * hidden;
-    const float d = to_f(d_act[i]);
-    const float v = to_f(up[r * 2 * hidden + j]);
-    const float gte = to_f(up[r * 2 * hidden + hidden + j]);
-    const float silu = __fdiv_rn(gte, __fadd_rn(1.0f, mimo_exp(-gte)));
-    mimo_put(&d_up[r * 2 * hidden + j], __fmul_rn(d, silu));
-    mimo_put(&d_up[r * 2 * hidden + hidden + j], __fmul_rn(__fmul_rn(d, v), mimo_silu_grad(gte)));
-}
-
-#define DEFINE_MIMO_MLP_GATE_BWD(NAME, T)                                       \
-extern "C" __global__ void NAME(                                                \
-    T* __restrict__ d_up, const T* __restrict__ d_act, const T* __restrict__ up,\
-    int rows, int hidden                                                        \
-) {                                                                             \
-    mimo_mlp_gate_bwd_body<T>(d_up, d_act, up, rows, hidden);                   \
-}
-DEFINE_MIMO_MLP_GATE_BWD(mimo_mlp_gate_bwd, float)
-DEFINE_MIMO_MLP_GATE_BWD(mimo_mlp_gate_bwd_bf16, __nv_bfloat16)
-DEFINE_MIMO_MLP_GATE_BWD(mimo_mlp_gate_bwd_f16, __half)

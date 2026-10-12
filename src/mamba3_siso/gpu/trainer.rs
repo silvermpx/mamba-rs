@@ -1901,6 +1901,11 @@ impl Mamba3TrainerMixed {
             lw.out_proj_w = g.out_proj_w.to_cpu(&self.ctx.stream)?;
         }
         out.norm_f_weight = m.norm_f_weight.to_cpu(&self.ctx.stream)?;
+        for (mo, mg) in out.mlp.iter_mut().zip(&m.mlp) {
+            mo.norm_weight = mg.norm_weight.to_cpu(&self.ctx.stream)?;
+            mo.fc1_w = mg.fc1_w.to_cpu(&self.ctx.stream)?;
+            mo.fc2_w = mg.fc2_w.to_cpu(&self.ctx.stream)?;
+        }
         Ok(out)
     }
 
@@ -2019,8 +2024,11 @@ impl Mamba3TrainerF32 {
         };
         dims.validate_index_budget()?;
 
-        let acts = GpuMamba3BackboneActs::new(&ctx.stream, &dims)?;
-        let scratch = GpuMamba3Scratch::new(&ctx.stream, &dims)?;
+        let hidden = cfg.mlp_hidden();
+        let acts =
+            GpuMamba3BackboneActs::new(&ctx.stream, &dims)?.with_mlp(&ctx.stream, &dims, hidden)?;
+        let scratch =
+            GpuMamba3Scratch::new(&ctx.stream, &dims)?.with_mlp(&ctx.stream, &dims, hidden)?;
 
         let bt = batch * seq_len;
         let nh = cfg.nheads();
@@ -2490,6 +2498,11 @@ impl Mamba3TrainerF32 {
             lw.out_proj_w = g.out_proj_w.to_cpu(&self.ctx.stream)?;
         }
         out.norm_f_weight = w.norm_f_weight.to_cpu(&self.ctx.stream)?;
+        for (mo, mg) in out.mlp.iter_mut().zip(&w.mlp) {
+            mo.norm_weight = mg.norm_weight.to_cpu(&self.ctx.stream)?;
+            mo.fc1_w = mg.fc1_w.to_cpu(&self.ctx.stream)?;
+            mo.fc2_w = mg.fc2_w.to_cpu(&self.ctx.stream)?;
+        }
         Ok(out)
     }
 }

@@ -47,20 +47,6 @@ pub struct GpuMamba3WeightsInf {
     pub flat: GpuBuffer,
 }
 
-/// The GPU trainers do not run the gated MLP yet: a model that has one is
-/// refused here rather than trained without it.
-fn refuse_mlp(cpu: &crate::mamba3_siso::weights::Mamba3Weights) -> Result<(), String> {
-    if cpu.mlp.is_empty() {
-        Ok(())
-    } else {
-        Err(
-            "the gated MLP (d_intermediate > 0) does not train on the GPU yet; \
-             the GPU inference engines and the CPU run this model"
-                .into(),
-        )
-    }
-}
-
 impl GpuMamba3WeightsInf {
     /// Upload CPU weights into a single flat GPU buffer with WeightSlice views.
     pub fn from_cpu(
@@ -320,12 +306,39 @@ pub struct GpuMamba3LayerWeights {
     pub out_proj_w: GpuBuffer,
 }
 
+/// GPU training weights of one layer's gated MLP.
+pub struct GpuMamba3MlpWeights {
+    /// The pre-MLP RMSNorm scale: `[d_model]`.
+    pub norm_weight: GpuBuffer,
+    /// The up projection `[d_model, 2 * hidden]`, value columns then gate.
+    pub fc1_w: GpuBuffer,
+    /// The down projection `[hidden, d_model]`.
+    pub fc2_w: GpuBuffer,
+}
+
+impl GpuMamba3MlpWeights {
+    fn from_cpu(stream: &Stream, m: &crate::mlp::GatedMlpLayerWeights) -> Result<Self, String> {
+        Ok(Self {
+            norm_weight: GpuBuffer::from_cpu(stream, &m.norm_weight)?,
+            fc1_w: GpuBuffer::from_cpu(stream, &m.fc1_w)?,
+            fc2_w: GpuBuffer::from_cpu(stream, &m.fc2_w)?,
+        })
+    }
+
+    /// The hidden width.
+    pub fn hidden(&self) -> usize {
+        self.fc2_w.len() / self.norm_weight.len().max(1)
+    }
+}
+
 /// GPU training weights for the full Mamba-3 backbone.
 pub struct GpuMamba3Weights {
     pub input_proj_w: GpuBuffer,
     pub input_proj_b: GpuBuffer,
     pub layers: Vec<GpuMamba3LayerWeights>,
     pub norm_f_weight: GpuBuffer,
+    /// The gated MLP of each layer; empty for a model without one.
+    pub mlp: Vec<GpuMamba3MlpWeights>,
 }
 
 impl GpuMamba3LayerWeights {
@@ -376,7 +389,6 @@ impl GpuMamba3Weights {
         cfg: &Mamba3Config,
         _input_dim: usize,
     ) -> Result<Self, String> {
-        refuse_mlp(cpu)?;
         Ok(Self {
             input_proj_w: GpuBuffer::from_cpu(stream, &cpu.input_proj_w)?,
             input_proj_b: GpuBuffer::from_cpu(stream, &cpu.input_proj_b)?,
@@ -386,6 +398,11 @@ impl GpuMamba3Weights {
                 .map(|lw| GpuMamba3LayerWeights::from_cpu(stream, lw, cfg))
                 .collect::<Result<Vec<_>, _>>()?,
             norm_f_weight: GpuBuffer::from_cpu(stream, &cpu.norm_f_weight)?,
+            mlp: cpu
+                .mlp
+                .iter()
+                .map(|m| GpuMamba3MlpWeights::from_cpu(stream, m))
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 
@@ -398,6 +415,17 @@ impl GpuMamba3Weights {
                 .map(|_| GpuMamba3LayerWeights::zeros(stream, cfg))
                 .collect::<Result<Vec<_>, _>>()?,
             norm_f_weight: GpuBuffer::zeros(stream, dm)?,
+            mlp: (0..cfg.n_layers)
+                .filter(|_| cfg.mlp_hidden() > 0)
+                .map(|_| {
+                    let h = cfg.mlp_hidden();
+                    Ok(GpuMamba3MlpWeights {
+                        norm_weight: GpuBuffer::zeros(stream, dm)?,
+                        fc1_w: GpuBuffer::zeros(stream, dm * 2 * h)?,
+                        fc2_w: GpuBuffer::zeros(stream, h * dm)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
         })
     }
 }
@@ -418,12 +446,22 @@ pub struct GpuMamba3LayerGrads {
     pub out_proj_w: GradSlice,
 }
 
+/// GPU gradients of one layer's gated MLP.
+pub struct GpuMamba3MlpGrads {
+    pub norm_weight: GradSlice,
+    pub fc1_w: GradSlice,
+    pub fc2_w: GradSlice,
+}
+
 /// GPU gradients for the full Mamba-3 backbone.
 pub struct GpuMamba3Grads {
     pub input_proj_w: GradSlice,
     pub input_proj_b: GradSlice,
     pub layers: Vec<GpuMamba3LayerGrads>,
     pub norm_f_weight: GradSlice,
+    /// The gated MLP of each layer, after every mixer gradient so those
+    /// keep their offsets; empty for a model without one.
+    pub mlp: Vec<GpuMamba3MlpGrads>,
     pub flat: GpuBuffer,
 }
 
@@ -436,7 +474,9 @@ impl GpuMamba3Grads {
         let nh = cfg.nheads();
         let ip = cfg.in_proj_out_dim();
         let per_layer = dm + dm * ip + nh + ds + ds + nh * ds + nh * ds + nh + di + di * dm;
-        let total = input_dim * dm + dm + cfg.n_layers * per_layer + dm;
+        let hidden = cfg.mlp_hidden();
+        let per_mlp = if hidden > 0 { dm + 3 * dm * hidden } else { 0 };
+        let total = input_dim * dm + dm + cfg.n_layers * (per_layer + per_mlp) + dm;
         let flat = GpuBuffer::zeros(stream, total)?;
         let base = flat.cached_ptr();
 
@@ -466,12 +506,21 @@ impl GpuMamba3Grads {
             });
         }
         let norm_f_weight = slice(dm);
+        let mlp = (0..cfg.n_layers)
+            .filter(|_| hidden > 0)
+            .map(|_| GpuMamba3MlpGrads {
+                norm_weight: slice(dm),
+                fc1_w: slice(dm * 2 * hidden),
+                fc2_w: slice(hidden * dm),
+            })
+            .collect();
 
         Ok(Self {
             input_proj_w,
             input_proj_b,
             layers,
             norm_f_weight,
+            mlp,
             flat,
         })
     }
