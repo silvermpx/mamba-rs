@@ -39,7 +39,7 @@ extern "C" __global__ void rmsnorm_forward(
 
     extern __shared__ float sdata[];
 
-    int off = b * dim;
+    long long off = (long long)b * dim;
 
     // Strided accumulation: each thread sums multiple elements when dim > blockDim.x
     float xh[RMSN_HOLD];
@@ -107,7 +107,7 @@ extern "C" __global__ void rmsnorm_forward_f32in_##SUFFIX(                   \
     if (b >= batch) return;                                                  \
     int d = threadIdx.x;                                                     \
     extern __shared__ float sdata[];                                         \
-    int off = b * dim;                                                       \
+    long long off = (long long)b * dim;                                      \
     float xh[RMSN_HOLD];                                                     \
     float sum = 0.0f;                                                        \
     _Pragma("unroll")                                                        \
@@ -175,7 +175,7 @@ extern "C" __global__ void rmsnorm_forward_resadd_f32in_##SUFFIX(            \
     if (b >= batch) return;                                                  \
     int d = threadIdx.x;                                                     \
     extern __shared__ float sdata[];                                         \
-    int off = b * dim;                                                       \
+    long long off = (long long)b * dim;                                      \
     float xh[RMSN_HOLD];                                                     \
     float sum = 0.0f;                                                        \
     _Pragma("unroll")                                                        \
@@ -256,7 +256,7 @@ extern "C" __global__ void rmsnorm_backward(
 
     extern __shared__ float sdata[];
 
-    int off = b * dim;
+    long long off = (long long)b * dim;
     float inv_rms = 1.0f / rms_saved[b];
 
     // Strided accumulation of dy * y_hat for the reduction
@@ -344,7 +344,7 @@ extern "C" __global__ void rmsnorm_backward_##SUFFIX(                          \
     if (b >= batch) return;                                                    \
     int d = threadIdx.x;                                                       \
     extern __shared__ float sdata[];                                           \
-    int off = b * dim;                                                         \
+    long long off = (long long)b * dim;                                        \
     float inv_rms = 1.0f / rms_saved[b];                                       \
     float sum = 0.0f;                                                          \
     for (int i = d; i < dim; i += blockDim.x) {                                \
@@ -416,7 +416,7 @@ extern "C" __global__ void rmsnorm_backward_f32in_##SUFFIX(                    \
     if (b >= batch) return;                                                    \
     int d = threadIdx.x;                                                       \
     extern __shared__ float sdata[];                                           \
-    int off = b * dim;                                                         \
+    long long off = (long long)b * dim;                                        \
     float inv_rms = 1.0f / rms_saved[b];                                       \
     float sum = 0.0f;                                                          \
     for (int i = d; i < dim; i += blockDim.x) {                                \

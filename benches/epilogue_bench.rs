@@ -25,7 +25,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::launch::grid_1d;
+use mamba_rs::gpu::launch::{grid_1d, grid_1d_wide};
 use stamp::bench_stamp;
 use timed::timed;
 
@@ -147,7 +147,7 @@ fn bench_epilogue_kernels_isolated() {
         let a = tbuf(&ctx, bt * DI, 2, dt);
         let b = tbuf(&ctx, bt * DI, 3, dt);
         let y = DtypedBuf::zeros(&ctx.stream, bt * DI, dt).unwrap();
-        let n = (bt * DI) as i32;
+        let n = (bt * DI) as i64;
         let (yp, ap, bp) = (y.cached_ptr(), a.cached_ptr(), b.cached_ptr());
         let f = k.elementwise_mul_typed.get(dt);
         let ms = timed(&ctx, 200, || {
@@ -156,7 +156,7 @@ fn bench_epilogue_kernels_isolated() {
             bld.arg(&ap);
             bld.arg(&bp);
             bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * DI)) }.unwrap();
+            unsafe { bld.launch(grid_1d_wide(bt * DI)) }.unwrap();
         });
         println!("  elementwise_mul_typed [bt*di]   {ms:.4} ms");
     }
@@ -165,7 +165,7 @@ fn bench_epilogue_kernels_isolated() {
     {
         let a = tbuf(&ctx, bt * DI, 4, dt);
         let y = DtypedBuf::zeros(&ctx.stream, bt * DI, dt).unwrap();
-        let n = (bt * DI) as i32;
+        let n = (bt * DI) as i64;
         let (yp, ap) = (y.cached_ptr(), a.cached_ptr());
         let f = k.softplus_copy_typed.get(dt);
         let ms = timed(&ctx, 200, || {
@@ -173,7 +173,7 @@ fn bench_epilogue_kernels_isolated() {
             bld.arg(&yp);
             bld.arg(&ap);
             bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * DI)) }.unwrap();
+            unsafe { bld.launch(grid_1d_wide(bt * DI)) }.unwrap();
         });
         println!("  softplus_copy_typed  [bt*di]    {ms:.4} ms");
     }
@@ -193,7 +193,7 @@ fn bench_epilogue_kernels_isolated() {
             bld.arg(&bp);
             bld.arg(&bt_i);
             bld.arg(&di_i);
-            unsafe { bld.launch(grid_1d(bt * DI)) }.unwrap();
+            unsafe { bld.launch(grid_1d_wide(bt * DI)) }.unwrap();
         });
         println!("  concat_halves_typed  [bt*2di]   {ms:.4} ms");
     }
@@ -202,7 +202,7 @@ fn bench_epilogue_kernels_isolated() {
     {
         let a = fbuf(&ctx, bt * DM, 7);
         let y = DtypedBuf::zeros(&ctx.stream, bt * DM, dt).unwrap();
-        let n = (bt * DM) as i32;
+        let n = (bt * DM) as i64;
         let (yp, ap) = (y.cached_ptr(), a.cached_ptr());
         let f = k.vec_cast_zplus_typed.get(dt);
         let ms = timed(&ctx, 200, || {
@@ -210,7 +210,7 @@ fn bench_epilogue_kernels_isolated() {
             bld.arg(&yp);
             bld.arg(&ap);
             bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * DM)) }.unwrap();
+            unsafe { bld.launch(grid_1d_wide(bt * DM)) }.unwrap();
         });
         println!("  vec_cast_zplus_typed [bt*dm]    {ms:.4} ms");
     }
@@ -220,7 +220,7 @@ fn bench_epilogue_kernels_isolated() {
         let a = tbuf(&ctx, bt * DM, 8, dt);
         let b = tbuf(&ctx, bt * DM, 9, dt);
         let y = DtypedBuf::zeros(&ctx.stream, bt * DM, dt).unwrap();
-        let n = (bt * DM) as i32;
+        let n = (bt * DM) as i64;
         let (yp, ap, bp) = (y.cached_ptr(), a.cached_ptr(), b.cached_ptr());
         let f = k.residual_add_typed.get(dt);
         let ms = timed(&ctx, 200, || {
@@ -229,7 +229,7 @@ fn bench_epilogue_kernels_isolated() {
             bld.arg(&ap);
             bld.arg(&bp);
             bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * DM)) }.unwrap();
+            unsafe { bld.launch(grid_1d_wide(bt * DM)) }.unwrap();
         });
         println!("  residual_add_typed   [bt*dm]    {ms:.4} ms");
     }

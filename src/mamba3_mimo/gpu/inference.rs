@@ -25,7 +25,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d, grid_norm, validate_rows_capacity};
+use crate::gpu::launch::{grid_1d, grid_norm, launch_elems, validate_rows_capacity};
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 
@@ -660,24 +660,16 @@ impl Mamba3MimoGpuEngine {
 
     /// `temporal += out` for `n` values, `out` in the activation dtype.
     fn residual_add(&self, temporal: u64, out: u64, n: usize) -> Result<(), String> {
-        let stream = &self.ctx.stream;
-        let n_i = n as i32;
-        let mut bld = if self.act == WeightDtype::F32 {
-            let mut bld = stream.launch_builder(&self.ctx.kernels.vec_add_inplace);
-            bld.arg(&temporal);
-            bld
+        let k = &self.ctx.kernels;
+        let (f, ptrs): (_, &[u64]) = if self.act == WeightDtype::F32 {
+            (&k.vec_add_inplace, &[temporal, out])
         } else {
-            let mut bld =
-                stream.launch_builder(self.ctx.kernels.residual_add_f32_typed.get(self.act));
-            bld.arg(&temporal);
-            bld.arg(&temporal);
-            bld
+            (
+                k.residual_add_f32_typed.get(self.act),
+                &[temporal, temporal, out],
+            )
         };
-        bld.arg(&out);
-        bld.arg(&n_i);
-        unsafe { bld.launch(grid_1d(n)) }
-            .map(|_| ())
-            .map_err(|e| format!("MIMO residual: {e:?}"))
+        launch_elems(&self.ctx.stream, f, ptrs, n, format_args!("MIMO residual"))
     }
 
     /// One layer's scan over the window by the chunked path.

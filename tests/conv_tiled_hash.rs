@@ -94,7 +94,7 @@ fn run(dtype: WeightDtype) {
         bld.arg(&dii);
         bld.arg(&dci);
         bld.arg(&dii); // x row stride: a contiguous x here
-        unsafe { bld.launch(grid_conv_fwd_tiled(b, di, t)) }.unwrap();
+        unsafe { bld.launch(grid_conv_fwd_tiled(b, di, t).unwrap()) }.unwrap();
     }
     {
         let mut bld = ctx
@@ -125,7 +125,7 @@ fn run(dtype: WeightDtype) {
         bld.arg(&stride);
         bld.arg(&off);
         bld.arg(&dii); // x row stride
-        unsafe { bld.launch(grid_conv_tiled(b, di, t)) }.unwrap();
+        unsafe { bld.launch(grid_conv_tiled(b, di, t).unwrap()) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
 

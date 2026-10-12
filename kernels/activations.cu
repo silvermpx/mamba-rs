@@ -7,16 +7,25 @@
 
 #include "_typed_prelude.cuh"
 
+// The element index of this thread and the grid's stride. The element
+// kernels below take 64-bit counts and stride over them, so a window past
+// 2^31 elements runs whole; below that every element keeps its thread.
+#ifndef ELEM_LOOP
+#define ELEM_LOOP(I, N)                                                         \
+    for (long long I = (long long)blockIdx.x * blockDim.x + threadIdx.x;       \
+         I < (N); I += (long long)gridDim.x * blockDim.x)
+#endif
+
 // ===================== SiLU forward (templated) =====================
 
 // ===================== Softplus forward (templated) =====================
 
 #define DEFINE_SOFTPLUS_FWD(SUFFIX, T, FROM_F)                            \
-extern "C" __global__ void softplus_forward_##SUFFIX(T* x, int n) {       \
-    int i = blockIdx.x * blockDim.x + threadIdx.x;                        \
-    if (i >= n) return;                                                   \
-    float v = to_f(x[i]);                                                 \
-    x[i] = FROM_F(v > 20.0f ? v : log1pf(exp2f(v * LOG2E)));         \
+extern "C" __global__ void softplus_forward_##SUFFIX(T* x, long long n) { \
+    ELEM_LOOP(i, n) {                                                     \
+        float v = to_f(x[i]);                                             \
+        x[i] = FROM_F(v > 20.0f ? v : log1pf(exp2f(v * LOG2E)));          \
+    }                                                                     \
 }
 
 DEFINE_SOFTPLUS_FWD(f32,  float,         from_f_f32)
@@ -35,7 +44,7 @@ extern "C" __global__ void softplus_forward_tmajor_##SUFFIX(              \
     int T_len, int d, int tstride                                         \
 ) {                                                                       \
     __shared__ T tile[SOFTPLUS_TILE][SOFTPLUS_TILE + 1];                  \
-    int b = blockIdx.z;                                                   \
+    long long b = blockIdx.z;                                             \
     int t0 = blockIdx.y * SOFTPLUS_TILE;                                  \
     int d0 = blockIdx.x * SOFTPLUS_TILE;                                  \
     for (int r = threadIdx.y; r < SOFTPLUS_TILE; r += blockDim.y) {       \
@@ -72,7 +81,7 @@ extern "C" __global__ void gate_from_tmajor_##SUFFIX(                     \
     int T_len, int d, int tstride, int gate_stride                        \
 ) {                                                                       \
     __shared__ T tile[SOFTPLUS_TILE][SOFTPLUS_TILE + 1];                  \
-    int b = blockIdx.z;                                                   \
+    long long b = blockIdx.z;                                             \
     int t0 = blockIdx.y * SOFTPLUS_TILE;                                  \
     int d0 = blockIdx.x * SOFTPLUS_TILE;                                  \
     for (int r = threadIdx.y; r < SOFTPLUS_TILE; r += blockDim.y) {       \
@@ -101,11 +110,11 @@ DEFINE_GATE_FROM_TMAJOR(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_GATE_FROM_TMAJOR(f16,  __half,        from_f_f16)
 
 // Untyped f32 entry: the training and prefill paths load it as softplus_fwd.
-extern "C" __global__ void softplus_forward(float* x, int n) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    float v = x[i];
-    x[i] = v > 20.0f ? v : log1pf(exp2f(v * LOG2E));
+extern "C" __global__ void softplus_forward(float* x, long long n) {
+    ELEM_LOOP(i, n) {
+        float v = x[i];
+        x[i] = v > 20.0f ? v : log1pf(exp2f(v * LOG2E));
+    }
 }
 
 // ===================== Backward (legacy f32 + typed variants) =====================
@@ -113,21 +122,19 @@ extern "C" __global__ void softplus_forward(float* x, int n) {
 // Typed variants exist for future use and parity testing.
 
 extern "C" __global__ void softplus_backward(
-    float* dx, const float* x_saved, const float* dy, int n
+    float* dx, const float* x_saved, const float* dy, long long n
 ) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    dx[i] = dy[i] / (1.0f + exp2f(-x_saved[i] * LOG2E));
+    ELEM_LOOP(i, n) dx[i] = dy[i] / (1.0f + exp2f(-x_saved[i] * LOG2E));
 }
 
 #define DEFINE_SOFTPLUS_BWD(SUFFIX, T, FROM_F)                            \
 extern "C" __global__ void softplus_backward_##SUFFIX(                    \
-    T* dx, const T* x_saved, const T* dy, int n                           \
+    T* dx, const T* x_saved, const T* dy, long long n                     \
 ) {                                                                       \
-    int i = blockIdx.x * blockDim.x + threadIdx.x;                        \
-    if (i >= n) return;                                                   \
-    float xs = to_f(x_saved[i]);                                          \
-    dx[i] = FROM_F(to_f(dy[i]) / (1.0f + exp2f(-xs * LOG2E)));            \
+    ELEM_LOOP(i, n) {                                                     \
+        float xs = to_f(x_saved[i]);                                      \
+        dx[i] = FROM_F(to_f(dy[i]) / (1.0f + exp2f(-xs * LOG2E)));        \
+    }                                                                     \
 }
 
 DEFINE_SOFTPLUS_BWD(f32,  float,         from_f_f32)

@@ -21,7 +21,7 @@ use super::weights::{GpuMambaTrainLayerWeights, GpuMambaTrainWeights};
 use crate::gpu::blas::gpu_gemm_bi_forward_raw;
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
-use crate::gpu::launch::{grid_1d, grid_norm, grid_parallel_scan};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm, grid_parallel_scan};
 use cudarc::driver::PushKernelArg;
 use std::sync::Arc;
 
@@ -101,7 +101,36 @@ impl GpuMambaDims {
                 self.xdbl_dim, self.dt_rank, self.d_state
             ));
         }
-        Ok(())
+        self.check_int_args()
+    }
+
+    /// Refuse dims whose 32-bit kernel arguments would wrap: the kernels
+    /// index every tensor with 64 bits, but take the dimensions, the row
+    /// count of a window, its row widths (the in_proj row of two inner
+    /// widths, the t-major row of the parallel scan) and the conv tap
+    /// rows as `int`s.
+    pub fn check_int_args(&self) -> Result<(), String> {
+        crate::gpu::launch::check_int_args(&[
+            ("batch", self.batch),
+            ("seq_len", self.seq_len),
+            (
+                "batch * seq_len rows",
+                self.batch.saturating_mul(self.seq_len),
+            ),
+            ("t-major row", self.seq_len.saturating_add(7)),
+            ("d_model", self.d_model),
+            ("input width", self.mamba_input_dim),
+            ("in_proj row", self.d_inner.saturating_mul(2)),
+            ("x_proj row", self.xdbl_dim),
+            (
+                "conv taps of all channels",
+                self.d_inner.saturating_mul(self.d_conv),
+            ),
+            (
+                "states of all channels",
+                self.d_inner.saturating_mul(self.d_state),
+            ),
+        ])
     }
 
     /// `B * T` — total number of (sample, timestep) pairs.
@@ -525,7 +554,7 @@ pub fn gpu_forward_mamba_layer(
         builder.arg(&xdbl_i);
         builder.arg(&dt_i);
         builder.arg(&offset);
-        unsafe { builder.launch(grid_1d(bt * dt_rank)) }
+        unsafe { builder.launch(grid_1d_wide(bt * dt_rank)) }
             .map_err(|e| format!("gather_cols dt mamba: {:?}", e))?;
     }
 
@@ -584,7 +613,7 @@ pub fn gpu_forward_mamba_layer(
         builder.arg(&ds_i);
         builder.arg(&b_offset);
         builder.arg(&c_offset);
-        unsafe { builder.launch(grid_1d(bt * ds)) }
+        unsafe { builder.launch(grid_1d_wide(bt * ds)) }
             .map_err(|e| format!("gather_bc_cols fwd mamba: {:?}", e))?;
     }
 
@@ -643,7 +672,7 @@ pub fn gpu_forward_mamba_layer(
             builder.arg(&t_i);
             builder.arg(&di_i);
             builder.arg(&ds_i);
-            unsafe { builder.launch(grid_1d(b * di)) }
+            unsafe { builder.launch(grid_1d_cover(b * di)?) }
                 .map_err(|e| format!("ssm_burnin_fwd mamba: {:?}", e))?;
         }
     }
@@ -653,7 +682,7 @@ pub fn gpu_forward_mamba_layer(
     // half of the in_proj output through the row stride.
     // ===================================================================
     {
-        let n = (bt * di) as i32;
+        let n = (bt * di) as i64;
         let di_i = di as i32;
         let gate_stride = (2 * di) as i32;
         let gate_off = di as i32;
@@ -665,7 +694,7 @@ pub fn gpu_forward_mamba_layer(
         builder.arg(&di_i);
         builder.arg(&gate_stride);
         builder.arg(&gate_off);
-        unsafe { builder.launch(grid_1d(bt * di)) }
+        unsafe { builder.launch(grid_1d_wide(bt * di)) }
             .map_err(|e| format!("gate_mul_silu mamba: {:?}", e))?;
     }
 
@@ -686,16 +715,17 @@ pub fn gpu_forward_mamba_layer(
     // F6: Residual add — write the NEXT layer's residual slot (or
     // norm_f_input for the last layer) directly, no temporal round trip
     // ===================================================================
-    {
-        let n = (bt * dm) as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.residual_add);
-        builder.arg(&stream_out);
-        builder.arg(acts.residual.inner());
-        builder.arg(scratch.out_flat.inner());
-        builder.arg(&n);
-        unsafe { builder.launch(grid_1d(bt * dm)) }
-            .map_err(|e| format!("residual_add mamba: {:?}", e))?;
-    }
+    crate::gpu::launch::launch_elems(
+        &ctx.stream,
+        &ctx.kernels.residual_add,
+        &[
+            stream_out,
+            acts.residual.cached_ptr(),
+            scratch.out_flat.cached_ptr(),
+        ],
+        bt * dm,
+        format_args!("residual_add mamba"),
+    )?;
 
     Ok(())
 }
@@ -995,7 +1025,7 @@ pub fn gpu_forward_mamba_target_burnin(
             builder.arg(&xdbl_i);
             builder.arg(&dt_i);
             builder.arg(&offset);
-            unsafe { builder.launch(grid_1d(bt * dt_rank)) }
+            unsafe { builder.launch(grid_1d_wide(bt * dt_rank)) }
                 .map_err(|e| format!("gather dt target L{layer_idx}: {:?}", e))?;
         }
         gpu_gemm_bi_forward_raw(
@@ -1020,11 +1050,11 @@ pub fn gpu_forward_mamba_target_burnin(
             unsafe { builder.launch(crate::gpu::launch::grid_tmajor_tiles(b, t, di)) }
                 .map_err(|e| format!("softplus_tmajor target L{layer_idx}: {:?}", e))?;
         } else {
-            let n = (bt * di) as i32;
+            let n = (bt * di) as i64;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.softplus_fwd);
             builder.arg(scratch.delta.inner_mut());
             builder.arg(&n);
-            unsafe { builder.launch(grid_1d(bt * di)) }
+            unsafe { builder.launch(grid_1d_wide(bt * di)) }
                 .map_err(|e| format!("softplus target L{layer_idx}: {:?}", e))?;
         }
 
@@ -1055,7 +1085,7 @@ pub fn gpu_forward_mamba_target_burnin(
             builder.arg(&ds_i);
             builder.arg(&b_offset);
             builder.arg(&c_offset);
-            unsafe { builder.launch(grid_1d(bt * ds)) }
+            unsafe { builder.launch(grid_1d_wide(bt * ds)) }
                 .map_err(|e| format!("gather_bc_cols target L{layer_idx}: {:?}", e))?;
         }
         // SSM burnin nosave: parallel scan for T > threshold, sequential otherwise.
@@ -1130,7 +1160,7 @@ pub fn gpu_forward_mamba_target_burnin(
                 builder.arg(&t_i);
                 builder.arg(&di_i);
                 builder.arg(&ds_i);
-                unsafe { builder.launch(grid_1d(b * di)) }
+                unsafe { builder.launch(grid_1d_cover(b * di)?) }
                     .map_err(|e| format!("ssm_nosave target L{layer_idx}: {:?}", e))?;
             }
         }
@@ -1147,15 +1177,13 @@ pub fn gpu_forward_mamba_target_burnin(
 
         // === F6: residual add — temporal = residual + out_proj ===
         // out_flat already has out_proj result. Add residual in-place.
-        {
-            let n = (bt * dm) as i32;
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.vec_add_inplace);
-            builder.arg(scratch.out_flat.inner_mut());
-            builder.arg(scratch.residual.inner());
-            builder.arg(&n);
-            unsafe { builder.launch(grid_1d(bt * dm)) }
-                .map_err(|e| format!("residual target L{layer_idx}: {:?}", e))?;
-        }
+        crate::gpu::launch::launch_elems(
+            &ctx.stream,
+            &ctx.kernels.vec_add_inplace,
+            &[scratch.out_flat.cached_ptr(), scratch.residual.cached_ptr()],
+            bt * dm,
+            format_args!("residual target L{layer_idx}"),
+        )?;
     }
 
     // Final RmsNorm (norm_f) after all Mamba layers — applied to all B*T timesteps

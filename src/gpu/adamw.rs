@@ -44,7 +44,7 @@ use cudarc::driver::{CudaFunction, CudaStream, PushKernelArg};
 
 use crate::gpu::buffers::{GpuBuffer, GradSlice};
 use crate::gpu::context::GpuCtx;
-use crate::gpu::launch::grid_1d;
+use crate::gpu::launch::grid_1d_wide;
 
 /// 2-element device buffer holding `[bias_c1, bias_c2]` for the
 /// CUDA-Graph-capturable AdamW kernel. CPU writes the next-step values
@@ -302,8 +302,8 @@ impl GpuAdamW {
         if len == 0 {
             return Ok(());
         }
-        let n = len as i32;
-        let cfg = grid_1d(len);
+        let n = i64::try_from(len).map_err(|_| format!("adamw_step_f32: {len} elements"))?;
+        let cfg = grid_1d_wide(len);
         let mut bld = ctx.stream.launch_builder(adamw_kernel);
         bld.arg(&ptrs.weight);
         bld.arg(&ptrs.grad);
@@ -358,8 +358,9 @@ impl GpuAdamW {
         if len == 0 {
             return Ok(());
         }
-        let n = len as i32;
-        let cfg = grid_1d(len);
+        let n =
+            i64::try_from(len).map_err(|_| format!("adamw_step_f32_capturable: {len} elements"))?;
+        let cfg = grid_1d_wide(len);
         let mut bld = ctx.stream.launch_builder(adamw_kernel);
         bld.arg(&ptrs.weight);
         bld.arg(&ptrs.grad);

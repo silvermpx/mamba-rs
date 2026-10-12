@@ -561,22 +561,19 @@ pub fn gpu_forward_mamba3_layer_mixed(
 
         // Kernel 0: adt = a_val · dt → adt_temp_scratch.
         {
-            let (kern, count) = super::forward::adt_multiply_launch(
-                m3k,
-                bt * nh,
-                &[
-                    adt_temp_scratch.cached_ptr(),
-                    acts.a_val.cached_ptr(),
-                    acts.dt.cached_ptr(),
-                ],
-            );
-            let n_total = count as i32;
-            let mut bld = ctx.stream.launch_builder(kern);
-            bld.arg(adt_temp_scratch.inner_mut());
-            bld.arg(acts.a_val.inner());
-            bld.arg(acts.dt.inner());
-            bld.arg(&n_total);
-            unsafe { bld.launch(grid_1d(count)) }.map_err(|e| format!("m3_mixed F6 adt: {e:?}"))?;
+            let ptrs = [
+                adt_temp_scratch.cached_ptr(),
+                acts.a_val.cached_ptr(),
+                acts.dt.cached_ptr(),
+            ];
+            let (kern, count) = super::forward::adt_multiply_launch(m3k, bt * nh, &ptrs);
+            crate::gpu::launch::launch_elems(
+                &ctx.stream,
+                kern,
+                &ptrs,
+                count,
+                format_args!("m3_mixed F6 adt"),
+            )?;
         }
 
         // K2: m3_dA_cumsum (pure f32) — adt → da_cumsum_saved, for the
@@ -882,21 +879,17 @@ pub fn gpu_forward_mamba3_layer_mixed(
         None,
         (bt, di, dm),
     )?;
-    {
-        let n = (bt * dm) as i32;
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.residual_add_f32_typed.get(dtype));
-        let dst = stream_out;
-        let a = acts.residual.cached_ptr();
-        let b = out_flat_scratch.cached_ptr();
-        bld.arg(&dst);
-        bld.arg(&a);
-        bld.arg(&b);
-        bld.arg(&n);
-        unsafe { bld.launch(grid_1d(bt * dm)) }
-            .map_err(|e| format!("m3_mixed F8 residual_add: {e:?}"))?;
-    }
+    crate::gpu::launch::launch_elems(
+        &ctx.stream,
+        m3k.residual_add_f32_typed.get(dtype),
+        &[
+            stream_out,
+            acts.residual.cached_ptr(),
+            out_flat_scratch.cached_ptr(),
+        ],
+        bt * dm,
+        format_args!("m3_mixed F8 residual_add"),
+    )?;
 
     Ok(())
 }
@@ -1291,16 +1284,13 @@ fn mixed_mlp_forward(
         None,
         (bt, h, dm),
     )?;
-    let ne = (bt * dm) as i32;
-    let mut add = ctx
-        .stream
-        .launch_builder(m3k.residual_add_f32_typed.get(dtype));
-    add.arg(&stream_out);
-    add.arg(&x_in);
-    add.arg(&out);
-    add.arg(&ne);
-    unsafe { add.launch(grid_1d(bt * dm)) }.map_err(|e| format!("m3_mixed MLP residual: {e:?}"))?;
-    Ok(())
+    crate::gpu::launch::launch_elems(
+        &ctx.stream,
+        m3k.residual_add_f32_typed.get(dtype),
+        &[stream_out, x_in, out],
+        bt * dm,
+        format_args!("m3_mixed MLP residual"),
+    )
 }
 
 /// The weights and the activations built for them must agree on the gated

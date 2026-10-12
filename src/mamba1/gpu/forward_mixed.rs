@@ -25,7 +25,7 @@ use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_norm};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm};
 use crate::mamba1::gpu::forward::{GpuMambaDims, GpuRecurrentState};
 use crate::mamba1::gpu::weights::GpuMambaMixedWeights;
 use crate::mamba1::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
@@ -548,7 +548,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
             bld.arg(&xdbl_i);
             bld.arg(&dt_i);
             bld.arg(&offset);
-            unsafe { bld.launch(grid_1d(bt * dt_rank)) }
+            unsafe { bld.launch(grid_1d_wide(bt * dt_rank)) }
                 .map_err(|e| format!("gather_cols dt typed L{layer_idx}: {e:?}"))?;
         }
         gpu_gemm_typed_forward_raw(
@@ -603,7 +603,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
             bld.arg(&ds_i);
             bld.arg(&b_off);
             bld.arg(&c_off);
-            unsafe { bld.launch(grid_1d(bt * ds)) }
+            unsafe { bld.launch(grid_1d_wide(bt * ds)) }
                 .map_err(|e| format!("gather_bc_cols typed L{layer_idx}: {e:?}"))?;
         }
         // SSM forward: parallel prefix scan for T > PARALLEL_SCAN_THRESHOLD
@@ -682,7 +682,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 bld.arg(&t_i);
                 bld.arg(&di_i);
                 bld.arg(&ds_i);
-                unsafe { bld.launch(grid_1d(b * di)) }
+                unsafe { bld.launch(grid_1d_cover(b * di)?) }
                     .map_err(|e| format!("ssm_burnin_forward typed L{layer_idx}: {e:?}"))?;
             }
         }
@@ -703,7 +703,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
             } else {
                 (k.gate_mul_silu_typed.get(dt), bt * di)
             };
-            let n = count as i32;
+            let n = count as i64;
             let di_i = di as i32;
             let gate_stride = (2 * di) as i32;
             let gate_off = di as i32;
@@ -715,7 +715,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
             bld.arg(&di_i);
             bld.arg(&gate_stride);
             bld.arg(&gate_off);
-            unsafe { bld.launch(grid_1d(count)) }
+            unsafe { bld.launch(grid_1d_wide(count)) }
                 .map_err(|e| format!("gate_mul_silu_typed L{layer_idx}: {e:?}"))?;
         }
 
@@ -746,18 +746,18 @@ pub fn gpu_forward_mamba_backbone_mixed(
         } else {
             acts.norm_f_input.cached_ptr()
         };
-        {
-            let n = (bt * dm) as i32;
-            let mut bld = ctx.stream.launch_builder(k.residual_add_f32_typed.get(dt));
-            let cur_res = acts.layers[layer_idx].residual.cached_ptr();
-            let of = scratch.out_flat.cached_ptr();
-            bld.arg(&next_res_ptr); // dst f32
-            bld.arg(&cur_res); // a f32
-            bld.arg(&of); // b typed
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * dm)) }
-                .map_err(|e| format!("residual_add_f32_typed L{layer_idx}: {e:?}"))?;
-        }
+        // dst f32, a f32, b typed.
+        crate::gpu::launch::launch_elems(
+            &ctx.stream,
+            k.residual_add_f32_typed.get(dt),
+            &[
+                next_res_ptr,
+                acts.layers[layer_idx].residual.cached_ptr(),
+                scratch.out_flat.cached_ptr(),
+            ],
+            bt * dm,
+            format_args!("residual_add_f32_typed L{layer_idx}"),
+        )?;
     }
 
     // ─── Final norm_f: residual_f32 → temporal_typed via rmsnorm_fwd_f32in_typed.

@@ -168,9 +168,22 @@
   on every instruction set. They used the instruction set's horizontal
   add and its own exponential polynomial, so NEON, AVX2 and AVX-512
   machines disagreed. On some machines their bits differ from 0.7.5.
+- The Mamba-1 kernels and the element kernels the families share index
+  with 64 bits, so a window is bounded by device memory, not by 2^31
+  elements. `gpu::launch::validate_kernel_arg_capacity` is gone:
+  `GpuMambaDims::check_int_args` refuses only the dimensions, row counts
+  and row widths the kernels still take as 32-bit ints, and every Mamba-1
+  entry calls it. `gpu::launch` gains `grid_1d_cover` and `check_int_args`,
+  and `grid_conv_fwd_tiled` and `grid_conv_tiled` return a `Result` that
+  names a grid past its extent.
 
 ### Fixed
 
+- The Mamba-1 prefill, decode and training indexed in 32 bits, and only the
+  trainer checked a size: a prompt or a batch past 2^31 elements in one
+  tensor read and wrote the wrong elements without an error.
+- The chunked backward of MIMO could not launch on an RTX 4090 or RTX 6000
+  Ada: its pair-gradient kernel took more registers than its block allows.
 - A NaN in Mamba-3's `dd_A` reached the state as the finite decay
   `-a_floor`, because the clamp returned its non-NaN operand. The NaN now
   goes through, as the reference's `torch.clamp` lets it.

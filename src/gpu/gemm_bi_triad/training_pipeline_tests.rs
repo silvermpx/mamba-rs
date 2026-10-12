@@ -1115,8 +1115,8 @@ mod cuda_qualification {
         ];
         if observed != [ptrs.weight, ptrs.grad, ptrs.m, ptrs.v]
             || kernel_argument::<sys::CUdeviceptr>(arguments, 9)? != fixture.bias.ptr()
-            || kernel_argument::<i32>(arguments, 10)?
-                != i32::try_from(len).map_err(|_| "AdamW length exceeds i32")?
+            || kernel_argument::<i64>(arguments, 10)?
+                != i64::try_from(len).map_err(|_| "AdamW length exceeds i64")?
         {
             return Err("AdamW graph argument identity changed".into());
         }

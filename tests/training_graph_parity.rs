@@ -368,21 +368,21 @@ fn recompute_a_neg_eager_test(ctx: &GpuCtx, setup: &mut Setup) {
     if per_layer == 0 {
         return;
     }
-    let n_i32 = per_layer as i32;
+    let n = per_layer as i64;
     for (li, mw) in setup.weights.master.layers.iter().enumerate() {
         let src = mw.a_log.cached_ptr();
         let dst_a = setup.a_neg_all.inner_at(li * per_layer);
         let mut b1 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
         b1.arg(&dst_a);
         b1.arg(&src);
-        b1.arg(&n_i32);
-        unsafe { b1.launch(mamba_rs::gpu::launch::grid_1d(per_layer)) }.unwrap();
+        b1.arg(&n);
+        unsafe { b1.launch(mamba_rs::gpu::launch::grid_1d_wide(per_layer)) }.unwrap();
         let dst_s = setup.state.a_neg_all.inner_at(li * per_layer);
         let mut b2 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
         b2.arg(&dst_s);
         b2.arg(&src);
-        b2.arg(&n_i32);
-        unsafe { b2.launch(mamba_rs::gpu::launch::grid_1d(per_layer)) }.unwrap();
+        b2.arg(&n);
+        unsafe { b2.launch(mamba_rs::gpu::launch::grid_1d_wide(per_layer)) }.unwrap();
     }
 }
 

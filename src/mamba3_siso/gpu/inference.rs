@@ -967,19 +967,16 @@ impl Mamba3GpuEngine {
         }?;
 
         // F9: Residual add - temporal (pre-norm stream) += block output.
-        {
-            let n = b * dm;
-            let n_i = n as i32;
-            let grid = crate::gpu::launch::grid_1d(n);
-            let mut builder = self
-                .ctx
-                .stream
-                .launch_builder(&self.kernels.vec_add_inplace);
-            builder.arg(scratch.temporal.inner());
-            builder.arg(scratch.post_norm.inner());
-            builder.arg(&n_i);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F9 residual: {e:?}"))?;
-        }
+        crate::gpu::launch::launch_elems(
+            &self.ctx.stream,
+            &self.kernels.vec_add_inplace,
+            &[
+                scratch.temporal.cached_ptr(),
+                scratch.post_norm.cached_ptr(),
+            ],
+            b * dm,
+            format_args!("F9 residual"),
+        )?;
 
         Ok(())
     }
@@ -1047,19 +1044,16 @@ impl Mamba3GpuEngine {
                 (b, h, dm),
             )
         }?;
-        {
-            let n = b * dm;
-            let n_i = n as i32;
-            let grid = crate::gpu::launch::grid_1d(n);
-            let mut builder = self
-                .ctx
-                .stream
-                .launch_builder(&self.kernels.vec_add_inplace);
-            builder.arg(scratch.temporal.inner());
-            builder.arg(scratch.post_norm.inner());
-            builder.arg(&n_i);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("mlp residual: {e:?}"))?;
-        }
+        crate::gpu::launch::launch_elems(
+            &self.ctx.stream,
+            &self.kernels.vec_add_inplace,
+            &[
+                scratch.temporal.cached_ptr(),
+                scratch.post_norm.cached_ptr(),
+            ],
+            b * dm,
+            format_args!("mlp residual"),
+        )?;
         Ok(())
     }
 
@@ -1776,20 +1770,14 @@ impl Mamba3GpuEngineMixed {
 
             // F9: residual_add_f32_typed — residual (f32) += temporal (half), stays f32.
             {
-                let n = (b * dm) as i32;
-                let grid = grid_1d(b * dm);
-                let mut bld = engine
-                    .ctx
-                    .stream
-                    .launch_builder(k.residual_add_f32_typed.get(dt));
                 let r_ptr = scratch.residual.cached_ptr();
-                let t_ptr = scratch.temporal.cached_ptr();
-                bld.arg(&r_ptr);
-                bld.arg(&r_ptr);
-                bld.arg(&t_ptr);
-                bld.arg(&n);
-                unsafe { bld.launch(grid) }
-                    .map_err(|e| format!("M3 F9 residual_add_f32: {e:?}"))?;
+                crate::gpu::launch::launch_elems(
+                    &engine.ctx.stream,
+                    k.residual_add_f32_typed.get(dt),
+                    &[r_ptr, r_ptr, scratch.temporal.cached_ptr()],
+                    b * dm,
+                    format_args!("M3 F9 residual_add_f32"),
+                )?;
             }
 
             // The MLP branch of a model that has one: norm2 of the f32
@@ -1866,19 +1854,14 @@ impl Mamba3GpuEngineMixed {
                     None,
                     (b, h, dm),
                 )?;
-                let n = (b * dm) as i32;
-                let mut bld = engine
-                    .ctx
-                    .stream
-                    .launch_builder(k.residual_add_f32_typed.get(dt));
                 let r_ptr = scratch.residual.cached_ptr();
-                let t_ptr = scratch.temporal.cached_ptr();
-                bld.arg(&r_ptr);
-                bld.arg(&r_ptr);
-                bld.arg(&t_ptr);
-                bld.arg(&n);
-                unsafe { bld.launch(grid_1d(b * dm)) }
-                    .map_err(|e| format!("M3 mlp residual: {e:?}"))?;
+                crate::gpu::launch::launch_elems(
+                    &engine.ctx.stream,
+                    k.residual_add_f32_typed.get(dt),
+                    &[r_ptr, r_ptr, scratch.temporal.cached_ptr()],
+                    b * dm,
+                    format_args!("M3 mlp residual"),
+                )?;
             }
         }
 

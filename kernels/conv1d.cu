@@ -41,13 +41,13 @@ extern "C" __global__ void conv1d_step_forward_silu_##SUFFIX(               \
     const float* __restrict__ bias,                                        \
     int batch, int d_inner, int d_conv                                     \
 ) {                                                                        \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                       \
-    int total = batch * d_inner;                                           \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;      \
+    long long total = (long long)batch * d_inner;                          \
     if (idx >= total) return;                                              \
-    int b = idx / d_inner;                                                 \
-    int d = idx % d_inner;                                                 \
-    int x_idx = b * x_stride + d;                                          \
-    int state_base = (b * d_inner + d) * d_conv;                           \
+    long long b = idx / d_inner;                                           \
+    int d = (int)(idx % d_inner);                                          \
+    long long x_idx = b * x_stride + d;                                    \
+    long long state_base = (b * d_inner + d) * d_conv;                     \
     /* Registerized d_conv == 4 fast path - see the note above. */          \
     if (d_conv == 4) {                                                     \
         float s0 = state[state_base + 1];                                  \
@@ -113,11 +113,11 @@ void conv1d_burnin_backward_##SUFFIX(                                          \
     const float* __restrict__ weight,                                          \
     int batch, int T_, int d_inner, int d_conv                                 \
 ) {                                                                            \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
-    int total = batch * d_inner;                                               \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;          \
+    long long total = (long long)batch * d_inner;                              \
     if (idx >= total) return;                                                  \
-    int b = idx / d_inner;                                                     \
-    int d = idx % d_inner;                                                     \
+    long long b = idx / d_inner;                                               \
+    int d = (int)(idx % d_inner);                                              \
     float carry[8];                                                            \
     if (d_conv > 8) return;                                                    \
     for (int k = 0; k < d_conv - 1; k++) carry[k] = 0.0f;                      \
@@ -125,13 +125,13 @@ void conv1d_burnin_backward_##SUFFIX(                                          \
     for (int k = 0; k < d_conv; k++) local_d_weight[k] = 0.0f;                 \
     float local_d_bias = 0.0f;                                                 \
     for (int t = T_ - 1; t >= 0; t--) {                                        \
-        int bt_di = (b * T_ + t) * d_inner + d;                                \
+        long long bt_di = (b * T_ + t) * d_inner + d;                          \
         float x = to_f(post_conv[bt_di]);                                      \
         float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));           \
         float silu_grad = sig * (1.0f + x * (1.0f - sig));                     \
         float d_conv_out = to_f(d_u[bt_di]) * silu_grad;                       \
         float dxb = d_conv_out * weight[d * d_conv + d_conv - 1];              \
-        int cs_base = ((b * T_ + t) * d_inner + d) * d_conv;                   \
+        long long cs_base = ((b * T_ + t) * d_inner + d) * d_conv;             \
         for (int k = 0; k < d_conv; k++) {                                     \
             local_d_weight[k] += d_conv_out * conv_states[cs_base + k];        \
         }                                                                      \
@@ -148,7 +148,7 @@ void conv1d_burnin_backward_##SUFFIX(                                          \
         d_x_branch[bt_di] = FROM_F(dxb);                                       \
     }                                                                          \
     /* Rule B stage-1 output: single per-(b,d) write. */                       \
-    int wp_base = (b * d_inner + d) * d_conv;                                  \
+    long long wp_base = (b * d_inner + d) * d_conv;                            \
     for (int k = 0; k < d_conv; k++) {                                         \
         d_weight_partials[wp_base + k] = local_d_weight[k];                    \
     }                                                                          \
@@ -250,16 +250,16 @@ extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
     int x_stride /* row stride of x_branch: d_inner, or 2*d_inner when        \
                     reading the in_proj output directly */                    \
 ) {                                                                          \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                         \
-    int total = batch * d_inner;                                             \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;        \
+    long long total = (long long)batch * d_inner;                            \
     if (idx >= total) return;                                                \
     if (d_conv > 8) return;                                                  \
-    int b = idx / d_inner;                                                   \
-    int d = idx % d_inner;                                                   \
+    long long b = idx / d_inner;                                             \
+    int d = (int)(idx % d_inner);                                            \
     int t0 = blockIdx.y * CONV1D_FWD_TILE_T;                                 \
     if (t0 >= T_len) return;                                                 \
     int t_end = min(t0 + CONV1D_FWD_TILE_T, T_len);                          \
-    int state_base = (b * d_inner + d) * d_conv;                             \
+    long long state_base = (b * d_inner + d) * d_conv;                       \
     float win[8];                                                            \
     if (t0 == 0) {                                                           \
         for (int k = 0; k < d_conv; k++) {                                   \
@@ -324,16 +324,16 @@ extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
                      reading the in_proj output directly */                  \
     int u_t_stride /* row stride of u_t, a multiple of eight */              \
 ) {                                                                          \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                         \
-    int total = batch * d_inner;                                             \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;        \
+    long long total = (long long)batch * d_inner;                            \
     if (idx >= total) return;                                                \
     if (d_conv > 8) return;                                                  \
-    int b = idx / d_inner;                                                   \
-    int d = idx % d_inner;                                                   \
+    long long b = idx / d_inner;                                             \
+    int d = (int)(idx % d_inner);                                            \
     int t0 = blockIdx.y * CONV1D_FWD_TILE_T;                                 \
     if (t0 >= T_len) return;                                                 \
     int t_end = min(t0 + CONV1D_FWD_TILE_T, T_len);                          \
-    int state_base = (b * d_inner + d) * d_conv;                             \
+    long long state_base = (b * d_inner + d) * d_conv;                       \
     float win[8];                                                            \
     if (t0 == 0) {                                                           \
         for (int k = 0; k < d_conv; k++) {                                   \
@@ -510,19 +510,19 @@ extern "C" __global__ void conv1d_bwd_tiled_##SUFFIX(                         \
     int out_stride, int out_offset,                                           \
     int x_stride /* row stride of x_branch, as in the forward */              \
 ) {                                                                           \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
-    int total = batch * d_inner;                                              \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;         \
+    long long total = (long long)batch * d_inner;                             \
     if (idx >= total) return;                                                 \
     if (d_conv > 8) return;                                                   \
-    int b = idx / d_inner;                                                    \
-    int d = idx % d_inner;                                                    \
+    long long b = idx / d_inner;                                              \
+    int d = (int)(idx % d_inner);                                             \
     int n_tiles = (T_ + CONV1D_TILE_T - 1) / CONV1D_TILE_T;                   \
     int tile = blockIdx.y;                                                    \
     int t0 = tile * CONV1D_TILE_T;                                            \
     if (t0 >= T_) return;                                                     \
     int t_end = min(t0 + CONV1D_TILE_T, T_);                                  \
-    int row = b * n_tiles + tile;                                             \
-    int init_base = (b * d_inner + d) * d_conv;                               \
+    long long row = b * n_tiles + tile;                                       \
+    long long init_base = (b * d_inner + d) * d_conv;                         \
     int carry_len = d_conv - 1;                                               \
     float local_d_bias = 0.0f;                                                \
     float bias_d = bias[d];                                                   \
@@ -600,10 +600,10 @@ extern "C" __global__ void conv1d_fwd_any_##SUFFIX(                           \
     const float* __restrict__ bias,                                           \
     int batch, int T_len, int d_inner, int d_conv, int x_stride, int tile     \
 ) {                                                                           \
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;                    \
-    if (idx >= batch * d_inner) return;                                       \
-    const int b = idx / d_inner;                                              \
-    const int d = idx % d_inner;                                              \
+    const long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;   \
+    if (idx >= (long long)batch * d_inner) return;                            \
+    const long long b = idx / d_inner;                                        \
+    const int d = (int)(idx % d_inner);                                       \
     const int t0 = blockIdx.y * tile;                                         \
     if (t0 >= T_len) return;                                                  \
     const int t_end = min(t0 + tile, T_len);                                  \
@@ -712,10 +712,10 @@ extern "C" __global__ void conv1d_bwd_any_##SUFFIX(                           \
     int batch, int T_, int d_inner, int d_conv,                               \
     int out_stride, int out_offset, int x_stride                              \
 ) {                                                                           \
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;                    \
-    if (idx >= batch * d_inner) return;                                       \
-    const int b = idx / d_inner;                                              \
-    const int d = idx % d_inner;                                              \
+    const long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;   \
+    if (idx >= (long long)batch * d_inner) return;                            \
+    const long long b = idx / d_inner;                                        \
+    const int d = (int)(idx % d_inner);                                       \
     const int n_tiles = (T_ + CONV1D_TILE_T - 1) / CONV1D_TILE_T;             \
     const int tile = blockIdx.y;                                              \
     const int t0 = tile * CONV1D_TILE_T;                                      \

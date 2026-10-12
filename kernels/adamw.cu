@@ -38,16 +38,16 @@ extern "C" __global__ void adamw_step_f32_capturable(
     float eps,
     float weight_decay,
     const float* __restrict__ bias_factors,  // [2] = {bc1, bc2}
-    int n
+    long long n
 ) {
     const float bias_c1 = bias_factors[0];
     const float bias_c2 = bias_factors[1];
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
+    const long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    const long long stride = (long long)gridDim.x * blockDim.x;
     const float one_minus_b1 = 1.f - beta1;
     const float one_minus_b2 = 1.f - beta2;
     const float decay_factor = 1.f - lr * weight_decay;
-    for (int i = idx; i < n; i += stride) {
+    for (long long i = idx; i < n; i += stride) {
         float g = grad[i];
         float p = param[i];
         float mi = m[i] * beta1 + one_minus_b1 * g;
@@ -72,14 +72,14 @@ extern "C" __global__ void adamw_step_f32(
     float weight_decay,
     float bias_c1,   // 1 / (1 - beta1^t)
     float bias_c2,   // 1 / (1 - beta2^t)
-    int n
+    long long n
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
+    const long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    const long long stride = (long long)gridDim.x * blockDim.x;
     const float one_minus_b1 = 1.f - beta1;
     const float one_minus_b2 = 1.f - beta2;
     const float decay_factor = 1.f - lr * weight_decay;
-    for (int i = idx; i < n; i += stride) {
+    for (long long i = idx; i < n; i += stride) {
         float g = grad[i];
         float p = param[i];
         float mi = m[i] * beta1 + one_minus_b1 * g;

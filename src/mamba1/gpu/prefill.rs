@@ -30,7 +30,9 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::CapturedGemmGraphPlan;
-use crate::gpu::launch::{grid_1d, grid_colsum, grid_norm, grid_parallel_scan};
+use crate::gpu::launch::{
+    grid_1d, grid_1d_cover, grid_1d_wide, grid_colsum, grid_norm, grid_parallel_scan,
+};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
 
@@ -662,7 +664,7 @@ fn prefill_body<W: MambaWeightsView>(
             builder.arg(&xdbl_i);
             builder.arg(&dt_i);
             builder.arg(&offset);
-            unsafe { builder.launch(grid_1d(bt * dt_rank)) }
+            unsafe { builder.launch(grid_1d_wide(bt * dt_rank)) }
                 .map_err(|e| format!("gather dt prefill L{layer_idx}: {e:?}"))?;
         }
         let (dpw, dpw_dt) = lw.dt_proj_w();
@@ -689,11 +691,11 @@ fn prefill_body<W: MambaWeightsView>(
             unsafe { builder.launch(crate::gpu::launch::grid_tmajor_tiles(b, t, di)) }
                 .map_err(|e| format!("softplus_tmajor prefill L{layer_idx}: {e:?}"))?;
         } else {
-            let n = (bt * di) as i32;
+            let n = (bt * di) as i64;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.softplus_fwd);
             builder.arg(scratch.delta.inner_mut());
             builder.arg(&n);
-            unsafe { builder.launch(grid_1d(bt * di)) }
+            unsafe { builder.launch(grid_1d_wide(bt * di)) }
                 .map_err(|e| format!("softplus prefill L{layer_idx}: {e:?}"))?;
         }
 
@@ -751,7 +753,7 @@ fn prefill_body<W: MambaWeightsView>(
                 builder.arg(&ds_i);
                 builder.arg(&b_offset);
                 builder.arg(&c_offset);
-                unsafe { builder.launch(grid_1d(bt * ds)) }
+                unsafe { builder.launch(grid_1d_wide(bt * ds)) }
                     .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
             }
         }
@@ -819,7 +821,7 @@ fn prefill_body<W: MambaWeightsView>(
                 builder.arg(&t_i);
                 builder.arg(&di_i);
                 builder.arg(&ds_i);
-                unsafe { builder.launch(grid_1d(b * di)) }
+                unsafe { builder.launch(grid_1d_cover(b * di)?) }
                     .map_err(|e| format!("ssm_nosave prefill L{layer_idx}: {e:?}"))?;
             }
         }
@@ -1193,7 +1195,7 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
             bld.arg(&xdbl_i);
             bld.arg(&dt_i);
             bld.arg(&offset);
-            unsafe { bld.launch(grid_1d(bt * dt_rank)) }
+            unsafe { bld.launch(grid_1d_wide(bt * dt_rank)) }
                 .map_err(|e| format!("gather dt prefill L{layer_idx}: {e:?}"))?;
         }
         let (dpw, dpw_dt) = lw.dt_proj_w();
@@ -1228,12 +1230,12 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
             unsafe { bld.launch(crate::gpu::launch::grid_tmajor_tiles(b, t, di)) }
                 .map_err(|e| format!("softplus_tmajor prefill L{layer_idx}: {e:?}"))?;
         } else {
-            let n = (bt * di) as i32;
+            let n = (bt * di) as i64;
             let mut bld = ctx.stream.launch_builder(k.softplus_fwd_typed.get(dt));
             let d_ptr = scratch.delta.cached_ptr();
             bld.arg(&d_ptr);
             bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * di)) }
+            unsafe { bld.launch(grid_1d_wide(bt * di)) }
                 .map_err(|e| format!("softplus prefill L{layer_idx}: {e:?}"))?;
         }
 
@@ -1291,7 +1293,7 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                 bld.arg(&ds_i);
                 bld.arg(&b_offset);
                 bld.arg(&c_offset);
-                unsafe { bld.launch(grid_1d(bt * ds)) }
+                unsafe { bld.launch(grid_1d_wide(bt * ds)) }
                     .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
             }
         }
@@ -1377,7 +1379,7 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                 bld.arg(&t_i);
                 bld.arg(&di_i);
                 bld.arg(&ds_i);
-                unsafe { bld.launch(grid_1d(b * di)) }
+                unsafe { bld.launch(grid_1d_cover(b * di)?) }
                     .map_err(|e| format!("ssm_nosave prefill L{layer_idx}: {e:?}"))?;
             }
         }

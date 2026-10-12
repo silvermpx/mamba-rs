@@ -66,7 +66,7 @@ use crate::gpu::blas::{
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_norm};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm};
 use cudarc::driver::PushKernelArg;
 
 // ---------------------------------------------------------------------------
@@ -127,7 +127,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         // vec_cast_zplus computes FROM_F(0.0f + src) — bit-identical to
         // the old idiom including at src = -0.0 (which a bare cast would
         // flip to -0.0 instead of today's +0.0).
-        let n = (bt * dm) as i32;
+        let n = (bt * dm) as i64;
         let mut bld = ctx.stream.launch_builder(k.vec_cast_zplus_typed.get(dtype));
         let a = scratch.temporal_typed.cached_ptr();
         let b_p = d_temporal.cached_ptr();
@@ -137,7 +137,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         // Only the first layer processed needs this pass; below it the
         // previous layer's norm backward already wrote the same value.
         if cast_d_temporal {
-            unsafe { bld.launch(grid_1d(bt * dm)) }
+            unsafe { bld.launch(grid_1d_wide(bt * dm)) }
                 .map_err(|e| format!("cast d_temporal→typed: {e:?}"))?;
         }
     }
@@ -181,7 +181,7 @@ pub fn gpu_backward_mamba_layer_mixed(
 
     // ─── B2: gating_bwd_typed ────────────────────────────────────────
     {
-        let n = (bt * di) as i32;
+        let n = (bt * di) as i64;
         let mut bld = ctx.stream.launch_builder(k.gating_bwd_typed.get(dtype));
         let dy = scratch.d_y.cached_ptr();
         // Gate gradient lands directly in the d_proj gate half.
@@ -201,7 +201,8 @@ pub fn gpu_backward_mamba_layer_mixed(
         bld.arg(&di_i);
         bld.arg(&proj_stride);
         bld.arg(&gate_off);
-        unsafe { bld.launch(grid_1d(bt * di)) }.map_err(|e| format!("gating_bwd_typed: {e:?}"))?;
+        unsafe { bld.launch(grid_1d_wide(bt * di)) }
+            .map_err(|e| format!("gating_bwd_typed: {e:?}"))?;
     }
 
     // ─── B3: SSM BPTT + reductions ───────────────────────────────────
@@ -236,7 +237,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         bld.arg(&ds_i);
         bld.arg(&b_off);
         bld.arg(&c_off);
-        unsafe { bld.launch(grid_1d(bt * ds)) }
+        unsafe { bld.launch(grid_1d_wide(bt * ds)) }
             .map_err(|e| format!("gather_bc_cols_typed bwd: {e:?}"))?;
     }
 
@@ -349,7 +350,7 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&ds_i);
-            unsafe { bld.launch(grid_1d(b * di)) }
+            unsafe { bld.launch(grid_1d_cover(b * di)?) }
                 .map_err(|e| format!("ssm_backward_local_typed: {e:?}"))?;
         }
     }
@@ -390,7 +391,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         bld.arg(&t_i);
         bld.arg(&reduce_di_i);
         bld.arg(&ds_i);
-        unsafe { bld.launch(grid_1d(bt * ds)) }
+        unsafe { bld.launch(grid_1d_cover(bt * ds)?) }
             .map_err(|e| format!("ssm_reduce_d_BC typed: {e:?}"))?;
         // d_D reducer — f32 in → f32 out.
         let mut bld = ctx.stream.launch_builder(&k.ssm_reduce_d_d);
@@ -419,7 +420,7 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&nc);
             bld.arg(&di_i);
             bld.arg(&ds_i);
-            unsafe { bld.launch(grid_1d(di * ds)) }
+            unsafe { bld.launch(grid_1d_cover(di * ds)?) }
                 .map_err(|e| format!("ssm_reduce_d_a_log_chunks: {e:?}"))?;
         } else {
             let mut bld = ctx.stream.launch_builder(&k.ssm_reduce_d_a_log);
@@ -428,7 +429,7 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&b_i);
             bld.arg(&di_i);
             bld.arg(&ds_i);
-            unsafe { bld.launch(grid_1d(di * ds)) }
+            unsafe { bld.launch(grid_1d_cover(di * ds)?) }
                 .map_err(|e| format!("ssm_reduce_d_a_log: {e:?}"))?;
         }
     }
@@ -449,7 +450,7 @@ pub fn gpu_backward_mamba_layer_mixed(
     if !(dims.scan_mode.use_parallel(t, ds)
         && di.is_multiple_of(crate::gpu::launch::SCAN_BWD_DGROUP))
     {
-        let n = (bt * di) as i32;
+        let n = (bt * di) as i64;
         let mut bld = ctx.stream.launch_builder(k.softplus_bwd_typed.get(dtype));
         let dx = scratch.d_delta_raw.cached_ptr();
         let xs = acts.delta_raw.cached_ptr();
@@ -458,7 +459,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         bld.arg(&xs);
         bld.arg(&dy);
         bld.arg(&n);
-        unsafe { bld.launch(grid_1d(bt * di)) }
+        unsafe { bld.launch(grid_1d_wide(bt * di)) }
             .map_err(|e| format!("softplus_bwd_typed: {e:?}"))?;
     }
     // Gather typed xdbl[:, 0..dt_rank] → typed dt_xdbl_buf (x_saved for dt_proj dW).
@@ -476,7 +477,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         bld.arg(&xdbl_i);
         bld.arg(&dt_i);
         bld.arg(&offset);
-        unsafe { bld.launch(grid_1d(bt * dt_rank)) }
+        unsafe { bld.launch(grid_1d_wide(bt * dt_rank)) }
             .map_err(|e| format!("gather_cols dt bwd typed: {e:?}"))?;
     }
     // dt_proj dW — typed GemmEx accumulator on f32 master.
@@ -551,7 +552,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         bld.arg(&bt_i);
         bld.arg(&dt_i);
         bld.arg(&ds_i);
-        unsafe { bld.launch(grid_1d(bt * xdbl_dim)) }
+        unsafe { bld.launch(grid_1d_wide(bt * xdbl_dim)) }
             .map_err(|e| format!("pack_xdbl_cols typed: {e:?}"))?;
     }
 
@@ -609,7 +610,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         bld.arg(&di_i_dst);
         bld.arg(&di_i_src);
         bld.arg(&offset);
-        unsafe { bld.launch(grid_1d(bt * di)) }
+        unsafe { bld.launch(grid_1d_wide(bt * di)) }
             .map_err(|e| format!("d_u += d_u_xproj typed: {e:?}"))?;
     }
 

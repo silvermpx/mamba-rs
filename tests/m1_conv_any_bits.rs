@@ -127,7 +127,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     launch(
                         &ctx,
                         k.conv1d_fwd_any_typed.get(dtype),
-                        grid_conv_fwd_tiled(b, di, t),
+                        grid_conv_fwd_tiled(b, di, t).unwrap(),
                         &args,
                     );
                 } else {
@@ -136,7 +136,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     launch(
                         &ctx,
                         k.conv1d_burnin_fwd_tiled_typed.get(dtype),
-                        grid_conv_fwd_tiled(b, di, t),
+                        grid_conv_fwd_tiled(b, di, t).unwrap(),
                         &args,
                     );
                 }
@@ -184,7 +184,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     launch(
                         &ctx,
                         k.conv1d_fwd_any_typed.get(dtype),
-                        grid_conv_fwd_tiled(b, di, t),
+                        grid_conv_fwd_tiled(b, di, t).unwrap(),
                         &args,
                     );
                 } else {
@@ -194,7 +194,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     launch(
                         &ctx,
                         k.conv1d_burnin_nosave_tiled_typed.get(dtype),
-                        grid_conv_fwd_tiled(b, di, t),
+                        grid_conv_fwd_tiled(b, di, t).unwrap(),
                         &args,
                     );
                 }
@@ -267,7 +267,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     launch(
                         &ctx,
                         k.conv1d_bwd_any_typed.get(dtype),
-                        grid_conv_tiled(b, di, t),
+                        grid_conv_tiled(b, di, t).unwrap(),
                         &args,
                     );
                 } else {
@@ -285,7 +285,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     launch(
                         &ctx,
                         k.conv1d_bwd_tiled_typed.get(dtype),
-                        grid_conv_tiled(b, di, t),
+                        grid_conv_tiled(b, di, t).unwrap(),
                         &args,
                     );
                 }

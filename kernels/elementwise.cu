@@ -1,22 +1,27 @@
 // Element-wise CUDA kernels the model families share.
 //
 // Bias broadcast and reductions, residual add, element-wise products, the
-// last-timestep gather. All kernels: 1D grid, 256 threads/block.
+// last-timestep gather. All kernels: 1D grid, 256 threads/block. The
+// element kernels take a 64-bit count and stride over it, so a window past
+// 2^31 elements runs whole; below that every element keeps its thread.
 //
 // Activation-touching kernels are templated via extern "C" wrappers with
 // suffixes (_f32, _bf16, _f16). Math in f32, storage in T_IN.
 
 #include "_typed_prelude.cuh"
 
+// The element index of this thread and the grid's stride.
+#ifndef ELEM_LOOP
+#define ELEM_LOOP(I, N)                                                         \
+    for (long long I = (long long)blockIdx.x * blockDim.x + threadIdx.x;       \
+         I < (N); I += (long long)gridDim.x * blockDim.x)
+#endif
+
 extern "C" __global__ void bias_broadcast(
     float* y, const float* bias,
     int batch, int n_out
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * n_out;
-    if (idx >= total) return;
-    int j = idx % n_out;
-    y[idx] = bias[j];
+    ELEM_LOOP(idx, (long long)batch * n_out) y[idx] = bias[idx % n_out];
 }
 
 // Column sum over the rows. Each column's sum is one serial chain of adds
@@ -144,7 +149,7 @@ void reduce_sum_axis0(
 
     float sum = 0.0f;
     for (int b = tid; b < batch; b += blockDim.x) {
-        sum += partials[b * dim + d];
+        sum += partials[(long long)b * dim + d];
     }
     sdata[tid] = sum;
     __syncthreads();
@@ -158,19 +163,15 @@ void reduce_sum_axis0(
 }
 
 extern "C" __global__ void fill_scalar(
-    float* dst, float val, int n
+    float* dst, float val, long long n
 ) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    dst[i] = val;
+    ELEM_LOOP(i, n) dst[i] = val;
 }
 
 extern "C" __global__ void vec_add_inplace(
-    float* a, const float* b, int n
+    float* a, const float* b, long long n
 ) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    a[i] += b[i];
+    ELEM_LOOP(i, n) a[i] += b[i];
 }
 
 extern "C" __global__ void gather_last_timestep(
@@ -182,7 +183,7 @@ extern "C" __global__ void gather_last_timestep(
     if (idx >= B * D) return;
     int b = idx / D;
     int d = idx % D;
-    dst[idx] = src[(b * T + (T - 1)) * D + d];
+    dst[idx] = src[((long long)b * T + (T - 1)) * D + d];
 }
 
 // Templated gather_last_timestep — T_out may differ from T_in (e.g., f32 dst
@@ -198,7 +199,7 @@ extern "C" __global__ void gather_last_timestep_##SUFFIX(                     \
     if (idx >= B * D) return;                                                 \
     int b = idx / D;                                                          \
     int d = idx % D;                                                          \
-    dst[idx] = src[(b * Tlen + (Tlen - 1)) * D + d];                          \
+    dst[idx] = src[((long long)b * Tlen + (Tlen - 1)) * D + d];               \
 }
 
 DEFINE_GATHER_LAST_TIMESTEP(f32,  float)
@@ -206,11 +207,9 @@ DEFINE_GATHER_LAST_TIMESTEP(bf16, __nv_bfloat16)
 DEFINE_GATHER_LAST_TIMESTEP(f16,  __half)
 
 extern "C" __global__ void residual_add(
-    float* dst, const float* a, const float* b, int n
+    float* dst, const float* a, const float* b, long long n
 ) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    dst[i] = a[i] + b[i];
+    ELEM_LOOP(i, n) dst[i] = a[i] + b[i];
 }
 
 // ===========================================================================
@@ -223,11 +222,7 @@ extern "C" __global__ void residual_add(
 extern "C" __global__ void bias_broadcast_##SUFFIX(                           \
     T* y, const float* bias, int batch, int n_out                             \
 ) {                                                                           \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
-    int total = batch * n_out;                                                \
-    if (idx >= total) return;                                                 \
-    int j = idx % n_out;                                                      \
-    y[idx] = FROM_F(bias[j]);                                                 \
+    ELEM_LOOP(idx, (long long)batch * n_out) y[idx] = FROM_F(bias[idx % n_out]); \
 }
 
 DEFINE_BIAS_BROADCAST(f32,  float,         from_f_f32)
@@ -235,20 +230,16 @@ DEFINE_BIAS_BROADCAST(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_BIAS_BROADCAST(f16,  __half,        from_f_f16)
 
 extern "C" __global__ void elementwise_mul(
-    float* y, const float* a, const float* b, int n
+    float* y, const float* a, const float* b, long long n
 ) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    y[i] = a[i] * b[i];
+    ELEM_LOOP(i, n) y[i] = a[i] * b[i];
 }
 
 #define DEFINE_ELEMENTWISE_MUL(SUFFIX, T, FROM_F)                             \
 extern "C" __global__ void elementwise_mul_##SUFFIX(                          \
-    T* y, const T* a, const T* b, int n                                       \
+    T* y, const T* a, const T* b, long long n                                 \
 ) {                                                                           \
-    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
-    if (i >= n) return;                                                       \
-    y[i] = FROM_F(to_f(a[i]) * to_f(b[i]));                                   \
+    ELEM_LOOP(i, n) y[i] = FROM_F(to_f(a[i]) * to_f(b[i]));                   \
 }
 
 DEFINE_ELEMENTWISE_MUL(f32,  float,         from_f_f32)
@@ -257,11 +248,9 @@ DEFINE_ELEMENTWISE_MUL(f16,  __half,        from_f_f16)
 
 #define DEFINE_RESIDUAL_ADD(SUFFIX, T, FROM_F)                                \
 extern "C" __global__ void residual_add_##SUFFIX(                             \
-    T* dst, const T* a, const T* b, int n                                     \
+    T* dst, const T* a, const T* b, long long n                               \
 ) {                                                                           \
-    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
-    if (i >= n) return;                                                       \
-    dst[i] = FROM_F(to_f(a[i]) + to_f(b[i]));                                 \
+    ELEM_LOOP(i, n) dst[i] = FROM_F(to_f(a[i]) + to_f(b[i]));                 \
 }
 
 DEFINE_RESIDUAL_ADD(f32,  float,         from_f_f32)
@@ -274,11 +263,9 @@ DEFINE_RESIDUAL_ADD(f16,  __half,        from_f_f16)
 // cross-layer residual stream f32 while per-layer branch outputs are bf16.
 #define DEFINE_RESIDUAL_ADD_F32_T(SUFFIX, T_IN)                               \
 extern "C" __global__ void residual_add_f32_##SUFFIX(                         \
-    float* dst, const float* a, const T_IN* b, int n                          \
+    float* dst, const float* a, const T_IN* b, long long n                    \
 ) {                                                                           \
-    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
-    if (i >= n) return;                                                       \
-    dst[i] = a[i] + to_f(b[i]);                                               \
+    ELEM_LOOP(i, n) dst[i] = a[i] + to_f(b[i]);                               \
 }
 
 DEFINE_RESIDUAL_ADD_F32_T(bf16, __nv_bfloat16)
@@ -300,21 +287,21 @@ DEFINE_RESIDUAL_ADD_F32_T(f16,  __half)
 #define DEFINE_ELEMENTWISE_MUL_V(SUFFIX, T, FROM_F)                           \
 extern "C" __global__ void elementwise_mul_v_##SUFFIX(                        \
     T* __restrict__ y, const T* __restrict__ a,                               \
-    const T* __restrict__ b, int n_vec                                        \
+    const T* __restrict__ b, long long n_vec                                  \
 ) {                                                                           \
-    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
-    if (i >= n_vec) return;                                                   \
     const int NPV = 16 / (int)sizeof(T);                                      \
-    uint4 av = reinterpret_cast<const uint4*>(a)[i];                          \
-    uint4 bv = reinterpret_cast<const uint4*>(b)[i];                          \
-    uint4 ov;                                                                 \
-    const T* ap = reinterpret_cast<const T*>(&av);                            \
-    const T* bp = reinterpret_cast<const T*>(&bv);                            \
-    T* op = reinterpret_cast<T*>(&ov);                                        \
-    for (int k = 0; k < NPV; k++) {                                           \
-        op[k] = FROM_F(to_f(ap[k]) * to_f(bp[k]));                            \
+    ELEM_LOOP(i, n_vec) {                                                     \
+        uint4 av = reinterpret_cast<const uint4*>(a)[i];                      \
+        uint4 bv = reinterpret_cast<const uint4*>(b)[i];                      \
+        uint4 ov;                                                             \
+        const T* ap = reinterpret_cast<const T*>(&av);                        \
+        const T* bp = reinterpret_cast<const T*>(&bv);                        \
+        T* op = reinterpret_cast<T*>(&ov);                                    \
+        for (int k = 0; k < NPV; k++) {                                       \
+            op[k] = FROM_F(to_f(ap[k]) * to_f(bp[k]));                        \
+        }                                                                     \
+        reinterpret_cast<uint4*>(y)[i] = ov;                                  \
     }                                                                         \
-    reinterpret_cast<uint4*>(y)[i] = ov;                                      \
 }
 
 DEFINE_ELEMENTWISE_MUL_V(f32,  float,         from_f_f32)
@@ -336,7 +323,7 @@ void reduce_bias_##SUFFIX(                                                    \
     if (i >= dim) return;                                                     \
     float sum = 0.0f;                                                         \
     for (int r = threadIdx.x; r < bt; r += blockDim.x) {                      \
-        sum += to_f(dy[r * dim + i]);                                         \
+        sum += to_f(dy[(long long)r * dim + i]);                              \
     }                                                                         \
     /* Warp + block reduction via shared memory. */                           \
     extern __shared__ float sdata[];                                          \

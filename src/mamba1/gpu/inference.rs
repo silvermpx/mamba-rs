@@ -20,7 +20,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d, grid_norm};
+use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_norm};
 use crate::gpu::options::GpuOptions;
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::weights::MambaWeights;
@@ -909,16 +909,16 @@ impl MambaGpuEngine {
             let offset = layer_idx * di * ds;
             let dst_ptr = a_neg_all.raw_ptr_at(&ctx.stream, offset);
             let src_ptr = lw.a_log.ptr();
-            let n_i = (di * ds) as i32;
+            let n = (di * ds) as i64;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
             builder.arg(&dst_ptr);
             builder.arg(&src_ptr);
-            builder.arg(&n_i);
-            unsafe { builder.launch(grid_1d(di * ds)) }
+            builder.arg(&n);
+            unsafe { builder.launch(grid_1d_wide(di * ds)) }
                 .map_err(|e| format!("exp_negate layer {layer_idx}: {e:?}"))?;
         }
 
-        Ok(Self::from_parts(
+        let engine = Self::from_parts(
             ctx,
             weights,
             a_neg_all,
@@ -926,7 +926,9 @@ impl MambaGpuEngine {
             input_dim,
             batch,
             cpu_weights.input_proj_w.is_empty(),
-        ))
+        );
+        engine.dims(1).check_for(&engine.ctx)?;
+        Ok(engine)
     }
 
     /// The engine around a built context, weights and `-exp(a_log)` arena,
@@ -1320,7 +1322,7 @@ impl MambaGpuEngine {
                 bld.arg(&b_i);
                 bld.arg(&di_i);
                 bld.arg(&dc_i);
-                unsafe { bld.launch(grid_1d(b * di)) }
+                unsafe { bld.launch(grid_1d_cover(b * di)?) }
                     .map_err(|e| format!("conv1d_step+silu L{layer_idx}: {e:?}"))?;
             }
 
@@ -1351,7 +1353,7 @@ impl MambaGpuEngine {
                 bld.arg(&xdbl_i);
                 bld.arg(&dt_i);
                 bld.arg(&offset);
-                unsafe { bld.launch(grid_1d(b * dt_rank)) }
+                unsafe { bld.launch(grid_1d_wide(b * dt_rank)) }
                     .map_err(|e| format!("gather_cols dt L{layer_idx}: {e:?}"))?;
             }
 
@@ -1414,7 +1416,7 @@ impl MambaGpuEngine {
                 bld.arg(&xdbl_stride_i);
                 bld.arg(&b_off);
                 bld.arg(&c_off);
-                unsafe { bld.launch(grid_1d(b * di)) }
+                unsafe { bld.launch(grid_1d_cover(b * di)?) }
                     .map_err(|e| format!("ssm_step fused L{layer_idx}: {e:?}"))?;
             }
 
@@ -1437,16 +1439,15 @@ impl MambaGpuEngine {
         // its own so the caller sees temporal as it stands after the
         // requested layer, without norm_f.
         if layer_limit > 0 && stop_after_layer.is_some() {
-            let n = (b * dm) as i32;
-            let mut bld = self.ctx.stream.launch_builder(&k.residual_add);
             let t_ptr = scratch.temporal.cached_ptr();
-            let r_ptr = scratch.residual.cached_ptr();
-            bld.arg(&t_ptr);
-            bld.arg(&r_ptr);
-            bld.arg(&t_ptr); // temporal = residual + temporal
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(b * dm)) }
-                .map_err(|e| format!("residual debug tail: {e:?}"))?;
+            // temporal = residual + temporal
+            crate::gpu::launch::launch_elems(
+                &self.ctx.stream,
+                &k.residual_add,
+                &[t_ptr, scratch.residual.cached_ptr(), t_ptr],
+                b * dm,
+                format_args!("residual debug tail"),
+            )?;
         }
         if stop_after_layer.is_none() {
             let b_i = b as i32;
@@ -1642,6 +1643,7 @@ impl MambaGpuEngineMixed {
             batch,
             cpu_weights.input_proj_w.is_empty(),
         );
+        engine.dims(1).check_for(&engine.ctx)?;
 
         // Pre-size half_staging for the worst-case step-time GEMM operand.
         // Eliminates lazy-grow during graph capture (a re-allocation would
@@ -1663,15 +1665,15 @@ impl MambaGpuEngineMixed {
             let offset = layer_idx * di * ds;
             let dst_ptr = a_neg_all.raw_ptr_at(&engine.ctx.stream, offset);
             let src_ptr = lw.a_log.ptr();
-            let n_i = (di * ds) as i32;
+            let n = (di * ds) as i64;
             let mut builder = engine
                 .ctx
                 .stream
                 .launch_builder(&engine.ctx.kernels.exp_negate);
             builder.arg(&dst_ptr);
             builder.arg(&src_ptr);
-            builder.arg(&n_i);
-            unsafe { builder.launch(grid_1d(di * ds)) }
+            builder.arg(&n);
+            unsafe { builder.launch(grid_1d_wide(di * ds)) }
                 .map_err(|e| format!("exp_negate mixed L{layer_idx}: {e:?}"))?;
         }
 
@@ -1954,7 +1956,7 @@ impl MambaGpuEngineMixed {
                 bld.arg(&b_i);
                 bld.arg(&di_i);
                 bld.arg(&dc_i);
-                unsafe { bld.launch(grid_1d(b * di)) }
+                unsafe { bld.launch(grid_1d_cover(b * di)?) }
                     .map_err(|e| format!("conv1d_step+silu L{layer_idx}: {e:?}"))?;
             }
 
@@ -1996,7 +1998,7 @@ impl MambaGpuEngineMixed {
                 bld.arg(&xdbl_i);
                 bld.arg(&dt_i);
                 bld.arg(&offset);
-                unsafe { bld.launch(grid_1d(b * dt_rank)) }
+                unsafe { bld.launch(grid_1d_wide(b * dt_rank)) }
                     .map_err(|e| format!("gather_cols dt L{layer_idx}: {e:?}"))?;
             }
 
@@ -2070,7 +2072,7 @@ impl MambaGpuEngineMixed {
                 bld.arg(&xdbl_stride_i);
                 bld.arg(&b_off);
                 bld.arg(&c_off);
-                unsafe { bld.launch(grid_1d(b * di)) }
+                unsafe { bld.launch(grid_1d_cover(b * di)?) }
                     .map_err(|e| format!("ssm_step fused L{layer_idx}: {e:?}"))?;
             }
 
@@ -2101,19 +2103,14 @@ impl MambaGpuEngineMixed {
         // applies the add on its own so the caller sees the residual as it
         // stands after the requested layer, without norm_f.
         if layer_limit > 0 && stop_after_layer.is_some() {
-            let n = (b * dm) as i32;
-            let mut bld = engine
-                .ctx
-                .stream
-                .launch_builder(k.residual_add_f32_typed.get(dt));
             let r_ptr = scratch.residual.cached_ptr();
-            let t_ptr = scratch.temporal.cached_ptr();
-            bld.arg(&r_ptr);
-            bld.arg(&r_ptr);
-            bld.arg(&t_ptr);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(b * dm)) }
-                .map_err(|e| format!("residual_add_f32 debug tail: {e:?}"))?;
+            crate::gpu::launch::launch_elems(
+                &engine.ctx.stream,
+                k.residual_add_f32_typed.get(dt),
+                &[r_ptr, r_ptr, scratch.temporal.cached_ptr()],
+                b * dm,
+                format_args!("residual_add_f32 debug tail"),
+            )?;
         }
         if stop_after_layer.is_none() {
             let b_i = b as i32;

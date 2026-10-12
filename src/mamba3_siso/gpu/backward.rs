@@ -445,14 +445,13 @@ pub fn gpu_backward_mamba3_layer(
         }
 
         if na > 0 {
-            let n_ac = (dims.batch * dims.seq_len * nh * na) as i32;
-            let mut builder = ctx.stream.launch_builder(&m3k.fill_scalar);
-            builder.arg(scratch.d_angle_cumsum.inner_mut());
-            let zero: f32 = 0.0;
-            builder.arg(&zero);
-            builder.arg(&n_ac);
-            unsafe { builder.launch(grid_1d(n_ac as usize)) }
-                .map_err(|e| format!("zero d_angle_cumsum: {:?}", e))?;
+            crate::gpu::launch::launch_fill(
+                &ctx.stream,
+                &m3k.fill_scalar,
+                (scratch.d_angle_cumsum.cached_ptr(), 0.0),
+                dims.batch * dims.seq_len * nh * na,
+                format_args!("zero d_angle_cumsum"),
+            )?;
         }
 
         // m3_dqktheta — dQ_bias/dK_bias removed from kernel args
@@ -603,14 +602,13 @@ pub fn gpu_backward_mamba3_layer(
                 .map_err(|e| format!("angle_dt_bwd B5a reduce dt: {:?}", e))?;
         }
     } else {
-        let ne = (bt * nh) as i32;
-        let zero: f32 = 0.0;
-        let mut builder = ctx.stream.launch_builder(&m3k.fill_scalar);
-        builder.arg(scratch.d_dt_angle.inner_mut());
-        builder.arg(&zero);
-        builder.arg(&ne);
-        unsafe { builder.launch(grid_1d(bt * nh)) }
-            .map_err(|e| format!("fill d_dt_angle no-angle B5a: {:?}", e))?;
+        crate::gpu::launch::launch_fill(
+            &ctx.stream,
+            &m3k.fill_scalar,
+            (scratch.d_dt_angle.cached_ptr(), 0.0),
+            bt * nh,
+            format_args!("fill d_dt_angle no-angle B5a"),
+        )?;
     }
 
     // B5b: m3_abg_bwd (sequential) or m3_final_grads (parallel).
@@ -863,15 +861,13 @@ pub fn gpu_backward_mamba3_layer(
     }
 
     // Residual pass-through: d_temporal += d_pre_norm.
-    {
-        let ne = (bt * dm) as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.vec_add_inplace);
-        builder.arg(d_temporal.inner_mut());
-        builder.arg(scratch.d_pre_norm.inner());
-        builder.arg(&ne);
-        unsafe { builder.launch(grid_1d(bt * dm)) }
-            .map_err(|e| format!("vec_add d_temporal m3: {:?}", e))?;
-    }
+    crate::gpu::launch::launch_elems(
+        &ctx.stream,
+        &m3k.vec_add_inplace,
+        &[d_temporal.cached_ptr(), scratch.d_pre_norm.cached_ptr()],
+        bt * dm,
+        format_args!("vec_add d_temporal m3"),
+    )?;
 
     Ok(())
 }

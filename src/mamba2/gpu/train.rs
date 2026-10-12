@@ -1992,19 +1992,13 @@ impl Mamba2GpuTrainer {
     /// `d_temp += d_pre` over the window's rows: what a residual branch's
     /// input gradient adds to the stream's.
     fn add_residual_grad(&self, rows: usize, l: usize) -> Result<(), String> {
-        let (d_temp, d_pre) = (self.bwd.d_temp.cached_ptr(), self.bwd.d_pre.cached_ptr());
-        let n = rows * self.cfg.d_model;
-        let n_i = n as i32;
-        let mut bld = self
-            .ctx
-            .stream
-            .launch_builder(&self.ctx.kernels.vec_add_inplace);
-        bld.arg(&d_temp);
-        bld.arg(&d_pre);
-        bld.arg(&n_i);
-        unsafe { bld.launch(grid_1d(n)) }
-            .map(|_| ())
-            .map_err(|e| format!("Mamba-2 backward residual L{l}: {e:?}"))
+        crate::gpu::launch::launch_elems(
+            &self.ctx.stream,
+            &self.ctx.kernels.vec_add_inplace,
+            &[self.bwd.d_temp.cached_ptr(), self.bwd.d_pre.cached_ptr()],
+            rows * self.cfg.d_model,
+            format_args!("Mamba-2 backward residual L{l}"),
+        )
     }
 
     /// The gated MLP's backward in layer `l`: from the residual gradient,
@@ -2169,7 +2163,7 @@ impl Mamba2GpuTrainer {
                 at(m_base, span),
                 at(v_base, span),
             );
-            let n = span.len as i32;
+            let n = span.len as i64;
             let mut bld = self
                 .ctx
                 .stream
@@ -2186,7 +2180,7 @@ impl Mamba2GpuTrainer {
             bld.arg(&bias_c1);
             bld.arg(&bias_c2);
             bld.arg(&n);
-            unsafe { bld.launch(grid_1d(span.len)) }
+            unsafe { bld.launch(crate::gpu::launch::grid_1d_wide(span.len)) }
                 .map_err(|e| format!("Mamba-2 AdamW: {e:?}"))?;
         }
         self.refresh_mirror()?;

@@ -56,7 +56,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::grid_1d;
+use crate::gpu::launch::grid_1d_wide;
 use crate::mamba1::gpu::backward::gpu_backward_mamba_backbone;
 use crate::mamba1::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
 use crate::mamba1::gpu::forward::{
@@ -87,7 +87,7 @@ fn recompute_a_neg_captured(
     if per_layer == 0 {
         return Ok(());
     }
-    let n_i32 = per_layer as i32;
+    let n = per_layer as i64;
     for (li, mw) in master_layers.iter().enumerate() {
         let src = mw.a_log.cached_ptr();
         // Two-destination refresh — twin of the eager path.
@@ -97,8 +97,8 @@ fn recompute_a_neg_captured(
         b1.arg(&dst_a);
         b1.arg(&dst_s);
         b1.arg(&src);
-        b1.arg(&n_i32);
-        unsafe { b1.launch(grid_1d(per_layer)) }
+        b1.arg(&n);
+        unsafe { b1.launch(grid_1d_wide(per_layer)) }
             .map_err(|e| format!("exp_negate2 captured a_neg mirrors L{li}: {e:?}"))?;
     }
     Ok(())

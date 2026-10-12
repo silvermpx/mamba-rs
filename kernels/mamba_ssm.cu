@@ -65,13 +65,13 @@ extern "C" __global__ void ssm_step_forward(
     const float* D,     // [d_inner] skip connection
     int batch, int d_inner, int d_state
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * d_inner;
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long total = (long long)batch * d_inner;
     if (idx >= total) return;
 
-    int b = idx / d_inner;
-    int d = idx % d_inner;
-    int h_base = (b * d_inner + d) * d_state;
+    long long b = idx / d_inner;
+    int d = (int)(idx % d_inner);
+    long long h_base = (b * d_inner + d) * d_state;
 
     // Opt A: load h and a_neg into registers
     // CONSTRAINT: d_state <= 64. Validated in Rust launch code.
@@ -81,7 +81,7 @@ extern "C" __global__ void ssm_step_forward(
     #pragma unroll
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
         h_local[n] = h[h_base + n];
-        a_local[n] = a_neg[d * d_state + n];
+        a_local[n] = a_neg[(long long)d * d_state + n];
     }
 
     float delta_d = delta[idx];
@@ -130,20 +130,20 @@ extern "C" __global__ void ssm_step_forward_fused_##SUFFIX(                 \
     int batch, int d_inner, int d_state,                                   \
     int xdbl_stride, int b_offset, int c_offset                            \
 ) {                                                                        \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                       \
-    int total = batch * d_inner;                                           \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;      \
+    long long total = (long long)batch * d_inner;                          \
     if (idx >= total) return;                                              \
-    int b = idx / d_inner;                                                 \
-    int d = idx % d_inner;                                                 \
-    int h_base = (b * d_inner + d) * d_state;                              \
-    int xdbl_base = b * xdbl_stride;                                       \
+    long long b = idx / d_inner;                                           \
+    int d = (int)(idx % d_inner);                                          \
+    long long h_base = (b * d_inner + d) * d_state;                        \
+    long long xdbl_base = b * xdbl_stride;                                 \
     float h_local[MAMBA_RS_STATE_CAP];                                     \
     float a_local[MAMBA_RS_STATE_CAP];                                     \
     if (d_state > MAMBA_RS_STATE_CAP) return;                              \
     _Pragma("unroll")                                                      \
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {        \
         h_local[n] = h[h_base + n];                                        \
-        a_local[n] = a_neg[d * d_state + n];                               \
+        a_local[n] = a_neg[(long long)d * d_state + n];                    \
     }                                                                      \
     /* Softplus as the standalone kernel spelled it, then its store. */    \
     float raw = to_f(delta_raw[idx]);                                      \
@@ -191,13 +191,13 @@ extern "C" __global__ void ssm_burnin_forward(
     const float* D,       // [d_inner]
     int batch, int T, int d_inner, int d_state
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * d_inner;
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long total = (long long)batch * d_inner;
     if (idx >= total) return;
 
-    int b = idx / d_inner;
-    int d = idx % d_inner;
-    int h_base = (b * d_inner + d) * d_state;
+    long long b = idx / d_inner;
+    int d = (int)(idx % d_inner);
+    long long h_base = (b * d_inner + d) * d_state;
 
     // Opt A: load h and a_neg into registers
     float h_local[MAMBA_RS_STATE_CAP];
@@ -206,19 +206,19 @@ extern "C" __global__ void ssm_burnin_forward(
     #pragma unroll
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
         h_local[n] = h[h_base + n];
-        a_local[n] = a_neg[d * d_state + n];
+        a_local[n] = a_neg[(long long)d * d_state + n];
     }
 
     // Save initial h state at time index 0
     #pragma unroll
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
-        int hs_idx = (b * (T + 1) + 0) * d_inner * d_state + d * d_state + n;
+        long long hs_idx = ((b * (T + 1) + 0) * d_inner + d) * d_state + n;
         h_saved[hs_idx] = h_local[n];
     }
 
     for (int t = 0; t < T; t++) {
-        int bt_di = (b * T + t) * d_inner + d;
-        int bt_ds = (b * T + t) * d_state;
+        long long bt_di = (b * T + t) * d_inner + d;
+        long long bt_ds = (b * T + t) * d_state;
 
         float raw = delta_raw[bt_di];
         float delta_d =
@@ -246,7 +246,7 @@ extern "C" __global__ void ssm_burnin_forward(
         // Save h AFTER step t = h_saved at time index t+1
         #pragma unroll
         for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
-            int hs_idx = (b * (T + 1) + (t + 1)) * d_inner * d_state + d * d_state + n;
+            long long hs_idx = ((b * (T + 1) + (t + 1)) * d_inner + d) * d_state + n;
             h_saved[hs_idx] = h_local[n];
         }
     }
@@ -273,13 +273,13 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
     int gate_stride,      // proj row stride; 0 = plain y store
     int batch, int T, int d_inner, int d_state
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * d_inner;
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long total = (long long)batch * d_inner;
     if (idx >= total) return;
 
-    int b = idx / d_inner;
-    int d = idx % d_inner;
-    int h_base = (b * d_inner + d) * d_state;
+    long long b = idx / d_inner;
+    int d = (int)(idx % d_inner);
+    long long h_base = (b * d_inner + d) * d_state;
 
     // Opt A: load h and a_neg into registers
     float h_local[MAMBA_RS_STATE_CAP];
@@ -288,12 +288,12 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
     #pragma unroll
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
         h_local[n] = h[h_base + n];
-        a_local[n] = a_neg[d * d_state + n];
+        a_local[n] = a_neg[(long long)d * d_state + n];
     }
 
     for (int t = 0; t < T; t++) {
-        int bt_di = (b * T + t) * d_inner + d;
-        int bt_ds = (b * T + t) * d_state;
+        long long bt_di = (b * T + t) * d_inner + d;
+        long long bt_ds = (b * T + t) * d_state;
 
         float delta_d = delta[bt_di];
         float u_d = u[bt_di];
@@ -337,23 +337,23 @@ extern "C" __global__ void ssm_burnin_forward_nosave_##SUFFIX(             \
     int gate_stride,                                                       \
     int batch, int T_len, int d_inner, int d_state                         \
 ) {                                                                        \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                       \
-    int total = batch * d_inner;                                           \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;      \
+    long long total = (long long)batch * d_inner;                          \
     if (idx >= total) return;                                              \
-    int b = idx / d_inner;                                                 \
-    int d = idx % d_inner;                                                 \
-    int h_base = (b * d_inner + d) * d_state;                              \
+    long long b = idx / d_inner;                                           \
+    int d = (int)(idx % d_inner);                                          \
+    long long h_base = (b * d_inner + d) * d_state;                        \
     float h_local[MAMBA_RS_STATE_CAP];                                                     \
     float a_local[MAMBA_RS_STATE_CAP];                                                     \
     if (d_state > MAMBA_RS_STATE_CAP) return;                                              \
     _Pragma("unroll")                                                      \
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {        \
         h_local[n] = h[h_base + n];                                        \
-        a_local[n] = a_neg[d * d_state + n];                               \
+        a_local[n] = a_neg[(long long)d * d_state + n];                    \
     }                                                                      \
     for (int t = 0; t < T_len; t++) {                                      \
-        int bt_di = (b * T_len + t) * d_inner + d;                         \
-        int bt_ds = (b * T_len + t) * d_state;                             \
+        long long bt_di = (b * T_len + t) * d_inner + d;                   \
+        long long bt_ds = (b * T_len + t) * d_state;                       \
         float delta_d = to_f(delta[bt_di]);                                \
         float u_d = to_f(u[bt_di]);                                        \
         float delta_u_d = delta_d * u_d;                                   \
@@ -395,29 +395,29 @@ extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
     const float* a_neg, const float* D,                                     \
     int batch, int T_len, int d_inner, int d_state                          \
 ) {                                                                         \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                        \
-    int total = batch * d_inner;                                            \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;       \
+    long long total = (long long)batch * d_inner;                           \
     if (idx >= total) return;                                               \
-    int b = idx / d_inner;                                                  \
-    int d = idx % d_inner;                                                  \
-    int h_base = (b * d_inner + d) * d_state;                               \
+    long long b = idx / d_inner;                                            \
+    int d = (int)(idx % d_inner);                                           \
+    long long h_base = (b * d_inner + d) * d_state;                         \
     float h_local[MAMBA_RS_STATE_CAP];                                                      \
     float a_local[MAMBA_RS_STATE_CAP];                                                      \
     if (d_state > MAMBA_RS_STATE_CAP) return;                                               \
     _Pragma("unroll")                                                       \
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {         \
         h_local[n] = h[h_base + n];                                         \
-        a_local[n] = a_neg[d * d_state + n];                                \
+        a_local[n] = a_neg[(long long)d * d_state + n];                     \
     }                                                                       \
     _Pragma("unroll")                                                       \
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {         \
-        int hs_idx = (b * (T_len + 1) + 0) * d_inner * d_state              \
-                     + d * d_state + n;                                     \
+        long long hs_idx =                                                  \
+            ((b * (T_len + 1) + 0) * d_inner + d) * d_state + n;            \
         h_saved[hs_idx] = h_local[n];                                       \
     }                                                                       \
     for (int t = 0; t < T_len; t++) {                                       \
-        int bt_di = (b * T_len + t) * d_inner + d;                          \
-        int bt_ds = (b * T_len + t) * d_state;                              \
+        long long bt_di = (b * T_len + t) * d_inner + d;                    \
+        long long bt_ds = (b * T_len + t) * d_state;                        \
         float raw = to_f(delta_raw[bt_di]);                                 \
         float sp = (raw > 20.0f)                                            \
             ? raw : log1pf(exp2f(raw * 1.4426950408889634f));               \
@@ -437,8 +437,8 @@ extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
         y_out[bt_di] = FROM_F(y_d);                                         \
         _Pragma("unroll")                                                   \
         for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {     \
-            int hs_idx = (b * (T_len + 1) + (t + 1)) * d_inner * d_state    \
-                         + d * d_state + n;                                 \
+            long long hs_idx =                                              \
+                ((b * (T_len + 1) + (t + 1)) * d_inner + d) * d_state + n;  \
             h_saved[hs_idx] = h_local[n];                                   \
         }                                                                   \
     }                                                                       \
@@ -480,12 +480,12 @@ extern "C" __global__ void ssm_backward_local(
     // Dimensions
     int batch, int T, int d_inner, int d_state
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * d_inner;
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long total = (long long)batch * d_inner;
     if (idx >= total) return;
 
-    int b = idx / d_inner;
-    int d = idx % d_inner;
+    long long b = idx / d_inner;
+    int d = (int)(idx % d_inner);
 
     // Per-thread accumulators for D and a_log gradients
     float local_d_D = 0.0f;
@@ -495,7 +495,7 @@ extern "C" __global__ void ssm_backward_local(
     if (d_state > MAMBA_RS_STATE_CAP) return;
     #pragma unroll
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else
-        a_local[n] = a_neg[d * d_state + n];
+        a_local[n] = a_neg[(long long)d * d_state + n];
 
     // d_h carries gradient backward through time
     float d_h[MAMBA_RS_STATE_CAP];
@@ -510,13 +510,13 @@ extern "C" __global__ void ssm_backward_local(
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {
         d_h[n] = 0.0f;
         d_a_acc[n] = 0.0f;
-        h_carry[n] = h_saved[(b * (T + 1) + T) * d_inner * d_state + (d * d_state + n)];
+        h_carry[n] = h_saved[((b * (T + 1) + T) * d_inner + d) * d_state + n];
     }
 
     // Backward through time (reverse T)
     for (int t = T - 1; t >= 0; t--) {
-        int bt_di = (b * T + t) * d_inner + d;
-        int bt_ds = (b * T + t) * d_state;
+        long long bt_di = (b * T + t) * d_inner + d;
+        long long bt_ds = (b * T + t) * d_state;
 
         float dy_d = dy[bt_di];
         float delta_d = delta_saved[bt_di];
@@ -544,11 +544,11 @@ extern "C" __global__ void ssm_backward_local(
             d_h[n] += dy_d * C_saved[bt_ds + n];
 
             // d_C += dy * h_curr (per-thread: indexed by b,t,d,n)
-            int btdn = ((b * T + t) * d_inner + d) * d_state + n;
+            long long btdn = ((b * T + t) * d_inner + d) * d_state + n;
             d_C_local[btdn] = dy_d * h_curr;
 
             // h_prev: state BEFORE step t
-            int h_prev_idx = (b * (T + 1) + t) * d_inner * d_state + (d * d_state + n);
+            long long h_prev_idx = ((b * (T + 1) + t) * d_inner + d) * d_state + n;
             float h_prev = h_saved[h_prev_idx];
 
             // d_delta += d_h * (a_dn * da * h_prev + u * B)
@@ -616,11 +616,11 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
     float*       d_a_log_local,                                                 \
     int batch, int T, int d_inner, int d_state                                  \
 ) {                                                                             \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                            \
-    int total = batch * d_inner;                                                \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;           \
+    long long total = (long long)batch * d_inner;                               \
     if (idx >= total) return;                                                   \
-    int b = idx / d_inner;                                                      \
-    int d = idx % d_inner;                                                      \
+    long long b = idx / d_inner;                                                \
+    int d = (int)(idx % d_inner);                                               \
     if (d_state > MAMBA_RS_STATE_CAP) return;                                                   \
                                                                                 \
     float local_d_D = 0.0f;                                                     \
@@ -630,16 +630,15 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
     float h_carry[MAMBA_RS_STATE_CAP];                                                          \
     _Pragma("unroll")                                                           \
     for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {             \
-        a_local[n] = a_neg[d * d_state + n];                                    \
+        a_local[n] = a_neg[(long long)d * d_state + n];                         \
         d_h[n] = 0.0f;                                                          \
         d_a_acc[n] = 0.0f;                                                      \
-        h_carry[n] = h_saved[(b * (T + 1) + T) * d_inner * d_state              \
-                             + (d * d_state + n)];                              \
+        h_carry[n] = h_saved[((b * (T + 1) + T) * d_inner + d) * d_state + n];  \
     }                                                                           \
                                                                                 \
     for (int t = T - 1; t >= 0; t--) {                                          \
-        int bt_di = (b * T + t) * d_inner + d;                                  \
-        int bt_ds = (b * T + t) * d_state;                                      \
+        long long bt_di = (b * T + t) * d_inner + d;                            \
+        long long bt_ds = (b * T + t) * d_state;                                \
         float dy_d    = to_f(dy[bt_di]);                                        \
         float delta_d = to_f(delta_saved[bt_di]);                               \
         float u_d     = to_f(u_saved[bt_di]);                                   \
@@ -650,8 +649,8 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
                                                                                 \
         _Pragma("unroll")                                                       \
         for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {         \
-            int h_prev_idx = (b * (T + 1) + t)       * d_inner * d_state        \
-                             + (d * d_state + n);                               \
+            long long h_prev_idx =                                              \
+                ((b * (T + 1) + t) * d_inner + d) * d_state + n;                \
             float h_curr = h_carry[n];                                          \
             float h_prev = h_saved[h_prev_idx];                                 \
             float B_n    = to_f(B_saved[bt_ds + n]);                            \
@@ -659,7 +658,7 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
             float da     = exp2f(delta_d * a_local[n] * LOG2E);                 \
                                                                                 \
             d_h[n] += dy_d * C_n;                                               \
-            int btdn = ((b * T + t) * d_inner + d) * d_state + n;               \
+            long long btdn = ((b * T + t) * d_inner + d) * d_state + n;         \
             d_C_local[btdn] = FROM_F(dy_d * h_curr);                            \
                                                                                 \
             d_delta_val += d_h[n] * (a_local[n] * da * h_prev + u_d * B_n);     \
@@ -705,11 +704,11 @@ extern "C" __global__ void ssm_reduce_d_BC_##SUFFIX(                           \
     const TY* d_C_local,      /* [batch * T * d_inner * d_state] */            \
     int batch, int T, int d_inner, int d_state                                 \
 ) {                                                                            \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
-    int total = batch * T * d_state;                                           \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;          \
+    long long total = (long long)batch * T * d_state;                          \
     if (idx >= total) return;                                                  \
-    int bt = idx / d_state;                                                    \
-    int n = idx % d_state;                                                     \
+    long long bt = idx / d_state;                                              \
+    int n = (int)(idx % d_state);                                              \
     float sum_b = 0.0f;                                                        \
     for (int d = 0; d < d_inner; d++) {                                        \
         sum_b += to_f(d_B_local[(bt * d_inner + d) * d_state + n]);            \
@@ -741,14 +740,14 @@ extern "C" __global__ void ssm_reduce_d_BC_tmajor_##SUFFIX(                    \
     const TY* d_C_local,      /* [batch * d_state * d_inner * T] */            \
     int batch, int T, int d_inner, int d_state                                 \
 ) {                                                                            \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
-    int total = batch * T * d_state;                                           \
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;          \
+    long long total = (long long)batch * T * d_state;                          \
     if (idx >= total) return;                                                  \
-    int t = idx % T;                                                           \
-    int rem = idx / T;                                                         \
-    int n = rem % d_state;                                                     \
-    int b = rem / d_state;                                                     \
-    int out_idx = (b * T + t) * d_state + n;                                   \
+    int t = (int)(idx % T);                                                    \
+    long long rem = idx / T;                                                   \
+    int n = (int)(rem % d_state);                                              \
+    long long b = rem / d_state;                                               \
+    long long out_idx = (b * T + t) * d_state + n;                             \
     float sum_b = 0.0f;                                                        \
     for (int d = 0; d < d_inner; d++) {                                        \
         sum_b += to_f(d_B_local[((b * d_state + n) * d_inner + d) * T + t]);   \
@@ -775,7 +774,7 @@ extern "C" __global__ void ssm_reduce_d_D(
     if (d >= d_inner) return;
     float sum = 0.0f;
     for (int b = 0; b < batch; b++) {
-        sum += d_D_local[b * d_inner + d];
+        sum += d_D_local[(long long)b * d_inner + d];
     }
     d_D_out[d] += sum;
 }
@@ -799,14 +798,14 @@ extern "C" __global__ void ssm_reduce_d_a_log_chunks(
     const float* partials,      // [batch * n_chunks * d_inner * d_state]
     int batch, int n_chunks, int d_inner, int d_state
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = d_inner * d_state;
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long total = (long long)d_inner * d_state;
     if (idx >= total) return;
     float sum = 0.0f;
     for (int b = 0; b < batch; b++) {
         float acc = 0.0f;
         for (int c = 0; c < n_chunks; c++) {
-            acc += partials[(b * n_chunks + c) * total + idx];
+            acc += partials[((long long)b * n_chunks + c) * total + idx];
         }
         sum += acc;
     }
@@ -818,8 +817,8 @@ extern "C" __global__ void ssm_reduce_d_a_log(
     const float* d_a_log_local, // [batch * d_inner * d_state]
     int batch, int d_inner, int d_state
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = d_inner * d_state;
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long total = (long long)d_inner * d_state;
     if (idx >= total) return;
     float sum = 0.0f;
     for (int b = 0; b < batch; b++) {

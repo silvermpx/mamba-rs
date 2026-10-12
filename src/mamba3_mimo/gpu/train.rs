@@ -45,7 +45,7 @@ use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer, GradSlice};
 use crate::gpu::context::{GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_norm, validate_rows_capacity};
+use crate::gpu::launch::{grid_1d, grid_norm, launch_elems, validate_rows_capacity};
 use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -1063,24 +1063,16 @@ impl Mamba3MimoGpuTrainer {
 
     /// `temporal += out` for `n` values, `out` in the activation dtype.
     fn residual_add(&self, temporal: u64, out: u64, n: usize) -> Result<(), String> {
-        let n_i = n as i32;
-        let stream = &self.ctx.stream;
-        let mut bld = if self.act == WeightDtype::F32 {
-            let mut bld = stream.launch_builder(&self.ctx.kernels.vec_add_inplace);
-            bld.arg(&temporal);
-            bld
+        let k = &self.ctx.kernels;
+        let (f, ptrs): (_, &[u64]) = if self.act == WeightDtype::F32 {
+            (&k.vec_add_inplace, &[temporal, out])
         } else {
-            let mut bld =
-                stream.launch_builder(self.ctx.kernels.residual_add_f32_typed.get(self.act));
-            bld.arg(&temporal);
-            bld.arg(&temporal);
-            bld
+            (
+                k.residual_add_f32_typed.get(self.act),
+                &[temporal, temporal, out],
+            )
         };
-        bld.arg(&out);
-        bld.arg(&n_i);
-        unsafe { bld.launch(grid_1d(n)) }
-            .map(|_| ())
-            .map_err(|e| format!("MIMO residual: {e:?}"))
+        launch_elems(&self.ctx.stream, f, ptrs, n, format_args!("MIMO residual"))
     }
 
     /// `y = x W` in the activation dtype.
@@ -1471,18 +1463,13 @@ impl Mamba3MimoGpuTrainer {
 
     /// `d_temp += d_pre`.
     fn add_residual_grad(&self, rows: usize) -> Result<(), String> {
-        let n = (rows * self.cfg.d_model) as i32;
-        let (d_temp, d_pre) = (self.bwd.d_temp.cached_ptr(), self.bwd.d_pre.cached_ptr());
-        let mut bld = self
-            .ctx
-            .stream
-            .launch_builder(&self.ctx.kernels.vec_add_inplace);
-        bld.arg(&d_temp);
-        bld.arg(&d_pre);
-        bld.arg(&n);
-        unsafe { bld.launch(grid_1d(rows * self.cfg.d_model)) }
-            .map(|_| ())
-            .map_err(|e| format!("MIMO backward residual: {e:?}"))
+        launch_elems(
+            &self.ctx.stream,
+            &self.ctx.kernels.vec_add_inplace,
+            &[self.bwd.d_temp.cached_ptr(), self.bwd.d_pre.cached_ptr()],
+            rows * self.cfg.d_model,
+            format_args!("MIMO backward residual"),
+        )
     }
 
     /// The residual gradient in the half type (the half lanes' GEMM input).
@@ -2450,7 +2437,7 @@ impl Mamba3MimoGpuTrainer {
                 at(m_base, span),
                 at(v_base, span),
             );
-            let n = span.len as i32;
+            let n = span.len as i64;
             let mut bld = self
                 .ctx
                 .stream
@@ -2467,7 +2454,8 @@ impl Mamba3MimoGpuTrainer {
             bld.arg(&bias_c1);
             bld.arg(&bias_c2);
             bld.arg(&n);
-            unsafe { bld.launch(grid_1d(span.len)) }.map_err(|e| format!("MIMO AdamW: {e:?}"))?;
+            unsafe { bld.launch(crate::gpu::launch::grid_1d_wide(span.len)) }
+                .map_err(|e| format!("MIMO AdamW: {e:?}"))?;
         }
         self.refresh_mirror()?;
         self.sync("AdamW")?;

@@ -8,7 +8,7 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_conv_fwd_tiled, grid_conv_tiled};
+use crate::gpu::launch::{blocks_1d, grid_1d_wide, grid_conv_fwd_tiled, grid_conv_tiled, tiles_y};
 
 /// The widest window the tiled conv kernels hold per thread.
 pub const CONV_WINDOW_TAPS: usize = 8;
@@ -64,19 +64,19 @@ pub(crate) fn conv_forward(
         bld.arg(&dc_i);
         bld.arg(&xs_i);
         bld.arg(&tile_i);
+        let grid = blocks_1d(batch * d_inner)
+            .and_then(|x| Ok((x, tiles_y(seq, tile)?)))
+            .map_err(|e| format!("{what} conv forward: {e}"))?;
         let cfg = LaunchConfig {
-            grid_dim: (
-                ((batch * d_inner) as u32).div_ceil(256),
-                (seq as u32).div_ceil(tile as u32),
-                1,
-            ),
+            grid_dim: (grid.0, grid.1, 1),
             block_dim: (256, 1, 1),
             shared_mem_bytes: 0,
         };
         unsafe { bld.launch(cfg) }.map_err(|e| format!("{what} conv forward: {e:?}"))?;
         return Ok(());
     }
-    let cfg = grid_conv_fwd_tiled(batch, d_inner, seq);
+    let cfg = grid_conv_fwd_tiled(batch, d_inner, seq)
+        .map_err(|e| format!("{what} conv forward: {e}"))?;
     if p.saved != 0 {
         let mut bld = ctx
             .stream
@@ -145,7 +145,8 @@ pub(crate) fn conv_backward(
     let k = &ctx.kernels;
     let (b_i, t_i, di_i, dc_i) = (batch as i32, seq as i32, d_inner as i32, d_conv as i32);
     let (os_i, oo_i, xs_i) = (p.d_x.1 as i32, p.d_x.2 as i32, p.x.1 as i32);
-    let cfg = grid_conv_tiled(batch, d_inner, seq);
+    let cfg =
+        grid_conv_tiled(batch, d_inner, seq).map_err(|e| format!("{what} conv backward: {e}"))?;
     if d_conv > CONV_WINDOW_TAPS {
         let mut bld = ctx.stream.launch_builder(k.conv1d_bwd_dco_typed.get(dtype));
         bld.arg(&p.dco);
@@ -159,7 +160,7 @@ pub(crate) fn conv_backward(
         bld.arg(&di_i);
         bld.arg(&dc_i);
         bld.arg(&xs_i);
-        unsafe { bld.launch(grid_1d(batch * seq * d_inner)) }
+        unsafe { bld.launch(grid_1d_wide(batch * seq * d_inner)) }
             .map_err(|e| format!("{what} conv pre-activation gradient: {e:?}"))?;
         let mut bld = ctx.stream.launch_builder(k.conv1d_bwd_any_typed.get(dtype));
         bld.arg(&p.d_x.0);

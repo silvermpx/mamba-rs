@@ -32,7 +32,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d, grid_norm, validate_rows_capacity};
+use crate::gpu::launch::{grid_1d, grid_norm, launch_elems, validate_rows_capacity};
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 use crate::mlp::GatedMlpLayerWeights;
@@ -416,25 +416,23 @@ impl M2Exec<'_> {
 
     /// `temporal += out` over `rows` rows, `out` in the activation dtype.
     fn residual_add(&self, temporal: u64, out: u64, rows: usize) -> Result<(), String> {
-        let stream = &self.ctx.stream;
-        let dm = self.cfg.d_model;
-        let n = (rows * dm) as i32;
-        let mut bld = if self.act == WeightDtype::F32 {
-            let mut bld = stream.launch_builder(&self.ctx.kernels.vec_add_inplace);
-            bld.arg(&temporal);
-            bld
+        let k = &self.ctx.kernels;
+        let n = rows * self.cfg.d_model;
+        let (f, ptrs): (_, &[u64]) = if self.act == WeightDtype::F32 {
+            (&k.vec_add_inplace, &[temporal, out])
         } else {
-            let mut bld =
-                stream.launch_builder(self.ctx.kernels.residual_add_f32_typed.get(self.act));
-            bld.arg(&temporal);
-            bld.arg(&temporal);
-            bld
+            (
+                k.residual_add_f32_typed.get(self.act),
+                &[temporal, temporal, out],
+            )
         };
-        bld.arg(&out);
-        bld.arg(&n);
-        unsafe { bld.launch(grid_1d(rows * dm)) }
-            .map(|_| ())
-            .map_err(|e| format!("Mamba-2 residual: {e:?}"))
+        launch_elems(
+            &self.ctx.stream,
+            f,
+            ptrs,
+            n,
+            format_args!("Mamba-2 residual"),
+        )
     }
 
     pub(crate) fn dt_flags(&self) -> (i32, f32, f32) {

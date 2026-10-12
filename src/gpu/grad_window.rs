@@ -8,13 +8,13 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaStream, PushKernelArg};
+use cudarc::driver::CudaStream;
 
 use super::buffers::{GpuBuffer, GpuByteBuffer};
 use super::context::GpuCtx;
 use super::dtype::WeightDtype;
 use super::grad_clip::{alloc_partials, clip_grads_device};
-use super::launch::grid_1d;
+use super::launch::launch_elems;
 use crate::mamba1::gpu::trainer::BackwardOpts;
 
 /// The gradient sum of an open accumulation window, and the scratch of
@@ -88,16 +88,6 @@ impl GradWindow {
 
 /// `dst += src`, element by element.
 fn add_into(ctx: &GpuCtx, dst: &mut GpuBuffer, src: &GpuBuffer) -> Result<(), String> {
-    add_into_sliced(ctx, dst, src, i32::MAX as usize)
-}
-
-/// [`add_into`] in launches of at most `max_slice` elements.
-fn add_into_sliced(
-    ctx: &GpuCtx,
-    dst: &mut GpuBuffer,
-    src: &GpuBuffer,
-    max_slice: usize,
-) -> Result<(), String> {
     let n = dst.len();
     if src.len() != n {
         return Err(format!(
@@ -105,22 +95,13 @@ fn add_into_sliced(
             src.len()
         ));
     }
-    // The element kernel counts in i32, so an arena past i32::MAX goes in
-    // slices. Each element is still one add of the same two floats.
-    let (dst_ptr, src_ptr) = (dst.cached_ptr(), src.cached_ptr());
-    let mut start = 0usize;
-    while start < n {
-        let len = (n - start).min(max_slice);
-        let off = (start * std::mem::size_of::<f32>()) as u64;
-        let (d, s, len_i) = (dst_ptr + off, src_ptr + off, len as i32);
-        let mut bld = ctx.stream.launch_builder(&ctx.kernels.vec_add_inplace);
-        bld.arg(&d);
-        bld.arg(&s);
-        bld.arg(&len_i);
-        unsafe { bld.launch(grid_1d(len)) }.map_err(|e| format!("gradient window add: {e:?}"))?;
-        start += len;
-    }
-    Ok(())
+    launch_elems(
+        &ctx.stream,
+        &ctx.kernels.vec_add_inplace,
+        &[dst.cached_ptr(), src.cached_ptr()],
+        n,
+        format_args!("gradient window add"),
+    )
 }
 
 /// The backward options these trainers refuse: an accumulating call in
@@ -157,10 +138,10 @@ mod tests {
     use super::*;
     use crate::gpu::device::GpuDevice;
 
-    /// The slices cover every element once, in order: an arena added in
-    /// launches of a thousand elements equals the host sum.
+    /// The add covers every element once: the arena plus the window is the
+    /// host sum.
     #[test]
-    fn sliced_adds_cover_every_element_once() {
+    fn the_window_add_covers_every_element_once() {
         let device = GpuDevice::new(0).expect("open CUDA device");
         let ctx = GpuCtx::new(&device).expect("context");
         let n = 2500;
@@ -170,7 +151,7 @@ mod tests {
         let mut src = GpuBuffer::zeros(&ctx.stream, n).expect("src");
         dst.upload(&ctx.stream, &a).expect("upload a");
         src.upload(&ctx.stream, &b).expect("upload b");
-        add_into_sliced(&ctx, &mut dst, &src, 1000).expect("sliced add");
+        add_into(&ctx, &mut dst, &src).expect("window add");
         let mut got = vec![0.0f32; n];
         dst.download(&ctx.stream, &mut got).expect("download");
         let want: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x + y).collect();

@@ -560,14 +560,13 @@ fn gpu_backward_mamba3_layer_mixed(
 
         // Zero d_angle_cumsum before m3_dqktheta.
         if na > 0 {
-            let n_ac = (dims.batch * dims.seq_len * nh * na) as i32;
-            let mut builder = ctx.stream.launch_builder(&m3k.fill_scalar);
-            builder.arg(sc.d_angle_cumsum.inner_mut());
-            let zero: f32 = 0.0;
-            builder.arg(&zero);
-            builder.arg(&n_ac);
-            unsafe { builder.launch(grid_1d(n_ac as usize)) }
-                .map_err(|e| format!("zero d_angle_cumsum mixed: {:?}", e))?;
+            crate::gpu::launch::launch_fill(
+                &ctx.stream,
+                &m3k.fill_scalar,
+                (sc.d_angle_cumsum.cached_ptr(), 0.0),
+                dims.batch * dims.seq_len * nh * na,
+                format_args!("zero d_angle_cumsum mixed"),
+            )?;
         }
 
         // m3_dqktheta typed — dQ_bias/dK_bias removed from args
@@ -719,14 +718,13 @@ fn gpu_backward_mamba3_layer_mixed(
                 .map_err(|e| format!("angle_dt_bwd mixed reduce dt: {:?}", e))?;
         }
     } else {
-        let ne = (bt * nh) as i32;
-        let zero: f32 = 0.0;
-        let mut builder = ctx.stream.launch_builder(&m3k.fill_scalar);
-        builder.arg(sc.d_dt_angle.inner_mut());
-        builder.arg(&zero);
-        builder.arg(&ne);
-        unsafe { builder.launch(grid_1d(bt * nh)) }
-            .map_err(|e| format!("zero d_dt_angle mixed: {:?}", e))?;
+        crate::gpu::launch::launch_fill(
+            &ctx.stream,
+            &m3k.fill_scalar,
+            (sc.d_dt_angle.cached_ptr(), 0.0),
+            bt * nh,
+            format_args!("zero d_dt_angle mixed"),
+        )?;
     }
 
     // ----------------------------------------------------------------
@@ -1026,15 +1024,13 @@ fn gpu_backward_mamba3_layer_mixed(
     }
 
     // Residual: d_temporal += d_pre_norm.
-    {
-        let ne = (bt * dm) as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.vec_add_inplace);
-        builder.arg(d_temporal.inner_mut());
-        builder.arg(sc.d_pre_norm.inner());
-        builder.arg(&ne);
-        unsafe { builder.launch(grid_1d(bt * dm)) }
-            .map_err(|e| format!("vec_add d_temporal mixed: {:?}", e))?;
-    }
+    crate::gpu::launch::launch_elems(
+        &ctx.stream,
+        &m3k.vec_add_inplace,
+        &[d_temporal.cached_ptr(), sc.d_pre_norm.cached_ptr()],
+        bt * dm,
+        format_args!("vec_add d_temporal mixed"),
+    )?;
 
     Ok(())
 }

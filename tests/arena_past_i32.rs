@@ -1,16 +1,20 @@
-//! A gradient arena past `i32::MAX` elements, as a multi-billion parameter
-//! model trains with: the clip norm and the f16 overflow check see every
-//! element. Before the counts were 64-bit, the norm of such an arena came
-//! out 0 (no clip, no spike skip) and the overflow check panicked.
+//! Windows past `i32::MAX` elements. A gradient arena as a multi-billion
+//! parameter model trains with: the clip norm and the f16 overflow check see
+//! every element. Before the counts were 64-bit, the norm of such an arena
+//! came out 0 (no clip, no spike skip) and the overflow check panicked. And
+//! the Mamba-1 element kernels over a window of that many elements: each one
+//! is processed once, those past 2^31 included.
 #![cfg(feature = "cuda")]
 
 use std::sync::Arc;
 
-use cudarc::driver::CudaStream;
-use mamba_rs::gpu::buffers::GpuBuffer;
+use cudarc::driver::{CudaStream, PushKernelArg};
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::grad_clip::{alloc_partials, clip_grads_device};
+use mamba_rs::gpu::launch::grid_1d_wide;
 use mamba_rs::gpu::loss_scaler::{OverflowFlag, check_inf_nan_gpu};
 
 /// Set `n` floats at `ptr` to `value` on the device.
@@ -20,6 +24,35 @@ fn fill(stream: &Arc<CudaStream>, ptr: u64, value: f32, n: usize) {
     };
     assert_eq!(r, cudarc::driver::sys::CUresult::CUDA_SUCCESS, "memset");
 }
+
+/// Set `n` 16-bit values at `ptr` to `bits` on the device.
+fn fill16(stream: &Arc<CudaStream>, ptr: u64, bits: u16, n: usize) {
+    let r = unsafe { cudarc::driver::sys::cuMemsetD16Async(ptr, bits, n, stream.cu_stream()) };
+    assert_eq!(r, cudarc::driver::sys::CUresult::CUDA_SUCCESS, "memset");
+}
+
+/// The 16-bit values at the given element positions of `ptr`.
+fn read16(stream: &Arc<CudaStream>, ptr: u64, at: &[usize]) -> Vec<u16> {
+    stream.synchronize().expect("sync");
+    at.iter()
+        .map(|&i| {
+            let mut v = 0u16;
+            let r = unsafe {
+                cudarc::driver::sys::cuMemcpyDtoH_v2(
+                    (&mut v as *mut u16).cast(),
+                    ptr + (i * 2) as u64,
+                    2,
+                )
+            };
+            assert_eq!(r, cudarc::driver::sys::CUresult::CUDA_SUCCESS, "read {i}");
+            v
+        })
+        .collect()
+}
+
+/// bf16 0.5 and 2.0.
+const HALF: u16 = 0x3f00;
+const TWO: u16 = 0x4000;
 
 #[test]
 #[ignore = "allocates 8 GiB of device memory"]
@@ -55,4 +88,68 @@ fn an_arena_past_i32_max_is_measured_and_checked_whole() {
         1,
         "the last element"
     );
+}
+
+/// The Mamba-1 element kernels over a window of `i32::MAX + 4097` bf16
+/// elements: the in-place softplus strides over the whole count, so every
+/// element, the last included, is softplus(0.5) and none is applied twice;
+/// the column gather over rows of two elements forms the offsets past 2^31
+/// in 64 bits, so the elements there read their own source elements and not
+/// the ones 2^31 back.
+#[test]
+#[ignore = "allocates 8 GiB of device memory"]
+fn m1_element_kernels_run_every_row_past_i32_max() {
+    let device = GpuDevice::new(0).expect("open CUDA device");
+    let ctx = GpuCtx::new(&device).expect("context");
+    let s = &ctx.stream;
+    let n = i32::MAX as usize + 4097;
+    let at = [
+        0,
+        1,
+        i32::MAX as usize - 1,
+        i32::MAX as usize,
+        i32::MAX as usize + 1,
+        n - 1,
+    ];
+    let n_i = n as i64;
+
+    let x = DtypedBuf::zeros(s, n, WeightDtype::Bf16).expect("4 GiB of bf16");
+    fill16(s, x.cached_ptr(), HALF, n);
+    let xp = x.cached_ptr();
+    let mut bld = s.launch_builder(ctx.kernels.softplus_fwd_typed.get(WeightDtype::Bf16));
+    bld.arg(&xp);
+    bld.arg(&n_i);
+    unsafe { bld.launch(grid_1d_wide(n)) }.expect("softplus");
+    let got = read16(s, xp, &at);
+    // softplus(0.5) = 0.974 rounds to bf16 0x3f79; twice applied it would be
+    // softplus(0.974) = 1.30.
+    assert!(
+        got.iter().all(|&v| v == 0x3f79),
+        "softplus once everywhere: {got:04x?}"
+    );
+    drop(x);
+
+    let rows = (n / 2) as i32;
+    let two = 2i32;
+    let zero = 0i32;
+    let src = DtypedBuf::zeros(s, n, WeightDtype::Bf16).expect("4 GiB of bf16");
+    let dst = DtypedBuf::zeros(s, n, WeightDtype::Bf16).expect("4 GiB of bf16");
+    let (sp, dp) = (src.cached_ptr(), dst.cached_ptr());
+    let low = i32::MAX as usize + 1;
+    fill16(s, sp, HALF, low);
+    fill16(s, sp + (low * 2) as u64, TWO, n - low);
+    let mut bld = s.launch_builder(ctx.kernels.gather_cols_typed.get(WeightDtype::Bf16));
+    bld.arg(&dp);
+    bld.arg(&sp);
+    bld.arg(&rows);
+    bld.arg(&two);
+    bld.arg(&two);
+    bld.arg(&zero);
+    unsafe { bld.launch(grid_1d_wide(n)) }.expect("gather");
+    let got = read16(s, dp, &at);
+    let want: Vec<u16> = at
+        .iter()
+        .map(|&i| if i < low { HALF } else { TWO })
+        .collect();
+    assert_eq!(got, want, "every element reads its own source element");
 }

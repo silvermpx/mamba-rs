@@ -482,7 +482,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     float* run_tape,
     int slim_tape
 ) {
-    int bid = blockIdx.x;
+    long long bid = blockIdx.x;
     int did = blockIdx.y;
     if (bid >= batch || did >= d_inner) return;
     if (d_state > MAX_DSTATE) return;
@@ -500,14 +500,14 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     float *smem_exch_b = smem_exch_a + NWARPS;
 
     float D_d = D[did];
-    int h_base = (bid * d_inner + did) * d_state;
+    long long h_base = (bid * d_inner + did) * d_state;
     int n_chunks = (T + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
     // Save initial SSM state (slim: tape row head — the chunk-0 prefix
     // is the identity and the chunk-0 entry state is h_0 itself).
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {
         if (slim_tape) {
-            int row = ((bid * d_inner + did) * d_state + n) * 3 * n_chunks;
+            long long row = ((bid * d_inner + did) * d_state + n) * 3 * n_chunks;
             run_tape[row + 0] = 1.0f;
             run_tape[row + 1] = 0.0f;
             run_tape[row + 2] = h[h_base + n];
@@ -517,7 +517,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
              * layout put every lane in its own 32-byte sector). Layout is a
              * property of the PARALLEL route; the sequential kernels keep
              * the historical layout. */
-            int hs_idx = ((bid * d_inner + did) * d_state + n) * (T + 1) + 0;
+            long long hs_idx = ((bid * d_inner + did) * d_state + n) * (T + 1) + 0;
             h_saved[hs_idx] = h[h_base + n];
         }
     }
@@ -568,7 +568,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
         for (int n = 0; n < d_state; n++) {
             // Pre-multiply a_neg by LOG2E so we can use exp2f directly,
             // saving one FMUL per (t, d, n) triple.
-            float a_dn = a_neg[did * d_state + n] * LOG2E;
+            float a_dn = a_neg[(long long)did * d_state + n] * LOG2E;
 
             // Build (da, db) pairs for this state dimension. B is read
             // directly (barrier diet — see the delta/u note above).
@@ -636,7 +636,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
             // Slim tape: record this chunk's entry prefix (chunk 0's
             // identity row was written above). Single writer.
             if (slim_tape && chunk > 0 && threadIdx.x == 0) {
-                int row =
+                long long row =
                     ((bid * d_inner + did) * d_state + n) * 3 * n_chunks;
                 run_tape[row + 3 * chunk + 0] = run_a;
                 run_tape[row + 3 * chunk + 1] = run_b;
@@ -680,12 +680,12 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
                     // boundary read used to load from h_saved).
                     if (slim_tape) {
                         if ((t + 1) % CHUNK_SIZE == 0 && t + 1 < T) {
-                            int row = ((bid * d_inner + did) * d_state + n)
+                            long long row = ((bid * d_inner + did) * d_state + n)
                                 * 3 * n_chunks;
                             run_tape[row + 3 * (chunk + 1) + 2] = h_t;
                         }
                     } else {
-                        int hs_idx = ((bid * d_inner + did) * d_state + n)
+                        long long hs_idx = ((bid * d_inner + did) * d_state + n)
                             * (T + 1) + (t + 1);
                         h_saved[hs_idx] = h_t;
                     }
@@ -744,7 +744,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     // stored ungated for gate_from_tmajor; 0: row-major rows.
     int tstride
 ) {
-    int bid = blockIdx.x;
+    long long bid = blockIdx.x;
     int did = blockIdx.y;
     if (bid >= batch || did >= d_inner) return;
     if (d_state > MAX_DSTATE) return;
@@ -762,7 +762,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     float *smem_exch_b = smem_exch_a + NWARPS;
 
     float D_d = D[did];
-    int h_base = (bid * d_inner + did) * d_state;
+    long long h_base = (bid * d_inner + did) * d_state;
 
     // Initialize running prefix to identity
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {
@@ -812,7 +812,7 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
         for (int n = 0; n < d_state; n++) {
             // Pre-multiply a_neg by LOG2E so we can use exp2f directly,
             // saving one FMUL per (t, d, n) triple.
-            float a_dn = a_neg[did * d_state + n] * LOG2E;
+            float a_dn = a_neg[(long long)did * d_state + n] * LOG2E;
 
             float thread_a[NITEMS];
             float thread_b[NITEMS];
@@ -956,7 +956,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
     float* run_tape,                                                          \
     int slim_tape                                                             \
 ) {                                                                           \
-    int bid = blockIdx.x;                                                     \
+    long long bid = blockIdx.x;                                               \
     int did = blockIdx.y;                                                     \
     if (bid >= batch || did >= d_inner) return;                               \
     if (d_state > MAX_DSTATE) return;                                         \
@@ -969,17 +969,17 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
     float *smem_exch_a = smem_run_b + d_state;                                \
     float *smem_exch_b = smem_exch_a + NWARPS;                                \
     float D_d = D[did];                                                       \
-    int h_base = (bid * d_inner + did) * d_state;                             \
+    long long h_base = (bid * d_inner + did) * d_state;                       \
     int n_chunks = (T + CHUNK_SIZE - 1) / CHUNK_SIZE;                         \
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
         if (slim_tape) {                                                      \
-            int row = ((bid * d_inner + did) * d_state + n) * 3 * n_chunks;   \
+            long long row = ((bid * d_inner + did) * d_state + n) * 3 * n_chunks; \
             run_tape[row + 0] = 1.0f;                                         \
             run_tape[row + 1] = 0.0f;                                         \
             run_tape[row + 2] = h[h_base + n];                                \
         } else {                                                              \
             /* T-major tape (see the plain fwd note). */                      \
-            int hs_idx =                                                      \
+            long long hs_idx =                                                \
                 ((bid * d_inner + did) * d_state + n) * (T + 1) + 0;          \
             h_saved[hs_idx] = h[h_base + n];                                  \
         }                                                                     \
@@ -1027,7 +1027,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             out_vals[i] = D_d * u_vals[i];                                    \
         }                                                                     \
         for (int n = 0; n < d_state; n++) {                                   \
-            float a_dn = a_neg[did * d_state + n] * LOG2E;                    \
+            float a_dn = a_neg[(long long)did * d_state + n] * LOG2E;         \
             float thread_a[NITEMS];                                           \
             float thread_b[NITEMS];                                           \
             float b_row[NITEMS];                                              \
@@ -1076,7 +1076,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             }                                                                 \
             /* Slim tape: chunk-entry prefix (single writer). */              \
             if (slim_tape && chunk > 0 && threadIdx.x == 0) {                 \
-                int row =                                                     \
+                long long row =                                               \
                     ((bid * d_inner + did) * d_state + n) * 3 * n_chunks;     \
                 run_tape[row + 3 * chunk + 0] = run_a;                        \
                 run_tape[row + 3 * chunk + 1] = run_b;                        \
@@ -1102,13 +1102,13 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                     float h_t = final_a * h_0 + final_b;                      \
                     if (slim_tape) {                                          \
                         if ((t + 1) % CHUNK_SIZE == 0 && t + 1 < T) {         \
-                            int row =                                         \
+                            long long row =                                   \
                                 ((bid * d_inner + did) * d_state + n)         \
                                 * 3 * n_chunks;                               \
                             run_tape[row + 3 * (chunk + 1) + 2] = h_t;        \
                         }                                                     \
                     } else {                                                  \
-                        int hs_idx = ((bid * d_inner + did) * d_state + n)    \
+                        long long hs_idx = ((bid * d_inner + did) * d_state + n) \
                                      * (T + 1) + (t + 1);                     \
                         h_saved[hs_idx] = h_t;                                \
                     }                                                         \
@@ -1154,7 +1154,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
     int batch, int T, int d_inner, int d_state,                               \
     int tstride /* t-major rows when > 0, see the f32 twin */                 \
 ) {                                                                           \
-    int bid = blockIdx.x;                                                     \
+    long long bid = blockIdx.x;                                               \
     int did = blockIdx.y;                                                     \
     if (bid >= batch || did >= d_inner) return;                               \
     if (d_state > MAX_DSTATE) return;                                         \
@@ -1167,7 +1167,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
     float *smem_exch_a = smem_run_b + d_state;                                \
     float *smem_exch_b = smem_exch_a + NWARPS;                                \
     float D_d = D[did];                                                       \
-    int h_base = (bid * d_inner + did) * d_state;                             \
+    long long h_base = (bid * d_inner + did) * d_state;                       \
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
         smem_run_a[n] = 1.0f;                                                 \
         smem_run_b[n] = 0.0f;                                                 \
@@ -1209,7 +1209,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             out_vals[i] = D_d * u_vals[i];                                    \
         }                                                                     \
         for (int n = 0; n < d_state; n++) {                                   \
-            float a_dn = a_neg[did * d_state + n] * LOG2E;                    \
+            float a_dn = a_neg[(long long)did * d_state + n] * LOG2E;         \
             float thread_a[NITEMS];                                           \
             float thread_b[NITEMS];                                           \
             float b_row[NITEMS];                                              \
@@ -1379,7 +1379,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
     const float* run_tape,                                                    \
     int slim_tape                                                             \
 ) {                                                                           \
-    int bid = blockIdx.x;                                                     \
+    long long bid = blockIdx.x;                                               \
     int did = blockIdx.y;                                                     \
     if (bid >= batch || did >= d_inner) return;                               \
     if (d_state > MAX_DSTATE) return;                                         \
@@ -1413,7 +1413,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
     float D_d = D[did];                                                       \
     /* T-major tape: per-(b,d) row base; +n*(T+1) selects the state
      * lane's contiguous t-run. */                                            \
-    int hsave_row_bd = (bid * d_inner + did) * d_state;                       \
+    long long hsave_row_bd = (bid * d_inner + did) * d_state;                 \
     /* Initialize inter-chunk reverse-scan postfix to identity (1, 0). The   \
        chunk_first_a buffer is set to 1.0 to act as `a_{t+1}=1` for the      \
        very-last timestep of the very-last chunk (no future). */              \
@@ -1459,7 +1459,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
         }                                                                     \
         /* ---- Outer d_state loop ---- */                                    \
         for (int n = 0; n < d_state; n++) {                                   \
-            float a_dn = a_neg[did * d_state + n];                            \
+            float a_dn = a_neg[(long long)did * d_state + n];                 \
             float a_dn_log2 = a_dn * LOG2E;                                   \
             float b_vals[NITEMS];                                             \
             load_row8(B_in + (bid * d_state + n) * T,                         \
@@ -1492,7 +1492,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             float H_vals[NITEMS];                                             \
             float h_prev_boundary = 0.0f;                                     \
             if (slim_tape) {                                                  \
-                int row = (hsave_row_bd + n) * 3 * n_chunks;                  \
+                long long row = (hsave_row_bd + n) * 3 * n_chunks;            \
                 float f_run_a = run_tape[row + 3 * chunk + 0];                \
                 float f_run_b = run_tape[row + 3 * chunk + 1];                \
                 float f_hentry = run_tape[row + 3 * chunk + 2];               \
@@ -1553,7 +1553,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             /* Build reverse-scan pairs (a_next, d_local).                    \
                pair[i].a = da_vals[i+1] for i in [0, NITEMS-1)                \
                pair[NITEMS-1].a = next thread's da_vals[0] from smem_next_a;  \
-               last thread of block uses postfix-saved next-chunk's first a. */\
+               last thread of block uses postfix-saved next-chunk's first a. */ \
             float thread_a[NITEMS];                                           \
             float thread_b[NITEMS];                                           \
             for (int i = 0; i < NITEMS - 1; i++) {                            \
@@ -1641,7 +1641,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
                compose(pair[i], pair[i+1], ..., pair[NITEMS-1]).              \
                Compose with (next_a, next_b) which represents pairs after     \
                this thread, AND with (run_a, run_b) the postfix from later    \
-               chunks. Final per-i pair: compose(thread_state[i], next_then_run). */\
+               chunks. Final per-i pair: compose(thread_state[i], next_then_run). */ \
             float post_a = next_a * run_a;                                    \
             float post_b = next_a * run_b + next_b;                           \
             float dh_vals[NITEMS];                                            \
@@ -1659,20 +1659,20 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
                 /* T-major: locals go [b][n][d][t] so this kernel's
                  * lane-over-t stores and the tmajor reducer's
                  * lane-over-t reads both coalesce. */                        \
-                int btdn_typed = ((bid * d_state + n) * d_inner + did) * T    \
+                long long btdn_typed = ((bid * d_state + n) * d_inner + did) * T \
                                  + t;                                         \
                 float h_curr, h_prev;                                         \
                 if (slim_tape) {                                              \
                     h_curr = H_vals[i];                                       \
                     h_prev = (i > 0) ? H_vals[i - 1] : h_prev_boundary;       \
                 } else {                                                      \
-                    int h_row = (hsave_row_bd + n) * (T + 1);                 \
+                    long long h_row = (hsave_row_bd + n) * (T + 1);           \
                     h_curr = h_saved[h_row + (t + 1)];                        \
                     h_prev = h_saved[h_row + t];                              \
                 }                                                             \
                 float dh = dh_vals[i];                                        \
                 d_C_local[btdn_typed] = FROM_F(dy_vals[i] * h_curr);          \
-                d_B_local[btdn_typed] = FROM_F(dh * delta_vals[i] * u_vals[i]);\
+                d_B_local[btdn_typed] = FROM_F(dh * delta_vals[i] * u_vals[i]); \
                 d_delta_acc[i] += dh * (a_dn * da_vals[i] * h_prev            \
                                         + u_vals[i] * b_vals[i]);             \
                 d_u_acc[i] += dh * delta_vals[i] * b_vals[i];                 \
@@ -1818,7 +1818,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
     int slim_tape                                                             \
 ) {                                                                           \
     const int G = SCAN_BWD_DGROUP;                                            \
-    int bid = blockIdx.x;                                                     \
+    long long bid = blockIdx.x;                                               \
     int gid = blockIdx.y; /* d group */                                       \
     int did0 = gid * G;                                                       \
     if (bid >= batch || did0 >= d_inner) return;                              \
@@ -1880,7 +1880,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
             __align__(16) T_ACT pk_u[G];                                      \
             __align__(16) T_ACT pk_dy[G];                                     \
             if (t < T) {                                                      \
-                int row = (bid * T + t) * d_inner + did0;                     \
+                long long row = (bid * T + t) * d_inner + did0;               \
                 if (sizeof(T_ACT) == 4) {                                     \
                     *reinterpret_cast<uint4 *>(pk_delta) =                    \
                         *reinterpret_cast<const uint4 *>(&delta[row]);        \
@@ -1927,7 +1927,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                         uv = to_f(stage_u[gg * CHUNK_SIZE +                   \
                                           threadIdx.x * NITEMS + i]);         \
                     } else {                                                  \
-                        int row = (bid * T + t) * d_inner + did0 + gg;        \
+                        long long row = (bid * T + t) * d_inner + did0 + gg;  \
                         dyv = to_f(dy[row]);                                  \
                         uv = to_f(u[row]);                                    \
                     }                                                         \
@@ -1965,7 +1965,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
             _Pragma("unroll")                                                 \
             for (int gg = 0; gg < G; gg++) {                                  \
                 int did = did0 + gg;                                          \
-                float a_dn = a_neg[did * d_state + n];                        \
+                float a_dn = a_neg[(long long)did * d_state + n];             \
                 float a_dn_log2 = a_dn * LOG2E;                               \
                 float delta_h[NITEMS];                                        \
                 float u_h[NITEMS];                                            \
@@ -1985,7 +1985,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                         /* The lane the block does not stage: its rows come   \
                            straight from global memory, the same values the   \
                            tile would have held. */                           \
-                        int row = (bid * T + t) * d_inner + did;              \
+                        long long row = (bid * T + t) * d_inner + did;        \
                         delta_h[i] = to_f(delta[row]);                        \
                         u_h[i] = to_f(u[row]);                                \
                         dy_h[i] = to_f(dy[row]);                              \
@@ -2015,12 +2015,12 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                 if ((threadIdx.x & 31) == 0) {                                \
                     smem_next_a[threadIdx.x >> 5] = da_vals[0];               \
                 }                                                             \
-                int hsave_row = (bid * d_inner + did) * d_state;              \
+                long long hsave_row = (bid * d_inner + did) * d_state;        \
                 float f_hentry = 0.0f;                                        \
                 float H_vals[NITEMS];                                         \
                 if (slim_tape) {                                              \
                     /* Slim-tape replay pairs (see the ungrouped kernel). */  \
-                    int row = (hsave_row + n) * 3 * n_chunks;                 \
+                    long long row = (hsave_row + n) * 3 * n_chunks;           \
                     float f_run_a = run_tape[row + 3 * chunk + 0];            \
                     float f_run_b = run_tape[row + 3 * chunk + 1];            \
                     f_hentry = run_tape[row + 3 * chunk + 2];                 \
@@ -2153,7 +2153,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                         h_prev =                                              \
                             (i > 0) ? H_vals[i - 1] : h_prev_boundary;        \
                     } else {                                                  \
-                        int h_row = (hsave_row + n) * (T + 1);                \
+                        long long h_row = (hsave_row + n) * (T + 1);          \
                         h_curr = h_saved[h_row + (t + 1)];                    \
                         h_prev = h_saved[h_row + t];                          \
                     }                                                         \
@@ -2216,7 +2216,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                store spans 16 sectors per warp instruction. Stage through     \
                the CHUNK tile and store striped: consecutive lanes then       \
                write consecutive addresses. Values unchanged.            */   \
-            int row_bc = ((bid * d_state + n) * (d_inner / G) + gid) * T;     \
+            long long row_bc = ((bid * d_state + n) * (d_inner / G) + gid) * T; \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
                 stage_bc[threadIdx.x * NITEMS + i] = FROM_F(acc_B[i]);        \
@@ -2251,7 +2251,7 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                 __align__(16) T_ACT pack_d[G];                                \
                 __align__(16) T_ACT pack_u[G];                                \
                 __align__(16) T_ACT pack_raw[G];                              \
-                int row = (bid * T + t) * d_inner + did0;                     \
+                long long row = (bid * T + t) * d_inner + did0;               \
                 if (sizeof(T_ACT) == 4) {                                     \
                     *reinterpret_cast<uint4 *>(pack_raw) =                    \
                         *reinterpret_cast<const uint4 *>(&dt_raw[row]);       \

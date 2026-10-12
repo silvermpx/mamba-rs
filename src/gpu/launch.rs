@@ -9,45 +9,20 @@ use cudarc::driver::LaunchConfig;
 /// Standard block size for 1D element-wise kernels.
 const BLOCK_1D: u32 = 256;
 
-/// Validate that the largest per-tensor element count of a run fits in i32.
-///
-/// CUDA kernels take element counts and strides as 32-bit `int`s; a count
-/// of 2^31 or more wraps to a negative argument and the kernel silently
-/// processes nothing (or indexes out of bounds via overflowed products in
-/// device code). The largest tensor in the training pipeline is `h_saved`
-/// at `B * (T+1) * d_inner * d_state`. Call this once at trainer/state
-/// construction — per-launch checks would be redundant after this.
-pub fn validate_kernel_arg_capacity(
-    batch: usize,
-    seq_len: usize,
-    d_inner: usize,
-    d_state: usize,
-) -> Result<(), String> {
-    // T=0 survives every arithmetic check but
-    // produces grid_dim.x = 0 launches that surface as an opaque CUDA error
-    // on a NEIGHBOURING kernel — reject it with a name at the front door.
-    if seq_len == 0 {
-        return Err("seq_len must be > 0".into());
+/// Refuse a launch whose 32-bit kernel arguments would wrap. Each named value
+/// is a dimension, a row count or a row width a kernel takes as an `int`;
+/// element counts and offsets are 64-bit in the kernels that check with
+/// this, so the size of a tensor is bounded by memory alone.
+pub fn check_int_args(args: &[(&str, usize)]) -> Result<(), String> {
+    match args.iter().find(|(_, v)| *v > i32::MAX as usize) {
+        Some((name, v)) => Err(format!(
+            "{name} {v} is past the 32-bit range the kernels take it in"
+        )),
+        None => Ok(()),
     }
-    if batch == 0 {
-        return Err("batch must be > 0".into());
-    }
-    let elems = batch
-        .checked_mul(seq_len + 1)
-        .and_then(|v| v.checked_mul(d_inner))
-        .and_then(|v| v.checked_mul(d_state))
-        .ok_or("batch * (seq_len+1) * d_inner * d_state overflows usize")?;
-    if elems > i32::MAX as usize {
-        return Err(format!(
-            "batch({batch}) * (seq_len({seq_len})+1) * d_inner({d_inner}) * d_state({d_state}) \
-             = {elems} elements exceeds i32::MAX; CUDA kernels take element counts as 32-bit ints"
-        ));
-    }
-    Ok(())
 }
 
-/// The window-sized counterpart of [`validate_kernel_arg_capacity`]: a
-/// window of `rows` token rows whose widest row holds `widest` elements
+/// A window of `rows` token rows whose widest row holds `widest` elements
 /// must stay within the 32-bit element counts the kernels take, so a
 /// window too large for them is refused when its buffers are sized rather
 /// than at a launch.
@@ -94,8 +69,8 @@ pub(crate) fn opt_in_dynamic_smem(
 /// Suitable for: activations, vec_add, elementwise_mul, gating, etc.
 pub fn grid_1d(n: usize) -> LaunchConfig {
     // `n as u32` would silently truncate for n >= 2^32 and launch a grid
-    // covering a fraction of the elements. Capacity is validated up front
-    // by `validate_kernel_arg_capacity`; this is the cheap backstop.
+    // covering a fraction of the elements, and the kernels this geometry
+    // serves index with 32 bits; this is the cheap backstop.
     assert!(
         n <= i32::MAX as usize,
         "grid_1d: element count {n} exceeds i32::MAX"
@@ -126,6 +101,84 @@ pub fn grid_1d_wide(n: usize) -> LaunchConfig {
         block_dim: (BLOCK_1D, 1, 1),
         shared_mem_bytes: 0,
     }
+}
+
+/// Launch config of one thread per element for kernels that index with 64
+/// bits and return past their count: [`grid_1d`]'s geometry, so every
+/// element keeps its thread, without its 32-bit ceiling on the count.
+pub fn grid_1d_cover(n: usize) -> Result<LaunchConfig, String> {
+    Ok(LaunchConfig {
+        grid_dim: (blocks_1d(n)?, 1, 1),
+        block_dim: (BLOCK_1D, 1, 1),
+        shared_mem_bytes: 0,
+    })
+}
+
+/// Blocks of [`BLOCK_1D`] threads covering `n` threads, within the grid's
+/// x extent of 2^31 - 1 blocks.
+pub(crate) fn blocks_1d(n: usize) -> Result<u32, String> {
+    let blocks = n.div_ceil(BLOCK_1D as usize).max(1);
+    u32::try_from(blocks)
+        .ok()
+        .filter(|&b| b <= i32::MAX as u32)
+        .ok_or_else(|| format!("{n} threads need {blocks} blocks, past the grid's x extent"))
+}
+
+/// Tiles of `tile` steps covering `t` steps on the grid's y axis, whose
+/// extent is 65535.
+pub(crate) fn tiles_y(t: usize, tile: usize) -> Result<u32, String> {
+    let tiles = t.div_ceil(tile);
+    u32::try_from(tiles)
+        .ok()
+        .filter(|&n| n <= 65535)
+        .ok_or_else(|| format!("{t} steps need {tiles} tiles of {tile}, past the grid's y extent"))
+}
+
+/// Launch a one-dimensional element kernel whose last argument is its
+/// element count as a 64-bit integer: the pointer arguments in order, then
+/// the count, over [`grid_1d_wide`]. Those kernels stride over their count,
+/// so a window past `i32::MAX` elements runs whole, and below it every
+/// element keeps the thread [`grid_1d`] gives it.
+pub(crate) fn launch_elems(
+    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+    f: &cudarc::driver::CudaFunction,
+    ptrs: &[u64],
+    n: usize,
+    what: std::fmt::Arguments<'_>,
+) -> Result<(), String> {
+    use cudarc::driver::PushKernelArg;
+    if n == 0 {
+        return Ok(());
+    }
+    let count = i64::try_from(n).map_err(|_| format!("{what}: {n} elements exceed i64"))?;
+    let mut bld = stream.launch_builder(f);
+    for p in ptrs {
+        bld.arg(p);
+    }
+    bld.arg(&count);
+    unsafe { bld.launch(grid_1d_wide(n)) }.map_err(|e| format!("{what}: {e:?}"))?;
+    Ok(())
+}
+
+/// Launch `fill_scalar`: `n` floats from `dst` on set to `val`.
+pub(crate) fn launch_fill(
+    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+    f: &cudarc::driver::CudaFunction,
+    (dst, val): (u64, f32),
+    n: usize,
+    what: std::fmt::Arguments<'_>,
+) -> Result<(), String> {
+    use cudarc::driver::PushKernelArg;
+    if n == 0 {
+        return Ok(());
+    }
+    let count = i64::try_from(n).map_err(|_| format!("{what}: {n} elements exceed i64"))?;
+    let mut bld = stream.launch_builder(f);
+    bld.arg(&dst);
+    bld.arg(&val);
+    bld.arg(&count);
+    unsafe { bld.launch(grid_1d_wide(n)) }.map_err(|e| format!("{what}: {e:?}"))?;
+    Ok(())
 }
 
 /// Launch config for SSM/conv1d kernels: `batch * d_inner` threads.
@@ -344,17 +397,13 @@ pub fn grid_gather_bc_tiled(
 /// left 146 SMs idle at the production shape (24 blocks); a tile walks from
 /// a halo window exactly as the serial walk would, so the tile depth never
 /// changes an output, and shallow tiles keep more blocks in flight.
-pub fn grid_conv_fwd_tiled(batch: usize, d_inner: usize, t: usize) -> LaunchConfig {
+pub fn grid_conv_fwd_tiled(batch: usize, d_inner: usize, t: usize) -> Result<LaunchConfig, String> {
     const TILE_T: usize = 32;
-    LaunchConfig {
-        grid_dim: (
-            ((batch * d_inner) as u32).div_ceil(256),
-            (t as u32).div_ceil(TILE_T as u32),
-            1,
-        ),
-        block_dim: (256, 1, 1),
+    Ok(LaunchConfig {
+        grid_dim: (blocks_1d(batch * d_inner)?, tiles_y(t, TILE_T)?, 1),
+        block_dim: (BLOCK_1D, 1, 1),
         shared_mem_bytes: 0,
-    }
+    })
 }
 
 /// Grid of the t-major transposing kernels, the softplus into t-major rows
@@ -375,17 +424,13 @@ pub fn grid_tmajor_tiles(batch: usize, t: usize, d: usize) -> LaunchConfig {
 
 /// Grid of the tiled conv backward: tiles of CONV1D_TILE_T = 128, the depth
 /// that also fixes how many partial rows the tap gradients reduce.
-pub fn grid_conv_tiled(batch: usize, d_inner: usize, t: usize) -> LaunchConfig {
+pub fn grid_conv_tiled(batch: usize, d_inner: usize, t: usize) -> Result<LaunchConfig, String> {
     const TILE_T: usize = 128;
-    LaunchConfig {
-        grid_dim: (
-            ((batch * d_inner) as u32).div_ceil(256),
-            (t as u32).div_ceil(TILE_T as u32),
-            1,
-        ),
-        block_dim: (256, 1, 1),
+    Ok(LaunchConfig {
+        grid_dim: (blocks_1d(batch * d_inner)?, tiles_y(t, TILE_T)?, 1),
+        block_dim: (BLOCK_1D, 1, 1),
         shared_mem_bytes: 0,
-    }
+    })
 }
 
 /// Elements per 16-byte vector for an activation dtype.
@@ -406,4 +451,62 @@ pub fn vec8_ok(
 ) -> bool {
     let w = vec8_width(elem_bytes);
     n_elems.is_multiple_of(w) && ptrs.iter().all(|p| p.is_multiple_of(16))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PAST_I32: usize = i32::MAX as usize + 4097;
+
+    /// Below `i32::MAX` threads the 64-bit geometries are `grid_1d`'s, so a
+    /// kernel moved to 64-bit indexing keeps every element on its thread.
+    #[test]
+    fn the_wide_geometries_are_grid_1d_below_i32_max() {
+        for n in [1, 255, 256, 257, 1 << 20, 3_000_017, i32::MAX as usize] {
+            let base = grid_1d(n);
+            assert_eq!(grid_1d_wide(n).grid_dim, base.grid_dim, "wide, {n}");
+            assert_eq!(
+                grid_1d_cover(n).unwrap().grid_dim,
+                base.grid_dim,
+                "cover, {n}"
+            );
+        }
+    }
+
+    /// Past `i32::MAX` threads the strided grid stops growing and the
+    /// covering grid keeps one thread per element.
+    #[test]
+    fn past_i32_max_the_wide_grid_strides_and_the_cover_grid_grows() {
+        assert_eq!(
+            grid_1d_wide(PAST_I32).grid_dim.0 as usize,
+            GRID_1D_WIDE_MAX_BLOCKS
+        );
+        let cover = grid_1d_cover(PAST_I32).unwrap();
+        assert_eq!(cover.grid_dim.0 as usize, PAST_I32.div_ceil(256));
+        assert!(cover.grid_dim.0 as usize * 256 >= PAST_I32);
+    }
+
+    /// A grid past the x extent or a tile count past the y extent is an
+    /// error, not a truncated launch.
+    #[test]
+    fn a_grid_past_its_extent_is_refused() {
+        let most = i32::MAX as usize * 256;
+        assert_eq!(blocks_1d(most).unwrap(), i32::MAX as u32);
+        assert!(blocks_1d(most + 1).is_err());
+        assert_eq!(tiles_y(65535 * 32, 32).unwrap(), 65535);
+        assert!(tiles_y(65535 * 32 + 1, 32).is_err());
+        assert!(grid_conv_fwd_tiled(1, 1, 65535 * 32 + 1).is_err());
+        assert!(grid_conv_tiled(most, 1, 1).is_ok());
+        assert!(grid_conv_tiled(most + 1, 1, 1).is_err());
+    }
+
+    /// The argument check names the first value a kernel would take
+    /// wrapped.
+    #[test]
+    fn the_int_argument_check_names_what_would_wrap() {
+        assert!(check_int_args(&[("a", 1), ("b", i32::MAX as usize)]).is_ok());
+        let err = check_int_args(&[("a", 1), ("rows", PAST_I32), ("c", PAST_I32)]).unwrap_err();
+        assert!(err.starts_with("rows "), "{err}");
+    }
 }

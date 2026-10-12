@@ -522,23 +522,19 @@ pub fn gpu_forward_mamba3_layer(
         let b_i = dims.batch as i32;
 
         {
-            let (kern, count) = adt_multiply_launch(
-                m3k,
-                bt * nh,
-                &[
-                    scratch.d_alpha.cached_ptr(),
-                    acts.a_val.cached_ptr(),
-                    acts.dt.cached_ptr(),
-                ],
-            );
-            let n_total = count as i32;
-            let mut builder = ctx.stream.launch_builder(kern);
-            builder.arg(scratch.d_alpha.inner_mut());
-            builder.arg(acts.a_val.inner());
-            builder.arg(acts.dt.inner());
-            builder.arg(&n_total);
-            unsafe { builder.launch(grid_1d(count)) }
-                .map_err(|e| format!("adt compute F6: {:?}", e))?;
+            let ptrs = [
+                scratch.d_alpha.cached_ptr(),
+                acts.a_val.cached_ptr(),
+                acts.dt.cached_ptr(),
+            ];
+            let (kern, count) = adt_multiply_launch(m3k, bt * nh, &ptrs);
+            crate::gpu::launch::launch_elems(
+                &ctx.stream,
+                kern,
+                &ptrs,
+                count,
+                format_args!("adt compute F6"),
+            )?;
         }
         // The fused kernel writes the decay cumsum itself; only the unfused
         // pair reads it from its own launch.
@@ -788,14 +784,17 @@ pub fn gpu_forward_mamba3_layer(
         // Write the NEXT layer's residual slot (or norm_f_input for the
         // last layer) directly - raw pointer, no aliasing of the
         // borrowed acts.
-        let ne = (bt * dm) as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.residual_add);
-        builder.arg(&stream_out);
-        builder.arg(scratch.out_flat.inner());
-        builder.arg(acts.residual.inner());
-        builder.arg(&ne);
-        unsafe { builder.launch(grid_1d(bt * dm)) }
-            .map_err(|e| format!("residual_add m3 F8: {:?}", e))?;
+        crate::gpu::launch::launch_elems(
+            &ctx.stream,
+            &m3k.residual_add,
+            &[
+                stream_out,
+                scratch.out_flat.cached_ptr(),
+                acts.residual.cached_ptr(),
+            ],
+            bt * dm,
+            format_args!("residual_add m3 F8"),
+        )?;
     }
     Ok(())
 }
@@ -1248,16 +1247,17 @@ pub fn gpu_forward_mamba3_target_burnin(
             None,
             (bt, di, dm),
         )?;
-        {
-            let ne = (bt * dm) as i32;
-            let mut builder = ctx.stream.launch_builder(&m3k.residual_add);
-            builder.arg(tgt.temporal_work.inner_mut());
-            builder.arg(tgt.out_flat.inner());
-            builder.arg(tgt.residual.inner());
-            builder.arg(&ne);
-            unsafe { builder.launch(grid_1d(bt * dm)) }
-                .map_err(|e| format!("residual_add m3 tgt L{l}: {:?}", e))?;
-        }
+        crate::gpu::launch::launch_elems(
+            &ctx.stream,
+            &m3k.residual_add,
+            &[
+                tgt.temporal_work.cached_ptr(),
+                tgt.out_flat.cached_ptr(),
+                tgt.residual.cached_ptr(),
+            ],
+            bt * dm,
+            format_args!("residual_add m3 tgt L{l}"),
+        )?;
         if let Some(mw) = mamba_w.mlp.get(l) {
             gpu_target_mlp(exec, mw, tgt)?;
         }
@@ -1364,14 +1364,17 @@ fn gpu_forward_mamba3_mlp(
         None,
         (bt, h, dm),
     )?;
-    let ne = (bt * dm) as i32;
-    let mut add = ctx.stream.launch_builder(&m3k.residual_add);
-    add.arg(&stream_out);
-    add.arg(scratch.out_flat.inner());
-    add.arg(m.x_in.inner());
-    add.arg(&ne);
-    unsafe { add.launch(grid_1d(bt * dm)) }.map_err(|e| format!("MLP residual m3: {e:?}"))?;
-    Ok(())
+    crate::gpu::launch::launch_elems(
+        &ctx.stream,
+        &m3k.residual_add,
+        &[
+            stream_out,
+            scratch.out_flat.cached_ptr(),
+            m.x_in.cached_ptr(),
+        ],
+        bt * dm,
+        format_args!("MLP residual m3"),
+    )
 }
 
 /// One layer's gated MLP in the target forward, nothing saved: the norm
@@ -1422,13 +1425,13 @@ fn gpu_target_mlp(
         None,
         (bt, h, dm),
     )?;
-    let ne = (bt * dm) as i32;
-    let mut add = ctx.stream.launch_builder(&m3k.vec_add_inplace);
-    add.arg(tgt.temporal_work.inner_mut());
-    add.arg(tgt.out_flat.inner());
-    add.arg(&ne);
-    unsafe { add.launch(grid_1d(bt * dm)) }.map_err(|e| format!("MLP residual m3 tgt: {e:?}"))?;
-    Ok(())
+    crate::gpu::launch::launch_elems(
+        &ctx.stream,
+        &m3k.vec_add_inplace,
+        &[tgt.temporal_work.cached_ptr(), tgt.out_flat.cached_ptr()],
+        bt * dm,
+        format_args!("MLP residual m3 tgt"),
+    )
 }
 
 #[cfg(test)]

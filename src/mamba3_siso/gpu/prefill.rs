@@ -704,23 +704,19 @@ impl Mamba3Prefill {
             }
             // Chunked SSD pipeline (the training forward's F6, tape-free).
             {
-                let (kern, count) = super::forward::adt_multiply_launch(
-                    m3k,
-                    bt * nh,
-                    &[
-                        ck.d_alpha.cached_ptr(),
-                        tgt.a_val.cached_ptr(),
-                        tgt.dt.cached_ptr(),
-                    ],
-                );
-                let n_total = count as i32;
-                let mut b = ctx.stream.launch_builder(kern);
-                b.arg(ck.d_alpha.inner_mut());
-                b.arg(tgt.a_val.inner());
-                b.arg(tgt.dt.inner());
-                b.arg(&n_total);
-                unsafe { b.launch(grid_1d(count)) }
-                    .map_err(|e| format!("prefill adt L{l}: {e:?}"))?;
+                let ptrs = [
+                    ck.d_alpha.cached_ptr(),
+                    tgt.a_val.cached_ptr(),
+                    tgt.dt.cached_ptr(),
+                ];
+                let (kern, count) = super::forward::adt_multiply_launch(m3k, bt * nh, &ptrs);
+                crate::gpu::launch::launch_elems(
+                    &ctx.stream,
+                    kern,
+                    &ptrs,
+                    count,
+                    format_args!("prefill adt L{l}"),
+                )?;
             }
             // The fused kernel writes the decay cumsum itself; only the
             // unfused pair reads it from its own launch.
@@ -1093,19 +1089,17 @@ impl Mamba3Prefill {
                 // Typed branch output + f32 residual -> f32 temporal (the
                 // trainer's residual_add_f32_typed; note the arg order:
                 // dst, f32 residual, typed branch).
-                let ne = (bt * dm) as i32;
-                let dst = tgt.temporal_work.cached_ptr();
-                let a = tgt.residual.cached_ptr();
-                let bb = ts.out_flat.cached_ptr();
-                let mut b = ctx
-                    .stream
-                    .launch_builder(m3k.residual_add_f32_typed.get(dtype));
-                b.arg(&dst);
-                b.arg(&a);
-                b.arg(&bb);
-                b.arg(&ne);
-                unsafe { b.launch(grid_1d(bt * dm)) }
-                    .map_err(|e| format!("prefill residual typed L{l}: {e:?}"))?;
+                crate::gpu::launch::launch_elems(
+                    &ctx.stream,
+                    m3k.residual_add_f32_typed.get(dtype),
+                    &[
+                        tgt.temporal_work.cached_ptr(),
+                        tgt.residual.cached_ptr(),
+                        ts.out_flat.cached_ptr(),
+                    ],
+                    bt * dm,
+                    format_args!("prefill residual typed L{l}"),
+                )?;
             } else {
                 crate::gpu::blas::gpu_gemm_bi_forward_raw(
                     ctx,
@@ -1115,14 +1109,17 @@ impl Mamba3Prefill {
                     None,
                     (bt, di, dm),
                 )?;
-                let ne = (bt * dm) as i32;
-                let mut b = ctx.stream.launch_builder(&m3k.residual_add);
-                b.arg(tgt.temporal_work.inner_mut());
-                b.arg(tgt.out_flat.inner());
-                b.arg(tgt.residual.inner());
-                b.arg(&ne);
-                unsafe { b.launch(grid_1d(bt * dm)) }
-                    .map_err(|e| format!("prefill residual L{l}: {e:?}"))?;
+                crate::gpu::launch::launch_elems(
+                    &ctx.stream,
+                    &m3k.residual_add,
+                    &[
+                        tgt.temporal_work.cached_ptr(),
+                        tgt.out_flat.cached_ptr(),
+                        tgt.residual.cached_ptr(),
+                    ],
+                    bt * dm,
+                    format_args!("prefill residual L{l}"),
+                )?;
             }
             // The MLP branch of a model that has one, over every row, in the
             // lane's dtype: norm2 of the f32 residual stream, the two GEMMs
@@ -1186,16 +1183,13 @@ impl Mamba3Prefill {
                         None,
                         (bt, m.hidden, dm),
                     )?;
-                    let ne = (bt * dm) as i32;
-                    let mut b = ctx
-                        .stream
-                        .launch_builder(m3k.residual_add_f32_typed.get(dtype));
-                    b.arg(&stream_in);
-                    b.arg(&stream_in);
-                    b.arg(&out);
-                    b.arg(&ne);
-                    unsafe { b.launch(grid_1d(bt * dm)) }
-                        .map_err(|e| format!("prefill mlp residual typed L{l}: {e:?}"))?;
+                    crate::gpu::launch::launch_elems(
+                        &ctx.stream,
+                        m3k.residual_add_f32_typed.get(dtype),
+                        &[stream_in, stream_in, out],
+                        bt * dm,
+                        format_args!("prefill mlp residual typed L{l}"),
+                    )?;
                 } else {
                     let pn = tgt.out_flat.cached_ptr();
                     let mut b = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
@@ -1235,13 +1229,13 @@ impl Mamba3Prefill {
                             (bt, m.hidden, dm),
                         )
                     }?;
-                    let ne = (bt * dm) as i32;
-                    let mut b = ctx.stream.launch_builder(&m3k.vec_add_inplace);
-                    b.arg(&stream_in);
-                    b.arg(&pn);
-                    b.arg(&ne);
-                    unsafe { b.launch(grid_1d(bt * dm)) }
-                        .map_err(|e| format!("prefill mlp residual L{l}: {e:?}"))?;
+                    crate::gpu::launch::launch_elems(
+                        &ctx.stream,
+                        &m3k.vec_add_inplace,
+                        &[stream_in, pn],
+                        bt * dm,
+                        format_args!("prefill mlp residual L{l}"),
+                    )?;
                 }
             }
         }

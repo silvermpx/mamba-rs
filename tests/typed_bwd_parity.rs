@@ -276,7 +276,7 @@ fn run_gating_bwd(
     let d_y = DtypedBuf::zeros(&ctx.stream, n, dtype).unwrap();
     let d_gate_pre = DtypedBuf::zeros(&ctx.stream, n, dtype).unwrap();
     ctx.stream.synchronize().unwrap(); // race-fix: alloc_zeros before launch
-    let n_i = n as i32;
+    let n_i = n as i64;
     let d_inner_i = n as i32;
     let stride_i = n as i32;
     let off_i = 0i32;

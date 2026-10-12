@@ -3,7 +3,7 @@ use super::kernel_identity::{FramedSha256, digest_hex};
 
 const OWNER_SOURCE: &str = include_str!("../../kernels/mamba_ssm_parallel.cu");
 const OWNER_SOURCE_SHA256: &str =
-    "4dd71537cd95c2d9ce99ef1f91d356b6494cf798eb03396bbfb427068060fc66";
+    "c440630b2332b16f27d1889d027939e9cc646460d98b58eb75f20b7676c6eab6";
 const FOLD_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD";
 const SHORT_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT";
 const STAGED_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED";
@@ -153,7 +153,7 @@ fn make_short_clone(original: &str) -> Result<String, String> {
     }
     let replacement = macro_lines(&[
         "            /* Short rows need no shared store transpose; arithmetic is unchanged. */",
-        "            int row_bc = ((bid * d_state + n) * (d_inner / G) + gid) * T;",
+        "            long long row_bc = ((bid * d_state + n) * (d_inner / G) + gid) * T;",
         "            _Pragma(\"unroll\")",
         "            for (int i = 0; i < NITEMS; i++) {",
         "                int t = chunk_start + threadIdx.x * NITEMS + i;",

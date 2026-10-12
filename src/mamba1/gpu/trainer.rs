@@ -64,7 +64,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::grid_1d;
+use crate::gpu::launch::{grid_1d, grid_1d_wide};
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::gpu::backward::gpu_backward_mamba_backbone;
 use crate::mamba1::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
@@ -98,7 +98,7 @@ fn recompute_a_neg_all(
     if per_layer == 0 {
         return Ok(());
     }
-    let n_i32 = per_layer as i32;
+    let n = per_layer as i64;
     for (li, mw) in master_layers.iter().enumerate() {
         let src = mw.a_log.cached_ptr();
         // Both a_neg mirrors (backward-side + forward-side state) from
@@ -109,8 +109,8 @@ fn recompute_a_neg_all(
         b1.arg(&dst_a);
         b1.arg(&dst_s);
         b1.arg(&src);
-        b1.arg(&n_i32);
-        unsafe { b1.launch(grid_1d(per_layer)) }
+        b1.arg(&n);
+        unsafe { b1.launch(grid_1d_wide(per_layer)) }
             .map_err(|e| format!("exp_negate2 a_neg mirrors L{li}: {e:?}"))?;
     }
     Ok(())
@@ -239,12 +239,14 @@ impl MambaGpuTrainer {
         // input projection rows d_model wide.
         cfg.validate()?;
         cpu_weights.validate(&cfg, session.input_dim)?;
-        crate::gpu::launch::validate_kernel_arg_capacity(
-            session.batch,
-            session.seq_len,
-            cfg.d_inner(),
-            cfg.d_state,
-        )?;
+        // An empty window survives every size check but launches empty
+        // grids, which surface as an opaque error on a neighbouring kernel.
+        if session.seq_len == 0 {
+            return Err("seq_len must be > 0".into());
+        }
+        if session.batch == 0 {
+            return Err("batch must be > 0".into());
+        }
         let inner = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => TrainerInner::F32(Box::new(
                 MambaTrainerF32::new_full(gpu_ordinal, cpu_weights, cfg, session, mode, dtype)?,
@@ -961,6 +963,7 @@ impl MambaTrainerMixed {
             scan_mode: cfg.scan_mode,
             rms_norm_eps: cfg.rms_norm_eps,
         };
+        dims.check_for(&ctx)?;
 
         let acts = GpuMambaBackboneMixedActs::new(&ctx.stream, &dims, dtype)?;
         let scratch = GpuMambaMixedTrainScratch::new(&ctx.stream, &dims, dtype)?;
@@ -2230,6 +2233,7 @@ impl MambaTrainerF32 {
             scan_mode: cfg.scan_mode,
             rms_norm_eps: cfg.rms_norm_eps,
         };
+        dims.check_for(&ctx)?;
 
         let acts = GpuMambaBackboneActs::new(&ctx.stream, &dims)?;
         let scratch = GpuMambaScratch::new(&ctx.stream, &dims)?;

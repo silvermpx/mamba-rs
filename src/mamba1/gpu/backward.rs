@@ -23,7 +23,7 @@ use super::weights::{
 use crate::gpu::blas::gpu_gemm_bi_backward_grad_raw;
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
-use crate::gpu::launch::{grid_1d, grid_norm};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm};
 use cudarc::driver::PushKernelArg;
 use std::sync::Arc;
 
@@ -69,7 +69,7 @@ pub fn gpu_backward_mamba_layer(
     // gating_backward(d_y, d_gate_pre, d_gated, y, gate_pre, n) - the
     // post-SiLU activation is recomputed inside the kernel.
     {
-        let n = (bt * di) as i32;
+        let n = (bt * di) as i64;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.gating_backward);
         let di_i = di as i32;
         let proj_stride = (2 * di) as i32;
@@ -84,7 +84,7 @@ pub fn gpu_backward_mamba_layer(
         builder.arg(&di_i);
         builder.arg(&proj_stride);
         builder.arg(&gate_off);
-        unsafe { builder.launch(grid_1d(bt * di)) }
+        unsafe { builder.launch(grid_1d_wide(bt * di)) }
             .map_err(|e| format!("gating_backward mamba: {:?}", e))?;
     }
 
@@ -120,7 +120,7 @@ pub fn gpu_backward_mamba_layer(
         builder.arg(&ds_i);
         builder.arg(&b_offset);
         builder.arg(&c_offset);
-        unsafe { builder.launch(grid_1d(bt * ds)) }
+        unsafe { builder.launch(grid_1d_wide(bt * ds)) }
             .map_err(|e| format!("gather_bc_cols bwd mamba: {:?}", e))?;
     }
 
@@ -206,7 +206,7 @@ pub fn gpu_backward_mamba_layer(
         } else if use_parallel {
             crate::gpu::launch::grid_parallel_scan_bwd(b, di)
         } else {
-            grid_1d(b * di)
+            grid_1d_cover(b * di)?
         };
         unsafe { builder.launch(cfg) }
             .map_err(|e| format!("ssm bwd (parallel={use_parallel}): {e:?}"))?;
@@ -252,7 +252,7 @@ pub fn gpu_backward_mamba_layer(
         builder.arg(&t_i);
         builder.arg(&reduce_di_i);
         builder.arg(&ds_i);
-        unsafe { builder.launch(grid_1d(bt * ds)) }
+        unsafe { builder.launch(grid_1d_cover(bt * ds)?) }
             .map_err(|e| format!("ssm_reduce_d_BC mamba: {:?}", e))?;
         // d_D reduction
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_reduce_d_d);
@@ -285,7 +285,7 @@ pub fn gpu_backward_mamba_layer(
             builder.arg(&nc);
             builder.arg(&di_i);
             builder.arg(&ds_i);
-            unsafe { builder.launch(grid_1d(di * ds)) }
+            unsafe { builder.launch(grid_1d_cover(di * ds)?) }
                 .map_err(|e| format!("ssm_reduce_d_a_log_chunks mamba: {:?}", e))?;
         } else {
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_reduce_d_a_log);
@@ -294,7 +294,7 @@ pub fn gpu_backward_mamba_layer(
             builder.arg(&b_i);
             builder.arg(&di_i);
             builder.arg(&ds_i);
-            unsafe { builder.launch(grid_1d(di * ds)) }
+            unsafe { builder.launch(grid_1d_cover(di * ds)?) }
                 .map_err(|e| format!("ssm_reduce_d_a_log mamba: {:?}", e))?;
         }
     }
@@ -314,13 +314,13 @@ pub fn gpu_backward_mamba_layer(
     if !(dims.scan_mode.use_parallel(t, ds)
         && di.is_multiple_of(crate::gpu::launch::SCAN_BWD_DGROUP))
     {
-        let n = (bt * di) as i32;
+        let n = (bt * di) as i64;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.softplus_bwd);
         builder.arg(scratch.d_delta_raw.inner_mut()); // dx output
         builder.arg(acts.delta_raw.inner()); // x_saved (pre-softplus activation)
         builder.arg(scratch.d_delta.inner()); // dy (upstream gradient from SSM)
         builder.arg(&n);
-        unsafe { builder.launch(grid_1d(bt * di)) }
+        unsafe { builder.launch(grid_1d_wide(bt * di)) }
             .map_err(|e| format!("softplus_bwd mamba: {:?}", e))?;
     }
 
@@ -337,7 +337,7 @@ pub fn gpu_backward_mamba_layer(
         builder.arg(&xdbl_i);
         builder.arg(&dt_i);
         builder.arg(&offset);
-        unsafe { builder.launch(grid_1d(bt * dt_rank)) }
+        unsafe { builder.launch(grid_1d_wide(bt * dt_rank)) }
             .map_err(|e| format!("gather dt x_saved mamba: {:?}", e))?;
     }
 
@@ -368,7 +368,7 @@ pub fn gpu_backward_mamba_layer(
         builder.arg(&bt_i);
         builder.arg(&dt_i);
         builder.arg(&ds_i);
-        unsafe { builder.launch(grid_1d(bt * xdbl_dim)) }
+        unsafe { builder.launch(grid_1d_wide(bt * xdbl_dim)) }
             .map_err(|e| format!("pack_xdbl_cols mamba: {:?}", e))?;
     }
 
@@ -386,15 +386,13 @@ pub fn gpu_backward_mamba_layer(
     )?;
 
     // Accumulate d_u += d_u_xproj
-    {
-        let n = (bt * di) as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.vec_add_inplace);
-        builder.arg(scratch.d_u.inner_mut());
-        builder.arg(scratch.d_u_xproj.inner());
-        builder.arg(&n);
-        unsafe { builder.launch(grid_1d(bt * di)) }
-            .map_err(|e| format!("vec_add d_u mamba: {:?}", e))?;
-    }
+    crate::gpu::launch::launch_elems(
+        &ctx.stream,
+        &ctx.kernels.vec_add_inplace,
+        &[scratch.d_u.cached_ptr(), scratch.d_u_xproj.cached_ptr()],
+        bt * di,
+        format_args!("vec_add d_u mamba"),
+    )?;
 
     // ===================================================================
     // B6: SiLU backward + Conv1d backward (fused burnin kernel)
