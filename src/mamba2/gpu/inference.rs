@@ -4,7 +4,9 @@
 //! Per layer: RMSNorm, the in_proj GEMM, the conv step with its SiLU
 //! (reading the xBC columns of the projection in place), the Mamba-2 step
 //! kernel, the gated norm (or the bare gate) and the inner MLP gate into
-//! one row, the out_proj GEMM and the residual add; then the final norm.
+//! one row, the out_proj GEMM and the residual add, then for a model with
+//! one the gated MLP after the mixer and its residual add. The final norm
+//! closes the window.
 //! The projections and the activation rows between them take the storage
 //! dtype; the residual stream, the scan output, the states and every small
 //! weight stay f32.
@@ -33,6 +35,7 @@ use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureMani
 use crate::gpu::launch::{grid_1d, grid_norm, validate_rows_capacity};
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
+use crate::mlp::GatedMlpLayerWeights;
 use crate::ops::portable_math::exp_portable;
 
 /// One layer's weights on the device.
@@ -130,6 +133,55 @@ pub(crate) struct LayerPtrs {
     pub out_b: Option<u64>,
 }
 
+/// One layer's gated MLP on the device: its norm scale f32, its
+/// projections in the activation dtype.
+struct GpuMamba2Mlp {
+    norm_weight: GpuBuffer,
+    fc1_w: DtypedBuf,
+    fc2_w: DtypedBuf,
+    hidden: usize,
+}
+
+impl GpuMamba2Mlp {
+    fn upload(
+        stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+        m: &GatedMlpLayerWeights,
+        act: WeightDtype,
+    ) -> Result<Self, String> {
+        let typed = |v: &[f32]| -> Result<DtypedBuf, String> {
+            let buf = DtypedBuf::zeros(stream, v.len(), act)?;
+            buf.upload_f32(stream, v)?;
+            Ok(buf)
+        };
+        Ok(Self {
+            norm_weight: GpuBuffer::from_cpu(stream, &m.norm_weight)?,
+            fc1_w: typed(&m.fc1_w)?,
+            fc2_w: typed(&m.fc2_w)?,
+            hidden: m.hidden(),
+        })
+    }
+
+    fn ptrs(&self) -> MlpPtrs {
+        MlpPtrs {
+            norm_w: self.norm_weight.cached_ptr(),
+            fc1_w: self.fc1_w.cached_ptr(),
+            fc2_w: self.fc2_w.cached_ptr(),
+            hidden: self.hidden,
+        }
+    }
+}
+
+/// One layer's gated MLP as device pointers: the engine's buffers and the
+/// trainer's flat arena both give it. The projections are in the
+/// activation dtype.
+#[derive(Clone, Copy)]
+pub(crate) struct MlpPtrs {
+    pub norm_w: u64,
+    pub fc1_w: u64,
+    pub fc2_w: u64,
+    pub hidden: usize,
+}
+
 /// One layer's window buffers: the projection rows it reads, what it
 /// writes, and the conv and SSM states it carries (this layer's slices).
 pub(crate) struct WindowPtrs {
@@ -149,10 +201,9 @@ pub(crate) struct WindowPtrs {
     pub stride: usize,
 }
 
-/// What a model needs of this device beyond its config's own envelope: the
-/// scans' state tiles, the gated norm's group, the grid's y and z extents,
-/// and the shared row norm's warp (it reduces whole warps of the model
-/// width).
+/// What a model needs of this device beyond its config's own envelope: a
+/// scan channel's state in shared memory, and heads, groups and state rows
+/// within the grid's y and z extents.
 pub(crate) fn check_device_envelope(
     cfg: &Mamba2Config,
     kernels: &Mamba2Kernels,
@@ -314,6 +365,59 @@ impl M2Exec<'_> {
             lw.out_b,
             (rows, di, dm),
         )?;
+        self.residual_add(temporal, out, rows)
+    }
+
+    /// The gated MLP after the mixer over `rows` rows of `temporal`: its
+    /// norm into `post` (scales into `rms`), the up projection into `up`,
+    /// value times silu(gate) into `act`, the down projection into `out`
+    /// and the residual add into `temporal`.
+    pub(crate) fn mlp_residual(
+        &self,
+        m: &MlpPtrs,
+        (temporal, post, rms, up, act, out): (u64, u64, u64, u64, u64, u64),
+        rows: usize,
+    ) -> Result<(), String> {
+        let dm = self.cfg.d_model;
+        let t = |ptr| TypedPtr {
+            ptr,
+            dtype: self.act,
+        };
+        self.rmsnorm((post, temporal, m.norm_w, rms), (rows, true))?;
+        gpu_gemm_typed_forward_raw(
+            self.ctx,
+            t(up),
+            t(post),
+            t(m.fc1_w),
+            None,
+            (rows, dm, 2 * m.hidden),
+        )?;
+        let (rows_i, hidden_i) = (rows as i32, m.hidden as i32);
+        let mut bld = self
+            .ctx
+            .stream
+            .launch_builder(self.kernels.gated_mlp.get(self.act));
+        bld.arg(&act);
+        bld.arg(&up);
+        bld.arg(&rows_i);
+        bld.arg(&hidden_i);
+        unsafe { bld.launch(grid_1d(rows * m.hidden)) }
+            .map_err(|e| format!("Mamba-2 MLP gate: {e:?}"))?;
+        gpu_gemm_typed_forward_raw(
+            self.ctx,
+            t(out),
+            t(act),
+            t(m.fc2_w),
+            None,
+            (rows, m.hidden, dm),
+        )?;
+        self.residual_add(temporal, out, rows)
+    }
+
+    /// `temporal += out` over `rows` rows, `out` in the activation dtype.
+    fn residual_add(&self, temporal: u64, out: u64, rows: usize) -> Result<(), String> {
+        let stream = &self.ctx.stream;
+        let dm = self.cfg.d_model;
         let n = (rows * dm) as i32;
         let mut bld = if self.act == WeightDtype::F32 {
             let mut bld = stream.launch_builder(&self.ctx.kernels.vec_add_inplace);
@@ -636,6 +740,10 @@ pub struct Mamba2GpuScratch {
     y: GpuBuffer,
     gated: DtypedBuf,
     out: DtypedBuf,
+    /// The gated MLP's up projection and gate rows (one element each for a
+    /// model without one).
+    mlp_up: DtypedBuf,
+    mlp_act: DtypedBuf,
     /// The final-norm rows, f32.
     final_out: GpuBuffer,
 }
@@ -660,6 +768,8 @@ pub struct Mamba2GpuEngine {
     /// type.
     act: WeightDtype,
     layers: Vec<GpuMamba2Layer>,
+    /// Each layer's gated MLP, empty for a model without one.
+    mlp: Vec<GpuMamba2Mlp>,
     input_proj: Option<(GpuBuffer, GpuBuffer)>,
     norm_f_weight: GpuBuffer,
     /// The decode step as one CUDA graph, once [`Self::capture_graph`] ran.
@@ -726,13 +836,6 @@ impl Mamba2GpuEngine {
         (dtype, mode): (WeightDtype, Option<GemmMode>),
     ) -> Result<Self, String> {
         w.validate(&cfg, input_dim)?;
-        if !w.mlp.is_empty() {
-            return Err(
-                "the GPU Mamba-2 engine does not run the MLP after the mixer yet; \
-                 the CPU runs this model"
-                    .into(),
-            );
-        }
         let act = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
             half => half,
@@ -749,6 +852,11 @@ impl Mamba2GpuEngine {
             .layers
             .iter()
             .map(|lw| GpuMamba2Layer::upload(&ctx.stream, lw, (&cfg, act)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mlp = w
+            .mlp
+            .iter()
+            .map(|m| GpuMamba2Mlp::upload(&ctx.stream, m, act))
             .collect::<Result<Vec<_>, _>>()?;
         let input_proj = if w.input_proj_w.is_empty() {
             None
@@ -767,6 +875,7 @@ impl Mamba2GpuEngine {
             input_dim,
             act,
             layers,
+            mlp,
             input_proj,
             norm_f_weight,
             graph: None,
@@ -836,7 +945,8 @@ impl Mamba2GpuEngine {
     pub fn alloc_scratch(&self) -> Result<Mamba2GpuScratch, String> {
         let (b, c) = (self.batch, &self.cfg);
         let s = &self.ctx.stream;
-        let typed = |n: usize| DtypedBuf::zeros(s, n, self.act);
+        let typed = |n: usize| DtypedBuf::zeros(s, n.max(1), self.act);
+        let hidden = c.mlp_hidden();
         Ok(Mamba2GpuScratch {
             input: GpuBuffer::zeros(s, b * self.input_dim)?,
             temporal: GpuBuffer::zeros(s, b * c.d_model)?,
@@ -847,6 +957,8 @@ impl Mamba2GpuEngine {
             y: GpuBuffer::zeros(s, b * c.ssm_dim())?,
             gated: typed(b * c.d_inner())?,
             out: typed(b * c.d_model)?,
+            mlp_up: typed(b * 2 * hidden)?,
+            mlp_act: typed(b * hidden)?,
             final_out: GpuBuffer::zeros(s, b * c.d_model)?,
         })
     }
@@ -1133,6 +1245,20 @@ impl Mamba2GpuEngine {
                 ),
                 b,
             )?;
+            if let Some(m) = self.mlp.get(l) {
+                self.exec().mlp_residual(
+                    &m.ptrs(),
+                    (
+                        temporal,
+                        post,
+                        rms,
+                        scratch.mlp_up.cached_ptr(),
+                        scratch.mlp_act.cached_ptr(),
+                        scratch.out.cached_ptr(),
+                    ),
+                    b,
+                )?;
+            }
         }
         self.exec().rmsnorm(
             (
@@ -1149,10 +1275,17 @@ impl Mamba2GpuEngine {
     pub fn alloc_prefill(&self, seq_len: usize) -> Result<Mamba2GpuPrefill, String> {
         let c = &self.cfg;
         let rows = self.batch * seq_len;
-        let widest = [self.input_dim, c.in_proj_out_dim(), c.d_inner(), c.d_model]
-            .into_iter()
-            .max()
-            .unwrap_or(0);
+        let hidden = c.mlp_hidden();
+        let widest = [
+            self.input_dim,
+            c.in_proj_out_dim(),
+            c.d_inner(),
+            c.d_model,
+            2 * hidden,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
         validate_rows_capacity(rows, widest)?;
         let nc = seq_len.div_ceil(CHUNK);
         let s = &self.ctx.stream;
@@ -1176,6 +1309,8 @@ impl Mamba2GpuEngine {
             y: z(rows * c.ssm_dim())?,
             gated: typed(rows * c.d_inner())?,
             out: typed(rows * c.d_model)?,
+            mlp_up: typed(rows * 2 * hidden)?,
+            mlp_act: typed(rows * hidden)?,
             final_rows: z(rows * c.d_model)?,
         })
     }
@@ -1305,6 +1440,20 @@ impl Mamba2GpuEngine {
                 ),
                 rows,
             )?;
+            if let Some(m) = self.mlp.get(l) {
+                x.mlp_residual(
+                    &m.ptrs(),
+                    (
+                        temporal,
+                        post,
+                        rms,
+                        pf.mlp_up.cached_ptr(),
+                        pf.mlp_act.cached_ptr(),
+                        pf.out.cached_ptr(),
+                    ),
+                    rows,
+                )?;
+            }
         }
         x.rmsnorm(
             (
@@ -1335,6 +1484,10 @@ pub struct Mamba2GpuPrefill {
     y: GpuBuffer,
     gated: DtypedBuf,
     out: DtypedBuf,
+    /// The gated MLP's up projection and gate rows (one element each for a
+    /// model without one).
+    mlp_up: DtypedBuf,
+    mlp_act: DtypedBuf,
     final_rows: GpuBuffer,
 }
 

@@ -5,7 +5,9 @@
 //! and norm, the normed rows, the projection, the conv output and the conv
 //! state the window started from, dt and its chunk cumsum, the C.B
 //! products, the state entering every chunk, the scan output and the gated
-//! rows. The backward walks the layers in reverse through the kernels of
+//! rows, and for the gated MLP after the mixer its input rows and norm, the
+//! normed rows, the up projection and the gate's rows. The backward walks
+//! the layers in reverse through the kernels of
 //! `kernels/mamba2_bwd.cu` and the Inference module's GEMMs and the Common module's norm and reduction
 //! kernels. The weights, their gradients and the AdamW moments are three
 //! flat buffers in one layout, so the optimizer runs per tensor with no
@@ -13,9 +15,10 @@
 //!
 //! In tf32 everything stays f32 and the GEMMs take the context's TF32
 //! contract. In bf16 and f16 the weights, gradients and moments stay f32;
-//! in_proj and out_proj run from half copies refreshed after every step,
-//! and the rows those GEMMs read or write (the normed rows, the projection,
-//! the conv output, the gated rows and their gradients) are stored half,
+//! in_proj, out_proj and the MLP's two projections run from half copies
+//! refreshed after every step, and the rows those GEMMs read or write (the
+//! normed rows, the projection, the conv output, the gated rows, the MLP's
+//! rows and their gradients) are stored half,
 //! while the residual stream, the scan, the states and every reduction
 //! stay f32. f16 scales the loss with the dynamic loss scaler: a step whose
 //! gradients overflow is skipped and the scale backs off.
@@ -30,7 +33,7 @@ use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSession
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::check_device_envelope;
-use super::inference::{LayerPtrs, M2Exec, Mamba2GpuState, WindowPtrs};
+use super::inference::{LayerPtrs, M2Exec, Mamba2GpuState, MlpPtrs, WindowPtrs};
 use super::kernels::{
     CHUNK, Mamba2Kernels, SeqBwdRoute, bc_tiles_smem_bytes, dx_tiles_geom,
     gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes, seq_bwd_tiles_smem_bytes, seq_bwd_tiles_threads,
@@ -73,14 +76,23 @@ struct LayerSpans {
     out_proj_b: Span,
 }
 
+/// One layer's gated MLP in the flat buffers.
+#[derive(Clone, Copy, Debug, Default)]
+struct MlpSpans {
+    norm_weight: Span,
+    fc1_w: Span,
+    fc2_w: Span,
+}
+
 /// The order of the flat buffers: the input projection, then each layer's
-/// tensors in [`Mamba2LayerWeights`] field order, then the final norm.
-/// A tensor the model does not have is an empty span.
+/// tensors in [`Mamba2LayerWeights`] field order, then each layer's MLP,
+/// then the final norm. A tensor the model does not have is an empty span.
 #[derive(Clone, Debug)]
 struct Layout {
     input_proj_w: Span,
     input_proj_b: Span,
     layers: Vec<LayerSpans>,
+    mlp: Vec<MlpSpans>,
     norm_f_weight: Span,
     total: usize,
 }
@@ -112,11 +124,21 @@ impl Layout {
                 out_proj_b: take(lw.out_proj_b.len()),
             })
             .collect();
+        let mlp = w
+            .mlp
+            .iter()
+            .map(|m| MlpSpans {
+                norm_weight: take(m.norm_weight.len()),
+                fc1_w: take(m.fc1_w.len()),
+                fc2_w: take(m.fc2_w.len()),
+            })
+            .collect();
         let norm_f_weight = take(w.norm_f_weight.len());
         Self {
             input_proj_w,
             input_proj_b,
             layers,
+            mlp,
             norm_f_weight,
             total: at,
         }
@@ -143,6 +165,13 @@ impl Layout {
                 (lw.gate_norm_weight.as_slice(), ls.gate_norm_weight, false),
                 (lw.out_proj_w.as_slice(), ls.out_proj_w, true),
                 (lw.out_proj_b.as_slice(), ls.out_proj_b, false),
+            ]);
+        }
+        for (m, ms) in w.mlp.iter().zip(&self.mlp) {
+            out.extend([
+                (m.norm_weight.as_slice(), ms.norm_weight, false),
+                (m.fc1_w.as_slice(), ms.fc1_w, true),
+                (m.fc2_w.as_slice(), ms.fc2_w, true),
             ]);
         }
         out.push((w.norm_f_weight.as_slice(), self.norm_f_weight, false));
@@ -190,6 +219,11 @@ impl Layout {
             read(gate_norm_weight, ls.gate_norm_weight);
             read(out_proj_w, ls.out_proj_w);
             read(out_proj_b, ls.out_proj_b);
+        }
+        for (m, ms) in w.mlp.iter_mut().zip(&self.mlp) {
+            read(&mut m.norm_weight, ms.norm_weight);
+            read(&mut m.fc1_w, ms.fc1_w);
+            read(&mut m.fc2_w, ms.fc2_w);
         }
         read(&mut w.norm_f_weight, self.norm_f_weight);
         w
@@ -262,6 +296,18 @@ struct LayerActs {
     ckpt: GpuBuffer,
     y: GpuBuffer,
     gated: Rows,
+    /// The gated MLP's own rows, for a layer with one.
+    mlp: Option<MlpActs>,
+}
+
+/// What the gated MLP's forward keeps for its backward: its input rows and
+/// norm, the normed rows, the up projection and the gate's rows.
+struct MlpActs {
+    x_in: GpuBuffer,
+    rms: GpuBuffer,
+    post: Rows,
+    up: Rows,
+    act: Rows,
 }
 
 /// The backward's buffers, one layer's worth, reused across layers.
@@ -301,6 +347,9 @@ struct BwdScratch {
     dv: GpuBuffer,
     d_post: Rows,
     d_pre: GpuBuffer,
+    /// The gradients of the MLP's up projection and gate rows.
+    d_up: Rows,
+    d_act: Rows,
     axis0: GpuBuffer,
     d_input: GpuBuffer,
     /// The residual gradient rounded to the half type, the out_proj
@@ -393,13 +442,6 @@ impl Mamba2GpuTrainer {
         let device = GpuDevice::new(opts.device)?;
         let device = &device;
         w.validate(&cfg, input_dim)?;
-        if !w.mlp.is_empty() {
-            return Err(
-                "the GPU Mamba-2 trainer does not run the MLP after the mixer yet; \
-                 the CPU trains this model"
-                    .into(),
-            );
-        }
         if batch == 0 || seq_len == 0 {
             return Err("a training window needs at least one sequence and one token".into());
         }
@@ -432,9 +474,13 @@ impl Mamba2GpuTrainer {
             c.d_inner(),
         );
         let (nh, hd, ds) = (c.nheads(), c.headdim, c.d_state);
+        let hidden = c.mlp_hidden();
         validate_rows_capacity(
             rows,
-            [input_dim, ip, cd, di, dm].into_iter().max().unwrap_or(0),
+            [input_dim, ip, cd, di, dm, 2 * hidden]
+                .into_iter()
+                .max()
+                .unwrap_or(0),
         )?;
         let per_chunk = batch * nc * nh;
         let nseg = seq_len.div_ceil(stride);
@@ -462,7 +508,7 @@ impl Mamba2GpuTrainer {
             _ => (1, 1),
         };
         let acts = (0..c.n_layers)
-            .map(|_| -> Result<LayerActs, String> {
+            .map(|l| -> Result<LayerActs, String> {
                 Ok(LayerActs {
                     x_in: z(rows * dm)?,
                     rms: z(rows)?,
@@ -477,6 +523,17 @@ impl Mamba2GpuTrainer {
                     ckpt: z(sequential(batch * nseg * nh * hd * ds))?,
                     y: z(rows * d_ssm)?,
                     gated: typed(rows * di)?,
+                    mlp: if l < w.mlp.len() {
+                        Some(MlpActs {
+                            x_in: z(rows * dm)?,
+                            rms: z(rows)?,
+                            post: typed(rows * dm)?,
+                            up: typed(rows * 2 * hidden)?,
+                            act: typed(rows * hidden)?,
+                        })
+                    } else {
+                        None
+                    },
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -514,6 +571,8 @@ impl Mamba2GpuTrainer {
             dv: z(rows * cd)?,
             d_post: typed(rows * dm)?,
             d_pre: z(rows * dm)?,
+            d_up: typed(rows * 2 * hidden)?,
+            d_act: typed(rows * hidden)?,
             axis0: z(rows * dm.max(d_ssm))?,
             d_input: z(rows * input_dim)?,
             d_temp_h: if act == WeightDtype::F32 {
@@ -525,17 +584,20 @@ impl Mamba2GpuTrainer {
         let mut mirror_pairs = Vec::new();
         let mut copy_at = 0usize;
         if act != WeightDtype::F32 {
-            for ls in &layout.layers {
-                for span in [ls.in_proj_w, ls.out_proj_w] {
-                    mirror_pairs.push((
-                        span,
-                        Span {
-                            off: copy_at,
-                            len: span.len,
-                        },
-                    ));
-                    copy_at += span.len;
-                }
+            let mats = layout
+                .layers
+                .iter()
+                .flat_map(|ls| [ls.in_proj_w, ls.out_proj_w])
+                .chain(layout.mlp.iter().flat_map(|ms| [ms.fc1_w, ms.fc2_w]));
+            for span in mats {
+                mirror_pairs.push((
+                    span,
+                    Span {
+                        off: copy_at,
+                        len: span.len,
+                    },
+                ));
+                copy_at += span.len;
             }
         }
         let mirror = if act == WeightDtype::F32 {
@@ -642,7 +704,8 @@ impl Mamba2GpuTrainer {
         }
     }
 
-    /// Round the master in_proj and out_proj weights into their half copies.
+    /// Round the master in_proj, out_proj and MLP projection weights into
+    /// their half copies.
     fn refresh_mirror(&mut self) -> Result<(), String> {
         let Some(mirror) = &self.mirror else {
             return Ok(());
@@ -839,6 +902,20 @@ impl Mamba2GpuTrainer {
         })
     }
 
+    /// Layer `l`'s gated MLP as pointers into the master (its projections as
+    /// the GEMMs read them), or None for a model without one.
+    fn mlp_ptrs(&self, l: usize) -> Result<Option<MlpPtrs>, String> {
+        let Some(ms) = self.layout.mlp.get(l) else {
+            return Ok(None);
+        };
+        Ok(Some(MlpPtrs {
+            norm_w: at(self.master.cached_ptr(), ms.norm_weight),
+            fc1_w: self.gemm_weight(ms.fc1_w)?,
+            fc2_w: self.gemm_weight(ms.fc2_w)?,
+            hidden: ms.fc2_w.len / self.cfg.d_model,
+        }))
+    }
+
     fn copy(&self, dst: u64, src: u64, n: usize, what: &str) -> Result<(), String> {
         let r = unsafe {
             cudarc::driver::sys::cuMemcpyDtoDAsync_v2(dst, src, n * 4, self.ctx.stream.cu_stream())
@@ -951,6 +1028,21 @@ impl Mamba2GpuTrainer {
                 ),
                 rows,
             )?;
+            if let (Some(m), Some(mp)) = (&a.mlp, self.mlp_ptrs(l)?) {
+                self.copy(m.x_in.cached_ptr(), temporal, rows * dm, "MLP input")?;
+                x.mlp_residual(
+                    &mp,
+                    (
+                        temporal,
+                        m.post.ptr(),
+                        m.rms.cached_ptr(),
+                        m.up.ptr(),
+                        m.act.ptr(),
+                        self.out_rows.ptr(),
+                    ),
+                    rows,
+                )?;
+            }
         }
         self.copy(
             self.final_in.cached_ptr(),
@@ -1142,6 +1234,9 @@ impl Mamba2GpuTrainer {
             rows,
         )?;
         for l in (0..c.n_layers).rev() {
+            if self.acts[l].mlp.is_some() {
+                self.mlp_backward(l)?;
+            }
             self.layer_backward(l)?;
         }
         let identity_input = self.layout.input_proj_w.len == 0;
@@ -1880,10 +1975,9 @@ impl Mamba2GpuTrainer {
             }
         }
         let a = &self.acts[l];
-        let (d_pre, d_temp) = (self.bwd.d_pre.cached_ptr(), self.bwd.d_temp.cached_ptr());
         self.rms_backward(
             (
-                d_pre,
+                self.bwd.d_pre.cached_ptr(),
                 self.bwd.d_post.ptr(),
                 a.x_in.cached_ptr(),
                 lp.norm_w,
@@ -1892,19 +1986,150 @@ impl Mamba2GpuTrainer {
             (at(g_base, ls.norm_weight), act != WeightDtype::F32),
             rows,
         )?;
-        let n = (rows * dm) as i32;
-        let mut bld = stream.launch_builder(&self.ctx.kernels.vec_add_inplace);
+        self.add_residual_grad(rows, l)
+    }
+
+    /// `d_temp += d_pre` over the window's rows: what a residual branch's
+    /// input gradient adds to the stream's.
+    fn add_residual_grad(&self, rows: usize, l: usize) -> Result<(), String> {
+        let (d_temp, d_pre) = (self.bwd.d_temp.cached_ptr(), self.bwd.d_pre.cached_ptr());
+        let n = rows * self.cfg.d_model;
+        let n_i = n as i32;
+        let mut bld = self
+            .ctx
+            .stream
+            .launch_builder(&self.ctx.kernels.vec_add_inplace);
         bld.arg(&d_temp);
         bld.arg(&d_pre);
-        bld.arg(&n);
-        unsafe { bld.launch(grid_1d(rows * dm)) }
+        bld.arg(&n_i);
+        unsafe { bld.launch(grid_1d(n)) }
             .map(|_| ())
             .map_err(|e| format!("Mamba-2 backward residual L{l}: {e:?}"))
     }
 
+    /// The gated MLP's backward in layer `l`: from the residual gradient,
+    /// the gate rows' gradient and the down projection's weight gradient,
+    /// the gate's, the normed rows' gradient and the up projection's weight
+    /// gradient, then the MLP norm's, whose input gradient joins the
+    /// residual gradient.
+    fn mlp_backward(&mut self, l: usize) -> Result<(), String> {
+        let rows = self.batch * self.seq_len;
+        let dm = self.cfg.d_model;
+        let act = self.act;
+        let ms = self.layout.mlp[l];
+        let hidden = ms.fc2_w.len / dm;
+        let (base, g_base) = (self.master.cached_ptr(), self.grads.cached_ptr());
+        let (w1, w2) = (self.gemm_weight(ms.fc1_w)?, self.gemm_weight(ms.fc2_w)?);
+        let (gw1, gw2) = (self.grad(ms.fc1_w), self.grad(ms.fc2_w));
+        let t = |ptr| TypedPtr { ptr, dtype: act };
+        let no_mlp = "a layer without an MLP in the MLP backward";
+        if act == WeightDtype::F32 {
+            let m = self.acts[l].mlp.as_ref().ok_or(no_mlp)?;
+            let s = &mut self.bwd;
+            gpu_gemm_bi_backward_grad_raw(
+                &self.ctx,
+                s.d_act.f32_mut()?,
+                (&gw2, None),
+                &s.d_temp,
+                m.act.f32()?,
+                w2,
+                (rows, hidden, dm),
+            )?;
+        } else {
+            let d_temp = self.bwd.d_temp.cached_ptr();
+            let dth = self
+                .bwd
+                .d_temp_h
+                .as_ref()
+                .ok_or("half lane without its rounded residual gradient")?
+                .cached_ptr();
+            self.round_rows(dth, d_temp, rows * dm)?;
+            let act_rows = self.acts[l].mlp.as_ref().ok_or(no_mlp)?.act.ptr();
+            gpu_gemm_bi_backward_dw_grad_typed(
+                &self.ctx,
+                &gw2,
+                t(dth),
+                t(act_rows),
+                rows,
+                hidden,
+                dm,
+            )?;
+            gpu_gemm_ex_backward_dx_typed(
+                &self.ctx,
+                t(self.bwd.d_act.ptr()),
+                t(dth),
+                t(w2),
+                rows,
+                hidden,
+                dm,
+            )?;
+        }
+        let up = self.acts[l].mlp.as_ref().ok_or(no_mlp)?.up.ptr();
+        let (d_up, d_act) = (self.bwd.d_up.ptr(), self.bwd.d_act.ptr());
+        let (rows_i, hidden_i) = (rows as i32, hidden as i32);
+        let mut bld = self
+            .ctx
+            .stream
+            .launch_builder(self.kernels.bwd.gated_mlp.get(act));
+        bld.arg(&d_up);
+        bld.arg(&d_act);
+        bld.arg(&up);
+        bld.arg(&rows_i);
+        bld.arg(&hidden_i);
+        unsafe { bld.launch(grid_1d(rows * hidden)) }
+            .map_err(|e| format!("Mamba-2 MLP gate backward L{l}: {e:?}"))?;
+        if act == WeightDtype::F32 {
+            let m = self.acts[l].mlp.as_ref().ok_or(no_mlp)?;
+            let s = &mut self.bwd;
+            gpu_gemm_bi_backward_grad_raw(
+                &self.ctx,
+                s.d_post.f32_mut()?,
+                (&gw1, None),
+                s.d_up.f32()?,
+                m.post.f32()?,
+                w1,
+                (rows, dm, 2 * hidden),
+            )?;
+        } else {
+            let post = self.acts[l].mlp.as_ref().ok_or(no_mlp)?.post.ptr();
+            gpu_gemm_bi_backward_dw_grad_typed(
+                &self.ctx,
+                &gw1,
+                t(d_up),
+                t(post),
+                rows,
+                dm,
+                2 * hidden,
+            )?;
+            gpu_gemm_ex_backward_dx_typed(
+                &self.ctx,
+                t(self.bwd.d_post.ptr()),
+                t(d_up),
+                t(w1),
+                rows,
+                dm,
+                2 * hidden,
+            )?;
+        }
+        let m = self.acts[l].mlp.as_ref().ok_or(no_mlp)?;
+        self.rms_backward(
+            (
+                self.bwd.d_pre.cached_ptr(),
+                self.bwd.d_post.ptr(),
+                m.x_in.cached_ptr(),
+                at(base, ms.norm_weight),
+                m.rms.cached_ptr(),
+            ),
+            (at(g_base, ms.norm_weight), act != WeightDtype::F32),
+            rows,
+        )?;
+        self.add_residual_grad(rows, l)
+    }
+
     /// One AdamW step on the gradients of the last backward. Under the
     /// optimizer's reference no-decay groups only the matrices (the input
-    /// projection, in_proj, the conv and out_proj weights) decay. Returns
+    /// projection, in_proj, the conv and out_proj weights, the MLP's
+    /// projections) decay. Returns
     /// false when the f16 gradients overflowed: the step is skipped and the
     /// loss scale backs off.
     ///

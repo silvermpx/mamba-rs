@@ -1,8 +1,8 @@
-//! The Mamba-2 CUDA module: `kernels/mamba2_ops.cu`, `mamba2_ssd.cu` and
-//! `mamba2_bwd.cu` after the typed prelude, compiled with NVRTC and cached
-//! under its own module kind, so adding it moves no identity of the Inference
-//! or Mamba-3 modules. The norms, the residual adds and the optimizer come
-//! from the Common module through the context.
+//! The Mamba-2 CUDA module: `kernels/gated_mlp.cu`, `mamba2_ops.cu`,
+//! `mamba2_ssd.cu` and `mamba2_bwd.cu` after the typed prelude, compiled
+//! with NVRTC and cached under its own module kind, so adding it moves no
+//! identity of the Inference or Mamba-3 modules. The norms, the residual
+//! adds and the optimizer come from the Common module through the context.
 
 use std::sync::Arc;
 
@@ -30,6 +30,9 @@ pub struct Mamba2Kernels {
     pub gate_only_fwd: TypedKernel,
     /// The mixer's inner MLP gate.
     pub mlp_gate_fwd: TypedKernel,
+    /// The gated MLP after the mixer: value times silu(gate) of each row
+    /// of its up projection.
+    pub gated_mlp: TypedKernel,
     /// The prefill: conv over the window and its state, dt with the chunk
     /// cumsum, the CB products, the chunk states, the state passing and
     /// the chunk scan.
@@ -85,6 +88,8 @@ pub struct Mamba2BwdKernels {
     pub gated_norm_stream: TypedKernel,
     pub gate_only: TypedKernel,
     pub mlp_gate: TypedKernel,
+    /// The backward of the gated MLP's gate, the shared kernel's bits.
+    pub gated_mlp: TypedKernel,
     pub conv_dv: TypedKernel,
     pub conv_dx: TypedKernel,
     pub conv_dw: TypedKernel,
@@ -213,6 +218,7 @@ impl Mamba2Kernels {
             &ComposedSpec {
                 sources: &[
                     include_str!("../../../kernels/_typed_prelude.cuh"),
+                    include_str!("../../../kernels/gated_mlp.cu"),
                     include_str!("../../../kernels/mamba2_ops.cu"),
                     include_str!("../../../kernels/mamba2_ssd.cu"),
                     include_str!("../../../kernels/mamba2_bwd.cu"),
@@ -257,6 +263,7 @@ impl Mamba2Kernels {
             gated_norm_fwd_stream: typed("m2_gated_norm_fwd_stream")?,
             gate_only_fwd: typed("m2_gate_only_fwd")?,
             mlp_gate_fwd: typed("m2_mlp_gate_fwd")?,
+            gated_mlp: typed("mlp_gate_fwd")?,
             conv_prefill: typed("m2_conv_prefill")?,
             conv_step: typed("m2_conv_step")?,
             conv_state: typed("m2_conv_state")?,
@@ -287,6 +294,7 @@ impl Mamba2Kernels {
                 gated_norm_stream: typed("m2b_gated_norm_stream")?,
                 gate_only: typed("m2b_gate_only")?,
                 mlp_gate: typed("m2b_mlp_gate")?,
+                gated_mlp: typed("mlp_gate_bwd")?,
                 conv_dv: typed("m2b_conv_dv")?,
                 conv_dx: typed("m2b_conv_dx")?,
                 conv_dw: typed("m2b_conv_dw")?,

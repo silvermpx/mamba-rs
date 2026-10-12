@@ -1,7 +1,8 @@
 //! Mamba-2 on the GPU against the CPU: decode and the chunked prefill over
 //! every head width the kernels tile differently, groups, per-channel D, the
 //! dt clamp, both norm orders, no norm, the mixer's inner MLP, a conv of 40
-//! taps and a head past the chunk state's tile. Batch rows against the same
+//! taps, a head past the chunk state's tile and the gated MLP after the
+//! mixer. Batch rows against the same
 //! sequence alone, and the prefill's bit-exact seams (a decode step
 //! continues a prefill of whole chunks, and windows split at chunk
 //! boundaries give the whole window).
@@ -110,6 +111,13 @@ fn cases() -> Vec<(&'static str, Mamba2Config)> {
                 ..base
             },
         ),
+        (
+            "the gated MLP after the mixer",
+            Mamba2Config {
+                d_intermediate: 96,
+                ..base
+            },
+        ),
     ]
 }
 
@@ -127,6 +135,12 @@ fn drawn(cfg: &Mamba2Config, input_dim: usize, seed: u64) -> Mamba2Weights {
             for (x, dv) in v.iter_mut().zip(d) {
                 *x = base + dv;
             }
+        }
+    }
+    for (l, m) in w.mlp.iter_mut().enumerate() {
+        let d = det(m.norm_weight.len(), seed * 100 + l as u64 * 10 + 5, 0.2);
+        for (x, dv) in m.norm_weight.iter_mut().zip(d) {
+            *x = 1.0 + dv;
         }
     }
     w.input_proj_b = det(cfg.d_model, seed + 7, 0.1);

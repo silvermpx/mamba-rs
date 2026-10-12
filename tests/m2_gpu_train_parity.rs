@@ -1,8 +1,9 @@
 //! Mamba-2 training on the GPU against the CPU trainer: the training
 //! forward's rows, every weight gradient and the input gradient over
 //! groups, per-channel D, an active dt clamp, biases, both norm orders, no
-//! norm with the inner MLP, the released head shape, a conv of 40 taps and
-//! heads past what shared memory holds, on windows that end inside a chunk,
+//! norm with the inner MLP, the released head shape, a conv of 40 taps,
+//! heads past what shared memory holds and the gated MLP after the mixer,
+//! on windows that end inside a chunk,
 //! in f32 and in the tf32, bf16 and f16 lanes. Then AdamW steps that lower a
 //! loss in every lane.
 #![cfg(feature = "cuda")]
@@ -99,6 +100,13 @@ fn cases() -> Vec<(&'static str, Mamba2Config)> {
                 ..base
             },
         ),
+        (
+            "the gated MLP after the mixer",
+            Mamba2Config {
+                d_intermediate: 96,
+                ..base
+            },
+        ),
     ]
 }
 
@@ -157,6 +165,12 @@ fn drawn(cfg: &Mamba2Config, input_dim: usize, seed: u64) -> Mamba2Weights {
             *v *= 3.0;
         }
     }
+    for (l, m) in w.mlp.iter_mut().enumerate() {
+        let d = det(m.norm_weight.len(), seed * 100 + l as u64 * 20 + 9, 0.2);
+        for (x, dv) in m.norm_weight.iter_mut().zip(d) {
+            *x = 1.0 + dv;
+        }
+    }
     w.input_proj_b = det(cfg.d_model, seed + 7, 0.1);
     w
 }
@@ -183,6 +197,15 @@ fn named(w: &Mamba2Weights) -> Vec<(String, &[f32])> {
             ("out_proj_b", &lw.out_proj_b),
         ] {
             out.push((format!("layer{l}.{name}"), v.as_slice()));
+        }
+    }
+    for (l, m) in w.mlp.iter().enumerate() {
+        for (name, v) in [
+            ("norm", &m.norm_weight),
+            ("fc1", &m.fc1_w),
+            ("fc2", &m.fc2_w),
+        ] {
+            out.push((format!("mlp{l}.{name}"), v.as_slice()));
         }
     }
     out
