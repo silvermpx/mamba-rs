@@ -179,8 +179,24 @@
   and run in pieces past it. `gpu::launch` gains `grid_1d_cover`,
   `check_int_args` and `launch_cast`, and `grid_conv_fwd_tiled` and
   `grid_conv_tiled` return a `Result` that names a grid past its extent.
+- `GpuCtx::cublas()` hands the context's cuBLAS handle, which the context
+  takes when it enters a cuBLAS GEMM mode and keeps. The `blas` and
+  `_blas_workspace` fields and `GpuDevice::create_cublas` are gone, and
+  `Mamba3GpuBackbone::blas` returns a `Result`. `GradSlice::to_cpu` and
+  `GradSlice::upload_from_cpu` take the stream the slice's kernels run on.
 
 ### Fixed
+
+- A CUDA graph capture failed when another thread of the process built or
+  dropped a model. Every GPU context destroyed its cuBLAS handle when it
+  dropped, and `cublasDestroy` synchronizes the device, which is invalid
+  while any stream of it captures and ends that capture. The f32 weights of
+  a Mamba-1 model uploaded between two synchronizations of the whole
+  context per tensor, the same fault. A context in the deterministic GEMM
+  mode, the default, now takes no cuBLAS handle, and one in a cuBLAS mode
+  returns its handle to a list the process keeps, for the next context to
+  take, instead of destroying it. The weights upload on the model's stream.
+  Dropping a model no longer stalls the other models on the device either.
 
 - The Mamba-1 prefill, decode and training indexed in 32 bits, and only the
   trainer checked a size: a prompt or a batch past 2^31 elements in one

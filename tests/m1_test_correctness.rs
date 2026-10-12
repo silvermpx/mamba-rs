@@ -1149,7 +1149,7 @@ mod gpu_tests {
 
         macro_rules! check_grad {
             ($name:expr, $gpu_slice:expr, $cpu_slice:expr) => {{
-                let gpu_vals = $gpu_slice.to_cpu().unwrap();
+                let gpu_vals = $gpu_slice.to_cpu(&ctx.stream).unwrap();
                 let worst_idx = gpu_vals
                     .iter()
                     .zip($cpu_slice.iter())
@@ -1481,7 +1481,7 @@ mod gpu_tests {
         ctx.stream.synchronize().unwrap();
 
         // Compare input_proj_b
-        let gpu_ipb = gpu_grads.input_proj_b.to_cpu().unwrap();
+        let gpu_ipb = gpu_grads.input_proj_b.to_cpu(&ctx.stream).unwrap();
         let cpu_ipb = &cpu_grads.input_proj_b;
         let (max_rel, max_abs) = compare_vecs(&gpu_ipb, cpu_ipb);
         println!(
@@ -1492,7 +1492,7 @@ mod gpu_tests {
         );
 
         // Compare input_proj_w
-        let gpu_ipw = gpu_grads.input_proj_w.to_cpu().unwrap();
+        let gpu_ipw = gpu_grads.input_proj_w.to_cpu(&ctx.stream).unwrap();
         let cpu_ipw = &cpu_grads.input_proj_w;
         let (max_rel, max_abs) = compare_vecs(&gpu_ipw, cpu_ipw);
         println!(
@@ -2044,7 +2044,7 @@ mod gpu_extra_tests {
         // Verify ALL GPU gradients are nonzero
         macro_rules! check_nonzero {
             ($name:expr, $slice:expr) => {
-                let vals = $slice.to_cpu().unwrap();
+                let vals = $slice.to_cpu(&ctx.stream).unwrap();
                 let max_abs = vals.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
                 assert!(max_abs > 1e-8, "GPU {} gradient is zero", $name);
             };

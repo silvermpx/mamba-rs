@@ -307,7 +307,7 @@ pub(crate) unsafe fn gpu_gemm_f32_forward_ptrs(
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
         cudarc::cublas::result::sgemm(
-            *ctx.blas.handle(),
+            ctx.cublas_handle()?,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             n_out_c,
@@ -400,7 +400,7 @@ pub fn gpu_gemm_bi_backward_dx_raw(
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
         cudarc::cublas::result::sgemm(
-            *ctx.blas.handle(),
+            ctx.cublas_handle()?,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             n_in_c,
@@ -466,7 +466,7 @@ pub fn gpu_gemm_bi_backward_dw_grad(
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
         cudarc::cublas::result::sgemm(
-            *ctx.blas.handle(),
+            ctx.cublas_handle()?,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
             n_out_c,
@@ -535,7 +535,7 @@ pub fn gpu_gemm_bi_backward_dw_grad_typed(
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
         cudarc::cublas::result::gemm_ex(
-            *ctx.blas.handle(),
+            ctx.cublas_handle()?,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
             n_out_c,
@@ -608,7 +608,7 @@ pub fn gpu_gemm_ex_backward_dx_typed(
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
         cudarc::cublas::result::gemm_ex(
-            *ctx.blas.handle(),
+            ctx.cublas_handle()?,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             n_in_c,
@@ -2547,7 +2547,7 @@ pub fn gpu_gemm_bi_tied_lm_head_raw(
     super::gemm_bi_triad::validate_f32_triad_pointer_request(ctx, request, operands)?;
     ctx.ensure_vendor_gemm("gpu_gemm_bi_tied_lm_head_raw")?;
     gpu_gemm_bi_tied_lm_head_blas(
-        &ctx.blas,
+        &*ctx.cublas()?,
         logits_ptr,
         temporal_ptr,
         embed_ptr,
@@ -3844,7 +3844,7 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
     }
     let compute = effective_compute(ctx, dtype)?;
     gpu_gemm_ex_tied_lm_head_with_compute(
-        &ctx.blas,
+        &*ctx.cublas()?,
         logits_ptr,
         temporal_ptr,
         embed_ptr,
@@ -4377,7 +4377,7 @@ pub fn gpu_gemm_typed_forward_raw(
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
         cudarc::cublas::result::gemm_ex(
-            *ctx.blas.handle(),
+            ctx.cublas_handle()?,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             n_out_c,

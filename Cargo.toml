@@ -393,6 +393,11 @@ path = "tests/gpu_backbone_api.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "capture_beside_teardown"
+path = "tests/capture_beside_teardown.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "gpu_trainer_api"
 path = "tests/gpu_trainer_api.rs"
 required-features = ["cuda"]

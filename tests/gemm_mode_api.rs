@@ -31,15 +31,17 @@ fn gpu_module_reexports_the_canonical_gemm_mode() {
     assert_eq!(mode, GemmMode::CublasPedantic);
 }
 
-fn actual_cublas_math(ctx: &GpuCtx) -> cublasMath_t {
+/// The math of the context's cuBLAS handle, or none when it holds no handle.
+fn actual_cublas_math(ctx: &GpuCtx) -> Option<cublasMath_t> {
+    let blas = ctx.cublas().ok()?;
     let mut math = cublasMath_t::CUBLAS_DEFAULT_MATH;
-    let status = unsafe { cublasGetMathMode(*ctx.blas.handle(), &mut math) };
+    let status = unsafe { cublasGetMathMode(*blas.handle(), &mut math) };
     assert_eq!(
         status,
         cublasStatus_t::CUBLAS_STATUS_SUCCESS,
         "query cuBLAS handle math"
     );
-    math
+    Some(math)
 }
 
 fn assert_mode(ctx: &GpuCtx, expected: GemmMode) {
@@ -67,11 +69,13 @@ fn assert_mode(ctx: &GpuCtx, expected: GemmMode) {
     );
     assert_eq!(policy.fast_gemm, fast_gemm, "policy fast-GEMM mapping");
     assert_eq!(policy.cublas_tf32, tf32, "policy TF32 mapping");
-    assert_eq!(
-        actual_cublas_math(ctx),
-        handle_math,
-        "cuBLAS handle math mapping"
-    );
+    // The deterministic mode holds a handle only when a cuBLAS mode took one
+    // before it, and then sets its math pedantic.
+    let math = actual_cublas_math(ctx);
+    if expected == GemmMode::Deterministic && math.is_none() {
+        return;
+    }
+    assert_eq!(math, Some(handle_math), "cuBLAS handle math mapping");
 }
 
 #[test]
@@ -81,6 +85,10 @@ fn gpu_context_constructors_use_explicit_modes_and_deterministic_defaults() {
 
     let ctx = GpuCtx::new(&device).expect("default GPU context");
     assert_mode(&ctx, GemmMode::Deterministic);
+    assert!(
+        ctx.cublas().is_err(),
+        "a deterministic context takes no cuBLAS handle"
+    );
     assert_eq!(ctx.route_controls().family(), BiGemmFamily::Triad);
     assert!(
         ctx.route_controls().tensor_cores(),

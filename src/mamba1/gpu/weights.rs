@@ -221,14 +221,8 @@ impl GpuMambaWeights {
             + cfg.n_layers * per_layer
             + cpu.norm_f_weight.len();
 
+        // The uploads run on the stream after the zeroing memset.
         let flat = GpuBuffer::zeros(stream, total)?;
-        // Wait for the async zero-memset to finish before host-sync uploads
-        // (cuMemcpyHtoD_v2 on default stream does NOT serialize with custom
-        // streams under per-thread default-stream semantics). See
-        // `GpuMambaMixedWeights::from_cpu` for details.
-        stream
-            .synchronize()
-            .map_err(|e| format!("sync after f32 weight alloc: {e:?}"))?;
         let base = flat.cached_ptr();
 
         let mut off = 0usize;
@@ -236,7 +230,7 @@ impl GpuMambaWeights {
             ($data:expr) => {{
                 let len = $data.len();
                 let slice = WeightSlice::from_offset(base, off, len);
-                slice.upload_from_cpu($data)?;
+                slice.upload_from_cpu(stream, $data)?;
                 off += len;
                 slice
             }};

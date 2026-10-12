@@ -313,8 +313,11 @@ type HalfOverflow = (
 pub struct GpuCtxResources {
     pub stream: Arc<cudarc::driver::CudaStream>,
     pub kernels: Arc<MambaKernels>,
-    pub blas: cudarc::cublas::CudaBlas,
-    pub _blas_workspace: Arc<cudarc::driver::CudaSlice<u8>>,
+    /// The cuBLAS handle, taken when the context enters a cuBLAS GEMM mode
+    /// and kept until it drops, since a captured graph records its
+    /// workspace. A context that only ran the deterministic GEMMs holds
+    /// none.
+    blas: RefCell<Option<super::cublas_pool::PooledBlas>>,
     /// Reusable GPU byte staging buffer for f32→bf16/f16 activation downcast
     /// before mixed-precision GEMM. Grown lazily on first use.
     half_staging: RefCell<Option<cudarc::driver::CudaSlice<u8>>>,
@@ -442,7 +445,8 @@ impl MathModeBackend for CublasMathBackend<'_> {
 }
 
 impl GpuCtx {
-    /// Create a GPU context, compile its kernels, and initialize cuBLAS.
+    /// Create a GPU context and compile its kernels. A cuBLAS GEMM mode also
+    /// takes a cuBLAS handle.
     ///
     /// The context starts in [`GemmMode::Deterministic`] and serves the
     /// Triad kernels with exact f32 products, the role of a plain context.
@@ -600,7 +604,14 @@ impl GpuCtx {
             .default_stream()
             .synchronize()
             .map_err(|e| format!("default-stream drain after kernel compile: {e:?}"))?;
-        let (blas, ws) = device.create_cublas(&stream, config.mode)?;
+        let blas = if config.mode == GemmMode::Deterministic {
+            None
+        } else {
+            Some(super::cublas_pool::PooledBlas::take(
+                &stream,
+                config.mode.cublas_math(),
+            )?)
+        };
         // Numeric routing defaults are nonambient. Explicit setters or the
         // `new_from_env*` constructors are the only ways to change them.
         let instance_token = next_gpu_ctx_token()?;
@@ -633,8 +644,7 @@ impl GpuCtx {
             resources: Rc::new(GpuCtxResources {
                 stream,
                 kernels,
-                blas,
-                _blas_workspace: Arc::new(ws),
+                blas: RefCell::new(blas),
                 half_staging: RefCell::new(None),
                 half_staging_ptr: RefCell::new(0),
                 half_staging_bytes: RefCell::new(0),
@@ -949,13 +959,15 @@ impl GpuCtx {
 
     /// Change the context's GEMM mode and cuBLAS math setting together.
     ///
-    /// The change is rejected while this context's stream is being captured or
-    /// while a GEMM route recorder is active. The current handle math is read
-    /// before mutation and restored if the requested cuBLAS update fails. The
-    /// canonical mode is published only after a successful update. If rollback
-    /// cannot be verified, the context becomes unusable and later supported
-    /// GEMM, capture, and replay entry points return the stored diagnostic.
-    /// Calling this with the current mode is a no-op on a usable context.
+    /// The first cuBLAS mode takes the context's cuBLAS handle, which it then
+    /// keeps. The change is rejected while this context's stream is being
+    /// captured or while a GEMM route recorder is active. The current handle
+    /// math is read before mutation and restored if the requested cuBLAS
+    /// update fails. The canonical mode is published only after a successful
+    /// update. If rollback cannot be verified, the context becomes unusable
+    /// and later supported GEMM, capture, and replay entry points return the
+    /// stored diagnostic. Calling this with the current mode is a no-op on a
+    /// usable context.
     ///
     /// ```no_run
     /// # use mamba_rs::gpu::context::{GemmMode, GpuCtx};
@@ -996,8 +1008,25 @@ impl GpuCtx {
             ));
         }
 
-        let mut backend = CublasMathBackend { blas: &self.blas };
-        match change_math_mode(&mut backend, mode.cublas_math()) {
+        let math = mode.cublas_math();
+        let mut held = self
+            .blas
+            .try_borrow_mut()
+            .map_err(|_| "the cuBLAS handle is in use".to_string())?;
+        let changed = match held.as_ref() {
+            Some(pooled) => change_math_mode(
+                &mut CublasMathBackend {
+                    blas: pooled.blas(),
+                },
+                math,
+            ),
+            None if mode == GemmMode::Deterministic => Ok(()),
+            None => super::cublas_pool::PooledBlas::take(&self.stream, math)
+                .map(|pooled| *held = Some(pooled))
+                .map_err(MathTransitionError::Recoverable),
+        };
+        drop(held);
+        match changed {
             Ok(()) => {
                 if self.graphs_captured.get() > 0 {
                     eprintln!(
@@ -1021,6 +1050,21 @@ impl GpuCtx {
     /// The context's GEMM mode.
     pub fn gemm_mode(&self) -> GemmMode {
         self.gemm_mode.get()
+    }
+
+    /// The context's cuBLAS handle. A context takes one when it enters a
+    /// cuBLAS GEMM mode and keeps it, and one that only ran the deterministic
+    /// GEMMs holds none.
+    pub fn cublas(&self) -> Result<std::cell::Ref<'_, cudarc::cublas::CudaBlas>, String> {
+        std::cell::Ref::filter_map(self.blas.borrow(), |held| {
+            held.as_ref().map(super::cublas_pool::PooledBlas::blas)
+        })
+        .map_err(|_| "the context holds no cuBLAS handle: it runs the deterministic GEMMs".into())
+    }
+
+    /// The raw handle of [`Self::cublas`], for a cuBLAS call.
+    pub(crate) fn cublas_handle(&self) -> Result<cudarc::cublas::sys::cublasHandle_t, String> {
+        Ok(*self.cublas()?.handle())
     }
 
     /// Reject GEMM, capture, and replay work after an unverified math rollback.

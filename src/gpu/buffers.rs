@@ -521,45 +521,43 @@ impl GradSlice {
         self.len * std::mem::size_of::<f32>()
     }
 
-    /// Download this slice from GPU to a CPU Vec.
-    ///
-    /// Uses raw cuMemcpyDtoH on the slice's device pointer.
-    /// Unlike GpuBuffer::to_cpu(), this works on non-owning views.
-    ///
-    /// Performs a full `cuCtxSynchronize` first — `cuMemcpyDtoH_v2` is
-    /// host-synchronous but does NOT order against NON_BLOCKING streams,
-    /// so pending kernels could otherwise still be writing the region.
-    /// GradSlice copies happen at idle points; the device-wide sync is fine.
-    pub fn to_cpu(&self) -> Result<Vec<f32>, String> {
+    /// Download this slice to a host vector on `stream`, the stream whose
+    /// kernels write it: the copy runs after them, and the call returns
+    /// once it finished.
+    pub fn to_cpu(&self, stream: &Arc<cudarc::driver::CudaStream>) -> Result<Vec<f32>, String> {
         let mut dst = vec![0.0f32; self.len];
         if self.len > 0 {
-            cu_ctx_sync("GradSlice::to_cpu")?;
-            let byte_count = self.len * std::mem::size_of::<f32>();
             let result = unsafe {
-                cudarc::driver::sys::cuMemcpyDtoH_v2(
-                    dst.as_mut_ptr() as *mut std::ffi::c_void,
+                cudarc::driver::sys::cuMemcpyDtoHAsync_v2(
+                    dst.as_mut_ptr().cast(),
                     self.ptr,
-                    byte_count,
+                    self.len * std::mem::size_of::<f32>(),
+                    stream.cu_stream(),
                 )
             };
             if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
                 return Err(format!(
-                    "GradSlice::to_cpu({} floats) failed: {:?}",
-                    self.len, result
+                    "GradSlice::to_cpu({} floats) failed: {result:?}",
+                    self.len
                 ));
             }
+            stream
+                .synchronize()
+                .map_err(|e| format!("GradSlice::to_cpu sync: {e:?}"))?;
         }
         Ok(dst)
     }
 
-    /// Upload CPU data into this slice's GPU memory region.
-    ///
-    /// Uses raw cuMemcpyHtoD on the slice's device pointer, bracketed by
-    /// `cuCtxSynchronize`: the leading sync lets in-flight kernels finish
-    /// reading the region; the trailing sync flushes the pageable-copy
-    /// tail DMA before later kernel launches on NON_BLOCKING streams.
-    /// Panics if src.len() != self.len.
-    pub fn upload_from_cpu(&self, src: &[f32]) -> Result<(), String> {
+    /// Upload `src` into this slice on `stream`, the stream whose kernels
+    /// read it: the copy runs after the work already queued there and
+    /// before the work queued after it. A host buffer in pageable memory is
+    /// staged before the call returns, so `src` may change right after.
+    /// Panics if `src.len() != self.len`.
+    pub fn upload_from_cpu(
+        &self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        src: &[f32],
+    ) -> Result<(), String> {
         assert_eq!(
             src.len(),
             self.len,
@@ -568,36 +566,23 @@ impl GradSlice {
             self.len
         );
         if self.len > 0 {
-            cu_ctx_sync("GradSlice::upload_from_cpu (pre)")?;
-            let byte_count = self.len * std::mem::size_of::<f32>();
             let result = unsafe {
-                cudarc::driver::sys::cuMemcpyHtoD_v2(
+                cudarc::driver::sys::cuMemcpyHtoDAsync_v2(
                     self.ptr,
-                    src.as_ptr() as *const std::ffi::c_void,
-                    byte_count,
+                    src.as_ptr().cast(),
+                    self.len * std::mem::size_of::<f32>(),
+                    stream.cu_stream(),
                 )
             };
             if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
                 return Err(format!(
-                    "GradSlice::upload_from_cpu({} floats) failed: {:?}",
-                    self.len, result
+                    "GradSlice::upload_from_cpu({} floats) failed: {result:?}",
+                    self.len
                 ));
             }
-            cu_ctx_sync("GradSlice::upload_from_cpu (post)")?;
         }
         Ok(())
     }
-}
-
-/// Device-wide sync (`cuCtxSynchronize`) — waits for ALL streams including
-/// NON_BLOCKING ones. Used to bracket legacy-stream memcpys that cannot
-/// take a stream parameter without breaking their call sites.
-fn cu_ctx_sync(what: &str) -> Result<(), String> {
-    let r = unsafe { cudarc::driver::sys::cuCtxSynchronize() };
-    if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-        return Err(format!("{what}: cuCtxSynchronize failed: {r:?}"));
-    }
-    Ok(())
 }
 
 /// Type alias for non-owning weight views into flat weight buffers.

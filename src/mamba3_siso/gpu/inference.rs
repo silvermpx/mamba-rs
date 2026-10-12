@@ -2505,12 +2505,10 @@ impl Mamba3GpuBackbone {
         }
     }
 
-    /// Access the vendor handle for explicit vendor-only compatibility code.
-    pub fn blas(&self) -> &cudarc::cublas::CudaBlas {
-        match &self.engine {
-            M3BackboneEngine::F32(e) => &e.ctx.blas,
-            M3BackboneEngine::Mixed(e) => &e.engine_ref().ctx.blas,
-        }
+    /// The context's cuBLAS handle, for explicit vendor-only compatibility
+    /// code. A context in the deterministic GEMM mode holds none.
+    pub fn blas(&self) -> Result<std::cell::Ref<'_, cudarc::cublas::CudaBlas>, String> {
+        self.ctx().cublas()
     }
 
     /// Download the last-computed temporal hidden state to CPU (f32).

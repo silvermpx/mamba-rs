@@ -26,6 +26,7 @@ pub mod blas;
 pub mod buffers;
 pub(crate) mod composed;
 pub mod context;
+mod cublas_pool;
 pub mod device;
 pub(crate) mod diagnostics;
 pub mod dtype;

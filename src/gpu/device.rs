@@ -232,53 +232,6 @@ impl GpuDevice {
     pub fn context(&self) -> &Arc<cudarc::driver::CudaContext> {
         &self.ctx
     }
-
-    /// Create a cuBLAS handle bound to the given compute stream.
-    /// Configures handle math for the requested context GEMM mode.
-    /// Pre-allocates 32 MiB workspace for CUDA Graph compatibility.
-    ///
-    /// The handle MUST be bound to the same stream used for CUDA Graph capture,
-    /// otherwise cuBLAS SGEMM operations will not be recorded into the graph.
-    pub fn create_cublas(
-        &self,
-        compute_stream: &Arc<cudarc::driver::CudaStream>,
-        mode: super::GemmMode,
-    ) -> Result<(cudarc::cublas::CudaBlas, cudarc::driver::CudaSlice<u8>), String> {
-        let blas = cudarc::cublas::CudaBlas::new(compute_stream.clone())
-            .map_err(|e| format!("cuBLAS init failed: {:?}", e))?;
-
-        unsafe {
-            let status = cudarc::cublas::sys::cublasSetMathMode(*blas.handle(), mode.cublas_math());
-            if status != cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
-                return Err(format!(
-                    "cublasSetMathMode for GEMM mode {} failed: {status:?}",
-                    mode.as_str()
-                ));
-            }
-        }
-
-        // Pre-allocate cuBLAS workspace for CUDA Graph compatibility.
-        // Without this, cuBLAS allocates workspace internally on each graph capture,
-        // leaking memory on reinit(). 32 MiB recommended for Hopper kernels.
-        let workspace_bytes: usize = 32 * 1024 * 1024;
-        let workspace = compute_stream
-            .alloc_zeros::<u8>(workspace_bytes)
-            .map_err(|e| format!("cuBLAS workspace alloc failed: {:?}", e))?;
-        unsafe {
-            use cudarc::driver::DevicePtr;
-            let (ws_ptr, _guard) = workspace.device_ptr(compute_stream);
-            let status = cudarc::cublas::sys::cublasSetWorkspace_v2(
-                *blas.handle(),
-                ws_ptr as *mut std::ffi::c_void,
-                workspace_bytes,
-            );
-            if status != cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
-                return Err("cublasSetWorkspace_v2 failed".into());
-            }
-        }
-
-        Ok((blas, workspace))
-    }
 }
 
 /// Whether `cc` belongs to the SM120 family (consumer Blackwell).
