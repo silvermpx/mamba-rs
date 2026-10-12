@@ -23,6 +23,9 @@ pub struct Mamba2Kernels {
     pub seq_fwd_ckpt: TypedKernel,
     /// The grouped gated RMSNorm.
     pub gated_norm_fwd: TypedKernel,
+    /// The gated norm of a group too wide to stage, with the staged
+    /// kernel's bits.
+    pub gated_norm_fwd_stream: TypedKernel,
     /// The gate without a norm.
     pub gate_only_fwd: TypedKernel,
     /// The mixer's inner MLP gate.
@@ -77,6 +80,9 @@ pub struct Mamba2BwdKernels {
     pub d_parts: TypedKernel,
     pub d_reduce: CudaFunction,
     pub gated_norm: TypedKernel,
+    /// The backward of a group too wide to stage, with the staged
+    /// kernel's bits.
+    pub gated_norm_stream: TypedKernel,
     pub gate_only: TypedKernel,
     pub mlp_gate: TypedKernel,
     pub conv_dv: TypedKernel,
@@ -88,6 +94,12 @@ pub struct Mamba2BwdKernels {
     /// `m2s_bwd` with the token's states in shared memory and its step
     /// scalars from `seq_scalars`, when [`seq_bwd_tiles_smem_bytes`] fits.
     pub seq_bwd_tiles: TypedKernel,
+    /// `m2s_bwd` with the states read from the replay tape and dS in shared
+    /// memory or a global scratch, for every head the other two cannot hold
+    /// (see [`Mamba2Kernels::seq_bwd_route`]).
+    pub seq_bwd_global: TypedKernel,
+    /// The widest block each sequential backward kernel launches.
+    pub seq_threads: SeqBwdThreads,
     pub seq_scalars: TypedKernel,
     pub seq_bc_groups: CudaFunction,
     /// The column sums of per-row weight-gradient partials, the shared
@@ -169,13 +181,23 @@ pub fn gated_norm_bwd_smem_bytes(d_ssm: usize, ng: usize, hd: usize) -> usize {
 }
 
 /// Launch geometry of the gated norm: one block per (row, group), its
-/// group and per-head sums staged in shared memory.
-pub fn gated_norm_cfg(rows: usize, d_ssm: usize, ng: usize, hd: usize) -> LaunchConfig {
-    LaunchConfig {
+/// group and per-head sums staged in shared memory when they fit `cap`
+/// bytes, else a pass of per-head sums of one float a thread. Returns
+/// whether the staged kernel runs.
+pub fn gated_norm_cfg(
+    rows: usize,
+    (d_ssm, ng, hd): (usize, usize, usize),
+    cap: usize,
+) -> (bool, LaunchConfig) {
+    const THREADS: usize = 256;
+    let staged = gated_norm_smem_bytes(d_ssm, ng, hd);
+    let fits = staged <= cap;
+    let cfg = LaunchConfig {
         grid_dim: (rows as u32, ng as u32, 1),
-        block_dim: (256, 1, 1),
-        shared_mem_bytes: gated_norm_smem_bytes(d_ssm, ng, hd) as u32,
-    }
+        block_dim: (THREADS as u32, 1, 1),
+        shared_mem_bytes: if fits { staged } else { THREADS * 4 } as u32,
+    };
+    (fits, cfg)
 }
 
 impl Mamba2Kernels {
@@ -219,11 +241,20 @@ impl Mamba2Kernels {
             )
             .map_err(|e| format!("query opt-in shared memory: {e:?}"))?
             .max(0) as usize;
+        let seq_bwd = typed("m2s_bwd")?;
+        let seq_bwd_tiles = typed("m2s_bwd_tiles")?;
+        let seq_bwd_global = typed("m2s_bwd_global")?;
+        let seq_threads = SeqBwdThreads {
+            tiles: max_block(&seq_bwd_tiles, "sequential backward tiles")?,
+            shared: max_block(&seq_bwd, "sequential backward")?,
+            global: max_block(&seq_bwd_global, "global sequential backward")?,
+        };
         let mut kernels = Self {
             step_fwd: typed("m2_step_fwd")?,
             seq_fwd: typed("m2_seq_fwd")?,
             seq_fwd_ckpt: typed("m2_seq_fwd_ckpt")?,
             gated_norm_fwd: typed("m2_gated_norm_fwd")?,
+            gated_norm_fwd_stream: typed("m2_gated_norm_fwd_stream")?,
             gate_only_fwd: typed("m2_gate_only_fwd")?,
             mlp_gate_fwd: typed("m2_mlp_gate_fwd")?,
             conv_prefill: typed("m2_conv_prefill")?,
@@ -253,13 +284,16 @@ impl Mamba2Kernels {
                 d_parts: typed("m2b_d_parts")?,
                 d_reduce: get("m2b_d_reduce")?,
                 gated_norm: typed("m2b_gated_norm")?,
+                gated_norm_stream: typed("m2b_gated_norm_stream")?,
                 gate_only: typed("m2b_gate_only")?,
                 mlp_gate: typed("m2b_mlp_gate")?,
                 conv_dv: typed("m2b_conv_dv")?,
                 conv_dx: typed("m2b_conv_dx")?,
                 conv_dw: typed("m2b_conv_dw")?,
-                seq_bwd: typed("m2s_bwd")?,
-                seq_bwd_tiles: typed("m2s_bwd_tiles")?,
+                seq_bwd,
+                seq_bwd_tiles,
+                seq_bwd_global,
+                seq_threads,
                 seq_scalars: typed("m2s_scalars")?,
                 seq_bc_groups: get("m2s_bc_groups")?,
                 reduce_rows: get("m2b_reduce_rows")?,
@@ -283,6 +317,7 @@ impl Mamba2Kernels {
                 (&kernels.bwd.gated_norm, "gated norm backward"),
                 (&kernels.bwd.seq_bwd, "sequential backward"),
                 (&kernels.bwd.seq_bwd_tiles, "sequential backward tiles"),
+                (&kernels.bwd.seq_bwd_global, "global sequential backward"),
                 (&kernels.chunk_scan_tiles, "chunk scan tiles"),
                 (&kernels.bmm_chunk, "chunk bmm"),
                 (&kernels.chunk_state, "chunk state"),
@@ -298,6 +333,36 @@ impl Mamba2Kernels {
         };
         Ok(kernels)
     }
+
+    /// The sequential backward's kernel for a head of `hd` channels and
+    /// `ds` states: the tiled kernel when its three tiles and its block fit,
+    /// else `m2s_bwd` when its two tiles and a thread per channel fit, else
+    /// the global kernel, which serves every head.
+    pub fn seq_bwd_route(&self, hd: usize, ds: usize) -> SeqBwdRoute {
+        let (t, cap) = (self.bwd.seq_threads, self.smem_optin);
+        let lanes = hd.next_multiple_of(32);
+        if seq_bwd_tiles_smem_bytes(hd, ds) <= cap && seq_bwd_tiles_threads(hd) <= t.tiles {
+            SeqBwdRoute::Tiles
+        } else if lanes <= t.shared && seq_bwd_smem_bytes(hd, ds, lanes) <= cap {
+            SeqBwdRoute::Shared
+        } else {
+            SeqBwdRoute::Global(seq_bwd_global_geom(hd, ds, t.global, cap))
+        }
+    }
+}
+
+/// The widest block every dtype of `k` launches, from its register use, a
+/// whole number of warps.
+fn max_block(k: &TypedKernel, what: &str) -> Result<usize, String> {
+    use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
+    let mut threads = 1024usize;
+    for f in [&k.f32, &k.bf16, &k.f16] {
+        let max = f
+            .get_attribute(FnAttr::CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+            .map_err(|e| format!("threads per block of the {what}: {e:?}"))?;
+        threads = threads.min(max.max(32) as usize);
+    }
+    Ok(threads / 32 * 32)
 }
 
 /// Tokens per block of the tiled chunk scan.
@@ -316,12 +381,16 @@ pub fn bmm_smem_bytes(ds: usize) -> usize {
 }
 
 /// The chunk state kernel's state indices per block (32 per lane column,
-/// one to four columns) and shared memory: the weighted inputs [64][P
-/// rounded up to 4], the B rows of the block's indices and the per-token
-/// weights.
-pub fn chunk_state_geom(hd: usize, ds: usize) -> (usize, usize) {
+/// one to four columns), the channels of its weighted-input tile and its
+/// shared memory: the tile [64][channels], the B rows of the block's
+/// indices and the per-token weights. The tile is the whole head rounded up
+/// to 4 when that fits `cap` bytes, else the widest multiple of 4 that does.
+pub fn chunk_state_geom(hd: usize, ds: usize, cap: usize) -> (usize, usize, usize) {
     let cols = 32 * ds.div_ceil(32).min(4).next_power_of_two().min(4);
-    (cols, CHUNK * (hd.next_multiple_of(4) + cols + 1) * 4)
+    let bytes = |pt: usize| CHUNK * (pt + cols + 1) * 4;
+    let fit = (cap / (CHUNK * 4)).saturating_sub(cols + 1) / 4 * 4;
+    let pt = hd.next_multiple_of(4).min(fit.max(4));
+    (cols, pt, bytes(pt))
 }
 
 /// The fused dx and token sums' state indices per staging pass and shared
@@ -377,4 +446,70 @@ pub fn seq_bwd_tiles_threads(hd: usize) -> usize {
 /// scalars, x and dy of the token, one reduction slot per thread.
 pub fn seq_bwd_smem_bytes(hd: usize, ds: usize, threads: usize) -> usize {
     (2 * hd * (ds + 1) + 2 * ds + 4 + 2 * hd + threads) * 4
+}
+
+/// The widest block each sequential backward kernel launches, from the
+/// compiled kernels' register use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeqBwdThreads {
+    pub tiles: usize,
+    pub shared: usize,
+    pub global: usize,
+}
+
+/// The sequential backward's kernel for a head
+/// ([`Mamba2Kernels::seq_bwd_route`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeqBwdRoute {
+    /// `m2s_bwd_tiles`: the token's states and dS in shared memory.
+    Tiles,
+    /// `m2s_bwd`: the replay state and dS in shared memory, a thread per
+    /// channel.
+    Shared,
+    /// `m2s_bwd_global` with its launch.
+    Global(SeqGlobalGeom),
+}
+
+/// The launch of `m2s_bwd_global` for a head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeqGlobalGeom {
+    /// The block: a thread per channel when the head fits it, else a power
+    /// of two whose threads take the channels in turns.
+    pub threads: usize,
+    /// dS in shared memory, else in a global scratch of P N floats per
+    /// sequence and head.
+    pub shared_ds: bool,
+    /// The head is wider than the block: each block sum keeps a leaf per
+    /// lane in a global scratch of 2 lanes floats per sequence and head.
+    pub wide: bool,
+    /// Dynamic shared memory in bytes.
+    pub smem: usize,
+}
+
+/// The launch of `m2s_bwd_global` for a head of `hd` channels and `ds`
+/// states, its blocks at most `max_threads` wide with `cap` bytes of shared
+/// memory. A head that fits the block gets a thread per channel, at least
+/// one per dC and dB chain and at least 256 for the passes over the state.
+pub fn seq_bwd_global_geom(hd: usize, ds: usize, max_threads: usize, cap: usize) -> SeqGlobalGeom {
+    let lanes = hd.next_multiple_of(32);
+    let max_threads = (max_threads / 32 * 32).max(32);
+    let wide = lanes > max_threads;
+    let threads = if wide {
+        1usize << max_threads.ilog2()
+    } else {
+        lanes
+            .max((2 * ds).next_multiple_of(32))
+            .max(256)
+            .min(max_threads)
+    };
+    let leaves = if wide { threads } else { lanes };
+    let rest = (2 * ds + 2 * leaves) * 4;
+    let tile = hd * (ds + 1) * 4;
+    let shared_ds = tile + rest <= cap;
+    SeqGlobalGeom {
+        threads,
+        shared_ds,
+        wide,
+        smem: if shared_ds { tile + rest } else { rest },
+    }
 }

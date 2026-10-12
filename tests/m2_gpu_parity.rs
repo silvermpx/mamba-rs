@@ -1,9 +1,10 @@
 //! Mamba-2 on the GPU against the CPU: decode and the chunked prefill over
 //! every head width the kernels tile differently, groups, per-channel D, the
-//! dt clamp, both norm orders, no norm and the mixer's inner MLP; batch rows
-//! against the same sequence alone; and the prefill's bit-exact seams (a
-//! decode step continues a prefill of whole chunks, and windows split at
-//! chunk boundaries give the whole window).
+//! dt clamp, both norm orders, no norm, the mixer's inner MLP, a conv of 40
+//! taps and a head past the chunk state's tile. Batch rows against the same
+//! sequence alone, and the prefill's bit-exact seams (a decode step
+//! continues a prefill of whole chunks, and windows split at chunk
+//! boundaries give the whole window).
 #![cfg(feature = "cuda")]
 
 use mamba_rs::gpu::WeightDtype;
@@ -96,6 +97,16 @@ fn cases() -> Vec<(&'static str, Mamba2Config)> {
                 headdim: 80,
                 d_ssm: 160,
                 d_state: 256,
+                ..base
+            },
+        ),
+        ("a conv of 40 taps", Mamba2Config { d_conv: 40, ..base }),
+        (
+            "a head past the chunk state's tile",
+            Mamba2Config {
+                d_model: 384,
+                headdim: 384,
+                d_state: 128,
                 ..base
             },
         ),

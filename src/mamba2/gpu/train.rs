@@ -32,8 +32,8 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 use super::inference::check_device_envelope;
 use super::inference::{LayerPtrs, M2Exec, Mamba2GpuState, WindowPtrs};
 use super::kernels::{
-    CHUNK, Mamba2Kernels, bc_tiles_smem_bytes, dx_tiles_geom, gated_norm_bwd_smem_bytes,
-    seq_bwd_smem_bytes, seq_bwd_tiles_smem_bytes, seq_bwd_tiles_threads,
+    CHUNK, Mamba2Kernels, SeqBwdRoute, bc_tiles_smem_bytes, dx_tiles_geom,
+    gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes, seq_bwd_tiles_smem_bytes, seq_bwd_tiles_threads,
 };
 use crate::gpu::adamw::GpuAdamW;
 use crate::gpu::blas::{
@@ -277,6 +277,12 @@ struct BwdScratch {
     rec: GpuBuffer,
     /// The sequential backward's step scalars, [rows, H, 3].
     seq_scal: GpuBuffer,
+    /// dS of the global sequential backward when it does not fit shared
+    /// memory, [B, H, P, N].
+    seq_ds: GpuBuffer,
+    /// The global sequential backward's block-sum leaves for a head wider
+    /// than its block, [B, H, 2, lanes].
+    seq_leaves: GpuBuffer,
     db_h: GpuBuffer,
     dc_h: GpuBuffer,
     acc: GpuBuffer,
@@ -320,9 +326,9 @@ pub struct Mamba2GpuTrainer {
     /// The fused dx and token sums' (state indices per pass, shared bytes)
     /// on the chunked path when the head fits; else the two kernels run.
     dx_tiles: Option<(usize, usize)>,
-    /// The sequential backward keeps the token's states in shared memory
-    /// when the head fits; else the states come from global memory.
-    seq_tiles: bool,
+    /// The sequential backward's kernel for the head (the chunked path
+    /// never reads it).
+    seq_bwd: SeqBwdRoute,
     template: Mamba2Weights,
     layout: Layout,
     master: GpuBuffer,
@@ -394,12 +400,6 @@ impl Mamba2GpuTrainer {
                     .into(),
             );
         }
-        if cfg.d_conv > 8 {
-            return Err(format!(
-                "the GPU conv serves d_conv <= 8, got {}",
-                cfg.d_conv
-            ));
-        }
         if batch == 0 || seq_len == 0 {
             return Err("a training window needs at least one sequence and one token".into());
         }
@@ -418,26 +418,6 @@ impl Mamba2GpuTrainer {
         let kernels = Mamba2Kernels::compile(device.context(), arch)?;
         check_device_envelope(&cfg, &kernels)?;
         let optin = kernels.smem_optin;
-        if seq_mode {
-            let threads = cfg.headdim.next_multiple_of(32);
-            let smem = seq_bwd_smem_bytes(cfg.headdim, cfg.d_state, threads);
-            if smem > optin || threads > 1024 {
-                return Err(format!(
-                    "the sequential backward of a {}-channel head with {} states needs {smem} \
-                     bytes of shared memory; this GPU serves {optin}",
-                    cfg.headdim, cfg.d_state
-                ));
-            }
-        }
-        if cfg.rmsnorm && gated_norm_bwd_smem_bytes(cfg.ssm_dim(), cfg.ngroups, cfg.headdim) > optin
-        {
-            return Err(format!(
-                "the gated-norm backward of a {}-channel group needs {} bytes of shared memory; \
-                 this GPU serves {optin}",
-                cfg.ssm_dim() / cfg.ngroups,
-                gated_norm_bwd_smem_bytes(cfg.ssm_dim(), cfg.ngroups, cfg.headdim)
-            ));
-        }
         let layout = Layout::of(w);
         let s = &ctx.stream;
         let z = |n: usize| GpuBuffer::zeros(s, n.max(1));
@@ -469,7 +449,18 @@ impl Mamba2GpuTrainer {
             dx_tiles_geom(hd, ds, optin)
         };
         let unfused = |n: usize| if dx_tiles.is_some() { 1 } else { chunked(n) };
-        let seq_tiles = seq_mode && seq_bwd_tiles_smem_bytes(hd, ds) <= optin;
+        let seq_bwd = kernels.seq_bwd_route(hd, ds);
+        let (seq_ds_len, seq_leaves_len) = match seq_bwd {
+            SeqBwdRoute::Global(g) => (
+                if g.shared_ds { 1 } else { batch * nh * hd * ds },
+                if g.wide {
+                    batch * nh * 2 * hd.next_multiple_of(32)
+                } else {
+                    1
+                },
+            ),
+            _ => (1, 1),
+        };
         let acts = (0..c.n_layers)
             .map(|_| -> Result<LayerActs, String> {
                 Ok(LayerActs {
@@ -498,7 +489,13 @@ impl Mamba2GpuTrainer {
             dxbc: z(rows * cd)?,
             ds: z(chunked(per_chunk * hd * ds))?,
             rec: z(sequential(batch * nh * stride * hd * ds))?,
-            seq_scal: z(if seq_tiles { rows * nh * 3 } else { 1 })?,
+            seq_scal: z(sequential(if seq_bwd == SeqBwdRoute::Shared {
+                1
+            } else {
+                rows * nh * 3
+            }))?,
+            seq_ds: z(sequential(seq_ds_len))?,
+            seq_leaves: z(sequential(seq_leaves_len))?,
             db_h: z(sequential(rows * nh * ds))?,
             dc_h: z(sequential(rows * nh * ds))?,
             acc: z(unfused(rows * d_ssm))?,
@@ -589,7 +586,7 @@ impl Mamba2GpuTrainer {
             seq_mode,
             stride,
             dx_tiles,
-            seq_tiles,
+            seq_bwd,
         };
         trainer.refresh_mirror()?;
         Ok(trainer)
@@ -1329,14 +1326,23 @@ impl Mamba2GpuTrainer {
         if let Some(w) = lp.gate_w {
             let dw_parts = s.dw_parts.cached_ptr();
             let (eps, nbg) = (c.gated_norm_eps, i32::from(c.norm_before_gate));
+            // The group staged in shared memory when it fits, else the
+            // streamed kernel with the same bits.
+            let staged = gated_norm_bwd_smem_bytes(d_ssm, ng, hd);
+            let fits = staged <= self.kernels.smem_optin;
             let cfg = LaunchConfig {
                 grid_dim: (rows as u32, ng as u32, 1),
                 block_dim: (128, 1, 1),
-                shared_mem_bytes: gated_norm_bwd_smem_bytes(d_ssm, ng, hd) as u32,
+                shared_mem_bytes: if fits { staged } else { 128 * 4 } as u32,
+            };
+            let kernel = if fits {
+                &k.gated_norm
+            } else {
+                &k.gated_norm_stream
             };
             let d_ssm_i = d_ssm as i32;
             go!(
-                k.gated_norm.get(act),
+                kernel.get(act),
                 cfg,
                 "gated norm",
                 [
@@ -1599,7 +1605,6 @@ impl Mamba2GpuTrainer {
                 );
             }
         } else {
-            let threads = hd.next_multiple_of(32);
             let (db_h, dc_h, rec, ckpt) = (
                 s.db_h.cached_ptr(),
                 s.dc_h.cached_ptr(),
@@ -1612,8 +1617,8 @@ impl Mamba2GpuTrainer {
             let limited = i32::from(c.dt_limit != (0.0, f32::INFINITY));
             let flags: i32 = i32::from(c.d_has_hdim) | (limited << 2);
             let (stride_i, cd_i) = (self.stride as i32, cd as i32);
-            if self.seq_tiles {
-                let scal = s.seq_scal.cached_ptr();
+            let scal = s.seq_scal.cached_ptr();
+            if self.seq_bwd != SeqBwdRoute::Shared {
                 go!(
                     k.seq_scalars.get(act),
                     grid_1d(rows * nh),
@@ -1623,84 +1628,135 @@ impl Mamba2GpuTrainer {
                         ds_i, cd_i, flags, lo, hi
                     ]
                 );
-                let cfg = LaunchConfig {
-                    grid_dim: (b as u32, nh as u32, 1),
-                    block_dim: (seq_bwd_tiles_threads(hd) as u32, 1, 1),
-                    shared_mem_bytes: seq_bwd_tiles_smem_bytes(hd, ds) as u32,
-                };
-                go!(
-                    k.seq_bwd_tiles.get(act),
-                    cfg,
-                    "sequential scan",
-                    [
-                        dxbc,
-                        d_proj,
-                        ld_proj,
-                        dt_off,
-                        db_h,
-                        dc_h,
-                        da_parts,
-                        dbias_parts,
-                        rec,
-                        dy,
-                        xbc,
-                        proj,
-                        ckpt,
-                        scal,
-                        dt_bias,
-                        a_neg,
-                        d,
-                        t_i,
-                        stride_i,
-                        nh_i,
-                        ng_i,
-                        hd_i,
-                        ds_i,
-                        cd_i,
-                        flags,
-                        lo,
-                        hi
-                    ]
-                );
-            } else {
-                let cfg = LaunchConfig {
-                    grid_dim: (b as u32, nh as u32, 1),
-                    block_dim: (threads as u32, 1, 1),
-                    shared_mem_bytes: seq_bwd_smem_bytes(hd, ds, threads) as u32,
-                };
-                go!(
-                    k.seq_bwd.get(act),
-                    cfg,
-                    "sequential scan",
-                    [
-                        dxbc,
-                        d_proj,
-                        ld_proj,
-                        dt_off,
-                        db_h,
-                        dc_h,
-                        da_parts,
-                        dbias_parts,
-                        rec,
-                        dy,
-                        xbc,
-                        proj,
-                        ckpt,
-                        dt_bias,
-                        a_neg,
-                        d,
-                        t_i,
-                        stride_i,
-                        nh_i,
-                        ng_i,
-                        hd_i,
-                        ds_i,
-                        cd_i,
-                        flags,
-                        lo,
-                        hi
-                    ]
-                );
+            }
+            let block = |threads: usize, smem: usize| LaunchConfig {
+                grid_dim: (b as u32, nh as u32, 1),
+                block_dim: (threads as u32, 1, 1),
+                shared_mem_bytes: smem as u32,
+            };
+            match self.seq_bwd {
+                SeqBwdRoute::Tiles => {
+                    go!(
+                        k.seq_bwd_tiles.get(act),
+                        block(seq_bwd_tiles_threads(hd), seq_bwd_tiles_smem_bytes(hd, ds)),
+                        "sequential scan",
+                        [
+                            dxbc,
+                            d_proj,
+                            ld_proj,
+                            dt_off,
+                            db_h,
+                            dc_h,
+                            da_parts,
+                            dbias_parts,
+                            rec,
+                            dy,
+                            xbc,
+                            proj,
+                            ckpt,
+                            scal,
+                            dt_bias,
+                            a_neg,
+                            d,
+                            t_i,
+                            stride_i,
+                            nh_i,
+                            ng_i,
+                            hd_i,
+                            ds_i,
+                            cd_i,
+                            flags,
+                            lo,
+                            hi
+                        ]
+                    );
+                }
+                SeqBwdRoute::Shared => {
+                    let threads = hd.next_multiple_of(32);
+                    go!(
+                        k.seq_bwd.get(act),
+                        block(threads, seq_bwd_smem_bytes(hd, ds, threads)),
+                        "sequential scan",
+                        [
+                            dxbc,
+                            d_proj,
+                            ld_proj,
+                            dt_off,
+                            db_h,
+                            dc_h,
+                            da_parts,
+                            dbias_parts,
+                            rec,
+                            dy,
+                            xbc,
+                            proj,
+                            ckpt,
+                            dt_bias,
+                            a_neg,
+                            d,
+                            t_i,
+                            stride_i,
+                            nh_i,
+                            ng_i,
+                            hd_i,
+                            ds_i,
+                            cd_i,
+                            flags,
+                            lo,
+                            hi
+                        ]
+                    );
+                }
+                SeqBwdRoute::Global(geom) => {
+                    // A null scratch tells the kernel dS sits in shared
+                    // memory, or that the head fits the block.
+                    let ds_glob = if geom.shared_ds {
+                        0u64
+                    } else {
+                        s.seq_ds.cached_ptr()
+                    };
+                    let leaves = if geom.wide {
+                        s.seq_leaves.cached_ptr()
+                    } else {
+                        0u64
+                    };
+                    go!(
+                        k.seq_bwd_global.get(act),
+                        block(geom.threads, geom.smem),
+                        "sequential scan",
+                        [
+                            dxbc,
+                            d_proj,
+                            ld_proj,
+                            dt_off,
+                            db_h,
+                            dc_h,
+                            da_parts,
+                            dbias_parts,
+                            rec,
+                            ds_glob,
+                            leaves,
+                            dy,
+                            xbc,
+                            proj,
+                            ckpt,
+                            scal,
+                            dt_bias,
+                            a_neg,
+                            d,
+                            t_i,
+                            stride_i,
+                            nh_i,
+                            ng_i,
+                            hd_i,
+                            ds_i,
+                            cd_i,
+                            flags,
+                            lo,
+                            hi
+                        ]
+                    );
+                }
             }
             let n = rows * ng * ds * 2;
             go!(
@@ -1753,10 +1809,16 @@ impl Mamba2GpuTrainer {
             let g_b = opt_at(g_base, ls.conv_b).unwrap_or(0);
             // 32 channels a block with a warp per tap and one for the bias,
             // 128 rows of dv and the inputs (plus the d_conv - 1 rows before)
-            // staged at a time.
+            // staged at a time. Past 31 taps the taps spread over blocks of
+            // 32 warps, each staging the same rows.
+            let warps = (c.d_conv + 1).min(32);
             let dw_cfg = LaunchConfig {
-                grid_dim: (cd.div_ceil(32) as u32, 1, 1),
-                block_dim: (32, (c.d_conv + 1) as u32, 1),
+                grid_dim: (
+                    cd.div_ceil(32) as u32,
+                    (c.d_conv + 1).div_ceil(warps) as u32,
+                    1,
+                ),
+                block_dim: (32, warps as u32, 1),
                 shared_mem_bytes: ((128 + 128 + c.d_conv - 1) * 32 * 4) as u32,
             };
             go!(

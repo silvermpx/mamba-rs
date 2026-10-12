@@ -1307,6 +1307,169 @@ DEFINE_M2B_GATED_NORM(m2b_gated_norm, float)
 DEFINE_M2B_GATED_NORM(m2b_gated_norm_bf16, __nv_bfloat16)
 DEFINE_M2B_GATED_NORM(m2b_gated_norm_f16, __half)
 
+// The gated norm backward of a group too wide to stage: the staged
+// kernel's sums in its order, every u and gw read again from global memory
+// and recomputed with its expressions where the staged kernel keeps them in
+// shared memory, so every output carries its bits. A pass of the per-head
+// sums takes one head a thread into `head_sum` (blockDim floats), and
+// thread 0 adds the pass to the running total heads ascending. Grid
+// (rows, ngroups), dynamic shared memory one float per thread.
+template <typename T>
+__device__ __forceinline__ float m2bs_u(
+    const float* __restrict__ y, const T* __restrict__ proj, long long r,
+    int d_ssm, long long ld_proj, int z_off, long long i, int norm_before_gate
+) {
+    const float yv = y[r * d_ssm + i];
+    const float zv = to_f(proj[r * ld_proj + z_off + i]);
+    return norm_before_gate ? yv : __fmul_rn(yv, m2_silu(zv));
+}
+
+template <typename T>
+__device__ __forceinline__ float m2bs_gw(
+    const T* __restrict__ dout, long long ld_out, int out_col,
+    const T* __restrict__ proj, long long ld_proj, int z_off,
+    const float* __restrict__ w, long long r, long long i, int norm_before_gate
+) {
+    const float d = to_f(dout[r * ld_out + out_col + i]);
+    float d1 = d;
+    if (norm_before_gate) d1 = __fmul_rn(d, m2_silu(to_f(proj[r * ld_proj + z_off + i])));
+    return __fmul_rn(w[i], d1);
+}
+
+template <typename T>
+__device__ __forceinline__ void m2b_gated_norm_stream_body(
+    float* __restrict__ dy,
+    T* __restrict__ d_proj, long long ld_proj, int z_off,
+    float* __restrict__ dw_parts,
+    const T* __restrict__ dout, long long ld_out, int out_col,
+    const float* __restrict__ y,
+    const T* __restrict__ proj,
+    const float* __restrict__ w,
+    long long rows, int d_ssm, int ng, int hd, float eps, int norm_before_gate
+) {
+    extern __shared__ float head_sum[];
+    __shared__ float scal[3];
+    const long long r = blockIdx.x;
+    const int g = blockIdx.y;
+    if (r >= rows || g >= ng) return;
+    const int gs = d_ssm / ng;
+    const int heads = gs / hd;
+    const long long c0 = (long long)g * gs;
+    if (threadIdx.x == 0) scal[2] = 0.0f;
+    for (int h0 = 0; h0 < heads; h0 += blockDim.x) {
+        const int hh = h0 + threadIdx.x;
+        if (hh < heads) {
+            float s = 0.0f;
+            for (int p = 0; p < hd; p++) {
+                const float v = m2bs_u(y, proj, r, d_ssm, ld_proj, z_off,
+                                       c0 + (long long)hh * hd + p, norm_before_gate);
+                s = __fmaf_rn(v, v, s);
+            }
+            head_sum[threadIdx.x] = s;
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float tot = scal[2];
+            const int n = min((int)blockDim.x, heads - h0);
+            for (int k = 0; k < n; k++) tot = __fadd_rn(tot, head_sum[k]);
+            scal[2] = tot;
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        float rs = __fdiv_rn(1.0f, sqrtf(__fadd_rn(__fdiv_rn(scal[2], (float)gs), eps)));
+        scal[0] = isfinite(rs) ? rs : 0.0f;
+        scal[2] = 0.0f;
+    }
+    __syncthreads();
+    const float rs = scal[0];
+    for (int i = threadIdx.x; i < gs; i += blockDim.x) {
+        const long long ci = c0 + i;
+        const float d = to_f(dout[r * ld_out + out_col + ci]);
+        const float wv = w[ci];
+        const float xh = __fmul_rn(
+            m2bs_u(y, proj, r, d_ssm, ld_proj, z_off, ci, norm_before_gate), rs);
+        float d1 = d;
+        if (norm_before_gate) {
+            const float zv = to_f(proj[r * ld_proj + z_off + ci]);
+            d1 = __fmul_rn(d, m2_silu(zv));
+            m2b_put(&d_proj[r * ld_proj + z_off + ci],
+                    __fmul_rn(__fmul_rn(d, __fmul_rn(xh, wv)), m2b_silu_grad(zv)));
+        }
+        dw_parts[r * d_ssm + ci] = __fmul_rn(d1, xh);
+    }
+    for (int h0 = 0; h0 < heads; h0 += blockDim.x) {
+        const int hh = h0 + threadIdx.x;
+        if (hh < heads) {
+            float s = 0.0f;
+            for (int p = 0; p < hd; p++) {
+                const long long ci = c0 + (long long)hh * hd + p;
+                const float u = m2bs_u(y, proj, r, d_ssm, ld_proj, z_off, ci, norm_before_gate);
+                const float gw = m2bs_gw(dout, ld_out, out_col, proj, ld_proj, z_off, w, r,
+                                         ci, norm_before_gate);
+                s = __fmaf_rn(__fmul_rn(u, rs), gw, s);
+            }
+            head_sum[threadIdx.x] = s;
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float tot = scal[2];
+            const int n = min((int)blockDim.x, heads - h0);
+            for (int k = 0; k < n; k++) tot = __fadd_rn(tot, head_sum[k]);
+            scal[2] = tot;
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) scal[1] = __fdiv_rn(scal[2], (float)gs);
+    __syncthreads();
+    const float c1 = scal[1];
+    for (int i = threadIdx.x; i < gs; i += blockDim.x) {
+        const long long ci = c0 + i;
+        const float xh = __fmul_rn(
+            m2bs_u(y, proj, r, d_ssm, ld_proj, z_off, ci, norm_before_gate), rs);
+        const float gw = m2bs_gw(dout, ld_out, out_col, proj, ld_proj, z_off, w, r, ci,
+                                 norm_before_gate);
+        const float du = __fmul_rn(rs, __fsub_rn(gw, __fmul_rn(xh, c1)));
+        if (norm_before_gate) {
+            dy[r * d_ssm + ci] = du;
+        } else {
+            const float yv = y[r * d_ssm + ci];
+            const float zv = to_f(proj[r * ld_proj + z_off + ci]);
+            dy[r * d_ssm + ci] = __fmul_rn(du, m2_silu(zv));
+            m2b_put(&d_proj[r * ld_proj + z_off + ci],
+                    __fmul_rn(__fmul_rn(du, yv), m2b_silu_grad(zv)));
+        }
+    }
+}
+
+#define DEFINE_M2B_GATED_NORM_STREAM(NAME, T)                                   \
+extern "C" __global__ void NAME(                                                \
+    float* __restrict__ dy,                                                     \
+    T* __restrict__ d_proj,                                                     \
+    long long ld_proj,                                                          \
+    int z_off,                                                                  \
+    float* __restrict__ dw_parts,                                               \
+    const T* __restrict__ dout,                                                 \
+    long long ld_out,                                                           \
+    int out_col,                                                                \
+    const float* __restrict__ y,                                                \
+    const T* __restrict__ proj,                                                 \
+    const float* __restrict__ w,                                                \
+    long long rows,                                                             \
+    int d_ssm,                                                                  \
+    int ng,                                                                     \
+    int hd,                                                                     \
+    float eps,                                                                  \
+    int norm_before_gate                                                        \
+) {                                                                             \
+    m2b_gated_norm_stream_body<T>(dy, d_proj, ld_proj, z_off, dw_parts, dout,   \
+        ld_out, out_col, y, proj, w, rows, d_ssm, ng, hd, eps,                  \
+        norm_before_gate);                                                      \
+}
+DEFINE_M2B_GATED_NORM_STREAM(m2b_gated_norm_stream, float)
+DEFINE_M2B_GATED_NORM_STREAM(m2b_gated_norm_stream_bf16, __nv_bfloat16)
+DEFINE_M2B_GATED_NORM_STREAM(m2b_gated_norm_stream_f16, __half)
+
 // The gate without a norm: out = y silu(z). Grid 1-D over rows * d_ssm.
 template <typename T>
 __device__ __forceinline__ void m2b_gate_only_body(
@@ -1490,8 +1653,10 @@ DEFINE_M2B_CONV_DX(m2b_conv_dx_f16, __half)
 // tiles of M2B_DW_ROWS through shared memory: dv [rows][32] and the conv
 // inputs [rows + d_conv - 1][32] from the row d_conv - 1 before the tile
 // (a token's taps inside its sequence are those rows; the taps before a
-// sequence's first token come from state0). Grid ceil(conv_dim / 32),
-// block (32, d_conv + 1); `g_b` may be null.
+// sequence's first token come from state0). Grid (ceil(conv_dim / 32),
+// ceil((d_conv + 1) / warps)), block (32, warps) with warps at most 32:
+// a block takes the taps blockIdx.y * warps onward and stages the same
+// rows as the others. `g_b` may be null.
 #define M2B_DW_ROWS 128
 template <typename T>
 __device__ __forceinline__ void m2b_conv_dw_body(
@@ -1507,11 +1672,11 @@ __device__ __forceinline__ void m2b_conv_dw_body(
     float* dvs = m2bc_sm;                    // [M2B_DW_ROWS][CH]
     float* xs = dvs + M2B_DW_ROWS * CH;      // [M2B_DW_ROWS + halo][CH]
     const int c0 = blockIdx.x * CH;
-    const int lane = threadIdx.x, k = threadIdx.y;
+    const int lane = threadIdx.x, k = blockIdx.y * blockDim.y + threadIdx.y;
     const int c = c0 + lane;
     const int tid = threadIdx.y * CH + lane, nthr = CH * blockDim.y;
     const long long rows = (long long)batch * seq;
-    const bool live = c < conv_dim && (k < d_conv || g_b != nullptr);
+    const bool live = c < conv_dim && (k < d_conv || (k == d_conv && g_b != nullptr));
     float acc = 0.0f;
     long long b = 0;
     int t = 0;
@@ -2232,6 +2397,333 @@ extern "C" __global__ void NAME(                                                
 DEFINE_M2S_BWD_TILES(m2s_bwd_tiles, float)
 DEFINE_M2S_BWD_TILES(m2s_bwd_tiles_bf16, __nv_bfloat16)
 DEFINE_M2S_BWD_TILES(m2s_bwd_tiles_f16, __half)
+
+// One token of the replay over the whole block: h[p][n] = e^acs h_prev[p][n]
+// + B[n] (x[p] e^0 dt), m2_row_step's update, four elements a step when
+// `vec` (dense rows on 16 bytes). A thread takes the same elements at every
+// token, so it reads only what it wrote the token before.
+template <typename T>
+__device__ __forceinline__ void m2sg_replay(
+    float* __restrict__ dst, const float* __restrict__ src,
+    const T* __restrict__ xh, const T* __restrict__ bv,
+    float eacs, float xs, int hd, int ds, bool vec
+) {
+    const int tid = threadIdx.x, nt = blockDim.x;
+    const long long pn = (long long)hd * ds;
+    const int w = vec ? 4 : 1;
+    int p = w * tid / ds, n = w * tid - (w * tid / ds) * ds;
+    const int dp = w * nt / ds, dn = w * nt - (w * nt / ds) * ds;
+    if (vec) {
+        for (long long e = 4LL * tid; e < pn; e += 4LL * nt) {
+            const float xw = __fmul_rn(to_f(xh[p]), xs);
+            const float4 s = *reinterpret_cast<const float4*>(src + e);
+            float4 o;
+            o.x = __fmaf_rn(eacs, s.x, __fmaf_rn(to_f(bv[n]), xw, 0.0f));
+            o.y = __fmaf_rn(eacs, s.y, __fmaf_rn(to_f(bv[n + 1]), xw, 0.0f));
+            o.z = __fmaf_rn(eacs, s.z, __fmaf_rn(to_f(bv[n + 2]), xw, 0.0f));
+            o.w = __fmaf_rn(eacs, s.w, __fmaf_rn(to_f(bv[n + 3]), xw, 0.0f));
+            *reinterpret_cast<float4*>(dst + e) = o;
+            p += dp;
+            n += dn;
+            if (n >= ds) {
+                n -= ds;
+                p++;
+            }
+        }
+    } else {
+        for (long long e = tid; e < pn; e += nt) {
+            const float xw = __fmul_rn(to_f(xh[p]), xs);
+            dst[e] = __fmaf_rn(eacs, src[e], __fmaf_rn(to_f(bv[n]), xw, 0.0f));
+            p += dp;
+            n += dn;
+            if (n >= ds) {
+                n -= ds;
+                p++;
+            }
+        }
+    }
+}
+
+// dS[p][n] = dy[p] C[n] + dS[p][n] over the whole block, dS first scaled by
+// the alpha of the token after this one when `scale` (every token but the
+// window's last), rounded before the fma as m2s_bwd rounds it into dS. Rows
+// `ld` apart, four elements a step when `vec` (dense rows on 16 bytes).
+__device__ __forceinline__ void m2sg_ds_update(
+    float* __restrict__ dsr, int ld, const float* __restrict__ dyh,
+    const float* __restrict__ c_sm, float alpha, bool scale, int hd, int ds, bool vec
+) {
+    const int tid = threadIdx.x, nt = blockDim.x;
+    const long long pn = (long long)hd * ds;
+    const int w = vec ? 4 : 1;
+    int p = w * tid / ds, n = w * tid - (w * tid / ds) * ds;
+    const int dp = w * nt / ds, dn = w * nt - (w * nt / ds) * ds;
+    if (vec) {
+        for (long long e = 4LL * tid; e < pn; e += 4LL * nt) {
+            float4 v = *reinterpret_cast<const float4*>(dsr + e);
+            if (scale) {
+                v.x = __fmul_rn(alpha, v.x);
+                v.y = __fmul_rn(alpha, v.y);
+                v.z = __fmul_rn(alpha, v.z);
+                v.w = __fmul_rn(alpha, v.w);
+            }
+            const float y = dyh[p];
+            v.x = __fmaf_rn(y, c_sm[n], v.x);
+            v.y = __fmaf_rn(y, c_sm[n + 1], v.y);
+            v.z = __fmaf_rn(y, c_sm[n + 2], v.z);
+            v.w = __fmaf_rn(y, c_sm[n + 3], v.w);
+            *reinterpret_cast<float4*>(dsr + e) = v;
+            p += dp;
+            n += dn;
+            if (n >= ds) {
+                n -= ds;
+                p++;
+            }
+        }
+    } else {
+        for (long long e = tid; e < pn; e += nt) {
+            float* d = dsr + (long long)p * ld + n;
+            const float v = scale ? __fmul_rn(alpha, *d) : *d;
+            *d = __fmaf_rn(dyh[p], c_sm[n], v);
+            p += dp;
+            n += dn;
+            if (n >= ds) {
+                n -= ds;
+                p++;
+            }
+        }
+    }
+}
+
+// m2s_bwd for a head whose state tiles do not fit shared memory. The
+// replayed states stay in the tape, and dS stays in shared memory when its
+// rows fit there (padded by one), else in a global scratch [B, H, P, N].
+// The replay runs element by element over the whole block. The walk back
+// spreads the dS update over the whole block, puts a state index's dC or
+// dB chain on a thread and a channel's two row chains on a thread, and
+// leaves the scaling of dS by alpha to the next token's update. A head
+// wider than the block (blockDim a power of two then) gives each thread
+// the channels p, p + blockDim and so on: the leaves of the two block sums
+// past a thread's first go to a global scratch [B, H, 2, lanes], and the
+// levels of the tree at or above the block width, which pair positions of
+// one thread only, run in that thread before the levels in shared memory.
+// Every chain and both trees are m2s_bwd's, so the bits are its own.
+// Dynamic shared memory: 2 N + 2 K floats, plus P (N + 1) with dS there
+// (lanes = P rounded up to a warp, K = lanes, or blockDim for a wider head).
+template <typename T>
+__device__ __forceinline__ void m2s_bwd_global_body(
+    float* __restrict__ dxbc,
+    T* __restrict__ d_proj, long long ld_proj, int dt_off,
+    float* __restrict__ db_h, float* __restrict__ dc_h,
+    float* __restrict__ da_parts, float* __restrict__ dbias_parts,
+    float* __restrict__ rec, float* __restrict__ ds_glob, float* __restrict__ leaves,
+    const float* __restrict__ dy,
+    const T* __restrict__ xbc, const T* __restrict__ proj,
+    const float* __restrict__ ckpt, const float* __restrict__ scal3,
+    const float* __restrict__ dt_bias, const float* __restrict__ a_neg,
+    const float* __restrict__ D,
+    int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,
+    int flags, float dt_min, float dt_max
+) {
+    extern __shared__ float m2sb_sm[];
+    const int b = blockIdx.x;
+    const int h = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int nt = blockDim.x;
+    const int g = h / (nh / ng);
+    const long long d_ssm = (long long)nh * hd;
+    const long long bh = (long long)b * nh + h;
+    const int nseg = (seq + stride - 1) / stride;
+    const long long pn = (long long)hd * ds;
+    const int lanes = (hd + 31) & ~31;
+    const int kl = lanes <= nt ? lanes : nt;
+    const bool shared_ds = ds_glob == nullptr;
+    const int ld = shared_ds ? ds + 1 : ds;
+    float* dsr = shared_ds ? m2sb_sm : ds_glob + bh * pn;
+    float* b_sm = shared_ds ? m2sb_sm + hd * (ds + 1) : m2sb_sm;
+    float* c_sm = b_sm + ds;
+    float* red = c_sm + ds;
+    float* gl = leaves == nullptr ? nullptr : leaves + bh * 2 * lanes;
+    float* tape = rec + bh * stride * pn;
+    const unsigned long long bases = reinterpret_cast<unsigned long long>(rec)
+        | reinterpret_cast<unsigned long long>(ckpt)
+        | (shared_ds ? 0ULL : reinterpret_cast<unsigned long long>(ds_glob));
+    const bool vec = (ds & 3) == 0 && (bases & 15) == 0;
+    if (shared_ds) {
+        for (int e = tid; e < hd * ld; e += nt) dsr[e] = 0.0f;
+    } else {
+        for (long long e = tid; e < pn; e += nt) dsr[e] = 0.0f;
+    }
+    __syncthreads();
+    float da_acc = 0.0f, dbias_acc = 0.0f;
+    float alpha_next = 1.0f;
+    bool scale = false;
+    for (int seg = nseg - 1; seg >= 0; seg--) {
+        const int t0 = seg * stride;
+        const int t1 = min(t0 + stride, seq);
+        const float* ck = ckpt + (((long long)b * nseg + seg) * nh + h) * pn;
+        for (int t = t0; t < t1; t++) {
+            const long long row = (long long)b * seq + t;
+            const long long xrow = row * conv_dim;
+            const float* sc = scal3 + (row * nh + h) * 3;
+            const float* src = t > t0 ? tape + (long long)(t - 1 - t0) * pn : ck;
+            m2sg_replay(tape + (long long)(t - t0) * pn, src, xbc + xrow + (long long)h * hd,
+                        xbc + xrow + d_ssm + (long long)g * ds, sc[0], sc[2], hd, ds, vec);
+        }
+        __syncthreads();
+        for (int t = t1 - 1; t >= t0; t--) {
+            const long long row = (long long)b * seq + t;
+            const long long xrow = row * conv_dim;
+            const int slot = t - t0;
+            const float* h_cur = tape + (long long)slot * pn;
+            const float* h_prev = slot > 0 ? tape + (long long)(slot - 1) * pn : ck;
+            for (int n = tid; n < ds; n += nt) {
+                b_sm[n] = to_f(xbc[xrow + d_ssm + (long long)g * ds + n]);
+                c_sm[n] = to_f(xbc[xrow + d_ssm + (long long)(ng + g) * ds + n]);
+            }
+            const float* sc = scal3 + (row * nh + h) * 3;
+            const float alpha = sc[0], dt = sc[2];
+            const float* dyh = dy + row * d_ssm + (long long)h * hd;
+            const T* xh = xbc + xrow + (long long)h * hd;
+            __syncthreads();
+            m2sg_ds_update(dsr, ld, dyh, c_sm, alpha_next, scale, hd, ds, vec && !shared_ds);
+            __syncthreads();
+            // dC and dB per state index, the two chains of an index on two
+            // threads, p ascending.
+            for (int k = tid; k < 2 * ds; k += nt) {
+                float acc = 0.0f;
+                if (k < ds) {
+#pragma unroll 4
+                    for (int p = 0; p < hd; p++)
+                        acc = __fmaf_rn(dyh[p], h_cur[(long long)p * ds + k], acc);
+                    dc_h[(row * nh + h) * ds + k] = acc;
+                } else {
+                    const int n = k - ds;
+#pragma unroll 4
+                    for (int p = 0; p < hd; p++)
+                        acc = __fmaf_rn(dsr[(long long)p * ld + n], to_f(xh[p]), acc);
+                    db_h[(row * nh + h) * ds + n] = __fmul_rn(acc, dt);
+                }
+            }
+            // Per channel the dt chain (sx = dS . B) and the alpha chain
+            // (dS . the state before the token), n ascending, and the
+            // channel's dx. The positions from P up to the lanes keep zero
+            // leaves, as m2s_bwd's threads past the head do.
+            float ddt0 = 0.0f, dal0 = 0.0f;
+            for (int p = tid; p < lanes; p += nt) {
+                float ddt_loc = 0.0f, dal_loc = 0.0f;
+                if (p < hd) {
+                    const float* drow = dsr + (long long)p * ld;
+                    const float* prow = h_prev + (long long)p * ds;
+                    float sx = 0.0f;
+                    int n = 0;
+                    if (vec) {
+                        for (; n + 4 <= ds; n += 4) {
+                            float dv[4];
+                            if (shared_ds) {
+#pragma unroll
+                                for (int j = 0; j < 4; j++) dv[j] = drow[n + j];
+                            } else {
+                                const float4 d4 = *reinterpret_cast<const float4*>(drow + n);
+                                dv[0] = d4.x;
+                                dv[1] = d4.y;
+                                dv[2] = d4.z;
+                                dv[3] = d4.w;
+                            }
+                            const float4 p4 = *reinterpret_cast<const float4*>(prow + n);
+                            const float pv[4] = {p4.x, p4.y, p4.z, p4.w};
+#pragma unroll
+                            for (int j = 0; j < 4; j++) {
+                                sx = __fmaf_rn(dv[j], b_sm[n + j], sx);
+                                dal_loc = __fmaf_rn(dv[j], pv[j], dal_loc);
+                            }
+                        }
+                    }
+                    for (; n < ds; n++) {
+                        const float dsv = drow[n];
+                        sx = __fmaf_rn(dsv, b_sm[n], sx);
+                        dal_loc = __fmaf_rn(dsv, prow[n], dal_loc);
+                    }
+                    const float dval =
+                        (flags & M2_FLAG_D_PER_CHANNEL) ? D[(long long)h * hd + p] : D[h];
+                    dxbc[xrow + (long long)h * hd + p] =
+                        __fmaf_rn(dt, sx, __fmul_rn(dval, dyh[p]));
+                    ddt_loc = __fmul_rn(to_f(xh[p]), sx);
+                }
+                if (p == tid) {
+                    ddt0 = ddt_loc;
+                    dal0 = dal_loc;
+                } else {
+                    gl[p] = ddt_loc;
+                    gl[lanes + p] = dal_loc;
+                }
+            }
+            // The tree's levels at or above the block width, on this
+            // thread's own positions: position i + w is i's own when w is a
+            // multiple of the block width.
+            if (lanes > nt) {
+                int width = 1;
+                while (width < lanes) width <<= 1;
+                for (int w = width >> 1; w >= nt; w >>= 1) {
+                    if (tid + w < lanes) {
+                        ddt0 = __fadd_rn(ddt0, gl[tid + w]);
+                        dal0 = __fadd_rn(dal0, gl[lanes + tid + w]);
+                    }
+                    for (int i = tid + nt; i < w; i += nt) {
+                        if (i + w < lanes) {
+                            gl[i] = __fadd_rn(gl[i], gl[i + w]);
+                            gl[lanes + i] = __fadd_rn(gl[lanes + i], gl[lanes + i + w]);
+                        }
+                    }
+                }
+            }
+            const float2 sums = m2s_block_sum2(ddt0, dal0, red, kl);
+            if (tid == 0) {
+                const float ddt_x = sums.x, dalpha = sums.y;
+                const float da = __fmul_rn(dalpha, alpha);
+                float ddt = __fmaf_rn(da, a_neg[h], ddt_x);
+                da_acc = __fmaf_rn(da, dt, da_acc);
+                const float v = __fadd_rn(to_f(proj[row * ld_proj + dt_off + h]), dt_bias[h]);
+                if (flags & M2_FLAG_DT_LIMIT) {
+                    const float sp = m2_softplus(v);
+                    if (sp < dt_min || sp > dt_max) ddt = 0.0f;
+                }
+                const float draw = v > 20.0f ? ddt : __fmul_rn(ddt, m2b_sigmoid(v));
+                m2b_put(&d_proj[row * ld_proj + dt_off + h], draw);
+                dbias_acc = __fadd_rn(dbias_acc, draw);
+            }
+            alpha_next = alpha;
+            scale = true;
+        }
+    }
+    if (tid == 0) {
+        da_parts[bh] = da_acc;
+        dbias_parts[bh] = dbias_acc;
+    }
+}
+
+#define DEFINE_M2S_BWD_GLOBAL(NAME, T)                                          \
+extern "C" __global__ void NAME(                                                \
+    float* __restrict__ dxbc,                                                   \
+    T* __restrict__ d_proj, long long ld_proj, int dt_off,                      \
+    float* __restrict__ db_h, float* __restrict__ dc_h,                         \
+    float* __restrict__ da_parts, float* __restrict__ dbias_parts,              \
+    float* __restrict__ rec, float* __restrict__ ds_glob,                       \
+    float* __restrict__ leaves,                                                 \
+    const float* __restrict__ dy,                                               \
+    const T* __restrict__ xbc, const T* __restrict__ proj,                      \
+    const float* __restrict__ ckpt, const float* __restrict__ scal3,            \
+    const float* __restrict__ dt_bias, const float* __restrict__ a_neg,         \
+    const float* __restrict__ D,                                                \
+    int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,          \
+    int flags, float dt_min, float dt_max                                       \
+) {                                                                             \
+    m2s_bwd_global_body<T>(dxbc, d_proj, ld_proj, dt_off, db_h, dc_h, da_parts, \
+        dbias_parts, rec, ds_glob, leaves, dy, xbc, proj, ckpt, scal3, dt_bias, \
+        a_neg, D, seq, stride, nh, ng, hd, ds, conv_dim, flags, dt_min, dt_max); \
+}
+DEFINE_M2S_BWD_GLOBAL(m2s_bwd_global, float)
+DEFINE_M2S_BWD_GLOBAL(m2s_bwd_global_bf16, __nv_bfloat16)
+DEFINE_M2S_BWD_GLOBAL(m2s_bwd_global_f16, __half)
 
 // out[j] += sum_r parts[r][j] over `rows` rows of `dim` columns: the
 // shared reduce_sum_axis0's per-thread strided sums and halving tree, so

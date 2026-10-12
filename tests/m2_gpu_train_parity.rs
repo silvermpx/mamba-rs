@@ -1,9 +1,10 @@
 //! Mamba-2 training on the GPU against the CPU trainer: the training
 //! forward's rows, every weight gradient and the input gradient over
 //! groups, per-channel D, an active dt clamp, biases, both norm orders, no
-//! norm with the inner MLP and the released head shape, on windows that
-//! end inside a chunk, in f32 and in the tf32, bf16 and f16 lanes; then
-//! AdamW steps that lower a loss in every lane.
+//! norm with the inner MLP, the released head shape, a conv of 40 taps and
+//! heads past what shared memory holds, on windows that end inside a chunk,
+//! in f32 and in the tf32, bf16 and f16 lanes. Then AdamW steps that lower a
+//! loss in every lane.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::gpu::GpuOptions;
@@ -82,6 +83,53 @@ fn cases() -> Vec<(&'static str, Mamba2Config)> {
             Mamba2Config {
                 headdim: 64,
                 d_state: 128,
+                ..base
+            },
+        ),
+        (
+            "a conv of 40 taps over two blocks",
+            Mamba2Config { d_conv: 40, ..base },
+        ),
+        (
+            "a head past the chunk state's tile",
+            Mamba2Config {
+                d_model: 384,
+                headdim: 384,
+                d_state: 128,
+                ..base
+            },
+        ),
+    ]
+}
+
+/// Heads the sequential backward serves from the replay tape: dS of the
+/// head in shared memory, and heads wider than the block.
+fn tape_heads() -> Vec<(&'static str, Mamba2Config)> {
+    let base = cases()[0].1;
+    vec![
+        (
+            "dS of a 128 by 128 head in shared memory",
+            Mamba2Config {
+                d_model: 128,
+                headdim: 128,
+                d_state: 128,
+                ..base
+            },
+        ),
+        (
+            "heads wider than a block",
+            // Two heads and D per channel: a per-head gradient of a head
+            // this wide is one f32 sum over every row and channel, and the
+            // draw can cancel it to a small fraction of its terms (dt_bias
+            // and D did here, past the tolerance on the chunked path too).
+            // A second head and D per channel keep each compared tensor
+            // from resting on one such sum.
+            Mamba2Config {
+                d_model: 640,
+                expand: 4,
+                headdim: 1280,
+                d_state: 16,
+                d_has_hdim: true,
                 ..base
             },
         ),
@@ -457,7 +505,8 @@ fn m2_gpu_train_half_lanes_lower_a_loss() {
 }
 
 /// The sequential path (ScanMode::Sequential: the recurrence replayed
-/// segment by segment) against the CPU trainer, in every lane; a repeated
+/// segment by segment) against the CPU trainer, in every lane, over every
+/// case and the heads whose backward reads the replay tape. A repeated
 /// backward gives the same bits.
 #[test]
 fn m2_gpu_train_sequential_matches_the_cpu_trainer() {
@@ -470,7 +519,7 @@ fn m2_gpu_train_sequential_matches_the_cpu_trainer() {
         (WeightDtype::F16, 5e-3, 5e-2),
         (WeightDtype::Bf16, 3e-2, 2e-1),
     ] {
-        for (label, base) in cases() {
+        for (label, base) in cases().into_iter().chain(tape_heads()) {
             let cfg = Mamba2Config {
                 scan_mode: ScanMode::Sequential,
                 ..base

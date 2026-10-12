@@ -17,7 +17,7 @@ use cudarc::driver::LaunchConfig;
 
 use super::kernels::{
     CHUNK, CHUNK_SCAN_TT, Mamba2Kernels, bmm_smem_bytes, chunk_scan_tiles_smem_bytes,
-    chunk_state_geom, decode_rows, gated_norm_cfg, gated_norm_smem_bytes, step_cfg, step_rows,
+    chunk_state_geom, decode_rows, gated_norm_cfg, step_cfg, step_rows,
 };
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
@@ -164,21 +164,6 @@ pub(crate) fn check_device_envelope(
             "a scan channel of {ds} states does not fit this GPU's {optin} bytes of shared memory"
         ));
     }
-    if cfg.rmsnorm && gated_norm_smem_bytes(cfg.ssm_dim(), ng, hd) > optin {
-        return Err(format!(
-            "a gated-norm group of {} channels needs {} bytes of shared memory; this GPU serves \
-             {optin}",
-            cfg.ssm_dim() / ng,
-            gated_norm_smem_bytes(cfg.ssm_dim(), ng, hd)
-        ));
-    }
-    let state_smem = chunk_state_geom(hd, ds).1;
-    if state_smem > optin {
-        return Err(format!(
-            "a chunk state of {hd} channels needs {state_smem} bytes of shared memory; this GPU \
-             serves {optin}"
-        ));
-    }
     let grid_limit = 65_535usize;
     if nh > grid_limit || ng > grid_limit || (hd * ds).div_ceil(256) > grid_limit {
         return Err(format!(
@@ -269,7 +254,13 @@ impl M2Exec<'_> {
         if let Some(w) = lw.gate_w {
             let eps = c.gated_norm_eps;
             let nbg = i32::from(c.norm_before_gate);
-            let mut bld = stream.launch_builder(self.kernels.gated_norm_fwd.get(self.act));
+            let (staged, norm_cfg) = gated_norm_cfg(rows, (d_ssm, ng, hd), self.kernels.smem_optin);
+            let kernel = if staged {
+                &self.kernels.gated_norm_fwd
+            } else {
+                &self.kernels.gated_norm_fwd_stream
+            };
+            let mut bld = stream.launch_builder(kernel.get(self.act));
             bld.arg(&gated);
             bld.arg(&ld_out);
             bld.arg(&out_col);
@@ -284,8 +275,7 @@ impl M2Exec<'_> {
             bld.arg(&hd_i);
             bld.arg(&eps);
             bld.arg(&nbg);
-            unsafe { bld.launch(gated_norm_cfg(rows, d_ssm, ng, hd)) }
-                .map_err(|e| format!("Mamba-2 gated norm: {e:?}"))?;
+            unsafe { bld.launch(norm_cfg) }.map_err(|e| format!("Mamba-2 gated norm: {e:?}"))?;
         } else {
             let mut bld = stream.launch_builder(self.kernels.gate_only_fwd.get(self.act));
             bld.arg(&gated);
@@ -523,10 +513,11 @@ impl M2Exec<'_> {
             bld.arg(&ds_i);
             bld.launch(g).map(|_| ())
         })?;
-        let (state_cols, state_smem) = chunk_state_geom(hd, ds);
+        let (state_cols, state_pt, state_smem) = chunk_state_geom(hd, ds, self.kernels.smem_optin);
+        let pt_i = state_pt as i32;
         let state_cfg = LaunchConfig {
             grid_dim: ((b * nc) as u32, nh as u32, ds.div_ceil(state_cols) as u32),
-            block_dim: ((32 * hd.div_ceil(4)).min(256) as u32, 1, 1),
+            block_dim: ((32 * state_pt / 4).min(256) as u32, 1, 1),
             shared_mem_bytes: state_smem as u32,
         };
         launch(state_cfg, "chunk state", l, &|g| unsafe {
@@ -543,6 +534,7 @@ impl M2Exec<'_> {
             bld.arg(&ng_i);
             bld.arg(&hd_i);
             bld.arg(&ds_i);
+            bld.arg(&pt_i);
             bld.launch(g).map(|_| ())
         })?;
         let pass_cfg = LaunchConfig {
@@ -740,12 +732,6 @@ impl Mamba2GpuEngine {
                  the CPU runs this model"
                     .into(),
             );
-        }
-        if cfg.d_conv > 8 {
-            return Err(format!(
-                "the GPU conv serves d_conv <= 8, got {}",
-                cfg.d_conv
-            ));
         }
         let act = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,

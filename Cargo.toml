@@ -630,6 +630,11 @@ name = "m1_identity_input_cpu"
 path = "tests/m1_identity_input_cpu.rs"
 
 [[test]]
+name = "m2_fallback_bits"
+path = "tests/m2_fallback_bits.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "identity_input_training"
 path = "tests/identity_input_training.rs"
 required-features = ["cuda"]

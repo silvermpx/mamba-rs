@@ -454,6 +454,75 @@ DEFINE_M2_GATED_NORM(m2_gated_norm_fwd, float, float, from_f_f32)
 DEFINE_M2_GATED_NORM(m2_gated_norm_fwd_bf16, __nv_bfloat16, __nv_bfloat16, from_f_bf16)
 DEFINE_M2_GATED_NORM(m2_gated_norm_fwd_f16, __half, __half, from_f_f16)
 
+// The gated norm of a group too wide to stage: the same sums in the same
+// order, each value read from global memory where the staged kernel reads
+// shared memory, and recomputed with its expressions. A pass takes one head
+// a thread into `head_sum` (blockDim floats), and thread 0 adds the pass's
+// sums to the group's total heads ascending, so the total, rstd and every
+// output are the staged kernel's bits. Grid (rows, ngroups), dynamic
+// shared memory one float per thread.
+#define DEFINE_M2_GATED_NORM_STREAM(NAME, TI, TO, FROM_F)                      \
+extern "C" __global__ void NAME(                                               \
+    TO* __restrict__ out, long long ld_out, int out_col,                       \
+    const float* __restrict__ y,                                               \
+    const TI* __restrict__ proj, long long ld_proj, int z_off,                 \
+    const float* __restrict__ w,                                               \
+    long long rows, int d_ssm, int ng, int hd, float eps,                      \
+    int norm_before_gate                                                       \
+) {                                                                            \
+    extern __shared__ float head_sum[];                                        \
+    const long long r = blockIdx.x;                                            \
+    const int g = blockIdx.y;                                                  \
+    if (r >= rows || g >= ng) return;                                          \
+    const int gs = d_ssm / ng;                                                 \
+    const int heads = gs / hd;                                                 \
+    const long long c0 = (long long)g * gs;                                    \
+    __shared__ float tot_sh;                                                   \
+    if (threadIdx.x == 0) tot_sh = 0.0f;                                       \
+    for (int h0 = 0; h0 < heads; h0 += blockDim.x) {                           \
+        const int hh = h0 + threadIdx.x;                                       \
+        if (hh < heads) {                                                      \
+            float s = 0.0f;                                                    \
+            for (int p = 0; p < hd; p++) {                                     \
+                const long long i = c0 + (long long)hh * hd + p;               \
+                float yv = y[r * d_ssm + i];                                   \
+                float zv = to_f(proj[r * ld_proj + z_off + i]);                \
+                float v = norm_before_gate ? yv : __fmul_rn(yv, m2_silu(zv));  \
+                s = __fmaf_rn(v, v, s);                                        \
+            }                                                                  \
+            head_sum[threadIdx.x] = s;                                         \
+        }                                                                      \
+        __syncthreads();                                                       \
+        if (threadIdx.x == 0) {                                                \
+            float tot = tot_sh;                                                \
+            const int n = min((int)blockDim.x, heads - h0);                    \
+            for (int k = 0; k < n; k++) tot = __fadd_rn(tot, head_sum[k]);     \
+            tot_sh = tot;                                                      \
+        }                                                                      \
+        __syncthreads();                                                       \
+    }                                                                          \
+    __shared__ float rstd_sh;                                                  \
+    if (threadIdx.x == 0) {                                                    \
+        float rs = __fdiv_rn(1.0f,                                             \
+            sqrtf(__fadd_rn(__fdiv_rn(tot_sh, (float)gs), eps)));              \
+        rstd_sh = isfinite(rs) ? rs : 0.0f;                                    \
+    }                                                                          \
+    __syncthreads();                                                           \
+    const float rs = rstd_sh;                                                  \
+    for (int i = threadIdx.x; i < gs; i += blockDim.x) {                       \
+        float yv = y[r * d_ssm + c0 + i];                                      \
+        float zv = to_f(proj[r * ld_proj + z_off + c0 + i]);                   \
+        float u = norm_before_gate ? yv : __fmul_rn(yv, m2_silu(zv));          \
+        float v = __fmul_rn(__fmul_rn(u, rs), w[c0 + i]);                      \
+        if (norm_before_gate) v = __fmul_rn(v, m2_silu(zv));                   \
+        out[r * ld_out + out_col + c0 + i] = FROM_F(v);                        \
+    }                                                                          \
+}
+
+DEFINE_M2_GATED_NORM_STREAM(m2_gated_norm_fwd_stream, float, float, from_f_f32)
+DEFINE_M2_GATED_NORM_STREAM(m2_gated_norm_fwd_stream_bf16, __nv_bfloat16, __nv_bfloat16, from_f_bf16)
+DEFINE_M2_GATED_NORM_STREAM(m2_gated_norm_fwd_stream_f16, __half, __half, from_f_f16)
+
 // The gate without a norm (rmsnorm off) when the scan did not apply it:
 // out = y silu(z), written at out_col. Grid 1-D over rows * d_ssm.
 #define DEFINE_M2_GATE_ONLY(NAME, TI, TO, FROM_F)                              \

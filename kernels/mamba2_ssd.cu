@@ -263,17 +263,19 @@ __device__ __forceinline__ void m2_stage4(int count, int tid, int nthr, LF load,
 // Each chunk's own state S[p][n] = sum_t B_t[n] xw[t][p], from zero, t
 // ascending: [B, nc, H, P, N], with xw = x (e^min(Acs_last - Acs_t, 0) dt_t).
 // Register tiles: a warp takes 4 channels p and a lane the state indices
-// lane + 32 j of the block's tile (JC of them); the per-token weights, xw
-// [64][P4] and the B rows [64][32 JC] are staged once per block.
-// A warp walks its groups of 4 channels in turn. Grid (B * nc, H,
-// ceil(N / (32 JC))), JC from N (1, 2 or 4), block up to 256 threads;
-// dynamic shared memory 64 (P4 + 32 JC + 1) floats.
+// lane + 32 j of the block's tile (JC of them). The per-token weights and
+// the B rows [64][32 JC] are staged once per block, xw [64][pt] once per
+// tile of pt channels (a multiple of 4), which the host makes the whole
+// head whenever it fits. A warp walks its groups of 4 channels of a tile in
+// turn, and each S[p][n] is one chain whatever the tile. Grid (B * nc, H,
+// ceil(N / (32 JC))), JC from N (1, 2 or 4), block up to 256 threads.
+// Dynamic shared memory: 64 (pt + 32 JC + 1) floats.
 template <typename TI, int JC>
 __device__ __forceinline__ void m2_chunk_state_body(
     float* __restrict__ states,
     const TI* __restrict__ xbc, long long ld_xbc, int b_col,
     const float* __restrict__ dt, const float* __restrict__ acs,
-    int batch, int seq, int nh, int ng, int hd, int ds
+    int batch, int seq, int nh, int ng, int hd, int ds, int pt
 ) {
     extern __shared__ float4 m2cs_sm4[];
     constexpr int NT = 32 * JC;
@@ -288,9 +290,8 @@ __device__ __forceinline__ void m2_chunk_state_body(
     const int t0 = c * M2_CHUNK;
     const int lc = min(M2_CHUNK, seq - t0);
     const long long sc = (bc * nh + h) * M2_CHUNK;
-    const int p4 = (hd + 3) & ~3;
-    float* xs = reinterpret_cast<float*>(m2cs_sm4);  // [64][p4]
-    float* bs = xs + M2_CHUNK * p4;                   // [64][NT]
+    float* xs = reinterpret_cast<float*>(m2cs_sm4);  // [64][pt]
+    float* bs = xs + M2_CHUNK * pt;                   // [64][NT]
     float* ws = bs + M2_CHUNK * NT;                   // [64]
     const int tid = threadIdx.x;
     const int lane = tid & 31, warp = tid >> 5, nw = blockDim.x >> 5;
@@ -298,13 +299,6 @@ __device__ __forceinline__ void m2_chunk_state_body(
     for (int t = tid; t < lc; t += blockDim.x)
         ws[t] = __fmul_rn(m2_exp(fminf(__fsub_rn(acs_last, acs[sc + t]), 0.0f)), dt[sc + t]);
     __syncthreads();
-    m2_stage4(lc * p4, threadIdx.x, blockDim.x,
-              [&](int i) {
-                  const int t = i / p4, p = i - t * p4;
-                  const long long r = (b * seq + t0 + t) * ld_xbc;
-                  return p < hd ? __fmul_rn(to_f(xbc[r + (long long)h * hd + p]), ws[t]) : 0.0f;
-              },
-              [&](int i, float v) { xs[i] = v; });
     m2_stage4(lc * NT, threadIdx.x, blockDim.x,
               [&](int i) {
                   const int t = i / NT, ni = i - t * NT;
@@ -313,8 +307,18 @@ __device__ __forceinline__ void m2_chunk_state_body(
                   return n < ds ? to_f(xbc[r + b_col + (long long)g * ds + n]) : 0.0f;
               },
               [&](int i, float v) { bs[i] = v; });
+    for (int pt0 = 0; pt0 < hd; pt0 += pt) {
+    /* The previous tile's reads are done before its xw is replaced. */
     __syncthreads();
-    for (int p0 = 4 * warp; p0 < hd; p0 += 4 * nw) {
+    m2_stage4(lc * pt, threadIdx.x, blockDim.x,
+              [&](int i) {
+                  const int t = i / pt, p = pt0 + (i - t * pt);
+                  const long long r = (b * seq + t0 + t) * ld_xbc;
+                  return p < hd ? __fmul_rn(to_f(xbc[r + (long long)h * hd + p]), ws[t]) : 0.0f;
+              },
+              [&](int i, float v) { xs[i] = v; });
+    __syncthreads();
+    for (int p0 = 4 * warp; p0 < pt && pt0 + p0 < hd; p0 += 4 * nw) {
         float acc[4][JC];
 #pragma unroll
         for (int i = 0; i < 4; i++) {
@@ -322,7 +326,7 @@ __device__ __forceinline__ void m2_chunk_state_body(
             for (int j = 0; j < JC; j++) acc[i][j] = 0.0f;
         }
         for (int t = 0; t < lc; t++) {
-            const float4 x4 = *reinterpret_cast<const float4*>(xs + t * p4 + p0);
+            const float4 x4 = *reinterpret_cast<const float4*>(xs + t * pt + p0);
             const float xv[4] = {x4.x, x4.y, x4.z, x4.w};
             float bv[JC];
 #pragma unroll
@@ -335,7 +339,7 @@ __device__ __forceinline__ void m2_chunk_state_body(
         }
 #pragma unroll
         for (int i = 0; i < 4; i++) {
-            const int p = p0 + i;
+            const int p = pt0 + p0 + i;
             if (p >= hd) continue;
 #pragma unroll
             for (int j = 0; j < JC; j++) {
@@ -344,6 +348,7 @@ __device__ __forceinline__ void m2_chunk_state_body(
             }
         }
     }
+    }
 }
 
 #define DEFINE_M2_CHUNK_STATE(NAME, TI)                                        \
@@ -351,17 +356,17 @@ extern "C" __global__ void NAME(                                               \
     float* __restrict__ states,                                                \
     const TI* __restrict__ xbc, long long ld_xbc, int b_col,                  \
     const float* __restrict__ dt, const float* __restrict__ acs,               \
-    int batch, int seq, int nh, int ng, int hd, int ds                         \
+    int batch, int seq, int nh, int ng, int hd, int ds, int pt                 \
 ) {                                                                            \
     if (ds <= 32)                                                              \
         m2_chunk_state_body<TI, 1>(states, xbc, ld_xbc, b_col, dt, acs, batch, \
-            seq, nh, ng, hd, ds);                                              \
+            seq, nh, ng, hd, ds, pt);                                          \
     else if (ds <= 64)                                                         \
         m2_chunk_state_body<TI, 2>(states, xbc, ld_xbc, b_col, dt, acs, batch, \
-            seq, nh, ng, hd, ds);                                              \
+            seq, nh, ng, hd, ds, pt);                                          \
     else                                                                       \
         m2_chunk_state_body<TI, 4>(states, xbc, ld_xbc, b_col, dt, acs, batch, \
-            seq, nh, ng, hd, ds);                                              \
+            seq, nh, ng, hd, ds, pt);                                          \
 }
 
 DEFINE_M2_CHUNK_STATE(m2_chunk_state, float)
