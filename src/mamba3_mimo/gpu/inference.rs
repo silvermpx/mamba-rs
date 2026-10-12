@@ -225,7 +225,12 @@ impl Mamba3MimoGpuEngine {
                 kernels.smem_optin
             )
         })?;
-        let chunked = chunked_geom((hd, ds, rank), kernels.smem_optin, false);
+        let chunked = chunked_geom(
+            (hd, ds, rank),
+            kernels.smem_optin,
+            false,
+            kernels.chunk_threads,
+        );
         if cfg.scan_mode == ScanMode::Parallel && chunked.is_none() {
             return Err(format!(
                 "the chunked scan of a rank-{rank} head of {hd} channels and {ds} states does \
@@ -1059,6 +1064,7 @@ pub(crate) fn launch_chunked_scan(
     } else {
         let (nt, sl, smem) = geom.state;
         let (bb, px, nt_i, sl_i) = (b_bias, mimo_x, nt as i32, sl as i32);
+        let pt_i = geom.pt as i32;
         let mut bld = stream.launch_builder(x.kernels.chunk_state.get(x.act));
         bld.arg(&contrib);
         bld.arg(&proj);
@@ -1078,9 +1084,14 @@ pub(crate) fn launch_chunked_scan(
         bld.arg(&na_i);
         bld.arg(&nt_i);
         bld.arg(&sl_i);
+        bld.arg(&pt_i);
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((b * nc) as u32, nh as u32, ds.div_ceil(nt) as u32),
-            block_dim: ((nt * hd) as u32, 1, 1),
+            grid_dim: (
+                (b * nc) as u32,
+                nh as u32,
+                (ds.div_ceil(nt) * hd.div_ceil(geom.pt)) as u32,
+            ),
+            block_dim: ((nt * geom.pt) as u32, 1, 1),
             shared_mem_bytes: smem as u32,
         };
         unsafe { bld.launch(cfg) }.map_err(err("chunk state"))?;
@@ -1146,7 +1157,7 @@ pub(crate) fn launch_chunked_scan(
     } else {
         let (tt, st, smem) = geom.scan;
         let w = [b_bias, c_bias, d, mimo_x, mimo_z, mimo_o];
-        let (tt_i, st_i) = (tt as i32, st as i32);
+        let (tt_i, st_i, pt_i) = (tt as i32, st as i32, geom.pt as i32);
         let mut bld = stream.launch_builder(x.kernels.chunk_scan.get(x.act));
         bld.arg(&gated);
         bld.arg(&y_out);
@@ -1170,13 +1181,18 @@ pub(crate) fn launch_chunked_scan(
         bld.arg(&na_i);
         bld.arg(&tt_i);
         bld.arg(&st_i);
+        bld.arg(&pt_i);
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((b * nc) as u32, nh as u32, CHUNK.div_ceil(tt) as u32),
+            grid_dim: (
+                (b * nc) as u32,
+                nh as u32,
+                (CHUNK.div_ceil(tt) * hd.div_ceil(geom.pt)) as u32,
+            ),
             // Whole warps only: the tile products leave a partial warp out,
             // so a block under 32 threads would leave G unwritten. Threads
-            // past `tt * hd` own no output, and each product keeps the one
+            // past `tt * pt` own no output, and each product keeps the one
             // chain its owner runs, so the rounding moves no bits.
-            block_dim: ((tt * hd).next_multiple_of(32) as u32, 1, 1),
+            block_dim: ((tt * geom.pt).next_multiple_of(32) as u32, 1, 1),
             shared_mem_bytes: smem as u32,
         };
         unsafe { bld.launch(cfg) }.map_err(err("scan"))?;

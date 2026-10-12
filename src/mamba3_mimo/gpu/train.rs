@@ -360,7 +360,16 @@ struct ChunkedBwd {
     gd: GpuBuffer,
     gdtb: GpuBuffer,
     tmp: GpuBuffer,
+    /// The generic state terms' keys and inputs, the generic pair terms'
+    /// staged rows and the lead's block-sum leaves, each in global memory
+    /// only when the head needs it (one element otherwise).
+    terms_glob: GpuBuffer,
+    pairs_glob: GpuBuffer,
+    lead_leaves: GpuBuffer,
 }
+
+/// Tokens per block of the generic state terms kernel.
+const TERMS_GROUP: usize = 8;
 
 /// The MIMO trainer: forward, backward and AdamW for windows of `seq_len`
 /// tokens of `batch` sequences.
@@ -502,7 +511,7 @@ impl Mamba3MimoGpuTrainer {
                  {optin} bytes of shared memory"
             )
         })?;
-        let fitted = chunked_geom((hd, ds, rank), optin, true);
+        let fitted = chunked_geom((hd, ds, rank), optin, true, kernels.chunk_threads);
         let chunked = if cfg.train_use_parallel_scan() {
             fitted
         } else {
@@ -645,6 +654,27 @@ impl Mamba3MimoGpuTrainer {
                 gd: z(ch_n(rows * nh * hd))?,
                 gdtb: z(ch_n(rows * nh))?,
                 tmp: z(ch_n(nh * rank * hd))?,
+                terms_glob: z(chunked.map_or(1, |_| {
+                    if (rank * ds + rank * hd) * 4 > optin {
+                        batch * nc * nh * CHUNK.div_ceil(TERMS_GROUP) * (rank * ds + rank * hd)
+                    } else {
+                        1
+                    }
+                }))?,
+                pairs_glob: z(chunked.map_or(1, |g| {
+                    if g.pairs_global {
+                        batch * nc * nh * g.pairs.0 * rank * (3 * ds + 2 * hd + 2)
+                    } else {
+                        1
+                    }
+                }))?,
+                lead_leaves: z(chunked.map_or(1, |_| {
+                    if hd.next_multiple_of(32) > kernels.chunk_threads {
+                        batch * nh * hd.next_multiple_of(32)
+                    } else {
+                        1
+                    }
+                }))?,
             },
         };
         let mut mirror_pairs = Vec::new();
@@ -1838,14 +1868,20 @@ impl Mamba3MimoGpuTrainer {
                 );
             } else {
                 let (nt, dsloc_smem) = geom.dsloc;
-                let nt_i = nt as i32;
+                let (nt_i, pt_i) = (nt as i32, geom.pt as i32);
                 go!(
                     &k.cb.dsloc,
-                    cfg3(b * nc, nh, ds.div_ceil(nt), nt * hd, dsloc_smem),
+                    cfg3(
+                        b * nc,
+                        nh,
+                        ds.div_ceil(nt) * hd.div_ceil(geom.pt),
+                        nt * geom.pt,
+                        dsloc_smem
+                    ),
                     "local state gradient",
                     [
                         dsl, dy, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i,
-                        nt_i
+                        nt_i, pt_i
                     ]
                 );
             }
@@ -1863,13 +1899,21 @@ impl Mamba3MimoGpuTrainer {
                 [dot, enter, dsl, count, pn_i]
             );
             // The state terms take the chunk's state gradient into shared
-            // memory once per group of tokens when it fits.
-            let (tg, terms_base) = (8usize, (rank * ds + rank * hd) * 4);
+            // memory once per group of tokens when it fits, and their keys
+            // and inputs into a global scratch when those do not.
+            let (tg, keys_inputs) = (TERMS_GROUP, (rank * ds + rank * hd) * 4);
+            let terms_glob = keys_inputs > k.smem_optin;
+            let terms_base = if terms_glob { 0 } else { keys_inputs };
             let staged = terms_base + hd * (ds + 1) * 4;
             let (stage, terms_smem) = if staged <= k.smem_optin {
                 (1i32, staged)
             } else {
                 (0i32, terms_base)
+            };
+            let glob = if terms_glob {
+                s.cb.terms_glob.cached_ptr()
+            } else {
+                0u64
             };
             let tg_i = tg as i32;
             if geom.terms_tiles.0 > 0 {
@@ -1896,8 +1940,8 @@ impl Mamba3MimoGpuTrainer {
                     cfg3(b * nc, nh, CHUNK.div_ceil(tg), 256, terms_smem),
                     "state terms",
                     [
-                        dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i,
-                        ng_i, hd_i, ds_i, r_i, na_i, tg_i, stage
+                        dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, glob, t_i,
+                        nh_i, ng_i, hd_i, ds_i, r_i, na_i, tg_i, stage
                     ]
                 );
             }
@@ -1926,23 +1970,41 @@ impl Mamba3MimoGpuTrainer {
                     ]
                 );
             } else {
+                let pairs_glob = if geom.pairs_global {
+                    s.cb.pairs_glob.cached_ptr()
+                } else {
+                    0u64
+                };
                 go!(
                     k.cb.pairs.get(act),
                     cfg3(b * nc, nh, 1, 256, pairs_smem),
                     "pairs",
                     [
                         dq, dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x,
-                        t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i, tl_i
+                        pairs_glob, t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i, tl_i
                     ]
                 );
             }
-            let lead_threads = hd.next_multiple_of(32);
+            // A thread per channel, or for a head wider than the block a
+            // power of two of them taking the channels in turns.
+            let lanes = hd.next_multiple_of(32);
+            let lead_wide = lanes > k.chunk_threads;
+            let lead_threads = if lead_wide {
+                1usize << k.chunk_threads.ilog2()
+            } else {
+                lanes
+            };
+            let leaves = if lead_wide {
+                s.cb.lead_leaves.cached_ptr()
+            } else {
+                0u64
+            };
             go!(
                 &k.cb.lead,
-                cfg3(b, nh, 1, lead_threads, lead_threads * 4),
+                cfg3(b, nh, 1, lead_threads, lanes.min(lead_threads) * 4),
                 "entering lead",
                 [
-                    de0, gpsi_init, d_init, e0, k0, v0, w_x, nh_i, hd_i, ds_i, r_i
+                    de0, gpsi_init, d_init, e0, k0, v0, w_x, leaves, nh_i, hd_i, ds_i, r_i
                 ]
             );
             go!(

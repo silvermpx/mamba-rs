@@ -363,12 +363,13 @@ DEFINE_M3M_PREP(m3m_prep_f16, __half)
 
 // Each chunk's own contribution to the state, from zero:
 //   C[p][n] = sum_s sum_r (e^min(Acs_last - Acs_s, 0) scale_s) u_s[r][p] k_s[r][n]
-// (s, then r, ascending). One block per (chunk, head, n-tile); thread
-// (p, n-in-tile). The chunk's rotated keys for the tile's n and its inputs
-// are staged in shared memory `sl` tokens at a time (the whole chunk when
-// it fits): sl * R * nt + sl * P + sl floats. The tile sizes change what a
-// pass stages, never the order of a thread's sum.
-// Grid (B * nc, H, ceil(N / nt)), block nt * P threads.
+// (s, then r, ascending). One block per (chunk, head, n-tile, tile of `pt`
+// channels); thread (p, n-in-tile). The chunk's rotated keys for the tile's
+// n and its tile's inputs are staged in shared memory `sl` tokens at a time
+// (the whole chunk when it fits): sl * R * nt + sl * pt + sl floats. The
+// tile sizes change what a pass stages, never the order of a thread's sum.
+// Grid (B * nc, H, ceil(N / nt) * ceil(P / pt)), the channel tile fastest,
+// block nt * pt threads.
 template <typename TI>
 __device__ __forceinline__ void m3m_chunk_state_body(
     float* __restrict__ contrib,
@@ -376,13 +377,16 @@ __device__ __forceinline__ void m3m_chunk_state_body(
     const float* __restrict__ bn, const float* __restrict__ coef,
     const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ b_bias, const float* __restrict__ mimo_x,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int sl
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int sl, int pt
 ) {
     extern __shared__ float m3m_sm[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
     const int h = blockIdx.y;
-    const int n0 = blockIdx.z * nt;
+    const int nct = (hd + pt - 1) / pt;
+    const int p0 = (int)(blockIdx.z % nct) * pt;
+    const int pc = min(pt, hd - p0);
+    const int n0 = (int)(blockIdx.z / nct) * nt;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -392,11 +396,12 @@ __device__ __forceinline__ void m3m_chunk_state_body(
     const int rgn = rank * ng * ds;
     const int half = ds / 2;
     float* kt = m3m_sm;                // [sl][R][nt]
-    float* xt = kt + sl * rank * nt;   // [sl][P]
-    float* wt = xt + sl * hd;          // [sl]
+    float* xt = kt + sl * rank * nt;   // [sl][pt]
+    float* wt = xt + sl * pt;          // [sl]
     const int tid = threadIdx.x;
-    const int p = tid % hd, nl = tid / hd;
-    const bool active = nl < nt && n0 + nl < ds;
+    const int pl = tid % pt, nl = tid / pt;
+    const int p = p0 + pl;
+    const bool active = nl < nt && n0 + nl < ds && pl < pc;
     const float acs_last = coef[(((b * seq + t0 + lc - 1) * nh) + h) * 4 + 3];
     float acc = 0.0f;
     for (int s0 = 0; s0 < lc; s0 += sl) {
@@ -414,9 +419,11 @@ __device__ __forceinline__ void m3m_chunk_state_body(
             }
             kt[i] = v;
         }
-        for (int i = tid; i < sn_ * hd; i += blockDim.x) {
-            const int s = i / hd, pp = i % hd;
-            xt[i] = to_f(proj[(b * seq + t0 + s0 + s) * ld_proj + di + (long long)h * hd + pp]);
+        for (int i = tid; i < sn_ * pt; i += blockDim.x) {
+            const int s = i / pt, pp = i % pt;
+            xt[i] = pp < pc ? to_f(proj[(b * seq + t0 + s0 + s) * ld_proj + di
+                                        + (long long)h * hd + p0 + pp])
+                            : 0.0f;
         }
         for (int s = tid; s < sn_; s += blockDim.x) {
             const float* cf = coef + ((b * seq + t0 + s0 + s) * nh + h) * 4;
@@ -425,7 +432,7 @@ __device__ __forceinline__ void m3m_chunk_state_body(
         __syncthreads();
         if (active) {
             for (int s = 0; s < sn_; s++) {
-                const float wx = __fmul_rn(wt[s], xt[s * hd + p]);
+                const float wx = __fmul_rn(wt[s], xt[s * pt + pl]);
                 for (int r = 0; r < rank; r++) {
                     const float u = __fmul_rn(wx, mimo_x[((long long)h * rank + r) * hd + p]);
                     acc = __fmaf_rn(u, kt[(s * rank + r) * nt + nl], acc);
@@ -443,10 +450,11 @@ extern "C" __global__ void NAME(                                                
     const float* __restrict__ bn, const float* __restrict__ coef,               \
     const float* __restrict__ sn, const float* __restrict__ cs,                 \
     const float* __restrict__ b_bias, const float* __restrict__ mimo_x,         \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int sl   \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int sl,  \
+    int pt                                                                      \
 ) {                                                                             \
     m3m_chunk_state_body<TI>(contrib, proj, ld_proj, bn, coef, sn, cs, b_bias,  \
-        mimo_x, seq, nh, ng, hd, ds, rank, na, nt, sl);                         \
+        mimo_x, seq, nh, ng, hd, ds, rank, na, nt, sl, pt);                     \
 }
 DEFINE_M3M_CHUNK_STATE(m3m_chunk_state, float)
 DEFINE_M3M_CHUNK_STATE(m3m_chunk_state_bf16, __nv_bfloat16)
@@ -619,8 +627,9 @@ extern "C" __global__ void m3m_state_pass(
     ssm[bh * pn + e] = st;
 }
 
-// The outputs. One block per (chunk, head, token tile); thread (t, p) of
-// the tile computes y_t[r] for every rank and the gated row:
+// The outputs. One block per (chunk, head, token tile, tile of `pt`
+// channels); thread (t, p) of the tile computes y_t[r] for every rank and
+// the gated row:
 //   y[r] = e^Acs_t (q_t[r] . S_enter[p])
 //        + sum_{s<=t} (G[t,r,s,r'] w(t,s)) u_s[r'][p]        (s, then r')
 //        + D u_t[r][p]
@@ -628,9 +637,11 @@ extern "C" __global__ void m3m_state_pass(
 // e^min(Acs_t - Acs_s, 0) scale_s off the diagonal, gamma_t on it. The
 // queries of the tile stay staged; the keys come in s-tiles of `st` with
 // their G block. Shared memory: tt * R * N (queries) + st * R * (N + 1)
-// (keys, rows padded) + tt * R * st * R (G) + st * P (inputs) floats. The tile sizes change what
-// a pass stages, never the order of a thread's sum.
-// Grid (B * nc, H, ceil(64 / tt)), block tt * P threads. `y_out` (may be
+// (keys, rows padded) + tt * R * st * R (G) + st * pt (inputs) floats. The
+// tile sizes change what a pass stages, never the order of a thread's sum.
+// Grid (B * nc, H, ceil(64 / tt) * ceil(P / pt)), the channel tile
+// fastest, block tt * pt threads. Every channel tile of a token tile
+// computes the same G. `y_out` (may be
 // null) receives the readouts y_t[r][p] with D, [B, T, H, R, P], what the
 // training backward's gate reads.
 template <typename TI, int RK>
@@ -645,13 +656,16 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
     const float* __restrict__ D,
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
     const float* __restrict__ mimo_o,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt, int st
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt, int st, int pt
 ) {
     extern __shared__ float m3m_sm[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
     const int h = blockIdx.y;
-    const int tile0 = blockIdx.z * tt;
+    const int nct = (hd + pt - 1) / pt;
+    const int p0 = (int)(blockIdx.z % nct) * pt;
+    const int pc = min(pt, hd - p0);
+    const int tile0 = (int)(blockIdx.z / nct) * tt;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -671,10 +685,11 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
     float* qs = m3m_sm;                       // [tt][R][N]
     float* ks = qs + tt * rank * ds;          // [ST][R][N + 1]
     float* gs = ks + ST * rank * kld;         // [tt*R][ST*R]
-    float* xs = gs + tt * rank * ST * rank;   // [ST][P]
+    float* xs = gs + tt * rank * ST * rank;   // [ST][pt]
     const int tid = threadIdx.x;
-    const int tl = tid / hd, p = tid % hd;
-    const bool live = tl < tn;
+    const int tl = tid / pt, pl = tid % pt;
+    const int p = p0 + pl;
+    const bool live = tl < tn && pl < pc;
     // The tile's rotated queries.
     for (int i = tid; i < tn * rank * ds; i += blockDim.x) {
         const int tq = i / (rank * ds), r = (i / ds) % rank, n = i % ds;
@@ -722,9 +737,11 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
                             b_bias + ((long long)h * rank + r) * ds, n, half, na,
                             sn + (row * nh + h) * na, cs + (row * nh + h) * na);
         }
-        for (int i = tid; i < sn_ * hd; i += blockDim.x) {
-            const int sk = i / hd, pp = i % hd;
-            xs[i] = to_f(proj[(b * seq + t0 + s0 + sk) * ld_proj + di + (long long)h * hd + pp]);
+        for (int i = tid; i < sn_ * pt; i += blockDim.x) {
+            const int sk = i / pt, pp = i % pt;
+            xs[i] = pp < pc ? to_f(proj[(b * seq + t0 + s0 + sk) * ld_proj + di
+                                        + (long long)h * hd + p0 + pp])
+                            : 0.0f;
         }
         __syncthreads();
         m3m_tile_product<1>(
@@ -743,7 +760,7 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
                 const float w = s < t
                     ? __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_t, cf[3]), 0.0f)), cf[2])
                     : gamma_t;
-                const float xsv = xs[sk * hd + p];
+                const float xsv = xs[sk * pt + pl];
                 _Pragma("unroll") for (int r = 0; r < R; r++) {
                     const float* grow = gs + (tl * rank + r) * (ST * rank) + sk * rank;
                     _Pragma("unroll") for (int r2 = 0; r2 < R; r2++) {
@@ -783,11 +800,12 @@ extern "C" __global__ void NAME(                                                
     const float* __restrict__ D,                                                \
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,         \
     const float* __restrict__ mimo_o,                                           \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt, int st   \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt, int st,  \
+    int pt                                                                      \
 ) {                                                                             \
     MIMO_RANK_DISPATCH(rank, m3m_chunk_scan_body<TI, RK>(out, y_out, proj,      \
         ld_proj, bn, cn, coef, sn, cs, enter, b_bias, c_bias, D, mimo_x,        \
-        mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, tt, st))                 \
+        mimo_z, mimo_o, seq, nh, ng, hd, ds, rank, na, tt, st, pt))             \
 }
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan, float)
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan_bf16, __nv_bfloat16)

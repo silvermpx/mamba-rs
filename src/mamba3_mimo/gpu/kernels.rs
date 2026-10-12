@@ -55,6 +55,10 @@ pub struct Mamba3MimoKernels {
     /// 48 KB may use: the device's per-block opt-in less the largest
     /// static stage among those kernels.
     pub smem_optin: usize,
+    /// The widest block the chunked path's channel-parallel kernels
+    /// (chunk state, chunk scan, the local state gradient, the lead)
+    /// launch, from their register use.
+    pub chunk_threads: usize,
     pub compiler_identity: ki::CompilerIdentity,
     pub artifact_identity: ki::ArtifactIdentity,
 }
@@ -125,6 +129,14 @@ pub struct ChunkedGeom {
     pub terms_tiles: (usize, usize),
     /// `m3mb_pairs`: tokens per tile, bytes.
     pub pairs: (usize, usize),
+    /// `m3mb_pairs` stages its queries, keys, dy, u and dq tile in a global
+    /// scratch of `tl R (3 N + 2 P + 2)` floats per chunk and head, its
+    /// shared memory holding only G, M and w G.
+    pub pairs_global: bool,
+    /// Channels per block of `m3m_chunk_state`, `m3m_chunk_scan` and
+    /// `m3mb_dsloc`: the whole head when its channels fit a block, else a
+    /// tile of them (each output keeps its one chain either way).
+    pub pt: usize,
     /// `m3mb_pairs_dq` and `m3mb_pairs_dk` at the same tile: their bytes, or
     /// zeros when a tile of more than 64 rows, a head of more than 128
     /// channels or more than 128 state indices leaves it to `m3mb_pairs`.
@@ -132,22 +144,24 @@ pub struct ChunkedGeom {
 }
 
 /// The chunked geometry of a head of `hd` channels, `ds` state indices and
-/// rank `rank` within `cap` bytes of shared memory, or `None` when a kernel
-/// of the path cannot fit (or a block would pass 1024 threads); the
-/// backward's two kernels count only when `training`.
+/// rank `rank` within `cap` bytes of shared memory and blocks of at most
+/// `threads`, or `None` when a kernel of the path cannot fit. The
+/// backward's kernels count only when `training`.
 pub fn chunked_geom(
     (hd, ds, rank): (usize, usize, usize),
     cap: usize,
     training: bool,
+    threads: usize,
 ) -> Option<ChunkedGeom> {
-    if hd == 0 || ds == 0 || rank == 0 || hd > 1024 {
+    if hd == 0 || ds == 0 || rank == 0 {
         return None;
     }
-    let wide = (256 / hd).max(1);
+    let pt = hd.min((threads / 32 * 32).max(32));
+    let wide = (256 / pt).max(1);
     // The state kernel: kt [sl][R][nt], xt [sl][P], wt [sl].
     let state = (1..=wide.min(ds)).rev().find_map(|nt| {
         [CHUNK, 32, 16, 8, 4, 2, 1].into_iter().find_map(|sl| {
-            let bytes = (sl * rank * nt + sl * hd + sl) * 4;
+            let bytes = (sl * rank * nt + sl * pt + sl) * 4;
             (bytes <= cap).then_some((nt, sl, bytes))
         })
     })?;
@@ -176,7 +190,7 @@ pub fn chunked_geom(
     let scan = (1..=wide.min(CHUNK)).rev().find_map(|tt| {
         [8usize, 4, 2, 1].into_iter().find_map(|st| {
             let bytes =
-                (tt * rank * ds + st * rank * (ds + 1) + tt * rank * st * rank + st * hd) * 4;
+                (tt * rank * ds + st * rank * (ds + 1) + tt * rank * st * rank + st * pt) * 4;
             (bytes <= cap).then_some((tt, st, bytes))
         })
     })?;
@@ -213,6 +227,8 @@ pub fn chunked_geom(
             inter_tiles: (0, 0),
             terms_tiles: (0, 0),
             pairs: (0, 0),
+            pairs_global: false,
+            pt,
             pairs_tiles: (0, 0),
         });
     }
@@ -222,12 +238,25 @@ pub fn chunked_geom(
         (bytes <= cap).then_some((nt, bytes))
     })?;
     // The pair terms: queries, keys and the dq tile, dy and u, three
-    // (tile R)^2 blocks; the key and u rows padded by one.
-    let pairs = [16usize, 8, 4, 2, 1].into_iter().find_map(|tl| {
+    // (tile R)^2 blocks, the key and u rows padded by one. When no token
+    // tile stages all of them, the rows go to a global scratch and only
+    // the three blocks stay in shared memory.
+    let staged = [16usize, 8, 4, 2, 1].into_iter().find_map(|tl| {
         let tr = tl * rank;
         let bytes = (3 * tr * ds + 2 * tr * hd + 2 * tr + 3 * tr * tr) * 4;
         (bytes <= cap).then_some((tl, bytes))
-    })?;
+    });
+    let (pairs, pairs_global) = match staged {
+        Some(p) => (p, false),
+        None => (
+            [16usize, 8, 4, 2, 1].into_iter().find_map(|tl| {
+                let tr = tl * rank;
+                let bytes = 3 * tr * tr * 4;
+                (bytes <= cap).then_some((tl, bytes))
+            })?,
+            true,
+        ),
+    };
     // The token-tile inter and state-terms kernels: rows (t, r) of `tt`
     // tokens padded to a float4 multiple plus 4. inter: the entering state,
     // dy transposed, d, and the trees' partials past d when the first two do
@@ -260,7 +289,7 @@ pub fn chunked_geom(
         let trs = tr.next_multiple_of(4) + 4;
         let dq = (hd * trs + tr * (hd + 1) + tr * ds + tr * trs + tl * tl) * 4;
         let dk = (ds * trs + hd * trs + tr * (ds + 1) + tr * (hd + 1) + 3 * tr * trs) * 4;
-        if tr <= 64 && hd <= 128 && ds <= 128 && dq.max(dk) <= cap {
+        if !pairs_global && tr <= 64 && hd <= 128 && ds <= 128 && dq.max(dk) <= cap {
             (dq, dk)
         } else {
             (0, 0)
@@ -276,6 +305,8 @@ pub fn chunked_geom(
         inter_tiles,
         terms_tiles,
         pairs,
+        pairs_global,
+        pt,
         pairs_tiles,
     })
 }
@@ -519,14 +550,21 @@ impl Mamba3MimoKernels {
         let scan_bwd_global = typed("mimo_scan_bwd_global")?;
         let scan_bwd_block = max_block(&scan_bwd, "scan backward")?;
         let scan_bwd_global_block = max_block(&scan_bwd_global, "global scan backward")?;
+        let chunk_state = typed("m3m_chunk_state")?;
+        let chunk_scan = typed("m3m_chunk_scan")?;
+        let dsloc = get("m3mb_dsloc")?;
+        let lead = get("m3mb_lead")?;
+        let chunk_threads = max_block(&chunk_state, "chunk state")?
+            .min(max_block(&chunk_scan, "chunk scan")?)
+            .min(max_block_of(&[&dsloc, &lead], "chunked backward")?);
         let mut kernels = Self {
             bc_norm: typed("mimo_bc_norm")?,
             scan,
             chunk_prep: typed("m3m_prep")?,
-            chunk_state: typed("m3m_chunk_state")?,
+            chunk_state,
             chunk_state_tiles: typed("m3m_chunk_state_tiles")?,
             state_pass: get("m3m_state_pass")?,
-            chunk_scan: typed("m3m_chunk_scan")?,
+            chunk_scan,
             chunk_scan_tiles: typed("m3m_chunk_scan_tiles")?,
             chunk_writeback: typed("m3m_writeback")?,
             mlp_gate: typed("mlp_gate_fwd")?,
@@ -545,7 +583,7 @@ impl Mamba3MimoKernels {
                 inter: get("m3mb_inter")?,
                 inter_tiles: get("m3mb_inter_tiles")?,
                 state_terms_tiles: typed("m3mb_state_terms_tiles")?,
-                dsloc: get("m3mb_dsloc")?,
+                dsloc,
                 dsloc_tiles: get("m3mb_dsloc_tiles")?,
                 pass: get("m3mb_pass")?,
                 chunk_dot: get("m3mb_chunk_dot")?,
@@ -556,13 +594,14 @@ impl Mamba3MimoKernels {
                 rot_bwd: get("m3mb_rot_bwd")?,
                 angles: typed("m3mb_angles")?,
                 combine: get("m3mb_combine")?,
-                lead: get("m3mb_lead")?,
+                lead,
                 scalars: typed("m3mb_scalars")?,
                 u_bwd: typed("m3mb_u_bwd")?,
                 sum_inner: get("m3mb_sum_inner")?,
                 reduce_rows: get("m3mb_reduce_rows")?,
             },
             smem_optin,
+            chunk_threads,
             compiler_identity,
             artifact_identity,
         };
@@ -607,9 +646,14 @@ impl Mamba3MimoKernels {
 /// The widest block every dtype of `k` launches, from its register use, a
 /// whole number of warps.
 fn max_block(k: &TypedKernel, what: &str) -> Result<usize, String> {
+    max_block_of(&[&k.f32, &k.bf16, &k.f16], what)
+}
+
+/// The widest block every one of `fs` launches, a whole number of warps.
+fn max_block_of(fs: &[&CudaFunction], what: &str) -> Result<usize, String> {
     use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
     let mut threads = 1024usize;
-    for f in [&k.f32, &k.bf16, &k.f16] {
+    for f in fs {
         let max = f
             .get_attribute(FnAttr::CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
             .map_err(|e| format!("threads per block of the MIMO {what}: {e:?}"))?;
@@ -622,13 +666,14 @@ fn max_block(k: &TypedKernel, what: &str) -> Result<usize, String> {
 mod tests {
     use super::*;
 
-    /// The released head keeps the full tiles; a wide rank shrinks the
-    /// scan's key tile; every chosen tile fits the limit; a head past 1024
-    /// channels has no chunked geometry.
+    /// The released head keeps the full tiles, a wide rank shrinks the
+    /// scan's key tile, and every chosen tile fits the limit. A head wider
+    /// than a block runs in tiles of channels, and a head whose rows the pair
+    /// terms cannot stage keeps them in global memory.
     #[test]
     fn chunked_geometry_fits_the_shared_memory() {
         let cap = 99 * 1024;
-        let released = chunked_geom((64, 128, 4), cap, true).unwrap();
+        let released = chunked_geom((64, 128, 4), cap, true, 1024).unwrap();
         assert_eq!((released.state.0, released.state.1), (4, CHUNK));
         assert_eq!((released.state_tiles.0, released.state_tiles.1), (4, 16));
         let tiles = released.scan_tiles;
@@ -637,7 +682,8 @@ mod tests {
         assert_eq!(released.inter_tiles.0, 16);
         assert_eq!(released.terms_tiles.0, 8);
         assert_eq!((released.scan.0, released.scan.1), (4, 8));
-        let wide = chunked_geom((16, 16, 16), cap, true).unwrap();
+        assert_eq!((released.pt, released.pairs_global), (64, false));
+        let wide = chunked_geom((16, 16, 16), cap, true, 1024).unwrap();
         assert_eq!((wide.scan.0, wide.scan.1), (16, 4));
         assert_eq!(wide.dsloc.0, 16);
         for shape in [
@@ -648,9 +694,11 @@ mod tests {
             (512, 16, 1),
             (1024, 256, 16),
             (8, 64, 6),
+            (2048, 16, 1),
+            (1280, 256, 16),
         ] {
             for cap in [48 * 1024, 64 * 1024, 99 * 1024, 227 * 1024] {
-                let Some(g) = chunked_geom(shape, cap, true) else {
+                let Some(g) = chunked_geom(shape, cap, true, 1024) else {
                     continue;
                 };
                 let sizes = [
@@ -668,10 +716,15 @@ mod tests {
                 for bytes in sizes {
                     assert!(bytes <= cap, "{shape:?} at {cap}: {g:?}");
                 }
-                assert!(g.state.0 * shape.0 <= 1024 && g.scan.0 * shape.0 <= 1024);
+                assert!(g.state.0 * g.pt <= 1024 && g.scan.0 * g.pt <= 1024);
+                assert_eq!(g.pt, shape.0.min(1024), "{shape:?}: {g:?}");
                 assert_eq!(g.state_tiles.0 == 0, shape.0 > 128, "{shape:?}: {g:?}");
             }
         }
-        assert!(chunked_geom((2048, 16, 1), 227 * 1024, true).is_none());
+        let tiled = chunked_geom((2048, 16, 1), 227 * 1024, true, 1024).unwrap();
+        assert_eq!((tiled.pt, tiled.state.0, tiled.scan.0), (1024, 1, 1));
+        let staged = chunked_geom((1024, 256, 16), 99 * 1024, true, 1024).unwrap();
+        assert!(staged.pairs_global, "{staged:?}");
+        assert_eq!(staged.pairs_tiles, (0, 0));
     }
 }

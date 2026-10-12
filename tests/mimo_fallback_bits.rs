@@ -5,7 +5,12 @@
 //!   blocks against the whole head in one block, with and without the
 //!   replay checkpoints, through the pipelined body and the plain one,
 //! - the sequential backward with its rows, keys and tiles in global memory
-//!   against the one that holds them in shared memory.
+//!   against the one that holds them in shared memory,
+//! - the chunked path's chunk state, chunk scan and local state gradient
+//!   with the head's channels in tiles against the whole head, the state
+//!   terms and pair terms staging their rows in global memory against
+//!   shared memory, and the entering lead over a block narrower than the
+//!   head against a thread per channel.
 //!
 //! Each pair runs on shapes both routes serve, at a compiled rank and a
 //! runtime one, in f32, bf16 and f16.
@@ -14,7 +19,7 @@
 #[path = "common/arch.rs"]
 mod arch;
 
-use cudarc::driver::PushKernelArg;
+use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
@@ -518,5 +523,393 @@ fn mimo_scan_bwd_global_is_the_shared_kernel() {
                 }
             }
         }
+    }
+}
+
+/// A kernel argument of any of the kinds the chunked kernels take.
+enum Arg {
+    P(u64),
+    L(i64),
+    I(i32),
+}
+
+fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+    let mut b = ctx.stream.launch_builder(f);
+    for a in args {
+        match a {
+            Arg::P(v) => {
+                b.arg(v);
+            }
+            Arg::L(v) => {
+                b.arg(v);
+            }
+            Arg::I(v) => {
+                b.arg(v);
+            }
+        }
+    }
+    unsafe { b.launch(cfg) }.unwrap();
+}
+
+fn cfg(grid: (usize, usize, usize), block: usize, smem: usize) -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: (grid.0 as u32, grid.1 as u32, grid.2 as u32),
+        block_dim: (block as u32, 1, 1),
+        shared_mem_bytes: smem as u32,
+    }
+}
+
+/// The inputs every chunked kernel here reads, for one shape, drawn once:
+/// two sequences of 100 tokens, a whole chunk and a partial one.
+struct ChunkedInputs {
+    seq: usize,
+    nc: usize,
+    ld_proj: usize,
+    bn: GpuBuffer,
+    cn: GpuBuffer,
+    coef: GpuBuffer,
+    sn: GpuBuffer,
+    cs: GpuBuffer,
+    b_bias: GpuBuffer,
+    c_bias: GpuBuffer,
+    d: GpuBuffer,
+    mx: GpuBuffer,
+    mz: GpuBuffer,
+    mo: GpuBuffer,
+    enter: GpuBuffer,
+    dy: GpuBuffer,
+    dst: GpuBuffer,
+}
+
+impl ChunkedInputs {
+    fn new(ctx: &GpuCtx, sh: Shape) -> Self {
+        let seq = 100usize;
+        let rows = sh.batch * seq;
+        let nc = seq.div_ceil(64);
+        let di = sh.nh * sh.hd;
+        let rgn = sh.rank * sh.ng * sh.ds;
+        let per = sh.batch * nc * sh.nh * sh.hd * sh.ds;
+        Self {
+            seq,
+            nc,
+            ld_proj: 2 * di + 2 * rgn + 3 * sh.nh + sh.na,
+            bn: f32_buf(ctx, &det(rows * rgn, 71, 1.0)),
+            cn: f32_buf(ctx, &det(rows * rgn, 72, 1.0)),
+            coef: f32_buf(ctx, &det(rows * sh.nh * 4, 73, 1.0)),
+            sn: f32_buf(ctx, &det(rows * sh.nh * sh.na, 74, 1.0)),
+            cs: f32_buf(ctx, &det(rows * sh.nh * sh.na, 75, 1.0)),
+            b_bias: f32_buf(ctx, &det(sh.nh * sh.rank * sh.ds, 76, 0.5)),
+            c_bias: f32_buf(ctx, &det(sh.nh * sh.rank * sh.ds, 77, 0.5)),
+            d: f32_buf(ctx, &det(sh.nh, 78, 1.0)),
+            mx: f32_buf(ctx, &det(sh.nh * sh.rank * sh.hd, 79, 0.8)),
+            mz: f32_buf(ctx, &det(sh.nh * sh.rank * sh.hd, 80, 0.8)),
+            mo: f32_buf(ctx, &det(sh.nh * sh.rank * sh.hd, 81, 0.8)),
+            enter: f32_buf(ctx, &det(per, 82, 1.0)),
+            dy: f32_buf(ctx, &det(rows * sh.nh * sh.rank * sh.hd, 83, 1.0)),
+            dst: f32_buf(ctx, &det(per, 84, 1.0)),
+        }
+    }
+}
+
+/// The chunk state, the chunk scan and the local state gradient with the
+/// head in channel tiles of 8 and 16 against the whole head.
+#[test]
+fn mimo_chunked_tiles_are_the_whole_head() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0()).unwrap();
+    let s = &ctx.stream;
+    for sh in SCAN_SHAPES {
+        let inp = ChunkedInputs::new(&ctx, sh);
+        let (b, nh, hd, ds, rank) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank);
+        let rows = b * inp.seq;
+        let ints = |extra: &[i32]| -> Vec<Arg> {
+            [
+                inp.seq as i32,
+                nh as i32,
+                sh.ng as i32,
+                hd as i32,
+                ds as i32,
+                rank as i32,
+                sh.na as i32,
+            ]
+            .iter()
+            .chain(extra)
+            .map(|&v| Arg::I(v))
+            .collect()
+        };
+        for dtype in DTYPES {
+            let proj = typed_buf(&ctx, &det(rows * inp.ld_proj, 85, 1.0), dtype);
+            let mut runs = Vec::new();
+            for pt in [hd, 8, 16] {
+                let tiles = hd.div_ceil(pt);
+                // The chunk state, one state index and 16 tokens a pass.
+                let contrib = GpuBuffer::zeros(s, b * inp.nc * nh * hd * ds).unwrap();
+                let (nt, sl) = (1usize, 16usize);
+                let mut args = vec![
+                    Arg::P(contrib.cached_ptr()),
+                    Arg::P(proj.cached_ptr()),
+                    Arg::L(inp.ld_proj as i64),
+                    Arg::P(inp.bn.cached_ptr()),
+                    Arg::P(inp.coef.cached_ptr()),
+                    Arg::P(inp.sn.cached_ptr()),
+                    Arg::P(inp.cs.cached_ptr()),
+                    Arg::P(inp.b_bias.cached_ptr()),
+                    Arg::P(inp.mx.cached_ptr()),
+                ];
+                args.extend(ints(&[nt as i32, sl as i32, pt as i32]));
+                let smem = (sl * rank * nt + sl * pt + sl) * 4;
+                launch(
+                    &ctx,
+                    k.chunk_state.get(dtype),
+                    cfg((b * inp.nc, nh, ds.div_ceil(nt) * tiles), nt * pt, smem),
+                    &args,
+                );
+                // The chunk scan, two query tokens and four key tokens a pass.
+                let out = DtypedBuf::zeros(s, rows * nh * hd, dtype).unwrap();
+                let y_out = GpuBuffer::zeros(s, rows * nh * rank * hd).unwrap();
+                let (tt, st) = (2usize, 4usize);
+                let mut args = vec![
+                    Arg::P(out.cached_ptr()),
+                    Arg::P(y_out.cached_ptr()),
+                    Arg::P(proj.cached_ptr()),
+                    Arg::L(inp.ld_proj as i64),
+                    Arg::P(inp.bn.cached_ptr()),
+                    Arg::P(inp.cn.cached_ptr()),
+                    Arg::P(inp.coef.cached_ptr()),
+                    Arg::P(inp.sn.cached_ptr()),
+                    Arg::P(inp.cs.cached_ptr()),
+                    Arg::P(inp.enter.cached_ptr()),
+                    Arg::P(inp.b_bias.cached_ptr()),
+                    Arg::P(inp.c_bias.cached_ptr()),
+                    Arg::P(inp.d.cached_ptr()),
+                    Arg::P(inp.mx.cached_ptr()),
+                    Arg::P(inp.mz.cached_ptr()),
+                    Arg::P(inp.mo.cached_ptr()),
+                ];
+                args.extend(ints(&[tt as i32, st as i32, pt as i32]));
+                let smem =
+                    (tt * rank * ds + st * rank * (ds + 1) + tt * rank * st * rank + st * pt) * 4;
+                launch(
+                    &ctx,
+                    k.chunk_scan.get(dtype),
+                    cfg(
+                        (b * inp.nc, nh, 64usize.div_ceil(tt) * tiles),
+                        (tt * pt).next_multiple_of(32),
+                        smem,
+                    ),
+                    &args,
+                );
+                // The local state gradient, two state indices a block.
+                let dsl = GpuBuffer::zeros(s, b * inp.nc * nh * hd * ds).unwrap();
+                let nt = 2usize;
+                let mut args = vec![
+                    Arg::P(dsl.cached_ptr()),
+                    Arg::P(inp.dy.cached_ptr()),
+                    Arg::P(inp.cn.cached_ptr()),
+                    Arg::P(inp.c_bias.cached_ptr()),
+                    Arg::P(inp.coef.cached_ptr()),
+                    Arg::P(inp.sn.cached_ptr()),
+                    Arg::P(inp.cs.cached_ptr()),
+                ];
+                args.extend(ints(&[nt as i32, pt as i32]));
+                launch(
+                    &ctx,
+                    &k.cb.dsloc,
+                    cfg(
+                        (b * inp.nc, nh, ds.div_ceil(nt) * tiles),
+                        nt * pt,
+                        (64 * rank * nt + 64) * 4,
+                    ),
+                    &args,
+                );
+                runs.push([
+                    bits_f32(&ctx, &contrib),
+                    bits_typed(&ctx, &out),
+                    bits_f32(&ctx, &y_out),
+                    bits_f32(&ctx, &dsl),
+                ]);
+            }
+            for (i, name) in ["chunk state", "chunk scan rows", "readouts", "local dS"]
+                .iter()
+                .enumerate()
+            {
+                for (run, pt) in runs.iter().zip([hd, 8, 16]).skip(1) {
+                    assert!(
+                        run[i] == runs[0][i],
+                        "{dtype:?} head {hd} rank {rank}, channel tile {pt}: {name}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The state terms and the pair terms with their rows staged in a global
+/// scratch against shared memory, and the entering lead over a block of 32
+/// threads (the tree's upper levels on each thread's own leaves) against a
+/// thread per channel.
+#[test]
+fn mimo_chunked_staging_in_global_is_the_shared_staging() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0()).unwrap();
+    let s = &ctx.stream;
+    for sh in SCAN_SHAPES {
+        let inp = ChunkedInputs::new(&ctx, sh);
+        let (b, nh, hd, ds, rank, na) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank, sh.na);
+        let rows = b * inp.seq;
+        let rn = rank * ds;
+        let ints = |extra: &[i32]| -> Vec<Arg> {
+            [
+                inp.seq as i32,
+                nh as i32,
+                sh.ng as i32,
+                hd as i32,
+                ds as i32,
+                rank as i32,
+                na as i32,
+            ]
+            .iter()
+            .chain(extra)
+            .map(|&v| Arg::I(v))
+            .collect()
+        };
+        let dk0 = det(rows * nh * rn, 86, 1.0);
+        let du0 = det(rows * nh * rank * hd, 87, 1.0);
+        let dq0 = det(rows * nh * rn, 88, 1.0);
+        for dtype in DTYPES {
+            let proj = typed_buf(&ctx, &det(rows * inp.ld_proj, 89, 1.0), dtype);
+            // The state terms: eight tokens a block, dS staged or not.
+            let tg = 8usize;
+            let blocks = b * inp.nc * nh * 64usize.div_ceil(tg);
+            let mut terms = Vec::new();
+            for (stage, glob) in [(1, false), (1, true), (0, false), (0, true)] {
+                let (dk, du) = (f32_buf(&ctx, &dk0), f32_buf(&ctx, &du0));
+                let dcs = GpuBuffer::zeros(s, rows * nh).unwrap();
+                let scratch = glob.then(|| GpuBuffer::zeros(s, blocks * (rn + rank * hd)).unwrap());
+                let base = if glob { 0 } else { (rn + rank * hd) * 4 };
+                let smem = base + if stage == 1 { hd * (ds + 1) * 4 } else { 0 };
+                let mut args = vec![
+                    Arg::P(dk.cached_ptr()),
+                    Arg::P(du.cached_ptr()),
+                    Arg::P(dcs.cached_ptr()),
+                    Arg::P(inp.dst.cached_ptr()),
+                    Arg::P(proj.cached_ptr()),
+                    Arg::L(inp.ld_proj as i64),
+                    Arg::P(inp.bn.cached_ptr()),
+                    Arg::P(inp.b_bias.cached_ptr()),
+                    Arg::P(inp.coef.cached_ptr()),
+                    Arg::P(inp.sn.cached_ptr()),
+                    Arg::P(inp.cs.cached_ptr()),
+                    Arg::P(inp.mx.cached_ptr()),
+                    Arg::P(scratch.as_ref().map_or(0, |g| g.cached_ptr())),
+                ];
+                args.extend(ints(&[tg as i32, stage]));
+                launch(
+                    &ctx,
+                    k.cb.state_terms.get(dtype),
+                    cfg((b * inp.nc, nh, 64usize.div_ceil(tg)), 256, smem),
+                    &args,
+                );
+                terms.push([
+                    bits_f32(&ctx, &dk),
+                    bits_f32(&ctx, &du),
+                    bits_f32(&ctx, &dcs),
+                ]);
+            }
+            for (i, t) in terms.iter().enumerate().skip(1) {
+                assert!(*t == terms[0], "{dtype:?} head {hd}: state terms, run {i}");
+            }
+            // The pair terms at a tile of two tokens.
+            let tl = 2usize;
+            let tr = tl * rank;
+            let mut pairs = Vec::new();
+            for glob in [false, true] {
+                let (dq, dk, du) = (
+                    f32_buf(&ctx, &dq0),
+                    f32_buf(&ctx, &dk0),
+                    f32_buf(&ctx, &du0),
+                );
+                let dwp = GpuBuffer::zeros(s, b * inp.nc * nh * 64 * 65 / 2).unwrap();
+                let scratch = glob.then(|| {
+                    GpuBuffer::zeros(s, b * inp.nc * nh * tr * (3 * ds + 2 * hd + 2)).unwrap()
+                });
+                let smem = if glob {
+                    3 * tr * tr * 4
+                } else {
+                    (3 * tr * ds + 2 * tr * hd + 2 * tr + 3 * tr * tr) * 4
+                };
+                let mut args = vec![
+                    Arg::P(dq.cached_ptr()),
+                    Arg::P(dk.cached_ptr()),
+                    Arg::P(du.cached_ptr()),
+                    Arg::P(dwp.cached_ptr()),
+                    Arg::P(inp.dy.cached_ptr()),
+                    Arg::P(proj.cached_ptr()),
+                    Arg::L(inp.ld_proj as i64),
+                    Arg::P(inp.bn.cached_ptr()),
+                    Arg::P(inp.cn.cached_ptr()),
+                    Arg::P(inp.b_bias.cached_ptr()),
+                    Arg::P(inp.c_bias.cached_ptr()),
+                    Arg::P(inp.coef.cached_ptr()),
+                    Arg::P(inp.sn.cached_ptr()),
+                    Arg::P(inp.cs.cached_ptr()),
+                    Arg::P(inp.mx.cached_ptr()),
+                    Arg::P(scratch.as_ref().map_or(0, |g| g.cached_ptr())),
+                ];
+                args.extend(ints(&[tl as i32]));
+                launch(
+                    &ctx,
+                    k.cb.pairs.get(dtype),
+                    cfg((b * inp.nc, nh, 1), 256, smem),
+                    &args,
+                );
+                pairs.push([
+                    bits_f32(&ctx, &dq),
+                    bits_f32(&ctx, &dk),
+                    bits_f32(&ctx, &du),
+                    bits_f32(&ctx, &dwp),
+                ]);
+            }
+            assert!(
+                pairs[1] == pairs[0],
+                "{dtype:?} head {hd} rank {rank}: pair terms"
+            );
+        }
+        // The entering lead, a thread per channel against a block of 32.
+        let lanes = hd.next_multiple_of(32);
+        let d_init = f32_buf(&ctx, &det(b * nh * hd * ds, 90, 1.0));
+        let e0 = f32_buf(&ctx, &det(b * nh, 91, 1.0));
+        let kst = f32_buf(&ctx, &det(b * nh * rn, 92, 1.0));
+        let vst = f32_buf(&ctx, &det(b * nh * hd, 93, 1.0));
+        let mut leads = Vec::new();
+        for threads in [lanes, 32] {
+            let de0 = GpuBuffer::zeros(s, b * nh).unwrap();
+            let gpsi = GpuBuffer::zeros(s, b * nh * rank * hd).unwrap();
+            let leaves = (lanes > threads).then(|| GpuBuffer::zeros(s, b * nh * lanes).unwrap());
+            let args = [
+                Arg::P(de0.cached_ptr()),
+                Arg::P(gpsi.cached_ptr()),
+                Arg::P(d_init.cached_ptr()),
+                Arg::P(e0.cached_ptr()),
+                Arg::P(kst.cached_ptr()),
+                Arg::P(vst.cached_ptr()),
+                Arg::P(inp.mx.cached_ptr()),
+                Arg::P(leaves.as_ref().map_or(0, |g| g.cached_ptr())),
+                Arg::I(nh as i32),
+                Arg::I(hd as i32),
+                Arg::I(ds as i32),
+                Arg::I(rank as i32),
+            ];
+            launch(
+                &ctx,
+                &k.cb.lead,
+                cfg((b, nh, 1), threads, lanes.min(threads) * 4),
+                &args,
+            );
+            leads.push([bits_f32(&ctx, &de0), bits_f32(&ctx, &gpsi)]);
+        }
+        assert!(leads[1] == leads[0], "head {hd}: the entering lead");
     }
 }

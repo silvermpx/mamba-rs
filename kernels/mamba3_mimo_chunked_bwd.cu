@@ -291,20 +291,24 @@ extern "C" __global__ void __launch_bounds__(512) m3mb_inter_tiles(
 // The state gradient each chunk's outputs give its entering state:
 // dS_loc[p][n] = sum_t e^Acs_t sum_r dy_t[r][p] q_t[r][n] (t, then r,
 // ascending). Laid out as m3m_chunk_state: one block per (chunk, head,
-// n-tile), the chunk's rotated queries for the tile staged.
-// Grid (B * nc, H, ceil(N / nt)), block nt * P threads.
+// n-tile, tile of `pt` channels), the chunk's rotated queries for the tile
+// staged. Grid (B * nc, H, ceil(N / nt) * ceil(P / pt)), the channel tile
+// fastest, block nt * pt threads.
 extern "C" __global__ void m3mb_dsloc(
     float* __restrict__ dsl,
     const float* __restrict__ dy,
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int pt
 ) {
     extern __shared__ float m3mb_sm[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
     const int h = blockIdx.y;
-    const int n0 = blockIdx.z * nt;
+    const int nct = (hd + pt - 1) / pt;
+    const int p0 = (int)(blockIdx.z % nct) * pt;
+    const int pc = min(pt, hd - p0);
+    const int n0 = (int)(blockIdx.z / nct) * nt;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -327,8 +331,9 @@ extern "C" __global__ void m3mb_dsloc(
     for (int t = tid; t < lc; t += blockDim.x)
         et[t] = mimo_exp(coef[((b * seq + t0 + t) * nh + h) * 4 + 3]);
     __syncthreads();
-    const int p = tid % hd, nl = tid / hd;
-    if (nl >= nt || n0 + nl >= ds) return;
+    const int pl = tid % pt, nl = tid / pt;
+    const int p = p0 + pl;
+    if (nl >= nt || n0 + nl >= ds || pl >= pc) return;
     float acc = 0.0f;
     for (int t = 0; t < lc; t++) {
         const long long row = b * seq + t0 + t;
@@ -506,16 +511,18 @@ extern "C" __global__ void m3mb_chunk_dot(
 //   dc_s       = sum_{r, p} u_s[r][p] ste[r][p]   (a fixed tree)
 // With `stage` the chunk's state gradient dS_c is read into shared memory
 // once for the group, rows padded by one, else every token reads it from
-// global memory. Grid (B * nc, H, ceil(64 / tg)), block 256 (the tree's
-// width), dynamic shared memory R * N + R * P floats, plus P * (N + 1)
-// with `stage`.
+// global memory. The token's keys and inputs stage in shared memory, or
+// with `glob` in that block's slice of a global scratch [blocks][R N + R P]
+// when they do not fit. Grid (B * nc, H, ceil(64 / tg)), block 256 (the
+// tree's width), dynamic shared memory R * N + R * P floats without
+// `glob`, plus P * (N + 1) with `stage`.
 template <typename T>
 __device__ __forceinline__ void m3mb_state_terms_body(
     float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dcs,
     const float* __restrict__ dst, const T* __restrict__ proj, long long ld_proj,
     const float* __restrict__ bn, const float* __restrict__ b_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    const float* __restrict__ mimo_x,
+    const float* __restrict__ mimo_x, float* __restrict__ glob,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg, int stage
 ) {
     extern __shared__ float m3mb_sm[];
@@ -536,9 +543,10 @@ __device__ __forceinline__ void m3mb_state_terms_body(
     const int half = ds / 2;
     const float acs_last = coef[((b * seq + t0 + lc - 1) * nh + h) * 4 + 3];
     const float* dsc = dst + (bc * nh + h) * (long long)hd * ds;
-    float* kt = m3mb_sm;                // [R][N]
+    const long long blk = ((long long)bc * gridDim.y + h) * gridDim.z + blockIdx.z;
+    float* kt = glob == nullptr ? m3mb_sm : glob + blk * ((long long)rank * (ds + hd));  // [R][N]
     float* ut = kt + rank * ds;         // [R][P]
-    float* dss = ut + rank * hd;        // [P][N + 1] with stage
+    float* dss = glob == nullptr ? ut + rank * hd : m3mb_sm;  // [P][N + 1] with stage
     const int dld = stage ? ds + 1 : ds;
     const float* dsr = stage ? dss : dsc;
     if (stage) {
@@ -805,11 +813,12 @@ extern "C" __global__ void NAME(                                                
     const float* __restrict__ bn, const float* __restrict__ b_bias,             \
     const float* __restrict__ coef, const float* __restrict__ sn,               \
     const float* __restrict__ cs, const float* __restrict__ mimo_x,             \
+    float* __restrict__ glob,                                                   \
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg,          \
     int stage                                                                   \
 ) {                                                                             \
     m3mb_state_terms_body<T>(dk, du, dcs, dst, proj, ld_proj, bn, b_bias, coef, \
-        sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tg, stage);              \
+        sn, cs, mimo_x, glob, seq, nh, ng, hd, ds, rank, na, tg, stage);        \
 }
 DEFINE_M3MB_STATE_TERMS(m3mb_state_terms, float)
 DEFINE_M3MB_STATE_TERMS(m3mb_state_terms_bf16, __nv_bfloat16)
@@ -827,7 +836,11 @@ DEFINE_M3MB_STATE_TERMS(m3mb_state_terms_f16, __half)
 // run as register tiles (m3m_tile_product). Dynamic shared memory:
 // tl R N + tl R (N + 1) + tl R P + tl R (P + 1) + 3 (tl R)^2 + tl R N
 // floats (queries, keys, dy, u, G, M, wG, the dq tile; key and u rows
-// padded by one). Grid (B * nc, H), block 256.
+// padded by one). With `glob` the queries, keys, dy, u and the dq tile
+// sit in that block's slice of a global scratch [B * nc * H][tl R
+// (3 N + 2 P + 2)] instead, and only G, M and wG in shared memory: the
+// products read the same values in the same order. Grid (B * nc, H),
+// block 256.
 template <typename T>
 __device__ __forceinline__ void m3mb_pairs_body(
     float* __restrict__ dq, float* __restrict__ dk, float* __restrict__ du,
@@ -836,7 +849,7 @@ __device__ __forceinline__ void m3mb_pairs_body(
     const float* __restrict__ bn, const float* __restrict__ cn,
     const float* __restrict__ b_bias, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    const float* __restrict__ mimo_x,
+    const float* __restrict__ mimo_x, float* __restrict__ glob,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl
 ) {
     extern __shared__ float m3mb_sm[];
@@ -856,14 +869,17 @@ __device__ __forceinline__ void m3mb_pairs_body(
     // lane at a step of the G (M) product, which at a stride of N or P
     // (multiples of 32) would put the reads in one bank.
     const int kld = ds + 1, uld = hd + 1;
-    float* qs = m3mb_sm;            // [tl][R][N]
+    float* gstage = glob == nullptr
+        ? nullptr
+        : glob + ((long long)bc * nh + h) * ((long long)tr * (3 * ds + 2 * hd + 2));
+    float* qs = gstage == nullptr ? m3mb_sm : gstage;  // [tl][R][N]
     float* ks = qs + tr * ds;       // [tl][R][N + 1]
     float* dys = ks + tr * kld;     // [tl][R][P]
     float* us = dys + tr * hd;      // [tl][R][P + 1]
-    float* gm = us + tr * uld;      // [tr][tr] G
+    float* gm = gstage == nullptr ? us + tr * uld : m3mb_sm;  // [tr][tr] G
     float* mm = gm + tr * tr;       // [tr][tr] M, then w M
     float* wg = mm + tr * tr;       // [tr][tr] w G
-    float* dqs = wg + tr * tr;      // [tl][R][N]
+    float* dqs = gstage == nullptr ? wg + tr * tr : us + tr * uld;  // [tl][R][N]
     const int tid = threadIdx.x;
     const long long pairs = M3M_CHUNK * (M3M_CHUNK + 1) / 2;
     for (int T0 = 0; T0 < lc; T0 += tl) {
@@ -996,10 +1012,11 @@ extern "C" __global__ void NAME(                                                
     const float* __restrict__ b_bias, const float* __restrict__ c_bias,         \
     const float* __restrict__ coef, const float* __restrict__ sn,               \
     const float* __restrict__ cs, const float* __restrict__ mimo_x,             \
+    float* __restrict__ glob,                                                   \
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl           \
 ) {                                                                             \
     m3mb_pairs_body<T>(dq, dk, du, dwp, dy, proj, ld_proj, bn, cn, b_bias,      \
-        c_bias, coef, sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tl);       \
+        c_bias, coef, sn, cs, mimo_x, glob, seq, nh, ng, hd, ds, rank, na, tl); \
 }
 DEFINE_M3MB_PAIRS(m3mb_pairs, float)
 DEFINE_M3MB_PAIRS(m3mb_pairs_bf16, __nv_bfloat16)
@@ -1587,31 +1604,46 @@ extern "C" __global__ void m3mb_combine(
 // adj[p][n] = sum_r (Psi_r v[p]) kp_r[n] and d_init the gradient of the
 // state entering the window, de0 = sum d_init adj (a fixed tree), and Psi
 // takes e0 v[p] sum_n d_init[p][n] kp_r[n] per (r, p) into gpsi_init
-// [B, H, R, P]. Block a whole number of warps covering P.
+// [B, H, R, P]. Block a whole number of warps covering P, the tree's leaves
+// the channels rounded up to a warp. A head wider than the block (blockDim
+// a power of two then) gives each thread the channels p, p + blockDim and
+// so on, its leaves past the first in `leaves` [B, H, lanes]
+// (mimo_fold_leaves), so the tree is the one a block per channel runs.
 extern "C" __global__ void m3mb_lead(
     float* __restrict__ de0, float* __restrict__ gpsi_init,
     const float* __restrict__ d_init, const float* __restrict__ e0,
     const float* __restrict__ kst, const float* __restrict__ vst,
-    const float* __restrict__ mimo_x,
+    const float* __restrict__ mimo_x, float* __restrict__ leaves,
     int nh, int hd, int ds, int rank
 ) {
     extern __shared__ float m3mb_sm[];
     const long long bh = (long long)blockIdx.x * nh + blockIdx.y;
     const int h = blockIdx.y;
-    const int p = threadIdx.x;
-    float part = 0.0f;
-    if (p < hd) {
-        const float v = vst[bh * hd + p];
-        for (int r = 0; r < rank; r++) {
-            float acc = 0.0f;
-            for (int n = 0; n < ds; n++)
-                acc = __fmaf_rn(d_init[(bh * hd + p) * ds + n], kst[(bh * rank + r) * ds + n], acc);
-            const float psi = mimo_x[((long long)h * rank + r) * hd + p];
-            gpsi_init[(bh * rank + r) * hd + p] = __fmul_rn(__fmul_rn(e0[bh], v), acc);
-            part = __fmaf_rn(__fmul_rn(psi, v), acc, part);
+    const int tid = threadIdx.x, nt = blockDim.x;
+    const int lanes = (hd + 31) & ~31;
+    float* gl = leaves == nullptr ? nullptr : leaves + bh * lanes;
+    float part0 = 0.0f;
+    for (int p = tid; p < lanes; p += nt) {
+        float part = 0.0f;
+        if (p < hd) {
+            const float v = vst[bh * hd + p];
+            for (int r = 0; r < rank; r++) {
+                float acc = 0.0f;
+                for (int n = 0; n < ds; n++)
+                    acc = __fmaf_rn(d_init[(bh * hd + p) * ds + n], kst[(bh * rank + r) * ds + n],
+                                    acc);
+                const float psi = mimo_x[((long long)h * rank + r) * hd + p];
+                gpsi_init[(bh * rank + r) * hd + p] = __fmul_rn(__fmul_rn(e0[bh], v), acc);
+                part = __fmaf_rn(__fmul_rn(psi, v), acc, part);
+            }
         }
+        if (p == tid)
+            part0 = part;
+        else
+            gl[p] = part;
     }
-    const float s = mimo_block_sum(part, m3mb_sm);
+    part0 = mimo_fold_leaves(part0, gl, lanes);
+    const float s = mimo_block_sum_n(part0, m3mb_sm, lanes <= nt ? lanes : nt);
     if (threadIdx.x == 0) de0[bh] = s;
 }
 
