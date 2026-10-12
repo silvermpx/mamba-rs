@@ -575,3 +575,188 @@ extern "C" __global__ void conv1d_bwd_tiled_##SUFFIX(                         \
 DEFINE_CONV1D_BWD_TILED(f32,  float,         from_f_f32)
 DEFINE_CONV1D_BWD_TILED(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_CONV1D_BWD_TILED(f16,  __half,        from_f_f16)
+
+// ============================================================================
+// Any number of taps. The tiled kernels above keep a channel's window, its
+// carries and its tap gradients in arrays of eight; the kernels below read
+// the window from the rows instead, so they serve every width. They run the
+// same chains in the same order, so where both run they give the same bits.
+// ============================================================================
+
+// The forward of any width with fused SiLU over one tile of `tile` steps, a
+// thread per (b, d): each output's chain over the taps ascending, the window
+// read from x_branch and, before t = 0, from the carry-in state (the window
+// before step 0 holds x[k - d_conv] in slot k). A tile at least as deep as
+// the window keeps every later tile's window past t = 0, so only tile 0
+// reads the state, and it writes the carry-out after its outputs.
+// conv_states_saved, when not null, receives the carry-in window, the
+// training tape; u_t, when not null, the outputs in t-major rows of
+// u_t_stride. Grid (ceil(B * d_inner / 256), ceil(T / tile)).
+#define DEFINE_CONV1D_FWD_ANY(SUFFIX, TY, FROM_F)                              \
+extern "C" __global__ void conv1d_fwd_any_##SUFFIX(                           \
+    TY* __restrict__ u_out, TY* __restrict__ u_t, int u_t_stride,             \
+    float* __restrict__ state, float* __restrict__ conv_states_saved,         \
+    const TY* __restrict__ x_branch, const float* __restrict__ weight,        \
+    const float* __restrict__ bias,                                           \
+    int batch, int T_len, int d_inner, int d_conv, int x_stride, int tile     \
+) {                                                                           \
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;                    \
+    if (idx >= batch * d_inner) return;                                       \
+    const int b = idx / d_inner;                                              \
+    const int d = idx % d_inner;                                              \
+    const int t0 = blockIdx.y * tile;                                         \
+    if (t0 >= T_len) return;                                                  \
+    const int t_end = min(t0 + tile, T_len);                                  \
+    const long long state_base = ((long long)b * d_inner + d) * d_conv;       \
+    const long long x_base = (long long)b * T_len;                            \
+    const float* w = weight + (long long)d * d_conv;                          \
+    const float bias_d = bias[d];                                             \
+    for (int t = t0; t < t_end; t++) {                                        \
+        float val = bias_d;                                                   \
+        for (int k = 0; k < d_conv; k++) {                                    \
+            const int tx = t - d_conv + 1 + k;                                \
+            const float xv = tx >= 0                                          \
+                ? to_f(x_branch[(x_base + tx) * x_stride + d])                \
+                : state[state_base + tx + d_conv];                            \
+            val += xv * w[k];                                                 \
+        }                                                                     \
+        const TY u_val =                                                      \
+            FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f)));         \
+        u_out[(x_base + t) * d_inner + d] = u_val;                            \
+        if (u_t != nullptr)                                                   \
+            u_t[((long long)b * d_inner + d) * u_t_stride + t] = u_val;       \
+    }                                                                         \
+    if (t0 == 0) {                                                            \
+        if (conv_states_saved != nullptr)                                     \
+            for (int k = 0; k < d_conv; k++)                                  \
+                conv_states_saved[state_base + k] = state[state_base + k];    \
+        /* After T steps the window holds x[T - d_conv + k], and the         \
+           incoming window's tail where that index is negative: slot k       \
+           then reads slot k + T, which k ascending has not written yet. */  \
+        for (int k = 0; k < d_conv; k++) {                                    \
+            const int th = T_len - d_conv + k;                                \
+            state[state_base + k] = th >= 0                                   \
+                ? to_f(x_branch[(x_base + th) * x_stride + d])                \
+                : state[state_base + k + T_len];                              \
+        }                                                                     \
+    }                                                                         \
+}
+
+DEFINE_CONV1D_FWD_ANY(f32,  float,         from_f_f32)
+DEFINE_CONV1D_FWD_ANY(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_FWD_ANY(f16,  __half,        from_f_f16)
+
+// The backward of any width, first half: every step's pre-activation
+// gradient dco = d_u silu'(v) into an f32 scratch [B * T, d_inner], v
+// recomputed with the forward's chain over the window and rounded to the
+// activation type as the forward stored it. Grid-stride over B * T * d_inner.
+#define DEFINE_CONV1D_BWD_DCO(SUFFIX, TY, FROM_F)                              \
+extern "C" __global__ void conv1d_bwd_dco_##SUFFIX(                           \
+    float* __restrict__ dco, const TY* __restrict__ d_u,                      \
+    const TY* __restrict__ x_branch, const float* __restrict__ conv_init,     \
+    const float* __restrict__ weight, const float* __restrict__ bias,         \
+    int batch, int T_, int d_inner, int d_conv, int x_stride                  \
+) {                                                                           \
+    const long long n = (long long)batch * T_ * d_inner;                      \
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;      \
+         i < n; i += (long long)gridDim.x * blockDim.x) {                     \
+        const int d = (int)(i % d_inner);                                     \
+        const long long bt = i / d_inner;                                     \
+        const int t = (int)(bt % T_);                                         \
+        const long long b = bt / T_;                                          \
+        const long long init_base = (b * d_inner + d) * d_conv;               \
+        const float* w = weight + (long long)d * d_conv;                      \
+        float val = bias[d];                                                  \
+        for (int k = 0; k < d_conv; k++) {                                    \
+            const int tx = t - d_conv + 1 + k;                                \
+            const float xv = tx >= 0                                          \
+                ? to_f(x_branch[(b * T_ + tx) * x_stride + d])                \
+                : conv_init[init_base + tx + d_conv];                         \
+            val += xv * w[k];                                                 \
+        }                                                                     \
+        float x = to_f(FROM_F(val));                                          \
+        float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));          \
+        float silu_grad = sig * (1.0f + x * (1.0f - sig));                    \
+        dco[i] = to_f(d_u[i]) * silu_grad;                                    \
+    }                                                                         \
+}
+
+DEFINE_CONV1D_BWD_DCO(f32,  float,         from_f_f32)
+DEFINE_CONV1D_BWD_DCO(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BWD_DCO(f16,  __half,        from_f_f16)
+
+// The pre-activation gradient of step s of one channel, zero past the
+// window, as the tiled walk takes it.
+__device__ __forceinline__ float conv_dco_at(
+    const float* __restrict__ dco, long long base, int s, int T_, int d_inner
+) {
+    return s < T_ ? dco[base + (long long)s * d_inner] : 0.0f;
+}
+
+// The backward of any width, second half, over the tiles of
+// conv1d_bwd_tiled, a thread per (b, d). d_x of each step is the anticausal
+// sum over the taps in the association the tiled walk's carries build: the
+// farthest step's product first, every nearer one added onto it, then the
+// step's own product added with two roundings. Each tap's gradient and the
+// bias's run their descending-t chains over the tile into the same partial
+// rows. Grid (ceil(B * d_inner / 256), ceil(T / CONV1D_TILE_T)).
+#define DEFINE_CONV1D_BWD_ANY(SUFFIX, TY, FROM_F)                              \
+extern "C" __global__ void conv1d_bwd_any_##SUFFIX(                           \
+    TY* __restrict__ d_x_branch,                                              \
+    float* __restrict__ d_weight_partials, /* [B*n_tiles, di*d_conv] */       \
+    float* __restrict__ d_bias_partials,   /* [B*n_tiles, di] */              \
+    const float* __restrict__ dco,                                            \
+    const TY* __restrict__ x_branch,                                          \
+    const float* __restrict__ conv_init, /* [B*di*d_conv] carry-in */         \
+    const float* __restrict__ weight,                                         \
+    int batch, int T_, int d_inner, int d_conv,                               \
+    int out_stride, int out_offset, int x_stride                              \
+) {                                                                           \
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;                    \
+    if (idx >= batch * d_inner) return;                                       \
+    const int b = idx / d_inner;                                              \
+    const int d = idx % d_inner;                                              \
+    const int n_tiles = (T_ + CONV1D_TILE_T - 1) / CONV1D_TILE_T;             \
+    const int tile = blockIdx.y;                                              \
+    const int t0 = tile * CONV1D_TILE_T;                                      \
+    if (t0 >= T_) return;                                                     \
+    const int t_end = min(t0 + CONV1D_TILE_T, T_);                            \
+    const long long row = (long long)b * n_tiles + tile;                      \
+    const long long init_base = ((long long)b * d_inner + d) * d_conv;        \
+    const long long g_base = (long long)b * T_ * d_inner + d;                 \
+    const float* w = weight + (long long)d * d_conv;                          \
+    for (int ts = t_end - 1; ts >= t0; ts--) {                                \
+        float dxb = __fmul_rn(conv_dco_at(dco, g_base, ts, T_, d_inner),      \
+                              w[d_conv - 1]);                                 \
+        if (d_conv > 1) {                                                     \
+            float acc = conv_dco_at(dco, g_base, ts + d_conv - 1, T_, d_inner) \
+                * w[0];                                                       \
+            for (int j = d_conv - 2; j >= 1; j--)                             \
+                acc = acc + conv_dco_at(dco, g_base, ts + j, T_, d_inner)     \
+                    * w[d_conv - 1 - j];                                      \
+            dxb = __fadd_rn(dxb, acc);                                        \
+        }                                                                     \
+        d_x_branch[((long long)b * T_ + ts) * out_stride + out_offset + d] =  \
+            FROM_F(dxb);                                                      \
+    }                                                                         \
+    for (int k = 0; k < d_conv; k++) {                                        \
+        float acc = 0.0f;                                                     \
+        for (int ts = t_end - 1; ts >= t0; ts--) {                            \
+            const int tx = ts - d_conv + 1 + k;                               \
+            const float xv = tx >= 0                                          \
+                ? to_f(x_branch[((long long)b * T_ + tx) * x_stride + d])     \
+                : conv_init[init_base + tx + d_conv];                         \
+            acc += conv_dco_at(dco, g_base, ts, T_, d_inner) * xv;            \
+        }                                                                     \
+        d_weight_partials[row * ((long long)d_inner * d_conv)                 \
+                          + (long long)d * d_conv + k] = acc;                 \
+    }                                                                         \
+    float bacc = 0.0f;                                                        \
+    for (int ts = t_end - 1; ts >= t0; ts--)                                  \
+        bacc = __fadd_rn(bacc, conv_dco_at(dco, g_base, ts, T_, d_inner));    \
+    d_bias_partials[row * d_inner + d] = bacc;                                \
+}
+
+DEFINE_CONV1D_BWD_ANY(f32,  float,         from_f_f32)
+DEFINE_CONV1D_BWD_ANY(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BWD_ANY(f16,  __half,        from_f_f16)

@@ -80,9 +80,9 @@ pub struct GpuMambaDims {
 impl GpuMambaDims {
     /// Refuse dims these kernels cannot run. The SSM kernels keep
     /// `d_state` floats per thread up to the capacity the context compiled
-    /// them with, and the conv kernels hold at most 8 taps per channel: past
-    /// either bound every launch returns without writing, so nothing is
-    /// launched at all. `xdbl_dim` must be the x_proj row the kernels read.
+    /// them with: past it every launch would return without writing, so
+    /// nothing is launched at all. The conv needs at least one tap, and
+    /// `xdbl_dim` must be the x_proj row the kernels read.
     pub fn check_for(&self, ctx: &GpuCtx) -> Result<(), String> {
         if self.d_state > ctx.state_cap() {
             return Err(format!(
@@ -92,11 +92,8 @@ impl GpuMambaDims {
                 ctx.state_cap()
             ));
         }
-        if self.d_conv == 0 || self.d_conv > 8 {
-            return Err(format!(
-                "d_conv {} is outside the 1..=8 taps the Mamba-1 conv kernels hold",
-                self.d_conv
-            ));
+        if self.d_conv == 0 {
+            return Err("the Mamba-1 conv needs at least one tap (d_conv 0)".into());
         }
         if self.xdbl_dim != self.dt_rank + 2 * self.d_state {
             return Err(format!(
@@ -312,6 +309,9 @@ pub struct GpuMambaScratch {
     ///   - rmsnorm_bwd partials: `B*T * d_model`
     ///   - conv1d_bwd partials: `B * d_inner * d_conv + B * d_inner = B * d_inner * (d_conv + 1)`
     pub axis0_partials: GpuBuffer,
+    /// The conv backward's pre-activation gradients `[B*T*d_inner]` for a
+    /// conv wider than the tiled kernels hold (one element otherwise).
+    pub conv_dco: GpuBuffer,
 }
 
 impl GpuMambaScratch {
@@ -382,6 +382,10 @@ impl GpuMambaScratch {
                     bt * d_model,
                     batch * dims.seq_len.div_ceil(128) * d_inner * (dims.d_conv + 1),
                 ),
+            )?,
+            conv_dco: GpuBuffer::zeros(
+                stream,
+                super::conv::conv_dco_len(bt, d_inner, dims.d_conv),
             )?,
         })
     }
@@ -475,33 +479,21 @@ pub fn gpu_forward_mamba_layer(
     // (u_out, state, conv_states_out, x_branch, weight, bias,
     //  batch, T, d_inner, d_conv, x_stride). Grid (b*di, T tiles) instead
     // of a serial walk over T; x is the first half of the in_proj output.
-    {
-        let b_i = b as i32;
-        let t_i = t as i32;
-        let di_i = di as i32;
-        let dc_i = d_conv as i32;
-        let mut builder = ctx.stream.launch_builder(
-            ctx.kernels
-                .conv1d_burnin_fwd_tiled_typed
-                .get(crate::gpu::dtype::WeightDtype::F32),
-        );
-        builder.arg(acts.u.inner_mut());
-        builder.arg(&layer_ptrs.conv_state); // state (raw ptr at layer offset)
-        builder.arg(acts.conv_states.inner_mut());
-        builder.arg(acts.proj.inner());
-        let cw_ptr = lw.conv1d_weight.cached_ptr();
-        let cb_ptr = lw.conv1d_bias.cached_ptr();
-        builder.arg(&cw_ptr);
-        builder.arg(&cb_ptr);
-        builder.arg(&b_i);
-        builder.arg(&t_i);
-        builder.arg(&di_i);
-        builder.arg(&dc_i);
-        let x_stride = (2 * di) as i32;
-        builder.arg(&x_stride);
-        unsafe { builder.launch(crate::gpu::launch::grid_conv_fwd_tiled(b, di, t)) }
-            .map_err(|e| format!("conv1d_burnin_fwd_tiled mamba: {:?}", e))?;
-    }
+    super::conv::conv_forward(
+        ctx,
+        crate::gpu::dtype::WeightDtype::F32,
+        &super::conv::ConvForward {
+            u: acts.u.cached_ptr(),
+            u_t: (0, 0),
+            state: layer_ptrs.conv_state,
+            saved: acts.conv_states.cached_ptr(),
+            x: (acts.proj.cached_ptr(), 2 * di),
+            weight: lw.conv1d_weight.cached_ptr(),
+            bias: lw.conv1d_bias.cached_ptr(),
+        },
+        (b, t, di, d_conv),
+        format_args!("training"),
+    )?;
 
     // ===================================================================
     // F4b: x_proj -- ONE cuBLAS SGEMM
@@ -960,37 +952,25 @@ pub fn gpu_forward_mamba_target_burnin(
         // the gate half, as the prefill chain does.
 
         // === F4a: conv1d burnin nosave + fused SiLU, T-tiled ===
-        {
-            let b_i = b as i32;
-            let t_i = t as i32;
-            let di_i = di as i32;
-            let dc_i = d_conv as i32;
-            let mut builder = ctx
-                .stream
-                .launch_builder(&ctx.kernels.conv1d_burnin_fwd_nosave_tiled);
-            builder.arg(scratch.u.inner_mut()); // post-SiLU output [B*T*di]
-            let ut_ptr = if tmajor_in {
-                scratch.u_t.cached_ptr()
-            } else {
-                0
-            };
-            builder.arg(&ut_ptr);
-            builder.arg(&conv_ptr); // per-layer state
-            builder.arg(scratch.proj_flat.inner());
-            let cw_ptr = lw.conv1d_weight.cached_ptr();
-            let cb_ptr = lw.conv1d_bias.cached_ptr();
-            builder.arg(&cw_ptr);
-            builder.arg(&cb_ptr);
-            builder.arg(&b_i);
-            builder.arg(&t_i);
-            builder.arg(&di_i);
-            builder.arg(&dc_i);
-            let x_stride = (2 * di) as i32;
-            builder.arg(&x_stride);
-            builder.arg(&ts_i);
-            unsafe { builder.launch(crate::gpu::launch::grid_conv_fwd_tiled(b, di, t)) }
-                .map_err(|e| format!("conv1d_nosave_tiled target L{layer_idx}: {:?}", e))?;
-        }
+        super::conv::conv_forward(
+            ctx,
+            crate::gpu::dtype::WeightDtype::F32,
+            &super::conv::ConvForward {
+                u: scratch.u.cached_ptr(),
+                u_t: if tmajor_in {
+                    (scratch.u_t.cached_ptr(), ts)
+                } else {
+                    (0, 0)
+                },
+                state: conv_ptr,
+                saved: 0,
+                x: (scratch.proj_flat.cached_ptr(), 2 * di),
+                weight: lw.conv1d_weight.cached_ptr(),
+                bias: lw.conv1d_bias.cached_ptr(),
+            },
+            (b, t, di, d_conv),
+            format_args!("target L{layer_idx}"),
+        )?;
 
         // === F4b: x_proj SGEMM [B*T, di] -> [B*T, xdbl_dim] ===
         gpu_gemm_bi_forward_raw(

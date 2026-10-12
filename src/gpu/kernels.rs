@@ -156,7 +156,6 @@ pub struct MambaKernels {
     /// Nosave tiled twin (inference prefill): tile-0 seeds from the
     /// carry-in state, later tiles from the x_branch halo - bit-identical
     /// to the serial nosave walk at two orders more parallelism.
-    pub conv1d_burnin_fwd_nosave_tiled: CudaFunction,
     pub conv1d_burnin_nosave_tiled_typed: TypedKernel,
 
     // -- Activations --
@@ -240,6 +239,13 @@ pub struct MambaKernels {
     /// the typed backward parity test drives; production runs the tiled
     /// kernel above. Matches DEFINE_CONV1D_BURNIN_BWD in conv1d.cu.
     pub conv1d_burnin_bwd_typed: TypedKernel,
+    /// The conv forward of any width, its window read from the rows: the
+    /// tiled kernels' chains for a conv wider than they hold.
+    pub conv1d_fwd_any_typed: TypedKernel,
+    /// The conv backward of any width: the pre-activation gradients, then
+    /// the tiled walk's d_x, tap and bias partials from them.
+    pub conv1d_bwd_dco_typed: TypedKernel,
+    pub conv1d_bwd_any_typed: TypedKernel,
 
     // -- Typed training-backward kernels (the HOTTEST kernel) --
     /// Typed dispatch (f32/bf16/f16) for `ssm_backward_local` — the BPTT
@@ -1481,7 +1487,6 @@ impl MambaKernels {
             ssm_reduce_d_a_log: get("ssm_reduce_d_a_log")?,
             ssm_reduce_d_a_log_chunks: get("ssm_reduce_d_a_log_chunks")?,
             // conv1d
-            conv1d_burnin_fwd_nosave_tiled: get("conv1d_burnin_forward_nosave_tiled_f32")?,
             conv1d_burnin_nosave_tiled_typed: load_typed("conv1d_burnin_forward_nosave_tiled")?,
             // activations
             softplus_fwd: get("softplus_forward")?,
@@ -1735,6 +1740,9 @@ impl MambaKernels {
             conv1d_burnin_bwd_typed: load_typed("conv1d_burnin_backward")?,
             conv1d_burnin_fwd_tiled_typed: load_typed("conv1d_burnin_forward_tiled")?,
             conv1d_bwd_tiled_typed: load_typed("conv1d_bwd_tiled")?,
+            conv1d_fwd_any_typed: load_typed("conv1d_fwd_any")?,
+            conv1d_bwd_dco_typed: load_typed("conv1d_bwd_dco")?,
+            conv1d_bwd_any_typed: load_typed("conv1d_bwd_any")?,
             // ssm_backward_local typed + typed-input reducers
             ssm_backward_local_typed: load_typed("ssm_backward_local")?,
             pack_xdbl_cols_typed: TypedKernel {

@@ -537,6 +537,11 @@ path = "tests/m1_gpu_matrix_parity.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m1_conv_any_bits"
+path = "tests/m1_conv_any_bits.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "loss_scaler"
 path = "tests/loss_scaler.rs"
 required-features = ["cuda"]

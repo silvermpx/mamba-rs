@@ -5,11 +5,13 @@
 //! - `prefill`: the GPU prompt prefill
 //! - `forward`, `backward`, `forward_mixed`, `backward_mixed`: the f32 and
 //!   the mixed-precision training passes
+//! - `conv`: the depthwise conv launches they share, at any width
 //! - `trainer`, `training_graph`: the training step and its captured graph
 //! - `weights`, `weights_mixed_train`: device weights
 
 pub mod backward;
 pub mod backward_mixed;
+pub(crate) mod conv;
 pub mod forward;
 pub mod forward_mixed;
 pub mod inference;

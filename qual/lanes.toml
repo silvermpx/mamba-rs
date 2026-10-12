@@ -154,6 +154,7 @@
 "large_d_state" = "gate"
 "loss_scaler" = "gate"
 "m1_cpu_benchmark" = "bench"
+"m1_conv_any_bits" = "gate"
 "m1_gpu_matrix_parity" = "gate"
 "m1_gpu_benchmark" = "bench"
 "m1_parallel_bwd_parity" = "contract"

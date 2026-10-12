@@ -42,8 +42,10 @@ fn m1_dims_past_the_compiled_capacities_are_refused() {
     m1_dims(16, 4).check_for(&ctx).expect("16 states fit");
     let err = m1_dims(32, 4).check_for(&ctx).unwrap_err();
     assert!(err.contains("d_state 32") && err.contains("16"), "{err}");
-    let err = m1_dims(16, 9).check_for(&ctx).unwrap_err();
-    assert!(err.contains("d_conv 9"), "{err}");
+    // Any conv width runs; a conv needs a tap.
+    m1_dims(16, 9).check_for(&ctx).expect("nine taps run");
+    let err = m1_dims(16, 0).check_for(&ctx).unwrap_err();
+    assert!(err.contains("d_conv 0"), "{err}");
     let mut skewed = m1_dims(16, 4);
     skewed.xdbl_dim += 1;
     assert!(skewed.check_for(&ctx).is_err());

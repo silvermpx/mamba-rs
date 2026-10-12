@@ -1,9 +1,11 @@
 //! Mamba-1 on the GPU against the CPU at inner widths that are not a
-//! multiple of four, odd ones too: a prompt through the prefill and decode
-//! steps after it, and a training window's rows and every gradient, in
-//! every storage precision, both scan modes and the cuBLAS modes. The
-//! parallel backward folds four channels at a time, so these widths take
-//! its ungrouped kernel and the flat reducers.
+//! multiple of four, odd ones too, and at conv widths from 2 to 64: a
+//! prompt through two prefills and decode steps after them, and a training
+//! window's rows and every gradient, in every storage precision, both scan
+//! modes and the cuBLAS modes. The parallel backward folds four channels at
+//! a time, so the odd inner widths take its ungrouped kernel and the flat
+//! reducers; a conv wider than eight taps takes the kernels that read their
+//! window from the rows, and one wider than 32 deepens the forward tiles.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::MambaBackbone;
@@ -71,6 +73,39 @@ fn cases() -> Vec<(&'static str, MambaConfig)> {
                 ..base
             },
         ),
+        (
+            "d_conv 2",
+            MambaConfig {
+                d_model: 8,
+                d_conv: 2,
+                ..base
+            },
+        ),
+        (
+            "d_conv 9, past the window the tiled conv holds",
+            MambaConfig {
+                d_model: 6,
+                d_conv: 9,
+                ..base
+            },
+        ),
+        (
+            "d_conv 40, deeper than a forward tile",
+            MambaConfig {
+                d_model: 12,
+                d_conv: 40,
+                ..base
+            },
+        ),
+        (
+            "d_conv 64 at an odd inner width",
+            MambaConfig {
+                d_model: 7,
+                expand: 3,
+                d_conv: 64,
+                ..base
+            },
+        ),
     ]
 }
 
@@ -108,11 +143,13 @@ const LANES: [(WeightDtype, f64); 4] = [
     (WeightDtype::Bf16, 3e-2),
 ];
 
-/// A prompt of two sequences through the prefill, then decode steps, against
-/// the CPU walking every token of each sequence one by one.
+/// A prompt of two sequences through two prefills, the second from the
+/// state the first left, then decode steps, against the CPU walking every
+/// token of each sequence one by one. Both prefills are shorter than the
+/// widest conv, so its carry-out keeps part of the window it came in with.
 #[test]
-fn m1_gpu_prefill_and_decode_match_cpu_at_any_inner_width() {
-    let (input_dim, batch, seq) = (12usize, 2usize, 37usize);
+fn m1_gpu_prefill_and_decode_match_cpu_at_any_width() {
+    let (input_dim, batch, seq, split) = (12usize, 2usize, 37usize, 17usize);
     for (label, base) in cases() {
         for scan_mode in [ScanMode::Sequential, ScanMode::Parallel] {
             let cfg = MambaConfig { scan_mode, ..base };
@@ -124,20 +161,34 @@ fn m1_gpu_prefill_and_decode_match_cpu_at_any_inner_width() {
             let steps: Vec<Vec<f32>> = (0..6)
                 .map(|t| det(batch * input_dim, 400 + t, 1.0))
                 .collect();
-            // The CPU's last prompt row and its decode rows, per sequence.
-            let mut want = vec![vec![0f32; batch * dm]; steps.len() + 1];
+            // The prompt rows of every sequence over [a, z).
+            let part = |a: usize, z: usize| -> Vec<f32> {
+                (0..batch)
+                    .flat_map(|b| {
+                        prompt[(b * seq + a) * input_dim..(b * seq + z) * input_dim]
+                            .iter()
+                            .copied()
+                    })
+                    .collect()
+            };
+            // The CPU's last row of each prefill and its decode rows, per
+            // sequence.
+            let mut want = vec![vec![0f32; batch * dm]; steps.len() + 2];
             for b in 0..batch {
                 let (mut st, mut sc) = (cpu.alloc_state(), cpu.alloc_scratch());
                 let mut c = vec![0f32; dm];
                 for t in 0..seq {
                     let at = (b * seq + t) * input_dim;
                     cpu.forward_step(&prompt[at..at + input_dim], &mut c, &mut st, &mut sc);
+                    if t + 1 == split {
+                        want[0][b * dm..(b + 1) * dm].copy_from_slice(&c);
+                    }
                 }
-                want[0][b * dm..(b + 1) * dm].copy_from_slice(&c);
+                want[1][b * dm..(b + 1) * dm].copy_from_slice(&c);
                 for (s, x) in steps.iter().enumerate() {
                     let x = &x[b * input_dim..(b + 1) * input_dim];
                     cpu.forward_step(x, &mut c, &mut st, &mut sc);
-                    want[s + 1][b * dm..(b + 1) * dm].copy_from_slice(&c);
+                    want[s + 2][b * dm..(b + 1) * dm].copy_from_slice(&c);
                 }
             }
             let mut runs: Vec<(WeightDtype, GemmMode, f64)> = LANES
@@ -151,13 +202,16 @@ fn m1_gpu_prefill_and_decode_match_cpu_at_any_inner_width() {
             for (dtype, mode, tol) in runs {
                 let opts = GpuOptions::default().dtype(dtype).mode(mode);
                 let mut gpu = MambaGpuBackbone::new(&w, cfg, input_dim, batch, opts).unwrap();
-                gpu.prefill(&prompt, seq).unwrap();
                 let mut g = vec![0f32; batch * dm];
-                gpu.download_temporal(&mut g).unwrap();
-                let mut worst = rel_l2(&g, &want[0]);
+                let mut worst = 0f64;
+                for (i, (a, z)) in [(0, split), (split, seq)].into_iter().enumerate() {
+                    gpu.prefill(&part(a, z), z - a).unwrap();
+                    gpu.download_temporal(&mut g).unwrap();
+                    worst = worst.max(rel_l2(&g, &want[i]));
+                }
                 for (s, x) in steps.iter().enumerate() {
                     gpu.step(x, &mut g).unwrap();
-                    worst = worst.max(rel_l2(&g, &want[s + 1]));
+                    worst = worst.max(rel_l2(&g, &want[s + 2]));
                 }
                 eprintln!(
                     "{label} {scan_mode:?} {dtype:?} {mode:?}: prefill + decode vs CPU {worst:.2e}"
@@ -288,10 +342,11 @@ fn cpu_reference(
 }
 
 /// The training window's rows and every gradient against the CPU trainer:
-/// both scan modes, every storage precision.
+/// both scan modes, every storage precision. 150 steps take several
+/// forward tiles at every conv width and two backward tiles.
 #[test]
-fn m1_gpu_train_matches_cpu_at_any_inner_width() {
-    let (input_dim, batch, seq) = (12usize, 2usize, 40usize);
+fn m1_gpu_train_matches_cpu_at_any_width() {
+    let (input_dim, batch, seq) = (12usize, 2usize, 150usize);
     for (label, base) in cases() {
         for scan_mode in [ScanMode::Sequential, ScanMode::Parallel] {
             let cfg = MambaConfig { scan_mode, ..base };

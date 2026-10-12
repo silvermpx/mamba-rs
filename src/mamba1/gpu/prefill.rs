@@ -607,40 +607,27 @@ fn prefill_body<W: MambaWeightsView>(
         // into its y store - three kernels and two B*T*di round-trips
         // replaced by two strided reads, bit-identically.
 
-        // F4a: conv1d burnin nosave + fused SiLU [all T, parallel B*d_inner]
-        {
-            let b_i = b as i32;
-            let t_i = t as i32;
-            let di_i = di as i32;
-            let dc_i = d_conv as i32;
-            let mut builder = ctx
-                .stream
-                .launch_builder(&ctx.kernels.conv1d_burnin_fwd_nosave_tiled);
-            builder.arg(scratch.u.inner_mut());
-            let ut_ptr = if tmajor_in {
-                scratch.u_t.cached_ptr()
-            } else {
-                0
-            };
-            builder.arg(&ut_ptr);
-            builder.arg(&conv_ptr); // INFERENCE STATE conv — persistent
-            builder.arg(scratch.proj_flat.inner());
-            let cw = lw.conv1d_weight();
-            let cb = lw.conv1d_bias();
-            builder.arg(&cw);
-            builder.arg(&cb);
-            builder.arg(&b_i);
-            builder.arg(&t_i);
-            builder.arg(&di_i);
-            builder.arg(&dc_i);
-            let xs_i = (2 * di) as i32;
-            builder.arg(&xs_i);
-            builder.arg(&ts_i);
-            // T-tiled: 3 blocks at B=1 became ~111 - the serial T=4621
-            // walk was the single largest prefill stage.
-            unsafe { builder.launch(crate::gpu::launch::grid_conv_fwd_tiled(b, di, t)) }
-                .map_err(|e| format!("conv1d_nosave_tiled prefill L{layer_idx}: {e:?}"))?;
-        }
+        // F4a: conv1d burnin nosave + fused SiLU [all T, parallel B*d_inner],
+        // into the inference state's persistent conv window.
+        super::conv::conv_forward(
+            ctx,
+            crate::gpu::dtype::WeightDtype::F32,
+            &super::conv::ConvForward {
+                u: scratch.u.cached_ptr(),
+                u_t: if tmajor_in {
+                    (scratch.u_t.cached_ptr(), ts)
+                } else {
+                    (0, 0)
+                },
+                state: conv_ptr,
+                saved: 0,
+                x: (scratch.proj_flat.cached_ptr(), 2 * di),
+                weight: lw.conv1d_weight(),
+                bias: lw.conv1d_bias(),
+            },
+            (b, t, di, d_conv),
+            format_args!("prefill L{layer_idx}"),
+        )?;
 
         // F4b: x_proj GEMM [B*T, di] → [B*T, xdbl_dim]
         let (xpw, xpw_dt) = lw.x_proj_w();
@@ -1095,39 +1082,25 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
         // round-trip emulation of the replaced typed chain.
 
         // F4a: conv1d burnin nosave typed (with fused SiLU).
-        {
-            let b_i = b as i32;
-            let t_i = t as i32;
-            let di_i = di as i32;
-            let dc_i = d_conv as i32;
-            let mut bld = ctx
-                .stream
-                .launch_builder(k.conv1d_burnin_nosave_tiled_typed.get(dt));
-            let u_ptr = scratch.u.cached_ptr();
-            let ut_ptr = if tmajor_in {
-                scratch.u_t.cached_ptr()
-            } else {
-                0
-            };
-            let xb_ptr = scratch.proj_flat.cached_ptr();
-            bld.arg(&u_ptr);
-            bld.arg(&ut_ptr);
-            bld.arg(&conv_ptr);
-            bld.arg(&xb_ptr);
-            let cw = lw.conv1d_weight();
-            let cb = lw.conv1d_bias();
-            bld.arg(&cw);
-            bld.arg(&cb);
-            bld.arg(&b_i);
-            bld.arg(&t_i);
-            bld.arg(&di_i);
-            bld.arg(&dc_i);
-            let xs_i = (2 * di) as i32;
-            bld.arg(&xs_i);
-            bld.arg(&ts_i);
-            unsafe { bld.launch(crate::gpu::launch::grid_conv_fwd_tiled(b, di, t)) }
-                .map_err(|e| format!("conv1d_nosave_tiled prefill L{layer_idx}: {e:?}"))?;
-        }
+        super::conv::conv_forward(
+            ctx,
+            dt,
+            &super::conv::ConvForward {
+                u: scratch.u.cached_ptr(),
+                u_t: if tmajor_in {
+                    (scratch.u_t.cached_ptr(), ts)
+                } else {
+                    (0, 0)
+                },
+                state: conv_ptr,
+                saved: 0,
+                x: (scratch.proj_flat.cached_ptr(), 2 * di),
+                weight: lw.conv1d_weight(),
+                bias: lw.conv1d_bias(),
+            },
+            (b, t, di, d_conv),
+            format_args!("prefill L{layer_idx}"),
+        )?;
 
         // F4b: x_proj GEMM typed.
         let (xpw, xpw_dt) = lw.x_proj_w();

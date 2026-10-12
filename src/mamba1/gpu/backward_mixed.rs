@@ -620,10 +620,7 @@ pub fn gpu_backward_mamba_layer_mixed(
     // Stage 2: two reduce_sum_axis0 launches reduce across B → f32 master
     //          grads in d_lw.conv1d_weight / d_lw.conv1d_bias.
     {
-        let b_i = b as i32;
-        let t_i = t as i32;
         let di_i = di as i32;
-        let dc_i = d_conv as i32;
         let n_tiles = t.div_ceil(128);
         let weight_partials_elems = b * n_tiles * di * d_conv;
         let bias_offset_bytes = (weight_partials_elems * std::mem::size_of::<f32>()) as u64;
@@ -634,36 +631,23 @@ pub fn gpu_backward_mamba_layer_mixed(
         // Stage 1: one tiled kernel walks d_x, the tap partials and the
         // bias partials together, recomputing the pre-activation from the
         // x window (no tape). The x half of d_proj is written in place.
-        {
-            let dxb = scratch.d_proj.cached_ptr();
-            let du = scratch.d_u.cached_ptr();
-            let xb = acts.proj.cached_ptr(); // x half, read through the row stride
-            let cs = acts.conv_states.cached_ptr();
-            let w = lw.conv1d_weight.ptr();
-            let cb = lw.conv1d_bias.ptr();
-            let mut bld = ctx
-                .stream
-                .launch_builder(k.conv1d_bwd_tiled_typed.get(dtype));
-            bld.arg(&dxb);
-            bld.arg(&wp_ptr); // d_weight_partials
-            bld.arg(&bp_ptr); // d_bias_partials
-            bld.arg(&du);
-            bld.arg(&xb);
-            bld.arg(&cs); // carry-in window (conv_init)
-            bld.arg(&w);
-            bld.arg(&cb);
-            bld.arg(&b_i);
-            bld.arg(&t_i);
-            bld.arg(&di_i);
-            bld.arg(&dc_i);
-            let proj_stride = (2 * di) as i32;
-            let x_off = 0i32;
-            bld.arg(&proj_stride);
-            bld.arg(&x_off);
-            bld.arg(&proj_stride); // x row stride
-            unsafe { bld.launch(crate::gpu::launch::grid_conv_tiled(b, di, t)) }
-                .map_err(|e| format!("conv1d_bwd_tiled mixed: {e:?}"))?;
-        }
+        super::conv::conv_backward(
+            ctx,
+            dtype,
+            &super::conv::ConvBackward {
+                d_x: (scratch.d_proj.cached_ptr(), 2 * di, 0),
+                d_weight_partials: wp_ptr,
+                d_bias_partials: bp_ptr,
+                d_u: scratch.d_u.cached_ptr(),
+                x: (acts.proj.cached_ptr(), 2 * di),
+                conv_init: acts.conv_states.cached_ptr(),
+                weight: lw.conv1d_weight.ptr(),
+                bias: lw.conv1d_bias.ptr(),
+                dco: scratch.conv_dco.cached_ptr(),
+            },
+            (b, t, di, d_conv),
+            format_args!("training"),
+        )?;
         // Stage 2a: reduce weight partials [B, di*d_conv] → d_lw.conv1d_weight.
         {
             let block_dim = (b as u32).next_power_of_two().clamp(32, 256);

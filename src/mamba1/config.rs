@@ -103,12 +103,9 @@ impl MambaConfig {
                 self.d_state
             ));
         }
-        // CUDA conv1d kernel unrolls d_conv — max 8
-        if self.d_conv > 8 {
-            return Err(format!(
-                "d_conv ({}) must be <= 8 (CUDA kernel limit)",
-                self.d_conv
-            ));
+        // The bound the Mamba-2 config keeps too.
+        if self.d_conv > 64 {
+            return Err(format!("d_conv ({}) must be <= 64", self.d_conv));
         }
         Ok(())
     }

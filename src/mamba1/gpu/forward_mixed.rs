@@ -225,6 +225,9 @@ pub struct GpuMambaMixedTrainScratch {
     ///   - rmsnorm_bwd partials:      B*T * d_model
     ///   - conv1d_bwd partials:       B * d_inner * (d_conv + 1)
     pub axis0_partials: GpuBuffer,
+    /// The conv backward's pre-activation gradients `[B*T*d_inner]` for a
+    /// conv wider than the tiled kernels hold (one element otherwise).
+    pub conv_dco: GpuBuffer,
 }
 
 impl GpuMambaMixedTrainScratch {
@@ -294,6 +297,7 @@ impl GpuMambaMixedTrainScratch {
                     b * dims.seq_len.div_ceil(128) * di * (dims.d_conv + 1),
                 ),
             )?,
+            conv_dco: GpuBuffer::zeros(stream, super::conv::conv_dco_len(bt, di, dims.d_conv))?,
         };
         // Race-fix invariant (a950648): callers may immediately upload from
         // host via default-stream HtoD; sync first.
@@ -492,38 +496,23 @@ pub fn gpu_forward_mamba_backbone_mixed(
             (bt, dm, 2 * di),
         )?;
 
-        // F4a: conv1d_burnin_forward_typed — typed I/O, f32 state save.
-        {
-            let b_i = b as i32;
-            let t_i = t as i32;
-            let di_i = di as i32;
-            let dc_i = d_conv as i32;
-            // The typed-signature kernel keeps one argument order for every
-            // dtype: (u_out, state, conv_states_out, x_branch, weight, bias,
-            // batch, T, d_inner, d_conv, x_stride); x is the first half of
-            // the in_proj output.
-            let kernel = k.conv1d_burnin_fwd_tiled_typed.get(dt);
-            let mut bld = ctx.stream.launch_builder(kernel);
-            let u = layer_acts.u.cached_ptr();
-            let cs = layer_acts.conv_states.cached_ptr();
-            let xb = layer_acts.proj.cached_ptr();
-            bld.arg(&u);
-            bld.arg(&conv_ptr); // state (f32, layer offset)
-            bld.arg(&cs);
-            bld.arg(&xb);
-            let cw = lw.conv1d_weight.ptr();
-            let cb = lw.conv1d_bias.ptr();
-            bld.arg(&cw);
-            bld.arg(&cb);
-            bld.arg(&b_i);
-            bld.arg(&t_i);
-            bld.arg(&di_i);
-            bld.arg(&dc_i);
-            let x_stride = (2 * di) as i32;
-            bld.arg(&x_stride);
-            unsafe { bld.launch(crate::gpu::launch::grid_conv_fwd_tiled(b, di, t)) }
-                .map_err(|e| format!("conv1d_burnin_tiled L{layer_idx}: {e:?}"))?;
-        }
+        // F4a: the conv with fused SiLU, typed I/O, f32 state save; x is
+        // the first half of the in_proj output.
+        super::conv::conv_forward(
+            ctx,
+            dt,
+            &super::conv::ConvForward {
+                u: layer_acts.u.cached_ptr(),
+                u_t: (0, 0),
+                state: conv_ptr,
+                saved: layer_acts.conv_states.cached_ptr(),
+                x: (layer_acts.proj.cached_ptr(), 2 * di),
+                weight: lw.conv1d_weight.ptr(),
+                bias: lw.conv1d_bias.ptr(),
+            },
+            (b, t, di, d_conv),
+            format_args!("training L{layer_idx}"),
+        )?;
 
         // F4b: x_proj GEMM typed.
         gpu_gemm_typed_forward_raw(
