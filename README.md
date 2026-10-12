@@ -54,7 +54,7 @@ underneath. The GPU path links only the CUDA driver API and cuBLAS.
 - Safetensors checkpoints for every family, and loaders for the official
   HuggingFace and `mamba_ssm` checkpoints.
 - State dimensions up to 256.
-- MSRV 1.97.
+- MSRV 1.98.1.
 
 ## Cargo features
 

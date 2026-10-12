@@ -62,6 +62,7 @@
 
 ### Changed
 
+- MSRV 1.97 -> 1.98.1.
 - The GPU kernels compile as three modules instead of one: `Inference`
   holds the inference GEMMs and the casts their routes launch, `Mamba1`
   the Mamba-1 scan, convolution and element-wise kernels, and `Shared` the
