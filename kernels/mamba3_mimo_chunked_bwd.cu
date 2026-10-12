@@ -1517,7 +1517,7 @@ DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_bf16, __nv_bfloat16)
 DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_f16, __half)
 
 #define DEFINE_M3MB_PAIRS_DK(NAME, T)                                           \
-extern "C" __global__ void NAME(                                                \
+extern "C" __global__ void __launch_bounds__(512) NAME(                         \
     float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dwp,    \
     const float* __restrict__ dy, const T* __restrict__ proj,                   \
     long long ld_proj,                                                          \
