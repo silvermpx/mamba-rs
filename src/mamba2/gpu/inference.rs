@@ -159,12 +159,6 @@ pub(crate) fn check_device_envelope(
 ) -> Result<(), String> {
     let (hd, ds, nh, ng) = (cfg.headdim, cfg.d_state, cfg.nheads(), cfg.ngroups);
     let optin = kernels.smem_optin;
-    if cfg.d_model < 32 {
-        return Err(format!(
-            "the GPU row norm reduces whole warps; d_model {} is below 32",
-            cfg.d_model
-        ));
-    }
     if step_rows(hd, ds, optin).is_none() {
         return Err(format!(
             "a scan channel of {ds} states does not fit this GPU's {optin} bytes of shared memory"

@@ -314,6 +314,10 @@ pub fn forward_mamba3_backbone_prefill_mode(
     let t_len = dims.seq_len;
     let is_outproj_norm = dims.is_outproj_norm;
     let t_dm = t_len * dm;
+    // An empty prompt leaves the state where it was.
+    if t_len == 0 {
+        return;
+    }
 
     assert!(ds <= MAX_DS, "d_state > {MAX_DS} unsupported");
     assert!(

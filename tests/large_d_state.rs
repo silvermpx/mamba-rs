@@ -84,6 +84,59 @@ fn m1_gpu_step_matches_cpu_at_d_state_256() {
     check_step_parity(256);
 }
 
+/// An explicit Sequential at 128 states runs the sequential scan and trains
+/// like the parallel scan: the forward rows and every gradient agree to
+/// rounding, the same recurrence summed in another order. Before, the mode
+/// was silently replaced by Parallel above 64 states.
+#[test]
+fn m1_explicit_sequential_trains_at_d_state_128() {
+    use mamba_rs::config::ScanMode;
+    use mamba_rs::{BackwardOpts, MambaGpuTrainer, TrainSessionCfg};
+    let (batch, seq_len, dm) = (2, 40, 64);
+    let run = |scan_mode: ScanMode| -> (Vec<f32>, Vec<f32>) {
+        let cfg = MambaConfig {
+            d_model: dm,
+            n_layers: 2,
+            d_state: 128,
+            d_conv: 4,
+            expand: 2,
+            scan_mode,
+            rms_norm_eps: 1e-5,
+        };
+        let w = MambaWeights::init(&cfg, dm, 7);
+        let session = TrainSessionCfg {
+            input_dim: dm,
+            batch,
+            seq_len,
+            lr: 1e-3,
+            weight_decay: 0.0,
+        };
+        let mut t = MambaGpuTrainer::new(&w, cfg, session, GpuOptions::default()).unwrap();
+        let mut rows = vec![0.0f32; batch * seq_len * dm];
+        t.forward(&det(batch * seq_len * dm, 0x71), &mut rows)
+            .unwrap();
+        let d = det(batch * seq_len * dm, 0x72);
+        t.backward_step(&d, BackwardOpts::default()).unwrap();
+        let stream = t.ctx().stream.clone();
+        (rows, t.grad_arena().to_cpu(&stream).unwrap())
+    };
+    let (seq_rows, seq_grads) = run(ScanMode::Sequential);
+    let (par_rows, par_grads) = run(ScanMode::Parallel);
+    let rel = |a: &[f32], b: &[f32]| -> f64 {
+        let num: f64 = a.iter().zip(b).map(|(x, y)| f64::from(x - y).powi(2)).sum();
+        let den: f64 = b.iter().map(|y| f64::from(*y).powi(2)).sum();
+        (num / den.max(1e-30)).sqrt()
+    };
+    let (r, g) = (rel(&seq_rows, &par_rows), rel(&seq_grads, &par_grads));
+    eprintln!("sequential vs parallel at 128 states: rows {r:.2e}, grads {g:.2e}");
+    assert!(
+        seq_rows != par_rows || seq_grads != par_grads,
+        "the explicit Sequential gave the parallel scan's bits: it was not honoured"
+    );
+    assert!(r < 1e-4, "forward rows differ by {r}");
+    assert!(g < 1e-3, "gradients differ by {g}");
+}
+
 #[test]
 fn state_capacity_range() {
     use mamba_rs::gpu::kernels::state_capacity;

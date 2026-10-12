@@ -108,6 +108,26 @@ pub fn grid_1d(n: usize) -> LaunchConfig {
     }
 }
 
+/// The block count [`grid_1d`] reaches at `i32::MAX` elements: the largest
+/// grid a grid-stride element kernel is launched with.
+const GRID_1D_WIDE_MAX_BLOCKS: usize = (i32::MAX as usize).div_ceil(BLOCK_1D as usize);
+
+/// Launch config for grid-stride element kernels that take a 64-bit count.
+///
+/// Up to `i32::MAX` elements this is [`grid_1d`]'s geometry, so a kernel
+/// moved to a 64-bit count keeps its element-to-thread mapping and its bits.
+/// Past that the grid stops growing and every thread strides over the rest.
+pub fn grid_1d_wide(n: usize) -> LaunchConfig {
+    let blocks = n
+        .div_ceil(BLOCK_1D as usize)
+        .clamp(1, GRID_1D_WIDE_MAX_BLOCKS);
+    LaunchConfig {
+        grid_dim: (blocks as u32, 1, 1),
+        block_dim: (BLOCK_1D, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
 /// Launch config for SSM/conv1d kernels: `batch * d_inner` threads.
 ///
 /// Each thread handles one (b, d) pair, sequential across T/d_state.
@@ -147,12 +167,14 @@ pub fn grid_col_tree_reduce(n_cols: usize) -> LaunchConfig {
 
 /// Launch config for norm kernels (L2Norm, RMSNorm).
 ///
-/// Grid: `batch` blocks. Block: min(dim, 1024) threads.
-/// Shared memory: `dim * sizeof(f32)` for reduction workspace.
+/// Grid: `batch` blocks. Block: the power of two at or above `dim`, at least
+/// one warp and at most 1024 threads.
+/// Shared memory: one f32 per thread for the reduction workspace.
 pub fn grid_norm(batch: usize, dim: usize) -> LaunchConfig {
-    let block = (dim as u32).min(1024);
-    // Round up to next power of 2 for efficient warp reduction
-    let block = block.next_power_of_two();
+    // The reduction ends in a full-mask warp shuffle, so the block holds at
+    // least one whole warp: below 32 the shuffle would read lanes that do
+    // not exist. The extra lanes hold +0.0, the identity of the sum.
+    let block = (dim as u32).clamp(32, 1024).next_power_of_two();
     LaunchConfig {
         grid_dim: (batch as u32, 1, 1),
         block_dim: (block, 1, 1),

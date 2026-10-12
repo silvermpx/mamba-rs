@@ -342,6 +342,92 @@ fn accumulation_window_steps_on_the_sum_of_its_micro_batches() {
 
 /// A few steps toward a fixed target lower the loss in every family,
 /// driven only through the trait, and the learning rate round-trips.
+/// The spike skip measures the gradient norm itself when no clip is set:
+/// a window above the threshold takes no step in any family, and the
+/// metrics report the norm that decided it.
+#[test]
+fn the_spike_skip_needs_no_clip_in_every_family() {
+    let m1_cfg = MambaConfig {
+        d_model: D_MODEL,
+        d_state: 8,
+        d_conv: 4,
+        expand: 2,
+        n_layers: 2,
+        scan_mode: ScanMode::Auto,
+        rms_norm_eps: 1e-5,
+    };
+    let siso_cfg = Mamba3Config {
+        d_model: D_MODEL,
+        d_state: 8,
+        expand: 2,
+        headdim: 8,
+        ngroups: 1,
+        n_layers: 2,
+        ..Mamba3Config::default()
+    };
+    let (input, d) = window();
+    let opts = GpuOptions::default().dtype(WeightDtype::F32);
+    let s = session();
+    let trainers: Vec<(&str, Box<dyn GpuTrainer>)> = vec![
+        (
+            "Mamba-1",
+            Box::new(
+                MambaGpuTrainer::new(&MambaWeights::init(&m1_cfg, INPUT_DIM, 61), m1_cfg, s, opts)
+                    .unwrap(),
+            ),
+        ),
+        (
+            "Mamba-2",
+            Box::new(
+                Mamba2GpuTrainer::new(
+                    &Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 62),
+                    m2_cfg(),
+                    s,
+                    opts,
+                )
+                .unwrap(),
+            ),
+        ),
+        (
+            "Mamba-3 SISO",
+            Box::new(
+                Mamba3GpuTrainer::new(
+                    &Mamba3Weights::init(&siso_cfg, INPUT_DIM, 63),
+                    siso_cfg,
+                    s,
+                    opts,
+                )
+                .unwrap(),
+            ),
+        ),
+        (
+            "Mamba-3 MIMO",
+            Box::new(
+                Mamba3MimoGpuTrainer::new(
+                    &Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 64),
+                    mimo_cfg(),
+                    s,
+                    opts,
+                )
+                .unwrap(),
+            ),
+        ),
+    ];
+    for (name, mut t) in trainers {
+        let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
+        t.forward(&input, &mut out).unwrap();
+        let m = t
+            .backward_step(&d, BackwardOpts::default().with_step_skip_above(1e-12))
+            .unwrap();
+        assert!(
+            !m.optimizer_stepped && m.step == 0,
+            "{name}: a window above the skip threshold stepped"
+        );
+        let norm = m.grad_norm.expect("the skip reports the norm it measured");
+        assert!(norm.is_finite() && norm > 0.0, "{name}: norm {norm}");
+    }
+}
+
 #[test]
 fn every_family_trains_through_the_trait() {
     let m1_cfg = MambaConfig {

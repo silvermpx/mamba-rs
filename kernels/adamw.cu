@@ -133,8 +133,13 @@ extern "C" __global__ void adamw_step_multi_##SUFFIX(                          \
     float beta1,                                                               \
     float beta2,                                                               \
     float eps,                                                                 \
-    const float* __restrict__ bias_factors  /* [3] = {bc1, bc2, lr} */         \
+    const float* __restrict__ bias_factors, /* [3] = {bc1, bc2, lr} */         \
+    const int* __restrict__ skip  /* null, or the f16 overflow flag */         \
 ) {                                                                            \
+    /* A captured f16 step cannot branch on the host, so the optimizer reads   \
+       the overflow flag itself: a step whose gradients overflowed leaves      \
+       master, moments and shadows exactly as they were, as eager does. */     \
+    if (skip != nullptr && *skip != 0) return;                                 \
     const AdamWChunkDesc c = chunks[blockIdx.x];                               \
     const float bias_c1 = bias_factors[0];                                     \
     const float bias_c2 = bias_factors[1];                                     \

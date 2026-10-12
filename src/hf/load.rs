@@ -64,6 +64,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
     let mut embed = vec![0.0f32; embed_len];
     let mut lm_head: Option<Vec<f32>> = None;
     let mut norm_f_weight = vec![0.0f32; hf_cfg.d_model];
+    let (mut embed_found, mut norm_f_found) = (false, false);
     let mut layer_weights: Vec<Option<LayerAccum>> = (0..hf_cfg.n_layers).map(|_| None).collect();
 
     for shard_path in &shard_paths {
@@ -88,6 +89,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
                         ));
                     }
                     embed[..expected].copy_from_slice(&data);
+                    embed_found = true;
                 }
                 RemappedKey::LmHead => {
                     let data = tensor_to_f32(tensor.data(), tensor.dtype())?;
@@ -103,6 +105,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
                         ));
                     }
                     norm_f_weight.copy_from_slice(&data);
+                    norm_f_found = true;
                 }
                 RemappedKey::Layer(idx, field) => {
                     if idx >= hf_cfg.n_layers {
@@ -112,9 +115,22 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
                     let accum = layer_weights[idx].get_or_insert_with(LayerAccum::default);
                     accum.set(field, data)?;
                 }
-                RemappedKey::Unknown => {}
+                // A tensor this model has no place for is a part it does
+                // not model. Loading without it would run another network.
+                RemappedKey::Unknown => {
+                    return Err(format!(
+                        "unexpected tensor {name}: the checkpoint holds a part this \
+                         Mamba-1 model does not have"
+                    ));
+                }
             }
         }
+    }
+    if !embed_found {
+        return Err("the checkpoint has no embedding tensor".into());
+    }
+    if !norm_f_found {
+        return Err("the checkpoint has no norm_f tensor".into());
     }
 
     if !hf_cfg.tie_word_embeddings && lm_head.is_none() {
@@ -134,7 +150,11 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
                 lm.len()
             ));
         }
-        *lm = transpose_2d(std::mem::take(lm), hf_cfg.vocab_size, hf_cfg.d_model);
+        *lm = transpose_2d(
+            std::mem::take(lm),
+            (hf_cfg.vocab_size, hf_cfg.d_model),
+            "lm_head.weight",
+        )?;
     }
 
     let mamba_cfg = MambaConfig {
@@ -249,6 +269,18 @@ impl LayerAccum {
             .ok_or_else(|| format!("missing field: {field}"))
     }
 
+    /// [`Self::take`] for a tensor that must hold exactly `len` values.
+    fn take_len(&mut self, field: &str, len: usize) -> Result<Vec<f32>, String> {
+        let data = self.take(field)?;
+        if data.len() != len {
+            return Err(format!(
+                "{field}: expected {len} values for this config, the checkpoint holds {}",
+                data.len()
+            ));
+        }
+        Ok(data)
+    }
+
     fn into_layer_weights(
         mut self,
         cfg: &MambaConfig,
@@ -271,7 +303,7 @@ impl LayerAccum {
         // currently support those, but we warn loudly here rather than
         // silently take the default zero-bias path).
         let conv1d_bias = if hf_cfg.use_conv_bias {
-            self.take("conv1d_bias")?
+            self.take_len("conv1d_bias", di)?
         } else {
             vec![0.0f32; di]
         };
@@ -284,9 +316,9 @@ impl LayerAccum {
             );
         }
         Ok(MambaLayerWeights {
-            norm_weight: self.take("norm_weight")?,
+            norm_weight: self.take_len("norm_weight", d)?,
             // HF: [2*d_inner, d_model] -> need [d_model, 2*d_inner]
-            in_proj_w: transpose_2d(self.take("in_proj_w")?, 2 * di, d),
+            in_proj_w: transpose_2d(self.take("in_proj_w")?, (2 * di, d), "in_proj_w")?,
             // HF stores depthwise conv1d weight as [d_inner, 1, d_conv]
             // (PyTorch `nn.Conv1d(groups=d_inner)` layout; the singleton
             // middle dim is the per-group in-channel). mamba-rs flattens
@@ -295,33 +327,43 @@ impl LayerAccum {
             // to the squeezed PyTorch layout, so no transpose is needed.
             // Source: mamba_ssm `MambaBlock.conv1d` in selective_scan /
             // models/mixer_seq_simple.py; layout matches nn.Conv1d docs.
-            conv1d_weight: self.take("conv1d_weight")?,
+            conv1d_weight: self.take_len("conv1d_weight", di * cfg.d_conv)?,
             conv1d_bias,
             // HF: [xdbl_dim, d_inner] -> need [d_inner, xdbl_dim]
-            x_proj_w: transpose_2d(self.take("x_proj_w")?, xd, di),
+            x_proj_w: transpose_2d(self.take("x_proj_w")?, (xd, di), "x_proj_w")?,
             // HF: [d_inner, dt_rank] -> need [dt_rank, d_inner]
-            dt_proj_w: transpose_2d(self.take("dt_proj_w")?, di, dr),
-            dt_proj_b: self.take("dt_proj_b")?,
-            a_log: self.take("a_log")?,
+            dt_proj_w: transpose_2d(self.take("dt_proj_w")?, (di, dr), "dt_proj_w")?,
+            dt_proj_b: self.take_len("dt_proj_b", di)?,
+            a_log: self.take_len("a_log", di * ds)?,
             a_neg: vec![0.0; di * ds],
-            d_param: self.take("d_param")?,
+            d_param: self.take_len("d_param", di)?,
             // HF: [d_model, d_inner] -> need [d_inner, d_model]
-            out_proj_w: transpose_2d(self.take("out_proj_w")?, d, di),
+            out_proj_w: transpose_2d(self.take("out_proj_w")?, (d, di), "out_proj_w")?,
         })
     }
 }
 
-/// Transpose a row-major `[rows, cols]` matrix to `[cols, rows]`.
+/// Transpose a row-major `[rows, cols]` matrix to `[cols, rows]`, refusing
+/// a tensor whose size is not that shape's.
 ///
 /// PyTorch nn.Linear stores weights as `[out_features, in_features]`.
 /// Our BLAS expects `[n_in, n_out]`. This converts between the two.
-fn transpose_2d(src: Vec<f32>, rows: usize, cols: usize) -> Vec<f32> {
-    debug_assert_eq!(src.len(), rows * cols);
+fn transpose_2d(
+    src: Vec<f32>,
+    (rows, cols): (usize, usize),
+    name: &str,
+) -> Result<Vec<f32>, String> {
+    if src.len() != rows * cols {
+        return Err(format!(
+            "{name}: expected [{rows}, {cols}] for this config, the checkpoint holds {} values",
+            src.len()
+        ));
+    }
     let mut dst = vec![0.0f32; rows * cols];
     for r in 0..rows {
         for c in 0..cols {
             dst[c * rows + r] = src[r * cols + c];
         }
     }
-    dst
+    Ok(dst)
 }

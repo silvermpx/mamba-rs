@@ -41,15 +41,29 @@ struct RawConfig {
     // architecture's scale. Name mirrors the HF field.
     rms_norm_eps: Option<f32>,
     layer_norm_epsilon: Option<f32>,
+    // The HF format sizes the mixer by `intermediate_size`.
+    intermediate_size: Option<usize>,
+    // Backbone parts the original format can carry. Each one this build
+    // does not model is refused rather than loaded without it.
+    d_intermediate: Option<usize>,
+    rms_norm: Option<bool>,
+    attn_layer_idx: Option<Vec<usize>>,
     // The original format names the mixer under `ssm_cfg.layer`; a config
     // without it is Mamba-1.
     ssm_cfg: Option<RawSsmCfg>,
 }
 
+/// The mixer arguments of an original-format config. A Mamba-1 checkpoint
+/// keeps its own `d_state`, `d_conv`, `expand` and `dt_rank` here, so they
+/// are read here before the top-level fields.
 #[derive(Deserialize)]
 struct RawSsmCfg {
     layer: Option<String>,
     is_mimo: Option<bool>,
+    d_state: Option<usize>,
+    d_conv: Option<usize>,
+    expand: Option<usize>,
+    dt_rank: Option<serde_json::Value>,
 }
 
 /// Parsed and validated Mamba config for HF loading.
@@ -77,8 +91,62 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
         serde_json::from_slice(json_bytes).map_err(|e| format!("config.json parse error: {e}"))?;
 
     let family = detect_family(&raw)?;
+    if raw.model_type.as_deref() == Some("falcon_mamba") {
+        // FalconMamba RMS-normalises B, C and dt inside every mixer. Read as
+        // plain Mamba-1 it would load and give wrong outputs.
+        return Err(
+            "falcon_mamba checkpoints need the B, C and dt mixer norms, \
+                    which this build does not implement"
+                .into(),
+        );
+    }
+    if raw.d_intermediate.is_some_and(|d| d > 0) {
+        return Err(
+            "config.json: d_intermediate > 0 (an MLP after every mixer) \
+                    is not supported for Mamba-1 yet"
+                .into(),
+        );
+    }
+    if raw.rms_norm == Some(false) {
+        return Err("config.json: rms_norm = false (LayerNorm) is not supported yet".into());
+    }
+    if raw.attn_layer_idx.as_ref().is_some_and(|a| !a.is_empty()) {
+        return Err("config.json: attention layers (attn_layer_idx) are not supported yet".into());
+    }
     let (d_model, n_layers, d_state, d_conv) = extract_dims(&raw)?;
-    let expand = raw.expand.unwrap_or(2);
+    let ssm_cfg = raw.ssm_cfg.as_ref();
+    let expand = match raw.intermediate_size {
+        // The HF format sizes the mixer by intermediate_size, and its
+        // `expand` can disagree (FalconMamba carries 16 against 8192 / 4096).
+        Some(inner) => {
+            if d_model == 0 || inner % d_model != 0 {
+                return Err(format!(
+                    "intermediate_size {inner} is not a whole multiple of hidden_size \
+                     {d_model}"
+                ));
+            }
+            inner / d_model
+        }
+        None => ssm_cfg.and_then(|c| c.expand).or(raw.expand).unwrap_or(2),
+    };
+    if let Some(rank) = ssm_cfg.and_then(|c| c.dt_rank.as_ref()) {
+        let expected = d_model.div_ceil(16);
+        let explicit = match rank {
+            serde_json::Value::String(s) if s == "auto" => None,
+            serde_json::Value::Number(n) => n.as_u64().map(|v| v as usize),
+            other => {
+                return Err(format!(
+                    "config.json: ssm_cfg.dt_rank {other} is not understood"
+                ));
+            }
+        };
+        if explicit.is_some_and(|r| r != expected) {
+            return Err(format!(
+                "ssm_cfg.dt_rank {rank} differs from d_model.div_ceil(16) = {expected}, \
+                 the only rank this build supports"
+            ));
+        }
+    }
     let vocab_size = raw.vocab_size.ok_or("missing vocab_size in config.json")?;
     // The original format stores the UNPADDED vocabulary and rounds it up
     // before allocating the embedding and the head, so a checkpoint saved
@@ -177,8 +245,9 @@ fn extract_dims(raw: &RawConfig) -> Result<(usize, usize, usize, usize), String>
     } else {
         let d_model = raw.d_model.ok_or("original config missing d_model")?;
         let n_layers = raw.n_layer.ok_or("original config missing n_layer")?;
-        let d_state = raw.d_state.unwrap_or(16);
-        let d_conv = raw.d_conv.unwrap_or(4);
+        let ssm = raw.ssm_cfg.as_ref();
+        let d_state = ssm.and_then(|c| c.d_state).or(raw.d_state).unwrap_or(16);
+        let d_conv = ssm.and_then(|c| c.d_conv).or(raw.d_conv).unwrap_or(4);
         Ok((d_model, n_layers, d_state, d_conv))
     }
 }
@@ -300,12 +369,6 @@ mod tests {
         let m2 = br#"{"model_type":"mamba2","hidden_size":64,"num_hidden_layers":2,"state_size":8,"conv_kernel":4,"vocab_size":100}"#;
         assert_eq!(parse_config_json(m2).unwrap().family, ModelFamily::Mamba2);
 
-        let falcon = br#"{"model_type":"falcon_mamba","hidden_size":64,"num_hidden_layers":2,"state_size":8,"conv_kernel":4,"vocab_size":100}"#;
-        assert_eq!(
-            parse_config_json(falcon).unwrap().family,
-            ModelFamily::Mamba1
-        );
-
         // M3 is DETECTED (not an "unsupported model_type" error) so the
         // loader can reject it with a precise family message.
         let m3 = br#"{"model_type":"mamba3","hidden_size":64,"num_hidden_layers":2,"state_size":8,"conv_kernel":4,"vocab_size":100}"#;
@@ -337,6 +400,58 @@ mod tests {
             err.contains("missing") || err.contains("num_hidden_layers"),
             "{err}"
         );
+    }
+
+    /// An original-format Mamba-1 config keeps its mixer arguments under
+    /// ssm_cfg, and they win over the defaults.
+    #[test]
+    fn original_format_mixer_arguments_come_from_ssm_cfg() {
+        let json = br#"{"d_model":256,"n_layer":4,"vocab_size":1000,
+            "ssm_cfg":{"d_state":32,"d_conv":3,"expand":3,"dt_rank":"auto"}}"#;
+        let cfg = parse_config_json(json).unwrap();
+        assert_eq!((cfg.d_state, cfg.d_conv, cfg.expand), (32, 3, 3));
+    }
+
+    /// The HF format sizes the mixer by intermediate_size, whatever its
+    /// `expand` field says.
+    #[test]
+    fn hf_format_inner_width_comes_from_intermediate_size() {
+        let json = br#"{"model_type":"mamba","hidden_size":64,"num_hidden_layers":2,
+            "state_size":8,"conv_kernel":4,"vocab_size":100,"expand":16,
+            "intermediate_size":128}"#;
+        assert_eq!(parse_config_json(json).unwrap().expand, 2);
+    }
+
+    /// Parts this build does not model are refused, never dropped: a
+    /// checkpoint must not load and then run without them.
+    #[test]
+    fn unmodelled_backbone_parts_are_refused() {
+        for (json, what) in [
+            (
+                &br#"{"model_type":"falcon_mamba","hidden_size":64,"num_hidden_layers":2,
+                "state_size":8,"conv_kernel":4,"vocab_size":100}"#[..],
+                "falcon_mamba",
+            ),
+            (
+                br#"{"d_model":64,"n_layer":2,"vocab_size":100,"d_intermediate":128}"#,
+                "d_intermediate",
+            ),
+            (
+                br#"{"d_model":64,"n_layer":2,"vocab_size":100,"rms_norm":false}"#,
+                "LayerNorm",
+            ),
+            (
+                br#"{"d_model":64,"n_layer":2,"vocab_size":100,"attn_layer_idx":[0]}"#,
+                "attn_layer_idx",
+            ),
+            (
+                br#"{"d_model":64,"n_layer":2,"vocab_size":100,"ssm_cfg":{"dt_rank":7}}"#,
+                "dt_rank",
+            ),
+        ] {
+            let err = parse_config_json(json).unwrap_err();
+            assert!(err.contains(what), "{what}: {err}");
+        }
     }
 
     #[test]

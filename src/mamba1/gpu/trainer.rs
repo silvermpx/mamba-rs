@@ -56,7 +56,7 @@ use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
-use crate::gpu::grad_clip::{alloc_partials, clip_grads_device, scale_grads};
+use crate::gpu::grad_clip::{alloc_partials, clip_grads_device, norm_limit, scale_grads};
 use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
@@ -1351,7 +1351,7 @@ impl MambaTrainerMixed {
         clip_max_norm: Option<f32>,
         step_skip_above: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
-        let grad_norm = match clip_max_norm {
+        let grad_norm = match norm_limit(clip_max_norm, step_skip_above) {
             Some(c) => Some(self.apply_clip(c)?),
             None => None,
         };
@@ -1421,7 +1421,7 @@ impl MambaTrainerMixed {
         self.staged_upload(2, d_temporal)?;
         {
             let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
-            let n = d_temporal.len() as i32;
+            let n = d_temporal.len() as i64;
             let mut builder = self
                 .ctx
                 .stream
@@ -1429,7 +1429,7 @@ impl MambaTrainerMixed {
             builder.arg(dt_scaled.inner_mut());
             builder.arg(&scale);
             builder.arg(&n);
-            unsafe { builder.launch(grid_1d(d_temporal.len())) }
+            unsafe { builder.launch(crate::gpu::launch::grid_1d_wide(d_temporal.len())) }
                 .map_err(|e| format!("scale d_temporal (f16 split): {e:?}"))?;
         }
         if let Some(ref mut u) = self.unscale_factor {
@@ -1468,7 +1468,7 @@ impl MambaTrainerMixed {
                 &mut self.grads.flat,
                 unscale,
             )?;
-            if let Some(c) = clip_max_norm {
+            if let Some(c) = norm_limit(clip_max_norm, step_skip_above) {
                 grad_norm = Some(self.apply_clip(c)?);
             }
             // Spike skip: a window whose PRE-clip norm exceeds the threshold
@@ -1555,7 +1555,7 @@ impl MambaTrainerMixed {
         self.staged_upload(2, d_temporal)?;
         {
             let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
-            let n = d_temporal.len() as i32;
+            let n = d_temporal.len() as i64;
             let mut builder = self
                 .ctx
                 .stream
@@ -1563,7 +1563,7 @@ impl MambaTrainerMixed {
             builder.arg(dt_scaled.inner_mut());
             builder.arg(&scale);
             builder.arg(&n);
-            unsafe { builder.launch(crate::gpu::launch::grid_1d(d_temporal.len())) }
+            unsafe { builder.launch(crate::gpu::launch::grid_1d_wide(d_temporal.len())) }
                 .map_err(|e| format!("scale d_temporal (f16): {e:?}"))?;
         }
 
@@ -1833,6 +1833,7 @@ impl MambaTrainerMixed {
                         multi_plan,
                         adam,
                         bias.ptr(),
+                        snap_overflow,
                     )?;
                     weights.sync_master_to_compute(ctx)?;
                     recompute_a_neg_all(
@@ -1916,6 +1917,7 @@ impl MambaTrainerMixed {
             &self.multi_plan,
             &self.adam,
             self.bias.ptr(),
+            0,
         )?;
         // Bulk typed shadows now ride the fused kernel; the walk below
         // covers only the f32-stays-f32 tensors.
@@ -1982,6 +1984,7 @@ impl MambaTrainerMixed {
                 multi_plan,
                 adam,
                 bias.ptr(),
+                0,
             )?;
             weights.sync_master_to_compute(ctx)?;
             recompute_a_neg_all(
@@ -2441,7 +2444,7 @@ impl MambaTrainerF32 {
         clip_max_norm: Option<f32>,
         step_skip_above: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
-        let grad_norm = match clip_max_norm {
+        let grad_norm = match norm_limit(clip_max_norm, step_skip_above) {
             Some(c) => Some(self.apply_clip(c)?),
             None => None,
         };
@@ -2516,6 +2519,7 @@ impl MambaTrainerF32 {
             &self.multi_plan,
             &self.adam,
             self.bias.ptr(),
+            0,
         )?;
         recompute_a_neg_all(
             &self.ctx,
@@ -2560,6 +2564,7 @@ impl MambaTrainerF32 {
                 multi_plan,
                 adam,
                 bias.ptr(),
+                0,
             )?;
             recompute_a_neg_all(
                 ctx,

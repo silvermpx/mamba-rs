@@ -10,6 +10,9 @@ use std::cell::RefCell;
 struct SampleScratch {
     indices: Vec<usize>,
     indexed: Vec<(usize, f32)>,
+    /// One bit per vocabulary entry, set while a penalty pass has already
+    /// touched that token. All clear between calls.
+    seen: Vec<u64>,
 }
 
 thread_local! {
@@ -85,6 +88,9 @@ impl Xoshiro256PlusPlus {
 
 /// Apply repetition penalty (CTRL paper, Keskar et al. 2019).
 ///
+/// Every distinct token in `seen_tokens` is penalised once, however often
+/// it occurs, as Hugging Face's `RepetitionPenaltyLogitsProcessor` does.
+///
 /// `penalty` must be strictly positive and not 1.0. Values ≤ 0 or NaN are
 /// ignored (treated as "disabled") to avoid producing `+Inf` logits via
 /// division by zero.
@@ -94,16 +100,35 @@ pub fn apply_repetition_penalty(logits: &mut [f32], seen_tokens: &[u32], penalty
     if !penalty.is_finite() || penalty <= 0.0 || penalty == 1.0 {
         return;
     }
-    for &tok in seen_tokens {
-        let idx = tok as usize;
-        if idx < logits.len() {
-            if logits[idx] > 0.0 {
-                logits[idx] /= penalty;
+    SAMPLE_SCRATCH.with(|cell| {
+        let seen = &mut cell.borrow_mut().seen;
+        let words = logits.len().div_ceil(64);
+        if seen.len() < words {
+            seen.resize(words, 0);
+        }
+        for &tok in seen_tokens {
+            let idx = tok as usize;
+            let Some(logit) = logits.get_mut(idx) else {
+                continue;
+            };
+            let (word, bit) = (idx / 64, 1u64 << (idx % 64));
+            if seen[word] & bit != 0 {
+                continue;
+            }
+            seen[word] |= bit;
+            if *logit > 0.0 {
+                *logit /= penalty;
             } else {
-                logits[idx] *= penalty;
+                *logit *= penalty;
             }
         }
-    }
+        // Clear only the words this call touched.
+        for &tok in seen_tokens {
+            if let Some(word) = seen.get_mut(tok as usize / 64) {
+                *word = 0;
+            }
+        }
+    });
 }
 
 /// Apply temperature scaling.
@@ -347,6 +372,19 @@ mod tests {
         let mut logits = vec![2.0, -1.0, 0.0];
         apply_repetition_penalty(&mut logits, &[1], 2.0);
         assert!((logits[1] - (-2.0)).abs() < 1e-6);
+    }
+
+    /// A token seen many times is penalised once, and the next call starts
+    /// from a clean slate.
+    #[test]
+    fn test_repetition_penalty_once_per_distinct_token() {
+        let mut logits = vec![2.0, -1.0, 4.0, 3.0];
+        apply_repetition_penalty(&mut logits, &[0, 0, 0, 1, 1, 0], 2.0);
+        assert_eq!(logits, vec![1.0, -2.0, 4.0, 3.0]);
+        apply_repetition_penalty(&mut logits, &[2, 2], 2.0);
+        assert_eq!(logits, vec![1.0, -2.0, 2.0, 3.0]);
+        apply_repetition_penalty(&mut logits, &[0, 100], 2.0);
+        assert_eq!(logits, vec![0.5, -2.0, 2.0, 3.0]);
     }
 
     #[test]

@@ -271,6 +271,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
     scratch: &mut GpuMamba3MixedScratch,
     dtype: WeightDtype,
 ) -> Result<(), String> {
+    exec.check_state_cap()?;
     let M3Exec {
         ctx,
         kernels: m3k,
@@ -983,6 +984,7 @@ pub fn gpu_forward_mamba3_backbone_mixed(
     states: GpuMamba3StateBufs<'_>,
     scratch: &mut GpuMamba3MixedScratch,
 ) -> Result<(), String> {
+    exec.check_state_cap()?;
     let M3Exec {
         ctx,
         kernels: m3k,

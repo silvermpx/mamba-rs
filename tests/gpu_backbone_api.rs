@@ -10,9 +10,10 @@
 use mamba_rs::config::ScanMode;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::{
-    AnyGpuBackbone, GpuBackbone, GpuOptions, Mamba2Config, Mamba2GpuBackbone, Mamba2Weights,
-    Mamba3Config, Mamba3GpuBackbone, Mamba3MimoConfig, Mamba3MimoGpuBackbone, Mamba3MimoWeights,
-    Mamba3Weights, MambaConfig, MambaGpuBackbone, MambaWeights, ModelFamily, WeightDtype,
+    AnyGpuBackbone, GpuBackbone, GpuOptions, Mamba2Backbone, Mamba2Config, Mamba2GpuBackbone,
+    Mamba2Weights, Mamba3Backbone, Mamba3Config, Mamba3GpuBackbone, Mamba3MimoBackbone,
+    Mamba3MimoConfig, Mamba3MimoGpuBackbone, Mamba3MimoWeights, Mamba3Weights, MambaBackbone,
+    MambaConfig, MambaGpuBackbone, MambaWeights, ModelFamily, WeightDtype,
 };
 
 /// Every storage precision; each path runs in all four.
@@ -248,6 +249,177 @@ fn a_longer_prompt_runs_after_the_capture_in_every_family() {
             a.download_temporal(&mut ra).unwrap();
             b.download_temporal(&mut rb).unwrap();
             assert_eq!(bits(&ra), bits(&rb), "{family:?} {dtype:?}");
+        }
+    }
+}
+
+/// A model narrower than one warp decodes on the GPU like the CPU in every
+/// family: the row norms reduce over a whole warp whatever the width, and
+/// no family refuses the width.
+#[test]
+fn every_family_decodes_a_model_narrower_than_a_warp() {
+    const DM: usize = 8;
+    // One CPU decoder per sequence: the family's backbone with its own state.
+    type Stepper = Box<dyn FnMut(&[f32], &mut [f32])>;
+    macro_rules! stepper {
+        ($bb:expr) => {{
+            let bb = $bb;
+            let mut state = bb.alloc_state();
+            let mut scratch = bb.alloc_scratch();
+            Box::new(move |x: &[f32], y: &mut [f32]| {
+                bb.forward_step(x, y, &mut state, &mut scratch)
+            }) as Stepper
+        }};
+    }
+    let opts = GpuOptions::default().dtype(WeightDtype::F32);
+    let m1 = MambaConfig {
+        d_model: DM,
+        ..m1_cfg()
+    };
+    let m2 = Mamba2Config {
+        d_model: DM,
+        ..m2_cfg()
+    };
+    let siso = Mamba3Config {
+        d_model: DM,
+        ..siso_cfg()
+    };
+    let mimo = Mamba3MimoConfig {
+        d_model: DM,
+        ..mimo_cfg()
+    };
+    let w1 = MambaWeights::init(&m1, INPUT_DIM, 21);
+    let w2 = Mamba2Weights::init(&m2, INPUT_DIM, 22);
+    let w3 = Mamba3Weights::init(&siso, INPUT_DIM, 23);
+    let w4 = Mamba3MimoWeights::init(&mimo, INPUT_DIM, 24);
+    let cases: Vec<(AnyGpuBackbone, Vec<Stepper>)> = vec![
+        (
+            MambaGpuBackbone::new(&w1, m1, INPUT_DIM, BATCH, opts)
+                .unwrap()
+                .into(),
+            (0..BATCH)
+                .map(|_| stepper!(MambaBackbone::new(w1.clone(), m1, INPUT_DIM).unwrap()))
+                .collect(),
+        ),
+        (
+            Mamba2GpuBackbone::new(&w2, m2, INPUT_DIM, BATCH, opts)
+                .unwrap()
+                .into(),
+            (0..BATCH)
+                .map(|_| stepper!(Mamba2Backbone::new(w2.clone(), m2, INPUT_DIM).unwrap()))
+                .collect(),
+        ),
+        (
+            Mamba3GpuBackbone::new(&w3, siso, INPUT_DIM, BATCH, opts)
+                .unwrap()
+                .into(),
+            (0..BATCH)
+                .map(|_| stepper!(Mamba3Backbone::new(w3.clone(), siso, INPUT_DIM).unwrap()))
+                .collect(),
+        ),
+        (
+            Mamba3MimoGpuBackbone::new(&w4, mimo, INPUT_DIM, BATCH, opts)
+                .unwrap()
+                .into(),
+            (0..BATCH)
+                .map(|_| stepper!(Mamba3MimoBackbone::new(w4.clone(), mimo, INPUT_DIM).unwrap()))
+                .collect(),
+        ),
+    ];
+    for (mut gpu, mut cpu) in cases {
+        let family = gpu.family();
+        for t in 0..6 {
+            let input = values(BATCH * INPUT_DIM, 40 + t);
+            let mut got = vec![0.0f32; BATCH * DM];
+            gpu.step(&input, &mut got).unwrap();
+            let mut want = vec![0.0f32; BATCH * DM];
+            for (b, step) in cpu.iter_mut().enumerate() {
+                step(
+                    &input[b * INPUT_DIM..(b + 1) * INPUT_DIM],
+                    &mut want[b * DM..(b + 1) * DM],
+                );
+            }
+            let diff = max_rel_diff(&got, &want);
+            assert!(
+                diff < 1e-3,
+                "{family:?} step {t}: GPU and CPU differ by {diff}"
+            );
+        }
+    }
+}
+
+/// A capture leaves the backbone where the caller left it: after a prompt,
+/// the rows of its last position and the step that follows are the bits of
+/// a backbone that never captured.
+#[test]
+fn a_capture_keeps_the_prompt_position_in_every_family() {
+    let t = 50;
+    let prompt = values(BATCH * t * D_MODEL, 31);
+    let next = values(BATCH * D_MODEL, 32);
+    for dtype in DTYPES {
+        let captured = every_family(D_MODEL, dtype);
+        let plain = every_family(D_MODEL, dtype);
+        for (mut a, mut b) in captured.into_iter().zip(plain) {
+            let family = a.family();
+            let rows = BATCH * a.d_model();
+            b.prefill(&prompt, t).unwrap();
+            let mut want_rows = vec![0.0f32; rows];
+            b.download_temporal(&mut want_rows).unwrap();
+            let mut want_next = vec![0.0f32; rows];
+            b.step(&next, &mut want_next).unwrap();
+
+            a.prefill(&prompt, t).unwrap();
+            a.capture_graph().unwrap();
+            let mut got_rows = vec![0.0f32; rows];
+            a.download_temporal(&mut got_rows).unwrap();
+            let mut got_next = vec![0.0f32; rows];
+            a.step(&next, &mut got_next).unwrap();
+            assert_eq!(
+                bits(&got_rows),
+                bits(&want_rows),
+                "{family:?} {dtype:?}: the prompt rows after the capture"
+            );
+            assert_eq!(
+                bits(&got_next),
+                bits(&want_next),
+                "{family:?} {dtype:?}: the step after the capture"
+            );
+        }
+    }
+}
+
+/// A second capture replaces the first, and a cleared graph hands the
+/// steps back to the eager path: every step keeps the bits of a backbone
+/// that only ever ran eagerly.
+#[test]
+fn a_second_capture_and_a_clear_in_every_family() {
+    for dtype in DTYPES {
+        let graphs = every_family(D_MODEL, dtype);
+        let plain = every_family(D_MODEL, dtype);
+        for (mut a, mut b) in graphs.into_iter().zip(plain) {
+            let family = a.family();
+            let rows = BATCH * a.d_model();
+            let step_both = |a: &mut AnyGpuBackbone, b: &mut AnyGpuBackbone, seed: u32| {
+                let input = values(BATCH * D_MODEL, seed);
+                let (mut ra, mut rb) = (vec![0.0f32; rows], vec![0.0f32; rows]);
+                a.step(&input, &mut ra).unwrap();
+                b.step(&input, &mut rb).unwrap();
+                assert_eq!(bits(&ra), bits(&rb), "{family:?} {dtype:?}: step {seed}");
+            };
+            a.capture_graph().unwrap();
+            step_both(&mut a, &mut b, 50);
+            a.capture_graph().unwrap();
+            assert!(
+                a.has_graph(),
+                "{family:?} {dtype:?}: no graph after recapture"
+            );
+            step_both(&mut a, &mut b, 51);
+            a.clear_graph().unwrap();
+            assert!(
+                !a.has_graph(),
+                "{family:?} {dtype:?}: graph after the clear"
+            );
+            step_both(&mut a, &mut b, 52);
         }
     }
 }

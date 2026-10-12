@@ -223,6 +223,10 @@ pub fn forward_mamba3_layer_batched(
     let a_floor = dims.a_floor;
     let is_outproj_norm = dims.is_outproj_norm;
 
+    // The angles the window starts from, for the backward's rotations.
+    let na_init = nh * n_angles;
+    acts.angle_init[..na_init].copy_from_slice(&angle_state[..na_init]);
+
     let o = &acts.offsets;
 
     // ═══ F1: RMSNorm (loop T) ═══

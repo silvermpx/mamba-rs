@@ -47,6 +47,23 @@ pub struct M3Exec<'a> {
     pub dims: &'a GpuMamba3Dims,
 }
 
+impl M3Exec<'_> {
+    /// The SSM kernels keep `d_state` floats per thread up to the capacity
+    /// they were compiled with, and past it every one of them returns
+    /// without writing. A pair that does not fit is refused before any
+    /// launch.
+    pub fn check_state_cap(&self) -> Result<(), String> {
+        if self.dims.d_state > self.kernels.state_cap {
+            return Err(format!(
+                "d_state {} exceeds the state capacity {} these Mamba-3 kernels were \
+                 compiled for (Mamba3Kernels::compile_with_state_cap)",
+                self.dims.d_state, self.kernels.state_cap
+            ));
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dimensions
 // ---------------------------------------------------------------------------
@@ -103,17 +120,22 @@ impl GpuMamba3Dims {
     /// long-context corruption class known from other CUDA codebases). The
     /// largest ranges are the activation tapes; guard them all at the host
     /// so an oversized shape fails loudly at construction, never numerically.
+    /// The sequential tape counts only on the sequential path: the chunked
+    /// path never allocates it (a one-element sentinel stands in) and never
+    /// indexes it.
     pub fn validate_index_budget(&self) -> Result<(), String> {
         let b = self.batch;
         let t = self.seq_len;
         let di = self.d_inner;
         let ds = self.d_state;
         let nh = self.nheads;
+        let sequential_tape = if self.use_parallel_scan {
+            0
+        } else {
+            b * (t + 1) * di * ds
+        };
         let candidates: [(&str, usize); 6] = [
-            (
-                "sequential tape B*(T+1)*d_inner*d_state",
-                b * (t + 1) * di * ds,
-            ),
+            ("sequential tape B*(T+1)*d_inner*d_state", sequential_tape),
             ("chunk-state tape B*n_chunks*nheads*headdim*d_state", {
                 b * self.n_chunks() * nh * self.headdim * ds
             }),
@@ -177,6 +199,26 @@ mod index_budget_tests {
         dims(2, 4621).validate_index_budget().unwrap();
         let err = dims(2, 25_000_000).validate_index_budget().unwrap_err();
         assert!(err.contains("index budget overflow"), "{err}");
+    }
+
+    /// A window whose only range past `i32::MAX` is the sequential tape runs
+    /// on the chunked path, which has no such tape, and is refused on the
+    /// sequential path, which does.
+    #[test]
+    fn the_sequential_tape_counts_only_on_the_sequential_path() {
+        let mut d = GpuMamba3Dims {
+            d_inner: 1536,
+            d_state: 128,
+            nheads: 24,
+            headdim: 64,
+            in_proj_dim: 3436,
+            ..dims(1, 12_000)
+        };
+        d.validate_index_budget()
+            .expect("the chunked path indexes no sequential tape");
+        d.use_parallel_scan = false;
+        let err = d.validate_index_budget().unwrap_err();
+        assert!(err.contains("sequential tape"), "{err}");
     }
 }
 

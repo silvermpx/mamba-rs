@@ -327,3 +327,32 @@ fn m3_prefill_batch_matches_sequential() {
 
     assert_bits("m3 batch vs sequential", &batch_out, &seq_out);
 }
+
+/// An empty prompt leaves the state as the last prompt left it.
+#[test]
+fn an_empty_prompt_leaves_the_state_alone() {
+    let cfg = test_cfg();
+    let input_dim = cfg.d_model;
+    let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
+    let dims = Mamba3Dims::from_config(&cfg, 5);
+    let mut state = Mamba3State::zeros(&cfg);
+    let mut scratch = Mamba3PrefillScratch::new(&dims, input_dim);
+    let mut out = vec![0.0f32; 5 * cfg.d_model];
+    let input = det(5 * input_dim, 0xAB, 0.05);
+    forward_mamba3_backbone_prefill(&mut out, &input, &w, &mut state.layers, &mut scratch, &dims);
+    let snapshot = |s: &Mamba3State| -> Vec<u32> {
+        s.layers
+            .iter()
+            .flat_map(|l| {
+                [&l.ssm_state, &l.k_state, &l.v_state, &l.angle_state]
+                    .into_iter()
+                    .flatten()
+                    .map(|x| x.to_bits())
+            })
+            .collect()
+    };
+    let before = snapshot(&state);
+    let empty = Mamba3Dims::from_config(&cfg, 0);
+    forward_mamba3_backbone_prefill(&mut [], &[], &w, &mut state.layers, &mut scratch, &empty);
+    assert_eq!(snapshot(&state), before);
+}

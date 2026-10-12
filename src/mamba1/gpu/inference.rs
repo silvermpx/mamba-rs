@@ -10,7 +10,7 @@ use super::weights::{
     GpuMambaMixedWeights, GpuMambaWeights, MambaLayerWeightsView, MambaWeightsView,
 };
 use crate::gpu::blas::{TypedPtr, gpu_gemm_forward_dispatch, gpu_gemm_typed_forward_raw};
-use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
+use crate::gpu::buffers::{DeviceKeep, DtypedBuf, GpuBuffer};
 use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
@@ -1000,6 +1000,19 @@ impl MambaGpuEngine {
         self.graph.is_some()
     }
 
+    /// Drop the captured graph: the next step runs eagerly and can be
+    /// captured again.
+    pub fn clear_graph(&mut self) -> Result<(), String> {
+        self.ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("M1 graph clear sync: {e:?}"))?;
+        self.graph = None;
+        self.captured_gemm_route = None;
+        self.captured_gemm_plan = None;
+        Ok(())
+    }
+
     /// Allocate zeroed inference state for this engine's batch size.
     pub fn alloc_state(&self) -> Result<MambaGpuState, String> {
         MambaGpuState::zeros(&self.ctx.stream, self.batch, &self.cfg)
@@ -1340,11 +1353,12 @@ impl MambaGpuEngine {
                 // compile time and silently returns without writing y
                 // beyond that cap; T=1 decode has no parallel alternative
                 // to route to, so refuse loudly.
-                assert!(
-                    ds <= k.state_cap,
-                    "ssm_step_fwd_fused: d_state {ds} exceeds the compiled state capacity {}",
-                    k.state_cap
-                );
+                if ds > k.state_cap {
+                    return Err(format!(
+                        "ssm_step_fwd_fused: d_state {ds} exceeds the compiled state capacity {}",
+                        k.state_cap
+                    ));
+                }
                 let dp = lw.d_param();
                 let mut bld = self
                     .ctx
@@ -1982,13 +1996,14 @@ impl MambaGpuEngineMixed {
             // time and silently returns without writing y beyond that cap;
             // T=1 decode has no parallel alternative to route to, so refuse
             // loudly.
-            assert!(
-                ds <= k.state_cap,
-                "ssm_step_fwd_fused_typed: d_state {ds} exceeds the compiled \
+            if ds > k.state_cap {
+                return Err(format!(
+                    "ssm_step_fwd_fused_typed: d_state {ds} exceeds the compiled \
                  state capacity {} (the fused kernel keeps the state in registers \
                  sized at compile time)",
-                k.state_cap
-            );
+                    k.state_cap
+                ));
+            }
             {
                 let b_i = b as i32;
                 let di_i = di as i32;
@@ -2339,6 +2354,21 @@ impl MambaGpuEngineMixed {
         self.graph.is_some()
     }
 
+    /// Drop the captured graph, whichever path it recorded: the next step
+    /// runs eagerly and can be captured again.
+    pub fn clear_graph(&mut self) -> Result<(), String> {
+        self.engine
+            .ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("M1 mixed graph clear sync: {e:?}"))?;
+        self.graph = None;
+        self.captured_path = None;
+        self.captured_gemm_route = None;
+        self.captured_gemm_plan = None;
+        Ok(())
+    }
+
     /// Access the underlying f32 inference engine (used by unified backbone
     /// wrapper to read cfg/batch/input_dim).
     pub fn engine_ref(&self) -> &MambaGpuEngine {
@@ -2652,7 +2682,12 @@ impl MambaGpuBackbone {
         self.state.reset(&stream)
     }
 
-    /// Capture CUDA Graph for faster inference. Call after at least one warmup step.
+    /// Capture the decode step as one CUDA graph, which later steps replay.
+    /// A graph captured before is dropped first. The capture leaves the
+    /// recurrent state and the output rows where the caller left them: its
+    /// warm-up step on zero input is undone before the graph is recorded.
+    /// Run the longest prompt before capturing: afterwards the GEMM staging
+    /// can no longer grow.
     pub fn capture_graph(&mut self) -> Result<(), String> {
         let (input_dim, batch, d_model) = match &self.engine {
             BackboneEngine::F32(e) => (e.input_dim, e.batch, e.cfg.d_model),
@@ -2662,13 +2697,27 @@ impl MambaGpuBackbone {
                 e.engine_ref().cfg.d_model,
             ),
         };
+        self.clear_graph()?;
         if let BackboneEngine::Mixed(e) = &self.engine {
             e.prepare_graph_scratch()?;
         }
+        let stream = self.stream().clone();
+        let f = std::mem::size_of::<f32>();
+        let keep = DeviceKeep::take(
+            &stream,
+            &[
+                (self.state.conv.cached_ptr(), self.state.conv.len() * f),
+                (self.state.ssm.cached_ptr(), self.state.ssm.len() * f),
+                (
+                    self.temporal_ptr(),
+                    batch * d_model * self.temporal_dtype().size_bytes(),
+                ),
+            ],
+        )?;
         let input = vec![0.0f32; batch * input_dim];
         let mut output = vec![0.0f32; batch * d_model];
         self.step(&input, &mut output)?;
-        self.reset()?;
+        keep.restore(&stream)?;
         match (&mut self.engine, &mut self.scratch) {
             (BackboneEngine::F32(e), BackboneScratch::F32(sc)) => {
                 // This owner drops its graph before the owned state and scratch.
@@ -2679,6 +2728,14 @@ impl MambaGpuBackbone {
                 unsafe { e.capture_graph_mixed_native(&mut self.state, sc) }
             }
             _ => Err("engine/scratch dtype mismatch".to_string()),
+        }
+    }
+
+    /// Drop the captured graph: steps run eagerly until the next capture.
+    pub fn clear_graph(&mut self) -> Result<(), String> {
+        match &mut self.engine {
+            BackboneEngine::F32(e) => e.clear_graph(),
+            BackboneEngine::Mixed(e) => e.clear_graph(),
         }
     }
 

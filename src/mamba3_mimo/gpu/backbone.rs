@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use crate::gpu::GpuOptions;
+use crate::gpu::buffers::DeviceKeep;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
@@ -103,15 +104,31 @@ impl Mamba3MimoGpuBackbone {
         self.state.reset(&self.engine.ctx)
     }
 
-    /// Capture the decode step as one CUDA graph: an eager step on zero
-    /// input, a reset, then the capture. Later steps replay the graph.
+    /// Capture the decode step as one CUDA graph, which later steps replay.
+    /// A graph captured before is dropped first. The capture leaves the
+    /// recurrent state and the output rows where the caller left them: its
+    /// warm-up step on zero input is undone before the graph is recorded.
     /// Run the longest prompt before capturing: afterwards the GEMM staging
     /// can no longer grow.
     pub fn capture_graph(&mut self) -> Result<(), String> {
+        self.engine.clear_graph()?;
+        let stream = self.engine.ctx.stream.clone();
+        let f = std::mem::size_of::<f32>();
+        let rows = self.step_window.final_rows();
+        let keep = DeviceKeep::take(
+            &stream,
+            &[
+                (self.state.ssm.cached_ptr(), self.state.ssm.len() * f),
+                (self.state.k.cached_ptr(), self.state.k.len() * f),
+                (self.state.v.cached_ptr(), self.state.v.len() * f),
+                (self.state.angle.cached_ptr(), self.state.angle.len() * f),
+                (rows.cached_ptr(), rows.len() * f),
+            ],
+        )?;
         let input = vec![0.0f32; self.batch() * self.input_dim()];
         let mut output = vec![0.0f32; self.batch() * self.d_model()];
         self.step(&input, &mut output)?;
-        self.reset()?;
+        keep.restore(&stream)?;
         // SAFETY: the graph reads this backbone's own state and step
         // window, which stay allocated and in place for as long as the
         // engine (and its graph, dropped first) lives.
@@ -124,6 +141,11 @@ impl Mamba3MimoGpuBackbone {
     /// Whether steps replay a captured graph.
     pub fn has_graph(&self) -> bool {
         self.engine.has_graph()
+    }
+
+    /// Drop the captured graph: steps run eagerly until the next capture.
+    pub fn clear_graph(&mut self) -> Result<(), String> {
+        self.engine.clear_graph()
     }
 
     /// The final-norm rows of the last step or prompt, f32

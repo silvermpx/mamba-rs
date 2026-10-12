@@ -340,6 +340,7 @@ impl GpuMambaTrainingStepGraph {
                     multi_plan,
                     adam,
                     bias.ptr(),
+                    0,
                 )?;
                 // f32-stays-f32 tensors still ride the (trimmed) sync walk.
                 train_w.sync_master_to_compute(ctx)?;
@@ -698,6 +699,7 @@ impl GpuMambaF32TrainingStepGraph {
                     multi_plan,
                     adam,
                     bias.ptr(),
+                    0,
                 )?;
                 // Recompute a_neg after AdamW — see mixed graph above for
                 // rationale. Without this the f32 SSM runs on a stale A-matrix

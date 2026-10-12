@@ -282,6 +282,11 @@ impl MambaGpuLM {
         self.backbone.capture_graph()
     }
 
+    /// Drop the captured graph: steps run eagerly until the next capture.
+    pub fn clear_graph(&mut self) -> Result<(), String> {
+        self.backbone.clear_graph()
+    }
+
     /// Zero the recurrent state. Each `generate` call starts from it.
     pub fn reset(&mut self) -> Result<(), String> {
         self.backbone.reset()
@@ -309,8 +314,10 @@ impl MambaGpuLM {
                 self.batch
             ));
         }
+        // An empty prompt has no position to continue from, so it generates
+        // nothing, the same rule as the batch call and the CPU model.
         if prompt.is_empty() {
-            return Err("an empty prompt leaves no position to continue from".into());
+            return Ok(());
         }
         self.backbone.reset()?;
         let mut rng = Xoshiro256PlusPlus::new(params.seed);
@@ -374,6 +381,17 @@ impl MambaGpuLM {
         let mut prompt_pos = vec![0usize; b];
         let mut finished = vec![false; b];
         let mut outputs: Vec<Vec<u32>> = vec![Vec::new(); b];
+        // The tokens each sequence has seen, prompt and output, which its
+        // repetition penalty reads, as the single-sequence call reads them.
+        let mut seen: Vec<Vec<u32>> = prompts
+            .iter()
+            .zip(params)
+            .map(|(p, sp)| {
+                let mut v = Vec::with_capacity(p.len() + sp.max_tokens);
+                v.extend_from_slice(p);
+                v
+            })
+            .collect();
         let mut last_token = vec![0u32; b];
         for i in 0..b {
             match prompts[i].first() {
@@ -417,7 +435,7 @@ impl MambaGpuLM {
                     .zip(rngs.par_iter_mut())
                     .enumerate()
                     .map(|(i, (logits, rng))| {
-                        sampling[i].then(|| sample_token(logits, &params[i], &outputs[i], rng))
+                        sampling[i].then(|| sample_token(logits, &params[i], &seen[i], rng))
                     })
                     .collect()
             } else {
@@ -426,7 +444,7 @@ impl MambaGpuLM {
                     .zip(rngs.iter_mut())
                     .enumerate()
                     .map(|(i, (logits, rng))| {
-                        sampling[i].then(|| sample_token(logits, &params[i], &outputs[i], rng))
+                        sampling[i].then(|| sample_token(logits, &params[i], &seen[i], rng))
                     })
                     .collect()
             };
@@ -450,6 +468,7 @@ impl MambaGpuLM {
                     continue;
                 }
                 outputs[i].push(next);
+                seen[i].push(next);
                 last_token[i] = next;
             }
         }
@@ -718,6 +737,11 @@ impl GpuMambaLM {
         self.lm.capture_graph()
     }
 
+    /// See [`MambaGpuLM::clear_graph`].
+    pub fn clear_graph(&mut self) -> Result<(), String> {
+        self.lm.clear_graph()
+    }
+
     /// See [`MambaGpuLM::reset`].
     pub fn reset(&mut self) -> Result<(), String> {
         self.lm.reset()
@@ -824,6 +848,52 @@ mod tied_head_capture_tests {
         let embed = vec![0.125; VOCAB * D_MODEL];
         let lm_head = (!tied).then(|| embed.clone());
         MambaGpuLM::new(backbone, embed, lm_head, VOCAB).unwrap()
+    }
+
+    /// The batch call penalises repetitions of the prompt as the single
+    /// call does: one sequence through `generate_batch` gives the tokens of
+    /// `generate`, with a repetition penalty that reaches the prompt.
+    #[test]
+    #[ignore = "needs a CUDA device and NVRTC"]
+    fn batch_generation_sees_the_prompt_like_the_single_call() {
+        const D_MODEL: usize = 16;
+        const VOCAB: usize = 64;
+        let cfg = MambaConfig {
+            d_model: D_MODEL,
+            d_state: 4,
+            d_conv: 2,
+            expand: 1,
+            n_layers: 1,
+            scan_mode: ScanMode::Sequential,
+            rms_norm_eps: 1e-5,
+        };
+        let mut weights = MambaWeights::init(&cfg, D_MODEL, 0x5EED);
+        weights.input_proj_w.clear();
+        weights.input_proj_b.clear();
+        let lm = || {
+            let backbone =
+                MambaGpuBackbone::new(&weights, cfg, D_MODEL, 1, GpuOptions::default()).unwrap();
+            let mut x = 0x1234_5678u32;
+            let embed: Vec<f32> = (0..VOCAB * D_MODEL)
+                .map(|_| {
+                    x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (x >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+                })
+                .collect();
+            MambaGpuLM::new(backbone, embed, None, VOCAB).unwrap()
+        };
+        let params = SampleParams {
+            repetition_penalty: 1.8,
+            max_tokens: 16,
+            eos_token_ids: Vec::new(),
+            ..SampleParams::default()
+        };
+        let prompt = [3u32, 9, 9, 17, 3];
+        let single = lm().generate(&prompt, &params).unwrap();
+        let batch = lm()
+            .generate_batch(&[&prompt], std::slice::from_ref(&params))
+            .unwrap();
+        assert_eq!(batch, vec![single]);
     }
 
     #[test]

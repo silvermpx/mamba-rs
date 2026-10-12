@@ -133,6 +133,11 @@ pub fn parallel_mamba_forward(
     let ds = dims.d_state;
     let seq_len = dims.seq_len;
     let mid = dims.mamba_input_dim;
+    // An empty window has no last step to report and leaves every state
+    // where it was.
+    if seq_len == 0 || b_sz == 0 {
+        return;
+    }
 
     let conv_per_sample = n_layers * di * dc;
     let ssm_per_sample = n_layers * di * ds;
@@ -420,6 +425,11 @@ pub fn parallel_mamba_target_forward(
 
         THREAD_TARGET_SCRATCH.with(|cell| {
             let mut opt = cell.borrow_mut();
+            // A worker keeps its scratch between calls, so one sized for an
+            // earlier shape is rebuilt.
+            if opt.as_ref().is_some_and(|s| !s.fits(dm, di, ds, dr)) {
+                *opt = None;
+            }
             let scratch = opt.get_or_insert_with(|| MambaTargetScratch::new(dm, di, ds, dr));
 
             // SAFETY: each `b` writes to a disjoint region of target_temporal:
@@ -428,7 +438,14 @@ pub fn parallel_mamba_target_forward(
             let out_b = unsafe { std::slice::from_raw_parts_mut(ptr.temporal.add(b * dm), dm) };
             out_b.fill(0.0);
 
-            forward_mamba_target_step(out_b, inp_b, target_w, scratch, (dm, di, ds, dc, dr, mid));
+            forward_mamba_target_step(
+                out_b,
+                inp_b,
+                target_w,
+                scratch,
+                (dm, di, ds, dc, dr, mid),
+                dims.rms_norm_eps,
+            );
         });
     });
 
@@ -490,8 +507,11 @@ pub fn parallel_mamba_target_forward_burnin(
 
         THREAD_TARGET_SEQ_SCRATCH.with(|cell| {
             let mut opt = cell.borrow_mut();
-            // Reinitialize if seq_len changed (tuner may change dims between trials).
-            let needs_reinit = opt.as_ref().is_some_and(|s| s.seq_len != seq_len);
+            // A worker keeps its scratch between calls, so one sized for an
+            // earlier shape (a tuner changes dims between trials) is rebuilt.
+            let needs_reinit = opt
+                .as_ref()
+                .is_some_and(|s| !s.fits((dm, di, ds, dc, dr, nl, seq_len)));
             if needs_reinit {
                 *opt = None;
             }
@@ -508,6 +528,7 @@ pub fn parallel_mamba_target_forward_burnin(
                 target_w,
                 scratch,
                 (dm, di, ds, dc, dr, seq_len),
+                dims.rms_norm_eps,
             );
         });
     });
@@ -1186,6 +1207,7 @@ mod tests {
                 &target_w,
                 &mut scratch,
                 (d_model, d_inner, d_state, d_conv, dt_rank, mamba_input_dim),
+                crate::ops::fast_math::RMS_NORM_EPS,
             );
         }
 

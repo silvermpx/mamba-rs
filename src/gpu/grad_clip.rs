@@ -18,7 +18,7 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::buffers::{GpuBuffer, GpuByteBuffer};
 use super::context::GpuCtx;
-use super::launch::grid_1d;
+use super::launch::grid_1d_wide;
 
 /// Number of f64 partials the fixed-grid reduction produces. Must match
 /// `GCLIP_BLOCKS` in kernels/grad_clip.cu.
@@ -52,7 +52,7 @@ pub fn global_grad_norm(
         GRAD_CLIP_PARTIALS,
         "grad-clip host partials slice has the wrong length"
     );
-    let n = grads_flat.len() as i32;
+    let n = grads_flat.len() as i64;
     let dst = partials.cached_ptr();
     let src = grads_flat.cached_ptr();
     let mut b = ctx
@@ -79,6 +79,13 @@ pub fn global_grad_norm(
         sum += p;
     }
     Ok(sum.sqrt())
+}
+
+/// The limit a global norm is computed against: the clip's maximum, or
+/// +inf when only the spike skip needs the norm. An infinite limit leaves
+/// every gradient as it is (the coefficient is exactly 1.0).
+pub(crate) fn norm_limit(clip_max_norm: Option<f32>, step_skip_above: Option<f32>) -> Option<f32> {
+    clip_max_norm.or(step_skip_above.map(|_| f32::INFINITY))
 }
 
 /// Device-side clip: launches the sum-of-squares reduction, folds the
@@ -112,7 +119,7 @@ pub fn clip_grads_device(
         "grad-clip scratch must hold exactly [coef, norm]"
     );
     let n_elems = grads_flat.len();
-    let n = n_elems as i32;
+    let n = n_elems as i64;
     // Stage 1: fixed-grid sum of squares (geometry is contractual).
     {
         let dst = partials.cached_ptr();
@@ -149,14 +156,16 @@ pub fn clip_grads_device(
         };
         unsafe { b.launch(cfg) }.map_err(|e| format!("grad_clip_coef_f32: {e:?}"))?;
     }
-    // Stage 3: scale by the device-resident coefficient.
-    {
+    // Stage 3: scale by the device-resident coefficient. An infinite limit
+    // only measures the norm: its coefficient is exactly 1.0, a no-op pass.
+    if max_norm != f32::INFINITY {
         let coef_ptr = scratch.cached_ptr();
         let mut b = ctx.stream.launch_builder(&ctx.kernels.scale_grads_dev_f32);
         b.arg(grads_flat.inner_mut());
         b.arg(&coef_ptr);
         b.arg(&n);
-        unsafe { b.launch(grid_1d(n_elems)) }.map_err(|e| format!("scale_grads_dev_f32: {e:?}"))?;
+        unsafe { b.launch(grid_1d_wide(n_elems)) }
+            .map_err(|e| format!("scale_grads_dev_f32: {e:?}"))?;
     }
     let mut host = [0.0f32; 2];
     scratch.download(&ctx.stream, &mut host)?;
@@ -172,12 +181,12 @@ pub fn clip_grads_device(
 #[derive(Clone, Copy, Debug)]
 pub struct GradRegionGeom {
     pub n_layers: i32,
-    pub layer_stride: i32,
-    pub a_off: i32,
+    pub layer_stride: i64,
+    pub a_off: i64,
     pub a_rows: i32,
     pub a_cols: i32,
-    pub a_row_stride: i32,
-    pub b_off: i32,
+    pub a_row_stride: i64,
+    pub b_off: i64,
     pub b_len: i32,
 }
 
@@ -275,12 +284,12 @@ pub fn clip_region_device(
 /// coefficient). Reuses the AMP `scale_grads_f32` kernel.
 pub fn scale_grads(ctx: &GpuCtx, grads_flat: &mut GpuBuffer, factor: f32) -> Result<(), String> {
     let n_elems = grads_flat.len();
-    let n = n_elems as i32;
+    let n = n_elems as i64;
     let mut b = ctx.stream.launch_builder(&ctx.kernels.scale_grads_f32);
     b.arg(grads_flat.inner_mut());
     b.arg(&factor);
     b.arg(&n);
-    unsafe { b.launch(grid_1d(n_elems)) }
+    unsafe { b.launch(grid_1d_wide(n_elems)) }
         .map(|_| ())
         .map_err(|e| format!("scale_grads (clip): {e:?}"))
 }

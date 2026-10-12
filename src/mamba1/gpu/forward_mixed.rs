@@ -336,6 +336,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
     );
 
     let dims = scratch.dims;
+    dims.check_for(ctx)?;
     let bt = dims.batch * dims.seq_len;
     let dm = dims.d_model;
     let di = dims.d_inner;
@@ -657,12 +658,13 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 unsafe { bld.launch(crate::gpu::launch::grid_parallel_scan(b, di, ds)) }
                     .map_err(|e| format!("ssm_parallel_fwd typed L{layer_idx}: {e:?}"))?;
             } else {
-                assert!(
-                    ds <= k.state_cap,
-                    "ssm_burnin_forward_typed: d_state {ds} exceeds the compiled \
+                if ds > k.state_cap {
+                    return Err(format!(
+                        "ssm_burnin_forward_typed: d_state {ds} exceeds the compiled \
                      state capacity {}",
-                    k.state_cap
-                );
+                        k.state_cap
+                    ));
+                }
                 let kernel = match dt {
                     WeightDtype::F32 | WeightDtype::Tf32 => &k.ssm_burnin_fwd,
                     WeightDtype::Bf16 => &k.ssm_burnin_fwd_bf16,

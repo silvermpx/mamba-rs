@@ -322,6 +322,7 @@ pub fn gpu_forward_mamba3_layer(
     layer_ptrs: &Mamba3LayerPtrs,
     scratch: &mut GpuMamba3Scratch,
 ) -> Result<(), String> {
+    exec.check_state_cap()?;
     let M3Exec {
         ctx,
         kernels: m3k,
@@ -809,6 +810,7 @@ pub fn gpu_forward_mamba3_backbone(
     states: GpuMamba3StateBufs<'_>,
     scratch: &mut GpuMamba3Scratch,
 ) -> Result<(), String> {
+    exec.check_state_cap()?;
     let M3Exec {
         ctx,
         kernels: m3k,
@@ -914,6 +916,7 @@ pub fn gpu_forward_mamba3_target_burnin(
     mamba_input: &GpuBuffer,
     tgt: &mut GpuMamba3TargetScratch,
 ) -> Result<(), String> {
+    exec.check_state_cap()?;
     let M3Exec {
         ctx,
         kernels: m3k,

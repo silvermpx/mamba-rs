@@ -61,6 +61,7 @@ pub fn gpu_backward_mamba3_backbone_mixed(
     f32_scratch: &mut GpuMamba3Scratch,
     mixed_scratch: &mut GpuMamba3MixedScratch,
 ) -> Result<(), String> {
+    exec.check_state_cap()?;
     let M3Exec {
         ctx,
         kernels: m3k,

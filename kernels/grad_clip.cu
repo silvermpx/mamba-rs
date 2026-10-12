@@ -21,12 +21,13 @@
 extern "C" __global__ void grad_sumsq_partial_f32(
     double* __restrict__ partials,
     const float* __restrict__ g,
-    int n
+    long long n
 ) {
     __shared__ double smem[GCLIP_THREADS];
     double acc = 0.0;
-    const int stride = GCLIP_BLOCKS * GCLIP_THREADS;
-    for (int i = blockIdx.x * GCLIP_THREADS + threadIdx.x; i < n; i += stride) {
+    const long long stride = (long long)GCLIP_BLOCKS * GCLIP_THREADS;
+    for (long long i = (long long)blockIdx.x * GCLIP_THREADS + threadIdx.x; i < n;
+         i += stride) {
         double v = (double)g[i];
         acc += v * v;
     }
@@ -86,9 +87,9 @@ extern "C" __global__ void grad_clip_coef_f32(
 extern "C" __global__ void grad_region_sumsq_partial_f32(
     double* __restrict__ partials,
     const float* __restrict__ g,
-    int n_layers, int layer_stride,
-    int a_off, int a_rows, int a_cols, int a_row_stride,
-    int b_off, int b_len
+    int n_layers, long long layer_stride,
+    long long a_off, int a_rows, int a_cols, long long a_row_stride,
+    long long b_off, int b_len
 ) {
     __shared__ double smem[GCLIP_THREADS];
     const int per_layer = a_rows * a_cols + b_len;
@@ -97,9 +98,9 @@ extern "C" __global__ void grad_region_sumsq_partial_f32(
     const long long stride = (long long)GCLIP_BLOCKS * GCLIP_THREADS;
     for (long long v = (long long)blockIdx.x * GCLIP_THREADS + threadIdx.x; v < n;
          v += stride) {
-        int l = (int)(v / per_layer);
+        long long l = v / per_layer;
         int r = (int)(v % per_layer);
-        int off;
+        long long off;
         if (r < a_rows * a_cols) {
             int row = r / a_cols;
             int col = r % a_cols;
@@ -129,9 +130,9 @@ extern "C" __global__ void grad_region_sumsq_partial_f32(
 extern "C" __global__ void grad_region_scale_dev_f32(
     float* __restrict__ g,
     const float* __restrict__ coef,   // [1]
-    int n_layers, int layer_stride,
-    int a_off, int a_rows, int a_cols, int a_row_stride,
-    int b_off, int b_len
+    int n_layers, long long layer_stride,
+    long long a_off, int a_rows, int a_cols, long long a_row_stride,
+    long long b_off, int b_len
 ) {
     const float c = coef[0];
     const int per_layer = a_rows * a_cols + b_len;
@@ -139,9 +140,9 @@ extern "C" __global__ void grad_region_scale_dev_f32(
     const long long stride = (long long)GCLIP_BLOCKS * GCLIP_THREADS;
     for (long long v = (long long)blockIdx.x * GCLIP_THREADS + threadIdx.x; v < n;
          v += stride) {
-        int l = (int)(v / per_layer);
+        long long l = v / per_layer;
         int r = (int)(v % per_layer);
-        int off;
+        long long off;
         if (r < a_rows * a_cols) {
             int row = r / a_cols;
             int col = r % a_cols;

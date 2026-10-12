@@ -831,13 +831,15 @@ pub fn build_multi_plan(
 }
 
 /// Launch the fused step: one kernel over every chunk. `bias_factors_ptr`
-/// is the 3-element `[bc1, bc2, lr]` device buffer.
+/// is the 3-element `[bc1, bc2, lr]` device buffer. `skip_flag` is 0, or a
+/// device `int` (the f16 overflow flag) that makes the step a no-op when set.
 pub fn step_multi(
     ctx: &GpuCtx,
     kernel: &CudaFunction,
     plan: &AdamWMultiPlan,
     adam: &GpuAdamW,
     bias_factors_ptr: cudarc::driver::sys::CUdeviceptr,
+    skip_flag: cudarc::driver::sys::CUdeviceptr,
 ) -> Result<(), String> {
     let table_ptr = plan.table.cached_ptr();
     let cfg = cudarc::driver::LaunchConfig {
@@ -851,6 +853,7 @@ pub fn step_multi(
     b.arg(&adam.beta2);
     b.arg(&adam.eps);
     b.arg(&bias_factors_ptr);
+    b.arg(&skip_flag);
     unsafe { b.launch(cfg) }
         .map(|_| ())
         .map_err(|e| format!("adamw_step_multi: {e:?}"))

@@ -200,8 +200,18 @@ impl MambaWeights {
             Ok(())
         };
 
-        check("input_proj_w", self.input_proj_w.len(), input_dim * d)?;
-        check("input_proj_b", self.input_proj_b.len(), d)?;
+        if self.input_proj_w.is_empty() && self.input_proj_b.is_empty() {
+            // No input projection: the rows are read as they are, so they
+            // are d_model wide.
+            check(
+                "input_dim of weights without an input projection",
+                input_dim,
+                d,
+            )?;
+        } else {
+            check("input_proj_w", self.input_proj_w.len(), input_dim * d)?;
+            check("input_proj_b", self.input_proj_b.len(), d)?;
+        }
         check("norm_f_weight", self.norm_f_weight.len(), d)?;
 
         if self.layers.len() != cfg.n_layers {

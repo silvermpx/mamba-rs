@@ -56,7 +56,7 @@ use cudarc::driver::{CudaSlice, CudaStream, PushKernelArg};
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::kernels::MambaKernels;
-use crate::gpu::launch::grid_1d;
+use crate::gpu::launch::grid_1d_wide;
 
 /// CPU-side state machine for dynamic loss scaling.
 #[derive(Clone, Debug)]
@@ -285,8 +285,8 @@ pub fn check_inf_nan_gpu(
     if grads.is_empty() {
         return Ok(());
     }
-    let n = grads.len() as i32;
-    let cfg = grid_1d(grads.len());
+    let n = grads.len() as i64;
+    let cfg = grid_1d_wide(grads.len());
     let mut bld = ctx.stream.launch_builder(&kernels.check_inf_nan_f32);
     let flag_ptr = {
         use cudarc::driver::DevicePtr;
@@ -337,8 +337,8 @@ pub fn scale_grads_skip_gpu(
     if grads.is_empty() {
         return Ok(());
     }
-    let n = grads.len() as i32;
-    let cfg = grid_1d(grads.len());
+    let n = grads.len() as i64;
+    let cfg = grid_1d_wide(grads.len());
     let mut bld = ctx.stream.launch_builder(&kernels.scale_grads_skip_f32);
     let flag_ptr = {
         use cudarc::driver::DevicePtr;
@@ -367,8 +367,8 @@ pub fn scale_grads_gpu(
     if grads.is_empty() {
         return Ok(());
     }
-    let n = grads.len() as i32;
-    let cfg = grid_1d(grads.len());
+    let n = grads.len() as i64;
+    let cfg = grid_1d_wide(grads.len());
     let mut bld = ctx.stream.launch_builder(&kernels.scale_grads_f32);
     let grad_ptr = grads.cached_ptr();
     bld.arg(&grad_ptr);

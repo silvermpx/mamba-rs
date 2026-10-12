@@ -44,12 +44,12 @@ fn region_clip_scales_only_the_region() {
 
     let geom = GradRegionGeom {
         n_layers: n_layers as i32,
-        layer_stride: per_layer as i32,
-        a_off: (head_pad + ctrl0) as i32,
+        layer_stride: per_layer as i64,
+        a_off: (head_pad + ctrl0) as i64,
         a_rows: rows as i32,
         a_cols: ctrl_len as i32,
-        a_row_stride: row_stride as i32,
-        b_off: (head_pad + mat) as i32,
+        a_row_stride: row_stride as i64,
+        b_off: (head_pad + mat) as i64,
         b_len: b_len as i32,
     };
 

@@ -88,6 +88,16 @@ impl GradWindow {
 
 /// `dst += src`, element by element.
 fn add_into(ctx: &GpuCtx, dst: &mut GpuBuffer, src: &GpuBuffer) -> Result<(), String> {
+    add_into_sliced(ctx, dst, src, i32::MAX as usize)
+}
+
+/// [`add_into`] in launches of at most `max_slice` elements.
+fn add_into_sliced(
+    ctx: &GpuCtx,
+    dst: &mut GpuBuffer,
+    src: &GpuBuffer,
+    max_slice: usize,
+) -> Result<(), String> {
     let n = dst.len();
     if src.len() != n {
         return Err(format!(
@@ -95,12 +105,21 @@ fn add_into(ctx: &GpuCtx, dst: &mut GpuBuffer, src: &GpuBuffer) -> Result<(), St
             src.len()
         ));
     }
-    let n_i = n as i32;
-    let mut bld = ctx.stream.launch_builder(&ctx.kernels.vec_add_inplace);
-    bld.arg(dst.inner_mut());
-    bld.arg(src.inner());
-    bld.arg(&n_i);
-    unsafe { bld.launch(grid_1d(n)) }.map_err(|e| format!("gradient window add: {e:?}"))?;
+    // The element kernel counts in i32, so an arena past i32::MAX goes in
+    // slices. Each element is still one add of the same two floats.
+    let (dst_ptr, src_ptr) = (dst.cached_ptr(), src.cached_ptr());
+    let mut start = 0usize;
+    while start < n {
+        let len = (n - start).min(max_slice);
+        let off = (start * std::mem::size_of::<f32>()) as u64;
+        let (d, s, len_i) = (dst_ptr + off, src_ptr + off, len as i32);
+        let mut bld = ctx.stream.launch_builder(&ctx.kernels.vec_add_inplace);
+        bld.arg(&d);
+        bld.arg(&s);
+        bld.arg(&len_i);
+        unsafe { bld.launch(grid_1d(len)) }.map_err(|e| format!("gradient window add: {e:?}"))?;
+        start += len;
+    }
     Ok(())
 }
 
@@ -131,4 +150,30 @@ pub(crate) fn check_backward_opts(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::device::GpuDevice;
+
+    /// The slices cover every element once, in order: an arena added in
+    /// launches of a thousand elements equals the host sum.
+    #[test]
+    fn sliced_adds_cover_every_element_once() {
+        let device = GpuDevice::new(0).expect("open CUDA device");
+        let ctx = GpuCtx::new(&device).expect("context");
+        let n = 2500;
+        let a: Vec<f32> = (0..n).map(|i| i as f32 * 0.5).collect();
+        let b: Vec<f32> = (0..n).map(|i| 1.0 - i as f32).collect();
+        let mut dst = GpuBuffer::zeros(&ctx.stream, n).expect("dst");
+        let mut src = GpuBuffer::zeros(&ctx.stream, n).expect("src");
+        dst.upload(&ctx.stream, &a).expect("upload a");
+        src.upload(&ctx.stream, &b).expect("upload b");
+        add_into_sliced(&ctx, &mut dst, &src, 1000).expect("sliced add");
+        let mut got = vec![0.0f32; n];
+        dst.download(&ctx.stream, &mut got).expect("download");
+        let want: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x + y).collect();
+        assert_eq!(got, want);
+    }
 }

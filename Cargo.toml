@@ -128,10 +128,14 @@ serde_json = "1"
 libc = "0.2"
 
 [dependencies.cudarc]
-# 0.19.9 floor: SyncOnDrop teardown gated behind is_managing_stream_
-# synchronization (PR 591) — the correct-drop story for our disabled
-# per-slice event tracking (the CUDA Graph capture prerequisite).
-version = "0.19.9"
+# 0.19.10 floor: the non-owning wrapper for a borrowed CUDA stream (PR 597),
+# so a caller's own stream can drive device-resident training I/O. It also
+# releases pinned allocations on error paths (PR 602) and adds the CUDA 13.4
+# bindings (PR 601).
+# 0.19.9 brought the SyncOnDrop teardown gated behind
+# is_managing_stream_synchronization (PR 591), the correct-drop story for
+# our disabled per-slice event tracking (the CUDA Graph capture prerequisite).
+version = "0.19.10"
 optional = true
 default-features = false
 features = [
@@ -643,6 +647,30 @@ required-features = ["cuda"]
 [[test]]
 name = "half_input_projection_decode"
 path = "tests/half_input_projection_decode.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "f16_graph_overflow"
+path = "tests/f16_graph_overflow.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "arena_past_i32"
+path = "tests/arena_past_i32.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "state_cap_refusal"
+path = "tests/state_cap_refusal.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "mimo_rank_bound"
+path = "tests/mimo_rank_bound.rs"
+
+[[test]]
+name = "tf32_wide_training"
+path = "tests/tf32_wide_training.rs"
 required-features = ["cuda"]
 
 [[test]]

@@ -104,6 +104,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         mirror_dx,
     } = *layer;
     let dims = scratch.dims;
+    dims.check_for(ctx)?;
     let bt = dims.bt();
     let dm = dims.d_model;
     let di = dims.d_inner;
@@ -835,6 +836,7 @@ pub fn gpu_backward_mamba_backbone_mixed(
     scratch: &mut GpuMambaMixedTrainScratch,
 ) -> Result<(), String> {
     let dims = scratch.dims;
+    dims.check_for(ctx)?;
     let dtype = acts.dtype;
     let bt = dims.bt();
 

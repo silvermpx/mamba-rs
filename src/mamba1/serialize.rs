@@ -35,14 +35,19 @@ pub fn save(
     let mut tensors: Vec<(&str, TensorView<'_>)> = Vec::new();
     let mut names: Vec<String> = Vec::new();
 
-    // Helper: create a 1D f32 tensor view from a slice
-    let view = |data: &[f32], shape: &[usize]| -> TensorView<'_> {
+    weights.validate(cfg, input_dim)?;
+    // An f32 tensor view. An empty tensor, the input projection of a model
+    // that reads its rows as they are, is written with one dimension of zero.
+    let view = |data: &[f32], shape: &[usize]| -> Result<TensorView<'_>, String> {
+        let shape = if data.is_empty() {
+            vec![0]
+        } else {
+            shape.to_vec()
+        };
         let bytes =
             unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
-        TensorView::new(safetensors::Dtype::F32, shape.to_vec(), bytes).expect(
-            "tensor view: bytes are sized from data.len() and every call site \
-             passes a shape whose product equals data.len()",
-        )
+        TensorView::new(safetensors::Dtype::F32, shape, bytes)
+            .map_err(|e| format!("tensor view: {e:?}"))
     };
 
     // input_proj
@@ -72,22 +77,22 @@ pub fn save(
 
     // Build tensor views (must live as long as tensors vec)
     let mut views: Vec<TensorView<'_>> = Vec::new();
-    views.push(view(&weights.input_proj_w, &[input_dim, dm]));
-    views.push(view(&weights.input_proj_b, &[dm]));
+    views.push(view(&weights.input_proj_w, &[input_dim, dm])?);
+    views.push(view(&weights.input_proj_b, &[dm])?);
 
     for lw in &weights.layers {
-        views.push(view(&lw.norm_weight, &[dm]));
-        views.push(view(&lw.in_proj_w, &[dm, 2 * di]));
-        views.push(view(&lw.conv1d_weight, &[di, dc]));
-        views.push(view(&lw.conv1d_bias, &[di]));
-        views.push(view(&lw.x_proj_w, &[di, xdbl_dim]));
-        views.push(view(&lw.dt_proj_w, &[dt_rank, di]));
-        views.push(view(&lw.dt_proj_b, &[di]));
-        views.push(view(&lw.a_log, &[di, ds]));
-        views.push(view(&lw.d_param, &[di]));
-        views.push(view(&lw.out_proj_w, &[di, dm]));
+        views.push(view(&lw.norm_weight, &[dm])?);
+        views.push(view(&lw.in_proj_w, &[dm, 2 * di])?);
+        views.push(view(&lw.conv1d_weight, &[di, dc])?);
+        views.push(view(&lw.conv1d_bias, &[di])?);
+        views.push(view(&lw.x_proj_w, &[di, xdbl_dim])?);
+        views.push(view(&lw.dt_proj_w, &[dt_rank, di])?);
+        views.push(view(&lw.dt_proj_b, &[di])?);
+        views.push(view(&lw.a_log, &[di, ds])?);
+        views.push(view(&lw.d_param, &[di])?);
+        views.push(view(&lw.out_proj_w, &[di, dm])?);
     }
-    views.push(view(&weights.norm_f_weight, &[dm]));
+    views.push(view(&weights.norm_f_weight, &[dm])?);
 
     // Build name-view pairs
     for (name, v) in names.iter().zip(views) {
@@ -254,4 +259,27 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
     weights.validate(&cfg, input_dim)?;
 
     Ok((weights, cfg, input_dim))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A model without an input projection, as every HF checkpoint loads,
+    /// saves and loads back as one instead of failing on its empty tensors.
+    #[test]
+    fn identity_input_round_trips() {
+        let cfg = MambaConfig::default();
+        let mut w = MambaWeights::init(&cfg, cfg.d_model, 42);
+        w.input_proj_w.clear();
+        w.input_proj_b.clear();
+        let path = std::env::temp_dir().join("mamba1_identity_test.safetensors");
+        save(&path, &w, &cfg, cfg.d_model).unwrap();
+        let loaded = load(&path);
+        std::fs::remove_file(&path).ok();
+        let (w2, cfg2, input_dim) = loaded.unwrap();
+        assert_eq!((cfg2, input_dim), (cfg, cfg.d_model));
+        assert!(w2.input_proj_w.is_empty() && w2.input_proj_b.is_empty());
+        assert_eq!(w.layers[0].in_proj_w, w2.layers[0].in_proj_w);
+    }
 }

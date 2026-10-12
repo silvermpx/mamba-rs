@@ -488,3 +488,47 @@ fn drawn_weights_with_input(
     w.input_proj_b = det(cfg.d_model, seed + 1, 0.1);
     w
 }
+
+/// One prefill scratch serves models of different shapes in turn: built for
+/// a two-head rank-4 model, it then prefills a wider rank-2 model with the
+/// bits of a scratch made for that model.
+#[test]
+fn m3_mimo_prefill_scratch_follows_the_model_it_serves() {
+    use mamba_rs::mamba1::cpu::prefill::PrefillMode;
+    use mamba_rs::mamba3_mimo::{
+        Mamba3MimoPrefillScratch, forward_mamba3_mimo_backbone_prefill_mode,
+    };
+    let small = Mamba3MimoConfig {
+        d_model: 32,
+        d_state: 16,
+        headdim: 16,
+        n_layers: 1,
+        ..Mamba3MimoConfig::default()
+    };
+    let wide = Mamba3MimoConfig {
+        d_model: 64,
+        d_state: 24,
+        mimo_rank: 2,
+        ..small
+    };
+    let seq = 9usize;
+    let run = |cfg: &Mamba3MimoConfig, scratch: &mut Mamba3MimoPrefillScratch| -> Vec<u32> {
+        let w = drawn_weights(cfg, 61);
+        let mut st = Mamba3MimoState::zeros(cfg);
+        let mut rows = vec![0f32; seq * cfg.d_model];
+        forward_mamba3_mimo_backbone_prefill_mode(
+            &mut rows,
+            &det(seq * cfg.d_model, 62, 1.0),
+            &w,
+            &mut st.layers,
+            scratch,
+            (cfg, seq, PrefillMode::Single),
+        );
+        rows.iter().map(|v| v.to_bits()).collect()
+    };
+    let mut reused = Mamba3MimoPrefillScratch::new(&small);
+    run(&small, &mut reused);
+    let got = run(&wide, &mut reused);
+    let want = run(&wide, &mut Mamba3MimoPrefillScratch::new(&wide));
+    assert_eq!(got, want, "a scratch reused across shapes changed the bits");
+}

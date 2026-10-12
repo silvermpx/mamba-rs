@@ -20,6 +20,8 @@ use crate::ops::norms::rms_norm_weighted;
 
 /// Reusable prefill buffers, grown to the longest window seen.
 pub struct Mamba3MimoPrefillScratch {
+    /// The config every buffer below is sized for.
+    cfg: Mamba3MimoConfig,
     rows: usize,
     norm: Vec<f32>,
     proj: Vec<f32>,
@@ -38,6 +40,7 @@ pub struct Mamba3MimoPrefillScratch {
 impl Mamba3MimoPrefillScratch {
     pub fn new(cfg: &Mamba3MimoConfig) -> Self {
         Self {
+            cfg: *cfg,
             rows: 0,
             norm: Vec::new(),
             proj: Vec::new(),
@@ -53,6 +56,11 @@ impl Mamba3MimoPrefillScratch {
     }
 
     fn ensure(&mut self, cfg: &Mamba3MimoConfig, rows: usize) {
+        // The per-head buffers follow the head shape, so a scratch built for
+        // another config starts over rather than reading past its heads.
+        if *cfg != self.cfg {
+            *self = Self::new(cfg);
+        }
         if rows <= self.rows {
             return;
         }

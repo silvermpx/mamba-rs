@@ -78,6 +78,35 @@ pub struct GpuMambaDims {
 }
 
 impl GpuMambaDims {
+    /// Refuse dims these kernels cannot run. The SSM kernels keep
+    /// `d_state` floats per thread up to the capacity the context compiled
+    /// them with, and the conv kernels hold at most 8 taps per channel: past
+    /// either bound every launch returns without writing, so nothing is
+    /// launched at all. `xdbl_dim` must be the x_proj row the kernels read.
+    pub fn check_for(&self, ctx: &GpuCtx) -> Result<(), String> {
+        if self.d_state > ctx.state_cap() {
+            return Err(format!(
+                "d_state {} exceeds the state capacity {} this context compiled \
+                 the Mamba-1 kernels for (GpuCtx::new_with_state_cap)",
+                self.d_state,
+                ctx.state_cap()
+            ));
+        }
+        if self.d_conv == 0 || self.d_conv > 8 {
+            return Err(format!(
+                "d_conv {} is outside the 1..=8 taps the Mamba-1 conv kernels hold",
+                self.d_conv
+            ));
+        }
+        if self.xdbl_dim != self.dt_rank + 2 * self.d_state {
+            return Err(format!(
+                "xdbl_dim {} is not dt_rank {} + 2 * d_state {}",
+                self.xdbl_dim, self.dt_rank, self.d_state
+            ));
+        }
+        Ok(())
+    }
+
     /// `B * T` — total number of (sample, timestep) pairs.
     pub fn bt(&self) -> usize {
         self.batch * self.seq_len
@@ -389,6 +418,7 @@ pub fn gpu_forward_mamba_layer(
     scratch: &mut GpuMambaScratch,
 ) -> Result<(), String> {
     let dims = scratch.dims;
+    dims.check_for(ctx)?;
     let bt = dims.bt();
     let dm = dims.d_model;
     let di = dims.d_inner;
@@ -749,6 +779,7 @@ pub fn gpu_forward_mamba_backbone(
     scratch: &mut GpuMambaScratch,
 ) -> Result<(), String> {
     let dims = scratch.dims;
+    dims.check_for(ctx)?;
     let bt = dims.bt();
 
     // Save input for backward
@@ -854,6 +885,7 @@ pub fn gpu_forward_mamba_target_burnin(
     scratch: &mut GpuMambaTargetScratch,
 ) -> Result<(), String> {
     let dims = &scratch.dims;
+    dims.check_for(ctx)?;
     let seq_len = dims.seq_len;
     let b = dims.batch;
     let bt = b * seq_len;

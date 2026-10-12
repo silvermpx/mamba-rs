@@ -229,6 +229,7 @@ fn one_eager_step(s: &mut Setup, ctx: &GpuCtx, m3k: &Mamba3Kernels, inp: &[f32],
         &s.multi_plan,
         &s.adam,
         s.bias.ptr(),
+        0,
     )
     .unwrap();
     s.weights.sync_master_to_compute(ctx).unwrap();

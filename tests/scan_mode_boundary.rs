@@ -1,9 +1,9 @@
 //! CPU-only pins for the scan-mode dispatch
 //! rules — the one scan test CI can run today (no cuda feature needed).
 //!
-//! Pins: the Auto threshold boundary, the `d_state > 64` sequential-kernel
-//! override in BOTH entry points (`use_parallel` and `resolve` — the latter
-//! used to omit it), and the explicit modes.
+//! Pins: the Auto threshold boundary, `Auto` taking the parallel scan above
+//! 64 states in both entry points (`use_parallel` and `resolve`), and the
+//! explicit modes honoured at every length and state size.
 
 use mamba_rs::config::ScanMode;
 
@@ -20,13 +20,20 @@ fn auto_threshold_boundary() {
 }
 
 #[test]
-fn d_state_override_forces_parallel_in_every_mode() {
-    for mode in [ScanMode::Sequential, ScanMode::Parallel, ScanMode::Auto] {
+fn auto_takes_the_parallel_scan_above_64_states() {
+    assert!(ScanMode::Auto.use_parallel(1, 65));
+    assert!(!ScanMode::Auto.use_parallel(1, 64));
+}
+
+#[test]
+fn explicit_modes_hold_at_every_state_size() {
+    for d_state in [1, 16, 64, 65, 128, 256] {
+        assert!(!ScanMode::Sequential.use_parallel(1, d_state), "{d_state}");
         assert!(
-            mode.use_parallel(1, 65),
-            "{mode:?}: d_state > 64 must force the parallel path (the sequential \
-             kernels silently no-op past their register cap)"
+            !ScanMode::Sequential.use_parallel(1 << 20, d_state),
+            "{d_state}"
         );
+        assert!(ScanMode::Parallel.use_parallel(1, d_state), "{d_state}");
     }
 }
 

@@ -91,8 +91,8 @@ pub struct BackwardOpts {
     /// not advance). A rare pathological window then costs one skipped
     /// update instead of a poisoned Adam second moment and a destroyed
     /// model - the small-batch analogue of the averaging a huge batch
-    /// provides. Requires `clip_max_norm` (the norm comes from the clip
-    /// fold; without it the option is ignored).
+    /// provides. Without `clip_max_norm` the same fold measures the norm
+    /// and leaves the gradients as they are.
     /// [`BackwardMetrics::optimizer_stepped`] reports the skip.
     pub step_skip_above: Option<f32>,
     /// `Some(c)`: before the global clip, clip the Mamba-3 CONTROL

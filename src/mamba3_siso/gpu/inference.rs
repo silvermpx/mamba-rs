@@ -15,7 +15,7 @@
 use super::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg};
 use super::weights::GpuMamba3WeightsInf;
 use crate::gpu::blas::gpu_gemm_f32_forward_ptrs;
-use crate::gpu::buffers::GpuBuffer;
+use crate::gpu::buffers::{DeviceKeep, GpuBuffer};
 use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
@@ -507,6 +507,19 @@ impl Mamba3GpuEngine {
     /// Whether a CUDA Graph has been captured.
     pub fn has_graph(&self) -> bool {
         self.graph.is_some()
+    }
+
+    /// Drop the captured graph: the next step runs eagerly and can be
+    /// captured again.
+    pub fn clear_graph(&mut self) -> Result<(), String> {
+        self.ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("M3 graph clear sync: {e:?}"))?;
+        self.graph = None;
+        self.captured_gemm_route = None;
+        self.captured_gemm_plan = None;
+        Ok(())
     }
 
     /// Allocate zeroed inference state.
@@ -1339,6 +1352,20 @@ impl Mamba3GpuEngineMixed {
 
     pub fn has_graph(&self) -> bool {
         self.graph.is_some()
+    }
+
+    /// Drop the captured graph: the next step runs eagerly and can be
+    /// captured again.
+    pub fn clear_graph(&mut self) -> Result<(), String> {
+        self.engine
+            .ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("M3 mixed graph clear sync: {e:?}"))?;
+        self.graph = None;
+        self.captured_gemm_route = None;
+        self.captured_gemm_plan = None;
+        Ok(())
     }
 
     /// End-to-end bf16/f16 T=1 Mamba-3 pipeline. A model with an input
@@ -2229,8 +2256,10 @@ impl Mamba3GpuBackbone {
         self.state.reset(&stream)
     }
 
-    /// Capture the decode step as one CUDA graph: an eager step on zero
-    /// input, a reset, then the capture. Later steps replay the graph.
+    /// Capture the decode step as one CUDA graph, which later steps replay.
+    /// A graph captured before is dropped first. The capture leaves the
+    /// recurrent state and the output rows where the caller left them: its
+    /// warm-up step on zero input is undone before the graph is recorded.
     /// Run the longest prompt before capturing: afterwards the GEMM staging
     /// can no longer grow.
     pub fn capture_graph(&mut self) -> Result<(), String> {
@@ -2241,13 +2270,30 @@ impl Mamba3GpuBackbone {
                 (er.input_dim, er.batch, er.cfg.d_model)
             }
         };
+        self.clear_graph()?;
         if let M3BackboneEngine::Mixed(e) = &self.engine {
             e.prepare_graph_scratch()?;
         }
+        let stream = self.stream().clone();
+        let f = std::mem::size_of::<f32>();
+        let st = &self.state;
+        let keep = DeviceKeep::take(
+            &stream,
+            &[
+                (st.ssm_state.cached_ptr(), st.ssm_state.len() * f),
+                (st.k_state.cached_ptr(), st.k_state.len() * f),
+                (st.v_state.cached_ptr(), st.v_state.len() * f),
+                (st.angle_state.cached_ptr(), st.angle_state.len() * f),
+                (
+                    self.temporal_ptr(),
+                    batch * d_model * self.temporal_dtype().size_bytes(),
+                ),
+            ],
+        )?;
         let input = vec![0.0f32; batch * input_dim];
         let mut output = vec![0.0f32; batch * d_model];
         self.step(&input, &mut output)?;
-        self.reset()?;
+        keep.restore(&stream)?;
         match (&mut self.engine, &mut self.scratch) {
             (M3BackboneEngine::F32(e), M3BackboneScratch::F32(sc)) => {
                 // This owner drops its graph before the owned state and scratch.
@@ -2258,6 +2304,14 @@ impl Mamba3GpuBackbone {
                 unsafe { e.capture_graph_mixed_native(&mut self.state, sc) }
             }
             _ => Err("M3 engine/scratch dtype mismatch".to_string()),
+        }
+    }
+
+    /// Drop the captured graph: steps run eagerly until the next capture.
+    pub fn clear_graph(&mut self) -> Result<(), String> {
+        match &mut self.engine {
+            M3BackboneEngine::F32(e) => e.clear_graph(),
+            M3BackboneEngine::Mixed(e) => e.clear_graph(),
         }
     }
 

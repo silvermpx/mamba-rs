@@ -22,7 +22,8 @@
 
 use super::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg};
 use super::state::{
-    CUptr, GpuMamba3Dims, GpuMamba3StateBufs, GpuMamba3TargetScratch, Mamba3PrefillTypedScratch,
+    CUptr, GpuMamba3Dims, GpuMamba3StateBufs, GpuMamba3TargetScratch, M3Exec,
+    Mamba3PrefillTypedScratch,
 };
 use super::weights::Mamba3WeightsView;
 use crate::gpu::blas::TypedPtr;
@@ -257,6 +258,12 @@ impl Mamba3Prefill {
         outputs: Mamba3PrefillOutputs<'_>,
     ) -> Result<(), String> {
         self.validate_run_dims(run.dims)?;
+        M3Exec {
+            ctx: run.ctx,
+            kernels: run.kernels,
+            dims: run.dims,
+        }
+        .check_state_cap()?;
         let has_gemm_work = run.dims.bt() != 0 && (!run.identity_proj || run.dims.n_layers != 0);
         if has_gemm_work {
             prepare_inference_arch_rung(run.ctx)?;

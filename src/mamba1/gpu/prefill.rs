@@ -516,6 +516,7 @@ fn prefill_body<W: MambaWeightsView>(
     final_out: Option<&mut GpuBuffer>,
 ) -> Result<(), String> {
     let dims: GpuMambaDims = scratch.dims;
+    dims.check_for(ctx)?;
     let seq_len = dims.seq_len;
     let b = dims.batch;
     let bt = b * seq_len;
@@ -1004,6 +1005,7 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
         "target_temporal dtype must match mixed scratch dtype"
     );
     let dims: GpuMambaDims = scratch.dims;
+    dims.check_for(ctx)?;
     let seq_len = dims.seq_len;
     let b = dims.batch;
     let bt = b * seq_len;
@@ -1324,12 +1326,13 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
                         .map_err(|e| format!("gate_from_tmajor prefill L{layer_idx}: {e:?}"))?;
                 }
             } else {
-                assert!(
-                    ds <= k.state_cap,
-                    "ssm_burnin_nosave_typed: d_state {ds} exceeds the compiled state \
+                if ds > k.state_cap {
+                    return Err(format!(
+                        "ssm_burnin_nosave_typed: d_state {ds} exceeds the compiled state \
                      capacity {} - the kernel returns without writing y otherwise",
-                    k.state_cap
-                );
+                        k.state_cap
+                    ));
+                }
                 let mut bld = ctx.stream.launch_builder(k.ssm_burnin_nosave_typed.get(dt));
                 bld.arg(&ssm_ptr);
                 bld.arg(&gated_out_ptr);

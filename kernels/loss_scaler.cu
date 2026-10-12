@@ -19,12 +19,12 @@
 extern "C" __global__ void check_inf_nan_f32(
     int* __restrict__ found_overflow,  // [1] device int, atomicOr target
     const float* __restrict__ grads,
-    int n
+    long long n
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long stride = (long long)gridDim.x * blockDim.x;
     int local = 0;
-    for (int i = idx; i < n; i += stride) {
+    for (long long i = idx; i < n; i += stride) {
         float v = grads[i];
         // Any non-finite triggers overflow. isfinite() returns false for both
         // ±inf and NaN, which is exactly the AMP semantics.
@@ -50,11 +50,11 @@ extern "C" __global__ void check_inf_nan_f32(
 extern "C" __global__ void scale_grads_f32(
     float* __restrict__ grads,
     float scale,
-    int n
+    long long n
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
-    for (int i = idx; i < n; i += stride) {
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long stride = (long long)gridDim.x * blockDim.x;
+    for (long long i = idx; i < n; i += stride) {
         grads[i] *= scale;
     }
 }
@@ -67,12 +67,12 @@ extern "C" __global__ void scale_grads_f32(
 extern "C" __global__ void scale_grads_dev_f32(
     float* __restrict__ grads,
     const float* __restrict__ scale,
-    int n
+    long long n
 ) {
     float s = scale[0];
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
-    for (int i = idx; i < n; i += stride) {
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long stride = (long long)gridDim.x * blockDim.x;
+    for (long long i = idx; i < n; i += stride) {
         grads[i] *= s;
     }
 }
@@ -122,7 +122,7 @@ extern "C" __global__ void scale_grads_skip_f32(
     float* __restrict__ grads,
     const int* __restrict__ overflow_flag,  // [1]
     const float* __restrict__ unscale_factor, // [1] = 1 / loss_scale
-    int n
+    long long n
 ) {
     // Branch on overflow and ASSIGN, not multiply. A multiply-by-zero would
     // propagate NaN: `Inf * 0 = NaN`, `NaN * 0 = NaN`. On overflow the raw
@@ -133,9 +133,9 @@ extern "C" __global__ void scale_grads_skip_f32(
     // skipping the optimizer step entirely on overflow.
     const int overflow = (overflow_flag[0] != 0);
     const float unscale = unscale_factor[0];
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = gridDim.x * blockDim.x;
-    for (int i = idx; i < n; i += stride) {
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long stride = (long long)gridDim.x * blockDim.x;
+    for (long long i = idx; i < n; i += stride) {
         grads[i] = overflow ? 0.0f : (grads[i] * unscale);
     }
 }

@@ -209,12 +209,6 @@ impl Mamba3MimoGpuEngine {
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = Mamba3MimoKernels::compile(device.context(), arch)?;
         let (hd, ds, rank) = (cfg.headdim, cfg.d_state, cfg.mimo_rank);
-        if cfg.d_model < 32 {
-            return Err(format!(
-                "the GPU row norm reduces whole warps; d_model {} is below 32",
-                cfg.d_model
-            ));
-        }
         let smem = scan_smem_bytes(hd, ds, rank);
         if smem > kernels.smem_optin || hd > 1024 {
             return Err(format!(
@@ -1162,7 +1156,11 @@ pub(crate) fn launch_chunked_scan(
         bld.arg(&st_i);
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: ((b * nc) as u32, nh as u32, CHUNK.div_ceil(tt) as u32),
-            block_dim: ((tt * hd) as u32, 1, 1),
+            // Whole warps only: the tile products leave a partial warp out,
+            // so a block under 32 threads would leave G unwritten. Threads
+            // past `tt * hd` own no output, and each product keeps the one
+            // chain its owner runs, so the rounding moves no bits.
+            block_dim: ((tt * hd).next_multiple_of(32) as u32, 1, 1),
             shared_mem_bytes: smem as u32,
         };
         unsafe { bld.launch(cfg) }.map_err(err("scan"))?;

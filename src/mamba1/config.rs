@@ -95,9 +95,8 @@ impl MambaConfig {
         // 256 is the reference implementations' own maximum. The
         // sequential SSM kernels size their per-thread state arrays at
         // JIT time from the model config (past ~128 the compiler spills
-        // to local memory — correct, slower); the training dispatch
-        // still routes d_state > 64 to the parallel scan as its faster
-        // numeric route.
+        // to local memory, correct and slower). `ScanMode::Auto` takes
+        // the parallel scan above 64 states, the faster route there.
         if self.d_state > 256 {
             return Err(format!(
                 "d_state ({}) must be <= 256 (CUDA parallel scan MAX_DSTATE limit)",

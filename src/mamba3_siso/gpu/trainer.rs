@@ -20,7 +20,7 @@ use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
 use crate::gpu::grad_clip::{
-    GradRegionGeom, alloc_partials, clip_grads_device, clip_region_device, scale_grads,
+    GradRegionGeom, alloc_partials, clip_grads_device, clip_region_device, norm_limit, scale_grads,
 };
 use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
@@ -172,12 +172,12 @@ impl Mamba3GpuTrainer {
             &cfg,
             crate::mamba3_siso::route::RoutePurpose::Training,
         )?;
-        crate::gpu::launch::validate_kernel_arg_capacity(
-            session.batch,
-            session.seq_len,
-            cfg.d_inner(),
-            cfg.d_state,
-        )?;
+        // The index ranges are checked against the scan this window runs
+        // when its dims are built (`GpuMamba3Dims::validate_index_budget`):
+        // the chunked path has no sequential tape to count.
+        if session.batch == 0 || session.seq_len == 0 {
+            return Err("a training window needs at least one sequence and one token".into());
+        }
         let inner = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => {
                 // The f32 backbone runs the input projection GEMM
@@ -737,12 +737,12 @@ fn m3_control_region_geom(cfg: &Mamba3Config, input_dim: usize) -> GradRegionGeo
     let layer0 = input_dim * dm + dm;
     GradRegionGeom {
         n_layers: cfg.n_layers as i32,
-        layer_stride: per_layer as i32,
-        a_off: (layer0 + dm + ctrl0) as i32,
+        layer_stride: per_layer as i64,
+        a_off: (layer0 + dm + ctrl0) as i64,
         a_rows: dm as i32,
         a_cols: ctrl_len as i32,
-        a_row_stride: ip as i32,
-        b_off: (layer0 + dm + dm * ip) as i32,
+        a_row_stride: ip as i64,
+        b_off: (layer0 + dm + dm * ip) as i64,
         b_len: nh as i32,
     }
 }
@@ -1180,7 +1180,7 @@ impl Mamba3TrainerMixed {
         let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
         dt_scaled.upload(&self.ctx.stream, d_temporal)?;
         {
-            let n = d_temporal.len() as i32;
+            let n = d_temporal.len() as i64;
             let mut builder = self
                 .ctx
                 .stream
@@ -1188,7 +1188,7 @@ impl Mamba3TrainerMixed {
             builder.arg(dt_scaled.inner_mut());
             builder.arg(&scale);
             builder.arg(&n);
-            unsafe { builder.launch(crate::gpu::launch::grid_1d(d_temporal.len())) }
+            unsafe { builder.launch(crate::gpu::launch::grid_1d_wide(d_temporal.len())) }
                 .map_err(|e| format!("scale d_temporal (m3 f16): {e:?}"))?;
         }
 
@@ -1440,6 +1440,7 @@ impl Mamba3TrainerMixed {
                         multi_plan,
                         adam,
                         bias.ptr(),
+                        snap_overflow,
                     )?;
                     weights.sync_master_to_compute(ctx)
                 })
@@ -1529,6 +1530,7 @@ impl Mamba3TrainerMixed {
             &self.multi_plan,
             &self.adam,
             self.bias.ptr(),
+            0,
         )?;
         // Bulk typed shadows ride the fused kernel; the walk covers only
         // the f32-stays-f32 tensors.
@@ -1600,6 +1602,7 @@ impl Mamba3TrainerMixed {
                 multi_plan,
                 adam,
                 bias.ptr(),
+                0,
             )?;
             weights.sync_master_to_compute(ctx)
         })?;
@@ -1741,7 +1744,7 @@ impl Mamba3TrainerMixed {
                 cb,
             )?;
         }
-        let grad_norm = match clip_max_norm {
+        let grad_norm = match norm_limit(clip_max_norm, step_skip_above) {
             Some(c) => Some(self.apply_clip(c)?),
             None => None,
         };
@@ -1789,7 +1792,7 @@ impl Mamba3TrainerMixed {
         {
             let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
             dt_scaled.upload(&self.ctx.stream, d_temporal)?;
-            let n = d_temporal.len() as i32;
+            let n = d_temporal.len() as i64;
             let mut builder = self
                 .ctx
                 .stream
@@ -1797,7 +1800,7 @@ impl Mamba3TrainerMixed {
             builder.arg(dt_scaled.inner_mut());
             builder.arg(&scale);
             builder.arg(&n);
-            unsafe { builder.launch(crate::gpu::launch::grid_1d(d_temporal.len())) }
+            unsafe { builder.launch(crate::gpu::launch::grid_1d_wide(d_temporal.len())) }
                 .map_err(|e| format!("scale d_temporal (m3 f16 split): {e:?}"))?;
         }
         if let Some(ref mut u) = self.unscale_factor {
@@ -1849,7 +1852,7 @@ impl Mamba3TrainerMixed {
                     cb,
                 )?;
             }
-            if let Some(c) = clip_max_norm {
+            if let Some(c) = norm_limit(clip_max_norm, step_skip_above) {
                 grad_norm = Some(self.apply_clip(c)?);
             }
             // Spike skip: a window whose PRE-clip norm exceeds the threshold
@@ -2255,6 +2258,7 @@ impl Mamba3TrainerF32 {
             &self.multi_plan,
             &self.adam,
             self.bias.ptr(),
+            0,
         )
     }
 
@@ -2312,6 +2316,7 @@ impl Mamba3TrainerF32 {
                 multi_plan,
                 adam,
                 bias.ptr(),
+                0,
             )
         })?;
         *prepared_gemm_manifest = Some(manifest);
@@ -2431,7 +2436,7 @@ impl Mamba3TrainerF32 {
                 cb,
             )?;
         }
-        let grad_norm = match clip_max_norm {
+        let grad_norm = match norm_limit(clip_max_norm, step_skip_above) {
             Some(c) => Some(self.apply_clip(c)?),
             None => None,
         };

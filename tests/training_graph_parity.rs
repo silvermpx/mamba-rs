@@ -301,6 +301,7 @@ fn one_eager_step(setup: &mut Setup, ctx: &GpuCtx, input: &[f32], d_temp: &[f32]
         &setup.multi_plan,
         &setup.adam,
         setup.bias.ptr(),
+        0,
     )
     .unwrap();
     setup.weights.sync_master_to_compute(ctx).unwrap();

@@ -694,7 +694,64 @@ impl GpuByteBuffer {
             .memset_zeros(&mut self.data)
             .map_err(|e| format!("GPU op failed: {:?}", e))
     }
+}
 
+/// Device copies of a few regions, written back later: how a warm-up step
+/// runs without moving the position a caller left a backbone at.
+pub struct DeviceKeep {
+    store: GpuByteBuffer,
+    regions: Vec<(cudarc::driver::sys::CUdeviceptr, usize)>,
+}
+
+impl DeviceKeep {
+    /// Copy each `(address, bytes)` region into one device store, in order.
+    pub fn take(
+        stream: &Arc<cudarc::driver::CudaStream>,
+        regions: &[(cudarc::driver::sys::CUdeviceptr, usize)],
+    ) -> Result<Self, String> {
+        let total: usize = regions.iter().map(|&(_, bytes)| bytes).sum();
+        let store = GpuByteBuffer::zeros(stream, total.max(1))?;
+        let mut at = store.cached_ptr();
+        for &(ptr, bytes) in regions {
+            copy_device_bytes(stream, at, ptr, bytes)?;
+            at += bytes as u64;
+        }
+        Ok(Self {
+            store,
+            regions: regions.to_vec(),
+        })
+    }
+
+    /// Write every region back from the store.
+    pub fn restore(&self, stream: &Arc<cudarc::driver::CudaStream>) -> Result<(), String> {
+        let mut at = self.store.cached_ptr();
+        for &(ptr, bytes) in &self.regions {
+            copy_device_bytes(stream, ptr, at, bytes)?;
+            at += bytes as u64;
+        }
+        Ok(())
+    }
+}
+
+/// An async device-to-device copy of `bytes` between raw addresses.
+fn copy_device_bytes(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    dst: cudarc::driver::sys::CUdeviceptr,
+    src: cudarc::driver::sys::CUdeviceptr,
+    bytes: usize,
+) -> Result<(), String> {
+    if bytes == 0 {
+        return Ok(());
+    }
+    let result =
+        unsafe { cudarc::driver::sys::cuMemcpyDtoDAsync_v2(dst, src, bytes, stream.cu_stream()) };
+    if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("D2D copy of {bytes} bytes failed: {result:?}"));
+    }
+    Ok(())
+}
+
+impl GpuByteBuffer {
     /// Upload raw bytes into the whole buffer (exact-length contract).
     pub fn upload_bytes(
         &mut self,

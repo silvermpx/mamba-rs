@@ -103,7 +103,7 @@ fn max_rel_err_masked(a: &[f32], b: &[f32], atol: f32) -> f32 {
     worst
 }
 
-fn run_case(scan_mode: ScanMode, seq_len: usize) {
+fn run_case(scan_mode: ScanMode, seq_len: usize, rms_norm_eps: f32) {
     let dev = GpuDevice::new(0).expect("GpuDevice");
     let ctx = GpuCtx::new(&dev).expect("GpuCtx");
     let cfg = MambaConfig {
@@ -113,7 +113,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize) {
         d_conv: 4,
         expand: 2,
         scan_mode,
-        rms_norm_eps: 1e-5,
+        rms_norm_eps,
     };
     let input_dim = cfg.d_model;
     let batch = 2;
@@ -140,6 +140,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize) {
             &cpu_tw,
             &mut cpu_scratch,
             (dm, di, ds, dc, dr, seq_len),
+            cfg.rms_norm_eps,
         );
     }
 
@@ -158,7 +159,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize) {
         mamba_input_dim: input_dim,
         n_layers: nl,
         scan_mode,
-        rms_norm_eps: 1e-5,
+        rms_norm_eps,
     };
     let mut scratch = GpuMambaTargetScratch::new(&ctx.stream, &gpu_dims).expect("target scratch");
     let mut a_neg_flat = vec![0.0f32; nl * di * ds];
@@ -181,10 +182,12 @@ fn run_case(scan_mode: ScanMode, seq_len: usize) {
     out_gpu
         .download(&ctx.stream, &mut gpu_out)
         .expect("download");
-    eprintln!(
-        "HASH target:m1:{scan_mode:?}:T{seq_len} {:016x}",
-        digest::fnv1a_f32(&gpu_out)
-    );
+    if rms_norm_eps == 1e-5 {
+        eprintln!(
+            "HASH target:m1:{scan_mode:?}:T{seq_len} {:016x}",
+            digest::fnv1a_f32(&gpu_out)
+        );
+    }
 
     assert!(
         gpu_out.iter().any(|v| v.abs() > 1e-3),
@@ -200,13 +203,20 @@ fn run_case(scan_mode: ScanMode, seq_len: usize) {
 
 #[test]
 fn m1_target_forward_matches_cpu_on_the_sequential_route() {
-    run_case(ScanMode::Sequential, 8);
+    run_case(ScanMode::Sequential, 8, 1e-5);
 }
 
 #[test]
 fn m1_target_forward_matches_cpu_on_the_parallel_route_across_chunks() {
     // Longer than one scan chunk, so the inter-chunk prefix path runs too.
-    run_case(ScanMode::Parallel, 1100);
+    run_case(ScanMode::Parallel, 1100, 1e-5);
+}
+
+/// The CPU target takes the model's norm eps as the GPU target does: at an
+/// eps far from the default the two still agree.
+#[test]
+fn m1_target_forward_matches_cpu_at_the_model_eps() {
+    run_case(ScanMode::Sequential, 8, 1e-2);
 }
 
 fn m3_dims(cfg: &Mamba3Config, batch: usize, seq_len: usize, parallel: bool) -> GpuMamba3Dims {

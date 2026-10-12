@@ -57,13 +57,17 @@ pub trait GpuBackbone {
     /// Zero the recurrent state, the start of new sequences.
     fn reset(&mut self) -> Result<(), String>;
 
-    /// Capture the decode step as one CUDA graph; later steps replay it.
-    /// Run the longest prompt first: after the capture the GEMM staging can
-    /// no longer grow.
+    /// Capture the decode step as one CUDA graph, which later steps replay.
+    /// A graph captured before is dropped first, and the state and output
+    /// rows stay where they were. Run the longest prompt first: after the
+    /// capture the GEMM staging can no longer grow.
     fn capture_graph(&mut self) -> Result<(), String>;
 
     /// Whether steps replay a captured graph.
     fn has_graph(&self) -> bool;
+
+    /// Drop the captured graph: steps run eagerly until the next capture.
+    fn clear_graph(&mut self) -> Result<(), String>;
 
     /// The final-norm rows of the last step or prompt, `[batch, d_model]`,
     /// on the device, in [`GpuBackbone::temporal_dtype`].
@@ -117,6 +121,9 @@ macro_rules! gpu_backbone_by_inherent_methods {
             }
             fn has_graph(&self) -> bool {
                 <$ty>::has_graph(self)
+            }
+            fn clear_graph(&mut self) -> Result<(), String> {
+                <$ty>::clear_graph(self)
             }
             fn temporal_ptr(&self) -> CUdeviceptr {
                 <$ty>::temporal_ptr(self)
@@ -214,6 +221,9 @@ impl GpuBackbone for AnyGpuBackbone {
     }
     fn has_graph(&self) -> bool {
         self.inner().has_graph()
+    }
+    fn clear_graph(&mut self) -> Result<(), String> {
+        self.inner_mut().clear_graph()
     }
     fn temporal_ptr(&self) -> CUdeviceptr {
         self.inner().temporal_ptr()

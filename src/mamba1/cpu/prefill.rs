@@ -42,9 +42,10 @@ use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 
-/// Maximum `d_state` the stack-allocated per-channel `da` buffer covers.
-/// Matches the GPU dispatch ceiling for the sequential kernels.
-const MAX_D_STATE: usize = 64;
+/// Maximum `d_state` the stack-allocated per-channel buffers cover: the
+/// largest state `MambaConfig::validate` admits, so every valid model
+/// prefills. Two blocks of `256 * SSM_BLOCK` floats are 16 KB of stack.
+const MAX_D_STATE: usize = 256;
 
 /// Row-major forward GEMM `(out, x, w, bias, m, k, n)` — the shared
 /// signature of [`sgemm_forward`] and [`sgemm_forward_par`].
@@ -439,6 +440,10 @@ pub fn forward_mamba_backbone_prefill_mode(
     let t_len = dims.seq_len;
     let hist = dc - 1;
     let eps = dims.rms_norm_eps;
+    // An empty prompt leaves the state where it was.
+    if t_len == 0 {
+        return;
+    }
 
     assert!(ds <= MAX_D_STATE, "d_state > {MAX_D_STATE} unsupported");
     assert_eq!(temporal_out.len(), t_len * dm, "temporal_out shape");

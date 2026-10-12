@@ -27,9 +27,9 @@ const MAX_ANGLES: usize = MAX_DS / 2;
 ///
 /// Computes gradients for all layer weights into `d_layer` and
 /// propagates `d_temporal_flat` backward through the layer.
-/// `angle_state_init`: snapshot of angle_state BEFORE the forward pass of this window.
-/// Required for correct RoPE gradient when angle_state carries from a prior window (burn-in).
-/// Pass `None` or a zero slice if training starts from zero state (no burn-in).
+/// `angle_state_init`: the angle state BEFORE the forward pass of this
+/// window. `None` takes the one the forward recorded in `acts`, which is
+/// right for every window, including one that starts mid-sequence.
 pub fn backward_mamba3_layer_batched(
     d_temporal_flat: &mut [f32],
     acts: &Mamba3LayerFlat,
@@ -146,6 +146,7 @@ pub fn backward_mamba3_layer_batched(
     // rounded to f32 each step): a pure-f32 reconstruction drifts from the
     // forward rotation at every wrap event and the error random-walks over
     // long sequences.
+    let angle_state_init = angle_state_init.or(Some(acts.angle_init.as_slice()));
     if n_angles > 0 {
         let two_pi_64 = 2.0 * std::f64::consts::PI;
         for h in 0..nh {

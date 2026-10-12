@@ -39,6 +39,7 @@ pub fn gpu_backward_mamba_layer(
     scratch: &mut GpuMambaScratch,
 ) -> Result<(), String> {
     let dims = scratch.dims; // Copy (GpuMambaDims is Copy)
+    dims.check_for(ctx)?;
     let bt = dims.bt();
     let dm = dims.d_model;
     let di = dims.d_inner;
@@ -581,6 +582,7 @@ pub fn gpu_backward_mamba_backbone(
     scratch: &mut GpuMambaScratch,
 ) -> Result<(), String> {
     let dims = scratch.dims; // Copy (GpuMambaDims is Copy)
+    dims.check_for(ctx)?;
     let bt = dims.bt();
 
     // norm_f backward — before reverse layer loop.

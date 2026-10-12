@@ -23,6 +23,7 @@
 //! Windows carry the conv and SSM states from one call to the next, and
 //! the gradients stop at the states a window starts from.
 
+use crate::gpu::grad_clip::norm_limit;
 use crate::gpu::grad_window::{GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
@@ -773,7 +774,7 @@ impl Mamba2GpuTrainer {
             });
         }
         self.window.fold_into(&self.ctx, &mut self.grads)?;
-        let grad_norm = match opts.clip_max_norm {
+        let grad_norm = match norm_limit(opts.clip_max_norm, opts.step_skip_above) {
             Some(c) if !self.overflowed => Some(self.window.clip(&self.ctx, &mut self.grads, c)?),
             _ => None,
         };

@@ -3,13 +3,12 @@
 //! Used for target network inference (no gradient tracking): T=1 cold-state forward, or
 //! T=seq_len burn-in forward with state carry.
 //!
-//! Norm eps: target forwards use the default `RMS_NORM_EPS` (1e-5) — the RL
-//! target path never loads HF checkpoints, so the per-checkpoint
-//! `rms_norm_eps` plumbing (FalconMamba) intentionally stops before here.
+//! Every norm takes the model's `rms_norm_eps`, as the GPU target forward
+//! does, so the CPU and GPU targets of one model agree.
 
 use super::weights::TrainMambaWeights;
 use crate::ops::blas::matvec_forward;
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_inplace, fast_exp_scalar};
+use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 
 /// Scratch buffers for single-step (T=1) target Mamba forward.
 pub struct MambaTargetScratch {
@@ -60,6 +59,14 @@ impl MambaTargetScratch {
             da: vec![0.0; d_state],
         }
     }
+
+    /// Whether these buffers were sized for exactly this shape.
+    pub fn fits(&self, d_model: usize, d_inner: usize, d_state: usize, dt_rank: usize) -> bool {
+        self.norm_buf.len() == d_model
+            && self.proj.len() == 2 * d_inner
+            && self.xdbl.len() == dt_rank + 2 * d_state
+            && self.h.len() == d_inner * d_state
+    }
 }
 
 /// Single-step (T=1) target Mamba forward with cold (zero) state.
@@ -72,6 +79,7 @@ pub fn forward_mamba_target_step(
     w: &TrainMambaWeights,
     scratch: &mut MambaTargetScratch,
     dims: (usize, usize, usize, usize, usize, usize), // (dm, di, ds, dc, dr, mid)
+    rms_norm_eps: f32,
 ) {
     let (dm, di, ds, dc, dr, mid) = dims;
     let xdbl_dim = dr + 2 * ds;
@@ -92,7 +100,7 @@ pub fn forward_mamba_target_step(
 
         // RmsNorm
         let mean_sq: f32 = output[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
-        let inv_rms = 1.0 / (mean_sq + RMS_NORM_EPS).sqrt();
+        let inv_rms = 1.0 / (mean_sq + rms_norm_eps).sqrt();
         for ((nb, &o), &nw) in scratch.norm_buf[..dm]
             .iter_mut()
             .zip(output[..dm].iter())
@@ -213,7 +221,7 @@ pub fn forward_mamba_target_step(
 
     // Final RmsNorm (norm_f)
     let mean_sq: f32 = output[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
-    let inv_rms = 1.0 / (mean_sq + RMS_NORM_EPS).sqrt();
+    let inv_rms = 1.0 / (mean_sq + rms_norm_eps).sqrt();
     for (o, &nfw) in output[..dm].iter_mut().zip(w.norm_f_weight[..dm].iter()) {
         *o *= inv_rms * nfw;
     }
@@ -293,6 +301,18 @@ impl MambaTargetSeqScratch {
         self.conv_states.fill(0.0);
         self.ssm_states.fill(0.0);
     }
+
+    /// Whether these buffers were sized for exactly this shape, the sizes
+    /// [`Self::new`] takes: `(dm, di, ds, dc, dr, nl, seq_len)`.
+    pub fn fits(&self, shape: (usize, usize, usize, usize, usize, usize, usize)) -> bool {
+        let (dm, di, ds, dc, dr, nl, seq_len) = shape;
+        self.seq_len == seq_len
+            && self.temporal.len() == dm
+            && self.proj.len() == 2 * di
+            && self.xdbl.len() == dr + 2 * ds
+            && self.conv_states.len() == nl * di * dc
+            && self.ssm_states.len() == nl * di * ds
+    }
 }
 
 /// Multi-step target forward with burn-in (standard burn-in approach for recurrent models).
@@ -306,6 +326,7 @@ pub fn forward_mamba_target_sequence(
     w: &TrainMambaWeights,
     scratch: &mut MambaTargetSeqScratch,
     dims: (usize, usize, usize, usize, usize, usize), // (dm, di, ds, dc, dr, seq_len)
+    rms_norm_eps: f32,
 ) {
     let (dm, di, ds, dc, dr, seq_len) = dims;
     let xdbl_dim = dr + 2 * ds;
@@ -336,7 +357,7 @@ pub fn forward_mamba_target_sequence(
             // RmsNorm
             let mean_sq: f32 =
                 scratch.temporal[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
-            let inv_rms = 1.0 / (mean_sq + RMS_NORM_EPS).sqrt();
+            let inv_rms = 1.0 / (mean_sq + rms_norm_eps).sqrt();
             for ((nb, &t), &nw) in scratch.norm_buf[..dm]
                 .iter_mut()
                 .zip(scratch.temporal[..dm].iter())
@@ -474,7 +495,7 @@ pub fn forward_mamba_target_sequence(
 
     // norm_f applied once at the end on the last-timestep output.
     let mean_sq: f32 = scratch.temporal[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
-    let inv_rms = 1.0 / (mean_sq + RMS_NORM_EPS).sqrt();
+    let inv_rms = 1.0 / (mean_sq + rms_norm_eps).sqrt();
     for (t, &nfw) in scratch.temporal[..dm]
         .iter_mut()
         .zip(w.norm_f_weight[..dm].iter())

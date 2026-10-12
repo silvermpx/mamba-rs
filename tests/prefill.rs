@@ -88,7 +88,52 @@ fn assert_bits(label: &str, a: &[f32], b: &[f32]) {
 /// Prefill (zero state) must reproduce the training forward bit-for-bit.
 #[test]
 fn prefill_matches_training_forward_bitwise() {
+    check_prefill_matches_training(test_cfg());
+}
+
+/// Every state size the config admits prefills, and still gives the
+/// training forward's bits.
+#[test]
+fn prefill_matches_training_forward_at_128_and_256_states() {
+    for d_state in [128, 256] {
+        check_prefill_matches_training(MambaConfig {
+            d_state,
+            ..test_cfg()
+        });
+    }
+}
+
+/// An empty prompt leaves the state as the last prompt left it.
+#[test]
+fn an_empty_prompt_leaves_the_state_alone() {
     let cfg = test_cfg();
+    let input_dim = 20usize;
+    let w = init_weights(&cfg, input_dim, 0xC0FFEE);
+    let (di, ds, dc, nl) = (cfg.d_inner(), cfg.d_state, cfg.d_conv, cfg.n_layers);
+    let dims = MambaDims::from_config(&cfg, 5, input_dim);
+    let mut state = MambaState::zeros(nl, di, ds, dc);
+    let mut scratch = PrefillScratch::new(&dims);
+    let mut out = vec![0.0f32; 5 * cfg.d_model];
+    let input = det(5 * input_dim, 0xAB, 0.05);
+    forward_mamba_backbone_prefill(&mut out, &input, &w, &mut state, &mut scratch, &dims);
+    let before: Vec<Vec<u32>> = state
+        .layers
+        .iter()
+        .flat_map(|l| [&l.conv_state, &l.ssm_state])
+        .map(|v| v.iter().map(|x| x.to_bits()).collect())
+        .collect();
+    let empty = MambaDims::from_config(&cfg, 0, input_dim);
+    forward_mamba_backbone_prefill(&mut [], &[], &w, &mut state, &mut scratch, &empty);
+    let after: Vec<Vec<u32>> = state
+        .layers
+        .iter()
+        .flat_map(|l| [&l.conv_state, &l.ssm_state])
+        .map(|v| v.iter().map(|x| x.to_bits()).collect())
+        .collect();
+    assert_eq!(after, before);
+}
+
+fn check_prefill_matches_training(cfg: MambaConfig) {
     let input_dim = 20usize;
     let seq_len = 8usize;
     let w = init_weights(&cfg, input_dim, 0xC0FFEE);

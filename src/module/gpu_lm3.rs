@@ -188,6 +188,11 @@ impl GpuMamba3LM {
         self.lm.capture_graph()
     }
 
+    /// See [`MambaGpuLM::clear_graph`].
+    pub fn clear_graph(&mut self) -> Result<(), String> {
+        self.lm.clear_graph()
+    }
+
     /// See [`MambaGpuLM::reset`].
     pub fn reset(&mut self) -> Result<(), String> {
         self.lm.reset()

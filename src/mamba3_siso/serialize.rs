@@ -21,12 +21,17 @@ use safetensors::tensor::{SafeTensors, TensorView};
 use std::collections::HashMap;
 use std::path::Path;
 
-fn view<'a>(data: &'a [f32], shape: &[usize]) -> TensorView<'a> {
+/// An f32 tensor view. An empty tensor, the input projection of a model
+/// that reads its rows as they are, is written with one dimension of zero.
+fn view<'a>(data: &'a [f32], shape: &[usize]) -> Result<TensorView<'a>, String> {
+    let shape = if data.is_empty() {
+        vec![0]
+    } else {
+        shape.to_vec()
+    };
     let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
-    TensorView::new(safetensors::Dtype::F32, shape.to_vec(), bytes).expect(
-        "tensor view: bytes are sized from data.len() and every call site \
-             passes a shape whose product equals data.len()",
-    )
+    TensorView::new(safetensors::Dtype::F32, shape, bytes)
+        .map_err(|e| format!("tensor view: {e:?}"))
 }
 
 /// Save the weights, the configuration and the input width to a
@@ -37,6 +42,7 @@ pub fn save(
     cfg: &Mamba3Config,
     input_dim: usize,
 ) -> Result<(), String> {
+    weights.validate(cfg, input_dim)?;
     let dm = cfg.d_model;
     let di = cfg.d_inner();
     let ds = cfg.d_state;
@@ -45,7 +51,7 @@ pub fn save(
 
     macro_rules! t {
         ($name:expr, $data:expr, $shape:expr) => {
-            ($name.to_string(), view($data, $shape))
+            ($name.to_string(), view($data, $shape)?)
         };
     }
 
@@ -341,6 +347,23 @@ mod tests {
         assert_eq!(w.layers[0].in_proj_w, w2.layers[0].in_proj_w);
         assert_eq!(w.norm_f_weight, w2.norm_f_weight);
         std::fs::remove_file(tmp).ok();
+    }
+
+    /// A model without an input projection, as every HF checkpoint loads,
+    /// saves and loads back as one: the empty tensors round-trip.
+    #[test]
+    fn identity_input_round_trips() {
+        let cfg = Mamba3Config::default();
+        let mut w = Mamba3Weights::init(&cfg, cfg.d_model, 42);
+        w.input_proj_w.clear();
+        w.input_proj_b.clear();
+        let tmp = std::env::temp_dir().join("mamba3_identity_test.safetensors");
+        save(&tmp, &w, &cfg, cfg.d_model).unwrap();
+        let (w2, input_dim) = load_mamba3(&tmp, &cfg).unwrap();
+        std::fs::remove_file(tmp).ok();
+        assert_eq!(input_dim, cfg.d_model);
+        assert!(w2.input_proj_w.is_empty() && w2.input_proj_b.is_empty());
+        assert_eq!(w.layers[0].in_proj_w, w2.layers[0].in_proj_w);
     }
 
     /// A checkpoint fully describes its own model identity — the

@@ -368,3 +368,57 @@ fn m3_gradients_match_f64_central_differences() {
         }
     }
 }
+
+/// The backward without an explicit starting angle state takes the one the
+/// forward recorded in the tape: for a window carried in from earlier
+/// tokens it gives the bits of the backward handed those angles, which the
+/// central differences above prove right.
+#[test]
+fn m3_backward_takes_the_window_start_angles_from_the_tape() {
+    let (seq, warm) = (9usize, 5usize);
+    for (label, cfg) in cases() {
+        let dims = Mamba3Dims::from_config(&cfg, seq);
+        let warm_dims = Mamba3Dims::from_config(&cfg, warm);
+        let dm = cfg.d_model;
+        let weights: Vec<TrainMamba3LayerWeights> = (0..cfg.n_layers)
+            .map(|l| drawn(&dims, 31 + l as u64))
+            .collect();
+        let mut carried = States::zeros(&dims, cfg.n_layers);
+        forward(
+            &weights,
+            &warm_dims,
+            &mut det(warm * dm, 79, 1.0),
+            &mut carried,
+        );
+        let angle_init = carried.angle.clone();
+        let mut st = carried.clone();
+        let mut temporal = det(seq * dm, 77, 1.0);
+        let acts = forward(&weights, &dims, &mut temporal, &mut st);
+        let run = |explicit: bool| {
+            let mut grads: Vec<TrainMamba3LayerWeights> = (0..cfg.n_layers)
+                .map(|_| TrainMamba3LayerWeights::zeros(&dims))
+                .collect();
+            let mut d_temporal = det(seq * dm, 78, 1.0);
+            let mut scratch = Mamba3Scratch::zeros(&dims);
+            for l in (0..cfg.n_layers).rev() {
+                backward_mamba3_layer_batched(
+                    &mut d_temporal,
+                    &acts[l],
+                    &weights[l],
+                    &mut grads[l],
+                    &mut scratch,
+                    &dims,
+                    explicit.then_some(angle_init[l].as_slice()),
+                );
+            }
+            let mut flat: Vec<u32> = d_temporal.iter().map(|v| v.to_bits()).collect();
+            for g in &mut grads {
+                for (_, v) in tensors(g) {
+                    flat.extend(v.iter().map(|x| x.to_bits()));
+                }
+            }
+            flat
+        };
+        assert_eq!(run(false), run(true), "{label}: the recorded angles differ");
+    }
+}

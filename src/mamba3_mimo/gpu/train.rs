@@ -24,6 +24,7 @@
 //! Windows carry the states from one call to the next, and the gradients
 //! stop at the states a window starts from.
 
+use crate::gpu::grad_clip::norm_limit;
 use crate::gpu::grad_window::{GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
@@ -448,12 +449,6 @@ impl Mamba3MimoGpuTrainer {
         if batch == 0 || seq_len == 0 {
             return Err("a training window needs at least one sequence and one token".into());
         }
-        if cfg.d_model < 32 {
-            return Err(format!(
-                "the GPU row norm reduces whole warps; d_model {} is below 32",
-                cfg.d_model
-            ));
-        }
         validate_rows_capacity(
             batch * seq_len,
             [
@@ -814,7 +809,7 @@ impl Mamba3MimoGpuTrainer {
             });
         }
         self.window.fold_into(&self.ctx, &mut self.grads)?;
-        let grad_norm = match opts.clip_max_norm {
+        let grad_norm = match norm_limit(opts.clip_max_norm, opts.step_skip_above) {
             Some(c) if !self.overflowed => Some(self.window.clip(&self.ctx, &mut self.grads, c)?),
             _ => None,
         };

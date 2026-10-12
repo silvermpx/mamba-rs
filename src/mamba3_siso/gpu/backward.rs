@@ -25,6 +25,7 @@ pub fn gpu_backward_mamba3_layer(
     lg: &GpuMamba3LayerGrads,
     scratch: &mut GpuMamba3Scratch,
 ) -> Result<(), String> {
+    exec.check_state_cap()?;
     let M3Exec {
         ctx,
         kernels: m3k,
@@ -860,6 +861,7 @@ pub fn gpu_backward_mamba3_backbone(
     grads: &GpuMamba3Grads,
     scratch: &mut GpuMamba3Scratch,
 ) -> Result<(), String> {
+    exec.check_state_cap()?;
     let M3Exec {
         ctx,
         kernels: m3k,

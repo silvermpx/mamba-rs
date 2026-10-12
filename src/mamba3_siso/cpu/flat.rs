@@ -151,6 +151,11 @@ pub struct Mamba3LayerFlat {
     pub data: Vec<f32>,
     pub offsets: Mamba3FieldOffsets,
     pub dims: Mamba3Dims,
+    /// The RoPE angle state of every head when the window began,
+    /// `[nheads * num_rope_angles]`. The backward rebuilds the rotations from
+    /// it, so a window that starts mid-sequence differentiates the angles the
+    /// forward really used.
+    pub angle_init: Vec<f32>,
 }
 
 impl Mamba3LayerFlat {
@@ -162,6 +167,7 @@ impl Mamba3LayerFlat {
             data: vec![0.0; total],
             offsets,
             dims,
+            angle_init: vec![0.0; dims.nheads * dims.num_rope_angles],
         }
     }
 

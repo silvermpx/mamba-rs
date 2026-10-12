@@ -45,27 +45,20 @@ impl ScanMode {
 
     /// Resolve the effective scan choice for a sequence length and state dim.
     ///
-    /// `d_state > 64` ALWAYS takes the parallel path regardless of the
-    /// requested mode. Historically the sequential kernels were hard-capped
-    /// at 64; they are capacity-sized and guarded now, but the route stays —
-    /// it is part of the numeric identity of existing runs, and the
-    /// parallel scan is the faster path at large state sizes anyway.
+    /// An explicit mode is honoured at every size: the sequential kernels
+    /// are sized to the state at compile time. `Auto` above 64 states takes
+    /// the parallel scan at any length, the faster path there, and the
+    /// route existing `Auto` runs took.
     pub fn use_parallel(self, seq_len: usize, d_state: usize) -> bool {
-        if d_state > 64 {
-            return true;
-        }
         match self {
             Self::Sequential => false,
             Self::Parallel => true,
-            Self::Auto => seq_len > Self::PARALLEL_SCAN_THRESHOLD,
+            Self::Auto => d_state > 64 || seq_len > Self::PARALLEL_SCAN_THRESHOLD,
         }
     }
 
-    /// Resolve Auto to a concrete mode based on sequence length.
     /// Resolve `Auto` for a shape. Delegates to [`Self::use_parallel`] so the
-    /// `d_state > 64` sequential override can never diverge between the two
-    /// entry points (this used to duplicate the
-    /// threshold WITHOUT the d_state override - a safety-divergent copy).
+    /// two entry points can never disagree.
     pub fn resolve(self, seq_len: usize, d_state: usize) -> Self {
         if self.use_parallel(seq_len, d_state) {
             Self::Parallel

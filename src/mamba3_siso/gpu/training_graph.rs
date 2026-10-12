@@ -221,6 +221,7 @@ impl GpuMamba3TrainingStepGraph {
                     multi_plan,
                     adam,
                     bias.ptr(),
+                    0,
                 )?;
                 // f32-stays-f32 tensors only (bulk shadows ride the fused kernel).
                 train_w.sync_master_to_compute(ctx)?;
@@ -557,6 +558,7 @@ impl GpuMamba3F32TrainingStepGraph {
                     multi_plan,
                     adam,
                     bias.ptr(),
+                    0,
                 )?;
                 Ok(())
             })
