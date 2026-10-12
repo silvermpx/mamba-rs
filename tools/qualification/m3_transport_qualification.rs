@@ -7,7 +7,8 @@ mod raw;
 
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::mamba3_siso::gpu::Mamba3Kernels;
+use mamba_rs::gpu::launch::IndexWidth;
+use mamba_rs::mamba3_siso::gpu::{DqkvRoute, Mamba3Kernels};
 
 #[test]
 #[ignore = "requires an Ada device and a qualified native compiler"]
@@ -20,9 +21,19 @@ fn compiled_transport_routes_keep_function_and_geometry_together() {
             Mamba3Kernels::compile_with_state_cap(device.context(), device.nvrtc_target(), cap)
                 .unwrap();
         for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
-            let legacy = kernels.m3_dqkv_typed.get(dtype);
+            let legacy = kernels.m3_dqkv_typed.i32.get(dtype);
             assert!(!std::ptr::eq(
-                kernels.dqkv_for_shape(dtype, 16, 16, 64, 1300, true),
+                kernels.dqkv_for_shape(
+                    dtype,
+                    DqkvRoute {
+                        state: 16,
+                        head: 16,
+                        chunk: 64,
+                        time: 1300,
+                        pairs: true,
+                    },
+                    IndexWidth::I32,
+                ),
                 legacy,
             ));
             for (state, head, chunk, time, pairs) in [
@@ -33,18 +44,29 @@ fn compiled_transport_routes_keep_function_and_geometry_together() {
                 (16, 16, 64, 1300, false),
             ] {
                 assert!(std::ptr::eq(
-                    kernels.dqkv_for_shape(dtype, state, head, chunk, time, pairs),
+                    kernels.dqkv_for_shape(
+                        dtype,
+                        DqkvRoute {
+                            state,
+                            head,
+                            chunk,
+                            time,
+                            pairs,
+                        },
+                        IndexWidth::I32,
+                    ),
                     legacy,
                 ));
             }
 
-            let legacy = kernels.m3_dqktheta_typed.get(dtype);
-            let (selected, tiles) = kernels.dqktheta_for_shape(dtype, 16, 64, 4);
+            let legacy = kernels.m3_dqktheta_typed.i32.get(dtype);
+            let (selected, tiles) = kernels.dqktheta_for_shape(dtype, 16, 64, 4, IndexWidth::I32);
             let optimized = cap == 16 && dtype != WeightDtype::F32;
             assert_eq!(!std::ptr::eq(selected, legacy), optimized);
             assert_eq!(tiles, if optimized { 4 } else { 6 });
             for (state, chunk, angles) in [(8, 64, 4), (16, 32, 4), (16, 64, 0)] {
-                let (selected, tiles) = kernels.dqktheta_for_shape(dtype, state, chunk, angles);
+                let (selected, tiles) =
+                    kernels.dqktheta_for_shape(dtype, state, chunk, angles, IndexWidth::I32);
                 assert!(std::ptr::eq(selected, legacy));
                 assert_eq!(tiles, 6);
             }

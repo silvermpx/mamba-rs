@@ -22,6 +22,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::IndexWidth;
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use mamba_rs::mamba3_siso::route::{
     block_tier_threads, sequential_backward_block_smem_bytes, sequential_forward_block_smem_bytes,
@@ -346,7 +347,7 @@ fn m3_sequential_block_tier_matches_the_warp_kernels() {
             let fwd_cfg = s.block_cfg(fwd_smem);
             let warp_target = forward(
                 &ctx,
-                (&m3k.m3_burnin_fwd_nosave, s.warp_cfg()),
+                (&m3k.m3_burnin_fwd_nosave.i32, s.warp_cfg()),
                 (s, f32, false),
                 &v,
             );
@@ -368,7 +369,10 @@ fn m3_sequential_block_tier_matches_the_warp_kernels() {
                 let hv = Values::new(s, dtype);
                 let warp = forward(
                     &ctx,
-                    (m3k.burnin_fwd_typed_for_state(dtype, ds), s.warp_cfg()),
+                    (
+                        m3k.burnin_fwd_typed_for_state(dtype, ds, IndexWidth::I32),
+                        s.warp_cfg(),
+                    ),
                     (s, dtype, true),
                     &hv,
                 );
@@ -382,7 +386,7 @@ fn m3_sequential_block_tier_matches_the_warp_kernels() {
             }
             let warp = forward(
                 &ctx,
-                (m3k.burnin_fwd_for_state(ds), s.warp_cfg()),
+                (m3k.burnin_fwd_for_state(ds, IndexWidth::I32), s.warp_cfg()),
                 (s, f32, true),
                 &v,
             );
@@ -396,7 +400,10 @@ fn m3_sequential_block_tier_matches_the_warp_kernels() {
             let bwd_smem = sequential_backward_block_smem_bytes(hd, ds);
             let warp_bwd = backward(
                 &ctx,
-                (m3k.backward_seq_for_state(ds), s.warp_cfg()),
+                (
+                    m3k.backward_seq_for_state(ds, IndexWidth::I32),
+                    s.warp_cfg(),
+                ),
                 (s, f32),
                 &v,
                 &warp,

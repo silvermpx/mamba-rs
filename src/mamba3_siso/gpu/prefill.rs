@@ -36,7 +36,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d, grid_colsum, grid_norm};
+use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_norm};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -175,7 +175,7 @@ impl Mamba3Prefill {
         dims: &GpuMamba3Dims,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
-        dims.validate_index_budget()?;
+        dims.check_int_args()?;
         let typed = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => None,
             _ => Some(Mamba3PrefillTypedScratch::new(stream, dims, dtype)?),
@@ -314,6 +314,7 @@ impl Mamba3Prefill {
         let ck = &mut self.chunk;
         let mut typed = self.typed.as_mut();
         let bt = dims.bt();
+        let width = dims.index_width();
         let dm = dims.d_model;
         let di = dims.d_inner;
         let ds = dims.d_state;
@@ -350,7 +351,6 @@ impl Mamba3Prefill {
             // upcast the projection into the f32 residual stream.
             let mid = dims.mamba_input_dim;
             {
-                let n = (bt * mid) as i32;
                 let cast = match dtype {
                     WeightDtype::Bf16 => &m3k.cast_f32_to_bf16,
                     WeightDtype::F16 => &m3k.cast_f32_to_f16,
@@ -358,14 +358,14 @@ impl Mamba3Prefill {
                         unreachable!("typed scratch exists only for half dtypes")
                     }
                 };
-                let dst = ts.input_cast.cached_ptr();
-                let src = mamba_input.cached_ptr();
-                let mut b = ctx.stream.launch_builder(cast);
-                b.arg(&dst);
-                b.arg(&src);
-                b.arg(&n);
-                unsafe { b.launch(grid_1d(bt * mid)) }
-                    .map_err(|e| format!("prefill input cast: {e:?}"))?;
+                crate::gpu::launch::launch_cast(
+                    &ctx.stream,
+                    cast,
+                    (ts.input_cast.cached_ptr(), 2),
+                    (mamba_input.cached_ptr(), 4),
+                    bt * mid,
+                    format_args!("prefill input cast"),
+                )?;
             }
             crate::gpu::blas::gpu_gemm_typed_forward_raw(
                 ctx,
@@ -385,7 +385,6 @@ impl Mamba3Prefill {
                 (bt, dims.mamba_input_dim, dm),
             )?;
             {
-                let n = (bt * dm) as i32;
                 let cast = match dtype {
                     WeightDtype::Bf16 => &m3k.cast_bf16_to_f32,
                     WeightDtype::F16 => &m3k.cast_f16_to_f32,
@@ -393,14 +392,14 @@ impl Mamba3Prefill {
                         unreachable!("typed scratch exists only for half dtypes")
                     }
                 };
-                let dst = tgt.temporal_work.cached_ptr();
-                let src = ts.out_flat.cached_ptr();
-                let mut b = ctx.stream.launch_builder(cast);
-                b.arg(&dst);
-                b.arg(&src);
-                b.arg(&n);
-                unsafe { b.launch(grid_1d(bt * dm)) }
-                    .map_err(|e| format!("prefill input upcast: {e:?}"))?;
+                crate::gpu::launch::launch_cast(
+                    &ctx.stream,
+                    cast,
+                    (tgt.temporal_work.cached_ptr(), 4),
+                    (ts.out_flat.cached_ptr(), 2),
+                    bt * dm,
+                    format_args!("prefill input upcast"),
+                )?;
             }
         } else {
             crate::gpu::blas::gpu_gemm_bi_forward_raw(
@@ -504,7 +503,9 @@ impl Mamba3Prefill {
                     let br: CUptr = 0;
                     let cr: CUptr = 0;
                     let proj = ts.proj_flat.cached_ptr();
-                    let mut b = ctx.stream.launch_builder(m3k.m3_split_typed.get(dtype));
+                    let mut b = ctx
+                        .stream
+                        .launch_builder(m3k.m3_split_typed.get(width).get(dtype));
                     b.arg(&z);
                     b.arg(&x);
                     b.arg(&br);
@@ -525,10 +526,10 @@ impl Mamba3Prefill {
                     b.arg(&ds_i);
                     b.arg(&nh_i);
                     b.arg(&na_i);
-                    unsafe { b.launch(grid_1d(bt * ip)) }
+                    unsafe { b.launch(grid_1d_cover(bt * ip)?) }
                         .map_err(|e| format!("prefill m3_split typed L{l}: {e:?}"))?;
                 } else {
-                    let mut b = ctx.stream.launch_builder(&m3k.m3_split);
+                    let mut b = ctx.stream.launch_builder(m3k.m3_split.get(width));
                     b.arg(tgt.z.inner_mut());
                     b.arg(tgt.x.inner_mut());
                     b.arg(tgt.b_raw.inner_mut());
@@ -549,7 +550,7 @@ impl Mamba3Prefill {
                     b.arg(&ds_i);
                     b.arg(&nh_i);
                     b.arg(&na_i);
-                    unsafe { b.launch(grid_1d(bt * ip)) }
+                    unsafe { b.launch(grid_1d_cover(bt * ip)?) }
                         .map_err(|e| format!("prefill m3_split L{l}: {e:?}"))?;
                 }
             }
@@ -570,7 +571,7 @@ impl Mamba3Prefill {
                 let cnw = lw.c_norm_weight;
                 let mut b = ctx
                     .stream
-                    .launch_builder(m3k.bcnorm_fwd_bc_typed.get(dtype));
+                    .launch_builder(m3k.bcnorm_fwd_bc_typed.get(width).get(dtype));
                 b.arg(&bn);
                 b.arg(&cn);
                 b.arg(tgt.b_rms.inner_mut());
@@ -594,7 +595,7 @@ impl Mamba3Prefill {
                 let eps: f32 = dims.rms_norm_eps;
                 let bnw = lw.b_norm_weight;
                 let cnw = lw.c_norm_weight;
-                let mut b = ctx.stream.launch_builder(&m3k.bcnorm_fwd_bc_f32);
+                let mut b = ctx.stream.launch_builder(m3k.bcnorm_fwd_bc_f32.get(width));
                 b.arg(tgt.b_normed.inner_mut());
                 b.arg(tgt.c_normed.inner_mut());
                 b.arg(tgt.b_rms.inner_mut());
@@ -655,7 +656,7 @@ impl Mamba3Prefill {
                     let cn = ts.c_normed.cached_ptr();
                     let mut b = ctx
                         .stream
-                        .launch_builder(m3k.m3_bias_rope_fwd_typed.get(dtype));
+                        .launch_builder(m3k.m3_bias_rope_fwd_typed.get(width).get(dtype));
                     b.arg(&bb);
                     b.arg(&cb);
                     b.arg(&k);
@@ -675,10 +676,10 @@ impl Mamba3Prefill {
                     b.arg(&no_angle);
                     b.arg(&no_angle);
                     b.arg(&no_angle);
-                    unsafe { b.launch(grid_1d(bt * nh * ds)) }
+                    unsafe { b.launch(grid_1d_cover(bt * nh * ds)?) }
                         .map_err(|e| format!("prefill bias_rope typed L{l}: {e:?}"))?;
                 } else {
-                    let mut b = ctx.stream.launch_builder(&m3k.m3_bias_rope_fwd);
+                    let mut b = ctx.stream.launch_builder(m3k.m3_bias_rope_fwd.get(width));
                     b.arg(&NULL_DEV);
                     b.arg(&NULL_DEV);
                     b.arg(tgt.k.inner_mut());
@@ -698,7 +699,7 @@ impl Mamba3Prefill {
                     b.arg(&no_angle);
                     b.arg(&no_angle);
                     b.arg(&no_angle);
-                    unsafe { b.launch(grid_1d(bt * nh * ds)) }
+                    unsafe { b.launch(grid_1d_cover(bt * nh * ds)?) }
                         .map_err(|e| format!("prefill bias_rope L{l}: {e:?}"))?;
                 }
             }
@@ -730,7 +731,7 @@ impl Mamba3Prefill {
                     block_dim: (block_x, 1, 1),
                     shared_mem_bytes: 0,
                 };
-                let mut b = ctx.stream.launch_builder(&m3k.m3_da_cumsum);
+                let mut b = ctx.stream.launch_builder(m3k.m3_da_cumsum.get(width));
                 b.arg(ck.da_cumsum.inner_mut());
                 b.arg(ck.d_alpha.inner());
                 b.arg(&b_i);
@@ -750,7 +751,7 @@ impl Mamba3Prefill {
                     let xp = ts.x.cached_ptr();
                     let mut b = ctx
                         .stream
-                        .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(dtype));
+                        .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(width).get(dtype));
                     b.arg(&ks);
                     b.arg(ck.qk_dot.inner_mut());
                     b.arg(&NULL_DEV);
@@ -774,7 +775,7 @@ impl Mamba3Prefill {
                 } else {
                     let mut b = ctx
                         .stream
-                        .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.f32);
+                        .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.get(width).f32);
                     b.arg(ck.k_scaled.inner_mut());
                     b.arg(ck.qk_dot.inner_mut());
                     b.arg(&NULL_DEV);
@@ -809,7 +810,7 @@ impl Mamba3Prefill {
                         let qp = ts.q.cached_ptr();
                         let mut b = ctx
                             .stream
-                            .launch_builder(m3k.m3_preprocess_chunks_typed.get(dtype));
+                            .launch_builder(m3k.m3_preprocess_chunks_typed.get(width).get(dtype));
                         b.arg(&ks);
                         b.arg(ck.qk_dot.inner_mut());
                         b.arg(&NULL_DEV);
@@ -826,7 +827,9 @@ impl Mamba3Prefill {
                         unsafe { b.launch(cfg) }
                             .map_err(|e| format!("prefill preprocess typed L{l}: {e:?}"))?;
                     } else {
-                        let mut b = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks);
+                        let mut b = ctx
+                            .stream
+                            .launch_builder(m3k.m3_preprocess_chunks.get(width));
                         b.arg(ck.k_scaled.inner_mut());
                         b.arg(ck.qk_dot.inner_mut());
                         b.arg(&NULL_DEV);
@@ -852,14 +855,14 @@ impl Mamba3Prefill {
                         hd,
                         ds,
                         dims.chunk_size(),
-                        m3k.chunk_tile_threads,
+                        *m3k.chunk_tile_threads.get(width),
                     );
                     if let Some(ts) = typed.as_deref_mut() {
                         let xp = ts.x.cached_ptr();
                         let ks = ts.k_scaled.cached_ptr();
                         let mut b = ctx
                             .stream
-                            .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
+                            .launch_builder(m3k.m3_chunk_state_fwd_typed.get(width).get(dtype));
                         b.arg(ck.chunk_states.inner_mut());
                         b.arg(&xp);
                         b.arg(&ks);
@@ -873,7 +876,7 @@ impl Mamba3Prefill {
                         unsafe { b.launch(cfg) }
                             .map_err(|e| format!("prefill chunk_state typed L{l}: {e:?}"))?;
                     } else {
-                        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
+                        let mut b = ctx.stream.launch_builder(m3k.m3_chunk_state_fwd.get(width));
                         b.arg(ck.chunk_states.inner_mut());
                         b.arg(tgt.x.inner());
                         b.arg(ck.k_scaled.inner());
@@ -902,12 +905,12 @@ impl Mamba3Prefill {
                 let cfg = super::kernels::state_pass_fused_cfg(dims.batch, nh, hd, ds);
                 let (kern, kp, xp) = match typed.as_deref_mut() {
                     Some(ts) => (
-                        m3k.m3_state_pass_fused_typed.get(dtype),
+                        m3k.m3_state_pass_fused_typed.get(width).get(dtype),
                         ts.k.cached_ptr(),
                         ts.x.cached_ptr(),
                     ),
                     None => (
-                        &m3k.m3_state_pass_fused_typed.f32,
+                        &m3k.m3_state_pass_fused_typed.get(width).f32,
                         tgt.k.cached_ptr(),
                         tgt.x.cached_ptr(),
                     ),
@@ -943,13 +946,13 @@ impl Mamba3Prefill {
                     hd,
                     ds,
                     dims.chunk_size(),
-                    m3k.chunk_tile_threads,
+                    *m3k.chunk_tile_threads.get(width),
                 );
                 if let Some(ts) = typed.as_deref_mut() {
                     let kern = if coop {
-                        m3k.m3_chunk_scan_fwd_coop_typed.get(dtype)
+                        m3k.m3_chunk_scan_fwd_coop_typed.get(width).get(dtype)
                     } else {
-                        m3k.m3_chunk_scan_fwd_typed.get(dtype)
+                        m3k.m3_chunk_scan_fwd_typed.get(width).get(dtype)
                     };
                     let yp = ts.y.cached_ptr();
                     let xp = ts.x.cached_ptr();
@@ -974,9 +977,9 @@ impl Mamba3Prefill {
                         .map_err(|e| format!("prefill chunk_scan typed L{l}: {e:?}"))?;
                 } else {
                     let kern = if coop {
-                        &m3k.m3_chunk_scan_fwd_coop
+                        m3k.m3_chunk_scan_fwd_coop.get(width)
                     } else {
-                        &m3k.m3_chunk_scan_fwd
+                        m3k.m3_chunk_scan_fwd.get(width)
                     };
                     let mut b = ctx.stream.launch_builder(kern);
                     b.arg(tgt.y.inner_mut());
@@ -1012,7 +1015,7 @@ impl Mamba3Prefill {
                     let z = ts.proj_flat.cached_ptr();
                     let mut b = ctx
                         .stream
-                        .launch_builder(m3k.rmsnorm_gated_fwd_typed.get(dtype));
+                        .launch_builder(m3k.rmsnorm_gated_fwd_typed.get(width).get(dtype));
                     b.arg(&g);
                     b.arg(tgt.rms_discard.inner_mut());
                     b.arg(&y);
@@ -1027,7 +1030,7 @@ impl Mamba3Prefill {
                     unsafe { b.launch(grid) }
                         .map_err(|e| format!("prefill gated typed L{l}: {e:?}"))?;
                 } else {
-                    let mut b = ctx.stream.launch_builder(&m3k.rmsnorm_gated_fwd);
+                    let mut b = ctx.stream.launch_builder(m3k.rmsnorm_gated_fwd.get(width));
                     b.arg(tgt.gated.inner_mut());
                     b.arg(tgt.rms_discard.inner_mut());
                     b.arg(tgt.y.inner());
@@ -1041,31 +1044,31 @@ impl Mamba3Prefill {
                     unsafe { b.launch(grid) }.map_err(|e| format!("prefill gated L{l}: {e:?}"))?;
                 }
             } else if let Some(ts) = typed.as_deref_mut() {
-                let n = (bt * di) as i32;
+                let n = crate::gpu::launch::WidthCount::new(bt * di, width)?;
                 let g = ts.gated.cached_ptr();
                 let y = ts.y.cached_ptr();
                 let z = ts.proj_flat.cached_ptr();
                 let mut b = ctx
                     .stream
-                    .launch_builder(m3k.silu_gate_fwd_typed.get(dtype));
+                    .launch_builder(m3k.silu_gate_fwd_typed.get(width).get(dtype));
                 b.arg(&g);
                 b.arg(&y);
                 b.arg(&z);
-                b.arg(&n);
+                n.push(&mut b);
                 let di_i2 = di as i32;
                 let z_stride = ip as i32;
                 b.arg(&di_i2);
                 b.arg(&z_stride);
-                unsafe { b.launch(grid_1d(bt * di)) }
+                unsafe { b.launch(grid_1d_cover(bt * di)?) }
                     .map_err(|e| format!("prefill silu typed L{l}: {e:?}"))?;
             } else {
-                let n = (bt * di) as i32;
-                let mut b = ctx.stream.launch_builder(&m3k.silu_gate_fwd);
+                let n = crate::gpu::launch::WidthCount::new(bt * di, width)?;
+                let mut b = ctx.stream.launch_builder(m3k.silu_gate_fwd.get(width));
                 b.arg(tgt.gated.inner_mut());
                 b.arg(tgt.y.inner());
                 b.arg(tgt.z.inner());
-                b.arg(&n);
-                unsafe { b.launch(grid_1d(bt * di)) }
+                n.push(&mut b);
+                unsafe { b.launch(grid_1d_cover(bt * di)?) }
                     .map_err(|e| format!("prefill silu L{l}: {e:?}"))?;
             }
             if let Some(ts) = typed.as_deref_mut() {
@@ -1169,7 +1172,7 @@ impl Mamba3Prefill {
                     b.arg(&up);
                     b.arg(&bt_i);
                     b.arg(&h_i);
-                    unsafe { b.launch(grid_1d(bt * m.hidden)) }
+                    unsafe { b.launch(grid_1d_cover(bt * m.hidden)?) }
                         .map_err(|e| format!("prefill mlp gate typed L{l}: {e:?}"))?;
                     let out = ts.out_flat.cached_ptr();
                     crate::gpu::blas::gpu_gemm_typed_forward_raw(
@@ -1217,7 +1220,7 @@ impl Mamba3Prefill {
                     b.arg(&up);
                     b.arg(&bt_i);
                     b.arg(&h_i);
-                    unsafe { b.launch(grid_1d(bt * m.hidden)) }
+                    unsafe { b.launch(grid_1d_cover(bt * m.hidden)?) }
                         .map_err(|e| format!("prefill mlp gate L{l}: {e:?}"))?;
                     unsafe {
                         crate::gpu::blas::gpu_gemm_f32_forward_ptrs(
@@ -1267,7 +1270,7 @@ impl Mamba3Prefill {
             b.arg(&b_i);
             b.arg(&t_i);
             b.arg(&dm_i);
-            let grid = grid_1d(dims.batch * dm);
+            let grid = grid_1d_cover(dims.batch * dm)?;
             unsafe { b.launch(grid) }.map_err(|e| format!("prefill gather_last: {e:?}"))?;
         }
         if let Some(full) = full_temporal {

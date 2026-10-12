@@ -29,11 +29,12 @@ pub fn check_int_args(args: &[(&str, usize)]) -> Result<(), String> {
     }
 }
 
-/// The integer type a kernel built twice forms its offsets in. The parallel
-/// scan forwards exist as an `int` build and an `_i64` build of one body:
-/// 64-bit offsets cost them enough registers on sm_89 to lose a resident
-/// block per SM, so a launch whose offsets all fit takes the `int` build.
-/// Both builds give the same bits.
+/// The integer type a kernel built twice forms its offsets in. The Mamba-1
+/// scans and convolutions and the Mamba-3 SISO kernels exist as an `int`
+/// build and an `_i64` build of one body: 64-bit offsets cost the hot loops
+/// registers and instructions, enough on sm_89 to lose a resident block per
+/// SM, so a launch whose offsets all fit takes the `int` build. Both builds
+/// give the same bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IndexWidth {
     I32,
@@ -43,12 +44,81 @@ pub enum IndexWidth {
 impl IndexWidth {
     /// `I32` while no element count in `extents` passes the range
     /// [`check_int_args`] lets a kernel take as an `int`, `I64` past it.
+    /// `MAMBA_RS_INDEX_WIDTH=i64` takes the `I64` builds at every size: the
+    /// qualification runs prove through it that the two builds give the
+    /// same bits on every case the suites record.
     pub fn covering(extents: &[usize]) -> Self {
+        if wide_index_forced() {
+            Self::I64
+        } else {
+            Self::fitting(extents)
+        }
+    }
+
+    /// The width the extents alone ask for.
+    fn fitting(extents: &[usize]) -> Self {
         if extents.iter().all(|&n| n <= INT_ARG_MAX) {
             Self::I32
         } else {
             Self::I64
         }
+    }
+}
+
+/// Whether `MAMBA_RS_INDEX_WIDTH` asks for the 64-bit builds at every size.
+/// Unset or `auto` leaves the choice to the extents; any other value than
+/// `i64` is refused loudly, so a typo cannot report a green run that never
+/// left the `int` builds.
+fn wide_index_forced() -> bool {
+    static WIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WIDE.get_or_init(|| match std::env::var("MAMBA_RS_INDEX_WIDTH") {
+        Err(_) => false,
+        Ok(v) => match v.trim() {
+            "auto" | "" => false,
+            "i64" => true,
+            other => {
+                panic!("MAMBA_RS_INDEX_WIDTH={other:?} is not a recognized width (use auto or i64)")
+            }
+        },
+    })
+}
+
+/// An element count a kernel built at two index widths takes in the type of
+/// the build that runs: an `int` in the `I32` build, a `long long` in the
+/// `I64` build.
+pub struct WidthCount {
+    narrow: i32,
+    wide: i64,
+    width: IndexWidth,
+}
+
+impl WidthCount {
+    /// The count `n` for a launch of the `width` build. An `I32` build takes
+    /// no count past `i32::MAX`: a width chosen without covering `n` is a
+    /// caller's bug, refused here rather than wrapped.
+    pub fn new(n: usize, width: IndexWidth) -> Result<Self, String> {
+        let wide =
+            i64::try_from(n).map_err(|_| format!("element count {n} is past the 64-bit range"))?;
+        let narrow = match width {
+            IndexWidth::I32 => i32::try_from(n).map_err(|_| {
+                format!("element count {n} reached the int build of a two-width kernel")
+            })?,
+            IndexWidth::I64 => 0,
+        };
+        Ok(Self {
+            narrow,
+            wide,
+            width,
+        })
+    }
+
+    /// Push the count as the next kernel argument.
+    pub fn push<'a>(&'a self, builder: &mut cudarc::driver::LaunchArgs<'a>) {
+        use cudarc::driver::PushKernelArg;
+        match self.width {
+            IndexWidth::I32 => builder.arg(&self.narrow),
+            IndexWidth::I64 => builder.arg(&self.wide),
+        };
     }
 }
 
@@ -738,6 +808,10 @@ mod tests {
     /// not count, the slim tape is counted by its chunk rows.
     #[test]
     fn a_scan_forward_takes_the_int_build_while_its_offsets_fit() {
+        assert!(
+            !wide_index_forced(),
+            "the width tests pin the extents logic; run them without MAMBA_RS_INDEX_WIDTH"
+        );
         use IndexWidth::{I32, I64};
         let m = INT_ARG_MAX;
         assert_eq!(IndexWidth::covering(&[]), I32);
@@ -775,6 +849,10 @@ mod tests {
     /// backward, the B and C gradient rows, a group's in the fold.
     #[test]
     fn the_backward_and_sequential_scans_take_the_int_build_while_they_fit() {
+        assert!(
+            !wide_index_forced(),
+            "the width tests pin the extents logic; run them without MAMBA_RS_INDEX_WIDTH"
+        );
         use IndexWidth::{I32, I64};
         let m = INT_ARG_MAX;
         // The sequential tape [batch, T + 1, d_inner, d_state] outgrows the
@@ -805,6 +883,10 @@ mod tests {
     /// tap partials fit, whichever crosses first.
     #[test]
     fn a_conv_launch_takes_the_int_build_while_its_offsets_fit() {
+        assert!(
+            !wide_index_forced(),
+            "the width tests pin the extents logic; run them without MAMBA_RS_INDEX_WIDTH"
+        );
         use IndexWidth::{I32, I64};
         let m = INT_ARG_MAX;
         // Rows [batch, seq, widest row]: the in_proj stride counts.

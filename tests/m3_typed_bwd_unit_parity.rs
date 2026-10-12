@@ -107,7 +107,7 @@ fn run_bcnorm_bwd_f32(
         block_dim: (DS as u32, 1, 1),
         shared_mem_bytes: DS as u32 * 4,
     };
-    let mut bld = ctx.stream.launch_builder(&m3k.bcnorm_bwd);
+    let mut bld = ctx.stream.launch_builder(&m3k.bcnorm_bwd.i32);
     let dbp = d_b.cached_ptr();
     let dwp = d_w.cached_ptr();
     let dop = d_out.cached_ptr();
@@ -152,7 +152,9 @@ fn run_bcnorm_bwd_typed(
         block_dim: (DS as u32, 1, 1),
         shared_mem_bytes: DS as u32 * 4,
     };
-    let mut bld = ctx.stream.launch_builder(m3k.bcnorm_bwd_typed.get(dtype));
+    let mut bld = ctx
+        .stream
+        .launch_builder(m3k.bcnorm_bwd_typed.i32.get(dtype));
     let dbp = d_b.cached_ptr();
     let dwp = d_w.cached_ptr();
     let dop = d_out.cached_ptr();
@@ -251,7 +253,7 @@ fn check_bc_bias_add_bwd(dtype: WeightDtype) {
     let nhi = NH as i32;
     let ngi = NG as i32;
     let dsi = DS as i32;
-    let mut bld = ctx.stream.launch_builder(&m3k.bc_bias_add_bwd);
+    let mut bld = ctx.stream.launch_builder(&m3k.bc_bias_add_bwd.i32);
     let a = dbn_f32.cached_ptr();
     let b = dbb_f32.cached_ptr();
     bld.arg(&a);
@@ -271,7 +273,7 @@ fn check_bc_bias_add_bwd(dtype: WeightDtype) {
     ctx.stream.synchronize().unwrap();
     let mut bld = ctx
         .stream
-        .launch_builder(m3k.bc_bias_add_bwd_typed.get(dtype));
+        .launch_builder(m3k.bc_bias_add_bwd_typed.i32.get(dtype));
     let a = dbn_t.cached_ptr();
     let b = dbb_t.cached_ptr();
     bld.arg(&a);
@@ -343,7 +345,7 @@ fn check_m3_split_bwd(dtype: WeightDtype) {
     let dsi = DS as i32;
     let nhi = NH as i32;
     let nai = N_ANGLES as i32;
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_split_bwd);
+    let mut bld = ctx.stream.launch_builder(&m3k.m3_split_bwd.i32);
     let p = dp32.cached_ptr();
     let z = dz32.cached_ptr();
     let x = dx32.cached_ptr();
@@ -380,7 +382,9 @@ fn check_m3_split_bwd(dtype: WeightDtype) {
     let dct = upload_typed(&ctx, &d_c_raw, dtype);
     let dpt = DtypedBuf::zeros(&ctx.stream, n * in_proj_dim, dtype).unwrap();
     ctx.stream.synchronize().unwrap();
-    let mut bld = ctx.stream.launch_builder(m3k.m3_split_bwd_typed.get(dtype));
+    let mut bld = ctx
+        .stream
+        .launch_builder(m3k.m3_split_bwd_typed.i32.get(dtype));
     let p = dpt.cached_ptr();
     let z = dzt.cached_ptr();
     let x = dxt.cached_ptr();
@@ -462,7 +466,7 @@ fn check_rope_bwd(dtype: WeightDtype) {
     let nhi = NH as i32;
     let dsi = DS as i32;
     let nai = N_ANGLES as i32;
-    let mut bld = ctx.stream.launch_builder(&m3k.rope_bwd);
+    let mut bld = ctx.stream.launch_builder(&m3k.rope_bwd.i32);
     let dp = dbp32.cached_ptr();
     let dpp = dcp32.cached_ptr();
     let dap = dang32.cached_ptr();
@@ -501,7 +505,7 @@ fn check_rope_bwd(dtype: WeightDtype) {
     let dcpt = DtypedBuf::zeros(&ctx.stream, n_elems, dtype).unwrap();
     let dang_t = GpuBuffer::zeros(&ctx.stream, n_angles_total).unwrap();
     ctx.stream.synchronize().unwrap();
-    let mut bld = ctx.stream.launch_builder(m3k.rope_bwd_typed.get(dtype));
+    let mut bld = ctx.stream.launch_builder(m3k.rope_bwd_typed.i32.get(dtype));
     let dp = dbpt.cached_ptr();
     let dpp = dcpt.cached_ptr();
     let dap = dang_t.cached_ptr();
@@ -601,7 +605,7 @@ fn check_rmsnorm_gated_bwd(dtype: WeightDtype) {
         block_dim: (DI as u32, 1, 1),
         shared_mem_bytes: (DI * std::mem::size_of::<f32>()) as u32,
     };
-    let mut bld = ctx.stream.launch_builder(&m3k.rmsnorm_gated_bwd);
+    let mut bld = ctx.stream.launch_builder(&m3k.rmsnorm_gated_bwd.i32);
     let dy = dy32.cached_ptr();
     let dz = dz32.cached_ptr();
     let dw = dw32.cached_ptr();
@@ -641,7 +645,7 @@ fn check_rmsnorm_gated_bwd(dtype: WeightDtype) {
 
     let mut bld = ctx
         .stream
-        .launch_builder(m3k.rmsnorm_gated_bwd_typed.get(dtype));
+        .launch_builder(m3k.rmsnorm_gated_bwd_typed.i32.get(dtype));
     let dy = dy_t.cached_ptr();
     let dz = dz_t.cached_ptr();
     let dw = dw_t.cached_ptr();

@@ -170,9 +170,9 @@ impl Mamba3GpuTrainer {
         // projection takes rows d_model wide.
         cfg.validate()?;
         cpu_weights.validate(&cfg, session.input_dim)?;
-        // The index ranges are checked against the scan this window runs
-        // when its dims are built (`GpuMamba3Dims::validate_index_budget`):
-        // the chunked path has no sequential tape to count.
+        // The kernels' 32-bit arguments are checked when the window's dims
+        // are built (`GpuMamba3Dims::check_int_args`); its tensors take the
+        // 64-bit builds past that range.
         if session.batch == 0 || session.seq_len == 0 {
             return Err("a training window needs at least one sequence and one token".into());
         }
@@ -851,7 +851,7 @@ impl Mamba3TrainerMixed {
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: cfg.train_use_parallel_scan(),
         };
-        dims.validate_index_budget()?;
+        dims.check_int_args()?;
 
         let acts = GpuMamba3BackboneMixedActs::new(
             &ctx.stream,
@@ -2022,7 +2022,7 @@ impl Mamba3TrainerF32 {
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: cfg.train_use_parallel_scan(),
         };
-        dims.validate_index_budget()?;
+        dims.check_int_args()?;
 
         let hidden = cfg.mlp_hidden();
         let acts =

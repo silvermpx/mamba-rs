@@ -139,6 +139,38 @@ is for contributors who change kernels. Users do not need it.
 - Both instantiations are tested: the wide one forced at small shapes and
   compared bit for bit with the narrow one, and one real test past 2^31
   per family (8 GiB of f32 fits a 48 GB board).
+  `MAMBA_RS_INDEX_WIDTH=i64` runs every kernel built at two widths on its
+  64-bit build at any size, so the bit recorders, run once without it and
+  once with it, prove the wide builds against the same records.
+- A family converts mechanically. Write or keep the 64-bit source, then
+  derive the two-width text from it and the 32-bit source by a token diff:
+  `IDX` replaces `long long` exactly where the 64-bit source widened an
+  `int` or inserted a cast, every other byte stays the 32-bit one, plain
+  kernels become macros (line comments to block comments, `#pragma` to
+  `_Pragma`), and a template device function takes the index type as a
+  template parameter. Then the `int` build compiles to the 32-bit kernel
+  and the `_i64` build to the 64-bit one, which the PTX and SASS diff
+  proves.
+- Compare every kernel of the module, converted or not, after the
+  conversion. NVVM's sm_89 output for a few kernels changes from one
+  compile of the same source to the next (it vectorizes their loads
+  differently), even with `-frandom-seed`, so compile each side several
+  times and accept a kernel when any compile of one side matches any of
+  the other. Normalize register numbers, labels, local depots and the
+  mangled names of a kernel's static shared arrays, which embed the
+  kernel's name.
+- One width per pass is enough when a pass's tensors are of comparable
+  size: the predicate covers every tensor the pass's kernels index,
+  scratch partials included, and a kernel whose count parameter has the
+  index type takes the count in the width of the build that runs
+  (`WidthCount`). A specialization built at 32 bits alone (a transport
+  clone, a packed reduction) is admitted only on the `int` route. A shared
+  kernel that takes a column count as an `int` gets a wide form beside it
+  (`reduce_sum_axis0_wide`) rather than a second build of the pinned one.
+- Two builds cost compile time: a family's module grows by its `_i64`
+  entries (the Mamba-1 module compiled cold in 41 s instead of 24 s on an
+  RTX 5090). Split compilation (`-split-compile`) is no remedy: it changed
+  the code of every kernel of the SISO module.
 
 ## Graph capture and other threads
 

@@ -111,51 +111,56 @@ impl GpuMamba3Dims {
         self.seq_len.div_ceil(self.chunk_size())
     }
 
-    /// Reject shapes whose LINEAR INDEX RANGES overflow `i32`.
-    ///
-    /// Every CUDA kernel in the Mamba-3 family takes its dims as `int` and
-    /// forms flat indices like `((b*T + t)*nh + h)*ds + n` in 32-bit
-    /// arithmetic — past `i32::MAX` the index wraps and the kernel reads
-    /// and writes the WRONG elements while returning success (the silent
-    /// long-context corruption class known from other CUDA codebases). The
-    /// largest ranges are the activation tapes; guard them all at the host
-    /// so an oversized shape fails loudly at construction, never numerically.
-    /// The sequential tape counts only on the sequential path: the chunked
-    /// path never allocates it (a one-element sentinel stands in) and never
-    /// indexes it.
-    pub fn validate_index_budget(&self) -> Result<(), String> {
-        let b = self.batch;
-        let t = self.seq_len;
-        let di = self.d_inner;
-        let ds = self.d_state;
+    /// Refuse dimensions past the 32-bit range the SISO kernels take their
+    /// scalar arguments in: the batch, the window, the rows they make and
+    /// the row widths. Element counts and offsets are 64-bit in the kernels'
+    /// 64-bit builds, which [`Self::index_width`] selects, so a tensor's size
+    /// is bounded by memory alone.
+    pub fn check_int_args(&self) -> Result<(), String> {
+        crate::gpu::launch::check_int_args(&[
+            ("batch", self.batch),
+            ("seq_len", self.seq_len),
+            ("batch*seq_len", self.bt()),
+            // The B and C norms launch a block per row of every group.
+            ("batch*seq_len*ngroups", self.bt() * self.ngroups),
+            ("in_proj_dim", self.in_proj_dim),
+            ("d_model", self.d_model),
+            ("nheads*d_state", self.nheads * self.d_state),
+            ("nheads*headdim*d_state", self.d_inner * self.d_state),
+        ])
+    }
+
+    /// The index width of every SISO launch at these dimensions: the int
+    /// builds while every tensor the kernels index fits the 32-bit range,
+    /// the 64-bit builds past it. The sequential tape counts only on the
+    /// sequential path: the chunked path never allocates it (a one-element
+    /// sentinel stands in) and never indexes it.
+    pub fn index_width(&self) -> crate::gpu::launch::IndexWidth {
+        let bt = self.bt();
         let nh = self.nheads;
+        let ds = self.d_state;
         let sequential_tape = if self.use_parallel_scan {
             0
         } else {
-            b * (t + 1) * di * ds
+            self.batch * (self.seq_len + 1) * self.d_inner * ds
         };
-        let candidates: [(&str, usize); 6] = [
-            ("sequential tape B*(T+1)*d_inner*d_state", sequential_tape),
-            ("chunk-state tape B*n_chunks*nheads*headdim*d_state", {
-                b * self.n_chunks() * nh * self.headdim * ds
-            }),
-            ("da cumsum B*n_chunks*nheads*chunk_size", {
-                b * self.n_chunks() * nh * CHUNK_SIZE
-            }),
-            ("activation B*T*in_proj_dim", b * t * self.in_proj_dim),
-            ("activation B*T*d_inner", b * t * di),
-            ("bc lanes B*T*nheads*d_state", b * t * nh * ds),
-        ];
-        for (name, len) in candidates {
-            if len > i32::MAX as usize {
-                return Err(format!(
-                    "index budget overflow: {name} = {len} exceeds i32::MAX — the CUDA \
-                     kernels index this range in 32-bit arithmetic and would silently \
-                     corrupt; shrink batch/seq_len or split the run"
-                ));
-            }
-        }
-        Ok(())
+        crate::gpu::launch::IndexWidth::covering(&[
+            sequential_tape,
+            // Chunk states [B, n_chunks, nh, hd, ds] and decay sums
+            // [B, n_chunks, nh, chunk_size].
+            self.batch * self.n_chunks() * self.d_inner * ds,
+            self.batch * self.n_chunks() * nh * CHUNK_SIZE,
+            // Rows of the projection, the inner channels and the model.
+            bt * self.in_proj_dim,
+            bt * self.d_inner,
+            bt * self.d_model,
+            // B and C lanes per head and per group, and the angles.
+            bt * nh * ds,
+            bt * self.ngroups * ds,
+            bt * nh * self.n_angles,
+            // The angle gradients' partials, both halves in one buffer.
+            2 * bt * nh * self.n_angles,
+        ])
     }
 }
 
@@ -166,8 +171,9 @@ impl GpuMamba3Dims {
 pub const CHUNK_SIZE: usize = crate::mamba3_siso::route::CHUNKED_CHUNK_SIZE;
 
 #[cfg(test)]
-mod index_budget_tests {
+mod index_width_tests {
     use super::GpuMamba3Dims;
+    use crate::gpu::launch::IndexWidth;
 
     fn dims(batch: usize, seq_len: usize) -> GpuMamba3Dims {
         GpuMamba3Dims {
@@ -190,20 +196,24 @@ mod index_budget_tests {
         }
     }
 
-    /// Realistic shapes pass; a sequence long enough to wrap the 32-bit
-    /// index range of the sequential tape is rejected LOUDLY — the kernels
-    /// would otherwise read and write the wrong elements while reporting
-    /// success.
+    /// Realistic shapes take the int builds; a window whose tensors pass the
+    /// 32-bit range takes the 64-bit builds instead of being refused, and
+    /// only the scalar arguments the kernels take as `int` are bounded.
     #[test]
-    fn index_budget_guards_long_context() {
-        dims(2, 4621).validate_index_budget().unwrap();
-        let err = dims(2, 25_000_000).validate_index_budget().unwrap_err();
-        assert!(err.contains("index budget overflow"), "{err}");
+    fn a_long_window_takes_the_64_bit_builds() {
+        let short = dims(2, 4621);
+        short.check_int_args().unwrap();
+        assert_eq!(short.index_width(), IndexWidth::I32);
+        let long = dims(2, 25_000_000);
+        long.check_int_args().unwrap();
+        assert_eq!(long.index_width(), IndexWidth::I64);
+        let err = dims(2, 1 << 30).check_int_args().unwrap_err();
+        assert!(err.starts_with("batch*seq_len "), "{err}");
     }
 
-    /// A window whose only range past `i32::MAX` is the sequential tape runs
-    /// on the chunked path, which has no such tape, and is refused on the
-    /// sequential path, which does.
+    /// A window whose only range past the 32-bit one is the sequential tape
+    /// keeps the int builds on the chunked path, which has no such tape, and
+    /// takes the 64-bit builds on the sequential path, which does.
     #[test]
     fn the_sequential_tape_counts_only_on_the_sequential_path() {
         let mut d = GpuMamba3Dims {
@@ -212,13 +222,12 @@ mod index_budget_tests {
             nheads: 24,
             headdim: 64,
             in_proj_dim: 3436,
+            n_angles: 4,
             ..dims(1, 12_000)
         };
-        d.validate_index_budget()
-            .expect("the chunked path indexes no sequential tape");
+        assert_eq!(d.index_width(), IndexWidth::I32);
         d.use_parallel_scan = false;
-        let err = d.validate_index_budget().unwrap_err();
-        assert!(err.contains("sequential tape"), "{err}");
+        assert_eq!(d.index_width(), IndexWidth::I64);
     }
 }
 

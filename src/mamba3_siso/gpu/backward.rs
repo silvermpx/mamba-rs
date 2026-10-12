@@ -16,7 +16,7 @@ use super::weights::{
 use crate::gpu::blas::gpu_gemm_bi_backward_grad_raw;
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_colsum, grid_norm};
+use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_norm};
 use cudarc::driver::PushKernelArg;
 
 /// Mamba-3 SISO single-layer GPU backward (sequential SSM backward).
@@ -43,6 +43,7 @@ pub fn gpu_backward_mamba3_layer(
     let ng = dims.ngroups;
     let ip = dims.in_proj_dim;
     let na = dims.n_angles;
+    let width = dims.index_width();
     let b = dims.batch as i32;
     let t = dims.seq_len as i32;
 
@@ -65,7 +66,7 @@ pub fn gpu_backward_mamba3_layer(
         let di_i = di as i32;
         let hd_i = dims.headdim as i32;
         let grid = super::kernels::gated_norm_cfg(bt, di, dims.headdim);
-        let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_gated_bwd);
+        let mut builder = ctx.stream.launch_builder(m3k.rmsnorm_gated_bwd.get(width));
         builder.arg(scratch.d_y.inner_mut());
         builder.arg(scratch.d_z.inner_mut());
         builder.arg(scratch.d_norm_gate_w.inner_mut());
@@ -91,15 +92,15 @@ pub fn gpu_backward_mamba3_layer(
                 .map_err(|e| format!("colsum d_norm_gate_w m3: {:?}", e))?;
         }
     } else {
-        let n = (bt * di) as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.silu_gate_bwd);
+        let n = crate::gpu::launch::WidthCount::new(bt * di, width)?;
+        let mut builder = ctx.stream.launch_builder(m3k.silu_gate_bwd.get(width));
         builder.arg(scratch.d_y.inner_mut());
         builder.arg(scratch.d_z.inner_mut());
         builder.arg(scratch.d_gated.inner());
         builder.arg(acts.y.inner());
         builder.arg(acts.z.inner());
-        builder.arg(&n);
-        unsafe { builder.launch(grid_1d(bt * di)) }
+        n.push(&mut builder);
+        unsafe { builder.launch(grid_1d_cover(bt * di)?) }
             .map_err(|e| format!("silu_gate_bwd m3 B7: {:?}", e))?;
     }
 
@@ -130,6 +131,7 @@ pub fn gpu_backward_mamba3_layer(
                 headdim: hd,
                 d_state: ds,
             },
+            width,
         );
         let mut builder = ctx.stream.launch_builder(kernel);
         builder.arg(acts.h_saved.inner());
@@ -170,7 +172,7 @@ pub fn gpu_backward_mamba3_layer(
             let nh_i = nh as i32;
             let ds_i = ds as i32;
             let na_i = na as i32;
-            let mut builder = ctx.stream.launch_builder(&m3k.rope_bwd);
+            let mut builder = ctx.stream.launch_builder(m3k.rope_bwd.get(width));
             builder.arg(scratch.d_b_pre_rope.inner_mut());
             builder.arg(scratch.d_c_pre_rope.inner_mut());
             builder.arg(scratch.d_angle_cumsum.inner_mut());
@@ -183,7 +185,7 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(&nh_i);
             builder.arg(&ds_i);
             builder.arg(&na_i);
-            unsafe { builder.launch(grid_1d(bt * nh * ds)) }
+            unsafe { builder.launch(grid_1d_cover(bt * nh * ds)?) }
                 .map_err(|e| format!("rope_bwd seq B6: {:?}", e))?;
         } else {
             scratch
@@ -224,7 +226,7 @@ pub fn gpu_backward_mamba3_layer(
             let b_i2 = dims.batch as i32;
             let nh_i = nh as i32;
             let hd_i = hd as i32;
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_reduce_d_d);
+            let mut builder = ctx.stream.launch_builder(m3k.m3_reduce_d_d.get(width));
             builder.arg(&d_dp);
             builder.arg(scratch.d_d_local.inner());
             builder.arg(&b_i2);
@@ -261,7 +263,9 @@ pub fn gpu_backward_mamba3_layer(
                 block_dim: (block_x, 1, 1),
                 shared_mem_bytes: 0,
             };
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_extract_da_cs_sum);
+            let mut builder = ctx
+                .stream
+                .launch_builder(m3k.m3_extract_da_cs_sum.get(width));
             builder.arg(scratch.da_cs_sum.inner_mut());
             builder.arg(acts.da_cumsum_saved.inner());
             builder.arg(&b_i);
@@ -307,7 +311,7 @@ pub fn gpu_backward_mamba3_layer(
                 d_state: ds,
                 chunk: cs_u,
             };
-            super::dqkv_tiled::launch(&ctx.stream, m3k, WeightDtype::F32, shape, &io)?;
+            super::dqkv_tiled::launch(&ctx.stream, m3k, WeightDtype::F32, shape, &io, width)?;
         } else {
             // Two chunk-by-state operand tiles and the V/dO tiles, each row
             // padded by one float so a warp reading consecutive rows spreads
@@ -346,6 +350,7 @@ pub fn gpu_backward_mamba3_layer(
                 };
                 let mut sb = ctx.stream.launch_builder(
                     m3k.m3_dqkv_state_terms_typed
+                        .get(width)
                         .get(crate::gpu::dtype::WeightDtype::F32),
                 );
                 sb.arg(scratch.dstate_terms.inner_mut());
@@ -362,7 +367,9 @@ pub fn gpu_backward_mamba3_layer(
                     .map_err(|e| format!("m3_dqkv_state_terms: {:?}", e))?;
 
                 let nc_i = nc as i32;
-                let mut pb = ctx.stream.launch_builder(&m3k.m3_dstate_passing_bwd);
+                let mut pb = ctx
+                    .stream
+                    .launch_builder(m3k.m3_dstate_passing_bwd.get(width));
                 pb.arg(scratch.dstate_enter.inner_mut());
                 pb.arg(scratch.dstate_terms.inner());
                 pb.arg(scratch.da_cs_sum.inner());
@@ -371,7 +378,7 @@ pub fn gpu_backward_mamba3_layer(
                 pb.arg(&hd_i);
                 pb.arg(&ds_i);
                 pb.arg(&nc_i);
-                unsafe { pb.launch(grid_1d(dims.batch * nh * hd * ds)) }
+                unsafe { pb.launch(grid_1d_cover(dims.batch * nh * hd * ds)?) }
                     .map_err(|e| format!("m3_dstate_passing_bwd: {:?}", e))?;
             }
             // t-split: blockDim.y lanes stride the per-timestep
@@ -387,11 +394,14 @@ pub fn gpu_backward_mamba3_layer(
             crate::mamba3_siso::route::require_warp(hd, "m3_dqkv")?;
             let dqkv = m3k.dqkv_for_shape(
                 WeightDtype::F32,
-                ds,
-                hd,
-                cs_u,
-                dims.seq_len,
-                use_pair_mats == 1,
+                super::transport::DqkvRoute {
+                    state: ds,
+                    head: hd,
+                    chunk: cs_u,
+                    time: dims.seq_len,
+                    pairs: use_pair_mats == 1,
+                },
+                width,
             );
             let mut builder = ctx.stream.launch_builder(dqkv);
             builder.arg(scratch.d_q.inner_mut());
@@ -473,7 +483,7 @@ pub fn gpu_backward_mamba3_layer(
                     0
                 },
             };
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_dqktheta);
+            let mut builder = ctx.stream.launch_builder(m3k.m3_dqktheta.get(width));
             builder.arg(scratch.d_c_pre_rope.inner_mut());
             builder.arg(scratch.d_b_pre_rope.inner_mut());
             builder.arg(scratch.d_angle_cumsum.inner_mut());
@@ -528,7 +538,7 @@ pub fn gpu_backward_mamba3_layer(
         // pre_rope grads around m3_ddt_dtrap, whose argument list touches
         // neither pair — consumers read d_b/c_pre_rope directly.)
         {
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_ddt_dtrap);
+            let mut builder = ctx.stream.launch_builder(m3k.m3_ddt_dtrap.get(width));
             builder.arg(scratch.d_gamma.inner_mut());
             builder.arg(scratch.d_trap_raw.inner_mut());
             builder.arg(scratch.d_scale.inner());
@@ -538,7 +548,7 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(&b_i);
             builder.arg(&t_i);
             builder.arg(&nh_i);
-            unsafe { builder.launch(grid_1d(bt * nh)) }
+            unsafe { builder.launch(grid_1d_cover(bt * nh)?) }
                 .map_err(|e| format!("m3_ddt_dtrap B6 S3: {:?}", e))?;
         }
     }
@@ -553,15 +563,15 @@ pub fn gpu_backward_mamba3_layer(
         let nh_i = nh as i32;
         let na_i = na as i32;
         let b_i = b;
-        let btna = (bt * na) as i32;
-        let btnh = (bt * nh) as i32;
         let contrib_angles_elems = nh * bt * na;
         let contrib_dt_offset_bytes = (contrib_angles_elems * std::mem::size_of::<f32>()) as u64;
         let contrib_angles_ptr = scratch.axis0_partials.cached_ptr();
         let contrib_dt_ptr = scratch.axis0_partials.cached_ptr() + contrib_dt_offset_bytes;
         // Stage 1
         {
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_angle_dt_bwd_seq);
+            let mut builder = ctx
+                .stream
+                .launch_builder(m3k.m3_angle_dt_bwd_seq.get(width));
             builder.arg(&contrib_angles_ptr);
             builder.arg(&contrib_dt_ptr);
             builder.arg(scratch.d_angle_cumsum.inner());
@@ -576,31 +586,31 @@ pub fn gpu_backward_mamba3_layer(
                 .map_err(|e| format!("m3_angle_dt_bwd_seq B5a stage1: {:?}", e))?;
         }
         // Stage 2a: reduce nh → d_angles_raw[B*T*na]
-        {
-            let accumulate_i: i32 = 0;
-            let (reduction, cfg) = m3k.axis0_reduction(nh, bt * na);
-            let mut builder = ctx.stream.launch_builder(reduction);
-            builder.arg(scratch.d_angles_raw.inner_mut());
-            builder.arg(&contrib_angles_ptr);
-            builder.arg(&nh_i);
-            builder.arg(&btna);
-            builder.arg(&accumulate_i);
-            unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("angle_dt_bwd B5a reduce angles: {:?}", e))?;
-        }
+        m3k.launch_axis0_sum(
+            &ctx.stream,
+            super::transport::Axis0Sum {
+                out: scratch.d_angles_raw.cached_ptr(),
+                partials: contrib_angles_ptr,
+                rows: nh,
+                columns: bt * na,
+                accumulate: false,
+            },
+            width,
+        )
+        .map_err(|e| format!("angle_dt_bwd B5a reduce angles: {e}"))?;
         // Stage 2b: reduce na → d_dt_angle[B*T*nh]
-        {
-            let accumulate_i: i32 = 0;
-            let (reduction, cfg) = m3k.axis0_reduction(na, bt * nh);
-            let mut builder = ctx.stream.launch_builder(reduction);
-            builder.arg(scratch.d_dt_angle.inner_mut());
-            builder.arg(&contrib_dt_ptr);
-            builder.arg(&na_i);
-            builder.arg(&btnh);
-            builder.arg(&accumulate_i);
-            unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("angle_dt_bwd B5a reduce dt: {:?}", e))?;
-        }
+        m3k.launch_axis0_sum(
+            &ctx.stream,
+            super::transport::Axis0Sum {
+                out: scratch.d_dt_angle.cached_ptr(),
+                partials: contrib_dt_ptr,
+                rows: na,
+                columns: bt * nh,
+                accumulate: false,
+            },
+            width,
+        )
+        .map_err(|e| format!("angle_dt_bwd B5a reduce dt: {e}"))?;
     } else {
         crate::gpu::launch::launch_fill(
             &ctx.stream,
@@ -613,10 +623,10 @@ pub fn gpu_backward_mamba3_layer(
 
     // B5b: m3_abg_bwd (sequential) or m3_final_grads (parallel).
     if !dims.use_parallel_scan {
-        let n_total = (bt * nh) as i32;
+        let n_total = crate::gpu::launch::WidthCount::new(bt * nh, width)?;
         let nh_i = nh as i32;
         let dtb_ptr = lw.dt_bias.raw_ptr(&ctx.stream);
-        let mut builder = ctx.stream.launch_builder(&m3k.m3_abg_bwd);
+        let mut builder = ctx.stream.launch_builder(m3k.m3_abg_bwd.get(width));
         builder.arg(scratch.d_dd_dt.inner_mut());
         builder.arg(scratch.d_dd_a.inner_mut());
         builder.arg(scratch.d_trap_raw.inner_mut());
@@ -632,15 +642,15 @@ pub fn gpu_backward_mamba3_layer(
         builder.arg(acts.trap_raw.inner());
         builder.arg(&dtb_ptr);
         builder.arg(&dims.a_floor);
-        builder.arg(&n_total);
+        n_total.push(&mut builder);
         builder.arg(&nh_i);
-        unsafe { builder.launch(grid_1d(bt * nh)) }
+        unsafe { builder.launch(grid_1d_cover(bt * nh)?) }
             .map_err(|e| format!("m3_abg_bwd seq B5b: {:?}", e))?;
     } else {
-        let n_total = (bt * nh) as i32;
+        let n_total = crate::gpu::launch::WidthCount::new(bt * nh, width)?;
         let nh_i = nh as i32;
         let dtb_ptr = lw.dt_bias.raw_ptr(&ctx.stream);
-        let mut builder = ctx.stream.launch_builder(&m3k.m3_final_grads);
+        let mut builder = ctx.stream.launch_builder(m3k.m3_final_grads.get(width));
         builder.arg(scratch.d_dd_dt.inner_mut());
         builder.arg(scratch.d_dd_a.inner_mut());
         builder.arg(scratch.d_alpha.inner());
@@ -652,9 +662,9 @@ pub fn gpu_backward_mamba3_layer(
         builder.arg(acts.dd_a_raw.inner());
         builder.arg(&dtb_ptr);
         builder.arg(&dims.a_floor);
-        builder.arg(&n_total);
+        n_total.push(&mut builder);
         builder.arg(&nh_i);
-        unsafe { builder.launch(grid_1d(bt * nh)) }
+        unsafe { builder.launch(grid_1d_cover(bt * nh)?) }
             .map_err(|e| format!("m3_final_grads B5b: {:?}", e))?;
     }
 
@@ -677,14 +687,14 @@ pub fn gpu_backward_mamba3_layer(
         let nh_i = nh as i32;
         let ng_i = ng as i32;
         let ds_i = ds as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.bc_bias_add_bwd);
+        let mut builder = ctx.stream.launch_builder(m3k.bc_bias_add_bwd.get(width));
         builder.arg(scratch.d_b_normed.inner_mut());
         builder.arg(scratch.d_b_pre_rope.inner());
         builder.arg(&n_i);
         builder.arg(&nh_i);
         builder.arg(&ng_i);
         builder.arg(&ds_i);
-        unsafe { builder.launch(grid_1d(bt * ng * ds)) }
+        unsafe { builder.launch(grid_1d_cover(bt * ng * ds)?) }
             .map_err(|e| format!("bc_bias_add_bwd B B4b: {:?}", e))?;
     }
     {
@@ -692,14 +702,14 @@ pub fn gpu_backward_mamba3_layer(
         let nh_i = nh as i32;
         let ng_i = ng as i32;
         let ds_i = ds as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.bc_bias_add_bwd);
+        let mut builder = ctx.stream.launch_builder(m3k.bc_bias_add_bwd.get(width));
         builder.arg(scratch.d_c_normed.inner_mut());
         builder.arg(scratch.d_c_pre_rope.inner());
         builder.arg(&n_i);
         builder.arg(&nh_i);
         builder.arg(&ng_i);
         builder.arg(&ds_i);
-        unsafe { builder.launch(grid_1d(bt * ng * ds)) }
+        unsafe { builder.launch(grid_1d_cover(bt * ng * ds)?) }
             .map_err(|e| format!("bc_bias_add_bwd C B4b: {:?}", e))?;
     }
 
@@ -714,7 +724,7 @@ pub fn gpu_backward_mamba3_layer(
             block_dim: (ds as u32, 1, 1),
             shared_mem_bytes: ds as u32 * 4,
         };
-        let mut builder = ctx.stream.launch_builder(&m3k.bcnorm_bwd);
+        let mut builder = ctx.stream.launch_builder(m3k.bcnorm_bwd.get(width));
         builder.arg(scratch.d_b_raw.inner_mut());
         builder.arg(scratch.d_b_norm_w.inner_mut());
         builder.arg(scratch.d_b_normed.inner());
@@ -748,7 +758,7 @@ pub fn gpu_backward_mamba3_layer(
             block_dim: (ds as u32, 1, 1),
             shared_mem_bytes: ds as u32 * 4,
         };
-        let mut builder = ctx.stream.launch_builder(&m3k.bcnorm_bwd);
+        let mut builder = ctx.stream.launch_builder(m3k.bcnorm_bwd.get(width));
         builder.arg(scratch.d_c_raw.inner_mut());
         builder.arg(scratch.d_c_norm_w.inner_mut());
         builder.arg(scratch.d_c_normed.inner());
@@ -781,7 +791,7 @@ pub fn gpu_backward_mamba3_layer(
         let ds_i = ds as i32;
         let nh_i = nh as i32;
         let na_i = na as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.m3_split_bwd);
+        let mut builder = ctx.stream.launch_builder(m3k.m3_split_bwd.get(width));
         builder.arg(scratch.d_proj.inner_mut());
         builder.arg(scratch.d_z.inner());
         builder.arg(scratch.d_x.inner());
@@ -797,7 +807,7 @@ pub fn gpu_backward_mamba3_layer(
         builder.arg(&ds_i);
         builder.arg(&nh_i);
         builder.arg(&na_i);
-        unsafe { builder.launch(grid_1d(bt * ip)) }
+        unsafe { builder.launch(grid_1d_cover(bt * ip)?) }
             .map_err(|e| format!("m3_split_bwd B3: {:?}", e))?;
     }
 
@@ -1026,7 +1036,8 @@ fn gpu_backward_mamba3_mlp(
     gate.arg(acts.up.inner());
     gate.arg(&bt_i);
     gate.arg(&h_i);
-    unsafe { gate.launch(grid_1d(bt * h)) }.map_err(|e| format!("MLP gate bwd m3: {e:?}"))?;
+    unsafe { gate.launch(grid_1d_cover(bt * h)?) }
+        .map_err(|e| format!("MLP gate bwd m3: {e:?}"))?;
     gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.mlp_d_post,

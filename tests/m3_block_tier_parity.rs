@@ -146,10 +146,11 @@ fn m3_step_block_matches_warp_bits() {
                     for (slot, (tier, st)) in tiers.iter_mut().enumerate() {
                         let y = upload_typed(&ctx, &vec![f32::NAN; batch * di], dtype);
                         let kernel = match tier {
-                            HeadTier::Warp => m3k.m3_step_fwd_typed.get(dtype),
-                            HeadTier::Block => m3k.m3_step_fwd_block_typed.get(dtype),
+                            HeadTier::Warp => m3k.m3_step_fwd_typed.i32.get(dtype),
+                            HeadTier::Block => m3k.m3_step_fwd_block_typed.i32.get(dtype),
                         };
-                        let cfg = step_head_cfg(*tier, batch, nh, hd, ds, m3k.step_block_threads);
+                        let cfg =
+                            step_head_cfg(*tier, batch, nh, hd, ds, m3k.step_block_threads.i32);
                         let ptrs = [
                             st.ssm.cached_ptr(),
                             st.k.cached_ptr(),

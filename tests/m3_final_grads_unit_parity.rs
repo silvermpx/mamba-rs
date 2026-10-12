@@ -201,7 +201,7 @@ fn check_dqkv(dtype: WeightDtype) {
         B as i32, T as i32, NH as i32, HD as i32, DS as i32, CS as i32,
     );
 
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv);
+    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv.i32);
     let args = [
         dq_ref.cached_ptr(),
         dk_ref.cached_ptr(),
@@ -254,7 +254,7 @@ fn check_dqkv(dtype: WeightDtype) {
     let dd_t = GpuBuffer::zeros(&ctx.stream, n_d).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    let mut bld = ctx.stream.launch_builder(m3k.m3_dqkv_typed.get(dtype));
+    let mut bld = ctx.stream.launch_builder(m3k.m3_dqkv_typed.i32.get(dtype));
     let args = [
         dq_t.cached_ptr(),
         dk_t.cached_ptr(),
@@ -378,7 +378,7 @@ fn check_dqktheta(dtype: WeightDtype) {
         CS as i32,
     );
 
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta);
+    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
     let args = [
         dqpre_ref.cached_ptr(),
         dkpre_ref.cached_ptr(),
@@ -459,7 +459,9 @@ fn check_dqktheta(dtype: WeightDtype) {
     let dkb_t = GpuBuffer::zeros(&ctx.stream, n_bias).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    let mut bld = ctx.stream.launch_builder(m3k.m3_dqktheta_typed.get(dtype));
+    let mut bld = ctx
+        .stream
+        .launch_builder(m3k.m3_dqktheta_typed.i32.get(dtype));
     let args = [
         dqpre_t.cached_ptr(),
         dkpre_t.cached_ptr(),
@@ -601,7 +603,7 @@ fn m3_dqktheta_output_hash() {
     let (bi, ti, nhi, dsi, nai, csi) = (
         CB as i32, CT as i32, CNH as i32, CDS as i32, CNA as i32, CCS as i32,
     );
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta);
+    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
     let args = [
         dqpre.cached_ptr(),
         dkpre.cached_ptr(),
@@ -735,7 +737,7 @@ fn m3_dqkv_output_hash() {
     let (bi, ti, nhi, hdi, dsi, csi) = (
         CB as i32, CT as i32, CNH as i32, CHD as i32, CDS as i32, CCS as i32,
     );
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv);
+    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv.i32);
     let args = [
         dq.cached_ptr(),
         dk.cached_ptr(),

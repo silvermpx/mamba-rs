@@ -107,14 +107,19 @@ fn device_and_kernel_facts() {
         ),
         (
             "m3_chunk_scan_fwd_bf16",
-            m3k.m3_chunk_scan_fwd_typed.get(dtype),
+            m3k.m3_chunk_scan_fwd_typed.i32.get(dtype),
             256,
             0,
         ),
-        ("m3_dqkv (f32)", &m3k.m3_dqkv, dqkv_block, dqkv_floats * 4),
+        (
+            "m3_dqkv (f32)",
+            &m3k.m3_dqkv.i32,
+            dqkv_block,
+            dqkv_floats * 4,
+        ),
         (
             "m3_dqkv_bf16 (production)",
-            m3k.m3_dqkv_typed.get(dtype),
+            m3k.m3_dqkv_typed.i32.get(dtype),
             dqkv_block,
             dqkv_floats * 4,
         ),

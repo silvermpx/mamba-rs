@@ -207,7 +207,7 @@ fn state_terms_reference(
     let out = GpuBuffer::zeros(&ctx.stream, B * s.nc() * NH * s.hd * s.ds).unwrap();
     let mut b = ctx
         .stream
-        .launch_builder(m3k.m3_dqkv_state_terms_typed.get(dtype));
+        .launch_builder(m3k.m3_dqkv_state_terms_typed.i32.get(dtype));
     let ptrs = [
         out.cached_ptr(),
         inp.q.cached_ptr(),
@@ -272,7 +272,7 @@ fn enter_state(
     inp: &Inputs,
 ) -> GpuBuffer {
     let out = GpuBuffer::zeros(&ctx.stream, B * s.nc() * NH * s.hd * s.ds).unwrap();
-    let mut b = ctx.stream.launch_builder(&m3k.m3_dstate_passing_bwd);
+    let mut b = ctx.stream.launch_builder(&m3k.m3_dstate_passing_bwd.i32);
     let ptrs = [
         out.cached_ptr(),
         terms.cached_ptr(),
@@ -305,7 +305,7 @@ fn dqkv_warp(
         legacy
     };
     assert!(smem <= CHUNKED_BACKWARD_SMEM_MAX, "{s:?} pairs {pairs}");
-    let mut b = ctx.stream.launch_builder(m3k.m3_dqkv_typed.get(dtype));
+    let mut b = ctx.stream.launch_builder(m3k.m3_dqkv_typed.i32.get(dtype));
     let outs = out.ptrs();
     let mut ptrs = outs.to_vec();
     ptrs.extend([

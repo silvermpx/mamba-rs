@@ -298,7 +298,7 @@ fn packed_bcnorm_matches_shared_tree_exactly() {
             .into_iter()
             .enumerate()
         {
-            let candidate = kernels.bcnorm_fwd_bc_typed.get(dtype);
+            let candidate = kernels.bcnorm_fwd_bc_typed.i32.get(dtype);
             let reference = &references[index];
             let states = (1..=32).chain([33, 48, 64, 65, 96]);
             let mut cases = 0;

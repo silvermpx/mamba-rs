@@ -117,7 +117,7 @@ fn scan_trio_time_and_hash() {
             block_dim: (block_x, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut b = ctx.stream.launch_builder(&m3k.m3_da_cumsum);
+        let mut b = ctx.stream.launch_builder(&m3k.m3_da_cumsum.i32);
         b.arg(da_pair.inner());
         b.arg(adt.inner());
         b.arg(&b_i);
@@ -136,7 +136,7 @@ fn scan_trio_time_and_hash() {
             block_dim: (cs as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut b = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks);
+        let mut b = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks.i32);
         b.arg(k_scaled.inner());
         b.arg(qk_dot.inner());
         b.arg(scale.inner());
@@ -160,9 +160,9 @@ fn scan_trio_time_and_hash() {
             hd,
             ds,
             cs,
-            m3k.chunk_tile_threads,
+            m3k.chunk_tile_threads.i32,
         );
-        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
+        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
         b.arg(chunk_states.inner());
         b.arg(x.inner());
         b.arg(k_scaled.inner());
@@ -176,9 +176,9 @@ fn scan_trio_time_and_hash() {
         unsafe { b.launch(cfg) }.unwrap();
     };
     let scan = || {
-        let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads);
+        let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads.i32);
         assert!(coop, "serve shape must ride the coop kernel");
-        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd_coop);
+        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd_coop.i32);
         b.arg(y.inner());
         b.arg(x.inner());
         b.arg(q.inner());
@@ -257,9 +257,9 @@ fn scan_trio_time_and_hash() {
             hd,
             ds,
             cs,
-            m3k.chunk_tile_threads,
+            m3k.chunk_tile_threads.i32,
         );
-        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
+        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
         b.arg(chunk_states_real.inner());
         b.arg(x.inner());
         b.arg(k_scaled.inner());
@@ -292,7 +292,7 @@ fn scan_trio_time_and_hash() {
             .expect("serve shape must fit the fused kernel");
         let mut b = ctx
             .stream
-            .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.f32);
+            .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.i32.f32);
         b.arg(k_scaled_f.inner());
         b.arg(qk_dot_f.inner());
         b.arg(scale_f.inner());
@@ -374,7 +374,7 @@ fn scan_trio_time_and_hash() {
                 };
                 let mut b = ctx
                     .stream
-                    .launch_builder(m3k.m3_preprocess_chunks_typed.get(dtype));
+                    .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
                 b.arg(&ksp_pair);
                 b.arg(qkd_pair.inner());
                 b.arg(scale_pair.inner());
@@ -396,11 +396,11 @@ fn scan_trio_time_and_hash() {
                     hd,
                     ds,
                     cs,
-                    m3k.chunk_tile_threads,
+                    m3k.chunk_tile_threads.i32,
                 );
                 let mut b = ctx
                     .stream
-                    .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
+                    .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
                 b.arg(states_pair.inner());
                 b.arg(&xp);
                 b.arg(&ksp_pair);
@@ -419,7 +419,7 @@ fn scan_trio_time_and_hash() {
                         .expect("serve shape must fit the fused kernel");
                 let mut b = ctx
                     .stream
-                    .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(dtype));
+                    .launch_builder(m3k.m3_chunk_pre_state_fused_typed.i32.get(dtype));
                 b.arg(&ksp_fused);
                 b.arg(qkd_fused.inner());
                 b.arg(scale_fused.inner());
@@ -483,11 +483,11 @@ fn scan_trio_time_and_hash() {
     // bf16 parity test only measures within tolerance.
     let y_t = GpuBuffer::zeros(st, batch * t * d_inner).unwrap();
     let scan_typed = || {
-        let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads);
+        let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads.i32);
         assert!(coop, "serve shape must ride the coop kernel");
         let mut b = ctx
             .stream
-            .launch_builder(&m3k.m3_chunk_scan_fwd_coop_typed.f32);
+            .launch_builder(&m3k.m3_chunk_scan_fwd_coop_typed.i32.f32);
         b.arg(y_t.inner());
         b.arg(x.inner());
         b.arg(q.inner());
@@ -534,7 +534,7 @@ fn scan_trio_time_and_hash() {
         };
         let nc_i = nc as i32;
         let init_states_null: u64 = 0;
-        let mut b = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd);
+        let mut b = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd.i32);
         b.arg(states_sp.inner());
         b.arg(final_states.inner());
         b.arg(da_cumsum.inner());
@@ -582,7 +582,9 @@ fn scan_trio_time_and_hash() {
             block_dim: (hd.max(ds) as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut b = ctx.stream.launch_builder(&m3k.m3_writeback_parallel_states);
+        let mut b = ctx
+            .stream
+            .launch_builder(&m3k.m3_writeback_parallel_states.i32);
         b.arg(ssm_out.inner());
         b.arg(k_out.inner());
         b.arg(v_out.inner());
@@ -603,7 +605,7 @@ fn scan_trio_time_and_hash() {
         let seed_null: u64 = 0;
         let mut b = ctx
             .stream
-            .launch_builder(&m3k.m3_state_pass_fused_typed.f32);
+            .launch_builder(&m3k.m3_state_pass_fused_typed.i32.f32);
         b.arg(states_fp.inner());
         b.arg(ssm_out.inner());
         b.arg(k_out.inner());
@@ -736,7 +738,7 @@ fn coeff_chain_time_and_hash() {
         let pj = proj.cached_ptr();
         let db = dt_bias.cached_ptr();
         let n_i = bt as i32;
-        let mut b = ctx.stream.launch_builder(m3k.m3_split_typed.get(dt_ty));
+        let mut b = ctx.stream.launch_builder(m3k.m3_split_typed.i32.get(dt_ty));
         b.arg(&zc);
         b.arg(&xc);
         b.arg(&br);
@@ -770,7 +772,7 @@ fn coeff_chain_time_and_hash() {
         let cfg = bcnorm_fwd_bc_cfg(bt * ng, ds);
         let mut b = ctx
             .stream
-            .launch_builder(m3k.bcnorm_fwd_bc_typed.get(dt_ty));
+            .launch_builder(m3k.bcnorm_fwd_bc_typed.i32.get(dt_ty));
         b.arg(&bn);
         b.arg(&cn);
         b.arg(b_rms.inner());
@@ -825,7 +827,7 @@ fn coeff_chain_time_and_hash() {
         let cbp = c_bias.cached_ptr();
         let mut b = ctx
             .stream
-            .launch_builder(m3k.m3_bias_rope_fwd_typed.get(dt_ty));
+            .launch_builder(m3k.m3_bias_rope_fwd_typed.i32.get(dt_ty));
         b.arg(&bb);
         b.arg(&cb);
         b.arg(&kp);
@@ -850,7 +852,7 @@ fn coeff_chain_time_and_hash() {
     };
     let abg = || {
         let n_total = (bt * nh) as i32;
-        let mut b = ctx.stream.launch_builder(&m3k.m3_compute_abg);
+        let mut b = ctx.stream.launch_builder(&m3k.m3_compute_abg.i32);
         b.arg(alpha.inner());
         b.arg(beta.inner());
         b.arg(gamma.inner());
@@ -957,7 +959,7 @@ fn sequential_prefill_time_and_hash() {
     let (batch_i, t_i, nh_i, hd_i, ds_i) =
         (batch as i32, t as i32, nh as i32, hd as i32, ds as i32);
     let prefill = || {
-        let mut b = st.launch_builder(&m3k.m3_burnin_fwd_nosave);
+        let mut b = st.launch_builder(&m3k.m3_burnin_fwd_nosave.i32);
         b.arg(ssm_state.inner());
         b.arg(k_state.inner());
         b.arg(v_state.inner());

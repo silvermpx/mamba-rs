@@ -27,6 +27,7 @@ pub use inference::{
 };
 pub use kernels::Mamba3Kernels;
 pub use trainer::Mamba3GpuTrainer;
+pub use transport::DqkvRoute;
 pub use weights::{
     GpuMamba3Grads, GpuMamba3LayerGrads, GpuMamba3LayerWeights, GpuMamba3LayerWeightsInf,
     GpuMamba3Weights, GpuMamba3WeightsInf,

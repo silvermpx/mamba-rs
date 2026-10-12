@@ -10,7 +10,7 @@
 
 use super::kernels::Mamba3Kernels;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::grid_1d;
+use crate::gpu::launch::{IndexWidth, grid_1d_cover};
 use crate::mamba3_siso::route::chunked_backward_tiled_smem_bytes;
 use cudarc::driver::sys::CUdeviceptr;
 use cudarc::driver::{CudaStream, LaunchConfig, PushKernelArg};
@@ -66,6 +66,7 @@ pub(super) fn launch(
     dtype: WeightDtype,
     shape: DqkvShape,
     io: &DqkvTiledIo,
+    width: IndexWidth,
 ) -> Result<(), String> {
     let DqkvShape {
         batch,
@@ -103,14 +104,14 @@ pub(super) fn launch(
     };
     unsafe { terms.launch(terms_cfg) }.map_err(|e| format!("m3_dqkv_state_terms_tiled: {e:?}"))?;
 
-    let mut pass = stream.launch_builder(&m3k.m3_dstate_passing_bwd);
+    let mut pass = stream.launch_builder(m3k.m3_dstate_passing_bwd.get(width));
     for p in [&io.enter_state, &io.state_terms, &io.da_cs_sum] {
         pass.arg(p);
     }
     for d in [&b, &nh, &hd, &ds, &nc] {
         pass.arg(d);
     }
-    unsafe { pass.launch(grid_1d(batch * nheads * headdim * d_state)) }
+    unsafe { pass.launch(grid_1d_cover(batch * nheads * headdim * d_state)?) }
         .map_err(|e| format!("m3_dstate_passing_bwd tiled: {e:?}"))?;
 
     let mut chain = stream.launch_builder(&m3k.m3_dqkv_dm_chain);
@@ -120,7 +121,8 @@ pub(super) fn launch(
     for d in [&rows_i, &hd, &ds] {
         chain.arg(d);
     }
-    unsafe { chain.launch(grid_1d(rows)) }.map_err(|e| format!("m3_dqkv_dm_chain: {e:?}"))?;
+    unsafe { chain.launch(grid_1d_cover(rows)?) }
+        .map_err(|e| format!("m3_dqkv_dm_chain: {e:?}"))?;
 
     let tile = TILE as i32;
     let mut stage = stream.launch_builder(m3k.m3_dqkv_tiled.get(dtype));

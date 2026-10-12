@@ -6,7 +6,8 @@
 
 use super::transport::{TransportAdmission, TransportKernels, transport_environment_admitted};
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::kernels::{CudaModuleAnchors, HalfKernel, TypedKernel};
+use crate::gpu::kernels::{ByIndexWidth, CudaModuleAnchors, HalfKernel, TypedKernel};
+use crate::gpu::launch::IndexWidth;
 use crate::mamba3_siso::route::{HeadTier, head_tier};
 use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig};
 use std::sync::Arc;
@@ -57,17 +58,17 @@ pub struct Mamba3Kernels {
     pub(super) transport: TransportKernels,
 
     // ── Sequential SSM (mamba3_siso.cu) ──
-    pub m3_step_fwd: CudaFunction,
-    pub m3_burnin_fwd: CudaFunction,
+    pub m3_step_fwd: ByIndexWidth<CudaFunction>,
+    pub m3_burnin_fwd: ByIndexWidth<CudaFunction>,
     /// The burn-in forward specialised on a state width, the twin of
     /// [`Self::m3_backward_seq_by_state`].
-    pub m3_burnin_fwd_by_state: [(usize, CudaFunction); 4],
-    pub m3_burnin_fwd_nosave: CudaFunction,
-    pub m3_backward_seq: CudaFunction,
+    pub m3_burnin_fwd_by_state: [(usize, ByIndexWidth<CudaFunction>); 4],
+    pub m3_burnin_fwd_nosave: ByIndexWidth<CudaFunction>,
+    pub m3_backward_seq: ByIndexWidth<CudaFunction>,
     /// The backward scan specialised on a state width, so its state loops
     /// carry a constant trip count. One per width the models here use; a
     /// width with no entry runs the general `m3_backward_seq` above.
-    pub m3_backward_seq_by_state: [(usize, CudaFunction); 4],
+    pub m3_backward_seq_by_state: [(usize, ByIndexWidth<CudaFunction>); 4],
     /// The sequential training forward for heads the warp kernels cannot
     /// hold: one CTA per head, the step's rows staged in shared memory.
     pub m3_burnin_fwd_block: TypedKernel,
@@ -77,32 +78,32 @@ pub struct Mamba3Kernels {
     /// every warp, the warps' sums added in order. It also serves every
     /// head of the bf16 and f16 sequential backward.
     pub m3_backward_seq_block: TypedKernel,
-    pub m3_reduce_d_d: CudaFunction,
+    pub m3_reduce_d_d: ByIndexWidth<CudaFunction>,
 
     // ── Shared ops (mamba3_ops.cu) ──
-    pub m3_split: CudaFunction,
-    pub m3_split_bwd: CudaFunction,
-    pub bcnorm_bwd: CudaFunction,
-    pub bc_bias_add: CudaFunction,
-    pub bc_bias_add_bwd: CudaFunction,
-    pub m3_angle_dt_fwd_seq: CudaFunction,
+    pub m3_split: ByIndexWidth<CudaFunction>,
+    pub m3_split_bwd: ByIndexWidth<CudaFunction>,
+    pub bcnorm_bwd: ByIndexWidth<CudaFunction>,
+    pub bc_bias_add: ByIndexWidth<CudaFunction>,
+    pub bc_bias_add_bwd: ByIndexWidth<CudaFunction>,
+    pub m3_angle_dt_fwd_seq: ByIndexWidth<CudaFunction>,
     /// Chunk-parallel angle accumulation pair — replaces the sequential
     /// kernel on multi-chunk windows (its serial fp64 chain dominates
     /// the prefill profile at production shapes).
-    pub m3_angle_chunk_sums: CudaFunction,
-    pub m3_angle_chunk_apply: CudaFunction,
-    pub m3_angle_dt_bwd_seq: CudaFunction,
-    pub rope_fwd: CudaFunction,
+    pub m3_angle_chunk_sums: ByIndexWidth<CudaFunction>,
+    pub m3_angle_chunk_apply: ByIndexWidth<CudaFunction>,
+    pub m3_angle_dt_bwd_seq: ByIndexWidth<CudaFunction>,
+    pub rope_fwd: ByIndexWidth<CudaFunction>,
     /// Fused bc_bias_add (B + C) + rope_fwd - one launch replaces the
     /// F4c/F4d/F4ef triple; biased saves still materialize for backward.
-    pub m3_bias_rope_fwd: CudaFunction,
-    pub rope_bwd: CudaFunction,
-    pub m3_compute_abg: CudaFunction,
-    pub m3_abg_bwd: CudaFunction,
-    pub silu_gate_fwd: CudaFunction,
-    pub silu_gate_bwd: CudaFunction,
-    pub rmsnorm_gated_fwd: CudaFunction,
-    pub rmsnorm_gated_bwd: CudaFunction,
+    pub m3_bias_rope_fwd: ByIndexWidth<CudaFunction>,
+    pub rope_bwd: ByIndexWidth<CudaFunction>,
+    pub m3_compute_abg: ByIndexWidth<CudaFunction>,
+    pub m3_abg_bwd: ByIndexWidth<CudaFunction>,
+    pub silu_gate_fwd: ByIndexWidth<CudaFunction>,
+    pub silu_gate_bwd: ByIndexWidth<CudaFunction>,
+    pub rmsnorm_gated_fwd: ByIndexWidth<CudaFunction>,
+    pub rmsnorm_gated_bwd: ByIndexWidth<CudaFunction>,
 
     // ── Shared kernels from norms.cu + elementwise.cu (used by training pipeline) ──
     pub rmsnorm_fwd: CudaFunction,
@@ -115,6 +116,10 @@ pub struct Mamba3Kernels {
     /// M3 backward (dD from m3_dqkv, d_angles_raw/d_dt_angle from
     /// m3_angle_dt_bwd_seq, and d_scale from rmsnorm_bwd).
     pub reduce_sum_axis0: CudaFunction,
+    /// The angle gradients' axis-0 reduction once a partial row holds more
+    /// columns than the 32-bit range: `reduce_sum_axis0`'s order per column,
+    /// in launches from a column offset.
+    pub reduce_sum_axis0_wide: CudaFunction,
     pub vec_add_inplace: CudaFunction,
     pub elementwise_mul: CudaFunction,
     /// 16-byte vectorized twin of `elementwise_mul` for f32 operands: the
@@ -137,32 +142,32 @@ pub struct Mamba3Kernels {
     pub adamw_step_multi: TypedKernel,
 
     // ── Chunked parallel scan (mamba3_chunked.cu) ──
-    pub m3_preprocess_chunks: CudaFunction,
-    pub m3_da_cumsum: CudaFunction,
-    pub m3_chunk_state_fwd: CudaFunction,
-    pub m3_state_passing_fwd: CudaFunction,
+    pub m3_preprocess_chunks: ByIndexWidth<CudaFunction>,
+    pub m3_da_cumsum: ByIndexWidth<CudaFunction>,
+    pub m3_chunk_state_fwd: ByIndexWidth<CudaFunction>,
+    pub m3_state_passing_fwd: ByIndexWidth<CudaFunction>,
     /// Trapezoidal boundary fold for state-carrying prefill: seeds the
     /// entering SSM state with `v_state (x) k_state * dt0 * (1 - trap0)`
     /// so the beta term's one-step reach-back across the window seam is
     /// honored (reference: mamba3_siso_fwd.py HAS_INITIAL_STATES).
-    pub m3_chunk_entering_state: CudaFunction,
-    pub m3_writeback_parallel_states: CudaFunction,
-    pub m3_chunk_scan_fwd: CudaFunction,
+    pub m3_chunk_entering_state: ByIndexWidth<CudaFunction>,
+    pub m3_writeback_parallel_states: ByIndexWidth<CudaFunction>,
+    pub m3_chunk_scan_fwd: ByIndexWidth<CudaFunction>,
     /// Cooperative-block twin: one head per 128-thread block, triangle
     /// tile + staged operands in dynamic smem. Routed when the smem total
     /// fits the 48 KB budget; bit-identical to the original.
-    pub m3_chunk_scan_fwd_coop: CudaFunction,
+    pub m3_chunk_scan_fwd_coop: ByIndexWidth<CudaFunction>,
     // m3_chunk_scan_bwd, m3_state_passing_bwd, m3_chunk_state_bwd,
     // m3_cumsum_bwd removed — dead code replaced by monolithic m3_dqkv +
     // m3_dqktheta path below.
-    pub m3_extract_da_cs_sum: CudaFunction,
-    pub m3_dqkv: CudaFunction,
+    pub m3_extract_da_cs_sum: ByIndexWidth<CudaFunction>,
+    pub m3_dqkv: ByIndexWidth<CudaFunction>,
     /// Per-chunk B terms of the reverse d_state recurrence (f32/typed
     /// activation reads; f32 output).
-    pub m3_dqkv_state_terms_typed: TypedKernel,
+    pub m3_dqkv_state_terms_typed: ByIndexWidth<TypedKernel>,
     /// Serial per-(b,h,p,n) reverse fold producing each chunk's
     /// entering d_state.
-    pub m3_dstate_passing_bwd: CudaFunction,
+    pub m3_dstate_passing_bwd: ByIndexWidth<CudaFunction>,
     /// The per-chunk terms of the reverse state pass for any head and state
     /// width, in 16 x 16 output tiles: the bits of the warp kernel wherever
     /// that one runs.
@@ -173,35 +178,35 @@ pub struct Mamba3Kernels {
     /// The chunked backward's dQKV stage for any head and state width:
     /// `m3_dqkv`'s outputs in its order, through tiles of a fixed budget.
     pub m3_dqkv_tiled: TypedKernel,
-    pub m3_dqktheta: CudaFunction,
-    pub m3_ddt_dtrap: CudaFunction,
-    pub m3_final_grads: CudaFunction,
+    pub m3_dqktheta: ByIndexWidth<CudaFunction>,
+    pub m3_ddt_dtrap: ByIndexWidth<CudaFunction>,
+    pub m3_final_grads: ByIndexWidth<CudaFunction>,
 
     // ── Typed variants for end-to-end bf16/f16 inference ──
     /// 8-way split + fused softplus/sigmoid, bf16/f16 proj and activation outputs.
     /// Coefficient outputs (dt, a_val, trap, angles, raw saves) stay f32.
-    pub m3_split_typed: TypedKernel,
+    pub m3_split_typed: ByIndexWidth<TypedKernel>,
     /// Fused B+C variant of bcnorm_fwd_typed (2× grid via blockIdx.y).
-    pub bcnorm_fwd_bc_typed: TypedKernel,
+    pub bcnorm_fwd_bc_typed: ByIndexWidth<TypedKernel>,
     /// Fused B+C norm, f32 lane (the decode step merges its two bcnorm
     /// launches through it).
-    pub bcnorm_fwd_bc_f32: CudaFunction,
+    pub bcnorm_fwd_bc_f32: ByIndexWidth<CudaFunction>,
     /// Fused typed twin of bias + rope (round-trip contract preserved).
-    pub m3_bias_rope_fwd_typed: TypedKernel,
+    pub m3_bias_rope_fwd_typed: ByIndexWidth<TypedKernel>,
     /// Plain SiLU gate (no norm), half I/O.
-    pub silu_gate_fwd_typed: TypedKernel,
+    pub silu_gate_fwd_typed: ByIndexWidth<TypedKernel>,
     /// SiLU-gate backward (typed twins share the f32 kernel's argument
     /// order and factored d_silu form).
-    pub silu_gate_bwd_typed: TypedKernel,
+    pub silu_gate_bwd_typed: ByIndexWidth<TypedKernel>,
     /// RMSNorm-gated output (half I/O, f32 weight/rms_vals).
-    pub rmsnorm_gated_fwd_typed: TypedKernel,
+    pub rmsnorm_gated_fwd_typed: ByIndexWidth<TypedKernel>,
     /// M3 SSM step — shared with training, already templated in mamba3_siso.cu.
-    pub m3_step_fwd_typed: TypedKernel,
+    pub m3_step_fwd_typed: ByIndexWidth<TypedKernel>,
     /// Block-tier decode step for heads wider than a warp (or of a width
     /// that is not a power of two): one CTA per (batch, head), the
     /// head-shared values staged in shared memory. Same arguments as
     /// `m3_step_fwd`; launched with `step_block_cfg`.
-    pub m3_step_fwd_block_typed: TypedKernel,
+    pub m3_step_fwd_block_typed: ByIndexWidth<TypedKernel>,
     /// The gated MLP's activation `value * silu(gate)` over the up
     /// projection's rows (value columns, then gate columns).
     pub mlp_gate_fwd_typed: TypedKernel,
@@ -209,35 +214,35 @@ pub struct Mamba3Kernels {
     pub mlp_gate_bwd: TypedKernel,
     /// M3 burnin forward (training) — sequential T-loop SSM with activation
     /// saves. Typed x/k/q/y; f32 state + alpha/beta/gamma + D + saves.
-    pub m3_burnin_fwd_typed_bf16: CudaFunction,
-    pub m3_burnin_fwd_typed_f16: CudaFunction,
-    burnin_fwd_typed_by_state: Option<HalfKernel>,
+    pub m3_burnin_fwd_typed_bf16: ByIndexWidth<CudaFunction>,
+    pub m3_burnin_fwd_typed_f16: ByIndexWidth<CudaFunction>,
+    burnin_fwd_typed_by_state: Option<ByIndexWidth<HalfKernel>>,
 
     // -- Typed M3 sequential backward kernels --
     /// RmsNorm over B/C groups, typed dy → typed d_B; f32 rms + weight +
     /// d_weight master-grad accumulator.
-    pub bcnorm_bwd_typed: TypedKernel,
+    pub bcnorm_bwd_typed: ByIndexWidth<TypedKernel>,
     /// Per-head bias reduction from typed d_B_biased → typed d_B_normed
     /// (expand groups backward). Bias grad handled by reduce_bias_typed.
-    pub bc_bias_add_bwd_typed: TypedKernel,
+    pub bc_bias_add_bwd_typed: ByIndexWidth<TypedKernel>,
     /// RoPE rotation backward, typed B/C grads + saved B/C, f32 angle saves.
-    pub rope_bwd_typed: TypedKernel,
+    pub rope_bwd_typed: ByIndexWidth<TypedKernel>,
     /// RoPE rotation backward with f32 gradients against the bf16 or f16
     /// pre-RoPE B and C, for the sequential mixed backward.
-    pub rope_bwd_mixed: HalfKernel,
+    pub rope_bwd_mixed: ByIndexWidth<HalfKernel>,
     /// 8-way split backward: assemble typed d_proj from typed d_z/d_x/
     /// d_B_raw/d_C_raw plus f32 dd_dt/dd_a/trap/angles.
-    pub m3_split_bwd_typed: TypedKernel,
+    pub m3_split_bwd_typed: ByIndexWidth<TypedKernel>,
     /// RMSNorm-gated backward (`out = RMSNorm(y) * weight * SiLU(z)`) —
     /// typed d_y/d_z/d_out/y/z; f32 weight + d_weight (per-sample,
     /// reduced later).
-    pub rmsnorm_gated_bwd_typed: TypedKernel,
+    pub rmsnorm_gated_bwd_typed: ByIndexWidth<TypedKernel>,
     // -- Typed M3 "final grad" kernels (HIGHEST RISK) --
     /// Huge dqkv kernel with smem tiles — typed Q_rot/K_scaled/V_in/dO;
     /// all 6 grad outputs stay f32 (atomicAdd on dD; master grads on others).
-    pub m3_dqkv_typed: TypedKernel,
+    pub m3_dqkv_typed: ByIndexWidth<TypedKernel>,
     /// Inverse-RoPE + bias backward — typed Q_raw/K_raw; 7 grad outputs f32.
-    pub m3_dqktheta_typed: TypedKernel,
+    pub m3_dqktheta_typed: ByIndexWidth<TypedKernel>,
 
     // m3_chunk_scan_bwd_typed + m3_chunk_state_bwd_typed
     // removed (dead — the typed backward path, like the f32 path, now routes
@@ -247,35 +252,35 @@ pub struct Mamba3Kernels {
     /// Per-chunk gamma/scale + qk_dot + K prescale. Typed K/Q/K_scaled,
     /// f32 DT/trap_sig/qk_dot/scale/gamma (these are scalars computed in
     /// float and reused by the scan path).
-    pub m3_preprocess_chunks_typed: TypedKernel,
+    pub m3_preprocess_chunks_typed: ByIndexWidth<TypedKernel>,
     /// Per-chunk SSM state matmul (typed x, typed K_scaled, f32 dA_cumsum,
     /// f32 states_out — BPTT state MUST remain f32 per Tri Dao invariant).
-    pub m3_chunk_state_fwd_typed: TypedKernel,
+    pub m3_chunk_state_fwd_typed: ByIndexWidth<TypedKernel>,
     /// Fused preprocess + chunk_state (3b): one kernel computes K_scaled/
     /// qk_dot/scale/gamma AND the chunk states, keeping K_scaled in smem
     /// across the seam instead of round-tripping it through L2. Launched
     /// only when `chunk_fused_cfg` returns Some; otherwise the pair runs.
-    pub m3_chunk_pre_state_fused_typed: TypedKernel,
+    pub m3_chunk_pre_state_fused_typed: ByIndexWidth<TypedKernel>,
     /// Persist final states to ssm_state/k_state/v_state (all f32 persistent
     /// buffers). Typed inputs k_flat/x_flat.
-    pub m3_writeback_parallel_states_typed: TypedKernel,
+    pub m3_writeback_parallel_states_typed: ByIndexWidth<TypedKernel>,
     /// The entering fold, the inter-chunk state pass and the window-final
     /// writeback in one launch, one CTA per (b, h): the three kernels'
     /// expressions in their order, the folded seed and the final state in
     /// registers. Typed inputs k_flat/x_flat; every state f32. Launched with
     /// `state_pass_fused_cfg`.
-    pub m3_state_pass_fused_typed: TypedKernel,
+    pub m3_state_pass_fused_typed: ByIndexWidth<TypedKernel>,
     /// Intra-chunk output: typed y_out/x/Q/K_scaled; f32 qk_dot/dA_cumsum/
     /// prev_states/D.
-    pub m3_chunk_scan_fwd_typed: TypedKernel,
+    pub m3_chunk_scan_fwd_typed: ByIndexWidth<TypedKernel>,
     /// The most threads one block of the chunked forward's scalar fallback
     /// tiles may run: the fewest any of their f32, bf16 and f16 kernels can
     /// launch with the registers its state capacity compiled to.
-    pub chunk_tile_threads: usize,
+    pub chunk_tile_threads: ByIndexWidth<usize>,
     /// The same bound for the block-tier decode step.
-    pub step_block_threads: usize,
+    pub step_block_threads: ByIndexWidth<usize>,
     /// Cooperative typed twin (see `m3_chunk_scan_fwd_coop`).
-    pub m3_chunk_scan_fwd_coop_typed: TypedKernel,
+    pub m3_chunk_scan_fwd_coop_typed: ByIndexWidth<TypedKernel>,
 
     /// Shared from M1: f32 residual → half post-norm (identical kernel, reused).
     pub rmsnorm_fwd_f32in_typed: HalfKernel,
@@ -302,25 +307,28 @@ impl Mamba3Kernels {
         Self::compile_with_state_cap(ctx, arch, 64)
     }
 
-    /// The backward scan to launch for a model of this state width: the
-    /// specialisation when one exists, the general entry otherwise. The
-    /// two compute the same thing; the specialisation is faster because
-    /// its loop bounds are constants the compiler can unroll.
-    pub fn backward_seq_for_state(&self, d_state: usize) -> &CudaFunction {
+    /// The backward scan to launch for a model of this state width, at the
+    /// index width of the launch: the specialisation when one exists, the
+    /// general entry otherwise. The two compute the same thing; the
+    /// specialisation is faster because its loop bounds are constants the
+    /// compiler can unroll.
+    pub fn backward_seq_for_state(&self, d_state: usize, width: IndexWidth) -> &CudaFunction {
         self.m3_backward_seq_by_state
             .iter()
-            .find(|(width, _)| *width == d_state)
+            .find(|(state, _)| *state == d_state)
             .map(|(_, function)| function)
             .unwrap_or(&self.m3_backward_seq)
+            .get(width)
     }
 
     /// The burn-in forward to launch for a model of this state width.
-    pub fn burnin_fwd_for_state(&self, d_state: usize) -> &CudaFunction {
+    pub fn burnin_fwd_for_state(&self, d_state: usize, width: IndexWidth) -> &CudaFunction {
         self.m3_burnin_fwd_by_state
             .iter()
-            .find(|(width, _)| *width == d_state)
+            .find(|(state, _)| *state == d_state)
             .map(|(_, function)| function)
             .unwrap_or(&self.m3_burnin_fwd)
+            .get(width)
     }
 
     /// Select the sequential training forward kernel for an activation dtype
@@ -329,36 +337,45 @@ impl Mamba3Kernels {
     /// BF16/F16 use constant-width loops on qualified Ada compiler targets;
     /// other devices, compilers and widths retain the general typed kernel.
     /// F32 uses the existing F32 state-width selector.
-    pub fn burnin_fwd_typed_for_state(&self, dtype: WeightDtype, d_state: usize) -> &CudaFunction {
+    pub fn burnin_fwd_typed_for_state(
+        &self,
+        dtype: WeightDtype,
+        d_state: usize,
+        width: IndexWidth,
+    ) -> &CudaFunction {
         if dtype == WeightDtype::F32 {
-            return self.burnin_fwd_for_state(d_state);
+            return self.burnin_fwd_for_state(d_state, width);
         }
         if matches!(d_state, 8 | 16 | 32 | 64)
             && d_state <= self.state_cap
             && let Some(kernels) = &self.burnin_fwd_typed_by_state
         {
-            return kernels.get(dtype);
+            return kernels.get(width).get(dtype);
         }
         match dtype {
-            WeightDtype::Bf16 => &self.m3_burnin_fwd_typed_bf16,
-            WeightDtype::F16 => &self.m3_burnin_fwd_typed_f16,
+            WeightDtype::Bf16 => self.m3_burnin_fwd_typed_bf16.get(width),
+            WeightDtype::F16 => self.m3_burnin_fwd_typed_f16.get(width),
             WeightDtype::F32 | WeightDtype::Tf32 => unreachable!("F32 uses its own selector"),
         }
     }
 
     /// The sequential training forward for a shape, with its launch. A head
     /// of one warp keeps the warp kernels; every other head takes the block
-    /// tier, which gives the warp kernels' bits where both serve.
+    /// tier, which gives the warp kernels' bits where both serve. The block
+    /// tier indexes in 64 bits at every width.
     pub fn sequential_forward(
         &self,
         dtype: WeightDtype,
         shape: SequentialShape,
+        width: IndexWidth,
     ) -> (&CudaFunction, LaunchConfig) {
         if head_tier(shape.headdim) == HeadTier::Warp {
             let kernel = match dtype {
-                WeightDtype::F32 | WeightDtype::Tf32 => self.burnin_fwd_for_state(shape.d_state),
+                WeightDtype::F32 | WeightDtype::Tf32 => {
+                    self.burnin_fwd_for_state(shape.d_state, width)
+                }
                 WeightDtype::Bf16 | WeightDtype::F16 => {
-                    self.burnin_fwd_typed_for_state(dtype, shape.d_state)
+                    self.burnin_fwd_typed_for_state(dtype, shape.d_state, width)
                 }
             };
             return (kernel, shape.launch(true, 0));
@@ -374,9 +391,10 @@ impl Mamba3Kernels {
     pub fn sequential_target_forward(
         &self,
         shape: SequentialShape,
+        width: IndexWidth,
     ) -> (&CudaFunction, LaunchConfig) {
         if head_tier(shape.headdim) == HeadTier::Warp {
-            return (&self.m3_burnin_fwd_nosave, shape.launch(true, 0));
+            return (self.m3_burnin_fwd_nosave.get(width), shape.launch(true, 0));
         }
         let smem = crate::mamba3_siso::route::sequential_forward_block_smem_bytes(shape.d_state);
         (&self.m3_burnin_fwd_nosave_block, shape.launch(false, smem))
@@ -389,11 +407,12 @@ impl Mamba3Kernels {
         &self,
         dtype: WeightDtype,
         shape: SequentialShape,
+        width: IndexWidth,
     ) -> (&CudaFunction, LaunchConfig) {
         let warp = head_tier(shape.headdim) == HeadTier::Warp;
         if warp && matches!(dtype, WeightDtype::F32 | WeightDtype::Tf32) {
             return (
-                self.backward_seq_for_state(shape.d_state),
+                self.backward_seq_for_state(shape.d_state, width),
                 shape.launch(true, 0),
             );
         }
@@ -602,25 +621,58 @@ impl Mamba3Kernels {
                 .load_function(name)
                 .map_err(|e| format!("M3 kernel '{name}' not found: {e:?}"))
         };
-        let chunk_tile_threads = block_threads_bound(
-            &[
-                &get("m3_chunk_state_fwd")?,
-                &get("m3_chunk_state_fwd_bf16")?,
-                &get("m3_chunk_state_fwd_f16")?,
-                &get("m3_chunk_scan_fwd")?,
-                &get("m3_chunk_scan_fwd_bf16")?,
-                &get("m3_chunk_scan_fwd_f16")?,
-            ],
-            "chunked forward's fallback tiles",
-        )?;
-        let step_block_threads = block_threads_bound(
-            &[
-                &get("m3_step_fwd_block")?,
-                &get("m3_step_fwd_block_bf16")?,
-                &get("m3_step_fwd_block_f16")?,
-            ],
-            "block-tier decode step",
-        )?;
+        // Both index widths of a kernel built twice: `name` and `name_i64`.
+        let pair = |name: &str| -> Result<ByIndexWidth<CudaFunction>, String> {
+            Ok(ByIndexWidth {
+                i32: get(name)?,
+                i64: get(&format!("{name}_i64"))?,
+            })
+        };
+        let typed_pair =
+            |f32: &str, bf16: &str, f16: &str| -> Result<ByIndexWidth<TypedKernel>, String> {
+                Ok(ByIndexWidth {
+                    i32: TypedKernel {
+                        f32: get(f32)?,
+                        bf16: get(bf16)?,
+                        f16: get(f16)?,
+                    },
+                    i64: TypedKernel {
+                        f32: get(&format!("{f32}_i64"))?,
+                        bf16: get(&format!("{bf16}_i64"))?,
+                        f16: get(&format!("{f16}_i64"))?,
+                    },
+                })
+            };
+        // Each width's bound comes from its own builds, so the int builds
+        // launch as they did before the 64-bit builds existed.
+        let bound = |names: &[&str], suffix: &str, what: &str| -> Result<usize, String> {
+            let kernels = names
+                .iter()
+                .map(|name| get(&format!("{name}{suffix}")))
+                .collect::<Result<Vec<_>, _>>()?;
+            block_threads_bound(&kernels.iter().collect::<Vec<_>>(), what)
+        };
+        let chunk_tiles = [
+            "m3_chunk_state_fwd",
+            "m3_chunk_state_fwd_bf16",
+            "m3_chunk_state_fwd_f16",
+            "m3_chunk_scan_fwd",
+            "m3_chunk_scan_fwd_bf16",
+            "m3_chunk_scan_fwd_f16",
+        ];
+        let chunk_tile_threads = ByIndexWidth {
+            i32: bound(&chunk_tiles, "", "chunked forward's fallback tiles")?,
+            i64: bound(&chunk_tiles, "_i64", "chunked forward's fallback tiles")?,
+        };
+        let step_blocks = [
+            "m3_step_fwd_block",
+            "m3_step_fwd_block_bf16",
+            "m3_step_fwd_block_f16",
+        ];
+        let step_block_threads = ByIndexWidth {
+            i32: bound(&step_blocks, "", "block-tier decode step")?,
+            i64: bound(&step_blocks, "_i64", "block-tier decode step")?,
+        };
 
         // PTX targeting Ada can also run on newer devices. Admission checks
         // the actual device because preserving a compiler's FMA graph alone
@@ -639,9 +691,15 @@ impl Mamba3Kernels {
             && matches!((nv_major, nv_minor), (12, 8) | (13, 0) | (13, 2))
             && matches!(state_cap, 16 | 32 | 64)
         {
-            Some(HalfKernel {
-                bf16: get("m3_burnin_fwd_bf16_by_state")?,
-                f16: get("m3_burnin_fwd_f16_by_state")?,
+            Some(ByIndexWidth {
+                i32: HalfKernel {
+                    bf16: get("m3_burnin_fwd_bf16_by_state")?,
+                    f16: get("m3_burnin_fwd_f16_by_state")?,
+                },
+                i64: HalfKernel {
+                    bf16: get("m3_burnin_fwd_bf16_by_state_i64")?,
+                    f16: get("m3_burnin_fwd_f16_by_state_i64")?,
+                },
             })
         } else {
             None
@@ -655,16 +713,16 @@ impl Mamba3Kernels {
             compiler_identity,
             artifact_identity,
             // Sequential SSM
-            m3_step_fwd: get("m3_step_fwd")?,
-            m3_burnin_fwd: get("m3_burnin_fwd")?,
+            m3_step_fwd: pair("m3_step_fwd")?,
+            m3_burnin_fwd: pair("m3_burnin_fwd")?,
             m3_burnin_fwd_by_state: [
-                (8, get("m3_burnin_fwd_ds8")?),
-                (16, get("m3_burnin_fwd_ds16")?),
-                (32, get("m3_burnin_fwd_ds32")?),
-                (64, get("m3_burnin_fwd_ds64")?),
+                (8, pair("m3_burnin_fwd_ds8")?),
+                (16, pair("m3_burnin_fwd_ds16")?),
+                (32, pair("m3_burnin_fwd_ds32")?),
+                (64, pair("m3_burnin_fwd_ds64")?),
             ],
-            m3_burnin_fwd_nosave: get("m3_burnin_fwd_nosave")?,
-            m3_backward_seq: get("m3_backward_seq")?,
+            m3_burnin_fwd_nosave: pair("m3_burnin_fwd_nosave")?,
+            m3_backward_seq: pair("m3_backward_seq")?,
             m3_burnin_fwd_block: TypedKernel {
                 f32: get("m3_burnin_fwd_block")?,
                 bf16: get("m3_burnin_fwd_block_bf16")?,
@@ -677,32 +735,32 @@ impl Mamba3Kernels {
                 f16: get("m3_backward_seq_block_f16")?,
             },
             m3_backward_seq_by_state: [
-                (8, get("m3_backward_seq_ds8")?),
-                (16, get("m3_backward_seq_ds16")?),
-                (32, get("m3_backward_seq_ds32")?),
-                (64, get("m3_backward_seq_ds64")?),
+                (8, pair("m3_backward_seq_ds8")?),
+                (16, pair("m3_backward_seq_ds16")?),
+                (32, pair("m3_backward_seq_ds32")?),
+                (64, pair("m3_backward_seq_ds64")?),
             ],
-            m3_reduce_d_d: get("m3_reduce_d_D")?,
+            m3_reduce_d_d: pair("m3_reduce_d_D")?,
 
             // Shared ops
-            m3_split: get("m3_split")?,
-            m3_split_bwd: get("m3_split_bwd")?,
-            bcnorm_bwd: get("bcnorm_bwd")?,
-            bc_bias_add: get("bc_bias_add")?,
-            bc_bias_add_bwd: get("bc_bias_add_bwd")?,
-            m3_angle_dt_fwd_seq: get("m3_angle_dt_fwd_seq")?,
-            m3_angle_chunk_sums: get("m3_angle_chunk_sums")?,
-            m3_angle_chunk_apply: get("m3_angle_chunk_apply")?,
-            m3_angle_dt_bwd_seq: get("m3_angle_dt_bwd_seq")?,
-            rope_fwd: get("rope_fwd")?,
-            m3_bias_rope_fwd: get("m3_bias_rope_fwd")?,
-            rope_bwd: get("rope_bwd")?,
-            m3_compute_abg: get("m3_compute_abg")?,
-            m3_abg_bwd: get("m3_abg_bwd")?,
-            silu_gate_fwd: get("silu_gate_fwd")?,
-            silu_gate_bwd: get("silu_gate_bwd")?,
-            rmsnorm_gated_fwd: get("rmsnorm_gated_forward")?,
-            rmsnorm_gated_bwd: get("rmsnorm_gated_backward")?,
+            m3_split: pair("m3_split")?,
+            m3_split_bwd: pair("m3_split_bwd")?,
+            bcnorm_bwd: pair("bcnorm_bwd")?,
+            bc_bias_add: pair("bc_bias_add")?,
+            bc_bias_add_bwd: pair("bc_bias_add_bwd")?,
+            m3_angle_dt_fwd_seq: pair("m3_angle_dt_fwd_seq")?,
+            m3_angle_chunk_sums: pair("m3_angle_chunk_sums")?,
+            m3_angle_chunk_apply: pair("m3_angle_chunk_apply")?,
+            m3_angle_dt_bwd_seq: pair("m3_angle_dt_bwd_seq")?,
+            rope_fwd: pair("rope_fwd")?,
+            m3_bias_rope_fwd: pair("m3_bias_rope_fwd")?,
+            rope_bwd: pair("rope_bwd")?,
+            m3_compute_abg: pair("m3_compute_abg")?,
+            m3_abg_bwd: pair("m3_abg_bwd")?,
+            silu_gate_fwd: pair("silu_gate_fwd")?,
+            silu_gate_bwd: pair("silu_gate_bwd")?,
+            rmsnorm_gated_fwd: pair("rmsnorm_gated_forward")?,
+            rmsnorm_gated_bwd: pair("rmsnorm_gated_backward")?,
 
             // Shared (norms.cu + elementwise.cu)
             rmsnorm_fwd: get("rmsnorm_forward")?,
@@ -710,6 +768,7 @@ impl Mamba3Kernels {
             colsum_accumulate: get("colsum_accumulate")?,
             colsum_segments: get("colsum_segments")?,
             reduce_sum_axis0: get("reduce_sum_axis0")?,
+            reduce_sum_axis0_wide: get("reduce_sum_axis0_wide")?,
             vec_add_inplace: get("vec_add_inplace")?,
             elementwise_mul: get("elementwise_mul")?,
             elementwise_mul_v: get("elementwise_mul_v_f32")?,
@@ -731,22 +790,22 @@ impl Mamba3Kernels {
             },
 
             // Chunked parallel scan
-            m3_preprocess_chunks: get("m3_preprocess_chunks")?,
-            m3_da_cumsum: get("m3_dA_cumsum")?,
-            m3_chunk_state_fwd: get("m3_chunk_state_fwd")?,
-            m3_state_passing_fwd: get("m3_state_passing_fwd")?,
-            m3_chunk_entering_state: get("m3_chunk_entering_state")?,
-            m3_writeback_parallel_states: get("m3_writeback_parallel_states")?,
-            m3_chunk_scan_fwd: get("m3_chunk_scan_fwd")?,
-            m3_chunk_scan_fwd_coop: get("m3_chunk_scan_fwd_coop")?,
-            m3_extract_da_cs_sum: get("m3_extract_da_cs_sum")?,
-            m3_dqkv: get("m3_dqkv")?,
-            m3_dqkv_state_terms_typed: TypedKernel {
-                f32: get("m3_dqkv_state_terms")?,
-                bf16: get("m3_dqkv_state_terms_bf16")?,
-                f16: get("m3_dqkv_state_terms_f16")?,
-            },
-            m3_dstate_passing_bwd: get("m3_dstate_passing_bwd")?,
+            m3_preprocess_chunks: pair("m3_preprocess_chunks")?,
+            m3_da_cumsum: pair("m3_dA_cumsum")?,
+            m3_chunk_state_fwd: pair("m3_chunk_state_fwd")?,
+            m3_state_passing_fwd: pair("m3_state_passing_fwd")?,
+            m3_chunk_entering_state: pair("m3_chunk_entering_state")?,
+            m3_writeback_parallel_states: pair("m3_writeback_parallel_states")?,
+            m3_chunk_scan_fwd: pair("m3_chunk_scan_fwd")?,
+            m3_chunk_scan_fwd_coop: pair("m3_chunk_scan_fwd_coop")?,
+            m3_extract_da_cs_sum: pair("m3_extract_da_cs_sum")?,
+            m3_dqkv: pair("m3_dqkv")?,
+            m3_dqkv_state_terms_typed: typed_pair(
+                "m3_dqkv_state_terms",
+                "m3_dqkv_state_terms_bf16",
+                "m3_dqkv_state_terms_f16",
+            )?,
+            m3_dstate_passing_bwd: pair("m3_dstate_passing_bwd")?,
             m3_dqkv_state_terms_tiled: TypedKernel {
                 f32: get("m3_dqkv_state_terms_tiled")?,
                 bf16: get("m3_dqkv_state_terms_tiled_bf16")?,
@@ -758,52 +817,44 @@ impl Mamba3Kernels {
                 bf16: get("m3_dqkv_tiled_bf16")?,
                 f16: get("m3_dqkv_tiled_f16")?,
             },
-            m3_dqktheta: get("m3_dqktheta")?,
-            m3_ddt_dtrap: get("m3_ddt_dtrap")?,
-            m3_final_grads: get("m3_final_grads")?,
+            m3_dqktheta: pair("m3_dqktheta")?,
+            m3_ddt_dtrap: pair("m3_ddt_dtrap")?,
+            m3_final_grads: pair("m3_final_grads")?,
 
             // Typed variants for mixed-dtype inference
-            m3_split_typed: TypedKernel {
-                f32: get("m3_split")?,
-                bf16: get("m3_split_bf16")?,
-                f16: get("m3_split_f16")?,
-            },
-            bcnorm_fwd_bc_typed: TypedKernel {
-                f32: get("bcnorm_fwd_bc_f32")?,
-                bf16: get("bcnorm_fwd_bc_bf16")?,
-                f16: get("bcnorm_fwd_bc_f16")?,
-            },
-            bcnorm_fwd_bc_f32: get("bcnorm_fwd_bc_f32")?,
-            m3_bias_rope_fwd_typed: TypedKernel {
-                f32: get("m3_bias_rope_fwd")?,
-                bf16: get("m3_bias_rope_fwd_bf16")?,
-                f16: get("m3_bias_rope_fwd_f16")?,
-            },
-            silu_gate_fwd_typed: TypedKernel {
-                f32: get("silu_gate_fwd")?,
-                bf16: get("silu_gate_fwd_bf16")?,
-                f16: get("silu_gate_fwd_f16")?,
-            },
-            silu_gate_bwd_typed: TypedKernel {
-                f32: get("silu_gate_bwd")?,
-                bf16: get("silu_gate_bwd_bf16")?,
-                f16: get("silu_gate_bwd_f16")?,
-            },
-            rmsnorm_gated_fwd_typed: TypedKernel {
-                f32: get("rmsnorm_gated_forward")?,
-                bf16: get("rmsnorm_gated_forward_bf16")?,
-                f16: get("rmsnorm_gated_forward_f16")?,
-            },
-            m3_step_fwd_typed: TypedKernel {
-                f32: get("m3_step_fwd")?,
-                bf16: get("m3_step_fwd_bf16")?,
-                f16: get("m3_step_fwd_f16")?,
-            },
-            m3_step_fwd_block_typed: TypedKernel {
-                f32: get("m3_step_fwd_block")?,
-                bf16: get("m3_step_fwd_block_bf16")?,
-                f16: get("m3_step_fwd_block_f16")?,
-            },
+            m3_split_typed: typed_pair("m3_split", "m3_split_bf16", "m3_split_f16")?,
+            bcnorm_fwd_bc_typed: typed_pair(
+                "bcnorm_fwd_bc_f32",
+                "bcnorm_fwd_bc_bf16",
+                "bcnorm_fwd_bc_f16",
+            )?,
+            bcnorm_fwd_bc_f32: pair("bcnorm_fwd_bc_f32")?,
+            m3_bias_rope_fwd_typed: typed_pair(
+                "m3_bias_rope_fwd",
+                "m3_bias_rope_fwd_bf16",
+                "m3_bias_rope_fwd_f16",
+            )?,
+            silu_gate_fwd_typed: typed_pair(
+                "silu_gate_fwd",
+                "silu_gate_fwd_bf16",
+                "silu_gate_fwd_f16",
+            )?,
+            silu_gate_bwd_typed: typed_pair(
+                "silu_gate_bwd",
+                "silu_gate_bwd_bf16",
+                "silu_gate_bwd_f16",
+            )?,
+            rmsnorm_gated_fwd_typed: typed_pair(
+                "rmsnorm_gated_forward",
+                "rmsnorm_gated_forward_bf16",
+                "rmsnorm_gated_forward_f16",
+            )?,
+            m3_step_fwd_typed: typed_pair("m3_step_fwd", "m3_step_fwd_bf16", "m3_step_fwd_f16")?,
+            m3_step_fwd_block_typed: typed_pair(
+                "m3_step_fwd_block",
+                "m3_step_fwd_block_bf16",
+                "m3_step_fwd_block_f16",
+            )?,
             mlp_gate_fwd_typed: TypedKernel {
                 f32: get("mlp_gate_fwd")?,
                 bf16: get("mlp_gate_fwd_bf16")?,
@@ -814,83 +865,73 @@ impl Mamba3Kernels {
                 bf16: get("mlp_gate_bwd_bf16")?,
                 f16: get("mlp_gate_bwd_f16")?,
             },
-            m3_burnin_fwd_typed_bf16: get("m3_burnin_fwd_bf16")?,
-            m3_burnin_fwd_typed_f16: get("m3_burnin_fwd_f16")?,
-            bcnorm_bwd_typed: TypedKernel {
-                f32: get("bcnorm_bwd")?,
-                bf16: get("bcnorm_bwd_bf16")?,
-                f16: get("bcnorm_bwd_f16")?,
+            m3_burnin_fwd_typed_bf16: pair("m3_burnin_fwd_bf16")?,
+            m3_burnin_fwd_typed_f16: pair("m3_burnin_fwd_f16")?,
+            bcnorm_bwd_typed: typed_pair("bcnorm_bwd", "bcnorm_bwd_bf16", "bcnorm_bwd_f16")?,
+            bc_bias_add_bwd_typed: typed_pair(
+                "bc_bias_add_bwd",
+                "bc_bias_add_bwd_bf16",
+                "bc_bias_add_bwd_f16",
+            )?,
+            rope_bwd_typed: typed_pair("rope_bwd", "rope_bwd_bf16", "rope_bwd_f16")?,
+            rope_bwd_mixed: ByIndexWidth {
+                i32: HalfKernel {
+                    bf16: get("rope_bwd_mixed_bf16")?,
+                    f16: get("rope_bwd_mixed_f16")?,
+                },
+                i64: HalfKernel {
+                    bf16: get("rope_bwd_mixed_bf16_i64")?,
+                    f16: get("rope_bwd_mixed_f16_i64")?,
+                },
             },
-            bc_bias_add_bwd_typed: TypedKernel {
-                f32: get("bc_bias_add_bwd")?,
-                bf16: get("bc_bias_add_bwd_bf16")?,
-                f16: get("bc_bias_add_bwd_f16")?,
-            },
-            rope_bwd_typed: TypedKernel {
-                f32: get("rope_bwd")?,
-                bf16: get("rope_bwd_bf16")?,
-                f16: get("rope_bwd_f16")?,
-            },
-            rope_bwd_mixed: HalfKernel {
-                bf16: get("rope_bwd_mixed_bf16")?,
-                f16: get("rope_bwd_mixed_f16")?,
-            },
-            m3_split_bwd_typed: TypedKernel {
-                f32: get("m3_split_bwd")?,
-                bf16: get("m3_split_bwd_bf16")?,
-                f16: get("m3_split_bwd_f16")?,
-            },
-            rmsnorm_gated_bwd_typed: TypedKernel {
-                f32: get("rmsnorm_gated_backward")?,
-                bf16: get("rmsnorm_gated_backward_bf16")?,
-                f16: get("rmsnorm_gated_backward_f16")?,
-            },
-            m3_dqkv_typed: TypedKernel {
-                f32: get("m3_dqkv")?,
-                bf16: get("m3_dqkv_bf16")?,
-                f16: get("m3_dqkv_f16")?,
-            },
-            m3_dqktheta_typed: TypedKernel {
-                f32: get("m3_dqktheta")?,
-                bf16: get("m3_dqktheta_bf16")?,
-                f16: get("m3_dqktheta_f16")?,
-            },
+            m3_split_bwd_typed: typed_pair(
+                "m3_split_bwd",
+                "m3_split_bwd_bf16",
+                "m3_split_bwd_f16",
+            )?,
+            rmsnorm_gated_bwd_typed: typed_pair(
+                "rmsnorm_gated_backward",
+                "rmsnorm_gated_backward_bf16",
+                "rmsnorm_gated_backward_f16",
+            )?,
+            m3_dqkv_typed: typed_pair("m3_dqkv", "m3_dqkv_bf16", "m3_dqkv_f16")?,
+            m3_dqktheta_typed: typed_pair("m3_dqktheta", "m3_dqktheta_bf16", "m3_dqktheta_f16")?,
 
-            m3_preprocess_chunks_typed: TypedKernel {
-                f32: get("m3_preprocess_chunks")?,
-                bf16: get("m3_preprocess_chunks_bf16")?,
-                f16: get("m3_preprocess_chunks_f16")?,
-            },
-            m3_chunk_state_fwd_typed: TypedKernel {
-                f32: get("m3_chunk_state_fwd")?,
-                bf16: get("m3_chunk_state_fwd_bf16")?,
-                f16: get("m3_chunk_state_fwd_f16")?,
-            },
-            m3_chunk_pre_state_fused_typed: TypedKernel {
-                f32: get("m3_chunk_pre_state_fused")?,
-                bf16: get("m3_chunk_pre_state_fused_bf16")?,
-                f16: get("m3_chunk_pre_state_fused_f16")?,
-            },
-            m3_writeback_parallel_states_typed: TypedKernel {
-                f32: get("m3_writeback_parallel_states")?,
-                bf16: get("m3_writeback_parallel_states_bf16")?,
-                f16: get("m3_writeback_parallel_states_f16")?,
-            },
-            m3_state_pass_fused_typed: TypedKernel {
-                f32: get("m3_state_pass_fused_f32")?,
-                bf16: get("m3_state_pass_fused_bf16")?,
-                f16: get("m3_state_pass_fused_f16")?,
-            },
-            m3_chunk_scan_fwd_coop_typed: TypedKernel {
-                f32: get("m3_chunk_scan_fwd_coop")?,
-                bf16: get("m3_chunk_scan_fwd_coop_bf16")?,
-                f16: get("m3_chunk_scan_fwd_coop_f16")?,
-            },
-            m3_chunk_scan_fwd_typed: TypedKernel {
-                f32: get("m3_chunk_scan_fwd")?,
-                bf16: get("m3_chunk_scan_fwd_bf16")?,
-                f16: get("m3_chunk_scan_fwd_f16")?,
-            },
+            m3_preprocess_chunks_typed: typed_pair(
+                "m3_preprocess_chunks",
+                "m3_preprocess_chunks_bf16",
+                "m3_preprocess_chunks_f16",
+            )?,
+            m3_chunk_state_fwd_typed: typed_pair(
+                "m3_chunk_state_fwd",
+                "m3_chunk_state_fwd_bf16",
+                "m3_chunk_state_fwd_f16",
+            )?,
+            m3_chunk_pre_state_fused_typed: typed_pair(
+                "m3_chunk_pre_state_fused",
+                "m3_chunk_pre_state_fused_bf16",
+                "m3_chunk_pre_state_fused_f16",
+            )?,
+            m3_writeback_parallel_states_typed: typed_pair(
+                "m3_writeback_parallel_states",
+                "m3_writeback_parallel_states_bf16",
+                "m3_writeback_parallel_states_f16",
+            )?,
+            m3_state_pass_fused_typed: typed_pair(
+                "m3_state_pass_fused_f32",
+                "m3_state_pass_fused_bf16",
+                "m3_state_pass_fused_f16",
+            )?,
+            m3_chunk_scan_fwd_coop_typed: typed_pair(
+                "m3_chunk_scan_fwd_coop",
+                "m3_chunk_scan_fwd_coop_bf16",
+                "m3_chunk_scan_fwd_coop_f16",
+            )?,
+            m3_chunk_scan_fwd_typed: typed_pair(
+                "m3_chunk_scan_fwd",
+                "m3_chunk_scan_fwd_bf16",
+                "m3_chunk_scan_fwd_f16",
+            )?,
 
             rmsnorm_fwd_f32in_typed: HalfKernel {
                 bf16: get("rmsnorm_forward_f32in_bf16")?,
@@ -929,10 +970,14 @@ impl Mamba3Kernels {
             // comfortably at CS=64 tile sizes.
             let budget: i32 = 99 * 1024;
             for f in [
-                &kernels.m3_dqkv,
-                &kernels.m3_dqkv_typed.f32,
-                &kernels.m3_dqkv_typed.bf16,
-                &kernels.m3_dqkv_typed.f16,
+                &kernels.m3_dqkv.i32,
+                &kernels.m3_dqkv.i64,
+                &kernels.m3_dqkv_typed.i32.f32,
+                &kernels.m3_dqkv_typed.i32.bf16,
+                &kernels.m3_dqkv_typed.i32.f16,
+                &kernels.m3_dqkv_typed.i64.f32,
+                &kernels.m3_dqkv_typed.i64.bf16,
+                &kernels.m3_dqkv_typed.i64.f16,
                 &kernels.m3_dqkv_tiled.f32,
                 &kernels.m3_dqkv_tiled.bf16,
                 &kernels.m3_dqkv_tiled.f16,

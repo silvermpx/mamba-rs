@@ -62,109 +62,113 @@
 // After SSM update, k_state and v_state are updated for next step.
 // k_state update: only p=0 writes (all p share the same k_cur values).
 // v_state update: each p writes its own x value.
-extern "C" __global__ void m3_step_fwd(
-    // In/Out: persistent state (mutated)
-    float* ssm_state,   // [B * nh * hd * ds]
-    float* k_state,     // [B * nh * ds] -- previous K (post bias+RoPE)
-    float* v_state,     // [B * nh * hd] -- previous x
-    // Output
-    float* y,           // [B * d_inner]
-    // Inputs (pre-computed by shared ops)
-    const float* x,     // [B * d_inner]   (d_inner = nh * hd)
-    const float* k_cur, // [B * nh * ds]   (B after bias+RoPE)
-    const float* q_cur, // [B * nh * ds]   (C after bias+RoPE)
-    // The recurrence coefficients are computed here from the step's
-    // dt, a_val and trap, spelled as the standalone coefficient kernel
-    // spelled them; an f32 stored and reloaded carries the same bits.
-    const float* dt,    // [B * nh]
-    const float* a_val, // [B * nh]
-    const float* trap,  // [B * nh]
-    const float* D,     // [nh]
-    int batch, int nh, int hd, int ds
-) {
-    int b = blockIdx.x;
-    int h = blockIdx.y;
-    int p = threadIdx.x;
-    if (b >= batch || h >= nh || p >= hd) return;
-
-    int d_inner = nh * hd;
-
-    // Warp-reduce/broadcast mask: only `hd` lanes launched (block_dim=hd, hd≤32).
-    // Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1.
-    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
-
-    // Load h_local into registers
-    float h_local[MAMBA_RS_STATE_CAP];
-    if (ds > MAMBA_RS_STATE_CAP) return;
-    int h_base = (b * nh * hd + h * hd + p) * ds;
-    for (int n = 0; n < ds; n++)
-        h_local[n] = ssm_state[h_base + n];
-
-    // O1: alpha, beta, gamma computed on p=0 and broadcast
-    float alpha_h = 0.0f;
-    float beta_h = 0.0f;
-    float gamma_h = 0.0f;
-    if (p == 0) {
-        float dt_v = dt[b * nh + h];
-        float a_v = a_val[b * nh + h];
-        float t_v = trap[b * nh + h];
-        alpha_h = exp2f((a_v * dt_v) * LOG2E);
-        beta_h = alpha_h * dt_v * (1.0f - t_v);
-        gamma_h = t_v * dt_v;
-    }
-    alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);
-    beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);
-    gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);
-
-    // O1: D[h] broadcast from p=0
-    float d_skip = 0.0f;
-    if (p == 0) d_skip = D[h];
-    d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);
-
-    // Per-thread unique values
-    float x_val = x[b * d_inner + h * hd + p];
-    float v_prev = v_state[b * nh * hd + h * hd + p];
-
-    float y_val = d_skip * x_val;
-
-    for (int n = 0; n < ds; n++) {
-        // O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0
-        float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;
-        if (p == 0) {
-            kc_n = k_cur[b * nh * ds + h * ds + n];
-            kp_n = k_state[b * nh * ds + h * ds + n];
-            qc_n = q_cur[b * nh * ds + h * ds + n];
-        }
-        kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);
-        kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);
-        qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);
-
-        // Trapezoidal recurrence
-        h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n + gamma_h * x_val * kc_n;
-        y_val += h_local[n] * qc_n;
-    }
-
-    // Write back SSM state
-    for (int n = 0; n < ds; n++)
-        ssm_state[h_base + n] = h_local[n];
-
-    // Write output
-    y[b * d_inner + h * hd + p] = y_val;
-
-    // Update k_state: only p=0 writes (k_cur is shared across all p in this head)
-    if (p == 0) {
-        for (int n = 0; n < ds; n++)
-            k_state[b * nh * ds + h * ds + n] = k_cur[b * nh * ds + h * ds + n];
-    }
-
-    // Update v_state: each p writes its own x
-    v_state[b * nh * hd + h * hd + p] = x_val;
+#define DEFINE_M3_STEP_FWD_F32(NAME, IDX)                                      \
+extern "C" __global__ void NAME(                                               \
+    /* In/Out: persistent state (mutated) */                                   \
+    float* ssm_state,   /* [B * nh * hd * ds] */                               \
+    float* k_state,     /* [B * nh * ds] -- previous K (post bias+RoPE) */     \
+    float* v_state,     /* [B * nh * hd] -- previous x */                      \
+    /* Output */                                                               \
+    float* y,           /* [B * d_inner] */                                    \
+    /* Inputs (pre-computed by shared ops) */                                  \
+    const float* x,     /* [B * d_inner]   (d_inner = nh * hd) */              \
+    const float* k_cur, /* [B * nh * ds]   (B after bias+RoPE) */              \
+    const float* q_cur, /* [B * nh * ds]   (C after bias+RoPE) */              \
+    /* The recurrence coefficients are computed here from the step's */        \
+    /* dt, a_val and trap, spelled as the standalone coefficient kernel */     \
+    /* spelled them; an f32 stored and reloaded carries the same bits. */      \
+    const float* dt,    /* [B * nh] */                                         \
+    const float* a_val, /* [B * nh] */                                         \
+    const float* trap,  /* [B * nh] */                                         \
+    const float* D,     /* [nh] */                                             \
+    int batch, int nh, int hd, int ds                                          \
+) {                                                                            \
+    IDX b = blockIdx.x;                                                        \
+    int h = blockIdx.y;                                                        \
+    int p = threadIdx.x;                                                       \
+    if (b >= batch || h >= nh || p >= hd) return;                              \
+                                                                               \
+    int d_inner = nh * hd;                                                     \
+                                                                               \
+    /* Warp-reduce/broadcast mask: only `hd` lanes launched (block_dim=hd, hd≤32). */ \
+    /* Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1. */        \
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);         \
+                                                                               \
+    /* Load h_local into registers */                                          \
+    float h_local[MAMBA_RS_STATE_CAP];                                         \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                       \
+    IDX h_base = (b * nh * hd + h * hd + p) * ds;                              \
+    for (int n = 0; n < ds; n++)                                               \
+        h_local[n] = ssm_state[h_base + n];                                    \
+                                                                               \
+    /* O1: alpha, beta, gamma computed on p=0 and broadcast */                 \
+    float alpha_h = 0.0f;                                                      \
+    float beta_h = 0.0f;                                                       \
+    float gamma_h = 0.0f;                                                      \
+    if (p == 0) {                                                              \
+        float dt_v = dt[b * nh + h];                                           \
+        float a_v = a_val[b * nh + h];                                         \
+        float t_v = trap[b * nh + h];                                          \
+        alpha_h = exp2f((a_v * dt_v) * LOG2E);                                 \
+        beta_h = alpha_h * dt_v * (1.0f - t_v);                                \
+        gamma_h = t_v * dt_v;                                                  \
+    }                                                                          \
+    alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);                          \
+    beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);                            \
+    gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);                          \
+                                                                               \
+    /* O1: D[h] broadcast from p=0 */                                          \
+    float d_skip = 0.0f;                                                       \
+    if (p == 0) d_skip = D[h];                                                 \
+    d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);                            \
+                                                                               \
+    /* Per-thread unique values */                                             \
+    float x_val = x[b * d_inner + h * hd + p];                                 \
+    float v_prev = v_state[b * nh * hd + h * hd + p];                          \
+                                                                               \
+    float y_val = d_skip * x_val;                                              \
+                                                                               \
+    for (int n = 0; n < ds; n++) {                                             \
+        /* O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0 */             \
+        float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;                           \
+        if (p == 0) {                                                          \
+            kc_n = k_cur[b * nh * ds + h * ds + n];                            \
+            kp_n = k_state[b * nh * ds + h * ds + n];                          \
+            qc_n = q_cur[b * nh * ds + h * ds + n];                            \
+        }                                                                      \
+        kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);                            \
+        kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);                            \
+        qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);                            \
+                                                                               \
+        /* Trapezoidal recurrence */                                           \
+        h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n + gamma_h * x_val * kc_n; \
+        y_val += h_local[n] * qc_n;                                            \
+    }                                                                          \
+                                                                               \
+    /* Write back SSM state */                                                 \
+    for (int n = 0; n < ds; n++)                                               \
+        ssm_state[h_base + n] = h_local[n];                                    \
+                                                                               \
+    /* Write output */                                                         \
+    y[b * d_inner + h * hd + p] = y_val;                                       \
+                                                                               \
+    /* Update k_state: only p=0 writes (k_cur is shared across all p in this head) */ \
+    if (p == 0) {                                                              \
+        for (int n = 0; n < ds; n++)                                           \
+            k_state[b * nh * ds + h * ds + n] = k_cur[b * nh * ds + h * ds + n]; \
+    }                                                                          \
+                                                                               \
+    /* Update v_state: each p writes its own x */                              \
+    v_state[b * nh * hd + h * hd + p] = x_val;                                 \
 }
+
+DEFINE_M3_STEP_FWD_F32(m3_step_fwd, int)
+DEFINE_M3_STEP_FWD_F32(m3_step_fwd_i64, long long)
 
 // Templated m3_step_fwd — activations in T_IN, state/D stay f32.
 // Used for T=1 decode in Mamba-3 LLM inference.
-#define DEFINE_M3_STEP_FWD(SUFFIX, TY, FROM_F)                              \
-extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
+#define DEFINE_M3_STEP_FWD(NAME, IDX, TY, FROM_F)                           \
+extern "C" __global__ void NAME(                                             \
     float* ssm_state,                                                        \
     float* k_state,                                                          \
     float* v_state,                                                          \
@@ -176,7 +180,7 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
     const float* D,                                                          \
     int batch, int nh, int hd, int ds                                        \
 ) {                                                                          \
-    int b = blockIdx.x;                                                      \
+    IDX b = blockIdx.x;                                                      \
     int h = blockIdx.y;                                                      \
     int p = threadIdx.x;                                                     \
     if (b >= batch || h >= nh || p >= hd) return;                            \
@@ -184,7 +188,7 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);       \
     float h_local[MAMBA_RS_STATE_CAP];                                                       \
     if (ds > MAMBA_RS_STATE_CAP) return;                                                     \
-    int h_base = (b * nh * hd + h * hd + p) * ds;                            \
+    IDX h_base = (b * nh * hd + h * hd + p) * ds;                            \
     for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];          \
     float alpha_h = 0.0f;                                                    \
     float beta_h = 0.0f;                                                     \
@@ -230,8 +234,10 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
     v_state[b * nh * hd + h * hd + p] = x_val;                               \
 }
 
-DEFINE_M3_STEP_FWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_STEP_FWD(f16,  __half,        from_f_f16)
+DEFINE_M3_STEP_FWD(m3_step_fwd_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_STEP_FWD(m3_step_fwd_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_STEP_FWD(m3_step_fwd_f16, int, __half, from_f_f16)
+DEFINE_M3_STEP_FWD(m3_step_fwd_f16_i64, long long, __half, from_f_f16)
 
 // ======================== BURN-IN FORWARD (with activation saves) ========================
 
@@ -248,7 +254,7 @@ DEFINE_M3_STEP_FWD(f16,  __half,        from_f_f16)
 // Same `DS` contract as the backward: a state width known at compile
 // time turns the state loops into constant trip counts, 0 keeps an
 // arbitrary width working.
-template <int DS>
+template <int DS, typename IDX>
 __device__ __forceinline__ void m3_burnin_fwd_tpl(
     // In/Out: persistent state (mutated)
     float* ssm_state,       // [B * nh * hd * ds]
@@ -270,7 +276,7 @@ __device__ __forceinline__ void m3_burnin_fwd_tpl(
     const float* __restrict__ D,           // [nh]
     int batch, int T, int nh, int hd, int ds
 ) {
-    int b = blockIdx.x;
+    IDX b = blockIdx.x;
     int h = blockIdx.y;
     int p = threadIdx.x;
     if (b >= batch || h >= nh || p >= hd) return;
@@ -285,7 +291,7 @@ __device__ __forceinline__ void m3_burnin_fwd_tpl(
     // Load h_local from persistent state into registers
     float h_local[MAMBA_RS_STATE_CAP];
     if (ds > MAMBA_RS_STATE_CAP) return;
-    int h_base = (b * nh * hd + h * hd + p) * ds;
+    IDX h_base = (b * nh * hd + h * hd + p) * ds;
     #pragma unroll
     for (int n = 0; n < sw; n++)
         h_local[n] = ssm_state[h_base + n];
@@ -327,7 +333,7 @@ __device__ __forceinline__ void m3_burnin_fwd_tpl(
         gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);
 
         // Per-thread unique values
-        int x_idx = (b * T + t) * d_inner + h * hd + p;
+        IDX x_idx = (b * T + t) * d_inner + h * hd + p;
         float x_val = x_flat[x_idx];
         float v_prev = v_state[b * nh * hd + h * hd + p];
 
@@ -357,7 +363,7 @@ __device__ __forceinline__ void m3_burnin_fwd_tpl(
         // Save h AFTER step t (O5 transposed layout)
         #pragma unroll
         for (int n = 0; n < sw; n++) {
-            int hs_idx = (t + 1) * nhd_ds + n * d_inner + h * hd + p;
+            IDX hs_idx = (IDX)(t + 1) * nhd_ds + n * d_inner + h * hd + p;
             h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n];
         }
 
@@ -378,7 +384,7 @@ __device__ __forceinline__ void m3_burnin_fwd_tpl(
         ssm_state[h_base + n] = h_local[n];
 }
 
-#define M3_BURNIN_FWD_ENTRY(NAME, DS_VALUE)                                  \
+#define M3_BURNIN_FWD_ENTRY(NAME, IDX, DS_VALUE)                             \
 extern "C" __global__ __launch_bounds__(32, 8)                               \
 void NAME(                                                                   \
     float* __restrict__ ssm_state, float* __restrict__ k_state,              \
@@ -391,16 +397,21 @@ void NAME(                                                                   \
     const float* __restrict__ D,                                             \
     int batch, int T, int nh, int hd, int ds                                 \
 ) {                                                                          \
-    m3_burnin_fwd_tpl<DS_VALUE>(                                             \
+    m3_burnin_fwd_tpl<DS_VALUE, IDX>(                                        \
         ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved,           \
         v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat,         \
         gamma_flat, D, batch, T, nh, hd, ds);                                \
 }
-M3_BURNIN_FWD_ENTRY(m3_burnin_fwd, 0)
-M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds8, 8)
-M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds16, 16)
-M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds32, 32)
-M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds64, 64)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd, int, 0)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_i64, long long, 0)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds8, int, 8)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds8_i64, long long, 8)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds16, int, 16)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds16_i64, long long, 16)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds32, int, 32)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds32_i64, long long, 32)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds64, int, 64)
+M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds64_i64, long long, 64)
 
 // ======================== BURN-IN FORWARD TYPED (bf16/f16) ========================
 //
@@ -410,8 +421,8 @@ M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_ds64, 64)
 // BPTT precision invariant; D + alpha/beta/gamma stay f32 (small
 // coefficients, non-linear activations). All recurrence math executes in
 // f32 internally; typed I/O only at load (`to_f`) and store (`FROM_F`).
-#define DEFINE_M3_BURNIN_FWD(SUFFIX, T_ACT, FROM_F)                          \
-extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
+#define DEFINE_M3_BURNIN_FWD(NAME, IDX, T_ACT, FROM_F)                       \
+extern "C" __global__ void NAME(                                             \
     float* ssm_state,                                                        \
     float* k_state,                                                          \
     float* v_state,                                                          \
@@ -428,7 +439,7 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
     const float* D,                                                          \
     int batch, int T, int nh, int hd, int ds                                 \
 ) {                                                                          \
-    int b = blockIdx.x;                                                      \
+    IDX b = blockIdx.x;                                                      \
     int h = blockIdx.y;                                                      \
     int p = threadIdx.x;                                                     \
     if (b >= batch || h >= nh || p >= hd) return;                            \
@@ -437,7 +448,7 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);       \
     float h_local[MAMBA_RS_STATE_CAP];                                                       \
     if (ds > MAMBA_RS_STATE_CAP) return;                                                     \
-    int h_base = (b * nh * hd + h * hd + p) * ds;                            \
+    IDX h_base = (b * nh * hd + h * hd + p) * ds;                            \
     for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];          \
     float d_skip = 0.0f;                                                     \
     if (p == 0) d_skip = D[h];                                               \
@@ -463,7 +474,7 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
         alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);                   \
         beta_h  = __shfl_sync(warp_mask, beta_h,  0, hd);                    \
         gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);                   \
-        int x_idx = (b * T + t) * d_inner + h * hd + p;                      \
+        IDX x_idx = (b * T + t) * d_inner + h * hd + p;                      \
         float x_val = to_f(x_flat[x_idx]);                                   \
         float v_prev = v_state[b * nh * hd + h * hd + p];                    \
         float y_val = d_skip * x_val;                                        \
@@ -483,7 +494,7 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
         }                                                                    \
         y_out[x_idx] = FROM_F(y_val);                                        \
         for (int n = 0; n < ds; n++) {                                        \
-            int hs_idx = (t + 1) * nhd_ds + n * d_inner + h * hd + p;        \
+            IDX hs_idx = (IDX)(t + 1) * nhd_ds + n * d_inner + h * hd + p;   \
             h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n];             \
         }                                                                    \
         if (p == 0) {                                                        \
@@ -496,13 +507,15 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
     for (int n = 0; n < ds; n++) ssm_state[h_base + n] = h_local[n];          \
 }
 
-DEFINE_M3_BURNIN_FWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_BURNIN_FWD(f16,  __half,        from_f_f16)
+DEFINE_M3_BURNIN_FWD(m3_burnin_fwd_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_BURNIN_FWD(m3_burnin_fwd_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_BURNIN_FWD(m3_burnin_fwd_f16, int, __half, from_f_f16)
+DEFINE_M3_BURNIN_FWD(m3_burnin_fwd_f16_i64, long long, __half, from_f_f16)
 
 // Constant-width loops avoid local-memory state accesses. The explicit FMAs
 // preserve the rounded previous-state term and the ordered output fold.
-#define DEFINE_M3_BURNIN_BY_STATE(SUFFIX, T_ACT, FROM_F) \
-__device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_generic( \
+#define DEFINE_M3_BURNIN_BY_STATE(NAME, IDX, T_ACT, FROM_F) \
+__device__ __forceinline__ void NAME##_generic( \
     float* ssm_state, \
     float* k_state, \
     float* v_state, \
@@ -519,7 +532,7 @@ __device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_generic( \
     const float* D, \
     int batch, int T, int nh, int hd, int ds \
 ) { \
-    int b = blockIdx.x; \
+    IDX b = blockIdx.x; \
     int h = blockIdx.y; \
     int p = threadIdx.x; \
     if (b >= batch || h >= nh || p >= hd) return; \
@@ -528,7 +541,7 @@ __device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_generic( \
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u); \
     float h_local[MAMBA_RS_STATE_CAP]; \
     if (ds > MAMBA_RS_STATE_CAP) return; \
-    int h_base = (b * nh * hd + h * hd + p) * ds; \
+    IDX h_base = (b * nh * hd + h * hd + p) * ds; \
     for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n]; \
     float d_skip = 0.0f; \
     if (p == 0) d_skip = D[h]; \
@@ -554,7 +567,7 @@ __device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_generic( \
         alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd); \
         beta_h  = __shfl_sync(warp_mask, beta_h,  0, hd); \
         gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd); \
-        int x_idx = (b * T + t) * d_inner + h * hd + p; \
+        IDX x_idx = (b * T + t) * d_inner + h * hd + p; \
         float x_val = to_f(x_flat[x_idx]); \
         float v_prev = v_state[b * nh * hd + h * hd + p]; \
         float y_val = d_skip * x_val; \
@@ -574,7 +587,7 @@ __device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_generic( \
         } \
         y_out[x_idx] = FROM_F(y_val); \
         for (int n = 0; n < ds; n++) { \
-            int hs_idx = (t + 1) * nhd_ds + n * d_inner + h * hd + p; \
+            IDX hs_idx = (IDX)(t + 1) * nhd_ds + n * d_inner + h * hd + p; \
             h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n]; \
         } \
         if (p == 0) { \
@@ -588,7 +601,7 @@ __device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_generic( \
 } \
  \
 template <int DS> \
-__device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_specialized( \
+__device__ __forceinline__ void NAME##_specialized( \
     float* ssm_state, \
     float* k_state, \
     float* v_state, \
@@ -605,7 +618,7 @@ __device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_specialized( \
     const float* D, \
     int batch, int T, int nh, int hd, int ds \
 ) { \
-    int b = blockIdx.x; \
+    IDX b = blockIdx.x; \
     int h = blockIdx.y; \
     int p = threadIdx.x; \
     if (b >= batch || h >= nh || p >= hd) return; \
@@ -614,7 +627,7 @@ __device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_specialized( \
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u); \
     float h_local[DS]; \
     if (ds > MAMBA_RS_STATE_CAP) return; \
-    int h_base = (b * nh * hd + h * hd + p) * ds; \
+    IDX h_base = (b * nh * hd + h * hd + p) * ds; \
     _Pragma("unroll") \
     for (int n = 0; n < DS; n++) h_local[n] = ssm_state[h_base + n]; \
     float d_skip = 0.0f; \
@@ -643,7 +656,7 @@ __device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_specialized( \
         alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd); \
         beta_h  = __shfl_sync(warp_mask, beta_h,  0, hd); \
         gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd); \
-        int x_idx = (b * T + t) * d_inner + h * hd + p; \
+        IDX x_idx = (b * T + t) * d_inner + h * hd + p; \
         float x_val = to_f(x_flat[x_idx]); \
         float v_prev = v_state[b * nh * hd + h * hd + p]; \
         float y_val = __fmul_rn(d_skip, x_val); \
@@ -667,7 +680,7 @@ __device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_specialized( \
         y_out[x_idx] = FROM_F(y_val); \
         _Pragma("unroll") \
         for (int n = 0; n < DS; n++) { \
-            int hs_idx = (t + 1) * nhd_ds + n * d_inner + h * hd + p; \
+            IDX hs_idx = (IDX)(t + 1) * nhd_ds + n * d_inner + h * hd + p; \
             h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n]; \
         } \
         if (p == 0) { \
@@ -682,7 +695,7 @@ __device__ __forceinline__ void m3_burnin_fwd_##SUFFIX##_specialized( \
     for (int n = 0; n < DS; n++) ssm_state[h_base + n] = h_local[n]; \
 } \
  \
-extern "C" __global__ void m3_burnin_fwd_##SUFFIX##_by_state( \
+extern "C" __global__ void NAME( \
     float* ssm_state, \
     float* k_state, \
     float* v_state, \
@@ -700,16 +713,18 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX##_by_state( \
     int batch, int T, int nh, int hd, int ds \
 ) { \
     switch (ds) { \
-    case 8: m3_burnin_fwd_##SUFFIX##_specialized<8>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    case 16: m3_burnin_fwd_##SUFFIX##_specialized<16>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    case 32: m3_burnin_fwd_##SUFFIX##_specialized<32>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    case 64: m3_burnin_fwd_##SUFFIX##_specialized<64>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    default: m3_burnin_fwd_##SUFFIX##_generic(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
+    case 8: NAME##_specialized<8>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
+    case 16: NAME##_specialized<16>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
+    case 32: NAME##_specialized<32>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
+    case 64: NAME##_specialized<64>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
+    default: NAME##_generic(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
     } \
 }
 
-DEFINE_M3_BURNIN_BY_STATE(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_BURNIN_BY_STATE(f16, __half, from_f_f16)
+DEFINE_M3_BURNIN_BY_STATE(m3_burnin_fwd_bf16_by_state, int, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_BURNIN_BY_STATE(m3_burnin_fwd_bf16_by_state_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_BURNIN_BY_STATE(m3_burnin_fwd_f16_by_state, int, __half, from_f_f16)
+DEFINE_M3_BURNIN_BY_STATE(m3_burnin_fwd_f16_by_state_i64, long long, __half, from_f_f16)
 #undef DEFINE_M3_BURNIN_BY_STATE
 
 // ======================== BURN-IN FORWARD NOSAVE (target network) ========================
@@ -718,100 +733,104 @@ DEFINE_M3_BURNIN_BY_STATE(f16, __half, from_f_f16)
 //
 // Identical recurrence to m3_burnin_fwd but skips h_saved/k_prev_saved/v_prev_saved writes.
 // Grid: (B, nh, 1), Block: (hd, 1, 1).
-extern "C" __global__ void m3_burnin_fwd_nosave(
-    // In/Out: persistent state (mutated)
-    float* ssm_state,       // [B * nh * hd * ds]
-    float* k_state,         // [B * nh * ds]
-    float* v_state,         // [B * nh * hd]
-    // Output
-    float* y_out,           // [B * T * d_inner]
-    // Inputs (pre-computed by shared ops, flat over T)
-    const float* x_flat,      // [B * T * d_inner]
-    const float* k_flat,      // [B * T * nh * ds]
-    const float* q_flat,      // [B * T * nh * ds]
-    const float* alpha_flat,  // [B * T * nh]
-    const float* beta_flat,   // [B * T * nh]
-    const float* gamma_flat,  // [B * T * nh]
-    const float* D,           // [nh]
-    int batch, int T, int nh, int hd, int ds
-) {
-    int b = blockIdx.x;
-    int h = blockIdx.y;
-    int p = threadIdx.x;
-    if (b >= batch || h >= nh || p >= hd) return;
-
-    int d_inner = nh * hd;
-
-    // Warp-reduce/broadcast mask: only `hd` lanes launched (block_dim=hd, hd≤32).
-    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
-
-    // Load h_local from persistent state into registers
-    float h_local[MAMBA_RS_STATE_CAP];
-    if (ds > MAMBA_RS_STATE_CAP) return;
-    int h_base = (b * nh * hd + h * hd + p) * ds;
-    for (int n = 0; n < ds; n++)
-        h_local[n] = ssm_state[h_base + n];
-
-    // O1: D[h] broadcast once before T loop
-    float d_skip = 0.0f;
-    if (p == 0) d_skip = D[h];
-    d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);
-
-    for (int t = 0; t < T; t++) {
-        // O1: alpha, beta, gamma broadcast from p=0
-        float alpha_h = 0.0f;
-        if (p == 0) alpha_h = alpha_flat[(b * T + t) * nh + h];
-        alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);
-
-        float beta_h = 0.0f;
-        if (p == 0) beta_h = beta_flat[(b * T + t) * nh + h];
-        beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);
-
-        float gamma_h = 0.0f;
-        if (p == 0) gamma_h = gamma_flat[(b * T + t) * nh + h];
-        gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);
-
-        // Per-thread unique values
-        int x_idx = (b * T + t) * d_inner + h * hd + p;
-        float x_val = x_flat[x_idx];
-        float v_prev = v_state[b * nh * hd + h * hd + p];
-
-        float y_val = d_skip * x_val;
-
-        for (int n = 0; n < ds; n++) {
-            // O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0
-            float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;
-            if (p == 0) {
-                kc_n = k_flat[(b * T + t) * nh * ds + h * ds + n];
-                kp_n = k_state[b * nh * ds + h * ds + n];
-                qc_n = q_flat[(b * T + t) * nh * ds + h * ds + n];
-            }
-            kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);
-            kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);
-            qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);
-
-            // Trapezoidal recurrence
-            h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n + gamma_h * x_val * kc_n;
-            y_val += h_local[n] * qc_n;
-        }
-
-        // Write output
-        y_out[x_idx] = y_val;
-
-        // Update k_state: p=0 writes
-        if (p == 0) {
-            for (int n = 0; n < ds; n++)
-                k_state[b * nh * ds + h * ds + n] = k_flat[(b * T + t) * nh * ds + h * ds + n];
-        }
-
-        // Update v_state: each p writes
-        v_state[b * nh * hd + h * hd + p] = x_val;
-    }
-
-    // Write back final SSM state to persistent buffer
-    for (int n = 0; n < ds; n++)
-        ssm_state[h_base + n] = h_local[n];
+#define DEFINE_M3_BURNIN_FWD_NOSAVE(NAME, IDX)                                 \
+extern "C" __global__ void NAME(                                               \
+    /* In/Out: persistent state (mutated) */                                   \
+    float* ssm_state,       /* [B * nh * hd * ds] */                           \
+    float* k_state,         /* [B * nh * ds] */                                \
+    float* v_state,         /* [B * nh * hd] */                                \
+    /* Output */                                                               \
+    float* y_out,           /* [B * T * d_inner] */                            \
+    /* Inputs (pre-computed by shared ops, flat over T) */                     \
+    const float* x_flat,      /* [B * T * d_inner] */                          \
+    const float* k_flat,      /* [B * T * nh * ds] */                          \
+    const float* q_flat,      /* [B * T * nh * ds] */                          \
+    const float* alpha_flat,  /* [B * T * nh] */                               \
+    const float* beta_flat,   /* [B * T * nh] */                               \
+    const float* gamma_flat,  /* [B * T * nh] */                               \
+    const float* D,           /* [nh] */                                       \
+    int batch, int T, int nh, int hd, int ds                                   \
+) {                                                                            \
+    IDX b = blockIdx.x;                                                        \
+    int h = blockIdx.y;                                                        \
+    int p = threadIdx.x;                                                       \
+    if (b >= batch || h >= nh || p >= hd) return;                              \
+                                                                               \
+    int d_inner = nh * hd;                                                     \
+                                                                               \
+    /* Warp-reduce/broadcast mask: only `hd` lanes launched (block_dim=hd, hd≤32). */ \
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);         \
+                                                                               \
+    /* Load h_local from persistent state into registers */                    \
+    float h_local[MAMBA_RS_STATE_CAP];                                         \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                       \
+    IDX h_base = (b * nh * hd + h * hd + p) * ds;                              \
+    for (int n = 0; n < ds; n++)                                               \
+        h_local[n] = ssm_state[h_base + n];                                    \
+                                                                               \
+    /* O1: D[h] broadcast once before T loop */                                \
+    float d_skip = 0.0f;                                                       \
+    if (p == 0) d_skip = D[h];                                                 \
+    d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);                            \
+                                                                               \
+    for (int t = 0; t < T; t++) {                                              \
+        /* O1: alpha, beta, gamma broadcast from p=0 */                        \
+        float alpha_h = 0.0f;                                                  \
+        if (p == 0) alpha_h = alpha_flat[(b * T + t) * nh + h];                \
+        alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);                      \
+                                                                               \
+        float beta_h = 0.0f;                                                   \
+        if (p == 0) beta_h = beta_flat[(b * T + t) * nh + h];                  \
+        beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);                        \
+                                                                               \
+        float gamma_h = 0.0f;                                                  \
+        if (p == 0) gamma_h = gamma_flat[(b * T + t) * nh + h];                \
+        gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);                      \
+                                                                               \
+        /* Per-thread unique values */                                         \
+        IDX x_idx = (b * T + t) * d_inner + h * hd + p;                        \
+        float x_val = x_flat[x_idx];                                           \
+        float v_prev = v_state[b * nh * hd + h * hd + p];                      \
+                                                                               \
+        float y_val = d_skip * x_val;                                          \
+                                                                               \
+        for (int n = 0; n < ds; n++) {                                         \
+            /* O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0 */         \
+            float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;                       \
+            if (p == 0) {                                                      \
+                kc_n = k_flat[(b * T + t) * nh * ds + h * ds + n];             \
+                kp_n = k_state[b * nh * ds + h * ds + n];                      \
+                qc_n = q_flat[(b * T + t) * nh * ds + h * ds + n];             \
+            }                                                                  \
+            kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);                        \
+            kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);                        \
+            qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);                        \
+                                                                               \
+            /* Trapezoidal recurrence */                                       \
+            h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n + gamma_h * x_val * kc_n; \
+            y_val += h_local[n] * qc_n;                                        \
+        }                                                                      \
+                                                                               \
+        /* Write output */                                                     \
+        y_out[x_idx] = y_val;                                                  \
+                                                                               \
+        /* Update k_state: p=0 writes */                                       \
+        if (p == 0) {                                                          \
+            for (int n = 0; n < ds; n++)                                       \
+                k_state[b * nh * ds + h * ds + n] = k_flat[(b * T + t) * nh * ds + h * ds + n]; \
+        }                                                                      \
+                                                                               \
+        /* Update v_state: each p writes */                                    \
+        v_state[b * nh * hd + h * hd + p] = x_val;                             \
+    }                                                                          \
+                                                                               \
+    /* Write back final SSM state to persistent buffer */                      \
+    for (int n = 0; n < ds; n++)                                               \
+        ssm_state[h_base + n] = h_local[n];                                    \
 }
+
+DEFINE_M3_BURNIN_FWD_NOSAVE(m3_burnin_fwd_nosave, int)
+DEFINE_M3_BURNIN_FWD_NOSAVE(m3_burnin_fwd_nosave_i64, long long)
 
 // ======================== BACKWARD ========================
 
@@ -846,7 +865,7 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
 // which is what lets the compiler keep the state in registers instead of
 // re-reading it every step; the 0 instantiation keeps an arbitrary width
 // working at the original speed.
-template <int DS>
+template <int DS, typename IDX>
 __device__ __forceinline__ void m3_backward_seq_tpl(
     // Saved activations from forward
     const float* __restrict__ h_saved,       // [B * (T+1) * nh * hd * ds] (O5 transposed)
@@ -871,7 +890,7 @@ __device__ __forceinline__ void m3_backward_seq_tpl(
     float* __restrict__ d_D_local,   // [B * d_inner] per-thread, reduced by m3_reduce_d_D
     int batch, int T, int nh, int hd, int ds
 ) {
-    int b = blockIdx.x;
+    IDX b = blockIdx.x;
     int h = blockIdx.y;
     int p = threadIdx.x;
     if (b >= batch || h >= nh || p >= hd) return;
@@ -911,7 +930,7 @@ __device__ __forceinline__ void m3_backward_seq_tpl(
     // Per-thread d_D accumulator (summed over T, reduced later)
     float sum_d_D = 0.0f;
 
-    int h_b_base = b * (T + 1) * nhd_ds;
+    IDX h_b_base = b * (T + 1) * nhd_ds;
 
     for (int t = T - 1; t >= 0; t--) {
         // lane 0 of the unique block per (b,h) is the sole writer
@@ -932,7 +951,7 @@ __device__ __forceinline__ void m3_backward_seq_tpl(
             }
         }
 
-        int x_idx = (b * T + t) * d_inner + h * hd + p;
+        IDX x_idx = (b * T + t) * d_inner + h * hd + p;
         float dy_val = d_y_flat[x_idx];
         float x_val = x_flat[x_idx];
         float v_prev = v_prev_saved[(b * T + t) * d_inner + h * hd + p];
@@ -980,8 +999,8 @@ __device__ __forceinline__ void m3_backward_seq_tpl(
             qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);
 
             // O5: coalesced h_saved reads
-            float h_prev_n = h_saved[h_b_base + t * nhd_ds + n * d_inner + h * hd + p];
-            float h_curr_n = h_saved[h_b_base + (t + 1) * nhd_ds + n * d_inner + h * hd + p];
+            float h_prev_n = h_saved[h_b_base + (IDX)t * nhd_ds + n * d_inner + h * hd + p];
+            float h_curr_n = h_saved[h_b_base + (IDX)(t + 1) * nhd_ds + n * d_inner + h * hd + p];
 
             // From y[p] = sum_n(h[p,n] * q[n]): d_h += d_y * q
             d_h_reg[n] += dy_val * qc_n;
@@ -1097,7 +1116,7 @@ __device__ __forceinline__ void m3_backward_seq_tpl(
 
 // One entry per state width the models here use, plus a general entry for
 // any other width. The host picks by the model's own `d_state`.
-#define M3_BACKWARD_SEQ_ENTRY(NAME, DS_VALUE)                                \
+#define M3_BACKWARD_SEQ_ENTRY(NAME, IDX, DS_VALUE)                           \
 extern "C" __global__ __launch_bounds__(32, 8)                               \
 void NAME(                                                                   \
     const float* __restrict__ h_saved, const float* __restrict__ k_prev_saved,\
@@ -1111,17 +1130,22 @@ void NAME(                                                                   \
     float* __restrict__ d_gamma, float* __restrict__ d_D_local,              \
     int batch, int T, int nh, int hd, int ds                                 \
 ) {                                                                          \
-    m3_backward_seq_tpl<DS_VALUE>(                                           \
+    m3_backward_seq_tpl<DS_VALUE, IDX>(                                      \
         h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat,         \
         alpha_flat, beta_flat, gamma_flat, D, d_y_flat,                      \
         d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local,                  \
         batch, T, nh, hd, ds);                                               \
 }
-M3_BACKWARD_SEQ_ENTRY(m3_backward_seq, 0)
-M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds8, 8)
-M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds16, 16)
-M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds32, 32)
-M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds64, 64)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq, int, 0)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_i64, long long, 0)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds8, int, 8)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds8_i64, long long, 8)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds16, int, 16)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds16_i64, long long, 16)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds32, int, 32)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds32_i64, long long, 32)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds64, int, 64)
+M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds64_i64, long long, 64)
 
 // ======================== REDUCTION KERNELS ========================
 
@@ -1131,35 +1155,39 @@ M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_ds64, 64)
 // single block per head → lane 0 unique writer.
 // Caller pre-zeros d_D_out in GpuMamba3Grads::zero (one memset per step);
 // direct store preserves the old atomicAdd-into-zero semantics exactly.
-extern "C" __global__ void m3_reduce_d_D(
-    float* __restrict__ d_D_out,           // [nh]
-    const float* __restrict__ d_D_local,   // [B * d_inner]
-    int batch, int nh, int hd
-) {
-    int head = blockIdx.x;
-    if (head >= nh) return;
-
-    int lane = threadIdx.x; // 0..31
-    int d_inner = nh * hd;
-    int total = batch * hd;
-
-    float sum = 0.0f;
-    for (int i = lane; i < total; i += 32) {
-        int b_i = i / hd;
-        int p_i = i % hd;
-        sum += d_D_local[b_i * d_inner + head * hd + p_i];
-    }
-
-    // Full warp reduction
-    sum += __shfl_down_sync(0xFFFFFFFF, sum, 16);
-    sum += __shfl_down_sync(0xFFFFFFFF, sum, 8);
-    sum += __shfl_down_sync(0xFFFFFFFF, sum, 4);
-    sum += __shfl_down_sync(0xFFFFFFFF, sum, 2);
-    sum += __shfl_down_sync(0xFFFFFFFF, sum, 1);
-
-    /* ACCUMULATE, never overwrite - every
-       sibling gradient writer follows the += contract (the caller zeroes
-       the arena once per window); an = here silently discarded prior
-       micro-batch d_D under accumulate_only gradient accumulation. */
-    if (lane == 0) d_D_out[head] += sum;
+#define DEFINE_M3_REDUCE_D_D(NAME, IDX)                                        \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ d_D_out,           /* [nh] */                          \
+    const float* __restrict__ d_D_local,   /* [B * d_inner] */                 \
+    int batch, int nh, int hd                                                  \
+) {                                                                            \
+    int head = blockIdx.x;                                                     \
+    if (head >= nh) return;                                                    \
+                                                                               \
+    int lane = threadIdx.x; /* 0..31 */                                        \
+    int d_inner = nh * hd;                                                     \
+    IDX total = (IDX)batch * hd;                                               \
+                                                                               \
+    float sum = 0.0f;                                                          \
+    for (IDX i = lane; i < total; i += 32) {                                   \
+        IDX b_i = i / hd;                                                      \
+        int p_i = (int)(i % hd);                                               \
+        sum += d_D_local[b_i * d_inner + head * hd + p_i];                     \
+    }                                                                          \
+                                                                               \
+    /* Full warp reduction */                                                  \
+    sum += __shfl_down_sync(0xFFFFFFFF, sum, 16);                              \
+    sum += __shfl_down_sync(0xFFFFFFFF, sum, 8);                               \
+    sum += __shfl_down_sync(0xFFFFFFFF, sum, 4);                               \
+    sum += __shfl_down_sync(0xFFFFFFFF, sum, 2);                               \
+    sum += __shfl_down_sync(0xFFFFFFFF, sum, 1);                               \
+                                                                               \
+    /* ACCUMULATE, never overwrite - every                                     \
+       sibling gradient writer follows the += contract (the caller zeroes      \
+       the arena once per window); an = here silently discarded prior          \
+       micro-batch d_D under accumulate_only gradient accumulation. */         \
+    if (lane == 0) d_D_out[head] += sum;                                       \
 }
+
+DEFINE_M3_REDUCE_D_D(m3_reduce_d_D, int)
+DEFINE_M3_REDUCE_D_D(m3_reduce_d_D_i64, long long)

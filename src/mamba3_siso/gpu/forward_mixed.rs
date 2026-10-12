@@ -27,7 +27,7 @@ use cudarc::driver::{CudaStream, PushKernelArg};
 use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_norm};
+use crate::gpu::launch::{grid_1d_cover, grid_norm};
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::kernels::bcnorm_fwd_bc_cfg;
 use crate::mamba3_siso::gpu::state::{CHUNK_SIZE, GpuMamba3StateBufs, M3Exec, Mamba3LayerPtrs};
@@ -321,6 +321,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
     let hd = dims.headdim;
     let ng = dims.ngroups;
     let ip = dims.in_proj_dim;
+    let width = dims.index_width();
     let na = dims.n_angles;
 
     // F1: rmsnorm_fwd_f32in_typed - f32 residual -> typed post_norm, f32
@@ -379,7 +380,9 @@ pub fn gpu_forward_mamba3_layer_mixed(
         let nh_i = nh as i32;
         let na_i = na as i32;
         let db_ptr = w.dt_bias.ptr();
-        let mut bld = ctx.stream.launch_builder(m3k.m3_split_typed.get(dtype));
+        let mut bld = ctx
+            .stream
+            .launch_builder(m3k.m3_split_typed.get(width).get(dtype));
         let z = acts.z.cached_ptr();
         let x = acts.x.cached_ptr();
         let br = acts.b_raw.cached_ptr();
@@ -412,7 +415,8 @@ pub fn gpu_forward_mamba3_layer_mixed(
         bld.arg(&ds_i);
         bld.arg(&nh_i);
         bld.arg(&na_i);
-        unsafe { bld.launch(grid_1d(bt * ip)) }.map_err(|e| format!("m3_mixed F3 split: {e:?}"))?;
+        unsafe { bld.launch(grid_1d_cover(bt * ip)?) }
+            .map_err(|e| format!("m3_mixed F3 split: {e:?}"))?;
     }
 
     // F4a/b: bcnorm_fwd_bc_typed (fused B+C) — typed B_raw/C_raw →
@@ -426,7 +430,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
         //   B_normed, C_normed, B_rms, C_rms, B_raw, C_raw, B_weight, C_weight
         let mut bld = ctx
             .stream
-            .launch_builder(m3k.bcnorm_fwd_bc_typed.get(dtype));
+            .launch_builder(m3k.bcnorm_fwd_bc_typed.get(width).get(dtype));
         let bn = acts.b_normed.cached_ptr();
         let cn = acts.c_normed.cached_ptr();
         let brms = acts.b_rms.cached_ptr();
@@ -493,7 +497,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
         let na_i = na as i32;
         let mut bld = ctx
             .stream
-            .launch_builder(m3k.m3_bias_rope_fwd_typed.get(dtype));
+            .launch_builder(m3k.m3_bias_rope_fwd_typed.get(width).get(dtype));
         let bb = acts.b_biased.cached_ptr();
         let cb = acts.c_biased.cached_ptr();
         let k = acts.k.cached_ptr();
@@ -522,7 +526,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
         bld.arg(&no_angle);
         bld.arg(&no_angle);
         bld.arg(&no_angle);
-        unsafe { bld.launch(grid_1d(bt * nh * ds)) }
+        unsafe { bld.launch(grid_1d_cover(bt * nh * ds)?) }
             .map_err(|e| format!("m3_mixed F4 bias_rope: {e:?}"))?;
     }
 
@@ -531,16 +535,17 @@ pub fn gpu_forward_mamba3_layer_mixed(
     // coefficients, and the sequential backward recomputes them from the
     // saved dt, A and trap, so nothing is saved for it.
     if !dims.use_parallel_scan {
-        let n_total = (bt * nh) as i32;
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_compute_abg);
+        let n_total = crate::gpu::launch::WidthCount::new(bt * nh, width)?;
+        let mut bld = ctx.stream.launch_builder(m3k.m3_compute_abg.get(width));
         bld.arg(alpha_scratch.inner_mut());
         bld.arg(beta_scratch.inner_mut());
         bld.arg(gamma_scratch.inner_mut());
         bld.arg(acts.dt.inner());
         bld.arg(acts.a_val.inner());
         bld.arg(acts.trap.inner());
-        bld.arg(&n_total);
-        unsafe { bld.launch(grid_1d(bt * nh)) }.map_err(|e| format!("m3_mixed F5b abg: {e:?}"))?;
+        n_total.push(&mut bld);
+        unsafe { bld.launch(grid_1d_cover(bt * nh)?) }
+            .map_err(|e| format!("m3_mixed F5b abg: {e:?}"))?;
     }
 
     // F6: SSM forward — sequential burnin OR chunked parallel scan.
@@ -587,7 +592,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 block_dim: (block_x, 1, 1),
                 shared_mem_bytes: 0,
             };
-            let mut bld = ctx.stream.launch_builder(&m3k.m3_da_cumsum);
+            let mut bld = ctx.stream.launch_builder(m3k.m3_da_cumsum.get(width));
             bld.arg(acts.da_cumsum_saved.inner_mut());
             bld.arg(adt_temp_scratch.inner());
             bld.arg(&b_i);
@@ -603,7 +608,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
         if let Some(fcfg) = fused {
             let mut bld = ctx
                 .stream
-                .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(dtype));
+                .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(width).get(dtype));
             let ks = acts.k_scaled_saved.cached_ptr();
             let kp = acts.k.cached_ptr();
             let qp = acts.q.cached_ptr();
@@ -640,7 +645,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 };
                 let mut bld = ctx
                     .stream
-                    .launch_builder(m3k.m3_preprocess_chunks_typed.get(dtype));
+                    .launch_builder(m3k.m3_preprocess_chunks_typed.get(width).get(dtype));
                 let ks = acts.k_scaled_saved.cached_ptr();
                 let kp = acts.k.cached_ptr();
                 let qp = acts.q.cached_ptr();
@@ -672,11 +677,11 @@ pub fn gpu_forward_mamba3_layer_mixed(
                     hd,
                     ds,
                     dims.chunk_size(),
-                    m3k.chunk_tile_threads,
+                    *m3k.chunk_tile_threads.get(width),
                 );
                 let mut bld = ctx
                     .stream
-                    .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
+                    .launch_builder(m3k.m3_chunk_state_fwd_typed.get(width).get(dtype));
                 let xp = acts.x.cached_ptr();
                 let ks = acts.k_scaled_saved.cached_ptr();
                 bld.arg(acts.chunk_states_saved.inner_mut());
@@ -703,7 +708,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
             let cfg = super::kernels::state_pass_fused_cfg(dims.batch, nh, hd, ds);
             let mut bld = ctx
                 .stream
-                .launch_builder(m3k.m3_state_pass_fused_typed.get(dtype));
+                .launch_builder(m3k.m3_state_pass_fused_typed.get(width).get(dtype));
             let seed_null: crate::mamba3_siso::gpu::state::CUptr = 0;
             let kp = acts.k.cached_ptr();
             let xp = acts.x.cached_ptr();
@@ -742,12 +747,12 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 hd,
                 ds,
                 dims.chunk_size(),
-                m3k.chunk_tile_threads,
+                *m3k.chunk_tile_threads.get(width),
             );
             let kern = if coop {
-                m3k.m3_chunk_scan_fwd_coop_typed.get(dtype)
+                m3k.m3_chunk_scan_fwd_coop_typed.get(width).get(dtype)
             } else {
-                m3k.m3_chunk_scan_fwd_typed.get(dtype)
+                m3k.m3_chunk_scan_fwd_typed.get(width).get(dtype)
             };
             let mut bld = ctx.stream.launch_builder(kern);
             let yp = acts.y.cached_ptr();
@@ -787,6 +792,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 headdim: hd,
                 d_state: ds,
             },
+            width,
         );
         let mut bld = ctx.stream.launch_builder(kernel);
         bld.arg(&ssm_state);
@@ -824,7 +830,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
         let grid = super::kernels::gated_norm_cfg(bt, di, hd);
         let mut bld = ctx
             .stream
-            .launch_builder(m3k.rmsnorm_gated_fwd_typed.get(dtype));
+            .launch_builder(m3k.rmsnorm_gated_fwd_typed.get(width).get(dtype));
         let g = acts.gated.cached_ptr();
         let gr = acts.gated_rms_vals.cached_ptr();
         let y = acts.y.cached_ptr();
@@ -843,21 +849,21 @@ pub fn gpu_forward_mamba3_layer_mixed(
         bld.arg(&z_stride);
         unsafe { bld.launch(grid) }.map_err(|e| format!("m3_mixed F7 rmsnorm_gated: {e:?}"))?;
     } else {
-        let n = (bt * di) as i32;
+        let n = crate::gpu::launch::WidthCount::new(bt * di, width)?;
         let mut bld = ctx
             .stream
-            .launch_builder(m3k.silu_gate_fwd_typed.get(dtype));
+            .launch_builder(m3k.silu_gate_fwd_typed.get(width).get(dtype));
         let g = acts.gated.cached_ptr();
         let y = acts.y.cached_ptr();
         let z = acts.z.cached_ptr();
         bld.arg(&g);
         bld.arg(&y);
         bld.arg(&z);
-        bld.arg(&n);
+        n.push(&mut bld);
         let di_i = di as i32;
         bld.arg(&di_i);
         bld.arg(&di_i);
-        unsafe { bld.launch(grid_1d(bt * di)) }
+        unsafe { bld.launch(grid_1d_cover(bt * di)?) }
             .map_err(|e| format!("m3_mixed F7 silu_gate: {e:?}"))?;
     }
 
@@ -1088,7 +1094,6 @@ pub fn gpu_forward_mamba3_backbone_mixed(
         // stream (norm math and every residual carry stay f32).
         let mid = dims.mamba_input_dim;
         {
-            let n = (bt * mid) as i32;
             let cast = match dtype {
                 WeightDtype::Bf16 => &m3k.cast_f32_to_bf16,
                 WeightDtype::F16 => &m3k.cast_f32_to_f16,
@@ -1096,14 +1101,14 @@ pub fn gpu_forward_mamba3_backbone_mixed(
                     return Err("m3_mixed forward: unexpected f32 compute dtype".into());
                 }
             };
-            let dst = acts.input_proj_inputs.cached_ptr();
-            let src = mamba_input.cached_ptr();
-            let mut bld = ctx.stream.launch_builder(cast);
-            bld.arg(&dst);
-            bld.arg(&src);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * mid)) }
-                .map_err(|e| format!("m3_mixed input_proj input cast: {e:?}"))?;
+            crate::gpu::launch::launch_cast(
+                &ctx.stream,
+                cast,
+                (acts.input_proj_inputs.cached_ptr(), 2),
+                (mamba_input.cached_ptr(), 4),
+                bt * mid,
+                format_args!("m3_mixed input_proj input cast"),
+            )?;
         }
         gpu_gemm_typed_forward_raw(
             ctx,
@@ -1123,7 +1128,6 @@ pub fn gpu_forward_mamba3_backbone_mixed(
             (bt, mid, dm),
         )?;
         {
-            let n = (bt * dm) as i32;
             let cast = match dtype {
                 WeightDtype::Bf16 => &m3k.cast_bf16_to_f32,
                 WeightDtype::F16 => &m3k.cast_f16_to_f32,
@@ -1131,14 +1135,14 @@ pub fn gpu_forward_mamba3_backbone_mixed(
                     return Err("m3_mixed forward: unexpected f32 compute dtype".into());
                 }
             };
-            let dst = temporal_f32.cached_ptr();
-            let src = acts.input_proj_outputs.cached_ptr();
-            let mut bld = ctx.stream.launch_builder(cast);
-            bld.arg(&dst);
-            bld.arg(&src);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * dm)) }
-                .map_err(|e| format!("m3_mixed input_proj residual upcast: {e:?}"))?;
+            crate::gpu::launch::launch_cast(
+                &ctx.stream,
+                cast,
+                (temporal_f32.cached_ptr(), 4),
+                (acts.input_proj_outputs.cached_ptr(), 2),
+                bt * dm,
+                format_args!("m3_mixed input_proj residual upcast"),
+            )?;
         }
     }
 
@@ -1274,7 +1278,8 @@ fn mixed_mlp_forward(
     gate.arg(&up);
     gate.arg(&bt_i);
     gate.arg(&h_i);
-    unsafe { gate.launch(grid_1d(bt * h)) }.map_err(|e| format!("m3_mixed MLP gate: {e:?}"))?;
+    unsafe { gate.launch(grid_1d_cover(bt * h)?) }
+        .map_err(|e| format!("m3_mixed MLP gate: {e:?}"))?;
     let out = scratch.out_flat.cached_ptr();
     gpu_gemm_typed_forward_raw(
         ctx,

@@ -205,6 +205,25 @@
   launched. The other fields hold both builds as a `ByIndexWidth`.
 - `MambaKernels::conv1d_burnin_bwd_typed` and its kernel are gone: no path
   launched the serial conv backward since the tiled backward replaced it.
+- The Mamba-3 SISO kernels index past 2^31 elements. Every SISO kernel
+  that forms an offset from the batch, the window or a chunk is built with
+  32-bit and with 64-bit offsets, and a training window, a prefill or a
+  decode step takes the 64-bit builds only when one of its tensors passes
+  the 32-bit range (`GpuMamba3Dims::index_width`). A shape that fits runs
+  the 32-bit code it ran before. `GpuMamba3Dims::validate_index_budget`,
+  which refused a window past 2^31 elements, is replaced by
+  `GpuMamba3Dims::check_int_args`, which bounds only the batch, the window
+  and the row widths the kernels take as 32-bit ints, and the chunked
+  angle accumulation no longer refuses its tensors past the range either.
+  The angle gradients' reduction takes a wide form past 2^31 columns
+  (`Mamba3Kernels::reduce_sum_axis0_wide`). The SISO kernel fields that
+  have two builds hold them as a `ByIndexWidth`, and so do
+  `chunk_tile_threads` and `step_block_threads`, one bound per build. The
+  sequential and transport selectors take the launch's `IndexWidth`, and
+  `Mamba3Kernels::dqkv_for_shape` takes its shape as a `DqkvRoute`.
+- `MAMBA_RS_INDEX_WIDTH=i64` runs every kernel built at two index widths
+  on its 64-bit build at any size, to prove against recorded bits that
+  the two builds agree. Unset or `auto` leaves the choice to the tensors.
 - `GpuCtx::cublas()` hands the context's cuBLAS handle, which the context
   takes when it enters a cuBLAS GEMM mode and keeps. `GpuCtx::take_cublas()`
   takes one for a context that stays in the deterministic mode, for a

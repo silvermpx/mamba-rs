@@ -9,6 +9,7 @@ use mamba_rs::gpu::buffers::GpuByteBuffer;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::kernels::cuda_include_paths;
+use mamba_rs::gpu::launch::IndexWidth;
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use std::sync::Arc;
 
@@ -414,8 +415,8 @@ fn typed_burnin_matches_released_sequential_recurrence() {
         eprintln!("SELECTOR cap={state_cap} NVRTC={nvrtc:?} specialized={admits_specialization}");
         for ds in [3, 8, 16, 17, 32, 48, 64] {
             assert!(std::ptr::eq(
-                production.burnin_fwd_typed_for_state(WeightDtype::F32, ds),
-                production.burnin_fwd_for_state(ds),
+                production.burnin_fwd_typed_for_state(WeightDtype::F32, ds, IndexWidth::I32),
+                production.burnin_fwd_for_state(ds, IndexWidth::I32),
             ));
         }
         for (dtype, suffix) in [(WeightDtype::Bf16, "bf16"), (WeightDtype::F16, "f16")] {
@@ -427,11 +428,11 @@ fn typed_burnin_matches_released_sequential_recurrence() {
                 .into_iter()
                 .filter(|&ds| ds <= state_cap)
             {
-                let selected = production.burnin_fwd_typed_for_state(dtype, ds);
+                let selected = production.burnin_fwd_typed_for_state(dtype, ds, IndexWidth::I32);
                 let generic = if dtype == WeightDtype::Bf16 {
-                    &production.m3_burnin_fwd_typed_bf16
+                    &production.m3_burnin_fwd_typed_bf16.i32
                 } else {
-                    &production.m3_burnin_fwd_typed_f16
+                    &production.m3_burnin_fwd_typed_f16.i32
                 };
                 assert_eq!(
                     !std::ptr::eq(selected, generic),
@@ -479,7 +480,10 @@ fn typed_burnin_matches_released_sequential_recurrence() {
             }
             check_case(
                 &stream,
-                [&old, production.burnin_fwd_typed_for_state(dtype, 16)],
+                [
+                    &old,
+                    production.burnin_fwd_typed_for_state(dtype, 16, IndexWidth::I32),
+                ],
                 Shape {
                     b: 1,
                     t: 256,

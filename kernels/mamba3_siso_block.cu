@@ -40,7 +40,7 @@
 // The previous K is staged by every thread before the barrier, so the
 // head's new K may overwrite k_state right after it: no thread reads
 // k_state again.
-#define DEFINE_M3_STEP_FWD_BLOCK(NAME, TY, FROM_F)                            \
+#define DEFINE_M3_STEP_FWD_BLOCK(NAME, IDX, TY, FROM_F)                       \
 extern "C" __global__ void NAME(                                              \
     float* ssm_state,                                                         \
     float* k_state,                                                           \
@@ -58,13 +58,13 @@ extern "C" __global__ void NAME(                                              \
     float* kc_sm = coef + 4;                                                  \
     float* kp_sm = kc_sm + ds;                                                \
     float* qc_sm = kp_sm + ds;                                                \
-    int b = blockIdx.x;                                                       \
+    IDX b = blockIdx.x;                                                       \
     int h = blockIdx.y;                                                       \
     int tid = threadIdx.x;                                                    \
     /* Uniform across the block, so every thread reaches the barrier. */      \
     if (b >= batch || h >= nh || ds > MAMBA_RS_STATE_CAP) return;             \
     int d_inner = nh * hd;                                                    \
-    int row = b * nh * ds + h * ds;                                           \
+    IDX row = b * nh * ds + h * ds;                                           \
     if (tid == 0) {                                                           \
         float dt_v = dt[b * nh + h];                                          \
         float a_v = a_val[b * nh + h];                                        \
@@ -88,7 +88,7 @@ extern "C" __global__ void NAME(                                              \
     float d_skip = coef[3];                                                   \
     for (int p = tid; p < hd; p += blockDim.x) {                              \
         float h_local[MAMBA_RS_STATE_CAP];                                    \
-        int h_base = (b * nh * hd + h * hd + p) * ds;                         \
+        IDX h_base = (b * nh * hd + h * hd + p) * ds;                         \
         for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];      \
         float x_val = to_f(x[b * d_inner + h * hd + p]);                      \
         float v_prev = v_state[b * nh * hd + h * hd + p];                     \
@@ -110,9 +110,12 @@ extern "C" __global__ void NAME(                                              \
     }                                                                         \
 }
 
-DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block, float, from_f_f32)
-DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_f16, __half, from_f_f16)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block, int, float, from_f_f32)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_i64, long long, float, from_f_f32)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_f16, int, __half, from_f_f16)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_f16_i64, long long, __half, from_f_f16)
 
 // ============================================================================
 // The sequential scan's training kernels for any head width.

@@ -164,7 +164,7 @@ fn check_preprocess_chunks(dtype: WeightDtype) {
         shared_mem_bytes: 0,
     };
     let (bi, ti, nhi, dsi, csi) = (B as i32, T as i32, NH as i32, DS as i32, CHUNK_SIZE as i32);
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks);
+    let mut bld = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks.i32);
     let (a, b, c, d, e, f, g, h) = (
         ks_f32.cached_ptr(),
         qk_f32.cached_ptr(),
@@ -207,7 +207,7 @@ fn check_preprocess_chunks(dtype: WeightDtype) {
 
     let mut bld = ctx
         .stream
-        .launch_builder(m3k.m3_preprocess_chunks_typed.get(dtype));
+        .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
     let (a, b, c, d, e, f, g, h) = (
         ks_t.cached_ptr(),
         qk_t.cached_ptr(),
@@ -295,7 +295,7 @@ fn check_chunk_state_fwd(dtype: WeightDtype) {
         DS as i32,
         CHUNK_SIZE as i32,
     );
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
+    let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
     let (a, b, c, d) = (
         states_f32.cached_ptr(),
         x_f32.cached_ptr(),
@@ -323,7 +323,7 @@ fn check_chunk_state_fwd(dtype: WeightDtype) {
     ctx.stream.synchronize().unwrap();
     let mut bld = ctx
         .stream
-        .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
+        .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
     let (a, b, c, d) = (
         states_t.cached_ptr(),
         x_t.cached_ptr(),
@@ -387,7 +387,8 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                 let nc = t.div_ceil(cs);
                 let fused_cfg = chunk_fused_cfg(batch, nc, nh, hd, ds, cs)
                     .unwrap_or_else(|| panic!("{label}: fused launch must be supported"));
-                let state_cfg = chunk_state_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads);
+                let state_cfg =
+                    chunk_state_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads.i32);
                 assert!(ds <= m3k.state_cap, "{label}: state capacity");
                 for cfg in [&fused_cfg, &state_cfg] {
                     let (bx, by, bz) = cfg.block_dim;
@@ -474,7 +475,7 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                         ];
                         let mut bld = ctx
                             .stream
-                            .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(dtype));
+                            .launch_builder(m3k.m3_chunk_pre_state_fused_typed.i32.get(dtype));
                         for ptr in &ptrs {
                             bld.arg(ptr);
                         }
@@ -493,7 +494,7 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                             block_dim: (block_x, 1, 1),
                             shared_mem_bytes: 0,
                         };
-                        let mut bld = ctx.stream.launch_builder(&m3k.m3_da_cumsum);
+                        let mut bld = ctx.stream.launch_builder(&m3k.m3_da_cumsum.i32);
                         let (da_ptr, adt_ptr) = (da.cached_ptr(), adt.cached_ptr());
                         bld.arg(&da_ptr);
                         bld.arg(&adt_ptr);
@@ -514,7 +515,7 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                         ];
                         let mut bld = ctx
                             .stream
-                            .launch_builder(m3k.m3_preprocess_chunks_typed.get(dtype));
+                            .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
                         for ptr in &ptrs {
                             bld.arg(ptr);
                         }
@@ -530,7 +531,7 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                         ];
                         let mut bld = ctx
                             .stream
-                            .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
+                            .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
                         for ptr in &ptrs {
                             bld.arg(ptr);
                         }
@@ -682,7 +683,7 @@ fn m3_state_pass_fused_matches_separate_bits() {
                         dt.cached_ptr(),
                         trap.cached_ptr(),
                     ];
-                    let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_entering_state);
+                    let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_entering_state.i32);
                     for ptr in &ptrs {
                         bld.arg(ptr);
                     }
@@ -711,7 +712,7 @@ fn m3_state_pass_fused_matches_separate_bits() {
                         da.cached_ptr(),
                         init_ptr,
                     ];
-                    let mut bld = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd);
+                    let mut bld = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd.i32);
                     for ptr in &ptrs {
                         bld.arg(ptr);
                     }
@@ -736,7 +737,7 @@ fn m3_state_pass_fused_matches_separate_bits() {
                     ];
                     let mut bld = ctx
                         .stream
-                        .launch_builder(m3k.m3_writeback_parallel_states_typed.get(dtype));
+                        .launch_builder(m3k.m3_writeback_parallel_states_typed.i32.get(dtype));
                     for ptr in &ptrs {
                         bld.arg(ptr);
                     }
@@ -771,7 +772,7 @@ fn m3_state_pass_fused_matches_separate_bits() {
                     assert!((1..=1024).contains(&(bx * by * bz)), "{label}: block");
                     let mut bld = ctx
                         .stream
-                        .launch_builder(m3k.m3_state_pass_fused_typed.get(dtype));
+                        .launch_builder(m3k.m3_state_pass_fused_typed.i32.get(dtype));
                     for ptr in &ptrs {
                         bld.arg(ptr);
                     }
@@ -844,7 +845,9 @@ fn check_writeback_parallel_states(dtype: WeightDtype) {
         shared_mem_bytes: 0,
     };
     let (bi, ti, nhi, hdi, dsi) = (B as i32, T as i32, NH as i32, HD as i32, DS as i32);
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_writeback_parallel_states);
+    let mut bld = ctx
+        .stream
+        .launch_builder(&m3k.m3_writeback_parallel_states.i32);
     let (a, b, c, d, e, f) = (
         ssm_ref.cached_ptr(),
         k_ref_out.cached_ptr(),
@@ -879,7 +882,7 @@ fn check_writeback_parallel_states(dtype: WeightDtype) {
     ctx.stream.synchronize().unwrap();
     let mut bld = ctx
         .stream
-        .launch_builder(m3k.m3_writeback_parallel_states_typed.get(dtype));
+        .launch_builder(m3k.m3_writeback_parallel_states_typed.i32.get(dtype));
     let (a, b, c, d, e, f) = (
         ssm_got.cached_ptr(),
         k_got_out.cached_ptr(),
@@ -965,7 +968,7 @@ fn check_chunk_scan_fwd(dtype: WeightDtype) {
         DS as i32,
         CHUNK_SIZE as i32,
     );
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd);
+    let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd.i32);
     let (a, b, c, d, e, f, g, h) = (
         y_f32.cached_ptr(),
         x_f32.cached_ptr(),
@@ -1002,7 +1005,7 @@ fn check_chunk_scan_fwd(dtype: WeightDtype) {
     ctx.stream.synchronize().unwrap();
     let mut bld = ctx
         .stream
-        .launch_builder(m3k.m3_chunk_scan_fwd_typed.get(dtype));
+        .launch_builder(m3k.m3_chunk_scan_fwd_typed.i32.get(dtype));
     let (a, b, c, d, e, f, g, h) = (
         y_t.cached_ptr(),
         x_t.cached_ptr(),

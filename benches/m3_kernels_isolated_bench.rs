@@ -132,7 +132,7 @@ fn m3_kernels_isolated_bench() {
 
     // m3_dqkv f32
     time_it("m3_dqkv f32", &|| {
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv);
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv.i32);
         let args = [
             dq.cached_ptr(),
             dk.cached_ptr(),
@@ -172,7 +172,7 @@ fn m3_kernels_isolated_bench() {
     time_it("m3_dqkv bf16", &|| {
         let mut bld = ctx
             .stream
-            .launch_builder(m3k.m3_dqkv_typed.get(WeightDtype::Bf16));
+            .launch_builder(m3k.m3_dqkv_typed.i32.get(WeightDtype::Bf16));
         let args = [
             dq.cached_ptr(),
             dk.cached_ptr(),
@@ -224,7 +224,7 @@ fn m3_kernels_isolated_bench() {
     let nai = CNA as i32;
     let th_staging: i32 = 1;
     time_it("m3_dqktheta f32", &|| {
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta);
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
         let args = [
             dqpre.cached_ptr(),
             dkpre.cached_ptr(),
@@ -288,7 +288,7 @@ fn m3_kernels_isolated_bench() {
     time_it("m3_chunk_state_fwd bf16", &|| {
         let mut bld = ctx
             .stream
-            .launch_builder(m3k.m3_chunk_state_fwd_typed.get(WeightDtype::Bf16));
+            .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(WeightDtype::Bf16));
         let xp = v_t.cached_ptr();
         let ksp = ks_t.cached_ptr();
         let cst_p = cst_out.cached_ptr();
@@ -307,7 +307,7 @@ fn m3_kernels_isolated_bench() {
     time_it("m3_chunk_scan_fwd bf16", &|| {
         let mut bld = ctx
             .stream
-            .launch_builder(m3k.m3_chunk_scan_fwd_typed.get(WeightDtype::Bf16));
+            .launch_builder(m3k.m3_chunk_scan_fwd_typed.i32.get(WeightDtype::Bf16));
         let yp = y_t.cached_ptr();
         let xp = v_t.cached_ptr();
         let qp = q_t.cached_ptr();

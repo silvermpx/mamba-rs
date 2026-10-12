@@ -336,6 +336,25 @@ impl Drop for Mamba3GpuEngine {
 
 /// The context and the compiled kernels an engine for `cfg` runs on, its
 /// GEMMs following the numeric contract of `dtype`.
+/// The index width of a decode step of `batch` sequences: its largest
+/// tensors are a layer's persistent SSM state and the projection rows.
+fn step_index_width(batch: usize, cfg: &Mamba3Config) -> crate::gpu::launch::IndexWidth {
+    crate::gpu::launch::IndexWidth::covering(&[
+        batch * cfg.d_inner() * cfg.d_state,
+        batch * cfg.in_proj_out_dim(),
+        batch * cfg.nheads() * cfg.d_state,
+        batch * cfg.nheads() * cfg.num_rope_angles(),
+        batch * cfg.d_inner(),
+        batch * cfg.d_model,
+    ])
+}
+
+/// Refuse a decode batch past the 32-bit range the step kernels take their
+/// rows in: the sequences, and the B and C norm rows of every group.
+fn step_int_args(batch: usize, cfg: &Mamba3Config) -> Result<(), String> {
+    crate::gpu::launch::check_int_args(&[("batch", batch), ("batch*ngroups", batch * cfg.ngroups)])
+}
+
 fn engine_ctx_and_kernels(
     device: &GpuDevice,
     cfg: &Mamba3Config,
@@ -423,6 +442,7 @@ impl Mamba3GpuEngine {
         mode: Option<GemmMode>,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
+        step_int_args(batch, &cfg)?;
         let (ctx, kernels) = engine_ctx_and_kernels(device, &cfg, mode, dtype)?;
         let weights = GpuMamba3WeightsInf::from_cpu(&ctx.stream, cpu_weights, input_dim)?;
         Ok(Self::from_parts(
@@ -746,6 +766,7 @@ impl Mamba3GpuEngine {
         let na = self.cfg.num_rope_angles();
         let a_floor = self.cfg.a_floor;
         let lw = &self.weights.layers[layer_idx];
+        let width = step_index_width(b, &self.cfg);
 
         // Pre-compute i32 locals to avoid temporaries in builder.arg()
         let b_i = b as i32;
@@ -797,8 +818,11 @@ impl Mamba3GpuEngine {
         // F3: m3_split (8-way + fused softplus/sigmoid)
         {
             let n = b * ip;
-            let grid = crate::gpu::launch::grid_1d(n);
-            let mut builder = self.ctx.stream.launch_builder(&self.kernels.m3_split);
+            let grid = crate::gpu::launch::grid_1d_cover(n)?;
+            let mut builder = self
+                .ctx
+                .stream
+                .launch_builder(self.kernels.m3_split.get(width));
             builder.arg(scratch.z.inner());
             builder.arg(scratch.x.inner());
             builder.arg(scratch.b_raw.inner());
@@ -830,7 +854,7 @@ impl Mamba3GpuEngine {
             let mut builder = self
                 .ctx
                 .stream
-                .launch_builder(&self.kernels.bcnorm_fwd_bc_f32);
+                .launch_builder(self.kernels.bcnorm_fwd_bc_f32.get(width));
             builder.arg(scratch.b_normed.inner());
             builder.arg(scratch.c_normed.inner());
             builder.arg(scratch.b_rms.inner());
@@ -855,7 +879,7 @@ impl Mamba3GpuEngine {
         // for the state writeback consumers; n_angles == 0 passes through.
         {
             let n = b * nh * ds;
-            let grid = crate::gpu::launch::grid_1d(n);
+            let grid = crate::gpu::launch::grid_1d_cover(n)?;
             let a_ptr: cudarc::driver::sys::CUdeviceptr = if na > 0 {
                 state.angle_state.inner_at(a_off)
             } else {
@@ -865,7 +889,7 @@ impl Mamba3GpuEngine {
             let mut builder = self
                 .ctx
                 .stream
-                .launch_builder(&self.kernels.m3_bias_rope_fwd);
+                .launch_builder(self.kernels.m3_bias_rope_fwd.get(width));
             builder.arg(scratch.b_biased.inner());
             builder.arg(scratch.c_biased.inner());
             builder.arg(scratch.k_cur.inner());
@@ -889,12 +913,18 @@ impl Mamba3GpuEngine {
         // F6: m3_step_fwd (trapezoidal SSM recurrence)
         {
             let tier = crate::mamba3_siso::route::head_tier(hd);
-            let grid =
-                super::kernels::step_head_cfg(tier, b, nh, hd, ds, self.kernels.step_block_threads);
+            let grid = super::kernels::step_head_cfg(
+                tier,
+                b,
+                nh,
+                hd,
+                ds,
+                *self.kernels.step_block_threads.get(width),
+            );
             let kernel = match tier {
-                crate::mamba3_siso::route::HeadTier::Warp => &self.kernels.m3_step_fwd,
+                crate::mamba3_siso::route::HeadTier::Warp => self.kernels.m3_step_fwd.get(width),
                 crate::mamba3_siso::route::HeadTier::Block => {
-                    &self.kernels.m3_step_fwd_block_typed.f32
+                    &self.kernels.m3_step_fwd_block_typed.get(width).f32
                 }
             };
             let ssm_ptr = state.ssm_state.inner_at(ssm_off);
@@ -927,7 +957,7 @@ impl Mamba3GpuEngine {
             let mut builder = self
                 .ctx
                 .stream
-                .launch_builder(&self.kernels.rmsnorm_gated_fwd);
+                .launch_builder(self.kernels.rmsnorm_gated_fwd.get(width));
             builder.arg(scratch.gated.inner());
             builder.arg(scratch.gated_rms_buf.inner()); // rms_vals (rstd per group)
             builder.arg(scratch.y.inner());
@@ -942,13 +972,16 @@ impl Mamba3GpuEngine {
             unsafe { builder.launch(grid) }.map_err(|e| format!("F7 rmsnorm_gated: {e:?}"))?;
         } else {
             let n = b * di;
-            let n_i = n as i32;
-            let grid = crate::gpu::launch::grid_1d(n);
-            let mut builder = self.ctx.stream.launch_builder(&self.kernels.silu_gate_fwd);
+            let n_i = crate::gpu::launch::WidthCount::new(n, width)?;
+            let grid = crate::gpu::launch::grid_1d_cover(n)?;
+            let mut builder = self
+                .ctx
+                .stream
+                .launch_builder(self.kernels.silu_gate_fwd.get(width));
             builder.arg(scratch.gated.inner());
             builder.arg(scratch.y.inner());
             builder.arg(scratch.z.inner());
-            builder.arg(&n_i);
+            n_i.push(&mut builder);
             unsafe { builder.launch(grid) }.map_err(|e| format!("F7 silu_gate: {e:?}"))?;
         }
 
@@ -1023,7 +1056,7 @@ impl Mamba3GpuEngine {
         {
             let rows_i = b_i;
             let h_i = h as i32;
-            let grid = crate::gpu::launch::grid_1d(b * h);
+            let grid = crate::gpu::launch::grid_1d_cover(b * h)?;
             let mut builder = self
                 .ctx
                 .stream
@@ -1267,6 +1300,7 @@ impl Mamba3GpuEngineMixed {
         bulk_dtype: WeightDtype,
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
+        step_int_args(batch, &cfg)?;
         // The f32 engine's context, kernels and shapes without its weights:
         // every kernel here reads `mixed_weights`, whose f32 arena holds the
         // norms, biases and per-head coefficients.
@@ -1402,7 +1436,7 @@ impl Mamba3GpuEngineMixed {
         state: &mut Mamba3GpuState,
         scratch: &mut Mamba3GpuScratchMixed,
     ) -> Result<(), String> {
-        use crate::gpu::launch::grid_1d;
+        use crate::gpu::launch::grid_1d_cover;
         use cudarc::driver::PushKernelArg;
 
         let engine = &self.engine;
@@ -1426,6 +1460,7 @@ impl Mamba3GpuEngineMixed {
         let a_floor = cfg.a_floor;
         let k = &engine.kernels;
         let w = &self.mixed_weights;
+        let width = step_index_width(b, cfg);
 
         let b_i = b as i32;
         let dm_i = dm as i32;
@@ -1453,16 +1488,14 @@ impl Mamba3GpuEngineMixed {
                 }
             };
             let staged = scratch.input_typed.cached_ptr();
-            {
-                let n = (b * mid) as i32;
-                let src = scratch.gpu_input.cached_ptr();
-                let mut bld = engine.ctx.stream.launch_builder(down);
-                bld.arg(&staged);
-                bld.arg(&src);
-                bld.arg(&n);
-                unsafe { bld.launch(grid_1d(b * mid)) }
-                    .map_err(|e| format!("M3 mixed input_proj input cast: {e:?}"))?;
-            }
+            crate::gpu::launch::launch_cast(
+                &engine.ctx.stream,
+                down,
+                (staged, 2),
+                (scratch.gpu_input.cached_ptr(), 4),
+                b * mid,
+                format_args!("M3 mixed input_proj input cast"),
+            )?;
             let projected = scratch.temporal.cached_ptr();
             gpu_gemm_typed_forward_raw(
                 &engine.ctx,
@@ -1481,14 +1514,14 @@ impl Mamba3GpuEngineMixed {
                 Some(w.input_proj_b.ptr()),
                 (b, mid, dm),
             )?;
-            let n = (b * dm) as i32;
-            let dst = scratch.residual.cached_ptr();
-            let mut bld = engine.ctx.stream.launch_builder(up);
-            bld.arg(&dst);
-            bld.arg(&projected);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(b * dm)) }
-                .map_err(|e| format!("M3 mixed input_proj residual upcast: {e:?}"))?;
+            crate::gpu::launch::launch_cast(
+                &engine.ctx.stream,
+                up,
+                (scratch.residual.cached_ptr(), 4),
+                (projected, 2),
+                b * dm,
+                format_args!("M3 mixed input_proj residual upcast"),
+            )?;
         }
 
         let f32_sz = std::mem::size_of::<f32>() as u64;
@@ -1545,8 +1578,11 @@ impl Mamba3GpuEngineMixed {
             // F3: m3_split typed — splits bf16 proj, writes bf16 activations + f32 coefficients.
             {
                 let n = b * ip;
-                let grid = grid_1d(n);
-                let mut bld = engine.ctx.stream.launch_builder(k.m3_split_typed.get(dt));
+                let grid = grid_1d_cover(n)?;
+                let mut bld = engine
+                    .ctx
+                    .stream
+                    .launch_builder(k.m3_split_typed.get(width).get(dt));
                 let z_ptr = scratch.z.cached_ptr();
                 let x_ptr = scratch.x.cached_ptr();
                 let br_ptr = scratch.b_raw.cached_ptr();
@@ -1598,7 +1634,7 @@ impl Mamba3GpuEngineMixed {
                 let mut bld = engine
                     .ctx
                     .stream
-                    .launch_builder(k.bcnorm_fwd_bc_typed.get(dt));
+                    .launch_builder(k.bcnorm_fwd_bc_typed.get(width).get(dt));
                 bld.arg(&bn_ptr);
                 bld.arg(&cn_ptr);
                 bld.arg(&br_ptr);
@@ -1625,7 +1661,7 @@ impl Mamba3GpuEngineMixed {
             // .inner() guard would invalidate graph capture.
             {
                 let n = b * nh * ds;
-                let grid = grid_1d(n);
+                let grid = grid_1d_cover(n)?;
                 let bb_ptr = scratch.b_biased.cached_ptr();
                 let cb_ptr = scratch.c_biased.cached_ptr();
                 let kc_ptr = scratch.k_cur.cached_ptr();
@@ -1645,7 +1681,7 @@ impl Mamba3GpuEngineMixed {
                 let mut bld = engine
                     .ctx
                     .stream
-                    .launch_builder(k.m3_bias_rope_fwd_typed.get(dt));
+                    .launch_builder(k.m3_bias_rope_fwd_typed.get(width).get(dt));
                 bld.arg(&bb_ptr);
                 bld.arg(&cb_ptr);
                 bld.arg(&kc_ptr);
@@ -1669,10 +1705,21 @@ impl Mamba3GpuEngineMixed {
             // F6: m3_step_fwd typed — f32 state, bf16 x/k_cur/q_cur/y, f32 α/β/γ/D.
             {
                 let tier = crate::mamba3_siso::route::head_tier(hd);
-                let grid = super::kernels::step_head_cfg(tier, b, nh, hd, ds, k.step_block_threads);
+                let grid = super::kernels::step_head_cfg(
+                    tier,
+                    b,
+                    nh,
+                    hd,
+                    ds,
+                    *k.step_block_threads.get(width),
+                );
                 let kernel = match tier {
-                    crate::mamba3_siso::route::HeadTier::Warp => k.m3_step_fwd_typed.get(dt),
-                    crate::mamba3_siso::route::HeadTier::Block => k.m3_step_fwd_block_typed.get(dt),
+                    crate::mamba3_siso::route::HeadTier::Warp => {
+                        k.m3_step_fwd_typed.get(width).get(dt)
+                    }
+                    crate::mamba3_siso::route::HeadTier::Block => {
+                        k.m3_step_fwd_block_typed.get(width).get(dt)
+                    }
                 };
                 let ssm_ptr = state.ssm_state.inner_at(ssm_off);
                 let kst_ptr = state.k_state.inner_at(k_off);
@@ -1711,7 +1758,7 @@ impl Mamba3GpuEngineMixed {
                 let mut bld = engine
                     .ctx
                     .stream
-                    .launch_builder(k.rmsnorm_gated_fwd_typed.get(dt));
+                    .launch_builder(k.rmsnorm_gated_fwd_typed.get(width).get(dt));
                 let gated_ptr = scratch.gated.cached_ptr();
                 let gr_ptr = scratch.gated_rms_buf.cached_ptr();
                 let y_ptr = scratch.y.cached_ptr();
@@ -1731,19 +1778,19 @@ impl Mamba3GpuEngineMixed {
                 unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F7 rmsnorm_gated: {e:?}"))?;
             } else {
                 let n = b * di;
-                let n_i = n as i32;
-                let grid = grid_1d(n);
+                let n_i = crate::gpu::launch::WidthCount::new(n, width)?;
+                let grid = crate::gpu::launch::grid_1d_cover(n)?;
                 let mut bld = engine
                     .ctx
                     .stream
-                    .launch_builder(k.silu_gate_fwd_typed.get(dt));
+                    .launch_builder(k.silu_gate_fwd_typed.get(width).get(dt));
                 let gated_ptr = scratch.gated.cached_ptr();
                 let y_ptr = scratch.y.cached_ptr();
                 let z_ptr = scratch.z.cached_ptr();
                 bld.arg(&gated_ptr);
                 bld.arg(&y_ptr);
                 bld.arg(&z_ptr);
-                bld.arg(&n_i);
+                n_i.push(&mut bld);
                 bld.arg(&di_i);
                 bld.arg(&di_i);
                 unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F7 silu_gate: {e:?}"))?;
@@ -1834,7 +1881,7 @@ impl Mamba3GpuEngineMixed {
                     bld.arg(&up_ptr);
                     bld.arg(&b_i);
                     bld.arg(&h_i);
-                    unsafe { bld.launch(grid_1d(b * h)) }
+                    unsafe { bld.launch(grid_1d_cover(b * h)?) }
                         .map_err(|e| format!("M3 mlp gate: {e:?}"))?;
                 }
                 gpu_gemm_typed_forward_raw(
@@ -2466,11 +2513,9 @@ impl Mamba3GpuBackbone {
                 )?;
                 // Downcast the final hidden into the typed decode temporal
                 // so the logits path continues exactly as after a step.
-                use cudarc::driver::PushKernelArg;
                 let eng = e.engine_ref();
                 let ctx = &eng.ctx;
                 let n = eng.batch * eng.cfg.d_model;
-                let n_i = n as i32;
                 let cast = match sc.temporal.dtype() {
                     WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
                     WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
@@ -2478,14 +2523,14 @@ impl Mamba3GpuBackbone {
                         return Err("M3 mixed prefill: unexpected f32 scratch dtype".into());
                     }
                 };
-                let dst = sc.temporal.cached_ptr();
-                let src = sc.prefill_hidden.cached_ptr();
-                let mut bld = ctx.stream.launch_builder(cast);
-                bld.arg(&dst);
-                bld.arg(&src);
-                bld.arg(&n_i);
-                unsafe { bld.launch(crate::gpu::launch::grid_1d(n)) }
-                    .map_err(|e| format!("M3 mixed prefill hidden downcast: {e:?}"))?;
+                crate::gpu::launch::launch_cast(
+                    &ctx.stream,
+                    cast,
+                    (sc.temporal.cached_ptr(), 2),
+                    (sc.prefill_hidden.cached_ptr(), 4),
+                    n,
+                    format_args!("M3 mixed prefill hidden downcast"),
+                )?;
                 Ok(())
             }
             _ => Err("M3 prefill: engine/scratch precision arms disagree".to_string()),

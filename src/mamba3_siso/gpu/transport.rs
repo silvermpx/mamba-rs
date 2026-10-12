@@ -3,7 +3,9 @@
 use super::kernels::Mamba3Kernels;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::kernels::{HalfKernel, TypedKernel};
-use cudarc::driver::{CudaFunction, LaunchConfig};
+use crate::gpu::launch::IndexWidth;
+use cudarc::driver::sys::CUdeviceptr;
+use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 
 #[derive(Clone, Copy)]
 pub(super) struct TransportAdmission {
@@ -116,7 +118,7 @@ fn axis0_launch_policy(
     columns: usize,
 ) -> Axis0LaunchPolicy {
     assert!(columns > 0, "axis-0 reduction columns must be positive");
-    let lanes = rows.next_power_of_two().clamp(32, 256) as u32;
+    let lanes = axis0_lanes(rows);
     if admission.cap16() && (1..=64).contains(&rows) && columns >= 4096 {
         let packed_columns = 256 / lanes;
         Axis0LaunchPolicy {
@@ -137,6 +139,33 @@ fn axis0_launch_policy(
             },
         }
     }
+}
+
+/// The shape a DQKV launch selects its function by: the state and head
+/// widths, the chunk, the window and whether the pair matrices are staged.
+#[derive(Clone, Copy, Debug)]
+pub struct DqkvRoute {
+    pub state: usize,
+    pub head: usize,
+    pub chunk: usize,
+    pub time: usize,
+    pub pairs: bool,
+}
+
+/// The block width of the plain axis-0 reduction for `rows` partial rows:
+/// a lane per row up to 256, never under a warp.
+fn axis0_lanes(rows: usize) -> u32 {
+    rows.next_power_of_two().clamp(32, 256) as u32
+}
+
+/// One axis-0 reduction: `rows` partial rows of `columns` floats at
+/// `partials`, summed per column into `out`, or added to it.
+pub struct Axis0Sum {
+    pub out: CUdeviceptr,
+    pub partials: CUdeviceptr,
+    pub rows: usize,
+    pub columns: usize,
+    pub accumulate: bool,
 }
 
 fn angle_backward_launch_policy(
@@ -167,26 +196,33 @@ fn angle_backward_launch_policy(
 }
 
 impl Mamba3Kernels {
-    /// Select the DQKV function for `state`, `head`, `chunk`, `time`, and
-    /// `pairs`. The returned handle must use the same shape, pair-matrix
-    /// decision, and launch geometry; ineligible shapes use the legacy typed
-    /// function for `dtype`.
+    /// Select the DQKV function for `route` at the launch's index `width`.
+    /// The returned handle must use the same shape, pair-matrix decision, and
+    /// launch geometry; ineligible shapes use the legacy typed function for
+    /// `dtype`. The transport is built at 32 bits only, so a launch past that
+    /// range takes the legacy function's 64-bit build.
     pub fn dqkv_for_shape(
         &self,
         dtype: WeightDtype,
-        state: usize,
-        head: usize,
-        chunk: usize,
-        time: usize,
-        pairs: bool,
+        route: DqkvRoute,
+        width: IndexWidth,
     ) -> &CudaFunction {
-        if dqkv_transport_admitted(self.transport.admission, state, head, chunk, time, pairs) {
+        let DqkvRoute {
+            state,
+            head,
+            chunk,
+            time,
+            pairs,
+        } = route;
+        if width == IndexWidth::I32
+            && dqkv_transport_admitted(self.transport.admission, state, head, chunk, time, pairs)
+        {
             match &self.transport.dqkv {
                 Some(kernels) => kernels.get(dtype),
                 None => unreachable!("admitted DQKV transport handles were not loaded"),
             }
         } else {
-            self.m3_dqkv_typed.get(dtype)
+            self.m3_dqkv_typed.get(width).get(dtype)
         }
     }
 
@@ -194,20 +230,25 @@ impl Mamba3Kernels {
     /// return its staging-tile count. The function and tile count are one
     /// launch contract: callers derive shared memory and staging from the
     /// count. Ineligible shapes and F32 use the legacy function with six tiles.
+    /// Like the DQKV transport, the DQK-theta transport serves 32-bit launches
+    /// only.
     pub fn dqktheta_for_shape(
         &self,
         dtype: WeightDtype,
         state: usize,
         chunk: usize,
         angles: usize,
+        width: IndexWidth,
     ) -> (&CudaFunction, usize) {
-        if dqktheta_transport_admitted(self.transport.admission, dtype, state, chunk, angles) {
+        if width == IndexWidth::I32
+            && dqktheta_transport_admitted(self.transport.admission, dtype, state, chunk, angles)
+        {
             match &self.transport.dqktheta {
                 Some(kernels) => (kernels.get(dtype), 4),
                 None => unreachable!("admitted DQK-theta transport handles were not loaded"),
             }
         } else {
-            (self.m3_dqktheta_typed.get(dtype), 6)
+            (self.m3_dqktheta_typed.get(width).get(dtype), 6)
         }
     }
 
@@ -225,6 +266,64 @@ impl Mamba3Kernels {
         } else {
             (&self.reduce_sum_axis0, policy.config)
         }
+    }
+
+    /// Launch the axis-0 reduction `sum`: on the 32-bit route the selection
+    /// of [`Self::axis0_reduction`] in one launch, on the 64-bit route the
+    /// wide reduction at the plain reduction's block width in launches of at
+    /// most the grid's x extent of columns. Every route sums a column in the
+    /// same order, so all of them write the same bits.
+    pub fn launch_axis0_sum(
+        &self,
+        stream: &CudaStream,
+        sum: Axis0Sum,
+        width: IndexWidth,
+    ) -> Result<(), String> {
+        let accumulate = i32::from(sum.accumulate);
+        let rows = i32::try_from(sum.rows)
+            .map_err(|_| format!("axis-0 reduction of {} rows", sum.rows))?;
+        if width == IndexWidth::I32 {
+            let columns = i32::try_from(sum.columns).map_err(|_| {
+                format!(
+                    "{} columns reached the 32-bit axis-0 reduction",
+                    sum.columns
+                )
+            })?;
+            let (reduction, cfg) = self.axis0_reduction(sum.rows, sum.columns);
+            let mut builder = stream.launch_builder(reduction);
+            builder.arg(&sum.out);
+            builder.arg(&sum.partials);
+            builder.arg(&rows);
+            builder.arg(&columns);
+            builder.arg(&accumulate);
+            return unsafe { builder.launch(cfg) }
+                .map(|_| ())
+                .map_err(|e| format!("axis-0 reduction: {e:?}"));
+        }
+        assert!(sum.columns > 0, "axis-0 reduction columns must be positive");
+        let lanes = axis0_lanes(sum.rows);
+        let dim = i64::try_from(sum.columns)
+            .map_err(|_| format!("axis-0 reduction of {} columns", sum.columns))?;
+        let mut col0 = 0usize;
+        while col0 < sum.columns {
+            let piece = (sum.columns - col0).min(i32::MAX as usize);
+            let first = col0 as i64;
+            let mut builder = stream.launch_builder(&self.reduce_sum_axis0_wide);
+            builder.arg(&sum.out);
+            builder.arg(&sum.partials);
+            builder.arg(&rows);
+            builder.arg(&dim);
+            builder.arg(&first);
+            builder.arg(&accumulate);
+            let cfg = LaunchConfig {
+                grid_dim: (piece as u32, 1, 1),
+                block_dim: (lanes, 1, 1),
+                shared_mem_bytes: lanes * 4,
+            };
+            unsafe { builder.launch(cfg) }.map_err(|e| format!("wide axis-0 reduction: {e:?}"))?;
+            col0 += piece;
+        }
+        Ok(())
     }
 
     /// Return the angle-backward launch configuration for `batch`, `time`,

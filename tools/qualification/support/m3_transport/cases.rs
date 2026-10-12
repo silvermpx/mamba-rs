@@ -3,7 +3,8 @@
 use super::{Case, check_case, encode, values};
 use cudarc::driver::{CudaModule, CudaStream, LaunchConfig};
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::mamba3_siso::gpu::Mamba3Kernels;
+use mamba_rs::gpu::launch::IndexWidth;
+use mamba_rs::mamba3_siso::gpu::{DqkvRoute, Mamba3Kernels};
 use std::sync::Arc;
 
 fn suffix(dtype: WeightDtype) -> &'static str {
@@ -108,7 +109,17 @@ pub(super) fn dqkv(
                     .to_vec(),
                 functions: [
                     &original,
-                    kernels.dqkv_for_shape(dtype, ds, hd, cs, t, pairs),
+                    kernels.dqkv_for_shape(
+                        dtype,
+                        DqkvRoute {
+                            state: ds,
+                            head: hd,
+                            chunk: cs,
+                            time: t,
+                            pairs,
+                        },
+                        IndexWidth::I32,
+                    ),
                 ],
                 configs: [cfg, cfg],
                 initial_output: None,
@@ -150,7 +161,7 @@ pub(super) fn dqktheta(
             .enumerate()
             .map(|(i, field)| encode(field, if i < 2 { dtype } else { WeightDtype::F32 }))
             .collect();
-        let (selected, tiles) = kernels.dqktheta_for_shape(dtype, ds, cs, na);
+        let (selected, tiles) = kernels.dqktheta_for_shape(dtype, ds, cs, na, IndexWidth::I32);
         for staging in [false, true] {
             let config = |tile_count| LaunchConfig {
                 grid_dim: ((b * t.div_ceil(cs)) as u32, nh as u32, 1),
@@ -282,7 +293,7 @@ pub(super) fn angle(stream: &Arc<CudaStream>, kernels: &Mamba3Kernels, baseline:
                 lengths: vec![th * na, th * na],
                 inputs,
                 dims: [b, t, nh, na].map(|v| v as i32).to_vec(),
-                functions: [&original, &kernels.m3_angle_dt_bwd_seq],
+                functions: [&original, &kernels.m3_angle_dt_bwd_seq.i32],
                 configs: [
                     LaunchConfig {
                         grid_dim: (b as u32, total.div_ceil(256) as u32, 1),

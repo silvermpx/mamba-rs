@@ -70,86 +70,90 @@ __device__ __forceinline__ float m3c_heavy_tail_deriv(float x) {
     return 1.0f / (d * d);
 }
 
-extern "C" __global__ void m3_preprocess_chunks(
-    // Outputs
-    float* __restrict__ K_scaled,   // [B * T * nh * ds] -- prescaled K
-    float* __restrict__ qk_dot,     // [B * T * nh]
-    float* __restrict__ scale_out,  // [B * T * nh]
-    float* __restrict__ gamma_out,  // [B * T * nh]
-    // Inputs
-    const float* __restrict__ K,        // [B * T * nh * ds] (post bias+RoPE)
-    const float* __restrict__ Q,        // [B * T * nh * ds] (post bias+RoPE)
-    const float* __restrict__ DT,       // [B * T * nh] (post-softplus)
-    const float* __restrict__ trap_sig, // [B * T * nh] (post-sigmoid)
-    int batch, int T, int nh, int ds, int chunk_size
-) {
-    int n_chunks = (T + chunk_size - 1) / chunk_size;
-    int bc = blockIdx.x;         // batch * n_chunks
-    int b = bc / n_chunks;
-    int chunk = bc % n_chunks;
-    int h = blockIdx.y;
-    int t_local = threadIdx.x;   // position within chunk
-
-    int chunk_start = chunk * chunk_size;
-    int t = chunk_start + t_local;
-    if (t >= T) return;
-
-    int th = (b * T + t) * nh + h;     // index into [B*T*nh] arrays
-
-    // gamma[t] = DT[t] * trap_sig[t]
-    float dt_cur = DT[th];
-    float trap_cur = trap_sig[th];
-    float gamma_val = dt_cur * trap_cur;
-
-    // shifted_gamma[t] = DT[t+1] * (1 - trap_sig[t+1]), 0 for last timestep
-    float shifted_gamma = 0.0f;
-    if (t + 1 < T) {
-        int th_next = (b * T + t + 1) * nh + h;
-        float dt_next = DT[th_next];
-        float trap_next = trap_sig[th_next];
-        shifted_gamma = dt_next * (1.0f - trap_next);
-    }
-
-    float scale_val = shifted_gamma + gamma_val;
-
-    // Store scale and gamma
-    if (scale_out) scale_out[th] = scale_val;
-    if (gamma_out) gamma_out[th] = gamma_val;
-
-    // Compute qk_dot = sum_n(Q[t,h,n] * K[t,h,n]) * gamma. Each thread
-    // owns one contiguous (t, h) row; the wide path issues float4 loads
-    // and stores (4x fewer transactions) while the dot stays the same
-    // serial n-ascending fold - bit-identical to the scalar path.
-    int kq_base = (b * T + t) * nh * ds + h * ds;
-    float dot = 0.0f;
-    if (ds % 4 == 0) {
-        const float4* q4 = reinterpret_cast<const float4*>(Q + kq_base);
-        const float4* k4 = reinterpret_cast<const float4*>(K + kq_base);
-        float4* ks4 = reinterpret_cast<float4*>(K_scaled + kq_base);
-        for (int n4 = 0; n4 < ds / 4; n4++) {
-            float4 qv = q4[n4];
-            float4 kv = k4[n4];
-            dot += qv.x * kv.x;
-            dot += qv.y * kv.y;
-            dot += qv.z * kv.z;
-            dot += qv.w * kv.w;
-            float4 sc;
-            sc.x = kv.x * scale_val;
-            sc.y = kv.y * scale_val;
-            sc.z = kv.z * scale_val;
-            sc.w = kv.w * scale_val;
-            ks4[n4] = sc;
-        }
-    } else {
-        for (int n = 0; n < ds; n++) {
-            dot += Q[kq_base + n] * K[kq_base + n];
-        }
-        for (int n = 0; n < ds; n++) {
-            K_scaled[kq_base + n] = K[kq_base + n] * scale_val;
-        }
-    }
-    qk_dot[th] = dot * gamma_val;
+#define DEFINE_M3_PREPROCESS_CHUNKS_F32(NAME, IDX)                             \
+extern "C" __global__ void NAME(                                               \
+    /* Outputs */                                                              \
+    float* __restrict__ K_scaled,   /* [B * T * nh * ds] -- prescaled K */     \
+    float* __restrict__ qk_dot,     /* [B * T * nh] */                         \
+    float* __restrict__ scale_out,  /* [B * T * nh] */                         \
+    float* __restrict__ gamma_out,  /* [B * T * nh] */                         \
+    /* Inputs */                                                               \
+    const float* __restrict__ K,        /* [B * T * nh * ds] (post bias+RoPE) */ \
+    const float* __restrict__ Q,        /* [B * T * nh * ds] (post bias+RoPE) */ \
+    const float* __restrict__ DT,       /* [B * T * nh] (post-softplus) */     \
+    const float* __restrict__ trap_sig, /* [B * T * nh] (post-sigmoid) */      \
+    int batch, int T, int nh, int ds, int chunk_size                           \
+) {                                                                            \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
+    IDX bc = blockIdx.x;         /* batch * n_chunks */                        \
+    IDX b = bc / n_chunks;                                                     \
+    int chunk = (int)(bc % n_chunks);                                          \
+    int h = blockIdx.y;                                                        \
+    int t_local = threadIdx.x;   /* position within chunk */                   \
+                                                                               \
+    int chunk_start = chunk * chunk_size;                                      \
+    int t = chunk_start + t_local;                                             \
+    if (t >= T) return;                                                        \
+                                                                               \
+    IDX th = (b * T + t) * nh + h;     /* index into [B*T*nh] arrays */        \
+                                                                               \
+    /* gamma[t] = DT[t] * trap_sig[t] */                                       \
+    float dt_cur = DT[th];                                                     \
+    float trap_cur = trap_sig[th];                                             \
+    float gamma_val = dt_cur * trap_cur;                                       \
+                                                                               \
+    /* shifted_gamma[t] = DT[t+1] * (1 - trap_sig[t+1]), 0 for last timestep */ \
+    float shifted_gamma = 0.0f;                                                \
+    if (t + 1 < T) {                                                           \
+        IDX th_next = (b * T + t + 1) * nh + h;                                \
+        float dt_next = DT[th_next];                                           \
+        float trap_next = trap_sig[th_next];                                   \
+        shifted_gamma = dt_next * (1.0f - trap_next);                          \
+    }                                                                          \
+                                                                               \
+    float scale_val = shifted_gamma + gamma_val;                               \
+                                                                               \
+    /* Store scale and gamma */                                                \
+    if (scale_out) scale_out[th] = scale_val;                                  \
+    if (gamma_out) gamma_out[th] = gamma_val;                                  \
+                                                                               \
+    /* Compute qk_dot = sum_n(Q[t,h,n] * K[t,h,n]) * gamma. Each thread */     \
+    /* owns one contiguous (t, h) row; the wide path issues float4 loads */    \
+    /* and stores (4x fewer transactions) while the dot stays the same */      \
+    /* serial n-ascending fold - bit-identical to the scalar path. */          \
+    IDX kq_base = (b * T + t) * nh * ds + h * ds;                              \
+    float dot = 0.0f;                                                          \
+    if (ds % 4 == 0) {                                                         \
+        const float4* q4 = reinterpret_cast<const float4*>(Q + kq_base);       \
+        const float4* k4 = reinterpret_cast<const float4*>(K + kq_base);       \
+        float4* ks4 = reinterpret_cast<float4*>(K_scaled + kq_base);           \
+        for (int n4 = 0; n4 < ds / 4; n4++) {                                  \
+            float4 qv = q4[n4];                                                \
+            float4 kv = k4[n4];                                                \
+            dot += qv.x * kv.x;                                                \
+            dot += qv.y * kv.y;                                                \
+            dot += qv.z * kv.z;                                                \
+            dot += qv.w * kv.w;                                                \
+            float4 sc;                                                         \
+            sc.x = kv.x * scale_val;                                           \
+            sc.y = kv.y * scale_val;                                           \
+            sc.z = kv.z * scale_val;                                           \
+            sc.w = kv.w * scale_val;                                           \
+            ks4[n4] = sc;                                                      \
+        }                                                                      \
+    } else {                                                                   \
+        for (int n = 0; n < ds; n++) {                                         \
+            dot += Q[kq_base + n] * K[kq_base + n];                            \
+        }                                                                      \
+        for (int n = 0; n < ds; n++) {                                         \
+            K_scaled[kq_base + n] = K[kq_base + n] * scale_val;                \
+        }                                                                      \
+    }                                                                          \
+    qk_dot[th] = dot * gamma_val;                                              \
 }
+
+DEFINE_M3_PREPROCESS_CHUNKS_F32(m3_preprocess_chunks, int)
+DEFINE_M3_PREPROCESS_CHUNKS_F32(m3_preprocess_chunks_i64, long long)
 
 // ============================================================================
 // 2. m3_dA_cumsum -- Inclusive prefix sum of ADT within chunks
@@ -162,30 +166,34 @@ extern "C" __global__ void m3_preprocess_chunks(
 // Output: dA_cumsum[B * n_chunks * nh * chunk_size]
 //
 // Grid: (B, n_chunks, ceil(nh / blockDim.x)), Block: (min(nh, 256))
-extern "C" __global__ void m3_dA_cumsum(
-    float* __restrict__ dA_cumsum_out,  // [B * n_chunks * nh * chunk_size]
-    const float* __restrict__ adt,      // [B * T * nh]
-    int batch, int T, int nh, int chunk_size
-) {
-    int b = blockIdx.x;
-    int chunk = blockIdx.y;
-    int h = blockIdx.z * blockDim.x + threadIdx.x;
-    if (h >= nh) return;
-
-    int n_chunks = gridDim.y;
-    int chunk_start = chunk * chunk_size;
-    int chunk_end = chunk_start + chunk_size;
-    if (chunk_end > T) chunk_end = T;
-
-    float cumsum = 0.0f;
-    int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;
-
-    for (int t = chunk_start; t < chunk_end; t++) {
-        float a_dt = adt[(b * T + t) * nh + h];
-        cumsum += a_dt;
-        dA_cumsum_out[cs_base + (t - chunk_start)] = cumsum;
-    }
+#define DEFINE_M3_DA_CUMSUM(NAME, IDX)                                         \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dA_cumsum_out,  /* [B * n_chunks * nh * chunk_size] */ \
+    const float* __restrict__ adt,      /* [B * T * nh] */                     \
+    int batch, int T, int nh, int chunk_size                                   \
+) {                                                                            \
+    IDX b = blockIdx.x;                                                        \
+    int chunk = blockIdx.y;                                                    \
+    int h = blockIdx.z * blockDim.x + threadIdx.x;                             \
+    if (h >= nh) return;                                                       \
+                                                                               \
+    int n_chunks = gridDim.y;                                                  \
+    int chunk_start = chunk * chunk_size;                                      \
+    int chunk_end = chunk_start + chunk_size;                                  \
+    if (chunk_end > T) chunk_end = T;                                          \
+                                                                               \
+    float cumsum = 0.0f;                                                       \
+    IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;              \
+                                                                               \
+    for (int t = chunk_start; t < chunk_end; t++) {                            \
+        float a_dt = adt[(b * T + t) * nh + h];                                \
+        cumsum += a_dt;                                                        \
+        dA_cumsum_out[cs_base + (t - chunk_start)] = cumsum;                   \
+    }                                                                          \
 }
+
+DEFINE_M3_DA_CUMSUM(m3_dA_cumsum, int)
+DEFINE_M3_DA_CUMSUM(m3_dA_cumsum_i64, long long)
 
 // ============================================================================
 // 3. m3_chunk_state_fwd -- Per-chunk state contribution (trapezoidal K_scaled)
@@ -204,176 +212,180 @@ extern "C" __global__ void m3_dA_cumsum(
 // head wider than its lanes takes its elements in turns, or (hd, ds / 4, 2)
 // in the quad layout (see chunk_state_cfg, which takes the lanes from the
 // threads the kernel's registers allow).
-extern "C" __global__ void m3_chunk_state_fwd(
-    float* __restrict__ states_out,     // [B * n_chunks * nh * hd * ds]
-    const float* __restrict__ x,        // [B * T * d_inner]
-    const float* __restrict__ K_scaled, // [B * T * nh * ds]
-    const float* __restrict__ dA_cumsum,// [B * n_chunks * nh * chunk_size]
-    int batch, int T, int nh, int hd, int ds, int chunk_size
-) {
-    int d_inner = nh * hd;
-    int n_chunks = (T + chunk_size - 1) / chunk_size;
-    int bc = blockIdx.x;  // batch * n_chunks
-    int b = bc / n_chunks;
-    int chunk = bc % n_chunks;
-    // Two heads share one block so the 16-lane head dimension fills a
-    // full warp (blockDim = (hd, 2)); each head's work stays private to
-    // its own thread row.
-    // Thread layout, selected by the launcher (single source:
-    // chunk_state_cfg in kernels.rs):
-    //   legacy: block (hd, heads)          - one thread owns all ds chains
-    //   quad:   block (hd, ds/4, heads)    - one thread owns FOUR chains
-    // The quad layout exists for latency hiding (the t-loop is a serial
-    // chain and the legacy grid leaves the SM starved at ~200 threads);
-    // every acc[n] chain is still folded ascending-t by exactly one
-    // thread with the identical expression - work redistribution only.
-    // Unambiguous layout probe: ONLY the quad layout has blockDim.z >= 2
-    // (legacy is (hd, heads, 1), whose y is the HEAD axis - probing y
-    // would misread it and walk a zero-byte dynamic smem allocation).
-    bool quad = blockDim.z >= 2;
-    int h = quad ? (blockIdx.y * blockDim.z + threadIdx.z)
-                 : (blockIdx.y * blockDim.y + threadIdx.y);
-    if (ds > MAMBA_RS_STATE_CAP) return;  // capacity guard for acc[] (uniform)
-
-    int chunk_start = chunk * chunk_size;
-    int chunk_end = chunk_start + chunk_size;
-    if (chunk_end > T) chunk_end = T;
-    int chunk_len = chunk_end - chunk_start;
-    bool wide = (ds % 4 == 0);
-
-    if (!quad) {
-        // The legacy layout holds no barrier, so a head past the last one
-        // leaves at once.
-        if (h >= nh) return;
-        int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;
-        float dA_end = dA_cumsum[cs_base + chunk_len - 1];
-        for (int p = threadIdx.x; p < hd; p += blockDim.x) {
-            // t outer / n inner: the decay exponential and the V load
-            // depend only on t, so the swapped order computes each ONCE
-            // per step instead of once per (step, state) pair. Every
-            // acc[n] still sums its terms in ascending t with the
-            // identical expression, so the bits are unchanged.
-            float acc[MAMBA_RS_STATE_CAP];
-            for (int n = 0; n < ds; n++) acc[n] = 0.0f;
-            for (int t = chunk_start; t < chunk_end; t++) {
-                int t_local = t - chunk_start;
-                float dA_t = dA_cumsum[cs_base + t_local];
-                float decay = FAST_EXP(m3_nonpos(dA_end - dA_t)); // The cumsum diff is <=0 mathematically; the cap restores the reference safety net against float-noise positives (decay>1).
-                float v_t = x[(b * T + t) * d_inner + h * hd + p];
-                int ks_base = (b * T + t) * nh * ds + h * ds;
-                for (int n = 0; n < ds; n++) {
-                    acc[n] += decay * K_scaled[ks_base + n] * v_t;
-                }
-            }
-            int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;
-            if (wide) {
-                float4* so4 = reinterpret_cast<float4*>(states_out + state_base);
-                for (int n4 = 0; n4 < ds / 4; n4++) {
-                    float4 o;
-                    o.x = acc[n4 * 4 + 0];
-                    o.y = acc[n4 * 4 + 1];
-                    o.z = acc[n4 * 4 + 2];
-                    o.w = acc[n4 * 4 + 3];
-                    so4[n4] = o;
-                }
-            } else {
-                for (int n = 0; n < ds; n++) states_out[state_base + n] = acc[n];
-            }
-        }
-        return;
-    }
-
-    int p = threadIdx.x;
-    int n_lo = (int)threadIdx.y * 4;
-    int n_hi = n_lo + 4;
-    // No early return on the quad path - it holds a __syncthreads and an
-    // out-of-range head (odd nh tail) must still reach the barrier.
-    bool live = (p < hd) && (h < nh);
-
-    // Output base for this (b, chunk, h, p)
-    int state_base = live ? ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds : 0;
-
-    float acc[MAMBA_RS_STATE_CAP];
-    for (int n = n_lo; n < n_hi; n++) acc[n] = 0.0f;
-    // The kernel is L2-throughput bound (measured 76% at the serve shape)
-    // and the quad thread split alone MULTIPLIES redundant global reads
-    // (four threads per p re-read the same x element). So this path
-    // stages the block's x/K/dA chunk slices in shared memory ONCE
-    // (cooperative, coalesced) and the fold reads smem - identical
-    // values, identical per-chain arithmetic, a fraction of the L2
-    // traffic.
-    extern __shared__ float m3cst_sm[];
-    int heads_pb = blockDim.z;
-    int h0 = blockIdx.y * heads_pb;
-    float* sx = m3cst_sm;                       // [heads][cs_len][hd]
-    float* sk = sx + heads_pb * chunk_size * hd; // [heads][cs_len][ds]
-    float* sda = sk + heads_pb * chunk_size * ds; // [heads][cs_len]
-    int tid = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;
-    int nthr = blockDim.x * blockDim.y * blockDim.z;
-    for (int i = tid; i < heads_pb * chunk_len * hd; i += nthr) {
-        int hz = i / (chunk_len * hd);
-        int rem = i % (chunk_len * hd);
-        int tl = rem / hd;
-        int pp = rem % hd;
-        int hg = h0 + hz;
-        sx[hz * chunk_size * hd + tl * hd + pp] = (hg < nh)
-            ? x[(long long)(b * T + chunk_start + tl) * d_inner + hg * hd + pp]
-            : 0.0f;
-    }
-    for (int i = tid; i < heads_pb * chunk_len * ds; i += nthr) {
-        int hz = i / (chunk_len * ds);
-        int rem = i % (chunk_len * ds);
-        int tl = rem / ds;
-        int nn = rem % ds;
-        int hg = h0 + hz;
-        sk[hz * chunk_size * ds + tl * ds + nn] = (hg < nh)
-            ? K_scaled[(long long)(b * T + chunk_start + tl) * nh * ds + hg * ds + nn]
-            : 0.0f;
-    }
-    for (int i = tid; i < heads_pb * chunk_len; i += nthr) {
-        int hz = i / chunk_len;
-        int tl = i % chunk_len;
-        int hg = h0 + hz;
-        sda[hz * chunk_size + tl] = (hg < nh)
-            ? dA_cumsum[((b * n_chunks + chunk) * nh + hg) * chunk_size + tl]
-            : 0.0f;
-    }
-    __syncthreads();
-    if (live) {
-        int hz = threadIdx.z;
-        const float* sxh = sx + hz * chunk_size * hd;
-        const float* skh = sk + hz * chunk_size * ds;
-        const float* sdah = sda + hz * chunk_size;
-        float dA_end_s = sdah[chunk_len - 1];
-        for (int t_local = 0; t_local < chunk_len; t_local++) {
-            float dA_t = sdah[t_local];
-            float decay = FAST_EXP(m3_nonpos(dA_end_s - dA_t));
-            float v_t = sxh[t_local * hd + p];
-            const float4* k4 = reinterpret_cast<const float4*>(skh + t_local * ds);
-            for (int n4 = n_lo / 4; n4 < n_hi / 4; n4++) {
-                float4 kv = k4[n4];
-                acc[n4 * 4 + 0] += decay * kv.x * v_t;
-                acc[n4 * 4 + 1] += decay * kv.y * v_t;
-                acc[n4 * 4 + 2] += decay * kv.z * v_t;
-                acc[n4 * 4 + 3] += decay * kv.w * v_t;
-            }
-        }
-    }
-    if (!live) return;
-    if (wide) {
-        float4* so4 = reinterpret_cast<float4*>(states_out + state_base);
-        for (int n4 = n_lo / 4; n4 < n_hi / 4; n4++) {
-            float4 o;
-            o.x = acc[n4 * 4 + 0];
-            o.y = acc[n4 * 4 + 1];
-            o.z = acc[n4 * 4 + 2];
-            o.w = acc[n4 * 4 + 3];
-            so4[n4] = o;
-        }
-    } else {
-        for (int n = n_lo; n < n_hi; n++) states_out[state_base + n] = acc[n];
-    }
+#define DEFINE_M3_CHUNK_STATE_FWD_F32(NAME, IDX)                               \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ states_out,     /* [B * n_chunks * nh * hd * ds] */    \
+    const float* __restrict__ x,        /* [B * T * d_inner] */                \
+    const float* __restrict__ K_scaled, /* [B * T * nh * ds] */                \
+    const float* __restrict__ dA_cumsum,/* [B * n_chunks * nh * chunk_size] */ \
+    int batch, int T, int nh, int hd, int ds, int chunk_size                   \
+) {                                                                            \
+    int d_inner = nh * hd;                                                     \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
+    IDX bc = blockIdx.x;  /* batch * n_chunks */                               \
+    IDX b = bc / n_chunks;                                                     \
+    int chunk = (int)(bc % n_chunks);                                          \
+    /* Two heads share one block so the 16-lane head dimension fills a */      \
+    /* full warp (blockDim = (hd, 2)); each head's work stays private to */    \
+    /* its own thread row. */                                                  \
+    /* Thread layout, selected by the launcher (single source: */              \
+    /* chunk_state_cfg in kernels.rs): */                                      \
+    /* legacy: block (hd, heads)          - one thread owns all ds chains */   \
+    /* quad:   block (hd, ds/4, heads)    - one thread owns FOUR chains */     \
+    /* The quad layout exists for latency hiding (the t-loop is a serial */    \
+    /* chain and the legacy grid leaves the SM starved at ~200 threads); */    \
+    /* every acc[n] chain is still folded ascending-t by exactly one */        \
+    /* thread with the identical expression - work redistribution only. */     \
+    /* Unambiguous layout probe: ONLY the quad layout has blockDim.z >= 2 */   \
+    /* (legacy is (hd, heads, 1), whose y is the HEAD axis - probing y */      \
+    /* would misread it and walk a zero-byte dynamic smem allocation). */      \
+    bool quad = blockDim.z >= 2;                                               \
+    int h = quad ? (blockIdx.y * blockDim.z + threadIdx.z)                     \
+                 : (blockIdx.y * blockDim.y + threadIdx.y);                    \
+    if (ds > MAMBA_RS_STATE_CAP) return;  /* capacity guard for acc[] (uniform) */ \
+                                                                               \
+    int chunk_start = chunk * chunk_size;                                      \
+    int chunk_end = chunk_start + chunk_size;                                  \
+    if (chunk_end > T) chunk_end = T;                                          \
+    int chunk_len = chunk_end - chunk_start;                                   \
+    bool wide = (ds % 4 == 0);                                                 \
+                                                                               \
+    if (!quad) {                                                               \
+        /* The legacy layout holds no barrier, so a head past the last one */  \
+        /* leaves at once. */                                                  \
+        if (h >= nh) return;                                                   \
+        IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;          \
+        float dA_end = dA_cumsum[cs_base + chunk_len - 1];                     \
+        for (int p = threadIdx.x; p < hd; p += blockDim.x) {                   \
+            /* t outer / n inner: the decay exponential and the V load */      \
+            /* depend only on t, so the swapped order computes each ONCE */    \
+            /* per step instead of once per (step, state) pair. Every */       \
+            /* acc[n] still sums its terms in ascending t with the */          \
+            /* identical expression, so the bits are unchanged. */             \
+            float acc[MAMBA_RS_STATE_CAP];                                     \
+            for (int n = 0; n < ds; n++) acc[n] = 0.0f;                        \
+            for (int t = chunk_start; t < chunk_end; t++) {                    \
+                int t_local = t - chunk_start;                                 \
+                float dA_t = dA_cumsum[cs_base + t_local];                     \
+                float decay = FAST_EXP(m3_nonpos(dA_end - dA_t)); /* The cumsum diff is <=0 mathematically; the cap restores the reference safety net against float-noise positives (decay>1). */ \
+                float v_t = x[(b * T + t) * d_inner + h * hd + p];             \
+                IDX ks_base = (b * T + t) * nh * ds + h * ds;                  \
+                for (int n = 0; n < ds; n++) {                                 \
+                    acc[n] += decay * K_scaled[ks_base + n] * v_t;             \
+                }                                                              \
+            }                                                                  \
+            IDX state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds; \
+            if (wide) {                                                        \
+                float4* so4 = reinterpret_cast<float4*>(states_out + state_base); \
+                for (int n4 = 0; n4 < ds / 4; n4++) {                          \
+                    float4 o;                                                  \
+                    o.x = acc[n4 * 4 + 0];                                     \
+                    o.y = acc[n4 * 4 + 1];                                     \
+                    o.z = acc[n4 * 4 + 2];                                     \
+                    o.w = acc[n4 * 4 + 3];                                     \
+                    so4[n4] = o;                                               \
+                }                                                              \
+            } else {                                                           \
+                for (int n = 0; n < ds; n++) states_out[state_base + n] = acc[n]; \
+            }                                                                  \
+        }                                                                      \
+        return;                                                                \
+    }                                                                          \
+                                                                               \
+    int p = threadIdx.x;                                                       \
+    int n_lo = (int)threadIdx.y * 4;                                           \
+    int n_hi = n_lo + 4;                                                       \
+    /* No early return on the quad path - it holds a __syncthreads and an */   \
+    /* out-of-range head (odd nh tail) must still reach the barrier. */        \
+    bool live = (p < hd) && (h < nh);                                          \
+                                                                               \
+    /* Output base for this (b, chunk, h, p) */                                \
+    IDX state_base = live ? ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds : 0; \
+                                                                               \
+    float acc[MAMBA_RS_STATE_CAP];                                             \
+    for (int n = n_lo; n < n_hi; n++) acc[n] = 0.0f;                           \
+    /* The kernel is L2-throughput bound (measured 76% at the serve shape) */  \
+    /* and the quad thread split alone MULTIPLIES redundant global reads */    \
+    /* (four threads per p re-read the same x element). So this path */        \
+    /* stages the block's x/K/dA chunk slices in shared memory ONCE */         \
+    /* (cooperative, coalesced) and the fold reads smem - identical */         \
+    /* values, identical per-chain arithmetic, a fraction of the L2 */         \
+    /* traffic. */                                                             \
+    extern __shared__ float m3cst_sm[];                                        \
+    int heads_pb = blockDim.z;                                                 \
+    int h0 = blockIdx.y * heads_pb;                                            \
+    float* sx = m3cst_sm;                       /* [heads][cs_len][hd] */      \
+    float* sk = sx + heads_pb * chunk_size * hd; /* [heads][cs_len][ds] */     \
+    float* sda = sk + heads_pb * chunk_size * ds; /* [heads][cs_len] */        \
+    int tid = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x; \
+    int nthr = blockDim.x * blockDim.y * blockDim.z;                           \
+    for (int i = tid; i < heads_pb * chunk_len * hd; i += nthr) {              \
+        int hz = i / (chunk_len * hd);                                         \
+        int rem = i % (chunk_len * hd);                                        \
+        int tl = rem / hd;                                                     \
+        int pp = rem % hd;                                                     \
+        int hg = h0 + hz;                                                      \
+        sx[hz * chunk_size * hd + tl * hd + pp] = (hg < nh)                    \
+            ? x[(long long)(b * T + chunk_start + tl) * d_inner + hg * hd + pp] \
+            : 0.0f;                                                            \
+    }                                                                          \
+    for (int i = tid; i < heads_pb * chunk_len * ds; i += nthr) {              \
+        int hz = i / (chunk_len * ds);                                         \
+        int rem = i % (chunk_len * ds);                                        \
+        int tl = rem / ds;                                                     \
+        int nn = rem % ds;                                                     \
+        int hg = h0 + hz;                                                      \
+        sk[hz * chunk_size * ds + tl * ds + nn] = (hg < nh)                    \
+            ? K_scaled[(long long)(b * T + chunk_start + tl) * nh * ds + hg * ds + nn] \
+            : 0.0f;                                                            \
+    }                                                                          \
+    for (int i = tid; i < heads_pb * chunk_len; i += nthr) {                   \
+        int hz = i / chunk_len;                                                \
+        int tl = i % chunk_len;                                                \
+        int hg = h0 + hz;                                                      \
+        sda[hz * chunk_size + tl] = (hg < nh)                                  \
+            ? dA_cumsum[((b * n_chunks + chunk) * nh + hg) * chunk_size + tl]  \
+            : 0.0f;                                                            \
+    }                                                                          \
+    __syncthreads();                                                           \
+    if (live) {                                                                \
+        int hz = threadIdx.z;                                                  \
+        const float* sxh = sx + hz * chunk_size * hd;                          \
+        const float* skh = sk + hz * chunk_size * ds;                          \
+        const float* sdah = sda + hz * chunk_size;                             \
+        float dA_end_s = sdah[chunk_len - 1];                                  \
+        for (int t_local = 0; t_local < chunk_len; t_local++) {                \
+            float dA_t = sdah[t_local];                                        \
+            float decay = FAST_EXP(m3_nonpos(dA_end_s - dA_t));                \
+            float v_t = sxh[t_local * hd + p];                                 \
+            const float4* k4 = reinterpret_cast<const float4*>(skh + t_local * ds); \
+            for (int n4 = n_lo / 4; n4 < n_hi / 4; n4++) {                     \
+                float4 kv = k4[n4];                                            \
+                acc[n4 * 4 + 0] += decay * kv.x * v_t;                         \
+                acc[n4 * 4 + 1] += decay * kv.y * v_t;                         \
+                acc[n4 * 4 + 2] += decay * kv.z * v_t;                         \
+                acc[n4 * 4 + 3] += decay * kv.w * v_t;                         \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+    if (!live) return;                                                         \
+    if (wide) {                                                                \
+        float4* so4 = reinterpret_cast<float4*>(states_out + state_base);      \
+        for (int n4 = n_lo / 4; n4 < n_hi / 4; n4++) {                         \
+            float4 o;                                                          \
+            o.x = acc[n4 * 4 + 0];                                             \
+            o.y = acc[n4 * 4 + 1];                                             \
+            o.z = acc[n4 * 4 + 2];                                             \
+            o.w = acc[n4 * 4 + 3];                                             \
+            so4[n4] = o;                                                       \
+        }                                                                      \
+    } else {                                                                   \
+        for (int n = n_lo; n < n_hi; n++) states_out[state_base + n] = acc[n]; \
+    }                                                                          \
 }
+
+DEFINE_M3_CHUNK_STATE_FWD_F32(m3_chunk_state_fwd, int)
+DEFINE_M3_CHUNK_STATE_FWD_F32(m3_chunk_state_fwd_i64, long long)
 
 // ============================================================================
 // 3b. m3_chunk_pre_state_fused -- preprocess + chunk_state in ONE kernel
@@ -397,169 +409,173 @@ extern "C" __global__ void m3_chunk_state_fwd(
 // Grid: (B * n_chunks, nh). Block: chunk_size (= 64 at the serve shape).
 // Dynamic smem floats: chunk_size * (ds + 4) (K_scaled) + chunk_size * hd
 // (x) + chunk_size (the decay) + chunk_size (the decay cumsum).
-extern "C" __global__ void m3_chunk_pre_state_fused(
-    float* __restrict__ K_scaled,
-    float* __restrict__ qk_dot,
-    float* __restrict__ scale_out,
-    float* __restrict__ gamma_out,
-    float* __restrict__ states_out,
-    const float* __restrict__ K,
-    const float* __restrict__ Q,
-    const float* __restrict__ DT,
-    const float* __restrict__ trap_sig,
-    const float* __restrict__ x,
-    const float* __restrict__ adt,       // [B * T * nh] a*dt
-    float* __restrict__ dA_cumsum,       // [B * n_chunks * nh * chunk_size] out
-    int batch, int T, int nh, int hd, int ds, int chunk_size
-) {
-    int d_inner = nh * hd;
-    int n_chunks = (T + chunk_size - 1) / chunk_size;
-    int bc = blockIdx.x;
-    int b = bc / n_chunks;
-    int chunk = bc % n_chunks;
-    int h = blockIdx.y;
-    if (ds > MAMBA_RS_STATE_CAP) return;
-
-    int chunk_start = chunk * chunk_size;
-    int chunk_end = chunk_start + chunk_size;
-    if (chunk_end > T) chunk_end = T;
-    int chunk_len = chunk_end - chunk_start;
-
-    extern __shared__ float m3f_sm[];
-    int k_ld = ds + 4; /* padded rows - see the coop kernel's bank note */
-    float* sm_k = m3f_sm;                       // [chunk_size][k_ld]
-    float* sm_x = sm_k + chunk_size * k_ld;     // [chunk_size][hd]
-    float* sm_dec = sm_x + chunk_size * hd;     // [chunk_size]
-    float* da_chunk = sm_dec + chunk_size;      // [chunk_size]
-
-    int tid = threadIdx.x;
-    int nt = blockDim.x;
-    // The chunk's decay cumsum, m3_dA_cumsum's adds from zero in row order
-    // over the a*dt rows, written for the state pass, the scan and the
-    // backward: one thread adds, as every add waits on the one before it,
-    // and the launch the standalone kernel took is gone.
-    for (int t_local = tid; t_local < chunk_len; t_local += nt) {
-        da_chunk[t_local] = adt[(b * T + chunk_start + t_local) * nh + h];
-    }
-    __syncthreads();
-    if (tid == 0) {
-        float cumsum = 0.0f;
-        int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;
-        for (int t_local = 0; t_local < chunk_len; t_local++) {
-            cumsum += da_chunk[t_local];
-            da_chunk[t_local] = cumsum;
-            dA_cumsum[cs_base + t_local] = cumsum;
-        }
-    }
-    __syncthreads();
-    // Each row's decay to the chunk's end is staged once with its row:
-    // every fold thread reads the same chunk_len values, and computing
-    // them in the fold repeated one exponential per thread and step.
-    // Same inputs, same expression - the values do not move.
-    float dA_end = da_chunk[chunk_len - 1];
-
-    // Phase A: the preprocess arithmetic, one t per thread (verbatim),
-    // with the K_scaled row written to global AND smem; x and the decay
-    // staged.
-    for (int t_local = tid; t_local < chunk_len; t_local += nt) {
-        int t = chunk_start + t_local;
-        int th = (b * T + t) * nh + h;
-        float dt_cur = DT[th];
-        float trap_cur = trap_sig[th];
-        float gamma_val = dt_cur * trap_cur;
-        float shifted_gamma = 0.0f;
-        if (t + 1 < T) {
-            int th_next = (b * T + t + 1) * nh + h;
-            float dt_next = DT[th_next];
-            float trap_next = trap_sig[th_next];
-            shifted_gamma = dt_next * (1.0f - trap_next);
-        }
-        float scale_val = shifted_gamma + gamma_val;
-        if (scale_out) scale_out[th] = scale_val;
-        if (gamma_out) gamma_out[th] = gamma_val;
-        int kq_base = (b * T + t) * nh * ds + h * ds;
-        float dot = 0.0f;
-        if (ds % 4 == 0) {
-            const float4* q4 = reinterpret_cast<const float4*>(Q + kq_base);
-            const float4* k4 = reinterpret_cast<const float4*>(K + kq_base);
-            float4* ks4 = reinterpret_cast<float4*>(K_scaled + kq_base);
-            float4* sk4 = reinterpret_cast<float4*>(sm_k + t_local * k_ld);
-            for (int n4 = 0; n4 < ds / 4; n4++) {
-                float4 qv = q4[n4];
-                float4 kv = k4[n4];
-                dot += qv.x * kv.x;
-                dot += qv.y * kv.y;
-                dot += qv.z * kv.z;
-                dot += qv.w * kv.w;
-                float4 sc;
-                sc.x = kv.x * scale_val;
-                sc.y = kv.y * scale_val;
-                sc.z = kv.z * scale_val;
-                sc.w = kv.w * scale_val;
-                ks4[n4] = sc;
-                sk4[n4] = sc;
-            }
-        } else {
-            for (int n = 0; n < ds; n++) {
-                dot += Q[kq_base + n] * K[kq_base + n];
-            }
-            for (int n = 0; n < ds; n++) {
-                float ks = K[kq_base + n] * scale_val;
-                K_scaled[kq_base + n] = ks;
-                sm_k[t_local * k_ld + n] = ks;
-            }
-        }
-        qk_dot[th] = dot * gamma_val;
-        sm_dec[t_local] = FAST_EXP(m3_nonpos(dA_end - da_chunk[t_local]));
-    }
-    if (hd % 4 == 0 && (reinterpret_cast<unsigned long long>(x) & 15) == 0) {
-        // Whole float4s when every row starts on 16 bytes: a quarter of
-        // the loads and index math, the same copied values.
-        int hq = hd >> 2;
-        float4* sm_x4 = reinterpret_cast<float4*>(sm_x);
-        for (int i = tid; i < chunk_len * hq; i += nt) {
-            int tl = i / hq;
-            int pq = i - tl * hq;
-            sm_x4[i] = *reinterpret_cast<const float4*>(
-                x + (long long)(b * T + chunk_start + tl) * d_inner + h * hd + 4 * pq);
-        }
-    } else {
-        for (int i = tid; i < chunk_len * hd; i += nt) {
-            int tl = i / hd;
-            int pp = i % hd;
-            sm_x[tl * hd + pp] = x[(long long)(b * T + chunk_start + tl) * d_inner + h * hd + pp];
-        }
-    }
-    __syncthreads();
-
-    // Phase B: the chunk_state quad fold (verbatim chains) over smem.
-    // Threads reshape to (p, n-quad); requires blockDim.x >= hd * ds/4
-    // (the launcher guard). Each acc chain folds ascending t, exactly
-    // the standalone kernel's arithmetic.
-    int quads = ds / 4;
-    for (int o = tid; o < hd * quads; o += nt) {
-        int p = o / quads;
-        int nq = o % quads;
-        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
-        for (int t_local = 0; t_local < chunk_len; t_local++) {
-            float decay = sm_dec[t_local];
-            float v_t = sm_x[t_local * hd + p];
-            const float4* k4 = reinterpret_cast<const float4*>(sm_k + t_local * k_ld);
-            float4 kv = k4[nq];
-            acc0 += decay * kv.x * v_t;
-            acc1 += decay * kv.y * v_t;
-            acc2 += decay * kv.z * v_t;
-            acc3 += decay * kv.w * v_t;
-        }
-        int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds + nq * 4;
-        float4 out;
-        out.x = acc0;
-        out.y = acc1;
-        out.z = acc2;
-        out.w = acc3;
-        *reinterpret_cast<float4*>(states_out + state_base) = out;
-    }
+#define DEFINE_M3_CHUNK_PRE_STATE_FUSED_F32(NAME, IDX)                         \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ K_scaled,                                              \
+    float* __restrict__ qk_dot,                                                \
+    float* __restrict__ scale_out,                                             \
+    float* __restrict__ gamma_out,                                             \
+    float* __restrict__ states_out,                                            \
+    const float* __restrict__ K,                                               \
+    const float* __restrict__ Q,                                               \
+    const float* __restrict__ DT,                                              \
+    const float* __restrict__ trap_sig,                                        \
+    const float* __restrict__ x,                                               \
+    const float* __restrict__ adt,       /* [B * T * nh] a*dt */               \
+    float* __restrict__ dA_cumsum,       /* [B * n_chunks * nh * chunk_size] out */ \
+    int batch, int T, int nh, int hd, int ds, int chunk_size                   \
+) {                                                                            \
+    int d_inner = nh * hd;                                                     \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
+    IDX bc = blockIdx.x;                                                       \
+    IDX b = bc / n_chunks;                                                     \
+    int chunk = (int)(bc % n_chunks);                                          \
+    int h = blockIdx.y;                                                        \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                       \
+                                                                               \
+    int chunk_start = chunk * chunk_size;                                      \
+    int chunk_end = chunk_start + chunk_size;                                  \
+    if (chunk_end > T) chunk_end = T;                                          \
+    int chunk_len = chunk_end - chunk_start;                                   \
+                                                                               \
+    extern __shared__ float m3f_sm[];                                          \
+    int k_ld = ds + 4; /* padded rows - see the coop kernel's bank note */     \
+    float* sm_k = m3f_sm;                       /* [chunk_size][k_ld] */       \
+    float* sm_x = sm_k + chunk_size * k_ld;     /* [chunk_size][hd] */         \
+    float* sm_dec = sm_x + chunk_size * hd;     /* [chunk_size] */             \
+    float* da_chunk = sm_dec + chunk_size;      /* [chunk_size] */             \
+                                                                               \
+    int tid = threadIdx.x;                                                     \
+    int nt = blockDim.x;                                                       \
+    /* The chunk's decay cumsum, m3_dA_cumsum's adds from zero in row order */ \
+    /* over the a*dt rows, written for the state pass, the scan and the */     \
+    /* backward: one thread adds, as every add waits on the one before it, */  \
+    /* and the launch the standalone kernel took is gone. */                   \
+    for (int t_local = tid; t_local < chunk_len; t_local += nt) {              \
+        da_chunk[t_local] = adt[(b * T + chunk_start + t_local) * nh + h];     \
+    }                                                                          \
+    __syncthreads();                                                           \
+    if (tid == 0) {                                                            \
+        float cumsum = 0.0f;                                                   \
+        IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;          \
+        for (int t_local = 0; t_local < chunk_len; t_local++) {                \
+            cumsum += da_chunk[t_local];                                       \
+            da_chunk[t_local] = cumsum;                                        \
+            dA_cumsum[cs_base + t_local] = cumsum;                             \
+        }                                                                      \
+    }                                                                          \
+    __syncthreads();                                                           \
+    /* Each row's decay to the chunk's end is staged once with its row: */     \
+    /* every fold thread reads the same chunk_len values, and computing */     \
+    /* them in the fold repeated one exponential per thread and step. */       \
+    /* Same inputs, same expression - the values do not move. */               \
+    float dA_end = da_chunk[chunk_len - 1];                                    \
+                                                                               \
+    /* Phase A: the preprocess arithmetic, one t per thread (verbatim), */     \
+    /* with the K_scaled row written to global AND smem; x and the decay */    \
+    /* staged. */                                                              \
+    for (int t_local = tid; t_local < chunk_len; t_local += nt) {              \
+        int t = chunk_start + t_local;                                         \
+        IDX th = (b * T + t) * nh + h;                                         \
+        float dt_cur = DT[th];                                                 \
+        float trap_cur = trap_sig[th];                                         \
+        float gamma_val = dt_cur * trap_cur;                                   \
+        float shifted_gamma = 0.0f;                                            \
+        if (t + 1 < T) {                                                       \
+            IDX th_next = (b * T + t + 1) * nh + h;                            \
+            float dt_next = DT[th_next];                                       \
+            float trap_next = trap_sig[th_next];                               \
+            shifted_gamma = dt_next * (1.0f - trap_next);                      \
+        }                                                                      \
+        float scale_val = shifted_gamma + gamma_val;                           \
+        if (scale_out) scale_out[th] = scale_val;                              \
+        if (gamma_out) gamma_out[th] = gamma_val;                              \
+        IDX kq_base = (b * T + t) * nh * ds + h * ds;                          \
+        float dot = 0.0f;                                                      \
+        if (ds % 4 == 0) {                                                     \
+            const float4* q4 = reinterpret_cast<const float4*>(Q + kq_base);   \
+            const float4* k4 = reinterpret_cast<const float4*>(K + kq_base);   \
+            float4* ks4 = reinterpret_cast<float4*>(K_scaled + kq_base);       \
+            float4* sk4 = reinterpret_cast<float4*>(sm_k + t_local * k_ld);    \
+            for (int n4 = 0; n4 < ds / 4; n4++) {                              \
+                float4 qv = q4[n4];                                            \
+                float4 kv = k4[n4];                                            \
+                dot += qv.x * kv.x;                                            \
+                dot += qv.y * kv.y;                                            \
+                dot += qv.z * kv.z;                                            \
+                dot += qv.w * kv.w;                                            \
+                float4 sc;                                                     \
+                sc.x = kv.x * scale_val;                                       \
+                sc.y = kv.y * scale_val;                                       \
+                sc.z = kv.z * scale_val;                                       \
+                sc.w = kv.w * scale_val;                                       \
+                ks4[n4] = sc;                                                  \
+                sk4[n4] = sc;                                                  \
+            }                                                                  \
+        } else {                                                               \
+            for (int n = 0; n < ds; n++) {                                     \
+                dot += Q[kq_base + n] * K[kq_base + n];                        \
+            }                                                                  \
+            for (int n = 0; n < ds; n++) {                                     \
+                float ks = K[kq_base + n] * scale_val;                         \
+                K_scaled[kq_base + n] = ks;                                    \
+                sm_k[t_local * k_ld + n] = ks;                                 \
+            }                                                                  \
+        }                                                                      \
+        qk_dot[th] = dot * gamma_val;                                          \
+        sm_dec[t_local] = FAST_EXP(m3_nonpos(dA_end - da_chunk[t_local]));     \
+    }                                                                          \
+    if (hd % 4 == 0 && (reinterpret_cast<unsigned long long>(x) & 15) == 0) {  \
+        /* Whole float4s when every row starts on 16 bytes: a quarter of */    \
+        /* the loads and index math, the same copied values. */                \
+        int hq = hd >> 2;                                                      \
+        float4* sm_x4 = reinterpret_cast<float4*>(sm_x);                       \
+        for (int i = tid; i < chunk_len * hq; i += nt) {                       \
+            int tl = i / hq;                                                   \
+            int pq = i - tl * hq;                                              \
+            sm_x4[i] = *reinterpret_cast<const float4*>(                       \
+                x + (long long)(b * T + chunk_start + tl) * d_inner + h * hd + 4 * pq); \
+        }                                                                      \
+    } else {                                                                   \
+        for (int i = tid; i < chunk_len * hd; i += nt) {                       \
+            int tl = i / hd;                                                   \
+            int pp = i % hd;                                                   \
+            sm_x[tl * hd + pp] = x[(long long)(b * T + chunk_start + tl) * d_inner + h * hd + pp]; \
+        }                                                                      \
+    }                                                                          \
+    __syncthreads();                                                           \
+                                                                               \
+    /* Phase B: the chunk_state quad fold (verbatim chains) over smem. */      \
+    /* Threads reshape to (p, n-quad); requires blockDim.x >= hd * ds/4 */     \
+    /* (the launcher guard). Each acc chain folds ascending t, exactly */      \
+    /* the standalone kernel's arithmetic. */                                  \
+    int quads = ds / 4;                                                        \
+    for (int o = tid; o < hd * quads; o += nt) {                               \
+        int p = o / quads;                                                     \
+        int nq = o % quads;                                                    \
+        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;              \
+        for (int t_local = 0; t_local < chunk_len; t_local++) {                \
+            float decay = sm_dec[t_local];                                     \
+            float v_t = sm_x[t_local * hd + p];                                \
+            const float4* k4 = reinterpret_cast<const float4*>(sm_k + t_local * k_ld); \
+            float4 kv = k4[nq];                                                \
+            acc0 += decay * kv.x * v_t;                                        \
+            acc1 += decay * kv.y * v_t;                                        \
+            acc2 += decay * kv.z * v_t;                                        \
+            acc3 += decay * kv.w * v_t;                                        \
+        }                                                                      \
+        IDX state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds + nq * 4; \
+        float4 out;                                                            \
+        out.x = acc0;                                                          \
+        out.y = acc1;                                                          \
+        out.z = acc2;                                                          \
+        out.w = acc3;                                                          \
+        *reinterpret_cast<float4*>(states_out + state_base) = out;             \
+    }                                                                          \
 }
+
+DEFINE_M3_CHUNK_PRE_STATE_FUSED_F32(m3_chunk_pre_state_fused, int)
+DEFINE_M3_CHUNK_PRE_STATE_FUSED_F32(m3_chunk_pre_state_fused_i64, long long)
 
 // ============================================================================
 // 4. m3_state_passing_fwd -- Inter-chunk exclusive prefix scan
@@ -598,89 +614,97 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
 // reference). All inputs f32; runs once per prefill, cost negligible.
 //
 // Grid: (B, nh, ceil(hd*ds / BLOCK)), Block: (min(hd*ds, 256))
-extern "C" __global__ void m3_chunk_entering_state(
-    float* __restrict__ h_enter,        // [B * nh * hd * ds] in/out
-    const float* __restrict__ k_state,  // [B * nh * ds]
-    const float* __restrict__ v_state,  // [B * nh * hd]
-    const float* __restrict__ dt,       // [B * T * nh] (post-softplus)
-    const float* __restrict__ trap,     // [B * T * nh] (post-sigmoid)
-    int batch, int nh, int hd, int ds, int T
-) {
-    int b = blockIdx.x;
-    int h = blockIdx.y;
-    int pd = blockIdx.z * blockDim.x + threadIdx.x;
-    int dim = hd * ds;
-    if (b >= batch || pd >= dim) return;
-    int p = pd / ds;
-    int n = pd % ds;
-    float dt0 = dt[b * T * nh + h];    // t = 0
-    float trap0 = trap[b * T * nh + h];
-    float v = v_state[(b * nh + h) * hd + p];
-    float k = k_state[(b * nh + h) * ds + n];
-    h_enter[(b * nh + h) * dim + pd] += v * k * dt0 * (1.0f - trap0);
+#define DEFINE_M3_CHUNK_ENTERING_STATE(NAME, IDX)                              \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ h_enter,        /* [B * nh * hd * ds] in/out */        \
+    const float* __restrict__ k_state,  /* [B * nh * ds] */                    \
+    const float* __restrict__ v_state,  /* [B * nh * hd] */                    \
+    const float* __restrict__ dt,       /* [B * T * nh] (post-softplus) */     \
+    const float* __restrict__ trap,     /* [B * T * nh] (post-sigmoid) */      \
+    int batch, int nh, int hd, int ds, int T                                   \
+) {                                                                            \
+    IDX b = blockIdx.x;                                                        \
+    int h = blockIdx.y;                                                        \
+    int pd = blockIdx.z * blockDim.x + threadIdx.x;                            \
+    int dim = hd * ds;                                                         \
+    if (b >= batch || pd >= dim) return;                                       \
+    int p = pd / ds;                                                           \
+    int n = pd % ds;                                                           \
+    float dt0 = dt[b * T * nh + h];    /* t = 0 */                             \
+    float trap0 = trap[b * T * nh + h];                                        \
+    float v = v_state[(b * nh + h) * hd + p];                                  \
+    float k = k_state[(b * nh + h) * ds + n];                                  \
+    h_enter[(b * nh + h) * dim + pd] += v * k * dt0 * (1.0f - trap0);          \
 }
+
+DEFINE_M3_CHUNK_ENTERING_STATE(m3_chunk_entering_state, int)
+DEFINE_M3_CHUNK_ENTERING_STATE(m3_chunk_entering_state_i64, long long)
 
 // Grid: (B, nh, ceil(hd*ds / BLOCK)), Block: (min(hd*ds, 256))
-extern "C" __global__ void m3_state_passing_fwd(
-    float* __restrict__ states,          // [B * n_chunks * nh * hd * ds] in/out
-    float* __restrict__ final_states,    // [B * nh * hd * ds] output
-    const float* __restrict__ dA_cumsum, // [B * n_chunks * nh * chunk_size]
-    const float* __restrict__ init_states, // [B * nh * hd * ds] or nullptr
-    int batch, int n_chunks, int nh, int hd, int ds, int chunk_size, int T
-) {
-    int b = blockIdx.x;
-    int h = blockIdx.y;
-    int pd = blockIdx.z * blockDim.x + threadIdx.x;  // flattened (p, n) index
-    int dim = hd * ds;
-    if (pd >= dim) return;
-
-    // Exclusive prefix scan: states[c] = state ENTERING chunk c. With an
-    // entering state the scan seeds from it instead of zero.
-    float state = init_states ? init_states[b * nh * dim + h * dim + pd] : 0.0f;
-
-    // The recurrence is serial in `state`, but the loads are not: each
-    // iteration issues the NEXT chunk's contribution and decay before
-    // touching the dependent chain, so the per-chunk memory latency
-    // pipelines behind the FMA chain instead of serializing on it. The
-    // arithmetic and its order are untouched. states is read with plain
-    // loads: this kernel also writes it, and the read-only cache path
-    // would let the compiler move a load past the store that overwrites
-    // the same element. dA_cumsum is read-only here and takes that path.
-    int state_idx = b * n_chunks * nh * dim + h * dim + pd;
-    int cs_idx = b * n_chunks * nh + h;
-    float contrib = states[state_idx];
-    int chunk_end_0 = chunk_size > T ? T : chunk_size;
-    float decay = FAST_EXP(__ldg(&dA_cumsum[cs_idx * chunk_size + chunk_end_0 - 1]));
-
-    for (int c = 0; c < n_chunks; c++) {
-        float next_contrib = 0.0f;
-        float next_decay = 0.0f;
-        if (c + 1 < n_chunks) {
-            next_contrib = states[state_idx + nh * dim];
-            int chunk_start_n = (c + 1) * chunk_size;
-            int chunk_end_n = chunk_start_n + chunk_size;
-            if (chunk_end_n > T) chunk_end_n = T;
-            int last_elem_n = chunk_end_n - chunk_start_n - 1;
-            next_decay = FAST_EXP(
-                __ldg(&dA_cumsum[(cs_idx + nh) * chunk_size + last_elem_n]));
-        }
-
-        // Write prev_state (state ENTERING this chunk) BEFORE updating
-        states[state_idx] = state;
-
-        // Update: state after this chunk = decay * prev_state + chunk_contribution
-        state = decay * state + contrib;
-
-        contrib = next_contrib;
-        decay = next_decay;
-        state_idx += nh * dim;
-        cs_idx += nh;
-    }
-
-    // Store final state (state after all chunks)
-    int final_idx = b * nh * dim + h * dim + pd;
-    final_states[final_idx] = state;
+#define DEFINE_M3_STATE_PASSING_FWD(NAME, IDX)                                 \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ states,          /* [B * n_chunks * nh * hd * ds] in/out */ \
+    float* __restrict__ final_states,    /* [B * nh * hd * ds] output */       \
+    const float* __restrict__ dA_cumsum, /* [B * n_chunks * nh * chunk_size] */ \
+    const float* __restrict__ init_states, /* [B * nh * hd * ds] or nullptr */ \
+    int batch, int n_chunks, int nh, int hd, int ds, int chunk_size, int T     \
+) {                                                                            \
+    IDX b = blockIdx.x;                                                        \
+    int h = blockIdx.y;                                                        \
+    int pd = blockIdx.z * blockDim.x + threadIdx.x;  /* flattened (p, n) index */ \
+    int dim = hd * ds;                                                         \
+    if (pd >= dim) return;                                                     \
+                                                                               \
+    /* Exclusive prefix scan: states[c] = state ENTERING chunk c. With an */   \
+    /* entering state the scan seeds from it instead of zero. */               \
+    float state = init_states ? init_states[b * nh * dim + h * dim + pd] : 0.0f; \
+                                                                               \
+    /* The recurrence is serial in `state`, but the loads are not: each */     \
+    /* iteration issues the NEXT chunk's contribution and decay before */      \
+    /* touching the dependent chain, so the per-chunk memory latency */        \
+    /* pipelines behind the FMA chain instead of serializing on it. The */     \
+    /* arithmetic and its order are untouched. states is read with plain */    \
+    /* loads: this kernel also writes it, and the read-only cache path */      \
+    /* would let the compiler move a load past the store that overwrites */    \
+    /* the same element. dA_cumsum is read-only here and takes that path. */   \
+    IDX state_idx = b * n_chunks * nh * dim + h * dim + pd;                    \
+    IDX cs_idx = b * n_chunks * nh + h;                                        \
+    float contrib = states[state_idx];                                         \
+    int chunk_end_0 = chunk_size > T ? T : chunk_size;                         \
+    float decay = FAST_EXP(__ldg(&dA_cumsum[cs_idx * chunk_size + chunk_end_0 - 1])); \
+                                                                               \
+    for (int c = 0; c < n_chunks; c++) {                                       \
+        float next_contrib = 0.0f;                                             \
+        float next_decay = 0.0f;                                               \
+        if (c + 1 < n_chunks) {                                                \
+            next_contrib = states[state_idx + nh * dim];                       \
+            int chunk_start_n = (c + 1) * chunk_size;                          \
+            int chunk_end_n = chunk_start_n + chunk_size;                      \
+            if (chunk_end_n > T) chunk_end_n = T;                              \
+            int last_elem_n = chunk_end_n - chunk_start_n - 1;                 \
+            next_decay = FAST_EXP(                                             \
+                __ldg(&dA_cumsum[(cs_idx + nh) * chunk_size + last_elem_n]));  \
+        }                                                                      \
+                                                                               \
+        /* Write prev_state (state ENTERING this chunk) BEFORE updating */     \
+        states[state_idx] = state;                                             \
+                                                                               \
+        /* Update: state after this chunk = decay * prev_state + chunk_contribution */ \
+        state = decay * state + contrib;                                       \
+                                                                               \
+        contrib = next_contrib;                                                \
+        decay = next_decay;                                                    \
+        state_idx += nh * dim;                                                 \
+        cs_idx += nh;                                                          \
+    }                                                                          \
+                                                                               \
+    /* Store final state (state after all chunks) */                           \
+    IDX final_idx = b * nh * dim + h * dim + pd;                               \
+    final_states[final_idx] = state;                                           \
 }
+
+DEFINE_M3_STATE_PASSING_FWD(m3_state_passing_fwd, int)
+DEFINE_M3_STATE_PASSING_FWD(m3_state_passing_fwd_i64, long long)
 
 // ============================================================================
 // 4b. m3_writeback_parallel_states -- Persist SSM/K/V state after parallel scan
@@ -699,48 +723,52 @@ extern "C" __global__ void m3_state_passing_fwd(
 //
 // Grid: (B, nh, 1), Block: (max(hd, ds), 1, 1)
 // Each thread handles one (p) index; loops over the other dimension.
-extern "C" __global__ void m3_writeback_parallel_states(
-    float* __restrict__ ssm_state,          // [B * nh * hd * ds] out
-    float* __restrict__ k_state,            // [B * nh * ds] out
-    float* __restrict__ v_state,            // [B * nh * hd] out
-    const float* __restrict__ final_states, // [B * nh * hd * ds] in
-    const float* __restrict__ k_flat,       // [B * T * nh * ds] in
-    const float* __restrict__ x_flat,       // [B * T * d_inner] in
-    int batch, int T, int nh, int hd, int ds
-) {
-    int b = blockIdx.x;
-    int h = blockIdx.y;
-    int p = threadIdx.x;
-    if (b >= batch || h >= nh) return;
-
-    int d_inner = nh * hd;
-    int dim = hd * ds;
-
-    // SSM state: copy final_states -> ssm_state (both [B * nh * hd * ds])
-    // Thread p loops over the dimension it doesn't cover
-    if (p < hd) {
-        for (int n = 0; n < ds; n++) {
-            int idx = b * nh * dim + h * dim + p * ds + n;
-            ssm_state[idx] = final_states[idx];
-        }
-    }
-
-    // K state: last timestep from k_flat[B * T * nh * ds]
-    // k_flat layout: [b * T * nh * ds + t * nh * ds + h * ds + n]
-    if (p < ds) {
-        int src_idx = (b * T + (T - 1)) * nh * ds + h * ds + p;
-        int dst_idx = b * nh * ds + h * ds + p;
-        k_state[dst_idx] = k_flat[src_idx];
-    }
-
-    // V state: last timestep from x_flat[B * T * d_inner]
-    // x_flat layout: [b * T * d_inner + t * d_inner + h * hd + p]
-    if (p < hd) {
-        int src_idx = (b * T + (T - 1)) * d_inner + h * hd + p;
-        int dst_idx = b * nh * hd + h * hd + p;
-        v_state[dst_idx] = x_flat[src_idx];
-    }
+#define DEFINE_M3_WRITEBACK_PARALLEL_STATES_F32(NAME, IDX)                     \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ ssm_state,          /* [B * nh * hd * ds] out */       \
+    float* __restrict__ k_state,            /* [B * nh * ds] out */            \
+    float* __restrict__ v_state,            /* [B * nh * hd] out */            \
+    const float* __restrict__ final_states, /* [B * nh * hd * ds] in */        \
+    const float* __restrict__ k_flat,       /* [B * T * nh * ds] in */         \
+    const float* __restrict__ x_flat,       /* [B * T * d_inner] in */         \
+    int batch, int T, int nh, int hd, int ds                                   \
+) {                                                                            \
+    IDX b = blockIdx.x;                                                        \
+    int h = blockIdx.y;                                                        \
+    int p = threadIdx.x;                                                       \
+    if (b >= batch || h >= nh) return;                                         \
+                                                                               \
+    int d_inner = nh * hd;                                                     \
+    int dim = hd * ds;                                                         \
+                                                                               \
+    /* SSM state: copy final_states -> ssm_state (both [B * nh * hd * ds]) */  \
+    /* Thread p loops over the dimension it doesn't cover */                   \
+    if (p < hd) {                                                              \
+        for (int n = 0; n < ds; n++) {                                         \
+            IDX idx = b * nh * dim + h * dim + p * ds + n;                     \
+            ssm_state[idx] = final_states[idx];                                \
+        }                                                                      \
+    }                                                                          \
+                                                                               \
+    /* K state: last timestep from k_flat[B * T * nh * ds] */                  \
+    /* k_flat layout: [b * T * nh * ds + t * nh * ds + h * ds + n] */          \
+    if (p < ds) {                                                              \
+        IDX src_idx = (b * T + (T - 1)) * nh * ds + h * ds + p;                \
+        IDX dst_idx = b * nh * ds + h * ds + p;                                \
+        k_state[dst_idx] = k_flat[src_idx];                                    \
+    }                                                                          \
+                                                                               \
+    /* V state: last timestep from x_flat[B * T * d_inner] */                  \
+    /* x_flat layout: [b * T * d_inner + t * d_inner + h * hd + p] */          \
+    if (p < hd) {                                                              \
+        IDX src_idx = (b * T + (T - 1)) * d_inner + h * hd + p;                \
+        IDX dst_idx = b * nh * hd + h * hd + p;                                \
+        v_state[dst_idx] = x_flat[src_idx];                                    \
+    }                                                                          \
 }
+
+DEFINE_M3_WRITEBACK_PARALLEL_STATES_F32(m3_writeback_parallel_states, int)
+DEFINE_M3_WRITEBACK_PARALLEL_STATES_F32(m3_writeback_parallel_states_i64, long long)
 
 // ============================================================================
 // 4c. m3_state_pass_fused -- the entering fold, the inter-chunk pass and the
@@ -763,9 +791,9 @@ extern "C" __global__ void m3_writeback_parallel_states(
 //
 // Grid: (B, nh). Block: hd*ds rounded up to whole warps, at most 1024; an
 // element loop covers larger states.
-#define DEFINE_M3_STATE_PASS_FUSED(SUFFIX, T_ACT)                             \
+#define DEFINE_M3_STATE_PASS_FUSED(NAME, IDX, T_ACT)                          \
 extern "C" __global__ void                                                    \
-m3_state_pass_fused_##SUFFIX(                                                 \
+NAME(                                                                         \
     float* __restrict__ states,          /* [B*nc*nh*hd*ds] in/out */         \
     float* ssm_state,                    /* [B*nh*hd*ds] out */               \
     float* k_state,                      /* [B*nh*ds] out */                  \
@@ -780,13 +808,13 @@ m3_state_pass_fused_##SUFFIX(                                                 \
     const T_ACT* __restrict__ x_flat,    /* [B*T*d_inner] */                  \
     int batch, int n_chunks, int nh, int hd, int ds, int chunk_size, int T    \
 ) {                                                                           \
-    int b = blockIdx.x;                                                       \
+    IDX b = blockIdx.x;                                                       \
     int h = blockIdx.y;                                                       \
     /* Uniform across the block, so no thread skips the barrier below. */     \
     if (b >= batch || h >= nh) return;                                        \
     int dim = hd * ds;                                                        \
     for (int pd = threadIdx.x; pd < dim; pd += blockDim.x) {                  \
-        int hi = (b * nh + h) * dim + pd;                                     \
+        IDX hi = (b * nh + h) * dim + pd;                                     \
         float state = 0.0f;                                                   \
         if (ssm_seed != nullptr) {                                            \
             int p = pd / ds;                                                  \
@@ -803,8 +831,8 @@ m3_state_pass_fused_##SUFFIX(                                                 \
         /* states is read with plain loads: this kernel also writes it, */   \
         /* and the read-only cache path would let the compiler move a */      \
         /* load past the store that overwrites the same element. */           \
-        int state_idx = b * n_chunks * nh * dim + h * dim + pd;               \
-        int cs_idx = b * n_chunks * nh + h;                                   \
+        IDX state_idx = b * n_chunks * nh * dim + h * dim + pd;               \
+        IDX cs_idx = b * n_chunks * nh + h;                                   \
         float contrib = states[state_idx];                                    \
         int chunk_end_0 = chunk_size > T ? T : chunk_size;                    \
         float decay =                                                         \
@@ -842,9 +870,12 @@ m3_state_pass_fused_##SUFFIX(                                                 \
     }                                                                         \
 }
 
-DEFINE_M3_STATE_PASS_FUSED(f32,  float)
-DEFINE_M3_STATE_PASS_FUSED(bf16, __nv_bfloat16)
-DEFINE_M3_STATE_PASS_FUSED(f16,  __half)
+DEFINE_M3_STATE_PASS_FUSED(m3_state_pass_fused_f32, int, float)
+DEFINE_M3_STATE_PASS_FUSED(m3_state_pass_fused_f32_i64, long long, float)
+DEFINE_M3_STATE_PASS_FUSED(m3_state_pass_fused_bf16, int, __nv_bfloat16)
+DEFINE_M3_STATE_PASS_FUSED(m3_state_pass_fused_bf16_i64, long long, __nv_bfloat16)
+DEFINE_M3_STATE_PASS_FUSED(m3_state_pass_fused_f16, int, __half)
+DEFINE_M3_STATE_PASS_FUSED(m3_state_pass_fused_f16_i64, long long, __half)
 
 // ============================================================================
 // 5. m3_chunk_scan_fwd -- Intra-chunk output computation
@@ -863,107 +894,111 @@ DEFINE_M3_STATE_PASS_FUSED(f16,  __half)
 // chunk_scan_cfg). Each thread computes the output of one (b, chunk, h, p)
 // across all timesteps; a head wider than its lanes takes its elements in
 // turns.
-extern "C" __global__ void m3_chunk_scan_fwd(
-    float* __restrict__ y_out,          // [B * T * d_inner]
-    const float* __restrict__ x,        // [B * T * d_inner]
-    const float* __restrict__ Q,        // [B * T * nh * ds] (post bias+RoPE)
-    const float* __restrict__ K_scaled, // [B * T * nh * ds] (prescaled by scale)
-    const float* __restrict__ qk_dot,   // [B * T * nh] (precomputed D-skip term)
-    const float* __restrict__ dA_cumsum,// [B * n_chunks * nh * chunk_size]
-    const float* __restrict__ prev_states, // [B * n_chunks * nh * hd * ds] (entering states)
-    const float* __restrict__ D,        // [nh]
-    int batch, int T, int nh, int hd, int ds, int chunk_size
-) {
-    int d_inner = nh * hd;
-    int n_chunks = (T + chunk_size - 1) / chunk_size;
-    int bc = blockIdx.x;
-    int b = bc / n_chunks;
-    int chunk = bc % n_chunks;
-    // Two heads share one block (blockDim = (lanes, 2)) so a 16-lane head
-    // dimension fills a full warp; each head row owns its own tile.
-    int h = blockIdx.y * blockDim.y + threadIdx.y;
-    int head_row = threadIdx.y;
-    bool head_live = h < nh;
-
-    int chunk_start = chunk * chunk_size;
-    int chunk_end = chunk_start + chunk_size;
-    if (chunk_end > T) chunk_end = T;
-    int chunk_len = chunk_end - chunk_start;
-    if (chunk_size > 64) return;  // tile rows are sized for the fixed chunk of 64
-    if (ds > MAMBA_RS_STATE_CAP) return;  // capacity guard for q_reg[] (uniform: all threads agree)
-
-    // dA_cumsum base for this (b, chunk, h)
-    int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;
-
-    float d_skip = head_live ? D[h] : 0.0f;
-
-    // The decayed causal attention tile decay(t,s) * (Q[t] . K_scaled[s])
-    // is identical for every lane p, so it is computed ONCE per
-    // (chunk, head) here instead of once per lane: rows are strided over
-    // the lanes, each row stages Q[t] in registers and dots it against
-    // the K rows below the diagonal. Every tile element is written by
-    // exactly one lane and every dot runs n ascending, so the arithmetic
-    // and its order match the per-lane original. Inactive threads skip
-    // the work but still reach the barrier.
-    __shared__ float qk_tile[2][64 * 64];
-    if (head_live) {
-        for (int t_local = threadIdx.x; t_local < chunk_len; t_local += blockDim.x) {
-            int t = chunk_start + t_local;
-            float dA_t = dA_cumsum[cs_base + t_local];
-            int q_base = (b * T + t) * nh * ds + h * ds;
-            float q_reg[MAMBA_RS_STATE_CAP];
-            for (int n = 0; n < ds; n++) q_reg[n] = Q[q_base + n];
-            for (int s_local = 0; s_local < t_local; s_local++) {
-                int s = chunk_start + s_local;
-                float dA_s = dA_cumsum[cs_base + s_local];
-                float decay = FAST_EXP(m3_nonpos(dA_t - dA_s)); // Same float-noise safety net as the state-passing kernel above.
-                float qk_val = 0.0f;
-                int ks_base = (b * T + s) * nh * ds + h * ds;
-                for (int n = 0; n < ds; n++) {
-                    qk_val += q_reg[n] * K_scaled[ks_base + n];
-                }
-                qk_tile[head_row][t_local * 64 + s_local] = decay * qk_val;
-            }
-        }
-    }
-    __syncthreads();
-    if (!head_live) return;
-
-    for (int p = threadIdx.x; p < hd; p += blockDim.x) {
-        // Prev state for this (b, chunk, h, p)
-        int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;
-        for (int t_local = 0; t_local < chunk_len; t_local++) {
-            int t = chunk_start + t_local;
-            float dA_t = dA_cumsum[cs_base + t_local];
-
-            // Y_off: state contribution = sum_n(Q[t,n] * prev_state[p,n]) * exp(dA[t])
-            float y_off = 0.0f;
-            float state_decay = FAST_EXP(dA_t);
-            int q_base = (b * T + t) * nh * ds + h * ds;
-            for (int n = 0; n < ds; n++) {
-                y_off += Q[q_base + n] * prev_states[state_base + n];
-            }
-            y_off *= state_decay;
-
-            // Y_diag: intra-chunk contribution from positions s <= t (strictly
-            // causal + diagonal). For s < t the decayed Q.K factor comes from
-            // the shared tile; s == t rides qk_dot (gamma contribution).
-            float y_diag = 0.0f;
-            for (int s_local = 0; s_local < t_local; s_local++) {
-                int s = chunk_start + s_local;
-                float v_s = x[(b * T + s) * d_inner + h * hd + p];
-                y_diag += qk_tile[head_row][t_local * 64 + s_local] * v_s;
-            }
-
-            // D + qk_dot skip: (D[h] + qk_dot[t,h]) * V[t,h,p]
-            float x_t = x[(b * T + t) * d_inner + h * hd + p];
-            int th = (b * T + t) * nh + h;
-            float y_skip = (d_skip + qk_dot[th]) * x_t;
-
-            y_out[(b * T + t) * d_inner + h * hd + p] = y_diag + y_off + y_skip;
-        }
-    }
+#define DEFINE_M3_CHUNK_SCAN_FWD_F32(NAME, IDX)                                \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ y_out,          /* [B * T * d_inner] */                \
+    const float* __restrict__ x,        /* [B * T * d_inner] */                \
+    const float* __restrict__ Q,        /* [B * T * nh * ds] (post bias+RoPE) */ \
+    const float* __restrict__ K_scaled, /* [B * T * nh * ds] (prescaled by scale) */ \
+    const float* __restrict__ qk_dot,   /* [B * T * nh] (precomputed D-skip term) */ \
+    const float* __restrict__ dA_cumsum,/* [B * n_chunks * nh * chunk_size] */ \
+    const float* __restrict__ prev_states, /* [B * n_chunks * nh * hd * ds] (entering states) */ \
+    const float* __restrict__ D,        /* [nh] */                             \
+    int batch, int T, int nh, int hd, int ds, int chunk_size                   \
+) {                                                                            \
+    int d_inner = nh * hd;                                                     \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
+    IDX bc = blockIdx.x;                                                       \
+    IDX b = bc / n_chunks;                                                     \
+    int chunk = (int)(bc % n_chunks);                                          \
+    /* Two heads share one block (blockDim = (lanes, 2)) so a 16-lane head */  \
+    /* dimension fills a full warp; each head row owns its own tile. */        \
+    int h = blockIdx.y * blockDim.y + threadIdx.y;                             \
+    int head_row = threadIdx.y;                                                \
+    bool head_live = h < nh;                                                   \
+                                                                               \
+    int chunk_start = chunk * chunk_size;                                      \
+    int chunk_end = chunk_start + chunk_size;                                  \
+    if (chunk_end > T) chunk_end = T;                                          \
+    int chunk_len = chunk_end - chunk_start;                                   \
+    if (chunk_size > 64) return;  /* tile rows are sized for the fixed chunk of 64 */ \
+    if (ds > MAMBA_RS_STATE_CAP) return;  /* capacity guard for q_reg[] (uniform: all threads agree) */ \
+                                                                               \
+    /* dA_cumsum base for this (b, chunk, h) */                                \
+    IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;              \
+                                                                               \
+    float d_skip = head_live ? D[h] : 0.0f;                                    \
+                                                                               \
+    /* The decayed causal attention tile decay(t,s) * (Q[t] . K_scaled[s]) */  \
+    /* is identical for every lane p, so it is computed ONCE per */            \
+    /* (chunk, head) here instead of once per lane: rows are strided over */   \
+    /* the lanes, each row stages Q[t] in registers and dots it against */     \
+    /* the K rows below the diagonal. Every tile element is written by */      \
+    /* exactly one lane and every dot runs n ascending, so the arithmetic */   \
+    /* and its order match the per-lane original. Inactive threads skip */     \
+    /* the work but still reach the barrier. */                                \
+    __shared__ float qk_tile[2][64 * 64];                                      \
+    if (head_live) {                                                           \
+        for (int t_local = threadIdx.x; t_local < chunk_len; t_local += blockDim.x) { \
+            int t = chunk_start + t_local;                                     \
+            float dA_t = dA_cumsum[cs_base + t_local];                         \
+            IDX q_base = (b * T + t) * nh * ds + h * ds;                       \
+            float q_reg[MAMBA_RS_STATE_CAP];                                   \
+            for (int n = 0; n < ds; n++) q_reg[n] = Q[q_base + n];             \
+            for (int s_local = 0; s_local < t_local; s_local++) {              \
+                int s = chunk_start + s_local;                                 \
+                float dA_s = dA_cumsum[cs_base + s_local];                     \
+                float decay = FAST_EXP(m3_nonpos(dA_t - dA_s)); /* Same float-noise safety net as the state-passing kernel above. */ \
+                float qk_val = 0.0f;                                           \
+                IDX ks_base = (b * T + s) * nh * ds + h * ds;                  \
+                for (int n = 0; n < ds; n++) {                                 \
+                    qk_val += q_reg[n] * K_scaled[ks_base + n];                \
+                }                                                              \
+                qk_tile[head_row][t_local * 64 + s_local] = decay * qk_val;    \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+    __syncthreads();                                                           \
+    if (!head_live) return;                                                    \
+                                                                               \
+    for (int p = threadIdx.x; p < hd; p += blockDim.x) {                       \
+        /* Prev state for this (b, chunk, h, p) */                             \
+        IDX state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds; \
+        for (int t_local = 0; t_local < chunk_len; t_local++) {                \
+            int t = chunk_start + t_local;                                     \
+            float dA_t = dA_cumsum[cs_base + t_local];                         \
+                                                                               \
+            /* Y_off: state contribution = sum_n(Q[t,n] * prev_state[p,n]) * exp(dA[t]) */ \
+            float y_off = 0.0f;                                                \
+            float state_decay = FAST_EXP(dA_t);                                \
+            IDX q_base = (b * T + t) * nh * ds + h * ds;                       \
+            for (int n = 0; n < ds; n++) {                                     \
+                y_off += Q[q_base + n] * prev_states[state_base + n];          \
+            }                                                                  \
+            y_off *= state_decay;                                              \
+                                                                               \
+            /* Y_diag: intra-chunk contribution from positions s <= t (strictly */ \
+            /* causal + diagonal). For s < t the decayed Q.K factor comes from */ \
+            /* the shared tile; s == t rides qk_dot (gamma contribution). */   \
+            float y_diag = 0.0f;                                               \
+            for (int s_local = 0; s_local < t_local; s_local++) {              \
+                int s = chunk_start + s_local;                                 \
+                float v_s = x[(b * T + s) * d_inner + h * hd + p];             \
+                y_diag += qk_tile[head_row][t_local * 64 + s_local] * v_s;     \
+            }                                                                  \
+                                                                               \
+            /* D + qk_dot skip: (D[h] + qk_dot[t,h]) * V[t,h,p] */             \
+            float x_t = x[(b * T + t) * d_inner + h * hd + p];                 \
+            IDX th = (b * T + t) * nh + h;                                     \
+            float y_skip = (d_skip + qk_dot[th]) * x_t;                        \
+                                                                               \
+            y_out[(b * T + t) * d_inner + h * hd + p] = y_diag + y_off + y_skip; \
+        }                                                                      \
+    }                                                                          \
 }
+
+DEFINE_M3_CHUNK_SCAN_FWD_F32(m3_chunk_scan_fwd, int)
+DEFINE_M3_CHUNK_SCAN_FWD_F32(m3_chunk_scan_fwd_i64, long long)
 
 // ============================================================================
 // 5b. m3_chunk_scan_fwd_coop -- cooperative-block twin of m3_chunk_scan_fwd
@@ -988,197 +1023,201 @@ extern "C" __global__ void m3_chunk_scan_fwd(
 //   qkd   chunk_size
 // The Rust launcher routes to this kernel only when that total fits the
 // 48 KB default budget; wider shapes keep the original kernel.
-extern "C" __global__ void m3_chunk_scan_fwd_coop(
-    float* __restrict__ y_out,
-    const float* __restrict__ x,
-    const float* __restrict__ Q,
-    const float* __restrict__ K_scaled,
-    const float* __restrict__ qk_dot,
-    const float* __restrict__ dA_cumsum,
-    const float* __restrict__ prev_states,
-    const float* __restrict__ D,
-    int batch, int T, int nh, int hd, int ds, int chunk_size
-) {
-    int d_inner = nh * hd;
-    int n_chunks = (T + chunk_size - 1) / chunk_size;
-    int bc = blockIdx.x;
-    int b = bc / n_chunks;
-    int chunk = bc % n_chunks;
-    int h = blockIdx.y;
-    if (chunk_size > 64) return;
-    if (ds > MAMBA_RS_STATE_CAP) return;
-
-    int chunk_start = chunk * chunk_size;
-    int chunk_end = chunk_start + chunk_size;
-    if (chunk_end > T) chunk_end = T;
-    int chunk_len = chunk_end - chunk_start;
-
-    int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;
-    int state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;
-
-    extern __shared__ float m3cs_sm[];
-    /* Rows padded to ds+4 floats (80 B, still 16-byte aligned): at
-     * ds = 16 an unpadded 64 B stride lands 8 consecutive lanes on the
-     * same 8 banks (a 4-way conflict on the hottest loop); 80 B walks
-     * all 32 banks. Address-only - the values and their order do not
-     * move. */
-    int qk_ld = ds + 4;
-    float* sm_tri = m3cs_sm;
-    float* sm_q   = sm_tri + chunk_size * (chunk_size - 1) / 2;
-    float* sm_k   = sm_q + chunk_size * qk_ld;
-    float* sm_v   = sm_k + chunk_size * qk_ld;
-    /* The entering state transposed, a row per state index n padded to
-     * hd + 4 floats: the output pass reads four heads' columns of one row
-     * as a float4, and a warp's eight column groups then lie in one
-     * contiguous 128-byte run. Rows per head, ds + 4 floats apart, put
-     * the groups four rows apart on two bank sets at ds = 16.
-     * Address-only: the values and their order do not move. */
-    int ps_ld = hd + 4;
-    float* sm_ps  = sm_v + chunk_size * hd;
-    float* sm_da  = sm_ps + ds * ps_ld;
-    float* sm_qkd = sm_da + chunk_size;
-
-    int tid = threadIdx.x;
-    int nt = blockDim.x;
-
-    // Stage: pure copies of exactly the values the original kernel reads.
-    for (int i = tid; i < chunk_len * ds; i += nt) {
-        int t_local = i / ds;
-        int n = i % ds;
-        int base = (b * T + chunk_start + t_local) * nh * ds + h * ds;
-        sm_q[t_local * qk_ld + n] = Q[base + n];
-        sm_k[t_local * qk_ld + n] = K_scaled[base + n];
-    }
-    for (int i = tid; i < chunk_len * hd; i += nt) {
-        int t_local = i / hd;
-        int pp = i % hd;
-        sm_v[t_local * hd + pp] =
-            x[(b * T + chunk_start + t_local) * d_inner + h * hd + pp];
-    }
-    for (int i = tid; i < hd * ds; i += nt) {
-        sm_ps[(i % ds) * ps_ld + (i / ds)] = prev_states[state_head + i];
-    }
-    for (int i = tid; i < chunk_len; i += nt) {
-        sm_da[i] = dA_cumsum[cs_base + i];
-        sm_qkd[i] = qk_dot[(b * T + chunk_start + i) * nh + h];
-    }
-    __syncthreads();
-
-    // Tile: one thread per (t, s) pair, n-ascending dot - the same chain
-    // the original ran per row, element for element.
-    int n_pairs = chunk_len * (chunk_len - 1) / 2;
-    // The kernel is smem-throughput bound (MIO queue, measured 87% L1
-    // utilization at the serve shape); the wide path issues float4 LDS
-    // where the scalar path issued four scalar LDS. The fold stays the
-    // SAME serial n-ascending FMA chain either way - the vector load
-    // only changes how bytes arrive, never the arithmetic or its order.
-    // Uniform guard: every smem row is 16B-aligned when ds % 4 == 0
-    // (row strides are multiples of 4 floats; the arena base is 16B).
-    bool wide = (ds % 4 == 0) && (hd % 4 == 0);
-    for (int e = tid; e < n_pairs; e += nt) {
-        // Decode the row-major strict-lower-triangle index: row t holds
-        // t entries starting at t*(t-1)/2. The float sqrt gives the row
-        // up to rounding; the two guards pin it exactly.
-        int t_local = (int)((1.0f + sqrtf(1.0f + 8.0f * (float)e)) * 0.5f);
-        while (t_local * (t_local - 1) / 2 > e) t_local--;
-        while ((t_local + 1) * t_local / 2 <= e) t_local++;
-        int s_local = e - t_local * (t_local - 1) / 2;
-        float decay = FAST_EXP(m3_nonpos(sm_da[t_local] - sm_da[s_local]));
-        float qk_val = 0.0f;
-        if (wide) {
-            const float4* q4 = reinterpret_cast<const float4*>(sm_q + t_local * qk_ld);
-            const float4* k4 = reinterpret_cast<const float4*>(sm_k + s_local * qk_ld);
-            for (int n4 = 0; n4 < ds / 4; n4++) {
-                float4 qv = q4[n4];
-                float4 kv = k4[n4];
-                qk_val += qv.x * kv.x;
-                qk_val += qv.y * kv.y;
-                qk_val += qv.z * kv.z;
-                qk_val += qv.w * kv.w;
-            }
-        } else {
-            for (int n = 0; n < ds; n++) {
-                qk_val += sm_q[t_local * qk_ld + n] * sm_k[s_local * qk_ld + n];
-            }
-        }
-        sm_tri[e] = decay * qk_val;
-    }
-    __syncthreads();
-
-    float d_skip = D[h];
-    // Outputs: the s-ascending y_diag chain and the n-ascending y_off dot
-    // are single serial folds per output element, exactly as before. The
-    // wide path assigns each thread FOUR p-columns of one t so the inner
-    // s-loop issues one float4 LDS of V (plus the sm_tri broadcast) where
-    // the scalar path issued four scalar LDS - four independent per-column
-    // accumulator chains, each still strictly s-ascending.
-    if (wide) {
-        int quads = hd / 4;
-        for (int o = tid; o < chunk_len * quads; o += nt) {
-            int t_local = o / quads;
-            int p0 = (o % quads) * 4;
-            float state_decay = FAST_EXP(sm_da[t_local]);
-            const float4* q4 = reinterpret_cast<const float4*>(sm_q + t_local * qk_ld);
-            float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
-            for (int n4 = 0; n4 < ds / 4; n4++) {
-                float4 qv = q4[n4];
-                // Row 4 n4 + k holds state index 4 n4 + k for the heads
-                // p0 .. p0 + 3: component j of nk is head p0 + j.
-                const float* row = sm_ps + 4 * n4 * ps_ld + p0;
-                float4 n0 = *reinterpret_cast<const float4*>(row);
-                float4 n1 = *reinterpret_cast<const float4*>(row + ps_ld);
-                float4 n2 = *reinterpret_cast<const float4*>(row + 2 * ps_ld);
-                float4 n3 = *reinterpret_cast<const float4*>(row + 3 * ps_ld);
-                acc0 += qv.x * n0.x; acc0 += qv.y * n1.x; acc0 += qv.z * n2.x; acc0 += qv.w * n3.x;
-                acc1 += qv.x * n0.y; acc1 += qv.y * n1.y; acc1 += qv.z * n2.y; acc1 += qv.w * n3.y;
-                acc2 += qv.x * n0.z; acc2 += qv.y * n1.z; acc2 += qv.z * n2.z; acc2 += qv.w * n3.z;
-                acc3 += qv.x * n0.w; acc3 += qv.y * n1.w; acc3 += qv.z * n2.w; acc3 += qv.w * n3.w;
-            }
-            float y_off0 = acc0 * state_decay;
-            float y_off1 = acc1 * state_decay;
-            float y_off2 = acc2 * state_decay;
-            float y_off3 = acc3 * state_decay;
-            float yd0 = 0.0f, yd1 = 0.0f, yd2 = 0.0f, yd3 = 0.0f;
-            int tri_row = t_local * (t_local - 1) / 2;
-            for (int s_local = 0; s_local < t_local; s_local++) {
-                float w = sm_tri[tri_row + s_local];
-                float4 v =
-                    *reinterpret_cast<const float4*>(sm_v + s_local * hd + p0);
-                yd0 += w * v.x;
-                yd1 += w * v.y;
-                yd2 += w * v.z;
-                yd3 += w * v.w;
-            }
-            float skip_w = d_skip + sm_qkd[t_local];
-            float4 vt = *reinterpret_cast<const float4*>(sm_v + t_local * hd + p0);
-            long long out_base =
-                (long long)(b * T + chunk_start + t_local) * d_inner + h * hd + p0;
-            y_out[out_base + 0] = yd0 + y_off0 + skip_w * vt.x;
-            y_out[out_base + 1] = yd1 + y_off1 + skip_w * vt.y;
-            y_out[out_base + 2] = yd2 + y_off2 + skip_w * vt.z;
-            y_out[out_base + 3] = yd3 + y_off3 + skip_w * vt.w;
-        }
-    } else {
-        for (int o = tid; o < chunk_len * hd; o += nt) {
-            int t_local = o / hd;
-            int p = o % hd;
-            float y_off = 0.0f;
-            float state_decay = FAST_EXP(sm_da[t_local]);
-            for (int n = 0; n < ds; n++) {
-                y_off += sm_q[t_local * qk_ld + n] * sm_ps[n * ps_ld + p];
-            }
-            y_off *= state_decay;
-            float y_diag = 0.0f;
-            int tri_row = t_local * (t_local - 1) / 2;
-            for (int s_local = 0; s_local < t_local; s_local++) {
-                y_diag += sm_tri[tri_row + s_local] * sm_v[s_local * hd + p];
-            }
-            float y_skip = (d_skip + sm_qkd[t_local]) * sm_v[t_local * hd + p];
-            y_out[(b * T + chunk_start + t_local) * d_inner + h * hd + p] =
-                y_diag + y_off + y_skip;
-        }
-    }
+#define DEFINE_M3_CHUNK_SCAN_FWD_COOP_F32(NAME, IDX)                           \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ y_out,                                                 \
+    const float* __restrict__ x,                                               \
+    const float* __restrict__ Q,                                               \
+    const float* __restrict__ K_scaled,                                        \
+    const float* __restrict__ qk_dot,                                          \
+    const float* __restrict__ dA_cumsum,                                       \
+    const float* __restrict__ prev_states,                                     \
+    const float* __restrict__ D,                                               \
+    int batch, int T, int nh, int hd, int ds, int chunk_size                   \
+) {                                                                            \
+    int d_inner = nh * hd;                                                     \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
+    IDX bc = blockIdx.x;                                                       \
+    IDX b = bc / n_chunks;                                                     \
+    int chunk = (int)(bc % n_chunks);                                          \
+    int h = blockIdx.y;                                                        \
+    if (chunk_size > 64) return;                                               \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                       \
+                                                                               \
+    int chunk_start = chunk * chunk_size;                                      \
+    int chunk_end = chunk_start + chunk_size;                                  \
+    if (chunk_end > T) chunk_end = T;                                          \
+    int chunk_len = chunk_end - chunk_start;                                   \
+                                                                               \
+    IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;              \
+    IDX state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;              \
+                                                                               \
+    extern __shared__ float m3cs_sm[];                                         \
+    /* Rows padded to ds+4 floats (80 B, still 16-byte aligned): at            \
+     * ds = 16 an unpadded 64 B stride lands 8 consecutive lanes on the        \
+     * same 8 banks (a 4-way conflict on the hottest loop); 80 B walks         \
+     * all 32 banks. Address-only - the values and their order do not          \
+     * move. */                                                                \
+    int qk_ld = ds + 4;                                                        \
+    float* sm_tri = m3cs_sm;                                                   \
+    float* sm_q   = sm_tri + chunk_size * (chunk_size - 1) / 2;                \
+    float* sm_k   = sm_q + chunk_size * qk_ld;                                 \
+    float* sm_v   = sm_k + chunk_size * qk_ld;                                 \
+    /* The entering state transposed, a row per state index n padded to        \
+     * hd + 4 floats: the output pass reads four heads' columns of one row     \
+     * as a float4, and a warp's eight column groups then lie in one           \
+     * contiguous 128-byte run. Rows per head, ds + 4 floats apart, put        \
+     * the groups four rows apart on two bank sets at ds = 16.                 \
+     * Address-only: the values and their order do not move. */                \
+    int ps_ld = hd + 4;                                                        \
+    float* sm_ps  = sm_v + chunk_size * hd;                                    \
+    float* sm_da  = sm_ps + ds * ps_ld;                                        \
+    float* sm_qkd = sm_da + chunk_size;                                        \
+                                                                               \
+    int tid = threadIdx.x;                                                     \
+    int nt = blockDim.x;                                                       \
+                                                                               \
+    /* Stage: pure copies of exactly the values the original kernel reads. */  \
+    for (int i = tid; i < chunk_len * ds; i += nt) {                           \
+        int t_local = i / ds;                                                  \
+        int n = i % ds;                                                        \
+        IDX base = (b * T + chunk_start + t_local) * nh * ds + h * ds;         \
+        sm_q[t_local * qk_ld + n] = Q[base + n];                               \
+        sm_k[t_local * qk_ld + n] = K_scaled[base + n];                        \
+    }                                                                          \
+    for (int i = tid; i < chunk_len * hd; i += nt) {                           \
+        int t_local = i / hd;                                                  \
+        int pp = i % hd;                                                       \
+        sm_v[t_local * hd + pp] =                                              \
+            x[(b * T + chunk_start + t_local) * d_inner + h * hd + pp];        \
+    }                                                                          \
+    for (int i = tid; i < hd * ds; i += nt) {                                  \
+        sm_ps[(i % ds) * ps_ld + (i / ds)] = prev_states[state_head + i];      \
+    }                                                                          \
+    for (int i = tid; i < chunk_len; i += nt) {                                \
+        sm_da[i] = dA_cumsum[cs_base + i];                                     \
+        sm_qkd[i] = qk_dot[(b * T + chunk_start + i) * nh + h];                \
+    }                                                                          \
+    __syncthreads();                                                           \
+                                                                               \
+    /* Tile: one thread per (t, s) pair, n-ascending dot - the same chain */   \
+    /* the original ran per row, element for element. */                       \
+    int n_pairs = chunk_len * (chunk_len - 1) / 2;                             \
+    /* The kernel is smem-throughput bound (MIO queue, measured 87% L1 */      \
+    /* utilization at the serve shape); the wide path issues float4 LDS */     \
+    /* where the scalar path issued four scalar LDS. The fold stays the */     \
+    /* SAME serial n-ascending FMA chain either way - the vector load */       \
+    /* only changes how bytes arrive, never the arithmetic or its order. */    \
+    /* Uniform guard: every smem row is 16B-aligned when ds % 4 == 0 */        \
+    /* (row strides are multiples of 4 floats; the arena base is 16B). */      \
+    bool wide = (ds % 4 == 0) && (hd % 4 == 0);                                \
+    for (int e = tid; e < n_pairs; e += nt) {                                  \
+        /* Decode the row-major strict-lower-triangle index: row t holds */    \
+        /* t entries starting at t*(t-1)/2. The float sqrt gives the row */    \
+        /* up to rounding; the two guards pin it exactly. */                   \
+        int t_local = (int)((1.0f + sqrtf(1.0f + 8.0f * (float)e)) * 0.5f);    \
+        while (t_local * (t_local - 1) / 2 > e) t_local--;                     \
+        while ((t_local + 1) * t_local / 2 <= e) t_local++;                    \
+        int s_local = e - t_local * (t_local - 1) / 2;                         \
+        float decay = FAST_EXP(m3_nonpos(sm_da[t_local] - sm_da[s_local]));    \
+        float qk_val = 0.0f;                                                   \
+        if (wide) {                                                            \
+            const float4* q4 = reinterpret_cast<const float4*>(sm_q + t_local * qk_ld); \
+            const float4* k4 = reinterpret_cast<const float4*>(sm_k + s_local * qk_ld); \
+            for (int n4 = 0; n4 < ds / 4; n4++) {                              \
+                float4 qv = q4[n4];                                            \
+                float4 kv = k4[n4];                                            \
+                qk_val += qv.x * kv.x;                                         \
+                qk_val += qv.y * kv.y;                                         \
+                qk_val += qv.z * kv.z;                                         \
+                qk_val += qv.w * kv.w;                                         \
+            }                                                                  \
+        } else {                                                               \
+            for (int n = 0; n < ds; n++) {                                     \
+                qk_val += sm_q[t_local * qk_ld + n] * sm_k[s_local * qk_ld + n]; \
+            }                                                                  \
+        }                                                                      \
+        sm_tri[e] = decay * qk_val;                                            \
+    }                                                                          \
+    __syncthreads();                                                           \
+                                                                               \
+    float d_skip = D[h];                                                       \
+    /* Outputs: the s-ascending y_diag chain and the n-ascending y_off dot */  \
+    /* are single serial folds per output element, exactly as before. The */   \
+    /* wide path assigns each thread FOUR p-columns of one t so the inner */   \
+    /* s-loop issues one float4 LDS of V (plus the sm_tri broadcast) where */  \
+    /* the scalar path issued four scalar LDS - four independent per-column */ \
+    /* accumulator chains, each still strictly s-ascending. */                 \
+    if (wide) {                                                                \
+        int quads = hd / 4;                                                    \
+        for (int o = tid; o < chunk_len * quads; o += nt) {                    \
+            int t_local = o / quads;                                           \
+            int p0 = (o % quads) * 4;                                          \
+            float state_decay = FAST_EXP(sm_da[t_local]);                      \
+            const float4* q4 = reinterpret_cast<const float4*>(sm_q + t_local * qk_ld); \
+            float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;          \
+            for (int n4 = 0; n4 < ds / 4; n4++) {                              \
+                float4 qv = q4[n4];                                            \
+                /* Row 4 n4 + k holds state index 4 n4 + k for the heads */    \
+                /* p0 .. p0 + 3: component j of nk is head p0 + j. */          \
+                const float* row = sm_ps + 4 * n4 * ps_ld + p0;                \
+                float4 n0 = *reinterpret_cast<const float4*>(row);             \
+                float4 n1 = *reinterpret_cast<const float4*>(row + ps_ld);     \
+                float4 n2 = *reinterpret_cast<const float4*>(row + 2 * ps_ld); \
+                float4 n3 = *reinterpret_cast<const float4*>(row + 3 * ps_ld); \
+                acc0 += qv.x * n0.x; acc0 += qv.y * n1.x; acc0 += qv.z * n2.x; acc0 += qv.w * n3.x; \
+                acc1 += qv.x * n0.y; acc1 += qv.y * n1.y; acc1 += qv.z * n2.y; acc1 += qv.w * n3.y; \
+                acc2 += qv.x * n0.z; acc2 += qv.y * n1.z; acc2 += qv.z * n2.z; acc2 += qv.w * n3.z; \
+                acc3 += qv.x * n0.w; acc3 += qv.y * n1.w; acc3 += qv.z * n2.w; acc3 += qv.w * n3.w; \
+            }                                                                  \
+            float y_off0 = acc0 * state_decay;                                 \
+            float y_off1 = acc1 * state_decay;                                 \
+            float y_off2 = acc2 * state_decay;                                 \
+            float y_off3 = acc3 * state_decay;                                 \
+            float yd0 = 0.0f, yd1 = 0.0f, yd2 = 0.0f, yd3 = 0.0f;              \
+            int tri_row = t_local * (t_local - 1) / 2;                         \
+            for (int s_local = 0; s_local < t_local; s_local++) {              \
+                float w = sm_tri[tri_row + s_local];                           \
+                float4 v =                                                     \
+                    *reinterpret_cast<const float4*>(sm_v + s_local * hd + p0); \
+                yd0 += w * v.x;                                                \
+                yd1 += w * v.y;                                                \
+                yd2 += w * v.z;                                                \
+                yd3 += w * v.w;                                                \
+            }                                                                  \
+            float skip_w = d_skip + sm_qkd[t_local];                           \
+            float4 vt = *reinterpret_cast<const float4*>(sm_v + t_local * hd + p0); \
+            long long out_base =                                               \
+                (long long)(b * T + chunk_start + t_local) * d_inner + h * hd + p0; \
+            y_out[out_base + 0] = yd0 + y_off0 + skip_w * vt.x;                \
+            y_out[out_base + 1] = yd1 + y_off1 + skip_w * vt.y;                \
+            y_out[out_base + 2] = yd2 + y_off2 + skip_w * vt.z;                \
+            y_out[out_base + 3] = yd3 + y_off3 + skip_w * vt.w;                \
+        }                                                                      \
+    } else {                                                                   \
+        for (int o = tid; o < chunk_len * hd; o += nt) {                       \
+            int t_local = o / hd;                                              \
+            int p = o % hd;                                                    \
+            float y_off = 0.0f;                                                \
+            float state_decay = FAST_EXP(sm_da[t_local]);                      \
+            for (int n = 0; n < ds; n++) {                                     \
+                y_off += sm_q[t_local * qk_ld + n] * sm_ps[n * ps_ld + p];     \
+            }                                                                  \
+            y_off *= state_decay;                                              \
+            float y_diag = 0.0f;                                               \
+            int tri_row = t_local * (t_local - 1) / 2;                         \
+            for (int s_local = 0; s_local < t_local; s_local++) {              \
+                y_diag += sm_tri[tri_row + s_local] * sm_v[s_local * hd + p];  \
+            }                                                                  \
+            float y_skip = (d_skip + sm_qkd[t_local]) * sm_v[t_local * hd + p]; \
+            y_out[(b * T + chunk_start + t_local) * d_inner + h * hd + p] =    \
+                y_diag + y_off + y_skip;                                       \
+        }                                                                      \
+    }                                                                          \
 }
+
+DEFINE_M3_CHUNK_SCAN_FWD_COOP_F32(m3_chunk_scan_fwd_coop, int)
+DEFINE_M3_CHUNK_SCAN_FWD_COOP_F32(m3_chunk_scan_fwd_coop_i64, long long)
 
 // ============================================================================
 // Sections 6-9 (m3_chunk_scan_bwd / m3_state_passing_bwd / m3_chunk_state_bwd
@@ -1198,22 +1237,26 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop(
 // 10. m3_extract_da_cs_sum -- Extract chunk-end cumsum values
 // ============================================================================
 // Grid: (B, n_chunks, ceil(nh/256)), Block: (min(nh, 256))
-extern "C" __global__ void m3_extract_da_cs_sum(
-    float* __restrict__ da_cs_sum,       // [B * n_chunks * nh]
-    const float* __restrict__ da_cumsum, // [B * n_chunks * nh * CS]
-    int B, int T, int nh, int CS
-) {
-    int b = blockIdx.x;
-    int chunk = blockIdx.y;
-    int h = blockIdx.z * blockDim.x + threadIdx.x;
-    if (h >= nh) return;
-    int n_chunks = (T + CS - 1) / CS;
-    int chunk_start = chunk * CS;
-    int last_t = min(CS, T - chunk_start) - 1;
-    int cs_idx = ((b * n_chunks + chunk) * nh + h) * CS + last_t;
-    int out_idx = (b * n_chunks + chunk) * nh + h;
-    da_cs_sum[out_idx] = da_cumsum[cs_idx];
+#define DEFINE_M3_EXTRACT_DA_CS_SUM(NAME, IDX)                                 \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ da_cs_sum,       /* [B * n_chunks * nh] */             \
+    const float* __restrict__ da_cumsum, /* [B * n_chunks * nh * CS] */        \
+    int B, int T, int nh, int CS                                               \
+) {                                                                            \
+    IDX b = blockIdx.x;                                                        \
+    int chunk = blockIdx.y;                                                    \
+    int h = blockIdx.z * blockDim.x + threadIdx.x;                             \
+    if (h >= nh) return;                                                       \
+    int n_chunks = (T + CS - 1) / CS;                                          \
+    int chunk_start = chunk * CS;                                              \
+    int last_t = min(CS, T - chunk_start) - 1;                                 \
+    IDX cs_idx = ((b * n_chunks + chunk) * nh + h) * CS + last_t;              \
+    IDX out_idx = (b * n_chunks + chunk) * nh + h;                             \
+    da_cs_sum[out_idx] = da_cumsum[cs_idx];                                    \
 }
+
+DEFINE_M3_EXTRACT_DA_CS_SUM(m3_extract_da_cs_sum, int)
+DEFINE_M3_EXTRACT_DA_CS_SUM(m3_extract_da_cs_sum_i64, long long)
 
 // ============================================================================
 // 11. m3_dqkv -- Monolithic chunked backward (reference backward stage 2)
@@ -1246,61 +1289,65 @@ extern "C" __global__ void m3_extract_da_cs_sum(
 //   the fused accumulate of the serial walk (same release-window
 //   family break as the M1 d-fold).
 // ============================================================================
-extern "C" __global__ void m3_dqkv_state_terms(
-    float* __restrict__ state_B, // [B*n_chunks*nh*hd*ds]
-    const float* __restrict__ Q_rot,
-    const float* __restrict__ DA_CS,
-    const float* __restrict__ dO,
-    int B, int T, int nh_total, int hd, int ds, int CS
-) {
-    int h = blockIdx.x;
-    int b = blockIdx.y;
-    int chunk_idx = blockIdx.z;
-    int p = threadIdx.x;
-    int ty = threadIdx.y;
-    int TS = blockDim.y;
-    int n_chunks = (T + CS - 1) / CS;
-    if (h >= nh_total || b >= B || p >= hd) return;
-    if (ds > MAMBA_RS_STATE_CAP || CS > 64) return;
-    int d_inner = nh_total * hd;
-    int chunk_start = chunk_idx * CS;
-    int chunk_len = min(CS, T - chunk_start);
-    extern __shared__ float smem_st[];
-    float* q_sm = smem_st;                 // [CS*ds]
-    float* do_sm = q_sm + CS * ds;         // [CS*hd]
-    float* expf_sm = do_sm + CS * hd;      // [CS]
-    for (int n = p; n < ds; n += hd) {
-        for (int t = ty; t < chunk_len; t += TS) {
-            int gt = chunk_start + t;
-            q_sm[t * ds + n] = Q_rot[((b * T + gt) * nh_total + h) * ds + n];
-        }
-    }
-    for (int t = ty; t < chunk_len; t += TS) {
-        int gt = chunk_start + t;
-        do_sm[t * hd + p] = dO[(b * T + gt) * d_inner + h * hd + p];
-    }
-    {
-        int lane = p + hd * ty;
-        int nlanes = hd * TS;
-        for (int t = lane; t < chunk_len; t += nlanes) {
-            float dA_t =
-                DA_CS[((b * n_chunks + chunk_idx) * nh_total + h) * CS + t];
-            expf_sm[t] = exp2f(dA_t * LOG2E);
-        }
-    }
-    __syncthreads();
-    for (int n = ty; n < ds; n += TS) {
-        float acc = 0.0f;
-        for (int t = 0; t < chunk_len; t++) {
-            acc += do_sm[t * hd + p] * expf_sm[t] * q_sm[t * ds + n];
-        }
-        state_B[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds
-                + p * ds + n] = acc;
-    }
+#define DEFINE_M3_DQKV_STATE_TERMS_F32(NAME, IDX)                              \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ state_B, /* [B*n_chunks*nh*hd*ds] */                   \
+    const float* __restrict__ Q_rot,                                           \
+    const float* __restrict__ DA_CS,                                           \
+    const float* __restrict__ dO,                                              \
+    int B, int T, int nh_total, int hd, int ds, int CS                         \
+) {                                                                            \
+    int h = blockIdx.x;                                                        \
+    IDX b = blockIdx.y;                                                        \
+    int chunk_idx = blockIdx.z;                                                \
+    int p = threadIdx.x;                                                       \
+    int ty = threadIdx.y;                                                      \
+    int TS = blockDim.y;                                                       \
+    int n_chunks = (T + CS - 1) / CS;                                          \
+    if (h >= nh_total || b >= B || p >= hd) return;                            \
+    if (ds > MAMBA_RS_STATE_CAP || CS > 64) return;                            \
+    int d_inner = nh_total * hd;                                               \
+    int chunk_start = chunk_idx * CS;                                          \
+    int chunk_len = min(CS, T - chunk_start);                                  \
+    extern __shared__ float smem_st[];                                         \
+    float* q_sm = smem_st;                 /* [CS*ds] */                       \
+    float* do_sm = q_sm + CS * ds;         /* [CS*hd] */                       \
+    float* expf_sm = do_sm + CS * hd;      /* [CS] */                          \
+    for (int n = p; n < ds; n += hd) {                                         \
+        for (int t = ty; t < chunk_len; t += TS) {                             \
+            int gt = chunk_start + t;                                          \
+            q_sm[t * ds + n] = Q_rot[((b * T + gt) * nh_total + h) * ds + n];  \
+        }                                                                      \
+    }                                                                          \
+    for (int t = ty; t < chunk_len; t += TS) {                                 \
+        int gt = chunk_start + t;                                              \
+        do_sm[t * hd + p] = dO[(b * T + gt) * d_inner + h * hd + p];           \
+    }                                                                          \
+    {                                                                          \
+        int lane = p + hd * ty;                                                \
+        int nlanes = hd * TS;                                                  \
+        for (int t = lane; t < chunk_len; t += nlanes) {                       \
+            float dA_t =                                                       \
+                DA_CS[((b * n_chunks + chunk_idx) * nh_total + h) * CS + t];   \
+            expf_sm[t] = exp2f(dA_t * LOG2E);                                  \
+        }                                                                      \
+    }                                                                          \
+    __syncthreads();                                                           \
+    for (int n = ty; n < ds; n += TS) {                                        \
+        float acc = 0.0f;                                                      \
+        for (int t = 0; t < chunk_len; t++) {                                  \
+            acc += do_sm[t * hd + p] * expf_sm[t] * q_sm[t * ds + n];          \
+        }                                                                      \
+        state_B[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds          \
+                + p * ds + n] = acc;                                           \
+    }                                                                          \
 }
 
-#define DEFINE_M3_DQKV_STATE_TERMS(SUFFIX, T_ACT)                             \
-extern "C" __global__ void m3_dqkv_state_terms_##SUFFIX(                      \
+DEFINE_M3_DQKV_STATE_TERMS_F32(m3_dqkv_state_terms, int)
+DEFINE_M3_DQKV_STATE_TERMS_F32(m3_dqkv_state_terms_i64, long long)
+
+#define DEFINE_M3_DQKV_STATE_TERMS(NAME, IDX, T_ACT)                          \
+extern "C" __global__ void NAME(                                              \
     float* __restrict__ state_B,                                              \
     const T_ACT* __restrict__ Q_rot,                                          \
     const float* __restrict__ DA_CS,                                          \
@@ -1308,7 +1355,7 @@ extern "C" __global__ void m3_dqkv_state_terms_##SUFFIX(                      \
     int B, int T, int nh_total, int hd, int ds, int CS                        \
 ) {                                                                           \
     int h = blockIdx.x;                                                       \
-    int b = blockIdx.y;                                                       \
+    IDX b = blockIdx.y;                                                       \
     int chunk_idx = blockIdx.z;                                               \
     int p = threadIdx.x;                                                      \
     int ty = threadIdx.y;                                                     \
@@ -1354,719 +1401,733 @@ extern "C" __global__ void m3_dqkv_state_terms_##SUFFIX(                      \
     }                                                                         \
 }
 
-DEFINE_M3_DQKV_STATE_TERMS(bf16, __nv_bfloat16)
-DEFINE_M3_DQKV_STATE_TERMS(f16,  __half)
+DEFINE_M3_DQKV_STATE_TERMS(m3_dqkv_state_terms_bf16, int, __nv_bfloat16)
+DEFINE_M3_DQKV_STATE_TERMS(m3_dqkv_state_terms_bf16_i64, long long, __nv_bfloat16)
+DEFINE_M3_DQKV_STATE_TERMS(m3_dqkv_state_terms_f16, int, __half)
+DEFINE_M3_DQKV_STATE_TERMS(m3_dqkv_state_terms_f16_i64, long long, __half)
 
 // One serial lane per (b, h, p, n): folds the per-chunk terms into the
 // entering state for every chunk (reverse order, deterministic).
-extern "C" __global__ void m3_dstate_passing_bwd(
-    float* __restrict__ enter_state, // [B*n_chunks*nh*hd*ds]
-    const float* __restrict__ state_B,
-    const float* __restrict__ DA_CS_SUM, // [B*n_chunks*nh]
-    int B, int nh_total, int hd, int ds, int n_chunks
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B * nh_total * hd * ds;
-    if (idx >= total) return;
-    int n = idx % ds;
-    int rem = idx / ds;
-    int p = rem % hd;
-    rem /= hd;
-    int h = rem % nh_total;
-    int b = rem / nh_total;
-    float e = 0.0f;
-    for (int c = n_chunks - 1; c >= 0; c--) {
-        int base = ((b * n_chunks + c) * nh_total + h) * hd * ds + p * ds + n;
-        enter_state[base] = e;
-        float a_c = exp2f(DA_CS_SUM[(b * n_chunks + c) * nh_total + h]
-                          * LOG2E);
-        e = a_c * e + state_B[base];
-    }
+#define DEFINE_M3_DSTATE_PASSING_BWD(NAME, IDX)                                \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ enter_state, /* [B*n_chunks*nh*hd*ds] */               \
+    const float* __restrict__ state_B,                                         \
+    const float* __restrict__ DA_CS_SUM, /* [B*n_chunks*nh] */                 \
+    int B, int nh_total, int hd, int ds, int n_chunks                          \
+) {                                                                            \
+    IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                      \
+    IDX total = (IDX)B * nh_total * hd * ds;                                   \
+    if (idx >= total) return;                                                  \
+    int n = (int)(idx % ds);                                                   \
+    IDX rem = idx / ds;                                                        \
+    int p = (int)(rem % hd);                                                   \
+    rem /= hd;                                                                 \
+    int h = (int)(rem % nh_total);                                             \
+    IDX b = rem / nh_total;                                                    \
+    float e = 0.0f;                                                            \
+    for (int c = n_chunks - 1; c >= 0; c--) {                                  \
+        IDX base = ((b * n_chunks + c) * nh_total + h) * hd * ds + p * ds + n; \
+        enter_state[base] = e;                                                 \
+        float a_c = exp2f(DA_CS_SUM[(b * n_chunks + c) * nh_total + h]         \
+                          * LOG2E);                                            \
+        e = a_c * e + state_B[base];                                           \
+    }                                                                          \
 }
 
-extern "C" __global__ void m3_dqkv(
-    // Outputs
-    float* __restrict__ dQ_mid,       // [B*T*nh*ds]
-    float* __restrict__ dK_mid,       // [B*T*nh*ds]
-    float* __restrict__ dV,           // [B*T*d_inner]
-    float* __restrict__ dADT,         // [B*T*nh]
-    float* __restrict__ dQK_dot_out,  // [B*T*nh]
-    float* __restrict__ dD_partials,  // [B * nh] per-(b,h) OUTPUT (no atomicAdd)
-    // Inputs
-    const float* __restrict__ Q_rot,       // [B*T*nh*ds]
-    const float* __restrict__ K_scaled,    // [B*T*nh*ds]
-    const float* __restrict__ V_in,        // [B*T*d_inner]
-    const float* __restrict__ DA_CS,       // [B*n_chunks*nh*CS]
-    const float* __restrict__ DA_CS_SUM,   // [B*n_chunks*nh]
-    const float* __restrict__ QK_dot_in,   // [B*T*nh]
-    const float* __restrict__ SSM_States,  // [B*n_chunks*nh*hd*ds]
-    const float* __restrict__ dO,          // [B*T*d_inner]
-    const float* __restrict__ D_param,     // [nh]
-    const float* __restrict__ enter_state, // [B*n_chunks*nh*hd*ds]
-    int B, int T, int nh_total, int hd, int ds, int CS,
-    int use_pair_mats  // 1 = smem holds the triangle pair matrices
-) {
-    // t-split: blockDim = (hd, T_SPLIT). One head per block;
-    // threadIdx.y strides the per-timestep loops so the block carries
-    // hd*T_SPLIT live lanes instead of one warp (the 32-thread blocks
-    // ran ~2% occupancy and owned 73% of the M3 step). Every output
-    // element keeps exactly one owning lane with the same inner-loop
-    // order as before, so outputs are bit-identical; only the lane->
-    // output assignment changed.
-    int h = blockIdx.x;
-    int b = blockIdx.y;
-    int p = threadIdx.x;
-    int ty = threadIdx.y;
-    int TS = blockDim.y;
-    int lane = p + hd * ty;
-    int nlanes = hd * TS;
-    if (h >= nh_total || b >= B || p >= hd) return;
-    if (ds > MAMBA_RS_STATE_CAP || CS > 64) return;
+DEFINE_M3_DSTATE_PASSING_BWD(m3_dstate_passing_bwd, int)
+DEFINE_M3_DSTATE_PASSING_BWD(m3_dstate_passing_bwd_i64, long long)
 
-    // Warp-reduce mask: with t-split lanes the ty slices of one warp can
-    // run DIFFERENT trip counts (chunk_len < TS or not a multiple), so a
-    // whole-warp mask would name lanes that are not executing the
-    // shuffle (UB per CUDA Programming Guide B.15.1). The mask names
-    // only this hd-lane segment; a segment shares one ty, hence one
-    // trip count, hence convergence.
-    unsigned warp_mask;
-    if (hd >= 32) {
-        warp_mask = 0xFFFFFFFFu;
-    } else {
-        unsigned lin = (unsigned)(threadIdx.y * blockDim.x + threadIdx.x);
-        unsigned seg_base = (lin & 31u) / (unsigned)hd * (unsigned)hd;
-        warp_mask = (((1u << hd) - 1u) << seg_base);
-    }
-
-    int d_inner = nh_total * hd;
-    int n_chunks = (T + CS - 1) / CS;
-    float D_val = D_param[h];
-    float dD_acc = 0.0f;
-
-    // Register state: the chunk's entering d_state column, produced by
-    // m3_dqkv_state_terms + m3_dstate_passing_bwd (chunk-parallel).
-    float d_state[MAMBA_RS_STATE_CAP]; // sized by the state capacity
-
-    // Shared memory layout (dynamically sized): ONE head per block, so
-    // the whole dynamic allocation is this head's slice.
-    extern __shared__ float smem_all[];
-    float* smem = smem_all;
-    // q_sm[CS][dsp], k_sm[CS][dsp], v_sm[CS][hdp], do_sm[CS][hdp]
-    // da_cs_sm[CS], qk_dot_sm[CS], ssm_sm[hd][ds] (loaded cooperatively)
-    // The four time-major tiles carry one float of padding per row: the
-    // pair-matrix build reads consecutive rows across a warp, and an even
-    // stride lands them on the same two banks. An odd stride only moves
-    // where a value lives, never what it is.
-    const int dsp = ds + 1;
-    const int hdp = hd + 1;
-    float* q_sm    = smem;
-    float* k_sm    = q_sm + CS * dsp;
-    float* v_sm    = k_sm + CS * dsp;
-    float* do_sm   = v_sm + CS * hdp;
-    float* da_cs_sm = do_sm + CS * hdp;
-    float* qk_sm   = da_cs_sm + CS;
-    float* ssm_sm  = qk_sm + CS; // [hd][ds] for SSM_States tile
-    // Extra staging for the warp-parallel dADT section: the true
-    // SSM_States tile (ssm_sm gets overwritten with d_state before the
-    // section runs) plus the two per-step lanes the combine reads.
-    float* ssm2_sm   = ssm_sm + hd * ds; // [hd][ds]
-    float* dm_rev_sm = ssm2_sm + hd * ds; // [CS]
-    float* dm_vec_sm = dm_rev_sm + CS;    // [CS]
-    // Strict-upper-triangle pair matrices K[a].Q[b] and
-    // V[a].dO[b] (a < b), computed once per chunk instead of per
-    // consumer lane (hd-fold recompute). Triangle packing keeps the
-    // two-head tile under the ~99 KB consumer-GPU smem opt-in cap.
-    // When the matrix-inclusive tile would blow the ~99 KB consumer smem
-    // opt-in (large d_state), the launcher passes use_pair_mats = 0 with
-    // the legacy tile size and every consumer falls back to the inline
-    // dot — same ascending-index arithmetic, bit-identical values.
-    int tri_n = CS * (CS - 1) / 2;
-    float* kq_mat  = dm_vec_sm + CS;      // [tri_n] (only if use_pair_mats)
-    float* vdo_mat = kq_mat + tri_n;      // [tri_n]
-    // Decay triangle exp2((da[b]-da[a])*LOG2E) for a < b plus
-    // per-step exp_fwd/exp_rev lanes — the consumers recomputed these
-    // transcendentals inline (~7.4k exp2f per (b,h,chunk) lane).
-    float* decay_mat  = vdo_mat + tri_n;   // [tri_n]
-    float* exp_fwd_sm = decay_mat + tri_n; // [CS]
-    float* exp_rev_sm = exp_fwd_sm + CS;   // [CS]
-
-    {
-        int chunk_idx = blockIdx.z;
-        int chunk_start = chunk_idx * CS;
-        int chunk_len = min(CS, T - chunk_start);
-        for (int n = 0; n < ds; n++) {
-            d_state[n] = enter_state[
-                ((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds
-                + p * ds + n];
-        }
-
-        // === Cooperative load tiles into shared memory ===
-        // V and dO: thread p loads element p, timesteps split over ty.
-        for (int t = ty; t < CS; t += TS) {
-            if (t < chunk_len) {
-                int gt = chunk_start + t;
-                v_sm[t * hdp + p] = V_in[(b * T + gt) * d_inner + h * hd + p];
-                do_sm[t * hdp + p] = dO[(b * T + gt) * d_inner + h * hd + p];
-            } else {
-                v_sm[t * hdp + p] = 0.0f;
-                do_sm[t * hdp + p] = 0.0f;
-            }
-        }
-        // Q and K: each thread loads ALL ds entries for indices n stride hd.
-        // OLD bug: `if (p < ds)` only worked when ds <= hd; for ds > hd
-        // (e.g. ds=16, hd=8) entries n=hd..ds-1 were left as garbage in
-        // shared memory, corrupting every dot/dQK computation downstream.
-        for (int n = p; n < ds; n += hd) {
-            for (int t = ty; t < CS; t += TS) {
-                if (t < chunk_len) {
-                    int gt = chunk_start + t;
-                    q_sm[t * dsp + n] = Q_rot[((b * T + gt) * nh_total + h) * ds + n];
-                    k_sm[t * dsp + n] = K_scaled[((b * T + gt) * nh_total + h) * ds + n];
-                } else {
-                    q_sm[t * dsp + n] = 0.0f;
-                    k_sm[t * dsp + n] = 0.0f;
-                }
-            }
-        }
-        // da_cs and qk_dot: p==0 lanes load, timesteps split over ty.
-        if (p == 0) {
-            for (int t = ty; t < CS; t += TS) {
-                if (t < chunk_len) {
-                    da_cs_sm[t] = DA_CS[((b * n_chunks + chunk_idx) * nh_total + h) * CS + t];
-                    qk_sm[t] = QK_dot_in[(b * T + chunk_start + t) * nh_total + h];
-                } else {
-                    da_cs_sm[t] = 0.0f;
-                    qk_sm[t] = 0.0f;
-                }
-            }
-        }
-        // SSM_States: ty==0 threads load their row (p) of [hd][ds]
-        if (ty == 0) {
-            for (int n = 0; n < ds; n++) {
-                ssm_sm[p * ds + n] = SSM_States[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + p * ds + n];
-            }
-        }
-        __syncthreads();
-
-        // Each (a,b) element is computed by exactly one thread with the
-        // same ascending-index dot the inline consumers used, so every
-        // reader sees a bit-identical value. The lanes walk the packed
-        // triangle flat, every lane taking every nlanes-th slot: a walk
-        // by row left most lanes idle on the short rows. A slot's (aa,
-        // bb) is recovered incrementally from the row lengths.
-        if (use_pair_mats) {
-            float cs_sum_pre =
-                DA_CS_SUM[(b * n_chunks + chunk_idx) * nh_total + h];
-            int row = 0;
-            int row_start = 0;
-            for (int idx = lane; idx < tri_n; idx += nlanes) {
-                while (row_start + (CS - 1 - row) <= idx) {
-                    row_start += CS - 1 - row;
-                    row++;
-                }
-                int aa = row;
-                int bb = idx - row_start + aa + 1;
-                float kq_acc = 0.0f;
-                for (int n = 0; n < ds; n++)
-                    kq_acc += k_sm[aa * dsp + n] * q_sm[bb * dsp + n];
-                kq_mat[idx] = kq_acc;
-                float vdo_acc = 0.0f;
-                for (int pp = 0; pp < hd; pp++)
-                    vdo_acc += v_sm[aa * hdp + pp] * do_sm[bb * hdp + pp];
-                vdo_mat[idx] = vdo_acc;
-                /* consumer-exact expression */
-                decay_mat[idx] =
-                    exp2f((da_cs_sm[bb] - da_cs_sm[aa]) * LOG2E);
-            }
-            for (int tt = lane; tt < CS; tt += nlanes) {
-                exp_fwd_sm[tt] = exp2f(da_cs_sm[tt] * LOG2E);
-                exp_rev_sm[tt] = exp2f((cs_sum_pre - da_cs_sm[tt]) * LOG2E);
-            }
-            __syncthreads();
-        }
-
-        float da_cs_chunk_sum = DA_CS_SUM[(b * n_chunks + chunk_idx) * nh_total + h];
-
-        // === Compute per-timestep outputs ===
-        // dV, dQK_dot for each timestep; timesteps split over ty.
-        for (int t = ty; t < chunk_len; t += TS) {
-            int gt = chunk_start + t;
-            float dA_t = da_cs_sm[t];
-            float exp_rev_t = use_pair_mats
-                ? exp_rev_sm[t]
-                : exp2f((da_cs_chunk_sum - dA_t) * LOG2E);
-
-            // --- dV[t,h,p] ---
-            // Intra: sum_{s: s has t as source, i.e., t<s in causal}
-            // P^T[t,s] = sum_n(K[t,n]*Q[s,n]) * exp(dA[s]-dA[t]) for s > t
-            float dv_intra = 0.0f;
-            for (int s = t + 1; s < chunk_len; s++) {
-                float kq;
-                if (use_pair_mats) {
-                    kq = kq_mat[M3_TRI(t, s, CS)];
-                } else {
-                    kq = 0.0f;
-                    for (int n = 0; n < ds; n++)
-                        kq += k_sm[t * dsp + n] * q_sm[s * dsp + n];
-                }
-                float decay = use_pair_mats
-                    ? decay_mat[M3_TRI(t, s, CS)]
-                    : exp2f((da_cs_sm[s] - dA_t) * LOG2E);
-                dv_intra += kq * decay * do_sm[s * hdp + p];
-            }
-            // Inter: K[t] @ d_state^T[p] * exp_rev
-            float dv_inter = 0.0f;
-            for (int n = 0; n < ds; n++)
-                dv_inter += k_sm[t * dsp + n] * d_state[n];
-            dv_inter *= exp_rev_t;
-            // Skip: dO * (D + qk_dot)
-            float dv_skip = do_sm[t * hdp + p] * (D_val + qk_sm[t]);
-
-            dV[(b * T + gt) * d_inner + h * hd + p] = dv_intra + dv_inter + dv_skip;
-
-            // --- dQK_dot[t,h] and dD ---
-            // dQK_dot = sum_p(dO[t,p] * V[t,p])
-            float dqk_val = do_sm[t * hdp + p] * v_sm[t * hdp + p];
-            // Warp reduce
-            for (int off = hd / 2; off > 0; off >>= 1)
-                dqk_val += __shfl_down_sync(warp_mask, dqk_val, off, hd);
-            if (p == 0) {
-                dQK_dot_out[(b * T + gt) * nh_total + h] = dqk_val;
-            }
-        }
-        __syncthreads();
-        // dD: resum the freshly stored dQK lane in ascending t on ONE
-        // lane — the historical accumulation order (t ascending within
-        // the chunk, chunks in reverse). Summing per-ty partials would
-        // interleave that order and move bits.
-        if (p == 0 && ty == 0) {
-            for (int t = 0; t < chunk_len; t++)
-                dD_acc += dQK_dot_out[(b * T + chunk_start + t) * nh_total + h];
-        }
-
-        // === dK_mid and dQ_mid ===
-        // These need sum over hd (reduction across threads).
-        // dK_mid[t,n] = sum_p(intra_contrib[t,p,n] + inter_contrib[t,p,n])
-        // Threads stride over state dims: for ds > hd, thread p covers
-        // n = p, p+hd, p+2*hd, ... (mirrors the cooperative Q/K load above;
-        // the old `if (p < ds) { n = p; }` silently zeroed n >= hd).
-        for (int n = p; n < ds; n += hd) {
-            for (int t = ty; t < chunk_len; t += TS) {
-                int gt = chunk_start + t;
-                float dA_t = da_cs_sm[t];
-
-                // dK_mid[t,n]: intra = sum_{s>t} dO[s]@V[s]^T * exp * Q[s,n]
-                // This is dp_t^T[*,t] @ Q[*,n]
-                // dp_t[i,j] = sum_p(V[i,p]*dO[j,p]) * mask[i,j]
-                // dp_t^T[j,i] = dp_t[i,j]
-                // (dp_t^T @ Q)[t, n] = sum_s(dp_t[s,t] * Q[s,n])
-                //                    = sum_s(sum_p(V[s,p]*dO[t,p]) * mask[s,t] * Q[s,n])
-                // Wait — mask is causal: mask[i,j] = exp(dA[j]-dA[i]) if j>i else 0
-                // dp_t[i,j] includes mask. For column t of dp_t: dp_t[s,t] for s where t > s
-                // Actually in Python: dp_t = V @ dO^T * mask
-                // dp_t[s1, s2] = sum_p(V[s1,p]*dO[s2,p]) * (s2>s1 ? exp(dA[s2]-dA[s1]) : 0)
-                // (dp_t @ Q)[s1, n] = sum_s2>s1 (sum_p(V[s1,p]*dO[s2,p]) * exp(dA[s2]-dA[s1]) * Q[s2,n])
-                // We want acc_dk[t, n] = (dp_t @ Q)[t, n] — this is dp_t row t dot Q col n
-                // But dp_t = V@dO^T ⊙ mask, so dp_t[t, s] = sum_p(V[t,p]*dO[s,p]) * mask[t,s]
-                // mask[t,s] = exp(dA[s]-dA[t]) if s>t else 0
-                // So acc_dk[t,n] = sum_{s>t} sum_p(V[t,p]*dO[s,p]) * exp(dA[s]-dA[t]) * Q[s,n]
-
-                float dk_intra = 0.0f;
-                for (int s = t + 1; s < chunk_len; s++) {
-                    float vdo;
-                    if (use_pair_mats) {
-                        vdo = vdo_mat[M3_TRI(t, s, CS)];
-                    } else {
-                        vdo = 0.0f;
-                        for (int pp = 0; pp < hd; pp++)
-                            vdo += v_sm[t * hdp + pp] * do_sm[s * hdp + pp];
-                    }
-                    float decay = use_pair_mats
-                        ? decay_mat[M3_TRI(t, s, CS)]
-                        : exp2f((da_cs_sm[s] - dA_t) * LOG2E);
-                    dk_intra += vdo * decay * q_sm[s * dsp + n];
-                }
-                // Inter-chunk dK contribution added in second pass below (after d_state → shared memory)
-                dK_mid[((b * T + gt) * nh_total + h) * ds + n] = dk_intra;
-
-                // dQ_mid[t,n]: similar structure
-                // acc_dq[t,n] = sum_{s<t} sum_p(V[s,p]*dO[t,p]) * exp(dA[t]-dA[s]) * K[s,n]  (wrong?)
-                // Actually from Python: s_block^T @ K where s_block = V@dO^T ⊙ mask (same as dp_t)
-                // acc_dq = (dp_t^T @ K)[t, n]
-                // dp_t^T[t, s] = dp_t[s, t] = sum_p(V[s,p]*dO[t,p]) * mask[s,t]
-                // mask[s,t] = exp(dA[t]-dA[s]) if t>s else 0
-                // So: acc_dq[t,n] = sum_{s<t} sum_p(V[s,p]*dO[t,p]) * exp(dA[t]-dA[s]) * K[s,n]
-                float dq_intra = 0.0f;
-                for (int s = 0; s < t; s++) {
-                    float vdo;
-                    if (use_pair_mats) {
-                        vdo = vdo_mat[M3_TRI(s, t, CS)];
-                    } else {
-                        vdo = 0.0f;
-                        for (int pp = 0; pp < hd; pp++)
-                            vdo += v_sm[s * hdp + pp] * do_sm[t * hdp + pp];
-                    }
-                    float decay = use_pair_mats
-                        ? decay_mat[M3_TRI(s, t, CS)]
-                        : exp2f((dA_t - da_cs_sm[s]) * LOG2E);
-                    dq_intra += vdo * decay * k_sm[s * dsp + n];
-                }
-                // Inter: dO[t] @ ssm_states * exp
-                float dq_inter = 0.0f;
-                for (int pp = 0; pp < hd; pp++)
-                    dq_inter += do_sm[t * hdp + pp] * ssm_sm[pp * ds + n];
-                dq_inter *=
-                    use_pair_mats ? exp_fwd_sm[t] : exp2f(dA_t * LOG2E);
-
-                dQ_mid[((b * T + gt) * nh_total + h) * ds + n] = dq_intra + dq_inter;
-            }
-        }
-        __syncthreads();
-
-        // === Store d_state to shared for inter-chunk dK_mid contribution ===
-        // Every ty lane replicates the same d_state bits; ty==0 writes.
-        if (ty == 0) {
-            for (int n = 0; n < ds; n++)
-                ssm_sm[p * ds + n] = d_state[n];
-        }
-        __syncthreads();
-
-        // Now fix dK_mid inter-chunk: sum_p(V[t,p] * d_state[p][n]) * exp_rev
-        // Strided over state dims so ds > hd is fully covered (see dK/dQ_mid above).
-        for (int n = p; n < ds; n += hd) {
-            for (int t = ty; t < chunk_len; t += TS) {
-                float dk_inter = 0.0f;
-                float exp_rev_t = use_pair_mats
-                    ? exp_rev_sm[t]
-                    : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);
-                for (int pp = 0; pp < hd; pp++)
-                    dk_inter += v_sm[t * hdp + pp] * ssm_sm[pp * ds + n];
-                dk_inter *= exp_rev_t;
-                int gt = chunk_start + t;
-                dK_mid[((b * T + gt) * nh_total + h) * ds + n] += dk_inter;
-            }
-        }
-        __syncthreads();
-
-        // === dADT computation (all 4 parts) ===
-        // Formerly a single-lane section (~95% of the kernel serial on
-        // lane 0). Restructured per OUTPUT step: each lane owns a strided
-        // set of steps and computes that step's contributions with a
-        // fixed serial order (below-diagonal pairs ascending, then
-        // above-diagonal), so no cross-lane reduction exists and the
-        // result is deterministic by construction. The true SSM_States
-        // tile is staged in shared memory once (ssm_sm already holds
-        // d_state at this point), replacing the per-element global
-        // re-reads of the old code.
-        for (int n = lane; n < hd * ds; n += nlanes) {
-            ssm2_sm[n] =
-                SSM_States[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + n];
-        }
-        __syncthreads();
-        for (int t = lane; t < chunk_len; t += nlanes) {
-            float acc = 0.0f;
-            // Below-diagonal: pairs (i, t) with i < t contribute +dAinv.
-            for (int i = 0; i < t; i++) {
-                float vdo;
-                if (use_pair_mats) {
-                    vdo = vdo_mat[M3_TRI(i, t, CS)];
-                } else {
-                    vdo = 0.0f;
-                    for (int pp = 0; pp < hd; pp++)
-                        vdo += v_sm[i * hdp + pp] * do_sm[t * hdp + pp];
-                }
-                float decay = use_pair_mats
-                    ? decay_mat[M3_TRI(i, t, CS)]
-                    : exp2f((da_cs_sm[t] - da_cs_sm[i]) * LOG2E);
-                float kq;
-                if (use_pair_mats) {
-                    kq = kq_mat[M3_TRI(i, t, CS)];
-                } else {
-                    kq = 0.0f;
-                    for (int n = 0; n < ds; n++)
-                        kq += k_sm[i * dsp + n] * q_sm[t * dsp + n];
-                }
-                acc += vdo * decay * kq;
-            }
-            // Above-diagonal: pairs (t, j) with j > t contribute -dAinv.
-            for (int j = t + 1; j < chunk_len; j++) {
-                float vdo;
-                if (use_pair_mats) {
-                    vdo = vdo_mat[M3_TRI(t, j, CS)];
-                } else {
-                    vdo = 0.0f;
-                    for (int pp = 0; pp < hd; pp++)
-                        vdo += v_sm[t * hdp + pp] * do_sm[j * hdp + pp];
-                }
-                float decay = use_pair_mats
-                    ? decay_mat[M3_TRI(t, j, CS)]
-                    : exp2f((da_cs_sm[j] - da_cs_sm[t]) * LOG2E);
-                float kq;
-                if (use_pair_mats) {
-                    kq = kq_mat[M3_TRI(t, j, CS)];
-                } else {
-                    kq = 0.0f;
-                    for (int n = 0; n < ds; n++)
-                        kq += k_sm[t * dsp + n] * q_sm[j * dsp + n];
-                }
-                acc -= vdo * decay * kq;
-            }
-            // Entering-state term: Q @ ssm_states^T dot dO * exp.
-            float qs_do = 0.0f;
-            for (int pp = 0; pp < hd; pp++) {
-                float qs = 0.0f;
-                for (int n = 0; n < ds; n++)
-                    qs += q_sm[t * dsp + n] * ssm2_sm[pp * ds + n];
-                qs_do += qs * do_sm[t * hdp + pp];
-            }
-            acc += qs_do
-                * (use_pair_mats ? exp_fwd_sm[t] : exp2f(da_cs_sm[t] * LOG2E));
-            dm_rev_sm[t] = acc;
-            // Exit-state term: K @ d_state^T dot V * exp_rev
-            // (ssm_sm holds d_state here).
-            float dsk_v = 0.0f;
-            for (int pp = 0; pp < hd; pp++) {
-                float dsk = 0.0f;
-                for (int n = 0; n < ds; n++)
-                    dsk += k_sm[t * dsp + n] * ssm_sm[pp * ds + n];
-                dsk_v += dsk * v_sm[t * hdp + pp];
-            }
-            dm_vec_sm[t] = dsk_v
-                * (use_pair_mats ? exp_rev_sm[t]
-                                 : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E));
-        }
-        __syncthreads();
-        if (p == 0 && ty == 0) {
-            // Scalar term + the serial reverse-cumsum combine (cheap,
-            // and its order is the numeric contract).
-            float dM_scalar = 0.0f;
-            for (int pp = 0; pp < hd; pp++) {
-                for (int n = 0; n < ds; n++)
-                    dM_scalar += ssm2_sm[pp * ds + n] * ssm_sm[pp * ds + n];
-            }
-            dM_scalar *= exp2f(da_cs_chunk_sum * LOG2E);
-
-            float total_rev = 0.0f;
-            for (int t = 0; t < chunk_len; t++) total_rev += dm_rev_sm[t];
-            total_rev += dM_scalar;
-            float cumsum = 0.0f;
-            for (int t = 0; t < chunk_len; t++) {
-                cumsum += dm_vec_sm[t] - dm_rev_sm[t];
-                // Same grouping as the historical in-place update
-                // (dM_rev[t] += total + cumsum - vec): the added term is
-                // evaluated first, then added once.
-                float out = dm_rev_sm[t] + (total_rev + cumsum - dm_vec_sm[t]);
-                int gt = chunk_start + t;
-                dADT[(b * T + gt) * nh_total + h] = out;
-            }
-        }
-        __syncthreads();
-
-    }
-
-    // Store dD per-(b, chunk, h) — caller reduces across rows.
-    if (p == 0 && ty == 0)
-        dD_partials[(b * n_chunks + blockIdx.z) * nh_total + h] = dD_acc;
+#define DEFINE_M3_DQKV_F32(NAME, IDX)                                          \
+extern "C" __global__ void NAME(                                               \
+    /* Outputs */                                                              \
+    float* __restrict__ dQ_mid,       /* [B*T*nh*ds] */                        \
+    float* __restrict__ dK_mid,       /* [B*T*nh*ds] */                        \
+    float* __restrict__ dV,           /* [B*T*d_inner] */                      \
+    float* __restrict__ dADT,         /* [B*T*nh] */                           \
+    float* __restrict__ dQK_dot_out,  /* [B*T*nh] */                           \
+    float* __restrict__ dD_partials,  /* [B * nh] per-(b,h) OUTPUT (no atomicAdd) */ \
+    /* Inputs */                                                               \
+    const float* __restrict__ Q_rot,       /* [B*T*nh*ds] */                   \
+    const float* __restrict__ K_scaled,    /* [B*T*nh*ds] */                   \
+    const float* __restrict__ V_in,        /* [B*T*d_inner] */                 \
+    const float* __restrict__ DA_CS,       /* [B*n_chunks*nh*CS] */            \
+    const float* __restrict__ DA_CS_SUM,   /* [B*n_chunks*nh] */               \
+    const float* __restrict__ QK_dot_in,   /* [B*T*nh] */                      \
+    const float* __restrict__ SSM_States,  /* [B*n_chunks*nh*hd*ds] */         \
+    const float* __restrict__ dO,          /* [B*T*d_inner] */                 \
+    const float* __restrict__ D_param,     /* [nh] */                          \
+    const float* __restrict__ enter_state, /* [B*n_chunks*nh*hd*ds] */         \
+    int B, int T, int nh_total, int hd, int ds, int CS,                        \
+    int use_pair_mats  /* 1 = smem holds the triangle pair matrices */         \
+) {                                                                            \
+    /* t-split: blockDim = (hd, T_SPLIT). One head per block; */               \
+    /* threadIdx.y strides the per-timestep loops so the block carries */      \
+    /* hd*T_SPLIT live lanes instead of one warp (the 32-thread blocks */      \
+    /* ran ~2% occupancy and owned 73% of the M3 step). Every output */        \
+    /* element keeps exactly one owning lane with the same inner-loop */       \
+    /* order as before, so outputs are bit-identical; only the lane-> */       \
+    /* output assignment changed. */                                           \
+    int h = blockIdx.x;                                                        \
+    IDX b = blockIdx.y;                                                        \
+    int p = threadIdx.x;                                                       \
+    int ty = threadIdx.y;                                                      \
+    int TS = blockDim.y;                                                       \
+    int lane = p + hd * ty;                                                    \
+    int nlanes = hd * TS;                                                      \
+    if (h >= nh_total || b >= B || p >= hd) return;                            \
+    if (ds > MAMBA_RS_STATE_CAP || CS > 64) return;                            \
+                                                                               \
+    /* Warp-reduce mask: with t-split lanes the ty slices of one warp can */   \
+    /* run DIFFERENT trip counts (chunk_len < TS or not a multiple), so a */   \
+    /* whole-warp mask would name lanes that are not executing the */          \
+    /* shuffle (UB per CUDA Programming Guide B.15.1). The mask names */       \
+    /* only this hd-lane segment; a segment shares one ty, hence one */        \
+    /* trip count, hence convergence. */                                       \
+    unsigned warp_mask;                                                        \
+    if (hd >= 32) {                                                            \
+        warp_mask = 0xFFFFFFFFu;                                               \
+    } else {                                                                   \
+        unsigned lin = (unsigned)(threadIdx.y * blockDim.x + threadIdx.x);     \
+        unsigned seg_base = (lin & 31u) / (unsigned)hd * (unsigned)hd;         \
+        warp_mask = (((1u << hd) - 1u) << seg_base);                           \
+    }                                                                          \
+                                                                               \
+    int d_inner = nh_total * hd;                                               \
+    int n_chunks = (T + CS - 1) / CS;                                          \
+    float D_val = D_param[h];                                                  \
+    float dD_acc = 0.0f;                                                       \
+                                                                               \
+    /* Register state: the chunk's entering d_state column, produced by */     \
+    /* m3_dqkv_state_terms + m3_dstate_passing_bwd (chunk-parallel). */        \
+    float d_state[MAMBA_RS_STATE_CAP]; /* sized by the state capacity */       \
+                                                                               \
+    /* Shared memory layout (dynamically sized): ONE head per block, so */     \
+    /* the whole dynamic allocation is this head's slice. */                   \
+    extern __shared__ float smem_all[];                                        \
+    float* smem = smem_all;                                                    \
+    /* q_sm[CS][dsp], k_sm[CS][dsp], v_sm[CS][hdp], do_sm[CS][hdp] */          \
+    /* da_cs_sm[CS], qk_dot_sm[CS], ssm_sm[hd][ds] (loaded cooperatively) */   \
+    /* The four time-major tiles carry one float of padding per row: the */    \
+    /* pair-matrix build reads consecutive rows across a warp, and an even */  \
+    /* stride lands them on the same two banks. An odd stride only moves */    \
+    /* where a value lives, never what it is. */                               \
+    const int dsp = ds + 1;                                                    \
+    const int hdp = hd + 1;                                                    \
+    float* q_sm    = smem;                                                     \
+    float* k_sm    = q_sm + CS * dsp;                                          \
+    float* v_sm    = k_sm + CS * dsp;                                          \
+    float* do_sm   = v_sm + CS * hdp;                                          \
+    float* da_cs_sm = do_sm + CS * hdp;                                        \
+    float* qk_sm   = da_cs_sm + CS;                                            \
+    float* ssm_sm  = qk_sm + CS; /* [hd][ds] for SSM_States tile */            \
+    /* Extra staging for the warp-parallel dADT section: the true */           \
+    /* SSM_States tile (ssm_sm gets overwritten with d_state before the */     \
+    /* section runs) plus the two per-step lanes the combine reads. */         \
+    float* ssm2_sm   = ssm_sm + hd * ds; /* [hd][ds] */                        \
+    float* dm_rev_sm = ssm2_sm + hd * ds; /* [CS] */                           \
+    float* dm_vec_sm = dm_rev_sm + CS;    /* [CS] */                           \
+    /* Strict-upper-triangle pair matrices K[a].Q[b] and */                    \
+    /* V[a].dO[b] (a < b), computed once per chunk instead of per */           \
+    /* consumer lane (hd-fold recompute). Triangle packing keeps the */        \
+    /* two-head tile under the ~99 KB consumer-GPU smem opt-in cap. */         \
+    /* When the matrix-inclusive tile would blow the ~99 KB consumer smem */   \
+    /* opt-in (large d_state), the launcher passes use_pair_mats = 0 with */   \
+    /* the legacy tile size and every consumer falls back to the inline */     \
+    /* dot — same ascending-index arithmetic, bit-identical values. */         \
+    int tri_n = CS * (CS - 1) / 2;                                             \
+    float* kq_mat  = dm_vec_sm + CS;      /* [tri_n] (only if use_pair_mats) */ \
+    float* vdo_mat = kq_mat + tri_n;      /* [tri_n] */                        \
+    /* Decay triangle exp2((da[b]-da[a])*LOG2E) for a < b plus */              \
+    /* per-step exp_fwd/exp_rev lanes — the consumers recomputed these */      \
+    /* transcendentals inline (~7.4k exp2f per (b,h,chunk) lane). */           \
+    float* decay_mat  = vdo_mat + tri_n;   /* [tri_n] */                       \
+    float* exp_fwd_sm = decay_mat + tri_n; /* [CS] */                          \
+    float* exp_rev_sm = exp_fwd_sm + CS;   /* [CS] */                          \
+                                                                               \
+    {                                                                          \
+        int chunk_idx = blockIdx.z;                                            \
+        int chunk_start = chunk_idx * CS;                                      \
+        int chunk_len = min(CS, T - chunk_start);                              \
+        for (int n = 0; n < ds; n++) {                                         \
+            d_state[n] = enter_state[                                          \
+                ((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds          \
+                + p * ds + n];                                                 \
+        }                                                                      \
+                                                                               \
+        /* === Cooperative load tiles into shared memory === */                \
+        /* V and dO: thread p loads element p, timesteps split over ty. */     \
+        for (int t = ty; t < CS; t += TS) {                                    \
+            if (t < chunk_len) {                                               \
+                int gt = chunk_start + t;                                      \
+                v_sm[t * hdp + p] = V_in[(b * T + gt) * d_inner + h * hd + p]; \
+                do_sm[t * hdp + p] = dO[(b * T + gt) * d_inner + h * hd + p];  \
+            } else {                                                           \
+                v_sm[t * hdp + p] = 0.0f;                                      \
+                do_sm[t * hdp + p] = 0.0f;                                     \
+            }                                                                  \
+        }                                                                      \
+        /* Q and K: each thread loads ALL ds entries for indices n stride hd. */ \
+        /* OLD bug: `if (p < ds)` only worked when ds <= hd; for ds > hd */    \
+        /* (e.g. ds=16, hd=8) entries n=hd..ds-1 were left as garbage in */    \
+        /* shared memory, corrupting every dot/dQK computation downstream. */  \
+        for (int n = p; n < ds; n += hd) {                                     \
+            for (int t = ty; t < CS; t += TS) {                                \
+                if (t < chunk_len) {                                           \
+                    int gt = chunk_start + t;                                  \
+                    q_sm[t * dsp + n] = Q_rot[((b * T + gt) * nh_total + h) * ds + n]; \
+                    k_sm[t * dsp + n] = K_scaled[((b * T + gt) * nh_total + h) * ds + n]; \
+                } else {                                                       \
+                    q_sm[t * dsp + n] = 0.0f;                                  \
+                    k_sm[t * dsp + n] = 0.0f;                                  \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        /* da_cs and qk_dot: p==0 lanes load, timesteps split over ty. */      \
+        if (p == 0) {                                                          \
+            for (int t = ty; t < CS; t += TS) {                                \
+                if (t < chunk_len) {                                           \
+                    da_cs_sm[t] = DA_CS[((b * n_chunks + chunk_idx) * nh_total + h) * CS + t]; \
+                    qk_sm[t] = QK_dot_in[(b * T + chunk_start + t) * nh_total + h]; \
+                } else {                                                       \
+                    da_cs_sm[t] = 0.0f;                                        \
+                    qk_sm[t] = 0.0f;                                           \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        /* SSM_States: ty==0 threads load their row (p) of [hd][ds] */         \
+        if (ty == 0) {                                                         \
+            for (int n = 0; n < ds; n++) {                                     \
+                ssm_sm[p * ds + n] = SSM_States[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + p * ds + n]; \
+            }                                                                  \
+        }                                                                      \
+        __syncthreads();                                                       \
+                                                                               \
+        /* Each (a,b) element is computed by exactly one thread with the */    \
+        /* same ascending-index dot the inline consumers used, so every */     \
+        /* reader sees a bit-identical value. The lanes walk the packed */     \
+        /* triangle flat, every lane taking every nlanes-th slot: a walk */    \
+        /* by row left most lanes idle on the short rows. A slot's (aa, */     \
+        /* bb) is recovered incrementally from the row lengths. */             \
+        if (use_pair_mats) {                                                   \
+            float cs_sum_pre =                                                 \
+                DA_CS_SUM[(b * n_chunks + chunk_idx) * nh_total + h];          \
+            int row = 0;                                                       \
+            int row_start = 0;                                                 \
+            for (int idx = lane; idx < tri_n; idx += nlanes) {                 \
+                while (row_start + (CS - 1 - row) <= idx) {                    \
+                    row_start += CS - 1 - row;                                 \
+                    row++;                                                     \
+                }                                                              \
+                int aa = row;                                                  \
+                int bb = idx - row_start + aa + 1;                             \
+                float kq_acc = 0.0f;                                           \
+                for (int n = 0; n < ds; n++)                                   \
+                    kq_acc += k_sm[aa * dsp + n] * q_sm[bb * dsp + n];         \
+                kq_mat[idx] = kq_acc;                                          \
+                float vdo_acc = 0.0f;                                          \
+                for (int pp = 0; pp < hd; pp++)                                \
+                    vdo_acc += v_sm[aa * hdp + pp] * do_sm[bb * hdp + pp];     \
+                vdo_mat[idx] = vdo_acc;                                        \
+                /* consumer-exact expression */                                \
+                decay_mat[idx] =                                               \
+                    exp2f((da_cs_sm[bb] - da_cs_sm[aa]) * LOG2E);              \
+            }                                                                  \
+            for (int tt = lane; tt < CS; tt += nlanes) {                       \
+                exp_fwd_sm[tt] = exp2f(da_cs_sm[tt] * LOG2E);                  \
+                exp_rev_sm[tt] = exp2f((cs_sum_pre - da_cs_sm[tt]) * LOG2E);   \
+            }                                                                  \
+            __syncthreads();                                                   \
+        }                                                                      \
+                                                                               \
+        float da_cs_chunk_sum = DA_CS_SUM[(b * n_chunks + chunk_idx) * nh_total + h]; \
+                                                                               \
+        /* === Compute per-timestep outputs === */                             \
+        /* dV, dQK_dot for each timestep; timesteps split over ty. */          \
+        for (int t = ty; t < chunk_len; t += TS) {                             \
+            int gt = chunk_start + t;                                          \
+            float dA_t = da_cs_sm[t];                                          \
+            float exp_rev_t = use_pair_mats                                    \
+                ? exp_rev_sm[t]                                                \
+                : exp2f((da_cs_chunk_sum - dA_t) * LOG2E);                     \
+                                                                               \
+            /* --- dV[t,h,p] --- */                                            \
+            /* Intra: sum_{s: s has t as source, i.e., t<s in causal} */       \
+            /* P^T[t,s] = sum_n(K[t,n]*Q[s,n]) * exp(dA[s]-dA[t]) for s > t */ \
+            float dv_intra = 0.0f;                                             \
+            for (int s = t + 1; s < chunk_len; s++) {                          \
+                float kq;                                                      \
+                if (use_pair_mats) {                                           \
+                    kq = kq_mat[M3_TRI(t, s, CS)];                             \
+                } else {                                                       \
+                    kq = 0.0f;                                                 \
+                    for (int n = 0; n < ds; n++)                               \
+                        kq += k_sm[t * dsp + n] * q_sm[s * dsp + n];           \
+                }                                                              \
+                float decay = use_pair_mats                                    \
+                    ? decay_mat[M3_TRI(t, s, CS)]                              \
+                    : exp2f((da_cs_sm[s] - dA_t) * LOG2E);                     \
+                dv_intra += kq * decay * do_sm[s * hdp + p];                   \
+            }                                                                  \
+            /* Inter: K[t] @ d_state^T[p] * exp_rev */                         \
+            float dv_inter = 0.0f;                                             \
+            for (int n = 0; n < ds; n++)                                       \
+                dv_inter += k_sm[t * dsp + n] * d_state[n];                    \
+            dv_inter *= exp_rev_t;                                             \
+            /* Skip: dO * (D + qk_dot) */                                      \
+            float dv_skip = do_sm[t * hdp + p] * (D_val + qk_sm[t]);           \
+                                                                               \
+            dV[(b * T + gt) * d_inner + h * hd + p] = dv_intra + dv_inter + dv_skip; \
+                                                                               \
+            /* --- dQK_dot[t,h] and dD --- */                                  \
+            /* dQK_dot = sum_p(dO[t,p] * V[t,p]) */                            \
+            float dqk_val = do_sm[t * hdp + p] * v_sm[t * hdp + p];            \
+            /* Warp reduce */                                                  \
+            for (int off = hd / 2; off > 0; off >>= 1)                         \
+                dqk_val += __shfl_down_sync(warp_mask, dqk_val, off, hd);      \
+            if (p == 0) {                                                      \
+                dQK_dot_out[(b * T + gt) * nh_total + h] = dqk_val;            \
+            }                                                                  \
+        }                                                                      \
+        __syncthreads();                                                       \
+        /* dD: resum the freshly stored dQK lane in ascending t on ONE */      \
+        /* lane — the historical accumulation order (t ascending within */     \
+        /* the chunk, chunks in reverse). Summing per-ty partials would */     \
+        /* interleave that order and move bits. */                             \
+        if (p == 0 && ty == 0) {                                               \
+            for (int t = 0; t < chunk_len; t++)                                \
+                dD_acc += dQK_dot_out[(b * T + chunk_start + t) * nh_total + h]; \
+        }                                                                      \
+                                                                               \
+        /* === dK_mid and dQ_mid === */                                        \
+        /* These need sum over hd (reduction across threads). */               \
+        /* dK_mid[t,n] = sum_p(intra_contrib[t,p,n] + inter_contrib[t,p,n]) */ \
+        /* Threads stride over state dims: for ds > hd, thread p covers */     \
+        /* n = p, p+hd, p+2*hd, ... (mirrors the cooperative Q/K load above; */ \
+        /* the old `if (p < ds) { n = p; }` silently zeroed n >= hd). */       \
+        for (int n = p; n < ds; n += hd) {                                     \
+            for (int t = ty; t < chunk_len; t += TS) {                         \
+                int gt = chunk_start + t;                                      \
+                float dA_t = da_cs_sm[t];                                      \
+                                                                               \
+                /* dK_mid[t,n]: intra = sum_{s>t} dO[s]@V[s]^T * exp * Q[s,n] */ \
+                /* This is dp_t^T[*,t] @ Q[*,n] */                             \
+                /* dp_t[i,j] = sum_p(V[i,p]*dO[j,p]) * mask[i,j] */            \
+                /* dp_t^T[j,i] = dp_t[i,j] */                                  \
+                /* (dp_t^T @ Q)[t, n] = sum_s(dp_t[s,t] * Q[s,n]) */           \
+                /* = sum_s(sum_p(V[s,p]*dO[t,p]) * mask[s,t] * Q[s,n]) */      \
+                /* Wait — mask is causal: mask[i,j] = exp(dA[j]-dA[i]) if j>i else 0 */ \
+                /* dp_t[i,j] includes mask. For column t of dp_t: dp_t[s,t] for s where t > s */ \
+                /* Actually in Python: dp_t = V @ dO^T * mask */               \
+                /* dp_t[s1, s2] = sum_p(V[s1,p]*dO[s2,p]) * (s2>s1 ? exp(dA[s2]-dA[s1]) : 0) */ \
+                /* (dp_t @ Q)[s1, n] = sum_s2>s1 (sum_p(V[s1,p]*dO[s2,p]) * exp(dA[s2]-dA[s1]) * Q[s2,n]) */ \
+                /* We want acc_dk[t, n] = (dp_t @ Q)[t, n] — this is dp_t row t dot Q col n */ \
+                /* But dp_t = V@dO^T ⊙ mask, so dp_t[t, s] = sum_p(V[t,p]*dO[s,p]) * mask[t,s] */ \
+                /* mask[t,s] = exp(dA[s]-dA[t]) if s>t else 0 */               \
+                /* So acc_dk[t,n] = sum_{s>t} sum_p(V[t,p]*dO[s,p]) * exp(dA[s]-dA[t]) * Q[s,n] */ \
+                                                                               \
+                float dk_intra = 0.0f;                                         \
+                for (int s = t + 1; s < chunk_len; s++) {                      \
+                    float vdo;                                                 \
+                    if (use_pair_mats) {                                       \
+                        vdo = vdo_mat[M3_TRI(t, s, CS)];                       \
+                    } else {                                                   \
+                        vdo = 0.0f;                                            \
+                        for (int pp = 0; pp < hd; pp++)                        \
+                            vdo += v_sm[t * hdp + pp] * do_sm[s * hdp + pp];   \
+                    }                                                          \
+                    float decay = use_pair_mats                                \
+                        ? decay_mat[M3_TRI(t, s, CS)]                          \
+                        : exp2f((da_cs_sm[s] - dA_t) * LOG2E);                 \
+                    dk_intra += vdo * decay * q_sm[s * dsp + n];               \
+                }                                                              \
+                /* Inter-chunk dK contribution added in second pass below (after d_state → shared memory) */ \
+                dK_mid[((b * T + gt) * nh_total + h) * ds + n] = dk_intra;     \
+                                                                               \
+                /* dQ_mid[t,n]: similar structure */                           \
+                /* acc_dq[t,n] = sum_{s<t} sum_p(V[s,p]*dO[t,p]) * exp(dA[t]-dA[s]) * K[s,n]  (wrong?) */ \
+                /* Actually from Python: s_block^T @ K where s_block = V@dO^T ⊙ mask (same as dp_t) */ \
+                /* acc_dq = (dp_t^T @ K)[t, n] */                              \
+                /* dp_t^T[t, s] = dp_t[s, t] = sum_p(V[s,p]*dO[t,p]) * mask[s,t] */ \
+                /* mask[s,t] = exp(dA[t]-dA[s]) if t>s else 0 */               \
+                /* So: acc_dq[t,n] = sum_{s<t} sum_p(V[s,p]*dO[t,p]) * exp(dA[t]-dA[s]) * K[s,n] */ \
+                float dq_intra = 0.0f;                                         \
+                for (int s = 0; s < t; s++) {                                  \
+                    float vdo;                                                 \
+                    if (use_pair_mats) {                                       \
+                        vdo = vdo_mat[M3_TRI(s, t, CS)];                       \
+                    } else {                                                   \
+                        vdo = 0.0f;                                            \
+                        for (int pp = 0; pp < hd; pp++)                        \
+                            vdo += v_sm[s * hdp + pp] * do_sm[t * hdp + pp];   \
+                    }                                                          \
+                    float decay = use_pair_mats                                \
+                        ? decay_mat[M3_TRI(s, t, CS)]                          \
+                        : exp2f((dA_t - da_cs_sm[s]) * LOG2E);                 \
+                    dq_intra += vdo * decay * k_sm[s * dsp + n];               \
+                }                                                              \
+                /* Inter: dO[t] @ ssm_states * exp */                          \
+                float dq_inter = 0.0f;                                         \
+                for (int pp = 0; pp < hd; pp++)                                \
+                    dq_inter += do_sm[t * hdp + pp] * ssm_sm[pp * ds + n];     \
+                dq_inter *=                                                    \
+                    use_pair_mats ? exp_fwd_sm[t] : exp2f(dA_t * LOG2E);       \
+                                                                               \
+                dQ_mid[((b * T + gt) * nh_total + h) * ds + n] = dq_intra + dq_inter; \
+            }                                                                  \
+        }                                                                      \
+        __syncthreads();                                                       \
+                                                                               \
+        /* === Store d_state to shared for inter-chunk dK_mid contribution === */ \
+        /* Every ty lane replicates the same d_state bits; ty==0 writes. */    \
+        if (ty == 0) {                                                         \
+            for (int n = 0; n < ds; n++)                                       \
+                ssm_sm[p * ds + n] = d_state[n];                               \
+        }                                                                      \
+        __syncthreads();                                                       \
+                                                                               \
+        /* Now fix dK_mid inter-chunk: sum_p(V[t,p] * d_state[p][n]) * exp_rev */ \
+        /* Strided over state dims so ds > hd is fully covered (see dK/dQ_mid above). */ \
+        for (int n = p; n < ds; n += hd) {                                     \
+            for (int t = ty; t < chunk_len; t += TS) {                         \
+                float dk_inter = 0.0f;                                         \
+                float exp_rev_t = use_pair_mats                                \
+                    ? exp_rev_sm[t]                                            \
+                    : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);          \
+                for (int pp = 0; pp < hd; pp++)                                \
+                    dk_inter += v_sm[t * hdp + pp] * ssm_sm[pp * ds + n];      \
+                dk_inter *= exp_rev_t;                                         \
+                int gt = chunk_start + t;                                      \
+                dK_mid[((b * T + gt) * nh_total + h) * ds + n] += dk_inter;    \
+            }                                                                  \
+        }                                                                      \
+        __syncthreads();                                                       \
+                                                                               \
+        /* === dADT computation (all 4 parts) === */                           \
+        /* Formerly a single-lane section (~95% of the kernel serial on */     \
+        /* lane 0). Restructured per OUTPUT step: each lane owns a strided */  \
+        /* set of steps and computes that step's contributions with a */       \
+        /* fixed serial order (below-diagonal pairs ascending, then */         \
+        /* above-diagonal), so no cross-lane reduction exists and the */       \
+        /* result is deterministic by construction. The true SSM_States */     \
+        /* tile is staged in shared memory once (ssm_sm already holds */       \
+        /* d_state at this point), replacing the per-element global */         \
+        /* re-reads of the old code. */                                        \
+        for (int n = lane; n < hd * ds; n += nlanes) {                         \
+            ssm2_sm[n] =                                                       \
+                SSM_States[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + n]; \
+        }                                                                      \
+        __syncthreads();                                                       \
+        for (int t = lane; t < chunk_len; t += nlanes) {                       \
+            float acc = 0.0f;                                                  \
+            /* Below-diagonal: pairs (i, t) with i < t contribute +dAinv. */   \
+            for (int i = 0; i < t; i++) {                                      \
+                float vdo;                                                     \
+                if (use_pair_mats) {                                           \
+                    vdo = vdo_mat[M3_TRI(i, t, CS)];                           \
+                } else {                                                       \
+                    vdo = 0.0f;                                                \
+                    for (int pp = 0; pp < hd; pp++)                            \
+                        vdo += v_sm[i * hdp + pp] * do_sm[t * hdp + pp];       \
+                }                                                              \
+                float decay = use_pair_mats                                    \
+                    ? decay_mat[M3_TRI(i, t, CS)]                              \
+                    : exp2f((da_cs_sm[t] - da_cs_sm[i]) * LOG2E);              \
+                float kq;                                                      \
+                if (use_pair_mats) {                                           \
+                    kq = kq_mat[M3_TRI(i, t, CS)];                             \
+                } else {                                                       \
+                    kq = 0.0f;                                                 \
+                    for (int n = 0; n < ds; n++)                               \
+                        kq += k_sm[i * dsp + n] * q_sm[t * dsp + n];           \
+                }                                                              \
+                acc += vdo * decay * kq;                                       \
+            }                                                                  \
+            /* Above-diagonal: pairs (t, j) with j > t contribute -dAinv. */   \
+            for (int j = t + 1; j < chunk_len; j++) {                          \
+                float vdo;                                                     \
+                if (use_pair_mats) {                                           \
+                    vdo = vdo_mat[M3_TRI(t, j, CS)];                           \
+                } else {                                                       \
+                    vdo = 0.0f;                                                \
+                    for (int pp = 0; pp < hd; pp++)                            \
+                        vdo += v_sm[t * hdp + pp] * do_sm[j * hdp + pp];       \
+                }                                                              \
+                float decay = use_pair_mats                                    \
+                    ? decay_mat[M3_TRI(t, j, CS)]                              \
+                    : exp2f((da_cs_sm[j] - da_cs_sm[t]) * LOG2E);              \
+                float kq;                                                      \
+                if (use_pair_mats) {                                           \
+                    kq = kq_mat[M3_TRI(t, j, CS)];                             \
+                } else {                                                       \
+                    kq = 0.0f;                                                 \
+                    for (int n = 0; n < ds; n++)                               \
+                        kq += k_sm[t * dsp + n] * q_sm[j * dsp + n];           \
+                }                                                              \
+                acc -= vdo * decay * kq;                                       \
+            }                                                                  \
+            /* Entering-state term: Q @ ssm_states^T dot dO * exp. */          \
+            float qs_do = 0.0f;                                                \
+            for (int pp = 0; pp < hd; pp++) {                                  \
+                float qs = 0.0f;                                               \
+                for (int n = 0; n < ds; n++)                                   \
+                    qs += q_sm[t * dsp + n] * ssm2_sm[pp * ds + n];            \
+                qs_do += qs * do_sm[t * hdp + pp];                             \
+            }                                                                  \
+            acc += qs_do                                                       \
+                * (use_pair_mats ? exp_fwd_sm[t] : exp2f(da_cs_sm[t] * LOG2E)); \
+            dm_rev_sm[t] = acc;                                                \
+            /* Exit-state term: K @ d_state^T dot V * exp_rev */               \
+            /* (ssm_sm holds d_state here). */                                 \
+            float dsk_v = 0.0f;                                                \
+            for (int pp = 0; pp < hd; pp++) {                                  \
+                float dsk = 0.0f;                                              \
+                for (int n = 0; n < ds; n++)                                   \
+                    dsk += k_sm[t * dsp + n] * ssm_sm[pp * ds + n];            \
+                dsk_v += dsk * v_sm[t * hdp + pp];                             \
+            }                                                                  \
+            dm_vec_sm[t] = dsk_v                                               \
+                * (use_pair_mats ? exp_rev_sm[t]                               \
+                                 : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E)); \
+        }                                                                      \
+        __syncthreads();                                                       \
+        if (p == 0 && ty == 0) {                                               \
+            /* Scalar term + the serial reverse-cumsum combine (cheap, */      \
+            /* and its order is the numeric contract). */                      \
+            float dM_scalar = 0.0f;                                            \
+            for (int pp = 0; pp < hd; pp++) {                                  \
+                for (int n = 0; n < ds; n++)                                   \
+                    dM_scalar += ssm2_sm[pp * ds + n] * ssm_sm[pp * ds + n];   \
+            }                                                                  \
+            dM_scalar *= exp2f(da_cs_chunk_sum * LOG2E);                       \
+                                                                               \
+            float total_rev = 0.0f;                                            \
+            for (int t = 0; t < chunk_len; t++) total_rev += dm_rev_sm[t];     \
+            total_rev += dM_scalar;                                            \
+            float cumsum = 0.0f;                                               \
+            for (int t = 0; t < chunk_len; t++) {                              \
+                cumsum += dm_vec_sm[t] - dm_rev_sm[t];                         \
+                /* Same grouping as the historical in-place update */          \
+                /* (dM_rev[t] += total + cumsum - vec): the added term is */   \
+                /* evaluated first, then added once. */                        \
+                float out = dm_rev_sm[t] + (total_rev + cumsum - dm_vec_sm[t]); \
+                int gt = chunk_start + t;                                      \
+                dADT[(b * T + gt) * nh_total + h] = out;                       \
+            }                                                                  \
+        }                                                                      \
+        __syncthreads();                                                       \
+                                                                               \
+    }                                                                          \
+                                                                               \
+    /* Store dD per-(b, chunk, h) — caller reduces across rows. */             \
+    if (p == 0 && ty == 0)                                                     \
+        dD_partials[(b * n_chunks + blockIdx.z) * nh_total + h] = dD_acc;      \
 }
+
+DEFINE_M3_DQKV_F32(m3_dqkv, int)
+DEFINE_M3_DQKV_F32(m3_dqkv_i64, long long)
 
 // ============================================================================
 // 12. m3_dqktheta -- Inverse RoPE + scale + bias gradients (reference backward stage 3)
 // ============================================================================
 // Grid: (B*n_chunks, nh), Block: (CS, 1, 1)
 // Each thread handles one timestep within a chunk.
-extern "C" __global__ void m3_dqktheta(
-    // Outputs
-    float* __restrict__ dQ_pre,         // [B*T*nh*ds] — pre-RoPE Q gradient
-    float* __restrict__ dK_pre,         // [B*T*nh*ds] — pre-RoPE K gradient
-    float* __restrict__ dAngles_cumsum, // [B*T*nh*n_angles]
-    // NO __restrict__ on dScale/dGamma/Scale_in/Gamma_in: the host passes
-    // the SAME buffer as Scale_in and dScale (resp. Gamma_in/dGamma) — the
-    // value is loaded into a register before the aliased store, which is
-    // well-defined only without the no-alias promise.
-    float* dScale,                      // [B*T*nh] (may alias Scale_in)
-    float* dGamma,                      // [B*T*nh] (may alias Gamma_in)
-    // dQ_bias/dK_bias accumulators removed from kernel — caller
-    // does colsum_accumulate on dQ_pre/dK_pre (already per-(b,t,h,n) scratch).
-    // Deterministic, no atomicAdd.
-    // Inputs
-    const float* __restrict__ Q_raw,    // [B*T*nh*ds] — acts.c_biased (pre-RoPE)
-    const float* __restrict__ K_raw,    // [B*T*nh*ds] — acts.b_biased (pre-RoPE)
-    const float* Scale_in,              // [B*T*nh] (may alias dScale)
-    const float* Gamma_in,              // [B*T*nh] (may alias dGamma)
-    const float* __restrict__ Angles,   // [B*T*nh*n_angles] — acts.angle_cumsum
-    const float* __restrict__ dQ_mid,   // [B*T*nh*ds] — from m3_dqkv
-    const float* __restrict__ dK_mid,   // [B*T*nh*ds] — from m3_dqkv
-    const float* __restrict__ dQK_dot,  // [B*T*nh] — from m3_dqkv
-    int B, int T, int nh, int ds, int n_angles, int CS,
-    int use_staging  // 1 = smem holds the six [CS][ds] I/O tiles
-) {
-    int n_chunks = (T + CS - 1) / CS;
-    int bc = blockIdx.x;
-    int b_chunk = bc; // b * n_chunks + chunk
-    int h = blockIdx.y;
-    int t_local = threadIdx.x;
-
-    int b = b_chunk / n_chunks;
-    int chunk = b_chunk % n_chunks;
-    int gt = chunk * CS + t_local;
-
-    // Capacity guard for the q_pre/k_pre/dq_in register arrays. All
-    // threads of the block read the same `ds` arg -> safe early return
-    // (before any barrier, uniform across the block).
-    if (ds > MAMBA_RS_STATE_CAP) return;
-    if (b >= B || h >= nh) return;
-
-    bool valid = (gt < T);
-
-    // Coalesced staging: the per-thread row loads/stores put adjacent
-    // threads nh*ds floats apart (one 32-byte sector each). Threads
-    // jointly stream the [CS][ds] tiles instead; every thread then
-    // reads ITS OWN row from shared memory — identical values, so the
-    // per-thread arithmetic (and bits) are unchanged.
-    extern __shared__ float dqkt_sm[];
-    float* q_sm     = dqkt_sm;
-    float* k_sm     = q_sm + CS * ds;
-    float* dqi_sm   = k_sm + CS * ds;
-    float* dki_sm   = dqi_sm + CS * ds;
-    float* out_q_sm = dki_sm + CS * ds;
-    float* out_k_sm = out_q_sm + CS * ds;
-    int t0 = chunk * CS;
-    int rows = min(CS, T - t0);
-    // Large-d_state tiles overflow the 48 KB no-opt-in dynamic-smem
-    // limit; the launcher then passes use_staging = 0 and every access
-    // falls back to the direct global form — identical values, only
-    // the coalescing win is lost.
-    if (use_staging) {
-        for (int i = t_local; i < rows * ds; i += CS) {
-            int tt = i / ds;
-            int nn = i % ds;
-            int gbase = ((b * T + t0 + tt) * nh + h) * ds + nn;
-            q_sm[i] = Q_raw[gbase];
-            k_sm[i] = K_raw[gbase];
-            dqi_sm[i] = dQ_mid[gbase];
-            dki_sm[i] = dK_mid[gbase];
-        }
-    }
-    __syncthreads();
-
-    if (valid) {
-        int base = ((b * T + gt) * nh + h) * ds;
-        float scale = Scale_in[(b * T + gt) * nh + h];
-        float gamma = Gamma_in[(b * T + gt) * nh + h];
-        float dqk = dQK_dot[(b * T + gt) * nh + h];
-
-        // Load Q_raw + K_raw (pre-RoPE, post-bias) from the staged tiles
-        float q_pre[MAMBA_RS_STATE_CAP], k_pre[MAMBA_RS_STATE_CAP]; // sized by the state capacity
-        for (int n = 0; n < ds; n++) {
-            q_pre[n] = use_staging ? q_sm[t_local * ds + n] : Q_raw[base + n];
-            k_pre[n] = use_staging ? k_sm[t_local * ds + n] : K_raw[base + n];
-        }
-        float dq_in[MAMBA_RS_STATE_CAP], dk_in[MAMBA_RS_STATE_CAP];
-        for (int n = 0; n < ds; n++) {
-            dq_in[n] = use_staging ? dqi_sm[t_local * ds + n] : dQ_mid[base + n];
-            dk_in[n] = use_staging ? dki_sm[t_local * ds + n] : dK_mid[base + n];
-        }
-
-        // Forward RoPE on K_raw to get K_rot (for dScale computation)
-        float k_rot[MAMBA_RS_STATE_CAP];
-        int angle_base = ((b * T + gt) * nh + h) * n_angles;
-        // Each angle's cos/sin was computed three times
-        // (forward RoPE, inverse RoPE, dtheta) — hoist into registers.
-        // cosf/sinf of the same input is deterministic, so every read
-        // stays bit-identical to the inline forms.
-        float cos_a[MAMBA_RS_STATE_CAP / 2], sin_a[MAMBA_RS_STATE_CAP / 2];
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
-            float theta = Angles[angle_base + a];
-            cos_a[a] = cosf(theta);
-            sin_a[a] = sinf(theta);
-        }
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
-            float cos_t = cos_a[a];
-            float sin_t = sin_a[a];
-            int i0 = 2 * a, i1 = 2 * a + 1;
-            k_rot[i0] = k_pre[i0] * cos_t - k_pre[i1] * sin_t;
-            k_rot[i1] = k_pre[i0] * sin_t + k_pre[i1] * cos_t;
-        }
-        for (int n = 2 * n_angles; n < ds; n++) k_rot[n] = k_pre[n];
-
-        // dScale = sum_n(dK_mid[n] * K_rot[n])
-        float d_scale = 0.0f;
-        for (int n = 0; n < ds; n++) d_scale += dk_in[n] * k_rot[n];
-        dScale[(b * T + gt) * nh + h] = d_scale;
-
-        // dGamma = dQK * sum_n(Q_raw[n] * K_raw[n])
-        float qk_raw = 0.0f;
-        for (int n = 0; n < ds; n++) qk_raw += q_pre[n] * k_pre[n];
-        dGamma[(b * T + gt) * nh + h] = dqk * qk_raw;
-
-        // Scale dK_mid by scale before inverse RoPE
-        for (int n = 0; n < ds; n++) dk_in[n] *= scale;
-
-        // Inverse RoPE on dQ_mid and scaled dK_mid
-        float dq_pre_out[MAMBA_RS_STATE_CAP], dk_pre_out[MAMBA_RS_STATE_CAP];
-        for (int n = 0; n < ds; n++) { dq_pre_out[n] = dq_in[n]; dk_pre_out[n] = dk_in[n]; }
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
-            float cos_t = cos_a[a];
-            float sin_t = sin_a[a];
-            int i0 = 2 * a, i1 = 2 * a + 1;
-            // Inverse rotation: R^T = [[cos, sin], [-sin, cos]]
-            dq_pre_out[i0] = dq_in[i0] * cos_t + dq_in[i1] * sin_t;
-            dq_pre_out[i1] = -dq_in[i0] * sin_t + dq_in[i1] * cos_t;
-            dk_pre_out[i0] = dk_in[i0] * cos_t + dk_in[i1] * sin_t;
-            dk_pre_out[i1] = -dk_in[i0] * sin_t + dk_in[i1] * cos_t;
-        }
-
-        // Add dQK path: dQ_pre += dqk * gamma * K_raw, dK_pre += dqk * gamma * Q_raw
-        float dqk_gamma = dqk * gamma;
-        for (int n = 0; n < ds; n++) {
-            dq_pre_out[n] += dqk_gamma * k_pre[n];
-            dk_pre_out[n] += dqk_gamma * q_pre[n];
-        }
-
-        // Stage dQ_pre, dK_pre rows; the cooperative store below writes
-        // them coalesced. (Caller reduces to dQ_bias/dK_bias via
-        // colsum_accumulate — no atomicAdd here.)
-        if (use_staging) {
-            for (int n = 0; n < ds; n++) {
-                out_q_sm[t_local * ds + n] = dq_pre_out[n];
-                out_k_sm[t_local * ds + n] = dk_pre_out[n];
-            }
-        } else {
-            for (int n = 0; n < ds; n++) {
-                dQ_pre[base + n] = dq_pre_out[n];
-                dK_pre[base + n] = dk_pre_out[n];
-            }
-        }
-
-        // dAngles_cumsum from rotary gradient
-        // dtheta = dQ_in * d(Q_rot)/d(theta) + dK_in_scaled * d(K_rot)/d(theta)
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
-            float cos_t = cos_a[a];
-            float sin_t = sin_a[a];
-            int i0 = 2 * a, i1 = 2 * a + 1;
-            // d(Q_rot)/dtheta: Q_rot[i0] = Q[i0]*cos - Q[i1]*sin
-            //                  Q_rot[i1] = Q[i0]*sin + Q[i1]*cos
-            // d/dtheta: [-Q[i0]*sin - Q[i1]*cos, Q[i0]*cos - Q[i1]*sin]
-            float dtheta_q = dq_in[i0] * (-q_pre[i0] * sin_t - q_pre[i1] * cos_t)
-                           + dq_in[i1] * (q_pre[i0] * cos_t - q_pre[i1] * sin_t);
-            float dtheta_k = dk_in[i0] * (-k_pre[i0] * sin_t - k_pre[i1] * cos_t)
-                           + dk_in[i1] * (k_pre[i0] * cos_t - k_pre[i1] * sin_t);
-            dAngles_cumsum[((b * T + gt) * nh + h) * n_angles + a] = dtheta_q + dtheta_k;
-        }
-    }
-    __syncthreads();
-    if (use_staging) {
-        for (int i = t_local; i < rows * ds; i += CS) {
-            int tt = i / ds;
-            int nn = i % ds;
-            int gbase = ((b * T + t0 + tt) * nh + h) * ds + nn;
-            dQ_pre[gbase] = out_q_sm[i];
-            dK_pre[gbase] = out_k_sm[i];
-        }
-    }
-    // dQ_bias/dK_bias produced via colsum_accumulate on
-    // dQ_pre/dK_pre by the caller. No atomicAdd here.
+#define DEFINE_M3_DQKTHETA_F32(NAME, IDX)                                      \
+extern "C" __global__ void NAME(                                               \
+    /* Outputs */                                                              \
+    float* __restrict__ dQ_pre,         /* [B*T*nh*ds] — pre-RoPE Q gradient */ \
+    float* __restrict__ dK_pre,         /* [B*T*nh*ds] — pre-RoPE K gradient */ \
+    float* __restrict__ dAngles_cumsum, /* [B*T*nh*n_angles] */                \
+    /* NO __restrict__ on dScale/dGamma/Scale_in/Gamma_in: the host passes */  \
+    /* the SAME buffer as Scale_in and dScale (resp. Gamma_in/dGamma) — the */ \
+    /* value is loaded into a register before the aliased store, which is */   \
+    /* well-defined only without the no-alias promise. */                      \
+    float* dScale,                      /* [B*T*nh] (may alias Scale_in) */    \
+    float* dGamma,                      /* [B*T*nh] (may alias Gamma_in) */    \
+    /* dQ_bias/dK_bias accumulators removed from kernel — caller */            \
+    /* does colsum_accumulate on dQ_pre/dK_pre (already per-(b,t,h,n) scratch). */ \
+    /* Deterministic, no atomicAdd. */                                         \
+    /* Inputs */                                                               \
+    const float* __restrict__ Q_raw,    /* [B*T*nh*ds] — acts.c_biased (pre-RoPE) */ \
+    const float* __restrict__ K_raw,    /* [B*T*nh*ds] — acts.b_biased (pre-RoPE) */ \
+    const float* Scale_in,              /* [B*T*nh] (may alias dScale) */      \
+    const float* Gamma_in,              /* [B*T*nh] (may alias dGamma) */      \
+    const float* __restrict__ Angles,   /* [B*T*nh*n_angles] — acts.angle_cumsum */ \
+    const float* __restrict__ dQ_mid,   /* [B*T*nh*ds] — from m3_dqkv */       \
+    const float* __restrict__ dK_mid,   /* [B*T*nh*ds] — from m3_dqkv */       \
+    const float* __restrict__ dQK_dot,  /* [B*T*nh] — from m3_dqkv */          \
+    int B, int T, int nh, int ds, int n_angles, int CS,                        \
+    int use_staging  /* 1 = smem holds the six [CS][ds] I/O tiles */           \
+) {                                                                            \
+    int n_chunks = (T + CS - 1) / CS;                                          \
+    IDX bc = blockIdx.x;                                                       \
+    IDX b_chunk = bc; /* b * n_chunks + chunk */                               \
+    int h = blockIdx.y;                                                        \
+    int t_local = threadIdx.x;                                                 \
+                                                                               \
+    IDX b = b_chunk / n_chunks;                                                \
+    int chunk = (int)(b_chunk % n_chunks);                                     \
+    int gt = chunk * CS + t_local;                                             \
+                                                                               \
+    /* Capacity guard for the q_pre/k_pre/dq_in register arrays. All */        \
+    /* threads of the block read the same `ds` arg -> safe early return */     \
+    /* (before any barrier, uniform across the block). */                      \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                       \
+    if (b >= B || h >= nh) return;                                             \
+                                                                               \
+    bool valid = (gt < T);                                                     \
+                                                                               \
+    /* Coalesced staging: the per-thread row loads/stores put adjacent */      \
+    /* threads nh*ds floats apart (one 32-byte sector each). Threads */        \
+    /* jointly stream the [CS][ds] tiles instead; every thread then */         \
+    /* reads ITS OWN row from shared memory — identical values, so the */      \
+    /* per-thread arithmetic (and bits) are unchanged. */                      \
+    extern __shared__ float dqkt_sm[];                                         \
+    float* q_sm     = dqkt_sm;                                                 \
+    float* k_sm     = q_sm + CS * ds;                                          \
+    float* dqi_sm   = k_sm + CS * ds;                                          \
+    float* dki_sm   = dqi_sm + CS * ds;                                        \
+    float* out_q_sm = dki_sm + CS * ds;                                        \
+    float* out_k_sm = out_q_sm + CS * ds;                                      \
+    int t0 = chunk * CS;                                                       \
+    int rows = min(CS, T - t0);                                                \
+    /* Large-d_state tiles overflow the 48 KB no-opt-in dynamic-smem */        \
+    /* limit; the launcher then passes use_staging = 0 and every access */     \
+    /* falls back to the direct global form — identical values, only */        \
+    /* the coalescing win is lost. */                                          \
+    if (use_staging) {                                                         \
+        for (int i = t_local; i < rows * ds; i += CS) {                        \
+            int tt = i / ds;                                                   \
+            int nn = i % ds;                                                   \
+            IDX gbase = ((b * T + t0 + tt) * nh + h) * ds + nn;                \
+            q_sm[i] = Q_raw[gbase];                                            \
+            k_sm[i] = K_raw[gbase];                                            \
+            dqi_sm[i] = dQ_mid[gbase];                                         \
+            dki_sm[i] = dK_mid[gbase];                                         \
+        }                                                                      \
+    }                                                                          \
+    __syncthreads();                                                           \
+                                                                               \
+    if (valid) {                                                               \
+        IDX base = ((b * T + gt) * nh + h) * ds;                               \
+        float scale = Scale_in[(b * T + gt) * nh + h];                         \
+        float gamma = Gamma_in[(b * T + gt) * nh + h];                         \
+        float dqk = dQK_dot[(b * T + gt) * nh + h];                            \
+                                                                               \
+        /* Load Q_raw + K_raw (pre-RoPE, post-bias) from the staged tiles */   \
+        float q_pre[MAMBA_RS_STATE_CAP], k_pre[MAMBA_RS_STATE_CAP]; /* sized by the state capacity */ \
+        for (int n = 0; n < ds; n++) {                                         \
+            q_pre[n] = use_staging ? q_sm[t_local * ds + n] : Q_raw[base + n]; \
+            k_pre[n] = use_staging ? k_sm[t_local * ds + n] : K_raw[base + n]; \
+        }                                                                      \
+        float dq_in[MAMBA_RS_STATE_CAP], dk_in[MAMBA_RS_STATE_CAP];            \
+        for (int n = 0; n < ds; n++) {                                         \
+            dq_in[n] = use_staging ? dqi_sm[t_local * ds + n] : dQ_mid[base + n]; \
+            dk_in[n] = use_staging ? dki_sm[t_local * ds + n] : dK_mid[base + n]; \
+        }                                                                      \
+                                                                               \
+        /* Forward RoPE on K_raw to get K_rot (for dScale computation) */      \
+        float k_rot[MAMBA_RS_STATE_CAP];                                       \
+        IDX angle_base = ((b * T + gt) * nh + h) * n_angles;                   \
+        /* Each angle's cos/sin was computed three times */                    \
+        /* (forward RoPE, inverse RoPE, dtheta) — hoist into registers. */     \
+        /* cosf/sinf of the same input is deterministic, so every read */      \
+        /* stays bit-identical to the inline forms. */                         \
+        float cos_a[MAMBA_RS_STATE_CAP / 2], sin_a[MAMBA_RS_STATE_CAP / 2];    \
+        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                 \
+            float theta = Angles[angle_base + a];                              \
+            cos_a[a] = cosf(theta);                                            \
+            sin_a[a] = sinf(theta);                                            \
+        }                                                                      \
+        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                 \
+            float cos_t = cos_a[a];                                            \
+            float sin_t = sin_a[a];                                            \
+            int i0 = 2 * a, i1 = 2 * a + 1;                                    \
+            k_rot[i0] = k_pre[i0] * cos_t - k_pre[i1] * sin_t;                 \
+            k_rot[i1] = k_pre[i0] * sin_t + k_pre[i1] * cos_t;                 \
+        }                                                                      \
+        for (int n = 2 * n_angles; n < ds; n++) k_rot[n] = k_pre[n];           \
+                                                                               \
+        /* dScale = sum_n(dK_mid[n] * K_rot[n]) */                             \
+        float d_scale = 0.0f;                                                  \
+        for (int n = 0; n < ds; n++) d_scale += dk_in[n] * k_rot[n];           \
+        dScale[(b * T + gt) * nh + h] = d_scale;                               \
+                                                                               \
+        /* dGamma = dQK * sum_n(Q_raw[n] * K_raw[n]) */                        \
+        float qk_raw = 0.0f;                                                   \
+        for (int n = 0; n < ds; n++) qk_raw += q_pre[n] * k_pre[n];            \
+        dGamma[(b * T + gt) * nh + h] = dqk * qk_raw;                          \
+                                                                               \
+        /* Scale dK_mid by scale before inverse RoPE */                        \
+        for (int n = 0; n < ds; n++) dk_in[n] *= scale;                        \
+                                                                               \
+        /* Inverse RoPE on dQ_mid and scaled dK_mid */                         \
+        float dq_pre_out[MAMBA_RS_STATE_CAP], dk_pre_out[MAMBA_RS_STATE_CAP];  \
+        for (int n = 0; n < ds; n++) { dq_pre_out[n] = dq_in[n]; dk_pre_out[n] = dk_in[n]; } \
+        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                 \
+            float cos_t = cos_a[a];                                            \
+            float sin_t = sin_a[a];                                            \
+            int i0 = 2 * a, i1 = 2 * a + 1;                                    \
+            /* Inverse rotation: R^T = [[cos, sin], [-sin, cos]] */            \
+            dq_pre_out[i0] = dq_in[i0] * cos_t + dq_in[i1] * sin_t;            \
+            dq_pre_out[i1] = -dq_in[i0] * sin_t + dq_in[i1] * cos_t;           \
+            dk_pre_out[i0] = dk_in[i0] * cos_t + dk_in[i1] * sin_t;            \
+            dk_pre_out[i1] = -dk_in[i0] * sin_t + dk_in[i1] * cos_t;           \
+        }                                                                      \
+                                                                               \
+        /* Add dQK path: dQ_pre += dqk * gamma * K_raw, dK_pre += dqk * gamma * Q_raw */ \
+        float dqk_gamma = dqk * gamma;                                         \
+        for (int n = 0; n < ds; n++) {                                         \
+            dq_pre_out[n] += dqk_gamma * k_pre[n];                             \
+            dk_pre_out[n] += dqk_gamma * q_pre[n];                             \
+        }                                                                      \
+                                                                               \
+        /* Stage dQ_pre, dK_pre rows; the cooperative store below writes */    \
+        /* them coalesced. (Caller reduces to dQ_bias/dK_bias via */           \
+        /* colsum_accumulate — no atomicAdd here.) */                          \
+        if (use_staging) {                                                     \
+            for (int n = 0; n < ds; n++) {                                     \
+                out_q_sm[t_local * ds + n] = dq_pre_out[n];                    \
+                out_k_sm[t_local * ds + n] = dk_pre_out[n];                    \
+            }                                                                  \
+        } else {                                                               \
+            for (int n = 0; n < ds; n++) {                                     \
+                dQ_pre[base + n] = dq_pre_out[n];                              \
+                dK_pre[base + n] = dk_pre_out[n];                              \
+            }                                                                  \
+        }                                                                      \
+                                                                               \
+        /* dAngles_cumsum from rotary gradient */                              \
+        /* dtheta = dQ_in * d(Q_rot)/d(theta) + dK_in_scaled * d(K_rot)/d(theta) */ \
+        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                 \
+            float cos_t = cos_a[a];                                            \
+            float sin_t = sin_a[a];                                            \
+            int i0 = 2 * a, i1 = 2 * a + 1;                                    \
+            /* d(Q_rot)/dtheta: Q_rot[i0] = Q[i0]*cos - Q[i1]*sin */           \
+            /* Q_rot[i1] = Q[i0]*sin + Q[i1]*cos */                            \
+            /* d/dtheta: [-Q[i0]*sin - Q[i1]*cos, Q[i0]*cos - Q[i1]*sin] */    \
+            float dtheta_q = dq_in[i0] * (-q_pre[i0] * sin_t - q_pre[i1] * cos_t) \
+                           + dq_in[i1] * (q_pre[i0] * cos_t - q_pre[i1] * sin_t); \
+            float dtheta_k = dk_in[i0] * (-k_pre[i0] * sin_t - k_pre[i1] * cos_t) \
+                           + dk_in[i1] * (k_pre[i0] * cos_t - k_pre[i1] * sin_t); \
+            dAngles_cumsum[((b * T + gt) * nh + h) * n_angles + a] = dtheta_q + dtheta_k; \
+        }                                                                      \
+    }                                                                          \
+    __syncthreads();                                                           \
+    if (use_staging) {                                                         \
+        for (int i = t_local; i < rows * ds; i += CS) {                        \
+            int tt = i / ds;                                                   \
+            int nn = i % ds;                                                   \
+            IDX gbase = ((b * T + t0 + tt) * nh + h) * ds + nn;                \
+            dQ_pre[gbase] = out_q_sm[i];                                       \
+            dK_pre[gbase] = out_k_sm[i];                                       \
+        }                                                                      \
+    }                                                                          \
+    /* dQ_bias/dK_bias produced via colsum_accumulate on */                    \
+    /* dQ_pre/dK_pre by the caller. No atomicAdd here. */                      \
 }
+
+DEFINE_M3_DQKTHETA_F32(m3_dqktheta, int)
+DEFINE_M3_DQKTHETA_F32(m3_dqktheta_i64, long long)
 
 // ============================================================================
 // 13. m3_ddt_dtrap -- dScale/dGamma -> dDT, dTrap (reference backward stage 4)
@@ -2076,95 +2137,100 @@ extern "C" __global__ void m3_dqktheta(
 // dTrap_presig[t] = ((dGamma[t] + dScale[t]) * dt[t] - dScale[t-1] * dt[t]) * sig*(1-sig)
 // Grid: ceil(B*T*nh / 256), Block: 256
 // Each thread handles one (b,t,h) element. Reads dScale[t-1] via shifted access.
-extern "C" __global__ void m3_ddt_dtrap(
-    float* __restrict__ dDT,          // [B*T*nh]
-    float* __restrict__ dTrap_presig, // [B*T*nh]
-    const float* __restrict__ dScale, // [B*T*nh]
-    const float* __restrict__ dGamma, // [B*T*nh]
-    const float* __restrict__ DT,     // [B*T*nh] — post-softplus dt
-    const float* __restrict__ Trap,   // [B*T*nh] — post-sigmoid trap
-    int B, int T, int nh
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = B * T * nh;
-    if (idx >= total) return;
-
-    // Decompose flat index: idx = (b * T + t) * nh + h
-    int h = idx % nh;
-    int bt = idx / nh;
-    int t = bt % T;
-    int b = bt / T;
-
-    float ds_cur = dScale[idx];
-    float dg_cur = dGamma[idx];
-    float dt_val = DT[idx];
-    float trap_val = Trap[idx];
-
-    // dScale from previous timestep (shifted read, 0 for t=0)
-    float ds_prev = 0.0f;
-    if (t > 0) ds_prev = dScale[idx - nh]; // (b*T + t-1)*nh + h = idx - nh
-
-    float d_dt = (dg_cur + ds_cur) * trap_val + ds_prev * (1.0f - trap_val);
-
-    float d_trap_sig = ((dg_cur + ds_cur) - ds_prev) * dt_val;
-    float d_trap_raw = d_trap_sig * trap_val * (1.0f - trap_val);
-
-    dDT[idx] = d_dt;
-    dTrap_presig[idx] = d_trap_raw;
+#define DEFINE_M3_DDT_DTRAP(NAME, IDX)                                         \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dDT,          /* [B*T*nh] */                           \
+    float* __restrict__ dTrap_presig, /* [B*T*nh] */                           \
+    const float* __restrict__ dScale, /* [B*T*nh] */                           \
+    const float* __restrict__ dGamma, /* [B*T*nh] */                           \
+    const float* __restrict__ DT,     /* [B*T*nh] — post-softplus dt */        \
+    const float* __restrict__ Trap,   /* [B*T*nh] — post-sigmoid trap */       \
+    int B, int T, int nh                                                       \
+) {                                                                            \
+    IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                      \
+    IDX total = (IDX)B * T * nh;                                               \
+    if (idx >= total) return;                                                  \
+                                                                               \
+    /* Decompose flat index: idx = (b * T + t) * nh + h */                     \
+    int t = (int)((idx / nh) % T);                                             \
+                                                                               \
+    float ds_cur = dScale[idx];                                                \
+    float dg_cur = dGamma[idx];                                                \
+    float dt_val = DT[idx];                                                    \
+    float trap_val = Trap[idx];                                                \
+                                                                               \
+    /* dScale from previous timestep (shifted read, 0 for t=0) */              \
+    float ds_prev = 0.0f;                                                      \
+    if (t > 0) ds_prev = dScale[idx - nh]; /* (b*T + t-1)*nh + h = idx - nh */ \
+                                                                               \
+    float d_dt = (dg_cur + ds_cur) * trap_val + ds_prev * (1.0f - trap_val);   \
+                                                                               \
+    float d_trap_sig = ((dg_cur + ds_cur) - ds_prev) * dt_val;                 \
+    float d_trap_raw = d_trap_sig * trap_val * (1.0f - trap_val);              \
+                                                                               \
+    dDT[idx] = d_dt;                                                           \
+    dTrap_presig[idx] = d_trap_raw;                                            \
 }
+
+DEFINE_M3_DDT_DTRAP(m3_ddt_dtrap, int)
+DEFINE_M3_DDT_DTRAP(m3_ddt_dtrap_i64, long long)
 
 // ============================================================================
 // 14. m3_final_grads -- Combine dADT + dDT + dDT_angle -> d_dd_dt, d_dd_a
 // ============================================================================
 // Grid: ceil(N/256), Block: 256
 // Replaces m3_abg_bwd for the parallel path.
-extern "C" __global__ void m3_final_grads(
-    float* __restrict__ d_dd_dt_raw,   // [B*T*nh]
-    float* __restrict__ d_dd_a_raw,    // [B*T*nh]
-    const float* __restrict__ dADT,    // [B*T*nh] — from m3_dqkv
-    const float* __restrict__ dDT,     // [B*T*nh] — from m3_ddt_dtrap
-    const float* __restrict__ dDT_angle, // [B*T*nh] — from angle_dt_bwd
-    const float* __restrict__ a_val,   // [B*T*nh] — saved activation
-    const float* __restrict__ DT,      // [B*T*nh] — saved post-softplus dt
-    const float* __restrict__ dd_dt_raw_saved, // [B*T*nh] — saved pre-softplus dd_dt (NO bias)
-    const float* __restrict__ dd_a_raw_saved,  // [B*T*nh] — saved pre-softplus dd_a
-    const float* __restrict__ dt_bias,         // [nh] — bias added before softplus
-    float a_floor,
-    int N, // = B*T*nh
-    int nh
-) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= N) return;
-
-    int h = i % nh;
-    float d_adt = dADT[i];
-    float d_dt_trap = dDT[i];
-    float d_dt_angle_val = dDT_angle[i];
-
-    float dt_val = DT[i];
-    float a_v = a_val[i];
-    float d_a_val = d_adt * dt_val;
-    float d_dt_adt = d_adt * a_v;
-
-    float d_dt_total = d_dt_trap + d_dt_angle_val + d_dt_adt;
-
-    // softplus backward: sigmoid(dd_dt_raw + dt_bias) — must include bias!
-    float raw_dt = dd_dt_raw_saved[i] + dt_bias[h];
-    float sig_dt = (raw_dt > 20.0f) ? 1.0f : 1.0f / (1.0f + exp2f(-raw_dt * LOG2E)); // Softplus asymptote guard - matches m3_dqkv sp_deriv_dt (mamba3_ops.cu) and the CPU form; without it the chunked backward disagreed with both.
-    d_dd_dt_raw[i] = d_dt_total * sig_dt;
-
-    // d_dd_a_raw: from d_a_val, through clamp and -heavy_tail
-    float raw_a = dd_a_raw_saved[i];
-    float a_unclamped = -m3c_heavy_tail(raw_a);
-    // a_val = min(-heavy_tail(raw), -a_floor) = clamp(-, max=-a_floor)
-    // If the clamp was active: gradient = 0.
-    if (a_unclamped > -a_floor) {
-        d_dd_a_raw[i] = 0.0f; // clamped, no gradient
-    } else {
-        // -heavy_tail backward: d_raw = d_a_val * (-heavy_tail'(raw))
-        d_dd_a_raw[i] = d_a_val * (-m3c_heavy_tail_deriv(raw_a));
-    }
+#define DEFINE_M3_FINAL_GRADS(NAME, IDX)                                       \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ d_dd_dt_raw,   /* [B*T*nh] */                          \
+    float* __restrict__ d_dd_a_raw,    /* [B*T*nh] */                          \
+    const float* __restrict__ dADT,    /* [B*T*nh] — from m3_dqkv */           \
+    const float* __restrict__ dDT,     /* [B*T*nh] — from m3_ddt_dtrap */      \
+    const float* __restrict__ dDT_angle, /* [B*T*nh] — from angle_dt_bwd */    \
+    const float* __restrict__ a_val,   /* [B*T*nh] — saved activation */       \
+    const float* __restrict__ DT,      /* [B*T*nh] — saved post-softplus dt */ \
+    const float* __restrict__ dd_dt_raw_saved, /* [B*T*nh] — saved pre-softplus dd_dt (NO bias) */ \
+    const float* __restrict__ dd_a_raw_saved,  /* [B*T*nh] — saved pre-softplus dd_a */ \
+    const float* __restrict__ dt_bias,         /* [nh] — bias added before softplus */ \
+    float a_floor,                                                             \
+    IDX N, /* = B*T*nh */                                                      \
+    int nh                                                                     \
+) {                                                                            \
+    IDX i = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                        \
+    if (i >= N) return;                                                        \
+                                                                               \
+    int h = (int)(i % nh);                                                     \
+    float d_adt = dADT[i];                                                     \
+    float d_dt_trap = dDT[i];                                                  \
+    float d_dt_angle_val = dDT_angle[i];                                       \
+                                                                               \
+    float dt_val = DT[i];                                                      \
+    float a_v = a_val[i];                                                      \
+    float d_a_val = d_adt * dt_val;                                            \
+    float d_dt_adt = d_adt * a_v;                                              \
+                                                                               \
+    float d_dt_total = d_dt_trap + d_dt_angle_val + d_dt_adt;                  \
+                                                                               \
+    /* softplus backward: sigmoid(dd_dt_raw + dt_bias) — must include bias! */ \
+    float raw_dt = dd_dt_raw_saved[i] + dt_bias[h];                            \
+    float sig_dt = (raw_dt > 20.0f) ? 1.0f : 1.0f / (1.0f + exp2f(-raw_dt * LOG2E)); /* Softplus asymptote guard - matches m3_dqkv sp_deriv_dt (mamba3_ops.cu) and the CPU form; without it the chunked backward disagreed with both. */ \
+    d_dd_dt_raw[i] = d_dt_total * sig_dt;                                      \
+                                                                               \
+    /* d_dd_a_raw: from d_a_val, through clamp and -heavy_tail */              \
+    float raw_a = dd_a_raw_saved[i];                                           \
+    float a_unclamped = -m3c_heavy_tail(raw_a);                                \
+    /* a_val = min(-heavy_tail(raw), -a_floor) = clamp(-, max=-a_floor) */     \
+    /* If the clamp was active: gradient = 0. */                               \
+    if (a_unclamped > -a_floor) {                                              \
+        d_dd_a_raw[i] = 0.0f; /* clamped, no gradient */                       \
+    } else {                                                                   \
+        /* -heavy_tail backward: d_raw = d_a_val * (-heavy_tail'(raw)) */      \
+        d_dd_a_raw[i] = d_a_val * (-m3c_heavy_tail_deriv(raw_a));              \
+    }                                                                          \
 }
+
+DEFINE_M3_FINAL_GRADS(m3_final_grads, int)
+DEFINE_M3_FINAL_GRADS(m3_final_grads_i64, long long)
 
 // ============================================================================
 // Typed (bf16/f16) variants of the chunked parallel forward kernels.
@@ -2179,9 +2245,9 @@ extern "C" __global__ void m3_final_grads(
 //   - m3_state_passing_fwd  (inter-chunk prefix recurrence)
 // ============================================================================
 
-#define DEFINE_M3_PREPROCESS_CHUNKS(SUFFIX, T_ACT, FROM_F)                    \
+#define DEFINE_M3_PREPROCESS_CHUNKS(NAME, IDX, T_ACT, FROM_F)                 \
 extern "C" __global__ void                                                    \
-m3_preprocess_chunks_##SUFFIX(                                                \
+NAME(                                                                         \
     T_ACT* __restrict__ K_scaled,                                             \
     float* __restrict__ qk_dot,                                               \
     float* __restrict__ scale_out,                                            \
@@ -2193,21 +2259,21 @@ m3_preprocess_chunks_##SUFFIX(                                                \
     int batch, int T, int nh, int ds, int chunk_size                          \
 ) {                                                                           \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
-    int bc = blockIdx.x;                                                      \
-    int b = bc / n_chunks;                                                    \
-    int chunk = bc % n_chunks;                                                \
+    IDX bc = blockIdx.x;                                                      \
+    IDX b = bc / n_chunks;                                                    \
+    int chunk = (int)(bc % n_chunks);                                         \
     int h = blockIdx.y;                                                       \
     int t_local = threadIdx.x;                                                \
     int chunk_start = chunk * chunk_size;                                     \
     int t = chunk_start + t_local;                                            \
     if (t >= T) return;                                                       \
-    int th = (b * T + t) * nh + h;                                            \
+    IDX th = (b * T + t) * nh + h;                                            \
     float dt_cur = DT[th];                                                    \
     float trap_cur = trap_sig[th];                                            \
     float gamma_val = dt_cur * trap_cur;                                      \
     float shifted_gamma = 0.0f;                                               \
     if (t + 1 < T) {                                                          \
-        int th_next = (b * T + t + 1) * nh + h;                               \
+        IDX th_next = (b * T + t + 1) * nh + h;                               \
         float dt_next = DT[th_next];                                          \
         float trap_next = trap_sig[th_next];                                  \
         shifted_gamma = dt_next * (1.0f - trap_next);                         \
@@ -2215,7 +2281,7 @@ m3_preprocess_chunks_##SUFFIX(                                                \
     float scale_val = shifted_gamma + gamma_val;                              \
     if (scale_out) scale_out[th] = scale_val;                                 \
     if (gamma_out) gamma_out[th] = gamma_val;                                 \
-    int kq_base = (b * T + t) * nh * ds + h * ds;                             \
+    IDX kq_base = (b * T + t) * nh * ds + h * ds;                             \
     float dot = 0.0f;                                                         \
     /* Wide path: one uint4 = 8 typed elements per load/store (the rows  */   \
     /* are contiguous and 16B-aligned when ds % 8 == 0); the fold and    */   \
@@ -2245,14 +2311,16 @@ m3_preprocess_chunks_##SUFFIX(                                                \
     qk_dot[th] = dot * gamma_val;                                             \
 }
 
-DEFINE_M3_PREPROCESS_CHUNKS(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_PREPROCESS_CHUNKS(f16,  __half,        from_f_f16)
+DEFINE_M3_PREPROCESS_CHUNKS(m3_preprocess_chunks_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_PREPROCESS_CHUNKS(m3_preprocess_chunks_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_PREPROCESS_CHUNKS(m3_preprocess_chunks_f16, int, __half, from_f_f16)
+DEFINE_M3_PREPROCESS_CHUNKS(m3_preprocess_chunks_f16_i64, long long, __half, from_f_f16)
 
 /* The typed twin of m3_chunk_state_fwd: the same layouts and chains, the
  * activations read through to_f. */
-#define DEFINE_M3_CHUNK_STATE_FWD(SUFFIX, T_ACT, FROM_F)                      \
+#define DEFINE_M3_CHUNK_STATE_FWD(NAME, IDX, T_ACT, FROM_F)                   \
 extern "C" __global__ void                                                    \
-m3_chunk_state_fwd_##SUFFIX(                                                  \
+NAME(                                                                         \
     float* __restrict__ states_out,                                           \
     const T_ACT* __restrict__ x,                                              \
     const T_ACT* __restrict__ K_scaled,                                       \
@@ -2261,9 +2329,9 @@ m3_chunk_state_fwd_##SUFFIX(                                                  \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
-    int bc = blockIdx.x;                                                      \
-    int b = bc / n_chunks;                                                    \
-    int chunk = bc % n_chunks;                                                \
+    IDX bc = blockIdx.x;                                                      \
+    IDX b = bc / n_chunks;                                                    \
+    int chunk = (int)(bc % n_chunks);                                         \
     /* Layout probe by blockDim.z (legacy y is the HEAD axis, see f32). */    \
     bool quad = blockDim.z >= 2;                                              \
     int h = quad ? (blockIdx.y * blockDim.z + threadIdx.z)                    \
@@ -2275,7 +2343,7 @@ m3_chunk_state_fwd_##SUFFIX(                                                  \
     int chunk_len = chunk_end - chunk_start;                                  \
     if (!quad) {                                                              \
         if (h >= nh) return;                                                  \
-        int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;         \
+        IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;         \
         float dA_end = dA_cumsum[cs_base + chunk_len - 1];                    \
         for (int p = threadIdx.x; p < hd; p += blockDim.x) {                  \
             float acc[MAMBA_RS_STATE_CAP];                                    \
@@ -2285,12 +2353,12 @@ m3_chunk_state_fwd_##SUFFIX(                                                  \
                 float dA_t = dA_cumsum[cs_base + t_local];                    \
                 float decay = FAST_EXP(m3_nonpos(dA_end - dA_t));             \
                 float v_t = to_f(x[(b * T + t) * d_inner + h * hd + p]);      \
-                int ks_base = (b * T + t) * nh * ds + h * ds;                 \
+                IDX ks_base = (b * T + t) * nh * ds + h * ds;                 \
                 for (int n = 0; n < ds; n++) {                                \
                     acc[n] += decay * to_f(K_scaled[ks_base + n]) * v_t;      \
                 }                                                             \
             }                                                                 \
-            int state_base =                                                  \
+            IDX state_base =                                                  \
                 ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;         \
             for (int n = 0; n < ds; n++) states_out[state_base + n] = acc[n]; \
         }                                                                     \
@@ -2300,7 +2368,7 @@ m3_chunk_state_fwd_##SUFFIX(                                                  \
     int n_lo = (int)threadIdx.y * 4;                                          \
     int n_hi = n_lo + 4;                                                      \
     bool live = (p < hd) && (h < nh);                                         \
-    int state_base =                                                          \
+    IDX state_base =                                                          \
         live ? ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds : 0;      \
     float acc[MAMBA_RS_STATE_CAP];                                            \
     for (int n = n_lo; n < n_hi; n++) acc[n] = 0.0f;                          \
@@ -2372,8 +2440,10 @@ m3_chunk_state_fwd_##SUFFIX(                                                  \
     (void)FROM_F;                                                             \
 }
 
-DEFINE_M3_CHUNK_STATE_FWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_CHUNK_STATE_FWD(f16,  __half,        from_f_f16)
+DEFINE_M3_CHUNK_STATE_FWD(m3_chunk_state_fwd_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_STATE_FWD(m3_chunk_state_fwd_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_STATE_FWD(m3_chunk_state_fwd_f16, int, __half, from_f_f16)
+DEFINE_M3_CHUNK_STATE_FWD(m3_chunk_state_fwd_f16_i64, long long, __half, from_f_f16)
 
 /* Typed twin of m3_chunk_pre_state_fused. BIT CONTRACT SUBTLETY: the
  * standalone chunk_state reads K_scaled AFTER its typed round trip
@@ -2381,8 +2451,8 @@ DEFINE_M3_CHUNK_STATE_FWD(f16,  __half,        from_f_f16)
  * fold must consume to_f(FROM_F(ks)) - the round-tripped value - never
  * the pre-round f32. x stages through to_f exactly as the standalone
  * reads it. */
-#define DEFINE_M3_CHUNK_PRE_STATE_FUSED(SUFFIX, T_ACT, FROM_F)                \
-extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
+#define DEFINE_M3_CHUNK_PRE_STATE_FUSED(NAME, IDX, T_ACT, FROM_F)             \
+extern "C" __global__ void NAME(                                              \
     T_ACT* __restrict__ K_scaled,                                             \
     float* __restrict__ qk_dot,                                               \
     float* __restrict__ scale_out,                                            \
@@ -2399,9 +2469,9 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
-    int bc = blockIdx.x;                                                      \
-    int b = bc / n_chunks;                                                    \
-    int chunk = bc % n_chunks;                                                \
+    IDX bc = blockIdx.x;                                                      \
+    IDX b = bc / n_chunks;                                                    \
+    int chunk = (int)(bc % n_chunks);                                         \
     int h = blockIdx.y;                                                       \
     if (ds > MAMBA_RS_STATE_CAP) return;                                      \
     int chunk_start = chunk * chunk_size;                                     \
@@ -2423,7 +2493,7 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
     __syncthreads();                                                          \
     if (tid == 0) {                                                           \
         float cumsum = 0.0f;                                                  \
-        int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;         \
+        IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;         \
         for (int t_local = 0; t_local < chunk_len; t_local++) {               \
             cumsum += da_chunk[t_local];                                      \
             da_chunk[t_local] = cumsum;                                       \
@@ -2434,13 +2504,13 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
     float dA_end = da_chunk[chunk_len - 1];                                   \
     for (int t_local = tid; t_local < chunk_len; t_local += nt) {             \
         int t = chunk_start + t_local;                                        \
-        int th = (b * T + t) * nh + h;                                        \
+        IDX th = (b * T + t) * nh + h;                                        \
         float dt_cur = DT[th];                                                \
         float trap_cur = trap_sig[th];                                        \
         float gamma_val = dt_cur * trap_cur;                                  \
         float shifted_gamma = 0.0f;                                           \
         if (t + 1 < T) {                                                      \
-            int th_next = (b * T + t + 1) * nh + h;                           \
+            IDX th_next = (b * T + t + 1) * nh + h;                           \
             float dt_next = DT[th_next];                                      \
             float trap_next = trap_sig[th_next];                              \
             shifted_gamma = dt_next * (1.0f - trap_next);                     \
@@ -2448,7 +2518,7 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
         float scale_val = shifted_gamma + gamma_val;                          \
         if (scale_out) scale_out[th] = scale_val;                             \
         if (gamma_out) gamma_out[th] = gamma_val;                             \
-        int kq_base = (b * T + t) * nh * ds + h * ds;                         \
+        IDX kq_base = (b * T + t) * nh * ds + h * ds;                         \
         float dot = 0.0f;                                                     \
         if (ds % 8 == 0) {                                                    \
             for (int n8 = 0; n8 < ds / 8; n8++) {                             \
@@ -2523,7 +2593,7 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
             acc2 += decay * kv.z * v_t;                                       \
             acc3 += decay * kv.w * v_t;                                       \
         }                                                                     \
-        int state_base =                                                      \
+        IDX state_base =                                                      \
             ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds + nq * 4;    \
         float4 out;                                                           \
         out.x = acc0;                                                         \
@@ -2534,12 +2604,14 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
     }                                                                         \
 }
 
-DEFINE_M3_CHUNK_PRE_STATE_FUSED(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_CHUNK_PRE_STATE_FUSED(f16,  __half,        from_f_f16)
+DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_f16, int, __half, from_f_f16)
+DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_f16_i64, long long, __half, from_f_f16)
 
-#define DEFINE_M3_WRITEBACK_PARALLEL_STATES(SUFFIX, T_ACT, FROM_F)            \
+#define DEFINE_M3_WRITEBACK_PARALLEL_STATES(NAME, IDX, T_ACT, FROM_F)         \
 extern "C" __global__ void                                                    \
-m3_writeback_parallel_states_##SUFFIX(                                        \
+NAME(                                                                         \
     float* __restrict__ ssm_state,                                            \
     float* __restrict__ k_state,                                              \
     float* __restrict__ v_state,                                              \
@@ -2548,7 +2620,7 @@ m3_writeback_parallel_states_##SUFFIX(                                        \
     const T_ACT* __restrict__ x_flat,                                         \
     int batch, int T, int nh, int hd, int ds                                  \
 ) {                                                                           \
-    int b = blockIdx.x;                                                       \
+    IDX b = blockIdx.x;                                                       \
     int h = blockIdx.y;                                                       \
     int p = threadIdx.x;                                                      \
     if (b >= batch || h >= nh) return;                                        \
@@ -2556,33 +2628,35 @@ m3_writeback_parallel_states_##SUFFIX(                                        \
     int dim = hd * ds;                                                        \
     if (p < hd) {                                                             \
         for (int n = 0; n < ds; n++) {                                        \
-            int idx = b * nh * dim + h * dim + p * ds + n;                    \
+            IDX idx = b * nh * dim + h * dim + p * ds + n;                    \
             ssm_state[idx] = final_states[idx];                               \
         }                                                                     \
     }                                                                         \
     if (p < ds) {                                                             \
-        int src_idx = (b * T + (T - 1)) * nh * ds + h * ds + p;               \
-        int dst_idx = b * nh * ds + h * ds + p;                               \
+        IDX src_idx = (b * T + (T - 1)) * nh * ds + h * ds + p;               \
+        IDX dst_idx = b * nh * ds + h * ds + p;                               \
         k_state[dst_idx] = to_f(k_flat[src_idx]);                             \
     }                                                                         \
     if (p < hd) {                                                             \
-        int src_idx = (b * T + (T - 1)) * d_inner + h * hd + p;               \
-        int dst_idx = b * nh * hd + h * hd + p;                               \
+        IDX src_idx = (b * T + (T - 1)) * d_inner + h * hd + p;               \
+        IDX dst_idx = b * nh * hd + h * hd + p;                               \
         v_state[dst_idx] = to_f(x_flat[src_idx]);                             \
     }                                                                         \
     (void)FROM_F;                                                             \
 }
 
-DEFINE_M3_WRITEBACK_PARALLEL_STATES(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_WRITEBACK_PARALLEL_STATES(f16,  __half,        from_f_f16)
+DEFINE_M3_WRITEBACK_PARALLEL_STATES(m3_writeback_parallel_states_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_WRITEBACK_PARALLEL_STATES(m3_writeback_parallel_states_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_WRITEBACK_PARALLEL_STATES(m3_writeback_parallel_states_f16, int, __half, from_f_f16)
+DEFINE_M3_WRITEBACK_PARALLEL_STATES(m3_writeback_parallel_states_f16_i64, long long, __half, from_f_f16)
 
-#define DEFINE_M3_CHUNK_SCAN_FWD(SUFFIX, T_ACT, FROM_F)                       \
+#define DEFINE_M3_CHUNK_SCAN_FWD(NAME, IDX, T_ACT, FROM_F)                    \
 /* No __launch_bounds__ pin: the old (64, 2) minimum-blocks hint was          \
  * unreachable behind the 32 KB static tile (smem caps residency at 3)        \
  * and only constrained the register allocator. A head wider than the         \
  * block takes its elements in turns, as in the f32 kernel. */                \
 extern "C" __global__ void                                                    \
-m3_chunk_scan_fwd_##SUFFIX(                                                   \
+NAME(                                                                         \
     T_ACT* __restrict__ y_out,                                                \
     const T_ACT* __restrict__ x,                                              \
     const T_ACT* __restrict__ Q,                                              \
@@ -2595,9 +2669,9 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
-    int bc = blockIdx.x;                                                      \
-    int b = bc / n_chunks;                                                    \
-    int chunk = bc % n_chunks;                                                \
+    IDX bc = blockIdx.x;                                                      \
+    IDX b = bc / n_chunks;                                                    \
+    int chunk = (int)(bc % n_chunks);                                         \
     int h = blockIdx.y * blockDim.y + threadIdx.y;                            \
     int head_row = threadIdx.y;                                               \
     bool head_live = h < nh;                                                  \
@@ -2607,7 +2681,7 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
     int chunk_len = chunk_end - chunk_start;                                  \
     if (chunk_size > 64) return;                                              \
     if (ds > MAMBA_RS_STATE_CAP) return;                                      \
-    int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
+    IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
     float d_skip = head_live ? D[h] : 0.0f;                                   \
     __shared__ float qk_tile[2][64 * 64];                                     \
     if (head_live) {                                                          \
@@ -2615,7 +2689,7 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
              t_local += blockDim.x) {                                         \
             int t = chunk_start + t_local;                                    \
             float dA_t = dA_cumsum[cs_base + t_local];                        \
-            int q_base = (b * T + t) * nh * ds + h * ds;                      \
+            IDX q_base = (b * T + t) * nh * ds + h * ds;                      \
             float q_reg[MAMBA_RS_STATE_CAP];                                  \
             for (int n = 0; n < ds; n++) q_reg[n] = to_f(Q[q_base + n]);      \
             for (int s_local = 0; s_local < t_local; s_local++) {             \
@@ -2623,7 +2697,7 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
                 float dA_s = dA_cumsum[cs_base + s_local];                    \
                 float decay = FAST_EXP(m3_nonpos(dA_t - dA_s));               \
                 float qk_val = 0.0f;                                          \
-                int ks_base = (b * T + s) * nh * ds + h * ds;                 \
+                IDX ks_base = (b * T + s) * nh * ds + h * ds;                 \
                 for (int n = 0; n < ds; n++) {                                \
                     qk_val += q_reg[n] * to_f(K_scaled[ks_base + n]);         \
                 }                                                             \
@@ -2634,14 +2708,14 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
     __syncthreads();                                                          \
     if (!head_live) return;                                                   \
     for (int p = threadIdx.x; p < hd; p += blockDim.x) {                      \
-        int state_base =                                                      \
+        IDX state_base =                                                      \
             ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;             \
         for (int t_local = 0; t_local < chunk_len; t_local++) {               \
             int t = chunk_start + t_local;                                    \
             float dA_t = dA_cumsum[cs_base + t_local];                        \
             float y_off = 0.0f;                                               \
             float state_decay = FAST_EXP(dA_t);                               \
-            int q_base = (b * T + t) * nh * ds + h * ds;                      \
+            IDX q_base = (b * T + t) * nh * ds + h * ds;                      \
             for (int n = 0; n < ds; n++) {                                    \
                 y_off += to_f(Q[q_base + n]) * prev_states[state_base + n];   \
             }                                                                 \
@@ -2653,7 +2727,7 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
                 y_diag += qk_tile[head_row][t_local * 64 + s_local] * v_s;    \
             }                                                                 \
             float x_t = to_f(x[(b * T + t) * d_inner + h * hd + p]);          \
-            int th = (b * T + t) * nh + h;                                    \
+            IDX th = (b * T + t) * nh + h;                                    \
             float y_skip = (d_skip + qk_dot[th]) * x_t;                       \
             float y_val = y_diag + y_off + y_skip;                            \
             y_out[(b * T + t) * d_inner + h * hd + p] = FROM_F(y_val);        \
@@ -2661,15 +2735,17 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
     }                                                                         \
 }
 
-DEFINE_M3_CHUNK_SCAN_FWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_CHUNK_SCAN_FWD(f16,  __half,        from_f_f16)
+DEFINE_M3_CHUNK_SCAN_FWD(m3_chunk_scan_fwd_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_SCAN_FWD(m3_chunk_scan_fwd_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_SCAN_FWD(m3_chunk_scan_fwd_f16, int, __half, from_f_f16)
+DEFINE_M3_CHUNK_SCAN_FWD(m3_chunk_scan_fwd_f16_i64, long long, __half, from_f_f16)
 
 /* Typed twin of m3_chunk_scan_fwd_coop (see the f32 kernel for the
  * distribution + smem layout). Activations convert through to_f at the
  * staging copy - the same conversion points the original kernel applies
  * inline - and y stores through FROM_F. */
-#define DEFINE_M3_CHUNK_SCAN_FWD_COOP(SUFFIX, T_ACT, FROM_F)                  \
-extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
+#define DEFINE_M3_CHUNK_SCAN_FWD_COOP(NAME, IDX, T_ACT, FROM_F)               \
+extern "C" __global__ void NAME(                                              \
     T_ACT* __restrict__ y_out,                                                \
     const T_ACT* __restrict__ x,                                              \
     const T_ACT* __restrict__ Q,                                              \
@@ -2682,9 +2758,9 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
-    int bc = blockIdx.x;                                                      \
-    int b = bc / n_chunks;                                                    \
-    int chunk = bc % n_chunks;                                                \
+    IDX bc = blockIdx.x;                                                      \
+    IDX b = bc / n_chunks;                                                    \
+    int chunk = (int)(bc % n_chunks);                                         \
     int h = blockIdx.y;                                                       \
     if (chunk_size > 64) return;                                              \
     if (ds > MAMBA_RS_STATE_CAP) return;                                      \
@@ -2692,8 +2768,8 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
     int chunk_end = chunk_start + chunk_size;                                 \
     if (chunk_end > T) chunk_end = T;                                         \
     int chunk_len = chunk_end - chunk_start;                                  \
-    int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
-    int state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;             \
+    IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
+    IDX state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;             \
     extern __shared__ float m3cs_sm[];                                        \
     /* Rows padded to ds+4 floats - see the f32 twin's bank note. */          \
     int qk_ld = ds + 4;                                                       \
@@ -2711,7 +2787,7 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
     for (int i = tid; i < chunk_len * ds; i += nt) {                          \
         int t_local = i / ds;                                                 \
         int n = i % ds;                                                       \
-        int base = (b * T + chunk_start + t_local) * nh * ds + h * ds;        \
+        IDX base = (b * T + chunk_start + t_local) * nh * ds + h * ds;        \
         sm_q[t_local * qk_ld + n] = to_f(Q[base + n]);                           \
         sm_k[t_local * qk_ld + n] = to_f(K_scaled[base + n]);                    \
     }                                                                         \
@@ -2844,8 +2920,10 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
     }                                                                         \
 }
 
-DEFINE_M3_CHUNK_SCAN_FWD_COOP(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_CHUNK_SCAN_FWD_COOP(f16,  __half,        from_f_f16)
+DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_bf16, int, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16, int, __half, from_f_f16)
+DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half, from_f_f16)
 
 // ============================================================================
 // Typed (bf16/f16) variants of the chunked parallel backward
@@ -3104,9 +3182,9 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(f16,  __half,        from_f_f16)
         } \
     }
 
-#define DEFINE_M3_DQKV(SUFFIX, T_ACT, FROM_F, MODE) \
+#define DEFINE_M3_DQKV(NAME, IDX, T_ACT, FROM_F, MODE) \
 extern "C" __global__ void \
-m3_dqkv_##SUFFIX( \
+NAME( \
 float* __restrict__ dQ_mid, \
 float* __restrict__ dK_mid, \
 float* __restrict__ dV, \
@@ -3127,7 +3205,7 @@ int B, int T, int nh_total, int hd, int ds, int CS, \
 int use_pair_mats \
 ) { \
     int h = blockIdx.x; \
-    int b = blockIdx.y; \
+    IDX b = blockIdx.y; \
     int p = threadIdx.x; \
     int ty = threadIdx.y; \
     int TS = blockDim.y; \
@@ -3352,11 +3430,13 @@ int use_pair_mats \
 }
 
 
-DEFINE_M3_DQKV(bf16, __nv_bfloat16, from_f_bf16, legacy)
-DEFINE_M3_DQKV(f16, __half, from_f_f16, legacy)
-DEFINE_M3_DQKV(transport_f32, float, from_f_f32, transport)
-DEFINE_M3_DQKV(transport_bf16, __nv_bfloat16, from_f_bf16, transport)
-DEFINE_M3_DQKV(transport_f16, __half, from_f_f16, transport)
+DEFINE_M3_DQKV(m3_dqkv_bf16, int, __nv_bfloat16, from_f_bf16, legacy)
+DEFINE_M3_DQKV(m3_dqkv_bf16_i64, long long, __nv_bfloat16, from_f_bf16, legacy)
+DEFINE_M3_DQKV(m3_dqkv_f16, int, __half, from_f_f16, legacy)
+DEFINE_M3_DQKV(m3_dqkv_f16_i64, long long, __half, from_f_f16, legacy)
+DEFINE_M3_DQKV(m3_dqkv_transport_f32, int, float, from_f_f32, transport)
+DEFINE_M3_DQKV(m3_dqkv_transport_bf16, int, __nv_bfloat16, from_f_bf16, transport)
+DEFINE_M3_DQKV(m3_dqkv_transport_f16, int, __half, from_f_f16, transport)
 
 
 // __launch_bounds__: block_dim=CS <= 64. Six state-capacity register arrays per
@@ -3373,9 +3453,9 @@ DEFINE_M3_DQKV(transport_f16, __half, from_f_f16, transport)
 #define M3_DQKT_THREAD_INDEX_legacy(t, n, ds) t * ds + n
 #define M3_DQKT_THREAD_INDEX_transport(t, n, ds) t * ds + (n ^ ((ds == 16) ? ((t >> 1) & 15) : 0))
 
-#define DEFINE_M3_DQKTHETA(SUFFIX, T_ACT, FROM_F, MODE) \
+#define DEFINE_M3_DQKTHETA(NAME, IDX, T_ACT, FROM_F, MODE) \
 extern "C" __global__ __launch_bounds__(64, 4) void \
-m3_dqktheta_##SUFFIX( \
+NAME( \
 float* __restrict__ dQ_pre, \
 float* __restrict__ dK_pre, \
 float* __restrict__ dAngles_cumsum, \
@@ -3393,12 +3473,12 @@ int B, int T, int nh, int ds, int n_angles, int CS, \
 int use_staging \
 ) { \
     int n_chunks = (T + CS - 1) / CS; \
-    int bc = blockIdx.x; \
-    int b_chunk = bc; \
+    IDX bc = blockIdx.x; \
+    IDX b_chunk = bc; \
     int h = blockIdx.y; \
     int t_local = threadIdx.x; \
-    int b = b_chunk / n_chunks; \
-    int chunk = b_chunk % n_chunks; \
+    IDX b = b_chunk / n_chunks; \
+    int chunk = (int)(b_chunk % n_chunks); \
     int gt = chunk * CS + t_local; \
     if (ds > MAMBA_RS_STATE_CAP) return; \
     if (b >= B || h >= nh) return; \
@@ -3416,7 +3496,7 @@ int use_staging \
         for (int i = t_local; i < rows * ds; i += CS) { \
             int tt = i / ds; \
             int nn = i % ds; \
-            int gbase = ((b * T + t0 + tt) * nh + h) * ds + nn; \
+            IDX gbase = ((b * T + t0 + tt) * nh + h) * ds + nn; \
             q_sm[M3_DQKT_COOP_INDEX_##MODE(i, tt, nn, ds)] = to_f(Q_raw[gbase]); \
             k_sm[M3_DQKT_COOP_INDEX_##MODE(i, tt, nn, ds)] = to_f(K_raw[gbase]); \
             dqi_sm[M3_DQKT_COOP_INDEX_##MODE(i, tt, nn, ds)] = dQ_mid[gbase]; \
@@ -3425,7 +3505,7 @@ int use_staging \
     } \
     __syncthreads(); \
     if (valid) { \
-        int base = ((b * T + gt) * nh + h) * ds; \
+        IDX base = ((b * T + gt) * nh + h) * ds; \
         float scale = Scale_in[(b * T + gt) * nh + h]; \
         float gamma = Gamma_in[(b * T + gt) * nh + h]; \
         float dqk = dQK_dot[(b * T + gt) * nh + h]; \
@@ -3444,7 +3524,7 @@ int use_staging \
             use_staging ? dki_sm[M3_DQKT_THREAD_INDEX_##MODE(t_local, n, ds)] : dK_mid[base + n]; \
         } \
         float k_rot[MAMBA_RS_STATE_CAP]; \
-        int angle_base = ((b * T + gt) * nh + h) * n_angles; \
+        IDX angle_base = ((b * T + gt) * nh + h) * n_angles; \
         float cos_a[MAMBA_RS_STATE_CAP / 2], sin_a[MAMBA_RS_STATE_CAP / 2]; \
         for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) { \
             float theta = Angles[angle_base + a]; \
@@ -3515,7 +3595,7 @@ int use_staging \
         for (int i = t_local; i < rows * ds; i += CS) { \
             int tt = i / ds; \
             int nn = i % ds; \
-            int gbase = ((b * T + t0 + tt) * nh + h) * ds + nn; \
+            IDX gbase = ((b * T + t0 + tt) * nh + h) * ds + nn; \
             dQ_pre[gbase] = out_q_sm[M3_DQKT_COOP_INDEX_##MODE(i, tt, nn, ds)]; \
             dK_pre[gbase] = out_k_sm[M3_DQKT_COOP_INDEX_##MODE(i, tt, nn, ds)]; \
         } \
@@ -3524,10 +3604,12 @@ int use_staging \
 }
 
 
-DEFINE_M3_DQKTHETA(bf16, __nv_bfloat16, from_f_bf16, legacy)
-DEFINE_M3_DQKTHETA(f16,  __half,        from_f_f16, legacy)
-DEFINE_M3_DQKTHETA(transport_bf16, __nv_bfloat16, from_f_bf16, transport)
-DEFINE_M3_DQKTHETA(transport_f16, __half, from_f_f16, transport)
+DEFINE_M3_DQKTHETA(m3_dqktheta_bf16, int, __nv_bfloat16, from_f_bf16, legacy)
+DEFINE_M3_DQKTHETA(m3_dqktheta_bf16_i64, long long, __nv_bfloat16, from_f_bf16, legacy)
+DEFINE_M3_DQKTHETA(m3_dqktheta_f16, int, __half, from_f_f16, legacy)
+DEFINE_M3_DQKTHETA(m3_dqktheta_f16_i64, long long, __half, from_f_f16, legacy)
+DEFINE_M3_DQKTHETA(m3_dqktheta_transport_bf16, int, __nv_bfloat16, from_f_bf16, transport)
+DEFINE_M3_DQKTHETA(m3_dqktheta_transport_f16, int, __half, from_f_f16, transport)
 
 
 #undef M3_DQKV_LOCAL_STATE_legacy
