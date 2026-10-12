@@ -256,10 +256,6 @@ pub struct MambaKernels {
     /// the bias partials in one walk, the pre-activation recomputed from
     /// the x window.
     pub conv1d_bwd_tiled_typed: ByIndexWidth<TypedKernel>,
-    /// Typed dispatch for `conv1d_burnin_backward`, the serial reference
-    /// the typed backward parity test drives; production runs the tiled
-    /// kernel above. Matches DEFINE_CONV1D_BURNIN_BWD in conv1d.cu.
-    pub conv1d_burnin_bwd_typed: TypedKernel,
     /// The conv forward of any width, its window read from the rows: the
     /// tiled kernels' chains for a conv wider than they hold.
     pub conv1d_fwd_any_typed: ByIndexWidth<TypedKernel>,
@@ -1792,7 +1788,6 @@ impl MambaKernels {
             // typed training-backward kernels
             gating_bwd_typed: load_typed("gating_backward")?,
             rmsnorm_bwd_typed: load_typed("rmsnorm_backward")?,
-            conv1d_burnin_bwd_typed: load_typed("conv1d_burnin_backward")?,
             conv1d_burnin_fwd_tiled_typed: load_widths("conv1d_burnin_forward_tiled")?,
             conv1d_bwd_tiled_typed: load_widths("conv1d_bwd_tiled")?,
             conv1d_fwd_any_typed: load_widths("conv1d_fwd_any")?,

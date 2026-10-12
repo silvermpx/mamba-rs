@@ -89,83 +89,10 @@ DEFINE_CONV1D_STEP_FWD_SILU(conv1d_step_forward_silu_f16_i64, long long, __half,
 
 // ======================== BURNIN (T>1) ========================
 
-// conv1d_burnin_backward typed (bf16/f16/f32) for mixed-precision training.
-// Pattern matches Dao-AILab/causal-conv1d backward: activations T_IN, weights
-// f32 master, recurrent state save (`conv_states`) f32.
-//
-// Rule B (no atomicAdd): accumulate d_weight/d_bias into thread-local
-// registers across the T-loop, then write one per-(b,d) partial at the end.
-// Caller MUST follow with two reduce_sum_axis0 launches:
-//   reduce_sum_axis0(d_weight, d_weight_partials, batch, d_inner*d_conv, 1)
-//   reduce_sum_axis0(d_bias,   d_bias_partials,   batch, d_inner,         1)
-//
-// Carry register array stays float[8] regardless of T_IN (BUG-M2 fix needs
-// f32 precision for the back-propagated gradient through the shift register).
-//
-// CONSTRAINT: d_conv <= 8 (compile-time register array). All shipped
-// state-spaces/mamba checkpoints use d_conv=4.
-#define DEFINE_CONV1D_BURNIN_BWD(SUFFIX, T, FROM_F)                            \
-extern "C" __global__ __launch_bounds__(256, 4)                                \
-void conv1d_burnin_backward_##SUFFIX(                                          \
-    T* __restrict__ d_x_branch,                                                \
-    float* __restrict__ d_weight_partials,                                     \
-    float* __restrict__ d_bias_partials,                                       \
-    const T* __restrict__ d_u,                                                 \
-    const T* __restrict__ post_conv,                                           \
-    const float* __restrict__ conv_states,                                     \
-    const float* __restrict__ weight,                                          \
-    int batch, int T_, int d_inner, int d_conv                                 \
-) {                                                                            \
-    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;          \
-    long long total = (long long)batch * d_inner;                              \
-    if (idx >= total) return;                                                  \
-    long long b = idx / d_inner;                                               \
-    int d = (int)(idx % d_inner);                                              \
-    float carry[8];                                                            \
-    if (d_conv > 8) return;                                                    \
-    for (int k = 0; k < d_conv - 1; k++) carry[k] = 0.0f;                      \
-    float local_d_weight[8];                                                   \
-    for (int k = 0; k < d_conv; k++) local_d_weight[k] = 0.0f;                 \
-    float local_d_bias = 0.0f;                                                 \
-    for (int t = T_ - 1; t >= 0; t--) {                                        \
-        long long bt_di = (b * T_ + t) * d_inner + d;                          \
-        float x = to_f(post_conv[bt_di]);                                      \
-        float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));           \
-        float silu_grad = sig * (1.0f + x * (1.0f - sig));                     \
-        float d_conv_out = to_f(d_u[bt_di]) * silu_grad;                       \
-        float dxb = d_conv_out * weight[d * d_conv + d_conv - 1];              \
-        long long cs_base = ((b * T_ + t) * d_inner + d) * d_conv;             \
-        for (int k = 0; k < d_conv; k++) {                                     \
-            local_d_weight[k] += d_conv_out * conv_states[cs_base + k];        \
-        }                                                                      \
-        local_d_bias += d_conv_out;                                            \
-        if (d_conv > 1) {                                                      \
-            int carry_len = d_conv - 1;                                        \
-            dxb += carry[0];                                                   \
-            for (int k = 0; k < carry_len - 1; k++) {                          \
-                carry[k] = carry[k + 1]                                        \
-                         + d_conv_out * weight[d * d_conv + d_conv - 2 - k];   \
-            }                                                                  \
-            carry[carry_len - 1] = d_conv_out * weight[d * d_conv];            \
-        }                                                                      \
-        d_x_branch[bt_di] = FROM_F(dxb);                                       \
-    }                                                                          \
-    /* Rule B stage-1 output: single per-(b,d) write. */                       \
-    long long wp_base = (b * d_inner + d) * d_conv;                            \
-    for (int k = 0; k < d_conv; k++) {                                         \
-        d_weight_partials[wp_base + k] = local_d_weight[k];                    \
-    }                                                                          \
-    d_bias_partials[b * d_inner + d] = local_d_bias;                           \
-}
-
-DEFINE_CONV1D_BURNIN_BWD(f32,  float,         from_f_f32)
-DEFINE_CONV1D_BURNIN_BWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_CONV1D_BURNIN_BWD(f16,  __half,        from_f_f16)
-
 // ============================================================================
-// Tiled conv1d (S-conv phase): the burnin kernels above run ONE thread per
-// (b, d) with a T-long serial loop — 24 blocks at the production shape, 146
-// idle SMs. The window only reaches d_conv-1 = 3 steps back, so the t-range
+// Tiled conv1d (S-conv phase): one thread per (b, d) walking all T steps
+// ran 24 blocks at the production shape and left 146 SMs idle. The window
+// only reaches d_conv-1 = 3 steps back, so the t-range
 // tiles perfectly: tile 0 seeds from the carry-in state, tiles k>0 seed
 // their window from x_branch halo loads — the SAME values the serial walk
 // would hold, so every output element is bit-identical. Only the tile

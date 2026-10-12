@@ -395,13 +395,13 @@ pub fn gpu_backward_mamba_layer(
     )?;
 
     // ===================================================================
-    // B6: SiLU backward + Conv1d backward (fused burnin kernel)
+    // B6: SiLU backward + Conv1d backward
     // ===================================================================
     // Rule B (no atomicAdd): two-stage launch.
-    // Stage 1: conv1d_burnin_bwd writes per-(b,d) partials into axis0_partials
-    //          split as [weight_partials | bias_partials]:
-    //            weight at offset 0, size B * d_inner * d_conv
-    //            bias   at offset B*d_inner*d_conv, size B * d_inner
+    // Stage 1: the conv backward writes per-(b, tile, d) partials into
+    //          axis0_partials split as [weight_partials | bias_partials]:
+    //            weight at offset 0, size B * n_tiles * d_inner * d_conv
+    //            bias   right after it, size B * n_tiles * d_inner
     // Stage 2: two reduce_sum_axis0 launches reduce across B → d_lw grad slices.
     {
         let di_i = di as i32;
@@ -451,7 +451,7 @@ pub fn gpu_backward_mamba_layer(
                 shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
             };
             unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("conv1d_burnin_bwd mamba weight final: {:?}", e))?;
+                .map_err(|e| format!("conv tap gradient reduce: {:?}", e))?;
         }
         // Stage 2b: reduce bias partials [B, d_inner] → d_lw.conv1d_bias.
         {
@@ -470,7 +470,7 @@ pub fn gpu_backward_mamba_layer(
                 shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
             };
             unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("conv1d_burnin_bwd mamba bias final: {:?}", e))?;
+                .map_err(|e| format!("conv bias gradient reduce: {:?}", e))?;
         }
     }
 

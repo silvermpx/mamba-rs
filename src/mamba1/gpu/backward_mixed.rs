@@ -667,7 +667,7 @@ pub fn gpu_backward_mamba_layer_mixed(
                 shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
             };
             unsafe { bld.launch(cfg) }
-                .map_err(|e| format!("conv1d_burnin_bwd_typed weight final: {e:?}"))?;
+                .map_err(|e| format!("conv tap gradient reduce typed: {e:?}"))?;
         }
         // Stage 2b: reduce bias partials [B, di] → d_lw.conv1d_bias.
         {
@@ -686,7 +686,7 @@ pub fn gpu_backward_mamba_layer_mixed(
                 shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
             };
             unsafe { bld.launch(cfg) }
-                .map_err(|e| format!("conv1d_burnin_bwd_typed bias final: {e:?}"))?;
+                .map_err(|e| format!("conv bias gradient reduce typed: {e:?}"))?;
         }
     }
 

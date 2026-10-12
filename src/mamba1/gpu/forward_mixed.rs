@@ -217,7 +217,7 @@ pub struct GpuMambaMixedTrainScratch {
 
     // ── Rule-B axis-0 reduction partials (determinism fix) ─
     /// Scratch for per-sample partials produced by Rule-B backward kernels
-    /// (rmsnorm_bwd d_scale, conv1d_burnin_bwd d_weight+d_bias). Reduced via
+    /// (rmsnorm_bwd d_scale, the conv backward's tap and bias partials). Reduced via
     /// `reduce_sum_axis0` to produce deterministic cross-batch accumulators
     /// (replaces the previous atomicAdd accumulators).
     ///

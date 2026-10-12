@@ -192,6 +192,8 @@
   the backward are built the same way and pick their build per launch
   (`gpu::launch::conv_index_width`). Their fields in `MambaKernels` hold
   both builds as a `ByIndexWidth`.
+- `MambaKernels::conv1d_burnin_bwd_typed` and its kernel are gone: no path
+  launched the serial conv backward since the tiled backward replaced it.
 - `GpuCtx::cublas()` hands the context's cuBLAS handle, which the context
   takes when it enters a cuBLAS GEMM mode and keeps. `GpuCtx::take_cublas()`
   takes one for a context that stays in the deterministic mode, for a
