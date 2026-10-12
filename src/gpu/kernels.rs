@@ -6,6 +6,7 @@
 use super::dtype::WeightDtype;
 use super::gemm_bi_triad::GemmBiKernels;
 use super::gemm_bi_triad::modules::inference_bundle::InferenceSm89Bundle;
+use super::launch::IndexWidth;
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -56,6 +57,23 @@ impl HalfKernel {
             WeightDtype::F32 | WeightDtype::Tf32 => {
                 panic!("HalfKernel has no f32 variant (use the TypedKernel f32 path instead)")
             }
+        }
+    }
+}
+
+/// One kernel body built with 32-bit and with 64-bit offsets, under the
+/// entry names `name` and `name_i64`. A launch takes the build its
+/// [`IndexWidth`] names.
+pub struct ByIndexWidth<K> {
+    pub i32: K,
+    pub i64: K,
+}
+
+impl<K> ByIndexWidth<K> {
+    pub fn get(&self, width: IndexWidth) -> &K {
+        match width {
+            IndexWidth::I32 => &self.i32,
+            IndexWidth::I64 => &self.i64,
         }
     }
 }
@@ -330,16 +348,17 @@ pub struct MambaKernels {
     pub rmsnorm_bwd_f32in_typed: HalfKernel,
 
     // -- Parallel scan (optional, for T>128) --
-    /// Parallel prefix scan SSM forward with activation saves.
-    pub ssm_parallel_fwd: CudaFunction,
+    /// Parallel prefix scan SSM forward with activation saves, in both
+    /// offset widths (see [`IndexWidth`]).
+    pub ssm_parallel_fwd: ByIndexWidth<CudaFunction>,
     /// Parallel prefix scan SSM forward without saves (target network).
-    pub ssm_parallel_fwd_nosave: CudaFunction,
+    pub ssm_parallel_fwd_nosave: ByIndexWidth<CudaFunction>,
     /// Typed parallel scan forward — typed delta/u/B/C/y_out,
     /// all scan state (smem_run, block scan, h, h_saved) remains f32 per
     /// `state-spaces/mamba` `scan_t = float2` invariant.
-    pub ssm_parallel_fwd_typed: TypedKernel,
+    pub ssm_parallel_fwd_typed: ByIndexWidth<TypedKernel>,
     /// Typed parallel scan forward nosave twin (target network / prefill).
-    pub ssm_parallel_fwd_nosave_typed: TypedKernel,
+    pub ssm_parallel_fwd_nosave_typed: ByIndexWidth<TypedKernel>,
 
     // -- M1 parallel scan BACKWARD --
     /// Parallel reverse-scan backward, mirrors state-spaces/mamba
@@ -1523,17 +1542,37 @@ impl MambaKernels {
             ssm_burnin_fwd_f16: get("ssm_burnin_forward_f16")?,
 
             // parallel scan
-            ssm_parallel_fwd: get("ssm_parallel_scan_fwd")?,
-            ssm_parallel_fwd_nosave: get("ssm_parallel_scan_fwd_nosave")?,
-            ssm_parallel_fwd_typed: TypedKernel {
-                f32: get("ssm_parallel_scan_fwd")?,
-                bf16: get("ssm_parallel_scan_fwd_bf16")?,
-                f16: get("ssm_parallel_scan_fwd_f16")?,
+            ssm_parallel_fwd: ByIndexWidth {
+                i32: get("ssm_parallel_scan_fwd")?,
+                i64: get("ssm_parallel_scan_fwd_i64")?,
             },
-            ssm_parallel_fwd_nosave_typed: TypedKernel {
-                f32: get("ssm_parallel_scan_fwd_nosave")?,
-                bf16: get("ssm_parallel_scan_fwd_nosave_bf16")?,
-                f16: get("ssm_parallel_scan_fwd_nosave_f16")?,
+            ssm_parallel_fwd_nosave: ByIndexWidth {
+                i32: get("ssm_parallel_scan_fwd_nosave")?,
+                i64: get("ssm_parallel_scan_fwd_nosave_i64")?,
+            },
+            ssm_parallel_fwd_typed: ByIndexWidth {
+                i32: TypedKernel {
+                    f32: get("ssm_parallel_scan_fwd")?,
+                    bf16: get("ssm_parallel_scan_fwd_bf16")?,
+                    f16: get("ssm_parallel_scan_fwd_f16")?,
+                },
+                i64: TypedKernel {
+                    f32: get("ssm_parallel_scan_fwd_i64")?,
+                    bf16: get("ssm_parallel_scan_fwd_bf16_i64")?,
+                    f16: get("ssm_parallel_scan_fwd_f16_i64")?,
+                },
+            },
+            ssm_parallel_fwd_nosave_typed: ByIndexWidth {
+                i32: TypedKernel {
+                    f32: get("ssm_parallel_scan_fwd_nosave")?,
+                    bf16: get("ssm_parallel_scan_fwd_nosave_bf16")?,
+                    f16: get("ssm_parallel_scan_fwd_nosave_f16")?,
+                },
+                i64: TypedKernel {
+                    f32: get("ssm_parallel_scan_fwd_nosave_i64")?,
+                    bf16: get("ssm_parallel_scan_fwd_nosave_bf16_i64")?,
+                    f16: get("ssm_parallel_scan_fwd_nosave_f16_i64")?,
+                },
             },
             ssm_parallel_bwd_typed: TypedKernel {
                 f32: get("ssm_parallel_scan_bwd_f32")?,

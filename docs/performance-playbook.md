@@ -104,11 +104,23 @@ is for contributors who change kernels. Users do not need it.
      every accepted shape. Write the bound next to the base. The reference
      Mamba scan, FlashAttention and CUTLASS index this way.
   2. When that still costs registers in a register-bound kernel, compile
-     the body twice from one template on the index type. The `int`
-     instantiation is the 32-bit code, bits and speed included. The host
+     the body twice, once per index type. The `int` build is the 32-bit
+     code, bits and speed included. The host
      picks it whenever every index the launch computes fits under the
      `check_int_args` headroom, and the `long long` one otherwise. PyTorch
-     dispatches its fast kernels the same way.
+     dispatches its fast kernels the same way. Write the body once as a
+     macro that takes the entry name and the index type, and instantiate
+     it per build: `name` with `int`, `name_i64` with `long long`
+     (`DEFINE_SSM_PARALLEL_SCAN_FWD` of the Mamba-1 scan forwards). The
+     host holds the pair as a `ByIndexWidth` and picks it with a predicate
+     beside the launch geometry (`scan_fwd_index_width`). A template body
+     inlined into two `extern "C"` entry points computes the same values,
+     but NVVM folds its address arithmetic differently: on sm_120 its
+     `int` build compiled to other instructions than the 32-bit kernel.
+     The macro's `int` build is that kernel, instruction for instruction,
+     on sm_89 and sm_120. Prove it with a
+     PTX and SASS diff of every build against the trees it replaces before
+     timing anything.
   3. Element-wise kernels whose source is pinned run in pieces under 2^31
      (`launch_cast`). Pieces are bit-identical along independent axes only,
      never along a reduced or scanned one.

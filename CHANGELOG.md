@@ -179,6 +179,15 @@
   and run in pieces past it. `gpu::launch` gains `grid_1d_cover`,
   `check_int_args` and `launch_cast`, and `grid_conv_fwd_tiled` and
   `grid_conv_tiled` return a `Result` that names a grid past its extent.
+- The Mamba-1 parallel scan forwards are built twice from one body, with
+  32-bit and with 64-bit offsets, and each launch takes the 64-bit build
+  only when one of its offsets passes the 32-bit range. The 64-bit offsets
+  cost the scan enough registers to lose a resident block per SM on an RTX
+  4090 or RTX 6000 Ada, so every shape that fits keeps the 32-bit code. The
+  two builds give the same bits. `MambaKernels::ssm_parallel_fwd`,
+  `ssm_parallel_fwd_nosave` and their `_typed` twins hold both builds as a
+  `ByIndexWidth`, and `gpu::launch` gains `IndexWidth`,
+  `scan_fwd_index_width` and `scan_fwd_nosave_index_width`.
 - `GpuCtx::cublas()` hands the context's cuBLAS handle, which the context
   takes when it enters a cuBLAS GEMM mode and keeps. `GpuCtx::take_cublas()`
   takes one for a context that stays in the deterministic mode, for a

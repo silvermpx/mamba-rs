@@ -29,6 +29,29 @@ pub fn check_int_args(args: &[(&str, usize)]) -> Result<(), String> {
     }
 }
 
+/// The integer type a kernel built twice forms its offsets in. The parallel
+/// scan forwards exist as an `int` build and an `_i64` build of one body:
+/// 64-bit offsets cost them enough registers on sm_89 to lose a resident
+/// block per SM, so a launch whose offsets all fit takes the `int` build.
+/// Both builds give the same bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexWidth {
+    I32,
+    I64,
+}
+
+impl IndexWidth {
+    /// `I32` while no element count in `extents` passes the range
+    /// [`check_int_args`] lets a kernel take as an `int`, `I64` past it.
+    pub fn covering(extents: &[usize]) -> Self {
+        if extents.iter().all(|&n| n <= INT_ARG_MAX) {
+            Self::I32
+        } else {
+            Self::I64
+        }
+    }
+}
+
 /// Let `f` stage as much dynamic shared memory as the device's per-block
 /// `optin` leaves beside its own static stage, and return that amount.
 pub(crate) fn opt_in_dynamic_smem(
@@ -339,6 +362,67 @@ pub fn grid_parallel_scan(batch: usize, d_inner: usize, d_state: usize) -> Launc
     }
 }
 
+/// Offset width of a parallel scan forward that saves for the backward. Its
+/// offsets reach the state and A rows `[batch, d_inner, d_state]`, the B and
+/// C rows `[batch, d_state, T]`, the activations `[batch, T, d_inner]` and
+/// the h tape: the chunk rows of the slim tape or every step of the full one.
+pub fn scan_fwd_index_width(
+    batch: usize,
+    seq_len: usize,
+    d_inner: usize,
+    d_state: usize,
+    slim_tape: bool,
+) -> IndexWidth {
+    let state = batch.saturating_mul(d_inner).saturating_mul(d_state);
+    let tape = if slim_tape {
+        state
+            .saturating_mul(3)
+            .saturating_mul(seq_len.div_ceil(SCAN_CHUNK))
+    } else {
+        state.saturating_mul(seq_len.saturating_add(1))
+    };
+    IndexWidth::covering(&[
+        state,
+        batch.saturating_mul(d_state).saturating_mul(seq_len),
+        batch.saturating_mul(seq_len).saturating_mul(d_inner),
+        tape,
+    ])
+}
+
+/// Offset width of a parallel scan forward without saves. Its offsets reach
+/// the state and A rows, the B and C rows, the activations while they are
+/// row-major (t-major rows take a 64-bit base in both builds) and, when the
+/// gate fuses into a row-major store, the in_proj rows of `gate_stride`
+/// columns the gate is read from.
+pub fn scan_fwd_nosave_index_width(
+    batch: usize,
+    seq_len: usize,
+    d_inner: usize,
+    d_state: usize,
+    gate_stride: usize,
+    tmajor: bool,
+) -> IndexWidth {
+    let rows = if tmajor {
+        0
+    } else {
+        batch.saturating_mul(seq_len).saturating_mul(d_inner)
+    };
+    let gate = if tmajor || gate_stride == 0 {
+        0
+    } else {
+        batch
+            .saturating_mul(seq_len)
+            .saturating_mul(gate_stride)
+            .saturating_add(d_inner.saturating_mul(2))
+    };
+    IndexWidth::covering(&[
+        batch.saturating_mul(d_inner).saturating_mul(d_state),
+        batch.saturating_mul(d_state).saturating_mul(seq_len),
+        rows,
+        gate,
+    ])
+}
+
 /// Launch config for the M1 parallel scan BACKWARD kernel.
 ///
 /// Smem layout = forward layout + reverse-scan workspace + postfix carry +
@@ -545,6 +629,45 @@ mod tests {
         assert!(check_int_args(&[("b", INT_ARG_MAX + 1)]).is_err());
         let err = check_int_args(&[("a", 1), ("rows", PAST_I32), ("c", PAST_I32)]).unwrap_err();
         assert!(err.starts_with("rows "), "{err}");
+    }
+
+    /// A scan forward takes the int build up to the last shape whose offsets
+    /// all fit and the `_i64` build one element past it, whichever tensor
+    /// crosses: the state, the B and C rows, the row-major activations, the
+    /// fused gate rows or the h tape. T-major rows and an ungated store do
+    /// not count, the slim tape is counted by its chunk rows.
+    #[test]
+    fn a_scan_forward_takes_the_int_build_while_its_offsets_fit() {
+        use IndexWidth::{I32, I64};
+        let m = INT_ARG_MAX;
+        assert_eq!(IndexWidth::covering(&[]), I32);
+        assert_eq!(IndexWidth::covering(&[0, m]), I32);
+        assert_eq!(IndexWidth::covering(&[1, m + 1]), I64);
+        let nosave = scan_fwd_nosave_index_width;
+        // The state [batch, d_inner, d_state].
+        assert_eq!(nosave(m, 0, 1, 1, 0, false), I32);
+        assert_eq!(nosave(m + 1, 0, 1, 1, 0, false), I64);
+        // B and C rows [batch, d_state, T]: two states over half the range.
+        let half = m / 2 + 1;
+        assert_eq!(nosave(1, half - 1, 1, 2, 0, false), I32);
+        assert_eq!(nosave(1, half, 1, 2, 0, false), I64);
+        // Row-major activations [batch, T, d_inner], counted only row-major.
+        assert_eq!(nosave(1, half - 1, 2, 1, 0, false), I32);
+        assert_eq!(nosave(1, half, 2, 1, 0, false), I64);
+        assert_eq!(nosave(1, half, 2, 1, 0, true), I32);
+        // The fused gate's in_proj rows, counted only when the gate fuses.
+        assert_eq!(nosave(1, 1, 1, 1, m - 2, false), I32);
+        assert_eq!(nosave(1, 1, 1, 1, m - 1, false), I64);
+        assert_eq!(nosave(1, 1, 1, 1, m - 1, true), I32);
+        // The full tape holds T + 1 steps of every state, the slim one a
+        // few floats per chunk.
+        assert_eq!(scan_fwd_index_width(1, m - 1, 1, 1, false), I32);
+        assert_eq!(scan_fwd_index_width(1, m, 1, 1, false), I64);
+        assert_eq!(scan_fwd_index_width(1, m, 1, 1, true), I32);
+        // The vision classifier's training shape fits; a batch whose B and
+        // C rows end past 2^31 does not.
+        assert_eq!(scan_fwd_index_width(2, 4621, 768, 16, true), I32);
+        assert_eq!(scan_fwd_index_width(8193, 1024, 1, 256, true), I64);
     }
 
     /// The pieces of a cast move each pointer by its own element size: a

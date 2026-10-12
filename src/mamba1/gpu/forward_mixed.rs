@@ -615,7 +615,9 @@ pub fn gpu_forward_mamba_backbone_mixed(
             let di_i = di as i32;
             let ds_i = ds as i32;
             if dims.scan_mode.use_parallel(t, ds) {
-                let kernel = k.ssm_parallel_fwd_typed.get(dt);
+                let slim = crate::gpu::launch::scan_tape_slim();
+                let width = crate::gpu::launch::scan_fwd_index_width(b, t, di, ds, slim);
+                let kernel = k.ssm_parallel_fwd_typed.get(width).get(dt);
                 let mut bld = ctx.stream.launch_builder(kernel);
                 let y = layer_acts.y.cached_ptr();
                 let hs = layer_acts.h_saved.cached_ptr();
@@ -639,7 +641,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 bld.arg(&t_i);
                 bld.arg(&di_i);
                 bld.arg(&ds_i);
-                let slim_i: i32 = i32::from(crate::gpu::launch::scan_tape_slim());
+                let slim_i: i32 = i32::from(slim);
                 bld.arg(&hs);
                 bld.arg(&slim_i);
                 unsafe { bld.launch(crate::gpu::launch::grid_parallel_scan(b, di, ds)) }

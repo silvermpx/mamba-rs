@@ -21,7 +21,10 @@ use super::weights::{GpuMambaTrainLayerWeights, GpuMambaTrainWeights};
 use crate::gpu::blas::gpu_gemm_bi_forward_raw;
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
-use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_norm, grid_parallel_scan};
+use crate::gpu::launch::{
+    grid_1d_cover, grid_1d_wide, grid_norm, grid_parallel_scan, scan_fwd_index_width,
+    scan_fwd_nosave_index_width,
+};
 use cudarc::driver::PushKernelArg;
 use std::sync::Arc;
 
@@ -633,8 +636,12 @@ pub fn gpu_forward_mamba_layer(
             // Parallel prefix scan: O(T / NTHREADS) per thread instead of O(T).
             // Grid: (batch, d_inner) — one block per (b, d) pair.
             let tape_p = acts.h_saved.cached_ptr();
-            let slim_i: i32 = i32::from(crate::gpu::launch::scan_tape_slim());
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_parallel_fwd);
+            let slim = crate::gpu::launch::scan_tape_slim();
+            let slim_i: i32 = i32::from(slim);
+            let width = scan_fwd_index_width(b, t, di, ds, slim);
+            let mut builder = ctx
+                .stream
+                .launch_builder(ctx.kernels.ssm_parallel_fwd.get(width));
             builder.arg(&layer_ptrs.ssm_state);
             builder.arg(acts.y.inner_mut());
             builder.arg(acts.h_saved.inner_mut());
@@ -1103,9 +1110,10 @@ pub fn gpu_forward_mamba_target_burnin(
             // the gated output lands directly and no gating pass runs.
             let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
+                let width = scan_fwd_nosave_index_width(b, t, di, ds, 2 * di, tmajor_in);
                 let mut builder = ctx
                     .stream
-                    .launch_builder(&ctx.kernels.ssm_parallel_fwd_nosave);
+                    .launch_builder(ctx.kernels.ssm_parallel_fwd_nosave.get(width));
                 let (delta_in, u_in, y_out) = if tmajor_in {
                     (&scratch.u, &scratch.u_t, &mut scratch.delta)
                 } else {

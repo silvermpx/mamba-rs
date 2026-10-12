@@ -82,19 +82,19 @@ fn device_and_kernel_facts() {
         ),
         (
             "ssm_parallel_scan_fwd (f32 training)",
-            &ctx.kernels.ssm_parallel_fwd,
+            &ctx.kernels.ssm_parallel_fwd.i32,
             block_of(&fwd_cfg),
             fwd_cfg.shared_mem_bytes as usize,
         ),
         (
             "ssm_parallel_scan_fwd_bf16 (production)",
-            ctx.kernels.ssm_parallel_fwd_typed.get(dtype),
+            ctx.kernels.ssm_parallel_fwd_typed.i32.get(dtype),
             block_of(&fwd_cfg),
             fwd_cfg.shared_mem_bytes as usize,
         ),
         (
             "ssm_parallel_scan_fwd_nosave_bf16 (prefill, target)",
-            ctx.kernels.ssm_parallel_fwd_nosave_typed.get(dtype),
+            ctx.kernels.ssm_parallel_fwd_nosave_typed.i32.get(dtype),
             block_of(&fwd_cfg),
             fwd_cfg.shared_mem_bytes as usize,
         ),

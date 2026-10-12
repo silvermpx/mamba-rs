@@ -30,7 +30,10 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::CapturedGemmGraphPlan;
-use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_colsum, grid_norm, grid_parallel_scan};
+use crate::gpu::launch::{
+    grid_1d_cover, grid_1d_wide, grid_colsum, grid_norm, grid_parallel_scan,
+    scan_fwd_nosave_index_width,
+};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
 
@@ -762,9 +765,10 @@ fn prefill_body<W: MambaWeightsView>(
             let ds_i = ds as i32;
             let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
+                let width = scan_fwd_nosave_index_width(b, t, di, ds, 2 * di, tmajor_in);
                 let mut builder = ctx
                     .stream
-                    .launch_builder(&ctx.kernels.ssm_parallel_fwd_nosave);
+                    .launch_builder(ctx.kernels.ssm_parallel_fwd_nosave.get(width));
                 let (delta_in, u_in, y_out) = if tmajor_in {
                     (&scratch.u, &scratch.u_t, &mut scratch.delta)
                 } else {
@@ -1322,9 +1326,10 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                 } else {
                     gated_out_ptr
                 };
+                let width = scan_fwd_nosave_index_width(b, t, di, ds, 2 * di, tmajor_in);
                 let mut bld = ctx
                     .stream
-                    .launch_builder(k.ssm_parallel_fwd_nosave_typed.get(dt));
+                    .launch_builder(k.ssm_parallel_fwd_nosave_typed.get(width).get(dt));
                 bld.arg(&ssm_ptr);
                 bld.arg(&y_ptr);
                 bld.arg(&delta_ptr);

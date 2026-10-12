@@ -729,6 +729,11 @@ path = "tests/arena_past_i32.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m1_scan_fwd_index_width"
+path = "tests/m1_scan_fwd_index_width.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "state_cap_refusal"
 path = "tests/state_cap_refusal.rs"
 required-features = ["cuda"]

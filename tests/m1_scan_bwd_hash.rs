@@ -93,7 +93,7 @@ fn m1_scan_bwd_output_hashes() {
         for (slim, tape_ptr) in [(0i32, h_saved.cached_ptr()), (1i32, tape.cached_ptr())] {
             let mut bld = ctx
                 .stream
-                .launch_builder(k.ssm_parallel_fwd_typed.get(dtype));
+                .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
             let hp = h.cached_ptr();
             let yp = y.cached_ptr();
             let hs = h_saved.cached_ptr();
@@ -343,7 +343,7 @@ fn m1_scan_fwd_f32_output_hashes() {
     // Slim tape: the launcher hands the kernel the tape as both the saved
     // states and the tape, so the recorder does the same.
     let slim = 1i32;
-    let mut bld = ctx.stream.launch_builder(&k.ssm_parallel_fwd);
+    let mut bld = ctx.stream.launch_builder(&k.ssm_parallel_fwd.i32);
     let hp = h.cached_ptr();
     let yp = y.cached_ptr();
     let hs = tape.cached_ptr();

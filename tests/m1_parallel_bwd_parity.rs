@@ -491,7 +491,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
     let run_fwd = |slim_i: i32, tp: u64, hp: u64| {
         let mut bld = ctx
             .stream
-            .launch_builder(k.ssm_parallel_fwd_typed.get(dtype));
+            .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
         let yp = y.cached_ptr();
         let hs = h_saved.cached_ptr();
         let dl = delta.cached_ptr();
@@ -745,7 +745,7 @@ fn diag_fold_slim_vs_full_positions() {
         for (sl, tp) in fwd_modes {
             let mut bld = ctx
                 .stream
-                .launch_builder(k.ssm_parallel_fwd_typed.get(dtype));
+                .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
             let hp = h.cached_ptr();
             let yp = y.cached_ptr();
             let hs = h_saved.cached_ptr();

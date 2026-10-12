@@ -632,7 +632,7 @@ fn bench_scan_kernels_isolated() {
     let fwd = |ctx: &GpuCtx| {
         let mut bld = ctx
             .stream
-            .launch_builder(k.ssm_parallel_fwd_typed.get(dtype));
+            .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
         let hp = h.cached_ptr();
         let yp = y.cached_ptr();
         let dp = delta.cached_ptr();
@@ -674,7 +674,7 @@ fn bench_scan_kernels_isolated() {
     let fwd_slim = |ctx: &GpuCtx| {
         let mut bld = ctx
             .stream
-            .launch_builder(k.ssm_parallel_fwd_typed.get(dtype));
+            .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
         let hp = h.cached_ptr();
         let yp = y.cached_ptr();
         let dp = delta.cached_ptr();
