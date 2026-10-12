@@ -24,6 +24,38 @@ use super::launch::{grid_1d, grid_colsum};
 use cudarc::driver::{CudaFunction, DeviceRepr, LaunchArgs, LaunchConfig, PushKernelArg};
 use std::ffi::{c_int, c_void};
 
+/// The sizes a 32-bit kernel takes, and the element count it indexes with
+/// them: an error when either is past an i32, where a plain cast would
+/// wrap it silently.
+fn kernel_ints<const N: usize>(
+    sizes: [usize; N],
+    elems: usize,
+    kernel: &str,
+) -> Result<[i32; N], String> {
+    if i32::try_from(elems).is_err() {
+        return Err(format!(
+            "{kernel}: {elems} elements are past the 32-bit indexing the kernel takes"
+        ));
+    }
+    let mut out = [0i32; N];
+    for (o, size) in out.iter_mut().zip(sizes) {
+        *o = i32::try_from(size).map_err(|_| format!("{kernel}: size {size} is past an i32"))?;
+    }
+    Ok(out)
+}
+
+/// The sizes of a cuBLAS call as the 32-bit ints its API takes, or an error
+/// naming the size that does not fit, where a plain cast would wrap it
+/// silently.
+fn cublas_ints<const N: usize>(sizes: [usize; N], call: &str) -> Result<[c_int; N], String> {
+    let mut out = [0 as c_int; N];
+    for (o, size) in out.iter_mut().zip(sizes) {
+        *o = c_int::try_from(size)
+            .map_err(|_| format!("{call}: size {size} is past the 32-bit sizes cuBLAS takes"))?;
+    }
+    Ok(out)
+}
+
 /// Test-only observation at the actual vendor GEMM FFI boundaries. A scoped
 /// guard owns thread-local state; nested guards are rejected without changing
 /// the enclosing guard, and Drop restores it on errors and unwinding.
@@ -248,8 +280,7 @@ pub(crate) unsafe fn gpu_gemm_f32_forward_ptrs(
     super::gemm_bi_triad::validate_f32_triad_pointer_request(ctx, request, operands)?;
     ctx.ensure_vendor_gemm("gpu_gemm_f32_forward_ptrs")?;
     let beta = if let Some(b_ptr) = bias {
-        let b_i = batch as i32;
-        let n_i = n_out as i32;
+        let [b_i, n_i] = kernel_ints([batch, n_out], batch * n_out, "bias_broadcast")?;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.bias_broadcast);
         builder.arg(&y);
         builder.arg(&b_ptr);
@@ -267,6 +298,8 @@ pub(crate) unsafe fn gpu_gemm_f32_forward_ptrs(
     let x_raw = x as *const f32;
     let y_raw = y as *mut f32;
 
+    let [n_out_c, batch_c, n_in_c] =
+        cublas_ints([n_out, batch, n_in], "gpu_gemm_f32_forward_ptrs")?;
     unsafe {
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
@@ -274,17 +307,17 @@ pub(crate) unsafe fn gpu_gemm_f32_forward_ptrs(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            n_out as c_int,
-            batch as c_int,
-            n_in as c_int,
+            n_out_c,
+            batch_c,
+            n_in_c,
             &alpha as *const f32,
             w_raw,
-            n_out as c_int,
+            n_out_c,
             x_raw,
-            n_in as c_int,
+            n_in_c,
             &beta as *const f32,
             y_raw,
-            n_out as c_int,
+            n_out_c,
         )
         .map_err(|e| format!("cuBLAS sgemm_forward_ptrs failed: {e:?}"))?;
     }
@@ -358,6 +391,8 @@ pub fn gpu_gemm_bi_backward_dx_raw(
     let dy_raw = dy.raw_ptr(&ctx.stream) as *const f32;
     let dx_raw = dx.raw_ptr(&ctx.stream) as *mut f32;
 
+    let [n_in_c, batch_c, n_out_c] =
+        cublas_ints([n_in, batch, n_out], "gpu_gemm_bi_backward_dx_raw")?;
     unsafe {
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
@@ -365,17 +400,17 @@ pub fn gpu_gemm_bi_backward_dx_raw(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            n_in as c_int,
-            batch as c_int,
-            n_out as c_int,
+            n_in_c,
+            batch_c,
+            n_out_c,
             &alpha as *const f32,
             w_raw,
-            n_out as c_int,
+            n_out_c,
             dy_raw,
-            n_out as c_int,
+            n_out_c,
             &beta as *const f32,
             dx_raw,
-            n_in as c_int,
+            n_in_c,
         )
         .map_err(|e| format!("cuBLAS sgemm_backward_dx_raw failed: {e:?}"))?;
     }
@@ -422,6 +457,8 @@ pub fn gpu_gemm_bi_backward_dw_grad(
     let x_ptr = x_saved.raw_ptr(&ctx.stream) as *const f32;
     let dw_ptr = dw.ptr() as *mut f32;
 
+    let [n_out_c, n_in_c, batch_c] =
+        cublas_ints([n_out, n_in, batch], "gpu_gemm_bi_backward_dw_grad")?;
     unsafe {
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
@@ -429,17 +466,17 @@ pub fn gpu_gemm_bi_backward_dw_grad(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
-            n_out as c_int,
-            n_in as c_int,
-            batch as c_int,
+            n_out_c,
+            n_in_c,
+            batch_c,
             &alpha as *const f32,
             dy_ptr,
-            n_out as c_int,
+            n_out_c,
             x_ptr,
-            n_in as c_int,
+            n_in_c,
             &beta as *const f32,
             dw_ptr,
-            n_out as c_int,
+            n_out_c,
         )
         .map_err(|e| format!("cuBLAS sgemm_backward_dw_grad failed: {e:?}"))?;
     }
@@ -489,6 +526,8 @@ pub fn gpu_gemm_bi_backward_dw_grad_typed(
     }
     let alpha: f32 = 1.0;
     let beta: f32 = 1.0;
+    let [n_out_c, n_in_c, batch_c] =
+        cublas_ints([n_out, n_in, batch], "gpu_gemm_bi_backward_dw_grad_typed")?;
     unsafe {
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
@@ -496,20 +535,20 @@ pub fn gpu_gemm_bi_backward_dw_grad_typed(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
-            n_out as c_int,
-            n_in as c_int,
-            batch as c_int,
+            n_out_c,
+            n_in_c,
+            batch_c,
             &alpha as *const f32 as *const c_void,
             dy.ptr as *const c_void,
             dy.dtype.cuda_data_type(),
-            n_out as c_int,
+            n_out_c,
             x_saved.ptr as *const c_void,
             x_saved.dtype.cuda_data_type(),
-            n_in as c_int,
+            n_in_c,
             &beta as *const f32 as *const c_void,
             dw.ptr() as *mut c_void,
             cudarc::cublas::sys::cudaDataType::CUDA_R_32F,
-            n_out as c_int,
+            n_out_c,
             effective_compute(ctx, dy.dtype)?,
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
@@ -560,6 +599,8 @@ pub fn gpu_gemm_ex_backward_dx_typed(
     }
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
+    let [n_in_c, batch_c, n_out_c] =
+        cublas_ints([n_in, batch, n_out], "gpu_gemm_ex_backward_dx_typed")?;
     unsafe {
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
@@ -567,20 +608,20 @@ pub fn gpu_gemm_ex_backward_dx_typed(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            n_in as c_int,
-            batch as c_int,
-            n_out as c_int,
+            n_in_c,
+            batch_c,
+            n_out_c,
             &alpha as *const f32 as *const c_void,
             w.ptr as *const c_void,
             w.dtype.cuda_data_type(),
-            n_out as c_int,
+            n_out_c,
             dy.ptr as *const c_void,
             dy.dtype.cuda_data_type(),
-            n_out as c_int,
+            n_out_c,
             &beta as *const f32 as *const c_void,
             dx.ptr as *mut c_void,
             dx.dtype.cuda_data_type(),
-            n_in as c_int,
+            n_in_c,
             effective_compute(ctx, dy.dtype)?,
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
@@ -2386,8 +2427,7 @@ pub fn gpu_gemm_bi_backward_grad_raw(
     gpu_gemm_bi_backward_dx_raw(ctx, dx, dy, w_ptr, batch, n_in, n_out)?;
 
     if let Some(db) = db {
-        let b_i = batch as i32;
-        let n_i = n_out as i32;
+        let [b_i, n_i] = kernel_ints([batch, n_out], batch * n_out, "colsum_accumulate")?;
         let db_ptr = db.ptr();
         let dy_ptr = dy.cached_ptr();
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.colsum_accumulate);
@@ -2427,7 +2467,7 @@ pub fn gpu_gemm_forward_dispatch(
             let (batch, n_in, _) = dims;
             let half_bytes = batch * n_in * w_dtype.size_bytes();
             let half_ptr = ctx.half_staging_for(half_bytes)?;
-            let n = (batch * n_in) as i32;
+            let [n] = kernel_ints([batch * n_in], batch * n_in, "cast_f32_to_half")?;
             let src_ptr = x.cached_ptr();
             let kernel = match w_dtype {
                 WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
@@ -2529,6 +2569,10 @@ pub fn gpu_gemm_bi_tied_lm_head_blas(
 ) -> Result<(), String> {
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
+    let [vocab_padded_c, batch_c, d_model_c] = cublas_ints(
+        [vocab_padded, batch, d_model],
+        "gpu_gemm_bi_tied_lm_head_blas",
+    )?;
     unsafe {
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
@@ -2536,17 +2580,17 @@ pub fn gpu_gemm_bi_tied_lm_head_blas(
             *blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            vocab_padded as c_int,
-            batch as c_int,
-            d_model as c_int,
+            vocab_padded_c,
+            batch_c,
+            d_model_c,
             &alpha as *const f32,
             embed_ptr as *const f32,
-            d_model as c_int,
+            d_model_c,
             temporal_ptr as *const f32,
-            d_model as c_int,
+            d_model_c,
             &beta as *const f32,
             logits_ptr as *mut f32,
-            vocab_padded as c_int,
+            vocab_padded_c,
         )
         .map_err(|e| format!("cuBLAS tied sgemm failed: {e:?}"))?;
     }
@@ -3846,6 +3890,10 @@ fn gpu_gemm_ex_tied_lm_head_with_compute(
     } = dims;
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
+    let [vocab_padded_c, batch_c, d_model_c] = cublas_ints(
+        [vocab_padded, batch, d_model],
+        "gpu_gemm_ex_tied_lm_head_with_compute",
+    )?;
     unsafe {
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
@@ -3853,20 +3901,20 @@ fn gpu_gemm_ex_tied_lm_head_with_compute(
             *blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            vocab_padded as c_int,
-            batch as c_int,
-            d_model as c_int,
+            vocab_padded_c,
+            batch_c,
+            d_model_c,
             &alpha as *const f32 as *const c_void,
             embed_ptr as *const c_void,
             dtype.cuda_data_type(),
-            d_model as c_int,
+            d_model_c,
             temporal_ptr as *const c_void,
             dtype.cuda_data_type(),
-            d_model as c_int,
+            d_model_c,
             &beta as *const f32 as *const c_void,
             logits_ptr as *mut c_void,
             cudarc::cublas::sys::cudaDataType::CUDA_R_32F,
-            vocab_padded as c_int,
+            vocab_padded_c,
             compute,
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
@@ -3934,6 +3982,8 @@ pub fn gpu_gemm_typed_raw_no_bias(
     let (batch, n_in, n_out) = dims;
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
+    let [n_out_c, batch_c, n_in_c] =
+        cublas_ints([n_out, batch, n_in], "gpu_gemm_typed_raw_no_bias")?;
     unsafe {
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
@@ -3941,20 +3991,20 @@ pub fn gpu_gemm_typed_raw_no_bias(
             *blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            n_out as c_int,
-            batch as c_int,
-            n_in as c_int,
+            n_out_c,
+            batch_c,
+            n_in_c,
             &alpha as *const f32 as *const c_void,
             w.ptr as *const c_void,
             w.dtype.cuda_data_type(),
-            n_out as c_int,
+            n_out_c,
             x.ptr as *const c_void,
             x.dtype.cuda_data_type(),
-            n_in as c_int,
+            n_in_c,
             &beta as *const f32 as *const c_void,
             c.ptr as *mut c_void,
             c.dtype.cuda_data_type(),
-            n_out as c_int,
+            n_out_c,
             w.dtype.compute_type(), // No context is available to select a GemmMode.
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
@@ -4263,6 +4313,11 @@ pub fn gpu_gemm_typed_forward_raw(
         && let Some(kernel) = pick_bi_matvec(ctx, x.dtype, w.dtype, c.dtype)
     {
         let bias_arg = bias_ptr.unwrap_or(0);
+        let [m_i, n_i, k_i] = kernel_ints(
+            [batch, n_out, n_in],
+            (batch * n_out).max(batch * n_in).max(n_out * n_in),
+            "matvec_bi",
+        )?;
         return launch_bi_matvec(
             ctx,
             kernel,
@@ -4273,9 +4328,9 @@ pub fn gpu_gemm_typed_forward_raw(
                 bias: bias_arg,
                 alpha: 1.0,
                 beta: 0.0,
-                m: batch as i32,
-                n: n_out as i32,
-                k: n_in as i32,
+                m: m_i,
+                n: n_i,
+                k: k_i,
             },
             [x.dtype, w.dtype, c.dtype],
             &mut NoPhysicalObserver,
@@ -4294,8 +4349,7 @@ pub fn gpu_gemm_typed_forward_raw(
     }
 
     let beta = if let Some(b_ptr) = bias_ptr {
-        let b_i = batch as i32;
-        let n_i = n_out as i32;
+        let [b_i, n_i] = kernel_ints([batch, n_out], batch * n_out, "bias_broadcast typed")?;
         let c_ptr = c.ptr;
         let bias_kernel = match c.dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => &ctx.kernels.bias_broadcast,
@@ -4314,6 +4368,8 @@ pub fn gpu_gemm_typed_forward_raw(
     };
     let alpha: f32 = 1.0;
 
+    let [n_out_c, batch_c, n_in_c] =
+        cublas_ints([n_out, batch, n_in], "gpu_gemm_typed_forward_raw")?;
     unsafe {
         #[cfg(test)]
         vendor_gemm_test::boundary()?;
@@ -4321,20 +4377,20 @@ pub fn gpu_gemm_typed_forward_raw(
             *ctx.blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            n_out as c_int,
-            batch as c_int,
-            n_in as c_int,
+            n_out_c,
+            batch_c,
+            n_in_c,
             &alpha as *const f32 as *const c_void,
             w.ptr as *const c_void,
             w.dtype.cuda_data_type(),
-            n_out as c_int,
+            n_out_c,
             x.ptr as *const c_void,
             x.dtype.cuda_data_type(),
-            n_in as c_int,
+            n_in_c,
             &beta as *const f32 as *const c_void,
             c.ptr as *mut c_void,
             c.dtype.cuda_data_type(),
-            n_out as c_int,
+            n_out_c,
             // Compute type follows the context's vendor mode for every dtype.
             effective_compute(ctx, w.dtype)?,
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
