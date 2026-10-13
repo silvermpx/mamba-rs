@@ -605,7 +605,8 @@ mod language_model {
     use super::*;
     use mamba_rs::module::sample::SampleParams;
     use mamba_rs::{
-        Mamba2Backbone, Mamba3Backbone, Mamba3MimoBackbone, MambaBackbone, MambaGpuLM, MambaLM,
+        CpuOptions, Mamba2Backbone, Mamba3Backbone, Mamba3MimoBackbone, MambaBackbone, MambaGpuLM,
+        MambaLM,
     };
 
     const VOCAB: usize = 90;
@@ -613,6 +614,12 @@ mod language_model {
     const VOCAB_ROWS: usize = 96;
 
     fn models(opts: GpuOptions) -> Vec<(MambaLM, MambaGpuLM)> {
+        models_with(opts, CpuOptions::default())
+    }
+
+    /// Every family's model on the CPU, its backbone in the precision
+    /// `cpu` names, and on the GPU.
+    fn models_with(opts: GpuOptions, cpu: CpuOptions) -> Vec<(MambaLM, MambaGpuLM)> {
         let embed = values(VOCAB_ROWS * D_MODEL, 30);
         let lm = |cpu: Result<MambaLM, String>, gpu: Result<MambaGpuLM, String>| {
             (cpu.unwrap(), gpu.unwrap())
@@ -625,30 +632,80 @@ mod language_model {
         let mimo = Mamba3MimoWeights::init(&mimo_cfg(), D_MODEL, 34);
         vec![
             lm(
-                MambaBackbone::new(m1.clone(), m1_cfg(), D_MODEL)
+                MambaBackbone::new_with(m1.clone(), m1_cfg(), D_MODEL, cpu)
                     .and_then(|bb| MambaLM::new(bb, embed.clone(), None, VOCAB)),
                 MambaGpuBackbone::new(&m1, m1_cfg(), D_MODEL, 1, opts)
                     .and_then(|bb| MambaGpuLM::new(bb, embed.clone(), None, VOCAB)),
             ),
             lm(
-                Mamba2Backbone::new(m2.clone(), m2_cfg(), D_MODEL)
+                Mamba2Backbone::new_with(m2.clone(), m2_cfg(), D_MODEL, cpu)
                     .and_then(|bb| MambaLM::new(bb, embed.clone(), None, VOCAB)),
                 Mamba2GpuBackbone::new(&m2, m2_cfg(), D_MODEL, 1, opts)
                     .and_then(|bb| MambaGpuLM::new(bb, embed.clone(), None, VOCAB)),
             ),
             lm(
-                Mamba3Backbone::new(siso.clone(), siso_cfg(), D_MODEL)
+                Mamba3Backbone::new_with(siso.clone(), siso_cfg(), D_MODEL, cpu)
                     .and_then(|bb| MambaLM::new(bb, embed.clone(), None, VOCAB)),
                 Mamba3GpuBackbone::new(&siso, siso_cfg(), D_MODEL, 1, opts)
                     .and_then(|bb| MambaGpuLM::new(bb, embed.clone(), None, VOCAB)),
             ),
             lm(
-                Mamba3MimoBackbone::new(mimo.clone(), mimo_cfg(), D_MODEL)
+                Mamba3MimoBackbone::new_with(mimo.clone(), mimo_cfg(), D_MODEL, cpu)
                     .and_then(|bb| MambaLM::new(bb, embed.clone(), None, VOCAB)),
                 Mamba3MimoGpuBackbone::new(&mimo, mimo_cfg(), D_MODEL, 1, opts)
                     .and_then(|bb| MambaGpuLM::new(bb, embed.clone(), None, VOCAB)),
             ),
         ]
+    }
+
+    /// The relative l2 distance of `a` from `b`.
+    fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
+        let (mut num, mut den) = (0f64, 0f64);
+        for (&x, &y) in a.iter().zip(b) {
+            num += (f64::from(x) - f64::from(y)).powi(2);
+            den += f64::from(y).powi(2);
+        }
+        (num / den.max(1e-30)).sqrt()
+    }
+
+    /// The bf16 and f16 models of every family against the CPU model whose
+    /// backbone and head compute in the same precision: after a short
+    /// prompt fed token by token and after a long one run in one pass, its
+    /// logits land closer to the GPU's than the f32 CPU model's do.
+    #[test]
+    fn half_language_models_track_the_cpu_lane_in_every_family() {
+        let params = SampleParams {
+            max_tokens: 0,
+            ..SampleParams::default()
+        };
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            let opts = GpuOptions::default().dtype(dtype);
+            let lane = CpuOptions::default().dtype(dtype);
+            let f32_models = models_with(opts, CpuOptions::default());
+            let lane_models = models_with(opts, lane);
+            for ((mut f32_cpu, mut gpu), (mut lane_cpu, _)) in
+                f32_models.into_iter().zip(lane_models)
+            {
+                let family = gpu.family();
+                for len in [12, 300] {
+                    let prompt: Vec<u32> = (0..len).map(|i| (i * 37 % VOCAB) as u32).collect();
+                    gpu.generate(&prompt, &params).unwrap();
+                    f32_cpu.generate(&prompt, &params);
+                    lane_cpu.generate(&prompt, &params);
+                    let d_f32 = rel_l2(f32_cpu.last_logits(0), gpu.last_logits(0));
+                    let d_lane = rel_l2(lane_cpu.last_logits(0), gpu.last_logits(0));
+                    eprintln!(
+                        "{family:?} {dtype:?} prompt {len}: logits vs CPU f32 {d_f32:.2e}, \
+                         vs CPU lane {d_lane:.2e}"
+                    );
+                    assert!(
+                        d_lane < d_f32,
+                        "{family:?} {dtype:?} prompt {len}: the CPU lane ({d_lane:.3e}) is no \
+                         closer than f32 ({d_f32:.3e})"
+                    );
+                }
+            }
+        }
     }
 
     /// The logits after a short prompt (fed token by token) and after a

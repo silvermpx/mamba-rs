@@ -196,6 +196,9 @@
 - Mamba-3 SISO joins the CPU precision lanes: `Mamba3Backbone::new_with`
   and `Mamba3CpuTrainer::new_with`. `Mamba3Backbone` gains
   `forward_prefill` and `alloc_prefill_scratch`, as `MambaBackbone` has.
+- `MambaLM` over a backbone built in a reduced precision computes its
+  head in that precision too, as `MambaGpuLM` does; `AnyBackbone::dtype`
+  names the backbone's precision.
 
 ### Changed
 

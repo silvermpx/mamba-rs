@@ -21,6 +21,8 @@ use crate::hf::load::{HfModel, load_hf};
 use crate::hf::load_mamba2::load_hf_mamba2;
 use crate::hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo};
 use crate::hf::read_family;
+use crate::ops::lane::{input_rows, round_matrix};
+use crate::precision::WeightDtype;
 
 // ---------------------------------------------------------------------------
 // AnyBackbone / AnyState / AnyScratch — enum dispatch
@@ -60,6 +62,16 @@ pub enum AnyScratch {
 }
 
 impl AnyBackbone {
+    /// The precision the backbone held computes in.
+    pub fn dtype(&self) -> WeightDtype {
+        match self {
+            Self::M1(b) => b.dtype(),
+            Self::M2(b) => b.dtype(),
+            Self::M3(b) => b.dtype(),
+            Self::M3Mimo(b) => b.dtype(),
+        }
+    }
+
     /// The family of the backbone held.
     pub fn family(&self) -> ModelFamily {
         match self {
@@ -200,6 +212,12 @@ pub struct MambaLM {
     prefill_outputs: Vec<f32>,
     embed: Vec<f32>,
     lm_head: Option<Vec<f32>>,
+    /// The head's weights in the backbone's reduced precision, rounded as
+    /// the GPU's head holds them (the embedding when the head is tied,
+    /// whose input rows keep reading the f32 table); `None` in f32.
+    head_w: Option<Vec<f32>>,
+    /// The last rows as the head multiplies them in a reduced precision.
+    head_rows: Vec<f32>,
     logits: Vec<f32>,
     logits_scratch: Vec<f32>,
     pub vocab_size: usize,
@@ -274,7 +292,10 @@ impl MambaLM {
     /// `embed` is row-major `[vocab_rows, d_model]`, possibly padded past
     /// `vocab_size`. `lm_head` is an untied head `[d_model, vocab_size]`
     /// (see [`crate::hf::embed::lm_head_logits_untied`]); `None` ties the
-    /// head to the embedding. The weights come from a checkpoint (the
+    /// head to the embedding. A backbone built in a reduced precision
+    /// (`new_with`) gives the head that precision too: the head multiplies
+    /// the rows and its weights rounded as the GPU's head does, the
+    /// embedding the prompt reads stays f32, and so do the logits. The weights come from a checkpoint (the
     /// loaders under [`crate::hf`]), a trainer's `snapshot_master` or a
     /// family's serializer, through the backbone's `new`.
     pub fn new(
@@ -327,6 +348,12 @@ impl MambaLM {
 
         let state = any.alloc_state();
         let scratch = any.alloc_scratch();
+        let dtype = any.dtype();
+        let head_w = (dtype != WeightDtype::F32).then(|| {
+            let mut w = lm_head.as_ref().unwrap_or(&embed).clone();
+            round_matrix(dtype, &mut w);
+            w
+        });
         Ok(Self {
             backbone: any,
             state,
@@ -336,6 +363,8 @@ impl MambaLM {
             prefill_outputs: Vec::new(),
             embed,
             lm_head,
+            head_w,
+            head_rows: Vec::new(),
             logits: vec![0.0f32; vocab_size],
             logits_scratch: vec![0.0f32; vocab_size_padded],
             vocab_size,
@@ -423,19 +452,21 @@ impl MambaLM {
     }
 
     fn compute_logits(&mut self) {
+        let dtype = self.backbone.dtype();
+        let rows = input_rows(dtype, &mut self.head_rows, &self.temporal);
         if let Some(ref lm_head_w) = self.lm_head {
             lm_head_logits_untied(
                 &mut self.logits,
-                &self.temporal,
-                lm_head_w,
+                rows,
+                self.head_w.as_deref().unwrap_or(lm_head_w),
                 self.vocab_size,
                 self.d_model,
             );
         } else {
             lm_head_logits(
                 &mut self.logits,
-                &self.temporal,
-                &self.embed,
+                rows,
+                self.head_w.as_deref().unwrap_or(&self.embed),
                 self.vocab_size,
                 self.vocab_size_padded,
                 self.d_model,
