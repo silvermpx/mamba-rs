@@ -17,7 +17,7 @@ use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{
     IndexWidth, SCAN_BWD_DGROUP, SCAN_CHUNK, grid_1d_cover, grid_parallel_scan_bwd,
-    grid_parallel_scan_bwd_fold, scan_bwd_index_width,
+    grid_parallel_scan_bwd_fold, scan_bwd_index_width, y_runs,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -90,6 +90,16 @@ fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
         }
     }
     unsafe { bld.launch(cfg) }.expect("scan launch");
+}
+
+/// [`launch`] once per run of the grid's y axis, each run's first block
+/// appended as the kernel's last argument.
+fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut run: Vec<Arg> = args.to_vec();
+        run.push(Arg::I(y_first));
+        launch(ctx, f, cfg, &run);
+    }
 }
 
 /// Every output buffer of a launch, as bytes.
@@ -393,7 +403,7 @@ fn run_bwd(ctx: &GpuCtx, f: &CudaFunction, s: Bwd, dt: WeightDtype, i: &BwdIn) -
         Arg::P(i.tape),
         Arg::I(i32::from(s.slim)),
     ]);
-    launch(ctx, f, s.cfg(dt), &args);
+    launch_runs(ctx, f, s.cfg(dt), &args);
     bytes_of(
         ctx,
         &[

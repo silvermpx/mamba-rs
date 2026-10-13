@@ -177,8 +177,9 @@ extern "C" __global__ void NAME(                                              \
     const TY* __restrict__ x_branch, const float* __restrict__ weight,       \
     const float* __restrict__ bias,                                          \
     int batch, int T_len, int d_inner, int d_conv,                            \
-    int x_stride /* row stride of x_branch: d_inner, or 2*d_inner when        \
+    int x_stride, /* row stride of x_branch: d_inner, or 2*d_inner when       \
                     reading the in_proj output directly */                    \
+    int y_first /* this run's first y block */                                \
 ) {                                                                          \
     IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                     \
     IDX total = (IDX)batch * d_inner;                                         \
@@ -186,7 +187,7 @@ extern "C" __global__ void NAME(                                              \
     if (d_conv > 8) return;                                                  \
     IDX b = idx / d_inner;                                                    \
     int d = (int)(idx % d_inner);                                            \
-    int t0 = blockIdx.y * CONV1D_FWD_TILE_T;                                 \
+    int t0 = (y_first + blockIdx.y) * CONV1D_FWD_TILE_T;                     \
     if (t0 >= T_len) return;                                                 \
     int t_end = min(t0 + CONV1D_FWD_TILE_T, T_len);                          \
     IDX state_base = (b * d_inner + d) * d_conv;                              \
@@ -255,7 +256,8 @@ extern "C" __global__ void NAME(                                              \
     int batch, int T_len, int d_inner, int d_conv,                           \
     int x_stride, /* row stride of x_branch; d_inner, or 2*d_inner when    \
                      reading the in_proj output directly */                  \
-    int u_t_stride /* row stride of u_t, a multiple of eight */              \
+    int u_t_stride, /* row stride of u_t, a multiple of eight */             \
+    int y_first /* this run's first y block */                               \
 ) {                                                                          \
     IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                     \
     IDX total = (IDX)batch * d_inner;                                         \
@@ -263,7 +265,7 @@ extern "C" __global__ void NAME(                                              \
     if (d_conv > 8) return;                                                  \
     IDX b = idx / d_inner;                                                    \
     int d = (int)(idx % d_inner);                                            \
-    int t0 = blockIdx.y * CONV1D_FWD_TILE_T;                                 \
+    int t0 = (y_first + blockIdx.y) * CONV1D_FWD_TILE_T;                     \
     if (t0 >= T_len) return;                                                 \
     int t_end = min(t0 + CONV1D_FWD_TILE_T, T_len);                          \
     IDX state_base = (b * d_inner + d) * d_conv;                              \
@@ -444,7 +446,8 @@ extern "C" __global__ void NAME(                                              \
     /* Row stride and column offset of the d_x destination: the x half        \
        of d_proj [bt, 2*d_inner] in production. */                            \
     int out_stride, int out_offset,                                           \
-    int x_stride /* row stride of x_branch, as in the forward */              \
+    int x_stride, /* row stride of x_branch, as in the forward */             \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                     \
     IDX total = (IDX)batch * d_inner;                                         \
@@ -453,7 +456,7 @@ extern "C" __global__ void NAME(                                              \
     IDX b = idx / d_inner;                                                    \
     int d = (int)(idx % d_inner);                                             \
     int n_tiles = (T_ + CONV1D_TILE_T - 1) / CONV1D_TILE_T;                   \
-    int tile = blockIdx.y;                                                    \
+    int tile = y_first + blockIdx.y;                                          \
     int t0 = tile * CONV1D_TILE_T;                                            \
     if (t0 >= T_) return;                                                     \
     int t_end = min(t0 + CONV1D_TILE_T, T_);                                  \
@@ -537,13 +540,14 @@ extern "C" __global__ void NAME(                                               \
     float* __restrict__ state, float* __restrict__ conv_states_saved,         \
     const TY* __restrict__ x_branch, const float* __restrict__ weight,        \
     const float* __restrict__ bias,                                           \
-    int batch, int T_len, int d_inner, int d_conv, int x_stride, int tile     \
+    int batch, int T_len, int d_inner, int d_conv, int x_stride, int tile,    \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     const IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                \
     if (idx >= (IDX)batch * d_inner) return;                                   \
     const IDX b = idx / d_inner;                                               \
     const int d = (int)(idx % d_inner);                                       \
-    const int t0 = blockIdx.y * tile;                                         \
+    const int t0 = (y_first + blockIdx.y) * tile;                             \
     if (t0 >= T_len) return;                                                  \
     const int t_end = min(t0 + tile, T_len);                                  \
     const long long state_base = ((long long)b * d_inner + d) * d_conv;       \
@@ -652,14 +656,15 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ conv_init, /* [B*di*d_conv] carry-in */         \
     const float* __restrict__ weight,                                         \
     int batch, int T_, int d_inner, int d_conv,                               \
-    int out_stride, int out_offset, int x_stride                              \
+    int out_stride, int out_offset, int x_stride,                             \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     const IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                \
     if (idx >= (IDX)batch * d_inner) return;                                   \
     const IDX b = idx / d_inner;                                               \
     const int d = (int)(idx % d_inner);                                       \
     const int n_tiles = (T_ + CONV1D_TILE_T - 1) / CONV1D_TILE_T;             \
-    const int tile = blockIdx.y;                                              \
+    const int tile = y_first + blockIdx.y;                                    \
     const int t0 = tile * CONV1D_TILE_T;                                      \
     if (t0 >= T_) return;                                                     \
     const int t_end = min(t0 + CONV1D_TILE_T, T_);                            \

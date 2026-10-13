@@ -15,7 +15,7 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{
-    IndexWidth, conv_index_width, grid_1d_cover, grid_conv_fwd_tiled, grid_conv_tiled,
+    IndexWidth, conv_index_width, grid_1d_cover, grid_conv_fwd_tiled, grid_conv_tiled, y_runs,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -80,6 +80,16 @@ fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
         }
     }
     unsafe { bld.launch(cfg) }.expect("conv launch");
+}
+
+/// [`launch`] once per run of the grid's y axis, each run's first block
+/// appended as the kernel's last argument.
+fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut run: Vec<Arg> = args.to_vec();
+        run.push(Arg::I(y_first));
+        launch(ctx, f, cfg, &run);
+    }
 }
 
 /// The decode step's conv in both offset widths: the four-tap register
@@ -234,7 +244,7 @@ fn the_conv_i64_builds_give_each_sequence_of_a_batch_past_i32_max_its_own_bits()
         ];
         args.extend(s.ints());
         args.push(Arg::I(s.xs as i32));
-        launch(
+        launch_runs(
             &ctx,
             k.conv1d_burnin_fwd_tiled_typed.i64.get(dt),
             grid_conv_fwd_tiled(s.b, s.di, s.t).expect("grid"),
@@ -254,7 +264,7 @@ fn the_conv_i64_builds_give_each_sequence_of_a_batch_past_i32_max_its_own_bits()
             ];
             args.extend(one.ints());
             args.push(Arg::I(s.xs as i32));
-            launch(
+            launch_runs(
                 &ctx,
                 k.conv1d_burnin_fwd_tiled_typed.i32.get(dt),
                 grid_conv_fwd_tiled(1, s.di, s.t).expect("grid"),
@@ -306,7 +316,7 @@ fn the_conv_i64_builds_give_each_sequence_of_a_batch_past_i32_max_its_own_bits()
         args.extend(s.ints());
         args.push(Arg::I(s.xs as i32));
         args.push(Arg::I(uts as i32));
-        launch(
+        launch_runs(
             &ctx,
             k.conv1d_burnin_nosave_tiled_typed.i64.get(dt),
             grid_conv_fwd_tiled(s.b, s.di, s.t).expect("grid"),
@@ -327,7 +337,7 @@ fn the_conv_i64_builds_give_each_sequence_of_a_batch_past_i32_max_its_own_bits()
             args.extend(one.ints());
             args.push(Arg::I(s.xs as i32));
             args.push(Arg::I(uts as i32));
-            launch(
+            launch_runs(
                 &ctx,
                 k.conv1d_burnin_nosave_tiled_typed.i32.get(dt),
                 grid_conv_fwd_tiled(1, s.di, s.t).expect("grid"),
@@ -409,7 +419,7 @@ fn the_conv_i64_builds_give_each_sequence_of_a_batch_past_i32_max_its_own_bits()
             Arg::P(bias.cached_ptr()),
         ];
         args.extend(tail(s));
-        launch(
+        launch_runs(
             &ctx,
             k.conv1d_bwd_tiled_typed.i64.get(dt),
             grid_conv_tiled(s.b, s.di, s.t).expect("grid"),
@@ -431,7 +441,7 @@ fn the_conv_i64_builds_give_each_sequence_of_a_batch_past_i32_max_its_own_bits()
                 Arg::P(bias.cached_ptr()),
             ];
             args.extend(tail(one));
-            launch(
+            launch_runs(
                 &ctx,
                 k.conv1d_bwd_tiled_typed.i32.get(dt),
                 grid_conv_tiled(1, s.di, s.t).expect("grid"),

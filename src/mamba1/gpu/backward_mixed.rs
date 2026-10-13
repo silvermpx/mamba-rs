@@ -289,7 +289,7 @@ pub fn gpu_backward_mamba_layer_mixed(
                     .zero(&ctx.stream)
                     .map_err(|e| format!("zero d_a_log_local: {e:?}"))?;
             }
-            let mut bld = ctx.stream.launch_builder(if use_fold {
+            let kernel = if use_fold {
                 k.ssm_parallel_bwd_fold_for_shape(dtype, b, t, di, ds)
             } else {
                 k.ssm_parallel_bwd_typed
@@ -302,40 +302,44 @@ pub fn gpu_backward_mamba_layer_mixed(
                         false,
                     ))
                     .get(dtype)
-            });
-            bld.arg(&h_p);
-            bld.arg(&delta_p);
-            bld.arg(&u_p);
-            bld.arg(&b_p);
-            bld.arg(&c_p);
-            bld.arg(&a_neg_ptr);
-            bld.arg(&dp);
-            bld.arg(&dy);
-            if use_fold {
-                // Fold epilogue emits the PRE-softplus dt gradient inline.
-                bld.arg(&ddr);
-                bld.arg(&raw_p);
-            } else {
-                bld.arg(&dd);
-            }
-            bld.arg(&du);
-            bld.arg(&dbl);
-            bld.arg(&dcl);
-            bld.arg(&ddd);
-            bld.arg(&da);
-            bld.arg(&b_i);
-            bld.arg(&t_i);
-            bld.arg(&di_i);
-            bld.arg(&ds_i);
+            };
             let slim_i: i32 = i32::from(crate::gpu::launch::scan_tape_slim());
-            bld.arg(&h_p);
-            bld.arg(&slim_i);
             let cfg = if use_fold {
                 crate::gpu::launch::grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())
             } else {
                 crate::gpu::launch::grid_parallel_scan_bwd(b, di)
             };
-            unsafe { bld.launch(cfg) }.map_err(|e| format!("ssm_parallel_bwd_typed: {e:?}"))?;
+            for (y_first, cfg) in crate::gpu::launch::y_runs(cfg) {
+                let mut bld = ctx.stream.launch_builder(kernel);
+                bld.arg(&h_p);
+                bld.arg(&delta_p);
+                bld.arg(&u_p);
+                bld.arg(&b_p);
+                bld.arg(&c_p);
+                bld.arg(&a_neg_ptr);
+                bld.arg(&dp);
+                bld.arg(&dy);
+                if use_fold {
+                    // Fold epilogue emits the PRE-softplus dt gradient inline.
+                    bld.arg(&ddr);
+                    bld.arg(&raw_p);
+                } else {
+                    bld.arg(&dd);
+                }
+                bld.arg(&du);
+                bld.arg(&dbl);
+                bld.arg(&dcl);
+                bld.arg(&ddd);
+                bld.arg(&da);
+                bld.arg(&b_i);
+                bld.arg(&t_i);
+                bld.arg(&di_i);
+                bld.arg(&ds_i);
+                bld.arg(&h_p);
+                bld.arg(&slim_i);
+                bld.arg(&y_first);
+                unsafe { bld.launch(cfg) }.map_err(|e| format!("ssm_parallel_bwd_typed: {e:?}"))?;
+            }
         } else {
             // Sequential typed bwd.
             let mut bld = ctx.stream.launch_builder(

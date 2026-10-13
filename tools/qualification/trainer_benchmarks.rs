@@ -580,7 +580,7 @@ fn bench_scan_kernels_isolated() {
     use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
     use mamba_rs::gpu::context::GpuCtx;
     use mamba_rs::gpu::device::GpuDevice;
-    use mamba_rs::gpu::launch::{grid_parallel_scan, grid_parallel_scan_bwd};
+    use mamba_rs::gpu::launch::{grid_parallel_scan, grid_parallel_scan_bwd, y_runs};
 
     let (b, t, di, ds) = (8usize, 1300usize, 768usize, 16usize);
     let device = GpuDevice::new(0).unwrap();
@@ -630,40 +630,43 @@ fn bench_scan_kernels_isolated() {
     let dsi = ds as i32;
 
     let fwd = |ctx: &GpuCtx| {
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
-        let hp = h.cached_ptr();
-        let yp = y.cached_ptr();
-        let dp = delta.cached_ptr();
-        let dsv = delta_saved.cached_ptr();
-        let up = u.cached_ptr();
-        let bp = bb.cached_ptr();
-        let cp = cc.cached_ptr();
-        let ap = a_neg.cached_ptr();
-        let ddp = dpar.cached_ptr();
-        let hs = h_saved.cached_ptr();
-        // Arg order matches the kernel signature (h, y, h_saved, delta,
-        // u, B, C, a_neg, D, ...): the arm previously pushed h_saved
-        // ninth, which shifted every pointer after y by one slot.
-        let slim0: i32 = 0;
-        bld.arg(&hp);
-        bld.arg(&yp);
-        bld.arg(&hs);
-        bld.arg(&dp);
-        bld.arg(&dsv);
-        bld.arg(&up);
-        bld.arg(&bp);
-        bld.arg(&cp);
-        bld.arg(&ap);
-        bld.arg(&ddp);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&dii);
-        bld.arg(&dsi);
-        bld.arg(&hs);
-        bld.arg(&slim0);
-        unsafe { bld.launch(grid_parallel_scan(b, di, ds)) }.unwrap();
+        for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
+            let hp = h.cached_ptr();
+            let yp = y.cached_ptr();
+            let dp = delta.cached_ptr();
+            let dsv = delta_saved.cached_ptr();
+            let up = u.cached_ptr();
+            let bp = bb.cached_ptr();
+            let cp = cc.cached_ptr();
+            let ap = a_neg.cached_ptr();
+            let ddp = dpar.cached_ptr();
+            let hs = h_saved.cached_ptr();
+            // Arg order matches the kernel signature (h, y, h_saved, delta,
+            // u, B, C, a_neg, D, ...): the arm previously pushed h_saved
+            // ninth, which shifted every pointer after y by one slot.
+            let slim0: i32 = 0;
+            bld.arg(&hp);
+            bld.arg(&yp);
+            bld.arg(&hs);
+            bld.arg(&dp);
+            bld.arg(&dsv);
+            bld.arg(&up);
+            bld.arg(&bp);
+            bld.arg(&cp);
+            bld.arg(&ap);
+            bld.arg(&ddp);
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&dii);
+            bld.arg(&dsi);
+            bld.arg(&hs);
+            bld.arg(&slim0);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
+        }
     };
     let fwd_tape = GpuBuffer::zeros(
         &ctx.stream,
@@ -672,38 +675,41 @@ fn bench_scan_kernels_isolated() {
     .unwrap();
     ctx.stream.synchronize().unwrap();
     let fwd_slim = |ctx: &GpuCtx| {
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
-        let hp = h.cached_ptr();
-        let yp = y.cached_ptr();
-        let dp = delta.cached_ptr();
-        let dsv = delta_saved.cached_ptr();
-        let up = u.cached_ptr();
-        let bp = bb.cached_ptr();
-        let cp = cc.cached_ptr();
-        let ap = a_neg.cached_ptr();
-        let ddp = dpar.cached_ptr();
-        let hs = h_saved.cached_ptr();
-        let tp = fwd_tape.cached_ptr();
-        let slim1: i32 = 1;
-        bld.arg(&hp);
-        bld.arg(&yp);
-        bld.arg(&hs);
-        bld.arg(&dp);
-        bld.arg(&dsv);
-        bld.arg(&up);
-        bld.arg(&bp);
-        bld.arg(&cp);
-        bld.arg(&ap);
-        bld.arg(&ddp);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&dii);
-        bld.arg(&dsi);
-        bld.arg(&tp);
-        bld.arg(&slim1);
-        unsafe { bld.launch(grid_parallel_scan(b, di, ds)) }.unwrap();
+        for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
+            let hp = h.cached_ptr();
+            let yp = y.cached_ptr();
+            let dp = delta.cached_ptr();
+            let dsv = delta_saved.cached_ptr();
+            let up = u.cached_ptr();
+            let bp = bb.cached_ptr();
+            let cp = cc.cached_ptr();
+            let ap = a_neg.cached_ptr();
+            let ddp = dpar.cached_ptr();
+            let hs = h_saved.cached_ptr();
+            let tp = fwd_tape.cached_ptr();
+            let slim1: i32 = 1;
+            bld.arg(&hp);
+            bld.arg(&yp);
+            bld.arg(&hs);
+            bld.arg(&dp);
+            bld.arg(&dsv);
+            bld.arg(&up);
+            bld.arg(&bp);
+            bld.arg(&cp);
+            bld.arg(&ap);
+            bld.arg(&ddp);
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&dii);
+            bld.arg(&dsi);
+            bld.arg(&tp);
+            bld.arg(&slim1);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
+        }
     };
 
     for _ in 0..3 {
@@ -742,45 +748,48 @@ fn bench_scan_kernels_isolated() {
     .unwrap();
 
     let bwd = |ctx: &GpuCtx| {
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.ssm_parallel_bwd_typed.i32.get(dtype));
-        let hs = h_saved.cached_ptr();
-        let dp = delta.cached_ptr();
-        let up = u.cached_ptr();
-        let bp = bb.cached_ptr();
-        let cp = cc.cached_ptr();
-        let ap = a_neg.cached_ptr();
-        let ddp = dpar.cached_ptr();
-        let dyp = d_y.cached_ptr();
-        let ddel = d_delta.cached_ptr();
-        let dup = d_u.cached_ptr();
-        let dbl = d_b_local.cached_ptr();
-        let dcl = d_c_local.cached_ptr();
-        let ddl = d_d_local.cached_ptr();
-        let dal = d_a_log_local.cached_ptr();
-        bld.arg(&hs);
-        bld.arg(&dp);
-        bld.arg(&up);
-        bld.arg(&bp);
-        bld.arg(&cp);
-        bld.arg(&ap);
-        bld.arg(&ddp);
-        bld.arg(&dyp);
-        bld.arg(&ddel);
-        bld.arg(&dup);
-        bld.arg(&dbl);
-        bld.arg(&dcl);
-        bld.arg(&ddl);
-        bld.arg(&dal);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&dii);
-        bld.arg(&dsi);
-        let slim0: i32 = 0;
-        bld.arg(&hs);
-        bld.arg(&slim0);
-        unsafe { bld.launch(grid_parallel_scan_bwd(b, di)) }.unwrap();
+        for (y_first, cfg) in y_runs(grid_parallel_scan_bwd(b, di)) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.ssm_parallel_bwd_typed.i32.get(dtype));
+            let hs = h_saved.cached_ptr();
+            let dp = delta.cached_ptr();
+            let up = u.cached_ptr();
+            let bp = bb.cached_ptr();
+            let cp = cc.cached_ptr();
+            let ap = a_neg.cached_ptr();
+            let ddp = dpar.cached_ptr();
+            let dyp = d_y.cached_ptr();
+            let ddel = d_delta.cached_ptr();
+            let dup = d_u.cached_ptr();
+            let dbl = d_b_local.cached_ptr();
+            let dcl = d_c_local.cached_ptr();
+            let ddl = d_d_local.cached_ptr();
+            let dal = d_a_log_local.cached_ptr();
+            bld.arg(&hs);
+            bld.arg(&dp);
+            bld.arg(&up);
+            bld.arg(&bp);
+            bld.arg(&cp);
+            bld.arg(&ap);
+            bld.arg(&ddp);
+            bld.arg(&dyp);
+            bld.arg(&ddel);
+            bld.arg(&dup);
+            bld.arg(&dbl);
+            bld.arg(&dcl);
+            bld.arg(&ddl);
+            bld.arg(&dal);
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&dii);
+            bld.arg(&dsi);
+            let slim0: i32 = 0;
+            bld.arg(&hs);
+            bld.arg(&slim0);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
+        }
     };
     // Production runs the slim tape (in-kernel h replay); time that
     // variant too so the ledger reflects the real trainer path.
@@ -791,46 +800,49 @@ fn bench_scan_kernels_isolated() {
     .unwrap();
     ctx.stream.synchronize().unwrap();
     let bwd_slim = |ctx: &GpuCtx| {
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.ssm_parallel_bwd_typed.i32.get(dtype));
-        let hs = h_saved.cached_ptr();
-        let tp = tape.cached_ptr();
-        let dp = delta.cached_ptr();
-        let up = u.cached_ptr();
-        let bp = bb.cached_ptr();
-        let cp = cc.cached_ptr();
-        let ap = a_neg.cached_ptr();
-        let ddp = dpar.cached_ptr();
-        let dyp = d_y.cached_ptr();
-        let ddel = d_delta.cached_ptr();
-        let dup = d_u.cached_ptr();
-        let dbl = d_b_local.cached_ptr();
-        let dcl = d_c_local.cached_ptr();
-        let ddl = d_d_local.cached_ptr();
-        let dal = d_a_log_local.cached_ptr();
-        bld.arg(&hs);
-        bld.arg(&dp);
-        bld.arg(&up);
-        bld.arg(&bp);
-        bld.arg(&cp);
-        bld.arg(&ap);
-        bld.arg(&ddp);
-        bld.arg(&dyp);
-        bld.arg(&ddel);
-        bld.arg(&dup);
-        bld.arg(&dbl);
-        bld.arg(&dcl);
-        bld.arg(&ddl);
-        bld.arg(&dal);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&dii);
-        bld.arg(&dsi);
-        let slim1: i32 = 1;
-        bld.arg(&tp);
-        bld.arg(&slim1);
-        unsafe { bld.launch(grid_parallel_scan_bwd(b, di)) }.unwrap();
+        for (y_first, cfg) in y_runs(grid_parallel_scan_bwd(b, di)) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.ssm_parallel_bwd_typed.i32.get(dtype));
+            let hs = h_saved.cached_ptr();
+            let tp = tape.cached_ptr();
+            let dp = delta.cached_ptr();
+            let up = u.cached_ptr();
+            let bp = bb.cached_ptr();
+            let cp = cc.cached_ptr();
+            let ap = a_neg.cached_ptr();
+            let ddp = dpar.cached_ptr();
+            let dyp = d_y.cached_ptr();
+            let ddel = d_delta.cached_ptr();
+            let dup = d_u.cached_ptr();
+            let dbl = d_b_local.cached_ptr();
+            let dcl = d_c_local.cached_ptr();
+            let ddl = d_d_local.cached_ptr();
+            let dal = d_a_log_local.cached_ptr();
+            bld.arg(&hs);
+            bld.arg(&dp);
+            bld.arg(&up);
+            bld.arg(&bp);
+            bld.arg(&cp);
+            bld.arg(&ap);
+            bld.arg(&ddp);
+            bld.arg(&dyp);
+            bld.arg(&ddel);
+            bld.arg(&dup);
+            bld.arg(&dbl);
+            bld.arg(&dcl);
+            bld.arg(&ddl);
+            bld.arg(&dal);
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&dii);
+            bld.arg(&dsi);
+            let slim1: i32 = 1;
+            bld.arg(&tp);
+            bld.arg(&slim1);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
+        }
     };
     for _ in 0..3 {
         bwd(&ctx);
@@ -863,48 +875,51 @@ fn bench_scan_kernels_isolated() {
     let d_c_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
     ctx.stream.synchronize().unwrap();
     let bwd_fold_slim = |ctx: &GpuCtx| {
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.ssm_parallel_bwd_fold_typed.i32.get(dtype));
-        let hs = h_saved.cached_ptr();
-        let tp = tape.cached_ptr();
-        let dp = delta.cached_ptr();
-        let up = u.cached_ptr();
-        let bp = bb.cached_ptr();
-        let cp = cc.cached_ptr();
-        let ap = a_neg.cached_ptr();
-        let ddp = dpar.cached_ptr();
-        let dyp = d_y.cached_ptr();
-        let ddel = d_delta.cached_ptr();
-        let dup = d_u.cached_ptr();
-        let dbl = d_b_fold.cached_ptr();
-        let dcl = d_c_fold.cached_ptr();
-        let ddl = d_d_local.cached_ptr();
-        let dal = d_a_log_local.cached_ptr();
-        bld.arg(&hs);
-        bld.arg(&dp);
-        bld.arg(&up);
-        bld.arg(&bp);
-        bld.arg(&cp);
-        bld.arg(&ap);
-        bld.arg(&ddp);
-        bld.arg(&dyp);
-        bld.arg(&ddel);
-        // The fold takes the PRE-softplus dt right after its output slot.
-        bld.arg(&dp);
-        bld.arg(&dup);
-        bld.arg(&dbl);
-        bld.arg(&dcl);
-        bld.arg(&ddl);
-        bld.arg(&dal);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&dii);
-        bld.arg(&dsi);
-        let slim1: i32 = 1;
-        bld.arg(&tp);
-        bld.arg(&slim1);
-        unsafe { bld.launch(grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())) }.unwrap();
+        for (y_first, cfg) in y_runs(grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.ssm_parallel_bwd_fold_typed.i32.get(dtype));
+            let hs = h_saved.cached_ptr();
+            let tp = tape.cached_ptr();
+            let dp = delta.cached_ptr();
+            let up = u.cached_ptr();
+            let bp = bb.cached_ptr();
+            let cp = cc.cached_ptr();
+            let ap = a_neg.cached_ptr();
+            let ddp = dpar.cached_ptr();
+            let dyp = d_y.cached_ptr();
+            let ddel = d_delta.cached_ptr();
+            let dup = d_u.cached_ptr();
+            let dbl = d_b_fold.cached_ptr();
+            let dcl = d_c_fold.cached_ptr();
+            let ddl = d_d_local.cached_ptr();
+            let dal = d_a_log_local.cached_ptr();
+            bld.arg(&hs);
+            bld.arg(&dp);
+            bld.arg(&up);
+            bld.arg(&bp);
+            bld.arg(&cp);
+            bld.arg(&ap);
+            bld.arg(&ddp);
+            bld.arg(&dyp);
+            bld.arg(&ddel);
+            // The fold takes the PRE-softplus dt right after its output slot.
+            bld.arg(&dp);
+            bld.arg(&dup);
+            bld.arg(&dbl);
+            bld.arg(&dcl);
+            bld.arg(&ddl);
+            bld.arg(&dal);
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&dii);
+            bld.arg(&dsi);
+            let slim1: i32 = 1;
+            bld.arg(&tp);
+            bld.arg(&slim1);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
+        }
     };
     let bwd_fold_ms = timed::timed(&ctx, 20, || bwd_fold_slim(&ctx));
 
@@ -991,7 +1006,7 @@ fn bench_bwd_kernels_isolated() {
     use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
     use mamba_rs::gpu::context::GpuCtx;
     use mamba_rs::gpu::device::GpuDevice;
-    use mamba_rs::gpu::launch::{grid_1d, grid_conv_tiled};
+    use mamba_rs::gpu::launch::{grid_1d, grid_conv_tiled, y_runs};
 
     let (b, t, di, ds, dc) = (8usize, 1300usize, 768usize, 16usize, 4usize);
     let bt = b * t;
@@ -1034,37 +1049,40 @@ fn bench_bwd_kernels_isolated() {
     };
 
     time_it("conv_bwd_tiled", &|| {
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.conv1d_bwd_tiled_typed.i32.get(dtype));
-        let dxp = d_x_branch.cached_ptr();
-        let wpp = wp.cached_ptr();
-        let bpp = bp.cached_ptr();
-        let dup = d_u.cached_ptr();
-        let xbp = x_branch.cached_ptr();
-        let cip = conv_init.cached_ptr();
-        let wpt = weight.cached_ptr();
-        let bpt = bias.cached_ptr();
-        bld.arg(&dxp);
-        bld.arg(&wpp);
-        bld.arg(&bpp);
-        bld.arg(&dup);
-        bld.arg(&xbp);
-        bld.arg(&cip);
-        bld.arg(&wpt);
-        bld.arg(&bpt);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&dii);
-        bld.arg(&dci);
-        // Contiguous destination for the isolated arm (production passes
-        // the d_proj geometry: stride 2*d_inner, offset 0).
-        let stride_i = dii;
-        let off_i = 0i32;
-        bld.arg(&stride_i);
-        bld.arg(&off_i);
-        bld.arg(&dii); // x row stride
-        unsafe { bld.launch(grid_conv_tiled(b, di, t).unwrap()) }.unwrap();
+        for (y_first, cfg) in y_runs(grid_conv_tiled(b, di, t).unwrap()) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.conv1d_bwd_tiled_typed.i32.get(dtype));
+            let dxp = d_x_branch.cached_ptr();
+            let wpp = wp.cached_ptr();
+            let bpp = bp.cached_ptr();
+            let dup = d_u.cached_ptr();
+            let xbp = x_branch.cached_ptr();
+            let cip = conv_init.cached_ptr();
+            let wpt = weight.cached_ptr();
+            let bpt = bias.cached_ptr();
+            bld.arg(&dxp);
+            bld.arg(&wpp);
+            bld.arg(&bpp);
+            bld.arg(&dup);
+            bld.arg(&xbp);
+            bld.arg(&cip);
+            bld.arg(&wpt);
+            bld.arg(&bpt);
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&dii);
+            bld.arg(&dci);
+            // Contiguous destination for the isolated arm (production passes
+            // the d_proj geometry: stride 2*d_inner, offset 0).
+            let stride_i = dii;
+            let off_i = 0i32;
+            bld.arg(&stride_i);
+            bld.arg(&off_i);
+            bld.arg(&dii); // x row stride
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
+        }
     });
 
     // gating backward

@@ -41,11 +41,13 @@ DEFINE_SOFTPLUS_FWD(f16,  __half,        from_f_f16)
 #define DEFINE_SOFTPLUS_FWD_TMAJOR(SUFFIX, T, FROM_F)                     \
 extern "C" __global__ void softplus_forward_tmajor_##SUFFIX(              \
     T* __restrict__ dst, const T* __restrict__ src,                       \
-    int T_len, int d, int tstride                                         \
+    int T_len, int d, int tstride,                                        \
+    int y_first, /* this run's first y block */                           \
+    int z_first /* this run's first z block */                            \
 ) {                                                                       \
     __shared__ T tile[SOFTPLUS_TILE][SOFTPLUS_TILE + 1];                  \
-    long long b = blockIdx.z;                                             \
-    int t0 = blockIdx.y * SOFTPLUS_TILE;                                  \
+    long long b = z_first + blockIdx.z;                                   \
+    int t0 = (y_first + blockIdx.y) * SOFTPLUS_TILE;                      \
     int d0 = blockIdx.x * SOFTPLUS_TILE;                                  \
     for (int r = threadIdx.y; r < SOFTPLUS_TILE; r += blockDim.y) {       \
         int t = t0 + r, c = d0 + threadIdx.x;                             \
@@ -78,11 +80,13 @@ DEFINE_SOFTPLUS_FWD_TMAJOR(f16,  __half,        from_f_f16)
 extern "C" __global__ void gate_from_tmajor_##SUFFIX(                     \
     T* __restrict__ out, const T* __restrict__ y_t,                       \
     const T* __restrict__ proj_gate,                                      \
-    int T_len, int d, int tstride, int gate_stride                        \
+    int T_len, int d, int tstride, int gate_stride,                       \
+    int y_first, /* this run's first y block */                           \
+    int z_first /* this run's first z block */                            \
 ) {                                                                       \
     __shared__ T tile[SOFTPLUS_TILE][SOFTPLUS_TILE + 1];                  \
-    long long b = blockIdx.z;                                             \
-    int t0 = blockIdx.y * SOFTPLUS_TILE;                                  \
+    long long b = z_first + blockIdx.z;                                   \
+    int t0 = (y_first + blockIdx.y) * SOFTPLUS_TILE;                      \
     int d0 = blockIdx.x * SOFTPLUS_TILE;                                  \
     for (int r = threadIdx.y; r < SOFTPLUS_TILE; r += blockDim.y) {       \
         int c = d0 + r, t = t0 + threadIdx.x;                             \

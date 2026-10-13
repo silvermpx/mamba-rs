@@ -231,6 +231,20 @@
   32-bit arguments. `m2_past_i32` and `mimo_past_i32` run the chunked
   kernels over windows past 2^31 elements and give every chunk and
   sequence compared the bits of its own launch.
+- Mamba-1 launches split a grid axis that passes the y or z extent of
+  65535 blocks into runs: the conv over more than 2,097,120 steps in the
+  forward's tiles of 32 or 8,388,480 in the backward's tiles of 128, the
+  parallel scans over more than 65535 channels, and the t-major
+  transposes, the B and C gather and the per-sequence column sum over more
+  sequences than that (the transposes over more steps too). A kernel adds
+  the first block of its run to its block index, so every block computes
+  what one launch over the whole axis would. `MambaConfig::validate` no
+  longer refuses a d_inner past 65535. `gpu::launch::y_runs`, `z_runs`
+  and `yz_runs` split a launch configuration, and the kernels launched
+  this way take the run's first block as their last arguments.
+  `MAMBA_RS_GRID_RUN=<n>` shortens every run to n blocks, so the suites
+  prove at ordinary shapes that the runs give one launch's bits.
+  `m1_grid_runs` runs every one of these kernels past the extents.
 - `GpuCtx::cublas()` hands the context's cuBLAS handle, which the context
   takes when it enters a cuBLAS GEMM mode and keeps. `GpuCtx::take_cublas()`
   takes one for a context that stays in the deterministic mode, for a

@@ -23,7 +23,7 @@ use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::launch::{
     grid_1d_cover, grid_1d_wide, grid_norm, grid_parallel_scan, scan_fwd_index_width,
-    scan_fwd_nosave_index_width, seq_scan_index_width,
+    scan_fwd_nosave_index_width, seq_scan_index_width, y_runs, yz_runs,
 };
 use cudarc::driver::PushKernelArg;
 use std::sync::Arc;
@@ -639,28 +639,31 @@ pub fn gpu_forward_mamba_layer(
             let slim = crate::gpu::launch::scan_tape_slim();
             let slim_i: i32 = i32::from(slim);
             let width = scan_fwd_index_width(b, t, di, ds, slim);
-            let mut builder = ctx
-                .stream
-                .launch_builder(ctx.kernels.ssm_parallel_fwd.get(width));
-            builder.arg(&layer_ptrs.ssm_state);
-            builder.arg(acts.y.inner_mut());
-            builder.arg(acts.h_saved.inner_mut());
-            builder.arg(acts.delta_raw.inner());
-            builder.arg(acts.delta.inner_mut());
-            builder.arg(acts.u.inner());
-            builder.arg(scratch.d_b_reduced.inner());
-            builder.arg(scratch.d_c_reduced.inner());
-            builder.arg(&layer_ptrs.a_neg);
-            let dp_ptr = lw.d_param.cached_ptr();
-            builder.arg(&dp_ptr);
-            builder.arg(&b_i);
-            builder.arg(&t_i);
-            builder.arg(&di_i);
-            builder.arg(&ds_i);
-            builder.arg(&tape_p);
-            builder.arg(&slim_i);
-            unsafe { builder.launch(grid_parallel_scan(b, di, ds)) }
-                .map_err(|e| format!("ssm_parallel_fwd mamba: {:?}", e))?;
+            for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+                let mut builder = ctx
+                    .stream
+                    .launch_builder(ctx.kernels.ssm_parallel_fwd.get(width));
+                builder.arg(&layer_ptrs.ssm_state);
+                builder.arg(acts.y.inner_mut());
+                builder.arg(acts.h_saved.inner_mut());
+                builder.arg(acts.delta_raw.inner());
+                builder.arg(acts.delta.inner_mut());
+                builder.arg(acts.u.inner());
+                builder.arg(scratch.d_b_reduced.inner());
+                builder.arg(scratch.d_c_reduced.inner());
+                builder.arg(&layer_ptrs.a_neg);
+                let dp_ptr = lw.d_param.cached_ptr();
+                builder.arg(&dp_ptr);
+                builder.arg(&b_i);
+                builder.arg(&t_i);
+                builder.arg(&di_i);
+                builder.arg(&ds_i);
+                builder.arg(&tape_p);
+                builder.arg(&slim_i);
+                builder.arg(&y_first);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("ssm_parallel_fwd mamba: {:?}", e))?;
+            }
         } else {
             // Sequential kernel: each thread handles one (b, d) pair over all T steps.
             let width = seq_scan_index_width(b, t, di, ds, di, true);
@@ -1049,16 +1052,21 @@ pub fn gpu_forward_mamba_target_burnin(
         if tmajor_in {
             let t_i = t as i32;
             let di_i = di as i32;
-            let mut builder = ctx
-                .stream
-                .launch_builder(&ctx.kernels.softplus_fwd_tmajor.f32);
-            builder.arg(scratch.u.inner_mut());
-            builder.arg(scratch.delta.inner());
-            builder.arg(&t_i);
-            builder.arg(&di_i);
-            builder.arg(&ts_i);
-            unsafe { builder.launch(crate::gpu::launch::grid_tmajor_tiles(b, t, di)) }
-                .map_err(|e| format!("softplus_tmajor target L{layer_idx}: {:?}", e))?;
+            for (y_first, z_first, cfg) in yz_runs(crate::gpu::launch::grid_tmajor_tiles(b, t, di))
+            {
+                let mut builder = ctx
+                    .stream
+                    .launch_builder(&ctx.kernels.softplus_fwd_tmajor.f32);
+                builder.arg(scratch.u.inner_mut());
+                builder.arg(scratch.delta.inner());
+                builder.arg(&t_i);
+                builder.arg(&di_i);
+                builder.arg(&ts_i);
+                builder.arg(&y_first);
+                builder.arg(&z_first);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("softplus_tmajor target L{layer_idx}: {:?}", e))?;
+            }
         } else {
             let n = (bt * di) as i64;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.softplus_fwd);
@@ -1114,43 +1122,54 @@ pub fn gpu_forward_mamba_target_burnin(
             let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
                 let width = scan_fwd_nosave_index_width(b, t, di, ds, 2 * di, tmajor_in);
-                let mut builder = ctx
-                    .stream
-                    .launch_builder(ctx.kernels.ssm_parallel_fwd_nosave.get(width));
-                let (delta_in, u_in, y_out) = if tmajor_in {
-                    (&scratch.u, &scratch.u_t, &mut scratch.delta)
-                } else {
-                    (&scratch.delta, &scratch.u, &mut scratch.gated)
-                };
-                builder.arg(&ssm_ptr);
-                builder.arg(y_out.inner_mut());
-                builder.arg(delta_in.inner());
-                builder.arg(u_in.inner());
-                builder.arg(scratch.b_gathered.inner());
-                builder.arg(scratch.c_gathered.inner());
-                builder.arg(&a_neg_ptr);
-                let dp_ptr = lw.d_param.cached_ptr();
-                builder.arg(&dp_ptr);
-                builder.arg(scratch.proj_flat.inner());
-                builder.arg(&gate_stride);
-                builder.arg(&b_i);
-                builder.arg(&t_i);
-                builder.arg(&di_i);
-                builder.arg(&ds_i);
-                builder.arg(&ts_i);
-                unsafe { builder.launch(grid_parallel_scan(b, di, ds)) }
-                    .map_err(|e| format!("ssm_parallel_nosave target L{layer_idx}: {:?}", e))?;
-                if tmajor_in {
-                    let mut builder = ctx.stream.launch_builder(&ctx.kernels.gate_from_tmajor.f32);
-                    builder.arg(scratch.gated.inner_mut());
-                    builder.arg(scratch.delta.inner());
+                for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+                    let mut builder = ctx
+                        .stream
+                        .launch_builder(ctx.kernels.ssm_parallel_fwd_nosave.get(width));
+                    let (delta_in, u_in, y_out) = if tmajor_in {
+                        (&scratch.u, &scratch.u_t, &mut scratch.delta)
+                    } else {
+                        (&scratch.delta, &scratch.u, &mut scratch.gated)
+                    };
+                    builder.arg(&ssm_ptr);
+                    builder.arg(y_out.inner_mut());
+                    builder.arg(delta_in.inner());
+                    builder.arg(u_in.inner());
+                    builder.arg(scratch.b_gathered.inner());
+                    builder.arg(scratch.c_gathered.inner());
+                    builder.arg(&a_neg_ptr);
+                    let dp_ptr = lw.d_param.cached_ptr();
+                    builder.arg(&dp_ptr);
                     builder.arg(scratch.proj_flat.inner());
+                    builder.arg(&gate_stride);
+                    builder.arg(&b_i);
                     builder.arg(&t_i);
                     builder.arg(&di_i);
+                    builder.arg(&ds_i);
                     builder.arg(&ts_i);
-                    builder.arg(&gate_stride);
-                    unsafe { builder.launch(crate::gpu::launch::grid_tmajor_tiles(b, t, di)) }
-                        .map_err(|e| format!("gate_from_tmajor target L{layer_idx}: {:?}", e))?;
+                    builder.arg(&y_first);
+                    unsafe { builder.launch(cfg) }
+                        .map_err(|e| format!("ssm_parallel_nosave target L{layer_idx}: {:?}", e))?;
+                }
+                if tmajor_in {
+                    for (y_first, z_first, cfg) in
+                        yz_runs(crate::gpu::launch::grid_tmajor_tiles(b, t, di))
+                    {
+                        let mut builder =
+                            ctx.stream.launch_builder(&ctx.kernels.gate_from_tmajor.f32);
+                        builder.arg(scratch.gated.inner_mut());
+                        builder.arg(scratch.delta.inner());
+                        builder.arg(scratch.proj_flat.inner());
+                        builder.arg(&t_i);
+                        builder.arg(&di_i);
+                        builder.arg(&ts_i);
+                        builder.arg(&gate_stride);
+                        builder.arg(&y_first);
+                        builder.arg(&z_first);
+                        unsafe { builder.launch(cfg) }.map_err(|e| {
+                            format!("gate_from_tmajor target L{layer_idx}: {:?}", e)
+                        })?;
+                    }
                 }
             } else {
                 let width = seq_scan_index_width(b, t, di, ds, 2 * di, false);

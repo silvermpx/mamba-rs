@@ -759,6 +759,11 @@ path = "tests/mimo_past_i32.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m1_grid_runs"
+path = "tests/m1_grid_runs.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "state_cap_refusal"
 path = "tests/state_cap_refusal.rs"
 required-features = ["cuda"]

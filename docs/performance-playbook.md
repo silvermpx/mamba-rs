@@ -172,6 +172,42 @@ is for contributors who change kernels. Users do not need it.
   RTX 5090). Split compilation (`-split-compile`) is no remedy: it changed
   the code of every kernel of the SISO module.
 
+## Grid extents
+
+A grid's x axis holds 2^31 - 1 blocks, its y and z axes 65535 each. A
+kernel whose blocks walk a quantity that grows with the configuration
+(heads, groups, channels, sequences, chunks, tiles of a sequence) on y or
+z stops launching once that quantity passes 65535 blocks, at configs the
+validators accept. The rule here:
+
+- Such a launch goes in runs of at most 65535 blocks along the axis
+  (`gpu::launch::y_runs`, `z_runs`, `yz_runs`), and the kernel takes the
+  run's first block as its last argument and adds it to `blockIdx`:
+  `int h = y_first + blockIdx.y;`. Every block keeps the index one launch
+  over the whole axis would give it, so a kernel whose blocks are
+  independent writes the same bits, and an axis that fits is the one
+  launch it always was. The run argument costs an add, and the extra
+  launches come only past the extent.
+- Not a grid-stride loop over the axis: it moves the body into a loop,
+  changes the code of every kernel, and a body that stages shared memory
+  needs a barrier between trips. Not a fold of y into z: it works only
+  where z is free, and decoding a folded index divides by a runtime
+  count. The runs work on any axis whatever the others hold.
+- A kernel that reads `gridDim.y` or `gridDim.z` as a count reads that
+  count from its arguments instead, since a run's grid is not the whole
+  axis.
+- `MAMBA_RS_GRID_RUN=<n>` shortens every run to n blocks. With it (three
+  works well), the bit recorders and the parity suites split the axes of
+  their ordinary shapes into many runs, which proves for every converted
+  launch that the runs give one launch's bits. The grid-runs tests
+  (`m1_grid_runs`) also run the kernels past the real extents: a window
+  of steps or sequences against a launch of its own, or channels against
+  twins given the same inputs in the first run.
+- A direct launch in a test or a benchmark goes through the same runs;
+  cudarc checks no argument count, so a launch that omitted the run
+  argument would read past its parameters. Find every launch of a kernel
+  by its field name before changing its parameters.
+
 ## Graph capture and other threads
 
 - A synchronize of the device or of the context is invalid while any stream

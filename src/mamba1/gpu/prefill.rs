@@ -32,7 +32,7 @@ use crate::gpu::graph_capture::{
 use crate::gpu::kernel_identity::CapturedGemmGraphPlan;
 use crate::gpu::launch::{
     grid_1d_cover, grid_1d_wide, grid_colsum, grid_norm, grid_parallel_scan,
-    scan_fwd_nosave_index_width, seq_scan_index_width,
+    scan_fwd_nosave_index_width, seq_scan_index_width, y_runs, yz_runs,
 };
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
@@ -276,14 +276,17 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
             block_dim: (BLOCK, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.colsum_segments);
-        builder.arg(&db_ptr);
-        builder.arg(&dy_ptr);
-        builder.arg(&segments);
-        builder.arg(&seg_len);
-        builder.arg(&cols);
-        unsafe { builder.launch(cfg) }
-            .map_err(|e| format!("prefill_pooled_sum colsum per sequence: {e:?}"))?;
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut builder = ctx.stream.launch_builder(&ctx.kernels.colsum_segments);
+            builder.arg(&db_ptr);
+            builder.arg(&dy_ptr);
+            builder.arg(&segments);
+            builder.arg(&seg_len);
+            builder.arg(&cols);
+            builder.arg(&y_first);
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("prefill_pooled_sum colsum per sequence: {e:?}"))?;
+        }
     }
     Ok(())
 }
@@ -681,16 +684,21 @@ fn prefill_body<W: MambaWeightsView>(
         if tmajor_in {
             let t_i = t as i32;
             let di_i = di as i32;
-            let mut builder = ctx
-                .stream
-                .launch_builder(&ctx.kernels.softplus_fwd_tmajor.f32);
-            builder.arg(scratch.u.inner_mut());
-            builder.arg(scratch.delta.inner());
-            builder.arg(&t_i);
-            builder.arg(&di_i);
-            builder.arg(&ts_i);
-            unsafe { builder.launch(crate::gpu::launch::grid_tmajor_tiles(b, t, di)) }
-                .map_err(|e| format!("softplus_tmajor prefill L{layer_idx}: {e:?}"))?;
+            for (y_first, z_first, cfg) in yz_runs(crate::gpu::launch::grid_tmajor_tiles(b, t, di))
+            {
+                let mut builder = ctx
+                    .stream
+                    .launch_builder(&ctx.kernels.softplus_fwd_tmajor.f32);
+                builder.arg(scratch.u.inner_mut());
+                builder.arg(scratch.delta.inner());
+                builder.arg(&t_i);
+                builder.arg(&di_i);
+                builder.arg(&ts_i);
+                builder.arg(&y_first);
+                builder.arg(&z_first);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("softplus_tmajor prefill L{layer_idx}: {e:?}"))?;
+            }
         } else {
             let n = (bt * di) as i64;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.softplus_fwd);
@@ -716,26 +724,24 @@ fn prefill_body<W: MambaWeightsView>(
                 2 * ds * (crate::gpu::launch::GBC_TILE_T + 1) * std::mem::size_of::<f32>();
             let t_i = t as i32;
             if tmajor && tile_smem <= 48 * 1024 {
-                let mut builder = ctx
-                    .stream
-                    .launch_builder(&ctx.kernels.gather_bc_cols_tmajor_tiled);
-                builder.arg(scratch.b_gathered.inner_mut());
-                builder.arg(scratch.c_gathered.inner_mut());
-                builder.arg(scratch.xdbl.inner());
-                builder.arg(&t_i);
-                builder.arg(&xdbl_i);
-                builder.arg(&ds_i);
-                builder.arg(&b_offset);
-                builder.arg(&c_offset);
-                unsafe {
-                    builder.launch(crate::gpu::launch::grid_gather_bc_tiled(
-                        b,
-                        t,
-                        ds,
-                        std::mem::size_of::<f32>(),
-                    ))
+                let cfg =
+                    crate::gpu::launch::grid_gather_bc_tiled(b, t, ds, std::mem::size_of::<f32>());
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut builder = ctx
+                        .stream
+                        .launch_builder(&ctx.kernels.gather_bc_cols_tmajor_tiled);
+                    builder.arg(scratch.b_gathered.inner_mut());
+                    builder.arg(scratch.c_gathered.inner_mut());
+                    builder.arg(scratch.xdbl.inner());
+                    builder.arg(&t_i);
+                    builder.arg(&xdbl_i);
+                    builder.arg(&ds_i);
+                    builder.arg(&b_offset);
+                    builder.arg(&c_offset);
+                    builder.arg(&y_first);
+                    unsafe { builder.launch(cfg) }
+                        .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
                 }
-                .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
             } else {
                 let kernel = if tmajor {
                     &ctx.kernels.gather_bc_cols_tmajor
@@ -766,43 +772,53 @@ fn prefill_body<W: MambaWeightsView>(
             let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
                 let width = scan_fwd_nosave_index_width(b, t, di, ds, 2 * di, tmajor_in);
-                let mut builder = ctx
-                    .stream
-                    .launch_builder(ctx.kernels.ssm_parallel_fwd_nosave.get(width));
-                let (delta_in, u_in, y_out) = if tmajor_in {
-                    (&scratch.u, &scratch.u_t, &mut scratch.delta)
-                } else {
-                    (&scratch.delta, &scratch.u, &mut scratch.gated)
-                };
-                builder.arg(&ssm_ptr);
-                builder.arg(y_out.inner_mut());
-                builder.arg(delta_in.inner());
-                builder.arg(u_in.inner());
-                builder.arg(scratch.b_gathered.inner());
-                builder.arg(scratch.c_gathered.inner());
-                builder.arg(&a_neg_ptr);
-                let dp = lw.d_param();
-                builder.arg(&dp);
-                builder.arg(scratch.proj_flat.inner());
-                builder.arg(&gate_stride);
-                builder.arg(&b_i);
-                builder.arg(&t_i);
-                builder.arg(&di_i);
-                builder.arg(&ds_i);
-                builder.arg(&ts_i);
-                unsafe { builder.launch(grid_parallel_scan(b, di, ds)) }
-                    .map_err(|e| format!("ssm_parallel prefill L{layer_idx}: {e:?}"))?;
-                if tmajor_in {
-                    let mut builder = ctx.stream.launch_builder(&ctx.kernels.gate_from_tmajor.f32);
-                    builder.arg(scratch.gated.inner_mut());
-                    builder.arg(scratch.delta.inner());
+                for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+                    let mut builder = ctx
+                        .stream
+                        .launch_builder(ctx.kernels.ssm_parallel_fwd_nosave.get(width));
+                    let (delta_in, u_in, y_out) = if tmajor_in {
+                        (&scratch.u, &scratch.u_t, &mut scratch.delta)
+                    } else {
+                        (&scratch.delta, &scratch.u, &mut scratch.gated)
+                    };
+                    builder.arg(&ssm_ptr);
+                    builder.arg(y_out.inner_mut());
+                    builder.arg(delta_in.inner());
+                    builder.arg(u_in.inner());
+                    builder.arg(scratch.b_gathered.inner());
+                    builder.arg(scratch.c_gathered.inner());
+                    builder.arg(&a_neg_ptr);
+                    let dp = lw.d_param();
+                    builder.arg(&dp);
                     builder.arg(scratch.proj_flat.inner());
+                    builder.arg(&gate_stride);
+                    builder.arg(&b_i);
                     builder.arg(&t_i);
                     builder.arg(&di_i);
+                    builder.arg(&ds_i);
                     builder.arg(&ts_i);
-                    builder.arg(&gate_stride);
-                    unsafe { builder.launch(crate::gpu::launch::grid_tmajor_tiles(b, t, di)) }
-                        .map_err(|e| format!("gate_from_tmajor prefill L{layer_idx}: {e:?}"))?;
+                    builder.arg(&y_first);
+                    unsafe { builder.launch(cfg) }
+                        .map_err(|e| format!("ssm_parallel prefill L{layer_idx}: {e:?}"))?;
+                }
+                if tmajor_in {
+                    for (y_first, z_first, cfg) in
+                        yz_runs(crate::gpu::launch::grid_tmajor_tiles(b, t, di))
+                    {
+                        let mut builder =
+                            ctx.stream.launch_builder(&ctx.kernels.gate_from_tmajor.f32);
+                        builder.arg(scratch.gated.inner_mut());
+                        builder.arg(scratch.delta.inner());
+                        builder.arg(scratch.proj_flat.inner());
+                        builder.arg(&t_i);
+                        builder.arg(&di_i);
+                        builder.arg(&ts_i);
+                        builder.arg(&gate_stride);
+                        builder.arg(&y_first);
+                        builder.arg(&z_first);
+                        unsafe { builder.launch(cfg) }
+                            .map_err(|e| format!("gate_from_tmajor prefill L{layer_idx}: {e:?}"))?;
+                    }
                 }
             } else {
                 let width = seq_scan_index_width(b, t, di, ds, 2 * di, false);
@@ -1222,16 +1238,21 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
         if tmajor_in {
             let t_i = t as i32;
             let di_i = di as i32;
-            let mut bld = ctx.stream.launch_builder(k.softplus_fwd_tmajor.get(dt));
-            let dst_ptr = scratch.u.cached_ptr();
-            let src_ptr = scratch.delta.cached_ptr();
-            bld.arg(&dst_ptr);
-            bld.arg(&src_ptr);
-            bld.arg(&t_i);
-            bld.arg(&di_i);
-            bld.arg(&ts_i);
-            unsafe { bld.launch(crate::gpu::launch::grid_tmajor_tiles(b, t, di)) }
-                .map_err(|e| format!("softplus_tmajor prefill L{layer_idx}: {e:?}"))?;
+            for (y_first, z_first, cfg) in yz_runs(crate::gpu::launch::grid_tmajor_tiles(b, t, di))
+            {
+                let mut bld = ctx.stream.launch_builder(k.softplus_fwd_tmajor.get(dt));
+                let dst_ptr = scratch.u.cached_ptr();
+                let src_ptr = scratch.delta.cached_ptr();
+                bld.arg(&dst_ptr);
+                bld.arg(&src_ptr);
+                bld.arg(&t_i);
+                bld.arg(&di_i);
+                bld.arg(&ts_i);
+                bld.arg(&y_first);
+                bld.arg(&z_first);
+                unsafe { bld.launch(cfg) }
+                    .map_err(|e| format!("softplus_tmajor prefill L{layer_idx}: {e:?}"))?;
+            }
         } else {
             let n = (bt * di) as i64;
             let mut bld = ctx.stream.launch_builder(k.softplus_fwd_typed.get(dt));
@@ -1258,26 +1279,23 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
             let cb_ptr = scratch.c_gathered.cached_ptr();
             let xdbl_ptr = scratch.xdbl.cached_ptr();
             if tmajor && tile_smem <= 48 * 1024 {
-                let mut bld = ctx
-                    .stream
-                    .launch_builder(k.gather_bc_cols_tmajor_tiled_typed.get(dt));
-                bld.arg(&bb_ptr);
-                bld.arg(&cb_ptr);
-                bld.arg(&xdbl_ptr);
-                bld.arg(&tm_i);
-                bld.arg(&xdbl_i);
-                bld.arg(&ds_i);
-                bld.arg(&b_offset);
-                bld.arg(&c_offset);
-                unsafe {
-                    bld.launch(crate::gpu::launch::grid_gather_bc_tiled(
-                        b,
-                        t,
-                        ds,
-                        dt.size_bytes(),
-                    ))
+                let cfg = crate::gpu::launch::grid_gather_bc_tiled(b, t, ds, dt.size_bytes());
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut bld = ctx
+                        .stream
+                        .launch_builder(k.gather_bc_cols_tmajor_tiled_typed.get(dt));
+                    bld.arg(&bb_ptr);
+                    bld.arg(&cb_ptr);
+                    bld.arg(&xdbl_ptr);
+                    bld.arg(&tm_i);
+                    bld.arg(&xdbl_i);
+                    bld.arg(&ds_i);
+                    bld.arg(&b_offset);
+                    bld.arg(&c_offset);
+                    bld.arg(&y_first);
+                    unsafe { bld.launch(cfg) }
+                        .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
                 }
-                .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
             } else {
                 let kernel = if tmajor {
                     k.gather_bc_cols_tmajor_typed.get(dt)
@@ -1328,37 +1346,46 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                     gated_out_ptr
                 };
                 let width = scan_fwd_nosave_index_width(b, t, di, ds, 2 * di, tmajor_in);
-                let mut bld = ctx
-                    .stream
-                    .launch_builder(k.ssm_parallel_fwd_nosave_typed.get(width).get(dt));
-                bld.arg(&ssm_ptr);
-                bld.arg(&y_ptr);
-                bld.arg(&delta_ptr);
-                bld.arg(&u_ptr);
-                bld.arg(&bb_ptr);
-                bld.arg(&cb_ptr);
-                bld.arg(&a_neg_ptr);
-                bld.arg(&dp);
-                bld.arg(&proj_ptr);
-                bld.arg(&gate_stride);
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&di_i);
-                bld.arg(&ds_i);
-                bld.arg(&ts_i);
-                unsafe { bld.launch(crate::gpu::launch::grid_parallel_scan(b, di, ds)) }
-                    .map_err(|e| format!("ssm_parallel_nosave prefill L{layer_idx}: {e:?}"))?;
-                if tmajor_in {
-                    let mut bld = ctx.stream.launch_builder(k.gate_from_tmajor.get(dt));
-                    bld.arg(&gated_out_ptr);
+                for (y_first, cfg) in y_runs(crate::gpu::launch::grid_parallel_scan(b, di, ds)) {
+                    let mut bld = ctx
+                        .stream
+                        .launch_builder(k.ssm_parallel_fwd_nosave_typed.get(width).get(dt));
+                    bld.arg(&ssm_ptr);
                     bld.arg(&y_ptr);
+                    bld.arg(&delta_ptr);
+                    bld.arg(&u_ptr);
+                    bld.arg(&bb_ptr);
+                    bld.arg(&cb_ptr);
+                    bld.arg(&a_neg_ptr);
+                    bld.arg(&dp);
                     bld.arg(&proj_ptr);
+                    bld.arg(&gate_stride);
+                    bld.arg(&b_i);
                     bld.arg(&t_i);
                     bld.arg(&di_i);
+                    bld.arg(&ds_i);
                     bld.arg(&ts_i);
-                    bld.arg(&gate_stride);
-                    unsafe { bld.launch(crate::gpu::launch::grid_tmajor_tiles(b, t, di)) }
-                        .map_err(|e| format!("gate_from_tmajor prefill L{layer_idx}: {e:?}"))?;
+                    bld.arg(&y_first);
+                    unsafe { bld.launch(cfg) }
+                        .map_err(|e| format!("ssm_parallel_nosave prefill L{layer_idx}: {e:?}"))?;
+                }
+                if tmajor_in {
+                    for (y_first, z_first, cfg) in
+                        yz_runs(crate::gpu::launch::grid_tmajor_tiles(b, t, di))
+                    {
+                        let mut bld = ctx.stream.launch_builder(k.gate_from_tmajor.get(dt));
+                        bld.arg(&gated_out_ptr);
+                        bld.arg(&y_ptr);
+                        bld.arg(&proj_ptr);
+                        bld.arg(&t_i);
+                        bld.arg(&di_i);
+                        bld.arg(&ts_i);
+                        bld.arg(&gate_stride);
+                        bld.arg(&y_first);
+                        bld.arg(&z_first);
+                        unsafe { bld.launch(cfg) }
+                            .map_err(|e| format!("gate_from_tmajor prefill L{layer_idx}: {e:?}"))?;
+                    }
                 }
             } else {
                 if ds > k.state_cap {

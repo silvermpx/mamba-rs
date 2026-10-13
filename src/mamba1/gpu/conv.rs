@@ -9,7 +9,7 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::launch::{
-    blocks_1d, conv_index_width, grid_1d_wide, grid_conv_fwd_tiled, grid_conv_tiled, tiles_y,
+    blocks_1d, conv_index_width, grid_1d_wide, grid_conv_fwd_tiled, grid_conv_tiled, y_runs,
 };
 
 /// The widest window the tiled conv kernels hold per thread.
@@ -52,69 +52,77 @@ pub(crate) fn conv_forward(
     if d_conv > CONV_WINDOW_TAPS {
         let tile = d_conv.max(FWD_TILE);
         let tile_i = tile as i32;
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.conv1d_fwd_any_typed.get(width).get(dtype));
-        bld.arg(&p.u);
-        bld.arg(&p.u_t.0);
-        bld.arg(&uts_i);
-        bld.arg(&p.state);
-        bld.arg(&p.saved);
-        bld.arg(&p.x.0);
-        bld.arg(&p.weight);
-        bld.arg(&p.bias);
-        bld.arg(&b_i);
-        bld.arg(&t_i);
-        bld.arg(&di_i);
-        bld.arg(&dc_i);
-        bld.arg(&xs_i);
-        bld.arg(&tile_i);
-        let grid = blocks_1d(batch * d_inner)
-            .and_then(|x| Ok((x, tiles_y(seq, tile)?)))
-            .map_err(|e| format!("{what} conv forward: {e}"))?;
         let cfg = LaunchConfig {
-            grid_dim: (grid.0, grid.1, 1),
+            grid_dim: (
+                blocks_1d(batch * d_inner).map_err(|e| format!("{what} conv forward: {e}"))?,
+                seq.div_ceil(tile) as u32,
+                1,
+            ),
             block_dim: (256, 1, 1),
             shared_mem_bytes: 0,
         };
-        unsafe { bld.launch(cfg) }.map_err(|e| format!("{what} conv forward: {e:?}"))?;
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.conv1d_fwd_any_typed.get(width).get(dtype));
+            bld.arg(&p.u);
+            bld.arg(&p.u_t.0);
+            bld.arg(&uts_i);
+            bld.arg(&p.state);
+            bld.arg(&p.saved);
+            bld.arg(&p.x.0);
+            bld.arg(&p.weight);
+            bld.arg(&p.bias);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&dc_i);
+            bld.arg(&xs_i);
+            bld.arg(&tile_i);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.map_err(|e| format!("{what} conv forward: {e:?}"))?;
+        }
         return Ok(());
     }
     let cfg = grid_conv_fwd_tiled(batch, d_inner, seq)
         .map_err(|e| format!("{what} conv forward: {e}"))?;
-    if p.saved != 0 {
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.conv1d_burnin_fwd_tiled_typed.get(width).get(dtype));
-        bld.arg(&p.u);
-        bld.arg(&p.state);
-        bld.arg(&p.saved);
-        bld.arg(&p.x.0);
-        bld.arg(&p.weight);
-        bld.arg(&p.bias);
-        bld.arg(&b_i);
-        bld.arg(&t_i);
-        bld.arg(&di_i);
-        bld.arg(&dc_i);
-        bld.arg(&xs_i);
-        unsafe { bld.launch(cfg) }.map_err(|e| format!("{what} conv forward: {e:?}"))?;
-    } else {
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.conv1d_burnin_nosave_tiled_typed.get(width).get(dtype));
-        bld.arg(&p.u);
-        bld.arg(&p.u_t.0);
-        bld.arg(&p.state);
-        bld.arg(&p.x.0);
-        bld.arg(&p.weight);
-        bld.arg(&p.bias);
-        bld.arg(&b_i);
-        bld.arg(&t_i);
-        bld.arg(&di_i);
-        bld.arg(&dc_i);
-        bld.arg(&xs_i);
-        bld.arg(&uts_i);
-        unsafe { bld.launch(cfg) }.map_err(|e| format!("{what} conv forward: {e:?}"))?;
+    for (y_first, cfg) in y_runs(cfg) {
+        if p.saved != 0 {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.conv1d_burnin_fwd_tiled_typed.get(width).get(dtype));
+            bld.arg(&p.u);
+            bld.arg(&p.state);
+            bld.arg(&p.saved);
+            bld.arg(&p.x.0);
+            bld.arg(&p.weight);
+            bld.arg(&p.bias);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&dc_i);
+            bld.arg(&xs_i);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.map_err(|e| format!("{what} conv forward: {e:?}"))?;
+        } else {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.conv1d_burnin_nosave_tiled_typed.get(width).get(dtype));
+            bld.arg(&p.u);
+            bld.arg(&p.u_t.0);
+            bld.arg(&p.state);
+            bld.arg(&p.x.0);
+            bld.arg(&p.weight);
+            bld.arg(&p.bias);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&dc_i);
+            bld.arg(&xs_i);
+            bld.arg(&uts_i);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.map_err(|e| format!("{what} conv forward: {e:?}"))?;
+        }
     }
     Ok(())
 }
@@ -168,16 +176,41 @@ pub(crate) fn conv_backward(
         bld.arg(&xs_i);
         unsafe { bld.launch(grid_1d_wide(batch * seq * d_inner)) }
             .map_err(|e| format!("{what} conv pre-activation gradient: {e:?}"))?;
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.conv1d_bwd_any_typed.get(width).get(dtype));
+            bld.arg(&p.d_x.0);
+            bld.arg(&p.d_weight_partials);
+            bld.arg(&p.d_bias_partials);
+            bld.arg(&p.dco);
+            bld.arg(&p.x.0);
+            bld.arg(&p.conv_init);
+            bld.arg(&p.weight);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&dc_i);
+            bld.arg(&os_i);
+            bld.arg(&oo_i);
+            bld.arg(&xs_i);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.map_err(|e| format!("{what} conv backward: {e:?}"))?;
+        }
+        return Ok(());
+    }
+    for (y_first, cfg) in y_runs(cfg) {
         let mut bld = ctx
             .stream
-            .launch_builder(k.conv1d_bwd_any_typed.get(width).get(dtype));
+            .launch_builder(k.conv1d_bwd_tiled_typed.get(width).get(dtype));
         bld.arg(&p.d_x.0);
         bld.arg(&p.d_weight_partials);
         bld.arg(&p.d_bias_partials);
-        bld.arg(&p.dco);
+        bld.arg(&p.d_u);
         bld.arg(&p.x.0);
         bld.arg(&p.conv_init);
         bld.arg(&p.weight);
+        bld.arg(&p.bias);
         bld.arg(&b_i);
         bld.arg(&t_i);
         bld.arg(&di_i);
@@ -185,28 +218,9 @@ pub(crate) fn conv_backward(
         bld.arg(&os_i);
         bld.arg(&oo_i);
         bld.arg(&xs_i);
+        bld.arg(&y_first);
         unsafe { bld.launch(cfg) }.map_err(|e| format!("{what} conv backward: {e:?}"))?;
-        return Ok(());
     }
-    let mut bld = ctx
-        .stream
-        .launch_builder(k.conv1d_bwd_tiled_typed.get(width).get(dtype));
-    bld.arg(&p.d_x.0);
-    bld.arg(&p.d_weight_partials);
-    bld.arg(&p.d_bias_partials);
-    bld.arg(&p.d_u);
-    bld.arg(&p.x.0);
-    bld.arg(&p.conv_init);
-    bld.arg(&p.weight);
-    bld.arg(&p.bias);
-    bld.arg(&b_i);
-    bld.arg(&t_i);
-    bld.arg(&di_i);
-    bld.arg(&dc_i);
-    bld.arg(&os_i);
-    bld.arg(&oo_i);
-    bld.arg(&xs_i);
-    unsafe { bld.launch(cfg) }.map_err(|e| format!("{what} conv backward: {e:?}"))?;
     Ok(())
 }
 

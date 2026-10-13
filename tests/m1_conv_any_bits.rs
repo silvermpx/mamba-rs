@@ -12,7 +12,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::launch::{IndexWidth, grid_1d, grid_conv_fwd_tiled, grid_conv_tiled};
+use mamba_rs::gpu::launch::{IndexWidth, grid_1d, grid_conv_fwd_tiled, grid_conv_tiled, y_runs};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -35,6 +35,7 @@ const BUILDS: [(bool, IndexWidth); 3] = [
 ];
 
 /// A kernel argument: a device pointer or an int.
+#[derive(Clone)]
 enum Arg {
     P(u64),
     I(i32),
@@ -58,6 +59,21 @@ fn launch(
         }
     }
     unsafe { bld.launch(cfg) }.unwrap();
+}
+
+/// [`launch`] once per run of the grid's y axis, each run's first block
+/// appended as the kernel's last argument.
+fn launch_runs(
+    ctx: &GpuCtx,
+    f: &cudarc::driver::CudaFunction,
+    cfg: cudarc::driver::LaunchConfig,
+    args: &[Arg],
+) {
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut run: Vec<Arg> = args.to_vec();
+        run.push(Arg::I(y_first));
+        launch(ctx, f, cfg, &run);
+    }
 }
 
 fn bits_f32(ctx: &GpuCtx, b: &GpuBuffer) -> Vec<u32> {
@@ -132,7 +148,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     let mut args = vec![Arg::P(u.cached_ptr()), Arg::P(0), Arg::I(0)];
                     args.extend(common);
                     args.push(Arg::I(32));
-                    launch(
+                    launch_runs(
                         &ctx,
                         k.conv1d_fwd_any_typed.get(width).get(dtype),
                         grid_conv_fwd_tiled(b, di, t).unwrap(),
@@ -141,7 +157,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                 } else {
                     let mut args = vec![Arg::P(u.cached_ptr())];
                     args.extend(common);
-                    launch(
+                    launch_runs(
                         &ctx,
                         k.conv1d_burnin_fwd_tiled_typed.get(width).get(dtype),
                         grid_conv_fwd_tiled(b, di, t).unwrap(),
@@ -192,7 +208,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     ];
                     args.extend(tail);
                     args.push(Arg::I(32));
-                    launch(
+                    launch_runs(
                         &ctx,
                         k.conv1d_fwd_any_typed.get(width).get(dtype),
                         grid_conv_fwd_tiled(b, di, t).unwrap(),
@@ -202,7 +218,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                     let mut args = vec![Arg::P(up), Arg::P(utp), Arg::P(sp)];
                     args.extend(tail);
                     args.push(Arg::I(uts as i32));
-                    launch(
+                    launch_runs(
                         &ctx,
                         k.conv1d_burnin_nosave_tiled_typed.get(width).get(dtype),
                         grid_conv_fwd_tiled(b, di, t).unwrap(),
@@ -278,7 +294,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                         Arg::P(w),
                     ];
                     args.extend(tail);
-                    launch(
+                    launch_runs(
                         &ctx,
                         k.conv1d_bwd_any_typed.get(width).get(dtype),
                         grid_conv_tiled(b, di, t).unwrap(),
@@ -296,7 +312,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
                         Arg::P(bs),
                     ];
                     args.extend(tail);
-                    launch(
+                    launch_runs(
                         &ctx,
                         k.conv1d_bwd_tiled_typed.get(width).get(dtype),
                         grid_conv_tiled(b, di, t).unwrap(),

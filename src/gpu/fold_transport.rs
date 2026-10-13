@@ -3,7 +3,7 @@ use super::kernel_identity::{FramedSha256, digest_hex};
 
 const OWNER_SOURCE: &str = include_str!("../../kernels/mamba_ssm_parallel.cu");
 const OWNER_SOURCE_SHA256: &str =
-    "15a86ee968b1f16d61eac98937651afdf1ca3b4f2ecc97f76ce4704e1d82f952";
+    "ecf3b3ef4559554eb300d6157382b79361ae864192ff706061b747efa82082e6";
 const FOLD_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD";
 const SHORT_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT";
 const STAGED_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED";

@@ -174,12 +174,13 @@ extern "C" __global__ void gather_bc_cols_tmajor(
 
 extern "C" __global__ void gather_bc_cols_tmajor_tiled(
     float* dst_b, float* dst_c, const float* src,
-    int T, int src_stride, int ds, int b_offset, int c_offset
+    int T, int src_stride, int ds, int b_offset, int c_offset,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float gbc_sm[];
     float* smb = gbc_sm;
     float* smc = gbc_sm + ds * (GBC_TILE_T + 1);
-    long long b = blockIdx.y;
+    long long b = y_first + blockIdx.y;
     int t0 = blockIdx.x * GBC_TILE_T;
     int nt = min(GBC_TILE_T, T - t0);
     int tile_elems = nt * ds;
@@ -260,12 +261,13 @@ DEFINE_GATHER_BC_TMAJOR(f16,  __half)
 #define DEFINE_GATHER_BC_TMAJOR_TILED(SUFFIX, T_ACT)                          \
 extern "C" __global__ void gather_bc_cols_tmajor_tiled_##SUFFIX(              \
     T_ACT* dst_b, T_ACT* dst_c, const T_ACT* src,                             \
-    int T, int src_stride, int ds, int b_offset, int c_offset                 \
+    int T, int src_stride, int ds, int b_offset, int c_offset,                \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     extern __shared__ unsigned char gbc_sm_raw[];                             \
     T_ACT* smb = (T_ACT*)gbc_sm_raw;                                          \
     T_ACT* smc = smb + ds * (GBC_TILE_T + 1);                                 \
-    long long b = blockIdx.y;                                                 \
+    long long b = y_first + blockIdx.y;                                       \
     int t0 = blockIdx.x * GBC_TILE_T;                                         \
     int nt = min(GBC_TILE_T, T - t0);                                         \
     int tile_elems = nt * ds;                                                 \

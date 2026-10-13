@@ -21,7 +21,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::launch::{grid_conv_fwd_tiled, grid_conv_tiled};
+use mamba_rs::gpu::launch::{grid_conv_fwd_tiled, grid_conv_tiled, y_runs};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -74,58 +74,64 @@ fn run(dtype: WeightDtype) {
     let (bi, ti, dii, dci) = (b as i32, t as i32, di as i32, dc as i32);
 
     {
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.conv1d_burnin_fwd_tiled_typed.i32.get(dtype));
-        let up = u.cached_ptr();
-        let sp = state.cached_ptr();
-        let csp = conv_states.cached_ptr();
-        let xp = x_branch.cached_ptr();
-        let wpt = weight.cached_ptr();
-        let bpt = bias.cached_ptr();
-        bld.arg(&up);
-        bld.arg(&sp);
-        bld.arg(&csp);
-        bld.arg(&xp);
-        bld.arg(&wpt);
-        bld.arg(&bpt);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&dii);
-        bld.arg(&dci);
-        bld.arg(&dii); // x row stride: a contiguous x here
-        unsafe { bld.launch(grid_conv_fwd_tiled(b, di, t).unwrap()) }.unwrap();
+        for (y_first, cfg) in y_runs(grid_conv_fwd_tiled(b, di, t).unwrap()) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.conv1d_burnin_fwd_tiled_typed.i32.get(dtype));
+            let up = u.cached_ptr();
+            let sp = state.cached_ptr();
+            let csp = conv_states.cached_ptr();
+            let xp = x_branch.cached_ptr();
+            let wpt = weight.cached_ptr();
+            let bpt = bias.cached_ptr();
+            bld.arg(&up);
+            bld.arg(&sp);
+            bld.arg(&csp);
+            bld.arg(&xp);
+            bld.arg(&wpt);
+            bld.arg(&bpt);
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&dii);
+            bld.arg(&dci);
+            bld.arg(&dii); // x row stride: a contiguous x here
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
+        }
     }
     {
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.conv1d_bwd_tiled_typed.i32.get(dtype));
-        let dxp = d_proj.cached_ptr();
-        let wpp = wp.cached_ptr();
-        let bpp = bp.cached_ptr();
-        let dup = d_u.cached_ptr();
-        let xbp = x_branch.cached_ptr();
-        let cip = conv_states.cached_ptr();
-        let wpt = weight.cached_ptr();
-        let bpt = bias.cached_ptr();
-        let stride = (2 * di) as i32;
-        let off = 0i32;
-        bld.arg(&dxp);
-        bld.arg(&wpp);
-        bld.arg(&bpp);
-        bld.arg(&dup);
-        bld.arg(&xbp);
-        bld.arg(&cip);
-        bld.arg(&wpt);
-        bld.arg(&bpt);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&dii);
-        bld.arg(&dci);
-        bld.arg(&stride);
-        bld.arg(&off);
-        bld.arg(&dii); // x row stride
-        unsafe { bld.launch(grid_conv_tiled(b, di, t).unwrap()) }.unwrap();
+        for (y_first, cfg) in y_runs(grid_conv_tiled(b, di, t).unwrap()) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.conv1d_bwd_tiled_typed.i32.get(dtype));
+            let dxp = d_proj.cached_ptr();
+            let wpp = wp.cached_ptr();
+            let bpp = bp.cached_ptr();
+            let dup = d_u.cached_ptr();
+            let xbp = x_branch.cached_ptr();
+            let cip = conv_states.cached_ptr();
+            let wpt = weight.cached_ptr();
+            let bpt = bias.cached_ptr();
+            let stride = (2 * di) as i32;
+            let off = 0i32;
+            bld.arg(&dxp);
+            bld.arg(&wpp);
+            bld.arg(&bpp);
+            bld.arg(&dup);
+            bld.arg(&xbp);
+            bld.arg(&cip);
+            bld.arg(&wpt);
+            bld.arg(&bpt);
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&dii);
+            bld.arg(&dci);
+            bld.arg(&stride);
+            bld.arg(&off);
+            bld.arg(&dii); // x row stride
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
+        }
     }
     ctx.stream.synchronize().unwrap();
 

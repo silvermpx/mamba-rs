@@ -16,7 +16,7 @@ use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{
     IndexWidth, grid_parallel_scan, scan_fwd_index_width, scan_fwd_nosave_index_width,
-    scan_tape_len,
+    scan_tape_len, y_runs,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -110,24 +110,27 @@ struct SaveIo {
 fn launch_save(ctx: &GpuCtx, f: &CudaFunction, io: &SaveIo, s: Shape, slim: bool) {
     let [b, t, di, ds] = s.args();
     let slim = i32::from(slim);
-    let mut bld = ctx.stream.launch_builder(f);
-    bld.arg(&io.h);
-    bld.arg(&io.y);
-    bld.arg(&io.tape);
-    bld.arg(&io.delta_raw);
-    bld.arg(&io.delta_saved);
-    bld.arg(&io.u);
-    bld.arg(&io.bm);
-    bld.arg(&io.cm);
-    bld.arg(&io.a_neg);
-    bld.arg(&io.d);
-    bld.arg(&b);
-    bld.arg(&t);
-    bld.arg(&di);
-    bld.arg(&ds);
-    bld.arg(&io.tape);
-    bld.arg(&slim);
-    unsafe { bld.launch(grid_parallel_scan(s.b, s.di, s.ds)) }.expect("saving forward");
+    for (y_first, cfg) in y_runs(grid_parallel_scan(s.b, s.di, s.ds)) {
+        let mut bld = ctx.stream.launch_builder(f);
+        bld.arg(&io.h);
+        bld.arg(&io.y);
+        bld.arg(&io.tape);
+        bld.arg(&io.delta_raw);
+        bld.arg(&io.delta_saved);
+        bld.arg(&io.u);
+        bld.arg(&io.bm);
+        bld.arg(&io.cm);
+        bld.arg(&io.a_neg);
+        bld.arg(&io.d);
+        bld.arg(&b);
+        bld.arg(&t);
+        bld.arg(&di);
+        bld.arg(&ds);
+        bld.arg(&io.tape);
+        bld.arg(&slim);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.expect("saving forward");
+    }
 }
 
 /// How the forward without saves lays out its activations and stores y.
@@ -176,23 +179,26 @@ fn launch_nosave(ctx: &GpuCtx, f: &CudaFunction, io: &NosaveIo, s: Shape, rows: 
         Rows::TMajor(stride) => stride as i32,
         _ => 0i32,
     };
-    let mut bld = ctx.stream.launch_builder(f);
-    bld.arg(&io.h);
-    bld.arg(&io.y);
-    bld.arg(&io.delta);
-    bld.arg(&io.u);
-    bld.arg(&io.bm);
-    bld.arg(&io.cm);
-    bld.arg(&io.a_neg);
-    bld.arg(&io.d);
-    bld.arg(&io.gate);
-    bld.arg(&gate_stride);
-    bld.arg(&b);
-    bld.arg(&t);
-    bld.arg(&di);
-    bld.arg(&ds);
-    bld.arg(&tstride);
-    unsafe { bld.launch(grid_parallel_scan(s.b, s.di, s.ds)) }.expect("forward without saves");
+    for (y_first, cfg) in y_runs(grid_parallel_scan(s.b, s.di, s.ds)) {
+        let mut bld = ctx.stream.launch_builder(f);
+        bld.arg(&io.h);
+        bld.arg(&io.y);
+        bld.arg(&io.delta);
+        bld.arg(&io.u);
+        bld.arg(&io.bm);
+        bld.arg(&io.cm);
+        bld.arg(&io.a_neg);
+        bld.arg(&io.d);
+        bld.arg(&io.gate);
+        bld.arg(&gate_stride);
+        bld.arg(&b);
+        bld.arg(&t);
+        bld.arg(&di);
+        bld.arg(&ds);
+        bld.arg(&tstride);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.expect("forward without saves");
+    }
 }
 
 /// Every output of one saving forward on fixed inputs, as bytes.

@@ -1317,14 +1317,17 @@ impl Mamba3Prefill {
                     block_dim: (BLOCK, 1, 1),
                     shared_mem_bytes: 0,
                 };
-                let mut b = ctx.stream.launch_builder(&m3k.colsum_segments);
-                b.arg(pooled.inner_mut());
-                b.arg(tgt.temporal_work.inner());
-                b.arg(&segments);
-                b.arg(&seg_len);
-                b.arg(&cols);
-                unsafe { b.launch(cfg) }
-                    .map_err(|e| format!("m3 prefill pooled colsum (batched): {e:?}"))?;
+                for (y_first, cfg) in crate::gpu::launch::y_runs(cfg) {
+                    let mut b = ctx.stream.launch_builder(&m3k.colsum_segments);
+                    b.arg(pooled.inner_mut());
+                    b.arg(tgt.temporal_work.inner());
+                    b.arg(&segments);
+                    b.arg(&seg_len);
+                    b.arg(&cols);
+                    b.arg(&y_first);
+                    unsafe { b.launch(cfg) }
+                        .map_err(|e| format!("m3 prefill pooled colsum (batched): {e:?}"))?;
+                }
             }
         }
         Ok(())

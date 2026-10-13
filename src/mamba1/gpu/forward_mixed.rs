@@ -25,7 +25,7 @@ use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_norm, launch_cast};
+use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_norm, launch_cast, y_runs};
 use crate::mamba1::gpu::forward::{GpuMambaDims, GpuRecurrentState};
 use crate::mamba1::gpu::weights::GpuMambaMixedWeights;
 use crate::mamba1::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
@@ -618,34 +618,37 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 let slim = crate::gpu::launch::scan_tape_slim();
                 let width = crate::gpu::launch::scan_fwd_index_width(b, t, di, ds, slim);
                 let kernel = k.ssm_parallel_fwd_typed.get(width).get(dt);
-                let mut bld = ctx.stream.launch_builder(kernel);
-                let y = layer_acts.y.cached_ptr();
-                let hs = layer_acts.h_saved.cached_ptr();
-                let draw = layer_acts.delta_raw.cached_ptr();
-                let dsave = layer_acts.delta.cached_ptr();
-                let u = layer_acts.u.cached_ptr();
-                let bb = scratch.b_buf.cached_ptr();
-                let cb = scratch.c_buf.cached_ptr();
-                let dp = lw.d_param.ptr();
-                bld.arg(&ssm_ptr);
-                bld.arg(&y);
-                bld.arg(&hs);
-                bld.arg(&draw);
-                bld.arg(&dsave);
-                bld.arg(&u);
-                bld.arg(&bb);
-                bld.arg(&cb);
-                bld.arg(&aneg_ptr);
-                bld.arg(&dp);
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&di_i);
-                bld.arg(&ds_i);
-                let slim_i: i32 = i32::from(slim);
-                bld.arg(&hs);
-                bld.arg(&slim_i);
-                unsafe { bld.launch(crate::gpu::launch::grid_parallel_scan(b, di, ds)) }
-                    .map_err(|e| format!("ssm_parallel_fwd typed L{layer_idx}: {e:?}"))?;
+                for (y_first, cfg) in y_runs(crate::gpu::launch::grid_parallel_scan(b, di, ds)) {
+                    let mut bld = ctx.stream.launch_builder(kernel);
+                    let y = layer_acts.y.cached_ptr();
+                    let hs = layer_acts.h_saved.cached_ptr();
+                    let draw = layer_acts.delta_raw.cached_ptr();
+                    let dsave = layer_acts.delta.cached_ptr();
+                    let u = layer_acts.u.cached_ptr();
+                    let bb = scratch.b_buf.cached_ptr();
+                    let cb = scratch.c_buf.cached_ptr();
+                    let dp = lw.d_param.ptr();
+                    bld.arg(&ssm_ptr);
+                    bld.arg(&y);
+                    bld.arg(&hs);
+                    bld.arg(&draw);
+                    bld.arg(&dsave);
+                    bld.arg(&u);
+                    bld.arg(&bb);
+                    bld.arg(&cb);
+                    bld.arg(&aneg_ptr);
+                    bld.arg(&dp);
+                    bld.arg(&b_i);
+                    bld.arg(&t_i);
+                    bld.arg(&di_i);
+                    bld.arg(&ds_i);
+                    let slim_i: i32 = i32::from(slim);
+                    bld.arg(&hs);
+                    bld.arg(&slim_i);
+                    bld.arg(&y_first);
+                    unsafe { bld.launch(cfg) }
+                        .map_err(|e| format!("ssm_parallel_fwd typed L{layer_idx}: {e:?}"))?;
+                }
             } else {
                 if ds > k.state_cap {
                     return Err(format!(

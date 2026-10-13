@@ -9,7 +9,7 @@ use cudarc::driver::PushKernelArg;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
-use mamba_rs::gpu::launch::grid_parallel_scan;
+use mamba_rs::gpu::launch::{grid_parallel_scan, y_runs};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -85,24 +85,27 @@ fn fused_softplus_fwd_matches_cpu() {
     };
     let slim = i32::from(slim_mode);
     {
-        let mut bld = ctx.stream.launch_builder(&ctx.kernels.ssm_parallel_fwd.i32);
-        bld.arg(h.inner_mut());
-        bld.arg(y.inner_mut());
-        bld.arg(h_saved.inner_mut());
-        bld.arg(raw_b.inner());
-        bld.arg(dsave.inner_mut());
-        bld.arg(u_b.inner());
-        bld.arg(bb.inner());
-        bld.arg(cb.inner());
-        bld.arg(ab.inner());
-        bld.arg(db.inner());
-        bld.arg(&b_i);
-        bld.arg(&t_i);
-        bld.arg(&di_i);
-        bld.arg(&ds_i);
-        bld.arg(&tape);
-        bld.arg(&slim);
-        unsafe { bld.launch(grid_parallel_scan(b, di, ds)) }.unwrap();
+        for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+            let mut bld = ctx.stream.launch_builder(&ctx.kernels.ssm_parallel_fwd.i32);
+            bld.arg(h.inner_mut());
+            bld.arg(y.inner_mut());
+            bld.arg(h_saved.inner_mut());
+            bld.arg(raw_b.inner());
+            bld.arg(dsave.inner_mut());
+            bld.arg(u_b.inner());
+            bld.arg(bb.inner());
+            bld.arg(cb.inner());
+            bld.arg(ab.inner());
+            bld.arg(db.inner());
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&ds_i);
+            bld.arg(&tape);
+            bld.arg(&slim);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
+        }
     }
     ctx.stream.synchronize().unwrap();
 

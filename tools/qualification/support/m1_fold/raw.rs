@@ -299,7 +299,9 @@ fn fixture(
     for dim in &dims {
         builder.arg(dim);
     }
-    builder.arg(&tape).arg(&slim);
+    // The first block of the y run closes the current ABI; the frozen
+    // kernels predate it and read no further than the flag.
+    builder.arg(&tape).arg(&slim).arg(&0i32);
     unsafe { builder.launch(grid_parallel_scan(s.b, s.di, s.ds)) }.unwrap();
     stream.synchronize().unwrap();
     data[0] = input[0].payload(stream, "forward tape");
@@ -367,7 +369,9 @@ fn launch(
 ) -> Result<(), String> {
     let i = &arm.inputs;
     let o = &arm.outputs;
-    // 15 pointers, four dimensions, run_tape pointer, slim flag: exact fold ABI.
+    // 15 pointers, four dimensions, run_tape pointer, slim flag, first block
+    // of the y run: the current fold ABI. The frozen legacy kernel predates
+    // the run argument and reads no further than the flag.
     let pointers = [
         i[0].ptr(),
         i[1].ptr(),
@@ -395,7 +399,7 @@ fn launch(
     for dim in &dims {
         builder.arg(dim);
     }
-    builder.arg(&tape).arg(&slim);
+    builder.arg(&tape).arg(&slim).arg(&0i32);
     unsafe {
         builder.launch(grid_parallel_scan_bwd_fold(
             s.b,

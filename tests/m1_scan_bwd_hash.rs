@@ -24,7 +24,7 @@ use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{
     SCAN_BWD_DGROUP, grid_parallel_scan, grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold,
-    scan_tape_len,
+    scan_tape_len, y_runs,
 };
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -91,38 +91,41 @@ fn m1_scan_bwd_output_hashes() {
         // Forward twice: full tape (feeds the ungrouped/full backward) and
         // slim tape (feeds the production fold/slim backward).
         for (slim, tape_ptr) in [(0i32, h_saved.cached_ptr()), (1i32, tape.cached_ptr())] {
-            let mut bld = ctx
-                .stream
-                .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
-            let hp = h.cached_ptr();
-            let yp = y.cached_ptr();
-            let hs = h_saved.cached_ptr();
-            // The fused forward reads the PRE-softplus dt and writes the
-            // post-softplus save itself; the backward replays from that save.
-            let dp = delta.cached_ptr();
-            let dsv = delta_saved.cached_ptr();
-            let up = u.cached_ptr();
-            let bp = bb.cached_ptr();
-            let cp = cc.cached_ptr();
-            let ap = a_neg.cached_ptr();
-            let ddp = dpar.cached_ptr();
-            bld.arg(&hp);
-            bld.arg(&yp);
-            bld.arg(&hs);
-            bld.arg(&dp);
-            bld.arg(&dsv);
-            bld.arg(&up);
-            bld.arg(&bp);
-            bld.arg(&cp);
-            bld.arg(&ap);
-            bld.arg(&ddp);
-            bld.arg(&bi);
-            bld.arg(&ti);
-            bld.arg(&dii);
-            bld.arg(&dsi);
-            bld.arg(&tape_ptr);
-            bld.arg(&slim);
-            unsafe { bld.launch(grid_parallel_scan(b, di, ds)) }.unwrap();
+            for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+                let mut bld = ctx
+                    .stream
+                    .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
+                let hp = h.cached_ptr();
+                let yp = y.cached_ptr();
+                let hs = h_saved.cached_ptr();
+                // The fused forward reads the PRE-softplus dt and writes the
+                // post-softplus save itself; the backward replays from that save.
+                let dp = delta.cached_ptr();
+                let dsv = delta_saved.cached_ptr();
+                let up = u.cached_ptr();
+                let bp = bb.cached_ptr();
+                let cp = cc.cached_ptr();
+                let ap = a_neg.cached_ptr();
+                let ddp = dpar.cached_ptr();
+                bld.arg(&hp);
+                bld.arg(&yp);
+                bld.arg(&hs);
+                bld.arg(&dp);
+                bld.arg(&dsv);
+                bld.arg(&up);
+                bld.arg(&bp);
+                bld.arg(&cp);
+                bld.arg(&ap);
+                bld.arg(&ddp);
+                bld.arg(&bi);
+                bld.arg(&ti);
+                bld.arg(&dii);
+                bld.arg(&dsi);
+                bld.arg(&tape_ptr);
+                bld.arg(&slim);
+                bld.arg(&y_first);
+                unsafe { bld.launch(cfg) }.unwrap();
+            }
         }
         ctx.stream.synchronize().unwrap();
         {
@@ -162,67 +165,70 @@ fn m1_scan_bwd_output_hashes() {
             // per-sample prefix with +=) - reset between arms.
             d_a_log_local.zero(&ctx.stream).unwrap();
             ctx.stream.synchronize().unwrap();
-            let mut bld = ctx.stream.launch_builder(if fold {
-                k.ssm_parallel_bwd_fold_for_shape(dtype, b, t, di, ds)
-            } else {
-                k.ssm_parallel_bwd_typed.i32.get(dtype)
-            });
-            let hs = h_saved.cached_ptr();
-            let tp = tape.cached_ptr();
-            let dp = delta_saved.cached_ptr();
-            let up = u.cached_ptr();
-            let bp = bb.cached_ptr();
-            let cp = cc.cached_ptr();
-            let ap = a_neg.cached_ptr();
-            let ddp = dpar.cached_ptr();
-            let dyp = d_y.cached_ptr();
-            let ddel = d_delta.cached_ptr();
-            let dp_raw = delta.cached_ptr();
-            let dup = d_u.cached_ptr();
-            let dbl = if fold {
-                d_b_fold.cached_ptr()
-            } else {
-                d_b_full.cached_ptr()
-            };
-            let dcl = if fold {
-                d_c_fold.cached_ptr()
-            } else {
-                d_c_full.cached_ptr()
-            };
-            let ddl = d_d_local.cached_ptr();
-            let dal = d_a_log_local.cached_ptr();
-            bld.arg(&hs);
-            bld.arg(&dp);
-            bld.arg(&up);
-            bld.arg(&bp);
-            bld.arg(&cp);
-            bld.arg(&ap);
-            bld.arg(&ddp);
-            bld.arg(&dyp);
-            bld.arg(&ddel);
-            if fold {
-                // The fold takes the PRE-softplus dt right after its output
-                // slot (it emits the raw-dt gradient inline).
-                bld.arg(&dp_raw);
-            }
-            bld.arg(&dup);
-            bld.arg(&dbl);
-            bld.arg(&dcl);
-            bld.arg(&ddl);
-            bld.arg(&dal);
-            bld.arg(&bi);
-            bld.arg(&ti);
-            bld.arg(&dii);
-            bld.arg(&dsi);
-            let (tape_arg, slim) = if fold { (tp, 1i32) } else { (hs, 0i32) };
-            bld.arg(&tape_arg);
-            bld.arg(&slim);
             let cfg = if fold {
                 grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())
             } else {
                 grid_parallel_scan_bwd(b, di)
             };
-            unsafe { bld.launch(cfg) }.unwrap();
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut bld = ctx.stream.launch_builder(if fold {
+                    k.ssm_parallel_bwd_fold_for_shape(dtype, b, t, di, ds)
+                } else {
+                    k.ssm_parallel_bwd_typed.i32.get(dtype)
+                });
+                let hs = h_saved.cached_ptr();
+                let tp = tape.cached_ptr();
+                let dp = delta_saved.cached_ptr();
+                let up = u.cached_ptr();
+                let bp = bb.cached_ptr();
+                let cp = cc.cached_ptr();
+                let ap = a_neg.cached_ptr();
+                let ddp = dpar.cached_ptr();
+                let dyp = d_y.cached_ptr();
+                let ddel = d_delta.cached_ptr();
+                let dp_raw = delta.cached_ptr();
+                let dup = d_u.cached_ptr();
+                let dbl = if fold {
+                    d_b_fold.cached_ptr()
+                } else {
+                    d_b_full.cached_ptr()
+                };
+                let dcl = if fold {
+                    d_c_fold.cached_ptr()
+                } else {
+                    d_c_full.cached_ptr()
+                };
+                let ddl = d_d_local.cached_ptr();
+                let dal = d_a_log_local.cached_ptr();
+                bld.arg(&hs);
+                bld.arg(&dp);
+                bld.arg(&up);
+                bld.arg(&bp);
+                bld.arg(&cp);
+                bld.arg(&ap);
+                bld.arg(&ddp);
+                bld.arg(&dyp);
+                bld.arg(&ddel);
+                if fold {
+                    // The fold takes the PRE-softplus dt right after its output
+                    // slot (it emits the raw-dt gradient inline).
+                    bld.arg(&dp_raw);
+                }
+                bld.arg(&dup);
+                bld.arg(&dbl);
+                bld.arg(&dcl);
+                bld.arg(&ddl);
+                bld.arg(&dal);
+                bld.arg(&bi);
+                bld.arg(&ti);
+                bld.arg(&dii);
+                bld.arg(&dsi);
+                let (tape_arg, slim) = if fold { (tp, 1i32) } else { (hs, 0i32) };
+                bld.arg(&tape_arg);
+                bld.arg(&slim);
+                bld.arg(&y_first);
+                unsafe { bld.launch(cfg) }.unwrap();
+            }
             ctx.stream.synchronize().unwrap();
 
             eprintln!(
@@ -343,35 +349,38 @@ fn m1_scan_fwd_f32_output_hashes() {
     // Slim tape: the launcher hands the kernel the tape as both the saved
     // states and the tape, so the recorder does the same.
     let slim = 1i32;
-    let mut bld = ctx.stream.launch_builder(&k.ssm_parallel_fwd.i32);
-    let hp = h.cached_ptr();
-    let yp = y.cached_ptr();
-    let hs = tape.cached_ptr();
-    let dp = delta.cached_ptr();
-    let dsv = delta_saved.cached_ptr();
-    let up = u.cached_ptr();
-    let bp = bb.cached_ptr();
-    let cp = cc.cached_ptr();
-    let ap = a_neg.cached_ptr();
-    let ddp = dpar.cached_ptr();
-    let tape_ptr = tape.cached_ptr();
-    bld.arg(&hp);
-    bld.arg(&yp);
-    bld.arg(&hs);
-    bld.arg(&dp);
-    bld.arg(&dsv);
-    bld.arg(&up);
-    bld.arg(&bp);
-    bld.arg(&cp);
-    bld.arg(&ap);
-    bld.arg(&ddp);
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&dii);
-    bld.arg(&dsi);
-    bld.arg(&tape_ptr);
-    bld.arg(&slim);
-    unsafe { bld.launch(grid_parallel_scan(b, di, ds)) }.unwrap();
+    for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+        let mut bld = ctx.stream.launch_builder(&k.ssm_parallel_fwd.i32);
+        let hp = h.cached_ptr();
+        let yp = y.cached_ptr();
+        let hs = tape.cached_ptr();
+        let dp = delta.cached_ptr();
+        let dsv = delta_saved.cached_ptr();
+        let up = u.cached_ptr();
+        let bp = bb.cached_ptr();
+        let cp = cc.cached_ptr();
+        let ap = a_neg.cached_ptr();
+        let ddp = dpar.cached_ptr();
+        let tape_ptr = tape.cached_ptr();
+        bld.arg(&hp);
+        bld.arg(&yp);
+        bld.arg(&hs);
+        bld.arg(&dp);
+        bld.arg(&dsv);
+        bld.arg(&up);
+        bld.arg(&bp);
+        bld.arg(&cp);
+        bld.arg(&ap);
+        bld.arg(&ddp);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&dii);
+        bld.arg(&dsi);
+        bld.arg(&tape_ptr);
+        bld.arg(&slim);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
     hash_outputs::hash_outputs(
         &ctx,

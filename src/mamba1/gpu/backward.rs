@@ -23,7 +23,7 @@ use super::weights::{
 use crate::gpu::blas::gpu_gemm_bi_backward_grad_raw;
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
-use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm, y_runs};
 use cudarc::driver::PushKernelArg;
 use std::sync::Arc;
 
@@ -176,42 +176,6 @@ pub fn gpu_backward_mamba_layer(
                 .zero(&ctx.stream)
                 .map_err(|e| format!("zero d_a_log_local: {e:?}"))?;
         }
-        let mut builder = ctx.stream.launch_builder(kernel);
-        builder.arg(acts.h_saved.inner());
-        builder.arg(acts.delta.inner());
-        builder.arg(acts.u.inner());
-        builder.arg(scratch.d_b_reduced.inner()); // B_saved
-        builder.arg(scratch.d_c_reduced.inner()); // C_saved
-        builder.arg(&a_neg_ptr); // raw ptr at layer offset
-        let dp_ptr = lw.d_param.cached_ptr();
-        builder.arg(&dp_ptr);
-        builder.arg(scratch.d_y.inner()); // dy (from gating backward)
-        if use_fold {
-            // The fold's epilogue applies the softplus derivative inline
-            // (round-first) and emits the PRE-softplus dt gradient - the
-            // separate softplus backward launch is skipped on this route.
-            builder.arg(scratch.d_delta_raw.inner_mut());
-            builder.arg(acts.delta_raw.inner());
-        } else {
-            builder.arg(scratch.d_delta.inner_mut());
-        }
-        builder.arg(scratch.d_u.inner_mut());
-        builder.arg(scratch.d_b_local.inner_mut());
-        builder.arg(scratch.d_c_local.inner_mut());
-        builder.arg(scratch.d_d_local.inner_mut());
-        builder.arg(scratch.d_a_log_local.inner_mut());
-        builder.arg(&b_i);
-        builder.arg(&t_i);
-        builder.arg(&di_i);
-        builder.arg(&ds_i);
-        // The slim tape rides the h_saved buffer; the flag picks the
-        // kernel's replay path. Sequential kernel keeps its signature.
-        let tape_p = acts.h_saved.cached_ptr();
-        let slim_i: i32 = i32::from(crate::gpu::launch::scan_tape_slim());
-        if use_parallel {
-            builder.arg(&tape_p);
-            builder.arg(&slim_i);
-        }
         let cfg = if use_fold {
             crate::gpu::launch::grid_parallel_scan_bwd_fold(b, di, ds, 4)
         } else if use_parallel {
@@ -219,8 +183,47 @@ pub fn gpu_backward_mamba_layer(
         } else {
             grid_1d_cover(b * di)?
         };
-        unsafe { builder.launch(cfg) }
-            .map_err(|e| format!("ssm bwd (parallel={use_parallel}): {e:?}"))?;
+        // The slim tape rides the h_saved buffer; the flag picks the
+        // kernel's replay path. Sequential kernel keeps its signature.
+        let tape_p = acts.h_saved.cached_ptr();
+        let slim_i: i32 = i32::from(crate::gpu::launch::scan_tape_slim());
+        let dp_ptr = lw.d_param.cached_ptr();
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut builder = ctx.stream.launch_builder(kernel);
+            builder.arg(acts.h_saved.inner());
+            builder.arg(acts.delta.inner());
+            builder.arg(acts.u.inner());
+            builder.arg(scratch.d_b_reduced.inner()); // B_saved
+            builder.arg(scratch.d_c_reduced.inner()); // C_saved
+            builder.arg(&a_neg_ptr); // raw ptr at layer offset
+            builder.arg(&dp_ptr);
+            builder.arg(scratch.d_y.inner()); // dy (from gating backward)
+            if use_fold {
+                // The fold's epilogue applies the softplus derivative inline
+                // (round-first) and emits the PRE-softplus dt gradient - the
+                // separate softplus backward launch is skipped on this route.
+                builder.arg(scratch.d_delta_raw.inner_mut());
+                builder.arg(acts.delta_raw.inner());
+            } else {
+                builder.arg(scratch.d_delta.inner_mut());
+            }
+            builder.arg(scratch.d_u.inner_mut());
+            builder.arg(scratch.d_b_local.inner_mut());
+            builder.arg(scratch.d_c_local.inner_mut());
+            builder.arg(scratch.d_d_local.inner_mut());
+            builder.arg(scratch.d_a_log_local.inner_mut());
+            builder.arg(&b_i);
+            builder.arg(&t_i);
+            builder.arg(&di_i);
+            builder.arg(&ds_i);
+            if use_parallel {
+                builder.arg(&tape_p);
+                builder.arg(&slim_i);
+                builder.arg(&y_first);
+            }
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("ssm bwd (parallel={use_parallel}): {e:?}"))?;
+        }
     }
 
     // Reductions: sum per-sample gradients across batch/d_inner.

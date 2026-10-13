@@ -498,10 +498,11 @@ NAME(                                                                         \
        slim the launcher passes the buffer of h_saved, and a launch           \
        touches only one of the two. */                                        \
     float* run_tape,                                                          \
-    int slim_tape                                                             \
+    int slim_tape,                                                            \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     IDX bid = blockIdx.x;                                                     \
-    int did = blockIdx.y;                                                     \
+    int did = y_first + blockIdx.y;                                           \
     if (bid >= batch || did >= d_inner) return;                               \
     if (d_state > MAX_DSTATE) return;                                         \
     extern __shared__ float smem[];                                           \
@@ -716,10 +717,11 @@ NAME(                                                                         \
     /* > 0: delta, u and y in t-major rows [batch, d_inner, tstride],         \
        y stored ungated for gate_from_tmajor. 0: row-major                    \
        [batch, T, d_inner]. */                                                \
-    int tstride                                                               \
+    int tstride,                                                              \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     IDX bid = blockIdx.x;                                                     \
-    int did = blockIdx.y;                                                     \
+    int did = y_first + blockIdx.y;                                           \
     if (bid >= batch || did >= d_inner) return;                               \
     if (d_state > MAX_DSTATE) return;                                         \
     extern __shared__ float smem[];                                           \
@@ -948,10 +950,11 @@ NAME(                                                                         \
     int batch, int T, int d_inner, int d_state,                               \
     /* Slim tape: (run_a, run_b, h_entry) per (b,d,n,chunk). */               \
     const float* run_tape,                                                    \
-    int slim_tape                                                             \
+    int slim_tape,                                                            \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     IDX bid = blockIdx.x;                                                     \
-    int did = blockIdx.y;                                                     \
+    int did = y_first + blockIdx.y;                                           \
     if (bid >= batch || did >= d_inner) return;                               \
     if (d_state > MAX_DSTATE) return;                                         \
     extern __shared__ float smem[];                                           \
@@ -1389,11 +1392,12 @@ NAME(                                                                         \
     float* __restrict__ d_a_log_local,                                        \
     int batch, int T, int d_inner, int d_state,                               \
     const float* run_tape,                                                    \
-    int slim_tape                                                             \
+    int slim_tape,                                                            \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     const int G = SCAN_BWD_DGROUP;                                            \
     IDX bid = blockIdx.x;                                                     \
-    int gid = blockIdx.y; /* d group */                                       \
+    int gid = y_first + blockIdx.y; /* d group */                             \
     int did0 = gid * G;                                                       \
     if (bid >= batch || did0 >= d_inner) return;                              \
     if (d_state > MAX_DSTATE) return;                                         \

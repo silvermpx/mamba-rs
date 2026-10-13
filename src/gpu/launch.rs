@@ -204,14 +204,67 @@ pub(crate) fn blocks_1d(n: usize) -> Result<u32, String> {
         .ok_or_else(|| format!("{n} threads need {blocks} blocks, past the grid's x extent"))
 }
 
-/// Tiles of `tile` steps covering `t` steps on the grid's y axis, whose
-/// extent is 65535.
-pub(crate) fn tiles_y(t: usize, tile: usize) -> Result<u32, String> {
-    let tiles = t.div_ceil(tile);
-    u32::try_from(tiles)
-        .ok()
-        .filter(|&n| n <= 65535)
-        .ok_or_else(|| format!("{t} steps need {tiles} tiles of {tile}, past the grid's y extent"))
+/// The extent of the grid's y and z axes, in blocks.
+pub const GRID_YZ_EXTENT: u32 = 65535;
+
+/// The blocks one run of a split axis holds: the axis's extent of
+/// [`GRID_YZ_EXTENT`], or fewer when `MAMBA_RS_GRID_RUN` asks for shorter
+/// runs. Shorter runs split the axes of ordinary shapes, so a suite run with
+/// it checks that every split launch writes what one launch would. A value
+/// other than a block count from 1 to the extent is refused loudly, so a
+/// typo cannot report a green run that never split an axis.
+fn run_blocks() -> u32 {
+    static RUN: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *RUN.get_or_init(|| match std::env::var("MAMBA_RS_GRID_RUN") {
+        Err(_) => GRID_YZ_EXTENT,
+        Ok(v) => match v.trim().parse::<u32>() {
+            Ok(n) if (1..=GRID_YZ_EXTENT).contains(&n) => n,
+            _ => panic!(
+                "MAMBA_RS_GRID_RUN={v:?} is not a run length from 1 to {GRID_YZ_EXTENT} blocks"
+            ),
+        },
+    })
+}
+
+/// `cfg` split along one axis (1 for y, 2 for z) into runs of at most `run`
+/// blocks, as `(first block, config)` pairs in ascending order.
+fn axis_runs(
+    cfg: LaunchConfig,
+    axis: usize,
+    run: u32,
+) -> impl Iterator<Item = (i32, LaunchConfig)> {
+    let (x, y, z) = cfg.grid_dim;
+    let blocks = if axis == 1 { y } else { z };
+    (0..blocks).step_by(run as usize).map(move |first| {
+        let n = (blocks - first).min(run);
+        let grid_dim = if axis == 1 { (x, n, z) } else { (x, y, n) };
+        (first as i32, LaunchConfig { grid_dim, ..cfg })
+    })
+}
+
+/// `cfg` split along its y axis into runs that each fit the axis's extent
+/// of [`GRID_YZ_EXTENT`] blocks: `(first block, config)` pairs in ascending
+/// order, a single pair when the axis fits. A kernel launched this way
+/// takes the run's first block as an argument and adds it to blockIdx.y,
+/// so every block keeps the index one launch over the whole axis would give
+/// it, and a kernel whose blocks are independent writes what that launch
+/// would. `cfg` carries the whole axis's block count, which here never
+/// passes one of the kernel's 32-bit arguments, so a first block fits an
+/// `int`.
+pub fn y_runs(cfg: LaunchConfig) -> impl Iterator<Item = (i32, LaunchConfig)> {
+    axis_runs(cfg, 1, run_blocks())
+}
+
+/// [`y_runs`] along the z axis.
+pub fn z_runs(cfg: LaunchConfig) -> impl Iterator<Item = (i32, LaunchConfig)> {
+    axis_runs(cfg, 2, run_blocks())
+}
+
+/// [`y_runs`] along both the y and the z axis: `(y first, z first,
+/// config)`.
+pub fn yz_runs(cfg: LaunchConfig) -> impl Iterator<Item = (i32, i32, LaunchConfig)> {
+    z_runs(cfg)
+        .flat_map(|(z_first, cfg)| y_runs(cfg).map(move |(y_first, cfg)| (y_first, z_first, cfg)))
 }
 
 /// Launch a one-dimensional element kernel whose last argument is its
@@ -413,11 +466,9 @@ pub fn scan_tape_len(batch: usize, seq_len: usize, d_inner: usize, d_state: usiz
     batch * d_inner * d_state * 3 * n_chunks
 }
 
+/// Grid of the parallel scan forward: one block per (sequence, channel),
+/// the channels on the y axis, launched in [`y_runs`].
 pub fn grid_parallel_scan(batch: usize, d_inner: usize, d_state: usize) -> LaunchConfig {
-    assert!(
-        d_inner <= 65535,
-        "grid_parallel_scan: d_inner {d_inner} exceeds CUDA grid.y limit 65535"
-    );
     assert!(
         d_state <= 256,
         "grid_parallel_scan: d_state {d_state} exceeds the kernel MAX_DSTATE guard - \
@@ -580,7 +631,8 @@ pub fn scan_bwd_index_width(
 pub const SCAN_BWD_DGROUP: usize = 4;
 
 /// Launch config for the d-group fold backward: one block per
-/// (batch, d-group of SCAN_BWD_DGROUP lanes). Smem = the f32 workspace
+/// (batch, d-group of SCAN_BWD_DGROUP lanes), the groups on the y axis,
+/// launched in [`y_runs`]. Smem = the f32 workspace
 /// (warp scans, exchanges, per-group postfix/carry lanes, reduce and
 /// boundary tiles) plus the typed delta/u/dy stage.
 pub fn grid_parallel_scan_bwd_fold(
@@ -611,11 +663,9 @@ pub fn grid_parallel_scan_bwd_fold(
     }
 }
 
+/// Grid of the parallel scan backward: one block per (sequence, channel),
+/// the channels on the y axis, launched in [`y_runs`].
 pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
-    assert!(
-        d_inner <= 65535,
-        "grid_parallel_scan_bwd: d_inner {d_inner} exceeds CUDA grid.y limit 65535"
-    );
     const NWARPS: usize = SCAN_NTHREADS / 32;
     const MAX_DSTATE: usize = 256;
     // SMEM_TOTAL_FLOATS (fwd layout incl. f32-sized stage) + bwd-extra
@@ -637,7 +687,8 @@ pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
 /// kills bank conflicts on the transposed read).
 pub const GBC_TILE_T: usize = 32;
 
-/// Grid for the staged t-major B/C gather.
+/// Grid for the staged t-major B/C gather: the sequences on the y axis,
+/// launched in [`y_runs`].
 pub fn grid_gather_bc_tiled(
     batch: usize,
     t: usize,
@@ -653,14 +704,15 @@ pub fn grid_gather_bc_tiled(
 
 /// Grid of the tiled conv forward kernels, the saving and the inference
 /// one: x covers (b * d_inner) threads at 256/block, y covers T in tiles of
-/// CONV1D_FWD_TILE_T = 32 (kernels/conv1d.cu). The serial per-(b,d) walk
-/// left 146 SMs idle at the production shape (24 blocks); a tile walks from
-/// a halo window exactly as the serial walk would, so the tile depth never
-/// changes an output, and shallow tiles keep more blocks in flight.
+/// CONV1D_FWD_TILE_T = 32 (kernels/conv1d.cu), launched in [`y_runs`]. The
+/// serial per-(b,d) walk left 146 SMs idle at the production shape (24
+/// blocks); a tile walks from a halo window exactly as the serial walk
+/// would, so the tile depth never changes an output, and shallow tiles keep
+/// more blocks in flight.
 pub fn grid_conv_fwd_tiled(batch: usize, d_inner: usize, t: usize) -> Result<LaunchConfig, String> {
     const TILE_T: usize = 32;
     Ok(LaunchConfig {
-        grid_dim: (blocks_1d(batch * d_inner)?, tiles_y(t, TILE_T)?, 1),
+        grid_dim: (blocks_1d(batch * d_inner)?, t.div_ceil(TILE_T) as u32, 1),
         block_dim: (BLOCK_1D, 1, 1),
         shared_mem_bytes: 0,
     })
@@ -669,6 +721,8 @@ pub fn grid_conv_fwd_tiled(batch: usize, d_inner: usize, t: usize) -> Result<Lau
 /// Grid of the t-major transposing kernels, the softplus into t-major rows
 /// and the gate out of them (kernels/activations.cu): one 32 x 32 tile of
 /// (d, t) per block and 32 x 8 threads, each thread four rows of the tile.
+/// The t tiles lie on the y axis and the sequences on the z axis, launched
+/// in [`yz_runs`].
 pub fn grid_tmajor_tiles(batch: usize, t: usize, d: usize) -> LaunchConfig {
     const TILE: u32 = 32;
     LaunchConfig {
@@ -687,11 +741,12 @@ pub fn grid_tmajor_tiles(batch: usize, t: usize, d: usize) -> LaunchConfig {
 const CONV_BWD_TILE_T: usize = 128;
 
 /// Grid of the tiled conv backward: tiles of CONV1D_TILE_T = 128, the depth
-/// that also fixes how many partial rows the tap gradients reduce.
+/// that also fixes how many partial rows the tap gradients reduce, on the y
+/// axis, launched in [`y_runs`].
 pub fn grid_conv_tiled(batch: usize, d_inner: usize, t: usize) -> Result<LaunchConfig, String> {
     const TILE_T: usize = CONV_BWD_TILE_T;
     Ok(LaunchConfig {
-        grid_dim: (blocks_1d(batch * d_inner)?, tiles_y(t, TILE_T)?, 1),
+        grid_dim: (blocks_1d(batch * d_inner)?, t.div_ceil(TILE_T) as u32, 1),
         block_dim: (BLOCK_1D, 1, 1),
         shared_mem_bytes: 0,
     })
@@ -777,18 +832,52 @@ mod tests {
         assert!(cover.grid_dim.0 as usize * 256 >= PAST_I32);
     }
 
-    /// A grid past the x extent or a tile count past the y extent is an
-    /// error, not a truncated launch.
+    /// A grid past the x extent is an error, not a truncated launch.
     #[test]
-    fn a_grid_past_its_extent_is_refused() {
+    fn a_grid_past_its_x_extent_is_refused() {
         let most = i32::MAX as usize * 256;
         assert_eq!(blocks_1d(most).unwrap(), i32::MAX as u32);
         assert!(blocks_1d(most + 1).is_err());
-        assert_eq!(tiles_y(65535 * 32, 32).unwrap(), 65535);
-        assert!(tiles_y(65535 * 32 + 1, 32).is_err());
-        assert!(grid_conv_fwd_tiled(1, 1, 65535 * 32 + 1).is_err());
         assert!(grid_conv_tiled(most, 1, 1).is_ok());
         assert!(grid_conv_tiled(most + 1, 1, 1).is_err());
+    }
+
+    /// The runs of an axis cover it in order, each within the extent; an
+    /// axis that fits is one run, a longer one ends in a partial run.
+    #[test]
+    fn the_runs_of_an_axis_cover_it_within_the_extent() {
+        let cfg = |y: u32, z: u32| LaunchConfig {
+            grid_dim: (7, y, z),
+            block_dim: (32, 1, 1),
+            shared_mem_bytes: 5,
+        };
+        let e = GRID_YZ_EXTENT;
+        let runs = |c, axis| -> Vec<_> {
+            axis_runs(c, axis, e)
+                .map(|(f, c)| (f, c.grid_dim))
+                .collect()
+        };
+        assert_eq!(runs(cfg(e, 3), 1), [(0, (7, e, 3))]);
+        assert_eq!(
+            runs(cfg(2 * e + 2, 3), 1),
+            [
+                (0, (7, e, 3)),
+                (e as i32, (7, e, 3)),
+                (2 * e as i32, (7, 2, 3))
+            ]
+        );
+        assert_eq!(
+            runs(cfg(3, e + 1), 2),
+            [(0, (7, 3, e)), (e as i32, (7, 3, 1))]
+        );
+        let tiles = grid_conv_fwd_tiled(1, 1, 65535 * 32 + 1).unwrap();
+        assert_eq!(tiles.grid_dim.1, 65536);
+        assert_eq!(axis_runs(tiles, 1, e).count(), 2);
+        assert!(axis_runs(cfg(0, 1), 1, e).next().is_none());
+        let short: Vec<_> = axis_runs(cfg(7, 1), 1, 3)
+            .map(|(f, c)| (f, c.grid_dim.1, c.shared_mem_bytes))
+            .collect();
+        assert_eq!(short, [(0, 3, 5), (3, 3, 5), (6, 1, 5)]);
     }
 
     /// The argument check names the first value a kernel would take

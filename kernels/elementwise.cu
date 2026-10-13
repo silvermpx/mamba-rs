@@ -95,10 +95,11 @@ void colsum_accumulate(
 extern "C" __global__ void colsum_segments(
     float* __restrict__ out,         // [segments * n_out]
     const float* __restrict__ src,   // [segments * seg_len * n_out]
-    int segments, int seg_len, int n_out
+    int segments, int seg_len, int n_out,
+    int y_first /* this run's first y block */
 ) {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
-    int s = blockIdx.y;
+    int s = y_first + blockIdx.y;
     if (j >= n_out || s >= segments) return;
     const float* base = src + (size_t)s * (size_t)seg_len * (size_t)n_out + j;
     size_t stride = (size_t)n_out;
