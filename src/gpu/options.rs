@@ -2,6 +2,7 @@
 
 use super::dtype::WeightDtype;
 use super::gemm_mode::GemmMode;
+use crate::config::ScanMode;
 
 /// Where a GPU model runs and in what precision: the device, the storage
 /// precision of its weights and activations, and the GEMM mode.
@@ -20,6 +21,9 @@ pub struct GpuOptions {
     pub dtype: WeightDtype,
     /// GEMM mode. `None` takes the one `MAMBA_RS_GEMM_MODE` names.
     pub mode: Option<GemmMode>,
+    /// Scan of the SSM recurrence over a window. `None` keeps the one the
+    /// model's configuration names (a loaded checkpoint's is `Auto`).
+    pub scan_mode: Option<ScanMode>,
 }
 
 impl GpuOptions {
@@ -39,5 +43,17 @@ impl GpuOptions {
     pub fn mode(mut self, mode: GemmMode) -> Self {
         self.mode = Some(mode);
         self
+    }
+
+    /// Run the scans in this mode whatever the model's configuration says.
+    pub fn scan_mode(mut self, mode: ScanMode) -> Self {
+        self.scan_mode = Some(mode);
+        self
+    }
+
+    /// The scan mode a model built with these options runs: this option's
+    /// when it is set, else the configuration's own.
+    pub(crate) fn scan_mode_or(&self, own: ScanMode) -> ScanMode {
+        self.scan_mode.unwrap_or(own)
     }
 }

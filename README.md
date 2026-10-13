@@ -157,7 +157,9 @@ embed, lm_head, vocab_size)` wraps a backbone built in code, and a batch
 above one generates several sequences side by side with
 `generate_batch`. The CPU `MambaLM::from_hf` loads the same checkpoints.
 The `mamba-generate` binary (feature `cli`) runs any of them from the
-command line, with `--gpu` and `--dtype`.
+command line; with `--gpu` it takes `--dtype`, `--gemm-mode`,
+`--scan-mode` and `--batch` (continuations of one prompt in one batched
+run), which the CPU path, f32 and one sequence, refuses.
 
 bf16 against f32 on the four `state-spaces/mamba-*-hf` checkpoints: 15 of
 15 greedy tokens match and the KL divergence of the final logits is at

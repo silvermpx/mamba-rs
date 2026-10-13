@@ -236,6 +236,7 @@
 "rmsnorm_bf16_768" = "gate"
 "scan_mode_bench" = "qualification"
 "scan_mode_boundary" = "host"
+"scan_mode_option" = "gate"
 "sm100_tcgen05_census" = "qualification"
 "sm120_tf32_pipeline_source_gate" = "host"
 "sm120_tf32_stack_source_gate" = "host"

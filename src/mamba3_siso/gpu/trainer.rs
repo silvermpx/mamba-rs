@@ -96,6 +96,8 @@ impl Mamba3GpuTrainer {
         session: TrainSessionCfg,
         opts: GpuOptions,
     ) -> Result<Self, String> {
+        let mut cfg = cfg;
+        cfg.scan_mode = opts.scan_mode_or(cfg.scan_mode);
         Self::new_full_inner(
             opts.device,
             cpu_weights,

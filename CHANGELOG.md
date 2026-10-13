@@ -105,6 +105,13 @@
   (`backward_step_input_grad`, also on `GpuTrainer`), for a model that
   trains something upstream of the backbone; Mamba-1 and SISO discarded
   it. In f16 it comes back unscaled.
+- `GpuOptions::scan_mode` picks the scan of every GPU backbone and trainer
+  built with the options, over the configuration's own (a loaded
+  checkpoint's is `Auto`), and `ScanMode::parse` reads `auto`,
+  `sequential` or `parallel`.
+- `mamba-generate` takes `--gemm-mode`, `--scan-mode` and `--batch` with
+  `--gpu`, and refuses those and a `--dtype` other than f32 on the CPU,
+  which ignored `--dtype` before.
 
 ### Changed
 

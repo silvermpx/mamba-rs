@@ -42,9 +42,25 @@ struct Args {
     gpu_device: usize,
 
     /// Weight storage precision on GPU: f32 (default), tf32 (f32 storage,
-    /// deterministic TF32 products), bf16 (half VRAM), f16
+    /// deterministic TF32 products), bf16 (half VRAM), f16. The CPU runs
+    /// f32 only.
     #[arg(long, default_value = "f32")]
     dtype: String,
+
+    /// GEMM mode on GPU: deterministic, cublas-fast or cublas-pedantic.
+    /// Without it, MAMBA_RS_GEMM_MODE decides (deterministic by default).
+    #[arg(long)]
+    gemm_mode: Option<String>,
+
+    /// Scan of the recurrence over the prompt on GPU: auto (default),
+    /// sequential or parallel
+    #[arg(long)]
+    scan_mode: Option<String>,
+
+    /// Continuations of the prompt to generate in one batched run on GPU,
+    /// sequence i sampling with seed + i
+    #[arg(long, default_value_t = 1)]
+    batch: usize,
 
     /// Sampling temperature (0 = greedy)
     #[arg(short, long, default_value_t = 0.7)]
@@ -134,6 +150,19 @@ fn main() {
         std::process::exit(1);
     }
 
+    // The CPU path takes none of the GPU settings: refuse them rather than
+    // run something other than what was asked.
+    let gpu_only = [
+        (args.dtype.to_lowercase() != "f32", "--dtype other than f32"),
+        (args.gemm_mode.is_some(), "--gemm-mode"),
+        (args.scan_mode.is_some(), "--scan-mode"),
+        (args.batch != 1, "--batch"),
+    ];
+    if let Some((_, flag)) = gpu_only.iter().find(|(set, _)| *set) {
+        eprintln!("error: {flag} needs --gpu; the CPU runs f32, one sequence");
+        std::process::exit(1);
+    }
+
     run_cpu(
         &model_dir,
         &args,
@@ -213,11 +242,29 @@ fn run_gpu(
     tokenizer: &Tokenizer,
 ) {
     let dtype = parse_dtype(&args.dtype);
-    let opts = mamba_rs::GpuOptions::default()
+    let mut opts = mamba_rs::GpuOptions::default()
         .device(args.gpu_device)
         .dtype(dtype);
+    if let Some(mode) = &args.gemm_mode {
+        opts = opts.mode(
+            mamba_rs::GemmMode::parse_env_value(mode).unwrap_or_else(|e| {
+                eprintln!("error: --gemm-mode: {e}");
+                std::process::exit(1);
+            }),
+        );
+    }
+    if let Some(mode) = &args.scan_mode {
+        opts = opts.scan_mode(mamba_rs::config::ScanMode::parse(mode).unwrap_or_else(|e| {
+            eprintln!("error: --scan-mode: {e}");
+            std::process::exit(1);
+        }));
+    }
+    if args.batch == 0 {
+        eprintln!("error: --batch must be at least 1");
+        std::process::exit(1);
+    }
     let t_load = Instant::now();
-    let mut lm = mamba_rs::MambaGpuLM::from_hf(model_dir, 1, opts).unwrap_or_else(|e| {
+    let mut lm = mamba_rs::MambaGpuLM::from_hf(model_dir, args.batch, opts).unwrap_or_else(|e| {
         eprintln!("error: failed to load GPU model: {e}");
         std::process::exit(1);
     });
@@ -242,6 +289,34 @@ fn run_gpu(
     let mut byte_buf = Vec::new();
     let t_start = Instant::now();
     let mut ttft: Option<u128> = None;
+
+    if args.batch > 1 {
+        let prompts = vec![prompt_ids; args.batch];
+        let seeds: Vec<SampleParams> = (0..args.batch as u64)
+            .map(|i| SampleParams {
+                seed: params.seed.wrapping_add(i),
+                ..params.clone()
+            })
+            .collect();
+        let outs = lm.generate_batch(&prompts, &seeds).unwrap_or_else(|e| {
+            eprintln!("\nerror: generation failed: {e}");
+            std::process::exit(1);
+        });
+        ttft = Some(t_start.elapsed().as_millis());
+        for (i, tokens) in outs.iter().enumerate() {
+            let _ = writeln!(stdout, "--- sequence {i} (seed {}) ---", seeds[i].seed);
+            byte_buf.clear();
+            for &token_id in tokens {
+                n_generated += 1;
+                if let Some(piece) = decode_token(tokenizer, token_id, &mut byte_buf) {
+                    let _ = stdout.write_all(piece.as_bytes());
+                }
+            }
+            let _ = writeln!(stdout);
+        }
+        print_stats(&mut stdout, n_prompt, n_generated, ttft, t_start);
+        return;
+    }
 
     lm.generate_streaming(prompt_ids, params, |token_id, _| {
         if ttft.is_none() {

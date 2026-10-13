@@ -548,6 +548,8 @@ impl Mamba3MimoGpuTrainer {
         opts: GpuOptions,
         stride: usize,
     ) -> Result<Self, String> {
+        let mut cfg = cfg;
+        cfg.scan_mode = opts.scan_mode_or(cfg.scan_mode);
         let TrainSessionCfg {
             input_dim,
             batch,

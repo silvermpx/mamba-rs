@@ -2153,6 +2153,8 @@ impl Mamba3GpuBackbone {
         batch: usize,
         opts: GpuOptions,
     ) -> Result<Self, String> {
+        let mut cfg = cfg;
+        cfg.scan_mode = opts.scan_mode_or(cfg.scan_mode);
         Self::new_with_dtype_inner(
             opts.device,
             cpu_weights,

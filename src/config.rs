@@ -57,6 +57,19 @@ impl ScanMode {
         }
     }
 
+    /// Parse `auto`, `sequential` or `parallel`; ASCII whitespace around
+    /// the name is ignored.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim_ascii() {
+            "auto" => Ok(Self::Auto),
+            "sequential" => Ok(Self::Sequential),
+            "parallel" => Ok(Self::Parallel),
+            _ => Err(format!(
+                "{value:?} is not a scan mode (use auto, sequential, or parallel)"
+            )),
+        }
+    }
+
     /// Resolve `Auto` for a shape. Delegates to [`Self::use_parallel`] so the
     /// two entry points can never disagree.
     pub fn resolve(self, seq_len: usize, d_state: usize) -> Self {

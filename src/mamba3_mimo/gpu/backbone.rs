@@ -45,6 +45,8 @@ impl Mamba3MimoGpuBackbone {
         batch: usize,
         opts: GpuOptions,
     ) -> Result<Self, String> {
+        let mut cfg = cfg;
+        cfg.scan_mode = opts.scan_mode_or(cfg.scan_mode);
         let device = GpuDevice::new(opts.device)?;
         let engine = match opts.mode {
             Some(mode) => Mamba3MimoGpuEngine::new_with_mode(

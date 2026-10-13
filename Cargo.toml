@@ -784,6 +784,11 @@ path = "tests/mimo_grid_runs.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "scan_mode_option"
+path = "tests/scan_mode_option.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "state_cap_refusal"
 path = "tests/state_cap_refusal.rs"
 required-features = ["cuda"]
