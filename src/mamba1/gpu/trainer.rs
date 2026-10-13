@@ -64,7 +64,7 @@ use crate::gpu::grad_clip::{
     norm_limit, read_tail, scale_grads,
 };
 use crate::gpu::graph_capture::{
-    capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
+    TrainBody, capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
@@ -661,12 +661,11 @@ impl MambaGpuTrainer {
         match &mut self.inner {
             TrainerInner::F32(t) => {
                 let _ = t.ctx.stream.synchronize();
-                drop(t.graph.take());
+                t.drop_graphs();
             }
             TrainerInner::Mixed(t) => {
                 let _ = t.ctx.stream.synchronize();
-                drop(t.graph.take());
-                drop(t.graph_f16.take());
+                t.drop_graphs();
             }
         }
     }
@@ -723,6 +722,37 @@ impl MambaGpuTrainer {
         match &mut self.inner {
             TrainerInner::F32(t) => t.step(input, d_temporal),
             TrainerInner::Mixed(t) => t.step(input, d_temporal),
+        }
+    }
+
+    /// One micro-batch of an accumulation window in one call: the forward
+    /// of `input` and the backward of `d_temporal`, as [`Self::step`] takes
+    /// them, the gradient added to the window, which the first call opens;
+    /// AdamW waits for [`Self::apply_window`]. In f16 every micro-batch
+    /// takes its gradient at the window's loss scale. With captured graphs
+    /// (see [`Self::capture_graph`]) the call replays one, with the eager
+    /// bits.
+    pub fn accumulate(
+        &mut self,
+        input: &[f32],
+        d_temporal: &[f32],
+    ) -> Result<BackwardMetrics, String> {
+        match &mut self.inner {
+            TrainerInner::F32(t) => t.accumulate(input, d_temporal),
+            TrainerInner::Mixed(t) => t.accumulate(input, d_temporal),
+        }
+    }
+
+    /// Apply the open accumulation window with the step options (see
+    /// [`Self::set_step_opts`]): in f16 the overflow check over the
+    /// window's gradient and the unscale, then the control clip, the global
+    /// clip, the spike skip and AdamW, as an applying [`Self::backward_step`]
+    /// with those options closes a window, with its bits. With captured
+    /// graphs the call replays one.
+    pub fn apply_window(&mut self) -> Result<StepMetrics, String> {
+        match &mut self.inner {
+            TrainerInner::F32(t) => t.apply_window(),
+            TrainerInner::Mixed(t) => t.apply_window(),
         }
     }
 
@@ -843,6 +873,14 @@ impl MambaGpuTrainer {
 /// and the decay, whose magnitude grows with the sequence length as the
 /// Mamba-3 control channels' does. The offsets come from the arena's own
 /// views, so they follow its layout with or without an input projection.
+/// An error unless a host slice holds the window's `want` values.
+fn check_window_len(what: &str, got: usize, want: usize) -> Result<(), String> {
+    if got != want {
+        return Err(format!("{what}: {got} values, the window holds {want}"));
+    }
+    Ok(())
+}
+
 fn m1_control_region_geom(grads: &GpuMambaGrads, cfg: &MambaConfig) -> GradRegionGeom {
     let base = grads.flat.cached_ptr();
     let at = |s: &GradSlice| ((s.ptr() - base) / std::mem::size_of::<f32>() as u64) as i64;
@@ -924,6 +962,10 @@ pub(crate) struct MambaTrainerMixed {
     // Always None for f16 (loss-scaler overflow check requires CPU readback,
     // which breaks graph capture).
     graph: Option<GpuMambaTrainingStepGraph>,
+    /// The accumulating micro-batch and the window's apply, captured
+    /// beside the step.
+    graph_acc: Option<GpuMambaTrainingStepGraph>,
+    graph_apply: Option<GpuMambaTrainingStepGraph>,
     prepared_gemm_manifest: Option<PreparedGemmCaptureManifest>,
 
     // f16 AMP loss scaler — populated for `WeightDtype::F16`, None otherwise.
@@ -944,8 +986,13 @@ pub(crate) struct MambaTrainerMixed {
     /// before each replay; the captured `scale_grads_skip` kernel reads it
     /// via a stable device pointer baked at capture time.
     graph_f16: Option<cudarc::driver::CudaGraph>,
+    /// The f16 accumulating micro-batch and the window's apply, captured
+    /// beside the step, on the same buffers.
+    graph_f16_acc: Option<cudarc::driver::CudaGraph>,
+    graph_f16_apply: Option<cudarc::driver::CudaGraph>,
     prepared_f16_gemm_manifest: Option<PreparedGemmCaptureManifest>,
     captured_f16_gemm_plan: Option<CapturedGemmGraphPlan>,
+    captured_f16_acc_plan: Option<CapturedGemmGraphPlan>,
     has_gemm_work: bool,
     /// 1-element device buffer of `1/loss_scale`.
     unscale_factor: Option<UnscaleFactor>,
@@ -976,8 +1023,7 @@ pub(crate) struct MambaTrainerMixed {
 impl Drop for MambaTrainerMixed {
     fn drop(&mut self) {
         let _ = self.ctx.stream.synchronize();
-        drop(self.graph.take());
-        drop(self.graph_f16.take());
+        self.drop_graphs();
     }
 }
 
@@ -1168,14 +1214,19 @@ impl MambaTrainerMixed {
             step_opts: BackwardOpts::default(),
             skip_flag,
             graph: None,
+            graph_acc: None,
+            graph_apply: None,
             prepared_gemm_manifest: None,
             scaler,
             overflow_flag,
             d_temporal_scaled,
             input_grad_half: None,
             graph_f16: None,
+            graph_f16_acc: None,
+            graph_f16_apply: None,
             prepared_f16_gemm_manifest: None,
             captured_f16_gemm_plan: None,
+            captured_f16_acc_plan: None,
             has_gemm_work,
             unscale_factor,
             // Sentinel zeros — overwritten in capture_graph_f16; never used
@@ -1196,6 +1247,16 @@ impl MambaTrainerMixed {
 
     pub fn has_graph(&self) -> bool {
         self.graph.is_some() || self.graph_f16.is_some()
+    }
+
+    /// Drop every captured body; the stream must be idle.
+    fn drop_graphs(&mut self) {
+        drop(self.graph.take());
+        drop(self.graph_acc.take());
+        drop(self.graph_apply.take());
+        drop(self.graph_f16.take());
+        drop(self.graph_f16_acc.take());
+        drop(self.graph_f16_apply.take());
     }
 
     /// The step options' tail (see [`StepTail`]).
@@ -1326,11 +1387,25 @@ impl MambaTrainerMixed {
         let manifest = self.prepared_gemm_manifest.ok_or_else(|| {
             "M1 mixed training graph capture requires one successful eager step".to_string()
         })?;
+        self.graph = Some(self.capture_mixed_body(&manifest, TrainBody::Step)?);
+        self.graph_acc = Some(self.capture_mixed_body(&manifest, TrainBody::Accumulate)?);
+        // The apply runs no GEMM: it is held to an empty inventory, so a
+        // GEMM that found its way into it would fail the capture.
+        let no_gemm = self.ctx.record_eager_gemm_manifest(|| Ok(()))?;
+        self.graph_apply = Some(self.capture_mixed_body(&no_gemm, TrainBody::Apply)?);
+        Ok(())
+    }
+
+    /// Capture one bf16 training body (see [`TrainBody`]).
+    fn capture_mixed_body(
+        &mut self,
+        manifest: &PreparedGemmCaptureManifest,
+        body: TrainBody,
+    ) -> Result<GpuMambaTrainingStepGraph, String> {
         let tail = self.step_tail();
         let skip = self.skip_flag.stable_ptr(&self.ctx.stream);
-
-        // The trainer owns every captured allocation and drops the graph first.
-        let g = unsafe {
+        // The trainer owns every captured allocation and drops the graphs first.
+        unsafe {
             GpuMambaTrainingStepGraph::capture(
                 &self.ctx,
                 &self.cfg,
@@ -1355,11 +1430,10 @@ impl MambaTrainerMixed {
                 },
                 self.batch,
                 self.seq_len,
-                &manifest,
+                manifest,
+                body,
             )
-        }?;
-        self.graph = Some(g);
-        Ok(())
+        }
     }
 
     /// Run one training step. For bf16 this is the existing
@@ -1401,37 +1475,18 @@ impl MambaTrainerMixed {
         // a step the tail skipped gives it back.
         self.staged_upload(0, input)?;
         self.staged_upload(1, d_temporal)?;
+        let prev_step = self.adam.step;
         let (_, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
 
         let replayed = if let Some(ref g) = self.graph {
-            g.replay(
-                &self.ctx,
-                &MambaMixedReplay {
-                    train_w: &self.weights,
-                    adam: &self.adam,
-                    bias: &self.bias,
-                    grads: &self.grads,
-                    a_neg_all: &self.a_neg_all,
-                    mamba_input: &self.mamba_input,
-                    d_temporal: &self.d_temporal,
-                    state: &self.state,
-                },
-            )?;
+            g.replay(&self.ctx, &self.mixed_replay())?;
             true
         } else {
             self.step_eager()?;
             false
         };
-        let (skipped, grad_norm) = self.step_verdict(false)?;
-        if skipped {
-            self.adam.step -= 1;
-        }
-        Ok(StepMetrics {
-            optimizer_stepped: !skipped,
-            grad_norm,
-            ..StepMetrics::plain(self.adam.step, replayed)
-        })
+        self.finish_step(prev_step, None, replayed)
     }
 
     /// Split forward (see [`MambaGpuTrainer::forward`]): eager forward, upcast
@@ -1879,6 +1934,307 @@ impl MambaTrainerMixed {
         Ok(())
     }
 
+    /// The f16 lane's upstream gradient: `d_temporal` staged into the
+    /// scaled buffer and multiplied by the loss scale on the device.
+    fn upload_scaled_d(&mut self, d_temporal: &[f32], scale: f32) -> Result<(), String> {
+        self.staged_upload(2, d_temporal)?;
+        let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
+        let n = d_temporal.len() as i64;
+        let mut builder = self
+            .ctx
+            .stream
+            .launch_builder(&self.ctx.kernels.scale_grads_f32);
+        builder.arg(dt_scaled.inner_mut());
+        builder.arg(&scale);
+        builder.arg(&n);
+        unsafe { builder.launch(crate::gpu::launch::grid_1d_wide(d_temporal.len())) }
+            .map(|_| ())
+            .map_err(|e| format!("scale d_temporal (f16): {e:?}"))
+    }
+
+    /// Pointer-stability invariant of the f16 graphs: every device buffer
+    /// baked into the captured kernels must have the same pointer at
+    /// replay time.
+    fn assert_f16_pointers(&self) {
+        // Pointer-stability invariant — every device buffer baked into
+        // the captured kernels MUST have the same pointer at replay time.
+        assert_eq!(
+            self.bias.ptr(),
+            self.captured_f16_bias_ptr,
+            "f16 graph replay: bias pointer changed since capture"
+        );
+        assert_eq!(
+            self.unscale_factor.as_ref().unwrap().ptr(),
+            self.captured_f16_unscale_ptr,
+            "f16 graph replay: unscale_factor pointer changed since capture"
+        );
+        assert_eq!(
+            self.overflow_flag
+                .as_ref()
+                .unwrap()
+                .stable_ptr(&self.ctx.stream),
+            self.captured_f16_overflow_ptr,
+            "f16 graph replay: overflow_flag pointer changed since capture"
+        );
+        assert_eq!(
+            self.grads.flat.cached_ptr(),
+            self.captured_f16_grads_ptr,
+            "f16 graph replay: grads.flat pointer changed since capture"
+        );
+        assert_eq!(
+            self.d_temporal_scaled.as_ref().unwrap().cached_ptr(),
+            self.captured_f16_dt_scaled_ptr,
+            "f16 graph replay: d_temporal_scaled pointer changed since capture"
+        );
+        assert_eq!(
+            self.ctx.half_staging_ptr(),
+            self.captured_f16_half_staging_ptr,
+            "f16 graph replay: half_staging pointer changed since capture \
+                 (lazy grow after capture - re-capture or presize larger)"
+        );
+        assert_eq!(
+            self.ctx.bi_upcast_scratch_ptrs(),
+            self.captured_f16_bi_upcast_ptrs,
+            "f16 graph replay: bi_upcast_scratch pointer changed since capture"
+        );
+        assert_eq!(
+            self.ctx.gemm_route(),
+            self.captured_f16_gemm_flags,
+            "f16 graph replay: GEMM route changed since capture; re-capture"
+        );
+
+        // Graph replay: forward + backward + check_inf_nan +
+        // scale_grads_skip + AdamW + sync all run as one cuGraphLaunch.
+        // grads.zero is included in the captured body.
+    }
+
+    /// The bf16 graphs' replay buffers.
+    fn mixed_replay(&self) -> MambaMixedReplay<'_> {
+        MambaMixedReplay {
+            train_w: &self.weights,
+            adam: &self.adam,
+            bias: &self.bias,
+            grads: &self.grads,
+            a_neg_all: &self.a_neg_all,
+            mamba_input: &self.mamba_input,
+            d_temporal: &self.d_temporal,
+            state: &self.state,
+        }
+    }
+
+    /// The verdict of an update after it ran: in f16 the overflow, then
+    /// the step options' tail, the loss scaler, and the step counter back
+    /// at `prev_step` when AdamW skipped (an overflow, a spike, or an error
+    /// for a norm that is not finite).
+    fn finish_step(
+        &mut self,
+        prev_step: u64,
+        scale: Option<f32>,
+        replayed: bool,
+    ) -> Result<StepMetrics, String> {
+        let overflow = match (scale, self.overflow_flag.as_ref()) {
+            (Some(_), Some(flag)) => flag.read(&self.ctx.stream)? != 0,
+            _ => false,
+        };
+        let (skipped, grad_norm) = self.step_verdict(overflow)?;
+        if let Some(scaler) = self.scaler.as_mut() {
+            scaler.update(overflow);
+        }
+        if skipped {
+            self.adam.step = prev_step;
+        }
+        Ok(StepMetrics {
+            step: self.adam.step,
+            graph_replayed: replayed,
+            loss_scale: scale,
+            overflow_skipped: scale.map(|_| overflow),
+            optimizer_stepped: !skipped,
+            grad_norm,
+        })
+    }
+
+    /// One micro-batch of an accumulation window (see
+    /// [`MambaGpuTrainer::accumulate`]).
+    pub(crate) fn accumulate(
+        &mut self,
+        input: &[f32],
+        d_temporal: &[f32],
+    ) -> Result<BackwardMetrics, String> {
+        self.split_forward_route = None;
+        check_window_len("accumulate input", input.len(), self.mamba_input.len())?;
+        check_window_len(
+            "accumulate d_temporal",
+            d_temporal.len(),
+            self.d_temporal.len(),
+        )?;
+        let scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
+        if !self.grads_dirty {
+            self.grads.zero(&self.ctx.stream)?;
+            self.grads_dirty = true;
+        }
+        self.staged_upload(0, input)?;
+        match scale {
+            Some(scale) => self.upload_scaled_d(d_temporal, scale)?,
+            None => self.staged_upload(1, d_temporal)?,
+        }
+        match (scale, &self.graph_acc, &self.graph_f16_acc) {
+            (None, Some(g), _) => g.replay(&self.ctx, &self.mixed_replay())?,
+            (Some(_), _, Some(g)) => {
+                self.assert_f16_pointers();
+                with_validated_gemm_graph_launch(
+                    &self.ctx,
+                    self.has_gemm_work,
+                    self.captured_f16_acc_plan.as_ref(),
+                    "M1 f16 accumulate graph replay",
+                    || {
+                        g.launch()
+                            .map_err(|e| format!("f16 accumulate graph launch: {e:?}"))
+                    },
+                )?;
+            }
+            _ => self.eager_accumulate(scale.is_some())?,
+        }
+        Ok(BackwardMetrics {
+            step: self.adam.step,
+            optimizer_stepped: false,
+            grad_norm: None,
+            loss_scale: scale,
+            overflow_skipped: None,
+        })
+    }
+
+    /// One accumulating micro-batch eagerly: the forward and the backward
+    /// into the open window, the GEMM inventory recorded for a capture.
+    fn eager_accumulate(&mut self, scaled: bool) -> Result<(), String> {
+        self.presize_prepared_gemm_scratch()?;
+        if self.has_gemm_work {
+            prepare_inference_arch_rung(&self.ctx)?;
+        }
+        let Self {
+            ctx,
+            weights,
+            grads,
+            acts,
+            scratch,
+            state,
+            a_neg_all,
+            mamba_input,
+            d_temporal,
+            d_temporal_scaled,
+            prepared_gemm_manifest,
+            prepared_f16_gemm_manifest,
+            ..
+        } = self;
+        let d = match (scaled, d_temporal_scaled.as_mut()) {
+            (true, Some(d)) => d,
+            (true, None) => {
+                return Err("f16 accumulate: the scaled gradient buffer is missing".into());
+            }
+            (false, _) => d_temporal,
+        };
+        let manifest = ctx.record_eager_gemm_manifest(|| {
+            gpu_forward_mamba_backbone_train_mixed(
+                ctx,
+                acts,
+                weights,
+                mamba_input,
+                state,
+                scratch,
+            )?;
+            gpu_backward_mamba_backbone_mixed(
+                ctx,
+                d,
+                grads,
+                acts,
+                &weights.compute,
+                a_neg_all,
+                scratch,
+            )
+        })?;
+        if scaled {
+            *prepared_f16_gemm_manifest = Some(manifest);
+        } else {
+            *prepared_gemm_manifest = Some(manifest);
+        }
+        Ok(())
+    }
+
+    /// The open window's apply (see [`MambaGpuTrainer::apply_window`]).
+    pub(crate) fn apply_window(&mut self) -> Result<StepMetrics, String> {
+        if !self.grads_dirty {
+            return Err("apply_window: no accumulation window is open".into());
+        }
+        self.split_forward_route = None;
+        let scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
+        if let (Some(u), Some(scale)) = (self.unscale_factor.as_mut(), scale) {
+            u.write(&self.ctx.stream, 1.0 / scale)?;
+        }
+        if let Some(flag) = self.overflow_flag.as_mut() {
+            flag.zero(&self.ctx.stream)?;
+        }
+        // The step counts before the update, as the fused step counts it;
+        // a step the overflow or the tail skipped gives it back.
+        let prev_step = self.adam.step;
+        let (_, bc1, bc2) = self.adam.advance();
+        self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
+        let replayed = match (scale, &self.graph_apply, &self.graph_f16_apply) {
+            (None, Some(g), _) => {
+                g.replay(&self.ctx, &self.mixed_replay())?;
+                true
+            }
+            (Some(_), _, Some(g)) => {
+                self.assert_f16_pointers();
+                with_validated_gemm_graph_launch(
+                    &self.ctx,
+                    false,
+                    None,
+                    "M1 f16 apply graph replay",
+                    || {
+                        g.launch()
+                            .map_err(|e| format!("f16 apply graph launch: {e:?}"))
+                    },
+                )?;
+                true
+            }
+            _ => {
+                self.eager_apply(scale.is_some())?;
+                false
+            }
+        };
+        self.grads_dirty = false;
+        self.finish_step(prev_step, scale, replayed)
+    }
+
+    /// The window's apply eagerly, the captured body's sequence: in f16 the
+    /// overflow check and the unscale that skips on it, then the step
+    /// options' tail and an AdamW that skips on the tail's flag.
+    fn eager_apply(&mut self, f16: bool) -> Result<(), String> {
+        let mut overflow = 0;
+        if f16 {
+            check_inf_nan_gpu(
+                &self.ctx,
+                &self.ctx.kernels,
+                self.overflow_flag.as_mut().unwrap(),
+                &self.grads.flat,
+            )?;
+            let unscale = self.unscale_factor.as_ref().expect("unscale buf");
+            scale_grads_skip_gpu(
+                &self.ctx,
+                &self.ctx.kernels,
+                self.overflow_flag.as_mut().unwrap(),
+                &mut self.grads.flat,
+                unscale,
+            )?;
+            overflow = self
+                .overflow_flag
+                .as_ref()
+                .unwrap()
+                .stable_ptr(&self.ctx.stream);
+        }
+        let skip = self.enqueue_step_tail(overflow)?;
+        self.eager_optimize(skip)
+    }
+
     /// f16 step (eager, no graph). Mirrors PyTorch GradScaler protocol:
     ///   1. Upload d_temporal scaled by `scaler.scale()`
     ///   2. forward + backward → grads (also scaled)
@@ -1892,20 +2248,7 @@ impl MambaTrainerMixed {
         // then scale d_temporal on-device: the old path built a scaled
         // Vec<f32> on the host every step (B*T*d_model alloc + traversal).
         self.staged_upload(0, input)?;
-        self.staged_upload(2, d_temporal)?;
-        {
-            let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
-            let n = d_temporal.len() as i64;
-            let mut builder = self
-                .ctx
-                .stream
-                .launch_builder(&self.ctx.kernels.scale_grads_f32);
-            builder.arg(dt_scaled.inner_mut());
-            builder.arg(&scale);
-            builder.arg(&n);
-            unsafe { builder.launch(crate::gpu::launch::grid_1d_wide(d_temporal.len())) }
-                .map_err(|e| format!("scale d_temporal (f16): {e:?}"))?;
-        }
+        self.upload_scaled_d(d_temporal, scale)?;
 
         // Update the unscale_factor device buffer (= 1/scale) for the
         // graph-captured `scale_grads_skip` kernel. CPU writes async H2D;
@@ -1918,7 +2261,7 @@ impl MambaTrainerMixed {
         // assume the optimizer WILL run (graph always launches AdamW; eager
         // skips on overflow). On eager-overflow we restore step below.
         let prev_step = self.adam.step;
-        let (next_step, bc1, bc2) = self.adam.advance();
+        let (_, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
 
         // Zero the overflow flag (drops borrow immediately so we can re-borrow below).
@@ -1928,56 +2271,8 @@ impl MambaTrainerMixed {
             .zero(&self.ctx.stream)?;
 
         let replayed = if let Some(ref g) = self.graph_f16 {
-            // Pointer-stability invariant — every device buffer baked into
-            // the captured kernels MUST have the same pointer at replay time.
-            assert_eq!(
-                self.bias.ptr(),
-                self.captured_f16_bias_ptr,
-                "f16 graph replay: bias pointer changed since capture"
-            );
-            assert_eq!(
-                self.unscale_factor.as_ref().unwrap().ptr(),
-                self.captured_f16_unscale_ptr,
-                "f16 graph replay: unscale_factor pointer changed since capture"
-            );
-            assert_eq!(
-                self.overflow_flag
-                    .as_ref()
-                    .unwrap()
-                    .stable_ptr(&self.ctx.stream),
-                self.captured_f16_overflow_ptr,
-                "f16 graph replay: overflow_flag pointer changed since capture"
-            );
-            assert_eq!(
-                self.grads.flat.cached_ptr(),
-                self.captured_f16_grads_ptr,
-                "f16 graph replay: grads.flat pointer changed since capture"
-            );
-            assert_eq!(
-                self.d_temporal_scaled.as_ref().unwrap().cached_ptr(),
-                self.captured_f16_dt_scaled_ptr,
-                "f16 graph replay: d_temporal_scaled pointer changed since capture"
-            );
-            assert_eq!(
-                self.ctx.half_staging_ptr(),
-                self.captured_f16_half_staging_ptr,
-                "f16 graph replay: half_staging pointer changed since capture \
-                 (lazy grow after capture - re-capture or presize larger)"
-            );
-            assert_eq!(
-                self.ctx.bi_upcast_scratch_ptrs(),
-                self.captured_f16_bi_upcast_ptrs,
-                "f16 graph replay: bi_upcast_scratch pointer changed since capture"
-            );
-            assert_eq!(
-                self.ctx.gemm_route(),
-                self.captured_f16_gemm_flags,
-                "f16 graph replay: GEMM route changed since capture; re-capture"
-            );
+            self.assert_f16_pointers();
 
-            // Graph replay: forward + backward + check_inf_nan +
-            // scale_grads_skip + AdamW + sync all run as one cuGraphLaunch.
-            // grads.zero is included in the captured body.
             with_validated_gemm_graph_launch(
                 &self.ctx,
                 self.has_gemm_work,
@@ -2020,30 +2315,7 @@ impl MambaTrainerMixed {
             self.eager_optimize(skip)?;
             false
         };
-        let overflow = self
-            .overflow_flag
-            .as_ref()
-            .unwrap()
-            .read(&self.ctx.stream)?
-            != 0;
-        // The step counted before it goes back when AdamW skipped it: an
-        // overflow (GradScaler keeps the step counter), a spike, or an
-        // error for a norm that is not finite.
-        let (skipped, grad_norm) = self.step_verdict(overflow)?;
-        self.scaler.as_mut().expect("f16 scaler").update(overflow);
-        if skipped {
-            self.adam.step = prev_step;
-        }
-        debug_assert!(skipped || self.adam.step == next_step);
-
-        Ok(StepMetrics {
-            step: self.adam.step,
-            graph_replayed: replayed,
-            loss_scale: Some(scale),
-            overflow_skipped: Some(overflow),
-            optimizer_stepped: !skipped,
-            grad_norm,
-        })
+        self.finish_step(prev_step, Some(scale), replayed)
     }
 
     /// Capture the f16 training step into a CUDA Graph.
@@ -2094,36 +2366,86 @@ impl MambaTrainerMixed {
         let tail = self.step_tail();
         let skip_ptr = self.skip_flag.stable_ptr(&self.ctx.stream);
 
-        // Capture body: zero_grads + forward + backward + check_inf_nan +
-        // scale_grads_skip + AdamW + sync_master_to_compute. Mirrors
-        // `step_f16` eager path 1:1 so numerics match.
+        // Capture bodies: the whole step, an accumulating micro-batch and the
+        // window's apply, each the eager sequence 1:1 so numerics match.
         self.ctx.freeze_graph_scratch();
-        let (g, captured_f16_gemm_plan) = {
-            let Self {
-                ctx,
-                cfg,
-                dtype,
-                weights,
-                grads,
-                adam,
-                bias,
-                multi_plan,
-                acts,
-                scratch,
-                state,
-                a_neg_all,
-                mamba_input,
-                d_temporal_scaled,
-                overflow_flag,
-                unscale_factor,
-                clip_partials,
-                clip_scratch,
-                ..
-            } = self;
-            let d_temporal = d_temporal_scaled.as_mut().expect("f16 dt_scaled");
-            unsafe {
-                capture_into_graph_with_gemm_plan(ctx, manifest.route_capacity, &manifest, || {
-                    grads.zero(&ctx.stream)?;
+        let tail = (tail, skip_ptr, snap_overflow);
+        let (g, captured_f16_gemm_plan) =
+            self.capture_f16_body(&manifest, TrainBody::Step, tail)?;
+        let (acc, acc_plan) = self.capture_f16_body(&manifest, TrainBody::Accumulate, tail)?;
+        // The apply runs no GEMM: it is held to an empty inventory, so a
+        // GEMM that found its way into it would fail the capture.
+        let no_gemm = self.ctx.record_eager_gemm_manifest(|| Ok(()))?;
+        let (apply, _) = self.capture_f16_body(&no_gemm, TrainBody::Apply, tail)?;
+        for (plan, label) in [
+            (&captured_f16_gemm_plan, "M1 f16 training graph capture"),
+            (&acc_plan, "M1 f16 accumulate graph capture"),
+        ] {
+            require_deterministic_gemm_graph_plan(
+                &self.ctx,
+                self.has_gemm_work,
+                plan.as_ref(),
+                label,
+            )?;
+        }
+        self.graph_f16_acc = Some(acc);
+        self.graph_f16_apply = Some(apply);
+        self.captured_f16_acc_plan = acc_plan;
+        self.graph_f16 = Some(g);
+        self.captured_f16_gemm_plan = captured_f16_gemm_plan;
+        self.captured_f16_bias_ptr = snap_bias;
+        self.captured_f16_unscale_ptr = snap_unscale;
+        self.captured_f16_overflow_ptr = snap_overflow;
+        self.captured_f16_grads_ptr = snap_grads;
+        self.captured_f16_dt_scaled_ptr = snap_dt_scaled;
+        self.captured_f16_half_staging_ptr = self.ctx.half_staging_ptr();
+        self.captured_f16_bi_upcast_ptrs = self.ctx.bi_upcast_scratch_ptrs();
+        self.ctx.note_graph_capture();
+        self.captured_f16_gemm_flags = self.ctx.gemm_route();
+        Ok(())
+    }
+
+    /// Capture one f16 training body (see [`TrainBody`]): the whole step
+    /// (the arena zeroed, the forward, the backward on the scaled
+    /// gradient, the overflow check, the unscale that skips on it, the step
+    /// options' tail, an AdamW that skips on the tail's flag, the master
+    /// sync and the a_neg refresh), an accumulating micro-batch (the
+    /// forward and the backward into the open window) or the window's
+    /// apply (the step's sequence from the overflow check on).
+    fn capture_f16_body(
+        &mut self,
+        manifest: &PreparedGemmCaptureManifest,
+        body: TrainBody,
+        (tail, skip_ptr, overflow_ptr): (StepTail, u64, u64),
+    ) -> Result<(cudarc::driver::CudaGraph, Option<CapturedGemmGraphPlan>), String> {
+        let Self {
+            ctx,
+            cfg,
+            dtype,
+            weights,
+            grads,
+            adam,
+            bias,
+            multi_plan,
+            acts,
+            scratch,
+            state,
+            a_neg_all,
+            mamba_input,
+            d_temporal_scaled,
+            overflow_flag,
+            unscale_factor,
+            clip_partials,
+            clip_scratch,
+            ..
+        } = self;
+        let d_temporal = d_temporal_scaled.as_mut().expect("f16 dt_scaled");
+        unsafe {
+            capture_into_graph_with_gemm_plan(ctx, manifest.route_capacity, manifest, || {
+                if body.passes() {
+                    if body == TrainBody::Step {
+                        grads.zero(&ctx.stream)?;
+                    }
                     gpu_forward_mamba_backbone_train_mixed(
                         ctx,
                         acts,
@@ -2141,70 +2463,55 @@ impl MambaTrainerMixed {
                         a_neg_all,
                         scratch,
                     )?;
-                    check_inf_nan_gpu(
-                        ctx,
-                        &ctx.kernels,
-                        overflow_flag.as_mut().unwrap(),
-                        &grads.flat,
-                    )?;
-                    scale_grads_skip_gpu(
-                        ctx,
-                        &ctx.kernels,
-                        overflow_flag.as_mut().unwrap(),
-                        &mut grads.flat,
-                        unscale_factor.as_ref().unwrap(),
-                    )?;
-                    // The step options' tail, then AdamW, which skips on the
-                    // flag the tail leaves (the overflow flag when it
-                    // measures nothing): branching mid-graph is unsupported,
-                    // and scale_grads_skip has already sanitized the arena on
-                    // overflow. The optimizer tail also recomputes a_neg
-                    // after AdamW so each replay sees the updated A-matrix
-                    // (same rationale as the eager and bf16-graph paths).
-                    let skip = tail.enqueue(
-                        ctx,
-                        &mut grads.flat,
-                        (&mut *clip_partials, &mut *clip_scratch),
-                        (skip_ptr, snap_overflow),
-                    )?;
-                    step_multi(
-                        ctx,
-                        ctx.kernels.adamw_step_multi.get(*dtype),
-                        multi_plan,
-                        adam,
-                        bias.ptr(),
-                        skip,
-                    )?;
-                    weights.sync_master_to_compute(ctx)?;
-                    recompute_a_neg_all(
-                        ctx,
-                        &weights.master.layers,
-                        a_neg_all,
-                        &state.a_neg_all,
-                        cfg.d_inner(),
-                        cfg.d_state,
-                    )
-                })
-            }
-        }?;
-        require_deterministic_gemm_graph_plan(
-            &self.ctx,
-            self.has_gemm_work,
-            captured_f16_gemm_plan.as_ref(),
-            "M1 f16 training graph capture",
-        )?;
-        self.graph_f16 = Some(g);
-        self.captured_f16_gemm_plan = captured_f16_gemm_plan;
-        self.captured_f16_bias_ptr = snap_bias;
-        self.captured_f16_unscale_ptr = snap_unscale;
-        self.captured_f16_overflow_ptr = snap_overflow;
-        self.captured_f16_grads_ptr = snap_grads;
-        self.captured_f16_dt_scaled_ptr = snap_dt_scaled;
-        self.captured_f16_half_staging_ptr = self.ctx.half_staging_ptr();
-        self.captured_f16_bi_upcast_ptrs = self.ctx.bi_upcast_scratch_ptrs();
-        self.ctx.note_graph_capture();
-        self.captured_f16_gemm_flags = self.ctx.gemm_route();
-        Ok(())
+                }
+                if !body.updates() {
+                    return Ok(());
+                }
+                check_inf_nan_gpu(
+                    ctx,
+                    &ctx.kernels,
+                    overflow_flag.as_mut().unwrap(),
+                    &grads.flat,
+                )?;
+                scale_grads_skip_gpu(
+                    ctx,
+                    &ctx.kernels,
+                    overflow_flag.as_mut().unwrap(),
+                    &mut grads.flat,
+                    unscale_factor.as_ref().unwrap(),
+                )?;
+                // The step options' tail, then AdamW, which skips on the
+                // flag the tail leaves (the overflow flag when it measures
+                // nothing): branching mid-graph is unsupported, and
+                // scale_grads_skip has already sanitized the arena on
+                // overflow. The optimizer tail also recomputes a_neg after
+                // AdamW so each replay sees the updated A-matrix (same
+                // rationale as the eager and bf16-graph paths).
+                let skip = tail.enqueue(
+                    ctx,
+                    &mut grads.flat,
+                    (&mut *clip_partials, &mut *clip_scratch),
+                    (skip_ptr, overflow_ptr),
+                )?;
+                step_multi(
+                    ctx,
+                    ctx.kernels.adamw_step_multi.get(*dtype),
+                    multi_plan,
+                    adam,
+                    bias.ptr(),
+                    skip,
+                )?;
+                weights.sync_master_to_compute(ctx)?;
+                recompute_a_neg_all(
+                    ctx,
+                    &weights.master.layers,
+                    a_neg_all,
+                    &state.a_neg_all,
+                    cfg.d_inner(),
+                    cfg.d_state,
+                )
+            })
+        }
     }
 
     /// Eager forward body: run the mixed training forward (saves the typed
@@ -2407,6 +2714,10 @@ pub(crate) struct MambaTrainerF32 {
     mamba_input: GpuBuffer,
     d_temporal: GpuBuffer,
     graph: Option<GpuMambaF32TrainingStepGraph>,
+    /// The accumulating micro-batch and the window's apply, captured
+    /// beside the step.
+    graph_acc: Option<GpuMambaF32TrainingStepGraph>,
+    graph_apply: Option<GpuMambaF32TrainingStepGraph>,
     prepared_gemm_manifest: Option<PreparedGemmCaptureManifest>,
     has_gemm_work: bool,
     /// Route that produced the saved split-forward activations.
@@ -2433,7 +2744,7 @@ pub(crate) struct MambaTrainerF32 {
 impl Drop for MambaTrainerF32 {
     fn drop(&mut self) {
         let _ = self.ctx.stream.synchronize();
-        drop(self.graph.take());
+        self.drop_graphs();
     }
 }
 
@@ -2586,6 +2897,8 @@ impl MambaTrainerF32 {
             mamba_input,
             d_temporal,
             graph: None,
+            graph_acc: None,
+            graph_apply: None,
             prepared_gemm_manifest: None,
             has_gemm_work,
             split_forward_route: None,
@@ -2609,6 +2922,13 @@ impl MambaTrainerF32 {
 
     fn has_graph(&self) -> bool {
         self.graph.is_some()
+    }
+
+    /// Drop every captured body; the stream must be idle.
+    fn drop_graphs(&mut self) {
+        drop(self.graph.take());
+        drop(self.graph_acc.take());
+        drop(self.graph_apply.take());
     }
 
     /// The step options' tail (see [`StepTail`]).
@@ -2658,10 +2978,25 @@ impl MambaTrainerF32 {
         let manifest = self.prepared_gemm_manifest.ok_or_else(|| {
             "M1 f32 training graph capture requires one successful eager step".to_string()
         })?;
+        self.graph = Some(self.capture_f32_body(&manifest, TrainBody::Step)?);
+        self.graph_acc = Some(self.capture_f32_body(&manifest, TrainBody::Accumulate)?);
+        // The apply runs no GEMM: it is held to an empty inventory, so a
+        // GEMM that found its way into it would fail the capture.
+        let no_gemm = self.ctx.record_eager_gemm_manifest(|| Ok(()))?;
+        self.graph_apply = Some(self.capture_f32_body(&no_gemm, TrainBody::Apply)?);
+        Ok(())
+    }
+
+    /// Capture one f32 training body (see [`TrainBody`]).
+    fn capture_f32_body(
+        &mut self,
+        manifest: &PreparedGemmCaptureManifest,
+        body: TrainBody,
+    ) -> Result<GpuMambaF32TrainingStepGraph, String> {
         let tail = self.step_tail();
         let skip = self.skip_flag.stable_ptr(&self.ctx.stream);
-        // The trainer owns every captured allocation and drops the graph first.
-        let g = unsafe {
+        // The trainer owns every captured allocation and drops the graphs first.
+        unsafe {
             GpuMambaF32TrainingStepGraph::capture(
                 &self.ctx,
                 &self.cfg,
@@ -2687,11 +3022,10 @@ impl MambaTrainerF32 {
                 },
                 self.batch,
                 self.seq_len,
-                &manifest,
+                manifest,
+                body,
             )
-        }?;
-        self.graph = Some(g);
-        Ok(())
+        }
     }
 
     /// Download the SSM `a_neg_all` buffer (f32 trainer variant). Used by
@@ -2739,25 +3073,33 @@ impl MambaTrainerF32 {
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
 
         let replayed = if let Some(ref g) = self.graph {
-            g.replay(
-                &self.ctx,
-                &MambaF32Replay {
-                    weights: &self.weights,
-                    adam: &self.adam,
-                    bias: &self.bias,
-                    grads: &self.grads,
-                    temporal: &self.temporal,
-                    a_neg_all: &self.a_neg_all,
-                    mamba_input: &self.mamba_input,
-                    d_temporal: &self.d_temporal,
-                    state: &self.state,
-                },
-            )?;
+            g.replay(&self.ctx, &self.f32_replay())?;
             true
         } else {
             self.step_eager()?;
             false
         };
+        self.finish_step(replayed)
+    }
+
+    /// The f32 graphs' replay buffers.
+    fn f32_replay(&self) -> MambaF32Replay<'_> {
+        MambaF32Replay {
+            weights: &self.weights,
+            adam: &self.adam,
+            bias: &self.bias,
+            grads: &self.grads,
+            temporal: &self.temporal,
+            a_neg_all: &self.a_neg_all,
+            mamba_input: &self.mamba_input,
+            d_temporal: &self.d_temporal,
+            state: &self.state,
+        }
+    }
+
+    /// The verdict of an update after it ran: the step options' tail, and
+    /// the step counted before the update given back when AdamW skipped.
+    fn finish_step(&mut self, replayed: bool) -> Result<StepMetrics, String> {
         let (skipped, grad_norm) = self.step_verdict(false)?;
         if skipped {
             self.adam.step -= 1;
@@ -2767,6 +3109,97 @@ impl MambaTrainerF32 {
             grad_norm,
             ..StepMetrics::plain(self.adam.step, replayed)
         })
+    }
+
+    /// One micro-batch of an accumulation window (see
+    /// [`MambaGpuTrainer::accumulate`]).
+    pub(crate) fn accumulate(
+        &mut self,
+        input: &[f32],
+        d_temporal: &[f32],
+    ) -> Result<BackwardMetrics, String> {
+        self.split_forward_route = None;
+        check_window_len("accumulate input", input.len(), self.mamba_input.len())?;
+        check_window_len(
+            "accumulate d_temporal",
+            d_temporal.len(),
+            self.d_temporal.len(),
+        )?;
+        if !self.grads_dirty {
+            self.grads.zero(&self.ctx.stream)?;
+            self.grads_dirty = true;
+        }
+        self.staged_upload(0, input)?;
+        self.staged_upload(1, d_temporal)?;
+        if let Some(g) = &self.graph_acc {
+            g.replay(&self.ctx, &self.f32_replay())?;
+        } else {
+            self.eager_accumulate()?;
+        }
+        Ok(BackwardMetrics {
+            step: self.adam.step,
+            optimizer_stepped: false,
+            grad_norm: None,
+            loss_scale: None,
+            overflow_skipped: None,
+        })
+    }
+
+    /// One accumulating micro-batch eagerly: the forward and the backward
+    /// into the open window, the GEMM inventory recorded for a capture.
+    fn eager_accumulate(&mut self) -> Result<(), String> {
+        if self.has_gemm_work {
+            prepare_inference_arch_rung(&self.ctx)?;
+        }
+        let Self {
+            ctx,
+            weights,
+            grads,
+            acts,
+            scratch,
+            state,
+            a_neg_all,
+            temporal,
+            mamba_input,
+            d_temporal,
+            prepared_gemm_manifest,
+            ..
+        } = self;
+        let manifest = ctx.record_eager_gemm_manifest(|| {
+            gpu_forward_mamba_backbone(ctx, temporal, acts, weights, mamba_input, state, scratch)?;
+            gpu_backward_mamba_backbone(ctx, d_temporal, grads, acts, weights, a_neg_all, scratch)
+        })?;
+        *prepared_gemm_manifest = Some(manifest);
+        Ok(())
+    }
+
+    /// The open window's apply (see [`MambaGpuTrainer::apply_window`]).
+    pub(crate) fn apply_window(&mut self) -> Result<StepMetrics, String> {
+        if !self.grads_dirty {
+            return Err("apply_window: no accumulation window is open".into());
+        }
+        self.split_forward_route = None;
+        // The step counts before the update, as the fused step counts it;
+        // a step the tail skipped gives it back.
+        let (_, bc1, bc2) = self.adam.advance();
+        self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
+        let replayed = if let Some(g) = &self.graph_apply {
+            g.replay(&self.ctx, &self.f32_replay())?;
+            true
+        } else {
+            let tail = self.step_tail();
+            let skip = self.skip_flag.stable_ptr(&self.ctx.stream);
+            let skip = tail.enqueue(
+                &self.ctx,
+                &mut self.grads.flat,
+                (&mut self.clip_partials, &mut self.clip_scratch),
+                (skip, 0),
+            )?;
+            self.eager_optimize(skip)?;
+            false
+        };
+        self.grads_dirty = false;
+        self.finish_step(replayed)
     }
 
     /// Split forward (see [`MambaGpuTrainer::forward`]): eager forward into the
@@ -2919,7 +3352,7 @@ impl MambaTrainerF32 {
         }
         let (step, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
-        self.eager_optimize()?;
+        self.eager_optimize(0)?;
         self.grads_dirty = false;
         Ok(BackwardMetrics {
             step,
@@ -2965,14 +3398,14 @@ impl MambaTrainerF32 {
     /// `a_neg = -exp(a_log)` refresh (without it the SSM reads a stale
     /// A-matrix and the a_log gradient is a silent no-op — see
     /// `recompute_a_neg_all`).
-    fn eager_optimize(&mut self) -> Result<(), String> {
+    fn eager_optimize(&mut self, skip: cudarc::driver::sys::CUdeviceptr) -> Result<(), String> {
         step_multi(
             &self.ctx,
             self.ctx.kernels.adamw_step_multi.get(WeightDtype::F32),
             &self.multi_plan,
             &self.adam,
             self.bias.ptr(),
-            0,
+            skip,
         )?;
         recompute_a_neg_all(
             &self.ctx,

@@ -18,6 +18,7 @@ use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::graph_capture::TrainBody;
 use mamba_rs::gpu::kernel_identity::PreparedGemmCaptureManifest;
 use mamba_rs::gpu::train::TrainSessionCfg;
 use mamba_rs::mamba1::MambaConfig;
@@ -438,6 +439,7 @@ fn training_graph_bf16_one_step_matches_eager() {
             batch,
             seq_len,
             &manifest,
+            TrainBody::Step,
         )
     }
     .unwrap();
@@ -555,6 +557,7 @@ fn training_graph_bf16_multi_replay_matches_eager() {
             batch,
             seq_len,
             &manifest,
+            TrainBody::Step,
         )
     }
     .unwrap();
@@ -649,6 +652,7 @@ fn training_graph_panics_on_state_conv_mismatch() {
             batch,
             seq_len,
             &manifest,
+            TrainBody::Step,
         )
     }
     .unwrap();
@@ -721,6 +725,7 @@ fn training_graph_panics_on_pointer_mismatch() {
             batch,
             seq_len,
             &manifest,
+            TrainBody::Step,
         )
     }
     .unwrap();

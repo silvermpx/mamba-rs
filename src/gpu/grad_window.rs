@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::CudaStream;
+use cudarc::driver::{CudaStream, PushKernelArg};
 
 use super::buffers::{GpuBuffer, GpuByteBuffer};
 use super::context::GpuCtx;
@@ -53,21 +53,95 @@ impl GradWindow {
         grads: &GpuBuffer,
         overflowed: bool,
     ) -> Result<(), String> {
+        self.open_zeroed(ctx, grads.len())?;
         self.overflowed |= overflowed;
-        let sum = match &mut self.sum {
-            Some(sum) => sum,
-            None => self.sum.insert(GpuBuffer::zeros(&ctx.stream, grads.len())?),
+        let Some(sum) = self.sum.as_mut() else {
+            return Err("an accumulation window without its sum".into());
         };
-        if self.open {
-            add_into(ctx, sum, grads)?;
-        } else {
-            sum.copy_from(grads, &ctx.stream)?;
-            self.open = true;
-        }
+        add_into(ctx, sum, grads)?;
         if overflowed {
             poison(ctx, sum)?;
         }
         Ok(())
+    }
+
+    /// The window's sum, allocated for `len` values when it has none yet,
+    /// so a captured body can name a buffer that stays where it is.
+    pub(crate) fn ensure_sum(&mut self, ctx: &GpuCtx, len: usize) -> Result<(), String> {
+        if self.sum.as_ref().is_none_or(|s| s.len() != len) {
+            self.sum = Some(GpuBuffer::zeros(&ctx.stream, len)?);
+        }
+        Ok(())
+    }
+
+    /// Open a window whose sum starts at zero, every micro-batch added to
+    /// it on the device; an open window stays as it is.
+    pub(crate) fn open_zeroed(&mut self, ctx: &GpuCtx, len: usize) -> Result<(), String> {
+        if self.open {
+            return Ok(());
+        }
+        self.ensure_sum(ctx, len)?;
+        if let Some(sum) = self.sum.as_mut() {
+            sum.zero(&ctx.stream)?;
+        }
+        self.open = true;
+        self.overflowed = false;
+        Ok(())
+    }
+
+    /// Add `grads` to the open window's sum and, when `overflow` (the loss
+    /// scaler's device flag, or 0 for none) is set, mark the sum with a NaN
+    /// (see [`poison`]): launches only, for a captured body.
+    pub(crate) fn add_device(
+        &mut self,
+        ctx: &GpuCtx,
+        grads: &GpuBuffer,
+        overflow: cudarc::driver::sys::CUdeviceptr,
+    ) -> Result<(), String> {
+        let Some(sum) = self.sum.as_mut() else {
+            return Err("an accumulation window without its sum".into());
+        };
+        add_into(ctx, sum, grads)?;
+        if overflow == 0 || sum.is_empty() {
+            return Ok(());
+        }
+        let ptr = sum.cached_ptr();
+        let mut b = ctx
+            .stream
+            .launch_builder(&ctx.kernels.grad_mark_overflow_f32);
+        b.arg(&ptr);
+        b.arg(&overflow);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (1, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { b.launch(cfg) }
+            .map(|_| ())
+            .map_err(|e| format!("grad_mark_overflow_f32: {e:?}"))
+    }
+
+    /// Copy the open window's sum into `grads` through the cached pointers
+    /// (CUDA Graph safe), leaving the window open: the first part of an
+    /// applying body.
+    pub(crate) fn copy_sum_into(&self, ctx: &GpuCtx, grads: &mut GpuBuffer) -> Result<(), String> {
+        let Some(sum) = self.sum.as_ref() else {
+            return Err("an accumulation window without its sum".into());
+        };
+        if sum.len() != grads.len() {
+            return Err(format!(
+                "gradient window: {} values against an arena of {}",
+                sum.len(),
+                grads.len()
+            ));
+        }
+        grads.copy_from_raw(sum, &ctx.stream)
+    }
+
+    /// Close the window after an applying body ran on its sum.
+    pub(crate) fn close(&mut self) {
+        self.open = false;
+        self.overflowed = false;
     }
 
     /// Add the open window's sum to the gradient of the applying call,

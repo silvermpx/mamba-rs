@@ -366,6 +366,57 @@ fn apply_step_full_closes_a_window_as_an_applying_backward_does() {
 /// through the trainer-state file. Two steps, both files written, a fresh
 /// trainer built from them, two more steps: the bits of four unbroken
 /// steps. A state of another family is refused.
+/// The fused calls carry the step options and the window as the split
+/// calls do: `step` with options set gives the bits of a forward and an
+/// applying backward with them, and `accumulate` twice then `apply_window`
+/// the bits of two accumulating backwards and the options' tail.
+#[test]
+fn the_fused_calls_take_the_step_options_and_the_window_in_every_family() {
+    let opts = BackwardOpts::default()
+        .with_clip_max_norm(0.05)
+        .with_control_clip_max_norm(0.01);
+    let acc = BackwardOpts::default().with_accumulate_only(true);
+    let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
+    for (mut fused, mut split) in trainers(session()).into_iter().zip(trainers(session())) {
+        let family = fused.family();
+        assert!(
+            fused.set_step_opts(acc).is_err(),
+            "{family:?}: accumulation as a step option"
+        );
+        assert!(fused.apply_window().is_err(), "{family:?}: no window");
+        fused.set_step_opts(opts).unwrap();
+        assert_eq!(fused.step_opts(), opts, "{family:?}");
+        let (x, d) = window(70);
+        let m = fused.step(&x, &d).unwrap();
+        assert!(
+            m.optimizer_stepped && m.grad_norm.is_some(),
+            "{family:?}: {m:?}"
+        );
+        split.forward(&x, &mut out).unwrap();
+        split.backward_step(&d, opts).unwrap();
+        for k in 0..2 {
+            let (x, d) = window(71 + k);
+            let m = fused.accumulate(&x, &d).unwrap();
+            assert!(!m.optimizer_stepped, "{family:?}: {m:?}");
+            split.forward(&x, &mut out).unwrap();
+            split.backward_step(&d, acc).unwrap();
+        }
+        let m = fused.apply_window().unwrap();
+        assert!(
+            m.optimizer_stepped && m.grad_norm.is_some() && m.step == 2,
+            "{family:?}: {m:?}"
+        );
+        split
+            .apply_step_full(
+                opts.clip_max_norm,
+                opts.step_skip_above,
+                opts.control_clip_max_norm,
+            )
+            .unwrap();
+        assert_eq!(response(&mut fused), response(&mut split), "{family:?}");
+    }
+}
+
 #[test]
 fn every_family_resumes_through_its_checkpoint_and_trainer_state_files() {
     let dir = std::env::temp_dir();

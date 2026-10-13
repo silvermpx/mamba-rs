@@ -179,5 +179,18 @@ extern "C" __global__ void grad_skip_flag_f32(
     skip[0] = (over || !(norm[0] <= limit)) ? 1 : 0;
 }
 
+// Mark an accumulation window's sum when the loss scaler's flag is set: a
+// NaN in its first element. The unscale of an overflowed micro-batch
+// zeroes its gradient, so the sum alone would not show the overflow; the
+// NaN survives every later add, the window's overflow check sees it, and
+// a data-parallel reduction carries it to every rank. One thread.
+extern "C" __global__ void grad_mark_overflow_f32(
+    float* __restrict__ sum,
+    const int* __restrict__ overflow
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (overflow[0] != 0) sum[0] = __int_as_float(0x7fc00000);
+}
+
 #undef GCLIP_THREADS
 #undef GCLIP_BLOCKS

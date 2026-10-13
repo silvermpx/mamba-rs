@@ -33,6 +33,29 @@ use super::kernel_identity::{
     ResolvedPhysicalLaunchSet, finish_recording_physical_capture,
 };
 
+/// Which part of a training step a captured graph records: the whole
+/// step, one accumulating micro-batch (the forward and the backward, the
+/// gradient added to the open window), or the window's apply (the
+/// optimizer tail over its gradient).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrainBody {
+    Step,
+    Accumulate,
+    Apply,
+}
+
+impl TrainBody {
+    /// Whether the body runs the forward and the backward.
+    pub fn passes(self) -> bool {
+        self != TrainBody::Apply
+    }
+
+    /// Whether the body runs the optimizer tail.
+    pub fn updates(self) -> bool {
+        self != TrainBody::Accumulate
+    }
+}
+
 /// Capture all CUDA work issued by `body` on `stream` into a CUDA Graph.
 ///
 /// Mirrors the pattern in `inference::GpuInferenceEngine::capture_graph`,

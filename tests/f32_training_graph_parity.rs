@@ -18,6 +18,7 @@ use mamba_rs::gpu::adamw::{
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::graph_capture::TrainBody;
 use mamba_rs::mamba1::MambaConfig;
 use mamba_rs::mamba1::MambaWeights;
 use mamba_rs::mamba1::gpu::backward::gpu_backward_mamba_backbone;
@@ -263,6 +264,7 @@ fn m1_f32_training_graph_matches_eager() {
             batch,
             seq_len,
             &manifest,
+            TrainBody::Step,
         )
     }
     .unwrap();
@@ -604,6 +606,7 @@ fn m3_f32_training_graph_matches_eager() {
                 tail: None,
             },
             &manifest,
+            TrainBody::Step,
         )
     }
     .unwrap();

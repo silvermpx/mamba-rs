@@ -82,6 +82,17 @@ pub trait GpuTrainer {
     /// The options [`GpuTrainer::step`] applies.
     fn step_opts(&self) -> BackwardOpts;
 
+    /// One micro-batch of an accumulation window in one call: the forward
+    /// of `input` and the backward of `d_temporal`, the gradient added to
+    /// the window (the first call opens it); AdamW waits for
+    /// [`GpuTrainer::apply_window`]. A captured graph replays it.
+    fn accumulate(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<BackwardMetrics, String>;
+
+    /// Apply the open accumulation window with the step options, as an
+    /// applying `backward_step` with those options closes a window. A
+    /// captured graph replays it.
+    fn apply_window(&mut self) -> Result<StepMetrics, String>;
+
     /// Zero the recurrent state, the start of new sequences.
     fn reset_state(&mut self) -> Result<(), String>;
 
@@ -210,6 +221,16 @@ macro_rules! gpu_trainer_by_inherent_methods {
             }
             fn step_opts(&self) -> BackwardOpts {
                 <$ty>::step_opts(self)
+            }
+            fn accumulate(
+                &mut self,
+                input: &[f32],
+                d_temporal: &[f32],
+            ) -> Result<BackwardMetrics, String> {
+                <$ty>::accumulate(self, input, d_temporal)
+            }
+            fn apply_window(&mut self) -> Result<StepMetrics, String> {
+                <$ty>::apply_window(self)
             }
             fn reset_state(&mut self) -> Result<(), String> {
                 <$ty>::reset_state(self)
@@ -393,6 +414,12 @@ impl GpuTrainer for AnyGpuTrainer {
     }
     fn step_opts(&self) -> BackwardOpts {
         self.inner().step_opts()
+    }
+    fn accumulate(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<BackwardMetrics, String> {
+        self.inner_mut().accumulate(input, d_temporal)
+    }
+    fn apply_window(&mut self) -> Result<StepMetrics, String> {
+        self.inner_mut().apply_window()
     }
     fn reset_state(&mut self) -> Result<(), String> {
         self.inner_mut().reset_state()

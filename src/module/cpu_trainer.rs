@@ -376,6 +376,32 @@ impl<F: CpuFamily> CpuCore<F> {
         self.step_opts
     }
 
+    /// One micro-batch of an accumulation window: the forward of `input`
+    /// and the backward of `d_temporal`, the gradient added to the window.
+    pub(crate) fn accumulate(
+        &mut self,
+        input: &[f32],
+        d_temporal: &[f32],
+    ) -> Result<BackwardMetrics, String> {
+        let mut out = std::mem::take(&mut self.out_buf);
+        let ran = self.forward(input, &mut out);
+        self.out_buf = out;
+        ran?;
+        self.backward_step(
+            d_temporal,
+            BackwardOpts::default().with_accumulate_only(true),
+            None,
+        )
+    }
+
+    /// The open window's tail with the step options.
+    pub(crate) fn apply_window(&mut self) -> Result<StepMetrics, String> {
+        let o = self.step_opts;
+        let m =
+            self.apply_step_full(o.clip_max_norm, o.step_skip_above, o.control_clip_max_norm)?;
+        Ok(StepMetrics::from_backward(m, false))
+    }
+
     /// Only the optimizer tail over the open window: the control clip,
     /// the global clip, the spike skip and the AdamW step.
     pub(crate) fn apply_step_full(
@@ -645,6 +671,16 @@ pub trait CpuTrainer {
     /// The options [`CpuTrainer::step`] applies.
     fn step_opts(&self) -> BackwardOpts;
 
+    /// One micro-batch of an accumulation window in one call: the forward
+    /// of `input` and the backward of `d_temporal`, the gradient added to
+    /// the window (the first call opens it); AdamW waits for
+    /// [`CpuTrainer::apply_window`].
+    fn accumulate(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<BackwardMetrics, String>;
+
+    /// Apply the open accumulation window with the step options, as an
+    /// applying `backward_step` with those options closes a window.
+    fn apply_window(&mut self) -> Result<StepMetrics, String>;
+
     /// Only the optimizer tail over the open window; after accumulating
     /// calls it gives the bits of an applying backward.
     fn apply_step_full(
@@ -737,6 +773,20 @@ macro_rules! cpu_trainer_type {
             /// See [`CpuTrainer::step_opts`]($crate::module::CpuTrainer::step_opts).
             pub fn step_opts(&self) -> $crate::optim::BackwardOpts {
                 self.core.step_opts()
+            }
+
+            /// See [`CpuTrainer::accumulate`]($crate::module::CpuTrainer::accumulate).
+            pub fn accumulate(
+                &mut self,
+                input: &[f32],
+                d_temporal: &[f32],
+            ) -> Result<$crate::optim::BackwardMetrics, String> {
+                self.core.accumulate(input, d_temporal)
+            }
+
+            /// See [`CpuTrainer::apply_window`]($crate::module::CpuTrainer::apply_window).
+            pub fn apply_window(&mut self) -> Result<$crate::optim::StepMetrics, String> {
+                self.core.apply_window()
             }
 
             /// See [`CpuTrainer::apply_step_full`]($crate::module::CpuTrainer::apply_step_full).
@@ -858,6 +908,16 @@ macro_rules! cpu_trainer_type {
             }
             fn step_opts(&self) -> $crate::optim::BackwardOpts {
                 <$name>::step_opts(self)
+            }
+            fn accumulate(
+                &mut self,
+                input: &[f32],
+                d_temporal: &[f32],
+            ) -> Result<$crate::optim::BackwardMetrics, String> {
+                <$name>::accumulate(self, input, d_temporal)
+            }
+            fn apply_window(&mut self) -> Result<$crate::optim::StepMetrics, String> {
+                <$name>::apply_window(self)
             }
             fn apply_step_full(
                 &mut self,
@@ -1005,6 +1065,12 @@ impl CpuTrainer for AnyCpuTrainer {
     }
     fn step_opts(&self) -> BackwardOpts {
         self.inner().step_opts()
+    }
+    fn accumulate(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<BackwardMetrics, String> {
+        self.inner_mut().accumulate(input, d_temporal)
+    }
+    fn apply_window(&mut self) -> Result<StepMetrics, String> {
+        self.inner_mut().apply_window()
     }
     fn apply_step_full(
         &mut self,

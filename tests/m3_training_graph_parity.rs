@@ -18,6 +18,7 @@ use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::graph_capture::TrainBody;
 use mamba_rs::gpu::kernel_identity::PreparedGemmCaptureManifest;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::backward_mixed::gpu_backward_mamba3_backbone_mixed;
@@ -352,6 +353,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
                 tail: None,
             },
             &manifest,
+            TrainBody::Step,
         )
     }
     .unwrap();
@@ -471,6 +473,7 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
                 tail: None,
             },
             &manifest,
+            TrainBody::Step,
         )
     }
     .unwrap();

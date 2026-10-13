@@ -29,7 +29,7 @@
 mod graph;
 
 use crate::config::ModelFamily;
-use crate::gpu::grad_clip::{GradRegionGeom, StepTail, norm_limit, scale_grads};
+use crate::gpu::grad_clip::{GradRegionGeom, StepTail, norm_limit, read_tail, scale_grads};
 use crate::gpu::grad_window::{GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
@@ -917,6 +917,142 @@ impl Mamba2GpuTrainer {
             return Err("the eager step returned no metrics".into());
         };
         Ok(StepMetrics::from_backward(m, false))
+    }
+
+    /// One micro-batch of an accumulation window in one call: the forward
+    /// of `input` and the backward of `d_temporal`, as [`Self::step`] takes
+    /// them, the gradient added to the window, which the first call opens;
+    /// AdamW waits for [`Self::apply_window`]. In f16 the loss scale holds
+    /// for the window, and an overflowed micro-batch marks it, so the apply
+    /// skips the whole window. With captured graphs (see
+    /// [`Self::capture_graph`]) the call replays one, with the eager bits.
+    pub fn accumulate(
+        &mut self,
+        input: &[f32],
+        d_temporal: &[f32],
+    ) -> Result<BackwardMetrics, String> {
+        self.check_window_len("accumulate input", input.len(), self.input_dim)?;
+        self.check_window_len("accumulate d_temporal", d_temporal.len(), self.cfg.d_model)?;
+        let loss_scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
+        self.window.open_zeroed(&self.ctx, self.grads.len())?;
+        self.forwarded = false;
+        self.fresh_grads = false;
+        if self.graph.is_some() {
+            self.accumulate_graph(input, d_temporal)?;
+        } else {
+            if self.has_gemm_work() {
+                prepare_inference_arch_rung(&self.ctx)?;
+            }
+            self.presize_gemm_scratch()?;
+            let manifest = GpuCtx::record_owner_eager_gemm_manifest(
+                self,
+                |t| &t.ctx,
+                |t| {
+                    t.forward_unchecked(input, None)?;
+                    t.upload_d_out(d_temporal, loss_scale)?;
+                    t.backward_device()?;
+                    t.accumulate_device()
+                },
+            )?;
+            self.eager_gemm_manifest = Some(manifest);
+        }
+        Ok(BackwardMetrics {
+            step: self.adamw.step,
+            optimizer_stepped: false,
+            grad_norm: None,
+            loss_scale,
+            overflow_skipped: None,
+        })
+    }
+
+    /// Apply the open accumulation window with the step options (see
+    /// [`Self::set_step_opts`]): in f16 the overflow check over the
+    /// window's gradient, then the control clip, the global clip, the
+    /// spike skip and AdamW, as an applying [`Self::backward_step`] with
+    /// those options closes a window, with its bits. With captured graphs
+    /// the call replays one.
+    pub fn apply_window(&mut self) -> Result<StepMetrics, String> {
+        if !self.window.is_open() {
+            return Err("apply_window: no accumulation window is open".into());
+        }
+        let scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
+        self.ensure_adamw_plan()?;
+        // The step counts before the update, as the fused step counts it;
+        // a step the tail or an overflow skipped gives it back.
+        let (_, bias_c1, bias_c2) = self.adamw.advance();
+        self.bias
+            .write(&self.ctx.stream, bias_c1, bias_c2, self.adamw.lr)?;
+        let replayed = self.graph.is_some();
+        if replayed {
+            self.apply_graph()?;
+        } else {
+            self.apply_device()?;
+        }
+        self.sync("apply_window")?;
+        self.window.close();
+        self.fresh_grads = false;
+        self.overflowed = scale.is_some() && self.overflow.read(&self.ctx.stream)? != 0;
+        let (skipped, grad_norm) = if self.tail_measures() {
+            match read_tail(
+                &self.ctx,
+                &self.skip_flag,
+                self.window.clip_coef(),
+                self.overflowed,
+            ) {
+                Ok((skipped, norm)) => (skipped, Some(norm)),
+                Err(e) => {
+                    self.adamw.step -= 1;
+                    return Err(e);
+                }
+            }
+        } else {
+            (self.overflowed, None)
+        };
+        if let Some(scaler) = self.scaler.as_mut() {
+            scaler.update(self.overflowed);
+        }
+        if skipped {
+            self.adamw.step -= 1;
+        }
+        Ok(StepMetrics {
+            step: self.adamw.step,
+            graph_replayed: replayed,
+            loss_scale: scale,
+            overflow_skipped: scale.map(|_| self.overflowed),
+            optimizer_stepped: !skipped,
+            grad_norm,
+        })
+    }
+
+    /// The arena of the last backward added to the open window's sum,
+    /// which an f16 overflow marks: the accumulating part of a captured
+    /// micro-batch.
+    pub(super) fn accumulate_device(&mut self) -> Result<(), String> {
+        let overflow = if self.scaler.is_some() {
+            self.overflow.stable_ptr(&self.ctx.stream)
+        } else {
+            0
+        };
+        self.window.add_device(&self.ctx, &self.grads, overflow)
+    }
+
+    /// The open window's sum into the arena, in f16 the overflow check over
+    /// it, the step options' tail and AdamW: the applying part of a
+    /// captured window.
+    pub(super) fn apply_device(&mut self) -> Result<(), String> {
+        self.window.copy_sum_into(&self.ctx, &mut self.grads)?;
+        if self.scaler.is_some() {
+            let stream = self.ctx.stream.clone();
+            self.overflow.zero(&stream)?;
+            check_inf_nan_gpu(
+                &self.ctx,
+                &self.ctx.kernels,
+                &mut self.overflow,
+                &self.grads,
+            )?;
+        }
+        let skip = self.tail_device()?;
+        self.adamw_device(skip)
     }
 
     /// The backward of the last [`Self::forward`] for `d_temporal`

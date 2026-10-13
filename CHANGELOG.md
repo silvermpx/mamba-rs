@@ -161,6 +161,13 @@
   step's bits. `StepMetrics` reports `optimizer_stepped` and
   `grad_norm`. A captured graph bakes the options in: another set needs
   `drop_graph` first.
+- Every trainer accumulates a window through fused calls: `accumulate`
+  (the forward and the backward of a micro-batch, its gradient added to
+  the window) and `apply_window` (the update with the step options), on
+  the GPU and CPU trainers and on `GpuTrainer` and `CpuTrainer`.
+  `capture_graph` records the whole step, an accumulating micro-batch and
+  the window's apply, and the calls replay them with the eager bits; in
+  f16 an overflowing micro-batch skips its window on the device.
 
 ### Changed
 

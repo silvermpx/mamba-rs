@@ -53,7 +53,7 @@ use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::grad_clip::{CaptureTail, enqueue_tail};
 use crate::gpu::graph_capture::{
-    capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
+    TrainBody, capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
@@ -241,6 +241,7 @@ impl GpuMambaTrainingStepGraph {
         batch: usize,
         seq_len: usize,
         manifest: &PreparedGemmCaptureManifest,
+        body: TrainBody,
     ) -> Result<Self, String> {
         let MambaMixedCapture {
             train_w,
@@ -310,31 +311,41 @@ impl GpuMambaTrainingStepGraph {
         let snap_half_staging = ctx.half_staging_ptr();
         let snap_bi_upcast = ctx.bi_upcast_scratch_ptrs();
         let route_capacity = manifest.route_capacity;
-        let has_gemm_work = batch != 0
+        let has_gemm_work = body.passes()
+            && batch != 0
             && seq_len != 0
             && (train_w.compute.input_proj_w.len_elems() != 0 || cfg.n_layers != 0);
 
         ctx.freeze_graph_scratch();
         let (graph, captured_gemm_plan) = unsafe {
             capture_into_graph_with_gemm_plan(ctx, route_capacity, manifest, || {
-                grads.zero(&ctx.stream)?;
-                gpu_forward_mamba_backbone_mixed(
-                    ctx,
-                    acts,
-                    &train_w.compute,
-                    mamba_input,
-                    state,
-                    scratch,
-                )?;
-                gpu_backward_mamba_backbone_mixed(
-                    ctx,
-                    d_temporal,
-                    grads,
-                    acts,
-                    &train_w.compute,
-                    a_neg_all,
-                    scratch,
-                )?;
+                if body.passes() {
+                    // An accumulating micro-batch adds to the window the
+                    // caller opened; the whole step starts its own.
+                    if body == TrainBody::Step {
+                        grads.zero(&ctx.stream)?;
+                    }
+                    gpu_forward_mamba_backbone_mixed(
+                        ctx,
+                        acts,
+                        &train_w.compute,
+                        mamba_input,
+                        state,
+                        scratch,
+                    )?;
+                    gpu_backward_mamba_backbone_mixed(
+                        ctx,
+                        d_temporal,
+                        grads,
+                        acts,
+                        &train_w.compute,
+                        a_neg_all,
+                        scratch,
+                    )?;
+                }
+                if !body.updates() {
+                    return Ok(());
+                }
                 let skip = enqueue_tail(&mut tail, ctx, &mut grads.flat)?;
                 // ONE fused launch: every master tensor updated, the four
                 // bulk typed shadows written in the same kernel (the old
@@ -651,6 +662,7 @@ impl GpuMambaF32TrainingStepGraph {
         batch: usize,
         seq_len: usize,
         manifest: &PreparedGemmCaptureManifest,
+        body: TrainBody,
     ) -> Result<Self, String> {
         let MambaF32Capture {
             weights,
@@ -681,24 +693,33 @@ impl GpuMambaF32TrainingStepGraph {
         let snap_input_proj = weights.input_proj_w.cached_ptr();
         let snap_norm_f = weights.norm_f_weight.cached_ptr();
         let route_capacity = manifest.route_capacity;
-        let has_gemm_work = batch != 0 && seq_len != 0;
+        let has_gemm_work = body.passes() && batch != 0 && seq_len != 0;
 
         let cfg_local = *cfg;
         let (graph, captured_gemm_plan) = unsafe {
             capture_into_graph_with_gemm_plan(ctx, route_capacity, manifest, || {
-                grads.zero(&ctx.stream)?;
-                gpu_forward_mamba_backbone(
-                    ctx,
-                    temporal,
-                    acts,
-                    weights,
-                    mamba_input,
-                    state,
-                    scratch,
-                )?;
-                gpu_backward_mamba_backbone(
-                    ctx, d_temporal, grads, acts, weights, a_neg_all, scratch,
-                )?;
+                if body.passes() {
+                    // An accumulating micro-batch adds to the window the
+                    // caller opened; the whole step starts its own.
+                    if body == TrainBody::Step {
+                        grads.zero(&ctx.stream)?;
+                    }
+                    gpu_forward_mamba_backbone(
+                        ctx,
+                        temporal,
+                        acts,
+                        weights,
+                        mamba_input,
+                        state,
+                        scratch,
+                    )?;
+                    gpu_backward_mamba_backbone(
+                        ctx, d_temporal, grads, acts, weights, a_neg_all, scratch,
+                    )?;
+                }
+                if !body.updates() {
+                    return Ok(());
+                }
                 let skip = enqueue_tail(&mut tail, ctx, &mut grads.flat)?;
                 step_multi(
                     ctx,

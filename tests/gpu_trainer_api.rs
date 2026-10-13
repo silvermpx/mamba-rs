@@ -848,6 +848,97 @@ fn the_step_options_reach_the_eager_and_the_captured_step_in_every_family() {
     }
 }
 
+/// A window of micro-batches trains through `accumulate` and
+/// `apply_window` in every family and precision, eager and captured, with
+/// the bits of the split calls it replaces: a fused step, then two windows
+/// of two micro-batches with both clips, and the replays report it. In f16
+/// a micro-batch that overflows skips its window on both roads, the
+/// weights and the step count where they were and the scale backed off.
+#[test]
+fn a_window_trains_through_accumulate_and_apply_in_every_family() {
+    let (input, d) = window();
+    let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
+    let opts = BackwardOpts::default()
+        .with_clip_max_norm(0.05)
+        .with_control_clip_max_norm(0.01);
+    let acc = BackwardOpts::default().with_accumulate_only(true);
+    let batches: Vec<(Vec<f32>, Vec<f32>)> = (0..4u32)
+        .map(|k| {
+            let x = values(input.len(), 300 + k);
+            let g: Vec<f32> = values(d.len(), 400 + k).iter().map(|v| v * 1e-2).collect();
+            (x, g)
+        })
+        .collect();
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+        let mut eager = any_trainers(dtype);
+        let mut split = any_trainers(dtype);
+        let mut graph = any_trainers(dtype);
+        for i in 0..eager.len() {
+            let label = format!("{:?} {dtype:?}", eager[i].family());
+            assert!(
+                eager[i].apply_window().is_err(),
+                "{label}: an apply without a window"
+            );
+            eager[i].set_step_opts(opts).unwrap();
+            graph[i].set_step_opts(opts).unwrap();
+            eager[i].step(&input, &d).unwrap();
+            graph[i].step(&input, &d).unwrap();
+            split[i].forward(&input, &mut out).unwrap();
+            split[i].backward_step(&d, opts).unwrap();
+            graph[i].capture_graph().unwrap();
+            for w in batches.chunks(2) {
+                for (x, g) in w {
+                    let m = eager[i].accumulate(x, g).unwrap();
+                    assert!(!m.optimizer_stepped, "{label}: {m:?}");
+                    graph[i].accumulate(x, g).unwrap();
+                    split[i].forward(x, &mut out).unwrap();
+                    split[i].backward_step(g, acc).unwrap();
+                }
+                let m = eager[i].apply_window().unwrap();
+                assert!(
+                    m.optimizer_stepped && !m.graph_replayed && m.grad_norm.is_some(),
+                    "{label}: the eager apply {m:?}"
+                );
+                let m = graph[i].apply_window().unwrap();
+                assert!(
+                    m.optimizer_stepped && m.graph_replayed && m.grad_norm.is_some(),
+                    "{label}: the replayed apply {m:?}"
+                );
+                split[i]
+                    .apply_step_full(
+                        opts.clip_max_norm,
+                        opts.step_skip_above,
+                        opts.control_clip_max_norm,
+                    )
+                    .unwrap();
+            }
+            let want = snapshot_bits(&split[i]);
+            assert_eq!(snapshot_bits(&eager[i]), want, "{label}: eager window");
+            assert_eq!(snapshot_bits(&graph[i]), want, "{label}: captured window");
+            if dtype != WeightDtype::F16 {
+                continue;
+            }
+            for t in [&mut eager[i], &mut graph[i]] {
+                t.load_scaler_state(3.0e38, 0).unwrap();
+                let (before, steps) = (snapshot_bits(t), t.optimizer_state().unwrap().step);
+                let (x, g) = &batches[0];
+                t.accumulate(x, g).unwrap();
+                t.accumulate(x, g).unwrap();
+                let m = t.apply_window().unwrap();
+                assert!(
+                    m.overflow_skipped == Some(true) && !m.optimizer_stepped && m.step == steps,
+                    "{label}: an overflowed window {m:?}"
+                );
+                assert_eq!(snapshot_bits(t), before, "{label}: a skipped window");
+                assert!(
+                    t.scaler_state().unwrap().0 < 3.0e38,
+                    "{label}: the scale did not back off"
+                );
+            }
+        }
+    }
+}
+
 /// Write the trainer's master weights to its family's checkpoint, and build
 /// a trainer of the same family from that file.
 fn reload_through_checkpoint(t: &AnyGpuTrainer, path: &Path, opts: GpuOptions) -> AnyGpuTrainer {
