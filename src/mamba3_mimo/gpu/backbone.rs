@@ -86,6 +86,10 @@ impl Mamba3MimoGpuBackbone {
     /// the device rows ([`Self::temporal_ptr`]) the prompt's last position.
     /// The window of the last prompt length is kept for the next call.
     pub fn prefill(&mut self, input: &[f32], seq_len: usize) -> Result<(), String> {
+        // An empty prompt leaves the state and the rows as they are.
+        if seq_len == 0 && input.is_empty() {
+            return Ok(());
+        }
         if self
             .prompt_window
             .as_ref()

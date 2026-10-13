@@ -86,6 +86,10 @@ impl Mamba2GpuBackbone {
     /// the device rows ([`Self::temporal_ptr`]) the prompt's last position.
     /// The buffers of the last prompt length are kept for the next call.
     pub fn prefill(&mut self, input: &[f32], seq_len: usize) -> Result<(), String> {
+        // An empty prompt leaves the state and the rows as they are.
+        if seq_len == 0 && input.is_empty() {
+            return Ok(());
+        }
         if self.prefill.as_ref().map(Mamba2GpuPrefill::seq_len) != Some(seq_len) {
             self.prefill = None;
             self.prefill = Some(self.engine.alloc_prefill(seq_len)?);

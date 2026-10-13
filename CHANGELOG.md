@@ -421,6 +421,8 @@
   parameters within one allocation. Mamba-1 refuses an `rms_norm_eps`
   that is not positive, SISO and MIMO an `a_floor` that is not finite,
   and SISO takes `a_floor = 0`, as the reference and MIMO do.
+- An empty prompt (`prefill` of no tokens) leaves the state and the rows
+  as they are in every GPU backbone; Mamba-2 and MIMO refused it.
 
 ### Fixed
 

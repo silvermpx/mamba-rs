@@ -183,6 +183,37 @@ fn prompts_continue_like_steps_in_every_family() {
     }
 }
 
+/// An empty prompt leaves the rows and the state as they are in every
+/// family.
+#[test]
+fn an_empty_prompt_changes_nothing_in_every_family() {
+    let prompt = values(BATCH * 5 * INPUT_DIM, 4);
+    let next = values(BATCH * INPUT_DIM, 5);
+    for mut bb in every_family(INPUT_DIM, WeightDtype::F32) {
+        let family = bb.family();
+        let rows = BATCH * bb.d_model();
+        bb.reset().unwrap();
+        bb.prefill(&prompt, 5).unwrap();
+        let mut before = vec![0.0f32; rows];
+        bb.download_temporal(&mut before).unwrap();
+        bb.prefill(&[], 0).unwrap();
+        let mut after = vec![0.0f32; rows];
+        bb.download_temporal(&mut after).unwrap();
+        assert_eq!(bits(&after), bits(&before), "{family:?}: the rows moved");
+        let mut stepped = vec![0.0f32; rows];
+        bb.step(&next, &mut stepped).unwrap();
+        bb.reset().unwrap();
+        bb.prefill(&prompt, 5).unwrap();
+        let mut control = vec![0.0f32; rows];
+        bb.step(&next, &mut control).unwrap();
+        assert_eq!(
+            bits(&stepped),
+            bits(&control),
+            "{family:?}: the state moved"
+        );
+    }
+}
+
 /// A captured graph replays the eager steps bit for bit, and a prompt as
 /// long as one run before the capture still runs after it.
 #[test]

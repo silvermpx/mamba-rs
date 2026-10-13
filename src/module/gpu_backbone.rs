@@ -51,7 +51,8 @@ pub trait GpuBackbone {
     /// A prompt of `seq_len` tokens per sequence in one pass, from host rows
     /// `[batch, seq_len, input_dim]`, continuing from the current state.
     /// Afterwards the state holds the position after the prompt and the
-    /// device rows the prompt's last position, as after a step.
+    /// device rows the prompt's last position, as after a step. An empty
+    /// prompt leaves both as they are.
     fn prefill(&mut self, input: &[f32], seq_len: usize) -> Result<(), String>;
 
     /// Zero the recurrent state, the start of new sequences.
