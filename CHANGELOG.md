@@ -488,6 +488,8 @@
 - A half-precision dX GEMM over a reduction of 128 or more columns at a
   batch under 128 rows runs the typed narrow kernel instead of the f32
   upcast route, with the same bits.
+- The GPU census holds each bf16 and f16 cell to the host computing in
+  that precision too, within eight of its roundings, beside the f32 host.
 
 ### Fixed
 

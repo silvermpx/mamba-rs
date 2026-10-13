@@ -18,15 +18,23 @@
 //! peaks where the stream crosses zero), the f32 host cannot judge the
 //! cell more closely than its own spread, and the cell is held to a few
 //! times that spread instead; the run lists those cells.
+//!
+//! A bf16 or f16 cell is also held to the host computing in its own
+//! precision, which rounds where the device stores: within a few roundings
+//! of that precision, the distance a rounding flipped by the two sides'
+//! summation orders spreads to through the later stores. That host stays
+//! close where the f32 host's spread is wide, so the ill-conditioned cells
+//! keep a tight check.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::ScanMode;
+use mamba_rs::mamba1::cpu::prefill::PrefillMode;
 use mamba_rs::matrix::{Path, Request};
 use mamba_rs::{
-    AnyCpuTrainer, AnyGpuBackbone, AnyGpuTrainer, BackwardOpts, CpuTrainer, GemmMode, GpuBackbone,
-    GpuOptions, GpuTrainer, Mamba2Backbone, Mamba2Config, Mamba2CpuTrainer, Mamba2GpuBackbone,
-    Mamba2GpuTrainer, Mamba2Weights, Mamba3Backbone, Mamba3Config, Mamba3CpuTrainer,
-    Mamba3GpuBackbone, Mamba3GpuTrainer, Mamba3MimoBackbone, Mamba3MimoConfig,
+    AnyCpuTrainer, AnyGpuBackbone, AnyGpuTrainer, BackwardOpts, CpuOptions, CpuTrainer, GemmMode,
+    GpuBackbone, GpuOptions, GpuTrainer, Mamba2Backbone, Mamba2Config, Mamba2CpuTrainer,
+    Mamba2GpuBackbone, Mamba2GpuTrainer, Mamba2Weights, Mamba3Backbone, Mamba3Config,
+    Mamba3CpuTrainer, Mamba3GpuBackbone, Mamba3GpuTrainer, Mamba3MimoBackbone, Mamba3MimoConfig,
     Mamba3MimoCpuTrainer, Mamba3MimoGpuBackbone, Mamba3MimoGpuTrainer, Mamba3MimoWeights,
     Mamba3Weights, MambaBackbone, MambaConfig, MambaCpuTrainer, MambaGpuBackbone, MambaGpuTrainer,
     MambaWeights, TrainSessionCfg, WeightDtype,
@@ -105,6 +113,12 @@ const NUDGES: [u32; 2] = [1001, 1002];
 /// How many times the host's own spread a cell may land from it.
 const SPREAD_FACTOR: f32 = 4.0;
 
+/// How many roundings of its precision a half cell may land from the host
+/// computing in that precision. The census measured at most about two
+/// (bf16) and three and a half (f16) on the decode and the prompt, where a
+/// flipped rounding spreads furthest, and far less on training windows.
+const LANE_ROUNDINGS: f32 = 8.0;
+
 /// `v` with every value moved by `u` relative, up or down as `seed` draws.
 fn nudged(v: &[f32], u: f32, seed: u32) -> Vec<f32> {
     v.iter()
@@ -113,11 +127,19 @@ fn nudged(v: &[f32], u: f32, seed: u32) -> Vec<f32> {
         .collect()
 }
 
-/// A cell's distance from the host, and how far the host moves itself
-/// when its inputs move by one rounding of the cell's precision.
+/// A cell's distance from the host, how far the host moves itself when
+/// its inputs move by one rounding of the cell's precision, and in a half
+/// precision the cell's distance from the host computing in it.
 struct Check {
     diff: f32,
     spread: f32,
+    lane: Option<f32>,
+}
+
+/// Whether the host runs a lane of `precision` beside its f32 run: the
+/// half precisions, whose GPU stores the host's lane rounds as it does.
+fn has_lane(precision: WeightDtype) -> bool {
+    matches!(precision, WeightDtype::Bf16 | WeightDtype::F16)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -181,19 +203,21 @@ impl Cfg {
         }
     }
 
-    fn host(&self, w: &Weights) -> Host {
+    /// The host backbone computing in `precision`.
+    fn host(&self, w: &Weights, precision: WeightDtype) -> Host {
+        let o = CpuOptions::default().dtype(precision);
         match (self, w) {
             (Cfg::M1(c), Weights::M1(w)) => {
-                Host::M1(MambaBackbone::new(w.clone(), *c, INPUT_DIM).unwrap())
+                Host::M1(MambaBackbone::new_with(w.clone(), *c, INPUT_DIM, o).unwrap())
             }
             (Cfg::M2(c), Weights::M2(w)) => {
-                Host::M2(Mamba2Backbone::new(w.clone(), *c, INPUT_DIM).unwrap())
+                Host::M2(Mamba2Backbone::new_with(w.clone(), *c, INPUT_DIM, o).unwrap())
             }
             (Cfg::Siso(c), Weights::Siso(w)) => {
-                Host::Siso(Mamba3Backbone::new(w.clone(), *c, INPUT_DIM).unwrap())
+                Host::Siso(Mamba3Backbone::new_with(w.clone(), *c, INPUT_DIM, o).unwrap())
             }
             (Cfg::Mimo(c), Weights::Mimo(w)) => {
-                Host::Mimo(Mamba3MimoBackbone::new(w.clone(), *c, INPUT_DIM).unwrap())
+                Host::Mimo(Mamba3MimoBackbone::new_with(w.clone(), *c, INPUT_DIM, o).unwrap())
             }
             _ => unreachable!("weights of another family"),
         }
@@ -217,13 +241,15 @@ impl Cfg {
         })
     }
 
-    fn host_trainer(&self, w: &Weights) -> Result<AnyCpuTrainer, String> {
+    /// The host trainer computing in `precision`.
+    fn host_trainer(&self, w: &Weights, precision: WeightDtype) -> Result<AnyCpuTrainer, String> {
         let s = TrainSessionCfg::new(INPUT_DIM, BATCH, WINDOW);
+        let o = CpuOptions::default().dtype(precision);
         Ok(match (self, w) {
-            (Cfg::M1(c), Weights::M1(w)) => MambaCpuTrainer::new(w, *c, s)?.into(),
-            (Cfg::M2(c), Weights::M2(w)) => Mamba2CpuTrainer::new(w, *c, s)?.into(),
-            (Cfg::Siso(c), Weights::Siso(w)) => Mamba3CpuTrainer::new(w, *c, s)?.into(),
-            (Cfg::Mimo(c), Weights::Mimo(w)) => Mamba3MimoCpuTrainer::new(w, *c, s)?.into(),
+            (Cfg::M1(c), Weights::M1(w)) => MambaCpuTrainer::new_with(w, *c, s, o)?.into(),
+            (Cfg::M2(c), Weights::M2(w)) => Mamba2CpuTrainer::new_with(w, *c, s, o)?.into(),
+            (Cfg::Siso(c), Weights::Siso(w)) => Mamba3CpuTrainer::new_with(w, *c, s, o)?.into(),
+            (Cfg::Mimo(c), Weights::Mimo(w)) => Mamba3MimoCpuTrainer::new_with(w, *c, s, o)?.into(),
             _ => unreachable!("weights of another family"),
         })
     }
@@ -266,6 +292,53 @@ impl Host {
             Host::Mimo(bb) => walk!(bb),
         }
         out
+    }
+
+    /// One sequence's prompt of `prompt` tokens run in one pass, as the
+    /// GPU runs it, then one step: the prompt's last row and the step's.
+    fn prompt(&self, inputs: &[f32], prompt: usize, d_model: usize) -> [Vec<f32>; 2] {
+        let mut rows = vec![0.0f32; prompt * d_model];
+        let mut after = vec![0.0f32; d_model];
+        let (head, next) = inputs.split_at(prompt * INPUT_DIM);
+        macro_rules! window {
+            ($bb:expr, |$state:ident, $scratch:ident| $run:block) => {{
+                let mut $state = $bb.alloc_state();
+                let mut $scratch = $bb.alloc_scratch();
+                $run
+                $bb.forward_step(&next[..INPUT_DIM], &mut after, &mut $state, &mut $scratch);
+            }};
+        }
+        match self {
+            Host::M1(bb) => window!(bb, |state, scratch| {
+                let mut pf = bb.alloc_prefill_scratch(prompt);
+                bb.forward_prefill(
+                    head,
+                    &mut rows,
+                    &mut state,
+                    &mut pf,
+                    prompt,
+                    PrefillMode::Single,
+                );
+            }),
+            Host::M2(bb) => window!(bb, |state, scratch| {
+                bb.forward_sequence(head, &mut rows, &mut state, &mut scratch, prompt);
+            }),
+            Host::Siso(bb) => window!(bb, |state, scratch| {
+                let mut pf = bb.alloc_prefill_scratch(prompt);
+                bb.forward_prefill(
+                    head,
+                    &mut rows,
+                    &mut state,
+                    &mut pf,
+                    prompt,
+                    PrefillMode::Single,
+                );
+            }),
+            Host::Mimo(bb) => window!(bb, |state, scratch| {
+                bb.forward_sequence(head, &mut rows, &mut state, &mut scratch, prompt);
+            }),
+        }
+        [rows[(prompt - 1) * d_model..].to_vec(), after]
     }
 }
 
@@ -337,6 +410,16 @@ fn configs() -> Vec<Cfg> {
             d_conv: 1,
             expand: 1,
             n_layers: 2,
+            ..MambaConfig::default()
+        }),
+        // FalconMamba: the dt, B and C parts of every x_proj row normalized.
+        Cfg::M1(MambaConfig {
+            d_model: 40,
+            d_state: 12,
+            d_conv: 4,
+            expand: 2,
+            n_layers: 2,
+            bcdt_rms_eps: Some(1e-6),
             ..MambaConfig::default()
         }),
         Cfg::M1(MambaConfig {
@@ -502,14 +585,14 @@ fn options((scan, precision, gemm): (ScanMode, WeightDtype, GemmMode)) -> GpuOpt
 fn check_decode(
     cfg: &Cfg,
     w: &Weights,
-    host: &Host,
+    (host, lane): (&Host, Option<&Host>),
     cell: (ScanMode, WeightDtype, GemmMode),
 ) -> Check {
     let d = cfg.d_model();
     let inputs = values(BATCH * DECODE_STEPS * INPUT_DIM, 7);
-    // The host's rows of every step, the batch's rows of a step together
+    // A host's rows of every step, the batch's rows of a step together
     // as the device gives them.
-    let host_rows = |inputs: &[f32]| -> Vec<f32> {
+    let rows_of = |host: &Host, inputs: &[f32]| -> Vec<f32> {
         let runs: Vec<Vec<f32>> = (0..BATCH)
             .map(|b| {
                 host.run(
@@ -526,13 +609,15 @@ fn check_decode(
             })
             .collect()
     };
+    let host_rows = |inputs: &[f32]| rows_of(host, inputs);
     let step_of =
         |rows: &[f32], t: usize| -> Vec<f32> { rows[t * BATCH * d..(t + 1) * BATCH * d].to_vec() };
     let want = host_rows(&inputs);
+    let lane_rows = lane.map(|l| rows_of(l, &inputs));
     let mut gpu = cfg
         .gpu(w, options(cell))
         .unwrap_or_else(|e| panic!("{cfg:?} {cell:?}: {e}"));
-    let mut diff = 0.0f32;
+    let (mut diff, mut lane_diff) = (0.0f32, 0.0f32);
     for t in 0..DECODE_STEPS {
         let step: Vec<f32> = (0..BATCH)
             .flat_map(|b| {
@@ -544,6 +629,9 @@ fn check_decode(
         gpu.step(&step, &mut got)
             .unwrap_or_else(|e| panic!("{cfg:?} {cell:?}: decode step {t}: {e}"));
         diff = diff.max(rel_diff(&got, &step_of(&want, t)));
+        if let Some(rows) = &lane_rows {
+            lane_diff = lane_diff.max(rel_diff(&got, &step_of(rows, t)));
+        }
     }
     let spread = host_spread(cell.1, |u, seed| {
         let moved = host_rows(&nudged(&inputs, u, seed));
@@ -551,7 +639,11 @@ fn check_decode(
             .map(|t| rel_diff(&step_of(&moved, t), &step_of(&want, t)))
             .fold(0.0f32, f32::max)
     });
-    Check { diff, spread }
+    Check {
+        diff,
+        spread,
+        lane: lane_rows.map(|_| lane_diff),
+    }
 }
 
 /// A prompt of `WINDOW` tokens and the step after it, the host's rows for
@@ -559,7 +651,7 @@ fn check_decode(
 fn check_prompt(
     cfg: &Cfg,
     w: &Weights,
-    host: &Host,
+    (host, lane): (&Host, Option<&Host>),
     cell: (ScanMode, WeightDtype, GemmMode),
 ) -> Check {
     let d = cfg.d_model();
@@ -598,7 +690,15 @@ fn check_prompt(
         let moved = host_rows(&nudged(&inputs, u, seed));
         rel_diff(&moved[0], &want[0]).max(rel_diff(&moved[1], &want[1]))
     });
-    Check { diff, spread }
+    // The lane runs the prompt in one pass, as the device does.
+    let lane = lane.map(|l| {
+        let runs: Vec<[Vec<f32>; 2]> = (0..BATCH)
+            .map(|b| l.prompt(sequence(&inputs, b, steps, INPUT_DIM), WINDOW, d))
+            .collect();
+        let row = |k: usize| -> Vec<f32> { runs.iter().flat_map(|r| r[k].clone()).collect() };
+        rel_diff(&last, &row(0)).max(rel_diff(&after, &row(1)))
+    });
+    Check { diff, spread, lane }
 }
 
 /// One training window on both devices: the GPU's global gradient norm
@@ -610,7 +710,7 @@ fn check_train(cfg: &Cfg, w: &Weights, cell: (ScanMode, WeightDtype, GemmMode)) 
     // The host's global gradient norm of the window, from the weights.
     let host_norm = |input: &[f32]| -> f32 {
         let mut cpu = cfg
-            .host_trainer(w)
+            .host_trainer(w, WeightDtype::F32)
             .unwrap_or_else(|e| panic!("{cfg:?}: {e}"));
         cpu.set_step_opts(measure).unwrap();
         let host = cpu.step(input, &d_temporal).unwrap();
@@ -621,6 +721,30 @@ fn check_train(cfg: &Cfg, w: &Weights, cell: (ScanMode, WeightDtype, GemmMode)) 
         host.grad_norm.unwrap()
     };
     let h = host_norm(&input);
+    // The host trainer computing in the cell's precision, its f16 windows
+    // through the loss scaler as on the device.
+    let lane_norm = has_lane(cell.1).then(|| {
+        let mut cpu = cfg
+            .host_trainer(w, cell.1)
+            .unwrap_or_else(|e| panic!("{cfg:?} {cell:?}: {e}"));
+        cpu.set_step_opts(measure).unwrap();
+        if cell.1 == WeightDtype::F16 {
+            cpu.load_scaler_state(1024.0, 0).unwrap();
+        }
+        let mut m = cpu.step(&input, &d_temporal).unwrap();
+        for _ in 0..16 {
+            if m.overflow_skipped != Some(true) {
+                break;
+            }
+            cpu.reset_state().unwrap();
+            m = cpu.step(&input, &d_temporal).unwrap();
+        }
+        assert!(
+            m.optimizer_stepped,
+            "{cfg:?} {cell:?}: the host lane skipped"
+        );
+        m.grad_norm.unwrap()
+    });
     let rel = |norm: f32| -> f32 {
         let d = ((norm - h) / h.max(1e-12)).abs();
         if d.is_nan() { f32::INFINITY } else { d }
@@ -657,9 +781,14 @@ fn check_train(cfg: &Cfg, w: &Weights, cell: (ScanMode, WeightDtype, GemmMode)) 
         device.loss_scale
     );
     let spread = host_spread(cell.1, |u, seed| rel(host_norm(&nudged(&input, u, seed))));
+    let g = device.grad_norm.unwrap();
     Check {
-        diff: rel(device.grad_norm.unwrap()),
+        diff: rel(g),
         spread,
+        lane: lane_norm.map(|l| {
+            let d = ((g - l) / l.max(1e-12)).abs();
+            if d.is_nan() { f32::INFINITY } else { d }
+        }),
     }
 }
 
@@ -680,19 +809,41 @@ fn host_spread(precision: WeightDtype, run: impl Fn(f32, u32) -> f32) -> f32 {
 fn every_cell_runs_and_agrees_with_the_host() {
     let mut failures = Vec::new();
     let mut held_to_spread = Vec::new();
+    let mut lanes = Vec::new();
     let mut cells_run = 0;
     for (i, cfg) in configs().into_iter().enumerate() {
         cfg.validate().unwrap_or_else(|e| panic!("{cfg:?}: {e}"));
         let w = cfg.weights(100 + i as u64);
-        let host = cfg.host(&w);
+        let host = cfg.host(&w, WeightDtype::F32);
+        let lane_hosts: Vec<(WeightDtype, Host)> = PRECISIONS
+            .into_iter()
+            .filter(|&p| has_lane(p))
+            .map(|p| (p, cfg.host(&w, p)))
+            .collect();
         for path in Path::ALL {
             for cell in cells(path) {
                 assert!(cfg.admit(&request(path, cell)), "{cfg:?} {path:?} {cell:?}");
+                let lane = lane_hosts
+                    .iter()
+                    .find(|(p, _)| *p == cell.1)
+                    .map(|(_, h)| h);
                 let check = match path {
-                    Path::Decode => check_decode(&cfg, &w, &host, cell),
-                    Path::Prefill => check_prompt(&cfg, &w, &host, cell),
+                    Path::Decode => check_decode(&cfg, &w, (&host, lane), cell),
+                    Path::Prefill => check_prompt(&cfg, &w, (&host, lane), cell),
                     Path::Train => check_train(&cfg, &w, cell),
                 };
+                if let Some(l) = check.lane {
+                    let line = format!(
+                        "{cfg:?} {} {cell:?}: f32 host {:.3e}, lane {l:.3e}",
+                        path.as_str(),
+                        check.diff
+                    );
+                    let lane_tol = LANE_ROUNDINGS * unit_roundoff(cell.1);
+                    if l > lane_tol {
+                        failures.push(format!("{line} > {lane_tol:.1e} from the lane"));
+                    }
+                    lanes.push(line);
+                }
                 cells_run += 1;
                 let base = tolerance(cell.1, cell.2);
                 let tol = base.max(SPREAD_FACTOR * check.spread);
@@ -712,6 +863,11 @@ fn every_cell_runs_and_agrees_with_the_host() {
         }
     }
     eprintln!("{cells_run} cells run");
+    eprintln!(
+        "{} half cells against the host lane:\n{}",
+        lanes.len(),
+        lanes.join("\n")
+    );
     if !held_to_spread.is_empty() {
         eprintln!(
             "{} cells held to the host's own spread:\n{}",
