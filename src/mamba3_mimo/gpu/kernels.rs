@@ -305,10 +305,12 @@ pub fn chunked_geom(
         ),
     };
     // The token-tile inter and state-terms kernels: rows (t, r) of `tt`
-    // tokens padded to a float4 multiple plus 4. inter: the entering state,
-    // dy transposed, d, and the trees' partials past d when the first two do
-    // not hold them; state terms: dS with rows padded by one, u and the keys
-    // transposed, ste, the partials. The largest token tile that fits.
+    // tokens padded to a float4 multiple plus 4, and every block the
+    // kernels read as float4 starting on 16 bytes. inter: the entering
+    // state, dy transposed, d, and the trees' partials past d when the first
+    // two do not hold them; state terms: dS with rows padded by one, u and
+    // the keys transposed, ste, the partials. The largest token tile that
+    // fits.
     let token_tiles = |bytes: &dyn Fn(usize, usize) -> usize| {
         if hd > 128 || ds > 128 || rank > CHUNK {
             return (0, 0);
@@ -321,21 +323,24 @@ pub fn chunked_geom(
             .unwrap_or((0, 0))
     };
     let inter_tiles = token_tiles(&|tt, rs| {
-        let front = hd * ds + hd * rs;
+        let front = (hd * ds).next_multiple_of(4) + hd * rs;
         let red = if tt * 256 > front { tt * 256 } else { 0 };
         (front + tt * rank * ds + red) * 4
     });
-    let terms_tiles =
-        token_tiles(&|tt, rs| (hd * (ds + 1) + hd * rs + ds * rs + tt * rank * hd + tt * 256) * 4);
+    let terms_tiles = token_tiles(&|tt, rs| {
+        ((hd * (ds + 1)).next_multiple_of(4) + hd * rs + ds * rs + tt * rank * hd + tt * 256) * 4
+    });
     // The split pair kernels: dy (transposed), u, the keys, w M (transposed)
     // and w for dq; the keys and u (transposed), the queries and dy, G, w M
-    // and w G for dk and du. Rows padded to a float4 multiple plus 4.
+    // and w G for dk and du. Rows padded to a float4 multiple plus 4, the
+    // blocks before w M and G to a float4 multiple.
     let pairs_tiles = {
         let tl = pairs.0;
         let tr = tl * rank;
         let trs = tr.next_multiple_of(4) + 4;
-        let dq = (hd * trs + tr * (hd + 1) + tr * ds + tr * trs + tl * tl) * 4;
-        let dk = (ds * trs + hd * trs + tr * (ds + 1) + tr * (hd + 1) + 3 * tr * trs) * 4;
+        let dq = (hd * trs + (tr * (hd + 1 + ds)).next_multiple_of(4) + tr * trs + tl * tl) * 4;
+        let dk =
+            (ds * trs + hd * trs + (tr * (ds + 1 + hd + 1)).next_multiple_of(4) + 3 * tr * trs) * 4;
         if !pairs_global && tr <= 64 && hd <= 128 && ds <= 128 && dq.max(dk) <= cap {
             (dq, dk)
         } else {

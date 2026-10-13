@@ -255,7 +255,8 @@ extern "C" __global__ void m3mb_inter(
 // m3mb_inter's per-element chains. I_t replays m3mb_inter's 256-thread
 // block: virtual thread j sums fma(d, q) over i = j, j + 256, ... (i = r N
 // + n), then the halving tree over the 256 partials, every token's tree in
-// parallel. Shared memory: the entering state [P][N], dy transposed
+// parallel. Shared memory: the entering state [P][N] padded to a float4
+// multiple, so dy's float4 rows start on 16 bytes, dy transposed
 // [P][R4 + 4] (R4 = tt R rounded up to 4), d [tt R][N]; the trees reuse
 // the first two when they hold tt 256 floats. Grid (B * nc, H,
 // ceil(64 / tt)), block 8 R4 threads.
@@ -283,12 +284,13 @@ __device__ __forceinline__ void m3mb_inter_tiles_body(
     const int half = ds / 2;
     const int rows = tn * rank;
     const int rs = ((tt * rank + 3) & ~3) + 4;
+    const int sts = (hd * ds + 3) & ~3;
     float* st = reinterpret_cast<float*>(m3mb_sm4);  // [P][N]
-    float* dyt = st + hd * ds;                        // [P][rs]
+    float* dyt = st + sts;                            // [P][rs]
     float* dd = dyt + hd * rs;                        // [tt R][N]
     // The trees' partials, [tt][256]: over the state and dy once the
     // products are done, past d when those are too small.
-    float* red = tt * 256 <= hd * ds + hd * rs ? st : dd + tt * rank * ds;
+    float* red = tt * 256 <= sts + hd * rs ? st : dd + tt * rank * ds;
     const int tid = threadIdx.x;
     const int lane = tid & 31;
     const int warp = tid >> 5, nw = blockDim.x >> 5;
@@ -724,8 +726,9 @@ __device__ __forceinline__ void m3mb_state_terms_body(
 //   (i = r P + p), then the halving tree, every token's tree in parallel.
 // The products are register tiles (a warp takes 4 rows, a lane the columns
 // lane + 32 j); dS sits as [P][N + 1], which both products read without
-// bank conflicts. Shared memory: dS, u and the rotated keys transposed
-// ([P][R4 + 4], [N][R4 + 4]), ste [tt R][P], the trees' [tt][256].
+// bank conflicts. Shared memory: dS padded to a float4 multiple, u and
+// the rotated keys transposed ([P][R4 + 4], [N][R4 + 4], their float4 rows
+// on 16 bytes), ste [tt R][P], the trees' [tt][256].
 // Grid (B * nc, H, ceil(64 / tt)), block 8 R4 threads.
 template <typename T>
 __device__ __forceinline__ void m3mb_state_terms_tiles_body(
@@ -756,7 +759,7 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
     const int rs = ((tt * rank + 3) & ~3) + 4;
     const int dld = ds + 1;
     float* dss = reinterpret_cast<float*>(m3mb_sm4);  // [P][N + 1]
-    float* ut = dss + hd * dld;                        // [P][rs]
+    float* ut = dss + ((hd * dld + 3) & ~3);           // [P][rs]
     float* kt = ut + hd * rs;                          // [N][rs]
     float* steb = kt + ds * rs;                        // [tt R][P]
     float* red = steb + tt * rank * hd;                // [tt][256]
@@ -1160,7 +1163,8 @@ DEFINE_M3MB_PAIRS(m3mb_pairs_f16, __half)
 // s-tiles up to t ascending, col = (s, r') ascending,
 // fma(w M, k_s[r'], dq). M = dy . u (p ascending from 0), zero past the
 // diagonal. Shared memory: dy [P][TR4 + 4] (transposed), u [tr][P + 1],
-// keys [tr][N], w M [tr][TR4 + 4] (transposed), w [tl][tl].
+// keys [tr][N], padded to a float4 multiple so the float4 rows of
+// w M [tr][TR4 + 4] (transposed) start on 16 bytes, w [tl][tl].
 // Grid (B * nc, H, ceil(64 / tl)), block 8 TR4 threads.
 template <typename T>
 __device__ __forceinline__ void m3mb_pairs_dq_body(
@@ -1193,7 +1197,7 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
     float* dyt = reinterpret_cast<float*>(m3mb_sm4);  // [P][trs]
     float* us = dyt + hd * trs;                        // [tr][uld]
     float* ks = us + tr * uld;                         // [tr][N]
-    float* mt = ks + tr * ds;                          // [tr][trs]
+    float* mt = us + ((tr * (uld + ds) + 3) & ~3);     // [tr][trs]
     float* ws = mt + tr * trs;                         // [tl][tl]
     const int tid = threadIdx.x;
     const int lane = tid & 31;
@@ -1332,7 +1336,8 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
 //   dk_s += (w M) q_t and du_s += (w G) dy_t, a = (t, r) ascending,
 // each from its value on entry (the state terms). Shared memory: keys and
 // u of the s-tile transposed [N][TR4 + 4] and [P][TR4 + 4]; per t-tile the
-// queries [tr][N + 1] and dy [tr][P + 1]; G, w M, w G [tr][TR4 + 4]; w.
+// queries [tr][N + 1] and dy [tr][P + 1], padded to a float4 multiple so
+// the float4 rows of G, w M, w G [tr][TR4 + 4] start on 16 bytes; w.
 // Grid (B * nc, H, ceil(64 / tl)), block 8 TR4 threads.
 template <typename T>
 __device__ __forceinline__ void m3mb_pairs_dk_body(
@@ -1367,7 +1372,7 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
     float* ut = kt + ds * trs;                        // [P][trs]
     float* qs = ut + hd * trs;                        // [tr][qld]
     float* dys = qs + tr * qld;                       // [tr][dld]
-    float* gm = dys + tr * dld;                       // [tr][trs]
+    float* gm = qs + ((tr * (qld + dld) + 3) & ~3);   // [tr][trs]
     float* mm = gm + tr * trs;                        // [tr][trs]
     float* wg = mm + tr * trs;                        // [tr][trs]
     const int tid = threadIdx.x;

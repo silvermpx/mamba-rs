@@ -475,6 +475,92 @@ fn m3_mimo_gpu_train_fits_a_wide_rank() {
     }
 }
 
+/// Heads whose shared-memory blocks do not end on a float4: the chunked
+/// backward's token-tile kernels read dy, u and the keys as float4 rows
+/// past a state of hd N floats (hd (N + 1) for the state terms), and the
+/// split pair kernels w M and G past blocks of tr (P + 1 + N) and
+/// tr (N + P + 2) floats. One channel of two states, three of six, and
+/// on a 99 KB part, rank 9 over 128 states and 128 or 127 channels, whose
+/// pair tiles of two tokens put 18 rows there, start those rows off 16
+/// bytes unless the blocks before them are padded. In f32 each matches the
+/// CPU trainer tensor by tensor; in bf16 the rows and the input gradient do
+/// (a one-head layer's dt_bias gradient is one value summed over the
+/// window with cancellation, which bf16 does not resolve against an f32
+/// host). A repeated backward gives the same bits.
+#[test]
+fn m3_mimo_gpu_train_pads_every_float4_block() {
+    let base = Mamba3MimoConfig {
+        n_layers: 2,
+        rope_fraction: 1.0,
+        ..Mamba3MimoConfig::default()
+    };
+    let shapes = [
+        (16, 2, 1, 2, 1),
+        (24, 2, 3, 6, 2),
+        (64, 2, 128, 128, 9),
+        (127, 1, 127, 128, 9),
+    ];
+    let (input_dim, batch, seq) = (24usize, 2usize, 100usize);
+    for (d_model, expand, headdim, d_state, mimo_rank) in shapes {
+        for (dtype, fwd_tol, grad_tol) in [
+            (WeightDtype::F32, 5e-5, 5e-4),
+            (WeightDtype::Bf16, 3e-2, 2e-1),
+        ] {
+            let cfg = Mamba3MimoConfig {
+                d_model,
+                expand,
+                headdim,
+                d_state,
+                mimo_rank,
+                ..base
+            };
+            cfg.validate().unwrap();
+            let label = format!("{dtype:?} P {headdim} N {d_state} R {mimo_rank}");
+            let w = drawn(&cfg, input_dim, 17);
+            let inputs = det(batch * seq * input_dim, 530, 1.0);
+            let d_out = det(batch * seq * d_model, 531, 1.0);
+            let (want_rows, want_grads, want_d_in) =
+                cpu_reference(&cfg, &w, (&inputs, &d_out), (input_dim, batch, seq));
+            let mut tr = Mamba3MimoGpuTrainer::new_with_stride(
+                &w,
+                cfg,
+                TrainSessionCfg::new(input_dim, batch, seq),
+                GpuOptions::default().dtype(dtype),
+                8,
+            )
+            .unwrap();
+            let mut rows = vec![0f32; batch * seq * d_model];
+            tr.forward(&inputs, &mut rows).unwrap();
+            let mut d_in = vec![0f32; batch * seq * input_dim];
+            tr.backward(&d_out, Some(&mut d_in)).unwrap();
+            let grads = tr.grads().unwrap();
+            tr.backward(&d_out, None).unwrap();
+            assert!(
+                tr.grads().unwrap() == grads,
+                "{label}: a repeated backward moved"
+            );
+            let fwd = rel_l2(&rows, &want_rows);
+            let din = rel_l2(&d_in, &want_d_in);
+            let worst = worst_gradient(&grads, &want_grads);
+            eprintln!(
+                "{label}: forward {fwd:.2e}, input gradient {din:.2e}, worst weight gradient \
+                 {:.2e} ({})",
+                worst.0, worst.1
+            );
+            assert!(fwd < fwd_tol, "{label}: forward {fwd:.3e}");
+            assert!(din < grad_tol, "{label}: input gradient {din:.3e}");
+            if dtype == WeightDtype::F32 {
+                assert!(
+                    worst.0 < grad_tol,
+                    "{label}: gradient {} {:.3e}",
+                    worst.1,
+                    worst.0
+                );
+            }
+        }
+    }
+}
+
 /// Heads past what one block holds, against the CPU trainer on both
 /// paths: two heads wider than a block, rank 16 over 256 states, whose
 /// keys and state rows pass shared memory together, and two rank-16 heads

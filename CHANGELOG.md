@@ -501,6 +501,10 @@
 - The SISO angle cumsum serves more than 65535 * 256 (head, angle) lanes:
   its launches run in runs on grid y, and a stale check refused the
   layout.
+- MIMO training on the GPU no longer faults with a misaligned address on
+  heads whose shared-memory blocks do not end on a float4, such as one
+  channel over two states or rank 9 over 128 states: the chunked
+  backward pads the blocks before the rows it reads as float4.
 
 ## 0.7.5 (2026-09-23)
 
