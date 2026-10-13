@@ -16,7 +16,10 @@ use super::core::{HeadScratch, HeadState, TokenIn, mimo_head_step, prepare_token
 use crate::mamba1::cpu::prefill::{PrefillMode, zip_rows};
 use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
+use crate::ops::lane::LaneGemm;
 use crate::ops::norms::rms_norm_weighted;
+use crate::ops::rounding::store;
+use crate::precision::WeightDtype;
 
 /// Reusable prefill buffers, grown to the longest window seen.
 pub struct Mamba3MimoPrefillScratch {
@@ -35,6 +38,9 @@ pub struct Mamba3MimoPrefillScratch {
     out: Vec<f32>,
     heads: Vec<HeadScratch>,
     mlp: GatedMlpRowsScratch,
+    /// The precision of the windows (see `CpuOptions`).
+    dtype: WeightDtype,
+    gemm: LaneGemm,
 }
 
 impl Mamba3MimoPrefillScratch {
@@ -52,14 +58,25 @@ impl Mamba3MimoPrefillScratch {
             out: Vec::new(),
             heads: (0..cfg.nheads()).map(|_| HeadScratch::new(cfg)).collect(),
             mlp: GatedMlpRowsScratch::default(),
+            dtype: WeightDtype::F32,
+            gemm: LaneGemm::default(),
         }
+    }
+
+    /// Run the windows in `dtype`: the weights must hold the bulk matrices
+    /// rounded as that precision keeps them.
+    pub(crate) fn set_dtype(&mut self, dtype: WeightDtype) {
+        self.dtype = dtype;
+        self.mlp.dtype = dtype;
     }
 
     fn ensure(&mut self, cfg: &Mamba3MimoConfig, rows: usize) {
         // The per-head buffers follow the head shape, so a scratch built for
         // another config starts over rather than reading past its heads.
         if *cfg != self.cfg {
+            let dtype = self.dtype;
             *self = Self::new(cfg);
+            self.set_dtype(dtype);
         }
         if rows <= self.rows {
             return;
@@ -80,6 +97,16 @@ impl Mamba3MimoPrefillScratch {
 
 type Gemm = fn(&mut [f32], &[f32], &[f32], Option<&[f32]>, usize, usize, usize);
 
+/// The input projection's precision: f32 in the half lanes, as the GPU
+/// engine keeps it, TF32 operands in the TF32 lane.
+fn input_proj_dtype(dtype: WeightDtype) -> WeightDtype {
+    if dtype == WeightDtype::Tf32 {
+        dtype
+    } else {
+        WeightDtype::F32
+    }
+}
+
 fn gemm_for(mode: PrefillMode) -> Gemm {
     match mode {
         PrefillMode::Single => sgemm_forward,
@@ -98,7 +125,7 @@ fn mimo_layer_prefill(
 ) {
     let (dm, di, p_len) = (cfg.d_model, cfg.d_inner(), cfg.headdim);
     let (na, ip, bc) = (cfg.num_rope_angles(), cfg.in_proj_out_dim(), cfg.bc_width());
-    let gemm = gemm_for(mode);
+    let lane = (gemm_for(mode), s.dtype);
 
     zip_rows(
         mode,
@@ -106,14 +133,12 @@ fn mimo_layer_prefill(
         (&temporal[..t_len * dm], dm),
         |d, x| row_norm(d, x, &lw.norm_weight, cfg.rms_norm_eps),
     );
-    gemm(
-        &mut s.proj[..t_len * ip],
-        &s.norm[..t_len * dm],
-        &lw.in_proj_w,
-        None,
-        t_len,
-        dm,
-        ip,
+    store(s.dtype, &mut s.norm[..t_len * dm]);
+    s.gemm.forward(
+        lane,
+        (&mut s.proj[..t_len * ip], &s.norm[..t_len * dm]),
+        (&lw.in_proj_w, None),
+        (t_len, dm, ip),
     );
     // Each token's normalised B, C and angle increments (the increment
     // rows are one wide for a model without angles, and stay unused).
@@ -165,14 +190,12 @@ fn mimo_layer_prefill(
             s.o_rm[t * di + h * p_len..t * di + (h + 1) * p_len].copy_from_slice(o_t);
         }
     }
-    gemm(
-        &mut s.out[..t_len * dm],
-        &s.o_rm[..t_len * di],
-        &lw.out_proj_w,
-        None,
-        t_len,
-        di,
-        dm,
+    store(s.dtype, &mut s.o_rm[..t_len * di]);
+    s.gemm.forward(
+        lane,
+        (&mut s.out[..t_len * dm], &s.o_rm[..t_len * di]),
+        (&lw.out_proj_w, None),
+        (t_len, di, dm),
     );
     for (t, &o) in temporal[..t_len * dm].iter_mut().zip(&s.out[..t_len * dm]) {
         *t += o;
@@ -276,14 +299,11 @@ pub fn forward_mamba3_mimo_backbone_prefill_mode(
         out.copy_from_slice(&input_flat[..seq_len * dm]);
     } else {
         let input_dim = input_flat.len() / seq_len;
-        gemm_for(mode)(
-            out,
-            &input_flat[..seq_len * input_dim],
-            &w.input_proj_w,
-            Some(&w.input_proj_b),
-            seq_len,
-            input_dim,
-            dm,
+        scratch.gemm.forward(
+            (gemm_for(mode), input_proj_dtype(scratch.dtype)),
+            (out, &input_flat[..seq_len * input_dim]),
+            (&w.input_proj_w, Some(&w.input_proj_b)),
+            (seq_len, input_dim, dm),
         );
     }
     for (l, (lw, st)) in w.layers.iter().zip(states.iter_mut()).enumerate() {

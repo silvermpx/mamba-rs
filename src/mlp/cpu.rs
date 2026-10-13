@@ -1,10 +1,19 @@
 //! The gated MLP on the CPU: one token at a time for decode, all rows of a
 //! window at once for prefill.
+//!
+//! In a reduced precision the branch rounds where the GPU's stores it: the
+//! normalized rows, both projections' outputs and the gated activation in
+//! the forward; the residual gradient's copy for the GEMMs, both input
+//! gradients and the gate's gradient in the backward. The norm's
+//! statistics, the residual and the weight gradients stay f32.
 
 use super::GatedMlpLayerWeights;
 use crate::ops::fast_math::fast_exp_scalar;
+use crate::ops::lane::LaneGemm;
 use crate::ops::norms::rms_norm_weighted;
-use crate::ops::packed::{PackedLinear, linear_row};
+use crate::ops::packed::PackedLinear;
+use crate::ops::rounding::store;
+use crate::precision::WeightDtype;
 
 /// `v * silu(g)`, the gate the reference applies (`F.silu`), with the same
 /// exponential every other CPU gate here uses.
@@ -19,6 +28,9 @@ pub struct GatedMlpStepScratch {
     up: Vec<f32>,
     act: Vec<f32>,
     down: Vec<f32>,
+    /// The precision the branch computes in.
+    pub(crate) dtype: WeightDtype,
+    gemm: LaneGemm,
 }
 
 impl GatedMlpStepScratch {
@@ -31,6 +43,8 @@ impl GatedMlpStepScratch {
             up: vec![0.0; 2 * hidden],
             act: vec![0.0; hidden],
             down: vec![0.0; d],
+            dtype: WeightDtype::F32,
+            gemm: LaneGemm::default(),
         }
     }
 }
@@ -81,24 +95,25 @@ fn mlp_step(
 ) {
     let d = w.norm_weight.len();
     let h = w.hidden();
+    let dtype = s.dtype;
     rms_norm_weighted(&mut s.norm[..d], &temporal[..d], &w.norm_weight, eps);
-    linear_row(
-        &mut s.up[..2 * h],
-        &s.norm[..d],
+    store(dtype, &mut s.norm[..d]);
+    s.gemm.row(
+        dtype,
+        (&mut s.up[..2 * h], &s.norm[..d]),
         (&w.fc1_w, p.map(|p| &p.fc1)),
         None,
-        (d, 2 * h),
     );
     let (val, gate) = s.up[..2 * h].split_at(h);
     for ((a, &v), &g) in s.act[..h].iter_mut().zip(val).zip(gate) {
         *a = gated(v, g);
     }
-    linear_row(
-        &mut s.down[..d],
-        &s.act[..h],
+    store(dtype, &mut s.act[..h]);
+    s.gemm.row(
+        dtype,
+        (&mut s.down[..d], &s.act[..h]),
         (&w.fc2_w, p.map(|p| &p.fc2)),
         None,
-        (h, d),
     );
     for (t, &r) in temporal[..d].iter_mut().zip(&s.down[..d]) {
         *t += r;
@@ -112,6 +127,9 @@ pub struct GatedMlpRowsScratch {
     up: Vec<f32>,
     act: Vec<f32>,
     down: Vec<f32>,
+    /// The precision the branch computes in.
+    pub(crate) dtype: WeightDtype,
+    gemm: LaneGemm,
 }
 
 /// A row GEMM `out[rows, n] = x[rows, k] @ w[k, n]` with no bias, as the
@@ -134,15 +152,24 @@ pub fn gated_mlp_rows(
     s.up.resize(rows * 2 * h, 0.0);
     s.act.resize(rows * h, 0.0);
     s.down.resize(rows * d, 0.0);
+    let lane = (gemm, s.dtype);
     norm_rows(&mut s.norm[..rows * d], &temporal[..rows * d]);
-    gemm(&mut s.up, &s.norm, &w.fc1_w, None, rows, d, 2 * h);
+    store(s.dtype, &mut s.norm[..rows * d]);
+    s.gemm.forward(
+        lane,
+        (&mut s.up, &s.norm),
+        (&w.fc1_w, None),
+        (rows, d, 2 * h),
+    );
     for (act_row, up_row) in s.act.chunks_exact_mut(h).zip(s.up.chunks_exact(2 * h)) {
         let (val, gate) = up_row.split_at(h);
         for ((a, &v), &g) in act_row.iter_mut().zip(val).zip(gate) {
             *a = gated(v, g);
         }
     }
-    gemm(&mut s.down, &s.act, &w.fc2_w, None, rows, h, d);
+    store(s.dtype, &mut s.act[..rows * h]);
+    s.gemm
+        .forward(lane, (&mut s.down, &s.act), (&w.fc2_w, None), (rows, h, d));
     for (t, &r) in temporal[..rows * d].iter_mut().zip(&s.down[..rows * d]) {
         *t += r;
     }
@@ -158,6 +185,9 @@ pub struct GatedMlpBackwardScratch {
     d_act: Vec<f32>,
     d_up: Vec<f32>,
     d_norm: Vec<f32>,
+    /// The precision the branch computes in.
+    pub(crate) dtype: WeightDtype,
+    gemm: LaneGemm,
 }
 
 /// The backward of one MLP branch over `rows` tokens. `x_in` are the rows
@@ -173,9 +203,10 @@ pub fn gated_mlp_rows_backward(
     s: &mut GatedMlpBackwardScratch,
     eps: f32,
 ) {
-    use crate::ops::blas::{sgemm_backward, sgemm_forward};
+    use crate::ops::blas::sgemm_forward;
     let d = w.norm_weight.len();
     let h = w.hidden();
+    let dtype = s.dtype;
     s.inv.resize(rows, 0.0);
     s.norm.resize(rows * d, 0.0);
     s.up.resize(rows * 2 * h, 0.0);
@@ -193,22 +224,26 @@ pub fn gated_mlp_rows_backward(
     {
         *inv = rms_norm_weighted(n, x, &w.norm_weight, eps);
     }
-    sgemm_forward(&mut s.up, &s.norm, &w.fc1_w, None, rows, d, 2 * h);
+    store(dtype, &mut s.norm[..rows * d]);
+    s.gemm.forward(
+        (sgemm_forward as RowsGemm, dtype),
+        (&mut s.up, &s.norm),
+        (&w.fc1_w, None),
+        (rows, d, 2 * h),
+    );
     for (act_row, up_row) in s.act.chunks_exact_mut(h).zip(s.up.chunks_exact(2 * h)) {
         let (val, gate) = up_row.split_at(h);
         for ((a, &v), &gt) in act_row.iter_mut().zip(val).zip(gate) {
             *a = gated(v, gt);
         }
     }
+    store(dtype, &mut s.act[..rows * h]);
 
     // Down projection, gate, up projection.
-    sgemm_backward(
-        &mut s.d_act,
-        &mut g.fc2_w,
-        None,
-        &d_temporal[..rows * d],
-        &s.act,
-        &w.fc2_w,
+    s.gemm.backward(
+        dtype,
+        (&mut s.d_act, &mut g.fc2_w, None),
+        (&d_temporal[..rows * d], &s.act, &w.fc2_w),
         (rows, h, d),
     );
     for ((d_up_row, up_row), d_act_row) in s
@@ -226,13 +261,11 @@ pub fn gated_mlp_rows_backward(
             d_gate[j] = d_act_row[j] * val[j] * (sg * (1.0 + gate[j] * (1.0 - sg)));
         }
     }
-    sgemm_backward(
-        &mut s.d_norm,
-        &mut g.fc1_w,
-        None,
-        &s.d_up,
-        &s.norm,
-        &w.fc1_w,
+    store(dtype, &mut s.d_up[..rows * 2 * h]);
+    s.gemm.backward(
+        dtype,
+        (&mut s.d_norm, &mut g.fc1_w, None),
+        (&s.d_up, &s.norm, &w.fc1_w),
         (rows, d, 2 * h),
     );
 

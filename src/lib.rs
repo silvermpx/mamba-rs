@@ -184,11 +184,12 @@ pub use module::MambaLM;
 pub use module::sample::SampleParams;
 pub use module::{Mamba2Backbone, Mamba3Backbone, Mamba3MimoBackbone, MambaBackbone};
 // What training needs on either device: the session, options and metrics
-// of a trainer, the AdamW state and the trainer-state file.
+// of a trainer, the AdamW state, the loss scaler and the trainer-state file.
 pub use optim::{
-    AdamWStateBlob, BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg, TrainerState,
+    AdamWStateBlob, BackwardMetrics, BackwardOpts, DynamicLossScaler, StepMetrics, TrainSessionCfg,
+    TrainerState,
 };
-pub use precision::{GemmMode, WeightDtype};
+pub use precision::{CpuOptions, GemmMode, WeightDtype};
 // The host trainers of every family and the trait over them.
 pub use mamba1::cpu::trainer::MambaCpuTrainer;
 pub use mamba2::cpu::trainer::Mamba2CpuTrainer;

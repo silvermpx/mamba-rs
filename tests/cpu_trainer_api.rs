@@ -516,3 +516,78 @@ fn every_family_resumes_through_its_checkpoint_and_trainer_state_files() {
         );
     }
 }
+
+/// The reduced-precision host trainers of Mamba-2 and MIMO: an f16 window
+/// that overflows is skipped whole and the loss scale backs off, the
+/// masters untouched, and the next clean window steps; the scale travels
+/// in the trainer state. bf16 needs no scaler and steps at once. Each lane
+/// runs the same window twice to the same bits.
+#[test]
+fn half_lanes_scale_skip_and_step() {
+    use mamba_rs::{CpuOptions, WeightDtype};
+    let s = session();
+    let m2 = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 2);
+    let mimo = Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 4);
+    let lanes = |dtype| -> Vec<AnyCpuTrainer> {
+        let o = CpuOptions::default().dtype(dtype);
+        vec![
+            Mamba2CpuTrainer::new_with(&m2, m2_cfg(), s, o)
+                .unwrap()
+                .into(),
+            Mamba3MimoCpuTrainer::new_with(&mimo, mimo_cfg(), s, o)
+                .unwrap()
+                .into(),
+        ]
+    };
+    let input = values(BATCH * SEQ_LEN * INPUT_DIM, 41);
+    let d_out = values(BATCH * SEQ_LEN * D_MODEL, 42);
+    let mut rows = vec![0f32; BATCH * SEQ_LEN * D_MODEL];
+    for mut t in lanes(WeightDtype::F16) {
+        assert_eq!(t.dtype(), WeightDtype::F16);
+        t.load_scaler_state(1024.0, 0).unwrap();
+        let before = t.trainer_state().unwrap();
+        let mut blown = d_out.clone();
+        blown[0] = f32::MAX;
+        t.forward(&input, &mut rows).unwrap();
+        let m = t.backward_step(&blown, BackwardOpts::default()).unwrap();
+        assert_eq!(
+            (m.optimizer_stepped, m.overflow_skipped, m.loss_scale),
+            (false, Some(true), Some(1024.0))
+        );
+        assert_eq!(t.scaler_state(), Some((512.0, 0)));
+        assert_eq!(
+            t.optimizer_state().unwrap().step,
+            before.optimizer.step,
+            "a skipped window moved the optimizer"
+        );
+        t.forward(&input, &mut rows).unwrap();
+        let m = t.backward_step(&d_out, BackwardOpts::default()).unwrap();
+        assert_eq!(
+            (m.optimizer_stepped, m.overflow_skipped),
+            (true, Some(false))
+        );
+        let state = t.trainer_state().unwrap();
+        assert_eq!(state.scaler, Some((512.0, 1)));
+    }
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16, WeightDtype::Tf32] {
+        let mut a = lanes(dtype);
+        let mut b = lanes(dtype);
+        for (x, y) in a.iter_mut().zip(b.iter_mut()) {
+            x.load_scaler_state(256.0, 0).unwrap();
+            y.load_scaler_state(256.0, 0).unwrap();
+            assert_eq!(x.scaler_state().is_some(), dtype == WeightDtype::F16);
+            let (mut rx, mut ry) = (rows.clone(), rows.clone());
+            x.forward(&input, &mut rx).unwrap();
+            y.forward(&input, &mut ry).unwrap();
+            assert_eq!(rx, ry, "{dtype:?}: the forward is not repeatable");
+            let mx = x.backward_step(&d_out, BackwardOpts::default()).unwrap();
+            let my = y.backward_step(&d_out, BackwardOpts::default()).unwrap();
+            assert!(mx.optimizer_stepped && my.optimizer_stepped, "{dtype:?}");
+            assert_eq!(
+                x.optimizer_state().unwrap(),
+                y.optimizer_state().unwrap(),
+                "{dtype:?}: the step is not repeatable"
+            );
+        }
+    }
+}

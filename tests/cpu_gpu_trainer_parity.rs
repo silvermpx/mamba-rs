@@ -333,3 +333,114 @@ fn train_alike(mut cpu: AnyCpuTrainer, mut gpu: AnyGpuTrainer, scan: ScanMode, c
         );
     }
 }
+
+/// The relative l2 distance of `a` from `b`.
+fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
+    let (mut num, mut den) = (0f64, 0f64);
+    for (&x, &y) in a.iter().zip(b) {
+        num += (f64::from(x) - f64::from(y)).powi(2);
+        den += f64::from(y).powi(2);
+    }
+    (num / den.max(1e-30)).sqrt()
+}
+
+/// A trainer's window: the input and the output gradient in, the rows of
+/// the forward out, the global gradient norm of the applied step returned.
+type Window<'a> = dyn FnMut(&[f32], &[f32], &mut [f32]) -> f32 + 'a;
+
+/// One window of a pair: the rows of the forward and the global gradient
+/// norm of the applied step.
+fn window(cpu_or_gpu: &mut Window<'_>) -> (Vec<f32>, f32) {
+    let input = values(BATCH * SEQ_LEN * INPUT_DIM, 31);
+    let d_out = values(BATCH * SEQ_LEN * D_MODEL, 32);
+    let mut rows = vec![0f32; BATCH * SEQ_LEN * D_MODEL];
+    let norm = cpu_or_gpu(&input, &d_out, &mut rows);
+    (rows, norm)
+}
+
+/// The bf16 and f16 GPU trainers of Mamba-2 and MIMO against the CPU
+/// trainer of the same precision, which rounds the weights and the values
+/// between the kernels where the GPU trainer stores them: its rows land
+/// closer to the GPU's than the f32 CPU's do. (A TF32 trainer takes TF32
+/// only on the GEMMs a board has a measured kernel for, so the CPU's TF32
+/// lane, which rounds every product's operands, is not its twin.)
+#[test]
+fn half_lanes_track_the_cpu_lane() {
+    use mamba_rs::CpuOptions;
+    let s = session();
+    let m2 = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 2);
+    let mimo = Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 4);
+    let measure = BackwardOpts::default().with_clip_max_norm(1e30);
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        let gpu_opts = GpuOptions::default().dtype(dtype);
+        let lane = CpuOptions::default().dtype(dtype);
+        let trio: Vec<(&str, [AnyCpuTrainer; 2], AnyGpuTrainer)> = vec![
+            (
+                "Mamba-2",
+                [
+                    Mamba2CpuTrainer::new(&m2, m2_cfg(), s).unwrap().into(),
+                    Mamba2CpuTrainer::new_with(&m2, m2_cfg(), s, lane)
+                        .unwrap()
+                        .into(),
+                ],
+                Mamba2GpuTrainer::new(&m2, m2_cfg(), s, gpu_opts)
+                    .unwrap()
+                    .into(),
+            ),
+            (
+                "MIMO",
+                [
+                    Mamba3MimoCpuTrainer::new(&mimo, mimo_cfg(), s)
+                        .unwrap()
+                        .into(),
+                    Mamba3MimoCpuTrainer::new_with(&mimo, mimo_cfg(), s, lane)
+                        .unwrap()
+                        .into(),
+                ],
+                Mamba3MimoGpuTrainer::new(&mimo, mimo_cfg(), s, gpu_opts)
+                    .unwrap()
+                    .into(),
+            ),
+        ];
+        for (label, [mut f32_host, mut lane_host], mut gpu) in trio {
+            assert_eq!(lane_host.dtype(), dtype);
+            for t in [&mut f32_host, &mut lane_host] {
+                t.set_step_opts(measure).unwrap();
+                t.load_scaler_state(256.0, 0).unwrap();
+            }
+            gpu.set_step_opts(measure).unwrap();
+            gpu.load_scaler_state(256.0, 0).unwrap();
+            let on_cpu = |t: &mut AnyCpuTrainer| {
+                window(&mut |x, d, rows| {
+                    t.forward(x, rows).unwrap();
+                    let m = t
+                        .backward_step(d, t.step_opts())
+                        .unwrap_or_else(|e| panic!("{label}: {e}"));
+                    assert!(m.optimizer_stepped, "{label} {dtype:?}: the host skipped");
+                    m.grad_norm.unwrap()
+                })
+            };
+            let (f32_rows, f32_norm) = on_cpu(&mut f32_host);
+            let (lane_rows, lane_norm) = on_cpu(&mut lane_host);
+            let (gpu_rows, gpu_norm) = window(&mut |x, d, rows| {
+                gpu.forward(x, rows).unwrap();
+                let m = gpu.backward_step(d, gpu.step_opts()).unwrap();
+                assert!(m.optimizer_stepped, "{label} {dtype:?}: the GPU skipped");
+                m.grad_norm.unwrap()
+            });
+            let (d_f32, d_lane) = (rel_l2(&gpu_rows, &f32_rows), rel_l2(&gpu_rows, &lane_rows));
+            eprintln!(
+                "{label} {dtype:?}: rows GPU vs CPU f32 {d_f32:.2e}, vs CPU lane {d_lane:.2e}; \
+                 gradient norm GPU {gpu_norm}, CPU f32 {f32_norm}, CPU lane {lane_norm}"
+            );
+            assert!(
+                d_lane < d_f32,
+                "{label} {dtype:?}: the CPU lane ({d_lane:.3e}) is no closer than f32 ({d_f32:.3e})"
+            );
+            assert_eq!(
+                lane_host.scaler_state().is_some(),
+                dtype == WeightDtype::F16
+            );
+        }
+    }
+}

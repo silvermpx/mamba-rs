@@ -19,7 +19,10 @@ use super::core::{
 use crate::mamba1::cpu::prefill::{PrefillMode, zip_rows};
 use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
+use crate::ops::lane::LaneGemm;
 use crate::ops::norms::rms_norm_weighted;
+use crate::ops::rounding::store;
+use crate::precision::WeightDtype;
 
 /// Reusable prefill buffers, grown to the longest window seen.
 pub struct Mamba2PrefillScratch {
@@ -34,6 +37,9 @@ pub struct Mamba2PrefillScratch {
     gated: Vec<f32>,
     out: Vec<f32>,
     mlp: GatedMlpRowsScratch,
+    /// The precision of the windows (see `CpuOptions`).
+    dtype: WeightDtype,
+    gemm: LaneGemm,
 }
 
 impl Mamba2PrefillScratch {
@@ -48,7 +54,16 @@ impl Mamba2PrefillScratch {
             gated: Vec::new(),
             out: Vec::new(),
             mlp: GatedMlpRowsScratch::default(),
+            dtype: WeightDtype::F32,
+            gemm: LaneGemm::default(),
         }
+    }
+
+    /// Run the windows in `dtype`: the weights must hold the bulk matrices
+    /// rounded as that precision keeps them.
+    pub(crate) fn set_dtype(&mut self, dtype: WeightDtype) {
+        self.dtype = dtype;
+        self.mlp.dtype = dtype;
     }
 
     fn ensure(&mut self, cfg: &Mamba2Config, rows: usize) {
@@ -86,6 +101,16 @@ fn bias(b: &[f32]) -> Option<&[f32]> {
     if b.is_empty() { None } else { Some(b) }
 }
 
+/// The input projection's precision: f32 in the half lanes, as the GPU
+/// engine keeps it, TF32 operands in the TF32 lane.
+fn input_proj_dtype(dtype: WeightDtype) -> WeightDtype {
+    if dtype == WeightDtype::Tf32 {
+        dtype
+    } else {
+        WeightDtype::F32
+    }
+}
+
 /// One Mamba-2 mixer over a window of `t_len` rows of `temporal`
 /// (`[t_len, d_model]`), residual included, advancing `state`.
 fn mamba2_layer_prefill(
@@ -109,7 +134,7 @@ fn mamba2_layer_prefill(
         cfg.ngroups,
         cfg.nheads(),
     );
-    let gemm = gemm_for(mode);
+    let lane = (gemm_for(mode), s.dtype);
 
     zip_rows(
         mode,
@@ -117,14 +142,12 @@ fn mamba2_layer_prefill(
         (&temporal[..t_len * dm], dm),
         |d, x| rms_row(d, x, &lw.norm_weight, cfg.rms_norm_eps),
     );
-    gemm(
-        &mut s.proj[..t_len * ip],
-        &s.norm[..t_len * dm],
-        &lw.in_proj_w,
-        bias(&lw.in_proj_b),
-        t_len,
-        dm,
-        ip,
+    store(s.dtype, &mut s.norm[..t_len * dm]);
+    s.gemm.forward(
+        lane,
+        (&mut s.proj[..t_len * ip], &s.norm[..t_len * dm]),
+        (&lw.in_proj_w, bias(&lw.in_proj_b)),
+        (t_len, dm, ip),
     );
     // The conv walks the window in order through the carried history.
     let xbc_col = 2 * d_mlp + d_ssm;
@@ -136,6 +159,7 @@ fn mamba2_layer_prefill(
         conv_silu_token(xbc, raw, &state.conv_hist, lw);
         conv_hist_push(&mut state.conv_hist, raw);
     }
+    store(s.dtype, &mut s.xbc[..t_len * cd]);
 
     // Each head scans the window on its own state.
     let (proj, xbc) = (&s.proj[..t_len * ip], &s.xbc[..t_len * cd]);
@@ -199,14 +223,12 @@ fn mamba2_layer_prefill(
         PrefillMode::Single => gated.for_each(gate_row),
         PrefillMode::Parallel => gated.collect::<Vec<_>>().into_par_iter().for_each(gate_row),
     }
-    gemm(
-        &mut s.out[..t_len * dm],
-        &s.gated[..t_len * di],
-        &lw.out_proj_w,
-        bias(&lw.out_proj_b),
-        t_len,
-        di,
-        dm,
+    store(s.dtype, &mut s.gated[..t_len * di]);
+    s.gemm.forward(
+        lane,
+        (&mut s.out[..t_len * dm], &s.gated[..t_len * di]),
+        (&lw.out_proj_w, bias(&lw.out_proj_b)),
+        (t_len, di, dm),
     );
     for (t, &o) in temporal[..t_len * dm].iter_mut().zip(&s.out[..t_len * dm]) {
         *t += o;
@@ -255,14 +277,11 @@ pub fn forward_mamba2_backbone_prefill_mode(
         out.copy_from_slice(&input_flat[..seq_len * dm]);
     } else {
         let input_dim = input_flat.len() / seq_len;
-        gemm_for(mode)(
-            out,
-            &input_flat[..seq_len * input_dim],
-            &w.input_proj_w,
-            bias(&w.input_proj_b),
-            seq_len,
-            input_dim,
-            dm,
+        scratch.gemm.forward(
+            (gemm_for(mode), input_proj_dtype(scratch.dtype)),
+            (out, &input_flat[..seq_len * input_dim]),
+            (&w.input_proj_w, bias(&w.input_proj_b)),
+            (seq_len, input_dim, dm),
         );
     }
     for (l, (lw, st)) in w.layers.iter().zip(states.iter_mut()).enumerate() {

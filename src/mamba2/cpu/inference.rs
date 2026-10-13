@@ -15,7 +15,10 @@ use super::super::state::Mamba2LayerState;
 use super::super::weights::{Mamba2LayerWeights, Mamba2Weights};
 use super::core::{conv_hist_push, conv_silu_token, gate_token, rms_row, ssm_token};
 use crate::mlp::cpu::{GatedMlpPacked, GatedMlpStepScratch, gated_mlp_step, gated_mlp_step_packed};
-use crate::ops::packed::{PackedLinear, linear_row};
+use crate::ops::lane::LaneGemm;
+use crate::ops::packed::PackedLinear;
+use crate::ops::rounding::store;
+use crate::precision::WeightDtype;
 
 /// One layer's projections packed for decode.
 #[derive(Clone, Debug)]
@@ -64,6 +67,9 @@ pub struct Mamba2StepScratch {
     y: Vec<f32>,
     gated: Vec<f32>,
     mlp: GatedMlpStepScratch,
+    /// The precision of the step (see `CpuOptions`).
+    dtype: WeightDtype,
+    gemm: LaneGemm,
 }
 
 impl Mamba2StepScratch {
@@ -77,16 +83,31 @@ impl Mamba2StepScratch {
             y: vec![0.0; cfg.ssm_dim()],
             gated: vec![0.0; cfg.d_inner()],
             mlp: GatedMlpStepScratch::new(dm, cfg.mlp_hidden()),
+            dtype: WeightDtype::F32,
+            gemm: LaneGemm::default(),
         }
+    }
+
+    /// Run the steps in `dtype`: the weights must hold the bulk matrices
+    /// rounded as that precision keeps them.
+    pub(crate) fn set_dtype(&mut self, dtype: WeightDtype) {
+        self.dtype = dtype;
+        self.mlp.dtype = dtype;
     }
 }
 
-/// `y = x W (+ b)` for one row, the bias added by the GEMM, from the
-/// packed panels when there are some.
-fn project(y: &mut [f32], x: &[f32], w: (&[f32], Option<&PackedLinear>), b: &[f32]) {
-    let bias = if b.is_empty() { None } else { Some(b) };
-    let (n_in, n_out) = (x.len(), y.len());
-    linear_row(y, x, w, bias, (n_in, n_out));
+fn bias(b: &[f32]) -> Option<&[f32]> {
+    if b.is_empty() { None } else { Some(b) }
+}
+
+/// The input projection's precision: f32 in the half lanes, as the GPU
+/// engine keeps it, TF32 operands in the TF32 lane.
+fn input_proj_dtype(dtype: WeightDtype) -> WeightDtype {
+    if dtype == WeightDtype::Tf32 {
+        dtype
+    } else {
+        WeightDtype::F32
+    }
 }
 
 /// One token through one Mamba-2 mixer; `temporal` (`[d_model]`) is both
@@ -154,6 +175,7 @@ fn layer_step_body(
 ) {
     let dm = cfg.d_model;
     let (d_mlp, d_ssm, cd) = (cfg.d_mlp(), cfg.ssm_dim(), cfg.conv_dim());
+    let dtype = scratch.dtype;
     scratch.residual.copy_from_slice(&temporal[..dm]);
     rms_row(
         &mut scratch.norm_buf,
@@ -161,16 +183,18 @@ fn layer_step_body(
         &lw.norm_weight,
         cfg.rms_norm_eps,
     );
-    project(
-        &mut scratch.proj,
-        &scratch.norm_buf,
+    store(dtype, &mut scratch.norm_buf);
+    scratch.gemm.row(
+        dtype,
+        (&mut scratch.proj, &scratch.norm_buf),
         (&lw.in_proj_w, lp.map(|p| &p.in_proj)),
-        &lw.in_proj_b,
+        bias(&lw.in_proj_b),
     );
     let xbc_raw = &scratch.proj[2 * d_mlp + d_ssm..2 * d_mlp + d_ssm + cd];
     let dt_raw = &scratch.proj[2 * d_mlp + d_ssm + cd..];
     conv_silu_token(&mut scratch.xbc, xbc_raw, &state.conv_hist, lw);
     conv_hist_push(&mut state.conv_hist, xbc_raw);
+    store(dtype, &mut scratch.xbc);
     ssm_token(
         (&mut state.ssm, &mut scratch.y),
         &scratch.xbc,
@@ -179,11 +203,12 @@ fn layer_step_body(
         cfg,
     );
     gate_token(&mut scratch.gated, &scratch.y, &scratch.proj, lw, cfg);
-    project(
-        &mut temporal[..dm],
-        &scratch.gated,
+    store(dtype, &mut scratch.gated);
+    scratch.gemm.row(
+        dtype,
+        (&mut temporal[..dm], &scratch.gated),
         (&lw.out_proj_w, lp.map(|p| &p.out_proj)),
-        &lw.out_proj_b,
+        bias(&lw.out_proj_b),
     );
     for (t, &r) in temporal[..dm].iter_mut().zip(&scratch.residual) {
         *t += r;
@@ -244,14 +269,14 @@ fn backbone_step(
     if weights.input_proj_w.is_empty() {
         temporal[..dm].copy_from_slice(&input[..dm]);
     } else {
-        project(
-            &mut temporal[..dm],
-            input,
+        scratch.gemm.row(
+            input_proj_dtype(scratch.dtype),
+            (&mut temporal[..dm], input),
             (
                 &weights.input_proj_w,
                 packed.and_then(|p| p.input_proj.as_ref()),
             ),
-            &weights.input_proj_b,
+            bias(&weights.input_proj_b),
         );
     }
     for (l, (lw, st)) in weights.layers.iter().zip(states.iter_mut()).enumerate() {

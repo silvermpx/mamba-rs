@@ -10,6 +10,7 @@ use crate::config::ModelFamily;
 use crate::module::cpu_trainer::{Control, CpuCore, CpuFamily, TensorRole, cpu_trainer_type};
 use crate::optim::session::TrainSessionCfg;
 use crate::optim::tensors::tensor_list;
+use crate::precision::{CpuOptions, WeightDtype};
 
 /// Positions between the tape's state checkpoints: the backward replays a
 /// head's recurrence over at most this many steps from a stored state.
@@ -38,6 +39,7 @@ tensor_list!(
 pub(crate) struct Mamba2Cpu {
     cfg: Mamba2Config,
     input_dim: usize,
+    dtype: WeightDtype,
 }
 
 /// One sequence's carried states, tape and scratch.
@@ -53,12 +55,23 @@ impl CpuFamily for Mamba2Cpu {
     const FAMILY: ModelFamily = ModelFamily::Mamba2;
     const RECURRENCE: &'static [&'static str] = &["conv", "ssm"];
 
+    fn dtype(&self) -> WeightDtype {
+        self.dtype
+    }
+
+    /// The GPU trainer's half mirror: in_proj, out_proj and the MLP's two
+    /// projections; TF32 rounds the input projection's operands too.
+    fn round_weights(&self, w: &mut Mamba2Weights) {
+        w.round_bulk(self.dtype);
+    }
+
     fn new_seq(&self, _w: &Mamba2Weights, seq_len: usize) -> Result<Mamba2CpuSeq, String> {
         Ok(Mamba2CpuSeq {
             states: (0..self.cfg.n_layers)
                 .map(|_| Mamba2LayerState::zeros(&self.cfg))
                 .collect(),
-            tape: Mamba2Tape::new(&self.cfg, seq_len, self.input_dim, TAPE_STRIDE),
+            tape: Mamba2Tape::new(&self.cfg, seq_len, self.input_dim, TAPE_STRIDE)
+                .with_dtype(self.dtype),
             scratch: Mamba2TrainScratch::default(),
         })
     }
@@ -235,11 +248,25 @@ impl Mamba2CpuTrainer {
         cfg: Mamba2Config,
         session: TrainSessionCfg,
     ) -> Result<Self, String> {
+        Self::new_with(weights, cfg, session, CpuOptions::default())
+    }
+
+    /// [`Mamba2CpuTrainer::new`] in the precision `opts` names: f32
+    /// masters, the bulk matrices and the values between the kernels
+    /// rounded as the GPU trainer of that precision rounds them, and in
+    /// f16 the dynamic loss scaler.
+    pub fn new_with(
+        weights: &Mamba2Weights,
+        cfg: Mamba2Config,
+        session: TrainSessionCfg,
+        opts: CpuOptions,
+    ) -> Result<Self, String> {
         cfg.validate()?;
         weights.validate(&cfg, session.input_dim)?;
         let fam = Mamba2Cpu {
             cfg,
             input_dim: session.input_dim,
+            dtype: opts.dtype,
         };
         Ok(Self {
             core: CpuCore::new(fam, weights.clone(), session, cfg.d_model)?,

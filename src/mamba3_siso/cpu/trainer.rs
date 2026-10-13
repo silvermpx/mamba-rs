@@ -98,6 +98,13 @@ impl CpuFamily for Mamba3Cpu {
     const FAMILY: ModelFamily = ModelFamily::Mamba3;
     const RECURRENCE: &'static [&'static str] = &["ssm", "k", "v", "angle"];
 
+    /// f32 until this family's reduced-precision lanes land.
+    fn dtype(&self) -> crate::precision::WeightDtype {
+        crate::precision::WeightDtype::F32
+    }
+
+    fn round_weights(&self, _w: &mut Mamba3CpuWeights) {}
+
     fn new_seq(&self, w: &Mamba3CpuWeights, seq_len: usize) -> Result<Mamba3CpuSeq, String> {
         let (dm, nl) = (self.cfg.d_model, self.cfg.n_layers);
         let [ssm, k, v, angle] = self.per_layer().map(|n| vec![0.0; nl * n]);

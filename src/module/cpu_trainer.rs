@@ -6,8 +6,12 @@
 //! needs) and that backward; [`CpuCore`] runs the batch's sequences side by
 //! side, sums their gradients in a fixed number of chunks reduced in a
 //! fixed tree (so the bits do not depend on the thread pool), keeps the
-//! window, clips, skips and steps. [`CpuTrainer`] names the surface the
-//! four families share, and [`AnyCpuTrainer`] holds one chosen at run time.
+//! window, clips, skips and steps. In a reduced precision it keeps f32
+//! masters and the weights the family computes with rounded from them after
+//! every step, and in f16 it scales the window's gradient with the dynamic
+//! loss scaler, as the GPU trainers do. [`CpuTrainer`] names the surface
+//! the four families share, and [`AnyCpuTrainer`] holds one chosen at run
+//! time.
 
 use std::ops::Range;
 
@@ -15,9 +19,11 @@ use rayon::prelude::*;
 
 use crate::config::ModelFamily;
 use crate::optim::adamw::{AdamWStateBlob, HostAdamW};
+use crate::optim::loss_scaler::DynamicLossScaler;
 use crate::optim::session::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
 pub(crate) use crate::optim::tensors::TensorList;
 use crate::optim::train_state::TrainerState;
+use crate::precision::WeightDtype;
 
 /// The elements of a tensor in the control channels: none, all of them,
 /// or the columns `cols` of every `row_len`-wide row.
@@ -66,6 +72,13 @@ pub(crate) trait CpuFamily: Send + Sync {
     /// state stores them.
     const RECURRENCE: &'static [&'static str];
 
+    /// The precision the family computes in.
+    fn dtype(&self) -> WeightDtype;
+    /// Round in place the tensors of `w` the family's GPU trainer holds in
+    /// the storage of [`CpuFamily::dtype`] (bf16, f16) or multiplies in
+    /// TF32: its bulk matrices. The others keep the masters' values.
+    fn round_weights(&self, w: &mut Self::Weights);
+
     fn new_seq(&self, w: &Self::Weights, seq_len: usize) -> Result<Self::Seq, String>;
     /// Zero the sequence's carried recurrence.
     fn reset_seq(&self, seq: &mut Self::Seq);
@@ -113,7 +126,16 @@ pub(crate) trait CpuFamily: Send + Sync {
 /// What every host trainer runs, over a family's sequences.
 pub(crate) struct CpuCore<F: CpuFamily> {
     pub(crate) fam: F,
+    /// The f32 masters AdamW updates.
     pub(crate) weights: F::Weights,
+    /// The weights the family computes with in a reduced precision: the
+    /// masters with the bulk matrices rounded, refreshed after every
+    /// optimizer step as the GPU's AdamW writes its compute copy. `None` in
+    /// f32, where they are the masters.
+    compute: Option<F::Weights>,
+    /// Scales the window's gradient in f16; disabled in the other
+    /// precisions.
+    scaler: DynamicLossScaler,
     /// The open window's gradient sum.
     grads: F::Weights,
     /// One gradient per chunk of the batch, reduced in a fixed tree.
@@ -164,7 +186,20 @@ impl<F: CpuFamily> CpuCore<F> {
         }
         let n_params = weights.n_elements();
         let rows = batch * seq_len;
+        let dtype = fam.dtype();
+        let compute = (dtype != WeightDtype::F32).then(|| {
+            let mut c = weights.clone();
+            fam.round_weights(&mut c);
+            c
+        });
+        let scaler = if dtype == WeightDtype::F16 {
+            DynamicLossScaler::new()
+        } else {
+            DynamicLossScaler::disabled()
+        };
         Ok(Self {
+            compute,
+            scaler,
             grads: F::zeros_like(&weights),
             slots: (0..n_chunks).map(|_| F::zeros_like(&weights)).collect(),
             seqs,
@@ -203,6 +238,36 @@ impl<F: CpuFamily> CpuCore<F> {
     pub(crate) fn set_lr(&mut self, lr: f32) {
         self.adam.lr = lr;
     }
+    pub(crate) fn dtype(&self) -> WeightDtype {
+        self.fam.dtype()
+    }
+
+    /// The f16 loss scale and its growth counter; `None` in the other
+    /// precisions.
+    pub(crate) fn scaler_state(&self) -> Option<(f32, u32)> {
+        self.scaler.enabled().then(|| self.scaler.state())
+    }
+
+    /// Restore the f16 loss scale and its growth counter; no effect in the
+    /// other precisions.
+    pub(crate) fn load_scaler_state(
+        &mut self,
+        scale: f32,
+        growth_tracker: u32,
+    ) -> Result<(), String> {
+        if self.scaler.enabled() {
+            self.scaler.load_state(scale, growth_tracker)?;
+        }
+        Ok(())
+    }
+
+    /// Round the compute copy afresh from the masters.
+    fn refresh_compute(&mut self) {
+        if let Some(c) = self.compute.as_mut() {
+            c.clone_from(&self.weights);
+            self.fam.round_weights(c);
+        }
+    }
 
     fn check_len(&self, what: &str, got: usize, width: usize) -> Result<(), String> {
         let want = self.batch * self.seq_len * width;
@@ -223,7 +288,7 @@ impl<F: CpuFamily> CpuCore<F> {
         self.check_len("forward output", out.len(), self.d_model)?;
         self.forwarded = false;
         let (per_in, per_out) = (self.seq_len * self.input_dim, self.seq_len * self.d_model);
-        let (fam, w) = (&self.fam, &self.weights);
+        let (fam, w) = (&self.fam, self.compute.as_ref().unwrap_or(&self.weights));
         self.seqs
             .par_iter_mut()
             .zip(input.par_chunks(per_in))
@@ -250,6 +315,12 @@ impl<F: CpuFamily> CpuCore<F> {
         }
         self.forwarded = false;
         self.d_buf.copy_from_slice(d_temporal);
+        // f16: the window's gradient at the loss scale, every micro-batch
+        // at the same one.
+        let scale = self.scaler.enabled().then(|| self.scaler.scale());
+        if let Some(s) = scale {
+            self.d_buf.iter_mut().for_each(|x| *x *= s);
+        }
         let n_chunks = self.slots.len();
         let (per_out, per_in) = (self.seq_len * self.d_model, self.seq_len * self.input_dim);
         // The chunks own fixed ranges of the batch, a function of the batch
@@ -270,7 +341,7 @@ impl<F: CpuFamily> CpuCore<F> {
             parts.push((s_head, d_head, i_head, &mut slot[0]));
             (seqs, d, d_in, slots) = (s_rest, d_rest, i_rest, slot_rest);
         }
-        let (fam, w) = (&self.fam, &self.weights);
+        let (fam, w) = (&self.fam, self.compute.as_ref().unwrap_or(&self.weights));
         parts
             .into_par_iter()
             .try_for_each(|(seqs, d, d_in, slot)| {
@@ -308,6 +379,10 @@ impl<F: CpuFamily> CpuCore<F> {
         self.window_open = true;
         if let Some(d) = d_input {
             d.copy_from_slice(&self.d_input_buf);
+            if let Some(s) = scale {
+                let inv = 1.0 / s;
+                d.iter_mut().for_each(|x| *x *= inv);
+            }
         }
         Ok(())
     }
@@ -335,7 +410,7 @@ impl<F: CpuFamily> CpuCore<F> {
                 step: self.adam.step,
                 optimizer_stepped: false,
                 grad_norm: None,
-                loss_scale: None,
+                loss_scale: self.scaler_state().map(|(s, _)| s),
                 overflow_skipped: None,
             });
         }
@@ -445,6 +520,29 @@ impl<F: CpuFamily> CpuCore<F> {
         step_skip_above: Option<f32>,
         control_clip_max_norm: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
+        // f16: a window whose gradient overflowed is skipped whole and the
+        // scale backs off; a clean one is unscaled before the clips.
+        let loss_scale = self.scaler_state().map(|(s, _)| s);
+        if let Some(s) = loss_scale {
+            let overflow = (0..self.grads.n_tensors())
+                .any(|i| self.grads.tensor(i).iter().any(|x| !x.is_finite()));
+            self.scaler.update(overflow);
+            if overflow {
+                self.window_open = false;
+                return Ok(BackwardMetrics {
+                    step: self.adam.step,
+                    optimizer_stepped: false,
+                    grad_norm: None,
+                    loss_scale,
+                    overflow_skipped: Some(true),
+                });
+            }
+            let inv = 1.0 / s;
+            for i in 0..self.grads.n_tensors() {
+                self.grads.tensor_mut(i).iter_mut().for_each(|x| *x *= inv);
+            }
+        }
+        let overflow_skipped = loss_scale.map(|_| false);
         // The control channels first, so a window whose step-size and
         // decay gradients grow with its length cannot rescale the whole
         // gradient through the global clip below.
@@ -476,20 +574,21 @@ impl<F: CpuFamily> CpuCore<F> {
                 step: self.adam.step,
                 optimizer_stepped: false,
                 grad_norm,
-                loss_scale: None,
-                overflow_skipped: None,
+                loss_scale,
+                overflow_skipped,
             });
         }
         let roles = &self.roles;
         self.adam
             .step(&mut self.weights, &self.grads, |i| roles[i].decays)?;
         self.fam.after_update(&self.weights);
+        self.refresh_compute();
         Ok(BackwardMetrics {
             step: self.adam.step,
             optimizer_stepped: true,
             grad_norm,
-            loss_scale: None,
-            overflow_skipped: None,
+            loss_scale,
+            overflow_skipped,
         })
     }
 
@@ -569,7 +668,7 @@ impl<F: CpuFamily> CpuCore<F> {
         TrainerState {
             family: F::FAMILY,
             optimizer: self.optimizer_state(),
-            scaler: None,
+            scaler: self.scaler_state(),
             recurrent: self.recurrent_state(),
         }
     }
@@ -584,6 +683,10 @@ impl<F: CpuFamily> CpuCore<F> {
             .collect::<Result<Vec<_>, String>>()?;
         for (i, values) in tensors.iter().enumerate() {
             self.check_recurrence(i, values)?;
+        }
+        if let Some((scale, tracker)) = state.scaler {
+            DynamicLossScaler::check_scale(scale)?;
+            self.load_scaler_state(scale, tracker)?;
         }
         self.adam.import_state(&state.optimizer)?;
         for (i, values) in tensors.iter().enumerate() {
@@ -706,6 +809,19 @@ pub trait CpuTrainer {
     fn seq_len(&self) -> usize;
     fn input_dim(&self) -> usize;
     fn d_model(&self) -> usize;
+
+    /// The precision the trainer computes in (see
+    /// [`CpuOptions`](crate::CpuOptions)).
+    fn dtype(&self) -> crate::WeightDtype;
+
+    /// The f16 loss scale and its growth counter; `None` in the other
+    /// precisions.
+    fn scaler_state(&self) -> Option<(f32, u32)>;
+
+    /// Restore the f16 loss scale and its growth counter; no effect in the
+    /// other precisions. A scale that is not finite and positive is an
+    /// error.
+    fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) -> Result<(), String>;
 
     /// The AdamW state for a bit-continuous resume.
     fn optimizer_state(&self) -> Result<AdamWStateBlob, String>;
@@ -850,6 +966,22 @@ macro_rules! cpu_trainer_type {
                 self.core.d_model()
             }
 
+            /// See [`CpuTrainer::dtype`]($crate::module::CpuTrainer::dtype).
+            pub fn dtype(&self) -> $crate::WeightDtype {
+                self.core.dtype()
+            }
+
+            /// See [`CpuTrainer::scaler_state`]($crate::module::CpuTrainer::scaler_state).
+            pub fn scaler_state(&self) -> Option<(f32, u32)> {
+                self.core.scaler_state()
+            }
+
+            /// See [`CpuTrainer::load_scaler_state`]($crate::module::CpuTrainer::load_scaler_state).
+            pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) -> Result<(), String> {
+                $crate::optim::DynamicLossScaler::check_scale(scale)?;
+                self.core.load_scaler_state(scale, growth_tracker)
+            }
+
             /// See [`CpuTrainer::optimizer_state`]($crate::module::CpuTrainer::optimizer_state).
             pub fn optimizer_state(&self) -> Result<$crate::optim::AdamWStateBlob, String> {
                 Ok(self.core.optimizer_state())
@@ -953,6 +1085,15 @@ macro_rules! cpu_trainer_type {
             }
             fn d_model(&self) -> usize {
                 <$name>::d_model(self)
+            }
+            fn dtype(&self) -> $crate::WeightDtype {
+                <$name>::dtype(self)
+            }
+            fn scaler_state(&self) -> Option<(f32, u32)> {
+                <$name>::scaler_state(self)
+            }
+            fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) -> Result<(), String> {
+                <$name>::load_scaler_state(self, scale, growth_tracker)
             }
             fn optimizer_state(&self) -> Result<$crate::optim::AdamWStateBlob, String> {
                 <$name>::optimizer_state(self)
@@ -1107,6 +1248,15 @@ impl CpuTrainer for AnyCpuTrainer {
     }
     fn d_model(&self) -> usize {
         self.inner().d_model()
+    }
+    fn dtype(&self) -> crate::WeightDtype {
+        self.inner().dtype()
+    }
+    fn scaler_state(&self) -> Option<(f32, u32)> {
+        self.inner().scaler_state()
+    }
+    fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) -> Result<(), String> {
+        self.inner_mut().load_scaler_state(scale, growth_tracker)
     }
     fn optimizer_state(&self) -> Result<AdamWStateBlob, String> {
         self.inner().optimizer_state()

@@ -8,6 +8,7 @@ use crate::mamba2::cpu::inference::{
 use crate::mamba2::cpu::prefill::{Mamba2PrefillScratch, forward_mamba2_backbone_prefill};
 use crate::mamba2::state::Mamba2State;
 use crate::mamba2::weights::Mamba2Weights;
+use crate::precision::{CpuOptions, WeightDtype};
 
 /// Mamba-2 backbone for CPU inference. The recurrent state is owned by the
 /// caller, so several sessions can share one set of weights.
@@ -19,6 +20,8 @@ pub struct Mamba2Backbone {
     packed: Option<Mamba2PackedLinears>,
     /// Width of an input row.
     input_dim: usize,
+    /// The precision the backbone computes in.
+    dtype: WeightDtype,
 }
 
 impl Mamba2Backbone {
@@ -30,6 +33,7 @@ impl Mamba2Backbone {
             cfg,
             packed: None,
             input_dim,
+            dtype: WeightDtype::F32,
         })
     }
 
@@ -40,13 +44,34 @@ impl Mamba2Backbone {
         cfg: Mamba2Config,
         input_dim: usize,
     ) -> Result<Self, String> {
+        Self::new_with(weights, cfg, input_dim, CpuOptions::default())
+    }
+
+    /// [`Mamba2Backbone::new`] in the precision `opts` names: the bulk
+    /// matrices rounded once here as the GPU engine of that precision
+    /// holds them, and the values between the kernels rounded where it
+    /// stores them. [`Mamba2Backbone::weights`] then gives the rounded
+    /// weights, the ones the backbone computes with.
+    pub fn new_with(
+        mut weights: Mamba2Weights,
+        cfg: Mamba2Config,
+        input_dim: usize,
+        opts: CpuOptions,
+    ) -> Result<Self, String> {
         weights.validate(&cfg, input_dim)?;
+        weights.round_bulk(opts.dtype);
         Ok(Self {
             weights,
             cfg,
             packed: None,
             input_dim,
+            dtype: opts.dtype,
         })
+    }
+
+    /// The precision the backbone computes in.
+    pub fn dtype(&self) -> WeightDtype {
+        self.dtype
     }
 
     /// The weights.
@@ -96,6 +121,7 @@ impl Mamba2Backbone {
         scratch: &mut Mamba2Scratch,
     ) {
         let (states, scratch) = (&mut state.layers, &mut scratch.step);
+        scratch.set_dtype(self.dtype);
         match &self.packed {
             Some(p) => mamba2_step_packed(
                 output,
@@ -120,6 +146,7 @@ impl Mamba2Backbone {
         seq_len: usize,
     ) {
         let (states, scratch) = (&mut state.layers, &mut scratch.prefill);
+        scratch.set_dtype(self.dtype);
         forward_mamba2_backbone_prefill(
             outputs,
             inputs,

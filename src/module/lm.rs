@@ -53,9 +53,9 @@ impl AnyState {
 }
 
 pub enum AnyScratch {
-    M1(MambaStepScratch),
+    M1(Box<MambaStepScratch>),
     M2(Box<Mamba2Scratch>),
-    M3(Mamba3StepScratch),
+    M3(Box<Mamba3StepScratch>),
     M3Mimo(Box<Mamba3MimoScratch>),
 }
 
@@ -128,9 +128,9 @@ impl AnyBackbone {
 
     pub fn alloc_scratch(&self) -> AnyScratch {
         match self {
-            Self::M1(bb) => AnyScratch::M1(bb.alloc_scratch()),
+            Self::M1(bb) => AnyScratch::M1(Box::new(bb.alloc_scratch())),
             Self::M2(bb) => AnyScratch::M2(Box::new(bb.alloc_scratch())),
-            Self::M3(bb) => AnyScratch::M3(bb.alloc_scratch()),
+            Self::M3(bb) => AnyScratch::M3(Box::new(bb.alloc_scratch())),
             Self::M3Mimo(bb) => AnyScratch::M3Mimo(Box::new(bb.alloc_scratch())),
         }
     }

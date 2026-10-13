@@ -79,6 +79,31 @@ impl WeightDtype {
     }
 }
 
+/// How a CPU model or trainer computes: the precision it holds its bulk
+/// weights and the values between its kernels in, rounded where the GPU
+/// lane of the same [`WeightDtype`] rounds them, so a reduced precision is
+/// served and trained on the host the way the device does it, and the
+/// device can be held to it. The default is f32, the host's own arithmetic.
+///
+/// Change a field with the builder, for example
+/// `CpuOptions::default().dtype(WeightDtype::Bf16)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CpuOptions {
+    /// The precision of the bulk weights and of the values between the
+    /// kernels; `Tf32` keeps f32 values and rounds the GEMM operands.
+    pub dtype: WeightDtype,
+}
+
+impl CpuOptions {
+    /// Hold the weights and the values between the kernels in this
+    /// precision.
+    pub fn dtype(mut self, dtype: WeightDtype) -> Self {
+        self.dtype = dtype;
+        self
+    }
+}
+
 /// Selects the GEMM implementation and cuBLAS numeric policy for a GPU context.
 ///
 /// [`GemmMode::Deterministic`] is the default. It selects the context's own

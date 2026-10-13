@@ -10,6 +10,14 @@
 //! its checkpoint. Everything runs in a fixed order on one thread per
 //! sample, so the gradients do not depend on the thread count or on the
 //! checkpoint stride.
+//!
+//! In a reduced precision the window rounds where the GPU trainer stores a
+//! half value: the normalized rows, the in_proj and out_proj outputs, the
+//! conv output and the gated rows in the forward; the residual gradient's
+//! copy for the GEMMs, the gated rows' and the normalized rows' input
+//! gradients and the in_proj gradient (once, after every term is in) in
+//! the backward. TF32 rounds every GEMM operand instead. The scan, the
+//! states, the norms' statistics and every weight gradient stay f32.
 
 use super::super::config::Mamba2Config;
 use super::super::state::Mamba2LayerState;
@@ -17,15 +25,19 @@ use super::super::weights::{Mamba2LayerWeights, Mamba2Weights};
 use super::core::{
     DSkip, HeadScan, conv_hist_push, conv_silu_token, dt_da, gate_token, head_scan, rms_row,
 };
+use crate::mlp::cpu::RowsGemm;
 use crate::mlp::cpu::{
     GatedMlpBackwardScratch, GatedMlpRowsScratch, gated_mlp_rows, gated_mlp_rows_backward,
 };
-use crate::ops::blas::{sgemm_backward, sgemm_forward};
+use crate::ops::blas::sgemm_forward;
 use crate::ops::fold16::sum_sq_fold16;
+use crate::ops::lane::LaneGemm;
 use crate::ops::norms::rms_norm_weighted;
 use crate::ops::portable_math::{
     exp_portable, sigmoid_portable, silu_grad_portable, silu_portable, softplus_portable,
 };
+use crate::ops::rounding::store;
+use crate::precision::WeightDtype;
 
 /// One layer's record.
 struct LayerTape {
@@ -49,6 +61,8 @@ pub struct Mamba2Tape {
     seq_len: usize,
     stride: usize,
     input_dim: usize,
+    /// The precision the window computes in.
+    dtype: WeightDtype,
     input: Vec<f32>,
     /// The rows entering the final norm.
     final_in: Vec<f32>,
@@ -77,6 +91,7 @@ impl Mamba2Tape {
             seq_len,
             stride,
             input_dim,
+            dtype: WeightDtype::F32,
             input: vec![0.0; seq_len * input_dim],
             final_in: vec![0.0; seq_len * dm],
             layers: (0..cfg.n_layers)
@@ -90,6 +105,13 @@ impl Mamba2Tape {
                 })
                 .collect(),
         }
+    }
+
+    /// The tape of a window computed in `dtype`: the weights it is given
+    /// must hold the bulk matrices rounded as that precision keeps them.
+    pub(crate) fn with_dtype(mut self, dtype: WeightDtype) -> Self {
+        self.dtype = dtype;
+        self
     }
 
     /// Bytes the tape holds.
@@ -130,10 +152,23 @@ pub struct Mamba2TrainScratch {
     u: Vec<f32>,
     mlp: GatedMlpRowsScratch,
     mlp_bwd: GatedMlpBackwardScratch,
+    /// The precision of the window in flight, from its tape.
+    dtype: WeightDtype,
+    gemm: LaneGemm,
 }
 
 fn bias(b: &[f32]) -> Option<&[f32]> {
     if b.is_empty() { None } else { Some(b) }
+}
+
+/// The input projection's precision: f32 in the half lanes, as the GPU
+/// trainer keeps it, TF32 operands in the TF32 lane.
+fn input_proj_dtype(dtype: WeightDtype) -> WeightDtype {
+    if dtype == WeightDtype::Tf32 {
+        dtype
+    } else {
+        WeightDtype::F32
+    }
 }
 
 fn grow(v: &mut Vec<f32>, n: usize) {
@@ -160,18 +195,17 @@ pub fn forward_mamba2_train(
         return;
     }
     tape.input.copy_from_slice(&input[..t_len * tape.input_dim]);
+    s.dtype = tape.dtype;
+    s.mlp.dtype = tape.dtype;
     let rows = &mut out[..t_len * dm];
     if w.input_proj_w.is_empty() {
         rows.copy_from_slice(&input[..t_len * dm]);
     } else {
-        sgemm_forward(
-            rows,
-            &input[..t_len * tape.input_dim],
-            &w.input_proj_w,
-            bias(&w.input_proj_b),
-            t_len,
-            tape.input_dim,
-            dm,
+        s.gemm.forward(
+            (sgemm_forward as RowsGemm, input_proj_dtype(tape.dtype)),
+            (rows, &tape.input),
+            (&w.input_proj_w, bias(&w.input_proj_b)),
+            (t_len, tape.input_dim, dm),
         );
     }
     let stride = tape.stride;
@@ -230,18 +264,17 @@ fn layer_forward(
     grow(&mut s.gated, t_len * di);
     grow(&mut s.out, t_len * dm);
 
+    let lane = (sgemm_forward as RowsGemm, s.dtype);
     lt.x_in.copy_from_slice(rows);
     for (d, x) in s.norm.chunks_exact_mut(dm).zip(rows.chunks_exact(dm)) {
         rms_row(d, x, &lw.norm_weight, cfg.rms_norm_eps);
     }
-    sgemm_forward(
-        &mut lt.proj,
-        &s.norm[..t_len * dm],
-        &lw.in_proj_w,
-        bias(&lw.in_proj_b),
-        t_len,
-        dm,
-        ip,
+    store(s.dtype, &mut s.norm[..t_len * dm]);
+    s.gemm.forward(
+        lane,
+        (&mut lt.proj, &s.norm[..t_len * dm]),
+        (&lw.in_proj_w, bias(&lw.in_proj_b)),
+        (t_len, dm, ip),
     );
     lt.conv_hist0.copy_from_slice(&state.conv_hist);
     let xbc_col = 2 * d_mlp + d_ssm;
@@ -250,6 +283,7 @@ fn layer_forward(
         conv_silu_token(xbc, raw, &state.conv_hist, lw);
         conv_hist_push(&mut state.conv_hist, raw);
     }
+    store(s.dtype, &mut s.xbc[..t_len * cd]);
 
     // The scan, head by head, with a checkpoint every `stride` tokens.
     for (h, st) in state.ssm.chunks_exact_mut(n * p_len).enumerate() {
@@ -291,14 +325,12 @@ fn layer_forward(
     {
         gate_token(g, y, proj, lw, cfg);
     }
-    sgemm_forward(
-        &mut s.out[..t_len * dm],
-        &s.gated[..t_len * di],
-        &lw.out_proj_w,
-        bias(&lw.out_proj_b),
-        t_len,
-        di,
-        dm,
+    store(s.dtype, &mut s.gated[..t_len * di]);
+    s.gemm.forward(
+        lane,
+        (&mut s.out[..t_len * dm], &s.gated[..t_len * di]),
+        (&lw.out_proj_w, bias(&lw.out_proj_b)),
+        (t_len, di, dm),
     );
     for (t, &o) in rows.iter_mut().zip(&s.out[..t_len * dm]) {
         *t += o;
@@ -332,6 +364,8 @@ pub fn backward_mamba2_train(
     if t_len == 0 {
         return;
     }
+    s.dtype = tape.dtype;
+    s.mlp_bwd.dtype = tape.dtype;
     let d_rows = &mut d_out[..t_len * dm];
     rms_backward(
         d_rows,
@@ -371,13 +405,10 @@ pub fn backward_mamba2_train(
         } else {
             Some(&mut grads.input_proj_b[..])
         };
-        sgemm_backward(
-            dx,
-            &mut grads.input_proj_w,
-            db,
-            d_rows,
-            &tape.input,
-            &w.input_proj_w,
+        s.gemm.backward(
+            input_proj_dtype(tape.dtype),
+            (dx, &mut grads.input_proj_w, db),
+            (d_rows, &tape.input, &w.input_proj_w),
             (t_len, tape.input_dim, dm),
         );
     } else if !d_input.is_empty() {
@@ -455,18 +486,18 @@ fn layer_backward(
     {
         gate_token(g, y, proj, lw, cfg);
     }
+    store(s.dtype, &mut s.gated[..t_len * di]);
     let db = if gw.out_proj_b.is_empty() {
         None
     } else {
         Some(&mut gw.out_proj_b[..])
     };
-    sgemm_backward(
-        &mut s.d_gated[..t_len * di],
-        &mut gw.out_proj_w,
-        db,
-        d_rows,
-        &s.gated[..t_len * di],
-        &lw.out_proj_w,
+    // The products take the lane's copy of the residual gradient, the bias
+    // its f32 sum.
+    s.gemm.backward(
+        s.dtype,
+        (&mut s.d_gated[..t_len * di], &mut gw.out_proj_w, db),
+        (d_rows, &s.gated[..t_len * di], &lw.out_proj_w),
         (t_len, di, dm),
     );
 
@@ -505,6 +536,7 @@ fn layer_backward(
             conv_hist_push(&mut hist, raw);
         }
     }
+    store(s.dtype, &mut s.xbc[..t_len * cd]);
 
     // The scan, head by head, segment by segment from the last.
     s.d_xbc[..t_len * cd].fill(0.0);
@@ -590,21 +622,26 @@ fn layer_backward(
     }
 
     // in_proj and the block norm; the residual already sits in d_rows.
+    // Every term of the in_proj gradient is in: a half lane rounds it once,
+    // as the GPU stores each of its columns.
+    store(s.dtype, &mut s.d_proj[..t_len * ip]);
     for (d, x) in s.norm.chunks_exact_mut(dm).zip(lt.x_in.chunks_exact(dm)) {
         rms_row(d, x, &lw.norm_weight, cfg.rms_norm_eps);
     }
+    store(s.dtype, &mut s.norm[..t_len * dm]);
     let db = if gw.in_proj_b.is_empty() {
         None
     } else {
         Some(&mut gw.in_proj_b[..])
     };
-    sgemm_backward(
-        &mut s.d_post[..t_len * dm],
-        &mut gw.in_proj_w,
-        db,
-        &s.d_proj[..t_len * ip],
-        &s.norm[..t_len * dm],
-        &lw.in_proj_w,
+    s.gemm.backward(
+        s.dtype,
+        (&mut s.d_post[..t_len * dm], &mut gw.in_proj_w, db),
+        (
+            &s.d_proj[..t_len * ip],
+            &s.norm[..t_len * dm],
+            &lw.in_proj_w,
+        ),
         (t_len, dm, ip),
     );
     rms_backward(

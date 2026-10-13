@@ -392,6 +392,64 @@ fn m3_mimo_gpu_typed_lanes_track_cpu() {
     }
 }
 
+/// Each reduced-precision engine against the CPU backbone of the same
+/// precision, which rounds the weights and the values between the kernels
+/// where the engine stores them: it lands closer than the f32 CPU, the
+/// prompt's rows and the steps after it alike.
+#[test]
+fn m3_mimo_gpu_typed_lanes_track_the_cpu_lane() {
+    use mamba_rs::{CpuOptions, Mamba3MimoBackbone};
+    let device = GpuDevice::new(0).unwrap();
+    let input_dim = 40usize;
+    let seq = 50usize;
+    for dtype in [WeightDtype::Tf32, WeightDtype::F16, WeightDtype::Bf16] {
+        for (label, cfg) in cases().into_iter().chain(tile_heads()) {
+            let w = drawn(&cfg, input_dim, 23);
+            let dm = cfg.d_model;
+            let inputs = det(seq * input_dim, 900, 1.0);
+            let e = engine(&device, &w, (cfg, input_dim, 1), dtype);
+            let mut gst = e.alloc_state().unwrap();
+            let mut win = e.alloc_window(seq).unwrap();
+            let mut rows = vec![0f32; seq * dm];
+            e.run(&inputs, &mut rows, &mut gst, &mut win).unwrap();
+            let mut one = e.alloc_window(1).unwrap();
+            let steps: Vec<Vec<f32>> = (0..6u64)
+                .map(|t| {
+                    let x = det(input_dim, 950 + t, 1.0);
+                    let mut g = vec![0f32; dm];
+                    e.run(&x, &mut g, &mut gst, &mut one).unwrap();
+                    g
+                })
+                .collect();
+            // The host in f32 and in the engine's precision.
+            let dist = |opts: CpuOptions| {
+                let bb = Mamba3MimoBackbone::new_with(w.clone(), cfg, input_dim, opts).unwrap();
+                let (mut st, mut sc) = (bb.alloc_state(), bb.alloc_scratch());
+                let mut want = vec![0f32; seq * dm];
+                bb.forward_sequence(&inputs, &mut want, &mut st, &mut sc, seq);
+                let mut worst = rel_l2(&rows, &want);
+                for (t, g) in steps.iter().enumerate() {
+                    let x = det(input_dim, 950 + t as u64, 1.0);
+                    let mut c = vec![0f32; dm];
+                    bb.forward_step(&x, &mut c, &mut st, &mut sc);
+                    worst = worst.max(rel_l2(g, &c));
+                }
+                worst
+            };
+            let f32_host = dist(CpuOptions::default());
+            let lane_host = dist(CpuOptions::default().dtype(dtype));
+            eprintln!(
+                "{dtype:?} {label}: GPU vs CPU f32 {f32_host:.2e}, vs CPU {dtype:?} {lane_host:.2e}"
+            );
+            assert!(
+                lane_host < f32_host,
+                "{dtype:?} {label}: the CPU lane ({lane_host:.3e}) is no closer than f32 \
+                 ({f32_host:.3e})"
+            );
+        }
+    }
+}
+
 /// The chunked prefill (ScanMode::Parallel) of windows that end inside a
 /// chunk against the CPU and against the recurrence, then decode steps
 /// continuing it against the CPU chain (the carried state, keys, input and

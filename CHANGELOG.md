@@ -182,6 +182,14 @@
   less shared memory than they opted in to (from 64 KB), so their smaller
   tiles, global staging and fallback kernels run on ordinary shapes and
   can be tested on one board.
+- CPU precision lanes: `CpuOptions::default().dtype(...)` builds a CPU
+  backbone (`new_with`) or trainer (`new_with`) that computes as the GPU
+  of that precision does: bf16 and f16 storage of the projections and of
+  the values between the kernels, TF32 operand rounding in every product,
+  f32 accumulation, f32 masters with the rounded copy refreshed after
+  every step, and in f16 the dynamic loss scaler (`scaler_state`,
+  `load_scaler_state`, carried in the trainer state). Mamba-2 and MIMO;
+  `DynamicLossScaler` is exported at the crate root.
 
 ### Changed
 
@@ -442,6 +450,7 @@
   reserve the f32 upcast scratch their GEMMs never use: three slots of
   rows x widest activation, about 325 MB on a Mamba-2 2.7b-sized decode
   engine.
+- `AnyScratch` holds every family's step scratch in a `Box`.
 
 ### Fixed
 

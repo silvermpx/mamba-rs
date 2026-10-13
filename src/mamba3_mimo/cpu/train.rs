@@ -9,6 +9,14 @@
 //! its checkpoint through the same step functions, keeping that segment's
 //! intermediates, and walks every stage back in a fixed order, the gated
 //! output norm (`is_outproj_norm`) included.
+//!
+//! In a reduced precision the window rounds where the GPU trainer stores a
+//! half value: the normalized rows, the in_proj and out_proj outputs and
+//! the gated rows in the forward; the residual gradient's copy for the
+//! GEMMs, the gated rows' and the normalized rows' input gradients and the
+//! in_proj gradient (once, after every term is in) in the backward. TF32
+//! rounds every GEMM operand instead. The heads' math, the states, the
+//! norms' statistics and every weight gradient stay f32.
 
 use super::super::config::Mamba3MimoConfig;
 use super::super::state::Mamba3MimoLayerState;
@@ -18,12 +26,16 @@ use super::core::{
     mimo_rows, prepare_token, rope_half_split, row_norm,
 };
 use crate::mamba3_siso::cpu::forward::{clamp_a, heavy_tail, heavy_tail_deriv, simd_sum_sq};
+use crate::mlp::cpu::RowsGemm;
 use crate::mlp::cpu::{
     GatedMlpBackwardScratch, GatedMlpRowsScratch, gated_mlp_rows, gated_mlp_rows_backward,
 };
-use crate::ops::blas::{sgemm_backward, sgemm_forward};
+use crate::ops::blas::sgemm_forward;
 use crate::ops::fast_math::fast_exp_scalar;
+use crate::ops::lane::LaneGemm;
 use crate::ops::norms::rms_norm_weighted;
+use crate::ops::rounding::store;
+use crate::precision::WeightDtype;
 
 /// One layer's record.
 struct LayerTape {
@@ -41,6 +53,8 @@ pub struct Mamba3MimoTape {
     seq_len: usize,
     stride: usize,
     input_dim: usize,
+    /// The precision the window computes in.
+    dtype: WeightDtype,
     /// Set by a forward that completed, cleared when one starts: the
     /// backward reads only a window the forward wrote whole.
     filled: bool,
@@ -56,6 +70,7 @@ impl Mamba3MimoTape {
             seq_len,
             stride: stride.max(1),
             input_dim,
+            dtype: WeightDtype::F32,
             filled: false,
             input: vec![0.0; seq_len * input_dim],
             final_in: vec![0.0; seq_len * dm],
@@ -73,6 +88,13 @@ impl Mamba3MimoTape {
                 })
                 .collect(),
         }
+    }
+
+    /// The tape of a window computed in `dtype`: the weights it is given
+    /// must hold the bulk matrices rounded as that precision keeps them.
+    pub(crate) fn with_dtype(mut self, dtype: WeightDtype) -> Self {
+        self.dtype = dtype;
+        self
     }
 }
 
@@ -95,6 +117,19 @@ pub struct Mamba3MimoTrainScratch {
     head_shape: (usize, usize, usize, usize, usize),
     mlp: GatedMlpRowsScratch,
     mlp_bwd: GatedMlpBackwardScratch,
+    /// The precision of the window in flight, from its tape.
+    dtype: WeightDtype,
+    gemm: LaneGemm,
+}
+
+/// The input projection's precision: f32 in the half lanes, as the GPU
+/// trainer keeps it, TF32 operands in the TF32 lane.
+fn input_proj_dtype(dtype: WeightDtype) -> WeightDtype {
+    if dtype == WeightDtype::Tf32 {
+        dtype
+    } else {
+        WeightDtype::F32
+    }
 }
 
 fn grow(v: &mut Vec<f32>, n: usize) {
@@ -204,18 +239,17 @@ pub fn forward_mamba3_mimo_train(
         return Ok(());
     }
     tape.input.copy_from_slice(&input[..t_len * tape.input_dim]);
+    s.dtype = tape.dtype;
+    s.mlp.dtype = tape.dtype;
     let rows = &mut out[..t_len * dm];
     if w.input_proj_w.is_empty() {
         rows.copy_from_slice(&input[..t_len * dm]);
     } else {
-        sgemm_forward(
-            rows,
-            &input[..t_len * tape.input_dim],
-            &w.input_proj_w,
-            bias(&w.input_proj_b),
-            t_len,
-            tape.input_dim,
-            dm,
+        s.gemm.forward(
+            (sgemm_forward as RowsGemm, input_proj_dtype(tape.dtype)),
+            (rows, &tape.input),
+            (&w.input_proj_w, bias(&w.input_proj_b)),
+            (t_len, tape.input_dim, dm),
         );
     }
     let head_shape = (
@@ -277,18 +311,17 @@ fn layer_forward(
     );
     grow(&mut s.norm, t_len * dm);
     grow(&mut s.out, t_len * dm);
+    let lane = (sgemm_forward as RowsGemm, s.dtype);
     lt.x_in.copy_from_slice(rows);
     for (d, x) in s.norm.chunks_exact_mut(dm).zip(rows.chunks_exact(dm)) {
         row_norm(d, x, &lw.norm_weight, cfg.rms_norm_eps);
     }
-    sgemm_forward(
-        &mut lt.proj,
-        &s.norm[..t_len * dm],
-        &lw.in_proj_w,
-        None,
-        t_len,
-        dm,
-        ip,
+    store(s.dtype, &mut s.norm[..t_len * dm]);
+    s.gemm.forward(
+        lane,
+        (&mut lt.proj, &s.norm[..t_len * dm]),
+        (&lw.in_proj_w, None),
+        (t_len, dm, ip),
     );
     prepare_rows(cfg, lw, &lt.proj, s, t_len);
     lt.ckpt.clear();
@@ -308,14 +341,12 @@ fn layer_forward(
         }
     }
     lt.ckpt.push(state.clone());
-    sgemm_forward(
-        &mut s.out[..t_len * dm],
-        &lt.o,
-        &lw.out_proj_w,
-        None,
-        t_len,
-        di,
-        dm,
+    store(s.dtype, &mut lt.o[..t_len * di]);
+    s.gemm.forward(
+        lane,
+        (&mut s.out[..t_len * dm], &lt.o),
+        (&lw.out_proj_w, None),
+        (t_len, di, dm),
     );
     for (r, &o) in rows.iter_mut().zip(&s.out[..t_len * dm]) {
         *r += o;
@@ -368,6 +399,8 @@ pub fn backward_mamba3_mimo_train(
     if t_len == 0 {
         return Ok(());
     }
+    s.dtype = tape.dtype;
+    s.mlp_bwd.dtype = tape.dtype;
     let d_rows = &mut d_out[..t_len * dm];
     row_norm_backward(
         d_rows,
@@ -407,13 +440,10 @@ pub fn backward_mamba3_mimo_train(
         } else {
             Some(&mut grads.input_proj_b[..])
         };
-        sgemm_backward(
-            dx,
-            &mut grads.input_proj_w,
-            db,
-            d_rows,
-            &tape.input,
-            &w.input_proj_w,
+        s.gemm.backward(
+            input_proj_dtype(tape.dtype),
+            (dx, &mut grads.input_proj_w, db),
+            (d_rows, &tape.input, &w.input_proj_w),
             (t_len, tape.input_dim, dm),
         );
     } else if !d_input.is_empty() {
@@ -646,13 +676,11 @@ fn layer_backward(
     grow(&mut s.d_post, t_len * dm);
     grow(&mut s.norm, t_len * dm);
 
-    sgemm_backward(
-        &mut s.d_o[..t_len * di],
-        &mut gw.out_proj_w,
-        None,
-        d_rows,
-        &lt.o,
-        &lw.out_proj_w,
+    // The products take the lane's copy of the residual gradient.
+    s.gemm.backward(
+        s.dtype,
+        (&mut s.d_o[..t_len * di], &mut gw.out_proj_w, None),
+        (d_rows, &lt.o, &lw.out_proj_w),
         (t_len, di, dm),
     );
     prepare_rows(cfg, lw, &lt.proj, s, t_len);
@@ -889,16 +917,21 @@ fn layer_backward(
     }
 
     // in_proj and the block norm; the residual already sits in d_rows.
+    // Every term of the in_proj gradient is in: a half lane rounds it once,
+    // as the GPU stores each of its columns.
+    store(s.dtype, &mut s.d_proj[..t_len * ip]);
     for (d, x) in s.norm.chunks_exact_mut(dm).zip(lt.x_in.chunks_exact(dm)) {
         row_norm(d, x, &lw.norm_weight, cfg.rms_norm_eps);
     }
-    sgemm_backward(
-        &mut s.d_post[..t_len * dm],
-        &mut gw.in_proj_w,
-        None,
-        &s.d_proj[..t_len * ip],
-        &s.norm[..t_len * dm],
-        &lw.in_proj_w,
+    store(s.dtype, &mut s.norm[..t_len * dm]);
+    s.gemm.backward(
+        s.dtype,
+        (&mut s.d_post[..t_len * dm], &mut gw.in_proj_w, None),
+        (
+            &s.d_proj[..t_len * ip],
+            &s.norm[..t_len * dm],
+            &lw.in_proj_w,
+        ),
         (t_len, dm, ip),
     );
     row_norm_backward(

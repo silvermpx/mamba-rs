@@ -56,6 +56,13 @@ impl CpuFamily for MambaCpu {
     const FAMILY: ModelFamily = ModelFamily::Mamba1;
     const RECURRENCE: &'static [&'static str] = &["conv", "ssm"];
 
+    /// f32 until this family's reduced-precision lanes land.
+    fn dtype(&self) -> crate::precision::WeightDtype {
+        crate::precision::WeightDtype::F32
+    }
+
+    fn round_weights(&self, _w: &mut TrainMambaWeights) {}
+
     fn new_seq(&self, _w: &TrainMambaWeights, _seq_len: usize) -> Result<MambaCpuSeq, String> {
         Ok(MambaCpuSeq {
             acts: MambaBackboneFlat::zeros(self.dims),

@@ -5,9 +5,11 @@ pub mod dims;
 pub mod fast_math;
 pub mod fold16;
 pub(crate) mod init;
+pub(crate) mod lane;
 pub mod norms;
 pub mod packed;
 pub mod portable_math;
+pub(crate) mod rounding;
 pub(crate) mod st_io;
 
 pub use dims::{MambaDims, MambaRecurrentState};
