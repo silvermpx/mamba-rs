@@ -615,10 +615,14 @@ pub(crate) struct F32PreparedLaunchCache {
     entries: HashMap<PreparedF32Key, Box<PreparedF32TriadLaunch>>,
 }
 
-// Large enough for dozens of layers with distinct forward and backward
-// resources, while keeping dynamic-shape metadata bounded per context.
-const F32_PREPARED_CACHE_LIMIT: usize = 1024;
-const SM120_PREPARED_CACHE_LIMIT: usize = 1024;
+// Every GEMM call site of a step keeps its own entry (the key holds its
+// operand pointers), and a graph capture finds the eager step's entries
+// or refuses. The bound covers the deepest stack a config validates,
+// 4096 layers of up to sixteen sites each with the input projection and
+// the head, so neither a step nor its capture evicts its own entries; a
+// caller whose pointers churn past it clears the cache, which keeps the
+// metadata bounded per context.
+const PREPARED_CACHE_LIMIT: usize = 1 << 17;
 
 fn make_room_in_bounded_cache<K, V>(
     entries: &mut HashMap<K, V>,
@@ -829,17 +833,12 @@ impl Sm120PreparedLaunchCache {
             managed_epoch: prepared.managed_epoch(),
             prepared: Box::new(prepared),
         };
-        make_room_in_bounded_cache(
-            &mut self.entries,
-            &key,
-            SM120_PREPARED_CACHE_LIMIT,
-            |cached| {
-                cached
-                    .managed_epoch
-                    .as_ref()
-                    .is_none_or(ManagedAllocationEpochStamp::is_current)
-            },
-        );
+        make_room_in_bounded_cache(&mut self.entries, &key, PREPARED_CACHE_LIMIT, |cached| {
+            cached
+                .managed_epoch
+                .as_ref()
+                .is_none_or(ManagedAllocationEpochStamp::is_current)
+        });
         if !self.entries.contains_key(&key) {
             self.entries
                 .try_reserve(1)
@@ -853,8 +852,6 @@ impl Sm120PreparedLaunchCache {
             .prepared)
     }
 }
-
-const SM100_PREPARED_CACHE_LIMIT: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Sm100PreparedKey {
@@ -1012,17 +1009,12 @@ impl Sm100PreparedLaunchCache {
             managed_epoch: prepared.managed_epoch(),
             prepared: Box::new(prepared),
         };
-        make_room_in_bounded_cache(
-            &mut self.entries,
-            &key,
-            SM100_PREPARED_CACHE_LIMIT,
-            |cached| {
-                cached
-                    .managed_epoch
-                    .as_ref()
-                    .is_none_or(ManagedAllocationEpochStamp::is_current)
-            },
-        );
+        make_room_in_bounded_cache(&mut self.entries, &key, PREPARED_CACHE_LIMIT, |cached| {
+            cached
+                .managed_epoch
+                .as_ref()
+                .is_none_or(ManagedAllocationEpochStamp::is_current)
+        });
         if !self.entries.contains_key(&key) {
             self.entries
                 .try_reserve(1)
@@ -1200,8 +1192,6 @@ pub(in crate::gpu) fn prepare_sm100_auto_graph_sequence<O: PhysicalLaunchObserve
     })
 }
 
-const SM90A_PREPARED_CACHE_LIMIT: usize = 1024;
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Sm90aPreparedKey {
     context: GemmRouteIdentity,
@@ -1366,17 +1356,12 @@ impl Sm90aPreparedLaunchCache {
             operands: request.operands,
             managed_epoch,
         };
-        make_room_in_bounded_cache(
-            &mut self.entries,
-            &key,
-            SM90A_PREPARED_CACHE_LIMIT,
-            |cached| {
-                cached
-                    .managed_epoch
-                    .as_ref()
-                    .is_none_or(ManagedAllocationEpochStamp::is_current)
-            },
-        );
+        make_room_in_bounded_cache(&mut self.entries, &key, PREPARED_CACHE_LIMIT, |cached| {
+            cached
+                .managed_epoch
+                .as_ref()
+                .is_none_or(ManagedAllocationEpochStamp::is_current)
+        });
         if !self.entries.contains_key(&key) {
             self.entries
                 .try_reserve(1)
@@ -3302,12 +3287,16 @@ fn validate_f32_triad_operands(
     }
 }
 
+/// The request and operands of an f32 GEMM the vendor library or the
+/// Inference f32 kernels serve: both offset with 64 bits, so the shape is
+/// held to [`F32TriadShape::validate_wide`], not to the Triad kernels'
+/// 32-bit spans.
 pub(in crate::gpu) fn validate_f32_triad_pointer_request(
     ctx: &GpuCtx,
     request: F32TriadRequest,
     operands: F32TriadOperands,
 ) -> Result<(), String> {
-    request.shape.validate(request.op)?;
+    request.shape.validate_wide(request.op)?;
     validate_f32_triad_operands(request, operands)?;
     let allocation_domain = validated_allocation_domain(&ctx.stream, &ctx.kernels, "f32 Triad")?;
     let resources = F32LaunchResourceSnapshot::query_output(request, operands, allocation_domain)?;
@@ -3588,7 +3577,7 @@ struct Tf32LaunchDigests {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Tf32SplitKLaunchPlan {
+pub(super) struct Tf32SplitKLaunchPlan {
     scratch_elements: usize,
     counter_elements: usize,
     fused: cudarc::driver::LaunchConfig,
@@ -3603,7 +3592,7 @@ struct Tf32SplitKWorkspace {
     counters: CUptr,
 }
 
-fn tf32_splitk_launch_plan(
+pub(super) fn tf32_splitk_launch_plan(
     request: F32TriadRequest,
     spec: &Tf32SplitKSpec,
 ) -> Result<Tf32SplitKLaunchPlan, String> {
@@ -5564,17 +5553,12 @@ impl F32PreparedLaunchCache {
             }
             prove_scalar_route_for_cache(ctx, selection, request, operands)?;
             let prepared = Self::prepare(ctx, selection, request, operands)?;
-            make_room_in_bounded_cache(
-                &mut self.entries,
-                &key,
-                F32_PREPARED_CACHE_LIMIT,
-                |cached| {
-                    cached
-                        .managed_epoch
-                        .as_ref()
-                        .is_none_or(ManagedAllocationEpochStamp::is_current)
-                },
-            );
+            make_room_in_bounded_cache(&mut self.entries, &key, PREPARED_CACHE_LIMIT, |cached| {
+                cached
+                    .managed_epoch
+                    .as_ref()
+                    .is_none_or(ManagedAllocationEpochStamp::is_current)
+            });
             if !self.entries.contains_key(&key) {
                 self.entries
                     .try_reserve(1)
@@ -12972,7 +12956,7 @@ const SM80_STREAMK_SLOTS_PER_CTA: usize = 2;
 
 /// The persistent grid of the tc64 TN stream-K kernel: as many CTAs per
 /// multiprocessor as stay resident, never more CTAs than (tile, slab)
-/// units, never zero.
+/// units or than the fixed slab and flag workspaces hold, never zero.
 pub fn sm80_streamk_grid(kernels: &GpuKernels, dims: (usize, usize, usize)) -> Result<u32, String> {
     let checked = GemmDims::tn(dims)?;
     let (batch, n_in, n_out) = checked.tuple();
@@ -12989,7 +12973,12 @@ pub fn sm80_streamk_grid(kernels: &GpuKernels, dims: (usize, usize, usize)) -> R
     // CTA count the loader read from the driver, not by one per SM.
     let resident = u64::from(kernels.multiprocessor_count().max(1))
         * u64::from(kernels.tc64_streamk_resident_ctas().max(1));
-    u32::try_from(units.min(resident).max(1)).map_err(|_| "stream-K grid exceeds u32".to_string())
+    // No supported board reaches this bound (an RTX 6000 Ada keeps 284 CTAs
+    // resident); a larger part takes fewer CTAs, all still resident.
+    let workspace = (SPLITK_SCRATCH_CAP / (SM80_STREAMK_SLOTS_PER_CTA * SM80_STREAMK_SLAB_FLOATS))
+        .min(TF32_SPLITK_COUNTER_CAP / SM80_STREAMK_SLOTS_PER_CTA) as u64;
+    u32::try_from(units.min(resident).min(workspace).max(1))
+        .map_err(|_| "stream-K grid exceeds u32".to_string())
 }
 
 /// The partial-slab and flag pointers of the stream-K dW kernel, from the
@@ -14987,23 +14976,21 @@ mod prepared_f32_launch_tests {
     fn bounded_cache_sweep_removes_stale_entries_before_insertion() {
         let mut entries = HashMap::from([(1_u32, true), (2, false)]);
 
-        make_room_in_bounded_cache(&mut entries, &3, F32_PREPARED_CACHE_LIMIT, |current| {
-            *current
-        });
+        make_room_in_bounded_cache(&mut entries, &3, PREPARED_CACHE_LIMIT, |current| *current);
 
         assert_eq!(entries, HashMap::from([(1, true)]));
     }
 
     #[test]
     fn bounded_cache_clears_before_a_distinct_entry_exceeds_the_limit() {
-        let mut entries = (0..F32_PREPARED_CACHE_LIMIT)
+        let mut entries = (0..PREPARED_CACHE_LIMIT)
             .map(|key| (key, true))
             .collect::<HashMap<_, _>>();
 
         make_room_in_bounded_cache(
             &mut entries,
-            &F32_PREPARED_CACHE_LIMIT,
-            F32_PREPARED_CACHE_LIMIT,
+            &PREPARED_CACHE_LIMIT,
+            PREPARED_CACHE_LIMIT,
             |current| *current,
         );
 

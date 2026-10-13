@@ -3381,10 +3381,12 @@ const TF32_PORTABLE_NEIGHBOUR_LOG_BOUND: f64 = 1.386_294_361_119_890_6;
 
 /// The portable tile of the nearest measured cell of the same operation,
 /// for a shape no cell names exactly. Only the portable tier is widened
-/// this way: its tiles keep one owner CTA per output tile and one k order,
-/// so any tile of the tier gives the same bits, and what the neighbour
-/// contributes is a speed choice. The specialized tiles stay on their
-/// exact cells. A neighbour measured on a larger output may carry a wide
+/// this way: its plain tiles keep one owner CTA per output tile and one k
+/// order, so any of them gives the same bits, and what the neighbour
+/// contributes is a speed choice; a split-K neighbour brings its own
+/// reduction order, and its partials must fit the fixed workspace (see
+/// [`resolve_tf32_forced`]). The specialized tiles stay on their exact
+/// cells. A neighbour measured on a larger output may carry a wide
 /// tile that leaves this board idle, so when the shape fills less than one
 /// wave with it and less than half of what the neighbour filled, the 64x64
 /// tile serves at the neighbour's pipeline depth, as the SM120 rule does.
@@ -3833,6 +3835,10 @@ pub fn resolve_tf32_forced(
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => {
             let spec = super::contract::tf32_splitk_spec(request.op, route)?;
+            // A neighbour's split-K route can outgrow the fixed partial
+            // and counter workspaces on a larger shape: it does not bind,
+            // and the exact family serves.
+            super::launch::tf32_splitk_launch_plan(request, spec)?;
             (ModuleKind::TriadSm80, spec.dynamic_shared_bytes)
         }
         _ => {
@@ -8050,7 +8056,9 @@ fn scalar_nn_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDis
     if (2..=127).contains(&n_out) {
         return Ok(ScalarDispatchPlan::NnNarrow);
     }
-    if n_out == 1 && n_in >= 32 {
+    // The GEMV kernel serves any reduction: a warp per row, lanes past K
+    // add nothing.
+    if n_out == 1 {
         return Ok(ScalarDispatchPlan::NnGemv);
     }
     let plain_slim_blocks = checked_tile_grid(dims.m_u32, 128, dims.n_u32, 64)?;
@@ -8146,7 +8154,9 @@ pub(in crate::gpu) fn tc_half_policy_prefers_scalar_forward(
 fn scalar_tn_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDispatchPlan, String> {
     scalar_wave_policy(multiprocessor_count)?;
     let (batch, n_in, n_out) = dims.tuple();
-    if n_out == 1 && n_in >= 4 && batch >= 32 {
+    // The GEMV kernel serves any batch and width: a warp per weight, lanes
+    // past the batch add nothing.
+    if n_out == 1 {
         return Ok(ScalarDispatchPlan::TnGemv);
     }
     if (2..=127).contains(&n_out) {

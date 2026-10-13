@@ -24,6 +24,15 @@
 //! * `m1_trainer_rejects_a_config_the_kernels_cannot_serve` — a config
 //!   past the reference's envelope never reaches the launchers: the
 //!   trainer validates the config first, as the Mamba-3 trainer does.
+//! * `a_one_wide_model_trains_in_every_precision` — a model one feature wide
+//!   takes one-column GEMMs of any reduction and batch, which the exact
+//!   planner once left uncovered below 32 (or 4) of them.
+//! * `a_raw_input_wider_than_static_shared_memory_trains_in_half` — the
+//!   matvec of a narrow half projection stages a whole input row in shared
+//!   memory, opted in past the 48 KB static budget.
+//! * `a_tf32_window_past_its_neighbours_split_workspace_trains` — a TF32
+//!   shape whose nearest measured cell splits the reduction past the fixed
+//!   workspace takes the exact family instead of failing the step.
 
 #![cfg(feature = "cuda")]
 
@@ -462,4 +471,86 @@ fn m1_trainer_rejects_a_config_the_kernels_cannot_serve() {
     .err()
     .expect("257 states must be rejected before any kernel runs");
     assert!(error.contains("d_state"), "unexpected rejection: {error}");
+}
+
+/// One step of a Mamba-1 trainer of `cfg` fed `input_dim`-wide rows over
+/// `batch` x `seq_len`, in `dtype`; the master weights stay finite.
+fn step_once(
+    cfg: mamba_rs::mamba1::MambaConfig,
+    input_dim: usize,
+    (batch, seq_len): (usize, usize),
+    dtype: WeightDtype,
+) {
+    use mamba_rs::gpu::train::TrainSessionCfg;
+    use mamba_rs::mamba1::MambaWeights;
+    use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
+
+    let cpu = MambaWeights::init(&cfg, input_dim, 11);
+    let mut trainer = MambaGpuTrainer::new(
+        &cpu,
+        cfg,
+        TrainSessionCfg::new(input_dim, batch, seq_len),
+        GpuOptions::default().dtype(dtype),
+    )
+    .unwrap_or_else(|e| panic!("{dtype:?} {cfg:?}: {e}"));
+    if dtype == WeightDtype::F16 {
+        trainer.load_scaler_state(1024.0, 0).unwrap();
+    }
+    let input = det_scaled(batch * seq_len * input_dim, 0x51, 1.0);
+    let d = det_scaled(batch * seq_len * cfg.d_model, 0x52, 0.01);
+    trainer
+        .step(&input, &d)
+        .unwrap_or_else(|e| panic!("{dtype:?} {cfg:?}: step: {e}"));
+    let master = trainer.snapshot_master().unwrap();
+    assert!(
+        master.layers[0].in_proj_w.iter().all(|v| v.is_finite()),
+        "{dtype:?} {cfg:?}"
+    );
+}
+
+#[test]
+fn a_one_wide_model_trains_in_every_precision() {
+    use mamba_rs::mamba1::MambaConfig;
+    let cfg = MambaConfig {
+        d_model: 1,
+        d_state: 1,
+        d_conv: 1,
+        expand: 2,
+        n_layers: 1,
+        ..MambaConfig::default()
+    };
+    for dtype in [
+        WeightDtype::F32,
+        WeightDtype::Tf32,
+        WeightDtype::Bf16,
+        WeightDtype::F16,
+    ] {
+        for window in [(1, 1), (3, 5), (2, 40)] {
+            step_once(cfg, 1, window, dtype);
+        }
+    }
+}
+
+#[test]
+fn a_raw_input_wider_than_static_shared_memory_trains_in_half() {
+    use mamba_rs::mamba1::MambaConfig;
+    let cfg = MambaConfig {
+        d_model: 16,
+        n_layers: 1,
+        ..MambaConfig::default()
+    };
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        step_once(cfg, 30_000, (1, 8), dtype);
+    }
+}
+
+#[test]
+fn a_tf32_window_past_its_neighbours_split_workspace_trains() {
+    use mamba_rs::mamba1::MambaConfig;
+    let cfg = MambaConfig {
+        d_model: 768,
+        n_layers: 1,
+        ..MambaConfig::default()
+    };
+    step_once(cfg, 768, (9, 512), WeightDtype::Tf32);
 }

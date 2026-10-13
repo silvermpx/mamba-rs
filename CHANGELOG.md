@@ -512,6 +512,15 @@
 - A SISO prompt runs the sequential recurrence under
   `ScanMode::Sequential`; the prefill ran the chunked scan whatever the
   mode said.
+- Deterministic GEMMs serve shapes they refused. A TF32 shape whose
+  nearest measured cell splits past the fixed workspace takes the exact
+  family (Mamba-1 d_model 768 in Tf32 failed from 4573 rows); one-column
+  GEMMs of any reduction and batch run on the GEMV kernels; models deeper
+  than about 85 layers keep their prepared launches (they re-prepared
+  every step and could not be captured); the vendor GEMMs and the
+  Inference f32 kernels take operands past 2^31 elements; the matvec opts
+  in to the device's shared memory (half projections past 24064 inputs
+  failed to launch).
 
 ## 0.7.5 (2026-09-23)
 

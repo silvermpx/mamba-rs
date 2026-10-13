@@ -4826,6 +4826,9 @@ fn launch_sm89_cell<O: PhysicalLaunchObserver>(
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
+    // The cells offset their rows in 32 bits; a forced cell on a larger
+    // shape than the table names is refused rather than wrapped.
+    super::blas::int_spans(args.m, args.n, args.k, "Inference Ada cell")?;
     let function = ctx
         .kernels
         .inference_sm89_cell_function(spec.symbol)

@@ -49,7 +49,7 @@ fn kernel_elems(elems: usize, kernel: &str) -> Result<(), String> {
 
 /// Refuses a GEMM whose spans pass the 32-bit offsets a kernel takes them
 /// in, a row times its stride as an `int`: A is m by k, B k by n, C m by n.
-fn int_spans(m: i32, n: i32, k: i32, kernel: &str) -> Result<(), String> {
+pub(in crate::gpu) fn int_spans(m: i32, n: i32, k: i32, kernel: &str) -> Result<(), String> {
     let (m, n, k) = (i64::from(m), i64::from(n), i64::from(k));
     for span in [m * k, k * n, m * n] {
         kernel_elems(usize::try_from(span).unwrap_or(usize::MAX), kernel)?;
@@ -4228,6 +4228,13 @@ fn launch_bi_matvec<O: PhysicalLaunchObserver>(
         .checked_add(15)
         .ok_or("matvec aligned byte span exceeds u32")?
         & !15;
+    if smem_bytes as usize > ctx.kernels.matvec_dynamic_smem {
+        return Err(format!(
+            "matvec_bi: a row of {} inputs stages {smem_bytes} bytes of shared memory, past the \
+             {} a block takes on this GPU",
+            args.k, ctx.kernels.matvec_dynamic_smem
+        ));
+    }
     let num_pid_n = (args.n + BLOCK_N_MV - 1) / BLOCK_N_MV;
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (num_pid_n as u32, args.m as u32, 1),

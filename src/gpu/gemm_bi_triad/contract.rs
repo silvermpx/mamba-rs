@@ -159,7 +159,22 @@ impl F32TriadShape {
         }
     }
 
+    /// The shape the Triad kernels serve: positive output axes, every axis,
+    /// stride, operand product and storage span in an `int`, every stride at
+    /// least its width.
     pub fn validate(self, op: ResolvedGemmOp) -> Result<(), String> {
+        self.check(op, true)
+    }
+
+    /// The checks of [`Self::validate`] a consumer that offsets with 64 bits
+    /// needs: the vendor GEMMs and the Inference f32 kernels take each axis
+    /// and stride as an `int` but form their offsets in 64 bits, so an
+    /// operand or a span past `int` is theirs to serve.
+    pub fn validate_wide(self, op: ResolvedGemmOp) -> Result<(), String> {
+        self.check(op, false)
+    }
+
+    fn check(self, op: ResolvedGemmOp, int_spans: bool) -> Result<(), String> {
         let output_rows = self.output_rows(op);
         let output_columns = self.output_columns(op);
         if output_rows == 0 || output_columns == 0 {
@@ -178,7 +193,9 @@ impl F32TriadShape {
             let product = lhs.checked_mul(rhs).ok_or_else(|| {
                 invalid_gemm_dimensions(format!("{name} overflows usize ({lhs} * {rhs})"))
             })?;
-            checked_i32(product, name)?;
+            if int_spans {
+                checked_i32(product, name)?;
+            }
         }
         let (widths, rows) = match op {
             ResolvedGemmOp::Nn => ([self.k, self.n, self.n], [self.m, self.k, self.m]),
@@ -203,7 +220,9 @@ impl F32TriadShape {
                     .ok_or_else(|| {
                         invalid_gemm_dimensions(format!("{name} storage span overflows usize"))
                     })?;
-                checked_i32(span, &format!("{name} storage"))?;
+                if int_spans {
+                    checked_i32(span, &format!("{name} storage"))?;
+                }
             }
         }
         Ok(())
@@ -7328,6 +7347,22 @@ mod tests {
         context_handle: 0x1234,
         device_ordinal: 2,
     };
+
+    /// Past `int` the Triad kernels refuse an operand, the 64-bit consumers
+    /// take it; an axis past `int` stays refused by both.
+    #[test]
+    fn a_wide_operand_is_refused_only_by_the_int_kernels() {
+        use crate::gpu::kernel_identity::ResolvedGemmOp;
+        let wide = F32TriadShape::contiguous(ResolvedGemmOp::Nn, (1 << 20, 4096, 2048));
+        assert!(wide.validate(ResolvedGemmOp::Nn).is_err());
+        assert!(wide.validate_wide(ResolvedGemmOp::Nn).is_ok());
+        let past_int = F32TriadShape::contiguous(ResolvedGemmOp::Nn, (1 << 31, 1, 1));
+        assert!(past_int.validate(ResolvedGemmOp::Nn).is_err());
+        assert!(past_int.validate_wide(ResolvedGemmOp::Nn).is_err());
+        let small = F32TriadShape::contiguous(ResolvedGemmOp::Tn, (64, 32, 16));
+        assert!(small.validate(ResolvedGemmOp::Tn).is_ok());
+        assert!(small.validate_wide(ResolvedGemmOp::Tn).is_ok());
+    }
 
     fn allocation_identity(offset_bytes: u64, required_bytes: u64) -> Sm90aAllocationIdentity {
         Sm90aAllocationIdentity {

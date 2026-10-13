@@ -236,8 +236,10 @@ shape within a factor of four of a measured shape on every dimension and
 staged the same way (an operand takes the 16-byte loads only when its
 leading dimension is a multiple of four floats) takes the tile of the
 nearest measured shape, a wide tile brought down to 64x64 when the shape
-would not fill the board with it. Any other shape takes the exact f32
-kernel, as before. Held out one at a time, the measured cells reproduce their
+would not fill the board with it. A neighbour that splits the reduction
+(split-K) brings its own reduction order, and it serves only when its
+partials fit the fixed workspace; otherwise the exact f32 kernel serves.
+Any other shape takes the exact f32 kernel, as before. Held out one at a time, the measured cells reproduce their
 own tiles from their neighbours 33 times in 38 at that factor. A board
 with its own TF32 module reads its own cohort first. A shape that cohort
 does not name takes the common tier the same way every other board does.

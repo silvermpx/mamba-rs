@@ -490,6 +490,9 @@ pub struct MambaKernels {
     pub matvec_bi_bf16_f32: CudaFunction,
     pub matvec_bi_f16_f32: CudaFunction,
     pub matvec_bi_f32_f32: CudaFunction,
+    /// The dynamic shared memory every matvec build may take, after its
+    /// opt-in to the device's budget: the staged row of A must fit.
+    pub matvec_dynamic_smem: usize,
 
     /// The Inference family's inference ladder (`kernels/gemm_bi_inference/`,
     /// GBF namespace): bit-identical copies of the forward TC tiles,
@@ -1489,6 +1492,33 @@ impl MambaKernels {
             Ok(kernels)
         };
 
+        // The matvec stages a row of A, K elements, in dynamic shared memory;
+        // opted in to the device's budget it serves every K that fits there.
+        let optin = ctx
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+            )
+            .map_err(|e| format!("query opt-in shared memory: {e:?}"))?
+            .max(0) as usize;
+        let matvec = [
+            get("matvec_bi_bf16_bf16")?,
+            get("matvec_bi_f16_f16")?,
+            get("matvec_bi_bf16_f32")?,
+            get("matvec_bi_f16_f32")?,
+            get("matvec_bi_f32_f32")?,
+        ];
+        let mut matvec_dynamic_smem = usize::MAX;
+        for f in &matvec {
+            matvec_dynamic_smem =
+                matvec_dynamic_smem.min(super::launch::opt_in_dynamic_smem(f, optin, "matvec")?);
+        }
+        let [
+            matvec_bi_bf16_bf16,
+            matvec_bi_f16_f16,
+            matvec_bi_bf16_f32,
+            matvec_bi_f16_f32,
+            matvec_bi_f32_f32,
+        ] = matvec;
         Ok(Self {
             state_cap,
             compiler_identity,
@@ -1748,11 +1778,12 @@ impl MambaKernels {
             },
 
             // Batch-invariant matvec (M=1 specialization)
-            matvec_bi_bf16_bf16: get("matvec_bi_bf16_bf16")?,
-            matvec_bi_f16_f16: get("matvec_bi_f16_f16")?,
-            matvec_bi_bf16_f32: get("matvec_bi_bf16_f32")?,
-            matvec_bi_f16_f32: get("matvec_bi_f16_f32")?,
-            matvec_bi_f32_f32: get("matvec_bi_f32_f32")?,
+            matvec_bi_bf16_bf16,
+            matvec_bi_f16_f16,
+            matvec_bi_bf16_f32,
+            matvec_bi_f16_f32,
+            matvec_bi_f32_f32,
+            matvec_dynamic_smem,
 
             // typed inference kernels
             softplus_fwd_typed: load_typed("softplus_forward")?,
