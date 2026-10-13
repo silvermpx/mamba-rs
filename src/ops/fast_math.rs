@@ -1,7 +1,7 @@
 //! Vectorized f32 exp() using the Cephes degree-7 polynomial (Moshier).
 //!
-//! Provides SIMD-accelerated exp() for NEON (AArch64) and AVX2 (x86_64),
-//! plus a scalar fallback, all three the same sequence of rounded
+//! Provides SIMD-accelerated exp() for NEON (AArch64), AVX-512 and AVX2
+//! (x86_64), plus a scalar fallback, all the same sequence of rounded
 //! operations: a SIMD lane gives the scalar version's bits on every
 //! machine. Max relative error: ~1.7e-7 (~1.4 ULP).
 //!
@@ -77,11 +77,12 @@ pub fn fast_exp_scalar(x: f32) -> f32 {
 
 /// Apply fast exp() to each element in a slice (in-place), the bits of
 /// [`fast_exp_scalar`] on every element.
-/// Dispatches to SIMD when available: NEON (AArch64, 4-wide), AVX2 (x86_64, 8-wide).
+/// Dispatches to SIMD when available: NEON (AArch64, 4-wide), AVX-512
+/// (x86_64, 16-wide), AVX2 (x86_64, 8-wide).
 ///
-/// On x86_64 the AVX2+FMA feature check is resolved ONCE into a cached
-/// function pointer: this function is called per channel per timestep per
-/// layer with only `d_state` elements, where two `is_x86_feature_detected!`
+/// On x86_64 the feature check is resolved ONCE into a cached function
+/// pointer: this function is called per channel per timestep per layer
+/// with only `d_state` elements, where the `is_x86_feature_detected!`
 /// lookups per call are measurable overhead.
 #[inline]
 pub fn fast_exp_inplace(buf: &mut [f32]) {
@@ -94,7 +95,9 @@ pub fn fast_exp_inplace(buf: &mut [f32]) {
         use std::sync::OnceLock;
         static DISPATCH: OnceLock<fn(&mut [f32])> = OnceLock::new();
         let f = DISPATCH.get_or_init(|| {
-            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            if is_x86_feature_detected!("avx512f") {
+                |b: &mut [f32]| unsafe { fast_exp_avx512(b) }
+            } else if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
                 |b: &mut [f32]| unsafe { fast_exp_avx2(b) }
             } else {
                 fast_exp_scalar_slice
@@ -269,6 +272,72 @@ unsafe fn fast_exp_avx2(buf: &mut [f32]) {
     } // unsafe
 }
 
+// ---------------------------------------------------------------------------
+// x86_64 AVX-512 implementation (16-wide __m512)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn fast_exp_avx512(buf: &mut [f32]) {
+    unsafe {
+        use std::arch::x86_64::*;
+
+        let len = buf.len();
+        let chunks = len / 16;
+        let remainder = len % 16;
+
+        let v_log2ef = _mm512_set1_ps(LOG2EF);
+        let v_ln2_hi = _mm512_set1_ps(LN2_HI);
+        let v_ln2_lo = _mm512_set1_ps(LN2_LO);
+        let v_p0 = _mm512_set1_ps(CEPH_P0);
+        let v_p1 = _mm512_set1_ps(CEPH_P1);
+        let v_p2 = _mm512_set1_ps(CEPH_P2);
+        let v_p3 = _mm512_set1_ps(CEPH_P3);
+        let v_p4 = _mm512_set1_ps(CEPH_P4);
+        let v_p5 = _mm512_set1_ps(CEPH_P5);
+        let v_one = _mm512_set1_ps(1.0);
+        let v_hi = _mm512_set1_ps(EXP_HI);
+        let v_lo = _mm512_set1_ps(EXP_LO);
+        let v_127 = _mm512_set1_epi32(127);
+
+        let ptr = buf.as_mut_ptr();
+        for i in 0..chunks {
+            let off = i * 16;
+            let x = _mm512_loadu_ps(ptr.add(off));
+
+            // The AVX2 version's steps, each the same rounded operation:
+            // the clamp passing a NaN through, n rounded to nearest even,
+            // the Cody-Waite reduction and the unfused polynomial.
+            let x = _mm512_min_ps(v_hi, _mm512_max_ps(v_lo, x));
+            let n_f = _mm512_roundscale_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(
+                _mm512_mul_ps(x, v_log2ef),
+            );
+            let r = _mm512_sub_ps(
+                _mm512_sub_ps(x, _mm512_mul_ps(n_f, v_ln2_hi)),
+                _mm512_mul_ps(n_f, v_ln2_lo),
+            );
+            let r2 = _mm512_mul_ps(r, r);
+            let p = _mm512_add_ps(_mm512_mul_ps(v_p0, r), v_p1);
+            let p = _mm512_add_ps(_mm512_mul_ps(p, r), v_p2);
+            let p = _mm512_add_ps(_mm512_mul_ps(p, r), v_p3);
+            let p = _mm512_add_ps(_mm512_mul_ps(p, r), v_p4);
+            let p = _mm512_add_ps(_mm512_mul_ps(p, r), v_p5);
+            let p = _mm512_add_ps(_mm512_mul_ps(p, r2), r);
+            let p = _mm512_add_ps(p, v_one);
+
+            let n_i = _mm512_cvtps_epi32(n_f);
+            let pow2n = _mm512_castsi512_ps(_mm512_slli_epi32::<23>(_mm512_add_epi32(n_i, v_127)));
+
+            _mm512_storeu_ps(ptr.add(off), _mm512_mul_ps(p, pow2n));
+        }
+
+        let tail_start = chunks * 16;
+        for v in &mut buf[tail_start..tail_start + remainder] {
+            *v = fast_exp_scalar(*v);
+        }
+    }
+}
+
 // Note: the former `fast_sin_cos` / `fast_ln` / `fast_softplus` / `fast_tanh`
 // helpers were deleted — they had no callers, and `fast_sin_cos`'s docstring
 // claimed "< 5e-7" accuracy while the truncated-Taylor coefficients actually
@@ -337,6 +406,54 @@ mod tests {
                     fast_exp_scalar(x).to_bits(),
                     "len {len}, element {i}: x={x}"
                 );
+            }
+        }
+    }
+
+    /// Every x86 path this machine runs gives the scalar version's bits,
+    /// whichever the dispatch picks, the specials included.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn every_x86_path_is_the_scalar_bits() {
+        let mut vals: Vec<f32> = (-1200..=1000).map(|i| i as f32 * 0.0937).collect();
+        vals.extend([
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            -0.0,
+            88.4,
+            -88.4,
+            1e-30,
+        ]);
+        type Path = unsafe fn(&mut [f32]);
+        let paths: [(&str, bool, Path); 2] = [
+            (
+                "avx512",
+                is_x86_feature_detected!("avx512f"),
+                fast_exp_avx512,
+            ),
+            (
+                "avx2",
+                is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"),
+                fast_exp_avx2,
+            ),
+        ];
+        for (name, available, f) in paths {
+            if !available {
+                continue;
+            }
+            for len in [0usize, 1, 7, 15, 16, 17, 31, 33, vals.len()] {
+                let mut buf = vals[..len].to_vec();
+                // SAFETY: the path's features were detected above.
+                unsafe { f(&mut buf) };
+                for (i, (&got, &x)) in buf.iter().zip(&vals[..len]).enumerate() {
+                    let want = fast_exp_scalar(x);
+                    assert!(
+                        got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                        "{name} len {len}, element {i}: x={x}"
+                    );
+                }
             }
         }
     }

@@ -466,6 +466,9 @@
   long window takes under a fifth of the memory. `MambaLayerFlat` and
   `Mamba3LayerFlat` drop their per-step state fields and accessors and
   gain `zeros_strided`, `ssm_ckpt` and `stride`.
+- The CPU kernels take AVX-512 where the CPU has it (pulp `x86-v4`, and a
+  sixteen-wide exp), with the AVX2 and NEON bits; the MIMO CPU backward
+  no longer allocates per head and token.
 
 ### Fixed
 

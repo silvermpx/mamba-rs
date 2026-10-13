@@ -117,6 +117,9 @@ pub struct Mamba3MimoTrainScratch {
     head_shape: (usize, usize, usize, usize, usize),
     mlp: GatedMlpRowsScratch,
     mlp_bwd: GatedMlpBackwardScratch,
+    /// The buffers of a head's replay and walk back, reused across heads,
+    /// segments and windows.
+    head_bwd: HeadBackward,
     /// The precision of the window in flight, from its tape.
     dtype: WeightDtype,
     gemm: LaneGemm,
@@ -482,15 +485,54 @@ struct TokenRecord {
     x_prev: Vec<f32>,
 }
 
-/// Replay one head over tokens `t0..t1` from `start`, filling `rec`; the
-/// arithmetic is [`mimo_head_step`]'s.
+/// The buffers of a head's backward: its segment's token records (a pool,
+/// the first `t1 - t0` of them in use), the replay's running state and
+/// rank inputs, and the gradients the walk back carries between tokens.
+#[derive(Default)]
+struct HeadBackward {
+    rec: Vec<TokenRecord>,
+    s_start: Vec<f32>,
+    ssm: Vec<f32>,
+    k: Vec<f32>,
+    v: Vec<f32>,
+    angle: Vec<f32>,
+    bv: Vec<f32>,
+    gx: Vec<f32>,
+    dy: Vec<f32>,
+    du: Vec<f32>,
+    ds: Vec<f32>,
+    dq: Vec<f32>,
+    d_up: Vec<f32>,
+    dkc: Vec<f32>,
+    dkp: Vec<f32>,
+    dx_prev: Vec<f32>,
+    dtheta: Vec<f32>,
+    ds_carry: Vec<f32>,
+    dk_carry: Vec<f32>,
+    dx_carry: Vec<f32>,
+    dtheta_carry: Vec<f32>,
+}
+
+/// `v` holding `n` copies of `x`, its allocation reused.
+fn refill<T: Copy>(v: &mut Vec<T>, n: usize, x: T) {
+    v.clear();
+    v.resize(n, x);
+}
+
+/// `v` holding a copy of `src`, its allocation reused.
+fn copy_into(v: &mut Vec<f32>, src: &[f32]) {
+    v.clear();
+    v.extend_from_slice(src);
+}
+
+/// Replay one head over tokens `t0..t1` from `start`, filling the first
+/// `t1 - t0` records of `hb.rec`; the arithmetic is [`mimo_head_step`]'s.
 fn replay_head(
     (cfg, lw, h): (&Mamba3MimoConfig, &Mamba3MimoLayerWeights, usize),
     (proj, bn, cn, tanh_pi): (&[f32], &[f32], &[f32], &[f32]),
     start: &Mamba3MimoLayerState,
     (t0, t1): (usize, usize),
-    rec: &mut Vec<TokenRecord>,
-    s_start: &mut Vec<f32>,
+    hb: &mut HeadBackward,
 ) {
     let (n, p_len, r, na, g_n) = (
         cfg.d_state,
@@ -500,16 +542,22 @@ fn replay_head(
         cfg.ngroups,
     );
     let g = h / (cfg.nheads() / g_n);
-    let mut ssm = start.ssm_state[h * p_len * n..(h + 1) * p_len * n].to_vec();
-    let mut k = start.k_state[h * r * n..(h + 1) * r * n].to_vec();
-    let mut v = start.v_state[h * p_len..(h + 1) * p_len].to_vec();
-    let mut angle = start.angle_state[h * na..(h + 1) * na].to_vec();
-    s_start.clear();
-    s_start.extend_from_slice(&ssm);
-    rec.clear();
+    copy_into(
+        &mut hb.ssm,
+        &start.ssm_state[h * p_len * n..(h + 1) * p_len * n],
+    );
+    copy_into(&mut hb.k, &start.k_state[h * r * n..(h + 1) * r * n]);
+    copy_into(&mut hb.v, &start.v_state[h * p_len..(h + 1) * p_len]);
+    copy_into(&mut hb.angle, &start.angle_state[h * na..(h + 1) * na]);
+    copy_into(&mut hb.s_start, &hb.ssm);
+    if hb.rec.len() < t1 - t0 {
+        hb.rec.resize_with(t1 - t0, TokenRecord::default);
+    }
+    refill(&mut hb.bv, p_len * r, 0.0);
+    refill(&mut hb.gx, p_len * r, 0.0);
     let proj_rows = h * r * p_len..(h + 1) * r * p_len;
     let mimo_x = &lw.mimo_x[proj_rows];
-    for t in t0..t1 {
+    for (slot, t) in (t0..t1).enumerate() {
         let tok = token_at(cfg, proj, (bn, cn, tanh_pi), t);
         let disc = discretize(
             tok.dd_a[h],
@@ -518,20 +566,18 @@ fn replay_head(
             tok.trap[h],
             cfg.a_floor,
         );
-        let mut rr = TokenRecord {
-            dt: disc.dt,
-            a: clamp_a(-heavy_tail(tok.dd_a[h]), cfg.a_floor),
-            alpha: disc.alpha,
-            lam: 1.0 / (1.0 + fast_exp_scalar(-tok.trap[h])),
-            lam_c: 1.0 / (1.0 + fast_exp_scalar(tok.trap[h])),
-            beta: disc.beta,
-            gamma: disc.gamma,
-            sc: vec![(0.0, 1.0); na],
-            ..TokenRecord::default()
-        };
-        advance_angles(&mut angle, tok.tanh_pi, disc.dt, &mut rr.sc);
-        rr.k_pre = vec![0.0; r * n];
-        rr.q_pre = vec![0.0; r * n];
+        let rr = &mut hb.rec[slot];
+        rr.dt = disc.dt;
+        rr.a = clamp_a(-heavy_tail(tok.dd_a[h]), cfg.a_floor);
+        rr.alpha = disc.alpha;
+        rr.lam = 1.0 / (1.0 + fast_exp_scalar(-tok.trap[h]));
+        rr.lam_c = 1.0 / (1.0 + fast_exp_scalar(tok.trap[h]));
+        rr.beta = disc.beta;
+        rr.gamma = disc.gamma;
+        refill(&mut rr.sc, na, (0.0, 1.0));
+        advance_angles(&mut hb.angle, tok.tanh_pi, disc.dt, &mut rr.sc);
+        refill(&mut rr.k_pre, r * n, 0.0);
+        refill(&mut rr.q_pre, r * n, 0.0);
         for i in 0..r {
             let row = (i * g_n + g) * n..(i * g_n + g + 1) * n;
             let bias = (h * r + i) * n..(h * r + i + 1) * n;
@@ -545,36 +591,42 @@ fn replay_head(
                 rr.q_pre[i * n + j] = c + cb;
             }
         }
-        rr.kc = rr.k_pre.clone();
-        rr.q = rr.q_pre.clone();
+        let TokenRecord {
+            k_pre,
+            q_pre,
+            kc,
+            q,
+            sc,
+            ..
+        } = rr;
+        copy_into(kc, k_pre);
+        copy_into(q, q_pre);
         for i in 0..r {
-            rope_half_split(&mut rr.kc[i * n..(i + 1) * n], &rr.sc);
-            rope_half_split(&mut rr.q[i * n..(i + 1) * n], &rr.sc);
+            rope_half_split(&mut kc[i * n..(i + 1) * n], sc);
+            rope_half_split(&mut q[i * n..(i + 1) * n], sc);
         }
         let x_h = &tok.x[h * p_len..(h + 1) * p_len];
-        rr.u = vec![0.0; p_len * r];
-        rr.up = vec![0.0; p_len * r];
-        let mut bv = vec![0.0; p_len * r];
-        let mut gx = vec![0.0; p_len * r];
+        refill(&mut rr.u, p_len * r, 0.0);
+        refill(&mut rr.up, p_len * r, 0.0);
         for p in 0..p_len {
             for i in 0..r {
                 let psi = mimo_x[i * p_len + p];
                 rr.u[p * r + i] = psi * x_h[p];
-                gx[p * r + i] = disc.gamma * rr.u[p * r + i];
-                rr.up[p * r + i] = psi * v[p];
-                bv[p * r + i] = disc.beta * rr.up[p * r + i];
+                hb.gx[p * r + i] = disc.gamma * rr.u[p * r + i];
+                rr.up[p * r + i] = psi * hb.v[p];
+                hb.bv[p * r + i] = disc.beta * rr.up[p * r + i];
             }
         }
-        rr.y = vec![0.0; p_len * r];
+        refill(&mut rr.y, p_len * r, 0.0);
         mimo_rows(
             r,
             MimoRowsIo {
-                state: &mut ssm,
-                k_prev: &k,
+                state: &mut hb.ssm,
+                k_prev: &hb.k,
                 k_cur: &rr.kc,
                 q: &rr.q,
-                bv: &bv,
-                gx: &gx,
+                bv: &hb.bv,
+                gx: &hb.gx,
                 alpha: disc.alpha,
                 y: &mut rr.y,
             },
@@ -583,11 +635,10 @@ fn replay_head(
         for (y, &u) in rr.y.iter_mut().zip(&rr.u) {
             *y = d.mul_add(u, *y);
         }
-        rr.s_cur = ssm.clone();
-        rr.x_prev = v.clone();
-        k.copy_from_slice(&rr.kc);
-        v.copy_from_slice(x_h);
-        rec.push(rr);
+        copy_into(&mut rr.s_cur, &hb.ssm);
+        copy_into(&mut rr.x_prev, &hb.v);
+        hb.k.copy_from_slice(&rr.kc);
+        hb.v.copy_from_slice(x_h);
     }
 }
 
@@ -690,15 +741,14 @@ fn layer_backward(
     s.d_tanh[..t_len * na.max(1)].fill(0.0);
     let heads_col = 2 * di + 2 * bc;
 
-    let mut rec = Vec::new();
-    let mut s_start = Vec::new();
+    let hb = &mut s.head_bwd;
     for h in 0..nh {
         let g = h / (nh / g_n);
         let proj_rows = h * r * p_len..(h + 1) * r * p_len;
-        let mut ds_carry = vec![0f32; p_len * n];
-        let mut dk_carry = vec![0f32; r * n];
-        let mut dx_carry = vec![0f32; p_len];
-        let mut dtheta_carry = vec![0f32; na];
+        refill(&mut hb.ds_carry, p_len * n, 0.0);
+        refill(&mut hb.dk_carry, r * n, 0.0);
+        refill(&mut hb.dx_carry, p_len, 0.0);
+        refill(&mut hb.dtheta_carry, na, 0.0);
         let segments = t_len.div_ceil(stride);
         for seg in (0..segments).rev() {
             let (t0, t1) = (seg * stride, ((seg + 1) * stride).min(t_len));
@@ -707,21 +757,21 @@ fn layer_backward(
                 (&lt.proj, &s.bn, &s.cn, &s.tanh_pi),
                 &lt.ckpt[seg],
                 (t0, t1),
-                &mut rec,
-                &mut s_start,
+                hb,
             );
             for t in (t0..t1).rev() {
                 let i_t = t - t0;
+                let rec = &hb.rec;
                 let rr = &rec[i_t];
                 let s_prev: &[f32] = if i_t == 0 {
-                    &s_start
+                    &hb.s_start
                 } else {
                     &rec[i_t - 1].s_cur
                 };
-                let k_prev: Vec<f32> = if i_t == 0 {
-                    lt.ckpt[seg].k_state[h * r * n..(h + 1) * r * n].to_vec()
+                let k_prev: &[f32] = if i_t == 0 {
+                    &lt.ckpt[seg].k_state[h * r * n..(h + 1) * r * n]
                 } else {
-                    rec[i_t - 1].kc.clone()
+                    &rec[i_t - 1].kc
                 };
                 let tok = token_at(cfg, &lt.proj, (&s.bn, &s.cn, &s.tanh_pi), t);
                 let x_h = &tok.x[h * p_len..(h + 1) * p_len];
@@ -731,10 +781,11 @@ fn layer_backward(
 
                 // The gate: o = sum_r ((y_r s_r) Phi_r), s_r = silu(Z_r z),
                 // with the output norm y_r taking (y_r rstd_r) w first.
-                let mut dy = vec![0f32; p_len * r];
+                refill(&mut hb.dy, p_len * r, 0.0);
+                let dy = &mut hb.dy[..];
                 if cfg.is_outproj_norm {
                     gate_normed_backward(
-                        &mut dy,
+                        dy,
                         (&mut *dp, &mut *gw, d_o),
                         (lw, &rr.y, z_h),
                         (h, r, p_len, cfg.ssm_norm_eps),
@@ -758,9 +809,10 @@ fn layer_backward(
                 }
                 // D and the readout.
                 let d = lw.d_param[h];
-                let mut du = vec![0f32; p_len * r];
-                let mut ds = ds_carry.clone();
-                let mut dq = vec![0f32; r * n];
+                refill(&mut hb.du, p_len * r, 0.0);
+                copy_into(&mut hb.ds, &hb.ds_carry);
+                refill(&mut hb.dq, r * n, 0.0);
+                let (du, ds, dq) = (&mut hb.du[..], &mut hb.ds[..], &mut hb.dq[..]);
                 for p in 0..p_len {
                     for i in 0..r {
                         let dyv = dy[p * r + i];
@@ -775,9 +827,11 @@ fn layer_backward(
                 // The recurrence.
                 let mut d_alpha = 0f32;
                 let (mut d_beta, mut d_gamma) = (0f32, 0f32);
-                let mut d_up = vec![0f32; p_len * r];
-                let mut dkc = dk_carry.clone();
-                let mut dkp = vec![0f32; r * n];
+                refill(&mut hb.d_up, p_len * r, 0.0);
+                copy_into(&mut hb.dkc, &hb.dk_carry);
+                refill(&mut hb.dkp, r * n, 0.0);
+                let (d_up, dkc, dkp) = (&mut hb.d_up[..], &mut hb.dkc[..], &mut hb.dkp[..]);
+                let ds_carry = &mut hb.ds_carry[..];
                 for p in 0..p_len {
                     for j in 0..n {
                         let dsv = ds[p * n + j];
@@ -797,11 +851,12 @@ fn layer_backward(
                         }
                     }
                 }
-                dk_carry = dkp;
+                std::mem::swap(&mut hb.dk_carry, &mut hb.dkp);
                 // The rank projections of x and of the previous x.
-                let mut dx_prev = vec![0f32; p_len];
+                refill(&mut hb.dx_prev, p_len, 0.0);
+                let dx_prev = &mut hb.dx_prev[..];
                 for p in 0..p_len {
-                    let mut dx = dx_carry[p];
+                    let mut dx = hb.dx_carry[p];
                     for i in 0..r {
                         let psi = lw.mimo_x[proj_rows.start + i * p_len + p];
                         gw.mimo_x[proj_rows.start + i * p_len + p] +=
@@ -811,12 +866,13 @@ fn layer_backward(
                     }
                     dp[di + h * p_len + p] += dx;
                 }
-                dx_carry = dx_prev;
+                std::mem::swap(&mut hb.dx_carry, &mut hb.dx_prev);
                 // The rotation, back to the biased keys and queries and to the
                 // angles.
                 let half = n / 2;
-                let mut dtheta = dtheta_carry.clone();
-                for (vec_grad, pre) in [(&mut dkc, &rr.k_pre), (&mut dq, &rr.q_pre)] {
+                copy_into(&mut hb.dtheta, &hb.dtheta_carry);
+                let dtheta = &mut hb.dtheta[..];
+                for (vec_grad, pre) in [(&mut *dkc, &rr.k_pre), (&mut *dq, &rr.q_pre)] {
                     for i in 0..r {
                         let gv = &mut vec_grad[i * n..(i + 1) * n];
                         let pv = &pre[i * n..(i + 1) * n];
@@ -846,7 +902,7 @@ fn layer_backward(
                     d_dt += dth * tp;
                     *dtan += dth * rr.dt;
                 }
-                dtheta_carry = dtheta;
+                std::mem::swap(&mut hb.dtheta_carry, &mut hb.dtheta);
                 // The discretisation.
                 let d_lam_c = d_beta * (rr.alpha * rr.dt);
                 d_alpha += d_beta * (rr.dt * rr.lam_c);

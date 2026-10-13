@@ -67,7 +67,10 @@ cli = ["hf", "dep:clap", "dep:tokenizers", "dep:hf-hub"]
 qualification = []
 
 [dependencies]
-pulp = "0.22"
+# x86-v4 lets the dispatch take AVX-512 where the CPU has it; every SIMD
+# kernel keeps a fixed logical lane order, so the bits stay the AVX2 and
+# NEON ones.
+pulp = { version = "0.22", features = ["x86-v4"] }
 rayon = "1.10"
 safetensors = "0.8"
 
