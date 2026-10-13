@@ -44,6 +44,7 @@
 //!   on the overflow flag and actually skips AdamW on overflow steps, which
 //!   matches PyTorch `torch.cuda.amp.GradScaler` semantics exactly.
 
+use crate::gpu::grad_window::check_backward_opts;
 use crate::gpu::options::GpuOptions;
 use cudarc::driver::PushKernelArg;
 
@@ -533,13 +534,6 @@ impl MambaGpuTrainer {
         // Mean = sum then multiply: for power-of-two worlds the scale
         // only moves exponents (exact); other sizes still get one
         // deterministic per-element rounding.
-        if self.grad_arena().len() > i32::MAX as usize {
-            return Err(format!(
-                "gradient arena has {} elements — beyond the i32 kernel ABI \
-                 of scale_grads; the mean scale would silently truncate",
-                self.grad_arena().len()
-            ));
-        }
         let inv_w = 1.0f32 / world as f32;
         match &mut self.inner {
             TrainerInner::F32(t) => scale_grads(&t.ctx, &mut t.grads.flat, inv_w)?,
@@ -698,6 +692,7 @@ impl MambaGpuTrainer {
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
+        check_backward_opts(&opts, "Mamba trainer")?;
         match &mut self.inner {
             TrainerInner::F32(t) => t.backward_split(d_temporal, opts),
             TrainerInner::Mixed(t) => t.backward_split(d_temporal, opts),
@@ -776,6 +771,8 @@ fn m1_control_region_geom(grads: &GpuMambaGrads, cfg: &MambaConfig) -> GradRegio
         a_row_stride: cfg.xdbl_dim() as i64,
         b_off: at(&l0.dt_proj_w),
         b_len: (l0.dt_proj_w.len() + l0.dt_proj_b.len() + l0.a_log.len()) as i32,
+        c_off: 0,
+        c_len: 0,
     }
 }
 
@@ -1336,14 +1333,6 @@ impl MambaTrainerMixed {
                  ({forward_route:?} -> {:?}); re-run forward()",
                 self.ctx.gemm_route()
             ));
-        }
-        if opts.clip_max_norm.is_some() && opts.accumulate_only {
-            return Err(
-                "clip_max_norm + accumulate_only is unsupported: the global norm is only \
-                 defined over the COMPLETE accumulated gradient — request the clip on the \
-                 final (applying) backward_step"
-                    .into(),
-            );
         }
         assert_eq!(
             d_temporal.len(),
@@ -2504,14 +2493,6 @@ impl MambaTrainerF32 {
                  ({forward_route:?} -> {:?}); re-run forward()",
                 self.ctx.gemm_route()
             ));
-        }
-        if opts.clip_max_norm.is_some() && opts.accumulate_only {
-            return Err(
-                "clip_max_norm + accumulate_only is unsupported: the global norm is only \
-                 defined over the COMPLETE accumulated gradient — request the clip on the \
-                 final (applying) backward_step"
-                    .into(),
-            );
         }
         assert_eq!(
             d_temporal.len(),

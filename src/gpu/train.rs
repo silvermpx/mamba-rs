@@ -102,11 +102,13 @@ pub struct BackwardOpts {
     /// decay, the only ones whose magnitude scales with the sequence
     /// length. Without a separate bound one resonant page rescales the
     /// ENTIRE arena through the global clip and starves the
-    /// representational columns. For Mamba-3 SISO they are the
+    /// representational columns. For Mamba-3 SISO and MIMO they are the
     /// dd_dt/dd_A/trap/angle columns of every layer's in_proj gradient
     /// plus dt_bias; for Mamba-1 the step-size columns of x_proj, dt_proj
-    /// and A_log. Every lane of those two trainers honors it; the
-    /// Mamba-2 and MIMO trainers refuse it.
+    /// and A_log; for Mamba-2 the dt columns of in_proj (and their in_proj
+    /// bias entries where the model has the bias), dt_bias and A_log.
+    /// Every family honors it on the applying call; on an accumulating
+    /// call it is an error, as the global clip is.
     pub control_clip_max_norm: Option<f32>,
 }
 
@@ -130,8 +132,8 @@ impl BackwardOpts {
         self
     }
 
-    /// Clip the Mamba-3 control-channel gradients to their own max norm
-    /// before the global clip. See
+    /// Clip the control-channel gradients to their own max norm before
+    /// the global clip. See
     /// [`BackwardOpts::control_clip_max_norm`].
     pub fn with_control_clip_max_norm(mut self, c: f32) -> Self {
         self.control_clip_max_norm = Some(c);

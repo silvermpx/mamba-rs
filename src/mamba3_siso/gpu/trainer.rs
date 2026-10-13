@@ -7,6 +7,7 @@
 //! Graph capture for all three. See the M1 trainer for the
 //! precision-support rationale.
 
+use crate::gpu::grad_window::check_backward_opts;
 use crate::gpu::options::GpuOptions;
 use cudarc::driver::PushKernelArg;
 
@@ -369,13 +370,6 @@ impl Mamba3GpuTrainer {
         // Mean = sum then multiply: for power-of-two worlds the scale
         // only moves exponents (exact); other sizes still get one
         // deterministic per-element rounding.
-        if self.grad_arena().len() > i32::MAX as usize {
-            return Err(format!(
-                "gradient arena has {} elements — beyond the i32 kernel ABI \
-                 of scale_grads; the mean scale would silently truncate",
-                self.grad_arena().len()
-            ));
-        }
         let inv_w = 1.0f32 / world as f32;
         match &mut self.inner {
             Trainer3Inner::F32(t) => scale_grads(&t.ctx, &mut t.grads.flat, inv_w)?,
@@ -651,6 +645,7 @@ impl Mamba3GpuTrainer {
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
+        check_backward_opts(&opts, "Mamba-3 trainer")?;
         match &mut self.inner {
             Trainer3Inner::F32(t) => t.backward_split(d_temporal, opts),
             Trainer3Inner::Mixed(t) => t.backward_split(d_temporal, opts),
@@ -718,6 +713,8 @@ fn m3_control_region_geom(cfg: &Mamba3Config, input_dim: usize) -> GradRegionGeo
         a_row_stride: ip as i64,
         b_off: (layer0 + dm + dm * ip) as i64,
         b_len: nh as i32,
+        c_off: 0,
+        c_len: 0,
     }
 }
 
@@ -1633,14 +1630,6 @@ impl Mamba3TrainerMixed {
                 "M3 split backward: GEMM route changed since forward; run forward again".into(),
             );
         }
-        if opts.clip_max_norm.is_some() && opts.accumulate_only {
-            return Err(
-                "clip_max_norm + accumulate_only is unsupported: the global norm is only \
-                 defined over the COMPLETE accumulated gradient — request the clip on the \
-                 final (applying) backward_step"
-                    .into(),
-            );
-        }
         assert_eq!(
             d_temporal.len(),
             self.d_temporal.len(),
@@ -2368,14 +2357,6 @@ impl Mamba3TrainerF32 {
         if self.ctx.gemm_route() != forward_route {
             return Err(
                 "M3 split backward: GEMM route changed since forward; run forward again".into(),
-            );
-        }
-        if opts.clip_max_norm.is_some() && opts.accumulate_only {
-            return Err(
-                "clip_max_norm + accumulate_only is unsupported: the global norm is only \
-                 defined over the COMPLETE accumulated gradient — request the clip on the \
-                 final (applying) backward_step"
-                    .into(),
             );
         }
         assert_eq!(

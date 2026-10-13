@@ -68,6 +68,15 @@
   on Mamba-1 and SISO. The ranks of a data-parallel world reduce their
   scaled gradients, so an overflow on one rank reaches every rank as inf
   or NaN, and every rank takes the same skip and keeps the same scale.
+- The Mamba-2 and MIMO trainers train data-parallel and clip their
+  control channels. `backward_step_dist` reduces the window's gradient
+  across the ranks, and `grad_arena`, `upload_grad_arena`, `apply_step`
+  and `apply_step_full` split the optimizer tail from the backward for a
+  reducer of the caller's own, as on Mamba-1 and SISO. The control
+  channels of Mamba-2 are the dt columns of in_proj (with their in_proj
+  bias entries where the model has the bias), dt_bias and A_log; MIMO's
+  are SISO's. `GradRegionGeom` gains a third contiguous block
+  (`c_off`, `c_len`) for the in_proj bias entries.
 
 ### Changed
 
@@ -338,6 +347,13 @@
   addresses. `GpuCtx::half_staging_for(bytes)` hands
   out such a span, and `ensure_half_staging` still refuses to grow a
   frozen buffer.
+- A clip of either kind on an accumulating call is an error in every
+  family; Mamba-1 and SISO ignored a control-channel clip there. The
+  refusal comes before the pending forward is consumed, so a valid call
+  can follow.
+- Data-parallel training no longer refuses a gradient arena past 2^31
+  elements: the mean scale was already 64-bit, and the fixed-order
+  reducer's fold now counts its shard in 64 bits.
 
 ## 0.7.5 (2026-09-23)
 

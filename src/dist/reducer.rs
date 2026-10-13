@@ -40,9 +40,9 @@ extern "C" __global__ void det_sum_ranks(
     float* __restrict__ out,
     const float* __restrict__ stacked,
     int world,
-    int len
+    long long len
 ) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= len) return;
     float acc = stacked[i];
     for (int r = 1; r < world; ++r) {
@@ -148,15 +148,17 @@ impl DetReduceKernel {
         if len == 0 {
             return Ok(());
         }
-        if len > i32::MAX as usize || world > i32::MAX as usize {
-            return Err(DistError::Transport(format!(
-                "det_sum_ranks: len {len} / world {world} exceed the i32 kernel ABI"
-            )));
-        }
-        let world_i = world as i32;
-        let len_i = len as i32;
+        let world_i = i32::try_from(world).map_err(|_| {
+            DistError::Transport(format!("det_sum_ranks: a world of {world} ranks"))
+        })?;
+        let len_i = len as i64;
+        let blocks = u32::try_from(len.div_ceil(256)).map_err(|_| {
+            DistError::Transport(format!(
+                "det_sum_ranks: {len} elements pass the grid's x extent"
+            ))
+        })?;
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((len as u32).div_ceil(256), 1, 1),
+            grid_dim: (blocks, 1, 1),
             block_dim: (256, 1, 1),
             shared_mem_bytes: 0,
         };

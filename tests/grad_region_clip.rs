@@ -1,9 +1,10 @@
-//! Region clip unit: the two-block per-layer region fold must (1) match
-//! a CPU L2 norm over exactly the described elements, (2) scale ONLY
-//! those elements by the PyTorch clip coefficient, and (3) leave every
-//! other arena element bit-untouched. Geometry mirrors the Mamba-3
-//! control region shape in miniature (a column stripe of a row-major
-//! matrix plus a contiguous bias vector, repeating per layer).
+//! Region clip unit: the per-layer region fold must (1) match a CPU L2
+//! norm over exactly the described elements, (2) scale ONLY those
+//! elements by the PyTorch clip coefficient, and (3) leave every other
+//! arena element bit-untouched. Geometry mirrors the control region
+//! shapes in miniature (a column stripe of a row-major matrix plus a
+//! contiguous bias vector, repeating per layer), with and without the
+//! third contiguous block Mamba-2's in_proj bias brings.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::gpu::buffers::GpuBuffer;
@@ -23,17 +24,28 @@ fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
 
 #[test]
 fn region_clip_scales_only_the_region() {
+    region_case(0);
+}
+
+#[test]
+fn region_clip_scales_only_the_region_with_a_third_block() {
+    region_case(4);
+}
+
+/// Miniature layout: 3 layers, each layer holding a 7x11 row-major
+/// matrix (stripe = columns 6..11), a 5-long bias, a gap of 2, a
+/// `c_len`-long third block, and 3 trailing pad elements, after a head
+/// pad, so complement coverage is meaningful.
+fn region_case(c_len: usize) {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
 
-    // Miniature m3-like layout: 3 layers, each layer holding a 7x11
-    // row-major matrix (stripe = columns 6..11) and a 5-long bias,
-    // padded fore and aft so complement coverage is meaningful.
     let (n_layers, rows, row_stride, ctrl0, ctrl_len, b_len) =
         (3usize, 7usize, 11usize, 6usize, 5usize, 5usize);
     let head_pad = 13usize;
     let mat = rows * row_stride;
-    let per_layer = mat + b_len + 3; // 3 trailing pad elems per layer
+    let c_at = mat + b_len + 2;
+    let per_layer = c_at + c_len + 3;
     let total = head_pad + n_layers * per_layer;
 
     let host = det(total, 0xC1AB_5EED, 4.0);
@@ -51,6 +63,8 @@ fn region_clip_scales_only_the_region() {
         a_row_stride: row_stride as i64,
         b_off: (head_pad + mat) as i64,
         b_len: b_len as i32,
+        c_off: (head_pad + c_at) as i64,
+        c_len: c_len as i32,
     };
 
     // CPU reference: the exact region element set.
@@ -63,6 +77,9 @@ fn region_clip_scales_only_the_region() {
         }
         for b in 0..b_len {
             in_region[head_pad + l * per_layer + mat + b] = true;
+        }
+        for c in 0..c_len {
+            in_region[head_pad + l * per_layer + c_at + c] = true;
         }
     }
     let cpu_norm = in_region

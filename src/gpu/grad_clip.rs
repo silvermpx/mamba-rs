@@ -172,12 +172,13 @@ pub fn clip_grads_device(
     Ok(host[1])
 }
 
-/// Geometry of a per-layer two-block region of a flat grad arena:
+/// Geometry of a per-layer three-block region of a flat grad arena:
 /// block A is an `a_rows x a_cols` stripe starting at `a_off` with row
-/// stride `a_row_stride` (a column slice of a row-major matrix), block
-/// B a contiguous `b_len` vector at `b_off`; both repeat every
-/// `layer_stride` elements for `n_layers` layers. Offsets are absolute
-/// arena element offsets for layer 0.
+/// stride `a_row_stride` (a column slice of a row-major matrix), blocks
+/// B and C contiguous vectors of `b_len` and `c_len` at `b_off` and
+/// `c_off` (C empty where a family has no third piece); all three repeat
+/// every `layer_stride` elements for `n_layers` layers. Offsets are
+/// absolute arena element offsets for layer 0.
 #[derive(Clone, Copy, Debug)]
 pub struct GradRegionGeom {
     pub n_layers: i32,
@@ -188,6 +189,8 @@ pub struct GradRegionGeom {
     pub a_row_stride: i64,
     pub b_off: i64,
     pub b_len: i32,
+    pub c_off: i64,
+    pub c_len: i32,
 }
 
 /// Region twin of [`clip_grads_device`]: deterministic L2 norm over the
@@ -236,6 +239,8 @@ pub fn clip_region_device(
         b.arg(&geom.a_row_stride);
         b.arg(&geom.b_off);
         b.arg(&geom.b_len);
+        b.arg(&geom.c_off);
+        b.arg(&geom.c_len);
         unsafe { b.launch(fixed) }.map_err(|e| format!("grad_region_sumsq_partial_f32: {e:?}"))?;
     }
     // Stage 2: the SAME ordered fold as the global clip.
@@ -273,6 +278,8 @@ pub fn clip_region_device(
         b.arg(&geom.a_row_stride);
         b.arg(&geom.b_off);
         b.arg(&geom.b_len);
+        b.arg(&geom.c_off);
+        b.arg(&geom.c_len);
         unsafe { b.launch(fixed) }.map_err(|e| format!("grad_region_scale_dev_f32: {e:?}"))?;
     }
     let mut host = [0.0f32; 2];

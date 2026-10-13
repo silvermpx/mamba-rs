@@ -24,7 +24,7 @@
 //! Windows carry the states from one call to the next, and the gradients
 //! stop at the states a window starts from.
 
-use crate::gpu::grad_clip::norm_limit;
+use crate::gpu::grad_clip::{GradRegionGeom, norm_limit, scale_grads};
 use crate::gpu::grad_window::{GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
@@ -237,6 +237,46 @@ impl Layout {
 
 fn at(base: u64, span: Span) -> u64 {
     base + (span.off * 4) as u64
+}
+
+/// The control region of the gradient arena, as in SISO: the dd_dt, dd_A,
+/// trap and angle columns of every layer's in_proj (the last
+/// `3 * nheads + angles` of its split), then dt_bias. These are the
+/// gradients of the step size and the decay, whose magnitude grows with
+/// the window's length. The layers repeat with one stride, since the
+/// layout holds the mixers one after another and the MLPs after them.
+fn control_region_geom(layout: &Layout, cfg: &Mamba3MimoConfig) -> GradRegionGeom {
+    let Some(l0) = layout.layers.first() else {
+        return GradRegionGeom {
+            n_layers: 0,
+            layer_stride: 0,
+            a_off: 0,
+            a_rows: 0,
+            a_cols: 0,
+            a_row_stride: 0,
+            b_off: 0,
+            b_len: 0,
+            c_off: 0,
+            c_len: 0,
+        };
+    };
+    let (dm, ip) = (cfg.d_model, cfg.in_proj_out_dim());
+    let ctrl = 3 * cfg.nheads() + cfg.num_rope_angles();
+    GradRegionGeom {
+        n_layers: layout.layers.len() as i32,
+        layer_stride: layout
+            .layers
+            .get(1)
+            .map_or(0, |l1| (l1.norm_weight.off - l0.norm_weight.off) as i64),
+        a_off: (l0.in_proj_w.off + ip - ctrl) as i64,
+        a_rows: dm as i32,
+        a_cols: ctrl as i32,
+        a_row_stride: ip as i64,
+        b_off: l0.dt_bias.off as i64,
+        b_len: l0.dt_bias.len as i32,
+        c_off: 0,
+        c_len: 0,
+    }
 }
 
 /// Rows in the activation dtype: f32 buffers in the f32 and tf32 lanes,
@@ -859,14 +899,17 @@ impl Mamba3MimoGpuTrainer {
 
     /// The backward of the last [`Self::forward`] for `d_temporal`
     /// (`[batch, seq_len, d_model]`), then the optimizer tail `opts` asks
-    /// for: the global-norm clip, the skip of a window whose norm spikes,
-    /// and the AdamW step. With `opts.accumulate_only` the gradient joins
-    /// the open accumulation window instead and the optimizer waits; the
-    /// next applying call steps on the window's sum. Scale `d_temporal` by
+    /// for: the control-channel clip, the global-norm clip, the skip of a
+    /// window whose norm spikes, and the AdamW step. With
+    /// `opts.accumulate_only` the gradient joins the open accumulation
+    /// window instead and the optimizer waits; the next applying call
+    /// steps on the window's sum. Scale `d_temporal` by
     /// `1 / micro_batches` for a mean.
     ///
-    /// A clip belongs on the applying call, and the control-channel clip
-    /// is not implemented here: those are errors. In f16 the loss scale
+    /// The control channels are the dd_dt, dd_A, trap and angle columns
+    /// of every layer's in_proj and dt_bias, as in SISO. A clip of either
+    /// kind belongs on the applying call: on an accumulating one it is an
+    /// error. In f16 the loss scale
     /// holds for the whole window, and an overflow in any of its
     /// micro-batches skips the whole window and backs the scale off.
     pub fn backward_step(
@@ -874,7 +917,7 @@ impl Mamba3MimoGpuTrainer {
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
-        check_backward_opts(&opts, "MIMO trainer", false)?;
+        check_backward_opts(&opts, "MIMO trainer")?;
         let loss_scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
         self.backward(d_temporal, None)?;
         if opts.accumulate_only {
@@ -892,14 +935,149 @@ impl Mamba3MimoGpuTrainer {
         if self.window.fold_into(&self.ctx, &mut self.grads)? {
             self.overflowed = true;
         }
-        let grad_norm = match norm_limit(opts.clip_max_norm, opts.step_skip_above) {
+        self.apply_tail(
+            (
+                opts.clip_max_norm,
+                opts.step_skip_above,
+                opts.control_clip_max_norm,
+            ),
+            loss_scale,
+        )
+    }
+
+    /// The gradient of the open accumulation window: the sum of its
+    /// micro-batches so far, in the layout of the master weights. A
+    /// data-parallel caller reduces it across ranks between the last
+    /// accumulating call and [`Self::apply_step`]. An error when no window
+    /// is open.
+    pub fn grad_arena(&self) -> Result<&GpuBuffer, String> {
+        self.window.sum()
+    }
+
+    /// Overwrite the open window's gradient with `values`, a reduced arena
+    /// of the same length.
+    pub fn upload_grad_arena(&mut self, values: &[f32]) -> Result<(), String> {
+        let sum = self.window.sum_mut()?;
+        if values.len() != sum.len() {
+            return Err(format!(
+                "upload_grad_arena: {} values for an arena of {}",
+                values.len(),
+                sum.len()
+            ));
+        }
+        sum.upload(&self.ctx.stream, values)
+    }
+
+    /// Run only the optimizer tail, with the global clip `clip_max_norm`,
+    /// over the open window's gradient (see [`Self::apply_step_full`]).
+    pub fn apply_step(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
+        self.apply_step_full(clip_max_norm, None, None)
+    }
+
+    /// Run only the optimizer tail over the open window's gradient: the
+    /// control-channel clip, the global clip, the skip of a spiking window
+    /// and the AdamW step, then close the window. With accumulating
+    /// `backward_step` calls before it, a reducer can run between the
+    /// last backward and the update, and the pair gives the bits of an
+    /// applying `backward_step`. In f16 the window's values decide the
+    /// overflow, so every rank that holds the same reduced gradient takes
+    /// the same skip.
+    pub fn apply_step_full(
+        &mut self,
+        clip_max_norm: Option<f32>,
+        step_skip_above: Option<f32>,
+        control_clip_max_norm: Option<f32>,
+    ) -> Result<BackwardMetrics, String> {
+        let loss_scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
+        self.overflowed = self.window.take_into(&self.ctx, &mut self.grads)?;
+        if self.scaler.is_some() {
+            self.overflowed |= self.grads_overflow()?;
+        }
+        self.fresh_grads = true;
+        self.apply_tail(
+            (clip_max_norm, step_skip_above, control_clip_max_norm),
+            loss_scale,
+        )
+    }
+
+    /// Data-parallel applying backward: the local backward joins the
+    /// window, the window's gradient is summed across the ranks and scaled
+    /// to their mean, then the optimizer tail runs. An accumulating call,
+    /// or a world of one, is a plain [`Self::backward_step`]. In f16 the
+    /// ranks reduce gradients of one loss scale, so an overflow on any
+    /// rank reaches every rank's window as inf or NaN, and every rank
+    /// skips the same window and keeps the same scale.
+    pub fn backward_step_dist(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+        dist: &crate::dist::DistContext,
+    ) -> Result<BackwardMetrics, String> {
+        let world = dist.world_size();
+        if world == 1 || opts.accumulate_only {
+            return self.backward_step(d_temporal, opts);
+        }
+        check_backward_opts(&opts, "MIMO trainer")?;
+        self.backward_step(
+            d_temporal,
+            BackwardOpts::default().with_accumulate_only(true),
+        )?;
+        let stream = self.ctx.stream.clone();
+        dist.all_reduce_grad_sum(self.window.sum()?, &stream)?;
+        // The mean is the sum times 1 / world: exact for a power-of-two
+        // world, one rounding per element otherwise.
+        scale_grads(&self.ctx, self.window.sum_mut()?, 1.0 / world as f32)?;
+        self.apply_step_full(
+            opts.clip_max_norm,
+            opts.step_skip_above,
+            opts.control_clip_max_norm,
+        )
+    }
+
+    /// Whether the gradient arena holds an inf or a NaN.
+    fn grads_overflow(&mut self) -> Result<bool, String> {
+        let stream = self.ctx.stream.clone();
+        self.overflow.zero(&stream)?;
+        check_inf_nan_gpu(
+            &self.ctx,
+            &self.ctx.kernels,
+            &mut self.overflow,
+            &self.grads,
+        )?;
+        Ok(self.overflow.read(&stream)? != 0)
+    }
+
+    /// The optimizer tail over the window's whole gradient in `grads`:
+    /// `(clip_max_norm, step_skip_above, control_clip_max_norm)` ask for
+    /// the control-channel clip, the global clip and the skip of a
+    /// spiking window, then the AdamW step, which an f16 overflow skips.
+    fn apply_tail(
+        &mut self,
+        (clip_max_norm, step_skip_above, control_clip_max_norm): (
+            Option<f32>,
+            Option<f32>,
+            Option<f32>,
+        ),
+        loss_scale: Option<f32>,
+    ) -> Result<BackwardMetrics, String> {
+        // The control channels first, so a window whose step-size and
+        // decay gradients grow with its length cannot rescale the whole
+        // arena through the global clip below.
+        if let Some(c) = control_clip_max_norm
+            && !self.overflowed
+        {
+            let geom = control_region_geom(&self.layout, &self.cfg);
+            self.window
+                .clip_region(&self.ctx, &mut self.grads, geom, c)?;
+        }
+        let grad_norm = match norm_limit(clip_max_norm, step_skip_above) {
             Some(c) if !self.overflowed => Some(self.window.clip(&self.ctx, &mut self.grads, c)?),
             _ => None,
         };
         // A window whose norm before the clip passes the threshold is
         // dropped whole: no AdamW step, and the loss scale counts it as a
         // clean step.
-        if let (Some(norm), Some(limit)) = (grad_norm, opts.step_skip_above)
+        if let (Some(norm), Some(limit)) = (grad_norm, step_skip_above)
             && norm > limit
         {
             self.fresh_grads = false;

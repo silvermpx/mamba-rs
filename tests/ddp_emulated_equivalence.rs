@@ -19,6 +19,10 @@ use mamba_rs::mamba1::{MambaConfig, MambaWeights};
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
+use mamba_rs::{
+    Mamba2Config, Mamba2GpuTrainer, Mamba2Weights, Mamba3MimoConfig, Mamba3MimoGpuTrainer,
+    Mamba3MimoWeights,
+};
 
 fn cfg() -> Mamba3Config {
     Mamba3Config {
@@ -218,8 +222,8 @@ fn emulated_ddp_world_size_is_a_numeric_route() {
     );
 }
 
-/// One rank of an f16 emulated world, of either family.
-trait F16Rank {
+/// One rank of an emulated world, of any family.
+trait Rank {
     fn forward(&mut self, input: &[f32], out: &mut [f32]);
     fn accumulate(&mut self, d: &[f32]) -> BackwardMetrics;
     fn arena(&self) -> Vec<f32>;
@@ -228,7 +232,11 @@ trait F16Rank {
     fn scaler(&self) -> Option<(f32, u32)>;
 }
 
-impl F16Rank for MambaGpuTrainer {
+fn to_bits(values: impl IntoIterator<Item = f32>) -> Vec<u32> {
+    values.into_iter().map(f32::to_bits).collect()
+}
+
+impl Rank for MambaGpuTrainer {
     fn forward(&mut self, input: &[f32], out: &mut [f32]) {
         MambaGpuTrainer::forward(self, input, out).unwrap();
     }
@@ -245,23 +253,24 @@ impl F16Rank for MambaGpuTrainer {
     }
     fn bits(&self) -> Vec<u32> {
         let w = self.snapshot_master().unwrap();
-        let mut out = Vec::new();
-        let mut push = |v: &[f32]| out.extend(v.iter().map(|x| x.to_bits()));
-        push(&w.input_proj_w);
-        push(&w.input_proj_b);
+        let mut out = to_bits(w.input_proj_w.iter().chain(&w.input_proj_b).copied());
         for l in &w.layers {
-            push(&l.norm_weight);
-            push(&l.in_proj_w);
-            push(&l.conv1d_weight);
-            push(&l.conv1d_bias);
-            push(&l.x_proj_w);
-            push(&l.dt_proj_w);
-            push(&l.dt_proj_b);
-            push(&l.a_log);
-            push(&l.d_param);
-            push(&l.out_proj_w);
+            for t in [
+                &l.norm_weight,
+                &l.in_proj_w,
+                &l.conv1d_weight,
+                &l.conv1d_bias,
+                &l.x_proj_w,
+                &l.dt_proj_w,
+                &l.dt_proj_b,
+                &l.a_log,
+                &l.d_param,
+                &l.out_proj_w,
+            ] {
+                out.extend(to_bits(t.iter().copied()));
+            }
         }
-        push(&w.norm_f_weight);
+        out.extend(to_bits(w.norm_f_weight.iter().copied()));
         out
     }
     fn scaler(&self) -> Option<(f32, u32)> {
@@ -269,7 +278,7 @@ impl F16Rank for MambaGpuTrainer {
     }
 }
 
-impl F16Rank for Mamba3GpuTrainer {
+impl Rank for Mamba3GpuTrainer {
     fn forward(&mut self, input: &[f32], out: &mut [f32]) {
         Mamba3GpuTrainer::forward(self, input, out).unwrap();
     }
@@ -292,16 +301,110 @@ impl F16Rank for Mamba3GpuTrainer {
     }
 }
 
-/// What one round of an f16 world closed with on every rank: whether the
+impl Rank for Mamba2GpuTrainer {
+    fn forward(&mut self, input: &[f32], out: &mut [f32]) {
+        Mamba2GpuTrainer::forward(self, input, out).unwrap();
+    }
+    fn accumulate(&mut self, d: &[f32]) -> BackwardMetrics {
+        self.backward_step(d, BackwardOpts::default().with_accumulate_only(true))
+            .unwrap()
+    }
+    fn arena(&self) -> Vec<f32> {
+        self.grad_arena()
+            .unwrap()
+            .to_cpu(&self.ctx().stream)
+            .unwrap()
+    }
+    fn apply(&mut self, reduced: &[f32]) -> BackwardMetrics {
+        self.upload_grad_arena(reduced).unwrap();
+        self.apply_step(None).unwrap()
+    }
+    fn bits(&self) -> Vec<u32> {
+        let w = self.snapshot_master().unwrap();
+        let mut out = to_bits(w.input_proj_w.iter().chain(&w.input_proj_b).copied());
+        for l in &w.layers {
+            for t in [
+                &l.norm_weight,
+                &l.in_proj_w,
+                &l.in_proj_b,
+                &l.conv_w,
+                &l.conv_b,
+                &l.dt_bias,
+                &l.a_log,
+                &l.d_param,
+                &l.gate_norm_weight,
+                &l.out_proj_w,
+                &l.out_proj_b,
+            ] {
+                out.extend(to_bits(t.iter().copied()));
+            }
+        }
+        out.extend(to_bits(w.norm_f_weight.iter().copied()));
+        out
+    }
+    fn scaler(&self) -> Option<(f32, u32)> {
+        self.scaler_state()
+    }
+}
+
+impl Rank for Mamba3MimoGpuTrainer {
+    fn forward(&mut self, input: &[f32], out: &mut [f32]) {
+        Mamba3MimoGpuTrainer::forward(self, input, out).unwrap();
+    }
+    fn accumulate(&mut self, d: &[f32]) -> BackwardMetrics {
+        self.backward_step(d, BackwardOpts::default().with_accumulate_only(true))
+            .unwrap()
+    }
+    fn arena(&self) -> Vec<f32> {
+        self.grad_arena()
+            .unwrap()
+            .to_cpu(&self.ctx().stream)
+            .unwrap()
+    }
+    fn apply(&mut self, reduced: &[f32]) -> BackwardMetrics {
+        self.upload_grad_arena(reduced).unwrap();
+        self.apply_step(None).unwrap()
+    }
+    fn bits(&self) -> Vec<u32> {
+        let w = self.snapshot_master().unwrap();
+        let mut out = to_bits(w.input_proj_w.iter().chain(&w.input_proj_b).copied());
+        for l in &w.layers {
+            for t in [
+                &l.norm_weight,
+                &l.in_proj_w,
+                &l.dt_bias,
+                &l.b_norm_weight,
+                &l.c_norm_weight,
+                &l.b_bias,
+                &l.c_bias,
+                &l.d_param,
+                &l.mimo_x,
+                &l.mimo_z,
+                &l.mimo_o,
+                &l.norm_gate_weight,
+                &l.out_proj_w,
+            ] {
+                out.extend(to_bits(t.iter().copied()));
+            }
+        }
+        out.extend(to_bits(w.norm_f_weight.iter().copied()));
+        out
+    }
+    fn scaler(&self) -> Option<(f32, u32)> {
+        self.scaler_state()
+    }
+}
+
+/// What one round of a world closed with on every rank: whether the
 /// window stepped and the loss scale the round left behind.
 type Round = (bool, Option<(f32, u32)>);
 
-/// `rounds` f16 data-parallel windows over the ranks, each rank on its own
-/// micro-batch of `n` values, rank `blow.1` overflowing in round `blow.0`.
-/// Every rank must close every round alike: the same skip decision, the
-/// same scale and the same master bits. Returns rank 0's final bits and
-/// the rounds.
-fn run_f16_world<R: F16Rank>(
+/// `rounds` data-parallel windows over the ranks, each rank on its own
+/// micro-batch of `n` values, rank `blow.1` overflowing in round `blow.0`
+/// (an f16 world). Every rank must close every round alike: the same skip
+/// decision, the same scale and the same master bits. Returns rank 0's
+/// final bits and the rounds.
+fn run_world<R: Rank>(
     mut ranks: Vec<R>,
     n: usize,
     rounds: usize,
@@ -315,8 +418,8 @@ fn run_f16_world<R: F16Rank>(
         let mut arenas = Vec::with_capacity(world);
         for (r, t) in ranks.iter_mut().enumerate() {
             let input = det(n, 0x3000 + (round * world + r) as u32);
-            // Small upstream gradients, so a clean window stays in f16's
-            // range.
+            // Small upstream gradients, so a window stays clear of the f16
+            // range at the scaler's starting scale of 2^16.
             let mut d: Vec<f32> = det(n, 0x4000 + (round * world + r) as u32)
                 .into_iter()
                 .map(|v| v * 0.01)
@@ -335,7 +438,9 @@ fn run_f16_world<R: F16Rank>(
             .map(|(t, reduced)| t.apply(reduced))
             .collect();
         let m0 = &metrics[0];
-        assert_eq!(m0.overflow_skipped, Some(!m0.optimizer_stepped));
+        if m0.loss_scale.is_some() {
+            assert_eq!(m0.overflow_skipped, Some(!m0.optimizer_stepped));
+        }
         let bits0 = ranks[0].bits();
         let scale0 = ranks[0].scaler();
         for (r, (t, m)) in ranks.iter().zip(&metrics).enumerate().skip(1) {
@@ -352,9 +457,16 @@ fn run_f16_world<R: F16Rank>(
     (ranks[0].bits(), closed)
 }
 
-fn f16_m1_ranks(world: usize, seq_len: usize) -> Vec<MambaGpuTrainer> {
+const D_MODEL: usize = 32;
+
+/// The f16 ranks' starting loss scale: 2^10 keeps a clean window's
+/// gradients in f16's range at these shapes, so an overflow comes only from
+/// the round that is made to overflow. No effect in the other precisions.
+const F16_START_SCALE: f32 = 1024.0;
+
+fn m1_ranks(world: usize, seq_len: usize, dtype: WeightDtype) -> Vec<MambaGpuTrainer> {
     let c = MambaConfig {
-        d_model: 32,
+        d_model: D_MODEL,
         n_layers: 2,
         d_state: 8,
         d_conv: 4,
@@ -362,50 +474,137 @@ fn f16_m1_ranks(world: usize, seq_len: usize) -> Vec<MambaGpuTrainer> {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
     };
-    let mut w = MambaWeights::init(&c, c.d_model, 0xC0FFEE);
-    w.input_proj_w.clear();
-    w.input_proj_b.clear();
+    let w = MambaWeights::init(&c, D_MODEL, 0xC0FFEE);
     (0..world)
         .map(|_| {
             let mut t = MambaGpuTrainer::new(
                 &w,
                 c,
-                TrainSessionCfg::new(c.d_model, 1, seq_len),
-                GpuOptions::default().dtype(WeightDtype::F16),
+                TrainSessionCfg::new(D_MODEL, 1, seq_len),
+                GpuOptions::default().dtype(dtype),
             )
             .unwrap();
-            // 2^10 keeps a clean window's gradients in f16's range at
-            // these shapes, so only the round made to overflow does.
-            t.load_scaler_state(1024.0, 0);
+            t.load_scaler_state(F16_START_SCALE, 0);
             t
         })
         .collect()
 }
 
-fn f16_siso_ranks(world: usize, seq_len: usize) -> Vec<Mamba3GpuTrainer> {
+fn siso_ranks(world: usize, seq_len: usize, dtype: WeightDtype) -> Vec<Mamba3GpuTrainer> {
     let c = cfg();
-    let mut w = Mamba3Weights::init(&c, c.d_model, 0xC0FFEE);
-    w.input_proj_w.clear();
-    w.input_proj_b.clear();
+    let w = Mamba3Weights::init(&c, D_MODEL, 0xC0FFEE);
     (0..world)
         .map(|_| {
             let mut t = Mamba3GpuTrainer::new(
                 &w,
                 c,
-                TrainSessionCfg::new(c.d_model, 1, seq_len),
-                GpuOptions::default().dtype(WeightDtype::F16),
+                TrainSessionCfg::new(D_MODEL, 1, seq_len),
+                GpuOptions::default().dtype(dtype),
             )
             .unwrap();
-            // 2^10 keeps a clean window's gradients in f16's range at
-            // these shapes, so only the round made to overflow does.
-            t.load_scaler_state(1024.0, 0);
+            t.load_scaler_state(F16_START_SCALE, 0);
             t
         })
         .collect()
 }
 
-/// One family's f16 world, rank 1 overflowing in the round given.
-type Run = Box<dyn Fn(Option<(usize, usize)>) -> (Vec<u32>, Vec<Round>)>;
+fn m2_ranks(world: usize, seq_len: usize, dtype: WeightDtype) -> Vec<Mamba2GpuTrainer> {
+    let c = Mamba2Config {
+        d_model: D_MODEL,
+        d_state: 16,
+        headdim: 16,
+        n_layers: 2,
+        ..Mamba2Config::default()
+    };
+    let w = Mamba2Weights::init(&c, D_MODEL, 0xC0FFEE);
+    (0..world)
+        .map(|_| {
+            let mut t = Mamba2GpuTrainer::new(
+                &w,
+                c,
+                TrainSessionCfg::new(D_MODEL, 1, seq_len),
+                GpuOptions::default().dtype(dtype),
+            )
+            .unwrap();
+            t.load_scaler_state(F16_START_SCALE, 0);
+            t
+        })
+        .collect()
+}
+
+fn mimo_ranks(world: usize, seq_len: usize, dtype: WeightDtype) -> Vec<Mamba3MimoGpuTrainer> {
+    let c = Mamba3MimoConfig {
+        d_model: D_MODEL,
+        d_state: 16,
+        headdim: 16,
+        n_layers: 2,
+        ..Mamba3MimoConfig::default()
+    };
+    let w = Mamba3MimoWeights::init(&c, D_MODEL, 0xC0FFEE);
+    (0..world)
+        .map(|_| {
+            let mut t = Mamba3MimoGpuTrainer::new(
+                &w,
+                c,
+                TrainSessionCfg::new(D_MODEL, 1, seq_len),
+                GpuOptions::default().dtype(dtype),
+            )
+            .unwrap();
+            t.load_scaler_state(F16_START_SCALE, 0);
+            t
+        })
+        .collect()
+}
+
+type World = Box<dyn Fn(WeightDtype, Option<(usize, usize)>) -> (Vec<u32>, Vec<Round>)>;
+
+/// A world of two ranks on 16-step windows for three rounds, per family.
+fn worlds() -> [(&'static str, World); 4] {
+    let (world, seq_len, rounds) = (2usize, 16usize, 3usize);
+    let n = seq_len * D_MODEL;
+    [
+        (
+            "Mamba-1",
+            Box::new(move |dtype, blow| {
+                run_world(m1_ranks(world, seq_len, dtype), n, rounds, blow)
+            }),
+        ),
+        (
+            "SISO",
+            Box::new(move |dtype, blow| {
+                run_world(siso_ranks(world, seq_len, dtype), n, rounds, blow)
+            }),
+        ),
+        (
+            "Mamba-2",
+            Box::new(move |dtype, blow| {
+                run_world(m2_ranks(world, seq_len, dtype), n, rounds, blow)
+            }),
+        ),
+        (
+            "MIMO",
+            Box::new(move |dtype, blow| {
+                run_world(mimo_ranks(world, seq_len, dtype), n, rounds, blow)
+            }),
+        ),
+    ]
+}
+
+/// Every family keeps its ranks on one replica through the split seam
+/// (accumulate, reduce, apply) and replays bit for bit.
+#[test]
+fn emulated_ddp_keeps_every_family_on_one_replica() {
+    for (family, run) in &worlds() {
+        for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+            let (bits, rounds) = run(dtype, None);
+            assert!(
+                rounds.iter().all(|r| r.0),
+                "{family} {dtype:?}: a window skipped"
+            );
+            assert_eq!(run(dtype, None).0, bits, "{family} {dtype:?}: replay");
+        }
+    }
+}
 
 /// f16 data parallelism reduces the loss-scaled gradients, so an
 /// overflow on one rank reaches every rank's arena as inf or NaN: every
@@ -414,26 +613,18 @@ type Run = Box<dyn Fn(Option<(usize, usize)>) -> (Vec<u32>, Vec<Round>)>;
 /// A clean world replays bit for bit.
 #[test]
 fn emulated_ddp_in_f16_takes_one_overflow_decision_on_every_rank() {
-    let (world, seq_len, rounds) = (2usize, 16usize, 3usize);
-    let n = seq_len * 32;
-    let runs: [(&str, Run); 2] = [
-        (
-            "Mamba-1",
-            Box::new(move |blow| run_f16_world(f16_m1_ranks(world, seq_len), n, rounds, blow)),
-        ),
-        (
-            "SISO",
-            Box::new(move |blow| run_f16_world(f16_siso_ranks(world, seq_len), n, rounds, blow)),
-        ),
-    ];
-    for (family, run) in &runs {
-        let (clean, clean_rounds) = run(None);
+    for (family, run) in &worlds() {
+        let (clean, clean_rounds) = run(WeightDtype::F16, None);
         assert!(
             clean_rounds.iter().all(|r| r.0),
             "{family}: a clean window skipped"
         );
-        assert_eq!(run(None).0, clean, "{family}: a clean f16 world replays");
-        let (_, blown) = run(Some((1, 1)));
+        assert_eq!(
+            run(WeightDtype::F16, None).0,
+            clean,
+            "{family}: a clean f16 world replays"
+        );
+        let (_, blown) = run(WeightDtype::F16, Some((1, 1)));
         assert!(
             blown[0].0 && !blown[1].0 && blown[2].0,
             "{family}: {blown:?}"

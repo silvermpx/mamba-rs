@@ -14,7 +14,7 @@ use cudarc::driver::CudaStream;
 
 use super::buffers::{GpuBuffer, GpuByteBuffer};
 use super::context::GpuCtx;
-use super::grad_clip::{alloc_partials, clip_grads_device};
+use super::grad_clip::{GradRegionGeom, alloc_partials, clip_grads_device, clip_region_device};
 use super::launch::launch_elems;
 use crate::mamba1::gpu::trainer::BackwardOpts;
 
@@ -45,7 +45,8 @@ impl GradWindow {
     }
 
     /// Add the gradient of an accumulating call to the window, and whether
-    /// it overflowed the f16 loss scale.
+    /// it overflowed the f16 loss scale; an overflowed call also marks the
+    /// sum with a NaN (see [`poison`]).
     pub(crate) fn accumulate(
         &mut self,
         ctx: &GpuCtx,
@@ -58,12 +59,15 @@ impl GradWindow {
             None => self.sum.insert(GpuBuffer::zeros(&ctx.stream, grads.len())?),
         };
         if self.open {
-            add_into(ctx, sum, grads)
+            add_into(ctx, sum, grads)?;
         } else {
             sum.copy_from(grads, &ctx.stream)?;
             self.open = true;
-            Ok(())
         }
+        if overflowed {
+            poison(ctx, sum)?;
+        }
+        Ok(())
     }
 
     /// Add the open window's sum to the gradient of the applying call,
@@ -86,6 +90,64 @@ impl GradWindow {
         Ok(overflowed)
     }
 
+    /// The sum of the open window, which a data-parallel caller reduces
+    /// across ranks before the applying call.
+    pub(crate) fn sum(&self) -> Result<&GpuBuffer, String> {
+        match &self.sum {
+            Some(sum) if self.open => Ok(sum),
+            _ => Err("no open accumulation window: accumulate a micro-batch first".into()),
+        }
+    }
+
+    /// The sum of the open window, to overwrite or rescale in place.
+    pub(crate) fn sum_mut(&mut self) -> Result<&mut GpuBuffer, String> {
+        match &mut self.sum {
+            Some(sum) if self.open => Ok(sum),
+            _ => Err("no open accumulation window: accumulate a micro-batch first".into()),
+        }
+    }
+
+    /// Copy the open window's sum into `grads`, close the window, and
+    /// return whether any of its micro-batches overflowed the f16 loss
+    /// scale. An error when no window is open.
+    pub(crate) fn take_into(
+        &mut self,
+        ctx: &GpuCtx,
+        grads: &mut GpuBuffer,
+    ) -> Result<bool, String> {
+        let sum = self.sum()?;
+        if sum.len() != grads.len() {
+            return Err(format!(
+                "gradient window: {} values against an arena of {}",
+                sum.len(),
+                grads.len()
+            ));
+        }
+        grads.copy_from(sum, &ctx.stream)?;
+        self.open = false;
+        Ok(std::mem::take(&mut self.overflowed))
+    }
+
+    /// Scale the region `geom` of `grads` to its own L2 norm `max_norm`
+    /// when it is larger, with the fixed-order f64 reduction the global
+    /// clip uses, and return the region's norm before the clip.
+    pub(crate) fn clip_region(
+        &mut self,
+        ctx: &GpuCtx,
+        grads: &mut GpuBuffer,
+        geom: GradRegionGeom,
+        max_norm: f32,
+    ) -> Result<f32, String> {
+        clip_region_device(
+            ctx,
+            grads,
+            &mut self.partials,
+            &mut self.coef,
+            geom,
+            max_norm,
+        )
+    }
+
     /// Scale `grads` to the global L2 norm `max_norm` when it is larger,
     /// with the fixed-order f64 reduction, and return the norm before the
     /// clip. A non-finite norm is an error.
@@ -103,6 +165,29 @@ impl GradWindow {
         }
         Ok(norm)
     }
+}
+
+/// Write a NaN into the first element of a window's sum. The unscale of an
+/// overflowed micro-batch zeroes its gradients, so the sum alone would not
+/// show the overflow; the NaN survives any sum it enters, so every rank of
+/// a data-parallel world that reduces this window with its own sees the
+/// overflow in the reduced arena and skips the same window.
+fn poison(ctx: &GpuCtx, sum: &mut GpuBuffer) -> Result<(), String> {
+    if sum.is_empty() {
+        return Ok(());
+    }
+    let r = unsafe {
+        cudarc::driver::sys::cuMemsetD32Async(
+            sum.cached_ptr(),
+            f32::NAN.to_bits(),
+            1,
+            ctx.stream.cu_stream(),
+        )
+    };
+    if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("gradient window overflow mark: {r:?}"));
+    }
+    Ok(())
 }
 
 /// `dst += src`, element by element.
@@ -123,22 +208,18 @@ fn add_into(ctx: &GpuCtx, dst: &mut GpuBuffer, src: &GpuBuffer) -> Result<(), St
     )
 }
 
-/// The backward options these trainers refuse: a clip on an accumulating
-/// call (the norm is the whole window's), and a control-channel clip on a
-/// family whose control columns it does not clip yet.
-pub(crate) fn check_backward_opts(
-    opts: &BackwardOpts,
-    family: &str,
-    clips_control: bool,
-) -> Result<(), String> {
+/// The backward options every trainer refuses: a clip of either kind on
+/// an accumulating call, since the norm is the whole window's.
+pub(crate) fn check_backward_opts(opts: &BackwardOpts, family: &str) -> Result<(), String> {
     if opts.accumulate_only && opts.clip_max_norm.is_some() {
         return Err(format!(
             "{family}: clip on the applying call; the norm is the whole window's"
         ));
     }
-    if opts.control_clip_max_norm.is_some() && !clips_control {
+    if opts.accumulate_only && opts.control_clip_max_norm.is_some() {
         return Err(format!(
-            "{family}: the control-channel clip is not implemented for this trainer"
+            "{family}: control-channel clip on the applying call; the norm is the \
+             whole window's"
         ));
     }
     Ok(())

@@ -117,6 +117,32 @@ impl Trainer {
         }
     }
 
+    /// A micro-batch joins the open window.
+    fn accumulate(&mut self, d: &[f32]) {
+        let m = self
+            .as_trainer()
+            .backward_step(d, BackwardOpts::default().with_accumulate_only(true))
+            .unwrap();
+        assert!(!m.optimizer_stepped);
+    }
+
+    /// The open window's gradient, read and written back through the
+    /// split seam, then the optimizer tail alone.
+    fn round_trip_then_apply(&mut self) -> mamba_rs::BackwardMetrics {
+        match self {
+            Self::M2(t) => {
+                let arena = t.grad_arena().unwrap().to_cpu(&t.ctx().stream).unwrap();
+                t.upload_grad_arena(&arena).unwrap();
+                t.apply_step(None).unwrap()
+            }
+            Self::Mimo(t) => {
+                let arena = t.grad_arena().unwrap().to_cpu(&t.ctx().stream).unwrap();
+                t.upload_grad_arena(&arena).unwrap();
+                t.apply_step(None).unwrap()
+            }
+        }
+    }
+
     /// The gradient arena, flattened.
     fn grads(&self) -> Vec<f32> {
         match self {
@@ -366,6 +392,51 @@ fn accumulation_window_steps_on_the_sum_of_its_micro_batches() {
             refused.is_err(),
             "{family:?}: a clip on an accumulating call"
         );
+    }
+}
+
+/// The split seam: a window whose last micro-batch only accumulates and
+/// whose optimizer tail runs alone through `apply_step` steps on the bits
+/// an applying `backward_step` gives, in every precision; its arena reads
+/// out and uploads back unchanged on the way. Without an open window
+/// there is no arena and nothing to apply.
+#[test]
+fn apply_step_closes_a_window_as_an_applying_backward_does() {
+    let (input, d) = window();
+    for family in [Family::Mamba2, Family::Mimo] {
+        for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+            let mut applying = Trainer::new(family, dtype);
+            forward(&mut applying, &input);
+            applying.accumulate(&d);
+            forward(&mut applying, &input);
+            let a = applying
+                .as_trainer()
+                .backward_step(&d, BackwardOpts::default())
+                .unwrap();
+
+            let mut split = Trainer::new(family, dtype);
+            forward(&mut split, &input);
+            split.accumulate(&d);
+            forward(&mut split, &input);
+            split.accumulate(&d);
+            let m = split.round_trip_then_apply();
+            assert!(m.optimizer_stepped && m.step == 1, "{family:?} {dtype:?}");
+            assert_eq!(
+                (m.loss_scale, m.overflow_skipped),
+                (a.loss_scale, a.overflow_skipped),
+                "{family:?} {dtype:?}"
+            );
+            assert_eq!(split.master(), applying.master(), "{family:?} {dtype:?}");
+            let closed = match &mut split {
+                Trainer::M2(t) => (t.grad_arena().is_err(), t.apply_step(None).is_err()),
+                Trainer::Mimo(t) => (t.grad_arena().is_err(), t.apply_step(None).is_err()),
+            };
+            assert_eq!(
+                closed,
+                (true, true),
+                "{family:?} {dtype:?}: a closed window"
+            );
+        }
     }
 }
 

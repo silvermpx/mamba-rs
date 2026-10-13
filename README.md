@@ -47,7 +47,7 @@ underneath. The GPU path links only the CUDA driver API and cuBLAS.
 - f32, tf32, bf16 and f16 storage through one `WeightDtype`. Every kernel
   accumulates in f32.
 - Three GEMM modes, deterministic by default. See below.
-- Deterministic data-parallel training over NCCL for Mamba and SISO, with
+- Deterministic data-parallel training over NCCL for every family, with
   one reduction per optimizer step in a fixed order.
 - Bit-continuous resume for Mamba and SISO: the optimizer state and the
   carried recurrence export and import.
@@ -199,9 +199,10 @@ and driven the same way, and the `GpuTrainer` trait names what they share.
 (`with_accumulate_only`). f16 training runs a dynamic loss scaler whose
 scale holds for a whole accumulation window; an overflow in any
 micro-batch skips the window, and the metrics report the scale and the
-skipped steps. The Mamba and SISO trainers
-also capture the whole step as one CUDA graph (`capture_graph`), train
-data-parallel (`backward_step_dist`) and export their optimizer state.
+skipped steps. Every trainer trains data-parallel (`backward_step_dist`,
+or `backward_step`, `grad_arena` and `apply_step` around a reducer of the
+caller's own), and the Mamba and SISO trainers also capture the whole step
+as one CUDA graph (`capture_graph`) and export their optimizer state.
 `examples/custom_loss.rs` is a complete training loop.
 
 ## Checkpoints
@@ -354,9 +355,8 @@ For contributors:
   the data-parallel training that ships now.
 - Reduced-precision tiers (fp8, int8) under the same bit discipline as the
   f32, tf32, bf16 and f16 paths.
-- Graph capture of the training step, data-parallel training and optimizer
-  state export for the Mamba-2 and MIMO trainers, which the Mamba and SISO
-  trainers have now.
+- Graph capture of the training step and optimizer state export for the
+  Mamba-2 and MIMO trainers, which the Mamba and SISO trainers have now.
 
 ## Citation
 
