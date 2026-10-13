@@ -34,6 +34,7 @@ fn cfg() -> MambaConfig {
         n_layers: 2,
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     }
 }
 

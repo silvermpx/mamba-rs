@@ -29,6 +29,9 @@ pub struct MambaDims {
     /// RMSNorm epsilon (layer norms + norm_f). 1e-5 unless the checkpoint
     /// specifies otherwise (FalconMamba: 1e-6).
     pub rms_norm_eps: f32,
+    /// FalconMamba's dt, B and C norm epsilon, `None` for Mamba-1 (see
+    /// [`MambaConfig::bcdt_rms_eps`]).
+    pub bcdt_rms_eps: Option<f32>,
 }
 
 impl MambaDims {
@@ -59,6 +62,7 @@ impl MambaDims {
             mamba_input_dim,
             n_layers,
             rms_norm_eps: crate::ops::fast_math::RMS_NORM_EPS,
+            bcdt_rms_eps: None,
         }
     }
 
@@ -75,6 +79,7 @@ impl MambaDims {
             config.n_layers,
         ));
         dims.rms_norm_eps = config.rms_norm_eps;
+        dims.bcdt_rms_eps = config.bcdt_rms_eps;
         dims
     }
 }

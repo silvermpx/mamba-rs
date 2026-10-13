@@ -57,6 +57,7 @@ fn run_route(mode: ScanMode, dtype: WeightDtype, seq_len: usize) -> (Vec<f32>, V
         expand: 2,
         scan_mode: mode,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let mut w = MambaWeights::init(&cfg, cfg.d_model, 0xC0FFEE);
     for lw in w.layers.iter_mut() {
@@ -77,6 +78,7 @@ fn run_route(mode: ScanMode, dtype: WeightDtype, seq_len: usize) -> (Vec<f32>, V
         n_layers: nl,
         scan_mode: cfg.scan_mode,
         rms_norm_eps: cfg.rms_norm_eps,
+        bcdt_rms_eps: None,
     };
     let device = GpuDevice::new(0).expect("device");
     let ctx = GpuCtx::new(&device).expect("ctx");
@@ -172,6 +174,7 @@ fn mixed_prefill_full_rows_end_in_the_last_rows() {
                 expand: 2,
                 scan_mode: ScanMode::Auto,
                 rms_norm_eps: 1e-5,
+                bcdt_rms_eps: None,
             };
             let mut w = MambaWeights::init(&cfg, cfg.d_model, 0xC0FFEE);
             for lw in w.layers.iter_mut() {
@@ -192,6 +195,7 @@ fn mixed_prefill_full_rows_end_in_the_last_rows() {
                 n_layers: nl,
                 scan_mode: cfg.scan_mode,
                 rms_norm_eps: cfg.rms_norm_eps,
+                bcdt_rms_eps: None,
             };
             let device = GpuDevice::new(0).expect("device");
             let ctx = GpuCtx::new(&device).expect("ctx");

@@ -169,7 +169,7 @@ fn m1_identity_input_trains_on_the_cpu_like_an_explicit_identity() {
             &train_weights(w),
             &mut scratch,
             (dm, di, ds, dc, cfg.dt_rank(), dm),
-            cfg.rms_norm_eps,
+            (cfg.rms_norm_eps, cfg.bcdt_rms_eps),
         );
         outs.push(bits(&out));
     }

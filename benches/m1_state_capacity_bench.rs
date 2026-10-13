@@ -36,6 +36,7 @@ fn m1_step_cost_across_state_capacities() {
             expand: 2,
             scan_mode: mamba_rs::config::ScanMode::Sequential,
             rms_norm_eps: 1e-5,
+            bcdt_rms_eps: None,
         };
         let input_dim = cfg.d_model;
         let cpu_bb = MambaBackbone::init(cfg, input_dim, 42);

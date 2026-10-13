@@ -25,6 +25,7 @@ use super::scratch::BackwardPhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::fast_exp_scalar;
+use crate::ops::norms::bcdt_rms_norm_backward;
 use crate::ops::rounding::{store, stored};
 
 /// `v` at least `n` long, grown once and reused after.
@@ -252,6 +253,13 @@ pub fn backward_mamba_layer_batched(
         let dt_off = t * dt_rank;
         for i in 0..dt_rank {
             scratch.d_xdbl_flat[xdbl_off + i] += scratch.d_dt_input_flat[dt_off + i];
+        }
+    }
+    // FalconMamba's norms take the gradient back through to the raw row.
+    if dims.bcdt_rms_eps.is_some() {
+        for t in 0..seq_len {
+            let d_row = &mut scratch.d_xdbl_flat[t * xdbl_dim..(t + 1) * xdbl_dim];
+            bcdt_rms_norm_backward(d_row, acts.xdbl(t), (dt_rank, ds), acts.bcdt_rstd(t));
         }
     }
     // Every term of d_xdbl is in: a half lane stores the row once.

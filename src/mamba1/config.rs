@@ -33,6 +33,12 @@ pub struct MambaConfig {
     /// Default 1e-5 (state-spaces/mamba). FalconMamba checkpoints use 1e-6 —
     /// the HF loader plumbs the checkpoint's value through here.
     pub rms_norm_eps: f32,
+
+    /// FalconMamba's mixer norms: the dt, B and C parts of every x_proj row
+    /// each divided by its root mean square, `v / sqrt(mean(v^2) + eps)`,
+    /// with no weight, before dt_proj and the scan read them. `None` is
+    /// Mamba-1; FalconMamba checkpoints carry 1e-6 (`mixer_rms_eps`).
+    pub bcdt_rms_eps: Option<f32>,
 }
 
 impl MambaConfig {
@@ -105,6 +111,11 @@ impl MambaConfig {
                 self.rms_norm_eps
             ));
         }
+        if let Some(eps) = self.bcdt_rms_eps
+            && (!eps.is_finite() || eps <= 0.0)
+        {
+            return Err(format!("bcdt_rms_eps must be positive, got {eps}"));
+        }
         envelope::check_param_bytes(self.layer_params(), self.n_layers)
     }
 
@@ -142,6 +153,7 @@ impl Default for MambaConfig {
             n_layers: 3,
             scan_mode: ScanMode::Auto,
             rms_norm_eps: crate::ops::fast_math::RMS_NORM_EPS,
+            bcdt_rms_eps: None,
         }
     }
 }

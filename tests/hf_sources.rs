@@ -755,3 +755,26 @@ fn mamba2_transformers_layout_loads_as_its_original_twin() {
     write_safetensors(&c_dir.join("model.safetensors"), &c_ts);
     assert!(load_hf_mamba2(&c_dir).unwrap().lm_head.is_none());
 }
+
+/// A FalconMamba checkpoint (transformers layout, `model_type`
+/// `falcon_mamba`, an untied head) loads as Mamba-1 with its mixer norms.
+#[test]
+fn falcon_mamba_loads_with_its_mixer_norms() {
+    let dir = scratch("falcon");
+    let mut ts = mamba1_tensors("backbone.embeddings.weight", Dtype::BF16);
+    ts.push(Tensor::new("lm_head.weight", &[32, 16], Dtype::BF16, 7));
+    write_safetensors(&dir.join("model.safetensors"), &refs(&ts));
+    std::fs::write(
+        dir.join("config.json"),
+        br#"{"model_type": "falcon_mamba", "hidden_size": 16, "num_hidden_layers": 2,
+            "state_size": 4, "conv_kernel": 4, "expand": 16, "intermediate_size": 32,
+            "time_step_rank": 1, "vocab_size": 32, "use_bias": false, "use_conv_bias": true,
+            "layer_norm_epsilon": 1e-5, "mixer_rms_eps": 1e-6, "tie_word_embeddings": false}"#,
+    )
+    .unwrap();
+    let m = load_hf(&dir).unwrap();
+    let cfg = m.backbone.config();
+    assert_eq!(cfg.bcdt_rms_eps, Some(1e-6));
+    assert_eq!((cfg.expand, cfg.rms_norm_eps), (2, 1e-5));
+    assert!(m.lm_head.is_some());
+}

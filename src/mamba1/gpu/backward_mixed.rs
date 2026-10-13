@@ -57,6 +57,7 @@
 use super::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaLayerMixedActs, GpuMambaMixedTrainScratch,
 };
+use super::mixer_norms::{NormBackward, launch_pack_xdbl_norm_bwd};
 use super::weights::{
     GpuMambaGrads, GpuMambaLayerGrads, GpuMambaMixedLayerWeights, GpuMambaMixedWeights,
 };
@@ -555,7 +556,23 @@ pub fn gpu_backward_mamba_layer_mixed(
         unsafe { bld.launch(cfg) }.map_err(|e| format!("reduce_bias dt_proj: {e:?}"))?;
     }
     // One-kernel typed d_xdbl assembly: dt | B | C ranges tile the row.
-    {
+    // With FalconMamba's norms the assembly takes the gradient back through
+    // them and stores it once.
+    if dims.bcdt_rms_eps.is_some() {
+        launch_pack_xdbl_norm_bwd(
+            ctx,
+            &NormBackward {
+                dst: scratch.d_xdbl.cached_ptr(),
+                dt_src: scratch.d_dt_input.cached_ptr(),
+                b_src: scratch.d_b_reduced.cached_ptr(),
+                c_src: scratch.d_c_reduced.cached_ptr(),
+                y: acts.xdbl.cached_ptr(),
+                rstd: acts.bcdt_rstd.cached_ptr(),
+            },
+            dtype,
+            (bt, dt_rank, ds),
+        )?;
+    } else {
         let bt_i = bt as i32;
         let dt_i = dt_rank as i32;
         let ds_i = ds as i32;

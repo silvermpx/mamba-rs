@@ -15,6 +15,7 @@ pub(crate) mod conv;
 pub mod forward;
 pub mod forward_mixed;
 pub mod inference;
+pub(crate) mod mixer_norms;
 pub mod prefill;
 pub mod trainer;
 pub mod training_graph;

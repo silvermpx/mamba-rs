@@ -19,6 +19,7 @@
 use super::backward::{GpuMambaTargetMixedScratch, GpuMambaTargetScratch};
 use super::forward::GpuMambaDims;
 use super::inference::MambaGpuState;
+use super::mixer_norms::launch_bcdt_norm;
 use super::weights::{MambaLayerWeightsView, MambaWeightsView};
 use crate::gpu::blas::{TypedPtr, gpu_gemm_forward_dispatch, gpu_gemm_typed_forward_raw};
 use crate::gpu::buffers::GpuBuffer;
@@ -643,7 +644,8 @@ fn prefill_body<W: MambaWeightsView>(
             format_args!("prefill L{layer_idx}"),
         )?;
 
-        // F4b: x_proj GEMM [B*T, di] → [B*T, xdbl_dim]
+        // F4b: x_proj GEMM [B*T, di] → [B*T, xdbl_dim], and FalconMamba's
+        // dt, B and C norms.
         let (xpw, xpw_dt) = lw.x_proj_w();
         gpu_gemm_forward_dispatch(
             ctx,
@@ -654,6 +656,15 @@ fn prefill_body<W: MambaWeightsView>(
             None,
             (bt, di, xdbl_dim),
         )?;
+        if let Some(eps) = dims.bcdt_rms_eps {
+            launch_bcdt_norm(
+                ctx,
+                (scratch.xdbl.cached_ptr(), 0),
+                WeightDtype::F32,
+                (bt, dt_rank, ds),
+                eps,
+            )?;
+        }
 
         // F4c: gather dt + dt_proj + softplus
         {
@@ -1179,7 +1190,7 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
             format_args!("prefill L{layer_idx}"),
         )?;
 
-        // F4b: x_proj GEMM typed.
+        // F4b: x_proj GEMM typed, and FalconMamba's dt, B and C norms.
         let (xpw, xpw_dt) = lw.x_proj_w();
         gpu_gemm_typed_forward_raw(
             ctx,
@@ -1198,6 +1209,15 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
             None,
             (bt, di, xdbl_dim),
         )?;
+        if let Some(eps) = dims.bcdt_rms_eps {
+            launch_bcdt_norm(
+                ctx,
+                (scratch.xdbl.cached_ptr(), 0),
+                dt,
+                (bt, dt_rank, ds),
+                eps,
+            )?;
+        }
 
         // F4c: gather_cols typed + dt_proj GEMM typed + softplus typed.
         {

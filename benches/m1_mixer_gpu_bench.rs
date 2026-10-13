@@ -79,6 +79,7 @@ fn mixer(scan_mode: ScanMode) -> MambaConfig {
         n_layers: LAYERS,
         scan_mode,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     }
 }
 
@@ -102,6 +103,7 @@ fn prefill_rate(device: &GpuDevice, cfg: MambaConfig, input_dim: usize, b: usize
         n_layers: nl,
         scan_mode: cfg.scan_mode,
         rms_norm_eps: cfg.rms_norm_eps,
+        bcdt_rms_eps: None,
     };
     let ctx = GpuCtx::new_with_state_cap(device, ds).unwrap();
     let weights = GpuMambaWeights::from_cpu(&ctx.stream, &w, &cfg).unwrap();

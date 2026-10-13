@@ -41,6 +41,8 @@ struct RawConfig {
     // architecture's scale. Name mirrors the HF field.
     rms_norm_eps: Option<f32>,
     layer_norm_epsilon: Option<f32>,
+    // FalconMamba's weightless dt, B and C norms inside every mixer.
+    mixer_rms_eps: Option<f32>,
     // The HF format sizes the mixer by `intermediate_size`.
     intermediate_size: Option<usize>,
     // Backbone parts the original format can carry. Each one this build
@@ -84,6 +86,9 @@ pub struct HfMambaConfig {
     /// every norm kernel instead of hardcoding the constant so both
     /// checkpoint families produce numerically correct outputs.
     pub rms_norm_eps: f32,
+    /// FalconMamba's dt, B and C norm epsilon (`mixer_rms_eps`, 1e-6 by
+    /// default); `None` for Mamba-1.
+    pub bcdt_rms_eps: Option<f32>,
 }
 
 /// A `config.json` as Python's `json.dump` writes it, which can hold the
@@ -141,15 +146,9 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
     let raw: RawConfig = config_json(json_bytes)?;
 
     let family = detect_family(&raw)?;
-    if raw.model_type.as_deref() == Some("falcon_mamba") {
-        // FalconMamba RMS-normalises B, C and dt inside every mixer. Read as
-        // plain Mamba-1 it would load and give wrong outputs.
-        return Err(
-            "falcon_mamba checkpoints need the B, C and dt mixer norms, \
-                    which this build does not implement"
-                .into(),
-        );
-    }
+    // FalconMamba is Mamba-1 with RMS norms over dt, B and C in every mixer.
+    let bcdt_rms_eps = (raw.model_type.as_deref() == Some("falcon_mamba"))
+        .then(|| raw.mixer_rms_eps.unwrap_or(1e-6));
     if raw.d_intermediate.is_some_and(|d| d > 0) {
         return Err(
             "config.json: d_intermediate > 0 (an MLP after every mixer) \
@@ -242,6 +241,7 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
         use_bias: raw.use_bias.unwrap_or(false),
         use_conv_bias: raw.use_conv_bias.unwrap_or(true),
         rms_norm_eps,
+        bcdt_rms_eps,
     })
 }
 
@@ -477,12 +477,7 @@ mod tests {
     fn unmodelled_backbone_parts_are_refused() {
         for (json, what) in [
             (
-                &br#"{"model_type":"falcon_mamba","hidden_size":64,"num_hidden_layers":2,
-                "state_size":8,"conv_kernel":4,"vocab_size":100}"#[..],
-                "falcon_mamba",
-            ),
-            (
-                br#"{"d_model":64,"n_layer":2,"vocab_size":100,"d_intermediate":128}"#,
+                &br#"{"d_model":64,"n_layer":2,"vocab_size":100,"d_intermediate":128}"#[..],
                 "d_intermediate",
             ),
             (
@@ -501,6 +496,31 @@ mod tests {
             let err = parse_config_json(json).unwrap_err();
             assert!(err.contains(what), "{what}: {err}");
         }
+    }
+
+    /// FalconMamba is Mamba-1 with the dt, B and C mixer norms: its
+    /// `mixer_rms_eps` (1e-6 when absent) turns them on, its block norms
+    /// keep `layer_norm_epsilon`, and a Mamba-1 config has no mixer norms.
+    #[test]
+    fn falcon_mamba_carries_its_mixer_norms() {
+        let json = br#"{"model_type":"falcon_mamba","hidden_size":64,"num_hidden_layers":2,
+            "state_size":8,"conv_kernel":4,"vocab_size":100,"intermediate_size":128,
+            "expand":16,"time_step_rank":4,"layer_norm_epsilon":1e-5,"mixer_rms_eps":2e-6,
+            "tie_word_embeddings":false}"#;
+        let cfg = parse_config_json(json).unwrap();
+        assert_eq!(cfg.family, ModelFamily::Mamba1);
+        assert_eq!((cfg.expand, cfg.rms_norm_eps), (2, 1e-5));
+        assert_eq!(cfg.bcdt_rms_eps, Some(2e-6));
+        assert!(!cfg.tie_word_embeddings);
+        let default_eps = br#"{"model_type":"falcon_mamba","hidden_size":64,
+            "num_hidden_layers":2,"state_size":8,"conv_kernel":4,"vocab_size":100}"#;
+        assert_eq!(
+            parse_config_json(default_eps).unwrap().bcdt_rms_eps,
+            Some(1e-6)
+        );
+        let mamba = br#"{"model_type":"mamba","hidden_size":64,"num_hidden_layers":2,
+            "state_size":8,"conv_kernel":4,"vocab_size":100,"mixer_rms_eps":2e-6}"#;
+        assert_eq!(parse_config_json(mamba).unwrap().bcdt_rms_eps, None);
     }
 
     #[test]

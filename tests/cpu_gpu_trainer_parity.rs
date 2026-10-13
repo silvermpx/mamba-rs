@@ -38,6 +38,15 @@ fn m1_cfg() -> MambaConfig {
         n_layers: 2,
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
+    }
+}
+
+/// Mamba-1 with FalconMamba's dt, B and C norms.
+fn falcon_cfg() -> MambaConfig {
+    MambaConfig {
+        bcdt_rms_eps: Some(1e-6),
+        ..m1_cfg()
     }
 }
 
@@ -369,6 +378,7 @@ fn half_lanes_track_the_cpu_lane() {
     use mamba_rs::CpuOptions;
     let s = session();
     let m1 = MambaWeights::init(&m1_cfg(), INPUT_DIM, 1);
+    let falcon = MambaWeights::init(&falcon_cfg(), INPUT_DIM, 5);
     let m2 = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 2);
     let siso = Mamba3Weights::init(&siso_cfg(), INPUT_DIM, 3);
     let mimo = Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 4);
@@ -386,6 +396,20 @@ fn half_lanes_track_the_cpu_lane() {
                         .into(),
                 ],
                 MambaGpuTrainer::new(&m1, m1_cfg(), s, gpu_opts)
+                    .unwrap()
+                    .into(),
+            ),
+            (
+                "FalconMamba",
+                [
+                    MambaCpuTrainer::new(&falcon, falcon_cfg(), s)
+                        .unwrap()
+                        .into(),
+                    MambaCpuTrainer::new_with(&falcon, falcon_cfg(), s, lane)
+                        .unwrap()
+                        .into(),
+                ],
+                MambaGpuTrainer::new(&falcon, falcon_cfg(), s, gpu_opts)
                     .unwrap()
                     .into(),
             ),

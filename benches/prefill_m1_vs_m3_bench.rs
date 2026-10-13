@@ -46,6 +46,7 @@ fn m1_vs_m3_prefill_head_to_head() {
             expand: 2,
             scan_mode: mamba_rs::config::ScanMode::Sequential,
             rms_norm_eps: 1e-5,
+            bcdt_rms_eps: None,
         };
         let mut w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
         for lw in w.layers.iter_mut() {

@@ -27,6 +27,7 @@ use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_norm, launch_cast, y_runs};
 use crate::mamba1::gpu::forward::{GpuMambaDims, GpuRecurrentState};
+use crate::mamba1::gpu::mixer_norms::launch_bcdt_norm;
 use crate::mamba1::gpu::weights::GpuMambaMixedWeights;
 use crate::mamba1::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 
@@ -60,6 +61,9 @@ pub struct GpuMambaLayerMixedActs {
     pub y: DtypedBuf,
     /// typed — gated output `y * gate_silu` `[B*T*d_inner]`.
     pub gated: DtypedBuf,
+    /// f32 — FalconMamba's dt, B and C norm scales `[B*T*3]`; empty for
+    /// Mamba-1.
+    pub bcdt_rstd: GpuBuffer,
 }
 
 /// Full Mamba backbone mixed-precision activations.
@@ -126,6 +130,14 @@ impl GpuMambaBackboneMixedActs {
                     delta: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
                     y: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
                     gated: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+                    bcdt_rstd: GpuBuffer::zeros(
+                        stream,
+                        if dims.bcdt_rms_eps.is_some() {
+                            bt * 3
+                        } else {
+                            0
+                        },
+                    )?,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -512,7 +524,8 @@ pub fn gpu_forward_mamba_backbone_mixed(
             format_args!("training L{layer_idx}"),
         )?;
 
-        // F4b: x_proj GEMM typed.
+        // F4b: x_proj GEMM typed, and FalconMamba's dt, B and C norms with
+        // the scales kept for the backward.
         gpu_gemm_typed_forward_raw(
             ctx,
             TypedPtr {
@@ -530,6 +543,18 @@ pub fn gpu_forward_mamba_backbone_mixed(
             None,
             (bt, di, xdbl_dim),
         )?;
+        if let Some(eps) = dims.bcdt_rms_eps {
+            launch_bcdt_norm(
+                ctx,
+                (
+                    layer_acts.xdbl.cached_ptr(),
+                    layer_acts.bcdt_rstd.cached_ptr(),
+                ),
+                dt,
+                (bt, dt_rank, dims.d_state),
+                eps,
+            )?;
+        }
 
         // F4c: gather_cols_typed (dt slice) + dt_proj GEMM typed + softplus_copy_typed.
         {

@@ -210,6 +210,11 @@
   `mamba2`), among them `mistralai/Mamba-Codestral-7B-v0.1`; the
   converted `mamba2-130m-hf` gives the weights of `state-spaces/mamba2-130m`
   bit for bit. Configs that hold Python's bare `Infinity` load.
+- FalconMamba: `MambaConfig::bcdt_rms_eps` turns on the RMS norms over
+  the dt, B and C parts of every x_proj row, on the CPU and the GPU, in
+  inference and training and in every precision. `falcon_mamba`
+  checkpoints load with them (`mixer_rms_eps`), and saved models keep
+  them.
 
 ### Changed
 

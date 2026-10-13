@@ -17,6 +17,7 @@
 //! Source: CPU reference in train/forward.rs
 
 use super::backward::GpuMambaTargetScratch;
+use super::mixer_norms::launch_bcdt_norm;
 use super::weights::{GpuMambaTrainLayerWeights, GpuMambaTrainWeights};
 use crate::gpu::blas::gpu_gemm_bi_forward_raw;
 use crate::gpu::buffers::GpuBuffer;
@@ -78,6 +79,9 @@ pub struct GpuMambaDims {
     /// RMSNorm epsilon (layer norms + norm_f). 1e-5 unless the checkpoint
     /// specifies otherwise (FalconMamba: 1e-6).
     pub rms_norm_eps: f32,
+    /// FalconMamba's dt, B and C norm epsilon, `None` for Mamba-1 (see
+    /// [`crate::MambaConfig::bcdt_rms_eps`]).
+    pub bcdt_rms_eps: Option<f32>,
 }
 
 impl GpuMambaDims {
@@ -182,6 +186,8 @@ pub struct GpuMambaLayerActs {
     // -- F4e: Gating --
     /// Gated output `y * gate_silu` `[B*T*d_inner]`.
     pub gated: GpuBuffer,
+    /// FalconMamba's dt, B and C norm scales `[B*T*3]`; empty for Mamba-1.
+    pub bcdt_rstd: GpuBuffer,
 }
 
 /// Full Mamba backbone activations on GPU.
@@ -246,6 +252,14 @@ impl GpuMambaBackboneActs {
                     y: GpuBuffer::zeros(stream, bt * d_inner)?,
                     // F4e: Gating
                     gated: GpuBuffer::zeros(stream, bt * d_inner)?,
+                    bcdt_rstd: GpuBuffer::zeros(
+                        stream,
+                        if dims.bcdt_rms_eps.is_some() {
+                            bt * 3
+                        } else {
+                            0
+                        },
+                    )?,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -528,6 +542,16 @@ pub fn gpu_forward_mamba_layer(
         None,
         (bt, di, xdbl_dim),
     )?;
+    // FalconMamba's dt, B and C norms, the scales kept for the backward.
+    if let Some(eps) = dims.bcdt_rms_eps {
+        launch_bcdt_norm(
+            ctx,
+            (acts.xdbl.cached_ptr(), acts.bcdt_rstd.cached_ptr()),
+            crate::gpu::dtype::WeightDtype::F32,
+            (bt, dims.dt_rank, dims.d_state),
+            eps,
+        )?;
+    }
 
     // ===================================================================
     // F4c: dt_proj + softplus
@@ -1010,7 +1034,8 @@ pub fn gpu_forward_mamba_target_burnin(
             format_args!("target L{layer_idx}"),
         )?;
 
-        // === F4b: x_proj SGEMM [B*T, di] -> [B*T, xdbl_dim] ===
+        // === F4b: x_proj SGEMM [B*T, di] -> [B*T, xdbl_dim], and
+        // FalconMamba's dt, B and C norms ===
         gpu_gemm_bi_forward_raw(
             ctx,
             &mut scratch.xdbl,
@@ -1019,6 +1044,15 @@ pub fn gpu_forward_mamba_target_burnin(
             None,
             (bt, di, xdbl_dim),
         )?;
+        if let Some(eps) = dims.bcdt_rms_eps {
+            launch_bcdt_norm(
+                ctx,
+                (scratch.xdbl.cached_ptr(), 0),
+                crate::gpu::dtype::WeightDtype::F32,
+                (bt, dims.dt_rank, dims.d_state),
+                eps,
+            )?;
+        }
 
         // === F4c: gather dt + dt_proj + softplus ===
         {

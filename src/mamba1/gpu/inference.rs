@@ -6,6 +6,7 @@
 //! All 12 existing CUDA kernels are reused — zero new kernel code needed.
 
 use super::forward::GpuMambaDims;
+use super::mixer_norms::launch_bcdt_norm;
 use super::weights::{
     GpuMambaMixedWeights, GpuMambaWeights, MambaLayerWeightsView, MambaWeightsView,
 };
@@ -52,6 +53,7 @@ mod model_gemm_manifest_tests {
             expand: 2,
             scan_mode: ScanMode::Sequential,
             rms_norm_eps: 1e-5,
+            bcdt_rms_eps: None,
         }
     }
 
@@ -854,6 +856,7 @@ impl MambaGpuEngine {
             mamba_input_dim: self.input_dim,
             scan_mode: self.cfg.scan_mode,
             rms_norm_eps: self.cfg.rms_norm_eps,
+            bcdt_rms_eps: self.cfg.bcdt_rms_eps,
         }
     }
 
@@ -1353,7 +1356,8 @@ impl MambaGpuEngine {
                     .map_err(|e| format!("conv1d_step+silu L{layer_idx}: {e:?}"))?;
             }
 
-            // F5: x_proj GEMM [B, d_inner] → [B, xdbl_dim]
+            // F5: x_proj GEMM [B, d_inner] → [B, xdbl_dim], and
+            // FalconMamba's dt, B and C norms.
             let (xpw, xpw_dt) = lw.x_proj_w();
             gpu_gemm_forward_dispatch(
                 &self.ctx,
@@ -1364,6 +1368,15 @@ impl MambaGpuEngine {
                 None,
                 (b, di, xdbl_dim),
             )?;
+            if let Some(eps) = cfg.bcdt_rms_eps {
+                launch_bcdt_norm(
+                    &self.ctx,
+                    (scratch.xdbl.cached_ptr(), 0),
+                    WeightDtype::F32,
+                    (b, dt_rank, ds),
+                    eps,
+                )?;
+            }
 
             // F6: gather dt from xdbl
             {
@@ -1997,7 +2010,8 @@ impl MambaGpuEngineMixed {
                     .map_err(|e| format!("conv1d_step+silu L{layer_idx}: {e:?}"))?;
             }
 
-            // F5: x_proj GEMM (bf16 everywhere).
+            // F5: x_proj GEMM (bf16 everywhere), and FalconMamba's dt, B
+            // and C norms.
             let (xpw, xpw_dt) = lw.x_proj_w();
             gpu_gemm_typed_forward_raw(
                 &engine.ctx,
@@ -2016,6 +2030,15 @@ impl MambaGpuEngineMixed {
                 None,
                 (b, di, xdbl_dim),
             )?;
+            if let Some(eps) = cfg.bcdt_rms_eps {
+                launch_bcdt_norm(
+                    &engine.ctx,
+                    (scratch.xdbl.cached_ptr(), 0),
+                    dt,
+                    (b, dt_rank, ds),
+                    eps,
+                )?;
+            }
 
             // F6: gather_cols typed — dt slice of xdbl into dt_gather (bf16).
             {
@@ -3153,6 +3176,7 @@ impl MambaGpuBackbone {
             mamba_input_dim: cfg.d_model,
             scan_mode: cfg.scan_mode,
             rms_norm_eps: cfg.rms_norm_eps,
+            bcdt_rms_eps: cfg.bcdt_rms_eps,
         }
     }
 }

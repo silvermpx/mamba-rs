@@ -85,6 +85,7 @@ fn trainers(device: Device, seq_len: usize) -> Vec<(&'static str, Trainer)> {
         n_layers: 2,
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let m2 = Mamba2Config {
         d_model: D_MODEL,

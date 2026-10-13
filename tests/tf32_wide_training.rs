@@ -30,6 +30,7 @@ fn one_step(d_model: usize, batch: usize, seq_len: usize) {
         n_layers: 1,
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let w = MambaWeights::init(&cfg, d_model, 5);
     let session = TrainSessionCfg {

@@ -32,6 +32,7 @@ fn m1_dims(d_state: usize, d_conv: usize) -> GpuMambaDims {
         n_layers: 1,
         scan_mode: ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     }
 }
 

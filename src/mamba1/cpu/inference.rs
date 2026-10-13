@@ -14,6 +14,7 @@ use crate::mamba1::state::MambaLayerState;
 use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 use crate::ops::lane::{LaneGemm, input_rows};
+use crate::ops::norms::bcdt_rms_norm;
 use crate::ops::packed::{PackedLinear, linear_row as linear};
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
@@ -224,6 +225,12 @@ fn layer_step(
         (&lw.x_proj_w, lp.map(|p| &p.x_proj)),
         None,
     );
+    // FalconMamba normalizes the row's dt, B and C parts; the GPU stores the
+    // normalized row again.
+    if let Some(eps) = cfg.bcdt_rms_eps {
+        bcdt_rms_norm(&mut scratch.xdbl[..xdbl_dim], (dt_rank, d_state), eps);
+        store(dtype, &mut scratch.xdbl[..xdbl_dim]);
+    }
 
     // dt_proj: delta_raw [dt_rank] -> delta [d_inner] + softplus
     scratch.gemm.row(

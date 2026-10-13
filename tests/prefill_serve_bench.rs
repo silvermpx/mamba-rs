@@ -72,6 +72,7 @@ fn rig(state_cap: usize) -> Rig {
         expand: 2,
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let mid = SERVE_INPUT_DIM;
     let mut w = MambaWeights::init(&cfg, mid, 0x5E12E);
@@ -92,6 +93,7 @@ fn rig(state_cap: usize) -> Rig {
         n_layers: nl,
         scan_mode: cfg.scan_mode,
         rms_norm_eps: cfg.rms_norm_eps,
+        bcdt_rms_eps: None,
     };
     let device = GpuDevice::new(0).expect("device");
     let ctx = GpuCtx::new_with_state_cap(&device, state_cap).expect("ctx");

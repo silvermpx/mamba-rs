@@ -265,6 +265,12 @@ pub struct MambaKernels {
     /// One-kernel d_xdbl assembly (dt|B|C ranges tile the row): dt source
     /// typed, B/C sources f32 reduce outputs, FROM_F(0.0f + v) stores.
     pub pack_xdbl_cols_typed: TypedKernel,
+    /// FalconMamba's dt, B and C norms of x_proj rows in place, keeping
+    /// the scales when asked (mamba_ssm_elementwise.cu).
+    pub bcdt_norm_fwd_typed: TypedKernel,
+    /// The d_xdbl assembly of a FalconMamba model, through the norms'
+    /// backward (mamba_ssm_elementwise.cu).
+    pub pack_xdbl_norm_bwd_typed: TypedKernel,
 
     // -- Typed inference kernels (f32/bf16/f16 variants) --
     pub softplus_fwd_typed: TypedKernel,
@@ -1826,6 +1832,8 @@ impl MambaKernels {
                 bf16: get("pack_xdbl_cols_bf16")?,
                 f16: get("pack_xdbl_cols_f16")?,
             },
+            bcdt_norm_fwd_typed: load_typed("bcdt_norm_fwd")?,
+            pack_xdbl_norm_bwd_typed: load_typed("pack_xdbl_norm_bwd")?,
 
             // dual-dtype (half-only)
             rmsnorm_fwd_f32in_typed: load_half("rmsnorm_forward_f32in")?,

@@ -38,6 +38,7 @@ fn m1_trainer_bf16_smoke() {
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -109,6 +110,7 @@ fn m1_trainer_multi_layer_bf16() {
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -240,6 +242,7 @@ fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -372,6 +375,7 @@ fn m1_trainer_f32_smoke() {
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let input_dim = cfg.d_model;
     let batch = 1;

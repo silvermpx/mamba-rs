@@ -53,9 +53,32 @@ fn cases() -> Vec<(&'static str, MambaConfig)> {
         expand: 2,
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     vec![
         ("d_inner 10", base),
+        // FalconMamba's cases keep dt_rank past 1: a one-element dt part
+        // normalizes to its sign, and the gradient of that norm, large only
+        // where the element crosses zero, is past what a half precision
+        // can follow against the f32 host.
+        (
+            "FalconMamba's dt, B and C norms",
+            MambaConfig {
+                d_model: 40,
+                bcdt_rms_eps: Some(1e-6),
+                ..base
+            },
+        ),
+        (
+            "FalconMamba's norms, odd d_inner 33 over 128 states",
+            MambaConfig {
+                d_model: 33,
+                expand: 1,
+                d_state: 128,
+                bcdt_rms_eps: Some(1e-6),
+                ..base
+            },
+        ),
         (
             "odd d_inner 33",
             MambaConfig {

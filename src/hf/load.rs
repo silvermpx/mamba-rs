@@ -154,6 +154,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         // Checkpoint-specified norm epsilon (FalconMamba: 1e-6) — plumbed
         // through every CPU/GPU inference norm via MambaConfig/MambaDims.
         rms_norm_eps: hf_cfg.rms_norm_eps,
+        bcdt_rms_eps: hf_cfg.bcdt_rms_eps,
         ..MambaConfig::default()
     };
 

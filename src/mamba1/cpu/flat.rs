@@ -21,6 +21,7 @@
 //! |10 | gate_pre_silu   | d_inner                      |
 //! |11 | gate_post_silu  | d_inner                      |
 //! |12 | gated           | d_inner                      |
+//! |13 | bcdt_rstd       | 3 with FalconMamba's norms, else 0 |
 //!
 //! The states are not kept per step: they are `d_inner * d_state` wide, and
 //! kept so they were most of the tape. The window keeps the conv register
@@ -53,6 +54,8 @@ pub struct FieldOffsets {
     pub gate_pre_silu: usize,
     pub gate_post_silu: usize,
     pub gated: usize,
+    /// FalconMamba's three dt, B and C norm scales (none for Mamba-1).
+    pub bcdt_rstd: usize,
     /// Total f32 elements per timestep.
     pub step_stride: usize,
 }
@@ -105,6 +108,11 @@ impl FieldOffsets {
         let gated = off;
         off += di;
 
+        let bcdt_rstd = off;
+        if dims.bcdt_rms_eps.is_some() {
+            off += 3;
+        }
+
         Self {
             residual,
             rms_val,
@@ -119,6 +127,7 @@ impl FieldOffsets {
             gate_pre_silu,
             gate_post_silu,
             gated,
+            bcdt_rstd,
             step_stride: off,
         }
     }
@@ -310,6 +319,14 @@ impl MambaLayerFlat {
         &self.data[b..b + self.dims.d_inner]
     }
 
+    /// `bcdt_rstd[t]`: the dt, B and C norm scales, empty for Mamba-1.
+    #[inline]
+    pub fn bcdt_rstd(&self, t: usize) -> &[f32] {
+        let b = self.base(t) + self.offsets.bcdt_rstd;
+        let n = self.offsets.step_stride - self.offsets.bcdt_rstd;
+        &self.data[b..b + n]
+    }
+
     // -----------------------------------------------------------------------
     // Write accessors
     // -----------------------------------------------------------------------
@@ -415,6 +432,14 @@ impl MambaLayerFlat {
         let b = self.base(t) + self.offsets.gated;
         let di = self.dims.d_inner;
         &mut self.data[b..b + di]
+    }
+
+    /// `bcdt_rstd_mut[t]`: the dt, B and C norm scales, empty for Mamba-1.
+    #[inline]
+    pub fn bcdt_rstd_mut(&mut self, t: usize) -> &mut [f32] {
+        let b = self.base(t) + self.offsets.bcdt_rstd;
+        let n = self.offsets.step_stride - self.offsets.bcdt_rstd;
+        &mut self.data[b..b + n]
     }
 
     // -----------------------------------------------------------------------

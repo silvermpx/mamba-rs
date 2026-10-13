@@ -442,7 +442,7 @@ pub fn parallel_mamba_target_forward(
                 target_w,
                 scratch,
                 (dm, di, ds, dc, dr, mid),
-                dims.rms_norm_eps,
+                (dims.rms_norm_eps, dims.bcdt_rms_eps),
             );
         });
     });
@@ -526,7 +526,7 @@ pub fn parallel_mamba_target_forward_burnin(
                 target_w,
                 scratch,
                 (dm, di, ds, dc, dr, seq_len),
-                dims.rms_norm_eps,
+                (dims.rms_norm_eps, dims.bcdt_rms_eps),
             );
         });
     });
@@ -1233,7 +1233,7 @@ mod tests {
                 &target_w,
                 &mut scratch,
                 (d_model, d_inner, d_state, d_conv, dt_rank, mamba_input_dim),
-                crate::ops::fast_math::RMS_NORM_EPS,
+                (crate::ops::fast_math::RMS_NORM_EPS, None),
             );
         }
 

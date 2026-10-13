@@ -451,6 +451,7 @@ fn tc_mixed_training_is_bit_identical_across_runs() {
         n_layers: 2,
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let run = || -> (Vec<(u64, u64)>, u64) {
         let mut cpu = MambaWeights::init(&cfg, cfg.d_model, 0xDE7E_4213);

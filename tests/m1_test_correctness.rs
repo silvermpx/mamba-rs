@@ -935,6 +935,7 @@ mod gpu_tests {
             n_layers: cfg.n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
             rms_norm_eps: 1e-5,
+            bcdt_rms_eps: None,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1081,6 +1082,7 @@ mod gpu_tests {
             n_layers: cfg.n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
             rms_norm_eps: 1e-5,
+            bcdt_rms_eps: None,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1353,6 +1355,7 @@ mod gpu_tests {
             n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
             rms_norm_eps: 1e-5,
+            bcdt_rms_eps: None,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1587,6 +1590,7 @@ fn test_custom_config_small() {
         n_layers: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let input_dim = 32;
     let bb = MambaBackbone::init(cfg, input_dim, 99);
@@ -1630,6 +1634,7 @@ fn test_custom_config_large() {
         n_layers: 4,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let input_dim = 256;
     let bb = MambaBackbone::init(cfg, input_dim, 77);
@@ -2100,6 +2105,7 @@ mod gpu_extra_tests {
             n_layers: cfg.n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
             rms_norm_eps: 1e-5,
+            bcdt_rms_eps: None,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -2190,6 +2196,7 @@ mod gpu_extra_tests {
             n_layers: 2,
             scan_mode: mamba_rs::config::ScanMode::Sequential,
             rms_norm_eps: 1e-5,
+            bcdt_rms_eps: None,
         };
         let input_dim = 32;
         let bb = MambaBackbone::init(cfg, input_dim, 99);
@@ -2228,6 +2235,279 @@ mod gpu_extra_tests {
             assert!(
                 max_diff < 5.0,
                 "custom config step {step}: GPU vs CPU max_diff={max_diff:.6}"
+            );
+        }
+    }
+}
+
+// =========================================================================
+// FalconMamba's mixer norms
+// =========================================================================
+
+fn falcon_cfg() -> MambaConfig {
+    MambaConfig {
+        d_model: 32,
+        d_state: 8,
+        n_layers: 2,
+        bcdt_rms_eps: Some(1e-6),
+        ..MambaConfig::default()
+    }
+}
+
+/// The decode of every input row in float64, transcribed from transformers'
+/// FalconMambaMixer: the Mamba-1 step of state-spaces/mamba with the dt, B
+/// and C parts of the x_proj row each divided by its root mean square.
+fn falcon_reference(
+    w: &mamba_rs::MambaWeights,
+    cfg: &MambaConfig,
+    input_dim: usize,
+    inputs: &[f32],
+) -> Vec<f64> {
+    let (d, di, ds, dc, dr) = (
+        cfg.d_model,
+        cfg.d_inner(),
+        cfg.d_state,
+        cfg.d_conv,
+        cfg.dt_rank(),
+    );
+    let xd = dr + 2 * ds;
+    let f = f64::from;
+    let eps = f(cfg.rms_norm_eps);
+    let mix_eps = f(cfg.bcdt_rms_eps.unwrap());
+    let rstd = |v: &[f64], e: f64| {
+        1.0 / (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64 + e).sqrt()
+    };
+    let silu = |x: f64| x / (1.0 + (-x).exp());
+    let mut conv = vec![vec![0f64; di * dc]; cfg.n_layers];
+    let mut ssm = vec![vec![0f64; di * ds]; cfg.n_layers];
+    let mut out = Vec::new();
+    for inp in inputs.chunks_exact(input_dim) {
+        let mut x: Vec<f64> = (0..d)
+            .map(|j| {
+                f(w.input_proj_b[j])
+                    + (0..input_dim)
+                        .map(|i| f(inp[i]) * f(w.input_proj_w[i * d + j]))
+                        .sum::<f64>()
+            })
+            .collect();
+        for (l, lw) in w.layers.iter().enumerate() {
+            let r = rstd(&x, eps);
+            let h: Vec<f64> = (0..d).map(|j| x[j] * r * f(lw.norm_weight[j])).collect();
+            let proj: Vec<f64> = (0..2 * di)
+                .map(|k| (0..d).map(|j| h[j] * f(lw.in_proj_w[j * 2 * di + k])).sum())
+                .collect();
+            let (xin, z) = proj.split_at(di);
+            let mut u = vec![0f64; di];
+            for c in 0..di {
+                let win = &mut conv[l][c * dc..(c + 1) * dc];
+                win.rotate_left(1);
+                win[dc - 1] = xin[c];
+                let v = f(lw.conv1d_bias[c])
+                    + (0..dc)
+                        .map(|k| win[k] * f(lw.conv1d_weight[c * dc + k]))
+                        .sum::<f64>();
+                u[c] = silu(v);
+            }
+            let mut xdbl: Vec<f64> = (0..xd)
+                .map(|k| (0..di).map(|c| u[c] * f(lw.x_proj_w[c * xd + k])).sum())
+                .collect();
+            for (lo, hi) in [(0, dr), (dr, dr + ds), (dr + ds, xd)] {
+                let r = rstd(&xdbl[lo..hi], mix_eps);
+                xdbl[lo..hi].iter_mut().for_each(|v| *v *= r);
+            }
+            let mut y = vec![0f64; di];
+            for c in 0..di {
+                let raw = f(lw.dt_proj_b[c])
+                    + (0..dr)
+                        .map(|k| xdbl[k] * f(lw.dt_proj_w[k * di + c]))
+                        .sum::<f64>();
+                let delta = if raw > 20.0 { raw } else { raw.exp().ln_1p() };
+                let mut yc = 0.0;
+                for n in 0..ds {
+                    let a = -f(lw.a_log[c * ds + n]).exp();
+                    let s = &mut ssm[l][c * ds + n];
+                    *s = (delta * a).exp() * *s + delta * u[c] * xdbl[dr + n];
+                    yc += *s * xdbl[dr + ds + n];
+                }
+                y[c] = (yc + f(lw.d_param[c]) * u[c]) * silu(z[c]);
+            }
+            for (j, xj) in x.iter_mut().enumerate() {
+                *xj += (0..di)
+                    .map(|c| y[c] * f(lw.out_proj_w[c * d + j]))
+                    .sum::<f64>();
+            }
+        }
+        let r = rstd(&x, eps);
+        out.extend((0..d).map(|j| x[j] * r * f(w.norm_f_weight[j])));
+    }
+    out
+}
+
+fn falcon_inputs(seq_len: usize, input_dim: usize) -> Vec<f32> {
+    (0..seq_len * input_dim)
+        .map(|i| ((i * 7919 % 1000) as f32 / 1000.0 - 0.5) * 0.8)
+        .collect()
+}
+
+/// The decode against the float64 reference; the same weights read as
+/// Mamba-1 are another model.
+#[test]
+fn falcon_decode_matches_the_f64_reference() {
+    let cfg = falcon_cfg();
+    let (input_dim, seq_len) = (24usize, 7usize);
+    let weights = mamba_rs::MambaWeights::init(&cfg, input_dim, 11);
+    let inputs = falcon_inputs(seq_len, input_dim);
+    let want = falcon_reference(&weights, &cfg, input_dim, &inputs);
+    let run = |cfg: MambaConfig| {
+        let bb = MambaBackbone::new(weights.clone(), cfg, input_dim).unwrap();
+        let (mut state, mut scratch) = (bb.alloc_state(), bb.alloc_scratch());
+        let mut out = vec![0f32; seq_len * cfg.d_model];
+        for (inp, o) in inputs
+            .chunks_exact(input_dim)
+            .zip(out.chunks_exact_mut(cfg.d_model))
+        {
+            bb.forward_step(inp, o, &mut state, &mut scratch);
+        }
+        out
+    };
+    let rel = |got: &[f32]| {
+        let num: f64 = got
+            .iter()
+            .zip(&want)
+            .map(|(&g, &w)| (f64::from(g) - w).powi(2))
+            .sum();
+        let den: f64 = want.iter().map(|w| w * w).sum();
+        (num / den).sqrt()
+    };
+    let falcon = rel(&run(cfg));
+    assert!(
+        falcon < 1e-5,
+        "FalconMamba decode vs f64 reference: {falcon:.3e}"
+    );
+    let plain = rel(&run(MambaConfig {
+        bcdt_rms_eps: None,
+        ..cfg
+    }));
+    assert!(plain > 1e-2, "the norms changed nothing: {plain:.3e}");
+}
+
+/// The prompt (both prefill modes), the decode and the trainer's forward
+/// give the same rows.
+#[test]
+fn falcon_prompt_decode_and_trainer_agree() {
+    use mamba_rs::mamba1::cpu::prefill::PrefillMode;
+    let cfg = falcon_cfg();
+    let (input_dim, seq_len, dm) = (24usize, 9usize, cfg.d_model);
+    let weights = mamba_rs::MambaWeights::init(&cfg, input_dim, 13);
+    let inputs = falcon_inputs(seq_len, input_dim);
+    let bb = MambaBackbone::new(weights.clone(), cfg, input_dim).unwrap();
+    let (mut state, mut scratch) = (bb.alloc_state(), bb.alloc_scratch());
+    let mut decode = vec![0f32; seq_len * dm];
+    for (inp, o) in inputs
+        .chunks_exact(input_dim)
+        .zip(decode.chunks_exact_mut(dm))
+    {
+        bb.forward_step(inp, o, &mut state, &mut scratch);
+    }
+    let max_diff = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max)
+    };
+    for mode in [PrefillMode::Single, PrefillMode::Parallel] {
+        let mut st = bb.alloc_state();
+        let mut ps = bb.alloc_prefill_scratch(seq_len);
+        let mut rows = vec![0f32; seq_len * dm];
+        bb.forward_prefill(&inputs, &mut rows, &mut st, &mut ps, seq_len, mode);
+        let diff = max_diff(&rows, &decode);
+        assert!(diff < 1e-4, "{mode:?} prefill vs decode: {diff:.3e}");
+    }
+    let (tw, dims) = build_train_scaffolding(&weights, &cfg, input_dim, seq_len);
+    let (train, _) = run_forward(&tw, &dims, &inputs);
+    let diff = max_diff(&train, &decode);
+    assert!(diff < 1e-4, "trainer forward vs decode: {diff:.3e}");
+}
+
+/// The trainer's gradients of the weights the norms sit between (x_proj
+/// and dt_proj) against central differences of `sum(output)`.
+#[test]
+fn falcon_gradients_match_central_differences() {
+    let cfg = falcon_cfg();
+    let (input_dim, seq_len) = (24usize, 5usize);
+    let weights = mamba_rs::MambaWeights::init(&cfg, input_dim, 17);
+    let (tw, dims) = build_train_scaffolding(&weights, &cfg, input_dim, seq_len);
+    let inputs = falcon_inputs(seq_len, input_dim);
+
+    use mamba_rs::ops::dims::MambaRecurrentState;
+    use mamba_rs::train::flat::MambaBackboneFlat;
+    use mamba_rs::train::scratch::PhaseScratch;
+    let (di, ds, dc, nl) = (dims.d_inner, dims.d_state, dims.d_conv, dims.n_layers);
+    let a_neg: Vec<f32> = tw
+        .layers
+        .iter()
+        .flat_map(|lw| lw.a_log.iter().map(|&a| -a.exp()))
+        .collect();
+    let mut acts = MambaBackboneFlat::zeros(dims);
+    let mut scratch = PhaseScratch::zeros(&dims);
+    let (mut conv, mut ssm) = (vec![0f32; nl * di * dc], vec![0f32; nl * di * ds]);
+    let mut state = MambaRecurrentState {
+        conv: &mut conv,
+        ssm: &mut ssm,
+        a_neg: &a_neg,
+    };
+    let mut temporal = vec![0f32; seq_len * dims.d_model];
+    mamba_rs::train::forward::forward_mamba_backbone_batched(
+        &mut temporal,
+        &mut acts,
+        &tw,
+        &inputs,
+        &mut state,
+        &mut scratch,
+        &dims,
+    );
+    let mut grads = mamba_rs::train::weights::TrainMambaWeights::zeros_from_dims(&dims);
+    let mut d_temporal = vec![1f32; temporal.len()];
+    let mut bwd = mamba_rs::train::scratch::BackwardPhaseScratch::zeros(&dims);
+    mamba_rs::train::backward::backward_mamba_backbone_batched(
+        &mut d_temporal,
+        &mut grads,
+        &acts,
+        &tw,
+        &a_neg,
+        &mut bwd,
+        &dims,
+    );
+
+    let loss = |tw: &mamba_rs::train::weights::TrainMambaWeights| -> f64 {
+        run_forward(tw, &dims, &inputs)
+            .0
+            .iter()
+            .map(|&v| f64::from(v))
+            .sum()
+    };
+    let h = 5e-3f32;
+    type Field = fn(&mut mamba_rs::train::weights::TrainMambaWeights) -> &mut Vec<f32>;
+    let checks: [(&str, Field); 2] = [
+        ("x_proj_w", |w| &mut w.layers[0].x_proj_w),
+        ("dt_proj_w", |w| &mut w.layers[1].dt_proj_w),
+    ];
+    for (name, field) in checks {
+        let mut g = grads.clone();
+        let analytic = field(&mut g).clone();
+        // The three largest gradients of the tensor.
+        let mut idx: Vec<usize> = (0..analytic.len()).collect();
+        idx.sort_by(|&a, &b| analytic[b].abs().total_cmp(&analytic[a].abs()));
+        for &i in &idx[..3] {
+            let (mut plus, mut minus) = (tw.clone(), tw.clone());
+            field(&mut plus)[i] += h;
+            field(&mut minus)[i] -= h;
+            let numeric = (loss(&plus) - loss(&minus)) / (2.0 * f64::from(h));
+            let rel = (f64::from(analytic[i]) - numeric).abs() / numeric.abs().max(1e-6);
+            assert!(
+                rel < 0.05,
+                "{name}[{i}]: analytic {} vs numeric {numeric:.6} ({rel:.3})",
+                analytic[i]
             );
         }
     }

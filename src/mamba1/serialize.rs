@@ -77,15 +77,20 @@ pub(crate) fn checkpoint_parts<'a>(
     }
     list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
 
-    // The configuration as JSON. scan_mode and rms_norm_eps are part of the
-    // checkpoint's numeric route: without them a model of another eps
-    // would load with the default one.
+    // The configuration as JSON. scan_mode and the norm epsilons are part
+    // of the checkpoint's numeric route: without them a model of another
+    // eps would load with the default one, and a FalconMamba model as
+    // Mamba-1.
+    let falcon = cfg
+        .bcdt_rms_eps
+        .map(|eps| format!(r#","bcdt_rms_eps":{eps}"#))
+        .unwrap_or_default();
     let meta = HashMap::from([
         ("mamba_version".to_string(), VERSION.to_string()),
         (
             "config".to_string(),
             format!(
-                r#"{{"d_model":{},"d_state":{},"d_conv":{},"expand":{},"n_layers":{},"input_dim":{},"scan_mode":"{:?}","rms_norm_eps":{}}}"#,
+                r#"{{"d_model":{},"d_state":{},"d_conv":{},"expand":{},"n_layers":{},"input_dim":{},"scan_mode":"{:?}","rms_norm_eps":{}{falcon}}}"#,
                 dm, ds, dc, cfg.expand, cfg.n_layers, input_dim, cfg.scan_mode, cfg.rms_norm_eps
             ),
         ),
@@ -154,19 +159,24 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
     } else {
         crate::config::ScanMode::default()
     };
-    let rms_norm_eps = config_json
-        .find(r#""rms_norm_eps":"#)
-        .map(|p| {
-            let tail = &config_json[p + r#""rms_norm_eps":"#.len()..];
-            let end = tail
-                .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == 'e'))
-                .unwrap_or(tail.len());
-            tail[..end]
-                .parse::<f32>()
-                .map_err(|e| format!("parse 'rms_norm_eps': {e}"))
-        })
-        .transpose()?
-        .unwrap_or_else(|| MambaConfig::default().rms_norm_eps);
+    // A float field of the config, `None` when the file has none.
+    let float = |key: &str| -> Result<Option<f32>, String> {
+        let tag = format!(r#""{key}":"#);
+        config_json
+            .find(&tag)
+            .map(|p| {
+                let tail = &config_json[p + tag.len()..];
+                let end = tail
+                    .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == 'e'))
+                    .unwrap_or(tail.len());
+                tail[..end]
+                    .parse::<f32>()
+                    .map_err(|e| format!("parse '{key}': {e}"))
+            })
+            .transpose()
+    };
+    let rms_norm_eps =
+        float("rms_norm_eps")?.unwrap_or_else(|| MambaConfig::default().rms_norm_eps);
 
     let cfg = MambaConfig {
         d_model,
@@ -176,6 +186,7 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
         n_layers,
         scan_mode,
         rms_norm_eps,
+        bcdt_rms_eps: float("bcdt_rms_eps")?,
     };
     cfg.validate()?;
 
@@ -295,5 +306,28 @@ mod tests {
         assert_eq!((cfg2, input_dim), (cfg, cfg.d_model));
         assert!(w2.input_proj_w.is_empty() && w2.input_proj_b.is_empty());
         assert_eq!(w.layers[0].in_proj_w, w2.layers[0].in_proj_w);
+    }
+
+    /// A FalconMamba model keeps its mixer norm epsilon through a save and
+    /// a load; a Mamba-1 file (none written) loads without it.
+    #[test]
+    fn falcon_mixer_norms_round_trip() {
+        for bcdt_rms_eps in [Some(1e-6), Some(3.5e-5), None] {
+            let cfg = MambaConfig {
+                bcdt_rms_eps,
+                ..MambaConfig::default()
+            };
+            let w = MambaWeights::init(&cfg, 16, 7);
+            let path = std::env::temp_dir().join(format!(
+                "mamba1_falcon_{}_{:?}.safetensors",
+                std::process::id(),
+                bcdt_rms_eps
+            ));
+            save(&path, &w, &cfg, 16).unwrap();
+            let loaded = load(&path);
+            std::fs::remove_file(&path).ok();
+            let (_, cfg2, _) = loaded.unwrap();
+            assert_eq!(cfg2, cfg);
+        }
     }
 }

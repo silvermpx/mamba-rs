@@ -32,6 +32,7 @@ fn tiny_cfg() -> MambaConfig {
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     }
 }
 
@@ -74,6 +75,7 @@ fn run_smoke(dtype: WeightDtype) {
         n_layers,
         scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
 
     let mut acts = GpuMambaBackboneMixedActs::new(&ctx.stream, &dims, dtype).unwrap();

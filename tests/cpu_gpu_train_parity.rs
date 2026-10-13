@@ -178,6 +178,7 @@ fn m1_cpu_gpu_backward_parity_f32() {
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -259,6 +260,7 @@ fn m1_cpu_gpu_backward_parity_f32() {
         n_layers: nl,
         scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let mut gpu_acts = GpuMambaBackboneActs::new(&ctx.stream, &gpu_dims).expect("gpu acts");
     let mut gpu_scratch = GpuMambaScratch::new(&ctx.stream, &gpu_dims).expect("gpu scratch");

@@ -52,6 +52,7 @@ fn cfg() -> MambaConfig {
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     }
 }
 
@@ -100,6 +101,7 @@ fn m1_f32_training_graph_matches_eager() {
         n_layers: nl,
         scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
 
     let n = batch * seq_len * dm;

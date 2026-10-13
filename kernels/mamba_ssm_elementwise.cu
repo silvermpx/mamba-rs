@@ -462,3 +462,98 @@ extern "C" __global__ void pack_xdbl_cols_##SUFFIX(                           \
 DEFINE_PACK_XDBL_COLS(f32,  float,         from_f_f32)
 DEFINE_PACK_XDBL_COLS(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_PACK_XDBL_COLS(f16,  __half,        from_f_f16)
+
+// FalconMamba's mixer norms: the dt, B and C parts of every x_proj row,
+// of widths dt_rank, ds and ds, each divided by its root mean square,
+// v / sqrt(mean(v^2) + eps), in place. One block of three warps per row,
+// warp p on part p. Lane j < 16 sums the squares of elements j, j + 16,
+// ... with fused multiply-adds in ascending order, and the sixteen lane
+// sums fold halves, quarters, pairs and the last pair: the host's
+// sixteen-lane order, so the scale is the host's bit for bit. `rstd`
+// (rows x 3) keeps the scales for the backward, or is null.
+__device__ __forceinline__ float bcdt_fold16(float acc) {
+    acc = __fadd_rn(acc, __shfl_down_sync(0xffffffffu, acc, 8));
+    acc = __fadd_rn(acc, __shfl_down_sync(0xffffffffu, acc, 4));
+    acc = __fadd_rn(acc, __shfl_down_sync(0xffffffffu, acc, 2));
+    acc = __fadd_rn(acc, __shfl_down_sync(0xffffffffu, acc, 1));
+    return __shfl_sync(0xffffffffu, acc, 0);
+}
+
+#define DEFINE_BCDT_NORM_FWD(SUFFIX, T, FROM_F)                               \
+extern "C" __global__ void bcdt_norm_fwd_##SUFFIX(                            \
+    T* __restrict__ xdbl, float* __restrict__ rstd,                           \
+    long long rows, int stride, int dt_rank, int ds, float eps                \
+) {                                                                           \
+    const int part = threadIdx.x >> 5;                                        \
+    const int lane = threadIdx.x & 31;                                        \
+    const int lo = part == 0 ? 0 : (part == 1 ? dt_rank : dt_rank + ds);      \
+    const int n = part == 0 ? dt_rank : ds;                                   \
+    for (long long row = blockIdx.x; row < rows; row += gridDim.x) {          \
+        T* v = xdbl + row * (long long)stride + lo;                           \
+        float acc = 0.0f;                                                     \
+        if (lane < 16) {                                                      \
+            for (int i = lane; i < n; i += 16) {                              \
+                const float x = to_f(v[i]);                                   \
+                acc = __fmaf_rn(x, x, acc);                                   \
+            }                                                                 \
+        }                                                                     \
+        const float sum = bcdt_fold16(acc);                                   \
+        const float r = __fdiv_rn(1.0f,                                       \
+            __fsqrt_rn(__fadd_rn(__fdiv_rn(sum, (float)n), eps)));            \
+        for (int i = lane; i < n; i += 32) {                                  \
+            v[i] = FROM_F(__fmul_rn(to_f(v[i]), r));                          \
+        }                                                                     \
+        if (rstd != nullptr && lane == 0) rstd[row * 3 + part] = r;           \
+    }                                                                         \
+}
+
+DEFINE_BCDT_NORM_FWD(f32,  float,         from_f_f32)
+DEFINE_BCDT_NORM_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_BCDT_NORM_FWD(f16,  __half,        from_f_f16)
+
+// The d_xdbl assembly of a FalconMamba model: pack_xdbl_cols's dt | B | C
+// gradient of the normalized row, taken back through the norms, stored
+// once. The gradient dy of a part with normalized values y (the forward's
+// stored row) and scale r becomes r (dy - y mean(dy y)), the mean's dot in
+// the sixteen-lane order. Block and warp layout as bcdt_norm_fwd.
+#define DEFINE_PACK_XDBL_NORM_BWD(SUFFIX, TY, FROM_F)                         \
+extern "C" __global__ void pack_xdbl_norm_bwd_##SUFFIX(                       \
+    TY* __restrict__ dst,                                                     \
+    const TY* __restrict__ dt_src,                                            \
+    const float* __restrict__ b_src,                                          \
+    const float* __restrict__ c_src,                                          \
+    const TY* __restrict__ y,                                                 \
+    const float* __restrict__ rstd,                                           \
+    long long rows, int dt_rank, int ds                                       \
+) {                                                                           \
+    const int part = threadIdx.x >> 5;                                        \
+    const int lane = threadIdx.x & 31;                                        \
+    const int lo = part == 0 ? 0 : (part == 1 ? dt_rank : dt_rank + ds);      \
+    const int n = part == 0 ? dt_rank : ds;                                   \
+    const long long w = (long long)dt_rank + 2LL * ds;                        \
+    for (long long row = blockIdx.x; row < rows; row += gridDim.x) {          \
+        const TY* yr = y + row * w + lo;                                      \
+        const float r = rstd[row * 3 + part];                                 \
+        float acc = 0.0f;                                                     \
+        if (lane < 16) {                                                      \
+            for (int i = lane; i < n; i += 16) {                              \
+                const float g = part == 0                                     \
+                    ? __fadd_rn(0.0f, to_f(dt_src[row * dt_rank + i]))        \
+                    : __fadd_rn(0.0f, (part == 1 ? b_src : c_src)[row * ds + i]); \
+                acc = __fmaf_rn(g, to_f(yr[i]), acc);                         \
+            }                                                                 \
+        }                                                                     \
+        const float m = __fdiv_rn(bcdt_fold16(acc), (float)n);                \
+        for (int i = lane; i < n; i += 32) {                                  \
+            const float g = part == 0                                         \
+                ? __fadd_rn(0.0f, to_f(dt_src[row * dt_rank + i]))            \
+                : __fadd_rn(0.0f, (part == 1 ? b_src : c_src)[row * ds + i]); \
+            const float d = __fsub_rn(g, __fmul_rn(to_f(yr[i]), m));          \
+            dst[row * w + lo + i] = FROM_F(__fmul_rn(r, d));                  \
+        }                                                                     \
+    }                                                                         \
+}
+
+DEFINE_PACK_XDBL_NORM_BWD(f32,  float,         from_f_f32)
+DEFINE_PACK_XDBL_NORM_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_PACK_XDBL_NORM_BWD(f16,  __half,        from_f_f16)

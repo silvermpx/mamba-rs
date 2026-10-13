@@ -473,6 +473,7 @@ fn m1_ranks(world: usize, seq_len: usize, dtype: WeightDtype) -> Vec<MambaGpuTra
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let w = MambaWeights::init(&c, D_MODEL, 0xC0FFEE);
     (0..world)

@@ -9,6 +9,7 @@
 use super::weights::TrainMambaWeights;
 use crate::ops::blas::matvec_forward;
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
+use crate::ops::norms::bcdt_rms_norm;
 
 /// Scratch buffers for single-step (T=1) target Mamba forward.
 pub struct MambaTargetScratch {
@@ -79,7 +80,7 @@ pub fn forward_mamba_target_step(
     w: &TrainMambaWeights,
     scratch: &mut MambaTargetScratch,
     dims: (usize, usize, usize, usize, usize, usize), // (dm, di, ds, dc, dr, mid)
-    rms_norm_eps: f32,
+    (rms_norm_eps, bcdt_rms_eps): (f32, Option<f32>),
 ) {
     let (dm, di, ds, dc, dr, mid) = dims;
     let xdbl_dim = dr + 2 * ds;
@@ -140,7 +141,7 @@ pub fn forward_mamba_target_step(
             scratch.x[d] = val * sig; // fused SiLU
         }
 
-        // x_proj
+        // x_proj, and FalconMamba's dt, B and C norms
         matvec_forward(
             &mut scratch.xdbl[..xdbl_dim],
             &scratch.x[..di],
@@ -149,6 +150,9 @@ pub fn forward_mamba_target_step(
             di,
             xdbl_dim,
         );
+        if let Some(eps) = bcdt_rms_eps {
+            bcdt_rms_norm(&mut scratch.xdbl[..xdbl_dim], (dr, ds), eps);
+        }
 
         // dt_proj + softplus
         matvec_forward(
@@ -330,7 +334,7 @@ pub fn forward_mamba_target_sequence(
     w: &TrainMambaWeights,
     scratch: &mut MambaTargetSeqScratch,
     dims: (usize, usize, usize, usize, usize, usize), // (dm, di, ds, dc, dr, seq_len)
-    rms_norm_eps: f32,
+    (rms_norm_eps, bcdt_rms_eps): (f32, Option<f32>),
 ) {
     let (dm, di, ds, dc, dr, seq_len) = dims;
     let xdbl_dim = dr + 2 * ds;
@@ -408,7 +412,7 @@ pub fn forward_mamba_target_sequence(
                 }
             }
 
-            // x_proj
+            // x_proj, and FalconMamba's dt, B and C norms
             matvec_forward(
                 &mut scratch.xdbl[..xdbl_dim],
                 &scratch.x[..di],
@@ -417,6 +421,9 @@ pub fn forward_mamba_target_sequence(
                 di,
                 xdbl_dim,
             );
+            if let Some(eps) = bcdt_rms_eps {
+                bcdt_rms_norm(&mut scratch.xdbl[..xdbl_dim], (dr, ds), eps);
+            }
 
             // dt_proj + softplus
             matvec_forward(

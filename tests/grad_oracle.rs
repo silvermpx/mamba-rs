@@ -342,6 +342,7 @@ fn run_oracle(input_dim: usize) {
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let seq_len = 4;
     let dims = MambaDims::from_config(&cfg, seq_len, input_dim);

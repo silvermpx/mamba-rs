@@ -25,6 +25,7 @@ use crate::mlp::cpu::RowsGemm;
 use crate::ops::blas::sgemm_forward;
 use crate::ops::dims::{MambaDims, MambaRecurrentState};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
+use crate::ops::norms::bcdt_rms_norm;
 use crate::ops::rounding::{store, stored};
 
 /// One step of a channel's selective scan: the decays `exp(delta * A)` into
@@ -234,7 +235,14 @@ pub fn forward_mamba_layer_batched(
         (seq_len, di, xdbl_dim),
     );
     for t in 0..seq_len {
-        let row = &scratch.xdbl_flat[t * xdbl_dim..(t + 1) * xdbl_dim];
+        let row = &mut scratch.xdbl_flat[t * xdbl_dim..(t + 1) * xdbl_dim];
+        // FalconMamba normalizes the row's dt, B and C parts and keeps the
+        // scales for the backward.
+        if let Some(eps) = dims.bcdt_rms_eps {
+            let r = bcdt_rms_norm(row, (dt_rank, ds), eps);
+            store(dtype, row);
+            acts.bcdt_rstd_mut(t).copy_from_slice(&r);
+        }
         acts.xdbl_mut(t).copy_from_slice(row);
         scratch.dt_in_flat[t * dt_rank..(t + 1) * dt_rank].copy_from_slice(&row[..dt_rank]);
     }

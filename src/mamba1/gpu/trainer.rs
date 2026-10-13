@@ -1105,6 +1105,7 @@ impl MambaTrainerMixed {
             n_layers,
             scan_mode: cfg.scan_mode,
             rms_norm_eps: cfg.rms_norm_eps,
+            bcdt_rms_eps: cfg.bcdt_rms_eps,
         };
         dims.check_for(&ctx)?;
 
@@ -2815,6 +2816,7 @@ impl MambaTrainerF32 {
             n_layers,
             scan_mode: cfg.scan_mode,
             rms_norm_eps: cfg.rms_norm_eps,
+            bcdt_rms_eps: cfg.bcdt_rms_eps,
         };
         dims.check_for(&ctx)?;
 

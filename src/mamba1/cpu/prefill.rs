@@ -42,6 +42,7 @@ use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 use crate::ops::lane::{LaneGemm, input_rows};
+use crate::ops::norms::bcdt_rms_norm;
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
 
@@ -598,13 +599,19 @@ pub fn forward_mamba_backbone_prefill_mode(
         }
         transpose_cm_to_rm(&mut scratch.u_rm, &scratch.u_cm, di, t_len, mode);
 
-        // F4b: x_proj GEMM + dt gather.
+        // F4b: x_proj GEMM, FalconMamba's dt, B and C norms, dt gather.
         scratch.gemm.forward(
             lane,
             (&mut scratch.xdbl, &scratch.u_rm),
             (&lw.x_proj_w, None),
             (t_len, di, xd),
         );
+        if let Some(eps) = dims.bcdt_rms_eps {
+            for_rows(mode, &mut scratch.xdbl[..t_len * xd], xd, |row| {
+                bcdt_rms_norm(row, (dr, dims.d_state), eps);
+                store(dtype, row);
+            });
+        }
         zip_rows(
             mode,
             (&mut scratch.dt_in[..t_len * dr], dr),

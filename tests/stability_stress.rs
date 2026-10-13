@@ -72,6 +72,7 @@ fn cfg() -> MambaConfig {
         expand: 2,
         scan_mode: ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     }
 }
 

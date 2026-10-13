@@ -114,6 +114,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize, rms_norm_eps: f32) {
         expand: 2,
         scan_mode,
         rms_norm_eps,
+        bcdt_rms_eps: None,
     };
     let input_dim = cfg.d_model;
     let batch = 2;
@@ -140,7 +141,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize, rms_norm_eps: f32) {
             &cpu_tw,
             &mut cpu_scratch,
             (dm, di, ds, dc, dr, seq_len),
-            cfg.rms_norm_eps,
+            (cfg.rms_norm_eps, cfg.bcdt_rms_eps),
         );
     }
 
@@ -160,6 +161,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize, rms_norm_eps: f32) {
         n_layers: nl,
         scan_mode,
         rms_norm_eps,
+        bcdt_rms_eps: None,
     };
     let mut scratch = GpuMambaTargetScratch::new(&ctx.stream, &gpu_dims).expect("target scratch");
     let mut a_neg_flat = vec![0.0f32; nl * di * ds];

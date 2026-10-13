@@ -93,6 +93,7 @@ fn run_once_at(steps: usize, tier: GemmTier, seq_len: usize) -> Vec<f32> {
         expand: 2,
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        bcdt_rms_eps: None,
     };
     let mut cpu = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
     for lw in cpu.layers.iter_mut() {
