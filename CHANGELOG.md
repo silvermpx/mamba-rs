@@ -174,6 +174,10 @@
   `tests/matrix_census_host.rs` walks it over the configurations
   `validate` accepts and lists the gaps it finds in
   `qual/matrix_ledger.toml`.
+- `tests/matrix_census_gpu.rs` runs every family on the GPU over
+  configurations that differ in each shape feature its kernels route on,
+  on every path, in a covering set of scan modes, precisions and GEMM
+  modes, and holds each cell to the host.
 
 ### Changed
 
