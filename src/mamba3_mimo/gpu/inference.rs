@@ -759,7 +759,6 @@ impl Mamba3MimoGpuEngine {
         let per = |n: usize| (b * nh * n * 4) as u64;
         let ld_proj = ip as i64;
         let (b_col, c_col) = ((2 * di) as i32, (2 * di + bc) as i32);
-        let rows_l = rows as i64;
         let rg = (r * ng) as i32;
         let (seq_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i) = (
             t_len as i32,
@@ -785,23 +784,27 @@ impl Mamba3MimoGpuEngine {
                 None,
                 (rows, dm, ip),
             )?;
-            {
-                let (wb, wc) = (lw.b_norm_weight.cached_ptr(), lw.c_norm_weight.cached_ptr());
+            let (wb, wc) = (lw.b_norm_weight.cached_ptr(), lw.c_norm_weight.cached_ptr());
+            for (first, n) in row_pieces(rows, r * ng) {
+                let normed = (first * r * ng * ds * 4) as u64;
+                let (bn_p, cn_p) = (bn + normed, cn + normed);
+                let proj_p = proj + (first * ip * self.act.size_bytes()) as u64;
+                let rows_p = n as i64;
                 let mut bld = stream.launch_builder(self.kernels.bc_norm.get(self.act));
-                bld.arg(&bn);
-                bld.arg(&cn);
-                bld.arg(&proj);
+                bld.arg(&bn_p);
+                bld.arg(&cn_p);
+                bld.arg(&proj_p);
                 bld.arg(&ld_proj);
                 bld.arg(&b_col);
                 bld.arg(&c_col);
                 bld.arg(&wb);
                 bld.arg(&wc);
-                bld.arg(&rows_l);
+                bld.arg(&rows_p);
                 bld.arg(&rg);
                 bld.arg(&ds_i);
                 bld.arg(&eps);
                 let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: ((rows * r * ng) as u32, 2, 1),
+                    grid_dim: ((n * r * ng) as u32, 2, 1),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 };
@@ -943,11 +946,26 @@ impl Mamba3MimoGpuEngine {
     }
 }
 
+/// Pieces of whole rows, `(first row, rows)`, for a launch with
+/// `blocks_per_row` blocks per row on the grid's x axis: at most its extent
+/// of blocks each. The blocks of these launches are independent, so the
+/// pieces write what one launch over every row would.
+pub(crate) fn row_pieces(
+    rows: usize,
+    blocks_per_row: usize,
+) -> impl Iterator<Item = (usize, usize)> {
+    let step = (i32::MAX as usize / blocks_per_row.max(1)).max(1);
+    (0..rows)
+        .step_by(step)
+        .map(move |first| (first, step.min(rows - first)))
+}
+
 /// The values the MIMO kernels take as `int` over windows of `seq_len`
-/// tokens of `batch` sequences: the batch, the window, its rows, and the
-/// widest row, which bounds every column offset and width the kernels take.
-/// Element counts and offsets are 64-bit, so a window is bounded by memory
-/// alone past these.
+/// tokens of `batch` sequences: the batch, the window, its rows, the widest
+/// row, which bounds every column offset and width the kernels take, and
+/// the heads of every sequence, one block each on a grid's x axis. Element
+/// counts and offsets are 64-bit, so a window is bounded by memory alone
+/// past these.
 pub(crate) fn check_window_ints(
     cfg: &Mamba3MimoConfig,
     input_dim: usize,
@@ -969,6 +987,8 @@ pub(crate) fn check_window_ints(
         ("seq_len", seq_len),
         ("rows", batch.saturating_mul(seq_len)),
         ("widest row", widest),
+        // The state passes launch a block per (sequence, head) on x.
+        ("batch*heads", batch.saturating_mul(cfg.nheads())),
     ])
 }
 

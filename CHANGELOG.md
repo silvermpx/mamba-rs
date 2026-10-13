@@ -224,6 +224,13 @@
 - `MAMBA_RS_INDEX_WIDTH=i64` runs every kernel built at two index widths
   on its 64-bit build at any size, to prove against recorded bits that
   the two builds agree. Unset or `auto` leaves the choice to the tensors.
+- Mamba-2 and MIMO launch past 2^31 elements too: MIMO's B and C norms
+  launch in pieces of whole rows within the grid's x extent, its column
+  reduction sizes its block from the full row count, and both families
+  bound the sequences times heads their state passes launch with the other
+  32-bit arguments. `m2_past_i32` and `mimo_past_i32` run the chunked
+  kernels over windows past 2^31 elements and give every chunk and
+  sequence compared the bits of its own launch.
 - `GpuCtx::cublas()` hands the context's cuBLAS handle, which the context
   takes when it enters a cuBLAS GEMM mode and keeps. `GpuCtx::take_cublas()`
   takes one for a context that stays in the deterministic mode, for a

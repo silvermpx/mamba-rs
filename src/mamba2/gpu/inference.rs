@@ -225,10 +225,11 @@ pub(crate) fn check_device_envelope(
 }
 
 /// The values the Mamba-2 kernels take as `int` over windows of `seq_len`
-/// tokens of `batch` sequences: the batch, the window, its rows, and the
-/// widest row, which bounds every column offset and width the kernels take.
-/// Element counts and offsets are 64-bit, so a window is bounded by memory
-/// alone past these.
+/// tokens of `batch` sequences: the batch, the window, its rows, the widest
+/// row, which bounds every column offset and width the kernels take, and
+/// the heads of every sequence, one block each on a grid's x axis. Element
+/// counts and offsets are 64-bit, so a window is bounded by memory alone
+/// past these.
 pub(crate) fn check_window_ints(
     cfg: &Mamba2Config,
     input_dim: usize,
@@ -249,6 +250,8 @@ pub(crate) fn check_window_ints(
         ("seq_len", seq_len),
         ("rows", batch.saturating_mul(seq_len)),
         ("widest row", widest),
+        // The state passes launch a block per (sequence, head) on x.
+        ("batch*heads", batch.saturating_mul(cfg.nheads())),
     ])
 }
 

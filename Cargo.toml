@@ -749,6 +749,16 @@ path = "tests/m3_index_width.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m2_past_i32"
+path = "tests/m2_past_i32.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "mimo_past_i32"
+path = "tests/mimo_past_i32.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "state_cap_refusal"
 path = "tests/state_cap_refusal.rs"
 required-features = ["cuda"]

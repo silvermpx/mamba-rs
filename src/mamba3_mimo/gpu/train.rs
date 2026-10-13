@@ -30,7 +30,9 @@ use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
-use super::inference::{MimoChunkedPtrs, MimoExec, check_window_ints, launch_chunked_scan};
+use super::inference::{
+    MimoChunkedPtrs, MimoExec, check_window_ints, launch_chunked_scan, row_pieces,
+};
 use super::kernels::{
     CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, chunked_geom,
     scan_bwd_global_geom, scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
@@ -1130,7 +1132,7 @@ impl Mamba3MimoGpuTrainer {
         let per = |n: usize| (b * nh * n * 4) as u64;
         let ld_proj = ip as i64;
         let (b_col, c_col) = ((2 * di) as i32, (2 * di + bc) as i32);
-        let (rows_l, rg) = (rows as i64, (rank * ng) as i32);
+        let rg = (rank * ng) as i32;
         let (t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i) = (
             t_len as i32,
             nh as i32,
@@ -1161,23 +1163,27 @@ impl Mamba3MimoGpuTrainer {
                 (rows, dm, ip),
             )?;
             let (bn, cn) = (a.bn.cached_ptr(), a.cn.cached_ptr());
-            {
-                let (wb, wc) = (at(base, ls.b_norm_weight), at(base, ls.c_norm_weight));
+            let (wb, wc) = (at(base, ls.b_norm_weight), at(base, ls.c_norm_weight));
+            for (first, n) in row_pieces(rows, rank * ng) {
+                let normed = (first * rank * ng * ds * 4) as u64;
+                let (bn_p, cn_p) = (bn + normed, cn + normed);
+                let proj_p = proj + (first * ip * self.act.size_bytes()) as u64;
+                let rows_p = n as i64;
                 let mut bld = stream.launch_builder(self.kernels.bc_norm.get(self.act));
-                bld.arg(&bn);
-                bld.arg(&cn);
-                bld.arg(&proj);
+                bld.arg(&bn_p);
+                bld.arg(&cn_p);
+                bld.arg(&proj_p);
                 bld.arg(&ld_proj);
                 bld.arg(&b_col);
                 bld.arg(&c_col);
                 bld.arg(&wb);
                 bld.arg(&wc);
-                bld.arg(&rows_l);
+                bld.arg(&rows_p);
                 bld.arg(&rg);
                 bld.arg(&ds_i);
                 bld.arg(&eps);
                 let cfg = LaunchConfig {
-                    grid_dim: ((rows * rank * ng) as u32, 2, 1),
+                    grid_dim: ((n * rank * ng) as u32, 2, 1),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 };
@@ -1393,7 +1399,7 @@ impl Mamba3MimoGpuTrainer {
         (rows, dim): (usize, usize),
         accumulate: bool,
     ) -> Result<(), String> {
-        let width = (rows as u32).next_power_of_two().clamp(32, 256);
+        let width = rows.next_power_of_two().clamp(32, 256) as u32;
         let cw: u32 = if dim >= 4096 { 32 } else { 8 };
         let (rows_i, dim_i, acc) = (rows as i64, dim as i64, i32::from(accumulate));
         let (width_i, cw_i) = (width as i32, cw as i32);
@@ -2309,31 +2315,40 @@ impl Mamba3MimoGpuTrainer {
             let (b_col, c_col) = ((2 * di) as i32, (2 * di + bc) as i32);
             let (wb, wc) = (at(base, ls.b_norm_weight), at(base, ls.c_norm_weight));
             let eps = c.ssm_norm_eps;
-            let mut bld = stream.launch_builder(k.bc_norm_bwd.get(act));
-            bld.arg(&d_proj);
-            bld.arg(&dw_b);
-            bld.arg(&dw_c);
-            bld.arg(&d_bn_h);
-            bld.arg(&d_cn_h);
-            bld.arg(&proj);
-            bld.arg(&ld_proj);
-            bld.arg(&b_col);
-            bld.arg(&c_col);
-            bld.arg(&wb);
-            bld.arg(&wc);
-            bld.arg(&rows_l);
-            bld.arg(&nh_i);
-            bld.arg(&ng_i);
-            bld.arg(&r_i);
-            bld.arg(&ds_i);
-            bld.arg(&eps);
-            let cfg = LaunchConfig {
-                grid_dim: ((rows * rank * ng) as u32, 2, 1),
-                block_dim: (128, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            unsafe { bld.launch(cfg) }
-                .map_err(|e| format!("MIMO B/C norm backward L{l}: {e:?}"))?;
+            let esz = act.size_bytes();
+            for (first, n) in row_pieces(rows, rank * ng) {
+                let (rows_p, proj_at) = (n as i64, (first * ip * esz) as u64);
+                let normed = (first * rank * ng * ds * 4) as u64;
+                let heads = (first * nh * rank * ds * 4) as u64;
+                let (d_proj_p, proj_p) = (d_proj + proj_at, proj + proj_at);
+                let (dw_b_p, dw_c_p) = (dw_b + normed, dw_c + normed);
+                let (d_bn_p, d_cn_p) = (d_bn_h + heads, d_cn_h + heads);
+                let mut bld = stream.launch_builder(k.bc_norm_bwd.get(act));
+                bld.arg(&d_proj_p);
+                bld.arg(&dw_b_p);
+                bld.arg(&dw_c_p);
+                bld.arg(&d_bn_p);
+                bld.arg(&d_cn_p);
+                bld.arg(&proj_p);
+                bld.arg(&ld_proj);
+                bld.arg(&b_col);
+                bld.arg(&c_col);
+                bld.arg(&wb);
+                bld.arg(&wc);
+                bld.arg(&rows_p);
+                bld.arg(&nh_i);
+                bld.arg(&ng_i);
+                bld.arg(&r_i);
+                bld.arg(&ds_i);
+                bld.arg(&eps);
+                let cfg = LaunchConfig {
+                    grid_dim: ((n * rank * ng) as u32, 2, 1),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                unsafe { bld.launch(cfg) }
+                    .map_err(|e| format!("MIMO B/C norm backward L{l}: {e:?}"))?;
+            }
             self.reduce_axis0(at(g_base, ls.b_norm_weight), dw_b, (rows * rank * ng, ds))?;
             self.reduce_axis0(at(g_base, ls.c_norm_weight), dw_c, (rows * rank * ng, ds))?;
         }
