@@ -1,10 +1,13 @@
-//! GPU chunked prefill acceptance: the prompt-window pass must agree with
-//! the CPU prefill oracle, and a window split in two with state carry must
-//! reproduce the unsplit window — the seam test that directly pins the
-//! trapezoidal boundary fold (a missing or wrong fold shows up as a
-//! first-position error orders of magnitude above float noise).
+//! GPU prefill acceptance, by the chunked scan and by the sequential
+//! recurrence: the prompt-window pass must agree with the CPU prefill
+//! oracle, and a window split in two with state carry must reproduce the
+//! unsplit window — the seam test that directly pins the trapezoidal
+//! boundary fold (a missing or wrong fold shows up as a first-position
+//! error orders of magnitude above float noise), and a captured prompt
+//! replays the eager one bit for bit.
 #![cfg(feature = "cuda")]
 
+use mamba_rs::config::ScanMode;
 use mamba_rs::gpu::GpuOptions;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::{BiGemmFamily, GpuCtx};
@@ -51,9 +54,13 @@ fn gpu_dims(cfg: &Mamba3Config, batch: usize, seq_len: usize) -> GpuMamba3Dims {
         a_floor: cfg.a_floor,
         is_outproj_norm: cfg.is_outproj_norm,
         rms_norm_eps: cfg.rms_norm_eps,
-        use_parallel_scan: true,
+        use_parallel_scan: cfg.prefill_use_parallel_scan(),
     }
 }
+
+/// The two scans a prompt runs by: the chunked one (`Auto`) and the
+/// sequential recurrence.
+const SCANS: [ScanMode; 2] = [ScanMode::Auto, ScanMode::Sequential];
 
 /// Deterministic pseudo-random input (xorshift, seed-stable across runs).
 fn det_input(len: usize, seed: u64) -> Vec<f32> {
@@ -217,7 +224,18 @@ fn gpu_prefill_matches_cpu_oracle() {
     // measured floors while a real defect (e.g. a missing boundary
     // fold) still fails by orders of magnitude.
     const REL_TOL: f32 = 2e-3;
-    let cfg = tiny_cfg();
+    for scan_mode in SCANS {
+        prefill_matches_cpu_oracle(
+            Mamba3Config {
+                scan_mode,
+                ..tiny_cfg()
+            },
+            REL_TOL,
+        );
+    }
+}
+
+fn prefill_matches_cpu_oracle(cfg: Mamba3Config, rel_tol: f32) {
     let w = identity_weights(&cfg, 7);
     let rig = rig();
     for seq_len in [1usize, 63, 64, 65, 127, 192] {
@@ -226,10 +244,10 @@ fn gpu_prefill_matches_cpu_oracle() {
         let mut states = GpuStates::zeros(&rig, &gpu_dims(&cfg, 1, seq_len));
         let gpu_last = gpu_prefill(&rig, &cfg, &w, &input, seq_len, &mut states, false);
         assert_close(
-            &format!("last_hidden T={seq_len}"),
+            &format!("{:?} last_hidden T={seq_len}", cfg.scan_mode),
             &gpu_last,
             &cpu_last,
-            REL_TOL,
+            rel_tol,
         );
         let (ssm, k, v, _angle) = states.download(&rig);
         let nl = cfg.n_layers;
@@ -242,19 +260,19 @@ fn gpu_prefill_matches_cpu_oracle() {
                 &format!("ssm_state T={seq_len} L{l}"),
                 &ssm[l * per_ssm..(l + 1) * per_ssm],
                 &ls.ssm_state,
-                REL_TOL,
+                rel_tol,
             );
             assert_close(
                 &format!("k_state T={seq_len} L{l}"),
                 &k[l * per_k..(l + 1) * per_k],
                 &ls.k_state,
-                REL_TOL,
+                rel_tol,
             );
             assert_close(
                 &format!("v_state T={seq_len} L{l}"),
                 &v[l * per_v..(l + 1) * per_v],
                 &ls.v_state,
-                REL_TOL,
+                rel_tol,
             );
         }
     }
@@ -267,7 +285,15 @@ fn gpu_prefill_matches_cpu_oracle() {
 /// and an unaligned split are pinned.
 #[test]
 fn gpu_prefill_split_window_reproduces_full_window() {
-    let cfg = tiny_cfg();
+    for scan_mode in SCANS {
+        split_window_reproduces_full_window(Mamba3Config {
+            scan_mode,
+            ..tiny_cfg()
+        });
+    }
+}
+
+fn split_window_reproduces_full_window(cfg: Mamba3Config) {
     let w = identity_weights(&cfg, 11);
     let rig = rig();
     let total = 192usize;
@@ -285,7 +311,7 @@ fn gpu_prefill_split_window_reproduces_full_window() {
         let (s_ssm, s_k, s_v, s_angle) = states.download(&rig);
 
         assert_close(
-            &format!("split={split} last_hidden"),
+            &format!("{:?} split={split} last_hidden", cfg.scan_mode),
             &split_last,
             &full_last,
             1e-4,
@@ -362,15 +388,20 @@ fn gpu_prefill_then_decode_handoff() {
 /// device).
 #[test]
 fn gpu_prefill_graph_replay_is_bitwise() {
-    for family in [BiGemmFamily::Triad, BiGemmFamily::Inference] {
-        gpu_prefill_graph_replay_is_bitwise_for_family(family);
+    for scan_mode in SCANS {
+        for family in [BiGemmFamily::Triad, BiGemmFamily::Inference] {
+            gpu_prefill_graph_replay_is_bitwise_for_family(scan_mode, family);
+        }
     }
 }
 
-fn gpu_prefill_graph_replay_is_bitwise_for_family(family: BiGemmFamily) {
+fn gpu_prefill_graph_replay_is_bitwise_for_family(scan_mode: ScanMode, family: BiGemmFamily) {
     use mamba_rs::mamba3_siso::gpu::prefill::Mamba3PrefillGraph;
 
-    let cfg = tiny_cfg();
+    let cfg = Mamba3Config {
+        scan_mode,
+        ..tiny_cfg()
+    };
     let w = identity_weights(&cfg, 33);
     let rig = rig();
     rig.ctx.route_controls().set_family(family);

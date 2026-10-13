@@ -187,12 +187,14 @@ impl IntWidths {
 
 /// Whether and how the GPU runs `req` on a SISO model of `cfg` fed rows
 /// `input_dim` wide. `cfg` must pass [`Mamba3Config::validate`]; the
-/// request's scan mode stands in for the config's. A prompt window takes
-/// the chunked scan whatever the mode asks: the sequential prefill is not
-/// built yet, and the census lists the reroute.
+/// request's scan mode stands in for the config's.
 pub fn admit(cfg: &Mamba3Config, input_dim: usize, req: &Request) -> Result<Plan, Refusal> {
     matrix::check_request(req)?;
     let widths = IntWidths::of(cfg, input_dim, (req.batch, req.seq_len));
+    let cfg = Mamba3Config {
+        scan_mode: req.scan,
+        ..*cfg
+    };
     let scan = match req.path {
         Path::Decode => {
             matrix::int_args(&widths.step_args())?;
@@ -200,14 +202,8 @@ pub fn admit(cfg: &Mamba3Config, input_dim: usize, req: &Request) -> Result<Plan
                 scan: Scan::Sequential,
             });
         }
-        Path::Prefill => Scan::Parallel,
-        Path::Train => Scan::of(
-            Mamba3Config {
-                scan_mode: req.scan,
-                ..*cfg
-            }
-            .train_use_parallel_scan(),
-        ),
+        Path::Prefill => Scan::of(cfg.prefill_use_parallel_scan()),
+        Path::Train => Scan::of(cfg.train_use_parallel_scan()),
     };
     matrix::int_args(&widths.args())?;
     Ok(Plan { scan })

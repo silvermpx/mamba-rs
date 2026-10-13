@@ -639,7 +639,7 @@ impl Mamba3GpuEngine {
             a_floor: self.cfg.a_floor,
             is_outproj_norm: self.cfg.is_outproj_norm,
             rms_norm_eps: self.cfg.rms_norm_eps,
-            use_parallel_scan: true,
+            use_parallel_scan: self.cfg.prefill_use_parallel_scan(),
         }
     }
 

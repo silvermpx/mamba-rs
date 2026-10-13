@@ -509,6 +509,9 @@
   heads whose shared-memory blocks do not end on a float4, such as one
   channel over two states or rank 9 over 128 states: the chunked
   backward pads the blocks before the rows it reads as float4.
+- A SISO prompt runs the sequential recurrence under
+  `ScanMode::Sequential`; the prefill ran the chunked scan whatever the
+  mode said.
 
 ## 0.7.5 (2026-09-23)
 

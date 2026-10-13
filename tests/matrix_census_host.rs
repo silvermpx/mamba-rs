@@ -347,7 +347,8 @@ fn the_census_matches_the_ledger() {
 }
 
 /// Every shape the published models take is admitted on every path, scan,
-/// precision and GEMM mode at the windows they run.
+/// precision and GEMM mode at the windows they run, and a window runs the
+/// scan its mode names.
 #[test]
 fn the_published_shapes_take_every_request() {
     let windows = [(1, 1), (8, 1), (1, 2048), (2, 4621)];
@@ -382,26 +383,26 @@ fn the_published_shapes_take_every_request() {
         if !windows.contains(&(req.batch, req.seq_len)) {
             continue;
         }
-        let siso_plan = mamba_rs::mamba3_siso::route::admit(&siso, 384, &req);
-        let reroute = req.path == Path::Prefill && req.scan == ScanMode::Sequential;
-        assert!(siso_plan.is_ok(), "siso {req:?}: {siso_plan:?}");
-        if !reroute
-            && req.seq_len > 1
-            && let Some(named) = Scan::named(req.scan)
-        {
-            assert_eq!(siso_plan.unwrap().scan, named, "siso {req:?}");
+        let plans = [
+            ("m1", mamba_rs::mamba1::route::admit(&m1, 768, &req)),
+            ("m2", mamba_rs::mamba2::route::admit(&m2, 768, &req)),
+            (
+                "siso",
+                mamba_rs::mamba3_siso::route::admit(&siso, 384, &req),
+            ),
+            (
+                "mimo",
+                mamba_rs::mamba3_mimo::route::admit(&mimo, 768, &req),
+            ),
+        ];
+        for (family, plan) in plans {
+            let plan = plan.unwrap_or_else(|r| panic!("{family} {req:?}: {r}"));
+            if req.path != Path::Decode
+                && req.seq_len > 1
+                && let Some(named) = Scan::named(req.scan)
+            {
+                assert_eq!(plan.scan, named, "{family} {req:?}");
+            }
         }
-        assert!(
-            mamba_rs::mamba2::route::admit(&m2, 768, &req).is_ok(),
-            "m2 {req:?}"
-        );
-        assert!(
-            mamba_rs::mamba1::route::admit(&m1, 768, &req).is_ok(),
-            "m1 {req:?}"
-        );
-        assert!(
-            mamba_rs::mamba3_mimo::route::admit(&mimo, 768, &req).is_ok(),
-            "mimo {req:?}"
-        );
     }
 }

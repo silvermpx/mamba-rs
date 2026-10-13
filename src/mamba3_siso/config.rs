@@ -210,6 +210,13 @@ impl Mamba3Config {
     pub fn train_use_parallel_scan(&self) -> bool {
         !matches!(self.scan_mode, ScanMode::Sequential)
     }
+
+    /// Resolve the prompt window's scan choice from `scan_mode`, as for
+    /// training: the chunked scan in every mode but `Sequential`, so `Auto`
+    /// keeps the chunked prompt at every length.
+    pub fn prefill_use_parallel_scan(&self) -> bool {
+        !matches!(self.scan_mode, ScanMode::Sequential)
+    }
 }
 
 impl Default for Mamba3Config {
