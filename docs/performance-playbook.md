@@ -209,6 +209,23 @@ validators accept. The rule here:
   argument would read past its parameters. Find every launch of a kernel
   by its field name before changing its parameters.
 
+## Forced routes
+
+Two knobs send ordinary shapes down routes that only larger shapes or
+other boards take otherwise, so a suite run on one board covers them.
+Both refuse a malformed value loudly.
+
+- `MAMBA_RS_GRID_RUN=<n>` (above) splits every grid axis into runs of n
+  blocks.
+- `MAMBA_RS_SMEM_BUDGET=<bytes>` holds the Mamba-2 and MIMO kernels to
+  less shared memory than they opted in to, down to 64 KB, which every
+  shape `validate` accepts still fits on its leanest kernels (one channel
+  of a MIMO scan of rank 16 over 256 states takes 49 KB): their tile
+  sizes, their staged-or-global choices and their fallback kernels follow
+  the smaller budget, as on a part with less shared memory or at a larger
+  shape. The fallback bit suites, which pin the route a shape takes on
+  the board's own budget, do not hold under it.
+
 ## Graph capture and other threads
 
 - A synchronize of the device or of the context is invalid while any stream

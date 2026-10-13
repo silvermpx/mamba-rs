@@ -178,6 +178,10 @@
   configurations that differ in each shape feature its kernels route on,
   on every path, in a covering set of scan modes, precisions and GEMM
   modes, and holds each cell to the host.
+- `MAMBA_RS_SMEM_BUDGET=<bytes>` holds the Mamba-2 and MIMO kernels to
+  less shared memory than they opted in to (from 64 KB), so their smaller
+  tiles, global staging and fallback kernels run on ordinary shapes and
+  can be tested on one board.
 
 ### Changed
 

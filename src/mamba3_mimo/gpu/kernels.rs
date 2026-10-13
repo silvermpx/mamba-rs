@@ -12,7 +12,7 @@ use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig};
 use crate::gpu::composed::{ComposedModule, ComposedSpec, compile_composed};
 use crate::gpu::kernel_identity as ki;
 use crate::gpu::kernels::{CudaModuleAnchors, TypedKernel};
-use crate::gpu::launch::opt_in_dynamic_smem;
+use crate::gpu::launch::{opt_in_dynamic_smem, smem_budget};
 use crate::mamba3_mimo::config::MAX_MIMO_RANK;
 
 /// The compiled MIMO kernels.
@@ -56,7 +56,8 @@ pub struct Mamba3MimoKernels {
     pub cb: MimoChunkedBwd,
     /// The dynamic shared memory each kernel staging more than the default
     /// 48 KB may use: the device's per-block opt-in less the largest
-    /// static stage among those kernels.
+    /// static stage among those kernels, or less when
+    /// `MAMBA_RS_SMEM_BUDGET` asks for it.
     pub smem_optin: usize,
     /// The widest blocks the chunked path's kernels launch, from their
     /// register use.
@@ -705,11 +706,11 @@ impl Mamba3MimoKernels {
                 optin,
                 "inter tiles",
             )?);
-            budget.min(opt_in_dynamic_smem(
+            smem_budget(budget.min(opt_in_dynamic_smem(
                 &kernels.cb.dsloc_tiles,
                 optin,
                 "dsloc tiles",
-            )?)
+            )?))
         };
         Ok(kernels)
     }
@@ -844,13 +845,19 @@ mod tests {
         assert_eq!((g.state_tiles.2, g.dsloc_tiles.2), (72, 72));
     }
     /// No validated head is refused for shared memory on a supported part:
-    /// within the 99 KB every part since Ampere lets a block opt in to, and
-    /// fewer threads than any kernel leaves a block, the recurrence fits a
-    /// tile of one channel and the chunked kernels a tile of every shape.
+    /// within the 99 KB every part since Ampere lets a block opt in to, or
+    /// the least budget the forced-route knob takes, and fewer threads than
+    /// any kernel leaves a block, the recurrence fits a tile of one channel
+    /// and the chunked kernels a tile of every shape.
     #[test]
     fn every_validated_head_fits_a_supported_part() {
+        for cap in [crate::gpu::launch::SMEM_BUDGET_FLOOR, 99 * 1024] {
+            every_validated_head_fits(cap);
+        }
+    }
+
+    fn every_validated_head_fits(cap: usize) {
         use crate::mamba3_mimo::config::{MAX_D_STATE, MAX_MIMO_RANK};
-        let cap = 99 * 1024;
         for rank in 1..=MAX_MIMO_RANK {
             for ds in 1..=MAX_D_STATE {
                 for hd in [1, 2, 31, 32, 33, 64, 128, 129, 1024, 4096] {

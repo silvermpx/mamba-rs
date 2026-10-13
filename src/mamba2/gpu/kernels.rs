@@ -11,7 +11,7 @@ use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig};
 use crate::gpu::composed::{ComposedModule, ComposedSpec, compile_composed};
 use crate::gpu::kernel_identity as ki;
 use crate::gpu::kernels::{CudaModuleAnchors, HalfKernel, TypedKernel};
-use crate::gpu::launch::opt_in_dynamic_smem;
+use crate::gpu::launch::{opt_in_dynamic_smem, smem_budget};
 
 /// The compiled Mamba-2 kernels.
 pub struct Mamba2Kernels {
@@ -52,7 +52,8 @@ pub struct Mamba2Kernels {
     pub bwd: Mamba2BwdKernels,
     /// The dynamic shared memory each opted-in kernel (the scans, the gated
     /// norms, the sequential backward) may stage: the device's per-block
-    /// opt-in less the largest static stage among them.
+    /// opt-in less the largest static stage among them, or less when
+    /// `MAMBA_RS_SMEM_BUDGET` asks for it.
     pub smem_optin: usize,
     pub compiler_identity: ki::CompilerIdentity,
     pub artifact_identity: ki::ArtifactIdentity,
@@ -347,7 +348,7 @@ impl Mamba2Kernels {
                     budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
                 }
             }
-            budget
+            smem_budget(budget)
         };
         Ok(kernels)
     }
@@ -544,12 +545,15 @@ mod tests {
 
     /// No validated state is refused for shared memory on a supported part:
     /// one channel of the largest state fits the 99 KB every part since
-    /// Ampere lets a block opt in to.
+    /// Ampere lets a block opt in to, and the least budget the forced-route
+    /// knob takes.
     #[test]
     fn one_channel_of_every_validated_state_fits_a_supported_part() {
-        for ds in 1..=1024 {
-            for hd in [1, 7, 32, 33, 4096] {
-                assert!(step_rows(hd, ds, 99 * 1024).is_some(), "hd {hd} ds {ds}");
+        for cap in [crate::gpu::launch::SMEM_BUDGET_FLOOR, 99 * 1024] {
+            for ds in 1..=1024 {
+                for hd in [1, 7, 32, 33, 4096] {
+                    assert!(step_rows(hd, ds, cap).is_some(), "hd {hd} ds {ds} at {cap}");
+                }
             }
         }
     }

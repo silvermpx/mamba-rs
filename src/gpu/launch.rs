@@ -139,6 +139,34 @@ pub(crate) fn opt_in_dynamic_smem(
     Ok(dynamic)
 }
 
+/// The least budget [`smem_budget`] accepts: under the 99 KB every
+/// supported part lets a block opt in to, and over what the leanest
+/// kernels of every shape `validate` accepts need (one channel of a MIMO
+/// scan of rank 16 over 256 states takes 49 KB), so every shape still runs.
+pub(crate) const SMEM_BUDGET_FLOOR: usize = 64 * 1024;
+
+/// The dynamic shared memory a family plans its tiles with: `opted`, what
+/// its kernels opted in to, or less when `MAMBA_RS_SMEM_BUDGET` asks for
+/// it. A smaller budget sends ordinary shapes down the routes larger shapes
+/// take on a part with less shared memory (smaller tiles, staging in global
+/// memory), so a suite run with it checks those routes on one board. A
+/// value other than a byte count from [`SMEM_BUDGET_FLOOR`] is refused
+/// loudly, so a typo cannot report a green run that never left the
+/// device's budget.
+pub(crate) fn smem_budget(opted: usize) -> usize {
+    static BUDGET: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let asked = *BUDGET.get_or_init(|| match std::env::var("MAMBA_RS_SMEM_BUDGET") {
+        Err(_) => None,
+        Ok(v) => match v.trim().parse::<usize>() {
+            Ok(n) if n >= SMEM_BUDGET_FLOOR => Some(n),
+            _ => panic!(
+                "MAMBA_RS_SMEM_BUDGET={v:?} is not a byte count of at least {SMEM_BUDGET_FLOOR}"
+            ),
+        },
+    });
+    asked.map_or(opted, |n| opted.min(n))
+}
+
 /// Launch config for 1D element-wise kernel on `n` elements.
 ///
 /// Grid: `ceil(n / 256)` blocks of 256 threads.
