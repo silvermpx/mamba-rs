@@ -546,98 +546,16 @@ fn scan_trio_time_and_hash() {
         "typed coop scan diverged from the plain coop kernel"
     );
 
-    // The inter-chunk prefix scan mutates its states buffer in place, so
-    // the hash arm runs once on a fresh copy of the pair's chunk_states;
-    // the timing loop then reuses the (already transformed) buffer -
-    // values drift there but the address pattern is identical.
-    let states_sp = GpuBuffer::from_cpu(st, &cst_h).unwrap();
-    let final_states = GpuBuffer::zeros(st, batch * nh * hd * ds).unwrap();
-    let state_passing = || {
-        let dim = hd * ds;
-        let block_x = dim.min(256) as u32;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (
-                batch as u32,
-                nh as u32,
-                dim.div_ceil(block_x as usize) as u32,
-            ),
-            block_dim: (block_x, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        let nc_i = nc as i32;
-        let init_states_null: u64 = 0;
-        for (y_first, z_first, cfg) in yz_runs(cfg) {
-            let mut b = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd.i32);
-            b.arg(states_sp.inner());
-            b.arg(final_states.inner());
-            b.arg(da_cumsum.inner());
-            b.arg(&init_states_null);
-            b.arg(&b_i);
-            b.arg(&nc_i);
-            b.arg(&nh_i);
-            b.arg(&hd_i);
-            b.arg(&ds_i);
-            b.arg(&cs_i);
-            b.arg(&t_i);
-            b.arg(&y_first);
-            b.arg(&z_first);
-            unsafe { b.launch(cfg) }.unwrap();
-        }
-    };
-    state_passing();
-    ctx.stream.synchronize().unwrap();
-    let mut sp_h = vec![0.0f32; batch * nc * nh * hd * ds];
-    states_sp.download(st, &mut sp_h).unwrap();
-    let mut fs_h = vec![0.0f32; batch * nh * hd * ds];
-    final_states.download(st, &mut fs_h).unwrap();
-    println!(
-        "STATE_PASSING HASH entering={:016x} final={:016x}",
-        fnv(&sp_h),
-        fnv(&fs_h)
-    );
-    evidence_digest::record_digest(
-        "m3_scan_micro_bench",
-        "state_passing",
-        "entering",
-        fnv(&sp_h),
-    )
-    .expect("acceptance evidence");
-    evidence_digest::record_digest("m3_scan_micro_bench", "state_passing", "final", fnv(&fs_h))
-        .expect("acceptance evidence");
-    println!("state_pass  {:8.1} us", time(&state_passing));
-
-    // The fused state pass takes the pass and the window-final writeback
-    // in one launch: its entering and exit states must carry the pass's
-    // bits, and its time is set against the two launches it replaces.
+    // The state pass mutates its states buffer in place, so the hash arm
+    // runs once on a fresh copy of the pair's chunk_states; the timing loop
+    // then reuses the (already transformed) buffer - values drift there but
+    // the address pattern is identical. The digests keep the keys of the
+    // separate pass the fused one replaced, whose entering and final states
+    // it gives bit for bit.
+    let states_fp = GpuBuffer::from_cpu(st, &cst_h).unwrap();
     let ssm_out = GpuBuffer::zeros(st, batch * nh * hd * ds).unwrap();
     let k_out = GpuBuffer::zeros(st, batch * nh * ds).unwrap();
     let v_out = GpuBuffer::zeros(st, batch * nh * hd).unwrap();
-    let writeback = || {
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (batch as u32, nh as u32, 1),
-            block_dim: (hd.max(ds) as u32, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        for (y_first, cfg) in y_runs(cfg) {
-            let mut b = ctx
-                .stream
-                .launch_builder(&m3k.m3_writeback_parallel_states.i32);
-            b.arg(ssm_out.inner());
-            b.arg(k_out.inner());
-            b.arg(v_out.inner());
-            b.arg(final_states.inner());
-            b.arg(k.inner());
-            b.arg(x.inner());
-            b.arg(&b_i);
-            b.arg(&t_i);
-            b.arg(&nh_i);
-            b.arg(&hd_i);
-            b.arg(&ds_i);
-            b.arg(&y_first);
-            unsafe { b.launch(cfg) }.unwrap();
-        }
-    };
-    let states_fp = GpuBuffer::from_cpu(st, &cst_h).unwrap();
     let state_pass_fused = || {
         let cfg = mamba_rs::mamba3_siso::gpu::kernels::state_pass_fused_cfg(batch, nh, hd, ds);
         let nc_i = nc as i32;
@@ -671,27 +589,24 @@ fn scan_trio_time_and_hash() {
     };
     state_pass_fused();
     ctx.stream.synchronize().unwrap();
-    let mut spf_h = vec![0.0f32; batch * nc * nh * hd * ds];
-    states_fp.download(st, &mut spf_h).unwrap();
-    let mut ssm_h = vec![0.0f32; batch * nh * hd * ds];
-    ssm_out.download(st, &mut ssm_h).unwrap();
-    assert_eq!(
-        fnv(&spf_h),
-        fnv(&sp_h),
-        "fused state pass entering states diverged from the pass"
-    );
-    assert_eq!(
-        fnv(&ssm_h),
-        fnv(&fs_h),
-        "fused state pass exit state diverged from the pass"
-    );
+    let mut sp_h = vec![0.0f32; batch * nc * nh * hd * ds];
+    states_fp.download(st, &mut sp_h).unwrap();
+    let mut fs_h = vec![0.0f32; batch * nh * hd * ds];
+    ssm_out.download(st, &mut fs_h).unwrap();
     println!(
-        "pass+writeback {:8.1} us",
-        time(&|| {
-            state_passing();
-            writeback();
-        })
+        "STATE_PASSING HASH entering={:016x} final={:016x}",
+        fnv(&sp_h),
+        fnv(&fs_h)
     );
+    evidence_digest::record_digest(
+        "m3_scan_micro_bench",
+        "state_passing",
+        "entering",
+        fnv(&sp_h),
+    )
+    .expect("acceptance evidence");
+    evidence_digest::record_digest("m3_scan_micro_bench", "state_passing", "final", fnv(&fs_h))
+        .expect("acceptance evidence");
     println!("state_pass_fused {:8.1} us", time(&state_pass_fused));
 }
 

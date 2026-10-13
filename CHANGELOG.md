@@ -284,6 +284,12 @@
   (sixteen, or the batch when smaller), each in order, and the chunks in a
   fixed tree, so a run gives the same bits on any machine. This moves
   their bits once.
+- `Mamba3Kernels` no longer carries `m3_state_passing_fwd`,
+  `m3_chunk_entering_state`, `m3_writeback_parallel_states` and
+  `m3_writeback_parallel_states_typed`. The fused state pass replaced
+  them, and only tests and a bench still launched them. The test that
+  holds the fused pass to their bits compiles a frozen copy of them
+  (`tests/fixtures/m3_state_pass_reference.cu`).
 
 ### Fixed
 

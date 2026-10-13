@@ -145,13 +145,6 @@ pub struct Mamba3Kernels {
     pub m3_preprocess_chunks: ByIndexWidth<CudaFunction>,
     pub m3_da_cumsum: ByIndexWidth<CudaFunction>,
     pub m3_chunk_state_fwd: ByIndexWidth<CudaFunction>,
-    pub m3_state_passing_fwd: ByIndexWidth<CudaFunction>,
-    /// Trapezoidal boundary fold for state-carrying prefill: seeds the
-    /// entering SSM state with `v_state (x) k_state * dt0 * (1 - trap0)`
-    /// so the beta term's one-step reach-back across the window seam is
-    /// honored (reference: mamba3_siso_fwd.py HAS_INITIAL_STATES).
-    pub m3_chunk_entering_state: ByIndexWidth<CudaFunction>,
-    pub m3_writeback_parallel_states: ByIndexWidth<CudaFunction>,
     pub m3_chunk_scan_fwd: ByIndexWidth<CudaFunction>,
     /// Cooperative-block twin: one head per 128-thread block, triangle
     /// tile + staged operands in dynamic smem. Routed when the smem total
@@ -261,13 +254,11 @@ pub struct Mamba3Kernels {
     /// across the seam instead of round-tripping it through L2. Launched
     /// only when `chunk_fused_cfg` returns Some; otherwise the pair runs.
     pub m3_chunk_pre_state_fused_typed: ByIndexWidth<TypedKernel>,
-    /// Persist final states to ssm_state/k_state/v_state (all f32 persistent
-    /// buffers). Typed inputs k_flat/x_flat.
-    pub m3_writeback_parallel_states_typed: ByIndexWidth<TypedKernel>,
-    /// The entering fold, the inter-chunk state pass and the window-final
-    /// writeback in one launch, one CTA per (b, h): the three kernels'
-    /// expressions in their order, the folded seed and the final state in
-    /// registers. Typed inputs k_flat/x_flat; every state f32. Launched with
+    /// The inter-chunk state pass of a window in one launch, one CTA per
+    /// (b, h): the trapezoidal entering fold of a carried window, the
+    /// exclusive prefix scan over the chunks, and the window's final SSM,
+    /// K and V states, the folded seed and the final state in registers.
+    /// Typed inputs k_flat/x_flat; every state f32. Launched with
     /// `state_pass_fused_cfg`.
     pub m3_state_pass_fused_typed: ByIndexWidth<TypedKernel>,
     /// Intra-chunk output: typed y_out/x/Q/K_scaled; f32 qk_dot/dA_cumsum/
@@ -793,9 +784,6 @@ impl Mamba3Kernels {
             m3_preprocess_chunks: pair("m3_preprocess_chunks")?,
             m3_da_cumsum: pair("m3_dA_cumsum")?,
             m3_chunk_state_fwd: pair("m3_chunk_state_fwd")?,
-            m3_state_passing_fwd: pair("m3_state_passing_fwd")?,
-            m3_chunk_entering_state: pair("m3_chunk_entering_state")?,
-            m3_writeback_parallel_states: pair("m3_writeback_parallel_states")?,
             m3_chunk_scan_fwd: pair("m3_chunk_scan_fwd")?,
             m3_chunk_scan_fwd_coop: pair("m3_chunk_scan_fwd_coop")?,
             m3_extract_da_cs_sum: pair("m3_extract_da_cs_sum")?,
@@ -911,11 +899,6 @@ impl Mamba3Kernels {
                 "m3_chunk_pre_state_fused",
                 "m3_chunk_pre_state_fused_bf16",
                 "m3_chunk_pre_state_fused_f16",
-            )?,
-            m3_writeback_parallel_states_typed: typed_pair(
-                "m3_writeback_parallel_states",
-                "m3_writeback_parallel_states_bf16",
-                "m3_writeback_parallel_states_f16",
             )?,
             m3_state_pass_fused_typed: typed_pair(
                 "m3_state_pass_fused_f32",

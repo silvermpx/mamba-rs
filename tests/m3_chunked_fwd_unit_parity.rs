@@ -1,12 +1,14 @@
-//! per-kernel parity tests for the 4 new typed M3 chunked parallel
-//! forward kernels: `m3_preprocess_chunks`, `m3_chunk_state_fwd`,
-//! `m3_writeback_parallel_states`, `m3_chunk_scan_fwd`. Each typed variant is
-//! compared against its f32 oracle on identical random inputs.
-//! The fused preprocess/state path also has exact same-dtype comparisons
-//! against the unfused pair, including its intermediate outputs.
+//! per-kernel parity tests for the typed M3 chunked parallel forward
+//! kernels: `m3_preprocess_chunks`, `m3_chunk_state_fwd` and
+//! `m3_chunk_scan_fwd`. Each typed variant is compared against its f32
+//! oracle on identical random inputs. The fused preprocess/state path also
+//! has exact same-dtype comparisons against the unfused pair, including its
+//! intermediate outputs.
 //!
-//! The fused state pass is held bit for bit to the entering fold, the
-//! inter-chunk pass and the writeback it replaces, in every dtype.
+//! The fused state pass is held bit for bit, in every dtype, to the three
+//! launches it replaced (the entering fold, the inter-chunk pass and the
+//! window-final writeback), kept frozen in
+//! `fixtures/m3_state_pass_reference.cu`.
 //!
 //! The scan-state arithmetic (`m3_dA_cumsum`, the inter-chunk pass) stays
 //! pure-f32 per the Tri Dao invariant (compounding O(T) prefix arithmetic
@@ -18,16 +20,17 @@
 #[path = "common/arch.rs"]
 mod arch;
 
-use cudarc::driver::{LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaModule, LaunchConfig, PushKernelArg};
 use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::kernels::state_capacity;
+use mamba_rs::gpu::kernels::{cuda_include_paths, state_capacity};
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::{
     Mamba3Kernels, chunk_fused_cfg, chunk_state_cfg, state_pass_fused_cfg,
 };
+use std::sync::Arc;
 
 // Small config — T=10, CS=4 forces 3 chunks with the LAST chunk PARTIAL (len=2).
 // Previously T=8 CS=4 left the partial-last-chunk path of the typed kernels
@@ -116,6 +119,41 @@ fn download_f32(ctx: &GpuCtx, buf: &GpuBuffer, n: usize) -> Vec<f32> {
 
 fn make_m3k(ctx: &GpuCtx) -> Mamba3Kernels {
     Mamba3Kernels::compile(ctx.stream.context(), arch::arch0()).unwrap()
+}
+
+/// The frozen three-launch state pass, compiled for the production
+/// module's target with its numeric options.
+fn state_pass_reference(ctx: &GpuCtx) -> Arc<CudaModule> {
+    let source = [
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("fixtures/m3_state_pass_reference.cu"),
+    ]
+    .join("\n");
+    let (mut major, mut minor) = (0, 0);
+    let status = unsafe { cudarc::nvrtc::sys::nvrtcVersion(&mut major, &mut minor) };
+    assert_eq!(status, cudarc::nvrtc::sys::nvrtcResult::NVRTC_SUCCESS);
+    let mut options = vec![
+        "--fmad=true".to_owned(),
+        "--extra-device-vectorization".to_owned(),
+        "-DNDEBUG".to_owned(),
+    ];
+    if (major, minor) >= (12, 9) {
+        options.push("--frandom-seed=1295203121".to_owned());
+    }
+    let ptx = cudarc::nvrtc::compile_ptx_with_opts(
+        &source,
+        cudarc::nvrtc::CompileOptions {
+            arch: Some(arch::arch0()),
+            options,
+            include_paths: cuda_include_paths(),
+            ..Default::default()
+        },
+    )
+    .expect("state pass reference compilation");
+    ctx.stream
+        .context()
+        .load_module(ptx)
+        .expect("load state pass reference")
 }
 
 fn tolerances(dtype: WeightDtype) -> (f32, f32) {
@@ -620,9 +658,10 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
 
 // ─── m3_state_pass_fused ───────────────────────────────────────────────
 
-/// The fused state pass against the three launches it replaces: the
-/// entering fold, the inter-chunk pass and the window-final writeback.
-/// Both arms take the same dtype, so every output must agree bit for bit:
+/// The fused state pass against the three launches it replaced, the
+/// entering fold, the inter-chunk pass and the window-final writeback,
+/// each launched whole from the frozen reference. Both arms take the same
+/// dtype, so every output must agree bit for bit:
 /// the entering state of every chunk, the exit SSM state and the K and V
 /// boundaries. The seeded arm passes the persistent states as their own
 /// seed, as a continued prefill does, so a write racing a read shows up.
@@ -631,6 +670,12 @@ fn m3_state_pass_fused_matches_separate_bits() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
     let m3k = make_m3k(&ctx);
+    let reference = state_pass_reference(&ctx);
+    let load = |name: &str| reference.load_function(name).expect(name);
+    let (entering, passing) = (
+        load("m3_reference_entering_state"),
+        load("m3_reference_state_passing"),
+    );
     // (batch, t, nh, hd, ds, cs): a partial last chunk, a single partial
     // chunk, the classifier head, a state wider than one 1024-thread pass,
     // and a state that is not a whole number of warps.
@@ -642,6 +687,11 @@ fn m3_state_pass_fused_matches_separate_bits() {
         (1, 70, 3, 5, 7, 16),
     ];
     for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+        let writeback = load(match dtype {
+            WeightDtype::Bf16 => "m3_reference_writeback_bf16",
+            WeightDtype::F16 => "m3_reference_writeback_f16",
+            _ => "m3_reference_writeback_f32",
+        });
         for (batch, t, nh, hd, ds, cs) in shapes {
             let nc = t.div_ceil(cs);
             let dim = hd * ds;
@@ -709,18 +759,14 @@ fn m3_state_pass_fused_matches_separate_bits() {
                         dt.cached_ptr(),
                         trap.cached_ptr(),
                     ];
-                    for (y_first, z_first, cfg) in yz_runs(cfg) {
-                        let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_entering_state.i32);
-                        for ptr in &ptrs {
-                            bld.arg(ptr);
-                        }
-                        for arg in [&bi, &nhi, &hdi, &dsi, &ti] {
-                            bld.arg(arg);
-                        }
-                        bld.arg(&y_first);
-                        bld.arg(&z_first);
-                        unsafe { bld.launch(cfg) }.unwrap();
+                    let mut bld = ctx.stream.launch_builder(&entering);
+                    for ptr in &ptrs {
+                        bld.arg(ptr);
                     }
+                    for arg in [&bi, &nhi, &hdi, &dsi, &ti] {
+                        bld.arg(arg);
+                    }
+                    unsafe { bld.launch(cfg) }.unwrap();
                     init.cached_ptr()
                 } else {
                     0
@@ -742,18 +788,14 @@ fn m3_state_pass_fused_matches_separate_bits() {
                         da.cached_ptr(),
                         init_ptr,
                     ];
-                    for (y_first, z_first, cfg) in yz_runs(cfg) {
-                        let mut bld = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd.i32);
-                        for ptr in &ptrs {
-                            bld.arg(ptr);
-                        }
-                        for arg in [&bi, &nci, &nhi, &hdi, &dsi, &csi, &ti] {
-                            bld.arg(arg);
-                        }
-                        bld.arg(&y_first);
-                        bld.arg(&z_first);
-                        unsafe { bld.launch(cfg) }.unwrap();
+                    let mut bld = ctx.stream.launch_builder(&passing);
+                    for ptr in &ptrs {
+                        bld.arg(ptr);
                     }
+                    for arg in [&bi, &nci, &nhi, &hdi, &dsi, &csi, &ti] {
+                        bld.arg(arg);
+                    }
+                    unsafe { bld.launch(cfg) }.unwrap();
                 }
                 {
                     let cfg = LaunchConfig {
@@ -769,19 +811,14 @@ fn m3_state_pass_fused_matches_separate_bits() {
                         k_flat.cached_ptr(),
                         x_flat.cached_ptr(),
                     ];
-                    for (y_first, cfg) in y_runs(cfg) {
-                        let mut bld = ctx
-                            .stream
-                            .launch_builder(m3k.m3_writeback_parallel_states_typed.i32.get(dtype));
-                        for ptr in &ptrs {
-                            bld.arg(ptr);
-                        }
-                        for arg in [&bi, &ti, &nhi, &hdi, &dsi] {
-                            bld.arg(arg);
-                        }
-                        bld.arg(&y_first);
-                        unsafe { bld.launch(cfg) }.unwrap();
+                    let mut bld = ctx.stream.launch_builder(&writeback);
+                    for ptr in &ptrs {
+                        bld.arg(ptr);
                     }
+                    for arg in [&bi, &ti, &nhi, &hdi, &dsi] {
+                        bld.arg(arg);
+                    }
+                    unsafe { bld.launch(cfg) }.unwrap();
                 }
                 // The fused launch, its seed the persistent states themselves.
                 let states_b = upload_f32(&ctx, &contrib);
@@ -853,122 +890,6 @@ fn m3_state_pass_fused_matches_separate_bits() {
             }
         }
     }
-}
-
-// ─── m3_writeback_parallel_states ──────────────────────────────────────
-
-fn check_writeback_parallel_states(dtype: WeightDtype) {
-    let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = make_m3k(&ctx);
-
-    let final_vals = det_rand(B * NH * HD * DS, 0x8C21);
-    let k_vals = det_rand(B * T * NH * DS, 0x8C22);
-    let x_vals = det_rand(B * T * D_INNER, 0x8C23);
-
-    let final_f32 = upload_f32(&ctx, &final_vals);
-    let k_f32 = upload_f32(&ctx, &k_vals);
-    let x_f32 = upload_f32(&ctx, &x_vals);
-
-    let ssm_n = B * NH * HD * DS;
-    let k_n = B * NH * DS;
-    let v_n = B * NH * HD;
-
-    // f32 oracle.
-    let ssm_ref = GpuBuffer::zeros(&ctx.stream, ssm_n).unwrap();
-    let k_ref_out = GpuBuffer::zeros(&ctx.stream, k_n).unwrap();
-    let v_ref_out = GpuBuffer::zeros(&ctx.stream, v_n).unwrap();
-    ctx.stream.synchronize().unwrap();
-    let cfg = LaunchConfig {
-        grid_dim: (B as u32, NH as u32, 1),
-        block_dim: (HD.max(DS) as u32, 1, 1),
-        shared_mem_bytes: 0,
-    };
-    let (bi, ti, nhi, hdi, dsi) = (B as i32, T as i32, NH as i32, HD as i32, DS as i32);
-    for (y_first, cfg) in y_runs(cfg) {
-        let mut bld = ctx
-            .stream
-            .launch_builder(&m3k.m3_writeback_parallel_states.i32);
-        let (a, b, c, d, e, f) = (
-            ssm_ref.cached_ptr(),
-            k_ref_out.cached_ptr(),
-            v_ref_out.cached_ptr(),
-            final_f32.cached_ptr(),
-            k_f32.cached_ptr(),
-            x_f32.cached_ptr(),
-        );
-        bld.arg(&a);
-        bld.arg(&b);
-        bld.arg(&c);
-        bld.arg(&d);
-        bld.arg(&e);
-        bld.arg(&f);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&hdi);
-        bld.arg(&dsi);
-        bld.arg(&y_first);
-        unsafe { bld.launch(cfg) }.unwrap();
-    }
-    ctx.stream.synchronize().unwrap();
-    let ssm_ref_v = download_f32(&ctx, &ssm_ref, ssm_n);
-    let k_ref_v = download_f32(&ctx, &k_ref_out, k_n);
-    let v_ref_v = download_f32(&ctx, &v_ref_out, v_n);
-
-    // Typed variant: typed k_flat/x_flat.
-    let k_t = upload_typed(&ctx, &k_vals, dtype);
-    let x_t = upload_typed(&ctx, &x_vals, dtype);
-    let ssm_got = GpuBuffer::zeros(&ctx.stream, ssm_n).unwrap();
-    let k_got_out = GpuBuffer::zeros(&ctx.stream, k_n).unwrap();
-    let v_got_out = GpuBuffer::zeros(&ctx.stream, v_n).unwrap();
-    ctx.stream.synchronize().unwrap();
-    for (y_first, cfg) in y_runs(cfg) {
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.m3_writeback_parallel_states_typed.i32.get(dtype));
-        let (a, b, c, d, e, f) = (
-            ssm_got.cached_ptr(),
-            k_got_out.cached_ptr(),
-            v_got_out.cached_ptr(),
-            final_f32.cached_ptr(),
-            k_t.cached_ptr(),
-            x_t.cached_ptr(),
-        );
-        bld.arg(&a);
-        bld.arg(&b);
-        bld.arg(&c);
-        bld.arg(&d);
-        bld.arg(&e);
-        bld.arg(&f);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&hdi);
-        bld.arg(&dsi);
-        bld.arg(&y_first);
-        unsafe { bld.launch(cfg) }.unwrap();
-    }
-    ctx.stream.synchronize().unwrap();
-    let ssm_got_v = download_f32(&ctx, &ssm_got, ssm_n);
-    let k_got_v = download_f32(&ctx, &k_got_out, k_n);
-    let v_got_v = download_f32(&ctx, &v_got_out, v_n);
-
-    eprintln!("m3_writeback_parallel_states {dtype:?}:");
-    let (cos_min, norm_tol) = tolerances(dtype);
-    // ssm_state is copied f32→f32 (no dtype conversion) → bit-exact.
-    assert_close("ssm_state", &ssm_ref_v, &ssm_got_v, 1.0 - 1e-6, 1e-4);
-    assert_close("k_state", &k_ref_v, &k_got_v, cos_min, norm_tol);
-    assert_close("v_state", &v_ref_v, &v_got_v, cos_min, norm_tol);
-}
-
-#[test]
-fn m3_writeback_parallel_states_bf16() {
-    check_writeback_parallel_states(WeightDtype::Bf16);
-}
-#[test]
-fn m3_writeback_parallel_states_f16() {
-    check_writeback_parallel_states(WeightDtype::F16);
 }
 
 // ─── m3_chunk_scan_fwd ─────────────────────────────────────────────────

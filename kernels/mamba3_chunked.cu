@@ -583,221 +583,45 @@ DEFINE_M3_CHUNK_PRE_STATE_FUSED_F32(m3_chunk_pre_state_fused, int)
 DEFINE_M3_CHUNK_PRE_STATE_FUSED_F32(m3_chunk_pre_state_fused_i64, long long)
 
 // ============================================================================
-// 4. m3_state_passing_fwd -- Inter-chunk exclusive prefix scan
+// 4. m3_state_pass_fused -- the inter-chunk state pass of a window
 // ============================================================================
 //
-// Sequential scan over n_chunks: out[c] = state entering chunk c.
-// Forward recurrence: new_state = exp(dA_chunk_end) * prev_state + chunk_contribution
-// Converts states in-place from chunk contributions to prefix-scanned entering states.
+// One CTA per (b, h), its threads over the hd*ds state elements. Each
+// element seeds its state, carries it across the chunks, and stores the
+// window's final state, then the block writes the K and V boundary states
+// from the window's last step.
 //
-// WINDOW SEMANTICS: with init_states == nullptr, chunk 0 enters with
-// state = 0 (the stateless-window contract every training forward uses —
-// the host zeroes all four persistent state buffers, including the RoPE
-// angle accumulator, at the start of every parallel-scan forward). A
-// prefill that CONTINUES a previous window passes init_states (the
-// entering SSM state, with the trapezoidal boundary fold already applied
-// by m3_chunk_entering_state) and chunk 0 starts from it.
-//
-// Handles partial last chunk (T not multiple of chunk_size).
-//
-// Input/Output: states[B * n_chunks * nh * hd * ds] (in-place)
-// Output:       final_states[B * nh * hd * ds]
-// Input:        dA_cumsum[B * n_chunks * nh * chunk_size]
-// Input:        init_states[B * nh * hd * ds] or nullptr
-//
-// Trapezoidal boundary fold for a prefill that CONTINUES a previous
-// window: the trapezoidal discretization's beta term reaches one step
-// BACK across the window seam, so carrying the SSM state alone is wrong
-// at exactly the first position of the new window. Following the
-// reference (mamba3_siso_fwd.py, HAS_INITIAL_STATES):
+// The seed: a window that CONTINUES a previous one (a carried prefill)
+// enters from the persistent SSM state, with the trapezoidal boundary fold
+// applied: the trapezoidal discretization's beta term reaches one step BACK
+// across the window seam, so carrying the SSM state alone is wrong at
+// exactly the first position of the new window. Following the reference
+// (mamba3_siso_fwd.py, HAS_INITIAL_STATES):
 //
 //   h_enter[b,h,p,n] += v_state[b,h,p] * k_state[b,h,n]
 //                       * dt[b,0,h] * (1 - trap[b,0,h])
 //
 // dt is post-softplus and trap post-sigmoid (both saved that way by the
-// split/activation kernels — no extra sigmoid here, unlike the raw-input
-// reference). All inputs f32; runs once per prefill, cost negligible.
+// split and activation kernels, so no extra sigmoid here, unlike the
+// raw-input reference). A null seed is a stateless window that enters at
+// zero, the contract of every training forward.
 //
-// Grid: (B, nh, ceil(hd*ds / BLOCK)), Block: (min(hd*ds, 256))
-#define DEFINE_M3_CHUNK_ENTERING_STATE(NAME, IDX)                              \
-extern "C" __global__ void NAME(                                               \
-    float* __restrict__ h_enter,        /* [B * nh * hd * ds] in/out */        \
-    const float* __restrict__ k_state,  /* [B * nh * ds] */                    \
-    const float* __restrict__ v_state,  /* [B * nh * hd] */                    \
-    const float* __restrict__ dt,       /* [B * T * nh] (post-softplus) */     \
-    const float* __restrict__ trap,     /* [B * T * nh] (post-sigmoid) */      \
-    int batch, int nh, int hd, int ds, int T,                                  \
-    int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
-) {                                                                            \
-    IDX b = blockIdx.x;                                                        \
-    int h = y_first + blockIdx.y;                                              \
-    int pd = (z_first + blockIdx.z) * blockDim.x + threadIdx.x;                \
-    int dim = hd * ds;                                                         \
-    if (b >= batch || pd >= dim) return;                                       \
-    int p = pd / ds;                                                           \
-    int n = pd % ds;                                                           \
-    float dt0 = dt[b * T * nh + h];    /* t = 0 */                             \
-    float trap0 = trap[b * T * nh + h];                                        \
-    float v = v_state[(b * nh + h) * hd + p];                                  \
-    float k = k_state[(b * nh + h) * ds + n];                                  \
-    h_enter[(b * nh + h) * dim + pd] += v * k * dt0 * (1.0f - trap0);          \
-}
-
-DEFINE_M3_CHUNK_ENTERING_STATE(m3_chunk_entering_state, int)
-DEFINE_M3_CHUNK_ENTERING_STATE(m3_chunk_entering_state_i64, long long)
-
-// Grid: (B, nh, ceil(hd*ds / BLOCK)), Block: (min(hd*ds, 256))
-#define DEFINE_M3_STATE_PASSING_FWD(NAME, IDX)                                 \
-extern "C" __global__ void NAME(                                               \
-    float* __restrict__ states,          /* [B * n_chunks * nh * hd * ds] in/out */ \
-    float* __restrict__ final_states,    /* [B * nh * hd * ds] output */       \
-    const float* __restrict__ dA_cumsum, /* [B * n_chunks * nh * chunk_size] */ \
-    const float* __restrict__ init_states, /* [B * nh * hd * ds] or nullptr */ \
-    int batch, int n_chunks, int nh, int hd, int ds, int chunk_size, int T,    \
-    int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
-) {                                                                            \
-    IDX b = blockIdx.x;                                                        \
-    int h = y_first + blockIdx.y;                                              \
-    int pd = (z_first + blockIdx.z) * blockDim.x + threadIdx.x;  /* flattened (p, n) index */ \
-    int dim = hd * ds;                                                         \
-    if (pd >= dim) return;                                                     \
-                                                                               \
-    /* Exclusive prefix scan: states[c] = state ENTERING chunk c. With an */   \
-    /* entering state the scan seeds from it instead of zero. */               \
-    float state = init_states ? init_states[b * nh * dim + h * dim + pd] : 0.0f; \
-                                                                               \
-    /* The recurrence is serial in `state`, but the loads are not: each */     \
-    /* iteration issues the NEXT chunk's contribution and decay before */      \
-    /* touching the dependent chain, so the per-chunk memory latency */        \
-    /* pipelines behind the FMA chain instead of serializing on it. The */     \
-    /* arithmetic and its order are untouched. states is read with plain */    \
-    /* loads: this kernel also writes it, and the read-only cache path */      \
-    /* would let the compiler move a load past the store that overwrites */    \
-    /* the same element. dA_cumsum is read-only here and takes that path. */   \
-    IDX state_idx = b * n_chunks * nh * dim + h * dim + pd;                    \
-    IDX cs_idx = b * n_chunks * nh + h;                                        \
-    float contrib = states[state_idx];                                         \
-    int chunk_end_0 = chunk_size > T ? T : chunk_size;                         \
-    float decay = FAST_EXP(__ldg(&dA_cumsum[cs_idx * chunk_size + chunk_end_0 - 1])); \
-                                                                               \
-    for (int c = 0; c < n_chunks; c++) {                                       \
-        float next_contrib = 0.0f;                                             \
-        float next_decay = 0.0f;                                               \
-        if (c + 1 < n_chunks) {                                                \
-            next_contrib = states[state_idx + nh * dim];                       \
-            int chunk_start_n = (c + 1) * chunk_size;                          \
-            int chunk_end_n = chunk_start_n + chunk_size;                      \
-            if (chunk_end_n > T) chunk_end_n = T;                              \
-            int last_elem_n = chunk_end_n - chunk_start_n - 1;                 \
-            next_decay = FAST_EXP(                                             \
-                __ldg(&dA_cumsum[(cs_idx + nh) * chunk_size + last_elem_n]));  \
-        }                                                                      \
-                                                                               \
-        /* Write prev_state (state ENTERING this chunk) BEFORE updating */     \
-        states[state_idx] = state;                                             \
-                                                                               \
-        /* Update: state after this chunk = decay * prev_state + chunk_contribution */ \
-        state = decay * state + contrib;                                       \
-                                                                               \
-        contrib = next_contrib;                                                \
-        decay = next_decay;                                                    \
-        state_idx += nh * dim;                                                 \
-        cs_idx += nh;                                                          \
-    }                                                                          \
-                                                                               \
-    /* Store final state (state after all chunks) */                           \
-    IDX final_idx = b * nh * dim + h * dim + pd;                               \
-    final_states[final_idx] = state;                                           \
-}
-
-DEFINE_M3_STATE_PASSING_FWD(m3_state_passing_fwd, int)
-DEFINE_M3_STATE_PASSING_FWD(m3_state_passing_fwd_i64, long long)
-
-// ============================================================================
-// 4b. m3_writeback_parallel_states -- Persist SSM/K/V state after parallel scan
-// ============================================================================
+// The pass: an exclusive prefix scan over the chunks that turns states in
+// place from chunk contributions into the state ENTERING each chunk,
+//   new_state = exp(dA_chunk_end) * prev_state + chunk_contribution,
+// with a partial last chunk when T is not a multiple of the chunk size.
 //
-// The parallel chunked scan path does not update the persistent layer state
-// buffers (ssm_state, k_state, v_state) unlike the sequential m3_burnin_fwd
-// kernel. This kernel writes back the final states of the WINDOW so callers
-// can inspect/export them. NOTE: the next parallel-scan window does NOT
-// consume them (stateless window — see m3_state_passing_fwd); only the
-// sequential path reads persistent state.
-//
-// SSM state: copy from final_states[B * nh * hd * ds] (output of K4)
-// K state:   extract last timestep (T-1) from k_flat[B * T * nh * ds]
-// V state:   extract last timestep (T-1) from x_flat[B * T * d_inner]
-//
-// Grid: (B, nh, 1), Block: (max(hd, ds), 1, 1)
-// Each thread handles one (p) index; loops over the other dimension.
-#define DEFINE_M3_WRITEBACK_PARALLEL_STATES_F32(NAME, IDX)                     \
-extern "C" __global__ void NAME(                                               \
-    float* __restrict__ ssm_state,          /* [B * nh * hd * ds] out */       \
-    float* __restrict__ k_state,            /* [B * nh * ds] out */            \
-    float* __restrict__ v_state,            /* [B * nh * hd] out */            \
-    const float* __restrict__ final_states, /* [B * nh * hd * ds] in */        \
-    const float* __restrict__ k_flat,       /* [B * T * nh * ds] in */         \
-    const float* __restrict__ x_flat,       /* [B * T * d_inner] in */         \
-    int batch, int T, int nh, int hd, int ds,                                  \
-    int y_first /* this run's first y block */                                 \
-) {                                                                            \
-    IDX b = blockIdx.x;                                                        \
-    int h = y_first + blockIdx.y;                                              \
-    int p = threadIdx.x;                                                       \
-    if (b >= batch || h >= nh) return;                                         \
-                                                                               \
-    int d_inner = nh * hd;                                                     \
-    int dim = hd * ds;                                                         \
-                                                                               \
-    /* SSM state: copy final_states -> ssm_state (both [B * nh * hd * ds]) */  \
-    /* Thread p loops over the dimension it doesn't cover */                   \
-    if (p < hd) {                                                              \
-        for (int n = 0; n < ds; n++) {                                         \
-            IDX idx = b * nh * dim + h * dim + p * ds + n;                     \
-            ssm_state[idx] = final_states[idx];                                \
-        }                                                                      \
-    }                                                                          \
-                                                                               \
-    /* K state: last timestep from k_flat[B * T * nh * ds] */                  \
-    /* k_flat layout: [b * T * nh * ds + t * nh * ds + h * ds + n] */          \
-    if (p < ds) {                                                              \
-        IDX src_idx = (b * T + (T - 1)) * nh * ds + h * ds + p;                \
-        IDX dst_idx = b * nh * ds + h * ds + p;                                \
-        k_state[dst_idx] = k_flat[src_idx];                                    \
-    }                                                                          \
-                                                                               \
-    /* V state: last timestep from x_flat[B * T * d_inner] */                  \
-    /* x_flat layout: [b * T * d_inner + t * d_inner + h * hd + p] */          \
-    if (p < hd) {                                                              \
-        IDX src_idx = (b * T + (T - 1)) * d_inner + h * hd + p;                \
-        IDX dst_idx = b * nh * hd + h * hd + p;                                \
-        v_state[dst_idx] = x_flat[src_idx];                                    \
-    }                                                                          \
-}
-
-DEFINE_M3_WRITEBACK_PARALLEL_STATES_F32(m3_writeback_parallel_states, int)
-DEFINE_M3_WRITEBACK_PARALLEL_STATES_F32(m3_writeback_parallel_states_i64, long long)
-
-// ============================================================================
-// 4c. m3_state_pass_fused -- the entering fold, the inter-chunk pass and the
-//     window-final writeback in one launch
-// ============================================================================
-//
-// One CTA per (b, h), its threads over the hd*ds state elements. Each
-// element folds its seed as m3_chunk_entering_state does, carries it across
-// the chunks as m3_state_passing_fwd does, and stores the final state where
-// m3_writeback_parallel_states copied it: the same expressions in the same
-// order, with the folded seed and the final state held in registers instead
-// of the round trips through global memory that the three launches took.
+// The arithmetic is that of the three launches this kernel replaced (the
+// entering fold, the pass and the writeback), in the same order, with the
+// folded seed and the final state held in registers instead of round trips
+// through global memory; tests/fixtures/m3_state_pass_reference.cu keeps
+// them frozen, and the fused pass is held to them bit for bit.
 //
 // The seed and the persistent state may be one buffer (a carried prefill
 // passes the layer's own SSM, K and V states as both): an element is read
 // before its own thread writes it, and the K and V boundary states, which
 // every element's fold reads, are rewritten only after a block barrier.
-// That barrier is why one CTA holds a head's whole state. A null seed is a
-// window that enters at zero.
+// That barrier is why one CTA holds a head's whole state.
 //
 // Grid: (B, nh). Block: hd*ds rounded up to whole warps, at most 1024; an
 // element loop covers larger states.
@@ -837,8 +661,8 @@ NAME(                                                                         \
             state = ssm_seed[hi];                                             \
             state += v * k * dt0 * (1.0f - trap0);                            \
         }                                                                     \
-        /* The pass of m3_state_passing_fwd: the next chunk's loads go */     \
-        /* out ahead of the dependent chain, the arithmetic unchanged. */     \
+        /* The pass: the next chunk's loads go out ahead of the */            \
+        /* dependent chain, the arithmetic unchanged. */                      \
         /* states is read with plain loads: this kernel also writes it, */   \
         /* and the read-only cache path would let the compiler move a */      \
         /* load past the store that overwrites the same element. */           \
@@ -2264,7 +2088,8 @@ DEFINE_M3_FINAL_GRADS(m3_final_grads_i64, long long)
 // The following kernels stay f32-only and are NOT typed: their O(T)
 // compounding scan state mandates float for numerical safety:
 //   - m3_dA_cumsum  (prefix-sum scan)
-//   - m3_state_passing_fwd  (inter-chunk prefix recurrence)
+// The state pass reads typed K and V for the boundary states only; its
+// inter-chunk recurrence is f32 too.
 // ============================================================================
 
 #define DEFINE_M3_PREPROCESS_CHUNKS(NAME, IDX, T_ACT, FROM_F)                 \
@@ -2633,48 +2458,6 @@ DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_bf16, int, __nv_bfloat1
 DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_f16, int, __half, from_f_f16)
 DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_f16_i64, long long, __half, from_f_f16)
-
-#define DEFINE_M3_WRITEBACK_PARALLEL_STATES(NAME, IDX, T_ACT, FROM_F)         \
-extern "C" __global__ void                                                    \
-NAME(                                                                         \
-    float* __restrict__ ssm_state,                                            \
-    float* __restrict__ k_state,                                              \
-    float* __restrict__ v_state,                                              \
-    const float* __restrict__ final_states,                                   \
-    const T_ACT* __restrict__ k_flat,                                         \
-    const T_ACT* __restrict__ x_flat,                                         \
-    int batch, int T, int nh, int hd, int ds,                                 \
-    int y_first /* this run's first y block */                                \
-) {                                                                           \
-    IDX b = blockIdx.x;                                                       \
-    int h = y_first + blockIdx.y;                                             \
-    int p = threadIdx.x;                                                      \
-    if (b >= batch || h >= nh) return;                                        \
-    int d_inner = nh * hd;                                                    \
-    int dim = hd * ds;                                                        \
-    if (p < hd) {                                                             \
-        for (int n = 0; n < ds; n++) {                                        \
-            IDX idx = b * nh * dim + h * dim + p * ds + n;                    \
-            ssm_state[idx] = final_states[idx];                               \
-        }                                                                     \
-    }                                                                         \
-    if (p < ds) {                                                             \
-        IDX src_idx = (b * T + (T - 1)) * nh * ds + h * ds + p;               \
-        IDX dst_idx = b * nh * ds + h * ds + p;                               \
-        k_state[dst_idx] = to_f(k_flat[src_idx]);                             \
-    }                                                                         \
-    if (p < hd) {                                                             \
-        IDX src_idx = (b * T + (T - 1)) * d_inner + h * hd + p;               \
-        IDX dst_idx = b * nh * hd + h * hd + p;                               \
-        v_state[dst_idx] = to_f(x_flat[src_idx]);                             \
-    }                                                                         \
-    (void)FROM_F;                                                             \
-}
-
-DEFINE_M3_WRITEBACK_PARALLEL_STATES(m3_writeback_parallel_states_bf16, int, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_WRITEBACK_PARALLEL_STATES(m3_writeback_parallel_states_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_WRITEBACK_PARALLEL_STATES(m3_writeback_parallel_states_f16, int, __half, from_f_f16)
-DEFINE_M3_WRITEBACK_PARALLEL_STATES(m3_writeback_parallel_states_f16_i64, long long, __half, from_f_f16)
 
 #define DEFINE_M3_CHUNK_SCAN_FWD(NAME, IDX, T_ACT, FROM_F)                    \
 /* No __launch_bounds__ pin: the old (64, 2) minimum-blocks hint was          \
