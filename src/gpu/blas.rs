@@ -20,7 +20,9 @@ use super::kernel_identity::{
     enqueue_with_physical_observation, finish_recording_physical_observer,
     resolve_physical_launch_observation,
 };
-use super::launch::{check_int_args, grid_1d, grid_1d_wide, grid_colsum, launch_cast};
+use super::launch::{
+    GRID_YZ_EXTENT, check_int_args, grid_1d, grid_1d_wide, grid_colsum, launch_cast, y_runs,
+};
 use cudarc::driver::{CudaFunction, DeviceRepr, LaunchArgs, LaunchConfig, PushKernelArg};
 use std::ffi::{c_int, c_void};
 
@@ -4304,7 +4306,10 @@ fn launch_bi_matvec<O: PhysicalLaunchObserver>(
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
-    int_spans(args.m, args.n, args.k, "matvec_bi")?;
+    // Each launch below takes at most the grid's y extent of rows and
+    // indexes A and C from its own first row.
+    let run_rows = args.m.min(GRID_YZ_EXTENT as i32);
+    int_spans(run_rows, args.n, args.k, "matvec_bi")?;
     // Must match kernel constants in kernels/gemm_bi_inference/:
     //   BLOCK_N_MV = 32, WARPS_PER_BLOCK = 8, THREADS_PER_BLOCK = 256
     // Grid is 2D: (ceil(N / BLOCK_N_MV), M) — one CTA per (m_row, col_chunk).
@@ -4326,7 +4331,7 @@ fn launch_bi_matvec<O: PhysicalLaunchObserver>(
         ));
     }
     let num_pid_n = (args.n + BLOCK_N_MV - 1) / BLOCK_N_MV;
-    let cfg = cudarc::driver::LaunchConfig {
+    let whole = cudarc::driver::LaunchConfig {
         grid_dim: (num_pid_n as u32, args.m as u32, 1),
         block_dim: (THREADS_PER_BLOCK as u32, 1, 1),
         shared_mem_bytes: smem_bytes,
@@ -4334,30 +4339,43 @@ fn launch_bi_matvec<O: PhysicalLaunchObserver>(
     let lda = args.k;
     let ldb = args.n;
     let ldc = args.n;
-    let mut builder = ctx.stream.launch_builder(kernel);
-    builder.arg(&args.c);
-    builder.arg(&args.a);
-    builder.arg(&args.b);
-    builder.arg(&args.bias);
-    builder.arg(&args.alpha);
-    builder.arg(&args.beta);
-    builder.arg(&args.m);
-    builder.arg(&args.n);
-    builder.arg(&args.k);
-    builder.arg(&lda);
-    builder.arg(&ldb);
-    builder.arg(&ldc);
-    let observation =
-        super::gemm_bi_inference::identity::observation(ctx, observer, kernel, cfg, || {
-            super::gemm_bi_inference::identity::Arguments::legacy(
-                [args.c, args.a, args.b, args.bias],
-                storage.map(super::gemm_bi_inference::identity::policy_dtype),
-                [args.alpha, args.beta],
-                [args.m, args.n, args.k, lda, ldb, ldc],
-            )
-        })?;
-    unsafe { enqueue_with_physical_observation(observer, &mut builder, cfg, observation) }
-        .map_err(|error| error.with_driver_context(format_args!("Inference matvec launch")))?;
+    // A block per row on y: past the axis's extent the rows go in runs,
+    // each launch's A and C moved to its first row, so every row is the
+    // work of the same block it would be in one launch.
+    let a_row = args.k as u64 * storage[0].size_bytes() as u64;
+    let c_row = args.n as u64 * storage[2].size_bytes() as u64;
+    for (first, cfg) in y_runs(whole) {
+        let run = BiGemmArgs {
+            c: args.c + first as u64 * c_row,
+            a: args.a + first as u64 * a_row,
+            m: cfg.grid_dim.1 as i32,
+            ..args
+        };
+        let mut builder = ctx.stream.launch_builder(kernel);
+        builder.arg(&run.c);
+        builder.arg(&run.a);
+        builder.arg(&run.b);
+        builder.arg(&run.bias);
+        builder.arg(&run.alpha);
+        builder.arg(&run.beta);
+        builder.arg(&run.m);
+        builder.arg(&run.n);
+        builder.arg(&run.k);
+        builder.arg(&lda);
+        builder.arg(&ldb);
+        builder.arg(&ldc);
+        let observation =
+            super::gemm_bi_inference::identity::observation(ctx, observer, kernel, cfg, || {
+                super::gemm_bi_inference::identity::Arguments::legacy(
+                    [run.c, run.a, run.b, run.bias],
+                    storage.map(super::gemm_bi_inference::identity::policy_dtype),
+                    [run.alpha, run.beta],
+                    [run.m, run.n, run.k, lda, ldb, ldc],
+                )
+            })?;
+        unsafe { enqueue_with_physical_observation(observer, &mut builder, cfg, observation) }
+            .map_err(|error| error.with_driver_context(format_args!("Inference matvec launch")))?;
+    }
     Ok(())
 }
 
@@ -4429,10 +4447,6 @@ pub fn gpu_gemm_typed_forward_raw(
         && let Some(kernel) = pick_bi_matvec(ctx, x.dtype, w.dtype, c.dtype)
     {
         let bias_arg = bias_ptr.unwrap_or(0);
-        kernel_elems(
-            (batch * n_out).max(batch * n_in).max(n_out * n_in),
-            "matvec_bi",
-        )?;
         let [m_i, n_i, k_i] = kernel_ints([batch, n_out, n_in], "matvec_bi")?;
         return launch_bi_matvec(
             ctx,
@@ -4777,6 +4791,87 @@ mod matvec_inventory_cuda_tests {
                         assert_eq!(actual, expected);
                         assert!(actual.iter().all(|v| *v == k as f32 + 0.5));
                     }
+                }
+            }
+        }
+    }
+
+    /// Rows past one launch's grid y go in runs, A and C moved to each
+    /// run's first row: the rows on both sides of a run boundary keep the
+    /// bits the same rows take in a product of four rows, in the mixed
+    /// f32-out lane and in a one-column half product.
+    #[test]
+    #[ignore = "needs a CUDA device"]
+    fn matvec_rows_past_one_grid_run_keep_each_rows_bits() {
+        let device = GpuDevice::new(0).unwrap();
+        let ctx = GpuCtx::new(&device).unwrap();
+        ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        let (m, k) = (70_000usize, 24usize);
+        let picked = [65_534usize, 65_535, 65_536, m - 1];
+        let row = |r: usize| -> Vec<f32> {
+            (0..k)
+                .map(|j| ((r * 7 + j * 3) % 23) as f32 / 8.0 - 1.375)
+                .collect()
+        };
+        let xs: Vec<f32> = (0..m).flat_map(row).collect();
+        let few: Vec<f32> = picked.iter().copied().flat_map(row).collect();
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            for (output, n) in [(WeightDtype::F32, 3usize), (dtype, 1)] {
+                let ws: Vec<f32> = (0..k * n).map(|i| (i % 13) as f32 / 4.0 - 1.5).collect();
+                let x = DtypedBuf::zeros(&ctx.stream, m * k, dtype).unwrap();
+                let x4 = DtypedBuf::zeros(&ctx.stream, 4 * k, dtype).unwrap();
+                let w = DtypedBuf::zeros(&ctx.stream, k * n, dtype).unwrap();
+                let y = DtypedBuf::zeros(&ctx.stream, m * n, output).unwrap();
+                let y4 = DtypedBuf::zeros(&ctx.stream, 4 * n, output).unwrap();
+                x.upload_f32(&ctx.stream, &xs).unwrap();
+                x4.upload_f32(&ctx.stream, &few).unwrap();
+                w.upload_f32(&ctx.stream, &ws).unwrap();
+                let typed = |b: &DtypedBuf, dtype| TypedPtr {
+                    ptr: b.cached_ptr(),
+                    dtype,
+                };
+                let eager = ctx
+                    .record_eager_gemm_trace(|| {
+                        gpu_gemm_typed_forward_raw(
+                            &ctx,
+                            typed(&y, output),
+                            typed(&x, dtype),
+                            typed(&w, dtype),
+                            None,
+                            (m, k, n),
+                        )
+                    })
+                    .unwrap();
+                assert!(
+                    eager.routes().len() >= 2,
+                    "{dtype:?} {output:?}: one launch"
+                );
+                for route in eager.routes() {
+                    assert_eq!(route.backend, PhysicalGemmBackend::InferenceMatvecEightWarp);
+                }
+                gpu_gemm_typed_forward_raw(
+                    &ctx,
+                    typed(&y4, output),
+                    typed(&x4, dtype),
+                    typed(&w, dtype),
+                    None,
+                    (4, k, n),
+                )
+                .unwrap();
+                let mut all = vec![0.0; m * n];
+                y.download_f32(&ctx.stream, &mut all).unwrap();
+                let mut want = vec![0.0; 4 * n];
+                y4.download_f32(&ctx.stream, &mut want).unwrap();
+                for (i, &r) in picked.iter().enumerate() {
+                    let got = &all[r * n..(r + 1) * n];
+                    let rows = &want[i * n..(i + 1) * n];
+                    assert!(
+                        got.iter()
+                            .zip(rows)
+                            .all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "{dtype:?} {output:?} row {r}: {got:?} vs {rows:?}"
+                    );
                 }
             }
         }

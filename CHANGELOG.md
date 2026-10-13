@@ -532,6 +532,11 @@
   Inference f32 kernels take operands past 2^31 elements; the matvec opts
   in to the device's shared memory (half projections past 24064 inputs
   failed to launch).
+- A matvec of more than 65535 rows runs: the mixed lane (half inputs,
+  f32 output) on Triad and plain contexts and one-column half products
+  put a block per row on the grid's y axis and failed to launch past its
+  extent. The 32-bit offsets the kernel takes now bound one launch's rows
+  rather than the whole product.
 
 ## 0.7.5 (2026-09-23)
 
