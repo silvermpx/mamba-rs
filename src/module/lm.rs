@@ -244,19 +244,19 @@ impl MambaLM {
                 let m = load_hf_mamba2(dir)?;
                 let d_model = m.cfg.d_model;
                 let backbone = Mamba2Backbone::new(m.weights, m.cfg, d_model)?;
-                Self::new(backbone, m.embed, None, m.vocab_size)
+                Self::new(backbone, m.embed, m.lm_head, m.vocab_size)
             }
             ModelFamily::Mamba3 => {
                 let m = load_hf_mamba3(dir)?;
                 let d_model = m.cfg.d_model;
                 let backbone = Mamba3Backbone::new(m.weights, m.cfg, d_model)?;
-                Self::new(backbone, m.embed, None, m.vocab_size)
+                Self::new(backbone, m.embed, m.lm_head, m.vocab_size)
             }
             ModelFamily::Mamba3Mimo => {
                 let m = load_hf_mamba3_mimo(dir)?;
                 let d_model = m.cfg.d_model;
                 let backbone = Mamba3MimoBackbone::new(m.weights, m.cfg, d_model)?;
-                Self::new(backbone, m.embed, None, m.vocab_size)
+                Self::new(backbone, m.embed, m.lm_head, m.vocab_size)
             }
         }
     }

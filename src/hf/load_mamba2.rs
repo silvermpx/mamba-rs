@@ -1,9 +1,13 @@
-//! Loading the official Mamba-2 checkpoints (state-spaces/mamba2-*).
+//! Loading Mamba-2 checkpoints in either layout they ship in.
 //!
-//! They ship as `config.json` in the original mamba_ssm format (the mixer
-//! settings under `ssm_cfg`, `"layer": "Mamba2"`) and a `pytorch_model.bin`,
-//! the embedding tied to the head and no input projection. The key map is
-//! as strict as the Mamba-3 loader's: every tensor the model uses must be
+//! The official state-spaces/mamba2-* repositories keep `config.json` in
+//! the original mamba_ssm format (the mixer settings under `ssm_cfg`,
+//! `"layer": "Mamba2"`) and a `pytorch_model.bin`. The transformers layout
+//! (`"model_type": "mamba2"`: mistralai/Mamba-Codestral-7B-v0.1, the
+//! converted mamba2-*-hf) names the fields its own way and the embedding
+//! `backbone.embeddings.weight`, and ships safetensors, often sharded and
+//! with an untied head. Neither has an input projection. The key map is as
+//! strict as the Mamba-3 loader's: every tensor the model uses must be
 //! present at its shape, and nothing else may be.
 
 use std::collections::HashMap;
@@ -11,9 +15,12 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use super::config_json::{config_json, json_f32};
 use super::load_mamba3::{
-    Source, bool_or, check_tensors, expect_common, f32_or, field, read_mlp, transpose, usize_or,
+    EMBEDDING, bool_or, check_tensors, expect_common, f32_or, field, read_mlp, read_untied_head,
+    transpose, usize_or,
 };
+use super::source::Source;
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 
@@ -22,33 +29,48 @@ pub struct HfMamba2Model {
     pub cfg: Mamba2Config,
     /// Layer weights with an empty (identity) input projection.
     pub weights: Mamba2Weights,
-    /// The embedding `[vocab_padded, d_model]`, also the tied head.
+    /// The embedding `[vocab_padded, d_model]`, also the head when it is
+    /// tied.
     pub embed: Vec<f32>,
+    /// The untied head `[d_model, vocab_size]`; `None` ties the head to the
+    /// embedding.
+    pub lm_head: Option<Vec<f32>>,
     /// The tokenizer's vocabulary size; rows past it are padding.
     pub vocab_size: usize,
 }
 
-/// The parsed `config.json` of an official Mamba-2 checkpoint.
+/// The parsed `config.json` of a Mamba-2 checkpoint.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HfMamba2Config {
     pub cfg: Mamba2Config,
     pub vocab_padded: usize,
     pub vocab_size: usize,
     pub tie_embeddings: bool,
+    /// The name of the embedding tensor: `backbone.embedding.weight` in the
+    /// original format, `backbone.embeddings.weight` in the transformers
+    /// one.
+    pub embedding: &'static str,
 }
 
-/// Is this original-format config a Mamba-2 one?
+/// The name the transformers layout gives the embedding.
+const HF_EMBEDDING: &str = "backbone.embeddings.weight";
+
+/// Is this config a Mamba-2 one, in either layout?
 pub fn is_mamba2_config(json: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(json)
-        .ok()
-        .is_some_and(|c| c["ssm_cfg"]["layer"].as_str() == Some("Mamba2"))
+    config_json::<Value>(json).is_ok_and(|c| {
+        c["ssm_cfg"]["layer"].as_str() == Some("Mamba2") || c["model_type"] == "mamba2"
+    })
 }
 
-/// Parse the original-format `config.json` of a Mamba-2 checkpoint. The
-/// defaults are the reference's own (`MambaConfig` and `Mamba2.__init__`).
+/// Parse the `config.json` of a Mamba-2 checkpoint in either layout. The
+/// defaults are each format's own: the reference's `MambaConfig` and
+/// `Mamba2.__init__` for the original one, transformers' `Mamba2Config`
+/// for the other.
 pub fn parse_mamba2_config(json: &[u8]) -> Result<HfMamba2Config, String> {
-    let root: Value =
-        serde_json::from_slice(json).map_err(|e| format!("config.json parse error: {e}"))?;
+    let root: Value = config_json(json)?;
+    if field(&root, "model_type").and_then(Value::as_str) == Some("mamba2") {
+        return parse_transformers_config(&root);
+    }
     let ssm = field(&root, "ssm_cfg").ok_or("config.json: no ssm_cfg")?;
     let layer = field(ssm, "layer").and_then(Value::as_str).unwrap_or("");
     if layer != "Mamba2" {
@@ -72,11 +94,7 @@ pub fn parse_mamba2_config(json: &[u8]) -> Result<HfMamba2Config, String> {
                 .as_array()
                 .filter(|a| a.len() == 2)
                 .ok_or("config.json: dt_limit is not a pair")?;
-            let num = |x: &Value| {
-                x.as_f64()
-                    .map(|n| n as f32)
-                    .ok_or("config.json: dt_limit holds a non-number")
-            };
+            let num = |x: &Value| json_f32(x).ok_or("config.json: dt_limit holds a non-number");
             (num(&pair[0])?, num(&pair[1])?)
         }
     };
@@ -116,10 +134,85 @@ pub fn parse_mamba2_config(json: &[u8]) -> Result<HfMamba2Config, String> {
         vocab_padded,
         vocab_size,
         tie_embeddings: bool_or(&root, "tie_embeddings", true)?,
+        embedding: EMBEDDING,
     })
 }
 
-/// Load an official Mamba-2 checkpoint directory.
+/// The transformers layout's `config.json`. Its `vocab_size` is the
+/// embedding's row count. Two of its fields do not describe the model the
+/// weights run: `rms_norm`, since every transformers Mamba-2 has the
+/// gated norm, and `norm_before_gate`, which transformers never reads (it
+/// gates before the norm as mamba_ssm does by default; Codestral's config
+/// says `true` of weights that run with the gate first).
+fn parse_transformers_config(root: &Value) -> Result<HfMamba2Config, String> {
+    let d_model = usize_or(root, "hidden_size", 4096)?;
+    let expand = usize_or(root, "expand", 2)?;
+    let (heads, headdim) = (
+        usize_or(root, "num_heads", 128)?,
+        usize_or(root, "head_dim", 64)?,
+    );
+    let d_inner = d_model
+        .checked_mul(expand)
+        .ok_or("config.json: hidden_size * expand overflows")?;
+    if heads.checked_mul(headdim) != Some(d_inner) {
+        return Err(format!(
+            "config.json: num_heads {heads} x head_dim {headdim} is not hidden_size {d_model} \
+             x expand {expand}"
+        ));
+    }
+    if field(root, "intermediate_size").is_some()
+        && usize_or(root, "intermediate_size", 0)? != d_inner
+    {
+        return Err("config.json: intermediate_size is not hidden_size x expand".into());
+    }
+    let dt_limit = match field(root, "time_step_limit") {
+        None => (0.0, f32::INFINITY),
+        Some(v) => {
+            let pair = v
+                .as_array()
+                .filter(|a| a.len() == 2)
+                .ok_or("config.json: time_step_limit is not a pair")?;
+            let num =
+                |x: &Value| json_f32(x).ok_or("config.json: time_step_limit holds a non-number");
+            (num(&pair[0])?, num(&pair[1])?)
+        }
+    };
+    let vocab_size = usize_or(root, "vocab_size", 32768)?;
+    if vocab_size == 0 || vocab_size > (1 << 24) {
+        return Err(format!("config.json: vocab_size {vocab_size} out of range"));
+    }
+    let eps = f32_or(root, "layer_norm_epsilon", 1e-5)?;
+    let cfg = Mamba2Config {
+        d_model,
+        n_layers: usize_or(root, "num_hidden_layers", 64)?,
+        d_intermediate: 0,
+        d_state: usize_or(root, "state_size", 128)?,
+        d_conv: usize_or(root, "conv_kernel", 4)?,
+        expand,
+        headdim,
+        d_ssm: 0,
+        ngroups: usize_or(root, "n_groups", 8)?,
+        d_has_hdim: false,
+        rmsnorm: true,
+        norm_before_gate: false,
+        dt_limit,
+        proj_bias: bool_or(root, "use_bias", false)?,
+        conv_bias: bool_or(root, "use_conv_bias", true)?,
+        rms_norm_eps: eps,
+        gated_norm_eps: eps,
+        scan_mode: crate::config::ScanMode::Auto,
+    };
+    cfg.validate()?;
+    Ok(HfMamba2Config {
+        cfg,
+        vocab_padded: vocab_size,
+        vocab_size,
+        tie_embeddings: bool_or(root, "tie_word_embeddings", false)?,
+        embedding: HF_EMBEDDING,
+    })
+}
+
+/// Load a Mamba-2 checkpoint directory in either layout.
 pub fn load_hf_mamba2(dir: &Path) -> Result<HfMamba2Model, String> {
     let json = std::fs::read(dir.join("config.json"))
         .map_err(|e| format!("cannot read config.json: {e}"))?;
@@ -138,7 +231,11 @@ pub fn load_hf_mamba2(dir: &Path) -> Result<HfMamba2Model, String> {
     let mut src = Source::open(dir)?;
 
     let mut expect: HashMap<String, Vec<usize>> = HashMap::new();
-    expect_common(&mut expect, (cfg.n_layers, d, hidden, hf.vocab_padded));
+    expect_common(
+        &mut expect,
+        (cfg.n_layers, d, hidden, hf.vocab_padded),
+        (hf.tie_embeddings, hf.embedding),
+    );
     for i in 0..cfg.n_layers {
         let p = |n: &str| format!("backbone.layers.{i}.mixer.{n}");
         expect.insert(p("in_proj.weight"), vec![ip, d]);
@@ -200,11 +297,15 @@ pub fn load_hf_mamba2(dir: &Path) -> Result<HfMamba2Model, String> {
         mlp,
     };
     weights.validate(&cfg, d)?;
-    let embed = src.read("backbone.embedding.weight")?;
+    let embed = src.read(hf.embedding)?;
+    let lm_head = (!hf.tie_embeddings)
+        .then(|| read_untied_head(&mut src, (hf.vocab_size, d)))
+        .transpose()?;
     Ok(HfMamba2Model {
         cfg,
         weights,
         embed,
+        lm_head,
         vocab_size: hf.vocab_size,
     })
 }

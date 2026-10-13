@@ -86,9 +86,59 @@ pub struct HfMambaConfig {
     pub rms_norm_eps: f32,
 }
 
+/// A `config.json` as Python's `json.dump` writes it, which can hold the
+/// bare tokens `Infinity`, `-Infinity` and `NaN` strict JSON lacks (a
+/// transformers Mamba-2 config carries `"time_step_limit": [0.0,
+/// Infinity]`). Each such token outside a string is read as a string of
+/// its own name, which [`json_f32`] reads back as the float it names.
+pub(crate) fn config_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| format!("config.json is not UTF-8: {e}"))?;
+    let mut out = String::with_capacity(text.len() + 16);
+    let (mut in_string, mut escaped) = (false, false);
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_string = true;
+        } else if let Some(token) = ["-Infinity", "Infinity", "NaN"]
+            .into_iter()
+            .find(|t| rest.starts_with(t))
+        {
+            out.push('"');
+            out.push_str(token);
+            out.push('"');
+            rest = &rest[token.len()..];
+            continue;
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    serde_json::from_str(&out).map_err(|e| format!("config.json parse error: {e}"))
+}
+
+/// A config number, or one of the bare non-finite tokens [`config_json`]
+/// keeps as strings.
+pub(crate) fn json_f32(v: &serde_json::Value) -> Option<f32> {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64().map(|x| x as f32),
+        serde_json::Value::String(s) => match s.as_str() {
+            "Infinity" => Some(f32::INFINITY),
+            "-Infinity" => Some(f32::NEG_INFINITY),
+            "NaN" => Some(f32::NAN),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
-    let raw: RawConfig =
-        serde_json::from_slice(json_bytes).map_err(|e| format!("config.json parse error: {e}"))?;
+    let raw: RawConfig = config_json(json_bytes)?;
 
     let family = detect_family(&raw)?;
     if raw.model_type.as_deref() == Some("falcon_mamba") {
@@ -200,8 +250,7 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
 pub fn read_family(dir: &Path) -> Result<ModelFamily, String> {
     let json = std::fs::read(dir.join("config.json"))
         .map_err(|e| format!("cannot read config.json: {e}"))?;
-    let raw: RawConfig =
-        serde_json::from_slice(&json).map_err(|e| format!("config.json parse error: {e}"))?;
+    let raw: RawConfig = config_json(&json)?;
     detect_family(&raw)
 }
 
@@ -459,5 +508,31 @@ mod tests {
         let json = br#"{"model_type":"mamba","hidden_size":64,"num_hidden_layers":2,"state_size":8,"conv_kernel":4,"vocab_size":100}"#;
         let cfg = parse_config_json(json).unwrap();
         assert!(cfg.tie_word_embeddings);
+    }
+
+    /// Python's `json.dump` writes the non-finite floats as bare tokens;
+    /// they read as the floats they name, and the same words inside a
+    /// string stay text.
+    #[test]
+    fn python_non_finite_tokens_are_read() {
+        let json = br#"{"time_step_limit": [0.0, Infinity], "low": -Infinity, "odd": NaN,
+            "name": "Infinity and \"NaN\" stay text", "model_type": "mamba2"}"#;
+        let v: serde_json::Value = config_json(json).unwrap();
+        let limit = v["time_step_limit"].as_array().unwrap();
+        assert_eq!(json_f32(&limit[0]), Some(0.0));
+        assert_eq!(json_f32(&limit[1]), Some(f32::INFINITY));
+        assert_eq!(json_f32(&v["low"]), Some(f32::NEG_INFINITY));
+        assert!(json_f32(&v["odd"]).is_some_and(f32::is_nan));
+        assert_eq!(v["name"], "Infinity and \"NaN\" stay text");
+        assert_eq!(json_f32(&v["name"]), None);
+        assert_eq!(
+            read_family_of(json).unwrap(),
+            ModelFamily::Mamba2,
+            "the family reads through the same parser"
+        );
+    }
+
+    fn read_family_of(json: &[u8]) -> Result<ModelFamily, String> {
+        detect_family(&config_json::<RawConfig>(json)?)
     }
 }

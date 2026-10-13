@@ -119,6 +119,10 @@ jobs:
           - os: macos-latest
             rust: stable
             features: accelerate
+          # The checkpoint loaders and their host suites build only with hf.
+          - os: ubuntu-latest
+            rust: stable
+            features: hf
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master

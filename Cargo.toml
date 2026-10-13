@@ -508,6 +508,11 @@ path = "tests/hf_integration.rs"
 required-features = ["hf"]
 
 [[test]]
+name = "hf_sources"
+path = "tests/hf_sources.rs"
+required-features = ["hf"]
+
+[[test]]
 name = "hf_training_convergence"
 path = "tests/hf_training_convergence.rs"
 required-features = ["cuda", "hf"]

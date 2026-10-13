@@ -3,15 +3,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use safetensors::SafeTensors;
-
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
 use crate::module::MambaBackbone;
 
-use super::bf16::bf16_bytes_to_f32;
 use super::config_json::{ModelFamily, parse_config_json};
 use super::keys::{RemappedKey, remap_m1_hf_key};
+use super::source::Source;
 
 /// Loaded HF Mamba model components.
 pub struct HfModel {
@@ -23,9 +21,10 @@ pub struct HfModel {
     pub d_model: usize,
 }
 
-/// Load a Mamba model from a HuggingFace checkpoint directory.
-///
-/// The directory must contain `config.json` and safetensors weight file(s).
+/// Load a Mamba-1 checkpoint directory: `config.json` in the HF or the
+/// original format, and the weights in any layout [`Source`] reads (one or
+/// several safetensors files, or the `pytorch_model.bin` the original
+/// repositories ship).
 pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
     let config_path = dir.join("config.json");
     let config_bytes =
@@ -40,7 +39,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         ));
     }
 
-    let shard_paths = discover_shards(dir)?;
+    let mut src = Source::open(dir)?;
 
     // config.json is untrusted input: bound the dims before sizing
     // allocations from their products (otherwise a hostile file can demand
@@ -67,62 +66,54 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
     let (mut embed_found, mut norm_f_found) = (false, false);
     let mut layer_weights: Vec<Option<LayerAccum>> = (0..hf_cfg.n_layers).map(|_| None).collect();
 
-    for shard_path in &shard_paths {
-        let file_bytes = std::fs::read(shard_path)
-            .map_err(|e| format!("cannot read {}: {e}", shard_path.display()))?;
-        let st = SafeTensors::deserialize(&file_bytes)
-            .map_err(|e| format!("safetensors parse error in {}: {e}", shard_path.display()))?;
-
-        for name in st.names() {
-            let tensor = st
-                .tensor(name)
-                .map_err(|e| format!("cannot read tensor {name}: {e}"))?;
-
-            match remap_m1_hf_key(name) {
-                RemappedKey::Embedding => {
-                    let data = tensor_to_f32(tensor.data(), tensor.dtype())?;
-                    let expected = hf_cfg.vocab_size * hf_cfg.d_model;
-                    if data.len() != expected {
-                        return Err(format!(
-                            "embedding shape: expected {expected} elements, got {}",
-                            data.len()
-                        ));
-                    }
-                    embed[..expected].copy_from_slice(&data);
-                    embed_found = true;
-                }
-                RemappedKey::LmHead => {
-                    let data = tensor_to_f32(tensor.data(), tensor.dtype())?;
-                    lm_head = Some(data);
-                }
-                RemappedKey::NormF => {
-                    let data = tensor_to_f32(tensor.data(), tensor.dtype())?;
-                    if data.len() != hf_cfg.d_model {
-                        return Err(format!(
-                            "norm_f_weight: expected {}, got {}",
-                            hf_cfg.d_model,
-                            data.len()
-                        ));
-                    }
-                    norm_f_weight.copy_from_slice(&data);
-                    norm_f_found = true;
-                }
-                RemappedKey::Layer(idx, field) => {
-                    if idx >= hf_cfg.n_layers {
-                        return Err(format!("layer index {idx} >= n_layers {}", hf_cfg.n_layers));
-                    }
-                    let data = tensor_to_f32(tensor.data(), tensor.dtype())?;
-                    let accum = layer_weights[idx].get_or_insert_with(LayerAccum::default);
-                    accum.set(field, data)?;
-                }
-                // A tensor this model has no place for is a part it does
-                // not model. Loading without it would run another network.
-                RemappedKey::Unknown => {
+    let names = src.names().to_vec();
+    for name in &names {
+        match remap_m1_hf_key(name) {
+            RemappedKey::Embedding => {
+                let data = src.read(name)?;
+                let expected = hf_cfg.vocab_size * hf_cfg.d_model;
+                if data.len() != expected {
                     return Err(format!(
-                        "unexpected tensor {name}: the checkpoint holds a part this \
-                         Mamba-1 model does not have"
+                        "embedding shape: expected {expected} elements, got {}",
+                        data.len()
                     ));
                 }
+                embed[..expected].copy_from_slice(&data);
+                embed_found = true;
+            }
+            RemappedKey::LmHead => {
+                // A tied head saved beside the embedding is not read.
+                if !hf_cfg.tie_word_embeddings {
+                    lm_head = Some(src.read(name)?);
+                }
+            }
+            RemappedKey::NormF => {
+                let data = src.read(name)?;
+                if data.len() != hf_cfg.d_model {
+                    return Err(format!(
+                        "norm_f_weight: expected {}, got {}",
+                        hf_cfg.d_model,
+                        data.len()
+                    ));
+                }
+                norm_f_weight.copy_from_slice(&data);
+                norm_f_found = true;
+            }
+            RemappedKey::Layer(idx, field) => {
+                if idx >= hf_cfg.n_layers {
+                    return Err(format!("layer index {idx} >= n_layers {}", hf_cfg.n_layers));
+                }
+                let data = src.read(name)?;
+                let accum = layer_weights[idx].get_or_insert_with(LayerAccum::default);
+                accum.set(field, data)?;
+            }
+            // A tensor this model has no place for is a part it does
+            // not model. Loading without it would run another network.
+            RemappedKey::Unknown => {
+                return Err(format!(
+                    "unexpected tensor {name}: the checkpoint holds a part this \
+                     Mamba-1 model does not have"
+                ));
             }
         }
     }
@@ -135,9 +126,6 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
 
     if !hf_cfg.tie_word_embeddings && lm_head.is_none() {
         return Err("tie_word_embeddings=false but lm_head.weight not found".into());
-    }
-    if hf_cfg.tie_word_embeddings {
-        lm_head = None;
     }
 
     // Transpose untied lm_head from PyTorch [vocab_size, d_model] to [d_model, vocab_size].
@@ -195,58 +183,6 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         vocab_size_padded,
         d_model: hf_cfg.d_model,
     })
-}
-
-fn discover_shards(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
-    let index_path = dir.join("model.safetensors.index.json");
-    if index_path.exists() {
-        let index_bytes =
-            std::fs::read(&index_path).map_err(|e| format!("cannot read index.json: {e}"))?;
-        let index: serde_json::Value =
-            serde_json::from_slice(&index_bytes).map_err(|e| format!("index.json parse: {e}"))?;
-        let weight_map = index
-            .get("weight_map")
-            .and_then(|v| v.as_object())
-            .ok_or("index.json missing weight_map")?;
-
-        let mut shard_files: Vec<String> = weight_map
-            .values()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-        shard_files.sort();
-        shard_files.dedup();
-
-        Ok(shard_files.into_iter().map(|f| dir.join(f)).collect())
-    } else {
-        let single = dir.join("model.safetensors");
-        if single.exists() {
-            Ok(vec![single])
-        } else {
-            Err(format!(
-                "no model.safetensors or index.json in {}",
-                dir.display()
-            ))
-        }
-    }
-}
-
-pub(super) fn tensor_to_f32(data: &[u8], dtype: safetensors::Dtype) -> Result<Vec<f32>, String> {
-    match dtype {
-        safetensors::Dtype::F32 => {
-            let floats: &[f32] = bytemuck::cast_slice(data);
-            Ok(floats.to_vec())
-        }
-        safetensors::Dtype::BF16 => bf16_bytes_to_f32(data),
-        safetensors::Dtype::F16 => {
-            use half::f16;
-            use half::slice::HalfFloatSliceExt;
-            let f16_slice: &[f16] = bytemuck::cast_slice(data);
-            let mut out = vec![0.0f32; f16_slice.len()];
-            f16_slice.convert_to_f32_slice(&mut out);
-            Ok(out)
-        }
-        other => Err(format!("unsupported dtype: {other:?}")),
-    }
 }
 
 #[derive(Default)]

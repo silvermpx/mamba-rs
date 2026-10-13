@@ -199,6 +199,17 @@
 - `MambaLM` over a backbone built in a reduced precision computes its
   head in that precision too, as `MambaGpuLM` does; `AnyBackbone::dtype`
   names the backbone's precision.
+- Every loader reads safetensors and `pytorch_model.bin`, one file or
+  shards behind an index (`hf::source::Source`), tensor by tensor with
+  positioned reads: the original `state-spaces/mamba-*` Mamba-1
+  repositories load, and `state-spaces/mamba-130m` gives the weights of
+  `mamba-130m-hf` bit for bit.
+- Untied heads for Mamba-2, SISO and MIMO checkpoints, in both language
+  models.
+- Mamba-2 checkpoints in the transformers layout (`model_type`
+  `mamba2`), among them `mistralai/Mamba-Codestral-7B-v0.1`; the
+  converted `mamba2-130m-hf` gives the weights of `state-spaces/mamba2-130m`
+  bit for bit. Configs that hold Python's bare `Infinity` load.
 
 ### Changed
 

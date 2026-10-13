@@ -14,6 +14,9 @@
 //!   mamba-130m-hf/{config.json,model.safetensors}
 //!   goldens/mamba-130m/{golden.json,last_logits.f64}
 //!
+//! and, for the original repository's layout, `mamba-130m/{config.json,
+//! pytorch_model.bin}` from state-spaces/mamba-130m.
+//!
 //!   cargo test --release --features hf --test hf_m1_checkpoint_parity \
 //!       -- --ignored --nocapture
 #![cfg(feature = "hf")]
@@ -111,6 +114,43 @@ fn follow_greedy(
 /// the full logits of the recorded rows, every log-normalizer and target
 /// log-probability, every top-1 and the greedy continuation; then the
 /// prompt prefilled in one pass, whose last row is the decode's.
+/// The original repository's config and `pytorch_model.bin` load the model
+/// its `-hf` twin loads, bit for bit: the same embedding and every layer's
+/// weights.
+#[test]
+#[ignore = "needs both official checkpoints (see the file header)"]
+fn mamba_130m_original_bin_is_its_hf_twin() {
+    let root = official_dir("MAMBA1_OFFICIAL_DIR", ".cache/mamba1-official");
+    let a = load_hf(&root.join("mamba-130m")).unwrap();
+    let b = load_hf(&root.join("mamba-130m-hf")).unwrap();
+    assert_eq!(
+        (a.vocab_size, a.vocab_size_padded, a.d_model),
+        (b.vocab_size, b.vocab_size_padded, b.d_model)
+    );
+    assert!(a.lm_head.is_none() && b.lm_head.is_none());
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert!(bits(&a.embed) == bits(&b.embed), "embedding");
+    let (wa, wb) = (a.backbone.weights(), b.backbone.weights());
+    assert!(bits(&wa.norm_f_weight) == bits(&wb.norm_f_weight), "norm_f");
+    assert_eq!(wa.layers.len(), wb.layers.len());
+    for (i, (la, lb)) in wa.layers.iter().zip(&wb.layers).enumerate() {
+        for (name, x, y) in [
+            ("norm", &la.norm_weight, &lb.norm_weight),
+            ("in_proj", &la.in_proj_w, &lb.in_proj_w),
+            ("conv", &la.conv1d_weight, &lb.conv1d_weight),
+            ("conv bias", &la.conv1d_bias, &lb.conv1d_bias),
+            ("x_proj", &la.x_proj_w, &lb.x_proj_w),
+            ("dt_proj", &la.dt_proj_w, &lb.dt_proj_w),
+            ("dt bias", &la.dt_proj_b, &lb.dt_proj_b),
+            ("A_log", &la.a_log, &lb.a_log),
+            ("D", &la.d_param, &lb.d_param),
+            ("out_proj", &la.out_proj_w, &lb.out_proj_w),
+        ] {
+            assert!(bits(x) == bits(y), "layer {i} {name}");
+        }
+    }
+}
+
 #[test]
 #[ignore = "needs the official checkpoint and its goldens (see the file header)"]
 fn mamba_130m_cpu_matches_the_f64_oracle() {

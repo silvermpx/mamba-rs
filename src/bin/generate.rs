@@ -382,29 +382,38 @@ fn download_model(model_id: &str, revision: &str) -> PathBuf {
     let st_path = model_dir.join("model.safetensors");
     let idx_path = model_dir.join("model.safetensors.index.json");
 
+    // Every shard a downloaded index names.
+    let shards = |idx: PathBuf| {
+        let idx_bytes = std::fs::read(&idx).unwrap();
+        let index: serde_json::Value = serde_json::from_slice(&idx_bytes).unwrap();
+        if let Some(wm) = index.get("weight_map").and_then(|v| v.as_object()) {
+            let mut shards: Vec<&str> = wm.values().filter_map(|v| v.as_str()).collect();
+            shards.sort();
+            shards.dedup();
+            for shard in shards {
+                eprintln!("  downloading {shard}...");
+                get(shard).unwrap_or_else(|e| {
+                    eprintln!("error: cannot download {shard}: {e}");
+                    std::process::exit(1);
+                });
+            }
+        }
+    };
     if !st_path.exists() && !idx_path.exists() {
         if let Ok(idx) = get("model.safetensors.index.json") {
-            let idx_bytes = std::fs::read(&idx).unwrap();
-            let index: serde_json::Value = serde_json::from_slice(&idx_bytes).unwrap();
-            if let Some(wm) = index.get("weight_map").and_then(|v| v.as_object()) {
-                let mut shards: Vec<&str> = wm.values().filter_map(|v| v.as_str()).collect();
-                shards.sort();
-                shards.dedup();
-                for shard in shards {
-                    eprintln!("  downloading {shard}...");
-                    get(shard).unwrap_or_else(|e| {
-                        eprintln!("error: cannot download {shard}: {e}");
-                        std::process::exit(1);
-                    });
-                }
-            }
+            shards(idx);
         } else if get("model.safetensors").is_err() {
-            // The original mamba_ssm repositories (the official Mamba-3
-            // checkpoints among them) ship a torch archive instead.
-            get("pytorch_model.bin").unwrap_or_else(|e| {
-                eprintln!("error: cannot download model weights: {e}");
-                std::process::exit(1);
-            });
+            // The original mamba_ssm repositories (the official Mamba-1,
+            // Mamba-2 and Mamba-3 checkpoints) ship torch archives instead,
+            // one file or shards behind an index.
+            if let Ok(idx) = get("pytorch_model.bin.index.json") {
+                shards(idx);
+            } else {
+                get("pytorch_model.bin").unwrap_or_else(|e| {
+                    eprintln!("error: cannot download model weights: {e}");
+                    std::process::exit(1);
+                });
+            }
         }
     }
 

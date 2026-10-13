@@ -14,6 +14,9 @@
 //!   mamba2-130m/{config.json,pytorch_model.bin}
 //!   goldens/mamba2-130m/{golden.json,last_logits.f64}
 //!
+//! and, for the transformers layout, `mamba2-130m-hf/{config.json,
+//! model.safetensors}` from AntonV/mamba2-130m-hf.
+//!
 //!   cargo test --release --features hf --test hf_m2_checkpoint_parity \
 //!       -- --ignored --nocapture
 #![cfg(feature = "hf")]
@@ -33,6 +36,38 @@ use m3_golden::{argmax, load_golden, logsumexp, official_dir};
 /// the full logits of the recorded rows, every log-normalizer and target
 /// log-probability, every top-1 and the greedy continuation; then the
 /// prompt prefilled in one pass, whose last row is the decode's.
+/// The transformers-layout conversion loads the model the original
+/// checkpoint loads, bit for bit. Its config states the padded vocabulary
+/// as the vocabulary, so only the vocabulary sizes differ.
+#[test]
+#[ignore = "needs both checkpoint layouts (see the file header)"]
+fn mamba2_130m_transformers_layout_is_the_original() {
+    let root = official_dir("MAMBA2_OFFICIAL_DIR", ".cache/mamba2-official");
+    let a = load_hf_mamba2(&root.join("mamba2-130m")).unwrap();
+    let b = load_hf_mamba2(&root.join("mamba2-130m-hf")).unwrap();
+    assert_eq!(a.cfg, b.cfg);
+    assert_eq!((a.vocab_size, b.vocab_size), (50277, 50288));
+    assert!(a.lm_head.is_none() && b.lm_head.is_none());
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert!(bits(&a.embed) == bits(&b.embed), "embedding");
+    assert!(bits(&a.weights.norm_f_weight) == bits(&b.weights.norm_f_weight));
+    for (i, (la, lb)) in a.weights.layers.iter().zip(&b.weights.layers).enumerate() {
+        for (name, x, y) in [
+            ("norm", &la.norm_weight, &lb.norm_weight),
+            ("in_proj", &la.in_proj_w, &lb.in_proj_w),
+            ("conv", &la.conv_w, &lb.conv_w),
+            ("conv bias", &la.conv_b, &lb.conv_b),
+            ("dt bias", &la.dt_bias, &lb.dt_bias),
+            ("A_log", &la.a_log, &lb.a_log),
+            ("D", &la.d_param, &lb.d_param),
+            ("gated norm", &la.gate_norm_weight, &lb.gate_norm_weight),
+            ("out_proj", &la.out_proj_w, &lb.out_proj_w),
+        ] {
+            assert!(bits(x) == bits(y), "layer {i} {name}");
+        }
+    }
+}
+
 #[test]
 #[ignore = "needs the official checkpoint and its goldens (see the file header)"]
 fn mamba2_130m_cpu_matches_the_f64_oracle() {

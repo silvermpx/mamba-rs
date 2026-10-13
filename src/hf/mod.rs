@@ -12,6 +12,7 @@ pub mod load;
 pub mod load_mamba2;
 pub mod load_mamba3;
 pub mod pickle;
+pub mod source;
 pub mod torch_zip;
 
 pub use config_json::{ModelFamily, read_family};

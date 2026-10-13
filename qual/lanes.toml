@@ -160,6 +160,7 @@
 "hf_m3_mimo_checkpoint_parity" = "record"
 "hf_full_cycle" = "record"
 "hf_integration" = "gate"
+"hf_sources" = "host"
 "hf_training_convergence" = "record"
 "hf_training_smoke" = "record"
 "inference_f16_smoke" = "gate"

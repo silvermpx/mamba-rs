@@ -129,19 +129,19 @@ impl MambaGpuLM {
                 let m = load_hf_mamba2(dir)?;
                 let d_model = m.cfg.d_model;
                 let gpu = Mamba2GpuBackbone::new(&m.weights, m.cfg, d_model, batch, opts)?;
-                Self::new(gpu, m.embed, None, m.vocab_size)
+                Self::new(gpu, m.embed, m.lm_head, m.vocab_size)
             }
             ModelFamily::Mamba3 => {
                 let m = load_hf_mamba3(dir)?;
                 let d_model = m.cfg.d_model;
                 let gpu = Mamba3GpuBackbone::new(&m.weights, m.cfg, d_model, batch, opts)?;
-                Self::new(gpu, m.embed, None, m.vocab_size)
+                Self::new(gpu, m.embed, m.lm_head, m.vocab_size)
             }
             ModelFamily::Mamba3Mimo => {
                 let m = load_hf_mamba3_mimo(dir)?;
                 let d_model = m.cfg.d_model;
                 let gpu = Mamba3MimoGpuBackbone::new(&m.weights, m.cfg, d_model, batch, opts)?;
-                Self::new(gpu, m.embed, None, m.vocab_size)
+                Self::new(gpu, m.embed, m.lm_head, m.vocab_size)
             }
         }
     }

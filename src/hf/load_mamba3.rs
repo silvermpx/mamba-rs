@@ -22,8 +22,8 @@ use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
 use crate::mlp::GatedMlpLayerWeights;
 
-use super::pickle::TensorRef;
-use super::torch_zip::TorchBin;
+use super::config_json::{config_json, json_f32};
+use super::source::Source;
 
 /// An official Mamba-3 checkpoint, ready for [`crate::module::MambaLM::new`]
 /// or the GPU language model.
@@ -31,8 +31,12 @@ pub struct HfMamba3Model {
     pub cfg: Mamba3Config,
     /// Layer weights with an empty (identity) input projection.
     pub weights: Mamba3Weights,
-    /// The embedding `[vocab_padded, d_model]`, also the tied head.
+    /// The embedding `[vocab_padded, d_model]`, also the head when it is
+    /// tied.
     pub embed: Vec<f32>,
+    /// The untied head `[d_model, vocab_size]`; `None` ties the head to the
+    /// embedding.
+    pub lm_head: Option<Vec<f32>>,
     /// The tokenizer's vocabulary size; rows past it are padding.
     pub vocab_size: usize,
 }
@@ -42,8 +46,12 @@ pub struct HfMamba3MimoModel {
     pub cfg: Mamba3MimoConfig,
     /// Layer weights with an empty (identity) input projection.
     pub weights: Mamba3MimoWeights,
-    /// The embedding `[vocab_padded, d_model]`, also the tied head.
+    /// The embedding `[vocab_padded, d_model]`, also the head when it is
+    /// tied.
     pub embed: Vec<f32>,
+    /// The untied head `[d_model, vocab_size]`; `None` ties the head to the
+    /// embedding.
+    pub lm_head: Option<Vec<f32>>,
     /// The tokenizer's vocabulary size; rows past it are padding.
     pub vocab_size: usize,
 }
@@ -77,10 +85,7 @@ pub(super) fn usize_or(obj: &Value, key: &str, default: usize) -> Result<usize, 
 pub(super) fn f32_or(obj: &Value, key: &str, default: f32) -> Result<f32, String> {
     match field(obj, key) {
         None => Ok(default),
-        Some(v) => v
-            .as_f64()
-            .map(|n| n as f32)
-            .ok_or_else(|| format!("config.json: {key} is not a number")),
+        Some(v) => json_f32(v).ok_or_else(|| format!("config.json: {key} is not a number")),
     }
 }
 
@@ -96,8 +101,7 @@ pub(super) fn bool_or(obj: &Value, key: &str, default: bool) -> Result<bool, Str
 /// Parse the original-format `config.json` of a Mamba-3 checkpoint. The
 /// defaults are the reference's own (`MambaConfig` and `Mamba3.__init__`).
 pub fn parse_mamba3_config(json: &[u8]) -> Result<HfMamba3Config, String> {
-    let root: Value =
-        serde_json::from_slice(json).map_err(|e| format!("config.json parse error: {e}"))?;
+    let root: Value = config_json(json)?;
     let ssm =
         field(&root, "ssm_cfg").ok_or("config.json: no ssm_cfg (not a Mamba-3 checkpoint)")?;
     let layer = field(ssm, "layer").and_then(Value::as_str).unwrap_or("");
@@ -192,75 +196,39 @@ impl HfMamba3Config {
     }
 }
 
-/// Tensors by name from either weight format the official repositories
-/// carry.
-pub(super) enum Source {
-    TorchBin(TorchBin, HashMap<String, TensorRef>),
-    Safetensors(Vec<u8>),
-}
-
-impl Source {
-    pub(super) fn open(dir: &Path) -> Result<Self, String> {
-        let st = dir.join("model.safetensors");
-        if st.exists() {
-            let bytes =
-                std::fs::read(&st).map_err(|e| format!("cannot read {}: {e}", st.display()))?;
-            return Ok(Self::Safetensors(bytes));
-        }
-        let bin = dir.join("pytorch_model.bin");
-        let archive = TorchBin::open(&bin)?;
-        let by_name = archive.tensors().iter().cloned().collect();
-        Ok(Self::TorchBin(archive, by_name))
-    }
-
-    /// Every tensor name with its shape.
-    fn shapes(&self) -> Result<Vec<(String, Vec<usize>)>, String> {
-        match self {
-            Self::TorchBin(archive, _) => Ok(archive
-                .tensors()
-                .iter()
-                .map(|(n, t)| (n.clone(), t.shape.clone()))
-                .collect()),
-            Self::Safetensors(bytes) => {
-                let st = safetensors::SafeTensors::deserialize(bytes)
-                    .map_err(|e| format!("safetensors parse error: {e}"))?;
-                Ok(st
-                    .tensors()
-                    .into_iter()
-                    .map(|(n, t)| (n, t.shape().to_vec()))
-                    .collect())
-            }
-        }
-    }
-
-    pub(super) fn read(&mut self, name: &str) -> Result<Vec<f32>, String> {
-        match self {
-            Self::TorchBin(archive, by_name) => {
-                let t = by_name
-                    .get(name)
-                    .ok_or_else(|| format!("tensor {name} is missing"))?
-                    .clone();
-                archive.read_f32(&t)
-            }
-            Self::Safetensors(bytes) => {
-                let st = safetensors::SafeTensors::deserialize(bytes)
-                    .map_err(|e| format!("safetensors parse error: {e}"))?;
-                let t = st.tensor(name).map_err(|e| format!("tensor {name}: {e}"))?;
-                super::load::tensor_to_f32(t.data(), t.dtype())
-            }
-        }
-    }
-}
-
-/// Transpose a PyTorch `[out, in]` weight to this crate's `[in, out]`.
+/// Transpose a PyTorch `[out, in]` weight to this crate's `[in, out]`, in
+/// square tiles so both sides of a large head stream through the cache.
 pub(super) fn transpose(src: &[f32], out: usize, inp: usize) -> Vec<f32> {
+    const TILE: usize = 32;
     let mut dst = vec![0.0f32; src.len()];
-    for (o, row) in src.chunks_exact(inp).enumerate() {
-        for (i, &v) in row.iter().enumerate() {
-            dst[i * out + o] = v;
+    for o0 in (0..out).step_by(TILE) {
+        let o1 = (o0 + TILE).min(out);
+        for i0 in (0..inp).step_by(TILE) {
+            let i1 = (i0 + TILE).min(inp);
+            for o in o0..o1 {
+                let row = &src[o * inp + i0..o * inp + i1];
+                for (i, &v) in (i0..i1).zip(row) {
+                    dst[i * out + o] = v;
+                }
+            }
         }
     }
     dst
+}
+
+/// An untied head, `[vocab_rows, d]` in the checkpoint, as the language
+/// models take it: `[d, vocab]`, the padding rows past the vocabulary
+/// dropped (they never win sampling).
+pub(super) fn read_untied_head(
+    src: &mut Source,
+    (vocab, d): (usize, usize),
+) -> Result<Vec<f32>, String> {
+    let rows = src.read("lm_head.weight")?;
+    let len = vocab
+        .checked_mul(d)
+        .filter(|&len| len <= rows.len())
+        .ok_or("lm_head.weight holds fewer rows than the vocabulary")?;
+    Ok(transpose(&rows[..len], vocab, d))
 }
 
 /// Read and parse a checkpoint directory's `config.json`.
@@ -278,17 +246,15 @@ pub(super) fn check_tensors(
     tie_embeddings: bool,
 ) -> Result<(), String> {
     let mut seen = 0usize;
-    for (name, shape) in src.shapes()? {
-        if name == "lm_head.weight" {
-            // A tied head is the embedding again; an untied one is a
-            // different model this loader does not build.
-            if !tie_embeddings {
-                return Err("untied lm_head checkpoints are not supported".into());
-            }
+    for name in src.names() {
+        // A tied head saved beside the embedding is the embedding again; an
+        // untied one is in `expect` at its own shape.
+        if name == "lm_head.weight" && tie_embeddings {
             continue;
         }
-        match expect.get(&name) {
-            Some(want) if *want == shape => seen += 1,
+        let shape = src.shape(name).unwrap_or_default();
+        match expect.get(name) {
+            Some(want) if want.as_slice() == shape => seen += 1,
             Some(want) => {
                 return Err(format!("tensor {name}: shape {shape:?}, expected {want:?}"));
             }
@@ -307,13 +273,21 @@ pub(super) fn check_tensors(
     Ok(())
 }
 
-/// The tensors every Mamba-3 layer and the model around them carry, whatever
-/// the mixer: embedding, final norm, the block norms and the MLP.
+/// The name the original mamba_ssm format gives the embedding.
+pub(super) const EMBEDDING: &str = "backbone.embedding.weight";
+
+/// The tensors every layer and the model around them carry, whatever the
+/// mixer: the embedding (under `embedding`), the head when it is untied,
+/// the final norm, the block norms and the MLP.
 pub(super) fn expect_common(
     expect: &mut HashMap<String, Vec<usize>>,
     (n_layers, d, hidden, vocab_padded): (usize, usize, usize, usize),
+    (tie_embeddings, embedding): (bool, &str),
 ) {
-    expect.insert("backbone.embedding.weight".into(), vec![vocab_padded, d]);
+    expect.insert(embedding.into(), vec![vocab_padded, d]);
+    if !tie_embeddings {
+        expect.insert("lm_head.weight".into(), vec![vocab_padded, d]);
+    }
     expect.insert("backbone.norm_f.weight".into(), vec![d]);
     for i in 0..n_layers {
         let p = |n: &str| format!("backbone.layers.{i}.{n}");
@@ -359,7 +333,11 @@ pub fn load_hf_mamba3_mimo(dir: &Path) -> Result<HfMamba3MimoModel, String> {
     let mut src = Source::open(dir)?;
 
     let mut expect: HashMap<String, Vec<usize>> = HashMap::new();
-    expect_common(&mut expect, (cfg.n_layers, d, hidden, hf.vocab_padded));
+    expect_common(
+        &mut expect,
+        (cfg.n_layers, d, hidden, hf.vocab_padded),
+        (hf.tie_embeddings, EMBEDDING),
+    );
     for i in 0..cfg.n_layers {
         let p = |n: &str| format!("backbone.layers.{i}.mixer.{n}");
         expect.insert(p("in_proj.weight"), vec![ip, d]);
@@ -414,11 +392,15 @@ pub fn load_hf_mamba3_mimo(dir: &Path) -> Result<HfMamba3MimoModel, String> {
         mlp,
     };
     weights.validate(&cfg, d)?;
-    let embed = src.read("backbone.embedding.weight")?;
+    let embed = src.read(EMBEDDING)?;
+    let lm_head = (!hf.tie_embeddings)
+        .then(|| read_untied_head(&mut src, (hf.vocab_size, d)))
+        .transpose()?;
     Ok(HfMamba3MimoModel {
         cfg,
         weights,
         embed,
+        lm_head,
         vocab_size: hf.vocab_size,
     })
 }
@@ -444,7 +426,11 @@ pub fn load_hf_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
 
     // The expected tensors and their reference shapes.
     let mut expect: HashMap<String, Vec<usize>> = HashMap::new();
-    expect_common(&mut expect, (cfg.n_layers, d, hidden, hf.vocab_padded));
+    expect_common(
+        &mut expect,
+        (cfg.n_layers, d, hidden, hf.vocab_padded),
+        (hf.tie_embeddings, EMBEDDING),
+    );
     for i in 0..cfg.n_layers {
         let p = |n: &str| format!("backbone.layers.{i}.{n}");
         expect.insert(p("mixer.in_proj.weight"), vec![ip, d]);
@@ -493,11 +479,15 @@ pub fn load_hf_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
         mlp,
     };
     weights.validate(&cfg, d)?;
-    let embed = src.read("backbone.embedding.weight")?;
+    let embed = src.read(EMBEDDING)?;
+    let lm_head = (!hf.tie_embeddings)
+        .then(|| read_untied_head(&mut src, (hf.vocab_size, d)))
+        .transpose()?;
     Ok(HfMamba3Model {
         cfg,
         weights,
         embed,
+        lm_head,
         vocab_size: hf.vocab_size,
     })
 }
