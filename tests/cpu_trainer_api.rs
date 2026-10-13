@@ -517,7 +517,7 @@ fn every_family_resumes_through_its_checkpoint_and_trainer_state_files() {
     }
 }
 
-/// The reduced-precision host trainers of Mamba-2 and MIMO: an f16 window
+/// The reduced-precision host trainers of Mamba-1, Mamba-2 and MIMO: an f16 window
 /// that overflows is skipped whole and the loss scale backs off, the
 /// masters untouched, and the next clean window steps; the scale travels
 /// in the trainer state. bf16 needs no scaler and steps at once. Each lane
@@ -526,11 +526,15 @@ fn every_family_resumes_through_its_checkpoint_and_trainer_state_files() {
 fn half_lanes_scale_skip_and_step() {
     use mamba_rs::{CpuOptions, WeightDtype};
     let s = session();
+    let m1 = MambaWeights::init(&m1_cfg(), INPUT_DIM, 1);
     let m2 = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 2);
     let mimo = Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 4);
     let lanes = |dtype| -> Vec<AnyCpuTrainer> {
         let o = CpuOptions::default().dtype(dtype);
         vec![
+            MambaCpuTrainer::new_with(&m1, m1_cfg(), s, o)
+                .unwrap()
+                .into(),
             Mamba2CpuTrainer::new_with(&m2, m2_cfg(), s, o)
                 .unwrap()
                 .into(),

@@ -13,7 +13,10 @@ use crate::mamba1::config::MambaConfig;
 use crate::mamba1::state::MambaLayerState;
 use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
+use crate::ops::lane::{LaneGemm, input_rows};
 use crate::ops::packed::{PackedLinear, linear_row as linear};
+use crate::ops::rounding::store;
+use crate::precision::WeightDtype;
 
 // ---------------------------------------------------------------------------
 // Packed projections
@@ -77,6 +80,9 @@ pub struct MambaLayerScratch {
     pub y: Vec<f32>,
     /// Batch buffer for SSM `da = exp(delta * a_neg)` SIMD vectorization `[d_state]`.
     pub da_buf: Vec<f32>,
+    /// The precision of the step (see `CpuOptions`).
+    pub(crate) dtype: WeightDtype,
+    gemm: LaneGemm,
 }
 
 impl MambaLayerScratch {
@@ -91,6 +97,8 @@ impl MambaLayerScratch {
             delta: vec![0.0; d_inner],
             y: vec![0.0; d_inner],
             da_buf: vec![0.0; cfg.d_state],
+            dtype: WeightDtype::F32,
+            gemm: LaneGemm::default(),
         }
     }
 }
@@ -103,6 +111,9 @@ pub struct MambaStepScratch {
     pub norm_buf: Vec<f32>,
     /// Saved residual for skip connection `[d_model]`.
     pub residual: Vec<f32>,
+    /// The input row as the input projection multiplies it in a reduced
+    /// precision.
+    input: Vec<f32>,
 }
 
 impl MambaStepScratch {
@@ -112,7 +123,14 @@ impl MambaStepScratch {
             layer: MambaLayerScratch::new(cfg),
             norm_buf: vec![0.0; cfg.d_model],
             residual: vec![0.0; cfg.d_model],
+            input: Vec::new(),
         }
+    }
+
+    /// Run the steps in `dtype`: the weights must hold the bulk matrices
+    /// rounded as that precision keeps them.
+    pub(crate) fn set_dtype(&mut self, dtype: WeightDtype) {
+        self.layer.dtype = dtype;
     }
 }
 
@@ -158,14 +176,14 @@ fn layer_step(
     let d_conv = cfg.d_conv;
     let dt_rank = cfg.dt_rank();
     let xdbl_dim = cfg.xdbl_dim();
+    let dtype = scratch.dtype;
 
     // in_proj: [d_model] -> [2*d_inner] (no bias)
-    linear(
-        &mut scratch.proj[..2 * d_inner],
-        &input[..d_model],
+    scratch.gemm.row(
+        dtype,
+        (&mut scratch.proj[..2 * d_inner], &input[..d_model]),
         (&lw.in_proj_w, lp.map(|p| &p.in_proj)),
         None,
-        (d_model, 2 * d_inner),
     );
 
     // Split x + gate SiLU
@@ -174,6 +192,7 @@ fn layer_step(
         let v = scratch.proj[d_inner + d];
         scratch.gate_silu[d] = v * sigmoid(v);
     }
+    store(dtype, &mut scratch.gate_silu[..d_inner]);
 
     // Conv1d shift register (dot BEFORE shift)
     let hist = d_conv - 1;
@@ -196,23 +215,22 @@ fn layer_step(
 
         scratch.x[d] = val * sigmoid(val); // fused conv1d + SiLU
     }
+    store(dtype, &mut scratch.x[..d_inner]);
 
     // x_proj: u [d_inner] -> xdbl [dt_rank + 2*d_state]
-    linear(
-        &mut scratch.xdbl[..xdbl_dim],
-        &scratch.x[..d_inner],
+    scratch.gemm.row(
+        dtype,
+        (&mut scratch.xdbl[..xdbl_dim], &scratch.x[..d_inner]),
         (&lw.x_proj_w, lp.map(|p| &p.x_proj)),
         None,
-        (d_inner, xdbl_dim),
     );
 
     // dt_proj: delta_raw [dt_rank] -> delta [d_inner] + softplus
-    linear(
-        &mut scratch.delta[..d_inner],
-        &scratch.xdbl[..dt_rank],
+    scratch.gemm.row(
+        dtype,
+        (&mut scratch.delta[..d_inner], &scratch.xdbl[..dt_rank]),
         (&lw.dt_proj_w, lp.map(|p| &p.dt_proj)),
         Some(&lw.dt_proj_b),
-        (dt_rank, d_inner),
     );
     for d in 0..d_inner {
         let raw = scratch.delta[d];
@@ -222,6 +240,7 @@ fn layer_step(
             fast_exp_scalar(raw).ln_1p()
         };
     }
+    store(dtype, &mut scratch.delta[..d_inner]);
 
     // SSM recurrence (SIMD-friendly: batch exp per channel via da_buf)
     let b_offset = dt_rank;
@@ -256,14 +275,14 @@ fn layer_step(
     for d in 0..d_inner {
         scratch.y[d] *= scratch.gate_silu[d];
     }
+    store(dtype, &mut scratch.y[..d_inner]);
 
     // out_proj: gated [d_inner] -> output [d_model]
-    linear(
-        &mut output[..d_model],
-        &scratch.y[..d_inner],
+    scratch.gemm.row(
+        dtype,
+        (&mut output[..d_model], &scratch.y[..d_inner]),
         (&lw.out_proj_w, lp.map(|p| &p.out_proj)),
         None,
-        (d_inner, d_model),
     );
 }
 
@@ -314,6 +333,7 @@ fn block_step(
     {
         *nb = h * inv_rms * nw;
     }
+    store(scratch.layer.dtype, &mut scratch.norm_buf[..d_model]);
 
     // Pure mixer
     layer_step(
@@ -360,7 +380,7 @@ pub fn mamba_step(
     let d_model = cfg.d_model;
     linear(
         &mut output[..d_model],
-        input,
+        input_rows(scratch.layer.dtype, &mut scratch.input, input),
         (&weights.input_proj_w, None),
         Some(&weights.input_proj_b),
         (input_dim, d_model),
@@ -386,7 +406,7 @@ pub fn mamba_step_packed(
     let d_model = cfg.d_model;
     linear(
         &mut output[..d_model],
-        input,
+        input_rows(scratch.layer.dtype, &mut scratch.input, input),
         (&weights.input_proj_w, packed.input_proj.as_ref()),
         Some(&weights.input_proj_b),
         (input_dim, d_model),
@@ -453,6 +473,7 @@ fn mamba_blocks_and_norm(
     {
         *o *= inv_rms * nfw;
     }
+    store(scratch.layer.dtype, &mut output[..d_model]);
 }
 
 /// Batched T=1 inference: processes B independent samples through the same

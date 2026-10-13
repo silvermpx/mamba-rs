@@ -14,6 +14,7 @@ use crate::module::cpu_trainer::{Control, CpuCore, CpuFamily, TensorRole, cpu_tr
 use crate::ops::dims::{MambaDims, MambaRecurrentState};
 use crate::optim::session::TrainSessionCfg;
 use crate::optim::tensors::tensor_list;
+use crate::precision::{CpuOptions, WeightDtype};
 
 tensor_list!(
     TrainMambaWeights,
@@ -39,6 +40,7 @@ pub(crate) struct MambaCpu {
     /// `-exp(a_log)` of every layer, which the scans read; refreshed after
     /// every optimizer step.
     a_neg: Vec<f32>,
+    dtype: WeightDtype,
 }
 
 /// One sequence's carried conv and SSM states, activations and scratch.
@@ -56,20 +58,25 @@ impl CpuFamily for MambaCpu {
     const FAMILY: ModelFamily = ModelFamily::Mamba1;
     const RECURRENCE: &'static [&'static str] = &["conv", "ssm"];
 
-    /// f32 until this family's reduced-precision lanes land.
-    fn dtype(&self) -> crate::precision::WeightDtype {
-        crate::precision::WeightDtype::F32
+    fn dtype(&self) -> WeightDtype {
+        self.dtype
     }
 
-    fn round_weights(&self, _w: &mut TrainMambaWeights) {}
+    /// The GPU trainer's mirror: every projection, the input one too.
+    fn round_weights(&self, w: &mut TrainMambaWeights) {
+        w.round_bulk(self.dtype);
+    }
 
     fn new_seq(&self, _w: &TrainMambaWeights, _seq_len: usize) -> Result<MambaCpuSeq, String> {
+        let mut fwd = PhaseScratch::zeros(&self.dims);
+        let mut bwd = BackwardPhaseScratch::zeros(&self.dims);
+        (fwd.dtype, bwd.dtype) = (self.dtype, self.dtype);
         Ok(MambaCpuSeq {
             acts: MambaBackboneFlat::zeros(self.dims),
             conv: vec![0.0; self.cfg.n_layers * self.recurrence_len(0)],
             ssm: vec![0.0; self.cfg.n_layers * self.recurrence_len(1)],
-            fwd: PhaseScratch::zeros(&self.dims),
-            bwd: BackwardPhaseScratch::zeros(&self.dims),
+            fwd,
+            bwd,
         })
     }
 
@@ -226,6 +233,19 @@ impl MambaCpuTrainer {
         cfg: MambaConfig,
         session: TrainSessionCfg,
     ) -> Result<Self, String> {
+        Self::new_with(weights, cfg, session, CpuOptions::default())
+    }
+
+    /// [`MambaCpuTrainer::new`] in the precision `opts` names: f32
+    /// masters, the projections and the values between the kernels
+    /// rounded as the GPU trainer of that precision rounds them, and in
+    /// f16 the dynamic loss scaler.
+    pub fn new_with(
+        weights: &MambaWeights,
+        cfg: MambaConfig,
+        session: TrainSessionCfg,
+        opts: CpuOptions,
+    ) -> Result<Self, String> {
         cfg.validate()?;
         weights.validate(&cfg, session.input_dim)?;
         let train = TrainMambaWeights {
@@ -254,6 +274,7 @@ impl MambaCpuTrainer {
             cfg,
             dims,
             a_neg: vec![0.0; cfg.n_layers * cfg.d_inner() * cfg.d_state],
+            dtype: opts.dtype,
         };
         fam.after_update(&train);
         Ok(Self {

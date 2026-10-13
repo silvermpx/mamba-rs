@@ -5,6 +5,7 @@ use crate::inference::{
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::state::MambaState;
 use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
+use crate::precision::{CpuOptions, WeightDtype};
 
 /// Complete Mamba backbone: input_proj -> N layers -> norm_f.
 ///
@@ -34,6 +35,8 @@ pub struct MambaBackbone {
     /// copy of `weights`, dropped by every mutable access to them so a step
     /// never reads stale panels.
     packed: Option<MambaPackedLinears>,
+    /// The precision the backbone computes in.
+    dtype: WeightDtype,
 }
 
 impl MambaBackbone {
@@ -49,6 +52,7 @@ impl MambaBackbone {
             input_dim,
             identity_proj: false,
             packed: None,
+            dtype: WeightDtype::F32,
         }
     }
 
@@ -60,7 +64,21 @@ impl MambaBackbone {
     /// Recomputes `a_neg = -exp(a_log)` for every layer: inference reads
     /// `a_neg` alone, and loaded weights may carry a stale one.
     pub fn new(weights: MambaWeights, cfg: MambaConfig, input_dim: usize) -> Result<Self, String> {
-        if weights.input_proj_w.is_empty() {
+        Self::new_with(weights, cfg, input_dim, CpuOptions::default())
+    }
+
+    /// [`MambaBackbone::new`] in the precision `opts` names: the
+    /// projections rounded once here as the GPU engine of that precision
+    /// holds them, and the values between the kernels rounded where it
+    /// stores them. [`MambaBackbone::weights`] then gives the rounded
+    /// weights, the ones the backbone computes with.
+    pub fn new_with(
+        weights: MambaWeights,
+        cfg: MambaConfig,
+        input_dim: usize,
+        opts: CpuOptions,
+    ) -> Result<Self, String> {
+        let mut backbone = if weights.input_proj_w.is_empty() {
             if input_dim != cfg.d_model {
                 return Err(format!(
                     "weights without an input projection read rows d_model ({}) wide, \
@@ -68,9 +86,18 @@ impl MambaBackbone {
                     cfg.d_model
                 ));
             }
-            return Self::without_projection(cfg, weights);
-        }
-        Self::with_projection(cfg, weights, input_dim)
+            Self::without_projection(cfg, weights)?
+        } else {
+            Self::with_projection(cfg, weights, input_dim)?
+        };
+        backbone.weights.round_bulk(opts.dtype);
+        backbone.dtype = opts.dtype;
+        Ok(backbone)
+    }
+
+    /// The precision the backbone computes in.
+    pub fn dtype(&self) -> WeightDtype {
+        self.dtype
     }
 
     #[deprecated(
@@ -97,6 +124,7 @@ impl MambaBackbone {
             input_dim,
             identity_proj: false,
             packed: None,
+            dtype: WeightDtype::F32,
         })
     }
 
@@ -161,6 +189,7 @@ impl MambaBackbone {
             input_dim: d,
             identity_proj: true,
             packed: None,
+            dtype: WeightDtype::F32,
         })
     }
 
@@ -175,7 +204,10 @@ impl MambaBackbone {
     }
 
     /// Mutable weight access (for optimizer updates). Drops the packed
-    /// projections; pack again with [`Self::pack_for_decode`].
+    /// projections; pack again with [`Self::pack_for_decode`]. In a
+    /// reduced precision the backbone computes with the values written
+    /// here as they are; [`Self::new_with`] rounds a set of weights as the
+    /// GPU engine of that precision holds them.
     pub fn weights_mut(&mut self) -> &mut MambaWeights {
         self.packed = None;
         &mut self.weights
@@ -187,7 +219,8 @@ impl MambaBackbone {
     }
 
     /// Mutable access to a specific layer's weights. Drops the packed
-    /// projections; pack again with [`Self::pack_for_decode`].
+    /// projections; pack again with [`Self::pack_for_decode`]. Written
+    /// values are taken as they are, as with [`Self::weights_mut`].
     pub fn layer_mut(&mut self, index: usize) -> &mut MambaLayerWeights {
         self.packed = None;
         &mut self.weights.layers[index]
@@ -248,6 +281,7 @@ impl MambaBackbone {
         state: &mut MambaState,
         scratch: &mut MambaStepScratch,
     ) {
+        scratch.set_dtype(self.dtype);
         match (&self.packed, self.identity_proj) {
             (Some(p), true) => mamba_step_no_proj_packed(
                 input,
@@ -371,6 +405,7 @@ impl MambaBackbone {
         mode: crate::mamba1::cpu::prefill::PrefillMode,
     ) {
         let dims = crate::ops::dims::MambaDims::from_config(&self.cfg, seq_len, self.input_dim);
+        scratch.set_dtype(self.dtype);
         crate::mamba1::cpu::prefill::forward_mamba_backbone_prefill_mode(
             outputs,
             inputs,

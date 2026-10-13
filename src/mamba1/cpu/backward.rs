@@ -22,10 +22,22 @@ use super::backward_ops::{Conv1dDims, backward_conv1d_step, backward_rms_norm};
 use super::flat::{MambaBackboneFlat, MambaLayerFlat};
 use super::scratch::BackwardPhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
-use crate::ops::blas::sgemm_backward;
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::fast_exp_scalar;
+use crate::ops::rounding::{store, stored};
 
+/// The backward of one layer over the window, accumulating its weight
+/// gradients into `d_layer` and leaving the gradient of the layer's input
+/// in `d_temporal_flat`.
+///
+/// In a reduced precision (the scratch's) the gradients between the phases
+/// are stored ones, as the GPU trainer keeps them: the GEMMs take the
+/// lane's copy of the residual gradient and store their input gradients,
+/// and the gating, scan, softplus, x_proj and conv backwards store theirs,
+/// the scan each channel's B and C terms before they sum over the
+/// channels. The conv's SiLU derivative reads the stored pre-activation.
+/// The SSM state gradient, every weight gradient and the residual gradient
+/// stay f32.
 pub fn backward_mamba_layer_batched(
     d_temporal_flat: &mut [f32],
     d_layer: &mut TrainMambaLayerWeights,
@@ -42,6 +54,7 @@ pub fn backward_mamba_layer_batched(
     let dt_rank = dims.dt_rank;
     let xdbl_dim = dims.xdbl_dim;
     let seq_len = dims.seq_len;
+    let dtype = scratch.dtype;
 
     // ===================================================================
     // Phase B1: Batch out_proj backward
@@ -50,13 +63,10 @@ pub fn backward_mamba_layer_batched(
     //                  (T, d_inner, d_model))
     // ===================================================================
     acts.copy_gated_all(&mut scratch.gated_buf);
-    sgemm_backward(
-        &mut scratch.d_gated_flat,
-        &mut d_layer.out_proj_w,
-        None,
-        d_temporal_flat,
-        &scratch.gated_buf,
-        &w.out_proj_w,
+    scratch.gemm.backward(
+        dtype,
+        (&mut scratch.d_gated_flat, &mut d_layer.out_proj_w, None),
+        (d_temporal_flat, &scratch.gated_buf, &w.out_proj_w),
         (seq_len, di, dm),
     );
 
@@ -73,11 +83,11 @@ pub fn backward_mamba_layer_batched(
         let y_vals = acts.y(t);
         for d in 0..di {
             let dg = scratch.d_gated_flat[t_off + d];
-            scratch.d_y_flat[t_off + d] = dg * gate_post_silu[d];
+            scratch.d_y_flat[t_off + d] = stored(dtype, dg * gate_post_silu[d]);
             let x = gate_pre_silu[d];
             let sigma = 1.0 / (1.0 + fast_exp_scalar(-x));
             let silu_grad = sigma * (1.0 + x * (1.0 - sigma));
-            scratch.d_gate_flat[t_off + d] = dg * y_vals[d] * silu_grad;
+            scratch.d_gate_flat[t_off + d] = stored(dtype, dg * y_vals[d] * silu_grad);
         }
     }
 
@@ -139,10 +149,11 @@ pub fn backward_mamba_layer_batched(
                     scratch.d_u_flat[t_off_di + d] += dh * delta_d * b_n;
 
                     // d_B[n] += dh * delta * u
-                    scratch.d_xdbl_flat[t_off_xdbl + b_offset + n] += dh * delta_d * u_d;
+                    scratch.d_xdbl_flat[t_off_xdbl + b_offset + n] +=
+                        stored(dtype, dh * delta_d * u_d);
 
                     // d_C[n] += d_y[d] * h[t,d,n]
-                    scratch.d_xdbl_flat[t_off_xdbl + c_offset + n] += dy_d * h_curr;
+                    scratch.d_xdbl_flat[t_off_xdbl + c_offset + n] += stored(dtype, dy_d * h_curr);
 
                     // d_a_log[d,n] += dh * da * delta * A[d,n] * h_prev
                     d_layer.a_log[idx] += dh * da * delta_d * a_dn * h_prev;
@@ -150,6 +161,9 @@ pub fn backward_mamba_layer_batched(
                     // BPTT: propagate d_h backwards through time
                     scratch.d_h[idx] = da * dh;
                 }
+                let i = t_off_di + d;
+                scratch.d_delta_flat[i] = stored(dtype, scratch.d_delta_flat[i]);
+                scratch.d_u_flat[i] = stored(dtype, scratch.d_u_flat[i]);
             }
         }
 
@@ -161,7 +175,7 @@ pub fn backward_mamba_layer_batched(
                     scratch.d_delta_flat[t_off_di + d]
                 } else {
                     let sig = 1.0 / (1.0 + fast_exp_scalar(-raw));
-                    scratch.d_delta_flat[t_off_di + d] * sig
+                    stored(dtype, scratch.d_delta_flat[t_off_di + d] * sig)
                 };
             }
         }
@@ -175,13 +189,18 @@ pub fn backward_mamba_layer_batched(
     //   Then accumulate d_dt_input into d_xdbl per timestep.
     // ===================================================================
     acts.copy_xdbl_dt_all(&mut scratch.xdbl_dt_buf);
-    sgemm_backward(
-        &mut scratch.d_dt_input_flat,
-        &mut d_layer.dt_proj_w,
-        Some(&mut d_layer.dt_proj_b),
-        &scratch.d_delta_raw_flat,
-        &scratch.xdbl_dt_buf,
-        &w.dt_proj_w,
+    scratch.gemm.backward(
+        dtype,
+        (
+            &mut scratch.d_dt_input_flat,
+            &mut d_layer.dt_proj_w,
+            Some(&mut d_layer.dt_proj_b),
+        ),
+        (
+            &scratch.d_delta_raw_flat,
+            &scratch.xdbl_dt_buf,
+            &w.dt_proj_w,
+        ),
         (seq_len, dt_rank, di),
     );
 
@@ -193,6 +212,8 @@ pub fn backward_mamba_layer_batched(
             scratch.d_xdbl_flat[xdbl_off + i] += scratch.d_dt_input_flat[dt_off + i];
         }
     }
+    // Every term of d_xdbl is in: a half lane stores the row once.
+    store(dtype, &mut scratch.d_xdbl_flat[..seq_len * xdbl_dim]);
 
     // ===================================================================
     // Phase B5: Batch x_proj backward
@@ -202,13 +223,10 @@ pub fn backward_mamba_layer_batched(
     //   Then accumulate: d_u_flat[i] += d_u_xproj_flat[i]
     // ===================================================================
     acts.copy_u_all(&mut scratch.u_buf);
-    sgemm_backward(
-        &mut scratch.d_u_xproj_flat,
-        &mut d_layer.x_proj_w,
-        None,
-        &scratch.d_xdbl_flat,
-        &scratch.u_buf,
-        &w.x_proj_w,
+    scratch.gemm.backward(
+        dtype,
+        (&mut scratch.d_u_xproj_flat, &mut d_layer.x_proj_w, None),
+        (&scratch.d_xdbl_flat, &scratch.u_buf, &w.x_proj_w),
         (seq_len, di, xdbl_dim),
     );
 
@@ -218,7 +236,7 @@ pub fn backward_mamba_layer_batched(
         .iter_mut()
         .zip(scratch.d_u_xproj_flat.iter())
     {
-        *du += du_xp;
+        *du = stored(dtype, *du + du_xp);
     }
 
     // ===================================================================
@@ -230,6 +248,7 @@ pub fn backward_mamba_layer_batched(
         let t_off = t * di;
         let post_conv = acts.post_conv(t);
         for (d, &x) in post_conv.iter().enumerate().take(di) {
+            let x = stored(dtype, x);
             let sig = 1.0 / (1.0 + fast_exp_scalar(-x));
             scratch.d_conv_out_flat[t_off + d] =
                 scratch.d_u_flat[t_off + d] * sig * (1.0 + x * (1.0 - sig));
@@ -272,6 +291,9 @@ pub fn backward_mamba_layer_batched(
             }
         }
     }
+    // Each position's input gradient is whole once the later positions'
+    // carry is in.
+    store(dtype, &mut scratch.d_x_branch_flat[..seq_len * di]);
 
     // ===================================================================
     // Phase B7: Batch in_proj backward
@@ -290,13 +312,10 @@ pub fn backward_mamba_layer_batched(
     }
 
     acts.copy_post_norm_all(&mut scratch.post_norm_buf);
-    sgemm_backward(
-        &mut scratch.d_norm_flat,
-        &mut d_layer.in_proj_w,
-        None,
-        &scratch.d_proj_flat,
-        &scratch.post_norm_buf,
-        &w.in_proj_w,
+    scratch.gemm.backward(
+        dtype,
+        (&mut scratch.d_norm_flat, &mut d_layer.in_proj_w, None),
+        (&scratch.d_proj_flat, &scratch.post_norm_buf, &w.in_proj_w),
         (seq_len, dm, 2 * di),
     );
 
@@ -409,13 +428,22 @@ pub fn backward_mamba_backbone_batched(
     // Use d_input_proj_scratch from BackwardPhaseScratch for the discarded dx.
     // A model without an input projection has no weight gradient here.
     if !mamba_w.input_proj_w.is_empty() {
-        sgemm_backward(
-            &mut scratch.d_input_proj_scratch,
-            &mut d_mamba.input_proj_w,
-            Some(&mut d_mamba.input_proj_b),
-            &d_temporal_flat[..seq_len * dm],
-            &acts.input_proj_inputs[..seq_len * mid],
-            &mamba_w.input_proj_w,
+        // A half lane casts the gradient to its storage once, for the
+        // weight's product and the bias's sum alike.
+        let d_out = &mut d_temporal_flat[..seq_len * dm];
+        store(scratch.dtype, d_out);
+        scratch.gemm.backward(
+            scratch.dtype,
+            (
+                &mut scratch.d_input_proj_scratch,
+                &mut d_mamba.input_proj_w,
+                Some(&mut d_mamba.input_proj_b),
+            ),
+            (
+                d_out,
+                &acts.input_proj_inputs[..seq_len * mid],
+                &mamba_w.input_proj_w,
+            ),
             (seq_len, mid, dm),
         );
     }

@@ -190,6 +190,9 @@
   every step, and in f16 the dynamic loss scaler (`scaler_state`,
   `load_scaler_state`, carried in the trainer state). Mamba-2 and MIMO;
   `DynamicLossScaler` is exported at the crate root.
+- Mamba-1 joins the CPU precision lanes: `MambaBackbone::new_with`, its
+  decode and prefill each rounding where the GPU path of the same name
+  stores, and `MambaCpuTrainer::new_with`.
 
 ### Changed
 

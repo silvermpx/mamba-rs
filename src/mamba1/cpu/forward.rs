@@ -21,9 +21,11 @@
 use super::flat::{MambaBackboneFlat, MambaLayerFlat};
 use super::scratch::PhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
+use crate::mlp::cpu::RowsGemm;
 use crate::ops::blas::sgemm_forward;
 use crate::ops::dims::{MambaDims, MambaRecurrentState};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
+use crate::ops::rounding::{store, stored};
 
 /// O2 optimized single-layer Mamba forward pass: 7-phase pipeline with batched SGEMM.
 ///
@@ -42,6 +44,14 @@ use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 /// - **F4**: Sequential SSM core (per-timestep: conv1d, x_proj, dt_proj, SSM, gating)
 /// - **F5**: Batch out_proj — ONE SGEMM call `[T * d_inner] -> [T * d_model]`
 /// - **F6**: Residual add (all T)
+///
+/// In a reduced precision (the scratch's) the values between the phases
+/// are stored ones, as the GPU trainer keeps them: the normalized rows,
+/// every projection's output, the gate after its SiLU, the conv output
+/// after its SiLU, delta after the softplus, the scan output and the gated
+/// rows. TF32 rounds every GEMM operand instead. The residual stream, the
+/// conv and SSM states, the norms' statistics and the decay factors stay
+/// f32.
 ///
 /// # Arguments
 ///
@@ -71,6 +81,8 @@ pub fn forward_mamba_layer_batched(
     let dt_rank = dims.dt_rank;
     let xdbl_dim = dims.xdbl_dim;
     let seq_len = dims.seq_len;
+    let dtype = scratch.dtype;
+    let lane = (sgemm_forward as RowsGemm, dtype);
 
     // ===================================================================
     // Phase F1: Batch RmsNorm (loop over T)
@@ -97,6 +109,7 @@ pub fn forward_mamba_layer_batched(
         for d in 0..dm {
             pn[d] = src[d] * inv_rms * layer_w.norm_weight[d];
         }
+        store(dtype, pn);
 
         // Also save post_norm into acts (needed for backward)
         acts.post_norm_mut(t).copy_from_slice(pn);
@@ -106,14 +119,11 @@ pub fn forward_mamba_layer_batched(
     // Phase F2: Batch in_proj -- ONE SGEMM call
     //           [T * d_model] -> [T * 2*d_inner]
     // ===================================================================
-    sgemm_forward(
-        &mut scratch.proj_flat,
-        &scratch.post_norm_flat,
-        &layer_w.in_proj_w,
-        None,
-        seq_len,
-        dm,
-        2 * di,
+    scratch.gemm.forward(
+        lane,
+        (&mut scratch.proj_flat, &scratch.post_norm_flat),
+        (&layer_w.in_proj_w, None),
+        (seq_len, dm, 2 * di),
     );
 
     // ===================================================================
@@ -136,6 +146,7 @@ pub fn forward_mamba_layer_batched(
             let sig = 1.0 / (1.0 + fast_exp_scalar(-g));
             scratch.gate_silu_flat[gs_off + d] = g * sig;
         }
+        store(dtype, &mut scratch.gate_silu_flat[gs_off..gs_off + di]);
         acts.gate_post_silu_mut(t)
             .copy_from_slice(&scratch.gate_silu_flat[gs_off..gs_off + di]);
     }
@@ -183,7 +194,7 @@ pub fn forward_mamba_layer_batched(
                     val += conv_state[base + k] * layer_w.conv1d_weight[base + k];
                 }
                 acts.data[pc_start + d] = val;
-                let u = val / (1.0 + fast_exp_scalar(-val));
+                let u = stored(dtype, val / (1.0 + fast_exp_scalar(-val)));
                 acts.data[u_start + d] = u;
                 scratch.u_flat[uf + d] = u;
             }
@@ -191,14 +202,14 @@ pub fn forward_mamba_layer_batched(
     }
 
     // -- F4b: x_proj as ONE SGEMM over all T rows --
-    sgemm_forward(
-        &mut scratch.xdbl_flat[..seq_len * xdbl_dim],
-        &scratch.u_flat[..seq_len * di],
-        &layer_w.x_proj_w,
-        None,
-        seq_len,
-        di,
-        xdbl_dim,
+    scratch.gemm.forward(
+        lane,
+        (
+            &mut scratch.xdbl_flat[..seq_len * xdbl_dim],
+            &scratch.u_flat[..seq_len * di],
+        ),
+        (&layer_w.x_proj_w, None),
+        (seq_len, di, xdbl_dim),
     );
     for t in 0..seq_len {
         let row = &scratch.xdbl_flat[t * xdbl_dim..(t + 1) * xdbl_dim];
@@ -207,14 +218,14 @@ pub fn forward_mamba_layer_batched(
     }
 
     // -- F4c: dt_proj as ONE SGEMM + softplus --
-    sgemm_forward(
-        &mut scratch.delta_raw_flat[..seq_len * di],
-        &scratch.dt_in_flat[..seq_len * dt_rank],
-        &layer_w.dt_proj_w,
-        Some(&layer_w.dt_proj_b),
-        seq_len,
-        dt_rank,
-        di,
+    scratch.gemm.forward(
+        lane,
+        (
+            &mut scratch.delta_raw_flat[..seq_len * di],
+            &scratch.dt_in_flat[..seq_len * dt_rank],
+        ),
+        (&layer_w.dt_proj_w, Some(&layer_w.dt_proj_b)),
+        (seq_len, dt_rank, di),
     );
     for t in 0..seq_len {
         let step_base = t * acts.offsets.step_stride;
@@ -227,7 +238,7 @@ pub fn forward_mamba_layer_batched(
             acts.data[d_start + d] = if raw > 20.0 {
                 raw
             } else {
-                fast_exp_scalar(raw).ln_1p()
+                stored(dtype, fast_exp_scalar(raw).ln_1p())
             };
         }
     }
@@ -276,7 +287,7 @@ pub fn forward_mamba_layer_batched(
                 }
 
                 y_d += layer_w.d_param[d] * u_d;
-                acts.data[y_start + d] = y_d;
+                acts.data[y_start + d] = stored(dtype, y_d);
             }
         }
 
@@ -291,7 +302,7 @@ pub fn forward_mamba_layer_batched(
             let gs_off = t * di;
             for d in 0..di {
                 scratch.gated_flat[gs_off + d] =
-                    acts.data[y_start + d] * acts.data[gpost_start + d];
+                    stored(dtype, acts.data[y_start + d] * acts.data[gpost_start + d]);
                 acts.data[gated_start + d] = scratch.gated_flat[gs_off + d];
             }
         }
@@ -301,14 +312,11 @@ pub fn forward_mamba_layer_batched(
     // Phase F5: Batch out_proj -- ONE SGEMM call
     //           [T * d_inner] -> [T * d_model]
     // ===================================================================
-    sgemm_forward(
-        &mut scratch.out_flat,
-        &scratch.gated_flat,
-        &layer_w.out_proj_w,
-        None,
-        seq_len,
-        di,
-        dm,
+    scratch.gemm.forward(
+        lane,
+        (&mut scratch.out_flat, &scratch.gated_flat),
+        (&layer_w.out_proj_w, None),
+        (seq_len, di, dm),
     );
 
     // ===================================================================
@@ -370,17 +378,17 @@ pub fn forward_mamba_backbone_batched(
     if mamba_w.input_proj_w.is_empty() {
         temporal_flat[..seq_len * dm].copy_from_slice(&mamba_input_flat[..seq_len * dm]);
     } else {
-        // Save inputs for backward
-        acts.input_proj_inputs
-            .copy_from_slice(&mamba_input_flat[..seq_len * mid]);
-        sgemm_forward(
-            &mut temporal_flat[..seq_len * dm],
-            &mamba_input_flat[..seq_len * mid],
-            &mamba_w.input_proj_w,
-            Some(&mamba_w.input_proj_b),
-            seq_len,
-            mid,
-            dm,
+        // Save inputs for backward. A half lane casts them to its storage,
+        // the GEMMs read them and its output so stored; the residual
+        // stream starts from that output.
+        let inputs = &mut acts.input_proj_inputs[..seq_len * mid];
+        inputs.copy_from_slice(&mamba_input_flat[..seq_len * mid]);
+        store(scratch.dtype, inputs);
+        scratch.gemm.forward(
+            (sgemm_forward as RowsGemm, scratch.dtype),
+            (&mut temporal_flat[..seq_len * dm], inputs),
+            (&mamba_w.input_proj_w, Some(&mamba_w.input_proj_b)),
+            (seq_len, mid, dm),
         );
     }
 
@@ -424,5 +432,6 @@ pub fn forward_mamba_backbone_batched(
         for d in 0..dm {
             temporal_flat[off + d] = temporal_flat[off + d] * inv_rms * mamba_w.norm_f_weight[d];
         }
+        store(scratch.dtype, &mut temporal_flat[off..off + dm]);
     }
 }

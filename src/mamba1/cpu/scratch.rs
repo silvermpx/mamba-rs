@@ -6,6 +6,8 @@
 //! intermediate buffers.
 
 use crate::ops::dims::MambaDims;
+use crate::ops::lane::LaneGemm;
+use crate::precision::WeightDtype;
 
 /// Scratch buffers for 7-phase optimized forward (O2).
 ///
@@ -35,6 +37,9 @@ pub struct PhaseScratch {
     pub dt_in_flat: Vec<f32>,
     /// Batched dt_proj output: `[T * d_inner]`.
     pub delta_raw_flat: Vec<f32>,
+    /// The precision of the forward (see `CpuOptions`).
+    pub(crate) dtype: WeightDtype,
+    pub(crate) gemm: LaneGemm,
 }
 
 impl PhaseScratch {
@@ -52,6 +57,8 @@ impl PhaseScratch {
             xdbl_flat: vec![0.0; t * (dims.dt_rank + 2 * dims.d_state)],
             dt_in_flat: vec![0.0; t * dims.dt_rank],
             delta_raw_flat: vec![0.0; t * dims.d_inner],
+            dtype: WeightDtype::F32,
+            gemm: LaneGemm::default(),
         }
     }
 }
@@ -106,6 +113,9 @@ pub struct BackwardPhaseScratch {
     pub d_input_proj_scratch: Vec<f32>,
     /// Local accumulator for norm_f weight gradient: `[d_model]`.
     pub d_norm_f_weight_local: Vec<f32>,
+    /// The precision of the backward, the forward's.
+    pub(crate) dtype: WeightDtype,
+    pub(crate) gemm: LaneGemm,
 }
 
 impl BackwardPhaseScratch {
@@ -137,6 +147,8 @@ impl BackwardPhaseScratch {
             post_norm_buf: vec![0.0; t * dm],
             d_input_proj_scratch: vec![0.0; t * dims.mamba_input_dim.max(dm)],
             d_norm_f_weight_local: vec![0.0; dm],
+            dtype: WeightDtype::F32,
+            gemm: LaneGemm::default(),
         }
     }
 }

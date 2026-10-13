@@ -358,7 +358,7 @@ fn window(cpu_or_gpu: &mut Window<'_>) -> (Vec<f32>, f32) {
     (rows, norm)
 }
 
-/// The bf16 and f16 GPU trainers of Mamba-2 and MIMO against the CPU
+/// The bf16 and f16 GPU trainers of Mamba-1, Mamba-2 and MIMO against the CPU
 /// trainer of the same precision, which rounds the weights and the values
 /// between the kernels where the GPU trainer stores them: its rows land
 /// closer to the GPU's than the f32 CPU's do. (A TF32 trainer takes TF32
@@ -368,6 +368,7 @@ fn window(cpu_or_gpu: &mut Window<'_>) -> (Vec<f32>, f32) {
 fn half_lanes_track_the_cpu_lane() {
     use mamba_rs::CpuOptions;
     let s = session();
+    let m1 = MambaWeights::init(&m1_cfg(), INPUT_DIM, 1);
     let m2 = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 2);
     let mimo = Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 4);
     let measure = BackwardOpts::default().with_clip_max_norm(1e30);
@@ -375,6 +376,18 @@ fn half_lanes_track_the_cpu_lane() {
         let gpu_opts = GpuOptions::default().dtype(dtype);
         let lane = CpuOptions::default().dtype(dtype);
         let trio: Vec<(&str, [AnyCpuTrainer; 2], AnyGpuTrainer)> = vec![
+            (
+                "Mamba-1",
+                [
+                    MambaCpuTrainer::new(&m1, m1_cfg(), s).unwrap().into(),
+                    MambaCpuTrainer::new_with(&m1, m1_cfg(), s, lane)
+                        .unwrap()
+                        .into(),
+                ],
+                MambaGpuTrainer::new(&m1, m1_cfg(), s, gpu_opts)
+                    .unwrap()
+                    .into(),
+            ),
             (
                 "Mamba-2",
                 [

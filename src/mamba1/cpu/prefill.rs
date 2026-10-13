@@ -41,6 +41,9 @@ use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
+use crate::ops::lane::{LaneGemm, input_rows};
+use crate::ops::rounding::store;
+use crate::precision::WeightDtype;
 
 /// Maximum `d_state` the stack-allocated per-channel buffers cover: the
 /// largest state `MambaConfig::validate` admits, so every valid model
@@ -124,6 +127,12 @@ pub struct PrefillScratch {
     out: Vec<f32>,
     /// Training-convention conv registers, channel-major `[di * dc]`.
     conv_reg: Vec<f32>,
+    /// The input rows as the input projection multiplies them in a reduced
+    /// precision.
+    input: Vec<f32>,
+    /// The precision of the prefill (see `CpuOptions`).
+    dtype: WeightDtype,
+    gemm: LaneGemm,
 }
 
 fn fingerprint(dims: &MambaDims) -> (usize, usize, usize, usize, usize, usize, usize) {
@@ -159,14 +168,25 @@ impl PrefillScratch {
             dt_in: vec![0.0; t * dims.dt_rank],
             out: vec![0.0; t * dims.d_model],
             conv_reg: vec![0.0; di * dims.d_conv],
+            input: Vec::new(),
+            dtype: WeightDtype::F32,
+            gemm: LaneGemm::default(),
         }
     }
 
     /// Re-size for a different dims fingerprint (no-op when unchanged).
     pub fn ensure(&mut self, dims: &MambaDims) {
         if fingerprint(dims) != self.fingerprint {
+            let dtype = self.dtype;
             *self = Self::new(dims);
+            self.dtype = dtype;
         }
+    }
+
+    /// Run the prefill in `dtype`: the weights must hold the bulk matrices
+    /// rounded as that precision keeps them.
+    pub(crate) fn set_dtype(&mut self, dtype: WeightDtype) {
+        self.dtype = dtype;
     }
 }
 
@@ -455,6 +475,12 @@ pub fn forward_mamba_backbone_prefill_mode(
         PrefillMode::Single => sgemm_forward,
         PrefillMode::Parallel => sgemm_forward_par,
     };
+    // In a reduced precision the activations between the kernels are
+    // stored values: the GEMMs round their results, the elementwise
+    // phases their outputs, as the GPU's half prefill stores them; the
+    // residual stream stays f32.
+    let dtype = scratch.dtype;
+    let lane = (gemm, dtype);
 
     // Input projection (identity D2D for HF checkpoints with empty proj).
     if w.input_proj_w.is_empty() {
@@ -463,7 +489,7 @@ pub fn forward_mamba_backbone_prefill_mode(
     } else {
         gemm(
             temporal_out,
-            mamba_input_flat,
+            input_rows(dtype, &mut scratch.input, mamba_input_flat),
             &w.input_proj_w,
             Some(&w.input_proj_b),
             t_len,
@@ -491,18 +517,16 @@ pub fn forward_mamba_backbone_prefill_mode(
                 for ((y, &s), nw) in dst.iter_mut().zip(src).zip(&lw.norm_weight[..dm]) {
                     *y = s * inv_rms * nw;
                 }
+                store(dtype, dst);
             },
         );
 
         // F2: in_proj GEMM.
-        gemm(
-            &mut scratch.proj,
-            &scratch.post_norm,
-            &lw.in_proj_w,
-            None,
-            t_len,
-            dm,
-            2 * di,
+        scratch.gemm.forward(
+            lane,
+            (&mut scratch.proj, &scratch.post_norm),
+            (&lw.in_proj_w, None),
+            (t_len, dm, 2 * di),
         );
 
         // F3: gate SiLU (the x branch stays in `proj` for the conv phase).
@@ -514,6 +538,7 @@ pub fn forward_mamba_backbone_prefill_mode(
                 for (g_out, &g) in gs.iter_mut().zip(&proj_row[di..2 * di]) {
                     *g_out = g * (1.0 / (1.0 + fast_exp_scalar(-g)));
                 }
+                store(dtype, gs);
             },
         );
 
@@ -548,6 +573,7 @@ pub fn forward_mamba_backbone_prefill_mode(
                         .enumerate()
                     {
                         conv_channel(d, u_col, reg, &x_cm[d * t_len..(d + 1) * t_len], lw, dims);
+                        store(dtype, u_col);
                     }
                 }
                 PrefillMode::Parallel => {
@@ -565,6 +591,7 @@ pub fn forward_mamba_backbone_prefill_mode(
                                 lw,
                                 dims,
                             );
+                            store(dtype, u_col);
                         });
                 }
             }
@@ -572,14 +599,11 @@ pub fn forward_mamba_backbone_prefill_mode(
         transpose_cm_to_rm(&mut scratch.u_rm, &scratch.u_cm, di, t_len, mode);
 
         // F4b: x_proj GEMM + dt gather.
-        gemm(
-            &mut scratch.xdbl,
-            &scratch.u_rm,
-            &lw.x_proj_w,
-            None,
-            t_len,
-            di,
-            xd,
+        scratch.gemm.forward(
+            lane,
+            (&mut scratch.xdbl, &scratch.u_rm),
+            (&lw.x_proj_w, None),
+            (t_len, di, xd),
         );
         zip_rows(
             mode,
@@ -589,21 +613,19 @@ pub fn forward_mamba_backbone_prefill_mode(
         );
 
         // F4c: dt_proj GEMM + softplus (threshold 20, same as training).
-        gemm(
-            &mut scratch.delta_rm,
-            &scratch.dt_in,
-            &lw.dt_proj_w,
-            Some(&lw.dt_proj_b),
-            t_len,
-            dr,
-            di,
+        scratch.gemm.forward(
+            lane,
+            (&mut scratch.delta_rm, &scratch.dt_in),
+            (&lw.dt_proj_w, Some(&lw.dt_proj_b)),
+            (t_len, dr, di),
         );
         for_rows(mode, &mut scratch.delta_rm[..t_len * di], di, |row| {
-            for v in row {
+            for v in row.iter_mut() {
                 if *v <= 20.0 {
                     *v = fast_exp_scalar(*v).ln_1p();
                 }
             }
+            store(dtype, row);
         });
         transpose_rows_to_cm(
             &mut scratch.delta_cm,
@@ -650,15 +672,18 @@ pub fn forward_mamba_backbone_prefill_mode(
         transpose_cm_to_rm(&mut scratch.y_rm, &scratch.y_cm, di, t_len, mode);
 
         // F4e: gating in row-major (same two-operand product as the fused
-        // per-channel version — bit-identical, cache-friendly).
+        // per-channel version — bit-identical, cache-friendly). A reduced
+        // precision stores the scan's output, then the gated product.
         zip_rows(
             mode,
             (&mut scratch.y_rm[..t_len * di], di),
             (&scratch.gate_silu[..t_len * di], di),
             |y_row, g_row| {
+                store(dtype, y_row);
                 for (y, &g) in y_row.iter_mut().zip(g_row) {
                     *y *= g;
                 }
+                store(dtype, y_row);
             },
         );
 
@@ -669,14 +694,11 @@ pub fn forward_mamba_backbone_prefill_mode(
         }
 
         // F5/F6: out_proj GEMM + in-place residual add.
-        gemm(
-            &mut scratch.out,
-            &scratch.y_rm,
-            &lw.out_proj_w,
-            None,
-            t_len,
-            di,
-            dm,
+        scratch.gemm.forward(
+            lane,
+            (&mut scratch.out, &scratch.y_rm),
+            (&lw.out_proj_w, None),
+            (t_len, di, dm),
         );
         zip_rows(
             mode,
@@ -700,6 +722,7 @@ pub fn forward_mamba_backbone_prefill_mode(
         for (y, nw) in row.iter_mut().zip(&w.norm_f_weight[..dm]) {
             *y *= inv_rms * nw;
         }
+        store(dtype, row);
     });
 }
 

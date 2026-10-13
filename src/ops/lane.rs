@@ -107,6 +107,25 @@ impl LaneGemm {
     }
 }
 
+/// The rows an input projection multiplies in `dtype`, its result kept in
+/// f32: the rows rounded to the half storage (the GPU casts them into a
+/// half staging buffer) or to TF32 operands, copied into `buf`; the rows
+/// themselves in f32.
+pub(crate) fn input_rows<'a>(
+    dtype: WeightDtype,
+    buf: &'a mut Vec<f32>,
+    rows: &'a [f32],
+) -> &'a [f32] {
+    if dtype == WeightDtype::F32 {
+        return rows;
+    }
+    buf.clear();
+    buf.extend_from_slice(rows);
+    store(dtype, buf);
+    operand(dtype, buf);
+    buf
+}
+
 /// Round in place the bulk matrices a lane keeps: to the half storage, or
 /// to TF32 operands, which the GPU rounds at every load and which round
 /// the same once.

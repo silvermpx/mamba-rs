@@ -87,6 +87,17 @@ pub(crate) fn round_f16(x: f32) -> f32 {
     f16_to_f32(f16_bits(x))
 }
 
+/// `x` as `dtype` stores it between kernels: a bf16 or f16 value for the
+/// half precisions, `x` itself for f32 and TF32.
+#[inline(always)]
+pub(crate) fn stored(dtype: WeightDtype, x: f32) -> f32 {
+    match dtype {
+        WeightDtype::Bf16 => round_bf16(x),
+        WeightDtype::F16 => round_f16(x),
+        WeightDtype::F32 | WeightDtype::Tf32 => x,
+    }
+}
+
 /// Rounds `v` in place to what `dtype` stores between kernels: bf16 and
 /// f16 values for the half precisions; f32 and TF32 store f32.
 pub(crate) fn store(dtype: WeightDtype, v: &mut [f32]) {
@@ -213,6 +224,16 @@ mod tests {
         let mut s = v;
         store(WeightDtype::Bf16, &mut s);
         assert_eq!(s, v.map(round_bf16));
+        for dtype in [
+            WeightDtype::F32,
+            WeightDtype::Tf32,
+            WeightDtype::Bf16,
+            WeightDtype::F16,
+        ] {
+            let mut s = v;
+            store(dtype, &mut s);
+            assert_eq!(s, v.map(|x| stored(dtype, x)));
+        }
         let mut s = v;
         store(WeightDtype::F16, &mut s);
         assert_eq!(s, v.map(round_f16));

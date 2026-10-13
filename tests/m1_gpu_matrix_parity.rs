@@ -225,6 +225,66 @@ fn m1_gpu_prefill_and_decode_match_cpu_at_any_width() {
     }
 }
 
+/// Each reduced-precision backbone against the CPU backbone of the same
+/// precision, which rounds the weights and the values between the kernels
+/// where the GPU stores them, its prefill where the GPU's prefill does and
+/// its decode where the GPU's decode does: a prompt's last row and the
+/// steps after it land closer than the f32 CPU's.
+#[test]
+fn m1_gpu_typed_lanes_track_the_cpu_lane() {
+    use mamba_rs::CpuOptions;
+    use mamba_rs::mamba1::cpu::prefill::PrefillMode;
+    let (input_dim, seq) = (12usize, 37usize);
+    for dtype in [WeightDtype::Tf32, WeightDtype::F16, WeightDtype::Bf16] {
+        for (label, cfg) in cases() {
+            let dm = cfg.d_model;
+            let w = drawn(&cfg, input_dim, 13);
+            let prompt = det(seq * input_dim, 500, 1.0);
+            let steps: Vec<Vec<f32>> = (0..6).map(|t| det(input_dim, 600 + t, 1.0)).collect();
+            let opts = GpuOptions::default().dtype(dtype);
+            let mut gpu = MambaGpuBackbone::new(&w, cfg, input_dim, 1, opts).unwrap();
+            let mut got = vec![vec![0f32; dm]; steps.len() + 1];
+            gpu.prefill(&prompt, seq).unwrap();
+            gpu.download_temporal(&mut got[0]).unwrap();
+            for (s, x) in steps.iter().enumerate() {
+                gpu.step(x, &mut got[s + 1]).unwrap();
+            }
+            // The host in f32 and in the backbone's precision.
+            let dist = |o: CpuOptions| {
+                let cpu = MambaBackbone::new_with(w.clone(), cfg, input_dim, o).unwrap();
+                let (mut st, mut sc) = (cpu.alloc_state(), cpu.alloc_scratch());
+                let mut pf = cpu.alloc_prefill_scratch(seq);
+                let mut rows = vec![0f32; seq * dm];
+                cpu.forward_prefill(
+                    &prompt,
+                    &mut rows,
+                    &mut st,
+                    &mut pf,
+                    seq,
+                    PrefillMode::Single,
+                );
+                let mut worst = rel_l2(&got[0], &rows[(seq - 1) * dm..]);
+                let mut c = vec![0f32; dm];
+                for (s, x) in steps.iter().enumerate() {
+                    cpu.forward_step(x, &mut c, &mut st, &mut sc);
+                    worst = worst.max(rel_l2(&got[s + 1], &c));
+                }
+                worst
+            };
+            let f32_host = dist(CpuOptions::default());
+            let lane_host = dist(CpuOptions::default().dtype(dtype));
+            eprintln!(
+                "{dtype:?} {label}: GPU vs CPU f32 {f32_host:.2e}, vs CPU {dtype:?} {lane_host:.2e}"
+            );
+            assert!(
+                lane_host < f32_host,
+                "{dtype:?} {label}: the CPU lane ({lane_host:.3e}) is no closer than f32 \
+                 ({f32_host:.3e})"
+            );
+        }
+    }
+}
+
 fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
     TrainMambaWeights {
         input_proj_w: w.input_proj_w.clone(),
