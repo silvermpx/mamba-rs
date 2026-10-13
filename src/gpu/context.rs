@@ -963,9 +963,11 @@ impl GpuCtx {
     /// Grown in the middle of a pass instead, they would move the operands
     /// the pass's earlier GEMMs were prepared with, and a graph captured
     /// after that pass would find those launches missing. Weights stored in
-    /// f32 stage and upcast nothing. Once a capture froze the scratch it
-    /// stays as it is: an eager GEMM that needs more runs on the overflow
-    /// buffers, and a capture that needs more is refused by name.
+    /// f32 stage and upcast nothing, and neither does a model context: its
+    /// Inference kernels read half operands as they are, and the language
+    /// model's tied head reserves its own rows. Once a capture froze the
+    /// scratch it stays as it is: an eager GEMM that needs more runs on the
+    /// overflow buffers, and a capture that needs more is refused by name.
     pub(crate) fn presize_gemm_scratch(
         &self,
         rows: usize,
@@ -977,7 +979,7 @@ impl GpuCtx {
             return Ok(());
         }
         self.ensure_half_staging(rows * max_width * dtype.size_bytes())?;
-        if self.batch_invariant() {
+        if self.batch_invariant() && self.bi_gemm_family() == BiGemmFamily::Triad {
             let elems = (rows * max_width).max(max_weight);
             self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))?;
         }

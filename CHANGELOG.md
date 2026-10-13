@@ -434,6 +434,10 @@
   in the deterministic mode instead of on every token, with the same
   logits; `gpu::blas::gpu_gemm_ex_tied_lm_head_widened_raw` serves a
   caller that keeps such a copy.
+- Model contexts (every GPU backbone and language model) no longer
+  reserve the f32 upcast scratch their GEMMs never use: three slots of
+  rows x widest activation, about 325 MB on a Mamba-2 2.7b-sized decode
+  engine.
 
 ### Fixed
 
