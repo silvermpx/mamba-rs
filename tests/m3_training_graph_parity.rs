@@ -349,6 +349,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
                     v: &mut g.v_states,
                     angle: &mut g.angle_states,
                 },
+                tail: None,
             },
             &manifest,
         )
@@ -467,6 +468,7 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
                     v: &mut g.v_states,
                     angle: &mut g.angle_states,
                 },
+                tail: None,
             },
             &manifest,
         )

@@ -765,6 +765,89 @@ fn the_shared_surface_carries_graphs_seam_and_dist_in_every_family() {
     }
 }
 
+/// The step options reach the fused step in every family and precision,
+/// eager and captured: three steps with the control clip and the global
+/// clip give the weights of the split call with the same options bit for
+/// bit, eager and replayed alike, and report the norm. A spike threshold
+/// below every norm skips the step on both roads, the weights and the
+/// step count where they were. Accumulation is refused as a step option,
+/// and so is a change under a captured graph until it is dropped.
+#[test]
+fn the_step_options_reach_the_eager_and_the_captured_step_in_every_family() {
+    let (input, d) = window();
+    let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
+    let opts = BackwardOpts::default()
+        .with_clip_max_norm(0.05)
+        .with_control_clip_max_norm(0.01);
+    let spike = opts.with_step_skip_above(1e-12);
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+        let mut eager = any_trainers(dtype);
+        let mut split = any_trainers(dtype);
+        let mut graph = any_trainers(dtype);
+        for i in 0..eager.len() {
+            let label = format!("{:?} {dtype:?}", eager[i].family());
+            assert!(
+                eager[i]
+                    .set_step_opts(opts.with_accumulate_only(true))
+                    .is_err(),
+                "{label}: accumulation as a step option"
+            );
+            eager[i].set_step_opts(opts).unwrap();
+            assert_eq!(eager[i].step_opts(), opts, "{label}");
+            graph[i].set_step_opts(opts).unwrap();
+            for k in 0..3 {
+                let m = eager[i].step(&input, &d).unwrap();
+                assert!(
+                    m.optimizer_stepped && m.grad_norm.is_some_and(f32::is_finite),
+                    "{label} step {k}: {m:?}"
+                );
+                split[i].forward(&input, &mut out).unwrap();
+                split[i].backward_step(&d, opts).unwrap();
+                if k == 0 {
+                    graph[i].step(&input, &d).unwrap();
+                    graph[i].capture_graph().unwrap();
+                } else {
+                    let m = graph[i].step(&input, &d).unwrap();
+                    assert!(m.graph_replayed && m.optimizer_stepped, "{label}: {m:?}");
+                }
+            }
+            let want = snapshot_bits(&split[i]);
+            assert_eq!(snapshot_bits(&eager[i]), want, "{label}: eager step");
+            assert_eq!(snapshot_bits(&graph[i]), want, "{label}: captured step");
+
+            assert!(
+                graph[i].set_step_opts(spike).is_err(),
+                "{label}: a change under a captured graph"
+            );
+            graph[i].set_step_opts(opts).unwrap();
+            graph[i].drop_graph();
+            graph[i].set_step_opts(spike).unwrap();
+            graph[i].step(&input, &d).unwrap();
+            graph[i].capture_graph().unwrap();
+            let before = snapshot_bits(&graph[i]);
+            let steps = graph[i].optimizer_state().unwrap().step;
+            let m = graph[i].step(&input, &d).unwrap();
+            assert!(
+                m.graph_replayed && !m.optimizer_stepped && m.step == steps,
+                "{label}: the spike replay {m:?}"
+            );
+            assert_eq!(
+                snapshot_bits(&graph[i]),
+                before,
+                "{label}: a skipped replay"
+            );
+            eager[i].set_step_opts(spike).unwrap();
+            let before = snapshot_bits(&eager[i]);
+            let m = eager[i].step(&input, &d).unwrap();
+            assert!(
+                !m.optimizer_stepped && m.step == 3,
+                "{label}: the spike step {m:?}"
+            );
+            assert_eq!(snapshot_bits(&eager[i]), before, "{label}: a skipped step");
+        }
+    }
+}
+
 /// Write the trainer's master weights to its family's checkpoint, and build
 /// a trainer of the same family from that file.
 fn reload_through_checkpoint(t: &AnyGpuTrainer, path: &Path, opts: GpuOptions) -> AnyGpuTrainer {

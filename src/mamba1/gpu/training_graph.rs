@@ -51,6 +51,7 @@ use crate::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, step_multi};
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
+use crate::gpu::grad_clip::{CaptureTail, enqueue_tail};
 use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
@@ -121,6 +122,8 @@ pub struct MambaMixedCapture<'a> {
     pub mamba_input: &'a GpuBuffer,
     pub d_temporal: &'a mut GpuBuffer,
     pub state: &'a mut GpuRecurrentState,
+    /// The step options' tail between the backward and the AdamW.
+    pub tail: Option<CaptureTail<'a>>,
 }
 
 /// Live buffers checked against the captured pointers on every M1 bf16
@@ -251,6 +254,7 @@ impl GpuMambaTrainingStepGraph {
             mamba_input,
             d_temporal,
             state,
+            mut tail,
         } = cap;
         // Result-returning capture must not panic on a caller mistake -
         // surface the contract as an error.
@@ -331,6 +335,7 @@ impl GpuMambaTrainingStepGraph {
                     a_neg_all,
                     scratch,
                 )?;
+                let skip = enqueue_tail(&mut tail, ctx, &mut grads.flat)?;
                 // ONE fused launch: every master tensor updated, the four
                 // bulk typed shadows written in the same kernel (the old
                 // per-tensor walk was 243 launches + a 4-cast/layer sync).
@@ -340,7 +345,7 @@ impl GpuMambaTrainingStepGraph {
                     multi_plan,
                     adam,
                     bias.ptr(),
-                    0,
+                    skip,
                 )?;
                 // f32-stays-f32 tensors still ride the (trimmed) sync walk.
                 train_w.sync_master_to_compute(ctx)?;
@@ -562,6 +567,8 @@ pub struct MambaF32Capture<'a> {
     pub mamba_input: &'a GpuBuffer,
     pub d_temporal: &'a mut GpuBuffer,
     pub state: &'a mut GpuRecurrentState,
+    /// The step options' tail between the backward and the AdamW.
+    pub tail: Option<CaptureTail<'a>>,
 }
 
 /// Live buffers checked against the captured pointers on every M1 f32
@@ -658,6 +665,7 @@ impl GpuMambaF32TrainingStepGraph {
             mamba_input,
             d_temporal,
             state,
+            mut tail,
         } = cap;
         let snap_input = mamba_input.cached_ptr();
         let snap_d_temporal = d_temporal.cached_ptr();
@@ -691,6 +699,7 @@ impl GpuMambaF32TrainingStepGraph {
                 gpu_backward_mamba_backbone(
                     ctx, d_temporal, grads, acts, weights, a_neg_all, scratch,
                 )?;
+                let skip = enqueue_tail(&mut tail, ctx, &mut grads.flat)?;
                 step_multi(
                     ctx,
                     ctx.kernels
@@ -699,7 +708,7 @@ impl GpuMambaF32TrainingStepGraph {
                     multi_plan,
                     adam,
                     bias.ptr(),
-                    0,
+                    skip,
                 )?;
                 // Recompute a_neg after AdamW — see mixed graph above for
                 // rationale. Without this the f32 SSM runs on a stale A-matrix

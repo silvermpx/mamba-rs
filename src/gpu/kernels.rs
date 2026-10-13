@@ -389,6 +389,9 @@ pub struct MambaKernels {
     /// Region twin of `scale_grads_dev_f32`: scales ONLY the described
     /// region by the device-resident clip coefficient.
     pub grad_region_scale_dev_f32: CudaFunction,
+    /// The skip flag of a captured step: an overflow, or a norm past the
+    /// spike threshold or not finite.
+    pub grad_skip_flag_f32: CudaFunction,
 
     // -- AdamW optimizer --
     /// Fused AdamW step on f32 master weights + f32 optimizer state.
@@ -1619,6 +1622,7 @@ impl MambaKernels {
             scale_grads_dev_f32: get("scale_grads_dev_f32")?,
             grad_region_sumsq_partial_f32: get("grad_region_sumsq_partial_f32")?,
             grad_region_scale_dev_f32: get("grad_region_scale_dev_f32")?,
+            grad_skip_flag_f32: get("grad_skip_flag_f32")?,
 
             // AdamW
             adamw_step_f32: get("adamw_step_f32")?,

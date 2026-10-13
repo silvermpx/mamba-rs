@@ -27,7 +27,7 @@
 mod graph;
 
 use crate::config::ModelFamily;
-use crate::gpu::grad_clip::{GradRegionGeom, norm_limit, scale_grads};
+use crate::gpu::grad_clip::{GradRegionGeom, StepTail, norm_limit, scale_grads};
 use crate::gpu::grad_window::{GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
@@ -503,6 +503,10 @@ pub struct Mamba3MimoGpuTrainer {
     mirror_pairs: Vec<(Span, Span)>,
     scaler: Option<DynamicLossScaler>,
     overflow: OverflowFlag,
+    /// The skip flag a measured step tail writes (see [`StepTail`]).
+    skip_flag: OverflowFlag,
+    /// The options of the fused step, eager or captured.
+    step_opts: BackwardOpts,
     /// The f16 loss scale on the device, which the backward multiplies the
     /// upstream gradient by.
     loss_scale: GpuBuffer,
@@ -827,6 +831,8 @@ impl Mamba3MimoGpuTrainer {
             mirror_pairs,
             scaler: (dtype == WeightDtype::F16).then(DynamicLossScaler::new),
             overflow: OverflowFlag::new(s)?,
+            skip_flag: OverflowFlag::new(s)?,
+            step_opts: BackwardOpts::default(),
             loss_scale: z(1)?,
             unscale: UnscaleFactor::new(s)?,
             overflowed: false,
@@ -920,12 +926,12 @@ impl Mamba3MimoGpuTrainer {
     /// One training step on a window: [`Self::forward`] of `input`
     /// (`[batch, seq_len, input_dim]`) without the download, then
     /// [`Self::backward_step`] of `d_temporal` (`[batch, seq_len, d_model]`,
-    /// d loss / d the final rows of every position) with the default
-    /// options.
+    /// d loss / d the final rows of every position) with the step options
+    /// (see [`Self::set_step_opts`]).
     ///
     /// With a captured graph (see [`Self::capture_graph`]) the step
-    /// replays it, unless an accumulation window is open: the eager step
-    /// folds the window in.
+    /// replays it, the same options baked in, unless an accumulation
+    /// window is open: the eager step folds the window in.
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         self.check_window_len("step input", input.len(), self.input_dim)?;
         self.check_window_len("step d_temporal", d_temporal.len(), self.cfg.d_model)?;
@@ -944,7 +950,8 @@ impl Mamba3MimoGpuTrainer {
                 t.forwarded = false;
                 t.forward_unchecked(input, None)?;
                 t.forwarded = true;
-                metrics = Some(t.backward_step(d_temporal, BackwardOpts::default())?);
+                let opts = t.step_opts;
+                metrics = Some(t.backward_step(d_temporal, opts)?);
                 Ok(())
             },
         )?;
@@ -954,12 +961,7 @@ impl Mamba3MimoGpuTrainer {
         let Some(m) = metrics else {
             return Err("the eager step returned no metrics".into());
         };
-        Ok(StepMetrics {
-            step: m.step,
-            graph_replayed: false,
-            loss_scale: m.loss_scale,
-            overflow_skipped: m.overflow_skipped,
-        })
+        Ok(StepMetrics::from_backward(m, false))
     }
 
     /// The backward of the last [`Self::forward`] for `d_temporal`
@@ -1064,6 +1066,54 @@ impl Mamba3MimoGpuTrainer {
     /// over the open window's gradient (see [`Self::apply_step_full`]).
     pub fn apply_step(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
         self.apply_step_full(clip_max_norm, None, None)
+    }
+
+    /// Set the options of the fused [`Self::step`]: the control-channel
+    /// clip, the global clip and the spike skip, which the eager step and a
+    /// captured graph both apply. Accumulation belongs to `backward_step`
+    /// and is refused here; a captured graph baked the options in, so
+    /// other options need `drop_graph` first.
+    pub fn set_step_opts(&mut self, opts: BackwardOpts) -> Result<(), String> {
+        if opts.accumulate_only {
+            return Err("the fused step applies its window: accumulate with backward_step".into());
+        }
+        if self.graph.is_some() && opts != self.step_opts {
+            return Err(
+                "MIMO set_step_opts: the captured graph baked the step options in; \
+                 drop_graph first"
+                    .into(),
+            );
+        }
+        self.step_opts = opts;
+        Ok(())
+    }
+
+    /// The options of the fused [`Self::step`].
+    pub fn step_opts(&self) -> BackwardOpts {
+        self.step_opts
+    }
+
+    /// Whether the step options' tail measures the norm.
+    pub(super) fn tail_measures(&self) -> bool {
+        self.step_opts.clip_max_norm.is_some() || self.step_opts.step_skip_above.is_some()
+    }
+
+    /// The step options' tail on the gradient as launches only (see
+    /// [`StepTail`]), returning the flag the AdamW after it skips on.
+    pub(super) fn tail_device(&mut self) -> Result<u64, String> {
+        let tail = StepTail::of(
+            &self.step_opts,
+            control_region_geom(&self.layout, &self.cfg),
+        );
+        let stream = self.ctx.stream.clone();
+        let overflow = if self.scaler.is_some() {
+            self.overflow.stable_ptr(&stream)
+        } else {
+            0
+        };
+        let skip = self.skip_flag.stable_ptr(&stream);
+        let scratch = self.window.clip_scratch();
+        tail.enqueue(&self.ctx, &mut self.grads, scratch, (skip, overflow))
     }
 
     /// Run only the optimizer tail over the open window's gradient: the

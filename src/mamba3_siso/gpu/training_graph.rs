@@ -17,6 +17,7 @@ use crate::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, step_multi};
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::{GemmRoute, GpuCtx};
 use crate::gpu::dtype::WeightDtype;
+use crate::gpu::grad_clip::{CaptureTail, enqueue_tail};
 use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
@@ -48,6 +49,8 @@ pub struct Mamba3MixedCapture<'a> {
     pub d_temporal: &'a mut GpuBuffer,
     /// ALL four state buffers are written by forward and read by backward.
     pub states: GpuMamba3StateBufs<'a>,
+    /// The step options' tail between the backward and the AdamW.
+    pub tail: Option<CaptureTail<'a>>,
 }
 
 /// Live buffers checked against the captured pointers on every M3 bf16
@@ -154,6 +157,7 @@ impl GpuMamba3TrainingStepGraph {
             mamba_input,
             d_temporal,
             mut states,
+            mut tail,
         } = cap;
         assert!(
             matches!(train_w.dtype, WeightDtype::Bf16),
@@ -215,13 +219,14 @@ impl GpuMamba3TrainingStepGraph {
                     f32_scratch,
                     mixed_scratch,
                 )?;
+                let skip = enqueue_tail(&mut tail, ctx, &mut grads.flat)?;
                 step_multi(
                     ctx,
                     m3k.adamw_step_multi.get(train_w.dtype),
                     multi_plan,
                     adam,
                     bias.ptr(),
-                    0,
+                    skip,
                 )?;
                 // f32-stays-f32 tensors only (bulk shadows ride the fused kernel).
                 train_w.sync_master_to_compute(ctx)?;
@@ -434,6 +439,8 @@ pub struct Mamba3F32Capture<'a> {
     pub mamba_input: &'a GpuBuffer,
     pub d_temporal: &'a mut GpuBuffer,
     pub states: GpuMamba3StateBufs<'a>,
+    /// The step options' tail between the backward and the AdamW.
+    pub tail: Option<CaptureTail<'a>>,
 }
 
 /// Live buffers checked against the captured pointers on every M3 f32
@@ -520,6 +527,7 @@ impl GpuMamba3F32TrainingStepGraph {
             mamba_input,
             d_temporal,
             mut states,
+            mut tail,
         } = cap;
         let snap_input = mamba_input.cached_ptr();
         let snap_d_temporal = d_temporal.cached_ptr();
@@ -551,6 +559,7 @@ impl GpuMamba3F32TrainingStepGraph {
                     scratch,
                 )?;
                 gpu_backward_mamba3_backbone(exec, d_temporal, acts, weights, grads, scratch)?;
+                let skip = enqueue_tail(&mut tail, ctx, &mut grads.flat)?;
                 step_multi(
                     ctx,
                     m3k.adamw_step_multi
@@ -558,7 +567,7 @@ impl GpuMamba3F32TrainingStepGraph {
                     multi_plan,
                     adam,
                     bias.ptr(),
-                    0,
+                    skip,
                 )?;
                 Ok(())
             })

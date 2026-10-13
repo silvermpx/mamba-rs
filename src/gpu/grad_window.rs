@@ -134,6 +134,17 @@ impl GradWindow {
         Ok(std::mem::take(&mut self.overflowed))
     }
 
+    /// The clip's scratch, the partial sums and `[coef, norm]`, for a step
+    /// tail that launches the clip itself.
+    pub(crate) fn clip_scratch(&mut self) -> (&mut GpuByteBuffer, &mut GpuBuffer) {
+        (&mut self.partials, &mut self.coef)
+    }
+
+    /// `[coef, norm]` of the last clip launched on this window's scratch.
+    pub(crate) fn clip_coef(&self) -> &GpuBuffer {
+        &self.coef
+    }
+
     /// Scale the region `geom` of `grads` to its own L2 norm `max_norm`
     /// when it is larger, with the fixed-order f64 reduction the global
     /// clip uses, and return the region's norm before the clip.

@@ -24,7 +24,8 @@ use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
 use crate::gpu::grad_clip::{
-    GradRegionGeom, alloc_partials, clip_grads_device, clip_region_device, norm_limit, scale_grads,
+    CaptureTail, GradRegionGeom, StepTail, alloc_partials, clip_grads_device, clip_region_device,
+    norm_limit, read_tail, scale_grads,
 };
 use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
@@ -534,6 +535,26 @@ impl Mamba3GpuTrainer {
         }
     }
 
+    /// Set the options of the fused [`Self::step`]: the control-channel
+    /// clip, the global clip and the spike skip, which the eager step and
+    /// a captured graph both apply. Accumulation belongs to
+    /// [`Self::backward_step`] and is refused here; a captured graph baked
+    /// the options in, so other options need [`Self::drop_graph`] first.
+    pub fn set_step_opts(&mut self, opts: BackwardOpts) -> Result<(), String> {
+        match &mut self.inner {
+            Trainer3Inner::F32(t) => t.set_step_opts(opts),
+            Trainer3Inner::Mixed(t) => t.set_step_opts(opts),
+        }
+    }
+
+    /// The options of the fused [`Self::step`].
+    pub fn step_opts(&self) -> BackwardOpts {
+        match &self.inner {
+            Trainer3Inner::F32(t) => t.step_opts,
+            Trainer3Inner::Mixed(t) => t.step_opts,
+        }
+    }
+
     /// Reset the recurrent SSM, K, V, and angle states to zero.
     pub fn reset_state(&mut self) -> Result<(), String> {
         match &mut self.inner {
@@ -831,6 +852,10 @@ pub(crate) struct Mamba3TrainerMixed {
     clip_partials: GpuByteBuffer,
     /// `[coef, norm]` - the device-side clip fold's output.
     clip_scratch: GpuBuffer,
+    /// The options of the fused step, eager or captured.
+    step_opts: BackwardOpts,
+    /// The skip flag a measured step tail writes (see [`StepTail`]).
+    skip_flag: OverflowFlag,
 
     // f16 AMP loss scaler (None for bf16). See M1 trainer for the protocol.
     scaler: Option<DynamicLossScaler>,
@@ -981,6 +1006,7 @@ impl Mamba3TrainerMixed {
 
         let clip_partials = alloc_partials(&ctx.stream)?;
         let clip_scratch = GpuBuffer::zeros(&ctx.stream, 2)?;
+        let skip_flag = OverflowFlag::new(&ctx.stream)?;
         let initial_gemm_route = ctx.gemm_route();
         let has_gemm_work =
             dims.bt() != 0 && (weights.compute.input_proj_w.len_elems() != 0 || dims.n_layers != 0);
@@ -1012,6 +1038,8 @@ impl Mamba3TrainerMixed {
             grads_dirty: false,
             clip_partials,
             clip_scratch,
+            step_opts: BackwardOpts::default(),
+            skip_flag,
             scaler,
             overflow_flag,
             d_temporal_scaled,
@@ -1034,6 +1062,64 @@ impl Mamba3TrainerMixed {
 
     pub fn has_graph(&self) -> bool {
         self.graph.is_some() || self.graph_f16.is_some()
+    }
+
+    /// The step options' tail (see [`StepTail`]).
+    fn step_tail(&self) -> StepTail {
+        StepTail::of(
+            &self.step_opts,
+            m3_control_region_geom(&self.cfg, self.dims.mamba_input_dim),
+        )
+    }
+
+    /// Set the options of the fused step (see
+    /// [`Mamba3GpuTrainer::set_step_opts`]).
+    pub(crate) fn set_step_opts(&mut self, opts: BackwardOpts) -> Result<(), String> {
+        if opts.accumulate_only {
+            return Err("the fused step applies its window: accumulate with backward_step".into());
+        }
+        if self.has_graph() && opts != self.step_opts {
+            return Err(
+                "Mamba-3 set_step_opts: the captured graph baked the step options in; \
+                 drop_graph first"
+                    .into(),
+            );
+        }
+        self.step_opts = opts;
+        Ok(())
+    }
+
+    /// Enqueue the step options' tail on the gradient; the flag the AdamW
+    /// after it skips on (`overflow` when it measures nothing).
+    fn enqueue_step_tail(
+        &mut self,
+        overflow: cudarc::driver::sys::CUdeviceptr,
+    ) -> Result<cudarc::driver::sys::CUdeviceptr, String> {
+        let tail = self.step_tail();
+        let skip = self.skip_flag.stable_ptr(&self.ctx.stream);
+        tail.enqueue(
+            &self.ctx,
+            &mut self.grads.flat,
+            (&mut self.clip_partials, &mut self.clip_scratch),
+            (skip, overflow),
+        )
+    }
+
+    /// After a fused step: whether its AdamW skipped and the pre-clip norm
+    /// when the tail measured one. A norm that is not finite and that no
+    /// overflow explains is an error, with the step counted before it given
+    /// back.
+    fn step_verdict(&mut self, overflowed: bool) -> Result<(bool, Option<f32>), String> {
+        if !self.step_tail().measures() {
+            return Ok((overflowed, None));
+        }
+        match read_tail(&self.ctx, &self.skip_flag, &self.clip_scratch, overflowed) {
+            Ok((skipped, norm)) => Ok((skipped, Some(norm))),
+            Err(e) => {
+                self.adam.step -= 1;
+                Err(e)
+            }
+        }
     }
 
     /// Reset SSM / K / V / angle states to zero (keeps weights untouched).
@@ -1066,6 +1152,8 @@ impl Mamba3TrainerMixed {
         let manifest = self.prepared_gemm_manifest.ok_or_else(|| {
             "M3 bf16 training graph capture requires one successful eager step".to_string()
         })?;
+        let tail = self.step_tail();
+        let skip = self.skip_flag.stable_ptr(&self.ctx.stream);
 
         // The trainer owns every captured allocation and drops the graph first.
         let g = unsafe {
@@ -1094,6 +1182,12 @@ impl Mamba3TrainerMixed {
                         v: &mut self.v_states,
                         angle: &mut self.angle_states,
                     },
+                    tail: Some(CaptureTail {
+                        tail,
+                        partials: &mut self.clip_partials,
+                        coef: &mut self.clip_scratch,
+                        skip,
+                    }),
                 },
                 &manifest,
             )
@@ -1126,7 +1220,9 @@ impl Mamba3TrainerMixed {
         self.mamba_input.upload(&self.ctx.stream, input)?;
         self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
 
-        let (step, bc1, bc2) = self.adam.advance();
+        // The step counts before the replay, as the eager step counts it
+        // before its AdamW; a step the tail skipped gives it back.
+        let (_, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
 
         let replayed = if let Some(ref g) = self.graph {
@@ -1152,7 +1248,15 @@ impl Mamba3TrainerMixed {
             false
         };
 
-        Ok(StepMetrics::plain(step, replayed))
+        let (skipped, grad_norm) = self.step_verdict(false)?;
+        if skipped {
+            self.adam.step -= 1;
+        }
+        Ok(StepMetrics {
+            optimizer_stepped: !skipped,
+            grad_norm,
+            ..StepMetrics::plain(self.adam.step, replayed)
+        })
     }
 
     fn eager_f16_forward_backward(&mut self) -> Result<(), String> {
@@ -1250,7 +1354,7 @@ impl Mamba3TrainerMixed {
             .expect("f16 overflow flag")
             .zero(&self.ctx.stream)?;
 
-        let (step, overflow, replayed) = if let Some(ref g) = self.graph_f16 {
+        let replayed = if let Some(ref g) = self.graph_f16 {
             assert_eq!(
                 self.bias.ptr(),
                 self.captured_f16_bias_ptr,
@@ -1307,17 +1411,15 @@ impl Mamba3TrainerMixed {
                         .map_err(|e| format!("M3 f16 graph launch: {e:?}"))
                 },
             )?;
-            let overflow = self
-                .overflow_flag
-                .as_ref()
-                .unwrap()
-                .read(&self.ctx.stream)?
-                != 0;
-            self.scaler.as_mut().expect("f16 scaler").update(overflow);
-            (next_step, overflow, true)
+            true
         } else {
-            // Same op sequence as the captured graph body (composed from
-            // the shared eager phase bodies).
+            // The captured body's sequence, from the shared eager phase
+            // bodies: the overflow check, the unscale that skips on it, the
+            // step options' tail and an AdamW that skips on the flag the
+            // tail leaves. On an overflow or a spike the parameters, both
+            // moments and the step counter stay where the previous step
+            // left them, which is what GradScaler does; the M1 twin runs
+            // the same sequence.
             self.eager_f16_forward_backward()?;
             check_inf_nan_gpu(
                 &self.ctx,
@@ -1325,43 +1427,43 @@ impl Mamba3TrainerMixed {
                 self.overflow_flag.as_mut().unwrap(),
                 &self.grads.flat,
             )?;
-            let overflow = self
+            let unscale = self.unscale_factor.as_ref().unwrap();
+            scale_grads_skip_gpu(
+                &self.ctx,
+                &self.ctx.kernels,
+                self.overflow_flag.as_mut().unwrap(),
+                &mut self.grads.flat,
+                unscale,
+            )?;
+            let overflow_ptr = self
                 .overflow_flag
                 .as_ref()
                 .unwrap()
-                .read(&self.ctx.stream)?
-                != 0;
-            if !overflow {
-                // Clean step only: unscale, then optimize. On overflow the
-                // parameters, both moments and the step counter stay where
-                // the previous step left them, which is what GradScaler
-                // does. The M1 twin reads the flag in the same place.
-                let unscale = self.unscale_factor.as_ref().unwrap();
-                scale_grads_skip_gpu(
-                    &self.ctx,
-                    &self.ctx.kernels,
-                    self.overflow_flag.as_mut().unwrap(),
-                    &mut self.grads.flat,
-                    unscale,
-                )?;
-                self.eager_optimize()?;
-            }
-            self.scaler.as_mut().expect("f16 scaler").update(overflow);
-            (next_step, overflow, false)
+                .stable_ptr(&self.ctx.stream);
+            let skip = self.enqueue_step_tail(overflow_ptr)?;
+            self.eager_optimize(skip)?;
+            false
         };
-
-        let final_step = if overflow {
+        let overflow = self
+            .overflow_flag
+            .as_ref()
+            .unwrap()
+            .read(&self.ctx.stream)?
+            != 0;
+        let (skipped, grad_norm) = self.step_verdict(overflow)?;
+        self.scaler.as_mut().expect("f16 scaler").update(overflow);
+        if skipped {
             self.adam.step = prev_step;
-            prev_step
-        } else {
-            step
-        };
+        }
+        debug_assert!(skipped || self.adam.step == next_step);
 
         Ok(StepMetrics {
-            step: final_step,
+            step: self.adam.step,
             graph_replayed: replayed,
             loss_scale: Some(scale),
             overflow_skipped: Some(overflow),
+            optimizer_stepped: !skipped,
+            grad_norm,
         })
     }
 
@@ -1406,6 +1508,8 @@ impl Mamba3TrainerMixed {
         let snap_half_staging = self.ctx.half_staging_ptr();
         let snap_bi_upcast = self.ctx.bi_upcast_scratch_ptrs();
         let snap_gemm_route = self.ctx.gemm_route();
+        let tail = self.step_tail();
+        let skip_ptr = self.skip_flag.stable_ptr(&self.ctx.stream);
 
         // Capture body: mirrors the eager f16 path 1:1 (composed from the
         // shared eager phase bodies) so numerics match.
@@ -1433,6 +1537,8 @@ impl Mamba3TrainerMixed {
                 angle_states,
                 overflow_flag,
                 unscale_factor,
+                clip_partials,
+                clip_scratch,
                 ..
             } = self;
             let exec = M3Exec {
@@ -1480,13 +1586,19 @@ impl Mamba3TrainerMixed {
                         &mut grads.flat,
                         unscale_factor.as_ref().unwrap(),
                     )?;
+                    let skip = tail.enqueue(
+                        ctx,
+                        &mut grads.flat,
+                        (&mut *clip_partials, &mut *clip_scratch),
+                        (skip_ptr, snap_overflow),
+                    )?;
                     step_multi(
                         ctx,
                         m3k.adamw_step_multi.get(*dtype),
                         multi_plan,
                         adam,
                         bias.ptr(),
-                        snap_overflow,
+                        skip,
                     )?;
                     weights.sync_master_to_compute(ctx)
                 })
@@ -1569,14 +1681,14 @@ impl Mamba3TrainerMixed {
     /// Eager optimizer tail: AdamW on the f32 master weights (capturable
     /// kernel so graph and eager numerics stay bit-identical), then the
     /// master → compute sync.
-    fn eager_optimize(&mut self) -> Result<(), String> {
+    fn eager_optimize(&mut self, skip: cudarc::driver::sys::CUdeviceptr) -> Result<(), String> {
         step_multi(
             &self.ctx,
             self.m3k.adamw_step_multi.get(self.dtype),
             &self.multi_plan,
             &self.adam,
             self.bias.ptr(),
-            0,
+            skip,
         )?;
         // Bulk typed shadows ride the fused kernel; the walk covers only
         // the f32-stays-f32 tensors.
@@ -1589,6 +1701,8 @@ impl Mamba3TrainerMixed {
         if has_gemm_work {
             prepare_inference_arch_rung(&self.ctx)?;
         }
+        let tail = self.step_tail();
+        let skip_ptr = self.skip_flag.stable_ptr(&self.ctx.stream);
         let Self {
             ctx,
             m3k,
@@ -1610,6 +1724,8 @@ impl Mamba3TrainerMixed {
             v_states,
             angle_states,
             prepared_gemm_manifest,
+            clip_partials,
+            clip_scratch,
             ..
         } = self;
         let exec = M3Exec {
@@ -1642,13 +1758,19 @@ impl Mamba3TrainerMixed {
                 f32_scratch,
                 mixed_scratch,
             )?;
+            let skip = tail.enqueue(
+                ctx,
+                &mut grads.flat,
+                (&mut *clip_partials, &mut *clip_scratch),
+                (skip_ptr, 0),
+            )?;
             step_multi(
                 ctx,
                 m3k.adamw_step_multi.get(*dtype),
                 multi_plan,
                 adam,
                 bias.ptr(),
-                0,
+                skip,
             )?;
             weights.sync_master_to_compute(ctx)
         })?;
@@ -1796,7 +1918,7 @@ impl Mamba3TrainerMixed {
         }
         let (step, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
-        self.eager_optimize()?;
+        self.eager_optimize(0)?;
         self.grads_dirty = false;
         Ok(BackwardMetrics {
             step,
@@ -1993,7 +2115,7 @@ impl Mamba3TrainerMixed {
             // is discarded whole, exactly as in the other lanes.
             skipped = matches!((grad_norm, step_skip_above), (Some(n), Some(thr)) if n > thr);
             if !skipped {
-                self.eager_optimize()?;
+                self.eager_optimize(0)?;
             }
         }
         self.scaler.as_mut().expect("f16 scaler").update(overflow);
@@ -2123,6 +2245,10 @@ pub(crate) struct Mamba3TrainerF32 {
     clip_partials: GpuByteBuffer,
     /// `[coef, norm]` - the device-side clip fold's output.
     clip_scratch: GpuBuffer,
+    /// The options of the fused step, eager or captured.
+    step_opts: BackwardOpts,
+    /// The skip flag a measured step tail writes (see [`StepTail`]).
+    skip_flag: OverflowFlag,
 }
 
 impl Drop for Mamba3TrainerF32 {
@@ -2224,6 +2350,7 @@ impl Mamba3TrainerF32 {
 
         let clip_partials = alloc_partials(&ctx.stream)?;
         let clip_scratch = GpuBuffer::zeros(&ctx.stream, 2)?;
+        let skip_flag = OverflowFlag::new(&ctx.stream)?;
 
         let has_gemm_work = dims.batch != 0 && dims.seq_len != 0;
         Ok(Self {
@@ -2252,6 +2379,8 @@ impl Mamba3TrainerF32 {
             grads_dirty: false,
             clip_partials,
             clip_scratch,
+            step_opts: BackwardOpts::default(),
+            skip_flag,
         })
     }
 
@@ -2264,11 +2393,59 @@ impl Mamba3TrainerF32 {
         Ok(())
     }
 
+    fn has_graph(&self) -> bool {
+        self.graph.is_some()
+    }
+
+    /// The step options' tail (see [`StepTail`]).
+    fn step_tail(&self) -> StepTail {
+        StepTail::of(
+            &self.step_opts,
+            m3_control_region_geom(&self.cfg, self.dims.mamba_input_dim),
+        )
+    }
+
+    /// Set the options of the fused step (see
+    /// [`Mamba3GpuTrainer::set_step_opts`]).
+    pub(crate) fn set_step_opts(&mut self, opts: BackwardOpts) -> Result<(), String> {
+        if opts.accumulate_only {
+            return Err("the fused step applies its window: accumulate with backward_step".into());
+        }
+        if self.has_graph() && opts != self.step_opts {
+            return Err(
+                "Mamba-3 set_step_opts: the captured graph baked the step options in; \
+                 drop_graph first"
+                    .into(),
+            );
+        }
+        self.step_opts = opts;
+        Ok(())
+    }
+
+    /// After a fused step: whether its AdamW skipped and the pre-clip norm
+    /// when the tail measured one. A norm that is not finite and that no
+    /// overflow explains is an error, with the step counted before it given
+    /// back.
+    fn step_verdict(&mut self, overflowed: bool) -> Result<(bool, Option<f32>), String> {
+        if !self.step_tail().measures() {
+            return Ok((overflowed, None));
+        }
+        match read_tail(&self.ctx, &self.skip_flag, &self.clip_scratch, overflowed) {
+            Ok((skipped, norm)) => Ok((skipped, Some(norm))),
+            Err(e) => {
+                self.adam.step -= 1;
+                Err(e)
+            }
+        }
+    }
+
     pub fn capture_graph(&mut self) -> Result<(), String> {
         self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
         let manifest = self.prepared_gemm_manifest.ok_or_else(|| {
             "M3 f32 training graph capture requires one successful eager step".to_string()
         })?;
+        let tail = self.step_tail();
+        let skip = self.skip_flag.stable_ptr(&self.ctx.stream);
         // The trainer owns every captured allocation and drops the graph first.
         let g = unsafe {
             GpuMamba3F32TrainingStepGraph::capture(
@@ -2294,6 +2471,12 @@ impl Mamba3TrainerF32 {
                         v: &mut self.v_states,
                         angle: &mut self.angle_states,
                     },
+                    tail: Some(CaptureTail {
+                        tail,
+                        partials: &mut self.clip_partials,
+                        coef: &mut self.clip_scratch,
+                        skip,
+                    }),
                 },
                 &manifest,
             )
@@ -2321,7 +2504,9 @@ impl Mamba3TrainerF32 {
         }
         self.mamba_input.upload(&self.ctx.stream, input)?;
         self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
-        let (step, bc1, bc2) = self.adam.advance();
+        // The step counts before the replay, as the eager step counts it
+        // before its AdamW; a step the tail skipped gives it back.
+        let (_, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
         let replayed = if let Some(ref g) = self.graph {
             g.replay(
@@ -2345,7 +2530,15 @@ impl Mamba3TrainerF32 {
             self.step_eager()?;
             false
         };
-        Ok(StepMetrics::plain(step, replayed))
+        let (skipped, grad_norm) = self.step_verdict(false)?;
+        if skipped {
+            self.adam.step -= 1;
+        }
+        Ok(StepMetrics {
+            optimizer_stepped: !skipped,
+            grad_norm,
+            ..StepMetrics::plain(self.adam.step, replayed)
+        })
     }
 
     /// Eager forward body (M1 seam mirror — the split API and the fused
@@ -2409,6 +2602,8 @@ impl Mamba3TrainerF32 {
         if has_gemm_work {
             prepare_inference_arch_rung(&self.ctx)?;
         }
+        let tail = self.step_tail();
+        let skip_ptr = self.skip_flag.stable_ptr(&self.ctx.stream);
         let Self {
             ctx,
             m3k,
@@ -2428,6 +2623,8 @@ impl Mamba3TrainerF32 {
             v_states,
             angle_states,
             prepared_gemm_manifest,
+            clip_partials,
+            clip_scratch,
             ..
         } = self;
         let exec = M3Exec {
@@ -2452,13 +2649,19 @@ impl Mamba3TrainerF32 {
                 scratch,
             )?;
             gpu_backward_mamba3_backbone(&exec, d_temporal, acts, weights, grads, scratch)?;
+            let skip = tail.enqueue(
+                ctx,
+                &mut grads.flat,
+                (&mut *clip_partials, &mut *clip_scratch),
+                (skip_ptr, 0),
+            )?;
             step_multi(
                 ctx,
                 m3k.adamw_step_multi.get(WeightDtype::F32),
                 multi_plan,
                 adam,
                 bias.ptr(),
-                0,
+                skip,
             )
         })?;
         *prepared_gemm_manifest = Some(manifest);

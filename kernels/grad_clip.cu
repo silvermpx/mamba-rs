@@ -164,5 +164,20 @@ extern "C" __global__ void grad_region_scale_dev_f32(
     }
 }
 
+// The skip of a step whose tail a graph replays, decided on the device:
+// skip when the loss scaler found an overflow (`overflow`, when not null)
+// or when the norm before the clip is not finite or passes `limit`.
+// Written on every replay, so it needs no reset.
+extern "C" __global__ void grad_skip_flag_f32(
+    int* __restrict__ skip,
+    const int* __restrict__ overflow,
+    const float* __restrict__ norm,   // [1]
+    float limit
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    const bool over = overflow != nullptr && overflow[0] != 0;
+    skip[0] = (over || !(norm[0] <= limit)) ? 1 : 0;
+}
+
 #undef GCLIP_THREADS
 #undef GCLIP_BLOCKS

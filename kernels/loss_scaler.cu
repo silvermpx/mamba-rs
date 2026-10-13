@@ -80,41 +80,15 @@ extern "C" __global__ void scale_grads_dev_f32(
 // CUDA-Graph-capturable variant of `scale_grads_f32` that conditionally
 // zeros the gradient based on an overflow flag from `check_inf_nan_f32`.
 //
-//   grads[i] *= (overflow_flag[0] != 0) ? 0.0 : unscale_factor
+//   grads[i] = (overflow_flag[0] != 0) ? 0.0 : grads[i] * unscale_factor
 //
-// This lets f16 AMP training capture the full step into a CUDA Graph: the
-// graph body always runs the optimizer, but on overflow steps the grads
-// are zeroed so AdamW has nothing to apply. CPU reads the flag AFTER
-// replay to drive the scaler state machine (backoff vs growth).
+// This lets f16 AMP training capture the whole step into a CUDA graph: the
+// optimizer kernel after it skips on the same flag, so an overflowed step
+// leaves the master weights and both moments where they were, as
+// `torch.cuda.amp.GradScaler` skips its step, and the eager step runs the
+// same sequence with the same bits. The CPU reads the flag after the step
+// to drive the scaler (backoff or growth).
 //
-// ### Divergence from the EAGER f16 path
-//
-// The EAGER f16 path (trainer.rs::step_f16 non-replay branch) syncs on
-// the overflow flag and ACTUALLY skips AdamW + sync_master_to_compute +
-// recompute_a_neg when overflow is detected — matching
-// `torch.cuda.amp.GradScaler` exactly: on a skipped step master weights,
-// m, v, and a_neg all stay at the previous step's values.
-//
-// The CAPTURED graph path cannot branch mid-graph, so AdamW runs on the
-// zeroed grads. The bounded side-effects per overflow step are:
-//   * `m_new  = β1 · m_old + (1 − β1) · 0 = β1 · m_old`       (−10% at β1=0.9)
-//   * `v_new  = β2 · v_old + (1 − β2) · 0 = β2 · v_old`       (−0.1% at β2=0.999)
-//   * `θ_new  = (1 − lr · wd) · θ_old − lr · (m̂ / (√v̂ + ε))` (decoupled
-//     weight-decay still fires; with m / v both shrunk by β the Adam term
-//     is smaller but non-zero, so θ moves by an amount ~proportional to
-//     `m_old · β1`. At a 5–10% overflow rate over 100 k steps this produces
-//     a measurable but bounded divergence from the eager path — typically
-//     ≤ 0.5 % master-weight drift, never unbounded).
-//
-// ### a_neg refresh also always runs in the graph
-//
-// The graph body re-computes `a_neg = -exp(a_log)` after AdamW. On an
-// overflow step `a_log` has moved slightly due to the weight-decay-only
-// update above, so `a_neg` also moves slightly. The eager path (which
-// skips the entire post-forward tail on overflow) does NOT update
-// `a_log` or `a_neg` on overflow, so it retains the previous step's
-// A-matrix exactly. This is a second source of eager-vs-graph divergence,
-// also bounded by the same mechanism.
 // `unscale_factor` is read from a 1-element device buffer so the value
 // can be updated between graph replays without re-capture. CPU writes
 // `1/loss_scale` to `unscale_factor[0]` before each `cuGraphLaunch`.

@@ -108,6 +108,22 @@ pub fn clip_grads_device(
     scratch: &mut GpuBuffer,
     max_norm: f32,
 ) -> Result<f32, String> {
+    enqueue_clip_grads(ctx, grads_flat, partials, scratch, max_norm)?;
+    let mut host = [0.0f32; 2];
+    scratch.download(&ctx.stream, &mut host)?;
+    Ok(host[1])
+}
+
+/// The three launches of [`clip_grads_device`] without the download, for a
+/// captured step: the norm stays in `scratch[1]` and the coefficient in
+/// `scratch[0]`.
+pub(crate) fn enqueue_clip_grads(
+    ctx: &GpuCtx,
+    grads_flat: &mut GpuBuffer,
+    partials: &mut GpuByteBuffer,
+    scratch: &mut GpuBuffer,
+    max_norm: f32,
+) -> Result<(), String> {
     assert_eq!(
         partials.len_bytes(),
         GRAD_CLIP_PARTIALS * std::mem::size_of::<f64>(),
@@ -167,9 +183,7 @@ pub fn clip_grads_device(
         unsafe { b.launch(grid_1d_wide(n_elems)) }
             .map_err(|e| format!("scale_grads_dev_f32: {e:?}"))?;
     }
-    let mut host = [0.0f32; 2];
-    scratch.download(&ctx.stream, &mut host)?;
-    Ok(host[1])
+    Ok(())
 }
 
 /// Geometry of a per-layer three-block region of a flat grad arena:
@@ -207,6 +221,22 @@ pub fn clip_region_device(
     geom: GradRegionGeom,
     max_norm: f32,
 ) -> Result<f32, String> {
+    enqueue_clip_region(ctx, grads_flat, partials, scratch, geom, max_norm)?;
+    let mut host = [0.0f32; 2];
+    scratch.download(&ctx.stream, &mut host)?;
+    Ok(host[1])
+}
+
+/// The three launches of [`clip_region_device`] without the download, for
+/// a captured step.
+pub(crate) fn enqueue_clip_region(
+    ctx: &GpuCtx,
+    grads_flat: &mut GpuBuffer,
+    partials: &mut GpuByteBuffer,
+    scratch: &mut GpuBuffer,
+    geom: GradRegionGeom,
+    max_norm: f32,
+) -> Result<(), String> {
     assert_eq!(
         partials.len_bytes(),
         GRAD_CLIP_PARTIALS * std::mem::size_of::<f64>(),
@@ -282,9 +312,34 @@ pub fn clip_region_device(
         b.arg(&geom.c_len);
         unsafe { b.launch(fixed) }.map_err(|e| format!("grad_region_scale_dev_f32: {e:?}"))?;
     }
-    let mut host = [0.0f32; 2];
-    scratch.download(&ctx.stream, &mut host)?;
-    Ok(host[1])
+    Ok(())
+}
+
+/// Write the skip flag of a captured step to `skip` (an i32 on the
+/// device): set when `overflow` (an i32 flag, or 0 for none) is set or the
+/// norm the last clip launch left in `scratch[1]` is not finite or passes
+/// `limit`.
+pub(crate) fn enqueue_skip_flag(
+    ctx: &GpuCtx,
+    skip: cudarc::driver::sys::CUdeviceptr,
+    overflow: cudarc::driver::sys::CUdeviceptr,
+    scratch: &GpuBuffer,
+    limit: f32,
+) -> Result<(), String> {
+    let norm_ptr = scratch.cached_ptr() + std::mem::size_of::<f32>() as u64;
+    let mut b = ctx.stream.launch_builder(&ctx.kernels.grad_skip_flag_f32);
+    b.arg(&skip);
+    b.arg(&overflow);
+    b.arg(&norm_ptr);
+    b.arg(&limit);
+    let cfg = LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (1, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    unsafe { b.launch(cfg) }
+        .map(|_| ())
+        .map_err(|e| format!("grad_skip_flag_f32: {e:?}"))
 }
 
 /// In-place multiply of the flat grad arena by `factor` (the clip
@@ -299,4 +354,128 @@ pub fn scale_grads(ctx: &GpuCtx, grads_flat: &mut GpuBuffer, factor: f32) -> Res
     unsafe { b.launch(grid_1d_wide(n_elems)) }
         .map(|_| ())
         .map_err(|e| format!("scale_grads (clip): {e:?}"))
+}
+
+/// The optimizer tail a fused step runs between its backward and its
+/// AdamW, as launches only, so a captured step records it: the control
+/// channels' clip, then the global clip (or the norm alone, for the spike
+/// skip), then the skip flag AdamW reads. Built from the trainer's step
+/// options; empty for the default options, when it launches nothing.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StepTail {
+    pub(crate) control: Option<(GradRegionGeom, f32)>,
+    pub(crate) clip_max_norm: Option<f32>,
+    pub(crate) step_skip_above: Option<f32>,
+}
+
+impl StepTail {
+    pub(crate) fn of(opts: &crate::optim::BackwardOpts, control_geom: GradRegionGeom) -> Self {
+        Self {
+            control: opts.control_clip_max_norm.map(|c| (control_geom, c)),
+            clip_max_norm: opts.clip_max_norm,
+            step_skip_above: opts.step_skip_above,
+        }
+    }
+
+    /// Whether the tail measures the global norm, and so writes the skip
+    /// flag a non-finite norm or a spike sets.
+    pub(crate) fn measures(&self) -> bool {
+        self.clip_max_norm.is_some() || self.step_skip_above.is_some()
+    }
+
+    /// Enqueue the tail on `grads` with the clip scratch `(partials,
+    /// coef)`, and return the flag the AdamW after it skips on: `skip`
+    /// when the tail measures the norm, else `overflow` (the loss scaler's
+    /// flag, or 0 for none).
+    pub(crate) fn enqueue(
+        &self,
+        ctx: &GpuCtx,
+        grads: &mut GpuBuffer,
+        (partials, coef): (&mut GpuByteBuffer, &mut GpuBuffer),
+        (skip, overflow): (
+            cudarc::driver::sys::CUdeviceptr,
+            cudarc::driver::sys::CUdeviceptr,
+        ),
+    ) -> Result<cudarc::driver::sys::CUdeviceptr, String> {
+        if let Some((geom, c)) = self.control {
+            enqueue_clip_region(ctx, grads, partials, coef, geom, c)?;
+        }
+        let Some(limit) = norm_limit(self.clip_max_norm, self.step_skip_above) else {
+            return Ok(overflow);
+        };
+        enqueue_clip_grads(ctx, grads, partials, coef, limit)?;
+        enqueue_skip_flag(
+            ctx,
+            skip,
+            overflow,
+            coef,
+            self.step_skip_above.unwrap_or(f32::INFINITY),
+        )?;
+        Ok(skip)
+    }
+}
+
+/// The trainer's step options as a captured body records them: the
+/// control clip, the global clip and the spike skip's flag between the
+/// backward and the AdamW, launched on the trainer's clip scratch. `None`
+/// in a capture records the default options, which launch nothing.
+pub struct CaptureTail<'a> {
+    pub(crate) tail: StepTail,
+    pub(crate) partials: &'a mut GpuByteBuffer,
+    pub(crate) coef: &'a mut GpuBuffer,
+    pub(crate) skip: cudarc::driver::sys::CUdeviceptr,
+}
+
+impl CaptureTail<'_> {
+    /// Enqueue the tail on `grads`; the flag the AdamW after it skips on
+    /// (`overflow`, the loss scaler's flag or 0, when it measures nothing).
+    pub(crate) fn enqueue(
+        &mut self,
+        ctx: &GpuCtx,
+        grads: &mut GpuBuffer,
+        overflow: cudarc::driver::sys::CUdeviceptr,
+    ) -> Result<cudarc::driver::sys::CUdeviceptr, String> {
+        self.tail.enqueue(
+            ctx,
+            grads,
+            (&mut *self.partials, &mut *self.coef),
+            (self.skip, overflow),
+        )
+    }
+}
+
+/// The flag the AdamW of a captured body skips on: the tail's, after it
+/// is enqueued, or 0 without one.
+pub(crate) fn enqueue_tail(
+    tail: &mut Option<CaptureTail<'_>>,
+    ctx: &GpuCtx,
+    grads: &mut GpuBuffer,
+) -> Result<cudarc::driver::sys::CUdeviceptr, String> {
+    match tail {
+        Some(t) => t.enqueue(ctx, grads, 0),
+        None => Ok(0),
+    }
+}
+
+/// After a fused step whose tail measured the norm: whether its AdamW was
+/// skipped (an overflow, a spike, or a norm that is not finite) and the
+/// pre-clip norm, with an error for a non-finite norm the loss scaler did
+/// not explain, as the eager tail gives one. `overflowed` is the loss
+/// scaler's verdict on the same step.
+pub(crate) fn read_tail(
+    ctx: &GpuCtx,
+    skip: &super::loss_scaler::OverflowFlag,
+    coef: &GpuBuffer,
+    overflowed: bool,
+) -> Result<(bool, f32), String> {
+    let skipped = skip.read(&ctx.stream)? != 0;
+    let mut host = [0.0f32; 2];
+    coef.download(&ctx.stream, &mut host)?;
+    if !overflowed && !host[1].is_finite() {
+        return Err(format!(
+            "clip_max_norm: non-finite global grad norm ({})",
+            host[1]
+        ));
+    }
+    Ok((skipped, host[1]))
 }

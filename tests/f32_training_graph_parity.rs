@@ -258,6 +258,7 @@ fn m1_f32_training_graph_matches_eager() {
                 mamba_input: &g_input,
                 d_temporal: &mut g_dtemp,
                 state: &mut g_state,
+                tail: None,
             },
             batch,
             seq_len,
@@ -600,6 +601,7 @@ fn m3_f32_training_graph_matches_eager() {
                     v: &mut g_vs,
                     angle: &mut g_ang,
                 },
+                tail: None,
             },
             &manifest,
         )

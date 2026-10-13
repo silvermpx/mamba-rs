@@ -127,6 +127,8 @@ pub(crate) struct CpuCore<F: CpuFamily> {
     d_model: usize,
     /// A forward whose backward has not run.
     forwarded: bool,
+    /// The options of the fused [`CpuCore::step`].
+    step_opts: BackwardOpts,
     /// The gradient holds micro-batches the optimizer has not taken.
     window_open: bool,
     /// The upstream gradient, which the backward consumes.
@@ -173,6 +175,7 @@ impl<F: CpuFamily> CpuCore<F> {
             input_dim,
             d_model,
             forwarded: false,
+            step_opts: BackwardOpts::default(),
             window_open: false,
             d_buf: vec![0.0; rows * d_model],
             d_input_buf: vec![0.0; rows * input_dim],
@@ -344,7 +347,7 @@ impl<F: CpuFamily> CpuCore<F> {
     }
 
     /// The forward of `input` and the backward of `d_temporal` with the
-    /// default options.
+    /// step options (see [`Self::set_step_opts`]).
     pub(crate) fn step(
         &mut self,
         input: &[f32],
@@ -354,8 +357,23 @@ impl<F: CpuFamily> CpuCore<F> {
         let ran = self.forward(input, &mut out);
         self.out_buf = out;
         ran?;
-        let m = self.backward_step(d_temporal, BackwardOpts::default(), None)?;
-        Ok(StepMetrics::plain(m.step, false))
+        let m = self.backward_step(d_temporal, self.step_opts, None)?;
+        Ok(StepMetrics::from_backward(m, false))
+    }
+
+    /// Set the options of the fused [`Self::step`]: the control clip, the
+    /// global clip and the spike skip. Accumulation belongs to
+    /// `backward_step` and is refused here.
+    pub(crate) fn set_step_opts(&mut self, opts: BackwardOpts) -> Result<(), String> {
+        if opts.accumulate_only {
+            return Err("the fused step applies its window: accumulate with backward_step".into());
+        }
+        self.step_opts = opts;
+        Ok(())
+    }
+
+    pub(crate) fn step_opts(&self) -> BackwardOpts {
+        self.step_opts
     }
 
     /// Only the optimizer tail over the open window: the control clip,
@@ -616,8 +634,16 @@ pub trait CpuTrainer {
     ) -> Result<BackwardMetrics, String>;
 
     /// The forward of `input` and the backward of `d_temporal` with the
-    /// default options.
+    /// step options.
     fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String>;
+
+    /// Set the options [`CpuTrainer::step`] applies: the control clip, the
+    /// global clip and the spike skip, as on the GPU. Accumulation is
+    /// refused: the fused step applies its window.
+    fn set_step_opts(&mut self, opts: BackwardOpts) -> Result<(), String>;
+
+    /// The options [`CpuTrainer::step`] applies.
+    fn step_opts(&self) -> BackwardOpts;
 
     /// Only the optimizer tail over the open window; after accumulating
     /// calls it gives the bits of an applying backward.
@@ -701,6 +727,16 @@ macro_rules! cpu_trainer_type {
                 d_temporal: &[f32],
             ) -> Result<$crate::optim::StepMetrics, String> {
                 self.core.step(input, d_temporal)
+            }
+
+            /// See [`CpuTrainer::set_step_opts`]($crate::module::CpuTrainer::set_step_opts).
+            pub fn set_step_opts(&mut self, opts: $crate::optim::BackwardOpts) -> Result<(), String> {
+                self.core.set_step_opts(opts)
+            }
+
+            /// See [`CpuTrainer::step_opts`]($crate::module::CpuTrainer::step_opts).
+            pub fn step_opts(&self) -> $crate::optim::BackwardOpts {
+                self.core.step_opts()
             }
 
             /// See [`CpuTrainer::apply_step_full`]($crate::module::CpuTrainer::apply_step_full).
@@ -816,6 +852,12 @@ macro_rules! cpu_trainer_type {
                 d_temporal: &[f32],
             ) -> Result<$crate::optim::StepMetrics, String> {
                 <$name>::step(self, input, d_temporal)
+            }
+            fn set_step_opts(&mut self, opts: $crate::optim::BackwardOpts) -> Result<(), String> {
+                <$name>::set_step_opts(self, opts)
+            }
+            fn step_opts(&self) -> $crate::optim::BackwardOpts {
+                <$name>::step_opts(self)
             }
             fn apply_step_full(
                 &mut self,
@@ -957,6 +999,12 @@ impl CpuTrainer for AnyCpuTrainer {
     }
     fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         self.inner_mut().step(input, d_temporal)
+    }
+    fn set_step_opts(&mut self, opts: BackwardOpts) -> Result<(), String> {
+        self.inner_mut().set_step_opts(opts)
+    }
+    fn step_opts(&self) -> BackwardOpts {
+        self.inner().step_opts()
     }
     fn apply_step_full(
         &mut self,

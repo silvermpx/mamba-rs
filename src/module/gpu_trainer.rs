@@ -67,8 +67,20 @@ pub trait GpuTrainer {
         d_input: &mut [f32],
     ) -> Result<BackwardMetrics, String>;
 
-    /// Forward, backward and the optimizer step in one call.
+    /// Forward, backward and the optimizer step in one call, with the
+    /// step options (see [`GpuTrainer::set_step_opts`]); a captured graph
+    /// replays the same step.
     fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String>;
+
+    /// Set the options [`GpuTrainer::step`] applies: the control-channel
+    /// clip, the global clip and the spike skip, which the eager step and
+    /// a captured graph both apply. Accumulation is refused (the fused
+    /// step applies its window), and so is a change under a captured
+    /// graph, which baked the options in: `drop_graph` first.
+    fn set_step_opts(&mut self, opts: BackwardOpts) -> Result<(), String>;
+
+    /// The options [`GpuTrainer::step`] applies.
+    fn step_opts(&self) -> BackwardOpts;
 
     /// Zero the recurrent state, the start of new sequences.
     fn reset_state(&mut self) -> Result<(), String>;
@@ -192,6 +204,12 @@ macro_rules! gpu_trainer_by_inherent_methods {
             }
             fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
                 <$ty>::step(self, input, d_temporal)
+            }
+            fn set_step_opts(&mut self, opts: BackwardOpts) -> Result<(), String> {
+                <$ty>::set_step_opts(self, opts)
+            }
+            fn step_opts(&self) -> BackwardOpts {
+                <$ty>::step_opts(self)
             }
             fn reset_state(&mut self) -> Result<(), String> {
                 <$ty>::reset_state(self)
@@ -369,6 +387,12 @@ impl GpuTrainer for AnyGpuTrainer {
     }
     fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         self.inner_mut().step(input, d_temporal)
+    }
+    fn set_step_opts(&mut self, opts: BackwardOpts) -> Result<(), String> {
+        self.inner_mut().set_step_opts(opts)
+    }
+    fn step_opts(&self) -> BackwardOpts {
+        self.inner().step_opts()
     }
     fn reset_state(&mut self) -> Result<(), String> {
         self.inner_mut().reset_state()

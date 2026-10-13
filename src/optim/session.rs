@@ -48,6 +48,12 @@ pub struct StepMetrics {
     /// `Some(true)` if the f16 loss-scaler detected an inf/nan in the
     /// grad arena and the optimizer step was skipped. `None` for bf16/f32.
     pub overflow_skipped: Option<bool>,
+    /// Whether AdamW took the step: false after an f16 overflow or when
+    /// the spike skip of the trainer's step options discarded the window.
+    pub optimizer_stepped: bool,
+    /// The pre-clip global gradient norm when the step options measure it
+    /// (a global clip or a spike skip), else `None`.
+    pub grad_norm: Option<f32>,
 }
 
 impl StepMetrics {
@@ -58,6 +64,20 @@ impl StepMetrics {
             graph_replayed,
             loss_scale: None,
             overflow_skipped: None,
+            optimizer_stepped: true,
+            grad_norm: None,
+        }
+    }
+
+    /// The fused step's metrics from those of its applying backward.
+    pub(crate) fn from_backward(m: BackwardMetrics, graph_replayed: bool) -> Self {
+        Self {
+            step: m.step,
+            graph_replayed,
+            loss_scale: m.loss_scale,
+            overflow_skipped: m.overflow_skipped,
+            optimizer_stepped: m.optimizer_stepped,
+            grad_norm: m.grad_norm,
         }
     }
 }
@@ -69,7 +89,7 @@ impl StepMetrics {
 /// `Default` is the safe fused-step behavior (zero the arena, run backward,
 /// run the full optimizer tail).
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BackwardOpts {
     /// `Some(c)`: after backward (and, for f16, after unscale) scale the
     /// gradients by `min(1, c / (||g||_2 + 1e-6))` before AdamW —

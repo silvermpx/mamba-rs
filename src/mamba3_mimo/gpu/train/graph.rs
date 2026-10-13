@@ -11,6 +11,7 @@ use cudarc::driver::CudaGraph;
 use super::Mamba3MimoGpuTrainer;
 use crate::gpu::adamw::AdamWPlanKey;
 use crate::gpu::context::GemmRoute;
+use crate::gpu::grad_clip::read_tail;
 use crate::gpu::graph_capture::{
     capture_owner_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
@@ -69,14 +70,10 @@ impl Mamba3MimoGpuTrainer {
         // them first, so any finite values do here.
         let stream = self.ctx.stream.clone();
         self.bias.write(&stream, 1.0, 1.0, self.adamw.lr)?;
-        let skip = match self.scaler.as_ref().map(DynamicLossScaler::scale) {
-            Some(scale) => {
-                self.unscale.write(&stream, 1.0 / scale)?;
-                self.overflow.zero(&stream)?;
-                self.overflow.stable_ptr(&stream)
-            }
-            None => 0,
-        };
+        if let Some(scale) = self.scaler.as_ref().map(DynamicLossScaler::scale) {
+            self.unscale.write(&stream, 1.0 / scale)?;
+            self.overflow.zero(&stream)?;
+        }
         self.ctx.presize_bi_scratch()?;
         let gemm_route = self.ctx.gemm_route();
         let has_gemm_work = self.has_gemm_work();
@@ -90,6 +87,7 @@ impl Mamba3MimoGpuTrainer {
                 |t| {
                     t.forward_device()?;
                     t.backward_device()?;
+                    let skip = t.tail_device()?;
                     t.adamw_device(skip)
                 },
             )
@@ -170,10 +168,29 @@ impl Mamba3MimoGpuTrainer {
         )?;
         self.sync(LABEL)?;
         self.overflowed = scale.is_some() && self.overflow.read(&stream)? != 0;
+        // A measured tail decided the skip on the device: an overflow, a
+        // spike, or a norm that is not finite, which errs as the eager tail
+        // errs. The step counted before the replay goes back with it.
+        let (skipped, grad_norm) = if self.tail_measures() {
+            match read_tail(
+                &self.ctx,
+                &self.skip_flag,
+                self.window.clip_coef(),
+                self.overflowed,
+            ) {
+                Ok((skipped, norm)) => (skipped, Some(norm)),
+                Err(e) => {
+                    self.adamw.step -= 1;
+                    return Err(e);
+                }
+            }
+        } else {
+            (self.overflowed, None)
+        };
         if let Some(scaler) = self.scaler.as_mut() {
             scaler.update(self.overflowed);
         }
-        if self.overflowed {
+        if skipped {
             self.adamw.step -= 1;
         }
         self.forwarded = true;
@@ -182,6 +199,8 @@ impl Mamba3MimoGpuTrainer {
             graph_replayed: true,
             loss_scale: scale,
             overflow_skipped: scale.map(|_| self.overflowed),
+            optimizer_stepped: !skipped,
+            grad_norm,
         })
     }
 }

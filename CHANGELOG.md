@@ -154,6 +154,13 @@
   trainers lay the carried recurrence out as the GPU trainers do, and
   `Mamba2GpuTrainer::recurrent_state` writes the conv window's oldest
   input, which no later step reads, as zero.
+- `set_step_opts` gives the fused `step` the options of `backward_step`
+  (the control-channel clip, the global clip and the spike skip) on every
+  trainer, GPU and CPU, and on `GpuTrainer` and `CpuTrainer`; a captured
+  graph records them and clips and skips on the device with the eager
+  step's bits. `StepMetrics` reports `optimizer_stepped` and
+  `grad_norm`. A captured graph bakes the options in: another set needs
+  `drop_graph` first.
 
 ### Changed
 
