@@ -262,6 +262,11 @@
   `_blas_workspace` fields and `GpuDevice::create_cublas` are gone, and
   `Mamba3GpuBackbone::blas` returns a `Result`. `GradSlice::to_cpu` and
   `GradSlice::upload_from_cpu` take the stream the slice's kernels run on.
+- CPU training bits no longer depend on the thread pool: the Mamba-1 and
+  SISO batch backward sums its samples in a fixed number of chunks
+  (sixteen, or the batch when smaller), each in order, and the chunks in a
+  fixed tree, so a run gives the same bits on any machine. This moves
+  their bits once.
 
 ### Fixed
 

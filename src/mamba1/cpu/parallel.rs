@@ -241,24 +241,22 @@ pub fn parallel_mamba_forward(
 // ---------------------------------------------------------------------------
 
 /// Run `backward_mamba_backbone_batched` for B samples in parallel using rayon,
-/// then reduce per-thread weight gradients into `grads_mamba`.
+/// then reduce the chunks' weight gradients into `grads_mamba`.
 ///
-/// **Deterministic static-partition approach** (replaces the old epoch-based
-/// dynamic work-stealing + broadcast collection):
+/// **Deterministic static partition:**
 ///
-/// 1. Pre-allocate `N_THREADS` gradient slots, each zeroed.
-/// 2. Static partition: thread `tid` owns samples `[start..end)` where the
-///    mapping is a pure function of `(B, N_THREADS, tid)`. Same samples
-///    always go to the same slot → same intra-slot accumulation order.
-/// 3. Each thread runs backward for its assigned samples sequentially,
-///    accumulating into its pre-assigned slot.
-/// 4. Fixed balanced binary-tree reduce: always
+/// 1. `min(B, BATCH_GRAD_CHUNKS)` gradient slots, each zeroed: a count
+///    that depends on the batch alone, never on the thread pool.
+/// 2. Static partition: chunk `c` owns samples `[start..end)`, a pure
+///    function of `(B, chunks, c)`, and sums them in order into its slot.
+///    Rayon runs the chunks on whatever threads it has.
+/// 3. Fixed balanced binary-tree reduce: always
 ///    `((slot[0]+slot[1])+(slot[2]+slot[3]))+((slot[4]+slot[5])+...)`
 ///    regardless of thread scheduling.
 ///
-/// Result: **bit-identical** output across runs with the same input,
-/// regardless of OS thread scheduling or Rayon work-stealing order.
-/// Same principle as the batch-invariant matvec kernel.
+/// Result: **bit-identical** output across runs, thread-pool sizes and
+/// machines with the same input. Same principle as the batch-invariant
+/// matvec kernel.
 pub fn parallel_mamba_backward(
     d_temporal_seqs: &mut [Vec<f32>],
     grads_mamba: &mut TrainMambaWeights,
@@ -273,33 +271,33 @@ pub fn parallel_mamba_backward(
         return;
     }
 
-    let n_threads = rayon::current_num_threads().min(b_sz);
+    let n_chunks = crate::ops::BATCH_GRAD_CHUNKS.min(b_sz);
 
-    // Reusable per-thread gradient slots (zero-allocation rule: rebuilding
-    // n_threads full TrainMambaWeights every call was the last remaining
+    // Reusable per-chunk gradient slots (zero-allocation rule: rebuilding
+    // n_chunks full TrainMambaWeights every call was the last remaining
     // per-step heap allocation in the CPU training path). The pool persists
     // across calls behind a process-wide mutex and is rebuilt only when
     // dims or the required slot count change.
     let mut pool_guard = M1_GRAD_SLOT_POOL.lock().unwrap();
     let rebuild = match pool_guard.as_ref() {
-        Some(p) => p.dims != *dims || p.slots.len() < n_threads,
+        Some(p) => p.dims != *dims || p.slots.len() < n_chunks,
         None => true,
     };
     if rebuild {
         *pool_guard = Some(M1GradSlotPool {
-            slots: (0..n_threads)
+            slots: (0..n_chunks)
                 .map(|_| TrainMambaWeights::zeros_from_dims(dims))
                 .collect(),
             dims: *dims,
         });
     }
-    let slots = &mut pool_guard.as_mut().unwrap().slots[..n_threads];
+    let slots = &mut pool_guard.as_mut().unwrap().slots[..n_chunks];
     for slot in slots.iter_mut() {
         slot.zero();
     }
 
     // SAFETY: each thread writes to disjoint regions:
-    // - slots[tid]: exclusive (static partition by tid)
+    // - slots[chunk]: exclusive (static partition by chunk)
     // - d_temporal_seqs[b]: exclusive per-sample (b in [start..end))
     // - mamba_batch_acts[b], mamba_w, a_neg_all: shared read-only
     struct BwdRawPtrs {
@@ -317,12 +315,12 @@ pub fn parallel_mamba_backward(
     };
 
     let ptrs_ref = &ptrs;
-    (0..n_threads).into_par_iter().for_each(|tid| {
-        let start = tid * b_sz / n_threads;
-        let end = (tid + 1) * b_sz / n_threads;
+    (0..n_chunks).into_par_iter().for_each(|chunk| {
+        let start = chunk * b_sz / n_chunks;
+        let end = (chunk + 1) * b_sz / n_chunks;
 
-        // SAFETY: tid is unique per thread, start..end is disjoint per tid.
-        let slot = unsafe { &mut *ptrs_ref.slots.add(tid) };
+        // SAFETY: chunk is unique per task, start..end is disjoint per chunk.
+        let slot = unsafe { &mut *ptrs_ref.slots.add(chunk) };
         for b in start..end {
             let d_temporal = unsafe { &mut *ptrs_ref.d_temporal_seqs.add(b) };
             let acts = unsafe { &*ptrs_ref.mamba_batch_acts.add(b) };
@@ -343,8 +341,8 @@ pub fn parallel_mamba_backward(
 
     // Fixed stride-half tree reduce over the first `len` slots: the
     // pairing (slot[i] += slot[i+half], odd leftover swapped into place) is
-    // a pure function of n_threads, so the f32 summation order — and the
-    // result bits — are reproducible for a fixed thread-pool size.
+    // a pure function of the chunk count, so the f32 summation order — and
+    // the result bits — are reproducible on any thread pool.
     let mut len = slots.len();
     while len > 1 {
         let half = len / 2;
@@ -1032,6 +1030,48 @@ mod tests {
             check("d_param", &sl.d_param, &pl.d_param);
             check("out_proj_w", &sl.out_proj_w, &pl.out_proj_w);
         }
+    }
+
+    /// The batch backward's bits do not depend on the thread pool: one,
+    /// three and eight threads give the same weight and data gradients.
+    #[test]
+    fn test_rayon_backward_bits_independent_of_pool_size() {
+        let setup = setup_backward_test();
+        let BackwardTestSetup {
+            dims,
+            mamba_w,
+            a_neg_all,
+            acts,
+            d_temporal_seed,
+            ..
+        } = &setup;
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let mut d_temporal: Vec<Vec<f32>> = d_temporal_seed.clone();
+                let mut grads = TrainMambaWeights::zeros_from_dims(dims);
+                parallel_mamba_backward(
+                    &mut d_temporal,
+                    &mut grads,
+                    acts,
+                    mamba_w,
+                    a_neg_all,
+                    dims,
+                );
+                let bits: Vec<u32> = collect_all_grad_values(&grads)
+                    .iter()
+                    .chain(d_temporal.iter().flatten())
+                    .map(|v| v.to_bits())
+                    .collect();
+                bits
+            })
+        };
+        let one = run(1);
+        assert_eq!(run(3), one, "three threads against one");
+        assert_eq!(run(8), one, "eight threads against one");
     }
 
     /// Determinism test: running parallel_mamba_backward twice with the same

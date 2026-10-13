@@ -11,3 +11,10 @@ pub mod portable_math;
 pub(crate) mod st_io;
 
 pub use dims::{MambaDims, MambaRecurrentState};
+
+/// Gradient chunks of a CPU batch backward. The count is fixed, so the
+/// samples each chunk sums and the tree that sums the chunks depend on the
+/// batch alone, never on the thread pool: a run gives the same bits on any
+/// machine. Sixteen keeps up to sixteen threads busy and bounds the chunks'
+/// memory at sixteen copies of the gradient.
+pub(crate) const BATCH_GRAD_CHUNKS: usize = 16;

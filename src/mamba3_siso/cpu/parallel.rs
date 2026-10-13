@@ -172,14 +172,15 @@ pub fn parallel_mamba3_forward(
 
 /// Parallel Mamba-3 backward with tree-reduce gradient accumulation.
 ///
-/// **Deterministic static-partition approach.** Each of `n_threads` worker
-/// owns a fixed sample range `[start..end)` and a pre-allocated gradient slot.
-/// Thread-local scratch is zeroed at the start of each sample. After all
-/// workers finish, slots are merged via fixed balanced binary-tree reduce.
+/// **Deterministic static partition.** Each of `min(B, BATCH_GRAD_CHUNKS)`
+/// chunks, a count that depends on the batch alone, owns a fixed sample
+/// range `[start..end)` and a pre-allocated gradient slot, and rayon runs
+/// the chunks on whatever threads it has. Thread-local scratch is zeroed at
+/// the start of each sample. After all chunks finish, slots are merged via
+/// a fixed balanced binary-tree reduce.
 ///
-/// Result: bit-identical output across runs regardless of OS thread
-/// scheduling or rayon work-stealing order. Same principle as the
-/// batch-invariant matvec kernel.
+/// Result: bit-identical output across runs, thread-pool sizes and
+/// machines. Same principle as the batch-invariant matvec kernel.
 ///
 /// Only layer gradients are accumulated here; input_proj and norm_f are owned
 /// by the caller and handled outside this function. `input_dim` is needed to
@@ -210,31 +211,31 @@ pub fn parallel_mamba3_backward(
     // release builds otherwise, not a panic).
     assert!(d_temporal_out.len() >= batch_size * t_per);
 
-    let n_threads = rayon::current_num_threads().min(batch_size);
+    let n_chunks = crate::ops::BATCH_GRAD_CHUNKS.min(batch_size);
 
-    // Reusable per-thread gradient slots (zero-allocation rule) — see the
+    // Reusable per-chunk gradient slots (zero-allocation rule) — see the
     // M1 counterpart in mamba1/cpu/parallel.rs for rationale.
     let mut pool_guard = M3_GRAD_SLOT_POOL.lock().unwrap();
     let rebuild = match pool_guard.as_ref() {
-        Some(p) => p.dims != *dims || p.input_dim != input_dim || p.slots.len() < n_threads,
+        Some(p) => p.dims != *dims || p.input_dim != input_dim || p.slots.len() < n_chunks,
         None => true,
     };
     if rebuild {
         *pool_guard = Some(M3GradSlotPool {
-            slots: (0..n_threads)
+            slots: (0..n_chunks)
                 .map(|_| TrainMamba3Weights::zeros(dims, input_dim))
                 .collect(),
             dims: *dims,
             input_dim,
         });
     }
-    let slots = &mut pool_guard.as_mut().unwrap().slots[..n_threads];
+    let slots = &mut pool_guard.as_mut().unwrap().slots[..n_chunks];
     for slot in slots.iter_mut() {
         slot.zero();
     }
 
     // SAFETY: each thread writes to disjoint regions:
-    // - slots[tid]: exclusive (static partition by tid)
+    // - slots[chunk]: exclusive (static partition by chunk)
     // - d_temporal_out[b*t_per .. (b+1)*t_per]: exclusive per-sample
     // - batch_acts[b], weights, dims: shared read-only
     struct BwdRawPtrs {
@@ -252,12 +253,12 @@ pub fn parallel_mamba3_backward(
     };
 
     let ptrs_ref = &ptrs;
-    (0..n_threads).into_par_iter().for_each(|tid| {
-        let start = tid * batch_size / n_threads;
-        let end = (tid + 1) * batch_size / n_threads;
+    (0..n_chunks).into_par_iter().for_each(|chunk| {
+        let start = chunk * batch_size / n_chunks;
+        let end = (chunk + 1) * batch_size / n_chunks;
 
-        // SAFETY: tid is unique per thread, start..end is disjoint per tid.
-        let slot = unsafe { &mut *ptrs_ref.slots.add(tid) };
+        // SAFETY: chunk is unique per task, start..end is disjoint per chunk.
+        let slot = unsafe { &mut *ptrs_ref.slots.add(chunk) };
         for b in start..end {
             with_scratch(dims, |tls| {
                 // SAFETY: disjoint per-sample slices via raw pointer offset.
@@ -284,8 +285,8 @@ pub fn parallel_mamba3_backward(
 
     // Fixed stride-half tree reduce over the first `len` slots: pairing is
     // slot[i] += slot[i+half] with the odd leftover swapped into place — a
-    // pure function of n_threads, so the f32 summation order (and result
-    // bits) are reproducible for a fixed thread-pool size.
+    // pure function of the chunk count, so the f32 summation order (and
+    // result bits) are reproducible on any thread pool.
     let mut len = slots.len();
     while len > 1 {
         let half = len / 2;
@@ -598,6 +599,58 @@ mod tests {
             cmp(&a.norm_gate_weight, &s.norm_gate_weight, "norm_gate_weight");
             cmp(&a.out_proj_w, &s.out_proj_w, "out_proj_w");
         }
+    }
+
+    /// The batch backward's bits do not depend on the thread pool: one,
+    /// three and eight threads give the same data and weight gradients.
+    #[test]
+    fn test_parallel_backward_bits_independent_of_pool_size() {
+        let cfg = test_cfg();
+        let input_dim = 16;
+        let dims = Mamba3Dims::from_config(&cfg, input_dim);
+        let batch = 5;
+        let w = init_weights(&dims, input_dim, 0xBEEF);
+        let t_total = batch * dims.seq_len * dims.d_model;
+        let mut xs = 0xC0DEu32;
+        let mut rand01 = || {
+            xs ^= xs << 13;
+            xs ^= xs >> 17;
+            xs ^= xs << 5;
+            (xs & 0x7fff_ffff) as f32 / 2_147_483_647.0 - 0.5
+        };
+        let temporal_in: Vec<f32> = (0..t_total).map(|_| rand01()).collect();
+        let d_temporal_seed: Vec<f32> = (0..t_total).map(|_| rand01()).collect();
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let (d_tmp, d_w) =
+                    run_forward_backward(batch, &dims, &w, &temporal_in, &d_temporal_seed);
+                let mut bits: Vec<u32> = d_tmp.iter().map(|v| v.to_bits()).collect();
+                for l in &d_w.layers {
+                    for t in [
+                        &l.norm_weight,
+                        &l.in_proj_w,
+                        &l.dt_bias,
+                        &l.b_norm_weight,
+                        &l.c_norm_weight,
+                        &l.b_bias,
+                        &l.c_bias,
+                        &l.d_param,
+                        &l.norm_gate_weight,
+                        &l.out_proj_w,
+                    ] {
+                        bits.extend(t.iter().map(|v| v.to_bits()));
+                    }
+                }
+                bits
+            })
+        };
+        let one = run(1);
+        assert_eq!(run(3), one, "three threads against one");
+        assert_eq!(run(8), one, "eight threads against one");
     }
 
     #[test]
