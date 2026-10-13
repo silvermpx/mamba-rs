@@ -2,7 +2,8 @@
 //!
 //! A prompt run in one pass continues like the same tokens stepped one by
 //! one, across two prompts in a row; a captured graph replays the eager
-//! steps bit for bit; the trait and the run-time enum reach the family's
+//! steps, and a captured prompt graph the eager prompts, bit for bit; the
+//! trait and the run-time enum reach the family's
 //! own methods; and the GPU language model of every family gives the CPU
 //! one's logits and loads the language-model checkpoint.
 #![cfg(feature = "cuda")]
@@ -420,6 +421,71 @@ fn a_second_capture_and_a_clear_in_every_family() {
                 "{family:?} {dtype:?}: graph after the clear"
             );
             step_both(&mut a, &mut b, 52);
+        }
+    }
+}
+
+/// A prompt pass captured as one graph gives the eager bits in every family
+/// and precision, with and without an input projection: the capture on a
+/// state mid-sequence leaves the rows and the state where they were,
+/// prompts of the captured length match the eager backbone's rows and the
+/// step after each, a prompt of another length runs eagerly and drops the
+/// graph, and a prompt graph captured again works beside a decode graph.
+#[test]
+fn prompt_graph_replays_the_eager_prefill_in_every_family() {
+    const LEN: usize = 37;
+    for input_dim in [INPUT_DIM, D_MODEL] {
+        for dtype in DTYPES {
+            let graphs = every_family(input_dim, dtype);
+            let plain = every_family(input_dim, dtype);
+            for (mut a, mut b) in graphs.into_iter().zip(plain) {
+                let label = format!("{:?} {dtype:?} input {input_dim}", a.family());
+                let x = values(BATCH * input_dim, 5);
+                let rows = |bb: &AnyGpuBackbone| {
+                    let mut v = vec![0.0f32; BATCH * D_MODEL];
+                    bb.download_temporal(&mut v).unwrap();
+                    bits(&v)
+                };
+                let step_both = |a: &mut AnyGpuBackbone, b: &mut AnyGpuBackbone, what: &str| {
+                    let (mut ra, mut rb) =
+                        (vec![0.0f32; BATCH * D_MODEL], vec![0.0f32; BATCH * D_MODEL]);
+                    a.step(&x, &mut ra).unwrap();
+                    b.step(&x, &mut rb).unwrap();
+                    assert_eq!(bits(&ra), bits(&rb), "{label}: {what}");
+                };
+                let prompt_both =
+                    |a: &mut AnyGpuBackbone, b: &mut AnyGpuBackbone, len: usize, seed: u32| {
+                        let prompt = values(BATCH * len * input_dim, seed);
+                        a.prefill(&prompt, len).unwrap();
+                        b.prefill(&prompt, len).unwrap();
+                        assert_eq!(rows(a), rows(b), "{label}: prompt {seed} of {len}");
+                    };
+                step_both(&mut a, &mut b, "the first step");
+                a.capture_prefill_graph(LEN).unwrap();
+                assert!(a.has_prefill_graph(), "{label}");
+                assert_eq!(rows(&a), rows(&b), "{label}: the capture moved the rows");
+                step_both(&mut a, &mut b, "the step after the capture");
+                for seed in 10..13 {
+                    prompt_both(&mut a, &mut b, LEN, seed);
+                    step_both(&mut a, &mut b, "the step after a replayed prompt");
+                }
+                assert!(a.has_prefill_graph(), "{label}: replays keep the graph");
+                prompt_both(&mut a, &mut b, 5, 20);
+                assert!(
+                    !a.has_prefill_graph(),
+                    "{label}: another length drops the graph"
+                );
+                step_both(&mut a, &mut b, "the step after an eager prompt");
+                a.capture_prefill_graph(LEN).unwrap();
+                a.capture_graph().unwrap();
+                for seed in 30..32 {
+                    prompt_both(&mut a, &mut b, LEN, seed);
+                    step_both(&mut a, &mut b, "a replayed step after a replayed prompt");
+                }
+                a.clear_prefill_graph();
+                assert!(!a.has_prefill_graph() && a.has_graph(), "{label}");
+                prompt_both(&mut a, &mut b, LEN, 40);
+            }
         }
     }
 }

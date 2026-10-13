@@ -276,7 +276,7 @@ fn mimo(device: &GpuDevice, dtype: WeightDtype) -> Row {
     let w = Mamba3MimoWeights::init(&cfg, D_MODEL, 7);
     let mut decode = [0f64; 2];
     for (slot, b) in [1usize, 16].into_iter().enumerate() {
-        let mut eng = Mamba3MimoGpuEngine::new(device, &w, cfg, D_MODEL, b, dtype).unwrap();
+        let eng = Mamba3MimoGpuEngine::new(device, &w, cfg, D_MODEL, b, dtype).unwrap();
         let mut st = eng.alloc_state().unwrap();
         let mut win = eng.alloc_window(1).unwrap();
         let input = det(b * D_MODEL, 12);

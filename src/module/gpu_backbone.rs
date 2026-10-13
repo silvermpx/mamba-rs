@@ -69,6 +69,20 @@ pub trait GpuBackbone {
     /// Drop the captured graph: steps run eagerly until the next capture.
     fn clear_graph(&mut self) -> Result<(), String>;
 
+    /// Capture the prompt pass of `seq_len` tokens per sequence as one CUDA
+    /// graph, which later [`GpuBackbone::prefill`] calls of that length
+    /// replay with the eager bits; the state and rows stay where they were.
+    /// A prompt of another length drops it. Capture the longest prompt
+    /// before the decode graph: after a capture the GEMM staging can no
+    /// longer grow.
+    fn capture_prefill_graph(&mut self, seq_len: usize) -> Result<(), String>;
+
+    /// Whether prompts of the kept length replay a captured graph.
+    fn has_prefill_graph(&self) -> bool;
+
+    /// Drop the prompt graph: prompts run eagerly until the next capture.
+    fn clear_prefill_graph(&mut self);
+
     /// The final-norm rows of the last step or prompt, `[batch, d_model]`,
     /// on the device, in [`GpuBackbone::temporal_dtype`].
     fn temporal_ptr(&self) -> CUdeviceptr;
@@ -124,6 +138,15 @@ macro_rules! gpu_backbone_by_inherent_methods {
             }
             fn clear_graph(&mut self) -> Result<(), String> {
                 <$ty>::clear_graph(self)
+            }
+            fn capture_prefill_graph(&mut self, seq_len: usize) -> Result<(), String> {
+                <$ty>::capture_prefill_graph(self, seq_len)
+            }
+            fn has_prefill_graph(&self) -> bool {
+                <$ty>::has_prefill_graph(self)
+            }
+            fn clear_prefill_graph(&mut self) {
+                <$ty>::clear_prefill_graph(self)
             }
             fn temporal_ptr(&self) -> CUdeviceptr {
                 <$ty>::temporal_ptr(self)
@@ -224,6 +247,15 @@ impl GpuBackbone for AnyGpuBackbone {
     }
     fn clear_graph(&mut self) -> Result<(), String> {
         self.inner_mut().clear_graph()
+    }
+    fn capture_prefill_graph(&mut self, seq_len: usize) -> Result<(), String> {
+        self.inner_mut().capture_prefill_graph(seq_len)
+    }
+    fn has_prefill_graph(&self) -> bool {
+        self.inner().has_prefill_graph()
+    }
+    fn clear_prefill_graph(&mut self) {
+        self.inner_mut().clear_prefill_graph()
     }
     fn temporal_ptr(&self) -> CUdeviceptr {
         self.inner().temporal_ptr()

@@ -258,6 +258,10 @@ impl Mamba3Prefill {
         if has_gemm_work {
             prepare_inference_arch_rung(run.ctx)?;
         }
+        // Sized before the first GEMM, so the GEMMs a later capture of this
+        // window records find the operands they were prepared with.
+        run.ctx
+            .presize_mixed_graph_scratch_m3(run.dims, run.weights.bulk_dtype())?;
         let manifest = run
             .ctx
             .record_eager_gemm_manifest(|| self.run_full_body(run, states, outputs))?;

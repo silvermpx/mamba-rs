@@ -18,13 +18,14 @@ use super::inference::{Mamba3MimoGpuEngine, Mamba3MimoGpuState, Mamba3MimoGpuWin
 ///
 /// Decode with [`Self::step`], run a prompt in one pass with
 /// [`Self::prefill`], start a new sequence with [`Self::reset`], and replay
-/// the decode step as one CUDA graph after [`Self::capture_graph`]. The
+/// the decode step as one CUDA graph after [`Self::capture_graph`] and the
+/// prompt pass of one length after [`Self::capture_prefill_graph`]. The
 /// final-norm rows of the last step or prompt stay on the device
 /// ([`Self::temporal_ptr`]) for a head that runs there, and
 /// [`Self::download_temporal`] copies them to the host.
 pub struct Mamba3MimoGpuBackbone {
-    // The engine drops first, and its captured graph with it, before the
-    // state and windows the graph reads.
+    // Each window holds its graph, which keeps the kernels' module and the
+    // context's resources alive until it is destroyed.
     engine: Mamba3MimoGpuEngine,
     state: Mamba3MimoGpuState,
     step_window: Mamba3MimoGpuWindow,
@@ -106,34 +107,67 @@ impl Mamba3MimoGpuBackbone {
         self.state.reset(&self.engine.ctx)
     }
 
+    /// Capture the prompt pass of `seq_len` tokens per sequence as one CUDA
+    /// graph, which later [`Self::prefill`] calls of that length replay with
+    /// the eager bits. The capture leaves the state and the rows where the
+    /// caller left them: its warm-up prompt on zero input is undone. A
+    /// prompt of another length drops the graph with the window it runs
+    /// on. Capture the longest prompt before the decode graph: afterwards
+    /// the GEMM staging can no longer grow.
+    pub fn capture_prefill_graph(&mut self, seq_len: usize) -> Result<(), String> {
+        let zeros = vec![0.0f32; self.batch() * seq_len * self.input_dim()];
+        if self
+            .prompt_window
+            .as_ref()
+            .map(Mamba3MimoGpuWindow::seq_len)
+            != Some(seq_len)
+        {
+            self.prompt_window = None;
+            self.prompt_window = Some(self.engine.alloc_window(seq_len)?);
+        }
+        let Some(win) = self.prompt_window.as_mut() else {
+            return Err("MIMO prompt window missing".into());
+        };
+        win.clear_graph();
+        let stream = self.engine.ctx.stream.clone();
+        let keep = keep_state(&stream, &self.state, &self.step_window)?;
+        self.engine.run_gpu_only(&zeros, &mut self.state, win)?;
+        keep.restore(&stream)?;
+        // SAFETY: the graph reads this backbone's own state and the
+        // window's buffers; the window holds the graph and drops it first.
+        unsafe { self.engine.capture_graph(&mut self.state, win) }
+    }
+
+    /// Whether prompts of the kept length replay a captured graph.
+    pub fn has_prefill_graph(&self) -> bool {
+        self.prompt_window
+            .as_ref()
+            .is_some_and(Mamba3MimoGpuWindow::has_graph)
+    }
+
+    /// Drop the prompt graph: prompts run eagerly until the next capture.
+    pub fn clear_prefill_graph(&mut self) {
+        if let Some(win) = self.prompt_window.as_mut() {
+            win.clear_graph();
+        }
+    }
+
     /// Capture the decode step as one CUDA graph, which later steps replay.
     /// A graph captured before is dropped first. The capture leaves the
     /// recurrent state and the output rows where the caller left them: its
     /// warm-up step on zero input is undone before the graph is recorded.
-    /// Run the longest prompt before capturing: afterwards the GEMM staging
-    /// can no longer grow.
+    /// Run and capture the longest prompt before: afterwards the GEMM
+    /// staging can no longer grow.
     pub fn capture_graph(&mut self) -> Result<(), String> {
-        self.engine.clear_graph()?;
+        self.step_window.clear_graph();
         let stream = self.engine.ctx.stream.clone();
-        let f = std::mem::size_of::<f32>();
-        let rows = self.step_window.final_rows();
-        let keep = DeviceKeep::take(
-            &stream,
-            &[
-                (self.state.ssm.cached_ptr(), self.state.ssm.len() * f),
-                (self.state.k.cached_ptr(), self.state.k.len() * f),
-                (self.state.v.cached_ptr(), self.state.v.len() * f),
-                (self.state.angle.cached_ptr(), self.state.angle.len() * f),
-                (rows.cached_ptr(), rows.len() * f),
-            ],
-        )?;
+        let keep = keep_state(&stream, &self.state, &self.step_window)?;
         let input = vec![0.0f32; self.batch() * self.input_dim()];
         let mut output = vec![0.0f32; self.batch() * self.d_model()];
         self.step(&input, &mut output)?;
         keep.restore(&stream)?;
-        // SAFETY: the graph reads this backbone's own state and step
-        // window, which stay allocated and in place for as long as the
-        // engine (and its graph, dropped first) lives.
+        // SAFETY: the graph reads this backbone's own state and the step
+        // window's buffers; the window holds the graph and drops it first.
         unsafe {
             self.engine
                 .capture_graph(&mut self.state, &mut self.step_window)
@@ -142,12 +176,13 @@ impl Mamba3MimoGpuBackbone {
 
     /// Whether steps replay a captured graph.
     pub fn has_graph(&self) -> bool {
-        self.engine.has_graph()
+        self.step_window.has_graph()
     }
 
     /// Drop the captured graph: steps run eagerly until the next capture.
     pub fn clear_graph(&mut self) -> Result<(), String> {
-        self.engine.clear_graph()
+        self.step_window.clear_graph();
+        Ok(())
     }
 
     /// The final-norm rows of the last step or prompt, f32
@@ -207,4 +242,25 @@ impl Mamba3MimoGpuBackbone {
     pub fn stream(&self) -> &Arc<cudarc::driver::CudaStream> {
         &self.engine.ctx.stream
     }
+}
+
+/// Copy the state and the step window's rows aside, for a warm-up run a
+/// capture undoes.
+fn keep_state(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    state: &Mamba3MimoGpuState,
+    step_window: &Mamba3MimoGpuWindow,
+) -> Result<DeviceKeep, String> {
+    let f = std::mem::size_of::<f32>();
+    let rows = step_window.final_rows();
+    DeviceKeep::take(
+        stream,
+        &[
+            (state.ssm.cached_ptr(), state.ssm.len() * f),
+            (state.k.cached_ptr(), state.k.len() * f),
+            (state.v.cached_ptr(), state.v.len() * f),
+            (state.angle.cached_ptr(), state.angle.len() * f),
+            (rows.cached_ptr(), rows.len() * f),
+        ],
+    )
 }

@@ -928,7 +928,7 @@ impl GpuCtx {
             .max(dims.dt_rank * dims.d_inner)
             .max(dims.d_inner * dims.d_model)
             .max(dims.mamba_input_dim * dims.d_model);
-        self.presize_train_gemm_scratch(dims.bt(), m1_mixed_graph_max_dim(dims), max_kn, dtype)
+        self.presize_gemm_scratch(dims.bt(), m1_mixed_graph_max_dim(dims), max_kn, dtype)
     }
 
     pub(crate) fn presize_mixed_graph_scratch_m3(
@@ -944,24 +944,27 @@ impl GpuCtx {
         let max_kn = (dims.d_model * dims.in_proj_dim)
             .max(dims.d_inner * dims.d_model)
             .max(dims.mamba_input_dim * dims.d_model);
-        self.presize_train_gemm_scratch(dims.bt(), max_dim, max_kn, dtype)
+        self.presize_gemm_scratch(dims.bt(), max_dim, max_kn, dtype)
     }
 
     /// Size the half staging and the batch-invariant upcast scratch for
-    /// every GEMM of a training step before its first one: `rows`
-    /// activation rows, `max_width` the widest activation, `max_weight` the
-    /// largest weight's element count. Grown in the middle of a step
-    /// instead, they would move the operands the step's earlier GEMMs were
-    /// prepared with, and a graph captured after that step would find those
-    /// launches missing. Weights stored in f32 stage and upcast nothing.
-    pub(crate) fn presize_train_gemm_scratch(
+    /// every GEMM of a pass (a training step, a prompt window, a decode
+    /// step) before its first one: `rows` activation rows, `max_width` the
+    /// widest activation, `max_weight` the largest weight's element count.
+    /// Grown in the middle of a pass instead, they would move the operands
+    /// the pass's earlier GEMMs were prepared with, and a graph captured
+    /// after that pass would find those launches missing. Weights stored in
+    /// f32 stage and upcast nothing. Once a capture froze the scratch it
+    /// stays as it is: an eager GEMM that needs more runs on the overflow
+    /// buffers, and a capture that needs more is refused by name.
+    pub(crate) fn presize_gemm_scratch(
         &self,
         rows: usize,
         max_width: usize,
         max_weight: usize,
         dtype: WeightDtype,
     ) -> Result<(), String> {
-        if dtype.storage() == WeightDtype::F32 {
+        if dtype.storage() == WeightDtype::F32 || self.graph_scratch_frozen.get() {
             return Ok(());
         }
         self.ensure_half_staging(rows * max_width * dtype.size_bytes())?;

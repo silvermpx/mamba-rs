@@ -38,6 +38,8 @@ use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 use crate::mlp::GatedMlpLayerWeights;
 use crate::ops::portable_math::exp_portable;
 
+mod prefill_graph;
+
 /// One layer's weights on the device.
 struct GpuMamba2Layer {
     norm_weight: GpuBuffer,
@@ -1061,6 +1063,7 @@ impl Mamba2GpuEngine {
                 if self.has_gemm_work() {
                     prepare_inference_arch_rung(&self.ctx)?;
                 }
+                self.presize_gemm_scratch(self.batch)?;
                 let manifest = self
                     .ctx
                     .record_eager_gemm_manifest(|| self.step_kernels(state, scratch))?;
@@ -1068,6 +1071,19 @@ impl Mamba2GpuEngine {
             }
         }
         Ok(())
+    }
+
+    /// Size the context's GEMM staging and upcast scratch for `rows` rows
+    /// through every projection, before a pass's first GEMM.
+    fn presize_gemm_scratch(&self, rows: usize) -> Result<(), String> {
+        let c = &self.cfg;
+        let (dm, ip, di, h) = (c.d_model, c.in_proj_out_dim(), c.d_inner(), c.mlp_hidden());
+        let width = dm.max(self.input_dim).max(ip).max(di).max(2 * h);
+        let weight = (self.input_dim * dm)
+            .max(dm * ip)
+            .max(di * dm)
+            .max(dm * 2 * h);
+        self.ctx.presize_gemm_scratch(rows, width, weight, self.act)
     }
 
     /// Whether the step runs any GEMM: the input projection or a layer.
@@ -1345,6 +1361,8 @@ impl Mamba2GpuEngine {
         // The chunked scan's scratch only when this window runs it.
         let ch = |n: usize| if c.prefill_parallel(seq_len) { n } else { 1 };
         Ok(Mamba2GpuPrefill {
+            graph: None,
+            eager_gemm_manifest: None,
             seq_len,
             input: z(rows * self.input_dim)?,
             temporal: z(rows * c.d_model)?,
@@ -1387,7 +1405,7 @@ impl Mamba2GpuEngine {
         )?;
         self.check_state(state)?;
         pf.input.upload(&self.ctx.stream, input)?;
-        self.prefill_kernels(state, pf)?;
+        self.run_prefill(state, pf)?;
         if pf.seq_len == 0 || self.batch == 0 {
             return Ok(());
         }
@@ -1431,7 +1449,7 @@ impl Mamba2GpuEngine {
         )?;
         self.check_state(state)?;
         pf.input.upload(&self.ctx.stream, input)?;
-        self.prefill_kernels(state, pf)?;
+        self.run_prefill(state, pf)?;
         self.ctx
             .stream
             .synchronize()
@@ -1518,8 +1536,14 @@ impl Mamba2GpuEngine {
     }
 }
 
-/// Buffers of one prompt window length.
+/// Buffers of one prompt window length, and the window's CUDA graph once
+/// [`Mamba2GpuEngine::capture_prefill_graph`] ran.
 pub struct Mamba2GpuPrefill {
+    // The graph drops first, before the buffers it reads.
+    graph: Option<prefill_graph::PrefillGraph>,
+    /// The GEMM inventory of the last eager run of the window, which a
+    /// capture takes.
+    eager_gemm_manifest: Option<PreparedGemmCaptureManifest>,
     seq_len: usize,
     input: GpuBuffer,
     temporal: GpuBuffer,
@@ -1546,6 +1570,17 @@ impl Mamba2GpuPrefill {
     /// The prompt tokens these buffers take per sequence.
     pub fn seq_len(&self) -> usize {
         self.seq_len
+    }
+
+    /// Whether this window's prefills replay a captured graph.
+    pub fn has_graph(&self) -> bool {
+        self.graph.is_some()
+    }
+
+    /// Drop the window's graph, once a replay in flight finished: its
+    /// prefills run eagerly and may be captured again.
+    pub fn clear_graph(&mut self) {
+        self.graph = None;
     }
 
     /// Every position's final-norm row of the last prefill, f32

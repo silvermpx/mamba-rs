@@ -8,8 +8,6 @@
 //! the storage dtype; the residual stream, the normalised B and C, the
 //! states and every small weight stay f32, and the final norm writes f32.
 
-use std::cell::Cell;
-
 use cudarc::driver::PushKernelArg;
 
 use super::kernels::{CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunked_geom, scan_geom};
@@ -75,8 +73,15 @@ impl Mamba3MimoGpuState {
     }
 }
 
-/// Buffers for windows of one length (a decode step is a window of one).
+/// Buffers for windows of one length (a decode step is a window of one),
+/// and the window's CUDA graph once [`Mamba3MimoGpuEngine::capture_graph`]
+/// ran.
 pub struct Mamba3MimoGpuWindow {
+    // The graph drops first, before the buffers it reads.
+    graph: Option<CapturedWindow>,
+    /// The GEMM inventory of the last eager run of the window, which a
+    /// capture takes.
+    eager_gemm_manifest: Option<PreparedGemmCaptureManifest>,
     seq_len: usize,
     input: GpuBuffer,
     temporal: GpuBuffer,
@@ -111,6 +116,18 @@ impl Mamba3MimoGpuWindow {
         self.seq_len
     }
 
+    /// Whether runs of this window on the state it was captured with
+    /// replay a graph.
+    pub fn has_graph(&self) -> bool {
+        self.graph.is_some()
+    }
+
+    /// Drop the window's graph, once a replay in flight finished: its runs
+    /// go eagerly and may be captured again.
+    pub fn clear_graph(&mut self) {
+        self.graph = None;
+    }
+
     /// Every position's final-norm row of the last run, f32
     /// `[batch, seq_len, d_model]`, on the device.
     pub fn final_rows(&self) -> &GpuBuffer {
@@ -138,34 +155,37 @@ pub struct Mamba3MimoGpuEngine {
     /// One counter per (sequence, head) for a head in tiles, so the last
     /// tile to finish carries the keys and angles out.
     scan_done: GpuByteBuffer,
-    /// One window's kernels as a CUDA graph, once [`Self::capture_graph`]
-    /// ran.
-    graph: Option<(cudarc::driver::CudaGraph, CapturedWindow)>,
-    /// The GEMM inventory of the last eager window: capture compares the
-    /// graph's GEMMs against it, so a capture must follow an eager run of
-    /// the same window.
-    eager_gemm_manifest: Cell<Option<PreparedGemmCaptureManifest>>,
 }
 
-/// What a captured window graph baked in: the GEMM route and its resolved
-/// launches, and every device address the replay reuses.
+/// A captured window: the graph, the GEMM route and its resolved launches,
+/// and every device address the replay reuses. It holds the kernels'
+/// module and the context's resources, so they outlive the graph.
 struct CapturedWindow {
+    graph: cudarc::driver::CudaGraph,
     gemm_route: crate::gpu::context::GemmRoute,
     gemm_plan: Option<CapturedGemmGraphPlan>,
-    /// The state's four buffers, the window's input rows and its
-    /// final-norm rows.
-    buffers: [u64; 6],
+    /// The state's four buffers.
+    state: [u64; 4],
     half_staging: u64,
     bi_upcast: [u64; 3],
+    _modules: crate::gpu::kernels::CudaModuleAnchors,
+    ctx: std::rc::Rc<crate::gpu::context::GpuCtxResources>,
 }
 
-impl Drop for Mamba3MimoGpuEngine {
+impl Drop for CapturedWindow {
     fn drop(&mut self) {
-        // A replay may still be in flight on the stream: the graph is
-        // destroyed only after it finished.
+        // A replay may still be in flight: the graph goes once it finished.
         let _ = self.ctx.stream.synchronize();
-        drop(self.graph.take());
     }
+}
+
+fn state_ptrs(state: &Mamba3MimoGpuState) -> [u64; 4] {
+    [
+        state.ssm.cached_ptr(),
+        state.k.cached_ptr(),
+        state.v.cached_ptr(),
+        state.angle.cached_ptr(),
+    ]
 }
 
 impl Mamba3MimoGpuEngine {
@@ -307,8 +327,6 @@ impl Mamba3MimoGpuEngine {
             chunked,
             scan,
             scan_done,
-            graph: None,
-            eager_gemm_manifest: Cell::new(None),
         })
     }
 
@@ -394,6 +412,8 @@ impl Mamba3MimoGpuEngine {
         let (nh, na) = (c.nheads(), c.num_rope_angles());
         let nc = seq_len.div_ceil(CHUNK);
         Ok(Mamba3MimoGpuWindow {
+            graph: None,
+            eager_gemm_manifest: None,
             seq_len,
             input: z(rows * self.input_dim)?,
             temporal: z(rows * c.d_model)?,
@@ -463,22 +483,21 @@ impl Mamba3MimoGpuEngine {
             (rows * self.input_dim).max(1),
         )?;
         self.check_state(state)?;
-        self.eager_gemm_manifest.set(None);
         win.input.upload(&self.ctx.stream, input)?;
-        match &self.graph {
-            Some((graph, captured)) if captured.buffers == Self::window_buffers(state, win) => {
-                self.replay(graph, captured)?
-            }
-            _ => {
-                if self.has_gemm_work() {
-                    prepare_inference_arch_rung(&self.ctx)?;
-                }
-                let manifest = self
-                    .ctx
-                    .record_eager_gemm_manifest(|| self.kernels_on_stream(state, win))?;
-                self.eager_gemm_manifest.set(Some(manifest));
-            }
+        if let Some(g) = &win.graph
+            && g.state == state_ptrs(state)
+        {
+            return self.replay(g);
         }
+        if self.has_gemm_work() {
+            prepare_inference_arch_rung(&self.ctx)?;
+        }
+        self.presize_gemm_scratch(self.batch * win.seq_len)?;
+        win.eager_gemm_manifest = None;
+        let manifest = self
+            .ctx
+            .record_eager_gemm_manifest(|| self.kernels_on_stream(state, win))?;
+        win.eager_gemm_manifest = Some(manifest);
         Ok(())
     }
 
@@ -522,44 +541,46 @@ impl Mamba3MimoGpuEngine {
         self.batch != 0 && (self.input_proj.is_some() || self.cfg.n_layers != 0)
     }
 
-    fn window_buffers(state: &Mamba3MimoGpuState, win: &Mamba3MimoGpuWindow) -> [u64; 6] {
-        [
-            state.ssm.cached_ptr(),
-            state.k.cached_ptr(),
-            state.v.cached_ptr(),
-            state.angle.cached_ptr(),
-            win.input.cached_ptr(),
-            win.final_rows.cached_ptr(),
-        ]
+    /// Size the context's GEMM staging and upcast scratch for `rows` rows
+    /// through every projection, before a window's first GEMM.
+    fn presize_gemm_scratch(&self, rows: usize) -> Result<(), String> {
+        let c = &self.cfg;
+        let (dm, ip, di, h) = (c.d_model, c.in_proj_out_dim(), c.d_inner(), c.mlp_hidden());
+        let width = dm.max(self.input_dim).max(ip).max(di).max(2 * h);
+        let weight = (self.input_dim * dm)
+            .max(dm * ip)
+            .max(di * dm)
+            .max(dm * 2 * h);
+        self.ctx.presize_gemm_scratch(rows, width, weight, self.act)
     }
 
-    /// Capture the kernels of `win` (a decode step: `alloc_window(1)`) as
-    /// one CUDA graph; later [`Self::run`] calls on this state and window
-    /// replay it, while any other window still runs eagerly.
+    /// Capture the kernels of `win` (a decode step, `alloc_window(1)`, or a
+    /// prompt window) as one CUDA graph, held by the window; later
+    /// [`Self::run`] calls of this window on this state replay it, while
+    /// the window on another state, and every other window, run eagerly.
     ///
     /// Takes the GEMM inventory of the eager run of this window that must
-    /// precede it, and replaces an earlier graph. The replay refuses a
-    /// changed GEMM route or moved GEMM staging. After capture the
-    /// context's GEMM staging can no longer grow: run the longest prefill
-    /// window before capturing.
+    /// precede it, and replaces the window's earlier graph. The replay
+    /// refuses a changed GEMM route or moved GEMM staging. After capture the
+    /// context's GEMM staging can no longer grow: run and capture the
+    /// longest window first.
     ///
     /// # Safety
     ///
-    /// `state` and `win` must stay allocated, and the engine's weights,
-    /// kernels and context unchanged, for as long as the graph replays.
+    /// `state` must stay allocated, and the engine's weights, kernels and
+    /// context unchanged, for as long as the graph replays.
     pub unsafe fn capture_graph(
-        &mut self,
+        &self,
         state: &mut Mamba3MimoGpuState,
         win: &mut Mamba3MimoGpuWindow,
     ) -> Result<(), String> {
         self.check_state(state)?;
-        let manifest = self.eager_gemm_manifest.take().ok_or_else(|| {
+        let manifest = win.eager_gemm_manifest.take().ok_or_else(|| {
             "MIMO graph capture needs a successful eager run of the window first".to_string()
         })?;
-        self.clear_graph()?;
+        win.graph = None;
         self.ctx.presize_bi_scratch()?;
         let gemm_route = self.ctx.gemm_route();
-        let buffers = Self::window_buffers(state, win);
         self.ctx.freeze_graph_scratch();
         let (graph, gemm_plan) = unsafe {
             capture_into_graph_with_gemm_plan(&self.ctx, manifest.route_capacity, &manifest, || {
@@ -572,38 +593,21 @@ impl Mamba3MimoGpuEngine {
             gemm_plan.as_ref(),
             "MIMO graph capture",
         )?;
-        let captured = CapturedWindow {
+        win.graph = Some(CapturedWindow {
+            graph,
             gemm_route,
             gemm_plan,
-            buffers,
+            state: state_ptrs(state),
             half_staging: self.ctx.half_staging_ptr(),
             bi_upcast: self.ctx.bi_upcast_scratch_ptrs(),
-        };
-        self.graph = Some((graph, captured));
+            _modules: self.kernels.module_anchors(),
+            ctx: self.ctx.resource_anchor(),
+        });
         self.ctx.note_graph_capture();
         Ok(())
     }
 
-    /// Whether a window replays a captured graph.
-    pub fn has_graph(&self) -> bool {
-        self.graph.is_some()
-    }
-
-    /// Drop the captured graph: every window runs eagerly again.
-    pub fn clear_graph(&mut self) -> Result<(), String> {
-        self.ctx
-            .stream
-            .synchronize()
-            .map_err(|e| format!("MIMO graph clear sync: {e:?}"))?;
-        self.graph = None;
-        Ok(())
-    }
-
-    fn replay(
-        &self,
-        graph: &cudarc::driver::CudaGraph,
-        captured: &CapturedWindow,
-    ) -> Result<(), String> {
+    fn replay(&self, captured: &CapturedWindow) -> Result<(), String> {
         const LABEL: &str = "MIMO graph replay";
         if captured.gemm_route != self.ctx.gemm_route() {
             return Err(format!("{LABEL}: the GEMM route changed since capture"));
@@ -615,7 +619,12 @@ impl Mamba3MimoGpuEngine {
             self.has_gemm_work(),
             captured.gemm_plan.as_ref(),
             LABEL,
-            || graph.launch().map_err(|e| format!("{LABEL}: {e:?}")),
+            || {
+                captured
+                    .graph
+                    .launch()
+                    .map_err(|e| format!("{LABEL}: {e:?}"))
+            },
         )
     }
 

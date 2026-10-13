@@ -10,7 +10,7 @@ use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig};
 
 use crate::gpu::composed::{ComposedModule, ComposedSpec, compile_composed};
 use crate::gpu::kernel_identity as ki;
-use crate::gpu::kernels::{HalfKernel, TypedKernel};
+use crate::gpu::kernels::{CudaModuleAnchors, HalfKernel, TypedKernel};
 use crate::gpu::launch::opt_in_dynamic_smem;
 
 /// The compiled Mamba-2 kernels.
@@ -56,6 +56,9 @@ pub struct Mamba2Kernels {
     pub smem_optin: usize,
     pub compiler_identity: ki::CompilerIdentity,
     pub artifact_identity: ki::ArtifactIdentity,
+    /// The loaded module, held by every graph that launches these kernels
+    /// so it outlives them.
+    _modules: CudaModuleAnchors,
 }
 
 /// The backward of the window and the training helpers
@@ -319,6 +322,7 @@ impl Mamba2Kernels {
             smem_optin,
             compiler_identity,
             artifact_identity,
+            _modules: CudaModuleAnchors::new(vec![module.clone()]),
         };
         kernels.smem_optin = {
             let optin = kernels.smem_optin;
@@ -346,6 +350,11 @@ impl Mamba2Kernels {
             budget
         };
         Ok(kernels)
+    }
+
+    /// The loaded module, for a graph to hold.
+    pub(crate) fn module_anchors(&self) -> CudaModuleAnchors {
+        self._modules.clone()
     }
 
     /// The sequential backward's kernel for a head of `hd` channels and

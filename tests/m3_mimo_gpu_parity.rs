@@ -701,7 +701,7 @@ fn m3_mimo_gpu_graph_replay_is_the_eager_window() {
         WeightDtype::F16,
     ] {
         let eager = engine(&device, &w, (cfg, input_dim, batch), dtype);
-        let mut graphed = engine(&device, &w, (cfg, input_dim, batch), dtype);
+        let graphed = engine(&device, &w, (cfg, input_dim, batch), dtype);
         let (mut est, mut gst) = (eager.alloc_state().unwrap(), graphed.alloc_state().unwrap());
         let (mut ewin, mut gwin) = (
             eager.alloc_window(1).unwrap(),
@@ -728,7 +728,7 @@ fn m3_mimo_gpu_graph_replay_is_the_eager_window() {
             assert_eq!(eo, go, "{dtype:?} step {t}");
             if t == 0 {
                 unsafe { graphed.capture_graph(&mut gst, &mut gwin) }.unwrap();
-                assert!(graphed.has_graph());
+                assert!(gwin.has_graph());
             }
             if t == 6 {
                 eager.run(&prompt, &mut erows, &mut est, &mut epw).unwrap();

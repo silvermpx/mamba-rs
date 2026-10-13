@@ -30,6 +30,8 @@ use cudarc::driver::PushKernelArg;
 use std::cell::Cell;
 use std::sync::Arc;
 
+mod prompt_graph;
+
 #[cfg(test)]
 mod model_gemm_manifest_tests {
     use super::*;
@@ -2252,10 +2254,17 @@ impl MambaGpuEngineMixed {
     /// reads its downcast input from there) turns the same work into a
     /// different launch set and the capture is refused. Idempotent.
     pub fn prepare_graph_scratch(&self) -> Result<(), String> {
+        self.prepare_prompt_scratch(1)
+    }
+
+    /// [`Self::prepare_graph_scratch`] for a prompt of `seq_len` tokens per
+    /// sequence, whose GEMMs then run on staging sized before the first.
+    pub(crate) fn prepare_prompt_scratch(&self, seq_len: usize) -> Result<(), String> {
         self.engine.ctx.presize_bi_scratch()?;
-        self.engine
-            .ctx
-            .presize_mixed_graph_scratch_m1(&self.engine.dims(1), self.mixed_weights.bulk_dtype)
+        self.engine.ctx.presize_mixed_graph_scratch_m1(
+            &self.engine.dims(seq_len),
+            self.mixed_weights.bulk_dtype,
+        )
     }
 
     /// Capture a CUDA Graph for the mixed-native pipeline.
@@ -2525,8 +2534,14 @@ pub struct MambaGpuBackbone {
 
 /// The buffers of one prompt length, kept for the next prompt of that
 /// length: the host rows on the device, their input projection when the
-/// model has one, and the prefill scratch of the engine's precision.
+/// model has one, the prefill scratch of the engine's precision, and the
+/// prompt's CUDA graph once [`MambaGpuBackbone::capture_prefill_graph`] ran.
 struct BackbonePrompt {
+    // The graph drops first, before the buffers it reads.
+    graph: Option<prompt_graph::PromptGraph>,
+    /// The GEMM inventory of the last eager run of the prompt, which a
+    /// capture takes.
+    eager_gemm_manifest: Option<PreparedGemmCaptureManifest>,
     seq_len: usize,
     input: GpuBuffer,
     projected: Option<GpuBuffer>,
@@ -2860,68 +2875,16 @@ impl MambaGpuBackbone {
         result
     }
 
-    /// Upload a prompt's rows, project them when the model has an input
-    /// projection, and run the prefill of the engine's precision.
+    /// Upload a prompt's rows, then run its kernels: the input projection
+    /// when the model has one and the prefill of the engine's precision.
     fn run_prompt(
         &mut self,
         prompt: &mut BackbonePrompt,
         input: &[f32],
         shape: (usize, usize, usize),
     ) -> Result<(), String> {
-        use super::prefill::{
-            PrefillInputs, gpu_forward_inference_prefill, gpu_forward_inference_prefill_mixed,
-        };
-        let BackbonePrompt {
-            input: rows_in,
-            projected,
-            scratch: prompt_scratch,
-            ..
-        } = prompt;
-        match (&self.engine, &mut self.scratch, prompt_scratch) {
-            (BackboneEngine::F32(e), BackboneScratch::F32(sc), PromptScratch::F32(pf)) => {
-                rows_in.upload(&e.ctx.stream, input)?;
-                let ip_out = project_prompt(
-                    &e.ctx,
-                    (&e.weights, e.identity_proj),
-                    rows_in,
-                    projected,
-                    shape,
-                )?;
-                gpu_forward_inference_prefill(
-                    &e.ctx,
-                    &mut sc.temporal,
-                    PrefillInputs {
-                        ip_out_flat: ip_out,
-                        weights: &e.weights,
-                        a_neg_all: &e.a_neg_all,
-                    },
-                    &mut self.state,
-                    pf,
-                )
-            }
-            (BackboneEngine::Mixed(e), BackboneScratch::Mixed(sc), PromptScratch::Mixed(pf)) => {
-                rows_in.upload(e.stream(), input)?;
-                let ip_out = project_prompt(
-                    e.ctx(),
-                    (e.weights_mixed_ref(), e.engine_ref().identity_proj),
-                    rows_in,
-                    projected,
-                    shape,
-                )?;
-                gpu_forward_inference_prefill_mixed(
-                    e.ctx(),
-                    &sc.temporal,
-                    PrefillInputs {
-                        ip_out_flat: ip_out,
-                        weights: e.weights_mixed_ref(),
-                        a_neg_all: e.a_neg_all_ref(),
-                    },
-                    &mut self.state,
-                    pf,
-                )
-            }
-            _ => Err("engine/scratch dtype mismatch (internal invariant)".to_string()),
-        }
+        prompt.input.upload(self.stream(), input)?;
+        self.run_prompt_kernels(prompt, shape)
     }
 
     /// The buffers a prompt of `seq_len` tokens per sequence runs on.
@@ -2945,6 +2908,8 @@ impl MambaGpuBackbone {
             Some(GpuBuffer::zeros(stream, rows * d_model)?)
         };
         Ok(BackbonePrompt {
+            graph: None,
+            eager_gemm_manifest: None,
             seq_len,
             input: GpuBuffer::zeros(stream, rows * input_dim)?,
             projected,

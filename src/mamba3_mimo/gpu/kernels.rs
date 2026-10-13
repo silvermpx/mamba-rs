@@ -11,7 +11,7 @@ use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig};
 
 use crate::gpu::composed::{ComposedModule, ComposedSpec, compile_composed};
 use crate::gpu::kernel_identity as ki;
-use crate::gpu::kernels::TypedKernel;
+use crate::gpu::kernels::{CudaModuleAnchors, TypedKernel};
 use crate::gpu::launch::opt_in_dynamic_smem;
 use crate::mamba3_mimo::config::MAX_MIMO_RANK;
 
@@ -63,6 +63,9 @@ pub struct Mamba3MimoKernels {
     pub chunk_threads: ChunkThreads,
     pub compiler_identity: ki::CompilerIdentity,
     pub artifact_identity: ki::ArtifactIdentity,
+    /// The loaded module, held by every graph that launches these kernels
+    /// so it outlives them.
+    _modules: CudaModuleAnchors,
 }
 
 /// The chunked path's backward kernels (`kernels/mamba3_mimo_chunked_bwd.cu`).
@@ -667,6 +670,7 @@ impl Mamba3MimoKernels {
             chunk_threads,
             compiler_identity,
             artifact_identity,
+            _modules: CudaModuleAnchors::new(vec![module.clone()]),
         };
         kernels.smem_optin = {
             let optin = kernels.smem_optin;
@@ -703,6 +707,11 @@ impl Mamba3MimoKernels {
             )?)
         };
         Ok(kernels)
+    }
+
+    /// The loaded module, for a graph to hold.
+    pub(crate) fn module_anchors(&self) -> CudaModuleAnchors {
+        self._modules.clone()
     }
 }
 

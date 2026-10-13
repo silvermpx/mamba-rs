@@ -123,6 +123,20 @@
   checkpoint with the embedding, the untied head and the vocabulary size
   beside it, and `MambaLM::from_checkpoint` and
   `MambaGpuLM::from_checkpoint` load it.
+- Every GPU backbone captures its prompt pass of one length as one CUDA
+  graph: `capture_prefill_graph(seq_len)`, `has_prefill_graph` and
+  `clear_prefill_graph`, on each family's backbone and on `GpuBackbone`.
+  Later prompts of that length replay it with the eager bits; the capture
+  leaves the state and rows where they were, a prompt of another length
+  drops it, and it works beside the decode graph (capture the longest
+  prompt first).
+- The Mamba-2 engine captures a prompt window over its buffers
+  (`Mamba2GpuEngine::capture_prefill_graph`; `Mamba2GpuPrefill::has_graph`
+  and `clear_graph`). Every MIMO window holds its own graph, so the decode
+  window and a prompt window keep theirs side by side:
+  `Mamba3MimoGpuEngine::capture_graph` takes `&self`, and `has_graph` and
+  `clear_graph` move to `Mamba3MimoGpuWindow`. Every such graph holds the
+  kernels' module and the context's resources, so it outlives neither.
 
 ### Changed
 
@@ -414,6 +428,12 @@
 - Data-parallel training no longer refuses a gradient arena past 2^31
   elements: the mean scale was already 64-bit, and the fixed-order
   reducer's fold now counts its shard in 64 bits.
+- The Mamba-2 and MIMO engines and the SISO prefill size their GEMM
+  staging and upcast scratch before an eager pass's first GEMM, as the
+  other paths did; a capture after one eager pass no longer misses the
+  launches the pass prepared on scratch it grew midway. Once a capture
+  froze the scratch, eager passes that need more run on the overflow
+  buffers as before.
 
 ## 0.7.5 (2026-09-23)
 

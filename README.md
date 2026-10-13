@@ -49,10 +49,12 @@ underneath. The GPU path links only the CUDA driver API and cuBLAS.
 - Three GEMM modes, deterministic by default. See below.
 - Deterministic data-parallel training over NCCL for every family, with
   one reduction per optimizer step in a fixed order.
-- Bit-continuous resume for every family: the optimizer state and the
-  carried recurrence export and import.
-- Safetensors checkpoints for every family, and loaders for the official
-  HuggingFace and `mamba_ssm` checkpoints.
+- Bit-continuous resume for every family: the optimizer state, the f16
+  loss scale and the carried recurrence export and import, and a
+  trainer-state file holds them beside the weights.
+- Safetensors checkpoints for every family, a language-model checkpoint
+  of any family in one file, and loaders for the official HuggingFace and
+  `mamba_ssm` checkpoints.
 - State dimensions up to 256.
 - MSRV 1.98.1.
 
@@ -226,6 +228,24 @@ width, so `load` needs nothing else. The official checkpoints load through
 `hf::load_hf` (Mamba), `hf::load_mamba2::load_hf_mamba2` and
 `hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo}`, or through
 `from_hf` of the language models.
+
+What a trainer needs beside its weights to resume bit for bit (the AdamW
+moments and settings, the f16 loss scale and the carried recurrence)
+goes to a trainer-state file of its own:
+
+```rust
+use mamba_rs::{GpuTrainer, TrainerState};
+use std::path::Path;
+
+trainer.trainer_state()?.save(Path::new("trainer.safetensors"))?;
+// Later, on a trainer built from the saved weights:
+trainer.load_trainer_state(&TrainerState::load(Path::new("trainer.safetensors"))?)?;
+```
+
+`MambaLM::save_checkpoint` writes a language model of any family to one
+file: the backbone as its family's checkpoint, with the embedding, the
+untied head and the vocabulary size beside it. `MambaLM::from_checkpoint`
+and `MambaGpuLM::from_checkpoint` load it.
 
 ## GEMM modes and storage precision
 

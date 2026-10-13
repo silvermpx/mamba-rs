@@ -18,7 +18,8 @@ use super::inference::{Mamba2GpuEngine, Mamba2GpuPrefill, Mamba2GpuScratch, Mamb
 ///
 /// Decode with [`Self::step`], run a prompt in one pass with
 /// [`Self::prefill`], start a new sequence with [`Self::reset`], and replay
-/// the decode step as one CUDA graph after [`Self::capture_graph`]. The
+/// the decode step as one CUDA graph after [`Self::capture_graph`] and the
+/// prompt pass of one length after [`Self::capture_prefill_graph`]. The
 /// final-norm rows of the last step or prompt stay on the device
 /// ([`Self::temporal_ptr`]) for a head that runs there, and
 /// [`Self::download_temporal`] copies them to the host.
@@ -99,6 +100,56 @@ impl Mamba2GpuBackbone {
     /// Zero the recurrent state, the start of new sequences.
     pub fn reset(&mut self) -> Result<(), String> {
         self.state.reset(&self.engine.ctx)
+    }
+
+    /// Capture the prompt pass of `seq_len` tokens per sequence as one CUDA
+    /// graph, which later [`Self::prefill`] calls of that length replay with
+    /// the eager bits. The capture leaves the state and the rows where the
+    /// caller left them: its warm-up prompt on zero input is undone. A
+    /// prompt of another length drops the graph with the buffers it runs on.
+    /// Capture the longest prompt before the decode graph: afterwards the
+    /// GEMM staging can no longer grow.
+    pub fn capture_prefill_graph(&mut self, seq_len: usize) -> Result<(), String> {
+        let zeros = vec![0.0f32; self.batch() * seq_len * self.input_dim()];
+        if self.prefill.as_ref().map(Mamba2GpuPrefill::seq_len) != Some(seq_len) {
+            self.prefill = None;
+            self.prefill = Some(self.engine.alloc_prefill(seq_len)?);
+        }
+        let Some(pf) = self.prefill.as_mut() else {
+            return Err("Mamba-2 prefill buffers missing".into());
+        };
+        pf.clear_graph();
+        let stream = self.engine.ctx.stream.clone();
+        let f = std::mem::size_of::<f32>();
+        let rows = self.scratch.final_rows();
+        let keep = DeviceKeep::take(
+            &stream,
+            &[
+                (self.state.conv.cached_ptr(), self.state.conv.len() * f),
+                (self.state.ssm.cached_ptr(), self.state.ssm.len() * f),
+                (rows.cached_ptr(), rows.len() * f),
+            ],
+        )?;
+        self.engine
+            .prefill_gpu_only(&zeros, &mut self.state, pf, &mut self.scratch)?;
+        keep.restore(&stream)?;
+        // SAFETY: the graph reads this backbone's own state and the
+        // window's buffers, which hold the graph and drop it first.
+        unsafe { self.engine.capture_prefill_graph(&mut self.state, pf) }
+    }
+
+    /// Whether prompts of the kept length replay a captured graph.
+    pub fn has_prefill_graph(&self) -> bool {
+        self.prefill
+            .as_ref()
+            .is_some_and(Mamba2GpuPrefill::has_graph)
+    }
+
+    /// Drop the prompt graph: prompts run eagerly until the next capture.
+    pub fn clear_prefill_graph(&mut self) {
+        if let Some(pf) = self.prefill.as_mut() {
+            pf.clear_graph();
+        }
     }
 
     /// Capture the decode step as one CUDA graph, which later steps replay.

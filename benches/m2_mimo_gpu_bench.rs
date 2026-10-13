@@ -197,7 +197,7 @@ fn mimo(device: &GpuDevice, part: &str) {
     println!("decode steps (us/step):");
     for dtype in dtypes().into_iter().filter(|_| wants(part, "decode")) {
         for &b in &DECODE_BATCH {
-            let mut eng = Mamba3MimoGpuEngine::new(device, &w, base, input_dim, b, dtype).unwrap();
+            let eng = Mamba3MimoGpuEngine::new(device, &w, base, input_dim, b, dtype).unwrap();
             let mut st = eng.alloc_state().unwrap();
             let mut win = eng.alloc_window(1).unwrap();
             let input = det(b * input_dim, 12);

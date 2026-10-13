@@ -1319,7 +1319,7 @@ impl Mamba2GpuTrainer {
             weight = weight.max(s.len);
         }
         self.ctx
-            .presize_train_gemm_scratch(self.batch * self.seq_len, width, weight, self.dtype)
+            .presize_gemm_scratch(self.batch * self.seq_len, width, weight, self.dtype)
     }
 
     /// The forward kernels; `out`, when given, receives the final rows.

@@ -30,6 +30,8 @@ use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::Mamba3Weights;
 use std::{cell::Cell, sync::Arc};
 
+mod prompt_graph;
+
 type Stream = Arc<cudarc::driver::CudaStream>;
 
 /// Persistent recurrent state for GPU Mamba-3 inference (all layers).
@@ -1217,6 +1219,30 @@ impl Drop for Mamba3GpuEngineMixed {
 }
 
 impl Mamba3GpuEngineMixed {
+    /// Downcast the typed prefill's final f32 rows into the decode rows of
+    /// the weight dtype, so the logits path continues exactly as after a
+    /// step.
+    fn cast_prefill_hidden(&self, sc: &mut Mamba3GpuScratchMixed) -> Result<(), String> {
+        let eng = self.engine_ref();
+        let ctx = &eng.ctx;
+        let n = eng.batch * eng.cfg.d_model;
+        let cast = match sc.temporal.dtype() {
+            WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
+            WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
+            WeightDtype::F32 | WeightDtype::Tf32 => {
+                return Err("M3 mixed prefill: unexpected f32 scratch dtype".into());
+            }
+        };
+        crate::gpu::launch::launch_cast(
+            &ctx.stream,
+            cast,
+            (sc.temporal.cached_ptr(), 2),
+            (sc.prefill_hidden.cached_ptr(), 4),
+            n,
+            format_args!("M3 mixed prefill hidden downcast"),
+        )
+    }
+
     fn has_gemm_work(&self) -> bool {
         self.engine.batch != 0 && (self.engine.cfg.n_layers != 0 || !self.engine.identity_proj)
     }
@@ -2134,6 +2160,8 @@ pub struct Mamba3GpuBackbone {
 /// The buffers of one prompt length, kept for the next prompt of that
 /// length: the host rows on the device and the prefill executor.
 struct M3BackbonePrompt {
+    // The graph drops first, before the buffers it reads.
+    graph: Option<super::prefill::Mamba3PrefillGraph>,
     seq_len: usize,
     input: GpuBuffer,
     prefill: super::prefill::Mamba3Prefill,
@@ -2454,13 +2482,18 @@ impl Mamba3GpuBackbone {
         let mut prompt = match kept {
             Some(prompt) => prompt,
             None => M3BackbonePrompt {
+                graph: None,
                 seq_len,
                 input: GpuBuffer::zeros(self.stream(), want)?,
                 prefill: self.alloc_prefill(seq_len)?,
             },
         };
         let result = prompt.input.upload(self.stream(), input).and_then(|()| {
-            self.prefill_sequence(&mut prompt.prefill, &prompt.input, seq_len, true)
+            if prompt.graph.is_some() {
+                self.replay_prompt(&prompt)
+            } else {
+                self.prefill_sequence(&mut prompt.prefill, &prompt.input, seq_len, true)
+            }
         });
         self.prompt = Some(prompt);
         result
@@ -2527,27 +2560,7 @@ impl Mamba3GpuBackbone {
                     carry_state,
                     &mut sc.prefill_hidden,
                 )?;
-                // Downcast the final hidden into the typed decode temporal
-                // so the logits path continues exactly as after a step.
-                let eng = e.engine_ref();
-                let ctx = &eng.ctx;
-                let n = eng.batch * eng.cfg.d_model;
-                let cast = match sc.temporal.dtype() {
-                    WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
-                    WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
-                    WeightDtype::F32 | WeightDtype::Tf32 => {
-                        return Err("M3 mixed prefill: unexpected f32 scratch dtype".into());
-                    }
-                };
-                crate::gpu::launch::launch_cast(
-                    &ctx.stream,
-                    cast,
-                    (sc.temporal.cached_ptr(), 2),
-                    (sc.prefill_hidden.cached_ptr(), 4),
-                    n,
-                    format_args!("M3 mixed prefill hidden downcast"),
-                )?;
-                Ok(())
+                e.cast_prefill_hidden(sc)
             }
             _ => Err("M3 prefill: engine/scratch precision arms disagree".to_string()),
         }
