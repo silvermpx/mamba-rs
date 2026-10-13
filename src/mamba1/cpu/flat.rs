@@ -4,7 +4,7 @@
 //! sample) with a single flat `Vec<f32>` per layer. All fields for all timesteps
 //! are packed contiguously in memory: `data[t * step_stride + field_offset .. +len]`.
 //!
-//! Layout per timestep (17 fields, no `pre_norm` -- was duplicate of `residual`):
+//! Layout per timestep (13 fields, no `pre_norm` -- was duplicate of `residual`):
 //!
 //! | # | Field           | Size                         |
 //! |---|-----------------|------------------------------|
@@ -12,19 +12,23 @@
 //! | 1 | rms_val         | 1                            |
 //! | 2 | post_norm       | d_model                      |
 //! | 3 | x_branch        | d_inner                      |
-//! | 4 | conv_state      | d_inner * d_conv             |
-//! | 5 | post_conv       | d_inner                      |
-//! | 6 | u               | d_inner                      |
-//! | 7 | xdbl            | xdbl_dim (dt_rank+2*d_state) |
-//! | 8 | delta_raw       | d_inner                      |
-//! | 9 | delta           | d_inner                      |
-//! |10 | h_prev          | d_inner * d_state            |
-//! |11 | h_curr          | d_inner * d_state            |
-//! |12 | da_exp          | d_inner * d_state            |
-//! |13 | y               | d_inner                      |
-//! |14 | gate_pre_silu   | d_inner                      |
-//! |15 | gate_post_silu  | d_inner                      |
-//! |16 | gated           | d_inner                      |
+//! | 4 | post_conv       | d_inner                      |
+//! | 5 | u               | d_inner                      |
+//! | 6 | xdbl            | xdbl_dim (dt_rank+2*d_state) |
+//! | 7 | delta_raw       | d_inner                      |
+//! | 8 | delta           | d_inner                      |
+//! | 9 | y               | d_inner                      |
+//! |10 | gate_pre_silu   | d_inner                      |
+//! |11 | gate_post_silu  | d_inner                      |
+//! |12 | gated           | d_inner                      |
+//!
+//! The states are not kept per step: they are `d_inner * d_state` wide, and
+//! kept so they were most of the tape. The window keeps the conv register
+//! it starts from, whose every later state is that register shifted through
+//! the window's `x_branch` rows, and the SSM state at every `stride`-th
+//! step; the backward replays each segment's states from its checkpoint
+//! with the forward's arithmetic, so the gradients are the same bits at
+//! every stride.
 
 use crate::ops::dims::MambaDims;
 
@@ -40,15 +44,11 @@ pub struct FieldOffsets {
     pub rms_val: usize,
     pub post_norm: usize,
     pub x_branch: usize,
-    pub conv_state: usize,
     pub post_conv: usize,
     pub u: usize,
     pub xdbl: usize,
     pub delta_raw: usize,
     pub delta: usize,
-    pub h_prev: usize,
-    pub h_curr: usize,
-    pub da_exp: usize,
     pub y: usize,
     pub gate_pre_silu: usize,
     pub gate_post_silu: usize,
@@ -62,8 +62,6 @@ impl FieldOffsets {
     pub fn new(dims: &MambaDims) -> Self {
         let dm = dims.d_model;
         let di = dims.d_inner;
-        let ds = dims.d_state;
-        let dc = dims.d_conv;
         let xdbl = dims.xdbl_dim;
 
         let mut off = 0usize;
@@ -80,9 +78,6 @@ impl FieldOffsets {
         let x_branch = off;
         off += di;
 
-        let conv_state = off;
-        off += di * dc;
-
         let post_conv = off;
         off += di;
 
@@ -97,15 +92,6 @@ impl FieldOffsets {
 
         let delta = off;
         off += di;
-
-        let h_prev = off;
-        off += di * ds;
-
-        let h_curr = off;
-        off += di * ds;
-
-        let da_exp = off;
-        off += di * ds;
 
         let y = off;
         off += di;
@@ -124,15 +110,11 @@ impl FieldOffsets {
             rms_val,
             post_norm,
             x_branch,
-            conv_state,
             post_conv,
             u,
             xdbl: xdbl_off,
             delta_raw,
             delta,
-            h_prev,
-            h_curr,
-            da_exp,
             y,
             gate_pre_silu,
             gate_post_silu,
@@ -146,6 +128,11 @@ impl FieldOffsets {
 // MambaLayerFlat — one layer, all timesteps in a single Vec<f32>
 // ---------------------------------------------------------------------------
 
+/// Steps between the SSM checkpoints of a tape built by
+/// [`MambaLayerFlat::zeros`]: the backward replays at most this many steps
+/// of a layer's states at a time, in a segment buffer of as many states.
+pub const TAPE_STRIDE: usize = 16;
+
 /// Contiguous activation buffer for one Mamba layer across all timesteps.
 ///
 /// Replaces `Vec<MambaStepSaved>` (33 steps x 18 Vecs = ~594 heap allocs)
@@ -157,17 +144,67 @@ pub struct MambaLayerFlat {
     pub offsets: FieldOffsets,
     /// Dimensions (kept for accessor bounds and bulk copy methods).
     pub dims: MambaDims,
+    /// The conv register the window starts from: `[d_inner * d_conv]`.
+    pub conv_init: Vec<f32>,
+    /// The SSM state before steps 0, `stride`, `2 * stride`, ...:
+    /// `[ceil(seq_len / stride) * d_inner * d_state]`.
+    pub ssm_ckpt: Vec<f32>,
+    /// Steps between the SSM checkpoints.
+    pub stride: usize,
 }
 
 impl MambaLayerFlat {
-    /// Allocate a zero-filled flat buffer for `dims.seq_len` timesteps.
+    /// Allocate a zero-filled flat buffer for `dims.seq_len` timesteps,
+    /// checkpointing the SSM state every [`TAPE_STRIDE`] steps.
     pub fn zeros(dims: MambaDims) -> Self {
+        Self::zeros_strided(dims, TAPE_STRIDE)
+    }
+
+    /// [`Self::zeros`] checkpointing the SSM state every `stride` steps
+    /// (at least one).
+    pub fn zeros_strided(dims: MambaDims, stride: usize) -> Self {
         let offsets = FieldOffsets::new(&dims);
         let total = dims.seq_len * offsets.step_stride;
+        let stride = stride.max(1);
+        let state = dims.d_inner * dims.d_state;
         Self {
             data: vec![0.0; total],
             offsets,
             dims,
+            conv_init: vec![0.0; dims.d_inner * dims.d_conv],
+            ssm_ckpt: vec![0.0; dims.seq_len.div_ceil(stride) * state],
+            stride,
+        }
+    }
+
+    /// The SSM state checkpointed before step `j * stride`.
+    #[inline]
+    pub fn ssm_ckpt(&self, j: usize) -> &[f32] {
+        let n = self.dims.d_inner * self.dims.d_state;
+        &self.ssm_ckpt[j * n..(j + 1) * n]
+    }
+
+    /// Mutable [`Self::ssm_ckpt`].
+    #[inline]
+    pub fn ssm_ckpt_mut(&mut self, j: usize) -> &mut [f32] {
+        let n = self.dims.d_inner * self.dims.d_state;
+        &mut self.ssm_ckpt[j * n..(j + 1) * n]
+    }
+
+    /// The conv register at step `t` into `out` (`[d_inner * d_conv]`): the
+    /// window's starting register shifted `t + 1` times, the `x_branch` rows
+    /// of steps `0..=t` entering at its end.
+    pub fn conv_window(&self, t: usize, out: &mut [f32]) {
+        let (di, dc) = (self.dims.d_inner, self.dims.d_conv);
+        for (d, reg) in out[..di * dc].chunks_exact_mut(dc).enumerate() {
+            for (k, r) in reg.iter_mut().enumerate() {
+                let from = k + t + 1;
+                *r = if from < dc {
+                    self.conv_init[d * dc + from]
+                } else {
+                    self.x_branch(from - dc)[d]
+                };
+            }
         }
     }
 
@@ -210,13 +247,6 @@ impl MambaLayerFlat {
         &self.data[b..b + self.dims.d_inner]
     }
 
-    /// `conv_state[t]`: `&[d_inner * d_conv]`.
-    #[inline]
-    pub fn conv_state(&self, t: usize) -> &[f32] {
-        let b = self.base(t) + self.offsets.conv_state;
-        &self.data[b..b + self.dims.d_inner * self.dims.d_conv]
-    }
-
     /// `post_conv[t]`: `&[d_inner]`.
     #[inline]
     pub fn post_conv(&self, t: usize) -> &[f32] {
@@ -250,27 +280,6 @@ impl MambaLayerFlat {
     pub fn delta(&self, t: usize) -> &[f32] {
         let b = self.base(t) + self.offsets.delta;
         &self.data[b..b + self.dims.d_inner]
-    }
-
-    /// `h_prev[t]`: `&[d_inner * d_state]`.
-    #[inline]
-    pub fn h_prev(&self, t: usize) -> &[f32] {
-        let b = self.base(t) + self.offsets.h_prev;
-        &self.data[b..b + self.dims.d_inner * self.dims.d_state]
-    }
-
-    /// `h_curr[t]`: `&[d_inner * d_state]`.
-    #[inline]
-    pub fn h_curr(&self, t: usize) -> &[f32] {
-        let b = self.base(t) + self.offsets.h_curr;
-        &self.data[b..b + self.dims.d_inner * self.dims.d_state]
-    }
-
-    /// `da_exp[t]`: `&[d_inner * d_state]`.
-    #[inline]
-    pub fn da_exp(&self, t: usize) -> &[f32] {
-        let b = self.base(t) + self.offsets.da_exp;
-        &self.data[b..b + self.dims.d_inner * self.dims.d_state]
     }
 
     /// `y[t]`: `&[d_inner]`.
@@ -336,14 +345,6 @@ impl MambaLayerFlat {
         &mut self.data[b..b + di]
     }
 
-    /// `conv_state_mut[t]`: `&mut [d_inner * d_conv]`.
-    #[inline]
-    pub fn conv_state_mut(&mut self, t: usize) -> &mut [f32] {
-        let b = self.base(t) + self.offsets.conv_state;
-        let len = self.dims.d_inner * self.dims.d_conv;
-        &mut self.data[b..b + len]
-    }
-
     /// `post_conv_mut[t]`: `&mut [d_inner]`.
     #[inline]
     pub fn post_conv_mut(&mut self, t: usize) -> &mut [f32] {
@@ -382,30 +383,6 @@ impl MambaLayerFlat {
         let b = self.base(t) + self.offsets.delta;
         let di = self.dims.d_inner;
         &mut self.data[b..b + di]
-    }
-
-    /// `h_prev_mut[t]`: `&mut [d_inner * d_state]`.
-    #[inline]
-    pub fn h_prev_mut(&mut self, t: usize) -> &mut [f32] {
-        let b = self.base(t) + self.offsets.h_prev;
-        let len = self.dims.d_inner * self.dims.d_state;
-        &mut self.data[b..b + len]
-    }
-
-    /// `h_curr_mut[t]`: `&mut [d_inner * d_state]`.
-    #[inline]
-    pub fn h_curr_mut(&mut self, t: usize) -> &mut [f32] {
-        let b = self.base(t) + self.offsets.h_curr;
-        let len = self.dims.d_inner * self.dims.d_state;
-        &mut self.data[b..b + len]
-    }
-
-    /// `da_exp_mut[t]`: `&mut [d_inner * d_state]`.
-    #[inline]
-    pub fn da_exp_mut(&mut self, t: usize) -> &mut [f32] {
-        let b = self.base(t) + self.offsets.da_exp;
-        let len = self.dims.d_inner * self.dims.d_state;
-        &mut self.data[b..b + len]
     }
 
     /// `y_mut[t]`: `&mut [d_inner]`.
@@ -509,12 +486,18 @@ pub struct MambaBackboneFlat {
 }
 
 impl MambaBackboneFlat {
-    /// Allocate all zero-filled flat buffers.
+    /// Allocate all zero-filled flat buffers, every layer checkpointing
+    /// its SSM state every [`TAPE_STRIDE`] steps.
     pub fn zeros(dims: MambaDims) -> Self {
+        Self::zeros_strided(dims, TAPE_STRIDE)
+    }
+
+    /// [`Self::zeros`] checkpointing every `stride` steps.
+    pub fn zeros_strided(dims: MambaDims, stride: usize) -> Self {
         Self {
             input_proj_inputs: vec![0.0; dims.seq_len * dims.mamba_input_dim],
             layers: (0..dims.n_layers)
-                .map(|_| MambaLayerFlat::zeros(dims))
+                .map(|_| MambaLayerFlat::zeros_strided(dims, stride))
                 .collect(),
             norm_f_input: vec![0.0; dims.seq_len * dims.d_model],
             norm_f_rms: vec![0.0; dims.seq_len],
@@ -543,8 +526,6 @@ mod tests {
         // Collect (offset, size) for each field.
         let dm = dims.d_model;
         let di = dims.d_inner;
-        let ds = dims.d_state;
-        let dc = dims.d_conv;
         let xd = dims.xdbl_dim;
 
         let fields: Vec<(usize, usize)> = vec![
@@ -552,15 +533,11 @@ mod tests {
             (o.rms_val, 1),
             (o.post_norm, dm),
             (o.x_branch, di),
-            (o.conv_state, di * dc),
             (o.post_conv, di),
             (o.u, di),
             (o.xdbl, xd),
             (o.delta_raw, di),
             (o.delta, di),
-            (o.h_prev, di * ds),
-            (o.h_curr, di * ds),
-            (o.da_exp, di * ds),
             (o.y, di),
             (o.gate_pre_silu, di),
             (o.gate_post_silu, di),
@@ -591,8 +568,8 @@ mod tests {
         );
 
         // Verify step_stride value for default dims:
-        // 128+1+128+256+1024+256+256+40+256+256+4096+4096+4096+256+256+256+256 = 15913
-        assert_eq!(o.step_stride, 15913);
+        // 128+1+128+256+256+256+40+256+256+256+256+256+256 = 2601
+        assert_eq!(o.step_stride, 2601);
     }
 
     #[test]
@@ -621,11 +598,6 @@ mod tests {
             assert!(layer.x_branch(t).iter().all(|&v| v == 3.0));
             assert_eq!(layer.x_branch(t).len(), dims.d_inner);
 
-            // conv_state
-            layer.conv_state_mut(t).iter_mut().for_each(|v| *v = 4.0);
-            assert!(layer.conv_state(t).iter().all(|&v| v == 4.0));
-            assert_eq!(layer.conv_state(t).len(), dims.d_inner * dims.d_conv);
-
             // post_conv
             layer.post_conv_mut(t).iter_mut().for_each(|v| *v = 5.0);
             assert!(layer.post_conv(t).iter().all(|&v| v == 5.0));
@@ -650,21 +622,6 @@ mod tests {
             layer.delta_mut(t).iter_mut().for_each(|v| *v = 9.0);
             assert!(layer.delta(t).iter().all(|&v| v == 9.0));
             assert_eq!(layer.delta(t).len(), dims.d_inner);
-
-            // h_prev
-            layer.h_prev_mut(t).iter_mut().for_each(|v| *v = 10.0);
-            assert!(layer.h_prev(t).iter().all(|&v| v == 10.0));
-            assert_eq!(layer.h_prev(t).len(), dims.d_inner * dims.d_state);
-
-            // h_curr
-            layer.h_curr_mut(t).iter_mut().for_each(|v| *v = 11.0);
-            assert!(layer.h_curr(t).iter().all(|&v| v == 11.0));
-            assert_eq!(layer.h_curr(t).len(), dims.d_inner * dims.d_state);
-
-            // da_exp
-            layer.da_exp_mut(t).iter_mut().for_each(|v| *v = 12.0);
-            assert!(layer.da_exp(t).iter().all(|&v| v == 12.0));
-            assert_eq!(layer.da_exp(t).len(), dims.d_inner * dims.d_state);
 
             // y
             layer.y_mut(t).iter_mut().for_each(|v| *v = 13.0);
@@ -818,6 +775,37 @@ mod tests {
         for layer in &backbone.layers {
             let expected_len = dims.seq_len * layer.offsets.step_stride;
             assert_eq!(layer.data.len(), expected_len);
+            assert_eq!(layer.stride, TAPE_STRIDE);
+            let ckpts = dims.seq_len.div_ceil(TAPE_STRIDE);
+            assert_eq!(layer.ssm_ckpt.len(), ckpts * dims.d_inner * dims.d_state);
+            assert_eq!(layer.conv_init.len(), dims.d_inner * dims.d_conv);
+        }
+    }
+
+    /// The register rebuilt at a step is the forward's shift register at
+    /// that step: the starting register's tail, then the rows in order.
+    #[test]
+    fn conv_window_is_the_shift_register() {
+        let dims = MambaDims::new((8, 6, 2, 4, 1, 7, 5, 1));
+        let (di, dc) = (dims.d_inner, dims.d_conv);
+        let mut layer = MambaLayerFlat::zeros(dims);
+        for (i, v) in layer.conv_init.iter_mut().enumerate() {
+            *v = -(i as f32) - 1.0;
+        }
+        for t in 0..dims.seq_len {
+            for (d, v) in layer.x_branch_mut(t).iter_mut().enumerate() {
+                *v = (t * 100 + d) as f32;
+            }
+        }
+        let mut reg = layer.conv_init.clone();
+        let mut got = vec![0.0f32; di * dc];
+        for t in 0..dims.seq_len {
+            for d in 0..di {
+                reg.copy_within(d * dc + 1..(d + 1) * dc, d * dc);
+                reg[d * dc + dc - 1] = layer.x_branch(t)[d];
+            }
+            layer.conv_window(t, &mut got);
+            assert_eq!(got, reg, "step {t}");
         }
     }
 }

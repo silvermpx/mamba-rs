@@ -20,11 +20,19 @@
 
 use super::backward_ops::{Conv1dDims, backward_conv1d_step, backward_rms_norm};
 use super::flat::{MambaBackboneFlat, MambaLayerFlat};
+use super::forward::scan_advance;
 use super::scratch::BackwardPhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::fast_exp_scalar;
 use crate::ops::rounding::{store, stored};
+
+/// `v` at least `n` long, grown once and reused after.
+fn grow(v: &mut Vec<f32>, n: usize) {
+    if v.len() < n {
+        v.resize(n, 0.0);
+    }
+}
 
 /// The backward of one layer over the window, accumulating its weight
 /// gradients into `d_layer` and leaving the gradient of the layer's input
@@ -100,83 +108,117 @@ pub fn backward_mamba_layer_batched(
     let b_offset = dt_rank;
     let c_offset = dt_rank + ds;
 
-    for t in (0..seq_len).rev() {
-        let t_off_di = t * di;
-        let t_off_xdbl = t * xdbl_dim;
-
-        // Zero per-timestep gradient slices
-        scratch.d_delta_flat[t_off_di..t_off_di + di].fill(0.0);
-        scratch.d_u_flat[t_off_di..t_off_di + di].fill(0.0);
-        scratch.d_xdbl_flat[t_off_xdbl..t_off_xdbl + xdbl_dim].fill(0.0);
-
-        // SSM backward
-        {
-            let acts_delta = acts.delta(t);
-            let acts_u = acts.u(t);
-            let acts_da_exp = acts.da_exp(t);
-            let acts_h_prev = acts.h_prev(t);
-            let acts_h_curr = acts.h_curr(t);
-            let acts_xdbl = acts.xdbl(t);
-
-            for d in 0..di {
-                let delta_d = acts_delta[d];
-                let u_d = acts_u[d];
-                let dy_d = scratch.d_y_flat[t_off_di + d];
-
-                // d_D[d] += d_y[d] * u[d]
-                d_layer.d_param[d] += dy_d * u_d;
-
-                // d_u[d] += d_y[d] * D[d] (from skip connection)
-                scratch.d_u_flat[t_off_di + d] += dy_d * w.d_param[d];
-
-                for n in 0..ds {
-                    let idx = d * ds + n;
-                    let a_dn = a_neg[idx];
-                    let da = acts_da_exp[idx];
-                    let h_prev = acts_h_prev[idx];
-                    let b_n = acts_xdbl[b_offset + n];
-                    let c_n = acts_xdbl[c_offset + n];
-                    let h_curr = acts_h_curr[idx];
-
-                    // d_h[d,n] += d_y[d] * C[n]
-                    scratch.d_h[idx] += dy_d * c_n;
-                    let dh = scratch.d_h[idx];
-
-                    // d_delta[d] += dh * (A[d,n] * da * h_prev + u * B[n])
-                    scratch.d_delta_flat[t_off_di + d] += dh * (a_dn * da * h_prev + u_d * b_n);
-
-                    // d_u[d] += dh * delta * B[n]
-                    scratch.d_u_flat[t_off_di + d] += dh * delta_d * b_n;
-
-                    // d_B[n] += dh * delta * u
-                    scratch.d_xdbl_flat[t_off_xdbl + b_offset + n] +=
-                        stored(dtype, dh * delta_d * u_d);
-
-                    // d_C[n] += d_y[d] * h[t,d,n]
-                    scratch.d_xdbl_flat[t_off_xdbl + c_offset + n] += stored(dtype, dy_d * h_curr);
-
-                    // d_a_log[d,n] += dh * da * delta * A[d,n] * h_prev
-                    d_layer.a_log[idx] += dh * da * delta_d * a_dn * h_prev;
-
-                    // BPTT: propagate d_h backwards through time
-                    scratch.d_h[idx] = da * dh;
-                }
-                let i = t_off_di + d;
-                scratch.d_delta_flat[i] = stored(dtype, scratch.d_delta_flat[i]);
-                scratch.d_u_flat[i] = stored(dtype, scratch.d_u_flat[i]);
+    // The segments between the tape's checkpoints, last first: each one's
+    // states replayed from its checkpoint as the forward ran them, then
+    // walked back step by step.
+    let stride = acts.stride;
+    let state = di * ds;
+    grow(&mut scratch.seg_h, (stride + 1) * state);
+    grow(&mut scratch.seg_da, stride * state);
+    for seg in (0..seq_len.div_ceil(stride)).rev() {
+        let t0 = seg * stride;
+        let t1 = (t0 + stride).min(seq_len);
+        scratch.seg_h[..state].copy_from_slice(acts.ssm_ckpt(seg));
+        for t in t0..t1 {
+            let k = t - t0;
+            let (done, next) = scratch.seg_h.split_at_mut((k + 1) * state);
+            let h = &mut next[..state];
+            h.copy_from_slice(&done[k * state..]);
+            let (delta, u, xdbl) = (acts.delta(t), acts.u(t), acts.xdbl(t));
+            let da = &mut scratch.seg_da[k * state..(k + 1) * state];
+            for (d, (h_d, da_d)) in h
+                .chunks_exact_mut(ds)
+                .zip(da.chunks_exact_mut(ds))
+                .enumerate()
+            {
+                scan_advance(
+                    h_d,
+                    da_d,
+                    (delta[d], u[d]),
+                    (&a_neg[d * ds..(d + 1) * ds], &xdbl[b_offset..b_offset + ds]),
+                );
             }
         }
+        for t in (t0..t1).rev() {
+            let t_off_di = t * di;
+            let t_off_xdbl = t * xdbl_dim;
+            let k = t - t0;
 
-        // Softplus backward
-        {
-            let acts_delta_raw = acts.delta_raw(t);
-            for (d, &raw) in acts_delta_raw.iter().enumerate().take(di) {
-                scratch.d_delta_raw_flat[t_off_di + d] = if raw > 20.0 {
-                    scratch.d_delta_flat[t_off_di + d]
-                } else {
-                    let sig = 1.0 / (1.0 + fast_exp_scalar(-raw));
-                    stored(dtype, scratch.d_delta_flat[t_off_di + d] * sig)
-                };
+            // Zero per-timestep gradient slices
+            scratch.d_delta_flat[t_off_di..t_off_di + di].fill(0.0);
+            scratch.d_u_flat[t_off_di..t_off_di + di].fill(0.0);
+            scratch.d_xdbl_flat[t_off_xdbl..t_off_xdbl + xdbl_dim].fill(0.0);
+
+            // SSM backward
+            {
+                let acts_delta = acts.delta(t);
+                let acts_u = acts.u(t);
+                let acts_da_exp = &scratch.seg_da[k * state..(k + 1) * state];
+                let acts_h_prev = &scratch.seg_h[k * state..(k + 1) * state];
+                let acts_h_curr = &scratch.seg_h[(k + 1) * state..(k + 2) * state];
+                let acts_xdbl = acts.xdbl(t);
+
+                for d in 0..di {
+                    let delta_d = acts_delta[d];
+                    let u_d = acts_u[d];
+                    let dy_d = scratch.d_y_flat[t_off_di + d];
+
+                    // d_D[d] += d_y[d] * u[d]
+                    d_layer.d_param[d] += dy_d * u_d;
+
+                    // d_u[d] += d_y[d] * D[d] (from skip connection)
+                    scratch.d_u_flat[t_off_di + d] += dy_d * w.d_param[d];
+
+                    for n in 0..ds {
+                        let idx = d * ds + n;
+                        let a_dn = a_neg[idx];
+                        let da = acts_da_exp[idx];
+                        let h_prev = acts_h_prev[idx];
+                        let b_n = acts_xdbl[b_offset + n];
+                        let c_n = acts_xdbl[c_offset + n];
+                        let h_curr = acts_h_curr[idx];
+
+                        // d_h[d,n] += d_y[d] * C[n]
+                        scratch.d_h[idx] += dy_d * c_n;
+                        let dh = scratch.d_h[idx];
+
+                        // d_delta[d] += dh * (A[d,n] * da * h_prev + u * B[n])
+                        scratch.d_delta_flat[t_off_di + d] += dh * (a_dn * da * h_prev + u_d * b_n);
+
+                        // d_u[d] += dh * delta * B[n]
+                        scratch.d_u_flat[t_off_di + d] += dh * delta_d * b_n;
+
+                        // d_B[n] += dh * delta * u
+                        scratch.d_xdbl_flat[t_off_xdbl + b_offset + n] +=
+                            stored(dtype, dh * delta_d * u_d);
+
+                        // d_C[n] += d_y[d] * h[t,d,n]
+                        scratch.d_xdbl_flat[t_off_xdbl + c_offset + n] +=
+                            stored(dtype, dy_d * h_curr);
+
+                        // d_a_log[d,n] += dh * da * delta * A[d,n] * h_prev
+                        d_layer.a_log[idx] += dh * da * delta_d * a_dn * h_prev;
+
+                        // BPTT: propagate d_h backwards through time
+                        scratch.d_h[idx] = da * dh;
+                    }
+                    let i = t_off_di + d;
+                    scratch.d_delta_flat[i] = stored(dtype, scratch.d_delta_flat[i]);
+                    scratch.d_u_flat[i] = stored(dtype, scratch.d_u_flat[i]);
+                }
+            }
+
+            // Softplus backward
+            {
+                let acts_delta_raw = acts.delta_raw(t);
+                for (d, &raw) in acts_delta_raw.iter().enumerate().take(di) {
+                    scratch.d_delta_raw_flat[t_off_di + d] = if raw > 20.0 {
+                        scratch.d_delta_flat[t_off_di + d]
+                    } else {
+                        let sig = 1.0 / (1.0 + fast_exp_scalar(-raw));
+                        stored(dtype, scratch.d_delta_flat[t_off_di + d] * sig)
+                    };
+                }
             }
         }
     }
@@ -264,7 +306,10 @@ pub fn backward_mamba_layer_batched(
             &mut d_layer.conv1d_weight,
             &mut d_layer.conv1d_bias,
             &scratch.d_conv_out_flat[t_off..t_off + di],
-            acts.conv_state(t),
+            {
+                acts.conv_window(t, &mut scratch.conv_win);
+                &scratch.conv_win
+            },
             &w.conv1d_weight,
             Conv1dDims {
                 d_inner: di,

@@ -1,7 +1,11 @@
 //! Contiguous activation buffers for Mamba-3 SISO forward/backward.
 //!
-//! 28 fields per timestep. All intermediate values needed for backward
-//! are saved in a single contiguous `Vec<f32>` per layer.
+//! 26 fields per timestep, saved in a single contiguous `Vec<f32>` per
+//! layer. The SSM state is not among them: `nheads * headdim * d_state`
+//! wide, kept per step it was most of the tape. The window keeps it at
+//! every `stride`-th step instead, and the backward replays each segment
+//! from its checkpoint with the forward's arithmetic, so the gradients are
+//! the same bits at every stride.
 //!
 //! Source: Lahoti et al., "Mamba-3", ICLR 2026.
 
@@ -31,8 +35,6 @@ pub struct Mamba3FieldOffsets {
     pub gamma: usize,        // [nh]
     pub dt_val: usize,       // [nh]
     pub a_val: usize,        // [nh]
-    pub h_prev: usize,       // [nh * hd * ds]
-    pub h_curr: usize,       // [nh * hd * ds]
     pub k_prev: usize,       // [nh * ds]
     pub v_prev: usize,       // [nh * hd]
     pub y: usize,            // [d_inner]
@@ -97,10 +99,6 @@ impl Mamba3FieldOffsets {
         off += nh;
         let a_val = off;
         off += nh;
-        let h_prev = off;
-        off += nh * hd * ds;
-        let h_curr = off;
-        off += nh * hd * ds;
         let k_prev = off;
         off += nh * ds;
         let v_prev = off;
@@ -134,8 +132,6 @@ impl Mamba3FieldOffsets {
             gamma,
             dt_val,
             a_val,
-            h_prev,
-            h_curr,
             k_prev,
             v_prev,
             y,
@@ -145,6 +141,11 @@ impl Mamba3FieldOffsets {
         }
     }
 }
+
+/// Steps between the SSM checkpoints of a tape built by
+/// [`Mamba3LayerFlat::zeros`]: the backward replays at most this many steps
+/// of a layer's states at a time.
+pub const TAPE_STRIDE: usize = 16;
 
 /// Contiguous activation buffer for one Mamba-3 layer across all timesteps.
 pub struct Mamba3LayerFlat {
@@ -156,19 +157,49 @@ pub struct Mamba3LayerFlat {
     /// it, so a window that starts mid-sequence differentiates the angles the
     /// forward really used.
     pub angle_init: Vec<f32>,
+    /// The SSM state before steps 0, `stride`, `2 * stride`, ...:
+    /// `[ceil(seq_len / stride) * nheads * headdim * d_state]`.
+    pub ssm_ckpt: Vec<f32>,
+    /// Steps between the SSM checkpoints.
+    pub stride: usize,
 }
 
 impl Mamba3LayerFlat {
-    /// Allocate zeroed buffer for `seq_len` timesteps.
+    /// Allocate zeroed buffer for `seq_len` timesteps, checkpointing the SSM
+    /// state every [`TAPE_STRIDE`] steps.
     pub fn zeros(dims: Mamba3Dims) -> Self {
+        Self::zeros_strided(dims, TAPE_STRIDE)
+    }
+
+    /// [`Self::zeros`] checkpointing the SSM state every `stride` steps (at
+    /// least one).
+    pub fn zeros_strided(dims: Mamba3Dims, stride: usize) -> Self {
         let offsets = Mamba3FieldOffsets::new(&dims);
         let total = dims.seq_len * offsets.step_stride;
+        let stride = stride.max(1);
+        let state = dims.nheads * dims.headdim * dims.d_state;
         Self {
             data: vec![0.0; total],
             offsets,
             dims,
             angle_init: vec![0.0; dims.nheads * dims.num_rope_angles],
+            ssm_ckpt: vec![0.0; dims.seq_len.div_ceil(stride) * state],
+            stride,
         }
+    }
+
+    /// The SSM state checkpointed before step `j * stride`.
+    #[inline]
+    pub fn ssm_ckpt(&self, j: usize) -> &[f32] {
+        let n = self.dims.nheads * self.dims.headdim * self.dims.d_state;
+        &self.ssm_ckpt[j * n..(j + 1) * n]
+    }
+
+    /// Mutable [`Self::ssm_ckpt`].
+    #[inline]
+    pub fn ssm_ckpt_mut(&mut self, j: usize) -> &mut [f32] {
+        let n = self.dims.nheads * self.dims.headdim * self.dims.d_state;
+        &mut self.ssm_ckpt[j * n..(j + 1) * n]
     }
 
     /// Base offset for timestep `t`.
@@ -198,11 +229,6 @@ impl Mamba3LayerFlat {
     pub fn y(&self, t: usize) -> &[f32] {
         let b = self.base(t) + self.offsets.y;
         &self.data[b..b + self.dims.d_inner]
-    }
-    pub fn h_prev(&self, t: usize) -> &[f32] {
-        let b = self.base(t) + self.offsets.h_prev;
-        let len = self.dims.nheads * self.dims.headdim * self.dims.d_state;
-        &self.data[b..b + len]
     }
     pub fn k_prev(&self, t: usize) -> &[f32] {
         let b = self.base(t) + self.offsets.k_prev;
@@ -261,8 +287,6 @@ mod tests {
             o.gamma,
             o.dt_val,
             o.a_val,
-            o.h_prev,
-            o.h_curr,
             o.k_prev,
             o.v_prev,
             o.y,
@@ -279,5 +303,10 @@ mod tests {
         let dims = test_dims();
         let flat = Mamba3LayerFlat::zeros(dims);
         assert_eq!(flat.data.len(), dims.seq_len * flat.offsets.step_stride);
+        let state = dims.nheads * dims.headdim * dims.d_state;
+        assert_eq!(
+            flat.ssm_ckpt.len(),
+            dims.seq_len.div_ceil(TAPE_STRIDE) * state
+        );
     }
 }

@@ -12,16 +12,66 @@
 
 use super::dims::Mamba3Dims;
 use super::flat::Mamba3LayerFlat;
-use super::forward::simd_sum_sq;
+use super::forward::{SsmHeadStep, simd_ssm_head, simd_sum_sq};
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
 use crate::ops::fast_math::fast_exp_scalar;
 use crate::ops::rounding::store;
+use crate::precision::WeightDtype;
 
 // Sized to the config validator's reference-range maximum; a
 // 256-float stack scratch per head is ~1 KB - negligible on CPU.
 const MAX_DS: usize = 256;
 const MAX_ANGLES: usize = MAX_DS / 2;
+
+/// `v` at least `n` long, grown once and reused after.
+fn grow(v: &mut Vec<f32>, n: usize) {
+    if v.len() < n {
+        v.resize(n, 0.0);
+    }
+}
+
+/// Head `h`'s B and C at step `t` as the forward used them, into `kq`
+/// (`[4 * d_state]`: B and C with their bias, then both rotated by the
+/// step's angles), each stored where a reduced precision stores it.
+fn head_kq(
+    kq: &mut [f32],
+    (acts, w): (&Mamba3LayerFlat, &TrainMamba3LayerWeights),
+    (t, h): (usize, usize),
+    (cum_angles, dims, dtype): (&[f32], &Mamba3Dims, WeightDtype),
+) {
+    let (ds, nh, na) = (dims.d_state, dims.nheads, dims.num_rope_angles);
+    let g = h / (nh / dims.ngroups);
+    let (base_t, o) = (acts.base(t), &acts.offsets);
+    let (pre, local) = kq.split_at_mut(2 * ds);
+    let (k_pre, q_pre) = pre.split_at_mut(ds);
+    for n in 0..ds {
+        k_pre[n] = acts.data[base_t + o.b_normed + g * ds + n] + w.b_bias[h * ds + n];
+        q_pre[n] = acts.data[base_t + o.c_normed + g * ds + n] + w.c_bias[h * ds + n];
+    }
+    store(dtype, k_pre);
+    store(dtype, q_pre);
+    let (k_local, q_local) = local.split_at_mut(ds);
+    k_local.copy_from_slice(k_pre);
+    q_local.copy_from_slice(q_pre);
+    if na > 0 {
+        let angles = &cum_angles[t * nh * na + h * na..t * nh * na + (h + 1) * na];
+        for (a, ca) in angles.iter().enumerate() {
+            let (sin_a, cos_a) = ca.sin_cos();
+            let (i0, i1) = (2 * a, 2 * a + 1);
+            let b0 = k_local[i0];
+            let b1 = k_local[i1];
+            k_local[i0] = cos_a * b0 - sin_a * b1;
+            k_local[i1] = sin_a * b0 + cos_a * b1;
+            let c0 = q_local[i0];
+            let c1 = q_local[i1];
+            q_local[i0] = cos_a * c0 - sin_a * c1;
+            q_local[i1] = sin_a * c0 + cos_a * c1;
+        }
+        store(dtype, &mut k_local[..2 * na]);
+        store(dtype, &mut q_local[..2 * na]);
+    }
+}
 
 /// Mamba-3 SISO single-layer batched backward pass.
 ///
@@ -193,131 +243,155 @@ pub fn backward_mamba3_layer_batched(
     scratch.d_d_param_buf.fill(0.0);
     scratch.d_k_carry[..nh * ds].fill(0.0);
 
-    for t in (0..seq_len).rev() {
-        let base_t = acts.base(t);
-        let d_y = &scratch.d_y_flat[t * di..(t + 1) * di];
-
-        scratch.d_k_carry_next[..nh * ds].fill(0.0);
-
-        for h in 0..nh {
-            let g = h / (nh / ng);
-            let alpha_h = acts.data[base_t + o.alpha + h];
-            let beta_h = acts.data[base_t + o.beta + h];
-            let gamma_h = acts.data[base_t + o.gamma + h];
-
-            // Reconstruct k_local, q_local (post-norm + bias + RoPE)
-            let mut k_pre = [0.0_f32; MAX_DS];
-            let mut q_pre = [0.0_f32; MAX_DS];
-            let mut k_local = [0.0_f32; MAX_DS];
-            let mut q_local = [0.0_f32; MAX_DS];
-            for n in 0..ds {
-                k_pre[n] = acts.data[base_t + o.b_normed + g * ds + n] + layer_w.b_bias[h * ds + n];
-                q_pre[n] = acts.data[base_t + o.c_normed + g * ds + n] + layer_w.c_bias[h * ds + n];
-            }
-            // The forward's stored B and C with their bias, rotated and
-            // stored again.
-            store(dtype, &mut k_pre[..ds]);
-            store(dtype, &mut q_pre[..ds]);
-            k_local[..ds].copy_from_slice(&k_pre[..ds]);
-            q_local[..ds].copy_from_slice(&q_pre[..ds]);
-
-            let mut cum_angle_h = [0.0_f32; MAX_ANGLES];
-            if n_angles > 0 {
-                let ca_off = t * nh * n_angles + h * n_angles;
-                cum_angle_h[..n_angles]
-                    .copy_from_slice(&scratch.cum_angles_flat[ca_off..ca_off + n_angles]);
-                for (a, ca) in cum_angle_h[..n_angles].iter().enumerate() {
-                    let (sin_a, cos_a) = ca.sin_cos();
-                    let (i0, i1) = (2 * a, 2 * a + 1);
-                    let b0 = k_local[i0];
-                    let b1 = k_local[i1];
-                    k_local[i0] = cos_a * b0 - sin_a * b1;
-                    k_local[i1] = sin_a * b0 + cos_a * b1;
-                    let c0 = q_local[i0];
-                    let c1 = q_local[i1];
-                    q_local[i0] = cos_a * c0 - sin_a * c1;
-                    q_local[i1] = sin_a * c0 + cos_a * c1;
-                }
-                store(dtype, &mut k_local[..2 * n_angles]);
-                store(dtype, &mut q_local[..2 * n_angles]);
-            }
-
-            let mut d_k_h = [0.0_f32; MAX_DS];
-            d_k_h[..ds].copy_from_slice(&scratch.d_k_carry[h * ds..h * ds + ds]);
-            let mut d_c_h = [0.0_f32; MAX_DS];
-
-            for p in 0..hd {
-                let x_val = acts.data[base_t + o.x + h * hd + p];
-                let dy_val = d_y[h * hd + p];
-                let v_prev = acts.data[base_t + o.v_prev + h * hd + p];
-
-                scratch.d_d_param_buf[h] += dy_val * x_val;
-
-                for n in 0..ds {
-                    let idx = (h * hd + p) * ds + n;
-                    scratch.d_h[idx] += dy_val * q_local[n];
-                    d_c_h[n] += dy_val * acts.data[base_t + o.h_curr + idx];
-                }
-
-                let mut d_x_val = layer_w.d_param[h] * dy_val;
-
-                for n in 0..ds {
-                    let idx = (h * hd + p) * ds + n;
-                    let dh = scratch.d_h[idx];
-                    let h_prev_val = acts.data[base_t + o.h_prev + idx];
-                    let k_prev_n = acts.data[base_t + o.k_prev + h * ds + n];
-
-                    scratch.d_alpha_flat[t * nh + h] += dh * h_prev_val;
-                    scratch.d_beta_flat[t * nh + h] += dh * v_prev * k_prev_n;
-                    scratch.d_gamma_flat[t * nh + h] += dh * x_val * k_local[n];
-
-                    if t > 0 {
-                        scratch.d_x_flat[(t - 1) * di + h * hd + p] += dh * beta_h * k_prev_n;
-                    }
-                    scratch.d_k_carry_next[h * ds + n] += dh * beta_h * v_prev;
-                    d_x_val += dh * gamma_h * k_local[n];
-                    d_k_h[n] += dh * gamma_h * x_val;
-
-                    scratch.d_h[idx] = alpha_h * dh;
-                }
-
-                scratch.d_x_flat[t * di + h * hd + p] += d_x_val;
-            }
-
-            // B4: Inverse RoPE
-            let mut d_k_pre_rope = d_k_h;
-            let mut d_c_pre_rope = d_c_h;
-
-            if n_angles > 0 {
-                for (a, ca) in cum_angle_h[..n_angles].iter().enumerate() {
-                    let (sin_a, cos_a) = ca.sin_cos();
-                    let (i0, i1) = (2 * a, 2 * a + 1);
-                    d_k_pre_rope[i0] = cos_a * d_k_h[i0] + sin_a * d_k_h[i1];
-                    d_k_pre_rope[i1] = -sin_a * d_k_h[i0] + cos_a * d_k_h[i1];
-                    d_c_pre_rope[i0] = cos_a * d_c_h[i0] + sin_a * d_c_h[i1];
-                    d_c_pre_rope[i1] = -sin_a * d_c_h[i0] + cos_a * d_c_h[i1];
-
-                    let d_angle_b = d_k_h[i0] * (-sin_a * k_pre[i0] - cos_a * k_pre[i1])
-                        + d_k_h[i1] * (cos_a * k_pre[i0] - sin_a * k_pre[i1]);
-                    let d_angle_c = d_c_h[i0] * (-sin_a * q_pre[i0] - cos_a * q_pre[i1])
-                        + d_c_h[i1] * (cos_a * q_pre[i0] - sin_a * q_pre[i1]);
-
-                    scratch.d_angle_cumsum_flat[t * nh * n_angles + h * n_angles + a] +=
-                        d_angle_b + d_angle_c;
-                }
-            }
-
-            // B5: Accumulate bias gradients
-            for n in 0..ds {
-                d_layer.b_bias[h * ds + n] += d_k_pre_rope[n];
-                d_layer.c_bias[h * ds + n] += d_c_pre_rope[n];
-                scratch.d_b_pre_rope_flat[t * bsize + g * ds + n] += d_k_pre_rope[n];
-                scratch.d_c_pre_rope_flat[t * bsize + g * ds + n] += d_c_pre_rope[n];
+    // The segments between the tape's checkpoints, last first: each one's
+    // states replayed from its checkpoint as the forward ran them, with
+    // every head's B and C as it used them, then walked back step by step.
+    let stride = acts.stride;
+    let hs = nh * hd * ds;
+    let kq_len = 4 * ds;
+    grow(&mut scratch.seg_h, (stride + 1) * hs);
+    grow(&mut scratch.seg_kq, stride * nh * kq_len);
+    grow(&mut scratch.seg_y, hd);
+    for seg in (0..seq_len.div_ceil(stride)).rev() {
+        let t0 = seg * stride;
+        let t1 = (t0 + stride).min(seq_len);
+        scratch.seg_h[..hs].copy_from_slice(acts.ssm_ckpt(seg));
+        for t in t0..t1 {
+            let k = t - t0;
+            let base_t = acts.base(t);
+            let (done, next) = scratch.seg_h.split_at_mut((k + 1) * hs);
+            let state = &mut next[..hs];
+            state.copy_from_slice(&done[k * hs..]);
+            for h in 0..nh {
+                let at = (k * nh + h) * kq_len;
+                let kq = &mut scratch.seg_kq[at..at + kq_len];
+                head_kq(
+                    kq,
+                    (acts, layer_w),
+                    (t, h),
+                    (&scratch.cum_angles_flat, dims, dtype),
+                );
+                let field = |off: usize, n: usize| base_t + off + h * n..base_t + off + (h + 1) * n;
+                simd_ssm_head(SsmHeadStep {
+                    state: &mut state[h * hd * ds..(h + 1) * hd * ds],
+                    k_prev: &acts.data[field(o.k_prev, ds)],
+                    k_cur: &kq[2 * ds..3 * ds],
+                    q: &kq[3 * ds..],
+                    x: &acts.data[field(o.x, hd)],
+                    x_stride: 1,
+                    v_prev: &acts.data[field(o.v_prev, hd)],
+                    y: &mut scratch.seg_y[..hd],
+                    y_stride: 1,
+                    d: layer_w.d_param[h],
+                    alpha: acts.data[base_t + o.alpha + h],
+                    beta: acts.data[base_t + o.beta + h],
+                    gamma: acts.data[base_t + o.gamma + h],
+                });
             }
         }
+        for t in (t0..t1).rev() {
+            let base_t = acts.base(t);
+            let d_y = &scratch.d_y_flat[t * di..(t + 1) * di];
+            let k = t - t0;
 
-        let (carry, carry_next) = (&mut scratch.d_k_carry, &scratch.d_k_carry_next);
-        carry[..nh * ds].copy_from_slice(&carry_next[..nh * ds]);
+            scratch.d_k_carry_next[..nh * ds].fill(0.0);
+
+            for h in 0..nh {
+                let g = h / (nh / ng);
+                let alpha_h = acts.data[base_t + o.alpha + h];
+                let beta_h = acts.data[base_t + o.beta + h];
+                let gamma_h = acts.data[base_t + o.gamma + h];
+
+                // The forward's B and C, from the replay.
+                let at = (k * nh + h) * kq_len;
+                let kq = &scratch.seg_kq[at..at + kq_len];
+                let (k_pre, q_pre) = (&kq[..ds], &kq[ds..2 * ds]);
+                let (k_local, q_local) = (&kq[2 * ds..3 * ds], &kq[3 * ds..]);
+
+                let mut cum_angle_h = [0.0_f32; MAX_ANGLES];
+                if n_angles > 0 {
+                    let ca_off = t * nh * n_angles + h * n_angles;
+                    cum_angle_h[..n_angles]
+                        .copy_from_slice(&scratch.cum_angles_flat[ca_off..ca_off + n_angles]);
+                }
+
+                let mut d_k_h = [0.0_f32; MAX_DS];
+                d_k_h[..ds].copy_from_slice(&scratch.d_k_carry[h * ds..h * ds + ds]);
+                let mut d_c_h = [0.0_f32; MAX_DS];
+
+                for p in 0..hd {
+                    let x_val = acts.data[base_t + o.x + h * hd + p];
+                    let dy_val = d_y[h * hd + p];
+                    let v_prev = acts.data[base_t + o.v_prev + h * hd + p];
+
+                    scratch.d_d_param_buf[h] += dy_val * x_val;
+
+                    for n in 0..ds {
+                        let idx = (h * hd + p) * ds + n;
+                        scratch.d_h[idx] += dy_val * q_local[n];
+                        d_c_h[n] += dy_val * scratch.seg_h[(k + 1) * hs + idx];
+                    }
+
+                    let mut d_x_val = layer_w.d_param[h] * dy_val;
+
+                    for n in 0..ds {
+                        let idx = (h * hd + p) * ds + n;
+                        let dh = scratch.d_h[idx];
+                        let h_prev_val = scratch.seg_h[k * hs + idx];
+                        let k_prev_n = acts.data[base_t + o.k_prev + h * ds + n];
+
+                        scratch.d_alpha_flat[t * nh + h] += dh * h_prev_val;
+                        scratch.d_beta_flat[t * nh + h] += dh * v_prev * k_prev_n;
+                        scratch.d_gamma_flat[t * nh + h] += dh * x_val * k_local[n];
+
+                        if t > 0 {
+                            scratch.d_x_flat[(t - 1) * di + h * hd + p] += dh * beta_h * k_prev_n;
+                        }
+                        scratch.d_k_carry_next[h * ds + n] += dh * beta_h * v_prev;
+                        d_x_val += dh * gamma_h * k_local[n];
+                        d_k_h[n] += dh * gamma_h * x_val;
+
+                        scratch.d_h[idx] = alpha_h * dh;
+                    }
+
+                    scratch.d_x_flat[t * di + h * hd + p] += d_x_val;
+                }
+
+                // B4: Inverse RoPE
+                let mut d_k_pre_rope = d_k_h;
+                let mut d_c_pre_rope = d_c_h;
+
+                if n_angles > 0 {
+                    for (a, ca) in cum_angle_h[..n_angles].iter().enumerate() {
+                        let (sin_a, cos_a) = ca.sin_cos();
+                        let (i0, i1) = (2 * a, 2 * a + 1);
+                        d_k_pre_rope[i0] = cos_a * d_k_h[i0] + sin_a * d_k_h[i1];
+                        d_k_pre_rope[i1] = -sin_a * d_k_h[i0] + cos_a * d_k_h[i1];
+                        d_c_pre_rope[i0] = cos_a * d_c_h[i0] + sin_a * d_c_h[i1];
+                        d_c_pre_rope[i1] = -sin_a * d_c_h[i0] + cos_a * d_c_h[i1];
+
+                        let d_angle_b = d_k_h[i0] * (-sin_a * k_pre[i0] - cos_a * k_pre[i1])
+                            + d_k_h[i1] * (cos_a * k_pre[i0] - sin_a * k_pre[i1]);
+                        let d_angle_c = d_c_h[i0] * (-sin_a * q_pre[i0] - cos_a * q_pre[i1])
+                            + d_c_h[i1] * (cos_a * q_pre[i0] - sin_a * q_pre[i1]);
+
+                        scratch.d_angle_cumsum_flat[t * nh * n_angles + h * n_angles + a] +=
+                            d_angle_b + d_angle_c;
+                    }
+                }
+
+                // B5: Accumulate bias gradients
+                for n in 0..ds {
+                    d_layer.b_bias[h * ds + n] += d_k_pre_rope[n];
+                    d_layer.c_bias[h * ds + n] += d_c_pre_rope[n];
+                    scratch.d_b_pre_rope_flat[t * bsize + g * ds + n] += d_k_pre_rope[n];
+                    scratch.d_c_pre_rope_flat[t * bsize + g * ds + n] += d_c_pre_rope[n];
+                }
+            }
+
+            let (carry, carry_next) = (&mut scratch.d_k_carry, &scratch.d_k_carry_next);
+            carry[..nh * ds].copy_from_slice(&carry_next[..nh * ds]);
+        }
     }
 
     for (dl, &dd) in d_layer.d_param[..nh]

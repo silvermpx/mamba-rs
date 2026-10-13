@@ -342,12 +342,16 @@ pub fn forward_mamba3_layer_batched(
     let mut k_local = [0.0_f32; MAX_DS];
     let mut q_local = [0.0_f32; MAX_DS];
 
+    let stride = acts.stride;
     for t in 0..seq_len {
         let base_t = acts.base(t);
 
-        // Save h_prev
-        let hp = base_t + o.h_prev;
-        acts.data[hp..hp + h_state_len].copy_from_slice(&ssm_state[..h_state_len]);
+        // The state before the step, checkpointed every `stride` steps.
+        if t % stride == 0 {
+            let j = t / stride;
+            acts.ssm_ckpt[j * h_state_len..(j + 1) * h_state_len]
+                .copy_from_slice(&ssm_state[..h_state_len]);
+        }
         // Save k_prev, v_prev
         let kp = base_t + o.k_prev;
         acts.data[kp..kp + nh * ds].copy_from_slice(&k_state[..nh * ds]);
@@ -453,10 +457,6 @@ pub fn forward_mamba3_layer_batched(
         // inputs become the next step's in one copy.
         let xs = base_t + o.x;
         v_state[..nh * hd].copy_from_slice(&acts.data[xs..xs + nh * hd]);
-
-        // Save h_curr
-        let hc = base_t + o.h_curr;
-        acts.data[hc..hc + h_state_len].copy_from_slice(&ssm_state[..h_state_len]);
     }
 
     // ═══ F6: Output gating (loop T) ═══

@@ -113,6 +113,15 @@ pub struct BackwardPhaseScratch {
     pub d_input_proj_scratch: Vec<f32>,
     /// Local accumulator for norm_f weight gradient: `[d_model]`.
     pub d_norm_f_weight_local: Vec<f32>,
+    /// The SSM states of the segment the backward walks back, the state
+    /// before its first step first: `[(stride + 1) * d_inner * d_state]`,
+    /// grown on first use.
+    pub(crate) seg_h: Vec<f32>,
+    /// The segment's decays: `[stride * d_inner * d_state]`.
+    pub(crate) seg_da: Vec<f32>,
+    /// The conv register at the step the backward is at, rebuilt from the
+    /// tape: `[d_inner * d_conv]`.
+    pub(crate) conv_win: Vec<f32>,
     /// The precision of the backward, the forward's.
     pub(crate) dtype: WeightDtype,
     pub(crate) gemm: LaneGemm,
@@ -147,6 +156,9 @@ impl BackwardPhaseScratch {
             post_norm_buf: vec![0.0; t * dm],
             d_input_proj_scratch: vec![0.0; t * dims.mamba_input_dim.max(dm)],
             d_norm_f_weight_local: vec![0.0; dm],
+            seg_h: Vec::new(),
+            seg_da: Vec::new(),
+            conv_win: vec![0.0; di * dims.d_conv],
             dtype: WeightDtype::F32,
             gemm: LaneGemm::default(),
         }

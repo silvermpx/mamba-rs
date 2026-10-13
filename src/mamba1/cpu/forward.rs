@@ -27,6 +27,27 @@ use crate::ops::dims::{MambaDims, MambaRecurrentState};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 use crate::ops::rounding::{store, stored};
 
+/// One step of a channel's selective scan: the decays `exp(delta * A)` into
+/// `da` and the state `h` advanced in place, `h = da * h + delta * u * B`.
+/// The backward replays a segment's states through it, so they are the
+/// forward's bits.
+#[inline(always)]
+pub(crate) fn scan_advance(
+    h: &mut [f32],
+    da: &mut [f32],
+    (delta_d, u_d): (f32, f32),
+    (a_neg, b): (&[f32], &[f32]),
+) {
+    let delta_u_d = delta_d * u_d;
+    for (dn, &a) in da.iter_mut().zip(a_neg) {
+        *dn = delta_d * a;
+    }
+    fast_exp_inplace(da);
+    for ((hn, &dn), &bn) in h.iter_mut().zip(da.iter()).zip(b) {
+        *hn = dn * *hn + delta_u_d * bn;
+    }
+}
+
 /// O2 optimized single-layer Mamba forward pass: 7-phase pipeline with batched SGEMM.
 ///
 /// Restructures the per-timestep forward into phases where the two biggest SGEMM
@@ -165,6 +186,9 @@ pub fn forward_mamba_layer_batched(
     let c_offset = dt_rank + ds;
 
     // -- F4a: conv1d shift + fused SiLU for ALL timesteps --
+    // The register the window starts from; the backward rebuilds every
+    // later one from it and the x_branch rows.
+    acts.conv_init.copy_from_slice(&conv_state[..di * dc]);
     for t in 0..seq_len {
         {
             let x_branch = acts.x_branch(t);
@@ -176,8 +200,6 @@ pub fn forward_mamba_layer_batched(
                 conv_state[base + dc - 1] = xb;
             }
         }
-        acts.conv_state_mut(t)
-            .copy_from_slice(&conv_state[..di * dc]);
 
         // Fused depthwise conv1d dot product + SiLU. u is written both to
         // acts (backward reads it) and to the contiguous u_flat rows the
@@ -243,55 +265,46 @@ pub fn forward_mamba_layer_batched(
         }
     }
 
+    let stride = acts.stride;
     for t in 0..seq_len {
-        // -- F4d: SSM recurrence --
-        acts.h_prev_mut(t).copy_from_slice(&ssm_state[..di * ds]);
+        // -- F4d: SSM recurrence, the state checkpointed every `stride` steps --
+        if t % stride == 0 {
+            acts.ssm_ckpt_mut(t / stride)
+                .copy_from_slice(&ssm_state[..di * ds]);
+        }
 
         {
             let step_base = t * acts.offsets.step_stride;
             let delta_start = step_base + acts.offsets.delta;
             let u_start = step_base + acts.offsets.u;
             let xdbl_start = step_base + acts.offsets.xdbl;
-            let da_start = step_base + acts.offsets.da_exp;
             let y_start = step_base + acts.offsets.y;
 
             for d in 0..di {
                 let delta_d = acts.data[delta_start + d];
                 let u_d = acts.data[u_start + d];
-                let delta_u_d = delta_d * u_d; // hoisted from inner loop (C2/T6)
                 let a_base = d * ds;
 
-                // Batch `da[n] = exp(delta * a_neg[n])` across the d_state
-                // lane via SIMD `fast_exp_inplace` (NEON 4-wide, AVX2 8-wide).
-                // Bit-identical to the per-element `fast_exp_scalar` it
-                // replaces — same Cephes degree-7 + roundeven — verified by
-                // the CPU↔GPU train parity test.
-                for n in 0..ds {
-                    scratch.da_buf[n] = delta_d * a_neg[a_base + n];
-                }
-                fast_exp_inplace(&mut scratch.da_buf[..ds]);
-
+                // `da[n] = exp(delta * a_neg[n])` across the d_state lane
+                // via SIMD `fast_exp_inplace` (NEON 4-wide, AVX2 8-wide),
+                // the bits of the per-element `fast_exp_scalar`.
+                let h = &mut ssm_state[a_base..a_base + ds];
+                let xdbl = &acts.data[xdbl_start..xdbl_start + xdbl_dim];
+                scan_advance(
+                    h,
+                    &mut scratch.da_buf[..ds],
+                    (delta_d, u_d),
+                    (&a_neg[a_base..a_base + ds], &xdbl[b_offset..b_offset + ds]),
+                );
                 let mut y_d = 0.0_f32;
-                for n in 0..ds {
-                    let idx = a_base + n;
-                    let b_n = acts.data[xdbl_start + b_offset + n];
-                    let c_n = acts.data[xdbl_start + c_offset + n];
-
-                    let da = scratch.da_buf[n];
-                    acts.data[da_start + idx] = da;
-
-                    let h_prev = ssm_state[idx];
-                    ssm_state[idx] = da * h_prev + delta_u_d * b_n;
-
-                    y_d += ssm_state[idx] * c_n;
+                for (&h_n, &c_n) in h.iter().zip(&xdbl[c_offset..c_offset + ds]) {
+                    y_d += h_n * c_n;
                 }
 
                 y_d += layer_w.d_param[d] * u_d;
                 acts.data[y_start + d] = stored(dtype, y_d);
             }
         }
-
-        acts.h_curr_mut(t).copy_from_slice(&ssm_state[..di * ds]);
 
         // -- F4e: gating: gated = y * gate_post_silu --
         {

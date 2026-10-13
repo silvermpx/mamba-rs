@@ -460,6 +460,12 @@
   rows x widest activation, about 325 MB on a Mamba-2 2.7b-sized decode
   engine.
 - `AnyScratch` holds every family's step scratch in a `Box`.
+- The Mamba-1 and SISO CPU training tapes keep the SSM state every 16
+  steps instead of every step (and Mamba-1 the conv register once per
+  window), replaying each segment in the backward with the same bits; a
+  long window takes under a fifth of the memory. `MambaLayerFlat` and
+  `Mamba3LayerFlat` drop their per-step state fields and accessors and
+  gain `zeros_strided`, `ssm_ckpt` and `stride`.
 
 ### Fixed
 

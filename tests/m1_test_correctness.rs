@@ -1652,6 +1652,117 @@ fn test_custom_config_large() {
 // CPU: all weight gradients are nonzero
 // =========================================================================
 
+/// The tape's checkpoint stride changes nothing: from a carried conv and
+/// SSM state, every stride (a checkpoint at every step, at a few, one for
+/// the window, and one past it) gives the same rows, carried states, input
+/// gradient and weight gradients, bit for bit.
+#[test]
+fn tape_stride_gives_the_same_bits() {
+    use mamba_rs::ops::dims::MambaRecurrentState;
+    use mamba_rs::train::backward::backward_mamba_backbone_batched;
+    use mamba_rs::train::flat::MambaBackboneFlat;
+    use mamba_rs::train::forward::forward_mamba_backbone_batched;
+    use mamba_rs::train::scratch::{BackwardPhaseScratch, PhaseScratch};
+    use mamba_rs::train::weights::TrainMambaWeights;
+    let cfg = MambaConfig {
+        d_model: 16,
+        d_state: 8,
+        d_conv: 4,
+        expand: 2,
+        n_layers: 2,
+        ..MambaConfig::default()
+    };
+    let (input_dim, seq_len) = (12usize, 37usize);
+    let weights = mamba_rs::MambaWeights::init(&cfg, input_dim, 7);
+    let (tw, dims) = build_train_scaffolding(&weights, &cfg, input_dim, seq_len);
+    let (di, ds, dc, nl) = (dims.d_inner, dims.d_state, dims.d_conv, dims.n_layers);
+    let a_neg: Vec<f32> = tw
+        .layers
+        .iter()
+        .flat_map(|lw| lw.a_log.iter().map(|v| -v.exp()))
+        .collect();
+    let draw = |n: usize, k: usize, m: usize| -> Vec<f32> {
+        (0..n)
+            .map(|i| ((i * k % m) as f32 / (m / 2) as f32) - 1.0)
+            .collect()
+    };
+    let input = draw(seq_len * input_dim, 37, 101);
+    let d_out = draw(seq_len * cfg.d_model, 53, 97);
+    // A carried state, so the window's first steps read history.
+    let conv0 = draw(nl * di * dc, 29, 31);
+    let ssm0 = draw(nl * di * ds, 13, 23);
+    let flat = |g: &TrainMambaWeights| -> Vec<f32> {
+        let mut v = [g.input_proj_w.clone(), g.input_proj_b.clone()].concat();
+        for l in &g.layers {
+            for t in [
+                &l.norm_weight,
+                &l.in_proj_w,
+                &l.conv1d_weight,
+                &l.conv1d_bias,
+                &l.x_proj_w,
+                &l.dt_proj_w,
+                &l.dt_proj_b,
+                &l.a_log,
+                &l.d_param,
+                &l.out_proj_w,
+            ] {
+                v.extend_from_slice(t);
+            }
+        }
+        v.extend_from_slice(&g.norm_f_weight);
+        v
+    };
+    let run = |stride: usize| -> Vec<Vec<u32>> {
+        let mut acts = MambaBackboneFlat::zeros_strided(dims, stride);
+        let (mut conv, mut ssm) = (conv0.clone(), ssm0.clone());
+        let mut out = vec![0.0f32; seq_len * cfg.d_model];
+        forward_mamba_backbone_batched(
+            &mut out,
+            &mut acts,
+            &tw,
+            &input,
+            &mut MambaRecurrentState {
+                conv: &mut conv,
+                ssm: &mut ssm,
+                a_neg: &a_neg,
+            },
+            &mut PhaseScratch::zeros(&dims),
+            &dims,
+        );
+        let mut grads = TrainMambaWeights::zeros_from_dims(&dims);
+        let mut d = d_out.clone();
+        backward_mamba_backbone_batched(
+            &mut d,
+            &mut grads,
+            &acts,
+            &tw,
+            &a_neg,
+            &mut BackwardPhaseScratch::zeros(&dims),
+            &dims,
+        );
+        [out, conv, ssm, d, flat(&grads)]
+            .iter()
+            .map(|v| v.iter().map(|x| x.to_bits()).collect())
+            .collect()
+    };
+    let want = run(1);
+    for stride in [3, 16, seq_len, seq_len + 13] {
+        let got = run(stride);
+        for (i, what) in [
+            "rows",
+            "conv state",
+            "SSM state",
+            "input gradient",
+            "weight gradients",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(got[i], want[i], "stride {stride}: {what}");
+        }
+    }
+}
+
 #[test]
 fn test_all_cpu_gradients_nonzero() {
     let cfg = MambaConfig::default();

@@ -60,6 +60,16 @@ pub struct Mamba3Scratch {
     pub d_k_carry: Vec<f32>,       // [nheads * d_state]
     pub d_k_carry_next: Vec<f32>,  // [nheads * d_state]
 
+    /// The SSM states of the segment the backward walks back, the state
+    /// before its first step first: `[(stride + 1) * nheads * headdim *
+    /// d_state]`, grown on first use.
+    pub(crate) seg_h: Vec<f32>,
+    /// Every head's B and C of the segment's steps as the forward used
+    /// them: `[stride * nheads * 4 * d_state]`.
+    pub(crate) seg_kq: Vec<f32>,
+    /// The readout the replay computes and drops: `[headdim]`.
+    pub(crate) seg_y: Vec<f32>,
+
     /// The precision of the forward and the backward (see `CpuOptions`).
     pub(crate) dtype: WeightDtype,
     pub(crate) gemm: LaneGemm,
@@ -108,6 +118,9 @@ impl Mamba3Scratch {
             cum_angles_flat: vec![0.0; t * nh * na],
             d_k_carry: vec![0.0; nh * ds],
             d_k_carry_next: vec![0.0; nh * ds],
+            seg_h: Vec::new(),
+            seg_kq: Vec::new(),
+            seg_y: Vec::new(),
             dtype: WeightDtype::F32,
             gemm: LaneGemm::default(),
         }

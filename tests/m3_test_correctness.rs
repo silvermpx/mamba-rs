@@ -550,6 +550,97 @@ fn test_m3_training_forward_matches_inference() {
 // All weight gradients nonzero
 // =========================================================================
 
+/// The tape's checkpoint stride changes nothing: from carried SSM, K, V and
+/// angle states, every stride (a checkpoint at every step, at a few, one
+/// for the window, and one past it) gives the same rows, carried states,
+/// input gradient and weight gradients, bit for bit, the gated norm and the
+/// rotation included.
+#[test]
+fn m3_tape_stride_gives_the_same_bits() {
+    let cfg = Mamba3Config {
+        rope_fraction: 1.0,
+        is_outproj_norm: true,
+        ..test_cfg()
+    };
+    let seq_len = 37;
+    let dims = Mamba3Dims::from_config(&cfg, seq_len);
+    let w = init_layer_w_drawn(&dims);
+    let (nh, hd, ds) = (dims.nheads, dims.headdim, dims.d_state);
+    let na = dims.num_rope_angles.max(1);
+    let draw = |n: usize, k: usize, m: usize| -> Vec<f32> {
+        (0..n)
+            .map(|i| ((i * k % m) as f32 / (m / 2) as f32) - 1.0)
+            .collect()
+    };
+    let rows = draw(seq_len * dims.d_model, 37, 101);
+    let d_rows = draw(seq_len * dims.d_model, 53, 97);
+    let states0 = [
+        draw(nh * hd * ds, 13, 23),
+        draw(nh * ds, 17, 29),
+        draw(nh * hd, 19, 31),
+        draw(nh * na, 23, 37),
+    ];
+    let flat = |g: &TrainMamba3LayerWeights| -> Vec<f32> {
+        [
+            &g.norm_weight,
+            &g.in_proj_w,
+            &g.dt_bias,
+            &g.b_norm_weight,
+            &g.c_norm_weight,
+            &g.b_bias,
+            &g.c_bias,
+            &g.d_param,
+            &g.norm_gate_weight,
+            &g.out_proj_w,
+        ]
+        .iter()
+        .flat_map(|t| t.iter().copied())
+        .collect()
+    };
+    let run = |stride: usize| -> Vec<Vec<u32>> {
+        let mut acts = Mamba3LayerFlat::zeros_strided(dims, stride);
+        let mut scratch = Mamba3Scratch::zeros(&dims);
+        let [mut ssm, mut k, mut v, mut a] = states0.clone();
+        let mut out = rows.clone();
+        forward_mamba3_layer_batched(
+            &mut out,
+            &mut acts,
+            &w,
+            Mamba3LayerStateMut {
+                ssm: &mut ssm,
+                k: &mut k,
+                v: &mut v,
+                angle: &mut a,
+            },
+            &mut scratch,
+            &dims,
+        );
+        let mut d = d_rows.clone();
+        let mut g = TrainMamba3LayerWeights::zeros(&dims);
+        backward_mamba3_layer_batched(&mut d, &acts, &w, &mut g, &mut scratch, &dims, None);
+        [out, ssm, k, v, a, d, flat(&g)]
+            .iter()
+            .map(|x| x.iter().map(|f| f.to_bits()).collect())
+            .collect()
+    };
+    let want = run(1);
+    for stride in [3, 16, seq_len, seq_len + 13] {
+        let got = run(stride);
+        let what = [
+            "rows",
+            "SSM state",
+            "K state",
+            "V state",
+            "angles",
+            "input gradient",
+            "weight gradients",
+        ];
+        for (i, what) in what.iter().enumerate() {
+            assert_eq!(got[i], want[i], "stride {stride}: {what}");
+        }
+    }
+}
+
 #[test]
 fn test_m3_all_cpu_gradients_nonzero() {
     let cfg = test_cfg();
