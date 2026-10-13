@@ -5,6 +5,9 @@
 //! weights come back through each trainer's `snapshot_master`, typed by its
 //! family.
 
+use crate::config::ModelFamily;
+use crate::dist::DistContext;
+use crate::gpu::adamw::AdamWStateBlob;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics};
@@ -52,6 +55,17 @@ pub trait GpuTrainer {
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String>;
 
+    /// [`Self::backward_step`] that also writes d loss / d the window's
+    /// input into `d_input` (`[batch, seq_len, input_dim]`), for a model
+    /// that trains something upstream of the backbone. In f16 the gradient
+    /// comes back unscaled.
+    fn backward_step_input_grad(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+        d_input: &mut [f32],
+    ) -> Result<BackwardMetrics, String>;
+
     /// Forward, backward and the optimizer step in one call.
     fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String>;
 
@@ -87,8 +101,60 @@ pub trait GpuTrainer {
     fn scaler_state(&self) -> Option<(f32, u32)>;
 
     /// Restore the f16 loss scale and its growth counter; no effect in the
-    /// other precisions.
-    fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32);
+    /// other precisions. A scale that is not finite and positive is an
+    /// error.
+    fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) -> Result<(), String>;
+
+    /// The full optimizer state (the Adam moments, the step counter and the
+    /// update settings) for a bit-continuous resume; the learning rate is
+    /// the caller's schedule and not part of it.
+    fn optimizer_state(&self) -> Result<AdamWStateBlob, String>;
+
+    /// Upload a previously exported optimizer state; a blob of another
+    /// parameterization is an error.
+    fn load_optimizer_state(&mut self, blob: &AdamWStateBlob) -> Result<(), String>;
+
+    /// Capture the training step as one CUDA graph, which later
+    /// [`Self::step`] calls replay with the eager step's bits. Needs one
+    /// eager step first.
+    fn capture_graph(&mut self) -> Result<(), String>;
+
+    /// Whether [`Self::step`] replays a captured graph.
+    fn has_graph(&self) -> bool;
+
+    /// Drop the captured graph: the next steps run eagerly and may be
+    /// captured again.
+    fn drop_graph(&mut self);
+
+    /// Data-parallel applying backward: the local backward joins the
+    /// window, the window's gradient is reduced to the ranks' mean through
+    /// `dist`, then the optimizer tail runs. An accumulating call, or a
+    /// world of one, is a plain [`Self::backward_step`].
+    fn backward_step_dist(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+        dist: &DistContext,
+    ) -> Result<BackwardMetrics, String>;
+
+    /// The open window's gradient on the host, for a reducer of the
+    /// caller's own.
+    fn download_grad_arena(&self) -> Result<Vec<f32>, String>;
+
+    /// Overwrite the open window's gradient with `values`, a reduced arena
+    /// of the same length.
+    fn upload_grad_arena(&mut self, values: &[f32]) -> Result<(), String>;
+
+    /// Only the optimizer tail over the open window's gradient: the
+    /// control-channel clip, the global clip, the skip of a spiking window
+    /// and the AdamW step. After accumulating calls it gives the bits of an
+    /// applying [`Self::backward_step`].
+    fn apply_step_full(
+        &mut self,
+        clip_max_norm: Option<f32>,
+        step_skip_above: Option<f32>,
+        control_clip_max_norm: Option<f32>,
+    ) -> Result<BackwardMetrics, String>;
 }
 
 // Each family's trainer has these methods of its own (inherent methods win
@@ -105,6 +171,14 @@ macro_rules! gpu_trainer_by_inherent_methods {
                 opts: BackwardOpts,
             ) -> Result<BackwardMetrics, String> {
                 <$ty>::backward_step(self, d_temporal, opts)
+            }
+            fn backward_step_input_grad(
+                &mut self,
+                d_temporal: &[f32],
+                opts: BackwardOpts,
+                d_input: &mut [f32],
+            ) -> Result<BackwardMetrics, String> {
+                <$ty>::backward_step_input_grad(self, d_temporal, opts, d_input)
             }
             fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
                 <$ty>::step(self, input, d_temporal)
@@ -139,8 +213,49 @@ macro_rules! gpu_trainer_by_inherent_methods {
             fn scaler_state(&self) -> Option<(f32, u32)> {
                 <$ty>::scaler_state(self)
             }
-            fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) {
+            fn load_scaler_state(
+                &mut self,
+                scale: f32,
+                growth_tracker: u32,
+            ) -> Result<(), String> {
                 <$ty>::load_scaler_state(self, scale, growth_tracker)
+            }
+            fn optimizer_state(&self) -> Result<AdamWStateBlob, String> {
+                <$ty>::optimizer_state(self)
+            }
+            fn load_optimizer_state(&mut self, blob: &AdamWStateBlob) -> Result<(), String> {
+                <$ty>::load_optimizer_state(self, blob)
+            }
+            fn capture_graph(&mut self) -> Result<(), String> {
+                <$ty>::capture_graph(self)
+            }
+            fn has_graph(&self) -> bool {
+                <$ty>::has_graph(self)
+            }
+            fn drop_graph(&mut self) {
+                <$ty>::drop_graph(self)
+            }
+            fn backward_step_dist(
+                &mut self,
+                d_temporal: &[f32],
+                opts: BackwardOpts,
+                dist: &DistContext,
+            ) -> Result<BackwardMetrics, String> {
+                <$ty>::backward_step_dist(self, d_temporal, opts, dist)
+            }
+            fn download_grad_arena(&self) -> Result<Vec<f32>, String> {
+                <$ty>::download_grad_arena(self)
+            }
+            fn upload_grad_arena(&mut self, values: &[f32]) -> Result<(), String> {
+                <$ty>::upload_grad_arena(self, values)
+            }
+            fn apply_step_full(
+                &mut self,
+                clip_max_norm: Option<f32>,
+                step_skip_above: Option<f32>,
+                control_clip_max_norm: Option<f32>,
+            ) -> Result<BackwardMetrics, String> {
+                <$ty>::apply_step_full(self, clip_max_norm, step_skip_above, control_clip_max_norm)
             }
         }
     )+};
@@ -152,3 +267,162 @@ gpu_trainer_by_inherent_methods!(
     Mamba3GpuTrainer,
     Mamba3MimoGpuTrainer,
 );
+
+/// A GPU trainer of any family, chosen at run time, behind the shared
+/// surface.
+pub enum AnyGpuTrainer {
+    M1(Box<MambaGpuTrainer>),
+    M2(Box<Mamba2GpuTrainer>),
+    M3(Box<Mamba3GpuTrainer>),
+    M3Mimo(Box<Mamba3MimoGpuTrainer>),
+}
+
+impl AnyGpuTrainer {
+    /// The family of the trainer held.
+    pub fn family(&self) -> ModelFamily {
+        match self {
+            Self::M1(_) => ModelFamily::Mamba1,
+            Self::M2(_) => ModelFamily::Mamba2,
+            Self::M3(_) => ModelFamily::Mamba3,
+            Self::M3Mimo(_) => ModelFamily::Mamba3Mimo,
+        }
+    }
+
+    fn inner(&self) -> &dyn GpuTrainer {
+        match self {
+            Self::M1(t) => t.as_ref(),
+            Self::M2(t) => t.as_ref(),
+            Self::M3(t) => t.as_ref(),
+            Self::M3Mimo(t) => t.as_ref(),
+        }
+    }
+
+    fn inner_mut(&mut self) -> &mut dyn GpuTrainer {
+        match self {
+            Self::M1(t) => t.as_mut(),
+            Self::M2(t) => t.as_mut(),
+            Self::M3(t) => t.as_mut(),
+            Self::M3Mimo(t) => t.as_mut(),
+        }
+    }
+}
+
+impl From<MambaGpuTrainer> for AnyGpuTrainer {
+    fn from(t: MambaGpuTrainer) -> Self {
+        Self::M1(Box::new(t))
+    }
+}
+
+impl From<Mamba2GpuTrainer> for AnyGpuTrainer {
+    fn from(t: Mamba2GpuTrainer) -> Self {
+        Self::M2(Box::new(t))
+    }
+}
+
+impl From<Mamba3GpuTrainer> for AnyGpuTrainer {
+    fn from(t: Mamba3GpuTrainer) -> Self {
+        Self::M3(Box::new(t))
+    }
+}
+
+impl From<Mamba3MimoGpuTrainer> for AnyGpuTrainer {
+    fn from(t: Mamba3MimoGpuTrainer) -> Self {
+        Self::M3Mimo(Box::new(t))
+    }
+}
+
+impl GpuTrainer for AnyGpuTrainer {
+    fn forward(&mut self, input: &[f32], temporal_out: &mut [f32]) -> Result<(), String> {
+        self.inner_mut().forward(input, temporal_out)
+    }
+    fn backward_step(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+    ) -> Result<BackwardMetrics, String> {
+        self.inner_mut().backward_step(d_temporal, opts)
+    }
+    fn backward_step_input_grad(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+        d_input: &mut [f32],
+    ) -> Result<BackwardMetrics, String> {
+        self.inner_mut()
+            .backward_step_input_grad(d_temporal, opts, d_input)
+    }
+    fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
+        self.inner_mut().step(input, d_temporal)
+    }
+    fn reset_state(&mut self) -> Result<(), String> {
+        self.inner_mut().reset_state()
+    }
+    fn set_lr(&mut self, lr: f32) -> Result<(), String> {
+        self.inner_mut().set_lr(lr)
+    }
+    fn lr(&self) -> f32 {
+        self.inner().lr()
+    }
+    fn batch(&self) -> usize {
+        self.inner().batch()
+    }
+    fn seq_len(&self) -> usize {
+        self.inner().seq_len()
+    }
+    fn input_dim(&self) -> usize {
+        self.inner().input_dim()
+    }
+    fn d_model(&self) -> usize {
+        self.inner().d_model()
+    }
+    fn dtype(&self) -> WeightDtype {
+        self.inner().dtype()
+    }
+    fn ctx(&self) -> &GpuCtx {
+        self.inner().ctx()
+    }
+    fn scaler_state(&self) -> Option<(f32, u32)> {
+        self.inner().scaler_state()
+    }
+    fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) -> Result<(), String> {
+        self.inner_mut().load_scaler_state(scale, growth_tracker)
+    }
+    fn optimizer_state(&self) -> Result<AdamWStateBlob, String> {
+        self.inner().optimizer_state()
+    }
+    fn load_optimizer_state(&mut self, blob: &AdamWStateBlob) -> Result<(), String> {
+        self.inner_mut().load_optimizer_state(blob)
+    }
+    fn capture_graph(&mut self) -> Result<(), String> {
+        self.inner_mut().capture_graph()
+    }
+    fn has_graph(&self) -> bool {
+        self.inner().has_graph()
+    }
+    fn drop_graph(&mut self) {
+        self.inner_mut().drop_graph()
+    }
+    fn backward_step_dist(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+        dist: &DistContext,
+    ) -> Result<BackwardMetrics, String> {
+        self.inner_mut().backward_step_dist(d_temporal, opts, dist)
+    }
+    fn download_grad_arena(&self) -> Result<Vec<f32>, String> {
+        self.inner().download_grad_arena()
+    }
+    fn upload_grad_arena(&mut self, values: &[f32]) -> Result<(), String> {
+        self.inner_mut().upload_grad_arena(values)
+    }
+    fn apply_step_full(
+        &mut self,
+        clip_max_norm: Option<f32>,
+        step_skip_above: Option<f32>,
+        control_clip_max_norm: Option<f32>,
+    ) -> Result<BackwardMetrics, String> {
+        self.inner_mut()
+            .apply_step_full(clip_max_norm, step_skip_above, control_clip_max_norm)
+    }
+}

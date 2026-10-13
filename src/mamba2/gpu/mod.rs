@@ -14,4 +14,4 @@ pub mod train;
 pub use backbone::Mamba2GpuBackbone;
 pub use inference::{Mamba2GpuEngine, Mamba2GpuPrefill, Mamba2GpuScratch, Mamba2GpuState};
 pub use kernels::Mamba2Kernels;
-pub use train::Mamba2GpuTrainer;
+pub use train::{Mamba2GpuTrainer, Mamba2RecurrentStateBlob};

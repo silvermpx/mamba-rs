@@ -9,10 +9,12 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::ScanMode;
+use mamba_rs::dist::DistContext;
 use mamba_rs::{
-    BackwardOpts, GpuOptions, GpuTrainer, Mamba2Config, Mamba2GpuTrainer, Mamba2Weights,
-    Mamba3Config, Mamba3GpuTrainer, Mamba3MimoConfig, Mamba3MimoGpuTrainer, Mamba3MimoWeights,
-    Mamba3Weights, MambaConfig, MambaGpuTrainer, MambaWeights, TrainSessionCfg, WeightDtype,
+    AnyGpuTrainer, BackwardOpts, GpuOptions, GpuTrainer, Mamba2Config, Mamba2GpuTrainer,
+    Mamba2Weights, Mamba3Config, Mamba3GpuTrainer, Mamba3MimoConfig, Mamba3MimoGpuTrainer,
+    Mamba3MimoWeights, Mamba3Weights, MambaConfig, MambaGpuTrainer, MambaWeights, ModelFamily,
+    TrainSessionCfg, WeightDtype,
 };
 
 const BATCH: usize = 2;
@@ -84,13 +86,13 @@ impl Trainer {
             Family::Mamba2 => {
                 let w = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 41);
                 let mut t = Mamba2GpuTrainer::new(&w, m2_cfg(), session(), opts).unwrap();
-                t.load_scaler_state(1024.0, 0);
+                t.load_scaler_state(1024.0, 0).unwrap();
                 Self::M2(Box::new(t))
             }
             Family::Mimo => {
                 let w = Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 42);
                 let mut t = Mamba3MimoGpuTrainer::new(&w, mimo_cfg(), session(), opts).unwrap();
-                t.load_scaler_state(1024.0, 0);
+                t.load_scaler_state(1024.0, 0).unwrap();
                 Self::Mimo(Box::new(t))
             }
         }
@@ -646,6 +648,267 @@ fn every_family_trains_through_the_trait() {
                 losses[0], losses[5]
             );
             assert!(losses[5] < losses[0], "{name} {dtype:?}: {losses:?}");
+        }
+    }
+}
+
+/// One trainer of each family behind `AnyGpuTrainer`, in `dtype`.
+fn any_trainers(dtype: WeightDtype) -> Vec<AnyGpuTrainer> {
+    let m1_cfg = MambaConfig {
+        d_model: D_MODEL,
+        d_state: 8,
+        d_conv: 4,
+        expand: 2,
+        n_layers: 2,
+        scan_mode: ScanMode::Auto,
+        rms_norm_eps: 1e-5,
+    };
+    let siso_cfg = Mamba3Config {
+        d_model: D_MODEL,
+        d_state: 8,
+        expand: 2,
+        headdim: 8,
+        ngroups: 1,
+        n_layers: 2,
+        ..Mamba3Config::default()
+    };
+    let (s, opts) = (session(), GpuOptions::default().dtype(dtype));
+    let mut out: Vec<AnyGpuTrainer> = vec![
+        MambaGpuTrainer::new(&MambaWeights::init(&m1_cfg, INPUT_DIM, 61), m1_cfg, s, opts)
+            .unwrap()
+            .into(),
+        Mamba2GpuTrainer::new(
+            &Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 62),
+            m2_cfg(),
+            s,
+            opts,
+        )
+        .unwrap()
+        .into(),
+        Mamba3GpuTrainer::new(
+            &Mamba3Weights::init(&siso_cfg, INPUT_DIM, 63),
+            siso_cfg,
+            s,
+            opts,
+        )
+        .unwrap()
+        .into(),
+        Mamba3MimoGpuTrainer::new(
+            &Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 64),
+            mimo_cfg(),
+            s,
+            opts,
+        )
+        .unwrap()
+        .into(),
+    ];
+    for t in &mut out {
+        t.load_scaler_state(1024.0, 0).unwrap();
+    }
+    out
+}
+
+/// The shared surface carries the graphs, the split seam and the
+/// data-parallel entry in every family through `AnyGpuTrainer`: a captured
+/// step replays, an accumulated window's arena reads out and uploads back
+/// into an `apply_step_full` that steps, a single-rank
+/// `backward_step_dist` is the plain applying call bit for bit, and a loss
+/// scale that is not finite and positive is refused.
+#[test]
+fn the_shared_surface_carries_graphs_seam_and_dist_in_every_family() {
+    let (input, d) = window();
+    let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
+    let families = [
+        ModelFamily::Mamba1,
+        ModelFamily::Mamba2,
+        ModelFamily::Mamba3,
+        ModelFamily::Mamba3Mimo,
+    ];
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+        let mut graphs = any_trainers(dtype);
+        let mut plain = any_trainers(dtype);
+        let mut dist = any_trainers(dtype);
+        let single = DistContext::single(0, 0);
+        for (i, family) in families.iter().enumerate() {
+            let label = format!("{family:?} {dtype:?}");
+            let t = &mut graphs[i];
+            assert_eq!(t.family(), *family, "{label}");
+            assert!(
+                t.load_scaler_state(f32::NAN, 0).is_err(),
+                "{label}: NaN scale"
+            );
+            assert!(t.load_scaler_state(0.0, 0).is_err(), "{label}: zero scale");
+            t.step(&input, &d).unwrap();
+            t.capture_graph().unwrap();
+            assert!(t.has_graph(), "{label}");
+            assert!(
+                t.step(&input, &d).unwrap().graph_replayed,
+                "{label}: replay"
+            );
+            t.drop_graph();
+            assert!(!t.has_graph(), "{label}");
+            assert!(
+                !t.step(&input, &d).unwrap().graph_replayed,
+                "{label}: eager"
+            );
+
+            let t = &mut plain[i];
+            t.forward(&input, &mut out).unwrap();
+            t.backward_step(&d, BackwardOpts::default().with_accumulate_only(true))
+                .unwrap();
+            let arena = t.download_grad_arena().unwrap();
+            assert!(arena.iter().any(|&g| g != 0.0), "{label}: an empty arena");
+            t.upload_grad_arena(&arena).unwrap();
+            let m = t.apply_step_full(None, None, None).unwrap();
+            assert!(m.optimizer_stepped && m.step == 1, "{label}: {m:?}");
+
+            let t = &mut dist[i];
+            t.forward(&input, &mut out).unwrap();
+            let m = t
+                .backward_step_dist(&d, BackwardOpts::default(), &single)
+                .unwrap();
+            assert!(m.optimizer_stepped && m.step == 1, "{label}: {m:?}");
+        }
+        // One applying step from the same start: the seam and the
+        // single-rank path give the same weights.
+        for (i, family) in families.iter().enumerate() {
+            let a = plain[i].download_grad_arena();
+            assert!(a.is_err() || matches!(family, ModelFamily::Mamba1 | ModelFamily::Mamba3));
+            let (p, q) = (&plain[i], &dist[i]);
+            assert_eq!(
+                snapshot_bits(p),
+                snapshot_bits(q),
+                "{family:?} {dtype:?}: the seam against the single-rank path"
+            );
+        }
+    }
+}
+
+/// The master weights of any family's trainer, as bits.
+fn snapshot_bits(t: &AnyGpuTrainer) -> Vec<u32> {
+    match t {
+        AnyGpuTrainer::M1(t) => {
+            let w = t.snapshot_master().unwrap();
+            let mut v: Vec<f32> = w.input_proj_w.clone();
+            v.extend_from_slice(&w.input_proj_b);
+            for l in &w.layers {
+                for x in [
+                    &l.norm_weight,
+                    &l.in_proj_w,
+                    &l.conv1d_weight,
+                    &l.conv1d_bias,
+                    &l.x_proj_w,
+                    &l.dt_proj_w,
+                    &l.dt_proj_b,
+                    &l.a_log,
+                    &l.d_param,
+                    &l.out_proj_w,
+                ] {
+                    v.extend_from_slice(x);
+                }
+            }
+            v.extend_from_slice(&w.norm_f_weight);
+            bits(v)
+        }
+        AnyGpuTrainer::M2(t) => bits(flatten_m2(&t.snapshot_master().unwrap())),
+        AnyGpuTrainer::M3(t) => {
+            let w = t.snapshot_master().unwrap();
+            let mut v: Vec<f32> = w.input_proj_w.clone();
+            v.extend_from_slice(&w.input_proj_b);
+            for l in &w.layers {
+                for x in [
+                    &l.norm_weight,
+                    &l.in_proj_w,
+                    &l.dt_bias,
+                    &l.b_norm_weight,
+                    &l.c_norm_weight,
+                    &l.b_bias,
+                    &l.c_bias,
+                    &l.d_param,
+                    &l.norm_gate_weight,
+                    &l.out_proj_w,
+                ] {
+                    v.extend_from_slice(x);
+                }
+            }
+            v.extend_from_slice(&w.norm_f_weight);
+            bits(v)
+        }
+        AnyGpuTrainer::M3Mimo(t) => bits(flatten_mimo(&t.snapshot_master().unwrap())),
+    }
+}
+
+/// The input gradient of every family: in f32 it matches central
+/// differences of `sum(out * d)` over the window's input (each forward
+/// from a zero state, the accumulating backward leaving the weights
+/// alone), and the half precisions give it within their rounding.
+#[test]
+fn every_family_returns_the_input_gradient() {
+    let (input, d) = window();
+    let n_out = BATCH * SEQ_LEN * D_MODEL;
+    let accumulating = BackwardOpts::default().with_accumulate_only(true);
+    let loss = |t: &mut AnyGpuTrainer, x: &[f32]| -> f64 {
+        let mut out = vec![0.0f32; n_out];
+        t.reset_state().unwrap();
+        t.forward(x, &mut out).unwrap();
+        out.iter()
+            .zip(&d)
+            .map(|(o, g)| f64::from(*o) * f64::from(*g))
+            .sum()
+    };
+    let grads = |dtype: WeightDtype| -> Vec<Vec<f32>> {
+        any_trainers(dtype)
+            .iter_mut()
+            .map(|t| {
+                let mut out = vec![0.0f32; n_out];
+                let mut d_input = vec![0.0f32; input.len()];
+                t.reset_state().unwrap();
+                t.forward(&input, &mut out).unwrap();
+                t.backward_step_input_grad(&d, accumulating, &mut d_input)
+                    .unwrap();
+                d_input
+            })
+            .collect()
+    };
+    let exact = grads(WeightDtype::F32);
+    let mut fd_trainers = any_trainers(WeightDtype::F32);
+    for (t, g) in fd_trainers.iter_mut().zip(&exact) {
+        let family = t.family();
+        // The four largest entries, where a wrong gradient shows.
+        let mut order: Vec<usize> = (0..g.len()).collect();
+        order.sort_by(|&a, &b| g[b].abs().total_cmp(&g[a].abs()));
+        let h = 1e-2f32;
+        for &k in &order[..4] {
+            let mut x = input.clone();
+            x[k] += h;
+            let up = loss(t, &x);
+            x[k] -= 2.0 * h;
+            let down = loss(t, &x);
+            let fd = (up - down) / (2.0 * f64::from(h));
+            let got = f64::from(g[k]);
+            assert!(
+                (fd - got).abs() <= 2e-3 + 5e-2 * got.abs(),
+                "{family:?}: d input[{k}] is {got}, central differences give {fd}"
+            );
+        }
+    }
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        for (family, (half, f32_g)) in grads(dtype).iter().zip(&exact).enumerate() {
+            let norm = f32_g
+                .iter()
+                .map(|v| f64::from(*v).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let diff = half
+                .iter()
+                .zip(f32_g)
+                .map(|(a, b)| f64::from(a - b).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            assert!(
+                diff <= 0.05 * norm,
+                "family {family} {dtype:?}: input gradient off f32 by {diff} of {norm}"
+            );
         }
     }
 }

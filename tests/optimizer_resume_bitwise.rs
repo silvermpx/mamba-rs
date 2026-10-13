@@ -340,3 +340,190 @@ fn m1_resume_with_recurrent_state_is_bit_continuous() {
         "carried conv state must be bit-continuous"
     );
 }
+
+/// Mamba-2 and MIMO resume bit for bit: four steps of one trainer give the
+/// bits of two steps, then a fresh trainer built from the snapshot with the
+/// optimizer state, the recurrence and (in f16) the loss scale loaded, then
+/// two more steps. A blob of the wrong length is refused.
+#[test]
+fn m2_and_mimo_resume_with_optimizer_and_recurrent_state_is_bit_continuous() {
+    use mamba_rs::{
+        Mamba2Config, Mamba2GpuTrainer, Mamba2Weights, Mamba3MimoConfig, Mamba3MimoGpuTrainer,
+        Mamba3MimoWeights,
+    };
+    const BATCH: usize = 2;
+    const SEQ: usize = 48;
+    const DM: usize = 32;
+    let session = TrainSessionCfg::new(DM, BATCH, SEQ);
+    let window = |k: usize| {
+        let n = BATCH * SEQ * DM;
+        let d: Vec<f32> = det(n, 0x6000 + k as u32).iter().map(|v| v * 0.02).collect();
+        (det(n, 0x5000 + k as u32), d)
+    };
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+        let opts = GpuOptions::default().dtype(dtype);
+
+        let m2_cfg = Mamba2Config {
+            d_model: DM,
+            d_state: 16,
+            headdim: 16,
+            n_layers: 2,
+            ..Mamba2Config::default()
+        };
+        let m2_bits = |w: &Mamba2Weights| {
+            let mut out = bits(&w.input_proj_w);
+            out.extend(bits(&w.input_proj_b));
+            for l in &w.layers {
+                for t in [
+                    &l.norm_weight,
+                    &l.in_proj_w,
+                    &l.in_proj_b,
+                    &l.conv_w,
+                    &l.conv_b,
+                    &l.dt_bias,
+                    &l.a_log,
+                    &l.d_param,
+                    &l.gate_norm_weight,
+                    &l.out_proj_w,
+                    &l.out_proj_b,
+                ] {
+                    out.extend(bits(t));
+                }
+            }
+            out.extend(bits(&w.norm_f_weight));
+            out
+        };
+        let w0 = Mamba2Weights::init(&m2_cfg, DM, 71);
+        let build = |w: &Mamba2Weights| {
+            let mut t = Mamba2GpuTrainer::new(w, m2_cfg, session, opts).unwrap();
+            t.load_scaler_state(1024.0, 0).unwrap();
+            t
+        };
+        let mut a = build(&w0);
+        for k in 0..4 {
+            let (x, d) = window(k);
+            a.step(&x, &d).unwrap();
+        }
+        let mut b1 = build(&w0);
+        for k in 0..2 {
+            let (x, d) = window(k);
+            b1.step(&x, &d).unwrap();
+        }
+        let mut b2 = build(&b1.snapshot_master().unwrap());
+        b2.load_optimizer_state(&b1.optimizer_state().unwrap())
+            .unwrap();
+        b2.load_recurrent_state(&b1.recurrent_state().unwrap())
+            .unwrap();
+        if let Some((scale, tracker)) = b1.scaler_state() {
+            b2.load_scaler_state(scale, tracker).unwrap();
+        }
+        for k in 2..4 {
+            let (x, d) = window(k);
+            b2.step(&x, &d).unwrap();
+        }
+        assert_eq!(
+            m2_bits(&b2.snapshot_master().unwrap()),
+            m2_bits(&a.snapshot_master().unwrap()),
+            "Mamba-2 {dtype:?}: the resumed weights"
+        );
+        assert_eq!(
+            b2.optimizer_state().unwrap(),
+            a.optimizer_state().unwrap(),
+            "Mamba-2 {dtype:?}"
+        );
+        assert_eq!(
+            b2.recurrent_state().unwrap(),
+            a.recurrent_state().unwrap(),
+            "Mamba-2 {dtype:?}"
+        );
+        let mut short = b2.recurrent_state().unwrap();
+        short.ssm.pop();
+        assert!(
+            b2.load_recurrent_state(&short).is_err(),
+            "Mamba-2: a short blob"
+        );
+
+        let mimo_cfg = Mamba3MimoConfig {
+            d_model: DM,
+            d_state: 16,
+            headdim: 16,
+            n_layers: 2,
+            ..Mamba3MimoConfig::default()
+        };
+        let mimo_bits = |w: &Mamba3MimoWeights| {
+            let mut out = bits(&w.input_proj_w);
+            out.extend(bits(&w.input_proj_b));
+            for l in &w.layers {
+                for t in [
+                    &l.norm_weight,
+                    &l.in_proj_w,
+                    &l.dt_bias,
+                    &l.b_norm_weight,
+                    &l.c_norm_weight,
+                    &l.b_bias,
+                    &l.c_bias,
+                    &l.d_param,
+                    &l.mimo_x,
+                    &l.mimo_z,
+                    &l.mimo_o,
+                    &l.norm_gate_weight,
+                    &l.out_proj_w,
+                ] {
+                    out.extend(bits(t));
+                }
+            }
+            out.extend(bits(&w.norm_f_weight));
+            out
+        };
+        let w0 = Mamba3MimoWeights::init(&mimo_cfg, DM, 72);
+        let build = |w: &Mamba3MimoWeights| {
+            let mut t = Mamba3MimoGpuTrainer::new(w, mimo_cfg, session, opts).unwrap();
+            t.load_scaler_state(1024.0, 0).unwrap();
+            t
+        };
+        let mut a = build(&w0);
+        for k in 0..4 {
+            let (x, d) = window(k);
+            a.step(&x, &d).unwrap();
+        }
+        let mut b1 = build(&w0);
+        for k in 0..2 {
+            let (x, d) = window(k);
+            b1.step(&x, &d).unwrap();
+        }
+        let mut b2 = build(&b1.snapshot_master().unwrap());
+        b2.load_optimizer_state(&b1.optimizer_state().unwrap())
+            .unwrap();
+        b2.load_recurrent_state(&b1.recurrent_state().unwrap())
+            .unwrap();
+        if let Some((scale, tracker)) = b1.scaler_state() {
+            b2.load_scaler_state(scale, tracker).unwrap();
+        }
+        for k in 2..4 {
+            let (x, d) = window(k);
+            b2.step(&x, &d).unwrap();
+        }
+        assert_eq!(
+            mimo_bits(&b2.snapshot_master().unwrap()),
+            mimo_bits(&a.snapshot_master().unwrap()),
+            "MIMO {dtype:?}: the resumed weights"
+        );
+        assert_eq!(
+            b2.optimizer_state().unwrap(),
+            a.optimizer_state().unwrap(),
+            "MIMO {dtype:?}"
+        );
+        assert_eq!(
+            b2.recurrent_state().unwrap(),
+            a.recurrent_state().unwrap(),
+            "MIMO {dtype:?}"
+        );
+        let mut short = b2.recurrent_state().unwrap();
+        short.angle.pop();
+        assert!(
+            b2.load_recurrent_state(&short).is_err(),
+            "MIMO: a short blob"
+        );
+    }
+}

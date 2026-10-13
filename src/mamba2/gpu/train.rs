@@ -41,8 +41,8 @@ use super::kernels::{
     gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes, seq_bwd_tiles_smem_bytes, seq_bwd_tiles_threads,
 };
 use crate::gpu::adamw::{
-    AdamWBiasFactors, AdamWMultiPlan, AdamWPlanKey, AdamWTensorSpec, GpuAdamW, build_multi_plan,
-    step_multi,
+    AdamWBiasFactors, AdamWMultiPlan, AdamWPlanKey, AdamWStateBlob, AdamWTensorSpec, GpuAdamW,
+    build_multi_plan, step_multi,
 };
 use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_bi_backward_grad_raw,
@@ -412,6 +412,14 @@ struct BwdScratch {
     d_temp_h: Option<DtypedBuf>,
 }
 
+/// A Mamba-2 trainer's carried recurrence on the host: every layer's conv
+/// window and SSM state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mamba2RecurrentStateBlob {
+    pub conv: Vec<f32>,
+    pub ssm: Vec<f32>,
+}
+
 /// The Mamba-2 trainer: forward, backward and AdamW for windows of
 /// `seq_len` tokens of `batch` sequences.
 pub struct Mamba2GpuTrainer {
@@ -460,6 +468,9 @@ pub struct Mamba2GpuTrainer {
     mirror_pairs: Vec<(Span, Span)>,
     scaler: Option<DynamicLossScaler>,
     overflow: OverflowFlag,
+    /// The f16 loss scale on the device, which the backward multiplies the
+    /// upstream gradient by.
+    loss_scale: GpuBuffer,
     unscale: UnscaleFactor,
     /// The last backward's gradients overflowed (f16), so the next AdamW
     /// step is skipped.
@@ -696,6 +707,7 @@ impl Mamba2GpuTrainer {
             mirror_pairs,
             scaler: (dtype == WeightDtype::F16).then(DynamicLossScaler::new),
             overflow: OverflowFlag::new(s)?,
+            loss_scale: z(1)?,
             unscale: UnscaleFactor::new(s)?,
             overflowed: false,
             layout,
@@ -761,10 +773,13 @@ impl Mamba2GpuTrainer {
 
     /// Restore the f16 loss scale and its growth counter (a checkpoint
     /// resume, or a scale chosen up front); no effect in the other lanes.
-    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) {
+    /// A scale that is not finite and positive is an error in every lane.
+    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) -> Result<(), String> {
+        DynamicLossScaler::check_scale(scale)?;
         if let Some(scaler) = self.scaler.as_mut() {
-            scaler.load_state(scale, growth_tracker);
+            scaler.load_state(scale, growth_tracker)?;
         }
+        Ok(())
     }
 
     /// Round the master in_proj, out_proj and MLP projection weights into
@@ -914,9 +929,31 @@ impl Mamba2GpuTrainer {
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
+        self.backward_step_with(d_temporal, opts, None)
+    }
+
+    /// [`Self::backward_step`] that also writes d loss / d the window's
+    /// input into `d_input` (`[batch, seq_len, input_dim]`), for a model
+    /// that trains something upstream of this backbone. In f16 the
+    /// gradient comes back unscaled.
+    pub fn backward_step_input_grad(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+        d_input: &mut [f32],
+    ) -> Result<BackwardMetrics, String> {
+        self.backward_step_with(d_temporal, opts, Some(d_input))
+    }
+
+    fn backward_step_with(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+        d_input: Option<&mut [f32]>,
+    ) -> Result<BackwardMetrics, String> {
         check_backward_opts(&opts, "Mamba-2 trainer")?;
         let loss_scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
-        self.backward(d_temporal, None)?;
+        self.backward(d_temporal, d_input)?;
         if opts.accumulate_only {
             self.window
                 .accumulate(&self.ctx, &self.grads, self.overflowed)?;
@@ -949,6 +986,11 @@ impl Mamba2GpuTrainer {
     /// is open.
     pub fn grad_arena(&self) -> Result<&GpuBuffer, String> {
         self.window.sum()
+    }
+
+    /// The open window's gradient downloaded to the host.
+    pub fn download_grad_arena(&self) -> Result<Vec<f32>, String> {
+        self.window.sum()?.to_cpu(&self.ctx.stream)
     }
 
     /// Overwrite the open window's gradient with `values`, a reduced arena
@@ -1098,6 +1140,49 @@ impl Mamba2GpuTrainer {
             loss_scale,
             overflow_skipped: loss_scale.map(|_| overflowed),
         })
+    }
+
+    /// Download the full optimizer state (the Adam moments, the step
+    /// counter and the update settings) for a bit-continuous resume. The
+    /// learning rate belongs to the caller's schedule and is not part of
+    /// it.
+    pub fn optimizer_state(&self) -> Result<AdamWStateBlob, String> {
+        self.adamw.export_state(&self.ctx.stream)
+    }
+
+    /// Upload a previously exported optimizer state, adopting its step
+    /// counter and update settings; a blob of another parameterization is
+    /// an error. A captured graph refuses its replay when the settings it
+    /// baked in changed (see [`Self::capture_graph`]).
+    pub fn load_optimizer_state(&mut self, blob: &AdamWStateBlob) -> Result<(), String> {
+        self.adamw.import_state(&self.ctx.stream, blob)
+    }
+
+    /// Download the carried recurrence: every layer's conv window and SSM
+    /// state, which a resume uploads to continue the sequences.
+    pub fn recurrent_state(&self) -> Result<Mamba2RecurrentStateBlob, String> {
+        Ok(Mamba2RecurrentStateBlob {
+            conv: self.state.conv.to_cpu(&self.ctx.stream)?,
+            ssm: self.state.ssm.to_cpu(&self.ctx.stream)?,
+        })
+    }
+
+    /// Upload a previously exported recurrence; a blob of another shape is
+    /// an error.
+    pub fn load_recurrent_state(&mut self, blob: &Mamba2RecurrentStateBlob) -> Result<(), String> {
+        let stream = self.ctx.stream.clone();
+        if blob.conv.len() != self.state.conv.len() || blob.ssm.len() != self.state.ssm.len() {
+            return Err(format!(
+                "recurrent state mismatch: the blob holds {} conv and {} SSM values, this \
+                 trainer {} and {}",
+                blob.conv.len(),
+                blob.ssm.len(),
+                self.state.conv.len(),
+                self.state.ssm.len()
+            ));
+        }
+        self.state.conv.upload(&stream, &blob.conv)?;
+        self.state.ssm.upload(&stream, &blob.ssm)
     }
 
     /// Download the f32 master weights for a checkpoint or the CPU model.
@@ -1499,18 +1584,17 @@ impl Mamba2GpuTrainer {
         Ok(())
     }
 
-    /// d loss / d the final rows into the backward's input, times the f16
-    /// loss scale, and the factor the backward unscales the gradients by.
+    /// d loss / d the final rows into the backward's input, and in f16 the
+    /// loss scale the backward multiplies them by and the factor it
+    /// unscales the gradients by.
     fn upload_d_out(&mut self, d_out: &[f32], scale: Option<f32>) -> Result<(), String> {
         let stream = self.ctx.stream.clone();
-        match scale {
-            Some(sc) => {
-                let scaled: Vec<f32> = d_out.iter().map(|v| v * sc).collect();
-                self.bwd.d_rows.upload(&stream, &scaled)?;
-                self.unscale.write(&stream, 1.0 / sc)
-            }
-            None => self.bwd.d_rows.upload(&stream, d_out),
+        self.bwd.d_rows.upload(&stream, d_out)?;
+        if let Some(sc) = scale {
+            self.loss_scale.upload(&stream, &[sc])?;
+            self.unscale.write(&stream, 1.0 / sc)?;
         }
+        Ok(())
     }
 
     /// The backward's kernels on the uploaded d_rows: the arena zeroed,
@@ -1523,6 +1607,16 @@ impl Mamba2GpuTrainer {
         let dm = c.d_model;
         let stream = self.ctx.stream.clone();
         self.grads.zero(&stream)?;
+        if self.scaler.is_some() {
+            let (d_rows, scale) = (self.bwd.d_rows.cached_ptr(), self.loss_scale.cached_ptr());
+            let n = self.bwd.d_rows.len() as i64;
+            let mut bld = stream.launch_builder(&self.ctx.kernels.scale_grads_dev_f32);
+            bld.arg(&d_rows);
+            bld.arg(&scale);
+            bld.arg(&n);
+            unsafe { bld.launch(crate::gpu::launch::grid_1d_wide(self.bwd.d_rows.len())) }
+                .map_err(|e| format!("loss scale of d_rows: {e:?}"))?;
+        }
         let base = self.master.cached_ptr();
         let g_base = self.grads.cached_ptr();
         self.rms_backward(

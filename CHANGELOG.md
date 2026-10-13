@@ -89,6 +89,22 @@
 - The Mamba-2 and MIMO AdamW runs as one fused launch over every tensor
   with its bias corrections and learning rate on the device, per element
   the arithmetic of the per-tensor kernel it replaces.
+- `GpuTrainer` names the graphs (`capture_graph`, `has_graph`,
+  `drop_graph`), the data-parallel entry (`backward_step_dist`) and the
+  split seam (`download_grad_arena`, `upload_grad_arena`,
+  `apply_step_full`) of every family, and `AnyGpuTrainer` holds a trainer
+  of any family behind it, as `AnyGpuBackbone` does for backbones. Every
+  trainer has `download_grad_arena`.
+- The Mamba-2 and MIMO trainers export and import their optimizer state
+  (`optimizer_state`, `load_optimizer_state`) and carried recurrence
+  (`recurrent_state`, `load_recurrent_state`, with
+  `Mamba2RecurrentStateBlob` and `Mamba3MimoRecurrentStateBlob`), so a
+  resumed run lands on the unbroken run's bits as on Mamba-1 and SISO;
+  `GpuTrainer` names the optimizer state.
+- Every trainer returns the gradient of the window's input
+  (`backward_step_input_grad`, also on `GpuTrainer`), for a model that
+  trains something upstream of the backbone; Mamba-1 and SISO discarded
+  it. In f16 it comes back unscaled.
 
 ### Changed
 
@@ -311,6 +327,15 @@
   them, and only tests and a bench still launched them. The test that
   holds the fused pass to their bits compiles a frozen copy of them
   (`tests/fixtures/m3_state_pass_reference.cu`).
+- `load_scaler_state` returns a `Result` and refuses a scale that is not
+  finite and positive, in every family and precision, instead of
+  panicking in f16 and ignoring it elsewhere;
+  `DynamicLossScaler::load_state` returns a `Result` too, and
+  `DynamicLossScaler::check_scale` names the rule.
+- In f16 the Mamba-2 and MIMO trainers multiply the upstream gradient by
+  the loss scale on the device, as Mamba-1 and SISO do, instead of
+  scaling a fresh host copy every backward; the bits are those of the
+  host multiply.
 
 ### Fixed
 

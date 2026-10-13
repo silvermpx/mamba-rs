@@ -178,7 +178,7 @@ fn m2(dtype: WeightDtype) -> Box<dyn Trainer> {
     let w = Mamba2Weights::init(&cfg, INPUT_DIM, 41);
     let mut t =
         Mamba2GpuTrainer::new(&w, cfg, session(), GpuOptions::default().dtype(dtype)).unwrap();
-    t.load_scaler_state(F16_START_SCALE, 0);
+    t.load_scaler_state(F16_START_SCALE, 0).unwrap();
     Box::new(t)
 }
 
@@ -193,7 +193,7 @@ fn mimo(dtype: WeightDtype) -> Box<dyn Trainer> {
     let w = Mamba3MimoWeights::init(&cfg, INPUT_DIM, 42);
     let mut t =
         Mamba3MimoGpuTrainer::new(&w, cfg, session(), GpuOptions::default().dtype(dtype)).unwrap();
-    t.load_scaler_state(F16_START_SCALE, 0);
+    t.load_scaler_state(F16_START_SCALE, 0).unwrap();
     Box::new(t)
 }
 

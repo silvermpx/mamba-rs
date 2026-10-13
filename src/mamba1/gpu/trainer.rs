@@ -52,7 +52,8 @@ use crate::gpu::adamw::{
     AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, build_multi_plan, m1_specs, m1_specs_mixed,
     step_multi,
 };
-use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer, GradSlice};
+use crate::gpu::blas::{TypedPtr, gpu_gemm_ex_backward_dx_typed};
+use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer, GradSlice};
 use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
@@ -437,6 +438,12 @@ impl MambaGpuTrainer {
         }
     }
 
+    /// The gradient arena downloaded to the host: the open window's sum
+    /// between an accumulating call and the applying one.
+    pub fn download_grad_arena(&self) -> Result<Vec<f32>, String> {
+        self.grad_arena().to_cpu(&self.ctx().stream)
+    }
+
     /// Replace the gradient contents without replacing their allocation.
     pub fn upload_grad_arena(&mut self, values: &[f32]) -> Result<(), String> {
         match &mut self.inner {
@@ -694,8 +701,34 @@ impl MambaGpuTrainer {
     ) -> Result<BackwardMetrics, String> {
         check_backward_opts(&opts, "Mamba trainer")?;
         match &mut self.inner {
-            TrainerInner::F32(t) => t.backward_split(d_temporal, opts),
-            TrainerInner::Mixed(t) => t.backward_split(d_temporal, opts),
+            TrainerInner::F32(t) => t.backward_split(d_temporal, opts, None),
+            TrainerInner::Mixed(t) => t.backward_split(d_temporal, opts, None),
+        }
+    }
+
+    /// [`Self::backward_step`] that also writes d loss / d the window's
+    /// input into `d_input` (`[batch, seq_len, input_dim]`), for a model
+    /// that trains something upstream of this backbone. In f16 the
+    /// gradient comes back unscaled. With an input projection it costs one
+    /// more GEMM.
+    pub fn backward_step_input_grad(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+        d_input: &mut [f32],
+    ) -> Result<BackwardMetrics, String> {
+        check_backward_opts(&opts, "Mamba trainer")?;
+        let want = self.batch() * self.seq_len() * self.input_dim();
+        if d_input.len() != want {
+            return Err(format!(
+                "backward_step_input_grad: d_input holds {} values; the window's input has \
+                 {want}",
+                d_input.len()
+            ));
+        }
+        match &mut self.inner {
+            TrainerInner::F32(t) => t.backward_split(d_temporal, opts, Some(d_input)),
+            TrainerInner::Mixed(t) => t.backward_split(d_temporal, opts, Some(d_input)),
         }
     }
 
@@ -736,11 +769,14 @@ impl MambaGpuTrainer {
     }
 
     /// Restore the dynamic loss scaler state saved via [`Self::scaler_state`].
-    /// No-op for non-f16 trainers.
-    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) {
+    /// No effect for non-f16 trainers; a scale that is not finite and
+    /// positive is an error in every precision.
+    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) -> Result<(), String> {
+        DynamicLossScaler::check_scale(scale)?;
         if let TrainerInner::Mixed(ref mut t) = self.inner {
-            t.load_scaler_state(scale, growth_tracker);
+            t.load_scaler_state(scale, growth_tracker)?;
         }
+        Ok(())
     }
 }
 
@@ -838,6 +874,9 @@ pub(crate) struct MambaTrainerMixed {
     /// Persistent device buffer for the scaled d_temporal (kept here so its
     /// pointer is stable across steps).
     d_temporal_scaled: Option<GpuBuffer>,
+    /// The input projection's dX in the compute precision, allocated by the
+    /// first backward that asks for the input gradient.
+    input_grad_half: Option<DtypedBuf>,
     /// f16 CUDA Graph. Captured body: forward + backward (with
     /// scaled d_temporal) + check_inf_nan + scale_grads_skip + AdamW + sync.
     /// CPU writes the next-step `1/loss_scale` into [`Self::unscale_factor`]
@@ -1069,6 +1108,7 @@ impl MambaTrainerMixed {
             scaler,
             overflow_flag,
             d_temporal_scaled,
+            input_grad_half: None,
             graph_f16: None,
             prepared_f16_gemm_manifest: None,
             captured_f16_gemm_plan: None,
@@ -1134,23 +1174,20 @@ impl MambaTrainerMixed {
         self.scaler.as_ref().map(|s| s.state())
     }
 
-    /// Restore scaler state from a prior `scaler_state()`. No-op if the
+    /// Restore scaler state from a prior `scaler_state()`. No effect if the
     /// scaler is disabled (bf16 / f32 trainer).
-    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) {
+    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) -> Result<(), String> {
         if let Some(ref mut s) = self.scaler {
-            s.load_state(scale, growth_tracker);
+            s.load_state(scale, growth_tracker)?;
             // Keep the on-device `unscale_factor` consistent with the
             // restored CPU state so the very next f16 step uses the right
             // unscale multiplier. Without this the first post-load step
             // would unscale with the old (init_scale-derived) value.
             if let Some(ref mut uf) = self.unscale_factor {
-                let unscale = 1.0 / s.scale();
-                // Best-effort — errors here shouldn't panic in a pure
-                // accessor; swallow and let the next step's normal write
-                // catch any real device error.
-                let _ = uf.write(&self.ctx.stream, unscale);
+                uf.write(&self.ctx.stream, 1.0 / s.scale())?;
             }
         }
+        Ok(())
     }
 
     /// Capture the training-step CUDA Graph. Call once after at least one
@@ -1314,11 +1351,13 @@ impl MambaTrainerMixed {
         Ok(())
     }
 
-    /// Split backward + optimizer (see [`MambaGpuTrainer::backward_step`]).
+    /// Split backward + optimizer (see [`MambaGpuTrainer::backward_step`]),
+    /// and the input gradient into `d_input` when one is asked for.
     pub(crate) fn backward_split(
         &mut self,
         d_temporal: &[f32],
         opts: BackwardOpts,
+        d_input: Option<&mut [f32]>,
     ) -> Result<BackwardMetrics, String> {
         let Some(forward_route) = self.split_forward_route.take() else {
             return Err(
@@ -1343,7 +1382,7 @@ impl MambaTrainerMixed {
         );
 
         if matches!(self.dtype, WeightDtype::F16) {
-            return self.backward_split_f16(d_temporal, opts);
+            return self.backward_split_f16(d_temporal, opts, d_input);
         }
 
         self.staged_upload(1, d_temporal)?;
@@ -1351,6 +1390,9 @@ impl MambaTrainerMixed {
             self.grads.zero(&self.ctx.stream)?;
         }
         self.eager_backward(false)?;
+        if let Some(d_input) = d_input {
+            self.download_input_grad(d_input)?;
+        }
 
         if opts.accumulate_only {
             self.grads_dirty = true;
@@ -1460,6 +1502,7 @@ impl MambaTrainerMixed {
         &mut self,
         d_temporal: &[f32],
         opts: BackwardOpts,
+        d_input: Option<&mut [f32]>,
     ) -> Result<BackwardMetrics, String> {
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
         self.staged_upload(2, d_temporal)?;
@@ -1480,6 +1523,9 @@ impl MambaTrainerMixed {
             self.grads.zero(&self.ctx.stream)?;
         }
         self.eager_backward(true)?;
+        if let Some(d_input) = d_input {
+            self.download_input_grad(d_input)?;
+        }
         if opts.accumulate_only {
             self.grads_dirty = true;
             return Ok(BackwardMetrics {
@@ -1495,6 +1541,73 @@ impl MambaTrainerMixed {
             opts.step_skip_above,
             opts.control_clip_max_norm,
         )
+    }
+
+    /// d loss / d the window's input after the eager backward: the
+    /// backbone input's gradient without an input projection, else the
+    /// projection's dX, from the cast dY the backward leaves in the
+    /// projection's saved outputs. Unscaled in f16.
+    fn download_input_grad(&mut self, d_input: &mut [f32]) -> Result<(), String> {
+        let stream = self.ctx.stream.clone();
+        let scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
+        let dtype = self.dtype;
+        if self.weights.compute.input_proj_w.len_elems() == 0 {
+            let src = match (&self.d_temporal_scaled, scale) {
+                (Some(scaled), Some(_)) => scaled,
+                _ => &self.d_temporal,
+            };
+            src.download(&stream, d_input)?;
+        } else {
+            let (bt, dm) = (self.batch * self.seq_len, self.cfg.d_model);
+            let mid = d_input.len() / bt;
+            if self.input_grad_half.is_none() {
+                self.input_grad_half = Some(DtypedBuf::zeros(&stream, bt * mid, dtype)?);
+            }
+            let Some(dx) = &self.input_grad_half else {
+                return Err("the input gradient's half buffer is missing".into());
+            };
+            gpu_gemm_ex_backward_dx_typed(
+                &self.ctx,
+                TypedPtr {
+                    ptr: dx.cached_ptr(),
+                    dtype,
+                },
+                TypedPtr {
+                    ptr: self.acts.input_proj_outputs.cached_ptr(),
+                    dtype,
+                },
+                TypedPtr {
+                    ptr: self.weights.compute.input_proj_w.ptr(),
+                    dtype,
+                },
+                bt,
+                mid,
+                dm,
+            )?;
+            let cast = match dtype {
+                WeightDtype::Bf16 => &self.ctx.kernels.cast_bf16_to_f32,
+                _ => &self.ctx.kernels.cast_f16_to_f32,
+            };
+            launch_cast(
+                &stream,
+                cast,
+                (self.scratch.d_input_proj_dx.cached_ptr(), 4),
+                (dx.cached_ptr(), dtype.size_bytes()),
+                bt * mid,
+                format_args!("input gradient cast"),
+            )?;
+            self.scratch.d_input_proj_dx.download(&stream, d_input)?;
+        }
+        stream
+            .synchronize()
+            .map_err(|e| format!("input gradient download: {e:?}"))?;
+        if let Some(sc) = scale {
+            let inv = 1.0 / sc;
+            for v in d_input.iter_mut() {
+                *v *= inv;
+            }
+        }
+        Ok(())
     }
 
     /// The GradScaler tail over the gradient sum of the open window: the
@@ -2474,11 +2587,13 @@ impl MambaTrainerF32 {
         Ok(())
     }
 
-    /// Split backward + optimizer (see [`MambaGpuTrainer::backward_step`]).
+    /// Split backward + optimizer (see [`MambaGpuTrainer::backward_step`]),
+    /// and the input gradient into `d_input` when one is asked for.
     pub(crate) fn backward_split(
         &mut self,
         d_temporal: &[f32],
         opts: BackwardOpts,
+        d_input: Option<&mut [f32]>,
     ) -> Result<BackwardMetrics, String> {
         let Some(forward_route) = self.split_forward_route.take() else {
             return Err(
@@ -2506,6 +2621,20 @@ impl MambaTrainerF32 {
             self.grads.zero(&self.ctx.stream)?;
         }
         self.eager_backward()?;
+        if let Some(d_input) = d_input {
+            // The backward leaves the input projection's dX in the scratch,
+            // or the backbone input's gradient in d_temporal without one.
+            let src = if self.weights.input_proj_w.is_empty() {
+                &self.d_temporal
+            } else {
+                &self.scratch.d_input_proj_dx
+            };
+            src.download(&self.ctx.stream, d_input)?;
+            self.ctx
+                .stream
+                .synchronize()
+                .map_err(|e| format!("input gradient download: {e:?}"))?;
+        }
 
         if opts.accumulate_only {
             self.grads_dirty = true;

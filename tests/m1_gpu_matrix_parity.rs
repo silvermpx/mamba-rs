@@ -370,7 +370,7 @@ fn m1_gpu_train_matches_cpu_at_any_width() {
                 )
                 .unwrap();
                 if dtype == WeightDtype::F16 {
-                    tr.load_scaler_state(256.0, 0);
+                    tr.load_scaler_state(256.0, 0).unwrap();
                 }
                 let mut rows = vec![0f32; batch * seq * dm];
                 tr.forward(&inputs, &mut rows).unwrap();

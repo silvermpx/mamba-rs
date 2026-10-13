@@ -15,4 +15,4 @@ pub mod train;
 pub use backbone::Mamba3MimoGpuBackbone;
 pub use inference::{Mamba3MimoGpuEngine, Mamba3MimoGpuState, Mamba3MimoGpuWindow};
 pub use kernels::Mamba3MimoKernels;
-pub use train::Mamba3MimoGpuTrainer;
+pub use train::{Mamba3MimoGpuTrainer, Mamba3MimoRecurrentStateBlob};

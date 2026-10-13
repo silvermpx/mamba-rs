@@ -484,7 +484,7 @@ fn m1_ranks(world: usize, seq_len: usize, dtype: WeightDtype) -> Vec<MambaGpuTra
                 GpuOptions::default().dtype(dtype),
             )
             .unwrap();
-            t.load_scaler_state(F16_START_SCALE, 0);
+            t.load_scaler_state(F16_START_SCALE, 0).unwrap();
             t
         })
         .collect()
@@ -502,7 +502,7 @@ fn siso_ranks(world: usize, seq_len: usize, dtype: WeightDtype) -> Vec<Mamba3Gpu
                 GpuOptions::default().dtype(dtype),
             )
             .unwrap();
-            t.load_scaler_state(F16_START_SCALE, 0);
+            t.load_scaler_state(F16_START_SCALE, 0).unwrap();
             t
         })
         .collect()
@@ -526,7 +526,7 @@ fn m2_ranks(world: usize, seq_len: usize, dtype: WeightDtype) -> Vec<Mamba2GpuTr
                 GpuOptions::default().dtype(dtype),
             )
             .unwrap();
-            t.load_scaler_state(F16_START_SCALE, 0);
+            t.load_scaler_state(F16_START_SCALE, 0).unwrap();
             t
         })
         .collect()
@@ -550,7 +550,7 @@ fn mimo_ranks(world: usize, seq_len: usize, dtype: WeightDtype) -> Vec<Mamba3Mim
                 GpuOptions::default().dtype(dtype),
             )
             .unwrap();
-            t.load_scaler_state(F16_START_SCALE, 0);
+            t.load_scaler_state(F16_START_SCALE, 0).unwrap();
             t
         })
         .collect()

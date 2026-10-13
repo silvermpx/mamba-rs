@@ -179,14 +179,25 @@ impl DynamicLossScaler {
         (self.scale, self.growth_tracker)
     }
 
-    /// Restore state from a previous [`Self::state`]. Validates inputs.
-    pub fn load_state(&mut self, scale: f32, growth_tracker: u32) {
-        assert!(
-            scale.is_finite() && scale > 0.0,
-            "loaded scale must be finite and positive, got {scale}"
-        );
+    /// Restore state from a previous [`Self::state`]. A scale that is not
+    /// finite and positive is an error; one outside the scaler's bounds is
+    /// clamped to them.
+    pub fn load_state(&mut self, scale: f32, growth_tracker: u32) -> Result<(), String> {
+        Self::check_scale(scale)?;
         self.scale = scale.clamp(self.min_scale, self.max_scale);
         self.growth_tracker = growth_tracker.min(self.growth_interval.saturating_sub(1));
+        Ok(())
+    }
+
+    /// Whether `scale` can be loaded: finite and positive.
+    pub fn check_scale(scale: f32) -> Result<(), String> {
+        if scale.is_finite() && scale > 0.0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "a loaded loss scale must be finite and positive, got {scale}"
+            ))
+        }
     }
 
     /// Current scale value to multiply the loss by.
@@ -451,7 +462,7 @@ mod tests {
         assert_eq!(saved_tracker, 3);
 
         let mut s2 = DynamicLossScaler::new().with_growth_interval(10);
-        s2.load_state(saved_scale, saved_tracker);
+        s2.load_state(saved_scale, saved_tracker).unwrap();
         assert_eq!(s2.scale(), 8.0);
         assert_eq!(s2.clean_step_count(), 3);
     }
@@ -461,7 +472,7 @@ mod tests {
         let mut s = DynamicLossScaler::new()
             .with_init_scale(8.0)
             .with_max_scale(100.0);
-        s.load_state(1e9, 999_999); // way over max + tracker over interval
+        s.load_state(1e9, 999_999).unwrap(); // way over max + tracker over interval
         assert_eq!(s.scale(), 100.0); // clamped to max
         // tracker clamped under growth_interval so it doesn't immediately grow
         assert!(s.clean_step_count() < s.growth_interval);

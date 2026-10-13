@@ -41,8 +41,8 @@ use super::kernels::{
 };
 use crate::config::ScanMode;
 use crate::gpu::adamw::{
-    AdamWBiasFactors, AdamWMultiPlan, AdamWPlanKey, AdamWTensorSpec, GpuAdamW, build_multi_plan,
-    step_multi,
+    AdamWBiasFactors, AdamWMultiPlan, AdamWPlanKey, AdamWStateBlob, AdamWTensorSpec, GpuAdamW,
+    build_multi_plan, step_multi,
 };
 use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_bi_backward_grad_raw,
@@ -440,6 +440,16 @@ struct ChunkedBwd {
 /// Tokens per block of the generic state terms kernel.
 const TERMS_GROUP: usize = 8;
 
+/// A MIMO trainer's carried recurrence on the host: every layer's SSM
+/// state, the K and V of the last step, and the accumulated angles.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mamba3MimoRecurrentStateBlob {
+    pub ssm: Vec<f32>,
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
+    pub angle: Vec<f32>,
+}
+
 /// The MIMO trainer: forward, backward and AdamW for windows of `seq_len`
 /// tokens of `batch` sequences.
 pub struct Mamba3MimoGpuTrainer {
@@ -491,6 +501,9 @@ pub struct Mamba3MimoGpuTrainer {
     mirror_pairs: Vec<(Span, Span)>,
     scaler: Option<DynamicLossScaler>,
     overflow: OverflowFlag,
+    /// The f16 loss scale on the device, which the backward multiplies the
+    /// upstream gradient by.
+    loss_scale: GpuBuffer,
     unscale: UnscaleFactor,
     overflowed: bool,
     /// Set by a completed forward, cleared when one starts.
@@ -810,6 +823,7 @@ impl Mamba3MimoGpuTrainer {
             mirror_pairs,
             scaler: (dtype == WeightDtype::F16).then(DynamicLossScaler::new),
             overflow: OverflowFlag::new(s)?,
+            loss_scale: z(1)?,
             unscale: UnscaleFactor::new(s)?,
             overflowed: false,
             layout,
@@ -964,9 +978,31 @@ impl Mamba3MimoGpuTrainer {
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
+        self.backward_step_with(d_temporal, opts, None)
+    }
+
+    /// [`Self::backward_step`] that also writes d loss / d the window's
+    /// input into `d_input` (`[batch, seq_len, input_dim]`), for a model
+    /// that trains something upstream of this backbone. In f16 the
+    /// gradient comes back unscaled.
+    pub fn backward_step_input_grad(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+        d_input: &mut [f32],
+    ) -> Result<BackwardMetrics, String> {
+        self.backward_step_with(d_temporal, opts, Some(d_input))
+    }
+
+    fn backward_step_with(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+        d_input: Option<&mut [f32]>,
+    ) -> Result<BackwardMetrics, String> {
         check_backward_opts(&opts, "MIMO trainer")?;
         let loss_scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
-        self.backward(d_temporal, None)?;
+        self.backward(d_temporal, d_input)?;
         if opts.accumulate_only {
             self.window
                 .accumulate(&self.ctx, &self.grads, self.overflowed)?;
@@ -999,6 +1035,11 @@ impl Mamba3MimoGpuTrainer {
     /// is open.
     pub fn grad_arena(&self) -> Result<&GpuBuffer, String> {
         self.window.sum()
+    }
+
+    /// The open window's gradient downloaded to the host.
+    pub fn download_grad_arena(&self) -> Result<Vec<f32>, String> {
+        self.window.sum()?.to_cpu(&self.ctx.stream)
     }
 
     /// Overwrite the open window's gradient with `values`, a reduced arena
@@ -1155,18 +1196,75 @@ impl Mamba3MimoGpuTrainer {
         self.scaler.as_ref().map(DynamicLossScaler::state)
     }
 
-    /// Restore the f16 loss scale and its growth counter; no effect in the
-    /// other lanes.
-    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) {
+    /// Restore the f16 loss scale and its growth counter (a checkpoint
+    /// resume, or a scale chosen up front); no effect in the other lanes.
+    /// A scale that is not finite and positive is an error in every lane.
+    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) -> Result<(), String> {
+        DynamicLossScaler::check_scale(scale)?;
         if let Some(scaler) = self.scaler.as_mut() {
-            scaler.load_state(scale, growth_tracker);
+            scaler.load_state(scale, growth_tracker)?;
         }
+        Ok(())
     }
 
     /// Whether the last backward's gradients overflowed the f16 loss scale
     /// (its AdamW step will be skipped).
     pub fn overflowed(&self) -> bool {
         self.overflowed
+    }
+
+    /// Download the full optimizer state (the Adam moments, the step
+    /// counter and the update settings) for a bit-continuous resume. The
+    /// learning rate belongs to the caller's schedule and is not part of
+    /// it.
+    pub fn optimizer_state(&self) -> Result<AdamWStateBlob, String> {
+        self.adamw.export_state(&self.ctx.stream)
+    }
+
+    /// Upload a previously exported optimizer state, adopting its step
+    /// counter and update settings; a blob of another parameterization is
+    /// an error. A captured graph refuses its replay when the settings it
+    /// baked in changed (see [`Self::capture_graph`]).
+    pub fn load_optimizer_state(&mut self, blob: &AdamWStateBlob) -> Result<(), String> {
+        self.adamw.import_state(&self.ctx.stream, blob)
+    }
+
+    /// Download the carried recurrence: every layer's SSM state, the K and
+    /// V of the last step and the accumulated angles, which a resume
+    /// uploads to continue the sequences.
+    pub fn recurrent_state(&self) -> Result<Mamba3MimoRecurrentStateBlob, String> {
+        let s = &self.ctx.stream;
+        Ok(Mamba3MimoRecurrentStateBlob {
+            ssm: self.state_ssm.to_cpu(s)?,
+            k: self.state_k.to_cpu(s)?,
+            v: self.state_v.to_cpu(s)?,
+            angle: self.state_ang.to_cpu(s)?,
+        })
+    }
+
+    /// Upload a previously exported recurrence; a blob of another shape is
+    /// an error.
+    pub fn load_recurrent_state(
+        &mut self,
+        blob: &Mamba3MimoRecurrentStateBlob,
+    ) -> Result<(), String> {
+        let lens = [
+            (blob.ssm.len(), self.state_ssm.len()),
+            (blob.k.len(), self.state_k.len()),
+            (blob.v.len(), self.state_v.len()),
+            (blob.angle.len(), self.state_ang.len()),
+        ];
+        if lens.iter().any(|(b, t)| b != t) {
+            return Err(format!(
+                "recurrent state mismatch: the blob's (ssm, k, v, angle) lengths against \
+                 this trainer's are {lens:?}"
+            ));
+        }
+        let s = self.ctx.stream.clone();
+        self.state_ssm.upload(&s, &blob.ssm)?;
+        self.state_k.upload(&s, &blob.k)?;
+        self.state_v.upload(&s, &blob.v)?;
+        self.state_ang.upload(&s, &blob.angle)
     }
 
     /// Download the f32 master weights for a checkpoint or the CPU model.
@@ -1847,18 +1945,17 @@ impl Mamba3MimoGpuTrainer {
         Ok(())
     }
 
-    /// d loss / d the final rows into the backward's input, times the f16
-    /// loss scale, and the factor the backward unscales the gradients by.
+    /// d loss / d the final rows into the backward's input, and in f16 the
+    /// loss scale the backward multiplies them by and the factor it
+    /// unscales the gradients by.
     fn upload_d_out(&mut self, d_out: &[f32], scale: Option<f32>) -> Result<(), String> {
         let stream = self.ctx.stream.clone();
-        match scale {
-            Some(sc) => {
-                let scaled: Vec<f32> = d_out.iter().map(|v| v * sc).collect();
-                self.bwd.d_rows.upload(&stream, &scaled)?;
-                self.unscale.write(&stream, 1.0 / sc)
-            }
-            None => self.bwd.d_rows.upload(&stream, d_out),
+        self.bwd.d_rows.upload(&stream, d_out)?;
+        if let Some(sc) = scale {
+            self.loss_scale.upload(&stream, &[sc])?;
+            self.unscale.write(&stream, 1.0 / sc)?;
         }
+        Ok(())
     }
 
     /// The backward's kernels on the uploaded d_rows: the arena zeroed,
@@ -1871,6 +1968,16 @@ impl Mamba3MimoGpuTrainer {
         let dm = c.d_model;
         let stream = self.ctx.stream.clone();
         self.grads.zero(&stream)?;
+        if self.scaler.is_some() {
+            let (d_rows, scale) = (self.bwd.d_rows.cached_ptr(), self.loss_scale.cached_ptr());
+            let n = self.bwd.d_rows.len() as i64;
+            let mut bld = stream.launch_builder(&self.ctx.kernels.scale_grads_dev_f32);
+            bld.arg(&d_rows);
+            bld.arg(&scale);
+            bld.arg(&n);
+            unsafe { bld.launch(crate::gpu::launch::grid_1d_wide(self.bwd.d_rows.len())) }
+                .map_err(|e| format!("loss scale of d_rows: {e:?}"))?;
+        }
         let base = self.master.cached_ptr();
         let g_base = self.grads.cached_ptr();
         self.rms_backward(

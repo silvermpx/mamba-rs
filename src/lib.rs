@@ -34,7 +34,8 @@
 //! (`Mamba2GpuBackbone`, `Mamba2GpuTrainer` and so on), each built from
 //! one `GpuOptions` value for the device, the storage precision and the
 //! GEMM mode. The `GpuBackbone` and `GpuTrainer` traits name what the
-//! GPU types share, `AnyGpuBackbone` holds a backbone of any family, and
+//! GPU types share, `AnyGpuBackbone` and `AnyGpuTrainer` hold a backbone
+//! and a trainer of any family, and
 //! `MambaLM` and `MambaGpuLM` (feature `hf`) load a checkpoint of any
 //! family and generate text.
 //!
@@ -198,4 +199,4 @@ pub use mamba3_siso::gpu::{Mamba3GpuBackbone, Mamba3GpuTrainer};
 #[cfg(all(feature = "cuda", feature = "hf"))]
 pub use module::MambaGpuLM;
 #[cfg(feature = "cuda")]
-pub use module::{AnyGpuBackbone, GpuBackbone, GpuTrainer};
+pub use module::{AnyGpuBackbone, AnyGpuTrainer, GpuBackbone, GpuTrainer};

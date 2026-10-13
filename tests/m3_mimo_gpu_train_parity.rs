@@ -251,7 +251,7 @@ fn m3_mimo_gpu_train_matches_the_cpu_trainer() {
                     8,
                 )
                 .unwrap();
-                tr.load_scaler_state(256.0, 0);
+                tr.load_scaler_state(256.0, 0).unwrap();
                 let mut rows = vec![0f32; batch * seq * dm];
                 tr.forward(&inputs, &mut rows).unwrap();
                 let mut d_in = vec![0f32; batch * seq * input_dim];
@@ -785,7 +785,7 @@ fn m3_mimo_gpu_train_f16_overflow_skips_the_step() {
     let before = tr.snapshot_master().unwrap();
     // The scaler's ceiling, 2^24, takes an output gradient of order one
     // past f16's 65504.
-    tr.load_scaler_state(2f32.powi(24), 0);
+    tr.load_scaler_state(2f32.powi(24), 0).unwrap();
     let loaded = tr.scaler_state().map(|s| s.0);
     tr.forward(&inputs, &mut out).unwrap();
     tr.backward(&d_out, None).unwrap();
@@ -800,7 +800,7 @@ fn m3_mimo_gpu_train_f16_overflow_skips_the_step() {
         tr.apply_adamw().is_err(),
         "the same gradients stepped twice"
     );
-    tr.load_scaler_state(256.0, 0);
+    tr.load_scaler_state(256.0, 0).unwrap();
     tr.forward(&inputs, &mut out).unwrap();
     tr.backward(&d_out, None).unwrap();
     assert!(!tr.overflowed());

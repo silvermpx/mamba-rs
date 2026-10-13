@@ -120,7 +120,7 @@ fn m1_f16_graph_step_that_overflows_moves_nothing() {
         GpuOptions::default().dtype(WeightDtype::F16),
     )
     .unwrap();
-    t.load_scaler_state(SCALE, 0);
+    t.load_scaler_state(SCALE, 0).unwrap();
     let input = values(BATCH * SEQ_LEN * D_MODEL, 1);
     let d_out = values(BATCH * SEQ_LEN * D_MODEL, 2);
     let eager = t.step(&input, &d_out).unwrap();
@@ -167,7 +167,7 @@ fn m3_f16_graph_step_that_overflows_moves_nothing() {
         GpuOptions::default().dtype(WeightDtype::F16),
     )
     .unwrap();
-    t.load_scaler_state(SCALE, 0);
+    t.load_scaler_state(SCALE, 0).unwrap();
     let input = values(BATCH * SEQ_LEN * D_MODEL, 3);
     let d_out = values(BATCH * SEQ_LEN * D_MODEL, 4);
     let eager = t.step(&input, &d_out).unwrap();

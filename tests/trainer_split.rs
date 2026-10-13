@@ -386,7 +386,7 @@ fn assert_accumulation_two_micro_equals_one_big_batch(dtype: WeightDtype, tol: f
     )
     .expect("big trainer");
     big.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
-    big.load_scaler_state(F16_TEST_SCALE, 0);
+    big.load_scaler_state(F16_TEST_SCALE, 0).unwrap();
     let big_in: Vec<f32> = s1_in.iter().chain(s2_in.iter()).copied().collect();
     let big_dt: Vec<f32> = s1_dt.iter().chain(s2_dt.iter()).copied().collect();
     let mut big_out = vec![0.0f32; 2 * n_out1];
@@ -407,7 +407,7 @@ fn assert_accumulation_two_micro_equals_one_big_batch(dtype: WeightDtype, tol: f
     )
     .expect("micro trainer");
     micro.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
-    micro.load_scaler_state(F16_TEST_SCALE, 0);
+    micro.load_scaler_state(F16_TEST_SCALE, 0).unwrap();
     let mut out = vec![0.0f32; n_out1];
     micro.forward(&s1_in, &mut out).expect("micro fwd 1");
     micro
@@ -747,7 +747,7 @@ fn assert_window_of_two_is_one_doubled_call(dtype: WeightDtype) {
         )
         .expect("trainer");
         t.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
-        t.load_scaler_state(F16_TEST_SCALE, 0);
+        t.load_scaler_state(F16_TEST_SCALE, 0).unwrap();
         t
     };
     let mut window = trainer();

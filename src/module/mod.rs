@@ -9,7 +9,7 @@
 //! - `gpu_backbone` (feature `cuda`): the `GpuBackbone` trait every family's
 //!   GPU backbone implements, and `AnyGpuBackbone`, one chosen at run time.
 //! - `gpu_trainer` (feature `cuda`): the `GpuTrainer` trait every family's
-//!   GPU trainer implements.
+//!   GPU trainer implements, and `AnyGpuTrainer`, one chosen at run time.
 //! - `gpu_lm` (features `cuda` and `hf`): `MambaGpuLM`, text generation on
 //!   the GPU for every family. `gpu_lm3` keeps the Mamba-3 language model
 //!   of 0.7.
@@ -43,6 +43,6 @@ pub use gpu_backbone::{AnyGpuBackbone, GpuBackbone};
 #[cfg(all(feature = "hf", feature = "cuda"))]
 pub use gpu_lm::MambaGpuLM;
 #[cfg(feature = "cuda")]
-pub use gpu_trainer::GpuTrainer;
+pub use gpu_trainer::{AnyGpuTrainer, GpuTrainer};
 #[cfg(feature = "hf")]
 pub use lm::MambaLM;
