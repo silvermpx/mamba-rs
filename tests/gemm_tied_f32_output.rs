@@ -1,6 +1,8 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::gpu::blas::{TiedLmDims, gpu_gemm_ex_tied_lm_head_raw};
+use mamba_rs::gpu::blas::{
+    TiedLmDims, gpu_gemm_ex_tied_lm_head_raw, gpu_gemm_ex_tied_lm_head_widened_raw,
+};
 use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::{BiGemmFamily, GemmMode, GpuCtx};
 use mamba_rs::gpu::device::GpuDevice;
@@ -321,4 +323,81 @@ fn deterministic_tied_half_rejects_null_and_overflow_before_execution() {
         .is_err(),
         "overflowing tied dimensions must reject"
     );
+}
+
+/// A caller that keeps the embedding widened to f32 gets the per-call
+/// widening's logits bit for bit: the exact reduction reads the same f32
+/// values, and only the rows are converted per call.
+fn assert_widened_embedding_keeps_the_bits(dtype: WeightDtype) {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    let ctx = GpuCtx::new(&device).expect("GPU context");
+    ctx.set_gemm_mode(GemmMode::Deterministic)
+        .expect("select deterministic GEMM mode");
+    let (batch, d_model, vocab_padded) = (3usize, 64usize, 512usize);
+    let values = |n: usize, seed: u32| -> Vec<f32> {
+        let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (x >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+            })
+            .collect()
+    };
+    let temporal = DtypedBuf::zeros(&ctx.stream, batch * d_model, dtype).unwrap();
+    let embed = DtypedBuf::zeros(&ctx.stream, vocab_padded * d_model, dtype).unwrap();
+    temporal
+        .upload_f32(&ctx.stream, &values(batch * d_model, 3))
+        .unwrap();
+    let embed_values = values(vocab_padded * d_model, 5);
+    embed.upload_f32(&ctx.stream, &embed_values).unwrap();
+    // The widened copy holds the half values exactly.
+    let rounded: Vec<f32> = embed_values
+        .iter()
+        .map(|&v| match dtype {
+            WeightDtype::Bf16 => half::bf16::from_f32(v).to_f32(),
+            _ => half::f16::from_f32(v).to_f32(),
+        })
+        .collect();
+    let widened = GpuBuffer::from_cpu(&ctx.stream, &rounded).unwrap();
+    let dims = TiedLmDims {
+        batch,
+        d_model,
+        vocab_padded,
+    };
+    let run = |widen: bool| -> Vec<u32> {
+        let logits = DtypedBuf::zeros(&ctx.stream, batch * vocab_padded, WeightDtype::F32).unwrap();
+        if widen {
+            gpu_gemm_ex_tied_lm_head_widened_raw(
+                &ctx,
+                logits.cached_ptr(),
+                (temporal.cached_ptr(), embed.cached_ptr()),
+                &widened,
+                dtype,
+                dims,
+            )
+            .unwrap();
+        } else {
+            gpu_gemm_ex_tied_lm_head_raw(
+                &ctx,
+                logits.cached_ptr(),
+                temporal.cached_ptr(),
+                embed.cached_ptr(),
+                dtype,
+                dims,
+            )
+            .unwrap();
+        }
+        let mut out = vec![0.0f32; batch * vocab_padded];
+        logits.download_f32(&ctx.stream, &mut out).unwrap();
+        out.iter().map(|v| v.to_bits()).collect()
+    };
+    assert_eq!(run(true), run(false), "{dtype:?}");
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_widened_tied_embedding_keeps_the_bits() {
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        assert_widened_embedding_keeps_the_bits(dtype);
+    }
 }

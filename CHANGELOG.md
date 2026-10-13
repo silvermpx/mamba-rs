@@ -430,6 +430,10 @@
 - `route::admit` refuses a deterministic training window whose GEMM
   operands pass 2^31 elements, as the Triad kernels do at their first
   GEMM; the census ledger lists that gap in every family.
+- `MambaGpuLM` with a tied bf16/f16 head widens the embedding to f32 once
+  in the deterministic mode instead of on every token, with the same
+  logits; `gpu::blas::gpu_gemm_ex_tied_lm_head_widened_raw` serves a
+  caller that keeps such a copy.
 
 ### Fixed
 

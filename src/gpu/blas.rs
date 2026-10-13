@@ -3322,8 +3322,8 @@ mod physical_graph_tests {
                 gemm_bi_tied_half_f32_in(
                     &ctx,
                     logits.cached_ptr(),
-                    temporal,
-                    embed,
+                    (temporal, embed),
+                    None,
                     dims,
                     &mut observer,
                 )
@@ -3382,8 +3382,8 @@ mod physical_graph_tests {
         gemm_bi_tied_half_f32_in(
             &ctx,
             logits.cached_ptr(),
-            temporal,
-            embed,
+            (temporal, embed),
+            None,
             dims,
             &mut observer,
         )
@@ -3547,14 +3547,17 @@ mod physical_graph_tests {
         let mismatch = gemm_bi_tied_half_f32_in(
             &ctx,
             0,
-            TypedPtr {
-                ptr: 0,
-                dtype: WeightDtype::Bf16,
-            },
-            TypedPtr {
-                ptr: 0,
-                dtype: WeightDtype::F16,
-            },
+            (
+                TypedPtr {
+                    ptr: 0,
+                    dtype: WeightDtype::Bf16,
+                },
+                TypedPtr {
+                    ptr: 0,
+                    dtype: WeightDtype::F16,
+                },
+            ),
+            None,
             dims,
             &mut observer,
         )
@@ -3563,14 +3566,17 @@ mod physical_graph_tests {
         let unsupported = gemm_bi_tied_half_f32_in(
             &ctx,
             0,
-            TypedPtr {
-                ptr: 0,
-                dtype: WeightDtype::F32,
-            },
-            TypedPtr {
-                ptr: 0,
-                dtype: WeightDtype::F32,
-            },
+            (
+                TypedPtr {
+                    ptr: 0,
+                    dtype: WeightDtype::F32,
+                },
+                TypedPtr {
+                    ptr: 0,
+                    dtype: WeightDtype::F32,
+                },
+            ),
+            None,
             dims,
             &mut observer,
         )
@@ -3707,11 +3713,14 @@ fn validate_tied_half_f32_ranges(
     )
 }
 
+/// `embed_widened`, when the caller keeps one, is the embedding already
+/// widened to f32 (`Vpad * D` floats): only the rows are widened then, and
+/// the exact reduction reads the same f32 values either way.
 fn gemm_bi_tied_half_f32_in<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     logits: cudarc::driver::sys::CUdeviceptr,
-    temporal: TypedPtr,
-    embed: TypedPtr,
+    (temporal, embed): (TypedPtr, TypedPtr),
+    embed_widened: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: TiedLmDims,
     observer: &mut O,
 ) -> Result<(), String> {
@@ -3733,8 +3742,13 @@ fn gemm_bi_tied_half_f32_in<O: PhysicalLaunchObserver>(
         dims: (dims.batch, dims.vocab_padded, dims.d_model),
     };
 
+    let embed_slot = if embed_widened.is_some() {
+        0
+    } else {
+        checked.embed_elements
+    };
     ctx.with_bi_upcast_scratch(
-        (checked.temporal_elements, checked.embed_elements, 0),
+        (checked.temporal_elements, embed_slot, 0),
         |temporal_f32, embed_f32, _| {
             if checked.temporal_elements != 0 {
                 bi_upcast_to_f32(
@@ -3746,23 +3760,29 @@ fn gemm_bi_tied_half_f32_in<O: PhysicalLaunchObserver>(
                     observer,
                 )?;
             }
-            if checked.embed_elements != 0 {
-                bi_upcast_to_f32(
-                    ctx,
-                    embed,
-                    embed_f32.cached_ptr(),
-                    checked.embed_elements,
-                    physical,
-                    observer,
-                )?;
-            }
+            let embed_f32 = match embed_widened {
+                Some(widened) => widened,
+                None => {
+                    if checked.embed_elements != 0 {
+                        bi_upcast_to_f32(
+                            ctx,
+                            embed,
+                            embed_f32.cached_ptr(),
+                            checked.embed_elements,
+                            physical,
+                            observer,
+                        )?;
+                    }
+                    embed_f32.cached_ptr()
+                }
+            };
             unsafe {
                 super::gemm_bi_triad::record_physical_exact_scalar_f32_backward_dx_ptrs(
                     ctx,
                     observer,
                     logits,
                     temporal_f32.cached_ptr(),
-                    embed_f32.cached_ptr(),
+                    embed_f32,
                     super::gemm_bi_triad::ScalarFallbackPhysicalContext {
                         dims: physical.dims,
                         dtype: physical.dtype,
@@ -3779,7 +3799,7 @@ fn gemm_bi_tied_half_f32_in<O: PhysicalLaunchObserver>(
 /// inputs once and reducing with the exact-scalar F32 NT route. The persistent
 /// scratch footprint is `(B + Vpad) * D * 4` bytes. Call this before freezing
 /// CUDA-graph-visible scratch; vendor modes and F32 heads need no reservation.
-#[cfg(any(feature = "hf", test))]
+#[cfg(test)]
 pub(crate) fn presize_tied_lm_head_scratch(
     ctx: &GpuCtx,
     dtype: WeightDtype,
@@ -3804,13 +3824,15 @@ pub(crate) fn presize_tied_lm_head_scratch(
 /// elements. All allocations must belong to `ctx` and remain live until the
 /// context stream completes (and through every replay that uses the pointers).
 ///
-/// In deterministic mode BF16/F16 inputs are each cast once into persistent
-/// F32 scratch, then reduced by the exact-scalar F32 NT route directly into
-/// `logits_ptr`; there is no half output round trip. This requires
-/// `(B + Vpad) * D * 4` bytes of shared conversion scratch. Call
-/// `presize_tied_lm_head_scratch` before graph capture can freeze scratch
-/// addresses. F32 delegates to [`gpu_gemm_bi_tied_lm_head_raw`], while vendor
-/// modes retain GemmEx with the context's canonical compute type.
+/// In deterministic mode BF16/F16 inputs are each cast once per call into
+/// persistent F32 scratch, then reduced by the exact-scalar F32 NT route
+/// directly into `logits_ptr`; there is no half output round trip. This
+/// requires `(B + Vpad) * D * 4` bytes of shared conversion scratch, which
+/// cannot grow inside a graph capture. A caller that calls it per token
+/// keeps the embedding widened instead
+/// ([`gpu_gemm_ex_tied_lm_head_widened_raw`]). F32 delegates to
+/// [`gpu_gemm_bi_tied_lm_head_raw`], while vendor modes retain GemmEx with
+/// the context's canonical compute type.
 ///
 /// Returns an error before enqueue for unhealthy context state, invalid or
 /// overflowing dimensions, null/misaligned/unmanaged spans, output overlap,
@@ -3840,14 +3862,17 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
         return gemm_bi_tied_half_f32_in(
             ctx,
             logits_ptr,
-            TypedPtr {
-                ptr: temporal_ptr,
-                dtype,
-            },
-            TypedPtr {
-                ptr: embed_ptr,
-                dtype,
-            },
+            (
+                TypedPtr {
+                    ptr: temporal_ptr,
+                    dtype,
+                },
+                TypedPtr {
+                    ptr: embed_ptr,
+                    dtype,
+                },
+            ),
+            None,
             dims,
             &mut observer,
         );
@@ -3862,6 +3887,71 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
         dims,
         compute,
     )
+}
+
+/// [`gpu_gemm_ex_tied_lm_head_raw`] for a caller that keeps the embedding
+/// widened to f32 as well (`embed_widened`, `Vpad * D` floats on `ctx`, the
+/// exact values of the `dtype` embedding at `embed_ptr`). The deterministic
+/// mode then widens only the rows, a `B * D` copy instead of the whole
+/// embedding, with the same bits; the vendor modes read the half embedding.
+pub fn gpu_gemm_ex_tied_lm_head_widened_raw(
+    ctx: &GpuCtx,
+    logits_ptr: cudarc::driver::sys::CUdeviceptr,
+    (temporal_ptr, embed_ptr): (
+        cudarc::driver::sys::CUdeviceptr,
+        cudarc::driver::sys::CUdeviceptr,
+    ),
+    embed_widened: &GpuBuffer,
+    dtype: WeightDtype,
+    dims: TiedLmDims,
+) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
+    if dtype == WeightDtype::F32 || ctx.gemm_mode() != GemmMode::Deterministic {
+        return gpu_gemm_ex_tied_lm_head_raw(ctx, logits_ptr, temporal_ptr, embed_ptr, dtype, dims);
+    }
+    let checked = checked_tied_lm_dims(dims)?;
+    if embed_widened.len() < checked.embed_elements {
+        return Err(format!(
+            "tied lm_head widened embedding holds {} values, {} needed",
+            embed_widened.len(),
+            checked.embed_elements
+        ));
+    }
+    let mut observer = NoPhysicalObserver;
+    gemm_bi_tied_half_f32_in(
+        ctx,
+        logits_ptr,
+        (
+            TypedPtr {
+                ptr: temporal_ptr,
+                dtype,
+            },
+            TypedPtr {
+                ptr: embed_ptr,
+                dtype,
+            },
+        ),
+        Some(embed_widened.cached_ptr()),
+        dims,
+        &mut observer,
+    )
+}
+
+/// Reserves the rows' conversion scratch of a tied half head whose caller
+/// keeps the embedding widened ([`gpu_gemm_ex_tied_lm_head_widened_raw`]):
+/// `B * D * 4` bytes. Call it before freezing CUDA-graph-visible scratch.
+#[cfg(feature = "hf")]
+pub(crate) fn presize_tied_lm_head_rows(
+    ctx: &GpuCtx,
+    dtype: WeightDtype,
+    dims: TiedLmDims,
+) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
+    if dtype == WeightDtype::F32 || ctx.gemm_mode() != GemmMode::Deterministic {
+        return Ok(());
+    }
+    let checked = checked_tied_lm_dims(dims)?;
+    ctx.with_bi_upcast_scratch((checked.temporal_elements, 0, 0), |_, _, _| Ok(()))
 }
 
 /// Vendor-only no-context twin of [`gpu_gemm_ex_tied_lm_head_raw`].

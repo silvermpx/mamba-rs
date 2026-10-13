@@ -11,7 +11,8 @@ use crate::config::ModelFamily;
 use crate::gpu::GpuOptions;
 use crate::gpu::blas::{
     TiedLmDims, TypedPtr, gpu_gemm_bi_forward_ptr, gpu_gemm_bi_tied_lm_head_raw,
-    gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw, presize_tied_lm_head_scratch,
+    gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw, gpu_gemm_ex_tied_lm_head_widened_raw,
+    presize_tied_lm_head_rows,
 };
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::context::{GemmMode, GpuCtx};
@@ -50,6 +51,11 @@ struct HeadWeights {
     embed: DtypedBuf,
     lm_head: Option<DtypedBuf>,
     dtype: WeightDtype,
+    /// A half embedding widened to f32 once, for a tied head in the
+    /// deterministic mode, whose exact reduction reads f32: widening it on
+    /// every token moved the whole embedding twice. Built at the first
+    /// such logits; the embedding never changes after construction.
+    embed_widened: Option<GpuBuffer>,
 }
 
 /// A language model on the GPU for any of the four families.
@@ -235,6 +241,7 @@ impl MambaGpuLM {
             embed: upload(&embed)?,
             lm_head,
             dtype,
+            embed_widened: None,
         };
         let head_rows = if matches!(dtype, WeightDtype::Bf16 | WeightDtype::F16)
             && backbone.temporal_dtype() != dtype
@@ -296,7 +303,9 @@ impl MambaGpuLM {
         if matches!(dtype, WeightDtype::Bf16 | WeightDtype::F16) {
             let ctx = self.backbone.ctx();
             if self.head.lm_head.is_none() {
-                presize_tied_lm_head_scratch(
+                // The deterministic head keeps the embedding widened once
+                // and converts only the rows per token.
+                presize_tied_lm_head_rows(
                     ctx,
                     dtype,
                     TiedLmDims {
@@ -533,10 +542,32 @@ impl MambaGpuLM {
         let stream: Arc<CudaStream> = self.backbone.stream().clone();
         let temporal_ptr = self.backbone.temporal_ptr();
         let (b, d, vp) = (self.batch, self.d_model, self.vocab_size_padded);
+        if self.head.dtype.is_half()
+            && self.head.lm_head.is_none()
+            && ctx.gemm_mode() == GemmMode::Deterministic
+            && self.head.embed_widened.is_none()
+        {
+            let widen = if self.head.dtype == WeightDtype::Bf16 {
+                &ctx.kernels.cast_bf16_to_f32
+            } else {
+                &ctx.kernels.cast_f16_to_f32
+            };
+            let widened = GpuBuffer::zeros(&stream, vp * d)?;
+            launch_cast(
+                &stream,
+                widen,
+                (widened.cached_ptr(), 4),
+                (self.head.embed.cached_ptr(), self.head.dtype.size_bytes()),
+                vp * d,
+                format_args!("widen the tied embedding"),
+            )?;
+            self.head.embed_widened = Some(widened);
+        }
         let HeadWeights {
             embed,
             lm_head,
             dtype,
+            embed_widened,
         } = &self.head;
 
         match *dtype {
@@ -602,18 +633,31 @@ impl MambaGpuLM {
                         None,
                         (b, d, vp),
                     )?,
-                    None => gpu_gemm_ex_tied_lm_head_raw(
-                        ctx,
-                        self.gpu_logits.cached_ptr(),
-                        rows_ptr,
-                        embed.cached_ptr(),
-                        dt,
-                        TiedLmDims {
+                    None => {
+                        let dims = TiedLmDims {
                             batch: b,
                             d_model: d,
                             vocab_padded: vp,
-                        },
-                    )?,
+                        };
+                        match embed_widened {
+                            Some(widened) => gpu_gemm_ex_tied_lm_head_widened_raw(
+                                ctx,
+                                self.gpu_logits.cached_ptr(),
+                                (rows_ptr, embed.cached_ptr()),
+                                widened,
+                                dt,
+                                dims,
+                            )?,
+                            None => gpu_gemm_ex_tied_lm_head_raw(
+                                ctx,
+                                self.gpu_logits.cached_ptr(),
+                                rows_ptr,
+                                embed.cached_ptr(),
+                                dt,
+                                dims,
+                            )?,
+                        }
+                    }
                 }
             }
         }
