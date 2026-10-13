@@ -204,6 +204,7 @@ fn train_weights_from_inference(w: &MambaWeights) -> TrainMambaWeights {
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
+        mlp: w.mlp.clone(),
     }
 }
 
@@ -232,5 +233,6 @@ fn inference_weights_from_train(tw: &TrainMambaWeights, template: &MambaWeights)
             })
             .collect(),
         norm_f_weight: tw.norm_f_weight.clone(),
+        mlp: tw.mlp.clone(),
     }
 }

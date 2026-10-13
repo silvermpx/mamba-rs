@@ -52,6 +52,7 @@ fn test_cfg() -> MambaConfig {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     }
 }
 
@@ -123,6 +124,17 @@ fn assert_snapshots_bit_eq(a: &MambaWeights, b: &MambaWeights, ctx_msg: &str) {
                     la.out_proj_b.as_slice(),
                     lb.out_proj_b.as_slice(),
                 ),
+            ]);
+        }
+        for (ma, mb) in a.mlp.iter().zip(b.mlp.iter()) {
+            v.extend([
+                (
+                    "mlp norm_weight",
+                    ma.norm_weight.as_slice(),
+                    mb.norm_weight.as_slice(),
+                ),
+                ("mlp fc1_w", ma.fc1_w.as_slice(), mb.fc1_w.as_slice()),
+                ("mlp fc2_w", ma.fc2_w.as_slice(), mb.fc2_w.as_slice()),
             ]);
         }
         v
@@ -246,6 +258,7 @@ fn forward_temporal_matches_cpu_training_forward() {
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
+        mlp: w.mlp.clone(),
     };
     let dims = MambaDims::from_config(&cfg, seq_len, input_dim);
     let di = cfg.d_inner();

@@ -78,6 +78,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
+        mlp: w.mlp.clone(),
     }
 }
 
@@ -100,6 +101,11 @@ fn flatten_cpu_grads(g: &TrainMambaWeights) -> Vec<f32> {
         out.extend_from_slice(&l.d_param);
         out.extend_from_slice(&l.out_proj_w);
         out.extend_from_slice(&l.out_proj_b);
+    }
+    for m in &g.mlp {
+        out.extend_from_slice(&m.norm_weight);
+        out.extend_from_slice(&m.fc1_w);
+        out.extend_from_slice(&m.fc2_w);
     }
     out.extend_from_slice(&g.norm_f_weight);
     out
@@ -132,6 +138,14 @@ fn grad_segments(cfg: &MambaConfig, input_dim: usize) -> Vec<(String, usize)> {
             (format!("L{li}.d_param"), di),
             (format!("L{li}.out_proj_w"), di * dm),
             (format!("L{li}.out_proj_b"), cfg.out_proj_bias_len()),
+        ]);
+    }
+    let hidden = cfg.mlp_hidden();
+    for li in (0..cfg.n_layers).filter(|_| hidden > 0) {
+        segs.extend([
+            (format!("mlp{li}.norm_weight"), dm),
+            (format!("mlp{li}.fc1_w"), dm * 2 * hidden),
+            (format!("mlp{li}.fc2_w"), hidden * dm),
         ]);
     }
     segs.push(("norm_f_weight".into(), dm));
@@ -188,6 +202,7 @@ fn m1_cpu_gpu_backward_parity_f32() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = cfg.d_model;
     let batch = 1;

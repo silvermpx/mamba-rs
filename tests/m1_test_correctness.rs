@@ -275,6 +275,7 @@ fn build_train_scaffolding(
             })
             .collect(),
         norm_f_weight: weights.norm_f_weight.clone(),
+        mlp: weights.mlp.clone(),
     };
 
     (tw, dims)
@@ -1596,6 +1597,7 @@ fn test_custom_config_small() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = 32;
     let bb = MambaBackbone::init(cfg, input_dim, 99);
@@ -1643,6 +1645,7 @@ fn test_custom_config_large() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = 256;
     let bb = MambaBackbone::init(cfg, input_dim, 77);
@@ -2208,6 +2211,7 @@ mod gpu_extra_tests {
             dt_rank: None,
             proj_bias: false,
             conv_bias: true,
+            d_intermediate: 0,
         };
         let input_dim = 32;
         let bb = MambaBackbone::init(cfg, input_dim, 99);
@@ -2266,10 +2270,11 @@ fn falcon_cfg() -> MambaConfig {
 }
 
 /// The decode of every input row in float64, transcribed from
-/// state-spaces/mamba's Mamba step and transformers' FalconMambaMixer: the
-/// in_proj and out_proj biases when the config has them, the conv bias when
-/// it has one, and with FalconMamba's norms the dt, B and C parts of the
-/// x_proj row each divided by its root mean square.
+/// state-spaces/mamba's Mamba step and Block and transformers'
+/// FalconMambaMixer: the in_proj and out_proj biases when the config has
+/// them, the conv bias when it has one, with FalconMamba's norms the dt, B
+/// and C parts of the x_proj row each divided by its root mean square, and
+/// the gated MLP's branch after every mixer when the model has one.
 fn f64_reference(
     w: &mamba_rs::MambaWeights,
     cfg: &MambaConfig,
@@ -2358,6 +2363,18 @@ fn f64_reference(
                     + (0..di)
                         .map(|c| y[c] * f(lw.out_proj_w[c * d + j]))
                         .sum::<f64>();
+            }
+            if let Some(m) = w.mlp.get(l) {
+                let h = m.hidden();
+                let r = rstd(&x, eps);
+                let n2: Vec<f64> = (0..d).map(|j| x[j] * r * f(m.norm_weight[j])).collect();
+                let up: Vec<f64> = (0..2 * h)
+                    .map(|k| (0..d).map(|j| n2[j] * f(m.fc1_w[j * 2 * h + k])).sum())
+                    .collect();
+                let act: Vec<f64> = (0..h).map(|k| up[k] * silu(up[h + k])).collect();
+                for (j, xj) in x.iter_mut().enumerate() {
+                    *xj += (0..h).map(|k| act[k] * f(m.fc2_w[k * d + j])).sum::<f64>();
+                }
             }
         }
         let r = rstd(&x, eps);
@@ -2549,6 +2566,7 @@ fn inference_weights(tw: &mamba_rs::train::weights::TrainMambaWeights) -> mamba_
             })
             .collect(),
         norm_f_weight: tw.norm_f_weight.clone(),
+        mlp: tw.mlp.clone(),
     }
 }
 
@@ -2599,7 +2617,8 @@ fn assert_central_differences(
 // =========================================================================
 
 /// The reference's options each alone and all together: `bias=True` on
-/// in_proj and out_proj, `conv_bias=False`, and an explicit `dt_rank`.
+/// in_proj and out_proj, `conv_bias=False`, an explicit `dt_rank`, and the
+/// gated MLP after every mixer (`d_intermediate`).
 fn variant_cfgs() -> Vec<(&'static str, MambaConfig)> {
     let base = MambaConfig {
         d_model: 32,
@@ -2630,11 +2649,19 @@ fn variant_cfgs() -> Vec<(&'static str, MambaConfig)> {
             },
         ),
         (
-            "all three with FalconMamba's norms",
+            "gated MLP 100 wide (128 hidden)",
+            MambaConfig {
+                d_intermediate: 100,
+                ..base
+            },
+        ),
+        (
+            "all of them with FalconMamba's norms",
             MambaConfig {
                 proj_bias: true,
                 conv_bias: false,
                 dt_rank: Some(7),
+                d_intermediate: 100,
                 bcdt_rms_eps: Some(1e-6),
                 ..base
             },
@@ -2657,6 +2684,51 @@ fn variant_weights(cfg: &MambaConfig, input_dim: usize, seed: u64) -> mamba_rs::
         }
     }
     w
+}
+
+/// The public block step runs the reference Block, the gated MLP branch
+/// included: block by block, then norm_f, it gives the backbone step's
+/// bits.
+#[test]
+fn block_steps_compose_the_backbone_step() {
+    use mamba_rs::{MambaLayerState, mamba_block_step, mamba_step_no_proj};
+    for (label, cfg) in variant_cfgs() {
+        let mut w = variant_weights(&cfg, cfg.d_model, 23);
+        w.input_proj_w.clear();
+        w.input_proj_b.clear();
+        let d = cfg.d_model;
+        let x: Vec<f32> = falcon_inputs(1, d);
+        let new_states = || {
+            (0..cfg.n_layers)
+                .map(|_| MambaLayerState::zeros(cfg.d_inner(), cfg.d_state, cfg.d_conv))
+                .collect::<Vec<_>>()
+        };
+        let mut want = vec![0f32; d];
+        let (mut states, mut scratch) = (new_states(), MambaStepScratch::new(&cfg));
+        mamba_step_no_proj(&x, &mut want, &w, &mut states, &mut scratch, &cfg);
+
+        let mut got = x.clone();
+        let (mut states, mut scratch) = (new_states(), MambaStepScratch::new(&cfg));
+        for (l, lw) in w.layers.iter().enumerate() {
+            mamba_block_step(
+                &mut got,
+                (lw, w.mlp.get(l)),
+                &mut states[l],
+                &mut scratch,
+                &cfg,
+            );
+        }
+        let mean_sq: f32 = got.iter().map(|v| v * v).sum::<f32>() / d as f32;
+        let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();
+        for (o, &nfw) in got.iter_mut().zip(&w.norm_f_weight) {
+            *o *= inv_rms * nfw;
+        }
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "{label}"
+        );
+    }
 }
 
 /// Every variant's decode against the float64 reference. The model
@@ -2710,6 +2782,20 @@ fn config_variants_decode_matches_the_f64_reference() {
                 .map(|(a, b)| (a - b).abs())
                 .fold(0f32, f32::max);
             assert!(diff < 1e-7, "{label}: against a zero conv bias {diff:.3e}");
+        }
+        if cfg.d_intermediate > 0 {
+            let mut no_mlp = w.clone();
+            for m in &mut no_mlp.mlp {
+                m.fc2_w.fill(0.0);
+            }
+            let moved = rel(
+                &decode(&no_mlp, cfg),
+                &f64_reference(&w, &cfg, input_dim, &inputs),
+            );
+            assert!(
+                moved > 1e-2,
+                "{label}: the MLP changed nothing ({moved:.3e})"
+            );
         }
         if cfg.proj_bias {
             let mut unbiased = w.clone();
@@ -2772,9 +2858,9 @@ fn config_variants_prompt_decode_and_trainer_agree() {
     }
 }
 
-/// The trainer's gradients of the biases and of dt_proj at its own rank
-/// against central differences; a model without a conv bias has no
-/// gradient for one.
+/// The trainer's gradients of the biases, of dt_proj at its own rank and of
+/// the gated MLP against central differences; a model without a conv bias
+/// has no gradient for one.
 #[test]
 fn config_variants_gradients_match_central_differences() {
     let (input_dim, seq_len) = (24usize, 5usize);
@@ -2795,6 +2881,11 @@ fn config_variants_gradients_match_central_differences() {
                     .iter()
                     .all(|l| l.in_proj_b.is_empty() && l.out_proj_b.is_empty())
             );
+        }
+        if cfg.d_intermediate > 0 {
+            checks.push(("mlp norm2", |w| &mut w.mlp[0].norm_weight));
+            checks.push(("mlp fc1", |w| &mut w.mlp[1].fc1_w));
+            checks.push(("mlp fc2", |w| &mut w.mlp[0].fc2_w));
         }
         if cfg.conv_bias {
             checks.push(("conv1d_bias", |w| &mut w.layers[0].conv1d_bias));

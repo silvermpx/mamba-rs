@@ -210,6 +210,7 @@ fn gpu_inference_prefill_matches_gpu_training_forward_sequential() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     run_case(&cfg, 20, 8, 0xC0FFEE, "seq-scan");
 }
@@ -230,6 +231,7 @@ fn gpu_inference_prefill_matches_gpu_training_forward_parallel_scan() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let t = mamba_rs::mamba1::gpu::forward::PARALLEL_SCAN_THRESHOLD + 77;
     run_case(&cfg, 20, t, 0xBEEF, "parallel-scan");

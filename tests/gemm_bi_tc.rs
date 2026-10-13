@@ -455,6 +455,7 @@ fn tc_mixed_training_is_bit_identical_across_runs() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let run = || -> (Vec<(u64, u64)>, u64) {
         let mut cpu = MambaWeights::init(&cfg, cfg.d_model, 0xDE7E_4213);

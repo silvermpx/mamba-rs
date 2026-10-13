@@ -5,6 +5,9 @@
 pub enum RemappedKey {
     /// Layer weight: (layer_index, field_name)
     Layer(usize, &'static str),
+    /// A tensor of a layer's gated MLP: (layer_index, `norm2`, `fc1` or
+    /// `fc2`)
+    Mlp(usize, &'static str),
     /// Final RMSNorm weight
     NormF,
     /// Embedding matrix (not a backbone weight)
@@ -38,6 +41,15 @@ pub fn remap_m1_hf_key(hf_key: &str) -> RemappedKey {
             Err(_) => return RemappedKey::Unknown,
         };
 
+        let mlp = match suffix {
+            "norm2.weight" => Some("norm2"),
+            "mlp.fc1.weight" => Some("fc1"),
+            "mlp.fc2.weight" => Some("fc2"),
+            _ => None,
+        };
+        if let Some(part) = mlp {
+            return RemappedKey::Mlp(layer_idx, part);
+        }
         let field = match suffix {
             "mixer.in_proj.weight" => "in_proj_w",
             "mixer.in_proj.bias" => "in_proj_b",
@@ -122,6 +134,22 @@ mod tests {
         // used to panic via out-of-range slicing (`&rest[dot + 1..]`).
         assert_eq!(remap_m1_hf_key("backbone.layers.0"), RemappedKey::Unknown);
         assert_eq!(remap_m1_hf_key("backbone.layers."), RemappedKey::Unknown);
+    }
+
+    #[test]
+    fn test_remap_mlp_keys() {
+        assert_eq!(
+            remap_m1_hf_key("backbone.layers.2.norm2.weight"),
+            RemappedKey::Mlp(2, "norm2")
+        );
+        assert_eq!(
+            remap_m1_hf_key("backbone.layers.0.mlp.fc1.weight"),
+            RemappedKey::Mlp(0, "fc1")
+        );
+        assert_eq!(
+            remap_m1_hf_key("backbone.layers.1.mlp.fc2.weight"),
+            RemappedKey::Mlp(1, "fc2")
+        );
     }
 
     #[test]

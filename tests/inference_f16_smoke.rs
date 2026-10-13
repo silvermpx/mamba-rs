@@ -29,6 +29,7 @@ fn m1_inference_f16_wrapper_smoke() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = cfg.d_model;
     let batch = 1;

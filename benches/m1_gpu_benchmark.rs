@@ -290,6 +290,7 @@ fn m1_gpu_benchmark() {
                 })
                 .collect(),
             norm_f_weight: cpu_weights.norm_f_weight.clone(),
+            mlp: cpu_weights.mlp.clone(),
         };
 
         let mut a_neg = vec![0.0f32; cfg.n_layers * di * ds];

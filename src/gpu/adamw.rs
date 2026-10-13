@@ -524,7 +524,7 @@ pub fn step_m1(
     let flat_base = grads.flat.cached_ptr();
 
     // Build paired iterator in the EXACT layout of `GpuMambaGrads::new`:
-    // input_proj_w, input_proj_b, [layers...], norm_f_weight.
+    // input_proj_w, input_proj_b, [layers...], [MLPs...], norm_f_weight.
     let mut pairs: Vec<(&GpuBuffer, &GradSlice)> =
         Vec::with_capacity(3 + 12 * weights.layers.len());
     pairs.push((&weights.input_proj_w, &grads.input_proj_w));
@@ -542,6 +542,11 @@ pub fn step_m1(
         pairs.push((&lw.d_param, &lg.d_param));
         pairs.push((&lw.out_proj_w, &lg.out_proj_w));
         pairs.push((&lw.out_proj_b, &lg.out_proj_b));
+    }
+    for (m, g) in weights.mlp.iter().zip(&grads.mlp) {
+        pairs.push((&m.norm_weight, &g.norm_weight));
+        pairs.push((&m.fc1_w, &g.fc1_w));
+        pairs.push((&m.fc2_w, &g.fc2_w));
     }
     pairs.push((&weights.norm_f_weight, &grads.norm_f_weight));
 
@@ -581,6 +586,11 @@ pub fn step_m1_capturable(
         pairs.push((&lw.d_param, &lg.d_param, true));
         pairs.push((&lw.out_proj_w, &lg.out_proj_w, false));
         pairs.push((&lw.out_proj_b, &lg.out_proj_b, true));
+    }
+    for (m, g) in weights.mlp.iter().zip(&grads.mlp) {
+        pairs.push((&m.norm_weight, &g.norm_weight, true));
+        pairs.push((&m.fc1_w, &g.fc1_w, false));
+        pairs.push((&m.fc2_w, &g.fc2_w, false));
     }
     pairs.push((&weights.norm_f_weight, &grads.norm_f_weight, true));
     for (w, g, no_decay) in pairs {
@@ -866,7 +876,8 @@ pub fn step_multi(
 
 /// The tensors of one M1 layer in the walks below, in `GpuMambaGrads::new`
 /// order: norm, in_proj w and b, conv w and b, x_proj, dt_proj w and b,
-/// a_log, D, out_proj w and b.
+/// a_log, D, out_proj w and b. The gated MLPs (norm, fc1, fc2) follow the
+/// layers, norm_f closes the walk.
 const M1_LAYER_TENSORS: usize = 12;
 
 /// The M1 tensor walk in the EXACT `GpuMambaGrads::new` layout, f32 lane
@@ -901,6 +912,11 @@ pub fn m1_specs(
         specs.push(f32_spec(&lw.out_proj_w, &lg.out_proj_w, false));
         specs.push(f32_spec(&lw.out_proj_b, &lg.out_proj_b, true));
     }
+    for (m, g) in weights.mlp.iter().zip(&grads.mlp) {
+        specs.push(f32_spec(&m.norm_weight, &g.norm_weight, true));
+        specs.push(f32_spec(&m.fc1_w, &g.fc1_w, false));
+        specs.push(f32_spec(&m.fc2_w, &g.fc2_w, false));
+    }
     specs.push(f32_spec(&weights.norm_f_weight, &grads.norm_f_weight, true));
     specs
 }
@@ -919,12 +935,14 @@ pub fn m1_specs_mixed(
     let mut specs = m1_specs(&weights.master, grads);
     // Positions in the walk: 0 input_proj_w (bulk), then per layer at
     // base+1 in_proj_w, base+5 x_proj_w, base+6 dt_proj_w, base+10
-    // out_proj_w.
+    // out_proj_w, then per MLP its fc1 and fc2, then norm_f.
     let mut wire = |idx: usize, slot: &crate::gpu::buffers::WeightSliceDyn| {
         debug_assert_eq!(specs[idx].len, slot.len_elems());
         specs[idx].out = slot.ptr();
         specs[idx].out_elt_bytes = out_elt;
     };
+    let mlp0 = 2 + weights.compute.layers.len() * M1_LAYER_TENSORS;
+    let norm_f = mlp0 + 3 * weights.compute.mlp.len();
     wire(0, &weights.compute.input_proj_w);
     for (li, cw) in weights.compute.layers.iter().enumerate() {
         let base = 2 + li * M1_LAYER_TENSORS;
@@ -933,12 +951,16 @@ pub fn m1_specs_mixed(
         wire(base + 6, &cw.dt_proj_w);
         wire(base + 10, &cw.out_proj_w);
     }
+    for (mi, cm) in weights.compute.mlp.iter().enumerate() {
+        let base = mlp0 + mi * 3;
+        wire(base + 1, &cm.fc1_w);
+        wire(base + 2, &cm.fc2_w);
+    }
     // The f32-stays-f32 shadows ride the same kernel: their compute copy
     // is the new master value verbatim, so the fused step writes it and
     // the per-tensor copy walk disappears. `a_log` is deliberately absent
     // - its compute copy has no training-path reader (the forward and
     // backward ride a_neg_all, recomputed from the master every step).
-    let last = specs.len() - 1;
     let mut wire_f32 = |idx: usize, slot: &crate::gpu::buffers::WeightSliceDyn| {
         debug_assert_eq!(specs[idx].len, slot.len_elems());
         specs[idx].out = slot.ptr();
@@ -956,7 +978,10 @@ pub fn m1_specs_mixed(
         wire_f32(base + 9, &cw.d_param);
         wire_f32(base + 11, &cw.out_proj_b);
     }
-    wire_f32(last, &weights.compute.norm_f_weight);
+    for (mi, cm) in weights.compute.mlp.iter().enumerate() {
+        wire_f32(mlp0 + mi * 3, &cm.norm_weight);
+    }
+    wire_f32(norm_f, &weights.compute.norm_f_weight);
     specs
 }
 

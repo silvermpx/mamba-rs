@@ -44,6 +44,7 @@ fn tiny_cfg() -> MambaConfig {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     }
 }
 
@@ -423,6 +424,7 @@ fn backbone_grad_parity_multi_layer(dtype: WeightDtype) {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let dims = dims_for(&cfg, 1, 4);
     let (w_f32, w_mix) = build_weights(&cfg, 0xCAFEBABE);

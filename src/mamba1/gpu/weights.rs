@@ -54,6 +54,18 @@ pub trait MambaWeightsView {
     fn norm_f_weight(&self) -> cudarc::driver::sys::CUdeviceptr;
     fn n_layers(&self) -> usize;
     fn layer(&self, i: usize) -> &Self::Layer;
+    /// Layer `i`'s gated MLP, `None` for a model without one.
+    fn mlp(&self, i: usize) -> Option<MambaMlpPtrs>;
+}
+
+/// Device pointers of one layer's gated MLP: the projections in the
+/// container's bulk dtype, the norm in f32.
+#[derive(Clone, Copy)]
+pub struct MambaMlpPtrs {
+    pub norm_weight: cudarc::driver::sys::CUdeviceptr,
+    pub fc1_w: (cudarc::driver::sys::CUdeviceptr, WeightDtype),
+    pub fc2_w: (cudarc::driver::sys::CUdeviceptr, WeightDtype),
+    pub hidden: usize,
 }
 
 /// A tensor's pointer, `None` when the model does not have it.
@@ -105,6 +117,14 @@ impl MambaLayerWeightsView for GpuMambaLayerWeights {
 
 impl MambaWeightsView for GpuMambaWeights {
     type Layer = GpuMambaLayerWeights;
+    fn mlp(&self, i: usize) -> Option<MambaMlpPtrs> {
+        self.mlp.get(i).map(|m| MambaMlpPtrs {
+            norm_weight: m.norm_weight.ptr(),
+            fc1_w: (m.fc1_w.ptr(), WeightDtype::F32),
+            fc2_w: (m.fc2_w.ptr(), WeightDtype::F32),
+            hidden: m.hidden,
+        })
+    }
     fn has_input_proj(&self) -> bool {
         !self.input_proj_w.is_empty()
     }
@@ -166,6 +186,14 @@ impl MambaLayerWeightsView for GpuMambaMixedLayerWeights {
 
 impl MambaWeightsView for GpuMambaMixedWeights {
     type Layer = GpuMambaMixedLayerWeights;
+    fn mlp(&self, i: usize) -> Option<MambaMlpPtrs> {
+        self.mlp.get(i).map(|m| MambaMlpPtrs {
+            norm_weight: m.norm_weight.ptr(),
+            fc1_w: (m.fc1_w.ptr(), m.fc1_w.dtype()),
+            fc2_w: (m.fc2_w.ptr(), m.fc2_w.dtype()),
+            hidden: m.hidden,
+        })
+    }
     fn has_input_proj(&self) -> bool {
         self.input_proj_w.len_elems() > 0
     }
@@ -208,6 +236,14 @@ pub struct GpuMambaLayerWeights {
     pub out_proj_b: WeightSlice,
 }
 
+/// One layer's gated MLP in the flat inference buffer.
+pub struct GpuMambaMlpWeights {
+    pub norm_weight: WeightSlice,
+    pub fc1_w: WeightSlice,
+    pub fc2_w: WeightSlice,
+    pub hidden: usize,
+}
+
 /// GPU weights for the full Mamba backbone (inference — flat buffer).
 pub struct GpuMambaWeights {
     pub flat: GpuBuffer,
@@ -215,6 +251,9 @@ pub struct GpuMambaWeights {
     pub input_proj_b: WeightSlice,
     pub layers: Vec<GpuMambaLayerWeights>,
     pub norm_f_weight: WeightSlice,
+    /// The gated MLP of each layer, after every other weight; empty for a
+    /// model without one.
+    pub mlp: Vec<GpuMambaMlpWeights>,
 }
 
 impl GpuMambaWeights {
@@ -250,7 +289,12 @@ impl GpuMambaWeights {
         let total = cpu.input_proj_w.len()
             + cpu.input_proj_b.len()
             + cfg.n_layers * per_layer
-            + cpu.norm_f_weight.len();
+            + cpu.norm_f_weight.len()
+            + cpu
+                .mlp
+                .iter()
+                .map(|m| m.norm_weight.len() + m.fc1_w.len() + m.fc2_w.len())
+                .sum::<usize>();
 
         // The uploads run on the stream after the zeroing memset.
         let flat = GpuBuffer::zeros(stream, total)?;
@@ -289,6 +333,15 @@ impl GpuMambaWeights {
         }
 
         let norm_f_weight = ws!(&cpu.norm_f_weight);
+        let mut mlp = Vec::with_capacity(cpu.mlp.len());
+        for m in &cpu.mlp {
+            mlp.push(GpuMambaMlpWeights {
+                norm_weight: ws!(&m.norm_weight),
+                fc1_w: ws!(&m.fc1_w),
+                fc2_w: ws!(&m.fc2_w),
+                hidden: m.hidden(),
+            });
+        }
         debug_assert_eq!(
             off, total,
             "weight layout mismatch: off={off} total={total}"
@@ -300,6 +353,7 @@ impl GpuMambaWeights {
             input_proj_b,
             layers,
             norm_f_weight,
+            mlp,
         })
     }
 
@@ -313,6 +367,7 @@ impl GpuMambaWeights {
             input_proj_b: WeightSlice::from_offset(base, 0, 0),
             layers: Vec::new(),
             norm_f_weight: WeightSlice::from_offset(base, 0, 0),
+            mlp: Vec::new(),
             flat,
         })
     }
@@ -344,6 +399,14 @@ pub struct GpuMambaMixedLayerWeights {
     pub out_proj_b: WeightSliceDyn,    // f32, empty without proj_bias
 }
 
+/// One layer's gated MLP in the mixed container: bulk projections, f32 norm.
+pub struct GpuMambaMixedMlpWeights {
+    pub norm_weight: WeightSliceDyn, // f32
+    pub fc1_w: WeightSliceDyn,       // bulk
+    pub fc2_w: WeightSliceDyn,       // bulk
+    pub hidden: usize,
+}
+
 pub struct GpuMambaMixedWeights {
     /// Arena holding bulk weights in bulk_dtype (bf16/f16).
     pub bulk_arena: GpuByteBuffer,
@@ -355,6 +418,9 @@ pub struct GpuMambaMixedWeights {
     pub input_proj_b: WeightSliceDyn, // f32
     pub layers: Vec<GpuMambaMixedLayerWeights>,
     pub norm_f_weight: WeightSliceDyn, // f32
+    /// The gated MLP of each layer, after every other weight in both
+    /// arenas; empty for a model without one.
+    pub mlp: Vec<GpuMambaMixedMlpWeights>,
 }
 
 impl GpuMambaMixedWeights {
@@ -387,9 +453,13 @@ impl GpuMambaMixedWeights {
 
         // Use actual CPU weight lengths — HF Mamba has empty input_proj_w/b
         // (identity_proj), while MambaBackbone::init populates both to d_model.
-        let bulk_elems = cpu.input_proj_w.len() + cfg.n_layers * per_layer_bulk;
-        let f32_elems =
-            cpu.input_proj_b.len() + cfg.n_layers * per_layer_f32 + cpu.norm_f_weight.len();
+        let mlp_bulk: usize = cpu.mlp.iter().map(|m| m.fc1_w.len() + m.fc2_w.len()).sum();
+        let mlp_f32: usize = cpu.mlp.iter().map(|m| m.norm_weight.len()).sum();
+        let bulk_elems = cpu.input_proj_w.len() + cfg.n_layers * per_layer_bulk + mlp_bulk;
+        let f32_elems = cpu.input_proj_b.len()
+            + cfg.n_layers * per_layer_f32
+            + cpu.norm_f_weight.len()
+            + mlp_f32;
 
         let bulk_arena = GpuByteBuffer::zeros(stream, bulk_elems * bulk_dtype.size_bytes())?;
         let f32_arena = GpuByteBuffer::zeros(stream, f32_elems * 4)?;
@@ -451,6 +521,15 @@ impl GpuMambaMixedWeights {
         }
 
         let norm_f_weight = alloc_f32(&cpu.norm_f_weight)?;
+        let mut mlp = Vec::with_capacity(cpu.mlp.len());
+        for m in &cpu.mlp {
+            mlp.push(GpuMambaMixedMlpWeights {
+                norm_weight: alloc_f32(&m.norm_weight)?,
+                fc1_w: alloc_bulk(&m.fc1_w)?,
+                fc2_w: alloc_bulk(&m.fc2_w)?,
+                hidden: m.hidden(),
+            });
+        }
 
         debug_assert_eq!(bulk_off, bulk_elems * bulk_dtype.size_bytes());
         debug_assert_eq!(f32_off, f32_elems * 4);
@@ -463,6 +542,7 @@ impl GpuMambaMixedWeights {
             input_proj_b,
             layers,
             norm_f_weight,
+            mlp,
         })
     }
 }
@@ -505,12 +585,31 @@ impl GpuMambaTrainLayerWeights {
     }
 }
 
+/// GPU training weights of one layer's gated MLP.
+pub struct GpuMambaTrainMlpWeights {
+    /// The pre-MLP RMSNorm scale: `[d_model]`.
+    pub norm_weight: GpuBuffer,
+    /// The up projection `[d_model, 2 * hidden]`.
+    pub fc1_w: GpuBuffer,
+    /// The down projection `[hidden, d_model]`.
+    pub fc2_w: GpuBuffer,
+}
+
+impl GpuMambaTrainMlpWeights {
+    /// The hidden width these weights carry.
+    pub fn hidden(&self) -> usize {
+        self.fc2_w.len() / self.norm_weight.len().max(1)
+    }
+}
+
 /// GPU training weights for the full Mamba backbone (per-tensor allocation).
 pub struct GpuMambaTrainWeights {
     pub input_proj_w: GpuBuffer,
     pub input_proj_b: GpuBuffer,
     pub layers: Vec<GpuMambaTrainLayerWeights>,
     pub norm_f_weight: GpuBuffer,
+    /// The gated MLP of each layer; empty for a model without one.
+    pub mlp: Vec<GpuMambaTrainMlpWeights>,
 }
 
 impl GpuMambaTrainWeights {
@@ -537,11 +636,23 @@ impl GpuMambaTrainWeights {
             });
         }
 
+        let mlp = cpu
+            .mlp
+            .iter()
+            .map(|m| {
+                Ok(GpuMambaTrainMlpWeights {
+                    norm_weight: GpuBuffer::from_cpu(stream, &m.norm_weight)?,
+                    fc1_w: GpuBuffer::from_cpu(stream, &m.fc1_w)?,
+                    fc2_w: GpuBuffer::from_cpu(stream, &m.fc2_w)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(Self {
             input_proj_w: GpuBuffer::from_cpu(stream, &cpu.input_proj_w)?,
             input_proj_b: GpuBuffer::from_cpu(stream, &cpu.input_proj_b)?,
             layers,
             norm_f_weight: GpuBuffer::from_cpu(stream, &cpu.norm_f_weight)?,
+            mlp,
         })
     }
 }
@@ -579,6 +690,13 @@ impl GpuMambaLayerGrads {
     }
 }
 
+/// Gradient views of one layer's gated MLP.
+pub struct GpuMambaMlpGrads {
+    pub norm_weight: GradSlice,
+    pub fc1_w: GradSlice,
+    pub fc2_w: GradSlice,
+}
+
 /// Flat gradient buffer with GradSlice views for all Mamba parameters.
 ///
 /// One `zero()` call clears all gradients. Industry standard layout
@@ -588,6 +706,11 @@ pub struct GpuMambaGrads {
     pub input_proj_w: GradSlice,
     pub input_proj_b: GradSlice,
     pub layers: Vec<GpuMambaLayerGrads>,
+    /// The gated MLP of each layer, after the layers and before norm_f,
+    /// the CPU trainer's tensor order, so the two trainers' grad arenas
+    /// and optimizer states are interchangeable; empty for a model
+    /// without one.
+    pub mlp: Vec<GpuMambaMlpGrads>,
     pub norm_f_weight: GradSlice,
 }
 
@@ -644,7 +767,9 @@ impl GpuMambaGrads {
             + di
             + di * dm
             + opb;
-        let total = ipw_len + ipb_len + cfg.n_layers * per_layer + dm;
+        let hidden = cfg.mlp_hidden();
+        let per_mlp = if hidden > 0 { dm + 3 * dm * hidden } else { 0 };
+        let total = ipw_len + ipb_len + cfg.n_layers * (per_layer + per_mlp) + dm;
 
         let flat = GpuBuffer::zeros(stream, total)?;
         let base = flat.cached_ptr();
@@ -680,6 +805,14 @@ impl GpuMambaGrads {
             });
         }
 
+        let mut mlp = Vec::new();
+        for _ in (0..cfg.n_layers).filter(|_| hidden > 0) {
+            mlp.push(GpuMambaMlpGrads {
+                norm_weight: gs!(dm),
+                fc1_w: gs!(dm * 2 * hidden),
+                fc2_w: gs!(hidden * dm),
+            });
+        }
         let norm_f_weight = gs!(dm);
         debug_assert_eq!(off, total, "grad layout mismatch: off={off} total={total}");
 
@@ -688,6 +821,7 @@ impl GpuMambaGrads {
             input_proj_w,
             input_proj_b,
             layers,
+            mlp,
             norm_f_weight,
         })
     }

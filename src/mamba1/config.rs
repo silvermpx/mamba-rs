@@ -53,12 +53,22 @@ pub struct MambaConfig {
     /// every official checkpoint has. Without one the conv has no bias to
     /// apply or train.
     pub conv_bias: bool,
+
+    /// The gated MLP after the mixer in every layer (`d_intermediate` in
+    /// the reference config); 0 means no MLP. The hidden width is this
+    /// value rounded up to a multiple of 128 (see [`Self::mlp_hidden`]).
+    pub d_intermediate: usize,
 }
 
 impl MambaConfig {
     /// Inner dimension (expanded). Used for in_proj, SSM, conv1d.
     pub fn d_inner(&self) -> usize {
         self.expand * self.d_model
+    }
+
+    /// The gated MLP's hidden width, 0 when the model has none.
+    pub fn mlp_hidden(&self) -> usize {
+        crate::mlp::mlp_hidden(self.d_intermediate)
     }
 
     /// The dt projection's rank: [`Self::dt_rank`] when given, else
@@ -98,6 +108,12 @@ impl MambaConfig {
         }
         if self.d_model > envelope::MAX_WIDTH {
             return Err(format!("d_model ({}) must be <= 2^20", self.d_model));
+        }
+        if self.d_intermediate > envelope::MAX_WIDTH {
+            return Err(format!(
+                "d_intermediate ({}) must be <= 2^20",
+                self.d_intermediate
+            ));
         }
         if self.n_layers > envelope::MAX_LAYERS {
             return Err(format!("n_layers ({}) must be <= 4096", self.n_layers));
@@ -140,8 +156,8 @@ impl MambaConfig {
     }
 
     /// One layer's parameters, exact in u128 (`None` past it): the norm,
-    /// the in, x, dt and out projections and their biases, the conv, A and
-    /// D.
+    /// the in, x, dt and out projections and their biases, the conv, A, D
+    /// and the gated MLP.
     pub(crate) fn layer_params(&self) -> Option<u128> {
         let w = |v: usize| v as u128;
         let (d, ds, dc) = (w(self.d_model), w(self.d_state), w(self.d_conv));
@@ -152,6 +168,7 @@ impl MambaConfig {
             w(usize::from(self.proj_bias)),
             w(usize::from(self.conv_bias)),
         );
+        let h = w(self.mlp_hidden());
         envelope::sum_of_products(&[
             &[d],
             &[d, 2, di],
@@ -165,6 +182,8 @@ impl MambaConfig {
             &[di],
             &[di, d],
             &[proj_bias, d],
+            &[if h > 0 { d } else { 0 }],
+            &[3, d, h],
         ])
     }
 
@@ -206,6 +225,7 @@ impl Default for MambaConfig {
             dt_rank: None,
             proj_bias: false,
             conv_bias: true,
+            d_intermediate: 0,
         }
     }
 }
@@ -219,13 +239,14 @@ mod tests {
     /// widths and tensor sizes exactly, each tensor within one allocation.
     #[test]
     fn validate_passes_only_exact_widths() {
-        let fields: [fn(&mut MambaConfig, usize); 6] = [
+        let fields: [fn(&mut MambaConfig, usize); 7] = [
             |c, v| c.d_model = v,
             |c, v| c.d_state = v,
             |c, v| c.d_conv = v,
             |c, v| c.expand = v,
             |c, v| c.n_layers = v,
             |c, v| c.dt_rank = Some(v),
+            |c, v| c.d_intermediate = v,
         ];
         sweep(MambaConfig::default(), &fields, |c| {
             if c.validate().is_err() {
@@ -239,6 +260,7 @@ mod tests {
                 (c.dt_rank(), di),
                 (di, c.d_state),
                 (di, c.d_conv),
+                (d, 2 * c.mlp_hidden()),
             ] {
                 let n = a.saturating_mul(b);
                 assert!(n <= isize::MAX as usize / 4, "{c:?}");
@@ -268,6 +290,7 @@ mod tests {
             dt_rank: Some(9),
             proj_bias: true,
             conv_bias: false,
+            d_intermediate: 100,
             ..odd
         };
         for cfg in [MambaConfig::default(), odd, variant] {

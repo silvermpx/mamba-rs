@@ -5,6 +5,7 @@
 //! into batched SGEMM calls across all timesteps, requiring flat `[T * dim]`
 //! intermediate buffers.
 
+use crate::mlp::cpu::{GatedMlpBackwardScratch, GatedMlpRowsScratch};
 use crate::ops::dims::MambaDims;
 use crate::ops::lane::LaneGemm;
 use crate::precision::WeightDtype;
@@ -37,6 +38,8 @@ pub struct PhaseScratch {
     pub dt_in_flat: Vec<f32>,
     /// Batched dt_proj output: `[T * d_inner]`.
     pub delta_raw_flat: Vec<f32>,
+    /// The gated MLP's window buffers, grown on first use.
+    pub(crate) mlp: GatedMlpRowsScratch,
     /// The precision of the forward (see `CpuOptions`).
     pub(crate) dtype: WeightDtype,
     pub(crate) gemm: LaneGemm,
@@ -57,6 +60,7 @@ impl PhaseScratch {
             xdbl_flat: vec![0.0; t * (dims.dt_rank + 2 * dims.d_state)],
             dt_in_flat: vec![0.0; t * dims.dt_rank],
             delta_raw_flat: vec![0.0; t * dims.d_inner],
+            mlp: GatedMlpRowsScratch::default(),
             dtype: WeightDtype::F32,
             gemm: LaneGemm::default(),
         }
@@ -122,6 +126,8 @@ pub struct BackwardPhaseScratch {
     /// The conv register at the step the backward is at, rebuilt from the
     /// tape: `[d_inner * d_conv]`.
     pub(crate) conv_win: Vec<f32>,
+    /// The gated MLP's backward buffers, grown on first use.
+    pub(crate) mlp: GatedMlpBackwardScratch,
     /// The precision of the backward, the forward's.
     pub(crate) dtype: WeightDtype,
     pub(crate) gemm: LaneGemm,
@@ -159,6 +165,7 @@ impl BackwardPhaseScratch {
             seg_h: Vec::new(),
             seg_da: Vec::new(),
             conv_win: vec![0.0; di * dims.d_conv],
+            mlp: GatedMlpBackwardScratch::default(),
             dtype: WeightDtype::F32,
             gemm: LaneGemm::default(),
         }

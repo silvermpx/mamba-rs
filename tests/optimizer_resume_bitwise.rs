@@ -257,6 +257,7 @@ fn m1_resume_with_recurrent_state_is_bit_continuous() {
             dt_rank: None,
             proj_bias: false,
             conv_bias: true,
+            d_intermediate: 0,
         }
     }
     fn m1_weights(c: &MambaConfig) -> MambaWeights {

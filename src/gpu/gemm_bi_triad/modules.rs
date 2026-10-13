@@ -8103,6 +8103,11 @@ const MAMBA1_SOURCE_FRAGMENTS: &[SourceFragment] = &[
         source: include_str!("../../../kernels/mamba_ssm_elementwise.cu"),
         allowed_quoted_includes: &["_typed_prelude.cuh"],
     },
+    SourceFragment {
+        logical_name: "kernels/gated_mlp.cu",
+        source: include_str!("../../../kernels/gated_mlp.cu"),
+        allowed_quoted_includes: &["_typed_prelude.cuh"],
+    },
 ];
 
 /// The kernels the families share through the context.
@@ -15432,6 +15437,7 @@ mod tests {
         "kernels/conv1d.cu",
         "kernels/activations.cu",
         "kernels/mamba_ssm_elementwise.cu",
+        "kernels/gated_mlp.cu",
     ];
 
     const SHARED_FRAGMENTS: &[&str] = &[

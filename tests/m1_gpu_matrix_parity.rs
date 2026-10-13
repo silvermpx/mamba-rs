@@ -57,6 +57,7 @@ fn cases() -> Vec<(&'static str, MambaConfig)> {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     vec![
         ("d_inner 10", base),
@@ -108,12 +109,21 @@ fn cases() -> Vec<(&'static str, MambaConfig)> {
             },
         ),
         (
+            "gated MLP 100 wide (128 hidden)",
+            MambaConfig {
+                d_model: 12,
+                d_intermediate: 100,
+                ..base
+            },
+        ),
+        (
             "every variant with FalconMamba's norms",
             MambaConfig {
                 d_model: 24,
                 dt_rank: Some(4),
                 proj_bias: true,
                 conv_bias: false,
+                d_intermediate: 100,
                 bcdt_rms_eps: Some(1e-6),
                 ..base
             },
@@ -192,6 +202,12 @@ fn drawn(cfg: &MambaConfig, input_dim: usize, seed: u64) -> MambaWeights {
     let d = det(w.norm_f_weight.len(), seed + 7, 0.2);
     for (x, dv) in w.norm_f_weight.iter_mut().zip(d) {
         *x = 1.0 + dv;
+    }
+    for (l, m) in w.mlp.iter_mut().enumerate() {
+        let d = det(m.norm_weight.len(), seed * 100 + l as u64 * 10 + 6, 0.2);
+        for (x, dv) in m.norm_weight.iter_mut().zip(d) {
+            *x = 1.0 + dv;
+        }
     }
     w
 }
@@ -372,6 +388,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
+        mlp: w.mlp.clone(),
     }
 }
 
@@ -395,6 +412,17 @@ fn named(g: &TrainMambaWeights) -> Vec<(String, &[f32])> {
             ("d", &lw.d_param),
             ("out_proj_w", &lw.out_proj_w),
             ("out_proj_b", &lw.out_proj_b),
+        ] {
+            out.push((format!("layer{l}.{name}"), v.as_slice()));
+        }
+    }
+    // The gated MLPs sit between the layers and norm_f in the arena, the
+    // CPU trainer's order.
+    for (l, m) in g.mlp.iter().enumerate() {
+        for (name, v) in [
+            ("mlp_norm", &m.norm_weight),
+            ("mlp_fc1", &m.fc1_w),
+            ("mlp_fc2", &m.fc2_w),
         ] {
             out.push((format!("layer{l}.{name}"), v.as_slice()));
         }

@@ -65,6 +65,10 @@ fn layer_bulk_dtype<W: MambaWeightsView>(weights: &W) -> Result<WeightDtype, Str
         ] {
             observe(&format!("layer {layer_index} {name}"), dtype)?;
         }
+        if let Some(m) = weights.mlp(layer_index) {
+            observe(&format!("layer {layer_index} mlp fc1"), m.fc1_w.1)?;
+            observe(&format!("layer {layer_index} mlp fc2"), m.fc2_w.1)?;
+        }
     }
     Ok(half_dtype.unwrap_or(WeightDtype::F32))
 }
@@ -392,7 +396,8 @@ impl PrefillPooledGraph {
         let input_ptr = input_flat.cached_ptr();
         let pooled_ptr = pooled_sum.cached_ptr();
         let bulk_dtype = layer_bulk_dtype(weights)?;
-        ctx.presize_mixed_graph_scratch_m1(&scratch.dims, bulk_dtype)?;
+        let mlp_hidden = weights.mlp(0).map_or(0, |m| m.hidden);
+        ctx.presize_mixed_graph_scratch_m1(&scratch.dims, mlp_hidden, bulk_dtype)?;
         let has_gemm_work = scratch.dims.batch != 0
             && scratch.dims.seq_len != 0
             && scratch.dims.mamba_input_dim != 0
@@ -870,6 +875,24 @@ fn prefill_body<W: MambaWeightsView>(
             lw.out_proj_b(),
             (bt, di, dm),
         )?;
+
+        // The gated MLP: its norm takes the block output's pending add into
+        // out_flat, and its own output is left pending in `residual`.
+        if let Some(m) = weights.mlp(layer_idx) {
+            let (stream_rows, rms) = (
+                scratch.out_flat.cached_ptr(),
+                scratch.rms_discard.cached_ptr(),
+            );
+            let bufs =
+                super::mlp::branch_bufs(scratch.mlp.as_mut(), (bt, m.hidden), "prefill scratch")?;
+            super::mlp::pending_f32(
+                ctx,
+                m,
+                (stream_rows, &mut scratch.residual, rms),
+                bufs,
+                (bt, dm, dims.rms_norm_eps),
+            )?;
+        }
 
         // F6, the residual add of this block's output, rides in the next
         // layer's norm or in norm_f below.
@@ -1459,6 +1482,19 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
             lw.out_proj_b(),
             (bt, di, dm),
         )?;
+
+        // The gated MLP: its norm takes the block output's pending add into
+        // the f32 residual, and its own output is left pending in out_flat.
+        if let Some(m) = weights.mlp(layer_idx) {
+            let ptrs = (
+                scratch.residual.cached_ptr(),
+                scratch.out_flat.cached_ptr(),
+                scratch.rms_discard.cached_ptr(),
+            );
+            let bufs =
+                super::mlp::branch_bufs(scratch.mlp.as_mut(), (bt, m.hidden), "prefill scratch")?;
+            super::mlp::pending_typed(ctx, m, ptrs, bufs, (bt, dm, dims.rms_norm_eps), dt)?;
+        }
 
         // F6, the f32 residual add of this block's output, rides in the
         // next layer's norm or in norm_f below.

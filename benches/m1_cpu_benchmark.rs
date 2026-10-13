@@ -147,6 +147,7 @@ fn m1_cpu_benchmark() {
                 })
                 .collect(),
             norm_f_weight: inf_w.norm_f_weight.clone(),
+            mlp: inf_w.mlp.clone(),
         };
 
         let mut a_neg = vec![0.0f32; cfg.n_layers * di * ds];
@@ -298,6 +299,7 @@ fn m1_cpu_benchmark() {
                 })
                 .collect(),
             norm_f_weight: inf_w.norm_f_weight.clone(),
+            mlp: inf_w.mlp.clone(),
         };
 
         let mut a_neg = vec![0.0f32; cfg.n_layers * di * ds];

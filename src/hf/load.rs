@@ -9,6 +9,7 @@ use crate::module::MambaBackbone;
 
 use super::config_json::{ModelFamily, parse_config_json};
 use super::keys::{RemappedKey, remap_m1_hf_key};
+use super::load_mamba3::read_mlp;
 use super::source::Source;
 
 /// Loaded HF Mamba model components.
@@ -56,6 +57,18 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
             hf_cfg.d_model
         ));
     }
+    if hf_cfg.n_layers == 0 || hf_cfg.n_layers > crate::config::envelope::MAX_LAYERS {
+        return Err(format!(
+            "n_layers {} out of supported range (1..=4096)",
+            hf_cfg.n_layers
+        ));
+    }
+    if hf_cfg.d_intermediate > crate::config::envelope::MAX_WIDTH {
+        return Err(format!(
+            "d_intermediate {} out of supported range (0..=2^20)",
+            hf_cfg.d_intermediate
+        ));
+    }
     let vocab_size_padded = (hf_cfg.vocab_size + 63) & !63;
     let embed_len = vocab_size_padded
         .checked_mul(hf_cfg.d_model)
@@ -65,6 +78,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
     let mut norm_f_weight = vec![0.0f32; hf_cfg.d_model];
     let (mut embed_found, mut norm_f_found) = (false, false);
     let mut layer_weights: Vec<Option<LayerAccum>> = (0..hf_cfg.n_layers).map(|_| None).collect();
+    let hidden = crate::mlp::mlp_hidden(hf_cfg.d_intermediate);
 
     let names = src.names().to_vec();
     for name in &names {
@@ -106,6 +120,27 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
                 let data = src.read(name)?;
                 let accum = layer_weights[idx].get_or_insert_with(LayerAccum::default);
                 accum.set(field, data)?;
+            }
+            // The gated MLP's tensors are read whole once every name is
+            // known; here each is held to the shape the config gives it.
+            RemappedKey::Mlp(idx, part) => {
+                let d = hf_cfg.d_model;
+                if hidden == 0 || idx >= hf_cfg.n_layers {
+                    return Err(format!(
+                        "unexpected tensor {name}: the config has no gated MLP in layer {idx}"
+                    ));
+                }
+                let want = match part {
+                    "norm2" => vec![d],
+                    "fc1" => vec![2 * hidden, d],
+                    _ => vec![d, hidden],
+                };
+                if src.shape(name) != Some(want.as_slice()) {
+                    return Err(format!(
+                        "tensor {name}: shape {:?}, expected {want:?}",
+                        src.shape(name)
+                    ));
+                }
             }
             // A tensor this model has no place for is a part it does
             // not model. Loading without it would run another network.
@@ -158,6 +193,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         dt_rank: hf_cfg.dt_rank,
         proj_bias: hf_cfg.use_bias,
         conv_bias: hf_cfg.use_conv_bias,
+        d_intermediate: hf_cfg.d_intermediate,
         ..MambaConfig::default()
     };
 
@@ -170,11 +206,17 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let mlp = (0..hf_cfg.n_layers)
+        .filter(|_| hidden > 0)
+        .map(|i| read_mlp(&mut src, i, hf_cfg.d_model, hidden))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let weights = MambaWeights {
         input_proj_w: vec![],
         input_proj_b: vec![],
         layers,
         norm_f_weight,
+        mlp,
     };
 
     let backbone = MambaBackbone::new(weights, mamba_cfg, mamba_cfg.d_model)?;

@@ -74,6 +74,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
+        mlp: w.mlp.clone(),
     }
 }
 
@@ -348,6 +349,7 @@ fn run_oracle(input_dim: usize) {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let seq_len = 4;
     let dims = MambaDims::from_config(&cfg, seq_len, input_dim);

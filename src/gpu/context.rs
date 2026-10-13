@@ -26,11 +26,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_GPU_CTX_TOKEN: AtomicU64 = AtomicU64::new(1);
 
-fn m1_mixed_graph_max_dim(dims: &crate::mamba1::gpu::forward::GpuMambaDims) -> usize {
+/// The widest row any Mamba-1 GEMM reads or writes, the gated MLP's up
+/// projection (`2 * mlp_hidden` wide) included.
+fn m1_mixed_graph_max_dim(
+    dims: &crate::mamba1::gpu::forward::GpuMambaDims,
+    mlp_hidden: usize,
+) -> usize {
     dims.d_model
         .max(2 * dims.d_inner)
         .max(dims.xdbl_dim)
         .max(dims.mamba_input_dim)
+        .max(2 * mlp_hidden)
 }
 
 // An explicit compare-exchange loop: `fetch_update` is deprecated from
@@ -838,9 +844,10 @@ impl GpuCtx {
     /// inside the captured body never grows (a lazy grow during capture
     /// fails the capture; one after capture frees pointers a previously
     /// captured graph still references). Sizing covers every step GEMM
-    /// (in_proj / x_proj / dt_proj / out_proj fwd, dW, dX) at
-    /// `m = batch·seq_len`. No-op for f32 or when the batch-invariant
-    /// flag is off (the captured body then never touches this scratch).
+    /// (in_proj / x_proj / dt_proj / out_proj and the gated MLP's fc1 /
+    /// fc2: fwd, dW, dX) at `m = batch·seq_len`. No-op for f32 or when the
+    /// batch-invariant flag is off (the captured body then never touches
+    /// this scratch).
     pub fn presize_bi_upcast_scratch_for_train(
         &self,
         cfg: &MambaConfig,
@@ -855,13 +862,15 @@ impl GpuCtx {
         let dm = cfg.d_model;
         let di = cfg.d_inner();
         let xproj_out = cfg.dt_rank() + 2 * cfg.d_state;
+        let h = cfg.mlp_hidden();
         // Largest single GEMM operand dim and largest K×N weight across the
         // step's GEMMs; every slot request (m·k, k·n, m·n) is ≤ this bound.
-        let max_dim = dm.max(2 * di).max(xproj_out);
+        let max_dim = dm.max(2 * di).max(xproj_out).max(2 * h);
         let max_kn = (dm * 2 * di)
             .max(di * xproj_out)
             .max(cfg.dt_rank() * di)
-            .max(di * dm);
+            .max(di * dm)
+            .max(dm * 2 * h);
         let elems = (m * max_dim).max(max_kn);
         self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))
     }
@@ -890,12 +899,14 @@ impl GpuCtx {
         let dm = cfg.d_model;
         let di = cfg.d_inner();
         let xproj_out = cfg.dt_rank() + 2 * cfg.d_state;
-        let max_dim = dm.max(2 * di).max(xproj_out).max(input_dim);
+        let h = cfg.mlp_hidden();
+        let max_dim = dm.max(2 * di).max(xproj_out).max(input_dim).max(2 * h);
         let max_kn = (dm * 2 * di)
             .max(di * xproj_out)
             .max(cfg.dt_rank() * di)
             .max(di * dm)
-            .max(input_dim * dm);
+            .max(input_dim * dm)
+            .max(dm * 2 * h);
         let elems = (m * max_dim).max(max_kn);
         self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))
     }
@@ -927,17 +938,27 @@ impl GpuCtx {
         self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))
     }
 
+    /// Size the staging and upcast scratch for every GEMM of a Mamba-1
+    /// window of `dims`, a gated MLP `mlp_hidden` wide included (0 without
+    /// one).
     pub(crate) fn presize_mixed_graph_scratch_m1(
         &self,
         dims: &crate::mamba1::gpu::forward::GpuMambaDims,
+        mlp_hidden: usize,
         dtype: WeightDtype,
     ) -> Result<(), String> {
         let max_kn = (dims.d_model * 2 * dims.d_inner)
             .max(dims.d_inner * dims.xdbl_dim)
             .max(dims.dt_rank * dims.d_inner)
             .max(dims.d_inner * dims.d_model)
-            .max(dims.mamba_input_dim * dims.d_model);
-        self.presize_gemm_scratch(dims.bt(), m1_mixed_graph_max_dim(dims), max_kn, dtype)
+            .max(dims.mamba_input_dim * dims.d_model)
+            .max(dims.d_model * 2 * mlp_hidden);
+        self.presize_gemm_scratch(
+            dims.bt(),
+            m1_mixed_graph_max_dim(dims, mlp_hidden),
+            max_kn,
+            dtype,
+        )
     }
 
     pub(crate) fn presize_mixed_graph_scratch_m3(
@@ -1980,8 +2001,9 @@ impl GpuCtx {
     /// a staging pointer and a later call grew the buffer, the freed
     /// allocation would be dereferenced on replay (CUDA_ERROR_ILLEGAL_ADDRESS
     /// or silent corruption). Sizes for the worst-case step-time GEMM
-    /// operand (in_proj input = batch × d_model, the largest staging consumer
-    /// in step_kernels). Idempotent — safe to call multiple times.
+    /// operand (in_proj input = batch × d_model, or the gated MLP's fc2
+    /// input = batch × hidden when wider). Idempotent — safe to call
+    /// multiple times.
     pub fn presize_half_staging_for_step(
         &self,
         cfg: &MambaConfig,
@@ -1994,7 +2016,7 @@ impl GpuCtx {
         let dm = cfg.d_model;
         let di = cfg.d_inner();
         let dt_rank = cfg.dt_rank();
-        let max_in_elems = batch * dm.max(di).max(dt_rank);
+        let max_in_elems = batch * dm.max(di).max(dt_rank).max(cfg.mlp_hidden());
         let bytes = max_in_elems * dtype.size_bytes();
         self.ensure_half_staging(bytes)
     }
@@ -2038,7 +2060,7 @@ impl GpuCtx {
         let dm = cfg.d_model;
         let di = cfg.d_inner();
         let dt_rank = cfg.dt_rank();
-        let max_dim = dm.max(di).max(dt_rank);
+        let max_dim = dm.max(di).max(dt_rank).max(cfg.mlp_hidden());
         let bytes = batch * seq_len * max_dim * dtype.size_bytes();
         self.ensure_half_staging(bytes)
     }
@@ -2344,7 +2366,10 @@ mod tests {
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
         };
-        assert_eq!(m1_mixed_graph_max_dim(&dims), 258);
+        assert_eq!(m1_mixed_graph_max_dim(&dims, 0), 258);
+        // A gated MLP wider than the two inner projection's rows sets the
+        // bound with its up projection.
+        assert_eq!(m1_mixed_graph_max_dim(&dims, 256), 512);
     }
 
     #[test]

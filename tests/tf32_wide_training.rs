@@ -34,6 +34,7 @@ fn one_step(d_model: usize, batch: usize, seq_len: usize) {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let w = MambaWeights::init(&cfg, d_model, 5);
     let session = TrainSessionCfg {

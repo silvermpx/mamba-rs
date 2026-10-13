@@ -89,6 +89,7 @@ fn trainers(device: Device, seq_len: usize) -> Vec<(&'static str, Trainer)> {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let m2 = Mamba2Config {
         d_model: D_MODEL,

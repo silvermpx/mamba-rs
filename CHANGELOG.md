@@ -227,6 +227,12 @@
   The CPU training passes refuse dims whose options differ from the
   weights: `MambaDims::new` describes the default options, and a model
   with others builds its dims with `MambaDims::from_config`.
+- Mamba-1 takes the reference's gated MLP after the mixer
+  (`MambaConfig::d_intermediate`, the `GatedMLP` of `mamba_ssm`, hidden
+  width rounded up to 128) on the CPU and the GPU, in inference and
+  training and in every precision, as Mamba-2 and Mamba-3 do. Original-
+  format checkpoints with `d_intermediate` load with it instead of being
+  refused, and saved models keep it.
 
 ### Changed
 
@@ -509,6 +515,10 @@
   bias and as the Mamba-2 and Mamba-3 trainers already did. A Mamba-1
   model trained with weight decay moves on the input projection's and the
   conv's biases.
+- `mamba_block_step` takes the layer's gated MLP beside its weights,
+  `(&MambaLayerWeights, Option<&GatedMlpLayerWeights>)`, and runs the
+  whole reference Block, the MLP branch included. It panics when the MLP
+  disagrees with the config.
 
 ### Fixed
 
@@ -608,6 +618,10 @@
   put a block per row on the grid's y axis and failed to launch past its
   extent. The 32-bit offsets the kernel takes now bound one launch's rows
   rather than the whole product.
+- The Mamba-1 checkpoint loader bounds `n_layer` (at most 4096) and
+  `d_intermediate` (at most 2^20) before sizing anything from them, as it
+  bounds `vocab_size` and `d_model`; a hostile `config.json` could demand
+  an arbitrary allocation or overflow the hidden width.
 
 ## 0.7.5 (2026-09-23)
 

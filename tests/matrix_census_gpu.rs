@@ -423,7 +423,7 @@ fn configs() -> Vec<Cfg> {
             ..MambaConfig::default()
         }),
         // Mamba-1 with in_proj and out_proj biases, without the conv bias,
-        // and with a dt rank of its own.
+        // with a dt rank of its own and a gated MLP after every mixer.
         Cfg::M1(MambaConfig {
             d_model: 24,
             d_state: 8,
@@ -433,6 +433,7 @@ fn configs() -> Vec<Cfg> {
             dt_rank: Some(5),
             proj_bias: true,
             conv_bias: false,
+            d_intermediate: 100,
             ..MambaConfig::default()
         }),
         Cfg::M1(MambaConfig {

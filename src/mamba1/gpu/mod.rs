@@ -6,6 +6,7 @@
 //! - `forward`, `backward`, `forward_mixed`, `backward_mixed`: the f32 and
 //!   the mixed-precision training passes
 //! - `conv`: the depthwise conv launches they share, at any width
+//! - `mlp`: the gated MLP after the mixer, on every path
 //! - `trainer`, `training_graph`: the training step and its captured graph
 //! - `weights`, `weights_mixed_train`: device weights
 
@@ -16,6 +17,7 @@ pub mod forward;
 pub mod forward_mixed;
 pub mod inference;
 pub(crate) mod mixer_norms;
+pub mod mlp;
 pub mod prefill;
 pub mod trainer;
 pub mod training_graph;

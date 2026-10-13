@@ -96,6 +96,7 @@ fn print_m1_prefill_digests() {
             dt_rank: None,
             proj_bias: false,
             conv_bias: true,
+            d_intermediate: 0,
         };
         for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
             let (window, steps) = run(cfg, batch, t, dtype);

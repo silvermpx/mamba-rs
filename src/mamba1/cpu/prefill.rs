@@ -38,11 +38,12 @@ use rayon::prelude::*;
 
 use crate::mamba1::state::MambaState;
 use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
+use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 use crate::ops::lane::{LaneGemm, input_rows};
-use crate::ops::norms::bcdt_rms_norm;
+use crate::ops::norms::{bcdt_rms_norm, rms_norm_weighted};
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
 
@@ -131,6 +132,8 @@ pub struct PrefillScratch {
     /// The input rows as the input projection multiplies them in a reduced
     /// precision.
     input: Vec<f32>,
+    /// The gated MLP's window buffers, grown on first use.
+    mlp: GatedMlpRowsScratch,
     /// The precision of the prefill (see `CpuOptions`).
     dtype: WeightDtype,
     gemm: LaneGemm,
@@ -170,6 +173,7 @@ impl PrefillScratch {
             out: vec![0.0; t * dims.d_model],
             conv_reg: vec![0.0; di * dims.d_conv],
             input: Vec::new(),
+            mlp: GatedMlpRowsScratch::default(),
             dtype: WeightDtype::F32,
             gemm: LaneGemm::default(),
         }
@@ -717,6 +721,23 @@ pub fn forward_mamba_backbone_prefill_mode(
                 }
             },
         );
+
+        // The MLP branch of a model that has one, over every row.
+        if let Some(m) = w.mlp.get(layer_idx) {
+            scratch.mlp.dtype = dtype;
+            gated_mlp_rows(
+                &mut temporal_out[..t_len * dm],
+                t_len,
+                m,
+                &mut scratch.mlp,
+                gemm,
+                |dst, src| {
+                    zip_rows(mode, (dst, dm), (src, dm), |d_row, s_row| {
+                        rms_norm_weighted(d_row, s_row, &m.norm_weight[..dm], eps);
+                    });
+                },
+            );
+        }
     }
 
     // norm_f at EVERY position, dims eps.

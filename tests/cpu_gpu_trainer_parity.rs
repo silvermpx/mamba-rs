@@ -42,6 +42,7 @@ fn m1_cfg() -> MambaConfig {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     }
 }
 
@@ -53,13 +54,14 @@ fn falcon_cfg() -> MambaConfig {
     }
 }
 
-/// Mamba-1 with in_proj and out_proj biases, without the conv bias, and
-/// with a dt rank of its own.
+/// Mamba-1 with in_proj and out_proj biases, without the conv bias, with
+/// a dt rank of its own and a gated MLP after every mixer.
 fn m1_variant_cfg() -> MambaConfig {
     MambaConfig {
         dt_rank: Some(5),
         proj_bias: true,
         conv_bias: false,
+        d_intermediate: 100,
         ..m1_cfg()
     }
 }
@@ -123,6 +125,7 @@ fn pairs(scan: ScanMode) -> Vec<(AnyCpuTrainer, AnyGpuTrainer)> {
         .dtype(WeightDtype::F32)
         .scan_mode(scan);
     let m1 = MambaWeights::init(&m1_cfg(), INPUT_DIM, 1);
+    let m1_variant = MambaWeights::init(&m1_variant_cfg(), INPUT_DIM, 5);
     let m2 = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 2);
     let siso = Mamba3Weights::init(&siso_cfg(), INPUT_DIM, 3);
     let mimo = Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 4);
@@ -130,6 +133,14 @@ fn pairs(scan: ScanMode) -> Vec<(AnyCpuTrainer, AnyGpuTrainer)> {
         (
             MambaCpuTrainer::new(&m1, m1_cfg(), s).unwrap().into(),
             MambaGpuTrainer::new(&m1, m1_cfg(), s, opts).unwrap().into(),
+        ),
+        (
+            MambaCpuTrainer::new(&m1_variant, m1_variant_cfg(), s)
+                .unwrap()
+                .into(),
+            MambaGpuTrainer::new(&m1_variant, m1_variant_cfg(), s, opts)
+                .unwrap()
+                .into(),
         ),
         (
             Mamba2CpuTrainer::new(&m2, m2_cfg(), s).unwrap().into(),
@@ -342,7 +353,9 @@ fn train_alike(mut cpu: AnyCpuTrainer, mut gpu: AnyGpuTrainer, scan: ScanMode, c
         diff < 2e-2 * moved,
         "{case}: the devices differ by {diff:e} where training moved {moved:e}"
     );
-    if family == ModelFamily::Mamba2 {
+    // The two devices hold the moments in one tensor order, so a state
+    // moves from either trainer to the other.
+    if matches!(family, ModelFamily::Mamba1 | ModelFamily::Mamba2) {
         let (sc, sg) = (
             cpu.optimizer_state().unwrap(),
             gpu.optimizer_state().unwrap(),
@@ -441,7 +454,7 @@ fn half_lanes_track_the_cpu_lane() {
                     .into(),
             ),
             (
-                "Mamba-1 biases, no conv bias, dt rank 5",
+                "Mamba-1 biases, no conv bias, dt rank 5, gated MLP",
                 [
                     MambaCpuTrainer::new(&variant, m1_variant_cfg(), s)
                         .unwrap()

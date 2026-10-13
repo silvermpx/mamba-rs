@@ -2,8 +2,8 @@
 // up projection holds the value columns, then the gate columns, and the
 // activation is value * silu(gate). The projections themselves are GEMMs.
 //
-// Composed into the Mamba-3 SISO, Mamba-3 MIMO and Mamba-2 modules, which
-// run its two kernels for the MLP after the mixer.
+// Composed into the Mamba-1, Mamba-2, Mamba-3 SISO and Mamba-3 MIMO
+// modules, which run its two kernels for the MLP after the mixer.
 
 #include "_typed_prelude.cuh"
 

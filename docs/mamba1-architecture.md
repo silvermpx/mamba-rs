@@ -55,8 +55,9 @@ Three levels matching the original architecture:
 // Level 1: Pure mixer — no norm, no residual (like Mamba class in mamba_simple.py)
 mamba_layer_step(input, output, layer_weights, state, scratch, cfg);
 
-// Level 2: Block — pre-norm + mixer + residual (like Block class in block.py)
-mamba_block_step(hidden, layer_weights, state, scratch, cfg);
+// Level 2: Block — pre-norm + mixer + residual, then the gated MLP branch
+// for a model with one (like Block class in block.py)
+mamba_block_step(hidden, (layer_weights, mlp), state, scratch, cfg);
 
 // Level 3: Full backbone — input_proj + N blocks + norm_f
 mamba_step(input, output, weights, states, scratch, cfg, input_dim);
@@ -88,11 +89,21 @@ Two states per layer persist from token to token:
 | D | [d_inner] | n/a |
 | out_proj | [d_inner, d_model] | with `proj_bias` |
 | norm | [d_model] | n/a |
+| norm2 (MLP) | [d_model] | n/a |
+| fc1 (MLP) | [d_model, 2*hidden] | No |
+| fc2 (MLP) | [hidden, d_model] | No |
 
 `dt_rank` is `ceil(d_model / 16)` unless the config gives one. The three
 options are the reference's `dt_rank`, `bias` and `conv_bias` (in the HF
 format `time_step_rank`, `use_bias` and `use_conv_bias`); an absent bias
 is an empty tensor, so a model without one holds and saves nothing for it.
+
+A config with `d_intermediate > 0` puts the reference `GatedMLP` after the
+mixer in every layer: `x += fc2(value * silu(gate))` with
+`[value | gate] = fc1(norm2(x))`, the hidden width `d_intermediate` rounded
+up to a multiple of 128 (the `Block` of `mamba_ssm/modules/block.py` with
+the MLP of `modules/mlp.py`). The official Mamba-1 checkpoints have none;
+the same MLP serves Mamba-2 and Mamba-3.
 
 ## Numeric routes: the scan and the GEMM
 

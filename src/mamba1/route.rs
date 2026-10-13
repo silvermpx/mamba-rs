@@ -70,14 +70,16 @@ impl IntWidths {
 /// The linear layers of a training step, `(name, input width, output
 /// width)`; a model without an input projection takes rows `d_model` wide,
 /// which no other layer's operands undercut.
-fn linears(cfg: &MambaConfig, input_dim: usize) -> [(&'static str, usize, usize); 5] {
-    let di = cfg.d_inner();
+fn linears(cfg: &MambaConfig, input_dim: usize) -> [(&'static str, usize, usize); 7] {
+    let (di, h) = (cfg.d_inner(), cfg.mlp_hidden());
     [
         ("input_proj", input_dim, cfg.d_model),
         ("in_proj", cfg.d_model, 2 * di),
         ("x_proj", di, cfg.xdbl_dim()),
         ("dt_proj", cfg.dt_rank(), di),
         ("out_proj", di, cfg.d_model),
+        ("mlp fc1", cfg.d_model, 2 * h),
+        ("mlp fc2", h, cfg.d_model),
     ]
 }
 

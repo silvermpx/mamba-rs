@@ -23,6 +23,7 @@ use super::flat::{MambaBackboneFlat, MambaLayerFlat};
 use super::forward::scan_advance;
 use super::scratch::BackwardPhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
+use crate::mlp::cpu::gated_mlp_rows_backward;
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::fast_exp_scalar;
 use crate::ops::norms::bcdt_rms_norm_backward;
@@ -474,6 +475,19 @@ pub fn backward_mamba_backbone_batched(
     // --- Mamba layers in reverse (batched) ---
     for layer_idx in (0..n_layers).rev() {
         let a_neg_start = layer_idx * a_neg_per_layer;
+
+        // The gated MLP's branch first: it ran after the mixer.
+        if let Some(m) = mamba_w.mlp.get(layer_idx) {
+            scratch.mlp.dtype = scratch.dtype;
+            gated_mlp_rows_backward(
+                &mut d_temporal_flat[..seq_len * dm],
+                &acts.mlp_in[layer_idx],
+                seq_len,
+                (m, &mut d_mamba.mlp[layer_idx]),
+                &mut scratch.mlp,
+                dims.rms_norm_eps,
+            );
+        }
 
         backward_mamba_layer_batched(
             d_temporal_flat,

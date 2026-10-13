@@ -7,9 +7,11 @@
 //! does, so the CPU and GPU targets of one model agree.
 
 use super::weights::TrainMambaWeights;
-use crate::ops::blas::matvec_forward;
+use crate::mlp::GatedMlpLayerWeights;
+use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows};
+use crate::ops::blas::{matvec_forward, sgemm_forward};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
-use crate::ops::norms::bcdt_rms_norm;
+use crate::ops::norms::{bcdt_rms_norm, rms_norm_weighted};
 
 /// Scratch buffers for single-step (T=1) target Mamba forward.
 pub struct MambaTargetScratch {
@@ -36,6 +38,8 @@ pub struct MambaTargetScratch {
     pub a_exp: Vec<f32>,
     /// Contiguous `da` staging for SIMD exp `[d_state]` (CPU perf rule 4).
     pub da: Vec<f32>,
+    /// The gated MLP's buffers, grown on first use.
+    pub(crate) mlp: GatedMlpRowsScratch,
 }
 
 impl MambaTargetScratch {
@@ -58,6 +62,7 @@ impl MambaTargetScratch {
             h: vec![0.0; d_inner * d_state],
             a_exp: vec![0.0; d_inner * d_state],
             da: vec![0.0; d_state],
+            mlp: GatedMlpRowsScratch::default(),
         }
     }
 
@@ -99,7 +104,7 @@ pub fn forward_mamba_target_step(
         );
     }
 
-    for lw in &w.layers {
+    for (l, lw) in w.layers.iter().enumerate() {
         // Save residual
         scratch.residual[..dm].copy_from_slice(&output[..dm]);
 
@@ -226,6 +231,9 @@ pub fn forward_mamba_target_step(
         for (o, &r) in output[..dm].iter_mut().zip(scratch.residual[..dm].iter()) {
             *o += r;
         }
+        if let Some(m) = w.mlp.get(l) {
+            mlp_row(&mut output[..dm], m, &mut scratch.mlp, rms_norm_eps);
+        }
     }
 
     // Final RmsNorm (norm_f)
@@ -234,6 +242,14 @@ pub fn forward_mamba_target_step(
     for (o, &nfw) in output[..dm].iter_mut().zip(w.norm_f_weight[..dm].iter()) {
         *o *= inv_rms * nfw;
     }
+}
+
+/// One row through a layer's gated MLP branch, in f32 as the target
+/// forwards run.
+fn mlp_row(row: &mut [f32], m: &GatedMlpLayerWeights, s: &mut GatedMlpRowsScratch, eps: f32) {
+    gated_mlp_rows(row, 1, m, s, sgemm_forward, |dst, src| {
+        rms_norm_weighted(dst, src, &m.norm_weight, eps);
+    });
 }
 
 /// Scratch buffers for multi-step target Mamba forward (burn-in).
@@ -266,6 +282,8 @@ pub struct MambaTargetSeqScratch {
     pub da: Vec<f32>,
     /// Sequence length (number of timesteps to process).
     pub seq_len: usize,
+    /// The gated MLP's buffers, grown on first use.
+    pub(crate) mlp: GatedMlpRowsScratch,
 }
 
 impl MambaTargetSeqScratch {
@@ -302,6 +320,7 @@ impl MambaTargetSeqScratch {
             a_exp: vec![0.0; nl * di * ds],
             da: vec![0.0; ds],
             seq_len,
+            mlp: GatedMlpRowsScratch::default(),
         }
     }
 
@@ -495,6 +514,14 @@ pub fn forward_mamba_target_sequence(
                 .zip(scratch.residual[..dm].iter())
             {
                 *t += r;
+            }
+            if let Some(m) = w.mlp.get(layer_idx) {
+                mlp_row(
+                    &mut scratch.temporal[..dm],
+                    m,
+                    &mut scratch.mlp,
+                    rms_norm_eps,
+                );
             }
         }
         // Per-timestep norm_f is intentionally NOT applied here: only the

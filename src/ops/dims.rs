@@ -36,6 +36,9 @@ pub struct MambaDims {
     pub proj_bias: bool,
     /// A bias on the conv (see [`MambaConfig::conv_bias`]).
     pub conv_bias: bool,
+    /// The gated MLP's hidden width, 0 without one (see
+    /// [`MambaConfig::mlp_hidden`]).
+    pub mlp_hidden: usize,
 }
 
 impl MambaDims {
@@ -43,7 +46,7 @@ impl MambaDims {
     ///
     /// Accepts a tuple to stay within clippy's 7-argument limit. The
     /// options take the reference's defaults (no projection biases, a conv
-    /// bias); a model with others builds its dims with
+    /// bias, no gated MLP); a model with others builds its dims with
     /// [`Self::from_config`], which the training entry points check.
     /// Order: `(d_model, d_inner, d_state, d_conv, dt_rank, seq_len, mamba_input_dim, n_layers)`.
     pub fn new(
@@ -72,6 +75,7 @@ impl MambaDims {
             bcdt_rms_eps: None,
             proj_bias: false,
             conv_bias: true,
+            mlp_hidden: 0,
         }
     }
 
@@ -91,6 +95,7 @@ impl MambaDims {
         dims.bcdt_rms_eps = config.bcdt_rms_eps;
         dims.proj_bias = config.proj_bias;
         dims.conv_bias = config.conv_bias;
+        dims.mlp_hidden = config.mlp_hidden();
         dims
     }
 }

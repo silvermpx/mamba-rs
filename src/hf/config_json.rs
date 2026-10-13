@@ -46,9 +46,10 @@ struct RawConfig {
     mixer_rms_eps: Option<f32>,
     // The HF format sizes the mixer by `intermediate_size`.
     intermediate_size: Option<usize>,
+    // The gated MLP after every mixer (original format only).
+    d_intermediate: Option<usize>,
     // Backbone parts the original format can carry. Each one this build
     // does not model is refused rather than loaded without it.
-    d_intermediate: Option<usize>,
     rms_norm: Option<bool>,
     attn_layer_idx: Option<Vec<usize>>,
     // The original format names the mixer under `ssm_cfg.layer`; a config
@@ -89,6 +90,8 @@ pub struct HfMambaConfig {
     /// always does).
     pub use_bias: bool,
     pub use_conv_bias: bool,
+    /// The gated MLP after every mixer (`d_intermediate`, 0 for none).
+    pub d_intermediate: usize,
     /// RMSNorm epsilon from the HF config. `1e-5` is the state-spaces
     /// default; FalconMamba ships `1e-6`. Callers should plumb this into
     /// every norm kernel instead of hardcoding the constant so both
@@ -157,13 +160,6 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
     // FalconMamba is Mamba-1 with RMS norms over dt, B and C in every mixer.
     let bcdt_rms_eps = (raw.model_type.as_deref() == Some("falcon_mamba"))
         .then(|| raw.mixer_rms_eps.unwrap_or(1e-6));
-    if raw.d_intermediate.is_some_and(|d| d > 0) {
-        return Err(
-            "config.json: d_intermediate > 0 (an MLP after every mixer) \
-                    is not supported for Mamba-1 yet"
-                .into(),
-        );
-    }
     if raw.rms_norm == Some(false) {
         return Err("config.json: rms_norm = false (LayerNorm) is not supported yet".into());
     }
@@ -240,6 +236,7 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
             .and_then(|c| c.conv_bias)
             .or(raw.use_conv_bias)
             .unwrap_or(true),
+        d_intermediate: raw.d_intermediate.unwrap_or(0),
         rms_norm_eps,
         bcdt_rms_eps,
     })
@@ -517,11 +514,7 @@ mod tests {
     fn unmodelled_backbone_parts_are_refused() {
         for (json, what) in [
             (
-                &br#"{"d_model":64,"n_layer":2,"vocab_size":100,"d_intermediate":128}"#[..],
-                "d_intermediate",
-            ),
-            (
-                br#"{"d_model":64,"n_layer":2,"vocab_size":100,"rms_norm":false}"#,
+                &br#"{"d_model":64,"n_layer":2,"vocab_size":100,"rms_norm":false}"#[..],
                 "LayerNorm",
             ),
             (

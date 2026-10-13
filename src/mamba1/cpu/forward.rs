@@ -21,11 +21,11 @@
 use super::flat::{MambaBackboneFlat, MambaLayerFlat};
 use super::scratch::PhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
-use crate::mlp::cpu::RowsGemm;
+use crate::mlp::cpu::{RowsGemm, gated_mlp_rows};
 use crate::ops::blas::sgemm_forward;
 use crate::ops::dims::{MambaDims, MambaRecurrentState};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
-use crate::ops::norms::bcdt_rms_norm;
+use crate::ops::norms::{bcdt_rms_norm, rms_norm_weighted};
 use crate::ops::rounding::{store, stored};
 
 /// One step of a channel's selective scan: the decays `exp(delta * A)` into
@@ -436,6 +436,25 @@ pub fn forward_mamba_backbone_batched(
             scratch,
             dims,
         );
+        // The gated MLP after the mixer, its input rows kept for the
+        // backward.
+        if let Some(m) = mamba_w.mlp.get(layer_idx) {
+            let rows = &mut temporal_flat[..seq_len * dm];
+            acts.mlp_in[layer_idx].copy_from_slice(rows);
+            scratch.mlp.dtype = scratch.dtype;
+            gated_mlp_rows(
+                rows,
+                seq_len,
+                m,
+                &mut scratch.mlp,
+                sgemm_forward,
+                |dst, src| {
+                    for (d_row, s_row) in dst.chunks_exact_mut(dm).zip(src.chunks_exact(dm)) {
+                        rms_norm_weighted(d_row, s_row, &m.norm_weight, dims.rms_norm_eps);
+                    }
+                },
+            );
+        }
     }
 
     // Final RmsNorm (norm_f) after all Mamba layers.

@@ -60,7 +60,7 @@ use super::forward_mixed::{
 use super::mixer_norms::{NormBackward, launch_pack_xdbl_norm_bwd};
 use super::weights::{
     GpuMambaGrads, GpuMambaLayerGrads, GpuMambaMixedLayerWeights, GpuMambaMixedWeights,
-    MambaLayerWeightsView,
+    MambaLayerWeightsView, MambaWeightsView,
 };
 use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_ex_backward_dx_typed,
@@ -104,6 +104,29 @@ fn reduce_bias(
     unsafe { bld.launch(cfg) }
         .map(|_| ())
         .map_err(|e| format!("reduce_bias {what}: {e:?}"))
+}
+
+/// `dst = FROM_F(0.0f + src)` over `n` elements: the f32 gradient cast to
+/// the lane's storage as the layer backward's first pass casts it.
+fn launch_cast_zplus(
+    ctx: &GpuCtx,
+    (dst, src): (
+        cudarc::driver::sys::CUdeviceptr,
+        cudarc::driver::sys::CUdeviceptr,
+    ),
+    n: usize,
+    dtype: WeightDtype,
+) -> Result<(), String> {
+    let n = n as i64;
+    let mut bld = ctx
+        .stream
+        .launch_builder(ctx.kernels.vec_cast_zplus_typed.get(dtype));
+    bld.arg(&dst);
+    bld.arg(&src);
+    bld.arg(&n);
+    unsafe { bld.launch(grid_1d_wide(n as usize)) }
+        .map(|_| ())
+        .map_err(|e| format!("cast d_temporal for the MLP: {e:?}"))
 }
 
 /// Per-layer bundle for the M1 mixed backward: the layer's master-grad
@@ -901,6 +924,13 @@ pub fn gpu_backward_mamba_backbone_mixed(
     dims.check_for(ctx)?;
     let dtype = acts.dtype;
     let bt = dims.bt();
+    let hidden = mamba_w.mlp.first().map(|m| m.hidden);
+    super::mlp::check_width(hidden, acts.mlp.as_ref().map(|m| m.hidden), "activations")?;
+    super::mlp::check_width(
+        hidden,
+        d_mamba.mlp.first().map(|g| g.fc2_w.len() / dims.d_model),
+        "gradients",
+    )?;
 
     // norm_f backward — always f32 (dy=f32 d_temporal, x=f32 norm_f_input,
     // dx=f32). Result copied back into d_temporal.
@@ -959,6 +989,33 @@ pub fn gpu_backward_mamba_backbone_mixed(
     for layer_idx in (0..dims.n_layers).rev() {
         let base = a_neg_all.raw_ptr(&ctx.stream);
         let a_neg_ptr = base + (layer_idx * a_neg_per_layer * std::mem::size_of::<f32>()) as u64;
+        let top = layer_idx + 1 == dims.n_layers;
+        // The MLP came after the mixer, so its backward comes first; its
+        // norm leaves the typed mirror of the gradient the mixer reads.
+        let mlp = acts.mlp.as_ref().zip(mamba_w.mlp(layer_idx));
+        if let Some((m, w)) = mlp {
+            let typed = scratch.temporal_typed.cached_ptr();
+            if top {
+                launch_cast_zplus(
+                    ctx,
+                    (typed, d_temporal.cached_ptr()),
+                    bt * dims.d_model,
+                    dtype,
+                )?;
+            }
+            let partials = scratch.axis0_partials.cached_ptr();
+            let bufs = scratch.mlp.as_ref().ok_or(
+                "the mixed scratch has no buffers for the gated MLP (build it with `with_mlp`)",
+            )?;
+            super::mlp::backward_mixed(
+                ctx,
+                (d_temporal, typed),
+                (&m.layers[layer_idx], w, &d_mamba.mlp[layer_idx]),
+                (bufs, partials),
+                (bt, dims.d_model),
+                dtype,
+            )?;
+        }
         gpu_backward_mamba_layer_mixed(
             ctx,
             d_temporal,
@@ -967,7 +1024,7 @@ pub fn gpu_backward_mamba_backbone_mixed(
                 acts: &acts.layers[layer_idx],
                 lw: &mamba_w.layers[layer_idx],
                 a_neg_ptr,
-                cast_d_temporal: layer_idx + 1 == dims.n_layers,
+                cast_d_temporal: top && mlp.is_none(),
                 mirror_dx: layer_idx > 0,
             },
             scratch,

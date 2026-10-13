@@ -200,9 +200,31 @@ pub struct GpuMambaBackboneActs {
     pub norm_f_input: GpuBuffer,
     /// Saved RMS values per sample for norm_f backward: `[B*T]`.
     pub norm_f_rms: GpuBuffer,
+    /// The gated MLP's saves, for a model with one (see [`Self::with_mlp`]).
+    pub mlp: Option<super::mlp::GpuMambaMlpBufs>,
 }
 
 impl GpuMambaBackboneActs {
+    /// The same activations with the gated MLP's saves, for a model whose
+    /// MLP is `hidden` wide (0 leaves them out).
+    pub fn with_mlp(
+        mut self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dims: &GpuMambaDims,
+        hidden: usize,
+    ) -> Result<Self, String> {
+        self.mlp = (hidden > 0)
+            .then(|| {
+                super::mlp::GpuMambaMlpBufs::new(
+                    stream,
+                    (dims.bt(), dims.d_model, dims.n_layers),
+                    hidden,
+                )
+            })
+            .transpose()?;
+        Ok(self)
+    }
+
     /// Allocate all activation save buffers for Mamba forward/backward.
     pub fn new(
         stream: &Arc<cudarc::driver::CudaStream>,
@@ -269,6 +291,7 @@ impl GpuMambaBackboneActs {
             layers,
             norm_f_input: GpuBuffer::zeros(stream, bt * d_model)?,
             norm_f_rms: GpuBuffer::zeros(stream, bt)?,
+            mlp: None,
         })
     }
 }
@@ -347,9 +370,26 @@ pub struct GpuMambaScratch {
     /// The conv backward's pre-activation gradients `[B*T*d_inner]` for a
     /// conv wider than the tiled kernels hold (one element otherwise).
     pub conv_dco: GpuBuffer,
+    /// The gated MLP backward's buffers, for a model with one (see
+    /// [`Self::with_mlp`]).
+    pub mlp: Option<super::mlp::GpuMambaMlpBwdBufs>,
 }
 
 impl GpuMambaScratch {
+    /// The same scratch with the gated MLP backward's buffers, for a model
+    /// whose MLP is `hidden` wide (0 leaves them out).
+    pub fn with_mlp(
+        mut self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        hidden: usize,
+    ) -> Result<Self, String> {
+        let dims = self.dims;
+        self.mlp = (hidden > 0)
+            .then(|| super::mlp::GpuMambaMlpBwdBufs::new(stream, (dims.bt(), dims.d_model), hidden))
+            .transpose()?;
+        Ok(self)
+    }
+
     /// Allocate all scratch buffers for Mamba forward/backward.
     pub fn new(
         stream: &Arc<cudarc::driver::CudaStream>,
@@ -422,6 +462,7 @@ impl GpuMambaScratch {
                 stream,
                 super::conv::conv_dco_len(bt, d_inner, dims.d_conv),
             )?,
+            mlp: None,
         })
     }
 }
@@ -832,6 +873,11 @@ pub fn gpu_forward_mamba_backbone(
     let dims = scratch.dims;
     dims.check_for(ctx)?;
     let bt = dims.bt();
+    super::mlp::check_width(
+        mamba_w.mlp.first().map(|m| m.hidden()),
+        acts.mlp.as_ref().map(|m| m.hidden),
+        "activations",
+    )?;
 
     if mamba_w.input_proj_w.is_empty() {
         // A model without an input projection (the official checkpoints,
@@ -882,17 +928,33 @@ pub fn gpu_forward_mamba_backbone(
         } else {
             acts.norm_f_input.cached_ptr()
         };
+        // With an MLP the mixer's sum lands in the MLP's input rows, and the
+        // MLP writes the layer's output.
+        let mixer_out = match &acts.mlp {
+            Some(m) => m.layers[layer_idx].x_in.cached_ptr(),
+            None => stream_out,
+        };
         // Split-borrow: the layer body needs &mut acts.layers[layer_idx]
-        // while stream_out points at a DIFFERENT slot (next layer /
-        // norm_f_input) — raw pointer, no aliasing of the borrowed acts.
+        // while mixer_out points at a DIFFERENT slot (next layer /
+        // norm_f_input / the MLP's input) — raw pointer, no aliasing of the
+        // borrowed acts.
         gpu_forward_mamba_layer(
             ctx,
-            stream_out,
+            mixer_out,
             &mut acts.layers[layer_idx],
             &mamba_w.layers[layer_idx],
             &layer_ptrs,
             scratch,
         )?;
+        if let Some(m) = acts.mlp.as_mut() {
+            super::mlp::forward_f32(
+                ctx,
+                stream_out,
+                (&mut m.layers[layer_idx], &mamba_w.mlp[layer_idx]),
+                &mut scratch.out_flat,
+                (bt, dims.d_model, dims.rms_norm_eps),
+            )?;
+        }
         // All kernels for this layer have been launched on stream
     }
 
@@ -938,7 +1000,7 @@ pub fn gpu_forward_mamba_target_burnin(
     a_neg_all: &GpuBuffer,
     scratch: &mut GpuMambaTargetScratch,
 ) -> Result<(), String> {
-    let dims = &scratch.dims;
+    let dims = scratch.dims;
     dims.check_for(ctx)?;
     let seq_len = dims.seq_len;
     let b = dims.batch;
@@ -951,7 +1013,7 @@ pub fn gpu_forward_mamba_target_burnin(
     let d_conv = dims.d_conv;
     let t = seq_len;
     // The t-major route, as in the prefill chain.
-    let ts = super::backward::tmajor_stride(dims);
+    let ts = super::backward::tmajor_stride(&dims);
     let tmajor_in = ts > 0 && scratch.u_t.len() >= b * di * ts;
     let ts_i = if tmajor_in { ts as i32 } else { 0 };
 
@@ -1242,6 +1304,22 @@ pub fn gpu_forward_mamba_target_burnin(
             bt * dm,
             format_args!("residual target L{layer_idx}"),
         )?;
+
+        // The gated MLP after the mixer over out_flat's rows, the residual
+        // buffer, dead until the next layer saves into it, taking the norm
+        // and the down projection.
+        if let Some(m) = target_w.mlp.get(layer_idx) {
+            let rms = scratch.rms_discard.cached_ptr();
+            let bufs =
+                super::mlp::branch_bufs(scratch.mlp.as_mut(), (bt, m.hidden()), "target scratch")?;
+            super::mlp::target_f32(
+                ctx,
+                m,
+                (&mut scratch.out_flat, &mut scratch.residual, rms),
+                bufs,
+                (bt, dm, dims.rms_norm_eps),
+            )?;
+        }
     }
 
     // Final RmsNorm (norm_f) after all Mamba layers — applied to all B*T timesteps

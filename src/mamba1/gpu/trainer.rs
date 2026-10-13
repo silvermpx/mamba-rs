@@ -1109,8 +1109,14 @@ impl MambaTrainerMixed {
         };
         dims.check_for(&ctx)?;
 
-        let acts = GpuMambaBackboneMixedActs::new(&ctx.stream, &dims, dtype)?;
-        let scratch = GpuMambaMixedTrainScratch::new(&ctx.stream, &dims, dtype)?;
+        let hidden = cfg.mlp_hidden();
+        let acts = GpuMambaBackboneMixedActs::new(&ctx.stream, &dims, dtype)?.with_mlp(
+            &ctx.stream,
+            &dims,
+            hidden,
+        )?;
+        let scratch = GpuMambaMixedTrainScratch::new(&ctx.stream, &dims, dtype)?
+            .with_mlp(&ctx.stream, hidden)?;
 
         // Seed recurrent state: conv/ssm zero; a_neg is recomputed from
         // the uploaded a_log by the SAME GPU kernel the post-step refresh
@@ -2692,6 +2698,11 @@ impl MambaTrainerMixed {
             lw.a_neg = lw.a_log.iter().map(|v| -v.exp()).collect();
         }
         out.norm_f_weight = master.norm_f_weight.to_cpu(&self.ctx.stream)?;
+        for (m, g) in out.mlp.iter_mut().zip(&master.mlp) {
+            m.norm_weight = g.norm_weight.to_cpu(&self.ctx.stream)?;
+            m.fc1_w = g.fc1_w.to_cpu(&self.ctx.stream)?;
+            m.fc2_w = g.fc2_w.to_cpu(&self.ctx.stream)?;
+        }
         Ok(out)
     }
 }
@@ -2822,8 +2833,10 @@ impl MambaTrainerF32 {
         };
         dims.check_for(&ctx)?;
 
-        let acts = GpuMambaBackboneActs::new(&ctx.stream, &dims)?;
-        let scratch = GpuMambaScratch::new(&ctx.stream, &dims)?;
+        let hidden = cfg.mlp_hidden();
+        let acts =
+            GpuMambaBackboneActs::new(&ctx.stream, &dims)?.with_mlp(&ctx.stream, &dims, hidden)?;
+        let scratch = GpuMambaScratch::new(&ctx.stream, &dims)?.with_mlp(&ctx.stream, hidden)?;
 
         // a_neg is recomputed from the uploaded a_log by the SAME GPU
         // kernel the post-step refresh uses — a CPU-side exp here differs
@@ -3529,6 +3542,11 @@ impl MambaTrainerF32 {
             lw.a_neg = lw.a_log.iter().map(|v| -v.exp()).collect();
         }
         out.norm_f_weight = w.norm_f_weight.to_cpu(&self.ctx.stream)?;
+        for (m, g) in out.mlp.iter_mut().zip(&w.mlp) {
+            m.norm_weight = g.norm_weight.to_cpu(&self.ctx.stream)?;
+            m.fc1_w = g.fc1_w.to_cpu(&self.ctx.stream)?;
+            m.fc2_w = g.fc2_w.to_cpu(&self.ctx.stream)?;
+        }
         Ok(out)
     }
 }

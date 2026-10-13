@@ -76,6 +76,7 @@ fn run_parallel_scan_trainer(dtype: WeightDtype) {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -242,6 +243,7 @@ fn a_log_actually_reaches_ssm_after_training() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -357,6 +359,7 @@ fn m1_trainer_f16_production_lr_stable() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = cfg.d_model;
     let batch = 2;
@@ -476,6 +479,7 @@ fn m1_trainer_rejects_a_config_the_kernels_cannot_serve() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let cpu = MambaWeights::init(&cfg, cfg.d_model, 7);
     let error = MambaGpuTrainer::new(

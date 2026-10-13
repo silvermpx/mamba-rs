@@ -265,6 +265,7 @@ fn mamba1_blob() -> String {
         include_str!("../kernels/conv1d.cu"),
         include_str!("../kernels/activations.cu"),
         include_str!("../kernels/mamba_ssm_elementwise.cu"),
+        include_str!("../kernels/gated_mlp.cu"),
     ])
 }
 

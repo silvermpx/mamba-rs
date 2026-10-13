@@ -665,6 +665,7 @@ mod tests {
                 })
                 .collect(),
             norm_f_weight: vec![1.0; d_model],
+            mlp: Vec::new(),
         };
 
         // Pre-compute a_neg_all.
@@ -839,6 +840,7 @@ mod tests {
                 })
                 .collect(),
             norm_f_weight: vec![1.0; d_model],
+            mlp: Vec::new(),
         };
 
         let a_neg_all: Vec<f32> = mamba_w
@@ -1215,6 +1217,7 @@ mod tests {
                 })
                 .collect(),
             norm_f_weight: vec![1.0; d_model],
+            mlp: Vec::new(),
         };
 
         // Build random mamba inputs: [B * mamba_input_dim].

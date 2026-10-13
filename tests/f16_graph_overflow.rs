@@ -115,6 +115,7 @@ fn m1_f16_graph_step_that_overflows_moves_nothing() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let weights = MambaWeights::init(&cfg, D_MODEL, 71);
     let mut t = MambaGpuTrainer::new(

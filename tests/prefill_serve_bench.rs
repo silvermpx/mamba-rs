@@ -76,6 +76,7 @@ fn rig(state_cap: usize) -> Rig {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let mid = SERVE_INPUT_DIM;
     let mut w = MambaWeights::init(&cfg, mid, 0x5E12E);

@@ -28,7 +28,7 @@ use crate::gpu::dtype::WeightDtype;
 use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_norm, launch_cast, y_runs};
 use crate::mamba1::gpu::forward::{GpuMambaDims, GpuRecurrentState};
 use crate::mamba1::gpu::mixer_norms::launch_bcdt_norm;
-use crate::mamba1::gpu::weights::{GpuMambaMixedWeights, MambaLayerWeightsView};
+use crate::mamba1::gpu::weights::{GpuMambaMixedWeights, MambaLayerWeightsView, MambaWeightsView};
 use crate::mamba1::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 
 /// Mixed-precision saved activations for one Mamba layer.
@@ -80,9 +80,33 @@ pub struct GpuMambaBackboneMixedActs {
     pub norm_f_rms: GpuBuffer,
     /// Element dtype of all `DtypedBuf` fields.
     pub dtype: WeightDtype,
+    /// The gated MLP's saves, for a model with one (see [`Self::with_mlp`]).
+    pub mlp: Option<super::mlp::GpuMambaMlpMixedBufs>,
 }
 
 impl GpuMambaBackboneMixedActs {
+    /// The same activations with the gated MLP's saves, for a model whose
+    /// MLP is `hidden` wide (0 leaves them out).
+    pub fn with_mlp(
+        mut self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dims: &GpuMambaDims,
+        hidden: usize,
+    ) -> Result<Self, String> {
+        let dtype = self.dtype;
+        self.mlp = (hidden > 0)
+            .then(|| {
+                super::mlp::GpuMambaMlpMixedBufs::new(
+                    stream,
+                    (dims.bt(), dims.d_model, dims.n_layers),
+                    hidden,
+                    dtype,
+                )
+            })
+            .transpose()?;
+        Ok(self)
+    }
+
     /// Allocate all activation buffers, sized for `dims`. Fires async memsets
     /// on `stream`. Caller MUST `stream.synchronize()` before any default-stream
     /// HtoD upload into one of these buffers; without the sync the upload
@@ -149,6 +173,7 @@ impl GpuMambaBackboneMixedActs {
             norm_f_input: GpuBuffer::zeros(stream, bt * d_model)?,
             norm_f_rms: GpuBuffer::zeros(stream, bt)?,
             dtype,
+            mlp: None,
         };
 
         // Enforce the memset-before-upload invariant: every later
@@ -240,9 +265,33 @@ pub struct GpuMambaMixedTrainScratch {
     /// The conv backward's pre-activation gradients `[B*T*d_inner]` for a
     /// conv wider than the tiled kernels hold (one element otherwise).
     pub conv_dco: GpuBuffer,
+    /// The gated MLP backward's buffers, for a model with one (see
+    /// [`Self::with_mlp`]).
+    pub mlp: Option<super::mlp::GpuMambaMlpMixedBwdBufs>,
 }
 
 impl GpuMambaMixedTrainScratch {
+    /// The same scratch with the gated MLP backward's buffers, for a model
+    /// whose MLP is `hidden` wide (0 leaves them out).
+    pub fn with_mlp(
+        mut self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        hidden: usize,
+    ) -> Result<Self, String> {
+        let (dims, dtype) = (self.dims, self.dtype);
+        self.mlp = (hidden > 0)
+            .then(|| {
+                super::mlp::GpuMambaMlpMixedBwdBufs::new(
+                    stream,
+                    (dims.bt(), dims.d_model),
+                    hidden,
+                    dtype,
+                )
+            })
+            .transpose()?;
+        Ok(self)
+    }
+
     pub fn new(
         stream: &Arc<cudarc::driver::CudaStream>,
         dims: &GpuMambaDims,
@@ -310,6 +359,7 @@ impl GpuMambaMixedTrainScratch {
                 ),
             )?,
             conv_dco: GpuBuffer::zeros(stream, super::conv::conv_dco_len(bt, di, dims.d_conv))?,
+            mlp: None,
         };
         // Race-fix invariant (a950648): callers may immediately upload from
         // host via default-stream HtoD; sync first.
@@ -364,6 +414,11 @@ pub fn gpu_forward_mamba_backbone_mixed(
     let d_conv = dims.d_conv;
     let dt = acts.dtype;
     let k = &ctx.kernels;
+    super::mlp::check_width(
+        mamba_w.mlp.first().map(|m| m.hidden),
+        acts.mlp.as_ref().map(|m| m.hidden),
+        "activations",
+    )?;
 
     // ─── Input projection (or identity-proj for HF Mamba) ───
     // For from_cpu loaded weights with zero-len input_proj_w, treat as identity:
@@ -771,18 +826,34 @@ pub fn gpu_forward_mamba_backbone_mixed(
         } else {
             acts.norm_f_input.cached_ptr()
         };
+        // With an MLP the mixer's sum lands in the MLP's input rows, and the
+        // MLP writes the layer's output.
+        let mixer_out = match &acts.mlp {
+            Some(m) => m.layers[layer_idx].x_in.cached_ptr(),
+            None => next_res_ptr,
+        };
         // dst f32, a f32, b typed.
         crate::gpu::launch::launch_elems(
             &ctx.stream,
             k.residual_add_f32_typed.get(dt),
             &[
-                next_res_ptr,
+                mixer_out,
                 acts.layers[layer_idx].residual.cached_ptr(),
                 scratch.out_flat.cached_ptr(),
             ],
             bt * dm,
             format_args!("residual_add_f32_typed L{layer_idx}"),
         )?;
+        if let (Some(m), Some(w)) = (&acts.mlp, mamba_w.mlp(layer_idx)) {
+            super::mlp::forward_mixed(
+                ctx,
+                next_res_ptr,
+                (&m.layers[layer_idx], w),
+                scratch.out_flat.cached_ptr(),
+                (bt, dm, dims.rms_norm_eps),
+                dt,
+            )?;
+        }
     }
 
     // ─── Final norm_f: residual_f32 → temporal_typed via rmsnorm_fwd_f32in_typed.

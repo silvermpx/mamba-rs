@@ -61,6 +61,7 @@ fn run_route(mode: ScanMode, dtype: WeightDtype, seq_len: usize) -> (Vec<f32>, V
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let mut w = MambaWeights::init(&cfg, cfg.d_model, 0xC0FFEE);
     for lw in w.layers.iter_mut() {
@@ -181,6 +182,7 @@ fn mixed_prefill_full_rows_end_in_the_last_rows() {
                 dt_rank: None,
                 proj_bias: false,
                 conv_bias: true,
+                d_intermediate: 0,
             };
             let mut w = MambaWeights::init(&cfg, cfg.d_model, 0xC0FFEE);
             for lw in w.layers.iter_mut() {

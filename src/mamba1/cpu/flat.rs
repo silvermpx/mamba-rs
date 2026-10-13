@@ -508,6 +508,9 @@ pub struct MambaBackboneFlat {
     pub norm_f_input: Vec<f32>,
     /// Saved RMS values per timestep for norm_f backward: `[seq_len]`.
     pub norm_f_rms: Vec<f32>,
+    /// The rows entering each layer's gated MLP, `[seq_len * d_model]` per
+    /// layer; empty for a model without one.
+    pub mlp_in: Vec<Vec<f32>>,
 }
 
 impl MambaBackboneFlat {
@@ -526,6 +529,10 @@ impl MambaBackboneFlat {
                 .collect(),
             norm_f_input: vec![0.0; dims.seq_len * dims.d_model],
             norm_f_rms: vec![0.0; dims.seq_len],
+            mlp_in: (0..dims.n_layers)
+                .filter(|_| dims.mlp_hidden > 0)
+                .map(|_| vec![0.0; dims.seq_len * dims.d_model])
+                .collect(),
         }
     }
 }

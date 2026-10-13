@@ -40,6 +40,7 @@ fn m1_step_cost_across_state_capacities() {
             dt_rank: None,
             proj_bias: false,
             conv_bias: true,
+            d_intermediate: 0,
         };
         let input_dim = cfg.d_model;
         let cpu_bb = MambaBackbone::init(cfg, input_dim, 42);

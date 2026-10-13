@@ -33,6 +33,7 @@ tensor_list!(
         out_proj_w,
         out_proj_b
     ],
+    mlp: mlp [norm_weight, fc1_w, fc2_w],
     post: [norm_f_weight],
 );
 
@@ -152,7 +153,8 @@ impl CpuFamily for MambaCpu {
     /// them. The control
     /// channels are the step-size columns of x_proj, dt_proj and A_log, as
     /// on the GPU. A bias the config lacks is an empty tensor with its
-    /// role, so every other tensor keeps its place.
+    /// role, so every other tensor keeps its place. The gated MLPs' norms
+    /// do not decay and their projections do.
     fn roles(&self, w: &TrainMambaWeights) -> Vec<TensorRole> {
         let (dt_rank, xdbl) = (self.cfg.dt_rank(), self.cfg.xdbl_dim());
         let role = |decays, control| TensorRole { decays, control };
@@ -177,6 +179,13 @@ impl CpuFamily for MambaCpu {
                 role(false, Control::None),
                 role(true, Control::None),
                 role(false, Control::None),
+            ]);
+        }
+        for _ in &w.mlp {
+            roles.extend([
+                role(false, Control::None),
+                role(true, Control::None),
+                role(true, Control::None),
             ]);
         }
         roles.push(role(false, Control::None));
@@ -277,6 +286,7 @@ impl MambaCpuTrainer {
                 })
                 .collect(),
             norm_f_weight: weights.norm_f_weight.clone(),
+            mlp: weights.mlp.clone(),
         };
         let dims = MambaDims::from_config(&cfg, session.seq_len, session.input_dim);
         let mut fam = MambaCpu {
@@ -321,6 +331,7 @@ impl MambaCpuTrainer {
                 })
                 .collect(),
             norm_f_weight: w.norm_f_weight.clone(),
+            mlp: w.mlp.clone(),
         }
     }
 }

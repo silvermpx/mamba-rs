@@ -50,6 +50,7 @@ fn m1_vs_m3_prefill_head_to_head() {
             dt_rank: None,
             proj_bias: false,
             conv_bias: true,
+            d_intermediate: 0,
         };
         let mut w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
         for lw in w.layers.iter_mut() {

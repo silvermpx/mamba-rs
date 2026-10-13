@@ -3,6 +3,7 @@
 //! Same layout as inference `MambaWeights` but all fields are owned `Vec<f32>`
 //! for in-place gradient accumulation during backward pass.
 
+use crate::mlp::GatedMlpLayerWeights;
 use crate::ops::dims::MambaDims;
 
 /// Trainable weights for a single Mamba layer.
@@ -51,12 +52,16 @@ pub struct TrainMambaWeights {
     pub layers: Vec<TrainMambaLayerWeights>,
     /// Final RMSNorm scale `[d_model]`.
     pub norm_f_weight: Vec<f32>,
+    /// The gated MLP of each layer, after its mixer; empty for a model
+    /// without one.
+    pub mlp: Vec<GatedMlpLayerWeights>,
 }
 
 impl TrainMambaWeights {
     /// Round in place the matrices a reduced precision keeps as the GPU
-    /// does: the input projection, in_proj, x_proj, dt_proj and out_proj,
-    /// in the half storage or as TF32 operands. f32 changes nothing.
+    /// does: the input projection, in_proj, x_proj, dt_proj, out_proj and
+    /// the MLP's projections, in the half storage or as TF32 operands. f32
+    /// changes nothing.
     pub(crate) fn round_bulk(&mut self, dtype: crate::precision::WeightDtype) {
         use crate::ops::lane::round_matrix;
         round_matrix(dtype, &mut self.input_proj_w);
@@ -65,6 +70,10 @@ impl TrainMambaWeights {
             round_matrix(dtype, &mut lw.x_proj_w);
             round_matrix(dtype, &mut lw.dt_proj_w);
             round_matrix(dtype, &mut lw.out_proj_w);
+        }
+        for m in &mut self.mlp {
+            round_matrix(dtype, &mut m.fc1_w);
+            round_matrix(dtype, &mut m.fc2_w);
         }
     }
 
@@ -98,6 +107,14 @@ impl TrainMambaWeights {
                 })
                 .collect(),
             norm_f_weight: vec![0.0; dm],
+            mlp: (0..dims.n_layers)
+                .filter(|_| dims.mlp_hidden > 0)
+                .map(|_| GatedMlpLayerWeights {
+                    norm_weight: vec![0.0; dm],
+                    fc1_w: vec![0.0; dm * 2 * dims.mlp_hidden],
+                    fc2_w: vec![0.0; dims.mlp_hidden * dm],
+                })
+                .collect(),
         }
     }
 
@@ -120,6 +137,11 @@ impl TrainMambaWeights {
             l.out_proj_b.fill(0.0);
         }
         self.norm_f_weight.fill(0.0);
+        for m in &mut self.mlp {
+            m.norm_weight.fill(0.0);
+            m.fc1_w.fill(0.0);
+            m.fc2_w.fill(0.0);
+        }
     }
 
     /// Accumulate another set of weights/gradients into this one.
@@ -141,6 +163,11 @@ impl TrainMambaWeights {
             add_vecs(&mut sl.out_proj_b, &ol.out_proj_b);
         }
         add_vecs(&mut self.norm_f_weight, &other.norm_f_weight);
+        for (sm, om) in self.mlp.iter_mut().zip(&other.mlp) {
+            add_vecs(&mut sm.norm_weight, &om.norm_weight);
+            add_vecs(&mut sm.fc1_w, &om.fc1_w);
+            add_vecs(&mut sm.fc2_w, &om.fc2_w);
+        }
     }
 }
 

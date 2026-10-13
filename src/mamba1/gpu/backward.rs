@@ -600,6 +600,13 @@ pub fn gpu_backward_mamba_backbone(
     let dims = scratch.dims; // Copy (GpuMambaDims is Copy)
     dims.check_for(ctx)?;
     let bt = dims.bt();
+    let hidden = mamba_w.mlp.first().map(|m| m.hidden());
+    super::mlp::check_width(hidden, acts.mlp.as_ref().map(|m| m.hidden), "activations")?;
+    super::mlp::check_width(
+        hidden,
+        d_mamba.mlp.first().map(|g| g.fc2_w.len() / dims.d_model),
+        "gradients",
+    )?;
 
     // norm_f backward — before reverse layer loop.
     // Rule B (no atomicAdd): two-stage launch.
@@ -660,6 +667,26 @@ pub fn gpu_backward_mamba_backbone(
     for layer_idx in (0..dims.n_layers).rev() {
         let base = a_neg_all.raw_ptr(&ctx.stream);
         let a_neg_ptr = base + (layer_idx * a_neg_per_layer * std::mem::size_of::<f32>()) as u64;
+
+        // The MLP came after the mixer, so its backward comes first.
+        if let Some(m) = acts.mlp.as_ref() {
+            let partials = scratch.axis0_partials.cached_ptr();
+            let bufs = scratch
+                .mlp
+                .as_mut()
+                .ok_or("the scratch has no buffers for the gated MLP (build it with `with_mlp`)")?;
+            super::mlp::backward_f32(
+                ctx,
+                d_temporal,
+                (
+                    &m.layers[layer_idx],
+                    &mamba_w.mlp[layer_idx],
+                    &d_mamba.mlp[layer_idx],
+                ),
+                (bufs, partials),
+                (bt, dims.d_model),
+            )?;
+        }
 
         gpu_backward_mamba_layer(
             ctx,
@@ -722,9 +749,26 @@ pub struct GpuMambaTargetScratch {
     pub ssm_states: GpuBuffer,  // [B*n_layers*d_inner*d_state]
     /// Dimensions this scratch was allocated for.
     pub dims: super::forward::GpuMambaDims,
+    /// The gated MLP branch's buffers, for a model with one (see
+    /// [`Self::with_mlp`]).
+    pub mlp: Option<super::mlp::GpuMambaMlpBranchBufs>,
 }
 
 impl GpuMambaTargetScratch {
+    /// The same scratch with the gated MLP branch's buffers, for a model
+    /// whose MLP is `hidden` wide (0 leaves them out).
+    pub fn with_mlp(
+        mut self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        hidden: usize,
+    ) -> Result<Self, String> {
+        let rows = self.dims.bt();
+        self.mlp = (hidden > 0)
+            .then(|| super::mlp::GpuMambaMlpBranchBufs::new(stream, rows, hidden))
+            .transpose()?;
+        Ok(self)
+    }
+
     /// Allocate scratch buffers for batched Mamba target forward.
     pub fn new(
         stream: &Arc<cudarc::driver::CudaStream>,
@@ -757,6 +801,7 @@ impl GpuMambaTargetScratch {
             conv_states: GpuBuffer::zeros(stream, batch * n_layers * d_inner * d_conv)?,
             ssm_states: GpuBuffer::zeros(stream, batch * n_layers * d_inner * d_state)?,
             dims: *dims,
+            mlp: None,
         })
     }
 }
@@ -800,9 +845,26 @@ pub struct GpuMambaTargetMixedScratch {
     pub u_t: DtypedBuf,
     pub dims: super::forward::GpuMambaDims,
     pub dtype: WeightDtype,
+    /// The gated MLP branch's buffers, for a model with one (see
+    /// [`Self::with_mlp`]).
+    pub mlp: Option<super::mlp::GpuMambaMlpBranchTyped>,
 }
 
 impl GpuMambaTargetMixedScratch {
+    /// The same scratch with the gated MLP branch's buffers, for a model
+    /// whose MLP is `hidden` wide (0 leaves them out).
+    pub fn with_mlp(
+        mut self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        hidden: usize,
+    ) -> Result<Self, String> {
+        let (rows, dtype) = (self.dims.bt(), self.dtype);
+        self.mlp = (hidden > 0)
+            .then(|| super::mlp::GpuMambaMlpBranchTyped::new(stream, rows, hidden, dtype))
+            .transpose()?;
+        Ok(self)
+    }
+
     pub fn new(
         stream: &Arc<cudarc::driver::CudaStream>,
         dims: &super::forward::GpuMambaDims,
@@ -835,6 +897,7 @@ impl GpuMambaTargetMixedScratch {
             u_t: DtypedBuf::zeros(stream, tm.max(1), dtype)?,
             dims: *dims,
             dtype,
+            mlp: None,
         })
     }
 }

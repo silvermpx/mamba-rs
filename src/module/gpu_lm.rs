@@ -910,6 +910,7 @@ mod tied_head_capture_tests {
             dt_rank: None,
             proj_bias: false,
             conv_bias: true,
+            d_intermediate: 0,
         };
         let mut weights = MambaWeights::init(&cfg, D_MODEL, 0x9031);
         weights.input_proj_w.clear();
@@ -947,6 +948,7 @@ mod tied_head_capture_tests {
             dt_rank: None,
             proj_bias: false,
             conv_bias: true,
+            d_intermediate: 0,
         };
         let mut weights = MambaWeights::init(&cfg, D_MODEL, 0x5EED);
         weights.input_proj_w.clear();

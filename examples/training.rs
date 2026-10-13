@@ -53,6 +53,7 @@ fn main() {
             })
             .collect(),
         norm_f_weight: inf_weights.norm_f_weight.clone(),
+        mlp: inf_weights.mlp.clone(),
     };
 
     // Allocate buffers

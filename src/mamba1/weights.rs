@@ -68,12 +68,17 @@ pub struct MambaWeights {
 
     /// Final RMSNorm after all layers `[d_model]`
     pub norm_f_weight: Vec<f32>,
+
+    /// The gated MLP of each layer, after its mixer; empty when the config
+    /// has `d_intermediate == 0`.
+    pub mlp: Vec<crate::mlp::GatedMlpLayerWeights>,
 }
 
 impl MambaWeights {
     /// Round in place the matrices a reduced precision keeps as the GPU
-    /// does: the input projection, in_proj, x_proj, dt_proj and out_proj,
-    /// in the half storage or as TF32 operands. f32 changes nothing.
+    /// does: the input projection, in_proj, x_proj, dt_proj, out_proj and
+    /// the MLP's projections, in the half storage or as TF32 operands. f32
+    /// changes nothing.
     pub(crate) fn round_bulk(&mut self, dtype: crate::precision::WeightDtype) {
         use crate::ops::lane::round_matrix;
         round_matrix(dtype, &mut self.input_proj_w);
@@ -82,6 +87,10 @@ impl MambaWeights {
             round_matrix(dtype, &mut lw.x_proj_w);
             round_matrix(dtype, &mut lw.dt_proj_w);
             round_matrix(dtype, &mut lw.out_proj_w);
+        }
+        for m in &mut self.mlp {
+            round_matrix(dtype, &mut m.fc1_w);
+            round_matrix(dtype, &mut m.fc2_w);
         }
     }
 
@@ -115,6 +124,12 @@ impl MambaWeights {
                 })
                 .collect(),
             norm_f_weight: vec![1.0; d], // RMSNorm init = ones
+            mlp: match cfg.mlp_hidden() {
+                0 => Vec::new(),
+                hidden => (0..cfg.n_layers)
+                    .map(|_| crate::mlp::GatedMlpLayerWeights::zeros(d, hidden))
+                    .collect(),
+            },
         }
     }
 
@@ -123,9 +138,10 @@ impl MambaWeights {
     /// - Linear layers: the PyTorch default, uniform with bound 1/sqrt(fan_in)
     /// - dt_proj weight: uniform with bound 1/sqrt(dt_rank), which is the
     ///   reference's `dt_rank^-0.5 * dt_scale` at the shipped scale 1.0
-    /// - out_proj: the same draw, then divided by sqrt(n_layers) — the
-    ///   GPT-2 prenorm-residual rule the reference applies to this one
-    ///   weight (one residual per layer for Mamba-1)
+    /// - out_proj (and the MLP's fc2): the same draw, then divided by
+    ///   sqrt(n_residuals_per_layer * n_layers), the GPT-2
+    ///   prenorm-residual rule of the reference's `_init_weights`: one
+    ///   residual per layer in a pure Mamba-1 stack, two with an MLP
     /// - A_log: log(1..=d_state) repeated across d_inner (Section 3.5)
     /// - dt_proj bias: inverse softplus of log-uniform(dt_min, dt_max) (Section 3.5)
     /// - D: ones
@@ -133,6 +149,8 @@ impl MambaWeights {
     /// - conv1d weight and bias: the PyTorch default with fan_in = d_conv
     /// - in_proj and out_proj biases, when the config has them: zero, as
     ///   the reference's `_init_weights` sets every Linear bias
+    /// - the MLP's fc1 and fc2: the Linear default, drawn after every mixer
+    ///   weight so a model without an MLP keeps the stream it always had
     pub fn init(cfg: &MambaConfig, input_dim: usize, seed: u64) -> Self {
         /// The reference clamps the log-uniform dt draw from below before
         /// inverting the softplus; inside the shipped [0.001, 0.1] range the
@@ -150,7 +168,8 @@ impl MambaWeights {
         linear_default_uniform(&mut w.input_proj_w, input_dim, &mut rng);
         // input_proj bias: zero (default)
 
-        let residual_rescale = 1.0 / (cfg.n_layers as f64).sqrt() as f32;
+        let residuals_per_layer = if w.mlp.is_empty() { 1 } else { 2 };
+        let residual_rescale = 1.0 / ((residuals_per_layer * cfg.n_layers) as f64).sqrt() as f32;
 
         for lw in &mut w.layers {
             // in_proj: the Linear default on fan_in = d_model
@@ -201,6 +220,15 @@ impl MambaWeights {
 
             // Pre-compute a_neg from a_log
             lw.compute_a_neg();
+        }
+
+        let hidden = cfg.mlp_hidden();
+        for m in &mut w.mlp {
+            linear_default_uniform(&mut m.fc1_w, d, &mut rng);
+            linear_default_uniform(&mut m.fc2_w, hidden, &mut rng);
+            for v in &mut m.fc2_w {
+                *v *= residual_rescale;
+            }
         }
 
         w
@@ -270,6 +298,15 @@ impl MambaWeights {
                 cfg.out_proj_bias_len(),
             )?;
         }
+        match cfg.mlp_hidden() {
+            0 => check("mlp layers", self.mlp.len(), 0)?,
+            hidden => {
+                check("mlp layers", self.mlp.len(), cfg.n_layers)?;
+                for (i, m) in self.mlp.iter().enumerate() {
+                    m.validate(d, hidden, &format!("mlp[{i}]"))?;
+                }
+            }
+        }
 
         Ok(())
     }
@@ -294,7 +331,9 @@ impl MambaWeights {
             + di
             + di * d
             + cfg.out_proj_bias_len();
-        input_dim * d + d + cfg.n_layers * per_layer + d
+        let hidden = cfg.mlp_hidden();
+        let per_mlp = if hidden > 0 { d + 3 * d * hidden } else { 0 };
+        input_dim * d + d + cfg.n_layers * (per_layer + per_mlp) + d
     }
 }
 

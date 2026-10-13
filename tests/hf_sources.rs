@@ -389,15 +389,16 @@ fn a_corrupt_safetensors_header_is_refused() {
 /// A small Mamba-1 checkpoint's tensors under the original repositories'
 /// names: two layers of d_model 16, d_state 4, d_conv 4, expand 2.
 fn mamba1_tensors(embedding_name: &str, dtype: Dtype) -> Vec<Tensor> {
-    mamba1_tensors_with(embedding_name, dtype, (1, false, true))
+    mamba1_tensors_with(embedding_name, dtype, (1, false, true, 0))
 }
 
 /// [`mamba1_tensors`] at dt rank `dr`, with the in_proj and out_proj
-/// biases when `proj_bias` and the conv bias only when `conv_bias`.
+/// biases when `proj_bias`, the conv bias only when `conv_bias`, and a
+/// gated MLP `hidden` wide after every mixer when `hidden` is not 0.
 fn mamba1_tensors_with(
     embedding_name: &str,
     dtype: Dtype,
-    (dr, proj_bias, conv_bias): (usize, bool, bool),
+    (dr, proj_bias, conv_bias, hidden): (usize, bool, bool, usize),
 ) -> Vec<Tensor> {
     let (d, di, ds, w, vocab) = (16, 32, 4, 4, 32);
     let mut ts = vec![
@@ -430,8 +431,100 @@ fn mamba1_tensors_with(
                 ts.push(Tensor::new(&name, &shape, dtype, s + k));
             }
         }
+        if hidden > 0 {
+            for (name, shape, k) in [
+                (format!("backbone.layers.{i}.norm2.weight"), vec![d], 12),
+                (
+                    format!("backbone.layers.{i}.mlp.fc1.weight"),
+                    vec![2 * hidden, d],
+                    13,
+                ),
+                (
+                    format!("backbone.layers.{i}.mlp.fc2.weight"),
+                    vec![d, hidden],
+                    14,
+                ),
+            ] {
+                ts.push(Tensor::new(&name, &shape, dtype, s + k));
+            }
+        }
     }
     ts
+}
+
+/// An original-format checkpoint with `d_intermediate` loads its gated
+/// MLPs: the norm as stored, both projections in the `[n_in, n_out]`
+/// layout; one whose MLP tensors are missing or of another width is
+/// refused.
+#[test]
+fn mamba1_gated_mlp_loads() {
+    let config = br#"{"d_model": 16, "n_layer": 2, "vocab_size": 32, "d_intermediate": 100,
+        "ssm_cfg": {"d_state": 4}}"#;
+    let ts = mamba1_tensors_with(
+        "backbone.embedding.weight",
+        Dtype::F32,
+        (1, false, true, 128),
+    );
+    let dir = scratch("m1-mlp");
+    write_safetensors(&dir.join("model.safetensors"), &refs(&ts));
+    std::fs::write(dir.join("config.json"), config).unwrap();
+    let m = load_hf(&dir).unwrap();
+    let cfg = m.backbone.config();
+    assert_eq!((cfg.d_intermediate, cfg.mlp_hidden()), (100, 128));
+    let tensor = |name: &str| {
+        ts.iter()
+            .find(|t| t.name == name)
+            .map(|t| t.read_back())
+            .unwrap()
+    };
+    let w = m.backbone.weights();
+    assert_eq!(w.mlp.len(), 2);
+    for (i, mw) in w.mlp.iter().enumerate() {
+        let p = |n: &str| format!("backbone.layers.{i}.{n}");
+        assert_eq!(mw.norm_weight, tensor(&p("norm2.weight")));
+        // fc1 is stored [2 hidden, d] and comes out [d, 2 hidden].
+        let fc1 = tensor(&p("mlp.fc1.weight"));
+        assert_eq!(mw.fc1_w[3 * 256 + 5], fc1[5 * 16 + 3]);
+        let fc2 = tensor(&p("mlp.fc2.weight"));
+        assert_eq!(mw.fc2_w[7 * 16 + 2], fc2[2 * 128 + 7]);
+    }
+
+    // Without the MLP's tensors, or with another width, the load is refused.
+    let refused = |tag: &str, tensors: &[Tensor]| {
+        let dir = scratch(tag);
+        write_safetensors(&dir.join("model.safetensors"), &refs(tensors));
+        std::fs::write(dir.join("config.json"), config).unwrap();
+        assert!(load_hf(&dir).is_err(), "{tag}");
+    };
+    let name = "backbone.embedding.weight";
+    refused(
+        "m1-mlp-missing",
+        &mamba1_tensors_with(name, Dtype::F32, (1, false, true, 0)),
+    );
+    refused(
+        "m1-mlp-narrow",
+        &mamba1_tensors_with(name, Dtype::F32, (1, false, true, 256)),
+    );
+    // A width or a depth past the bounds is refused before anything is
+    // sized from it.
+    for (tag, config) in [
+        (
+            "m1-mlp-huge",
+            r#"{"d_model": 16, "n_layer": 2, "vocab_size": 32,
+                "d_intermediate": 18446744073709551615, "ssm_cfg": {"d_state": 4}}"#,
+        ),
+        (
+            "m1-deep",
+            r#"{"d_model": 16, "n_layer": 18446744073709551615, "vocab_size": 32,
+                "ssm_cfg": {"d_state": 4}}"#,
+        ),
+    ] {
+        let dir = scratch(tag);
+        write_safetensors(&dir.join("model.safetensors"), &refs(&ts));
+        std::fs::write(dir.join("config.json"), config).unwrap();
+        let err = load_hf(&dir).err().unwrap_or_default();
+        assert!(err.contains("out of supported range"), "{tag}: {err}");
+    }
 }
 
 /// The projection biases, a missing conv bias and a dt rank of its own load
@@ -439,7 +532,7 @@ fn mamba1_tensors_with(
 /// whose tensors disagree with its flags is refused.
 #[test]
 fn mamba1_bias_and_rank_options_load() {
-    let opts = (3, true, false);
+    let opts = (3, true, false, 0);
     let ts = mamba1_tensors_with("backbone.embeddings.weight", Dtype::F32, opts);
     let hf = scratch("m1-options-hf");
     write_safetensors(&hf.join("model.safetensors"), &refs(&ts));
@@ -501,14 +594,14 @@ fn mamba1_bias_and_rank_options_load() {
     let conv_on = hf_config.replace("\"use_conv_bias\": false", "\"use_conv_bias\": true");
     refused("m1-options-no-conv-tensor", &ts, &conv_on, "conv1d_bias");
     let name = "backbone.embeddings.weight";
-    let extra_conv = mamba1_tensors_with(name, Dtype::F32, (3, true, true));
+    let extra_conv = mamba1_tensors_with(name, Dtype::F32, (3, true, true, 0));
     refused(
         "m1-options-extra-conv",
         &extra_conv,
         hf_config,
         "conv1d_bias",
     );
-    let unbiased = mamba1_tensors_with(name, Dtype::F32, (3, false, false));
+    let unbiased = mamba1_tensors_with(name, Dtype::F32, (3, false, false, 0));
     refused("m1-options-no-biases", &unbiased, hf_config, "in_proj_b");
 }
 

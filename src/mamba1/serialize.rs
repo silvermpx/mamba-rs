@@ -6,17 +6,24 @@
 //! Tensor naming convention:
 //! - `input_proj.weight`, `input_proj.bias`
 //! - `layers.{i}.norm.weight`
-//! - `layers.{i}.in_proj.weight`
-//! - `layers.{i}.conv1d.weight`, `layers.{i}.conv1d.bias`
+//! - `layers.{i}.in_proj.weight`, and `layers.{i}.in_proj.bias` with
+//!   projection biases
+//! - `layers.{i}.conv1d.weight`, and `layers.{i}.conv1d.bias` with a conv
+//!   bias
 //! - `layers.{i}.x_proj.weight`
 //! - `layers.{i}.dt_proj.weight`, `layers.{i}.dt_proj.bias`
 //! - `layers.{i}.a_log`
 //! - `layers.{i}.D`
-//! - `layers.{i}.out_proj.weight`
+//! - `layers.{i}.out_proj.weight`, and `layers.{i}.out_proj.bias` with
+//!   projection biases
+//! - `layers.{i}.norm2.weight`, `layers.{i}.mlp.fc1.weight`,
+//!   `layers.{i}.mlp.fc2.weight` (models with a gated MLP)
 //! - `norm_f.weight`
 //!
 //! Metadata stores config as JSON: `d_model`, `d_state`, `d_conv`, `expand`,
-//! `n_layers`, `input_dim`, and the family marker `mamba_version = "1"`.
+//! `n_layers`, `input_dim`, the route and norm fields, the options a model
+//! sets away from their defaults, and the family marker
+//! `mamba_version = "1"`.
 
 use crate::config::ModelFamily;
 use crate::mamba1::config::MambaConfig;
@@ -83,6 +90,13 @@ pub(crate) fn checkpoint_parts<'a>(
             list.push(p("out_proj.bias"), &lw.out_proj_b, &[dm])?;
         }
     }
+    let hidden = cfg.mlp_hidden();
+    for (i, m) in weights.mlp.iter().enumerate() {
+        let p = |n: &str| format!("layers.{i}.{n}");
+        list.push(p("norm2.weight"), &m.norm_weight, &[dm])?;
+        list.push(p("mlp.fc1.weight"), &m.fc1_w, &[dm, 2 * hidden])?;
+        list.push(p("mlp.fc2.weight"), &m.fc2_w, &[hidden, dm])?;
+    }
     list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
 
     // The configuration as JSON. scan_mode and the norm epsilons are part
@@ -103,6 +117,9 @@ pub(crate) fn checkpoint_parts<'a>(
     }
     if !cfg.conv_bias {
         extra.push_str(r#","conv_bias":false"#);
+    }
+    if cfg.d_intermediate > 0 {
+        extra.push_str(&format!(r#","d_intermediate":{}"#, cfg.d_intermediate));
     }
     let meta = HashMap::from([
         ("mamba_version".to_string(), VERSION.to_string()),
@@ -212,6 +229,11 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
             .transpose()?,
         proj_bias: config_json.contains(r#""proj_bias":true"#),
         conv_bias: !config_json.contains(r#""conv_bias":false"#),
+        d_intermediate: if config_json.contains(r#""d_intermediate":"#) {
+            parse_field(config_json, "d_intermediate")?
+        } else {
+            0
+        },
     };
     cfg.validate()?;
 
@@ -277,12 +299,24 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
     }
 
     let norm_f_weight = read("norm_f.weight")?;
+    let mlp = (0..n_layers)
+        .filter(|_| cfg.mlp_hidden() > 0)
+        .map(|i| {
+            let p = |n: &str| format!("layers.{i}.{n}");
+            Ok(crate::mlp::GatedMlpLayerWeights {
+                norm_weight: read(&p("norm2.weight"))?,
+                fc1_w: read(&p("mlp.fc1.weight"))?,
+                fc2_w: read(&p("mlp.fc2.weight"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     let weights = MambaWeights {
         input_proj_w,
         input_proj_b,
         layers,
         norm_f_weight,
+        mlp,
     };
 
     // Reject undersized/oversized tensors before they can reach the BLAS
@@ -366,22 +400,24 @@ mod tests {
         }
     }
 
-    /// The projection biases, a missing conv bias and an explicit dt rank
-    /// survive a save and a load, the tensors bit for bit; a file of a
-    /// model without them stays as it was written before they existed.
+    /// The projection biases, a missing conv bias, an explicit dt rank and
+    /// the gated MLP survive a save and a load, the tensors bit for bit; a
+    /// file of a model without them stays as it was written before they
+    /// existed.
     #[test]
     fn bias_and_rank_options_round_trip() {
         let variants = [
-            (Some(5), true, false),
-            (None, true, true),
-            (Some(3), false, false),
-            (None, false, true),
+            (Some(5), true, false, 0),
+            (None, true, true, 200),
+            (Some(3), false, false, 0),
+            (None, false, true, 0),
         ];
-        for (dt_rank, proj_bias, conv_bias) in variants {
+        for (dt_rank, proj_bias, conv_bias, d_intermediate) in variants {
             let cfg = MambaConfig {
                 dt_rank,
                 proj_bias,
                 conv_bias,
+                d_intermediate,
                 ..MambaConfig::default()
             };
             let mut w = MambaWeights::init(&cfg, 16, 9);
@@ -397,13 +433,13 @@ mod tests {
             }
             let (list, meta) = checkpoint_parts(&w, &cfg, 16).unwrap();
             let config_json = &meta["config"];
-            if (dt_rank, proj_bias, conv_bias) == (None, false, true) {
-                for key in ["dt_rank", "proj_bias", "conv_bias"] {
+            if (dt_rank, proj_bias, conv_bias, d_intermediate) == (None, false, true, 0) {
+                for key in ["dt_rank", "proj_bias", "conv_bias", "d_intermediate"] {
                     assert!(!config_json.contains(key), "{key} in {config_json}");
                 }
             }
             let path = std::env::temp_dir().join(format!(
-                "mamba1_options_{}_{dt_rank:?}_{proj_bias}_{conv_bias}.safetensors",
+                "mamba1_options_{}_{dt_rank:?}_{proj_bias}_{conv_bias}_{d_intermediate}.safetensors",
                 std::process::id()
             ));
             list.save(meta, &path).unwrap();
@@ -417,6 +453,7 @@ mod tests {
                 assert_eq!(a.conv1d_bias, b.conv1d_bias);
                 assert_eq!(a.dt_proj_w, b.dt_proj_w);
             }
+            assert_eq!(w.mlp, w2.mlp);
         }
     }
 }

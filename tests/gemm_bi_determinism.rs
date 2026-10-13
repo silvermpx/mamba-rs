@@ -57,6 +57,7 @@ fn cfg() -> MambaConfig {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     }
 }
 
@@ -77,6 +78,11 @@ fn flat_weights(w: &MambaWeights) -> Vec<f32> {
         out.extend_from_slice(&l.d_param);
         out.extend_from_slice(&l.out_proj_w);
         out.extend_from_slice(&l.out_proj_b);
+    }
+    for m in &w.mlp {
+        out.extend_from_slice(&m.norm_weight);
+        out.extend_from_slice(&m.fc1_w);
+        out.extend_from_slice(&m.fc2_w);
     }
     out.extend_from_slice(&w.norm_f_weight);
     out

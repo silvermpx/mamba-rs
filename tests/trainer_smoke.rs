@@ -42,6 +42,7 @@ fn m1_trainer_bf16_smoke() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -117,6 +118,7 @@ fn m1_trainer_multi_layer_bf16() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -252,6 +254,7 @@ fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -388,6 +391,7 @@ fn m1_trainer_f32_smoke() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = cfg.d_model;
     let batch = 1;

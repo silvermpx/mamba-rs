@@ -2,7 +2,8 @@
 //!
 //! Three levels of API:
 //! - [`mamba_layer_step`]: Pure mixer (no norm, no residual). Matches Tri Dao's `Mamba` class.
-//! - [`mamba_block_step`]: Pre-norm + mixer + residual. Matches Tri Dao's `Block` class.
+//! - [`mamba_block_step`]: Pre-norm + mixer + residual, then the gated MLP
+//!   branch for a model with one. Matches Tri Dao's `Block` class.
 //! - [`mamba_step`]: Full backbone: input_proj + N blocks + norm_f.
 //!
 //! [`mamba_step_packed`] runs the same step with the projections packed in
@@ -13,6 +14,8 @@ use super::bias;
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::state::MambaLayerState;
 use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
+use crate::mlp::GatedMlpLayerWeights;
+use crate::mlp::cpu::{GatedMlpPacked, GatedMlpStepScratch, gated_mlp_step, gated_mlp_step_packed};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 use crate::ops::lane::{LaneGemm, input_rows};
 use crate::ops::norms::bcdt_rms_norm;
@@ -40,6 +43,8 @@ pub struct MambaPackedLinears {
     pub layers: Vec<MambaLayerPacked>,
     /// The input projection, absent for a backbone without one.
     pub input_proj: Option<PackedLinear>,
+    /// One per layer with a gated MLP.
+    pub mlp: Vec<GatedMlpPacked>,
 }
 
 impl MambaPackedLinears {
@@ -58,7 +63,11 @@ impl MambaPackedLinears {
             .collect();
         let input_proj = (!weights.input_proj_w.is_empty())
             .then(|| PackedLinear::pack(&weights.input_proj_w, input_dim, dm));
-        Self { layers, input_proj }
+        Self {
+            layers,
+            input_proj,
+            mlp: weights.mlp.iter().map(GatedMlpPacked::pack).collect(),
+        }
     }
 }
 
@@ -116,6 +125,8 @@ pub struct MambaStepScratch {
     /// The input row as the input projection multiplies it in a reduced
     /// precision.
     input: Vec<f32>,
+    /// The gated MLP's buffers (zero-sized when the model has none).
+    pub mlp: GatedMlpStepScratch,
 }
 
 impl MambaStepScratch {
@@ -126,6 +137,7 @@ impl MambaStepScratch {
             norm_buf: vec![0.0; cfg.d_model],
             residual: vec![0.0; cfg.d_model],
             input: Vec::new(),
+            mlp: GatedMlpStepScratch::new(cfg.d_model, cfg.mlp_hidden()),
         }
     }
 
@@ -133,6 +145,7 @@ impl MambaStepScratch {
     /// rounded as that precision keeps them.
     pub(crate) fn set_dtype(&mut self, dtype: WeightDtype) {
         self.layer.dtype = dtype;
+        self.mlp.dtype = dtype;
     }
 }
 
@@ -298,25 +311,40 @@ fn layer_step(
 // Level 2: Mamba block (pre-norm + layer + residual)
 // ---------------------------------------------------------------------------
 
-/// Mamba block step (T=1): RMSNorm → MambaLayer → residual add.
+/// Mamba block step (T=1): RMSNorm → MambaLayer → residual add, then for a
+/// model with a gated MLP its branch (norm2 → MLP → residual add).
 ///
 /// Matches Tri Dao's `Block` class in `block.py`.
 /// `hidden` is modified in-place: normed → passed to layer → output + residual.
 ///
 /// # Arguments
 /// - `hidden`: `[d_model]` — hidden state (modified in-place)
-/// - `lw`: layer weights (includes `norm_weight`)
+/// - `(lw, mlp)`: layer weights (includes `norm_weight`) and the layer's
+///   gated MLP, `None` for a model without one
 /// - `state`: persistent conv + SSM state
 /// - `scratch`: pre-allocated scratch (includes layer scratch + norm_buf + residual)
 /// - `cfg`: Mamba config
+///
+/// # Panics
+///
+/// When `mlp` is given for a config without a gated MLP, or missing for
+/// one with it.
 pub fn mamba_block_step(
     hidden: &mut [f32],
-    lw: &MambaLayerWeights,
+    (lw, mlp): (&MambaLayerWeights, Option<&GatedMlpLayerWeights>),
     state: &mut MambaLayerState,
     scratch: &mut MambaStepScratch,
     cfg: &MambaConfig,
 ) {
+    assert_eq!(
+        mlp.is_some(),
+        cfg.mlp_hidden() > 0,
+        "mamba_block_step takes the gated MLP exactly when the config has one"
+    );
     block_step(hidden, (lw, None), state, scratch, cfg);
+    if let Some(m) = mlp {
+        gated_mlp_step(hidden, m, &mut scratch.mlp, cfg.rms_norm_eps);
+    }
 }
 
 /// [`mamba_block_step`] with the projections packed when `lp` holds them.
@@ -463,15 +491,25 @@ fn mamba_blocks_and_norm(
 ) {
     let d_model = cfg.d_model;
     if let Some(p) = packed {
-        assert_eq!(
-            p.layers.len(),
-            weights.layers.len(),
+        assert!(
+            p.layers.len() == weights.layers.len() && p.mlp.len() == weights.mlp.len(),
             "packed projections of another backbone"
         );
     }
+    // Each layer: the mixer branch, then the MLP branch when the model has
+    // one.
     for (layer_idx, lw) in weights.layers.iter().enumerate() {
         let lp = packed.map(|p| &p.layers[layer_idx]);
         block_step(output, (lw, lp), &mut state[layer_idx], scratch, cfg);
+        if let Some(m) = weights.mlp.get(layer_idx) {
+            let eps = cfg.rms_norm_eps;
+            match packed {
+                Some(p) => {
+                    gated_mlp_step_packed(output, (m, &p.mlp[layer_idx]), &mut scratch.mlp, eps)
+                }
+                None => gated_mlp_step(output, m, &mut scratch.mlp, eps),
+            }
+        }
     }
     let mean_sq: f32 = output[..d_model].iter().map(|v| v * v).sum::<f32>() / d_model as f32;
     let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();

@@ -43,6 +43,7 @@ fn prefill_bench_classifier_shape() {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = 1024usize;
     // Production patchify T_TOTAL: 57x81 patches + 4 register tokens.

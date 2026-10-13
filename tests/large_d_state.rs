@@ -37,6 +37,7 @@ fn check_step_parity(d_state: usize) {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = cfg.d_model;
     let dm = cfg.d_model;
@@ -110,6 +111,7 @@ fn m1_explicit_sequential_trains_at_d_state_128() {
             dt_rank: None,
             proj_bias: false,
             conv_bias: true,
+            d_intermediate: 0,
         };
         let w = MambaWeights::init(&cfg, dm, 7);
         let session = TrainSessionCfg {

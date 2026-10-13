@@ -177,6 +177,17 @@ impl MambaBackbone {
             check("out_proj_w", lw.out_proj_w.len(), di * d)?;
             check("out_proj_b", lw.out_proj_b.len(), cfg.out_proj_bias_len())?;
         }
+        let hidden = cfg.mlp_hidden();
+        let mlp_layers = if hidden > 0 { cfg.n_layers } else { 0 };
+        if weights.mlp.len() != mlp_layers {
+            return Err(format!(
+                "mlp: expected {mlp_layers} layers, got {}",
+                weights.mlp.len()
+            ));
+        }
+        for (i, m) in weights.mlp.iter().enumerate() {
+            m.validate(d, hidden, &format!("mlp[{i}]"))?;
+        }
         if weights.norm_f_weight.len() != d {
             return Err(format!(
                 "norm_f_weight: expected {d}, got {}",

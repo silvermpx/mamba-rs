@@ -327,6 +327,11 @@ pub struct MambaKernels {
     /// backward (dt_proj has a learned bias; dW goes via typed GemmEx,
     /// bias grad via this launch).
     pub reduce_bias_typed: TypedKernel,
+    /// The gated MLP's activation, `value * silu(gate)` over each row of
+    /// the up projection (kernels/gated_mlp.cu).
+    pub mlp_gate_fwd_typed: TypedKernel,
+    /// Its backward into the up projection's row, value then gate.
+    pub mlp_gate_bwd: TypedKernel,
 
     // -- Dual-dtype kernels for end-to-end bf16/f16 inference --
     /// RMSNorm: f32 residual input → half output. Keeps residual stream in
@@ -1816,6 +1821,16 @@ impl MambaKernels {
             concat_halves_typed: load_typed("concat_halves")?,
             scatter_add_cols_typed: load_typed("scatter_add_cols")?,
             reduce_bias_typed: load_typed("reduce_bias")?,
+            mlp_gate_fwd_typed: TypedKernel {
+                f32: get("mlp_gate_fwd")?,
+                bf16: get("mlp_gate_fwd_bf16")?,
+                f16: get("mlp_gate_fwd_f16")?,
+            },
+            mlp_gate_bwd: TypedKernel {
+                f32: get("mlp_gate_bwd")?,
+                bf16: get("mlp_gate_bwd_bf16")?,
+                f16: get("mlp_gate_bwd_f16")?,
+            },
 
             // typed training-backward kernels
             gating_bwd_typed: load_typed("gating_backward")?,

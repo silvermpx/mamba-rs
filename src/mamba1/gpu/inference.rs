@@ -57,6 +57,7 @@ mod model_gemm_manifest_tests {
             dt_rank: None,
             proj_bias: false,
             conv_bias: true,
+            d_intermediate: 0,
         }
     }
 
@@ -671,6 +672,8 @@ pub struct MambaGpuScratch {
     pub delta: GpuBuffer,
     pub y: GpuBuffer,
     pub rms_buf: GpuBuffer,
+    /// The gated MLP branch's buffers, for a model with one.
+    pub mlp: Option<super::mlp::GpuMambaMlpBranchBufs>,
 }
 
 impl MambaGpuScratch {
@@ -696,6 +699,9 @@ impl MambaGpuScratch {
             delta: GpuBuffer::zeros(stream, batch * di)?,
             y: GpuBuffer::zeros(stream, batch * di)?,
             rms_buf: GpuBuffer::zeros(stream, batch)?,
+            mlp: (cfg.mlp_hidden() > 0)
+                .then(|| super::mlp::GpuMambaMlpBranchBufs::new(stream, batch, cfg.mlp_hidden()))
+                .transpose()?,
         })
     }
 }
@@ -732,6 +738,8 @@ pub struct MambaGpuScratchMixed {
     pub y: DtypedBuf,
     pub rms_buf: GpuBuffer,
     pub dtype: WeightDtype,
+    /// The gated MLP branch's buffers, for a model with one.
+    pub mlp: Option<super::mlp::GpuMambaMlpBranchTyped>,
 }
 
 impl MambaGpuScratchMixed {
@@ -765,6 +773,11 @@ impl MambaGpuScratchMixed {
             y: DtypedBuf::zeros(stream, batch * di, dtype)?,
             rms_buf: GpuBuffer::zeros(stream, batch)?,
             dtype,
+            mlp: (cfg.mlp_hidden() > 0)
+                .then(|| {
+                    super::mlp::GpuMambaMlpBranchTyped::new(stream, batch, cfg.mlp_hidden(), dtype)
+                })
+                .transpose()?,
         })
     }
 }
@@ -1482,6 +1495,21 @@ impl MambaGpuEngine {
                 lw.out_proj_b(),
                 (b, di, dm),
             )?;
+
+            // The gated MLP: its norm takes the mixer's pending add, and its
+            // output is left pending in turn.
+            if let Some(m) = weights.mlp(layer_idx) {
+                let (res, rms) = (scratch.residual.cached_ptr(), scratch.rms_buf.cached_ptr());
+                let bufs =
+                    super::mlp::branch_bufs(scratch.mlp.as_mut(), (b, m.hidden), "decode scratch")?;
+                super::mlp::pending_f32(
+                    &self.ctx,
+                    m,
+                    (res, &mut scratch.temporal, rms),
+                    bufs,
+                    (b, dm, cfg.rms_norm_eps),
+                )?;
+            }
         }
 
         // The last layer's residual add is still pending. A full step folds
@@ -2166,6 +2194,26 @@ impl MambaGpuEngineMixed {
                 lw.out_proj_b(),
                 (b, di, dm),
             )?;
+
+            // The gated MLP: its norm takes the mixer's pending add into the
+            // f32 residual, and its output is left pending in turn.
+            if let Some(m) = w.mlp(layer_idx) {
+                let ptrs = (
+                    scratch.residual.cached_ptr(),
+                    scratch.temporal.cached_ptr(),
+                    scratch.rms_buf.cached_ptr(),
+                );
+                let bufs =
+                    super::mlp::branch_bufs(scratch.mlp.as_mut(), (b, m.hidden), "decode scratch")?;
+                super::mlp::pending_typed(
+                    &engine.ctx,
+                    m,
+                    ptrs,
+                    bufs,
+                    (b, dm, cfg.rms_norm_eps),
+                    dt,
+                )?;
+            }
         }
 
         // The last layer's residual add is still pending. A full step folds
@@ -2312,6 +2360,7 @@ impl MambaGpuEngineMixed {
         self.engine.ctx.presize_bi_scratch()?;
         self.engine.ctx.presize_mixed_graph_scratch_m1(
             &self.engine.dims(seq_len),
+            self.engine.cfg.mlp_hidden(),
             self.mixed_weights.bulk_dtype,
         )
     }
@@ -3133,7 +3182,8 @@ impl MambaGpuBackbone {
             self.stream(),
             &self.prompt_dims(seq_len),
             dtype,
-        )
+        )?
+        .with_mlp(self.stream(), self.config().mlp_hidden())
     }
 
     /// Scratch for [`Self::prefill_sequence`] at `seq_len` tokens per
@@ -3143,7 +3193,8 @@ impl MambaGpuBackbone {
         seq_len: usize,
     ) -> Result<super::backward::GpuMambaTargetScratch, String> {
         self.admit_prompt(seq_len)?;
-        super::backward::GpuMambaTargetScratch::new(self.stream(), &self.prompt_dims(seq_len))
+        super::backward::GpuMambaTargetScratch::new(self.stream(), &self.prompt_dims(seq_len))?
+            .with_mlp(self.stream(), self.config().mlp_hidden())
     }
 
     /// Asks [`crate::mamba1::route::admit`] for prompt windows of `seq_len`

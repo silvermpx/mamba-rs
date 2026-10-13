@@ -75,6 +75,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
+        mlp: w.mlp.clone(),
     }
 }
 
@@ -120,6 +121,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize, rms_norm_eps: f32) {
         dt_rank: None,
         proj_bias: false,
         conv_bias: true,
+        d_intermediate: 0,
     };
     let input_dim = cfg.d_model;
     let batch = 2;
