@@ -631,6 +631,11 @@
 - Mamba-3 checkpoints whose block norms take a `norm_epsilon` other than
   1e-5 load, the mixer norms keeping the reference's fixed 1e-5, instead
   of being refused.
+- Every GEMM entry settles an empty axis as BLAS does, in every mode and
+  deterministic family: an empty output writes nothing, an empty
+  reduction leaves the bias (zeros without one) in a written output, and
+  a weight or bias gradient accumulates nothing. The Triad routes refused
+  any empty axis and the f32 ones an empty output.
 
 ## 0.7.5 (2026-09-23)
 

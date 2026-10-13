@@ -254,6 +254,11 @@ name = "inference_epilogue_pins"
 path = "tests/inference_epilogue_pins.rs"
 
 [[test]]
+name = "gemm_empty_axes"
+path = "tests/gemm_empty_axes.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "gemm_bi_async_allocation"
 path = "tests/gemm_bi_async_allocation.rs"
 required-features = ["cuda"]

@@ -38,6 +38,77 @@ fn kernel_ints<const N: usize>(sizes: [usize; N], kernel: &str) -> Result<[i32; 
     Ok(out)
 }
 
+/// The forward of a GEMM with an empty axis, settled as BLAS settles it: an
+/// empty output has nothing to write, and an empty reduction leaves the
+/// bias in every row (zeros without one). `Ok(true)` when an empty axis
+/// settled the GEMM.
+fn forward_empty_axis(
+    ctx: &GpuCtx,
+    y: TypedPtr,
+    bias: Option<cudarc::driver::sys::CUdeviceptr>,
+    (rows, reduction, cols): (usize, usize, usize),
+) -> Result<bool, String> {
+    if rows == 0 || cols == 0 {
+        return Ok(true);
+    }
+    if reduction != 0 {
+        return Ok(false);
+    }
+    match bias {
+        Some(b) => {
+            let [rows_i, cols_i] = kernel_ints([rows, cols], "bias_broadcast")?;
+            let mut builder = ctx
+                .stream
+                .launch_builder(ctx.kernels.bias_broadcast_typed.get(y.dtype));
+            builder.arg(&y.ptr);
+            builder.arg(&b);
+            builder.arg(&rows_i);
+            builder.arg(&cols_i);
+            unsafe { builder.launch(grid_1d_wide(rows * cols)) }
+                .map_err(|e| format!("bias over an empty reduction: {e:?}"))?;
+        }
+        None => zero_fill(ctx, y, rows * cols)?,
+    }
+    Ok(true)
+}
+
+/// The input gradient of a GEMM with an empty axis: nothing to write for an
+/// empty one, zeros for an empty reduction. `Ok(true)` when an empty axis
+/// settled it.
+fn overwrite_empty_axis(
+    ctx: &GpuCtx,
+    out: TypedPtr,
+    (rows, cols, reduction): (usize, usize, usize),
+) -> Result<bool, String> {
+    if rows == 0 || cols == 0 {
+        return Ok(true);
+    }
+    if reduction != 0 {
+        return Ok(false);
+    }
+    zero_fill(ctx, out, rows * cols)?;
+    Ok(true)
+}
+
+/// A weight gradient accumulates nothing over an empty axis.
+fn accumulate_empty_axis((rows, n_in, n_out): (usize, usize, usize)) -> bool {
+    rows == 0 || n_in == 0 || n_out == 0
+}
+
+/// `elems` zeros of `out`'s dtype from its pointer on; zero bits are +0.0
+/// in every storage.
+fn zero_fill(ctx: &GpuCtx, out: TypedPtr, elems: usize) -> Result<(), String> {
+    let bytes = elems
+        .checked_mul(out.dtype.size_bytes())
+        .ok_or("zero fill: the output's bytes overflow usize")?;
+    let r =
+        unsafe { cudarc::driver::sys::cuMemsetD8Async(out.ptr, 0, bytes, ctx.stream.cu_stream()) };
+    if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("zero fill over an empty reduction: {r:?}"));
+    }
+    Ok(())
+}
+
 /// The element count of a kernel that indexes with 32 bits: an error past
 /// an i32, where its index would wrap.
 fn kernel_elems(elems: usize, kernel: &str) -> Result<(), String> {
@@ -240,6 +311,13 @@ pub(crate) unsafe fn gpu_gemm_f32_forward_ptrs(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    let output = TypedPtr {
+        ptr: y,
+        dtype: WeightDtype::F32,
+    };
+    if forward_empty_axis(ctx, output, bias, dims)? {
+        return Ok(());
+    }
     let (batch, n_in, n_out) = dims;
     let shape = super::gemm_bi_triad::F32TriadShape::contiguous(ResolvedGemmOp::Nn, dims);
     let request = super::gemm_bi_triad::F32TriadRequest {
@@ -376,6 +454,13 @@ pub fn gpu_gemm_bi_backward_dx_raw(
     n_out: usize,
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    let output = TypedPtr {
+        ptr: dx.cached_ptr(),
+        dtype: WeightDtype::F32,
+    };
+    if overwrite_empty_axis(ctx, output, (batch, n_in, n_out))? {
+        return Ok(());
+    }
     if ctx.batch_invariant() {
         return match ctx.bi_gemm_family() {
             super::context::BiGemmFamily::Triad => {
@@ -444,6 +529,9 @@ pub fn gpu_gemm_bi_backward_dw_grad(
     n_out: usize,
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    if accumulate_empty_axis((batch, n_in, n_out)) {
+        return Ok(());
+    }
     if ctx.batch_invariant() {
         return match ctx.bi_gemm_family() {
             super::context::BiGemmFamily::Triad => {
@@ -523,6 +611,9 @@ pub fn gpu_gemm_bi_backward_dw_grad_typed(
     n_out: usize,
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    if accumulate_empty_axis((batch, n_in, n_out)) {
+        return Ok(());
+    }
     debug_assert_eq!(
         dy.dtype, x_saved.dtype,
         "cuBLAS GemmEx requires A.dtype == B.dtype"
@@ -595,6 +686,9 @@ pub fn gpu_gemm_ex_backward_dx_typed(
     n_out: usize,
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    if overwrite_empty_axis(ctx, dx, (batch, n_in, n_out))? {
+        return Ok(());
+    }
     debug_assert_eq!(
         dy.dtype, w.dtype,
         "cuBLAS GemmEx requires A.dtype == B.dtype"
@@ -821,6 +915,9 @@ pub fn gemm_bi_forward_typed(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    if forward_empty_axis(ctx, y, (bias_ptr != 0).then_some(bias_ptr), dims)? {
+        return Ok(());
+    }
     let mut observer = NoPhysicalObserver;
     gemm_bi_forward_typed_in(ctx, y, x, w, bias_ptr, dims, &mut observer).map(drop)
 }
@@ -991,6 +1088,9 @@ pub fn gemm_bi_backward_dw_typed(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    if accumulate_empty_axis(dims) {
+        return Ok(());
+    }
     let mut observer = NoPhysicalObserver;
     gemm_bi_backward_dw_typed_in(ctx, dw_ptr, dy, x_saved, dims, &mut observer).map(drop)
 }
@@ -1145,6 +1245,9 @@ pub fn gemm_bi_backward_dx_typed(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    if overwrite_empty_axis(ctx, dx, dims)? {
+        return Ok(());
+    }
     let mut observer = NoPhysicalObserver;
     gemm_bi_backward_dx_typed_in(ctx, dx, dy, w, dims, &mut observer).map(drop)
 }
@@ -2441,7 +2544,10 @@ pub fn gpu_gemm_bi_backward_grad_raw(
     gpu_gemm_bi_backward_dw_grad(ctx, dw, dy, x_saved, batch, n_in, n_out)?;
     gpu_gemm_bi_backward_dx_raw(ctx, dx, dy, w_ptr, batch, n_in, n_out)?;
 
-    if let Some(db) = db {
+    // A bias gradient accumulates nothing over no rows or no columns.
+    if let Some(db) = db
+        && !accumulate_empty_axis((batch, 1, n_out))
+    {
         let [b_i, n_i] = kernel_ints([batch, n_out], "colsum_accumulate")?;
         let db_ptr = db.ptr();
         let dy_ptr = dy.cached_ptr();
@@ -2472,6 +2578,13 @@ pub fn gpu_gemm_forward_dispatch(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    let output = TypedPtr {
+        ptr: y.cached_ptr(),
+        dtype: WeightDtype::F32,
+    };
+    if forward_empty_axis(ctx, output, bias_ptr, dims)? {
+        return Ok(());
+    }
     match w_dtype {
         WeightDtype::F32 | WeightDtype::Tf32 => {
             gpu_gemm_bi_forward_raw(ctx, y, x, w_ptr, bias_ptr, dims)
@@ -2532,6 +2645,13 @@ pub fn gpu_gemm_bi_tied_lm_head_raw(
     vocab_padded: usize,
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    let logits = TypedPtr {
+        ptr: logits_ptr,
+        dtype: WeightDtype::F32,
+    };
+    if forward_empty_axis(ctx, logits, None, (batch, d_model, vocab_padded))? {
+        return Ok(());
+    }
     let dims = (batch, vocab_padded, d_model);
     let request = super::gemm_bi_triad::F32TriadRequest {
         op: ResolvedGemmOp::Nt,
@@ -3848,6 +3968,18 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
     dims: TiedLmDims,
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    let logits = TypedPtr {
+        ptr: logits_ptr,
+        dtype: WeightDtype::F32,
+    };
+    if forward_empty_axis(
+        ctx,
+        logits,
+        None,
+        (dims.batch, dims.d_model, dims.vocab_padded),
+    )? {
+        return Ok(());
+    }
     if dtype == WeightDtype::F32 {
         return gpu_gemm_bi_tied_lm_head_raw(
             ctx,
@@ -3908,6 +4040,18 @@ pub fn gpu_gemm_ex_tied_lm_head_widened_raw(
     dims: TiedLmDims,
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    let logits = TypedPtr {
+        ptr: logits_ptr,
+        dtype: WeightDtype::F32,
+    };
+    if forward_empty_axis(
+        ctx,
+        logits,
+        None,
+        (dims.batch, dims.d_model, dims.vocab_padded),
+    )? {
+        return Ok(());
+    }
     if dtype == WeightDtype::F32 || ctx.gemm_mode() != GemmMode::Deterministic {
         return gpu_gemm_ex_tied_lm_head_raw(ctx, logits_ptr, temporal_ptr, embed_ptr, dtype, dims);
     }
@@ -4235,6 +4379,9 @@ pub fn gemm_bi_forward_raw(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    if forward_empty_axis(ctx, c, bias_ptr, dims)? {
+        return Ok(());
+    }
     super::gemm_bi_inference::inference_forward(ctx, c, x, w, bias_ptr, dims).map(|_| ())
 }
 
@@ -4388,6 +4535,9 @@ pub fn gpu_gemm_typed_forward_raw(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     ctx.ensure_gemm_usable()?;
+    if forward_empty_axis(ctx, c, bias_ptr, dims)? {
+        return Ok(());
+    }
     let (batch, n_in, n_out) = dims;
 
     // Canonical routing is mode-first. All-F32 delegates to the shared NN
