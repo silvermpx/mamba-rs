@@ -95,7 +95,7 @@ jobs:
       - run: exit 0
 
   test:
-    name: Test (${{ matrix.os }} / ${{ matrix.rust }})
+    name: Test (${{ matrix.os }} / ${{ matrix.rust }}${{ matrix.features && format(' / {0}', matrix.features) || '' }})
     needs: basics
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -111,6 +111,14 @@ jobs:
             rust: stable
           - os: windows-latest
             rust: stable
+          # The BLAS backends replace the BLAS-free GEMMs, whose bit claims
+          # their tests gate out; everything else must hold on them too.
+          - os: ubuntu-latest
+            rust: stable
+            features: gemm-blas
+          - os: macos-latest
+            rust: stable
+            features: accelerate
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -118,8 +126,8 @@ jobs:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.rust }}
-      - run: cargo test --workspace
+          key: ${{ matrix.rust }}-${{ matrix.features }}
+      - run: cargo test --workspace ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
 
   cuda-check:
     # Every GPU/tier test file is

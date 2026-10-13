@@ -921,6 +921,10 @@ mod tests {
     /// The pool-parallel forward (row blocks walked panel by panel) gives
     /// the plain loop's bits at shapes large enough to take it, ragged rows
     /// and columns included.
+    #[cfg(not(any(
+        all(feature = "accelerate", target_os = "macos"),
+        feature = "gemm-blas"
+    )))]
     #[test]
     fn test_sgemm_forward_par_matches_the_plain_loop_bitwise() {
         let synth = |n: usize, seed: u32| -> Vec<f32> {
@@ -967,6 +971,10 @@ mod tests {
     /// plus the products over ascending j, dW as its value plus the
     /// products over ascending batch rows; serial and pool-sized shapes,
     /// ragged edges, signed zeros and non-finite values included.
+    #[cfg(not(any(
+        all(feature = "accelerate", target_os = "macos"),
+        feature = "gemm-blas"
+    )))]
     #[test]
     fn test_sgemm_backward_matches_the_plain_loops_bitwise() {
         let synth = |n: usize, seed: u32| -> Vec<f32> {
