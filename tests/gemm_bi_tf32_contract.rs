@@ -4001,68 +4001,68 @@ fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
             "M1 f32 training",
             TRAINING_GRAPH_SOURCE,
             "GpuMambaF32TrainingStepGraph",
-            "capture",
+            &["capture"][..],
             &["replay"][..],
         ),
         (
             "M1 pooled prefill",
             PREFILL_SOURCE,
             "PrefillPooledGraph",
-            "capture",
+            &["capture"][..],
             &["launch"][..],
         ),
         (
             "M3 f32 training",
             MAMBA3_TRAINING_GRAPH_SOURCE,
             "GpuMamba3F32TrainingStepGraph",
-            "capture",
+            &["capture"][..],
             &["replay"][..],
         ),
         (
             "M3 full prefill",
             MAMBA3_PREFILL_SOURCE,
             "Mamba3PrefillGraph",
-            "capture",
+            &["capture"][..],
             &["replay"][..],
         ),
         (
             "M3 pooled prefill",
             MAMBA3_PREFILL_SOURCE,
             "Mamba3PrefillPooledGraph",
-            "capture",
+            &["capture"][..],
             &["replay"][..],
         ),
         (
             "M1 bf16 training",
             TRAINING_GRAPH_SOURCE,
             "GpuMambaTrainingStepGraph",
-            "capture",
+            &["capture"][..],
             &["replay"][..],
         ),
         (
             "M1 raw f16 trainer",
             TRAINER_SOURCE,
             "MambaTrainerMixed",
-            "capture_graph_f16",
+            &["capture_f16_body", "capture_graph_f16"][..],
             &["step_f16"][..],
         ),
         (
             "M3 bf16 training",
             MAMBA3_TRAINING_GRAPH_SOURCE,
             "GpuMamba3TrainingStepGraph",
-            "capture",
+            &["capture"][..],
             &["replay"][..],
         ),
         (
             "M3 raw f16 trainer",
             MAMBA3_TRAINER_SOURCE,
             "Mamba3TrainerMixed",
-            "capture_graph_f16",
+            &["capture_f16_body", "capture_graph_f16"][..],
             &["step_f16"][..],
         ),
     ];
     assert_eq!(remaining_holders.len(), 9, "remaining owner census");
-    for (label, source, holder, capture, replays) in remaining_holders {
+    for (label, source, holder, captures, replays) in remaining_holders {
         let structure = source_mask(struct_scope_for_type(source, holder));
         assert_code_contains_all(
             &structure,
@@ -4073,7 +4073,26 @@ fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
             ],
             &format!("{label} retained graph contract"),
         );
-        let capture = source_mask(method_scope_for_type(source, holder, capture));
+        // The entry is the last method; a body helper it calls captures
+        // first, so the helpers' scopes come before the entry's.
+        let (entry, helpers) = captures.split_last().expect("a capture method");
+        let entry_scope = source_mask(method_scope_for_type(source, holder, entry));
+        for helper in helpers {
+            let call = entry_scope
+                .find(&format!("self.{helper}("))
+                .unwrap_or_else(|| panic!("{label}::{entry} does not call {helper}"));
+            assert!(
+                call < entry_scope
+                    .find("require_deterministic_gemm_graph_plan")
+                    .unwrap_or(0),
+                "{label}::{entry} must capture through {helper} before validating the plan"
+            );
+        }
+        let capture = captures
+            .iter()
+            .map(|method| source_mask(method_scope_for_type(source, holder, method)))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_code_contains_all(
             &capture,
             &[
