@@ -26,6 +26,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{
     Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, scan_bwd_record_floats, scan_bwd_smem_bytes,
     scan_bwd_threads, scan_smem_bytes,
@@ -228,29 +229,33 @@ fn mimo_scan_tiles_are_the_whole_head() {
                     let (stride_i, tile, pipe) = (stride as i32, g.tile as i32, i32::from(g.pipe));
                     let (done_ptr, y_ptr) = (done.cached_ptr(), y.cached_ptr());
                     let kernel = if ckpt { &k.scan_ckpt } else { &k.scan };
-                    let mut b = s.launch_builder(kernel.get(dtype));
-                    for p in &ptrs {
-                        b.arg(p);
-                    }
-                    b.arg(&ld);
-                    for p in &ins {
-                        b.arg(p);
-                    }
-                    for v in &ints {
-                        b.arg(v);
-                    }
-                    b.arg(&a_floor);
-                    if ckpt {
-                        for p in &cks {
+                    for (y_first, z_first, cfg) in yz_runs(g.cfg(batch, nh, hd)) {
+                        let mut b = s.launch_builder(kernel.get(dtype));
+                        for p in &ptrs {
                             b.arg(p);
                         }
-                        b.arg(&stride_i);
+                        b.arg(&ld);
+                        for p in &ins {
+                            b.arg(p);
+                        }
+                        for v in &ints {
+                            b.arg(v);
+                        }
+                        b.arg(&a_floor);
+                        if ckpt {
+                            for p in &cks {
+                                b.arg(p);
+                            }
+                            b.arg(&stride_i);
+                        }
+                        b.arg(&tile);
+                        b.arg(&pipe);
+                        b.arg(&done_ptr);
+                        b.arg(&y_ptr);
+                        b.arg(&y_first);
+                        b.arg(&z_first);
+                        unsafe { b.launch(cfg) }.unwrap();
                     }
-                    b.arg(&tile);
-                    b.arg(&pipe);
-                    b.arg(&done_ptr);
-                    b.arg(&y_ptr);
-                    unsafe { b.launch(g.cfg(batch, nh, hd)) }.unwrap();
                     let mut got = vec![
                         bits_typed(&ctx, &out),
                         bits_f32(&ctx, &y),
@@ -456,25 +461,6 @@ fn mimo_scan_bwd_global_is_the_shared_kernel() {
                 } else {
                     &k.scan_bwd
                 };
-                let mut b = s.launch_builder(kernel.get(dtype));
-                b.arg(&d_proj_ptr);
-                b.arg(&ld);
-                for p in &outs {
-                    b.arg(p);
-                }
-                if let Some(ptrs) = &scratch_ptrs {
-                    for p in ptrs {
-                        b.arg(p);
-                    }
-                }
-                for p in &ins {
-                    b.arg(p);
-                }
-                for v in &ints {
-                    b.arg(v);
-                }
-                b.arg(&a_floor);
-                b.arg(&dy_in);
                 let (threads, smem) = match g {
                     None => (
                         scan_bwd_threads(hd),
@@ -487,7 +473,29 @@ fn mimo_scan_bwd_global_is_the_shared_kernel() {
                     block_dim: (threads as u32, 1, 1),
                     shared_mem_bytes: smem as u32,
                 };
-                unsafe { b.launch(cfg) }.unwrap();
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut b = s.launch_builder(kernel.get(dtype));
+                    b.arg(&d_proj_ptr);
+                    b.arg(&ld);
+                    for p in &outs {
+                        b.arg(p);
+                    }
+                    if let Some(ptrs) = &scratch_ptrs {
+                        for p in ptrs {
+                            b.arg(p);
+                        }
+                    }
+                    for p in &ins {
+                        b.arg(p);
+                    }
+                    for v in &ints {
+                        b.arg(v);
+                    }
+                    b.arg(&a_floor);
+                    b.arg(&dy_in);
+                    b.arg(&y_first);
+                    unsafe { b.launch(cfg) }.unwrap();
+                }
                 vec![
                     bits_typed(&ctx, &d_proj),
                     bits_f32(&ctx, &d_bn_h),
@@ -540,6 +548,7 @@ fn mimo_scan_bwd_global_is_the_shared_kernel() {
 }
 
 /// A kernel argument of any of the kinds the chunked kernels take.
+#[derive(Clone, Copy)]
 enum Arg {
     P(u64),
     L(i64),
@@ -562,6 +571,26 @@ fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
         }
     }
     unsafe { b.launch(cfg) }.unwrap();
+}
+
+/// [`launch`] once per run of the grid's y axis, each run's first block
+/// appended as the kernel's last argument.
+fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut run = args.to_vec();
+        run.push(Arg::I(y_first));
+        launch(ctx, f, cfg, &run);
+    }
+}
+
+/// [`launch`] once per run of the grid's y and z axes, each run's first y
+/// and z blocks appended.
+fn launch_yz_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+    for (y_first, z_first, cfg) in yz_runs(cfg) {
+        let mut run = args.to_vec();
+        run.extend([Arg::I(y_first), Arg::I(z_first)]);
+        launch(ctx, f, cfg, &run);
+    }
 }
 
 fn cfg(grid: (usize, usize, usize), block: usize, smem: usize) -> LaunchConfig {
@@ -672,7 +701,7 @@ fn mimo_chunked_tiles_are_the_whole_head() {
                 ];
                 args.extend(ints(&[nt as i32, sl as i32, pt as i32]));
                 let smem = (sl * rank * nt + sl * pt + sl) * 4;
-                launch(
+                launch_yz_runs(
                     &ctx,
                     k.chunk_state.get(dtype),
                     cfg((b * inp.nc, nh, ds.div_ceil(nt) * tiles), nt * pt, smem),
@@ -703,7 +732,7 @@ fn mimo_chunked_tiles_are_the_whole_head() {
                 args.extend(ints(&[tt as i32, st as i32, pt as i32]));
                 let smem =
                     (tt * rank * ds + st * rank * (ds + 1) + tt * rank * st * rank + st * pt) * 4;
-                launch(
+                launch_yz_runs(
                     &ctx,
                     k.chunk_scan.get(dtype),
                     cfg(
@@ -726,7 +755,7 @@ fn mimo_chunked_tiles_are_the_whole_head() {
                     Arg::P(inp.cs.cached_ptr()),
                 ];
                 args.extend(ints(&[nt as i32, pt as i32]));
-                launch(
+                launch_yz_runs(
                     &ctx,
                     &k.cb.dsloc,
                     cfg(
@@ -826,7 +855,7 @@ fn mimo_chunked_register_tiles_are_the_channel_parallel_kernels() {
             let contrib = GpuBuffer::zeros(s, per).unwrap();
             let mut args = state_args(&contrib);
             args.extend(ints(&[1, sl as i32, hd as i32]));
-            launch(
+            launch_yz_runs(
                 &ctx,
                 k.chunk_state.get(dtype),
                 cfg((b * inp.nc, nh, ds), hd, (sl * rank + sl * hd + sl) * 4),
@@ -835,7 +864,7 @@ fn mimo_chunked_register_tiles_are_the_channel_parallel_kernels() {
             let dsl = GpuBuffer::zeros(s, per).unwrap();
             let mut args = dsloc_args(&dsl);
             args.extend(ints(&[1, hd as i32]));
-            launch(
+            launch_yz_runs(
                 &ctx,
                 &k.cb.dsloc,
                 cfg((b * inp.nc, nh, ds), hd, (64 * rank + 64) * 4),
@@ -849,7 +878,7 @@ fn mimo_chunked_register_tiles_are_the_channel_parallel_kernels() {
                 let contrib = GpuBuffer::zeros(s, per).unwrap();
                 let mut args = state_args(&contrib);
                 args.extend(ints(&tile_ints));
-                launch(
+                launch_yz_runs(
                     &ctx,
                     k.chunk_state_tiles.get(dtype),
                     cfg(grid, 8 * pg, smem),
@@ -858,7 +887,7 @@ fn mimo_chunked_register_tiles_are_the_channel_parallel_kernels() {
                 let dsl = GpuBuffer::zeros(s, per).unwrap();
                 let mut args = dsloc_args(&dsl);
                 args.extend(ints(&tile_ints));
-                launch(&ctx, &k.cb.dsloc_tiles, cfg(grid, 8 * pg, smem), &args);
+                launch_yz_runs(&ctx, &k.cb.dsloc_tiles, cfg(grid, 8 * pg, smem), &args);
                 for (i, (name, got)) in [("chunk state", &contrib), ("local dS", &dsl)]
                     .iter()
                     .enumerate()
@@ -934,7 +963,7 @@ fn mimo_chunked_staging_in_global_is_the_shared_staging() {
                     Arg::P(scratch.as_ref().map_or(0, |g| g.cached_ptr())),
                 ];
                 args.extend(ints(&[tg as i32, stage]));
-                launch(
+                launch_runs(
                     &ctx,
                     k.cb.state_terms.get(dtype),
                     cfg((b * inp.nc, nh, 64usize.div_ceil(tg)), 256, smem),
@@ -987,7 +1016,7 @@ fn mimo_chunked_staging_in_global_is_the_shared_staging() {
                     Arg::P(scratch.as_ref().map_or(0, |g| g.cached_ptr())),
                 ];
                 args.extend(ints(&[tl as i32]));
-                launch(
+                launch_runs(
                     &ctx,
                     k.cb.pairs.get(dtype),
                     cfg((b * inp.nc, nh, 1), 256, smem),
@@ -1030,7 +1059,7 @@ fn mimo_chunked_staging_in_global_is_the_shared_staging() {
                 Arg::I(ds as i32),
                 Arg::I(rank as i32),
             ];
-            launch(
+            launch_runs(
                 &ctx,
                 &k.cb.lead,
                 cfg((b, nh, 1), threads, lanes.min(threads) * 4),

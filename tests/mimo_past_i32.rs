@@ -19,6 +19,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{ChunkedGeom, Mamba3MimoKernels, chunked_geom};
 
 const CHUNK: usize = 64;
@@ -73,6 +74,26 @@ fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
         };
     }
     unsafe { b.launch(cfg) }.expect("launch");
+}
+
+/// [`launch`] once per run of the grid's y axis, each run's first block
+/// appended as the kernel's last argument.
+fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut run = args.to_vec();
+        run.push(Arg::I(y_first));
+        launch(ctx, f, cfg, &run);
+    }
+}
+
+/// [`launch`] once per run of the grid's y and z axes, each run's first y
+/// and z blocks appended.
+fn launch_yz_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+    for (y_first, z_first, cfg) in yz_runs(cfg) {
+        let mut run = args.to_vec();
+        run.extend([Arg::I(y_first), Arg::I(z_first)]);
+        launch(ctx, f, cfg, &run);
+    }
 }
 
 /// The scan's shape: `b` sequences of `t` tokens, `nh` heads of `hd`
@@ -239,7 +260,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
     );
     let heads = 2 * s.di() + 2 * s.bc();
     let ang_col = heads + 3 * s.nh;
-    launch(
+    launch_runs(
         ctx,
         k.chunk_prep.get(ACT),
         LaunchConfig {
@@ -286,7 +307,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
         let (jc, sl, pg, smem) = geom.state_tiles;
         let mut args = state_in.to_vec();
         args.extend([Arg::I(jc as i32), Arg::I(sl as i32), Arg::I(pg as i32)]);
-        launch(
+        launch_yz_runs(
             ctx,
             k.chunk_state_tiles.get(ACT),
             LaunchConfig {
@@ -304,7 +325,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
         let (nt, sl, smem) = geom.state;
         let mut args = state_in.to_vec();
         args.extend([Arg::I(nt as i32), Arg::I(sl as i32), Arg::I(geom.pt as i32)]);
-        launch(
+        launch_yz_runs(
             ctx,
             k.chunk_state.get(ACT),
             LaunchConfig {
@@ -319,7 +340,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
             &args,
         );
     }
-    launch(
+    launch_runs(
         ctx,
         &k.state_pass,
         LaunchConfig {
@@ -373,7 +394,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
         let (tq, kt, nk, smem) = geom.scan_tiles;
         let mut args = scan_in.to_vec();
         args.extend([Arg::I(tq as i32), Arg::I(kt as i32), Arg::I(nk as i32)]);
-        launch(
+        launch_runs(
             ctx,
             k.chunk_scan_tiles.get(ACT),
             LaunchConfig {
@@ -387,7 +408,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
         let (tt, st, smem) = geom.scan;
         let mut args = scan_in.to_vec();
         args.extend([Arg::I(tt as i32), Arg::I(st as i32), Arg::I(geom.pt as i32)]);
-        launch(
+        launch_yz_runs(
             ctx,
             k.chunk_scan.get(ACT),
             LaunchConfig {
@@ -402,7 +423,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
             &args,
         );
     }
-    launch(
+    launch_runs(
         ctx,
         k.chunk_writeback.get(ACT),
         LaunchConfig {

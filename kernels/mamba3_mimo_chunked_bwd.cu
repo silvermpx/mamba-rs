@@ -116,12 +116,13 @@ __device__ __forceinline__ void m3mb_gate_normed_body(
     const float* __restrict__ D, const float* __restrict__ norm_w,
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
     const float* __restrict__ mimo_o,
-    int nh, int hd, int rank, float eps
+    int nh, int hd, int rank, float eps,
+    int y_first /* this run's first y block */
 ) {
     __shared__ float rstd[MIMO_MAX_RANK];
     __shared__ float cfac[MIMO_MAX_RANK];
     const long long row = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const long long di = (long long)nh * hd;
     const long long base = (row * nh + h) * (long long)rank * hd;
     const float* yr = y + base;
@@ -181,21 +182,22 @@ __device__ __forceinline__ void m3mb_gate_normed_body(
     }
 }
 
-#define DEFINE_M3MB_GATE_NORMED(NAME, T)                                        \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dy, float* __restrict__ du, T* __restrict__ d_proj,     \
-    long long ld_proj,                                                          \
-    float* __restrict__ gphi, float* __restrict__ gz, float* __restrict__ gd,   \
-    float* __restrict__ gw,                                                     \
-    const T* __restrict__ d_o, const float* __restrict__ y,                     \
-    const T* __restrict__ proj, const float* __restrict__ D,                    \
-    const float* __restrict__ norm_w,                                           \
-    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,         \
-    const float* __restrict__ mimo_o,                                           \
-    int nh, int hd, int rank, float eps                                         \
-) {                                                                             \
+#define DEFINE_M3MB_GATE_NORMED(NAME, T)                                       \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dy, float* __restrict__ du, T* __restrict__ d_proj,    \
+    long long ld_proj,                                                         \
+    float* __restrict__ gphi, float* __restrict__ gz, float* __restrict__ gd,  \
+    float* __restrict__ gw,                                                    \
+    const T* __restrict__ d_o, const float* __restrict__ y,                    \
+    const T* __restrict__ proj, const float* __restrict__ D,                   \
+    const float* __restrict__ norm_w,                                          \
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,        \
+    const float* __restrict__ mimo_o,                                          \
+    int nh, int hd, int rank, float eps,                                       \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
     m3mb_gate_normed_body<T>(dy, du, d_proj, ld_proj, gphi, gz, gd, gw, d_o, y, \
-        proj, D, norm_w, mimo_x, mimo_z, mimo_o, nh, hd, rank, eps);            \
+        proj, D, norm_w, mimo_x, mimo_z, mimo_o, nh, hd, rank, eps, y_first);  \
 }
 DEFINE_M3MB_GATE_NORMED(m3mb_gate_normed, float)
 DEFINE_M3MB_GATE_NORMED(m3mb_gate_normed_bf16, __nv_bfloat16)
@@ -210,12 +212,13 @@ extern "C" __global__ void m3mb_inter(
     const float* __restrict__ dy, const float* __restrict__ enter,
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na
+    int seq, int nh, int ng, int hd, int ds, int rank, int na,
+    int y_first /* this run's first y block */
 ) {
     __shared__ float red[256];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int t = blockIdx.z;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
@@ -261,12 +264,13 @@ __device__ __forceinline__ void m3mb_inter_tiles_body(
     const float* __restrict__ dy, const float* __restrict__ enter,
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float4 m3mb_sm4[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -385,10 +389,11 @@ extern "C" __global__ void __launch_bounds__(512) m3mb_inter_tiles(
     const float* __restrict__ dy, const float* __restrict__ enter,
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt,
+    int y_first /* this run's first y block */
 ) {
     m3mb_inter_tiles_body(dq, inter, dy, enter, cn, c_bias, coef, sn, cs, seq, nh, ng, hd, ds,
-                          rank, na, tt);
+                          rank, na, tt, y_first);
 }
 
 // The state gradient each chunk's outputs give its entering state:
@@ -402,16 +407,18 @@ extern "C" __global__ void m3mb_dsloc(
     const float* __restrict__ dy,
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int pt
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int pt,
+    int y_first, /* this run's first y block */
+    int z_first /* this run's first z block */
 ) {
     extern __shared__ float m3mb_sm[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int nct = (hd + pt - 1) / pt;
-    const int p0 = (int)(blockIdx.z % nct) * pt;
+    const int p0 = (int)((z_first + blockIdx.z) % nct) * pt;
     const int pc = min(pt, hd - p0);
-    const int n0 = (int)(blockIdx.z / nct) * nt;
+    const int n0 = (int)((z_first + blockIdx.z) / nct) * nt;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -464,16 +471,18 @@ __device__ __forceinline__ void m3mb_dsloc_tiles_body(
     const float* __restrict__ dy,
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int sl, int pg
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int sl, int pg,
+    int y_first, /* this run's first y block */
+    int z_first /* this run's first z block */
 ) {
     extern __shared__ float4 m3mb_sm4[];
     constexpr int NT = 32 * JC;
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int nz = (ds + NT - 1) / NT;
-    const int grp = blockIdx.z / nz;
-    const int n0 = (blockIdx.z - grp * nz) * NT;
+    const int grp = (z_first + blockIdx.z) / nz;
+    const int n0 = ((z_first + blockIdx.z) - grp * nz) * NT;
     const int pb = grp * pg;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
@@ -556,17 +565,19 @@ extern "C" __global__ void m3mb_dsloc_tiles(
     const float* __restrict__ dy,
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int jc, int sl, int pg
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int jc, int sl, int pg,
+    int y_first, /* this run's first y block */
+    int z_first /* this run's first z block */
 ) {
     if (jc == 1)
         m3mb_dsloc_tiles_body<1>(dsl, dy, cn, c_bias, coef, sn, cs, seq, nh, ng, hd, ds,
-                                 rank, na, sl, pg);
+                                 rank, na, sl, pg, y_first, z_first);
     else if (jc == 2)
         m3mb_dsloc_tiles_body<2>(dsl, dy, cn, c_bias, coef, sn, cs, seq, nh, ng, hd, ds,
-                                 rank, na, sl, pg);
+                                 rank, na, sl, pg, y_first, z_first);
     else
         m3mb_dsloc_tiles_body<4>(dsl, dy, cn, c_bias, coef, sn, cs, seq, nh, ng, hd, ds,
-                                 rank, na, sl, pg);
+                                 rank, na, sl, pg, y_first, z_first);
 }
 
 // The state passing backward, in place: dS holds dS_loc on entry and the
@@ -576,11 +587,12 @@ extern "C" __global__ void m3mb_dsloc_tiles(
 extern "C" __global__ void m3mb_pass(
     float* __restrict__ dst, float* __restrict__ d_init,
     const float* __restrict__ coef,
-    int batch, int seq, int nh, int hd, int ds
+    int batch, int seq, int nh, int hd, int ds,
+    int y_first /* this run's first y block */
 ) {
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bh = blockIdx.x;
-    const long long e = (long long)blockIdx.y * blockDim.x + threadIdx.x;
+    const long long e = (long long)(y_first + blockIdx.y) * blockDim.x + threadIdx.x;
     const long long pn = (long long)hd * ds;
     if (bh >= (long long)batch * nh || e >= pn) return;
     const long long b = bh / nh;
@@ -632,13 +644,14 @@ __device__ __forceinline__ void m3mb_state_terms_body(
     const float* __restrict__ bn, const float* __restrict__ b_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ mimo_x, float* __restrict__ glob,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg, int stage
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg, int stage,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m3mb_sm[];
     __shared__ float red[256];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -652,7 +665,7 @@ __device__ __forceinline__ void m3mb_state_terms_body(
     const int half = ds / 2;
     const float acs_last = coef[((b * seq + t0 + lc - 1) * nh + h) * 4 + 3];
     const float* dsc = dst + (bc * nh + h) * (long long)hd * ds;
-    const long long blk = ((long long)bc * gridDim.y + h) * gridDim.z + blockIdx.z;
+    const long long blk = ((long long)bc * nh + h) * gridDim.z + blockIdx.z;
     float* kt = glob == nullptr ? m3mb_sm : glob + blk * ((long long)rank * (ds + hd));  // [R][N]
     float* ut = kt + rank * ds;         // [R][P]
     float* dss = glob == nullptr ? ut + rank * hd : m3mb_sm;  // [P][N + 1] with stage
@@ -721,12 +734,13 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
     const float* __restrict__ bn, const float* __restrict__ b_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ mimo_x,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float4 m3mb_sm4[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -897,37 +911,39 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
     for (int tl = tid; tl < tn; tl += blockDim.x) dcs[(row0 + tl) * nh + h] = red[tl * 256];
 }
 
-#define DEFINE_M3MB_STATE_TERMS_TILES(NAME, T)                                  \
-extern "C" __global__ void __launch_bounds__(512) NAME(                         \
-    float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dcs,    \
-    const float* __restrict__ dst, const T* __restrict__ proj,                  \
-    long long ld_proj,                                                          \
-    const float* __restrict__ bn, const float* __restrict__ b_bias,             \
-    const float* __restrict__ coef, const float* __restrict__ sn,               \
-    const float* __restrict__ cs, const float* __restrict__ mimo_x,             \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt           \
-) {                                                                             \
+#define DEFINE_M3MB_STATE_TERMS_TILES(NAME, T)                                 \
+extern "C" __global__ void __launch_bounds__(512) NAME(                        \
+    float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dcs,   \
+    const float* __restrict__ dst, const T* __restrict__ proj,                 \
+    long long ld_proj,                                                         \
+    const float* __restrict__ bn, const float* __restrict__ b_bias,            \
+    const float* __restrict__ coef, const float* __restrict__ sn,              \
+    const float* __restrict__ cs, const float* __restrict__ mimo_x,            \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt,         \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
     m3mb_state_terms_tiles_body<T>(dk, du, dcs, dst, proj, ld_proj, bn, b_bias, \
-        coef, sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tt);               \
+        coef, sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tt, y_first);     \
 }
 DEFINE_M3MB_STATE_TERMS_TILES(m3mb_state_terms_tiles, float)
 DEFINE_M3MB_STATE_TERMS_TILES(m3mb_state_terms_tiles_bf16, __nv_bfloat16)
 DEFINE_M3MB_STATE_TERMS_TILES(m3mb_state_terms_tiles_f16, __half)
 
-#define DEFINE_M3MB_STATE_TERMS(NAME, T)                                        \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dcs,    \
-    const float* __restrict__ dst, const T* __restrict__ proj,                  \
-    long long ld_proj,                                                          \
-    const float* __restrict__ bn, const float* __restrict__ b_bias,             \
-    const float* __restrict__ coef, const float* __restrict__ sn,               \
-    const float* __restrict__ cs, const float* __restrict__ mimo_x,             \
-    float* __restrict__ glob,                                                   \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg,          \
-    int stage                                                                   \
-) {                                                                             \
+#define DEFINE_M3MB_STATE_TERMS(NAME, T)                                       \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dcs,   \
+    const float* __restrict__ dst, const T* __restrict__ proj,                 \
+    long long ld_proj,                                                         \
+    const float* __restrict__ bn, const float* __restrict__ b_bias,            \
+    const float* __restrict__ coef, const float* __restrict__ sn,              \
+    const float* __restrict__ cs, const float* __restrict__ mimo_x,            \
+    float* __restrict__ glob,                                                  \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg,         \
+    int stage,                                                                 \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
     m3mb_state_terms_body<T>(dk, du, dcs, dst, proj, ld_proj, bn, b_bias, coef, \
-        sn, cs, mimo_x, glob, seq, nh, ng, hd, ds, rank, na, tg, stage);        \
+        sn, cs, mimo_x, glob, seq, nh, ng, hd, ds, rank, na, tg, stage, y_first); \
 }
 DEFINE_M3MB_STATE_TERMS(m3mb_state_terms, float)
 DEFINE_M3MB_STATE_TERMS(m3mb_state_terms_bf16, __nv_bfloat16)
@@ -959,12 +975,13 @@ __device__ __forceinline__ void m3mb_pairs_body(
     const float* __restrict__ b_bias, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ mimo_x, float* __restrict__ glob,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m3mb_sm[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -1111,21 +1128,22 @@ __device__ __forceinline__ void m3mb_pairs_body(
     }
 }
 
-#define DEFINE_M3MB_PAIRS(NAME, T)                                              \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dq, float* __restrict__ dk, float* __restrict__ du,     \
-    float* __restrict__ dwp,                                                    \
-    const float* __restrict__ dy, const T* __restrict__ proj,                   \
-    long long ld_proj,                                                          \
-    const float* __restrict__ bn, const float* __restrict__ cn,                 \
-    const float* __restrict__ b_bias, const float* __restrict__ c_bias,         \
-    const float* __restrict__ coef, const float* __restrict__ sn,               \
-    const float* __restrict__ cs, const float* __restrict__ mimo_x,             \
-    float* __restrict__ glob,                                                   \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl           \
-) {                                                                             \
-    m3mb_pairs_body<T>(dq, dk, du, dwp, dy, proj, ld_proj, bn, cn, b_bias,      \
-        c_bias, coef, sn, cs, mimo_x, glob, seq, nh, ng, hd, ds, rank, na, tl); \
+#define DEFINE_M3MB_PAIRS(NAME, T)                                             \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dq, float* __restrict__ dk, float* __restrict__ du,    \
+    float* __restrict__ dwp,                                                   \
+    const float* __restrict__ dy, const T* __restrict__ proj,                  \
+    long long ld_proj,                                                         \
+    const float* __restrict__ bn, const float* __restrict__ cn,                \
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,        \
+    const float* __restrict__ coef, const float* __restrict__ sn,              \
+    const float* __restrict__ cs, const float* __restrict__ mimo_x,            \
+    float* __restrict__ glob,                                                  \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,         \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m3mb_pairs_body<T>(dq, dk, du, dwp, dy, proj, ld_proj, bn, cn, b_bias,     \
+        c_bias, coef, sn, cs, mimo_x, glob, seq, nh, ng, hd, ds, rank, na, tl, y_first); \
 }
 DEFINE_M3MB_PAIRS(m3mb_pairs, float)
 DEFINE_M3MB_PAIRS(m3mb_pairs_bf16, __nv_bfloat16)
@@ -1151,12 +1169,13 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
     const float* __restrict__ bn, const float* __restrict__ b_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ mimo_x,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float4 m3mb_sm4[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -1323,12 +1342,13 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
     const float* __restrict__ b_bias, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ mimo_x,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float4 m3mb_sm4[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -1505,36 +1525,38 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
     }
 }
 
-#define DEFINE_M3MB_PAIRS_DQ(NAME, T)                                           \
-extern "C" __global__ void __launch_bounds__(512) NAME(                         \
-    float* __restrict__ dq,                                                     \
-    const float* __restrict__ dy, const T* __restrict__ proj,                   \
-    long long ld_proj,                                                          \
-    const float* __restrict__ bn, const float* __restrict__ b_bias,             \
-    const float* __restrict__ coef, const float* __restrict__ sn,               \
-    const float* __restrict__ cs, const float* __restrict__ mimo_x,             \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl           \
-) {                                                                             \
-    m3mb_pairs_dq_body<T>(dq, dy, proj, ld_proj, bn, b_bias, coef, sn, cs,      \
-        mimo_x, seq, nh, ng, hd, ds, rank, na, tl);                             \
+#define DEFINE_M3MB_PAIRS_DQ(NAME, T)                                          \
+extern "C" __global__ void __launch_bounds__(512) NAME(                        \
+    float* __restrict__ dq,                                                    \
+    const float* __restrict__ dy, const T* __restrict__ proj,                  \
+    long long ld_proj,                                                         \
+    const float* __restrict__ bn, const float* __restrict__ b_bias,            \
+    const float* __restrict__ coef, const float* __restrict__ sn,              \
+    const float* __restrict__ cs, const float* __restrict__ mimo_x,            \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,         \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m3mb_pairs_dq_body<T>(dq, dy, proj, ld_proj, bn, b_bias, coef, sn, cs,     \
+        mimo_x, seq, nh, ng, hd, ds, rank, na, tl, y_first);                   \
 }
 DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq, float)
 DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_bf16, __nv_bfloat16)
 DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_f16, __half)
 
-#define DEFINE_M3MB_PAIRS_DK(NAME, T)                                           \
-extern "C" __global__ void __launch_bounds__(512) NAME(                         \
-    float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dwp,    \
-    const float* __restrict__ dy, const T* __restrict__ proj,                   \
-    long long ld_proj,                                                          \
-    const float* __restrict__ bn, const float* __restrict__ cn,                 \
-    const float* __restrict__ b_bias, const float* __restrict__ c_bias,         \
-    const float* __restrict__ coef, const float* __restrict__ sn,               \
-    const float* __restrict__ cs, const float* __restrict__ mimo_x,             \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl           \
-) {                                                                             \
-    m3mb_pairs_dk_body<T>(dk, du, dwp, dy, proj, ld_proj, bn, cn, b_bias,       \
-        c_bias, coef, sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tl);       \
+#define DEFINE_M3MB_PAIRS_DK(NAME, T)                                          \
+extern "C" __global__ void __launch_bounds__(512) NAME(                        \
+    float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dwp,   \
+    const float* __restrict__ dy, const T* __restrict__ proj,                  \
+    long long ld_proj,                                                         \
+    const float* __restrict__ bn, const float* __restrict__ cn,                \
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,        \
+    const float* __restrict__ coef, const float* __restrict__ sn,              \
+    const float* __restrict__ cs, const float* __restrict__ mimo_x,            \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,         \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m3mb_pairs_dk_body<T>(dk, du, dwp, dy, proj, ld_proj, bn, cn, b_bias,      \
+        c_bias, coef, sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tl, y_first); \
 }
 DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk, float)
 DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk_bf16, __nv_bfloat16)
@@ -1552,10 +1574,11 @@ extern "C" __global__ void m3mb_rot_bwd(
     const float* __restrict__ bn, const float* __restrict__ cn,
     const float* __restrict__ b_bias, const float* __restrict__ c_bias,
     const float* __restrict__ sn, const float* __restrict__ cs,
-    int nh, int ng, int ds, int rank, int na
+    int nh, int ng, int ds, int rank, int na,
+    int y_first /* this run's first y block */
 ) {
     const long long row = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int g = h / (nh / ng);
     const int rgn = rank * ng * ds;
     const int half = ds / 2;
@@ -1606,12 +1629,13 @@ __device__ __forceinline__ void m3mb_angles_body(
     float* __restrict__ d_tanh_h, float* __restrict__ ddt_ang,
     const float* __restrict__ dth, const float* __restrict__ coef,
     const T* __restrict__ proj, long long ld_proj, int ang_col,
-    int seq, int nh, int na
+    int seq, int nh, int na,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m3mb_sm[];
     float* prod = m3mb_sm;  // [na]
     const int b = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     float cum[8];
     const int per = (na + (int)blockDim.x - 1) / (int)blockDim.x;
     for (int k = 0; k < per && k < 8; k++) cum[k] = 0.0f;
@@ -1637,15 +1661,16 @@ __device__ __forceinline__ void m3mb_angles_body(
     }
 }
 
-#define DEFINE_M3MB_ANGLES(NAME, T)                                             \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ d_tanh_h, float* __restrict__ ddt_ang,                  \
-    const float* __restrict__ dth, const float* __restrict__ coef,              \
-    const T* __restrict__ proj, long long ld_proj, int ang_col,                 \
-    int seq, int nh, int na                                                     \
-) {                                                                             \
-    m3mb_angles_body<T>(d_tanh_h, ddt_ang, dth, coef, proj, ld_proj, ang_col,   \
-        seq, nh, na);                                                           \
+#define DEFINE_M3MB_ANGLES(NAME, T)                                            \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ d_tanh_h, float* __restrict__ ddt_ang,                 \
+    const float* __restrict__ dth, const float* __restrict__ coef,             \
+    const T* __restrict__ proj, long long ld_proj, int ang_col,                \
+    int seq, int nh, int na,                                                   \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m3mb_angles_body<T>(d_tanh_h, ddt_ang, dth, coef, proj, ld_proj, ang_col,  \
+        seq, nh, na, y_first);                                                 \
 }
 DEFINE_M3MB_ANGLES(m3mb_angles, float)
 DEFINE_M3MB_ANGLES(m3mb_angles_bf16, __nv_bfloat16)
@@ -1664,11 +1689,12 @@ extern "C" __global__ void m3mb_combine(
     const float* __restrict__ dwp, const float* __restrict__ dcs,
     const float* __restrict__ inter, const float* __restrict__ dot,
     const float* __restrict__ coef,
-    int seq, int nh
+    int seq, int nh,
+    int y_first /* this run's first y block */
 ) {
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int k = threadIdx.x;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
@@ -1723,11 +1749,12 @@ extern "C" __global__ void m3mb_lead(
     const float* __restrict__ d_init, const float* __restrict__ e0,
     const float* __restrict__ kst, const float* __restrict__ vst,
     const float* __restrict__ mimo_x, float* __restrict__ leaves,
-    int nh, int hd, int ds, int rank
+    int nh, int hd, int ds, int rank,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m3mb_sm[];
-    const long long bh = (long long)blockIdx.x * nh + blockIdx.y;
-    const int h = blockIdx.y;
+    const long long bh = (long long)blockIdx.x * nh + (y_first + blockIdx.y);
+    const int h = y_first + blockIdx.y;
     const int tid = threadIdx.x, nt = blockDim.x;
     const int lanes = (hd + 31) & ~31;
     float* gl = leaves == nullptr ? nullptr : leaves + bh * lanes;

@@ -22,6 +22,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba2::gpu::kernels::{
     CHUNK, Mamba2Kernels, chunk_state_geom, dx_tiles_geom, gated_norm_bwd_smem_bytes,
     gated_norm_cfg, seq_bwd_smem_bytes,
@@ -110,22 +111,25 @@ fn m2_gated_norm_streamed_is_the_staged_kernel() {
                     let (ld_out_l, ld_proj_l, rows_l) =
                         (ld_out as i64, ld_proj as i64, rows as i64);
                     let (d_ssm_i, ng_i, hd_i, eps) = (d_ssm as i32, ng as i32, hd as i32, 1e-5f32);
-                    let mut b = ctx.stream.launch_builder(kernel.get(dtype));
-                    b.arg(&o);
-                    b.arg(&ld_out_l);
-                    b.arg(&out_col);
-                    b.arg(&yp);
-                    b.arg(&pp);
-                    b.arg(&ld_proj_l);
-                    b.arg(&z_off);
-                    b.arg(&wp);
-                    b.arg(&rows_l);
-                    b.arg(&d_ssm_i);
-                    b.arg(&ng_i);
-                    b.arg(&hd_i);
-                    b.arg(&eps);
-                    b.arg(&nbg);
-                    unsafe { b.launch(cfg) }.unwrap();
+                    for (y_first, cfg) in y_runs(cfg) {
+                        let mut b = ctx.stream.launch_builder(kernel.get(dtype));
+                        b.arg(&o);
+                        b.arg(&ld_out_l);
+                        b.arg(&out_col);
+                        b.arg(&yp);
+                        b.arg(&pp);
+                        b.arg(&ld_proj_l);
+                        b.arg(&z_off);
+                        b.arg(&wp);
+                        b.arg(&rows_l);
+                        b.arg(&d_ssm_i);
+                        b.arg(&ng_i);
+                        b.arg(&hd_i);
+                        b.arg(&eps);
+                        b.arg(&nbg);
+                        b.arg(&y_first);
+                        unsafe { b.launch(cfg) }.unwrap();
+                    }
                     outs.push(bits_typed(&ctx, &out));
                 }
                 assert_eq!(
@@ -176,30 +180,33 @@ fn m2_gated_norm_backward_streamed_is_the_staged_kernel() {
                     let (ld_out_l, ld_proj_l, rows_l) =
                         (ld_out as i64, ld_proj as i64, rows as i64);
                     let (d_ssm_i, ng_i, hd_i, eps) = (d_ssm as i32, ng as i32, hd as i32, 1e-5f32);
-                    let mut b = ctx.stream.launch_builder(kernel.get(dtype));
-                    b.arg(&ptrs[0]);
-                    b.arg(&ptrs[1]);
-                    b.arg(&ld_proj_l);
-                    b.arg(&z_off);
-                    b.arg(&ptrs[2]);
-                    b.arg(&ptrs[3]);
-                    b.arg(&ld_out_l);
-                    b.arg(&out_col);
-                    b.arg(&ptrs[4]);
-                    b.arg(&ptrs[5]);
-                    b.arg(&ptrs[6]);
-                    b.arg(&rows_l);
-                    b.arg(&d_ssm_i);
-                    b.arg(&ng_i);
-                    b.arg(&hd_i);
-                    b.arg(&eps);
-                    b.arg(&nbg);
                     let cfg = LaunchConfig {
                         grid_dim: (rows as u32, ng as u32, 1),
                         block_dim: (128, 1, 1),
                         shared_mem_bytes: smem as u32,
                     };
-                    unsafe { b.launch(cfg) }.unwrap();
+                    for (y_first, cfg) in y_runs(cfg) {
+                        let mut b = ctx.stream.launch_builder(kernel.get(dtype));
+                        b.arg(&ptrs[0]);
+                        b.arg(&ptrs[1]);
+                        b.arg(&ld_proj_l);
+                        b.arg(&z_off);
+                        b.arg(&ptrs[2]);
+                        b.arg(&ptrs[3]);
+                        b.arg(&ld_out_l);
+                        b.arg(&out_col);
+                        b.arg(&ptrs[4]);
+                        b.arg(&ptrs[5]);
+                        b.arg(&ptrs[6]);
+                        b.arg(&rows_l);
+                        b.arg(&d_ssm_i);
+                        b.arg(&ng_i);
+                        b.arg(&hd_i);
+                        b.arg(&eps);
+                        b.arg(&nbg);
+                        b.arg(&y_first);
+                        unsafe { b.launch(cfg) }.unwrap();
+                    }
                     runs.push((
                         bits_f32(&ctx, &dy),
                         bits_typed(&ctx, &d_proj),
@@ -254,22 +261,25 @@ fn m2_chunk_state_tiles_are_the_whole_head() {
                     ds as i32,
                     pt as i32,
                 ];
-                let mut b = ctx.stream.launch_builder(k.chunk_state.get(dtype));
-                b.arg(&sp);
-                b.arg(&xp);
-                b.arg(&ld);
-                b.arg(&ints[0]);
-                b.arg(&dtp);
-                b.arg(&ap);
-                for v in &ints[1..] {
-                    b.arg(v);
-                }
                 let cfg = LaunchConfig {
                     grid_dim: ((batch * nc) as u32, nh as u32, ds.div_ceil(cols) as u32),
                     block_dim: ((32 * pt / 4).min(256) as u32, 1, 1),
                     shared_mem_bytes: (CHUNK * (pt + cols + 1) * 4) as u32,
                 };
-                unsafe { b.launch(cfg) }.unwrap();
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut b = ctx.stream.launch_builder(k.chunk_state.get(dtype));
+                    b.arg(&sp);
+                    b.arg(&xp);
+                    b.arg(&ld);
+                    b.arg(&ints[0]);
+                    b.arg(&dtp);
+                    b.arg(&ap);
+                    for v in &ints[1..] {
+                        b.arg(v);
+                    }
+                    b.arg(&y_first);
+                    unsafe { b.launch(cfg) }.unwrap();
+                }
                 runs.push(bits_f32(&ctx, &states));
             }
             assert_eq!(runs[0], runs[1], "{dtype:?} head {hd} state {ds}");
@@ -342,28 +352,31 @@ fn m2_dx_tiles_are_the_dx_and_token_sums() {
                 );
                 if tiled {
                     let head = [dxp, ddtx, qv, inter, ptrs[0], ptrs[1]];
-                    let mut b = ctx.stream.launch_builder(k.bwd.dx_tiles.get(dtype));
-                    for p in &head {
-                        b.arg(p);
-                    }
-                    b.arg(&ld);
-                    b.arg(&b_col_i);
-                    b.arg(&c_col_i);
-                    let rest = [ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6], ptrs[7]];
-                    for p in &rest {
-                        b.arg(p);
-                    }
-                    b.arg(&per_channel);
-                    let tail = ints(&[seq, nh, ng, hd, ds, nk]);
-                    for v in &tail {
-                        b.arg(v);
-                    }
                     let cfg = LaunchConfig {
                         grid_dim: ((batch * nc) as u32, nh as u32, 1),
                         block_dim: ((16 * hd.div_ceil(4)) as u32, 1, 1),
                         shared_mem_bytes: smem as u32,
                     };
-                    unsafe { b.launch(cfg) }.unwrap();
+                    for (y_first, cfg) in y_runs(cfg) {
+                        let mut b = ctx.stream.launch_builder(k.bwd.dx_tiles.get(dtype));
+                        for p in &head {
+                            b.arg(p);
+                        }
+                        b.arg(&ld);
+                        b.arg(&b_col_i);
+                        b.arg(&c_col_i);
+                        let rest = [ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6], ptrs[7]];
+                        for p in &rest {
+                            b.arg(p);
+                        }
+                        b.arg(&per_channel);
+                        let tail = ints(&[seq, nh, ng, hd, ds, nk]);
+                        for v in &tail {
+                            b.arg(v);
+                        }
+                        b.arg(&y_first);
+                        unsafe { b.launch(cfg) }.unwrap();
+                    }
                 } else {
                     let scratch: Vec<GpuBuffer> = (0..3)
                         .map(|_| GpuBuffer::zeros(&ctx.stream, rows * d_ssm).unwrap())
@@ -374,22 +387,6 @@ fn m2_dx_tiles_are_the_dx_and_token_sums() {
                         scratch[2].cached_ptr(),
                     );
                     let head = [dxp, acc, ste, yi, ptrs[0], ptrs[1]];
-                    let mut b = ctx.stream.launch_builder(k.bwd.dx.get(dtype));
-                    for p in &head {
-                        b.arg(p);
-                    }
-                    b.arg(&ld);
-                    b.arg(&b_col_i);
-                    b.arg(&c_col_i);
-                    let rest = [ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6], ptrs[7]];
-                    for p in &rest {
-                        b.arg(p);
-                    }
-                    b.arg(&per_channel);
-                    let tail = ints(&[batch, seq, nh, ng, hd, ds]);
-                    for v in &tail {
-                        b.arg(v);
-                    }
                     let cfg = LaunchConfig {
                         grid_dim: (
                             (batch * nc) as u32,
@@ -399,24 +396,47 @@ fn m2_dx_tiles_are_the_dx_and_token_sums() {
                         block_dim: (128, 1, 1),
                         shared_mem_bytes: 0,
                     };
-                    unsafe { b.launch(cfg) }.unwrap();
+                    for (y_first, z_first, cfg) in yz_runs(cfg) {
+                        let mut b = ctx.stream.launch_builder(k.bwd.dx.get(dtype));
+                        for p in &head {
+                            b.arg(p);
+                        }
+                        b.arg(&ld);
+                        b.arg(&b_col_i);
+                        b.arg(&c_col_i);
+                        let rest = [ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6], ptrs[7]];
+                        for p in &rest {
+                            b.arg(p);
+                        }
+                        b.arg(&per_channel);
+                        let tail = ints(&[batch, seq, nh, ng, hd, ds]);
+                        for v in &tail {
+                            b.arg(v);
+                        }
+                        b.arg(&y_first);
+                        b.arg(&z_first);
+                        unsafe { b.launch(cfg) }.unwrap();
+                    }
                     let sums_head = [ddtx, qv, inter, acc, ste, yi, ptrs[0], ptrs[1]];
-                    let mut b = ctx.stream.launch_builder(k.bwd.rowsums.get(dtype));
-                    for p in &sums_head {
-                        b.arg(p);
-                    }
-                    b.arg(&ld);
-                    b.arg(&ptrs[5]);
-                    let tail = ints(&[batch, seq, nh, hd]);
-                    for v in &tail {
-                        b.arg(v);
-                    }
                     let cfg = LaunchConfig {
                         grid_dim: ((batch * nc) as u32, nh as u32, 1),
                         block_dim: (CHUNK as u32, 1, 1),
                         shared_mem_bytes: 0,
                     };
-                    unsafe { b.launch(cfg) }.unwrap();
+                    for (y_first, cfg) in y_runs(cfg) {
+                        let mut b = ctx.stream.launch_builder(k.bwd.rowsums.get(dtype));
+                        for p in &sums_head {
+                            b.arg(p);
+                        }
+                        b.arg(&ld);
+                        b.arg(&ptrs[5]);
+                        let tail = ints(&[batch, seq, nh, hd]);
+                        for v in &tail {
+                            b.arg(v);
+                        }
+                        b.arg(&y_first);
+                        unsafe { b.launch(cfg) }.unwrap();
+                    }
                 }
                 runs.push([
                     bits_f32(&ctx, &dxbc),
@@ -603,34 +623,37 @@ fn m2_sequential_backward_global_is_the_shared_kernel() {
                     } else {
                         &k.bwd.seq_bwd
                     };
-                    let mut b = s.launch_builder(kernel.get(dtype));
-                    b.arg(&outs[0]);
-                    b.arg(&outs[1]);
-                    b.arg(&ld);
-                    b.arg(&dt_off);
-                    for o in &outs[2..] {
-                        b.arg(o);
-                    }
-                    if global.is_some() {
-                        b.arg(&ds_ptr);
-                        b.arg(&leaves_ptr);
-                    }
-                    for (i, p) in ins.iter().enumerate() {
-                        if i != 4 || global.is_some() {
-                            b.arg(p);
-                        }
-                    }
-                    for v in &ints {
-                        b.arg(v);
-                    }
-                    b.arg(&lo);
-                    b.arg(&hi);
                     let cfg = LaunchConfig {
                         grid_dim: (batch as u32, nh as u32, 1),
                         block_dim: (block as u32, 1, 1),
                         shared_mem_bytes: smem as u32,
                     };
-                    unsafe { b.launch(cfg) }.unwrap();
+                    for (y_first, cfg) in y_runs(cfg) {
+                        let mut b = s.launch_builder(kernel.get(dtype));
+                        b.arg(&outs[0]);
+                        b.arg(&outs[1]);
+                        b.arg(&ld);
+                        b.arg(&dt_off);
+                        for o in &outs[2..] {
+                            b.arg(o);
+                        }
+                        if global.is_some() {
+                            b.arg(&ds_ptr);
+                            b.arg(&leaves_ptr);
+                        }
+                        for (i, p) in ins.iter().enumerate() {
+                            if i != 4 || global.is_some() {
+                                b.arg(p);
+                            }
+                        }
+                        for v in &ints {
+                            b.arg(v);
+                        }
+                        b.arg(&lo);
+                        b.arg(&hi);
+                        b.arg(&y_first);
+                        unsafe { b.launch(cfg) }.unwrap();
+                    }
                     vec![
                         bits_f32(&ctx, &dxbc),
                         bits_typed(&ctx, &d_proj),

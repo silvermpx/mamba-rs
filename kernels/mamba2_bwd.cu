@@ -111,12 +111,14 @@ __device__ __forceinline__ void m2b_dhloc_body(
     const float* __restrict__ dy,
     const T* __restrict__ xbc, long long ld_xbc, int c_col,
     const float* __restrict__ acs,
-    int batch, int seq, int nh, int ng, int hd, int ds
+    int batch, int seq, int nh, int ng, int hd, int ds,
+    int y_first, /* this run's first y block */
+    int z_first /* this run's first z block */
 ) {
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
-    const long long e = (long long)blockIdx.z * blockDim.x + threadIdx.x;
+    const int h = y_first + blockIdx.y;
+    const long long e = (long long)(z_first + blockIdx.z) * blockDim.x + threadIdx.x;
     if (bc >= (long long)batch * nc || h >= nh || e >= (long long)hd * ds) return;
     const int p = (int)(e / ds);
     const int n = (int)(e % ds);
@@ -136,23 +138,25 @@ __device__ __forceinline__ void m2b_dhloc_body(
     ds_out[((bc * nh + h) * hd + p) * (long long)ds + n] = acc;
 }
 
-#define DEFINE_M2B_DHLOC(NAME, T)                                               \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ ds_out,                                                 \
-    const float* __restrict__ dy,                                               \
-    const T* __restrict__ xbc,                                                  \
-    long long ld_xbc,                                                           \
-    int c_col,                                                                  \
-    const float* __restrict__ acs,                                              \
-    int batch,                                                                  \
-    int seq,                                                                    \
-    int nh,                                                                     \
-    int ng,                                                                     \
-    int hd,                                                                     \
-    int ds                                                                      \
-) {                                                                             \
-    m2b_dhloc_body<T>(ds_out, dy, xbc, ld_xbc, c_col, acs, batch, seq, nh,      \
-        ng, hd, ds);                                                            \
+#define DEFINE_M2B_DHLOC(NAME, T)                                              \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ ds_out,                                                \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc,                                                 \
+    long long ld_xbc,                                                          \
+    int c_col,                                                                 \
+    const float* __restrict__ acs,                                             \
+    int batch,                                                                 \
+    int seq,                                                                   \
+    int nh,                                                                    \
+    int ng,                                                                    \
+    int hd,                                                                    \
+    int ds,                                                                    \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
+) {                                                                            \
+    m2b_dhloc_body<T>(ds_out, dy, xbc, ld_xbc, c_col, acs, batch, seq, nh,     \
+        ng, hd, ds, y_first, z_first);                                         \
 }
 DEFINE_M2B_DHLOC(m2b_dhloc, float)
 DEFINE_M2B_DHLOC(m2b_dhloc_bf16, __nv_bfloat16)
@@ -166,12 +170,13 @@ DEFINE_M2B_DHLOC(m2b_dhloc_f16, __half)
 extern "C" __global__ void m2b_state_passing(
     float* __restrict__ ds,
     const float* __restrict__ acs,
-    int batch, int seq, int nh, int hd, int dstate
+    int batch, int seq, int nh, int hd, int dstate,
+    int y_first /* this run's first y block */
 ) {
     __shared__ float decay[M2_PASS_WINDOW];
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bh = blockIdx.x;
-    const long long e = (long long)blockIdx.y * blockDim.x + threadIdx.x;
+    const long long e = (long long)(y_first + blockIdx.y) * blockDim.x + threadIdx.x;
     const long long pn = (long long)hd * dstate;
     if (bh >= (long long)batch * nh) return;
     const bool live = e < pn;
@@ -250,12 +255,14 @@ __device__ __forceinline__ void m2b_dx_body(
     const float* __restrict__ cb,
     const float* __restrict__ dt, const float* __restrict__ acs,
     const float* __restrict__ D, int d_per_channel,
-    int batch, int seq, int nh, int ng, int hd, int dstate
+    int batch, int seq, int nh, int ng, int hd, int dstate,
+    int y_first, /* this run's first y block */
+    int z_first /* this run's first z block */
 ) {
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
-    const int e = blockIdx.z * blockDim.x + threadIdx.x;
+    const int h = y_first + blockIdx.y;
+    const int e = (z_first + blockIdx.z) * blockDim.x + threadIdx.x;
     if (bc >= (long long)batch * nc || h >= nh || e >= M2_CHUNK * hd) return;
     const int s = e / hd;
     const int p = e % hd;
@@ -292,34 +299,36 @@ __device__ __forceinline__ void m2b_dx_body(
     yi_out[o] = __fmul_rn(ci, m2_exp(acs_s));
 }
 
-#define DEFINE_M2B_DX(NAME, T)                                                  \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dxbc,                                                   \
-    float* __restrict__ acc_out,                                                \
-    float* __restrict__ ste_out,                                                \
-    float* __restrict__ yi_out,                                                 \
-    const float* __restrict__ dy,                                               \
-    const T* __restrict__ xbc,                                                  \
-    long long ld_xbc,                                                           \
-    int b_col,                                                                  \
-    int c_col,                                                                  \
-    const float* __restrict__ states,                                           \
-    const float* __restrict__ ds_in,                                            \
-    const float* __restrict__ cb,                                               \
-    const float* __restrict__ dt,                                               \
-    const float* __restrict__ acs,                                              \
-    const float* __restrict__ D,                                                \
-    int d_per_channel,                                                          \
-    int batch,                                                                  \
-    int seq,                                                                    \
-    int nh,                                                                     \
-    int ng,                                                                     \
-    int hd,                                                                     \
-    int dstate                                                                  \
-) {                                                                             \
-    m2b_dx_body<T>(dxbc, acc_out, ste_out, yi_out, dy, xbc, ld_xbc, b_col,      \
-        c_col, states, ds_in, cb, dt, acs, D, d_per_channel, batch, seq,        \
-        nh, ng, hd, dstate);                                                    \
+#define DEFINE_M2B_DX(NAME, T)                                                 \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dxbc,                                                  \
+    float* __restrict__ acc_out,                                               \
+    float* __restrict__ ste_out,                                               \
+    float* __restrict__ yi_out,                                                \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc,                                                 \
+    long long ld_xbc,                                                          \
+    int b_col,                                                                 \
+    int c_col,                                                                 \
+    const float* __restrict__ states,                                          \
+    const float* __restrict__ ds_in,                                           \
+    const float* __restrict__ cb,                                              \
+    const float* __restrict__ dt,                                              \
+    const float* __restrict__ acs,                                             \
+    const float* __restrict__ D,                                               \
+    int d_per_channel,                                                         \
+    int batch,                                                                 \
+    int seq,                                                                   \
+    int nh,                                                                    \
+    int ng,                                                                    \
+    int hd,                                                                    \
+    int dstate,                                                                \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
+) {                                                                            \
+    m2b_dx_body<T>(dxbc, acc_out, ste_out, yi_out, dy, xbc, ld_xbc, b_col,     \
+        c_col, states, ds_in, cb, dt, acs, D, d_per_channel, batch, seq,       \
+        nh, ng, hd, dstate, y_first, z_first);                                 \
 }
 DEFINE_M2B_DX(m2b_dx, float)
 DEFINE_M2B_DX(m2b_dx_bf16, __nv_bfloat16)
@@ -335,11 +344,12 @@ __device__ __forceinline__ void m2b_rowsums_body(
     const float* __restrict__ yi_b, const float* __restrict__ dy,
     const T* __restrict__ xbc, long long ld_xbc,
     const float* __restrict__ dt,
-    int batch, int seq, int nh, int hd
+    int batch, int seq, int nh, int hd,
+    int y_first /* this run's first y block */
 ) {
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int t = threadIdx.x;
     if (bc >= (long long)batch * nc || h >= nh || t >= M2_CHUNK) return;
     const int c = (int)(bc % nc);
@@ -368,25 +378,26 @@ __device__ __forceinline__ void m2b_rowsums_body(
     inter[o] = it;
 }
 
-#define DEFINE_M2B_ROWSUMS(NAME, T)                                             \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ ddtx,                                                   \
-    float* __restrict__ qv,                                                     \
-    float* __restrict__ inter,                                                  \
-    const float* __restrict__ acc_b,                                            \
-    const float* __restrict__ ste_b,                                            \
-    const float* __restrict__ yi_b,                                             \
-    const float* __restrict__ dy,                                               \
-    const T* __restrict__ xbc,                                                  \
-    long long ld_xbc,                                                           \
-    const float* __restrict__ dt,                                               \
-    int batch,                                                                  \
-    int seq,                                                                    \
-    int nh,                                                                     \
-    int hd                                                                      \
-) {                                                                             \
-    m2b_rowsums_body<T>(ddtx, qv, inter, acc_b, ste_b, yi_b, dy, xbc,           \
-        ld_xbc, dt, batch, seq, nh, hd);                                        \
+#define DEFINE_M2B_ROWSUMS(NAME, T)                                            \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ ddtx,                                                  \
+    float* __restrict__ qv,                                                    \
+    float* __restrict__ inter,                                                 \
+    const float* __restrict__ acc_b,                                           \
+    const float* __restrict__ ste_b,                                           \
+    const float* __restrict__ yi_b,                                            \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc,                                                 \
+    long long ld_xbc,                                                          \
+    const float* __restrict__ dt,                                              \
+    int batch,                                                                 \
+    int seq,                                                                   \
+    int nh,                                                                    \
+    int hd,                                                                    \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2b_rowsums_body<T>(ddtx, qv, inter, acc_b, ste_b, yi_b, dy, xbc,          \
+        ld_xbc, dt, batch, seq, nh, hd, y_first);                              \
 }
 DEFINE_M2B_ROWSUMS(m2b_rowsums, float)
 DEFINE_M2B_ROWSUMS(m2b_rowsums_bf16, __nv_bfloat16)
@@ -415,12 +426,13 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
     const float* __restrict__ cb,
     const float* __restrict__ dt, const float* __restrict__ acs,
     const float* __restrict__ D, int d_per_channel,
-    int seq, int nh, int ng, int hd, int dstate, int nk
+    int seq, int nh, int ng, int hd, int dstate, int nk,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float4 m2bt_sm4[];
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M2_CHUNK;
@@ -588,34 +600,35 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
     }
 }
 
-#define DEFINE_M2B_DX_TILES(NAME, T)                                            \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dxbc,                                                   \
-    float* __restrict__ ddtx,                                                   \
-    float* __restrict__ qv,                                                     \
-    float* __restrict__ inter,                                                  \
-    const float* __restrict__ dy,                                               \
-    const T* __restrict__ xbc,                                                  \
-    long long ld_xbc,                                                           \
-    int b_col,                                                                  \
-    int c_col,                                                                  \
-    const float* __restrict__ states,                                           \
-    const float* __restrict__ ds_in,                                            \
-    const float* __restrict__ cb,                                               \
-    const float* __restrict__ dt,                                               \
-    const float* __restrict__ acs,                                              \
-    const float* __restrict__ D,                                                \
-    int d_per_channel,                                                          \
-    int seq,                                                                    \
-    int nh,                                                                     \
-    int ng,                                                                     \
-    int hd,                                                                     \
-    int dstate,                                                                 \
-    int nk                                                                      \
-) {                                                                             \
-    m2b_dx_tiles_body<T>(dxbc, ddtx, qv, inter, dy, xbc, ld_xbc, b_col, c_col,  \
-        states, ds_in, cb, dt, acs, D, d_per_channel, seq, nh, ng, hd, dstate,  \
-        nk);                                                                    \
+#define DEFINE_M2B_DX_TILES(NAME, T)                                           \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dxbc,                                                  \
+    float* __restrict__ ddtx,                                                  \
+    float* __restrict__ qv,                                                    \
+    float* __restrict__ inter,                                                 \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc,                                                 \
+    long long ld_xbc,                                                          \
+    int b_col,                                                                 \
+    int c_col,                                                                 \
+    const float* __restrict__ states,                                          \
+    const float* __restrict__ ds_in,                                           \
+    const float* __restrict__ cb,                                              \
+    const float* __restrict__ dt,                                              \
+    const float* __restrict__ acs,                                             \
+    const float* __restrict__ D,                                               \
+    int d_per_channel,                                                         \
+    int seq,                                                                   \
+    int nh,                                                                    \
+    int ng,                                                                    \
+    int hd,                                                                    \
+    int dstate,                                                                \
+    int nk,                                                                    \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2b_dx_tiles_body<T>(dxbc, ddtx, qv, inter, dy, xbc, ld_xbc, b_col, c_col, \
+        states, ds_in, cb, dt, acs, D, d_per_channel, seq, nh, ng, hd, dstate, \
+        nk, y_first);                                                          \
 }
 DEFINE_M2B_DX_TILES(m2b_dx_tiles, float)
 DEFINE_M2B_DX_TILES(m2b_dx_tiles_bf16, __nv_bfloat16)
@@ -632,11 +645,12 @@ __device__ __forceinline__ void m2b_pairs_body(
     const T* __restrict__ xbc, long long ld_xbc,
     const float* __restrict__ cb,
     const float* __restrict__ dt, const float* __restrict__ acs,
-    int batch, int seq, int nh, int ng, int hd
+    int batch, int seq, int nh, int ng, int hd,
+    int y_first /* this run's first y block */
 ) {
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int q = blockIdx.z * blockDim.x + threadIdx.x;
     if (bc >= (long long)batch * nc || h >= nh || q >= M2B_PAIRS) return;
     int t, s;
@@ -667,24 +681,25 @@ __device__ __forceinline__ void m2b_pairs_body(
     mm[o] = t > s ? __fmul_rn(dcb, cb[(bc * ng + g) * M2B_PAIRS + q]) : 0.0f;
 }
 
-#define DEFINE_M2B_PAIRS(NAME, T)                                               \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dcbh,                                                   \
-    float* __restrict__ mm,                                                     \
-    const float* __restrict__ dy,                                               \
-    const T* __restrict__ xbc,                                                  \
-    long long ld_xbc,                                                           \
-    const float* __restrict__ cb,                                               \
-    const float* __restrict__ dt,                                               \
-    const float* __restrict__ acs,                                              \
-    int batch,                                                                  \
-    int seq,                                                                    \
-    int nh,                                                                     \
-    int ng,                                                                     \
-    int hd                                                                      \
-) {                                                                             \
-    m2b_pairs_body<T>(dcbh, mm, dy, xbc, ld_xbc, cb, dt, acs, batch, seq,       \
-        nh, ng, hd);                                                            \
+#define DEFINE_M2B_PAIRS(NAME, T)                                              \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dcbh,                                                  \
+    float* __restrict__ mm,                                                    \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc,                                                 \
+    long long ld_xbc,                                                          \
+    const float* __restrict__ cb,                                              \
+    const float* __restrict__ dt,                                              \
+    const float* __restrict__ acs,                                             \
+    int batch,                                                                 \
+    int seq,                                                                   \
+    int nh,                                                                    \
+    int ng,                                                                    \
+    int hd,                                                                    \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2b_pairs_body<T>(dcbh, mm, dy, xbc, ld_xbc, cb, dt, acs, batch, seq,      \
+        nh, ng, hd, y_first);                                                  \
 }
 DEFINE_M2B_PAIRS(m2b_pairs, float)
 DEFINE_M2B_PAIRS(m2b_pairs_bf16, __nv_bfloat16)
@@ -701,11 +716,12 @@ __device__ __forceinline__ void m2b_db_body(
     const T* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,
     const float* __restrict__ ds_in, const float* __restrict__ dcbh,
     const float* __restrict__ dt, const float* __restrict__ acs,
-    int batch, int seq, int nh, int ng, int hd, int dstate
+    int batch, int seq, int nh, int ng, int hd, int dstate,
+    int y_first /* this run's first y block */
 ) {
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int g = blockIdx.y;
+    const int g = y_first + blockIdx.y;
     const int e = blockIdx.z * blockDim.x + threadIdx.x;
     if (bc >= (long long)batch * nc || g >= ng || e >= M2_CHUNK * dstate) return;
     const int s = e / dstate;
@@ -741,26 +757,27 @@ __device__ __forceinline__ void m2b_db_body(
     dxbc[rs * ld_xbc + b_col + (long long)g * dstate + n] = acc;
 }
 
-#define DEFINE_M2B_DB(NAME, T)                                                  \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dxbc,                                                   \
-    const T* __restrict__ xbc,                                                  \
-    long long ld_xbc,                                                           \
-    int b_col,                                                                  \
-    int c_col,                                                                  \
-    const float* __restrict__ ds_in,                                            \
-    const float* __restrict__ dcbh,                                             \
-    const float* __restrict__ dt,                                               \
-    const float* __restrict__ acs,                                              \
-    int batch,                                                                  \
-    int seq,                                                                    \
-    int nh,                                                                     \
-    int ng,                                                                     \
-    int hd,                                                                     \
-    int dstate                                                                  \
-) {                                                                             \
-    m2b_db_body<T>(dxbc, xbc, ld_xbc, b_col, c_col, ds_in, dcbh, dt, acs,       \
-        batch, seq, nh, ng, hd, dstate);                                        \
+#define DEFINE_M2B_DB(NAME, T)                                                 \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dxbc,                                                  \
+    const T* __restrict__ xbc,                                                 \
+    long long ld_xbc,                                                          \
+    int b_col,                                                                 \
+    int c_col,                                                                 \
+    const float* __restrict__ ds_in,                                           \
+    const float* __restrict__ dcbh,                                            \
+    const float* __restrict__ dt,                                              \
+    const float* __restrict__ acs,                                             \
+    int batch,                                                                 \
+    int seq,                                                                   \
+    int nh,                                                                    \
+    int ng,                                                                    \
+    int hd,                                                                    \
+    int dstate,                                                                \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2b_db_body<T>(dxbc, xbc, ld_xbc, b_col, c_col, ds_in, dcbh, dt, acs,      \
+        batch, seq, nh, ng, hd, dstate, y_first);                              \
 }
 DEFINE_M2B_DB(m2b_db, float)
 DEFINE_M2B_DB(m2b_db_bf16, __nv_bfloat16)
@@ -785,12 +802,13 @@ __device__ __forceinline__ void m2b_bc_tiles_body(
     const T* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,
     const float* __restrict__ mat, const float* __restrict__ dcbh,
     const float* __restrict__ dt, const float* __restrict__ acs,
-    int seq, int nh, int ng, int hd, int dstate
+    int seq, int nh, int ng, int hd, int dstate,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m2bt_sm[];
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int g = blockIdx.y;
+    const int g = y_first + blockIdx.y;
     const int n0 = blockIdx.z * 32;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
@@ -892,17 +910,18 @@ __device__ __forceinline__ void m2b_bc_tiles_body(
     }
 }
 
-#define DEFINE_M2B_BC_TILES(NAME, T, DC)                                        \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dxbc,                                                   \
-    const float* __restrict__ dy,                                               \
-    const T* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,          \
-    const float* __restrict__ mat, const float* __restrict__ dcbh,              \
-    const float* __restrict__ dt, const float* __restrict__ acs,                \
-    int seq, int nh, int ng, int hd, int dstate                                 \
-) {                                                                             \
-    m2b_bc_tiles_body<T, DC>(dxbc, dy, xbc, ld_xbc, b_col, c_col, mat, dcbh,    \
-        dt, acs, seq, nh, ng, hd, dstate);                                      \
+#define DEFINE_M2B_BC_TILES(NAME, T, DC)                                       \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dxbc,                                                  \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,         \
+    const float* __restrict__ mat, const float* __restrict__ dcbh,             \
+    const float* __restrict__ dt, const float* __restrict__ acs,               \
+    int seq, int nh, int ng, int hd, int dstate,                               \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2b_bc_tiles_body<T, DC>(dxbc, dy, xbc, ld_xbc, b_col, c_col, mat, dcbh,   \
+        dt, acs, seq, nh, ng, hd, dstate, y_first);                            \
 }
 DEFINE_M2B_BC_TILES(m2b_db_tiles, float, false)
 DEFINE_M2B_BC_TILES(m2b_db_tiles_bf16, __nv_bfloat16, false)
@@ -922,11 +941,12 @@ __device__ __forceinline__ void m2b_dc_body(
     const T* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,
     const float* __restrict__ states, const float* __restrict__ dcbh,
     const float* __restrict__ acs,
-    int batch, int seq, int nh, int ng, int hd, int dstate
+    int batch, int seq, int nh, int ng, int hd, int dstate,
+    int y_first /* this run's first y block */
 ) {
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int g = blockIdx.y;
+    const int g = y_first + blockIdx.y;
     const int e = blockIdx.z * blockDim.x + threadIdx.x;
     if (bc >= (long long)batch * nc || g >= ng || e >= M2_CHUNK * dstate) return;
     const int t = e / dstate;
@@ -961,26 +981,27 @@ __device__ __forceinline__ void m2b_dc_body(
     dxbc[rt * ld_xbc + c_col + (long long)g * dstate + n] = acc;
 }
 
-#define DEFINE_M2B_DC(NAME, T)                                                  \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dxbc,                                                   \
-    const float* __restrict__ dy,                                               \
-    const T* __restrict__ xbc,                                                  \
-    long long ld_xbc,                                                           \
-    int b_col,                                                                  \
-    int c_col,                                                                  \
-    const float* __restrict__ states,                                           \
-    const float* __restrict__ dcbh,                                             \
-    const float* __restrict__ acs,                                              \
-    int batch,                                                                  \
-    int seq,                                                                    \
-    int nh,                                                                     \
-    int ng,                                                                     \
-    int hd,                                                                     \
-    int dstate                                                                  \
-) {                                                                             \
-    m2b_dc_body<T>(dxbc, dy, xbc, ld_xbc, b_col, c_col, states, dcbh, acs,      \
-        batch, seq, nh, ng, hd, dstate);                                        \
+#define DEFINE_M2B_DC(NAME, T)                                                 \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dxbc,                                                  \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc,                                                 \
+    long long ld_xbc,                                                          \
+    int b_col,                                                                 \
+    int c_col,                                                                 \
+    const float* __restrict__ states,                                          \
+    const float* __restrict__ dcbh,                                            \
+    const float* __restrict__ acs,                                             \
+    int batch,                                                                 \
+    int seq,                                                                   \
+    int nh,                                                                    \
+    int ng,                                                                    \
+    int hd,                                                                    \
+    int dstate,                                                                \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2b_dc_body<T>(dxbc, dy, xbc, ld_xbc, b_col, c_col, states, dcbh, acs,     \
+        batch, seq, nh, ng, hd, dstate, y_first);                              \
 }
 DEFINE_M2B_DC(m2b_dc, float)
 DEFINE_M2B_DC(m2b_dc_bf16, __nv_bfloat16)
@@ -1006,13 +1027,14 @@ __device__ __forceinline__ void m2b_combine_body(
     const float* __restrict__ dt, const float* __restrict__ acs,
     const T* __restrict__ proj,
     const float* __restrict__ dt_bias, const float* __restrict__ a_neg,
-    int batch, int seq, int nh, int has_limit, float dt_min, float dt_max
+    int batch, int seq, int nh, int has_limit, float dt_min, float dt_max,
+    int y_first /* this run's first y block */
 ) {
     __shared__ float s_dadt[M2_CHUNK];
     __shared__ float s_draw[M2_CHUNK];
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int k = threadIdx.x;
     if (bc >= (long long)batch * nc || h >= nh) return;
     const int c = (int)(bc % nc);
@@ -1057,33 +1079,34 @@ __device__ __forceinline__ void m2b_combine_body(
     }
 }
 
-#define DEFINE_M2B_COMBINE(NAME, T)                                             \
-extern "C" __global__ void NAME(                                                \
-    T* __restrict__ d_proj,                                                     \
-    long long ld_proj,                                                          \
-    int dt_off,                                                                 \
-    float* __restrict__ da_parts,                                               \
-    float* __restrict__ dbias_parts,                                            \
-    const float* __restrict__ mm,                                               \
-    const float* __restrict__ qv,                                               \
-    const float* __restrict__ inter,                                            \
-    const float* __restrict__ ddtx,                                             \
-    const float* __restrict__ chunk_dot,                                        \
-    const float* __restrict__ dt,                                               \
-    const float* __restrict__ acs,                                              \
-    const T* __restrict__ proj,                                                 \
-    const float* __restrict__ dt_bias,                                          \
-    const float* __restrict__ a_neg,                                            \
-    int batch,                                                                  \
-    int seq,                                                                    \
-    int nh,                                                                     \
-    int has_limit,                                                              \
-    float dt_min,                                                               \
-    float dt_max                                                                \
-) {                                                                             \
-    m2b_combine_body<T>(d_proj, ld_proj, dt_off, da_parts, dbias_parts, mm,     \
-        qv, inter, ddtx, chunk_dot, dt, acs, proj, dt_bias, a_neg, batch,       \
-        seq, nh, has_limit, dt_min, dt_max);                                    \
+#define DEFINE_M2B_COMBINE(NAME, T)                                            \
+extern "C" __global__ void NAME(                                               \
+    T* __restrict__ d_proj,                                                    \
+    long long ld_proj,                                                         \
+    int dt_off,                                                                \
+    float* __restrict__ da_parts,                                              \
+    float* __restrict__ dbias_parts,                                           \
+    const float* __restrict__ mm,                                              \
+    const float* __restrict__ qv,                                              \
+    const float* __restrict__ inter,                                           \
+    const float* __restrict__ ddtx,                                            \
+    const float* __restrict__ chunk_dot,                                       \
+    const float* __restrict__ dt,                                              \
+    const float* __restrict__ acs,                                             \
+    const T* __restrict__ proj,                                                \
+    const float* __restrict__ dt_bias,                                         \
+    const float* __restrict__ a_neg,                                           \
+    int batch,                                                                 \
+    int seq,                                                                   \
+    int nh,                                                                    \
+    int has_limit,                                                             \
+    float dt_min,                                                              \
+    float dt_max,                                                              \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2b_combine_body<T>(d_proj, ld_proj, dt_off, da_parts, dbias_parts, mm,    \
+        qv, inter, ddtx, chunk_dot, dt, acs, proj, dt_bias, a_neg, batch,      \
+        seq, nh, has_limit, dt_min, dt_max, y_first);                          \
 }
 DEFINE_M2B_COMBINE(m2b_combine, float)
 DEFINE_M2B_COMBINE(m2b_combine_bf16, __nv_bfloat16)
@@ -1115,11 +1138,12 @@ __device__ __forceinline__ void m2b_d_parts_body(
     float* __restrict__ parts,
     const float* __restrict__ dy,
     const T* __restrict__ xbc, long long ld_xbc,
-    int batch, int seq, int nh, int hd
+    int batch, int seq, int nh, int hd,
+    int y_first /* this run's first y block */
 ) {
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     if (bc >= (long long)batch * nc || h >= nh) return;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
@@ -1137,18 +1161,19 @@ __device__ __forceinline__ void m2b_d_parts_body(
     }
 }
 
-#define DEFINE_M2B_D_PARTS(NAME, T)                                             \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ parts,                                                  \
-    const float* __restrict__ dy,                                               \
-    const T* __restrict__ xbc,                                                  \
-    long long ld_xbc,                                                           \
-    int batch,                                                                  \
-    int seq,                                                                    \
-    int nh,                                                                     \
-    int hd                                                                      \
-) {                                                                             \
-    m2b_d_parts_body<T>(parts, dy, xbc, ld_xbc, batch, seq, nh, hd);            \
+#define DEFINE_M2B_D_PARTS(NAME, T)                                            \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ parts,                                                 \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc,                                                 \
+    long long ld_xbc,                                                          \
+    int batch,                                                                 \
+    int seq,                                                                   \
+    int nh,                                                                    \
+    int hd,                                                                    \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2b_d_parts_body<T>(parts, dy, xbc, ld_xbc, batch, seq, nh, hd, y_first);  \
 }
 DEFINE_M2B_D_PARTS(m2b_d_parts, float)
 DEFINE_M2B_D_PARTS(m2b_d_parts_bf16, __nv_bfloat16)
@@ -1195,12 +1220,13 @@ __device__ __forceinline__ void m2b_gated_norm_body(
     const float* __restrict__ y,
     const T* __restrict__ proj,
     const float* __restrict__ w,
-    long long rows, int d_ssm, int ng, int hd, float eps, int norm_before_gate
+    long long rows, int d_ssm, int ng, int hd, float eps, int norm_before_gate,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m2bn_sm[];
     __shared__ float scal[2];
     const long long r = blockIdx.x;
-    const int g = blockIdx.y;
+    const int g = y_first + blockIdx.y;
     if (r >= rows || g >= ng) return;
     const int gs = d_ssm / ng;
     const int heads = gs / hd;
@@ -1279,29 +1305,30 @@ __device__ __forceinline__ void m2b_gated_norm_body(
     }
 }
 
-#define DEFINE_M2B_GATED_NORM(NAME, T)                                          \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dy,                                                     \
-    T* __restrict__ d_proj,                                                     \
-    long long ld_proj,                                                          \
-    int z_off,                                                                  \
-    float* __restrict__ dw_parts,                                               \
-    const T* __restrict__ dout,                                                 \
-    long long ld_out,                                                           \
-    int out_col,                                                                \
-    const float* __restrict__ y,                                                \
-    const T* __restrict__ proj,                                                 \
-    const float* __restrict__ w,                                                \
-    long long rows,                                                             \
-    int d_ssm,                                                                  \
-    int ng,                                                                     \
-    int hd,                                                                     \
-    float eps,                                                                  \
-    int norm_before_gate                                                        \
-) {                                                                             \
-    m2b_gated_norm_body<T>(dy, d_proj, ld_proj, z_off, dw_parts, dout,          \
-        ld_out, out_col, y, proj, w, rows, d_ssm, ng, hd, eps,                  \
-        norm_before_gate);                                                      \
+#define DEFINE_M2B_GATED_NORM(NAME, T)                                         \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dy,                                                    \
+    T* __restrict__ d_proj,                                                    \
+    long long ld_proj,                                                         \
+    int z_off,                                                                 \
+    float* __restrict__ dw_parts,                                              \
+    const T* __restrict__ dout,                                                \
+    long long ld_out,                                                          \
+    int out_col,                                                               \
+    const float* __restrict__ y,                                               \
+    const T* __restrict__ proj,                                                \
+    const float* __restrict__ w,                                               \
+    long long rows,                                                            \
+    int d_ssm,                                                                 \
+    int ng,                                                                    \
+    int hd,                                                                    \
+    float eps,                                                                 \
+    int norm_before_gate,                                                      \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2b_gated_norm_body<T>(dy, d_proj, ld_proj, z_off, dw_parts, dout,         \
+        ld_out, out_col, y, proj, w, rows, d_ssm, ng, hd, eps,                 \
+        norm_before_gate, y_first);                                            \
 }
 DEFINE_M2B_GATED_NORM(m2b_gated_norm, float)
 DEFINE_M2B_GATED_NORM(m2b_gated_norm_bf16, __nv_bfloat16)
@@ -1345,12 +1372,13 @@ __device__ __forceinline__ void m2b_gated_norm_stream_body(
     const float* __restrict__ y,
     const T* __restrict__ proj,
     const float* __restrict__ w,
-    long long rows, int d_ssm, int ng, int hd, float eps, int norm_before_gate
+    long long rows, int d_ssm, int ng, int hd, float eps, int norm_before_gate,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float head_sum[];
     __shared__ float scal[3];
     const long long r = blockIdx.x;
-    const int g = blockIdx.y;
+    const int g = y_first + blockIdx.y;
     if (r >= rows || g >= ng) return;
     const int gs = d_ssm / ng;
     const int heads = gs / hd;
@@ -1442,29 +1470,30 @@ __device__ __forceinline__ void m2b_gated_norm_stream_body(
     }
 }
 
-#define DEFINE_M2B_GATED_NORM_STREAM(NAME, T)                                   \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dy,                                                     \
-    T* __restrict__ d_proj,                                                     \
-    long long ld_proj,                                                          \
-    int z_off,                                                                  \
-    float* __restrict__ dw_parts,                                               \
-    const T* __restrict__ dout,                                                 \
-    long long ld_out,                                                           \
-    int out_col,                                                                \
-    const float* __restrict__ y,                                                \
-    const T* __restrict__ proj,                                                 \
-    const float* __restrict__ w,                                                \
-    long long rows,                                                             \
-    int d_ssm,                                                                  \
-    int ng,                                                                     \
-    int hd,                                                                     \
-    float eps,                                                                  \
-    int norm_before_gate                                                        \
-) {                                                                             \
-    m2b_gated_norm_stream_body<T>(dy, d_proj, ld_proj, z_off, dw_parts, dout,   \
-        ld_out, out_col, y, proj, w, rows, d_ssm, ng, hd, eps,                  \
-        norm_before_gate);                                                      \
+#define DEFINE_M2B_GATED_NORM_STREAM(NAME, T)                                  \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dy,                                                    \
+    T* __restrict__ d_proj,                                                    \
+    long long ld_proj,                                                         \
+    int z_off,                                                                 \
+    float* __restrict__ dw_parts,                                              \
+    const T* __restrict__ dout,                                                \
+    long long ld_out,                                                          \
+    int out_col,                                                               \
+    const float* __restrict__ y,                                               \
+    const T* __restrict__ proj,                                                \
+    const float* __restrict__ w,                                               \
+    long long rows,                                                            \
+    int d_ssm,                                                                 \
+    int ng,                                                                    \
+    int hd,                                                                    \
+    float eps,                                                                 \
+    int norm_before_gate,                                                      \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2b_gated_norm_stream_body<T>(dy, d_proj, ld_proj, z_off, dw_parts, dout,  \
+        ld_out, out_col, y, proj, w, rows, d_ssm, ng, hd, eps,                 \
+        norm_before_gate, y_first);                                            \
 }
 DEFINE_M2B_GATED_NORM_STREAM(m2b_gated_norm_stream, float)
 DEFINE_M2B_GATED_NORM_STREAM(m2b_gated_norm_stream_bf16, __nv_bfloat16)
@@ -1796,11 +1825,12 @@ __device__ __forceinline__ void m2s_bwd_body(
     const float* __restrict__ dt_bias, const float* __restrict__ a_neg,
     const float* __restrict__ D,
     int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,
-    int flags, float dt_min, float dt_max
+    int flags, float dt_min, float dt_max,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m2sb_sm[];
     const int b = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int tid = threadIdx.x;
     const int g = h / (nh / ng);
     const long long d_ssm = (long long)nh * hd;
@@ -1937,24 +1967,25 @@ __device__ __forceinline__ void m2s_bwd_body(
     }
 }
 
-#define DEFINE_M2S_BWD(NAME, T)                                                 \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dxbc,                                                   \
-    T* __restrict__ d_proj, long long ld_proj, int dt_off,                      \
-    float* __restrict__ db_h, float* __restrict__ dc_h,                         \
-    float* __restrict__ da_parts, float* __restrict__ dbias_parts,              \
-    float* __restrict__ rec,                                                    \
-    const float* __restrict__ dy,                                               \
-    const T* __restrict__ xbc, const T* __restrict__ proj,                      \
-    const float* __restrict__ ckpt,                                             \
-    const float* __restrict__ dt_bias, const float* __restrict__ a_neg,         \
-    const float* __restrict__ D,                                                \
-    int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,          \
-    int flags, float dt_min, float dt_max                                       \
-) {                                                                             \
-    m2s_bwd_body<T>(dxbc, d_proj, ld_proj, dt_off, db_h, dc_h, da_parts,        \
-        dbias_parts, rec, dy, xbc, proj, ckpt, dt_bias, a_neg, D, seq, stride,  \
-        nh, ng, hd, ds, conv_dim, flags, dt_min, dt_max);                       \
+#define DEFINE_M2S_BWD(NAME, T)                                                \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dxbc,                                                  \
+    T* __restrict__ d_proj, long long ld_proj, int dt_off,                     \
+    float* __restrict__ db_h, float* __restrict__ dc_h,                        \
+    float* __restrict__ da_parts, float* __restrict__ dbias_parts,             \
+    float* __restrict__ rec,                                                   \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc, const T* __restrict__ proj,                     \
+    const float* __restrict__ ckpt,                                            \
+    const float* __restrict__ dt_bias, const float* __restrict__ a_neg,        \
+    const float* __restrict__ D,                                               \
+    int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,         \
+    int flags, float dt_min, float dt_max,                                     \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2s_bwd_body<T>(dxbc, d_proj, ld_proj, dt_off, db_h, dc_h, da_parts,       \
+        dbias_parts, rec, dy, xbc, proj, ckpt, dt_bias, a_neg, D, seq, stride, \
+        nh, ng, hd, ds, conv_dim, flags, dt_min, dt_max, y_first);             \
 }
 DEFINE_M2S_BWD(m2s_bwd, float)
 DEFINE_M2S_BWD(m2s_bwd_bf16, __nv_bfloat16)
@@ -2114,11 +2145,12 @@ __device__ __forceinline__ void m2s_bwd_tiles_body(
     const float* __restrict__ dt_bias, const float* __restrict__ a_neg,
     const float* __restrict__ D,
     int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,
-    int flags, float dt_min, float dt_max
+    int flags, float dt_min, float dt_max,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m2sb_sm[];
     const int b = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int tid = threadIdx.x;
     const int g = h / (nh / ng);
     const long long d_ssm = (long long)nh * hd;
@@ -2375,24 +2407,25 @@ __device__ __forceinline__ void m2s_bwd_tiles_body(
     }
 }
 
-#define DEFINE_M2S_BWD_TILES(NAME, T)                                           \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dxbc,                                                   \
-    T* __restrict__ d_proj, long long ld_proj, int dt_off,                      \
-    float* __restrict__ db_h, float* __restrict__ dc_h,                         \
-    float* __restrict__ da_parts, float* __restrict__ dbias_parts,              \
-    float* __restrict__ rec,                                                    \
-    const float* __restrict__ dy,                                               \
-    const T* __restrict__ xbc, const T* __restrict__ proj,                      \
-    const float* __restrict__ ckpt, const float* __restrict__ scal3,            \
-    const float* __restrict__ dt_bias, const float* __restrict__ a_neg,         \
-    const float* __restrict__ D,                                                \
-    int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,          \
-    int flags, float dt_min, float dt_max                                       \
-) {                                                                             \
-    m2s_bwd_tiles_body<T>(dxbc, d_proj, ld_proj, dt_off, db_h, dc_h, da_parts,  \
-        dbias_parts, rec, dy, xbc, proj, ckpt, scal3, dt_bias, a_neg, D, seq,   \
-        stride, nh, ng, hd, ds, conv_dim, flags, dt_min, dt_max);               \
+#define DEFINE_M2S_BWD_TILES(NAME, T)                                          \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dxbc,                                                  \
+    T* __restrict__ d_proj, long long ld_proj, int dt_off,                     \
+    float* __restrict__ db_h, float* __restrict__ dc_h,                        \
+    float* __restrict__ da_parts, float* __restrict__ dbias_parts,             \
+    float* __restrict__ rec,                                                   \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc, const T* __restrict__ proj,                     \
+    const float* __restrict__ ckpt, const float* __restrict__ scal3,           \
+    const float* __restrict__ dt_bias, const float* __restrict__ a_neg,        \
+    const float* __restrict__ D,                                               \
+    int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,         \
+    int flags, float dt_min, float dt_max,                                     \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m2s_bwd_tiles_body<T>(dxbc, d_proj, ld_proj, dt_off, db_h, dc_h, da_parts, \
+        dbias_parts, rec, dy, xbc, proj, ckpt, scal3, dt_bias, a_neg, D, seq,  \
+        stride, nh, ng, hd, ds, conv_dim, flags, dt_min, dt_max, y_first);     \
 }
 DEFINE_M2S_BWD_TILES(m2s_bwd_tiles, float)
 DEFINE_M2S_BWD_TILES(m2s_bwd_tiles_bf16, __nv_bfloat16)
@@ -2522,11 +2555,12 @@ __device__ __forceinline__ void m2s_bwd_global_body(
     const float* __restrict__ dt_bias, const float* __restrict__ a_neg,
     const float* __restrict__ D,
     int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,
-    int flags, float dt_min, float dt_max
+    int flags, float dt_min, float dt_max,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m2sb_sm[];
     const int b = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int tid = threadIdx.x;
     const int nt = blockDim.x;
     const int g = h / (nh / ng);
@@ -2701,25 +2735,26 @@ __device__ __forceinline__ void m2s_bwd_global_body(
     }
 }
 
-#define DEFINE_M2S_BWD_GLOBAL(NAME, T)                                          \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ dxbc,                                                   \
-    T* __restrict__ d_proj, long long ld_proj, int dt_off,                      \
-    float* __restrict__ db_h, float* __restrict__ dc_h,                         \
-    float* __restrict__ da_parts, float* __restrict__ dbias_parts,              \
-    float* __restrict__ rec, float* __restrict__ ds_glob,                       \
-    float* __restrict__ leaves,                                                 \
-    const float* __restrict__ dy,                                               \
-    const T* __restrict__ xbc, const T* __restrict__ proj,                      \
-    const float* __restrict__ ckpt, const float* __restrict__ scal3,            \
-    const float* __restrict__ dt_bias, const float* __restrict__ a_neg,         \
-    const float* __restrict__ D,                                                \
-    int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,          \
-    int flags, float dt_min, float dt_max                                       \
-) {                                                                             \
+#define DEFINE_M2S_BWD_GLOBAL(NAME, T)                                         \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dxbc,                                                  \
+    T* __restrict__ d_proj, long long ld_proj, int dt_off,                     \
+    float* __restrict__ db_h, float* __restrict__ dc_h,                        \
+    float* __restrict__ da_parts, float* __restrict__ dbias_parts,             \
+    float* __restrict__ rec, float* __restrict__ ds_glob,                      \
+    float* __restrict__ leaves,                                                \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc, const T* __restrict__ proj,                     \
+    const float* __restrict__ ckpt, const float* __restrict__ scal3,           \
+    const float* __restrict__ dt_bias, const float* __restrict__ a_neg,        \
+    const float* __restrict__ D,                                               \
+    int seq, int stride, int nh, int ng, int hd, int ds, int conv_dim,         \
+    int flags, float dt_min, float dt_max,                                     \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
     m2s_bwd_global_body<T>(dxbc, d_proj, ld_proj, dt_off, db_h, dc_h, da_parts, \
         dbias_parts, rec, ds_glob, leaves, dy, xbc, proj, ckpt, scal3, dt_bias, \
-        a_neg, D, seq, stride, nh, ng, hd, ds, conv_dim, flags, dt_min, dt_max); \
+        a_neg, D, seq, stride, nh, ng, hd, ds, conv_dim, flags, dt_min, dt_max, y_first); \
 }
 DEFINE_M2S_BWD_GLOBAL(m2s_bwd_global, float)
 DEFINE_M2S_BWD_GLOBAL(m2s_bwd_global_bf16, __nv_bfloat16)

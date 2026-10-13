@@ -254,6 +254,14 @@
   `m3_grid_runs` runs the sequential scans, the decode step and the chunk
   scan past the extent against first-run twins, and the decay cumsum over
   chunks past it against a launch of its own.
+- Mamba-2 and MIMO split their heads, groups and state elements the same
+  way, and the head-width tiles on the z axis where those grow with the
+  head. The Mamba-2 device envelope no longer refuses a model past 65535
+  heads or groups. The MIMO scan finds a head's last tile by the head's
+  tile count rather than the grid's z extent, so it holds across runs.
+  `m2_grid_runs` and `mimo_grid_runs` run the Mamba-2 decode step and
+  state passing and the MIMO state pass past the extent against first-run
+  twins.
 - `GpuCtx::cublas()` hands the context's cuBLAS handle, which the context
   takes when it enters a cuBLAS GEMM mode and keeps. `GpuCtx::take_cublas()`
   takes one for a context that stays in the deterministic mode, for a

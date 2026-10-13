@@ -122,7 +122,8 @@ extern "C" __global__ void NAME(                                               \
     float* __restrict__ dt_out, float* __restrict__ acs_out,                   \
     const TI* __restrict__ proj, long long ld_proj, int dt_off,               \
     const float* __restrict__ dt_bias, const float* __restrict__ a_neg,        \
-    int batch, int seq, int nh, int has_limit, float dt_min, float dt_max      \
+    int batch, int seq, int nh, int has_limit, float dt_min, float dt_max,     \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     __shared__ float dts[4][M2_CHUNK];                                         \
     __shared__ float acss[4][M2_CHUNK];                                        \
@@ -130,7 +131,7 @@ extern "C" __global__ void NAME(                                               \
     const long long bc = blockIdx.x;                                           \
     if (bc >= (long long)batch * nc) return;                                   \
     const int hl = threadIdx.y;                                                \
-    const int h = blockIdx.y * 4 + hl;                                         \
+    const int h = (y_first + blockIdx.y) * 4 + hl;                             \
     const int t = threadIdx.x;                                                 \
     const int c = (int)(bc % nc);                                              \
     const long long b = bc / nc;                                               \
@@ -176,7 +177,8 @@ DEFINE_M2_DT_CUMSUM(m2_dt_cumsum_f16, __half)
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ cb,                                                    \
     const TI* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,       \
-    int batch, int seq, int ng, int ds                                         \
+    int batch, int seq, int ng, int ds,                                        \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     extern __shared__ float m2bmm_sm[];                                        \
     constexpr int LS = M2_CHUNK + 4;                                           \
@@ -185,7 +187,7 @@ extern "C" __global__ void NAME(                                               \
     float* bt = ct + npass * LS;                                               \
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;                            \
     const long long bc = blockIdx.x;                                           \
-    const int g = blockIdx.y;                                                  \
+    const int g = y_first + blockIdx.y;                                        \
     if (bc >= (long long)batch * nc || g >= ng) return;                        \
     const int c = (int)(bc % nc);                                              \
     const long long b = bc / nc;                                               \
@@ -275,13 +277,14 @@ __device__ __forceinline__ void m2_chunk_state_body(
     float* __restrict__ states,
     const TI* __restrict__ xbc, long long ld_xbc, int b_col,
     const float* __restrict__ dt, const float* __restrict__ acs,
-    int batch, int seq, int nh, int ng, int hd, int ds, int pt
+    int batch, int seq, int nh, int ng, int hd, int ds, int pt,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float4 m2cs_sm4[];
     constexpr int NT = 32 * JC;
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int n0 = blockIdx.z * NT;
     if (bc >= (long long)batch * nc || h >= nh) return;
     const int g = h / (nh / ng);
@@ -356,17 +359,18 @@ extern "C" __global__ void NAME(                                               \
     float* __restrict__ states,                                                \
     const TI* __restrict__ xbc, long long ld_xbc, int b_col,                  \
     const float* __restrict__ dt, const float* __restrict__ acs,               \
-    int batch, int seq, int nh, int ng, int hd, int ds, int pt                 \
+    int batch, int seq, int nh, int ng, int hd, int ds, int pt,                \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     if (ds <= 32)                                                              \
         m2_chunk_state_body<TI, 1>(states, xbc, ld_xbc, b_col, dt, acs, batch, \
-            seq, nh, ng, hd, ds, pt);                                          \
+            seq, nh, ng, hd, ds, pt, y_first);                                 \
     else if (ds <= 64)                                                         \
         m2_chunk_state_body<TI, 2>(states, xbc, ld_xbc, b_col, dt, acs, batch, \
-            seq, nh, ng, hd, ds, pt);                                          \
+            seq, nh, ng, hd, ds, pt, y_first);                                 \
     else                                                                       \
         m2_chunk_state_body<TI, 4>(states, xbc, ld_xbc, b_col, dt, acs, batch, \
-            seq, nh, ng, hd, ds, pt);                                          \
+            seq, nh, ng, hd, ds, pt, y_first);                                 \
 }
 
 DEFINE_M2_CHUNK_STATE(m2_chunk_state, float)
@@ -385,12 +389,13 @@ extern "C" __global__ void m2_state_passing(
     float* __restrict__ states,
     float* __restrict__ ssm,
     const float* __restrict__ acs,
-    int batch, int seq, int nh, int hd, int ds
+    int batch, int seq, int nh, int hd, int ds,
+    int y_first /* this run's first y block */
 ) {
     __shared__ float decay[M2_PASS_WINDOW];
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bh = blockIdx.x;
-    const long long e = (long long)blockIdx.y * blockDim.x + threadIdx.x;
+    const long long e = (long long)(y_first + blockIdx.y) * blockDim.x + threadIdx.x;
     const long long pn = (long long)hd * ds;
     if (bh >= (long long)batch * nh) return;
     const bool live = e < pn;
@@ -437,12 +442,14 @@ extern "C" __global__ void NAME(                                               \
     const TI* __restrict__ xbc, long long ld_xbc, int c_col,                  \
     const float* __restrict__ dt, const float* __restrict__ acs,               \
     const float* __restrict__ D, int d_per_channel,                            \
-    int batch, int seq, int nh, int ng, int hd, int ds                         \
+    int batch, int seq, int nh, int ng, int hd, int ds,                        \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;                            \
     const long long bc = blockIdx.x;                                           \
-    const int h = blockIdx.y;                                                  \
-    const int e = blockIdx.z * blockDim.x + threadIdx.x;                       \
+    const int h = y_first + blockIdx.y;                                        \
+    const int e = (z_first + blockIdx.z) * blockDim.x + threadIdx.x;           \
     if (bc >= (long long)batch * nc || h >= nh || e >= M2_CHUNK * hd) return;  \
     const int t = e / hd;                                                      \
     const int p = e % hd;                                                      \
@@ -501,12 +508,13 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
     const TI* __restrict__ xbc, long long ld_xbc, int c_col,
     const float* __restrict__ dt, const float* __restrict__ acs,
     const float* __restrict__ D, int d_per_channel,
-    int batch, int seq, int nh, int ng, int hd, int ds
+    int batch, int seq, int nh, int ng, int hd, int ds,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m2cs_sm[];
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int tile0 = blockIdx.z * M2_SCAN_TT;
     if (bc >= (long long)batch * nc || h >= nh) return;
     const int c = (int)(bc % nc);
@@ -629,10 +637,11 @@ extern "C" __global__ void NAME(                                               \
     const TI* __restrict__ xbc, long long ld_xbc, int c_col,                  \
     const float* __restrict__ dt, const float* __restrict__ acs,               \
     const float* __restrict__ D, int d_per_channel,                            \
-    int batch, int seq, int nh, int ng, int hd, int ds                         \
+    int batch, int seq, int nh, int ng, int hd, int ds,                        \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     m2_chunk_scan_tiles_body<TI>(y, states, cb, xbc, ld_xbc, c_col, dt, acs,   \
-        D, d_per_channel, batch, seq, nh, ng, hd, ds);                         \
+        D, d_per_channel, batch, seq, nh, ng, hd, ds, y_first);                \
 }
 
 DEFINE_M2_CHUNK_SCAN_TILES(m2_chunk_scan_tiles, float)

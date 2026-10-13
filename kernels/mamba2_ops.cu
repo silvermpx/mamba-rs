@@ -192,14 +192,16 @@ __device__ __forceinline__ void m2_steps_body(
     int batch, int seq, int nh, int ng, int hd, int ds,
     int conv_dim, int d_in_proj, int z_off, int dt_off,
     int flags, float dt_min, float dt_max,
-    float* __restrict__ ckpt, int stride
+    float* __restrict__ ckpt, int stride,
+    int y_first, /* this run's first y block */
+    int z_first /* this run's first z block */
 ) {
     extern __shared__ float m2s_sm[];
     float* bc = m2s_sm;            // [2][2 N]: B then C of a token, two halves
     float* tile = m2s_sm + 4 * ds;
     const int b = blockIdx.x;
-    const int h = blockIdx.y;
-    const int p0 = blockIdx.z * blockDim.x;
+    const int h = y_first + blockIdx.y;
+    const int p0 = (z_first + blockIdx.z) * blockDim.x;
     const int tid = threadIdx.x;
     if (b >= batch || h >= nh || p0 >= hd) return;
     const int rows = min((int)blockDim.x, hd - p0);
@@ -328,11 +330,13 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ D,                                               \
     int batch, int nh, int ng, int hd, int ds,                                 \
     int conv_dim, int d_in_proj, int z_off, int dt_off,                        \
-    int flags, float dt_min, float dt_max                                      \
+    int flags, float dt_min, float dt_max,                                     \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     m2_steps_body<TI, false>(y, ssm, xbc, proj, dt_bias, a_neg, D, batch, 1,   \
         nh, ng, hd, ds, conv_dim, d_in_proj, z_off, dt_off, flags, dt_min,     \
-        dt_max, nullptr, 1);                                                   \
+        dt_max, nullptr, 1, y_first, z_first);                                 \
 }
 
 DEFINE_M2_STEP_FWD(m2_step_fwd, float)
@@ -351,11 +355,13 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ D,                                               \
     int batch, int seq, int nh, int ng, int hd, int ds,                        \
     int conv_dim, int d_in_proj, int z_off, int dt_off,                        \
-    int flags, float dt_min, float dt_max                                      \
+    int flags, float dt_min, float dt_max,                                     \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     m2_steps_body<TI, false>(y, ssm, xbc, proj, dt_bias, a_neg, D, batch, seq, \
         nh, ng, hd, ds, conv_dim, d_in_proj, z_off, dt_off, flags, dt_min,     \
-        dt_max, nullptr, 1);                                                   \
+        dt_max, nullptr, 1, y_first, z_first);                                 \
 }
 
 DEFINE_M2_SEQ_FWD(m2_seq_fwd, float)
@@ -376,11 +382,13 @@ extern "C" __global__ void NAME(                                               \
     int batch, int seq, int nh, int ng, int hd, int ds,                        \
     int conv_dim, int d_in_proj, int z_off, int dt_off,                        \
     int flags, float dt_min, float dt_max,                                     \
-    float* __restrict__ ckpt, int stride                                       \
+    float* __restrict__ ckpt, int stride,                                      \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     m2_steps_body<TI, true>(y, ssm, xbc, proj, dt_bias, a_neg, D, batch, seq,  \
         nh, ng, hd, ds, conv_dim, d_in_proj, z_off, dt_off, flags, dt_min,     \
-        dt_max, ckpt, stride);                                                 \
+        dt_max, ckpt, stride, y_first, z_first);                               \
 }
 
 DEFINE_M2_SEQ_FWD_CKPT(m2_seq_fwd_ckpt, float)
@@ -404,11 +412,12 @@ extern "C" __global__ void NAME(                                               \
     const TI* __restrict__ proj, long long ld_proj, int z_off,                 \
     const float* __restrict__ w,                                               \
     long long rows, int d_ssm, int ng, int hd, float eps,                      \
-    int norm_before_gate                                                       \
+    int norm_before_gate,                                                      \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     extern __shared__ float m2n_sm[];                                          \
     const long long r = blockIdx.x;                                            \
-    const int g = blockIdx.y;                                                  \
+    const int g = y_first + blockIdx.y;                                        \
     if (r >= rows || g >= ng) return;                                          \
     const int gs = d_ssm / ng;                                                 \
     const int heads = gs / hd;                                                 \
@@ -468,11 +477,12 @@ extern "C" __global__ void NAME(                                               \
     const TI* __restrict__ proj, long long ld_proj, int z_off,                 \
     const float* __restrict__ w,                                               \
     long long rows, int d_ssm, int ng, int hd, float eps,                      \
-    int norm_before_gate                                                       \
+    int norm_before_gate,                                                      \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     extern __shared__ float head_sum[];                                        \
     const long long r = blockIdx.x;                                            \
-    const int g = blockIdx.y;                                                  \
+    const int g = y_first + blockIdx.y;                                        \
     if (r >= rows || g >= ng) return;                                          \
     const int gs = d_ssm / ng;                                                 \
     const int heads = gs / hd;                                                 \

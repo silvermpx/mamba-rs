@@ -32,7 +32,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{check_int_args, grid_1d_cover, grid_norm, launch_elems};
+use crate::gpu::launch::{check_int_args, grid_1d_cover, grid_norm, launch_elems, y_runs, yz_runs};
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 use crate::mlp::GatedMlpLayerWeights;
@@ -202,23 +202,17 @@ pub(crate) struct WindowPtrs {
 }
 
 /// What a model needs of this device beyond its config's own envelope: a
-/// scan channel's state in shared memory, and heads, groups and state rows
-/// within the grid's y and z extents.
+/// scan channel's state in shared memory. Heads, groups and state rows past
+/// the grid's y and z extents launch in runs.
 pub(crate) fn check_device_envelope(
     cfg: &Mamba2Config,
     kernels: &Mamba2Kernels,
 ) -> Result<(), String> {
-    let (hd, ds, nh, ng) = (cfg.headdim, cfg.d_state, cfg.nheads(), cfg.ngroups);
+    let (hd, ds) = (cfg.headdim, cfg.d_state);
     let optin = kernels.smem_optin;
     if step_rows(hd, ds, optin).is_none() {
         return Err(format!(
             "a scan channel of {ds} states does not fit this GPU's {optin} bytes of shared memory"
-        ));
-    }
-    let grid_limit = 65_535usize;
-    if nh > grid_limit || ng > grid_limit || (hd * ds).div_ceil(256) > grid_limit {
-        return Err(format!(
-            "{nh} heads, {ng} groups or {hd}x{ds} state rows pass the GPU's grid extents"
         ));
     }
     Ok(())
@@ -342,22 +336,25 @@ impl M2Exec<'_> {
             } else {
                 &self.kernels.gated_norm_fwd_stream
             };
-            let mut bld = stream.launch_builder(kernel.get(self.act));
-            bld.arg(&gated);
-            bld.arg(&ld_out);
-            bld.arg(&out_col);
-            bld.arg(&y);
-            bld.arg(&proj);
-            bld.arg(&ld_proj);
-            bld.arg(&z_off);
-            bld.arg(&w);
-            bld.arg(&rows_l);
-            bld.arg(&d_ssm_i);
-            bld.arg(&ng_i);
-            bld.arg(&hd_i);
-            bld.arg(&eps);
-            bld.arg(&nbg);
-            unsafe { bld.launch(norm_cfg) }.map_err(|e| format!("Mamba-2 gated norm: {e:?}"))?;
+            for (y_first, cfg) in y_runs(norm_cfg) {
+                let mut bld = stream.launch_builder(kernel.get(self.act));
+                bld.arg(&gated);
+                bld.arg(&ld_out);
+                bld.arg(&out_col);
+                bld.arg(&y);
+                bld.arg(&proj);
+                bld.arg(&ld_proj);
+                bld.arg(&z_off);
+                bld.arg(&w);
+                bld.arg(&rows_l);
+                bld.arg(&d_ssm_i);
+                bld.arg(&ng_i);
+                bld.arg(&hd_i);
+                bld.arg(&eps);
+                bld.arg(&nbg);
+                bld.arg(&y_first);
+                unsafe { bld.launch(cfg) }.map_err(|e| format!("Mamba-2 gated norm: {e:?}"))?;
+            }
         } else {
             let mut bld = stream.launch_builder(self.kernels.gate_only_fwd.get(self.act));
             bld.arg(&gated);
@@ -518,6 +515,23 @@ impl M2Exec<'_> {
              run: &dyn Fn(LaunchConfig) -> Result<(), cudarc::driver::DriverError>| {
                 run(cfg).map_err(|e| format!("Mamba-2 window {what} L{l}: {e:?}"))
             };
+        // A launch whose y or z axis may pass the grid's extent, once per
+        // run; the kernel takes the run's first y block, and its first z
+        // block when its z axis is split too.
+        let launch_runs = |cfg: LaunchConfig,
+                           what: &str,
+                           l: usize,
+                           run: &dyn Fn(
+            LaunchConfig,
+            i32,
+            i32,
+        ) -> Result<(), cudarc::driver::DriverError>| {
+            for (y_first, z_first, cfg) in yz_runs(cfg) {
+                run(cfg, y_first, z_first)
+                    .map_err(|e| format!("Mamba-2 window {what} L{l}: {e:?}"))?;
+            }
+            Ok::<(), String>(())
+        };
         let (cw, cbias) = (lw.conv_w, lw.conv_b);
         launch(grid_1d_cover(rows * cd)?, "conv", l, &|g| unsafe {
             let mut bld = stream.launch_builder(self.kernels.conv_prefill.get(self.act));
@@ -567,11 +581,11 @@ impl M2Exec<'_> {
             let (ckpt, stride_i) = (w.ckpt, w.stride as i32);
             let rows = step_rows(hd, ds, self.kernels.smem_optin)
                 .ok_or("the sequential scan does not fit this GPU's shared memory")?;
-            return launch(
+            return launch_runs(
                 step_cfg(b, nh, (hd, ds), rows),
                 "sequential scan",
                 l,
-                &|g| unsafe {
+                &|g, y_first, z_first| unsafe {
                     let kernel = if ckpt == 0 {
                         &self.kernels.seq_fwd
                     } else {
@@ -602,6 +616,8 @@ impl M2Exec<'_> {
                         bld.arg(&ckpt);
                         bld.arg(&stride_i);
                     }
+                    bld.arg(&y_first);
+                    bld.arg(&z_first);
                     bld.launch(g).map(|_| ())
                 },
             );
@@ -611,7 +627,7 @@ impl M2Exec<'_> {
             block_dim: (CHUNK as u32, 4, 1),
             shared_mem_bytes: 0,
         };
-        launch(dt_cfg, "dt", l, &|g| unsafe {
+        launch_runs(dt_cfg, "dt", l, &|g, y_first, _| unsafe {
             let mut bld = stream.launch_builder(self.kernels.dt_cumsum.get(self.act));
             bld.arg(&dt);
             bld.arg(&acs);
@@ -626,6 +642,7 @@ impl M2Exec<'_> {
             bld.arg(&limited);
             bld.arg(&lo);
             bld.arg(&hi);
+            bld.arg(&y_first);
             bld.launch(g).map(|_| ())
         })?;
         let bmm_cfg = LaunchConfig {
@@ -633,7 +650,7 @@ impl M2Exec<'_> {
             block_dim: (256, 1, 1),
             shared_mem_bytes: bmm_smem_bytes(ds) as u32,
         };
-        launch(bmm_cfg, "bmm", l, &|g| unsafe {
+        launch_runs(bmm_cfg, "bmm", l, &|g, y_first, _| unsafe {
             let mut bld = stream.launch_builder(self.kernels.bmm_chunk.get(self.act));
             bld.arg(&cb);
             bld.arg(&xbc);
@@ -644,6 +661,7 @@ impl M2Exec<'_> {
             bld.arg(&t_i);
             bld.arg(&ng_i);
             bld.arg(&ds_i);
+            bld.arg(&y_first);
             bld.launch(g).map(|_| ())
         })?;
         let (state_cols, state_pt, state_smem) = chunk_state_geom(hd, ds, self.kernels.smem_optin);
@@ -653,7 +671,7 @@ impl M2Exec<'_> {
             block_dim: ((32 * state_pt / 4).min(256) as u32, 1, 1),
             shared_mem_bytes: state_smem as u32,
         };
-        launch(state_cfg, "chunk state", l, &|g| unsafe {
+        launch_runs(state_cfg, "chunk state", l, &|g, y_first, _| unsafe {
             let mut bld = stream.launch_builder(self.kernels.chunk_state.get(self.act));
             bld.arg(&states);
             bld.arg(&xbc);
@@ -668,6 +686,7 @@ impl M2Exec<'_> {
             bld.arg(&hd_i);
             bld.arg(&ds_i);
             bld.arg(&pt_i);
+            bld.arg(&y_first);
             bld.launch(g).map(|_| ())
         })?;
         let pass_cfg = LaunchConfig {
@@ -675,7 +694,7 @@ impl M2Exec<'_> {
             block_dim: (256, 1, 1),
             shared_mem_bytes: 0,
         };
-        launch(pass_cfg, "state passing", l, &|g| unsafe {
+        launch_runs(pass_cfg, "state passing", l, &|g, y_first, _| unsafe {
             let mut bld = stream.launch_builder(&self.kernels.state_passing);
             bld.arg(&states);
             bld.arg(&ssm);
@@ -685,13 +704,15 @@ impl M2Exec<'_> {
             bld.arg(&nh_i);
             bld.arg(&hd_i);
             bld.arg(&ds_i);
+            bld.arg(&y_first);
             bld.launch(g).map(|_| ())
         })?;
         let dp = lw.d;
         // The register-tiled scan when its staging fits; both give the same
         // bits.
         let tiles_smem = chunk_scan_tiles_smem_bytes(hd, ds);
-        let (scan_kernel, scan_cfg) = if tiles_smem <= self.kernels.smem_optin {
+        let tiled = tiles_smem <= self.kernels.smem_optin;
+        let (scan_kernel, scan_cfg) = if tiled {
             (
                 &self.kernels.chunk_scan_tiles,
                 LaunchConfig {
@@ -718,7 +739,7 @@ impl M2Exec<'_> {
                 },
             )
         };
-        launch(scan_cfg, "chunk scan", l, &|g| unsafe {
+        launch_runs(scan_cfg, "chunk scan", l, &|g, y_first, z_first| unsafe {
             let mut bld = stream.launch_builder(scan_kernel.get(self.act));
             bld.arg(&y);
             bld.arg(&states);
@@ -736,6 +757,10 @@ impl M2Exec<'_> {
             bld.arg(&ng_i);
             bld.arg(&hd_i);
             bld.arg(&ds_i);
+            bld.arg(&y_first);
+            if !tiled {
+                bld.arg(&z_first);
+            }
             bld.launch(g).map(|_| ())
         })?;
         Ok(())
@@ -1239,30 +1264,33 @@ impl Mamba2GpuEngine {
                     lw.a_neg.cached_ptr(),
                     lw.d_param.cached_ptr(),
                 );
-                let mut bld = stream.launch_builder(self.kernels.step_fwd.get(self.act));
-                bld.arg(&y);
-                bld.arg(&ssm);
-                bld.arg(&xbc);
-                bld.arg(&proj);
-                bld.arg(&dtb);
-                bld.arg(&an);
-                bld.arg(&dp);
-                bld.arg(&b_i);
-                bld.arg(&nh_i);
-                bld.arg(&ng_i);
-                bld.arg(&hd_i);
-                bld.arg(&ds_i);
-                bld.arg(&cd_i);
-                bld.arg(&ip_i);
-                bld.arg(&z_off_i);
-                bld.arg(&dt_off_i);
-                bld.arg(&flags);
-                bld.arg(&lo);
-                bld.arg(&hi);
                 let rows = decode_rows((b, nh), (hd, ds), self.kernels.smem_optin)
                     .ok_or("the decode step does not fit this GPU's shared memory")?;
-                unsafe { bld.launch(step_cfg(b, nh, (hd, ds), rows)) }
-                    .map_err(|e| format!("Mamba-2 step L{l}: {e:?}"))?;
+                for (y_first, z_first, cfg) in yz_runs(step_cfg(b, nh, (hd, ds), rows)) {
+                    let mut bld = stream.launch_builder(self.kernels.step_fwd.get(self.act));
+                    bld.arg(&y);
+                    bld.arg(&ssm);
+                    bld.arg(&xbc);
+                    bld.arg(&proj);
+                    bld.arg(&dtb);
+                    bld.arg(&an);
+                    bld.arg(&dp);
+                    bld.arg(&b_i);
+                    bld.arg(&nh_i);
+                    bld.arg(&ng_i);
+                    bld.arg(&hd_i);
+                    bld.arg(&ds_i);
+                    bld.arg(&cd_i);
+                    bld.arg(&ip_i);
+                    bld.arg(&z_off_i);
+                    bld.arg(&dt_off_i);
+                    bld.arg(&flags);
+                    bld.arg(&lo);
+                    bld.arg(&hi);
+                    bld.arg(&y_first);
+                    bld.arg(&z_first);
+                    unsafe { bld.launch(cfg) }.map_err(|e| format!("Mamba-2 step L{l}: {e:?}"))?;
+                }
             }
             self.exec().gate_out_residual(
                 &lw.ptrs(),

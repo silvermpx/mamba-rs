@@ -47,7 +47,9 @@ use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
 use crate::gpu::context::{GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_colsum, grid_norm, launch_cast};
+use crate::gpu::launch::{
+    grid_1d, grid_1d_cover, grid_colsum, grid_norm, launch_cast, y_runs, yz_runs,
+};
 use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -1327,6 +1329,33 @@ impl Mamba2GpuTrainer {
                     .map_err(|e| format!("Mamba-2 backward {} L{l}: {e:?}", $what))?;
             }};
         }
+        // One launch split into runs along its y axis, the run's first y
+        // block after the arguments.
+        macro_rules! go_y {
+            ($f:expr, $cfg:expr, $what:expr, [$($arg:expr),* $(,)?]) => {{
+                for (y_first, cfg) in y_runs($cfg) {
+                    let mut bld = stream.launch_builder($f);
+                    $(bld.arg(&$arg);)*
+                    bld.arg(&y_first);
+                    unsafe { bld.launch(cfg) }
+                        .map_err(|e| format!("Mamba-2 backward {} L{l}: {e:?}", $what))?;
+                }
+            }};
+        }
+        // One launch split into runs along its y and z axes, the run's first
+        // y and z blocks after the arguments.
+        macro_rules! go_yz {
+            ($f:expr, $cfg:expr, $what:expr, [$($arg:expr),* $(,)?]) => {{
+                for (y_first, z_first, cfg) in yz_runs($cfg) {
+                    let mut bld = stream.launch_builder($f);
+                    $(bld.arg(&$arg);)*
+                    bld.arg(&y_first);
+                    bld.arg(&z_first);
+                    unsafe { bld.launch(cfg) }
+                        .map_err(|e| format!("Mamba-2 backward {} L{l}: {e:?}", $what))?;
+                }
+            }};
+        }
         let cfg3 = |x: usize, y: usize, z: usize, block: u32| LaunchConfig {
             grid_dim: (x as u32, y as u32, z as u32),
             block_dim: (block, 1, 1),
@@ -1431,7 +1460,7 @@ impl Mamba2GpuTrainer {
                 &k.gated_norm_stream
             };
             let d_ssm_i = d_ssm as i32;
-            go!(
+            go_y!(
                 kernel.get(act),
                 cfg,
                 "gated norm",
@@ -1465,7 +1494,7 @@ impl Mamba2GpuTrainer {
         // D.
         {
             let parts = s.d_parts.cached_ptr();
-            go!(
+            go_y!(
                 k.d_parts.get(act),
                 cfg3(b * nc, nh, 1, 128),
                 "D parts",
@@ -1486,7 +1515,7 @@ impl Mamba2GpuTrainer {
         // The scan backward: the chunked path, or the sequential one.
         if !self.seq_mode {
             let pn = hd * ds;
-            go!(
+            go_yz!(
                 k.dhloc.get(act),
                 cfg3(b * nc, nh, pn.div_ceil(256), 256),
                 "dH",
@@ -1494,7 +1523,7 @@ impl Mamba2GpuTrainer {
                     ds_buf, dy, xbc, ld_xbc, c_col, acs, b_i, t_i, nh_i, ng_i, hd_i, ds_i
                 ]
             );
-            go!(
+            go_y!(
                 &k.state_passing,
                 cfg3(b * nh, pn.div_ceil(256), 1, 256),
                 "state passing",
@@ -1516,7 +1545,7 @@ impl Mamba2GpuTrainer {
             let per_channel = i32::from(c.d_has_hdim);
             if let Some((nk, smem)) = self.dx_tiles {
                 let nk_i = nk as i32;
-                go!(
+                go_y!(
                     k.dx_tiles.get(act),
                     LaunchConfig {
                         grid_dim: ((b * nc) as u32, nh as u32, 1),
@@ -1551,7 +1580,7 @@ impl Mamba2GpuTrainer {
                 );
             } else {
                 let (acc, ste, yi) = (s.acc.cached_ptr(), s.ste.cached_ptr(), s.yi.cached_ptr());
-                go!(
+                go_yz!(
                     k.dx.get(act),
                     cfg3(b * nc, nh, (CHUNK * hd).div_ceil(128), 128),
                     "dx",
@@ -1580,7 +1609,7 @@ impl Mamba2GpuTrainer {
                         ds_i
                     ]
                 );
-                go!(
+                go_y!(
                     k.rowsums.get(act),
                     cfg3(b * nc, nh, 1, CHUNK as u32),
                     "token sums",
@@ -1590,7 +1619,7 @@ impl Mamba2GpuTrainer {
                 );
             }
             let (dcbh, mm) = (s.dcbh.cached_ptr(), s.mm.cached_ptr());
-            go!(
+            go_y!(
                 k.pairs.get(act),
                 cfg3(b * nc, nh, PAIRS.div_ceil(256), 256),
                 "pairs",
@@ -1605,7 +1634,7 @@ impl Mamba2GpuTrainer {
                     block_dim: (512, 1, 1),
                     shared_mem_bytes: bc_smem as u32,
                 };
-                go!(
+                go_y!(
                     k.db_tiles.get(act),
                     tiles,
                     "dB",
@@ -1614,7 +1643,7 @@ impl Mamba2GpuTrainer {
                         ng_i, hd_i, ds_i
                     ]
                 );
-                go!(
+                go_y!(
                     k.dc_tiles.get(act),
                     tiles,
                     "dC",
@@ -1625,7 +1654,7 @@ impl Mamba2GpuTrainer {
                 );
             } else {
                 let bc_cfg = cfg3(b * nc, ng, (CHUNK * ds).div_ceil(128), 128);
-                go!(
+                go_y!(
                     k.db.get(act),
                     bc_cfg,
                     "dB",
@@ -1634,7 +1663,7 @@ impl Mamba2GpuTrainer {
                         ng_i, hd_i, ds_i
                     ]
                 );
-                go!(
+                go_y!(
                     k.dc.get(act),
                     bc_cfg,
                     "dC",
@@ -1649,7 +1678,7 @@ impl Mamba2GpuTrainer {
                 let (dt_bias, a_neg) = (lp.dt_bias, lp.a_neg);
                 let (lo, hi) = c.dt_limit;
                 let has_limit = i32::from(c.dt_limit != (0.0, f32::INFINITY));
-                go!(
+                go_y!(
                     k.combine.get(act),
                     cfg3(b * nc, nh, 1, CHUNK as u32),
                     "decay gradients",
@@ -1726,7 +1755,7 @@ impl Mamba2GpuTrainer {
             };
             match self.seq_bwd {
                 SeqBwdRoute::Tiles => {
-                    go!(
+                    go_y!(
                         k.seq_bwd_tiles.get(act),
                         block(seq_bwd_tiles_threads(hd), seq_bwd_tiles_smem_bytes(hd, ds)),
                         "sequential scan",
@@ -1763,7 +1792,7 @@ impl Mamba2GpuTrainer {
                 }
                 SeqBwdRoute::Shared => {
                     let threads = hd.next_multiple_of(32);
-                    go!(
+                    go_y!(
                         k.seq_bwd.get(act),
                         block(threads, seq_bwd_smem_bytes(hd, ds, threads)),
                         "sequential scan",
@@ -1810,7 +1839,7 @@ impl Mamba2GpuTrainer {
                     } else {
                         0u64
                     };
-                    go!(
+                    go_y!(
                         k.seq_bwd_global.get(act),
                         block(geom.threads, geom.smem),
                         "sequential scan",

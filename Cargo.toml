@@ -769,6 +769,16 @@ path = "tests/m3_grid_runs.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m2_grid_runs"
+path = "tests/m2_grid_runs.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "mimo_grid_runs"
+path = "tests/mimo_grid_runs.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "state_cap_refusal"
 path = "tests/state_cap_refusal.rs"
 required-features = ["cuda"]

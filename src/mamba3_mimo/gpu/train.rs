@@ -47,7 +47,9 @@ use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer, GradSlice};
 use crate::gpu::context::{GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_norm, launch_cast, launch_elems};
+use crate::gpu::launch::{
+    grid_1d, grid_1d_cover, grid_norm, launch_cast, launch_elems, y_runs, yz_runs,
+};
 use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -1248,68 +1250,75 @@ impl Mamba3MimoGpuTrainer {
                     a.ck_v.cached_ptr(),
                     a.ck_ang.cached_ptr(),
                 ];
-                let mut bld = stream.launch_builder(self.kernels.scan_ckpt.get(self.act));
-                bld.arg(&o);
-                bld.arg(&ssm);
-                bld.arg(&kst);
-                bld.arg(&vst);
-                bld.arg(&ang);
-                bld.arg(&proj);
-                bld.arg(&ld_proj);
-                bld.arg(&bn);
-                bld.arg(&cn);
-                for p in &ptrs {
-                    bld.arg(p);
+                for (y_first, z_first, cfg) in yz_runs(self.scan.cfg(b, nh, hd)) {
+                    let mut bld = stream.launch_builder(self.kernels.scan_ckpt.get(self.act));
+                    bld.arg(&o);
+                    bld.arg(&ssm);
+                    bld.arg(&kst);
+                    bld.arg(&vst);
+                    bld.arg(&ang);
+                    bld.arg(&proj);
+                    bld.arg(&ld_proj);
+                    bld.arg(&bn);
+                    bld.arg(&cn);
+                    for p in &ptrs {
+                        bld.arg(p);
+                    }
+                    bld.arg(&t_i);
+                    bld.arg(&nh_i);
+                    bld.arg(&ng_i);
+                    bld.arg(&hd_i);
+                    bld.arg(&ds_i);
+                    bld.arg(&r_i);
+                    bld.arg(&na_i);
+                    bld.arg(&a_floor);
+                    for p in &cks {
+                        bld.arg(p);
+                    }
+                    bld.arg(&stride_i);
+                    let (tile, pipe) = (self.scan.tile as i32, i32::from(self.scan.pipe));
+                    let done = self.scan_done.cached_ptr();
+                    let y_out = if ls.norm_gate.len > 0 {
+                        a.y.cached_ptr()
+                    } else {
+                        0u64
+                    };
+                    bld.arg(&tile);
+                    bld.arg(&pipe);
+                    bld.arg(&done);
+                    bld.arg(&y_out);
+                    bld.arg(&y_first);
+                    bld.arg(&z_first);
+                    unsafe { bld.launch(cfg) }.map_err(|e| format!("MIMO scan L{l}: {e:?}"))?;
                 }
-                bld.arg(&t_i);
-                bld.arg(&nh_i);
-                bld.arg(&ng_i);
-                bld.arg(&hd_i);
-                bld.arg(&ds_i);
-                bld.arg(&r_i);
-                bld.arg(&na_i);
-                bld.arg(&a_floor);
-                for p in &cks {
-                    bld.arg(p);
-                }
-                bld.arg(&stride_i);
-                let (tile, pipe) = (self.scan.tile as i32, i32::from(self.scan.pipe));
-                let done = self.scan_done.cached_ptr();
-                let y_out = if ls.norm_gate.len > 0 {
-                    a.y.cached_ptr()
-                } else {
-                    0u64
-                };
-                bld.arg(&tile);
-                bld.arg(&pipe);
-                bld.arg(&done);
-                bld.arg(&y_out);
-                unsafe { bld.launch(self.scan.cfg(b, nh, hd)) }
-                    .map_err(|e| format!("MIMO scan L{l}: {e:?}"))?;
             }
             // The output norm gates the scans' readouts again, over the plain
             // gate's rows.
             if ls.norm_gate.len > 0 {
                 let (o, y, nw) = (a.o.ptr(), a.y.cached_ptr(), at(base, ls.norm_gate));
                 let (mz, mo) = (at(base, ls.mimo_z), at(base, ls.mimo_o));
-                let mut bld = stream.launch_builder(self.kernels.gate_normed.get(self.act));
-                bld.arg(&o);
-                bld.arg(&y);
-                bld.arg(&proj);
-                bld.arg(&ld_proj);
-                bld.arg(&nw);
-                bld.arg(&mz);
-                bld.arg(&mo);
-                bld.arg(&nh_i);
-                bld.arg(&hd_i);
-                bld.arg(&r_i);
-                bld.arg(&eps);
                 let cfg = LaunchConfig {
                     grid_dim: (rows as u32, nh as u32, 1),
                     block_dim: (hd.next_multiple_of(32).min(256) as u32, 1, 1),
                     shared_mem_bytes: 0,
                 };
-                unsafe { bld.launch(cfg) }.map_err(|e| format!("MIMO output norm L{l}: {e:?}"))?;
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut bld = stream.launch_builder(self.kernels.gate_normed.get(self.act));
+                    bld.arg(&o);
+                    bld.arg(&y);
+                    bld.arg(&proj);
+                    bld.arg(&ld_proj);
+                    bld.arg(&nw);
+                    bld.arg(&mz);
+                    bld.arg(&mo);
+                    bld.arg(&nh_i);
+                    bld.arg(&hd_i);
+                    bld.arg(&r_i);
+                    bld.arg(&eps);
+                    bld.arg(&y_first);
+                    unsafe { bld.launch(cfg) }
+                        .map_err(|e| format!("MIMO output norm L{l}: {e:?}"))?;
+                }
             }
             self.gemm(
                 (out_rows, a.o.ptr(), self.gemm_weight(ls.out_proj_w)?),
@@ -1806,34 +1815,37 @@ impl Mamba3MimoGpuTrainer {
                 at(base, ls.mimo_o),
             );
             let eps = c.ssm_norm_eps;
-            let mut bld = stream.launch_builder(k.cb.gate_normed.get(act));
-            bld.arg(&dy);
-            bld.arg(&du);
-            bld.arg(&d_proj);
-            bld.arg(&ld_proj);
-            bld.arg(&gphi);
-            bld.arg(&gz);
-            bld.arg(&gd);
-            bld.arg(&gw);
-            bld.arg(&d_o);
-            bld.arg(&y);
-            bld.arg(&proj);
-            bld.arg(&w_d);
-            bld.arg(&w_norm);
-            bld.arg(&w_x);
-            bld.arg(&w_z);
-            bld.arg(&w_o);
-            bld.arg(&nh_i);
-            bld.arg(&hd_i);
-            bld.arg(&r_i);
-            bld.arg(&eps);
             let cfg = LaunchConfig {
                 grid_dim: (rows as u32, nh as u32, 1),
                 block_dim: (hd.next_multiple_of(32).min(256) as u32, 1, 1),
                 shared_mem_bytes: 0,
             };
-            unsafe { bld.launch(cfg) }
-                .map_err(|e| format!("MIMO output norm backward L{l}: {e:?}"))?;
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut bld = stream.launch_builder(k.cb.gate_normed.get(act));
+                bld.arg(&dy);
+                bld.arg(&du);
+                bld.arg(&d_proj);
+                bld.arg(&ld_proj);
+                bld.arg(&gphi);
+                bld.arg(&gz);
+                bld.arg(&gd);
+                bld.arg(&gw);
+                bld.arg(&d_o);
+                bld.arg(&y);
+                bld.arg(&proj);
+                bld.arg(&w_d);
+                bld.arg(&w_norm);
+                bld.arg(&w_x);
+                bld.arg(&w_z);
+                bld.arg(&w_o);
+                bld.arg(&nh_i);
+                bld.arg(&hd_i);
+                bld.arg(&r_i);
+                bld.arg(&eps);
+                bld.arg(&y_first);
+                unsafe { bld.launch(cfg) }
+                    .map_err(|e| format!("MIMO output norm backward L{l}: {e:?}"))?;
+            }
             self.reduce_axis0(at(g_base, ls.norm_gate), gw, (rows, di))?;
         }
         if let Some(geom) = self.chunked {
@@ -1907,6 +1919,33 @@ impl Mamba3MimoGpuTrainer {
                         .map_err(|e| format!("MIMO chunked backward {} L{l}: {e:?}", $what))?;
                 }};
             }
+            // One launch split into runs along its y axis, the run's first y
+            // block after the arguments.
+            macro_rules! go_y {
+                ($f:expr, $cfg:expr, $what:expr, [$($arg:expr),* $(,)?]) => {{
+                    for (y_first, cfg) in y_runs($cfg) {
+                        let mut bld = stream.launch_builder($f);
+                        $(bld.arg(&$arg);)*
+                        bld.arg(&y_first);
+                        unsafe { bld.launch(cfg) }
+                            .map_err(|e| format!("MIMO chunked backward {} L{l}: {e:?}", $what))?;
+                    }
+                }};
+            }
+            // One launch split into runs along its y and z axes, the run's
+            // first y and z blocks after the arguments.
+            macro_rules! go_yz {
+                ($f:expr, $cfg:expr, $what:expr, [$($arg:expr),* $(,)?]) => {{
+                    for (y_first, z_first, cfg) in yz_runs($cfg) {
+                        let mut bld = stream.launch_builder($f);
+                        $(bld.arg(&$arg);)*
+                        bld.arg(&y_first);
+                        bld.arg(&z_first);
+                        unsafe { bld.launch(cfg) }
+                            .map_err(|e| format!("MIMO chunked backward {} L{l}: {e:?}", $what))?;
+                    }
+                }};
+            }
             let cfg3 = |x: usize, y: usize, z: usize, block: usize, smem: usize| LaunchConfig {
                 grid_dim: (x as u32, y as u32, z as u32),
                 block_dim: (block as u32, 1, 1),
@@ -1926,7 +1965,7 @@ impl Mamba3MimoGpuTrainer {
             if geom.inter_tiles.0 > 0 {
                 let (tt, smem) = geom.inter_tiles;
                 let tt_i = tt as i32;
-                go!(
+                go_y!(
                     &k.cb.inter_tiles,
                     cfg3(
                         b * nc,
@@ -1942,7 +1981,7 @@ impl Mamba3MimoGpuTrainer {
                     ]
                 );
             } else {
-                go!(
+                go_y!(
                     &k.cb.inter,
                     cfg3(b * nc, nh, CHUNK, 256, 0),
                     "inter-chunk term",
@@ -1955,7 +1994,7 @@ impl Mamba3MimoGpuTrainer {
             if geom.dsloc_tiles.0 > 0 {
                 let (jc, sl, pg, smem) = geom.dsloc_tiles;
                 let (jc_i, sl_i, pg_i) = (jc as i32, sl as i32, pg as i32);
-                go!(
+                go_yz!(
                     &k.cb.dsloc_tiles,
                     cfg3(
                         b * nc,
@@ -1973,7 +2012,7 @@ impl Mamba3MimoGpuTrainer {
             } else {
                 let (nt, dsloc_smem) = geom.dsloc;
                 let (nt_i, pt_i) = (nt as i32, geom.pt as i32);
-                go!(
+                go_yz!(
                     &k.cb.dsloc,
                     cfg3(
                         b * nc,
@@ -1989,7 +2028,7 @@ impl Mamba3MimoGpuTrainer {
                     ]
                 );
             }
-            go!(
+            go_y!(
                 &k.cb.pass,
                 cfg3(b * nh, (hd * ds).div_ceil(256), 1, 256, 0),
                 "state passing",
@@ -2023,7 +2062,7 @@ impl Mamba3MimoGpuTrainer {
             if geom.terms_tiles.0 > 0 {
                 let (tt, smem) = geom.terms_tiles;
                 let tt_i = tt as i32;
-                go!(
+                go_y!(
                     k.cb.state_terms_tiles.get(act),
                     cfg3(
                         b * nc,
@@ -2039,7 +2078,7 @@ impl Mamba3MimoGpuTrainer {
                     ]
                 );
             } else {
-                go!(
+                go_y!(
                     k.cb.state_terms.get(act),
                     cfg3(b * nc, nh, CHUNK.div_ceil(tg), 256, terms_smem),
                     "state terms",
@@ -2055,7 +2094,7 @@ impl Mamba3MimoGpuTrainer {
                 let (dq_smem, dk_smem) = geom.pairs_tiles;
                 let threads = 8 * (tl * rank).next_multiple_of(4);
                 let tiles = CHUNK.div_ceil(tl);
-                go!(
+                go_y!(
                     k.cb.pairs_dq.get(act),
                     cfg3(b * nc, nh, tiles, threads, dq_smem),
                     "pairs dq",
@@ -2064,7 +2103,7 @@ impl Mamba3MimoGpuTrainer {
                         ds_i, r_i, na_i, tl_i
                     ]
                 );
-                go!(
+                go_y!(
                     k.cb.pairs_dk.get(act),
                     cfg3(b * nc, nh, tiles, threads, dk_smem),
                     "pairs dk",
@@ -2079,7 +2118,7 @@ impl Mamba3MimoGpuTrainer {
                 } else {
                     0u64
                 };
-                go!(
+                go_y!(
                     k.cb.pairs.get(act),
                     cfg3(b * nc, nh, 1, 256, pairs_smem),
                     "pairs",
@@ -2103,7 +2142,7 @@ impl Mamba3MimoGpuTrainer {
             } else {
                 0u64
             };
-            go!(
+            go_y!(
                 &k.cb.lead,
                 cfg3(b, nh, 1, lead_threads, lanes.min(lead_threads) * 4),
                 "entering lead",
@@ -2111,13 +2150,13 @@ impl Mamba3MimoGpuTrainer {
                     de0, gpsi_init, d_init, e0, k0, v0, w_x, leaves, nh_i, hd_i, ds_i, r_i
                 ]
             );
-            go!(
+            go_y!(
                 &k.cb.combine,
                 cfg3(b * nc, nh, 1, CHUNK, 0),
                 "decay gradients",
                 [dsc3, dwp, dcs, inter, dot, coef, t_i, nh_i]
             );
-            go!(
+            go_y!(
                 &k.cb.rot_bwd,
                 cfg3(rows, nh, 1, 128, 0),
                 "rotation",
@@ -2127,7 +2166,7 @@ impl Mamba3MimoGpuTrainer {
                 ]
             );
             if na > 0 {
-                go!(
+                go_y!(
                     k.cb.angles.get(act),
                     cfg3(b, nh, 1, 32, na * 4),
                     "angles",
@@ -2231,44 +2270,47 @@ impl Mamba3MimoGpuTrainer {
                         home(g.wide, &s.bwd_leaves),
                     ]
                 });
-                let mut bld = stream.launch_builder(kernel.get(act));
-                bld.arg(&d_proj);
-                bld.arg(&ld_proj);
-                bld.arg(&d_bn_h);
-                bld.arg(&d_cn_h);
-                bld.arg(&d_tanh_h);
-                for p in &parts {
-                    bld.arg(p);
-                }
-                bld.arg(&rec);
-                if let Some(ptrs) = &scratch {
-                    for p in ptrs {
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut bld = stream.launch_builder(kernel.get(act));
+                    bld.arg(&d_proj);
+                    bld.arg(&ld_proj);
+                    bld.arg(&d_bn_h);
+                    bld.arg(&d_cn_h);
+                    bld.arg(&d_tanh_h);
+                    for p in &parts {
                         bld.arg(p);
                     }
+                    bld.arg(&rec);
+                    if let Some(ptrs) = &scratch {
+                        for p in ptrs {
+                            bld.arg(p);
+                        }
+                    }
+                    bld.arg(&d_o);
+                    bld.arg(&proj);
+                    bld.arg(&bn);
+                    bld.arg(&cn);
+                    for p in &cks {
+                        bld.arg(p);
+                    }
+                    for p in &weights {
+                        bld.arg(p);
+                    }
+                    bld.arg(&t_i);
+                    bld.arg(&stride_i);
+                    bld.arg(&nh_i);
+                    bld.arg(&ng_i);
+                    bld.arg(&hd_i);
+                    bld.arg(&ds_i);
+                    bld.arg(&r_i);
+                    bld.arg(&na_i);
+                    bld.arg(&a_floor);
+                    let dy_in = if normed { s.cb.dy.cached_ptr() } else { 0u64 };
+                    bld.arg(&dy_in);
+                    bld.arg(&y_first);
+                    unsafe { bld.launch(cfg) }
+                        .map_err(|e| format!("MIMO scan backward L{l}: {e:?}"))?;
                 }
-                bld.arg(&d_o);
-                bld.arg(&proj);
-                bld.arg(&bn);
-                bld.arg(&cn);
-                for p in &cks {
-                    bld.arg(p);
-                }
-                for p in &weights {
-                    bld.arg(p);
-                }
-                bld.arg(&t_i);
-                bld.arg(&stride_i);
-                bld.arg(&nh_i);
-                bld.arg(&ng_i);
-                bld.arg(&hd_i);
-                bld.arg(&ds_i);
-                bld.arg(&r_i);
-                bld.arg(&na_i);
-                bld.arg(&a_floor);
-                let dy_in = if normed { s.cb.dy.cached_ptr() } else { 0u64 };
-                bld.arg(&dy_in);
-                unsafe { bld.launch(cfg) }
-                    .map_err(|e| format!("MIMO scan backward L{l}: {e:?}"))?;
             }
             // The per-sequence partials into the gradients. Under the output
             // norm the gate's three come from its pre-pass instead.

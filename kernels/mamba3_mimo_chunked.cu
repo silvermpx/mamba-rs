@@ -248,11 +248,12 @@ __device__ __forceinline__ void m3m_prep_body(
     float* __restrict__ coef, float* __restrict__ sn, float* __restrict__ cs,
     float* __restrict__ e0, float* __restrict__ ang,
     const TI* __restrict__ proj, long long ld_proj, const float* __restrict__ dt_bias,
-    int seq, int nh, int heads, int ang_col, int na, float a_floor
+    int seq, int nh, int heads, int ang_col, int na, float a_floor,
+    int y_first /* this run's first y block */
 ) {
     constexpr int AB = 32;
     const int b = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const long long bh = (long long)b * nh + h;
     const long long row0 = (long long)b * seq;
     const long long cstr = (long long)nh * 4;
@@ -346,16 +347,17 @@ __device__ __forceinline__ void m3m_prep_body(
     }
 }
 
-#define DEFINE_M3M_PREP(NAME, TI)                                               \
-extern "C" __global__ void __launch_bounds__(512) NAME(                         \
-    float* __restrict__ coef, float* __restrict__ sn, float* __restrict__ cs,   \
-    float* __restrict__ e0, float* __restrict__ ang,                            \
-    const TI* __restrict__ proj, long long ld_proj,                             \
-    const float* __restrict__ dt_bias,                                          \
-    int seq, int nh, int heads, int ang_col, int na, float a_floor              \
-) {                                                                             \
-    m3m_prep_body<TI>(coef, sn, cs, e0, ang, proj, ld_proj, dt_bias, seq, nh,   \
-        heads, ang_col, na, a_floor);                                           \
+#define DEFINE_M3M_PREP(NAME, TI)                                              \
+extern "C" __global__ void __launch_bounds__(512) NAME(                        \
+    float* __restrict__ coef, float* __restrict__ sn, float* __restrict__ cs,  \
+    float* __restrict__ e0, float* __restrict__ ang,                           \
+    const TI* __restrict__ proj, long long ld_proj,                            \
+    const float* __restrict__ dt_bias,                                         \
+    int seq, int nh, int heads, int ang_col, int na, float a_floor,            \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m3m_prep_body<TI>(coef, sn, cs, e0, ang, proj, ld_proj, dt_bias, seq, nh,  \
+        heads, ang_col, na, a_floor, y_first);                                 \
 }
 DEFINE_M3M_PREP(m3m_prep, float)
 DEFINE_M3M_PREP(m3m_prep_bf16, __nv_bfloat16)
@@ -377,16 +379,18 @@ __device__ __forceinline__ void m3m_chunk_state_body(
     const float* __restrict__ bn, const float* __restrict__ coef,
     const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ b_bias, const float* __restrict__ mimo_x,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int sl, int pt
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int sl, int pt,
+    int y_first, /* this run's first y block */
+    int z_first /* this run's first z block */
 ) {
     extern __shared__ float m3m_sm[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int nct = (hd + pt - 1) / pt;
-    const int p0 = (int)(blockIdx.z % nct) * pt;
+    const int p0 = (int)((z_first + blockIdx.z) % nct) * pt;
     const int pc = min(pt, hd - p0);
-    const int n0 = (int)(blockIdx.z / nct) * nt;
+    const int n0 = (int)((z_first + blockIdx.z) / nct) * nt;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -443,18 +447,20 @@ __device__ __forceinline__ void m3m_chunk_state_body(
     if (active) contrib[((bc * nh + h) * hd + p) * (long long)ds + n0 + nl] = acc;
 }
 
-#define DEFINE_M3M_CHUNK_STATE(NAME, TI)                                        \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ contrib,                                                \
-    const TI* __restrict__ proj, long long ld_proj,                             \
-    const float* __restrict__ bn, const float* __restrict__ coef,               \
-    const float* __restrict__ sn, const float* __restrict__ cs,                 \
-    const float* __restrict__ b_bias, const float* __restrict__ mimo_x,         \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int sl,  \
-    int pt                                                                      \
-) {                                                                             \
-    m3m_chunk_state_body<TI>(contrib, proj, ld_proj, bn, coef, sn, cs, b_bias,  \
-        mimo_x, seq, nh, ng, hd, ds, rank, na, nt, sl, pt);                     \
+#define DEFINE_M3M_CHUNK_STATE(NAME, TI)                                       \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ contrib,                                               \
+    const TI* __restrict__ proj, long long ld_proj,                            \
+    const float* __restrict__ bn, const float* __restrict__ coef,              \
+    const float* __restrict__ sn, const float* __restrict__ cs,                \
+    const float* __restrict__ b_bias, const float* __restrict__ mimo_x,        \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int sl, \
+    int pt,                                                                    \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
+) {                                                                            \
+    m3m_chunk_state_body<TI>(contrib, proj, ld_proj, bn, coef, sn, cs, b_bias, \
+        mimo_x, seq, nh, ng, hd, ds, rank, na, nt, sl, pt, y_first, z_first);  \
 }
 DEFINE_M3M_CHUNK_STATE(m3m_chunk_state, float)
 DEFINE_M3M_CHUNK_STATE(m3m_chunk_state_bf16, __nv_bfloat16)
@@ -479,16 +485,18 @@ __device__ __forceinline__ void m3m_chunk_state_tiles_body(
     const float* __restrict__ bn, const float* __restrict__ coef,
     const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ b_bias, const float* __restrict__ mimo_x,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int sl, int pg
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int sl, int pg,
+    int y_first, /* this run's first y block */
+    int z_first /* this run's first z block */
 ) {
     extern __shared__ float4 m3m_sm4[];
     constexpr int NT = 32 * JC;
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int nz = (ds + NT - 1) / NT;
-    const int grp = blockIdx.z / nz;
-    const int n0 = (blockIdx.z - grp * nz) * NT;
+    const int grp = (z_first + blockIdx.z) / nz;
+    const int n0 = ((z_first + blockIdx.z) - grp * nz) * NT;
     const int pb = grp * pg;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
@@ -572,25 +580,27 @@ __device__ __forceinline__ void m3m_chunk_state_tiles_body(
     }
 }
 
-#define DEFINE_M3M_CHUNK_STATE_TILES(NAME, TI)                                  \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ contrib,                                                \
-    const TI* __restrict__ proj, long long ld_proj,                             \
-    const float* __restrict__ bn, const float* __restrict__ coef,               \
-    const float* __restrict__ sn, const float* __restrict__ cs,                 \
-    const float* __restrict__ b_bias, const float* __restrict__ mimo_x,         \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int jc, int sl,  \
-    int pg                                                                      \
-) {                                                                             \
-    if (jc == 1)                                                                \
+#define DEFINE_M3M_CHUNK_STATE_TILES(NAME, TI)                                 \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ contrib,                                               \
+    const TI* __restrict__ proj, long long ld_proj,                            \
+    const float* __restrict__ bn, const float* __restrict__ coef,              \
+    const float* __restrict__ sn, const float* __restrict__ cs,                \
+    const float* __restrict__ b_bias, const float* __restrict__ mimo_x,        \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int jc, int sl, \
+    int pg,                                                                    \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
+) {                                                                            \
+    if (jc == 1)                                                               \
         m3m_chunk_state_tiles_body<1, TI>(contrib, proj, ld_proj, bn, coef, sn, \
-            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl, pg);         \
-    else if (jc == 2)                                                           \
+            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl, pg, y_first, z_first); \
+    else if (jc == 2)                                                          \
         m3m_chunk_state_tiles_body<2, TI>(contrib, proj, ld_proj, bn, coef, sn, \
-            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl, pg);         \
-    else                                                                        \
+            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl, pg, y_first, z_first); \
+    else                                                                       \
         m3m_chunk_state_tiles_body<4, TI>(contrib, proj, ld_proj, bn, coef, sn, \
-            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl, pg);         \
+            cs, b_bias, mimo_x, seq, nh, ng, hd, ds, rank, na, sl, pg, y_first, z_first); \
 }
 DEFINE_M3M_CHUNK_STATE_TILES(m3m_chunk_state_tiles, float)
 DEFINE_M3M_CHUNK_STATE_TILES(m3m_chunk_state_tiles_bf16, __nv_bfloat16)
@@ -607,11 +617,12 @@ extern "C" __global__ void m3m_state_pass(
     const float* __restrict__ coef, const float* __restrict__ e0,
     const float* __restrict__ kst, const float* __restrict__ vst,
     const float* __restrict__ mimo_x,
-    int batch, int seq, int nh, int hd, int ds, int rank
+    int batch, int seq, int nh, int hd, int ds, int rank,
+    int y_first /* this run's first y block */
 ) {
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bh = blockIdx.x;
-    const long long e = (long long)blockIdx.y * blockDim.x + threadIdx.x;
+    const long long e = (long long)(y_first + blockIdx.y) * blockDim.x + threadIdx.x;
     const long long pn = (long long)hd * ds;
     if (bh >= (long long)batch * nh || e >= pn) return;
     const long long b = bh / nh;
@@ -664,16 +675,18 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
     const float* __restrict__ D,
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
     const float* __restrict__ mimo_o,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt, int st, int pt
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt, int st, int pt,
+    int y_first, /* this run's first y block */
+    int z_first /* this run's first z block */
 ) {
     extern __shared__ float m3m_sm[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int nct = (hd + pt - 1) / pt;
-    const int p0 = (int)(blockIdx.z % nct) * pt;
+    const int p0 = (int)((z_first + blockIdx.z) % nct) * pt;
     const int pc = min(pt, hd - p0);
-    const int tile0 = (int)(blockIdx.z / nct) * tt;
+    const int tile0 = (int)((z_first + blockIdx.z) / nct) * tt;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -796,24 +809,26 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
     }
 }
 
-#define DEFINE_M3M_CHUNK_SCAN(NAME, TI)                                         \
-extern "C" __global__ void NAME(                                                \
-    TI* __restrict__ out, float* __restrict__ y_out,                            \
-    const TI* __restrict__ proj, long long ld_proj,                             \
-    const float* __restrict__ bn, const float* __restrict__ cn,                 \
-    const float* __restrict__ coef,                                             \
-    const float* __restrict__ sn, const float* __restrict__ cs,                 \
-    const float* __restrict__ enter,                                            \
-    const float* __restrict__ b_bias, const float* __restrict__ c_bias,         \
-    const float* __restrict__ D,                                                \
-    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,         \
-    const float* __restrict__ mimo_o,                                           \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt, int st,  \
-    int pt                                                                      \
-) {                                                                             \
-    m3m_chunk_scan_body<TI, MIMO_RANK>(out, y_out, proj, ld_proj, bn, cn,       \
-        coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq,    \
-        nh, ng, hd, ds, rank, na, tt, st, pt);                                  \
+#define DEFINE_M3M_CHUNK_SCAN(NAME, TI)                                        \
+extern "C" __global__ void NAME(                                               \
+    TI* __restrict__ out, float* __restrict__ y_out,                           \
+    const TI* __restrict__ proj, long long ld_proj,                            \
+    const float* __restrict__ bn, const float* __restrict__ cn,                \
+    const float* __restrict__ coef,                                            \
+    const float* __restrict__ sn, const float* __restrict__ cs,                \
+    const float* __restrict__ enter,                                           \
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,        \
+    const float* __restrict__ D,                                               \
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,        \
+    const float* __restrict__ mimo_o,                                          \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt, int st, \
+    int pt,                                                                    \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
+) {                                                                            \
+    m3m_chunk_scan_body<TI, MIMO_RANK>(out, y_out, proj, ld_proj, bn, cn,      \
+        coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq,   \
+        nh, ng, hd, ds, rank, na, tt, st, pt, y_first, z_first);               \
 }
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan, float)
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan_bf16, __nv_bfloat16)
@@ -851,7 +866,8 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     const float* __restrict__ D,
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
     const float* __restrict__ mimo_o,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tq, int kt, int nk
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tq, int kt, int nk,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float4 m3m_sm4[];
     constexpr int PP = 32 * JP;
@@ -859,7 +875,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     constexpr int KCS = KC + 4;
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
@@ -1081,33 +1097,34 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     }
 }
 
-#define DEFINE_M3M_CHUNK_SCAN_TILES(NAME, TI)                                   \
-extern "C" __global__ void __launch_bounds__(512) NAME(                         \
-    TI* __restrict__ out, float* __restrict__ y_out,                            \
-    const TI* __restrict__ proj, long long ld_proj,                             \
-    const float* __restrict__ bn, const float* __restrict__ cn,                 \
-    const float* __restrict__ coef,                                             \
-    const float* __restrict__ sn, const float* __restrict__ cs,                 \
-    const float* __restrict__ enter,                                            \
-    const float* __restrict__ b_bias, const float* __restrict__ c_bias,         \
-    const float* __restrict__ D,                                                \
-    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,         \
-    const float* __restrict__ mimo_o,                                           \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tq, int kt,  \
-    int nk                                                                      \
-) {                                                                             \
-    if (hd <= 32)                                                               \
-        m3m_chunk_scan_tiles_body<TI, 1>(out, y_out, proj, ld_proj, bn, cn,     \
-            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,     \
-            seq, nh, ng, hd, ds, rank, na, tq, kt, nk);                         \
-    else if (hd <= 64)                                                          \
-        m3m_chunk_scan_tiles_body<TI, 2>(out, y_out, proj, ld_proj, bn, cn,     \
-            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,     \
-            seq, nh, ng, hd, ds, rank, na, tq, kt, nk);                         \
-    else                                                                        \
-        m3m_chunk_scan_tiles_body<TI, 4>(out, y_out, proj, ld_proj, bn, cn,     \
-            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,     \
-            seq, nh, ng, hd, ds, rank, na, tq, kt, nk);                         \
+#define DEFINE_M3M_CHUNK_SCAN_TILES(NAME, TI)                                  \
+extern "C" __global__ void __launch_bounds__(512) NAME(                        \
+    TI* __restrict__ out, float* __restrict__ y_out,                           \
+    const TI* __restrict__ proj, long long ld_proj,                            \
+    const float* __restrict__ bn, const float* __restrict__ cn,                \
+    const float* __restrict__ coef,                                            \
+    const float* __restrict__ sn, const float* __restrict__ cs,                \
+    const float* __restrict__ enter,                                           \
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,        \
+    const float* __restrict__ D,                                               \
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,        \
+    const float* __restrict__ mimo_o,                                          \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tq, int kt, \
+    int nk,                                                                    \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    if (hd <= 32)                                                              \
+        m3m_chunk_scan_tiles_body<TI, 1>(out, y_out, proj, ld_proj, bn, cn,    \
+            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,    \
+            seq, nh, ng, hd, ds, rank, na, tq, kt, nk, y_first);               \
+    else if (hd <= 64)                                                         \
+        m3m_chunk_scan_tiles_body<TI, 2>(out, y_out, proj, ld_proj, bn, cn,    \
+            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,    \
+            seq, nh, ng, hd, ds, rank, na, tq, kt, nk, y_first);               \
+    else                                                                       \
+        m3m_chunk_scan_tiles_body<TI, 4>(out, y_out, proj, ld_proj, bn, cn,    \
+            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,    \
+            seq, nh, ng, hd, ds, rank, na, tq, kt, nk, y_first);               \
 }
 DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles, float)
 DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_bf16, __nv_bfloat16)
@@ -1122,10 +1139,11 @@ __device__ __forceinline__ void m3m_writeback_body(
     const float* __restrict__ bn,
     const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ b_bias,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na
+    int seq, int nh, int ng, int hd, int ds, int rank, int na,
+    int y_first /* this run's first y block */
 ) {
     const int b = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int g = h / (nh / ng);
     const int di = nh * hd;
     const int rgn = rank * ng * ds;
@@ -1147,17 +1165,18 @@ __device__ __forceinline__ void m3m_writeback_body(
     }
 }
 
-#define DEFINE_M3M_WRITEBACK(NAME, TI)                                          \
-extern "C" __global__ void NAME(                                                \
-    float* __restrict__ kst, float* __restrict__ vst,                           \
-    const TI* __restrict__ proj, long long ld_proj,                             \
-    const float* __restrict__ bn,                                               \
-    const float* __restrict__ sn, const float* __restrict__ cs,                 \
-    const float* __restrict__ b_bias,                                           \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na                   \
-) {                                                                             \
-    m3m_writeback_body<TI>(kst, vst, proj, ld_proj, bn, sn, cs, b_bias, seq,    \
-        nh, ng, hd, ds, rank, na);                                              \
+#define DEFINE_M3M_WRITEBACK(NAME, TI)                                         \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ kst, float* __restrict__ vst,                          \
+    const TI* __restrict__ proj, long long ld_proj,                            \
+    const float* __restrict__ bn,                                              \
+    const float* __restrict__ sn, const float* __restrict__ cs,                \
+    const float* __restrict__ b_bias,                                          \
+    int seq, int nh, int ng, int hd, int ds, int rank, int na,                 \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
+    m3m_writeback_body<TI>(kst, vst, proj, ld_proj, bn, sn, cs, b_bias, seq,   \
+        nh, ng, hd, ds, rank, na, y_first);                                    \
 }
 DEFINE_M3M_WRITEBACK(m3m_writeback, float)
 DEFINE_M3M_WRITEBACK(m3m_writeback_bf16, __nv_bfloat16)

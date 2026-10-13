@@ -140,11 +140,12 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
     const float* __restrict__ mimo_o,
     int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,
-    float a_floor, const float* __restrict__ dy_in
+    float a_floor, const float* __restrict__ dy_in,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float mb_sm[];
     const int b = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int tid = threadIdx.x;
     const int g = h / (nh / ng);
     const int di = nh * hd;
@@ -763,32 +764,33 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
     }
 }
 
-#define DEFINE_MIMO_SCAN_BWD(NAME, T)                                           \
-extern "C" __global__ void NAME(                                                \
-    T* __restrict__ d_proj, long long ld_proj,                                  \
-    float* __restrict__ d_bn_h, float* __restrict__ d_cn_h,                     \
-    float* __restrict__ d_tanh_h,                                               \
-    float* __restrict__ g_x, float* __restrict__ g_z, float* __restrict__ g_o,  \
-    float* __restrict__ g_d, float* __restrict__ g_dtb,                         \
-    float* __restrict__ g_bb, float* __restrict__ g_cb,                         \
-    float* __restrict__ rec,                                                    \
-    const T* __restrict__ d_o,                                                  \
-    const T* __restrict__ proj,                                                 \
-    const float* __restrict__ bn, const float* __restrict__ cn,                 \
-    const float* __restrict__ ck_ssm, const float* __restrict__ ck_k,           \
-    const float* __restrict__ ck_v, const float* __restrict__ ck_ang,           \
-    const float* __restrict__ dt_bias,                                          \
-    const float* __restrict__ b_bias, const float* __restrict__ c_bias,         \
-    const float* __restrict__ D,                                                \
-    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,         \
-    const float* __restrict__ mimo_o,                                           \
-    int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,      \
-    float a_floor, const float* __restrict__ dy_in                              \
-) {                                                                             \
+#define DEFINE_MIMO_SCAN_BWD(NAME, T)                                          \
+extern "C" __global__ void NAME(                                               \
+    T* __restrict__ d_proj, long long ld_proj,                                 \
+    float* __restrict__ d_bn_h, float* __restrict__ d_cn_h,                    \
+    float* __restrict__ d_tanh_h,                                              \
+    float* __restrict__ g_x, float* __restrict__ g_z, float* __restrict__ g_o, \
+    float* __restrict__ g_d, float* __restrict__ g_dtb,                        \
+    float* __restrict__ g_bb, float* __restrict__ g_cb,                        \
+    float* __restrict__ rec,                                                   \
+    const T* __restrict__ d_o,                                                 \
+    const T* __restrict__ proj,                                                \
+    const float* __restrict__ bn, const float* __restrict__ cn,                \
+    const float* __restrict__ ck_ssm, const float* __restrict__ ck_k,          \
+    const float* __restrict__ ck_v, const float* __restrict__ ck_ang,          \
+    const float* __restrict__ dt_bias,                                         \
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,        \
+    const float* __restrict__ D,                                               \
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,        \
+    const float* __restrict__ mimo_o,                                          \
+    int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,     \
+    float a_floor, const float* __restrict__ dy_in,                            \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
     mimo_scan_bwd_body<T, MIMO_RANK>(d_proj, ld_proj, d_bn_h, d_cn_h,          \
-        d_tanh_h, g_x, g_z, g_o, g_d, g_dtb, g_bb, g_cb, rec, d_o, proj, bn,    \
-        cn, ck_ssm, ck_k, ck_v, ck_ang, dt_bias, b_bias, c_bias, D, mimo_x,     \
-        mimo_z, mimo_o, seq, stride, nh, ng, hd, ds, rank, na, a_floor, dy_in); \
+        d_tanh_h, g_x, g_z, g_o, g_d, g_dtb, g_bb, g_cb, rec, d_o, proj, bn,   \
+        cn, ck_ssm, ck_k, ck_v, ck_ang, dt_bias, b_bias, c_bias, D, mimo_x,    \
+        mimo_z, mimo_o, seq, stride, nh, ng, hd, ds, rank, na, a_floor, dy_in, y_first); \
 }
 DEFINE_MIMO_SCAN_BWD(mimo_scan_bwd, float)
 DEFINE_MIMO_SCAN_BWD(mimo_scan_bwd_bf16, __nv_bfloat16)
@@ -918,11 +920,12 @@ __device__ __forceinline__ void mimo_scan_bwd_global_body(
     const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
     const float* __restrict__ mimo_o,
     int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,
-    float a_floor, const float* __restrict__ dy_in
+    float a_floor, const float* __restrict__ dy_in,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float mb_sm[];
     const int b = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int tid = threadIdx.x;
     const int nt = blockDim.x;
     const int g = h / (nh / ng);
@@ -1362,36 +1365,37 @@ __device__ __forceinline__ void mimo_scan_bwd_global_body(
     }
 }
 
-#define DEFINE_MIMO_SCAN_BWD_GLOBAL(NAME, T)                                    \
-extern "C" __global__ void NAME(                                                \
-    T* __restrict__ d_proj, long long ld_proj,                                  \
-    float* __restrict__ d_bn_h, float* __restrict__ d_cn_h,                     \
-    float* __restrict__ d_tanh_h,                                               \
-    float* __restrict__ g_x, float* __restrict__ g_z, float* __restrict__ g_o,  \
-    float* __restrict__ g_d, float* __restrict__ g_dtb,                         \
-    float* __restrict__ g_bb, float* __restrict__ g_cb,                         \
-    float* __restrict__ rec,                                                    \
-    float* __restrict__ ds_glob, float* __restrict__ kg_glob,                   \
-    float* __restrict__ pr_glob, float* __restrict__ ch,                        \
-    float* __restrict__ leaves,                                                 \
-    const T* __restrict__ d_o,                                                  \
-    const T* __restrict__ proj,                                                 \
-    const float* __restrict__ bn, const float* __restrict__ cn,                 \
-    const float* __restrict__ ck_ssm, const float* __restrict__ ck_k,           \
-    const float* __restrict__ ck_v, const float* __restrict__ ck_ang,           \
-    const float* __restrict__ dt_bias,                                          \
-    const float* __restrict__ b_bias, const float* __restrict__ c_bias,         \
-    const float* __restrict__ D,                                                \
-    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,         \
-    const float* __restrict__ mimo_o,                                           \
-    int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,      \
-    float a_floor, const float* __restrict__ dy_in                              \
-) {                                                                             \
+#define DEFINE_MIMO_SCAN_BWD_GLOBAL(NAME, T)                                   \
+extern "C" __global__ void NAME(                                               \
+    T* __restrict__ d_proj, long long ld_proj,                                 \
+    float* __restrict__ d_bn_h, float* __restrict__ d_cn_h,                    \
+    float* __restrict__ d_tanh_h,                                              \
+    float* __restrict__ g_x, float* __restrict__ g_z, float* __restrict__ g_o, \
+    float* __restrict__ g_d, float* __restrict__ g_dtb,                        \
+    float* __restrict__ g_bb, float* __restrict__ g_cb,                        \
+    float* __restrict__ rec,                                                   \
+    float* __restrict__ ds_glob, float* __restrict__ kg_glob,                  \
+    float* __restrict__ pr_glob, float* __restrict__ ch,                       \
+    float* __restrict__ leaves,                                                \
+    const T* __restrict__ d_o,                                                 \
+    const T* __restrict__ proj,                                                \
+    const float* __restrict__ bn, const float* __restrict__ cn,                \
+    const float* __restrict__ ck_ssm, const float* __restrict__ ck_k,          \
+    const float* __restrict__ ck_v, const float* __restrict__ ck_ang,          \
+    const float* __restrict__ dt_bias,                                         \
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,        \
+    const float* __restrict__ D,                                               \
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,        \
+    const float* __restrict__ mimo_o,                                          \
+    int seq, int stride, int nh, int ng, int hd, int ds, int rank, int na,     \
+    float a_floor, const float* __restrict__ dy_in,                            \
+    int y_first /* this run's first y block */                                 \
+) {                                                                            \
     mimo_scan_bwd_global_body<T, MIMO_RANK>(d_proj, ld_proj, d_bn_h, d_cn_h,   \
         d_tanh_h, g_x, g_z, g_o, g_d, g_dtb, g_bb, g_cb, rec, ds_glob, kg_glob, \
-        pr_glob, ch, leaves, d_o, proj, bn, cn, ck_ssm, ck_k, ck_v, ck_ang,     \
-        dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, stride, nh,    \
-        ng, hd, ds, rank, na, a_floor, dy_in);                                  \
+        pr_glob, ch, leaves, d_o, proj, bn, cn, ck_ssm, ck_k, ck_v, ck_ang,    \
+        dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, stride, nh,   \
+        ng, hd, ds, rank, na, a_floor, dy_in, y_first);                        \
 }
 DEFINE_MIMO_SCAN_BWD_GLOBAL(mimo_scan_bwd_global, float)
 DEFINE_MIMO_SCAN_BWD_GLOBAL(mimo_scan_bwd_global_bf16, __nv_bfloat16)

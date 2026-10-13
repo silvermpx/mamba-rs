@@ -18,6 +18,7 @@ use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba2::gpu::kernels::{
     CHUNK, CHUNK_SCAN_TT, Mamba2Kernels, bmm_smem_bytes, chunk_scan_tiles_smem_bytes,
     chunk_state_geom,
@@ -84,6 +85,26 @@ fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
         };
     }
     unsafe { b.launch(cfg) }.expect("launch");
+}
+
+/// [`launch`] once per run of the grid's y axis, each run's first block
+/// appended as the kernel's last argument.
+fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut run = args.to_vec();
+        run.push(Arg::I(y_first));
+        launch(ctx, f, cfg, &run);
+    }
+}
+
+/// [`launch`] once per run of the grid's y and z axes, each run's first y
+/// and z blocks appended.
+fn launch_yz_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+    for (y_first, z_first, cfg) in yz_runs(cfg) {
+        let mut run = args.to_vec();
+        run.extend([Arg::I(y_first), Arg::I(z_first)]);
+        launch(ctx, f, cfg, &run);
+    }
 }
 
 fn assert_bits(what: &str, a: &[u32], b: &[u32]) {
@@ -163,7 +184,7 @@ fn run_chunks(
     k: &Mamba2Kernels,
     w: Win,
     p: ChunkPtrs,
-    scan: (&CudaFunction, LaunchConfig),
+    scan: (&CudaFunction, LaunchConfig, bool),
 ) {
     let (ld, b_col, c_col) = (w.ld() as i64, w.di() as i32, (w.di() + w.ng * w.ds) as i32);
     let (nh, ng, hd, ds) = (
@@ -173,7 +194,7 @@ fn run_chunks(
         Arg::I(w.ds as i32),
     );
     let [b, t] = ints(w);
-    launch(
+    launch_runs(
         ctx,
         k.bmm_chunk.get(mamba_rs::gpu::dtype::WeightDtype::F32),
         LaunchConfig {
@@ -194,7 +215,7 @@ fn run_chunks(
         ],
     );
     let (cols, pt, smem) = chunk_state_geom(w.hd, w.ds, k.smem_optin);
-    launch(
+    launch_runs(
         ctx,
         k.chunk_state.get(mamba_rs::gpu::dtype::WeightDtype::F32),
         LaunchConfig {
@@ -222,7 +243,8 @@ fn run_chunks(
             Arg::I(pt as i32),
         ],
     );
-    launch(
+    let scan_launch = if scan.2 { launch_yz_runs } else { launch_runs };
+    scan_launch(
         ctx,
         scan.0,
         scan.1,
@@ -353,7 +375,7 @@ fn the_chunk_kernels_give_chunks_past_i32_max_their_own_bits() {
         ..w
     };
     for (name, scan, cfg) in scans(w) {
-        run_chunks(&ctx, &k, w, all, (scan, cfg));
+        run_chunks(&ctx, &k, w, all, (scan, cfg, name == "plain"));
         for &c in &firsts {
             let own_cb = zeros(&ctx, window * w.ng * w.pairs());
             let own_states = zeros(&ctx, window * w.nh * w.hd * w.ds);
@@ -368,7 +390,7 @@ fn the_chunk_kernels_give_chunks_past_i32_max_their_own_bits() {
                 .into_iter()
                 .find(|(n, _, _)| *n == name)
                 .expect("scan");
-            run_chunks(&ctx, &k, own, p, (own_scan.1, own_scan.2));
+            run_chunks(&ctx, &k, own, p, (own_scan.1, own_scan.2, name == "plain"));
             let past = all.past(w, c);
             for (what, a, b, n) in [
                 ("C B", past.cb, p.cb, window * w.ng * w.pairs()),
@@ -420,7 +442,7 @@ fn the_state_passing_gives_a_sequence_past_i32_max_its_own_bits() {
     let ssm = floats(&ctx, &det(w.b * w.nh * pn, 81, 0.5));
     let acs = floats(&ctx, &decay_sums(w, 82));
     let pass = |w: Win, states: u64, ssm: u64, acs: u64| {
-        launch(
+        launch_runs(
             &ctx,
             &k.state_passing,
             LaunchConfig {
