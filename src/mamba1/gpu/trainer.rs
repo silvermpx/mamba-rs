@@ -55,7 +55,7 @@ use crate::gpu::adamw::{
 };
 use crate::gpu::blas::{TypedPtr, gpu_gemm_ex_backward_dx_typed};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer, GradSlice};
-use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
+use crate::gpu::context::{GemmMode, GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
@@ -80,6 +80,7 @@ use crate::mamba1::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_train_mixed,
 };
 use crate::mamba1::gpu::weights::GpuMambaTrainLayerWeights;
+use crate::matrix::{Path, Request};
 
 /// Recompute `a_neg = -exp(a_log)` from the current master weights after
 /// AdamW has updated `a_log`. Writes to BOTH `a_neg_all` (consumed by the
@@ -245,14 +246,15 @@ impl MambaGpuTrainer {
         // input projection rows d_model wide.
         cfg.validate()?;
         cpu_weights.validate(&cfg, session.input_dim)?;
-        // An empty window survives every size check but launches empty
-        // grids, which surface as an opaque error on a neighbouring kernel.
-        if session.seq_len == 0 {
-            return Err("seq_len must be > 0".into());
-        }
-        if session.batch == 0 {
-            return Err("batch must be > 0".into());
-        }
+        let request = Request {
+            path: Path::Train,
+            batch: session.batch,
+            seq_len: session.seq_len,
+            scan: cfg.scan_mode,
+            precision: dtype,
+            gemm: gemm_mode_or_env(mode)?,
+        };
+        crate::mamba1::route::admit(&cfg, session.input_dim, &request)?;
         let inner = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => TrainerInner::F32(Box::new(
                 MambaTrainerF32::new_full(gpu_ordinal, cpu_weights, cfg, session, mode, dtype)?,

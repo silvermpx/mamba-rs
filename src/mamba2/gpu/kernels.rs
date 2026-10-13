@@ -537,3 +537,20 @@ pub fn seq_bwd_global_geom(hd: usize, ds: usize, max_threads: usize, cap: usize)
         smem: if shared_ds { tile + rest } else { rest },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No validated state is refused for shared memory on a supported part:
+    /// one channel of the largest state fits the 99 KB every part since
+    /// Ampere lets a block opt in to.
+    #[test]
+    fn one_channel_of_every_validated_state_fits_a_supported_part() {
+        for ds in 1..=1024 {
+            for hd in [1, 7, 32, 33, 4096] {
+                assert!(step_rows(hd, ds, 99 * 1024).is_some(), "hd {hd} ds {ds}");
+            }
+        }
+    }
+}

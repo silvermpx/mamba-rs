@@ -1,61 +1,8 @@
 use cudarc::cublas::sys::{cublasComputeType_t, cublasMath_t};
 
-/// Selects the GEMM implementation and cuBLAS numeric policy for a GPU context.
-///
-/// [`GemmMode::Deterministic`] is the default. It selects the context's own
-/// fixed-reduction-order GEMM kernels. The two cuBLAS modes select vendor
-/// GEMMs with either ordinary or pedantic f32 compute. The storage precision
-/// ([`WeightDtype`](crate::gpu::dtype::WeightDtype)) is the other
-/// setting and is independent of the mode.
-///
-/// Use [`crate::gpu::context::GpuCtx::new_with_mode`] when the mode
-/// is known at construction, or
-/// [`crate::gpu::context::GpuCtx::set_gemm_mode`] to change an
-/// existing usable context.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum GemmMode {
-    /// Use the context's own deterministic GEMM kernels: the same bits run
-    /// to run, eager or graph. `WeightDtype::F32` multiplies exactly;
-    /// `WeightDtype::Tf32` takes the deterministic TF32 kernels where one is
-    /// measured.
-    #[default]
-    Deterministic,
-    /// Use cuBLAS with ordinary f32 GemmEx compute and TF32 handle math.
-    ///
-    /// This permits vendor TF32 and other cuBLAS optimizations for every f32
-    /// product, whichever of `F32` and `Tf32` the weights were stored as.
-    CublasFast,
-    /// Use cuBLAS with pedantic f32 GemmEx compute and pedantic handle math.
-    CublasPedantic,
-}
+pub use crate::precision::GemmMode;
 
 impl GemmMode {
-    /// Parse a value accepted by `MAMBA_RS_GEMM_MODE`.
-    ///
-    /// ASCII whitespace around the value is ignored. The remaining text must
-    /// be exactly `deterministic`, `cublas-fast`, or `cublas-pedantic`; names
-    /// are lowercase and case-sensitive.
-    pub fn parse_env_value(value: &str) -> Result<Self, String> {
-        match value.trim_ascii() {
-            "deterministic" => Ok(Self::Deterministic),
-            "cublas-fast" => Ok(Self::CublasFast),
-            "cublas-pedantic" => Ok(Self::CublasPedantic),
-            _ => Err(format!(
-                "MAMBA_RS_GEMM_MODE={value:?} is not a recognized GEMM mode \
-                 (use deterministic, cublas-fast, or cublas-pedantic)"
-            )),
-        }
-    }
-
-    /// Return the canonical environment spelling for this mode.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Deterministic => "deterministic",
-            Self::CublasFast => "cublas-fast",
-            Self::CublasPedantic => "cublas-pedantic",
-        }
-    }
-
     pub(crate) const fn batch_invariant(self) -> bool {
         matches!(self, Self::Deterministic)
     }

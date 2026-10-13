@@ -6,20 +6,16 @@
 
 use cudarc::driver::LaunchConfig;
 
+use crate::matrix::INT_ARG_MAX;
+
 /// Standard block size for 1D element-wise kernels.
 const BLOCK_1D: u32 = 256;
 
-/// The largest value [`check_int_args`] lets a kernel take as an `int`:
-/// `i32::MAX` less the headroom kernels step past their bounds with. A loop
-/// counter strided by the block ends up to a block past its bound, and a
-/// time row is padded by a few elements, so a value right under `i32::MAX`
-/// would wrap them.
-const INT_ARG_MAX: usize = i32::MAX as usize - (1 << 16);
-
-/// Refuse a launch whose 32-bit kernel arguments would wrap. Each named value
-/// is a dimension, a row count or a row width a kernel takes as an `int`;
-/// element counts and offsets are 64-bit in the kernels that check with
-/// this, so the size of a tensor is bounded by memory alone.
+/// Refuse a launch whose 32-bit kernel arguments would wrap, past
+/// `INT_ARG_MAX`. Each named value is a dimension, a row count or a row
+/// width a kernel takes as an `int`; element counts and offsets are 64-bit
+/// in the kernels that check with this, so the size of a tensor is bounded
+/// by memory alone.
 pub fn check_int_args(args: &[(&str, usize)]) -> Result<(), String> {
     match args.iter().find(|(_, v)| *v > INT_ARG_MAX) {
         Some((name, v)) => Err(format!(

@@ -168,6 +168,12 @@
   `capture_graph` records the whole step, an accumulating micro-batch and
   the window's apply, and the calls replay them with the eager bits; in
   f16 an overflowing micro-batch skips its window on the device.
+- `matrix::Request` and each family's `route::admit` say on the host,
+  before anything is built, whether the GPU runs a request and with which
+  scan, or why not; every GPU engine and trainer asks it first.
+  `tests/matrix_census_host.rs` walks it over the configurations
+  `validate` accepts and lists the gaps it finds in
+  `qual/matrix_ledger.toml`.
 
 ### Changed
 

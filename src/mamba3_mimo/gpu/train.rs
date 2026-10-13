@@ -34,9 +34,7 @@ use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSession
 use crate::gpu::train_state::TrainerState;
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
-use super::inference::{
-    MimoChunkedPtrs, MimoExec, check_window_ints, launch_chunked_scan, row_pieces,
-};
+use super::inference::{MimoChunkedPtrs, MimoExec, launch_chunked_scan, row_pieces};
 use super::kernels::{
     CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, chunked_geom,
     scan_bwd_global_geom, scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
@@ -51,7 +49,7 @@ use crate::gpu::blas::{
     gpu_gemm_ex_backward_dx_typed, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw,
 };
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer, GradSlice};
-use crate::gpu::context::{GemmRole, GpuCtx};
+use crate::gpu::context::{GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
@@ -64,6 +62,7 @@ use crate::gpu::loss_scaler::{
 };
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::Mamba3MimoWeights;
+use crate::matrix::{Path, Request};
 
 /// A tensor's place in the flat buffers, in f32 elements.
 #[derive(Clone, Copy, Debug, Default)]
@@ -564,13 +563,18 @@ impl Mamba3MimoGpuTrainer {
             weight_decay,
         } = session;
         let dtype = opts.dtype;
+        w.validate(&cfg, input_dim)?;
+        let request = Request {
+            path: Path::Train,
+            batch,
+            seq_len,
+            scan: cfg.scan_mode,
+            precision: dtype,
+            gemm: gemm_mode_or_env(opts.mode)?,
+        };
+        crate::mamba3_mimo::route::admit(&cfg, input_dim, &request)?;
         let device = GpuDevice::new(opts.device)?;
         let device = &device;
-        w.validate(&cfg, input_dim)?;
-        if batch == 0 || seq_len == 0 {
-            return Err("a training window needs at least one sequence and one token".into());
-        }
-        check_window_ints(&cfg, input_dim, (batch, seq_len))?;
         let stride = stride.clamp(1, seq_len);
         let (hd, ds, rank, na) = (
             cfg.headdim,

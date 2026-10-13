@@ -12,6 +12,7 @@ pub mod config;
 pub mod cpu;
 #[cfg(feature = "cuda")]
 pub mod gpu;
+pub mod route;
 pub mod serialize;
 pub mod state;
 pub mod weights;

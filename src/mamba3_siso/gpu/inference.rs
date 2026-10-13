@@ -16,7 +16,7 @@ use super::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg};
 use super::weights::GpuMamba3WeightsInf;
 use crate::gpu::blas::gpu_gemm_f32_forward_ptrs;
 use crate::gpu::buffers::{DeviceKeep, GpuBuffer};
-use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
+use crate::gpu::context::{GemmMode, GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
 use crate::gpu::graph_capture::{
@@ -28,6 +28,7 @@ use crate::gpu::launch::y_runs;
 use crate::gpu::options::GpuOptions;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::Mamba3Weights;
+use crate::matrix::{Path, Request};
 use std::{cell::Cell, sync::Arc};
 
 mod prompt_graph;
@@ -352,10 +353,24 @@ fn step_index_width(batch: usize, cfg: &Mamba3Config) -> crate::gpu::launch::Ind
     ])
 }
 
-/// Refuse a decode batch past the 32-bit range the step kernels take their
-/// rows in: the sequences, and the B and C norm rows of every group.
-fn step_int_args(batch: usize, cfg: &Mamba3Config) -> Result<(), String> {
-    crate::gpu::launch::check_int_args(&[("batch", batch), ("batch*ngroups", batch * cfg.ngroups)])
+/// Asks [`crate::mamba3_siso::route::admit`] for decode steps of `batch`
+/// sequences, after the weights and their config pass.
+fn admit_decode(
+    cpu_weights: &Mamba3Weights,
+    (cfg, input_dim, batch): (&Mamba3Config, usize, usize),
+    (precision, mode): (WeightDtype, Option<GemmMode>),
+) -> Result<(), String> {
+    cpu_weights.validate(cfg, input_dim)?;
+    let request = Request {
+        path: Path::Decode,
+        batch,
+        seq_len: 1,
+        scan: cfg.scan_mode,
+        precision,
+        gemm: gemm_mode_or_env(mode)?,
+    };
+    crate::mamba3_siso::route::admit(cfg, input_dim, &request)?;
+    Ok(())
 }
 
 fn engine_ctx_and_kernels(
@@ -445,7 +460,7 @@ impl Mamba3GpuEngine {
         mode: Option<GemmMode>,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
-        step_int_args(batch, &cfg)?;
+        admit_decode(cpu_weights, (&cfg, input_dim, batch), (dtype, mode))?;
         let (ctx, kernels) = engine_ctx_and_kernels(device, &cfg, mode, dtype)?;
         let weights = GpuMamba3WeightsInf::from_cpu(&ctx.stream, cpu_weights, input_dim)?;
         Ok(Self::from_parts(
@@ -592,6 +607,21 @@ impl Mamba3GpuEngine {
     }
 
     /// Launch dimensions for a prompt window of `seq_len` on this engine.
+    /// Asks [`crate::mamba3_siso::route::admit`] for prompt windows of
+    /// `seq_len` tokens in `precision`.
+    fn admit_prefill(&self, seq_len: usize, precision: WeightDtype) -> Result<(), String> {
+        let request = Request {
+            path: Path::Prefill,
+            batch: self.batch,
+            seq_len,
+            scan: self.cfg.scan_mode,
+            precision,
+            gemm: self.ctx.gemm_mode(),
+        };
+        crate::mamba3_siso::route::admit(&self.cfg, self.input_dim, &request)?;
+        Ok(())
+    }
+
     fn prefill_dims(&self, seq_len: usize) -> super::state::GpuMamba3Dims {
         super::state::GpuMamba3Dims {
             batch: self.batch,
@@ -616,6 +646,7 @@ impl Mamba3GpuEngine {
     /// Allocate a prefill executor for a FIXED prompt length (scratch is
     /// shaped by `seq_len`; reuse it for windows of the same length).
     pub fn alloc_prefill(&self, seq_len: usize) -> Result<super::prefill::Mamba3Prefill, String> {
+        self.admit_prefill(seq_len, WeightDtype::F32)?;
         let mut prefill =
             super::prefill::Mamba3Prefill::new(&self.ctx.stream, &self.prefill_dims(seq_len))?;
         prefill.ensure_mlp(&self.ctx.stream, self.cfg.mlp_hidden())?;
@@ -1333,7 +1364,7 @@ impl Mamba3GpuEngineMixed {
         bulk_dtype: WeightDtype,
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
-        step_int_args(batch, &cfg)?;
+        admit_decode(cpu_weights, (&cfg, input_dim, batch), (bulk_dtype, mode))?;
         // The f32 engine's context, kernels and shapes without its weights:
         // every kernel here reads `mixed_weights`, whose f32 arena holds the
         // norms, biases and per-head coefficients.
@@ -1400,6 +1431,8 @@ impl Mamba3GpuEngineMixed {
     /// length: the prefill runs the trainer's bf16/f16 kernel chain
     /// against `mixed_weights`.
     pub fn alloc_prefill(&self, seq_len: usize) -> Result<super::prefill::Mamba3Prefill, String> {
+        self.engine
+            .admit_prefill(seq_len, self.mixed_weights.bulk_dtype)?;
         let mut prefill = super::prefill::Mamba3Prefill::new_with_dtype(
             &self.engine.ctx.stream,
             &self.engine.prefill_dims(seq_len),

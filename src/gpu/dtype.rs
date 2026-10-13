@@ -10,54 +10,9 @@
 
 use cudarc::cublas::sys as cublas_sys;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, Hash)]
-pub enum WeightDtype {
-    /// IEEE 754 single precision. Default. Largest memory footprint and
-    /// the safe choice for math sensitive to precision (full pre-training,
-    /// long-horizon RL). Every product is exact f32: one fused
-    /// multiply-add per step, in one fixed order.
-    #[default]
-    F32,
-    /// f32 storage with deterministic TF32 products. In the deterministic
-    /// GEMM mode each operand is rounded to TF32 once, the tensor cores
-    /// multiply, and the sums accumulate in f32 in a fixed order; the same
-    /// bits come back run to run, eager or graph. This is permission, not
-    /// a forced backend: a shape or board without a measured TF32 kernel
-    /// takes the exact f32 kernel. It is not the vendor's Fast TF32. Under
-    /// [`GemmMode::CublasFast`](crate::gpu::GemmMode::CublasFast)
-    /// the vendor's TF32 already applies to every f32 product; under
-    /// `CublasPedantic` the products are pedantic f32. Memory, buffers and
-    /// checkpoints are those of `F32`.
-    Tf32,
-    /// IEEE 754 half precision (`half::f16`). Tightest dynamic range —
-    /// requires the dynamic loss scaler in training to avoid gradient
-    /// underflow. ~2× memory savings and ~1.3× tok/s speedup at
-    /// inference vs f32 on Ada / Hopper.
-    F16,
-    /// Brain float 16 (`half::bf16`). Same exponent range as f32 with
-    /// reduced mantissa — no loss scaler needed in training. The
-    /// recommended default for mixed-precision: ~2× memory, ~1.3×
-    /// tok/s, no overflow regime to manage.
-    Bf16,
-}
+pub use crate::precision::WeightDtype;
 
 impl WeightDtype {
-    /// The dtype of the bytes in memory: `Tf32` is stored as `F32`.
-    pub fn storage(self) -> Self {
-        match self {
-            Self::Tf32 => Self::F32,
-            other => other,
-        }
-    }
-
-    /// Byte size of one element.
-    pub fn size_bytes(self) -> usize {
-        match self {
-            Self::F32 | Self::Tf32 => 4,
-            Self::F16 | Self::Bf16 => 2,
-        }
-    }
-
     /// cuBLAS/CUDA data type identifier for cublasGemmEx.
     pub fn cuda_data_type(self) -> cublas_sys::cudaDataType {
         match self {
@@ -108,24 +63,6 @@ impl WeightDtype {
         // the best Tensor Core kernel for bf16/f16 inputs.
         cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F
     }
-
-    /// Whether the bytes in memory are f32 (`F32` and `Tf32`).
-    pub fn is_f32(self) -> bool {
-        matches!(self, Self::F32 | Self::Tf32)
-    }
-
-    pub fn is_half(self) -> bool {
-        !self.is_f32()
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::F32 => "f32",
-            Self::Tf32 => "tf32",
-            Self::F16 => "f16",
-            Self::Bf16 => "bf16",
-        }
-    }
 }
 
 #[cfg(test)]
@@ -133,26 +70,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sizes() {
-        assert_eq!(WeightDtype::F32.size_bytes(), 4);
-        assert_eq!(WeightDtype::Tf32.size_bytes(), 4);
-        assert_eq!(WeightDtype::F16.size_bytes(), 2);
-        assert_eq!(WeightDtype::Bf16.size_bytes(), 2);
-    }
-
-    #[test]
-    fn is_half() {
-        assert!(!WeightDtype::F32.is_half());
-        assert!(!WeightDtype::Tf32.is_half());
-        assert!(WeightDtype::F16.is_half());
-        assert!(WeightDtype::Bf16.is_half());
-    }
-
-    #[test]
-    fn tf32_is_stored_as_f32() {
-        assert_eq!(WeightDtype::Tf32.storage(), WeightDtype::F32);
-        assert_eq!(WeightDtype::Bf16.storage(), WeightDtype::Bf16);
-        assert_eq!(WeightDtype::Tf32.as_str(), "tf32");
+    fn tf32_has_the_f32_data_type() {
         assert_eq!(
             WeightDtype::Tf32.cuda_data_type(),
             WeightDtype::F32.cuda_data_type()

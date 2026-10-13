@@ -71,9 +71,9 @@ pub struct GpuMambaDims {
     pub mamba_input_dim: usize,
     /// Number of stacked Mamba layers.
     pub n_layers: usize,
-    /// GPU SSM scan dispatch (Sequential / Parallel / Auto with the
-    /// T > PARALLEL_SCAN_THRESHOLD heuristic). d_state > 64 always forces
-    /// the parallel kernels regardless of mode (register-array limit).
+    /// GPU SSM scan dispatch: Sequential and Parallel as named at every
+    /// d_state, Auto as [`crate::config::ScanMode::use_parallel`] resolves
+    /// it.
     pub scan_mode: crate::config::ScanMode,
     /// RMSNorm epsilon (layer norms + norm_f). 1e-5 unless the checkpoint
     /// specifies otherwise (FalconMamba: 1e-6).
@@ -109,31 +109,20 @@ impl GpuMambaDims {
 
     /// Refuse dims whose 32-bit kernel arguments would wrap: the kernels
     /// index every tensor with 64 bits, but take the dimensions, the row
-    /// count of a window, its row widths (the in_proj row of two inner
-    /// widths, the t-major row of the parallel scan) and the conv tap
-    /// rows as `int`s.
+    /// count of a window and its row widths as `int`s, the list
+    /// [`crate::mamba1::route::admit`] checks.
     pub fn check_int_args(&self) -> Result<(), String> {
-        crate::gpu::launch::check_int_args(&[
-            ("batch", self.batch),
-            ("seq_len", self.seq_len),
-            (
-                "batch * seq_len rows",
-                self.batch.saturating_mul(self.seq_len),
-            ),
-            ("t-major row", self.seq_len.saturating_add(7)),
-            ("d_model", self.d_model),
-            ("input width", self.mamba_input_dim),
-            ("in_proj row", self.d_inner.saturating_mul(2)),
-            ("x_proj row", self.xdbl_dim),
-            (
-                "conv taps of all channels",
-                self.d_inner.saturating_mul(self.d_conv),
-            ),
-            (
-                "states of all channels",
-                self.d_inner.saturating_mul(self.d_state),
-            ),
-        ])
+        let widths = crate::mamba1::route::IntWidths {
+            batch: self.batch,
+            seq_len: self.seq_len,
+            d_model: self.d_model,
+            input_dim: self.mamba_input_dim,
+            d_inner: self.d_inner,
+            xdbl_dim: self.xdbl_dim,
+            d_conv: self.d_conv,
+            d_state: self.d_state,
+        };
+        crate::gpu::launch::check_int_args(&widths.args())
     }
 
     /// `B * T` — total number of (sample, timestep) pairs.
@@ -620,12 +609,9 @@ pub fn gpu_forward_mamba_layer(
             .map_err(|e| format!("gather_bc_cols fwd mamba: {:?}", e))?;
     }
 
-    // SSM burnin forward: use parallel prefix scan for long sequences,
-    // sequential kernel for short ones, at the automatic threshold.
-    // Both kernels have identical interfaces and produce identical results.
-    // EXCEPTION: sequential kernel silently fails for d_state > 64 (register
-    // array limit), so we force the parallel scan path which handles d_state
-    // up to MAX_DSTATE=256 via its outer loop.
+    // SSM burnin forward: the parallel prefix scan or the sequential
+    // kernel, as the scan mode resolves for this window and d_state. Both
+    // kernels have identical interfaces and produce identical results.
     {
         let b_i = b as i32;
         let t_i = t as i32;
@@ -1115,10 +1101,8 @@ pub fn gpu_forward_mamba_target_burnin(
             unsafe { builder.launch(grid_1d_wide(bt * ds)) }
                 .map_err(|e| format!("gather_bc_cols target L{layer_idx}: {:?}", e))?;
         }
-        // SSM burnin nosave: parallel scan for T > threshold, sequential otherwise.
-        // EXCEPTION: sequential kernel silently fails for d_state > 64 (register
-        // array limit), so we force the parallel scan path which handles d_state
-        // up to MAX_DSTATE=256 via its outer loop.
+        // SSM burnin nosave: the parallel or the sequential scan, as the
+        // scan mode resolves for this window and d_state.
         {
             let b_i = b as i32;
             let t_i = t as i32;

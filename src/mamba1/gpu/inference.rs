@@ -11,7 +11,7 @@ use super::weights::{
 };
 use crate::gpu::blas::{TypedPtr, gpu_gemm_forward_dispatch, gpu_gemm_typed_forward_raw};
 use crate::gpu::buffers::{DeviceKeep, DtypedBuf, GpuBuffer};
-use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
+use crate::gpu::context::{GemmMode, GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
@@ -26,6 +26,7 @@ use crate::gpu::launch::{
 use crate::gpu::options::GpuOptions;
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::weights::MambaWeights;
+use crate::matrix::{Path, Request};
 use cudarc::driver::PushKernelArg;
 use std::cell::Cell;
 use std::sync::Arc;
@@ -818,6 +819,26 @@ fn engine_ctx(
     }
 }
 
+/// Asks [`crate::mamba1::route::admit`] for decode steps of `batch`
+/// sequences, after the weights and their config pass.
+fn admit_decode(
+    cpu_weights: &MambaWeights,
+    (cfg, input_dim, batch): (&MambaConfig, usize, usize),
+    (precision, mode): (WeightDtype, Option<GemmMode>),
+) -> Result<(), String> {
+    cpu_weights.validate(cfg, input_dim)?;
+    let request = Request {
+        path: Path::Decode,
+        batch,
+        seq_len: 1,
+        scan: cfg.scan_mode,
+        precision,
+        gemm: gemm_mode_or_env(mode)?,
+    };
+    crate::mamba1::route::admit(cfg, input_dim, &request)?;
+    Ok(())
+}
+
 impl MambaGpuEngine {
     fn dims(&self, seq_len: usize) -> GpuMambaDims {
         GpuMambaDims {
@@ -901,6 +922,7 @@ impl MambaGpuEngine {
         mode: Option<GemmMode>,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
+        admit_decode(cpu_weights, (&cfg, input_dim, batch), (dtype, mode))?;
         let ctx = engine_ctx(device, &cfg, mode, dtype)?;
         let weights = GpuMambaWeights::from_cpu(&ctx.stream, cpu_weights, &cfg)?;
 
@@ -1639,6 +1661,7 @@ impl MambaGpuEngineMixed {
         bulk_dtype: WeightDtype,
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
+        admit_decode(cpu_weights, (&cfg, input_dim, batch), (bulk_dtype, mode))?;
         // The f32 engine's context and shapes without its weights: every
         // kernel here reads `mixed_weights` and the arena of -exp(a_log)
         // built from them below.
@@ -3079,6 +3102,7 @@ impl MambaGpuBackbone {
                 return Err("alloc_prefill_mixed_scratch: backbone is F32".to_string());
             }
         };
+        self.admit_prompt(seq_len)?;
         super::backward::GpuMambaTargetMixedScratch::new(
             self.stream(),
             &self.prompt_dims(seq_len),
@@ -3092,7 +3116,23 @@ impl MambaGpuBackbone {
         &self,
         seq_len: usize,
     ) -> Result<super::backward::GpuMambaTargetScratch, String> {
+        self.admit_prompt(seq_len)?;
         super::backward::GpuMambaTargetScratch::new(self.stream(), &self.prompt_dims(seq_len))
+    }
+
+    /// Asks [`crate::mamba1::route::admit`] for prompt windows of `seq_len`
+    /// tokens.
+    fn admit_prompt(&self, seq_len: usize) -> Result<(), String> {
+        let request = Request {
+            path: Path::Prefill,
+            batch: self.batch(),
+            seq_len,
+            scan: self.config().scan_mode,
+            precision: self.dtype(),
+            gemm: self.ctx().gemm_mode(),
+        };
+        crate::mamba1::route::admit(self.config(), self.input_dim(), &request)?;
+        Ok(())
     }
 
     /// The prefill shape of a prompt of `seq_len` tokens per sequence. The

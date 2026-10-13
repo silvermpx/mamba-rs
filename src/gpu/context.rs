@@ -136,6 +136,15 @@ fn gemm_mode_from_env(mode: Result<String, std::env::VarError>) -> Result<GemmMo
     }
 }
 
+/// The GEMM mode a context built with `mode` takes: `mode` itself, or the
+/// one `MAMBA_RS_GEMM_MODE` names when the caller named none.
+pub(crate) fn gemm_mode_or_env(mode: Option<GemmMode>) -> Result<GemmMode, String> {
+    match mode {
+        Some(mode) => Ok(mode),
+        None => gemm_mode_from_env(GemmEnvValues::read().mode),
+    }
+}
+
 fn resolve_gemm_env(values: GemmEnvValues, role: GemmRole) -> Result<ResolvedGemmEnv, String> {
     Ok(explicit_gemm_config(gemm_mode_from_env(values.mode)?, role))
 }

@@ -16,6 +16,9 @@
 //! The module needs no CUDA feature: a CPU caller can ask which kernels a
 //! model takes before building anything.
 
+use crate::mamba3_siso::config::Mamba3Config;
+use crate::matrix::{self, Path, Plan, Refusal, Request, Scan};
+
 /// The widest head the warp-shuffle kernels serve: one lane per head
 /// element in a single warp.
 pub const WARP_HEADDIM_MAX: usize = 32;
@@ -117,10 +120,102 @@ pub fn require_warp(headdim: usize, kernel: &str) -> Result<(), String> {
     }
 }
 
+/// The widths a SISO launch over windows of `seq_len` tokens of `batch`
+/// sequences takes as `int`s.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct IntWidths {
+    pub batch: usize,
+    pub seq_len: usize,
+    pub ngroups: usize,
+    pub d_model: usize,
+    pub input_dim: usize,
+    pub in_proj_dim: usize,
+    pub nheads: usize,
+    pub d_state: usize,
+    pub d_inner: usize,
+}
+
+impl IntWidths {
+    pub(crate) fn of(
+        cfg: &Mamba3Config,
+        input_dim: usize,
+        (batch, seq_len): (usize, usize),
+    ) -> Self {
+        Self {
+            batch,
+            seq_len,
+            ngroups: cfg.ngroups,
+            d_model: cfg.d_model,
+            input_dim,
+            in_proj_dim: cfg.in_proj_out_dim(),
+            nheads: cfg.nheads(),
+            d_state: cfg.d_state,
+            d_inner: cfg.d_inner(),
+        }
+    }
+
+    /// The values the window kernels take as `int`s: the batch, the
+    /// window, the rows they make, the B and C norm rows of every group,
+    /// and the row widths.
+    pub(crate) fn args(&self) -> [(&'static str, usize); 9] {
+        let rows = self.batch.saturating_mul(self.seq_len);
+        [
+            ("batch", self.batch),
+            ("seq_len", self.seq_len),
+            ("batch*seq_len", rows),
+            ("batch*seq_len*ngroups", rows.saturating_mul(self.ngroups)),
+            ("in_proj_dim", self.in_proj_dim),
+            ("d_model", self.d_model),
+            ("input width", self.input_dim),
+            ("nheads*d_state", self.nheads.saturating_mul(self.d_state)),
+            (
+                "nheads*headdim*d_state",
+                self.d_inner.saturating_mul(self.d_state),
+            ),
+        ]
+    }
+
+    /// The values the decode step takes as `int`s: the sequences, and the
+    /// B and C norm rows of every group.
+    pub(crate) fn step_args(&self) -> [(&'static str, usize); 2] {
+        [
+            ("batch", self.batch),
+            ("batch*ngroups", self.batch.saturating_mul(self.ngroups)),
+        ]
+    }
+}
+
+/// Whether and how the GPU runs `req` on a SISO model of `cfg` fed rows
+/// `input_dim` wide. `cfg` must pass [`Mamba3Config::validate`]; the
+/// request's scan mode stands in for the config's. A prompt window takes
+/// the chunked scan whatever the mode asks: the sequential prefill is not
+/// built yet, and the census lists the reroute.
+pub fn admit(cfg: &Mamba3Config, input_dim: usize, req: &Request) -> Result<Plan, Refusal> {
+    matrix::check_request(req)?;
+    let widths = IntWidths::of(cfg, input_dim, (req.batch, req.seq_len));
+    let scan = match req.path {
+        Path::Decode => {
+            matrix::int_args(&widths.step_args())?;
+            return Ok(Plan {
+                scan: Scan::Sequential,
+            });
+        }
+        Path::Prefill => Scan::Parallel,
+        Path::Train => Scan::of(
+            Mamba3Config {
+                scan_mode: req.scan,
+                ..*cfg
+            }
+            .train_use_parallel_scan(),
+        ),
+    };
+    matrix::int_args(&widths.args())?;
+    Ok(Plan { scan })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mamba3_siso::config::Mamba3Config;
 
     /// The official checkpoint shape runs on the block tier, its chunked
     /// training through the tiled backward.

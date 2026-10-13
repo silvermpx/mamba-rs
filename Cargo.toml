@@ -788,6 +788,10 @@ name = "cpu_trainer_api"
 path = "tests/cpu_trainer_api.rs"
 
 [[test]]
+name = "matrix_census_host"
+path = "tests/matrix_census_host.rs"
+
+[[test]]
 name = "cpu_gpu_trainer_parity"
 path = "tests/cpu_gpu_trainer_parity.rs"
 required-features = ["cuda"]

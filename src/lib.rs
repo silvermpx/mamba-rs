@@ -99,10 +99,12 @@ pub mod mamba1;
 pub mod mamba2;
 pub mod mamba3_mimo;
 pub mod mamba3_siso;
+pub mod matrix;
 pub mod mlp;
 pub mod module;
 pub mod ops;
 pub mod optim;
+pub mod precision;
 
 /// The 0.7 path of Mamba-1 and of the GPU engine, which 0.8 split into
 /// [`mamba1`] and `gpu`. It re-exports both, so code written for 0.7 still
@@ -186,6 +188,7 @@ pub use module::{Mamba2Backbone, Mamba3Backbone, Mamba3MimoBackbone, MambaBackbo
 pub use optim::{
     AdamWStateBlob, BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg, TrainerState,
 };
+pub use precision::{GemmMode, WeightDtype};
 // The host trainers of every family and the trait over them.
 pub use mamba1::cpu::trainer::MambaCpuTrainer;
 pub use mamba2::cpu::trainer::Mamba2CpuTrainer;
@@ -197,7 +200,7 @@ pub use module::{AnyCpuTrainer, CpuTrainer};
 // backbones and the trainers with the traits over them, and the language
 // model.
 #[cfg(feature = "cuda")]
-pub use gpu::{GemmMode, GpuOptions, WeightDtype};
+pub use gpu::GpuOptions;
 #[cfg(feature = "cuda")]
 pub use mamba1::gpu::{MambaGpuBackbone, MambaGpuTrainer};
 #[cfg(feature = "cuda")]

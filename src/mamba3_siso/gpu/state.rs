@@ -117,17 +117,18 @@ impl GpuMamba3Dims {
     /// 64-bit builds, which [`Self::index_width`] selects, so a tensor's size
     /// is bounded by memory alone.
     pub fn check_int_args(&self) -> Result<(), String> {
-        crate::gpu::launch::check_int_args(&[
-            ("batch", self.batch),
-            ("seq_len", self.seq_len),
-            ("batch*seq_len", self.bt()),
-            // The B and C norms launch a block per row of every group.
-            ("batch*seq_len*ngroups", self.bt() * self.ngroups),
-            ("in_proj_dim", self.in_proj_dim),
-            ("d_model", self.d_model),
-            ("nheads*d_state", self.nheads * self.d_state),
-            ("nheads*headdim*d_state", self.d_inner * self.d_state),
-        ])
+        let widths = crate::mamba3_siso::route::IntWidths {
+            batch: self.batch,
+            seq_len: self.seq_len,
+            ngroups: self.ngroups,
+            d_model: self.d_model,
+            input_dim: self.mamba_input_dim,
+            in_proj_dim: self.in_proj_dim,
+            nheads: self.nheads,
+            d_state: self.d_state,
+            d_inner: self.d_inner,
+        };
+        crate::gpu::launch::check_int_args(&widths.args())
     }
 
     /// The index width of every SISO launch at these dimensions: the int

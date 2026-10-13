@@ -838,4 +838,28 @@ mod tests {
         let g = chunked_geom((72, 24, 4), cap, true, ChunkThreads::uniform(1024)).unwrap();
         assert_eq!((g.state_tiles.2, g.dsloc_tiles.2), (72, 72));
     }
+    /// No validated head is refused for shared memory on a supported part:
+    /// within the 99 KB every part since Ampere lets a block opt in to, and
+    /// fewer threads than any kernel leaves a block, the recurrence fits a
+    /// tile of one channel and the chunked kernels a tile of every shape.
+    #[test]
+    fn every_validated_head_fits_a_supported_part() {
+        use crate::mamba3_mimo::config::{MAX_D_STATE, MAX_MIMO_RANK};
+        let cap = 99 * 1024;
+        for rank in 1..=MAX_MIMO_RANK {
+            for ds in 1..=MAX_D_STATE {
+                for hd in [1, 2, 31, 32, 33, 64, 128, 129, 1024, 4096] {
+                    for na in [0, ds / 4, ds / 2] {
+                        let scan = scan_geom((hd, ds, rank, na), cap, 128);
+                        assert!(scan.is_some(), "scan hd {hd} ds {ds} rank {rank} na {na}");
+                    }
+                    for training in [false, true] {
+                        let geom =
+                            chunked_geom((hd, ds, rank), cap, training, ChunkThreads::uniform(32));
+                        assert!(geom.is_some(), "chunked hd {hd} ds {ds} rank {rank}");
+                    }
+                }
+            }
+        }
+    }
 }

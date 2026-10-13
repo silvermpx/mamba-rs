@@ -19,7 +19,7 @@ use crate::gpu::adamw::{
 };
 use crate::gpu::blas::{TypedPtr, gpu_gemm_ex_backward_dx_typed};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer};
-use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
+use crate::gpu::context::{GemmMode, GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
@@ -55,6 +55,7 @@ use crate::mamba3_siso::gpu::training_graph::{
 use crate::mamba3_siso::gpu::weights::{GpuMamba3Grads, GpuMamba3Weights};
 use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 use crate::mamba3_siso::weights::Mamba3Weights;
+use crate::matrix::{Path, Request};
 
 /// CPU-side snapshot of the four carried Mamba-3 recurrences (SSM, K,
 /// V, RoPE angle), layer after layer and within a layer sequence after
@@ -176,12 +177,15 @@ impl Mamba3GpuTrainer {
         // projection takes rows d_model wide.
         cfg.validate()?;
         cpu_weights.validate(&cfg, session.input_dim)?;
-        // The kernels' 32-bit arguments are checked when the window's dims
-        // are built (`GpuMamba3Dims::check_int_args`); its tensors take the
-        // 64-bit builds past that range.
-        if session.batch == 0 || session.seq_len == 0 {
-            return Err("a training window needs at least one sequence and one token".into());
-        }
+        let request = Request {
+            path: Path::Train,
+            batch: session.batch,
+            seq_len: session.seq_len,
+            scan: cfg.scan_mode,
+            precision: dtype,
+            gemm: gemm_mode_or_env(mode)?,
+        };
+        crate::mamba3_siso::route::admit(&cfg, session.input_dim, &request)?;
         let inner = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => Trainer3Inner::F32(Box::new(
                 Mamba3TrainerF32::new_full(gpu_ordinal, cpu_weights, cfg, session, mode, dtype)?,

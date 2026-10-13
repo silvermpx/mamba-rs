@@ -14,7 +14,7 @@ use super::kernels::{CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunked_ge
 use crate::config::ScanMode;
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer};
-use crate::gpu::context::{GemmMode, GemmRole, GpuCtx};
+use crate::gpu::context::{GemmMode, GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
@@ -23,9 +23,10 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{check_int_args, grid_1d_cover, grid_norm, launch_elems, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_norm, launch_elems, y_runs, yz_runs};
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
+use crate::matrix::{Path, Request};
 
 struct GpuMimoLayer {
     norm_weight: GpuBuffer,
@@ -224,7 +225,15 @@ impl Mamba3MimoGpuEngine {
         (dtype, mode): (WeightDtype, Option<GemmMode>),
     ) -> Result<Self, String> {
         w.validate(&cfg, input_dim)?;
-        check_window_ints(&cfg, input_dim, (batch, 1))?;
+        let request = Request {
+            path: Path::Decode,
+            batch,
+            seq_len: 1,
+            scan: cfg.scan_mode,
+            precision: dtype,
+            gemm: gemm_mode_or_env(mode)?,
+        };
+        crate::mamba3_mimo::route::admit(&cfg, input_dim, &request)?;
         let act = match dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => WeightDtype::F32,
             half => half,
@@ -397,10 +406,19 @@ impl Mamba3MimoGpuEngine {
     /// decode steps.
     pub fn alloc_window(&self, seq_len: usize) -> Result<Mamba3MimoGpuWindow, String> {
         let c = &self.cfg;
-        if seq_len == 0 || self.batch == 0 {
-            return Err("a window needs at least one row".into());
-        }
-        check_window_ints(c, self.input_dim, (self.batch, seq_len))?;
+        let request = Request {
+            path: if seq_len == 1 {
+                Path::Decode
+            } else {
+                Path::Prefill
+            },
+            batch: self.batch,
+            seq_len,
+            scan: c.scan_mode,
+            precision: self.act,
+            gemm: self.ctx.gemm_mode(),
+        };
+        crate::mamba3_mimo::route::admit(c, self.input_dim, &request)?;
         let rows = self.batch * seq_len;
         let s = &self.ctx.stream;
         let z = |n: usize| GpuBuffer::zeros(s, n.max(1));
@@ -974,38 +992,6 @@ pub(crate) fn row_pieces(
     (0..rows)
         .step_by(step)
         .map(move |first| (first, step.min(rows - first)))
-}
-
-/// The values the MIMO kernels take as `int` over windows of `seq_len`
-/// tokens of `batch` sequences: the batch, the window, its rows, the widest
-/// row, which bounds every column offset and width the kernels take, and
-/// the heads of every sequence, one block each on a grid's x axis. Element
-/// counts and offsets are 64-bit, so a window is bounded by memory alone
-/// past these.
-pub(crate) fn check_window_ints(
-    cfg: &Mamba3MimoConfig,
-    input_dim: usize,
-    (batch, seq_len): (usize, usize),
-) -> Result<(), String> {
-    let widest = [
-        input_dim,
-        cfg.in_proj_out_dim(),
-        cfg.bc_width(),
-        cfg.mimo_rank * cfg.d_inner(),
-        2 * cfg.mlp_hidden(),
-        cfg.d_model,
-    ]
-    .into_iter()
-    .max()
-    .unwrap_or(0);
-    check_int_args(&[
-        ("batch", batch),
-        ("seq_len", seq_len),
-        ("rows", batch.saturating_mul(seq_len)),
-        ("widest row", widest),
-        // The state passes launch a block per (sequence, head) on x.
-        ("batch*heads", batch.saturating_mul(cfg.nheads())),
-    ])
 }
 
 /// The context, module, shape and activation dtype a MIMO launch needs,

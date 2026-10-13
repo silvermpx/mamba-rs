@@ -1,0 +1,11 @@
+# The matrix census's gaps: requests on configurations `validate` accepts
+# that no GPU kernel serves, or that run another scan than the one they
+# name. Each row is `"<family> | <kind> | <predicate>" = <cells>`, the
+# cells of the census grid it covers (tests/matrix_census_host.rs). Every
+# row is a defect the kernel work removes; the census fails on a gap
+# without a row, on a row whose count differs from the census, and on a
+# row whose gap is gone. A refusal the 32-bit kernel arguments impose is
+# a capacity, not a gap, and has no row.
+
+[gaps]
+"mamba3_siso | reroute | prefill Sequential runs Parallel" = 39888
