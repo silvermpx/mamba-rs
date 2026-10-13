@@ -12,6 +12,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::y_runs;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::prefill::{Mamba3PrefillScratch, forward_mamba3_backbone_prefill};
@@ -165,14 +166,17 @@ fn m3_step_block_matches_warp_bits() {
                             d.cached_ptr(),
                         ];
                         let dims = [batch, nh, hd, ds].map(|v| v as i32);
-                        let mut bld = ctx.stream.launch_builder(kernel);
-                        for ptr in &ptrs {
-                            bld.arg(ptr);
+                        for (y_first, cfg) in y_runs(cfg) {
+                            let mut bld = ctx.stream.launch_builder(kernel);
+                            for ptr in &ptrs {
+                                bld.arg(ptr);
+                            }
+                            for dim in &dims {
+                                bld.arg(dim);
+                            }
+                            bld.arg(&y_first);
+                            unsafe { bld.launch(cfg) }.unwrap();
                         }
-                        for dim in &dims {
-                            bld.arg(dim);
-                        }
-                        unsafe { bld.launch(cfg) }.unwrap();
                         ctx.stream.synchronize().unwrap();
                         ys[slot].push(download_typed(&ctx, &y));
                     }

@@ -24,6 +24,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
+use crate::gpu::launch::y_runs;
 use crate::gpu::options::GpuOptions;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::Mamba3Weights;
@@ -930,46 +931,52 @@ impl Mamba3GpuEngine {
             let ssm_ptr = state.ssm_state.inner_at(ssm_off);
             let k_ptr = state.k_state.inner_at(k_off);
             let v_ptr = state.v_state.inner_at(v_off);
-            let mut builder = self.ctx.stream.launch_builder(kernel);
-            // CUDA signature: ssm_state, k_state, v_state, y, ...
-            builder.arg(&ssm_ptr);
-            builder.arg(&k_ptr);
-            builder.arg(&v_ptr);
-            builder.arg(scratch.y.inner());
-            builder.arg(scratch.x.inner());
-            builder.arg(scratch.k_cur.inner());
-            builder.arg(scratch.q_cur.inner());
-            // The step computes its own coefficients from dt, a_val and trap.
-            builder.arg(scratch.dt.inner());
-            builder.arg(scratch.a_val.inner());
-            builder.arg(scratch.trap.inner());
-            builder.arg(lw.d_param.inner());
-            builder.arg(&b_i);
-            builder.arg(&nh_i);
-            builder.arg(&hd_i);
-            builder.arg(&ds_i);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F6 m3_step_fwd: {e:?}"))?;
+            for (y_first, cfg) in y_runs(grid) {
+                let mut builder = self.ctx.stream.launch_builder(kernel);
+                // CUDA signature: ssm_state, k_state, v_state, y, ...
+                builder.arg(&ssm_ptr);
+                builder.arg(&k_ptr);
+                builder.arg(&v_ptr);
+                builder.arg(scratch.y.inner());
+                builder.arg(scratch.x.inner());
+                builder.arg(scratch.k_cur.inner());
+                builder.arg(scratch.q_cur.inner());
+                // The step computes its own coefficients from dt, a_val and trap.
+                builder.arg(scratch.dt.inner());
+                builder.arg(scratch.a_val.inner());
+                builder.arg(scratch.trap.inner());
+                builder.arg(lw.d_param.inner());
+                builder.arg(&b_i);
+                builder.arg(&nh_i);
+                builder.arg(&hd_i);
+                builder.arg(&ds_i);
+                builder.arg(&y_first);
+                unsafe { builder.launch(cfg) }.map_err(|e| format!("F6 m3_step_fwd: {e:?}"))?;
+            }
         }
 
         // F7: Output gating
         if self.cfg.is_outproj_norm {
             let grid = super::kernels::gated_norm_cfg(b, di, self.cfg.headdim);
-            let mut builder = self
-                .ctx
-                .stream
-                .launch_builder(self.kernels.rmsnorm_gated_fwd.get(width));
-            builder.arg(scratch.gated.inner());
-            builder.arg(scratch.gated_rms_buf.inner()); // rms_vals (rstd per group)
-            builder.arg(scratch.y.inner());
-            builder.arg(scratch.z.inner());
-            builder.arg(lw.norm_gate_weight.inner());
-            builder.arg(&b_i);
-            builder.arg(&di_i);
-            builder.arg(&hd_i);
-            let eps_g5: f32 = self.cfg.rms_norm_eps;
-            builder.arg(&eps_g5);
-            builder.arg(&di_i);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F7 rmsnorm_gated: {e:?}"))?;
+            for (y_first, cfg) in y_runs(grid) {
+                let mut builder = self
+                    .ctx
+                    .stream
+                    .launch_builder(self.kernels.rmsnorm_gated_fwd.get(width));
+                builder.arg(scratch.gated.inner());
+                builder.arg(scratch.gated_rms_buf.inner()); // rms_vals (rstd per group)
+                builder.arg(scratch.y.inner());
+                builder.arg(scratch.z.inner());
+                builder.arg(lw.norm_gate_weight.inner());
+                builder.arg(&b_i);
+                builder.arg(&di_i);
+                builder.arg(&hd_i);
+                let eps_g5: f32 = self.cfg.rms_norm_eps;
+                builder.arg(&eps_g5);
+                builder.arg(&di_i);
+                builder.arg(&y_first);
+                unsafe { builder.launch(cfg) }.map_err(|e| format!("F7 rmsnorm_gated: {e:?}"))?;
+            }
         } else {
             let n = b * di;
             let n_i = crate::gpu::launch::WidthCount::new(n, width)?;
@@ -1724,58 +1731,65 @@ impl Mamba3GpuEngineMixed {
                 let ssm_ptr = state.ssm_state.inner_at(ssm_off);
                 let kst_ptr = state.k_state.inner_at(k_off);
                 let vst_ptr = state.v_state.inner_at(v_off);
-                let mut bld = engine.ctx.stream.launch_builder(kernel);
-                let y_ptr = scratch.y.cached_ptr();
-                let x_ptr = scratch.x.cached_ptr();
-                let kc_ptr = scratch.k_cur.cached_ptr();
-                let qc_ptr = scratch.q_cur.cached_ptr();
-                bld.arg(&ssm_ptr);
-                bld.arg(&kst_ptr);
-                bld.arg(&vst_ptr);
-                bld.arg(&y_ptr);
-                bld.arg(&x_ptr);
-                bld.arg(&kc_ptr);
-                bld.arg(&qc_ptr);
-                // The step computes its own coefficients from dt, a_val and trap.
-                let dt_ptr = scratch.dt.cached_ptr();
-                let av_ptr = scratch.a_val.cached_ptr();
-                let tr_ptr = scratch.trap.cached_ptr();
-                let dp_ptr = lw.d_param.ptr();
-                bld.arg(&dt_ptr);
-                bld.arg(&av_ptr);
-                bld.arg(&tr_ptr);
-                bld.arg(&dp_ptr);
-                bld.arg(&b_i);
-                bld.arg(&nh_i);
-                bld.arg(&hd_i);
-                bld.arg(&ds_i);
-                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F6 step_fwd: {e:?}"))?;
+                for (y_first, cfg) in y_runs(grid) {
+                    let mut bld = engine.ctx.stream.launch_builder(kernel);
+                    let y_ptr = scratch.y.cached_ptr();
+                    let x_ptr = scratch.x.cached_ptr();
+                    let kc_ptr = scratch.k_cur.cached_ptr();
+                    let qc_ptr = scratch.q_cur.cached_ptr();
+                    bld.arg(&ssm_ptr);
+                    bld.arg(&kst_ptr);
+                    bld.arg(&vst_ptr);
+                    bld.arg(&y_ptr);
+                    bld.arg(&x_ptr);
+                    bld.arg(&kc_ptr);
+                    bld.arg(&qc_ptr);
+                    // The step computes its own coefficients from dt, a_val and trap.
+                    let dt_ptr = scratch.dt.cached_ptr();
+                    let av_ptr = scratch.a_val.cached_ptr();
+                    let tr_ptr = scratch.trap.cached_ptr();
+                    let dp_ptr = lw.d_param.ptr();
+                    bld.arg(&dt_ptr);
+                    bld.arg(&av_ptr);
+                    bld.arg(&tr_ptr);
+                    bld.arg(&dp_ptr);
+                    bld.arg(&b_i);
+                    bld.arg(&nh_i);
+                    bld.arg(&hd_i);
+                    bld.arg(&ds_i);
+                    bld.arg(&y_first);
+                    unsafe { bld.launch(cfg) }.map_err(|e| format!("M3 F6 step_fwd: {e:?}"))?;
+                }
             }
 
             // F7: output gating (typed).
             if cfg.is_outproj_norm {
                 let grid = super::kernels::gated_norm_cfg(b, di, cfg.headdim);
-                let mut bld = engine
-                    .ctx
-                    .stream
-                    .launch_builder(k.rmsnorm_gated_fwd_typed.get(width).get(dt));
-                let gated_ptr = scratch.gated.cached_ptr();
-                let gr_ptr = scratch.gated_rms_buf.cached_ptr();
-                let y_ptr = scratch.y.cached_ptr();
-                let z_ptr = scratch.z.cached_ptr();
-                let nw_ptr = lw.norm_gate_weight.ptr();
-                bld.arg(&gated_ptr);
-                bld.arg(&gr_ptr);
-                bld.arg(&y_ptr);
-                bld.arg(&z_ptr);
-                bld.arg(&nw_ptr);
-                bld.arg(&b_i);
-                bld.arg(&di_i);
-                bld.arg(&hd_i);
-                let eps_g5: f32 = engine.cfg.rms_norm_eps;
-                bld.arg(&eps_g5);
-                bld.arg(&di_i);
-                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F7 rmsnorm_gated: {e:?}"))?;
+                for (y_first, cfg) in y_runs(grid) {
+                    let mut bld = engine
+                        .ctx
+                        .stream
+                        .launch_builder(k.rmsnorm_gated_fwd_typed.get(width).get(dt));
+                    let gated_ptr = scratch.gated.cached_ptr();
+                    let gr_ptr = scratch.gated_rms_buf.cached_ptr();
+                    let y_ptr = scratch.y.cached_ptr();
+                    let z_ptr = scratch.z.cached_ptr();
+                    let nw_ptr = lw.norm_gate_weight.ptr();
+                    bld.arg(&gated_ptr);
+                    bld.arg(&gr_ptr);
+                    bld.arg(&y_ptr);
+                    bld.arg(&z_ptr);
+                    bld.arg(&nw_ptr);
+                    bld.arg(&b_i);
+                    bld.arg(&di_i);
+                    bld.arg(&hd_i);
+                    let eps_g5: f32 = engine.cfg.rms_norm_eps;
+                    bld.arg(&eps_g5);
+                    bld.arg(&di_i);
+                    bld.arg(&y_first);
+                    unsafe { bld.launch(cfg) }
+                        .map_err(|e| format!("M3 F7 rmsnorm_gated: {e:?}"))?;
+                }
             } else {
                 let n = b * di;
                 let n_i = crate::gpu::launch::WidthCount::new(n, width)?;

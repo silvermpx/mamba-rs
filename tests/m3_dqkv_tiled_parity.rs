@@ -19,6 +19,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::yz_runs;
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use mamba_rs::mamba3_siso::route::{
     CHUNKED_BACKWARD_SMEM_MAX, chunked_backward_smem_bytes, chunked_backward_tiled_smem_bytes,
@@ -205,28 +206,32 @@ fn state_terms_reference(
     inp: &Inputs,
 ) -> GpuBuffer {
     let out = GpuBuffer::zeros(&ctx.stream, B * s.nc() * NH * s.hd * s.ds).unwrap();
-    let mut b = ctx
-        .stream
-        .launch_builder(m3k.m3_dqkv_state_terms_typed.i32.get(dtype));
-    let ptrs = [
-        out.cached_ptr(),
-        inp.q.cached_ptr(),
-        inp.da_cs.cached_ptr(),
-        inp.d_o.cached_ptr(),
-    ];
-    for p in &ptrs {
-        b.arg(p);
-    }
-    let dims = s.dims();
-    for d in &dims {
-        b.arg(d);
-    }
     let cfg = LaunchConfig {
         grid_dim: (NH as u32, B as u32, s.nc() as u32),
         block_dim: (s.hd as u32, 4, 1),
         shared_mem_bytes: ((CS * s.ds + CS * s.hd + CS) * 4) as u32,
     };
-    unsafe { b.launch(cfg) }.unwrap();
+    for (y_first, z_first, cfg) in yz_runs(cfg) {
+        let mut b = ctx
+            .stream
+            .launch_builder(m3k.m3_dqkv_state_terms_typed.i32.get(dtype));
+        let ptrs = [
+            out.cached_ptr(),
+            inp.q.cached_ptr(),
+            inp.da_cs.cached_ptr(),
+            inp.d_o.cached_ptr(),
+        ];
+        for p in &ptrs {
+            b.arg(p);
+        }
+        let dims = s.dims();
+        for d in &dims {
+            b.arg(d);
+        }
+        b.arg(&y_first);
+        b.arg(&z_first);
+        unsafe { b.launch(cfg) }.unwrap();
+    }
     out
 }
 
@@ -238,28 +243,32 @@ fn state_terms_tiled(
     inp: &Inputs,
 ) -> GpuBuffer {
     let out = GpuBuffer::zeros(&ctx.stream, B * s.nc() * NH * s.hd * s.ds).unwrap();
-    let mut b = ctx
-        .stream
-        .launch_builder(m3k.m3_dqkv_state_terms_tiled.get(dtype));
-    let ptrs = [
-        out.cached_ptr(),
-        inp.q.cached_ptr(),
-        inp.da_cs.cached_ptr(),
-        inp.d_o.cached_ptr(),
-    ];
-    for p in &ptrs {
-        b.arg(p);
-    }
-    let dims = s.dims();
-    for d in &dims {
-        b.arg(d);
-    }
     let cfg = LaunchConfig {
         grid_dim: (NH as u32, B as u32, s.nc() as u32),
         block_dim: (256, 1, 1),
         shared_mem_bytes: 0,
     };
-    unsafe { b.launch(cfg) }.unwrap();
+    for (y_first, z_first, cfg) in yz_runs(cfg) {
+        let mut b = ctx
+            .stream
+            .launch_builder(m3k.m3_dqkv_state_terms_tiled.get(dtype));
+        let ptrs = [
+            out.cached_ptr(),
+            inp.q.cached_ptr(),
+            inp.da_cs.cached_ptr(),
+            inp.d_o.cached_ptr(),
+        ];
+        for p in &ptrs {
+            b.arg(p);
+        }
+        let dims = s.dims();
+        for d in &dims {
+            b.arg(d);
+        }
+        b.arg(&y_first);
+        b.arg(&z_first);
+        unsafe { b.launch(cfg) }.unwrap();
+    }
     out
 }
 
@@ -305,37 +314,41 @@ fn dqkv_warp(
         legacy
     };
     assert!(smem <= CHUNKED_BACKWARD_SMEM_MAX, "{s:?} pairs {pairs}");
-    let mut b = ctx.stream.launch_builder(m3k.m3_dqkv_typed.i32.get(dtype));
-    let outs = out.ptrs();
-    let mut ptrs = outs.to_vec();
-    ptrs.extend([
-        inp.q.cached_ptr(),
-        inp.k.cached_ptr(),
-        inp.v.cached_ptr(),
-        inp.da_cs.cached_ptr(),
-        inp.da_cs_sum.cached_ptr(),
-        inp.qk.cached_ptr(),
-        inp.states.cached_ptr(),
-        inp.d_o.cached_ptr(),
-        inp.d_param.cached_ptr(),
-        enter.cached_ptr(),
-    ]);
-    for p in &ptrs {
-        b.arg(p);
-    }
-    let dims = s.dims();
-    for d in &dims {
-        b.arg(d);
-    }
-    let pairs_i = i32::from(pairs);
-    b.arg(&pairs_i);
     let t_split = 16.min(1024 / s.hd).max(1) as u32;
     let cfg = LaunchConfig {
         grid_dim: (NH as u32, B as u32, s.nc() as u32),
         block_dim: (s.hd as u32, t_split, 1),
         shared_mem_bytes: smem as u32,
     };
-    unsafe { b.launch(cfg) }.unwrap();
+    for (y_first, z_first, cfg) in yz_runs(cfg) {
+        let mut b = ctx.stream.launch_builder(m3k.m3_dqkv_typed.i32.get(dtype));
+        let outs = out.ptrs();
+        let mut ptrs = outs.to_vec();
+        ptrs.extend([
+            inp.q.cached_ptr(),
+            inp.k.cached_ptr(),
+            inp.v.cached_ptr(),
+            inp.da_cs.cached_ptr(),
+            inp.da_cs_sum.cached_ptr(),
+            inp.qk.cached_ptr(),
+            inp.states.cached_ptr(),
+            inp.d_o.cached_ptr(),
+            inp.d_param.cached_ptr(),
+            enter.cached_ptr(),
+        ]);
+        for p in &ptrs {
+            b.arg(p);
+        }
+        let dims = s.dims();
+        for d in &dims {
+            b.arg(d);
+        }
+        let pairs_i = i32::from(pairs);
+        b.arg(&pairs_i);
+        b.arg(&y_first);
+        b.arg(&z_first);
+        unsafe { b.launch(cfg) }.unwrap();
+    }
     out
 }
 
@@ -365,37 +378,41 @@ fn dqkv_tiled(
     unsafe { c.launch(blocks(rows)) }.unwrap();
 
     let out = Outputs::new(ctx, s);
-    let mut b = ctx.stream.launch_builder(m3k.m3_dqkv_tiled.get(dtype));
-    let outs = out.ptrs();
-    let mut ptrs = outs.to_vec();
-    ptrs.extend([
-        inp.q.cached_ptr(),
-        inp.k.cached_ptr(),
-        inp.v.cached_ptr(),
-        inp.da_cs.cached_ptr(),
-        inp.da_cs_sum.cached_ptr(),
-        inp.qk.cached_ptr(),
-        inp.states.cached_ptr(),
-        inp.d_o.cached_ptr(),
-        inp.d_param.cached_ptr(),
-        enter.cached_ptr(),
-        chain.cached_ptr(),
-    ]);
-    for p in &ptrs {
-        b.arg(p);
-    }
-    let dims = s.dims();
-    for d in &dims {
-        b.arg(d);
-    }
-    let tile_i = tile as i32;
-    b.arg(&tile_i);
     let cfg = LaunchConfig {
         grid_dim: (NH as u32, B as u32, s.nc() as u32),
         block_dim: (256, 1, 1),
         shared_mem_bytes: chunked_backward_tiled_smem_bytes(tile) as u32,
     };
-    unsafe { b.launch(cfg) }.unwrap();
+    for (y_first, z_first, cfg) in yz_runs(cfg) {
+        let mut b = ctx.stream.launch_builder(m3k.m3_dqkv_tiled.get(dtype));
+        let outs = out.ptrs();
+        let mut ptrs = outs.to_vec();
+        ptrs.extend([
+            inp.q.cached_ptr(),
+            inp.k.cached_ptr(),
+            inp.v.cached_ptr(),
+            inp.da_cs.cached_ptr(),
+            inp.da_cs_sum.cached_ptr(),
+            inp.qk.cached_ptr(),
+            inp.states.cached_ptr(),
+            inp.d_o.cached_ptr(),
+            inp.d_param.cached_ptr(),
+            enter.cached_ptr(),
+            chain.cached_ptr(),
+        ]);
+        for p in &ptrs {
+            b.arg(p);
+        }
+        let dims = s.dims();
+        for d in &dims {
+            b.arg(d);
+        }
+        let tile_i = tile as i32;
+        b.arg(&tile_i);
+        b.arg(&y_first);
+        b.arg(&z_first);
+        unsafe { b.launch(cfg) }.unwrap();
+    }
     out
 }
 

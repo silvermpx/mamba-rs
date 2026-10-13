@@ -27,7 +27,7 @@ use cudarc::driver::{CudaStream, PushKernelArg};
 use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_norm};
+use crate::gpu::launch::{grid_1d_cover, grid_norm, y_runs, yz_runs};
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::kernels::bcnorm_fwd_bc_cfg;
 use crate::mamba3_siso::gpu::state::{CHUNK_SIZE, GpuMamba3StateBufs, M3Exec, Mamba3LayerPtrs};
@@ -592,47 +592,55 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 block_dim: (block_x, 1, 1),
                 shared_mem_bytes: 0,
             };
-            let mut bld = ctx.stream.launch_builder(m3k.m3_da_cumsum.get(width));
-            bld.arg(acts.da_cumsum_saved.inner_mut());
-            bld.arg(adt_temp_scratch.inner());
-            bld.arg(&b_i);
-            bld.arg(&t_i);
-            bld.arg(&nh_i);
-            bld.arg(&cs);
-            unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F6 K2 da_cumsum: {e:?}"))?;
+            for (y_first, z_first, cfg) in yz_runs(cfg) {
+                let mut bld = ctx.stream.launch_builder(m3k.m3_da_cumsum.get(width));
+                bld.arg(acts.da_cumsum_saved.inner_mut());
+                bld.arg(adt_temp_scratch.inner());
+                bld.arg(&b_i);
+                bld.arg(&t_i);
+                bld.arg(&nh_i);
+                bld.arg(&cs);
+                bld.arg(&y_first);
+                bld.arg(&z_first);
+                unsafe { bld.launch(cfg) }
+                    .map_err(|e| format!("m3_mixed F6 K2 da_cumsum: {e:?}"))?;
+            }
         }
 
         // K1+K2+K3 fused (decay cumsum + preprocess + chunk_state) when the
         // shape allows: K_scaled crosses the seam in shared memory instead
         // of L2.
         if let Some(fcfg) = fused {
-            let mut bld = ctx
-                .stream
-                .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(width).get(dtype));
-            let ks = acts.k_scaled_saved.cached_ptr();
-            let kp = acts.k.cached_ptr();
-            let qp = acts.q.cached_ptr();
-            let xp = acts.x.cached_ptr();
-            bld.arg(&ks);
-            bld.arg(acts.qk_dot_saved.inner_mut());
-            bld.arg(acts.scale_saved.inner_mut());
-            bld.arg(acts.gamma_saved.inner_mut());
-            bld.arg(acts.chunk_states_saved.inner_mut());
-            bld.arg(&kp);
-            bld.arg(&qp);
-            bld.arg(acts.dt.inner());
-            bld.arg(acts.trap.inner());
-            bld.arg(&xp);
-            bld.arg(adt_temp_scratch.inner());
-            bld.arg(acts.da_cumsum_saved.inner_mut());
-            bld.arg(&b_i);
-            bld.arg(&t_i);
-            bld.arg(&nh_i);
-            bld.arg(&hd_i);
-            bld.arg(&ds_i);
-            bld.arg(&cs);
-            unsafe { bld.launch(fcfg) }
-                .map_err(|e| format!("m3_mixed F6 fused pre+state: {e:?}"))?;
+            for (y_first, cfg) in y_runs(fcfg) {
+                let mut bld = ctx
+                    .stream
+                    .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(width).get(dtype));
+                let ks = acts.k_scaled_saved.cached_ptr();
+                let kp = acts.k.cached_ptr();
+                let qp = acts.q.cached_ptr();
+                let xp = acts.x.cached_ptr();
+                bld.arg(&ks);
+                bld.arg(acts.qk_dot_saved.inner_mut());
+                bld.arg(acts.scale_saved.inner_mut());
+                bld.arg(acts.gamma_saved.inner_mut());
+                bld.arg(acts.chunk_states_saved.inner_mut());
+                bld.arg(&kp);
+                bld.arg(&qp);
+                bld.arg(acts.dt.inner());
+                bld.arg(acts.trap.inner());
+                bld.arg(&xp);
+                bld.arg(adt_temp_scratch.inner());
+                bld.arg(acts.da_cumsum_saved.inner_mut());
+                bld.arg(&b_i);
+                bld.arg(&t_i);
+                bld.arg(&nh_i);
+                bld.arg(&hd_i);
+                bld.arg(&ds_i);
+                bld.arg(&cs);
+                bld.arg(&y_first);
+                unsafe { bld.launch(cfg) }
+                    .map_err(|e| format!("m3_mixed F6 fused pre+state: {e:?}"))?;
+            }
         } else {
             // K1: m3_preprocess_chunks_typed — typed K/Q + f32 DT/trap →
             // typed K_scaled (acts.k_scaled_saved) + f32 qk_dot/scale/gamma
@@ -643,27 +651,30 @@ pub fn gpu_forward_mamba3_layer_mixed(
                     block_dim: (cs as u32, 1, 1),
                     shared_mem_bytes: 0,
                 };
-                let mut bld = ctx
-                    .stream
-                    .launch_builder(m3k.m3_preprocess_chunks_typed.get(width).get(dtype));
-                let ks = acts.k_scaled_saved.cached_ptr();
-                let kp = acts.k.cached_ptr();
-                let qp = acts.q.cached_ptr();
-                bld.arg(&ks);
-                bld.arg(acts.qk_dot_saved.inner_mut());
-                bld.arg(acts.scale_saved.inner_mut());
-                bld.arg(acts.gamma_saved.inner_mut());
-                bld.arg(&kp);
-                bld.arg(&qp);
-                bld.arg(acts.dt.inner());
-                bld.arg(acts.trap.inner());
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&nh_i);
-                bld.arg(&ds_i);
-                bld.arg(&cs);
-                unsafe { bld.launch(cfg) }
-                    .map_err(|e| format!("m3_mixed F6 K1 preprocess: {e:?}"))?;
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut bld = ctx
+                        .stream
+                        .launch_builder(m3k.m3_preprocess_chunks_typed.get(width).get(dtype));
+                    let ks = acts.k_scaled_saved.cached_ptr();
+                    let kp = acts.k.cached_ptr();
+                    let qp = acts.q.cached_ptr();
+                    bld.arg(&ks);
+                    bld.arg(acts.qk_dot_saved.inner_mut());
+                    bld.arg(acts.scale_saved.inner_mut());
+                    bld.arg(acts.gamma_saved.inner_mut());
+                    bld.arg(&kp);
+                    bld.arg(&qp);
+                    bld.arg(acts.dt.inner());
+                    bld.arg(acts.trap.inner());
+                    bld.arg(&b_i);
+                    bld.arg(&t_i);
+                    bld.arg(&nh_i);
+                    bld.arg(&ds_i);
+                    bld.arg(&cs);
+                    bld.arg(&y_first);
+                    unsafe { bld.launch(cfg) }
+                        .map_err(|e| format!("m3_mixed F6 K1 preprocess: {e:?}"))?;
+                }
             }
 
             // K3: m3_chunk_state_fwd_typed — typed x + typed K_scaled →
@@ -679,23 +690,26 @@ pub fn gpu_forward_mamba3_layer_mixed(
                     dims.chunk_size(),
                     *m3k.chunk_tile_threads.get(width),
                 );
-                let mut bld = ctx
-                    .stream
-                    .launch_builder(m3k.m3_chunk_state_fwd_typed.get(width).get(dtype));
-                let xp = acts.x.cached_ptr();
-                let ks = acts.k_scaled_saved.cached_ptr();
-                bld.arg(acts.chunk_states_saved.inner_mut());
-                bld.arg(&xp);
-                bld.arg(&ks);
-                bld.arg(acts.da_cumsum_saved.inner());
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&nh_i);
-                bld.arg(&hd_i);
-                bld.arg(&ds_i);
-                bld.arg(&cs);
-                unsafe { bld.launch(cfg) }
-                    .map_err(|e| format!("m3_mixed F6 K3 chunk_state_fwd: {e:?}"))?;
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut bld = ctx
+                        .stream
+                        .launch_builder(m3k.m3_chunk_state_fwd_typed.get(width).get(dtype));
+                    let xp = acts.x.cached_ptr();
+                    let ks = acts.k_scaled_saved.cached_ptr();
+                    bld.arg(acts.chunk_states_saved.inner_mut());
+                    bld.arg(&xp);
+                    bld.arg(&ks);
+                    bld.arg(acts.da_cumsum_saved.inner());
+                    bld.arg(&b_i);
+                    bld.arg(&t_i);
+                    bld.arg(&nh_i);
+                    bld.arg(&hd_i);
+                    bld.arg(&ds_i);
+                    bld.arg(&cs);
+                    bld.arg(&y_first);
+                    unsafe { bld.launch(cfg) }
+                        .map_err(|e| format!("m3_mixed F6 K3 chunk_state_fwd: {e:?}"))?;
+                }
             }
         }
         // K4: the inter-chunk state pass and the window-final writeback in
@@ -706,32 +720,36 @@ pub fn gpu_forward_mamba3_layer_mixed(
         {
             let nc_i = nc as i32;
             let cfg = super::kernels::state_pass_fused_cfg(dims.batch, nh, hd, ds);
-            let mut bld = ctx
-                .stream
-                .launch_builder(m3k.m3_state_pass_fused_typed.get(width).get(dtype));
-            let seed_null: crate::mamba3_siso::gpu::state::CUptr = 0;
-            let kp = acts.k.cached_ptr();
-            let xp = acts.x.cached_ptr();
-            bld.arg(acts.chunk_states_saved.inner_mut());
-            bld.arg(&ssm_state);
-            bld.arg(&k_state);
-            bld.arg(&v_state);
-            bld.arg(&seed_null);
-            bld.arg(&k_state);
-            bld.arg(&v_state);
-            bld.arg(acts.dt.inner());
-            bld.arg(acts.trap.inner());
-            bld.arg(acts.da_cumsum_saved.inner());
-            bld.arg(&kp);
-            bld.arg(&xp);
-            bld.arg(&b_i);
-            bld.arg(&nc_i);
-            bld.arg(&nh_i);
-            bld.arg(&hd_i);
-            bld.arg(&ds_i);
-            bld.arg(&cs);
-            bld.arg(&t_i);
-            unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F6 K4 state_pass: {e:?}"))?;
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut bld = ctx
+                    .stream
+                    .launch_builder(m3k.m3_state_pass_fused_typed.get(width).get(dtype));
+                let seed_null: crate::mamba3_siso::gpu::state::CUptr = 0;
+                let kp = acts.k.cached_ptr();
+                let xp = acts.x.cached_ptr();
+                bld.arg(acts.chunk_states_saved.inner_mut());
+                bld.arg(&ssm_state);
+                bld.arg(&k_state);
+                bld.arg(&v_state);
+                bld.arg(&seed_null);
+                bld.arg(&k_state);
+                bld.arg(&v_state);
+                bld.arg(acts.dt.inner());
+                bld.arg(acts.trap.inner());
+                bld.arg(acts.da_cumsum_saved.inner());
+                bld.arg(&kp);
+                bld.arg(&xp);
+                bld.arg(&b_i);
+                bld.arg(&nc_i);
+                bld.arg(&nh_i);
+                bld.arg(&hd_i);
+                bld.arg(&ds_i);
+                bld.arg(&cs);
+                bld.arg(&t_i);
+                bld.arg(&y_first);
+                unsafe { bld.launch(cfg) }
+                    .map_err(|e| format!("m3_mixed F6 K4 state_pass: {e:?}"))?;
+            }
         }
 
         // K5 reads the entering states K4 left in acts.chunk_states_saved,
@@ -754,27 +772,30 @@ pub fn gpu_forward_mamba3_layer_mixed(
             } else {
                 m3k.m3_chunk_scan_fwd_typed.get(width).get(dtype)
             };
-            let mut bld = ctx.stream.launch_builder(kern);
-            let yp = acts.y.cached_ptr();
-            let xp = acts.x.cached_ptr();
-            let qp = acts.q.cached_ptr();
-            let ks = acts.k_scaled_saved.cached_ptr();
-            bld.arg(&yp);
-            bld.arg(&xp);
-            bld.arg(&qp);
-            bld.arg(&ks);
-            bld.arg(acts.qk_dot_saved.inner());
-            bld.arg(acts.da_cumsum_saved.inner());
-            bld.arg(acts.chunk_states_saved.inner());
-            bld.arg(&dp_ptr);
-            bld.arg(&b_i);
-            bld.arg(&t_i);
-            bld.arg(&nh_i);
-            bld.arg(&hd_i);
-            bld.arg(&ds_i);
-            bld.arg(&cs);
-            unsafe { bld.launch(cfg) }
-                .map_err(|e| format!("m3_mixed F6 K5 chunk_scan_fwd: {e:?}"))?;
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut bld = ctx.stream.launch_builder(kern);
+                let yp = acts.y.cached_ptr();
+                let xp = acts.x.cached_ptr();
+                let qp = acts.q.cached_ptr();
+                let ks = acts.k_scaled_saved.cached_ptr();
+                bld.arg(&yp);
+                bld.arg(&xp);
+                bld.arg(&qp);
+                bld.arg(&ks);
+                bld.arg(acts.qk_dot_saved.inner());
+                bld.arg(acts.da_cumsum_saved.inner());
+                bld.arg(acts.chunk_states_saved.inner());
+                bld.arg(&dp_ptr);
+                bld.arg(&b_i);
+                bld.arg(&t_i);
+                bld.arg(&nh_i);
+                bld.arg(&hd_i);
+                bld.arg(&ds_i);
+                bld.arg(&cs);
+                bld.arg(&y_first);
+                unsafe { bld.launch(cfg) }
+                    .map_err(|e| format!("m3_mixed F6 K5 chunk_scan_fwd: {e:?}"))?;
+            }
         }
     } else {
         // Sequential SSM burnin typed.
@@ -794,31 +815,34 @@ pub fn gpu_forward_mamba3_layer_mixed(
             },
             width,
         );
-        let mut bld = ctx.stream.launch_builder(kernel);
-        bld.arg(&ssm_state);
-        bld.arg(&k_state);
-        bld.arg(&v_state);
-        let y = acts.y.cached_ptr();
-        bld.arg(&y);
-        bld.arg(acts.h_saved.inner_mut());
-        bld.arg(acts.k_prev_saved.inner_mut());
-        bld.arg(acts.v_prev_saved.inner_mut());
-        let x = acts.x.cached_ptr();
-        let k = acts.k.cached_ptr();
-        let q = acts.q.cached_ptr();
-        bld.arg(&x);
-        bld.arg(&k);
-        bld.arg(&q);
-        bld.arg(alpha_scratch.inner());
-        bld.arg(beta_scratch.inner());
-        bld.arg(gamma_scratch.inner());
-        bld.arg(&dp_ptr);
-        bld.arg(&b_i);
-        bld.arg(&t_i);
-        bld.arg(&nh_i);
-        bld.arg(&hd_i);
-        bld.arg(&ds_i);
-        unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F6 burnin: {e:?}"))?;
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut bld = ctx.stream.launch_builder(kernel);
+            bld.arg(&ssm_state);
+            bld.arg(&k_state);
+            bld.arg(&v_state);
+            let y = acts.y.cached_ptr();
+            bld.arg(&y);
+            bld.arg(acts.h_saved.inner_mut());
+            bld.arg(acts.k_prev_saved.inner_mut());
+            bld.arg(acts.v_prev_saved.inner_mut());
+            let x = acts.x.cached_ptr();
+            let k = acts.k.cached_ptr();
+            let q = acts.q.cached_ptr();
+            bld.arg(&x);
+            bld.arg(&k);
+            bld.arg(&q);
+            bld.arg(alpha_scratch.inner());
+            bld.arg(beta_scratch.inner());
+            bld.arg(gamma_scratch.inner());
+            bld.arg(&dp_ptr);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&nh_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F6 burnin: {e:?}"))?;
+        }
     }
 
     // F7: gating — silu_gate_fwd_typed or rmsnorm_gated_fwd_typed.
@@ -828,26 +852,29 @@ pub fn gpu_forward_mamba3_layer_mixed(
         let di_i = di as i32;
         let hd_i = hd as i32;
         let grid = super::kernels::gated_norm_cfg(bt, di, hd);
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.rmsnorm_gated_fwd_typed.get(width).get(dtype));
-        let g = acts.gated.cached_ptr();
-        let gr = acts.gated_rms_vals.cached_ptr();
-        let y = acts.y.cached_ptr();
-        let z = acts.z.cached_ptr();
-        bld.arg(&g);
-        bld.arg(&gr);
-        bld.arg(&y);
-        bld.arg(&z);
-        bld.arg(&nw_ptr);
-        bld.arg(&bt_i);
-        bld.arg(&di_i);
-        bld.arg(&hd_i);
-        let eps_g5: f32 = dims.rms_norm_eps;
-        bld.arg(&eps_g5);
-        let z_stride = di as i32;
-        bld.arg(&z_stride);
-        unsafe { bld.launch(grid) }.map_err(|e| format!("m3_mixed F7 rmsnorm_gated: {e:?}"))?;
+        for (y_first, cfg) in y_runs(grid) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(m3k.rmsnorm_gated_fwd_typed.get(width).get(dtype));
+            let g = acts.gated.cached_ptr();
+            let gr = acts.gated_rms_vals.cached_ptr();
+            let y = acts.y.cached_ptr();
+            let z = acts.z.cached_ptr();
+            bld.arg(&g);
+            bld.arg(&gr);
+            bld.arg(&y);
+            bld.arg(&z);
+            bld.arg(&nw_ptr);
+            bld.arg(&bt_i);
+            bld.arg(&di_i);
+            bld.arg(&hd_i);
+            let eps_g5: f32 = dims.rms_norm_eps;
+            bld.arg(&eps_g5);
+            let z_stride = di as i32;
+            bld.arg(&z_stride);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F7 rmsnorm_gated: {e:?}"))?;
+        }
     } else {
         let n = crate::gpu::launch::WidthCount::new(bt * di, width)?;
         let mut bld = ctx

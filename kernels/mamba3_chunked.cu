@@ -82,13 +82,14 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ Q,        /* [B * T * nh * ds] (post bias+RoPE) */ \
     const float* __restrict__ DT,       /* [B * T * nh] (post-softplus) */     \
     const float* __restrict__ trap_sig, /* [B * T * nh] (post-sigmoid) */      \
-    int batch, int T, int nh, int ds, int chunk_size                           \
+    int batch, int T, int nh, int ds, int chunk_size,                          \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
     IDX bc = blockIdx.x;         /* batch * n_chunks */                        \
     IDX b = bc / n_chunks;                                                     \
     int chunk = (int)(bc % n_chunks);                                          \
-    int h = blockIdx.y;                                                        \
+    int h = y_first + blockIdx.y;                                              \
     int t_local = threadIdx.x;   /* position within chunk */                   \
                                                                                \
     int chunk_start = chunk * chunk_size;                                      \
@@ -170,14 +171,16 @@ DEFINE_M3_PREPROCESS_CHUNKS_F32(m3_preprocess_chunks_i64, long long)
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ dA_cumsum_out,  /* [B * n_chunks * nh * chunk_size] */ \
     const float* __restrict__ adt,      /* [B * T * nh] */                     \
-    int batch, int T, int nh, int chunk_size                                   \
+    int batch, int T, int nh, int chunk_size,                                  \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
-    int chunk = blockIdx.y;                                                    \
-    int h = blockIdx.z * blockDim.x + threadIdx.x;                             \
+    int chunk = y_first + blockIdx.y;                                          \
+    int h = (z_first + blockIdx.z) * blockDim.x + threadIdx.x;                 \
     if (h >= nh) return;                                                       \
                                                                                \
-    int n_chunks = gridDim.y;                                                  \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
     int chunk_start = chunk * chunk_size;                                      \
     int chunk_end = chunk_start + chunk_size;                                  \
     if (chunk_end > T) chunk_end = T;                                          \
@@ -218,7 +221,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ x,        /* [B * T * d_inner] */                \
     const float* __restrict__ K_scaled, /* [B * T * nh * ds] */                \
     const float* __restrict__ dA_cumsum,/* [B * n_chunks * nh * chunk_size] */ \
-    int batch, int T, int nh, int hd, int ds, int chunk_size                   \
+    int batch, int T, int nh, int hd, int ds, int chunk_size,                  \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     int d_inner = nh * hd;                                                     \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
@@ -240,8 +244,8 @@ extern "C" __global__ void NAME(                                               \
     /* (legacy is (hd, heads, 1), whose y is the HEAD axis - probing y */      \
     /* would misread it and walk a zero-byte dynamic smem allocation). */      \
     bool quad = blockDim.z >= 2;                                               \
-    int h = quad ? (blockIdx.y * blockDim.z + threadIdx.z)                     \
-                 : (blockIdx.y * blockDim.y + threadIdx.y);                    \
+    int h = quad ? ((y_first + blockIdx.y) * blockDim.z + threadIdx.z)         \
+                 : ((y_first + blockIdx.y) * blockDim.y + threadIdx.y);        \
     if (ds > MAMBA_RS_STATE_CAP) return;  /* capacity guard for acc[] (uniform) */ \
                                                                                \
     int chunk_start = chunk * chunk_size;                                      \
@@ -313,7 +317,7 @@ extern "C" __global__ void NAME(                                               \
     /* traffic. */                                                             \
     extern __shared__ float m3cst_sm[];                                        \
     int heads_pb = blockDim.z;                                                 \
-    int h0 = blockIdx.y * heads_pb;                                            \
+    int h0 = (y_first + blockIdx.y) * heads_pb;                                \
     float* sx = m3cst_sm;                       /* [heads][cs_len][hd] */      \
     float* sk = sx + heads_pb * chunk_size * hd; /* [heads][cs_len][ds] */     \
     float* sda = sk + heads_pb * chunk_size * ds; /* [heads][cs_len] */        \
@@ -423,14 +427,15 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ x,                                               \
     const float* __restrict__ adt,       /* [B * T * nh] a*dt */               \
     float* __restrict__ dA_cumsum,       /* [B * n_chunks * nh * chunk_size] out */ \
-    int batch, int T, int nh, int hd, int ds, int chunk_size                   \
+    int batch, int T, int nh, int hd, int ds, int chunk_size,                  \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     int d_inner = nh * hd;                                                     \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
     IDX bc = blockIdx.x;                                                       \
     IDX b = bc / n_chunks;                                                     \
     int chunk = (int)(bc % n_chunks);                                          \
-    int h = blockIdx.y;                                                        \
+    int h = y_first + blockIdx.y;                                              \
     if (ds > MAMBA_RS_STATE_CAP) return;                                       \
                                                                                \
     int chunk_start = chunk * chunk_size;                                      \
@@ -621,11 +626,13 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ v_state,  /* [B * nh * hd] */                    \
     const float* __restrict__ dt,       /* [B * T * nh] (post-softplus) */     \
     const float* __restrict__ trap,     /* [B * T * nh] (post-sigmoid) */      \
-    int batch, int nh, int hd, int ds, int T                                   \
+    int batch, int nh, int hd, int ds, int T,                                  \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
-    int h = blockIdx.y;                                                        \
-    int pd = blockIdx.z * blockDim.x + threadIdx.x;                            \
+    int h = y_first + blockIdx.y;                                              \
+    int pd = (z_first + blockIdx.z) * blockDim.x + threadIdx.x;                \
     int dim = hd * ds;                                                         \
     if (b >= batch || pd >= dim) return;                                       \
     int p = pd / ds;                                                           \
@@ -647,11 +654,13 @@ extern "C" __global__ void NAME(                                               \
     float* __restrict__ final_states,    /* [B * nh * hd * ds] output */       \
     const float* __restrict__ dA_cumsum, /* [B * n_chunks * nh * chunk_size] */ \
     const float* __restrict__ init_states, /* [B * nh * hd * ds] or nullptr */ \
-    int batch, int n_chunks, int nh, int hd, int ds, int chunk_size, int T     \
+    int batch, int n_chunks, int nh, int hd, int ds, int chunk_size, int T,    \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
-    int h = blockIdx.y;                                                        \
-    int pd = blockIdx.z * blockDim.x + threadIdx.x;  /* flattened (p, n) index */ \
+    int h = y_first + blockIdx.y;                                              \
+    int pd = (z_first + blockIdx.z) * blockDim.x + threadIdx.x;  /* flattened (p, n) index */ \
     int dim = hd * ds;                                                         \
     if (pd >= dim) return;                                                     \
                                                                                \
@@ -731,10 +740,11 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ final_states, /* [B * nh * hd * ds] in */        \
     const float* __restrict__ k_flat,       /* [B * T * nh * ds] in */         \
     const float* __restrict__ x_flat,       /* [B * T * d_inner] in */         \
-    int batch, int T, int nh, int hd, int ds                                   \
+    int batch, int T, int nh, int hd, int ds,                                  \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
-    int h = blockIdx.y;                                                        \
+    int h = y_first + blockIdx.y;                                              \
     int p = threadIdx.x;                                                       \
     if (b >= batch || h >= nh) return;                                         \
                                                                                \
@@ -806,10 +816,11 @@ NAME(                                                                         \
     const float* __restrict__ dA_cumsum, /* [B*nc*nh*chunk_size] */           \
     const T_ACT* __restrict__ k_flat,    /* [B*T*nh*ds] */                    \
     const T_ACT* __restrict__ x_flat,    /* [B*T*d_inner] */                  \
-    int batch, int n_chunks, int nh, int hd, int ds, int chunk_size, int T    \
+    int batch, int n_chunks, int nh, int hd, int ds, int chunk_size, int T,   \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     IDX b = blockIdx.x;                                                       \
-    int h = blockIdx.y;                                                       \
+    int h = y_first + blockIdx.y;                                             \
     /* Uniform across the block, so no thread skips the barrier below. */     \
     if (b >= batch || h >= nh) return;                                        \
     int dim = hd * ds;                                                        \
@@ -904,7 +915,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ dA_cumsum,/* [B * n_chunks * nh * chunk_size] */ \
     const float* __restrict__ prev_states, /* [B * n_chunks * nh * hd * ds] (entering states) */ \
     const float* __restrict__ D,        /* [nh] */                             \
-    int batch, int T, int nh, int hd, int ds, int chunk_size                   \
+    int batch, int T, int nh, int hd, int ds, int chunk_size,                  \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     int d_inner = nh * hd;                                                     \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
@@ -913,7 +925,7 @@ extern "C" __global__ void NAME(                                               \
     int chunk = (int)(bc % n_chunks);                                          \
     /* Two heads share one block (blockDim = (lanes, 2)) so a 16-lane head */  \
     /* dimension fills a full warp; each head row owns its own tile. */        \
-    int h = blockIdx.y * blockDim.y + threadIdx.y;                             \
+    int h = (y_first + blockIdx.y) * blockDim.y + threadIdx.y;                 \
     int head_row = threadIdx.y;                                                \
     bool head_live = h < nh;                                                   \
                                                                                \
@@ -1033,14 +1045,15 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ dA_cumsum,                                       \
     const float* __restrict__ prev_states,                                     \
     const float* __restrict__ D,                                               \
-    int batch, int T, int nh, int hd, int ds, int chunk_size                   \
+    int batch, int T, int nh, int hd, int ds, int chunk_size,                  \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     int d_inner = nh * hd;                                                     \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
     IDX bc = blockIdx.x;                                                       \
     IDX b = bc / n_chunks;                                                     \
     int chunk = (int)(bc % n_chunks);                                          \
-    int h = blockIdx.y;                                                        \
+    int h = y_first + blockIdx.y;                                              \
     if (chunk_size > 64) return;                                               \
     if (ds > MAMBA_RS_STATE_CAP) return;                                       \
                                                                                \
@@ -1241,11 +1254,13 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP_F32(m3_chunk_scan_fwd_coop_i64, long long)
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ da_cs_sum,       /* [B * n_chunks * nh] */             \
     const float* __restrict__ da_cumsum, /* [B * n_chunks * nh * CS] */        \
-    int B, int T, int nh, int CS                                               \
+    int B, int T, int nh, int CS,                                              \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
-    int chunk = blockIdx.y;                                                    \
-    int h = blockIdx.z * blockDim.x + threadIdx.x;                             \
+    int chunk = y_first + blockIdx.y;                                          \
+    int h = (z_first + blockIdx.z) * blockDim.x + threadIdx.x;                 \
     if (h >= nh) return;                                                       \
     int n_chunks = (T + CS - 1) / CS;                                          \
     int chunk_start = chunk * CS;                                              \
@@ -1295,11 +1310,13 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ Q_rot,                                           \
     const float* __restrict__ DA_CS,                                           \
     const float* __restrict__ dO,                                              \
-    int B, int T, int nh_total, int hd, int ds, int CS                         \
+    int B, int T, int nh_total, int hd, int ds, int CS,                        \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     int h = blockIdx.x;                                                        \
-    IDX b = blockIdx.y;                                                        \
-    int chunk_idx = blockIdx.z;                                                \
+    IDX b = y_first + blockIdx.y;                                              \
+    int chunk_idx = z_first + blockIdx.z;                                      \
     int p = threadIdx.x;                                                       \
     int ty = threadIdx.y;                                                      \
     int TS = blockDim.y;                                                       \
@@ -1352,11 +1369,13 @@ extern "C" __global__ void NAME(                                              \
     const T_ACT* __restrict__ Q_rot,                                          \
     const float* __restrict__ DA_CS,                                          \
     const T_ACT* __restrict__ dO,                                             \
-    int B, int T, int nh_total, int hd, int ds, int CS                        \
+    int B, int T, int nh_total, int hd, int ds, int CS,                       \
+    int y_first, /* this run's first y block */                               \
+    int z_first /* this run's first z block */                                \
 ) {                                                                           \
     int h = blockIdx.x;                                                       \
-    IDX b = blockIdx.y;                                                       \
-    int chunk_idx = blockIdx.z;                                               \
+    IDX b = y_first + blockIdx.y;                                             \
+    int chunk_idx = z_first + blockIdx.z;                                     \
     int p = threadIdx.x;                                                      \
     int ty = threadIdx.y;                                                     \
     int TS = blockDim.y;                                                      \
@@ -1458,7 +1477,9 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ D_param,     /* [nh] */                          \
     const float* __restrict__ enter_state, /* [B*n_chunks*nh*hd*ds] */         \
     int B, int T, int nh_total, int hd, int ds, int CS,                        \
-    int use_pair_mats  /* 1 = smem holds the triangle pair matrices */         \
+    int use_pair_mats,  /* 1 = smem holds the triangle pair matrices */        \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     /* t-split: blockDim = (hd, T_SPLIT). One head per block; */               \
     /* threadIdx.y strides the per-timestep loops so the block carries */      \
@@ -1468,7 +1489,7 @@ extern "C" __global__ void NAME(                                               \
     /* order as before, so outputs are bit-identical; only the lane-> */       \
     /* output assignment changed. */                                           \
     int h = blockIdx.x;                                                        \
-    IDX b = blockIdx.y;                                                        \
+    IDX b = y_first + blockIdx.y;                                              \
     int p = threadIdx.x;                                                       \
     int ty = threadIdx.y;                                                      \
     int TS = blockDim.y;                                                       \
@@ -1545,7 +1566,7 @@ extern "C" __global__ void NAME(                                               \
     float* exp_rev_sm = exp_fwd_sm + CS;   /* [CS] */                          \
                                                                                \
     {                                                                          \
-        int chunk_idx = blockIdx.z;                                            \
+        int chunk_idx = z_first + blockIdx.z;                                  \
         int chunk_start = chunk_idx * CS;                                      \
         int chunk_len = min(CS, T - chunk_start);                              \
         for (int n = 0; n < ds; n++) {                                         \
@@ -1920,7 +1941,7 @@ extern "C" __global__ void NAME(                                               \
                                                                                \
     /* Store dD per-(b, chunk, h) — caller reduces across rows. */             \
     if (p == 0 && ty == 0)                                                     \
-        dD_partials[(b * n_chunks + blockIdx.z) * nh_total + h] = dD_acc;      \
+        dD_partials[(b * n_chunks + (z_first + blockIdx.z)) * nh_total + h] = dD_acc; \
 }
 
 DEFINE_M3_DQKV_F32(m3_dqkv, int)
@@ -1956,12 +1977,13 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ dK_mid,   /* [B*T*nh*ds] — from m3_dqkv */       \
     const float* __restrict__ dQK_dot,  /* [B*T*nh] — from m3_dqkv */          \
     int B, int T, int nh, int ds, int n_angles, int CS,                        \
-    int use_staging  /* 1 = smem holds the six [CS][ds] I/O tiles */           \
+    int use_staging,  /* 1 = smem holds the six [CS][ds] I/O tiles */          \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     int n_chunks = (T + CS - 1) / CS;                                          \
     IDX bc = blockIdx.x;                                                       \
     IDX b_chunk = bc; /* b * n_chunks + chunk */                               \
-    int h = blockIdx.y;                                                        \
+    int h = y_first + blockIdx.y;                                              \
     int t_local = threadIdx.x;                                                 \
                                                                                \
     IDX b = b_chunk / n_chunks;                                                \
@@ -2256,13 +2278,14 @@ NAME(                                                                         \
     const T_ACT* __restrict__ Q,                                              \
     const float* __restrict__ DT,                                             \
     const float* __restrict__ trap_sig,                                       \
-    int batch, int T, int nh, int ds, int chunk_size                          \
+    int batch, int T, int nh, int ds, int chunk_size,                         \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
     IDX bc = blockIdx.x;                                                      \
     IDX b = bc / n_chunks;                                                    \
     int chunk = (int)(bc % n_chunks);                                         \
-    int h = blockIdx.y;                                                       \
+    int h = y_first + blockIdx.y;                                             \
     int t_local = threadIdx.x;                                                \
     int chunk_start = chunk * chunk_size;                                     \
     int t = chunk_start + t_local;                                            \
@@ -2325,7 +2348,8 @@ NAME(                                                                         \
     const T_ACT* __restrict__ x,                                              \
     const T_ACT* __restrict__ K_scaled,                                       \
     const float* __restrict__ dA_cumsum,                                      \
-    int batch, int T, int nh, int hd, int ds, int chunk_size                  \
+    int batch, int T, int nh, int hd, int ds, int chunk_size,                 \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
@@ -2334,8 +2358,8 @@ NAME(                                                                         \
     int chunk = (int)(bc % n_chunks);                                         \
     /* Layout probe by blockDim.z (legacy y is the HEAD axis, see f32). */    \
     bool quad = blockDim.z >= 2;                                              \
-    int h = quad ? (blockIdx.y * blockDim.z + threadIdx.z)                    \
-                 : (blockIdx.y * blockDim.y + threadIdx.y);                   \
+    int h = quad ? ((y_first + blockIdx.y) * blockDim.z + threadIdx.z)        \
+                 : ((y_first + blockIdx.y) * blockDim.y + threadIdx.y);       \
     if (ds > MAMBA_RS_STATE_CAP) return;                                      \
     int chunk_start = chunk * chunk_size;                                     \
     int chunk_end = chunk_start + chunk_size;                                 \
@@ -2375,7 +2399,7 @@ NAME(                                                                         \
     /* Staged as f32 via to_f: same values the direct loop read. */           \
     extern __shared__ float m3cst_sm[];                                       \
     int heads_pb = blockDim.z;                                                \
-    int h0 = blockIdx.y * heads_pb;                                           \
+    int h0 = (y_first + blockIdx.y) * heads_pb;                               \
     float* sx = m3cst_sm;                                                     \
     float* sk = sx + heads_pb * chunk_size * hd;                              \
     float* sda = sk + heads_pb * chunk_size * ds;                             \
@@ -2465,14 +2489,15 @@ extern "C" __global__ void NAME(                                              \
     const T_ACT* __restrict__ x,                                              \
     const float* __restrict__ adt,                                            \
     float* __restrict__ dA_cumsum,                                            \
-    int batch, int T, int nh, int hd, int ds, int chunk_size                  \
+    int batch, int T, int nh, int hd, int ds, int chunk_size,                 \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
     IDX bc = blockIdx.x;                                                      \
     IDX b = bc / n_chunks;                                                    \
     int chunk = (int)(bc % n_chunks);                                         \
-    int h = blockIdx.y;                                                       \
+    int h = y_first + blockIdx.y;                                             \
     if (ds > MAMBA_RS_STATE_CAP) return;                                      \
     int chunk_start = chunk * chunk_size;                                     \
     int chunk_end = chunk_start + chunk_size;                                 \
@@ -2618,10 +2643,11 @@ NAME(                                                                         \
     const float* __restrict__ final_states,                                   \
     const T_ACT* __restrict__ k_flat,                                         \
     const T_ACT* __restrict__ x_flat,                                         \
-    int batch, int T, int nh, int hd, int ds                                  \
+    int batch, int T, int nh, int hd, int ds,                                 \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     IDX b = blockIdx.x;                                                       \
-    int h = blockIdx.y;                                                       \
+    int h = y_first + blockIdx.y;                                             \
     int p = threadIdx.x;                                                      \
     if (b >= batch || h >= nh) return;                                        \
     int d_inner = nh * hd;                                                    \
@@ -2665,14 +2691,15 @@ NAME(                                                                         \
     const float* __restrict__ dA_cumsum,                                      \
     const float* __restrict__ prev_states,                                    \
     const float* __restrict__ D,                                              \
-    int batch, int T, int nh, int hd, int ds, int chunk_size                  \
+    int batch, int T, int nh, int hd, int ds, int chunk_size,                 \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
     IDX bc = blockIdx.x;                                                      \
     IDX b = bc / n_chunks;                                                    \
     int chunk = (int)(bc % n_chunks);                                         \
-    int h = blockIdx.y * blockDim.y + threadIdx.y;                            \
+    int h = (y_first + blockIdx.y) * blockDim.y + threadIdx.y;                \
     int head_row = threadIdx.y;                                               \
     bool head_live = h < nh;                                                  \
     int chunk_start = chunk * chunk_size;                                     \
@@ -2754,14 +2781,15 @@ extern "C" __global__ void NAME(                                              \
     const float* __restrict__ dA_cumsum,                                      \
     const float* __restrict__ prev_states,                                    \
     const float* __restrict__ D,                                              \
-    int batch, int T, int nh, int hd, int ds, int chunk_size                  \
+    int batch, int T, int nh, int hd, int ds, int chunk_size,                 \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
     IDX bc = blockIdx.x;                                                      \
     IDX b = bc / n_chunks;                                                    \
     int chunk = (int)(bc % n_chunks);                                         \
-    int h = blockIdx.y;                                                       \
+    int h = y_first + blockIdx.y;                                             \
     if (chunk_size > 64) return;                                              \
     if (ds > MAMBA_RS_STATE_CAP) return;                                      \
     int chunk_start = chunk * chunk_size;                                     \
@@ -3202,10 +3230,12 @@ const T_ACT* __restrict__ dO, \
 const float* __restrict__ D_param, \
 const float* __restrict__ enter_state, \
 int B, int T, int nh_total, int hd, int ds, int CS, \
-int use_pair_mats \
+int use_pair_mats, \
+    int y_first, /* this run's first y block */ \
+    int z_first /* this run's first z block */ \
 ) { \
     int h = blockIdx.x; \
-    IDX b = blockIdx.y; \
+    IDX b = y_first + blockIdx.y; \
     int p = threadIdx.x; \
     int ty = threadIdx.y; \
     int TS = blockDim.y; \
@@ -3246,7 +3276,7 @@ int use_pair_mats \
     M3_DQKV_PAIR_STORAGE_##MODE \
     float* exp_rev_sm = exp_fwd_sm + CS; \
     { \
-        int chunk_idx = blockIdx.z; \
+        int chunk_idx = z_first + blockIdx.z; \
         int chunk_start = chunk_idx * CS; \
         int chunk_len = min(CS, T - chunk_start); \
         M3_DQKV_LOAD_LOCAL_STATE_##MODE \
@@ -3425,7 +3455,7 @@ int use_pair_mats \
         __syncthreads(); \
     } \
     if (p == 0 && ty == 0) \
-    dD_partials[(b * n_chunks + blockIdx.z) * nh_total + h] = dD_acc; \
+    dD_partials[(b * n_chunks + (z_first + blockIdx.z)) * nh_total + h] = dD_acc; \
     (void)FROM_F; \
 }
 
@@ -3470,12 +3500,13 @@ const float* __restrict__ dQ_mid, \
 const float* __restrict__ dK_mid, \
 const float* __restrict__ dQK_dot, \
 int B, int T, int nh, int ds, int n_angles, int CS, \
-int use_staging \
+int use_staging, \
+    int y_first /* this run's first y block */ \
 ) { \
     int n_chunks = (T + CS - 1) / CS; \
     IDX bc = blockIdx.x; \
     IDX b_chunk = bc; \
-    int h = blockIdx.y; \
+    int h = y_first + blockIdx.y; \
     int t_local = threadIdx.x; \
     IDX b = b_chunk / n_chunks; \
     int chunk = (int)(b_chunk % n_chunks); \

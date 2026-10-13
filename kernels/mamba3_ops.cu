@@ -264,11 +264,12 @@ extern "C" __global__ void NAME(                                               \
     float* __restrict__ angle_state,    /* [B * nh * n_angles] -- persistent per-env */ \
     const float* __restrict__ angles_raw, /* [B*T * n_angles] */               \
     const float* __restrict__ dt_arr,    /* [B*T * nh] */                      \
-    int B, int T, int nh, int n_angles                                         \
+    int B, int T, int nh, int n_angles,                                        \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
     if (b >= B) return;                                                        \
-    int idx = blockIdx.y * blockDim.x + threadIdx.x;                           \
+    int idx = (y_first + blockIdx.y) * blockDim.x + threadIdx.x;               \
     int total_per_env = nh * n_angles;                                         \
     if (idx >= total_per_env) return;                                          \
                                                                                \
@@ -329,14 +330,15 @@ extern "C" __global__ void NAME(                                               \
     double* __restrict__ chunk_sums,      /* [B * n_chunks * nh * n_angles] */ \
     const float* __restrict__ angles_raw, /* [B*T * n_angles] */               \
     const float* __restrict__ dt_arr,     /* [B*T * nh] */                     \
-    int B, int T, int nh, int n_angles, int chunk_size                         \
+    int B, int T, int nh, int n_angles, int chunk_size,                        \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
     IDX bc = blockIdx.x;                                                       \
     IDX b = bc / n_chunks;                                                     \
     int chunk = (int)(bc % n_chunks);                                          \
     if (b >= B) return;                                                        \
-    int idx = blockIdx.y * blockDim.x + threadIdx.x;                           \
+    int idx = (y_first + blockIdx.y) * blockDim.x + threadIdx.x;               \
     int total_per_env = nh * n_angles;                                         \
     if (idx >= total_per_env) return;                                          \
     int h = idx / n_angles;                                                    \
@@ -386,14 +388,15 @@ extern "C" __global__ void NAME(                                               \
     const double* __restrict__ chunk_sums, /* [B * n_chunks * nh * n_angles] */ \
     const float* __restrict__ angles_raw,  /* [B*T * n_angles] */              \
     const float* __restrict__ dt_arr,      /* [B*T * nh] */                    \
-    int B, int T, int nh, int n_angles, int chunk_size                         \
+    int B, int T, int nh, int n_angles, int chunk_size,                        \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
     IDX bc = blockIdx.x;                                                       \
     IDX b = bc / n_chunks;                                                     \
     int chunk = (int)(bc % n_chunks);                                          \
     if (b >= B) return;                                                        \
-    int idx = blockIdx.y * blockDim.x + threadIdx.x;                           \
+    int idx = (y_first + blockIdx.y) * blockDim.x + threadIdx.x;               \
     int total_per_env = nh * n_angles;                                         \
     if (idx >= total_per_env) return;                                          \
     int h = idx / n_angles;                                                    \
@@ -485,11 +488,12 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ d_angle_cumsum,/* [B*T * nh * n_angles] */       \
     const float* __restrict__ angles_raw,    /* [B*T * n_angles] */            \
     const float* __restrict__ dt_arr,        /* [B*T * nh] */                  \
-    int B, int T, int nh, int n_angles                                         \
+    int B, int T, int nh, int n_angles,                                        \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
     if (b >= B) return;                                                        \
-    int idx = blockIdx.y * blockDim.x + threadIdx.x;                           \
+    int idx = (y_first + blockIdx.y) * blockDim.x + threadIdx.x;               \
     int total_per_env = nh * n_angles;                                         \
     if (idx >= total_per_env) return;                                          \
                                                                                \
@@ -1051,14 +1055,15 @@ extern "C" __global__ void NAME(                                               \
     const T_ACT* __restrict__ y,                                               \
     const T_ACT* __restrict__ z,                                               \
     const float* __restrict__ weight,                                          \
-    int N, int d_inner, int group_size, float eps, int z_stride                \
+    int N, int d_inner, int group_size, float eps, int z_stride,               \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     const int width = m3g_group_width(group_size);                             \
     const int lanes = width < (int)blockDim.x ? width : (int)blockDim.x;       \
     const int local_group = threadIdx.x / lanes;                               \
     const int local = threadIdx.x - local_group * lanes;                       \
     const int n_groups = d_inner / group_size;                                 \
-    const int group = blockIdx.y * (blockDim.x / lanes) + local_group;         \
+    const int group = (y_first + blockIdx.y) * (blockDim.x / lanes) + local_group; \
     const IDX sample = blockIdx.x;                                             \
     const bool live = sample < N && group < n_groups && local < group_size;    \
     const int d0 = group * group_size + local;                                 \
@@ -1099,14 +1104,15 @@ extern "C" __global__ void NAME(                                               \
     T_ACT* d_y, T_ACT* d_z, float* d_weight,                                   \
     const T_ACT* d_out, const T_ACT* y, const T_ACT* z,                        \
     const float* weight, const float* rms_vals,                                \
-    int N, int d_inner, int group_size                                         \
+    int N, int d_inner, int group_size,                                        \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     const int width = m3g_group_width(group_size);                             \
     const int lanes = width < (int)blockDim.x ? width : (int)blockDim.x;       \
     const int local_group = threadIdx.x / lanes;                               \
     const int local = threadIdx.x - local_group * lanes;                       \
     const int n_groups = d_inner / group_size;                                 \
-    const int group = blockIdx.y * (blockDim.x / lanes) + local_group;         \
+    const int group = (y_first + blockIdx.y) * (blockDim.x / lanes) + local_group; \
     const IDX sample = blockIdx.x;                                             \
     const bool live = sample < N && group < n_groups && local < group_size;    \
     const long long base = (long long)sample * d_inner;                        \

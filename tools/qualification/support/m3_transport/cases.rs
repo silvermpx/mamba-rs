@@ -104,7 +104,10 @@ pub(super) fn dqkv(
                 outputs: &["dQ", "dK", "dV", "dADT", "dQK", "dD_partials"],
                 lengths: vec![th * ds, th * ds, th * hd, th, th, ch],
                 inputs,
-                dims: [b, t, nh, hd, ds, cs, usize::from(pairs)]
+                // The dimensions, then the first y and z blocks of the one run
+                // each axis takes here; the frozen kernel predates the run
+                // arguments and reads no further than the pair flag.
+                dims: [b, t, nh, hd, ds, cs, usize::from(pairs), 0, 0]
                     .map(|v| v as i32)
                     .to_vec(),
                 functions: [
@@ -182,7 +185,10 @@ pub(super) fn dqktheta(
                     outputs: &["dQ_pre", "dK_pre", "dAngles", "dScale", "dGamma"],
                     lengths: vec![th * ds, th * ds, th * na, th, th],
                     inputs: inputs.clone(),
-                    dims: [b, t, nh, ds, na, cs, usize::from(staging)]
+                    // The first y block of the one run closes the current
+                    // arguments; the frozen kernel reads no further than
+                    // the staging flag.
+                    dims: [b, t, nh, ds, na, cs, usize::from(staging), 0]
                         .map(|v| v as i32)
                         .to_vec(),
                     functions: [&original, selected],
@@ -292,7 +298,9 @@ pub(super) fn angle(stream: &Arc<CudaStream>, kernels: &Mamba3Kernels, baseline:
                 outputs: &["dAngles_partials", "dDt_partials"],
                 lengths: vec![th * na, th * na],
                 inputs,
-                dims: [b, t, nh, na].map(|v| v as i32).to_vec(),
+                // The first y block of the one run; the frozen kernel
+                // predates it and reads no further than the angle count.
+                dims: [b, t, nh, na, 0].map(|v| v as i32).to_vec(),
                 functions: [&original, &kernels.m3_angle_dt_bwd_seq.i32],
                 configs: [
                     LaunchConfig {

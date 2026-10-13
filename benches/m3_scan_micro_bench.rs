@@ -9,6 +9,7 @@ use cudarc::driver::PushKernelArg;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg, chunk_scan_cfg};
 use std::time::Instant;
 
@@ -117,14 +118,18 @@ fn scan_trio_time_and_hash() {
             block_dim: (block_x, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut b = ctx.stream.launch_builder(&m3k.m3_da_cumsum.i32);
-        b.arg(da_pair.inner());
-        b.arg(adt.inner());
-        b.arg(&b_i);
-        b.arg(&t_i);
-        b.arg(&nh_i);
-        b.arg(&cs_i);
-        unsafe { b.launch(cfg) }.unwrap();
+        for (y_first, z_first, cfg) in yz_runs(cfg) {
+            let mut b = ctx.stream.launch_builder(&m3k.m3_da_cumsum.i32);
+            b.arg(da_pair.inner());
+            b.arg(adt.inner());
+            b.arg(&b_i);
+            b.arg(&t_i);
+            b.arg(&nh_i);
+            b.arg(&cs_i);
+            b.arg(&y_first);
+            b.arg(&z_first);
+            unsafe { b.launch(cfg) }.unwrap();
+        }
     };
     cumsum();
     ctx.stream.synchronize().unwrap();
@@ -136,21 +141,24 @@ fn scan_trio_time_and_hash() {
             block_dim: (cs as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut b = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks.i32);
-        b.arg(k_scaled.inner());
-        b.arg(qk_dot.inner());
-        b.arg(scale.inner());
-        b.arg(gamma.inner());
-        b.arg(k.inner());
-        b.arg(q.inner());
-        b.arg(dt_b.inner());
-        b.arg(trap.inner());
-        b.arg(&b_i);
-        b.arg(&t_i);
-        b.arg(&nh_i);
-        b.arg(&ds_i);
-        b.arg(&cs_i);
-        unsafe { b.launch(cfg) }.unwrap();
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut b = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks.i32);
+            b.arg(k_scaled.inner());
+            b.arg(qk_dot.inner());
+            b.arg(scale.inner());
+            b.arg(gamma.inner());
+            b.arg(k.inner());
+            b.arg(q.inner());
+            b.arg(dt_b.inner());
+            b.arg(trap.inner());
+            b.arg(&b_i);
+            b.arg(&t_i);
+            b.arg(&nh_i);
+            b.arg(&ds_i);
+            b.arg(&cs_i);
+            b.arg(&y_first);
+            unsafe { b.launch(cfg) }.unwrap();
+        }
     };
     let chunk_state = || {
         let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(
@@ -162,38 +170,44 @@ fn scan_trio_time_and_hash() {
             cs,
             m3k.chunk_tile_threads.i32,
         );
-        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
-        b.arg(chunk_states.inner());
-        b.arg(x.inner());
-        b.arg(k_scaled.inner());
-        b.arg(da_cumsum.inner());
-        b.arg(&b_i);
-        b.arg(&t_i);
-        b.arg(&nh_i);
-        b.arg(&hd_i);
-        b.arg(&ds_i);
-        b.arg(&cs_i);
-        unsafe { b.launch(cfg) }.unwrap();
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
+            b.arg(chunk_states.inner());
+            b.arg(x.inner());
+            b.arg(k_scaled.inner());
+            b.arg(da_cumsum.inner());
+            b.arg(&b_i);
+            b.arg(&t_i);
+            b.arg(&nh_i);
+            b.arg(&hd_i);
+            b.arg(&ds_i);
+            b.arg(&cs_i);
+            b.arg(&y_first);
+            unsafe { b.launch(cfg) }.unwrap();
+        }
     };
     let scan = || {
         let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads.i32);
         assert!(coop, "serve shape must ride the coop kernel");
-        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd_coop.i32);
-        b.arg(y.inner());
-        b.arg(x.inner());
-        b.arg(q.inner());
-        b.arg(k_scaled.inner());
-        b.arg(qk_dot.inner());
-        b.arg(da_cumsum.inner());
-        b.arg(prev_states.inner());
-        b.arg(d_param.inner());
-        b.arg(&b_i);
-        b.arg(&t_i);
-        b.arg(&nh_i);
-        b.arg(&hd_i);
-        b.arg(&ds_i);
-        b.arg(&cs_i);
-        unsafe { b.launch(cfg) }.unwrap();
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd_coop.i32);
+            b.arg(y.inner());
+            b.arg(x.inner());
+            b.arg(q.inner());
+            b.arg(k_scaled.inner());
+            b.arg(qk_dot.inner());
+            b.arg(da_cumsum.inner());
+            b.arg(prev_states.inner());
+            b.arg(d_param.inner());
+            b.arg(&b_i);
+            b.arg(&t_i);
+            b.arg(&nh_i);
+            b.arg(&hd_i);
+            b.arg(&ds_i);
+            b.arg(&cs_i);
+            b.arg(&y_first);
+            unsafe { b.launch(cfg) }.unwrap();
+        }
     };
 
     preprocess();
@@ -259,18 +273,21 @@ fn scan_trio_time_and_hash() {
             cs,
             m3k.chunk_tile_threads.i32,
         );
-        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
-        b.arg(chunk_states_real.inner());
-        b.arg(x.inner());
-        b.arg(k_scaled.inner());
-        b.arg(da_pair.inner());
-        b.arg(&b_i);
-        b.arg(&t_i);
-        b.arg(&nh_i);
-        b.arg(&hd_i);
-        b.arg(&ds_i);
-        b.arg(&cs_i);
-        unsafe { b.launch(cfg) }.unwrap();
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
+            b.arg(chunk_states_real.inner());
+            b.arg(x.inner());
+            b.arg(k_scaled.inner());
+            b.arg(da_pair.inner());
+            b.arg(&b_i);
+            b.arg(&t_i);
+            b.arg(&nh_i);
+            b.arg(&hd_i);
+            b.arg(&ds_i);
+            b.arg(&cs_i);
+            b.arg(&y_first);
+            unsafe { b.launch(cfg) }.unwrap();
+        }
     }
     ctx.stream.synchronize().unwrap();
     let mut cst_real = vec![0.0f32; batch * nc * nh * hd * ds];
@@ -290,28 +307,31 @@ fn scan_trio_time_and_hash() {
     let fused = || {
         let fcfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_fused_cfg(batch, nc, nh, hd, ds, cs)
             .expect("serve shape must fit the fused kernel");
-        let mut b = ctx
-            .stream
-            .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.i32.f32);
-        b.arg(k_scaled_f.inner());
-        b.arg(qk_dot_f.inner());
-        b.arg(scale_f.inner());
-        b.arg(gamma_f.inner());
-        b.arg(chunk_states_f.inner());
-        b.arg(k.inner());
-        b.arg(q.inner());
-        b.arg(dt_b.inner());
-        b.arg(trap.inner());
-        b.arg(x.inner());
-        b.arg(adt.inner());
-        b.arg(da_fused.inner());
-        b.arg(&b_i);
-        b.arg(&t_i);
-        b.arg(&nh_i);
-        b.arg(&hd_i);
-        b.arg(&ds_i);
-        b.arg(&cs_i);
-        unsafe { b.launch(fcfg) }.unwrap();
+        for (y_first, cfg) in y_runs(fcfg) {
+            let mut b = ctx
+                .stream
+                .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.i32.f32);
+            b.arg(k_scaled_f.inner());
+            b.arg(qk_dot_f.inner());
+            b.arg(scale_f.inner());
+            b.arg(gamma_f.inner());
+            b.arg(chunk_states_f.inner());
+            b.arg(k.inner());
+            b.arg(q.inner());
+            b.arg(dt_b.inner());
+            b.arg(trap.inner());
+            b.arg(x.inner());
+            b.arg(adt.inner());
+            b.arg(da_fused.inner());
+            b.arg(&b_i);
+            b.arg(&t_i);
+            b.arg(&nh_i);
+            b.arg(&hd_i);
+            b.arg(&ds_i);
+            b.arg(&cs_i);
+            b.arg(&y_first);
+            unsafe { b.launch(cfg) }.unwrap();
+        }
     };
     fused();
     ctx.stream.synchronize().unwrap();
@@ -372,23 +392,26 @@ fn scan_trio_time_and_hash() {
                     block_dim: (cs as u32, 1, 1),
                     shared_mem_bytes: 0,
                 };
-                let mut b = ctx
-                    .stream
-                    .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
-                b.arg(&ksp_pair);
-                b.arg(qkd_pair.inner());
-                b.arg(scale_pair.inner());
-                b.arg(gamma_pair.inner());
-                b.arg(&kp);
-                b.arg(&qp);
-                b.arg(dt_b.inner());
-                b.arg(trap.inner());
-                b.arg(&b_i);
-                b.arg(&t_i);
-                b.arg(&nh_i);
-                b.arg(&ds_i);
-                b.arg(&cs_i);
-                unsafe { b.launch(cfg) }.unwrap();
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut b = ctx
+                        .stream
+                        .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
+                    b.arg(&ksp_pair);
+                    b.arg(qkd_pair.inner());
+                    b.arg(scale_pair.inner());
+                    b.arg(gamma_pair.inner());
+                    b.arg(&kp);
+                    b.arg(&qp);
+                    b.arg(dt_b.inner());
+                    b.arg(trap.inner());
+                    b.arg(&b_i);
+                    b.arg(&t_i);
+                    b.arg(&nh_i);
+                    b.arg(&ds_i);
+                    b.arg(&cs_i);
+                    b.arg(&y_first);
+                    unsafe { b.launch(cfg) }.unwrap();
+                }
                 let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(
                     batch,
                     nc,
@@ -398,47 +421,53 @@ fn scan_trio_time_and_hash() {
                     cs,
                     m3k.chunk_tile_threads.i32,
                 );
-                let mut b = ctx
-                    .stream
-                    .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
-                b.arg(states_pair.inner());
-                b.arg(&xp);
-                b.arg(&ksp_pair);
-                b.arg(da_pair.inner());
-                b.arg(&b_i);
-                b.arg(&t_i);
-                b.arg(&nh_i);
-                b.arg(&hd_i);
-                b.arg(&ds_i);
-                b.arg(&cs_i);
-                unsafe { b.launch(cfg) }.unwrap();
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut b = ctx
+                        .stream
+                        .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
+                    b.arg(states_pair.inner());
+                    b.arg(&xp);
+                    b.arg(&ksp_pair);
+                    b.arg(da_pair.inner());
+                    b.arg(&b_i);
+                    b.arg(&t_i);
+                    b.arg(&nh_i);
+                    b.arg(&hd_i);
+                    b.arg(&ds_i);
+                    b.arg(&cs_i);
+                    b.arg(&y_first);
+                    unsafe { b.launch(cfg) }.unwrap();
+                }
             };
             let fused_typed = || {
                 let fcfg =
                     mamba_rs::mamba3_siso::gpu::kernels::chunk_fused_cfg(batch, nc, nh, hd, ds, cs)
                         .expect("serve shape must fit the fused kernel");
-                let mut b = ctx
-                    .stream
-                    .launch_builder(m3k.m3_chunk_pre_state_fused_typed.i32.get(dtype));
-                b.arg(&ksp_fused);
-                b.arg(qkd_fused.inner());
-                b.arg(scale_fused.inner());
-                b.arg(gamma_fused.inner());
-                b.arg(states_fused.inner());
-                b.arg(&kp);
-                b.arg(&qp);
-                b.arg(dt_b.inner());
-                b.arg(trap.inner());
-                b.arg(&xp);
-                b.arg(adt.inner());
-                b.arg(da_fused.inner());
-                b.arg(&b_i);
-                b.arg(&t_i);
-                b.arg(&nh_i);
-                b.arg(&hd_i);
-                b.arg(&ds_i);
-                b.arg(&cs_i);
-                unsafe { b.launch(fcfg) }.unwrap();
+                for (y_first, cfg) in y_runs(fcfg) {
+                    let mut b = ctx
+                        .stream
+                        .launch_builder(m3k.m3_chunk_pre_state_fused_typed.i32.get(dtype));
+                    b.arg(&ksp_fused);
+                    b.arg(qkd_fused.inner());
+                    b.arg(scale_fused.inner());
+                    b.arg(gamma_fused.inner());
+                    b.arg(states_fused.inner());
+                    b.arg(&kp);
+                    b.arg(&qp);
+                    b.arg(dt_b.inner());
+                    b.arg(trap.inner());
+                    b.arg(&xp);
+                    b.arg(adt.inner());
+                    b.arg(da_fused.inner());
+                    b.arg(&b_i);
+                    b.arg(&t_i);
+                    b.arg(&nh_i);
+                    b.arg(&hd_i);
+                    b.arg(&ds_i);
+                    b.arg(&cs_i);
+                    b.arg(&y_first);
+                    unsafe { b.launch(cfg) }.unwrap();
+                }
             };
             pair();
             fused_typed();
@@ -485,24 +514,27 @@ fn scan_trio_time_and_hash() {
     let scan_typed = || {
         let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads.i32);
         assert!(coop, "serve shape must ride the coop kernel");
-        let mut b = ctx
-            .stream
-            .launch_builder(&m3k.m3_chunk_scan_fwd_coop_typed.i32.f32);
-        b.arg(y_t.inner());
-        b.arg(x.inner());
-        b.arg(q.inner());
-        b.arg(k_scaled.inner());
-        b.arg(qk_dot.inner());
-        b.arg(da_cumsum.inner());
-        b.arg(prev_states.inner());
-        b.arg(d_param.inner());
-        b.arg(&b_i);
-        b.arg(&t_i);
-        b.arg(&nh_i);
-        b.arg(&hd_i);
-        b.arg(&ds_i);
-        b.arg(&cs_i);
-        unsafe { b.launch(cfg) }.unwrap();
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut b = ctx
+                .stream
+                .launch_builder(&m3k.m3_chunk_scan_fwd_coop_typed.i32.f32);
+            b.arg(y_t.inner());
+            b.arg(x.inner());
+            b.arg(q.inner());
+            b.arg(k_scaled.inner());
+            b.arg(qk_dot.inner());
+            b.arg(da_cumsum.inner());
+            b.arg(prev_states.inner());
+            b.arg(d_param.inner());
+            b.arg(&b_i);
+            b.arg(&t_i);
+            b.arg(&nh_i);
+            b.arg(&hd_i);
+            b.arg(&ds_i);
+            b.arg(&cs_i);
+            b.arg(&y_first);
+            unsafe { b.launch(cfg) }.unwrap();
+        }
     };
     scan_typed();
     ctx.stream.synchronize().unwrap();
@@ -534,19 +566,23 @@ fn scan_trio_time_and_hash() {
         };
         let nc_i = nc as i32;
         let init_states_null: u64 = 0;
-        let mut b = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd.i32);
-        b.arg(states_sp.inner());
-        b.arg(final_states.inner());
-        b.arg(da_cumsum.inner());
-        b.arg(&init_states_null);
-        b.arg(&b_i);
-        b.arg(&nc_i);
-        b.arg(&nh_i);
-        b.arg(&hd_i);
-        b.arg(&ds_i);
-        b.arg(&cs_i);
-        b.arg(&t_i);
-        unsafe { b.launch(cfg) }.unwrap();
+        for (y_first, z_first, cfg) in yz_runs(cfg) {
+            let mut b = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd.i32);
+            b.arg(states_sp.inner());
+            b.arg(final_states.inner());
+            b.arg(da_cumsum.inner());
+            b.arg(&init_states_null);
+            b.arg(&b_i);
+            b.arg(&nc_i);
+            b.arg(&nh_i);
+            b.arg(&hd_i);
+            b.arg(&ds_i);
+            b.arg(&cs_i);
+            b.arg(&t_i);
+            b.arg(&y_first);
+            b.arg(&z_first);
+            unsafe { b.launch(cfg) }.unwrap();
+        }
     };
     state_passing();
     ctx.stream.synchronize().unwrap();
@@ -582,50 +618,56 @@ fn scan_trio_time_and_hash() {
             block_dim: (hd.max(ds) as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut b = ctx
-            .stream
-            .launch_builder(&m3k.m3_writeback_parallel_states.i32);
-        b.arg(ssm_out.inner());
-        b.arg(k_out.inner());
-        b.arg(v_out.inner());
-        b.arg(final_states.inner());
-        b.arg(k.inner());
-        b.arg(x.inner());
-        b.arg(&b_i);
-        b.arg(&t_i);
-        b.arg(&nh_i);
-        b.arg(&hd_i);
-        b.arg(&ds_i);
-        unsafe { b.launch(cfg) }.unwrap();
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut b = ctx
+                .stream
+                .launch_builder(&m3k.m3_writeback_parallel_states.i32);
+            b.arg(ssm_out.inner());
+            b.arg(k_out.inner());
+            b.arg(v_out.inner());
+            b.arg(final_states.inner());
+            b.arg(k.inner());
+            b.arg(x.inner());
+            b.arg(&b_i);
+            b.arg(&t_i);
+            b.arg(&nh_i);
+            b.arg(&hd_i);
+            b.arg(&ds_i);
+            b.arg(&y_first);
+            unsafe { b.launch(cfg) }.unwrap();
+        }
     };
     let states_fp = GpuBuffer::from_cpu(st, &cst_h).unwrap();
     let state_pass_fused = || {
         let cfg = mamba_rs::mamba3_siso::gpu::kernels::state_pass_fused_cfg(batch, nh, hd, ds);
         let nc_i = nc as i32;
         let seed_null: u64 = 0;
-        let mut b = ctx
-            .stream
-            .launch_builder(&m3k.m3_state_pass_fused_typed.i32.f32);
-        b.arg(states_fp.inner());
-        b.arg(ssm_out.inner());
-        b.arg(k_out.inner());
-        b.arg(v_out.inner());
-        b.arg(&seed_null);
-        b.arg(k_out.inner());
-        b.arg(v_out.inner());
-        b.arg(dt_b.inner());
-        b.arg(trap.inner());
-        b.arg(da_cumsum.inner());
-        b.arg(k.inner());
-        b.arg(x.inner());
-        b.arg(&b_i);
-        b.arg(&nc_i);
-        b.arg(&nh_i);
-        b.arg(&hd_i);
-        b.arg(&ds_i);
-        b.arg(&cs_i);
-        b.arg(&t_i);
-        unsafe { b.launch(cfg) }.unwrap();
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut b = ctx
+                .stream
+                .launch_builder(&m3k.m3_state_pass_fused_typed.i32.f32);
+            b.arg(states_fp.inner());
+            b.arg(ssm_out.inner());
+            b.arg(k_out.inner());
+            b.arg(v_out.inner());
+            b.arg(&seed_null);
+            b.arg(k_out.inner());
+            b.arg(v_out.inner());
+            b.arg(dt_b.inner());
+            b.arg(trap.inner());
+            b.arg(da_cumsum.inner());
+            b.arg(k.inner());
+            b.arg(x.inner());
+            b.arg(&b_i);
+            b.arg(&nc_i);
+            b.arg(&nh_i);
+            b.arg(&hd_i);
+            b.arg(&ds_i);
+            b.arg(&cs_i);
+            b.arg(&t_i);
+            b.arg(&y_first);
+            unsafe { b.launch(cfg) }.unwrap();
+        }
     };
     state_pass_fused();
     ctx.stream.synchronize().unwrap();
@@ -959,24 +1001,27 @@ fn sequential_prefill_time_and_hash() {
     let (batch_i, t_i, nh_i, hd_i, ds_i) =
         (batch as i32, t as i32, nh as i32, hd as i32, ds as i32);
     let prefill = || {
-        let mut b = st.launch_builder(&m3k.m3_burnin_fwd_nosave.i32);
-        b.arg(ssm_state.inner());
-        b.arg(k_state.inner());
-        b.arg(v_state.inner());
-        b.arg(y_out.inner());
-        b.arg(x.inner());
-        b.arg(k.inner());
-        b.arg(q.inner());
-        b.arg(alpha.inner());
-        b.arg(beta.inner());
-        b.arg(gamma.inner());
-        b.arg(d_skip.inner());
-        b.arg(&batch_i);
-        b.arg(&t_i);
-        b.arg(&nh_i);
-        b.arg(&hd_i);
-        b.arg(&ds_i);
-        unsafe { b.launch(cfg) }.unwrap();
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut b = st.launch_builder(&m3k.m3_burnin_fwd_nosave.i32);
+            b.arg(ssm_state.inner());
+            b.arg(k_state.inner());
+            b.arg(v_state.inner());
+            b.arg(y_out.inner());
+            b.arg(x.inner());
+            b.arg(k.inner());
+            b.arg(q.inner());
+            b.arg(alpha.inner());
+            b.arg(beta.inner());
+            b.arg(gamma.inner());
+            b.arg(d_skip.inner());
+            b.arg(&batch_i);
+            b.arg(&t_i);
+            b.arg(&nh_i);
+            b.arg(&hd_i);
+            b.arg(&ds_i);
+            b.arg(&y_first);
+            unsafe { b.launch(cfg) }.unwrap();
+        }
     };
 
     let iters = 20usize;

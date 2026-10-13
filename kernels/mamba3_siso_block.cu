@@ -51,7 +51,8 @@ extern "C" __global__ void NAME(                                              \
     const TY* q_cur,                                                          \
     const float* dt, const float* a_val, const float* trap,                   \
     const float* D,                                                           \
-    int batch, int nh, int hd, int ds                                         \
+    int batch, int nh, int hd, int ds,                                        \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     extern __shared__ float m3sb_sm[];                                        \
     float* coef = m3sb_sm;                                                    \
@@ -59,7 +60,7 @@ extern "C" __global__ void NAME(                                              \
     float* kp_sm = kc_sm + ds;                                                \
     float* qc_sm = kp_sm + ds;                                                \
     IDX b = blockIdx.x;                                                       \
-    int h = blockIdx.y;                                                       \
+    int h = y_first + blockIdx.y;                                             \
     int tid = threadIdx.x;                                                    \
     /* Uniform across the block, so every thread reaches the barrier. */      \
     if (b >= batch || h >= nh || ds > MAMBA_RS_STATE_CAP) return;             \
@@ -162,7 +163,8 @@ __device__ __forceinline__ void m3_burnin_block_tpl(
     const T_ACT* x_flat, const T_ACT* k_flat, const T_ACT* q_flat,
     const float* alpha_flat, const float* beta_flat, const float* gamma_flat,
     const float* D,
-    int batch, int T, int nh, int hd, int ds
+    int batch, int T, int nh, int hd, int ds,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m3bb_sm[];
     float* coef = m3bb_sm;
@@ -170,7 +172,7 @@ __device__ __forceinline__ void m3_burnin_block_tpl(
     float* kp_sm = kc_sm + ds;
     float* qc_sm = kp_sm + ds;
     const int b = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int tid = threadIdx.x;
     /* Uniform across the block, so every thread reaches the barriers. */
     if (b >= batch || h >= nh || ds > MAMBA_RS_STATE_CAP) return;
@@ -262,14 +264,15 @@ extern "C" __global__ __launch_bounds__(512) void NAME(                        \
     float* h_saved, float* k_prev_saved, float* v_prev_saved,                 \
     const T_ACT* x_flat, const T_ACT* k_flat, const T_ACT* q_flat,            \
     const float* alpha_flat, const float* beta_flat, const float* gamma_flat, \
-    const float* D, int batch, int T, int nh, int hd, int ds                  \
+    const float* D, int batch, int T, int nh, int hd, int ds,                 \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     switch (ds) {                                                             \
-    case 8: m3_burnin_block_tpl<T_ACT, SAVE, 8, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    case 16: m3_burnin_block_tpl<T_ACT, SAVE, 16, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    case 32: m3_burnin_block_tpl<T_ACT, SAVE, 32, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    case 64: m3_burnin_block_tpl<T_ACT, SAVE, 64, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    default: m3_burnin_block_tpl<T_ACT, SAVE, 0, false>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
+    case 8: m3_burnin_block_tpl<T_ACT, SAVE, 8, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
+    case 16: m3_burnin_block_tpl<T_ACT, SAVE, 16, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
+    case 32: m3_burnin_block_tpl<T_ACT, SAVE, 32, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
+    case 64: m3_burnin_block_tpl<T_ACT, SAVE, 64, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
+    default: m3_burnin_block_tpl<T_ACT, SAVE, 0, false>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
     }                                                                         \
 }
 
@@ -283,11 +286,12 @@ extern "C" __global__ __launch_bounds__(512) void m3_burnin_fwd_nosave_block(
     float* ssm_state, float* k_state, float* v_state, float* y_out,
     const float* x_flat, const float* k_flat, const float* q_flat,
     const float* alpha_flat, const float* beta_flat, const float* gamma_flat,
-    const float* D, int batch, int T, int nh, int hd, int ds
+    const float* D, int batch, int T, int nh, int hd, int ds,
+    int y_first /* this run's first y block */
 ) {
     m3_burnin_block_tpl<float, false, 0, false>(ssm_state, k_state, v_state, y_out,
         nullptr, nullptr, nullptr, x_flat, k_flat, q_flat, alpha_flat,
-        beta_flat, gamma_flat, D, batch, T, nh, hd, ds);
+        beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first);
 }
 
 // One warp's shuffle tree over the head, as the warp kernel runs it: width
@@ -329,7 +333,8 @@ __device__ __forceinline__ void m3_backward_seq_block_tpl(
     float* __restrict__ d_x, float* __restrict__ d_k, float* __restrict__ d_q,
     float* __restrict__ d_alpha, float* __restrict__ d_beta,
     float* __restrict__ d_gamma, float* __restrict__ d_D_local,
-    int batch, int T, int nh, int hd, int ds
+    int batch, int T, int nh, int hd, int ds,
+    int y_first /* this run's first y block */
 ) {
     extern __shared__ float m3bs_sm[];
     float* coef = m3bs_sm;
@@ -339,7 +344,7 @@ __device__ __forceinline__ void m3_backward_seq_block_tpl(
     float* carry_sm = qc_sm + ds;          /* [ds] previous-K gradient */
     float* red = carry_sm + ds;            /* [(3 * ds + 3) * warps] */
     const int b = blockIdx.x;
-    const int h = blockIdx.y;
+    const int h = y_first + blockIdx.y;
     const int tid = threadIdx.x;
     /* Uniform across the block, so every thread reaches the barriers. */
     if (b >= batch || h >= nh || ds > MAMBA_RS_STATE_CAP) return;
@@ -503,14 +508,15 @@ extern "C" __global__ __launch_bounds__(512) void NAME(                        \
     float* __restrict__ d_x, float* __restrict__ d_k, float* __restrict__ d_q,\
     float* __restrict__ d_alpha, float* __restrict__ d_beta,                  \
     float* __restrict__ d_gamma, float* __restrict__ d_D_local,               \
-    int batch, int T, int nh, int hd, int ds                                  \
+    int batch, int T, int nh, int hd, int ds,                                 \
+    int y_first /* this run's first y block */                                \
 ) {                                                                           \
     switch (ds) {                                                             \
-    case 8: m3_backward_seq_block_tpl<T_ACT, 8>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds); return; \
-    case 16: m3_backward_seq_block_tpl<T_ACT, 16>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds); return; \
-    case 32: m3_backward_seq_block_tpl<T_ACT, 32>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds); return; \
-    case 64: m3_backward_seq_block_tpl<T_ACT, 64>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds); return; \
-    default: m3_backward_seq_block_tpl<T_ACT, 0>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds); return; \
+    case 8: m3_backward_seq_block_tpl<T_ACT, 8>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first); return; \
+    case 16: m3_backward_seq_block_tpl<T_ACT, 16>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first); return; \
+    case 32: m3_backward_seq_block_tpl<T_ACT, 32>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first); return; \
+    case 64: m3_backward_seq_block_tpl<T_ACT, 64>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first); return; \
+    default: m3_backward_seq_block_tpl<T_ACT, 0>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first); return; \
     }                                                                         \
 }
 
@@ -570,11 +576,13 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     const T_ACT* __restrict__ Q_rot,                                           \
     const float* __restrict__ DA_CS,                                           \
     const T_ACT* __restrict__ dO,                                              \
-    int B, int T, int nh_total, int hd, int ds, int CS                         \
+    int B, int T, int nh_total, int hd, int ds, int CS,                        \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     const int h = blockIdx.x;                                                  \
-    const int b = blockIdx.y;                                                  \
-    const int chunk_idx = blockIdx.z;                                          \
+    const int b = y_first + blockIdx.y;                                        \
+    const int chunk_idx = z_first + blockIdx.z;                                \
     const int tid = threadIdx.x;                                               \
     if (h >= nh_total || b >= B || CS > 64) return;                            \
     const int n_chunks = (T + CS - 1) / CS;                                    \
@@ -657,11 +665,13 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     const T_ACT* __restrict__ dO, const float* __restrict__ D_param,           \
     const float* __restrict__ enter_state,                                     \
     const float* __restrict__ dm_chain,                                        \
-    int B, int T, int nh_total, int hd, int ds, int CS, int TW                 \
+    int B, int T, int nh_total, int hd, int ds, int CS, int TW,                \
+    int y_first, /* this run's first y block */                                \
+    int z_first /* this run's first z block */                                 \
 ) {                                                                            \
     const int h = blockIdx.x;                                                  \
-    const int b = blockIdx.y;                                                  \
-    const int chunk_idx = blockIdx.z;                                          \
+    const int b = y_first + blockIdx.y;                                        \
+    const int chunk_idx = z_first + blockIdx.z;                                \
     const int tid = threadIdx.x;                                               \
     /* Uniform across the block, so every thread reaches the barriers. */     \
     if (h >= nh_total || b >= B || CS > 64 || TW > 32 || TW < 1) return;       \

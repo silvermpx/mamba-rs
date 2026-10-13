@@ -245,6 +245,15 @@
   `MAMBA_RS_GRID_RUN=<n>` shortens every run to n blocks, so the suites
   prove at ordinary shapes that the runs give one launch's bits.
   `m1_grid_runs` runs every one of these kernels past the extents.
+- The Mamba-3 SISO launches split their grid axes past 65535 blocks the
+  same way: the heads on the y axis of every kernel that walks them (the
+  decode and sequential steps on both head tiers, the chunked forward and
+  backward, the gated norm, the angle kernels), the sequences and chunks
+  on the y and z axes of the chunked backward, and the chunks of the decay
+  cumsum, which reads its chunk count from its arguments now.
+  `m3_grid_runs` runs the sequential scans, the decode step and the chunk
+  scan past the extent against first-run twins, and the decay cumsum over
+  chunks past it against a launch of its own.
 - `GpuCtx::cublas()` hands the context's cuBLAS handle, which the context
   takes when it enters a cuBLAS GEMM mode and keeps. `GpuCtx::take_cublas()`
   takes one for a context that stays in the deterministic mode, for a

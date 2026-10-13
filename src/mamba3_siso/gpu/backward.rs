@@ -16,7 +16,7 @@ use super::weights::{
 use crate::gpu::blas::gpu_gemm_bi_backward_grad_raw;
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_norm};
+use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_norm, y_runs, yz_runs};
 use cudarc::driver::PushKernelArg;
 
 /// Mamba-3 SISO single-layer GPU backward (sequential SSM backward).
@@ -66,19 +66,23 @@ pub fn gpu_backward_mamba3_layer(
         let di_i = di as i32;
         let hd_i = dims.headdim as i32;
         let grid = super::kernels::gated_norm_cfg(bt, di, dims.headdim);
-        let mut builder = ctx.stream.launch_builder(m3k.rmsnorm_gated_bwd.get(width));
-        builder.arg(scratch.d_y.inner_mut());
-        builder.arg(scratch.d_z.inner_mut());
-        builder.arg(scratch.d_norm_gate_w.inner_mut());
-        builder.arg(scratch.d_gated.inner());
-        builder.arg(acts.y.inner());
-        builder.arg(acts.z.inner());
-        builder.arg(&nw_ptr);
-        builder.arg(acts.gated_rms_vals.inner());
-        builder.arg(&bt_i);
-        builder.arg(&di_i);
-        builder.arg(&hd_i);
-        unsafe { builder.launch(grid) }.map_err(|e| format!("rmsnorm_gated_bwd m3 B7: {:?}", e))?;
+        for (y_first, cfg) in y_runs(grid) {
+            let mut builder = ctx.stream.launch_builder(m3k.rmsnorm_gated_bwd.get(width));
+            builder.arg(scratch.d_y.inner_mut());
+            builder.arg(scratch.d_z.inner_mut());
+            builder.arg(scratch.d_norm_gate_w.inner_mut());
+            builder.arg(scratch.d_gated.inner());
+            builder.arg(acts.y.inner());
+            builder.arg(acts.z.inner());
+            builder.arg(&nw_ptr);
+            builder.arg(acts.gated_rms_vals.inner());
+            builder.arg(&bt_i);
+            builder.arg(&di_i);
+            builder.arg(&hd_i);
+            builder.arg(&y_first);
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("rmsnorm_gated_bwd m3 B7: {:?}", e))?;
+        }
         {
             let n_i = di as i32;
             let mut builder = ctx.stream.launch_builder(&m3k.colsum_accumulate);
@@ -133,31 +137,34 @@ pub fn gpu_backward_mamba3_layer(
             },
             width,
         );
-        let mut builder = ctx.stream.launch_builder(kernel);
-        builder.arg(acts.h_saved.inner());
-        builder.arg(acts.k_prev_saved.inner());
-        builder.arg(acts.v_prev_saved.inner());
-        builder.arg(acts.x.inner());
-        builder.arg(acts.k.inner());
-        builder.arg(acts.q.inner());
-        builder.arg(acts.alpha.inner());
-        builder.arg(acts.beta.inner());
-        builder.arg(acts.gamma.inner());
-        builder.arg(&dp_ptr);
-        builder.arg(scratch.d_y.inner());
-        builder.arg(scratch.d_x.inner_mut());
-        builder.arg(scratch.d_k.inner_mut());
-        builder.arg(scratch.d_q.inner_mut());
-        builder.arg(scratch.d_alpha.inner_mut());
-        builder.arg(scratch.d_beta.inner_mut());
-        builder.arg(scratch.d_gamma.inner_mut());
-        builder.arg(scratch.d_d_local.inner_mut());
-        builder.arg(&b_i);
-        builder.arg(&t_i);
-        builder.arg(&nh_i);
-        builder.arg(&hd_i);
-        builder.arg(&ds_i);
-        unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_backward_seq B6: {:?}", e))?;
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut builder = ctx.stream.launch_builder(kernel);
+            builder.arg(acts.h_saved.inner());
+            builder.arg(acts.k_prev_saved.inner());
+            builder.arg(acts.v_prev_saved.inner());
+            builder.arg(acts.x.inner());
+            builder.arg(acts.k.inner());
+            builder.arg(acts.q.inner());
+            builder.arg(acts.alpha.inner());
+            builder.arg(acts.beta.inner());
+            builder.arg(acts.gamma.inner());
+            builder.arg(&dp_ptr);
+            builder.arg(scratch.d_y.inner());
+            builder.arg(scratch.d_x.inner_mut());
+            builder.arg(scratch.d_k.inner_mut());
+            builder.arg(scratch.d_q.inner_mut());
+            builder.arg(scratch.d_alpha.inner_mut());
+            builder.arg(scratch.d_beta.inner_mut());
+            builder.arg(scratch.d_gamma.inner_mut());
+            builder.arg(scratch.d_d_local.inner_mut());
+            builder.arg(&b_i);
+            builder.arg(&t_i);
+            builder.arg(&nh_i);
+            builder.arg(&hd_i);
+            builder.arg(&ds_i);
+            builder.arg(&y_first);
+            unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_backward_seq B6: {:?}", e))?;
+        }
 
         if na > 0 {
             // ORDERING INVARIANT (important): `rope_bwd` writes
@@ -263,17 +270,21 @@ pub fn gpu_backward_mamba3_layer(
                 block_dim: (block_x, 1, 1),
                 shared_mem_bytes: 0,
             };
-            let mut builder = ctx
-                .stream
-                .launch_builder(m3k.m3_extract_da_cs_sum.get(width));
-            builder.arg(scratch.da_cs_sum.inner_mut());
-            builder.arg(acts.da_cumsum_saved.inner());
-            builder.arg(&b_i);
-            builder.arg(&t_i);
-            builder.arg(&nh_i);
-            builder.arg(&cs);
-            unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("m3_extract_da_cs_sum B6: {:?}", e))?;
+            for (y_first, z_first, cfg) in yz_runs(cfg) {
+                let mut builder = ctx
+                    .stream
+                    .launch_builder(m3k.m3_extract_da_cs_sum.get(width));
+                builder.arg(scratch.da_cs_sum.inner_mut());
+                builder.arg(acts.da_cumsum_saved.inner());
+                builder.arg(&b_i);
+                builder.arg(&t_i);
+                builder.arg(&nh_i);
+                builder.arg(&cs);
+                builder.arg(&y_first);
+                builder.arg(&z_first);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("m3_extract_da_cs_sum B6: {:?}", e))?;
+            }
         }
 
         // m3_dqkv assigns every element of d_q, d_k and d_x it owns, so the
@@ -348,23 +359,27 @@ pub fn gpu_backward_mamba3_layer(
                     shared_mem_bytes: ((cs_u * ds + cs_u * hd + cs_u) * std::mem::size_of::<f32>())
                         as u32,
                 };
-                let mut sb = ctx.stream.launch_builder(
-                    m3k.m3_dqkv_state_terms_typed
-                        .get(width)
-                        .get(crate::gpu::dtype::WeightDtype::F32),
-                );
-                sb.arg(scratch.dstate_terms.inner_mut());
-                sb.arg(acts.q.inner());
-                sb.arg(acts.da_cumsum_saved.inner());
-                sb.arg(scratch.d_y.inner());
-                sb.arg(&b_i);
-                sb.arg(&t_i);
-                sb.arg(&nh_i);
-                sb.arg(&hd_i);
-                sb.arg(&ds_i);
-                sb.arg(&cs);
-                unsafe { sb.launch(st_cfg) }
-                    .map_err(|e| format!("m3_dqkv_state_terms: {:?}", e))?;
+                for (y_first, z_first, cfg) in yz_runs(st_cfg) {
+                    let mut sb = ctx.stream.launch_builder(
+                        m3k.m3_dqkv_state_terms_typed
+                            .get(width)
+                            .get(crate::gpu::dtype::WeightDtype::F32),
+                    );
+                    sb.arg(scratch.dstate_terms.inner_mut());
+                    sb.arg(acts.q.inner());
+                    sb.arg(acts.da_cumsum_saved.inner());
+                    sb.arg(scratch.d_y.inner());
+                    sb.arg(&b_i);
+                    sb.arg(&t_i);
+                    sb.arg(&nh_i);
+                    sb.arg(&hd_i);
+                    sb.arg(&ds_i);
+                    sb.arg(&cs);
+                    sb.arg(&y_first);
+                    sb.arg(&z_first);
+                    unsafe { sb.launch(cfg) }
+                        .map_err(|e| format!("m3_dqkv_state_terms: {:?}", e))?;
+                }
 
                 let nc_i = nc as i32;
                 let mut pb = ctx
@@ -403,32 +418,36 @@ pub fn gpu_backward_mamba3_layer(
                 },
                 width,
             );
-            let mut builder = ctx.stream.launch_builder(dqkv);
-            builder.arg(scratch.d_q.inner_mut());
-            builder.arg(scratch.d_k.inner_mut());
-            builder.arg(scratch.d_x.inner_mut());
-            builder.arg(scratch.d_alpha.inner_mut());
-            builder.arg(scratch.d_beta.inner_mut());
-            // dD_partials [B*nh] — reduced after kernel.
-            builder.arg(scratch.axis0_partials.inner_mut());
-            builder.arg(acts.q.inner());
-            builder.arg(acts.k_scaled_saved.inner());
-            builder.arg(acts.x.inner());
-            builder.arg(acts.da_cumsum_saved.inner());
-            builder.arg(scratch.da_cs_sum.inner());
-            builder.arg(acts.qk_dot_saved.inner());
-            builder.arg(acts.chunk_states_saved.inner());
-            builder.arg(scratch.d_y.inner());
-            builder.arg(&dp_ptr);
-            builder.arg(scratch.dstate_enter.inner());
-            builder.arg(&b_i);
-            builder.arg(&t_i);
-            builder.arg(&nh_i);
-            builder.arg(&hd_i);
-            builder.arg(&ds_i);
-            builder.arg(&cs);
-            builder.arg(&use_pair_mats);
-            unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv B6 S1: {:?}", e))?;
+            for (y_first, z_first, cfg) in yz_runs(cfg) {
+                let mut builder = ctx.stream.launch_builder(dqkv);
+                builder.arg(scratch.d_q.inner_mut());
+                builder.arg(scratch.d_k.inner_mut());
+                builder.arg(scratch.d_x.inner_mut());
+                builder.arg(scratch.d_alpha.inner_mut());
+                builder.arg(scratch.d_beta.inner_mut());
+                // dD_partials [B*nh] — reduced after kernel.
+                builder.arg(scratch.axis0_partials.inner_mut());
+                builder.arg(acts.q.inner());
+                builder.arg(acts.k_scaled_saved.inner());
+                builder.arg(acts.x.inner());
+                builder.arg(acts.da_cumsum_saved.inner());
+                builder.arg(scratch.da_cs_sum.inner());
+                builder.arg(acts.qk_dot_saved.inner());
+                builder.arg(acts.chunk_states_saved.inner());
+                builder.arg(scratch.d_y.inner());
+                builder.arg(&dp_ptr);
+                builder.arg(scratch.dstate_enter.inner());
+                builder.arg(&b_i);
+                builder.arg(&t_i);
+                builder.arg(&nh_i);
+                builder.arg(&hd_i);
+                builder.arg(&ds_i);
+                builder.arg(&cs);
+                builder.arg(&use_pair_mats);
+                builder.arg(&y_first);
+                builder.arg(&z_first);
+                unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv B6 S1: {:?}", e))?;
+            }
         }
         // Stage 2: reduce dD_partials[B*nc, nh] → lg.d_param[nh]
         // (accumulate=1 across layers; GpuMamba3Grads::zero runs once per
@@ -483,30 +502,34 @@ pub fn gpu_backward_mamba3_layer(
                     0
                 },
             };
-            let mut builder = ctx.stream.launch_builder(m3k.m3_dqktheta.get(width));
-            builder.arg(scratch.d_c_pre_rope.inner_mut());
-            builder.arg(scratch.d_b_pre_rope.inner_mut());
-            builder.arg(scratch.d_angle_cumsum.inner_mut());
-            let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
-            let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
-            builder.arg(scratch.d_scale.inner_mut());
-            builder.arg(scratch.d_gamma_par.inner_mut());
-            builder.arg(acts.c_biased.inner());
-            builder.arg(acts.b_biased.inner());
-            builder.arg(&scale_in_ptr);
-            builder.arg(&gamma_in_ptr);
-            builder.arg(acts.angle_cumsum.inner());
-            builder.arg(scratch.d_q.inner());
-            builder.arg(scratch.d_k.inner());
-            builder.arg(scratch.d_beta.inner());
-            builder.arg(&b_i);
-            builder.arg(&t_i);
-            builder.arg(&nh_i);
-            builder.arg(&ds_i);
-            builder.arg(&na_i);
-            builder.arg(&cs);
-            builder.arg(&dqkt_staging);
-            unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqktheta B6 S2: {:?}", e))?;
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut builder = ctx.stream.launch_builder(m3k.m3_dqktheta.get(width));
+                builder.arg(scratch.d_c_pre_rope.inner_mut());
+                builder.arg(scratch.d_b_pre_rope.inner_mut());
+                builder.arg(scratch.d_angle_cumsum.inner_mut());
+                let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
+                let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
+                builder.arg(scratch.d_scale.inner_mut());
+                builder.arg(scratch.d_gamma_par.inner_mut());
+                builder.arg(acts.c_biased.inner());
+                builder.arg(acts.b_biased.inner());
+                builder.arg(&scale_in_ptr);
+                builder.arg(&gamma_in_ptr);
+                builder.arg(acts.angle_cumsum.inner());
+                builder.arg(scratch.d_q.inner());
+                builder.arg(scratch.d_k.inner());
+                builder.arg(scratch.d_beta.inner());
+                builder.arg(&b_i);
+                builder.arg(&t_i);
+                builder.arg(&nh_i);
+                builder.arg(&ds_i);
+                builder.arg(&na_i);
+                builder.arg(&cs);
+                builder.arg(&dqkt_staging);
+                builder.arg(&y_first);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("m3_dqktheta B6 S2: {:?}", e))?;
+            }
         }
         // colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
         {
@@ -569,21 +592,24 @@ pub fn gpu_backward_mamba3_layer(
         let contrib_dt_ptr = scratch.axis0_partials.cached_ptr() + contrib_dt_offset_bytes;
         // Stage 1
         {
-            let mut builder = ctx
-                .stream
-                .launch_builder(m3k.m3_angle_dt_bwd_seq.get(width));
-            builder.arg(&contrib_angles_ptr);
-            builder.arg(&contrib_dt_ptr);
-            builder.arg(scratch.d_angle_cumsum.inner());
-            builder.arg(acts.angles_raw.inner());
-            builder.arg(acts.dt.inner());
-            builder.arg(&b_i);
-            builder.arg(&t_i);
-            builder.arg(&nh_i);
-            builder.arg(&na_i);
             let grid = m3k.angle_backward_cfg(dims.batch, dims.seq_len, nh, na);
-            unsafe { builder.launch(grid) }
-                .map_err(|e| format!("m3_angle_dt_bwd_seq B5a stage1: {:?}", e))?;
+            for (y_first, cfg) in y_runs(grid) {
+                let mut builder = ctx
+                    .stream
+                    .launch_builder(m3k.m3_angle_dt_bwd_seq.get(width));
+                builder.arg(&contrib_angles_ptr);
+                builder.arg(&contrib_dt_ptr);
+                builder.arg(scratch.d_angle_cumsum.inner());
+                builder.arg(acts.angles_raw.inner());
+                builder.arg(acts.dt.inner());
+                builder.arg(&b_i);
+                builder.arg(&t_i);
+                builder.arg(&nh_i);
+                builder.arg(&na_i);
+                builder.arg(&y_first);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("m3_angle_dt_bwd_seq B5a stage1: {:?}", e))?;
+            }
         }
         // Stage 2a: reduce nh → d_angles_raw[B*T*na]
         m3k.launch_axis0_sum(

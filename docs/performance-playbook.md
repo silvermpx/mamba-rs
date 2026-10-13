@@ -200,9 +200,10 @@ validators accept. The rule here:
   works well), the bit recorders and the parity suites split the axes of
   their ordinary shapes into many runs, which proves for every converted
   launch that the runs give one launch's bits. The grid-runs tests
-  (`m1_grid_runs`) also run the kernels past the real extents: a window
-  of steps or sequences against a launch of its own, or channels against
-  twins given the same inputs in the first run.
+  (`m1_grid_runs`, `m3_grid_runs`) also run the kernels past the real
+  extents: a window of steps or sequences against a launch of its own,
+  or channels and heads against twins given the same inputs in the
+  first run.
 - A direct launch in a test or a benchmark goes through the same runs;
   cudarc checks no argument count, so a launch that omitted the run
   argument would read past its parameters. Find every launch of a kernel

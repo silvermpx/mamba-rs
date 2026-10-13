@@ -10,7 +10,7 @@
 
 use super::kernels::Mamba3Kernels;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{IndexWidth, grid_1d_cover};
+use crate::gpu::launch::{IndexWidth, grid_1d_cover, yz_runs};
 use crate::mamba3_siso::route::chunked_backward_tiled_smem_bytes;
 use cudarc::driver::sys::CUdeviceptr;
 use cudarc::driver::{CudaStream, LaunchConfig, PushKernelArg};
@@ -90,19 +90,23 @@ pub(super) fn launch(
     let (nc, rows_i) = (dim(n_chunks)?, dim(rows)?);
     let grid = (nheads as u32, batch as u32, n_chunks as u32);
 
-    let mut terms = stream.launch_builder(m3k.m3_dqkv_state_terms_tiled.get(dtype));
-    for p in [&io.state_terms, &io.q_rot, &io.da_cs, &io.d_o] {
-        terms.arg(p);
-    }
-    for d in [&b, &t, &nh, &hd, &ds, &cs] {
-        terms.arg(d);
-    }
     let terms_cfg = LaunchConfig {
         grid_dim: grid,
         block_dim: (BLOCK, 1, 1),
         shared_mem_bytes: 0,
     };
-    unsafe { terms.launch(terms_cfg) }.map_err(|e| format!("m3_dqkv_state_terms_tiled: {e:?}"))?;
+    for (y_first, z_first, cfg) in yz_runs(terms_cfg) {
+        let mut terms = stream.launch_builder(m3k.m3_dqkv_state_terms_tiled.get(dtype));
+        for p in [&io.state_terms, &io.q_rot, &io.da_cs, &io.d_o] {
+            terms.arg(p);
+        }
+        for d in [&b, &t, &nh, &hd, &ds, &cs] {
+            terms.arg(d);
+        }
+        terms.arg(&y_first);
+        terms.arg(&z_first);
+        unsafe { terms.launch(cfg) }.map_err(|e| format!("m3_dqkv_state_terms_tiled: {e:?}"))?;
+    }
 
     let mut pass = stream.launch_builder(m3k.m3_dstate_passing_bwd.get(width));
     for p in [&io.enter_state, &io.state_terms, &io.da_cs_sum] {
@@ -125,36 +129,40 @@ pub(super) fn launch(
         .map_err(|e| format!("m3_dqkv_dm_chain: {e:?}"))?;
 
     let tile = TILE as i32;
-    let mut stage = stream.launch_builder(m3k.m3_dqkv_tiled.get(dtype));
-    for p in [
-        &io.d_q,
-        &io.d_k,
-        &io.d_v,
-        &io.d_adt,
-        &io.d_qk_dot,
-        &io.d_partials,
-        &io.q_rot,
-        &io.k_scaled,
-        &io.v,
-        &io.da_cs,
-        &io.da_cs_sum,
-        &io.qk_dot,
-        &io.chunk_states,
-        &io.d_o,
-        &io.d_param,
-        &io.enter_state,
-        &io.dm_chain,
-    ] {
-        stage.arg(p);
-    }
-    for d in [&b, &t, &nh, &hd, &ds, &cs, &tile] {
-        stage.arg(d);
-    }
     let stage_cfg = LaunchConfig {
         grid_dim: grid,
         block_dim: (BLOCK, 1, 1),
         shared_mem_bytes: chunked_backward_tiled_smem_bytes(TILE) as u32,
     };
-    unsafe { stage.launch(stage_cfg) }.map_err(|e| format!("m3_dqkv_tiled: {e:?}"))?;
+    for (y_first, z_first, cfg) in yz_runs(stage_cfg) {
+        let mut stage = stream.launch_builder(m3k.m3_dqkv_tiled.get(dtype));
+        for p in [
+            &io.d_q,
+            &io.d_k,
+            &io.d_v,
+            &io.d_adt,
+            &io.d_qk_dot,
+            &io.d_partials,
+            &io.q_rot,
+            &io.k_scaled,
+            &io.v,
+            &io.da_cs,
+            &io.da_cs_sum,
+            &io.qk_dot,
+            &io.chunk_states,
+            &io.d_o,
+            &io.d_param,
+            &io.enter_state,
+            &io.dm_chain,
+        ] {
+            stage.arg(p);
+        }
+        for d in [&b, &t, &nh, &hd, &ds, &cs, &tile] {
+            stage.arg(d);
+        }
+        stage.arg(&y_first);
+        stage.arg(&z_first);
+        unsafe { stage.launch(cfg) }.map_err(|e| format!("m3_dqkv_tiled: {e:?}"))?;
+    }
     Ok(())
 }

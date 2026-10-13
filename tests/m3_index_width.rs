@@ -23,7 +23,7 @@ use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::kernels::ByIndexWidth;
-use mamba_rs::gpu::launch::grid_1d_cover;
+use mamba_rs::gpu::launch::{grid_1d_cover, y_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, chunk_scan_cfg};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -94,6 +94,16 @@ fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
         };
     }
     unsafe { b.launch(cfg) }.expect("launch");
+}
+
+/// [`launch`] once per run of the grid's y axis, each run's first block
+/// appended as the kernel's last argument.
+fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut run = args.to_vec();
+        run.push(Arg::I(y_first));
+        launch(ctx, f, cfg, &run);
+    }
 }
 
 fn compile(ctx: &GpuCtx, state_cap: usize) -> Mamba3Kernels {
@@ -375,7 +385,7 @@ fn run_seq(ctx: &GpuCtx, fwd: &CudaFunction, bwd: &CudaFunction, s: Seq, p: &[u6
     .map(|n| ptr(n))
     .chain(s.ints())
     .collect();
-    launch(ctx, fwd, s.cfg(), &fwd_args);
+    launch_runs(ctx, fwd, s.cfg(), &fwd_args);
     let bwd_args: Vec<Arg> = [
         "h_saved", "k_prev", "v_prev", "x", "k", "q", "alpha", "beta", "gamma", "d", "dy", "dx",
         "dk", "dq", "dalpha", "dbeta", "dgamma", "dd_local",
@@ -384,7 +394,7 @@ fn run_seq(ctx: &GpuCtx, fwd: &CudaFunction, bwd: &CudaFunction, s: Seq, p: &[u6
     .map(|n| ptr(n))
     .chain(s.ints())
     .collect();
-    launch(ctx, bwd, s.cfg(), &bwd_args);
+    launch_runs(ctx, bwd, s.cfg(), &bwd_args);
 }
 
 /// The chunked scan's shape.
@@ -629,7 +639,7 @@ fn both_builds_of_the_siso_kernels_give_the_same_bits() {
             .iter()
             .map(|f| {
                 let (io, bufs) = chunk_bufs(&ctx, c);
-                launch(&ctx, f, cfg, &io.args(c));
+                launch_runs(&ctx, f, cfg, &io.args(c));
                 read(st, io.y, bufs[0].len())
             })
             .collect();
@@ -651,7 +661,7 @@ fn both_builds_of_the_siso_kernels_give_the_same_bits() {
                 block_dim: ((nh * na).min(256) as u32, 1, 1),
                 shared_mem_bytes: 0,
             };
-            launch(
+            launch_runs(
                 &ctx,
                 f,
                 cfg,
@@ -952,7 +962,7 @@ fn the_chunk_scan_i64_build_gives_chunks_past_i32_max_their_own_bits() {
     } else {
         &m3k.m3_chunk_scan_fwd
     };
-    launch(&ctx, &kernel.i64, cfg, &io.args(s));
+    launch_runs(&ctx, &kernel.i64, cfg, &io.args(s));
     let chunks = 64;
     let window = Chunked {
         t: chunks * CS,
@@ -974,7 +984,7 @@ fn the_chunk_scan_i64_build_gives_chunks_past_i32_max_their_own_bits() {
             CS,
             m3k.chunk_tile_threads.i32,
         );
-        launch(&ctx, &kernel.i32, own_cfg, &own.args(window));
+        launch_runs(&ctx, &kernel.i32, own_cfg, &own.args(window));
         assert_bits(
             &format!("chunks from {c}"),
             &read(st, at(io.y, c * CS * di), window.t * di),

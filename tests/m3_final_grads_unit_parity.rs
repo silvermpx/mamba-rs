@@ -23,6 +23,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 
 // Config: realistic-ish head dims, 2 chunks with partial last chunk coverage.
@@ -201,36 +202,40 @@ fn check_dqkv(dtype: WeightDtype) {
         B as i32, T as i32, NH as i32, HD as i32, DS as i32, CS as i32,
     );
 
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv.i32);
-    let args = [
-        dq_ref.cached_ptr(),
-        dk_ref.cached_ptr(),
-        dv_ref.cached_ptr(),
-        dadt_ref.cached_ptr(),
-        dqk_ref.cached_ptr(),
-        dd_ref.cached_ptr(),
-        q_f32.cached_ptr(),
-        ks_f32.cached_ptr(),
-        v_f32.cached_ptr(),
-        dcs_buf.cached_ptr(),
-        dcs_sum_buf.cached_ptr(),
-        qk_buf.cached_ptr(),
-        ssm_buf.cached_ptr(),
-        do_f32.cached_ptr(),
-        d_buf.cached_ptr(),
-        enter.cached_ptr(),
-    ];
-    for a in &args {
-        bld.arg(a);
+    for (y_first, z_first, cfg) in yz_runs(cfg) {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv.i32);
+        let args = [
+            dq_ref.cached_ptr(),
+            dk_ref.cached_ptr(),
+            dv_ref.cached_ptr(),
+            dadt_ref.cached_ptr(),
+            dqk_ref.cached_ptr(),
+            dd_ref.cached_ptr(),
+            q_f32.cached_ptr(),
+            ks_f32.cached_ptr(),
+            v_f32.cached_ptr(),
+            dcs_buf.cached_ptr(),
+            dcs_sum_buf.cached_ptr(),
+            qk_buf.cached_ptr(),
+            ssm_buf.cached_ptr(),
+            do_f32.cached_ptr(),
+            d_buf.cached_ptr(),
+            enter.cached_ptr(),
+        ];
+        for a in &args {
+            bld.arg(a);
+        }
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        bld.arg(&use_mats_i);
+        bld.arg(&y_first);
+        bld.arg(&z_first);
+        unsafe { bld.launch(cfg) }.unwrap();
     }
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&hdi);
-    bld.arg(&dsi);
-    bld.arg(&csi);
-    bld.arg(&use_mats_i);
-    unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
     let dq_ref_v = download_f32(&ctx, &dq_ref, n_q);
@@ -254,36 +259,40 @@ fn check_dqkv(dtype: WeightDtype) {
     let dd_t = GpuBuffer::zeros(&ctx.stream, n_d).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    let mut bld = ctx.stream.launch_builder(m3k.m3_dqkv_typed.i32.get(dtype));
-    let args = [
-        dq_t.cached_ptr(),
-        dk_t.cached_ptr(),
-        dv_t.cached_ptr(),
-        dadt_t.cached_ptr(),
-        dqk_t.cached_ptr(),
-        dd_t.cached_ptr(),
-        q_t.cached_ptr(),
-        ks_t.cached_ptr(),
-        v_t.cached_ptr(),
-        dcs_buf.cached_ptr(),
-        dcs_sum_buf.cached_ptr(),
-        qk_buf.cached_ptr(),
-        ssm_buf.cached_ptr(),
-        do_t.cached_ptr(),
-        d_buf.cached_ptr(),
-        enter.cached_ptr(),
-    ];
-    for a in &args {
-        bld.arg(a);
+    for (y_first, z_first, cfg) in yz_runs(cfg) {
+        let mut bld = ctx.stream.launch_builder(m3k.m3_dqkv_typed.i32.get(dtype));
+        let args = [
+            dq_t.cached_ptr(),
+            dk_t.cached_ptr(),
+            dv_t.cached_ptr(),
+            dadt_t.cached_ptr(),
+            dqk_t.cached_ptr(),
+            dd_t.cached_ptr(),
+            q_t.cached_ptr(),
+            ks_t.cached_ptr(),
+            v_t.cached_ptr(),
+            dcs_buf.cached_ptr(),
+            dcs_sum_buf.cached_ptr(),
+            qk_buf.cached_ptr(),
+            ssm_buf.cached_ptr(),
+            do_t.cached_ptr(),
+            d_buf.cached_ptr(),
+            enter.cached_ptr(),
+        ];
+        for a in &args {
+            bld.arg(a);
+        }
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        bld.arg(&use_mats_i);
+        bld.arg(&y_first);
+        bld.arg(&z_first);
+        unsafe { bld.launch(cfg) }.unwrap();
     }
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&hdi);
-    bld.arg(&dsi);
-    bld.arg(&csi);
-    bld.arg(&use_mats_i);
-    unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
     let dq_t_v = download_f32(&ctx, &dq_t, n_q);
@@ -378,34 +387,37 @@ fn check_dqktheta(dtype: WeightDtype) {
         CS as i32,
     );
 
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
-    let args = [
-        dqpre_ref.cached_ptr(),
-        dkpre_ref.cached_ptr(),
-        dang_ref.cached_ptr(),
-        dscale_ref.cached_ptr(),
-        dgamma_ref.cached_ptr(),
-        q_raw_f32.cached_ptr(),
-        k_raw_f32.cached_ptr(),
-        scale_buf.cached_ptr(),
-        gamma_buf.cached_ptr(),
-        angle_buf.cached_ptr(),
-        dq_mid_buf.cached_ptr(),
-        dk_mid_buf.cached_ptr(),
-        dqk_buf.cached_ptr(),
-    ];
-    for a in &args {
-        bld.arg(a);
-    }
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&dsi);
-    bld.arg(&nai);
-    bld.arg(&csi);
     let staging_i: i32 = 1;
-    bld.arg(&staging_i);
-    unsafe { bld.launch(cfg) }.unwrap();
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
+        let args = [
+            dqpre_ref.cached_ptr(),
+            dkpre_ref.cached_ptr(),
+            dang_ref.cached_ptr(),
+            dscale_ref.cached_ptr(),
+            dgamma_ref.cached_ptr(),
+            q_raw_f32.cached_ptr(),
+            k_raw_f32.cached_ptr(),
+            scale_buf.cached_ptr(),
+            gamma_buf.cached_ptr(),
+            angle_buf.cached_ptr(),
+            dq_mid_buf.cached_ptr(),
+            dk_mid_buf.cached_ptr(),
+            dqk_buf.cached_ptr(),
+        ];
+        for a in &args {
+            bld.arg(a);
+        }
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&dsi);
+        bld.arg(&nai);
+        bld.arg(&csi);
+        bld.arg(&staging_i);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
 
     // produce dQ_bias/dK_bias from dQ_pre/dK_pre via colsum_accumulate.
@@ -459,35 +471,38 @@ fn check_dqktheta(dtype: WeightDtype) {
     let dkb_t = GpuBuffer::zeros(&ctx.stream, n_bias).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    let mut bld = ctx
-        .stream
-        .launch_builder(m3k.m3_dqktheta_typed.i32.get(dtype));
-    let args = [
-        dqpre_t.cached_ptr(),
-        dkpre_t.cached_ptr(),
-        dang_t.cached_ptr(),
-        dscale_t.cached_ptr(),
-        dgamma_t.cached_ptr(),
-        q_raw_t.cached_ptr(),
-        k_raw_t.cached_ptr(),
-        scale_buf.cached_ptr(),
-        gamma_buf.cached_ptr(),
-        angle_buf.cached_ptr(),
-        dq_mid_buf.cached_ptr(),
-        dk_mid_buf.cached_ptr(),
-        dqk_buf.cached_ptr(),
-    ];
-    for a in &args {
-        bld.arg(a);
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx
+            .stream
+            .launch_builder(m3k.m3_dqktheta_typed.i32.get(dtype));
+        let args = [
+            dqpre_t.cached_ptr(),
+            dkpre_t.cached_ptr(),
+            dang_t.cached_ptr(),
+            dscale_t.cached_ptr(),
+            dgamma_t.cached_ptr(),
+            q_raw_t.cached_ptr(),
+            k_raw_t.cached_ptr(),
+            scale_buf.cached_ptr(),
+            gamma_buf.cached_ptr(),
+            angle_buf.cached_ptr(),
+            dq_mid_buf.cached_ptr(),
+            dk_mid_buf.cached_ptr(),
+            dqk_buf.cached_ptr(),
+        ];
+        for a in &args {
+            bld.arg(a);
+        }
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&dsi);
+        bld.arg(&nai);
+        bld.arg(&csi);
+        bld.arg(&staging_i);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
     }
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&dsi);
-    bld.arg(&nai);
-    bld.arg(&csi);
-    bld.arg(&staging_i);
-    unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
     // typed path also colsums dQ_pre/dK_pre to produce bias grads.
@@ -603,34 +618,37 @@ fn m3_dqktheta_output_hash() {
     let (bi, ti, nhi, dsi, nai, csi) = (
         CB as i32, CT as i32, CNH as i32, CDS as i32, CNA as i32, CCS as i32,
     );
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
-    let args = [
-        dqpre.cached_ptr(),
-        dkpre.cached_ptr(),
-        dang.cached_ptr(),
-        dscale.cached_ptr(),
-        dgamma.cached_ptr(),
-        q_raw.cached_ptr(),
-        k_raw.cached_ptr(),
-        scale_buf.cached_ptr(),
-        gamma_buf.cached_ptr(),
-        angle_buf.cached_ptr(),
-        dq_mid.cached_ptr(),
-        dk_mid.cached_ptr(),
-        dqk_buf.cached_ptr(),
-    ];
-    for a in &args {
-        bld.arg(a);
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
+        let args = [
+            dqpre.cached_ptr(),
+            dkpre.cached_ptr(),
+            dang.cached_ptr(),
+            dscale.cached_ptr(),
+            dgamma.cached_ptr(),
+            q_raw.cached_ptr(),
+            k_raw.cached_ptr(),
+            scale_buf.cached_ptr(),
+            gamma_buf.cached_ptr(),
+            angle_buf.cached_ptr(),
+            dq_mid.cached_ptr(),
+            dk_mid.cached_ptr(),
+            dqk_buf.cached_ptr(),
+        ];
+        for a in &args {
+            bld.arg(a);
+        }
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&dsi);
+        bld.arg(&nai);
+        bld.arg(&csi);
+        let staging_i: i32 = 1;
+        bld.arg(&staging_i);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
     }
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&dsi);
-    bld.arg(&nai);
-    bld.arg(&csi);
-    let staging_i: i32 = 1;
-    bld.arg(&staging_i);
-    unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
     let fnv = |v: &[f32]| -> u64 {
@@ -737,36 +755,40 @@ fn m3_dqkv_output_hash() {
     let (bi, ti, nhi, hdi, dsi, csi) = (
         CB as i32, CT as i32, CNH as i32, CHD as i32, CDS as i32, CCS as i32,
     );
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv.i32);
-    let args = [
-        dq.cached_ptr(),
-        dk.cached_ptr(),
-        dv.cached_ptr(),
-        dadt.cached_ptr(),
-        dqk.cached_ptr(),
-        dd.cached_ptr(),
-        q_f32.cached_ptr(),
-        ks_f32.cached_ptr(),
-        v_f32.cached_ptr(),
-        dcs_buf.cached_ptr(),
-        dcs_sum_buf.cached_ptr(),
-        qk_buf.cached_ptr(),
-        ssm_buf.cached_ptr(),
-        do_f32.cached_ptr(),
-        d_buf.cached_ptr(),
-        enter.cached_ptr(),
-    ];
-    for a in &args {
-        bld.arg(a);
+    for (y_first, z_first, cfg) in yz_runs(cfg) {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv.i32);
+        let args = [
+            dq.cached_ptr(),
+            dk.cached_ptr(),
+            dv.cached_ptr(),
+            dadt.cached_ptr(),
+            dqk.cached_ptr(),
+            dd.cached_ptr(),
+            q_f32.cached_ptr(),
+            ks_f32.cached_ptr(),
+            v_f32.cached_ptr(),
+            dcs_buf.cached_ptr(),
+            dcs_sum_buf.cached_ptr(),
+            qk_buf.cached_ptr(),
+            ssm_buf.cached_ptr(),
+            do_f32.cached_ptr(),
+            d_buf.cached_ptr(),
+            enter.cached_ptr(),
+        ];
+        for a in &args {
+            bld.arg(a);
+        }
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        bld.arg(&use_mats_i);
+        bld.arg(&y_first);
+        bld.arg(&z_first);
+        unsafe { bld.launch(cfg) }.unwrap();
     }
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&hdi);
-    bld.arg(&dsi);
-    bld.arg(&csi);
-    bld.arg(&use_mats_i);
-    unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
     let fnv = |v: &[f32]| -> u64 {

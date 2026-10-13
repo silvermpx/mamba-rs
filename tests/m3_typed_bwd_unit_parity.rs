@@ -13,7 +13,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::launch::grid_1d;
+use mamba_rs::gpu::launch::{grid_1d, y_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 
 fn det_rand(n: usize, seed: u32) -> Vec<f32> {
@@ -605,27 +605,30 @@ fn check_rmsnorm_gated_bwd(dtype: WeightDtype) {
         block_dim: (DI as u32, 1, 1),
         shared_mem_bytes: (DI * std::mem::size_of::<f32>()) as u32,
     };
-    let mut bld = ctx.stream.launch_builder(&m3k.rmsnorm_gated_bwd.i32);
-    let dy = dy32.cached_ptr();
-    let dz = dz32.cached_ptr();
-    let dw = dw32.cached_ptr();
-    let do_p = do32.cached_ptr();
-    let y_p = y32.cached_ptr();
-    let z_p = z32.cached_ptr();
-    let w_p = w32.cached_ptr();
-    let r_p = r32.cached_ptr();
-    bld.arg(&dy);
-    bld.arg(&dz);
-    bld.arg(&dw);
-    bld.arg(&do_p);
-    bld.arg(&y_p);
-    bld.arg(&z_p);
-    bld.arg(&w_p);
-    bld.arg(&r_p);
-    bld.arg(&ni);
-    bld.arg(&dii);
-    bld.arg(&gsi);
-    unsafe { bld.launch(cfg) }.unwrap();
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx.stream.launch_builder(&m3k.rmsnorm_gated_bwd.i32);
+        let dy = dy32.cached_ptr();
+        let dz = dz32.cached_ptr();
+        let dw = dw32.cached_ptr();
+        let do_p = do32.cached_ptr();
+        let y_p = y32.cached_ptr();
+        let z_p = z32.cached_ptr();
+        let w_p = w32.cached_ptr();
+        let r_p = r32.cached_ptr();
+        bld.arg(&dy);
+        bld.arg(&dz);
+        bld.arg(&dw);
+        bld.arg(&do_p);
+        bld.arg(&y_p);
+        bld.arg(&z_p);
+        bld.arg(&w_p);
+        bld.arg(&r_p);
+        bld.arg(&ni);
+        bld.arg(&dii);
+        bld.arg(&gsi);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
     let mut dy_ref = vec![0f32; n_elems];
     let mut dz_ref = vec![0f32; n_elems];
@@ -643,29 +646,32 @@ fn check_rmsnorm_gated_bwd(dtype: WeightDtype) {
     let dw_t = GpuBuffer::zeros(&ctx.stream, n_elems).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    let mut bld = ctx
-        .stream
-        .launch_builder(m3k.rmsnorm_gated_bwd_typed.i32.get(dtype));
-    let dy = dy_t.cached_ptr();
-    let dz = dz_t.cached_ptr();
-    let dw = dw_t.cached_ptr();
-    let do_p = do_t.cached_ptr();
-    let y_p = y_t.cached_ptr();
-    let z_p = z_t.cached_ptr();
-    let w_p = w32.cached_ptr();
-    let r_p = r32.cached_ptr();
-    bld.arg(&dy);
-    bld.arg(&dz);
-    bld.arg(&dw);
-    bld.arg(&do_p);
-    bld.arg(&y_p);
-    bld.arg(&z_p);
-    bld.arg(&w_p);
-    bld.arg(&r_p);
-    bld.arg(&ni);
-    bld.arg(&dii);
-    bld.arg(&gsi);
-    unsafe { bld.launch(cfg) }.unwrap();
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx
+            .stream
+            .launch_builder(m3k.rmsnorm_gated_bwd_typed.i32.get(dtype));
+        let dy = dy_t.cached_ptr();
+        let dz = dz_t.cached_ptr();
+        let dw = dw_t.cached_ptr();
+        let do_p = do_t.cached_ptr();
+        let y_p = y_t.cached_ptr();
+        let z_p = z_t.cached_ptr();
+        let w_p = w32.cached_ptr();
+        let r_p = r32.cached_ptr();
+        bld.arg(&dy);
+        bld.arg(&dz);
+        bld.arg(&dw);
+        bld.arg(&do_p);
+        bld.arg(&y_p);
+        bld.arg(&z_p);
+        bld.arg(&w_p);
+        bld.arg(&r_p);
+        bld.arg(&ni);
+        bld.arg(&dii);
+        bld.arg(&gsi);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
     let dy_typ = download_typed(&ctx, &dy_t);
     let dz_typ = download_typed(&ctx, &dz_t);

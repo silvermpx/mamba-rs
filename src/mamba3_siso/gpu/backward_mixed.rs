@@ -26,7 +26,7 @@ use crate::gpu::blas::{
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_norm};
+use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_norm, y_runs, yz_runs};
 use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3LayerMixedActs, GpuMamba3MixedScratch,
     GpuMamba3MlpMixedActs,
@@ -300,27 +300,30 @@ fn gpu_backward_mamba3_layer_mixed(
         {
             let nw_ptr = lw.norm_gate_weight.ptr();
             let grid = crate::mamba3_siso::gpu::kernels::gated_norm_cfg(bt, di, hd);
-            let mut builder = ctx
-                .stream
-                .launch_builder(m3k.rmsnorm_gated_bwd_typed.get(width).get(dtype));
-            let dyp = msc.d_y_typed.cached_ptr();
-            let dzp = msc.d_z_typed.cached_ptr();
-            let dgp = msc.d_gated_typed.cached_ptr();
-            let yp = acts.y.cached_ptr();
-            let zp = acts.z.cached_ptr();
-            builder.arg(&dyp);
-            builder.arg(&dzp);
-            builder.arg(sc.d_norm_gate_w.inner_mut()); // f32 master grad accumulator
-            builder.arg(&dgp);
-            builder.arg(&yp);
-            builder.arg(&zp);
-            builder.arg(&nw_ptr);
-            builder.arg(acts.gated_rms_vals.inner());
-            builder.arg(&bt_i);
-            builder.arg(&di_i);
-            builder.arg(&hd_i);
-            unsafe { builder.launch(grid) }
-                .map_err(|e| format!("rmsnorm_gated_bwd typed B7: {:?}", e))?;
+            for (y_first, cfg) in y_runs(grid) {
+                let mut builder = ctx
+                    .stream
+                    .launch_builder(m3k.rmsnorm_gated_bwd_typed.get(width).get(dtype));
+                let dyp = msc.d_y_typed.cached_ptr();
+                let dzp = msc.d_z_typed.cached_ptr();
+                let dgp = msc.d_gated_typed.cached_ptr();
+                let yp = acts.y.cached_ptr();
+                let zp = acts.z.cached_ptr();
+                builder.arg(&dyp);
+                builder.arg(&dzp);
+                builder.arg(sc.d_norm_gate_w.inner_mut()); // f32 master grad accumulator
+                builder.arg(&dgp);
+                builder.arg(&yp);
+                builder.arg(&zp);
+                builder.arg(&nw_ptr);
+                builder.arg(acts.gated_rms_vals.inner());
+                builder.arg(&bt_i);
+                builder.arg(&di_i);
+                builder.arg(&hd_i);
+                builder.arg(&y_first);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("rmsnorm_gated_bwd typed B7: {:?}", e))?;
+            }
         }
         // Reduce d_norm_gate_w → lg.norm_gate_weight
         {
@@ -384,17 +387,21 @@ fn gpu_backward_mamba3_layer_mixed(
                 block_dim: (block_x, 1, 1),
                 shared_mem_bytes: 0,
             };
-            let mut builder = ctx
-                .stream
-                .launch_builder(m3k.m3_extract_da_cs_sum.get(width));
-            builder.arg(sc.da_cs_sum.inner_mut());
-            builder.arg(acts.da_cumsum_saved.inner());
-            builder.arg(&b);
-            builder.arg(&t);
-            builder.arg(&nh_i);
-            builder.arg(&cs);
-            unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("m3_extract_da_cs_sum mixed: {:?}", e))?;
+            for (y_first, z_first, cfg) in yz_runs(cfg) {
+                let mut builder = ctx
+                    .stream
+                    .launch_builder(m3k.m3_extract_da_cs_sum.get(width));
+                builder.arg(sc.da_cs_sum.inner_mut());
+                builder.arg(acts.da_cumsum_saved.inner());
+                builder.arg(&b);
+                builder.arg(&t);
+                builder.arg(&nh_i);
+                builder.arg(&cs);
+                builder.arg(&y_first);
+                builder.arg(&z_first);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("m3_extract_da_cs_sum mixed: {:?}", e))?;
+            }
         }
 
         // m3_dqkv typed assigns every element of d_q, d_k and d_x it owns, so
@@ -470,23 +477,27 @@ fn gpu_backward_mamba3_layer_mixed(
                     shared_mem_bytes: ((cs_u * ds + cs_u * hd + cs_u) * std::mem::size_of::<f32>())
                         as u32,
                 };
-                let mut sb = ctx
-                    .stream
-                    .launch_builder(m3k.m3_dqkv_state_terms_typed.get(width).get(dtype));
-                let q_p = acts.q.cached_ptr();
-                let dy_p = msc.d_y_typed.cached_ptr();
-                sb.arg(sc.dstate_terms.inner_mut());
-                sb.arg(&q_p);
-                sb.arg(acts.da_cumsum_saved.inner());
-                sb.arg(&dy_p);
-                sb.arg(&b);
-                sb.arg(&t);
-                sb.arg(&nh_i);
-                sb.arg(&hd_i);
-                sb.arg(&ds_i);
-                sb.arg(&cs);
-                unsafe { sb.launch(st_cfg) }
-                    .map_err(|e| format!("m3_dqkv_state_terms typed: {:?}", e))?;
+                for (y_first, z_first, cfg) in yz_runs(st_cfg) {
+                    let mut sb = ctx
+                        .stream
+                        .launch_builder(m3k.m3_dqkv_state_terms_typed.get(width).get(dtype));
+                    let q_p = acts.q.cached_ptr();
+                    let dy_p = msc.d_y_typed.cached_ptr();
+                    sb.arg(sc.dstate_terms.inner_mut());
+                    sb.arg(&q_p);
+                    sb.arg(acts.da_cumsum_saved.inner());
+                    sb.arg(&dy_p);
+                    sb.arg(&b);
+                    sb.arg(&t);
+                    sb.arg(&nh_i);
+                    sb.arg(&hd_i);
+                    sb.arg(&ds_i);
+                    sb.arg(&cs);
+                    sb.arg(&y_first);
+                    sb.arg(&z_first);
+                    unsafe { sb.launch(cfg) }
+                        .map_err(|e| format!("m3_dqkv_state_terms typed: {:?}", e))?;
+                }
 
                 let nc_i = nc as i32;
                 let mut pb = ctx
@@ -521,35 +532,39 @@ fn gpu_backward_mamba3_layer_mixed(
                 },
                 width,
             );
-            let mut builder = ctx.stream.launch_builder(dqkv);
-            builder.arg(sc.d_q.inner_mut()); // dQ_mid
-            builder.arg(sc.d_k.inner_mut()); // dK_mid
-            builder.arg(sc.d_x.inner_mut()); // dV
-            builder.arg(sc.d_alpha.inner_mut()); // dADT
-            builder.arg(sc.d_beta.inner_mut()); // dQK_dot
-            builder.arg(sc.axis0_partials.inner_mut()); // dD_partials [B*nh] (no-atomics partials)
-            let q_p = acts.q.cached_ptr(); // typed Q_rot
-            let ks_p = acts.k_scaled_saved.cached_ptr(); // typed K_scaled
-            let v_p = acts.x.cached_ptr(); // typed V = x
-            let dy_p = msc.d_y_typed.cached_ptr(); // typed dO = d_y
-            builder.arg(&q_p);
-            builder.arg(&ks_p);
-            builder.arg(&v_p);
-            builder.arg(acts.da_cumsum_saved.inner());
-            builder.arg(sc.da_cs_sum.inner());
-            builder.arg(acts.qk_dot_saved.inner());
-            builder.arg(acts.chunk_states_saved.inner());
-            builder.arg(&dy_p);
-            builder.arg(&dp_ptr);
-            builder.arg(sc.dstate_enter.inner());
-            builder.arg(&b);
-            builder.arg(&t);
-            builder.arg(&nh_i);
-            builder.arg(&hd_i);
-            builder.arg(&ds_i);
-            builder.arg(&cs);
-            builder.arg(&use_pair_mats);
-            unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv_typed B6: {:?}", e))?;
+            for (y_first, z_first, cfg) in yz_runs(cfg) {
+                let mut builder = ctx.stream.launch_builder(dqkv);
+                builder.arg(sc.d_q.inner_mut()); // dQ_mid
+                builder.arg(sc.d_k.inner_mut()); // dK_mid
+                builder.arg(sc.d_x.inner_mut()); // dV
+                builder.arg(sc.d_alpha.inner_mut()); // dADT
+                builder.arg(sc.d_beta.inner_mut()); // dQK_dot
+                builder.arg(sc.axis0_partials.inner_mut()); // dD_partials [B*nh] (no-atomics partials)
+                let q_p = acts.q.cached_ptr(); // typed Q_rot
+                let ks_p = acts.k_scaled_saved.cached_ptr(); // typed K_scaled
+                let v_p = acts.x.cached_ptr(); // typed V = x
+                let dy_p = msc.d_y_typed.cached_ptr(); // typed dO = d_y
+                builder.arg(&q_p);
+                builder.arg(&ks_p);
+                builder.arg(&v_p);
+                builder.arg(acts.da_cumsum_saved.inner());
+                builder.arg(sc.da_cs_sum.inner());
+                builder.arg(acts.qk_dot_saved.inner());
+                builder.arg(acts.chunk_states_saved.inner());
+                builder.arg(&dy_p);
+                builder.arg(&dp_ptr);
+                builder.arg(sc.dstate_enter.inner());
+                builder.arg(&b);
+                builder.arg(&t);
+                builder.arg(&nh_i);
+                builder.arg(&hd_i);
+                builder.arg(&ds_i);
+                builder.arg(&cs);
+                builder.arg(&use_pair_mats);
+                builder.arg(&y_first);
+                builder.arg(&z_first);
+                unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv_typed B6: {:?}", e))?;
+            }
         }
         // Stage 2: reduce dD_partials[B*nc, nh] → lg.d_param[nh] (accumulate=1).
         {
@@ -604,32 +619,36 @@ fn gpu_backward_mamba3_layer_mixed(
                     0
                 },
             };
-            let mut builder = ctx.stream.launch_builder(dqktheta);
-            builder.arg(sc.d_c_pre_rope.inner_mut());
-            builder.arg(sc.d_b_pre_rope.inner_mut());
-            builder.arg(sc.d_angle_cumsum.inner_mut());
-            let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
-            let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
-            builder.arg(sc.d_scale.inner_mut());
-            builder.arg(sc.d_gamma_par.inner_mut());
-            let cb_p = acts.c_biased.cached_ptr(); // typed Q_raw
-            let bb_p = acts.b_biased.cached_ptr(); // typed K_raw
-            builder.arg(&cb_p);
-            builder.arg(&bb_p);
-            builder.arg(&scale_in_ptr);
-            builder.arg(&gamma_in_ptr);
-            builder.arg(acts.angle_cumsum.inner());
-            builder.arg(sc.d_q.inner());
-            builder.arg(sc.d_k.inner());
-            builder.arg(sc.d_beta.inner());
-            builder.arg(&b);
-            builder.arg(&t);
-            builder.arg(&nh_i);
-            builder.arg(&ds_i);
-            builder.arg(&na_i);
-            builder.arg(&cs);
-            builder.arg(&dqkt_staging);
-            unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqktheta_typed B6: {:?}", e))?;
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut builder = ctx.stream.launch_builder(dqktheta);
+                builder.arg(sc.d_c_pre_rope.inner_mut());
+                builder.arg(sc.d_b_pre_rope.inner_mut());
+                builder.arg(sc.d_angle_cumsum.inner_mut());
+                let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
+                let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
+                builder.arg(sc.d_scale.inner_mut());
+                builder.arg(sc.d_gamma_par.inner_mut());
+                let cb_p = acts.c_biased.cached_ptr(); // typed Q_raw
+                let bb_p = acts.b_biased.cached_ptr(); // typed K_raw
+                builder.arg(&cb_p);
+                builder.arg(&bb_p);
+                builder.arg(&scale_in_ptr);
+                builder.arg(&gamma_in_ptr);
+                builder.arg(acts.angle_cumsum.inner());
+                builder.arg(sc.d_q.inner());
+                builder.arg(sc.d_k.inner());
+                builder.arg(sc.d_beta.inner());
+                builder.arg(&b);
+                builder.arg(&t);
+                builder.arg(&nh_i);
+                builder.arg(&ds_i);
+                builder.arg(&na_i);
+                builder.arg(&cs);
+                builder.arg(&dqkt_staging);
+                builder.arg(&y_first);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("m3_dqktheta_typed B6: {:?}", e))?;
+            }
         }
         // colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
         {
@@ -690,21 +709,24 @@ fn gpu_backward_mamba3_layer_mixed(
         let contrib_dt_ptr = sc.axis0_partials.cached_ptr() + contrib_dt_offset_bytes;
         // Stage 1
         {
-            let mut builder = ctx
-                .stream
-                .launch_builder(m3k.m3_angle_dt_bwd_seq.get(width));
-            builder.arg(&contrib_angles_ptr);
-            builder.arg(&contrib_dt_ptr);
-            builder.arg(sc.d_angle_cumsum.inner());
-            builder.arg(acts.angles_raw.inner());
-            builder.arg(acts.dt.inner());
-            builder.arg(&b);
-            builder.arg(&t);
-            builder.arg(&nh_i);
-            builder.arg(&na_i);
             let grid = m3k.angle_backward_cfg(dims.batch, dims.seq_len, nh, na);
-            unsafe { builder.launch(grid) }
-                .map_err(|e| format!("m3_angle_dt_bwd_seq mixed stage1: {:?}", e))?;
+            for (y_first, cfg) in y_runs(grid) {
+                let mut builder = ctx
+                    .stream
+                    .launch_builder(m3k.m3_angle_dt_bwd_seq.get(width));
+                builder.arg(&contrib_angles_ptr);
+                builder.arg(&contrib_dt_ptr);
+                builder.arg(sc.d_angle_cumsum.inner());
+                builder.arg(acts.angles_raw.inner());
+                builder.arg(acts.dt.inner());
+                builder.arg(&b);
+                builder.arg(&t);
+                builder.arg(&nh_i);
+                builder.arg(&na_i);
+                builder.arg(&y_first);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("m3_angle_dt_bwd_seq mixed stage1: {:?}", e))?;
+            }
         }
         // Stage 2a: reduce nh → d_angles_raw[B*T*na]
         m3k.launch_axis0_sum(
@@ -1111,29 +1133,32 @@ fn sequential_ssm_backward_mixed(
         msc.d_y_typed.cached_ptr(),
     );
     let dp_ptr = lw_master.d_param.raw_ptr(&ctx.stream);
-    let mut bptt = ctx.stream.launch_builder(kernel);
-    bptt.arg(acts.h_saved.inner());
-    bptt.arg(acts.k_prev_saved.inner());
-    bptt.arg(acts.v_prev_saved.inner());
-    bptt.arg(&x);
-    bptt.arg(&k);
-    bptt.arg(&q);
-    bptt.arg(msc.alpha.inner());
-    bptt.arg(msc.beta.inner());
-    bptt.arg(msc.gamma.inner());
-    bptt.arg(&dp_ptr);
-    bptt.arg(&dy);
-    bptt.arg(sc.d_x.inner_mut());
-    bptt.arg(sc.d_k.inner_mut());
-    bptt.arg(sc.d_q.inner_mut());
-    bptt.arg(sc.d_alpha.inner_mut());
-    bptt.arg(sc.d_beta.inner_mut());
-    bptt.arg(sc.d_gamma.inner_mut());
-    bptt.arg(sc.d_d_local.inner_mut());
-    for d in [&b_i, &t_i, &nh_i, &hd_i, &ds_i] {
-        bptt.arg(d);
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bptt = ctx.stream.launch_builder(kernel);
+        bptt.arg(acts.h_saved.inner());
+        bptt.arg(acts.k_prev_saved.inner());
+        bptt.arg(acts.v_prev_saved.inner());
+        bptt.arg(&x);
+        bptt.arg(&k);
+        bptt.arg(&q);
+        bptt.arg(msc.alpha.inner());
+        bptt.arg(msc.beta.inner());
+        bptt.arg(msc.gamma.inner());
+        bptt.arg(&dp_ptr);
+        bptt.arg(&dy);
+        bptt.arg(sc.d_x.inner_mut());
+        bptt.arg(sc.d_k.inner_mut());
+        bptt.arg(sc.d_q.inner_mut());
+        bptt.arg(sc.d_alpha.inner_mut());
+        bptt.arg(sc.d_beta.inner_mut());
+        bptt.arg(sc.d_gamma.inner_mut());
+        bptt.arg(sc.d_d_local.inner_mut());
+        for d in [&b_i, &t_i, &nh_i, &hd_i, &ds_i] {
+            bptt.arg(d);
+        }
+        bptt.arg(&y_first);
+        unsafe { bptt.launch(cfg) }.map_err(|e| format!("m3_backward_seq mixed B6: {e:?}"))?;
     }
-    unsafe { bptt.launch(cfg) }.map_err(|e| format!("m3_backward_seq mixed B6: {e:?}"))?;
 
     if na > 0 {
         let na_i = na as i32;

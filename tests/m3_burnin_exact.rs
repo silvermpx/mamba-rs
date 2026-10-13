@@ -9,7 +9,7 @@ use mamba_rs::gpu::buffers::GpuByteBuffer;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::kernels::cuda_include_paths;
-use mamba_rs::gpu::launch::IndexWidth;
+use mamba_rs::gpu::launch::{IndexWidth, y_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use std::sync::Arc;
 
@@ -291,6 +291,7 @@ fn enqueue(
     shape: Shape,
     fixture: &Fixture,
     output: &[Buffer; 7],
+    runs: bool,
 ) {
     // Each arm gets a separate copy of the same immutable initial SSM/K/V.
     for (dst, src) in output[..3].iter().zip(&fixture.state) {
@@ -313,15 +314,25 @@ fn enqueue(
         }
     });
     let dims = [shape.b, shape.t, shape.nh, shape.hd, shape.ds].map(|value| value as i32);
-    let mut builder = stream.launch_builder(function);
-    for ptr in &ptrs {
-        builder.arg(ptr);
+    let launches: Vec<(i32, LaunchConfig)> = if runs {
+        y_runs(shape.cfg()).collect()
+    } else {
+        vec![(0, shape.cfg())]
+    };
+    for (y_first, cfg) in launches {
+        let mut builder = stream.launch_builder(function);
+        for ptr in &ptrs {
+            builder.arg(ptr);
+        }
+        for dim in &dims {
+            builder.arg(dim);
+        }
+        if runs {
+            builder.arg(&y_first);
+        }
+        // All pointers refer to disjoint, live allocations on this stream.
+        unsafe { builder.launch(cfg) }.expect("burn-in launch");
     }
-    for dim in &dims {
-        builder.arg(dim);
-    }
-    // All pointers refer to disjoint, live allocations on this stream.
-    unsafe { builder.launch(shape.cfg()) }.expect("burn-in launch");
 }
 
 fn assert_bytes(label: &str, actual: &[u8], expected: &[u8]) {
@@ -348,9 +359,11 @@ fn check_case(
         outputs(stream, shape, dtype, 0xa5),
         outputs(stream, shape, dtype, 0x5a),
     ];
-    for arm in 0..2 {
-        enqueue(stream, functions[arm], shape, &fixture, &arms[arm]);
-    }
+    // The released reference reads its head from `blockIdx.y` alone and
+    // takes no first block, so it launches whole; the production kernel
+    // launches in runs.
+    enqueue(stream, functions[0], shape, &fixture, &arms[0], false);
+    enqueue(stream, functions[1], shape, &fixture, &arms[1], true);
     stream.synchronize().unwrap();
     for (index, name) in OUTPUT_NAMES.into_iter().enumerate() {
         let label = format!("{label}, {name}");

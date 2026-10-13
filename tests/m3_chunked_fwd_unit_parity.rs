@@ -24,6 +24,7 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::kernels::state_capacity;
+use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::{
     Mamba3Kernels, chunk_fused_cfg, chunk_state_cfg, state_pass_fused_cfg,
 };
@@ -164,31 +165,34 @@ fn check_preprocess_chunks(dtype: WeightDtype) {
         shared_mem_bytes: 0,
     };
     let (bi, ti, nhi, dsi, csi) = (B as i32, T as i32, NH as i32, DS as i32, CHUNK_SIZE as i32);
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks.i32);
-    let (a, b, c, d, e, f, g, h) = (
-        ks_f32.cached_ptr(),
-        qk_f32.cached_ptr(),
-        scale_f32.cached_ptr(),
-        gamma_f32.cached_ptr(),
-        k_f32.cached_ptr(),
-        q_f32.cached_ptr(),
-        dt_buf.cached_ptr(),
-        trap_buf.cached_ptr(),
-    );
-    bld.arg(&a);
-    bld.arg(&b);
-    bld.arg(&c);
-    bld.arg(&d);
-    bld.arg(&e);
-    bld.arg(&f);
-    bld.arg(&g);
-    bld.arg(&h);
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&dsi);
-    bld.arg(&csi);
-    unsafe { bld.launch(cfg) }.unwrap();
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks.i32);
+        let (a, b, c, d, e, f, g, h) = (
+            ks_f32.cached_ptr(),
+            qk_f32.cached_ptr(),
+            scale_f32.cached_ptr(),
+            gamma_f32.cached_ptr(),
+            k_f32.cached_ptr(),
+            q_f32.cached_ptr(),
+            dt_buf.cached_ptr(),
+            trap_buf.cached_ptr(),
+        );
+        bld.arg(&a);
+        bld.arg(&b);
+        bld.arg(&c);
+        bld.arg(&d);
+        bld.arg(&e);
+        bld.arg(&f);
+        bld.arg(&g);
+        bld.arg(&h);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
 
     let ks_ref = download_f32(&ctx, &ks_f32, ks_n);
@@ -205,33 +209,36 @@ fn check_preprocess_chunks(dtype: WeightDtype) {
     let gamma_t = GpuBuffer::zeros(&ctx.stream, th_n).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    let mut bld = ctx
-        .stream
-        .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
-    let (a, b, c, d, e, f, g, h) = (
-        ks_t.cached_ptr(),
-        qk_t.cached_ptr(),
-        scale_t.cached_ptr(),
-        gamma_t.cached_ptr(),
-        k_t.cached_ptr(),
-        q_t.cached_ptr(),
-        dt_buf.cached_ptr(),
-        trap_buf.cached_ptr(),
-    );
-    bld.arg(&a);
-    bld.arg(&b);
-    bld.arg(&c);
-    bld.arg(&d);
-    bld.arg(&e);
-    bld.arg(&f);
-    bld.arg(&g);
-    bld.arg(&h);
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&dsi);
-    bld.arg(&csi);
-    unsafe { bld.launch(cfg) }.unwrap();
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx
+            .stream
+            .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
+        let (a, b, c, d, e, f, g, h) = (
+            ks_t.cached_ptr(),
+            qk_t.cached_ptr(),
+            scale_t.cached_ptr(),
+            gamma_t.cached_ptr(),
+            k_t.cached_ptr(),
+            q_t.cached_ptr(),
+            dt_buf.cached_ptr(),
+            trap_buf.cached_ptr(),
+        );
+        bld.arg(&a);
+        bld.arg(&b);
+        bld.arg(&c);
+        bld.arg(&d);
+        bld.arg(&e);
+        bld.arg(&f);
+        bld.arg(&g);
+        bld.arg(&h);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
 
     let ks_got = download_typed(&ctx, &ks_t);
@@ -295,24 +302,27 @@ fn check_chunk_state_fwd(dtype: WeightDtype) {
         DS as i32,
         CHUNK_SIZE as i32,
     );
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
-    let (a, b, c, d) = (
-        states_f32.cached_ptr(),
-        x_f32.cached_ptr(),
-        ks_f32_buf.cached_ptr(),
-        da_buf.cached_ptr(),
-    );
-    bld.arg(&a);
-    bld.arg(&b);
-    bld.arg(&c);
-    bld.arg(&d);
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&hdi);
-    bld.arg(&dsi);
-    bld.arg(&csi);
-    unsafe { bld.launch(cfg) }.unwrap();
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
+        let (a, b, c, d) = (
+            states_f32.cached_ptr(),
+            x_f32.cached_ptr(),
+            ks_f32_buf.cached_ptr(),
+            da_buf.cached_ptr(),
+        );
+        bld.arg(&a);
+        bld.arg(&b);
+        bld.arg(&c);
+        bld.arg(&d);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
     let ref_states = download_f32(&ctx, &states_f32, states_n);
 
@@ -321,26 +331,29 @@ fn check_chunk_state_fwd(dtype: WeightDtype) {
     let ks_t = upload_typed(&ctx, &ks_vals, dtype);
     let states_t = GpuBuffer::zeros(&ctx.stream, states_n).unwrap();
     ctx.stream.synchronize().unwrap();
-    let mut bld = ctx
-        .stream
-        .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
-    let (a, b, c, d) = (
-        states_t.cached_ptr(),
-        x_t.cached_ptr(),
-        ks_t.cached_ptr(),
-        da_buf.cached_ptr(),
-    );
-    bld.arg(&a);
-    bld.arg(&b);
-    bld.arg(&c);
-    bld.arg(&d);
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&hdi);
-    bld.arg(&dsi);
-    bld.arg(&csi);
-    unsafe { bld.launch(cfg) }.unwrap();
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx
+            .stream
+            .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
+        let (a, b, c, d) = (
+            states_t.cached_ptr(),
+            x_t.cached_ptr(),
+            ks_t.cached_ptr(),
+            da_buf.cached_ptr(),
+        );
+        bld.arg(&a);
+        bld.arg(&b);
+        bld.arg(&c);
+        bld.arg(&d);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
     let got_states = download_f32(&ctx, &states_t, states_n);
 
@@ -473,16 +486,19 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                             adt.cached_ptr(),
                             da.cached_ptr(),
                         ];
-                        let mut bld = ctx
-                            .stream
-                            .launch_builder(m3k.m3_chunk_pre_state_fused_typed.i32.get(dtype));
-                        for ptr in &ptrs {
-                            bld.arg(ptr);
+                        for (y_first, cfg) in y_runs(fused_cfg) {
+                            let mut bld = ctx
+                                .stream
+                                .launch_builder(m3k.m3_chunk_pre_state_fused_typed.i32.get(dtype));
+                            for ptr in &ptrs {
+                                bld.arg(ptr);
+                            }
+                            for dim in &dims {
+                                bld.arg(dim);
+                            }
+                            bld.arg(&y_first);
+                            unsafe { bld.launch(cfg) }.unwrap();
                         }
-                        for dim in &dims {
-                            bld.arg(dim);
-                        }
-                        unsafe { bld.launch(fused_cfg) }.unwrap();
                     } else {
                         let block_x = nh.min(256) as u32;
                         let da_cfg = LaunchConfig {
@@ -494,15 +510,19 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                             block_dim: (block_x, 1, 1),
                             shared_mem_bytes: 0,
                         };
-                        let mut bld = ctx.stream.launch_builder(&m3k.m3_da_cumsum.i32);
-                        let (da_ptr, adt_ptr) = (da.cached_ptr(), adt.cached_ptr());
-                        bld.arg(&da_ptr);
-                        bld.arg(&adt_ptr);
-                        let da_dims = [dims[0], dims[1], dims[2], dims[5]];
-                        for dim in &da_dims {
-                            bld.arg(dim);
+                        for (y_first, z_first, cfg) in yz_runs(da_cfg) {
+                            let mut bld = ctx.stream.launch_builder(&m3k.m3_da_cumsum.i32);
+                            let (da_ptr, adt_ptr) = (da.cached_ptr(), adt.cached_ptr());
+                            bld.arg(&da_ptr);
+                            bld.arg(&adt_ptr);
+                            let da_dims = [dims[0], dims[1], dims[2], dims[5]];
+                            for dim in &da_dims {
+                                bld.arg(dim);
+                            }
+                            bld.arg(&y_first);
+                            bld.arg(&z_first);
+                            unsafe { bld.launch(cfg) }.unwrap();
                         }
-                        unsafe { bld.launch(da_cfg) }.unwrap();
                         let ptrs = [
                             ks.cached_ptr(),
                             qk.cached_ptr(),
@@ -513,32 +533,38 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                             dt.cached_ptr(),
                             trap.cached_ptr(),
                         ];
-                        let mut bld = ctx
-                            .stream
-                            .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
-                        for ptr in &ptrs {
-                            bld.arg(ptr);
+                        for (y_first, cfg) in y_runs(pre_cfg) {
+                            let mut bld = ctx
+                                .stream
+                                .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
+                            for ptr in &ptrs {
+                                bld.arg(ptr);
+                            }
+                            for dim in &pre_dims {
+                                bld.arg(dim);
+                            }
+                            bld.arg(&y_first);
+                            unsafe { bld.launch(cfg) }.unwrap();
                         }
-                        for dim in &pre_dims {
-                            bld.arg(dim);
-                        }
-                        unsafe { bld.launch(pre_cfg) }.unwrap();
                         let ptrs = [
                             states.cached_ptr(),
                             x.cached_ptr(),
                             ks.cached_ptr(),
                             da.cached_ptr(),
                         ];
-                        let mut bld = ctx
-                            .stream
-                            .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
-                        for ptr in &ptrs {
-                            bld.arg(ptr);
+                        for (y_first, cfg) in y_runs(state_cfg) {
+                            let mut bld = ctx
+                                .stream
+                                .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
+                            for ptr in &ptrs {
+                                bld.arg(ptr);
+                            }
+                            for dim in &dims {
+                                bld.arg(dim);
+                            }
+                            bld.arg(&y_first);
+                            unsafe { bld.launch(cfg) }.unwrap();
                         }
-                        for dim in &dims {
-                            bld.arg(dim);
-                        }
-                        unsafe { bld.launch(state_cfg) }.unwrap();
                     }
                     ctx.stream.synchronize().unwrap();
                     [
@@ -683,14 +709,18 @@ fn m3_state_pass_fused_matches_separate_bits() {
                         dt.cached_ptr(),
                         trap.cached_ptr(),
                     ];
-                    let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_entering_state.i32);
-                    for ptr in &ptrs {
-                        bld.arg(ptr);
+                    for (y_first, z_first, cfg) in yz_runs(cfg) {
+                        let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_entering_state.i32);
+                        for ptr in &ptrs {
+                            bld.arg(ptr);
+                        }
+                        for arg in [&bi, &nhi, &hdi, &dsi, &ti] {
+                            bld.arg(arg);
+                        }
+                        bld.arg(&y_first);
+                        bld.arg(&z_first);
+                        unsafe { bld.launch(cfg) }.unwrap();
                     }
-                    for arg in [&bi, &nhi, &hdi, &dsi, &ti] {
-                        bld.arg(arg);
-                    }
-                    unsafe { bld.launch(cfg) }.unwrap();
                     init.cached_ptr()
                 } else {
                     0
@@ -712,14 +742,18 @@ fn m3_state_pass_fused_matches_separate_bits() {
                         da.cached_ptr(),
                         init_ptr,
                     ];
-                    let mut bld = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd.i32);
-                    for ptr in &ptrs {
-                        bld.arg(ptr);
+                    for (y_first, z_first, cfg) in yz_runs(cfg) {
+                        let mut bld = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd.i32);
+                        for ptr in &ptrs {
+                            bld.arg(ptr);
+                        }
+                        for arg in [&bi, &nci, &nhi, &hdi, &dsi, &csi, &ti] {
+                            bld.arg(arg);
+                        }
+                        bld.arg(&y_first);
+                        bld.arg(&z_first);
+                        unsafe { bld.launch(cfg) }.unwrap();
                     }
-                    for arg in [&bi, &nci, &nhi, &hdi, &dsi, &csi, &ti] {
-                        bld.arg(arg);
-                    }
-                    unsafe { bld.launch(cfg) }.unwrap();
                 }
                 {
                     let cfg = LaunchConfig {
@@ -735,16 +769,19 @@ fn m3_state_pass_fused_matches_separate_bits() {
                         k_flat.cached_ptr(),
                         x_flat.cached_ptr(),
                     ];
-                    let mut bld = ctx
-                        .stream
-                        .launch_builder(m3k.m3_writeback_parallel_states_typed.i32.get(dtype));
-                    for ptr in &ptrs {
-                        bld.arg(ptr);
+                    for (y_first, cfg) in y_runs(cfg) {
+                        let mut bld = ctx
+                            .stream
+                            .launch_builder(m3k.m3_writeback_parallel_states_typed.i32.get(dtype));
+                        for ptr in &ptrs {
+                            bld.arg(ptr);
+                        }
+                        for arg in [&bi, &ti, &nhi, &hdi, &dsi] {
+                            bld.arg(arg);
+                        }
+                        bld.arg(&y_first);
+                        unsafe { bld.launch(cfg) }.unwrap();
                     }
-                    for arg in [&bi, &ti, &nhi, &hdi, &dsi] {
-                        bld.arg(arg);
-                    }
-                    unsafe { bld.launch(cfg) }.unwrap();
                 }
                 // The fused launch, its seed the persistent states themselves.
                 let states_b = upload_f32(&ctx, &contrib);
@@ -770,16 +807,19 @@ fn m3_state_pass_fused_matches_separate_bits() {
                     let cfg = state_pass_fused_cfg(batch, nh, hd, ds);
                     let (bx, by, bz) = cfg.block_dim;
                     assert!((1..=1024).contains(&(bx * by * bz)), "{label}: block");
-                    let mut bld = ctx
-                        .stream
-                        .launch_builder(m3k.m3_state_pass_fused_typed.i32.get(dtype));
-                    for ptr in &ptrs {
-                        bld.arg(ptr);
+                    for (y_first, cfg) in y_runs(cfg) {
+                        let mut bld = ctx
+                            .stream
+                            .launch_builder(m3k.m3_state_pass_fused_typed.i32.get(dtype));
+                        for ptr in &ptrs {
+                            bld.arg(ptr);
+                        }
+                        for arg in [&bi, &nci, &nhi, &hdi, &dsi, &csi, &ti] {
+                            bld.arg(arg);
+                        }
+                        bld.arg(&y_first);
+                        unsafe { bld.launch(cfg) }.unwrap();
                     }
-                    for arg in [&bi, &nci, &nhi, &hdi, &dsi, &csi, &ti] {
-                        bld.arg(arg);
-                    }
-                    unsafe { bld.launch(cfg) }.unwrap();
                 }
                 ctx.stream.synchronize().unwrap();
                 let pairs = [
@@ -845,29 +885,32 @@ fn check_writeback_parallel_states(dtype: WeightDtype) {
         shared_mem_bytes: 0,
     };
     let (bi, ti, nhi, hdi, dsi) = (B as i32, T as i32, NH as i32, HD as i32, DS as i32);
-    let mut bld = ctx
-        .stream
-        .launch_builder(&m3k.m3_writeback_parallel_states.i32);
-    let (a, b, c, d, e, f) = (
-        ssm_ref.cached_ptr(),
-        k_ref_out.cached_ptr(),
-        v_ref_out.cached_ptr(),
-        final_f32.cached_ptr(),
-        k_f32.cached_ptr(),
-        x_f32.cached_ptr(),
-    );
-    bld.arg(&a);
-    bld.arg(&b);
-    bld.arg(&c);
-    bld.arg(&d);
-    bld.arg(&e);
-    bld.arg(&f);
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&hdi);
-    bld.arg(&dsi);
-    unsafe { bld.launch(cfg) }.unwrap();
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx
+            .stream
+            .launch_builder(&m3k.m3_writeback_parallel_states.i32);
+        let (a, b, c, d, e, f) = (
+            ssm_ref.cached_ptr(),
+            k_ref_out.cached_ptr(),
+            v_ref_out.cached_ptr(),
+            final_f32.cached_ptr(),
+            k_f32.cached_ptr(),
+            x_f32.cached_ptr(),
+        );
+        bld.arg(&a);
+        bld.arg(&b);
+        bld.arg(&c);
+        bld.arg(&d);
+        bld.arg(&e);
+        bld.arg(&f);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
     let ssm_ref_v = download_f32(&ctx, &ssm_ref, ssm_n);
     let k_ref_v = download_f32(&ctx, &k_ref_out, k_n);
@@ -880,29 +923,32 @@ fn check_writeback_parallel_states(dtype: WeightDtype) {
     let k_got_out = GpuBuffer::zeros(&ctx.stream, k_n).unwrap();
     let v_got_out = GpuBuffer::zeros(&ctx.stream, v_n).unwrap();
     ctx.stream.synchronize().unwrap();
-    let mut bld = ctx
-        .stream
-        .launch_builder(m3k.m3_writeback_parallel_states_typed.i32.get(dtype));
-    let (a, b, c, d, e, f) = (
-        ssm_got.cached_ptr(),
-        k_got_out.cached_ptr(),
-        v_got_out.cached_ptr(),
-        final_f32.cached_ptr(),
-        k_t.cached_ptr(),
-        x_t.cached_ptr(),
-    );
-    bld.arg(&a);
-    bld.arg(&b);
-    bld.arg(&c);
-    bld.arg(&d);
-    bld.arg(&e);
-    bld.arg(&f);
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&hdi);
-    bld.arg(&dsi);
-    unsafe { bld.launch(cfg) }.unwrap();
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx
+            .stream
+            .launch_builder(m3k.m3_writeback_parallel_states_typed.i32.get(dtype));
+        let (a, b, c, d, e, f) = (
+            ssm_got.cached_ptr(),
+            k_got_out.cached_ptr(),
+            v_got_out.cached_ptr(),
+            final_f32.cached_ptr(),
+            k_t.cached_ptr(),
+            x_t.cached_ptr(),
+        );
+        bld.arg(&a);
+        bld.arg(&b);
+        bld.arg(&c);
+        bld.arg(&d);
+        bld.arg(&e);
+        bld.arg(&f);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
     let ssm_got_v = download_f32(&ctx, &ssm_got, ssm_n);
     let k_got_v = download_f32(&ctx, &k_got_out, k_n);
@@ -968,32 +1014,35 @@ fn check_chunk_scan_fwd(dtype: WeightDtype) {
         DS as i32,
         CHUNK_SIZE as i32,
     );
-    let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd.i32);
-    let (a, b, c, d, e, f, g, h) = (
-        y_f32.cached_ptr(),
-        x_f32.cached_ptr(),
-        q_f32.cached_ptr(),
-        ks_f32_buf.cached_ptr(),
-        qk_buf.cached_ptr(),
-        da_buf.cached_ptr(),
-        prev_buf.cached_ptr(),
-        d_buf.cached_ptr(),
-    );
-    bld.arg(&a);
-    bld.arg(&b);
-    bld.arg(&c);
-    bld.arg(&d);
-    bld.arg(&e);
-    bld.arg(&f);
-    bld.arg(&g);
-    bld.arg(&h);
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&hdi);
-    bld.arg(&dsi);
-    bld.arg(&csi);
-    unsafe { bld.launch(cfg) }.unwrap();
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd.i32);
+        let (a, b, c, d, e, f, g, h) = (
+            y_f32.cached_ptr(),
+            x_f32.cached_ptr(),
+            q_f32.cached_ptr(),
+            ks_f32_buf.cached_ptr(),
+            qk_buf.cached_ptr(),
+            da_buf.cached_ptr(),
+            prev_buf.cached_ptr(),
+            d_buf.cached_ptr(),
+        );
+        bld.arg(&a);
+        bld.arg(&b);
+        bld.arg(&c);
+        bld.arg(&d);
+        bld.arg(&e);
+        bld.arg(&f);
+        bld.arg(&g);
+        bld.arg(&h);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
     let y_ref = download_f32(&ctx, &y_f32, y_n);
 
@@ -1003,34 +1052,37 @@ fn check_chunk_scan_fwd(dtype: WeightDtype) {
     let ks_t = upload_typed(&ctx, &ks_vals, dtype);
     let y_t = DtypedBuf::zeros(&ctx.stream, y_n, dtype).unwrap();
     ctx.stream.synchronize().unwrap();
-    let mut bld = ctx
-        .stream
-        .launch_builder(m3k.m3_chunk_scan_fwd_typed.i32.get(dtype));
-    let (a, b, c, d, e, f, g, h) = (
-        y_t.cached_ptr(),
-        x_t.cached_ptr(),
-        q_t.cached_ptr(),
-        ks_t.cached_ptr(),
-        qk_buf.cached_ptr(),
-        da_buf.cached_ptr(),
-        prev_buf.cached_ptr(),
-        d_buf.cached_ptr(),
-    );
-    bld.arg(&a);
-    bld.arg(&b);
-    bld.arg(&c);
-    bld.arg(&d);
-    bld.arg(&e);
-    bld.arg(&f);
-    bld.arg(&g);
-    bld.arg(&h);
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&nhi);
-    bld.arg(&hdi);
-    bld.arg(&dsi);
-    bld.arg(&csi);
-    unsafe { bld.launch(cfg) }.unwrap();
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut bld = ctx
+            .stream
+            .launch_builder(m3k.m3_chunk_scan_fwd_typed.i32.get(dtype));
+        let (a, b, c, d, e, f, g, h) = (
+            y_t.cached_ptr(),
+            x_t.cached_ptr(),
+            q_t.cached_ptr(),
+            ks_t.cached_ptr(),
+            qk_buf.cached_ptr(),
+            da_buf.cached_ptr(),
+            prev_buf.cached_ptr(),
+            d_buf.cached_ptr(),
+        );
+        bld.arg(&a);
+        bld.arg(&b);
+        bld.arg(&c);
+        bld.arg(&d);
+        bld.arg(&e);
+        bld.arg(&f);
+        bld.arg(&g);
+        bld.arg(&h);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        bld.arg(&y_first);
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
     let y_got = download_typed(&ctx, &y_t);
 

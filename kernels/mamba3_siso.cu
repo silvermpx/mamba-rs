@@ -81,10 +81,11 @@ extern "C" __global__ void NAME(                                               \
     const float* a_val, /* [B * nh] */                                         \
     const float* trap,  /* [B * nh] */                                         \
     const float* D,     /* [nh] */                                             \
-    int batch, int nh, int hd, int ds                                          \
+    int batch, int nh, int hd, int ds,                                         \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
-    int h = blockIdx.y;                                                        \
+    int h = y_first + blockIdx.y;                                              \
     int p = threadIdx.x;                                                       \
     if (b >= batch || h >= nh || p >= hd) return;                              \
                                                                                \
@@ -178,10 +179,11 @@ extern "C" __global__ void NAME(                                             \
     const TY* q_cur,                                                         \
     const float* dt, const float* a_val, const float* trap,                  \
     const float* D,                                                          \
-    int batch, int nh, int hd, int ds                                        \
+    int batch, int nh, int hd, int ds,                                       \
+    int y_first /* this run's first y block */                               \
 ) {                                                                          \
     IDX b = blockIdx.x;                                                      \
-    int h = blockIdx.y;                                                      \
+    int h = y_first + blockIdx.y;                                            \
     int p = threadIdx.x;                                                     \
     if (b >= batch || h >= nh || p >= hd) return;                            \
     int d_inner = nh * hd;                                                   \
@@ -274,10 +276,11 @@ __device__ __forceinline__ void m3_burnin_fwd_tpl(
     const float* __restrict__ beta_flat,   // [B * T * nh]
     const float* __restrict__ gamma_flat,  // [B * T * nh]
     const float* __restrict__ D,           // [nh]
-    int batch, int T, int nh, int hd, int ds
+    int batch, int T, int nh, int hd, int ds,
+    int y_first /* this run's first y block */
 ) {
     IDX b = blockIdx.x;
-    int h = blockIdx.y;
+    int h = y_first + blockIdx.y;
     int p = threadIdx.x;
     if (b >= batch || h >= nh || p >= hd) return;
 
@@ -395,12 +398,13 @@ void NAME(                                                                   \
     const float* __restrict__ q_flat, const float* __restrict__ alpha_flat,  \
     const float* __restrict__ beta_flat, const float* __restrict__ gamma_flat,\
     const float* __restrict__ D,                                             \
-    int batch, int T, int nh, int hd, int ds                                 \
+    int batch, int T, int nh, int hd, int ds,                                \
+    int y_first /* this run's first y block */                               \
 ) {                                                                          \
     m3_burnin_fwd_tpl<DS_VALUE, IDX>(                                        \
         ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved,           \
         v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat,         \
-        gamma_flat, D, batch, T, nh, hd, ds);                                \
+        gamma_flat, D, batch, T, nh, hd, ds, y_first);                       \
 }
 M3_BURNIN_FWD_ENTRY(m3_burnin_fwd, int, 0)
 M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_i64, long long, 0)
@@ -437,10 +441,11 @@ extern "C" __global__ void NAME(                                             \
     const float* beta_flat,                                                  \
     const float* gamma_flat,                                                 \
     const float* D,                                                          \
-    int batch, int T, int nh, int hd, int ds                                 \
+    int batch, int T, int nh, int hd, int ds,                                \
+    int y_first /* this run's first y block */                               \
 ) {                                                                          \
     IDX b = blockIdx.x;                                                      \
-    int h = blockIdx.y;                                                      \
+    int h = y_first + blockIdx.y;                                            \
     int p = threadIdx.x;                                                     \
     if (b >= batch || h >= nh || p >= hd) return;                            \
     int d_inner = nh * hd;                                                   \
@@ -530,10 +535,10 @@ __device__ __forceinline__ void NAME##_generic( \
     const float* beta_flat, \
     const float* gamma_flat, \
     const float* D, \
-    int batch, int T, int nh, int hd, int ds \
+    int batch, int T, int nh, int hd, int ds, int y_first \
 ) { \
     IDX b = blockIdx.x; \
-    int h = blockIdx.y; \
+    int h = y_first + blockIdx.y; \
     int p = threadIdx.x; \
     if (b >= batch || h >= nh || p >= hd) return; \
     int d_inner = nh * hd; \
@@ -616,10 +621,10 @@ __device__ __forceinline__ void NAME##_specialized( \
     const float* beta_flat, \
     const float* gamma_flat, \
     const float* D, \
-    int batch, int T, int nh, int hd, int ds \
+    int batch, int T, int nh, int hd, int ds, int y_first \
 ) { \
     IDX b = blockIdx.x; \
-    int h = blockIdx.y; \
+    int h = y_first + blockIdx.y; \
     int p = threadIdx.x; \
     if (b >= batch || h >= nh || p >= hd) return; \
     int d_inner = nh * hd; \
@@ -710,14 +715,14 @@ extern "C" __global__ void NAME( \
     const float* beta_flat, \
     const float* gamma_flat, \
     const float* D, \
-    int batch, int T, int nh, int hd, int ds \
+    int batch, int T, int nh, int hd, int ds, int y_first \
 ) { \
     switch (ds) { \
-    case 8: NAME##_specialized<8>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    case 16: NAME##_specialized<16>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    case 32: NAME##_specialized<32>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    case 64: NAME##_specialized<64>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
-    default: NAME##_generic(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds); return; \
+    case 8: NAME##_specialized<8>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
+    case 16: NAME##_specialized<16>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
+    case 32: NAME##_specialized<32>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
+    case 64: NAME##_specialized<64>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
+    default: NAME##_generic(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
     } \
 }
 
@@ -749,10 +754,11 @@ extern "C" __global__ void NAME(                                               \
     const float* beta_flat,   /* [B * T * nh] */                               \
     const float* gamma_flat,  /* [B * T * nh] */                               \
     const float* D,           /* [nh] */                                       \
-    int batch, int T, int nh, int hd, int ds                                   \
+    int batch, int T, int nh, int hd, int ds,                                  \
+    int y_first /* this run's first y block */                                 \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
-    int h = blockIdx.y;                                                        \
+    int h = y_first + blockIdx.y;                                              \
     int p = threadIdx.x;                                                       \
     if (b >= batch || h >= nh || p >= hd) return;                              \
                                                                                \
@@ -888,10 +894,11 @@ __device__ __forceinline__ void m3_backward_seq_tpl(
     float* __restrict__ d_beta,      // [B * T * nh] (lane-0 direct store per (b,t,h))
     float* __restrict__ d_gamma,     // [B * T * nh] (lane-0 direct store per (b,t,h))
     float* __restrict__ d_D_local,   // [B * d_inner] per-thread, reduced by m3_reduce_d_D
-    int batch, int T, int nh, int hd, int ds
+    int batch, int T, int nh, int hd, int ds,
+    int y_first /* this run's first y block */
 ) {
     IDX b = blockIdx.x;
-    int h = blockIdx.y;
+    int h = y_first + blockIdx.y;
     int p = threadIdx.x;
     if (b >= batch || h >= nh || p >= hd) return;
 
@@ -1128,13 +1135,14 @@ void NAME(                                                                   \
     float* __restrict__ d_x, float* __restrict__ d_k, float* __restrict__ d_q,\
     float* __restrict__ d_alpha, float* __restrict__ d_beta,                 \
     float* __restrict__ d_gamma, float* __restrict__ d_D_local,              \
-    int batch, int T, int nh, int hd, int ds                                 \
+    int batch, int T, int nh, int hd, int ds,                                \
+    int y_first /* this run's first y block */                               \
 ) {                                                                          \
     m3_backward_seq_tpl<DS_VALUE, IDX>(                                      \
         h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat,         \
         alpha_flat, beta_flat, gamma_flat, D, d_y_flat,                      \
         d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local,                  \
-        batch, T, nh, hd, ds);                                               \
+        batch, T, nh, hd, ds, y_first);                                      \
 }
 M3_BACKWARD_SEQ_ENTRY(m3_backward_seq, int, 0)
 M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_i64, long long, 0)

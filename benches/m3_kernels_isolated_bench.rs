@@ -10,6 +10,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 
 fn det_rand(n: usize, seed: u32) -> Vec<f32> {
@@ -132,36 +133,40 @@ fn m3_kernels_isolated_bench() {
 
     // m3_dqkv f32
     time_it("m3_dqkv f32", &|| {
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv.i32);
-        let args = [
-            dq.cached_ptr(),
-            dk.cached_ptr(),
-            dv.cached_ptr(),
-            dadt.cached_ptr(),
-            dqk.cached_ptr(),
-            dd.cached_ptr(),
-            q_f32.cached_ptr(),
-            ks_f32.cached_ptr(),
-            v_f32.cached_ptr(),
-            dcs_buf.cached_ptr(),
-            dcs_sum_buf.cached_ptr(),
-            qk_buf.cached_ptr(),
-            ssm_buf.cached_ptr(),
-            do_f32.cached_ptr(),
-            d_buf.cached_ptr(),
-            enter.cached_ptr(),
-        ];
-        for a in &args {
-            bld.arg(a);
+        for (y_first, z_first, cfg) in yz_runs(cfg) {
+            let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv.i32);
+            let args = [
+                dq.cached_ptr(),
+                dk.cached_ptr(),
+                dv.cached_ptr(),
+                dadt.cached_ptr(),
+                dqk.cached_ptr(),
+                dd.cached_ptr(),
+                q_f32.cached_ptr(),
+                ks_f32.cached_ptr(),
+                v_f32.cached_ptr(),
+                dcs_buf.cached_ptr(),
+                dcs_sum_buf.cached_ptr(),
+                qk_buf.cached_ptr(),
+                ssm_buf.cached_ptr(),
+                do_f32.cached_ptr(),
+                d_buf.cached_ptr(),
+                enter.cached_ptr(),
+            ];
+            for a in &args {
+                bld.arg(a);
+            }
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&nhi);
+            bld.arg(&hdi);
+            bld.arg(&dsi);
+            bld.arg(&csi);
+            bld.arg(&use_mats_i);
+            bld.arg(&y_first);
+            bld.arg(&z_first);
+            unsafe { bld.launch(cfg) }.unwrap();
         }
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&hdi);
-        bld.arg(&dsi);
-        bld.arg(&csi);
-        bld.arg(&use_mats_i);
-        unsafe { bld.launch(cfg) }.unwrap();
     });
 
     // m3_dqkv bf16 typed (production dtype)
@@ -170,38 +175,42 @@ fn m3_kernels_isolated_bench() {
     let v_t = upload_typed(&ctx, &det_rand(n_v, 0xA003), WeightDtype::Bf16);
     let do_t = upload_typed(&ctx, &det_rand(n_v, 0xA004), WeightDtype::Bf16);
     time_it("m3_dqkv bf16", &|| {
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.m3_dqkv_typed.i32.get(WeightDtype::Bf16));
-        let args = [
-            dq.cached_ptr(),
-            dk.cached_ptr(),
-            dv.cached_ptr(),
-            dadt.cached_ptr(),
-            dqk.cached_ptr(),
-            dd.cached_ptr(),
-            q_t.cached_ptr(),
-            ks_t.cached_ptr(),
-            v_t.cached_ptr(),
-            dcs_buf.cached_ptr(),
-            dcs_sum_buf.cached_ptr(),
-            qk_buf.cached_ptr(),
-            ssm_buf.cached_ptr(),
-            do_t.cached_ptr(),
-            d_buf.cached_ptr(),
-            enter.cached_ptr(),
-        ];
-        for a in &args {
-            bld.arg(a);
+        for (y_first, z_first, cfg) in yz_runs(cfg) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(m3k.m3_dqkv_typed.i32.get(WeightDtype::Bf16));
+            let args = [
+                dq.cached_ptr(),
+                dk.cached_ptr(),
+                dv.cached_ptr(),
+                dadt.cached_ptr(),
+                dqk.cached_ptr(),
+                dd.cached_ptr(),
+                q_t.cached_ptr(),
+                ks_t.cached_ptr(),
+                v_t.cached_ptr(),
+                dcs_buf.cached_ptr(),
+                dcs_sum_buf.cached_ptr(),
+                qk_buf.cached_ptr(),
+                ssm_buf.cached_ptr(),
+                do_t.cached_ptr(),
+                d_buf.cached_ptr(),
+                enter.cached_ptr(),
+            ];
+            for a in &args {
+                bld.arg(a);
+            }
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&nhi);
+            bld.arg(&hdi);
+            bld.arg(&dsi);
+            bld.arg(&csi);
+            bld.arg(&use_mats_i);
+            bld.arg(&y_first);
+            bld.arg(&z_first);
+            unsafe { bld.launch(cfg) }.unwrap();
         }
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&hdi);
-        bld.arg(&dsi);
-        bld.arg(&csi);
-        bld.arg(&use_mats_i);
-        unsafe { bld.launch(cfg) }.unwrap();
     });
 
     // m3_dqktheta f32
@@ -224,33 +233,36 @@ fn m3_kernels_isolated_bench() {
     let nai = CNA as i32;
     let th_staging: i32 = 1;
     time_it("m3_dqktheta f32", &|| {
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
-        let args = [
-            dqpre.cached_ptr(),
-            dkpre.cached_ptr(),
-            dang.cached_ptr(),
-            dscale.cached_ptr(),
-            dgamma.cached_ptr(),
-            q_f32.cached_ptr(),
-            ks_f32.cached_ptr(),
-            scale_buf.cached_ptr(),
-            gamma_buf.cached_ptr(),
-            angle_buf.cached_ptr(),
-            dq.cached_ptr(),
-            dk.cached_ptr(),
-            dqk_dot_buf.cached_ptr(),
-        ];
-        for a in &args {
-            bld.arg(a);
+        for (y_first, cfg) in y_runs(th_cfg) {
+            let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
+            let args = [
+                dqpre.cached_ptr(),
+                dkpre.cached_ptr(),
+                dang.cached_ptr(),
+                dscale.cached_ptr(),
+                dgamma.cached_ptr(),
+                q_f32.cached_ptr(),
+                ks_f32.cached_ptr(),
+                scale_buf.cached_ptr(),
+                gamma_buf.cached_ptr(),
+                angle_buf.cached_ptr(),
+                dq.cached_ptr(),
+                dk.cached_ptr(),
+                dqk_dot_buf.cached_ptr(),
+            ];
+            for a in &args {
+                bld.arg(a);
+            }
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&nhi);
+            bld.arg(&dsi);
+            bld.arg(&nai);
+            bld.arg(&csi);
+            bld.arg(&th_staging);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
         }
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&dsi);
-        bld.arg(&nai);
-        bld.arg(&csi);
-        bld.arg(&th_staging);
-        unsafe { bld.launch(th_cfg) }.unwrap();
     });
 
     // colsum_accumulate over dQ_pre (per layer the trainer runs two of
@@ -286,47 +298,53 @@ fn m3_kernels_isolated_bench() {
         shared_mem_bytes: 0,
     };
     time_it("m3_chunk_state_fwd bf16", &|| {
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(WeightDtype::Bf16));
-        let xp = v_t.cached_ptr();
-        let ksp = ks_t.cached_ptr();
-        let cst_p = cst_out.cached_ptr();
-        bld.arg(&cst_p);
-        bld.arg(&xp);
-        bld.arg(&ksp);
-        bld.arg(dcs_buf.inner());
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&hdi);
-        bld.arg(&dsi);
-        bld.arg(&csi);
-        unsafe { bld.launch(fwd_cfg) }.unwrap();
+        for (y_first, cfg) in y_runs(fwd_cfg) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(WeightDtype::Bf16));
+            let xp = v_t.cached_ptr();
+            let ksp = ks_t.cached_ptr();
+            let cst_p = cst_out.cached_ptr();
+            bld.arg(&cst_p);
+            bld.arg(&xp);
+            bld.arg(&ksp);
+            bld.arg(dcs_buf.inner());
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&nhi);
+            bld.arg(&hdi);
+            bld.arg(&dsi);
+            bld.arg(&csi);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
+        }
     });
     time_it("m3_chunk_scan_fwd bf16", &|| {
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.m3_chunk_scan_fwd_typed.i32.get(WeightDtype::Bf16));
-        let yp = y_t.cached_ptr();
-        let xp = v_t.cached_ptr();
-        let qp = q_t.cached_ptr();
-        let ksp = ks_t.cached_ptr();
-        bld.arg(&yp);
-        bld.arg(&xp);
-        bld.arg(&qp);
-        bld.arg(&ksp);
-        bld.arg(qk_buf.inner());
-        bld.arg(dcs_buf.inner());
-        bld.arg(ssm_buf.inner());
-        bld.arg(d_buf.inner());
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&hdi);
-        bld.arg(&dsi);
-        bld.arg(&csi);
-        unsafe { bld.launch(fwd_cfg) }.unwrap();
+        for (y_first, cfg) in y_runs(fwd_cfg) {
+            let mut bld = ctx
+                .stream
+                .launch_builder(m3k.m3_chunk_scan_fwd_typed.i32.get(WeightDtype::Bf16));
+            let yp = y_t.cached_ptr();
+            let xp = v_t.cached_ptr();
+            let qp = q_t.cached_ptr();
+            let ksp = ks_t.cached_ptr();
+            bld.arg(&yp);
+            bld.arg(&xp);
+            bld.arg(&qp);
+            bld.arg(&ksp);
+            bld.arg(qk_buf.inner());
+            bld.arg(dcs_buf.inner());
+            bld.arg(ssm_buf.inner());
+            bld.arg(d_buf.inner());
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&nhi);
+            bld.arg(&hdi);
+            bld.arg(&dsi);
+            bld.arg(&csi);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.unwrap();
+        }
     });
 }
 

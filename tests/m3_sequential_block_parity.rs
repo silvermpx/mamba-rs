@@ -22,7 +22,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::launch::IndexWidth;
+use mamba_rs::gpu::launch::{IndexWidth, y_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use mamba_rs::mamba3_siso::route::{
     block_tier_threads, sequential_backward_block_smem_bytes, sequential_forward_block_smem_bytes,
@@ -215,14 +215,17 @@ fn forward(
         d_param.cached_ptr(),
     ]);
     let dims = s.dims();
-    let mut b = ctx.stream.launch_builder(kernel);
-    for p in &ptrs {
-        b.arg(p);
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut b = ctx.stream.launch_builder(kernel);
+        for p in &ptrs {
+            b.arg(p);
+        }
+        for d in &dims {
+            b.arg(d);
+        }
+        b.arg(&y_first);
+        unsafe { b.launch(cfg) }.unwrap();
     }
-    for d in &dims {
-        b.arg(d);
-    }
-    unsafe { b.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
     let y_host = {
         let mut out = vec![0f32; bt * di];
@@ -272,29 +275,32 @@ fn backward(
         ("dgamma", z(bt * NH)),
         ("dD local", z(B * di)),
     ];
-    let mut b = ctx.stream.launch_builder(kernel);
-    let ins = [
-        h_saved.cached_ptr(),
-        k_prev.cached_ptr(),
-        v_prev.cached_ptr(),
-        x.cached_ptr(),
-        k.cached_ptr(),
-        q.cached_ptr(),
-        alpha.cached_ptr(),
-        beta.cached_ptr(),
-        gamma.cached_ptr(),
-        d_param.cached_ptr(),
-        d_y.cached_ptr(),
-    ];
-    let out_ptrs: Vec<_> = outs.iter().map(|(_, o)| o.cached_ptr()).collect();
-    for p in ins.iter().chain(&out_ptrs) {
-        b.arg(p);
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut b = ctx.stream.launch_builder(kernel);
+        let ins = [
+            h_saved.cached_ptr(),
+            k_prev.cached_ptr(),
+            v_prev.cached_ptr(),
+            x.cached_ptr(),
+            k.cached_ptr(),
+            q.cached_ptr(),
+            alpha.cached_ptr(),
+            beta.cached_ptr(),
+            gamma.cached_ptr(),
+            d_param.cached_ptr(),
+            d_y.cached_ptr(),
+        ];
+        let out_ptrs: Vec<_> = outs.iter().map(|(_, o)| o.cached_ptr()).collect();
+        for p in ins.iter().chain(&out_ptrs) {
+            b.arg(p);
+        }
+        let dims = s.dims();
+        for d in &dims {
+            b.arg(d);
+        }
+        b.arg(&y_first);
+        unsafe { b.launch(cfg) }.unwrap();
     }
-    let dims = s.dims();
-    for d in &dims {
-        b.arg(d);
-    }
-    unsafe { b.launch(cfg) }.unwrap();
     outs.iter()
         .map(|(name, o)| (*name, download(ctx, o)))
         .collect()
