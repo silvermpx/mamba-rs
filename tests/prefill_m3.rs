@@ -356,3 +356,60 @@ fn an_empty_prompt_leaves_the_state_alone() {
     forward_mamba3_backbone_prefill(&mut [], &[], &w, &mut state.layers, &mut scratch, &empty);
     assert_eq!(snapshot(&state), before);
 }
+
+/// In every precision the parallel prefill gives the bits of the serial
+/// one and the decode after it continues from the same state; the f32
+/// lane is the plain backbone, and a half lane's rows are stored values.
+/// The gated norm and an MLP behind every layer ride along.
+#[test]
+fn m3_lane_prefill_parallel_bit_equals_single() {
+    use mamba_rs::{CpuOptions, Mamba3Backbone, WeightDtype};
+    let cfg = Mamba3Config {
+        d_intermediate: 80,
+        ..test_cfg()
+    };
+    let (input_dim, seq_len) = (20usize, 16usize);
+    let dm = cfg.d_model;
+    let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
+    let input = det((seq_len + 1) * input_dim, 0xAB, 0.5);
+    let (prompt, next) = input.split_at(seq_len * input_dim);
+    // The prompt's rows and the decode row after them.
+    let run = |b: &Mamba3Backbone, mode: PrefillMode| -> Vec<f32> {
+        let (mut st, mut sc) = (b.alloc_state(), b.alloc_scratch());
+        let mut pf = b.alloc_prefill_scratch(seq_len);
+        let mut out = vec![0.0f32; (seq_len + 1) * dm];
+        let (rows, last) = out.split_at_mut(seq_len * dm);
+        b.forward_prefill(prompt, rows, &mut st, &mut pf, seq_len, mode);
+        b.forward_step(next, last, &mut st, &mut sc);
+        out
+    };
+    let plain = run(
+        &Mamba3Backbone::new(w.clone(), cfg, input_dim).unwrap(),
+        PrefillMode::Single,
+    );
+    for dtype in [
+        WeightDtype::F32,
+        WeightDtype::Tf32,
+        WeightDtype::Bf16,
+        WeightDtype::F16,
+    ] {
+        let opts = CpuOptions::default().dtype(dtype);
+        let b = Mamba3Backbone::new_with(w.clone(), cfg, input_dim, opts).unwrap();
+        assert_eq!(b.dtype(), dtype);
+        let single = run(&b, PrefillMode::Single);
+        let parallel = run(&b, PrefillMode::Parallel);
+        assert_bits(&format!("{dtype:?} parallel vs single"), &parallel, &single);
+        match dtype {
+            WeightDtype::F32 => assert_bits("f32 lane vs plain", &single, &plain),
+            _ => assert_ne!(single, plain, "{dtype:?}: the lane rounded nothing"),
+        }
+        let stored = |v: f32| match dtype {
+            WeightDtype::Bf16 => half::bf16::from_f32(v).to_f32(),
+            WeightDtype::F16 => half::f16::from_f32(v).to_f32(),
+            _ => v,
+        };
+        for (i, &v) in single.iter().enumerate() {
+            assert_eq!(v.to_bits(), stored(v).to_bits(), "{dtype:?} row value {i}");
+        }
+    }
+}

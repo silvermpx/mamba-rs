@@ -14,8 +14,10 @@ use super::dims::Mamba3Dims;
 use super::flat::Mamba3LayerFlat;
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
+use crate::mlp::cpu::RowsGemm;
 use crate::ops::blas::sgemm_forward;
 use crate::ops::fast_math::fast_exp_scalar;
+use crate::ops::rounding::store;
 
 // Stack-array limits (must match config validation)
 // Sized to the config validator's reference-range maximum; a
@@ -197,6 +199,13 @@ pub struct Mamba3LayerStateMut<'a> {
 ///
 /// Processes `seq_len` timesteps, saves all activations in `acts` for backward.
 /// Mutates `ssm_state`, `k_state`, `v_state`, `angle_state` (persistent).
+///
+/// In a reduced precision (the scratch's) the values between the kernels
+/// are stored ones, as the GPU trainer keeps them: the normalized rows,
+/// both projections' outputs, the normalized B and C, each head's B and C
+/// with their bias and again after the rotation, the scan output and the
+/// gated rows. TF32 rounds every GEMM operand instead. The states, the
+/// head scalars and the residual stream stay f32.
 pub fn forward_mamba3_layer_batched(
     temporal_flat: &mut [f32],
     acts: &mut Mamba3LayerFlat,
@@ -222,6 +231,8 @@ pub fn forward_mamba3_layer_batched(
     let n_angles = dims.num_rope_angles;
     let a_floor = dims.a_floor;
     let is_outproj_norm = dims.is_outproj_norm;
+    let dtype = scratch.dtype;
+    let lane = (sgemm_forward as RowsGemm, dtype);
 
     // The angles the window starts from, for the backward's rotations.
     let na_init = nh * n_angles;
@@ -244,18 +255,16 @@ pub fn forward_mamba3_layer_batched(
 
         let pn = &mut scratch.post_norm_flat[off..off + dm];
         simd_rms_scale(pn, src, &layer_w.norm_weight[..dm], inv_rms);
+        store(dtype, pn);
         acts.data[base_t + o.post_norm..base_t + o.post_norm + dm].copy_from_slice(pn);
     }
 
     // ═══ F2: Batch in_proj SGEMM ═══
-    sgemm_forward(
-        &mut scratch.proj_flat,
-        &scratch.post_norm_flat,
-        &layer_w.in_proj_w,
-        None,
-        seq_len,
-        dm,
-        ip,
+    scratch.gemm.forward(
+        lane,
+        (&mut scratch.proj_flat, &scratch.post_norm_flat),
+        (&layer_w.in_proj_w, None),
+        (seq_len, dm, ip),
     );
 
     // ═══ F3: 8-way split (loop T) ═══
@@ -306,6 +315,7 @@ pub fn forward_mamba3_layer_batched(
                 acts.data[bn_start + gs + i] =
                     acts.data[b_raw_start + gs + i] * inv_rms * layer_w.b_norm_weight[i];
             }
+            store(dtype, &mut acts.data[bn_start + gs..bn_start + gs + ds]);
         }
         // BCNorm for C
         let c_raw_start = base_t + o.c_raw;
@@ -320,6 +330,7 @@ pub fn forward_mamba3_layer_batched(
                 acts.data[cn_start + gs + i] =
                     acts.data[c_raw_start + gs + i] * inv_rms * layer_w.c_norm_weight[i];
             }
+            store(dtype, &mut acts.data[cn_start + gs..cn_start + gs + ds]);
         }
     }
 
@@ -369,6 +380,8 @@ pub fn forward_mamba3_layer_batched(
                 q_local[n] =
                     acts.data[base_t + o.c_normed + g * ds + n] + layer_w.c_bias[h * ds + n];
             }
+            store(dtype, &mut k_local[..ds]);
+            store(dtype, &mut q_local[..ds]);
 
             // RoPE
             if n_angles > 0 {
@@ -393,6 +406,8 @@ pub fn forward_mamba3_layer_batched(
                     q_local[i0] = cos_a * c0 - sin_a * c1;
                     q_local[i1] = sin_a * c0 + cos_a * c1;
                 }
+                store(dtype, &mut k_local[..2 * n_angles]);
+                store(dtype, &mut q_local[..2 * n_angles]);
             }
 
             // Save per-step angle velocity tanh(raw)*pi (backward reads it
@@ -429,6 +444,7 @@ pub fn forward_mamba3_layer_batched(
                 beta,
                 gamma,
             });
+            store(dtype, &mut hi[h * hd..(h + 1) * hd]);
 
             // Update states
             k_state[h * ds..h * ds + ds].copy_from_slice(&k_local[..ds]);
@@ -470,19 +486,17 @@ pub fn forward_mamba3_layer_batched(
                 acts.data[gs + d] = acts.data[ys + d] * silu;
             }
         }
+        store(dtype, &mut acts.data[gs..gs + di]);
 
         scratch.gated_flat[t * di..(t + 1) * di].copy_from_slice(&acts.data[gs..gs + di]);
     }
 
     // ═══ F7: Batch out_proj SGEMM + residual ═══
-    sgemm_forward(
-        &mut scratch.out_flat,
-        &scratch.gated_flat,
-        &layer_w.out_proj_w,
-        None,
-        seq_len,
-        di,
-        dm,
+    scratch.gemm.forward(
+        lane,
+        (&mut scratch.out_flat, &scratch.gated_flat),
+        (&layer_w.out_proj_w, None),
+        (seq_len, di, dm),
     );
 
     for t in 0..seq_len {

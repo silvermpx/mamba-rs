@@ -52,6 +52,23 @@ pub struct Mamba3Weights {
 }
 
 impl Mamba3Weights {
+    /// Round in place the matrices a reduced precision keeps as the GPU
+    /// does: the input projection, in_proj, out_proj and the MLP's
+    /// projections, in the half storage or as TF32 operands. f32 changes
+    /// nothing.
+    pub(crate) fn round_bulk(&mut self, dtype: crate::precision::WeightDtype) {
+        use crate::ops::lane::round_matrix;
+        round_matrix(dtype, &mut self.input_proj_w);
+        for lw in &mut self.layers {
+            round_matrix(dtype, &mut lw.in_proj_w);
+            round_matrix(dtype, &mut lw.out_proj_w);
+        }
+        for m in &mut self.mlp {
+            round_matrix(dtype, &mut m.fc1_w);
+            round_matrix(dtype, &mut m.fc2_w);
+        }
+    }
+
     /// Allocate zeroed weights matching the config dimensions.
     pub fn zeros(cfg: &Mamba3Config, input_dim: usize) -> Self {
         let d = cfg.d_model;

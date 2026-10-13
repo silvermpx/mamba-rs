@@ -193,6 +193,9 @@
 - Mamba-1 joins the CPU precision lanes: `MambaBackbone::new_with`, its
   decode and prefill each rounding where the GPU path of the same name
   stores, and `MambaCpuTrainer::new_with`.
+- Mamba-3 SISO joins the CPU precision lanes: `Mamba3Backbone::new_with`
+  and `Mamba3CpuTrainer::new_with`. `Mamba3Backbone` gains
+  `forward_prefill` and `alloc_prefill_scratch`, as `MambaBackbone` has.
 
 ### Changed
 

@@ -15,8 +15,8 @@ use super::flat::Mamba3LayerFlat;
 use super::forward::simd_sum_sq;
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
-use crate::ops::blas::sgemm_backward;
 use crate::ops::fast_math::fast_exp_scalar;
+use crate::ops::rounding::store;
 
 // Sized to the config validator's reference-range maximum; a
 // 256-float stack scratch per head is ~1 KB - negligible on CPU.
@@ -30,6 +30,15 @@ const MAX_ANGLES: usize = MAX_DS / 2;
 /// `angle_state_init`: the angle state BEFORE the forward pass of this
 /// window. `None` takes the one the forward recorded in `acts`, which is
 /// right for every window, including one that starts mid-sequence.
+///
+/// In a reduced precision (the scratch's) the gradients between the
+/// kernels are stored ones, as the GPU trainer's sequential scan keeps
+/// them: the GEMMs take the lane's copy of their output gradients and
+/// store their input gradients, the gate stores both of its gradients, the
+/// B and C norms take their gradients stored and store theirs, and the
+/// projection's gradient is stored whole. The scan's, the rotation's and
+/// the head scalars' gradients, every weight gradient and the residual
+/// gradient stay f32.
 pub fn backward_mamba3_layer_batched(
     d_temporal_flat: &mut [f32],
     acts: &Mamba3LayerFlat,
@@ -52,6 +61,7 @@ pub fn backward_mamba3_layer_batched(
 
     let o = &acts.offsets;
     let bsize = ng * ds;
+    let dtype = scratch.dtype;
 
     // ═══ B1: out_proj SGEMM backward ═══
     for t in 0..seq_len {
@@ -60,13 +70,10 @@ pub fn backward_mamba3_layer_batched(
         scratch.gated_buf[t * di..(t + 1) * di].copy_from_slice(&acts.data[gs..gs + di]);
     }
 
-    sgemm_backward(
-        &mut scratch.d_gated_flat,
-        &mut d_layer.out_proj_w,
-        None,
-        d_temporal_flat,
-        &scratch.gated_buf,
-        &layer_w.out_proj_w,
+    scratch.gemm.backward(
+        dtype,
+        (&mut scratch.d_gated_flat, &mut d_layer.out_proj_w, None),
+        (d_temporal_flat, &scratch.gated_buf, &layer_w.out_proj_w),
         (seq_len, di, dm),
     );
 
@@ -135,6 +142,8 @@ pub fn backward_mamba3_layer_batched(
                 dz[d] = dg[d] * acts.data[ys + d] * d_silu;
             }
         }
+        store(dtype, dy);
+        store(dtype, dz);
     }
 
     // Pre-compute cumulative angles for backward RoPE reconstruction into
@@ -204,9 +213,13 @@ pub fn backward_mamba3_layer_batched(
             for n in 0..ds {
                 k_pre[n] = acts.data[base_t + o.b_normed + g * ds + n] + layer_w.b_bias[h * ds + n];
                 q_pre[n] = acts.data[base_t + o.c_normed + g * ds + n] + layer_w.c_bias[h * ds + n];
-                k_local[n] = k_pre[n];
-                q_local[n] = q_pre[n];
             }
+            // The forward's stored B and C with their bias, rotated and
+            // stored again.
+            store(dtype, &mut k_pre[..ds]);
+            store(dtype, &mut q_pre[..ds]);
+            k_local[..ds].copy_from_slice(&k_pre[..ds]);
+            q_local[..ds].copy_from_slice(&q_pre[..ds]);
 
             let mut cum_angle_h = [0.0_f32; MAX_ANGLES];
             if n_angles > 0 {
@@ -225,6 +238,8 @@ pub fn backward_mamba3_layer_batched(
                     q_local[i0] = cos_a * c0 - sin_a * c1;
                     q_local[i1] = sin_a * c0 + cos_a * c1;
                 }
+                store(dtype, &mut k_local[..2 * n_angles]);
+                store(dtype, &mut q_local[..2 * n_angles]);
             }
 
             let mut d_k_h = [0.0_f32; MAX_DS];
@@ -313,6 +328,10 @@ pub fn backward_mamba3_layer_batched(
     }
 
     // ═══ B5 (continued): BCNorm backward ═══
+    // Every head's term is in: a half lane stores the group sums the norms
+    // take.
+    store(dtype, &mut scratch.d_b_pre_rope_flat[..seq_len * bsize]);
+    store(dtype, &mut scratch.d_c_pre_rope_flat[..seq_len * bsize]);
     scratch.d_b_raw_flat.fill(0.0);
     scratch.d_c_raw_flat.fill(0.0);
 
@@ -361,6 +380,8 @@ pub fn backward_mamba3_layer_batched(
             }
         }
     }
+    store(dtype, &mut scratch.d_b_raw_flat[..seq_len * bsize]);
+    store(dtype, &mut scratch.d_c_raw_flat[..seq_len * bsize]);
 
     // ═══ B6: Discretization backward ═══
     scratch.d_dd_dt_flat.fill(0.0);
@@ -475,19 +496,24 @@ pub fn backward_mamba3_layer_batched(
         }
     }
 
+    // Every term of the projection's gradient is in: a half lane stores
+    // it whole.
+    store(dtype, &mut scratch.d_proj_flat[..seq_len * ip]);
+
     for t in 0..seq_len {
         let base_t = acts.base(t);
         scratch.post_norm_buf[t * dm..(t + 1) * dm]
             .copy_from_slice(&acts.data[base_t + o.post_norm..base_t + o.post_norm + dm]);
     }
 
-    sgemm_backward(
-        &mut scratch.d_post_norm_flat,
-        &mut d_layer.in_proj_w,
-        None,
-        &scratch.d_proj_flat,
-        &scratch.post_norm_buf,
-        &layer_w.in_proj_w,
+    scratch.gemm.backward(
+        dtype,
+        (&mut scratch.d_post_norm_flat, &mut d_layer.in_proj_w, None),
+        (
+            &scratch.d_proj_flat,
+            &scratch.post_norm_buf,
+            &layer_w.in_proj_w,
+        ),
         (seq_len, dm, ip),
     );
 

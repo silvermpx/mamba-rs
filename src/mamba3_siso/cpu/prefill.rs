@@ -32,6 +32,9 @@ use crate::mamba3_siso::state::Mamba3LayerState;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::fast_math::fast_exp_scalar;
+use crate::ops::lane::{LaneGemm, input_rows};
+use crate::ops::rounding::store;
+use crate::precision::WeightDtype;
 
 /// Stack-array limits (match `forward.rs` / config validation).
 // Sized to the config validator's reference-range maximum; a
@@ -93,6 +96,12 @@ pub struct Mamba3PrefillScratch {
     out: Vec<f32>,
     /// The gated MLP's window buffers, grown on first use.
     mlp: crate::mlp::cpu::GatedMlpRowsScratch,
+    /// The input rows as the input projection multiplies them in a reduced
+    /// precision.
+    input: Vec<f32>,
+    /// The precision of the prefill (see `CpuOptions`).
+    dtype: WeightDtype,
+    gemm: LaneGemm,
 }
 
 impl Mamba3PrefillScratch {
@@ -117,14 +126,26 @@ impl Mamba3PrefillScratch {
             gated: vec![0.0; t * di],
             out: vec![0.0; t * dims.d_model],
             mlp: crate::mlp::cpu::GatedMlpRowsScratch::default(),
+            input: Vec::new(),
+            dtype: WeightDtype::F32,
+            gemm: LaneGemm::default(),
         }
     }
 
     /// Re-size for a different fingerprint (no-op when unchanged).
     pub fn ensure(&mut self, dims: &Mamba3Dims, input_dim: usize) {
         if (*dims, input_dim) != self.fingerprint {
+            let dtype = self.dtype;
             *self = Self::new(dims, input_dim);
+            self.set_dtype(dtype);
         }
+    }
+
+    /// Run the prefill in `dtype`: the weights must hold the bulk matrices
+    /// rounded as that precision keeps them.
+    pub(crate) fn set_dtype(&mut self, dtype: WeightDtype) {
+        self.dtype = dtype;
+        self.mlp.dtype = dtype;
     }
 }
 
@@ -144,6 +165,9 @@ struct HeadIo<'a> {
 /// Shared read-only inputs of the F5 head phase (head-major scalar columns
 /// are pre-sliced to THIS head's `[T]` column).
 struct HeadShared<'a> {
+    /// The precision of the prefill: each step's B and C with their bias
+    /// and after the rotation, and the scan output, are stored values.
+    dtype: WeightDtype,
     x_cm: &'a [f32],
     dd_a_col: &'a [f32],
     dd_dt_col: &'a [f32],
@@ -168,6 +192,7 @@ fn ssm_head(
         angle_state,
     } = io;
     let HeadShared {
+        dtype,
         x_cm,
         dd_a_col,
         dd_dt_col,
@@ -212,6 +237,8 @@ fn ssm_head(
         {
             *q = c + bias;
         }
+        store(dtype, &mut k_local[..ds]);
+        store(dtype, &mut q_local[..ds]);
 
         if na > 0 {
             let tp_row = t * na;
@@ -238,6 +265,8 @@ fn ssm_head(
                 q_local[i0] = cos_a * c0 - sin_a * c1;
                 q_local[i1] = sin_a * c0 + cos_a * c1;
             }
+            store(dtype, &mut k_local[..2 * na]);
+            store(dtype, &mut q_local[..2 * na]);
         }
 
         let alpha = fast_exp_scalar(a_val * dt_val);
@@ -266,6 +295,7 @@ fn ssm_head(
             v_state[p] = x_cm[(h * hd + p) * t_len + t];
         }
     }
+    store(dtype, y_cols);
 }
 
 /// Full-sequence Mamba-3 CPU inference forward (serial mode).
@@ -338,20 +368,25 @@ pub fn forward_mamba3_backbone_prefill_mode(
         PrefillMode::Single => sgemm_forward,
         PrefillMode::Parallel => sgemm_forward_par,
     };
+    // In a reduced precision the activations between the kernels are
+    // stored values, as the GPU's half prefill keeps them: the GEMMs round
+    // their outputs, the norms, the gate and the scan theirs. The residual
+    // stream, the states and the head scalars stay f32.
+    let dtype = scratch.dtype;
+    let lane = (gemm, dtype);
 
     // Input projection (identity D2D when input_proj is absent — the
-    // mixed-trained checkpoint convention).
+    // mixed-trained checkpoint convention). A half lane casts the rows to
+    // its storage and keeps the projection's output stored.
     if w.input_proj_w.is_empty() {
         temporal_out[..t_dm].copy_from_slice(&input_flat[..t_dm]);
     } else {
-        gemm(
-            temporal_out,
-            input_flat,
-            &w.input_proj_w,
-            Some(&w.input_proj_b),
-            t_len,
-            input_dim,
-            dm,
+        let rows = input_rows(dtype, &mut scratch.input, input_flat);
+        scratch.gemm.forward(
+            lane,
+            (&mut temporal_out[..t_dm], rows),
+            (&w.input_proj_w, Some(&w.input_proj_b)),
+            (t_len, input_dim, dm),
         );
     }
 
@@ -368,18 +403,16 @@ pub fn forward_mamba3_backbone_prefill_mode(
                 let sum_sq = simd_sum_sq(src);
                 let inv_rms = 1.0 / (sum_sq / dm as f32 + dims.rms_norm_eps).sqrt();
                 simd_rms_scale(dst, src, &lw.norm_weight[..dm], inv_rms);
+                store(dtype, dst);
             },
         );
 
         // F2: in_proj GEMM.
-        gemm(
-            &mut scratch.proj,
-            &scratch.post_norm,
-            &lw.in_proj_w,
-            None,
-            t_len,
-            dm,
-            ip,
+        scratch.gemm.forward(
+            lane,
+            (&mut scratch.proj, &scratch.post_norm),
+            (&lw.in_proj_w, None),
+            (t_len, dm, ip),
         );
 
         // F3/F4 prep rows: BCNorm B and C + tanh-pi angle velocities. The
@@ -401,6 +434,7 @@ pub fn forward_mamba3_backbone_prefill_mode(
                         *d = r * inv_rms * lw.b_norm_weight[i];
                     }
                 }
+                store(dtype, dst);
             },
         );
         zip_rows(
@@ -416,6 +450,7 @@ pub fn forward_mamba3_backbone_prefill_mode(
                         *d = r * inv_rms * lw.c_norm_weight[i];
                     }
                 }
+                store(dtype, dst);
             },
         );
         if na > 0 {
@@ -476,6 +511,7 @@ pub fn forward_mamba3_backbone_prefill_mode(
                     h,
                     io,
                     HeadShared {
+                        dtype,
                         x_cm,
                         dd_a_col: &dd_a_cm[h * t_len..(h + 1) * t_len],
                         dd_dt_col: &dd_dt_cm[h * t_len..(h + 1) * t_len],
@@ -563,18 +599,16 @@ pub fn forward_mamba3_backbone_prefill_mode(
                         *gv = y * silu;
                     }
                 }
+                store(dtype, gated_row);
             },
         );
 
         // F7: out_proj GEMM + in-place residual add.
-        gemm(
-            &mut scratch.out,
-            &scratch.gated,
-            &lw.out_proj_w,
-            None,
-            t_len,
-            di,
-            dm,
+        scratch.gemm.forward(
+            lane,
+            (&mut scratch.out, &scratch.gated),
+            (&lw.out_proj_w, None),
+            (t_len, di, dm),
         );
         zip_rows(
             mode,
@@ -610,6 +644,7 @@ pub fn forward_mamba3_backbone_prefill_mode(
     // test reproduces the exact same call per row).
     for_rows(mode, &mut temporal_out[..t_dm], dm, |row| {
         crate::ops::norms::rms_norm_inplace(row, &w.norm_f_weight[..dm], dims.rms_norm_eps);
+        store(dtype, row);
     });
 }
 

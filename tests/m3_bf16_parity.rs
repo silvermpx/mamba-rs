@@ -244,3 +244,92 @@ fn test_m3_f32_backbone_unchanged_after_mixed_refactor() {
         );
     }
 }
+
+/// The relative l2 distance of `a` from `b`.
+fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
+    let (mut num, mut den) = (0f64, 0f64);
+    for (&x, &y) in a.iter().zip(b) {
+        num += (f64::from(x) - f64::from(y)).powi(2);
+        den += f64::from(y).powi(2);
+    }
+    (num / den.max(1e-30)).sqrt()
+}
+
+/// Each reduced-precision backbone against the CPU backbone of the same
+/// precision, which rounds the weights and the values between the kernels
+/// where the GPU stores them: a prompt's last row and the steps after it
+/// land closer than the f32 CPU's, with the plain gate and with the gated
+/// norm and an MLP behind every layer.
+#[test]
+fn m3_gpu_typed_lanes_track_the_cpu_lane() {
+    use mamba_rs::mamba1::cpu::prefill::PrefillMode;
+    use mamba_rs::{CpuOptions, Mamba3Backbone};
+    let (input_dim, seq) = (40usize, 37usize);
+    let gated_mlp = Mamba3Config {
+        is_outproj_norm: true,
+        d_intermediate: 96,
+        ..small_m3_cfg()
+    };
+    for dtype in [WeightDtype::Tf32, WeightDtype::F16, WeightDtype::Bf16] {
+        for (label, cfg) in [
+            ("plain gate", small_m3_cfg()),
+            ("gated norm + MLP", gated_mlp),
+        ] {
+            let dm = cfg.d_model;
+            let w = Mamba3Weights::init(&cfg, input_dim, 17);
+            let det = |n: usize, seed: u64| -> Vec<f32> {
+                let mut s = seed.max(1);
+                (0..n)
+                    .map(|_| {
+                        s ^= s << 13;
+                        s ^= s >> 7;
+                        s ^= s << 17;
+                        ((s & 0xFFFFFF) as f32 / 16777216.0) * 2.0 - 1.0
+                    })
+                    .collect()
+            };
+            let prompt = det(seq * input_dim, 500);
+            let steps: Vec<Vec<f32>> = (0..6).map(|t| det(input_dim, 600 + t)).collect();
+            let opts = GpuOptions::default().dtype(dtype);
+            let mut gpu = Mamba3GpuBackbone::new(&w, cfg, input_dim, 1, opts).unwrap();
+            let mut got = vec![vec![0f32; dm]; steps.len() + 1];
+            gpu.prefill(&prompt, seq).unwrap();
+            gpu.download_temporal(&mut got[0]).unwrap();
+            for (s, x) in steps.iter().enumerate() {
+                gpu.step(x, &mut got[s + 1]).unwrap();
+            }
+            // The host in f32 and in the backbone's precision.
+            let dist = |o: CpuOptions| {
+                let cpu = Mamba3Backbone::new_with(w.clone(), cfg, input_dim, o).unwrap();
+                let (mut st, mut sc) = (cpu.alloc_state(), cpu.alloc_scratch());
+                let mut pf = cpu.alloc_prefill_scratch(seq);
+                let mut rows = vec![0f32; seq * dm];
+                cpu.forward_prefill(
+                    &prompt,
+                    &mut rows,
+                    &mut st,
+                    &mut pf,
+                    seq,
+                    PrefillMode::Single,
+                );
+                let mut worst = rel_l2(&got[0], &rows[(seq - 1) * dm..]);
+                let mut c = vec![0f32; dm];
+                for (s, x) in steps.iter().enumerate() {
+                    cpu.forward_step(x, &mut c, &mut st, &mut sc);
+                    worst = worst.max(rel_l2(&got[s + 1], &c));
+                }
+                worst
+            };
+            let f32_host = dist(CpuOptions::default());
+            let lane_host = dist(CpuOptions::default().dtype(dtype));
+            eprintln!(
+                "{dtype:?} {label}: GPU vs CPU f32 {f32_host:.2e}, vs CPU {dtype:?} {lane_host:.2e}"
+            );
+            assert!(
+                lane_host < f32_host,
+                "{dtype:?} {label}: the CPU lane ({lane_host:.3e}) is no closer than f32 \
+                 ({f32_host:.3e})"
+            );
+        }
+    }
+}

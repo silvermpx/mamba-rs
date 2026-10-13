@@ -14,14 +14,18 @@ use crate::config::ModelFamily;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
 use crate::mlp::GatedMlpLayerWeights;
+use crate::mlp::cpu::RowsGemm;
 use crate::mlp::cpu::{
     GatedMlpBackwardScratch, GatedMlpRowsScratch, gated_mlp_rows, gated_mlp_rows_backward,
 };
 use crate::module::cpu_trainer::{Control, CpuCore, CpuFamily, TensorRole, cpu_trainer_type};
-use crate::ops::blas::{sgemm_backward, sgemm_forward};
+use crate::ops::blas::sgemm_forward;
+use crate::ops::lane::round_matrix;
 use crate::ops::norms::{rms_norm_inplace, rms_norm_weighted};
+use crate::ops::rounding::store;
 use crate::optim::session::TrainSessionCfg;
 use crate::optim::tensors::tensor_list;
+use crate::precision::{CpuOptions, WeightDtype};
 
 /// The trainable weights of a SISO model: the layers in the training
 /// layout, the gated MLPs of a model that has them.
@@ -57,6 +61,7 @@ pub(crate) struct Mamba3Cpu {
     cfg: Mamba3Config,
     dims: Mamba3Dims,
     input_dim: usize,
+    dtype: WeightDtype,
 }
 
 /// One sequence's carried states, the tape its backward reads, scratch.
@@ -98,29 +103,44 @@ impl CpuFamily for Mamba3Cpu {
     const FAMILY: ModelFamily = ModelFamily::Mamba3;
     const RECURRENCE: &'static [&'static str] = &["ssm", "k", "v", "angle"];
 
-    /// f32 until this family's reduced-precision lanes land.
-    fn dtype(&self) -> crate::precision::WeightDtype {
-        crate::precision::WeightDtype::F32
+    fn dtype(&self) -> WeightDtype {
+        self.dtype
     }
 
-    fn round_weights(&self, _w: &mut Mamba3CpuWeights) {}
+    /// The GPU trainer's mirror: the input projection, in_proj, out_proj
+    /// and the MLP's projections.
+    fn round_weights(&self, w: &mut Mamba3CpuWeights) {
+        round_matrix(self.dtype, &mut w.input_proj_w);
+        for lw in &mut w.layers {
+            round_matrix(self.dtype, &mut lw.in_proj_w);
+            round_matrix(self.dtype, &mut lw.out_proj_w);
+        }
+        for m in &mut w.mlp {
+            round_matrix(self.dtype, &mut m.fc1_w);
+            round_matrix(self.dtype, &mut m.fc2_w);
+        }
+    }
 
     fn new_seq(&self, w: &Mamba3CpuWeights, seq_len: usize) -> Result<Mamba3CpuSeq, String> {
         let (dm, nl) = (self.cfg.d_model, self.cfg.n_layers);
         let [ssm, k, v, angle] = self.per_layer().map(|n| vec![0.0; nl * n]);
+        let mut phase = Mamba3Scratch::zeros(&self.dims);
+        let mut mlp = GatedMlpRowsScratch::default();
+        let mut mlp_bwd = GatedMlpBackwardScratch::default();
+        (phase.dtype, mlp.dtype, mlp_bwd.dtype) = (self.dtype, self.dtype, self.dtype);
         Ok(Mamba3CpuSeq {
             acts: (0..nl).map(|_| Mamba3LayerFlat::zeros(self.dims)).collect(),
             ssm,
             k,
             v,
             angle,
-            phase: Mamba3Scratch::zeros(&self.dims),
+            phase,
             input: vec![0.0; seq_len * self.input_dim],
             mlp_in: w.mlp.iter().map(|_| vec![0.0; seq_len * dm]).collect(),
             norm_f_in: vec![0.0; seq_len * dm],
             norm_f_inv: vec![0.0; seq_len],
-            mlp: GatedMlpRowsScratch::default(),
-            mlp_bwd: GatedMlpBackwardScratch::default(),
+            mlp,
+            mlp_bwd,
         })
     }
 
@@ -138,19 +158,21 @@ impl CpuFamily for Mamba3Cpu {
         out: &mut [f32],
     ) -> Result<(), String> {
         let (dm, t_len, eps) = (self.cfg.d_model, self.dims.seq_len, self.cfg.rms_norm_eps);
-        seq.input.copy_from_slice(input);
         let rows = &mut seq.norm_f_in;
         if w.input_proj_w.is_empty() {
+            seq.input.copy_from_slice(input);
             rows.copy_from_slice(&input[..t_len * dm]);
         } else {
-            sgemm_forward(
-                rows,
-                input,
-                &w.input_proj_w,
-                Some(&w.input_proj_b),
-                t_len,
-                self.input_dim,
-                dm,
+            // A half lane casts the rows to its storage, the backward's
+            // product reading them so stored, and keeps the projection's
+            // output stored; the residual stream starts from that output.
+            seq.input.copy_from_slice(input);
+            store(self.dtype, &mut seq.input);
+            seq.phase.gemm.forward(
+                (sgemm_forward as RowsGemm, self.dtype),
+                (&mut rows[..], &seq.input),
+                (&w.input_proj_w, Some(&w.input_proj_b)),
+                (t_len, self.input_dim, dm),
             );
         }
         let [ssm_l, k_l, v_l, a_l] = self.per_layer();
@@ -243,13 +265,18 @@ impl CpuFamily for Mamba3Cpu {
             let n = d_input.len();
             d_input.copy_from_slice(&d_out[..n]);
         } else {
-            sgemm_backward(
-                d_input,
-                &mut grads.input_proj_w,
-                Some(&mut grads.input_proj_b),
-                &d_out[..t_len * dm],
-                &seq.input,
-                &w.input_proj_w,
+            // A half lane casts the gradient to its storage once, for the
+            // weight's product and the bias's sum alike.
+            let d_rows = &mut d_out[..t_len * dm];
+            store(self.dtype, d_rows);
+            seq.phase.gemm.backward(
+                self.dtype,
+                (
+                    d_input,
+                    &mut grads.input_proj_w,
+                    Some(&mut grads.input_proj_b),
+                ),
+                (d_rows, &seq.input, &w.input_proj_w),
                 (t_len, self.input_dim, dm),
             );
         }
@@ -351,6 +378,19 @@ impl Mamba3CpuTrainer {
         cfg: Mamba3Config,
         session: TrainSessionCfg,
     ) -> Result<Self, String> {
+        Self::new_with(weights, cfg, session, CpuOptions::default())
+    }
+
+    /// [`Mamba3CpuTrainer::new`] in the precision `opts` names: f32
+    /// masters, the projections and the values between the kernels
+    /// rounded as the GPU trainer of that precision rounds them, and in
+    /// f16 the dynamic loss scaler.
+    pub fn new_with(
+        weights: &Mamba3Weights,
+        cfg: Mamba3Config,
+        session: TrainSessionCfg,
+        opts: CpuOptions,
+    ) -> Result<Self, String> {
         cfg.validate()?;
         weights.validate(&cfg, session.input_dim)?;
         let train = Mamba3CpuWeights {
@@ -379,6 +419,7 @@ impl Mamba3CpuTrainer {
             cfg,
             dims: Mamba3Dims::from_config(&cfg, session.seq_len),
             input_dim: session.input_dim,
+            dtype: opts.dtype,
         };
         Ok(Self {
             core: CpuCore::new(fam, train, session, cfg.d_model)?,

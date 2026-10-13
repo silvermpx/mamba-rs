@@ -4,6 +4,8 @@
 //! 25 buffers for batched SGEMM phases and gradient propagation.
 
 use super::dims::Mamba3Dims;
+use crate::ops::lane::LaneGemm;
+use crate::precision::WeightDtype;
 
 /// Reusable scratch buffers for Mamba-3 batched forward and backward.
 pub struct Mamba3Scratch {
@@ -57,6 +59,10 @@ pub struct Mamba3Scratch {
     pub cum_angles_flat: Vec<f32>, // [T * nheads * n_angles]
     pub d_k_carry: Vec<f32>,       // [nheads * d_state]
     pub d_k_carry_next: Vec<f32>,  // [nheads * d_state]
+
+    /// The precision of the forward and the backward (see `CpuOptions`).
+    pub(crate) dtype: WeightDtype,
+    pub(crate) gemm: LaneGemm,
 }
 
 impl Mamba3Scratch {
@@ -102,6 +108,8 @@ impl Mamba3Scratch {
             cum_angles_flat: vec![0.0; t * nh * na],
             d_k_carry: vec![0.0; nh * ds],
             d_k_carry_next: vec![0.0; nh * ds],
+            dtype: WeightDtype::F32,
+            gemm: LaneGemm::default(),
         }
     }
 

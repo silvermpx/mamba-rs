@@ -17,8 +17,11 @@ use crate::mamba3_siso::state::Mamba3LayerState;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
 use crate::mlp::cpu::GatedMlpPacked;
 use crate::ops::fast_math::fast_exp_scalar;
+use crate::ops::lane::{LaneGemm, input_rows};
 use crate::ops::norms::{bcnorm, rms_norm_weighted, rmsnorm_gated};
-use crate::ops::packed::{PackedLinear, linear_row};
+use crate::ops::packed::PackedLinear;
+use crate::ops::rounding::store;
+use crate::precision::WeightDtype;
 
 /// One layer's projections packed for decode.
 #[derive(Clone, Debug)]
@@ -74,6 +77,12 @@ pub struct Mamba3StepScratch {
     pub bc_inv_rms: Vec<f32>, // [ngroups] (BCNorm inv_rms scratch)
     /// The gated MLP's buffers (zero-sized when the model has none).
     pub mlp: crate::mlp::cpu::GatedMlpStepScratch,
+    /// The input row as the input projection multiplies it in a reduced
+    /// precision.
+    input: Vec<f32>,
+    /// The precision of the step (see `CpuOptions`).
+    dtype: WeightDtype,
+    gemm: LaneGemm,
 }
 
 impl Mamba3StepScratch {
@@ -98,7 +107,17 @@ impl Mamba3StepScratch {
             residual: vec![0.0; dm],
             bc_inv_rms: vec![0.0; ng],
             mlp: crate::mlp::cpu::GatedMlpStepScratch::new(dm, cfg.mlp_hidden()),
+            input: Vec::new(),
+            dtype: WeightDtype::F32,
+            gemm: LaneGemm::default(),
         }
+    }
+
+    /// Run the steps in `dtype`: the weights must hold the bulk matrices
+    /// rounded as that precision keeps them.
+    pub(crate) fn set_dtype(&mut self, dtype: WeightDtype) {
+        self.dtype = dtype;
+        self.mlp.dtype = dtype;
     }
 }
 
@@ -125,6 +144,12 @@ pub fn mamba3_layer_step(
 }
 
 /// [`mamba3_layer_step`] with the projections packed when `lp` holds them.
+///
+/// In a reduced precision (the scratch's) the values between the kernels
+/// are stored ones, as the GPU's decode keeps them: the normalized row,
+/// both projections' outputs, the normalized B and C, each head's B and C
+/// with their bias and again after the rotation, the scan output and the
+/// gated row. The states, the head scalars and the residual stay f32.
 fn layer_step(
     temporal: &mut [f32],
     scratch: &mut Mamba3StepScratch,
@@ -141,6 +166,7 @@ fn layer_step(
     let ip = cfg.in_proj_out_dim();
     let n_rope = cfg.num_rope_angles();
     let a_floor = cfg.a_floor;
+    let dtype = scratch.dtype;
 
     // 1. Save residual
     scratch.residual[..dm].copy_from_slice(&temporal[..dm]);
@@ -152,14 +178,14 @@ fn layer_step(
         &lw.norm_weight,
         cfg.rms_norm_eps,
     );
+    store(dtype, &mut scratch.norm_buf[..dm]);
 
     // 3. in_proj: [d_model] → [in_proj_dim] (BLAS matvec, no bias)
-    linear_row(
-        &mut scratch.proj[..ip],
-        &scratch.norm_buf[..dm],
+    scratch.gemm.row(
+        dtype,
+        (&mut scratch.proj[..ip], &scratch.norm_buf[..dm]),
         (&lw.in_proj_w, lp.map(|p| &p.in_proj)),
         None,
-        (dm, ip),
     );
 
     // 4. 8-way split: z, x, B, C, dd_dt, dd_A, trap, angles
@@ -199,6 +225,8 @@ fn layer_step(
         cfg.rms_norm_eps,
         &mut scratch.bc_inv_rms,
     );
+    store(dtype, &mut scratch.b_normed[..ng * ds]);
+    store(dtype, &mut scratch.c_normed[..ng * ds]);
 
     // 6. Per-head: bias + RoPE + A/DT + trapezoidal SSM
     // tanh(angles_raw) * pi depends only on the angle index — hoist out of
@@ -245,6 +273,8 @@ fn layer_step(
         {
             *q = c + bias;
         }
+        store(dtype, &mut k_local[..ds]);
+        store(dtype, &mut q_local[..ds]);
 
         // RoPE: per-head angle accumulation and rotation
         if n_rope > 0 {
@@ -268,6 +298,8 @@ fn layer_step(
                 q_local[i0] = cos_a * c0 - sin_a * c1;
                 q_local[i1] = sin_a * c0 + cos_a * c1;
             }
+            store(dtype, &mut k_local[..2 * n_rope]);
+            store(dtype, &mut q_local[..2 * n_rope]);
         }
 
         // Trapezoidal: alpha, beta, gamma
@@ -293,6 +325,8 @@ fn layer_step(
             gamma,
         });
 
+        store(dtype, &mut scratch.y[h * hd..(h + 1) * hd]);
+
         // Update K state for next step
         state.k_state[h * ds..h * ds + ds].copy_from_slice(&k_local[..ds]);
     }
@@ -317,14 +351,14 @@ fn layer_step(
             scratch.gated[i] = scratch.y[i] * z * sig;
         }
     }
+    store(dtype, &mut scratch.gated[..di]);
 
     // 8. out_proj: [d_inner] → [d_model] (BLAS matvec) + residual
-    linear_row(
-        &mut temporal[..dm],
-        &scratch.gated[..di],
+    scratch.gemm.row(
+        dtype,
+        (&mut temporal[..dm], &scratch.gated[..di]),
         (&lw.out_proj_w, lp.map(|p| &p.out_proj)),
         None,
-        (di, dm),
     );
     for (t_out, &r) in temporal[..dm].iter_mut().zip(&scratch.residual[..dm]) {
         *t_out += r;
@@ -393,15 +427,18 @@ fn backbone_step(
         debug_assert_eq!(input_dim, dm);
         temporal[..dm].copy_from_slice(&input[..dm]);
     } else {
-        linear_row(
-            &mut temporal[..dm],
-            &input[..input_dim],
+        // A half lane casts the row to its storage and keeps the
+        // projection's output stored, as the GPU's decode does.
+        let dtype = scratch.dtype;
+        let row = input_rows(dtype, &mut scratch.input, &input[..input_dim]);
+        scratch.gemm.row(
+            dtype,
+            (&mut temporal[..dm], row),
             (
                 &weights.input_proj_w,
                 packed.and_then(|p| p.input_proj.as_ref()),
             ),
             Some(&weights.input_proj_b),
-            (input_dim, dm),
         );
     }
 
@@ -432,6 +469,7 @@ fn backbone_step(
         cfg.rms_norm_eps,
     );
     temporal[..dm].copy_from_slice(&scratch.norm_buf[..dm]);
+    store(scratch.dtype, &mut temporal[..dm]);
 }
 
 /// Batched single-step inference: B independent samples, each with its own

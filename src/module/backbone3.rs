@@ -8,12 +8,18 @@
 //!
 //! [`MambaBackbone`]: crate::module::MambaBackbone
 
+use crate::mamba1::cpu::prefill::PrefillMode;
 use crate::mamba3_siso::config::Mamba3Config;
+use crate::mamba3_siso::cpu::dims::Mamba3Dims;
 use crate::mamba3_siso::cpu::inference::{
     Mamba3PackedLinears, Mamba3StepScratch, mamba3_step, mamba3_step_packed,
 };
+use crate::mamba3_siso::cpu::prefill::{
+    Mamba3PrefillScratch, forward_mamba3_backbone_prefill_mode,
+};
 use crate::mamba3_siso::state::Mamba3State;
 use crate::mamba3_siso::weights::Mamba3Weights;
+use crate::precision::{CpuOptions, WeightDtype};
 
 /// Mamba-3 SISO backbone for CPU inference. Holds the full set of
 /// per-layer weights and the architecture config; the recurrent state
@@ -31,6 +37,8 @@ pub struct Mamba3Backbone {
     packed: Option<Mamba3PackedLinears>,
     /// Width of an input row.
     input_dim: usize,
+    /// The precision the backbone computes in.
+    dtype: WeightDtype,
 }
 
 impl Mamba3Backbone {
@@ -44,6 +52,7 @@ impl Mamba3Backbone {
             cfg,
             packed: None,
             input_dim,
+            dtype: WeightDtype::F32,
         }
     }
 
@@ -57,13 +66,34 @@ impl Mamba3Backbone {
         cfg: Mamba3Config,
         input_dim: usize,
     ) -> Result<Self, String> {
+        Self::new_with(weights, cfg, input_dim, CpuOptions::default())
+    }
+
+    /// [`Mamba3Backbone::new`] in the precision `opts` names: the
+    /// projections rounded once here as the GPU engine of that precision
+    /// holds them, and the values between the kernels rounded where it
+    /// stores them. [`Mamba3Backbone::weights`] then gives the rounded
+    /// weights, the ones the backbone computes with.
+    pub fn new_with(
+        mut weights: Mamba3Weights,
+        cfg: Mamba3Config,
+        input_dim: usize,
+        opts: CpuOptions,
+    ) -> Result<Self, String> {
         weights.validate(&cfg, input_dim)?;
+        weights.round_bulk(opts.dtype);
         Ok(Self {
             weights,
             cfg,
             packed: None,
             input_dim,
+            dtype: opts.dtype,
         })
+    }
+
+    /// The precision the backbone computes in.
+    pub fn dtype(&self) -> WeightDtype {
+        self.dtype
     }
 
     #[deprecated(
@@ -125,6 +155,7 @@ impl Mamba3Backbone {
         scratch: &mut Mamba3StepScratch,
     ) {
         let states = &mut state.layers;
+        scratch.set_dtype(self.dtype);
         match &self.packed {
             Some(p) => mamba3_step_packed(
                 output,
@@ -165,6 +196,41 @@ impl Mamba3Backbone {
     /// proj). Reusable across calls; never aliased across threads.
     pub fn alloc_scratch(&self) -> Mamba3StepScratch {
         Mamba3StepScratch::new(&self.cfg)
+    }
+
+    /// Allocate a full-sequence prefill scratch for sequences of `seq_len`.
+    pub fn alloc_prefill_scratch(&self, seq_len: usize) -> Mamba3PrefillScratch {
+        let dims = Mamba3Dims::from_config(&self.cfg, seq_len);
+        Mamba3PrefillScratch::new(&dims, self.input_dim)
+    }
+
+    /// Full-sequence prefill: `seq_len` inputs through the batched GEMM
+    /// pipeline, the post-norm_f output written at every position and the
+    /// recurrent state carried, so [`Self::forward_step`] continues from
+    /// it. The rows are the training forward's, not the decode chain's:
+    /// the batched products accumulate in another order than the steps'.
+    ///
+    /// `inputs`: `[seq_len * input_dim]`; `outputs`: `[seq_len * d_model]`.
+    pub fn forward_prefill(
+        &self,
+        inputs: &[f32],
+        outputs: &mut [f32],
+        state: &mut Mamba3State,
+        scratch: &mut Mamba3PrefillScratch,
+        seq_len: usize,
+        mode: PrefillMode,
+    ) {
+        let dims = Mamba3Dims::from_config(&self.cfg, seq_len);
+        scratch.set_dtype(self.dtype);
+        forward_mamba3_backbone_prefill_mode(
+            outputs,
+            inputs,
+            &self.weights,
+            &mut state.layers,
+            scratch,
+            &dims,
+            mode,
+        );
     }
 }
 
