@@ -69,7 +69,8 @@ pub trait GpuTrainer {
 
     /// Forward, backward and the optimizer step in one call, with the
     /// step options (see [`GpuTrainer::set_step_opts`]); a captured graph
-    /// replays the same step.
+    /// replays the same step. With an accumulation window open the
+    /// micro-batch joins the window and the window is applied.
     fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String>;
 
     /// Set the options [`GpuTrainer::step`] applies: the control-channel

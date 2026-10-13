@@ -930,12 +930,19 @@ impl Mamba3MimoGpuTrainer {
     /// (see [`Self::set_step_opts`]).
     ///
     /// With a captured graph (see [`Self::capture_graph`]) the step
-    /// replays it, the same options baked in, unless an accumulation
-    /// window is open: the eager step folds the window in.
+    /// replays it, the same options baked in. With an accumulation window
+    /// open the step adds its micro-batch to the window and applies it, as
+    /// [`Self::accumulate`] then [`Self::apply_window`] would.
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         self.check_window_len("step input", input.len(), self.input_dim)?;
         self.check_window_len("step d_temporal", d_temporal.len(), self.cfg.d_model)?;
-        if self.graph.is_some() && !self.window.is_open() {
+        // A step with a window open adds its micro-batch to the window and
+        // applies it, as the split calls would close the window.
+        if self.window.is_open() {
+            self.accumulate(input, d_temporal)?;
+            return self.apply_window();
+        }
+        if self.graph.is_some() {
             return self.step_graph(input, d_temporal);
         }
         if self.has_gemm_work() {

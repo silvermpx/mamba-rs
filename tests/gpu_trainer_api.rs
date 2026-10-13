@@ -939,6 +939,36 @@ fn a_window_trains_through_accumulate_and_apply_in_every_family() {
     }
 }
 
+/// A fused step with an accumulation window open adds its micro-batch to
+/// the window and applies it, in every family and precision: the bits of
+/// an accumulating backward followed by an applying one.
+#[test]
+fn a_fused_step_on_an_open_window_applies_it_in_every_family() {
+    let (input, d) = window();
+    let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
+    let acc = BackwardOpts::default().with_accumulate_only(true);
+    let second = values(input.len(), 900);
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+        let mut fused = any_trainers(dtype);
+        let mut split = any_trainers(dtype);
+        for i in 0..fused.len() {
+            let label = format!("{:?} {dtype:?}", fused[i].family());
+            fused[i].accumulate(&input, &d).unwrap();
+            split[i].forward(&input, &mut out).unwrap();
+            split[i].backward_step(&d, acc).unwrap();
+            let m = fused[i].step(&second, &d).unwrap();
+            assert!(m.optimizer_stepped && m.step == 1, "{label}: {m:?}");
+            split[i].forward(&second, &mut out).unwrap();
+            split[i].backward_step(&d, BackwardOpts::default()).unwrap();
+            assert_eq!(
+                snapshot_bits(&fused[i]),
+                snapshot_bits(&split[i]),
+                "{label}"
+            );
+        }
+    }
+}
+
 /// Write the trainer's master weights to its family's checkpoint, and build
 /// a trainer of the same family from that file.
 fn reload_through_checkpoint(t: &AnyGpuTrainer, path: &Path, opts: GpuOptions) -> AnyGpuTrainer {

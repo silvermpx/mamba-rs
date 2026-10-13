@@ -717,7 +717,10 @@ impl MambaGpuTrainer {
     /// length `batch * seq_len * input_dim`; `d_temporal` must have
     /// length `batch * seq_len * d_model` (gradient w.r.t. the FULL
     /// post-norm_f temporal output sequence, not just the last position).
-    /// Returns [`StepMetrics`] with overflow / replay flags.
+    /// Returns [`StepMetrics`] with overflow / replay flags. With an
+    /// accumulation window open the step adds its micro-batch to the window
+    /// and applies it, as [`Self::accumulate`] then [`Self::apply_window`]
+    /// would.
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         match &mut self.inner {
             TrainerInner::F32(t) => t.step(input, d_temporal),
@@ -1458,13 +1461,11 @@ impl MambaTrainerMixed {
             self.d_temporal.len(),
             d_temporal.len()
         );
+        // A step with a window open adds its micro-batch to the window and
+        // applies it, as the split calls would close the window.
         if self.grads_dirty {
-            return Err(
-                "step(): an accumulate_only backward window is open — close it with \
-                 backward_step(accumulate_only=false); the fused step zeroes the grad \
-                 arena and would silently discard the accumulated gradients"
-                    .into(),
-            );
+            self.accumulate(input, d_temporal)?;
+            return self.apply_window();
         }
         if matches!(self.dtype, WeightDtype::F16) {
             return self.step_f16(input, d_temporal);
@@ -3056,13 +3057,11 @@ impl MambaTrainerF32 {
             self.d_temporal.len(),
             d_temporal.len(),
         );
+        // A step with a window open adds its micro-batch to the window and
+        // applies it, as the split calls would close the window.
         if self.grads_dirty {
-            return Err(
-                "step(): an accumulate_only backward window is open — close it with \
-                 backward_step(accumulate_only=false); the fused step zeroes the grad \
-                 arena and would silently discard the accumulated gradients"
-                    .into(),
-            );
+            self.accumulate(input, d_temporal)?;
+            return self.apply_window();
         }
         self.staged_upload(0, input)?;
         self.staged_upload(1, d_temporal)?;

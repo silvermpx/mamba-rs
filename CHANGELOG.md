@@ -408,6 +408,8 @@
   `AdamWStateBlob` and `TrainerState` live in the new `optim` module and
   at the crate root without the `cuda` feature; `gpu::train`,
   `gpu::adamw::AdamWStateBlob` and `gpu::train_state` still reach them.
+- A fused `step` with an accumulation window open adds its micro-batch to
+  the window and applies it in every family; Mamba-1 and SISO refused it.
 
 ### Fixed
 

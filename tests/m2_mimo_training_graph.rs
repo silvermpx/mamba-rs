@@ -274,10 +274,11 @@ fn a_baked_adamw_setting_needs_a_new_capture() {
     }
 }
 
-/// An open accumulation window folds into the next step, which the graph
-/// does not do, so that step runs eagerly, with the eager bits.
+/// An open accumulation window folds into the next step, which adds its
+/// micro-batch and applies the window: by the captured accumulate and apply
+/// graphs when the trainer has them, with the eager bits.
 #[test]
-fn an_open_window_runs_the_step_eagerly() {
+fn an_open_window_folds_into_the_step() {
     for (family, make) in FAMILIES {
         let mut runs = Vec::new();
         for graph in [false, true] {
@@ -290,7 +291,7 @@ fn an_open_window_runs_the_step_eagerly() {
             let (input, d) = window(1, false);
             t.accumulate(&input, &d);
             let m = t.step(&input, &d).unwrap();
-            assert!(!m.graph_replayed, "{family}: the window's step");
+            assert_eq!(m.graph_replayed, graph, "{family}: the window's step");
             let (input, d) = window(2, false);
             assert_eq!(
                 t.step(&input, &d).unwrap().graph_replayed,

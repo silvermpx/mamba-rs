@@ -299,8 +299,9 @@ fn forward_alone_leaves_optimizer_untouched() {
     assert_snapshots_bit_eq(&before, &after, "forward-only");
 }
 
-/// Interlock: backward without forward errs; the fused step() refuses to run
-/// while an accumulate window is open; closing the window restores it.
+/// Interlock: backward without forward errs; the fused step() on an open
+/// accumulate window adds its micro-batch to the window and applies it;
+/// the split calls go on from there.
 #[test]
 fn split_interlock_and_accumulate_window() {
     let cfg = test_cfg();
@@ -338,8 +339,13 @@ fn split_interlock_and_accumulate_window() {
     assert!(!m.optimizer_stepped);
     assert_eq!(m.step, 0, "accumulate-only must not advance adam");
 
-    // Fused step must refuse while the window is open.
-    assert!(t.step(&input, &d_temporal).is_err());
+    // A fused step with the window open adds its micro-batch to the window
+    // and applies it.
+    let m1 = t
+        .step(&input, &d_temporal)
+        .expect("fused step on the open window");
+    assert!(m1.optimizer_stepped);
+    assert_eq!(m1.step, 1);
 
     // A second backward needs its own forward.
     assert!(
@@ -353,7 +359,7 @@ fn split_interlock_and_accumulate_window() {
         .backward_step(&d_temporal, BackwardOpts::default())
         .expect("closing backward");
     assert!(m2.optimizer_stepped);
-    assert_eq!(m2.step, 1);
+    assert_eq!(m2.step, 2);
     t.step(&input, &d_temporal).expect("fused step after close");
 }
 
@@ -555,7 +561,7 @@ fn reset_closes_split_lifecycle_f32() {
     assert_reset_closes_split_lifecycle(WeightDtype::F32);
 }
 
-fn assert_failed_fused_step_closes_split_lifecycle(dtype: WeightDtype) {
+fn assert_fused_step_on_an_open_window_closes_split_lifecycle(dtype: WeightDtype) {
     let cfg = test_cfg();
     let input_dim = cfg.d_model;
     let (batch, seq_len) = (1usize, 4usize);
@@ -587,12 +593,13 @@ fn assert_failed_fused_step_closes_split_lifecycle(dtype: WeightDtype) {
     trainer
         .forward(&input, &mut output)
         .expect("split forward 2");
-    trainer
+    let m = trainer
         .step(&input, &d_temporal)
-        .expect_err("fused step must reject an open accumulation window");
+        .expect("a fused step applies the open accumulation window");
+    assert!(m.optimizer_stepped, "the window was applied");
     let error = trainer
         .backward_step(&d_temporal, BackwardOpts::default())
-        .expect_err("a failed fused step must discard saved split activations");
+        .expect_err("the fused step must discard the split forward it did not consume");
     assert!(
         error.starts_with("backward_step() without a pending forward()"),
         "unexpected lifecycle error: {error}"
@@ -600,13 +607,13 @@ fn assert_failed_fused_step_closes_split_lifecycle(dtype: WeightDtype) {
 }
 
 #[test]
-fn failed_fused_step_closes_split_lifecycle_bf16() {
-    assert_failed_fused_step_closes_split_lifecycle(WeightDtype::Bf16);
+fn fused_step_on_an_open_window_closes_split_lifecycle_bf16() {
+    assert_fused_step_on_an_open_window_closes_split_lifecycle(WeightDtype::Bf16);
 }
 
 #[test]
-fn failed_fused_step_closes_split_lifecycle_f32() {
-    assert_failed_fused_step_closes_split_lifecycle(WeightDtype::F32);
+fn fused_step_on_an_open_window_closes_split_lifecycle_f32() {
+    assert_fused_step_on_an_open_window_closes_split_lifecycle(WeightDtype::F32);
 }
 
 /// f16 split: the GradScaler protocol rides backward_step, and an
