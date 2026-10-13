@@ -14030,8 +14030,18 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
         return Ok(seal);
     }
 
-    // Narrow reduction N (2..=127).
-    if (2..=127).contains(&n_out) && batch >= 1 && n_in >= 1 {
+    // Narrow reduction N (2..=127), and the wider reductions the f32 cascade
+    // serves with the same narrow kernel: its typed twin keeps the same FMA
+    // chain, so these shapes give the bits of the upcast route they took.
+    let wide_narrow = || {
+        nt_routes_to_wide_narrow(
+            batch,
+            n_in,
+            n_out,
+            environment.kernels.multiprocessor_count(),
+        )
+    };
+    if ((2..=127).contains(&n_out) || wide_narrow()) && batch >= 1 && n_in >= 1 {
         let m_i = checked_dims.m_i32;
         let n_i = checked_dims.n_i32;
         let k_out_i = checked_dims.k_i32;
@@ -17518,6 +17528,7 @@ mod prepared_f32_launch_tests {
                 n_tail: 0
             }
         ));
+        assert!(!nt_routes_to_wide_narrow(32, 96, 128, 142));
         assert_eq!(
             scalar_physical_nodes(aligned_request, operands, aligned_plan)
                 .unwrap()
@@ -17533,6 +17544,11 @@ mod prepared_f32_launch_tests {
             let (_, neighbor_request, neighbor_plan) =
                 scalar_backward_launch_plan(ResolvedGemmOp::Nt, dims, 142).unwrap();
             assert_eq!(neighbor_plan, expected_plan, "neighbor {dims:?}");
+            assert_eq!(
+                nt_routes_to_wide_narrow(dims.0, dims.1, dims.2, 142),
+                expected_plan != ScalarDispatchPlan::NtNarrow,
+                "neighbor {dims:?}"
+            );
             let neighbor =
                 scalar_physical_nodes(neighbor_request, operands, neighbor_plan).unwrap();
             assert_eq!(neighbor.len(), 1, "neighbor {dims:?}");

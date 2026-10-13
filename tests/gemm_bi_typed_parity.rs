@@ -319,6 +319,14 @@ fn typed_stage2_buckets_bit_match_f32_triad() {
         check_dx(&t, dt, (64, 384, 1), false);
         check_dx(&t, dt, (256, 96, 80), false);
         check_dx(&t, dt, (250, 100, 80), false);
+        // dX over 128 or more reduction columns at a batch under 128 that
+        // no split-K route takes: the narrow kernel, natively typed.
+        check_dx(&t, dt, (1, 40, 128), false);
+        check_dx(&t, dt, (5, 33, 300), false);
+        check_dx(&t, dt, (31, 95, 128), false);
+        check_dx(&t, dt, (32, 95, 129), false);
+        check_dx(&t, dt, (100, 70, 130), false);
+        check_dx(&t, dt, (127, 70, 2050), false);
     }
 }
 

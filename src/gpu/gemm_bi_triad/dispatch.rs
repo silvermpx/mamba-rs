@@ -8324,6 +8324,26 @@ pub(super) fn nt_routes_to_big(
         .is_ok_and(|plan| matches!(plan, ScalarDispatchPlan::NtFinal { slim: false }))
 }
 
+/// Whether the f32 NT cascade runs the narrow kernel over a reduction of
+/// 128 or more: a batch under 128 rows that no split-K route takes. No
+/// qualified cell replaces either plan on any board, so the plain narrow
+/// kernel is the exact f32 route of these shapes everywhere.
+pub(super) fn nt_routes_to_wide_narrow(
+    batch: usize,
+    n_in: usize,
+    n_out: usize,
+    multiprocessor_count: u32,
+) -> bool {
+    GemmDims::nt((batch, n_in, n_out))
+        .and_then(|dims| scalar_nt_plan(dims, multiprocessor_count))
+        .is_ok_and(|plan| {
+            matches!(
+                plan,
+                ScalarDispatchPlan::NtSmallBatchWide | ScalarDispatchPlan::NtMidBatchWide
+            )
+        })
+}
+
 #[cfg(test)]
 mod scalar_wave_policy_tests {
     use super::{

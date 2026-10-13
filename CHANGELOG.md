@@ -469,6 +469,9 @@
 - The CPU kernels take AVX-512 where the CPU has it (pulp `x86-v4`, and a
   sixteen-wide exp), with the AVX2 and NEON bits; the MIMO CPU backward
   no longer allocates per head and token.
+- A half-precision dX GEMM over a reduction of 128 or more columns at a
+  batch under 128 rows runs the typed narrow kernel instead of the f32
+  upcast route, with the same bits.
 
 ### Fixed
 
