@@ -1,9 +1,10 @@
-//! Bit-continuous training resume: a run that checkpoints weights AND
-//! optimizer state at step k, reloads both into a fresh trainer, and
-//! trains k more steps must land bit-for-bit where the unbroken 2k-step
-//! run lands. A weights-only "resume" re-warms Adam from zero and
-//! provably diverges — the control case asserts that divergence, so this
-//! suite fails loudly if the comparison ever stops biting.
+//! Bit-continuous training resume: a run that checkpoints weights, the
+//! optimizer state and the carried recurrence at step k, reloads them into
+//! a fresh trainer, and trains k more steps must land bit-for-bit where the
+//! unbroken 2k-step run lands. A resume without the optimizer state
+//! re-warms Adam from zero and provably diverges — the control case
+//! asserts that divergence, so this suite fails loudly if the comparison
+//! ever stops biting.
 
 #![cfg(feature = "cuda")]
 
@@ -124,11 +125,13 @@ fn check_resume(dtype: WeightDtype) {
     run_steps(&mut b1, 0, k, n, dm_n);
     let w_mid = b1.snapshot_master().unwrap();
     let blob_mid = b1.optimizer_state().unwrap();
+    let rec_mid = b1.recurrent_state().unwrap();
     assert_eq!(blob_mid.step, k as u64, "step counter rides the blob");
     drop(b1);
 
     let mut b2 = build(&w_mid, dtype);
     b2.load_optimizer_state(&blob_mid).unwrap();
+    b2.load_recurrent_state(&rec_mid).unwrap();
     run_steps(&mut b2, k, 2 * k, n, dm_n);
     let w_b = weight_bits(&b2.snapshot_master().unwrap());
     let blob_b = b2.optimizer_state().unwrap();
@@ -149,9 +152,11 @@ fn check_resume(dtype: WeightDtype) {
         "Adam v must be bit-continuous"
     );
 
-    // Control: weights-only resume (optimizer re-warmed from zero) must
-    // NOT reproduce the unbroken run — otherwise this suite tests nothing.
+    // Control: a resume without the optimizer state (Adam re-warmed from
+    // zero) must NOT reproduce the unbroken run — otherwise this suite
+    // tests nothing.
     let mut c2 = build(&w_mid, dtype);
+    c2.load_recurrent_state(&rec_mid).unwrap();
     run_steps(&mut c2, k, 2 * k, n, dm_n);
     let w_c = weight_bits(&c2.snapshot_master().unwrap());
     assert_ne!(

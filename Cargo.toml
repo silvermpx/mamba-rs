@@ -793,6 +793,11 @@ path = "tests/cpu_gpu_trainer_parity.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "window_split_carries_state"
+path = "tests/window_split_carries_state.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "m2_grid_runs"
 path = "tests/m2_grid_runs.rs"
 required-features = ["cuda"]

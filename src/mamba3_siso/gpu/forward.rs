@@ -662,10 +662,16 @@ pub fn gpu_forward_mamba3_layer(
             }
         }
         // K4: the inter-chunk state pass and the window-final writeback in
-        // one launch: the entering states land in place in the saved chunk
-        // states, the exit states in the persistent ssm/k/v buffers.
-        // Training forward: stateless window, chunk 0 enters at zero. A
-        // state-carrying prefill passes its persistent states as the seed.
+        // one launch: the window enters from the carried states with the
+        // trapezoidal boundary fold, as a carried prefill does, the entering
+        // states land in place in the saved chunk states, the exit states
+        // in the persistent ssm/k/v buffers. The carried K and V are kept
+        // first: the pass overwrites them, and the fold's gradient reads
+        // them.
+        acts.k_enter
+            .copy_from_device_ptr(layer_ptrs.k_state, &ctx.stream)?;
+        acts.v_enter
+            .copy_from_device_ptr(layer_ptrs.v_state, &ctx.stream)?;
         {
             let nc_i = nc as i32;
             let cfg = super::kernels::state_pass_fused_cfg(dims.batch, nh, hd, ds);
@@ -673,12 +679,11 @@ pub fn gpu_forward_mamba3_layer(
                 let mut builder = ctx
                     .stream
                     .launch_builder(&m3k.m3_state_pass_fused_typed.get(width).f32);
-                let seed_null: crate::mamba3_siso::gpu::state::CUptr = 0;
                 builder.arg(acts.chunk_states_saved.inner_mut());
                 builder.arg(&layer_ptrs.ssm_state);
                 builder.arg(&layer_ptrs.k_state);
                 builder.arg(&layer_ptrs.v_state);
-                builder.arg(&seed_null);
+                builder.arg(&layer_ptrs.ssm_state);
                 builder.arg(&layer_ptrs.k_state);
                 builder.arg(&layer_ptrs.v_state);
                 builder.arg(acts.dt.inner());
@@ -845,16 +850,12 @@ pub fn gpu_forward_mamba3_layer(
 
 /// Mamba-3 SISO full backbone forward (input proj + N layers + norm_f).
 ///
-/// State semantics: with `dims.use_parallel_scan` the window is STATELESS —
-/// this TRAINING forward runs stateless windows: it passes a null seed to
-/// `m3_state_pass_fused` (chunk 0 starts from zero) and zeroes all four
-/// state buffers (including the RoPE angle accumulator) up front to keep
-/// the semantics consistent. Final window states are still written back
-/// for inspection. The chunked kernels themselves DO support an entering
-/// state (a non-null seed, folded with the trapezoidal boundary term) —
-/// that route belongs to the state-carrying prefill; within training,
-/// cross-call continuity remains the sequential path's job
-/// (`use_parallel_scan = false`, `m3_burnin_fwd`).
+/// State semantics: every window continues from the carried SSM, K, V and
+/// angle states and leaves them after its last step, on both scan paths,
+/// so a sequence cut into windows runs as it would whole. The chunked path
+/// seeds `m3_state_pass_fused` with the carried states (folded with the
+/// trapezoidal boundary term) and continues the angle accumulator; a new
+/// sequence starts from `reset_state`.
 pub fn gpu_forward_mamba3_backbone(
     exec: &M3Exec<'_>,
     temporal: &mut GpuBuffer,
@@ -877,18 +878,6 @@ pub fn gpu_forward_mamba3_backbone(
     let nh = dims.nheads;
     let hd = dims.headdim;
     let na = dims.n_angles.max(1);
-
-    if dims.use_parallel_scan {
-        // This training window is STATELESS (null entering state to the
-        // chunked kernels), but the angle kernel WOULD carry the persistent accumulator — a hybrid
-        // that matches neither stateless-window nor full-continuity
-        // semantics. Zero all four so every parallel window is cleanly
-        // stateless. (Async memsets — CUDA Graph capture safe.)
-        states.ssm.zero(&ctx.stream)?;
-        states.k.zero(&ctx.stream)?;
-        states.v.zero(&ctx.stream)?;
-        states.angle.zero(&ctx.stream)?;
-    }
 
     if mamba_w.input_proj_w.is_empty() {
         // No input projection (the official checkpoints' layout): the

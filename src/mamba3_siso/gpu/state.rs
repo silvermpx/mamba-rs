@@ -279,6 +279,12 @@ pub struct GpuMamba3LayerActs {
     pub gamma_saved: GpuBuffer,        // [B*T*nh]
     pub qk_dot_saved: GpuBuffer,       // [B*T*nh]
     pub chunk_states_saved: GpuBuffer, // [B*nc*nh*hd*ds] -- entering chunk states
+    /// The carried K and V the window entered with, which its first step's
+    /// trapezoidal fold read and the state pass then overwrote: the fold's
+    /// gradient needs them. `[B*nh*ds]` and `[B*nh*hd]` on the chunked
+    /// path; the sequential tapes hold them there (one-element sentinels).
+    pub k_enter: GpuBuffer,
+    pub v_enter: GpuBuffer,
     // F7: RMSNormGated
     pub gated_rms_vals: GpuBuffer, // [B*T*nheads] — one rstd per group (group_size=headdim)
     pub gated: GpuBuffer,          // [B*T*d_inner]
@@ -396,6 +402,13 @@ pub struct GpuMamba3Scratch {
     /// Entering d_state per chunk (m3_dstate_passing_bwd output).
     /// [B * n_chunks * nh * hd * ds]
     pub dstate_enter: GpuBuffer,
+    /// The gradient of the state the window entered with
+    /// (m3_dstate_passing_bwd's last fold). [B * nh * hd * ds]
+    pub dstate_seed: GpuBuffer,
+    /// The gradient of the entering trapezoidal fold's coefficient
+    /// (m3_enter_fold_bwd), the scale gradient of the step before the
+    /// window's first. [B * nh]
+    pub d_scale_enter: GpuBuffer,
     /// The chain each chunk's saved state adds to dADT, for the tiled
     /// backward. [B * n_chunks * nh]
     pub dm_chain: GpuBuffer,
@@ -552,6 +565,22 @@ impl GpuMamba3LayerActs {
                     bt * nh * hd
                 },
             )?,
+            k_enter: GpuBuffer::zeros(
+                stream,
+                if dims.use_parallel_scan {
+                    b * nh * ds
+                } else {
+                    1
+                },
+            )?,
+            v_enter: GpuBuffer::zeros(
+                stream,
+                if dims.use_parallel_scan {
+                    b * nh * hd
+                } else {
+                    1
+                },
+            )?,
             y: GpuBuffer::zeros(stream, bt * di)?,
             da_cumsum_saved: GpuBuffer::zeros(stream, b * nc * nh * cs)?,
             k_scaled_saved: GpuBuffer::zeros(stream, bt * nh * ds)?,
@@ -660,6 +689,8 @@ impl GpuMamba3Scratch {
                 let nc = dims.n_chunks();
                 GpuBuffer::zeros(stream, b * nc * nh * hd * ds)?
             },
+            dstate_seed: GpuBuffer::zeros(stream, b * nh * hd * ds)?,
+            d_scale_enter: GpuBuffer::zeros(stream, b * nh)?,
             dm_chain: GpuBuffer::zeros(stream, b * dims.n_chunks() * nh)?,
             d_scale: GpuBuffer::zeros(stream, bt * nh)?,
             d_gamma_par: GpuBuffer::zeros(stream, bt * nh)?,

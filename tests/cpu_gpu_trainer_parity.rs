@@ -1,12 +1,14 @@
-//! The host trainer of every family trains as the GPU trainer does: from
-//! the same weights, three steps with the global and the control clip give
-//! master weights within f32 rounding of the GPU's in f32, the same step
-//! counts, the same clip norms to f32 precision, and after every window the
-//! same carried state in the same layout, so a trainer state either device
-//! saved loads into the other. Every window starts from the empty state:
-//! the carry across windows is `window_split_carries_state`'s. For Mamba-2,
-//! whose host tensor order is the GPU arena's, the optimizer moments agree
-//! too.
+//! The host trainer of every family trains as the GPU trainer does, in
+//! each scan mode of the GPU: from the same weights, three steps with the
+//! global and the control clip give master weights within f32 rounding of
+//! the GPU's in f32, the same step counts, the same clip norms to f32
+//! precision, and after every window the same carried state in the same
+//! layout, so a trainer state either device saved loads into the other.
+//! The steps run once with every window from the empty state and once
+//! with the state carried across the windows, which takes the gradient of
+//! the terms a window's first step reads from the window before. For
+//! Mamba-2, whose host tensor order is the GPU arena's, the optimizer
+//! moments agree too.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::ScanMode;
@@ -90,9 +92,13 @@ fn worst(a: &[f32], b: &[f32]) -> f32 {
     })
 }
 
-/// The same family on both devices from the same weights, in f32.
-fn pairs() -> Vec<(AnyCpuTrainer, AnyGpuTrainer)> {
-    let (s, opts) = (session(), GpuOptions::default().dtype(WeightDtype::F32));
+/// The same family on both devices from the same weights, in f32, the GPU
+/// in the scan mode `scan`.
+fn pairs(scan: ScanMode) -> Vec<(AnyCpuTrainer, AnyGpuTrainer)> {
+    let s = session();
+    let opts = GpuOptions::default()
+        .dtype(WeightDtype::F32)
+        .scan_mode(scan);
     let m1 = MambaWeights::init(&m1_cfg(), INPUT_DIM, 1);
     let m2 = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 2);
     let siso = Mamba3Weights::init(&siso_cfg(), INPUT_DIM, 3);
@@ -240,70 +246,90 @@ fn masters(cpu: &AnyCpuTrainer, gpu: &AnyGpuTrainer) -> (Vec<f32>, Vec<f32>) {
 
 #[test]
 fn every_family_trains_on_the_cpu_as_on_the_gpu() {
+    for scan in [ScanMode::Sequential, ScanMode::Parallel] {
+        for carry in [false, true] {
+            for (cpu, gpu) in pairs(scan) {
+                train_alike(cpu, gpu, scan, carry);
+            }
+        }
+    }
+}
+
+/// Three steps on both devices, every window from the empty state or the
+/// state carried across them, compared after each window and at the end.
+fn train_alike(mut cpu: AnyCpuTrainer, mut gpu: AnyGpuTrainer, scan: ScanMode, carry: bool) {
     let opts = BackwardOpts::default()
         .with_clip_max_norm(0.05)
         .with_control_clip_max_norm(0.01);
     let n_out = BATCH * SEQ_LEN * D_MODEL;
-    for (mut cpu, mut gpu) in pairs() {
-        let family = cpu.family();
-        assert_eq!(family, gpu.family());
-        let (before, _) = masters(&cpu, &gpu);
-        for k in 0..3u32 {
-            let input = values(BATCH * SEQ_LEN * INPUT_DIM, 10 + k);
-            let d: Vec<f32> = values(n_out, 20 + k).iter().map(|v| v * 1e-2).collect();
-            let (mut oc, mut og) = (vec![0.0f32; n_out], vec![0.0f32; n_out]);
+    let family = cpu.family();
+    assert_eq!(family, gpu.family());
+    let case = format!(
+        "{family:?} with the {scan:?} scan, {}",
+        if carry {
+            "the state carried"
+        } else {
+            "every window from the empty state"
+        }
+    );
+    let (before, _) = masters(&cpu, &gpu);
+    for k in 0..3u32 {
+        let input = values(BATCH * SEQ_LEN * INPUT_DIM, 10 + k);
+        let d: Vec<f32> = values(n_out, 20 + k).iter().map(|v| v * 1e-2).collect();
+        let (mut oc, mut og) = (vec![0.0f32; n_out], vec![0.0f32; n_out]);
+        if !carry {
             cpu.reset_state().unwrap();
             gpu.reset_state().unwrap();
-            cpu.forward(&input, &mut oc).unwrap();
-            gpu.forward(&input, &mut og).unwrap();
-            let out_diff = worst(&oc, &og);
-            assert!(
-                out_diff < 1e-4,
-                "{family:?} step {k}: outputs differ by {out_diff}"
-            );
-            let (sc, sg) = (cpu.trainer_state().unwrap(), gpu.trainer_state().unwrap());
-            assert_eq!(sc.recurrent.len(), sg.recurrent.len(), "{family:?}");
-            for ((name, vc), (name_g, vg)) in sc.recurrent.iter().zip(&sg.recurrent) {
-                assert_eq!((name, vc.len()), (name_g, vg.len()), "{family:?}");
-                let scale = vg.iter().fold(1.0f32, |m, v| m.max(v.abs()));
-                let diff = worst(vc, vg);
-                assert!(
-                    diff <= 1e-4 * scale,
-                    "{family:?} step {k}: the carried {name} differs by {diff} of {scale}"
-                );
-            }
-            let mc = cpu.backward_step(&d, opts).unwrap();
-            let mg = gpu.backward_step(&d, opts).unwrap();
-            assert_eq!(mc.step, mg.step, "{family:?} step {k}");
-            assert_eq!(mc.optimizer_stepped, mg.optimizer_stepped, "{family:?}");
-            let (nc, ng) = (mc.grad_norm.unwrap(), mg.grad_norm.unwrap());
-            assert!(
-                (nc - ng).abs() <= 1e-4 * ng.abs(),
-                "{family:?} step {k}: clip norms {nc} and {ng}"
-            );
         }
-        let (wc, wg) = masters(&cpu, &gpu);
-        assert_eq!(wc.len(), wg.len(), "{family:?}");
-        let moved = worst(&before, &wg);
-        let diff = worst(&wc, &wg);
-        eprintln!("{family:?}: weights moved {moved:e}, devices differ by {diff:e}");
-        assert!(moved > 1e-4, "{family:?}: the weights did not move");
+        cpu.forward(&input, &mut oc).unwrap();
+        gpu.forward(&input, &mut og).unwrap();
+        let out_diff = worst(&oc, &og);
         assert!(
-            diff < 2e-2 * moved,
-            "{family:?}: the devices differ by {diff:e} where training moved {moved:e}"
+            out_diff < 1e-4,
+            "{case}, step {k}: outputs differ by {out_diff}"
         );
-        if family == ModelFamily::Mamba2 {
-            let (sc, sg) = (
-                cpu.optimizer_state().unwrap(),
-                gpu.optimizer_state().unwrap(),
-            );
-            assert_eq!((sc.m.len(), sc.step), (sg.m.len(), sg.step));
-            let scale = sg.m.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-            let moments = worst(&sc.m, &sg.m);
+        let (sc, sg) = (cpu.trainer_state().unwrap(), gpu.trainer_state().unwrap());
+        assert_eq!(sc.recurrent.len(), sg.recurrent.len(), "{case}");
+        for ((name, vc), (name_g, vg)) in sc.recurrent.iter().zip(&sg.recurrent) {
+            assert_eq!((name, vc.len()), (name_g, vg.len()), "{case}");
+            let scale = vg.iter().fold(1.0f32, |m, v| m.max(v.abs()));
+            let diff = worst(vc, vg);
             assert!(
-                moments <= 1e-3 * scale,
-                "Mamba-2 first moments differ by {moments:e} of {scale:e}"
+                diff <= 1e-4 * scale,
+                "{case}, step {k}: the carried {name} differs by {diff} of {scale}"
             );
         }
+        let mc = cpu.backward_step(&d, opts).unwrap();
+        let mg = gpu.backward_step(&d, opts).unwrap();
+        assert_eq!(mc.step, mg.step, "{case}, step {k}");
+        assert_eq!(mc.optimizer_stepped, mg.optimizer_stepped, "{case}");
+        let (nc, ng) = (mc.grad_norm.unwrap(), mg.grad_norm.unwrap());
+        assert!(
+            (nc - ng).abs() <= 1e-4 * ng.abs(),
+            "{case}, step {k}: clip norms {nc} and {ng}"
+        );
+    }
+    let (wc, wg) = masters(&cpu, &gpu);
+    assert_eq!(wc.len(), wg.len(), "{case}");
+    let moved = worst(&before, &wg);
+    let diff = worst(&wc, &wg);
+    eprintln!("{case}: weights moved {moved:e}, devices differ by {diff:e}");
+    assert!(moved > 1e-4, "{case}: the weights did not move");
+    assert!(
+        diff < 2e-2 * moved,
+        "{case}: the devices differ by {diff:e} where training moved {moved:e}"
+    );
+    if family == ModelFamily::Mamba2 {
+        let (sc, sg) = (
+            cpu.optimizer_state().unwrap(),
+            gpu.optimizer_state().unwrap(),
+        );
+        assert_eq!((sc.m.len(), sc.step), (sg.m.len(), sg.step));
+        let scale = sg.m.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let moments = worst(&sc.m, &sg.m);
+        assert!(
+            moments <= 1e-3 * scale,
+            "{case}: the first moments differ by {moments:e} of {scale:e}"
+        );
     }
 }

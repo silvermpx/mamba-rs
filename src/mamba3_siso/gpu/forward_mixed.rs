@@ -107,6 +107,10 @@ pub struct GpuMamba3LayerMixedActs {
     pub qk_dot_saved: GpuBuffer,
     /// f32 — chunk states (BPTT-class recurrent state).
     pub chunk_states_saved: GpuBuffer,
+    /// f32 — the carried K and V the window entered with, for the entering
+    /// fold's gradient (chunked path; one-element sentinels otherwise).
+    pub k_enter: GpuBuffer,
+    pub v_enter: GpuBuffer,
 
     // F7: RMSNormGated
     /// f32 — one rstd per head.
@@ -233,6 +237,22 @@ impl GpuMamba3BackboneMixedActs {
                     gamma_saved: GpuBuffer::zeros(stream, bt * nh)?,
                     qk_dot_saved: GpuBuffer::zeros(stream, bt * nh)?,
                     chunk_states_saved: GpuBuffer::zeros(stream, batch * nc_max * nh * hd * ds)?,
+                    k_enter: GpuBuffer::zeros(
+                        stream,
+                        if use_parallel_scan {
+                            batch * nh * ds
+                        } else {
+                            1
+                        },
+                    )?,
+                    v_enter: GpuBuffer::zeros(
+                        stream,
+                        if use_parallel_scan {
+                            batch * nh * hd
+                        } else {
+                            1
+                        },
+                    )?,
                     gated_rms_vals: GpuBuffer::zeros(stream, bt * nh)?,
                     gated: DtypedBuf::zeros(stream, bt * di, dtype)?,
                 })
@@ -714,9 +734,13 @@ pub fn gpu_forward_mamba3_layer_mixed(
         }
         // K4: the inter-chunk state pass and the window-final writeback in
         // one launch (pure f32 states, typed k/x for the exit K and V): the
-        // entering states land in place in chunk_states, the exit states in
-        // the persistent ssm_state/k_state/v_state. Training forward:
-        // stateless window, chunk 0 enters at zero.
+        // window enters from the carried states with the trapezoidal
+        // boundary fold, the entering states land in place in chunk_states,
+        // the exit states in the persistent ssm_state/k_state/v_state. The
+        // carried K and V are kept first: the pass overwrites them, and the
+        // fold's gradient reads them.
+        acts.k_enter.copy_from_device_ptr(k_state, &ctx.stream)?;
+        acts.v_enter.copy_from_device_ptr(v_state, &ctx.stream)?;
         {
             let nc_i = nc as i32;
             let cfg = super::kernels::state_pass_fused_cfg(dims.batch, nh, hd, ds);
@@ -724,14 +748,13 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 let mut bld = ctx
                     .stream
                     .launch_builder(m3k.m3_state_pass_fused_typed.get(width).get(dtype));
-                let seed_null: crate::mamba3_siso::gpu::state::CUptr = 0;
                 let kp = acts.k.cached_ptr();
                 let xp = acts.x.cached_ptr();
                 bld.arg(acts.chunk_states_saved.inner_mut());
                 bld.arg(&ssm_state);
                 bld.arg(&k_state);
                 bld.arg(&v_state);
-                bld.arg(&seed_null);
+                bld.arg(&ssm_state);
                 bld.arg(&k_state);
                 bld.arg(&v_state);
                 bld.arg(acts.dt.inner());
@@ -1084,16 +1107,6 @@ pub fn gpu_forward_mamba3_backbone_mixed(
                     .into(),
             );
         }
-    }
-
-    if dims.use_parallel_scan {
-        // Stateless window: the chunked kernels ignore entering SSM/K/V
-        // state; zero the angle accumulator too so all four states behave
-        // identically (see gpu_forward_mamba3_backbone).
-        states.ssm.zero(&ctx.stream)?;
-        states.k.zero(&ctx.stream)?;
-        states.v.zero(&ctx.stream)?;
-        states.angle.zero(&ctx.stream)?;
     }
 
     // input_proj: if identity (len_elems==0), D2D copy mamba_input →

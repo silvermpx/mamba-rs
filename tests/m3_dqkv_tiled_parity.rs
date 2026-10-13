@@ -294,6 +294,9 @@ fn enter_state(
     for d in &dims {
         b.arg(d);
     }
+    // No gradient of the window's entering state is asked for.
+    let no_seed_grad: u64 = 0;
+    b.arg(&no_seed_grad);
     unsafe { b.launch(blocks(B * NH * s.hd * s.ds)) }.unwrap();
     out
 }

@@ -455,6 +455,14 @@
   launches the pass prepared on scratch it grew midway. Once a capture
   froze the scratch, eager passes that need more run on the overflow
   buffers as before.
+- The Mamba-3 SISO trainer carries the recurrence across training
+  windows on the chunked scan, as on the sequential scan and in every
+  other family. The chunked training forward started every window from
+  the empty state, so a sequence cut into windows trained as if it
+  restarted at every cut. Each window now enters with the carried SSM,
+  K, V and angle states and the trapezoidal term its first step reads
+  from the step before, and the backward takes that term's gradient into
+  the first step's dt and trapezoid gate.
 
 ## 0.7.5 (2026-09-23)
 

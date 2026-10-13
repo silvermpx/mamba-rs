@@ -20,6 +20,49 @@ use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_norm, y_runs, yz_runs}
 use cudarc::driver::PushKernelArg;
 
 /// Mamba-3 SISO single-layer GPU backward (sequential SSM backward).
+/// The operands of the entering fold's gradient.
+pub(super) struct EnterFold<'a> {
+    pub d_scale_enter: &'a mut GpuBuffer,
+    pub seed_grad: &'a GpuBuffer,
+    pub k_enter: &'a GpuBuffer,
+    pub v_enter: &'a GpuBuffer,
+}
+
+/// The gradient of the trapezoidal fold the window's entering state took,
+/// per sequence and head (`m3_enter_fold_bwd`): `m3_ddt_dtrap` adds it to
+/// the first step's dt and trap gradients. Zero for a window that entered
+/// with zero K and V.
+pub(super) fn launch_enter_fold_bwd(exec: &M3Exec<'_>, op: EnterFold<'_>) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
+    let rows = u32::try_from(dims.batch * dims.nheads)
+        .map_err(|_| "m3_enter_fold_bwd: batch * heads exceeds the grid".to_string())?;
+    let (b, nh) = (dims.batch as i32, dims.nheads as i32);
+    let (hd, ds) = (dims.headdim as i32, dims.d_state as i32);
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (rows, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let mut builder = ctx
+        .stream
+        .launch_builder(m3k.m3_enter_fold_bwd.get(dims.index_width()));
+    builder.arg(op.d_scale_enter.inner_mut());
+    builder.arg(op.seed_grad.inner());
+    builder.arg(op.k_enter.inner());
+    builder.arg(op.v_enter.inner());
+    builder.arg(&b);
+    builder.arg(&nh);
+    builder.arg(&hd);
+    builder.arg(&ds);
+    unsafe { builder.launch(cfg) }
+        .map(|_| ())
+        .map_err(|e| format!("m3_enter_fold_bwd: {e:?}"))
+}
+
 pub fn gpu_backward_mamba3_layer(
     exec: &M3Exec<'_>,
     d_temporal: &mut GpuBuffer, // [B*T*d_model] in/out gradient
@@ -312,6 +355,7 @@ pub fn gpu_backward_mamba3_layer(
                 d_param: dp_ptr,
                 state_terms: scratch.dstate_terms.cached_ptr(),
                 enter_state: scratch.dstate_enter.cached_ptr(),
+                seed_grad: scratch.dstate_seed.cached_ptr(),
                 dm_chain: scratch.dm_chain.cached_ptr(),
             };
             let shape = super::dqkv_tiled::DqkvShape {
@@ -393,6 +437,7 @@ pub fn gpu_backward_mamba3_layer(
                 pb.arg(&hd_i);
                 pb.arg(&ds_i);
                 pb.arg(&nc_i);
+                pb.arg(scratch.dstate_seed.inner_mut());
                 unsafe { pb.launch(grid_1d_cover(dims.batch * nh * hd * ds)?) }
                     .map_err(|e| format!("m3_dstate_passing_bwd: {:?}", e))?;
             }
@@ -560,6 +605,15 @@ pub fn gpu_backward_mamba3_layer(
         // (dead identity round trip removed: d_q/d_k used to shuttle the
         // pre_rope grads around m3_ddt_dtrap, whose argument list touches
         // neither pair — consumers read d_b/c_pre_rope directly.)
+        launch_enter_fold_bwd(
+            exec,
+            EnterFold {
+                d_scale_enter: &mut scratch.d_scale_enter,
+                seed_grad: &scratch.dstate_seed,
+                k_enter: &acts.k_enter,
+                v_enter: &acts.v_enter,
+            },
+        )?;
         {
             let mut builder = ctx.stream.launch_builder(m3k.m3_ddt_dtrap.get(width));
             builder.arg(scratch.d_gamma.inner_mut());
@@ -571,6 +625,7 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(&b_i);
             builder.arg(&t_i);
             builder.arg(&nh_i);
+            builder.arg(scratch.d_scale_enter.inner());
             unsafe { builder.launch(grid_1d_cover(bt * nh)?) }
                 .map_err(|e| format!("m3_ddt_dtrap B6 S3: {:?}", e))?;
         }

@@ -159,8 +159,12 @@ pub struct Mamba3Kernels {
     /// activation reads; f32 output).
     pub m3_dqkv_state_terms_typed: ByIndexWidth<TypedKernel>,
     /// Serial per-(b,h,p,n) reverse fold producing each chunk's
-    /// entering d_state.
+    /// entering d_state, and the gradient of the state the window entered
+    /// with.
     pub m3_dstate_passing_bwd: ByIndexWidth<CudaFunction>,
+    /// The gradient of the trapezoidal fold a window adds to the state it
+    /// enters with, one block of 256 per (sequence, head).
+    pub m3_enter_fold_bwd: ByIndexWidth<CudaFunction>,
     /// The per-chunk terms of the reverse state pass for any head and state
     /// width, in 16 x 16 output tiles: the bits of the warp kernel wherever
     /// that one runs.
@@ -794,6 +798,7 @@ impl Mamba3Kernels {
                 "m3_dqkv_state_terms_f16",
             )?,
             m3_dstate_passing_bwd: pair("m3_dstate_passing_bwd")?,
+            m3_enter_fold_bwd: pair("m3_enter_fold_bwd")?,
             m3_dqkv_state_terms_tiled: TypedKernel {
                 f32: get("m3_dqkv_state_terms_tiled")?,
                 bf16: get("m3_dqkv_state_terms_tiled_bf16")?,

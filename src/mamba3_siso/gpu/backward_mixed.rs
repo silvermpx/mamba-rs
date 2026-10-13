@@ -427,6 +427,7 @@ fn gpu_backward_mamba3_layer_mixed(
                 d_param: dp_ptr,
                 state_terms: sc.dstate_terms.cached_ptr(),
                 enter_state: sc.dstate_enter.cached_ptr(),
+                seed_grad: sc.dstate_seed.cached_ptr(),
                 dm_chain: sc.dm_chain.cached_ptr(),
             };
             let shape = super::dqkv_tiled::DqkvShape {
@@ -511,6 +512,7 @@ fn gpu_backward_mamba3_layer_mixed(
                 pb.arg(&hd_i);
                 pb.arg(&ds_i);
                 pb.arg(&nc_i);
+                pb.arg(sc.dstate_seed.inner_mut());
                 unsafe { pb.launch(grid_1d_cover(dims.batch * nh * hd * ds)?) }
                     .map_err(|e| format!("m3_dstate_passing_bwd typed: {:?}", e))?;
             }
@@ -679,7 +681,17 @@ fn gpu_backward_mamba3_layer_mixed(
         // d_b/c_pre_rope directly; the f32 twin dropped its copy pair in the
         // dead-work pass.)
 
-        // S3: m3_ddt_dtrap (pure f32) — produces dDT, dTrap.
+        // S3: the entering fold's gradient, then m3_ddt_dtrap (pure f32) —
+        // produces dDT, dTrap.
+        super::backward::launch_enter_fold_bwd(
+            exec,
+            super::backward::EnterFold {
+                d_scale_enter: &mut sc.d_scale_enter,
+                seed_grad: &sc.dstate_seed,
+                k_enter: &acts.k_enter,
+                v_enter: &acts.v_enter,
+            },
+        )?;
         {
             let mut builder = ctx.stream.launch_builder(m3k.m3_ddt_dtrap.get(width));
             builder.arg(sc.d_gamma.inner_mut()); // dDT → d_gamma scratch
@@ -691,6 +703,7 @@ fn gpu_backward_mamba3_layer_mixed(
             builder.arg(&b);
             builder.arg(&t);
             builder.arg(&nh_i);
+            builder.arg(sc.d_scale_enter.inner());
             unsafe { builder.launch(grid_1d_cover(bt * nh)?) }
                 .map_err(|e| format!("m3_ddt_dtrap mixed: {:?}", e))?;
         }

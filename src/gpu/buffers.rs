@@ -361,6 +361,22 @@ impl GpuBuffer {
         Ok(())
     }
 
+    /// Device-to-device copy of this buffer's length from the device
+    /// address `src`, through the cached pointer (CUDA Graph safe). The
+    /// caller vouches that `src` holds that many floats.
+    pub(crate) fn copy_from_device_ptr(
+        &mut self,
+        src: cudarc::driver::sys::CUdeviceptr,
+        stream: &Arc<cudarc::driver::CudaStream>,
+    ) -> Result<(), String> {
+        copy_device_bytes(
+            stream,
+            self.cached_ptr,
+            src,
+            self.len * std::mem::size_of::<f32>(),
+        )
+    }
+
     /// Length in f32 elements.
     pub fn len(&self) -> usize {
         self.len

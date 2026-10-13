@@ -56,10 +56,9 @@ use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 use crate::mamba3_siso::weights::Mamba3Weights;
 
 /// CPU-side snapshot of the four carried Mamba-3 recurrences (SSM, K,
-/// V, RoPE angle) for TBPTT-style window handoff on the sequential
-/// path and checkpointed resume. The chunked training path runs
-/// stateless windows and zeroes these each forward, so the blob is
-/// meaningful for sequential-scan runs.
+/// V, RoPE angle), layer after layer and within a layer sequence after
+/// sequence, for a checkpointed resume. Every training window continues
+/// from them and leaves them after its last step, on both scan paths.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mamba3RecurrentStateBlob {
     pub ssm: Vec<f32>,
@@ -544,8 +543,7 @@ impl Mamba3GpuTrainer {
     }
 
     /// Download the four carried recurrences (SSM, K, V, angle) — the
-    /// sequential-path TBPTT handoff counterpart of
-    /// [`Self::optimizer_state`].
+    /// window-handoff counterpart of [`Self::optimizer_state`].
     pub fn recurrent_state(&self) -> Result<Mamba3RecurrentStateBlob, String> {
         let (stream, ssm, k, v, angle) = match &self.inner {
             Trainer3Inner::F32(t) => (

@@ -603,8 +603,10 @@ DEFINE_M3_CHUNK_PRE_STATE_FUSED_F32(m3_chunk_pre_state_fused_i64, long long)
 //
 // dt is post-softplus and trap post-sigmoid (both saved that way by the
 // split and activation kernels, so no extra sigmoid here, unlike the
-// raw-input reference). A null seed is a stateless window that enters at
-// zero, the contract of every training forward.
+// raw-input reference). Training seeds every window this way too, so a
+// sequence cut into windows trains as it runs; the backward takes the
+// fold's gradient through m3_enter_fold_bwd. A null seed enters at zero,
+// the stateless window of the pooled prefill.
 //
 // The pass: an exclusive prefix scan over the chunks that turns states in
 // place from chunk contributions into the state ENTERING each chunk,
@@ -1250,13 +1252,16 @@ DEFINE_M3_DQKV_STATE_TERMS(m3_dqkv_state_terms_f16, int, __half)
 DEFINE_M3_DQKV_STATE_TERMS(m3_dqkv_state_terms_f16_i64, long long, __half)
 
 // One serial lane per (b, h, p, n): folds the per-chunk terms into the
-// entering state for every chunk (reverse order, deterministic).
+// entering state for every chunk (reverse order, deterministic). The fold
+// past the first chunk is the gradient of the state the window entered
+// with, which `seed_grad` takes when it is not null.
 #define DEFINE_M3_DSTATE_PASSING_BWD(NAME, IDX)                                \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ enter_state, /* [B*n_chunks*nh*hd*ds] */               \
     const float* __restrict__ state_B,                                         \
     const float* __restrict__ DA_CS_SUM, /* [B*n_chunks*nh] */                 \
-    int B, int nh_total, int hd, int ds, int n_chunks                          \
+    int B, int nh_total, int hd, int ds, int n_chunks,                         \
+    float* __restrict__ seed_grad /* [B*nh*hd*ds] or nullptr */                \
 ) {                                                                            \
     IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                      \
     IDX total = (IDX)B * nh_total * hd * ds;                                   \
@@ -1275,10 +1280,51 @@ extern "C" __global__ void NAME(                                               \
                           * LOG2E);                                            \
         e = a_c * e + state_B[base];                                           \
     }                                                                          \
+    if (seed_grad != nullptr) seed_grad[idx] = e;                              \
 }
 
 DEFINE_M3_DSTATE_PASSING_BWD(m3_dstate_passing_bwd, int)
 DEFINE_M3_DSTATE_PASSING_BWD(m3_dstate_passing_bwd_i64, long long)
+
+// The gradient of the trapezoidal fold a window adds to the state it enters
+// with (m3_state_pass_fused): the fold scales v_state (x) k_state by
+// c = dt0 * (1 - trap0), so
+//   dL/dc = sum_{p,n} dL/dh_enter[p][n] * v_state[p] * k_state[n],
+// which m3_ddt_dtrap takes as the scale gradient of the step before the
+// window's first. A stateless window entered with zero K and V and gets
+// zero. One block per (b, h); every thread sums a fixed stride of the
+// elements in order and the block adds the partials in a fixed tree, so
+// the bits do not depend on the launch. Block: 256 threads.
+#define DEFINE_M3_ENTER_FOLD_BWD(NAME, IDX)                                    \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ d_scale_enter,   /* [B*nh] */                          \
+    const float* __restrict__ seed_grad, /* [B*nh*hd*ds] */                    \
+    const float* __restrict__ k_enter,   /* [B*nh*ds] */                       \
+    const float* __restrict__ v_enter,   /* [B*nh*hd] */                       \
+    int batch, int nh, int hd, int ds                                          \
+) {                                                                            \
+    __shared__ float part[256];                                                \
+    const IDX bh = blockIdx.x;                                                 \
+    if (bh >= (IDX)batch * nh) return;                                         \
+    const int dim = hd * ds;                                                   \
+    float acc = 0.0f;                                                          \
+    for (int pd = threadIdx.x; pd < dim; pd += blockDim.x) {                   \
+        const int p = pd / ds;                                                 \
+        const int n = pd % ds;                                                 \
+        acc = __fmaf_rn(seed_grad[bh * dim + pd],                              \
+                        v_enter[bh * hd + p] * k_enter[bh * ds + n], acc);     \
+    }                                                                          \
+    part[threadIdx.x] = acc;                                                   \
+    __syncthreads();                                                           \
+    for (int half = blockDim.x / 2; half > 0; half >>= 1) {                    \
+        if (threadIdx.x < half) part[threadIdx.x] += part[threadIdx.x + half]; \
+        __syncthreads();                                                       \
+    }                                                                          \
+    if (threadIdx.x == 0) d_scale_enter[bh] = part[0];                         \
+}
+
+DEFINE_M3_ENTER_FOLD_BWD(m3_enter_fold_bwd, int)
+DEFINE_M3_ENTER_FOLD_BWD(m3_enter_fold_bwd_i64, long long)
 
 #define DEFINE_M3_DQKV_F32(NAME, IDX)                                          \
 extern "C" __global__ void NAME(                                               \
@@ -1982,7 +2028,10 @@ DEFINE_M3_DQKTHETA_F32(m3_dqktheta_i64, long long)
 // dDT[t] = (dGamma[t] + dScale[t]) * trap[t] + dScale[t-1] * (1 - trap[t])
 // dTrap_presig[t] = ((dGamma[t] + dScale[t]) * dt[t] - dScale[t-1] * dt[t]) * sig*(1-sig)
 // Grid: ceil(B*T*nh / 256), Block: 256
-// Each thread handles one (b,t,h) element. Reads dScale[t-1] via shifted access.
+// Each thread handles one (b,t,h) element. Reads dScale[t-1] via shifted
+// access; at t = 0 the step before is the previous window's last, whose
+// scale gradient is the entering fold's (m3_enter_fold_bwd), or zero
+// without one.
 #define DEFINE_M3_DDT_DTRAP(NAME, IDX)                                         \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ dDT,          /* [B*T*nh] */                           \
@@ -1991,7 +2040,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ dGamma, /* [B*T*nh] */                           \
     const float* __restrict__ DT,     /* [B*T*nh] — post-softplus dt */        \
     const float* __restrict__ Trap,   /* [B*T*nh] — post-sigmoid trap */       \
-    int B, int T, int nh                                                       \
+    int B, int T, int nh,                                                      \
+    const float* __restrict__ dScale_enter /* [B*nh] or nullptr */             \
 ) {                                                                            \
     IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                      \
     IDX total = (IDX)B * T * nh;                                               \
@@ -2005,9 +2055,12 @@ extern "C" __global__ void NAME(                                               \
     float dt_val = DT[idx];                                                    \
     float trap_val = Trap[idx];                                                \
                                                                                \
-    /* dScale from previous timestep (shifted read, 0 for t=0) */              \
+    /* dScale from previous timestep (shifted read; the entering fold's */    \
+    /* at t = 0) */                                                            \
     float ds_prev = 0.0f;                                                      \
     if (t > 0) ds_prev = dScale[idx - nh]; /* (b*T + t-1)*nh + h = idx - nh */ \
+    else if (dScale_enter != nullptr)                                          \
+        ds_prev = dScale_enter[(idx / nh / T) * nh + idx % nh];               \
                                                                                \
     float d_dt = (dg_cur + ds_cur) * trap_val + ds_prev * (1.0f - trap_val);   \
                                                                                \

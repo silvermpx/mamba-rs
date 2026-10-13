@@ -55,6 +55,8 @@ pub(super) struct DqkvTiledIo {
     pub d_param: CUdeviceptr,
     pub state_terms: CUdeviceptr,
     pub enter_state: CUdeviceptr,
+    /// The gradient of the state the window entered with, `[B*nh*hd*ds]`.
+    pub seed_grad: CUdeviceptr,
     pub dm_chain: CUdeviceptr,
 }
 
@@ -115,6 +117,7 @@ pub(super) fn launch(
     for d in [&b, &nh, &hd, &ds, &nc] {
         pass.arg(d);
     }
+    pass.arg(&io.seed_grad);
     unsafe { pass.launch(grid_1d_cover(batch * nheads * headdim * d_state)?) }
         .map_err(|e| format!("m3_dstate_passing_bwd tiled: {e:?}"))?;
 

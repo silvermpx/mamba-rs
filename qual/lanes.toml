@@ -262,3 +262,4 @@
 "target_forward_parity" = "gate"
 "training_graph_parity" = "gate"
 "typed_bwd_parity" = "gate"
+"window_split_carries_state" = "gate"
