@@ -164,6 +164,7 @@
 "kernel_identity_cuda" = "contract"
 "large_d_state" = "gate"
 "loss_scaler" = "gate"
+"lm_checkpoint" = "host"
 "m1_cpu_benchmark" = "bench"
 "m1_conv_any_bits" = "gate"
 "m1_gpu_matrix_parity" = "gate"

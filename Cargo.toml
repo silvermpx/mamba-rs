@@ -774,6 +774,16 @@ path = "tests/m2_mimo_training_graph.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "scan_mode_option"
+path = "tests/scan_mode_option.rs"
+required-features = ["cuda"]
+
+[[test]]
+name = "lm_checkpoint"
+path = "tests/lm_checkpoint.rs"
+required-features = ["hf"]
+
+[[test]]
 name = "m2_grid_runs"
 path = "tests/m2_grid_runs.rs"
 required-features = ["cuda"]
@@ -781,11 +791,6 @@ required-features = ["cuda"]
 [[test]]
 name = "mimo_grid_runs"
 path = "tests/mimo_grid_runs.rs"
-required-features = ["cuda"]
-
-[[test]]
-name = "scan_mode_option"
-path = "tests/scan_mode_option.rs"
 required-features = ["cuda"]
 
 [[test]]

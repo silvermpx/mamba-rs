@@ -5,7 +5,7 @@
 //!   [`Mamba3MimoBackbone`].
 //! - `lm` (feature `hf`): `MambaLM`, text generation on the CPU for every
 //!   family, loaded from a checkpoint directory or wrapped around a
-//!   backbone.
+//!   backbone, and saved as one language-model checkpoint file.
 //! - `gpu_backbone` (feature `cuda`): the `GpuBackbone` trait every family's
 //!   GPU backbone implements, and `AnyGpuBackbone`, one chosen at run time.
 //! - `gpu_trainer` (feature `cuda`): the `GpuTrainer` trait every family's
@@ -32,6 +32,8 @@ pub mod gpu_lm3;
 pub mod gpu_trainer;
 #[cfg(feature = "hf")]
 pub mod lm;
+#[cfg(feature = "hf")]
+mod lm_checkpoint;
 pub mod sample;
 
 pub use backbone::MambaBackbone;

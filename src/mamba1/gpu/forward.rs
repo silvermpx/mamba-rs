@@ -783,20 +783,29 @@ impl GpuRecurrentState {
         stream: &std::sync::Arc<cudarc::driver::CudaStream>,
         blob: &RecurrentStateBlob,
     ) -> Result<(), String> {
-        if blob.conv_states.len() != self.conv_states.len()
-            || blob.ssm_states.len() != self.ssm_states.len()
+        self.import_parts(stream, &blob.conv_states, &blob.ssm_states)
+    }
+
+    /// [`Self::import_state`] from borrowed conv and SSM values.
+    pub(crate) fn import_parts(
+        &mut self,
+        stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+        conv_states: &[f32],
+        ssm_states: &[f32],
+    ) -> Result<(), String> {
+        if conv_states.len() != self.conv_states.len() || ssm_states.len() != self.ssm_states.len()
         {
             return Err(format!(
                 "recurrent state mismatch: blob conv/ssm = {}/{} elements, \
                  state = {}/{} — the blob belongs to a different shape",
-                blob.conv_states.len(),
-                blob.ssm_states.len(),
+                conv_states.len(),
+                ssm_states.len(),
                 self.conv_states.len(),
                 self.ssm_states.len()
             ));
         }
-        self.conv_states.upload(stream, &blob.conv_states)?;
-        self.ssm_states.upload(stream, &blob.ssm_states)?;
+        self.conv_states.upload(stream, conv_states)?;
+        self.ssm_states.upload(stream, ssm_states)?;
         Ok(())
     }
 }

@@ -37,6 +37,17 @@ pub fn save(
     cfg: &Mamba2Config,
     input_dim: usize,
 ) -> Result<(), String> {
+    let (list, meta) = checkpoint_parts(weights, cfg, input_dim)?;
+    list.save(meta, path)
+}
+
+/// The tensors and the metadata [`save`] writes; the language-model
+/// checkpoint adds its embedding and head to them.
+pub(crate) fn checkpoint_parts<'a>(
+    weights: &'a Mamba2Weights,
+    cfg: &Mamba2Config,
+    input_dim: usize,
+) -> Result<(TensorList<'a>, HashMap<String, String>), String> {
     weights.validate(cfg, input_dim)?;
     let dm = cfg.d_model;
     let mut list = TensorList::new();
@@ -108,7 +119,7 @@ pub fn save(
         ("d_intermediate".to_string(), cfg.d_intermediate.to_string()),
         ("scan_mode".to_string(), format!("{:?}", cfg.scan_mode)),
     ]);
-    list.save(meta, path)
+    Ok((list, meta))
 }
 
 /// Load a checkpoint [`save`] wrote: the weights, the configuration and the

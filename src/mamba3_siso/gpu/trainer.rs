@@ -7,8 +7,10 @@
 //! Graph capture for all three. See the M1 trainer for the
 //! precision-support rationale.
 
+use crate::config::ModelFamily;
 use crate::gpu::grad_window::check_backward_opts;
 use crate::gpu::options::GpuOptions;
+use crate::gpu::train_state::TrainerState;
 use cudarc::driver::PushKernelArg;
 
 use crate::gpu::adamw::{
@@ -572,43 +574,45 @@ impl Mamba3GpuTrainer {
     /// Upload a previously exported recurrence. Errs on any length
     /// mismatch — the blob belongs to a different shape.
     pub fn load_recurrent_state(&mut self, blob: &Mamba3RecurrentStateBlob) -> Result<(), String> {
-        let (stream, ssm, k, v, angle) = match &mut self.inner {
+        self.load_recurrent_parts([&blob.ssm, &blob.k, &blob.v, &blob.angle])
+    }
+
+    /// The (ssm, k, v, angle) recurrence from borrowed values.
+    fn load_recurrent_parts(&mut self, parts: [&[f32]; 4]) -> Result<(), String> {
+        let (stream, bufs) = match &mut self.inner {
             Trainer3Inner::F32(t) => (
                 t.ctx.stream.clone(),
-                &mut t.ssm_states,
-                &mut t.k_states,
-                &mut t.v_states,
-                &mut t.angle_states,
+                [
+                    &mut t.ssm_states,
+                    &mut t.k_states,
+                    &mut t.v_states,
+                    &mut t.angle_states,
+                ],
             ),
             Trainer3Inner::Mixed(t) => (
                 t.ctx.stream.clone(),
-                &mut t.ssm_states,
-                &mut t.k_states,
-                &mut t.v_states,
-                &mut t.angle_states,
+                [
+                    &mut t.ssm_states,
+                    &mut t.k_states,
+                    &mut t.v_states,
+                    &mut t.angle_states,
+                ],
             ),
         };
-        if blob.ssm.len() != ssm.len()
-            || blob.k.len() != k.len()
-            || blob.v.len() != v.len()
-            || blob.angle.len() != angle.len()
-        {
+        if parts.iter().zip(&bufs).any(|(p, b)| p.len() != b.len()) {
+            let lens: Vec<(usize, usize)> = parts
+                .iter()
+                .zip(&bufs)
+                .map(|(p, b)| (p.len(), b.len()))
+                .collect();
             return Err(format!(
-                "Mamba3 recurrent state mismatch: blob {}/{}/{}/{} vs state                  {}/{}/{}/{} — the blob belongs to a different shape",
-                blob.ssm.len(),
-                blob.k.len(),
-                blob.v.len(),
-                blob.angle.len(),
-                ssm.len(),
-                k.len(),
-                v.len(),
-                angle.len()
+                "Mamba3 recurrent state mismatch: the blob's (ssm, k, v, angle) lengths \
+                 against this trainer's are {lens:?}; the blob belongs to a different shape"
             ));
         }
-        ssm.upload(&stream, &blob.ssm)?;
-        k.upload(&stream, &blob.k)?;
-        v.upload(&stream, &blob.v)?;
-        angle.upload(&stream, &blob.angle)?;
+        for (buf, values) in bufs.into_iter().zip(parts) {
+            buf.upload(&stream, values)?;
+        }
         Ok(())
     }
 
@@ -685,6 +689,41 @@ impl Mamba3GpuTrainer {
             Trainer3Inner::F32(t) => t.backward_split(d_temporal, opts, Some(d_input)),
             Trainer3Inner::Mixed(t) => t.backward_split(d_temporal, opts, Some(d_input)),
         }
+    }
+
+    /// Everything this trainer needs beside its weights to resume bit for
+    /// bit: the optimizer state, the f16 loss scale and the carried
+    /// recurrence. [`TrainerState::save`] writes it to a file.
+    pub fn trainer_state(&self) -> Result<TrainerState, String> {
+        let rec = self.recurrent_state()?;
+        Ok(TrainerState {
+            family: ModelFamily::Mamba3,
+            optimizer: self.optimizer_state()?,
+            scaler: self.scaler_state(),
+            recurrent: vec![
+                ("ssm".into(), rec.ssm),
+                ("k".into(), rec.k),
+                ("v".into(), rec.v),
+                ("angle".into(), rec.angle),
+            ],
+        })
+    }
+
+    /// Load a state a trainer of this family gave with
+    /// [`Self::trainer_state`]. The learning rate is not part of it.
+    pub fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String> {
+        state.check_family(ModelFamily::Mamba3)?;
+        let parts = [
+            state.recurrent_tensor("ssm")?,
+            state.recurrent_tensor("k")?,
+            state.recurrent_tensor("v")?,
+            state.recurrent_tensor("angle")?,
+        ];
+        self.load_optimizer_state(&state.optimizer)?;
+        if let Some((scale, tracker)) = state.scaler {
+            self.load_scaler_state(scale, tracker)?;
+        }
+        self.load_recurrent_parts(parts)
     }
 
     /// Download f32 master weights for checkpointing.

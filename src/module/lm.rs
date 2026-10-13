@@ -243,6 +243,27 @@ impl MambaLM {
         }
     }
 
+    /// Write the model to one safetensors file: the backbone as its
+    /// family's checkpoint, with the embedding, the untied head and the
+    /// vocabulary size beside it. [`Self::from_checkpoint`] and
+    /// `MambaGpuLM::from_checkpoint` read it back.
+    pub fn save_checkpoint(&self, path: &Path) -> Result<(), String> {
+        super::lm_checkpoint::save(
+            path,
+            &self.backbone,
+            &self.embed,
+            self.lm_head.as_deref(),
+            self.vocab_size,
+        )
+    }
+
+    /// Load a model [`Self::save_checkpoint`] wrote. The family comes from
+    /// the file.
+    pub fn from_checkpoint(path: &Path) -> Result<Self, String> {
+        let p = super::lm_checkpoint::load(path)?;
+        Self::new(p.backbone, p.embed, p.lm_head, p.vocab_size)
+    }
+
     /// The family of the backbone.
     pub fn family(&self) -> ModelFamily {
         self.backbone.family()

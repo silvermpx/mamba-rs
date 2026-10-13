@@ -4,7 +4,7 @@
 //! one, across two prompts in a row; a captured graph replays the eager
 //! steps bit for bit; the trait and the run-time enum reach the family's
 //! own methods; and the GPU language model of every family gives the CPU
-//! one's logits.
+//! one's logits and loads the language-model checkpoint.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::ScanMode;
@@ -572,6 +572,38 @@ mod language_model {
                 eprintln!("{:?} prompt {len}: logits {diff:.2e}", gpu.family());
                 assert!(diff < 1e-3, "{:?} prompt {len}: {diff}", gpu.family());
             }
+        }
+    }
+
+    /// A language-model checkpoint loads onto the device as the model it
+    /// was saved from: in every family its logits are those of the GPU
+    /// model built from the same parts, bit for bit.
+    #[test]
+    fn gpu_language_model_loads_a_checkpoint_in_every_family() {
+        let params = SampleParams {
+            max_tokens: 0,
+            ..SampleParams::default()
+        };
+        let prompt: Vec<u32> = (0..12).map(|i| (i * 37 % VOCAB) as u32).collect();
+        let bits = |l: &[f32]| l.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+        for (cpu, mut gpu) in models(GpuOptions::default()) {
+            let family = gpu.family();
+            let path = std::env::temp_dir().join(format!(
+                "mamba_rs_gpu_lm_checkpoint_{}_{family:?}.safetensors",
+                std::process::id()
+            ));
+            cpu.save_checkpoint(&path).unwrap();
+            let loaded = MambaGpuLM::from_checkpoint(&path, 1, GpuOptions::default());
+            std::fs::remove_file(&path).ok();
+            let mut loaded = loaded.unwrap();
+            assert_eq!(loaded.family(), family);
+            gpu.generate(&prompt, &params).unwrap();
+            loaded.generate(&prompt, &params).unwrap();
+            assert_eq!(
+                bits(loaded.last_logits(0)),
+                bits(gpu.last_logits(0)),
+                "{family:?}"
+            );
         }
     }
 

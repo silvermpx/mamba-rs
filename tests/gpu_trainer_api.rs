@@ -5,11 +5,15 @@
 //! reports the gradient's norm and leaves a gradient under the limit
 //! alone, a spiking window is dropped whole, and an accumulation window
 //! steps on the sum of its micro-batches. Every family trains through the
-//! `GpuTrainer` trait.
+//! `GpuTrainer` trait and resumes through its checkpoint and trainer-state
+//! files.
 #![cfg(feature = "cuda")]
+
+use std::path::Path;
 
 use mamba_rs::config::ScanMode;
 use mamba_rs::dist::DistContext;
+use mamba_rs::gpu::train_state::TrainerState;
 use mamba_rs::{
     AnyGpuTrainer, BackwardOpts, GpuOptions, GpuTrainer, Mamba2Config, Mamba2GpuTrainer,
     Mamba2Weights, Mamba3Config, Mamba3GpuTrainer, Mamba3MimoConfig, Mamba3MimoGpuTrainer,
@@ -449,24 +453,7 @@ fn apply_step_closes_a_window_as_an_applying_backward_does() {
 /// metrics report the norm that decided it.
 #[test]
 fn the_spike_skip_needs_no_clip_in_every_family() {
-    let m1_cfg = MambaConfig {
-        d_model: D_MODEL,
-        d_state: 8,
-        d_conv: 4,
-        expand: 2,
-        n_layers: 2,
-        scan_mode: ScanMode::Auto,
-        rms_norm_eps: 1e-5,
-    };
-    let siso_cfg = Mamba3Config {
-        d_model: D_MODEL,
-        d_state: 8,
-        expand: 2,
-        headdim: 8,
-        ngroups: 1,
-        n_layers: 2,
-        ..Mamba3Config::default()
-    };
+    let (m1_cfg, siso_cfg) = (m1_cfg(), siso_cfg());
     let (input, d) = window();
     let opts = GpuOptions::default().dtype(WeightDtype::F32);
     let s = session();
@@ -532,24 +519,7 @@ fn the_spike_skip_needs_no_clip_in_every_family() {
 
 #[test]
 fn every_family_trains_through_the_trait() {
-    let m1_cfg = MambaConfig {
-        d_model: D_MODEL,
-        d_state: 8,
-        d_conv: 4,
-        expand: 2,
-        n_layers: 2,
-        scan_mode: ScanMode::Auto,
-        rms_norm_eps: 1e-5,
-    };
-    let siso_cfg = Mamba3Config {
-        d_model: D_MODEL,
-        d_state: 8,
-        expand: 2,
-        headdim: 8,
-        ngroups: 1,
-        n_layers: 2,
-        ..Mamba3Config::default()
-    };
+    let (m1_cfg, siso_cfg) = (m1_cfg(), siso_cfg());
     let s = TrainSessionCfg {
         lr: 3e-3,
         ..session()
@@ -652,9 +622,8 @@ fn every_family_trains_through_the_trait() {
     }
 }
 
-/// One trainer of each family behind `AnyGpuTrainer`, in `dtype`.
-fn any_trainers(dtype: WeightDtype) -> Vec<AnyGpuTrainer> {
-    let m1_cfg = MambaConfig {
+fn m1_cfg() -> MambaConfig {
+    MambaConfig {
         d_model: D_MODEL,
         d_state: 8,
         d_conv: 4,
@@ -662,8 +631,11 @@ fn any_trainers(dtype: WeightDtype) -> Vec<AnyGpuTrainer> {
         n_layers: 2,
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
-    };
-    let siso_cfg = Mamba3Config {
+    }
+}
+
+fn siso_cfg() -> Mamba3Config {
+    Mamba3Config {
         d_model: D_MODEL,
         d_state: 8,
         expand: 2,
@@ -671,12 +643,21 @@ fn any_trainers(dtype: WeightDtype) -> Vec<AnyGpuTrainer> {
         ngroups: 1,
         n_layers: 2,
         ..Mamba3Config::default()
-    };
+    }
+}
+
+/// One trainer of each family behind `AnyGpuTrainer`, in `dtype`.
+fn any_trainers(dtype: WeightDtype) -> Vec<AnyGpuTrainer> {
     let (s, opts) = (session(), GpuOptions::default().dtype(dtype));
     let mut out: Vec<AnyGpuTrainer> = vec![
-        MambaGpuTrainer::new(&MambaWeights::init(&m1_cfg, INPUT_DIM, 61), m1_cfg, s, opts)
-            .unwrap()
-            .into(),
+        MambaGpuTrainer::new(
+            &MambaWeights::init(&m1_cfg(), INPUT_DIM, 61),
+            m1_cfg(),
+            s,
+            opts,
+        )
+        .unwrap()
+        .into(),
         Mamba2GpuTrainer::new(
             &Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 62),
             m2_cfg(),
@@ -686,8 +667,8 @@ fn any_trainers(dtype: WeightDtype) -> Vec<AnyGpuTrainer> {
         .unwrap()
         .into(),
         Mamba3GpuTrainer::new(
-            &Mamba3Weights::init(&siso_cfg, INPUT_DIM, 63),
-            siso_cfg,
+            &Mamba3Weights::init(&siso_cfg(), INPUT_DIM, 63),
+            siso_cfg(),
             s,
             opts,
         )
@@ -779,6 +760,106 @@ fn the_shared_surface_carries_graphs_seam_and_dist_in_every_family() {
                 snapshot_bits(p),
                 snapshot_bits(q),
                 "{family:?} {dtype:?}: the seam against the single-rank path"
+            );
+        }
+    }
+}
+
+/// Write the trainer's master weights to its family's checkpoint, and build
+/// a trainer of the same family from that file.
+fn reload_through_checkpoint(t: &AnyGpuTrainer, path: &Path, opts: GpuOptions) -> AnyGpuTrainer {
+    let s = session();
+    match t {
+        AnyGpuTrainer::M1(t) => {
+            let w = t.snapshot_master().unwrap();
+            mamba_rs::mamba1::serialize::save(path, &w, &m1_cfg(), INPUT_DIM).unwrap();
+            let (w, cfg, input_dim) = mamba_rs::mamba1::serialize::load(path).unwrap();
+            assert_eq!(input_dim, INPUT_DIM);
+            MambaGpuTrainer::new(&w, cfg, s, opts).unwrap().into()
+        }
+        AnyGpuTrainer::M2(t) => {
+            let w = t.snapshot_master().unwrap();
+            mamba_rs::mamba2::serialize::save(path, &w, &m2_cfg(), INPUT_DIM).unwrap();
+            let (w, cfg, input_dim) = mamba_rs::mamba2::serialize::load(path).unwrap();
+            assert_eq!(input_dim, INPUT_DIM);
+            Mamba2GpuTrainer::new(&w, cfg, s, opts).unwrap().into()
+        }
+        AnyGpuTrainer::M3(t) => {
+            let w = t.snapshot_master().unwrap();
+            mamba_rs::mamba3_siso::serialize::save(path, &w, &siso_cfg(), INPUT_DIM).unwrap();
+            let (w, cfg, input_dim) = mamba_rs::mamba3_siso::serialize::load(path).unwrap();
+            assert_eq!(input_dim, INPUT_DIM);
+            Mamba3GpuTrainer::new(&w, cfg, s, opts).unwrap().into()
+        }
+        AnyGpuTrainer::M3Mimo(t) => {
+            let w = t.snapshot_master().unwrap();
+            mamba_rs::mamba3_mimo::serialize::save(path, &w, &mimo_cfg(), INPUT_DIM).unwrap();
+            let (w, cfg, input_dim) = mamba_rs::mamba3_mimo::serialize::load(path).unwrap();
+            assert_eq!(input_dim, INPUT_DIM);
+            Mamba3MimoGpuTrainer::new(&w, cfg, s, opts).unwrap().into()
+        }
+    }
+}
+
+/// Every family resumes bit for bit through files: the weights through
+/// the family's checkpoint, the optimizer, the loss scale and the carried
+/// recurrence through the trainer-state file. Two steps, both files
+/// written, a fresh trainer built from them, two more steps: the weights
+/// and the state of four unbroken steps. Every step steps, in f16 too, so
+/// the comparison bites; a state of another family is refused.
+#[test]
+fn every_family_resumes_through_its_checkpoint_and_trainer_state_files() {
+    let (input, d) = window();
+    let dir = std::env::temp_dir();
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+        let opts = GpuOptions::default().dtype(dtype);
+        for (mut a, mut b) in any_trainers(dtype).into_iter().zip(any_trainers(dtype)) {
+            let family = a.family();
+            let label = format!("{family:?} {dtype:?}");
+            let step = |t: &mut AnyGpuTrainer| {
+                let m = t.step(&input, &d).unwrap();
+                assert_ne!(m.overflow_skipped, Some(true), "{label}: {m:?}");
+            };
+            for _ in 0..4 {
+                step(&mut a);
+            }
+            for _ in 0..2 {
+                step(&mut b);
+            }
+            let name = format!(
+                "mamba_rs_resume_{}_{family:?}_{dtype:?}",
+                std::process::id()
+            );
+            let weights = dir.join(format!("{name}_weights.safetensors"));
+            let state_file = dir.join(format!("{name}_state.safetensors"));
+            b.trainer_state().unwrap().save(&state_file).unwrap();
+            let mut c = reload_through_checkpoint(&b, &weights, opts);
+            let state = TrainerState::load(&state_file);
+            std::fs::remove_file(&weights).ok();
+            std::fs::remove_file(&state_file).ok();
+            let state = state.unwrap();
+            assert_eq!(state, b.trainer_state().unwrap(), "{label}: the file");
+            assert_eq!(state.scaler.is_some(), dtype == WeightDtype::F16, "{label}");
+
+            let mut foreign = state.clone();
+            foreign.family = if family == ModelFamily::Mamba1 {
+                ModelFamily::Mamba2
+            } else {
+                ModelFamily::Mamba1
+            };
+            assert!(
+                c.load_trainer_state(&foreign).is_err(),
+                "{label}: another family's state"
+            );
+            c.load_trainer_state(&state).unwrap();
+            for _ in 0..2 {
+                step(&mut c);
+            }
+            assert_eq!(snapshot_bits(&c), snapshot_bits(&a), "{label}: the weights");
+            assert_eq!(
+                c.trainer_state().unwrap(),
+                a.trainer_state().unwrap(),
+                "{label}: the optimizer, scale and recurrence"
             );
         }
     }

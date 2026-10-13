@@ -185,7 +185,7 @@ pub use module::{Mamba2Backbone, Mamba3Backbone, Mamba3MimoBackbone, MambaBackbo
 // backbones and the trainers with the traits over them, the trainer's
 // options and metrics, and the language model.
 #[cfg(feature = "cuda")]
-pub use gpu::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
+pub use gpu::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg, TrainerState};
 #[cfg(feature = "cuda")]
 pub use gpu::{GemmMode, GpuOptions, WeightDtype};
 #[cfg(feature = "cuda")]

@@ -28,6 +28,7 @@ use crate::mamba3_mimo::gpu::Mamba3MimoGpuBackbone;
 use crate::mamba3_siso::gpu::inference::Mamba3GpuBackbone;
 
 use super::gpu_backbone::{AnyGpuBackbone, GpuBackbone};
+use super::lm::AnyBackbone;
 use super::sample::{SampleParams, Xoshiro256PlusPlus, sample_token};
 
 /// Prompts of at least this many tokens run through the one-pass prefill,
@@ -137,6 +138,33 @@ impl MambaGpuLM {
                 Self::new(gpu, m.embed, None, m.vocab_size)
             }
         }
+    }
+
+    /// Load a language-model checkpoint `MambaLM::save_checkpoint` wrote,
+    /// for `batch` sequences, on the device, in the storage precision and
+    /// in the GEMM mode `opts` names. The family comes from the file.
+    ///
+    /// # Errors
+    ///
+    /// Checkpoint, configuration, CUDA, upload and allocation failures.
+    pub fn from_checkpoint(path: &Path, batch: usize, opts: GpuOptions) -> Result<Self, String> {
+        let p = super::lm_checkpoint::load(path)?;
+        let gpu: AnyGpuBackbone = match &p.backbone {
+            AnyBackbone::M1(b) => {
+                MambaGpuBackbone::new(b.weights(), *b.config(), b.input_dim(), batch, opts)?.into()
+            }
+            AnyBackbone::M2(b) => {
+                Mamba2GpuBackbone::new(b.weights(), *b.config(), b.input_dim(), batch, opts)?.into()
+            }
+            AnyBackbone::M3(b) => {
+                Mamba3GpuBackbone::new(b.weights(), *b.config(), b.input_dim(), batch, opts)?.into()
+            }
+            AnyBackbone::M3Mimo(b) => {
+                Mamba3MimoGpuBackbone::new(b.weights(), *b.config(), b.input_dim(), batch, opts)?
+                    .into()
+            }
+        };
+        Self::new(gpu, p.embed, p.lm_head, p.vocab_size)
     }
 
     /// Wrap a GPU backbone with its embedding and head.

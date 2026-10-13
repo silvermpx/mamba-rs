@@ -16,23 +16,10 @@
 
 use super::config::Mamba3Config;
 use super::weights::{Mamba3LayerWeights, Mamba3Weights};
-use safetensors::serialize_to_file;
-use safetensors::tensor::{SafeTensors, TensorView};
+use crate::ops::st_io::{TensorList, read_f32};
+use safetensors::tensor::SafeTensors;
 use std::collections::HashMap;
 use std::path::Path;
-
-/// An f32 tensor view. An empty tensor, the input projection of a model
-/// that reads its rows as they are, is written with one dimension of zero.
-fn view<'a>(data: &'a [f32], shape: &[usize]) -> Result<TensorView<'a>, String> {
-    let shape = if data.is_empty() {
-        vec![0]
-    } else {
-        shape.to_vec()
-    };
-    let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
-    TensorView::new(safetensors::Dtype::F32, shape, bytes)
-        .map_err(|e| format!("tensor view: {e:?}"))
-}
 
 /// Save the weights, the configuration and the input width to a
 /// safetensors file.
@@ -42,6 +29,17 @@ pub fn save(
     cfg: &Mamba3Config,
     input_dim: usize,
 ) -> Result<(), String> {
+    let (list, meta) = checkpoint_parts(weights, cfg, input_dim)?;
+    list.save(meta, path)
+}
+
+/// The tensors and the metadata [`save`] writes; the language-model
+/// checkpoint adds its embedding and head to them.
+pub(crate) fn checkpoint_parts<'a>(
+    weights: &'a Mamba3Weights,
+    cfg: &Mamba3Config,
+    input_dim: usize,
+) -> Result<(TensorList<'a>, HashMap<String, String>), String> {
     weights.validate(cfg, input_dim)?;
     let dm = cfg.d_model;
     let di = cfg.d_inner();
@@ -49,44 +47,34 @@ pub fn save(
     let nh = cfg.nheads();
     let ip = cfg.in_proj_out_dim();
 
-    macro_rules! t {
-        ($name:expr, $data:expr, $shape:expr) => {
-            ($name.to_string(), view($data, $shape)?)
-        };
-    }
-
-    let mut tensors: Vec<(String, TensorView<'_>)> = vec![
-        t!("input_proj.weight", &weights.input_proj_w, &[input_dim, dm]),
-        t!("input_proj.bias", &weights.input_proj_b, &[dm]),
-    ];
-
+    let mut list = TensorList::new();
+    list.push(
+        "input_proj.weight".into(),
+        &weights.input_proj_w,
+        &[input_dim, dm],
+    )?;
+    list.push("input_proj.bias".into(), &weights.input_proj_b, &[dm])?;
     for (i, lw) in weights.layers.iter().enumerate() {
         let p = |n: &str| format!("layers.{i}.{n}");
-        tensors.extend([
-            t!(p("norm.weight"), &lw.norm_weight, &[dm]),
-            t!(p("in_proj.weight"), &lw.in_proj_w, &[dm, ip]),
-            t!(p("dt_bias"), &lw.dt_bias, &[nh]),
-            t!(p("b_norm.weight"), &lw.b_norm_weight, &[ds]),
-            t!(p("c_norm.weight"), &lw.c_norm_weight, &[ds]),
-            t!(p("b_bias"), &lw.b_bias, &[nh, ds]),
-            t!(p("c_bias"), &lw.c_bias, &[nh, ds]),
-            t!(p("D"), &lw.d_param, &[nh]),
-            t!(p("norm_gate.weight"), &lw.norm_gate_weight, &[di]),
-            t!(p("out_proj.weight"), &lw.out_proj_w, &[di, dm]),
-        ]);
+        list.push(p("norm.weight"), &lw.norm_weight, &[dm])?;
+        list.push(p("in_proj.weight"), &lw.in_proj_w, &[dm, ip])?;
+        list.push(p("dt_bias"), &lw.dt_bias, &[nh])?;
+        list.push(p("b_norm.weight"), &lw.b_norm_weight, &[ds])?;
+        list.push(p("c_norm.weight"), &lw.c_norm_weight, &[ds])?;
+        list.push(p("b_bias"), &lw.b_bias, &[nh, ds])?;
+        list.push(p("c_bias"), &lw.c_bias, &[nh, ds])?;
+        list.push(p("D"), &lw.d_param, &[nh])?;
+        list.push(p("norm_gate.weight"), &lw.norm_gate_weight, &[di])?;
+        list.push(p("out_proj.weight"), &lw.out_proj_w, &[di, dm])?;
     }
-
     let hidden = cfg.mlp_hidden();
     for (i, m) in weights.mlp.iter().enumerate() {
         let p = |n: &str| format!("layers.{i}.{n}");
-        tensors.extend([
-            t!(p("norm2.weight"), &m.norm_weight, &[dm]),
-            t!(p("mlp.fc1.weight"), &m.fc1_w, &[dm, 2 * hidden]),
-            t!(p("mlp.fc2.weight"), &m.fc2_w, &[hidden, dm]),
-        ]);
+        list.push(p("norm2.weight"), &m.norm_weight, &[dm])?;
+        list.push(p("mlp.fc1.weight"), &m.fc1_w, &[dm, 2 * hidden])?;
+        list.push(p("mlp.fc2.weight"), &m.fc2_w, &[hidden, dm])?;
     }
-
-    tensors.push(t!("norm_f.weight", &weights.norm_f_weight, &[dm]));
+    list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
 
     let meta = HashMap::from([
         ("d_model".to_string(), dm.to_string()),
@@ -111,12 +99,7 @@ pub fn save(
         ("scan_mode".to_string(), format!("{:?}", cfg.scan_mode)),
         ("mamba_version".to_string(), "3".to_string()),
     ]);
-
-    let refs: Vec<_> = tensors
-        .iter()
-        .map(|(n, t)| (n.as_str(), t.clone()))
-        .collect();
-    serialize_to_file(refs, Some(meta), path).map_err(|e| format!("safetensors save failed: {e:?}"))
+    Ok((list, meta))
 }
 
 /// Load Mamba-3 SISO weights from safetensors with a caller-supplied config.
@@ -127,7 +110,12 @@ pub fn save(
 /// produces a different model with plausible-looking outputs.
 pub fn load_mamba3(path: &Path, cfg: &Mamba3Config) -> Result<(Mamba3Weights, usize), String> {
     let data = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
-    let (_, header) = SafeTensors::read_metadata(&data).map_err(|e| format!("metadata: {e}"))?;
+    weights_from_bytes(&data, cfg)
+}
+
+/// [`load_mamba3`] from the bytes of a checkpoint.
+fn weights_from_bytes(data: &[u8], cfg: &Mamba3Config) -> Result<(Mamba3Weights, usize), String> {
+    let (_, header) = SafeTensors::read_metadata(data).map_err(|e| format!("metadata: {e}"))?;
     let meta_map = header.metadata().as_ref().ok_or("no metadata")?;
     let input_dim: usize = meta_map
         .get("input_dim")
@@ -170,35 +158,8 @@ pub fn load_mamba3(path: &Path, cfg: &Mamba3Config) -> Result<(Mamba3Weights, us
         ));
     }
 
-    let st = SafeTensors::deserialize(&data).map_err(|e| format!("deserialize: {e:?}"))?;
-
-    // Byte-wise decode: the safetensors spec does not guarantee 4-byte
-    // alignment of the data section, so a `*const f32` cast on the raw
-    // buffer would be UB for a spec-valid file with an unpadded header.
-    let get = |name: &str| -> Result<Vec<f32>, String> {
-        let t = st
-            .tensor(name)
-            .map_err(|e| format!("tensor '{name}': {e:?}"))?;
-        if t.dtype() != safetensors::Dtype::F32 {
-            return Err(format!(
-                "tensor '{name}': dtype {:?}, expected F32",
-                t.dtype()
-            ));
-        }
-        let bytes = t.data();
-        if bytes.len() % 4 != 0 {
-            return Err(format!(
-                "tensor '{name}': byte length {} is not a multiple of 4",
-                bytes.len()
-            ));
-        }
-        Ok(bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| f32::from_le_bytes(*c))
-            .collect())
-    };
+    let st = SafeTensors::deserialize(data).map_err(|e| format!("deserialize: {e:?}"))?;
+    let get = |name: &str| read_f32(&st, name);
 
     let mut layers = Vec::new();
     for i in 0..cfg.n_layers {
@@ -263,7 +224,12 @@ pub fn save_mamba3(
 /// (false, 1e-5 and Auto), the model they trained as.
 pub fn load(path: &Path) -> Result<(Mamba3Weights, Mamba3Config, usize), String> {
     let data = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
-    let (_, header) = SafeTensors::read_metadata(&data).map_err(|e| format!("metadata: {e}"))?;
+    load_from_bytes(&data)
+}
+
+/// [`load`] from the bytes of a checkpoint.
+pub fn load_from_bytes(data: &[u8]) -> Result<(Mamba3Weights, Mamba3Config, usize), String> {
+    let (_, header) = SafeTensors::read_metadata(data).map_err(|e| format!("metadata: {e}"))?;
     let meta_map = header.metadata().as_ref().ok_or("no metadata")?;
 
     if meta_map.get("mamba_version").map(String::as_str) != Some("3") {
@@ -322,7 +288,7 @@ pub fn load(path: &Path) -> Result<(Mamba3Weights, Mamba3Config, usize), String>
     };
     cfg.validate()?;
 
-    let (w, input_dim) = load_mamba3(path, &cfg)?;
+    let (w, input_dim) = weights_from_bytes(data, &cfg)?;
     Ok((w, cfg, input_dim))
 }
 

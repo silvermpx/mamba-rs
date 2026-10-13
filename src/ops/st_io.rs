@@ -1,6 +1,6 @@
-//! What the Mamba-2 and MIMO safetensors serializers share: building the
-//! tensor list with shapes, reading an f32 tensor back byte by byte, and
-//! reading the configuration from the file's metadata.
+//! What the safetensors serializers share: building the tensor list with
+//! shapes, reading an f32 tensor back byte by byte, and reading the
+//! configuration and the family from the file's metadata.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -92,6 +92,15 @@ pub(crate) fn read_f32(st: &SafeTensors<'_>, name: &str) -> Result<Vec<f32>, Str
         .collect())
 }
 
+/// [`read_f32`] of a tensor the file may not hold.
+#[cfg(feature = "hf")]
+pub(crate) fn read_f32_opt(st: &SafeTensors<'_>, name: &str) -> Result<Option<Vec<f32>>, String> {
+    match st.tensor(name) {
+        Err(safetensors::SafeTensorError::TensorNotFound(_)) => Ok(None),
+        _ => read_f32(st, name).map(Some),
+    }
+}
+
 /// The metadata of a safetensors file.
 pub(crate) fn read_meta(data: &[u8]) -> Result<HashMap<String, String>, String> {
     let (_, header) = SafeTensors::read_metadata(data).map_err(|e| format!("metadata: {e}"))?;
@@ -120,5 +129,20 @@ pub(crate) fn scan_mode(meta: &HashMap<String, String>) -> Result<crate::config:
         Some("Parallel") => Ok(ScanMode::Parallel),
         Some("Auto") | None => Ok(ScanMode::Auto),
         Some(other) => Err(format!("unknown scan_mode '{other}' in the metadata")),
+    }
+}
+
+/// The family a checkpoint's `mamba_version` names. Mamba-1 files written
+/// before the marker carry none.
+pub(crate) fn checkpoint_family(
+    meta: &HashMap<String, String>,
+) -> Result<crate::config::ModelFamily, String> {
+    use crate::config::ModelFamily;
+    match meta.get("mamba_version").map(String::as_str) {
+        None | Some("1") => Ok(ModelFamily::Mamba1),
+        Some("2") => Ok(ModelFamily::Mamba2),
+        Some("3") => Ok(ModelFamily::Mamba3),
+        Some("3-mimo") => Ok(ModelFamily::Mamba3Mimo),
+        Some(other) => Err(format!("unknown mamba_version '{other}' in the metadata")),
     }
 }

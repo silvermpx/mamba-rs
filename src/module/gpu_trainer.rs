@@ -11,6 +11,7 @@ use crate::gpu::adamw::AdamWStateBlob;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics};
+use crate::gpu::train_state::TrainerState;
 use crate::mamba1::gpu::trainer::MambaGpuTrainer;
 use crate::mamba2::gpu::Mamba2GpuTrainer;
 use crate::mamba3_mimo::gpu::Mamba3MimoGpuTrainer;
@@ -113,6 +114,15 @@ pub trait GpuTrainer {
     /// Upload a previously exported optimizer state; a blob of another
     /// parameterization is an error.
     fn load_optimizer_state(&mut self, blob: &AdamWStateBlob) -> Result<(), String>;
+
+    /// Everything beside the weights a bit-continuous resume needs: the
+    /// optimizer state, the f16 loss scale and the carried recurrence.
+    /// [`TrainerState::save`] writes it next to the weight checkpoint.
+    fn trainer_state(&self) -> Result<TrainerState, String>;
+
+    /// Load a [`Self::trainer_state`] of a trainer of the same family and
+    /// shape; another family's state is an error.
+    fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String>;
 
     /// Capture the training step as one CUDA graph, which later
     /// [`Self::step`] calls replay with the eager step's bits. Needs one
@@ -225,6 +235,12 @@ macro_rules! gpu_trainer_by_inherent_methods {
             }
             fn load_optimizer_state(&mut self, blob: &AdamWStateBlob) -> Result<(), String> {
                 <$ty>::load_optimizer_state(self, blob)
+            }
+            fn trainer_state(&self) -> Result<TrainerState, String> {
+                <$ty>::trainer_state(self)
+            }
+            fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String> {
+                <$ty>::load_trainer_state(self, state)
             }
             fn capture_graph(&mut self) -> Result<(), String> {
                 <$ty>::capture_graph(self)
@@ -392,6 +408,12 @@ impl GpuTrainer for AnyGpuTrainer {
     }
     fn load_optimizer_state(&mut self, blob: &AdamWStateBlob) -> Result<(), String> {
         self.inner_mut().load_optimizer_state(blob)
+    }
+    fn trainer_state(&self) -> Result<TrainerState, String> {
+        self.inner().trainer_state()
+    }
+    fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String> {
+        self.inner_mut().load_trainer_state(state)
     }
     fn capture_graph(&mut self) -> Result<(), String> {
         self.inner_mut().capture_graph()

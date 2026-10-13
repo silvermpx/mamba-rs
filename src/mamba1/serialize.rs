@@ -16,14 +16,18 @@
 //! - `norm_f.weight`
 //!
 //! Metadata stores config as JSON: `d_model`, `d_state`, `d_conv`, `expand`,
-//! `n_layers`, `input_dim`.
+//! `n_layers`, `input_dim`, and the family marker `mamba_version = "1"`.
 
+use crate::config::ModelFamily;
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
-use safetensors::serialize_to_file;
-use safetensors::tensor::{SafeTensors, TensorView};
+use crate::ops::st_io::{TensorList, checkpoint_family};
+use safetensors::tensor::SafeTensors;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// The family marker in the metadata.
+const VERSION: &str = "1";
 
 /// Save weights to a `.safetensors` file.
 pub fn save(
@@ -32,25 +36,18 @@ pub fn save(
     cfg: &MambaConfig,
     input_dim: usize,
 ) -> Result<(), String> {
-    let mut tensors: Vec<(&str, TensorView<'_>)> = Vec::new();
-    let mut names: Vec<String> = Vec::new();
+    let (list, meta) = checkpoint_parts(weights, cfg, input_dim)?;
+    list.save(meta, path)
+}
 
+/// The tensors and the metadata [`save`] writes; the language-model
+/// checkpoint adds its embedding and head to them.
+pub(crate) fn checkpoint_parts<'a>(
+    weights: &'a MambaWeights,
+    cfg: &MambaConfig,
+    input_dim: usize,
+) -> Result<(TensorList<'a>, HashMap<String, String>), String> {
     weights.validate(cfg, input_dim)?;
-    // An f32 tensor view. An empty tensor, the input projection of a model
-    // that reads its rows as they are, is written with one dimension of zero.
-    let view = |data: &[f32], shape: &[usize]| -> Result<TensorView<'_>, String> {
-        let shape = if data.is_empty() {
-            vec![0]
-        } else {
-            shape.to_vec()
-        };
-        let bytes =
-            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
-        TensorView::new(safetensors::Dtype::F32, shape, bytes)
-            .map_err(|e| format!("tensor view: {e:?}"))
-    };
-
-    // input_proj
     let dm = cfg.d_model;
     let di = cfg.d_inner();
     let ds = cfg.d_state;
@@ -58,61 +55,42 @@ pub fn save(
     let dt_rank = cfg.dt_rank();
     let xdbl_dim = cfg.xdbl_dim();
 
-    names.push("input_proj.weight".into());
-    names.push("input_proj.bias".into());
-
-    for i in 0..cfg.n_layers {
-        names.push(format!("layers.{i}.norm.weight"));
-        names.push(format!("layers.{i}.in_proj.weight"));
-        names.push(format!("layers.{i}.conv1d.weight"));
-        names.push(format!("layers.{i}.conv1d.bias"));
-        names.push(format!("layers.{i}.x_proj.weight"));
-        names.push(format!("layers.{i}.dt_proj.weight"));
-        names.push(format!("layers.{i}.dt_proj.bias"));
-        names.push(format!("layers.{i}.a_log"));
-        names.push(format!("layers.{i}.D"));
-        names.push(format!("layers.{i}.out_proj.weight"));
+    let mut list = TensorList::new();
+    list.push(
+        "input_proj.weight".into(),
+        &weights.input_proj_w,
+        &[input_dim, dm],
+    )?;
+    list.push("input_proj.bias".into(), &weights.input_proj_b, &[dm])?;
+    for (i, lw) in weights.layers.iter().enumerate() {
+        let p = |n: &str| format!("layers.{i}.{n}");
+        list.push(p("norm.weight"), &lw.norm_weight, &[dm])?;
+        list.push(p("in_proj.weight"), &lw.in_proj_w, &[dm, 2 * di])?;
+        list.push(p("conv1d.weight"), &lw.conv1d_weight, &[di, dc])?;
+        list.push(p("conv1d.bias"), &lw.conv1d_bias, &[di])?;
+        list.push(p("x_proj.weight"), &lw.x_proj_w, &[di, xdbl_dim])?;
+        list.push(p("dt_proj.weight"), &lw.dt_proj_w, &[dt_rank, di])?;
+        list.push(p("dt_proj.bias"), &lw.dt_proj_b, &[di])?;
+        list.push(p("a_log"), &lw.a_log, &[di, ds])?;
+        list.push(p("D"), &lw.d_param, &[di])?;
+        list.push(p("out_proj.weight"), &lw.out_proj_w, &[di, dm])?;
     }
-    names.push("norm_f.weight".into());
+    list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
 
-    // Build tensor views (must live as long as tensors vec)
-    let mut views: Vec<TensorView<'_>> = Vec::new();
-    views.push(view(&weights.input_proj_w, &[input_dim, dm])?);
-    views.push(view(&weights.input_proj_b, &[dm])?);
-
-    for lw in &weights.layers {
-        views.push(view(&lw.norm_weight, &[dm])?);
-        views.push(view(&lw.in_proj_w, &[dm, 2 * di])?);
-        views.push(view(&lw.conv1d_weight, &[di, dc])?);
-        views.push(view(&lw.conv1d_bias, &[di])?);
-        views.push(view(&lw.x_proj_w, &[di, xdbl_dim])?);
-        views.push(view(&lw.dt_proj_w, &[dt_rank, di])?);
-        views.push(view(&lw.dt_proj_b, &[di])?);
-        views.push(view(&lw.a_log, &[di, ds])?);
-        views.push(view(&lw.d_param, &[di])?);
-        views.push(view(&lw.out_proj_w, &[di, dm])?);
-    }
-    views.push(view(&weights.norm_f_weight, &[dm])?);
-
-    // Build name-view pairs
-    for (name, v) in names.iter().zip(views) {
-        tensors.push((name.as_str(), v));
-    }
-
-    // Metadata: config as JSON. scan_mode + rms_norm_eps ride along (M-B,
-    // they are part of the checkpoint's numeric
-    // route — dropping them silently re-routed a non-default-eps model to
-    // 1e-5 on load.
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        "config".to_string(),
-        format!(
-            r#"{{"d_model":{},"d_state":{},"d_conv":{},"expand":{},"n_layers":{},"input_dim":{},"scan_mode":"{:?}","rms_norm_eps":{}}}"#,
-            dm, ds, dc, cfg.expand, cfg.n_layers, input_dim, cfg.scan_mode, cfg.rms_norm_eps
+    // The configuration as JSON. scan_mode and rms_norm_eps are part of the
+    // checkpoint's numeric route: without them a model of another eps
+    // would load with the default one.
+    let meta = HashMap::from([
+        ("mamba_version".to_string(), VERSION.to_string()),
+        (
+            "config".to_string(),
+            format!(
+                r#"{{"d_model":{},"d_state":{},"d_conv":{},"expand":{},"n_layers":{},"input_dim":{},"scan_mode":"{:?}","rms_norm_eps":{}}}"#,
+                dm, ds, dc, cfg.expand, cfg.n_layers, input_dim, cfg.scan_mode, cfg.rms_norm_eps
+            ),
         ),
-    );
-
-    serialize_to_file(tensors, Some(metadata), path).map_err(|e| format!("safetensors save: {e}"))
+    ]);
+    Ok((list, meta))
 }
 
 /// Load weights from a `.safetensors` file.
@@ -129,11 +107,18 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
     // Read metadata first to get config
     let (_, meta) =
         SafeTensors::read_metadata(data).map_err(|e| format!("safetensors metadata: {e}"))?;
-    let config_json = meta
+    let meta = meta
         .metadata()
         .as_ref()
-        .and_then(|m| m.get("config"))
         .ok_or("missing 'config' metadata")?;
+    // Files written before the family tag carry none.
+    if checkpoint_family(meta)? != ModelFamily::Mamba1 {
+        return Err(format!(
+            "not a Mamba-1 checkpoint (mamba_version = {:?})",
+            meta.get("mamba_version")
+        ));
+    }
+    let config_json = meta.get("config").ok_or("missing 'config' metadata")?;
 
     let st = SafeTensors::deserialize(data).map_err(|e| format!("safetensors parse: {e}"))?;
 
@@ -264,6 +249,35 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A checkpoint written before the family marker carries none and
+    /// still loads; a file marked as another family does not.
+    #[test]
+    fn untagged_files_load_and_other_families_are_refused() {
+        let cfg = MambaConfig::default();
+        let w = MambaWeights::init(&cfg, 16, 7);
+        let path = std::env::temp_dir().join(format!(
+            "mamba1_untagged_{}.safetensors",
+            std::process::id()
+        ));
+        let write = |tag: Option<&str>| {
+            let (list, mut meta) = checkpoint_parts(&w, &cfg, 16).unwrap();
+            match tag {
+                Some(t) => meta.insert("mamba_version".into(), t.into()),
+                None => meta.remove("mamba_version"),
+            };
+            list.save(meta, &path).unwrap();
+            load(&path)
+        };
+        let untagged = write(None);
+        let mamba2 = write(Some("2"));
+        std::fs::remove_file(&path).ok();
+        let (w2, cfg2, input_dim) = untagged.unwrap();
+        assert_eq!((cfg2, input_dim), (cfg, 16));
+        assert_eq!(w.layers[0].in_proj_w, w2.layers[0].in_proj_w);
+        let err = mamba2.err().unwrap();
+        assert!(err.contains("not a Mamba-1 checkpoint"), "{err}");
+    }
 
     /// A model without an input projection, as every HF checkpoint loads,
     /// saves and loads back as one instead of failing on its empty tensors.

@@ -44,8 +44,10 @@
 //!   on the overflow flag and actually skips AdamW on overflow steps, which
 //!   matches PyTorch `torch.cuda.amp.GradScaler` semantics exactly.
 
+use crate::config::ModelFamily;
 use crate::gpu::grad_window::check_backward_opts;
 use crate::gpu::options::GpuOptions;
+use crate::gpu::train_state::TrainerState;
 use cudarc::driver::PushKernelArg;
 
 use crate::gpu::adamw::{
@@ -551,6 +553,35 @@ impl MambaGpuTrainer {
         self.apply_step_full(clip, opts.step_skip_above, opts.control_clip_max_norm)
     }
 
+    /// Everything this trainer needs beside its weights to resume bit for
+    /// bit: the optimizer state, the f16 loss scale and the carried
+    /// recurrence. [`TrainerState::save`] writes it to a file.
+    pub fn trainer_state(&self) -> Result<TrainerState, String> {
+        let rec = self.recurrent_state()?;
+        Ok(TrainerState {
+            family: ModelFamily::Mamba1,
+            optimizer: self.optimizer_state()?,
+            scaler: self.scaler_state(),
+            recurrent: vec![
+                ("conv".into(), rec.conv_states),
+                ("ssm".into(), rec.ssm_states),
+            ],
+        })
+    }
+
+    /// Load a state a trainer of this family gave with
+    /// [`Self::trainer_state`]. The learning rate is not part of it.
+    pub fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String> {
+        state.check_family(ModelFamily::Mamba1)?;
+        let conv = state.recurrent_tensor("conv")?;
+        let ssm = state.recurrent_tensor("ssm")?;
+        self.load_optimizer_state(&state.optimizer)?;
+        if let Some((scale, tracker)) = state.scaler {
+            self.load_scaler_state(scale, tracker)?;
+        }
+        self.load_recurrent_parts(conv, ssm)
+    }
+
     /// Download the carried recurrence (conv + SSM state) — the TBPTT
     /// window handoff and checkpointed-resume counterpart of
     /// [`Self::optimizer_state`].
@@ -568,9 +599,13 @@ impl MambaGpuTrainer {
         &mut self,
         blob: &crate::mamba1::gpu::forward::RecurrentStateBlob,
     ) -> Result<(), String> {
+        self.load_recurrent_parts(&blob.conv_states, &blob.ssm_states)
+    }
+
+    fn load_recurrent_parts(&mut self, conv: &[f32], ssm: &[f32]) -> Result<(), String> {
         match &mut self.inner {
-            TrainerInner::F32(t) => t.state.import_state(&t.ctx.stream, blob),
-            TrainerInner::Mixed(t) => t.state.import_state(&t.ctx.stream, blob),
+            TrainerInner::F32(t) => t.state.import_parts(&t.ctx.stream, conv, ssm),
+            TrainerInner::Mixed(t) => t.state.import_parts(&t.ctx.stream, conv, ssm),
         }
     }
 

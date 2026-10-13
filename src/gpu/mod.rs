@@ -43,11 +43,13 @@ pub mod launch;
 pub mod loss_scaler;
 pub mod options;
 pub mod train;
+pub mod train_state;
 
 pub use dtype::WeightDtype;
 pub use gemm_mode::GemmMode;
 pub use options::GpuOptions;
 pub use train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
+pub use train_state::TrainerState;
 
 // Up to 0.7 this module also held the Mamba-1 GPU path, and code written
 // then imports it from here (`mamba_rs::gpu::inference` and the rest). The

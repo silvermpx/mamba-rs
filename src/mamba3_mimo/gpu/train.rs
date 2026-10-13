@@ -26,10 +26,12 @@
 
 mod graph;
 
+use crate::config::ModelFamily;
 use crate::gpu::grad_clip::{GradRegionGeom, norm_limit, scale_grads};
 use crate::gpu::grad_window::{GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
+use crate::gpu::train_state::TrainerState;
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::{
@@ -1250,11 +1252,16 @@ impl Mamba3MimoGpuTrainer {
         &mut self,
         blob: &Mamba3MimoRecurrentStateBlob,
     ) -> Result<(), String> {
+        self.load_recurrent_parts([&blob.ssm, &blob.k, &blob.v, &blob.angle])
+    }
+
+    /// The (ssm, k, v, angle) recurrence from borrowed values.
+    fn load_recurrent_parts(&mut self, [ssm, k, v, angle]: [&[f32]; 4]) -> Result<(), String> {
         let lens = [
-            (blob.ssm.len(), self.state_ssm.len()),
-            (blob.k.len(), self.state_k.len()),
-            (blob.v.len(), self.state_v.len()),
-            (blob.angle.len(), self.state_ang.len()),
+            (ssm.len(), self.state_ssm.len()),
+            (k.len(), self.state_k.len()),
+            (v.len(), self.state_v.len()),
+            (angle.len(), self.state_ang.len()),
         ];
         if lens.iter().any(|(b, t)| b != t) {
             return Err(format!(
@@ -1263,10 +1270,45 @@ impl Mamba3MimoGpuTrainer {
             ));
         }
         let s = self.ctx.stream.clone();
-        self.state_ssm.upload(&s, &blob.ssm)?;
-        self.state_k.upload(&s, &blob.k)?;
-        self.state_v.upload(&s, &blob.v)?;
-        self.state_ang.upload(&s, &blob.angle)
+        self.state_ssm.upload(&s, ssm)?;
+        self.state_k.upload(&s, k)?;
+        self.state_v.upload(&s, v)?;
+        self.state_ang.upload(&s, angle)
+    }
+
+    /// Everything this trainer needs beside its weights to resume bit for
+    /// bit: the optimizer state, the f16 loss scale and the carried
+    /// recurrence. [`TrainerState::save`] writes it to a file.
+    pub fn trainer_state(&self) -> Result<TrainerState, String> {
+        let rec = self.recurrent_state()?;
+        Ok(TrainerState {
+            family: ModelFamily::Mamba3Mimo,
+            optimizer: self.optimizer_state()?,
+            scaler: self.scaler_state(),
+            recurrent: vec![
+                ("ssm".into(), rec.ssm),
+                ("k".into(), rec.k),
+                ("v".into(), rec.v),
+                ("angle".into(), rec.angle),
+            ],
+        })
+    }
+
+    /// Load a state a trainer of this family gave with
+    /// [`Self::trainer_state`]. The learning rate is not part of it.
+    pub fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String> {
+        state.check_family(ModelFamily::Mamba3Mimo)?;
+        let parts = [
+            state.recurrent_tensor("ssm")?,
+            state.recurrent_tensor("k")?,
+            state.recurrent_tensor("v")?,
+            state.recurrent_tensor("angle")?,
+        ];
+        self.load_optimizer_state(&state.optimizer)?;
+        if let Some((scale, tracker)) = state.scaler {
+            self.load_scaler_state(scale, tracker)?;
+        }
+        self.load_recurrent_parts(parts)
     }
 
     /// Download the f32 master weights for a checkpoint or the CPU model.

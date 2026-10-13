@@ -28,10 +28,12 @@
 
 mod graph;
 
+use crate::config::ModelFamily;
 use crate::gpu::grad_clip::{GradRegionGeom, norm_limit, scale_grads};
 use crate::gpu::grad_window::{GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
+use crate::gpu::train_state::TrainerState;
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::{LayerPtrs, M2Exec, Mamba2GpuState, MlpPtrs, WindowPtrs};
@@ -1172,19 +1174,49 @@ impl Mamba2GpuTrainer {
     /// Upload a previously exported recurrence; a blob of another shape is
     /// an error.
     pub fn load_recurrent_state(&mut self, blob: &Mamba2RecurrentStateBlob) -> Result<(), String> {
+        self.load_recurrent_parts(&blob.conv, &blob.ssm)
+    }
+
+    fn load_recurrent_parts(&mut self, conv: &[f32], ssm: &[f32]) -> Result<(), String> {
         let stream = self.ctx.stream.clone();
-        if blob.conv.len() != self.state.conv.len() || blob.ssm.len() != self.state.ssm.len() {
+        if conv.len() != self.state.conv.len() || ssm.len() != self.state.ssm.len() {
             return Err(format!(
                 "recurrent state mismatch: the blob holds {} conv and {} SSM values, this \
                  trainer {} and {}",
-                blob.conv.len(),
-                blob.ssm.len(),
+                conv.len(),
+                ssm.len(),
                 self.state.conv.len(),
                 self.state.ssm.len()
             ));
         }
-        self.state.conv.upload(&stream, &blob.conv)?;
-        self.state.ssm.upload(&stream, &blob.ssm)
+        self.state.conv.upload(&stream, conv)?;
+        self.state.ssm.upload(&stream, ssm)
+    }
+
+    /// Everything this trainer needs beside its weights to resume bit for
+    /// bit: the optimizer state, the f16 loss scale and the carried
+    /// recurrence. [`TrainerState::save`] writes it to a file.
+    pub fn trainer_state(&self) -> Result<TrainerState, String> {
+        let rec = self.recurrent_state()?;
+        Ok(TrainerState {
+            family: ModelFamily::Mamba2,
+            optimizer: self.optimizer_state()?,
+            scaler: self.scaler_state(),
+            recurrent: vec![("conv".into(), rec.conv), ("ssm".into(), rec.ssm)],
+        })
+    }
+
+    /// Load a state a trainer of this family gave with
+    /// [`Self::trainer_state`]. The learning rate is not part of it.
+    pub fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String> {
+        state.check_family(ModelFamily::Mamba2)?;
+        let conv = state.recurrent_tensor("conv")?;
+        let ssm = state.recurrent_tensor("ssm")?;
+        self.load_optimizer_state(&state.optimizer)?;
+        if let Some((scale, tracker)) = state.scaler {
+            self.load_scaler_state(scale, tracker)?;
+        }
+        self.load_recurrent_parts(conv, ssm)
     }
 
     /// Download the f32 master weights for a checkpoint or the CPU model.

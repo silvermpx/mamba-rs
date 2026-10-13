@@ -112,6 +112,17 @@
 - `mamba-generate` takes `--gemm-mode`, `--scan-mode` and `--batch` with
   `--gpu`, and refuses those and a `--dtype` other than f32 on the CPU,
   which ignored `--dtype` before.
+- A trainer-state file for every family: `GpuTrainer::trainer_state`
+  gathers what a trainer needs beside its weights to resume bit for bit
+  (the AdamW moments, step and settings, the f16 loss scale and the
+  carried recurrence) into a `TrainerState`, whose `save` and `load` write
+  and read one safetensors file; `load_trainer_state` refuses a state of
+  another family, and the recurrence's lengths are checked before upload.
+- A language-model checkpoint of any family in one file:
+  `MambaLM::save_checkpoint` writes the backbone as its family's
+  checkpoint with the embedding, the untied head and the vocabulary size
+  beside it, and `MambaLM::from_checkpoint` and
+  `MambaGpuLM::from_checkpoint` load it.
 
 ### Changed
 
@@ -343,6 +354,11 @@
   the loss scale on the device, as Mamba-1 and SISO do, instead of
   scaling a fresh host copy every backward; the bits are those of the
   host multiply.
+- Mamba-1 checkpoints carry the family marker the other families' do
+  (`mamba_version = "1"`); the Mamba-1 loader still reads files without
+  it and refuses a file marked as another family. The Mamba-1 and SISO
+  serializers share the checked tensor list of the others, and the SISO
+  loader reads its file once.
 
 ### Fixed
 
