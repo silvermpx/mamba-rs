@@ -470,7 +470,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
         bld.arg(&n_i);
         bld.arg(&ng_i);
         bld.arg(&ds_i);
-        let eps_g5: f32 = dims.rms_norm_eps;
+        let eps_g5: f32 = dims.ssm_norm_eps;
         bld.arg(&eps_g5);
         let src_stride = (ng * ds) as i32;
         bld.arg(&src_stride);
@@ -891,7 +891,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
             bld.arg(&bt_i);
             bld.arg(&di_i);
             bld.arg(&hd_i);
-            let eps_g5: f32 = dims.rms_norm_eps;
+            let eps_g5: f32 = dims.ssm_norm_eps;
             bld.arg(&eps_g5);
             let z_stride = di as i32;
             bld.arg(&z_stride);

@@ -70,6 +70,7 @@ fn dims_for(cfg: &Mamba3Config, batch: usize, seq_len: usize) -> GpuMamba3Dims {
         n_angles: cfg.num_rope_angles(),
         a_floor: cfg.a_floor,
         rms_norm_eps: cfg.rms_norm_eps,
+        ssm_norm_eps: cfg.ssm_norm_eps,
         is_outproj_norm: cfg.is_outproj_norm,
         use_parallel_scan: cfg.train_use_parallel_scan(),
     }

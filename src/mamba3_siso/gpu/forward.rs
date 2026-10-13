@@ -437,7 +437,7 @@ pub fn gpu_forward_mamba3_layer(
         builder.arg(&n_i);
         builder.arg(&ng_i);
         builder.arg(&ds_i);
-        let eps_g5: f32 = dims.rms_norm_eps;
+        let eps_g5: f32 = dims.ssm_norm_eps;
         builder.arg(&eps_g5);
         // B_raw and C_raw are dense [bt, ng*ds] here (the prefill reads
         // them inside the projection and passes its row width instead).
@@ -801,7 +801,7 @@ pub fn gpu_forward_mamba3_layer(
             builder.arg(&bt_i);
             builder.arg(&di_i);
             builder.arg(&hd_i);
-            let eps_g5: f32 = dims.rms_norm_eps;
+            let eps_g5: f32 = dims.ssm_norm_eps;
             builder.arg(&eps_g5);
             builder.arg(&di_i);
             builder.arg(&y_first);
@@ -1103,7 +1103,7 @@ pub fn gpu_forward_mamba3_target_burnin(
             builder.arg(&n_i);
             builder.arg(&ng_i);
             builder.arg(&ds_i);
-            let eps_g5: f32 = dims.rms_norm_eps;
+            let eps_g5: f32 = dims.ssm_norm_eps;
             builder.arg(&eps_g5);
             // Dense B_raw/C_raw rows, as in the training forward.
             let src_stride = (ng * ds) as i32;
@@ -1269,7 +1269,7 @@ pub fn gpu_forward_mamba3_target_burnin(
                 builder.arg(&bt_i);
                 builder.arg(&di_i);
                 builder.arg(&hd_i);
-                let eps_g5: f32 = dims.rms_norm_eps;
+                let eps_g5: f32 = dims.ssm_norm_eps;
                 builder.arg(&eps_g5);
                 builder.arg(&di_i);
                 builder.arg(&y_first);

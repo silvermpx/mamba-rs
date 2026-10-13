@@ -93,6 +93,7 @@ pub(crate) fn checkpoint_parts<'a>(
             cfg.is_outproj_norm.to_string(),
         ),
         ("rms_norm_eps".to_string(), cfg.rms_norm_eps.to_string()),
+        ("ssm_norm_eps".to_string(), cfg.ssm_norm_eps.to_string()),
         // Identity-critical too: without it a model with an MLP would load
         // as one without.
         ("d_intermediate".to_string(), cfg.d_intermediate.to_string()),
@@ -141,6 +142,21 @@ fn weights_from_bytes(data: &[u8], cfg: &Mamba3Config) -> Result<(Mamba3Weights,
                 "checkpoint identity mismatch: file has rms_norm_eps={stored}, \
                  caller config says {} — every norm site differs",
                 cfg.rms_norm_eps
+            ));
+        }
+    }
+    // A file written before the mixer norms had their own epsilon ran them
+    // at the block norms'.
+    if let Some(v) = meta_map
+        .get("ssm_norm_eps")
+        .or(meta_map.get("rms_norm_eps"))
+    {
+        let stored: f32 = v.parse().map_err(|e| format!("parse ssm_norm_eps: {e}"))?;
+        if stored != cfg.ssm_norm_eps {
+            return Err(format!(
+                "checkpoint identity mismatch: file has ssm_norm_eps={stored}, \
+                 caller config says {} — the B/C and gate norms differ",
+                cfg.ssm_norm_eps
             ));
         }
     }
@@ -277,6 +293,15 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(Mamba3Weights, Mamba3Config, usiz
             Some(v) => v.parse().map_err(|e| format!("parse rms_norm_eps: {e}"))?,
             None => 1e-5,
         },
+        // Files written before the mixer norms had their own epsilon used
+        // the block norms' for them.
+        ssm_norm_eps: match meta_map
+            .get("ssm_norm_eps")
+            .or(meta_map.get("rms_norm_eps"))
+        {
+            Some(v) => v.parse().map_err(|e| format!("parse ssm_norm_eps: {e}"))?,
+            None => 1e-5,
+        },
         scan_mode,
         // Checkpoints from before the MLP carry no MLP.
         d_intermediate: match meta_map.get("d_intermediate") {
@@ -341,6 +366,7 @@ mod tests {
         let cfg = Mamba3Config {
             is_outproj_norm: true,
             rms_norm_eps: 3e-6,
+            ssm_norm_eps: 7e-6,
             scan_mode: crate::config::ScanMode::Sequential,
             ..Mamba3Config::default()
         };
@@ -367,7 +393,37 @@ mod tests {
         let err = load_mamba3(&tmp, &wrong_eps).err().unwrap();
         assert!(err.contains("rms_norm_eps"), "{err}");
 
+        let wrong_mixer_eps = Mamba3Config {
+            ssm_norm_eps: 1e-5,
+            ..cfg
+        };
+        let err = load_mamba3(&tmp, &wrong_mixer_eps).err().unwrap();
+        assert!(err.contains("ssm_norm_eps"), "{err}");
+
         std::fs::remove_file(tmp).ok();
+    }
+
+    /// A file written before the mixer norms had their own epsilon ran
+    /// them at the block norms': it loads with that epsilon for both.
+    #[test]
+    fn files_without_the_mixer_epsilon_load_with_the_block_one() {
+        let cfg = Mamba3Config {
+            rms_norm_eps: 3e-6,
+            ssm_norm_eps: 3e-6,
+            ..Mamba3Config::default()
+        };
+        let w = Mamba3Weights::init(&cfg, 64, 9);
+        let (list, mut meta) = checkpoint_parts(&w, &cfg, 64).unwrap();
+        meta.remove("ssm_norm_eps");
+        let tmp = std::env::temp_dir().join(format!(
+            "mamba3_test_old_eps_{}.safetensors",
+            std::process::id()
+        ));
+        list.save(meta, &tmp).unwrap();
+        let loaded = load(&tmp);
+        std::fs::remove_file(&tmp).ok();
+        let (_, cfg2, _) = loaded.unwrap();
+        assert_eq!(cfg2, cfg);
     }
 
     /// A model with a gated MLP saves its MLP tensors and its width, the

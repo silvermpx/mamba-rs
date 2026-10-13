@@ -119,15 +119,9 @@ pub fn parse_mamba3_config(json: &[u8]) -> Result<HfMamba3Config, String> {
     if !bool_or(&root, "rms_norm", true)? {
         return Err("config.json: rms_norm = false (LayerNorm) is not supported".into());
     }
+    // The block norms take norm_epsilon; the mixer's B/C and gate norms
+    // keep the 1e-5 the reference fixes for them (ssm_norm_eps below).
     let eps = f32_or(&root, "norm_epsilon", 1e-5)?;
-    // The reference hard-codes the mixer's B/C norm eps at 1e-5, while this
-    // crate drives every norm from one eps; another block eps would be a
-    // different model than the one loaded.
-    if eps != 1e-5 {
-        return Err(format!(
-            "config.json: norm_epsilon {eps} differs from the mixer's fixed 1e-5"
-        ));
-    }
     let mimo_rank = if bool_or(ssm, "is_mimo", false)? {
         Some(usize_or(ssm, "mimo_rank", 4)?)
     } else {
@@ -155,6 +149,8 @@ pub fn parse_mamba3_config(json: &[u8]) -> Result<HfMamba3Config, String> {
         a_floor: f32_or(ssm, "A_floor", 1e-4)?,
         is_outproj_norm: bool_or(ssm, "is_outproj_norm", false)?,
         rms_norm_eps: eps,
+        // The reference fixes the mixer's norms at 1e-5.
+        ssm_norm_eps: 1e-5,
         ..Mamba3Config::default()
     };
     cfg.validate()?;
@@ -186,8 +182,7 @@ impl HfMamba3Config {
             a_floor: c.a_floor,
             is_outproj_norm: c.is_outproj_norm,
             rms_norm_eps: c.rms_norm_eps,
-            // The reference fixes the mixer's norms at 1e-5.
-            ssm_norm_eps: 1e-5,
+            ssm_norm_eps: c.ssm_norm_eps,
             d_intermediate: c.d_intermediate,
             scan_mode: c.scan_mode,
         };

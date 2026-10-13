@@ -24,10 +24,12 @@ pub struct Mamba3Dims {
     pub a_floor: f32,
     /// Whether to use output RMSNormGated.
     pub is_outproj_norm: bool,
-    /// RMSNorm/BCNorm epsilon for every CPU norm site — flows from
-    /// `Mamba3Config::rms_norm_eps` (checkpoint identity: a different eps
-    /// is a different model).
+    /// Epsilon of the block norms (`Mamba3Config::rms_norm_eps`;
+    /// checkpoint identity: a different eps is a different model).
     pub rms_norm_eps: f32,
+    /// Epsilon of the mixer's B/C norms and output-gate norm
+    /// (`Mamba3Config::ssm_norm_eps`).
+    pub ssm_norm_eps: f32,
 }
 
 impl Mamba3Dims {
@@ -48,6 +50,7 @@ impl Mamba3Dims {
             a_floor: config.a_floor,
             is_outproj_norm: config.is_outproj_norm,
             rms_norm_eps: config.rms_norm_eps,
+            ssm_norm_eps: config.ssm_norm_eps,
         }
     }
 

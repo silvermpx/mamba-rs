@@ -131,6 +131,10 @@ of the reference (`tools/oracles/m3_oracle.py`).
 
 Where `in_proj_dim = 2·d_inner + 2·ngroups·d_state + 3·nheads + num_rope_angles`.
 
+The block norms (`norm`, the MLP's `norm2`, `norm_f`) take `rms_norm_eps`,
+the reference's `norm_epsilon`; the B/C norms and the gated output norm take
+`ssm_norm_eps`, which the reference fixes at 1e-5.
+
 ## CUDA kernels
 
 | File | Kernels | Purpose |

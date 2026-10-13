@@ -61,6 +61,8 @@ pub fn layer_step64(
     );
     let na = cfg.num_rope_angles();
     let eps = f64::from(cfg.rms_norm_eps);
+    // The reference's B/C and gate norms keep an epsilon of their own.
+    let ssm_eps = f64::from(cfg.ssm_norm_eps);
     let normed = rms64(u, &lw.norm_weight, eps);
     let proj = matvec64(&normed, &lw.in_proj_w, cfg.in_proj_out_dim());
     let mut o = 0;
@@ -79,11 +81,11 @@ pub fn layer_step64(
     let ang = take(na);
     let bn: Vec<f64> = b
         .chunks(n)
-        .flat_map(|row| rms64(row, &lw.b_norm_weight, eps))
+        .flat_map(|row| rms64(row, &lw.b_norm_weight, ssm_eps))
         .collect();
     let cn: Vec<f64> = c
         .chunks(n)
-        .flat_map(|row| rms64(row, &lw.c_norm_weight, eps))
+        .flat_map(|row| rms64(row, &lw.c_norm_weight, ssm_eps))
         .collect();
     let two_pi = 2.0 * std::f64::consts::PI;
     let mut y = vec![0f64; di];
@@ -141,7 +143,7 @@ pub fn layer_step64(
     for (h, row) in y.chunks_mut(p_len).enumerate() {
         if cfg.is_outproj_norm {
             let ms = row.iter().map(|v| v * v).sum::<f64>() / p_len as f64;
-            let inv = 1.0 / (ms + eps).sqrt();
+            let inv = 1.0 / (ms + ssm_eps).sqrt();
             for (p, v) in row.iter_mut().enumerate() {
                 *v *= inv * f64::from(lw.norm_gate_weight[h * p_len + p]);
             }

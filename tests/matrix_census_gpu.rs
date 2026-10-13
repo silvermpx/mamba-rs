@@ -536,6 +536,18 @@ fn configs() -> Vec<Cfg> {
             n_layers: 2,
             ..Mamba3Config::default()
         }),
+        // The B/C and gate norms at an epsilon of their own, apart from the
+        // block norms', each large enough to move the rows.
+        Cfg::Siso(Mamba3Config {
+            d_model: 24,
+            headdim: 8,
+            d_state: 8,
+            is_outproj_norm: true,
+            rms_norm_eps: 1e-3,
+            ssm_norm_eps: 5e-2,
+            n_layers: 2,
+            ..Mamba3Config::default()
+        }),
         Cfg::Mimo(Mamba3MimoConfig {
             d_model: 16,
             headdim: 1,

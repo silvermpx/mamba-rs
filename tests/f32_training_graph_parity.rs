@@ -412,6 +412,7 @@ fn m3_f32_training_graph_matches_eager() {
         n_angles: cfg.num_rope_angles(),
         a_floor: cfg.a_floor,
         rms_norm_eps: cfg.rms_norm_eps,
+        ssm_norm_eps: cfg.ssm_norm_eps,
         is_outproj_norm: cfg.is_outproj_norm,
         use_parallel_scan: true,
     };

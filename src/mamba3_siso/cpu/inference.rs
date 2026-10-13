@@ -213,7 +213,7 @@ fn layer_step(
         &lw.b_norm_weight,
         ng,
         ds,
-        cfg.rms_norm_eps,
+        cfg.ssm_norm_eps,
         &mut scratch.bc_inv_rms,
     );
     bcnorm(
@@ -222,7 +222,7 @@ fn layer_step(
         &lw.c_norm_weight,
         ng,
         ds,
-        cfg.rms_norm_eps,
+        cfg.ssm_norm_eps,
         &mut scratch.bc_inv_rms,
     );
     store(dtype, &mut scratch.b_normed[..ng * ds]);
@@ -342,7 +342,7 @@ fn layer_step(
             &scratch.z[..di],
             &lw.norm_gate_weight,
             hd,
-            cfg.rms_norm_eps,
+            cfg.ssm_norm_eps,
         );
     } else {
         for i in 0..di {

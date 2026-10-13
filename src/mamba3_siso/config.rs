@@ -31,11 +31,14 @@ pub struct Mamba3Config {
     /// to the chunked parallel path (see [`Mamba3Config::train_use_parallel_scan`]);
     /// CPU paths and the T=1 decode step are unaffected.
     pub scan_mode: ScanMode,
-    /// RMSNorm/BCNorm epsilon used by every norm site in this backbone
-    /// (layer RMSNorm, B/C BCNorm, RMSNormGated, final norm). A checkpoint
-    /// trained with a different eps loads a DIFFERENT model — the value
-    /// rides checkpoint metadata (see `serialize.rs`).
+    /// Epsilon of the block norms (`norm`, `norm2`, `norm_f`); the
+    /// reference's `norm_epsilon`. A checkpoint trained with a different
+    /// eps loads a DIFFERENT model — the value rides checkpoint metadata
+    /// (see `serialize.rs`).
     pub rms_norm_eps: f32,
+    /// Epsilon of the mixer's B/C norms and output-gate norm, which the
+    /// reference fixes at 1e-5 whatever `norm_epsilon` says.
+    pub ssm_norm_eps: f32,
     /// The gated MLP after the mixer in every layer (`d_intermediate` in
     /// the reference config); 0 means no MLP. The hidden width is this
     /// value rounded up to a multiple of 128 (see [`Self::mlp_hidden`]).
@@ -168,11 +171,13 @@ impl Mamba3Config {
                 self.a_floor
             ));
         }
-        if !self.rms_norm_eps.is_finite() || self.rms_norm_eps <= 0.0 {
-            return Err(format!(
-                "rms_norm_eps must be positive, got {}",
-                self.rms_norm_eps
-            ));
+        for (name, eps) in [
+            ("rms_norm_eps", self.rms_norm_eps),
+            ("ssm_norm_eps", self.ssm_norm_eps),
+        ] {
+            if !eps.is_finite() || eps <= 0.0 {
+                return Err(format!("{name} must be positive, got {eps}"));
+            }
         }
         envelope::check_param_bytes(self.layer_params(), self.n_layers)
     }
@@ -239,6 +244,7 @@ impl Default for Mamba3Config {
             // Reference default (state-spaces/mamba RMSNorm eps). Rides
             // checkpoint metadata; changing it re-defines the model.
             rms_norm_eps: 1e-5,
+            ssm_norm_eps: 1e-5,
             d_intermediate: 0,
         }
     }
@@ -399,11 +405,18 @@ mod tests {
                 ..Mamba3Config::default()
             };
             assert_eq!(a_floor.validate().is_ok(), v.is_finite() && v >= 0.0, "{v}");
-            let eps = Mamba3Config {
-                rms_norm_eps: v,
-                ..Mamba3Config::default()
-            };
-            assert_eq!(eps.validate().is_ok(), v.is_finite() && v > 0.0, "{v}");
+            for eps in [
+                Mamba3Config {
+                    rms_norm_eps: v,
+                    ..Mamba3Config::default()
+                },
+                Mamba3Config {
+                    ssm_norm_eps: v,
+                    ..Mamba3Config::default()
+                },
+            ] {
+                assert_eq!(eps.validate().is_ok(), v.is_finite() && v > 0.0, "{v}");
+            }
             let rope = Mamba3Config {
                 rope_fraction: v,
                 ..Mamba3Config::default()

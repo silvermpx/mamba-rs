@@ -73,6 +73,7 @@ fn m3_dims_past_the_compiled_capacity_are_refused() {
         n_angles: d_state / 4,
         a_floor: 1e-4,
         rms_norm_eps: 1e-5,
+        ssm_norm_eps: 1e-5,
         is_outproj_norm: false,
         use_parallel_scan: true,
     };

@@ -675,6 +675,25 @@ fn mamba1_reads_the_original_bin_as_its_hf_twin() {
     }
 }
 
+/// A Mamba-3 config with its own block norm epsilon parses: the block
+/// norms take `norm_epsilon`, the mixer's norms the reference's fixed 1e-5,
+/// in SISO and in MIMO.
+#[test]
+fn mamba3_block_norm_epsilon_is_its_own() {
+    for mimo in [false, true] {
+        let json = format!(
+            r#"{{"d_model": 32, "n_layer": 1, "vocab_size": 30, "norm_epsilon": 1e-6,
+            "ssm_cfg": {{"layer": "Mamba3", "d_state": 16, "headdim": 16, "is_mimo": {mimo},
+            "mimo_rank": 2}}}}"#
+        );
+        let hf = parse_mamba3_config(json.as_bytes()).unwrap();
+        assert_eq!((hf.cfg.rms_norm_eps, hf.cfg.ssm_norm_eps), (1e-6, 1e-5));
+        if let Some(m) = hf.mimo_config().unwrap() {
+            assert_eq!((m.rms_norm_eps, m.ssm_norm_eps), (1e-6, 1e-5));
+        }
+    }
+}
+
 /// A head `[vocab_rows, d]` checkpoint tensor as the language models take
 /// an untied head: `[d, vocab]`.
 fn head_layout(rows: &[f32], vocab: usize, d: usize) -> Vec<f32> {

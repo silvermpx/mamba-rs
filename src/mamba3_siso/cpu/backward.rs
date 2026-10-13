@@ -142,7 +142,7 @@ pub fn backward_mamba3_layer_batched(
                 let g_end = (g_start + hd).min(di);
                 let g_len = g_end - g_start;
                 let sum_sq = simd_sum_sq(&acts.data[ys + g_start..ys + g_end]);
-                let rstd = 1.0 / (sum_sq / g_len as f32 + dims.rms_norm_eps).sqrt();
+                let rstd = 1.0 / (sum_sq / g_len as f32 + dims.ssm_norm_eps).sqrt();
 
                 for d in g_start..g_end {
                     let z = acts.data[zs + d];

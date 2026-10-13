@@ -569,7 +569,7 @@ impl Mamba3Prefill {
             if let Some(ts) = typed.as_deref_mut() {
                 let n_i = bt as i32;
                 let cfg = bcnorm_fwd_bc_cfg(bt * ng, ds);
-                let eps: f32 = dims.rms_norm_eps;
+                let eps: f32 = dims.ssm_norm_eps;
                 let bn = ts.b_normed.cached_ptr();
                 let cn = ts.c_normed.cached_ptr();
                 // B and C live inside the projection at fixed column
@@ -602,7 +602,7 @@ impl Mamba3Prefill {
                 // BCNorm of B and C in one launch (grid y picks the operand).
                 let n_i = bt as i32;
                 let cfg = bcnorm_fwd_bc_cfg(bt * ng, ds);
-                let eps: f32 = dims.rms_norm_eps;
+                let eps: f32 = dims.ssm_norm_eps;
                 let bnw = lw.b_norm_weight;
                 let cnw = lw.c_norm_weight;
                 let mut b = ctx.stream.launch_builder(m3k.bcnorm_fwd_bc_f32.get(width));
@@ -1148,7 +1148,7 @@ impl Mamba3Prefill {
                 let bt_i = bt as i32;
                 let di_i = di as i32;
                 let grid = super::kernels::gated_norm_cfg(bt, di, dims.headdim);
-                let eps: f32 = dims.rms_norm_eps;
+                let eps: f32 = dims.ssm_norm_eps;
                 if let Some(ts) = typed.as_deref_mut() {
                     let g = ts.gated.cached_ptr();
                     let y = ts.y.cached_ptr();

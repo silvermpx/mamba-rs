@@ -206,6 +206,15 @@ fn cases() -> Vec<(&'static str, Mamba3Config)> {
                 ..base
             },
         ),
+        (
+            "mixer norms at their own epsilon",
+            Mamba3Config {
+                is_outproj_norm: true,
+                rms_norm_eps: 1e-3,
+                ssm_norm_eps: 5e-2,
+                ..base
+            },
+        ),
     ]
 }
 

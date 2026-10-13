@@ -639,6 +639,7 @@ impl Mamba3GpuEngine {
             a_floor: self.cfg.a_floor,
             is_outproj_norm: self.cfg.is_outproj_norm,
             rms_norm_eps: self.cfg.rms_norm_eps,
+            ssm_norm_eps: self.cfg.ssm_norm_eps,
             use_parallel_scan: self.cfg.prefill_use_parallel_scan(),
         }
     }
@@ -900,7 +901,7 @@ impl Mamba3GpuEngine {
             builder.arg(&b_i);
             builder.arg(&ng_i);
             builder.arg(&ds_i);
-            let eps_g5: f32 = self.cfg.rms_norm_eps;
+            let eps_g5: f32 = self.cfg.ssm_norm_eps;
             builder.arg(&eps_g5);
             let src_stride = (ng * ds) as i32;
             builder.arg(&src_stride);
@@ -1004,7 +1005,7 @@ impl Mamba3GpuEngine {
                 builder.arg(&b_i);
                 builder.arg(&di_i);
                 builder.arg(&hd_i);
-                let eps_g5: f32 = self.cfg.rms_norm_eps;
+                let eps_g5: f32 = self.cfg.ssm_norm_eps;
                 builder.arg(&eps_g5);
                 builder.arg(&di_i);
                 builder.arg(&y_first);
@@ -1712,7 +1713,7 @@ impl Mamba3GpuEngineMixed {
                 bld.arg(&b_i);
                 bld.arg(&ng_i);
                 bld.arg(&ds_i);
-                let eps_g5: f32 = engine.cfg.rms_norm_eps;
+                let eps_g5: f32 = engine.cfg.ssm_norm_eps;
                 bld.arg(&eps_g5);
                 let src_stride = ng_i * ds_i;
                 bld.arg(&src_stride);
@@ -1842,7 +1843,7 @@ impl Mamba3GpuEngineMixed {
                     bld.arg(&b_i);
                     bld.arg(&di_i);
                     bld.arg(&hd_i);
-                    let eps_g5: f32 = engine.cfg.rms_norm_eps;
+                    let eps_g5: f32 = engine.cfg.ssm_norm_eps;
                     bld.arg(&eps_g5);
                     bld.arg(&di_i);
                     bld.arg(&y_first);

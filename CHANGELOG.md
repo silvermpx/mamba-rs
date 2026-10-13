@@ -622,6 +622,15 @@
   `d_intermediate` (at most 2^20) before sizing anything from them, as it
   bounds `vocab_size` and `d_model`; a hostile `config.json` could demand
   an arbitrary allocation or overflow the hidden width.
+- Mamba-3 SISO's B/C and output-gate norms run at their own epsilon,
+  `Mamba3Config::ssm_norm_eps`, which the reference fixes at 1e-5 apart
+  from the block norms' `rms_norm_eps`, on every CPU and GPU path, as
+  MIMO's already did. A SISO model whose `rms_norm_eps` is not 1e-5 ran
+  its mixer norms at it. Saved models keep the field; files written
+  before it load with the block epsilon for both.
+- Mamba-3 checkpoints whose block norms take a `norm_epsilon` other than
+  1e-5 load, the mixer norms keeping the reference's fixed 1e-5, instead
+  of being refused.
 
 ## 0.7.5 (2026-09-23)
 
