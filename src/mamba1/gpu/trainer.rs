@@ -449,8 +449,9 @@ impl MambaGpuTrainer {
     /// `backward_step(accumulate_only = true)` this splits the applying
     /// backward in two, so a gradient reducer can run in between; the
     /// pair is bit-identical to a single applying `backward_step`.
-    /// Requires an open accumulation window. Not defined for f16 — the
-    /// loss-scaler protocol owns that tail end to end.
+    /// Requires an open accumulation window. In f16 the tail is the
+    /// loss-scaler protocol over the window's sum: the overflow check, the
+    /// conditional unscale, the clips, the step and the scaler update.
     pub fn apply_step(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
         self.apply_step_with(clip_max_norm, None)
     }
@@ -475,14 +476,6 @@ impl MambaGpuTrainer {
         step_skip_above: Option<f32>,
         control_clip_max_norm: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
-        if matches!(self.dtype(), WeightDtype::F16) {
-            return Err(
-                "apply_step is not defined for f16: the loss-scaler protocol (overflow \
-                 check, conditional unscale, scaler update, step rollback) owns the \
-                 optimizer tail — use the applying backward_step directly"
-                    .into(),
-            );
-        }
         match &mut self.inner {
             TrainerInner::F32(t) => {
                 if !t.grads_dirty {
@@ -498,7 +491,11 @@ impl MambaGpuTrainer {
                          backward_step(accumulate_only = true) first"
                         .into());
                 }
-                t.apply_step_inner(clip_max_norm, step_skip_above, control_clip_max_norm)
+                if t.dtype == WeightDtype::F16 {
+                    t.f16_apply_tail(clip_max_norm, step_skip_above, control_clip_max_norm)
+                } else {
+                    t.apply_step_inner(clip_max_norm, step_skip_above, control_clip_max_norm)
+                }
             }
         }
     }
@@ -509,6 +506,11 @@ impl MambaGpuTrainer {
     /// is byte-identical to a plain `backward_step`. Micro-batch
     /// (accumulate-only) calls stay purely local — the reduction
     /// happens once per optimizer step, on the window-closing call.
+    ///
+    /// In f16 the ranks reduce their loss-scaled gradients, so an overflow
+    /// on any rank reaches every rank's arena as inf or NaN: every rank
+    /// skips the same window and keeps the same loss scale, given the same
+    /// scale to start from.
     pub fn backward_step_dist(
         &mut self,
         d_temporal: &[f32],
@@ -520,13 +522,6 @@ impl MambaGpuTrainer {
             return self.backward_step(d_temporal, opts);
         }
         let clip = opts.clip_max_norm;
-        if self.dtype() == WeightDtype::F16 {
-            return Err("f16 multi-GPU training is not supported yet: the split \
-                 accumulate/reduce/apply path cannot unscale the f16 \
-                 loss-scaled gradients around the cross-rank reduce — \
-                 use bf16 or f32 for data-parallel training"
-                .into());
-        }
 
         let m = self.backward_step(
             d_temporal,
@@ -1359,15 +1354,7 @@ impl MambaTrainerMixed {
         );
 
         if matches!(self.dtype, WeightDtype::F16) {
-            if opts.accumulate_only {
-                return Err(
-                    "f16 + accumulate_only is unsupported: the loss-scale freeze window \
-                     across micro-batches has no defined semantics"
-                        .into(),
-                );
-            }
-            let m = self.backward_split_f16(d_temporal, opts)?;
-            return Ok(m);
+            return self.backward_split_f16(d_temporal, opts);
         }
 
         self.staged_upload(1, d_temporal)?;
@@ -1473,22 +1460,18 @@ impl MambaTrainerMixed {
         Ok(norm)
     }
 
-    /// f16 split backward: mirrors the `step_f16` eager branch minus the
-    /// forward (GradScaler protocol — scale, backward, overflow check,
-    /// conditional unscale + clip + optimize, scaler update, step rollback).
-    /// The clip norm is computed AFTER the unscale, per the
-    /// unscale-then-norm-then-clip ordering law.
+    /// f16 split backward under the GradScaler protocol. The loss scale
+    /// holds for a whole accumulation window: the scaler moves only on the
+    /// call that closes it, so every micro-batch adds gradients of the same
+    /// scale into the arena. An accumulating call scales its d_temporal and
+    /// adds its gradients; the closing call adds its own and runs the scaler
+    /// tail over the window's sum, where an overflow in any micro-batch
+    /// survives as inf or NaN and skips the whole window.
     fn backward_split_f16(
         &mut self,
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
-        let BackwardOpts {
-            clip_max_norm,
-            step_skip_above,
-            control_clip_max_norm,
-            ..
-        } = opts;
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
         self.staged_upload(2, d_temporal)?;
         {
@@ -1504,6 +1487,39 @@ impl MambaTrainerMixed {
             unsafe { builder.launch(crate::gpu::launch::grid_1d_wide(d_temporal.len())) }
                 .map_err(|e| format!("scale d_temporal (f16 split): {e:?}"))?;
         }
+        if !self.grads_dirty {
+            self.grads.zero(&self.ctx.stream)?;
+        }
+        self.eager_backward(true)?;
+        if opts.accumulate_only {
+            self.grads_dirty = true;
+            return Ok(BackwardMetrics {
+                step: self.adam.step,
+                optimizer_stepped: false,
+                grad_norm: None,
+                loss_scale: Some(scale),
+                overflow_skipped: None,
+            });
+        }
+        self.f16_apply_tail(
+            opts.clip_max_norm,
+            opts.step_skip_above,
+            opts.control_clip_max_norm,
+        )
+    }
+
+    /// The GradScaler tail over the gradient sum of the open window: the
+    /// overflow check, the conditional unscale, the control and global
+    /// clips, the optimizer step, the scaler update and, on a skipped step,
+    /// the step rollback. Closes the window. The clip norm is taken after
+    /// the unscale, per the unscale-then-norm-then-clip ordering law.
+    fn f16_apply_tail(
+        &mut self,
+        clip_max_norm: Option<f32>,
+        step_skip_above: Option<f32>,
+        control_clip_max_norm: Option<f32>,
+    ) -> Result<BackwardMetrics, String> {
+        let scale = self.scaler.as_ref().expect("f16 scaler").scale();
         if let Some(ref mut u) = self.unscale_factor {
             u.write(&self.ctx.stream, 1.0 / scale)?;
         }
@@ -1514,9 +1530,7 @@ impl MambaTrainerMixed {
             .as_mut()
             .expect("f16 overflow flag")
             .zero(&self.ctx.stream)?;
-
-        self.grads.zero(&self.ctx.stream)?;
-        self.eager_backward(true)?;
+        self.grads_dirty = false;
         check_inf_nan_gpu(
             &self.ctx,
             &self.ctx.kernels,

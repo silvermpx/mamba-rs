@@ -75,20 +75,23 @@ enum Trainer {
 }
 
 impl Trainer {
+    /// A trainer of `family` in `dtype`; in f16 the loss scaler starts at
+    /// 2^10, which keeps these windows' gradients in f16's range (at its
+    /// own starting scale of 2^16 they overflow and every step skips).
     fn new(family: Family, dtype: WeightDtype) -> Self {
         let opts = GpuOptions::default().dtype(dtype);
         match family {
             Family::Mamba2 => {
                 let w = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 41);
-                Self::M2(Box::new(
-                    Mamba2GpuTrainer::new(&w, m2_cfg(), session(), opts).unwrap(),
-                ))
+                let mut t = Mamba2GpuTrainer::new(&w, m2_cfg(), session(), opts).unwrap();
+                t.load_scaler_state(1024.0, 0);
+                Self::M2(Box::new(t))
             }
             Family::Mimo => {
                 let w = Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 42);
-                Self::Mimo(Box::new(
-                    Mamba3MimoGpuTrainer::new(&w, mimo_cfg(), session(), opts).unwrap(),
-                ))
+                let mut t = Mamba3MimoGpuTrainer::new(&w, mimo_cfg(), session(), opts).unwrap();
+                t.load_scaler_state(1024.0, 0);
+                Self::Mimo(Box::new(t))
             }
         }
     }
@@ -114,11 +117,16 @@ impl Trainer {
         }
     }
 
-    fn grads_norm(&self) -> f64 {
-        let flat: Vec<f32> = match self {
+    /// The gradient arena, flattened.
+    fn grads(&self) -> Vec<f32> {
+        match self {
             Self::M2(t) => flatten_m2(&t.grads().unwrap()),
             Self::Mimo(t) => flatten_mimo(&t.grads().unwrap()),
-        };
+        }
+    }
+
+    fn grads_norm(&self) -> f64 {
+        let flat = self.grads();
         flat.iter()
             .map(|&g| f64::from(g) * f64::from(g))
             .sum::<f64>()
@@ -289,42 +297,63 @@ fn clip_and_spike_skip_follow_the_gradient_norm() {
 
 /// An accumulating call and an applying call on the same window step on
 /// twice its gradient. Doubling is exact in floating point and the
-/// backward is linear in its upstream gradient, so the result has the bits
-/// of one call on the window with `d` doubled.
+/// backward is linear in its upstream gradient, so in f32, tf32 and bf16
+/// the result has the bits of one call on the window with `d` doubled. f16
+/// holds one loss scale over the window, but doubling commutes with its
+/// rounding only above its subnormal range: there the window's gradient
+/// agrees with the doubled call's within f16's precision.
 #[test]
 fn accumulation_window_steps_on_the_sum_of_its_micro_batches() {
     let (input, d) = window();
     let d2: Vec<f32> = d.iter().map(|v| 2.0 * v).collect();
     for family in [Family::Mamba2, Family::Mimo] {
-        let mut window = Trainer::new(family, WeightDtype::F32);
-        let t = window.as_trainer();
-        let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
-        t.forward(&input, &mut out).unwrap();
-        let m = t
-            .backward_step(&d, BackwardOpts::default().with_accumulate_only(true))
-            .unwrap();
-        assert!(!m.optimizer_stepped && m.step == 0, "{family:?}");
-        t.reset_state().unwrap();
-        t.forward(&input, &mut out).unwrap();
-        let m = t.backward_step(&d, BackwardOpts::default()).unwrap();
-        assert!(m.optimizer_stepped && m.step == 1, "{family:?}");
+        for dtype in [
+            WeightDtype::F32,
+            WeightDtype::Tf32,
+            WeightDtype::Bf16,
+            WeightDtype::F16,
+        ] {
+            let mut window = Trainer::new(family, dtype);
+            let t = window.as_trainer();
+            let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
+            t.forward(&input, &mut out).unwrap();
+            let a = t
+                .backward_step(&d, BackwardOpts::default().with_accumulate_only(true))
+                .unwrap();
+            assert!(!a.optimizer_stepped && a.step == 0, "{family:?} {dtype:?}");
+            t.reset_state().unwrap();
+            t.forward(&input, &mut out).unwrap();
+            let m = t.backward_step(&d, BackwardOpts::default()).unwrap();
+            assert!(m.optimizer_stepped && m.step == 1, "{family:?} {dtype:?}");
+            assert_eq!(
+                m.loss_scale, a.loss_scale,
+                "{family:?} {dtype:?}: the loss scale holds for the window"
+            );
 
-        let mut doubled = Trainer::new(family, WeightDtype::F32);
-        forward(&mut doubled, &input);
-        doubled
-            .as_trainer()
-            .backward_step(&d2, BackwardOpts::default())
-            .unwrap();
-        assert_eq!(window.master(), doubled.master(), "{family:?}");
+            let mut doubled = Trainer::new(family, dtype);
+            forward(&mut doubled, &input);
+            let md = doubled
+                .as_trainer()
+                .backward_step(&d2, BackwardOpts::default())
+                .unwrap();
+            assert!(md.optimizer_stepped, "{family:?} {dtype:?}: {md:?}");
+            if dtype == WeightDtype::F16 {
+                let (a, b) = (window.grads(), doubled.grads());
+                let top = a.iter().fold(0.0f32, |t, v| t.max(v.abs()));
+                let worst = a
+                    .iter()
+                    .zip(&b)
+                    .fold(0.0f32, |t, (x, y)| t.max((x - y).abs()));
+                assert!(
+                    top > 0.0 && worst <= top / 1024.0,
+                    "{family:?} {dtype:?}: the gradients differ by {worst:e} against {top:e}"
+                );
+            } else {
+                assert_eq!(window.master(), doubled.master(), "{family:?} {dtype:?}");
+            }
+        }
 
-        // f16 has no accumulation window, and a clip belongs on the
-        // applying call.
-        let mut half = Trainer::new(family, WeightDtype::F16);
-        forward(&mut half, &input);
-        let refused = half
-            .as_trainer()
-            .backward_step(&d, BackwardOpts::default().with_accumulate_only(true));
-        assert!(refused.is_err(), "{family:?}: f16 accumulated");
+        // A clip belongs on the applying call.
         let mut f32_t = Trainer::new(family, WeightDtype::F32);
         forward(&mut f32_t, &input);
         let refused = f32_t.as_trainer().backward_step(

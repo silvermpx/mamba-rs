@@ -82,8 +82,10 @@ pub struct BackwardOpts {
     /// next `backward_step`, Adam does not advance, and AdamW /
     /// master→compute sync / the `a_neg` refresh are all skipped. Loss
     /// averaging stays caller-side (scale `d_temporal` by `1/n_micro`).
-    /// Unsupported for f16 (the loss-scale freeze window across
-    /// micro-batches has no defined semantics).
+    /// In f16 the loss scale holds for the whole window: every micro-batch
+    /// adds gradients of the same scale, and the applying call checks the
+    /// window's sum for overflow, skipping the whole window and backing the
+    /// scale off when any micro-batch overflowed.
     pub accumulate_only: bool,
     /// `Some(t)`: on the applying call, if the PRE-clip global gradient
     /// norm exceeds `t`, SKIP the optimizer step entirely and discard

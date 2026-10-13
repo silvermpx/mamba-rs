@@ -4,7 +4,9 @@
 //! Their backward writes the gradient arena whole, so a window of
 //! micro-batches sums into a buffer of its own, in call order, and the
 //! applying call adds that sum to its own gradient before the clip and the
-//! optimizer step.
+//! optimizer step. In f16 the window also remembers whether any of its
+//! micro-batches overflowed the loss scale, which holds for the whole
+//! window, so the applying call skips the whole window then.
 
 use std::sync::Arc;
 
@@ -12,7 +14,6 @@ use cudarc::driver::CudaStream;
 
 use super::buffers::{GpuBuffer, GpuByteBuffer};
 use super::context::GpuCtx;
-use super::dtype::WeightDtype;
 use super::grad_clip::{alloc_partials, clip_grads_device};
 use super::launch::launch_elems;
 use crate::mamba1::gpu::trainer::BackwardOpts;
@@ -25,6 +26,9 @@ pub(crate) struct GradWindow {
     sum: Option<GpuBuffer>,
     /// Whether `sum` holds a window the optimizer has not stepped on yet.
     open: bool,
+    /// Whether a micro-batch of the open window overflowed the f16 loss
+    /// scale.
+    overflowed: bool,
     partials: GpuByteBuffer,
     coef: GpuBuffer,
 }
@@ -34,13 +38,21 @@ impl GradWindow {
         Ok(Self {
             sum: None,
             open: false,
+            overflowed: false,
             partials: alloc_partials(stream)?,
             coef: GpuBuffer::zeros(stream, 2)?,
         })
     }
 
-    /// Add the gradient of an accumulating call to the window.
-    pub(crate) fn accumulate(&mut self, ctx: &GpuCtx, grads: &GpuBuffer) -> Result<(), String> {
+    /// Add the gradient of an accumulating call to the window, and whether
+    /// it overflowed the f16 loss scale.
+    pub(crate) fn accumulate(
+        &mut self,
+        ctx: &GpuCtx,
+        grads: &GpuBuffer,
+        overflowed: bool,
+    ) -> Result<(), String> {
+        self.overflowed |= overflowed;
         let sum = match &mut self.sum {
             Some(sum) => sum,
             None => self.sum.insert(GpuBuffer::zeros(&ctx.stream, grads.len())?),
@@ -54,17 +66,24 @@ impl GradWindow {
         }
     }
 
-    /// Add the open window's sum to the gradient of the applying call and
-    /// close the window. Nothing to add when no window is open.
-    pub(crate) fn fold_into(&mut self, ctx: &GpuCtx, grads: &mut GpuBuffer) -> Result<(), String> {
+    /// Add the open window's sum to the gradient of the applying call,
+    /// close the window, and return whether any of its micro-batches
+    /// overflowed the f16 loss scale. Nothing to add when no window is open.
+    pub(crate) fn fold_into(
+        &mut self,
+        ctx: &GpuCtx,
+        grads: &mut GpuBuffer,
+    ) -> Result<bool, String> {
         if !self.open {
-            return Ok(());
+            return Ok(false);
         }
         self.open = false;
+        let overflowed = std::mem::take(&mut self.overflowed);
         let Some(sum) = &self.sum else {
             return Err("an accumulation window without its sum".into());
         };
-        add_into(ctx, grads, sum)
+        add_into(ctx, grads, sum)?;
+        Ok(overflowed)
     }
 
     /// Scale `grads` to the global L2 norm `max_norm` when it is larger,
@@ -104,22 +123,14 @@ fn add_into(ctx: &GpuCtx, dst: &mut GpuBuffer, src: &GpuBuffer) -> Result<(), St
     )
 }
 
-/// The backward options these trainers refuse: an accumulating call in
-/// f16 (the loss scale has no defined state across a window), a clip on an
-/// accumulating call (the norm is the whole window's), and a control-channel
-/// clip on a family whose control columns it does not clip yet.
+/// The backward options these trainers refuse: a clip on an accumulating
+/// call (the norm is the whole window's), and a control-channel clip on a
+/// family whose control columns it does not clip yet.
 pub(crate) fn check_backward_opts(
     opts: &BackwardOpts,
-    dtype: WeightDtype,
     family: &str,
     clips_control: bool,
 ) -> Result<(), String> {
-    if opts.accumulate_only && dtype == WeightDtype::F16 {
-        return Err(format!(
-            "{family}: accumulate_only is not defined for f16, where the loss scale \
-             owns each step"
-        ));
-    }
     if opts.accumulate_only && opts.clip_max_norm.is_some() {
         return Err(format!(
             "{family}: clip on the applying call; the norm is the whole window's"

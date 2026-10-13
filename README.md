@@ -196,8 +196,10 @@ let master = trainer.snapshot_master()?; // f32 weights for a checkpoint or the 
 and driven the same way, and the `GpuTrainer` trait names what they share.
 `BackwardOpts` also skips a window whose gradient norm spikes
 (`with_step_skip_above`) and accumulates micro-batches
-(`with_accumulate_only`). f16 training runs a dynamic loss scaler, and the
-metrics report its scale and skipped steps. The Mamba and SISO trainers
+(`with_accumulate_only`). f16 training runs a dynamic loss scaler whose
+scale holds for a whole accumulation window; an overflow in any
+micro-batch skips the window, and the metrics report the scale and the
+skipped steps. The Mamba and SISO trainers
 also capture the whole step as one CUDA graph (`capture_graph`), train
 data-parallel (`backward_step_dist`) and export their optimizer state.
 `examples/custom_loss.rs` is a complete training loop.

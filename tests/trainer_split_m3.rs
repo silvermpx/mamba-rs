@@ -371,52 +371,317 @@ fn m3_failed_fused_step_closes_split_lifecycle_f32() {
     assert_failed_fused_step_closes_split_lifecycle(WeightDtype::F32);
 }
 
-/// f16 split: GradScaler protocol rides backward_step; accumulate_only errs.
+/// f16 split: the GradScaler protocol rides backward_step, and an
+/// accumulation window keeps one loss scale. The accumulating call steps
+/// nothing and reports the scale; the applying call steps once over the
+/// window's sum at that same scale and reports the clip norm.
 #[test]
 fn m3_f16_split_scaler_protocol() {
+    let (mut t, input, d_temporal, mut out) = f16_trainer();
+    t.forward(&input, &mut out).expect("forward");
+    let a = t
+        .backward_step(
+            &d_temporal,
+            BackwardOpts::default().with_accumulate_only(true),
+        )
+        .expect("f16 accumulating backward");
+    assert!(!a.optimizer_stepped);
+    assert_eq!(a.overflow_skipped, None);
+    let scale = a.loss_scale.expect("the window's loss scale");
+    t.forward(&input, &mut out).expect("forward 2");
+    let m = t
+        .backward_step(&d_temporal, BackwardOpts::default().with_clip_max_norm(1.0))
+        .expect("f16 applying backward");
+    assert_eq!(
+        m.loss_scale,
+        Some(scale),
+        "the loss scale holds for the window"
+    );
+    assert_eq!(m.overflow_skipped, Some(false));
+    assert!(m.optimizer_stepped);
+    assert_eq!(m.step, 1);
+    let norm = m.grad_norm.expect("a clean step reports the norm");
+    assert!(norm.is_finite() && norm > 0.0);
+}
+
+/// An overflow in one micro-batch survives the window's sum: the applying
+/// call skips the whole window, leaves every weight and the step where
+/// they were, and backs the loss scale off for the next window, which
+/// steps. `apply_step` closes a window the same way.
+#[test]
+fn m3_f16_overflow_in_a_micro_batch_skips_the_window() {
+    let (mut t, input, d_temporal, mut out) = f16_trainer();
+    let before = t.snapshot_master().expect("snapshot before");
+    let mut blown = d_temporal.clone();
+    blown[0] = f32::MAX;
+    t.forward(&input, &mut out).expect("forward");
+    let a = t
+        .backward_step(&blown, BackwardOpts::default().with_accumulate_only(true))
+        .expect("f16 accumulating backward");
+    let scale = a.loss_scale.expect("the window's loss scale");
+    t.forward(&input, &mut out).expect("forward 2");
+    let m = t
+        .backward_step(&d_temporal, BackwardOpts::default())
+        .expect("f16 applying backward");
+    assert_eq!(m.overflow_skipped, Some(true));
+    assert!(!m.optimizer_stepped);
+    assert_eq!(m.step, 0);
+    assert_snapshots_bit_eq(
+        &before,
+        &t.snapshot_master().expect("snapshot after"),
+        "a skipped window",
+    );
+    t.forward(&input, &mut out).expect("forward 3");
+    t.backward_step(
+        &d_temporal,
+        BackwardOpts::default().with_accumulate_only(true),
+    )
+    .expect("f16 accumulating backward 2");
+    let n = t.apply_step(None).expect("f16 apply_step");
+    let backed_off = n.loss_scale.expect("the next window's scale");
+    assert!(
+        backed_off < scale,
+        "{backed_off} after an overflow at {scale}"
+    );
+    assert_eq!(n.overflow_skipped, Some(false));
+    assert!(n.optimizer_stepped);
+    assert_eq!(n.step, 1);
+}
+
+/// An f16 trainer on the identity input projection, with an input and an
+/// output gradient for one window of one sequence.
+fn f16_trainer() -> (Mamba3GpuTrainer, Vec<f32>, Vec<f32>, Vec<f32>) {
     let cfg = test_cfg();
     let input_dim = cfg.d_model;
     let (batch, seq_len) = (1usize, 4usize);
     let mut w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
     w.input_proj_w.clear();
     w.input_proj_b.clear();
-    let mut t = Mamba3GpuTrainer::new(
+    let t = Mamba3GpuTrainer::new(
         &w,
         cfg,
         session(batch, seq_len, input_dim),
         GpuOptions::default().dtype(WeightDtype::F16),
     )
     .expect("f16 trainer");
-
     let n_in = batch * seq_len * input_dim;
     let n_out = batch * seq_len * cfg.d_model;
-    let input = det(n_in, 0xAC, 0.05);
-    let d_temporal = det(n_out, 0xBC, 0.01);
-    let mut out = vec![0.0f32; n_out];
+    (
+        t,
+        det(n_in, 0xAC, 0.05),
+        det(n_out, 0xBC, 0.01),
+        vec![0.0f32; n_out],
+    )
+}
 
-    t.forward(&input, &mut out).expect("forward");
-    assert!(
-        t.backward_step(
-            &d_temporal,
-            BackwardOpts::default().with_accumulate_only(true)
-        )
-        .is_err(),
-        "f16 + accumulate_only must be rejected"
-    );
-    assert!(
-        t.backward_step(&d_temporal, BackwardOpts::default())
-            .is_err(),
-        "a rejected backward must close the pending lifecycle"
-    );
-    t.forward(&input, &mut out)
-        .expect("forward after rejection");
-    let m = t
-        .backward_step(&d_temporal, BackwardOpts::default().with_clip_max_norm(1.0))
-        .expect("f16 backward");
-    assert!(m.loss_scale.is_some());
-    assert!(m.overflow_skipped.is_some());
-    if m.optimizer_stepped {
-        let norm = m.grad_norm.expect("clean step reports the norm");
-        assert!(norm.is_finite() && norm > 0.0);
+/// Two accumulated micro-batches (batch 1, state reset between) against one
+/// big batch (batch 2) of the same samples: the gradients sum either way,
+/// so the weights agree within the tolerance of a different GEMM batch
+/// shape. In f16 both runs hold the same loss scale, so the window sums
+/// the same scaled gradients the big batch takes.
+fn assert_accumulation_two_micro_equals_one_big_batch(dtype: WeightDtype, tol: f32) {
+    let cfg = test_cfg();
+    let input_dim = cfg.d_model;
+    let seq_len = 8usize;
+    let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
+    let n_in = seq_len * input_dim;
+    let n_out = seq_len * cfg.d_model;
+    let (s1_in, s2_in) = (det(n_in, 0xA1, 0.05), det(n_in, 0xA2, 0.05));
+    let (s1_dt, s2_dt) = (det(n_out, 0xB1, 0.01), det(n_out, 0xB2, 0.01));
+
+    let mut big = Mamba3GpuTrainer::new(
+        &w,
+        cfg,
+        session(2, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("big trainer");
+    big.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
+    big.load_scaler_state(F16_TEST_SCALE, 0);
+    let big_in: Vec<f32> = s1_in.iter().chain(&s2_in).copied().collect();
+    let big_dt: Vec<f32> = s1_dt.iter().chain(&s2_dt).copied().collect();
+    let mut big_out = vec![0.0f32; 2 * n_out];
+    big.forward(&big_in, &mut big_out).expect("big forward");
+    let stepped = big
+        .backward_step(&big_dt, BackwardOpts::default())
+        .expect("big backward")
+        .optimizer_stepped;
+    assert!(stepped, "{dtype:?}: the big batch stepped");
+    let sa = big.snapshot_master().expect("big snapshot");
+
+    let mut micro = Mamba3GpuTrainer::new(
+        &w,
+        cfg,
+        session(1, seq_len, input_dim),
+        GpuOptions::default().dtype(dtype),
+    )
+    .expect("micro trainer");
+    micro.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
+    micro.load_scaler_state(F16_TEST_SCALE, 0);
+    let mut out = vec![0.0f32; n_out];
+    micro.forward(&s1_in, &mut out).expect("micro forward 1");
+    micro
+        .backward_step(&s1_dt, BackwardOpts::default().with_accumulate_only(true))
+        .expect("micro backward 1");
+    micro.reset_state().expect("reset");
+    micro.forward(&s2_in, &mut out).expect("micro forward 2");
+    let stepped = micro
+        .backward_step(&s2_dt, BackwardOpts::default())
+        .expect("micro backward 2")
+        .optimizer_stepped;
+    assert!(stepped, "{dtype:?}: the window stepped");
+    let sb = micro.snapshot_master().expect("micro snapshot");
+
+    let flat = |s: &Mamba3Weights| -> Vec<f32> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&s.input_proj_w);
+        v.extend_from_slice(&s.input_proj_b);
+        v.extend_from_slice(&s.norm_f_weight);
+        for l in &s.layers {
+            for t in [
+                &l.norm_weight,
+                &l.in_proj_w,
+                &l.dt_bias,
+                &l.b_norm_weight,
+                &l.c_norm_weight,
+                &l.b_bias,
+                &l.c_bias,
+                &l.d_param,
+                &l.norm_gate_weight,
+                &l.out_proj_w,
+            ] {
+                v.extend_from_slice(t);
+            }
+        }
+        v
+    };
+    let mut worst = 0.0f32;
+    for (a, b) in flat(&sa).iter().zip(flat(&sb).iter()) {
+        let d = (a - b).abs();
+        worst = worst.max(d / a.abs().max(b.abs()).max(1e-4));
     }
+    eprintln!("{dtype:?} accumulation vs big batch: max_rel={worst:e}");
+    assert!(
+        worst < tol,
+        "{dtype:?}: accumulated micro-batches diverge from the big batch: max_rel={worst:e}"
+    );
+}
+
+#[test]
+fn m3_accumulation_two_micro_equals_one_big_batch() {
+    assert_accumulation_two_micro_equals_one_big_batch(WeightDtype::F32, 1e-5);
+}
+
+#[test]
+fn m3_f16_accumulation_two_micro_equals_one_big_batch() {
+    assert_accumulation_two_micro_equals_one_big_batch(WeightDtype::F16, 1e-4);
+}
+
+/// The f16 loss scale the accumulation tests start from. At the scaler's
+/// own starting scale of 2^16, the gradients these small activations give
+/// through the RMSNorm backward pass f16's range and the step is skipped,
+/// which is the scaler doing its job but leaves nothing to compare;
+/// 2^10 keeps them in range. No effect in the other precisions.
+const F16_TEST_SCALE: f32 = 1024.0;
+
+/// A window of two calls on the same sequence steps on twice its gradient.
+/// Doubling is exact, the backward is linear in its upstream gradient, and
+/// over one short sample every gradient element takes a single add per
+/// call, so in f32, tf32 and bf16 the window gives the bits of one call
+/// with the gradient doubled. f16 holds one loss scale over the window, but
+/// doubling commutes with its rounding only above its subnormal range
+/// (2^-14): a gradient intermediate below it rounds differently in the
+/// doubled call. There the first moments, which carry the gradient, agree
+/// within f16's precision, where a window that dropped or averaged a call
+/// would be off by half.
+fn assert_window_of_two_is_one_doubled_call(dtype: WeightDtype) {
+    let cfg = test_cfg();
+    let input_dim = cfg.d_model;
+    let (batch, seq_len) = (1usize, 4usize);
+    let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
+    let n_in = batch * seq_len * input_dim;
+    let n_out = batch * seq_len * cfg.d_model;
+    let input = det(n_in, 0xA5, 0.05);
+    let d = det(n_out, 0xB5, 0.01);
+    let d2: Vec<f32> = d.iter().map(|v| 2.0 * v).collect();
+    let mut out = vec![0.0f32; n_out];
+    let trainer = || {
+        let mut t = Mamba3GpuTrainer::new(
+            &w,
+            cfg,
+            session(batch, seq_len, input_dim),
+            GpuOptions::default().dtype(dtype),
+        )
+        .expect("trainer");
+        t.ctx().set_gemm_mode(GemmMode::Deterministic).unwrap();
+        t.load_scaler_state(F16_TEST_SCALE, 0);
+        t
+    };
+    let mut window = trainer();
+    window.forward(&input, &mut out).expect("forward 1");
+    let a = window
+        .backward_step(&d, BackwardOpts::default().with_accumulate_only(true))
+        .expect("accumulating backward");
+    window.reset_state().expect("reset");
+    window.forward(&input, &mut out).expect("forward 2");
+    let m = window
+        .backward_step(&d, BackwardOpts::default())
+        .expect("applying backward");
+    assert!(m.optimizer_stepped, "{dtype:?}: {m:?}");
+    assert_eq!(m.loss_scale, a.loss_scale, "{dtype:?}: the window's scale");
+    let mut doubled = trainer();
+    doubled.forward(&input, &mut out).expect("forward");
+    let md = doubled
+        .backward_step(&d2, BackwardOpts::default())
+        .expect("doubled backward");
+    assert!(md.optimizer_stepped, "{dtype:?}: the doubled call: {md:?}");
+    let label = format!("{dtype:?}: a window of two against one doubled call");
+    if matches!(dtype, WeightDtype::F16) {
+        assert_first_moments_close(
+            &window.optimizer_state().expect("window state").m,
+            &doubled.optimizer_state().expect("doubled state").m,
+            &label,
+        );
+    } else {
+        assert_snapshots_bit_eq(
+            &window.snapshot_master().expect("window snapshot"),
+            &doubled.snapshot_master().expect("doubled snapshot"),
+            &label,
+        );
+    }
+}
+
+/// Two runs' first moments agree within f16's precision, 2^-10 of the
+/// largest of them.
+fn assert_first_moments_close(a: &[f32], b: &[f32], ctx_msg: &str) {
+    assert_eq!(a.len(), b.len(), "{ctx_msg}");
+    let top = a.iter().fold(0.0f32, |t, v| t.max(v.abs()));
+    let worst = a
+        .iter()
+        .zip(b)
+        .fold(0.0f32, |t, (x, y)| t.max((x - y).abs()));
+    assert!(
+        top > 0.0 && worst <= top / 1024.0,
+        "{ctx_msg}: the first moments differ by {worst:e} against {top:e}"
+    );
+}
+
+#[test]
+fn m3_window_of_two_is_one_doubled_call_f32() {
+    assert_window_of_two_is_one_doubled_call(WeightDtype::F32);
+}
+
+#[test]
+fn m3_window_of_two_is_one_doubled_call_tf32() {
+    assert_window_of_two_is_one_doubled_call(WeightDtype::Tf32);
+}
+
+#[test]
+fn m3_window_of_two_is_one_doubled_call_bf16() {
+    assert_window_of_two_is_one_doubled_call(WeightDtype::Bf16);
+}
+
+#[test]
+fn m3_window_of_two_is_one_doubled_call_f16() {
+    assert_window_of_two_is_one_doubled_call(WeightDtype::F16);
 }

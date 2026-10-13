@@ -59,6 +59,15 @@
   as the row-major product.
 - `benches/family_compare_bench.rs` runs the four families side by side
   at one size.
+- Gradient accumulation works in f16 in every family, and so does
+  data-parallel training of Mamba-1 and SISO in f16. The loss scale holds
+  for the whole window, as with torch's GradScaler: every micro-batch
+  takes its gradients at the same scale, the scaler moves only on the
+  applying call, and an overflow in any micro-batch skips the whole
+  window and backs the scale off. `apply_step` runs the same scaler tail
+  on Mamba-1 and SISO. The ranks of a data-parallel world reduce their
+  scaled gradients, so an overflow on one rank reaches every rank as inf
+  or NaN, and every rank takes the same skip and keeps the same scale.
 
 ### Changed
 

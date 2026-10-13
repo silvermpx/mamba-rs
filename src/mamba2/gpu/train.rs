@@ -809,28 +809,33 @@ impl Mamba2GpuTrainer {
     /// next applying call steps on the window's sum. Scale `d_temporal` by
     /// `1 / micro_batches` for a mean.
     ///
-    /// f16 cannot accumulate, a clip belongs on the applying call, and the
-    /// control-channel clip is not implemented here: those are errors.
+    /// A clip belongs on the applying call, and the control-channel clip
+    /// is not implemented here: those are errors. In f16 the loss scale
+    /// holds for the whole window, and an overflow in any of its
+    /// micro-batches skips the whole window and backs the scale off.
     pub fn backward_step(
         &mut self,
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
-        check_backward_opts(&opts, self.dtype, "Mamba-2 trainer", false)?;
+        check_backward_opts(&opts, "Mamba-2 trainer", false)?;
         let loss_scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
         self.backward(d_temporal, None)?;
         if opts.accumulate_only {
-            self.window.accumulate(&self.ctx, &self.grads)?;
+            self.window
+                .accumulate(&self.ctx, &self.grads, self.overflowed)?;
             self.fresh_grads = false;
             return Ok(BackwardMetrics {
                 step: self.adamw.step,
                 optimizer_stepped: false,
                 grad_norm: None,
-                loss_scale: None,
+                loss_scale,
                 overflow_skipped: None,
             });
         }
-        self.window.fold_into(&self.ctx, &mut self.grads)?;
+        if self.window.fold_into(&self.ctx, &mut self.grads)? {
+            self.overflowed = true;
+        }
         let grad_norm = match norm_limit(opts.clip_max_norm, opts.step_skip_above) {
             Some(c) if !self.overflowed => Some(self.window.clip(&self.ctx, &mut self.grads, c)?),
             _ => None,
