@@ -18,6 +18,7 @@
 
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::matrix::{self, Path, Plan, Refusal, Request, Scan};
+use crate::precision::GemmMode;
 
 /// The widest head the warp-shuffle kernels serve: one lane per head
 /// element in a single warp.
@@ -185,6 +186,20 @@ impl IntWidths {
     }
 }
 
+/// The linear layers of a training step, `(name, input width, output
+/// width)`; a model without an input projection takes rows `d_model` wide,
+/// which no other layer's operands undercut.
+fn linears(cfg: &Mamba3Config, input_dim: usize) -> [(&'static str, usize, usize); 5] {
+    let (d, h) = (cfg.d_model, cfg.mlp_hidden());
+    [
+        ("input_proj", input_dim, d),
+        ("in_proj", d, cfg.in_proj_out_dim()),
+        ("out_proj", cfg.d_inner(), d),
+        ("mlp fc1", d, 2 * h),
+        ("mlp fc2", h, d),
+    ]
+}
+
 /// Whether and how the GPU runs `req` on a SISO model of `cfg` fed rows
 /// `input_dim` wide. `cfg` must pass [`Mamba3Config::validate`]; the
 /// request's scan mode stands in for the config's.
@@ -206,6 +221,10 @@ pub fn admit(cfg: &Mamba3Config, input_dim: usize, req: &Request) -> Result<Plan
         Path::Train => Scan::of(cfg.train_use_parallel_scan()),
     };
     matrix::int_args(&widths.args())?;
+    if req.path == Path::Train && req.gemm == GemmMode::Deterministic {
+        let rows = req.batch.saturating_mul(req.seq_len);
+        matrix::triad_spans(rows, &linears(&cfg, input_dim))?;
+    }
     Ok(Plan { scan })
 }
 

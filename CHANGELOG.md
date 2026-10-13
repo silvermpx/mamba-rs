@@ -427,6 +427,9 @@
   and SISO takes `a_floor = 0`, as the reference and MIMO do.
 - An empty prompt (`prefill` of no tokens) leaves the state and the rows
   as they are in every GPU backbone; Mamba-2 and MIMO refused it.
+- `route::admit` refuses a deterministic training window whose GEMM
+  operands pass 2^31 elements, as the Triad kernels do at their first
+  GEMM; the census ledger lists that gap in every family.
 
 ### Fixed
 

@@ -8,3 +8,7 @@
 # a capacity, not a gap, and has no row.
 
 [gaps]
+"mamba1 | kernel | a training GEMM operand past 2^31 elements" = 9840
+"mamba2 | kernel | a training GEMM operand past 2^31 elements" = 44088
+"mamba3_mimo | kernel | a training GEMM operand past 2^31 elements" = 82872
+"mamba3_siso | kernel | a training GEMM operand past 2^31 elements" = 30240

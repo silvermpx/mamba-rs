@@ -1,8 +1,8 @@
 //! The matrix on the device: every family over configurations that differ
-//! in each shape feature its kernels route on (head widths of one lane, of
-//! a warp and of a block, odd widths, the largest state, conv widths past
-//! the fast kernels, groups, ranks, the gated MLP, the output norm, a zero
-//! A floor), on every path (the decode step, a prompt, a training window),
+//! in each shape feature its kernels route on (one feature wide, head
+//! widths of one lane, of a warp and of a block, odd widths, the largest
+//! state, conv widths past the fast kernels, groups, ranks, the gated MLP,
+//! the output norm, a zero A floor), on every path (the decode step, a prompt, a training window),
 //! in a covering set of scan modes, storage precisions and GEMM modes:
 //! every pair of a scan mode and a precision, of a precision and a GEMM
 //! mode, and of a scan mode and a GEMM mode runs on every configuration
@@ -13,10 +13,11 @@
 //! runs every configuration `validate` accepts: the decode and prompt rows
 //! within the cell's precision, and a training window's global gradient
 //! norm within it, the window applied. Where the host itself moves further
-//! than that when its inputs move by one rounding of the cell's precision,
-//! the f32 host cannot judge the cell more closely than its own spread,
-//! and the cell is held to a few times that spread instead; the run lists
-//! those cells.
+//! than that when its inputs move by one rounding of the cell's precision
+//! (a model one feature wide normalizes a single value, whose gradient
+//! peaks where the stream crosses zero), the f32 host cannot judge the
+//! cell more closely than its own spread, and the cell is held to a few
+//! times that spread instead; the run lists those cells.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::ScanMode;
@@ -296,6 +297,40 @@ fn sequence(rows: &[f32], b: usize, steps: usize, width: usize) -> &[f32] {
 
 fn configs() -> Vec<Cfg> {
     vec![
+        // One feature wide: every projection to or from d_model is a
+        // one-column GEMM.
+        Cfg::M1(MambaConfig {
+            d_model: 1,
+            d_state: 1,
+            d_conv: 1,
+            expand: 2,
+            n_layers: 2,
+            ..MambaConfig::default()
+        }),
+        Cfg::M2(Mamba2Config {
+            d_model: 1,
+            headdim: 1,
+            d_state: 1,
+            d_conv: 1,
+            n_layers: 2,
+            ..Mamba2Config::default()
+        }),
+        Cfg::Siso(Mamba3Config {
+            d_model: 1,
+            headdim: 1,
+            d_state: 2,
+            n_layers: 2,
+            ..Mamba3Config::default()
+        }),
+        Cfg::Mimo(Mamba3MimoConfig {
+            d_model: 1,
+            headdim: 1,
+            d_state: 2,
+            mimo_rank: 1,
+            rope_fraction: 1.0,
+            n_layers: 2,
+            ..Mamba3MimoConfig::default()
+        }),
         Cfg::M1(MambaConfig {
             d_model: 16,
             d_state: 1,

@@ -5,6 +5,7 @@
 
 use crate::mamba1::config::MambaConfig;
 use crate::matrix::{self, Path, Plan, Refusal, Request, Scan};
+use crate::precision::GemmMode;
 
 /// The widths a Mamba-1 launch takes as `int`s, over windows of `seq_len`
 /// tokens of `batch` sequences.
@@ -66,11 +67,29 @@ impl IntWidths {
     }
 }
 
+/// The linear layers of a training step, `(name, input width, output
+/// width)`; a model without an input projection takes rows `d_model` wide,
+/// which no other layer's operands undercut.
+fn linears(cfg: &MambaConfig, input_dim: usize) -> [(&'static str, usize, usize); 5] {
+    let di = cfg.d_inner();
+    [
+        ("input_proj", input_dim, cfg.d_model),
+        ("in_proj", cfg.d_model, 2 * di),
+        ("x_proj", di, cfg.xdbl_dim()),
+        ("dt_proj", cfg.dt_rank(), di),
+        ("out_proj", di, cfg.d_model),
+    ]
+}
+
 /// Whether and how the GPU runs `req` on a Mamba-1 model of `cfg` fed rows
 /// `input_dim` wide. `cfg` must pass [`MambaConfig::validate`].
 pub fn admit(cfg: &MambaConfig, input_dim: usize, req: &Request) -> Result<Plan, Refusal> {
     matrix::check_request(req)?;
     matrix::int_args(&IntWidths::of(cfg, input_dim, (req.batch, req.seq_len)).args())?;
+    if req.path == Path::Train && req.gemm == GemmMode::Deterministic {
+        let rows = req.batch.saturating_mul(req.seq_len);
+        matrix::triad_spans(rows, &linears(cfg, input_dim))?;
+    }
     let scan = match req.path {
         Path::Decode => Scan::Sequential,
         Path::Prefill | Path::Train => Scan::of(req.scan.use_parallel(req.seq_len, cfg.d_state)),

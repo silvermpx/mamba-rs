@@ -9,6 +9,7 @@
 
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::matrix::{self, Path, Plan, Refusal, Request, Scan};
+use crate::precision::GemmMode;
 
 /// The values the MIMO kernels take as `int`s over windows of `seq_len`
 /// tokens of `batch` sequences: the batch, the window, its rows, the widest
@@ -42,6 +43,20 @@ pub(crate) fn int_args(
     ]
 }
 
+/// The linear layers of a training step, `(name, input width, output
+/// width)`; a model without an input projection takes rows `d_model` wide,
+/// which no other layer's operands undercut.
+fn linears(cfg: &Mamba3MimoConfig, input_dim: usize) -> [(&'static str, usize, usize); 5] {
+    let (d, h) = (cfg.d_model, cfg.mlp_hidden());
+    [
+        ("input_proj", input_dim, d),
+        ("in_proj", d, cfg.in_proj_out_dim()),
+        ("out_proj", cfg.d_inner(), d),
+        ("mlp fc1", d, 2 * h),
+        ("mlp fc2", h, d),
+    ]
+}
+
 /// Whether and how the GPU runs `req` on a MIMO model of `cfg` fed rows
 /// `input_dim` wide. `cfg` must pass [`Mamba3MimoConfig::validate`]; the
 /// request's scan mode stands in for the config's. A prompt of one token
@@ -49,6 +64,10 @@ pub(crate) fn int_args(
 pub fn admit(cfg: &Mamba3MimoConfig, input_dim: usize, req: &Request) -> Result<Plan, Refusal> {
     matrix::check_request(req)?;
     matrix::int_args(&int_args(cfg, input_dim, (req.batch, req.seq_len)))?;
+    if req.path == Path::Train && req.gemm == GemmMode::Deterministic {
+        let rows = req.batch.saturating_mul(req.seq_len);
+        matrix::triad_spans(rows, &linears(cfg, input_dim))?;
+    }
     let cfg = Mamba3MimoConfig {
         scan_mode: req.scan,
         ..*cfg

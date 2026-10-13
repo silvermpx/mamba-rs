@@ -153,6 +153,34 @@ pub(crate) fn int_args(args: &[(&'static str, usize)]) -> Result<(), Refusal> {
     }
 }
 
+/// Refuses a training window the deterministic GEMMs cannot serve. Their
+/// Triad kernels offset each operand in 32 bits, so every linear layer
+/// `(name, input width, output width)` of a family over `rows` rows must
+/// keep its input, its output and its weight within `i32::MAX` elements;
+/// the vendor GEMMs and the inference kernels offset in 64 bits.
+pub(crate) fn triad_spans(
+    rows: usize,
+    linears: &[(&'static str, usize, usize)],
+) -> Result<(), Refusal> {
+    for &(name, k, n) in linears {
+        let largest = [
+            rows.saturating_mul(k),
+            rows.saturating_mul(n),
+            k.saturating_mul(n),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+        if largest > i32::MAX as usize {
+            return Err(Refusal::Kernel {
+                predicate: "a training GEMM operand past 2^31 elements",
+                detail: format!("{name} over {rows} rows, {k} in, {n} out"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Refuses a request that names no work.
 pub(crate) fn check_request(req: &Request) -> Result<(), Refusal> {
     if req.batch == 0 || req.seq_len == 0 {
@@ -197,6 +225,15 @@ mod tests {
         assert!(check_request(&req(Path::Decode, 2, 2)).is_err());
         assert!(check_request(&req(Path::Decode, 2, 1)).is_ok());
         assert!(check_request(&req(Path::Train, 1, 1)).is_ok());
+    }
+
+    #[test]
+    fn a_training_operand_past_the_int_range_names_its_layer() {
+        assert_eq!(triad_spans(1 << 16, &[("in_proj", 768, 3072)]), Ok(()));
+        let err = triad_spans(1 << 20, &[("in_proj", 768, 3072), ("out_proj", 1536, 768)]);
+        assert!(matches!(err, Err(Refusal::Kernel { .. })));
+        assert!(String::from(err.unwrap_err()).contains("in_proj"));
+        assert!(triad_spans(1, &[("in_proj", 1 << 16, 1 << 16)]).is_err());
     }
 
     #[test]
