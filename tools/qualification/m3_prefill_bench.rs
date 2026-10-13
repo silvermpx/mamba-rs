@@ -124,6 +124,8 @@ fn f16_training_warmup_restarts_after_overflow() {
                 graph_replayed,
                 loss_scale: Some(scale),
                 overflow_skipped: Some(overflow),
+                optimizer_stepped: !overflow,
+                grad_norm: None,
             })
         })
         .unwrap();
@@ -142,11 +144,14 @@ fn f16_training_warmup_stops_at_the_attempt_limit() {
         let result = warm_up_f16_training(false, || {
             attempts += 1;
             assert!(attempts <= 128, "warmup exceeded its finite limit");
+            let overflow = !intermittent || attempts.is_multiple_of(8);
             Ok(StepMetrics {
                 step: 0,
                 graph_replayed: false,
                 loss_scale: Some(1.0),
-                overflow_skipped: Some(!intermittent || attempts.is_multiple_of(8)),
+                overflow_skipped: Some(overflow),
+                optimizer_stepped: !overflow,
+                grad_norm: None,
             })
         });
         assert!(result.is_err());
