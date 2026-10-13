@@ -102,6 +102,7 @@ pub mod mamba3_siso;
 pub mod mlp;
 pub mod module;
 pub mod ops;
+pub mod optim;
 
 /// The 0.7 path of Mamba-1 and of the GPU engine, which 0.8 split into
 /// [`mamba1`] and `gpu`. It re-exports both, so code written for 0.7 still
@@ -180,12 +181,21 @@ pub use mamba3_mimo::{
 pub use module::MambaLM;
 pub use module::sample::SampleParams;
 pub use module::{Mamba2Backbone, Mamba3Backbone, Mamba3MimoBackbone, MambaBackbone};
+// What training needs on either device: the session, options and metrics
+// of a trainer, the AdamW state and the trainer-state file.
+pub use optim::{
+    AdamWStateBlob, BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg, TrainerState,
+};
+// The host trainers of every family and the trait over them.
+pub use mamba1::cpu::trainer::MambaCpuTrainer;
+pub use mamba2::cpu::trainer::Mamba2CpuTrainer;
+pub use mamba3_mimo::cpu::trainer::Mamba3MimoCpuTrainer;
+pub use mamba3_siso::cpu::trainer::Mamba3CpuTrainer;
+pub use module::{AnyCpuTrainer, CpuTrainer};
 
 // The GPU side of every family: the options every constructor takes, the
-// backbones and the trainers with the traits over them, the trainer's
-// options and metrics, and the language model.
-#[cfg(feature = "cuda")]
-pub use gpu::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg, TrainerState};
+// backbones and the trainers with the traits over them, and the language
+// model.
 #[cfg(feature = "cuda")]
 pub use gpu::{GemmMode, GpuOptions, WeightDtype};
 #[cfg(feature = "cuda")]

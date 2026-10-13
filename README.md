@@ -38,12 +38,13 @@ underneath. The GPU path links only the CUDA driver API and cuBLAS.
 
 - CPU and GPU paths for every family, held to each other by parity tests
   on shared weights.
-- Inference: single steps, prompts in one pass, and the decode step as one
-  CUDA graph.
-- Training: the full backward through the recurrent state, AdamW, global
-  norm clipping and gradient accumulation. Bring your own loss: `forward`
-  gives the full output on the host, and the gradient of any loss goes
-  back through `backward_step`.
+- Inference: single steps, prompts in one pass, and the decode step and
+  the prompt pass of one length as CUDA graphs.
+- Training on the CPU and the GPU: the full backward through the
+  recurrent state, AdamW, global and control-channel norm clipping, the
+  skip of a spiking window and gradient accumulation. Bring your own loss:
+  `forward` gives the full output on the host, and the gradient of any
+  loss goes back through `backward_step`.
 - f32, tf32, bf16 and f16 storage through one `WeightDtype`. Every kernel
   accumulates in f32.
 - Three GEMM modes, deterministic by default. See below.
@@ -105,6 +106,26 @@ Mamba-2 and MIMO check their configuration in `init` and return a
 `Result`, Mamba and SISO return the backbone itself. `new(weights, cfg,
 input_dim)` wraps weights loaded from a checkpoint or a trainer.
 
+Every family also trains on the CPU, through the trainers
+`MambaCpuTrainer`, `Mamba2CpuTrainer`, `Mamba3CpuTrainer` and
+`Mamba3MimoCpuTrainer`. They take the GPU trainers' session, options and
+metrics and have their calls (`forward`, `backward_step`, `step`, the
+accumulation window, `apply_step_full`, the optimizer and trainer state),
+and the `CpuTrainer` trait and `AnyCpuTrainer` name what they share. The
+sequences of a batch run side by side and their gradients sum in a fixed
+number of chunks, so a run gives the same bits on any thread pool.
+
+```rust
+use mamba_rs::{BackwardOpts, Mamba2CpuTrainer, TrainSessionCfg};
+
+let session = TrainSessionCfg::new(input_dim, batch, seq_len);
+let mut trainer = Mamba2CpuTrainer::new(&weights, cfg, session)?;
+let mut out = vec![0.0f32; batch * seq_len * cfg.d_model];
+trainer.forward(&input, &mut out)?;
+trainer.backward_step(&my_loss_grad(&out), BackwardOpts::default().with_clip_max_norm(1.0))?;
+let master = trainer.snapshot_master();
+```
+
 Enable `gemm-blas`, or `accelerate` on macOS, for any CPU work beyond a
 correctness check.
 
@@ -121,6 +142,7 @@ use mamba_rs::{GpuOptions, Mamba3MimoGpuBackbone, WeightDtype};
 let opts = GpuOptions::default().dtype(WeightDtype::Bf16);
 let mut gpu = Mamba3MimoGpuBackbone::new(&weights, cfg, input_dim, batch, opts)?;
 
+gpu.capture_prefill_graph(seq_len)?; // optional: a prompt of this length is one launch
 gpu.capture_graph()?;              // optional: each step is then one graph launch
 gpu.prefill(&prompt, seq_len)?;    // a prompt in one pass
 gpu.step(&input, &mut output)?;    // then token by token
@@ -133,8 +155,10 @@ gpu.reset()?;                      // a new sequence
 other families take the same arguments: `MambaGpuBackbone`,
 `Mamba2GpuBackbone` and `Mamba3GpuBackbone`. `step_gpu_only` leaves the
 output on the device, where `temporal_ptr` points at it for a head that
-runs on the GPU. A captured graph fixes the GEMM staging, so run the
-longest prompt before `capture_graph` when the prompts are long.
+runs on the GPU. A captured graph fixes the GEMM staging, so run or
+capture the longest prompt before `capture_graph` when the prompts are
+long. `capture_prefill_graph` keeps one prompt length; a prompt of another
+length runs eagerly and drops it.
 
 Code that takes any family uses the `GpuBackbone` trait, and
 `AnyGpuBackbone` holds a backbone of a family chosen at run time.

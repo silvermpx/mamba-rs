@@ -3,6 +3,8 @@
 //! - CPU backbones: [`MambaBackbone`] (Mamba-1, which also trains on the
 //!   CPU), [`Mamba2Backbone`], [`Mamba3Backbone`] (Mamba-3 SISO) and
 //!   [`Mamba3MimoBackbone`].
+//! - `cpu_trainer`: the [`CpuTrainer`] trait every family's host trainer
+//!   implements, and [`AnyCpuTrainer`], one chosen at run time.
 //! - `lm` (feature `hf`): `MambaLM`, text generation on the CPU for every
 //!   family, loaded from a checkpoint directory or wrapped around a
 //!   backbone, and saved as one language-model checkpoint file.
@@ -22,6 +24,7 @@ pub mod backbone2;
 // gets the CPU backbones and the sampling utilities.
 pub mod backbone3;
 pub mod backbone3_mimo;
+pub(crate) mod cpu_trainer;
 #[cfg(feature = "cuda")]
 pub mod gpu_backbone;
 #[cfg(all(feature = "hf", feature = "cuda"))]
@@ -40,6 +43,7 @@ pub use backbone::MambaBackbone;
 pub use backbone2::Mamba2Backbone;
 pub use backbone3::Mamba3Backbone;
 pub use backbone3_mimo::Mamba3MimoBackbone;
+pub use cpu_trainer::{AnyCpuTrainer, CpuTrainer};
 #[cfg(feature = "cuda")]
 pub use gpu_backbone::{AnyGpuBackbone, GpuBackbone};
 #[cfg(all(feature = "hf", feature = "cuda"))]

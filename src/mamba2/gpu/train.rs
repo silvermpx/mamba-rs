@@ -414,8 +414,12 @@ struct BwdScratch {
     d_temp_h: Option<DtypedBuf>,
 }
 
-/// A Mamba-2 trainer's carried recurrence on the host: every layer's conv
-/// window and SSM state.
+/// A Mamba-2 trainer's carried recurrence on the host, layer after layer
+/// and within a layer sequence after sequence: the conv window `[conv_dim,
+/// d_conv]` of the last inputs, newest last, and the SSM state `[nheads,
+/// headdim, d_state]`. A window's first column, its oldest input, is read
+/// by no later step and is zero here, so the CPU trainer, which keeps only
+/// the inputs a step reads, exports the same state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mamba2RecurrentStateBlob {
     pub conv: Vec<f32>,
@@ -1165,8 +1169,12 @@ impl Mamba2GpuTrainer {
     /// Download the carried recurrence: every layer's conv window and SSM
     /// state, which a resume uploads to continue the sequences.
     pub fn recurrent_state(&self) -> Result<Mamba2RecurrentStateBlob, String> {
+        let mut conv = self.state.conv.to_cpu(&self.ctx.stream)?;
+        conv.iter_mut()
+            .step_by(self.cfg.d_conv)
+            .for_each(|oldest| *oldest = 0.0);
         Ok(Mamba2RecurrentStateBlob {
-            conv: self.state.conv.to_cpu(&self.ctx.stream)?,
+            conv,
             ssm: self.state.ssm.to_cpu(&self.ctx.stream)?,
         })
     }

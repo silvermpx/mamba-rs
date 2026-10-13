@@ -35,6 +35,8 @@
 "cpu_gemv_bench" = "bench"
 "control_clip" = "gate"
 "cpu_gpu_train_parity" = "gate"
+"cpu_gpu_trainer_parity" = "gate"
+"cpu_trainer_api" = "host"
 "cublas_compute_probe" = "qualification"
 "ddp_emulated_equivalence" = "gate"
 "ddp_fixed_order_reducer" = "gate"

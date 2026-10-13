@@ -137,6 +137,23 @@
   `Mamba3MimoGpuEngine::capture_graph` takes `&self`, and `has_graph` and
   `clear_graph` move to `Mamba3MimoGpuWindow`. Every such graph holds the
   kernels' module and the context's resources, so it outlives neither.
+- Every family trains on the CPU through a trainer object:
+  `MambaCpuTrainer`, `Mamba2CpuTrainer`, `Mamba3CpuTrainer` and
+  `Mamba3MimoCpuTrainer`, with the `CpuTrainer` trait and `AnyCpuTrainer`.
+  They take the GPU trainers' `TrainSessionCfg`, `BackwardOpts`,
+  `BackwardMetrics` and `StepMetrics`: the forward of a window with the
+  recurrence carried, `backward_step` with the global and control-channel
+  clips, the spike skip and the accumulation window, `apply_step_full`
+  and the arena seam, the input gradient, AdamW on the host with the
+  GPU's arithmetic and no-decay groups, and the optimizer and trainer
+  state. A batch's sequences run side by side and their gradients sum in
+  a fixed number of chunks reduced in a fixed tree, so the bits do not
+  depend on the thread pool. The SISO trainer trains the gated MLP of a
+  model that has one.
+- A trainer state saved on either device loads into the other: the CPU
+  trainers lay the carried recurrence out as the GPU trainers do, and
+  `Mamba2GpuTrainer::recurrent_state` writes the conv window's oldest
+  input, which no later step reads, as zero.
 
 ### Changed
 
@@ -373,6 +390,10 @@
   it and refuses a file marked as another family. The Mamba-1 and SISO
   serializers share the checked tensor list of the others, and the SISO
   loader reads its file once.
+- `TrainSessionCfg`, `BackwardOpts`, `BackwardMetrics`, `StepMetrics`,
+  `AdamWStateBlob` and `TrainerState` live in the new `optim` module and
+  at the crate root without the `cuda` feature; `gpu::train`,
+  `gpu::adamw::AdamWStateBlob` and `gpu::train_state` still reach them.
 
 ### Fixed
 

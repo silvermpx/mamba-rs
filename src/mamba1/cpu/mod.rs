@@ -14,4 +14,5 @@ pub mod parallel;
 pub mod prefill;
 pub mod scratch;
 pub mod target;
+pub mod trainer;
 pub mod weights;

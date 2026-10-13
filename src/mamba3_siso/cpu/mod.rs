@@ -18,6 +18,7 @@ pub mod inference;
 pub mod parallel;
 pub mod prefill;
 pub mod scratch;
+pub mod trainer;
 pub mod weights;
 
 pub use dims::Mamba3Dims;

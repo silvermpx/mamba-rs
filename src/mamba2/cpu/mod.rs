@@ -9,6 +9,7 @@ pub(crate) mod core;
 pub mod inference;
 pub mod prefill;
 pub mod train;
+pub mod trainer;
 
 pub use inference::{Mamba2StepScratch, mamba2_layer_step, mamba2_step};
 pub use prefill::{

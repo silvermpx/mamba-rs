@@ -112,22 +112,7 @@ pub struct AdamWParamPtrs {
     pub v: cudarc::driver::sys::CUdeviceptr,
 }
 
-/// CPU-side snapshot of the full AdamW state for a bit-continuous
-/// resume: without the moment buffers and step counter, a "resumed" run
-/// re-warms Adam from zero and provably diverges from the unbroken run.
-/// The learning rate is NOT part of the blob — it belongs to the
-/// caller's schedule (see [`GpuAdamW::export_state`]).
-#[derive(Clone, Debug, PartialEq)]
-pub struct AdamWStateBlob {
-    pub m: Vec<f32>,
-    pub v: Vec<f32>,
-    pub step: u64,
-    pub beta1: f32,
-    pub beta2: f32,
-    pub eps: f32,
-    pub weight_decay: f32,
-    pub reference_no_decay: bool,
-}
+pub use crate::optim::adamw::AdamWStateBlob;
 
 /// f32 fused AdamW optimizer (matches `torch.optim.AdamW`).
 pub struct GpuAdamW {
@@ -382,17 +367,8 @@ impl GpuAdamW {
     /// bias-correction multipliers used inside the kernel.
     pub fn advance(&mut self) -> (u64, f32, f32) {
         self.step += 1;
-        // `powi` takes i32 for the exponent. Clamp to a step count beyond
-        // which `β^t` is already below f64 round-off (≈ 1e-300 at step
-        // ~3000 for β=0.9, step ~700k for β=0.999). 2^30 is ≈ 1.07B, well
-        // inside i32 range and well past any realistic training horizon.
-        // This avoids the silent overflow that cast `u64 as i32` produced
-        // at step ≥ 2^31 (negative exponent → garbage bias factors).
-        let t = self.step.min(1 << 30) as i32;
-        let denom1 = 1.0 - (self.beta1 as f64).powi(t);
-        let denom2 = 1.0 - (self.beta2 as f64).powi(t);
-        let bias_c1 = (1.0 / denom1.max(1e-30)) as f32;
-        let bias_c2 = (1.0 / denom2.max(1e-30)) as f32;
+        let (bias_c1, bias_c2) =
+            crate::optim::adamw::bias_corrections(self.step, self.beta1, self.beta2);
         (self.step, bias_c1, bias_c2)
     }
 }

@@ -1,0 +1,287 @@
+//! The Mamba-1 host trainer: the shared CPU trainer over this family's
+//! backbone forward and backward ([`forward_mamba_backbone_batched`],
+//! [`backward_mamba_backbone_batched`]).
+
+use super::backward::backward_mamba_backbone_batched;
+use super::flat::MambaBackboneFlat;
+use super::forward::forward_mamba_backbone_batched;
+use super::scratch::{BackwardPhaseScratch, PhaseScratch};
+use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
+use crate::config::ModelFamily;
+use crate::mamba1::config::MambaConfig;
+use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
+use crate::module::cpu_trainer::{Control, CpuCore, CpuFamily, TensorRole, cpu_trainer_type};
+use crate::ops::dims::{MambaDims, MambaRecurrentState};
+use crate::optim::session::TrainSessionCfg;
+use crate::optim::tensors::tensor_list;
+
+tensor_list!(
+    TrainMambaWeights,
+    pre: [input_proj_w, input_proj_b],
+    layers: layers [
+        norm_weight,
+        in_proj_w,
+        conv1d_weight,
+        conv1d_bias,
+        x_proj_w,
+        dt_proj_w,
+        dt_proj_b,
+        a_log,
+        d_param,
+        out_proj_w
+    ],
+    post: [norm_f_weight],
+);
+
+pub(crate) struct MambaCpu {
+    cfg: MambaConfig,
+    dims: MambaDims,
+    /// `-exp(a_log)` of every layer, which the scans read; refreshed after
+    /// every optimizer step.
+    a_neg: Vec<f32>,
+}
+
+/// One sequence's carried conv and SSM states, activations and scratch.
+pub(crate) struct MambaCpuSeq {
+    acts: MambaBackboneFlat,
+    conv: Vec<f32>,
+    ssm: Vec<f32>,
+    fwd: PhaseScratch,
+    bwd: BackwardPhaseScratch,
+}
+
+impl CpuFamily for MambaCpu {
+    type Weights = TrainMambaWeights;
+    type Seq = MambaCpuSeq;
+    const FAMILY: ModelFamily = ModelFamily::Mamba1;
+    const RECURRENCE: &'static [&'static str] = &["conv", "ssm"];
+
+    fn new_seq(&self, _w: &TrainMambaWeights, _seq_len: usize) -> Result<MambaCpuSeq, String> {
+        Ok(MambaCpuSeq {
+            acts: MambaBackboneFlat::zeros(self.dims),
+            conv: vec![0.0; self.cfg.n_layers * self.recurrence_len(0)],
+            ssm: vec![0.0; self.cfg.n_layers * self.recurrence_len(1)],
+            fwd: PhaseScratch::zeros(&self.dims),
+            bwd: BackwardPhaseScratch::zeros(&self.dims),
+        })
+    }
+
+    fn reset_seq(&self, seq: &mut MambaCpuSeq) {
+        seq.conv.fill(0.0);
+        seq.ssm.fill(0.0);
+    }
+
+    fn forward(
+        &self,
+        w: &TrainMambaWeights,
+        seq: &mut MambaCpuSeq,
+        input: &[f32],
+        out: &mut [f32],
+    ) -> Result<(), String> {
+        out.fill(0.0);
+        forward_mamba_backbone_batched(
+            out,
+            &mut seq.acts,
+            w,
+            input,
+            &mut MambaRecurrentState {
+                conv: &mut seq.conv,
+                ssm: &mut seq.ssm,
+                a_neg: &self.a_neg,
+            },
+            &mut seq.fwd,
+            &self.dims,
+        );
+        Ok(())
+    }
+
+    fn backward(
+        &self,
+        w: &TrainMambaWeights,
+        seq: &mut MambaCpuSeq,
+        grads: &mut TrainMambaWeights,
+        d_out: &mut [f32],
+        d_input: &mut [f32],
+    ) -> Result<(), String> {
+        backward_mamba_backbone_batched(
+            d_out,
+            grads,
+            &seq.acts,
+            w,
+            &self.a_neg,
+            &mut seq.bwd,
+            &self.dims,
+        );
+        // Without an input projection the rows the layers read are the
+        // input, so their gradient is the input's; with one, the
+        // projection's backward left it in the scratch.
+        let n = d_input.len();
+        if w.input_proj_w.is_empty() {
+            d_input.copy_from_slice(&d_out[..n]);
+        } else {
+            d_input.copy_from_slice(&seq.bwd.d_input_proj_scratch[..n]);
+        }
+        Ok(())
+    }
+
+    fn zeros_like(w: &TrainMambaWeights) -> TrainMambaWeights {
+        let mut g = w.clone();
+        crate::optim::tensors::TensorList::zero(&mut g);
+        g
+    }
+
+    /// The matrices and biases decay but for the reference's no-decay
+    /// group (the norm scales, dt_proj's bias, A_log and D); the control
+    /// channels are the step-size columns of x_proj, dt_proj and A_log, as
+    /// on the GPU.
+    fn roles(&self, w: &TrainMambaWeights) -> Vec<TensorRole> {
+        let (dt_rank, xdbl) = (self.cfg.dt_rank(), self.cfg.xdbl_dim());
+        let role = |decays, control| TensorRole { decays, control };
+        let mut roles = vec![role(true, Control::None), role(true, Control::None)];
+        for _ in &w.layers {
+            roles.extend([
+                role(false, Control::None),
+                role(true, Control::None),
+                role(true, Control::None),
+                role(true, Control::None),
+                role(
+                    true,
+                    Control::Columns {
+                        row_len: xdbl,
+                        cols: 0..dt_rank,
+                    },
+                ),
+                role(true, Control::All),
+                role(false, Control::All),
+                role(false, Control::All),
+                role(false, Control::None),
+                role(true, Control::None),
+            ]);
+        }
+        roles.push(role(false, Control::None));
+        roles
+    }
+
+    fn after_update(&mut self, w: &TrainMambaWeights) {
+        let mut at = 0;
+        for lw in &w.layers {
+            for (a, &log) in self.a_neg[at..at + lw.a_log.len()]
+                .iter_mut()
+                .zip(&lw.a_log)
+            {
+                *a = -log.exp();
+            }
+            at += lw.a_log.len();
+        }
+    }
+
+    fn n_layers(&self) -> usize {
+        self.cfg.n_layers
+    }
+
+    fn recurrence_len(&self, i: usize) -> usize {
+        let c = &self.cfg;
+        match i {
+            0 => c.d_inner() * c.d_conv,
+            _ => c.d_inner() * c.d_state,
+        }
+    }
+
+    /// The host keeps both states as the GPU does, layer after layer.
+    fn export_recurrence(&self, seq: &MambaCpuSeq, i: usize, l: usize, out: &mut Vec<f32>) {
+        let n = self.recurrence_len(i);
+        let all = if i == 0 { &seq.conv } else { &seq.ssm };
+        out.extend_from_slice(&all[l * n..(l + 1) * n]);
+    }
+
+    fn import_recurrence(&self, seq: &mut MambaCpuSeq, i: usize, l: usize, values: &[f32]) {
+        let n = self.recurrence_len(i);
+        let all = if i == 0 { &mut seq.conv } else { &mut seq.ssm };
+        all[l * n..(l + 1) * n].copy_from_slice(values);
+    }
+}
+
+cpu_trainer_type!(
+    /// A Mamba-1 model trained on the CPU: the batch's sequences side by
+    /// side, the accumulation window, the clips, the spike skip and AdamW,
+    /// with the surface of [`crate::module::CpuTrainer`]. The gradients of
+    /// the batch sum in a fixed number of chunks reduced in a fixed tree,
+    /// so the bits do not depend on the thread pool.
+    MambaCpuTrainer,
+    MambaCpu
+);
+
+impl MambaCpuTrainer {
+    /// A trainer of `weights` (copied as the f32 master) for the session's
+    /// batch and window, with its AdamW settings.
+    pub fn new(
+        weights: &MambaWeights,
+        cfg: MambaConfig,
+        session: TrainSessionCfg,
+    ) -> Result<Self, String> {
+        cfg.validate()?;
+        weights.validate(&cfg, session.input_dim)?;
+        let train = TrainMambaWeights {
+            input_proj_w: weights.input_proj_w.clone(),
+            input_proj_b: weights.input_proj_b.clone(),
+            layers: weights
+                .layers
+                .iter()
+                .map(|lw| TrainMambaLayerWeights {
+                    norm_weight: lw.norm_weight.clone(),
+                    in_proj_w: lw.in_proj_w.clone(),
+                    conv1d_weight: lw.conv1d_weight.clone(),
+                    conv1d_bias: lw.conv1d_bias.clone(),
+                    x_proj_w: lw.x_proj_w.clone(),
+                    dt_proj_w: lw.dt_proj_w.clone(),
+                    dt_proj_b: lw.dt_proj_b.clone(),
+                    a_log: lw.a_log.clone(),
+                    d_param: lw.d_param.clone(),
+                    out_proj_w: lw.out_proj_w.clone(),
+                })
+                .collect(),
+            norm_f_weight: weights.norm_f_weight.clone(),
+        };
+        let dims = MambaDims::from_config(&cfg, session.seq_len, session.input_dim);
+        let mut fam = MambaCpu {
+            cfg,
+            dims,
+            a_neg: vec![0.0; cfg.n_layers * cfg.d_inner() * cfg.d_state],
+        };
+        fam.after_update(&train);
+        Ok(Self {
+            core: CpuCore::new(fam, train, session, cfg.d_model)?,
+        })
+    }
+
+    /// The master weights, for a checkpoint or the inference model.
+    pub fn snapshot_master(&self) -> MambaWeights {
+        let w = &self.core.weights;
+        MambaWeights {
+            input_proj_w: w.input_proj_w.clone(),
+            input_proj_b: w.input_proj_b.clone(),
+            layers: w
+                .layers
+                .iter()
+                .map(|lw| {
+                    let mut out = MambaLayerWeights {
+                        norm_weight: lw.norm_weight.clone(),
+                        in_proj_w: lw.in_proj_w.clone(),
+                        conv1d_weight: lw.conv1d_weight.clone(),
+                        conv1d_bias: lw.conv1d_bias.clone(),
+                        x_proj_w: lw.x_proj_w.clone(),
+                        dt_proj_w: lw.dt_proj_w.clone(),
+                        dt_proj_b: lw.dt_proj_b.clone(),
+                        a_log: lw.a_log.clone(),
+                        a_neg: vec![0.0; lw.a_log.len()],
+                        d_param: lw.d_param.clone(),
+                        out_proj_w: lw.out_proj_w.clone(),
+                    };
+                    out.compute_a_neg();
+                    out
+                })
+                .collect(),
+            norm_f_weight: w.norm_f_weight.clone(),
+        }
+    }
+}

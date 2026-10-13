@@ -784,6 +784,15 @@ path = "tests/lm_checkpoint.rs"
 required-features = ["hf"]
 
 [[test]]
+name = "cpu_trainer_api"
+path = "tests/cpu_trainer_api.rs"
+
+[[test]]
+name = "cpu_gpu_trainer_parity"
+path = "tests/cpu_gpu_trainer_parity.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "m2_grid_runs"
 path = "tests/m2_grid_runs.rs"
 required-features = ["cuda"]

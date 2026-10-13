@@ -43,7 +43,7 @@ pub mod launch;
 pub mod loss_scaler;
 pub mod options;
 pub mod train;
-pub mod train_state;
+pub use crate::optim::train_state;
 
 pub use dtype::WeightDtype;
 pub use gemm_mode::GemmMode;

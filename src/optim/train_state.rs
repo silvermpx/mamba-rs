@@ -11,8 +11,8 @@ use std::path::Path;
 use safetensors::tensor::SafeTensors;
 
 use crate::config::ModelFamily;
-use crate::gpu::adamw::AdamWStateBlob;
 use crate::ops::st_io::{TensorList, meta, read_f32, read_meta};
+use crate::optim::adamw::AdamWStateBlob;
 
 /// The format marker in the metadata.
 const FORMAT: &str = "mamba-rs-trainer-state";
