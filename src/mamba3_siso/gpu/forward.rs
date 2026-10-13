@@ -162,11 +162,10 @@ fn validate_angle_chunked_layout(
 
     let grid_x = u32::try_from(checked_angle_product("grid-x extent", &[batch, n_chunks])?)
         .map_err(|_| "angle grid-x extent does not fit u32".to_string())?;
+    // Past the 65535 blocks one launch holds on y the kernels launch in
+    // runs (`y_runs`).
     let grid_y = u32::try_from(lanes.div_ceil(256))
         .map_err(|_| "angle grid-y extent does not fit u32".to_string())?;
-    if grid_y > u16::MAX.into() {
-        return Err(format!("angle grid-y extent exceeds CUDA limit: {grid_y}"));
-    }
     let block_x = u32::try_from(lanes.min(256))
         .map_err(|_| "angle block-x extent does not fit u32".to_string())?;
 
@@ -1532,6 +1531,30 @@ mod angle_chunked_contract_tests {
         };
         let err = validate_angle_chunked_layout(shape, LENGTHS, 1).unwrap_err();
         assert!(err.contains("overflows usize"), "{err}");
+    }
+
+    /// A sequence of more than 65535 * 256 (head, angle) lanes takes more
+    /// blocks on y than one launch holds; the launches run in runs, so the
+    /// layout validates.
+    #[test]
+    fn lanes_past_one_launch_of_grid_y_validate() {
+        let shape = AngleChunkedShape {
+            batch: 1,
+            seq_len: 1,
+            heads: 131_072,
+            angles: 128,
+        };
+        let lanes = shape.heads * shape.angles;
+        let lengths = AngleChunkedLengths {
+            angle_cumsum: lanes,
+            angles_raw: shape.angles,
+            dt: shape.heads,
+            sums_bytes: lanes * std::mem::size_of::<f64>(),
+            carries_bytes: lanes * std::mem::size_of::<f32>(),
+        };
+        let launch = validate_angle_chunked_layout(shape, lengths, 1).unwrap();
+        assert_eq!(launch.grid_y as usize, lanes.div_ceil(256));
+        assert!(launch.grid_y > 65_535);
     }
 
     #[test]

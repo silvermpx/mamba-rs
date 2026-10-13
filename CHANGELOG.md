@@ -490,6 +490,9 @@
 - The Inference family's tensor-core legacy tile and the matvec kernel
   refuse an operand or output of more than 2^31 elements, whose 32-bit
   row offsets wrapped and read or wrote other memory without an error.
+- The SISO angle cumsum serves more than 65535 * 256 (head, angle) lanes:
+  its launches run in runs on grid y, and a stale check refused the
+  layout.
 
 ## 0.7.5 (2026-09-23)
 
