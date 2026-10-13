@@ -496,6 +496,10 @@ pub fn inference_forward_f32_legacy_baseline(
     let m = i32::try_from(shape.m).map_err(|_| "Inference M exceeds i32")?;
     let n = i32::try_from(shape.n).map_err(|_| "Inference N exceeds i32")?;
     let k = i32::try_from(shape.k).map_err(|_| "Inference K exceeds i32")?;
+    // The former kernel offsets its rows in 32 bits.
+    for span in [shape.m * shape.k, shape.k * shape.n, shape.m * shape.n] {
+        i32::try_from(span).map_err(|_| "Inference f32 legacy baseline span exceeds i32")?;
+    }
     let grid_m = u32::try_from(shape.m.div_ceil(64)).map_err(|_| "Inference M grid exceeds u32")?;
     let grid_n = u32::try_from(shape.n.div_ceil(64)).map_err(|_| "Inference N grid exceeds u32")?;
     let grid = grid_m

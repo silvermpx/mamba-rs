@@ -487,6 +487,9 @@
 - `validate` of Mamba-2, SISO and MIMO derived `d_inner` from unbounded
   fields before any bound, so a config read from a file could overflow
   before it was refused; SISO took a NaN `a_floor`.
+- The Inference family's tensor-core legacy tile and the matvec kernel
+  refuse an operand or output of more than 2^31 elements, whose 32-bit
+  row offsets wrapped and read or wrote other memory without an error.
 
 ## 0.7.5 (2026-09-23)
 

@@ -47,6 +47,16 @@ fn kernel_elems(elems: usize, kernel: &str) -> Result<(), String> {
     }
 }
 
+/// Refuses a GEMM whose spans pass the 32-bit offsets a kernel takes them
+/// in, a row times its stride as an `int`: A is m by k, B k by n, C m by n.
+fn int_spans(m: i32, n: i32, k: i32, kernel: &str) -> Result<(), String> {
+    let (m, n, k) = (i64::from(m), i64::from(n), i64::from(k));
+    for span in [m * k, k * n, m * n] {
+        kernel_elems(usize::try_from(span).unwrap_or(usize::MAX), kernel)?;
+    }
+    Ok(())
+}
+
 /// The sizes of a cuBLAS call as the 32-bit ints its API takes, or an error
 /// naming the size that does not fit, where a plain cast would wrap it
 /// silently.
@@ -4070,6 +4080,11 @@ fn launch_bi_gemm<O: PhysicalLaunchObserver>(
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
+    // The tensor-core tiles offset their rows in 32 bits; the f32 tile
+    // takes 64-bit offsets.
+    if storage[0].is_half() {
+        int_spans(args.m, args.n, args.k, "gemm_bi tensor-core tile")?;
+    }
     // The selected kernel supplies its qualified thread count. Every
     // variant below still owns a 64x64 output tile; a mismatched block
     // size can return plausible garbage rather than a launch error.
@@ -4199,6 +4214,7 @@ fn launch_bi_matvec<O: PhysicalLaunchObserver>(
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
+    int_spans(args.m, args.n, args.k, "matvec_bi")?;
     // Must match kernel constants in kernels/gemm_bi_inference/:
     //   BLOCK_N_MV = 32, WARPS_PER_BLOCK = 8, THREADS_PER_BLOCK = 256
     // Grid is 2D: (ceil(N / BLOCK_N_MV), M) — one CTA per (m_row, col_chunk).
