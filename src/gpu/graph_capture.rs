@@ -111,6 +111,42 @@ where
     Ok((graph, plan))
 }
 
+/// [`capture_into_graph_with_gemm_plan`] for a body that needs the
+/// context's owner mutably: `ctx_of` reaches the context from the owner
+/// before and after the capture, so no borrow of it is held while the body
+/// runs. The GEMM route recording ends whatever the body returns.
+///
+/// # Safety
+///
+/// As for [`capture_into_graph_with_gemm_plan`].
+pub(crate) unsafe fn capture_owner_into_graph_with_gemm_plan<T>(
+    owner: &mut T,
+    ctx_of: fn(&T) -> &GpuCtx,
+    route_capacity: usize,
+    manifest: &PreparedGemmCaptureManifest,
+    body: impl FnOnce(&mut T) -> Result<(), String>,
+) -> Result<(CudaGraph, Option<CapturedGemmGraphPlan>), String> {
+    let stream = {
+        let ctx = ctx_of(owner);
+        ctx.ensure_gemm_usable()?;
+        manifest.validate_capture_request(ctx.gemm_route(), route_capacity)?;
+        ctx.begin_gemm_route_recording(route_capacity)?.detach();
+        ctx.stream.clone()
+    };
+    let captured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        capture_into_graph(&stream, || body(owner))
+    }));
+    let recording = ctx_of(owner).resume_gemm_route_recording();
+    match captured {
+        Err(payload) => {
+            drop(recording);
+            std::panic::resume_unwind(payload)
+        }
+        Ok(Err(error)) => Err(error),
+        Ok(Ok(graph)) => Ok((graph, recording.finish_against_manifest(manifest)?)),
+    }
+}
+
 fn physical_capture_body_error(error: PhysicalCudaLaunchError) -> String {
     match error {
         #[cfg(test)]

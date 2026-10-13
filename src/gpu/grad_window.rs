@@ -90,6 +90,12 @@ impl GradWindow {
         Ok(overflowed)
     }
 
+    /// Whether a window is open: an accumulating call came after the last
+    /// applying one.
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+
     /// The sum of the open window, which a data-parallel caller reduces
     /// across ranks before the applying call.
     pub(crate) fn sum(&self) -> Result<&GpuBuffer, String> {

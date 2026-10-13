@@ -831,6 +831,29 @@ pub fn build_multi_plan(
     Ok(AdamWMultiPlan { table, n_chunks })
 }
 
+/// What an [`AdamWMultiPlan`] bakes into its chunk table from the
+/// optimizer: the decay, whether the reference's no-decay groups hold, and
+/// where the moments live. A trainer keeps the key beside its plan and
+/// rebuilds the plan when any of them moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AdamWPlanKey {
+    weight_decay_bits: u32,
+    reference_no_decay: bool,
+    m: cudarc::driver::sys::CUdeviceptr,
+    v: cudarc::driver::sys::CUdeviceptr,
+}
+
+impl AdamWPlanKey {
+    pub(crate) fn of(adam: &GpuAdamW) -> Self {
+        Self {
+            weight_decay_bits: adam.weight_decay.to_bits(),
+            reference_no_decay: adam.reference_no_decay,
+            m: adam.m.cached_ptr(),
+            v: adam.v.cached_ptr(),
+        }
+    }
+}
+
 /// Launch the fused step: one kernel over every chunk. `bias_factors_ptr`
 /// is the 3-element `[bc1, bc2, lr]` device buffer. `skip_flag` is 0, or a
 /// device `int` (the f16 overflow flag) that makes the step a no-op when set.

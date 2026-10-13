@@ -769,6 +769,11 @@ path = "tests/m3_grid_runs.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m2_mimo_training_graph"
+path = "tests/m2_mimo_training_graph.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "m2_grid_runs"
 path = "tests/m2_grid_runs.rs"
 required-features = ["cuda"]

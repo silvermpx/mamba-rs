@@ -26,6 +26,8 @@
 //! Windows carry the conv and SSM states from one call to the next, and
 //! the gradients stop at the states a window starts from.
 
+mod graph;
+
 use crate::gpu::grad_clip::{GradRegionGeom, norm_limit, scale_grads};
 use crate::gpu::grad_window::{GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
@@ -38,7 +40,10 @@ use super::kernels::{
     CHUNK, Mamba2Kernels, SeqBwdRoute, bc_tiles_smem_bytes, dx_tiles_geom,
     gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes, seq_bwd_tiles_smem_bytes, seq_bwd_tiles_threads,
 };
-use crate::gpu::adamw::GpuAdamW;
+use crate::gpu::adamw::{
+    AdamWBiasFactors, AdamWMultiPlan, AdamWPlanKey, AdamWTensorSpec, GpuAdamW, build_multi_plan,
+    step_multi,
+};
 use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_bi_backward_grad_raw,
     gpu_gemm_ex_backward_dx_typed, gpu_gemm_f32_forward_ptrs,
@@ -47,6 +52,8 @@ use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
 use crate::gpu::context::{GemmRole, GpuCtx};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
+use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
+use crate::gpu::kernel_identity::PreparedGemmCaptureManifest;
 use crate::gpu::launch::{
     grid_1d, grid_1d_cover, grid_colsum, grid_norm, launch_cast, y_runs, yz_runs,
 };
@@ -408,6 +415,10 @@ struct BwdScratch {
 /// The Mamba-2 trainer: forward, backward and AdamW for windows of
 /// `seq_len` tokens of `batch` sequences.
 pub struct Mamba2GpuTrainer {
+    /// The captured training step; dropped before the buffers it runs on.
+    graph: Option<graph::TrainGraph>,
+    /// The GEMM inventory of the last eager step, which a capture takes.
+    eager_gemm_manifest: Option<PreparedGemmCaptureManifest>,
     pub kernels: Mamba2Kernels,
     pub ctx: GpuCtx,
     cfg: Mamba2Config,
@@ -459,6 +470,12 @@ pub struct Mamba2GpuTrainer {
     fresh_grads: bool,
     /// The accumulation window and the clip of [`Self::backward_step`].
     window: GradWindow,
+    /// The fused AdamW's chunk table, and the optimizer settings it bakes
+    /// in: a weight decay, reference_no_decay or moment buffer changed
+    /// through `adamw_mut` rebuilds it before the next step.
+    multi_plan: Option<(AdamWPlanKey, AdamWMultiPlan)>,
+    /// The AdamW bias corrections and learning rate, on the device.
+    bias: AdamWBiasFactors,
 }
 
 const PAIRS: usize = CHUNK * (CHUNK + 1) / 2;
@@ -647,10 +664,14 @@ impl Mamba2GpuTrainer {
         } else {
             Some(DtypedBuf::zeros(s, copy_at.max(1), act)?)
         };
-        let mut trainer = Self {
+        let trainer = Self {
+            graph: None,
+            eager_gemm_manifest: None,
             forwarded: false,
             fresh_grads: false,
             window: GradWindow::new(s)?,
+            multi_plan: None,
+            bias: AdamWBiasFactors::new(s)?,
             master: GpuBuffer::from_cpu(s, &layout.flatten(w))?,
             grads: z(layout.total)?,
             adamw: GpuAdamW::new(s, layout.total)?
@@ -748,7 +769,7 @@ impl Mamba2GpuTrainer {
 
     /// Round the master in_proj, out_proj and MLP projection weights into
     /// their half copies.
-    fn refresh_mirror(&mut self) -> Result<(), String> {
+    fn refresh_mirror(&self) -> Result<(), String> {
         let Some(mirror) = &self.mirror else {
             return Ok(());
         };
@@ -833,12 +854,38 @@ impl Mamba2GpuTrainer {
     /// [`Self::backward_step`] of `d_temporal` (`[batch, seq_len, d_model]`,
     /// d loss / d the final rows of every position) with the default
     /// options.
+    ///
+    /// With a captured graph (see [`Self::capture_graph`]) the step
+    /// replays it, unless an accumulation window is open: the eager step
+    /// folds the window in.
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         self.check_window_len("step input", input.len(), self.input_dim)?;
-        self.forwarded = false;
-        self.forward_unchecked(input, None)?;
-        self.forwarded = true;
-        let m = self.backward_step(d_temporal, BackwardOpts::default())?;
+        self.check_window_len("step d_temporal", d_temporal.len(), self.cfg.d_model)?;
+        if self.graph.is_some() && !self.window.is_open() {
+            return self.step_graph(input, d_temporal);
+        }
+        if self.has_gemm_work() {
+            prepare_inference_arch_rung(&self.ctx)?;
+        }
+        self.presize_gemm_scratch()?;
+        let mut metrics = None;
+        let manifest = GpuCtx::record_owner_eager_gemm_manifest(
+            self,
+            |t| &t.ctx,
+            |t| {
+                t.forwarded = false;
+                t.forward_unchecked(input, None)?;
+                t.forwarded = true;
+                metrics = Some(t.backward_step(d_temporal, BackwardOpts::default())?);
+                Ok(())
+            },
+        )?;
+        if self.graph.is_none() {
+            self.eager_gemm_manifest = Some(manifest);
+        }
+        let Some(m) = metrics else {
+            return Err("the eager step returned no metrics".into());
+        };
         Ok(StepMetrics {
             step: m.step,
             graph_replayed: false,
@@ -1127,19 +1174,56 @@ impl Mamba2GpuTrainer {
         self.check_window_len("forward input", input.len(), self.input_dim)?;
         self.check_window_len("forward output", out.len(), self.cfg.d_model)?;
         self.forwarded = false;
+        self.presize_gemm_scratch()?;
         self.forward_unchecked(input, Some(out))?;
         self.forwarded = true;
         Ok(())
     }
 
+    /// Size the context's GEMM staging and upcast scratch for this
+    /// trainer's widest GEMM before a window's first one. Every weight a
+    /// GEMM reads is `d_model` wide on one side, so its length over
+    /// `d_model` is the activation width on the other.
+    fn presize_gemm_scratch(&self) -> Result<(), String> {
+        let dm = self.cfg.d_model;
+        let spans = std::iter::once(self.layout.input_proj_w)
+            .chain(
+                self.layout
+                    .layers
+                    .iter()
+                    .flat_map(|l| [l.in_proj_w, l.out_proj_w]),
+            )
+            .chain(self.layout.mlp.iter().flat_map(|m| [m.fc1_w, m.fc2_w]));
+        let (mut width, mut weight) = (dm, 0);
+        for s in spans {
+            width = width.max(s.len / dm.max(1));
+            weight = weight.max(s.len);
+        }
+        self.ctx
+            .presize_train_gemm_scratch(self.batch * self.seq_len, width, weight, self.dtype)
+    }
+
     /// The forward kernels; `out`, when given, receives the final rows.
     fn forward_unchecked(&mut self, input: &[f32], out: Option<&mut [f32]>) -> Result<(), String> {
+        let stream = self.ctx.stream.clone();
+        self.input.upload(&stream, input)?;
+        self.forward_device()?;
+        let Some(out) = out else {
+            return Ok(());
+        };
+        self.sync("forward")?;
+        self.final_out.download(&stream, out)?;
+        self.sync("forward")
+    }
+
+    /// The forward's kernels on the uploaded input, the final rows left in
+    /// `final_out`: the forward part of a captured step.
+    fn forward_device(&self) -> Result<(), String> {
         let c = self.cfg;
         let (b, t_len) = (self.batch, self.seq_len);
         let rows = b * t_len;
         let (dm, nh) = (c.d_model, c.nheads());
-        let stream = self.ctx.stream.clone();
-        self.input.upload(&stream, input)?;
+        let stream = &self.ctx.stream;
         for (l, ls) in self.layout.layers.iter().enumerate() {
             let a_log = at(self.master.cached_ptr(), ls.a_log);
             let a_neg = self.a_neg.cached_ptr() + (l * nh * 4) as u64;
@@ -1244,13 +1328,7 @@ impl Mamba2GpuTrainer {
                 self.final_rms.cached_ptr(),
             ),
             (rows, false),
-        )?;
-        let Some(out) = out else {
-            return Ok(());
-        };
-        self.sync("forward")?;
-        self.final_out.download(&stream, out)?;
-        self.sync("forward")
+        )
     }
 
     fn grad(&self, span: Span) -> GradSlice {
@@ -1393,19 +1471,58 @@ impl Mamba2GpuTrainer {
         d_out: &[f32],
         d_input: Option<&mut [f32]>,
     ) -> Result<(), String> {
+        let stream = self.ctx.stream.clone();
+        let scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
+        self.upload_d_out(d_out, scale)?;
+        self.backward_device()?;
+        self.overflowed = false;
+        if scale.is_some() {
+            self.sync("backward")?;
+            self.overflowed = self.overflow.read(&stream)? != 0;
+        }
+        self.sync("backward")?;
+        if let Some(d_input) = d_input {
+            let src = if self.layout.input_proj_w.len == 0 {
+                &self.bwd.d_temp
+            } else {
+                &self.bwd.d_input
+            };
+            src.download(&stream, d_input)?;
+            self.sync("backward")?;
+            if let Some(sc) = scale {
+                let inv = 1.0 / sc;
+                for v in d_input.iter_mut() {
+                    *v *= inv;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// d loss / d the final rows into the backward's input, times the f16
+    /// loss scale, and the factor the backward unscales the gradients by.
+    fn upload_d_out(&mut self, d_out: &[f32], scale: Option<f32>) -> Result<(), String> {
+        let stream = self.ctx.stream.clone();
+        match scale {
+            Some(sc) => {
+                let scaled: Vec<f32> = d_out.iter().map(|v| v * sc).collect();
+                self.bwd.d_rows.upload(&stream, &scaled)?;
+                self.unscale.write(&stream, 1.0 / sc)
+            }
+            None => self.bwd.d_rows.upload(&stream, d_out),
+        }
+    }
+
+    /// The backward's kernels on the uploaded d_rows: the arena zeroed,
+    /// every tensor's gradient, and in f16 the overflow check and the
+    /// unscale, which leaves an overflowed arena as it is. The backward
+    /// part of a captured step.
+    fn backward_device(&mut self) -> Result<(), String> {
         let c = self.cfg;
         let rows = self.batch * self.seq_len;
         let dm = c.d_model;
         let stream = self.ctx.stream.clone();
         self.grads.zero(&stream)?;
-        let scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
-        match scale {
-            Some(sc) => {
-                let scaled: Vec<f32> = d_out.iter().map(|v| v * sc).collect();
-                self.bwd.d_rows.upload(&stream, &scaled)?;
-            }
-            None => self.bwd.d_rows.upload(&stream, d_out)?,
-        }
         let base = self.master.cached_ptr();
         let g_base = self.grads.cached_ptr();
         self.rms_backward(
@@ -1442,8 +1559,7 @@ impl Mamba2GpuTrainer {
                 (rows, self.input_dim, dm),
             )?;
         }
-        self.overflowed = false;
-        if let Some(sc) = scale {
+        if self.scaler.is_some() {
             self.overflow.zero(&stream)?;
             check_inf_nan_gpu(
                 &self.ctx,
@@ -1451,7 +1567,6 @@ impl Mamba2GpuTrainer {
                 &mut self.overflow,
                 &self.grads,
             )?;
-            self.unscale.write(&stream, 1.0 / sc)?;
             scale_grads_skip_gpu(
                 &self.ctx,
                 &self.ctx.kernels,
@@ -1459,24 +1574,6 @@ impl Mamba2GpuTrainer {
                 &mut self.grads,
                 &self.unscale,
             )?;
-            self.sync("backward")?;
-            self.overflowed = self.overflow.read(&stream)? != 0;
-        }
-        self.sync("backward")?;
-        if let Some(d_input) = d_input {
-            let src = if identity_input {
-                &self.bwd.d_temp
-            } else {
-                &self.bwd.d_input
-            };
-            src.download(&stream, d_input)?;
-            self.sync("backward")?;
-            if let Some(sc) = scale {
-                let inv = 1.0 / sc;
-                for v in d_input.iter_mut() {
-                    *v *= inv;
-                }
-            }
         }
         Ok(())
     }
@@ -2350,6 +2447,41 @@ impl Mamba2GpuTrainer {
         self.apply_adamw_unchecked()
     }
 
+    /// Build the fused AdamW's chunk table over the layout, or rebuild it
+    /// when the optimizer settings it bakes in changed since: under the
+    /// reference's no-decay groups only the matrices decay.
+    fn ensure_adamw_plan(&mut self) -> Result<(), String> {
+        let key = AdamWPlanKey::of(&self.adamw);
+        if matches!(&self.multi_plan, Some((k, _)) if *k == key) {
+            return Ok(());
+        }
+        let (w_base, g_base) = (self.master.cached_ptr(), self.grads.cached_ptr());
+        let specs: Vec<AdamWTensorSpec> = self
+            .layout
+            .pairs(&self.template)
+            .into_iter()
+            .map(|(_, span, decays)| AdamWTensorSpec {
+                weight: at(w_base, span),
+                grad: at(g_base, span),
+                out: 0,
+                out_elt_bytes: 0,
+                out_is_f32: false,
+                len: span.len,
+                no_decay: !decays,
+            })
+            .collect();
+        let plan = build_multi_plan(
+            &self.ctx.stream,
+            &self.adamw,
+            g_base,
+            &specs,
+            self.adamw.reference_no_decay,
+            self.adamw.weight_decay,
+        )?;
+        self.multi_plan = Some((key, plan));
+        Ok(())
+    }
+
     fn apply_adamw_unchecked(&mut self) -> Result<bool, String> {
         if let Some(scaler) = self.scaler.as_mut() {
             scaler.update(self.overflowed);
@@ -2357,47 +2489,38 @@ impl Mamba2GpuTrainer {
                 return Ok(false);
             }
         }
-        let (_, bias_c1, bias_c2) = self.adamw.advance();
-        let (w_base, g_base) = (self.master.cached_ptr(), self.grads.cached_ptr());
-        let (m_base, v_base) = (self.adamw.m.cached_ptr(), self.adamw.v.cached_ptr());
-        let o = &self.adamw;
-        for (_, span, decays) in self.layout.pairs(&self.template) {
-            if span.len == 0 {
-                continue;
-            }
-            let wd = if decays || !o.reference_no_decay {
-                o.weight_decay
-            } else {
-                0.0
-            };
-            let (w, g, m, v) = (
-                at(w_base, span),
-                at(g_base, span),
-                at(m_base, span),
-                at(v_base, span),
-            );
-            let n = span.len as i64;
-            let mut bld = self
-                .ctx
-                .stream
-                .launch_builder(&self.ctx.kernels.adamw_step_f32);
-            bld.arg(&w);
-            bld.arg(&g);
-            bld.arg(&m);
-            bld.arg(&v);
-            bld.arg(&o.lr);
-            bld.arg(&o.beta1);
-            bld.arg(&o.beta2);
-            bld.arg(&o.eps);
-            bld.arg(&wd);
-            bld.arg(&bias_c1);
-            bld.arg(&bias_c2);
-            bld.arg(&n);
-            unsafe { bld.launch(crate::gpu::launch::grid_1d_wide(span.len)) }
-                .map_err(|e| format!("Mamba-2 AdamW: {e:?}"))?;
-        }
-        self.refresh_mirror()?;
+        self.prepare_adamw()?;
+        self.adamw_device(0)?;
         self.sync("AdamW")?;
         Ok(true)
+    }
+
+    /// The AdamW chunk table checked against the optimizer, the step
+    /// counted, and its bias corrections and learning rate written for the
+    /// device.
+    fn prepare_adamw(&mut self) -> Result<(), String> {
+        self.ensure_adamw_plan()?;
+        let (_, bias_c1, bias_c2) = self.adamw.advance();
+        self.bias
+            .write(&self.ctx.stream, bias_c1, bias_c2, self.adamw.lr)
+    }
+
+    /// The fused AdamW over every tensor, then the half copies' refresh.
+    /// `skip` is 0, or the f16 overflow flag, which leaves the weights and
+    /// moments as they are when set: the optimizer part of a captured
+    /// step.
+    fn adamw_device(&self, skip: u64) -> Result<(), String> {
+        let Some((_, plan)) = &self.multi_plan else {
+            return Err("the AdamW chunk table is missing".into());
+        };
+        step_multi(
+            &self.ctx,
+            self.ctx.kernels.adamw_step_multi.get(WeightDtype::F32),
+            plan,
+            &self.adamw,
+            self.bias.ptr(),
+            skip,
+        )?;
+        self.refresh_mirror()
     }
 }

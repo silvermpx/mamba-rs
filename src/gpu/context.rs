@@ -235,6 +235,13 @@ pub(crate) struct GemmRouteRecordingGuard<'a> {
 }
 
 impl GemmRouteRecordingGuard<'_> {
+    /// Let the recording outlive this borrow of the context, for a body
+    /// that needs the context's owner mutably;
+    /// [`GpuCtx::resume_gemm_route_recording`] takes it back.
+    pub(crate) fn detach(self) {
+        std::mem::forget(self);
+    }
+
     #[cfg(test)]
     pub(crate) fn finish(self) -> Result<CapturedGemmGraphPlan, String> {
         let recorder = self.ctx.take_gemm_route_recording()?;
@@ -916,21 +923,12 @@ impl GpuCtx {
         dims: &crate::mamba1::gpu::forward::GpuMambaDims,
         dtype: WeightDtype,
     ) -> Result<(), String> {
-        if matches!(dtype, WeightDtype::F32) {
-            return Ok(());
-        }
-        let max_dim = m1_mixed_graph_max_dim(dims);
-        self.ensure_half_staging(dims.bt() * max_dim * dtype.size_bytes())?;
-        if self.batch_invariant() {
-            let max_kn = (dims.d_model * 2 * dims.d_inner)
-                .max(dims.d_inner * dims.xdbl_dim)
-                .max(dims.dt_rank * dims.d_inner)
-                .max(dims.d_inner * dims.d_model)
-                .max(dims.mamba_input_dim * dims.d_model);
-            let elems = (dims.bt() * max_dim).max(max_kn);
-            self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))?;
-        }
-        Ok(())
+        let max_kn = (dims.d_model * 2 * dims.d_inner)
+            .max(dims.d_inner * dims.xdbl_dim)
+            .max(dims.dt_rank * dims.d_inner)
+            .max(dims.d_inner * dims.d_model)
+            .max(dims.mamba_input_dim * dims.d_model);
+        self.presize_train_gemm_scratch(dims.bt(), m1_mixed_graph_max_dim(dims), max_kn, dtype)
     }
 
     pub(crate) fn presize_mixed_graph_scratch_m3(
@@ -938,20 +936,37 @@ impl GpuCtx {
         dims: &crate::mamba3_siso::gpu::state::GpuMamba3Dims,
         dtype: WeightDtype,
     ) -> Result<(), String> {
-        if matches!(dtype, WeightDtype::F32) {
-            return Ok(());
-        }
         let max_dim = dims
             .d_model
             .max(dims.d_inner)
             .max(dims.in_proj_dim)
             .max(dims.mamba_input_dim);
-        self.ensure_half_staging(dims.bt() * max_dim * dtype.size_bytes())?;
+        let max_kn = (dims.d_model * dims.in_proj_dim)
+            .max(dims.d_inner * dims.d_model)
+            .max(dims.mamba_input_dim * dims.d_model);
+        self.presize_train_gemm_scratch(dims.bt(), max_dim, max_kn, dtype)
+    }
+
+    /// Size the half staging and the batch-invariant upcast scratch for
+    /// every GEMM of a training step before its first one: `rows`
+    /// activation rows, `max_width` the widest activation, `max_weight` the
+    /// largest weight's element count. Grown in the middle of a step
+    /// instead, they would move the operands the step's earlier GEMMs were
+    /// prepared with, and a graph captured after that step would find those
+    /// launches missing. Weights stored in f32 stage and upcast nothing.
+    pub(crate) fn presize_train_gemm_scratch(
+        &self,
+        rows: usize,
+        max_width: usize,
+        max_weight: usize,
+        dtype: WeightDtype,
+    ) -> Result<(), String> {
+        if dtype.storage() == WeightDtype::F32 {
+            return Ok(());
+        }
+        self.ensure_half_staging(rows * max_width * dtype.size_bytes())?;
         if self.batch_invariant() {
-            let max_kn = (dims.d_model * dims.in_proj_dim)
-                .max(dims.d_inner * dims.d_model)
-                .max(dims.mamba_input_dim * dims.d_model);
-            let elems = (dims.bt() * max_dim).max(max_kn);
+            let elems = (rows * max_width).max(max_weight);
             self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))?;
         }
         Ok(())
@@ -1242,6 +1257,34 @@ impl GpuCtx {
         let recording = self.begin_eager_gemm_route_recording()?;
         body()?;
         recording.finish_trace()
+    }
+
+    /// Take back a recording an owner-generic helper detached (see
+    /// [`GemmRouteRecordingGuard::detach`]); dropping the guard clears it.
+    pub(crate) fn resume_gemm_route_recording(&self) -> GemmRouteRecordingGuard<'_> {
+        GemmRouteRecordingGuard { ctx: self }
+    }
+
+    /// [`Self::record_eager_gemm_manifest`] for a body that needs the
+    /// context's owner mutably: `ctx_of` reaches the context from the
+    /// owner between the steps, so no borrow of it is held while the body
+    /// runs. The recording ends whatever the body returns.
+    pub(crate) fn record_owner_eager_gemm_manifest<T>(
+        owner: &mut T,
+        ctx_of: fn(&T) -> &GpuCtx,
+        body: impl FnOnce(&mut T) -> Result<(), String>,
+    ) -> Result<PreparedGemmCaptureManifest, String> {
+        ctx_of(owner).begin_eager_gemm_route_recording()?.detach();
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(owner)));
+        let recording = ctx_of(owner).resume_gemm_route_recording();
+        match ran {
+            Err(payload) => {
+                drop(recording);
+                std::panic::resume_unwind(payload)
+            }
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(())) => recording.finish_trace().map(|trace| trace.manifest()),
+        }
     }
 
     /// Run one ordinary eager body and return its capture manifest.

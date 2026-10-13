@@ -77,6 +77,18 @@
   bias entries where the model has the bias), dt_bias and A_log; MIMO's
   are SISO's. `GradRegionGeom` gains a third contiguous block
   (`c_off`, `c_len`) for the in_proj bias entries.
+- The Mamba-2 and MIMO trainers capture their training step as one CUDA
+  graph: `capture_graph`, `has_graph` and `drop_graph`, as on Mamba-1 and
+  SISO. The replay gives the eager step's bits in every precision,
+  including an f16 overflow, which the captured AdamW skips on the
+  device; the learning rate may change between replays. A step with an
+  open accumulation window runs eagerly, since it folds the window in, and
+  a change to an AdamW setting the capture baked in (the betas, epsilon,
+  weight decay, no-decay groups or moment buffers) refuses the replay
+  until the graph is captured again.
+- The Mamba-2 and MIMO AdamW runs as one fused launch over every tensor
+  with its bias corrections and learning rate on the device, per element
+  the arithmetic of the per-tensor kernel it replaces.
 
 ### Changed
 
