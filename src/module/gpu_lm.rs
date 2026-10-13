@@ -907,6 +907,9 @@ mod tied_head_capture_tests {
             scan_mode: ScanMode::Sequential,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
+            dt_rank: None,
+            proj_bias: false,
+            conv_bias: true,
         };
         let mut weights = MambaWeights::init(&cfg, D_MODEL, 0x9031);
         weights.input_proj_w.clear();
@@ -941,6 +944,9 @@ mod tied_head_capture_tests {
             scan_mode: ScanMode::Sequential,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
+            dt_rank: None,
+            proj_bias: false,
+            conv_bias: true,
         };
         let mut weights = MambaWeights::init(&cfg, D_MODEL, 0x5EED);
         weights.input_proj_w.clear();

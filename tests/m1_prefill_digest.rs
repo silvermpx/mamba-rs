@@ -93,6 +93,9 @@ fn print_m1_prefill_digests() {
             scan_mode: ScanMode::Parallel,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
+            dt_rank: None,
+            proj_bias: false,
+            conv_bias: true,
         };
         for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
             let (window, steps) = run(cfg, batch, t, dtype);

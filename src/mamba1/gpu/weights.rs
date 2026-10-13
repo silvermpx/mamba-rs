@@ -29,8 +29,13 @@ pub trait MambaLayerWeightsView {
     fn dt_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype);
     fn out_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype);
     // Always-f32
+    /// The in_proj and out_proj biases, `None` for a model without them.
+    fn in_proj_b(&self) -> Option<cudarc::driver::sys::CUdeviceptr>;
+    fn out_proj_b(&self) -> Option<cudarc::driver::sys::CUdeviceptr>;
     fn norm_weight(&self) -> cudarc::driver::sys::CUdeviceptr;
     fn conv1d_weight(&self) -> cudarc::driver::sys::CUdeviceptr;
+    /// The conv bias, or a null pointer for a model without one: the conv
+    /// kernels read a null bias as zero.
     fn conv1d_bias(&self) -> cudarc::driver::sys::CUdeviceptr;
     fn dt_proj_b(&self) -> cudarc::driver::sys::CUdeviceptr;
     fn a_log(&self) -> cudarc::driver::sys::CUdeviceptr;
@@ -51,9 +56,23 @@ pub trait MambaWeightsView {
     fn layer(&self, i: usize) -> &Self::Layer;
 }
 
+/// A tensor's pointer, `None` when the model does not have it.
+fn present(
+    len: usize,
+    ptr: cudarc::driver::sys::CUdeviceptr,
+) -> Option<cudarc::driver::sys::CUdeviceptr> {
+    (len > 0).then_some(ptr)
+}
+
 impl MambaLayerWeightsView for GpuMambaLayerWeights {
     fn in_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
         (self.in_proj_w.ptr(), WeightDtype::F32)
+    }
+    fn in_proj_b(&self) -> Option<cudarc::driver::sys::CUdeviceptr> {
+        present(self.in_proj_b.len(), self.in_proj_b.ptr())
+    }
+    fn out_proj_b(&self) -> Option<cudarc::driver::sys::CUdeviceptr> {
+        present(self.out_proj_b.len(), self.out_proj_b.ptr())
     }
     fn x_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
         (self.x_proj_w.ptr(), WeightDtype::F32)
@@ -71,7 +90,7 @@ impl MambaLayerWeightsView for GpuMambaLayerWeights {
         self.conv1d_weight.ptr()
     }
     fn conv1d_bias(&self) -> cudarc::driver::sys::CUdeviceptr {
-        self.conv1d_bias.ptr()
+        present(self.conv1d_bias.len(), self.conv1d_bias.ptr()).unwrap_or(0)
     }
     fn dt_proj_b(&self) -> cudarc::driver::sys::CUdeviceptr {
         self.dt_proj_b.ptr()
@@ -110,6 +129,12 @@ impl MambaLayerWeightsView for GpuMambaMixedLayerWeights {
     fn in_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
         (self.in_proj_w.ptr(), self.in_proj_w.dtype())
     }
+    fn in_proj_b(&self) -> Option<cudarc::driver::sys::CUdeviceptr> {
+        present(self.in_proj_b.len_elems(), self.in_proj_b.ptr())
+    }
+    fn out_proj_b(&self) -> Option<cudarc::driver::sys::CUdeviceptr> {
+        present(self.out_proj_b.len_elems(), self.out_proj_b.ptr())
+    }
     fn x_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
         (self.x_proj_w.ptr(), self.x_proj_w.dtype())
     }
@@ -126,7 +151,7 @@ impl MambaLayerWeightsView for GpuMambaMixedLayerWeights {
         self.conv1d_weight.ptr()
     }
     fn conv1d_bias(&self) -> cudarc::driver::sys::CUdeviceptr {
-        self.conv1d_bias.ptr()
+        present(self.conv1d_bias.len_elems(), self.conv1d_bias.ptr()).unwrap_or(0)
     }
     fn dt_proj_b(&self) -> cudarc::driver::sys::CUdeviceptr {
         self.dt_proj_b.ptr()
@@ -169,7 +194,10 @@ impl MambaWeightsView for GpuMambaMixedWeights {
 pub struct GpuMambaLayerWeights {
     pub norm_weight: WeightSlice,
     pub in_proj_w: WeightSlice,
+    /// Empty without `proj_bias`, as is `out_proj_b`.
+    pub in_proj_b: WeightSlice,
     pub conv1d_weight: WeightSlice,
+    /// Empty without `conv_bias`.
     pub conv1d_bias: WeightSlice,
     pub x_proj_w: WeightSlice,
     pub dt_proj_w: WeightSlice,
@@ -177,6 +205,7 @@ pub struct GpuMambaLayerWeights {
     pub a_log: WeightSlice,
     pub d_param: WeightSlice,
     pub out_proj_w: WeightSlice,
+    pub out_proj_b: WeightSlice,
 }
 
 /// GPU weights for the full Mamba backbone (inference — flat buffer).
@@ -204,14 +233,16 @@ impl GpuMambaWeights {
 
         let per_layer = d_model
             + d_model * 2 * d_inner
+            + cfg.in_proj_bias_len()
             + d_inner * d_conv
-            + d_inner
+            + cfg.conv_bias_len()
             + d_inner * xdbl_dim
             + dt_rank * d_inner
             + d_inner
             + d_inner * d_state
             + d_inner
-            + d_inner * d_model;
+            + d_inner * d_model
+            + cfg.out_proj_bias_len();
 
         // Use the CPU weights' actual lengths. For HF Mamba (identity_proj),
         // both input_proj_w and input_proj_b are empty; the formula must not
@@ -244,6 +275,7 @@ impl GpuMambaWeights {
             layers.push(GpuMambaLayerWeights {
                 norm_weight: ws!(&lw.norm_weight),
                 in_proj_w: ws!(&lw.in_proj_w),
+                in_proj_b: ws!(&lw.in_proj_b),
                 conv1d_weight: ws!(&lw.conv1d_weight),
                 conv1d_bias: ws!(&lw.conv1d_bias),
                 x_proj_w: ws!(&lw.x_proj_w),
@@ -252,6 +284,7 @@ impl GpuMambaWeights {
                 a_log: ws!(&lw.a_log),
                 d_param: ws!(&lw.d_param),
                 out_proj_w: ws!(&lw.out_proj_w),
+                out_proj_b: ws!(&lw.out_proj_b),
             });
         }
 
@@ -299,14 +332,16 @@ impl GpuMambaWeights {
 pub struct GpuMambaMixedLayerWeights {
     pub norm_weight: WeightSliceDyn,   // f32
     pub in_proj_w: WeightSliceDyn,     // bulk (bf16/f16)
+    pub in_proj_b: WeightSliceDyn,     // f32, empty without proj_bias
     pub conv1d_weight: WeightSliceDyn, // f32 (small, custom kernel reads directly)
-    pub conv1d_bias: WeightSliceDyn,   // f32
+    pub conv1d_bias: WeightSliceDyn,   // f32, empty without conv_bias
     pub x_proj_w: WeightSliceDyn,      // bulk
     pub dt_proj_w: WeightSliceDyn,     // bulk
     pub dt_proj_b: WeightSliceDyn,     // f32
     pub a_log: WeightSliceDyn,         // f32 (used in exp, critical)
     pub d_param: WeightSliceDyn,       // f32 (SSM skip, critical)
     pub out_proj_w: WeightSliceDyn,    // bulk
+    pub out_proj_b: WeightSliceDyn,    // f32, empty without proj_bias
 }
 
 pub struct GpuMambaMixedWeights {
@@ -339,9 +374,16 @@ impl GpuMambaMixedWeights {
         // bulk (per layer): in_proj_w + x_proj_w + dt_proj_w + out_proj_w
         let per_layer_bulk =
             d_model * 2 * d_inner + d_inner * xdbl_dim + dt_rank * d_inner + d_inner * d_model;
-        // f32 (per layer): norm + conv1d_w + conv1d_b + dt_proj_b + a_log + d_param
-        let per_layer_f32 =
-            d_model + d_inner * d_conv + d_inner + d_inner + d_inner * d_state + d_inner;
+        // f32 (per layer): norm + in_proj_b + conv1d_w + conv1d_b + dt_proj_b
+        // + a_log + d_param + out_proj_b
+        let per_layer_f32 = d_model
+            + cfg.in_proj_bias_len()
+            + d_inner * d_conv
+            + cfg.conv_bias_len()
+            + d_inner
+            + d_inner * d_state
+            + d_inner
+            + cfg.out_proj_bias_len();
 
         // Use actual CPU weight lengths — HF Mamba has empty input_proj_w/b
         // (identity_proj), while MambaBackbone::init populates both to d_model.
@@ -395,6 +437,7 @@ impl GpuMambaMixedWeights {
             layers.push(GpuMambaMixedLayerWeights {
                 norm_weight: alloc_f32(&lw.norm_weight)?,
                 in_proj_w: alloc_bulk(&lw.in_proj_w)?,
+                in_proj_b: alloc_f32(&lw.in_proj_b)?,
                 conv1d_weight: alloc_f32(&lw.conv1d_weight)?,
                 conv1d_bias: alloc_f32(&lw.conv1d_bias)?,
                 x_proj_w: alloc_bulk(&lw.x_proj_w)?,
@@ -403,6 +446,7 @@ impl GpuMambaMixedWeights {
                 a_log: alloc_f32(&lw.a_log)?,
                 d_param: alloc_f32(&lw.d_param)?,
                 out_proj_w: alloc_bulk(&lw.out_proj_w)?,
+                out_proj_b: alloc_f32(&lw.out_proj_b)?,
             });
         }
 
@@ -431,7 +475,10 @@ impl GpuMambaMixedWeights {
 pub struct GpuMambaTrainLayerWeights {
     pub norm_weight: GpuBuffer,
     pub in_proj_w: GpuBuffer,
+    /// Empty without `proj_bias`, as is `out_proj_b`.
+    pub in_proj_b: GpuBuffer,
     pub conv1d_weight: GpuBuffer,
+    /// Empty without `conv_bias`.
     pub conv1d_bias: GpuBuffer,
     pub x_proj_w: GpuBuffer,
     pub dt_proj_w: GpuBuffer,
@@ -439,6 +486,23 @@ pub struct GpuMambaTrainLayerWeights {
     pub a_log: GpuBuffer,
     pub d_param: GpuBuffer,
     pub out_proj_w: GpuBuffer,
+    pub out_proj_b: GpuBuffer,
+}
+
+impl GpuMambaTrainLayerWeights {
+    /// The in_proj bias, `None` for a model without projection biases.
+    pub fn in_proj_b_ptr(&self) -> Option<cudarc::driver::sys::CUdeviceptr> {
+        present(self.in_proj_b.len(), self.in_proj_b.cached_ptr())
+    }
+    /// The out_proj bias, `None` for a model without projection biases.
+    pub fn out_proj_b_ptr(&self) -> Option<cudarc::driver::sys::CUdeviceptr> {
+        present(self.out_proj_b.len(), self.out_proj_b.cached_ptr())
+    }
+    /// The conv bias, or a null pointer for a model without one: the conv
+    /// kernels read a null bias as zero.
+    pub fn conv1d_bias_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        present(self.conv1d_bias.len(), self.conv1d_bias.cached_ptr()).unwrap_or(0)
+    }
 }
 
 /// GPU training weights for the full Mamba backbone (per-tensor allocation).
@@ -460,6 +524,7 @@ impl GpuMambaTrainWeights {
             layers.push(GpuMambaTrainLayerWeights {
                 norm_weight: GpuBuffer::from_cpu(stream, &lw.norm_weight)?,
                 in_proj_w: GpuBuffer::from_cpu(stream, &lw.in_proj_w)?,
+                in_proj_b: GpuBuffer::from_cpu(stream, &lw.in_proj_b)?,
                 conv1d_weight: GpuBuffer::from_cpu(stream, &lw.conv1d_weight)?,
                 conv1d_bias: GpuBuffer::from_cpu(stream, &lw.conv1d_bias)?,
                 x_proj_w: GpuBuffer::from_cpu(stream, &lw.x_proj_w)?,
@@ -468,6 +533,7 @@ impl GpuMambaTrainWeights {
                 a_log: GpuBuffer::from_cpu(stream, &lw.a_log)?,
                 d_param: GpuBuffer::from_cpu(stream, &lw.d_param)?,
                 out_proj_w: GpuBuffer::from_cpu(stream, &lw.out_proj_w)?,
+                out_proj_b: GpuBuffer::from_cpu(stream, &lw.out_proj_b)?,
             });
         }
 
@@ -488,7 +554,10 @@ impl GpuMambaTrainWeights {
 pub struct GpuMambaLayerGrads {
     pub norm_weight: GradSlice,
     pub in_proj_w: GradSlice,
+    /// Empty without `proj_bias`, as is `out_proj_b`.
+    pub in_proj_b: GradSlice,
     pub conv1d_weight: GradSlice,
+    /// Empty without `conv_bias`.
     pub conv1d_bias: GradSlice,
     pub x_proj_w: GradSlice,
     pub dt_proj_w: GradSlice,
@@ -496,6 +565,18 @@ pub struct GpuMambaLayerGrads {
     pub a_log: GradSlice,
     pub d_param: GradSlice,
     pub out_proj_w: GradSlice,
+    pub out_proj_b: GradSlice,
+}
+
+impl GpuMambaLayerGrads {
+    /// The in_proj bias gradient, `None` for a model without the bias.
+    pub fn in_proj_b_opt(&self) -> Option<&GradSlice> {
+        (!self.in_proj_b.is_empty()).then_some(&self.in_proj_b)
+    }
+    /// The out_proj bias gradient, `None` for a model without the bias.
+    pub fn out_proj_b_opt(&self) -> Option<&GradSlice> {
+        (!self.out_proj_b.is_empty()).then_some(&self.out_proj_b)
+    }
 }
 
 /// Flat gradient buffer with GradSlice views for all Mamba parameters.
@@ -546,8 +627,23 @@ impl GpuMambaGrads {
         } else {
             (0, 0)
         };
-        let per_layer =
-            dm + dm * 2 * di + di * dc + di + di * xd + dr * di + di + di * ds + di + di * dm;
+        let (ipb, cb, opb) = (
+            cfg.in_proj_bias_len(),
+            cfg.conv_bias_len(),
+            cfg.out_proj_bias_len(),
+        );
+        let per_layer = dm
+            + dm * 2 * di
+            + ipb
+            + di * dc
+            + cb
+            + di * xd
+            + dr * di
+            + di
+            + di * ds
+            + di
+            + di * dm
+            + opb;
         let total = ipw_len + ipb_len + cfg.n_layers * per_layer + dm;
 
         let flat = GpuBuffer::zeros(stream, total)?;
@@ -571,14 +667,16 @@ impl GpuMambaGrads {
             layers.push(GpuMambaLayerGrads {
                 norm_weight: gs!(dm),
                 in_proj_w: gs!(dm * 2 * di),
+                in_proj_b: gs!(ipb),
                 conv1d_weight: gs!(di * dc),
-                conv1d_bias: gs!(di),
+                conv1d_bias: gs!(cb),
                 x_proj_w: gs!(di * xd),
                 dt_proj_w: gs!(dr * di),
                 dt_proj_b: gs!(di),
                 a_log: gs!(di * ds),
                 d_param: gs!(di),
                 out_proj_w: gs!(di * dm),
+                out_proj_b: gs!(opb),
             });
         }
 

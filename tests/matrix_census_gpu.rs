@@ -422,6 +422,19 @@ fn configs() -> Vec<Cfg> {
             bcdt_rms_eps: Some(1e-6),
             ..MambaConfig::default()
         }),
+        // Mamba-1 with in_proj and out_proj biases, without the conv bias,
+        // and with a dt rank of its own.
+        Cfg::M1(MambaConfig {
+            d_model: 24,
+            d_state: 8,
+            d_conv: 4,
+            expand: 2,
+            n_layers: 2,
+            dt_rank: Some(5),
+            proj_bias: true,
+            conv_bias: false,
+            ..MambaConfig::default()
+        }),
         Cfg::M1(MambaConfig {
             d_model: 33,
             d_state: 7,

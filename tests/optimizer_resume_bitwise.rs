@@ -254,6 +254,9 @@ fn m1_resume_with_recurrent_state_is_bit_continuous() {
             scan_mode: mamba_rs::config::ScanMode::Sequential,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
+            dt_rank: None,
+            proj_bias: false,
+            conv_bias: true,
         }
     }
     fn m1_weights(c: &MambaConfig) -> MambaWeights {

@@ -191,6 +191,7 @@ fn train_weights_from_inference(w: &MambaWeights) -> TrainMambaWeights {
             .map(|lw| TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
+                in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
                 conv1d_bias: lw.conv1d_bias.clone(),
                 x_proj_w: lw.x_proj_w.clone(),
@@ -199,6 +200,7 @@ fn train_weights_from_inference(w: &MambaWeights) -> TrainMambaWeights {
                 a_log: lw.a_log.clone(),
                 d_param: lw.d_param.clone(),
                 out_proj_w: lw.out_proj_w.clone(),
+                out_proj_b: lw.out_proj_b.clone(),
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
@@ -216,6 +218,7 @@ fn inference_weights_from_train(tw: &TrainMambaWeights, template: &MambaWeights)
             .map(|(tlw, _)| mamba_rs::mamba1::MambaLayerWeights {
                 norm_weight: tlw.norm_weight.clone(),
                 in_proj_w: tlw.in_proj_w.clone(),
+                in_proj_b: tlw.in_proj_b.clone(),
                 conv1d_weight: tlw.conv1d_weight.clone(),
                 conv1d_bias: tlw.conv1d_bias.clone(),
                 x_proj_w: tlw.x_proj_w.clone(),
@@ -225,6 +228,7 @@ fn inference_weights_from_train(tw: &TrainMambaWeights, template: &MambaWeights)
                 a_neg: tlw.a_log.iter().map(|v| -v.exp()).collect(),
                 d_param: tlw.d_param.clone(),
                 out_proj_w: tlw.out_proj_w.clone(),
+                out_proj_b: tlw.out_proj_b.clone(),
             })
             .collect(),
         norm_f_weight: tw.norm_f_weight.clone(),

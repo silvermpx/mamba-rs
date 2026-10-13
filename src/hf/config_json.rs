@@ -15,7 +15,8 @@ struct RawConfig {
     num_hidden_layers: Option<usize>,
     state_size: Option<usize>,
     conv_kernel: Option<usize>,
-    time_step_rank: Option<usize>,
+    // A number, or "auto" for the reference rank.
+    time_step_rank: Option<serde_json::Value>,
     // Original fields
     d_model: Option<usize>,
     n_layer: Option<usize>,
@@ -56,8 +57,8 @@ struct RawConfig {
 }
 
 /// The mixer arguments of an original-format config. A Mamba-1 checkpoint
-/// keeps its own `d_state`, `d_conv`, `expand` and `dt_rank` here, so they
-/// are read here before the top-level fields.
+/// keeps its own `d_state`, `d_conv`, `expand`, `dt_rank` and bias flags
+/// here, so they are read here before the top-level fields.
 #[derive(Deserialize)]
 struct RawSsmCfg {
     layer: Option<String>,
@@ -66,6 +67,8 @@ struct RawSsmCfg {
     d_conv: Option<usize>,
     expand: Option<usize>,
     dt_rank: Option<serde_json::Value>,
+    bias: Option<bool>,
+    conv_bias: Option<bool>,
 }
 
 /// Parsed and validated Mamba config for HF loading.
@@ -79,6 +82,11 @@ pub struct HfMambaConfig {
     pub expand: usize,
     pub vocab_size: usize,
     pub tie_word_embeddings: bool,
+    /// The dt projection's rank when the config states one other than the
+    /// reference's `d_model.div_ceil(16)`.
+    pub dt_rank: Option<usize>,
+    /// Biases on in_proj and out_proj (x_proj never has one, dt_proj
+    /// always does).
     pub use_bias: bool,
     pub use_conv_bias: bool,
     /// RMSNorm epsilon from the HF config. `1e-5` is the state-spaces
@@ -178,24 +186,18 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
         }
         None => ssm_cfg.and_then(|c| c.expand).or(raw.expand).unwrap_or(2),
     };
-    if let Some(rank) = ssm_cfg.and_then(|c| c.dt_rank.as_ref()) {
-        let expected = d_model.div_ceil(16);
-        let explicit = match rank {
-            serde_json::Value::String(s) if s == "auto" => None,
-            serde_json::Value::Number(n) => n.as_u64().map(|v| v as usize),
-            other => {
-                return Err(format!(
-                    "config.json: ssm_cfg.dt_rank {other} is not understood"
-                ));
-            }
-        };
-        if explicit.is_some_and(|r| r != expected) {
-            return Err(format!(
-                "ssm_cfg.dt_rank {rank} differs from d_model.div_ceil(16) = {expected}, \
-                 the only rank this build supports"
-            ));
-        }
+    // The original format states the rank as ssm_cfg.dt_rank, the HF one
+    // as time_step_rank. A rank equal to the reference's reads as it, so
+    // such a config builds the same model as one that says "auto".
+    let dt_rank = match (
+        ssm_cfg.and_then(|c| c.dt_rank.as_ref()),
+        &raw.time_step_rank,
+    ) {
+        (Some(rank), _) => explicit_rank(rank, "ssm_cfg.dt_rank")?,
+        (None, Some(rank)) => explicit_rank(rank, "time_step_rank")?,
+        (None, None) => None,
     }
+    .filter(|&rank| rank != d_model.div_ceil(16));
     let vocab_size = raw.vocab_size.ok_or("missing vocab_size in config.json")?;
     // The original format stores the UNPADDED vocabulary and rounds it up
     // before allocating the embedding and the head, so a checkpoint saved
@@ -211,15 +213,6 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
     } else {
         vocab_size
     };
-
-    if let Some(tsr) = raw.time_step_rank {
-        let expected = d_model.div_ceil(16);
-        if tsr != expected {
-            return Err(format!(
-                "time_step_rank mismatch: config has {tsr}, expected d_model.div_ceil(16) = {expected}"
-            ));
-        }
-    }
 
     // Accept either name. HF-native Mamba uses `rms_norm_eps`; some
     // older forks / Mamba2 configs use `layer_norm_epsilon`. Default
@@ -238,11 +231,32 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
             .tie_word_embeddings
             .or(raw.tie_embeddings)
             .unwrap_or(true),
-        use_bias: raw.use_bias.unwrap_or(false),
-        use_conv_bias: raw.use_conv_bias.unwrap_or(true),
+        dt_rank,
+        use_bias: ssm_cfg
+            .and_then(|c| c.bias)
+            .or(raw.use_bias)
+            .unwrap_or(false),
+        use_conv_bias: ssm_cfg
+            .and_then(|c| c.conv_bias)
+            .or(raw.use_conv_bias)
+            .unwrap_or(true),
         rms_norm_eps,
         bcdt_rms_eps,
     })
+}
+
+/// A dt rank as a config states it: a whole number, or "auto" for the
+/// reference rank.
+fn explicit_rank(rank: &serde_json::Value, key: &str) -> Result<Option<usize>, String> {
+    match rank {
+        serde_json::Value::String(s) if s == "auto" => Ok(None),
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .and_then(|r| usize::try_from(r).ok())
+            .map(Some)
+            .ok_or_else(|| format!("config.json: {key} {n} is not a whole rank")),
+        other => Err(format!("config.json: {key} {other} is not understood")),
+    }
 }
 
 /// The family a checkpoint directory's `config.json` names, without the
@@ -426,19 +440,45 @@ mod tests {
         assert_eq!(parse_config_json(m3s).unwrap().family, ModelFamily::Mamba3);
     }
 
+    /// A stated dt rank is the model's in either format; the reference's
+    /// own rank and "auto" read as the default, and a rank that is not a
+    /// whole number is refused.
     #[test]
-    fn test_time_step_rank_mismatch_err() {
-        let json = br#"{
-            "model_type": "mamba",
-            "hidden_size": 768,
-            "num_hidden_layers": 24,
-            "state_size": 16,
-            "conv_kernel": 4,
-            "vocab_size": 50280,
-            "time_step_rank": 999
-        }"#;
-        let err = parse_config_json(json).unwrap_err();
-        assert!(err.contains("time_step_rank mismatch"), "{err}");
+    fn stated_dt_ranks_are_read() {
+        let hf = |rank: &str| {
+            format!(
+                r#"{{"model_type":"mamba","hidden_size":768,"num_hidden_layers":24,
+                "state_size":16,"conv_kernel":4,"vocab_size":50280,"time_step_rank":{rank}}}"#
+            )
+        };
+        let rank = |json: &str| parse_config_json(json.as_bytes()).map(|c| c.dt_rank);
+        assert_eq!(rank(&hf("999")), Ok(Some(999)));
+        assert_eq!(rank(&hf("48")), Ok(None));
+        assert_eq!(rank(&hf(r#""auto""#)), Ok(None));
+        assert!(rank(&hf("2.5")).is_err());
+        assert!(rank(&hf(r#""wide""#)).is_err());
+        let original = r#"{"d_model":64,"n_layer":2,"vocab_size":100,"ssm_cfg":{"dt_rank":7}}"#;
+        assert_eq!(rank(original), Ok(Some(7)));
+    }
+
+    /// The projection and conv biases follow the format's own flags:
+    /// ssm_cfg.bias and ssm_cfg.conv_bias in the original one, use_bias and
+    /// use_conv_bias in the HF one.
+    #[test]
+    fn bias_flags_are_read_in_both_formats() {
+        let flags = |json: &[u8]| {
+            let c = parse_config_json(json).unwrap();
+            (c.use_bias, c.use_conv_bias)
+        };
+        let original = br#"{"d_model":64,"n_layer":2,"vocab_size":100,
+            "ssm_cfg":{"bias":true,"conv_bias":false}}"#;
+        assert_eq!(flags(original), (true, false));
+        let hf = br#"{"model_type":"mamba","hidden_size":64,"num_hidden_layers":2,
+            "state_size":8,"conv_kernel":4,"vocab_size":100,"use_bias":true,
+            "use_conv_bias":false}"#;
+        assert_eq!(flags(hf), (true, false));
+        let silent = br#"{"d_model":64,"n_layer":2,"vocab_size":100}"#;
+        assert_eq!(flags(silent), (false, true));
     }
 
     #[test]
@@ -487,10 +527,6 @@ mod tests {
             (
                 br#"{"d_model":64,"n_layer":2,"vocab_size":100,"attn_layer_idx":[0]}"#,
                 "attn_layer_idx",
-            ),
-            (
-                br#"{"d_model":64,"n_layer":2,"vocab_size":100,"ssm_cfg":{"dt_rank":7}}"#,
-                "dt_rank",
             ),
         ] {
             let err = parse_config_json(json).unwrap_err();

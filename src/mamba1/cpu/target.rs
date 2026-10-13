@@ -119,7 +119,7 @@ pub fn forward_mamba_target_step(
             &mut scratch.proj[..2 * di],
             &scratch.norm_buf[..dm],
             &lw.in_proj_w,
-            None,
+            super::bias(&lw.in_proj_b),
             dm,
             2 * di,
         );
@@ -136,7 +136,8 @@ pub fn forward_mamba_target_step(
 
         // Conv1d (T=1 cold state: just bias + x * weight[dc-1])
         for d in 0..di {
-            let val = lw.conv1d_bias[d] + scratch.x[d] * lw.conv1d_weight[d * dc + dc - 1];
+            let val = lw.conv1d_bias.get(d).copied().unwrap_or(0.0)
+                + scratch.x[d] * lw.conv1d_weight[d * dc + dc - 1];
             let sig = 1.0 / (1.0 + fast_exp_scalar(-val));
             scratch.x[d] = val * sig; // fused SiLU
         }
@@ -216,7 +217,7 @@ pub fn forward_mamba_target_step(
             &mut output[..dm],
             &scratch.y[..di],
             &lw.out_proj_w,
-            None,
+            super::bias(&lw.out_proj_b),
             di,
             dm,
         );
@@ -379,7 +380,7 @@ pub fn forward_mamba_target_sequence(
                 &mut scratch.proj[..2 * di],
                 &scratch.norm_buf[..dm],
                 &lw.in_proj_w,
-                None,
+                super::bias(&lw.in_proj_b),
                 dm,
                 2 * di,
             );
@@ -403,7 +404,7 @@ pub fn forward_mamba_target_sequence(
                     }
                     cs[base + dc - 1] = scratch.x[d];
                     // Dot product
-                    let mut val = lw.conv1d_bias[d];
+                    let mut val = lw.conv1d_bias.get(d).copied().unwrap_or(0.0);
                     for k in 0..dc {
                         val += cs[base + k] * lw.conv1d_weight[base + k];
                     }
@@ -483,7 +484,7 @@ pub fn forward_mamba_target_sequence(
                 &mut scratch.temporal[..dm],
                 &scratch.y[..di],
                 &lw.out_proj_w,
-                None,
+                super::bias(&lw.out_proj_b),
                 di,
                 dm,
             );

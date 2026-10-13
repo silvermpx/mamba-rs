@@ -9,6 +9,7 @@
 //! panels ([`MambaPackedLinears`]), the same bits as the row-major product
 //! without a BLAS, faster on the weights a decode streams from memory.
 
+use super::bias;
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::state::MambaLayerState;
 use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
@@ -179,12 +180,12 @@ fn layer_step(
     let xdbl_dim = cfg.xdbl_dim();
     let dtype = scratch.dtype;
 
-    // in_proj: [d_model] -> [2*d_inner] (no bias)
+    // in_proj: [d_model] -> [2*d_inner]
     scratch.gemm.row(
         dtype,
         (&mut scratch.proj[..2 * d_inner], &input[..d_model]),
         (&lw.in_proj_w, lp.map(|p| &p.in_proj)),
-        None,
+        bias(&lw.in_proj_b),
     );
 
     // Split x + gate SiLU
@@ -204,7 +205,7 @@ fn layer_step(
             val += state.conv_state[state_off + k] * lw.conv1d_weight[d * d_conv + k];
         }
         val += scratch.x[d] * lw.conv1d_weight[d * d_conv + hist];
-        val += lw.conv1d_bias[d];
+        val += lw.conv1d_bias.get(d).copied().unwrap_or(0.0);
 
         // Shift state left + insert new
         for k in 0..hist.saturating_sub(1) {
@@ -289,7 +290,7 @@ fn layer_step(
         dtype,
         (&mut output[..d_model], &scratch.y[..d_inner]),
         (&lw.out_proj_w, lp.map(|p| &p.out_proj)),
-        None,
+        bias(&lw.out_proj_b),
     );
 }
 

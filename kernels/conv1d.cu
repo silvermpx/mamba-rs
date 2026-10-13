@@ -7,6 +7,13 @@
 
 #include "_typed_prelude.cuh"
 
+// A model without a conv bias passes a null bias pointer: its channels
+// start from zero, exactly as a zero bias would start them.
+template <typename I>
+__device__ __forceinline__ float conv_bias_at(const float* __restrict__ bias, I d) {
+    return bias != nullptr ? bias[d] : 0.0f;
+}
+
 // Conv1d step forward (T=1): shift register + depthwise dot product
 // state[b, d, 0..d_conv-1] = state[b, d, 1..d_conv]
 // state[b, d, d_conv-1] = new_x[b, d]
@@ -58,7 +65,7 @@ extern "C" __global__ void NAME(                                           \
         state[state_base + 1] = s1;                                        \
         state[state_base + 2] = s2;                                        \
         state[state_base + 3] = s3;                                        \
-        float sum = bias[d];                                               \
+        float sum = conv_bias_at(bias, d);                                 \
         sum += s0 * weight[d * 4];                                         \
         sum += s1 * weight[d * 4 + 1];                                     \
         sum += s2 * weight[d * 4 + 2];                                     \
@@ -71,7 +78,7 @@ extern "C" __global__ void NAME(                                           \
         state[state_base + k] = state[state_base + k + 1];                 \
     }                                                                      \
     state[state_base + d_conv - 1] = to_f(new_x[x_idx]);                   \
-    float sum = bias[d];                                                   \
+    float sum = conv_bias_at(bias, d);                                     \
     for (int k = 0; k < d_conv; k++) {                                     \
         sum += state[state_base + k] * weight[d * d_conv + k];             \
     }                                                                      \
@@ -223,7 +230,7 @@ extern "C" __global__ void NAME(                                              \
             win[k] = to_f(x_branch[(b * T_len + th) * x_stride + d]);         \
         }                                                                    \
     }                                                                        \
-    float bias_d = bias[d];                                                  \
+    float bias_d = conv_bias_at(bias, d);                                    \
     if (d_conv == 4) {                                                       \
         float win4[4] = {win[0], win[1], win[2], win[3]};                    \
         float w4[4];                                                         \
@@ -295,7 +302,7 @@ extern "C" __global__ void NAME(                                              \
             win[k] = to_f(x_branch[(b * T_len + th) * x_stride + d]);         \
         }                                                                    \
     }                                                                        \
-    float bias_d = bias[d];                                                  \
+    float bias_d = conv_bias_at(bias, d);                                    \
     if (d_conv == 4) {                                                       \
         float win4[4] = {win[0], win[1], win[2], win[3]};                    \
         float w4[4];                                                         \
@@ -464,7 +471,7 @@ extern "C" __global__ void NAME(                                              \
     IDX init_base = (b * d_inner + d) * d_conv;                               \
     int carry_len = d_conv - 1;                                               \
     float local_d_bias = 0.0f;                                                \
-    float bias_d = bias[d];                                                   \
+    float bias_d = conv_bias_at(bias, d);                                     \
     /* The window at step ts holds x[ts - d_conv + 1 + k]; a negative         \
        index reads the carry-in state past its first slot. */                 \
     int ts_top = t_end + carry_len - 1;                                       \
@@ -553,7 +560,7 @@ extern "C" __global__ void NAME(                                               \
     const long long state_base = ((long long)b * d_inner + d) * d_conv;       \
     const long long x_base = (long long)b * T_len;                            \
     const float* w = weight + (long long)d * d_conv;                          \
-    const float bias_d = bias[d];                                             \
+    const float bias_d = conv_bias_at(bias, d);                               \
     for (int t = t0; t < t_end; t++) {                                        \
         float val = bias_d;                                                   \
         for (int k = 0; k < d_conv; k++) {                                    \
@@ -612,7 +619,7 @@ extern "C" __global__ void conv1d_bwd_dco_##SUFFIX(                           \
         const long long b = bt / T_;                                          \
         const long long init_base = (b * d_inner + d) * d_conv;               \
         const float* w = weight + (long long)d * d_conv;                      \
-        float val = bias[d];                                                  \
+        float val = conv_bias_at(bias, d);                                    \
         for (int k = 0; k < d_conv; k++) {                                    \
             const int tx = t - d_conv + 1 + k;                                \
             const float xv = tx >= 0                                          \

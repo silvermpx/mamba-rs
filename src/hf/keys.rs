@@ -40,6 +40,7 @@ pub fn remap_m1_hf_key(hf_key: &str) -> RemappedKey {
 
         let field = match suffix {
             "mixer.in_proj.weight" => "in_proj_w",
+            "mixer.in_proj.bias" => "in_proj_b",
             "mixer.conv1d.weight" => "conv1d_weight",
             "mixer.conv1d.bias" => "conv1d_bias",
             "mixer.x_proj.weight" => "x_proj_w",
@@ -48,6 +49,7 @@ pub fn remap_m1_hf_key(hf_key: &str) -> RemappedKey {
             "mixer.A_log" => "a_log",
             "mixer.D" => "d_param",
             "mixer.out_proj.weight" => "out_proj_w",
+            "mixer.out_proj.bias" => "out_proj_b",
             "norm.weight" => "norm_weight",
             _ => return RemappedKey::Unknown,
         };

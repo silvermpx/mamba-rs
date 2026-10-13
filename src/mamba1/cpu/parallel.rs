@@ -575,6 +575,7 @@ mod tests {
         TrainMambaLayerWeights {
             norm_weight: (0..d_model).map(|_| 0.8 + r().abs()).collect(),
             in_proj_w: (0..d_model * 2 * d_inner).map(|_| r()).collect(),
+            in_proj_b: Vec::new(),
             conv1d_weight: (0..d_inner * d_conv).map(|_| r()).collect(),
             conv1d_bias: (0..d_inner).map(|_| r()).collect(),
             x_proj_w: (0..d_inner * xdbl_dim).map(|_| r()).collect(),
@@ -583,6 +584,7 @@ mod tests {
             a_log: (0..d_inner * d_state).map(|_| -1.0 + r() * 0.5).collect(),
             d_param: (0..d_inner).map(|_| r()).collect(),
             out_proj_w: (0..d_inner * d_model).map(|_| r()).collect(),
+            out_proj_b: Vec::new(),
         }
     }
 
@@ -1021,6 +1023,7 @@ mod tests {
             };
             check("norm_weight", &sl.norm_weight, &pl.norm_weight);
             check("in_proj_w", &sl.in_proj_w, &pl.in_proj_w);
+            check("in_proj_b", &sl.in_proj_b, &pl.in_proj_b);
             check("conv1d_weight", &sl.conv1d_weight, &pl.conv1d_weight);
             check("conv1d_bias", &sl.conv1d_bias, &pl.conv1d_bias);
             check("x_proj_w", &sl.x_proj_w, &pl.x_proj_w);
@@ -1029,6 +1032,7 @@ mod tests {
             check("a_log", &sl.a_log, &pl.a_log);
             check("d_param", &sl.d_param, &pl.d_param);
             check("out_proj_w", &sl.out_proj_w, &pl.out_proj_w);
+            check("out_proj_b", &sl.out_proj_b, &pl.out_proj_b);
         }
     }
 
@@ -1155,6 +1159,7 @@ mod tests {
         for layer in &g.layers {
             out.extend_from_slice(&layer.norm_weight);
             out.extend_from_slice(&layer.in_proj_w);
+            out.extend_from_slice(&layer.in_proj_b);
             out.extend_from_slice(&layer.conv1d_weight);
             out.extend_from_slice(&layer.conv1d_bias);
             out.extend_from_slice(&layer.x_proj_w);
@@ -1163,6 +1168,7 @@ mod tests {
             out.extend_from_slice(&layer.a_log);
             out.extend_from_slice(&layer.d_param);
             out.extend_from_slice(&layer.out_proj_w);
+            out.extend_from_slice(&layer.out_proj_b);
         }
         out
     }

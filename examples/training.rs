@@ -40,6 +40,7 @@ fn main() {
             .map(|lw| mamba_rs::train::weights::TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
+                in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
                 conv1d_bias: lw.conv1d_bias.clone(),
                 x_proj_w: lw.x_proj_w.clone(),
@@ -48,6 +49,7 @@ fn main() {
                 a_log: lw.a_log.clone(),
                 d_param: lw.d_param.clone(),
                 out_proj_w: lw.out_proj_w.clone(),
+                out_proj_b: lw.out_proj_b.clone(),
             })
             .collect(),
         norm_f_weight: inf_weights.norm_f_weight.clone(),

@@ -141,6 +141,7 @@ impl MambaBackbone {
     /// except the projection's, which it requires, and the `a_neg`
     /// refresh the SSM reads.
     fn without_projection(cfg: MambaConfig, mut weights: MambaWeights) -> Result<Self, String> {
+        cfg.validate()?;
         if weights.layers.len() != cfg.n_layers {
             return Err(format!(
                 "expected {} layers, got {}",
@@ -165,14 +166,16 @@ impl MambaBackbone {
             };
             check("norm_weight", lw.norm_weight.len(), d)?;
             check("in_proj_w", lw.in_proj_w.len(), d * 2 * di)?;
+            check("in_proj_b", lw.in_proj_b.len(), cfg.in_proj_bias_len())?;
             check("conv1d_weight", lw.conv1d_weight.len(), di * dc)?;
-            check("conv1d_bias", lw.conv1d_bias.len(), di)?;
+            check("conv1d_bias", lw.conv1d_bias.len(), cfg.conv_bias_len())?;
             check("x_proj_w", lw.x_proj_w.len(), di * xd)?;
             check("dt_proj_w", lw.dt_proj_w.len(), dr * di)?;
             check("dt_proj_b", lw.dt_proj_b.len(), di)?;
             check("a_log", lw.a_log.len(), di * ds)?;
             check("d_param", lw.d_param.len(), di)?;
             check("out_proj_w", lw.out_proj_w.len(), di * d)?;
+            check("out_proj_b", lw.out_proj_b.len(), cfg.out_proj_bias_len())?;
         }
         if weights.norm_f_weight.len() != d {
             return Err(format!(

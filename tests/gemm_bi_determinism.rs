@@ -54,6 +54,9 @@ fn cfg() -> MambaConfig {
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     }
 }
 
@@ -64,6 +67,7 @@ fn flat_weights(w: &MambaWeights) -> Vec<f32> {
     for l in &w.layers {
         out.extend_from_slice(&l.norm_weight);
         out.extend_from_slice(&l.in_proj_w);
+        out.extend_from_slice(&l.in_proj_b);
         out.extend_from_slice(&l.conv1d_weight);
         out.extend_from_slice(&l.conv1d_bias);
         out.extend_from_slice(&l.x_proj_w);
@@ -72,6 +76,7 @@ fn flat_weights(w: &MambaWeights) -> Vec<f32> {
         out.extend_from_slice(&l.a_log);
         out.extend_from_slice(&l.d_param);
         out.extend_from_slice(&l.out_proj_w);
+        out.extend_from_slice(&l.out_proj_b);
     }
     out.extend_from_slice(&w.norm_f_weight);
     out

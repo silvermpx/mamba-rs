@@ -62,6 +62,9 @@ mod cuda_example {
             scan_mode: mamba_rs::config::ScanMode::Sequential,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
+            dt_rank: None,
+            proj_bias: false,
+            conv_bias: true,
         };
         let input_dim = cfg.d_model;
         let batch = 2;

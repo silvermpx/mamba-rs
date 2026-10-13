@@ -144,7 +144,7 @@ pub fn forward_mamba_layer_batched(
     scratch.gemm.forward(
         lane,
         (&mut scratch.proj_flat, &scratch.post_norm_flat),
-        (&layer_w.in_proj_w, None),
+        (&layer_w.in_proj_w, super::bias(&layer_w.in_proj_b)),
         (seq_len, dm, 2 * di),
     );
 
@@ -212,7 +212,7 @@ pub fn forward_mamba_layer_batched(
             let uf = t * di;
             for d in 0..di {
                 let base = d * dc;
-                let mut val = layer_w.conv1d_bias[d];
+                let mut val = layer_w.conv1d_bias.get(d).copied().unwrap_or(0.0);
                 for k in 0..dc {
                     val += conv_state[base + k] * layer_w.conv1d_weight[base + k];
                 }
@@ -336,7 +336,7 @@ pub fn forward_mamba_layer_batched(
     scratch.gemm.forward(
         lane,
         (&mut scratch.out_flat, &scratch.gated_flat),
-        (&layer_w.out_proj_w, None),
+        (&layer_w.out_proj_w, super::bias(&layer_w.out_proj_b)),
         (seq_len, di, dm),
     );
 
@@ -382,6 +382,7 @@ pub fn forward_mamba_backbone_batched(
     scratch: &mut PhaseScratch,
     dims: &MambaDims,
 ) {
+    super::assert_dims_fit(dims, mamba_w);
     let conv_states = &mut *state.conv;
     let ssm_states = &mut *state.ssm;
     let a_neg_all = state.a_neg;

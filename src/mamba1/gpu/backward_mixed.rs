@@ -60,6 +60,7 @@ use super::forward_mixed::{
 use super::mixer_norms::{NormBackward, launch_pack_xdbl_norm_bwd};
 use super::weights::{
     GpuMambaGrads, GpuMambaLayerGrads, GpuMambaMixedLayerWeights, GpuMambaMixedWeights,
+    MambaLayerWeightsView,
 };
 use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_ex_backward_dx_typed,
@@ -71,6 +72,39 @@ use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm, launch
 use cudarc::driver::PushKernelArg;
 
 // ---------------------------------------------------------------------------
+
+/// `db[i] += sum over rows of dy[row, i]` for a `dy` of `dtype`, into an f32
+/// master grad: one block per bias element, no atomics.
+fn reduce_bias(
+    ctx: &GpuCtx,
+    dtype: WeightDtype,
+    (db, dy): (
+        cudarc::driver::sys::CUdeviceptr,
+        cudarc::driver::sys::CUdeviceptr,
+    ),
+    (rows, n): (usize, usize),
+    what: &str,
+) -> Result<(), String> {
+    let rows_i = rows as i32;
+    let n_i = n as i32;
+    let mut bld = ctx
+        .stream
+        .launch_builder(ctx.kernels.reduce_bias_typed.get(dtype));
+    bld.arg(&db);
+    bld.arg(&dy);
+    bld.arg(&rows_i);
+    bld.arg(&n_i);
+    // Threads sum over the rows; shared memory holds one partial per thread.
+    let threads = 256u32;
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (n as u32, 1, 1),
+        block_dim: (threads, 1, 1),
+        shared_mem_bytes: (threads as usize * std::mem::size_of::<f32>()) as u32,
+    };
+    unsafe { bld.launch(cfg) }
+        .map(|_| ())
+        .map_err(|e| format!("reduce_bias {what}: {e:?}"))
+}
 
 /// Per-layer bundle for the M1 mixed backward: the layer's master-grad
 /// slots, saved activations, compute weights, and gradient-flow schedule.
@@ -160,6 +194,17 @@ pub fn gpu_backward_mamba_layer_mixed(
         di,
         dm,
     )?;
+    // out_proj bias grad: the f32 gradient entering the layer summed over
+    // (b, t), as the CPU lane sums it.
+    if let Some(db) = d_lw.out_proj_b_opt() {
+        reduce_bias(
+            ctx,
+            WeightDtype::F32,
+            (db.ptr(), d_temporal.cached_ptr()),
+            (bt, dm),
+            "out_proj",
+        )?;
+    }
     // dX[bt, di] = d_out_flat[bt, dm] @ out_proj_w^T[dm, di]
     gpu_gemm_ex_backward_dx_typed(
         ctx,
@@ -535,26 +580,13 @@ pub fn gpu_backward_mamba_layer_mixed(
     )?;
     // dt_proj bias grad — typed reduction of d_delta_raw over (b, t) into
     // f32 d_dt_proj_b master grad.
-    {
-        let bt_i = bt as i32;
-        let di_i = di as i32;
-        let mut bld = ctx.stream.launch_builder(k.reduce_bias_typed.get(dtype));
-        let db = d_lw.dt_proj_b.ptr();
-        let dy = scratch.d_delta_raw.cached_ptr();
-        bld.arg(&db);
-        bld.arg(&dy);
-        bld.arg(&bt_i);
-        bld.arg(&di_i);
-        // One block per bias index, threads sum over bt; shared mem sized by
-        // threads-per-block (grid_1d spawns 256 threads/block).
-        let threads = 256u32;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (di as u32, 1, 1),
-            block_dim: (threads, 1, 1),
-            shared_mem_bytes: (threads as usize * std::mem::size_of::<f32>()) as u32,
-        };
-        unsafe { bld.launch(cfg) }.map_err(|e| format!("reduce_bias dt_proj: {e:?}"))?;
-    }
+    reduce_bias(
+        ctx,
+        dtype,
+        (d_lw.dt_proj_b.ptr(), scratch.d_delta_raw.cached_ptr()),
+        (bt, di),
+        "dt_proj",
+    )?;
     // One-kernel typed d_xdbl assembly: dt | B | C ranges tile the row.
     // With FalconMamba's norms the assembly takes the gradient back through
     // them and stores it once.
@@ -677,7 +709,7 @@ pub fn gpu_backward_mamba_layer_mixed(
                 x: (acts.proj.cached_ptr(), 2 * di),
                 conv_init: acts.conv_states.cached_ptr(),
                 weight: lw.conv1d_weight.ptr(),
-                bias: lw.conv1d_bias.ptr(),
+                bias: lw.conv1d_bias(),
                 dco: scratch.conv_dco.cached_ptr(),
             },
             (b, t, di, d_conv),
@@ -703,8 +735,9 @@ pub fn gpu_backward_mamba_layer_mixed(
             unsafe { bld.launch(cfg) }
                 .map_err(|e| format!("conv tap gradient reduce typed: {e:?}"))?;
         }
-        // Stage 2b: reduce bias partials [B, di] → d_lw.conv1d_bias.
-        {
+        // Stage 2b: reduce bias partials [B, di] → d_lw.conv1d_bias, for a
+        // model that has the bias.
+        if !d_lw.conv1d_bias.is_empty() {
             let block_dim = (b as u32).next_power_of_two().clamp(32, 256);
             let accumulate_i: i32 = 1;
             let p = d_lw.conv1d_bias.ptr();
@@ -744,6 +777,16 @@ pub fn gpu_backward_mamba_layer_mixed(
         dm,
         2 * di,
     )?;
+    // in_proj bias grad: the typed d_proj summed over (b, t).
+    if let Some(db) = d_lw.in_proj_b_opt() {
+        reduce_bias(
+            ctx,
+            dtype,
+            (db.ptr(), scratch.d_proj.cached_ptr()),
+            (bt, 2 * di),
+            "in_proj",
+        )?;
+    }
     // in_proj dX — typed GemmEx into d_norm (feeds rmsnorm_bwd_f32in as dy).
     gpu_gemm_ex_backward_dx_typed(
         ctx,
@@ -964,25 +1007,13 @@ pub fn gpu_backward_mamba_backbone_mixed(
         }
         // db: typed accumulating reduction of dY over (b, t) into the f32
         // grad slice (deterministic — one block per bias index, no atomics).
-        {
-            let bt_i = bt as i32;
-            let dm_i = dm as i32;
-            let mut bld = ctx
-                .stream
-                .launch_builder(ctx.kernels.reduce_bias_typed.get(dtype));
-            let db = d_mamba.input_proj_b.ptr();
-            bld.arg(&db);
-            bld.arg(&dy_ptr);
-            bld.arg(&bt_i);
-            bld.arg(&dm_i);
-            let threads = 256u32;
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (dm as u32, 1, 1),
-                block_dim: (threads, 1, 1),
-                shared_mem_bytes: (threads as usize * std::mem::size_of::<f32>()) as u32,
-            };
-            unsafe { bld.launch(cfg) }.map_err(|e| format!("reduce_bias input_proj: {e:?}"))?;
-        }
+        reduce_bias(
+            ctx,
+            dtype,
+            (d_mamba.input_proj_b.ptr(), dy_ptr),
+            (bt, dm),
+            "input_proj",
+        )?;
         // dW: saved typed inputs^T @ dY, accumulated into the f32 grad
         // slice (bi-deterministic or cuBLAS, routed inside the helper).
         gpu_gemm_bi_backward_dw_grad_typed(

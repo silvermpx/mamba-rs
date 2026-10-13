@@ -503,7 +503,7 @@ pub fn gpu_forward_mamba_layer(
         &mut acts.proj,
         &acts.post_norm,
         lw.in_proj_w.cached_ptr(),
-        None,
+        lw.in_proj_b_ptr(),
         (bt, dm, 2 * di),
     )?;
 
@@ -524,7 +524,7 @@ pub fn gpu_forward_mamba_layer(
             saved: acts.conv_states.cached_ptr(),
             x: (acts.proj.cached_ptr(), 2 * di),
             weight: lw.conv1d_weight.cached_ptr(),
-            bias: lw.conv1d_bias.cached_ptr(),
+            bias: lw.conv1d_bias_ptr(),
         },
         (b, t, di, d_conv),
         format_args!("training"),
@@ -730,7 +730,7 @@ pub fn gpu_forward_mamba_layer(
         &mut scratch.out_flat,
         &acts.gated,
         lw.out_proj_w.cached_ptr(),
-        None,
+        lw.out_proj_b_ptr(),
         (bt, di, dm),
     )?;
 
@@ -1005,7 +1005,7 @@ pub fn gpu_forward_mamba_target_burnin(
             &mut scratch.proj_flat,
             &scratch.out_flat,
             lw.in_proj_w.cached_ptr(),
-            None,
+            lw.in_proj_b_ptr(),
             (bt, dm, 2 * di),
         )?;
 
@@ -1028,7 +1028,7 @@ pub fn gpu_forward_mamba_target_burnin(
                 saved: 0,
                 x: (scratch.proj_flat.cached_ptr(), 2 * di),
                 weight: lw.conv1d_weight.cached_ptr(),
-                bias: lw.conv1d_bias.cached_ptr(),
+                bias: lw.conv1d_bias_ptr(),
             },
             (b, t, di, d_conv),
             format_args!("target L{layer_idx}"),
@@ -1229,7 +1229,7 @@ pub fn gpu_forward_mamba_target_burnin(
             &mut scratch.out_flat,
             &scratch.gated,
             lw.out_proj_w.cached_ptr(),
-            None,
+            lw.out_proj_b_ptr(),
             (bt, di, dm),
         )?;
 

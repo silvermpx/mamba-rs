@@ -41,6 +41,9 @@ fn m1_cfg() -> MambaConfig {
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     }
 }
 

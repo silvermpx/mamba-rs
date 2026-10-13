@@ -22,7 +22,7 @@ pub struct Conv1dDims {
 pub fn backward_conv1d_step(
     d_x_branch: &mut [f32],    // [d_inner] output: gradient w.r.t. x_branch input
     d_conv_weight: &mut [f32], // [d_inner * d_conv] accumulated weight gradient
-    d_conv_bias: &mut [f32],   // [d_inner] accumulated bias gradient
+    d_conv_bias: &mut [f32],   // [d_inner] accumulated bias gradient, or empty
     d_conv_out: &[f32],        // [d_inner] upstream gradient (post SiLU backward)
     conv_state: &[f32],        // [d_inner * d_conv] saved conv state at this timestep
     conv_weight: &[f32],       // [d_inner * d_conv] conv weights
@@ -34,8 +34,10 @@ pub fn backward_conv1d_step(
     for d in 0..di {
         let base = d * dc;
 
-        // Bias gradient: db[d] += d_conv_out[d]
-        d_conv_bias[d] += d_conv_out[d];
+        // Bias gradient: db[d] += d_conv_out[d], when the conv has a bias
+        if let Some(db) = d_conv_bias.get_mut(d) {
+            *db += d_conv_out[d];
+        }
 
         // Weight gradient: dw[d, k] += d_conv_out[d] * state[d, k]
         for k in 0..dc {

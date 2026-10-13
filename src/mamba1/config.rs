@@ -39,6 +39,20 @@ pub struct MambaConfig {
     /// with no weight, before dt_proj and the scan read them. `None` is
     /// Mamba-1; FalconMamba checkpoints carry 1e-6 (`mixer_rms_eps`).
     pub bcdt_rms_eps: Option<f32>,
+
+    /// The rank of the dt projection: dt_proj is `[dt_rank, d_inner]` and
+    /// x_proj's first `dt_rank` columns feed it. `None` is the reference's
+    /// "auto", `ceil(d_model / 16)`.
+    pub dt_rank: Option<usize>,
+
+    /// Biases on in_proj and out_proj (`bias` in the reference, `use_bias`
+    /// in transformers). Every official checkpoint has none.
+    pub proj_bias: bool,
+
+    /// A bias on the depthwise conv (`conv_bias`, `use_conv_bias`), as
+    /// every official checkpoint has. Without one the conv has no bias to
+    /// apply or train.
+    pub conv_bias: bool,
 }
 
 impl MambaConfig {
@@ -47,9 +61,10 @@ impl MambaConfig {
         self.expand * self.d_model
     }
 
-    /// dt_rank = ceil(d_model / 16). Controls delta projection bottleneck.
+    /// The dt projection's rank: [`Self::dt_rank`] when given, else
+    /// `ceil(d_model / 16)`.
     pub fn dt_rank(&self) -> usize {
-        self.d_model.div_ceil(16)
+        self.dt_rank.unwrap_or(self.d_model.div_ceil(16))
     }
 
     /// x_proj output dimension: dt_rank + 2 * d_state (for delta, B, C).
@@ -116,29 +131,63 @@ impl MambaConfig {
         {
             return Err(format!("bcdt_rms_eps must be positive, got {eps}"));
         }
+        if let Some(rank) = self.dt_rank
+            && (rank == 0 || rank > envelope::MAX_WIDTH)
+        {
+            return Err(format!("dt_rank ({rank}) must be in 1..=2^20"));
+        }
         envelope::check_param_bytes(self.layer_params(), self.n_layers)
     }
 
     /// One layer's parameters, exact in u128 (`None` past it): the norm,
-    /// the in, x, dt and out projections, the conv, A and D.
+    /// the in, x, dt and out projections and their biases, the conv, A and
+    /// D.
     pub(crate) fn layer_params(&self) -> Option<u128> {
         let w = |v: usize| v as u128;
         let (d, ds, dc) = (w(self.d_model), w(self.d_state), w(self.d_conv));
         let di = d.checked_mul(w(self.expand))?;
-        let dr = w(self.d_model.div_ceil(16));
+        let dr = w(self.dt_rank());
         let xd = dr.checked_add(ds.checked_mul(2)?)?;
+        let (proj_bias, conv_bias) = (
+            w(usize::from(self.proj_bias)),
+            w(usize::from(self.conv_bias)),
+        );
         envelope::sum_of_products(&[
             &[d],
             &[d, 2, di],
+            &[proj_bias, 2, di],
             &[di, dc],
-            &[di],
+            &[conv_bias, di],
             &[di, xd],
             &[dr, di],
             &[di],
             &[di, ds],
             &[di],
             &[di, d],
+            &[proj_bias, d],
         ])
+    }
+
+    /// The length of a layer's in_proj bias: `2 d_inner` with
+    /// [`Self::proj_bias`], else none.
+    pub fn in_proj_bias_len(&self) -> usize {
+        if self.proj_bias {
+            2 * self.d_inner()
+        } else {
+            0
+        }
+    }
+
+    /// The length of a layer's out_proj bias: `d_model` with
+    /// [`Self::proj_bias`], else none.
+    pub fn out_proj_bias_len(&self) -> usize {
+        if self.proj_bias { self.d_model } else { 0 }
+    }
+
+    /// The length of a layer's conv bias: `d_inner` with
+    /// [`Self::conv_bias`], else none.
+    pub fn conv_bias_len(&self) -> usize {
+        if self.conv_bias { self.d_inner() } else { 0 }
     }
 }
 
@@ -154,6 +203,9 @@ impl Default for MambaConfig {
             scan_mode: ScanMode::Auto,
             rms_norm_eps: crate::ops::fast_math::RMS_NORM_EPS,
             bcdt_rms_eps: None,
+            dt_rank: None,
+            proj_bias: false,
+            conv_bias: true,
         }
     }
 }
@@ -167,12 +219,13 @@ mod tests {
     /// widths and tensor sizes exactly, each tensor within one allocation.
     #[test]
     fn validate_passes_only_exact_widths() {
-        let fields: [fn(&mut MambaConfig, usize); 5] = [
+        let fields: [fn(&mut MambaConfig, usize); 6] = [
             |c, v| c.d_model = v,
             |c, v| c.d_state = v,
             |c, v| c.d_conv = v,
             |c, v| c.expand = v,
             |c, v| c.n_layers = v,
+            |c, v| c.dt_rank = Some(v),
         ];
         sweep(MambaConfig::default(), &fields, |c| {
             if c.validate().is_err() {
@@ -211,7 +264,13 @@ mod tests {
             n_layers: 2,
             ..MambaConfig::default()
         };
-        for cfg in [MambaConfig::default(), odd] {
+        let variant = MambaConfig {
+            dt_rank: Some(9),
+            proj_bias: true,
+            conv_bias: false,
+            ..odd
+        };
+        for cfg in [MambaConfig::default(), odd, variant] {
             let input_dim = 5;
             let w = crate::mamba1::weights::MambaWeights::zeros(&cfg, input_dim);
             let (list, _) = crate::mamba1::serialize::checkpoint_parts(&w, &cfg, input_dim)

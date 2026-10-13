@@ -155,6 +155,9 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         // through every CPU/GPU inference norm via MambaConfig/MambaDims.
         rms_norm_eps: hf_cfg.rms_norm_eps,
         bcdt_rms_eps: hf_cfg.bcdt_rms_eps,
+        dt_rank: hf_cfg.dt_rank,
+        proj_bias: hf_cfg.use_bias,
+        conv_bias: hf_cfg.use_conv_bias,
         ..MambaConfig::default()
     };
 
@@ -163,7 +166,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         .enumerate()
         .map(|(i, opt)| {
             opt.ok_or(format!("layer {i}: no weights found"))
-                .and_then(|a| a.into_layer_weights(&mamba_cfg, &hf_cfg))
+                .and_then(|a| a.into_layer_weights(&mamba_cfg))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -218,11 +221,7 @@ impl LayerAccum {
         Ok(data)
     }
 
-    fn into_layer_weights(
-        mut self,
-        cfg: &MambaConfig,
-        hf_cfg: &crate::hf::config_json::HfMambaConfig,
-    ) -> Result<MambaLayerWeights, String> {
+    fn into_layer_weights(mut self, cfg: &MambaConfig) -> Result<MambaLayerWeights, String> {
         let d = cfg.d_model;
         let di = cfg.d_inner();
         let ds = cfg.d_state;
@@ -233,26 +232,19 @@ impl LayerAccum {
         // Our BLAS convention: W is [n_in, n_out] row-major (y = x @ W).
         // All four linear weight matrices must be transposed from HF layout.
         //
-        // `use_conv_bias=false` checkpoints omit `conv1d_bias` entirely;
-        // we synthesize a zero bias so the conv1d kernel (which always
-        // reads a `bias[di]` tensor) sees a no-op. Same for `use_bias=true`
-        // scenarios where the projection biases are present (we don't
-        // currently support those, but we warn loudly here rather than
-        // silently take the default zero-bias path).
-        let conv1d_bias = if hf_cfg.use_conv_bias {
-            self.take_len("conv1d_bias", di)?
-        } else {
-            vec![0.0f32; di]
+        // A bias the config turns off is absent from the checkpoint and
+        // stays empty here, as the model holds it.
+        let mut optional = |on: bool, field: &str, len: usize| {
+            if on {
+                self.take_len(field, len)
+            } else {
+                Ok(Vec::new())
+            }
         };
-        if hf_cfg.use_bias {
-            return Err(
-                "HF config has use_bias=true (non-default) — projection biases \
-                 on in_proj / out_proj / x_proj / dt_proj are not wired into \
-                 mamba-rs inference kernels. Open an issue if you need this."
-                    .to_string(),
-            );
-        }
-        Ok(MambaLayerWeights {
+        let in_proj_b = optional(cfg.proj_bias, "in_proj_b", 2 * di)?;
+        let out_proj_b = optional(cfg.proj_bias, "out_proj_b", d)?;
+        let conv1d_bias = optional(cfg.conv_bias, "conv1d_bias", di)?;
+        let layer = MambaLayerWeights {
             norm_weight: self.take_len("norm_weight", d)?,
             // HF: [2*d_inner, d_model] -> need [d_model, 2*d_inner]
             in_proj_w: transpose_2d(self.take("in_proj_w")?, (2 * di, d), "in_proj_w")?,
@@ -266,6 +258,7 @@ impl LayerAccum {
             // models/mixer_seq_simple.py; layout matches nn.Conv1d docs.
             conv1d_weight: self.take_len("conv1d_weight", di * cfg.d_conv)?,
             conv1d_bias,
+            in_proj_b,
             // HF: [xdbl_dim, d_inner] -> need [d_inner, xdbl_dim]
             x_proj_w: transpose_2d(self.take("x_proj_w")?, (xd, di), "x_proj_w")?,
             // HF: [d_inner, dt_rank] -> need [dt_rank, d_inner]
@@ -276,7 +269,15 @@ impl LayerAccum {
             d_param: self.take_len("d_param", di)?,
             // HF: [d_model, d_inner] -> need [d_inner, d_model]
             out_proj_w: transpose_2d(self.take("out_proj_w")?, (d, di), "out_proj_w")?,
-        })
+            out_proj_b,
+        };
+        // A tensor left over is a part the config says the model lacks.
+        if let Some(field) = self.fields.keys().next() {
+            return Err(format!(
+                "the checkpoint holds {field}, a part this config's model does not have"
+            ));
+        }
+        Ok(layer)
     }
 }
 

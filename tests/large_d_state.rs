@@ -34,6 +34,9 @@ fn check_step_parity(d_state: usize) {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     };
     let input_dim = cfg.d_model;
     let dm = cfg.d_model;
@@ -104,6 +107,9 @@ fn m1_explicit_sequential_trains_at_d_state_128() {
             scan_mode,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
+            dt_rank: None,
+            proj_bias: false,
+            conv_bias: true,
         };
         let w = MambaWeights::init(&cfg, dm, 7);
         let session = TrainSessionCfg {

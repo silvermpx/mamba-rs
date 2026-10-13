@@ -16,9 +16,12 @@ pub struct TrainMambaLayerWeights {
     pub norm_weight: Vec<f32>,
     /// Input projection `[d_model, 2 * d_inner]`.
     pub in_proj_w: Vec<f32>,
+    /// Input projection bias `[2 * d_inner]`, empty without projection
+    /// biases.
+    pub in_proj_b: Vec<f32>,
     /// Depthwise conv1d filter `[d_inner * d_conv]`.
     pub conv1d_weight: Vec<f32>,
-    /// Depthwise conv1d bias `[d_inner]`.
+    /// Depthwise conv1d bias `[d_inner]`, empty without a conv bias.
     pub conv1d_bias: Vec<f32>,
     /// x-to-(delta, B, C) projection `[d_inner, dt_rank + 2*d_state]`.
     pub x_proj_w: Vec<f32>,
@@ -32,6 +35,9 @@ pub struct TrainMambaLayerWeights {
     pub d_param: Vec<f32>,
     /// Output projection `[d_inner, d_model]`.
     pub out_proj_w: Vec<f32>,
+    /// Output projection bias `[d_model]`, empty without projection
+    /// biases.
+    pub out_proj_b: Vec<f32>,
 }
 
 /// Trainable weights for the full Mamba backbone.
@@ -79,14 +85,16 @@ impl TrainMambaWeights {
                 .map(|_| TrainMambaLayerWeights {
                     norm_weight: vec![0.0; dm],
                     in_proj_w: vec![0.0; dm * 2 * di],
+                    in_proj_b: vec![0.0; if dims.proj_bias { 2 * di } else { 0 }],
                     conv1d_weight: vec![0.0; di * dc],
-                    conv1d_bias: vec![0.0; di],
+                    conv1d_bias: vec![0.0; if dims.conv_bias { di } else { 0 }],
                     x_proj_w: vec![0.0; di * xdbl],
                     dt_proj_w: vec![0.0; dr * di],
                     dt_proj_b: vec![0.0; di],
                     a_log: vec![0.0; di * ds],
                     d_param: vec![0.0; di],
                     out_proj_w: vec![0.0; di * dm],
+                    out_proj_b: vec![0.0; if dims.proj_bias { dm } else { 0 }],
                 })
                 .collect(),
             norm_f_weight: vec![0.0; dm],
@@ -100,6 +108,7 @@ impl TrainMambaWeights {
         for l in &mut self.layers {
             l.norm_weight.fill(0.0);
             l.in_proj_w.fill(0.0);
+            l.in_proj_b.fill(0.0);
             l.conv1d_weight.fill(0.0);
             l.conv1d_bias.fill(0.0);
             l.x_proj_w.fill(0.0);
@@ -108,6 +117,7 @@ impl TrainMambaWeights {
             l.a_log.fill(0.0);
             l.d_param.fill(0.0);
             l.out_proj_w.fill(0.0);
+            l.out_proj_b.fill(0.0);
         }
         self.norm_f_weight.fill(0.0);
     }
@@ -119,6 +129,7 @@ impl TrainMambaWeights {
         for (sl, ol) in self.layers.iter_mut().zip(other.layers.iter()) {
             add_vecs(&mut sl.norm_weight, &ol.norm_weight);
             add_vecs(&mut sl.in_proj_w, &ol.in_proj_w);
+            add_vecs(&mut sl.in_proj_b, &ol.in_proj_b);
             add_vecs(&mut sl.conv1d_weight, &ol.conv1d_weight);
             add_vecs(&mut sl.conv1d_bias, &ol.conv1d_bias);
             add_vecs(&mut sl.x_proj_w, &ol.x_proj_w);
@@ -127,6 +138,7 @@ impl TrainMambaWeights {
             add_vecs(&mut sl.a_log, &ol.a_log);
             add_vecs(&mut sl.d_param, &ol.d_param);
             add_vecs(&mut sl.out_proj_w, &ol.out_proj_w);
+            add_vecs(&mut sl.out_proj_b, &ol.out_proj_b);
         }
         add_vecs(&mut self.norm_f_weight, &other.norm_f_weight);
     }

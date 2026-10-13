@@ -215,6 +215,18 @@
   inference and training and in every precision. `falcon_mamba`
   checkpoints load with them (`mixer_rms_eps`), and saved models keep
   them.
+- Mamba-1 takes the reference's other mixer options: an explicit
+  `MambaConfig::dt_rank`, biases on in_proj and out_proj
+  (`proj_bias`), and no conv bias (`conv_bias = false`), on the CPU and
+  the GPU, in inference and training and in every precision. An absent
+  bias is an empty tensor (`MambaLayerWeights::in_proj_b`, `out_proj_b`,
+  `conv1d_bias`). Checkpoints that set them (`dt_rank`, `bias`,
+  `conv_bias` in the original format, `time_step_rank`, `use_bias`,
+  `use_conv_bias` in the HF one) load with them instead of being refused,
+  and saved models keep them.
+  The CPU training passes refuse dims whose options differ from the
+  weights: `MambaDims::new` describes the default options, and a model
+  with others builds its dims with `MambaDims::from_config`.
 
 ### Changed
 
@@ -490,6 +502,13 @@
   upcast route, with the same bits.
 - The GPU census holds each bf16 and f16 cell to the host computing in
   that precision too, within eight of its roundings, beside the f32 host.
+- Under the reference no-decay groups (`reference_no_decay`, on by
+  default) every Mamba-1 bias is exempt from weight decay: the input
+  projection's, the conv's and in_proj's and out_proj's join dt_proj's,
+  A_log, D and the norm scales, as the reference training groups every
+  bias and as the Mamba-2 and Mamba-3 trainers already did. A Mamba-1
+  model trained with weight decay moves on the input projection's and the
+  conv's biases.
 
 ### Fixed
 

@@ -262,6 +262,7 @@ fn build_train_scaffolding(
             .map(|lw| TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
+                in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
                 conv1d_bias: lw.conv1d_bias.clone(),
                 x_proj_w: lw.x_proj_w.clone(),
@@ -270,6 +271,7 @@ fn build_train_scaffolding(
                 a_log: lw.a_log.clone(),
                 d_param: lw.d_param.clone(),
                 out_proj_w: lw.out_proj_w.clone(),
+                out_proj_b: lw.out_proj_b.clone(),
             })
             .collect(),
         norm_f_weight: weights.norm_f_weight.clone(),
@@ -1591,6 +1593,9 @@ fn test_custom_config_small() {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     };
     let input_dim = 32;
     let bb = MambaBackbone::init(cfg, input_dim, 99);
@@ -1635,6 +1640,9 @@ fn test_custom_config_large() {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     };
     let input_dim = 256;
     let bb = MambaBackbone::init(cfg, input_dim, 77);
@@ -2197,6 +2205,9 @@ mod gpu_extra_tests {
             scan_mode: mamba_rs::config::ScanMode::Sequential,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
+            dt_rank: None,
+            proj_bias: false,
+            conv_bias: true,
         };
         let input_dim = 32;
         let bb = MambaBackbone::init(cfg, input_dim, 99);
@@ -2254,10 +2265,12 @@ fn falcon_cfg() -> MambaConfig {
     }
 }
 
-/// The decode of every input row in float64, transcribed from transformers'
-/// FalconMambaMixer: the Mamba-1 step of state-spaces/mamba with the dt, B
-/// and C parts of the x_proj row each divided by its root mean square.
-fn falcon_reference(
+/// The decode of every input row in float64, transcribed from
+/// state-spaces/mamba's Mamba step and transformers' FalconMambaMixer: the
+/// in_proj and out_proj biases when the config has them, the conv bias when
+/// it has one, and with FalconMamba's norms the dt, B and C parts of the
+/// x_proj row each divided by its root mean square.
+fn f64_reference(
     w: &mamba_rs::MambaWeights,
     cfg: &MambaConfig,
     input_dim: usize,
@@ -2273,7 +2286,9 @@ fn falcon_reference(
     let xd = dr + 2 * ds;
     let f = f64::from;
     let eps = f(cfg.rms_norm_eps);
-    let mix_eps = f(cfg.bcdt_rms_eps.unwrap());
+    let mix_eps = cfg.bcdt_rms_eps.map(f);
+    // An absent bias adds nothing.
+    let bias = |b: &[f32], i: usize| b.get(i).map_or(0.0, |&v| f(v));
     let rstd = |v: &[f64], e: f64| {
         1.0 / (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64 + e).sqrt()
     };
@@ -2294,7 +2309,12 @@ fn falcon_reference(
             let r = rstd(&x, eps);
             let h: Vec<f64> = (0..d).map(|j| x[j] * r * f(lw.norm_weight[j])).collect();
             let proj: Vec<f64> = (0..2 * di)
-                .map(|k| (0..d).map(|j| h[j] * f(lw.in_proj_w[j * 2 * di + k])).sum())
+                .map(|k| {
+                    bias(&lw.in_proj_b, k)
+                        + (0..d)
+                            .map(|j| h[j] * f(lw.in_proj_w[j * 2 * di + k]))
+                            .sum::<f64>()
+                })
                 .collect();
             let (xin, z) = proj.split_at(di);
             let mut u = vec![0f64; di];
@@ -2302,7 +2322,7 @@ fn falcon_reference(
                 let win = &mut conv[l][c * dc..(c + 1) * dc];
                 win.rotate_left(1);
                 win[dc - 1] = xin[c];
-                let v = f(lw.conv1d_bias[c])
+                let v = bias(&lw.conv1d_bias, c)
                     + (0..dc)
                         .map(|k| win[k] * f(lw.conv1d_weight[c * dc + k]))
                         .sum::<f64>();
@@ -2311,9 +2331,11 @@ fn falcon_reference(
             let mut xdbl: Vec<f64> = (0..xd)
                 .map(|k| (0..di).map(|c| u[c] * f(lw.x_proj_w[c * xd + k])).sum())
                 .collect();
-            for (lo, hi) in [(0, dr), (dr, dr + ds), (dr + ds, xd)] {
-                let r = rstd(&xdbl[lo..hi], mix_eps);
-                xdbl[lo..hi].iter_mut().for_each(|v| *v *= r);
+            if let Some(mix_eps) = mix_eps {
+                for (lo, hi) in [(0, dr), (dr, dr + ds), (dr + ds, xd)] {
+                    let r = rstd(&xdbl[lo..hi], mix_eps);
+                    xdbl[lo..hi].iter_mut().for_each(|v| *v *= r);
+                }
             }
             let mut y = vec![0f64; di];
             for c in 0..di {
@@ -2332,9 +2354,10 @@ fn falcon_reference(
                 y[c] = (yc + f(lw.d_param[c]) * u[c]) * silu(z[c]);
             }
             for (j, xj) in x.iter_mut().enumerate() {
-                *xj += (0..di)
-                    .map(|c| y[c] * f(lw.out_proj_w[c * d + j]))
-                    .sum::<f64>();
+                *xj += bias(&lw.out_proj_b, j)
+                    + (0..di)
+                        .map(|c| y[c] * f(lw.out_proj_w[c * d + j]))
+                        .sum::<f64>();
             }
         }
         let r = rstd(&x, eps);
@@ -2357,7 +2380,7 @@ fn falcon_decode_matches_the_f64_reference() {
     let (input_dim, seq_len) = (24usize, 7usize);
     let weights = mamba_rs::MambaWeights::init(&cfg, input_dim, 11);
     let inputs = falcon_inputs(seq_len, input_dim);
-    let want = falcon_reference(&weights, &cfg, input_dim, &inputs);
+    let want = f64_reference(&weights, &cfg, input_dim, &inputs);
     let run = |cfg: MambaConfig| {
         let bb = MambaBackbone::new(weights.clone(), cfg, input_dim).unwrap();
         let (mut state, mut scratch) = (bb.alloc_state(), bb.alloc_scratch());
@@ -2438,7 +2461,25 @@ fn falcon_gradients_match_central_differences() {
     let weights = mamba_rs::MambaWeights::init(&cfg, input_dim, 17);
     let (tw, dims) = build_train_scaffolding(&weights, &cfg, input_dim, seq_len);
     let inputs = falcon_inputs(seq_len, input_dim);
+    let grads = grads_of_sum(&tw, &dims, &inputs);
+    let checks: [(&str, Field); 2] = [
+        ("x_proj_w", |w| &mut w.layers[0].x_proj_w),
+        ("dt_proj_w", |w| &mut w.layers[1].dt_proj_w),
+    ];
+    assert_central_differences(
+        "FalconMamba",
+        (&tw, &cfg, input_dim, &inputs),
+        &grads,
+        &checks,
+    );
+}
 
+/// The trainer's gradients of `sum(output)` over `inputs`.
+fn grads_of_sum(
+    tw: &mamba_rs::train::weights::TrainMambaWeights,
+    dims: &mamba_rs::ops::dims::MambaDims,
+    inputs: &[f32],
+) -> mamba_rs::train::weights::TrainMambaWeights {
     use mamba_rs::ops::dims::MambaRecurrentState;
     use mamba_rs::train::flat::MambaBackboneFlat;
     use mamba_rs::train::scratch::PhaseScratch;
@@ -2448,67 +2489,321 @@ fn falcon_gradients_match_central_differences() {
         .iter()
         .flat_map(|lw| lw.a_log.iter().map(|&a| -a.exp()))
         .collect();
-    let mut acts = MambaBackboneFlat::zeros(dims);
-    let mut scratch = PhaseScratch::zeros(&dims);
+    let mut acts = MambaBackboneFlat::zeros(*dims);
+    let mut scratch = PhaseScratch::zeros(dims);
     let (mut conv, mut ssm) = (vec![0f32; nl * di * dc], vec![0f32; nl * di * ds]);
     let mut state = MambaRecurrentState {
         conv: &mut conv,
         ssm: &mut ssm,
         a_neg: &a_neg,
     };
-    let mut temporal = vec![0f32; seq_len * dims.d_model];
+    let mut temporal = vec![0f32; dims.seq_len * dims.d_model];
     mamba_rs::train::forward::forward_mamba_backbone_batched(
         &mut temporal,
         &mut acts,
-        &tw,
-        &inputs,
+        tw,
+        inputs,
         &mut state,
         &mut scratch,
-        &dims,
+        dims,
     );
-    let mut grads = mamba_rs::train::weights::TrainMambaWeights::zeros_from_dims(&dims);
+    let mut grads = mamba_rs::train::weights::TrainMambaWeights::zeros_from_dims(dims);
     let mut d_temporal = vec![1f32; temporal.len()];
-    let mut bwd = mamba_rs::train::scratch::BackwardPhaseScratch::zeros(&dims);
+    let mut bwd = mamba_rs::train::scratch::BackwardPhaseScratch::zeros(dims);
     mamba_rs::train::backward::backward_mamba_backbone_batched(
         &mut d_temporal,
         &mut grads,
         &acts,
-        &tw,
+        tw,
         &a_neg,
         &mut bwd,
-        &dims,
+        dims,
     );
+    grads
+}
 
-    let loss = |tw: &mamba_rs::train::weights::TrainMambaWeights| -> f64 {
-        run_forward(tw, &dims, &inputs)
-            .0
+type Field = fn(&mut mamba_rs::train::weights::TrainMambaWeights) -> &mut Vec<f32>;
+
+/// The inference weights of trainer weights.
+fn inference_weights(tw: &mamba_rs::train::weights::TrainMambaWeights) -> mamba_rs::MambaWeights {
+    mamba_rs::MambaWeights {
+        input_proj_w: tw.input_proj_w.clone(),
+        input_proj_b: tw.input_proj_b.clone(),
+        layers: tw
+            .layers
             .iter()
-            .map(|&v| f64::from(v))
+            .map(|lw| mamba_rs::MambaLayerWeights {
+                norm_weight: lw.norm_weight.clone(),
+                in_proj_w: lw.in_proj_w.clone(),
+                in_proj_b: lw.in_proj_b.clone(),
+                conv1d_weight: lw.conv1d_weight.clone(),
+                conv1d_bias: lw.conv1d_bias.clone(),
+                x_proj_w: lw.x_proj_w.clone(),
+                dt_proj_w: lw.dt_proj_w.clone(),
+                dt_proj_b: lw.dt_proj_b.clone(),
+                a_log: lw.a_log.clone(),
+                a_neg: lw.a_log.iter().map(|a| -a.exp()).collect(),
+                d_param: lw.d_param.clone(),
+                out_proj_w: lw.out_proj_w.clone(),
+                out_proj_b: lw.out_proj_b.clone(),
+            })
+            .collect(),
+        norm_f_weight: tw.norm_f_weight.clone(),
+    }
+}
+
+/// The three largest gradients of each named tensor against central
+/// differences of `sum(output)` taken through the float64 reference: an
+/// f32 forward's roundoff in the summed rows is past the whole difference
+/// a small gradient makes, and the reference's is not.
+fn assert_central_differences(
+    label: &str,
+    (tw, cfg, input_dim, inputs): (
+        &mamba_rs::train::weights::TrainMambaWeights,
+        &MambaConfig,
+        usize,
+        &[f32],
+    ),
+    grads: &mamba_rs::train::weights::TrainMambaWeights,
+    checks: &[(&str, Field)],
+) {
+    let loss = |tw: &mamba_rs::train::weights::TrainMambaWeights| -> f64 {
+        f64_reference(&inference_weights(tw), cfg, input_dim, inputs)
+            .iter()
             .sum()
     };
-    let h = 5e-3f32;
-    type Field = fn(&mut mamba_rs::train::weights::TrainMambaWeights) -> &mut Vec<f32>;
-    let checks: [(&str, Field); 2] = [
-        ("x_proj_w", |w| &mut w.layers[0].x_proj_w),
-        ("dt_proj_w", |w| &mut w.layers[1].dt_proj_w),
-    ];
-    for (name, field) in checks {
-        let mut g = grads.clone();
-        let analytic = field(&mut g).clone();
-        // The three largest gradients of the tensor.
+    let h = 1e-3f32;
+    for &(name, field) in checks {
+        let analytic = field(&mut grads.clone()).clone();
         let mut idx: Vec<usize> = (0..analytic.len()).collect();
         idx.sort_by(|&a, &b| analytic[b].abs().total_cmp(&analytic[a].abs()));
         for &i in &idx[..3] {
             let (mut plus, mut minus) = (tw.clone(), tw.clone());
             field(&mut plus)[i] += h;
             field(&mut minus)[i] -= h;
-            let numeric = (loss(&plus) - loss(&minus)) / (2.0 * f64::from(h));
-            let rel = (f64::from(analytic[i]) - numeric).abs() / numeric.abs().max(1e-6);
+            // The steps the f32 weights actually took.
+            let step = f64::from(field(&mut plus)[i]) - f64::from(field(&mut minus)[i]);
+            let numeric = (loss(&plus) - loss(&minus)) / step;
+            let rel = (f64::from(analytic[i]) - numeric).abs() / numeric.abs();
             assert!(
-                rel < 0.05,
-                "{name}[{i}]: analytic {} vs numeric {numeric:.6} ({rel:.3})",
+                rel < 1e-2,
+                "{label}: {name}[{i}]: analytic {} vs numeric {numeric:.6e} ({rel:.3e})",
                 analytic[i]
             );
         }
+    }
+}
+
+// =========================================================================
+// Projection biases, no conv bias, a dt rank of its own
+// =========================================================================
+
+/// The reference's options each alone and all together: `bias=True` on
+/// in_proj and out_proj, `conv_bias=False`, and an explicit `dt_rank`.
+fn variant_cfgs() -> Vec<(&'static str, MambaConfig)> {
+    let base = MambaConfig {
+        d_model: 32,
+        d_state: 8,
+        n_layers: 2,
+        ..MambaConfig::default()
+    };
+    vec![
+        (
+            "projection biases",
+            MambaConfig {
+                proj_bias: true,
+                ..base
+            },
+        ),
+        (
+            "no conv bias",
+            MambaConfig {
+                conv_bias: false,
+                ..base
+            },
+        ),
+        (
+            "dt rank 7",
+            MambaConfig {
+                dt_rank: Some(7),
+                ..base
+            },
+        ),
+        (
+            "all three with FalconMamba's norms",
+            MambaConfig {
+                proj_bias: true,
+                conv_bias: false,
+                dt_rank: Some(7),
+                bcdt_rms_eps: Some(1e-6),
+                ..base
+            },
+        ),
+    ]
+}
+
+/// Initial weights with the projection biases drawn away from their zero
+/// init, so the forward reads them.
+fn variant_weights(cfg: &MambaConfig, input_dim: usize, seed: u64) -> mamba_rs::MambaWeights {
+    let mut w = mamba_rs::MambaWeights::init(cfg, input_dim, seed);
+    for lw in &mut w.layers {
+        for (i, b) in lw
+            .in_proj_b
+            .iter_mut()
+            .chain(&mut lw.out_proj_b)
+            .enumerate()
+        {
+            *b = ((i * 37 % 17) as f32 / 17.0 - 0.5) * 0.4;
+        }
+    }
+    w
+}
+
+/// Every variant's decode against the float64 reference. The model
+/// without a conv bias is the model whose conv bias is zero, and the
+/// biases change the rows.
+#[test]
+fn config_variants_decode_matches_the_f64_reference() {
+    let (input_dim, seq_len) = (24usize, 7usize);
+    let inputs = falcon_inputs(seq_len, input_dim);
+    let decode = |w: &mamba_rs::MambaWeights, cfg: MambaConfig| {
+        let bb = MambaBackbone::new(w.clone(), cfg, input_dim).unwrap();
+        let (mut state, mut scratch) = (bb.alloc_state(), bb.alloc_scratch());
+        let mut out = vec![0f32; seq_len * cfg.d_model];
+        for (inp, o) in inputs
+            .chunks_exact(input_dim)
+            .zip(out.chunks_exact_mut(cfg.d_model))
+        {
+            bb.forward_step(inp, o, &mut state, &mut scratch);
+        }
+        out
+    };
+    let rel = |got: &[f32], want: &[f64]| {
+        let num: f64 = got
+            .iter()
+            .zip(want)
+            .map(|(&g, &w)| (f64::from(g) - w).powi(2))
+            .sum();
+        let den: f64 = want.iter().map(|w| w * w).sum();
+        (num / den).sqrt()
+    };
+    for (label, cfg) in variant_cfgs() {
+        let w = variant_weights(&cfg, input_dim, 19);
+        let got = decode(&w, cfg);
+        let err = rel(&got, &f64_reference(&w, &cfg, input_dim, &inputs));
+        assert!(err < 1e-5, "{label}: decode vs f64 reference {err:.3e}");
+        if !cfg.conv_bias {
+            let mut zero = w.clone();
+            for lw in &mut zero.layers {
+                lw.conv1d_bias = vec![0.0; cfg.d_inner()];
+            }
+            let with_zero = decode(
+                &zero,
+                MambaConfig {
+                    conv_bias: true,
+                    ..cfg
+                },
+            );
+            let diff = got
+                .iter()
+                .zip(&with_zero)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(diff < 1e-7, "{label}: against a zero conv bias {diff:.3e}");
+        }
+        if cfg.proj_bias {
+            let mut unbiased = w.clone();
+            for lw in &mut unbiased.layers {
+                lw.in_proj_b.fill(0.0);
+                lw.out_proj_b.fill(0.0);
+            }
+            let moved = rel(
+                &decode(&unbiased, cfg),
+                &f64_reference(&w, &cfg, input_dim, &inputs),
+            );
+            assert!(
+                moved > 1e-2,
+                "{label}: the biases changed nothing ({moved:.3e})"
+            );
+        }
+    }
+}
+
+/// The prompt (both prefill modes), the decode and the trainer's forward
+/// give the same rows for every variant.
+#[test]
+fn config_variants_prompt_decode_and_trainer_agree() {
+    use mamba_rs::mamba1::cpu::prefill::PrefillMode;
+    let (input_dim, seq_len) = (24usize, 9usize);
+    let inputs = falcon_inputs(seq_len, input_dim);
+    let max_diff = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max)
+    };
+    for (label, cfg) in variant_cfgs() {
+        let dm = cfg.d_model;
+        let weights = variant_weights(&cfg, input_dim, 23);
+        let bb = MambaBackbone::new(weights.clone(), cfg, input_dim).unwrap();
+        let (mut state, mut scratch) = (bb.alloc_state(), bb.alloc_scratch());
+        let mut decode = vec![0f32; seq_len * dm];
+        for (inp, o) in inputs
+            .chunks_exact(input_dim)
+            .zip(decode.chunks_exact_mut(dm))
+        {
+            bb.forward_step(inp, o, &mut state, &mut scratch);
+        }
+        for mode in [PrefillMode::Single, PrefillMode::Parallel] {
+            let mut st = bb.alloc_state();
+            let mut ps = bb.alloc_prefill_scratch(seq_len);
+            let mut rows = vec![0f32; seq_len * dm];
+            bb.forward_prefill(&inputs, &mut rows, &mut st, &mut ps, seq_len, mode);
+            let diff = max_diff(&rows, &decode);
+            assert!(
+                diff < 1e-4,
+                "{label}: {mode:?} prefill vs decode {diff:.3e}"
+            );
+        }
+        let (tw, dims) = build_train_scaffolding(&weights, &cfg, input_dim, seq_len);
+        let (train, _) = run_forward(&tw, &dims, &inputs);
+        let diff = max_diff(&train, &decode);
+        assert!(diff < 1e-4, "{label}: trainer forward vs decode {diff:.3e}");
+    }
+}
+
+/// The trainer's gradients of the biases and of dt_proj at its own rank
+/// against central differences; a model without a conv bias has no
+/// gradient for one.
+#[test]
+fn config_variants_gradients_match_central_differences() {
+    let (input_dim, seq_len) = (24usize, 5usize);
+    let inputs = falcon_inputs(seq_len, input_dim);
+    for (label, cfg) in variant_cfgs() {
+        let weights = variant_weights(&cfg, input_dim, 29);
+        let (tw, dims) = build_train_scaffolding(&weights, &cfg, input_dim, seq_len);
+        let grads = grads_of_sum(&tw, &dims, &inputs);
+        let mut checks: Vec<(&str, Field)> = Vec::new();
+        checks.push(("dt_proj_w", |w| &mut w.layers[1].dt_proj_w));
+        if cfg.proj_bias {
+            checks.push(("in_proj_b", |w| &mut w.layers[0].in_proj_b));
+            checks.push(("out_proj_b", |w| &mut w.layers[1].out_proj_b));
+        } else {
+            assert!(
+                grads
+                    .layers
+                    .iter()
+                    .all(|l| l.in_proj_b.is_empty() && l.out_proj_b.is_empty())
+            );
+        }
+        if cfg.conv_bias {
+            checks.push(("conv1d_bias", |w| &mut w.layers[0].conv1d_bias));
+        } else {
+            assert!(
+                grads.layers.iter().all(|l| l.conv1d_bias.is_empty()),
+                "{label}: a conv bias gradient without the bias"
+            );
+        }
+        assert_central_differences(label, (&tw, &cfg, input_dim, &inputs), &grads, &checks);
     }
 }

@@ -41,6 +41,9 @@ fn tiny_cfg() -> MambaConfig {
         scan_mode: ScanMode::Sequential,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     }
 }
 
@@ -338,14 +341,16 @@ fn grad_layout(cfg: &MambaConfig, input_dim: usize) -> Vec<(&'static str, usize)
     for _ in 0..cfg.n_layers {
         out.push(("norm_weight", dm));
         out.push(("in_proj_w", dm * 2 * di));
+        out.push(("in_proj_b", cfg.in_proj_bias_len()));
         out.push(("conv1d_weight", di * dc));
-        out.push(("conv1d_bias", di));
+        out.push(("conv1d_bias", cfg.conv_bias_len()));
         out.push(("x_proj_w", di * xd));
         out.push(("dt_proj_w", dr * di));
         out.push(("dt_proj_b", di));
         out.push(("a_log", di * ds));
         out.push(("d_param", di));
         out.push(("out_proj_w", di * dm));
+        out.push(("out_proj_b", cfg.out_proj_bias_len()));
     }
     out.push(("norm_f_weight", dm));
     out
@@ -415,6 +420,9 @@ fn backbone_grad_parity_multi_layer(dtype: WeightDtype) {
         scan_mode: ScanMode::Sequential,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     };
     let dims = dims_for(&cfg, 1, 4);
     let (w_f32, w_mix) = build_weights(&cfg, 0xCAFEBABE);
@@ -674,6 +682,11 @@ fn loss_curve(dtype: WeightDtype, n_steps: usize, lr: f32) {
                         *w -= lr * g;
                     }
                 }
+                "in_proj_b" => {
+                    for (w, &g) in cpu.layers[0].in_proj_b.iter_mut().zip(slice) {
+                        *w -= lr * g;
+                    }
+                }
                 "conv1d_weight" => {
                     for (w, &g) in cpu.layers[0].conv1d_weight.iter_mut().zip(slice) {
                         *w -= lr * g;
@@ -712,6 +725,11 @@ fn loss_curve(dtype: WeightDtype, n_steps: usize, lr: f32) {
                 }
                 "out_proj_w" => {
                     for (w, &g) in cpu.layers[0].out_proj_w.iter_mut().zip(slice) {
+                        *w -= lr * g;
+                    }
+                }
+                "out_proj_b" => {
+                    for (w, &g) in cpu.layers[0].out_proj_b.iter_mut().zip(slice) {
                         *w -= lr * g;
                     }
                 }

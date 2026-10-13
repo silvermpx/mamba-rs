@@ -80,14 +80,19 @@ Two states per layer persist from token to token:
 
 | Weight | Shape | Bias |
 |--------|-------|------|
-| in_proj | [d_model, 2*d_inner] | No |
-| conv1d | [d_inner, d_conv] | Yes |
+| in_proj | [d_model, 2*d_inner] | with `proj_bias` |
+| conv1d | [d_inner, d_conv] | unless `conv_bias` is false |
 | x_proj | [d_inner, dt_rank + 2*d_state] | No |
 | dt_proj | [dt_rank, d_inner] | Yes |
 | A_log | [d_inner, d_state] | n/a |
 | D | [d_inner] | n/a |
-| out_proj | [d_inner, d_model] | No |
+| out_proj | [d_inner, d_model] | with `proj_bias` |
 | norm | [d_model] | n/a |
+
+`dt_rank` is `ceil(d_model / 16)` unless the config gives one. The three
+options are the reference's `dt_rank`, `bias` and `conv_bias` (in the HF
+format `time_step_rank`, `use_bias` and `use_conv_bias`); an absent bias
+is an empty tensor, so a model without one holds and saves nothing for it.
 
 ## Numeric routes: the scan and the GEMM
 

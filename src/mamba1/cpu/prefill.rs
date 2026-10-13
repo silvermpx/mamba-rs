@@ -210,7 +210,7 @@ fn conv_channel(
     let hist = dc - 1;
     let t_len = u_col.len();
     let w_base = d * dc;
-    let bias = lw.conv1d_bias[d];
+    let bias = lw.conv1d_bias.get(d).copied().unwrap_or(0.0);
     let head = hist.min(t_len);
 
     // Head: shift-register form over the carried history.
@@ -526,7 +526,7 @@ pub fn forward_mamba_backbone_prefill_mode(
         scratch.gemm.forward(
             lane,
             (&mut scratch.proj, &scratch.post_norm),
-            (&lw.in_proj_w, None),
+            (&lw.in_proj_w, super::bias(&lw.in_proj_b)),
             (t_len, dm, 2 * di),
         );
 
@@ -704,7 +704,7 @@ pub fn forward_mamba_backbone_prefill_mode(
         scratch.gemm.forward(
             lane,
             (&mut scratch.out, &scratch.y_rm),
-            (&lw.out_proj_w, None),
+            (&lw.out_proj_w, super::bias(&lw.out_proj_b)),
             (t_len, di, dm),
         );
         zip_rows(

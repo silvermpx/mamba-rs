@@ -59,6 +59,7 @@ fn train_weights(w: &MambaWeights) -> TrainMambaWeights {
             .map(|l| TrainMambaLayerWeights {
                 norm_weight: l.norm_weight.clone(),
                 in_proj_w: l.in_proj_w.clone(),
+                in_proj_b: l.in_proj_b.clone(),
                 conv1d_weight: l.conv1d_weight.clone(),
                 conv1d_bias: l.conv1d_bias.clone(),
                 x_proj_w: l.x_proj_w.clone(),
@@ -67,6 +68,7 @@ fn train_weights(w: &MambaWeights) -> TrainMambaWeights {
                 a_log: l.a_log.clone(),
                 d_param: l.d_param.clone(),
                 out_proj_w: l.out_proj_w.clone(),
+                out_proj_b: l.out_proj_b.clone(),
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),

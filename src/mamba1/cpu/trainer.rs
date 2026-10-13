@@ -22,6 +22,7 @@ tensor_list!(
     layers: layers [
         norm_weight,
         in_proj_w,
+        in_proj_b,
         conv1d_weight,
         conv1d_bias,
         x_proj_w,
@@ -29,7 +30,8 @@ tensor_list!(
         dt_proj_b,
         a_log,
         d_param,
-        out_proj_w
+        out_proj_w,
+        out_proj_b
     ],
     post: [norm_f_weight],
 );
@@ -144,20 +146,24 @@ impl CpuFamily for MambaCpu {
         g
     }
 
-    /// The matrices and biases decay but for the reference's no-decay
-    /// group (the norm scales, dt_proj's bias, A_log and D); the control
+    /// The matrices decay; the reference training's no-decay group does
+    /// not: what the mixer marks `_no_weight_decay` (A_log, D), every
+    /// bias and every norm scale, as the Mamba-2 and Mamba-3 walks group
+    /// them. The control
     /// channels are the step-size columns of x_proj, dt_proj and A_log, as
-    /// on the GPU.
+    /// on the GPU. A bias the config lacks is an empty tensor with its
+    /// role, so every other tensor keeps its place.
     fn roles(&self, w: &TrainMambaWeights) -> Vec<TensorRole> {
         let (dt_rank, xdbl) = (self.cfg.dt_rank(), self.cfg.xdbl_dim());
         let role = |decays, control| TensorRole { decays, control };
-        let mut roles = vec![role(true, Control::None), role(true, Control::None)];
+        let mut roles = vec![role(true, Control::None), role(false, Control::None)];
         for _ in &w.layers {
             roles.extend([
                 role(false, Control::None),
                 role(true, Control::None),
+                role(false, Control::None),
                 role(true, Control::None),
-                role(true, Control::None),
+                role(false, Control::None),
                 role(
                     true,
                     Control::Columns {
@@ -170,6 +176,7 @@ impl CpuFamily for MambaCpu {
                 role(false, Control::All),
                 role(false, Control::None),
                 role(true, Control::None),
+                role(false, Control::None),
             ]);
         }
         roles.push(role(false, Control::None));
@@ -257,6 +264,7 @@ impl MambaCpuTrainer {
                 .map(|lw| TrainMambaLayerWeights {
                     norm_weight: lw.norm_weight.clone(),
                     in_proj_w: lw.in_proj_w.clone(),
+                    in_proj_b: lw.in_proj_b.clone(),
                     conv1d_weight: lw.conv1d_weight.clone(),
                     conv1d_bias: lw.conv1d_bias.clone(),
                     x_proj_w: lw.x_proj_w.clone(),
@@ -265,6 +273,7 @@ impl MambaCpuTrainer {
                     a_log: lw.a_log.clone(),
                     d_param: lw.d_param.clone(),
                     out_proj_w: lw.out_proj_w.clone(),
+                    out_proj_b: lw.out_proj_b.clone(),
                 })
                 .collect(),
             norm_f_weight: weights.norm_f_weight.clone(),
@@ -295,6 +304,7 @@ impl MambaCpuTrainer {
                     let mut out = MambaLayerWeights {
                         norm_weight: lw.norm_weight.clone(),
                         in_proj_w: lw.in_proj_w.clone(),
+                        in_proj_b: lw.in_proj_b.clone(),
                         conv1d_weight: lw.conv1d_weight.clone(),
                         conv1d_bias: lw.conv1d_bias.clone(),
                         x_proj_w: lw.x_proj_w.clone(),
@@ -304,6 +314,7 @@ impl MambaCpuTrainer {
                         a_neg: vec![0.0; lw.a_log.len()],
                         d_param: lw.d_param.clone(),
                         out_proj_w: lw.out_proj_w.clone(),
+                        out_proj_b: lw.out_proj_b.clone(),
                     };
                     out.compute_a_neg();
                     out

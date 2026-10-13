@@ -73,6 +73,9 @@ fn rig(state_cap: usize) -> Rig {
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     };
     let mid = SERVE_INPUT_DIM;
     let mut w = MambaWeights::init(&cfg, mid, 0x5E12E);

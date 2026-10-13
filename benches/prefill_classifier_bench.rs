@@ -40,6 +40,9 @@ fn prefill_bench_classifier_shape() {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     };
     let input_dim = 1024usize;
     // Production patchify T_TOTAL: 57x81 patches + 4 register tokens.

@@ -2679,6 +2679,7 @@ impl MambaTrainerMixed {
             let g = &master.layers[i];
             lw.norm_weight = g.norm_weight.to_cpu(&self.ctx.stream)?;
             lw.in_proj_w = g.in_proj_w.to_cpu(&self.ctx.stream)?;
+            lw.in_proj_b = g.in_proj_b.to_cpu(&self.ctx.stream)?;
             lw.conv1d_weight = g.conv1d_weight.to_cpu(&self.ctx.stream)?;
             lw.conv1d_bias = g.conv1d_bias.to_cpu(&self.ctx.stream)?;
             lw.x_proj_w = g.x_proj_w.to_cpu(&self.ctx.stream)?;
@@ -2687,6 +2688,7 @@ impl MambaTrainerMixed {
             lw.a_log = g.a_log.to_cpu(&self.ctx.stream)?;
             lw.d_param = g.d_param.to_cpu(&self.ctx.stream)?;
             lw.out_proj_w = g.out_proj_w.to_cpu(&self.ctx.stream)?;
+            lw.out_proj_b = g.out_proj_b.to_cpu(&self.ctx.stream)?;
             lw.a_neg = lw.a_log.iter().map(|v| -v.exp()).collect();
         }
         out.norm_f_weight = master.norm_f_weight.to_cpu(&self.ctx.stream)?;
@@ -3514,6 +3516,7 @@ impl MambaTrainerF32 {
             let g = &w.layers[i];
             lw.norm_weight = g.norm_weight.to_cpu(&self.ctx.stream)?;
             lw.in_proj_w = g.in_proj_w.to_cpu(&self.ctx.stream)?;
+            lw.in_proj_b = g.in_proj_b.to_cpu(&self.ctx.stream)?;
             lw.conv1d_weight = g.conv1d_weight.to_cpu(&self.ctx.stream)?;
             lw.conv1d_bias = g.conv1d_bias.to_cpu(&self.ctx.stream)?;
             lw.x_proj_w = g.x_proj_w.to_cpu(&self.ctx.stream)?;
@@ -3522,6 +3525,7 @@ impl MambaTrainerF32 {
             lw.a_log = g.a_log.to_cpu(&self.ctx.stream)?;
             lw.d_param = g.d_param.to_cpu(&self.ctx.stream)?;
             lw.out_proj_w = g.out_proj_w.to_cpu(&self.ctx.stream)?;
+            lw.out_proj_b = g.out_proj_b.to_cpu(&self.ctx.stream)?;
             lw.a_neg = lw.a_log.iter().map(|v| -v.exp()).collect();
         }
         out.norm_f_weight = w.norm_f_weight.to_cpu(&self.ctx.stream)?;

@@ -39,6 +39,9 @@ fn m1_cfg() -> MambaConfig {
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     }
 }
 
@@ -46,6 +49,17 @@ fn m1_cfg() -> MambaConfig {
 fn falcon_cfg() -> MambaConfig {
     MambaConfig {
         bcdt_rms_eps: Some(1e-6),
+        ..m1_cfg()
+    }
+}
+
+/// Mamba-1 with in_proj and out_proj biases, without the conv bias, and
+/// with a dt rank of its own.
+fn m1_variant_cfg() -> MambaConfig {
+    MambaConfig {
+        dt_rank: Some(5),
+        proj_bias: true,
+        conv_bias: false,
         ..m1_cfg()
     }
 }
@@ -379,6 +393,19 @@ fn half_lanes_track_the_cpu_lane() {
     let s = session();
     let m1 = MambaWeights::init(&m1_cfg(), INPUT_DIM, 1);
     let falcon = MambaWeights::init(&falcon_cfg(), INPUT_DIM, 5);
+    // The projection biases start at zero; drawn away from it, the forward
+    // reads them from the first step.
+    let mut variant = MambaWeights::init(&m1_variant_cfg(), INPUT_DIM, 6);
+    for lw in &mut variant.layers {
+        for (i, b) in lw
+            .in_proj_b
+            .iter_mut()
+            .chain(&mut lw.out_proj_b)
+            .enumerate()
+        {
+            *b = ((i * 37 % 17) as f32 / 17.0 - 0.5) * 0.2;
+        }
+    }
     let m2 = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 2);
     let siso = Mamba3Weights::init(&siso_cfg(), INPUT_DIM, 3);
     let mimo = Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 4);
@@ -410,6 +437,20 @@ fn half_lanes_track_the_cpu_lane() {
                         .into(),
                 ],
                 MambaGpuTrainer::new(&falcon, falcon_cfg(), s, gpu_opts)
+                    .unwrap()
+                    .into(),
+            ),
+            (
+                "Mamba-1 biases, no conv bias, dt rank 5",
+                [
+                    MambaCpuTrainer::new(&variant, m1_variant_cfg(), s)
+                        .unwrap()
+                        .into(),
+                    MambaCpuTrainer::new_with(&variant, m1_variant_cfg(), s, lane)
+                        .unwrap()
+                        .into(),
+                ],
+                MambaGpuTrainer::new(&variant, m1_variant_cfg(), s, gpu_opts)
                     .unwrap()
                     .into(),
             ),

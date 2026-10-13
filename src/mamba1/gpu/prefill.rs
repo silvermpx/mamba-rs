@@ -613,7 +613,7 @@ fn prefill_body<W: MambaWeightsView>(
             &scratch.residual,
             ipw,
             ipw_dt,
-            None,
+            lw.in_proj_b(),
             (bt, dm, 2 * di),
         )?;
 
@@ -867,7 +867,7 @@ fn prefill_body<W: MambaWeightsView>(
             &scratch.gated,
             opw,
             opw_dt,
-            None,
+            lw.out_proj_b(),
             (bt, di, dm),
         )?;
 
@@ -1161,7 +1161,7 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                 ptr: ipw,
                 dtype: ipw_dt,
             },
-            None,
+            lw.in_proj_b(),
             (bt, dm, 2 * di),
         )?;
 
@@ -1456,7 +1456,7 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                 ptr: opw,
                 dtype: opw_dt,
             },
-            None,
+            lw.out_proj_b(),
             (bt, di, dm),
         )?;
 

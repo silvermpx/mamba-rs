@@ -74,7 +74,11 @@ pub fn backward_mamba_layer_batched(
     acts.copy_gated_all(&mut scratch.gated_buf);
     scratch.gemm.backward(
         dtype,
-        (&mut scratch.d_gated_flat, &mut d_layer.out_proj_w, None),
+        (
+            &mut scratch.d_gated_flat,
+            &mut d_layer.out_proj_w,
+            super::bias_mut(&mut d_layer.out_proj_b),
+        ),
         (d_temporal_flat, &scratch.gated_buf, &w.out_proj_w),
         (seq_len, di, dm),
     );
@@ -367,7 +371,11 @@ pub fn backward_mamba_layer_batched(
     acts.copy_post_norm_all(&mut scratch.post_norm_buf);
     scratch.gemm.backward(
         dtype,
-        (&mut scratch.d_norm_flat, &mut d_layer.in_proj_w, None),
+        (
+            &mut scratch.d_norm_flat,
+            &mut d_layer.in_proj_w,
+            super::bias_mut(&mut d_layer.in_proj_b),
+        ),
         (&scratch.d_proj_flat, &scratch.post_norm_buf, &w.in_proj_w),
         (seq_len, dm, 2 * di),
     );
@@ -425,6 +433,8 @@ pub fn backward_mamba_backbone_batched(
     scratch: &mut BackwardPhaseScratch,
     dims: &MambaDims,
 ) {
+    super::assert_dims_fit(dims, mamba_w);
+    super::assert_dims_fit(dims, d_mamba);
     let dm = dims.d_model;
     let di = dims.d_inner;
     let ds = dims.d_state;

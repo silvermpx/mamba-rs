@@ -9,12 +9,15 @@ pub struct MambaLayerWeights {
     /// RMSNorm scale `[d_model]`
     pub norm_weight: Vec<f32>,
 
-    /// Input projection `[d_model, 2 * d_inner]` (no bias)
+    /// Input projection `[d_model, 2 * d_inner]`
     pub in_proj_w: Vec<f32>,
+    /// Input projection bias `[2 * d_inner]`, empty without
+    /// [`MambaConfig::proj_bias`]
+    pub in_proj_b: Vec<f32>,
 
     /// Depthwise conv1d `[d_inner, d_conv]`
     pub conv1d_weight: Vec<f32>,
-    /// Conv1d bias `[d_inner]`
+    /// Conv1d bias `[d_inner]`, empty without [`MambaConfig::conv_bias`]
     pub conv1d_bias: Vec<f32>,
 
     /// SSM input projection `[d_inner, dt_rank + 2*d_state]` (no bias)
@@ -35,8 +38,11 @@ pub struct MambaLayerWeights {
     /// SSM skip connection `[d_inner]`
     pub d_param: Vec<f32>,
 
-    /// Output projection `[d_inner, d_model]` (no bias)
+    /// Output projection `[d_inner, d_model]`
     pub out_proj_w: Vec<f32>,
+    /// Output projection bias `[d_model]`, empty without
+    /// [`MambaConfig::proj_bias`]
+    pub out_proj_b: Vec<f32>,
 }
 
 impl MambaLayerWeights {
@@ -95,8 +101,9 @@ impl MambaWeights {
                 .map(|_| MambaLayerWeights {
                     norm_weight: vec![1.0; d], // RMSNorm init = ones
                     in_proj_w: vec![0.0; d * 2 * di],
+                    in_proj_b: vec![0.0; cfg.in_proj_bias_len()],
                     conv1d_weight: vec![0.0; di * dc],
-                    conv1d_bias: vec![0.0; di],
+                    conv1d_bias: vec![0.0; cfg.conv_bias_len()],
                     x_proj_w: vec![0.0; di * xd],
                     dt_proj_w: vec![0.0; dr * di],
                     dt_proj_b: vec![0.0; di],
@@ -104,6 +111,7 @@ impl MambaWeights {
                     a_neg: vec![0.0; di * ds], // computed from a_log after init
                     d_param: vec![1.0; di],    // D init = ones (paper)
                     out_proj_w: vec![0.0; di * d],
+                    out_proj_b: vec![0.0; cfg.out_proj_bias_len()],
                 })
                 .collect(),
             norm_f_weight: vec![1.0; d], // RMSNorm init = ones
@@ -123,6 +131,8 @@ impl MambaWeights {
     /// - D: ones
     /// - RMSNorm: ones
     /// - conv1d weight and bias: the PyTorch default with fan_in = d_conv
+    /// - in_proj and out_proj biases, when the config has them: zero, as
+    ///   the reference's `_init_weights` sets every Linear bias
     pub fn init(cfg: &MambaConfig, input_dim: usize, seed: u64) -> Self {
         /// The reference clamps the log-uniform dt draw from below before
         /// inverting the softplus; inside the shipped [0.001, 0.1] range the
@@ -245,14 +255,20 @@ impl MambaWeights {
             let p = |n: &str| format!("layer[{i}].{n}");
             check(&p("norm_weight"), lw.norm_weight.len(), d)?;
             check(&p("in_proj_w"), lw.in_proj_w.len(), d * 2 * di)?;
+            check(&p("in_proj_b"), lw.in_proj_b.len(), cfg.in_proj_bias_len())?;
             check(&p("conv1d_weight"), lw.conv1d_weight.len(), di * dc)?;
-            check(&p("conv1d_bias"), lw.conv1d_bias.len(), di)?;
+            check(&p("conv1d_bias"), lw.conv1d_bias.len(), cfg.conv_bias_len())?;
             check(&p("x_proj_w"), lw.x_proj_w.len(), di * xd)?;
             check(&p("dt_proj_w"), lw.dt_proj_w.len(), dr * di)?;
             check(&p("dt_proj_b"), lw.dt_proj_b.len(), di)?;
             check(&p("a_log"), lw.a_log.len(), di * ds)?;
             check(&p("d_param"), lw.d_param.len(), di)?;
             check(&p("out_proj_w"), lw.out_proj_w.len(), di * d)?;
+            check(
+                &p("out_proj_b"),
+                lw.out_proj_b.len(),
+                cfg.out_proj_bias_len(),
+            )?;
         }
 
         Ok(())
@@ -266,8 +282,18 @@ impl MambaWeights {
         let dc = cfg.d_conv;
         let dr = cfg.dt_rank();
         let xd = cfg.xdbl_dim();
-        let per_layer =
-            d + d * 2 * di + di * dc + di + di * xd + dr * di + di + di * ds + di + di * d;
+        let per_layer = d
+            + d * 2 * di
+            + cfg.in_proj_bias_len()
+            + di * dc
+            + cfg.conv_bias_len()
+            + di * xd
+            + dr * di
+            + di
+            + di * ds
+            + di
+            + di * d
+            + cfg.out_proj_bias_len();
         input_dim * d + d + cfg.n_layers * per_layer + d
     }
 }

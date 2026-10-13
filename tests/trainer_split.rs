@@ -49,6 +49,9 @@ fn test_cfg() -> MambaConfig {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     }
 }
 
@@ -83,6 +86,11 @@ fn assert_snapshots_bit_eq(a: &MambaWeights, b: &MambaWeights, ctx_msg: &str) {
                     lb.in_proj_w.as_slice(),
                 ),
                 (
+                    "in_proj_b",
+                    la.in_proj_b.as_slice(),
+                    lb.in_proj_b.as_slice(),
+                ),
+                (
                     "conv1d_weight",
                     la.conv1d_weight.as_slice(),
                     lb.conv1d_weight.as_slice(),
@@ -109,6 +117,11 @@ fn assert_snapshots_bit_eq(a: &MambaWeights, b: &MambaWeights, ctx_msg: &str) {
                     "out_proj_w",
                     la.out_proj_w.as_slice(),
                     lb.out_proj_w.as_slice(),
+                ),
+                (
+                    "out_proj_b",
+                    la.out_proj_b.as_slice(),
+                    lb.out_proj_b.as_slice(),
                 ),
             ]);
         }
@@ -220,6 +233,7 @@ fn forward_temporal_matches_cpu_training_forward() {
             .map(|lw| TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
+                in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
                 conv1d_bias: lw.conv1d_bias.clone(),
                 x_proj_w: lw.x_proj_w.clone(),
@@ -228,6 +242,7 @@ fn forward_temporal_matches_cpu_training_forward() {
                 a_log: lw.a_log.clone(),
                 d_param: lw.d_param.clone(),
                 out_proj_w: lw.out_proj_w.clone(),
+                out_proj_b: lw.out_proj_b.clone(),
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
@@ -439,6 +454,7 @@ fn assert_accumulation_two_micro_equals_one_big_batch(dtype: WeightDtype, tol: f
         for l in &s.layers {
             v.extend_from_slice(&l.norm_weight);
             v.extend_from_slice(&l.in_proj_w);
+            v.extend_from_slice(&l.in_proj_b);
             v.extend_from_slice(&l.conv1d_weight);
             v.extend_from_slice(&l.conv1d_bias);
             v.extend_from_slice(&l.x_proj_w);
@@ -447,6 +463,7 @@ fn assert_accumulation_two_micro_equals_one_big_batch(dtype: WeightDtype, tol: f
             v.extend_from_slice(&l.a_log);
             v.extend_from_slice(&l.d_param);
             v.extend_from_slice(&l.out_proj_w);
+            v.extend_from_slice(&l.out_proj_b);
         }
         v.extend_from_slice(&s.norm_f_weight);
         v
@@ -834,6 +851,7 @@ fn flat_weights(s: &MambaWeights) -> Vec<f32> {
     for l in &s.layers {
         v.extend_from_slice(&l.norm_weight);
         v.extend_from_slice(&l.in_proj_w);
+        v.extend_from_slice(&l.in_proj_b);
         v.extend_from_slice(&l.conv1d_weight);
         v.extend_from_slice(&l.conv1d_bias);
         v.extend_from_slice(&l.x_proj_w);
@@ -842,6 +860,7 @@ fn flat_weights(s: &MambaWeights) -> Vec<f32> {
         v.extend_from_slice(&l.a_log);
         v.extend_from_slice(&l.d_param);
         v.extend_from_slice(&l.out_proj_w);
+        v.extend_from_slice(&l.out_proj_b);
     }
     v.extend_from_slice(&s.norm_f_weight);
     v
@@ -984,7 +1003,7 @@ fn set_lr_under_graph_applies_on_next_replay() {
 }
 
 /// Reference no-decay groups: with the mask ON, masked tensors (a_log,
-/// d_param, dt_proj_b, norm scales) skip the decoupled decay term exactly
+/// d_param, every bias, norm scales) skip the decoupled decay term exactly
 /// (w_on - w_off == lr*wd*w0 elementwise), while unmasked tensors stay
 /// bit-identical to the mask-OFF run. The mask is on by default, so the
 /// OFF run turns it off explicitly.
@@ -1024,11 +1043,9 @@ fn reference_no_decay_masks_exactly_the_named_tensors() {
     let unmasked = |s: &MambaWeights| -> Vec<f32> {
         let mut v = Vec::new();
         v.extend_from_slice(&s.input_proj_w);
-        v.extend_from_slice(&s.input_proj_b);
         for l in &s.layers {
             v.extend_from_slice(&l.in_proj_w);
             v.extend_from_slice(&l.conv1d_weight);
-            v.extend_from_slice(&l.conv1d_bias);
             v.extend_from_slice(&l.x_proj_w);
             v.extend_from_slice(&l.dt_proj_w);
             v.extend_from_slice(&l.out_proj_w);
@@ -1049,8 +1066,20 @@ fn reference_no_decay_masks_exactly_the_named_tensors() {
 
     // Masked tensors: w_on - w_off == lr*wd*w0 (the decay term), elementwise.
     let masked_with_origin = |s: &MambaWeights, w0: &MambaWeights| -> Vec<(f32, f32)> {
-        let mut v: Vec<(f32, f32)> = Vec::new();
+        let mut v: Vec<(f32, f32)> = s
+            .input_proj_b
+            .iter()
+            .copied()
+            .zip(w0.input_proj_b.iter().copied())
+            .collect();
         for (l, l0) in s.layers.iter().zip(w0.layers.iter()) {
+            for (t, t0) in [
+                (&l.in_proj_b, &l0.in_proj_b),
+                (&l.conv1d_bias, &l0.conv1d_bias),
+                (&l.out_proj_b, &l0.out_proj_b),
+            ] {
+                v.extend(t.iter().copied().zip(t0.iter().copied()));
+            }
             v.extend(
                 l.norm_weight
                     .iter()

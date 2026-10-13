@@ -61,6 +61,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             .map(|lw| TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
+                in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
                 conv1d_bias: lw.conv1d_bias.clone(),
                 x_proj_w: lw.x_proj_w.clone(),
@@ -69,6 +70,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
                 a_log: lw.a_log.clone(),
                 d_param: lw.d_param.clone(),
                 out_proj_w: lw.out_proj_w.clone(),
+                out_proj_b: lw.out_proj_b.clone(),
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
@@ -343,6 +345,9 @@ fn run_oracle(input_dim: usize) {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     };
     let seq_len = 4;
     let dims = MambaDims::from_config(&cfg, seq_len, input_dim);

@@ -66,14 +66,22 @@ pub(crate) fn checkpoint_parts<'a>(
         let p = |n: &str| format!("layers.{i}.{n}");
         list.push(p("norm.weight"), &lw.norm_weight, &[dm])?;
         list.push(p("in_proj.weight"), &lw.in_proj_w, &[dm, 2 * di])?;
+        if cfg.proj_bias {
+            list.push(p("in_proj.bias"), &lw.in_proj_b, &[2 * di])?;
+        }
         list.push(p("conv1d.weight"), &lw.conv1d_weight, &[di, dc])?;
-        list.push(p("conv1d.bias"), &lw.conv1d_bias, &[di])?;
+        if cfg.conv_bias {
+            list.push(p("conv1d.bias"), &lw.conv1d_bias, &[di])?;
+        }
         list.push(p("x_proj.weight"), &lw.x_proj_w, &[di, xdbl_dim])?;
         list.push(p("dt_proj.weight"), &lw.dt_proj_w, &[dt_rank, di])?;
         list.push(p("dt_proj.bias"), &lw.dt_proj_b, &[di])?;
         list.push(p("a_log"), &lw.a_log, &[di, ds])?;
         list.push(p("D"), &lw.d_param, &[di])?;
         list.push(p("out_proj.weight"), &lw.out_proj_w, &[di, dm])?;
+        if cfg.proj_bias {
+            list.push(p("out_proj.bias"), &lw.out_proj_b, &[dm])?;
+        }
     }
     list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
 
@@ -81,16 +89,27 @@ pub(crate) fn checkpoint_parts<'a>(
     // of the checkpoint's numeric route: without them a model of another
     // eps would load with the default one, and a FalconMamba model as
     // Mamba-1.
-    let falcon = cfg
+    // The fields a model leaves at their defaults are not written, so a
+    // file of such a model reads as it always did.
+    let mut extra = cfg
         .bcdt_rms_eps
         .map(|eps| format!(r#","bcdt_rms_eps":{eps}"#))
         .unwrap_or_default();
+    if let Some(rank) = cfg.dt_rank {
+        extra.push_str(&format!(r#","dt_rank":{rank}"#));
+    }
+    if cfg.proj_bias {
+        extra.push_str(r#","proj_bias":true"#);
+    }
+    if !cfg.conv_bias {
+        extra.push_str(r#","conv_bias":false"#);
+    }
     let meta = HashMap::from([
         ("mamba_version".to_string(), VERSION.to_string()),
         (
             "config".to_string(),
             format!(
-                r#"{{"d_model":{},"d_state":{},"d_conv":{},"expand":{},"n_layers":{},"input_dim":{},"scan_mode":"{:?}","rms_norm_eps":{}{falcon}}}"#,
+                r#"{{"d_model":{},"d_state":{},"d_conv":{},"expand":{},"n_layers":{},"input_dim":{},"scan_mode":"{:?}","rms_norm_eps":{}{extra}}}"#,
                 dm, ds, dc, cfg.expand, cfg.n_layers, input_dim, cfg.scan_mode, cfg.rms_norm_eps
             ),
         ),
@@ -187,6 +206,12 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
         scan_mode,
         rms_norm_eps,
         bcdt_rms_eps: float("bcdt_rms_eps")?,
+        dt_rank: config_json
+            .contains(r#""dt_rank":"#)
+            .then(|| parse_field(config_json, "dt_rank"))
+            .transpose()?,
+        proj_bias: config_json.contains(r#""proj_bias":true"#),
+        conv_bias: !config_json.contains(r#""conv_bias":false"#),
     };
     cfg.validate()?;
 
@@ -226,11 +251,20 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
     for i in 0..n_layers {
         let a_log = read(&format!("layers.{i}.a_log"))?;
         let a_neg = a_log.iter().map(|v| -v.exp()).collect();
+        // A bias the config lacks is not in the file.
+        let optional = |on: bool, name: &str| -> Result<Vec<f32>, String> {
+            if on {
+                read(&format!("layers.{i}.{name}"))
+            } else {
+                Ok(Vec::new())
+            }
+        };
         layers.push(MambaLayerWeights {
             norm_weight: read(&format!("layers.{i}.norm.weight"))?,
             in_proj_w: read(&format!("layers.{i}.in_proj.weight"))?,
+            in_proj_b: optional(cfg.proj_bias, "in_proj.bias")?,
             conv1d_weight: read(&format!("layers.{i}.conv1d.weight"))?,
-            conv1d_bias: read(&format!("layers.{i}.conv1d.bias"))?,
+            conv1d_bias: optional(cfg.conv_bias, "conv1d.bias")?,
             x_proj_w: read(&format!("layers.{i}.x_proj.weight"))?,
             dt_proj_w: read(&format!("layers.{i}.dt_proj.weight"))?,
             dt_proj_b: read(&format!("layers.{i}.dt_proj.bias"))?,
@@ -238,6 +272,7 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
             a_neg,
             d_param: read(&format!("layers.{i}.D"))?,
             out_proj_w: read(&format!("layers.{i}.out_proj.weight"))?,
+            out_proj_b: optional(cfg.proj_bias, "out_proj.bias")?,
         });
     }
 
@@ -328,6 +363,60 @@ mod tests {
             std::fs::remove_file(&path).ok();
             let (_, cfg2, _) = loaded.unwrap();
             assert_eq!(cfg2, cfg);
+        }
+    }
+
+    /// The projection biases, a missing conv bias and an explicit dt rank
+    /// survive a save and a load, the tensors bit for bit; a file of a
+    /// model without them stays as it was written before they existed.
+    #[test]
+    fn bias_and_rank_options_round_trip() {
+        let variants = [
+            (Some(5), true, false),
+            (None, true, true),
+            (Some(3), false, false),
+            (None, false, true),
+        ];
+        for (dt_rank, proj_bias, conv_bias) in variants {
+            let cfg = MambaConfig {
+                dt_rank,
+                proj_bias,
+                conv_bias,
+                ..MambaConfig::default()
+            };
+            let mut w = MambaWeights::init(&cfg, 16, 9);
+            for lw in &mut w.layers {
+                for (i, b) in lw
+                    .in_proj_b
+                    .iter_mut()
+                    .chain(&mut lw.out_proj_b)
+                    .enumerate()
+                {
+                    *b = i as f32 * 0.01 - 0.3;
+                }
+            }
+            let (list, meta) = checkpoint_parts(&w, &cfg, 16).unwrap();
+            let config_json = &meta["config"];
+            if (dt_rank, proj_bias, conv_bias) == (None, false, true) {
+                for key in ["dt_rank", "proj_bias", "conv_bias"] {
+                    assert!(!config_json.contains(key), "{key} in {config_json}");
+                }
+            }
+            let path = std::env::temp_dir().join(format!(
+                "mamba1_options_{}_{dt_rank:?}_{proj_bias}_{conv_bias}.safetensors",
+                std::process::id()
+            ));
+            list.save(meta, &path).unwrap();
+            let loaded = load(&path);
+            std::fs::remove_file(&path).ok();
+            let (w2, cfg2, _) = loaded.unwrap();
+            assert_eq!(cfg2, cfg);
+            for (a, b) in w.layers.iter().zip(&w2.layers) {
+                assert_eq!(a.in_proj_b, b.in_proj_b);
+                assert_eq!(a.out_proj_b, b.out_proj_b);
+                assert_eq!(a.conv1d_bias, b.conv1d_bias);
+                assert_eq!(a.dt_proj_w, b.dt_proj_w);
+            }
         }
     }
 }

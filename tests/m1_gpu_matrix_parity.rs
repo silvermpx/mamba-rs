@@ -54,6 +54,9 @@ fn cases() -> Vec<(&'static str, MambaConfig)> {
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     };
     vec![
         ("d_inner 10", base),
@@ -75,6 +78,42 @@ fn cases() -> Vec<(&'static str, MambaConfig)> {
                 d_model: 33,
                 expand: 1,
                 d_state: 128,
+                bcdt_rms_eps: Some(1e-6),
+                ..base
+            },
+        ),
+        (
+            "in_proj and out_proj biases at odd widths",
+            MambaConfig {
+                d_model: 7,
+                expand: 3,
+                proj_bias: true,
+                ..base
+            },
+        ),
+        (
+            "no conv bias",
+            MambaConfig {
+                d_model: 8,
+                conv_bias: false,
+                ..base
+            },
+        ),
+        (
+            "dt_rank 6 against the default 1",
+            MambaConfig {
+                d_model: 10,
+                dt_rank: Some(6),
+                ..base
+            },
+        ),
+        (
+            "every variant with FalconMamba's norms",
+            MambaConfig {
+                d_model: 24,
+                dt_rank: Some(4),
+                proj_bias: true,
+                conv_bias: false,
                 bcdt_rms_eps: Some(1e-6),
                 ..base
             },
@@ -132,7 +171,7 @@ fn cases() -> Vec<(&'static str, MambaConfig)> {
     ]
 }
 
-/// Weights with the norms, the conv bias and D drawn away from their init.
+/// Weights with the norms, the biases and D drawn away from their init.
 fn drawn(cfg: &MambaConfig, input_dim: usize, seed: u64) -> MambaWeights {
     let mut w = MambaWeights::init(cfg, input_dim, seed);
     for (l, lw) in w.layers.iter_mut().enumerate() {
@@ -141,6 +180,8 @@ fn drawn(cfg: &MambaConfig, input_dim: usize, seed: u64) -> MambaWeights {
             (&mut lw.norm_weight, 1, 1.0, 0.2),
             (&mut lw.conv1d_bias, 2, 0.0, 0.3),
             (&mut lw.d_param, 3, 1.0, 0.5),
+            (&mut lw.in_proj_b, 4, 0.0, 0.3),
+            (&mut lw.out_proj_b, 5, 0.0, 0.3),
         ] {
             let d = det(v.len(), s + k, scale);
             for (x, dv) in v.iter_mut().zip(d) {
@@ -318,6 +359,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             .map(|lw| TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
+                in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
                 conv1d_bias: lw.conv1d_bias.clone(),
                 x_proj_w: lw.x_proj_w.clone(),
@@ -326,6 +368,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
                 a_log: lw.a_log.clone(),
                 d_param: lw.d_param.clone(),
                 out_proj_w: lw.out_proj_w.clone(),
+                out_proj_b: lw.out_proj_b.clone(),
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
@@ -342,6 +385,7 @@ fn named(g: &TrainMambaWeights) -> Vec<(String, &[f32])> {
         for (name, v) in [
             ("norm", &lw.norm_weight),
             ("in_proj_w", &lw.in_proj_w),
+            ("in_proj_b", &lw.in_proj_b),
             ("conv1d_w", &lw.conv1d_weight),
             ("conv1d_b", &lw.conv1d_bias),
             ("x_proj_w", &lw.x_proj_w),
@@ -350,6 +394,7 @@ fn named(g: &TrainMambaWeights) -> Vec<(String, &[f32])> {
             ("a_log", &lw.a_log),
             ("d", &lw.d_param),
             ("out_proj_w", &lw.out_proj_w),
+            ("out_proj_b", &lw.out_proj_b),
         ] {
             out.push((format!("layer{l}.{name}"), v.as_slice()));
         }

@@ -57,7 +57,7 @@ pub fn gpu_backward_mamba_layer(
     gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.d_gated,
-        (&d_lw.out_proj_w, None),
+        (&d_lw.out_proj_w, d_lw.out_proj_b_opt()),
         d_temporal,
         &acts.gated,
         lw.out_proj_w.cached_ptr(),
@@ -457,7 +457,7 @@ pub fn gpu_backward_mamba_layer(
                 x: (acts.proj.cached_ptr(), 2 * di),
                 conv_init: acts.conv_states.cached_ptr(),
                 weight: lw.conv1d_weight.cached_ptr(),
-                bias: lw.conv1d_bias.cached_ptr(),
+                bias: lw.conv1d_bias_ptr(),
                 dco: scratch.conv_dco.cached_ptr(),
             },
             (b, t, di, d_conv),
@@ -483,8 +483,9 @@ pub fn gpu_backward_mamba_layer(
             unsafe { builder.launch(cfg) }
                 .map_err(|e| format!("conv tap gradient reduce: {:?}", e))?;
         }
-        // Stage 2b: reduce bias partials [B, d_inner] → d_lw.conv1d_bias.
-        {
+        // Stage 2b: reduce bias partials [B, d_inner] → d_lw.conv1d_bias,
+        // for a model that has the bias.
+        if !d_lw.conv1d_bias.is_empty() {
             let block_dim = (b as u32).next_power_of_two().clamp(32, 256);
             let accumulate_i: i32 = 1;
             let p = d_lw.conv1d_bias.ptr();
@@ -513,7 +514,7 @@ pub fn gpu_backward_mamba_layer(
     gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.d_norm,
-        (&d_lw.in_proj_w, None),
+        (&d_lw.in_proj_w, d_lw.in_proj_b_opt()),
         &scratch.d_proj,
         &acts.post_norm,
         lw.in_proj_w.cached_ptr(),

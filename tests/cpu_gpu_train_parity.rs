@@ -65,6 +65,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             .map(|lw| TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
+                in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
                 conv1d_bias: lw.conv1d_bias.clone(),
                 x_proj_w: lw.x_proj_w.clone(),
@@ -73,6 +74,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
                 a_log: lw.a_log.clone(),
                 d_param: lw.d_param.clone(),
                 out_proj_w: lw.out_proj_w.clone(),
+                out_proj_b: lw.out_proj_b.clone(),
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
@@ -80,7 +82,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
 }
 
 /// Flatten a CPU `TrainMambaWeights` into the same linear order as the GPU
-/// `GpuMambaGrads.flat` allocation in `src/mamba1/gpu/weights.rs:509-545`.
+/// `GpuMambaGrads.flat` allocation (`GpuMambaGrads::new_sized`).
 fn flatten_cpu_grads(g: &TrainMambaWeights) -> Vec<f32> {
     let mut out = Vec::new();
     out.extend_from_slice(&g.input_proj_w);
@@ -88,6 +90,7 @@ fn flatten_cpu_grads(g: &TrainMambaWeights) -> Vec<f32> {
     for l in &g.layers {
         out.extend_from_slice(&l.norm_weight);
         out.extend_from_slice(&l.in_proj_w);
+        out.extend_from_slice(&l.in_proj_b);
         out.extend_from_slice(&l.conv1d_weight);
         out.extend_from_slice(&l.conv1d_bias);
         out.extend_from_slice(&l.x_proj_w);
@@ -96,6 +99,7 @@ fn flatten_cpu_grads(g: &TrainMambaWeights) -> Vec<f32> {
         out.extend_from_slice(&l.a_log);
         out.extend_from_slice(&l.d_param);
         out.extend_from_slice(&l.out_proj_w);
+        out.extend_from_slice(&l.out_proj_b);
     }
     out.extend_from_slice(&g.norm_f_weight);
     out
@@ -118,14 +122,16 @@ fn grad_segments(cfg: &MambaConfig, input_dim: usize) -> Vec<(String, usize)> {
         segs.extend([
             (format!("L{li}.norm_weight"), dm),
             (format!("L{li}.in_proj_w"), dm * 2 * di),
+            (format!("L{li}.in_proj_b"), cfg.in_proj_bias_len()),
             (format!("L{li}.conv1d_weight"), di * dc),
-            (format!("L{li}.conv1d_bias"), di),
+            (format!("L{li}.conv1d_bias"), cfg.conv_bias_len()),
             (format!("L{li}.x_proj_w"), di * xd),
             (format!("L{li}.dt_proj_w"), dr * di),
             (format!("L{li}.dt_proj_b"), di),
             (format!("L{li}.a_log"), di * ds),
             (format!("L{li}.d_param"), di),
             (format!("L{li}.out_proj_w"), di * dm),
+            (format!("L{li}.out_proj_b"), cfg.out_proj_bias_len()),
         ]);
     }
     segs.push(("norm_f_weight".into(), dm));
@@ -179,6 +185,9 @@ fn m1_cpu_gpu_backward_parity_f32() {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     };
     let input_dim = cfg.d_model;
     let batch = 1;

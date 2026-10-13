@@ -207,6 +207,9 @@ fn gpu_inference_prefill_matches_gpu_training_forward_sequential() {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     };
     run_case(&cfg, 20, 8, 0xC0FFEE, "seq-scan");
 }
@@ -224,6 +227,9 @@ fn gpu_inference_prefill_matches_gpu_training_forward_parallel_scan() {
         scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
+        dt_rank: None,
+        proj_bias: false,
+        conv_bias: true,
     };
     let t = mamba_rs::mamba1::gpu::forward::PARALLEL_SCAN_THRESHOLD + 77;
     run_case(&cfg, 20, t, 0xBEEF, "parallel-scan");

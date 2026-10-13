@@ -54,6 +54,9 @@ mod model_gemm_manifest_tests {
             scan_mode: ScanMode::Sequential,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
+            dt_rank: None,
+            proj_bias: false,
+            conv_bias: true,
         }
     }
 
@@ -1321,7 +1324,7 @@ impl MambaGpuEngine {
                 &scratch.temporal,
                 ipw,
                 ipw_dt,
-                None,
+                lw.in_proj_b(),
                 (b, dm, 2 * di),
             )?;
 
@@ -1476,7 +1479,7 @@ impl MambaGpuEngine {
                 &scratch.y,
                 opw,
                 opw_dt,
-                None,
+                lw.out_proj_b(),
                 (b, di, dm),
             )?;
         }
@@ -1975,7 +1978,7 @@ impl MambaGpuEngineMixed {
                     ptr: ipw,
                     dtype: ipw_dt,
                 },
-                None,
+                lw.in_proj_b(),
                 (b, dm, 2 * di),
             )?;
 
@@ -2160,7 +2163,7 @@ impl MambaGpuEngineMixed {
                     ptr: opw,
                     dtype: opw_dt,
                 },
-                None,
+                lw.out_proj_b(),
                 (b, di, dm),
             )?;
         }

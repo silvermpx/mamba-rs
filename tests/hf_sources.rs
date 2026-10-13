@@ -389,7 +389,17 @@ fn a_corrupt_safetensors_header_is_refused() {
 /// A small Mamba-1 checkpoint's tensors under the original repositories'
 /// names: two layers of d_model 16, d_state 4, d_conv 4, expand 2.
 fn mamba1_tensors(embedding_name: &str, dtype: Dtype) -> Vec<Tensor> {
-    let (d, di, ds, w, dr, vocab) = (16, 32, 4, 4, 1, 32);
+    mamba1_tensors_with(embedding_name, dtype, (1, false, true))
+}
+
+/// [`mamba1_tensors`] at dt rank `dr`, with the in_proj and out_proj
+/// biases when `proj_bias` and the conv bias only when `conv_bias`.
+fn mamba1_tensors_with(
+    embedding_name: &str,
+    dtype: Dtype,
+    (dr, proj_bias, conv_bias): (usize, bool, bool),
+) -> Vec<Tensor> {
+    let (d, di, ds, w, vocab) = (16, 32, 4, 4, 32);
     let mut ts = vec![
         Tensor::new(embedding_name, &[vocab, d], dtype, 100),
         Tensor::new("backbone.norm_f.weight", &[d], dtype, 101),
@@ -408,11 +418,98 @@ fn mamba1_tensors(embedding_name: &str, dtype: Dtype) -> Vec<Tensor> {
             (p("mixer.D"), vec![di], 7),
             (p("mixer.out_proj.weight"), vec![d, di], 8),
             (p("norm.weight"), vec![d], 9),
+            (p("mixer.in_proj.bias"), vec![2 * di], 10),
+            (p("mixer.out_proj.bias"), vec![d], 11),
         ] {
-            ts.push(Tensor::new(&name, &shape, dtype, s + k));
+            let absent = match k {
+                2 => !conv_bias,
+                10 | 11 => !proj_bias,
+                _ => false,
+            };
+            if !absent {
+                ts.push(Tensor::new(&name, &shape, dtype, s + k));
+            }
         }
     }
     ts
+}
+
+/// The projection biases, a missing conv bias and a dt rank of its own load
+/// from either format's flags, the biases as they are stored; a checkpoint
+/// whose tensors disagree with its flags is refused.
+#[test]
+fn mamba1_bias_and_rank_options_load() {
+    let opts = (3, true, false);
+    let ts = mamba1_tensors_with("backbone.embeddings.weight", Dtype::F32, opts);
+    let hf = scratch("m1-options-hf");
+    write_safetensors(&hf.join("model.safetensors"), &refs(&ts));
+    let hf_config = r#"{"model_type": "mamba", "hidden_size": 16, "num_hidden_layers": 2,
+        "state_size": 4, "conv_kernel": 4, "expand": 2, "time_step_rank": 3,
+        "vocab_size": 32, "use_bias": true, "use_conv_bias": false}"#;
+    std::fs::write(hf.join("config.json"), hf_config).unwrap();
+    let original = scratch("m1-options-original");
+    write_safetensors(&original.join("model.safetensors"), &refs(&ts));
+    std::fs::write(
+        original.join("config.json"),
+        br#"{"d_model": 16, "n_layer": 2, "vocab_size": 32, "pad_vocab_size_multiple": 8,
+            "ssm_cfg": {"d_state": 4, "dt_rank": 3, "bias": true, "conv_bias": false}}"#,
+    )
+    .unwrap();
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let tensor = |name: &str| {
+        ts.iter()
+            .find(|t| t.name == name)
+            .map(|t| t.read_back())
+            .unwrap()
+    };
+    let (a, b) = (load_hf(&hf).unwrap(), load_hf(&original).unwrap());
+    for m in [&a, &b] {
+        let cfg = m.backbone.config();
+        assert_eq!(
+            (cfg.dt_rank(), cfg.proj_bias, cfg.conv_bias),
+            (3, true, false)
+        );
+        for (i, lw) in m.backbone.weights().layers.iter().enumerate() {
+            let p = |n: &str| format!("backbone.layers.{i}.mixer.{n}");
+            assert_eq!(bits(&lw.in_proj_b), bits(&tensor(&p("in_proj.bias"))));
+            assert_eq!(bits(&lw.out_proj_b), bits(&tensor(&p("out_proj.bias"))));
+            assert!(lw.conv1d_bias.is_empty());
+            assert_eq!(lw.dt_proj_w.len(), 3 * 32);
+        }
+    }
+    for (la, lb) in a
+        .backbone
+        .weights()
+        .layers
+        .iter()
+        .zip(&b.backbone.weights().layers)
+    {
+        assert_eq!(bits(&la.dt_proj_w), bits(&lb.dt_proj_w));
+        assert_eq!(bits(&la.x_proj_w), bits(&lb.x_proj_w));
+    }
+
+    // Flags the tensors contradict are refused: a conv bias the file
+    // lacks, a conv bias the flags say the model has not, biases the file
+    // lacks.
+    let refused = |tag: &str, tensors: &[Tensor], config: &str, needle: &str| {
+        let dir = scratch(tag);
+        write_safetensors(&dir.join("model.safetensors"), &refs(tensors));
+        std::fs::write(dir.join("config.json"), config).unwrap();
+        let err = load_hf(&dir).err().unwrap();
+        assert!(err.contains(needle), "{tag}: {err}");
+    };
+    let conv_on = hf_config.replace("\"use_conv_bias\": false", "\"use_conv_bias\": true");
+    refused("m1-options-no-conv-tensor", &ts, &conv_on, "conv1d_bias");
+    let name = "backbone.embeddings.weight";
+    let extra_conv = mamba1_tensors_with(name, Dtype::F32, (3, true, true));
+    refused(
+        "m1-options-extra-conv",
+        &extra_conv,
+        hf_config,
+        "conv1d_bias",
+    );
+    let unbiased = mamba1_tensors_with(name, Dtype::F32, (3, false, false));
+    refused("m1-options-no-biases", &unbiased, hf_config, "in_proj_b");
 }
 
 /// The original `state-spaces/mamba-*` layout (config in the mamba_ssm

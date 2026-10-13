@@ -32,12 +32,19 @@ pub struct MambaDims {
     /// FalconMamba's dt, B and C norm epsilon, `None` for Mamba-1 (see
     /// [`MambaConfig::bcdt_rms_eps`]).
     pub bcdt_rms_eps: Option<f32>,
+    /// Biases on in_proj and out_proj (see [`MambaConfig::proj_bias`]).
+    pub proj_bias: bool,
+    /// A bias on the conv (see [`MambaConfig::conv_bias`]).
+    pub conv_bias: bool,
 }
 
 impl MambaDims {
     /// Build from individual dimension values.
     ///
-    /// Accepts a tuple to stay within clippy's 7-argument limit.
+    /// Accepts a tuple to stay within clippy's 7-argument limit. The
+    /// options take the reference's defaults (no projection biases, a conv
+    /// bias); a model with others builds its dims with
+    /// [`Self::from_config`], which the training entry points check.
     /// Order: `(d_model, d_inner, d_state, d_conv, dt_rank, seq_len, mamba_input_dim, n_layers)`.
     pub fn new(
         (d_model, d_inner, d_state, d_conv, dt_rank, seq_len, mamba_input_dim, n_layers): (
@@ -63,6 +70,8 @@ impl MambaDims {
             n_layers,
             rms_norm_eps: crate::ops::fast_math::RMS_NORM_EPS,
             bcdt_rms_eps: None,
+            proj_bias: false,
+            conv_bias: true,
         }
     }
 
@@ -80,6 +89,8 @@ impl MambaDims {
         ));
         dims.rms_norm_eps = config.rms_norm_eps;
         dims.bcdt_rms_eps = config.bcdt_rms_eps;
+        dims.proj_bias = config.proj_bias;
+        dims.conv_bias = config.conv_bias;
         dims
     }
 }

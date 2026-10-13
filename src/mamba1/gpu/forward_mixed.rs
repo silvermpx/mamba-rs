@@ -28,7 +28,7 @@ use crate::gpu::dtype::WeightDtype;
 use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_norm, launch_cast, y_runs};
 use crate::mamba1::gpu::forward::{GpuMambaDims, GpuRecurrentState};
 use crate::mamba1::gpu::mixer_norms::launch_bcdt_norm;
-use crate::mamba1::gpu::weights::GpuMambaMixedWeights;
+use crate::mamba1::gpu::weights::{GpuMambaMixedWeights, MambaLayerWeightsView};
 use crate::mamba1::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 
 /// Mixed-precision saved activations for one Mamba layer.
@@ -502,7 +502,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 ptr: lw.in_proj_w.ptr(),
                 dtype: dt,
             },
-            None,
+            lw.in_proj_b(),
             (bt, dm, 2 * di),
         )?;
 
@@ -518,7 +518,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 saved: layer_acts.conv_states.cached_ptr(),
                 x: (layer_acts.proj.cached_ptr(), 2 * di),
                 weight: lw.conv1d_weight.ptr(),
-                bias: lw.conv1d_bias.ptr(),
+                bias: lw.conv1d_bias(),
             },
             (b, t, di, d_conv),
             format_args!("training L{layer_idx}"),
@@ -759,7 +759,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 ptr: lw.out_proj_w.ptr(),
                 dtype: dt,
             },
-            None,
+            lw.out_proj_b(),
             (bt, di, dm),
         )?;
 
