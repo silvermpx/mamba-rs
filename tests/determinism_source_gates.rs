@@ -10,6 +10,18 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 
+/// Atomics that order no arithmetic: a completion counter whose result
+/// only picks which block stores values every block computed alike. The
+/// MIMO scan's tiles of one head all build the same carried keys and
+/// angles, and the last tile to finish stores them, after every tile has
+/// read the incoming ones; which tile that is never changes a value. Each
+/// entry names the file and the exact source line; an entry that matches
+/// nothing fails, so the list can only shrink with the code it excuses.
+const COMPLETION_COUNTERS: &[(&str, &str)] = &[(
+    "kernels/mamba3_mimo.cu",
+    "const bool last = atomicAdd(&done[bh], 1u) == (unsigned int)tiles - 1u;",
+)];
+
 /// The one law with no other enforcement: no numeric atomics anywhere
 /// in the kernel tree. Every reduction is a fixed-order tree or a
 /// single-owner store; an atomic would make the result depend on the
@@ -18,6 +30,7 @@ fn root() -> PathBuf {
 fn kernels_contain_no_numeric_atomics() {
     let dir = root().join("kernels");
     let mut offenders = Vec::new();
+    let mut used = vec![false; COMPLETION_COUNTERS.len()];
     let mut stack = vec![dir];
     while let Some(d) = stack.pop() {
         for entry in std::fs::read_dir(&d).expect("kernel dir") {
@@ -49,17 +62,28 @@ fn kernels_contain_no_numeric_atomics() {
                                 && (j == 0
                                     || !line.as_bytes()[j - 1].is_ascii_alphanumeric())
                         });
-                if hit {
-                    offenders.push(format!(
-                        "{}:{}: {}",
-                        path.strip_prefix(root()).unwrap().display(),
-                        i + 1,
-                        raw.trim()
-                    ));
+                let file = path.strip_prefix(root()).unwrap().display().to_string();
+                let counter = COMPLETION_COUNTERS
+                    .iter()
+                    .position(|(f, l)| *f == file && *l == raw.trim());
+                match (hit, counter) {
+                    (true, Some(k)) => used[k] = true,
+                    (true, None) => offenders.push(format!("{file}:{}: {}", i + 1, raw.trim())),
+                    (false, _) => {}
                 }
             }
         }
     }
+    let stale: Vec<_> = COMPLETION_COUNTERS
+        .iter()
+        .zip(&used)
+        .filter(|(_, used)| !**used)
+        .map(|(entry, _)| entry)
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "completion counters that match no kernel line: {stale:?}"
+    );
     assert!(
         offenders.is_empty(),
         "numeric atomic or reduction opcode in the kernel tree - the \
