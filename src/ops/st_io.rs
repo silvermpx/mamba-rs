@@ -51,6 +51,12 @@ impl<'a> TensorList<'a> {
         Ok(())
     }
 
+    /// The values of every tensor in the list.
+    #[cfg(test)]
+    pub(crate) fn elements(&self) -> usize {
+        self.tensors.iter().map(|(_, v)| v.data().len() / 4).sum()
+    }
+
     /// Write the tensors and `meta` to `path`.
     pub(crate) fn save(self, meta: HashMap<String, String>, path: &Path) -> Result<(), String> {
         serialize_to_file(self.tensors, Some(meta), path)

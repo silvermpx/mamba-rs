@@ -2,7 +2,7 @@
 //!
 //! Source: Lahoti et al., "Mamba-3", ICLR 2026 (arXiv 2603.15569).
 
-use crate::config::ScanMode;
+use crate::config::{ScanMode, envelope};
 
 /// Configuration for a Mamba-3 SISO backbone.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,6 +95,33 @@ impl Mamba3Config {
         if self.headdim < 1 {
             return Err("headdim must be >= 1".into());
         }
+        if self.n_layers < 1 {
+            return Err("n_layers must be >= 1".into());
+        }
+        if self.d_model < 1 {
+            return Err("d_model must be >= 1".into());
+        }
+        if self.expand < 1 {
+            return Err("expand must be >= 1".into());
+        }
+        if self.ngroups < 1 {
+            return Err("ngroups must be >= 1".into());
+        }
+        if self.d_model > envelope::MAX_WIDTH {
+            return Err(format!("d_model ({}) must be <= 2^20", self.d_model));
+        }
+        if self.d_intermediate > envelope::MAX_WIDTH {
+            return Err(format!(
+                "d_intermediate ({}) must be <= 2^20",
+                self.d_intermediate
+            ));
+        }
+        if self.n_layers > envelope::MAX_LAYERS {
+            return Err(format!("n_layers ({}) must be <= 4096", self.n_layers));
+        }
+        self.d_model
+            .checked_mul(self.expand)
+            .ok_or("expand * d_model overflows usize")?;
         if !self.d_inner().is_multiple_of(self.headdim) {
             return Err(format!(
                 "d_inner ({}) must be divisible by headdim ({})",
@@ -120,9 +147,6 @@ impl Mamba3Config {
                 self.d_state
             ));
         }
-        if self.ngroups < 1 {
-            return Err("ngroups must be >= 1".into());
-        }
         if !self.nheads().is_multiple_of(self.ngroups) {
             return Err(format!(
                 "nheads ({}) must be divisible by ngroups ({})",
@@ -136,22 +160,12 @@ impl Mamba3Config {
                 self.rope_fraction
             ));
         }
-        if self.a_floor <= 0.0 {
-            return Err(format!("a_floor must be positive, got {}", self.a_floor));
-        }
-        if self.n_layers < 1 {
-            return Err("n_layers must be >= 1".into());
-        }
-        if self.d_model < 1 {
-            return Err("d_model must be >= 1".into());
-        }
-        if self.expand < 1 {
-            return Err("expand must be >= 1".into());
-        }
-        if self.d_intermediate > (1 << 20) {
+        // The reference clamps A at -A_floor; zero is legal and never
+        // clamps, as for MIMO.
+        if !self.a_floor.is_finite() || self.a_floor < 0.0 {
             return Err(format!(
-                "d_intermediate ({}) must be <= 2^20",
-                self.d_intermediate
+                "a_floor must be finite and non-negative, got {}",
+                self.a_floor
             ));
         }
         if !self.rms_norm_eps.is_finite() || self.rms_norm_eps <= 0.0 {
@@ -160,7 +174,31 @@ impl Mamba3Config {
                 self.rms_norm_eps
             ));
         }
-        Ok(())
+        envelope::check_param_bytes(self.layer_params(), self.n_layers)
+    }
+
+    /// One layer's parameters, exact in u128 (`None` past it): the norms,
+    /// the in and out projections, dt bias, the B and C norms and biases,
+    /// D, the gate norm and the gated MLP.
+    pub(crate) fn layer_params(&self) -> Option<u128> {
+        let w = |v: usize| v as u128;
+        let (d, ds, ng) = (w(self.d_model), w(self.d_state), w(self.ngroups));
+        let di = d.checked_mul(w(self.expand))?;
+        let nh = di.checked_div(w(self.headdim))?;
+        let na = w(self.num_rope_angles());
+        let ip = envelope::sum_of_products(&[&[2, di], &[2, ng, ds], &[3, nh], &[na]])?;
+        let h = w(self.mlp_hidden());
+        envelope::sum_of_products(&[
+            &[d],
+            &[d, ip],
+            &[2, nh],
+            &[2, ds],
+            &[2, nh, ds],
+            &[di],
+            &[di, d],
+            &[if h > 0 { d } else { 0 }],
+            &[3, d, h],
+        ])
     }
 
     /// Resolve the training-time scan choice from `scan_mode`.
@@ -316,5 +354,78 @@ mod tests {
         .validate()
         .unwrap_err();
         assert!(err.contains("rope_fraction"), "{err}");
+    }
+    /// `validate` never panics, and every config it passes derives its
+    /// widths and tensor sizes exactly, each tensor within one allocation.
+    #[test]
+    fn validate_passes_only_exact_widths() {
+        use crate::config::envelope_sweep::{FLOATS, sweep};
+        let fields: [fn(&mut Mamba3Config, usize); 7] = [
+            |c, v| c.d_model = v,
+            |c, v| c.d_state = v,
+            |c, v| c.expand = v,
+            |c, v| c.headdim = v,
+            |c, v| c.ngroups = v,
+            |c, v| c.n_layers = v,
+            |c, v| c.d_intermediate = v,
+        ];
+        sweep(Mamba3Config::default(), &fields, |c| {
+            if c.validate().is_err() {
+                return;
+            }
+            let (d, di, ip) = (c.d_model, c.d_inner(), c.in_proj_out_dim());
+            let _ = (c.nheads(), c.num_rope_angles());
+            assert!(c.layer_params().is_some());
+            for (a, b) in [
+                (d, ip),
+                (di, d),
+                (c.nheads(), c.d_state),
+                (d, 2 * c.mlp_hidden()),
+            ] {
+                let n = a.saturating_mul(b);
+                assert!(n <= isize::MAX as usize / 4, "{c:?}");
+            }
+        });
+        for v in FLOATS {
+            let a_floor = Mamba3Config {
+                a_floor: v,
+                ..Mamba3Config::default()
+            };
+            assert_eq!(a_floor.validate().is_ok(), v.is_finite() && v >= 0.0, "{v}");
+            let eps = Mamba3Config {
+                rms_norm_eps: v,
+                ..Mamba3Config::default()
+            };
+            assert_eq!(eps.validate().is_ok(), v.is_finite() && v > 0.0, "{v}");
+            let rope = Mamba3Config {
+                rope_fraction: v,
+                ..Mamba3Config::default()
+            };
+            assert_eq!(rope.validate().is_ok(), v == 0.5 || v == 1.0, "{v}");
+        }
+    }
+
+    /// The parameters `validate` bounds are the ones the weights hold.
+    #[test]
+    fn layer_params_count_every_tensor() {
+        let odd = Mamba3Config {
+            d_model: 40,
+            d_state: 6,
+            headdim: 20,
+            ngroups: 2,
+            n_layers: 2,
+            rope_fraction: 1.0,
+            d_intermediate: 100,
+            ..Mamba3Config::default()
+        };
+        for cfg in [Mamba3Config::default(), odd] {
+            let input_dim = 5;
+            let w = crate::mamba3_siso::weights::Mamba3Weights::zeros(&cfg, input_dim);
+            let (list, _) = crate::mamba3_siso::serialize::checkpoint_parts(&w, &cfg, input_dim)
+                .expect("the weights match their config");
+            let outer = (input_dim * cfg.d_model + 2 * cfg.d_model) as u128;
+            let layers = cfg.n_layers as u128 * cfg.layer_params().expect("a small model");
+            assert_eq!(list.elements() as u128, outer + layers, "{cfg:?}");
+        }
     }
 }

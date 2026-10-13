@@ -148,6 +148,7 @@ impl Mamba3Weights {
 
     /// Verify weight dimensions match the config.
     pub fn validate(&self, cfg: &Mamba3Config, input_dim: usize) -> Result<(), String> {
+        cfg.validate()?;
         let d = cfg.d_model;
         let di = cfg.d_inner();
         let ds = cfg.d_state;
@@ -168,7 +169,11 @@ impl Mamba3Weights {
         if self.input_proj_w.is_empty() && self.input_proj_b.is_empty() {
             ck("identity input width", input_dim, d)?;
         } else {
-            ck("input_proj_w", self.input_proj_w.len(), input_dim * d)?;
+            ck(
+                "input_proj_w",
+                self.input_proj_w.len(),
+                input_dim.saturating_mul(d),
+            )?;
             ck("input_proj_b", self.input_proj_b.len(), d)?;
         }
         ck("norm_f_weight", self.norm_f_weight.len(), d)?;

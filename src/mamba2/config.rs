@@ -3,7 +3,7 @@
 //! Source: Dao & Gu, "Transformers are SSMs", ICML 2024 (arXiv 2405.21060);
 //! the reference is state-spaces/mamba `mamba_ssm/modules/mamba2.py`.
 
-use crate::config::ScanMode;
+use crate::config::{ScanMode, envelope};
 
 /// Configuration for a Mamba-2 backbone.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -108,11 +108,24 @@ impl Mamba2Config {
         crate::mlp::mlp_hidden(self.d_intermediate)
     }
 
-    /// Validate the model envelope: the shapes the reference accepts.
+    /// Validate the model envelope: the shapes the reference accepts,
+    /// inside the bounds every family keeps (`d_model` and
+    /// `d_intermediate` at most 2^20, at most 4096 layers, the layers' f32
+    /// parameters within one allocation). Every bound on a field is checked
+    /// before a width is derived from it.
     pub fn validate(&self) -> Result<(), String> {
         if self.d_model < 1 || self.expand < 1 || self.n_layers < 1 {
             return Err("d_model, expand and n_layers must be >= 1".into());
         }
+        if self.d_intermediate > envelope::MAX_WIDTH || self.d_model > envelope::MAX_WIDTH {
+            return Err("d_model and d_intermediate must be <= 2^20".into());
+        }
+        if self.n_layers > envelope::MAX_LAYERS {
+            return Err(format!("n_layers ({}) must be <= 4096", self.n_layers));
+        }
+        self.d_model
+            .checked_mul(self.expand)
+            .ok_or("expand * d_model overflows usize")?;
         if self.ssm_dim() > self.d_inner() {
             return Err(format!(
                 "d_ssm ({}) must not exceed d_inner ({})",
@@ -152,10 +165,42 @@ impl Mamba2Config {
                 return Err(format!("{name} must be positive, got {eps}"));
             }
         }
-        if self.d_intermediate > (1 << 20) || self.d_model > (1 << 20) {
-            return Err("d_model and d_intermediate must be <= 2^20".into());
-        }
-        Ok(())
+        envelope::check_param_bytes(self.layer_params(), self.n_layers)
+    }
+
+    /// One layer's parameters, exact in u128 (`None` past it): the norms,
+    /// the in and out projections with their biases, the conv, dt bias, A,
+    /// D and the gated MLP.
+    pub(crate) fn layer_params(&self) -> Option<u128> {
+        let w = |v: usize| v as u128;
+        let on = |n: u128, flag: bool| if flag { n } else { 0 };
+        let (d, ds, dc, hd) = (
+            w(self.d_model),
+            w(self.d_state),
+            w(self.d_conv),
+            w(self.headdim),
+        );
+        let di = d.checked_mul(w(self.expand))?;
+        let ssm = if self.d_ssm == 0 { di } else { w(self.d_ssm) };
+        let d_mlp = di.checked_sub(ssm)?;
+        let nh = ssm.checked_div(hd)?;
+        let cd = envelope::sum_of_products(&[&[ssm], &[2, w(self.ngroups), ds]])?;
+        let ip = envelope::sum_of_products(&[&[2, d_mlp], &[ssm], &[cd], &[nh]])?;
+        let h = w(self.mlp_hidden());
+        envelope::sum_of_products(&[
+            &[d],
+            &[d, ip],
+            &[on(ip, self.proj_bias)],
+            &[cd, dc],
+            &[on(cd, self.conv_bias)],
+            &[2, nh],
+            &[if self.d_has_hdim { ssm } else { nh }],
+            &[on(ssm, self.rmsnorm)],
+            &[di, d],
+            &[on(d, self.proj_bias)],
+            &[on(d, h > 0)],
+            &[3, d, h],
+        ])
     }
 }
 
@@ -222,6 +267,88 @@ mod tests {
             },
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
+        }
+    }
+    /// `validate` never panics, and every config it passes derives its
+    /// widths and tensor sizes exactly, each tensor within one allocation.
+    #[test]
+    fn validate_passes_only_exact_widths() {
+        use crate::config::envelope_sweep::{FLOATS, sweep};
+        let fields: [fn(&mut Mamba2Config, usize); 9] = [
+            |c, v| c.d_model = v,
+            |c, v| c.d_state = v,
+            |c, v| c.d_conv = v,
+            |c, v| c.expand = v,
+            |c, v| c.headdim = v,
+            |c, v| c.d_ssm = v,
+            |c, v| c.ngroups = v,
+            |c, v| c.n_layers = v,
+            |c, v| c.d_intermediate = v,
+        ];
+        sweep(Mamba2Config::default(), &fields, |c| {
+            if c.validate().is_err() {
+                return;
+            }
+            let (d, di, ip, cd) = (c.d_model, c.d_inner(), c.in_proj_out_dim(), c.conv_dim());
+            let _ = (c.ssm_dim(), c.d_mlp(), c.nheads());
+            assert!(c.layer_params().is_some());
+            for (a, b) in [(d, ip), (cd, c.d_conv), (di, d), (d, 2 * c.mlp_hidden())] {
+                let n = a.saturating_mul(b);
+                assert!(n <= isize::MAX as usize / 4, "{c:?}");
+            }
+        });
+        for eps in FLOATS {
+            for c in [
+                Mamba2Config {
+                    rms_norm_eps: eps,
+                    ..Mamba2Config::default()
+                },
+                Mamba2Config {
+                    gated_norm_eps: eps,
+                    ..Mamba2Config::default()
+                },
+            ] {
+                assert_eq!(c.validate().is_ok(), eps.is_finite() && eps > 0.0, "{eps}");
+            }
+            for limit in [(eps, f32::INFINITY), (0.0, eps)] {
+                let _ = Mamba2Config {
+                    dt_limit: limit,
+                    ..Mamba2Config::default()
+                }
+                .validate();
+            }
+        }
+    }
+
+    /// The parameters `validate` bounds are the ones the weights hold.
+    #[test]
+    fn layer_params_count_every_tensor() {
+        let full = Mamba2Config {
+            d_model: 48,
+            d_state: 8,
+            d_conv: 3,
+            headdim: 16,
+            d_ssm: 64,
+            ngroups: 2,
+            n_layers: 2,
+            d_has_hdim: true,
+            proj_bias: true,
+            d_intermediate: 100,
+            ..Mamba2Config::default()
+        };
+        let bare = Mamba2Config {
+            rmsnorm: false,
+            conv_bias: false,
+            ..Mamba2Config::default()
+        };
+        for cfg in [Mamba2Config::default(), full, bare] {
+            let input_dim = 5;
+            let w = crate::mamba2::weights::Mamba2Weights::zeros(&cfg, input_dim);
+            let (list, _) = crate::mamba2::serialize::checkpoint_parts(&w, &cfg, input_dim)
+                .expect("the weights match their config");
+            let outer = (input_dim * cfg.d_model + 2 * cfg.d_model) as u128;
+            let layers = cfg.n_layers as u128 * cfg.layer_params().expect("a small model");
+            assert_eq!(list.elements() as u128, outer + layers, "{cfg:?}");
         }
     }
 }

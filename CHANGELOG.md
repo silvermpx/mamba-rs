@@ -410,6 +410,11 @@
   `gpu::adamw::AdamWStateBlob` and `gpu::train_state` still reach them.
 - A fused `step` with an accumulation window open adds its micro-batch to
   the window and applies it in every family; Mamba-1 and SISO refused it.
+- `validate` keeps one envelope in every family: `d_model` and
+  `d_intermediate` at most 2^20, at most 4096 layers, and the layers' f32
+  parameters within one allocation. Mamba-1 refuses an `rms_norm_eps`
+  that is not positive, SISO and MIMO an `a_floor` that is not finite,
+  and SISO takes `a_floor = 0`, as the reference and MIMO do.
 
 ### Fixed
 
@@ -479,6 +484,9 @@
   K, V and angle states and the trapezoidal term its first step reads
   from the step before, and the backward takes that term's gradient into
   the first step's dt and trapezoid gate.
+- `validate` of Mamba-2, SISO and MIMO derived `d_inner` from unbounded
+  fields before any bound, so a config read from a file could overflow
+  before it was refused; SISO took a NaN `a_floor`.
 
 ## 0.7.5 (2026-09-23)
 

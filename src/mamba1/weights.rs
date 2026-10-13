@@ -186,6 +186,7 @@ impl MambaWeights {
     ///
     /// Returns `Err` if any tensor has the wrong size.
     pub fn validate(&self, cfg: &MambaConfig, input_dim: usize) -> Result<(), String> {
+        cfg.validate()?;
         let d = cfg.d_model;
         let di = cfg.d_inner();
         let ds = cfg.d_state;
@@ -209,7 +210,11 @@ impl MambaWeights {
                 d,
             )?;
         } else {
-            check("input_proj_w", self.input_proj_w.len(), input_dim * d)?;
+            check(
+                "input_proj_w",
+                self.input_proj_w.len(),
+                input_dim.saturating_mul(d),
+            )?;
             check("input_proj_b", self.input_proj_b.len(), d)?;
         }
         check("norm_f_weight", self.norm_f_weight.len(), d)?;

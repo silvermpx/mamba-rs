@@ -157,7 +157,11 @@ impl Mamba3MimoWeights {
         if self.input_proj_w.is_empty() && self.input_proj_b.is_empty() {
             ck("identity input width", input_dim, d)?;
         } else {
-            ck("input_proj_w", self.input_proj_w.len(), input_dim * d)?;
+            ck(
+                "input_proj_w",
+                self.input_proj_w.len(),
+                input_dim.saturating_mul(d),
+            )?;
             ck("input_proj_b", self.input_proj_b.len(), d)?;
         }
         ck("norm_f_weight", self.norm_f_weight.len(), d)?;
