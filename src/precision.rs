@@ -21,9 +21,11 @@ pub enum WeightDtype {
     /// f32 storage with deterministic TF32 products. In the deterministic
     /// GEMM mode each operand is rounded to TF32 once, the tensor cores
     /// multiply, and the sums accumulate in f32 in a fixed order; the same
-    /// bits come back run to run, eager or graph. This is permission, not
-    /// a forced backend: a shape or board without a measured TF32 kernel
-    /// takes the exact f32 kernel. It is not the vendor's Fast TF32. Under
+    /// bits come back run to run, eager or graph. A model context (the
+    /// backbones and the language model) runs TF32 for every f32 product of
+    /// its layers; a trainer only where a measured TF32 kernel exists for
+    /// the shape and the board, the exact f32 kernel elsewhere, as for the
+    /// language model's tied head. It is not the vendor's Fast TF32. Under
     /// [`GemmMode::CublasFast`]
     /// the vendor's TF32 already applies to every f32 product; under
     /// `CublasPedantic` the products are pedantic f32. Memory, buffers and
