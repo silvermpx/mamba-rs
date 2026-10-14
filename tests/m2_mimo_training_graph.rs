@@ -4,12 +4,15 @@
 //! learning-rate change between replays and an overflow the captured AdamW
 //! skips on the device. The replay refuses AdamW settings the capture
 //! baked in until the graph is captured again, and a step with an open
-//! accumulation window runs eagerly to fold the window in.
+//! accumulation window runs eagerly to fold the window in. An f16 overflow
+//! a fused accumulate marked on the device skips the applying backward that
+//! folds its window in.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::{
-    BackwardOpts, GpuOptions, Mamba2Config, Mamba2GpuTrainer, Mamba2Weights, Mamba3MimoConfig,
-    Mamba3MimoGpuTrainer, Mamba3MimoWeights, StepMetrics, TrainSessionCfg, WeightDtype,
+    BackwardMetrics, BackwardOpts, GpuOptions, Mamba2Config, Mamba2GpuTrainer, Mamba2Weights,
+    Mamba3MimoConfig, Mamba3MimoGpuTrainer, Mamba3MimoWeights, StepMetrics, TrainSessionCfg,
+    WeightDtype,
 };
 
 const BATCH: usize = 2;
@@ -59,6 +62,8 @@ trait Trainer {
     fn set_lr(&mut self, lr: f32);
     fn set_beta1(&mut self, beta1: f32);
     fn accumulate(&mut self, input: &[f32], d: &[f32]);
+    fn fused_accumulate(&mut self, input: &[f32], d: &[f32]);
+    fn applying_backward(&mut self, input: &[f32], d: &[f32]) -> BackwardMetrics;
 }
 
 fn bits(v: &[f32]) -> impl Iterator<Item = u32> + '_ {
@@ -113,6 +118,14 @@ impl Trainer for Mamba2GpuTrainer {
         self.backward_step(d, BackwardOpts::default().with_accumulate_only(true))
             .unwrap();
     }
+    fn fused_accumulate(&mut self, input: &[f32], d: &[f32]) {
+        Mamba2GpuTrainer::accumulate(self, input, d).unwrap();
+    }
+    fn applying_backward(&mut self, input: &[f32], d: &[f32]) -> BackwardMetrics {
+        let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
+        self.forward(input, &mut out).unwrap();
+        self.backward_step(d, BackwardOpts::default()).unwrap()
+    }
 }
 
 impl Trainer for Mamba3MimoGpuTrainer {
@@ -164,6 +177,14 @@ impl Trainer for Mamba3MimoGpuTrainer {
         self.forward(input, &mut out).unwrap();
         self.backward_step(d, BackwardOpts::default().with_accumulate_only(true))
             .unwrap();
+    }
+    fn fused_accumulate(&mut self, input: &[f32], d: &[f32]) {
+        Mamba3MimoGpuTrainer::accumulate(self, input, d).unwrap();
+    }
+    fn applying_backward(&mut self, input: &[f32], d: &[f32]) -> BackwardMetrics {
+        let mut out = vec![0.0f32; BATCH * SEQ_LEN * D_MODEL];
+        self.forward(input, &mut out).unwrap();
+        self.backward_step(d, BackwardOpts::default()).unwrap()
     }
 }
 
@@ -301,5 +322,39 @@ fn an_open_window_folds_into_the_step() {
             runs.push(t.master());
         }
         assert_eq!(runs[0], runs[1], "{family}");
+    }
+}
+
+/// A fused accumulate whose f16 micro-batch overflows marks the window on
+/// the device alone. The applying split backward that folds the window in
+/// reads the overflow from the folded values and skips the whole window:
+/// no AdamW step, the weights untouched, the loss scale backed off, both
+/// when the accumulate runs eagerly and when it replays its captured graph.
+#[test]
+fn a_fused_overflow_skips_the_applying_backward_step() {
+    for (family, make) in FAMILIES {
+        for graph in [false, true] {
+            let what = format!("{family} graph={graph}");
+            let mut t = make(WeightDtype::F16);
+            let (input, d) = window(0, false);
+            t.step(&input, &d).unwrap();
+            if graph {
+                t.capture().unwrap();
+            }
+            let before = t.master();
+            let (scale, _) = t.scaler().unwrap();
+            let (input, d) = window(1, true);
+            t.fused_accumulate(&input, &d);
+            let (input, d) = window(2, false);
+            let m = t.applying_backward(&input, &d);
+            assert_eq!(m.overflow_skipped, Some(true), "{what}: the overflow");
+            assert!(!m.optimizer_stepped, "{what}: no AdamW step");
+            assert_eq!(t.master(), before, "{what}: the weights untouched");
+            let (after, _) = t.scaler().unwrap();
+            assert!(
+                after < scale,
+                "{what}: the scale backed off ({scale} -> {after})"
+            );
+        }
     }
 }

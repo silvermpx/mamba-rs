@@ -647,6 +647,13 @@
   reduction leaves the bias (zeros without one) in a written output, and
   a weight or bias gradient accumulates nothing. The Triad routes refused
   any empty axis and the f32 ones an empty output.
+- In f16 the Mamba-2 and MIMO trainers wrote NaN into the weights when a
+  window filled by the fused `accumulate` overflowed and an applying
+  `backward_step` closed it. The fused call marks its overflow in the
+  window's sum only, and the applying call trusted the overflows it had
+  read on the host. It now reads the folded gradient for a window the
+  fused call filled, skips the whole window and backs the loss scale
+  off; with a clip it no longer fails on the non-finite norm.
 
 ## 0.7.5 (2026-09-23)
 

@@ -28,7 +28,7 @@ mod graph;
 
 use crate::config::ModelFamily;
 use crate::gpu::grad_clip::{GradRegionGeom, StepTail, norm_limit, read_tail, scale_grads};
-use crate::gpu::grad_window::{GradWindow, check_backward_opts};
+use crate::gpu::grad_window::{FoldOverflow, GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
 use crate::gpu::train_state::TrainerState;
@@ -1005,7 +1005,8 @@ impl Mamba3MimoGpuTrainer {
         self.check_window_len("accumulate input", input.len(), self.input_dim)?;
         self.check_window_len("accumulate d_temporal", d_temporal.len(), self.cfg.d_model)?;
         let loss_scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
-        self.window.open_zeroed(&self.ctx, self.grads.len())?;
+        self.window
+            .open_for_device(&self.ctx, self.grads.len(), self.scaler.is_some())?;
         self.forwarded = false;
         self.fresh_grads = false;
         if self.graph.is_some() {
@@ -1183,9 +1184,14 @@ impl Mamba3MimoGpuTrainer {
                 overflow_skipped: None,
             });
         }
-        if self.window.fold_into(&self.ctx, &mut self.grads)? {
-            self.overflowed = true;
-        }
+        let window_overflowed = match self.window.fold_into(&self.ctx, &mut self.grads)? {
+            FoldOverflow::Clear => false,
+            FoldOverflow::Overflowed => true,
+            // A micro-batch the device added marks its overflow in the
+            // window's values alone, which the fold carried into the arena.
+            FoldOverflow::InValues => !self.overflowed && self.grads_overflow()?,
+        };
+        self.overflowed |= window_overflowed;
         self.apply_tail(
             (
                 opts.clip_max_norm,

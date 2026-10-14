@@ -6,7 +6,9 @@
 //! applying call adds that sum to its own gradient before the clip and the
 //! optimizer step. In f16 the window also remembers whether any of its
 //! micro-batches overflowed the loss scale, which holds for the whole
-//! window, so the applying call skips the whole window then.
+//! window, so the applying call skips the whole window then. A micro-batch
+//! added on the device marks its overflow in the sum's values alone, so a
+//! window that took one has the applying call read the values.
 
 use std::sync::Arc;
 
@@ -27,8 +29,11 @@ pub(crate) struct GradWindow {
     /// Whether `sum` holds a window the optimizer has not stepped on yet.
     open: bool,
     /// Whether a micro-batch of the open window overflowed the f16 loss
-    /// scale.
+    /// scale, as far as the host knows.
     overflowed: bool,
+    /// Whether a micro-batch joined the open window on the device under the
+    /// f16 loss scale: its overflow shows only in the sum's values.
+    scaled_on_device: bool,
     partials: GpuByteBuffer,
     coef: GpuBuffer,
 }
@@ -39,6 +44,7 @@ impl GradWindow {
             sum: None,
             open: false,
             overflowed: false,
+            scaled_on_device: false,
             partials: alloc_partials(stream)?,
             coef: GpuBuffer::zeros(stream, 2)?,
         })
@@ -74,9 +80,9 @@ impl GradWindow {
         Ok(())
     }
 
-    /// Open a window whose sum starts at zero, every micro-batch added to
-    /// it on the device; an open window stays as it is.
-    pub(crate) fn open_zeroed(&mut self, ctx: &GpuCtx, len: usize) -> Result<(), String> {
+    /// Open a window whose sum starts at zero; an open window stays as it
+    /// is.
+    fn open_zeroed(&mut self, ctx: &GpuCtx, len: usize) -> Result<(), String> {
         if self.open {
             return Ok(());
         }
@@ -86,6 +92,22 @@ impl GradWindow {
         }
         self.open = true;
         self.overflowed = false;
+        self.scaled_on_device = false;
+        Ok(())
+    }
+
+    /// Open the window for a micro-batch the device adds to its sum (see
+    /// [`Self::add_device`]); an open window stays as it is. `scaled` says
+    /// the micro-batch runs under the f16 loss scale, whose overflow marks
+    /// only the sum's values, so the fold has the applying call read them.
+    pub(crate) fn open_for_device(
+        &mut self,
+        ctx: &GpuCtx,
+        len: usize,
+        scaled: bool,
+    ) -> Result<(), String> {
+        self.open_zeroed(ctx, len)?;
+        self.scaled_on_device |= scaled;
         Ok(())
     }
 
@@ -142,26 +164,34 @@ impl GradWindow {
     pub(crate) fn close(&mut self) {
         self.open = false;
         self.overflowed = false;
+        self.scaled_on_device = false;
     }
 
     /// Add the open window's sum to the gradient of the applying call,
-    /// close the window, and return whether any of its micro-batches
-    /// overflowed the f16 loss scale. Nothing to add when no window is open.
+    /// close the window, and return what is known of an f16 overflow in
+    /// its micro-batches. Nothing to add when no window is open.
     pub(crate) fn fold_into(
         &mut self,
         ctx: &GpuCtx,
         grads: &mut GpuBuffer,
-    ) -> Result<bool, String> {
+    ) -> Result<FoldOverflow, String> {
         if !self.open {
-            return Ok(false);
+            return Ok(FoldOverflow::Clear);
         }
         self.open = false;
         let overflowed = std::mem::take(&mut self.overflowed);
+        let in_values = std::mem::take(&mut self.scaled_on_device);
         let Some(sum) = &self.sum else {
             return Err("an accumulation window without its sum".into());
         };
         add_into(ctx, grads, sum)?;
-        Ok(overflowed)
+        Ok(if overflowed {
+            FoldOverflow::Overflowed
+        } else if in_values {
+            FoldOverflow::InValues
+        } else {
+            FoldOverflow::Clear
+        })
     }
 
     /// Whether a window is open: an accumulating call came after the last
@@ -188,8 +218,9 @@ impl GradWindow {
     }
 
     /// Copy the open window's sum into `grads`, close the window, and
-    /// return whether any of its micro-batches overflowed the f16 loss
-    /// scale. An error when no window is open.
+    /// return whether the host knows of an f16 overflow in its
+    /// micro-batches; one the device added shows only in the values, which
+    /// the caller reads. An error when no window is open.
     pub(crate) fn take_into(
         &mut self,
         ctx: &GpuCtx,
@@ -205,6 +236,7 @@ impl GradWindow {
         }
         grads.copy_from(sum, &ctx.stream)?;
         self.open = false;
+        self.scaled_on_device = false;
         Ok(std::mem::take(&mut self.overflowed))
     }
 
@@ -256,6 +288,19 @@ impl GradWindow {
         }
         Ok(norm)
     }
+}
+
+/// What the fold of a window into the applying call's gradient knows of an
+/// f16 overflow in the window's micro-batches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FoldOverflow {
+    /// None of them overflowed.
+    Clear,
+    /// One of them overflowed.
+    Overflowed,
+    /// One of them joined on the device under the loss scale: only the
+    /// folded gradient's values tell whether it overflowed.
+    InValues,
 }
 
 /// Write a NaN into the first element of a window's sum. The unscale of an
