@@ -5,7 +5,8 @@
 //!
 //! Tensor naming convention:
 //! - `input_proj.weight`, `input_proj.bias`
-//! - `layers.{i}.norm.weight`
+//! - `layers.{i}.norm.weight`, and `layers.{i}.norm.bias` for LayerNorm
+//!   block norms (`rms_norm = false`)
 //! - `layers.{i}.in_proj.weight`, and `layers.{i}.in_proj.bias` with
 //!   projection biases
 //! - `layers.{i}.conv1d.weight`, and `layers.{i}.conv1d.bias` with a conv
@@ -16,9 +17,10 @@
 //! - `layers.{i}.D`
 //! - `layers.{i}.out_proj.weight`, and `layers.{i}.out_proj.bias` with
 //!   projection biases
-//! - `layers.{i}.norm2.weight`, `layers.{i}.mlp.fc1.weight`,
-//!   `layers.{i}.mlp.fc2.weight` (models with a gated MLP)
-//! - `norm_f.weight`
+//! - `layers.{i}.norm2.weight` (and `layers.{i}.norm2.bias` for
+//!   LayerNorm), `layers.{i}.mlp.fc1.weight`, `layers.{i}.mlp.fc2.weight`
+//!   (models with a gated MLP)
+//! - `norm_f.weight`, and `norm_f.bias` for LayerNorm
 //!
 //! Metadata stores config as JSON: `d_model`, `d_state`, `d_conv`, `expand`,
 //! `n_layers`, `input_dim`, the route and norm fields, the options a model
@@ -61,6 +63,7 @@ pub(crate) fn checkpoint_parts<'a>(
     let dc = cfg.d_conv;
     let dt_rank = cfg.dt_rank();
     let xdbl_dim = cfg.xdbl_dim();
+    let layer_norm = !cfg.block_norm.rms_norm();
 
     let mut list = TensorList::new();
     list.push(
@@ -72,6 +75,9 @@ pub(crate) fn checkpoint_parts<'a>(
     for (i, lw) in weights.layers.iter().enumerate() {
         let p = |n: &str| format!("layers.{i}.{n}");
         list.push(p("norm.weight"), &lw.norm_weight, &[dm])?;
+        if layer_norm {
+            list.push(p("norm.bias"), &lw.norm_bias, &[dm])?;
+        }
         list.push(p("in_proj.weight"), &lw.in_proj_w, &[dm, 2 * di])?;
         if cfg.proj_bias {
             list.push(p("in_proj.bias"), &lw.in_proj_b, &[2 * di])?;
@@ -94,10 +100,16 @@ pub(crate) fn checkpoint_parts<'a>(
     for (i, m) in weights.mlp.iter().enumerate() {
         let p = |n: &str| format!("layers.{i}.{n}");
         list.push(p("norm2.weight"), &m.norm_weight, &[dm])?;
+        if layer_norm {
+            list.push(p("norm2.bias"), &m.norm_bias, &[dm])?;
+        }
         list.push(p("mlp.fc1.weight"), &m.fc1_w, &[dm, 2 * hidden])?;
         list.push(p("mlp.fc2.weight"), &m.fc2_w, &[hidden, dm])?;
     }
     list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
+    if layer_norm {
+        list.push("norm_f.bias".into(), &weights.norm_f_bias, &[dm])?;
+    }
 
     // The configuration as JSON. scan_mode and the norm epsilons are part
     // of the checkpoint's numeric route: without them a model of another
@@ -120,6 +132,9 @@ pub(crate) fn checkpoint_parts<'a>(
     }
     if cfg.d_intermediate > 0 {
         extra.push_str(&format!(r#","d_intermediate":{}"#, cfg.d_intermediate));
+    }
+    if layer_norm {
+        extra.push_str(r#","rms_norm":false"#);
     }
     let meta = HashMap::from([
         ("mamba_version".to_string(), VERSION.to_string()),
@@ -221,6 +236,9 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
         expand,
         n_layers,
         scan_mode,
+        block_norm: crate::config::BlockNorm::from_rms_norm(
+            !config_json.contains(r#""rms_norm":false"#),
+        ),
         rms_norm_eps,
         bcdt_rms_eps: float("bcdt_rms_eps")?,
         dt_rank: config_json
@@ -268,6 +286,15 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
 
     let input_proj_w = read("input_proj.weight")?;
     let input_proj_b = read("input_proj.bias")?;
+    // A LayerNorm block norm's bias; an RMSNorm has none in the file.
+    let layer_norm = !cfg.block_norm.rms_norm();
+    let norm_bias = |name: &str| -> Result<Vec<f32>, String> {
+        if layer_norm {
+            read(name)
+        } else {
+            Ok(Vec::new())
+        }
+    };
 
     let mut layers = Vec::with_capacity(n_layers);
     for i in 0..n_layers {
@@ -283,6 +310,7 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
         };
         layers.push(MambaLayerWeights {
             norm_weight: read(&format!("layers.{i}.norm.weight"))?,
+            norm_bias: norm_bias(&format!("layers.{i}.norm.bias"))?,
             in_proj_w: read(&format!("layers.{i}.in_proj.weight"))?,
             in_proj_b: optional(cfg.proj_bias, "in_proj.bias")?,
             conv1d_weight: read(&format!("layers.{i}.conv1d.weight"))?,
@@ -299,12 +327,14 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
     }
 
     let norm_f_weight = read("norm_f.weight")?;
+    let norm_f_bias = norm_bias("norm_f.bias")?;
     let mlp = (0..n_layers)
         .filter(|_| cfg.mlp_hidden() > 0)
         .map(|i| {
             let p = |n: &str| format!("layers.{i}.{n}");
             Ok(crate::mlp::GatedMlpLayerWeights {
                 norm_weight: read(&p("norm2.weight"))?,
+                norm_bias: norm_bias(&p("norm2.bias"))?,
                 fc1_w: read(&p("mlp.fc1.weight"))?,
                 fc2_w: read(&p("mlp.fc2.weight"))?,
             })
@@ -316,6 +346,7 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
         input_proj_b,
         layers,
         norm_f_weight,
+        norm_f_bias,
         mlp,
     };
 
@@ -406,18 +437,22 @@ mod tests {
     /// existed.
     #[test]
     fn bias_and_rank_options_round_trip() {
+        use crate::config::BlockNorm;
         let variants = [
-            (Some(5), true, false, 0),
-            (None, true, true, 200),
-            (Some(3), false, false, 0),
-            (None, false, true, 0),
+            (Some(5), true, false, 0, BlockNorm::Rms),
+            (None, true, true, 200, BlockNorm::Rms),
+            (Some(3), false, false, 0, BlockNorm::Rms),
+            (None, false, true, 0, BlockNorm::Rms),
+            (None, false, true, 200, BlockNorm::Layer),
+            (Some(3), true, false, 0, BlockNorm::Layer),
         ];
-        for (dt_rank, proj_bias, conv_bias, d_intermediate) in variants {
+        for (dt_rank, proj_bias, conv_bias, d_intermediate, block_norm) in variants {
             let cfg = MambaConfig {
                 dt_rank,
                 proj_bias,
                 conv_bias,
                 d_intermediate,
+                block_norm,
                 ..MambaConfig::default()
             };
             let mut w = MambaWeights::init(&cfg, 16, 9);
@@ -426,10 +461,19 @@ mod tests {
                     .in_proj_b
                     .iter_mut()
                     .chain(&mut lw.out_proj_b)
+                    .chain(&mut lw.norm_bias)
                     .enumerate()
                 {
                     *b = i as f32 * 0.01 - 0.3;
                 }
+            }
+            for (i, b) in w
+                .norm_f_bias
+                .iter_mut()
+                .chain(w.mlp.iter_mut().flat_map(|m| &mut m.norm_bias))
+                .enumerate()
+            {
+                *b = 0.2 - i as f32 * 0.003;
             }
             let (list, meta) = checkpoint_parts(&w, &cfg, 16).unwrap();
             let config_json = &meta["config"];
@@ -438,8 +482,12 @@ mod tests {
                     assert!(!config_json.contains(key), "{key} in {config_json}");
                 }
             }
+            assert_eq!(
+                config_json.contains(r#""rms_norm":false"#),
+                !block_norm.rms_norm()
+            );
             let path = std::env::temp_dir().join(format!(
-                "mamba1_options_{}_{dt_rank:?}_{proj_bias}_{conv_bias}_{d_intermediate}.safetensors",
+                "mamba1_options_{}_{dt_rank:?}_{proj_bias}_{conv_bias}_{d_intermediate}_{block_norm:?}.safetensors",
                 std::process::id()
             ));
             list.save(meta, &path).unwrap();
@@ -452,7 +500,9 @@ mod tests {
                 assert_eq!(a.out_proj_b, b.out_proj_b);
                 assert_eq!(a.conv1d_bias, b.conv1d_bias);
                 assert_eq!(a.dt_proj_w, b.dt_proj_w);
+                assert_eq!(a.norm_bias, b.norm_bias);
             }
+            assert_eq!(w.norm_f_bias, w2.norm_f_bias);
             assert_eq!(w.mlp, w2.mlp);
         }
     }

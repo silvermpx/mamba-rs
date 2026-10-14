@@ -5,7 +5,9 @@
 //! and a 5% tolerance, and they cannot touch in_proj at all; differencing
 //! the float64 step drops the floor far enough to hold every tensor, every
 //! in_proj column group and the layer inputs to 5e-3, from a fresh state
-//! and from one carried in from earlier tokens.
+//! and from one carried in from earlier tokens. The whole model - input
+//! projection, gated MLPs and final norm included - is held to the same
+//! bound through the CPU trainer's gradient window, under both block norms.
 
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::backward::backward_mamba3_layer_batched;
@@ -14,10 +16,12 @@ use mamba_rs::mamba3_siso::cpu::flat::Mamba3LayerFlat;
 use mamba_rs::mamba3_siso::cpu::forward::{Mamba3LayerStateMut, forward_mamba3_layer_batched};
 use mamba_rs::mamba3_siso::cpu::scratch::Mamba3Scratch;
 use mamba_rs::mamba3_siso::cpu::weights::TrainMamba3LayerWeights;
+use mamba_rs::mamba3_siso::weights::Mamba3Weights;
+use mamba_rs::{Mamba3CpuTrainer, TrainSessionCfg};
 
 #[path = "common/m3_oracle.rs"]
 mod m3_oracle;
-use m3_oracle::{Layer64, layer_step64, zeros64};
+use m3_oracle::{Layer64, backbone_step64, layer_step64, train_layer, zeros64};
 
 fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
     let mut s = seed.max(1);
@@ -45,6 +49,7 @@ fn drawn(dims: &Mamba3Dims, seed: u64) -> TrainMamba3LayerWeights {
         (&mut w.d_param, 8, 1.0, 0.5),
         (&mut w.norm_gate_weight, 9, 1.0, 0.3),
         (&mut w.out_proj_w, 10, 0.0, 0.3),
+        (&mut w.norm_bias, 11, 0.0, 0.3),
     ] {
         let draws = det(v.len(), seed * 100 + k, scale);
         for (x, dv) in v.iter_mut().zip(draws) {
@@ -155,9 +160,11 @@ fn loss64(
         .sum()
 }
 
-fn tensors(w: &mut TrainMamba3LayerWeights) -> [(&'static str, &mut Vec<f32>); 10] {
-    [
+/// The layer's tensors a model has: an RMSNorm block norm has no bias.
+fn tensors(w: &mut TrainMamba3LayerWeights) -> Vec<(&'static str, &mut Vec<f32>)> {
+    let mut out = vec![
         ("norm", &mut w.norm_weight),
+        ("norm_bias", &mut w.norm_bias),
         ("in_proj_w", &mut w.in_proj_w),
         ("dt_bias", &mut w.dt_bias),
         ("b_norm", &mut w.b_norm_weight),
@@ -167,7 +174,9 @@ fn tensors(w: &mut TrainMamba3LayerWeights) -> [(&'static str, &mut Vec<f32>); 1
         ("d", &mut w.d_param),
         ("norm_gate", &mut w.norm_gate_weight),
         ("out_proj_w", &mut w.out_proj_w),
-    ]
+    ];
+    out.retain(|(_, v)| !v.is_empty());
+    out
 }
 
 fn cases() -> Vec<(&'static str, Mamba3Config)> {
@@ -209,6 +218,23 @@ fn cases() -> Vec<(&'static str, Mamba3Config)> {
         (
             "mixer norms at their own epsilon",
             Mamba3Config {
+                is_outproj_norm: true,
+                rms_norm_eps: 1e-3,
+                ssm_norm_eps: 5e-2,
+                ..base
+            },
+        ),
+        (
+            "LayerNorm block norm",
+            Mamba3Config {
+                block_norm: mamba_rs::BlockNorm::Layer,
+                ..base
+            },
+        ),
+        (
+            "LayerNorm block norm, output norm, own epsilons",
+            Mamba3Config {
+                block_norm: mamba_rs::BlockNorm::Layer,
                 is_outproj_norm: true,
                 rms_norm_eps: 1e-3,
                 ssm_norm_eps: 5e-2,
@@ -429,5 +455,168 @@ fn m3_backward_takes_the_window_start_angles_from_the_tape() {
             flat
         };
         assert_eq!(run(false), run(true), "{label}: the recorded angles differ");
+    }
+}
+
+/// The whole model's tensors in the CPU trainer's gradient order (the
+/// input projection, the layers, the gated MLPs, the final norm), named
+/// `<owner>.<tensor>`; tensors a model lacks are left out.
+fn model_tensors(w: &mut Mamba3Weights) -> Vec<(String, &mut Vec<f32>)> {
+    let mut out: Vec<(String, &mut Vec<f32>)> = vec![
+        ("in.input_proj_w".into(), &mut w.input_proj_w),
+        ("in.input_proj_b".into(), &mut w.input_proj_b),
+    ];
+    for (l, lw) in w.layers.iter_mut().enumerate() {
+        out.extend([
+            (format!("L{l}.norm"), &mut lw.norm_weight),
+            (format!("L{l}.norm_bias"), &mut lw.norm_bias),
+            (format!("L{l}.in_proj_w"), &mut lw.in_proj_w),
+            (format!("L{l}.dt_bias"), &mut lw.dt_bias),
+            (format!("L{l}.b_norm"), &mut lw.b_norm_weight),
+            (format!("L{l}.c_norm"), &mut lw.c_norm_weight),
+            (format!("L{l}.b_bias"), &mut lw.b_bias),
+            (format!("L{l}.c_bias"), &mut lw.c_bias),
+            (format!("L{l}.d"), &mut lw.d_param),
+            (format!("L{l}.norm_gate"), &mut lw.norm_gate_weight),
+            (format!("L{l}.out_proj_w"), &mut lw.out_proj_w),
+        ]);
+    }
+    for (l, m) in w.mlp.iter_mut().enumerate() {
+        out.extend([
+            (format!("mlp{l}.norm"), &mut m.norm_weight),
+            (format!("mlp{l}.norm_bias"), &mut m.norm_bias),
+            (format!("mlp{l}.fc1"), &mut m.fc1_w),
+            (format!("mlp{l}.fc2"), &mut m.fc2_w),
+        ]);
+    }
+    out.push(("out.norm_f".into(), &mut w.norm_f_weight));
+    out.push(("out.norm_f_bias".into(), &mut w.norm_f_bias));
+    out.retain(|(_, v)| !v.is_empty());
+    out
+}
+
+/// The tensor's name within its owner, which picks its draw and its probes.
+fn short(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+/// A whole model with every parameter drawn around its usual value.
+fn drawn_model(cfg: &Mamba3Config, input_dim: usize, seed: u64) -> Mamba3Weights {
+    let mut w = Mamba3Weights::init(cfg, input_dim, seed);
+    for (k, (name, v)) in model_tensors(&mut w).into_iter().enumerate() {
+        let (base, scale) = match short(&name) {
+            "norm" | "b_norm" | "c_norm" | "norm_gate" | "norm_f" => (1.0, 0.25),
+            "d" => (1.0, 0.5),
+            "dt_bias" => (-1.0, 0.5),
+            "b_bias" | "c_bias" => (0.0, 0.5),
+            _ => (0.0, 0.3),
+        };
+        let draws = det(v.len(), seed * 1000 + k as u64, scale);
+        for (x, dv) in v.iter_mut().zip(draws) {
+            *x = base + dv;
+        }
+    }
+    w
+}
+
+/// Every tensor of the whole model - the input projection, the layers, the
+/// gated MLPs and the final norm - from the CPU trainer's gradient window
+/// against float64 central differences of the model's step, under both
+/// block norms, with and without the MLP.
+#[test]
+fn m3_trainer_gradients_match_f64_central_differences() {
+    let (seq, input_dim) = (6usize, 12usize);
+    let base = Mamba3Config {
+        d_model: 16,
+        d_state: 8,
+        headdim: 8,
+        expand: 2,
+        ngroups: 1,
+        n_layers: 2,
+        rope_fraction: 0.5,
+        is_outproj_norm: true,
+        d_intermediate: 24,
+        ..Mamba3Config::default()
+    };
+    let layer_norm = Mamba3Config {
+        block_norm: mamba_rs::BlockNorm::Layer,
+        ..base
+    };
+    for (label, cfg) in [
+        ("RMSNorm, MLP", base),
+        ("LayerNorm, MLP", layer_norm),
+        (
+            "LayerNorm, no MLP",
+            Mamba3Config {
+                d_intermediate: 0,
+                ..layer_norm
+            },
+        ),
+    ] {
+        cfg.validate().unwrap();
+        let dm = cfg.d_model;
+        let w = drawn_model(&cfg, input_dim, 5);
+        let inputs = det(seq * input_dim, 81, 1.0);
+        let probe = det(seq * dm, 82, 1.0);
+        let mut trainer =
+            Mamba3CpuTrainer::new(&w, cfg, TrainSessionCfg::new(input_dim, 1, seq)).unwrap();
+        trainer.accumulate(&inputs, &probe).unwrap();
+        let arena = trainer.download_grad_arena().unwrap();
+        let loss = |w: &Mamba3Weights| -> f64 {
+            let layers: Vec<TrainMamba3LayerWeights> = w.layers.iter().map(train_layer).collect();
+            let mut st = zeros64(&cfg);
+            inputs
+                .chunks_exact(input_dim)
+                .zip(probe.chunks_exact(dm))
+                .map(|(x, p)| {
+                    backbone_step64(&cfg, (w, &layers), &mut st, x)
+                        .iter()
+                        .zip(p)
+                        .map(|(o, &pv)| o * f64::from(pv))
+                        .sum::<f64>()
+                })
+                .sum()
+        };
+        let mut wm = w.clone();
+        let layout: Vec<(String, usize)> = model_tensors(&mut wm)
+            .into_iter()
+            .map(|(n, v)| (n, v.len()))
+            .collect();
+        assert_eq!(
+            layout.iter().map(|(_, n)| n).sum::<usize>(),
+            arena.len(),
+            "{label}: the gradient window's length"
+        );
+        let (mut off, mut checked, mut worst) = (0usize, 0usize, 0f64);
+        for (name, len) in &layout {
+            let g = &arena[off..off + len];
+            off += len;
+            let scale = g.iter().fold(0f32, |a, &v| a.max(v.abs()));
+            assert!(scale > 0.0, "{label}: {name} has no gradient");
+            for i in probe_indices(&cfg, short(name), g) {
+                let perturb = |sign: f32| -> (Mamba3Weights, f64) {
+                    let mut wp = w.clone();
+                    let at = {
+                        let mut tp = model_tensors(&mut wp);
+                        let v = &mut tp.iter_mut().find(|(n, _)| n == name).unwrap().1;
+                        v[i] += sign * 1e-3 * v[i].abs().max(1.0);
+                        f64::from(v[i])
+                    };
+                    (wp, at)
+                };
+                let (plus, hp) = perturb(1.0);
+                let (minus, hm) = perturb(-1.0);
+                let fd = (loss(&plus) - loss(&minus)) / (hp - hm);
+                let err = (f64::from(g[i]) - fd).abs() / fd.abs().max(0.05 * f64::from(scale));
+                worst = worst.max(err);
+                assert!(
+                    err < 5e-3,
+                    "{label}: {name}[{i}] analytic {} vs fd {fd:.6e} (rel {err:.3e})",
+                    g[i]
+                );
+                checked += 1;
+            }
+        }
+        eprintln!("{label}: {checked} probes over the whole model, worst rel {worst:.2e}");
     }
 }

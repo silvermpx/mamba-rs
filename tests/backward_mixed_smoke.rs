@@ -31,6 +31,7 @@ fn tiny_cfg() -> MambaConfig {
         d_conv: 4,
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
+        block_norm: mamba_rs::BlockNorm::Rms,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -79,6 +80,7 @@ fn run_smoke(dtype: WeightDtype) {
         n_layers,
         scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        block_norm: mamba_rs::BlockNorm::Rms,
         bcdt_rms_eps: None,
     };
 

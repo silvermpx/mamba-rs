@@ -26,9 +26,11 @@ pub struct MambaDims {
     pub mamba_input_dim: usize,
     /// Number of stacked Mamba layers.
     pub n_layers: usize,
-    /// RMSNorm epsilon (layer norms + norm_f). 1e-5 unless the checkpoint
-    /// specifies otherwise (FalconMamba: 1e-6).
+    /// Epsilon of the block norms (layer norms + norm_f). 1e-5 unless the
+    /// checkpoint specifies otherwise (FalconMamba: 1e-6).
     pub rms_norm_eps: f32,
+    /// The kind of the block norms (see [`MambaConfig::block_norm`]).
+    pub block_norm: crate::config::BlockNorm,
     /// FalconMamba's dt, B and C norm epsilon, `None` for Mamba-1 (see
     /// [`MambaConfig::bcdt_rms_eps`]).
     pub bcdt_rms_eps: Option<f32>,
@@ -72,6 +74,7 @@ impl MambaDims {
             mamba_input_dim,
             n_layers,
             rms_norm_eps: crate::ops::fast_math::RMS_NORM_EPS,
+            block_norm: crate::config::BlockNorm::Rms,
             bcdt_rms_eps: None,
             proj_bias: false,
             conv_bias: true,
@@ -92,6 +95,7 @@ impl MambaDims {
             config.n_layers,
         ));
         dims.rms_norm_eps = config.rms_norm_eps;
+        dims.block_norm = config.block_norm;
         dims.bcdt_rms_eps = config.bcdt_rms_eps;
         dims.proj_bias = config.proj_bias;
         dims.conv_bias = config.conv_bias;

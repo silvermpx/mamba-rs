@@ -1,5 +1,5 @@
-//! Configuration shared by the model families: the family itself and the
-//! scan mode of the GPU recurrence.
+//! Configuration shared by the model families: the family itself, the
+//! kind of the block norms and the scan mode of the GPU recurrence.
 
 // Mamba-1's configuration lived here up to 0.7. Code written then still
 // finds it here for one release, its home is `mamba1::config`.
@@ -19,6 +19,51 @@ pub enum ModelFamily {
     Mamba3,
     /// Mamba-3 MIMO, a rank of input and output channels per head.
     Mamba3Mimo,
+}
+
+/// The kind of the block norms: the norm before each mixer, the one before
+/// an MLP and the final norm. mamba_ssm picks it with `rms_norm`; every
+/// official checkpoint is RMSNorm. The norms inside the mixers stay RMS
+/// either way, as in the reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BlockNorm {
+    /// RMSNorm, `x / sqrt(mean(x^2) + eps) * weight` (`rms_norm = true`).
+    #[default]
+    Rms,
+    /// LayerNorm with the biased variance, `(x - mean) / sqrt(var + eps) *
+    /// weight + bias` (`rms_norm = false`, `nn.LayerNorm`).
+    Layer,
+}
+
+impl BlockNorm {
+    /// The kind mamba_ssm's `rms_norm` flag names.
+    pub const fn from_rms_norm(rms_norm: bool) -> Self {
+        if rms_norm { Self::Rms } else { Self::Layer }
+    }
+
+    /// The value of mamba_ssm's `rms_norm` flag for this kind.
+    pub const fn rms_norm(self) -> bool {
+        matches!(self, Self::Rms)
+    }
+
+    /// The length of a norm's bias over `width` features: `width` for
+    /// LayerNorm, 0 for RMSNorm.
+    pub const fn bias_len(self, width: usize) -> usize {
+        match self {
+            Self::Rms => 0,
+            Self::Layer => width,
+        }
+    }
+
+    /// The statistics a norm keeps per row for its backward: the RMS for
+    /// RMSNorm; the standard deviation and the mean, in that order, for
+    /// LayerNorm.
+    pub const fn stats_per_row(self) -> usize {
+        match self {
+            Self::Rms => 1,
+            Self::Layer => 2,
+        }
+    }
 }
 
 /// Scan mode for GPU SSM recurrence.

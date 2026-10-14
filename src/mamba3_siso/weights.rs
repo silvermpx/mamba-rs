@@ -12,8 +12,10 @@ use crate::ops::init::{SimpleRng, dt_bias_init, linear_default_uniform};
 /// Added: BCNorm weights, per-head biases, RoPE via in_proj.
 #[derive(Clone)]
 pub struct Mamba3LayerWeights {
-    /// RMSNorm scale: `[d_model]`.
+    /// The block norm's scale: `[d_model]`.
     pub norm_weight: Vec<f32>,
+    /// The block LayerNorm's bias: `[d_model]`, empty for RMSNorm.
+    pub norm_bias: Vec<f32>,
     /// in_proj weight: `[d_model, in_proj_dim]`, no bias.
     /// Split output: `[z, x, B, C, dd_dt, dd_A, trap, angles]`.
     pub in_proj_w: Vec<f32>,
@@ -44,8 +46,10 @@ pub struct Mamba3Weights {
     pub input_proj_b: Vec<f32>,
     /// Per-layer weights.
     pub layers: Vec<Mamba3LayerWeights>,
-    /// Final RMSNorm after all layers: `[d_model]`.
+    /// The final norm's scale after all layers: `[d_model]`.
     pub norm_f_weight: Vec<f32>,
+    /// The final LayerNorm's bias: `[d_model]`, empty for RMSNorm.
+    pub norm_f_bias: Vec<f32>,
     /// The gated MLP of each layer, after its mixer; empty when the config
     /// has `d_intermediate == 0`.
     pub mlp: Vec<crate::mlp::GatedMlpLayerWeights>,
@@ -83,6 +87,7 @@ impl Mamba3Weights {
             layers: (0..cfg.n_layers)
                 .map(|_| Mamba3LayerWeights {
                     norm_weight: vec![1.0; d],
+                    norm_bias: vec![0.0; cfg.block_norm.bias_len(d)],
                     in_proj_w: vec![0.0; d * ip],
                     dt_bias: vec![0.0; nh],
                     b_norm_weight: vec![1.0; ds],
@@ -100,10 +105,11 @@ impl Mamba3Weights {
                 })
                 .collect(),
             norm_f_weight: vec![1.0; d],
+            norm_f_bias: vec![0.0; cfg.block_norm.bias_len(d)],
             mlp: match cfg.mlp_hidden() {
                 0 => Vec::new(),
                 hidden => (0..cfg.n_layers)
-                    .map(|_| crate::mlp::GatedMlpLayerWeights::zeros(d, hidden))
+                    .map(|_| crate::mlp::GatedMlpLayerWeights::zeros(d, hidden, cfg.block_norm))
                     .collect(),
             },
         }
@@ -146,7 +152,8 @@ impl Mamba3Weights {
 
             // D=ones, norm_weight=ones, b_bias=ones, c_bias=ones,
             // b_norm_weight=ones, c_norm_weight=ones — all set by zeros()
-            // above (zeros() initializes these to 1.0 per reference).
+            // above (zeros() initializes these to 1.0 per reference), a
+            // LayerNorm's bias to zero as nn.LayerNorm does.
         }
 
         // The MLP draws after every mixer weight, so a model without one
@@ -193,12 +200,15 @@ impl Mamba3Weights {
             )?;
             ck("input_proj_b", self.input_proj_b.len(), d)?;
         }
+        let norm_bias = cfg.block_norm.bias_len(d);
         ck("norm_f_weight", self.norm_f_weight.len(), d)?;
+        ck("norm_f_bias", self.norm_f_bias.len(), norm_bias)?;
         ck("n_layers", self.layers.len(), cfg.n_layers)?;
 
         for (i, lw) in self.layers.iter().enumerate() {
             let p = |n: &str| format!("layer[{i}].{n}");
             ck(&p("norm_weight"), lw.norm_weight.len(), d)?;
+            ck(&p("norm_bias"), lw.norm_bias.len(), norm_bias)?;
             ck(&p("in_proj_w"), lw.in_proj_w.len(), d * ip)?;
             ck(&p("dt_bias"), lw.dt_bias.len(), nh)?;
             ck(&p("b_norm_weight"), lw.b_norm_weight.len(), ds)?;
@@ -214,7 +224,7 @@ impl Mamba3Weights {
             hidden => {
                 ck("mlp layers", self.mlp.len(), cfg.n_layers)?;
                 for (i, m) in self.mlp.iter().enumerate() {
-                    m.validate(d, hidden, &format!("mlp[{i}]"))?;
+                    m.validate(d, hidden, cfg.block_norm, &format!("mlp[{i}]"))?;
                 }
             }
         }

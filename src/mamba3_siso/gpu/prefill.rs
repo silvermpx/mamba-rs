@@ -30,6 +30,7 @@ use super::state::{
 };
 use super::weights::Mamba3WeightsView;
 use crate::gpu::blas::TypedPtr;
+use crate::gpu::block_norm::{self, NormParams};
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
@@ -39,7 +40,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_norm, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_colsum, y_runs, yz_runs};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -434,42 +435,26 @@ impl Mamba3Prefill {
             let v_ptr = v_base + (dims.batch * l * nh * hd) as u64 * f32_sz;
             let a_ptr = a_base + (dims.batch * l * nh * na_alloc) as u64 * f32_sz;
 
-            // Layer norm over the residual stream.
+            // The block norm over the residual stream, into the typed rows
+            // on the typed lane.
             tgt.residual
                 .copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
             {
-                let bt_i = bt as i32;
-                let dm_i = dm as i32;
-                let eps: f32 = dims.rms_norm_eps;
-                let nw = lw.norm_weight;
-                if let Some(ts) = typed.as_deref_mut() {
-                    let pn = ts.post_norm.cached_ptr();
-                    let rms = tgt.rms_discard.cached_ptr();
-                    let x = tgt.residual.cached_ptr();
-                    let mut b = ctx
-                        .stream
-                        .launch_builder(m3k.rmsnorm_fwd_f32in_typed.get(dtype));
-                    b.arg(&pn);
-                    b.arg(&rms);
-                    b.arg(&x);
-                    b.arg(&nw);
-                    b.arg(&bt_i);
-                    b.arg(&dm_i);
-                    b.arg(&eps);
-                    unsafe { b.launch(grid_norm(bt, dm)) }
-                        .map_err(|e| format!("prefill rmsnorm typed L{l}: {e:?}"))?;
-                } else {
-                    let mut b = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
-                    b.arg(tgt.out_flat.inner_mut());
-                    b.arg(tgt.rms_discard.inner_mut());
-                    b.arg(tgt.residual.inner());
-                    b.arg(&nw);
-                    b.arg(&bt_i);
-                    b.arg(&dm_i);
-                    b.arg(&eps);
-                    unsafe { b.launch(grid_norm(bt, dm)) }
-                        .map_err(|e| format!("prefill rmsnorm L{l}: {e:?}"))?;
-                }
+                let (out, y) = match typed.as_deref() {
+                    Some(ts) => (dtype, ts.post_norm.cached_ptr()),
+                    None => (WeightDtype::F32, tgt.out_flat.cached_ptr()),
+                };
+                block_norm::forward(
+                    ctx,
+                    out,
+                    (y, tgt.rms_discard.cached_ptr(), tgt.residual.cached_ptr()),
+                    NormParams {
+                        w: lw.norm_weight,
+                        b: lw.norm_bias,
+                    },
+                    (bt, dm, dims.rms_norm_eps),
+                    "prefill block norm",
+                )?;
             }
             if let Some(ts) = typed.as_deref_mut() {
                 crate::gpu::blas::gpu_gemm_typed_forward_raw(
@@ -1284,27 +1269,25 @@ impl Mamba3Prefill {
                         m.hidden
                     ));
                 };
-                let (bt_i, dm_i, h_i) = (bt as i32, dm as i32, m.hidden as i32);
-                let eps: f32 = dims.rms_norm_eps;
-                let nw = m.norm_weight;
+                let (bt_i, h_i) = (bt as i32, m.hidden as i32);
+                let norm = NormParams {
+                    w: m.norm_weight,
+                    b: m.norm_bias,
+                };
                 let up = win.up.cached_ptr();
                 let act = win.act.cached_ptr();
                 let rms = tgt.rms_discard.cached_ptr();
                 let stream_in = tgt.temporal_work.cached_ptr();
                 if let Some(ts) = typed.as_deref_mut() {
                     let pn = ts.post_norm.cached_ptr();
-                    let mut b = ctx
-                        .stream
-                        .launch_builder(m3k.rmsnorm_fwd_f32in_typed.get(dtype));
-                    b.arg(&pn);
-                    b.arg(&rms);
-                    b.arg(&stream_in);
-                    b.arg(&nw);
-                    b.arg(&bt_i);
-                    b.arg(&dm_i);
-                    b.arg(&eps);
-                    unsafe { b.launch(grid_norm(bt, dm)) }
-                        .map_err(|e| format!("prefill mlp norm2 typed L{l}: {e:?}"))?;
+                    block_norm::forward(
+                        ctx,
+                        dtype,
+                        (pn, rms, stream_in),
+                        norm,
+                        (bt, dm, dims.rms_norm_eps),
+                        "prefill mlp norm2 typed",
+                    )?;
                     crate::gpu::blas::gpu_gemm_typed_forward_raw(
                         ctx,
                         TypedPtr { ptr: up, dtype },
@@ -1344,16 +1327,14 @@ impl Mamba3Prefill {
                     )?;
                 } else {
                     let pn = tgt.out_flat.cached_ptr();
-                    let mut b = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
-                    b.arg(&pn);
-                    b.arg(&rms);
-                    b.arg(&stream_in);
-                    b.arg(&nw);
-                    b.arg(&bt_i);
-                    b.arg(&dm_i);
-                    b.arg(&eps);
-                    unsafe { b.launch(grid_norm(bt, dm)) }
-                        .map_err(|e| format!("prefill mlp norm2 L{l}: {e:?}"))?;
+                    block_norm::forward(
+                        ctx,
+                        WeightDtype::F32,
+                        (pn, rms, stream_in),
+                        norm,
+                        (bt, dm, dims.rms_norm_eps),
+                        "prefill mlp norm2",
+                    )?;
                     unsafe {
                         crate::gpu::blas::gpu_gemm_f32_forward_ptrs(
                             ctx,
@@ -1397,19 +1378,19 @@ impl Mamba3Prefill {
         tgt.residual
             .copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
         {
-            let nf = weights.norm_f();
-            let bt_i = bt as i32;
-            let dm_i = dm as i32;
-            let eps: f32 = dims.rms_norm_eps;
-            let mut b = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
-            b.arg(tgt.temporal_work.inner_mut());
-            b.arg(tgt.rms_discard.inner_mut());
-            b.arg(tgt.residual.inner());
-            b.arg(&nf);
-            b.arg(&bt_i);
-            b.arg(&dm_i);
-            b.arg(&eps);
-            unsafe { b.launch(grid_norm(bt, dm)) }.map_err(|e| format!("prefill norm_f: {e:?}"))?;
+            let (w, b) = weights.norm_f();
+            block_norm::forward(
+                ctx,
+                WeightDtype::F32,
+                (
+                    tgt.temporal_work.cached_ptr(),
+                    tgt.rms_discard.cached_ptr(),
+                    tgt.residual.cached_ptr(),
+                ),
+                NormParams { w, b },
+                (bt, dm, dims.rms_norm_eps),
+                "prefill norm_f",
+            )?;
         }
         {
             let dm_i = dm as i32;

@@ -5,6 +5,7 @@
 //! - **Training**: per-tensor GpuBuffer (optimizer compatible)
 //! - **Gradients**: flat buffer + GradSlice views (single zero() clears all)
 
+use crate::gpu::block_norm::NormParams;
 use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer, GradSlice, WeightSlice, WeightSliceDyn};
 use crate::gpu::dtype::WeightDtype;
 use crate::mamba3_siso::config::Mamba3Config;
@@ -12,25 +13,46 @@ use std::sync::Arc;
 
 type Stream = Arc<cudarc::driver::CudaStream>;
 
+/// A tensor the model may lack, a LayerNorm bias of an RMSNorm model:
+/// `None` for an empty host copy.
+fn upload_opt(stream: &Stream, src: &[f32]) -> Result<Option<GpuBuffer>, String> {
+    if src.is_empty() {
+        return Ok(None);
+    }
+    GpuBuffer::from_cpu(stream, src).map(Some)
+}
+
+/// Zeros for a tensor the model may lack: `None` when `len` is 0.
+fn zeros_opt(stream: &Stream, len: usize) -> Result<Option<GpuBuffer>, String> {
+    if len == 0 {
+        return Ok(None);
+    }
+    GpuBuffer::zeros(stream, len).map(Some)
+}
+
 // ═══ Inference weights — flat buffer + WeightSlice ═══
 
 /// GPU inference weights for a single Mamba-3 layer.
 pub struct GpuMamba3LayerWeightsInf {
-    pub norm_weight: WeightSlice,      // [d_model]
-    pub in_proj_w: WeightSlice,        // [d_model * in_proj_dim]
-    pub dt_bias: WeightSlice,          // [nheads]
-    pub b_norm_weight: WeightSlice,    // [d_state]
-    pub c_norm_weight: WeightSlice,    // [d_state]
-    pub b_bias: WeightSlice,           // [nheads * d_state]
-    pub c_bias: WeightSlice,           // [nheads * d_state]
-    pub d_param: WeightSlice,          // [nheads]
+    pub norm_weight: WeightSlice, // [d_model]
+    /// The block norm's bias, LayerNorm only.
+    pub norm_bias: Option<WeightSlice>, // [d_model]
+    pub in_proj_w: WeightSlice,   // [d_model * in_proj_dim]
+    pub dt_bias: WeightSlice,     // [nheads]
+    pub b_norm_weight: WeightSlice, // [d_state]
+    pub c_norm_weight: WeightSlice, // [d_state]
+    pub b_bias: WeightSlice,      // [nheads * d_state]
+    pub c_bias: WeightSlice,      // [nheads * d_state]
+    pub d_param: WeightSlice,     // [nheads]
     pub norm_gate_weight: WeightSlice, // [d_inner]
-    pub out_proj_w: WeightSlice,       // [d_inner * d_model]
+    pub out_proj_w: WeightSlice,  // [d_inner * d_model]
 }
 
 /// GPU inference weights of one layer's gated MLP.
 pub struct GpuGatedMlpWeightsInf {
     pub norm_weight: WeightSlice, // [d_model]
+    /// The norm's bias, LayerNorm only.
+    pub norm_bias: Option<WeightSlice>, // [d_model]
     pub fc1_w: WeightSlice,       // [d_model * 2 * hidden]
     pub fc2_w: WeightSlice,       // [hidden * d_model]
     pub hidden: usize,
@@ -42,12 +64,42 @@ pub struct GpuMamba3WeightsInf {
     pub input_proj_b: WeightSlice,
     pub layers: Vec<GpuMamba3LayerWeightsInf>,
     pub norm_f_weight: WeightSlice,
+    /// The final norm's bias, LayerNorm only.
+    pub norm_f_bias: Option<WeightSlice>,
     /// The gated MLP of each layer; empty for a model without one.
     pub mlp: Vec<GpuGatedMlpWeightsInf>,
     pub flat: GpuBuffer,
 }
 
+impl GpuMamba3LayerWeightsInf {
+    /// The block norm before the mixer.
+    pub(crate) fn norm(&self) -> NormParams {
+        NormParams {
+            w: self.norm_weight.ptr(),
+            b: self.norm_bias.as_ref().map_or(0, WeightSlice::ptr),
+        }
+    }
+}
+
+impl GpuGatedMlpWeightsInf {
+    /// The norm before the MLP.
+    pub(crate) fn norm(&self) -> NormParams {
+        NormParams {
+            w: self.norm_weight.ptr(),
+            b: self.norm_bias.as_ref().map_or(0, WeightSlice::ptr),
+        }
+    }
+}
+
 impl GpuMamba3WeightsInf {
+    /// The final norm.
+    pub(crate) fn final_norm(&self) -> NormParams {
+        NormParams {
+            w: self.norm_f_weight.ptr(),
+            b: self.norm_f_bias.as_ref().map_or(0, WeightSlice::ptr),
+        }
+    }
+
     /// Upload CPU weights into a single flat GPU buffer with WeightSlice views.
     pub fn from_cpu(
         stream: &Stream,
@@ -60,6 +112,7 @@ impl GpuMamba3WeightsInf {
         flat_data.extend_from_slice(&cpu.input_proj_b);
         for lw in &cpu.layers {
             flat_data.extend_from_slice(&lw.norm_weight);
+            flat_data.extend_from_slice(&lw.norm_bias);
             flat_data.extend_from_slice(&lw.in_proj_w);
             flat_data.extend_from_slice(&lw.dt_bias);
             flat_data.extend_from_slice(&lw.b_norm_weight);
@@ -71,10 +124,12 @@ impl GpuMamba3WeightsInf {
             flat_data.extend_from_slice(&lw.out_proj_w);
         }
         flat_data.extend_from_slice(&cpu.norm_f_weight);
+        flat_data.extend_from_slice(&cpu.norm_f_bias);
         // The MLP goes after every mixer weight, so the slices above keep
         // their offsets.
         for m in &cpu.mlp {
             flat_data.extend_from_slice(&m.norm_weight);
+            flat_data.extend_from_slice(&m.norm_bias);
             flat_data.extend_from_slice(&m.fc1_w);
             flat_data.extend_from_slice(&m.fc2_w);
         }
@@ -96,6 +151,7 @@ impl GpuMamba3WeightsInf {
         for lw in &cpu.layers {
             layers.push(GpuMamba3LayerWeightsInf {
                 norm_weight: slice(lw.norm_weight.len()),
+                norm_bias: (!lw.norm_bias.is_empty()).then(|| slice(lw.norm_bias.len())),
                 in_proj_w: slice(lw.in_proj_w.len()),
                 dt_bias: slice(lw.dt_bias.len()),
                 b_norm_weight: slice(lw.b_norm_weight.len()),
@@ -108,11 +164,13 @@ impl GpuMamba3WeightsInf {
             });
         }
         let norm_f_weight = slice(cpu.norm_f_weight.len());
+        let norm_f_bias = (!cpu.norm_f_bias.is_empty()).then(|| slice(cpu.norm_f_bias.len()));
         let mlp = cpu
             .mlp
             .iter()
             .map(|m| GpuGatedMlpWeightsInf {
                 norm_weight: slice(m.norm_weight.len()),
+                norm_bias: (!m.norm_bias.is_empty()).then(|| slice(m.norm_bias.len())),
                 fc1_w: slice(m.fc1_w.len()),
                 fc2_w: slice(m.fc2_w.len()),
                 hidden: m.hidden(),
@@ -124,6 +182,7 @@ impl GpuMamba3WeightsInf {
             input_proj_b,
             layers,
             norm_f_weight,
+            norm_f_bias,
             mlp,
             flat,
         })
@@ -139,6 +198,7 @@ impl GpuMamba3WeightsInf {
             input_proj_b: WeightSlice::from_offset(base, 0, 0),
             layers: Vec::new(),
             norm_f_weight: WeightSlice::from_offset(base, 0, 0),
+            norm_f_bias: None,
             mlp: Vec::new(),
             flat,
         })
@@ -156,21 +216,25 @@ impl GpuMamba3WeightsInf {
 // critical for numerical stability per research).
 
 pub struct GpuMamba3MixedLayerWeights {
-    pub norm_weight: WeightSliceDyn,      // f32
-    pub in_proj_w: WeightSliceDyn,        // bulk
-    pub dt_bias: WeightSliceDyn,          // f32
-    pub b_norm_weight: WeightSliceDyn,    // f32
-    pub c_norm_weight: WeightSliceDyn,    // f32
-    pub b_bias: WeightSliceDyn,           // f32
-    pub c_bias: WeightSliceDyn,           // f32
-    pub d_param: WeightSliceDyn,          // f32
+    pub norm_weight: WeightSliceDyn, // f32
+    /// The block norm's bias, LayerNorm only.
+    pub norm_bias: Option<WeightSliceDyn>, // f32
+    pub in_proj_w: WeightSliceDyn,   // bulk
+    pub dt_bias: WeightSliceDyn,     // f32
+    pub b_norm_weight: WeightSliceDyn, // f32
+    pub c_norm_weight: WeightSliceDyn, // f32
+    pub b_bias: WeightSliceDyn,      // f32
+    pub c_bias: WeightSliceDyn,      // f32
+    pub d_param: WeightSliceDyn,     // f32
     pub norm_gate_weight: WeightSliceDyn, // f32
-    pub out_proj_w: WeightSliceDyn,       // bulk
+    pub out_proj_w: WeightSliceDyn,  // bulk
 }
 
 /// One layer's gated MLP in the mixed container: bulk projections, f32 norm.
 pub struct GpuMamba3MixedMlpWeights {
     pub norm_weight: WeightSliceDyn, // f32
+    /// The norm's bias, LayerNorm only.
+    pub norm_bias: Option<WeightSliceDyn>, // f32
     pub fc1_w: WeightSliceDyn,       // bulk
     pub fc2_w: WeightSliceDyn,       // bulk
     pub hidden: usize,
@@ -184,11 +248,41 @@ pub struct GpuMamba3MixedWeights {
     pub input_proj_b: WeightSliceDyn, // f32
     pub layers: Vec<GpuMamba3MixedLayerWeights>,
     pub norm_f_weight: WeightSliceDyn, // f32
+    /// The final norm's bias, LayerNorm only.
+    pub norm_f_bias: Option<WeightSliceDyn>, // f32
     /// The gated MLP of each layer; empty for a model without one.
     pub mlp: Vec<GpuMamba3MixedMlpWeights>,
 }
 
+impl GpuMamba3MixedLayerWeights {
+    /// The block norm before the mixer.
+    pub(crate) fn norm(&self) -> NormParams {
+        NormParams {
+            w: self.norm_weight.ptr(),
+            b: self.norm_bias.as_ref().map_or(0, WeightSliceDyn::ptr),
+        }
+    }
+}
+
+impl GpuMamba3MixedMlpWeights {
+    /// The norm before the MLP.
+    pub(crate) fn norm(&self) -> NormParams {
+        NormParams {
+            w: self.norm_weight.ptr(),
+            b: self.norm_bias.as_ref().map_or(0, WeightSliceDyn::ptr),
+        }
+    }
+}
+
 impl GpuMamba3MixedWeights {
+    /// The final norm.
+    pub(crate) fn final_norm(&self) -> NormParams {
+        NormParams {
+            w: self.norm_f_weight.ptr(),
+            b: self.norm_f_bias.as_ref().map_or(0, WeightSliceDyn::ptr),
+        }
+    }
+
     pub fn from_cpu(
         stream: &Stream,
         cpu: &crate::mamba3_siso::weights::Mamba3Weights,
@@ -206,11 +300,13 @@ impl GpuMamba3MixedWeights {
 
         let f32_elems: usize = cpu.input_proj_b.len()
             + cpu.norm_f_weight.len()
+            + cpu.norm_f_bias.len()
             + cpu
                 .layers
                 .iter()
                 .map(|lw| {
                     lw.norm_weight.len()
+                        + lw.norm_bias.len()
                         + lw.dt_bias.len()
                         + lw.b_norm_weight.len()
                         + lw.c_norm_weight.len()
@@ -220,7 +316,11 @@ impl GpuMamba3MixedWeights {
                         + lw.norm_gate_weight.len()
                 })
                 .sum::<usize>()
-            + cpu.mlp.iter().map(|m| m.norm_weight.len()).sum::<usize>();
+            + cpu
+                .mlp
+                .iter()
+                .map(|m| m.norm_weight.len() + m.norm_bias.len())
+                .sum::<usize>();
 
         let bulk_arena = GpuByteBuffer::zeros(stream, bulk_elems * bulk_dtype.size_bytes())?;
         let f32_arena = GpuByteBuffer::zeros(stream, f32_elems * 4)?;
@@ -264,6 +364,11 @@ impl GpuMamba3MixedWeights {
         for lw in &cpu.layers {
             layers.push(GpuMamba3MixedLayerWeights {
                 norm_weight: alloc_f32(&lw.norm_weight)?,
+                norm_bias: if lw.norm_bias.is_empty() {
+                    None
+                } else {
+                    Some(alloc_f32(&lw.norm_bias)?)
+                },
                 in_proj_w: alloc_bulk(&lw.in_proj_w)?,
                 dt_bias: alloc_f32(&lw.dt_bias)?,
                 b_norm_weight: alloc_f32(&lw.b_norm_weight)?,
@@ -277,12 +382,22 @@ impl GpuMamba3MixedWeights {
         }
 
         let norm_f_weight = alloc_f32(&cpu.norm_f_weight)?;
+        let norm_f_bias = if cpu.norm_f_bias.is_empty() {
+            None
+        } else {
+            Some(alloc_f32(&cpu.norm_f_bias)?)
+        };
         // The MLP goes after every mixer weight, so the slices above keep
         // their offsets.
         let mut mlp = Vec::with_capacity(cpu.mlp.len());
         for m in &cpu.mlp {
             mlp.push(GpuMamba3MixedMlpWeights {
                 norm_weight: alloc_f32(&m.norm_weight)?,
+                norm_bias: if m.norm_bias.is_empty() {
+                    None
+                } else {
+                    Some(alloc_f32(&m.norm_bias)?)
+                },
                 fc1_w: alloc_bulk(&m.fc1_w)?,
                 fc2_w: alloc_bulk(&m.fc2_w)?,
                 hidden: m.hidden(),
@@ -300,6 +415,7 @@ impl GpuMamba3MixedWeights {
             input_proj_b,
             layers,
             norm_f_weight,
+            norm_f_bias,
             mlp,
         })
     }
@@ -310,6 +426,8 @@ impl GpuMamba3MixedWeights {
 /// GPU training weights for a single Mamba-3 layer.
 pub struct GpuMamba3LayerWeights {
     pub norm_weight: GpuBuffer,
+    /// The block norm's bias, LayerNorm only.
+    pub norm_bias: Option<GpuBuffer>,
     pub in_proj_w: GpuBuffer,
     pub dt_bias: GpuBuffer,
     pub b_norm_weight: GpuBuffer,
@@ -323,8 +441,10 @@ pub struct GpuMamba3LayerWeights {
 
 /// GPU training weights of one layer's gated MLP.
 pub struct GpuMamba3MlpWeights {
-    /// The pre-MLP RMSNorm scale: `[d_model]`.
+    /// The pre-MLP norm's scale: `[d_model]`.
     pub norm_weight: GpuBuffer,
+    /// The pre-MLP norm's bias, LayerNorm only: `[d_model]`.
+    pub norm_bias: Option<GpuBuffer>,
     /// The up projection `[d_model, 2 * hidden]`, value columns then gate.
     pub fc1_w: GpuBuffer,
     /// The down projection `[hidden, d_model]`.
@@ -335,6 +455,7 @@ impl GpuMamba3MlpWeights {
     fn from_cpu(stream: &Stream, m: &crate::mlp::GatedMlpLayerWeights) -> Result<Self, String> {
         Ok(Self {
             norm_weight: GpuBuffer::from_cpu(stream, &m.norm_weight)?,
+            norm_bias: upload_opt(stream, &m.norm_bias)?,
             fc1_w: GpuBuffer::from_cpu(stream, &m.fc1_w)?,
             fc2_w: GpuBuffer::from_cpu(stream, &m.fc2_w)?,
         })
@@ -344,6 +465,14 @@ impl GpuMamba3MlpWeights {
     pub fn hidden(&self) -> usize {
         self.fc2_w.len() / self.norm_weight.len().max(1)
     }
+
+    /// The norm before the MLP.
+    pub(crate) fn norm(&self) -> NormParams {
+        NormParams {
+            w: self.norm_weight.cached_ptr(),
+            b: self.norm_bias.as_ref().map_or(0, GpuBuffer::cached_ptr),
+        }
+    }
 }
 
 /// GPU training weights for the full Mamba-3 backbone.
@@ -352,6 +481,8 @@ pub struct GpuMamba3Weights {
     pub input_proj_b: GpuBuffer,
     pub layers: Vec<GpuMamba3LayerWeights>,
     pub norm_f_weight: GpuBuffer,
+    /// The final norm's bias, LayerNorm only.
+    pub norm_f_bias: Option<GpuBuffer>,
     /// The gated MLP of each layer; empty for a model without one.
     pub mlp: Vec<GpuMamba3MlpWeights>,
 }
@@ -364,6 +495,7 @@ impl GpuMamba3LayerWeights {
     ) -> Result<Self, String> {
         Ok(Self {
             norm_weight: GpuBuffer::from_cpu(stream, &lw.norm_weight)?,
+            norm_bias: upload_opt(stream, &lw.norm_bias)?,
             in_proj_w: GpuBuffer::from_cpu(stream, &lw.in_proj_w)?,
             dt_bias: GpuBuffer::from_cpu(stream, &lw.dt_bias)?,
             b_norm_weight: GpuBuffer::from_cpu(stream, &lw.b_norm_weight)?,
@@ -384,6 +516,7 @@ impl GpuMamba3LayerWeights {
         let ip = cfg.in_proj_out_dim();
         Ok(Self {
             norm_weight: GpuBuffer::zeros(stream, dm)?,
+            norm_bias: zeros_opt(stream, cfg.block_norm.bias_len(dm))?,
             in_proj_w: GpuBuffer::zeros(stream, dm * ip)?,
             dt_bias: GpuBuffer::zeros(stream, nh)?,
             b_norm_weight: GpuBuffer::zeros(stream, ds)?,
@@ -394,6 +527,14 @@ impl GpuMamba3LayerWeights {
             norm_gate_weight: GpuBuffer::zeros(stream, di)?,
             out_proj_w: GpuBuffer::zeros(stream, di * dm)?,
         })
+    }
+
+    /// The block norm before the mixer.
+    pub(crate) fn norm(&self) -> NormParams {
+        NormParams {
+            w: self.norm_weight.cached_ptr(),
+            b: self.norm_bias.as_ref().map_or(0, GpuBuffer::cached_ptr),
+        }
     }
 }
 
@@ -413,6 +554,7 @@ impl GpuMamba3Weights {
                 .map(|lw| GpuMamba3LayerWeights::from_cpu(stream, lw, cfg))
                 .collect::<Result<Vec<_>, _>>()?,
             norm_f_weight: GpuBuffer::from_cpu(stream, &cpu.norm_f_weight)?,
+            norm_f_bias: upload_opt(stream, &cpu.norm_f_bias)?,
             mlp: cpu
                 .mlp
                 .iter()
@@ -430,18 +572,28 @@ impl GpuMamba3Weights {
                 .map(|_| GpuMamba3LayerWeights::zeros(stream, cfg))
                 .collect::<Result<Vec<_>, _>>()?,
             norm_f_weight: GpuBuffer::zeros(stream, dm)?,
+            norm_f_bias: zeros_opt(stream, cfg.block_norm.bias_len(dm))?,
             mlp: (0..cfg.n_layers)
                 .filter(|_| cfg.mlp_hidden() > 0)
                 .map(|_| {
                     let h = cfg.mlp_hidden();
                     Ok(GpuMamba3MlpWeights {
                         norm_weight: GpuBuffer::zeros(stream, dm)?,
+                        norm_bias: zeros_opt(stream, cfg.block_norm.bias_len(dm))?,
                         fc1_w: GpuBuffer::zeros(stream, dm * 2 * h)?,
                         fc2_w: GpuBuffer::zeros(stream, h * dm)?,
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?,
         })
+    }
+
+    /// The final norm.
+    pub(crate) fn final_norm(&self) -> NormParams {
+        NormParams {
+            w: self.norm_f_weight.cached_ptr(),
+            b: self.norm_f_bias.as_ref().map_or(0, GpuBuffer::cached_ptr),
+        }
     }
 }
 
@@ -450,6 +602,8 @@ impl GpuMamba3Weights {
 /// GPU gradients for a single Mamba-3 layer.
 pub struct GpuMamba3LayerGrads {
     pub norm_weight: GradSlice,
+    /// The block norm's bias, LayerNorm only.
+    pub norm_bias: Option<GradSlice>,
     pub in_proj_w: GradSlice,
     pub dt_bias: GradSlice,
     pub b_norm_weight: GradSlice,
@@ -464,6 +618,8 @@ pub struct GpuMamba3LayerGrads {
 /// GPU gradients of one layer's gated MLP.
 pub struct GpuMamba3MlpGrads {
     pub norm_weight: GradSlice,
+    /// The norm's bias, LayerNorm only.
+    pub norm_bias: Option<GradSlice>,
     pub fc1_w: GradSlice,
     pub fc2_w: GradSlice,
 }
@@ -474,6 +630,8 @@ pub struct GpuMamba3Grads {
     pub input_proj_b: GradSlice,
     pub layers: Vec<GpuMamba3LayerGrads>,
     pub norm_f_weight: GradSlice,
+    /// The final norm's bias, LayerNorm only.
+    pub norm_f_bias: Option<GradSlice>,
     /// The gated MLP of each layer, after every mixer gradient so those
     /// keep their offsets; empty for a model without one.
     pub mlp: Vec<GpuMamba3MlpGrads>,
@@ -481,6 +639,25 @@ pub struct GpuMamba3Grads {
 }
 
 impl GpuMamba3Grads {
+    /// The f32 values one layer's mixer gradients take in the arena.
+    pub(crate) fn layer_len(cfg: &Mamba3Config) -> usize {
+        let dm = cfg.d_model;
+        let di = cfg.d_inner();
+        let ds = cfg.d_state;
+        let nh = cfg.nheads();
+        let ip = cfg.in_proj_out_dim();
+        dm + cfg.block_norm.bias_len(dm)
+            + dm * ip
+            + nh
+            + ds
+            + ds
+            + nh * ds
+            + nh * ds
+            + nh
+            + di
+            + di * dm
+    }
+
     /// Allocate gradient buffer for full Mamba-3 backbone.
     pub fn new(stream: &Stream, cfg: &Mamba3Config, input_dim: usize) -> Result<Self, String> {
         let dm = cfg.d_model;
@@ -488,10 +665,15 @@ impl GpuMamba3Grads {
         let ds = cfg.d_state;
         let nh = cfg.nheads();
         let ip = cfg.in_proj_out_dim();
-        let per_layer = dm + dm * ip + nh + ds + ds + nh * ds + nh * ds + nh + di + di * dm;
+        let nb = cfg.block_norm.bias_len(dm);
+        let per_layer = Self::layer_len(cfg);
         let hidden = cfg.mlp_hidden();
-        let per_mlp = if hidden > 0 { dm + 3 * dm * hidden } else { 0 };
-        let total = input_dim * dm + dm + cfg.n_layers * (per_layer + per_mlp) + dm;
+        let per_mlp = if hidden > 0 {
+            dm + nb + 3 * dm * hidden
+        } else {
+            0
+        };
+        let total = input_dim * dm + dm + cfg.n_layers * (per_layer + per_mlp) + dm + nb;
         let flat = GpuBuffer::zeros(stream, total)?;
         let base = flat.cached_ptr();
 
@@ -509,6 +691,7 @@ impl GpuMamba3Grads {
         for _ in 0..cfg.n_layers {
             layers.push(GpuMamba3LayerGrads {
                 norm_weight: slice(dm),
+                norm_bias: (nb > 0).then(|| slice(nb)),
                 in_proj_w: slice(dm * ip),
                 dt_bias: slice(nh),
                 b_norm_weight: slice(ds),
@@ -521,10 +704,12 @@ impl GpuMamba3Grads {
             });
         }
         let norm_f_weight = slice(dm);
+        let norm_f_bias = (nb > 0).then(|| slice(nb));
         let mlp = (0..cfg.n_layers)
             .filter(|_| hidden > 0)
             .map(|_| GpuMamba3MlpGrads {
                 norm_weight: slice(dm),
+                norm_bias: (nb > 0).then(|| slice(nb)),
                 fc1_w: slice(dm * 2 * hidden),
                 fc2_w: slice(hidden * dm),
             })
@@ -535,6 +720,7 @@ impl GpuMamba3Grads {
             input_proj_b,
             layers,
             norm_f_weight,
+            norm_f_bias,
             mlp,
             flat,
         })
@@ -553,6 +739,8 @@ impl GpuMamba3Grads {
 /// `in_proj_w` / `out_proj_w` follow the container's bulk dtype.
 pub struct Mamba3LayerWeightPtrs {
     pub norm_weight: u64,
+    /// The block norm's bias, 0 for RMSNorm.
+    pub norm_bias: u64,
     pub in_proj_w: u64,
     pub dt_bias: u64,
     pub b_norm_weight: u64,
@@ -568,6 +756,8 @@ pub struct Mamba3LayerWeightPtrs {
 /// dtype for the projections and f32 for the norm.
 pub struct GatedMlpWeightPtrs {
     pub norm_weight: u64,
+    /// The norm's bias, 0 for RMSNorm.
+    pub norm_bias: u64,
     pub fc1_w: u64,
     pub fc2_w: u64,
     pub hidden: usize,
@@ -588,7 +778,8 @@ pub trait Mamba3WeightsView {
     fn input_proj(&self) -> (u64, u64);
     fn n_layers(&self) -> usize;
     fn layer(&self, l: usize) -> Mamba3LayerWeightPtrs;
-    fn norm_f(&self) -> u64;
+    /// The final norm's scale and bias, the bias 0 for RMSNorm.
+    fn norm_f(&self) -> (u64, u64);
     /// Layer `l`'s gated MLP, `None` for a model without one.
     fn mlp(&self, l: usize) -> Option<GatedMlpWeightPtrs>;
     /// Identity of the underlying device allocations, for the CUDA-graph
@@ -615,6 +806,7 @@ impl Mamba3WeightsView for GpuMamba3WeightsInf {
         let lw = &self.layers[l];
         Mamba3LayerWeightPtrs {
             norm_weight: lw.norm_weight.ptr(),
+            norm_bias: lw.norm().b,
             in_proj_w: lw.in_proj_w.ptr(),
             dt_bias: lw.dt_bias.ptr(),
             b_norm_weight: lw.b_norm_weight.ptr(),
@@ -626,12 +818,14 @@ impl Mamba3WeightsView for GpuMamba3WeightsInf {
             out_proj_w: lw.out_proj_w.ptr(),
         }
     }
-    fn norm_f(&self) -> u64 {
-        self.norm_f_weight.ptr()
+    fn norm_f(&self) -> (u64, u64) {
+        let p = self.final_norm();
+        (p.w, p.b)
     }
     fn mlp(&self, l: usize) -> Option<GatedMlpWeightPtrs> {
         self.mlp.get(l).map(|m| GatedMlpWeightPtrs {
             norm_weight: m.norm_weight.ptr(),
+            norm_bias: m.norm().b,
             fc1_w: m.fc1_w.ptr(),
             fc2_w: m.fc2_w.ptr(),
             hidden: m.hidden,
@@ -656,6 +850,7 @@ impl Mamba3WeightsView for GpuMamba3MixedWeights {
         let lw = &self.layers[l];
         Mamba3LayerWeightPtrs {
             norm_weight: lw.norm_weight.ptr(),
+            norm_bias: lw.norm().b,
             in_proj_w: lw.in_proj_w.ptr(),
             dt_bias: lw.dt_bias.ptr(),
             b_norm_weight: lw.b_norm_weight.ptr(),
@@ -667,12 +862,14 @@ impl Mamba3WeightsView for GpuMamba3MixedWeights {
             out_proj_w: lw.out_proj_w.ptr(),
         }
     }
-    fn norm_f(&self) -> u64 {
-        self.norm_f_weight.ptr()
+    fn norm_f(&self) -> (u64, u64) {
+        let p = self.final_norm();
+        (p.w, p.b)
     }
     fn mlp(&self, l: usize) -> Option<GatedMlpWeightPtrs> {
         self.mlp.get(l).map(|m| GatedMlpWeightPtrs {
             norm_weight: m.norm_weight.ptr(),
+            norm_bias: m.norm().b,
             fc1_w: m.fc1_w.ptr(),
             fc2_w: m.fc2_w.ptr(),
             hidden: m.hidden,

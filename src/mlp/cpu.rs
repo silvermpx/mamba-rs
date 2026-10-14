@@ -10,7 +10,7 @@
 use super::GatedMlpLayerWeights;
 use crate::ops::fast_math::fast_exp_scalar;
 use crate::ops::lane::LaneGemm;
-use crate::ops::norms::rms_norm_weighted;
+use crate::ops::norms::{layer_norm_row, layer_norm_row_backward, rms_norm_weighted};
 use crate::ops::packed::PackedLinear;
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
@@ -20,6 +20,17 @@ use crate::precision::WeightDtype;
 #[inline(always)]
 fn gated(v: f32, g: f32) -> f32 {
     v * (g / (1.0 + fast_exp_scalar(-g)))
+}
+
+/// The pre-MLP norm of one row: RMSNorm ([`rms_norm_weighted`]), or
+/// LayerNorm for a model whose norms carry a bias.
+#[inline]
+pub fn mlp_norm_row(out: &mut [f32], x: &[f32], w: &GatedMlpLayerWeights, eps: f32) {
+    if w.norm_bias.is_empty() {
+        rms_norm_weighted(out, x, &w.norm_weight, eps);
+    } else {
+        layer_norm_row(out, x, (&w.norm_weight, &w.norm_bias), eps);
+    }
 }
 
 /// Per-token buffers of one MLP, sized once.
@@ -96,7 +107,7 @@ fn mlp_step(
     let d = w.norm_weight.len();
     let h = w.hidden();
     let dtype = s.dtype;
-    rms_norm_weighted(&mut s.norm[..d], &temporal[..d], &w.norm_weight, eps);
+    mlp_norm_row(&mut s.norm[..d], &temporal[..d], w, eps);
     store(dtype, &mut s.norm[..d]);
     s.gemm.row(
         dtype,
@@ -179,6 +190,8 @@ pub fn gated_mlp_rows(
 #[derive(Default)]
 pub struct GatedMlpBackwardScratch {
     inv: Vec<f32>,
+    /// A LayerNorm's std and mean per row.
+    ln_stats: Vec<[f32; 2]>,
     norm: Vec<f32>,
     up: Vec<f32>,
     act: Vec<f32>,
@@ -194,7 +207,8 @@ pub struct GatedMlpBackwardScratch {
 /// before the branch; `d_temporal` holds d loss / d (the rows after it) and
 /// leaves holding d loss / d (the rows before it), the residual included.
 /// The weight gradients accumulate into `g`. The norm is
-/// [`rms_norm_weighted`], `(x * inv_rms) * w`, as both forward paths apply.
+/// [`rms_norm_weighted`], `(x * inv_rms) * w`, as both forward paths apply,
+/// or [`layer_norm_row`] for a model whose norms carry a bias.
 pub fn gated_mlp_rows_backward(
     d_temporal: &mut [f32],
     x_in: &[f32],
@@ -216,13 +230,26 @@ pub fn gated_mlp_rows_backward(
     s.d_norm.resize(rows * d, 0.0);
 
     // The forward again: norm, up projection, gate.
-    for ((inv, n), x) in s
-        .inv
-        .iter_mut()
-        .zip(s.norm.chunks_exact_mut(d))
-        .zip(x_in.chunks_exact(d))
-    {
-        *inv = rms_norm_weighted(n, x, &w.norm_weight, eps);
+    let layer_norm = !w.norm_bias.is_empty();
+    if layer_norm {
+        s.ln_stats.resize(rows, [0.0; 2]);
+        for ((st, n), x) in s
+            .ln_stats
+            .iter_mut()
+            .zip(s.norm.chunks_exact_mut(d))
+            .zip(x_in.chunks_exact(d))
+        {
+            *st = layer_norm_row(n, x, (&w.norm_weight, &w.norm_bias), eps);
+        }
+    } else {
+        for ((inv, n), x) in s
+            .inv
+            .iter_mut()
+            .zip(s.norm.chunks_exact_mut(d))
+            .zip(x_in.chunks_exact(d))
+        {
+            *inv = rms_norm_weighted(n, x, &w.norm_weight, eps);
+        }
     }
     store(dtype, &mut s.norm[..rows * d]);
     s.gemm.forward(
@@ -269,7 +296,26 @@ pub fn gated_mlp_rows_backward(
         (rows, d, 2 * h),
     );
 
-    // The norm: xh = x * inv, n = xh * w.
+    // The norm. LayerNorm: its own backward, added onto the residual's.
+    if layer_norm {
+        for (((dt_row, x), dn), &st) in d_temporal[..rows * d]
+            .chunks_exact_mut(d)
+            .zip(x_in.chunks_exact(d))
+            .zip(s.d_norm.chunks_exact(d))
+            .zip(&s.ln_stats)
+        {
+            layer_norm_row_backward(
+                dt_row,
+                (&mut g.norm_weight, &mut g.norm_bias),
+                (dn, x),
+                &w.norm_weight,
+                st,
+                true,
+            );
+        }
+        return;
+    }
+    // RMSNorm: xh = x * inv, n = xh * w.
     for (((dt_row, x), dn), &inv) in d_temporal[..rows * d]
         .chunks_exact_mut(d)
         .zip(x_in.chunks_exact(d))
@@ -312,70 +358,164 @@ mod tests {
             .collect()
     }
 
+    /// The reference block branch `x + mlp(norm2(x))` of one row in f64:
+    /// RMSNorm, or LayerNorm when the bias is not empty.
+    fn reference_branch(row: &[f64], w: &[Vec<f64>; 4], h: usize, eps: f64) -> Vec<f64> {
+        let [nw, nb, fc1, fc2] = w;
+        let d = row.len();
+        let n: Vec<f64> = if nb.is_empty() {
+            let ms = row.iter().map(|v| v * v).sum::<f64>() / d as f64;
+            let inv = 1.0 / (ms + eps).sqrt();
+            (0..d).map(|i| row[i] * inv * nw[i]).collect()
+        } else {
+            let m = row.iter().sum::<f64>() / d as f64;
+            let var = row.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / d as f64;
+            let sd = (var + eps).sqrt();
+            (0..d).map(|i| (row[i] - m) / sd * nw[i] + nb[i]).collect()
+        };
+        let up: Vec<f64> = (0..2 * h)
+            .map(|j| (0..d).map(|i| n[i] * fc1[i * 2 * h + j]).sum())
+            .collect();
+        let act: Vec<f64> = (0..h)
+            .map(|j| up[j] * (up[h + j] / (1.0 + (-up[h + j]).exp())))
+            .collect();
+        (0..d)
+            .map(|o| row[o] + (0..h).map(|j| act[j] * fc2[j * d + o]).sum::<f64>())
+            .collect()
+    }
+
+    fn mlp_weights(d: usize, h: usize, layer_norm: bool) -> GatedMlpLayerWeights {
+        GatedMlpLayerWeights {
+            norm_weight: draw(d, 1).iter().map(|v| 1.0 + v).collect(),
+            norm_bias: if layer_norm { draw(d, 5) } else { Vec::new() },
+            fc1_w: draw(d * 2 * h, 2),
+            fc2_w: draw(h * d, 3),
+        }
+    }
+
+    fn wide(v: &[f32]) -> Vec<f64> {
+        v.iter().map(|&a| f64::from(a)).collect()
+    }
+
     /// The step and the rows form agree with a plain f64 transcription of
-    /// the reference block branch.
+    /// the reference block branch, under either norm.
     #[test]
     fn gated_mlp_matches_the_reference_branch() {
         let (d, h, rows) = (24usize, 128usize, 5usize);
-        let w = GatedMlpLayerWeights {
-            norm_weight: draw(d, 1).iter().map(|v| 1.0 + v).collect(),
-            fc1_w: draw(d * 2 * h, 2),
-            fc2_w: draw(h * d, 3),
-        };
-        let x = draw(rows * d, 4);
         let eps = 1e-5f32;
-        let mut want = vec![0f64; rows * d];
-        for r in 0..rows {
-            let row = &x[r * d..(r + 1) * d];
-            let ms = row
-                .iter()
-                .map(|&v| f64::from(v) * f64::from(v))
-                .sum::<f64>()
-                / d as f64;
-            let inv = 1.0 / (ms + f64::from(eps)).sqrt();
-            let n: Vec<f64> = (0..d)
-                .map(|i| f64::from(row[i]) * inv * f64::from(w.norm_weight[i]))
+        for layer_norm in [false, true] {
+            let w = mlp_weights(d, h, layer_norm);
+            let wd = [
+                wide(&w.norm_weight),
+                wide(&w.norm_bias),
+                wide(&w.fc1_w),
+                wide(&w.fc2_w),
+            ];
+            let x = draw(rows * d, 4);
+            let want: Vec<f64> = x
+                .chunks_exact(d)
+                .flat_map(|row| reference_branch(&wide(row), &wd, h, f64::from(eps)))
                 .collect();
-            let up: Vec<f64> = (0..2 * h)
-                .map(|j| {
-                    (0..d)
-                        .map(|i| n[i] * f64::from(w.fc1_w[i * 2 * h + j]))
-                        .sum()
-                })
-                .collect();
-            let act: Vec<f64> = (0..h)
-                .map(|j| up[j] * (up[h + j] / (1.0 + (-up[h + j]).exp())))
-                .collect();
-            for o in 0..d {
-                let down: f64 = (0..h).map(|j| act[j] * f64::from(w.fc2_w[j * d + o])).sum();
-                want[r * d + o] = f64::from(row[o]) + down;
+            let mut step_out = x.clone();
+            let mut ss = GatedMlpStepScratch::new(d, h);
+            for r in 0..rows {
+                gated_mlp_step(&mut step_out[r * d..(r + 1) * d], &w, &mut ss, eps);
+            }
+            let mut rows_out = x.clone();
+            let mut rs = GatedMlpRowsScratch::default();
+            gated_mlp_rows(
+                &mut rows_out,
+                rows,
+                &w,
+                &mut rs,
+                sgemm_forward,
+                |dst, src| {
+                    for (o, i) in dst.chunks_exact_mut(d).zip(src.chunks_exact(d)) {
+                        mlp_norm_row(o, i, &w, eps);
+                    }
+                },
+            );
+            for (label, got) in [("step", &step_out), ("rows", &rows_out)] {
+                for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+                    assert!(
+                        (f64::from(g) - w).abs() <= 1e-5 * w.abs().max(1.0),
+                        "{label} (layer norm {layer_norm})[{i}]: {g} vs {w}"
+                    );
+                }
             }
         }
-        let mut step_out = x.clone();
-        let mut ss = GatedMlpStepScratch::new(d, h);
-        for r in 0..rows {
-            gated_mlp_step(&mut step_out[r * d..(r + 1) * d], &w, &mut ss, eps);
-        }
-        let mut rows_out = x.clone();
-        let mut rs = GatedMlpRowsScratch::default();
-        gated_mlp_rows(
-            &mut rows_out,
-            rows,
-            &w,
-            &mut rs,
-            sgemm_forward,
-            |dst, src| {
-                for (o, i) in dst.chunks_exact_mut(d).zip(src.chunks_exact(d)) {
-                    rms_norm_weighted(o, i, &w.norm_weight, eps);
-                }
-            },
-        );
-        for (label, got) in [("step", &step_out), ("rows", &rows_out)] {
-            for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+    }
+
+    /// The backward against central differences of `sum(g * out)` taken
+    /// through the f64 reference, under either norm: the input gradient
+    /// (the residual's included), every norm parameter and a sweep of each
+    /// projection's entries.
+    #[test]
+    fn gated_mlp_backward_is_the_reference_derivative() {
+        let (d, h, rows) = (12usize, 8usize, 3usize);
+        let eps = 1e-5f64;
+        for layer_norm in [false, true] {
+            let w = mlp_weights(d, h, layer_norm);
+            let x = draw(rows * d, 6);
+            let g_out = draw(rows * d, 7);
+            let mut d_t = g_out.clone();
+            let mut grads = GatedMlpLayerWeights {
+                norm_weight: vec![0.0; d],
+                norm_bias: vec![0.0; w.norm_bias.len()],
+                fc1_w: vec![0.0; d * 2 * h],
+                fc2_w: vec![0.0; h * d],
+            };
+            let mut s = GatedMlpBackwardScratch::default();
+            gated_mlp_rows_backward(&mut d_t, &x, rows, (&w, &mut grads), &mut s, eps as f32);
+
+            let g64 = wide(&g_out);
+            let loss = |x: &[f64], wd: &[Vec<f64>; 4]| -> f64 {
+                x.chunks_exact(d)
+                    .zip(g64.chunks_exact(d))
+                    .map(|(row, g)| {
+                        reference_branch(row, wd, h, eps)
+                            .iter()
+                            .zip(g)
+                            .map(|(a, b)| a * b)
+                            .sum::<f64>()
+                    })
+                    .sum()
+            };
+            let x64 = wide(&x);
+            let wd = [
+                wide(&w.norm_weight),
+                wide(&w.norm_bias),
+                wide(&w.fc1_w),
+                wide(&w.fc2_w),
+            ];
+            let step = 1e-6f64;
+            let close = |got: f32, want: f64, what: &str| {
                 assert!(
-                    (f64::from(g) - w).abs() <= 1e-5 * w.abs().max(1.0),
-                    "{label}[{i}]: {g} vs {w}"
+                    (f64::from(got) - want).abs() <= 2e-4 * want.abs().max(1.0),
+                    "layer norm {layer_norm} {what}: {got} vs {want}"
                 );
+            };
+            for i in 0..rows * d {
+                let (mut p, mut m) = (x64.clone(), x64.clone());
+                p[i] += step;
+                m[i] -= step;
+                let want = (loss(&p, &wd) - loss(&m, &wd)) / (2.0 * step);
+                close(d_t[i], want, &format!("dx[{i}]"));
+            }
+            let analytic = [
+                &grads.norm_weight,
+                &grads.norm_bias,
+                &grads.fc1_w,
+                &grads.fc2_w,
+            ];
+            for (t, got) in analytic.iter().enumerate() {
+                for i in (0..got.len()).step_by(got.len().div_ceil(16).max(1)) {
+                    let (mut p, mut m) = (wd.clone(), wd.clone());
+                    p[t][i] += step;
+                    m[t][i] -= step;
+                    let want = (loss(&x64, &p) - loss(&x64, &m)) / (2.0 * step);
+                    close(got[i], want, &format!("tensor {t}[{i}]"));
+                }
             }
         }
     }

@@ -836,23 +836,22 @@ fn check_window_len(what: &str, got: usize, want: usize) -> Result<(), String> {
 
 fn m3_control_region_geom(cfg: &Mamba3Config, input_dim: usize) -> GradRegionGeom {
     let dm = cfg.d_model;
-    let di = cfg.d_inner();
-    let ds = cfg.d_state;
     let nh = cfg.nheads();
     let ip = cfg.in_proj_out_dim();
     let na = cfg.num_rope_angles();
     let ctrl_len = 3 * nh + na;
     let ctrl0 = ip - ctrl_len;
-    let per_layer = dm + dm * ip + nh + ds + ds + nh * ds + nh * ds + nh + di + di * dm;
-    let layer0 = input_dim * dm + dm;
+    // The first layer's in_proj gradient, after the input projection's and
+    // the layer's block norm scale and bias.
+    let in_proj0 = input_dim * dm + dm + dm + cfg.block_norm.bias_len(dm);
     GradRegionGeom {
         n_layers: cfg.n_layers as i32,
-        layer_stride: per_layer as i64,
-        a_off: (layer0 + dm + ctrl0) as i64,
+        layer_stride: GpuMamba3Grads::layer_len(cfg) as i64,
+        a_off: (in_proj0 + ctrl0) as i64,
         a_rows: dm as i32,
         a_cols: ctrl_len as i32,
         a_row_stride: ip as i64,
-        b_off: (layer0 + dm + dm * ip) as i64,
+        b_off: (in_proj0 + dm * ip) as i64,
         b_len: nh as i32,
         c_off: 0,
         c_len: 0,
@@ -997,6 +996,7 @@ impl Mamba3TrainerMixed {
             a_floor: cfg.a_floor,
             rms_norm_eps: cfg.rms_norm_eps,
             ssm_norm_eps: cfg.ssm_norm_eps,
+            block_norm: cfg.block_norm,
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: cfg.train_use_parallel_scan(),
         };
@@ -2502,6 +2502,9 @@ impl Mamba3TrainerMixed {
         for (i, lw) in out.layers.iter_mut().enumerate() {
             let g = &m.layers[i];
             lw.norm_weight = g.norm_weight.to_cpu(&self.ctx.stream)?;
+            if let Some(b) = &g.norm_bias {
+                lw.norm_bias = b.to_cpu(&self.ctx.stream)?;
+            }
             lw.in_proj_w = g.in_proj_w.to_cpu(&self.ctx.stream)?;
             lw.dt_bias = g.dt_bias.to_cpu(&self.ctx.stream)?;
             lw.b_norm_weight = g.b_norm_weight.to_cpu(&self.ctx.stream)?;
@@ -2513,8 +2516,14 @@ impl Mamba3TrainerMixed {
             lw.out_proj_w = g.out_proj_w.to_cpu(&self.ctx.stream)?;
         }
         out.norm_f_weight = m.norm_f_weight.to_cpu(&self.ctx.stream)?;
+        if let Some(b) = &m.norm_f_bias {
+            out.norm_f_bias = b.to_cpu(&self.ctx.stream)?;
+        }
         for (mo, mg) in out.mlp.iter_mut().zip(&m.mlp) {
             mo.norm_weight = mg.norm_weight.to_cpu(&self.ctx.stream)?;
+            if let Some(b) = &mg.norm_bias {
+                mo.norm_bias = b.to_cpu(&self.ctx.stream)?;
+            }
             mo.fc1_w = mg.fc1_w.to_cpu(&self.ctx.stream)?;
             mo.fc2_w = mg.fc2_w.to_cpu(&self.ctx.stream)?;
         }
@@ -2640,6 +2649,7 @@ impl Mamba3TrainerF32 {
             a_floor: cfg.a_floor,
             rms_norm_eps: cfg.rms_norm_eps,
             ssm_norm_eps: cfg.ssm_norm_eps,
+            block_norm: cfg.block_norm,
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: cfg.train_use_parallel_scan(),
         };
@@ -3335,6 +3345,9 @@ impl Mamba3TrainerF32 {
         for (i, lw) in out.layers.iter_mut().enumerate() {
             let g = &w.layers[i];
             lw.norm_weight = g.norm_weight.to_cpu(&self.ctx.stream)?;
+            if let Some(b) = &g.norm_bias {
+                lw.norm_bias = b.to_cpu(&self.ctx.stream)?;
+            }
             lw.in_proj_w = g.in_proj_w.to_cpu(&self.ctx.stream)?;
             lw.dt_bias = g.dt_bias.to_cpu(&self.ctx.stream)?;
             lw.b_norm_weight = g.b_norm_weight.to_cpu(&self.ctx.stream)?;
@@ -3346,8 +3359,14 @@ impl Mamba3TrainerF32 {
             lw.out_proj_w = g.out_proj_w.to_cpu(&self.ctx.stream)?;
         }
         out.norm_f_weight = w.norm_f_weight.to_cpu(&self.ctx.stream)?;
+        if let Some(b) = &w.norm_f_bias {
+            out.norm_f_bias = b.to_cpu(&self.ctx.stream)?;
+        }
         for (mo, mg) in out.mlp.iter_mut().zip(&w.mlp) {
             mo.norm_weight = mg.norm_weight.to_cpu(&self.ctx.stream)?;
+            if let Some(b) = &mg.norm_bias {
+                mo.norm_bias = b.to_cpu(&self.ctx.stream)?;
+            }
             mo.fc1_w = mg.fc1_w.to_cpu(&self.ctx.stream)?;
             mo.fc2_w = mg.fc2_w.to_cpu(&self.ctx.stream)?;
         }

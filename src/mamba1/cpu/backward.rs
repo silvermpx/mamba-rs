@@ -26,7 +26,7 @@ use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use crate::mlp::cpu::gated_mlp_rows_backward;
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::fast_exp_scalar;
-use crate::ops::norms::bcdt_rms_norm_backward;
+use crate::ops::norms::{bcdt_rms_norm_backward, layer_norm_row_backward};
 use crate::ops::rounding::{store, stored};
 
 /// `v` at least `n` long, grown once and reused after.
@@ -382,21 +382,33 @@ pub fn backward_mamba_layer_batched(
     );
 
     // ===================================================================
-    // Phase B8: Batch RmsNorm backward + residual
+    // Phase B8: the batch's block norm backward + residual
     // ===================================================================
+    let layer_norm = !w.norm_bias.is_empty();
     for t in 0..seq_len {
         let off = t * dm;
-        let rms_slice = [acts.rms_val(t)];
-        scratch.d_pre_norm_flat[off..off + dm].fill(0.0);
-        backward_rms_norm(
-            &mut scratch.d_pre_norm_flat[off..off + dm],
-            &mut d_layer.norm_weight,
-            &scratch.d_norm_flat[off..off + dm],
-            acts.residual(t),
-            (&w.norm_weight, &rms_slice),
-            1,
-            dm,
-        );
+        if layer_norm {
+            layer_norm_row_backward(
+                &mut scratch.d_pre_norm_flat[off..off + dm],
+                (&mut d_layer.norm_weight, &mut d_layer.norm_bias),
+                (&scratch.d_norm_flat[off..off + dm], acts.residual(t)),
+                &w.norm_weight,
+                acts.norm_stats(t),
+                false,
+            );
+        } else {
+            let rms_slice = [acts.rms_val(t)];
+            scratch.d_pre_norm_flat[off..off + dm].fill(0.0);
+            backward_rms_norm(
+                &mut scratch.d_pre_norm_flat[off..off + dm],
+                &mut d_layer.norm_weight,
+                &scratch.d_norm_flat[off..off + dm],
+                acts.residual(t),
+                (&w.norm_weight, &rms_slice),
+                1,
+                dm,
+            );
+        }
 
         // Residual gradient: d_temporal[t] += d_pre_norm[t]
         for d in 0..dm {
@@ -451,15 +463,44 @@ pub fn backward_mamba_backbone_batched(
         let norm_f_dx = &mut scratch.d_input_proj_scratch[..seq_len * dm];
         norm_f_dx.fill(0.0);
         scratch.d_norm_f_weight_local.fill(0.0);
-        backward_rms_norm(
-            norm_f_dx,
-            &mut scratch.d_norm_f_weight_local,
-            &d_temporal_flat[..seq_len * dm],
-            &acts.norm_f_input[..seq_len * dm],
-            (&mamba_w.norm_f_weight, &acts.norm_f_rms[..seq_len]),
-            seq_len,
-            dm,
-        );
+        if mamba_w.norm_f_bias.is_empty() {
+            backward_rms_norm(
+                norm_f_dx,
+                &mut scratch.d_norm_f_weight_local,
+                &d_temporal_flat[..seq_len * dm],
+                &acts.norm_f_input[..seq_len * dm],
+                (&mamba_w.norm_f_weight, &acts.norm_f_rms[..seq_len]),
+                seq_len,
+                dm,
+            );
+        } else {
+            scratch.d_norm_f_bias_local.fill(0.0);
+            for (((dx, dy), x), st) in norm_f_dx
+                .chunks_exact_mut(dm)
+                .zip(d_temporal_flat[..seq_len * dm].chunks_exact(dm))
+                .zip(acts.norm_f_input[..seq_len * dm].chunks_exact(dm))
+                .zip(acts.norm_f_rms.as_chunks::<2>().0)
+            {
+                layer_norm_row_backward(
+                    dx,
+                    (
+                        &mut scratch.d_norm_f_weight_local,
+                        &mut scratch.d_norm_f_bias_local,
+                    ),
+                    (dy, x),
+                    &mamba_w.norm_f_weight,
+                    *st,
+                    false,
+                );
+            }
+            for (a, b) in d_mamba
+                .norm_f_bias
+                .iter_mut()
+                .zip(&scratch.d_norm_f_bias_local)
+            {
+                *a += b;
+            }
+        }
         // Copy norm_f dx back into d_temporal_flat for the layer backward passes
         d_temporal_flat[..seq_len * dm].copy_from_slice(&norm_f_dx[..seq_len * dm]);
         // Accumulate d_norm_f_weight gradient

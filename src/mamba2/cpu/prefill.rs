@@ -14,13 +14,12 @@ use super::super::config::Mamba2Config;
 use super::super::state::Mamba2LayerState;
 use super::super::weights::{Mamba2LayerWeights, Mamba2Weights};
 use super::core::{
-    DSkip, HeadScan, conv_hist_push, conv_silu_token, dt_da, gate_token, head_scan, rms_row,
+    DSkip, HeadScan, block_norm_row, conv_hist_push, conv_silu_token, dt_da, gate_token, head_scan,
 };
 use crate::mamba1::cpu::prefill::{PrefillMode, zip_rows};
-use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows};
+use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows, mlp_norm_row};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::lane::LaneGemm;
-use crate::ops::norms::rms_norm_weighted;
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
 
@@ -140,7 +139,7 @@ fn mamba2_layer_prefill(
         mode,
         (&mut s.norm[..t_len * dm], dm),
         (&temporal[..t_len * dm], dm),
-        |d, x| rms_row(d, x, &lw.norm_weight, cfg.rms_norm_eps),
+        |d, x| block_norm_row(d, x, (&lw.norm_weight, &lw.norm_bias), cfg.rms_norm_eps),
     );
     store(s.dtype, &mut s.norm[..t_len * dm]);
     s.gemm.forward(
@@ -296,7 +295,7 @@ pub fn forward_mamba2_backbone_prefill_mode(
                 gemm_for(mode),
                 |dst, src| {
                     zip_rows(mode, (dst, dm), (src, dm), |d, x| {
-                        rms_norm_weighted(d, x, &mlp.norm_weight, eps);
+                        mlp_norm_row(d, x, mlp, eps);
                     });
                 },
             );
@@ -305,6 +304,6 @@ pub fn forward_mamba2_backbone_prefill_mode(
     let norm = &mut scratch.norm[..seq_len * dm];
     norm.copy_from_slice(out);
     zip_rows(mode, (out, dm), (norm, dm), |d, x| {
-        rms_row(d, x, &w.norm_f_weight, cfg.rms_norm_eps);
+        block_norm_row(d, x, (&w.norm_f_weight, &w.norm_f_bias), cfg.rms_norm_eps);
     });
 }

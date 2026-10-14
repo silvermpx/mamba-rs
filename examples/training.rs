@@ -39,6 +39,7 @@ fn main() {
             .iter()
             .map(|lw| mamba_rs::train::weights::TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
+                norm_bias: lw.norm_bias.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
                 in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
@@ -53,6 +54,7 @@ fn main() {
             })
             .collect(),
         norm_f_weight: inf_weights.norm_f_weight.clone(),
+        norm_f_bias: inf_weights.norm_f_bias.clone(),
         mlp: inf_weights.mlp.clone(),
     };
 

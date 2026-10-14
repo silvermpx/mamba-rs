@@ -41,6 +41,22 @@ fn rms64(x: &[f64], w: &[f32], eps: f64) -> Vec<f64> {
         .collect()
 }
 
+/// A block norm: RMSNorm, or `nn.LayerNorm` (biased variance) when the
+/// bias is not empty.
+fn block_norm64(x: &[f64], (w, b): (&[f32], &[f32]), eps: f64) -> Vec<f64> {
+    if b.is_empty() {
+        return rms64(x, w, eps);
+    }
+    let n = x.len() as f64;
+    let mean = x.iter().sum::<f64>() / n;
+    let var = x.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+    let inv = 1.0 / (var + eps).sqrt();
+    x.iter()
+        .zip(w.iter().zip(b))
+        .map(|(v, (&w, &b))| (v - mean) * inv * f64::from(w) + f64::from(b))
+        .collect()
+}
+
 fn silu64(x: f64) -> f64 {
     x / (1.0 + (-x).exp())
 }
@@ -60,7 +76,11 @@ fn mixer64(cfg: &Mamba2Config, lw: &Mamba2LayerWeights, st: &mut Layer64, u: &[f
         cfg.conv_dim(),
         cfg.d_conv,
     );
-    let normed = rms64(u, &lw.norm_weight, f64::from(cfg.rms_norm_eps));
+    let normed = block_norm64(
+        u,
+        (&lw.norm_weight, &lw.norm_bias),
+        f64::from(cfg.rms_norm_eps),
+    );
     let proj = matvec64(&normed, &lw.in_proj_w, &lw.in_proj_b, cfg.in_proj_out_dim());
     let z0 = &proj[..d_mlp];
     let x0 = &proj[d_mlp..2 * d_mlp];
@@ -142,7 +162,7 @@ fn mixer64(cfg: &Mamba2Config, lw: &Mamba2LayerWeights, st: &mut Layer64, u: &[f
 }
 
 fn mlp64(m: &mamba_rs::mlp::GatedMlpLayerWeights, x: &[f64], eps: f64) -> Vec<f64> {
-    let normed = rms64(x, &m.norm_weight, eps);
+    let normed = block_norm64(x, (&m.norm_weight, &m.norm_bias), eps);
     let hidden = m.hidden();
     let up = matvec64(&normed, &m.fc1_w, &[], 2 * hidden);
     let act: Vec<f64> = (0..hidden)
@@ -170,7 +190,11 @@ pub fn step64(
             x = mlp64(m, &x, f64::from(cfg.rms_norm_eps));
         }
     }
-    rms64(&x, &w.norm_f_weight, f64::from(cfg.rms_norm_eps))
+    block_norm64(
+        &x,
+        (&w.norm_f_weight, &w.norm_f_bias),
+        f64::from(cfg.rms_norm_eps),
+    )
 }
 
 pub fn zeros64(cfg: &Mamba2Config) -> Vec<Layer64> {

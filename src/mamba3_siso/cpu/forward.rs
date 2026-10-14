@@ -17,6 +17,7 @@ use super::weights::TrainMamba3LayerWeights;
 use crate::mlp::cpu::RowsGemm;
 use crate::ops::blas::sgemm_forward;
 use crate::ops::fast_math::fast_exp_scalar;
+use crate::ops::norms::layer_norm_row;
 use crate::ops::rounding::store;
 
 // Stack-array limits (must match config validation)
@@ -240,7 +241,7 @@ pub fn forward_mamba3_layer_batched(
 
     let o = &acts.offsets;
 
-    // ═══ F1: RMSNorm (loop T) ═══
+    // ═══ F1: the block norm (loop T) ═══
     for t in 0..seq_len {
         let off = t * dm;
         let src = &temporal_flat[off..off + dm];
@@ -248,13 +249,22 @@ pub fn forward_mamba3_layer_batched(
 
         acts.data[base_t + o.residual..base_t + o.residual + dm].copy_from_slice(src);
 
-        let sum_sq = simd_sum_sq(src);
-        let rms = (sum_sq / dm as f32 + dims.rms_norm_eps).sqrt();
-        acts.data[base_t + o.rms_val] = rms;
-        let inv_rms = 1.0 / rms;
-
         let pn = &mut scratch.post_norm_flat[off..off + dm];
-        simd_rms_scale(pn, src, &layer_w.norm_weight[..dm], inv_rms);
+        if layer_w.norm_bias.is_empty() {
+            let sum_sq = simd_sum_sq(src);
+            let rms = (sum_sq / dm as f32 + dims.rms_norm_eps).sqrt();
+            acts.data[base_t + o.rms_val] = rms;
+            let inv_rms = 1.0 / rms;
+            simd_rms_scale(pn, src, &layer_w.norm_weight[..dm], inv_rms);
+        } else {
+            let stats = layer_norm_row(
+                pn,
+                src,
+                (&layer_w.norm_weight[..dm], &layer_w.norm_bias[..dm]),
+                dims.rms_norm_eps,
+            );
+            acts.data[base_t + o.rms_val..base_t + o.rms_val + 2].copy_from_slice(&stats);
+        }
         store(dtype, pn);
         acts.data[base_t + o.post_norm..base_t + o.post_norm + dm].copy_from_slice(pn);
     }

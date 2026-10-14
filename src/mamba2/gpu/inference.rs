@@ -22,6 +22,7 @@ use super::kernels::{
     chunk_state_geom, decode_rows, gated_norm_cfg, step_cfg, step_rows,
 };
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
+use crate::gpu::block_norm::{self, NormParams};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::context::{GemmMode, GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
@@ -32,7 +33,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d_cover, grid_norm, launch_elems, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, launch_elems, y_runs, yz_runs};
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 use crate::matrix::{Path, Request};
@@ -44,6 +45,8 @@ mod prefill_graph;
 /// One layer's weights on the device.
 struct GpuMamba2Layer {
     norm_weight: GpuBuffer,
+    /// The block LayerNorm's bias, None for RMSNorm.
+    norm_bias: Option<GpuBuffer>,
     /// The projections, in the activation dtype.
     in_proj_w: DtypedBuf,
     in_proj_b: Option<GpuBuffer>,
@@ -88,6 +91,7 @@ impl GpuMamba2Layer {
         let a_neg: Vec<f32> = lw.a_log.iter().map(|&a| -exp_portable(a)).collect();
         Ok(Self {
             norm_weight: up(&lw.norm_weight)?,
+            norm_bias: opt(&lw.norm_bias)?,
             in_proj_w: typed(&lw.in_proj_w)?,
             in_proj_b: opt(&lw.in_proj_b)?,
             conv_w: up(&lw.conv_w)?,
@@ -103,7 +107,10 @@ impl GpuMamba2Layer {
 
     fn ptrs(&self) -> LayerPtrs {
         LayerPtrs {
-            norm_w: self.norm_weight.cached_ptr(),
+            norm: NormParams {
+                w: self.norm_weight.cached_ptr(),
+                b: self.norm_bias.as_ref().map_or(0, GpuBuffer::cached_ptr),
+            },
             in_w: self.in_proj_w.cached_ptr(),
             in_b: self.in_proj_b.as_ref().map(GpuBuffer::cached_ptr),
             conv_w: self.conv_w.cached_ptr(),
@@ -122,7 +129,8 @@ impl GpuMamba2Layer {
 /// take: the engine's buffers and the trainer's flat arena both give it.
 #[derive(Clone, Copy)]
 pub(crate) struct LayerPtrs {
-    pub norm_w: u64,
+    /// The block norm before the mixer.
+    pub norm: NormParams,
     pub in_w: u64,
     pub in_b: Option<u64>,
     pub conv_w: u64,
@@ -140,6 +148,8 @@ pub(crate) struct LayerPtrs {
 /// projections in the activation dtype.
 struct GpuMamba2Mlp {
     norm_weight: GpuBuffer,
+    /// The norm's LayerNorm bias, None for RMSNorm.
+    norm_bias: Option<GpuBuffer>,
     fc1_w: DtypedBuf,
     fc2_w: DtypedBuf,
     hidden: usize,
@@ -156,8 +166,14 @@ impl GpuMamba2Mlp {
             buf.upload_f32(stream, v)?;
             Ok(buf)
         };
+        let norm_bias = if m.norm_bias.is_empty() {
+            None
+        } else {
+            Some(GpuBuffer::from_cpu(stream, &m.norm_bias)?)
+        };
         Ok(Self {
             norm_weight: GpuBuffer::from_cpu(stream, &m.norm_weight)?,
+            norm_bias,
             fc1_w: typed(&m.fc1_w)?,
             fc2_w: typed(&m.fc2_w)?,
             hidden: m.hidden(),
@@ -166,7 +182,10 @@ impl GpuMamba2Mlp {
 
     fn ptrs(&self) -> MlpPtrs {
         MlpPtrs {
-            norm_w: self.norm_weight.cached_ptr(),
+            norm: NormParams {
+                w: self.norm_weight.cached_ptr(),
+                b: self.norm_bias.as_ref().map_or(0, GpuBuffer::cached_ptr),
+            },
             fc1_w: self.fc1_w.cached_ptr(),
             fc2_w: self.fc2_w.cached_ptr(),
             hidden: self.hidden,
@@ -179,7 +198,8 @@ impl GpuMamba2Mlp {
 /// activation dtype.
 #[derive(Clone, Copy)]
 pub(crate) struct MlpPtrs {
-    pub norm_w: u64,
+    /// The norm before the MLP (`norm2`).
+    pub norm: NormParams,
     pub fc1_w: u64,
     pub fc2_w: u64,
     pub hidden: usize,
@@ -232,31 +252,25 @@ pub(crate) struct M2Exec<'a> {
 }
 
 impl M2Exec<'_> {
-    /// RMSNorm of f32 rows into `y`: in the activation dtype when `typed`,
-    /// else f32.
-    pub(crate) fn rmsnorm(
+    /// A block norm of f32 rows into `y`: in the activation dtype when
+    /// `typed`, else f32. `stats` takes each row's statistics (one for
+    /// RMSNorm, two for LayerNorm).
+    pub(crate) fn block_norm(
         &self,
-        (y, x, w, rms): (u64, u64, u64, u64),
+        (y, x, stats): (u64, u64, u64),
+        norm: NormParams,
         (rows, typed): (usize, bool),
     ) -> Result<(), String> {
-        let (rows_i, dm_i) = (rows as i32, self.cfg.d_model as i32);
-        let eps = self.cfg.rms_norm_eps;
-        let kernel = if typed && self.act != WeightDtype::F32 {
-            self.ctx.kernels.rmsnorm_fwd_f32in_typed.get(self.act)
-        } else {
-            &self.ctx.kernels.rmsnorm_fwd
-        };
-        let mut bld = self.ctx.stream.launch_builder(kernel);
-        bld.arg(&y);
-        bld.arg(&rms);
-        bld.arg(&x);
-        bld.arg(&w);
-        bld.arg(&rows_i);
-        bld.arg(&dm_i);
-        bld.arg(&eps);
-        unsafe { bld.launch(grid_norm(rows, self.cfg.d_model)) }
-            .map(|_| ())
-            .map_err(|e| format!("Mamba-2 rmsnorm: {e:?}"))
+        let out = if typed { self.act } else { WeightDtype::F32 };
+        let shape = (rows, self.cfg.d_model, self.cfg.rms_norm_eps);
+        block_norm::forward(
+            self.ctx,
+            out,
+            (y, stats, x),
+            norm,
+            shape,
+            "Mamba-2 block norm",
+        )
     }
 
     /// Norm and in_proj of `rows` rows of `temporal` into `proj`.
@@ -266,7 +280,7 @@ impl M2Exec<'_> {
         (temporal, post, rms, proj): (u64, u64, u64, u64),
         rows: usize,
     ) -> Result<(), String> {
-        self.rmsnorm((post, temporal, lw.norm_w, rms), (rows, true))?;
+        self.block_norm((post, temporal, rms), lw.norm, (rows, true))?;
         let t = |ptr| TypedPtr {
             ptr,
             dtype: self.act,
@@ -383,7 +397,7 @@ impl M2Exec<'_> {
             ptr,
             dtype: self.act,
         };
-        self.rmsnorm((post, temporal, m.norm_w, rms), (rows, true))?;
+        self.block_norm((post, temporal, rms), m.norm, (rows, true))?;
         gpu_gemm_typed_forward_raw(
             self.ctx,
             t(up),
@@ -798,6 +812,8 @@ pub struct Mamba2GpuEngine {
     mlp: Vec<GpuMamba2Mlp>,
     input_proj: Option<(GpuBuffer, GpuBuffer)>,
     norm_f_weight: GpuBuffer,
+    /// The final LayerNorm's bias, None for RMSNorm.
+    norm_f_bias: Option<GpuBuffer>,
     /// The decode step as one CUDA graph, once [`Self::capture_graph`] ran.
     graph: Option<(cudarc::driver::CudaGraph, CapturedStep)>,
     /// The GEMM inventory of the last eager step: capture compares the
@@ -902,6 +918,11 @@ impl Mamba2GpuEngine {
             ))
         };
         let norm_f_weight = GpuBuffer::from_cpu(&ctx.stream, &w.norm_f_weight)?;
+        let norm_f_bias = if w.norm_f_bias.is_empty() {
+            None
+        } else {
+            Some(GpuBuffer::from_cpu(&ctx.stream, &w.norm_f_bias)?)
+        };
         Ok(Self {
             kernels,
             ctx,
@@ -913,9 +934,18 @@ impl Mamba2GpuEngine {
             mlp,
             input_proj,
             norm_f_weight,
+            norm_f_bias,
             graph: None,
             eager_gemm_manifest: Cell::new(None),
         })
+    }
+
+    /// The final norm's parameters on the device.
+    fn norm_f(&self) -> NormParams {
+        NormParams {
+            w: self.norm_f_weight.cached_ptr(),
+            b: self.norm_f_bias.as_ref().map_or(0, GpuBuffer::cached_ptr),
+        }
     }
 
     fn exec(&self) -> M2Exec<'_> {
@@ -986,7 +1016,7 @@ impl Mamba2GpuEngine {
             input: GpuBuffer::zeros(s, b * self.input_dim)?,
             temporal: GpuBuffer::zeros(s, b * c.d_model)?,
             post_norm: typed(b * c.d_model)?,
-            rms: GpuBuffer::zeros(s, b)?,
+            rms: GpuBuffer::zeros(s, b * c.block_norm.stats_per_row())?,
             proj: typed(b * c.in_proj_out_dim())?,
             xbc: typed(b * c.conv_dim())?,
             y: GpuBuffer::zeros(s, b * c.ssm_dim())?,
@@ -1312,13 +1342,9 @@ impl Mamba2GpuEngine {
                 )?;
             }
         }
-        self.exec().rmsnorm(
-            (
-                scratch.final_out.cached_ptr(),
-                temporal,
-                self.norm_f_weight.cached_ptr(),
-                rms,
-            ),
+        self.exec().block_norm(
+            (scratch.final_out.cached_ptr(), temporal, rms),
+            self.norm_f(),
             (b, false),
         )
     }
@@ -1350,7 +1376,7 @@ impl Mamba2GpuEngine {
             input: z(rows * self.input_dim)?,
             temporal: z(rows * c.d_model)?,
             post: typed(rows * c.d_model)?,
-            rms: z(rows)?,
+            rms: z(rows * c.block_norm.stats_per_row())?,
             proj: typed(rows * c.in_proj_out_dim())?,
             xbc: typed(rows * c.conv_dim())?,
             conv_next: z(self.batch * c.conv_dim() * c.d_conv)?,
@@ -1507,13 +1533,9 @@ impl Mamba2GpuEngine {
                 )?;
             }
         }
-        x.rmsnorm(
-            (
-                pf.final_rows.cached_ptr(),
-                temporal,
-                self.norm_f_weight.cached_ptr(),
-                rms,
-            ),
+        x.block_norm(
+            (pf.final_rows.cached_ptr(), temporal, rms),
+            self.norm_f(),
             (rows, false),
         )
     }

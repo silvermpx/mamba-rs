@@ -284,6 +284,17 @@ pub struct MambaKernels {
     /// in place: the previous layer's residual add and this layer's norm in
     /// one launch on the decode routes. The f32 entry takes an f32 branch.
     pub rmsnorm_fwd_resadd_typed: TypedKernel,
+    /// LayerNorm, the block norm of a model with `rms_norm = false`: f32
+    /// input, output in the entry's type, f32 scale and bias, and two
+    /// statistics per row (the std, then the mean) for the backward.
+    pub layernorm_fwd_typed: TypedKernel,
+    /// LayerNorm with the previous branch's residual add fused in, the
+    /// twin of `rmsnorm_fwd_resadd_typed`.
+    pub layernorm_fwd_resadd_typed: TypedKernel,
+    /// LayerNorm backward: `dy` in the entry's type, f32 `x` and `dx`, f32
+    /// scale partials; the twin of `rmsnorm_bwd_f32in_typed` and, through
+    /// the f32 entry, of `rmsnorm_bwd`.
+    pub layernorm_bwd_typed: TypedKernel,
     pub bias_broadcast_typed: TypedKernel,
     pub elementwise_mul_typed: TypedKernel,
     pub residual_add_typed: TypedKernel,
@@ -1801,6 +1812,9 @@ impl MambaKernels {
             softplus_fwd_tmajor: load_typed("softplus_forward_tmajor")?,
             gate_from_tmajor: load_typed("gate_from_tmajor")?,
             rmsnorm_fwd_resadd_typed: load_typed("rmsnorm_forward_resadd_f32in")?,
+            layernorm_fwd_typed: load_typed("layernorm_forward_f32in")?,
+            layernorm_fwd_resadd_typed: load_typed("layernorm_forward_resadd_f32in")?,
+            layernorm_bwd_typed: load_typed("layernorm_backward_f32in")?,
             bias_broadcast_typed: load_typed("bias_broadcast")?,
             elementwise_mul_typed: load_typed("elementwise_mul")?,
             residual_add_typed: load_typed("residual_add")?,

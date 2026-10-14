@@ -41,6 +41,7 @@ fn drawn(cfg: &Mamba2Config, input_dim: usize, seed: u64) -> Mamba2Weights {
         jitter(&mut lw.in_proj_b, 4, 0.0, 0.2);
         jitter(&mut lw.out_proj_b, 5, 0.0, 0.2);
         jitter(&mut lw.conv_b, 6, 0.0, 0.3);
+        jitter(&mut lw.norm_bias, 8, 0.0, 0.2);
         // Larger out_proj so later layers see a real signal.
         for v in &mut lw.out_proj_w {
             *v *= 3.0;
@@ -52,6 +53,14 @@ fn drawn(cfg: &Mamba2Config, input_dim: usize, seed: u64) -> Mamba2Weights {
         for (x, dv) in m.norm_weight.iter_mut().zip(d) {
             *x = 1.0 + dv;
         }
+        let d = det(m.norm_bias.len(), seed + 40 + i as u64, 0.2);
+        for (x, dv) in m.norm_bias.iter_mut().zip(d) {
+            *x = dv;
+        }
+    }
+    let d = det(w.norm_f_bias.len(), seed + 50, 0.2);
+    for (x, dv) in w.norm_f_bias.iter_mut().zip(d) {
+        *x = dv;
     }
     w
 }
@@ -115,10 +124,12 @@ fn tensors(w: &mut Mamba2Weights) -> Vec<(String, &mut Vec<f32>)> {
         ("input_proj_w".into(), &mut w.input_proj_w),
         ("input_proj_b".into(), &mut w.input_proj_b),
         ("norm_f".into(), &mut w.norm_f_weight),
+        ("norm_f_bias".into(), &mut w.norm_f_bias),
     ];
     for (l, lw) in w.layers.iter_mut().enumerate() {
         for (name, v) in [
             ("norm", &mut lw.norm_weight),
+            ("norm_bias", &mut lw.norm_bias),
             ("in_proj_w", &mut lw.in_proj_w),
             ("in_proj_b", &mut lw.in_proj_b),
             ("conv_w", &mut lw.conv_w),
@@ -135,6 +146,7 @@ fn tensors(w: &mut Mamba2Weights) -> Vec<(String, &mut Vec<f32>)> {
     }
     for (l, m) in w.mlp.iter_mut().enumerate() {
         out.push((format!("mlp{l}.norm"), &mut m.norm_weight));
+        out.push((format!("mlp{l}.norm_bias"), &mut m.norm_bias));
         out.push((format!("mlp{l}.fc1"), &mut m.fc1_w));
         out.push((format!("mlp{l}.fc2"), &mut m.fc2_w));
     }
@@ -198,6 +210,14 @@ fn cases() -> Vec<(&'static str, Mamba2Config)> {
             },
         ),
         ("conv width 1", Mamba2Config { d_conv: 1, ..base }),
+        (
+            "LayerNorm block norms, MLP after",
+            Mamba2Config {
+                block_norm: mamba_rs::BlockNorm::Layer,
+                d_intermediate: 40,
+                ..base
+            },
+        ),
         (
             "conv width 2, softplus past its cutoff",
             Mamba2Config { d_conv: 2, ..base },

@@ -32,6 +32,7 @@ fn m1_dims(d_state: usize, d_conv: usize) -> GpuMambaDims {
         n_layers: 1,
         scan_mode: ScanMode::Sequential,
         rms_norm_eps: 1e-5,
+        block_norm: mamba_rs::BlockNorm::Rms,
         bcdt_rms_eps: None,
     }
 }
@@ -74,6 +75,7 @@ fn m3_dims_past_the_compiled_capacity_are_refused() {
         a_floor: 1e-4,
         rms_norm_eps: 1e-5,
         ssm_norm_eps: 1e-5,
+        block_norm: mamba_rs::BlockNorm::Rms,
         is_outproj_norm: false,
         use_parallel_scan: true,
     };

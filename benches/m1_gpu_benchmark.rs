@@ -118,6 +118,7 @@ fn m1_gpu_benchmark() {
             n_layers: cfg.n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
             rms_norm_eps: 1e-5,
+            block_norm: mamba_rs::BlockNorm::Rms,
             bcdt_rms_eps: None,
         };
 
@@ -276,6 +277,7 @@ fn m1_gpu_benchmark() {
                 .iter()
                 .map(|lw| TrainMambaLayerWeights {
                     norm_weight: lw.norm_weight.clone(),
+                    norm_bias: lw.norm_bias.clone(),
                     in_proj_w: lw.in_proj_w.clone(),
                     in_proj_b: lw.in_proj_b.clone(),
                     conv1d_weight: lw.conv1d_weight.clone(),
@@ -290,6 +292,7 @@ fn m1_gpu_benchmark() {
                 })
                 .collect(),
             norm_f_weight: cpu_weights.norm_f_weight.clone(),
+            norm_f_bias: cpu_weights.norm_f_bias.clone(),
             mlp: cpu_weights.mlp.clone(),
         };
 

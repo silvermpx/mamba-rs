@@ -3,7 +3,7 @@
 //! Source: Dao & Gu, "Transformers are SSMs", ICML 2024 (arXiv 2405.21060);
 //! the reference is state-spaces/mamba `mamba_ssm/modules/mamba2.py`.
 
-use crate::config::{ScanMode, envelope};
+use crate::config::{BlockNorm, ScanMode, envelope};
 
 /// Configuration for a Mamba-2 backbone.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -38,7 +38,11 @@ pub struct Mamba2Config {
     pub proj_bias: bool,
     /// The conv carries a bias.
     pub conv_bias: bool,
-    /// Epsilon of the block norms (`norm`, `norm2`, `norm_f`).
+    /// The kind of the block norms (`norm`, `norm2`, `norm_f`): RMSNorm,
+    /// or LayerNorm with a bias for a model built with `rms_norm=False`.
+    pub block_norm: BlockNorm,
+    /// Epsilon of the block norms (`norm`, `norm2`, `norm_f`), of either
+    /// kind.
     pub rms_norm_eps: f32,
     /// Epsilon of the mixer's gated norm, which the reference fixes at 1e-5.
     pub gated_norm_eps: f32,
@@ -168,9 +172,9 @@ impl Mamba2Config {
         envelope::check_param_bytes(self.layer_params(), self.n_layers)
     }
 
-    /// One layer's parameters, exact in u128 (`None` past it): the norms,
-    /// the in and out projections with their biases, the conv, dt bias, A,
-    /// D and the gated MLP.
+    /// One layer's parameters, exact in u128 (`None` past it): the norms
+    /// with a LayerNorm's bias, the in and out projections with their
+    /// biases, the conv, dt bias, A, D and the gated MLP.
     pub(crate) fn layer_params(&self) -> Option<u128> {
         let w = |v: usize| v as u128;
         let on = |n: u128, flag: bool| if flag { n } else { 0 };
@@ -187,8 +191,10 @@ impl Mamba2Config {
         let cd = envelope::sum_of_products(&[&[ssm], &[2, w(self.ngroups), ds]])?;
         let ip = envelope::sum_of_products(&[&[2, d_mlp], &[ssm], &[cd], &[nh]])?;
         let h = w(self.mlp_hidden());
+        let norm_bias = |n: u128| if self.block_norm.rms_norm() { 0 } else { n };
         envelope::sum_of_products(&[
             &[d],
+            &[norm_bias(d)],
             &[d, ip],
             &[on(ip, self.proj_bias)],
             &[cd, dc],
@@ -199,14 +205,16 @@ impl Mamba2Config {
             &[di, d],
             &[on(d, self.proj_bias)],
             &[on(d, h > 0)],
+            &[on(norm_bias(d), h > 0)],
             &[3, d, h],
         ])
     }
 }
 
 impl Default for Mamba2Config {
-    /// A small model with the reference's defaults: rmsnorm with the gate
-    /// first, a conv bias, no projection bias, an open dt limit.
+    /// A small model with the reference's defaults: RMSNorm block norms,
+    /// rmsnorm with the gate first, a conv bias, no projection bias, an
+    /// open dt limit.
     fn default() -> Self {
         Self {
             d_model: 128,
@@ -223,6 +231,7 @@ impl Default for Mamba2Config {
             dt_limit: (0.0, f32::INFINITY),
             proj_bias: false,
             conv_bias: true,
+            block_norm: BlockNorm::Rms,
             rms_norm_eps: 1e-5,
             gated_norm_eps: 1e-5,
             d_intermediate: 0,
@@ -341,12 +350,17 @@ mod tests {
             conv_bias: false,
             ..Mamba2Config::default()
         };
-        for cfg in [Mamba2Config::default(), full, bare] {
+        let layer_norm = Mamba2Config {
+            block_norm: BlockNorm::Layer,
+            ..full
+        };
+        for cfg in [Mamba2Config::default(), full, bare, layer_norm] {
             let input_dim = 5;
             let w = crate::mamba2::weights::Mamba2Weights::zeros(&cfg, input_dim);
             let (list, _) = crate::mamba2::serialize::checkpoint_parts(&w, &cfg, input_dim)
                 .expect("the weights match their config");
-            let outer = (input_dim * cfg.d_model + 2 * cfg.d_model) as u128;
+            let norm_f = cfg.d_model + cfg.block_norm.bias_len(cfg.d_model);
+            let outer = (input_dim * cfg.d_model + cfg.d_model + norm_f) as u128;
             let layers = cfg.n_layers as u128 * cfg.layer_params().expect("a small model");
             assert_eq!(list.elements() as u128, outer + layers, "{cfg:?}");
         }

@@ -132,6 +132,14 @@ fn tile_heads() -> Vec<(&'static str, Mamba3MimoConfig)> {
                 ..base
             },
         ),
+        (
+            "rank 4, LayerNorm block norms, MLP after",
+            Mamba3MimoConfig {
+                block_norm: mamba_rs::BlockNorm::Layer,
+                d_intermediate: 128,
+                ..base
+            },
+        ),
     ]
 }
 
@@ -151,6 +159,7 @@ fn drawn(cfg: &Mamba3MimoConfig, input_dim: usize, seed: u64) -> Mamba3MimoWeigh
             (&mut lw.mimo_o, 8, 0.0, 0.8),
             (&mut lw.norm_weight, 9, 1.0, 0.2),
             (&mut lw.norm_gate_weight, 10, 1.0, 0.3),
+            (&mut lw.norm_bias, 11, 0.0, 0.2),
         ] {
             let d = det(v.len(), s + k, scale);
             for (x, dv) in v.iter_mut().zip(d) {
@@ -164,6 +173,14 @@ fn drawn(cfg: &Mamba3MimoConfig, input_dim: usize, seed: u64) -> Mamba3MimoWeigh
         for (x, dv) in m.norm_weight.iter_mut().zip(d) {
             *x = 1.0 + dv;
         }
+        let d = det(m.norm_bias.len(), seed + 40 + i as u64, 0.2);
+        for (x, dv) in m.norm_bias.iter_mut().zip(d) {
+            *x = dv;
+        }
+    }
+    let d = det(w.norm_f_bias.len(), seed + 50, 0.2);
+    for (x, dv) in w.norm_f_bias.iter_mut().zip(d) {
+        *x = dv;
     }
     w
 }

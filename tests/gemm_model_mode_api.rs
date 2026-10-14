@@ -60,6 +60,7 @@ fn small_m1_cfg() -> MambaConfig {
         d_conv: 4,
         expand: 2,
         scan_mode: ScanMode::Sequential,
+        block_norm: mamba_rs::BlockNorm::Rms,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,

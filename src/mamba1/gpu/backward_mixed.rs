@@ -60,15 +60,16 @@ use super::forward_mixed::{
 use super::mixer_norms::{NormBackward, launch_pack_xdbl_norm_bwd};
 use super::weights::{
     GpuMambaGrads, GpuMambaLayerGrads, GpuMambaMixedLayerWeights, GpuMambaMixedWeights,
-    MambaLayerWeightsView, MambaWeightsView,
+    MambaLayerWeightsView, MambaWeightsView, final_norm_params, layer_norm_params,
 };
 use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_ex_backward_dx_typed,
 };
+use crate::gpu::block_norm;
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm, launch_cast};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, launch_cast};
 use cudarc::driver::PushKernelArg;
 
 // ---------------------------------------------------------------------------
@@ -830,51 +831,41 @@ pub fn gpu_backward_mamba_layer_mixed(
         2 * di,
     )?;
 
-    // ─── B8: RmsNorm backward (typed dy + f32 x → f32 dx) + residual ─
+    // ─── B8: the block norm's backward (typed dy + f32 x → f32 dx) +
+    // residual ─
     // Rule B (no atomicAdd): two-stage launch.
-    // Stage 1: rmsnorm_bwd variant writes f32 d_pre_norm + per-sample per-dim
-    //          f32 partials into axis0_partials[bt * dm].
+    // Stage 1 writes f32 d_pre_norm + per-sample per-dim f32 partials into
+    //          axis0_partials[bt * dm] (a LayerNorm adds its bias gradient
+    //          first).
     // Stage 2: reduce_sum_axis0 reduces across bt → d_lw.norm_weight (f32
     //          master grad, accumulate=1).
-    // Dispatch: bf16/f16 → dual-dtype f32in kernel; f32 → pure-f32 rmsnorm_bwd.
-    let rmsnorm_bwd = match dtype {
-        WeightDtype::F32 | WeightDtype::Tf32 => &k.rmsnorm_bwd,
-        WeightDtype::Bf16 | WeightDtype::F16 => k.rmsnorm_bwd_f32in_typed.get(dtype),
-    };
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
         let axis0_ptr = scratch.axis0_partials.cached_ptr();
-        // Stage 1
-        {
-            // dx = d_temporal with accumulate=1 (residual add folded in).
-            let mut bld = ctx.stream.launch_builder(rmsnorm_bwd);
-            let dx = d_temporal.cached_ptr();
-            let dy = scratch.d_norm.cached_ptr();
-            let x = acts.residual.cached_ptr();
-            let sc = lw.norm_weight.ptr();
-            let rms = acts.rms_vals.cached_ptr();
-            let accumulate_dx: i32 = 1;
-            bld.arg(&dx);
-            bld.arg(&axis0_ptr); // d_scale_partials
-            bld.arg(&dy);
-            bld.arg(&x);
-            bld.arg(&sc);
-            bld.arg(&rms);
-            bld.arg(&bt_i);
-            bld.arg(&dm_i);
-            bld.arg(&accumulate_dx);
-            // Typed mirror of the dx store for the layer below - saves
-            // that layer's standalone cast pass.
-            let mirror = if mirror_dx {
-                scratch.temporal_typed.cached_ptr()
-            } else {
-                0
-            };
-            bld.arg(&mirror);
-            unsafe { bld.launch(grid_norm(bt, dm)) }
-                .map_err(|e| format!("rmsnorm_bwd_f32in_typed partial: {e:?}"))?;
-        }
+        // Stage 1: dx = d_temporal with accumulate=1 (residual add folded
+        // in), its typed mirror stored for the layer below - saves that
+        // layer's standalone cast pass.
+        let mirror = if mirror_dx {
+            scratch.temporal_typed.cached_ptr()
+        } else {
+            0
+        };
+        block_norm::backward(
+            ctx,
+            dtype,
+            (
+                d_temporal.cached_ptr(),
+                axis0_ptr,
+                scratch.d_norm.cached_ptr(),
+                acts.residual.cached_ptr(),
+                acts.rms_vals.cached_ptr(),
+            ),
+            (layer_norm_params(lw), d_lw.norm_bias_ptr()),
+            (bt, dm),
+            (true, mirror),
+            "block norm bwd mixed",
+        )?;
         // Stage 2
         {
             let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
@@ -939,29 +930,25 @@ pub fn gpu_backward_mamba_backbone_mixed(
         let bt_i = bt as i32;
         let dm_i = dims.d_model as i32;
         let axis0_ptr = scratch.axis0_partials.cached_ptr();
-        // Stage 1
-        {
-            // In-place: dx aliases dy (= d_temporal); accumulate=0. See
-            // the f32 twin for the alias-safety argument.
-            let dt_ptr = d_temporal.cached_ptr();
-            let accumulate_dx: i32 = 0;
-            let mut bld = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_bwd);
-            bld.arg(&dt_ptr);
-            bld.arg(&axis0_ptr); // d_scale_partials
-            bld.arg(&dt_ptr);
-            bld.arg(acts.norm_f_input.inner());
-            let nf = mamba_w.norm_f_weight.ptr();
-            bld.arg(&nf);
-            bld.arg(acts.norm_f_rms.inner());
-            bld.arg(&bt_i);
-            bld.arg(&dm_i);
-            bld.arg(&accumulate_dx);
-            // The f32 kernel has no typed consumer for this store.
-            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
-            bld.arg(&no_mirror);
-            unsafe { bld.launch(grid_norm(bt, dims.d_model)) }
-                .map_err(|e| format!("rmsnorm_bwd norm_f mixed partial: {e:?}"))?;
-        }
+        // Stage 1, in place: dx aliases dy (= d_temporal); accumulate=0.
+        // See the f32 twin for the alias-safety argument. The f32 kernel
+        // has no typed consumer for this store.
+        let dt_ptr = d_temporal.cached_ptr();
+        block_norm::backward(
+            ctx,
+            WeightDtype::F32,
+            (
+                dt_ptr,
+                axis0_ptr,
+                dt_ptr,
+                acts.norm_f_input.cached_ptr(),
+                acts.norm_f_rms.cached_ptr(),
+            ),
+            (final_norm_params(mamba_w), d_mamba.norm_f_bias_ptr()),
+            (bt, dims.d_model),
+            (false, 0),
+            "norm_f bwd mixed",
+        )?;
         // Stage 2
         {
             let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);

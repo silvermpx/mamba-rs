@@ -74,7 +74,8 @@
 //! - [`ops`]: shared dimensions, BLAS, norms and fast-math helpers
 //! - [`dist`]: deterministic data-parallel training, one fixed-order
 //!   reduction per optimizer step
-//! - [`config`]: what the families share, `ScanMode` and `ModelFamily`
+//! - [`config`]: what the families share, `ScanMode`, `BlockNorm` and
+//!   `ModelFamily`
 //!
 //! ## References
 //!
@@ -151,7 +152,7 @@ pub mod gpu3 {
     pub use crate::mamba3_siso::gpu::*;
 }
 
-pub use config::ModelFamily;
+pub use config::{BlockNorm, ModelFamily};
 
 // Mamba-1
 pub use mamba1::config::MambaConfig;

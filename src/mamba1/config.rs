@@ -1,6 +1,6 @@
 //! Mamba-1 model configuration.
 
-use crate::config::{ScanMode, envelope};
+use crate::config::{BlockNorm, ScanMode, envelope};
 
 /// Configuration for a Mamba SSM model.
 ///
@@ -29,9 +29,13 @@ pub struct MambaConfig {
     /// Only affects GPU training forward/backward. CPU always uses sequential.
     pub scan_mode: ScanMode,
 
-    /// RMSNorm epsilon for every layer norm and the final norm_f.
-    /// Default 1e-5 (state-spaces/mamba). FalconMamba checkpoints use 1e-6 —
-    /// the HF loader plumbs the checkpoint's value through here.
+    /// The kind of the block norms (`norm`, `norm2`, `norm_f`): RMSNorm,
+    /// or LayerNorm with a bias for a model built with `rms_norm=False`.
+    pub block_norm: BlockNorm,
+
+    /// Epsilon of the block norms (`norm`, `norm2`, `norm_f`), of either
+    /// kind. Default 1e-5 (state-spaces/mamba). FalconMamba checkpoints use
+    /// 1e-6 — the HF loader plumbs the checkpoint's value through here.
     pub rms_norm_eps: f32,
 
     /// FalconMamba's mixer norms: the dt, B and C parts of every x_proj row
@@ -155,9 +159,9 @@ impl MambaConfig {
         envelope::check_param_bytes(self.layer_params(), self.n_layers)
     }
 
-    /// One layer's parameters, exact in u128 (`None` past it): the norm,
-    /// the in, x, dt and out projections and their biases, the conv, A, D
-    /// and the gated MLP.
+    /// One layer's parameters, exact in u128 (`None` past it): the norm
+    /// and a LayerNorm's bias, the in, x, dt and out projections and their
+    /// biases, the conv, A, D and the gated MLP with its norm.
     pub(crate) fn layer_params(&self) -> Option<u128> {
         let w = |v: usize| v as u128;
         let (d, ds, dc) = (w(self.d_model), w(self.d_state), w(self.d_conv));
@@ -169,8 +173,10 @@ impl MambaConfig {
             w(usize::from(self.conv_bias)),
         );
         let h = w(self.mlp_hidden());
+        let norm_bias = |n: u128| if self.block_norm.rms_norm() { 0 } else { n };
         envelope::sum_of_products(&[
             &[d],
+            &[norm_bias(d)],
             &[d, 2, di],
             &[proj_bias, 2, di],
             &[di, dc],
@@ -183,6 +189,7 @@ impl MambaConfig {
             &[di, d],
             &[proj_bias, d],
             &[if h > 0 { d } else { 0 }],
+            &[if h > 0 { norm_bias(d) } else { 0 }],
             &[3, d, h],
         ])
     }
@@ -220,6 +227,7 @@ impl Default for MambaConfig {
             expand: 2,
             n_layers: 3,
             scan_mode: ScanMode::Auto,
+            block_norm: BlockNorm::Rms,
             rms_norm_eps: crate::ops::fast_math::RMS_NORM_EPS,
             bcdt_rms_eps: None,
             dt_rank: None,
@@ -293,12 +301,17 @@ mod tests {
             d_intermediate: 100,
             ..odd
         };
-        for cfg in [MambaConfig::default(), odd, variant] {
+        let layer_norm = MambaConfig {
+            block_norm: BlockNorm::Layer,
+            ..variant
+        };
+        for cfg in [MambaConfig::default(), odd, variant, layer_norm] {
             let input_dim = 5;
             let w = crate::mamba1::weights::MambaWeights::zeros(&cfg, input_dim);
             let (list, _) = crate::mamba1::serialize::checkpoint_parts(&w, &cfg, input_dim)
                 .expect("the weights match their config");
-            let outer = (input_dim * cfg.d_model + 2 * cfg.d_model) as u128;
+            let d = cfg.d_model;
+            let outer = (input_dim * d + 2 * d + cfg.block_norm.bias_len(d)) as u128;
             let layers = cfg.n_layers as u128 * cfg.layer_params().expect("a small model");
             assert_eq!(list.elements() as u128, outer + layers, "{cfg:?}");
         }

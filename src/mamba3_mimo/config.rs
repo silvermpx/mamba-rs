@@ -4,7 +4,7 @@
 //! reference module is state-spaces/mamba `mamba_ssm/modules/mamba3.py`
 //! with `is_mimo=True`.
 
-use crate::config::{ScanMode, envelope};
+use crate::config::{BlockNorm, ScanMode, envelope};
 
 /// Configuration for a Mamba-3 MIMO backbone.
 ///
@@ -36,8 +36,11 @@ pub struct Mamba3MimoConfig {
     /// RMSNormGated on each rank's output before `mimo_o` (default false,
     /// as the released checkpoints).
     pub is_outproj_norm: bool,
-    /// Epsilon of the block norms (`norm`, `norm2`, `norm_f`); the
-    /// reference's `norm_epsilon`.
+    /// The kind of the block norms (`norm`, `norm2`, `norm_f`): RMSNorm,
+    /// or LayerNorm with a bias for a model built with `rms_norm=False`.
+    pub block_norm: BlockNorm,
+    /// Epsilon of the block norms (`norm`, `norm2`, `norm_f`), of either
+    /// kind; the reference's `norm_epsilon`.
     pub rms_norm_eps: f32,
     /// Epsilon of the mixer's B/C norms and output-gate norm, which the
     /// reference fixes at 1e-5 whatever `norm_epsilon` says.
@@ -197,9 +200,10 @@ impl Mamba3MimoConfig {
         envelope::check_param_bytes(self.layer_params(), self.n_layers)
     }
 
-    /// One layer's parameters, exact in u128 (`None` past it): the norms,
-    /// the in and out projections, dt bias, the B and C norms and biases,
-    /// D, the rank projections, the gate norm and the gated MLP.
+    /// One layer's parameters, exact in u128 (`None` past it): the norms
+    /// with a LayerNorm's bias, the in and out projections, dt bias, the B
+    /// and C norms and biases, D, the rank projections, the gate norm and
+    /// the gated MLP.
     pub(crate) fn layer_params(&self) -> Option<u128> {
         let w = |v: usize| v as u128;
         let (d, ds, r) = (w(self.d_model), w(self.d_state), w(self.mimo_rank));
@@ -209,8 +213,10 @@ impl Mamba3MimoConfig {
         let ip =
             envelope::sum_of_products(&[&[2, di], &[2, r, w(self.ngroups), ds], &[3, nh], &[na]])?;
         let h = w(self.mlp_hidden());
+        let norm_bias = |n: u128| if self.block_norm.rms_norm() { 0 } else { n };
         envelope::sum_of_products(&[
             &[d],
+            &[norm_bias(d)],
             &[d, ip],
             &[2, nh],
             &[2, ds],
@@ -219,6 +225,7 @@ impl Mamba3MimoConfig {
             &[di],
             &[di, d],
             &[if h > 0 { d } else { 0 }],
+            &[if h > 0 { norm_bias(d) } else { 0 }],
             &[3, d, h],
         ])
     }
@@ -239,6 +246,7 @@ impl Default for Mamba3MimoConfig {
             rope_fraction: 0.5,
             a_floor: 1e-4,
             is_outproj_norm: false,
+            block_norm: BlockNorm::Rms,
             rms_norm_eps: 1e-5,
             ssm_norm_eps: 1e-5,
             d_intermediate: 0,
@@ -357,12 +365,17 @@ mod tests {
             d_intermediate: 100,
             ..Mamba3MimoConfig::default()
         };
-        for cfg in [Mamba3MimoConfig::default(), odd] {
+        let layer_norm = Mamba3MimoConfig {
+            block_norm: BlockNorm::Layer,
+            ..odd
+        };
+        for cfg in [Mamba3MimoConfig::default(), odd, layer_norm] {
             let input_dim = 5;
             let w = crate::mamba3_mimo::weights::Mamba3MimoWeights::zeros(&cfg, input_dim);
             let (list, _) = crate::mamba3_mimo::serialize::checkpoint_parts(&w, &cfg, input_dim)
                 .expect("the weights match their config");
-            let outer = (input_dim * cfg.d_model + 2 * cfg.d_model) as u128;
+            let norm_f = cfg.d_model + cfg.block_norm.bias_len(cfg.d_model);
+            let outer = (input_dim * cfg.d_model + cfg.d_model + norm_f) as u128;
             let layers = cfg.n_layers as u128 * cfg.layer_params().expect("a small model");
             assert_eq!(list.elements() as u128, outer + layers, "{cfg:?}");
         }

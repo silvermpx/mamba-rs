@@ -20,9 +20,12 @@
 //! - `dtype`, `options`: the storage precision and the options every
 //!   constructor takes
 //! - `graph_capture`, `launch`: capture and launch helpers
+//! - `block_norm`: the block norms (RMSNorm or LayerNorm) every family
+//!   launches
 
 pub mod adamw;
 pub mod blas;
+pub(crate) mod block_norm;
 pub mod buffers;
 pub(crate) mod composed;
 pub mod context;

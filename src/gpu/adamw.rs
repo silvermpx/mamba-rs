@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaFunction, CudaStream, PushKernelArg};
 
-use crate::gpu::buffers::{GpuBuffer, GradSlice};
+use crate::gpu::buffers::{GpuBuffer, GradSlice, WeightSliceDyn};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::launch::grid_1d_wide;
 
@@ -875,10 +875,14 @@ pub fn step_multi(
 }
 
 /// The tensors of one M1 layer in the walks below, in `GpuMambaGrads::new`
-/// order: norm, in_proj w and b, conv w and b, x_proj, dt_proj w and b,
-/// a_log, D, out_proj w and b. The gated MLPs (norm, fc1, fc2) follow the
-/// layers, norm_f closes the walk.
-const M1_LAYER_TENSORS: usize = 12;
+/// order: the norm's scale and bias, in_proj w and b, conv w and b,
+/// x_proj, dt_proj w and b, a_log, D, out_proj w and b. The gated MLPs
+/// (norm scale and bias, fc1, fc2) follow the layers, norm_f's scale and
+/// bias close the walk.
+const M1_LAYER_TENSORS: usize = 13;
+/// Tensors per gated MLP in the M1 walk: the norm's scale and bias, fc1,
+/// fc2.
+const M1_MLP_TENSORS: usize = 4;
 
 /// The M1 tensor walk in the EXACT `GpuMambaGrads::new` layout, f32 lane
 /// (no typed shadow — `out = 0`).
@@ -895,11 +899,16 @@ pub fn m1_specs(
         len: w.len(),
         no_decay,
     };
-    let mut specs = Vec::with_capacity(3 + M1_LAYER_TENSORS * weights.layers.len());
+    let mut specs = Vec::with_capacity(
+        4 + M1_LAYER_TENSORS * weights.layers.len() + M1_MLP_TENSORS * weights.mlp.len(),
+    );
     specs.push(f32_spec(&weights.input_proj_w, &grads.input_proj_w, false));
     specs.push(f32_spec(&weights.input_proj_b, &grads.input_proj_b, true));
+    // A tensor the model lacks (a LayerNorm bias of an RMSNorm model, a
+    // projection bias) is an empty spec in its place, which the plan skips.
     for (lw, lg) in weights.layers.iter().zip(&grads.layers) {
         specs.push(f32_spec(&lw.norm_weight, &lg.norm_weight, true));
+        specs.push(f32_spec(&lw.norm_bias, &lg.norm_bias, true));
         specs.push(f32_spec(&lw.in_proj_w, &lg.in_proj_w, false));
         specs.push(f32_spec(&lw.in_proj_b, &lg.in_proj_b, true));
         specs.push(f32_spec(&lw.conv1d_weight, &lg.conv1d_weight, false));
@@ -914,10 +923,12 @@ pub fn m1_specs(
     }
     for (m, g) in weights.mlp.iter().zip(&grads.mlp) {
         specs.push(f32_spec(&m.norm_weight, &g.norm_weight, true));
+        specs.push(f32_spec(&m.norm_bias, &g.norm_bias, true));
         specs.push(f32_spec(&m.fc1_w, &g.fc1_w, false));
         specs.push(f32_spec(&m.fc2_w, &g.fc2_w, false));
     }
     specs.push(f32_spec(&weights.norm_f_weight, &grads.norm_f_weight, true));
+    specs.push(f32_spec(&weights.norm_f_bias, &grads.norm_f_bias, true));
     specs
 }
 
@@ -934,7 +945,7 @@ pub fn m1_specs_mixed(
     };
     let mut specs = m1_specs(&weights.master, grads);
     // Positions in the walk: 0 input_proj_w (bulk), then per layer at
-    // base+1 in_proj_w, base+5 x_proj_w, base+6 dt_proj_w, base+10
+    // base+2 in_proj_w, base+6 x_proj_w, base+7 dt_proj_w, base+11
     // out_proj_w, then per MLP its fc1 and fc2, then norm_f.
     let mut wire = |idx: usize, slot: &crate::gpu::buffers::WeightSliceDyn| {
         debug_assert_eq!(specs[idx].len, slot.len_elems());
@@ -942,19 +953,19 @@ pub fn m1_specs_mixed(
         specs[idx].out_elt_bytes = out_elt;
     };
     let mlp0 = 2 + weights.compute.layers.len() * M1_LAYER_TENSORS;
-    let norm_f = mlp0 + 3 * weights.compute.mlp.len();
+    let norm_f = mlp0 + M1_MLP_TENSORS * weights.compute.mlp.len();
     wire(0, &weights.compute.input_proj_w);
     for (li, cw) in weights.compute.layers.iter().enumerate() {
         let base = 2 + li * M1_LAYER_TENSORS;
-        wire(base + 1, &cw.in_proj_w);
-        wire(base + 5, &cw.x_proj_w);
-        wire(base + 6, &cw.dt_proj_w);
-        wire(base + 10, &cw.out_proj_w);
+        wire(base + 2, &cw.in_proj_w);
+        wire(base + 6, &cw.x_proj_w);
+        wire(base + 7, &cw.dt_proj_w);
+        wire(base + 11, &cw.out_proj_w);
     }
     for (mi, cm) in weights.compute.mlp.iter().enumerate() {
-        let base = mlp0 + mi * 3;
-        wire(base + 1, &cm.fc1_w);
-        wire(base + 2, &cm.fc2_w);
+        let base = mlp0 + mi * M1_MLP_TENSORS;
+        wire(base + 2, &cm.fc1_w);
+        wire(base + 3, &cm.fc2_w);
     }
     // The f32-stays-f32 shadows ride the same kernel: their compute copy
     // is the new master value verbatim, so the fused step writes it and
@@ -971,17 +982,21 @@ pub fn m1_specs_mixed(
     for (li, cw) in weights.compute.layers.iter().enumerate() {
         let base = 2 + li * M1_LAYER_TENSORS;
         wire_f32(base, &cw.norm_weight);
-        wire_f32(base + 2, &cw.in_proj_b);
-        wire_f32(base + 3, &cw.conv1d_weight);
-        wire_f32(base + 4, &cw.conv1d_bias);
-        wire_f32(base + 7, &cw.dt_proj_b);
-        wire_f32(base + 9, &cw.d_param);
-        wire_f32(base + 11, &cw.out_proj_b);
+        wire_f32(base + 1, &cw.norm_bias);
+        wire_f32(base + 3, &cw.in_proj_b);
+        wire_f32(base + 4, &cw.conv1d_weight);
+        wire_f32(base + 5, &cw.conv1d_bias);
+        wire_f32(base + 8, &cw.dt_proj_b);
+        wire_f32(base + 10, &cw.d_param);
+        wire_f32(base + 12, &cw.out_proj_b);
     }
     for (mi, cm) in weights.compute.mlp.iter().enumerate() {
-        wire_f32(mlp0 + mi * 3, &cm.norm_weight);
+        let base = mlp0 + mi * M1_MLP_TENSORS;
+        wire_f32(base, &cm.norm_weight);
+        wire_f32(base + 1, &cm.norm_bias);
     }
     wire_f32(norm_f, &weights.compute.norm_f_weight);
+    wire_f32(norm_f + 1, &weights.compute.norm_f_bias);
     specs
 }
 
@@ -990,44 +1005,7 @@ pub fn m3_specs(
     weights: &crate::mamba3_siso::gpu::weights::GpuMamba3Weights,
     grads: &crate::mamba3_siso::gpu::weights::GpuMamba3Grads,
 ) -> Vec<AdamWTensorSpec> {
-    let f32_spec = |w: &GpuBuffer, g: &GradSlice, no_decay: bool| AdamWTensorSpec {
-        weight: w.cached_ptr(),
-        grad: g.ptr(),
-        out: 0,
-        out_elt_bytes: 0,
-        out_is_f32: false,
-        len: w.len(),
-        no_decay,
-    };
-    let mut specs = Vec::with_capacity(3 + 10 * weights.layers.len());
-    specs.push(f32_spec(&weights.input_proj_w, &grads.input_proj_w, false));
-    // Every bias is no-decay per the reference parameter grouping (the
-    // name rule in the official param_grouping catches input_proj_b and
-    // the all-ones B/C biases; decaying an all-ones bias walks it out of
-    // the positive regime the Mamba-3 ablation requires).
-    specs.push(f32_spec(&weights.input_proj_b, &grads.input_proj_b, true));
-    for (lw, lg) in weights.layers.iter().zip(&grads.layers) {
-        specs.push(f32_spec(&lw.norm_weight, &lg.norm_weight, true));
-        specs.push(f32_spec(&lw.in_proj_w, &lg.in_proj_w, false));
-        specs.push(f32_spec(&lw.dt_bias, &lg.dt_bias, true));
-        specs.push(f32_spec(&lw.b_norm_weight, &lg.b_norm_weight, true));
-        specs.push(f32_spec(&lw.c_norm_weight, &lg.c_norm_weight, true));
-        specs.push(f32_spec(&lw.b_bias, &lg.b_bias, true));
-        specs.push(f32_spec(&lw.c_bias, &lg.c_bias, true));
-        specs.push(f32_spec(&lw.d_param, &lg.d_param, true));
-        specs.push(f32_spec(&lw.norm_gate_weight, &lg.norm_gate_weight, true));
-        specs.push(f32_spec(&lw.out_proj_w, &lg.out_proj_w, false));
-    }
-    specs.push(f32_spec(&weights.norm_f_weight, &grads.norm_f_weight, true));
-    // The gated MLP after every mixer tensor, as the gradient arena lays it
-    // out: the norm scale undecayed like every norm, the projections
-    // decayed like in_proj and out_proj.
-    for (mw, mg) in weights.mlp.iter().zip(&grads.mlp) {
-        specs.push(f32_spec(&mw.norm_weight, &mg.norm_weight, true));
-        specs.push(f32_spec(&mw.fc1_w, &mg.fc1_w, false));
-        specs.push(f32_spec(&mw.fc2_w, &mg.fc2_w, false));
-    }
-    specs
+    m3_walk(weights, grads, None)
 }
 
 /// M3 mixed-lane walk: in_proj_w / out_proj_w carry their typed compute
@@ -1040,46 +1018,162 @@ pub fn m3_specs_mixed(
         crate::gpu::dtype::WeightDtype::F32 => 4usize,
         _ => 2usize,
     };
-    let mut specs = m3_specs(&weights.master, grads);
-    let mut wire = |idx: usize, slot: &crate::gpu::buffers::WeightSliceDyn| {
-        debug_assert_eq!(specs[idx].len, slot.len_elems());
-        specs[idx].out = slot.ptr();
-        specs[idx].out_elt_bytes = out_elt;
+    m3_walk(&weights.master, grads, Some((&weights.compute, out_elt)))
+}
+
+/// The M3 tensors in the gradient arena's order. With a compute container
+/// (and its bulk element size) every tensor also writes its compute shadow
+/// in the same launch: the bulk projections their typed copies, the rest
+/// their f32 copies (see the M1 twin).
+fn m3_walk(
+    weights: &crate::mamba3_siso::gpu::weights::GpuMamba3Weights,
+    grads: &crate::mamba3_siso::gpu::weights::GpuMamba3Grads,
+    compute: Option<(
+        &crate::mamba3_siso::gpu::weights::GpuMamba3MixedWeights,
+        usize,
+    )>,
+) -> Vec<AdamWTensorSpec> {
+    let bulk_elt = compute.map_or(0, |(_, elt)| elt);
+    // `typed` marks a bulk projection, whose shadow is in the compute dtype.
+    let spec = |(w, g): (&GpuBuffer, &GradSlice),
+                no_decay: bool,
+                (shadow, typed): (Option<&WeightSliceDyn>, bool)| {
+        let (out, out_elt_bytes, out_is_f32) = match shadow {
+            None => (0, 0, false),
+            Some(slot) => {
+                debug_assert_eq!(slot.len_elems(), w.len());
+                if typed {
+                    (slot.ptr(), bulk_elt, false)
+                } else {
+                    (slot.ptr(), 4, true)
+                }
+            }
+        };
+        AdamWTensorSpec {
+            weight: w.cached_ptr(),
+            grad: g.ptr(),
+            out,
+            out_elt_bytes,
+            out_is_f32,
+            len: w.len(),
+            no_decay,
+        }
     };
-    wire(0, &weights.compute.input_proj_w);
-    for (li, cw) in weights.compute.layers.iter().enumerate() {
-        let base = 2 + li * 10;
-        wire(base + 1, &cw.in_proj_w);
-        wire(base + 9, &cw.out_proj_w);
+    let compute = compute.map(|(c, _)| c);
+    let mut specs = Vec::with_capacity(4 + 12 * weights.layers.len() + 4 * weights.mlp.len());
+    specs.push(spec(
+        (&weights.input_proj_w, &grads.input_proj_w),
+        false,
+        (compute.map(|c| &c.input_proj_w), true),
+    ));
+    // Every bias is no-decay per the reference parameter grouping (the
+    // name rule in the official param_grouping catches input_proj_b and
+    // the all-ones B/C biases; decaying an all-ones bias walks it out of
+    // the positive regime the Mamba-3 ablation requires).
+    specs.push(spec(
+        (&weights.input_proj_b, &grads.input_proj_b),
+        true,
+        (compute.map(|c| &c.input_proj_b), false),
+    ));
+    for (li, (lw, lg)) in weights.layers.iter().zip(&grads.layers).enumerate() {
+        let cw = compute.map(|c| &c.layers[li]);
+        specs.push(spec(
+            (&lw.norm_weight, &lg.norm_weight),
+            true,
+            (cw.map(|c| &c.norm_weight), false),
+        ));
+        if let (Some(w), Some(g)) = (&lw.norm_bias, &lg.norm_bias) {
+            specs.push(spec(
+                (w, g),
+                true,
+                (cw.and_then(|c| c.norm_bias.as_ref()), false),
+            ));
+        }
+        specs.push(spec(
+            (&lw.in_proj_w, &lg.in_proj_w),
+            false,
+            (cw.map(|c| &c.in_proj_w), true),
+        ));
+        specs.push(spec(
+            (&lw.dt_bias, &lg.dt_bias),
+            true,
+            (cw.map(|c| &c.dt_bias), false),
+        ));
+        specs.push(spec(
+            (&lw.b_norm_weight, &lg.b_norm_weight),
+            true,
+            (cw.map(|c| &c.b_norm_weight), false),
+        ));
+        specs.push(spec(
+            (&lw.c_norm_weight, &lg.c_norm_weight),
+            true,
+            (cw.map(|c| &c.c_norm_weight), false),
+        ));
+        specs.push(spec(
+            (&lw.b_bias, &lg.b_bias),
+            true,
+            (cw.map(|c| &c.b_bias), false),
+        ));
+        specs.push(spec(
+            (&lw.c_bias, &lg.c_bias),
+            true,
+            (cw.map(|c| &c.c_bias), false),
+        ));
+        specs.push(spec(
+            (&lw.d_param, &lg.d_param),
+            true,
+            (cw.map(|c| &c.d_param), false),
+        ));
+        specs.push(spec(
+            (&lw.norm_gate_weight, &lg.norm_gate_weight),
+            true,
+            (cw.map(|c| &c.norm_gate_weight), false),
+        ));
+        specs.push(spec(
+            (&lw.out_proj_w, &lg.out_proj_w),
+            false,
+            (cw.map(|c| &c.out_proj_w), true),
+        ));
     }
-    let norm_f = 2 + weights.compute.layers.len() * 10;
-    for (mi, cm) in weights.compute.mlp.iter().enumerate() {
-        let base = norm_f + 1 + mi * 3;
-        wire(base + 1, &cm.fc1_w);
-        wire(base + 2, &cm.fc2_w);
+    specs.push(spec(
+        (&weights.norm_f_weight, &grads.norm_f_weight),
+        true,
+        (compute.map(|c| &c.norm_f_weight), false),
+    ));
+    if let (Some(w), Some(g)) = (&weights.norm_f_bias, &grads.norm_f_bias) {
+        specs.push(spec(
+            (w, g),
+            true,
+            (compute.and_then(|c| c.norm_f_bias.as_ref()), false),
+        ));
     }
-    // f32-stays-f32 shadows ride the same kernel (see the M1 twin).
-    let mut wire_f32 = |idx: usize, slot: &crate::gpu::buffers::WeightSliceDyn| {
-        debug_assert_eq!(specs[idx].len, slot.len_elems());
-        specs[idx].out = slot.ptr();
-        specs[idx].out_elt_bytes = 4;
-        specs[idx].out_is_f32 = true;
-    };
-    wire_f32(1, &weights.compute.input_proj_b);
-    for (li, cw) in weights.compute.layers.iter().enumerate() {
-        let base = 2 + li * 10;
-        wire_f32(base, &cw.norm_weight);
-        wire_f32(base + 2, &cw.dt_bias);
-        wire_f32(base + 3, &cw.b_norm_weight);
-        wire_f32(base + 4, &cw.c_norm_weight);
-        wire_f32(base + 5, &cw.b_bias);
-        wire_f32(base + 6, &cw.c_bias);
-        wire_f32(base + 7, &cw.d_param);
-        wire_f32(base + 8, &cw.norm_gate_weight);
-    }
-    wire_f32(norm_f, &weights.compute.norm_f_weight);
-    for (mi, cm) in weights.compute.mlp.iter().enumerate() {
-        wire_f32(norm_f + 1 + mi * 3, &cm.norm_weight);
+    // The gated MLP after every mixer tensor, as the gradient arena lays it
+    // out: the norm undecayed like every norm, the projections decayed
+    // like in_proj and out_proj.
+    for (mi, (mw, mg)) in weights.mlp.iter().zip(&grads.mlp).enumerate() {
+        let cm = compute.map(|c| &c.mlp[mi]);
+        specs.push(spec(
+            (&mw.norm_weight, &mg.norm_weight),
+            true,
+            (cm.map(|c| &c.norm_weight), false),
+        ));
+        if let (Some(w), Some(g)) = (&mw.norm_bias, &mg.norm_bias) {
+            specs.push(spec(
+                (w, g),
+                true,
+                (cm.and_then(|c| c.norm_bias.as_ref()), false),
+            ));
+        }
+        specs.push(spec(
+            (&mw.fc1_w, &mg.fc1_w),
+            false,
+            (cm.map(|c| &c.fc1_w), true),
+        ));
+        specs.push(spec(
+            (&mw.fc2_w, &mg.fc2_w),
+            false,
+            (cm.map(|c| &c.fc2_w), true),
+        ));
     }
     specs
 }

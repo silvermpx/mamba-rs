@@ -6,8 +6,10 @@ use crate::mamba1::config::MambaConfig;
 /// All tensors stored as flat `Vec<f32>` in row-major order.
 #[derive(Clone)]
 pub struct MambaLayerWeights {
-    /// RMSNorm scale `[d_model]`
+    /// The block norm's scale `[d_model]`
     pub norm_weight: Vec<f32>,
+    /// The block LayerNorm's bias `[d_model]`, empty for RMSNorm
+    pub norm_bias: Vec<f32>,
 
     /// Input projection `[d_model, 2 * d_inner]`
     pub in_proj_w: Vec<f32>,
@@ -66,8 +68,10 @@ pub struct MambaWeights {
     /// Per-layer weights
     pub layers: Vec<MambaLayerWeights>,
 
-    /// Final RMSNorm after all layers `[d_model]`
+    /// The final norm's scale after all layers `[d_model]`
     pub norm_f_weight: Vec<f32>,
+    /// The final LayerNorm's bias `[d_model]`, empty for RMSNorm
+    pub norm_f_bias: Vec<f32>,
 
     /// The gated MLP of each layer, after its mixer; empty when the config
     /// has `d_intermediate == 0`.
@@ -102,13 +106,16 @@ impl MambaWeights {
         let dc = cfg.d_conv;
         let dr = cfg.dt_rank();
         let xd = cfg.xdbl_dim();
+        // A LayerNorm's bias starts at zero, as nn.LayerNorm's.
+        let nb = cfg.block_norm.bias_len(d);
 
         Self {
             input_proj_w: vec![0.0; input_dim * d],
             input_proj_b: vec![0.0; d],
             layers: (0..cfg.n_layers)
                 .map(|_| MambaLayerWeights {
-                    norm_weight: vec![1.0; d], // RMSNorm init = ones
+                    norm_weight: vec![1.0; d], // norm scale init = ones
+                    norm_bias: vec![0.0; nb],
                     in_proj_w: vec![0.0; d * 2 * di],
                     in_proj_b: vec![0.0; cfg.in_proj_bias_len()],
                     conv1d_weight: vec![0.0; di * dc],
@@ -123,11 +130,12 @@ impl MambaWeights {
                     out_proj_b: vec![0.0; cfg.out_proj_bias_len()],
                 })
                 .collect(),
-            norm_f_weight: vec![1.0; d], // RMSNorm init = ones
+            norm_f_weight: vec![1.0; d], // norm scale init = ones
+            norm_f_bias: vec![0.0; nb],
             mlp: match cfg.mlp_hidden() {
                 0 => Vec::new(),
                 hidden => (0..cfg.n_layers)
-                    .map(|_| crate::mlp::GatedMlpLayerWeights::zeros(d, hidden))
+                    .map(|_| crate::mlp::GatedMlpLayerWeights::zeros(d, hidden, cfg.block_norm))
                     .collect(),
             },
         }
@@ -269,7 +277,9 @@ impl MambaWeights {
             )?;
             check("input_proj_b", self.input_proj_b.len(), d)?;
         }
+        let nb = cfg.block_norm.bias_len(d);
         check("norm_f_weight", self.norm_f_weight.len(), d)?;
+        check("norm_f_bias", self.norm_f_bias.len(), nb)?;
 
         if self.layers.len() != cfg.n_layers {
             return Err(format!(
@@ -282,6 +292,7 @@ impl MambaWeights {
         for (i, lw) in self.layers.iter().enumerate() {
             let p = |n: &str| format!("layer[{i}].{n}");
             check(&p("norm_weight"), lw.norm_weight.len(), d)?;
+            check(&p("norm_bias"), lw.norm_bias.len(), nb)?;
             check(&p("in_proj_w"), lw.in_proj_w.len(), d * 2 * di)?;
             check(&p("in_proj_b"), lw.in_proj_b.len(), cfg.in_proj_bias_len())?;
             check(&p("conv1d_weight"), lw.conv1d_weight.len(), di * dc)?;
@@ -303,7 +314,7 @@ impl MambaWeights {
             hidden => {
                 check("mlp layers", self.mlp.len(), cfg.n_layers)?;
                 for (i, m) in self.mlp.iter().enumerate() {
-                    m.validate(d, hidden, &format!("mlp[{i}]"))?;
+                    m.validate(d, hidden, cfg.block_norm, &format!("mlp[{i}]"))?;
                 }
             }
         }
@@ -319,7 +330,9 @@ impl MambaWeights {
         let dc = cfg.d_conv;
         let dr = cfg.dt_rank();
         let xd = cfg.xdbl_dim();
+        let nb = cfg.block_norm.bias_len(d);
         let per_layer = d
+            + nb
             + d * 2 * di
             + cfg.in_proj_bias_len()
             + di * dc
@@ -332,8 +345,12 @@ impl MambaWeights {
             + di * d
             + cfg.out_proj_bias_len();
         let hidden = cfg.mlp_hidden();
-        let per_mlp = if hidden > 0 { d + 3 * d * hidden } else { 0 };
-        input_dim * d + d + cfg.n_layers * (per_layer + per_mlp) + d
+        let per_mlp = if hidden > 0 {
+            d + nb + 3 * d * hidden
+        } else {
+            0
+        };
+        input_dim * d + d + cfg.n_layers * (per_layer + per_mlp) + d + nb
     }
 }
 

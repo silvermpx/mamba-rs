@@ -51,6 +51,7 @@ fn cfg() -> MambaConfig {
         d_conv: 4,
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
+        block_norm: mamba_rs::BlockNorm::Rms,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -105,6 +106,7 @@ fn m1_f32_training_graph_matches_eager() {
         n_layers: nl,
         scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        block_norm: mamba_rs::BlockNorm::Rms,
         bcdt_rms_eps: None,
     };
 
@@ -413,6 +415,7 @@ fn m3_f32_training_graph_matches_eager() {
         a_floor: cfg.a_floor,
         rms_norm_eps: cfg.rms_norm_eps,
         ssm_norm_eps: cfg.ssm_norm_eps,
+        block_norm: cfg.block_norm,
         is_outproj_norm: cfg.is_outproj_norm,
         use_parallel_scan: true,
     };

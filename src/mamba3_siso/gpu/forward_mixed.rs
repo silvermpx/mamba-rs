@@ -25,9 +25,10 @@ use std::sync::Arc;
 use cudarc::driver::{CudaStream, PushKernelArg};
 
 use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
+use crate::gpu::block_norm;
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_norm, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, y_runs, yz_runs};
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::kernels::bcnorm_fwd_bc_cfg;
 use crate::mamba3_siso::gpu::state::{CHUNK_SIZE, GpuMamba3StateBufs, M3Exec, Mamba3LayerPtrs};
@@ -39,10 +40,11 @@ use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 /// invariants (residual f32, BPTT f32, reduction saves f32,
 /// activation I/O typed).
 pub struct GpuMamba3LayerMixedActs {
-    // F1: RMSNorm
+    // F1: the block norm
     /// f32 residual input (pre-norm) — feeds layer output residual add too.
     pub residual: GpuBuffer,
-    /// f32 RMS scalar per (b,t) pair.
+    /// f32 block norm statistics per (b,t) pair, `BlockNorm::stats_per_row`
+    /// each.
     pub rms_vals: GpuBuffer,
     /// typed post-norm output → in_proj input.
     pub post_norm: DtypedBuf,
@@ -120,11 +122,12 @@ pub struct GpuMamba3LayerMixedActs {
 }
 
 /// One layer's gated MLP saves in the mixed lane: the residual rows and the
-/// rms in f32, the normed rows, the up projection and the activation typed.
+/// norm's statistics in f32, the normed rows, the up projection and the
+/// activation typed.
 pub struct GpuMamba3MlpMixedActs {
     pub x_in: GpuBuffer, // [B*T*d_model]
     pub post: DtypedBuf, // [B*T*d_model]
-    pub rms: GpuBuffer,  // [B*T]
+    pub rms: GpuBuffer,  // [B*T*stats]
     pub up: DtypedBuf,   // [B*T*2*hidden]
     pub act: DtypedBuf,  // [B*T*hidden]
 }
@@ -138,7 +141,7 @@ pub struct GpuMamba3BackboneMixedActs {
     pub layers: Vec<GpuMamba3LayerMixedActs>,
     /// f32 — pre-norm_f input (residual stream).
     pub norm_f_input: GpuBuffer,
-    /// f32 — RMS values per sample for norm_f backward.
+    /// f32 — norm_f's statistics per sample for its backward.
     pub norm_f_rms: GpuBuffer,
     /// The gated MLP saves of every layer; empty for a model without one.
     pub mlp: Vec<GpuMamba3MlpMixedActs>,
@@ -170,6 +173,7 @@ impl GpuMamba3BackboneMixedActs {
         let na = cfg.num_rope_angles();
         let hd = cfg.headdim;
         let bt = batch * seq_len;
+        let stats = bt * cfg.block_norm.stats_per_row();
         // Match f32 GpuMamba3LayerActs: chunks sized by ceil(seq_len / chunk_size).
         let nc_max = seq_len.div_ceil(CHUNK_SIZE);
         // da_cumsum_saved is [B * nc * nh * chunk_size] per f32 layout.
@@ -179,7 +183,7 @@ impl GpuMamba3BackboneMixedActs {
             .map(|_| {
                 Ok(GpuMamba3LayerMixedActs {
                     residual: GpuBuffer::zeros(stream, bt * dm)?,
-                    rms_vals: GpuBuffer::zeros(stream, bt)?,
+                    rms_vals: GpuBuffer::zeros(stream, stats)?,
                     post_norm: DtypedBuf::zeros(stream, bt * dm, dtype)?,
                     z: DtypedBuf::zeros(stream, bt * di, dtype)?,
                     x: DtypedBuf::zeros(stream, bt * di, dtype)?,
@@ -264,7 +268,7 @@ impl GpuMamba3BackboneMixedActs {
             input_proj_outputs: DtypedBuf::zeros(stream, bt * dm, dtype)?,
             layers,
             norm_f_input: GpuBuffer::zeros(stream, bt * dm)?,
-            norm_f_rms: GpuBuffer::zeros(stream, bt)?,
+            norm_f_rms: GpuBuffer::zeros(stream, stats)?,
             mlp: (0..cfg.n_layers)
                 .filter(|_| cfg.mlp_hidden() > 0)
                 .map(|_| {
@@ -272,7 +276,7 @@ impl GpuMamba3BackboneMixedActs {
                     Ok(GpuMamba3MlpMixedActs {
                         x_in: GpuBuffer::zeros(stream, bt * dm)?,
                         post: DtypedBuf::zeros(stream, bt * dm, dtype)?,
-                        rms: GpuBuffer::zeros(stream, bt)?,
+                        rms: GpuBuffer::zeros(stream, stats)?,
                         up: DtypedBuf::zeros(stream, bt * 2 * h, dtype)?,
                         act: DtypedBuf::zeros(stream, bt * h, dtype)?,
                     })
@@ -344,31 +348,22 @@ pub fn gpu_forward_mamba3_layer_mixed(
     let width = dims.index_width();
     let na = dims.n_angles;
 
-    // F1: rmsnorm_fwd_f32in_typed - f32 residual -> typed post_norm, f32
-    // rms_vals. The residual stream already lives in acts.residual: the
-    // previous layer's residual_add wrote it there directly (layer 0 is
-    // seeded by the driver) - the per-layer temporal round trip is gone.
-    {
-        let bt_i = bt as i32;
-        let dm_i = dm as i32;
-        let eps: f32 = dims.rms_norm_eps;
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.rmsnorm_fwd_f32in_typed.get(dtype));
-        let pn = acts.post_norm.cached_ptr();
-        let rms = acts.rms_vals.cached_ptr();
-        let x = acts.residual.cached_ptr();
-        let nw = w.norm_weight.ptr();
-        bld.arg(&pn);
-        bld.arg(&rms);
-        bld.arg(&x);
-        bld.arg(&nw);
-        bld.arg(&bt_i);
-        bld.arg(&dm_i);
-        bld.arg(&eps);
-        unsafe { bld.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("m3_mixed F1 rmsnorm: {e:?}"))?;
-    }
+    // F1: the block norm - f32 residual -> typed post_norm, f32 statistics.
+    // The residual stream already lives in acts.residual: the previous
+    // layer's residual_add wrote it there directly (layer 0 is seeded by the
+    // driver) - the per-layer temporal round trip is gone.
+    block_norm::forward(
+        ctx,
+        dtype,
+        (
+            acts.post_norm.cached_ptr(),
+            acts.rms_vals.cached_ptr(),
+            acts.residual.cached_ptr(),
+        ),
+        w.norm(),
+        (bt, dm, dims.rms_norm_eps),
+        "m3_mixed F1 block norm",
+    )?;
 
     // F2: in_proj GEMM typed [B*T, dm] -> [B*T, in_proj_dim].
     gpu_gemm_typed_forward_raw(
@@ -1240,30 +1235,22 @@ pub fn gpu_forward_mamba3_backbone_mixed(
         }
     }
 
-    // norm_f — the f32 rmsnorm from the saved pre-norm residual into the
+    // norm_f — the f32 norm from the saved pre-norm residual into the
     // caller's f32 temporal: the head consumes the POST-norm stream, the
-    // exact mirror of the f32 lane (norm_f_weight is f32 in the mixed
-    // arena). The backward's rmsnorm_bwd replays from norm_f_input +
-    // norm_f_rms saved here.
-    {
-        let bt_i = bt as i32;
-        let dm_i = dm as i32;
-        let eps: f32 = dims.rms_norm_eps;
-        let mut bld = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
-        let rms = acts.norm_f_rms.cached_ptr();
-        let x = acts.norm_f_input.cached_ptr();
-        let nw = w.compute.norm_f_weight.ptr();
-        bld.arg(temporal_f32.inner_mut());
-        bld.arg(&rms);
-        bld.arg(&x);
-        bld.arg(&nw);
-        bld.arg(&bt_i);
-        bld.arg(&dm_i);
-        bld.arg(&eps);
-        unsafe { bld.launch(grid_norm(bt, dm)) }.map_err(|e| format!("m3_mixed norm_f: {e:?}"))?;
-    }
-
-    Ok(())
+    // exact mirror of the f32 lane (norm_f's parameters are f32 in the mixed
+    // arena). The backward replays from norm_f_input + norm_f_rms saved here.
+    block_norm::forward(
+        ctx,
+        WeightDtype::F32,
+        (
+            temporal_f32.cached_ptr(),
+            acts.norm_f_rms.cached_ptr(),
+            acts.norm_f_input.cached_ptr(),
+        ),
+        w.compute.final_norm(),
+        (bt, dm, dims.rms_norm_eps),
+        "m3_mixed norm_f",
+    )
 }
 
 /// One layer's gated MLP in the mixed training forward: the f32 rows the
@@ -1284,8 +1271,7 @@ fn mixed_mlp_forward(
         dims,
     } = *exec;
     let (bt, dm, h) = (dims.bt(), dims.d_model, w.hidden);
-    let (bt_i, dm_i, h_i) = (bt as i32, dm as i32, h as i32);
-    let eps: f32 = dims.rms_norm_eps;
+    let (bt_i, h_i) = (bt as i32, h as i32);
     let (x_in, post, rms, up, act) = (
         m.x_in.cached_ptr(),
         m.post.cached_ptr(),
@@ -1293,17 +1279,14 @@ fn mixed_mlp_forward(
         m.up.cached_ptr(),
         m.act.cached_ptr(),
     );
-    let nw = w.norm_weight.ptr();
-    let mut norm = ctx
-        .stream
-        .launch_builder(m3k.rmsnorm_fwd_f32in_typed.get(dtype));
-    for p in [&post, &rms, &x_in, &nw] {
-        norm.arg(p);
-    }
-    norm.arg(&bt_i);
-    norm.arg(&dm_i);
-    norm.arg(&eps);
-    unsafe { norm.launch(grid_norm(bt, dm)) }.map_err(|e| format!("m3_mixed MLP norm: {e:?}"))?;
+    block_norm::forward(
+        ctx,
+        dtype,
+        (post, rms, x_in),
+        w.norm(),
+        (bt, dm, dims.rms_norm_eps),
+        "m3_mixed MLP norm",
+    )?;
     let typed = |ptr| TypedPtr { ptr, dtype };
     gpu_gemm_typed_forward_raw(
         ctx,
@@ -1346,7 +1329,7 @@ pub(super) fn check_mixed_mlp(
 ) -> Result<(), String> {
     let model: Vec<usize> = w.compute.mlp.iter().map(|m| m.hidden).collect();
     let built: Vec<usize> = acts.mlp.iter().map(|m| m.act.len_elems()).collect();
-    let rows = acts.norm_f_rms.len();
+    let rows = acts.norm_f_input.len() / w.compute.norm_f_weight.len_elems().max(1);
     if model.len() != built.len() || model.iter().zip(&built).any(|(h, n)| h * rows != *n) {
         return Err(format!(
             "the gated MLP widths {model:?} of the weights do not match the activations \

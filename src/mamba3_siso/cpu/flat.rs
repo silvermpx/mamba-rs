@@ -14,36 +14,38 @@ use super::dims::Mamba3Dims;
 /// Memory layout descriptor — f32-element offsets for each saved field within one timestep.
 #[derive(Debug, Clone, Copy)]
 pub struct Mamba3FieldOffsets {
-    pub residual: usize,     // [d_model]
-    pub rms_val: usize,      // [1]
-    pub post_norm: usize,    // [d_model]
-    pub z: usize,            // [d_inner]
-    pub x: usize,            // [d_inner]
-    pub b_raw: usize,        // [ng * ds]
-    pub c_raw: usize,        // [ng * ds]
-    pub b_normed: usize,     // [ng * ds]
-    pub c_normed: usize,     // [ng * ds]
+    pub residual: usize, // [d_model]
+    /// The block norm's statistics: the RMS, or a LayerNorm's std and
+    /// mean (`BlockNorm::stats_per_row`).
+    pub rms_val: usize, // [1 or 2]
+    pub post_norm: usize, // [d_model]
+    pub z: usize,        // [d_inner]
+    pub x: usize,        // [d_inner]
+    pub b_raw: usize,    // [ng * ds]
+    pub c_raw: usize,    // [ng * ds]
+    pub b_normed: usize, // [ng * ds]
+    pub c_normed: usize, // [ng * ds]
     pub bcnorm_rms_b: usize, // [ng]
     pub bcnorm_rms_c: usize, // [ng]
-    pub dd_dt_raw: usize,    // [nh]
-    pub dd_a_raw: usize,     // [nh]
-    pub trap_raw: usize,     // [nh]
-    pub angles_raw: usize,   // [n_angles.max(1)]
+    pub dd_dt_raw: usize, // [nh]
+    pub dd_a_raw: usize, // [nh]
+    pub trap_raw: usize, // [nh]
+    pub angles_raw: usize, // [n_angles.max(1)]
     pub angle_cumsum: usize, // [n_angles.max(1)]
-    pub alpha: usize,        // [nh]
-    pub beta: usize,         // [nh]
-    pub gamma: usize,        // [nh]
-    pub dt_val: usize,       // [nh]
-    pub a_val: usize,        // [nh]
-    pub k_prev: usize,       // [nh * ds]
-    pub v_prev: usize,       // [nh * hd]
-    pub y: usize,            // [d_inner]
+    pub alpha: usize,    // [nh]
+    pub beta: usize,     // [nh]
+    pub gamma: usize,    // [nh]
+    pub dt_val: usize,   // [nh]
+    pub a_val: usize,    // [nh]
+    pub k_prev: usize,   // [nh * ds]
+    pub v_prev: usize,   // [nh * hd]
+    pub y: usize,        // [d_inner]
     /// UNUSED on CPU (backward recomputes the group rstd from `y`, matching
     /// forward). Kept in the layout for offset-table stability; the GPU
     /// mixed path saves its per-head rstd in a separate buffer.
     pub gated_rms_val: usize, // [1]
-    pub gated: usize,        // [d_inner]
-    pub step_stride: usize,  // total floats per timestep
+    pub gated: usize,    // [d_inner]
+    pub step_stride: usize, // total floats per timestep
 }
 
 impl Mamba3FieldOffsets {
@@ -60,7 +62,7 @@ impl Mamba3FieldOffsets {
         let residual = off;
         off += dm;
         let rms_val = off;
-        off += 1;
+        off += dims.block_norm.stats_per_row();
         let post_norm = off;
         off += dm;
         let z = off;

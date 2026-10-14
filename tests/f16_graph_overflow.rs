@@ -110,6 +110,7 @@ fn m1_f16_graph_step_that_overflows_moves_nothing() {
         expand: 2,
         n_layers: 2,
         scan_mode: ScanMode::Auto,
+        block_norm: mamba_rs::BlockNorm::Rms,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,

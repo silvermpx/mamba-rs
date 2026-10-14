@@ -2364,6 +2364,7 @@ mod tests {
             n_layers: 1,
             scan_mode: ScanMode::Sequential,
             rms_norm_eps: 1e-5,
+            block_norm: crate::config::BlockNorm::Rms,
             bcdt_rms_eps: None,
         };
         assert_eq!(m1_mixed_graph_max_dim(&dims, 0), 258);

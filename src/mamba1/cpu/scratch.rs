@@ -117,6 +117,9 @@ pub struct BackwardPhaseScratch {
     pub d_input_proj_scratch: Vec<f32>,
     /// Local accumulator for norm_f weight gradient: `[d_model]`.
     pub d_norm_f_weight_local: Vec<f32>,
+    /// Local accumulator for a LayerNorm norm_f's bias gradient:
+    /// `[d_model]`, empty for RMSNorm.
+    pub d_norm_f_bias_local: Vec<f32>,
     /// The SSM states of the segment the backward walks back, the state
     /// before its first step first: `[(stride + 1) * d_inner * d_state]`,
     /// grown on first use.
@@ -162,6 +165,7 @@ impl BackwardPhaseScratch {
             post_norm_buf: vec![0.0; t * dm],
             d_input_proj_scratch: vec![0.0; t * dims.mamba_input_dim.max(dm)],
             d_norm_f_weight_local: vec![0.0; dm],
+            d_norm_f_bias_local: vec![0.0; dims.block_norm.bias_len(dm)],
             seg_h: Vec::new(),
             seg_da: Vec::new(),
             conv_win: vec![0.0; di * dims.d_conv],

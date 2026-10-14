@@ -56,6 +56,7 @@ fn dims_for(cfg: &Mamba3Config, batch: usize, seq_len: usize) -> GpuMamba3Dims {
         a_floor: cfg.a_floor,
         rms_norm_eps: cfg.rms_norm_eps,
         ssm_norm_eps: cfg.ssm_norm_eps,
+        block_norm: cfg.block_norm,
         is_outproj_norm: cfg.is_outproj_norm,
         use_parallel_scan: false,
     }
@@ -311,9 +312,23 @@ fn run_f32_post_normf(
 }
 
 fn check(dtype: WeightDtype) {
-    let cfg = tiny_cfg();
+    check_cfg(tiny_cfg(), dtype);
+}
+
+fn check_cfg(cfg: Mamba3Config, dtype: WeightDtype) {
     let dims = dims_for(&cfg, 1, 4);
-    let cpu = Mamba3Weights::init(&cfg, dims.mamba_input_dim, 0xBADF00D8);
+    let mut cpu = Mamba3Weights::init(&cfg, dims.mamba_input_dim, 0xBADF00D8);
+    // A LayerNorm's biases start at zero; drawn ones put the bias add in
+    // the forward too. An RMSNorm model has none.
+    let biases = cpu
+        .layers
+        .iter_mut()
+        .map(|lw| &mut lw.norm_bias)
+        .chain(std::iter::once(&mut cpu.norm_f_bias));
+    for (k, b) in biases.enumerate() {
+        let d = det_rand(b.len(), 0x1B + k as u32);
+        b.copy_from_slice(&d);
+    }
     let input = det_rand(dims.bt() * dims.mamba_input_dim, 0xA1);
 
     let ref_out = run_f32_post_normf(&cpu, &cfg, &dims, &input);
@@ -345,6 +360,21 @@ fn m3_forward_mixed_parity_bf16() {
 #[test]
 fn m3_forward_mixed_parity_f16() {
     check(WeightDtype::F16);
+}
+
+/// LayerNorm block norms (`rms_norm = false`) with their biases, in both
+/// half precisions.
+#[test]
+fn m3_forward_mixed_parity_layer_norm() {
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        check_cfg(
+            Mamba3Config {
+                block_norm: mamba_rs::BlockNorm::Layer,
+                ..tiny_cfg()
+            },
+            dtype,
+        );
+    }
 }
 
 /// The dropped-norm_f regression: the mixed forward's public output must

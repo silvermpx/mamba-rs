@@ -574,6 +574,7 @@ mod tests {
         let xdbl_dim = dt_rank + 2 * d_state;
         TrainMambaLayerWeights {
             norm_weight: (0..d_model).map(|_| 0.8 + r().abs()).collect(),
+            norm_bias: Vec::new(),
             in_proj_w: (0..d_model * 2 * d_inner).map(|_| r()).collect(),
             in_proj_b: Vec::new(),
             conv1d_weight: (0..d_inner * d_conv).map(|_| r()).collect(),
@@ -665,6 +666,7 @@ mod tests {
                 })
                 .collect(),
             norm_f_weight: vec![1.0; d_model],
+            norm_f_bias: Vec::new(),
             mlp: Vec::new(),
         };
 
@@ -840,6 +842,7 @@ mod tests {
                 })
                 .collect(),
             norm_f_weight: vec![1.0; d_model],
+            norm_f_bias: Vec::new(),
             mlp: Vec::new(),
         };
 
@@ -1217,6 +1220,7 @@ mod tests {
                 })
                 .collect(),
             norm_f_weight: vec![1.0; d_model],
+            norm_f_bias: Vec::new(),
             mlp: Vec::new(),
         };
 

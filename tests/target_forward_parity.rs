@@ -61,6 +61,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             .iter()
             .map(|lw| TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
+                norm_bias: lw.norm_bias.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
                 in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
@@ -75,6 +76,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
+        norm_f_bias: w.norm_f_bias.clone(),
         mlp: w.mlp.clone(),
     }
 }
@@ -116,6 +118,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize, rms_norm_eps: f32) {
         d_conv: 4,
         expand: 2,
         scan_mode,
+        block_norm: mamba_rs::BlockNorm::Rms,
         rms_norm_eps,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -168,6 +171,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize, rms_norm_eps: f32) {
         n_layers: nl,
         scan_mode,
         rms_norm_eps,
+        block_norm: cfg.block_norm,
         bcdt_rms_eps: None,
     };
     let mut scratch = GpuMambaTargetScratch::new(&ctx.stream, &gpu_dims).expect("target scratch");
@@ -245,15 +249,14 @@ fn m3_dims(cfg: &Mamba3Config, batch: usize, seq_len: usize, parallel: bool) -> 
         a_floor: cfg.a_floor,
         rms_norm_eps: cfg.rms_norm_eps,
         ssm_norm_eps: cfg.ssm_norm_eps,
+        block_norm: cfg.block_norm,
         is_outproj_norm: cfg.is_outproj_norm,
         use_parallel_scan: parallel,
     }
 }
 
-fn run_m3_case(parallel: bool, seq_len: usize, max_rel: f32) {
-    let dev = GpuDevice::new(0).expect("GpuDevice");
-    let ctx = GpuCtx::new(&dev).expect("GpuCtx");
-    let cfg = Mamba3Config {
+fn m3_cfg() -> Mamba3Config {
+    Mamba3Config {
         d_model: 32,
         d_state: 8,
         expand: 2,
@@ -264,7 +267,12 @@ fn run_m3_case(parallel: bool, seq_len: usize, max_rel: f32) {
         a_floor: 0.0625,
         is_outproj_norm: true,
         ..Mamba3Config::default()
-    };
+    }
+}
+
+fn run_m3_case(cfg: Mamba3Config, parallel: bool, seq_len: usize, max_rel: f32) {
+    let dev = GpuDevice::new(0).expect("GpuDevice");
+    let ctx = GpuCtx::new(&dev).expect("GpuCtx");
     let batch = 2;
     let input_dim = cfg.d_model;
     let m3k = Mamba3Kernels::compile_with_state_cap(
@@ -278,7 +286,23 @@ fn run_m3_case(parallel: bool, seq_len: usize, max_rel: f32) {
     let dm = dims.d_model;
     let (nh, hd, ds, nl) = (dims.nheads, dims.headdim, dims.d_state, dims.n_layers);
     let na = dims.n_angles.max(1);
-    let cpu_w = Mamba3Weights::init(&cfg, input_dim, 0x9060_0003);
+    let mut cpu_w = Mamba3Weights::init(&cfg, input_dim, 0x9060_0003);
+    // A LayerNorm's biases start at zero; drawn ones put the bias add in
+    // the rows too. An RMSNorm model has none.
+    let biases = cpu_w
+        .layers
+        .iter_mut()
+        .map(|lw| &mut lw.norm_bias)
+        .chain(std::iter::once(&mut cpu_w.norm_f_bias));
+    for (k, b) in biases.enumerate() {
+        let d = det(b.len(), 0x1B + k as u32, 0.5);
+        b.copy_from_slice(&d);
+    }
+    let label = if cfg.block_norm.rms_norm() {
+        ""
+    } else {
+        ":layernorm"
+    };
     let gpu_w = GpuMamba3Weights::from_cpu(&ctx.stream, &cpu_w, &cfg, input_dim)
         .expect("GpuMamba3Weights::from_cpu");
     let input = det(bt * input_dim, 0xCC, 0.05);
@@ -329,7 +353,7 @@ fn run_m3_case(parallel: bool, seq_len: usize, max_rel: f32) {
     ctx.stream.synchronize().expect("sync");
     let got = out.to_cpu(&ctx.stream).expect("download");
     eprintln!(
-        "HASH target:m3:parallel={parallel}:T{seq_len} {:016x}",
+        "HASH target:m3:parallel={parallel}:T{seq_len}{label} {:016x}",
         digest::fnv1a_f32(&got)
     );
 
@@ -347,11 +371,26 @@ fn run_m3_case(parallel: bool, seq_len: usize, max_rel: f32) {
 
 #[test]
 fn m3_target_forward_matches_the_backbone_on_the_sequential_route() {
-    run_m3_case(false, 8, 1e-4);
+    run_m3_case(m3_cfg(), false, 8, 1e-4);
 }
 
 #[test]
 fn m3_target_forward_matches_the_backbone_on_the_chunked_route() {
     // Longer than one chunk, so the chunk boundary carries state.
-    run_m3_case(true, 300, 1e-3);
+    run_m3_case(m3_cfg(), true, 300, 1e-3);
+}
+
+/// LayerNorm block norms with their biases, on a single head: the target
+/// scratch keeps two statistics a row for them, more than the one head's
+/// gated-norm statistics it is otherwise sized by.
+#[test]
+fn m3_target_forward_matches_the_backbone_with_layer_norm() {
+    let cfg = Mamba3Config {
+        headdim: 64,
+        block_norm: mamba_rs::BlockNorm::Layer,
+        ..m3_cfg()
+    };
+    assert_eq!(cfg.nheads(), 1);
+    run_m3_case(cfg, false, 8, 1e-4);
+    run_m3_case(cfg, true, 300, 1e-3);
 }

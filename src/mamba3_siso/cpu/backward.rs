@@ -16,6 +16,7 @@ use super::forward::{SsmHeadStep, simd_ssm_head, simd_sum_sq};
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
 use crate::ops::fast_math::fast_exp_scalar;
+use crate::ops::norms::layer_norm_row_backward;
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
 
@@ -591,11 +592,29 @@ pub fn backward_mamba3_layer_batched(
         (seq_len, dm, ip),
     );
 
-    // ═══ B8: RMSNorm backward + residual ═══
+    // ═══ B8: the block norm's backward + residual ═══
     scratch.d_residual_buf[..seq_len * dm].copy_from_slice(&d_temporal_flat[..seq_len * dm]);
 
     let inv_dim = 1.0 / dm as f32;
+    let layer_norm = !layer_w.norm_bias.is_empty();
     for t in 0..seq_len {
+        if layer_norm {
+            let base_t = acts.base(t);
+            let off = t * dm;
+            let st = &acts.data[base_t + o.rms_val..base_t + o.rms_val + 2];
+            layer_norm_row_backward(
+                &mut d_temporal_flat[off..off + dm],
+                (&mut d_layer.norm_weight, &mut d_layer.norm_bias),
+                (
+                    &scratch.d_post_norm_flat[off..off + dm],
+                    &acts.data[base_t + o.residual..base_t + o.residual + dm],
+                ),
+                &layer_w.norm_weight,
+                [st[0], st[1]],
+                false,
+            );
+            continue;
+        }
         let base_t = acts.base(t);
         let off = t * dm;
         let rms = acts.data[base_t + o.rms_val];

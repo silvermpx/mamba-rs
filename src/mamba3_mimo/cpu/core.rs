@@ -336,6 +336,17 @@ pub(crate) fn row_norm(dst: &mut [f32], src: &[f32], w: &[f32], eps: f32) {
     simd_rms_scale(dst, src, w, inv_rms);
 }
 
+/// A block norm of one row: [`row_norm`], or LayerNorm for a model whose
+/// norms carry a bias (`b` then holds the row's width).
+#[inline]
+pub(crate) fn block_norm_row(dst: &mut [f32], src: &[f32], (w, b): (&[f32], &[f32]), eps: f32) {
+    if b.is_empty() {
+        row_norm(dst, src, w, eps);
+    } else {
+        crate::ops::norms::layer_norm_row(dst, src, (w, b), eps);
+    }
+}
+
 /// One head's recurrent state: `[P, N]` state, `[R, N]` keys, `[P]` raw
 /// previous input, `[na]` angles.
 pub(crate) struct HeadState<'a> {

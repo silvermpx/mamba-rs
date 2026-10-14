@@ -121,6 +121,7 @@ fn m3_gpu_benchmark() {
             a_floor: cfg.a_floor,
             rms_norm_eps: cfg.rms_norm_eps,
             ssm_norm_eps: cfg.ssm_norm_eps,
+            block_norm: cfg.block_norm,
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: false,
         };

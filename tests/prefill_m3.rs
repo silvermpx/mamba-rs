@@ -16,7 +16,7 @@ use mamba_rs::mamba3_siso::state::Mamba3State;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 use mamba_rs::ops::blas::sgemm_forward;
 use mamba_rs::ops::fast_math::RMS_NORM_EPS;
-use mamba_rs::ops::norms::rms_norm_inplace;
+use mamba_rs::ops::norms::{layer_norm_inplace, rms_norm_inplace};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -71,6 +71,7 @@ fn train_weights_from(w: &Mamba3Weights) -> TrainMamba3Weights {
             .iter()
             .map(|lw| TrainMamba3LayerWeights {
                 norm_weight: lw.norm_weight.clone(),
+                norm_bias: lw.norm_bias.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
                 dt_bias: lw.dt_bias.clone(),
                 b_norm_weight: lw.b_norm_weight.clone(),
@@ -83,6 +84,32 @@ fn train_weights_from(w: &Mamba3Weights) -> TrainMamba3Weights {
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
+        norm_f_bias: w.norm_f_bias.clone(),
+    }
+}
+
+/// The model's weights with every LayerNorm bias drawn, so the bias add
+/// runs too; an RMSNorm model has none.
+fn init_weights(cfg: &Mamba3Config, input_dim: usize) -> Mamba3Weights {
+    let mut w = Mamba3Weights::init(cfg, input_dim, 0xC0FFEE);
+    let biases = w
+        .layers
+        .iter_mut()
+        .map(|lw| &mut lw.norm_bias)
+        .chain(w.mlp.iter_mut().map(|m| &mut m.norm_bias))
+        .chain(std::iter::once(&mut w.norm_f_bias));
+    for (k, b) in biases.enumerate() {
+        let d = det(b.len(), 0x1B + k as u32, 0.4);
+        b.copy_from_slice(&d);
+    }
+    w
+}
+
+/// [`test_cfg`] with LayerNorm block norms (`rms_norm = false`).
+fn layer_norm_cfg() -> Mamba3Config {
+    Mamba3Config {
+        block_norm: mamba_rs::BlockNorm::Layer,
+        ..test_cfg()
     }
 }
 
@@ -106,10 +133,16 @@ fn m3_prefill_matches_training_layers_bitwise_official_head_width() {
     check_prefill_matches_training_layers(official_width_cfg());
 }
 
+/// The same contract with LayerNorm block norms and their biases.
+#[test]
+fn m3_prefill_matches_training_layers_bitwise_layer_norm() {
+    check_prefill_matches_training_layers(layer_norm_cfg());
+}
+
 fn check_prefill_matches_training_layers(cfg: Mamba3Config) {
     let input_dim = 20usize;
     let seq_len = 8usize;
-    let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
+    let w = init_weights(&cfg, input_dim);
     let tw = train_weights_from(&w);
     let input = det(seq_len * input_dim, 0xAA, 0.05);
     let dims = Mamba3Dims::from_config(&cfg, seq_len);
@@ -150,7 +183,11 @@ fn check_prefill_matches_training_layers(cfg: Mamba3Config) {
         );
     }
     for row in ref_out.chunks_mut(dm) {
-        rms_norm_inplace(row, &w.norm_f_weight, RMS_NORM_EPS);
+        if w.norm_f_bias.is_empty() {
+            rms_norm_inplace(row, &w.norm_f_weight, RMS_NORM_EPS);
+        } else {
+            layer_norm_inplace(row, (&w.norm_f_weight, &w.norm_f_bias), cfg.rms_norm_eps);
+        }
     }
 
     // Prefill.
@@ -174,10 +211,19 @@ fn m3_prefill_parallel_bit_equals_single_official_head_width() {
     check_prefill_parallel_bit_equals_single(official_width_cfg());
 }
 
+/// The same contract with LayerNorm block norms, an MLP behind every layer.
+#[test]
+fn m3_prefill_parallel_bit_equals_single_layer_norm() {
+    check_prefill_parallel_bit_equals_single(Mamba3Config {
+        d_intermediate: 80,
+        ..layer_norm_cfg()
+    });
+}
+
 fn check_prefill_parallel_bit_equals_single(cfg: Mamba3Config) {
     let input_dim = 20usize;
     let seq_len = 16usize;
-    let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
+    let w = init_weights(&cfg, input_dim);
     let input = det(seq_len * input_dim, 0xAB, 0.05);
     let dims = Mamba3Dims::from_config(&cfg, seq_len);
 
@@ -221,10 +267,19 @@ fn m3_prefill_then_decode_handoff_official_head_width() {
     check_prefill_then_decode_handoff(official_width_cfg());
 }
 
+/// The same handoff with LayerNorm block norms, an MLP behind every layer.
+#[test]
+fn m3_prefill_then_decode_handoff_layer_norm() {
+    check_prefill_then_decode_handoff(Mamba3Config {
+        d_intermediate: 80,
+        ..layer_norm_cfg()
+    });
+}
+
 fn check_prefill_then_decode_handoff(cfg: Mamba3Config) {
     let input_dim = cfg.d_model;
     let seq_len = 8usize;
-    let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
+    let w = init_weights(&cfg, input_dim);
     let dims = Mamba3Dims::from_config(&cfg, seq_len);
     let inputs = det((seq_len + 1) * input_dim, 0xAC, 0.05);
     let dm = cfg.d_model;
@@ -292,7 +347,7 @@ fn m3_prefill_batch_matches_sequential() {
     let input_dim = 20usize;
     let seq_len = 8usize;
     let b = 3usize;
-    let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
+    let w = init_weights(&cfg, input_dim);
     let dims = Mamba3Dims::from_config(&cfg, seq_len);
     let dm = cfg.d_model;
     let inputs = det(b * seq_len * input_dim, 0xAE, 0.05);
@@ -333,7 +388,7 @@ fn m3_prefill_batch_matches_sequential() {
 fn an_empty_prompt_leaves_the_state_alone() {
     let cfg = test_cfg();
     let input_dim = cfg.d_model;
-    let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
+    let w = init_weights(&cfg, input_dim);
     let dims = Mamba3Dims::from_config(&cfg, 5);
     let mut state = Mamba3State::zeros(&cfg);
     let mut scratch = Mamba3PrefillScratch::new(&dims, input_dim);
@@ -360,17 +415,23 @@ fn an_empty_prompt_leaves_the_state_alone() {
 /// In every precision the parallel prefill gives the bits of the serial
 /// one and the decode after it continues from the same state; the f32
 /// lane is the plain backbone, and a half lane's rows are stored values.
-/// The gated norm and an MLP behind every layer ride along.
+/// The gated norm and an MLP behind every layer ride along, under both
+/// block norms.
 #[test]
 fn m3_lane_prefill_parallel_bit_equals_single() {
+    for base in [test_cfg(), layer_norm_cfg()] {
+        check_lane_prefill_parallel_bit_equals_single(Mamba3Config {
+            d_intermediate: 80,
+            ..base
+        });
+    }
+}
+
+fn check_lane_prefill_parallel_bit_equals_single(cfg: Mamba3Config) {
     use mamba_rs::{CpuOptions, Mamba3Backbone, WeightDtype};
-    let cfg = Mamba3Config {
-        d_intermediate: 80,
-        ..test_cfg()
-    };
     let (input_dim, seq_len) = (20usize, 16usize);
     let dm = cfg.d_model;
-    let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
+    let w = init_weights(&cfg, input_dim);
     let input = det((seq_len + 1) * input_dim, 0xAB, 0.5);
     let (prompt, next) = input.split_at(seq_len * input_dim);
     // The prompt's rows and the decode row after them.

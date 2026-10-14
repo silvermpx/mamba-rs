@@ -14,9 +14,10 @@ use super::weights::{
     GpuMamba3MlpWeights, GpuMamba3Weights,
 };
 use crate::gpu::blas::gpu_gemm_bi_backward_grad_raw;
-use crate::gpu::buffers::GpuBuffer;
+use crate::gpu::block_norm;
+use crate::gpu::buffers::{GpuBuffer, GradSlice};
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_norm, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_colsum, y_runs, yz_runs};
 use cudarc::driver::PushKernelArg;
 
 /// Mamba-3 SISO single-layer GPU backward (sequential SSM backward).
@@ -903,34 +904,29 @@ pub fn gpu_backward_mamba3_layer(
         (bt, dm, ip),
     )?;
 
-    // B1: RMSNorm backward — no-atomics partials rule.
-    // Stage 1: rmsnorm_bwd writes per-sample per-dim partials to axis0_partials.
-    // Stage 2: reduce_sum_axis0 → lg.norm_weight (accumulate=1).
+    // B1: the block norm's backward — no-atomics partials rule.
+    // Stage 1 writes per-sample per-dim scale partials to axis0_partials
+    // (a LayerNorm adds its bias gradient first); the input gradient is a
+    // plain store. Stage 2: reduce_sum_axis0 → lg.norm_weight (accumulate=1).
     {
-        let nw_ptr = lw.norm_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;
         let dm_i = dm as i32;
         let axis0_ptr = scratch.axis0_partials.cached_ptr();
-        {
-            let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
-            builder.arg(scratch.d_pre_norm.inner_mut());
-            builder.arg(&axis0_ptr); // d_scale_partials [bt*dm]
-            builder.arg(scratch.d_norm.inner());
-            builder.arg(acts.residual.inner());
-            builder.arg(&nw_ptr);
-            builder.arg(acts.rms_vals.inner());
-            builder.arg(&bt_i);
-            builder.arg(&dm_i);
-            // Shared-kernel ABI: rmsnorm_backward grew an `accumulate`
-            // arg (M1 residual fold); the M3 sites keep the
-            // plain-store behavior.
-            let accumulate_dx: i32 = 0;
-            builder.arg(&accumulate_dx);
-            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
-            builder.arg(&no_mirror);
-            unsafe { builder.launch(grid_norm(bt, dm)) }
-                .map_err(|e| format!("rmsnorm_bwd m3 B1 stage1: {:?}", e))?;
-        }
+        block_norm::backward(
+            ctx,
+            WeightDtype::F32,
+            (
+                scratch.d_pre_norm.cached_ptr(),
+                axis0_ptr,
+                scratch.d_norm.cached_ptr(),
+                acts.residual.cached_ptr(),
+                acts.rms_vals.cached_ptr(),
+            ),
+            (lw.norm(), lg.norm_bias.as_ref().map_or(0, GradSlice::ptr)),
+            (bt, dm),
+            (false, 0),
+            "block norm bwd m3 B1",
+        )?;
         {
             let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
             let accumulate_i: i32 = 1;
@@ -987,30 +983,24 @@ pub fn gpu_backward_mamba3_backbone(
     let dm = dims.d_model;
 
     // norm_f bwd — no-atomics partials rule.
-    {
-        let nf_ptr = mamba_w.norm_f_weight.raw_ptr(&ctx.stream);
-        let bt_i = bt as i32;
-        let dm_i = dm as i32;
-        let axis0_ptr = scratch.axis0_partials.cached_ptr();
-        let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
-        builder.arg(scratch.d_norm.inner_mut());
-        builder.arg(&axis0_ptr); // d_scale_partials [bt*dm]
-        builder.arg(d_temporal.inner());
-        builder.arg(acts.norm_f_input.inner());
-        builder.arg(&nf_ptr);
-        builder.arg(acts.norm_f_rms.inner());
-        builder.arg(&bt_i);
-        builder.arg(&dm_i);
-        // Shared-kernel ABI: rmsnorm_backward grew an `accumulate`
-        // arg (M1 residual fold); the M3 sites keep the
-        // plain-store behavior.
-        let accumulate_dx: i32 = 0;
-        builder.arg(&accumulate_dx);
-        let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
-        builder.arg(&no_mirror);
-        unsafe { builder.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_bwd norm_f m3 stage1: {:?}", e))?;
-    }
+    block_norm::backward(
+        ctx,
+        WeightDtype::F32,
+        (
+            scratch.d_norm.cached_ptr(),
+            scratch.axis0_partials.cached_ptr(),
+            d_temporal.cached_ptr(),
+            acts.norm_f_input.cached_ptr(),
+            acts.norm_f_rms.cached_ptr(),
+        ),
+        (
+            mamba_w.final_norm(),
+            grads.norm_f_bias.as_ref().map_or(0, GradSlice::ptr),
+        ),
+        (bt, dm),
+        (false, 0),
+        "norm_f bwd m3",
+    )?;
     // Stage 2: reduce axis0_partials[bt, dm] → grads.norm_f_weight[dm] (accumulate=1).
     {
         let bt_i = bt as i32;
@@ -1128,23 +1118,23 @@ fn gpu_backward_mamba3_mlp(
         w.fc1_w.raw_ptr(&ctx.stream),
         (bt, dm, 2 * h),
     )?;
-    let nw = w.norm_weight.raw_ptr(&ctx.stream);
     let partials = scratch.axis0_partials.cached_ptr();
-    let mut norm = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
-    norm.arg(d_temporal.inner_mut());
-    norm.arg(&partials);
-    norm.arg(scratch.mlp_d_post.inner());
-    norm.arg(acts.x_in.inner());
-    norm.arg(&nw);
-    norm.arg(acts.rms.inner());
-    norm.arg(&bt_i);
-    norm.arg(&dm_i);
     // Accumulate: the norm's input gradient adds into the residual's.
-    let accumulate: i32 = 1;
-    norm.arg(&accumulate);
-    let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
-    norm.arg(&no_mirror);
-    unsafe { norm.launch(grid_norm(bt, dm)) }.map_err(|e| format!("MLP norm bwd m3: {e:?}"))?;
+    block_norm::backward(
+        ctx,
+        WeightDtype::F32,
+        (
+            d_temporal.cached_ptr(),
+            partials,
+            scratch.mlp_d_post.cached_ptr(),
+            acts.x_in.cached_ptr(),
+            acts.rms.cached_ptr(),
+        ),
+        (w.norm(), g.norm_bias.as_ref().map_or(0, GradSlice::ptr)),
+        (bt, dm),
+        (true, 0),
+        "MLP norm bwd m3",
+    )?;
     let block = (bt as u32).next_power_of_two().clamp(32, 256);
     let d_nw = g.norm_weight.ptr();
     let reduce_acc: i32 = 1;

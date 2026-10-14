@@ -22,18 +22,19 @@ use super::super::config::Mamba3MimoConfig;
 use super::super::state::Mamba3MimoLayerState;
 use super::super::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use super::core::{
-    HeadScratch, HeadState, MimoRowsIo, TokenIn, advance_angles, discretize, mimo_head_step,
-    mimo_rows, prepare_token, rope_half_split, row_norm,
+    HeadScratch, HeadState, MimoRowsIo, TokenIn, advance_angles, block_norm_row, discretize,
+    mimo_head_step, mimo_rows, prepare_token, rope_half_split,
 };
 use crate::mamba3_siso::cpu::forward::{clamp_a, heavy_tail, heavy_tail_deriv, simd_sum_sq};
 use crate::mlp::cpu::RowsGemm;
 use crate::mlp::cpu::{
     GatedMlpBackwardScratch, GatedMlpRowsScratch, gated_mlp_rows, gated_mlp_rows_backward,
+    mlp_norm_row,
 };
 use crate::ops::blas::sgemm_forward;
 use crate::ops::fast_math::fast_exp_scalar;
 use crate::ops::lane::LaneGemm;
-use crate::ops::norms::rms_norm_weighted;
+use crate::ops::norms::{layer_norm_row_backward_in_place, layer_norm_stats};
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
 
@@ -280,7 +281,7 @@ pub fn forward_mamba3_mimo_train(
             let eps = cfg.rms_norm_eps;
             gated_mlp_rows(rows, t_len, mlp, &mut s.mlp, sgemm_forward, |dst, src| {
                 for (d_row, s_row) in dst.chunks_exact_mut(dm).zip(src.chunks_exact(dm)) {
-                    rms_norm_weighted(d_row, s_row, &mlp.norm_weight, eps);
+                    mlp_norm_row(d_row, s_row, mlp, eps);
                 }
             });
         }
@@ -290,7 +291,7 @@ pub fn forward_mamba3_mimo_train(
         .chunks_exact_mut(dm)
         .zip(tape.final_in.chunks_exact(dm))
     {
-        row_norm(o, x, &w.norm_f_weight, cfg.rms_norm_eps);
+        block_norm_row(o, x, (&w.norm_f_weight, &w.norm_f_bias), cfg.rms_norm_eps);
     }
     tape.filled = true;
     Ok(())
@@ -317,7 +318,7 @@ fn layer_forward(
     let lane = (sgemm_forward as RowsGemm, s.dtype);
     lt.x_in.copy_from_slice(rows);
     for (d, x) in s.norm.chunks_exact_mut(dm).zip(rows.chunks_exact(dm)) {
-        row_norm(d, x, &lw.norm_weight, cfg.rms_norm_eps);
+        block_norm_row(d, x, (&lw.norm_weight, &lw.norm_bias), cfg.rms_norm_eps);
     }
     store(s.dtype, &mut s.norm[..t_len * dm]);
     s.gemm.forward(
@@ -353,6 +354,27 @@ fn layer_forward(
     );
     for (r, &o) in rows.iter_mut().zip(&s.out[..t_len * dm]) {
         *r += o;
+    }
+}
+
+/// d loss / d x of rows through a block norm: [`row_norm_backward`], or
+/// the LayerNorm backward for a model whose norms carry a bias, its
+/// statistics recomputed from the rows as the forward computed them. The
+/// parameters' gradients accumulate.
+fn block_norm_backward(
+    d_rows: &mut [f32],
+    x_rows: &[f32],
+    (w, b): (&[f32], &[f32]),
+    (gw, gb): (&mut [f32], &mut [f32]),
+    eps: f32,
+) {
+    if b.is_empty() {
+        return row_norm_backward(d_rows, x_rows, (w, gw), eps);
+    }
+    let n = w.len();
+    for (d, x) in d_rows.chunks_exact_mut(n).zip(x_rows.chunks_exact(n)) {
+        let stats = layer_norm_stats(x, eps);
+        layer_norm_row_backward_in_place(d, (&mut *gw, &mut *gb), x, w, stats);
     }
 }
 
@@ -405,10 +427,11 @@ pub fn backward_mamba3_mimo_train(
     s.dtype = tape.dtype;
     s.mlp_bwd.dtype = tape.dtype;
     let d_rows = &mut d_out[..t_len * dm];
-    row_norm_backward(
+    block_norm_backward(
         d_rows,
         &tape.final_in,
-        (&w.norm_f_weight, &mut grads.norm_f_weight),
+        (&w.norm_f_weight, &w.norm_f_bias),
+        (&mut grads.norm_f_weight, &mut grads.norm_f_bias),
         cfg.rms_norm_eps,
     );
     for l in (0..cfg.n_layers).rev() {
@@ -977,7 +1000,7 @@ fn layer_backward(
     // as the GPU stores each of its columns.
     store(s.dtype, &mut s.d_proj[..t_len * ip]);
     for (d, x) in s.norm.chunks_exact_mut(dm).zip(lt.x_in.chunks_exact(dm)) {
-        row_norm(d, x, &lw.norm_weight, cfg.rms_norm_eps);
+        block_norm_row(d, x, (&lw.norm_weight, &lw.norm_bias), cfg.rms_norm_eps);
     }
     store(s.dtype, &mut s.norm[..t_len * dm]);
     s.gemm.backward(
@@ -990,10 +1013,11 @@ fn layer_backward(
         ),
         (t_len, dm, ip),
     );
-    row_norm_backward(
+    block_norm_backward(
         &mut s.d_post[..t_len * dm],
         &lt.x_in,
-        (&lw.norm_weight, &mut gw.norm_weight),
+        (&lw.norm_weight, &lw.norm_bias),
+        (&mut gw.norm_weight, &mut gw.norm_bias),
         cfg.rms_norm_eps,
     );
     for (d, &dp) in d_rows.iter_mut().zip(&s.d_post[..t_len * dm]) {
@@ -1013,6 +1037,7 @@ impl Mamba3MimoWeights {
                 .iter()
                 .map(|l| Mamba3MimoLayerWeights {
                     norm_weight: z(&l.norm_weight),
+                    norm_bias: z(&l.norm_bias),
                     in_proj_w: z(&l.in_proj_w),
                     dt_bias: z(&l.dt_bias),
                     b_norm_weight: z(&l.b_norm_weight),
@@ -1028,11 +1053,13 @@ impl Mamba3MimoWeights {
                 })
                 .collect(),
             norm_f_weight: z(&self.norm_f_weight),
+            norm_f_bias: z(&self.norm_f_bias),
             mlp: self
                 .mlp
                 .iter()
                 .map(|m| crate::mlp::GatedMlpLayerWeights {
                     norm_weight: z(&m.norm_weight),
+                    norm_bias: z(&m.norm_bias),
                     fc1_w: z(&m.fc1_w),
                     fc2_w: z(&m.fc2_w),
                 })

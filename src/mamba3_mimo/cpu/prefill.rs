@@ -12,12 +12,11 @@ use rayon::prelude::*;
 use super::super::config::Mamba3MimoConfig;
 use super::super::state::Mamba3MimoLayerState;
 use super::super::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
-use super::core::{HeadScratch, HeadState, TokenIn, mimo_head_step, prepare_token, row_norm};
+use super::core::{HeadScratch, HeadState, TokenIn, block_norm_row, mimo_head_step, prepare_token};
 use crate::mamba1::cpu::prefill::{PrefillMode, zip_rows};
-use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows};
+use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows, mlp_norm_row};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::lane::LaneGemm;
-use crate::ops::norms::rms_norm_weighted;
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
 
@@ -131,7 +130,7 @@ fn mimo_layer_prefill(
         mode,
         (&mut s.norm[..t_len * dm], dm),
         (&temporal[..t_len * dm], dm),
-        |d, x| row_norm(d, x, &lw.norm_weight, cfg.rms_norm_eps),
+        |d, x| block_norm_row(d, x, (&lw.norm_weight, &lw.norm_bias), cfg.rms_norm_eps),
     );
     store(s.dtype, &mut s.norm[..t_len * dm]);
     s.gemm.forward(
@@ -318,7 +317,7 @@ pub fn forward_mamba3_mimo_backbone_prefill_mode(
                 gemm_for(mode),
                 |dst, src| {
                     zip_rows(mode, (dst, dm), (src, dm), |d, x| {
-                        rms_norm_weighted(d, x, &mlp.norm_weight, eps);
+                        mlp_norm_row(d, x, mlp, eps);
                     });
                 },
             );
@@ -327,6 +326,6 @@ pub fn forward_mamba3_mimo_backbone_prefill_mode(
     let norm = &mut scratch.norm[..seq_len * dm];
     norm.copy_from_slice(out);
     zip_rows(mode, (out, dm), (norm, dm), |d, x| {
-        row_norm(d, x, &w.norm_f_weight, cfg.rms_norm_eps);
+        block_norm_row(d, x, (&w.norm_f_weight, &w.norm_f_bias), cfg.rms_norm_eps);
     });
 }

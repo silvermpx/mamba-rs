@@ -20,10 +20,12 @@ use super::backward::GpuMambaTargetScratch;
 use super::mixer_norms::launch_bcdt_norm;
 use super::weights::{GpuMambaTrainLayerWeights, GpuMambaTrainWeights};
 use crate::gpu::blas::gpu_gemm_bi_forward_raw;
+use crate::gpu::block_norm;
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
+use crate::gpu::dtype::WeightDtype;
 use crate::gpu::launch::{
-    grid_1d_cover, grid_1d_wide, grid_norm, grid_parallel_scan, scan_fwd_index_width,
+    grid_1d_cover, grid_1d_wide, grid_parallel_scan, scan_fwd_index_width,
     scan_fwd_nosave_index_width, seq_scan_index_width, y_runs, yz_runs,
 };
 use cudarc::driver::PushKernelArg;
@@ -76,9 +78,11 @@ pub struct GpuMambaDims {
     /// d_state, Auto as [`crate::config::ScanMode::use_parallel`] resolves
     /// it.
     pub scan_mode: crate::config::ScanMode,
-    /// RMSNorm epsilon (layer norms + norm_f). 1e-5 unless the checkpoint
-    /// specifies otherwise (FalconMamba: 1e-6).
+    /// Epsilon of the block norms (layer norms + norm_f). 1e-5 unless the
+    /// checkpoint specifies otherwise (FalconMamba: 1e-6).
     pub rms_norm_eps: f32,
+    /// The kind of the block norms (see [`crate::MambaConfig::block_norm`]).
+    pub block_norm: crate::config::BlockNorm,
     /// FalconMamba's dt, B and C norm epsilon, `None` for Mamba-1 (see
     /// [`crate::MambaConfig::bcdt_rms_eps`]).
     pub bcdt_rms_eps: Option<f32>,
@@ -144,10 +148,11 @@ impl GpuMambaDims {
 /// All tensors indexed as `[B * T * dim]` unless noted.
 /// Needed by the backward pass to compute gradients.
 pub struct GpuMambaLayerActs {
-    // -- F1: RmsNorm --
+    // -- F1: the block norm --
     /// Pre-norm input saved for residual add `[B*T*d_model]`.
     pub residual: GpuBuffer,
-    /// RMS scalar per (b,t) pair `[B*T]`.
+    /// The block norm's statistics per (b,t) pair, `BlockNorm::stats_per_row`
+    /// each `[B*T*stats]`.
     pub rms_vals: GpuBuffer,
     /// Post-norm output `[B*T*d_model]`.
     pub post_norm: GpuBuffer,
@@ -198,7 +203,7 @@ pub struct GpuMambaBackboneActs {
     pub layers: Vec<GpuMambaLayerActs>,
     /// Saved pre-norm_f input for backward: `[B*T*d_model]`.
     pub norm_f_input: GpuBuffer,
-    /// Saved RMS values per sample for norm_f backward: `[B*T]`.
+    /// Saved norm_f statistics per sample for its backward: `[B*T*stats]`.
     pub norm_f_rms: GpuBuffer,
     /// The gated MLP's saves, for a model with one (see [`Self::with_mlp`]).
     pub mlp: Option<super::mlp::GpuMambaMlpBufs>,
@@ -218,7 +223,7 @@ impl GpuMambaBackboneActs {
                 super::mlp::GpuMambaMlpBufs::new(
                     stream,
                     (dims.bt(), dims.d_model, dims.n_layers),
-                    hidden,
+                    (hidden, dims.block_norm),
                 )
             })
             .transpose()?;
@@ -241,13 +246,14 @@ impl GpuMambaBackboneActs {
         let mamba_input_dim = dims.mamba_input_dim;
         let bt = batch * seq_len;
         let xdbl_dim = dt_rank + 2 * d_state;
+        let stats = bt * dims.block_norm.stats_per_row();
 
         let layers = (0..n_layers)
             .map(|_| {
                 Ok(GpuMambaLayerActs {
-                    // F1: RmsNorm
+                    // F1: the block norm
                     residual: GpuBuffer::zeros(stream, bt * d_model)?,
-                    rms_vals: GpuBuffer::zeros(stream, bt)?,
+                    rms_vals: GpuBuffer::zeros(stream, stats)?,
                     post_norm: GpuBuffer::zeros(stream, bt * d_model)?,
                     // F2: in_proj output
                     proj: GpuBuffer::zeros(stream, bt * 2 * d_inner)?,
@@ -290,7 +296,7 @@ impl GpuMambaBackboneActs {
             input_proj_inputs: GpuBuffer::zeros(stream, bt * mamba_input_dim)?,
             layers,
             norm_f_input: GpuBuffer::zeros(stream, bt * d_model)?,
-            norm_f_rms: GpuBuffer::zeros(stream, bt)?,
+            norm_f_rms: GpuBuffer::zeros(stream, stats)?,
             mlp: None,
         })
     }
@@ -507,31 +513,26 @@ pub fn gpu_forward_mamba_layer(
     let d_conv = dims.d_conv;
 
     // ===================================================================
-    // F1: RmsNorm — compute post_norm from this layer's residual slot
+    // F1: the block norm — compute post_norm from this layer's residual
+    // slot
     // ===================================================================
     // The residual stream value already lives in acts.residual: the
     // PREVIOUS layer's residual_add wrote it there directly (layer 0 is
     // seeded by the driver). The old per-layer temporal→residual D2D
     // copy is gone — same next-layer-residual plumbing the mixed lane
     // ships (forward_mixed.rs).
-
-    // rmsnorm_forward(y, rms_out, x, scale, batch, dim, eps)
-    {
-        let batch_i = bt as i32;
-        let dim_i = dm as i32;
-        let eps: f32 = dims.rms_norm_eps;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
-        builder.arg(acts.post_norm.inner_mut());
-        builder.arg(acts.rms_vals.inner_mut());
-        builder.arg(acts.residual.inner());
-        let nw_ptr = lw.norm_weight.cached_ptr();
-        builder.arg(&nw_ptr);
-        builder.arg(&batch_i);
-        builder.arg(&dim_i);
-        builder.arg(&eps);
-        unsafe { builder.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_fwd mamba: {:?}", e))?;
-    }
+    block_norm::forward(
+        ctx,
+        WeightDtype::F32,
+        (
+            acts.post_norm.cached_ptr(),
+            acts.rms_vals.cached_ptr(),
+            acts.residual.cached_ptr(),
+        ),
+        lw.norm(),
+        (bt, dm, dims.rms_norm_eps),
+        "block norm mamba",
+    )?;
 
     // ===================================================================
     // F2: Batch in_proj -- ONE cuBLAS SGEMM
@@ -958,28 +959,22 @@ pub fn gpu_forward_mamba_backbone(
         // All kernels for this layer have been launched on stream
     }
 
-    // Final RmsNorm (norm_f) after all Mamba layers. The last layer's
+    // The final norm (norm_f) after all Mamba layers. The last layer's
     // residual_add already wrote acts.norm_f_input (the backward's
     // pre-norm save) — no copy needed; the normed output lands in
     // `temporal`, which stays the driver's output buffer.
-    {
-        let bt_i = bt as i32;
-        let dm_i = dims.d_model as i32;
-        let eps: f32 = dims.rms_norm_eps;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
-        builder.arg(temporal.inner_mut()); // normed output
-        builder.arg(acts.norm_f_rms.inner_mut()); // rms scalars (saved for backward)
-        builder.arg(acts.norm_f_input.inner()); // input (saved copy)
-        let nf_ptr = mamba_w.norm_f_weight.cached_ptr();
-        builder.arg(&nf_ptr);
-        builder.arg(&bt_i);
-        builder.arg(&dm_i);
-        builder.arg(&eps);
-        unsafe { builder.launch(grid_norm(bt, dims.d_model)) }
-            .map_err(|e| format!("rmsnorm_fwd norm_f: {:?}", e))?;
-    }
-
-    Ok(())
+    block_norm::forward(
+        ctx,
+        WeightDtype::F32,
+        (
+            temporal.cached_ptr(),
+            acts.norm_f_rms.cached_ptr(),
+            acts.norm_f_input.cached_ptr(),
+        ),
+        mamba_w.norm_f(),
+        (bt, dims.d_model, dims.rms_norm_eps),
+        "norm_f",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,24 +1037,20 @@ pub fn gpu_forward_mamba_target_burnin(
         let ssm_ptr = ssm_base + (layer_idx * ssm_per_layer) as u64 * f32_sz;
         let a_neg_ptr = aneg_base + (layer_idx * a_neg_per_layer) as u64 * f32_sz;
 
-        // === F1: RmsNorm [B*T] ===
+        // === F1: the block norm [B*T] ===
         scratch.residual.copy_from(&scratch.out_flat, &ctx.stream)?;
-        {
-            let bt_i = bt as i32;
-            let dm_i = dm as i32;
-            let eps: f32 = dims.rms_norm_eps;
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
-            builder.arg(scratch.out_flat.inner_mut()); // normed output
-            builder.arg(scratch.rms_discard.inner_mut()); // rms scalars (discarded)
-            builder.arg(scratch.residual.inner()); // input
-            let nw_ptr = lw.norm_weight.cached_ptr();
-            builder.arg(&nw_ptr);
-            builder.arg(&bt_i);
-            builder.arg(&dm_i);
-            builder.arg(&eps);
-            unsafe { builder.launch(grid_norm(bt, dm)) }
-                .map_err(|e| format!("rmsnorm target L{layer_idx}: {:?}", e))?;
-        }
+        block_norm::forward(
+            ctx,
+            WeightDtype::F32,
+            (
+                scratch.out_flat.cached_ptr(),
+                scratch.rms_discard.cached_ptr(),
+                scratch.residual.cached_ptr(),
+            ),
+            lw.norm(),
+            (bt, dm, dims.rms_norm_eps),
+            "block norm target",
+        )?;
 
         // === F2: in_proj SGEMM [B*T, dm] -> [B*T, 2*di] ===
         gpu_gemm_bi_forward_raw(
@@ -1322,25 +1313,21 @@ pub fn gpu_forward_mamba_target_burnin(
         }
     }
 
-    // Final RmsNorm (norm_f) after all Mamba layers — applied to all B*T timesteps
-    {
-        let bt_i = bt as i32;
-        let dm_i = dm as i32;
-        let eps: f32 = dims.rms_norm_eps;
-        // Use residual as temp input buffer, rms_discard for rms scalars
-        scratch.residual.copy_from(&scratch.out_flat, &ctx.stream)?;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
-        builder.arg(scratch.out_flat.inner_mut()); // normed output
-        builder.arg(scratch.rms_discard.inner_mut()); // rms (discarded)
-        builder.arg(scratch.residual.inner()); // input
-        let tnf_ptr = target_w.norm_f_weight.cached_ptr();
-        builder.arg(&tnf_ptr);
-        builder.arg(&bt_i);
-        builder.arg(&dm_i);
-        builder.arg(&eps);
-        unsafe { builder.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_fwd norm_f target: {:?}", e))?;
-    }
+    // The final norm (norm_f) after all Mamba layers — applied to all B*T
+    // timesteps, the residual buffer its input, rms_discard its statistics.
+    scratch.residual.copy_from(&scratch.out_flat, &ctx.stream)?;
+    block_norm::forward(
+        ctx,
+        WeightDtype::F32,
+        (
+            scratch.out_flat.cached_ptr(),
+            scratch.rms_discard.cached_ptr(),
+            scratch.residual.cached_ptr(),
+        ),
+        target_w.norm_f(),
+        (bt, dm, dims.rms_norm_eps),
+        "norm_f target",
+    )?;
 
     // Extract last timestep: out_flat[b*(T-1)+..] → target_temporal[b*dm]
     {

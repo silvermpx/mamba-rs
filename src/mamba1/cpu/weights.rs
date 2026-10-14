@@ -13,8 +13,10 @@ use crate::ops::dims::MambaDims;
 /// into a separate instance with the same layout.
 #[derive(Clone)]
 pub struct TrainMambaLayerWeights {
-    /// RMSNorm scale `[d_model]`.
+    /// The block norm's scale `[d_model]`.
     pub norm_weight: Vec<f32>,
+    /// The block LayerNorm's bias `[d_model]`, empty for RMSNorm.
+    pub norm_bias: Vec<f32>,
     /// Input projection `[d_model, 2 * d_inner]`.
     pub in_proj_w: Vec<f32>,
     /// Input projection bias `[2 * d_inner]`, empty without projection
@@ -50,8 +52,10 @@ pub struct TrainMambaWeights {
     pub input_proj_b: Vec<f32>,
     /// Per-layer weights (one per Mamba layer).
     pub layers: Vec<TrainMambaLayerWeights>,
-    /// Final RMSNorm scale `[d_model]`.
+    /// The final norm's scale `[d_model]`.
     pub norm_f_weight: Vec<f32>,
+    /// The final LayerNorm's bias `[d_model]`, empty for RMSNorm.
+    pub norm_f_bias: Vec<f32>,
     /// The gated MLP of each layer, after its mixer; empty for a model
     /// without one.
     pub mlp: Vec<GatedMlpLayerWeights>,
@@ -86,6 +90,7 @@ impl TrainMambaWeights {
         let dr = dims.dt_rank;
         let xdbl = dims.xdbl_dim;
         let mid = dims.mamba_input_dim;
+        let nb = dims.block_norm.bias_len(dm);
 
         Self {
             input_proj_w: vec![0.0; mid * dm],
@@ -93,6 +98,7 @@ impl TrainMambaWeights {
             layers: (0..dims.n_layers)
                 .map(|_| TrainMambaLayerWeights {
                     norm_weight: vec![0.0; dm],
+                    norm_bias: vec![0.0; nb],
                     in_proj_w: vec![0.0; dm * 2 * di],
                     in_proj_b: vec![0.0; if dims.proj_bias { 2 * di } else { 0 }],
                     conv1d_weight: vec![0.0; di * dc],
@@ -107,10 +113,12 @@ impl TrainMambaWeights {
                 })
                 .collect(),
             norm_f_weight: vec![0.0; dm],
+            norm_f_bias: vec![0.0; nb],
             mlp: (0..dims.n_layers)
                 .filter(|_| dims.mlp_hidden > 0)
                 .map(|_| GatedMlpLayerWeights {
                     norm_weight: vec![0.0; dm],
+                    norm_bias: vec![0.0; nb],
                     fc1_w: vec![0.0; dm * 2 * dims.mlp_hidden],
                     fc2_w: vec![0.0; dims.mlp_hidden * dm],
                 })
@@ -124,6 +132,7 @@ impl TrainMambaWeights {
         self.input_proj_b.fill(0.0);
         for l in &mut self.layers {
             l.norm_weight.fill(0.0);
+            l.norm_bias.fill(0.0);
             l.in_proj_w.fill(0.0);
             l.in_proj_b.fill(0.0);
             l.conv1d_weight.fill(0.0);
@@ -137,8 +146,10 @@ impl TrainMambaWeights {
             l.out_proj_b.fill(0.0);
         }
         self.norm_f_weight.fill(0.0);
+        self.norm_f_bias.fill(0.0);
         for m in &mut self.mlp {
             m.norm_weight.fill(0.0);
+            m.norm_bias.fill(0.0);
             m.fc1_w.fill(0.0);
             m.fc2_w.fill(0.0);
         }
@@ -150,6 +161,7 @@ impl TrainMambaWeights {
         add_vecs(&mut self.input_proj_b, &other.input_proj_b);
         for (sl, ol) in self.layers.iter_mut().zip(other.layers.iter()) {
             add_vecs(&mut sl.norm_weight, &ol.norm_weight);
+            add_vecs(&mut sl.norm_bias, &ol.norm_bias);
             add_vecs(&mut sl.in_proj_w, &ol.in_proj_w);
             add_vecs(&mut sl.in_proj_b, &ol.in_proj_b);
             add_vecs(&mut sl.conv1d_weight, &ol.conv1d_weight);
@@ -163,8 +175,10 @@ impl TrainMambaWeights {
             add_vecs(&mut sl.out_proj_b, &ol.out_proj_b);
         }
         add_vecs(&mut self.norm_f_weight, &other.norm_f_weight);
+        add_vecs(&mut self.norm_f_bias, &other.norm_f_bias);
         for (sm, om) in self.mlp.iter_mut().zip(&other.mlp) {
             add_vecs(&mut sm.norm_weight, &om.norm_weight);
+            add_vecs(&mut sm.norm_bias, &om.norm_bias);
             add_vecs(&mut sm.fc1_w, &om.fc1_w);
             add_vecs(&mut sm.fc2_w, &om.fc2_w);
         }

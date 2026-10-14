@@ -50,15 +50,14 @@ use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_bi_backward_grad_raw,
     gpu_gemm_ex_backward_dx_typed, gpu_gemm_f32_forward_ptrs,
 };
+use crate::gpu::block_norm::{self, NormParams};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
 use crate::gpu::context::{GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
 use crate::gpu::kernel_identity::PreparedGemmCaptureManifest;
-use crate::gpu::launch::{
-    grid_1d, grid_1d_cover, grid_colsum, grid_norm, launch_cast, y_runs, yz_runs,
-};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_colsum, launch_cast, y_runs, yz_runs};
 use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -76,6 +75,7 @@ struct Span {
 #[derive(Clone, Copy, Debug, Default)]
 struct LayerSpans {
     norm_weight: Span,
+    norm_bias: Span,
     in_proj_w: Span,
     in_proj_b: Span,
     conv_w: Span,
@@ -92,6 +92,7 @@ struct LayerSpans {
 #[derive(Clone, Copy, Debug, Default)]
 struct MlpSpans {
     norm_weight: Span,
+    norm_bias: Span,
     fc1_w: Span,
     fc2_w: Span,
 }
@@ -106,6 +107,7 @@ struct Layout {
     layers: Vec<LayerSpans>,
     mlp: Vec<MlpSpans>,
     norm_f_weight: Span,
+    norm_f_bias: Span,
     total: usize,
 }
 
@@ -124,6 +126,7 @@ impl Layout {
             .iter()
             .map(|lw| LayerSpans {
                 norm_weight: take(lw.norm_weight.len()),
+                norm_bias: take(lw.norm_bias.len()),
                 in_proj_w: take(lw.in_proj_w.len()),
                 in_proj_b: take(lw.in_proj_b.len()),
                 conv_w: take(lw.conv_w.len()),
@@ -141,17 +144,20 @@ impl Layout {
             .iter()
             .map(|m| MlpSpans {
                 norm_weight: take(m.norm_weight.len()),
+                norm_bias: take(m.norm_bias.len()),
                 fc1_w: take(m.fc1_w.len()),
                 fc2_w: take(m.fc2_w.len()),
             })
             .collect();
         let norm_f_weight = take(w.norm_f_weight.len());
+        let norm_f_bias = take(w.norm_f_bias.len());
         Self {
             input_proj_w,
             input_proj_b,
             layers,
             mlp,
             norm_f_weight,
+            norm_f_bias,
             total: at,
         }
     }
@@ -167,6 +173,7 @@ impl Layout {
         for (lw, ls) in w.layers.iter().zip(&self.layers) {
             out.extend([
                 (lw.norm_weight.as_slice(), ls.norm_weight, false),
+                (lw.norm_bias.as_slice(), ls.norm_bias, false),
                 (lw.in_proj_w.as_slice(), ls.in_proj_w, true),
                 (lw.in_proj_b.as_slice(), ls.in_proj_b, false),
                 (lw.conv_w.as_slice(), ls.conv_w, true),
@@ -182,11 +189,13 @@ impl Layout {
         for (m, ms) in w.mlp.iter().zip(&self.mlp) {
             out.extend([
                 (m.norm_weight.as_slice(), ms.norm_weight, false),
+                (m.norm_bias.as_slice(), ms.norm_bias, false),
                 (m.fc1_w.as_slice(), ms.fc1_w, true),
                 (m.fc2_w.as_slice(), ms.fc2_w, true),
             ]);
         }
         out.push((w.norm_f_weight.as_slice(), self.norm_f_weight, false));
+        out.push((w.norm_f_bias.as_slice(), self.norm_f_bias, false));
         out
     }
 
@@ -209,6 +218,7 @@ impl Layout {
         for (lw, ls) in w.layers.iter_mut().zip(&self.layers) {
             let Mamba2LayerWeights {
                 norm_weight,
+                norm_bias,
                 in_proj_w,
                 in_proj_b,
                 conv_w,
@@ -221,6 +231,7 @@ impl Layout {
                 out_proj_b,
             } = lw;
             read(norm_weight, ls.norm_weight);
+            read(norm_bias, ls.norm_bias);
             read(in_proj_w, ls.in_proj_w);
             read(in_proj_b, ls.in_proj_b);
             read(conv_w, ls.conv_w);
@@ -234,10 +245,12 @@ impl Layout {
         }
         for (m, ms) in w.mlp.iter_mut().zip(&self.mlp) {
             read(&mut m.norm_weight, ms.norm_weight);
+            read(&mut m.norm_bias, ms.norm_bias);
             read(&mut m.fc1_w, ms.fc1_w);
             read(&mut m.fc2_w, ms.fc2_w);
         }
         read(&mut w.norm_f_weight, self.norm_f_weight);
+        read(&mut w.norm_f_bias, self.norm_f_bias);
         w
     }
 }
@@ -570,6 +583,9 @@ impl Mamba2GpuTrainer {
         );
         let (nh, hd, ds) = (c.nheads(), c.headdim, c.d_state);
         let hidden = c.mlp_hidden();
+        // Each block norm keeps one statistic per row for RMSNorm, two for
+        // LayerNorm.
+        let stats = c.block_norm.stats_per_row();
         let per_chunk = batch * nc * nh;
         let nseg = seq_len.div_ceil(stride);
         // The chunked path's per-chunk buffers, or the sequential path's
@@ -599,7 +615,7 @@ impl Mamba2GpuTrainer {
             .map(|l| -> Result<LayerActs, String> {
                 Ok(LayerActs {
                     x_in: z(rows * dm)?,
-                    rms: z(rows)?,
+                    rms: z(rows * stats)?,
                     post: typed(rows * dm)?,
                     proj: typed(rows * ip)?,
                     xbc: typed(rows * cd)?,
@@ -614,7 +630,7 @@ impl Mamba2GpuTrainer {
                     mlp: if l < w.mlp.len() {
                         Some(MlpActs {
                             x_in: z(rows * dm)?,
-                            rms: z(rows)?,
+                            rms: z(rows * stats)?,
                             post: typed(rows * dm)?,
                             up: typed(rows * 2 * hidden)?,
                             act: typed(rows * hidden)?,
@@ -716,7 +732,7 @@ impl Mamba2GpuTrainer {
             input: z(rows * input_dim)?,
             temporal: z(rows * dm)?,
             final_in: z(rows * dm)?,
-            final_rms: z(rows)?,
+            final_rms: z(rows * stats)?,
             final_out: z(rows * dm)?,
             conv_next: z(batch * cd * c.d_conv)?,
             out_rows: typed(rows * dm)?,
@@ -1447,7 +1463,10 @@ impl Mamba2GpuTrainer {
     fn layer_ptrs(&self, l: usize) -> Result<LayerPtrs, String> {
         let (base, ls) = (self.master.cached_ptr(), &self.layout.layers[l]);
         Ok(LayerPtrs {
-            norm_w: at(base, ls.norm_weight),
+            norm: NormParams {
+                w: at(base, ls.norm_weight),
+                b: opt_at(base, ls.norm_bias).unwrap_or(0),
+            },
             in_w: self.gemm_weight(ls.in_proj_w)?,
             in_b: opt_at(base, ls.in_proj_b),
             conv_w: at(base, ls.conv_w),
@@ -1467,8 +1486,12 @@ impl Mamba2GpuTrainer {
         let Some(ms) = self.layout.mlp.get(l) else {
             return Ok(None);
         };
+        let base = self.master.cached_ptr();
         Ok(Some(MlpPtrs {
-            norm_w: at(self.master.cached_ptr(), ms.norm_weight),
+            norm: NormParams {
+                w: at(base, ms.norm_weight),
+                b: opt_at(base, ms.norm_bias).unwrap_or(0),
+            },
             fc1_w: self.gemm_weight(ms.fc1_w)?,
             fc2_w: self.gemm_weight(ms.fc2_w)?,
             hidden: ms.fc2_w.len / self.cfg.d_model,
@@ -1646,13 +1669,13 @@ impl Mamba2GpuTrainer {
             rows * dm,
             "final rows",
         )?;
-        x.rmsnorm(
+        x.block_norm(
             (
                 self.final_out.cached_ptr(),
                 temporal,
-                at(base, self.layout.norm_f_weight),
                 self.final_rms.cached_ptr(),
             ),
+            self.norm_f_params(base),
             (rows, false),
         )
     }
@@ -1665,39 +1688,36 @@ impl Mamba2GpuTrainer {
         (span.len > 0).then(|| self.grad(span))
     }
 
-    /// RMSNorm backward of `rows` rows: `dx` = the input gradient, the
-    /// scale's gradient accumulated into `g_scale`; `dy` is in the half
-    /// type when `typed_dy`, else f32.
-    fn rms_backward(
+    /// The final norm's parameters in the master at `base`.
+    fn norm_f_params(&self, base: u64) -> NormParams {
+        NormParams {
+            w: at(base, self.layout.norm_f_weight),
+            b: opt_at(base, self.layout.norm_f_bias).unwrap_or(0),
+        }
+    }
+
+    /// A block norm's backward over `rows` rows: `dx` = the input gradient,
+    /// the scale's gradient accumulated into `g_scale` and a LayerNorm's
+    /// bias gradient into `g_bias`; `dy` is in the half type when
+    /// `typed_dy`, else f32.
+    fn norm_backward(
         &self,
-        (dx, dy, x, scale, rms): (u64, u64, u64, u64, u64),
-        (g_scale, typed_dy): (u64, bool),
-        rows: usize,
+        (dx, dy, x, stats): (u64, u64, u64, u64),
+        (norm, g_scale, g_bias): (NormParams, u64, u64),
+        (rows, typed_dy): (usize, bool),
     ) -> Result<(), String> {
         let dm = self.cfg.d_model;
-        let (rows_i, dm_i) = (rows as i32, dm as i32);
         let axis0 = self.bwd.axis0.cached_ptr();
-        let stream = &self.ctx.stream;
-        let zero: i32 = 0;
-        let null: u64 = 0;
-        let kernel = if typed_dy {
-            self.ctx.kernels.rmsnorm_bwd_f32in_typed.get(self.act)
-        } else {
-            &self.ctx.kernels.rmsnorm_bwd
-        };
-        let mut bld = stream.launch_builder(kernel);
-        bld.arg(&dx);
-        bld.arg(&axis0);
-        bld.arg(&dy);
-        bld.arg(&x);
-        bld.arg(&scale);
-        bld.arg(&rms);
-        bld.arg(&rows_i);
-        bld.arg(&dm_i);
-        bld.arg(&zero);
-        bld.arg(&null);
-        unsafe { bld.launch(grid_norm(rows, dm)) }
-            .map_err(|e| format!("Mamba-2 rmsnorm backward: {e:?}"))?;
+        let dy_dtype = if typed_dy { self.act } else { WeightDtype::F32 };
+        block_norm::backward(
+            &self.ctx,
+            dy_dtype,
+            (dx, axis0, dy, x, stats),
+            (norm, g_bias),
+            (rows, dm),
+            (false, 0),
+            "Mamba-2 block norm backward",
+        )?;
         self.reduce_axis0(g_scale, axis0, (rows, dm))
     }
 
@@ -1860,16 +1880,19 @@ impl Mamba2GpuTrainer {
         }
         let base = self.master.cached_ptr();
         let g_base = self.grads.cached_ptr();
-        self.rms_backward(
+        self.norm_backward(
             (
                 self.bwd.d_temp.cached_ptr(),
                 self.bwd.d_rows.cached_ptr(),
                 self.final_in.cached_ptr(),
-                at(base, self.layout.norm_f_weight),
                 self.final_rms.cached_ptr(),
             ),
-            (at(g_base, self.layout.norm_f_weight), false),
-            rows,
+            (
+                self.norm_f_params(base),
+                at(g_base, self.layout.norm_f_weight),
+                opt_at(g_base, self.layout.norm_f_bias).unwrap_or(0),
+            ),
+            (rows, false),
         )?;
         for l in (0..c.n_layers).rev() {
             if self.acts[l].mlp.is_some() {
@@ -2620,16 +2643,19 @@ impl Mamba2GpuTrainer {
             }
         }
         let a = &self.acts[l];
-        self.rms_backward(
+        self.norm_backward(
             (
                 self.bwd.d_pre.cached_ptr(),
                 self.bwd.d_post.ptr(),
                 a.x_in.cached_ptr(),
-                lp.norm_w,
                 a.rms.cached_ptr(),
             ),
-            (at(g_base, ls.norm_weight), act != WeightDtype::F32),
-            rows,
+            (
+                lp.norm,
+                at(g_base, ls.norm_weight),
+                opt_at(g_base, ls.norm_bias).unwrap_or(0),
+            ),
+            (rows, act != WeightDtype::F32),
         )?;
         self.add_residual_grad(rows, l)
     }
@@ -2751,16 +2777,22 @@ impl Mamba2GpuTrainer {
             )?;
         }
         let m = self.acts[l].mlp.as_ref().ok_or(no_mlp)?;
-        self.rms_backward(
+        self.norm_backward(
             (
                 self.bwd.d_pre.cached_ptr(),
                 self.bwd.d_post.ptr(),
                 m.x_in.cached_ptr(),
-                at(base, ms.norm_weight),
                 m.rms.cached_ptr(),
             ),
-            (at(g_base, ms.norm_weight), act != WeightDtype::F32),
-            rows,
+            (
+                NormParams {
+                    w: at(base, ms.norm_weight),
+                    b: opt_at(base, ms.norm_bias).unwrap_or(0),
+                },
+                at(g_base, ms.norm_weight),
+                opt_at(g_base, ms.norm_bias).unwrap_or(0),
+            ),
+            (rows, act != WeightDtype::F32),
         )?;
         self.add_residual_grad(rows, l)
     }

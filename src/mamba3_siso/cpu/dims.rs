@@ -30,6 +30,8 @@ pub struct Mamba3Dims {
     /// Epsilon of the mixer's B/C norms and output-gate norm
     /// (`Mamba3Config::ssm_norm_eps`).
     pub ssm_norm_eps: f32,
+    /// The kind of the block norms (`Mamba3Config::block_norm`).
+    pub block_norm: crate::config::BlockNorm,
 }
 
 impl Mamba3Dims {
@@ -51,6 +53,7 @@ impl Mamba3Dims {
             is_outproj_norm: config.is_outproj_norm,
             rms_norm_eps: config.rms_norm_eps,
             ssm_norm_eps: config.ssm_norm_eps,
+            block_norm: config.block_norm,
         }
     }
 

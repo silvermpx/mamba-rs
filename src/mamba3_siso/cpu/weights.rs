@@ -9,6 +9,7 @@ use super::dims::Mamba3Dims;
 #[derive(Clone)]
 pub struct TrainMamba3LayerWeights {
     pub norm_weight: Vec<f32>,      // [d_model]
+    pub norm_bias: Vec<f32>,        // [d_model] for LayerNorm, empty for RMSNorm
     pub in_proj_w: Vec<f32>,        // [d_model * in_proj_dim]
     pub dt_bias: Vec<f32>,          // [nheads]
     pub b_norm_weight: Vec<f32>,    // [d_state]
@@ -29,6 +30,7 @@ impl TrainMamba3LayerWeights {
         let ip = dims.in_proj_dim;
         Self {
             norm_weight: vec![0.0; dm],
+            norm_bias: vec![0.0; dims.block_norm.bias_len(dm)],
             in_proj_w: vec![0.0; dm * ip],
             dt_bias: vec![0.0; nh],
             b_norm_weight: vec![0.0; ds],
@@ -44,6 +46,7 @@ impl TrainMamba3LayerWeights {
     /// Zero all gradient accumulators.
     pub fn zero(&mut self) {
         self.norm_weight.fill(0.0);
+        self.norm_bias.fill(0.0);
         self.in_proj_w.fill(0.0);
         self.dt_bias.fill(0.0);
         self.b_norm_weight.fill(0.0);
@@ -58,6 +61,9 @@ impl TrainMamba3LayerWeights {
     /// Accumulate gradients from another set.
     pub fn add_inplace(&mut self, other: &Self) {
         for (a, &b) in self.norm_weight.iter_mut().zip(&other.norm_weight) {
+            *a += b;
+        }
+        for (a, &b) in self.norm_bias.iter_mut().zip(&other.norm_bias) {
             *a += b;
         }
         for (a, &b) in self.in_proj_w.iter_mut().zip(&other.in_proj_w) {
@@ -97,6 +103,7 @@ impl TrainMamba3LayerWeights {
     pub fn sum_sq(&self) -> f64 {
         let s = |v: &[f32]| v.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>();
         s(&self.norm_weight)
+            + s(&self.norm_bias)
             + s(&self.in_proj_w)
             + s(&self.dt_bias)
             + s(&self.b_norm_weight)
@@ -116,6 +123,7 @@ pub struct TrainMamba3Weights {
     pub input_proj_b: Vec<f32>, // [d_model]
     pub layers: Vec<TrainMamba3LayerWeights>,
     pub norm_f_weight: Vec<f32>, // [d_model]
+    pub norm_f_bias: Vec<f32>,   // [d_model] for LayerNorm, empty for RMSNorm
 }
 
 impl TrainMamba3Weights {
@@ -127,6 +135,7 @@ impl TrainMamba3Weights {
                 .map(|_| TrainMamba3LayerWeights::zeros(dims))
                 .collect(),
             norm_f_weight: vec![0.0; dims.d_model],
+            norm_f_bias: vec![0.0; dims.block_norm.bias_len(dims.d_model)],
         }
     }
 
@@ -137,6 +146,7 @@ impl TrainMamba3Weights {
             l.zero();
         }
         self.norm_f_weight.fill(0.0);
+        self.norm_f_bias.fill(0.0);
     }
 
     pub fn add_inplace(&mut self, other: &Self) {
@@ -150,6 +160,9 @@ impl TrainMamba3Weights {
             l.add_inplace(o);
         }
         for (a, &b) in self.norm_f_weight.iter_mut().zip(&other.norm_f_weight) {
+            *a += b;
+        }
+        for (a, &b) in self.norm_f_bias.iter_mut().zip(&other.norm_f_bias) {
             *a += b;
         }
     }

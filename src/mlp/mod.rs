@@ -10,6 +10,8 @@
 
 pub mod cpu;
 
+use crate::config::BlockNorm;
+
 /// The rounding the reference applies to the configured hidden width.
 pub const HIDDEN_MULTIPLE: usize = 128;
 
@@ -23,8 +25,10 @@ pub fn mlp_hidden(d_intermediate: usize) -> usize {
 /// projection here uses.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GatedMlpLayerWeights {
-    /// The pre-MLP RMSNorm scale (`norm2`): `[d_model]`.
+    /// The pre-MLP norm's scale (`norm2`): `[d_model]`.
     pub norm_weight: Vec<f32>,
+    /// The pre-MLP LayerNorm's bias: `[d_model]`, empty for RMSNorm.
+    pub norm_bias: Vec<f32>,
     /// The up projection `[d_model, 2 * hidden]`: value columns first,
     /// then gate columns.
     pub fc1_w: Vec<f32>,
@@ -33,10 +37,12 @@ pub struct GatedMlpLayerWeights {
 }
 
 impl GatedMlpLayerWeights {
-    /// Zeroed projections and a unit norm for a `d_model` by `hidden` MLP.
-    pub fn zeros(d_model: usize, hidden: usize) -> Self {
+    /// Zeroed projections and a unit norm of kind `norm` for a `d_model`
+    /// by `hidden` MLP.
+    pub fn zeros(d_model: usize, hidden: usize, norm: BlockNorm) -> Self {
         Self {
             norm_weight: vec![1.0; d_model],
+            norm_bias: vec![0.0; norm.bias_len(d_model)],
             fc1_w: vec![0.0; d_model * 2 * hidden],
             fc2_w: vec![0.0; hidden * d_model],
         }
@@ -51,10 +57,18 @@ impl GatedMlpLayerWeights {
         }
     }
 
-    /// Check the tensor sizes against a `d_model` by `hidden` MLP.
-    pub fn validate(&self, d_model: usize, hidden: usize, label: &str) -> Result<(), String> {
+    /// Check the tensor sizes against a `d_model` by `hidden` MLP with a
+    /// norm of kind `norm`.
+    pub fn validate(
+        &self,
+        d_model: usize,
+        hidden: usize,
+        norm: BlockNorm,
+        label: &str,
+    ) -> Result<(), String> {
         for (name, actual, expected) in [
             ("norm2", self.norm_weight.len(), d_model),
+            ("norm2 bias", self.norm_bias.len(), norm.bias_len(d_model)),
             ("fc1", self.fc1_w.len(), d_model * 2 * hidden),
             ("fc2", self.fc2_w.len(), hidden * d_model),
         ] {

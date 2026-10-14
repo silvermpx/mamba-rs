@@ -22,13 +22,17 @@ use std::sync::Arc;
 use cudarc::driver::PushKernelArg;
 
 use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
+use crate::gpu::block_norm;
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, grid_norm, launch_cast, y_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, launch_cast, y_runs};
 use crate::mamba1::gpu::forward::{GpuMambaDims, GpuRecurrentState};
 use crate::mamba1::gpu::mixer_norms::launch_bcdt_norm;
-use crate::mamba1::gpu::weights::{GpuMambaMixedWeights, MambaLayerWeightsView, MambaWeightsView};
+use crate::mamba1::gpu::weights::{
+    GpuMambaMixedWeights, MambaLayerWeightsView, MambaWeightsView, final_norm_params,
+    layer_norm_params,
+};
 use crate::mamba1::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 
 /// Mixed-precision saved activations for one Mamba layer.
@@ -99,7 +103,7 @@ impl GpuMambaBackboneMixedActs {
                 super::mlp::GpuMambaMlpMixedBufs::new(
                     stream,
                     (dims.bt(), dims.d_model, dims.n_layers),
-                    hidden,
+                    (hidden, dims.block_norm),
                     dtype,
                 )
             })
@@ -127,13 +131,14 @@ impl GpuMambaBackboneMixedActs {
         let mamba_input_dim = dims.mamba_input_dim;
         let bt = batch * seq_len;
         let xdbl_dim = dt_rank + 2 * d_state;
+        let stats = bt * dims.block_norm.stats_per_row();
 
         let layers = (0..n_layers)
             .map(|_| {
                 Ok(GpuMambaLayerMixedActs {
                     // f32 — recurrent / reduction
                     residual: GpuBuffer::zeros(stream, bt * d_model)?,
-                    rms_vals: GpuBuffer::zeros(stream, bt)?,
+                    rms_vals: GpuBuffer::zeros(stream, stats)?,
                     conv_states: GpuBuffer::zeros(stream, batch * d_inner * d_conv)?,
                     h_saved: GpuBuffer::zeros(
                         stream,
@@ -171,7 +176,7 @@ impl GpuMambaBackboneMixedActs {
             input_proj_outputs: DtypedBuf::zeros(stream, bt * d_model, dtype)?,
             layers,
             norm_f_input: GpuBuffer::zeros(stream, bt * d_model)?,
-            norm_f_rms: GpuBuffer::zeros(stream, bt)?,
+            norm_f_rms: GpuBuffer::zeros(stream, stats)?,
             dtype,
             mlp: None,
         };
@@ -519,27 +524,20 @@ pub fn gpu_forward_mamba_backbone_mixed(
         let lw = &mamba_w.layers[layer_idx];
         let layer_acts = &mut acts.layers[layer_idx];
 
-        // F1: rmsnorm_fwd_f32in_typed — read f32 residual, write typed post_norm.
-        // Side effect: rms_vals_f32 saved for backward.
-        {
-            let bt_i = bt as i32;
-            let dm_i = dm as i32;
-            let eps: f32 = dims.rms_norm_eps;
-            let mut bld = ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
-            let pn_ptr = layer_acts.post_norm.cached_ptr();
-            let rms_ptr = layer_acts.rms_vals.cached_ptr();
-            let res_ptr = layer_acts.residual.cached_ptr();
-            bld.arg(&pn_ptr);
-            bld.arg(&rms_ptr);
-            bld.arg(&res_ptr);
-            let nw = lw.norm_weight.ptr();
-            bld.arg(&nw);
-            bld.arg(&bt_i);
-            bld.arg(&dm_i);
-            bld.arg(&eps);
-            unsafe { bld.launch(grid_norm(bt, dm)) }
-                .map_err(|e| format!("rmsnorm_f32in_typed L{layer_idx}: {e:?}"))?;
-        }
+        // F1: the block norm — read f32 residual, write typed post_norm.
+        // Side effect: its f32 statistics saved for backward.
+        block_norm::forward(
+            ctx,
+            dt,
+            (
+                layer_acts.post_norm.cached_ptr(),
+                layer_acts.rms_vals.cached_ptr(),
+                layer_acts.residual.cached_ptr(),
+            ),
+            layer_norm_params(lw),
+            (bt, dm, dims.rms_norm_eps),
+            "block norm mixed",
+        )?;
 
         // F2: in_proj GEMM typed — [B*T, dm] -> [B*T, 2*di], saved whole;
         // the conv and the gating read their halves through the row stride.
@@ -856,28 +854,19 @@ pub fn gpu_forward_mamba_backbone_mixed(
         }
     }
 
-    // ─── Final norm_f: residual_f32 → temporal_typed via rmsnorm_fwd_f32in_typed.
-    {
-        let bt_i = bt as i32;
-        let dm_i = dm as i32;
-        let eps: f32 = dims.rms_norm_eps;
-        let mut bld = ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
-        let tt = scratch.temporal_typed.cached_ptr();
-        let nfr = acts.norm_f_rms.cached_ptr();
-        let nfi = acts.norm_f_input.cached_ptr();
-        bld.arg(&tt);
-        bld.arg(&nfr);
-        bld.arg(&nfi);
-        let nfw = mamba_w.norm_f_weight.ptr();
-        bld.arg(&nfw);
-        bld.arg(&bt_i);
-        bld.arg(&dm_i);
-        bld.arg(&eps);
-        unsafe { bld.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_f32in_typed norm_f: {e:?}"))?;
-    }
-
-    Ok(())
+    // ─── Final norm_f: residual_f32 → temporal_typed.
+    block_norm::forward(
+        ctx,
+        dt,
+        (
+            scratch.temporal_typed.cached_ptr(),
+            acts.norm_f_rms.cached_ptr(),
+            acts.norm_f_input.cached_ptr(),
+        ),
+        final_norm_params(mamba_w),
+        (bt, dm, dims.rms_norm_eps),
+        "norm_f mixed",
+    )
 }
 
 /// Convenience overload: build the bf16 mixed weights from a

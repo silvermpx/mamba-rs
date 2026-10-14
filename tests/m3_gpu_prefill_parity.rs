@@ -55,6 +55,7 @@ fn gpu_dims(cfg: &Mamba3Config, batch: usize, seq_len: usize) -> GpuMamba3Dims {
         is_outproj_norm: cfg.is_outproj_norm,
         rms_norm_eps: cfg.rms_norm_eps,
         ssm_norm_eps: cfg.ssm_norm_eps,
+        block_norm: cfg.block_norm,
         use_parallel_scan: cfg.prefill_use_parallel_scan(),
     }
 }
@@ -82,7 +83,31 @@ fn identity_weights(cfg: &Mamba3Config, seed: u64) -> Mamba3Weights {
     let mut w = Mamba3Weights::init(cfg, cfg.d_model, seed);
     w.input_proj_w.clear();
     w.input_proj_b.clear();
+    draw_norm_biases(&mut w, seed);
     w
+}
+
+/// Draws a LayerNorm model's norm biases, which start at zero, so the bias
+/// add runs too; an RMSNorm model has none.
+fn draw_norm_biases(w: &mut Mamba3Weights, seed: u64) {
+    let biases = w
+        .layers
+        .iter_mut()
+        .map(|lw| &mut lw.norm_bias)
+        .chain(w.mlp.iter_mut().map(|m| &mut m.norm_bias))
+        .chain(std::iter::once(&mut w.norm_f_bias));
+    for (k, b) in biases.enumerate() {
+        let d = det_input(b.len(), seed * 100 + k as u64);
+        b.copy_from_slice(&d);
+    }
+}
+
+/// [`tiny_cfg`] with LayerNorm block norms (`rms_norm = false`).
+fn layer_norm_cfg() -> Mamba3Config {
+    Mamba3Config {
+        block_norm: mamba_rs::BlockNorm::Layer,
+        ..tiny_cfg()
+    }
 }
 
 struct GpuRig {
@@ -236,6 +261,20 @@ fn gpu_prefill_matches_cpu_oracle() {
     }
 }
 
+/// The same contract with LayerNorm block norms and their biases.
+#[test]
+fn gpu_prefill_matches_cpu_oracle_layer_norm() {
+    for scan_mode in SCANS {
+        prefill_matches_cpu_oracle(
+            Mamba3Config {
+                scan_mode,
+                ..layer_norm_cfg()
+            },
+            2e-3,
+        );
+    }
+}
+
 fn prefill_matches_cpu_oracle(cfg: Mamba3Config, rel_tol: f32) {
     let w = identity_weights(&cfg, 7);
     let rig = rig();
@@ -330,15 +369,25 @@ fn split_window_reproduces_full_window(cfg: Mamba3Config) {
 /// same sequence.
 #[test]
 fn gpu_prefill_then_decode_handoff() {
+    prefill_then_decode_handoff(tiny_cfg());
+}
+
+/// The same handoff with LayerNorm block norms and their biases.
+#[test]
+fn gpu_prefill_then_decode_handoff_layer_norm() {
+    prefill_then_decode_handoff(layer_norm_cfg());
+}
+
+fn prefill_then_decode_handoff(cfg: Mamba3Config) {
     use mamba_rs::mamba3_siso::Mamba3StepScratch;
     use mamba_rs::mamba3_siso::cpu::inference::mamba3_step;
     use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuEngine;
 
-    let cfg = tiny_cfg();
     // FULL weights incl a real input projection: the CPU step path has no
     // identity-proj branch (it feeds matvec unconditionally), so the
     // handoff is exercised with the projection live on both sides.
-    let w = Mamba3Weights::init(&cfg, cfg.d_model, 21);
+    let mut w = Mamba3Weights::init(&cfg, cfg.d_model, 21);
+    draw_norm_biases(&mut w, 21);
     let seq_len = 100usize;
     let dm = cfg.d_model;
     let input = det_input((seq_len + 1) * dm, 7);
@@ -359,7 +408,7 @@ fn gpu_prefill_then_decode_handoff() {
 
     // GPU: engine prefill entry, then the ordinary decode step.
     let device = GpuDevice::new(0).expect("cuda device");
-    let engine = Mamba3GpuEngine::new(&device, &w, tiny_cfg(), dm, 1).unwrap();
+    let engine = Mamba3GpuEngine::new(&device, &w, cfg, dm, 1).unwrap();
     let mut state = engine.alloc_state().unwrap();
     let mut scratch = engine.alloc_scratch().unwrap();
     let mut prefill = engine.alloc_prefill(seq_len).unwrap();

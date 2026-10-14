@@ -71,6 +71,7 @@ fn dims_for(cfg: &Mamba3Config, batch: usize, seq_len: usize) -> GpuMamba3Dims {
         a_floor: cfg.a_floor,
         rms_norm_eps: cfg.rms_norm_eps,
         ssm_norm_eps: cfg.ssm_norm_eps,
+        block_norm: cfg.block_norm,
         is_outproj_norm: cfg.is_outproj_norm,
         use_parallel_scan: cfg.train_use_parallel_scan(),
     }
@@ -123,7 +124,19 @@ fn assert_close(label: &str, a: &[f32], b: &[f32], cos_min: f32, norm_tol: f32) 
 /// input_proj for the mixed path (its forward + backward both use the
 /// identity branch via len_elems()==0). All other weights identical.
 fn build_weights(cfg: &Mamba3Config, seed: u64) -> (Mamba3Weights, Mamba3Weights) {
-    let w = Mamba3Weights::init(cfg, cfg.d_model, seed);
+    let mut w = Mamba3Weights::init(cfg, cfg.d_model, seed);
+    // A LayerNorm's biases start at zero; drawn ones put the bias add in
+    // the forward too. An RMSNorm model has none.
+    let biases = w
+        .layers
+        .iter_mut()
+        .map(|lw| &mut lw.norm_bias)
+        .chain(w.mlp.iter_mut().map(|m| &mut m.norm_bias))
+        .chain(std::iter::once(&mut w.norm_f_bias));
+    for (k, b) in biases.enumerate() {
+        let d = det_rand(b.len(), 0x1B + k as u32);
+        b.copy_from_slice(&d);
+    }
     let mut w_f32 = w.clone();
     w_f32.input_proj_w = (0..cfg.d_model * cfg.d_model)
         .map(|i| {
@@ -315,11 +328,14 @@ fn grad_layout(cfg: &Mamba3Config, input_dim: usize) -> Vec<(&'static str, usize
     let ds = cfg.d_state;
     let nh = cfg.nheads();
     let ip = cfg.in_proj_out_dim();
+    // A LayerNorm's bias follows its scale; an RMSNorm has none.
+    let nb = cfg.block_norm.bias_len(dm);
     let mut out = Vec::new();
     out.push(("input_proj_w", input_dim * dm));
     out.push(("input_proj_b", dm));
     for _ in 0..cfg.n_layers {
         out.push(("norm_weight", dm));
+        out.push(("norm_bias", nb));
         out.push(("in_proj_w", dm * ip));
         out.push(("dt_bias", nh));
         out.push(("b_norm_weight", ds));
@@ -331,12 +347,15 @@ fn grad_layout(cfg: &Mamba3Config, input_dim: usize) -> Vec<(&'static str, usize
         out.push(("out_proj_w", di * dm));
     }
     out.push(("norm_f_weight", dm));
+    out.push(("norm_f_bias", nb));
     let h = cfg.mlp_hidden();
     for _ in (0..cfg.n_layers).filter(|_| h > 0) {
         out.push(("mlp.norm_weight", dm));
+        out.push(("mlp.norm_bias", nb));
         out.push(("mlp.fc1_w", dm * 2 * h));
         out.push(("mlp.fc2_w", h * dm));
     }
+    out.retain(|&(_, len)| len > 0);
     out
 }
 
@@ -626,6 +645,23 @@ fn m3_backward_mixed_parity_gated_mlp_bf16() {
 fn m3_backward_mixed_parity_gated_mlp_f16() {
     for mode in [ScanMode::Auto, ScanMode::Sequential] {
         check_cfg(gated_mlp_cfg(mode), WeightDtype::F16, 64);
+    }
+}
+
+/// LayerNorm block norms (`rms_norm = false`) with their biases: the norm
+/// before every mixer and every gated MLP and the final norm, on both
+/// scans, in both half precisions.
+#[test]
+fn m3_backward_mixed_parity_layer_norm() {
+    for (mode, dtype) in [
+        (ScanMode::Auto, WeightDtype::Bf16),
+        (ScanMode::Sequential, WeightDtype::F16),
+    ] {
+        let cfg = Mamba3Config {
+            block_norm: mamba_rs::BlockNorm::Layer,
+            ..gated_mlp_cfg(mode)
+        };
+        check_cfg(cfg, dtype, 64);
     }
 }
 

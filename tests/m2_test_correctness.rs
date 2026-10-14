@@ -43,6 +43,26 @@ fn drawn(cfg: &Mamba2Config, input_dim: usize, seed: u64) -> Mamba2Weights {
         jitter(&mut lw.norm_weight, 3, 1.0, 0.2);
         jitter(&mut lw.in_proj_b, 4, 0.0, 0.1);
         jitter(&mut lw.out_proj_b, 5, 0.0, 0.1);
+        jitter(&mut lw.norm_bias, 6, 0.0, 0.2);
+    }
+    for (l, m) in w.mlp.iter_mut().enumerate() {
+        let s = seed * 100 + l as u64 * 10 + 7;
+        for (k, (v, base)) in [(&mut m.norm_weight, 1.0), (&mut m.norm_bias, 0.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let d = det(v.len(), s + k as u64, 0.2);
+            for (x, dv) in v.iter_mut().zip(d) {
+                *x = base + dv;
+            }
+        }
+    }
+    for (x, dv) in w
+        .norm_f_bias
+        .iter_mut()
+        .zip(det(cfg.d_model, seed + 9, 0.2))
+    {
+        *x = dv;
     }
     w.input_proj_b = det(cfg.d_model, seed + 7, 0.1);
     w
@@ -98,6 +118,14 @@ fn cases() -> Vec<(&'static str, Mamba2Config)> {
             Mamba2Config {
                 headdim: 64,
                 d_state: 128,
+                ..base
+            },
+        ),
+        (
+            "LayerNorm block norms, MLP after",
+            Mamba2Config {
+                block_norm: mamba_rs::BlockNorm::Layer,
+                d_intermediate: 96,
                 ..base
             },
         ),

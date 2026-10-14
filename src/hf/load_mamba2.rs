@@ -17,10 +17,11 @@ use serde_json::Value;
 
 use super::config_json::{config_json, json_f32};
 use super::load_mamba3::{
-    EMBEDDING, bool_or, check_tensors, expect_common, f32_or, field, read_mlp, read_untied_head,
-    transpose, usize_or,
+    EMBEDDING, bool_or, check_tensors, expect_common, f32_or, field, read_mlp, read_norm_bias,
+    read_untied_head, transpose, usize_or,
 };
 use super::source::Source;
+use crate::config::BlockNorm;
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 
@@ -82,10 +83,11 @@ pub fn parse_mamba2_config(json: &[u8]) -> Result<HfMamba2Config, String> {
         .and_then(Value::as_array)
         .is_some_and(|a| !a.is_empty())
     {
-        return Err("config.json: hybrid attention layers are not supported".into());
-    }
-    if !bool_or(&root, "rms_norm", true)? {
-        return Err("config.json: rms_norm = false (LayerNorm) is not supported".into());
+        return Err(
+            "config.json: attention layers (attn_layer_idx) are not loaded: attention stays \
+             outside mamba-rs"
+                .into(),
+        );
     }
     let dt_limit = match field(ssm, "dt_limit") {
         None => (0.0, f32::INFINITY),
@@ -124,6 +126,7 @@ pub fn parse_mamba2_config(json: &[u8]) -> Result<HfMamba2Config, String> {
         dt_limit,
         proj_bias: bool_or(ssm, "bias", false)?,
         conv_bias: bool_or(ssm, "conv_bias", true)?,
+        block_norm: BlockNorm::from_rms_norm(bool_or(&root, "rms_norm", true)?),
         rms_norm_eps: f32_or(&root, "norm_epsilon", 1e-5)?,
         gated_norm_eps: 1e-5,
         scan_mode: crate::config::ScanMode::Auto,
@@ -141,7 +144,8 @@ pub fn parse_mamba2_config(json: &[u8]) -> Result<HfMamba2Config, String> {
 /// The transformers layout's `config.json`. Its `vocab_size` is the
 /// embedding's row count. Two of its fields do not describe the model the
 /// weights run: `rms_norm`, since every transformers Mamba-2 has the
-/// gated norm, and `norm_before_gate`, which transformers never reads (it
+/// gated norm and RMSNorm block norms, and `norm_before_gate`, which
+/// transformers never reads (it
 /// gates before the norm as mamba_ssm does by default; Codestral's config
 /// says `true` of weights that run with the gate first).
 fn parse_transformers_config(root: &Value) -> Result<HfMamba2Config, String> {
@@ -198,6 +202,7 @@ fn parse_transformers_config(root: &Value) -> Result<HfMamba2Config, String> {
         dt_limit,
         proj_bias: bool_or(root, "use_bias", false)?,
         conv_bias: bool_or(root, "use_conv_bias", true)?,
+        block_norm: BlockNorm::Rms,
         rms_norm_eps: eps,
         gated_norm_eps: eps,
         scan_mode: crate::config::ScanMode::Auto,
@@ -235,6 +240,7 @@ pub fn load_hf_mamba2(dir: &Path) -> Result<HfMamba2Model, String> {
         &mut expect,
         (cfg.n_layers, d, hidden, hf.vocab_padded),
         (hf.tie_embeddings, hf.embedding),
+        cfg.block_norm,
     );
     for i in 0..cfg.n_layers {
         let p = |n: &str| format!("backbone.layers.{i}.mixer.{n}");
@@ -272,8 +278,10 @@ pub fn load_hf_mamba2(dir: &Path) -> Result<HfMamba2Model, String> {
         let out_proj_b = opt("mixer.out_proj.bias", cfg.proj_bias)?;
         let conv_b = opt("mixer.conv1d.bias", cfg.conv_bias)?;
         let gate_norm_weight = opt("mixer.norm.weight", cfg.rmsnorm)?;
+        let norm_bias = read_norm_bias(&mut src, &p("norm"), cfg.block_norm)?;
         layers.push(Mamba2LayerWeights {
             norm_weight: src.read(&p("norm.weight"))?,
+            norm_bias,
             in_proj_w: transpose(&src.read(&p("mixer.in_proj.weight"))?, ip, d),
             in_proj_b,
             conv_w: src.read(&p("mixer.conv1d.weight"))?,
@@ -286,7 +294,7 @@ pub fn load_hf_mamba2(dir: &Path) -> Result<HfMamba2Model, String> {
             out_proj_b,
         });
         if hidden > 0 {
-            mlp.push(read_mlp(&mut src, i, d, hidden)?);
+            mlp.push(read_mlp(&mut src, i, (d, hidden), cfg.block_norm)?);
         }
     }
     let weights = Mamba2Weights {
@@ -294,6 +302,7 @@ pub fn load_hf_mamba2(dir: &Path) -> Result<HfMamba2Model, String> {
         input_proj_b: Vec::new(),
         layers,
         norm_f_weight: src.read("backbone.norm_f.weight")?,
+        norm_f_bias: read_norm_bias(&mut src, "backbone.norm_f", cfg.block_norm)?,
         mlp,
     };
     weights.validate(&cfg, d)?;

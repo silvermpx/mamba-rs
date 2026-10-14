@@ -13,7 +13,7 @@ use pulp::{Arch, Simd, WithSimd};
 use super::super::config::Mamba2Config;
 use super::super::state::Mamba2LayerState;
 use super::super::weights::{Mamba2LayerWeights, Mamba2Weights};
-use super::core::{conv_hist_push, conv_silu_token, gate_token, rms_row, ssm_token};
+use super::core::{block_norm_row, conv_hist_push, conv_silu_token, gate_token, ssm_token};
 use crate::mlp::cpu::{GatedMlpPacked, GatedMlpStepScratch, gated_mlp_step, gated_mlp_step_packed};
 use crate::ops::lane::LaneGemm;
 use crate::ops::packed::PackedLinear;
@@ -177,10 +177,10 @@ fn layer_step_body(
     let (d_mlp, d_ssm, cd) = (cfg.d_mlp(), cfg.ssm_dim(), cfg.conv_dim());
     let dtype = scratch.dtype;
     scratch.residual.copy_from_slice(&temporal[..dm]);
-    rms_row(
+    block_norm_row(
         &mut scratch.norm_buf,
         &temporal[..dm],
-        &lw.norm_weight,
+        (&lw.norm_weight, &lw.norm_bias),
         cfg.rms_norm_eps,
     );
     store(dtype, &mut scratch.norm_buf);
@@ -298,10 +298,10 @@ fn backbone_step(
         }
     }
     scratch.norm_buf.copy_from_slice(&temporal[..dm]);
-    rms_row(
+    block_norm_row(
         &mut temporal[..dm],
         &scratch.norm_buf,
-        &weights.norm_f_weight,
+        (&weights.norm_f_weight, &weights.norm_f_bias),
         cfg.rms_norm_eps,
     );
 }

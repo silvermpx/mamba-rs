@@ -71,6 +71,7 @@ fn rig(state_cap: usize) -> Rig {
         d_conv: 4,
         expand: 2,
         scan_mode: ScanMode::Auto,
+        block_norm: mamba_rs::BlockNorm::Rms,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -97,6 +98,7 @@ fn rig(state_cap: usize) -> Rig {
         n_layers: nl,
         scan_mode: cfg.scan_mode,
         rms_norm_eps: cfg.rms_norm_eps,
+        block_norm: cfg.block_norm,
         bcdt_rms_eps: None,
     };
     let device = GpuDevice::new(0).expect("device");

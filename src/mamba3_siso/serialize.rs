@@ -2,7 +2,7 @@
 //!
 //! Tensor naming convention:
 //! - `input_proj.weight`, `input_proj.bias`
-//! - `layers.{i}.norm.weight`
+//! - `layers.{i}.norm.weight`, `layers.{i}.norm.bias` (LayerNorm models)
 //! - `layers.{i}.in_proj.weight`
 //! - `layers.{i}.dt_bias`
 //! - `layers.{i}.b_norm.weight`, `layers.{i}.c_norm.weight`
@@ -10,13 +10,17 @@
 //! - `layers.{i}.D`
 //! - `layers.{i}.norm_gate.weight`
 //! - `layers.{i}.out_proj.weight`
-//! - `layers.{i}.norm2.weight`, `layers.{i}.mlp.fc1.weight`,
-//!   `layers.{i}.mlp.fc2.weight` (models with a gated MLP)
-//! - `norm_f.weight`
+//! - `layers.{i}.norm2.weight`, `layers.{i}.norm2.bias`,
+//!   `layers.{i}.mlp.fc1.weight`, `layers.{i}.mlp.fc2.weight` (models with
+//!   a gated MLP; the bias for LayerNorm models)
+//! - `norm_f.weight`, `norm_f.bias` (LayerNorm models)
+//!
+//! An RMSNorm model writes no norm bias and no `rms_norm` entry, so its
+//! files keep the bytes they had before LayerNorm models existed.
 
 use super::config::Mamba3Config;
 use super::weights::{Mamba3LayerWeights, Mamba3Weights};
-use crate::ops::st_io::{TensorList, read_f32};
+use crate::ops::st_io::{TensorList, block_norm, block_norm_entry, read_f32};
 use safetensors::tensor::SafeTensors;
 use std::collections::HashMap;
 use std::path::Path;
@@ -57,6 +61,9 @@ pub(crate) fn checkpoint_parts<'a>(
     for (i, lw) in weights.layers.iter().enumerate() {
         let p = |n: &str| format!("layers.{i}.{n}");
         list.push(p("norm.weight"), &lw.norm_weight, &[dm])?;
+        if !lw.norm_bias.is_empty() {
+            list.push(p("norm.bias"), &lw.norm_bias, &[dm])?;
+        }
         list.push(p("in_proj.weight"), &lw.in_proj_w, &[dm, ip])?;
         list.push(p("dt_bias"), &lw.dt_bias, &[nh])?;
         list.push(p("b_norm.weight"), &lw.b_norm_weight, &[ds])?;
@@ -71,12 +78,18 @@ pub(crate) fn checkpoint_parts<'a>(
     for (i, m) in weights.mlp.iter().enumerate() {
         let p = |n: &str| format!("layers.{i}.{n}");
         list.push(p("norm2.weight"), &m.norm_weight, &[dm])?;
+        if !m.norm_bias.is_empty() {
+            list.push(p("norm2.bias"), &m.norm_bias, &[dm])?;
+        }
         list.push(p("mlp.fc1.weight"), &m.fc1_w, &[dm, 2 * hidden])?;
         list.push(p("mlp.fc2.weight"), &m.fc2_w, &[hidden, dm])?;
     }
     list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
+    if !weights.norm_f_bias.is_empty() {
+        list.push("norm_f.bias".into(), &weights.norm_f_bias, &[dm])?;
+    }
 
-    let meta = HashMap::from([
+    let mut meta = HashMap::from([
         ("d_model".to_string(), dm.to_string()),
         ("d_state".to_string(), ds.to_string()),
         ("expand".to_string(), cfg.expand.to_string()),
@@ -100,6 +113,7 @@ pub(crate) fn checkpoint_parts<'a>(
         ("scan_mode".to_string(), format!("{:?}", cfg.scan_mode)),
         ("mamba_version".to_string(), "3".to_string()),
     ]);
+    meta.extend(block_norm_entry(cfg.block_norm));
     Ok((list, meta))
 }
 
@@ -160,6 +174,14 @@ fn weights_from_bytes(data: &[u8], cfg: &Mamba3Config) -> Result<(Mamba3Weights,
             ));
         }
     }
+    let stored_norm = block_norm(meta_map)?;
+    if stored_norm != cfg.block_norm {
+        return Err(format!(
+            "checkpoint identity mismatch: file has block norms {stored_norm:?}, caller \
+             config says {:?} — every block norm differs",
+            cfg.block_norm
+        ));
+    }
     let stored_mlp: usize = match meta_map.get("d_intermediate") {
         Some(v) => v
             .parse()
@@ -176,12 +198,21 @@ fn weights_from_bytes(data: &[u8], cfg: &Mamba3Config) -> Result<(Mamba3Weights,
 
     let st = SafeTensors::deserialize(data).map_err(|e| format!("deserialize: {e:?}"))?;
     let get = |name: &str| read_f32(&st, name);
+    // A norm's bias, which only a LayerNorm model's file holds.
+    let norm_bias = |name: &str| {
+        if cfg.block_norm.rms_norm() {
+            Ok(Vec::new())
+        } else {
+            get(name)
+        }
+    };
 
     let mut layers = Vec::new();
     for i in 0..cfg.n_layers {
         let p = |n: &str| format!("layers.{i}.{n}");
         layers.push(Mamba3LayerWeights {
             norm_weight: get(&p("norm.weight"))?,
+            norm_bias: norm_bias(&p("norm.bias"))?,
             in_proj_w: get(&p("in_proj.weight"))?,
             dt_bias: get(&p("dt_bias"))?,
             b_norm_weight: get(&p("b_norm.weight"))?,
@@ -202,6 +233,7 @@ fn weights_from_bytes(data: &[u8], cfg: &Mamba3Config) -> Result<(Mamba3Weights,
                 let p = |n: &str| format!("layers.{i}.{n}");
                 Ok(crate::mlp::GatedMlpLayerWeights {
                     norm_weight: get(&p("norm2.weight"))?,
+                    norm_bias: norm_bias(&p("norm2.bias"))?,
                     fc1_w: get(&p("mlp.fc1.weight"))?,
                     fc2_w: get(&p("mlp.fc2.weight"))?,
                 })
@@ -214,6 +246,7 @@ fn weights_from_bytes(data: &[u8], cfg: &Mamba3Config) -> Result<(Mamba3Weights,
         input_proj_b: get("input_proj.bias")?,
         layers,
         norm_f_weight: get("norm_f.weight")?,
+        norm_f_bias: norm_bias("norm_f.bias")?,
         mlp,
     };
 
@@ -303,6 +336,7 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(Mamba3Weights, Mamba3Config, usiz
             None => 1e-5,
         },
         scan_mode,
+        block_norm: block_norm(meta_map)?,
         // Checkpoints from before the MLP carry no MLP.
         d_intermediate: match meta_map.get("d_intermediate") {
             Some(v) => v
@@ -424,6 +458,54 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
         let (_, cfg2, _) = loaded.unwrap();
         assert_eq!(cfg2, cfg);
+    }
+
+    /// A LayerNorm model saves its norms' biases and its kind, the auto
+    /// loader rebuilds both, and a caller config of the other kind is
+    /// refused.
+    #[test]
+    fn layer_norm_checkpoint_roundtrip() {
+        let cfg = Mamba3Config {
+            block_norm: crate::config::BlockNorm::Layer,
+            d_intermediate: 200,
+            ..Mamba3Config::default()
+        };
+        let mut w = Mamba3Weights::init(&cfg, 64, 13);
+        let mut k = 0.0f32;
+        let mut fill = |v: &mut Vec<f32>| {
+            for b in v.iter_mut() {
+                k += 0.01;
+                *b = k;
+            }
+        };
+        for lw in &mut w.layers {
+            fill(&mut lw.norm_bias);
+        }
+        for m in &mut w.mlp {
+            fill(&mut m.norm_bias);
+        }
+        fill(&mut w.norm_f_bias);
+        let tmp = std::env::temp_dir().join(format!(
+            "mamba3_test_layer_norm_{}.safetensors",
+            std::process::id()
+        ));
+        save(&tmp, &w, &cfg, 64).unwrap();
+        let (w2, cfg2, _) = load(&tmp).unwrap();
+        assert_eq!(cfg2, cfg);
+        assert_eq!(w2.norm_f_bias, w.norm_f_bias);
+        for (a, b) in w.layers.iter().zip(&w2.layers) {
+            assert_eq!(a.norm_bias, b.norm_bias);
+        }
+        for (a, b) in w.mlp.iter().zip(&w2.mlp) {
+            assert_eq!(a.norm_bias, b.norm_bias);
+        }
+        let rms = Mamba3Config {
+            block_norm: crate::config::BlockNorm::Rms,
+            ..cfg
+        };
+        let err = load_mamba3(&tmp, &rms).err().unwrap();
+        std::fs::remove_file(&tmp).ok();
+        assert!(err.contains("block norms"), "{err}");
     }
 
     /// A model with a gated MLP saves its MLP tensors and its width, the

@@ -12,6 +12,10 @@ use mamba_rs::mamba3_siso::cpu::weights::TrainMamba3LayerWeights;
 use mamba_rs::mamba3_siso::state::Mamba3State;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
+#[path = "common/m3_oracle.rs"]
+mod m3_oracle;
+use m3_oracle::{backbone_step64, train_layer, zeros64};
+
 fn test_cfg() -> Mamba3Config {
     Mamba3Config {
         d_model: 16,
@@ -1111,4 +1115,98 @@ fn test_m3_gradient_accumulation() {
         (ratio - 4.0).abs() < 0.01, // sum_sq doubles → ratio is 4.0
         "gradient accumulation ratio: {ratio:.4} (expected 4.0)"
     );
+}
+
+/// Draws in `[-scale, scale)` from a fixed xorshift stream.
+fn draw(n: usize, seed: u64, scale: f32) -> Vec<f32> {
+    let mut s = seed.max(1);
+    (0..n)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (((s & 0xFFFFFF) as f32 / 16777216.0) * 2.0 - 1.0) * scale
+        })
+        .collect()
+}
+
+/// The largest deviation from the float64 values over their largest one.
+fn rel_max(got: &[f32], want: &[f64]) -> f64 {
+    let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs())).max(1e-30);
+    got.iter()
+        .zip(want)
+        .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()))
+        / scale
+}
+
+/// The decode step of a whole model against the float64 reference step:
+/// the input projection, every layer's mixer and gated MLP and the final
+/// norm, under both block norms, every norm scale and bias drawn so no
+/// constant init hides a path.
+#[test]
+fn m3_decode_matches_the_f64_backbone_oracle() {
+    let base = Mamba3Config {
+        d_model: 32,
+        d_state: 16,
+        expand: 2,
+        headdim: 8,
+        ngroups: 1,
+        n_layers: 2,
+        rope_fraction: 0.5,
+        is_outproj_norm: true,
+        d_intermediate: 48,
+        ..Mamba3Config::default()
+    };
+    let layer_norm = Mamba3Config {
+        block_norm: mamba_rs::BlockNorm::Layer,
+        ..base
+    };
+    let input_dim = 20usize;
+    for (label, cfg) in [
+        ("RMSNorm, MLP", base),
+        ("LayerNorm, MLP", layer_norm),
+        (
+            "LayerNorm, no MLP, SiLU gate",
+            Mamba3Config {
+                d_intermediate: 0,
+                is_outproj_norm: false,
+                ..layer_norm
+            },
+        ),
+    ] {
+        cfg.validate().unwrap();
+        let mut w = Mamba3Weights::init(&cfg, input_dim, 7);
+        let norms = w
+            .layers
+            .iter_mut()
+            .flat_map(|lw| [&mut lw.norm_weight, &mut lw.norm_bias])
+            .chain(
+                w.mlp
+                    .iter_mut()
+                    .flat_map(|m| [&mut m.norm_weight, &mut m.norm_bias]),
+            )
+            .chain([&mut w.norm_f_weight, &mut w.norm_f_bias]);
+        for (k, v) in norms.enumerate() {
+            // Scales around one, biases around zero.
+            let base = if k % 2 == 0 { 1.0 } else { 0.0 };
+            let draws = draw(v.len(), 40 + k as u64, 0.3);
+            for (x, d) in v.iter_mut().zip(draws) {
+                *x = base + d;
+            }
+        }
+        let layers: Vec<TrainMamba3LayerWeights> = w.layers.iter().map(train_layer).collect();
+        let mut st32 = Mamba3State::zeros(&cfg);
+        let mut scratch = Mamba3StepScratch::new(&cfg);
+        let mut st64 = zeros64(&cfg);
+        let mut out = vec![0f32; cfg.d_model];
+        let mut worst = 0f64;
+        for t in 0..24u64 {
+            let input = draw(input_dim, 300 + t, 1.0);
+            mamba3_step(&mut out, &input, &mut scratch, &w, &mut st32.layers, &cfg);
+            let want = backbone_step64(&cfg, (&w, &layers), &mut st64, &input);
+            worst = worst.max(rel_max(&out, &want));
+        }
+        eprintln!("{label}: outputs {worst:.2e}");
+        assert!(worst < 2e-5, "{label}: outputs rel {worst:.3e}");
+    }
 }

@@ -127,6 +127,25 @@ where
         .map_err(|e| format!("parse '{key}': {e}"))
 }
 
+/// The block norms' kind as the metadata spells it: `rms_norm = false` for
+/// LayerNorm, RMSNorm when the key is absent (every file written before the
+/// option, and every RMSNorm model since, carries none).
+pub(crate) fn block_norm(
+    meta: &HashMap<String, String>,
+) -> Result<crate::config::BlockNorm, String> {
+    match meta.get("rms_norm").map(String::as_str) {
+        None | Some("true") => Ok(crate::config::BlockNorm::Rms),
+        Some("false") => Ok(crate::config::BlockNorm::Layer),
+        Some(other) => Err(format!("unknown rms_norm '{other}' in the metadata")),
+    }
+}
+
+/// The metadata entry of a non-default block norm kind: LayerNorm writes
+/// `rms_norm = false`, RMSNorm nothing, so its files keep their bytes.
+pub(crate) fn block_norm_entry(norm: crate::config::BlockNorm) -> Option<(String, String)> {
+    (!norm.rms_norm()).then(|| ("rms_norm".to_string(), "false".to_string()))
+}
+
 /// The scan mode as the metadata spells it.
 pub(crate) fn scan_mode(meta: &HashMap<String, String>) -> Result<crate::config::ScanMode, String> {
     use crate::config::ScanMode;

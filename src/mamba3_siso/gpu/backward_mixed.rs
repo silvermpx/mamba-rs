@@ -23,10 +23,11 @@
 use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_ex_backward_dx_typed,
 };
-use crate::gpu::buffers::GpuBuffer;
+use crate::gpu::block_norm::{self, NormParams};
+use crate::gpu::buffers::{GpuBuffer, GradSlice};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_norm, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_colsum, y_runs, yz_runs};
 use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3LayerMixedActs, GpuMamba3MixedScratch,
     GpuMamba3MlpMixedActs,
@@ -73,30 +74,27 @@ pub fn gpu_backward_mamba3_backbone_mixed(
 
     // norm_f bwd (f32, residual stays f32) — no-atomics partials.
     {
-        let nf_ptr = mamba_w.master.norm_f_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;
         let dm_i = dm as i32;
         let axis0_ptr = f32_scratch.axis0_partials.cached_ptr();
-        {
-            let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
-            builder.arg(f32_scratch.d_norm.inner_mut());
-            builder.arg(&axis0_ptr); // d_scale_partials [bt*dm]
-            builder.arg(d_temporal.inner());
-            builder.arg(acts.norm_f_input.inner());
-            builder.arg(&nf_ptr);
-            builder.arg(acts.norm_f_rms.inner());
-            builder.arg(&bt_i);
-            builder.arg(&dm_i);
-            // Shared-kernel ABI: rmsnorm_backward grew an `accumulate`
-            // arg (M1 residual fold); the M3 sites keep the
-            // plain-store behavior.
-            let accumulate_dx: i32 = 0;
-            builder.arg(&accumulate_dx);
-            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
-            builder.arg(&no_mirror);
-            unsafe { builder.launch(grid_norm(bt, dm)) }
-                .map_err(|e| format!("rmsnorm_bwd norm_f m3 mixed stage1: {:?}", e))?;
-        }
+        block_norm::backward(
+            ctx,
+            WeightDtype::F32,
+            (
+                f32_scratch.d_norm.cached_ptr(),
+                axis0_ptr,
+                d_temporal.cached_ptr(),
+                acts.norm_f_input.cached_ptr(),
+                acts.norm_f_rms.cached_ptr(),
+            ),
+            (
+                mamba_w.master.final_norm(),
+                grads.norm_f_bias.as_ref().map_or(0, GradSlice::ptr),
+            ),
+            (bt, dm),
+            (false, 0),
+            "norm_f bwd m3 mixed",
+        )?;
         {
             let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
             let accumulate_i: i32 = 1;
@@ -125,7 +123,7 @@ pub fn gpu_backward_mamba3_backbone_mixed(
             let layer = MixedMlpBwd {
                 acts: m,
                 cw: &mamba_w.compute.mlp[l],
-                norm_master: &mamba_w.master.mlp[l].norm_weight,
+                norm_master: mamba_w.master.mlp[l].norm(),
                 g: &grads.mlp[l],
             };
             mixed_mlp_backward(exec, d_temporal, &layer, f32_scratch, mixed_scratch)?;
@@ -1031,34 +1029,31 @@ fn gpu_backward_mamba3_layer_mixed(
     )?;
 
     // ----------------------------------------------------------------
-    // B1: rmsnorm_bwd (f32-only kernel).
-    // Cast typed d_post_norm → f32 d_norm scratch, then call f32 rmsnorm_bwd.
+    // B1: the block norm's backward in f32.
+    // Cast typed d_post_norm → f32 d_norm scratch, then the f32 backward.
     // ----------------------------------------------------------------
     cast_typed_to_f32(ctx, m3k, &mut sc.d_norm, &msc.d_post_norm_typed, bt * dm)?;
     // no-atomics partials rule two-stage:
     {
-        let nw_ptr = lw_master.norm_weight.raw_ptr(&ctx.stream);
         let axis0_ptr = sc.axis0_partials.cached_ptr();
-        {
-            let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
-            builder.arg(sc.d_pre_norm.inner_mut());
-            builder.arg(&axis0_ptr); // d_scale_partials [bt*dm]
-            builder.arg(sc.d_norm.inner());
-            builder.arg(acts.residual.inner());
-            builder.arg(&nw_ptr);
-            builder.arg(acts.rms_vals.inner());
-            builder.arg(&bt_i);
-            builder.arg(&dm_i);
-            // Shared-kernel ABI: rmsnorm_backward grew an `accumulate`
-            // arg (M1 residual fold); the M3 sites keep the
-            // plain-store behavior.
-            let accumulate_dx: i32 = 0;
-            builder.arg(&accumulate_dx);
-            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
-            builder.arg(&no_mirror);
-            unsafe { builder.launch(grid_norm(bt, dm)) }
-                .map_err(|e| format!("rmsnorm_bwd m3 B1 mixed stage1: {:?}", e))?;
-        }
+        block_norm::backward(
+            ctx,
+            WeightDtype::F32,
+            (
+                sc.d_pre_norm.cached_ptr(),
+                axis0_ptr,
+                sc.d_norm.cached_ptr(),
+                acts.residual.cached_ptr(),
+                acts.rms_vals.cached_ptr(),
+            ),
+            (
+                lw_master.norm(),
+                lg.norm_bias.as_ref().map_or(0, GradSlice::ptr),
+            ),
+            (bt, dm),
+            (false, 0),
+            "block norm bwd m3 B1 mixed",
+        )?;
         {
             let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
             let accumulate_i: i32 = 1;
@@ -1231,7 +1226,8 @@ fn sequential_ssm_backward_mixed(
 struct MixedMlpBwd<'a> {
     acts: &'a GpuMamba3MlpMixedActs,
     cw: &'a crate::mamba3_siso::gpu::weights::GpuMamba3MixedMlpWeights,
-    norm_master: &'a GpuBuffer,
+    /// The f32 master parameters of the MLP's norm.
+    norm_master: NormParams,
     g: &'a crate::mamba3_siso::gpu::weights::GpuMamba3MlpGrads,
 }
 
@@ -1319,24 +1315,23 @@ fn mixed_mlp_backward(
         2 * h,
     )?;
     cast_typed_to_f32(ctx, m3k, &mut sc.d_norm, &msc.mlp_d_post, bt * dm)?;
-    let nw = norm_master.cached_ptr();
     let partials = sc.axis0_partials.cached_ptr();
-    let mut norm = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
-    norm.arg(d_temporal.inner_mut());
-    norm.arg(&partials);
-    norm.arg(sc.d_norm.inner());
-    norm.arg(acts.x_in.inner());
-    norm.arg(&nw);
-    norm.arg(acts.rms.inner());
-    norm.arg(&bt_i);
-    norm.arg(&dm_i);
     // Accumulate: the norm's input gradient adds into the residual's.
-    let accumulate: i32 = 1;
-    norm.arg(&accumulate);
-    let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
-    norm.arg(&no_mirror);
-    unsafe { norm.launch(grid_norm(bt, dm)) }
-        .map_err(|e| format!("m3_mixed MLP norm bwd: {e:?}"))?;
+    block_norm::backward(
+        ctx,
+        WeightDtype::F32,
+        (
+            d_temporal.cached_ptr(),
+            partials,
+            sc.d_norm.cached_ptr(),
+            acts.x_in.cached_ptr(),
+            acts.rms.cached_ptr(),
+        ),
+        (norm_master, g.norm_bias.as_ref().map_or(0, GradSlice::ptr)),
+        (bt, dm),
+        (true, 0),
+        "m3_mixed MLP norm bwd",
+    )?;
     let block = (bt as u32).next_power_of_two().clamp(32, 256);
     let d_nw = g.norm_weight.ptr();
     let reduce_acc: i32 = 1;

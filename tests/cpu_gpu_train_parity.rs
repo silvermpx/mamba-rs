@@ -64,6 +64,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             .iter()
             .map(|lw| TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
+                norm_bias: lw.norm_bias.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
                 in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
@@ -78,6 +79,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
+        norm_f_bias: w.norm_f_bias.clone(),
         mlp: w.mlp.clone(),
     }
 }
@@ -90,6 +92,7 @@ fn flatten_cpu_grads(g: &TrainMambaWeights) -> Vec<f32> {
     out.extend_from_slice(&g.input_proj_b);
     for l in &g.layers {
         out.extend_from_slice(&l.norm_weight);
+        out.extend_from_slice(&l.norm_bias);
         out.extend_from_slice(&l.in_proj_w);
         out.extend_from_slice(&l.in_proj_b);
         out.extend_from_slice(&l.conv1d_weight);
@@ -104,10 +107,12 @@ fn flatten_cpu_grads(g: &TrainMambaWeights) -> Vec<f32> {
     }
     for m in &g.mlp {
         out.extend_from_slice(&m.norm_weight);
+        out.extend_from_slice(&m.norm_bias);
         out.extend_from_slice(&m.fc1_w);
         out.extend_from_slice(&m.fc2_w);
     }
     out.extend_from_slice(&g.norm_f_weight);
+    out.extend_from_slice(&g.norm_f_bias);
     out
 }
 
@@ -120,6 +125,8 @@ fn grad_segments(cfg: &MambaConfig, input_dim: usize) -> Vec<(String, usize)> {
     let dc = cfg.d_conv;
     let dr = cfg.dt_rank();
     let xd = cfg.xdbl_dim();
+    // A LayerNorm's bias follows its scale; an RMSNorm has none.
+    let nb = cfg.block_norm.bias_len(dm);
     let mut segs = vec![
         ("input_proj_w".into(), input_dim * dm),
         ("input_proj_b".into(), dm),
@@ -127,6 +134,7 @@ fn grad_segments(cfg: &MambaConfig, input_dim: usize) -> Vec<(String, usize)> {
     for li in 0..cfg.n_layers {
         segs.extend([
             (format!("L{li}.norm_weight"), dm),
+            (format!("L{li}.norm_bias"), nb),
             (format!("L{li}.in_proj_w"), dm * 2 * di),
             (format!("L{li}.in_proj_b"), cfg.in_proj_bias_len()),
             (format!("L{li}.conv1d_weight"), di * dc),
@@ -144,11 +152,13 @@ fn grad_segments(cfg: &MambaConfig, input_dim: usize) -> Vec<(String, usize)> {
     for li in (0..cfg.n_layers).filter(|_| hidden > 0) {
         segs.extend([
             (format!("mlp{li}.norm_weight"), dm),
+            (format!("mlp{li}.norm_bias"), nb),
             (format!("mlp{li}.fc1_w"), dm * 2 * hidden),
             (format!("mlp{li}.fc2_w"), hidden * dm),
         ]);
     }
     segs.push(("norm_f_weight".into(), dm));
+    segs.push(("norm_f_bias".into(), nb));
     segs
 }
 
@@ -197,6 +207,7 @@ fn m1_cpu_gpu_backward_parity_f32() {
         d_conv: 4,
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
+        block_norm: mamba_rs::BlockNorm::Rms,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -284,6 +295,7 @@ fn m1_cpu_gpu_backward_parity_f32() {
         n_layers: nl,
         scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        block_norm: mamba_rs::BlockNorm::Rms,
         bcdt_rms_eps: None,
     };
     let mut gpu_acts = GpuMambaBackboneActs::new(&ctx.stream, &gpu_dims).expect("gpu acts");

@@ -9,8 +9,10 @@ use super::forward::GpuMambaDims;
 use super::mixer_norms::launch_bcdt_norm;
 use super::weights::{
     GpuMambaMixedWeights, GpuMambaWeights, MambaLayerWeightsView, MambaWeightsView,
+    final_norm_params, layer_norm_params,
 };
 use crate::gpu::blas::{TypedPtr, gpu_gemm_forward_dispatch, gpu_gemm_typed_forward_raw};
+use crate::gpu::block_norm;
 use crate::gpu::buffers::{DeviceKeep, DtypedBuf, GpuBuffer};
 use crate::gpu::context::{GemmMode, GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
@@ -21,9 +23,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{
-    conv_index_width, grid_1d_cover, grid_1d_wide, grid_norm, seq_scan_index_width,
-};
+use crate::gpu::launch::{conv_index_width, grid_1d_cover, grid_1d_wide, seq_scan_index_width};
 use crate::gpu::options::GpuOptions;
 use crate::mamba1::config::MambaConfig;
 use crate::mamba1::weights::MambaWeights;
@@ -52,6 +52,7 @@ mod model_gemm_manifest_tests {
             d_conv: 4,
             expand: 2,
             scan_mode: ScanMode::Sequential,
+            block_norm: crate::config::BlockNorm::Rms,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
             dt_rank: None,
@@ -698,7 +699,7 @@ impl MambaGpuScratch {
             dt_gather: GpuBuffer::zeros(stream, batch * dt_rank)?,
             delta: GpuBuffer::zeros(stream, batch * di)?,
             y: GpuBuffer::zeros(stream, batch * di)?,
-            rms_buf: GpuBuffer::zeros(stream, batch)?,
+            rms_buf: GpuBuffer::zeros(stream, batch * cfg.block_norm.stats_per_row())?,
             mlp: (cfg.mlp_hidden() > 0)
                 .then(|| super::mlp::GpuMambaMlpBranchBufs::new(stream, batch, cfg.mlp_hidden()))
                 .transpose()?,
@@ -771,7 +772,7 @@ impl MambaGpuScratchMixed {
             dt_gather: DtypedBuf::zeros(stream, batch * dt_rank, dtype)?,
             delta: DtypedBuf::zeros(stream, batch * di, dtype)?,
             y: DtypedBuf::zeros(stream, batch * di, dtype)?,
-            rms_buf: GpuBuffer::zeros(stream, batch)?,
+            rms_buf: GpuBuffer::zeros(stream, batch * cfg.block_norm.stats_per_row())?,
             dtype,
             mlp: (cfg.mlp_hidden() > 0)
                 .then(|| {
@@ -872,6 +873,7 @@ impl MambaGpuEngine {
             mamba_input_dim: self.input_dim,
             scan_mode: self.cfg.scan_mode,
             rms_norm_eps: self.cfg.rms_norm_eps,
+            block_norm: self.cfg.block_norm,
             bcdt_rms_eps: self.cfg.bcdt_rms_eps,
         }
     }
@@ -1287,46 +1289,40 @@ impl MambaGpuEngine {
             let ssm_ptr = state.ssm.cached_ptr() + (state.ssm_offset(layer_idx) as u64) * f32_sz;
             let aneg_ptr = self.a_neg_all.cached_ptr() + (layer_idx * di * ds) as u64 * f32_sz;
 
-            // F1: RmsNorm. Layer 0 saves the input projection as the residual
-            // and normalizes it. From the second layer on, the previous
-            // layer's residual add rides in the same launch: the norm adds
-            // the branch output (temporal) into the residual in place and
-            // normalizes the sum, so neither the add kernel nor the residual
-            // copy runs.
+            // F1: the block norm. Layer 0 saves the input projection as the
+            // residual and normalizes it. From the second layer on, the
+            // previous layer's residual add rides in the same launch: the
+            // norm adds the branch output (temporal) into the residual in
+            // place and normalizes the sum, so neither the add kernel nor the
+            // residual copy runs. The output overwrites temporal.
             {
-                let b_i = b as i32;
-                let dm_i = dm as i32;
-                let eps: f32 = cfg.rms_norm_eps;
                 let t_ptr = scratch.temporal.cached_ptr();
                 let rms_ptr = scratch.rms_buf.cached_ptr();
                 let res_ptr = scratch.residual.cached_ptr();
-                let nw = lw.norm_weight();
-                let mut bld = if layer_idx == 0 {
+                let shape = (b, dm, cfg.rms_norm_eps);
+                if layer_idx == 0 {
                     scratch
                         .residual
                         .copy_from_raw(&scratch.temporal, &self.ctx.stream)?;
-                    let mut bld = self.ctx.stream.launch_builder(&k.rmsnorm_fwd);
-                    bld.arg(&t_ptr); // output overwrites temporal
-                    bld.arg(&rms_ptr);
-                    bld.arg(&res_ptr); // input = saved residual
-                    bld
+                    block_norm::forward(
+                        &self.ctx,
+                        WeightDtype::F32,
+                        (t_ptr, rms_ptr, res_ptr),
+                        layer_norm_params(lw),
+                        shape,
+                        "block norm decode",
+                    )?;
                 } else {
-                    let mut bld = self
-                        .ctx
-                        .stream
-                        .launch_builder(&k.rmsnorm_fwd_resadd_typed.f32);
-                    bld.arg(&t_ptr); // output overwrites temporal
-                    bld.arg(&rms_ptr);
-                    bld.arg(&res_ptr); // residual += branch, then the norm input
-                    bld.arg(&t_ptr); // branch = the previous layer's out_proj
-                    bld
-                };
-                bld.arg(&nw);
-                bld.arg(&b_i);
-                bld.arg(&dm_i);
-                bld.arg(&eps);
-                unsafe { bld.launch(grid_norm(b, dm)) }
-                    .map_err(|e| format!("rmsnorm_fwd L{layer_idx}: {e:?}"))?;
+                    // residual += branch (the previous layer's out_proj).
+                    block_norm::forward_resadd(
+                        &self.ctx,
+                        WeightDtype::F32,
+                        (t_ptr, rms_ptr, res_ptr, t_ptr),
+                        layer_norm_params(lw),
+                        shape,
+                        "block norm decode",
+                    )?;
+                }
             }
 
             // F2: in_proj SGEMM [B, d_model] → [B, 2*d_inner]
@@ -1529,26 +1525,21 @@ impl MambaGpuEngine {
             )?;
         }
         if stop_after_layer.is_none() {
-            let b_i = b as i32;
-            let dm_i = dm as i32;
-            let eps: f32 = cfg.rms_norm_eps;
-            let mut bld = self
-                .ctx
-                .stream
-                .launch_builder(&k.rmsnorm_fwd_resadd_typed.f32);
+            // branch = the last layer's out_proj.
             let t_ptr = scratch.temporal.cached_ptr();
-            let rms_ptr = scratch.rms_buf.cached_ptr();
-            let res_ptr = scratch.residual.cached_ptr();
-            bld.arg(&t_ptr);
-            bld.arg(&rms_ptr);
-            bld.arg(&res_ptr);
-            bld.arg(&t_ptr); // branch = the last layer's out_proj
-            let nfw = weights.norm_f_weight();
-            bld.arg(&nfw);
-            bld.arg(&b_i);
-            bld.arg(&dm_i);
-            bld.arg(&eps);
-            unsafe { bld.launch(grid_norm(b, dm)) }.map_err(|e| format!("norm_f: {e:?}"))?;
+            block_norm::forward_resadd(
+                &self.ctx,
+                WeightDtype::F32,
+                (
+                    t_ptr,
+                    scratch.rms_buf.cached_ptr(),
+                    scratch.residual.cached_ptr(),
+                    t_ptr,
+                ),
+                final_norm_params(weights),
+                (b, dm, cfg.rms_norm_eps),
+                "norm_f",
+            )?;
         }
 
         Ok(())
@@ -1950,44 +1941,36 @@ impl MambaGpuEngineMixed {
             let ssm_ptr = state.ssm.cached_ptr() + (state.ssm_offset(layer_idx) as u64) * f32_sz;
             let aneg_ptr = self.a_neg_all.cached_ptr() + (layer_idx * di * ds) as u64 * f32_sz;
 
-            // F1: rmsnorm f32_in → half_out (temporal_bf16 <- residual_f32 * norm_w).
-            // From the second layer on, the previous layer's residual add
-            // rides in the same launch: the norm adds the branch output
-            // (temporal) into the f32 residual and normalizes the sum.
+            // F1: the block norm, f32_in → half_out (temporal_bf16 <-
+            // norm(residual_f32)). From the second layer on, the previous
+            // layer's residual add rides in the same launch: the norm adds the
+            // branch output (temporal) into the f32 residual and normalizes the
+            // sum.
             {
-                let b_i = b as i32;
-                let dm_i = dm as i32;
-                let eps: f32 = cfg.rms_norm_eps;
                 let t_ptr = scratch.temporal.cached_ptr();
                 let rms_ptr = scratch.rms_buf.cached_ptr();
                 let res_ptr = scratch.residual.cached_ptr();
-                let nw = lw.norm_weight();
-                let mut bld = if layer_idx == 0 {
-                    let mut bld = engine
-                        .ctx
-                        .stream
-                        .launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
-                    bld.arg(&t_ptr);
-                    bld.arg(&rms_ptr);
-                    bld.arg(&res_ptr);
-                    bld
+                let shape = (b, dm, cfg.rms_norm_eps);
+                if layer_idx == 0 {
+                    block_norm::forward(
+                        &engine.ctx,
+                        dt,
+                        (t_ptr, rms_ptr, res_ptr),
+                        layer_norm_params(lw),
+                        shape,
+                        "block norm decode mixed",
+                    )?;
                 } else {
-                    let mut bld = engine
-                        .ctx
-                        .stream
-                        .launch_builder(k.rmsnorm_fwd_resadd_typed.get(dt));
-                    bld.arg(&t_ptr);
-                    bld.arg(&rms_ptr);
-                    bld.arg(&res_ptr);
-                    bld.arg(&t_ptr); // branch = the previous layer's out_proj
-                    bld
-                };
-                bld.arg(&nw);
-                bld.arg(&b_i);
-                bld.arg(&dm_i);
-                bld.arg(&eps);
-                unsafe { bld.launch(grid_norm(b, dm)) }
-                    .map_err(|e| format!("rmsnorm_f32in L{layer_idx}: {e:?}"))?;
+                    // branch = the previous layer's out_proj.
+                    block_norm::forward_resadd(
+                        &engine.ctx,
+                        dt,
+                        (t_ptr, rms_ptr, res_ptr, t_ptr),
+                        layer_norm_params(lw),
+                        shape,
+                        "block norm decode mixed",
+                    )?;
+                }
             }
 
             // F2: in_proj GEMM — bf16 input, bf16 weights, bf16 output.
@@ -2232,26 +2215,21 @@ impl MambaGpuEngineMixed {
             )?;
         }
         if stop_after_layer.is_none() {
-            let b_i = b as i32;
-            let dm_i = dm as i32;
-            let eps: f32 = cfg.rms_norm_eps;
-            let mut bld = engine
-                .ctx
-                .stream
-                .launch_builder(k.rmsnorm_fwd_resadd_typed.get(dt));
+            // branch = the last layer's out_proj.
             let t_ptr = scratch.temporal.cached_ptr();
-            let rms_ptr = scratch.rms_buf.cached_ptr();
-            let res_ptr = scratch.residual.cached_ptr();
-            bld.arg(&t_ptr);
-            bld.arg(&rms_ptr);
-            bld.arg(&res_ptr);
-            bld.arg(&t_ptr); // branch = the last layer's out_proj
-            let nfw = w.norm_f_weight();
-            bld.arg(&nfw);
-            bld.arg(&b_i);
-            bld.arg(&dm_i);
-            bld.arg(&eps);
-            unsafe { bld.launch(grid_norm(b, dm)) }.map_err(|e| format!("norm_f_mixed: {e:?}"))?;
+            block_norm::forward_resadd(
+                &engine.ctx,
+                dt,
+                (
+                    t_ptr,
+                    scratch.rms_buf.cached_ptr(),
+                    scratch.residual.cached_ptr(),
+                    t_ptr,
+                ),
+                final_norm_params(w),
+                (b, dm, cfg.rms_norm_eps),
+                "norm_f_mixed",
+            )?;
         }
 
         Ok(())
@@ -3230,6 +3208,7 @@ impl MambaGpuBackbone {
             mamba_input_dim: cfg.d_model,
             scan_mode: cfg.scan_mode,
             rms_norm_eps: cfg.rms_norm_eps,
+            block_norm: cfg.block_norm,
             bcdt_rms_eps: cfg.bcdt_rms_eps,
         }
     }

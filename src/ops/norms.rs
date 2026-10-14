@@ -4,6 +4,8 @@
 //! - `rms_norm_weighted` — RMSNorm with learnable weight
 //! - `bcnorm` — per-group RMSNorm for B/C (Mamba-3)
 //! - `rmsnorm_gated` — RMSNormGated: norm(y) * weight * SiLU(z) (Mamba-3)
+//! - `layer_norm_row` — LayerNorm with a bias, the block norm of a model
+//!   built with `rms_norm = false`
 
 use super::fast_math::fast_exp_scalar;
 use super::fold16::{dot_fold16, sum_sq_fold16};
@@ -169,6 +171,126 @@ pub fn bcdt_rms_norm_backward(
     weightless_rms_norm_backward(&mut d_c[..d_state], &c[..d_state], r[2]);
 }
 
+/// LayerNorm of one row with the biased variance (`nn.LayerNorm`), the
+/// block norm of a model built with `rms_norm = false`: `out = (x - mean)
+/// / std * weight + bias`, `std = sqrt(var + eps)`. The mean, then the
+/// centred sum of squares, are left-to-right f32 sums (two passes, as the
+/// reference's kernel, so a large mean costs no precision). Returns
+/// `[std, mean]` for the backward.
+#[inline]
+pub fn layer_norm_row(
+    out: &mut [f32],
+    x: &[f32],
+    (weight, bias): (&[f32], &[f32]),
+    eps: f32,
+) -> [f32; 2] {
+    debug_assert_eq!(x.len(), out.len());
+    debug_assert_eq!(x.len(), weight.len());
+    debug_assert_eq!(x.len(), bias.len());
+    let [sd, mean] = layer_norm_stats(x, eps);
+    let inv = 1.0 / sd;
+    for (((o, &v), &w), &b) in out.iter_mut().zip(x).zip(weight).zip(bias) {
+        *o = (v - mean) * inv * w + b;
+    }
+    [sd, mean]
+}
+
+/// [`layer_norm_row`] in place, the same expressions element by element.
+/// Returns `[std, mean]`.
+#[inline]
+pub fn layer_norm_inplace(x: &mut [f32], (weight, bias): (&[f32], &[f32]), eps: f32) -> [f32; 2] {
+    let [sd, mean] = layer_norm_stats(x, eps);
+    let inv = 1.0 / sd;
+    for ((v, &w), &b) in x.iter_mut().zip(weight).zip(bias) {
+        *v = (*v - mean) * inv * w + b;
+    }
+    [sd, mean]
+}
+
+/// The statistics [`layer_norm_row`] normalizes a row with, `[std, mean]`,
+/// for a backward that recomputes them: the same sums in the same order.
+#[inline]
+pub fn layer_norm_stats(x: &[f32], eps: f32) -> [f32; 2] {
+    let n = x.len() as f32;
+    let mut sum = 0.0_f32;
+    for &v in x {
+        sum += v;
+    }
+    let mean = sum / n;
+    let mut sq = 0.0_f32;
+    for &v in x {
+        let c = v - mean;
+        sq += c * c;
+    }
+    [(sq / n + eps).sqrt(), mean]
+}
+
+/// The backward of [`layer_norm_row`] for one row. With `x_hat = (x -
+/// mean) / std` and `g = weight * dy`, the input gradient
+/// `(g - mean(g) - x_hat * mean(g * x_hat)) / std` is written into `dx`,
+/// or added onto it when `accumulate`; `dy * x_hat` and `dy` accumulate
+/// into the weight's and the bias's gradients.
+#[inline]
+pub fn layer_norm_row_backward(
+    dx: &mut [f32],
+    (d_weight, d_bias): (&mut [f32], &mut [f32]),
+    (dy, x): (&[f32], &[f32]),
+    weight: &[f32],
+    [sd, mean]: [f32; 2],
+    accumulate: bool,
+) {
+    let n = x.len();
+    debug_assert_eq!(n, dx.len());
+    debug_assert_eq!(n, dy.len());
+    let inv = 1.0 / sd;
+    let (mut s_g, mut s_gx) = (0.0_f32, 0.0_f32);
+    for ((&v, &d), &w) in x.iter().zip(dy).zip(weight) {
+        let x_hat = (v - mean) * inv;
+        let g = w * d;
+        s_g += g;
+        s_gx += g * x_hat;
+    }
+    let (mean_g, mean_gx) = (s_g / n as f32, s_gx / n as f32);
+    for i in 0..n {
+        let x_hat = (x[i] - mean) * inv;
+        let d = (weight[i] * dy[i] - mean_g - x_hat * mean_gx) * inv;
+        dx[i] = if accumulate { dx[i] + d } else { d };
+        d_weight[i] += dy[i] * x_hat;
+        d_bias[i] += dy[i];
+    }
+}
+
+/// [`layer_norm_row_backward`] in place, overwriting: `d` holds the
+/// gradient of the normalized row and leaves holding the input's, the same
+/// expressions element by element.
+#[inline]
+pub fn layer_norm_row_backward_in_place(
+    d: &mut [f32],
+    (d_weight, d_bias): (&mut [f32], &mut [f32]),
+    x: &[f32],
+    weight: &[f32],
+    [sd, mean]: [f32; 2],
+) {
+    let n = x.len();
+    debug_assert_eq!(n, d.len());
+    let inv = 1.0 / sd;
+    let (mut s_g, mut s_gx) = (0.0_f32, 0.0_f32);
+    for ((&v, &dy), &w) in x.iter().zip(d.iter()).zip(weight) {
+        let x_hat = (v - mean) * inv;
+        let g = w * dy;
+        s_g += g;
+        s_gx += g * x_hat;
+    }
+    let (mean_g, mean_gx) = (s_g / n as f32, s_gx / n as f32);
+    for i in 0..n {
+        let x_hat = (x[i] - mean) * inv;
+        let dy = d[i];
+        d_weight[i] += dy * x_hat;
+        d_bias[i] += dy;
+        d[i] = (weight[i] * dy - mean_g - x_hat * mean_gx) * inv;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +337,87 @@ mod tests {
         ] {
             let ms = part.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>() / part.len() as f64;
             assert!((ms - 1.0).abs() < 1e-4, "{ms}");
+        }
+    }
+
+    /// LayerNorm against an f64 transcription of `nn.LayerNorm`, and its
+    /// backward against central differences of `sum(g y)` taken through
+    /// that f64 transcription, for every input, weight and bias element; a
+    /// row with a large mean checks the two-pass statistics.
+    #[test]
+    fn layer_norm_row_matches_the_reference_and_its_derivative() {
+        let eps = 1e-5f64;
+        for (n, shift) in [(13usize, 0.25f32), (64, 40.0)] {
+            let x: Vec<f32> = (0..n)
+                .map(|i| ((i * 37 % 11) as f32 - 5.0) * 0.3 + shift)
+                .collect();
+            let w: Vec<f32> = (0..n)
+                .map(|i| 1.0 + ((i * 7 % 5) as f32 - 2.0) * 0.1)
+                .collect();
+            let b: Vec<f32> = (0..n).map(|i| ((i * 3 % 4) as f32 - 1.5) * 0.05).collect();
+            let g: Vec<f32> = (0..n).map(|i| ((i * 13 % 7) as f32 - 3.0) * 0.2).collect();
+            let reference = |x: &[f64], w: &[f64], b: &[f64]| -> Vec<f64> {
+                let m = x.iter().sum::<f64>() / n as f64;
+                let var = x.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / n as f64;
+                let sd = (var + eps).sqrt();
+                (0..n).map(|i| (x[i] - m) / sd * w[i] + b[i]).collect()
+            };
+            let wide = |v: &[f32]| v.iter().map(|&a| f64::from(a)).collect::<Vec<f64>>();
+            let (xd, wd, bd, gd) = (wide(&x), wide(&w), wide(&b), wide(&g));
+            let mut y = vec![0.0f32; n];
+            let stats = layer_norm_row(&mut y, &x, (&w, &b), eps as f32);
+            for (i, (&got, want)) in y.iter().zip(reference(&xd, &wd, &bd)).enumerate() {
+                assert!(
+                    (f64::from(got) - want).abs() < 1e-5,
+                    "y[{i}]: {got} vs {want}"
+                );
+            }
+            let loss = |x: &[f64], w: &[f64], b: &[f64]| -> f64 {
+                reference(x, w, b).iter().zip(&gd).map(|(a, c)| a * c).sum()
+            };
+            let mut dx = vec![0.5f32; n];
+            let (mut dw, mut db) = (vec![0.0f32; n], vec![0.0f32; n]);
+            layer_norm_row_backward(&mut dx, (&mut dw, &mut db), (&g, &x), &w, stats, true);
+            // The in-place form gives the same bits, and the stats a backward
+            // recomputes are the forward's.
+            assert_eq!(layer_norm_stats(&x, eps as f32), stats);
+            let mut d_in = g.clone();
+            let (mut dw_in, mut db_in) = (vec![0.0f32; n], vec![0.0f32; n]);
+            layer_norm_row_backward_in_place(&mut d_in, (&mut dw_in, &mut db_in), &x, &w, stats);
+            let mut d_out = vec![0.0f32; n];
+            let (mut dw_out, mut db_out) = (vec![0.0f32; n], vec![0.0f32; n]);
+            layer_norm_row_backward(
+                &mut d_out,
+                (&mut dw_out, &mut db_out),
+                (&g, &x),
+                &w,
+                stats,
+                false,
+            );
+            assert_eq!((&d_in, &dw_in, &db_in), (&d_out, &dw_out, &db_out));
+            let h = 1e-6f64;
+            let fd = |which: usize, i: usize| -> f64 {
+                let (mut p, mut m) = (
+                    [xd.clone(), wd.clone(), bd.clone()],
+                    [xd.clone(), wd.clone(), bd.clone()],
+                );
+                p[which][i] += h;
+                m[which][i] -= h;
+                (loss(&p[0], &p[1], &p[2]) - loss(&m[0], &m[1], &m[2])) / (2.0 * h)
+            };
+            for i in 0..n {
+                for (which, got) in [
+                    (0, f64::from(dx[i]) - 0.5),
+                    (1, f64::from(dw[i])),
+                    (2, f64::from(db[i])),
+                ] {
+                    let want = fd(which, i);
+                    assert!(
+                        (got - want).abs() < 1e-4 * want.abs().max(1.0),
+                        "n {n} part {which}[{i}]: {got} vs {want}"
+                    );
+                }
+            }
         }
     }
 

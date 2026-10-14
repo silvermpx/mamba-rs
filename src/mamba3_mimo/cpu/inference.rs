@@ -12,7 +12,7 @@
 use super::super::config::Mamba3MimoConfig;
 use super::super::state::Mamba3MimoLayerState;
 use super::super::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
-use super::core::{HeadScratch, HeadState, mimo_head_step, prepare_token, row_norm};
+use super::core::{HeadScratch, HeadState, block_norm_row, mimo_head_step, prepare_token};
 use crate::mlp::cpu::{GatedMlpPacked, GatedMlpStepScratch, gated_mlp_step, gated_mlp_step_packed};
 use crate::ops::lane::LaneGemm;
 use crate::ops::packed::PackedLinear;
@@ -143,10 +143,10 @@ fn layer_step(
 
     let dtype = scratch.dtype;
     scratch.residual.copy_from_slice(&temporal[..dm]);
-    row_norm(
+    block_norm_row(
         &mut scratch.norm_buf,
         &temporal[..dm],
-        &lw.norm_weight,
+        (&lw.norm_weight, &lw.norm_bias),
         cfg.rms_norm_eps,
     );
     store(dtype, &mut scratch.norm_buf);
@@ -272,10 +272,10 @@ fn backbone_step(
         }
     }
     scratch.norm_buf.copy_from_slice(&temporal[..dm]);
-    row_norm(
+    block_norm_row(
         &mut temporal[..dm],
         &scratch.norm_buf,
-        &weights.norm_f_weight,
+        (&weights.norm_f_weight, &weights.norm_f_bias),
         cfg.rms_norm_eps,
     );
 }

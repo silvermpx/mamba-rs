@@ -40,6 +40,7 @@ fn drawn(cfg: &Mamba3MimoConfig, input_dim: usize, seed: u64) -> Mamba3MimoWeigh
             (&mut lw.mimo_z, 7, 1.0, 0.5),
             (&mut lw.mimo_o, 8, 0.0, 0.8),
             (&mut lw.norm_weight, 9, 1.0, 0.2),
+            (&mut lw.norm_bias, 11, 0.0, 0.2),
         ] {
             let d = det(v.len(), s + k, scale);
             for (x, dv) in v.iter_mut().zip(d) {
@@ -60,6 +61,14 @@ fn drawn(cfg: &Mamba3MimoConfig, input_dim: usize, seed: u64) -> Mamba3MimoWeigh
         for (x, dv) in m.norm_weight.iter_mut().zip(d) {
             *x = 1.0 + dv;
         }
+        let d = det(m.norm_bias.len(), seed + 40 + i as u64, 0.2);
+        for (x, dv) in m.norm_bias.iter_mut().zip(d) {
+            *x = dv;
+        }
+    }
+    let d = det(w.norm_f_bias.len(), seed + 50, 0.2);
+    for (x, dv) in w.norm_f_bias.iter_mut().zip(d) {
+        *x = dv;
     }
     w
 }
@@ -108,10 +117,12 @@ fn tensors(w: &mut Mamba3MimoWeights, with_norm: bool) -> Vec<(String, &mut Vec<
         ("input_proj_w".into(), &mut w.input_proj_w),
         ("input_proj_b".into(), &mut w.input_proj_b),
         ("norm_f".into(), &mut w.norm_f_weight),
+        ("norm_f_bias".into(), &mut w.norm_f_bias),
     ];
     for (l, lw) in w.layers.iter_mut().enumerate() {
         for (name, v) in [
             ("norm", &mut lw.norm_weight),
+            ("norm_bias", &mut lw.norm_bias),
             ("in_proj_w", &mut lw.in_proj_w),
             ("dt_bias", &mut lw.dt_bias),
             ("b_norm", &mut lw.b_norm_weight),
@@ -132,9 +143,12 @@ fn tensors(w: &mut Mamba3MimoWeights, with_norm: bool) -> Vec<(String, &mut Vec<
     }
     for (l, m) in w.mlp.iter_mut().enumerate() {
         out.push((format!("mlp{l}.norm"), &mut m.norm_weight));
+        out.push((format!("mlp{l}.norm_bias"), &mut m.norm_bias));
         out.push((format!("mlp{l}.fc1"), &mut m.fc1_w));
         out.push((format!("mlp{l}.fc2"), &mut m.fc2_w));
     }
+    // A LayerNorm's biases are empty in an RMSNorm model.
+    out.retain(|(_, v)| !v.is_empty());
     out
 }
 
@@ -160,6 +174,14 @@ fn cases() -> Vec<(&'static str, Mamba3MimoConfig)> {
             "rank 4, full rope, MLP after",
             Mamba3MimoConfig {
                 rope_fraction: 1.0,
+                d_intermediate: 40,
+                ..base
+            },
+        ),
+        (
+            "LayerNorm block norms, MLP after",
+            Mamba3MimoConfig {
+                block_norm: mamba_rs::BlockNorm::Layer,
                 d_intermediate: 40,
                 ..base
             },

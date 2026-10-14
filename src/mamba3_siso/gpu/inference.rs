@@ -15,6 +15,7 @@
 use super::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg};
 use super::weights::GpuMamba3WeightsInf;
 use crate::gpu::blas::gpu_gemm_f32_forward_ptrs;
+use crate::gpu::block_norm;
 use crate::gpu::buffers::{DeviceKeep, GpuBuffer};
 use crate::gpu::context::{GemmMode, GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
@@ -175,7 +176,7 @@ impl Mamba3GpuScratch {
             y: GpuBuffer::zeros(stream, batch * di)?,
             gated: GpuBuffer::zeros(stream, batch * di)?,
             post_norm: GpuBuffer::zeros(stream, batch * dm)?,
-            rms_buf: GpuBuffer::zeros(stream, batch)?,
+            rms_buf: GpuBuffer::zeros(stream, batch * cfg.block_norm.stats_per_row())?,
             gated_rms_buf: GpuBuffer::zeros(stream, batch * nh)?,
             mlp_up: GpuBuffer::zeros(stream, (batch * 2 * cfg.mlp_hidden()).max(1))?,
             mlp_act: GpuBuffer::zeros(stream, (batch * cfg.mlp_hidden()).max(1))?,
@@ -287,7 +288,7 @@ impl Mamba3GpuScratchMixed {
             y: DtypedBuf::zeros(stream, batch * di, dtype)?,
             gated: DtypedBuf::zeros(stream, batch * di, dtype)?,
             post_norm: DtypedBuf::zeros(stream, batch * dm, dtype)?,
-            rms_buf: GpuBuffer::zeros(stream, batch)?,
+            rms_buf: GpuBuffer::zeros(stream, batch * cfg.block_norm.stats_per_row())?,
             gated_rms_buf: GpuBuffer::zeros(stream, batch * nh)?,
             mlp_up: DtypedBuf::zeros(stream, (batch * 2 * cfg.mlp_hidden()).max(1), dtype)?,
             mlp_act: DtypedBuf::zeros(stream, (batch * cfg.mlp_hidden()).max(1), dtype)?,
@@ -640,6 +641,7 @@ impl Mamba3GpuEngine {
             is_outproj_norm: self.cfg.is_outproj_norm,
             rms_norm_eps: self.cfg.rms_norm_eps,
             ssm_norm_eps: self.cfg.ssm_norm_eps,
+            block_norm: self.cfg.block_norm,
             use_parallel_scan: self.cfg.prefill_use_parallel_scan(),
         }
     }
@@ -707,12 +709,8 @@ impl Mamba3GpuEngine {
         state: &mut Mamba3GpuState,
         scratch: &mut Mamba3GpuScratch,
     ) -> Result<(), String> {
-        use cudarc::driver::PushKernelArg;
-
         let b = self.batch;
         let dm = self.cfg.d_model;
-        let b_i = b as i32;
-        let dm_i = dm as i32;
 
         if self.identity_proj {
             // HF M3 models have no input_proj — embedding is already d_model.
@@ -746,7 +744,7 @@ impl Mamba3GpuEngine {
             }
         }
 
-        // Final RMSNorm
+        // The final norm
         {
             let bytes = b * dm * std::mem::size_of::<f32>();
             unsafe {
@@ -758,21 +756,18 @@ impl Mamba3GpuEngine {
                 );
             }
         }
-        {
-            let grid = crate::gpu::launch::grid_norm(b, dm);
-            let eps: f32 = self.cfg.rms_norm_eps;
-            let mut builder = self.ctx.stream.launch_builder(&self.kernels.rmsnorm_fwd);
-            builder.arg(scratch.temporal.inner());
-            builder.arg(scratch.rms_buf.inner());
-            builder.arg(scratch.post_norm.inner());
-            builder.arg(self.weights.norm_f_weight.inner());
-            builder.arg(&b_i);
-            builder.arg(&dm_i);
-            builder.arg(&eps);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("norm_f: {e:?}"))?;
-        }
-
-        Ok(())
+        block_norm::forward(
+            &self.ctx,
+            WeightDtype::F32,
+            (
+                scratch.temporal.cached_ptr(),
+                scratch.rms_buf.cached_ptr(),
+                scratch.post_norm.cached_ptr(),
+            ),
+            self.weights.final_norm(),
+            (b, dm, self.cfg.rms_norm_eps),
+            "norm_f",
+        )
     }
 
     /// Launch the 10-phase T=1 forward for one layer.
@@ -805,7 +800,6 @@ impl Mamba3GpuEngine {
 
         // Pre-compute i32 locals to avoid temporaries in builder.arg()
         let b_i = b as i32;
-        let dm_i = dm as i32;
         let di_i = di as i32;
         let ds_i = ds as i32;
         let nh_i = nh as i32;
@@ -818,25 +812,23 @@ impl Mamba3GpuEngine {
         let v_off = layer_idx * state.v_per_layer();
         let a_off = layer_idx * state.angle_per_layer();
 
-        // F1: RMSNorm reads the residual stream in place - the old
+        // F1: the block norm reads the residual stream in place - the old
         // pre-norm D2D save is gone: F8 now writes post_norm (dead by
         // then) and F9 adds it into temporal, which still holds the
         // pre-norm value. IEEE addition of the same two f32 values is
         // commutative, so the swapped operand roles round identically.
-        {
-            let grid = crate::gpu::launch::grid_norm(b, dm);
-            let eps: f32 = self.cfg.rms_norm_eps;
-            let nw_ptr = lw.norm_weight.ptr();
-            let mut builder = self.ctx.stream.launch_builder(&self.kernels.rmsnorm_fwd);
-            builder.arg(scratch.post_norm.inner());
-            builder.arg(scratch.rms_buf.inner());
-            builder.arg(scratch.temporal.inner());
-            builder.arg(&nw_ptr);
-            builder.arg(&b_i);
-            builder.arg(&dm_i);
-            builder.arg(&eps);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F1 rmsnorm: {e:?}"))?;
-        }
+        block_norm::forward(
+            &self.ctx,
+            WeightDtype::F32,
+            (
+                scratch.post_norm.cached_ptr(),
+                scratch.rms_buf.cached_ptr(),
+                scratch.temporal.cached_ptr(),
+            ),
+            lw.norm(),
+            (b, dm, self.cfg.rms_norm_eps),
+            "F1 block norm",
+        )?;
 
         // F2: in_proj SGEMM [batch, d_model] → [batch, in_proj_dim]
         unsafe {
@@ -1069,21 +1061,18 @@ impl Mamba3GpuEngine {
         let m = &self.weights.mlp[layer_idx];
         let h = m.hidden;
         let b_i = b as i32;
-        let dm_i = dm as i32;
-        {
-            let grid = crate::gpu::launch::grid_norm(b, dm);
-            let eps: f32 = self.cfg.rms_norm_eps;
-            let nw_ptr = m.norm_weight.ptr();
-            let mut builder = self.ctx.stream.launch_builder(&self.kernels.rmsnorm_fwd);
-            builder.arg(scratch.post_norm.inner());
-            builder.arg(scratch.rms_buf.inner());
-            builder.arg(scratch.temporal.inner());
-            builder.arg(&nw_ptr);
-            builder.arg(&b_i);
-            builder.arg(&dm_i);
-            builder.arg(&eps);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("mlp norm2: {e:?}"))?;
-        }
+        block_norm::forward(
+            &self.ctx,
+            WeightDtype::F32,
+            (
+                scratch.post_norm.cached_ptr(),
+                scratch.rms_buf.cached_ptr(),
+                scratch.temporal.cached_ptr(),
+            ),
+            m.norm(),
+            (b, dm, self.cfg.rms_norm_eps),
+            "mlp norm2",
+        )?;
         unsafe {
             gpu_gemm_f32_forward_ptrs(
                 &self.ctx,
@@ -1530,7 +1519,6 @@ impl Mamba3GpuEngineMixed {
         let width = step_index_width(b, cfg);
 
         let b_i = b as i32;
-        let dm_i = dm as i32;
         let di_i = di as i32;
         let ds_i = ds as i32;
         let nh_i = nh as i32;
@@ -1601,27 +1589,19 @@ impl Mamba3GpuEngineMixed {
             let a_off = layer_idx * state.angle_per_layer();
             let _ = f32_sz; // reserved for future offset math
 
-            // F1: rmsnorm f32in → half post_norm.
-            {
-                let eps: f32 = engine.cfg.rms_norm_eps;
-                let grid = crate::gpu::launch::grid_norm(b, dm);
-                let mut bld = engine
-                    .ctx
-                    .stream
-                    .launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
-                let pn_ptr = scratch.post_norm.cached_ptr();
-                let rms_ptr = scratch.rms_buf.cached_ptr();
-                let res_ptr = scratch.residual.cached_ptr();
-                let nw = lw.norm_weight.ptr();
-                bld.arg(&pn_ptr);
-                bld.arg(&rms_ptr);
-                bld.arg(&res_ptr);
-                bld.arg(&nw);
-                bld.arg(&b_i);
-                bld.arg(&dm_i);
-                bld.arg(&eps);
-                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F1 rmsnorm: {e:?}"))?;
-            }
+            // F1: the block norm, f32 residual → half post_norm.
+            block_norm::forward(
+                &engine.ctx,
+                dt,
+                (
+                    scratch.post_norm.cached_ptr(),
+                    scratch.rms_buf.cached_ptr(),
+                    scratch.residual.cached_ptr(),
+                ),
+                lw.norm(),
+                (b, dm, engine.cfg.rms_norm_eps),
+                "M3 F1 block norm",
+            )?;
 
             // F2: in_proj GEMM typed (bf16 × bf16 → bf16).
             gpu_gemm_typed_forward_raw(
@@ -1906,26 +1886,18 @@ impl Mamba3GpuEngineMixed {
             // the gate, and the typed branch added back into the residual.
             if let Some(m) = w.mlp.get(layer_idx) {
                 let h = m.hidden;
-                {
-                    let eps: f32 = engine.cfg.rms_norm_eps;
-                    let grid = crate::gpu::launch::grid_norm(b, dm);
-                    let mut bld = engine
-                        .ctx
-                        .stream
-                        .launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
-                    let pn_ptr = scratch.post_norm.cached_ptr();
-                    let rms_ptr = scratch.rms_buf.cached_ptr();
-                    let res_ptr = scratch.residual.cached_ptr();
-                    let nw = m.norm_weight.ptr();
-                    bld.arg(&pn_ptr);
-                    bld.arg(&rms_ptr);
-                    bld.arg(&res_ptr);
-                    bld.arg(&nw);
-                    bld.arg(&b_i);
-                    bld.arg(&dm_i);
-                    bld.arg(&eps);
-                    unsafe { bld.launch(grid) }.map_err(|e| format!("M3 mlp norm2: {e:?}"))?;
-                }
+                block_norm::forward(
+                    &engine.ctx,
+                    dt,
+                    (
+                        scratch.post_norm.cached_ptr(),
+                        scratch.rms_buf.cached_ptr(),
+                        scratch.residual.cached_ptr(),
+                    ),
+                    m.norm(),
+                    (b, dm, engine.cfg.rms_norm_eps),
+                    "M3 mlp norm2",
+                )?;
                 gpu_gemm_typed_forward_raw(
                     &engine.ctx,
                     TypedPtr {
@@ -1987,28 +1959,18 @@ impl Mamba3GpuEngineMixed {
         }
 
         // Final norm_f: residual_f32 → temporal (half).
-        {
-            let grid = crate::gpu::launch::grid_norm(b, dm);
-            let eps: f32 = engine.cfg.rms_norm_eps;
-            let mut bld = engine
-                .ctx
-                .stream
-                .launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
-            let t_ptr = scratch.temporal.cached_ptr();
-            let rms_ptr = scratch.rms_buf.cached_ptr();
-            let res_ptr = scratch.residual.cached_ptr();
-            let nfw = w.norm_f_weight.ptr();
-            bld.arg(&t_ptr);
-            bld.arg(&rms_ptr);
-            bld.arg(&res_ptr);
-            bld.arg(&nfw);
-            bld.arg(&b_i);
-            bld.arg(&dm_i);
-            bld.arg(&eps);
-            unsafe { bld.launch(grid) }.map_err(|e| format!("M3 norm_f: {e:?}"))?;
-        }
-
-        Ok(())
+        block_norm::forward(
+            &engine.ctx,
+            dt,
+            (
+                scratch.temporal.cached_ptr(),
+                scratch.rms_buf.cached_ptr(),
+                scratch.residual.cached_ptr(),
+            ),
+            w.final_norm(),
+            (b, dm, engine.cfg.rms_norm_eps),
+            "M3 norm_f",
+        )
     }
 
     pub fn step_mixed_native(

@@ -23,6 +23,22 @@ fn f64v(v: &[f32]) -> Vec<f64> {
     v.iter().map(|&x| f64::from(x)).collect()
 }
 
+/// A block norm: RMSNorm, or `nn.LayerNorm` (biased variance) when the
+/// bias is not empty.
+fn block_norm64(x: &[f64], (w, b): (&[f32], &[f32]), eps: f64) -> Vec<f64> {
+    if b.is_empty() {
+        return rms64(x, w, eps);
+    }
+    let n = x.len() as f64;
+    let mean = x.iter().sum::<f64>() / n;
+    let var = x.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+    let inv = 1.0 / (var + eps).sqrt();
+    x.iter()
+        .zip(w.iter().zip(b))
+        .map(|(v, (&w, &b))| (v - mean) * inv * f64::from(w) + f64::from(b))
+        .collect()
+}
+
 fn rms64(x: &[f64], w: &[f32], eps: f64) -> Vec<f64> {
     let ms = x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64;
     let inv = 1.0 / (ms + eps).sqrt();
@@ -62,7 +78,11 @@ fn mixer_step64(
         cfg.mimo_rank,
     );
     let na = cfg.num_rope_angles();
-    let normed = rms64(u, &lw.norm_weight, f64::from(cfg.rms_norm_eps));
+    let normed = block_norm64(
+        u,
+        (&lw.norm_weight, &lw.norm_bias),
+        f64::from(cfg.rms_norm_eps),
+    );
     let proj = matvec64(&normed, &lw.in_proj_w, cfg.in_proj_out_dim());
     let mut o = 0;
     let mut take = |len: usize| {
@@ -201,7 +221,11 @@ pub fn backbone_step64(
             x = mlp64(m, &x, f64::from(cfg.rms_norm_eps));
         }
     }
-    rms64(&x, &w.norm_f_weight, f64::from(cfg.rms_norm_eps))
+    block_norm64(
+        &x,
+        (&w.norm_f_weight, &w.norm_f_bias),
+        f64::from(cfg.rms_norm_eps),
+    )
 }
 
 pub fn zeros64(cfg: &Mamba3MimoConfig) -> Vec<Layer64> {
@@ -223,7 +247,7 @@ pub fn zeros64(cfg: &Mamba3MimoConfig) -> Vec<Layer64> {
 }
 
 fn mlp64(m: &mamba_rs::mlp::GatedMlpLayerWeights, x: &[f64], eps: f64) -> Vec<f64> {
-    let normed = rms64(x, &m.norm_weight, eps);
+    let normed = block_norm64(x, (&m.norm_weight, &m.norm_bias), eps);
     let hidden = m.hidden();
     let up = matvec64(&normed, &m.fc1_w, 2 * hidden);
     let act: Vec<f64> = (0..hidden)

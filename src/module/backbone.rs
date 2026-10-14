@@ -155,6 +155,7 @@ impl MambaBackbone {
         let dc = cfg.d_conv;
         let dr = cfg.dt_rank();
         let xd = cfg.xdbl_dim();
+        let nb = cfg.block_norm.bias_len(d);
         for (i, lw) in weights.layers.iter().enumerate() {
             let check = |name: &str, actual: usize, expected: usize| -> Result<(), String> {
                 if actual != expected {
@@ -165,6 +166,7 @@ impl MambaBackbone {
                 Ok(())
             };
             check("norm_weight", lw.norm_weight.len(), d)?;
+            check("norm_bias", lw.norm_bias.len(), nb)?;
             check("in_proj_w", lw.in_proj_w.len(), d * 2 * di)?;
             check("in_proj_b", lw.in_proj_b.len(), cfg.in_proj_bias_len())?;
             check("conv1d_weight", lw.conv1d_weight.len(), di * dc)?;
@@ -186,12 +188,18 @@ impl MambaBackbone {
             ));
         }
         for (i, m) in weights.mlp.iter().enumerate() {
-            m.validate(d, hidden, &format!("mlp[{i}]"))?;
+            m.validate(d, hidden, cfg.block_norm, &format!("mlp[{i}]"))?;
         }
         if weights.norm_f_weight.len() != d {
             return Err(format!(
                 "norm_f_weight: expected {d}, got {}",
                 weights.norm_f_weight.len()
+            ));
+        }
+        if weights.norm_f_bias.len() != nb {
+            return Err(format!(
+                "norm_f_bias: expected {nb}, got {}",
+                weights.norm_f_bias.len()
             ));
         }
         for lw in &mut weights.layers {

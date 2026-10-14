@@ -1,8 +1,11 @@
-//! A float64 transcription of the reference Mamba-3 SISO mixer step, for the
-//! SISO gradient test to take central differences on.
+//! A float64 transcription of the reference Mamba-3 SISO step, for the SISO
+//! gradient tests to take central differences on: the mixer, and the whole
+//! model with its gated MLPs and final norm.
 
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::weights::TrainMamba3LayerWeights;
+use mamba_rs::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
+use mamba_rs::mlp::GatedMlpLayerWeights;
 
 // The float64 step oracle, transcribed from the reference's `Mamba3.step`
 // and `_postprocess` (mamba_ssm/modules/mamba3.py) at state-spaces/mamba
@@ -18,6 +21,22 @@ pub struct Layer64 {
     pub k: Vec<f64>,
     pub v: Vec<f64>,
     pub angle: Vec<f64>,
+}
+
+/// A block norm: LayerNorm (biased variance, as `nn.LayerNorm`) when it has
+/// a bias, RMSNorm otherwise.
+fn block_norm64(x: &[f64], (w, b): (&[f32], &[f32]), eps: f64) -> Vec<f64> {
+    if b.is_empty() {
+        return rms64(x, w, eps);
+    }
+    let n = x.len() as f64;
+    let mean = x.iter().sum::<f64>() / n;
+    let var = x.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+    let inv = 1.0 / (var + eps).sqrt();
+    x.iter()
+        .zip(w.iter().zip(b))
+        .map(|(v, (&w, &b))| (v - mean) * inv * f64::from(w) + f64::from(b))
+        .collect()
 }
 
 fn rms64(x: &[f64], w: &[f32], eps: f64) -> Vec<f64> {
@@ -63,7 +82,7 @@ pub fn layer_step64(
     let eps = f64::from(cfg.rms_norm_eps);
     // The reference's B/C and gate norms keep an epsilon of their own.
     let ssm_eps = f64::from(cfg.ssm_norm_eps);
-    let normed = rms64(u, &lw.norm_weight, eps);
+    let normed = block_norm64(u, (&lw.norm_weight, &lw.norm_bias), eps);
     let proj = matvec64(&normed, &lw.in_proj_w, cfg.in_proj_out_dim());
     let mut o = 0;
     let mut take = |len: usize| {
@@ -154,6 +173,65 @@ pub fn layer_step64(
     }
     let mixed = matvec64(&y, &lw.out_proj_w, dm);
     u.iter().zip(&mixed).map(|(a, b)| a + b).collect()
+}
+
+/// One layer's weights in the training layout [`layer_step64`] reads.
+pub fn train_layer(lw: &Mamba3LayerWeights) -> TrainMamba3LayerWeights {
+    TrainMamba3LayerWeights {
+        norm_weight: lw.norm_weight.clone(),
+        norm_bias: lw.norm_bias.clone(),
+        in_proj_w: lw.in_proj_w.clone(),
+        dt_bias: lw.dt_bias.clone(),
+        b_norm_weight: lw.b_norm_weight.clone(),
+        c_norm_weight: lw.c_norm_weight.clone(),
+        b_bias: lw.b_bias.clone(),
+        c_bias: lw.c_bias.clone(),
+        d_param: lw.d_param.clone(),
+        norm_gate_weight: lw.norm_gate_weight.clone(),
+        out_proj_w: lw.out_proj_w.clone(),
+    }
+}
+
+/// The gated MLP on one row: `x + fc2(value * silu(gate))` with
+/// `[value | gate] = fc1(norm2(x))`.
+fn mlp64(m: &GatedMlpLayerWeights, x: &[f64], eps: f64) -> Vec<f64> {
+    let normed = block_norm64(x, (&m.norm_weight, &m.norm_bias), eps);
+    let hidden = m.hidden();
+    let up = matvec64(&normed, &m.fc1_w, 2 * hidden);
+    let act: Vec<f64> = (0..hidden)
+        .map(|j| up[j] * silu64(up[hidden + j]))
+        .collect();
+    let down = matvec64(&act, &m.fc2_w, x.len());
+    x.iter().zip(&down).map(|(a, b)| a + b).collect()
+}
+
+/// One token through the whole model: the input projection (none for an
+/// identity one), every layer's mixer and gated MLP, and the final norm.
+/// `layers` are `w`'s layers through [`train_layer`].
+pub fn backbone_step64(
+    cfg: &Mamba3Config,
+    (w, layers): (&Mamba3Weights, &[TrainMamba3LayerWeights]),
+    st: &mut [Layer64],
+    input: &[f32],
+) -> Vec<f64> {
+    let eps = f64::from(cfg.rms_norm_eps);
+    let input64: Vec<f64> = input.iter().map(|&v| f64::from(v)).collect();
+    let mut x = if w.input_proj_w.is_empty() {
+        input64
+    } else {
+        let mut x = matvec64(&input64, &w.input_proj_w, cfg.d_model);
+        for (xv, &b) in x.iter_mut().zip(&w.input_proj_b) {
+            *xv += f64::from(b);
+        }
+        x
+    };
+    for (l, (lw, s)) in layers.iter().zip(st.iter_mut()).enumerate() {
+        x = layer_step64(cfg, lw, s, &x);
+        if let Some(m) = w.mlp.get(l) {
+            x = mlp64(m, &x, eps);
+        }
+    }
+    block_norm64(&x, (&w.norm_f_weight, &w.norm_f_bias), eps)
 }
 
 pub fn zeros64(cfg: &Mamba3Config) -> Vec<Layer64> {

@@ -5,11 +5,13 @@
 pub enum RemappedKey {
     /// Layer weight: (layer_index, field_name)
     Layer(usize, &'static str),
-    /// A tensor of a layer's gated MLP: (layer_index, `norm2`, `fc1` or
-    /// `fc2`)
+    /// A tensor of a layer's gated MLP: (layer_index, `norm2`,
+    /// `norm2_bias`, `fc1` or `fc2`)
     Mlp(usize, &'static str),
-    /// Final RMSNorm weight
+    /// The final norm's weight
     NormF,
+    /// The final LayerNorm's bias
+    NormFBias,
     /// Embedding matrix (not a backbone weight)
     Embedding,
     /// LM head (separate from embedding when not tied)
@@ -29,6 +31,9 @@ pub fn remap_m1_hf_key(hf_key: &str) -> RemappedKey {
     if hf_key == "backbone.norm_f.weight" {
         return RemappedKey::NormF;
     }
+    if hf_key == "backbone.norm_f.bias" {
+        return RemappedKey::NormFBias;
+    }
 
     if let Some(rest) = hf_key.strip_prefix("backbone.layers.") {
         // A key like "backbone.layers.0" (numeric tail, no field suffix) is
@@ -43,6 +48,7 @@ pub fn remap_m1_hf_key(hf_key: &str) -> RemappedKey {
 
         let mlp = match suffix {
             "norm2.weight" => Some("norm2"),
+            "norm2.bias" => Some("norm2_bias"),
             "mlp.fc1.weight" => Some("fc1"),
             "mlp.fc2.weight" => Some("fc2"),
             _ => None,
@@ -63,6 +69,7 @@ pub fn remap_m1_hf_key(hf_key: &str) -> RemappedKey {
             "mixer.out_proj.weight" => "out_proj_w",
             "mixer.out_proj.bias" => "out_proj_b",
             "norm.weight" => "norm_weight",
+            "norm.bias" => "norm_bias",
             _ => return RemappedKey::Unknown,
         };
         return RemappedKey::Layer(layer_idx, field);
@@ -149,6 +156,23 @@ mod tests {
         assert_eq!(
             remap_m1_hf_key("backbone.layers.1.mlp.fc2.weight"),
             RemappedKey::Mlp(1, "fc2")
+        );
+        assert_eq!(
+            remap_m1_hf_key("backbone.layers.1.norm2.bias"),
+            RemappedKey::Mlp(1, "norm2_bias")
+        );
+    }
+
+    /// A LayerNorm model's block norm biases.
+    #[test]
+    fn test_remap_layer_norm_biases() {
+        assert_eq!(
+            remap_m1_hf_key("backbone.layers.4.norm.bias"),
+            RemappedKey::Layer(4, "norm_bias")
+        );
+        assert_eq!(
+            remap_m1_hf_key("backbone.norm_f.bias"),
+            RemappedKey::NormFBias
         );
     }
 

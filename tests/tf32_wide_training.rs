@@ -29,6 +29,7 @@ fn one_step(d_model: usize, batch: usize, seq_len: usize) {
         expand: 2,
         n_layers: 1,
         scan_mode: ScanMode::Auto,
+        block_norm: mamba_rs::BlockNorm::Rms,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,

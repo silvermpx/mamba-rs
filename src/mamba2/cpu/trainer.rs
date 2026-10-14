@@ -21,6 +21,7 @@ tensor_list!(
     pre: [input_proj_w, input_proj_b],
     layers: layers [
         norm_weight,
+        norm_bias,
         in_proj_w,
         in_proj_b,
         conv_w,
@@ -32,8 +33,8 @@ tensor_list!(
         out_proj_w,
         out_proj_b
     ],
-    mlp: mlp [norm_weight, fc1_w, fc2_w],
-    post: [norm_f_weight],
+    mlp: mlp [norm_weight, norm_bias, fc1_w, fc2_w],
+    post: [norm_f_weight, norm_f_bias],
 );
 
 pub(crate) struct Mamba2Cpu {
@@ -120,9 +121,9 @@ impl CpuFamily for Mamba2Cpu {
         w.zeros_like()
     }
 
-    /// The matrices decay; the control channels are the dt columns of
-    /// in_proj (with their bias entries where the model has the bias),
-    /// dt_bias and A_log, as on the GPU.
+    /// The matrices decay; the norms' scales and biases do not. The control
+    /// channels are the dt columns of in_proj (with their bias entries where
+    /// the model has the bias), dt_bias and A_log, as on the GPU.
     fn roles(&self, w: &Mamba2Weights) -> Vec<TensorRole> {
         let (ip, nh) = (self.cfg.in_proj_out_dim(), self.cfg.nheads());
         let dt = Control::Columns {
@@ -136,6 +137,7 @@ impl CpuFamily for Mamba2Cpu {
         let mut roles = vec![plain(true), plain(false)];
         for _ in &w.layers {
             roles.extend([
+                plain(false),
                 plain(false),
                 TensorRole {
                     decays: true,
@@ -162,9 +164,9 @@ impl CpuFamily for Mamba2Cpu {
             ]);
         }
         for _ in &w.mlp {
-            roles.extend([plain(false), plain(true), plain(true)]);
+            roles.extend([plain(false), plain(false), plain(true), plain(true)]);
         }
-        roles.push(plain(false));
+        roles.extend([plain(false), plain(false)]);
         roles
     }
 

@@ -91,6 +91,14 @@ fn cases() -> Vec<(&'static str, Mamba3MimoConfig)> {
                 ..base
             },
         ),
+        (
+            "rank 4, LayerNorm block norms, MLP after",
+            Mamba3MimoConfig {
+                block_norm: mamba_rs::BlockNorm::Layer,
+                d_intermediate: 128,
+                ..base
+            },
+        ),
     ]
 }
 
@@ -109,6 +117,7 @@ fn drawn(cfg: &Mamba3MimoConfig, input_dim: usize, seed: u64) -> Mamba3MimoWeigh
             (&mut lw.mimo_o, 8, 0.0, 0.8),
             (&mut lw.norm_weight, 9, 1.0, 0.2),
             (&mut lw.norm_gate_weight, 10, 1.0, 0.3),
+            (&mut lw.norm_bias, 11, 0.0, 0.2),
         ] {
             let d = det(v.len(), s + k, scale);
             for (x, dv) in v.iter_mut().zip(d) {
@@ -125,6 +134,14 @@ fn drawn(cfg: &Mamba3MimoConfig, input_dim: usize, seed: u64) -> Mamba3MimoWeigh
         for (x, dv) in m.norm_weight.iter_mut().zip(d) {
             *x = 1.0 + dv;
         }
+        let d = det(m.norm_bias.len(), seed + 40 + i as u64, 0.2);
+        for (x, dv) in m.norm_bias.iter_mut().zip(d) {
+            *x = dv;
+        }
+    }
+    let d = det(w.norm_f_bias.len(), seed + 50, 0.2);
+    for (x, dv) in w.norm_f_bias.iter_mut().zip(d) {
+        *x = dv;
     }
     w
 }
@@ -135,10 +152,12 @@ fn named(w: &Mamba3MimoWeights) -> Vec<(String, &[f32])> {
         ("input_proj_w".to_string(), w.input_proj_w.as_slice()),
         ("input_proj_b".to_string(), w.input_proj_b.as_slice()),
         ("norm_f".to_string(), w.norm_f_weight.as_slice()),
+        ("norm_f_bias".to_string(), w.norm_f_bias.as_slice()),
     ];
     for (l, lw) in w.layers.iter().enumerate() {
         for (name, v) in [
             ("norm", &lw.norm_weight),
+            ("norm_bias", &lw.norm_bias),
             ("in_proj_w", &lw.in_proj_w),
             ("dt_bias", &lw.dt_bias),
             ("b_norm", &lw.b_norm_weight),
@@ -157,6 +176,7 @@ fn named(w: &Mamba3MimoWeights) -> Vec<(String, &[f32])> {
     }
     for (l, m) in w.mlp.iter().enumerate() {
         out.push((format!("mlp{l}.norm"), m.norm_weight.as_slice()));
+        out.push((format!("mlp{l}.norm_bias"), m.norm_bias.as_slice()));
         out.push((format!("mlp{l}.fc1"), m.fc1_w.as_slice()));
         out.push((format!("mlp{l}.fc2"), m.fc2_w.as_slice()));
     }

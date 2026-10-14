@@ -50,6 +50,26 @@ fn drawn_weights(cfg: &Mamba3MimoConfig, seed: u64) -> Mamba3MimoWeights {
         jitter(&mut lw.mimo_o, 8, 0.0, 0.8);
         jitter(&mut lw.norm_gate_weight, 9, 1.0, 0.3);
         jitter(&mut lw.norm_weight, 10, 1.0, 0.2);
+        jitter(&mut lw.norm_bias, 11, 0.0, 0.2);
+    }
+    for (l, m) in w.mlp.iter_mut().enumerate() {
+        let s = seed * 100 + l as u64 * 10 + 5;
+        for (k, (v, base)) in [(&mut m.norm_weight, 1.0), (&mut m.norm_bias, 0.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let d = det(v.len(), s + k as u64, 0.2);
+            for (x, dv) in v.iter_mut().zip(d) {
+                *x = base + dv;
+            }
+        }
+    }
+    for (x, dv) in w
+        .norm_f_bias
+        .iter_mut()
+        .zip(det(cfg.d_model, seed + 9, 0.2))
+    {
+        *x = dv;
     }
     w
 }
@@ -115,6 +135,14 @@ fn m3_mimo_decode_matches_the_f64_step_oracle() {
                 mimo_rank: 8,
                 headdim: 8,
                 d_state: 24,
+                ..base
+            },
+        ),
+        (
+            "rank 4 LayerNorm block norms, MLP after",
+            Mamba3MimoConfig {
+                block_norm: mamba_rs::BlockNorm::Layer,
+                d_intermediate: 96,
                 ..base
             },
         ),
@@ -394,6 +422,14 @@ fn m3_mimo_prefill_matches_the_decode_chain() {
             Mamba3MimoConfig {
                 mimo_rank: 3,
                 d_state: 2,
+                ..base
+            },
+        ),
+        (
+            "rank 4 LayerNorm block norms, MLP after",
+            Mamba3MimoConfig {
+                block_norm: mamba_rs::BlockNorm::Layer,
+                d_intermediate: 96,
                 ..base
             },
         ),

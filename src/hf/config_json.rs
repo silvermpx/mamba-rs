@@ -48,9 +48,10 @@ struct RawConfig {
     intermediate_size: Option<usize>,
     // The gated MLP after every mixer (original format only).
     d_intermediate: Option<usize>,
-    // Backbone parts the original format can carry. Each one this build
-    // does not model is refused rather than loaded without it.
+    // The block norms' kind: `false` builds LayerNorm block norms.
     rms_norm: Option<bool>,
+    // Attention layers between the mixers: refused rather than loaded
+    // without them, since attention stays outside this crate.
     attn_layer_idx: Option<Vec<usize>>,
     // The original format names the mixer under `ssm_cfg.layer`; a config
     // without it is Mamba-1.
@@ -92,10 +93,13 @@ pub struct HfMambaConfig {
     pub use_conv_bias: bool,
     /// The gated MLP after every mixer (`d_intermediate`, 0 for none).
     pub d_intermediate: usize,
-    /// RMSNorm epsilon from the HF config. `1e-5` is the state-spaces
-    /// default; FalconMamba ships `1e-6`. Callers should plumb this into
-    /// every norm kernel instead of hardcoding the constant so both
-    /// checkpoint families produce numerically correct outputs.
+    /// The block norms' kind: RMSNorm, or LayerNorm with biases for an
+    /// original-format config with `rms_norm = false`.
+    pub block_norm: crate::config::BlockNorm,
+    /// The block norms' epsilon from the HF config. `1e-5` is the
+    /// state-spaces default; FalconMamba ships `1e-6`. Callers should plumb
+    /// this into every norm kernel instead of hardcoding the constant so
+    /// both checkpoint families produce numerically correct outputs.
     pub rms_norm_eps: f32,
     /// FalconMamba's dt, B and C norm epsilon (`mixer_rms_eps`, 1e-6 by
     /// default); `None` for Mamba-1.
@@ -160,11 +164,12 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
     // FalconMamba is Mamba-1 with RMS norms over dt, B and C in every mixer.
     let bcdt_rms_eps = (raw.model_type.as_deref() == Some("falcon_mamba"))
         .then(|| raw.mixer_rms_eps.unwrap_or(1e-6));
-    if raw.rms_norm == Some(false) {
-        return Err("config.json: rms_norm = false (LayerNorm) is not supported yet".into());
-    }
     if raw.attn_layer_idx.as_ref().is_some_and(|a| !a.is_empty()) {
-        return Err("config.json: attention layers (attn_layer_idx) are not supported yet".into());
+        return Err(
+            "config.json: attention layers (attn_layer_idx) are not loaded: attention stays \
+             outside mamba-rs"
+                .into(),
+        );
     }
     let (d_model, n_layers, d_state, d_conv) = extract_dims(&raw)?;
     let ssm_cfg = raw.ssm_cfg.as_ref();
@@ -237,6 +242,7 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
             .or(raw.use_conv_bias)
             .unwrap_or(true),
         d_intermediate: raw.d_intermediate.unwrap_or(0),
+        block_norm: crate::config::BlockNorm::from_rms_norm(raw.rms_norm != Some(false)),
         rms_norm_eps,
         bcdt_rms_eps,
     })
@@ -508,22 +514,29 @@ mod tests {
         assert_eq!(parse_config_json(json).unwrap().expand, 2);
     }
 
-    /// Parts this build does not model are refused, never dropped: a
-    /// checkpoint must not load and then run without them.
+    /// Attention layers are refused, never dropped: a checkpoint must not
+    /// load and then run without them. An `rms_norm = false` config builds
+    /// its LayerNorm block norms; one that says nothing has RMSNorm.
     #[test]
     fn unmodelled_backbone_parts_are_refused() {
-        for (json, what) in [
+        let json = br#"{"d_model":64,"n_layer":2,"vocab_size":100,"attn_layer_idx":[0]}"#;
+        let err = parse_config_json(json).unwrap_err();
+        assert!(err.contains("attn_layer_idx"), "{err}");
+        for (json, norm) in [
             (
                 &br#"{"d_model":64,"n_layer":2,"vocab_size":100,"rms_norm":false}"#[..],
-                "LayerNorm",
+                crate::config::BlockNorm::Layer,
             ),
             (
-                br#"{"d_model":64,"n_layer":2,"vocab_size":100,"attn_layer_idx":[0]}"#,
-                "attn_layer_idx",
+                br#"{"d_model":64,"n_layer":2,"vocab_size":100,"rms_norm":true}"#,
+                crate::config::BlockNorm::Rms,
+            ),
+            (
+                br#"{"d_model":64,"n_layer":2,"vocab_size":100}"#,
+                crate::config::BlockNorm::Rms,
             ),
         ] {
-            let err = parse_config_json(json).unwrap_err();
-            assert!(err.contains(what), "{what}: {err}");
+            assert_eq!(parse_config_json(json).unwrap().block_norm, norm);
         }
     }
 

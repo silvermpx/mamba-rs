@@ -527,6 +527,71 @@ fn mamba1_gated_mlp_loads() {
     }
 }
 
+/// An original-format Mamba-1 checkpoint built with `rms_norm = false`
+/// loads its LayerNorm block norms: every norm's bias as stored, the gated
+/// MLP's norm2 among them. One missing a bias is refused, and so is an
+/// RMSNorm config whose checkpoint carries one.
+#[test]
+fn mamba1_layer_norm_checkpoints_load() {
+    let config = br#"{"d_model": 16, "n_layer": 2, "vocab_size": 32, "d_intermediate": 100,
+        "ssm_cfg": {"d_state": 4}, "rms_norm": false}"#;
+    let mut ts = mamba1_tensors_with(
+        "backbone.embedding.weight",
+        Dtype::F32,
+        (1, false, true, 128),
+    );
+    ts.push(Tensor::new("backbone.norm_f.bias", &[16], Dtype::F32, 300));
+    for i in 0..2u64 {
+        ts.push(Tensor::new(
+            &format!("backbone.layers.{i}.norm.bias"),
+            &[16],
+            Dtype::F32,
+            301 + i,
+        ));
+        ts.push(Tensor::new(
+            &format!("backbone.layers.{i}.norm2.bias"),
+            &[16],
+            Dtype::F32,
+            311 + i,
+        ));
+    }
+    let tensor = |name: &str| {
+        ts.iter()
+            .find(|t| t.name == name)
+            .map(|t| t.read_back())
+            .unwrap()
+    };
+    let dir = scratch("m1-layer-norm");
+    write_safetensors(&dir.join("model.safetensors"), &refs(&ts));
+    std::fs::write(dir.join("config.json"), config).unwrap();
+    let m = load_hf(&dir).unwrap();
+    assert_eq!(m.backbone.config().block_norm, mamba_rs::BlockNorm::Layer);
+    let w = m.backbone.weights();
+    assert_eq!(w.norm_f_bias, tensor("backbone.norm_f.bias"));
+    for i in 0..2 {
+        let p = |n: &str| format!("backbone.layers.{i}.{n}");
+        assert_eq!(w.layers[i].norm_bias, tensor(&p("norm.bias")));
+        assert_eq!(w.mlp[i].norm_bias, tensor(&p("norm2.bias")));
+    }
+
+    let refused = |tag: &str, tensors: &[&Tensor], config: &[u8]| {
+        let dir = scratch(tag);
+        write_safetensors(&dir.join("model.safetensors"), tensors);
+        std::fs::write(dir.join("config.json"), config).unwrap();
+        assert!(load_hf(&dir).is_err(), "{tag}");
+    };
+    for missing in [
+        "backbone.norm_f.bias",
+        "backbone.layers.1.norm.bias",
+        "backbone.layers.0.norm2.bias",
+    ] {
+        let kept: Vec<&Tensor> = ts.iter().filter(|t| t.name != missing).collect();
+        refused(&format!("m1-layer-norm-no-{missing}"), &kept, config);
+    }
+    let rms = String::from_utf8_lossy(config).replace("\"rms_norm\": false", "\"rms_norm\": true");
+    refused("m1-layer-norm-as-rms", &refs(&ts), rms.as_bytes());
+}
+
 /// The projection biases, a missing conv bias and a dt rank of its own load
 /// from either format's flags, the biases as they are stored; a checkpoint
 /// whose tensors disagree with its flags is refused.
@@ -986,4 +1051,178 @@ fn falcon_mamba_loads_with_its_mixer_norms() {
     assert_eq!(cfg.bcdt_rms_eps, Some(1e-6));
     assert_eq!((cfg.expand, cfg.rms_norm_eps), (2, 1e-5));
     assert!(m.lm_head.is_some());
+}
+
+/// A Mamba-2 checkpoint built with `rms_norm = false` loads its LayerNorm
+/// block norms: every norm's bias as stored, the gated MLP's norm2 among
+/// them. One missing a bias is refused.
+#[test]
+fn mamba2_layer_norm_checkpoints_load() {
+    let json = br#"{"d_model": 32, "n_layer": 2, "vocab_size": 32, "d_intermediate": 64,
+        "ssm_cfg": {"layer": "Mamba2", "d_state": 8, "headdim": 16}, "rms_norm": false}"#;
+    let cfg = parse_mamba2_config(json).unwrap().cfg;
+    assert_eq!(cfg.block_norm, mamba_rs::BlockNorm::Layer);
+    let (d, h) = (cfg.d_model, cfg.mlp_hidden());
+    let mut ts = vec![
+        Tensor::new("backbone.embedding.weight", &[32, d], Dtype::F32, 1),
+        Tensor::new("backbone.norm_f.weight", &[d], Dtype::F32, 2),
+        Tensor::new("backbone.norm_f.bias", &[d], Dtype::F32, 3),
+    ];
+    for i in 0..cfg.n_layers {
+        let p = |n: &str| format!("backbone.layers.{i}.{n}");
+        let seed = 10 * (i as u64 + 1);
+        for (k, (name, shape)) in [
+            ("norm.weight", vec![d]),
+            ("norm.bias", vec![d]),
+            ("norm2.weight", vec![d]),
+            ("norm2.bias", vec![d]),
+            ("mlp.fc1.weight", vec![2 * h, d]),
+            ("mlp.fc2.weight", vec![d, h]),
+            ("mixer.in_proj.weight", vec![cfg.in_proj_out_dim(), d]),
+            ("mixer.conv1d.weight", vec![cfg.conv_dim(), 1, cfg.d_conv]),
+            ("mixer.conv1d.bias", vec![cfg.conv_dim()]),
+            ("mixer.dt_bias", vec![cfg.nheads()]),
+            ("mixer.A_log", vec![cfg.nheads()]),
+            ("mixer.D", vec![cfg.nheads()]),
+            ("mixer.norm.weight", vec![cfg.ssm_dim()]),
+            ("mixer.out_proj.weight", vec![d, cfg.d_inner()]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ts.push(Tensor::new(&p(name), &shape, Dtype::F32, seed + k as u64));
+        }
+    }
+    let tensor = |name: &str| {
+        ts.iter()
+            .find(|t| t.name == name)
+            .map(|t| t.read_back())
+            .unwrap()
+    };
+    let dir = scratch("m2-layer-norm");
+    std::fs::write(dir.join("config.json"), json).unwrap();
+    write_safetensors(&dir.join("model.safetensors"), &refs(&ts));
+    let m = load_hf_mamba2(&dir).unwrap();
+    assert_eq!(m.weights.norm_f_bias, tensor("backbone.norm_f.bias"));
+    for i in 0..cfg.n_layers {
+        let p = |n: &str| format!("backbone.layers.{i}.{n}");
+        assert_eq!(m.weights.layers[i].norm_bias, tensor(&p("norm.bias")));
+        assert_eq!(m.weights.mlp[i].norm_bias, tensor(&p("norm2.bias")));
+    }
+
+    let missing: Vec<Tensor> = ts
+        .into_iter()
+        .filter(|t| t.name != "backbone.layers.1.norm2.bias")
+        .collect();
+    let dir = scratch("m2-layer-norm-missing");
+    std::fs::write(dir.join("config.json"), json).unwrap();
+    write_safetensors(&dir.join("model.safetensors"), &refs(&missing));
+    assert!(load_hf_mamba2(&dir).is_err());
+}
+
+/// Mamba-3 checkpoints built with `rms_norm = false`, SISO and MIMO, load
+/// their LayerNorm block norms: every norm's bias as stored, the gated
+/// MLP's norm2 among them. One missing a bias is refused.
+#[test]
+fn mamba3_layer_norm_checkpoints_load() {
+    for mimo in [false, true] {
+        let json = format!(
+            r#"{{"d_model": 32, "n_layer": 2, "vocab_size": 32, "d_intermediate": 64,
+            "ssm_cfg": {{"layer": "Mamba3", "d_state": 16, "headdim": 16, "is_mimo": {mimo},
+            "mimo_rank": 2}}, "rms_norm": false, "tie_embeddings": true}}"#
+        );
+        let hf = parse_mamba3_config(json.as_bytes()).unwrap();
+        let (cfg, rank) = (hf.cfg, hf.mimo_rank.unwrap_or(1));
+        assert_eq!(cfg.block_norm, mamba_rs::BlockNorm::Layer);
+        let ip = match hf.mimo_config().unwrap() {
+            Some(m) => m.in_proj_out_dim(),
+            None => cfg.in_proj_out_dim(),
+        };
+        let (d, ds, nh, h) = (cfg.d_model, cfg.d_state, cfg.nheads(), cfg.mlp_hidden());
+        let mut ts = vec![
+            Tensor::new("backbone.embedding.weight", &[32, d], Dtype::F32, 1),
+            Tensor::new("backbone.norm_f.weight", &[d], Dtype::F32, 2),
+            Tensor::new("backbone.norm_f.bias", &[d], Dtype::F32, 3),
+        ];
+        for i in 0..cfg.n_layers {
+            let p = |n: &str| format!("backbone.layers.{i}.{n}");
+            let seed = 100 * (i as u64 + 1);
+            let mut layer = vec![
+                ("norm.weight", vec![d]),
+                ("norm.bias", vec![d]),
+                ("norm2.weight", vec![d]),
+                ("norm2.bias", vec![d]),
+                ("mlp.fc1.weight", vec![2 * h, d]),
+                ("mlp.fc2.weight", vec![d, h]),
+                ("mixer.in_proj.weight", vec![ip, d]),
+                ("mixer.dt_bias", vec![nh]),
+                ("mixer.B_bias", vec![nh, rank, ds]),
+                ("mixer.C_bias", vec![nh, rank, ds]),
+                ("mixer.D", vec![nh]),
+                ("mixer.B_norm.weight", vec![ds]),
+                ("mixer.C_norm.weight", vec![ds]),
+                ("mixer.out_proj.weight", vec![d, cfg.d_inner()]),
+            ];
+            if mimo {
+                for name in ["mixer.mimo_x", "mixer.mimo_z", "mixer.mimo_o"] {
+                    layer.push((name, vec![nh, rank, cfg.headdim]));
+                }
+            }
+            for (k, (name, shape)) in layer.into_iter().enumerate() {
+                ts.push(Tensor::new(&p(name), &shape, Dtype::F32, seed + k as u64));
+            }
+        }
+        let tensor = |name: &str| {
+            ts.iter()
+                .find(|t| t.name == name)
+                .map(|t| t.read_back())
+                .unwrap()
+        };
+        let dir = scratch(&format!("m3-layer-norm-{mimo}"));
+        std::fs::write(dir.join("config.json"), &json).unwrap();
+        write_safetensors(&dir.join("model.safetensors"), &refs(&ts));
+        // Every bias in the order the model holds them: the final norm's,
+        // then each layer's block norm and norm2.
+        let mut want = vec![tensor("backbone.norm_f.bias")];
+        for i in 0..cfg.n_layers {
+            want.push(tensor(&format!("backbone.layers.{i}.norm.bias")));
+            want.push(tensor(&format!("backbone.layers.{i}.norm2.bias")));
+        }
+        let got: Vec<Vec<f32>> = if mimo {
+            let w = load_hf_mamba3_mimo(&dir).unwrap().weights;
+            std::iter::once(w.norm_f_bias.clone())
+                .chain(
+                    w.layers
+                        .iter()
+                        .zip(&w.mlp)
+                        .flat_map(|(l, m)| [l.norm_bias.clone(), m.norm_bias.clone()]),
+                )
+                .collect()
+        } else {
+            let w = load_hf_mamba3(&dir).unwrap().weights;
+            std::iter::once(w.norm_f_bias.clone())
+                .chain(
+                    w.layers
+                        .iter()
+                        .zip(&w.mlp)
+                        .flat_map(|(l, m)| [l.norm_bias.clone(), m.norm_bias.clone()]),
+                )
+                .collect()
+        };
+        assert_eq!(got, want, "mimo {mimo}");
+
+        let missing: Vec<Tensor> = ts
+            .into_iter()
+            .filter(|t| t.name != "backbone.layers.1.norm.bias")
+            .collect();
+        let dir = scratch(&format!("m3-layer-norm-missing-{mimo}"));
+        std::fs::write(dir.join("config.json"), &json).unwrap();
+        write_safetensors(&dir.join("model.safetensors"), &refs(&missing));
+        let refused = if mimo {
+            load_hf_mamba3_mimo(&dir).is_err()
+        } else {
+            load_hf_mamba3(&dir).is_err()
+        };
+        assert!(refused, "mimo {mimo}: a missing block-norm bias loaded");
+    }
 }

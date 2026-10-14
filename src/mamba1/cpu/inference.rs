@@ -18,7 +18,7 @@ use crate::mlp::GatedMlpLayerWeights;
 use crate::mlp::cpu::{GatedMlpPacked, GatedMlpStepScratch, gated_mlp_step, gated_mlp_step_packed};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 use crate::ops::lane::{LaneGemm, input_rows};
-use crate::ops::norms::bcdt_rms_norm;
+use crate::ops::norms::{bcdt_rms_norm, layer_norm_inplace, layer_norm_row};
 use crate::ops::packed::{PackedLinear, linear_row as linear};
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
@@ -360,14 +360,23 @@ fn block_step(
     // Save residual
     scratch.residual[..d_model].copy_from_slice(&hidden[..d_model]);
 
-    // RMSNorm
-    let mean_sq: f32 = hidden[..d_model].iter().map(|v| v * v).sum::<f32>() / d_model as f32;
-    let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();
-    for (nb, (&h, &nw)) in scratch.norm_buf[..d_model]
-        .iter_mut()
-        .zip(hidden[..d_model].iter().zip(lw.norm_weight.iter()))
-    {
-        *nb = h * inv_rms * nw;
+    // The block norm
+    if lw.norm_bias.is_empty() {
+        let mean_sq: f32 = hidden[..d_model].iter().map(|v| v * v).sum::<f32>() / d_model as f32;
+        let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();
+        for (nb, (&h, &nw)) in scratch.norm_buf[..d_model]
+            .iter_mut()
+            .zip(hidden[..d_model].iter().zip(lw.norm_weight.iter()))
+        {
+            *nb = h * inv_rms * nw;
+        }
+    } else {
+        layer_norm_row(
+            &mut scratch.norm_buf[..d_model],
+            &hidden[..d_model],
+            (&lw.norm_weight, &lw.norm_bias),
+            cfg.rms_norm_eps,
+        );
     }
     store(scratch.layer.dtype, &mut scratch.norm_buf[..d_model]);
 
@@ -511,13 +520,21 @@ fn mamba_blocks_and_norm(
             }
         }
     }
-    let mean_sq: f32 = output[..d_model].iter().map(|v| v * v).sum::<f32>() / d_model as f32;
-    let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();
-    for (o, &nfw) in output[..d_model]
-        .iter_mut()
-        .zip(weights.norm_f_weight[..d_model].iter())
-    {
-        *o *= inv_rms * nfw;
+    if weights.norm_f_bias.is_empty() {
+        let mean_sq: f32 = output[..d_model].iter().map(|v| v * v).sum::<f32>() / d_model as f32;
+        let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();
+        for (o, &nfw) in output[..d_model]
+            .iter_mut()
+            .zip(weights.norm_f_weight[..d_model].iter())
+        {
+            *o *= inv_rms * nfw;
+        }
+    } else {
+        layer_norm_inplace(
+            &mut output[..d_model],
+            (&weights.norm_f_weight, &weights.norm_f_bias),
+            cfg.rms_norm_eps,
+        );
     }
     store(scratch.layer.dtype, &mut output[..d_model]);
 }

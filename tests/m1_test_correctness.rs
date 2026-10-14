@@ -261,6 +261,7 @@ fn build_train_scaffolding(
             .iter()
             .map(|lw| TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
+                norm_bias: lw.norm_bias.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
                 in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
@@ -275,6 +276,7 @@ fn build_train_scaffolding(
             })
             .collect(),
         norm_f_weight: weights.norm_f_weight.clone(),
+        norm_f_bias: weights.norm_f_bias.clone(),
         mlp: weights.mlp.clone(),
     };
 
@@ -938,6 +940,7 @@ mod gpu_tests {
             n_layers: cfg.n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
             rms_norm_eps: 1e-5,
+            block_norm: mamba_rs::BlockNorm::Rms,
             bcdt_rms_eps: None,
         };
 
@@ -1085,6 +1088,7 @@ mod gpu_tests {
             n_layers: cfg.n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
             rms_norm_eps: 1e-5,
+            block_norm: mamba_rs::BlockNorm::Rms,
             bcdt_rms_eps: None,
         };
 
@@ -1358,6 +1362,7 @@ mod gpu_tests {
             n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
             rms_norm_eps: 1e-5,
+            block_norm: mamba_rs::BlockNorm::Rms,
             bcdt_rms_eps: None,
         };
 
@@ -1592,6 +1597,7 @@ fn test_custom_config_small() {
         expand: 2,
         n_layers: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
+        block_norm: mamba_rs::BlockNorm::Rms,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -1640,6 +1646,7 @@ fn test_custom_config_large() {
         expand: 2,
         n_layers: 4,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
+        block_norm: mamba_rs::BlockNorm::Rms,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -2116,6 +2123,7 @@ mod gpu_extra_tests {
             n_layers: cfg.n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
             rms_norm_eps: 1e-5,
+            block_norm: mamba_rs::BlockNorm::Rms,
             bcdt_rms_eps: None,
         };
 
@@ -2206,6 +2214,7 @@ mod gpu_extra_tests {
             expand: 2,
             n_layers: 2,
             scan_mode: mamba_rs::config::ScanMode::Sequential,
+            block_norm: mamba_rs::BlockNorm::Rms,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
             dt_rank: None,
@@ -2297,6 +2306,22 @@ fn f64_reference(
     let rstd = |v: &[f64], e: f64| {
         1.0 / (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64 + e).sqrt()
     };
+    // A block norm: LayerNorm (the biased variance, as nn.LayerNorm) for a
+    // norm with a bias, RMSNorm without one.
+    let block_norm = |v: &[f64], (wt, bs): (&[f32], &[f32])| -> Vec<f64> {
+        if bs.is_empty() {
+            let r = rstd(v, eps);
+            return v.iter().zip(wt).map(|(x, &g)| x * r * f(g)).collect();
+        }
+        let n = v.len() as f64;
+        let mean = v.iter().sum::<f64>() / n;
+        let var = v.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n;
+        let inv = 1.0 / (var + eps).sqrt();
+        v.iter()
+            .zip(wt.iter().zip(bs))
+            .map(|(x, (&g, &b))| (x - mean) * inv * f(g) + f(b))
+            .collect()
+    };
     let silu = |x: f64| x / (1.0 + (-x).exp());
     let mut conv = vec![vec![0f64; di * dc]; cfg.n_layers];
     let mut ssm = vec![vec![0f64; di * ds]; cfg.n_layers];
@@ -2311,8 +2336,7 @@ fn f64_reference(
             })
             .collect();
         for (l, lw) in w.layers.iter().enumerate() {
-            let r = rstd(&x, eps);
-            let h: Vec<f64> = (0..d).map(|j| x[j] * r * f(lw.norm_weight[j])).collect();
+            let h = block_norm(&x, (&lw.norm_weight, &lw.norm_bias));
             let proj: Vec<f64> = (0..2 * di)
                 .map(|k| {
                     bias(&lw.in_proj_b, k)
@@ -2366,8 +2390,7 @@ fn f64_reference(
             }
             if let Some(m) = w.mlp.get(l) {
                 let h = m.hidden();
-                let r = rstd(&x, eps);
-                let n2: Vec<f64> = (0..d).map(|j| x[j] * r * f(m.norm_weight[j])).collect();
+                let n2 = block_norm(&x, (&m.norm_weight, &m.norm_bias));
                 let up: Vec<f64> = (0..2 * h)
                     .map(|k| (0..d).map(|j| n2[j] * f(m.fc1_w[j * 2 * h + k])).sum())
                     .collect();
@@ -2377,8 +2400,7 @@ fn f64_reference(
                 }
             }
         }
-        let r = rstd(&x, eps);
-        out.extend((0..d).map(|j| x[j] * r * f(w.norm_f_weight[j])));
+        out.extend(block_norm(&x, (&w.norm_f_weight, &w.norm_f_bias)));
     }
     out
 }
@@ -2551,6 +2573,7 @@ fn inference_weights(tw: &mamba_rs::train::weights::TrainMambaWeights) -> mamba_
             .iter()
             .map(|lw| mamba_rs::MambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
+                norm_bias: lw.norm_bias.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
                 in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
@@ -2566,6 +2589,7 @@ fn inference_weights(tw: &mamba_rs::train::weights::TrainMambaWeights) -> mamba_
             })
             .collect(),
         norm_f_weight: tw.norm_f_weight.clone(),
+        norm_f_bias: tw.norm_f_bias.clone(),
         mlp: tw.mlp.clone(),
     }
 }
@@ -2666,11 +2690,20 @@ fn variant_cfgs() -> Vec<(&'static str, MambaConfig)> {
                 ..base
             },
         ),
+        (
+            "LayerNorm block norms with the gated MLP",
+            MambaConfig {
+                d_intermediate: 100,
+                block_norm: mamba_rs::BlockNorm::Layer,
+                ..base
+            },
+        ),
     ]
 }
 
-/// Initial weights with the projection biases drawn away from their zero
-/// init, so the forward reads them.
+/// Initial weights with the projection and norm biases drawn away from
+/// their zero init and the norm scales away from ones, so the forward reads
+/// them.
 fn variant_weights(cfg: &MambaConfig, input_dim: usize, seed: u64) -> mamba_rs::MambaWeights {
     let mut w = mamba_rs::MambaWeights::init(cfg, input_dim, seed);
     for lw in &mut w.layers {
@@ -2678,10 +2711,31 @@ fn variant_weights(cfg: &MambaConfig, input_dim: usize, seed: u64) -> mamba_rs::
             .in_proj_b
             .iter_mut()
             .chain(&mut lw.out_proj_b)
+            .chain(&mut lw.norm_bias)
             .enumerate()
         {
             *b = ((i * 37 % 17) as f32 / 17.0 - 0.5) * 0.4;
         }
+    }
+    for (i, b) in w
+        .norm_f_bias
+        .iter_mut()
+        .chain(w.mlp.iter_mut().flat_map(|m| &mut m.norm_bias))
+        .enumerate()
+    {
+        *b = ((i * 29 % 13) as f32 / 13.0 - 0.5) * 0.4;
+    }
+    // The norm scales away from ones: the probed loss is the sum of the
+    // outputs, and a LayerNorm's output under a uniform scale sums to its
+    // bias whatever its input, which would leave nothing upstream to probe.
+    for (i, g) in w
+        .norm_f_weight
+        .iter_mut()
+        .chain(w.layers.iter_mut().flat_map(|lw| &mut lw.norm_weight))
+        .chain(w.mlp.iter_mut().flat_map(|m| &mut m.norm_weight))
+        .enumerate()
+    {
+        *g = 1.0 + ((i * 23 % 11) as f32 / 11.0 - 0.5) * 0.4;
     }
     w
 }
@@ -2718,10 +2772,18 @@ fn block_steps_compose_the_backbone_step() {
                 &cfg,
             );
         }
-        let mean_sq: f32 = got.iter().map(|v| v * v).sum::<f32>() / d as f32;
-        let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();
-        for (o, &nfw) in got.iter_mut().zip(&w.norm_f_weight) {
-            *o *= inv_rms * nfw;
+        if w.norm_f_bias.is_empty() {
+            let mean_sq: f32 = got.iter().map(|v| v * v).sum::<f32>() / d as f32;
+            let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();
+            for (o, &nfw) in got.iter_mut().zip(&w.norm_f_weight) {
+                *o *= inv_rms * nfw;
+            }
+        } else {
+            mamba_rs::ops::norms::layer_norm_inplace(
+                &mut got,
+                (&w.norm_f_weight, &w.norm_f_bias),
+                cfg.rms_norm_eps,
+            );
         }
         assert_eq!(
             got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -2886,6 +2948,15 @@ fn config_variants_gradients_match_central_differences() {
             checks.push(("mlp norm2", |w| &mut w.mlp[0].norm_weight));
             checks.push(("mlp fc1", |w| &mut w.mlp[1].fc1_w));
             checks.push(("mlp fc2", |w| &mut w.mlp[0].fc2_w));
+        }
+        if !cfg.block_norm.rms_norm() {
+            checks.push(("norm bias", |w| &mut w.layers[0].norm_bias));
+            checks.push(("norm weight", |w| &mut w.layers[1].norm_weight));
+            checks.push(("norm_f bias", |w| &mut w.norm_f_bias));
+            checks.push(("norm_f weight", |w| &mut w.norm_f_weight));
+            if cfg.d_intermediate > 0 {
+                checks.push(("mlp norm2 bias", |w| &mut w.mlp[1].norm_bias));
+            }
         }
         if cfg.conv_bias {
             checks.push(("conv1d_bias", |w| &mut w.layers[0].conv1d_bias));

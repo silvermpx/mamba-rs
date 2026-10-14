@@ -76,6 +76,9 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
     let mut embed = vec![0.0f32; embed_len];
     let mut lm_head: Option<Vec<f32>> = None;
     let mut norm_f_weight = vec![0.0f32; hf_cfg.d_model];
+    // A LayerNorm model's final bias; an RMSNorm one has none.
+    let layer_norm = !hf_cfg.block_norm.rms_norm();
+    let mut norm_f_bias: Option<Vec<f32>> = None;
     let (mut embed_found, mut norm_f_found) = (false, false);
     let mut layer_weights: Vec<Option<LayerAccum>> = (0..hf_cfg.n_layers).map(|_| None).collect();
     let hidden = crate::mlp::mlp_hidden(hf_cfg.d_intermediate);
@@ -113,6 +116,22 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
                 norm_f_weight.copy_from_slice(&data);
                 norm_f_found = true;
             }
+            RemappedKey::NormFBias => {
+                if !layer_norm {
+                    return Err(format!(
+                        "unexpected tensor {name}: an RMSNorm model's final norm has no bias"
+                    ));
+                }
+                let data = src.read(name)?;
+                if data.len() != hf_cfg.d_model {
+                    return Err(format!(
+                        "norm_f_bias: expected {}, got {}",
+                        hf_cfg.d_model,
+                        data.len()
+                    ));
+                }
+                norm_f_bias = Some(data);
+            }
             RemappedKey::Layer(idx, field) => {
                 if idx >= hf_cfg.n_layers {
                     return Err(format!("layer index {idx} >= n_layers {}", hf_cfg.n_layers));
@@ -130,8 +149,13 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
                         "unexpected tensor {name}: the config has no gated MLP in layer {idx}"
                     ));
                 }
+                if part == "norm2_bias" && !layer_norm {
+                    return Err(format!(
+                        "unexpected tensor {name}: an RMSNorm model's norm2 has no bias"
+                    ));
+                }
                 let want = match part {
-                    "norm2" => vec![d],
+                    "norm2" | "norm2_bias" => vec![d],
                     "fc1" => vec![2 * hidden, d],
                     _ => vec![d, hidden],
                 };
@@ -158,6 +182,11 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
     if !norm_f_found {
         return Err("the checkpoint has no norm_f tensor".into());
     }
+    let norm_f_bias = match (layer_norm, norm_f_bias) {
+        (false, _) => Vec::new(),
+        (true, Some(bias)) => bias,
+        (true, None) => return Err("the LayerNorm checkpoint has no norm_f bias".into()),
+    };
 
     if !hf_cfg.tie_word_embeddings && lm_head.is_none() {
         return Err("tie_word_embeddings=false but lm_head.weight not found".into());
@@ -186,6 +215,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         d_conv: hf_cfg.d_conv,
         expand: hf_cfg.expand,
         n_layers: hf_cfg.n_layers,
+        block_norm: hf_cfg.block_norm,
         // Checkpoint-specified norm epsilon (FalconMamba: 1e-6) — plumbed
         // through every CPU/GPU inference norm via MambaConfig/MambaDims.
         rms_norm_eps: hf_cfg.rms_norm_eps,
@@ -208,7 +238,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
 
     let mlp = (0..hf_cfg.n_layers)
         .filter(|_| hidden > 0)
-        .map(|i| read_mlp(&mut src, i, hf_cfg.d_model, hidden))
+        .map(|i| read_mlp(&mut src, i, (hf_cfg.d_model, hidden), hf_cfg.block_norm))
         .collect::<Result<Vec<_>, _>>()?;
 
     let weights = MambaWeights {
@@ -216,6 +246,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         input_proj_b: vec![],
         layers,
         norm_f_weight,
+        norm_f_bias,
         mlp,
     };
 
@@ -283,11 +314,13 @@ impl LayerAccum {
                 Ok(Vec::new())
             }
         };
+        let norm_bias = optional(!cfg.block_norm.rms_norm(), "norm_bias", d)?;
         let in_proj_b = optional(cfg.proj_bias, "in_proj_b", 2 * di)?;
         let out_proj_b = optional(cfg.proj_bias, "out_proj_b", d)?;
         let conv1d_bias = optional(cfg.conv_bias, "conv1d_bias", di)?;
         let layer = MambaLayerWeights {
             norm_weight: self.take_len("norm_weight", d)?,
+            norm_bias,
             // HF: [2*d_inner, d_model] -> need [d_model, 2*d_inner]
             in_proj_w: transpose_2d(self.take("in_proj_w")?, (2 * di, d), "in_proj_w")?,
             // HF stores depthwise conv1d weight as [d_inner, 1, d_conv]

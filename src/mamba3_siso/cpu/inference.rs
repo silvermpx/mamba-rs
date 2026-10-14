@@ -18,7 +18,7 @@ use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
 use crate::mlp::cpu::GatedMlpPacked;
 use crate::ops::fast_math::fast_exp_scalar;
 use crate::ops::lane::{LaneGemm, input_rows};
-use crate::ops::norms::{bcnorm, rms_norm_weighted, rmsnorm_gated};
+use crate::ops::norms::{bcnorm, layer_norm_row, rms_norm_weighted, rmsnorm_gated};
 use crate::ops::packed::PackedLinear;
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
@@ -171,13 +171,22 @@ fn layer_step(
     // 1. Save residual
     scratch.residual[..dm].copy_from_slice(&temporal[..dm]);
 
-    // 2. RMSNorm
-    rms_norm_weighted(
-        &mut scratch.norm_buf[..dm],
-        &temporal[..dm],
-        &lw.norm_weight,
-        cfg.rms_norm_eps,
-    );
+    // 2. The block norm
+    if lw.norm_bias.is_empty() {
+        rms_norm_weighted(
+            &mut scratch.norm_buf[..dm],
+            &temporal[..dm],
+            &lw.norm_weight,
+            cfg.rms_norm_eps,
+        );
+    } else {
+        layer_norm_row(
+            &mut scratch.norm_buf[..dm],
+            &temporal[..dm],
+            (&lw.norm_weight, &lw.norm_bias),
+            cfg.rms_norm_eps,
+        );
+    }
     store(dtype, &mut scratch.norm_buf[..dm]);
 
     // 3. in_proj: [d_model] → [in_proj_dim] (BLAS matvec, no bias)
@@ -461,13 +470,22 @@ fn backbone_step(
         }
     }
 
-    // Final RMSNorm (reuse scratch.norm_buf to avoid heap allocation)
-    rms_norm_weighted(
-        &mut scratch.norm_buf[..dm],
-        &temporal[..dm],
-        &weights.norm_f_weight,
-        cfg.rms_norm_eps,
-    );
+    // The final norm (reuse scratch.norm_buf to avoid heap allocation)
+    if weights.norm_f_bias.is_empty() {
+        rms_norm_weighted(
+            &mut scratch.norm_buf[..dm],
+            &temporal[..dm],
+            &weights.norm_f_weight,
+            cfg.rms_norm_eps,
+        );
+    } else {
+        layer_norm_row(
+            &mut scratch.norm_buf[..dm],
+            &temporal[..dm],
+            (&weights.norm_f_weight, &weights.norm_f_bias),
+            cfg.rms_norm_eps,
+        );
+    }
     temporal[..dm].copy_from_slice(&scratch.norm_buf[..dm]);
     store(scratch.dtype, &mut temporal[..dm]);
 }

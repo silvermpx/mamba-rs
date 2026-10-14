@@ -1,4 +1,4 @@
-// RMSNorm CUDA kernels (forward + backward).
+// RMSNorm and LayerNorm CUDA kernels (forward + backward).
 //
 // Each sample processed by one thread block with shared memory reduction.
 // Grid: (batch, 1, 1). Block: (min(next_power_of_2(dim), 1024), 1, 1).
@@ -455,3 +455,231 @@ extern "C" __global__ void rmsnorm_backward_f32in_##SUFFIX(                    \
 
 DEFINE_RMSNORM_BWD_F32IN(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_RMSNORM_BWD_F32IN(f16,  __half,        from_f_f16)
+
+// ---------------------------------------------------------------------------
+// LayerNorm: the block norm of a model built with `rms_norm=False`
+// (mamba_ssm's `norm_cls` is then `nn.LayerNorm`): `y = (x - mean) / std *
+// scale + bias` with the biased variance, std = sqrt(var + eps). The ABI
+// follows the RMS kernels above with a bias after the scale and two
+// statistics per row in place of one: `stats[2b]` holds the row's std and
+// `stats[2b + 1]` its mean, interleaved, so a slice of rows keeps its
+// statistics contiguous.
+// ---------------------------------------------------------------------------
+
+// Block-wide sum of one f32 per thread, returned to every thread: the tree
+// of the RMS kernels (halving through shared memory down to 64 lanes, one
+// warp of shuffles after). The trailing barrier leaves `sdata` free for the
+// caller's next sum.
+__device__ __forceinline__ float block_sum_f32(float v, float* sdata) {
+    int d = threadIdx.x;
+    sdata[d] = v;
+    __syncthreads();
+    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
+        if (d < s) sdata[d] += sdata[d + s];
+        __syncthreads();
+    }
+    if (d < 32) {
+        float w = sdata[d];
+        if (d + 32 < blockDim.x) w += sdata[d + 32];
+        w = warp_reduce_sum(w);
+        if (d == 0) sdata[0] = w;
+    }
+    __syncthreads();
+    float total = sdata[0];
+    __syncthreads();
+    return total;
+}
+
+// The row statistics from the register-held values and the tail past the
+// hold depth: the mean first, then the centred sum of squares (two passes,
+// as the reference's kernel, so a large mean costs no precision). Slots
+// past the row end were loaded as 0 and are skipped in the second pass.
+// Non-finite or vanishing statistics fall back to mean 0 and std 1, the
+// rule the RMS kernels apply to their scale: the row passes through as
+// `x * scale + bias` instead of spreading a NaN over the whole row.
+__device__ __forceinline__ void layernorm_row_stats(
+    const float* xh, const float* row, int dim, float eps, float sum,
+    float* sdata, float* mean_out, float* std_out
+) {
+    int d = threadIdx.x;
+    float mean = block_sum_f32(sum, sdata) / (float)dim;
+    float sq = 0.0f;
+    #pragma unroll
+    for (int k = 0; k < RMSN_HOLD; ++k) {
+        int i = d + k * (int)blockDim.x;
+        if (i < dim) {
+            float c = xh[k] - mean;
+            sq += c * c;
+        }
+    }
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {
+        float c = row[i] - mean;
+        sq += c * c;
+    }
+    float sd = sqrtf(block_sum_f32(sq, sdata) / (float)dim + eps);
+    if (!isfinite(mean) || !isfinite(sd) || sd < 1e-20f) {
+        mean = 0.0f;
+        sd = 1.0f;
+    }
+    *mean_out = mean;
+    *std_out = sd;
+}
+
+// f32 input (the residual stream), output in T_OUT (f32 for the f32 lane,
+// the half type feeding the branch GEMM otherwise).
+#define DEFINE_LAYERNORM_FWD_F32IN(SUFFIX, T_OUT, FROM_F)                    \
+extern "C" __global__ void layernorm_forward_f32in_##SUFFIX(                 \
+    T_OUT* y, float* stats,                                                  \
+    const float* x, const float* scale, const float* bias,                   \
+    int batch, int dim, float eps                                            \
+) {                                                                          \
+    int b = blockIdx.x;                                                      \
+    if (b >= batch) return;                                                  \
+    int d = threadIdx.x;                                                     \
+    extern __shared__ float sdata[];                                         \
+    long long off = (long long)b * dim;                                      \
+    const float* row = x + off;                                              \
+    float xh[RMSN_HOLD];                                                     \
+    float sum = 0.0f;                                                        \
+    _Pragma("unroll")                                                        \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
+        int i = d + k * (int)blockDim.x;                                     \
+        xh[k] = (i < dim) ? row[i] : 0.0f;                                   \
+        sum += xh[k];                                                        \
+    }                                                                        \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
+        sum += row[i];                                                       \
+    }                                                                        \
+    float mean, sd;                                                          \
+    layernorm_row_stats(xh, row, dim, eps, sum, sdata, &mean, &sd);          \
+    if (d == 0) {                                                            \
+        stats[2 * (long long)b] = sd;                                        \
+        stats[2 * (long long)b + 1] = mean;                                  \
+    }                                                                        \
+    float inv = 1.0f / sd;                                                   \
+    _Pragma("unroll")                                                        \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
+        int i = d + k * (int)blockDim.x;                                     \
+        if (i < dim)                                                         \
+            y[off + i] = FROM_F((xh[k] - mean) * inv * scale[i] + bias[i]);  \
+    }                                                                        \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
+        y[off + i] = FROM_F((row[i] - mean) * inv * scale[i] + bias[i]);     \
+    }                                                                        \
+}
+
+DEFINE_LAYERNORM_FWD_F32IN(f32,  float,         from_f_f32)
+DEFINE_LAYERNORM_FWD_F32IN(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_LAYERNORM_FWD_F32IN(f16,  __half,        from_f_f16)
+
+// The previous branch's residual add fused into the norm, as
+// `rmsnorm_forward_resadd_f32in` does for RMSNorm: `resid += to_f(branch)`
+// in place, then the norm of the sum from the same registers. The sum and
+// every later expression are spelled as in the plain kernel, so the output
+// carries the bits of the two-kernel chain. `y` may alias `branch`: each
+// thread reads its branch elements before the first barrier.
+#define DEFINE_LAYERNORM_FWD_RESADD_F32IN(SUFFIX, T_OUT, FROM_F)             \
+extern "C" __global__ void layernorm_forward_resadd_f32in_##SUFFIX(          \
+    T_OUT* y, float* stats,                                                  \
+    float* resid, const T_OUT* branch,                                       \
+    const float* scale, const float* bias,                                   \
+    int batch, int dim, float eps                                            \
+) {                                                                          \
+    int b = blockIdx.x;                                                      \
+    if (b >= batch) return;                                                  \
+    int d = threadIdx.x;                                                     \
+    extern __shared__ float sdata[];                                         \
+    long long off = (long long)b * dim;                                      \
+    float* row = resid + off;                                                \
+    float xh[RMSN_HOLD];                                                     \
+    float sum = 0.0f;                                                        \
+    _Pragma("unroll")                                                        \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
+        int i = d + k * (int)blockDim.x;                                     \
+        float v = 0.0f;                                                      \
+        if (i < dim) {                                                       \
+            v = row[i] + to_f(branch[off + i]);                              \
+            row[i] = v;                                                      \
+        }                                                                    \
+        xh[k] = v;                                                           \
+        sum += xh[k];                                                        \
+    }                                                                        \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
+        float v = row[i] + to_f(branch[off + i]);                            \
+        row[i] = v;                                                          \
+        sum += v;                                                            \
+    }                                                                        \
+    float mean, sd;                                                          \
+    layernorm_row_stats(xh, row, dim, eps, sum, sdata, &mean, &sd);          \
+    if (d == 0) {                                                            \
+        stats[2 * (long long)b] = sd;                                        \
+        stats[2 * (long long)b + 1] = mean;                                  \
+    }                                                                        \
+    float inv = 1.0f / sd;                                                   \
+    _Pragma("unroll")                                                        \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
+        int i = d + k * (int)blockDim.x;                                     \
+        if (i < dim)                                                         \
+            y[off + i] = FROM_F((xh[k] - mean) * inv * scale[i] + bias[i]);  \
+    }                                                                        \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
+        y[off + i] = FROM_F((row[i] - mean) * inv * scale[i] + bias[i]);     \
+    }                                                                        \
+}
+
+DEFINE_LAYERNORM_FWD_RESADD_F32IN(f32,  float,         from_f_f32)
+DEFINE_LAYERNORM_FWD_RESADD_F32IN(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_LAYERNORM_FWD_RESADD_F32IN(f16,  __half,        from_f_f16)
+
+// Backward, the twin of `rmsnorm_backward_f32in` (and of `rmsnorm_backward`
+// through the f32 entry): `dy` in T, the saved f32 input `x`, `dx` f32 -
+// added onto `dx` when `accumulate` - with an optional mirror of each
+// stored value in T. With x_hat = (x - mean) / std and g = scale * dy:
+//   dx = (g - mean(g) - x_hat * mean(g * x_hat)) / std
+// Rule B: `d_scale_partials[b * dim + i] = dy * x_hat`, reduced by the
+// caller like the RMS partials. The bias gradient is the column sum of
+// `dy`, which the caller takes BEFORE this launch since `dx` may alias
+// `dy` (the in-place final norm).
+#define DEFINE_LAYERNORM_BWD_F32IN(SUFFIX, T, FROM_F)                          \
+extern "C" __global__ void layernorm_backward_f32in_##SUFFIX(                  \
+    float* __restrict__ dx, float* __restrict__ d_scale_partials,              \
+    const T* __restrict__ dy, const float* __restrict__ x,                     \
+    const float* __restrict__ scale,                                           \
+    const float* __restrict__ stats,                                           \
+    int batch, int dim,                                                        \
+    int accumulate,                                                            \
+    T* __restrict__ dx_typed                                                   \
+) {                                                                            \
+    int b = blockIdx.x;                                                        \
+    if (b >= batch) return;                                                    \
+    int d = threadIdx.x;                                                       \
+    extern __shared__ float sdata[];                                           \
+    long long off = (long long)b * dim;                                        \
+    float sd = stats[2 * (long long)b];                                        \
+    float mean = stats[2 * (long long)b + 1];                                  \
+    float inv = 1.0f / sd;                                                     \
+    float s_g = 0.0f, s_gx = 0.0f;                                             \
+    for (int i = d; i < dim; i += blockDim.x) {                                \
+        float x_hat = (x[off + i] - mean) * inv;                               \
+        float g = scale[i] * to_f(dy[off + i]);                                \
+        s_g += g;                                                              \
+        s_gx += g * x_hat;                                                     \
+    }                                                                          \
+    float mean_g = block_sum_f32(s_g, sdata) / (float)dim;                     \
+    float mean_gx = block_sum_f32(s_gx, sdata) / (float)dim;                   \
+    for (int i = d; i < dim; i += blockDim.x) {                                \
+        float x_hat = (x[off + i] - mean) * inv;                               \
+        float dy_val = to_f(dy[off + i]);                                      \
+        float dx_val = (scale[i] * dy_val - mean_g - x_hat * mean_gx) * inv;   \
+        float dx_store = accumulate ? __fadd_rn(dx[off + i], dx_val) : dx_val; \
+        dx[off + i] = dx_store;                                                \
+        if (dx_typed != nullptr) {                                             \
+            dx_typed[off + i] = FROM_F(0.0f + dx_store);                       \
+        }                                                                      \
+        d_scale_partials[off + i] = dy_val * x_hat;                            \
+    }                                                                          \
+}
+
+DEFINE_LAYERNORM_BWD_F32IN(f32,  float,         from_f_f32)
+DEFINE_LAYERNORM_BWD_F32IN(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_LAYERNORM_BWD_F32IN(f16,  __half,        from_f_f16)

@@ -105,16 +105,14 @@ pub struct Mamba3Kernels {
     pub rmsnorm_gated_fwd: ByIndexWidth<CudaFunction>,
     pub rmsnorm_gated_bwd: ByIndexWidth<CudaFunction>,
 
-    // ── Shared kernels from norms.cu + elementwise.cu (used by training pipeline) ──
-    pub rmsnorm_fwd: CudaFunction,
-    pub rmsnorm_bwd: CudaFunction,
+    // ── Shared kernels from elementwise.cu (used by training pipeline) ──
     pub colsum_accumulate: CudaFunction,
     /// Segmented column sum - the batched pooled route.
     pub colsum_segments: CudaFunction,
     /// Deterministic axis-0 reduction — finalises Rule-B per-sample partials
     /// into f32 master-grad slots. Replaces atomicAdd accumulators used in
     /// M3 backward (dD from m3_dqkv, d_angles_raw/d_dt_angle from
-    /// m3_angle_dt_bwd_seq, and d_scale from rmsnorm_bwd).
+    /// m3_angle_dt_bwd_seq, and the block norms' scale partials).
     pub reduce_sum_axis0: CudaFunction,
     /// The angle gradients' axis-0 reduction once a partial row holds more
     /// columns than the 32-bit range: `reduce_sum_axis0`'s order per column,
@@ -277,8 +275,6 @@ pub struct Mamba3Kernels {
     /// Cooperative typed twin (see `m3_chunk_scan_fwd_coop`).
     pub m3_chunk_scan_fwd_coop_typed: ByIndexWidth<TypedKernel>,
 
-    /// Shared from M1: f32 residual → half post-norm (identical kernel, reused).
-    pub rmsnorm_fwd_f32in_typed: HalfKernel,
     /// Shared from M1: f32 residual += half branch (stays f32).
     pub residual_add_f32_typed: HalfKernel,
     /// Shared from M1: gather last timestep of B×T×D into B×D, dtype-preserving.
@@ -444,8 +440,8 @@ impl Mamba3Kernels {
             include_str!("../../../kernels/mamba3_siso_block.cu"),
             // The gated MLP's activation, for models trained with an MLP.
             include_str!("../../../kernels/gated_mlp.cu"),
-            // Shared kernels needed by training pipeline
-            include_str!("../../../kernels/norms.cu"),
+            // Shared kernels needed by training pipeline; the block norms
+            // run from the context's kernels.
             include_str!("../../../kernels/elementwise.cu"),
             include_str!("../../../kernels/gemm_bi_inference/casts.cu"),
             include_str!("../../../kernels/adamw.cu"),
@@ -757,9 +753,7 @@ impl Mamba3Kernels {
             rmsnorm_gated_fwd: pair("rmsnorm_gated_forward")?,
             rmsnorm_gated_bwd: pair("rmsnorm_gated_backward")?,
 
-            // Shared (norms.cu + elementwise.cu)
-            rmsnorm_fwd: get("rmsnorm_forward")?,
-            rmsnorm_bwd: get("rmsnorm_backward")?,
+            // Shared (elementwise.cu)
             colsum_accumulate: get("colsum_accumulate")?,
             colsum_segments: get("colsum_segments")?,
             reduce_sum_axis0: get("reduce_sum_axis0")?,
@@ -921,10 +915,6 @@ impl Mamba3Kernels {
                 "m3_chunk_scan_fwd_f16",
             )?,
 
-            rmsnorm_fwd_f32in_typed: HalfKernel {
-                bf16: get("rmsnorm_forward_f32in_bf16")?,
-                f16: get("rmsnorm_forward_f32in_f16")?,
-            },
             residual_add_f32_typed: HalfKernel {
                 bf16: get("residual_add_f32_bf16")?,
                 f16: get("residual_add_f32_f16")?,

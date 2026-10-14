@@ -21,11 +21,11 @@
 use super::flat::{MambaBackboneFlat, MambaLayerFlat};
 use super::scratch::PhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
-use crate::mlp::cpu::{RowsGemm, gated_mlp_rows};
+use crate::mlp::cpu::{RowsGemm, gated_mlp_rows, mlp_norm_row};
 use crate::ops::blas::sgemm_forward;
 use crate::ops::dims::{MambaDims, MambaRecurrentState};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
-use crate::ops::norms::{bcdt_rms_norm, rms_norm_weighted};
+use crate::ops::norms::{bcdt_rms_norm, layer_norm_inplace, layer_norm_row};
 use crate::ops::rounding::{store, stored};
 
 /// One step of a channel's selective scan: the decays `exp(delta * A)` into
@@ -107,7 +107,7 @@ pub fn forward_mamba_layer_batched(
     let lane = (sgemm_forward as RowsGemm, dtype);
 
     // ===================================================================
-    // Phase F1: Batch RmsNorm (loop over T)
+    // Phase F1: the batch's block norm (loop over T)
     // ===================================================================
     for t in 0..seq_len {
         let off = t * dm;
@@ -116,20 +116,28 @@ pub fn forward_mamba_layer_batched(
         // Save residual
         acts.residual_mut(t).copy_from_slice(src);
 
-        // Compute RMS
-        let mut sum_sq = 0.0_f32;
-        for &v in &src[..dm] {
-            sum_sq += v * v;
-        }
-        let mean_sq = sum_sq / dm as f32;
-        let rms = (mean_sq + dims.rms_norm_eps).sqrt();
-        acts.set_rms_val(t, rms);
-        let inv_rms = 1.0 / rms;
-
         // Write post_norm into scratch buffer for batched in_proj
         let pn = &mut scratch.post_norm_flat[off..off + dm];
-        for d in 0..dm {
-            pn[d] = src[d] * inv_rms * layer_w.norm_weight[d];
+        if layer_w.norm_bias.is_empty() {
+            let mut sum_sq = 0.0_f32;
+            for &v in &src[..dm] {
+                sum_sq += v * v;
+            }
+            let mean_sq = sum_sq / dm as f32;
+            let rms = (mean_sq + dims.rms_norm_eps).sqrt();
+            acts.set_rms_val(t, rms);
+            let inv_rms = 1.0 / rms;
+            for d in 0..dm {
+                pn[d] = src[d] * inv_rms * layer_w.norm_weight[d];
+            }
+        } else {
+            let stats = layer_norm_row(
+                pn,
+                src,
+                (&layer_w.norm_weight, &layer_w.norm_bias),
+                dims.rms_norm_eps,
+            );
+            acts.set_norm_stats(t, stats);
         }
         store(dtype, pn);
 
@@ -450,16 +458,27 @@ pub fn forward_mamba_backbone_batched(
                 sgemm_forward,
                 |dst, src| {
                     for (d_row, s_row) in dst.chunks_exact_mut(dm).zip(src.chunks_exact(dm)) {
-                        rms_norm_weighted(d_row, s_row, &m.norm_weight, dims.rms_norm_eps);
+                        mlp_norm_row(d_row, s_row, m, dims.rms_norm_eps);
                     }
                 },
             );
         }
     }
 
-    // Final RmsNorm (norm_f) after all Mamba layers.
+    // The final norm (norm_f) after all Mamba layers.
     // Save pre-norm input for backward, then apply norm in-place.
     acts.norm_f_input[..seq_len * dm].copy_from_slice(&temporal_flat[..seq_len * dm]);
+    if !mamba_w.norm_f_bias.is_empty() {
+        let p = (&mamba_w.norm_f_weight[..], &mamba_w.norm_f_bias[..]);
+        for (row, st) in temporal_flat[..seq_len * dm]
+            .chunks_exact_mut(dm)
+            .zip(acts.norm_f_rms.as_chunks_mut::<2>().0)
+        {
+            *st = layer_norm_inplace(row, p, dims.rms_norm_eps);
+            store(scratch.dtype, row);
+        }
+        return;
+    }
     for t in 0..seq_len {
         let off = t * dm;
         let mean_sq: f32 = temporal_flat[off..off + dm]

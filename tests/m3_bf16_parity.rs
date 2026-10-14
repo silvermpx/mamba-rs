@@ -259,7 +259,7 @@ fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
 /// precision, which rounds the weights and the values between the kernels
 /// where the GPU stores them: a prompt's last row and the steps after it
 /// land closer than the f32 CPU's, with the plain gate and with the gated
-/// norm and an MLP behind every layer.
+/// norm and an MLP behind every layer, under both block norms.
 #[test]
 fn m3_gpu_typed_lanes_track_the_cpu_lane() {
     use mamba_rs::mamba1::cpu::prefill::PrefillMode;
@@ -274,9 +274,15 @@ fn m3_gpu_typed_lanes_track_the_cpu_lane() {
         for (label, cfg) in [
             ("plain gate", small_m3_cfg()),
             ("gated norm + MLP", gated_mlp),
+            (
+                "LayerNorm, gated norm + MLP",
+                Mamba3Config {
+                    block_norm: mamba_rs::BlockNorm::Layer,
+                    ..gated_mlp
+                },
+            ),
         ] {
             let dm = cfg.d_model;
-            let w = Mamba3Weights::init(&cfg, input_dim, 17);
             let det = |n: usize, seed: u64| -> Vec<f32> {
                 let mut s = seed.max(1);
                 (0..n)
@@ -288,6 +294,19 @@ fn m3_gpu_typed_lanes_track_the_cpu_lane() {
                     })
                     .collect()
             };
+            let mut w = Mamba3Weights::init(&cfg, input_dim, 17);
+            // A LayerNorm's biases start at zero; drawn ones put the bias
+            // add in the rows too. An RMSNorm model has none.
+            let biases = w
+                .layers
+                .iter_mut()
+                .map(|lw| &mut lw.norm_bias)
+                .chain(w.mlp.iter_mut().map(|m| &mut m.norm_bias))
+                .chain(std::iter::once(&mut w.norm_f_bias));
+            for (k, b) in biases.enumerate() {
+                let d = det(b.len(), 700 + k as u64);
+                b.copy_from_slice(&d);
+            }
             let prompt = det(seq * input_dim, 500);
             let steps: Vec<Vec<f32>> = (0..6).map(|t| det(input_dim, 600 + t)).collect();
             let opts = GpuOptions::default().dtype(dtype);

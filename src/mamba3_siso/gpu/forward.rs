@@ -2,7 +2,7 @@
 //!
 //! Split from the former 2313-line `mamba3_gpu.rs`. 8-phase
 //! pipeline:
-//!   F1: RMSNorm
+//!   F1: the block norm (RMSNorm, or LayerNorm for `rms_norm = false`)
 //!   F2: in_proj SGEMM
 //!   F3: m3_split (8-way + fused activations)
 //!   F4: BCNorm + bias + RoPE on B,C
@@ -20,10 +20,11 @@ use super::state::{
 };
 use super::weights::{GpuMamba3LayerWeights, GpuMamba3MlpWeights, GpuMamba3Weights};
 use crate::gpu::blas::gpu_gemm_bi_forward_raw;
+use crate::gpu::block_norm;
 use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_norm, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, y_runs, yz_runs};
 use cudarc::driver::PushKernelArg;
 
 /// Logical dimensions for chunk-parallel angle accumulation.
@@ -351,26 +352,22 @@ pub fn gpu_forward_mamba3_layer(
     let na = dims.n_angles;
     let width = dims.index_width();
 
-    // F1: RMSNorm - the residual stream already lives in acts.residual:
-    // the previous layer's residual_add wrote it there directly (layer 0
-    // is seeded by the driver). Same next-layer-residual plumbing as the
-    // M1 forward - the per-layer temporal round trip is gone.
-    {
-        let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
-        builder.arg(acts.post_norm.inner_mut());
-        builder.arg(acts.rms_vals.inner_mut());
-        builder.arg(acts.residual.inner());
-        let nw_ptr = lw.norm_weight.raw_ptr(&ctx.stream);
-        builder.arg(&nw_ptr);
-        let bt_i = bt as i32;
-        let dm_i = dm as i32;
-        let eps: f32 = dims.rms_norm_eps;
-        builder.arg(&bt_i);
-        builder.arg(&dm_i);
-        builder.arg(&eps);
-        unsafe { builder.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_fwd m3 F1: {:?}", e))?;
-    }
+    // F1: the block norm - the residual stream already lives in
+    // acts.residual: the previous layer's residual_add wrote it there
+    // directly (layer 0 is seeded by the driver). Same next-layer-residual
+    // plumbing as the M1 forward - the per-layer temporal round trip is gone.
+    block_norm::forward(
+        ctx,
+        WeightDtype::F32,
+        (
+            acts.post_norm.cached_ptr(),
+            acts.rms_vals.cached_ptr(),
+            acts.residual.cached_ptr(),
+        ),
+        lw.norm(),
+        (bt, dm, dims.rms_norm_eps),
+        "block norm m3 F1",
+    )?;
 
     // F2: in_proj SGEMM
     gpu_gemm_bi_forward_raw(
@@ -866,11 +863,7 @@ pub fn gpu_forward_mamba3_backbone(
 ) -> Result<(), String> {
     exec.check_state_cap()?;
     check_mlp_buffers(mamba_w, acts.mlp.as_ref().map(|m| m.hidden))?;
-    let M3Exec {
-        ctx,
-        kernels: m3k,
-        dims,
-    } = *exec;
+    let M3Exec { ctx, dims, .. } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
     let ds = dims.d_state;
@@ -942,23 +935,18 @@ pub fn gpu_forward_mamba3_backbone(
     }
 
     // The last layer's residual_add already wrote acts.norm_f_input.
-    {
-        let nf_ptr = mamba_w.norm_f_weight.raw_ptr(&ctx.stream);
-        let bt_i = bt as i32;
-        let dm_i = dm as i32;
-        let eps: f32 = dims.rms_norm_eps;
-        let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
-        builder.arg(temporal.inner_mut());
-        builder.arg(acts.norm_f_rms.inner_mut());
-        builder.arg(acts.norm_f_input.inner());
-        builder.arg(&nf_ptr);
-        builder.arg(&bt_i);
-        builder.arg(&dm_i);
-        builder.arg(&eps);
-        unsafe { builder.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_fwd norm_f m3: {:?}", e))?;
-    }
-    Ok(())
+    block_norm::forward(
+        ctx,
+        WeightDtype::F32,
+        (
+            temporal.cached_ptr(),
+            acts.norm_f_rms.cached_ptr(),
+            acts.norm_f_input.cached_ptr(),
+        ),
+        mamba_w.final_norm(),
+        (bt, dm, dims.rms_norm_eps),
+        "norm_f m3",
+    )
 }
 
 /// Mamba-3 target burn-in forward (no activations saved, used for Bellman target).
@@ -1027,22 +1015,18 @@ pub fn gpu_forward_mamba3_target_burnin(
         let lw = &mamba_w.layers[l];
         tgt.residual
             .copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
-        {
-            let bt_i = bt as i32;
-            let dm_i = dm as i32;
-            let eps: f32 = dims.rms_norm_eps;
-            let nw_ptr = lw.norm_weight.raw_ptr(&ctx.stream);
-            let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
-            builder.arg(tgt.out_flat.inner_mut());
-            builder.arg(tgt.rms_discard.inner_mut());
-            builder.arg(tgt.residual.inner());
-            builder.arg(&nw_ptr);
-            builder.arg(&bt_i);
-            builder.arg(&dm_i);
-            builder.arg(&eps);
-            unsafe { builder.launch(grid_norm(bt, dm)) }
-                .map_err(|e| format!("rmsnorm_fwd m3 tgt L{l}: {:?}", e))?;
-        }
+        block_norm::forward(
+            ctx,
+            WeightDtype::F32,
+            (
+                tgt.out_flat.cached_ptr(),
+                tgt.rms_discard.cached_ptr(),
+                tgt.residual.cached_ptr(),
+            ),
+            lw.norm(),
+            (bt, dm, dims.rms_norm_eps),
+            "block norm m3 tgt",
+        )?;
         gpu_gemm_bi_forward_raw(
             ctx,
             &mut tgt.proj_flat,
@@ -1310,24 +1294,20 @@ pub fn gpu_forward_mamba3_target_burnin(
         }
     }
 
-    {
-        tgt.residual
-            .copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
-        let nf_ptr = mamba_w.norm_f_weight.raw_ptr(&ctx.stream);
-        let bt_i = bt as i32;
-        let dm_i = dm as i32;
-        let eps: f32 = dims.rms_norm_eps;
-        let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
-        builder.arg(tgt.temporal_work.inner_mut());
-        builder.arg(tgt.rms_discard.inner_mut());
-        builder.arg(tgt.residual.inner());
-        builder.arg(&nf_ptr);
-        builder.arg(&bt_i);
-        builder.arg(&dm_i);
-        builder.arg(&eps);
-        unsafe { builder.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_fwd norm_f m3 tgt: {:?}", e))?;
-    }
+    tgt.residual
+        .copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
+    block_norm::forward(
+        ctx,
+        WeightDtype::F32,
+        (
+            tgt.temporal_work.cached_ptr(),
+            tgt.rms_discard.cached_ptr(),
+            tgt.residual.cached_ptr(),
+        ),
+        mamba_w.final_norm(),
+        (bt, dm, dims.rms_norm_eps),
+        "norm_f m3 tgt",
+    )?;
 
     {
         let b_i = dims.batch as i32;
@@ -1377,18 +1357,15 @@ fn gpu_forward_mamba3_mlp(
         dims,
     } = *exec;
     let (bt, dm, h) = (dims.bt(), dims.d_model, w.hidden());
-    let (bt_i, dm_i, h_i) = (bt as i32, dm as i32, h as i32);
-    let eps: f32 = dims.rms_norm_eps;
-    let nw = w.norm_weight.raw_ptr(&ctx.stream);
-    let mut norm = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
-    norm.arg(m.post.inner_mut());
-    norm.arg(m.rms.inner_mut());
-    norm.arg(m.x_in.inner());
-    norm.arg(&nw);
-    norm.arg(&bt_i);
-    norm.arg(&dm_i);
-    norm.arg(&eps);
-    unsafe { norm.launch(grid_norm(bt, dm)) }.map_err(|e| format!("MLP norm m3: {e:?}"))?;
+    let (bt_i, h_i) = (bt as i32, h as i32);
+    block_norm::forward(
+        ctx,
+        WeightDtype::F32,
+        (m.post.cached_ptr(), m.rms.cached_ptr(), m.x_in.cached_ptr()),
+        w.norm(),
+        (bt, dm, dims.rms_norm_eps),
+        "MLP norm m3",
+    )?;
     gpu_gemm_bi_forward_raw(
         ctx,
         &mut m.up,
@@ -1438,18 +1415,19 @@ fn gpu_target_mlp(
         dims,
     } = *exec;
     let (bt, dm, h) = (dims.bt(), dims.d_model, w.hidden());
-    let (bt_i, dm_i, h_i) = (bt as i32, dm as i32, h as i32);
-    let eps: f32 = dims.rms_norm_eps;
-    let nw = w.norm_weight.raw_ptr(&ctx.stream);
-    let mut norm = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
-    norm.arg(tgt.out_flat.inner_mut());
-    norm.arg(tgt.rms_discard.inner_mut());
-    norm.arg(tgt.temporal_work.inner());
-    norm.arg(&nw);
-    norm.arg(&bt_i);
-    norm.arg(&dm_i);
-    norm.arg(&eps);
-    unsafe { norm.launch(grid_norm(bt, dm)) }.map_err(|e| format!("MLP norm m3 tgt: {e:?}"))?;
+    let (bt_i, h_i) = (bt as i32, h as i32);
+    block_norm::forward(
+        ctx,
+        WeightDtype::F32,
+        (
+            tgt.out_flat.cached_ptr(),
+            tgt.rms_discard.cached_ptr(),
+            tgt.temporal_work.cached_ptr(),
+        ),
+        w.norm(),
+        (bt, dm, dims.rms_norm_eps),
+        "MLP norm m3 tgt",
+    )?;
     gpu_gemm_bi_forward_raw(
         ctx,
         &mut tgt.mlp_up,

@@ -52,6 +52,7 @@ fn cases() -> Vec<(&'static str, MambaConfig)> {
         d_conv: 4,
         expand: 2,
         scan_mode: ScanMode::Auto,
+        block_norm: mamba_rs::BlockNorm::Rms,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -129,6 +130,25 @@ fn cases() -> Vec<(&'static str, MambaConfig)> {
             },
         ),
         (
+            "LayerNorm block norms, gated MLP 100 wide",
+            MambaConfig {
+                d_model: 12,
+                d_intermediate: 100,
+                block_norm: mamba_rs::BlockNorm::Layer,
+                ..base
+            },
+        ),
+        (
+            "LayerNorm block norms, projection biases, odd d_inner 21",
+            MambaConfig {
+                d_model: 7,
+                expand: 3,
+                proj_bias: true,
+                block_norm: mamba_rs::BlockNorm::Layer,
+                ..base
+            },
+        ),
+        (
             "odd d_inner 33",
             MambaConfig {
                 d_model: 33,
@@ -192,6 +212,7 @@ fn drawn(cfg: &MambaConfig, input_dim: usize, seed: u64) -> MambaWeights {
             (&mut lw.d_param, 3, 1.0, 0.5),
             (&mut lw.in_proj_b, 4, 0.0, 0.3),
             (&mut lw.out_proj_b, 5, 0.0, 0.3),
+            (&mut lw.norm_bias, 8, 0.0, 0.3),
         ] {
             let d = det(v.len(), s + k, scale);
             for (x, dv) in v.iter_mut().zip(d) {
@@ -203,10 +224,18 @@ fn drawn(cfg: &MambaConfig, input_dim: usize, seed: u64) -> MambaWeights {
     for (x, dv) in w.norm_f_weight.iter_mut().zip(d) {
         *x = 1.0 + dv;
     }
+    let d = det(w.norm_f_bias.len(), seed + 9, 0.3);
+    for (x, dv) in w.norm_f_bias.iter_mut().zip(d) {
+        *x = dv;
+    }
     for (l, m) in w.mlp.iter_mut().enumerate() {
         let d = det(m.norm_weight.len(), seed * 100 + l as u64 * 10 + 6, 0.2);
         for (x, dv) in m.norm_weight.iter_mut().zip(d) {
             *x = 1.0 + dv;
+        }
+        let d = det(m.norm_bias.len(), seed * 100 + l as u64 * 10 + 7, 0.3);
+        for (x, dv) in m.norm_bias.iter_mut().zip(d) {
+            *x = dv;
         }
     }
     w
@@ -374,6 +403,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             .iter()
             .map(|lw| TrainMambaLayerWeights {
                 norm_weight: lw.norm_weight.clone(),
+                norm_bias: lw.norm_bias.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
                 in_proj_b: lw.in_proj_b.clone(),
                 conv1d_weight: lw.conv1d_weight.clone(),
@@ -388,6 +418,7 @@ fn train_weights_from(w: &MambaWeights) -> TrainMambaWeights {
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
+        norm_f_bias: w.norm_f_bias.clone(),
         mlp: w.mlp.clone(),
     }
 }
@@ -401,6 +432,7 @@ fn named(g: &TrainMambaWeights) -> Vec<(String, &[f32])> {
     for (l, lw) in g.layers.iter().enumerate() {
         for (name, v) in [
             ("norm", &lw.norm_weight),
+            ("norm_bias", &lw.norm_bias),
             ("in_proj_w", &lw.in_proj_w),
             ("in_proj_b", &lw.in_proj_b),
             ("conv1d_w", &lw.conv1d_weight),
@@ -421,6 +453,7 @@ fn named(g: &TrainMambaWeights) -> Vec<(String, &[f32])> {
     for (l, m) in g.mlp.iter().enumerate() {
         for (name, v) in [
             ("mlp_norm", &m.norm_weight),
+            ("mlp_norm_bias", &m.norm_bias),
             ("mlp_fc1", &m.fc1_w),
             ("mlp_fc2", &m.fc2_w),
         ] {
@@ -428,6 +461,7 @@ fn named(g: &TrainMambaWeights) -> Vec<(String, &[f32])> {
         }
     }
     out.push(("norm_f".to_string(), g.norm_f_weight.as_slice()));
+    out.push(("norm_f_bias".to_string(), g.norm_f_bias.as_slice()));
     out
 }
 

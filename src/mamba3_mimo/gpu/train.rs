@@ -48,15 +48,14 @@ use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_bi_backward_grad_raw,
     gpu_gemm_ex_backward_dx_typed, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw,
 };
+use crate::gpu::block_norm::{self, NormParams};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer, GradSlice};
 use crate::gpu::context::{GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
 use crate::gpu::kernel_identity::PreparedGemmCaptureManifest;
-use crate::gpu::launch::{
-    grid_1d, grid_1d_cover, grid_norm, launch_cast, launch_elems, y_runs, yz_runs,
-};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, launch_cast, launch_elems, y_runs, yz_runs};
 use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -74,6 +73,7 @@ struct Span {
 #[derive(Clone, Copy, Debug, Default)]
 struct LayerSpans {
     norm_weight: Span,
+    norm_bias: Span,
     in_proj_w: Span,
     dt_bias: Span,
     b_norm_weight: Span,
@@ -93,6 +93,7 @@ struct LayerSpans {
 #[derive(Clone, Copy, Debug, Default)]
 struct MlpSpans {
     norm_weight: Span,
+    norm_bias: Span,
     fc1_w: Span,
     fc2_w: Span,
 }
@@ -106,6 +107,7 @@ struct Layout {
     layers: Vec<LayerSpans>,
     mlp: Vec<MlpSpans>,
     norm_f_weight: Span,
+    norm_f_bias: Span,
     total: usize,
 }
 
@@ -124,6 +126,7 @@ impl Layout {
             .iter()
             .map(|lw| LayerSpans {
                 norm_weight: take(lw.norm_weight.len()),
+                norm_bias: take(lw.norm_bias.len()),
                 in_proj_w: take(lw.in_proj_w.len()),
                 dt_bias: take(lw.dt_bias.len()),
                 b_norm_weight: take(lw.b_norm_weight.len()),
@@ -147,17 +150,20 @@ impl Layout {
             .iter()
             .map(|m| MlpSpans {
                 norm_weight: take(m.norm_weight.len()),
+                norm_bias: take(m.norm_bias.len()),
                 fc1_w: take(m.fc1_w.len()),
                 fc2_w: take(m.fc2_w.len()),
             })
             .collect();
         let norm_f_weight = take(w.norm_f_weight.len());
+        let norm_f_bias = take(w.norm_f_bias.len());
         Self {
             input_proj_w,
             input_proj_b,
             layers,
             mlp,
             norm_f_weight,
+            norm_f_bias,
             total: at,
         }
     }
@@ -172,6 +178,7 @@ impl Layout {
         for (lw, ls) in w.layers.iter().zip(&self.layers) {
             out.extend([
                 (lw.norm_weight.as_slice(), ls.norm_weight, false),
+                (lw.norm_bias.as_slice(), ls.norm_bias, false),
                 (lw.in_proj_w.as_slice(), ls.in_proj_w, true),
                 (lw.dt_bias.as_slice(), ls.dt_bias, false),
                 (lw.b_norm_weight.as_slice(), ls.b_norm_weight, false),
@@ -193,11 +200,13 @@ impl Layout {
         for (m, ms) in w.mlp.iter().zip(&self.mlp) {
             out.extend([
                 (m.norm_weight.as_slice(), ms.norm_weight, false),
+                (m.norm_bias.as_slice(), ms.norm_bias, false),
                 (m.fc1_w.as_slice(), ms.fc1_w, true),
                 (m.fc2_w.as_slice(), ms.fc2_w, true),
             ]);
         }
         out.push((w.norm_f_weight.as_slice(), self.norm_f_weight, false));
+        out.push((w.norm_f_bias.as_slice(), self.norm_f_bias, false));
         out
     }
 
@@ -218,6 +227,7 @@ impl Layout {
         read(&mut w.input_proj_b, self.input_proj_b);
         for (lw, ls) in w.layers.iter_mut().zip(&self.layers) {
             read(&mut lw.norm_weight, ls.norm_weight);
+            read(&mut lw.norm_bias, ls.norm_bias);
             read(&mut lw.in_proj_w, ls.in_proj_w);
             read(&mut lw.dt_bias, ls.dt_bias);
             read(&mut lw.b_norm_weight, ls.b_norm_weight);
@@ -235,10 +245,12 @@ impl Layout {
         }
         for (m, ms) in w.mlp.iter_mut().zip(&self.mlp) {
             read(&mut m.norm_weight, ms.norm_weight);
+            read(&mut m.norm_bias, ms.norm_bias);
             read(&mut m.fc1_w, ms.fc1_w);
             read(&mut m.fc2_w, ms.fc2_w);
         }
         read(&mut w.norm_f_weight, self.norm_f_weight);
+        read(&mut w.norm_f_bias, self.norm_f_bias);
         w
     }
 }
@@ -635,6 +647,9 @@ impl Mamba3MimoGpuTrainer {
             c.nheads(),
         );
         let hidden = c.mlp_hidden();
+        // Each block norm keeps one statistic per row for RMSNorm, two for
+        // LayerNorm.
+        let stats = c.block_norm.stats_per_row();
         let nseg = seq_len.div_ceil(stride);
         let nc = seq_len.div_ceil(CHUNK);
         // Each path's buffers; the other path's are left one element long.
@@ -654,7 +669,7 @@ impl Mamba3MimoGpuTrainer {
             .map(|l| -> Result<LayerActs, String> {
                 Ok(LayerActs {
                     x_in: z(rows * dm)?,
-                    rms: z(rows)?,
+                    rms: z(rows * stats)?,
                     post: typed(rows * dm)?,
                     proj: typed(rows * ip)?,
                     bn: z(rows * bc)?,
@@ -679,7 +694,7 @@ impl Mamba3MimoGpuTrainer {
                     mlp: if l < w.mlp.len() {
                         Some(MlpActs {
                             x_in: z(rows * dm)?,
-                            rms: z(rows)?,
+                            rms: z(rows * stats)?,
                             post: typed(rows * dm)?,
                             up: typed(rows * 2 * hidden)?,
                             act: typed(rows * hidden)?,
@@ -827,7 +842,7 @@ impl Mamba3MimoGpuTrainer {
             input: z(rows * input_dim)?,
             temporal: z(rows * dm)?,
             final_in: z(rows * dm)?,
-            final_rms: z(rows)?,
+            final_rms: z(rows * stats)?,
             final_out: z(rows * dm)?,
             out_rows: typed(rows * dm)?,
             bwd,
@@ -1597,30 +1612,33 @@ impl Mamba3MimoGpuTrainer {
         }
     }
 
-    /// RMSNorm of f32 rows into `y` (the activation dtype when `typed`).
-    fn rmsnorm(
+    /// A block norm of f32 rows into `y` (the activation dtype when
+    /// `typed`); `stats` takes each row's statistics.
+    fn block_norm(
         &self,
-        (y, x, w, rms): (u64, u64, u64, u64),
+        (y, x, stats): (u64, u64, u64),
+        norm: NormParams,
         (rows, typed): (usize, bool),
     ) -> Result<(), String> {
-        let (rows_i, dm_i) = (rows as i32, self.cfg.d_model as i32);
-        let eps = self.cfg.rms_norm_eps;
-        let kernel = if typed && self.act != WeightDtype::F32 {
-            self.ctx.kernels.rmsnorm_fwd_f32in_typed.get(self.act)
-        } else {
-            &self.ctx.kernels.rmsnorm_fwd
-        };
-        let mut bld = self.ctx.stream.launch_builder(kernel);
-        bld.arg(&y);
-        bld.arg(&rms);
-        bld.arg(&x);
-        bld.arg(&w);
-        bld.arg(&rows_i);
-        bld.arg(&dm_i);
-        bld.arg(&eps);
-        unsafe { bld.launch(grid_norm(rows, self.cfg.d_model)) }
-            .map(|_| ())
-            .map_err(|e| format!("MIMO rmsnorm: {e:?}"))
+        let out = if typed { self.act } else { WeightDtype::F32 };
+        let shape = (rows, self.cfg.d_model, self.cfg.rms_norm_eps);
+        block_norm::forward(
+            &self.ctx,
+            out,
+            (y, stats, x),
+            norm,
+            shape,
+            "MIMO block norm",
+        )
+    }
+
+    /// A block norm's parameters in the buffer at `base` laid out as the
+    /// master: its scale, and the bias for LayerNorm (0 for RMSNorm).
+    fn norm_params(base: u64, (w, b): (Span, Span)) -> NormParams {
+        NormParams {
+            w: at(base, w),
+            b: if b.len > 0 { at(base, b) } else { 0 },
+        }
     }
 
     /// `temporal += out` for `n` values, `out` in the activation dtype.
@@ -1756,13 +1774,9 @@ impl Mamba3MimoGpuTrainer {
         for (l, a) in self.acts.iter().enumerate() {
             let ls = self.layout.layers[l];
             self.copy(a.x_in.cached_ptr(), temporal, rows * dm, "layer input")?;
-            self.rmsnorm(
-                (
-                    a.post.ptr(),
-                    temporal,
-                    at(base, ls.norm_weight),
-                    a.rms.cached_ptr(),
-                ),
+            self.block_norm(
+                (a.post.ptr(), temporal, a.rms.cached_ptr()),
+                Self::norm_params(base, (ls.norm_weight, ls.norm_bias)),
                 (rows, true),
             )?;
             let proj = a.proj.ptr();
@@ -1935,13 +1949,9 @@ impl Mamba3MimoGpuTrainer {
                 let ms = self.layout.mlp[l];
                 let hidden = ms.fc2_w.len / dm;
                 self.copy(m.x_in.cached_ptr(), temporal, rows * dm, "MLP input")?;
-                self.rmsnorm(
-                    (
-                        m.post.ptr(),
-                        temporal,
-                        at(base, ms.norm_weight),
-                        m.rms.cached_ptr(),
-                    ),
+                self.block_norm(
+                    (m.post.ptr(), temporal, m.rms.cached_ptr()),
+                    Self::norm_params(base, (ms.norm_weight, ms.norm_bias)),
                     (rows, true),
                 )?;
                 self.gemm(
@@ -1970,13 +1980,13 @@ impl Mamba3MimoGpuTrainer {
             rows * dm,
             "final rows",
         )?;
-        self.rmsnorm(
+        self.block_norm(
             (
                 self.final_out.cached_ptr(),
                 temporal,
-                at(base, self.layout.norm_f_weight),
                 self.final_rms.cached_ptr(),
             ),
+            Self::norm_params(base, (self.layout.norm_f_weight, self.layout.norm_f_bias)),
             (rows, false),
         )
     }
@@ -2030,39 +2040,30 @@ impl Mamba3MimoGpuTrainer {
             .map_err(|e| format!("MIMO column reduction: {e:?}"))
     }
 
-    /// RMSNorm backward of `rows` rows into `dx` (f32), the scale's
-    /// gradient accumulated into `g_scale`; `dy` is in the activation dtype
-    /// when `typed_dy`.
-    fn rms_backward(
+    /// A block norm's backward over `rows` rows into `dx` (f32): the
+    /// gradients of the norm the `spans` (scale, bias) name accumulate in
+    /// the arena; `dy` is in the activation dtype when `typed_dy`.
+    fn norm_backward(
         &self,
-        (dx, dy, x, scale, rms): (u64, u64, u64, u64, u64),
-        (g_scale, typed_dy): (u64, bool),
+        (dx, dy, x, stats): (u64, u64, u64, u64),
+        (spans, typed_dy): ((Span, Span), bool),
         rows: usize,
     ) -> Result<(), String> {
         let dm = self.cfg.d_model;
-        let (rows_i, dm_i) = (rows as i32, dm as i32);
         let axis0 = self.bwd.axis0.cached_ptr();
-        let zero: i32 = 0;
-        let null: u64 = 0;
-        let kernel = if typed_dy && self.act != WeightDtype::F32 {
-            self.ctx.kernels.rmsnorm_bwd_f32in_typed.get(self.act)
-        } else {
-            &self.ctx.kernels.rmsnorm_bwd
-        };
-        let mut bld = self.ctx.stream.launch_builder(kernel);
-        bld.arg(&dx);
-        bld.arg(&axis0);
-        bld.arg(&dy);
-        bld.arg(&x);
-        bld.arg(&scale);
-        bld.arg(&rms);
-        bld.arg(&rows_i);
-        bld.arg(&dm_i);
-        bld.arg(&zero);
-        bld.arg(&null);
-        unsafe { bld.launch(grid_norm(rows, dm)) }
-            .map_err(|e| format!("MIMO rmsnorm backward: {e:?}"))?;
-        self.reduce_axis0(g_scale, axis0, (rows, dm))
+        let norm = Self::norm_params(self.master.cached_ptr(), spans);
+        let g = Self::norm_params(self.grads.cached_ptr(), spans);
+        let dy_dtype = if typed_dy { self.act } else { WeightDtype::F32 };
+        block_norm::backward(
+            &self.ctx,
+            dy_dtype,
+            (dx, axis0, dy, x, stats),
+            (norm, g.b),
+            (rows, dm),
+            (false, 0),
+            "MIMO block norm backward",
+        )?;
+        self.reduce_axis0(g.w, axis0, (rows, dm))
     }
 
     /// `d_temp += d_pre`.
@@ -2220,16 +2221,14 @@ impl Mamba3MimoGpuTrainer {
                 .map_err(|e| format!("loss scale of d_rows: {e:?}"))?;
         }
         let base = self.master.cached_ptr();
-        let g_base = self.grads.cached_ptr();
-        self.rms_backward(
+        self.norm_backward(
             (
                 self.bwd.d_temp.cached_ptr(),
                 self.bwd.d_rows.cached_ptr(),
                 self.final_in.cached_ptr(),
-                at(base, self.layout.norm_f_weight),
                 self.final_rms.cached_ptr(),
             ),
-            (at(g_base, self.layout.norm_f_weight), false),
+            ((self.layout.norm_f_weight, self.layout.norm_f_bias), false),
             rows,
         )?;
         for l in (0..c.n_layers).rev() {
@@ -2279,7 +2278,6 @@ impl Mamba3MimoGpuTrainer {
         let dm = c.d_model;
         let ms = self.layout.mlp[l];
         let hidden = ms.fc2_w.len / dm;
-        let g_base = self.grads.cached_ptr();
         let gw2 = self.grad(ms.fc2_w);
         let w2 = self.gemm_weight(ms.fc2_w)?;
         if self.act == WeightDtype::F32 {
@@ -2342,15 +2340,14 @@ impl Mamba3MimoGpuTrainer {
             )?;
         }
         let m = self.acts[l].mlp.as_ref().ok_or("the layer has no MLP")?;
-        self.rms_backward(
+        self.norm_backward(
             (
                 self.bwd.d_pre.cached_ptr(),
                 self.bwd.d_post2.ptr(),
                 m.x_in.cached_ptr(),
-                at(self.master.cached_ptr(), ms.norm_weight),
                 m.rms.cached_ptr(),
             ),
-            (at(g_base, ms.norm_weight), true),
+            ((ms.norm_weight, ms.norm_bias), true),
             rows,
         )?;
         self.add_residual_grad(rows)
@@ -3063,15 +3060,14 @@ impl Mamba3MimoGpuTrainer {
             )?;
         }
         let a = &self.acts[l];
-        self.rms_backward(
+        self.norm_backward(
             (
                 self.bwd.d_pre.cached_ptr(),
                 self.bwd.d_post.ptr(),
                 a.x_in.cached_ptr(),
-                at(base, ls.norm_weight),
                 a.rms.cached_ptr(),
             ),
-            (at(g_base, ls.norm_weight), true),
+            ((ls.norm_weight, ls.norm_bias), true),
             rows,
         )?;
         self.add_residual_grad(rows)

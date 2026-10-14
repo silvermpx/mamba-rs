@@ -16,6 +16,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::config::BlockNorm;
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use crate::mamba3_siso::config::Mamba3Config;
@@ -114,10 +115,11 @@ pub fn parse_mamba3_config(json: &[u8]) -> Result<HfMamba3Config, String> {
         .and_then(Value::as_array)
         .is_some_and(|a| !a.is_empty())
     {
-        return Err("config.json: hybrid attention layers are not supported".into());
-    }
-    if !bool_or(&root, "rms_norm", true)? {
-        return Err("config.json: rms_norm = false (LayerNorm) is not supported".into());
+        return Err(
+            "config.json: attention layers (attn_layer_idx) are not loaded: attention stays \
+             outside mamba-rs"
+                .into(),
+        );
     }
     // The block norms take norm_epsilon; the mixer's B/C and gate norms
     // keep the 1e-5 the reference fixes for them (ssm_norm_eps below).
@@ -148,6 +150,7 @@ pub fn parse_mamba3_config(json: &[u8]) -> Result<HfMamba3Config, String> {
         rope_fraction: f32_or(ssm, "rope_fraction", 0.5)?,
         a_floor: f32_or(ssm, "A_floor", 1e-4)?,
         is_outproj_norm: bool_or(ssm, "is_outproj_norm", false)?,
+        block_norm: BlockNorm::from_rms_norm(bool_or(&root, "rms_norm", true)?),
         rms_norm_eps: eps,
         // The reference fixes the mixer's norms at 1e-5.
         ssm_norm_eps: 1e-5,
@@ -181,6 +184,7 @@ impl HfMamba3Config {
             rope_fraction: c.rope_fraction,
             a_floor: c.a_floor,
             is_outproj_norm: c.is_outproj_norm,
+            block_norm: c.block_norm,
             rms_norm_eps: c.rms_norm_eps,
             ssm_norm_eps: c.ssm_norm_eps,
             d_intermediate: c.d_intermediate,
@@ -274,36 +278,63 @@ pub(super) const EMBEDDING: &str = "backbone.embedding.weight";
 /// The tensors every layer and the model around them carry, whatever the
 /// mixer: the embedding (under `embedding`), the head when it is untied,
 /// the final norm, the block norms and the MLP.
+/// The tensors every original-format checkpoint holds around its mixers:
+/// the embedding and the head, the block norms (a LayerNorm's with its
+/// bias) and the gated MLPs.
 pub(super) fn expect_common(
     expect: &mut HashMap<String, Vec<usize>>,
     (n_layers, d, hidden, vocab_padded): (usize, usize, usize, usize),
     (tie_embeddings, embedding): (bool, &str),
+    norm: BlockNorm,
 ) {
     expect.insert(embedding.into(), vec![vocab_padded, d]);
     if !tie_embeddings {
         expect.insert("lm_head.weight".into(), vec![vocab_padded, d]);
     }
-    expect.insert("backbone.norm_f.weight".into(), vec![d]);
-    for i in 0..n_layers {
-        let p = |n: &str| format!("backbone.layers.{i}.{n}");
-        expect.insert(p("norm.weight"), vec![d]);
-        if hidden > 0 {
-            expect.insert(p("norm2.weight"), vec![d]);
-            expect.insert(p("mlp.fc1.weight"), vec![2 * hidden, d]);
-            expect.insert(p("mlp.fc2.weight"), vec![d, hidden]);
+    let mut norm_at = |name: String| {
+        if !norm.rms_norm() {
+            expect.insert(format!("{name}.bias"), vec![d]);
         }
+        expect.insert(format!("{name}.weight"), vec![d]);
+    };
+    norm_at("backbone.norm_f".into());
+    for i in 0..n_layers {
+        norm_at(format!("backbone.layers.{i}.norm"));
+        if hidden > 0 {
+            norm_at(format!("backbone.layers.{i}.norm2"));
+        }
+    }
+    for i in (0..n_layers).filter(|_| hidden > 0) {
+        let p = |n: &str| format!("backbone.layers.{i}.{n}");
+        expect.insert(p("mlp.fc1.weight"), vec![2 * hidden, d]);
+        expect.insert(p("mlp.fc2.weight"), vec![d, hidden]);
+    }
+}
+
+/// A block norm's bias as the checkpoint stores it: LayerNorm's, empty for
+/// RMSNorm.
+pub(super) fn read_norm_bias(
+    src: &mut Source,
+    name: &str,
+    norm: BlockNorm,
+) -> Result<Vec<f32>, String> {
+    if norm.rms_norm() {
+        Ok(Vec::new())
+    } else {
+        src.read(&format!("{name}.bias"))
     }
 }
 
 pub(super) fn read_mlp(
     src: &mut Source,
     i: usize,
-    d: usize,
-    hidden: usize,
+    (d, hidden): (usize, usize),
+    norm: BlockNorm,
 ) -> Result<GatedMlpLayerWeights, String> {
     let p = |n: &str| format!("backbone.layers.{i}.{n}");
     Ok(GatedMlpLayerWeights {
         norm_weight: src.read(&p("norm2.weight"))?,
+        norm_bias: read_norm_bias(src, &p("norm2"), norm)?,
         fc1_w: transpose(&src.read(&p("mlp.fc1.weight"))?, 2 * hidden, d),
         fc2_w: transpose(&src.read(&p("mlp.fc2.weight"))?, d, hidden),
     })
@@ -332,6 +363,7 @@ pub fn load_hf_mamba3_mimo(dir: &Path) -> Result<HfMamba3MimoModel, String> {
         &mut expect,
         (cfg.n_layers, d, hidden, hf.vocab_padded),
         (hf.tie_embeddings, EMBEDDING),
+        cfg.block_norm,
     );
     for i in 0..cfg.n_layers {
         let p = |n: &str| format!("backbone.layers.{i}.mixer.{n}");
@@ -356,8 +388,10 @@ pub fn load_hf_mamba3_mimo(dir: &Path) -> Result<HfMamba3MimoModel, String> {
     let mut mlp = Vec::new();
     for i in 0..cfg.n_layers {
         let p = |n: &str| format!("backbone.layers.{i}.{n}");
+        let norm_bias = read_norm_bias(&mut src, &p("norm"), cfg.block_norm)?;
         layers.push(Mamba3MimoLayerWeights {
             norm_weight: src.read(&p("norm.weight"))?,
+            norm_bias,
             in_proj_w: transpose(&src.read(&p("mixer.in_proj.weight"))?, ip, d),
             dt_bias: src.read(&p("mixer.dt_bias"))?,
             b_norm_weight: src.read(&p("mixer.B_norm.weight"))?,
@@ -376,7 +410,7 @@ pub fn load_hf_mamba3_mimo(dir: &Path) -> Result<HfMamba3MimoModel, String> {
             out_proj_w: transpose(&src.read(&p("mixer.out_proj.weight"))?, d, di),
         });
         if hidden > 0 {
-            mlp.push(read_mlp(&mut src, i, d, hidden)?);
+            mlp.push(read_mlp(&mut src, i, (d, hidden), cfg.block_norm)?);
         }
     }
     let weights = Mamba3MimoWeights {
@@ -384,6 +418,7 @@ pub fn load_hf_mamba3_mimo(dir: &Path) -> Result<HfMamba3MimoModel, String> {
         input_proj_b: Vec::new(),
         layers,
         norm_f_weight: src.read("backbone.norm_f.weight")?,
+        norm_f_bias: read_norm_bias(&mut src, "backbone.norm_f", cfg.block_norm)?,
         mlp,
     };
     weights.validate(&cfg, d)?;
@@ -425,6 +460,7 @@ pub fn load_hf_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
         &mut expect,
         (cfg.n_layers, d, hidden, hf.vocab_padded),
         (hf.tie_embeddings, EMBEDDING),
+        cfg.block_norm,
     );
     for i in 0..cfg.n_layers {
         let p = |n: &str| format!("backbone.layers.{i}.{n}");
@@ -446,8 +482,10 @@ pub fn load_hf_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
     let mut mlp = Vec::new();
     for i in 0..cfg.n_layers {
         let p = |n: &str| format!("backbone.layers.{i}.{n}");
+        let norm_bias = read_norm_bias(&mut src, &p("norm"), cfg.block_norm)?;
         layers.push(Mamba3LayerWeights {
             norm_weight: src.read(&p("norm.weight"))?,
+            norm_bias,
             in_proj_w: transpose(&src.read(&p("mixer.in_proj.weight"))?, ip, d),
             dt_bias: src.read(&p("mixer.dt_bias"))?,
             b_norm_weight: src.read(&p("mixer.B_norm.weight"))?,
@@ -463,7 +501,7 @@ pub fn load_hf_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
             out_proj_w: transpose(&src.read(&p("mixer.out_proj.weight"))?, d, di),
         });
         if hidden > 0 {
-            mlp.push(read_mlp(&mut src, i, d, hidden)?);
+            mlp.push(read_mlp(&mut src, i, (d, hidden), cfg.block_norm)?);
         }
     }
     let weights = Mamba3Weights {
@@ -471,6 +509,7 @@ pub fn load_hf_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
         input_proj_b: Vec::new(),
         layers,
         norm_f_weight: src.read("backbone.norm_f.weight")?,
+        norm_f_bias: read_norm_bias(&mut src, "backbone.norm_f", cfg.block_norm)?,
         mlp,
     };
     weights.validate(&cfg, d)?;

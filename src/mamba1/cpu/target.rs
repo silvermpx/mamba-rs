@@ -8,10 +8,10 @@
 
 use super::weights::TrainMambaWeights;
 use crate::mlp::GatedMlpLayerWeights;
-use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows};
+use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows, mlp_norm_row};
 use crate::ops::blas::{matvec_forward, sgemm_forward};
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
-use crate::ops::norms::{bcdt_rms_norm, rms_norm_weighted};
+use crate::ops::norms::{bcdt_rms_norm, layer_norm_inplace, layer_norm_row};
 
 /// Scratch buffers for single-step (T=1) target Mamba forward.
 pub struct MambaTargetScratch {
@@ -108,15 +108,24 @@ pub fn forward_mamba_target_step(
         // Save residual
         scratch.residual[..dm].copy_from_slice(&output[..dm]);
 
-        // RmsNorm
-        let mean_sq: f32 = output[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
-        let inv_rms = 1.0 / (mean_sq + rms_norm_eps).sqrt();
-        for ((nb, &o), &nw) in scratch.norm_buf[..dm]
-            .iter_mut()
-            .zip(output[..dm].iter())
-            .zip(lw.norm_weight[..dm].iter())
-        {
-            *nb = o * inv_rms * nw;
+        // The block norm
+        if lw.norm_bias.is_empty() {
+            let mean_sq: f32 = output[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
+            let inv_rms = 1.0 / (mean_sq + rms_norm_eps).sqrt();
+            for ((nb, &o), &nw) in scratch.norm_buf[..dm]
+                .iter_mut()
+                .zip(output[..dm].iter())
+                .zip(lw.norm_weight[..dm].iter())
+            {
+                *nb = o * inv_rms * nw;
+            }
+        } else {
+            layer_norm_row(
+                &mut scratch.norm_buf[..dm],
+                &output[..dm],
+                (&lw.norm_weight, &lw.norm_bias),
+                rms_norm_eps,
+            );
         }
 
         // in_proj
@@ -236,10 +245,20 @@ pub fn forward_mamba_target_step(
         }
     }
 
-    // Final RmsNorm (norm_f)
-    let mean_sq: f32 = output[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
-    let inv_rms = 1.0 / (mean_sq + rms_norm_eps).sqrt();
-    for (o, &nfw) in output[..dm].iter_mut().zip(w.norm_f_weight[..dm].iter()) {
+    // The final norm (norm_f)
+    final_norm(&mut output[..dm], w, rms_norm_eps);
+}
+
+/// The final norm of one row in place: RMSNorm, or LayerNorm for a model
+/// with its bias.
+fn final_norm(row: &mut [f32], w: &TrainMambaWeights, eps: f32) {
+    if !w.norm_f_bias.is_empty() {
+        layer_norm_inplace(row, (&w.norm_f_weight, &w.norm_f_bias), eps);
+        return;
+    }
+    let mean_sq: f32 = row.iter().map(|v| v * v).sum::<f32>() / row.len() as f32;
+    let inv_rms = 1.0 / (mean_sq + eps).sqrt();
+    for (o, &nfw) in row.iter_mut().zip(&w.norm_f_weight) {
         *o *= inv_rms * nfw;
     }
 }
@@ -248,7 +267,7 @@ pub fn forward_mamba_target_step(
 /// forwards run.
 fn mlp_row(row: &mut [f32], m: &GatedMlpLayerWeights, s: &mut GatedMlpRowsScratch, eps: f32) {
     gated_mlp_rows(row, 1, m, s, sgemm_forward, |dst, src| {
-        rms_norm_weighted(dst, src, &m.norm_weight, eps);
+        mlp_norm_row(dst, src, m, eps);
     });
 }
 
@@ -382,16 +401,25 @@ pub fn forward_mamba_target_sequence(
             // Save residual
             scratch.residual[..dm].copy_from_slice(&scratch.temporal[..dm]);
 
-            // RmsNorm
-            let mean_sq: f32 =
-                scratch.temporal[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
-            let inv_rms = 1.0 / (mean_sq + rms_norm_eps).sqrt();
-            for ((nb, &t), &nw) in scratch.norm_buf[..dm]
-                .iter_mut()
-                .zip(scratch.temporal[..dm].iter())
-                .zip(lw.norm_weight[..dm].iter())
-            {
-                *nb = t * inv_rms * nw;
+            // The block norm
+            if lw.norm_bias.is_empty() {
+                let mean_sq: f32 =
+                    scratch.temporal[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
+                let inv_rms = 1.0 / (mean_sq + rms_norm_eps).sqrt();
+                for ((nb, &t), &nw) in scratch.norm_buf[..dm]
+                    .iter_mut()
+                    .zip(scratch.temporal[..dm].iter())
+                    .zip(lw.norm_weight[..dm].iter())
+                {
+                    *nb = t * inv_rms * nw;
+                }
+            } else {
+                layer_norm_row(
+                    &mut scratch.norm_buf[..dm],
+                    &scratch.temporal[..dm],
+                    (&lw.norm_weight, &lw.norm_bias),
+                    rms_norm_eps,
+                );
             }
 
             // in_proj
@@ -533,14 +561,7 @@ pub fn forward_mamba_target_sequence(
     }
 
     // norm_f applied once at the end on the last-timestep output.
-    let mean_sq: f32 = scratch.temporal[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
-    let inv_rms = 1.0 / (mean_sq + rms_norm_eps).sqrt();
-    for (t, &nfw) in scratch.temporal[..dm]
-        .iter_mut()
-        .zip(w.norm_f_weight[..dm].iter())
-    {
-        *t *= inv_rms * nfw;
-    }
+    final_norm(&mut scratch.temporal[..dm], w, rms_norm_eps);
 
     // Output = last timestep (post-norm_f)
     output[..dm].copy_from_slice(&scratch.temporal[..dm]);

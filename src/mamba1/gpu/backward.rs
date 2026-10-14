@@ -22,9 +22,10 @@ use super::weights::{
     GpuMambaGrads, GpuMambaLayerGrads, GpuMambaTrainLayerWeights, GpuMambaTrainWeights,
 };
 use crate::gpu::blas::gpu_gemm_bi_backward_grad_raw;
+use crate::gpu::block_norm;
 use crate::gpu::buffers::GpuBuffer;
 use crate::gpu::context::GpuCtx;
-use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, grid_norm, y_runs};
+use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_1d_wide, y_runs};
 use cudarc::driver::PushKernelArg;
 use std::sync::Arc;
 
@@ -522,37 +523,34 @@ pub fn gpu_backward_mamba_layer(
     )?;
 
     // ===================================================================
-    // B8: RmsNorm backward + residual
+    // B8: the block norm's backward + residual
     // ===================================================================
     // Rule B (no atomicAdd): two-stage launch.
-    // Stage 1: rmsnorm_bwd writes per-sample per-dim partials to axis0_partials[bt * dm].
+    // Stage 1 writes per-sample per-dim scale partials to
+    // axis0_partials[bt * dm] (a LayerNorm adds its bias gradient first).
     // Stage 2: reduce_sum_axis0 reduces across bt → d_lw.norm_weight (accumulate=1).
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let nw_ptr = lw.norm_weight.cached_ptr();
         let axis0_ptr = scratch.axis0_partials.cached_ptr();
-        // Stage 1
-        {
-            // dx = d_temporal with accumulate=1: the residual-path add
-            // (old separate vec_add_inplace) is folded into the store.
-            let accumulate_dx: i32 = 1;
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_bwd);
-            builder.arg(d_temporal.inner_mut());
-            builder.arg(&axis0_ptr); // d_scale_partials
-            builder.arg(scratch.d_norm.inner());
-            builder.arg(acts.residual.inner()); // x = input before norm
-            builder.arg(&nw_ptr);
-            builder.arg(acts.rms_vals.inner());
-            builder.arg(&bt_i);
-            builder.arg(&dm_i);
-            builder.arg(&accumulate_dx);
-            // No typed consumer on the pure-f32 lane.
-            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
-            builder.arg(&no_mirror);
-            unsafe { builder.launch(grid_norm(bt, dm)) }
-                .map_err(|e| format!("rmsnorm_bwd mamba partial: {:?}", e))?;
-        }
+        // Stage 1: dx = d_temporal with accumulate=1: the residual-path add
+        // (old separate vec_add_inplace) is folded into the store; no typed
+        // consumer on the pure-f32 lane.
+        block_norm::backward(
+            ctx,
+            WeightDtype::F32,
+            (
+                d_temporal.cached_ptr(),
+                axis0_ptr,
+                scratch.d_norm.cached_ptr(),
+                acts.residual.cached_ptr(),
+                acts.rms_vals.cached_ptr(),
+            ),
+            (lw.norm(), d_lw.norm_bias_ptr()),
+            (bt, dm),
+            (true, 0),
+            "block norm bwd mamba",
+        )?;
         // Stage 2
         {
             let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
@@ -616,30 +614,26 @@ pub fn gpu_backward_mamba_backbone(
         let bt_i = bt as i32;
         let dm_i = dims.d_model as i32;
         let axis0_ptr = scratch.axis0_partials.cached_ptr();
-        // Stage 1
-        {
-            // In-place: dx aliases dy (= d_temporal). Kernel-safe: the
-            // sum pass reads all dy before the barrier, and the write
-            // pass reads dy[off+i] before storing the same element.
-            // Kills the d_norm temp + the copy-back.
-            let dt_ptr = d_temporal.cached_ptr();
-            let accumulate_dx: i32 = 0;
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_bwd);
-            builder.arg(&dt_ptr); // dx (in place)
-            builder.arg(&axis0_ptr); // d_scale_partials
-            builder.arg(&dt_ptr); // dy (upstream gradient)
-            builder.arg(acts.norm_f_input.inner()); // saved pre-norm input
-            let nf_ptr = mamba_w.norm_f_weight.cached_ptr();
-            builder.arg(&nf_ptr); // scale
-            builder.arg(acts.norm_f_rms.inner()); // saved rms
-            builder.arg(&bt_i);
-            builder.arg(&dm_i);
-            builder.arg(&accumulate_dx);
-            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
-            builder.arg(&no_mirror);
-            unsafe { builder.launch(grid_norm(bt, dims.d_model)) }
-                .map_err(|e| format!("rmsnorm_bwd norm_f partial: {:?}", e))?;
-        }
+        // Stage 1, in place: dx aliases dy (= d_temporal). Kernel-safe:
+        // the sum pass reads all dy before the barrier, and the write pass
+        // reads dy[off+i] before storing the same element. Kills the d_norm
+        // temp + the copy-back.
+        let dt_ptr = d_temporal.cached_ptr();
+        block_norm::backward(
+            ctx,
+            WeightDtype::F32,
+            (
+                dt_ptr,
+                axis0_ptr,
+                dt_ptr,
+                acts.norm_f_input.cached_ptr(),
+                acts.norm_f_rms.cached_ptr(),
+            ),
+            (mamba_w.norm_f(), d_mamba.norm_f_bias_ptr()),
+            (bt, dims.d_model),
+            (false, 0),
+            "norm_f bwd",
+        )?;
         // Stage 2
         {
             let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
@@ -736,7 +730,7 @@ pub struct GpuMambaTargetScratch {
     pub gated: GpuBuffer,       // [B*T*d_inner] the scan's gated store
     pub out_flat: GpuBuffer,    // [B*T*d_model]
     pub residual: GpuBuffer,    // [B*T*d_model] (saved before RmsNorm)
-    pub rms_discard: GpuBuffer, // [B*T] (RmsNorm scalars, discarded)
+    pub rms_discard: GpuBuffer, // [B*T*stats] (the norms' statistics, discarded)
     pub b_gathered: GpuBuffer,  // [B*T*d_state]
     pub c_gathered: GpuBuffer,  // [B*T*d_state]
     /// t-major rows [B, d_inner, stride] of `u` that the conv writes for
@@ -794,7 +788,7 @@ impl GpuMambaTargetScratch {
             gated: GpuBuffer::zeros(stream, bt * d_inner)?,
             out_flat: GpuBuffer::zeros(stream, bt * d_model)?,
             residual: GpuBuffer::zeros(stream, bt * d_model)?,
-            rms_discard: GpuBuffer::zeros(stream, bt)?,
+            rms_discard: GpuBuffer::zeros(stream, bt * dims.block_norm.stats_per_row())?,
             b_gathered: GpuBuffer::zeros(stream, bt * d_state)?,
             c_gathered: GpuBuffer::zeros(stream, bt * d_state)?,
             u_t: GpuBuffer::zeros(stream, tm.max(1))?,
@@ -891,7 +885,7 @@ impl GpuMambaTargetMixedScratch {
             gated: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
             out_flat: DtypedBuf::zeros(stream, bt * d_model, dtype)?,
             residual: GpuBuffer::zeros(stream, bt * d_model)?,
-            rms_discard: GpuBuffer::zeros(stream, bt)?,
+            rms_discard: GpuBuffer::zeros(stream, bt * dims.block_norm.stats_per_row())?,
             b_gathered: DtypedBuf::zeros(stream, bt * d_state, dtype)?,
             c_gathered: DtypedBuf::zeros(stream, bt * d_state, dtype)?,
             u_t: DtypedBuf::zeros(stream, tm.max(1), dtype)?,

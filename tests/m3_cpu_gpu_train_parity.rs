@@ -36,6 +36,7 @@
 //!   - the sequential scan's block-tier kernels (headdim 48 and 64)
 //!   - the gated output norm past 1024 channels and on a head of 48
 //!   - the gated MLP after every mixer, on both scans
+//!   - LayerNorm block norms (`rms_norm = false`) with their biases
 //!   - heads wider than a block, the gated norm past 1024 channels a head
 //!
 //! The chunked window is stateless by design (chunk 0 starts from zero
@@ -68,10 +69,11 @@ use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 use mamba_rs::mlp::GatedMlpLayerWeights;
 use mamba_rs::mlp::cpu::{
     GatedMlpBackwardScratch, GatedMlpRowsScratch, gated_mlp_rows, gated_mlp_rows_backward,
+    mlp_norm_row,
 };
 use mamba_rs::ops::blas::{sgemm_backward, sgemm_forward};
 use mamba_rs::ops::fast_math::RMS_NORM_EPS;
-use mamba_rs::ops::norms::rms_norm_weighted;
+use mamba_rs::ops::norms::{layer_norm_inplace, layer_norm_row_backward};
 
 /// Per-tensor directional agreement floor.
 const COS_MIN: f32 = 0.9999;
@@ -131,6 +133,7 @@ impl Scenario {
             a_floor: cfg.a_floor,
             rms_norm_eps: cfg.rms_norm_eps,
             ssm_norm_eps: cfg.ssm_norm_eps,
+            block_norm: cfg.block_norm,
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: self.use_parallel_scan,
         }
@@ -146,6 +149,7 @@ fn train_weights_from(w: &Mamba3Weights) -> TrainMamba3Weights {
             .iter()
             .map(|lw| TrainMamba3LayerWeights {
                 norm_weight: lw.norm_weight.clone(),
+                norm_bias: lw.norm_bias.clone(),
                 in_proj_w: lw.in_proj_w.clone(),
                 dt_bias: lw.dt_bias.clone(),
                 b_norm_weight: lw.b_norm_weight.clone(),
@@ -158,6 +162,7 @@ fn train_weights_from(w: &Mamba3Weights) -> TrainMamba3Weights {
             })
             .collect(),
         norm_f_weight: w.norm_f_weight.clone(),
+        norm_f_bias: w.norm_f_bias.clone(),
     }
 }
 
@@ -170,6 +175,7 @@ fn flatten_cpu_grads(g: &TrainMamba3Weights, mlp: &[GatedMlpLayerWeights]) -> Ve
     out.extend_from_slice(&g.input_proj_b);
     for l in &g.layers {
         out.extend_from_slice(&l.norm_weight);
+        out.extend_from_slice(&l.norm_bias);
         out.extend_from_slice(&l.in_proj_w);
         out.extend_from_slice(&l.dt_bias);
         out.extend_from_slice(&l.b_norm_weight);
@@ -181,8 +187,10 @@ fn flatten_cpu_grads(g: &TrainMamba3Weights, mlp: &[GatedMlpLayerWeights]) -> Ve
         out.extend_from_slice(&l.out_proj_w);
     }
     out.extend_from_slice(&g.norm_f_weight);
+    out.extend_from_slice(&g.norm_f_bias);
     for m in mlp {
         out.extend_from_slice(&m.norm_weight);
+        out.extend_from_slice(&m.norm_bias);
         out.extend_from_slice(&m.fc1_w);
         out.extend_from_slice(&m.fc2_w);
     }
@@ -196,6 +204,8 @@ fn grad_segments(cfg: &Mamba3Config, input_dim: usize) -> Vec<(String, usize)> {
     let ds = cfg.d_state;
     let nh = cfg.nheads();
     let ip = cfg.in_proj_out_dim();
+    // A LayerNorm's bias follows its scale; an RMSNorm has none.
+    let nb = cfg.block_norm.bias_len(dm);
     let mut segs = vec![
         ("input_proj_w".into(), input_dim * dm),
         ("input_proj_b".into(), dm),
@@ -203,6 +213,7 @@ fn grad_segments(cfg: &Mamba3Config, input_dim: usize) -> Vec<(String, usize)> {
     for li in 0..cfg.n_layers {
         segs.extend([
             (format!("L{li}.norm_weight"), dm),
+            (format!("L{li}.norm_bias"), nb),
             (format!("L{li}.in_proj_w"), dm * ip),
             (format!("L{li}.dt_bias"), nh),
             (format!("L{li}.b_norm_weight"), ds),
@@ -215,14 +226,17 @@ fn grad_segments(cfg: &Mamba3Config, input_dim: usize) -> Vec<(String, usize)> {
         ]);
     }
     segs.push(("norm_f_weight".into(), dm));
+    segs.push(("norm_f_bias".into(), nb));
     let h = cfg.mlp_hidden();
     for li in (0..cfg.n_layers).filter(|_| h > 0) {
         segs.extend([
             (format!("L{li}.mlp.norm_weight"), dm),
+            (format!("L{li}.mlp.norm_bias"), nb),
             (format!("L{li}.mlp.fc1_w"), dm * 2 * h),
             (format!("L{li}.mlp.fc2_w"), h * dm),
         ]);
     }
+    segs.retain(|&(_, len)| len > 0);
     segs
 }
 
@@ -403,6 +417,7 @@ fn run_cpu(
         input_proj_b: Vec::new(),
         layers: vec![tw.layers[l].clone()],
         norm_f_weight: Vec::new(),
+        norm_f_bias: Vec::new(),
     };
     let eps = scn.cfg.rms_norm_eps;
     let mut layer_acts = Vec::with_capacity(nl);
@@ -440,33 +455,69 @@ fn run_cpu(
                 sgemm_forward,
                 |dst, src| {
                     for (d_row, s_row) in dst.chunks_exact_mut(dm).zip(src.chunks_exact(dm)) {
-                        rms_norm_weighted(d_row, s_row, &m.norm_weight, eps);
+                        mlp_norm_row(d_row, s_row, m, eps);
                     }
                 },
             );
         }
     }
 
-    // Forward: norm_f RMSNorm.
+    // Forward: norm_f, an RMSNorm or a LayerNorm (its statistics are the
+    // row's [std, mean]).
     let norm_f_input = temporal.clone();
-    let mut norm_f_rms = vec![0.0f32; bt];
+    let layer_norm = !tw.norm_f_bias.is_empty();
+    let mut norm_f_stats = vec![0.0f32; bt * if layer_norm { 2 } else { 1 }];
     let mut out = vec![0.0f32; bt * dm];
-    rmsnorm_rows_fwd(&mut out, &mut norm_f_rms, &norm_f_input, &tw.norm_f_weight);
+    if layer_norm {
+        out.copy_from_slice(&norm_f_input);
+        for (row, st) in out
+            .chunks_exact_mut(dm)
+            .zip(norm_f_stats.as_chunks_mut::<2>().0)
+        {
+            *st = layer_norm_inplace(row, (&tw.norm_f_weight, &tw.norm_f_bias), eps);
+        }
+    } else {
+        rmsnorm_rows_fwd(
+            &mut out,
+            &mut norm_f_stats,
+            &norm_f_input,
+            &tw.norm_f_weight,
+        );
+    }
 
     // Backward: norm_f → layers → input_proj.
     let mut grads = TrainMamba3Weights::zeros(&dims, input_dim);
     let mut d_temporal = vec![0.0f32; bt * dm];
-    rmsnorm_rows_bwd(
-        (&mut d_temporal, &mut grads.norm_f_weight),
-        d_out,
-        &norm_f_input,
-        (&tw.norm_f_weight, &norm_f_rms),
-    );
+    if layer_norm {
+        for (((dx, dy), x), st) in d_temporal
+            .chunks_exact_mut(dm)
+            .zip(d_out.chunks_exact(dm))
+            .zip(norm_f_input.chunks_exact(dm))
+            .zip(norm_f_stats.as_chunks::<2>().0)
+        {
+            layer_norm_row_backward(
+                dx,
+                (&mut grads.norm_f_weight, &mut grads.norm_f_bias),
+                (dy, x),
+                &tw.norm_f_weight,
+                *st,
+                false,
+            );
+        }
+    } else {
+        rmsnorm_rows_bwd(
+            (&mut d_temporal, &mut grads.norm_f_weight),
+            d_out,
+            &norm_f_input,
+            (&tw.norm_f_weight, &norm_f_stats),
+        );
+    }
 
     let mut mlp_grads: Vec<GatedMlpLayerWeights> = mlp
         .iter()
         .map(|m| GatedMlpLayerWeights {
             norm_weight: vec![0.0; dm],
+            norm_bias: vec![0.0; m.norm_bias.len()],
             fc1_w: vec![0.0; m.fc1_w.len()],
             fc2_w: vec![0.0; m.fc2_w.len()],
         })
@@ -602,7 +653,19 @@ fn check_scenario(label: &str, scn: &Scenario) {
     let n_in = scn.bt() * input_dim;
     let n_out = scn.bt() * scn.cfg.d_model;
 
-    let cpu_w = Mamba3Weights::init(&scn.cfg, input_dim, 0xC0FFEE);
+    let mut cpu_w = Mamba3Weights::init(&scn.cfg, input_dim, 0xC0FFEE);
+    // A LayerNorm's biases start at zero; drawn ones put the bias add in
+    // the forward too. An RMSNorm model has none.
+    let biases = cpu_w
+        .layers
+        .iter_mut()
+        .map(|lw| &mut lw.norm_bias)
+        .chain(cpu_w.mlp.iter_mut().map(|m| &mut m.norm_bias))
+        .chain(std::iter::once(&mut cpu_w.norm_f_bias));
+    for (k, b) in biases.enumerate() {
+        let d = det(b.len(), 0x1B + k as u32, 0.2);
+        b.copy_from_slice(&d);
+    }
     let tw = train_weights_from(&cpu_w);
 
     // Identical input + upstream gradient for both paths. Scales keep
@@ -925,6 +988,31 @@ fn m3_cpu_gpu_train_parity_gated_mlp() {
             use_parallel_scan: parallel,
         };
         check_scenario(&format!("mlp parallel={parallel}"), &scn);
+    }
+}
+
+/// LayerNorm block norms (`rms_norm = false`): the norm before every mixer,
+/// the one before every gated MLP and the final norm, each with its bias,
+/// on both scans with both output gates, with and without the MLP.
+#[test]
+fn m3_cpu_gpu_train_parity_layer_norm() {
+    for (parallel, outproj_norm, d_intermediate) in
+        [(true, true, 160), (false, false, 160), (true, false, 0)]
+    {
+        let scn = Scenario {
+            cfg: Mamba3Config {
+                block_norm: mamba_rs::BlockNorm::Layer,
+                d_intermediate,
+                ..base_cfg(outproj_norm)
+            },
+            batch: 2,
+            seq_len: if parallel { 128 } else { 64 },
+            use_parallel_scan: parallel,
+        };
+        check_scenario(
+            &format!("layer norm parallel={parallel} mlp={d_intermediate}"),
+            &scn,
+        );
     }
 }
 

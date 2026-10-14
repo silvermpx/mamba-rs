@@ -118,6 +118,14 @@ fn cases() -> Vec<(&'static str, Mamba2Config)> {
                 ..base
             },
         ),
+        (
+            "LayerNorm block norms with the gated MLP",
+            Mamba2Config {
+                block_norm: mamba_rs::BlockNorm::Layer,
+                d_intermediate: 96,
+                ..base
+            },
+        ),
     ]
 }
 
@@ -130,6 +138,7 @@ fn drawn(cfg: &Mamba2Config, input_dim: usize, seed: u64) -> Mamba2Weights {
             (&mut lw.gate_norm_weight, 2, 1.0, 0.3),
             (&mut lw.in_proj_b, 3, 0.0, 0.1),
             (&mut lw.out_proj_b, 4, 0.0, 0.1),
+            (&mut lw.norm_bias, 6, 0.0, 0.2),
         ] {
             let d = det(v.len(), s + k, scale);
             for (x, dv) in v.iter_mut().zip(d) {
@@ -142,6 +151,14 @@ fn drawn(cfg: &Mamba2Config, input_dim: usize, seed: u64) -> Mamba2Weights {
         for (x, dv) in m.norm_weight.iter_mut().zip(d) {
             *x = 1.0 + dv;
         }
+        let d = det(m.norm_bias.len(), seed * 100 + l as u64 * 10 + 8, 0.2);
+        for (x, dv) in m.norm_bias.iter_mut().zip(d) {
+            *x = dv;
+        }
+    }
+    let d = det(w.norm_f_bias.len(), seed + 9, 0.2);
+    for (x, dv) in w.norm_f_bias.iter_mut().zip(d) {
+        *x = dv;
     }
     w.input_proj_b = det(cfg.d_model, seed + 7, 0.1);
     w

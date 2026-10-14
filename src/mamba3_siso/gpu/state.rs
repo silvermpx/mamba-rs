@@ -91,6 +91,8 @@ pub struct GpuMamba3Dims {
     /// Epsilon of the mixer's B/C norms and output-gate norm
     /// (`Mamba3Config::ssm_norm_eps`).
     pub ssm_norm_eps: f32,
+    /// The kind of the block norms (`Mamba3Config::block_norm`).
+    pub block_norm: crate::config::BlockNorm,
     /// false = sequential SSM (m3_burnin_fwd/m3_backward_seq), faster at T<=64.
     /// true = parallel chunked scan (10-kernel pipeline), faster at T>64.
     pub use_parallel_scan: bool,
@@ -196,6 +198,7 @@ mod index_width_tests {
             is_outproj_norm: false,
             rms_norm_eps: 1e-5,
             ssm_norm_eps: 1e-5,
+            block_norm: crate::config::BlockNorm::Rms,
             use_parallel_scan: true,
         }
     }
@@ -241,9 +244,10 @@ mod index_width_tests {
 
 /// Per-layer saved activations for backward.
 pub struct GpuMamba3LayerActs {
-    // F1: RMSNorm
-    pub residual: GpuBuffer,  // [B*T*d_model]
-    pub rms_vals: GpuBuffer,  // [B*T]
+    // F1: the block norm
+    pub residual: GpuBuffer, // [B*T*d_model]
+    /// The block norm's statistics, `BlockNorm::stats_per_row` per row.
+    pub rms_vals: GpuBuffer, // [B*T*stats]
     pub post_norm: GpuBuffer, // [B*T*d_model]
     // F3: Split
     pub z: GpuBuffer,          // [B*T*d_inner]
@@ -298,7 +302,7 @@ pub struct GpuMamba3LayerActs {
 pub struct GpuMamba3MlpActs {
     pub x_in: GpuBuffer, // [B*T*d_model] the rows entering the MLP
     pub post: GpuBuffer, // [B*T*d_model] the rows after its norm
-    pub rms: GpuBuffer,  // [B*T]
+    pub rms: GpuBuffer,  // [B*T*stats] its norm's statistics
     pub up: GpuBuffer,   // [B*T*2*hidden] value columns, then gate
     pub act: GpuBuffer,  // [B*T*hidden]
 }
@@ -316,6 +320,7 @@ impl GpuMamba3MlpBufs {
         hidden: usize,
     ) -> Result<Self, String> {
         let (bt, dm) = (dims.bt(), dims.d_model);
+        let stats = bt * dims.block_norm.stats_per_row();
         let z = |n: usize| GpuBuffer::zeros(stream, n);
         Ok(Self {
             hidden,
@@ -324,7 +329,7 @@ impl GpuMamba3MlpBufs {
                     Ok(GpuMamba3MlpActs {
                         x_in: z(bt * dm)?,
                         post: z(bt * dm)?,
-                        rms: z(bt)?,
+                        rms: z(stats)?,
                         up: z(bt * 2 * hidden)?,
                         act: z(bt * hidden)?,
                     })
@@ -339,7 +344,7 @@ pub struct GpuMamba3BackboneActs {
     pub input_proj_inputs: GpuBuffer, // [B*T*mamba_input_dim]
     pub layers: Vec<GpuMamba3LayerActs>,
     pub norm_f_input: GpuBuffer, // [B*T*d_model]
-    pub norm_f_rms: GpuBuffer,   // [B*T]
+    pub norm_f_rms: GpuBuffer,   // [B*T*stats]
     /// The gated MLP's buffers; `None` for a model without one.
     pub mlp: Option<GpuMamba3MlpBufs>,
 }
@@ -480,7 +485,9 @@ pub struct GpuMamba3TargetScratch {
     pub temporal_work: GpuBuffer, // [B*T*d_model] — working temporal (input_proj output → layers → norm_f)
     pub out_flat: GpuBuffer,      // [B*T*d_model]
     pub residual: GpuBuffer,      // [B*T*d_model]
-    pub rms_discard: GpuBuffer,   // [B*T*nheads] — per-group rstd (discarded in target)
+    /// Statistics nobody reads back: the gated norm's per-group rstd and
+    /// the block norms', `[B*T*max(nheads, stats)]`.
+    pub rms_discard: GpuBuffer,
     /// The gated MLP's up projection `[B*T*2*hidden]` and activation
     /// `[B*T*hidden]`, empty unless [`Self::with_mlp`] sized them.
     pub mlp_up: GpuBuffer,
@@ -515,7 +522,7 @@ impl GpuMamba3LayerActs {
         let cs = dims.chunk_size();
         Ok(Self {
             residual: GpuBuffer::zeros(stream, bt * dm)?,
-            rms_vals: GpuBuffer::zeros(stream, bt)?,
+            rms_vals: GpuBuffer::zeros(stream, bt * dims.block_norm.stats_per_row())?,
             post_norm: GpuBuffer::zeros(stream, bt * dm)?,
             z: GpuBuffer::zeros(stream, bt * di)?,
             x: GpuBuffer::zeros(stream, bt * di)?,
@@ -610,7 +617,7 @@ impl GpuMamba3BackboneActs {
                 .map(|_| GpuMamba3LayerActs::new(stream, bt, dims))
                 .collect::<Result<_, _>>()?,
             norm_f_input: GpuBuffer::zeros(stream, bt * dims.d_model)?,
-            norm_f_rms: GpuBuffer::zeros(stream, bt)?,
+            norm_f_rms: GpuBuffer::zeros(stream, bt * dims.block_norm.stats_per_row())?,
             mlp: None,
         })
     }
@@ -778,7 +785,7 @@ impl GpuMamba3TargetScratch {
             temporal_work: GpuBuffer::zeros(stream, bt * dm)?,
             out_flat: GpuBuffer::zeros(stream, bt * dm)?,
             residual: GpuBuffer::zeros(stream, bt * dm)?,
-            rms_discard: GpuBuffer::zeros(stream, bt * nh)?,
+            rms_discard: GpuBuffer::zeros(stream, bt * nh.max(dims.block_norm.stats_per_row()))?,
             mlp_up: GpuBuffer::zeros(stream, 0)?,
             mlp_act: GpuBuffer::zeros(stream, 0)?,
             ssm_states: GpuBuffer::zeros(stream, b * nl * nh * hd * ds)?,

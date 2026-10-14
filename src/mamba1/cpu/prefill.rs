@@ -38,12 +38,12 @@ use rayon::prelude::*;
 
 use crate::mamba1::state::MambaState;
 use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
-use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows};
+use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows, mlp_norm_row};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 use crate::ops::lane::{LaneGemm, input_rows};
-use crate::ops::norms::{bcdt_rms_norm, rms_norm_weighted};
+use crate::ops::norms::{bcdt_rms_norm, layer_norm_inplace, layer_norm_row};
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
 
@@ -506,21 +506,26 @@ pub fn forward_mamba_backbone_prefill_mode(
     for (layer_idx, lw) in w.layers.iter().enumerate() {
         let lstate = &mut state.layers[layer_idx];
 
-        // F1: RMSNorm at every position (dims eps — never hardcoded).
-        // `temporal_out` doubles as the residual: it is only read here and
-        // updated in-place at F6, so no residual copy is needed.
+        // F1: the block norm at every position (dims eps — never
+        // hardcoded). `temporal_out` doubles as the residual: it is only
+        // read here and updated in-place at F6, so no residual copy is
+        // needed.
         zip_rows(
             mode,
             (&mut scratch.post_norm[..t_len * dm], dm),
             (&temporal_out[..t_len * dm], dm),
             |dst, src| {
-                let mut sum_sq = 0.0_f32;
-                for &v in src {
-                    sum_sq += v * v;
-                }
-                let inv_rms = 1.0 / (sum_sq / dm as f32 + eps).sqrt();
-                for ((y, &s), nw) in dst.iter_mut().zip(src).zip(&lw.norm_weight[..dm]) {
-                    *y = s * inv_rms * nw;
+                if lw.norm_bias.is_empty() {
+                    let mut sum_sq = 0.0_f32;
+                    for &v in src {
+                        sum_sq += v * v;
+                    }
+                    let inv_rms = 1.0 / (sum_sq / dm as f32 + eps).sqrt();
+                    for ((y, &s), nw) in dst.iter_mut().zip(src).zip(&lw.norm_weight[..dm]) {
+                        *y = s * inv_rms * nw;
+                    }
+                } else {
+                    layer_norm_row(dst, src, (&lw.norm_weight, &lw.norm_bias), eps);
                 }
                 store(dtype, dst);
             },
@@ -733,7 +738,7 @@ pub fn forward_mamba_backbone_prefill_mode(
                 gemm,
                 |dst, src| {
                     zip_rows(mode, (dst, dm), (src, dm), |d_row, s_row| {
-                        rms_norm_weighted(d_row, s_row, &m.norm_weight[..dm], eps);
+                        mlp_norm_row(d_row, s_row, m, eps);
                     });
                 },
             );
@@ -742,13 +747,17 @@ pub fn forward_mamba_backbone_prefill_mode(
 
     // norm_f at EVERY position, dims eps.
     for_rows(mode, &mut temporal_out[..t_len * dm], dm, |row| {
-        let mut sum_sq = 0.0_f32;
-        for &v in row.iter() {
-            sum_sq += v * v;
-        }
-        let inv_rms = 1.0 / (sum_sq / dm as f32 + eps).sqrt();
-        for (y, nw) in row.iter_mut().zip(&w.norm_f_weight[..dm]) {
-            *y *= inv_rms * nw;
+        if w.norm_f_bias.is_empty() {
+            let mut sum_sq = 0.0_f32;
+            for &v in row.iter() {
+                sum_sq += v * v;
+            }
+            let inv_rms = 1.0 / (sum_sq / dm as f32 + eps).sqrt();
+            for (y, nw) in row.iter_mut().zip(&w.norm_f_weight[..dm]) {
+                *y *= inv_rms * nw;
+            }
+        } else {
+            layer_norm_inplace(row, (&w.norm_f_weight, &w.norm_f_bias), eps);
         }
         store(dtype, row);
     });

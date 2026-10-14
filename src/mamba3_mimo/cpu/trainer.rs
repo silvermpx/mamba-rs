@@ -23,6 +23,7 @@ tensor_list!(
     pre: [input_proj_w, input_proj_b],
     layers: layers [
         norm_weight,
+        norm_bias,
         in_proj_w,
         dt_bias,
         b_norm_weight,
@@ -36,8 +37,8 @@ tensor_list!(
         out_proj_w,
         norm_gate_weight
     ],
-    mlp: mlp [norm_weight, fc1_w, fc2_w],
-    post: [norm_f_weight],
+    mlp: mlp [norm_weight, norm_bias, fc1_w, fc2_w],
+    post: [norm_f_weight, norm_f_bias],
 );
 
 pub(crate) struct Mamba3MimoCpu {
@@ -156,6 +157,7 @@ impl CpuFamily for Mamba3MimoCpu {
         for _ in &w.layers {
             roles.extend([
                 plain(false),
+                plain(false),
                 TensorRole {
                     decays: true,
                     control: Control::Columns {
@@ -180,9 +182,9 @@ impl CpuFamily for Mamba3MimoCpu {
             ]);
         }
         for _ in &w.mlp {
-            roles.extend([plain(false), plain(true), plain(true)]);
+            roles.extend([plain(false), plain(false), plain(true), plain(true)]);
         }
-        roles.push(plain(false));
+        roles.extend([plain(false), plain(false)]);
         roles
     }
 

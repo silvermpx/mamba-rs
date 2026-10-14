@@ -9,7 +9,7 @@
 //! | # | Field           | Size                         |
 //! |---|-----------------|------------------------------|
 //! | 0 | residual        | d_model                      |
-//! | 1 | rms_val         | 1                            |
+//! | 1 | rms_val         | 1, 2 for LayerNorm (std, mean) |
 //! | 2 | post_norm       | d_model                      |
 //! | 3 | x_branch        | d_inner                      |
 //! | 4 | post_conv       | d_inner                      |
@@ -42,6 +42,8 @@ use crate::ops::dims::MambaDims;
 #[derive(Debug, Clone, Copy)]
 pub struct FieldOffsets {
     pub residual: usize,
+    /// The block norm's statistics: the rms, or a LayerNorm's std and mean
+    /// (`BlockNorm::stats_per_row`).
     pub rms_val: usize,
     pub post_norm: usize,
     pub x_branch: usize,
@@ -73,7 +75,7 @@ impl FieldOffsets {
         off += dm;
 
         let rms_val = off;
-        off += 1;
+        off += dims.block_norm.stats_per_row();
 
         let post_norm = off;
         off += dm;
@@ -242,6 +244,13 @@ impl MambaLayerFlat {
         self.data[self.base(t) + self.offsets.rms_val]
     }
 
+    /// A LayerNorm block norm's `[std, mean]` of step `t`.
+    #[inline]
+    pub fn norm_stats(&self, t: usize) -> [f32; 2] {
+        let b = self.base(t) + self.offsets.rms_val;
+        [self.data[b], self.data[b + 1]]
+    }
+
     /// `post_norm[t]`: `&[d_model]`.
     #[inline]
     pub fn post_norm(&self, t: usize) -> &[f32] {
@@ -344,6 +353,13 @@ impl MambaLayerFlat {
     pub fn set_rms_val(&mut self, t: usize, val: f32) {
         let idx = self.base(t) + self.offsets.rms_val;
         self.data[idx] = val;
+    }
+
+    /// Set a LayerNorm block norm's `[std, mean]` of step `t`.
+    #[inline]
+    pub fn set_norm_stats(&mut self, t: usize, stats: [f32; 2]) {
+        let b = self.base(t) + self.offsets.rms_val;
+        self.data[b..b + 2].copy_from_slice(&stats);
     }
 
     /// `post_norm_mut[t]`: `&mut [d_model]`.
@@ -506,7 +522,8 @@ pub struct MambaBackboneFlat {
     pub layers: Vec<MambaLayerFlat>,
     /// Saved pre-norm_f input for backward: `[seq_len * d_model]`.
     pub norm_f_input: Vec<f32>,
-    /// Saved RMS values per timestep for norm_f backward: `[seq_len]`.
+    /// Saved norm_f statistics per timestep for its backward: the rms, or
+    /// a LayerNorm's `[std, mean]`: `[seq_len * stats]`.
     pub norm_f_rms: Vec<f32>,
     /// The rows entering each layer's gated MLP, `[seq_len * d_model]` per
     /// layer; empty for a model without one.
@@ -528,7 +545,7 @@ impl MambaBackboneFlat {
                 .map(|_| MambaLayerFlat::zeros_strided(dims, stride))
                 .collect(),
             norm_f_input: vec![0.0; dims.seq_len * dims.d_model],
-            norm_f_rms: vec![0.0; dims.seq_len],
+            norm_f_rms: vec![0.0; dims.seq_len * dims.block_norm.stats_per_row()],
             mlp_in: (0..dims.n_layers)
                 .filter(|_| dims.mlp_hidden > 0)
                 .map(|_| vec![0.0; dims.seq_len * dims.d_model])

@@ -233,6 +233,14 @@
   training and in every precision, as Mamba-2 and Mamba-3 do. Original-
   format checkpoints with `d_intermediate` load with it instead of being
   refused, and saved models keep it.
+- LayerNorm block norms in every family. A model built with
+  `rms_norm = false`, the reference's `nn.LayerNorm` as `norm_cls`, runs
+  the norm before each mixer, the gated MLP's `norm2` and `norm_f` as
+  LayerNorm with a bias, on the CPU and the GPU, in every storage
+  precision, in decode, prefill and training; the mixers' own norms stay
+  RMSNorm, as in the reference. `BlockNorm` on each config names the kind.
+  Original-format checkpoints with `rms_norm: false` load with their
+  biases, and the safetensors checkpoints keep them.
 
 ### Changed
 
@@ -519,6 +527,9 @@
   `(&MambaLayerWeights, Option<&GatedMlpLayerWeights>)`, and runs the
   whole reference Block, the MLP branch included. It panics when the MLP
   disagrees with the config.
+- A checkpoint with attention layers (`attn_layer_idx`) is refused with
+  the same words in every family: attention stays outside mamba-rs, so the
+  model would run without the layers it was trained with.
 
 ### Fixed
 

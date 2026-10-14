@@ -107,6 +107,14 @@ fn cases() -> Vec<(&'static str, Mamba2Config)> {
                 ..base
             },
         ),
+        (
+            "LayerNorm block norms with the gated MLP",
+            Mamba2Config {
+                block_norm: mamba_rs::BlockNorm::Layer,
+                d_intermediate: 96,
+                ..base
+            },
+        ),
     ]
 }
 
@@ -155,6 +163,7 @@ fn drawn(cfg: &Mamba2Config, input_dim: usize, seed: u64) -> Mamba2Weights {
             (&mut lw.in_proj_b, 4, 0.0, 0.2),
             (&mut lw.out_proj_b, 5, 0.0, 0.2),
             (&mut lw.conv_b, 6, 0.0, 0.3),
+            (&mut lw.norm_bias, 7, 0.0, 0.2),
         ] {
             let d = det(v.len(), s + k, scale);
             for (x, dv) in v.iter_mut().zip(d) {
@@ -170,6 +179,14 @@ fn drawn(cfg: &Mamba2Config, input_dim: usize, seed: u64) -> Mamba2Weights {
         for (x, dv) in m.norm_weight.iter_mut().zip(d) {
             *x = 1.0 + dv;
         }
+        let d = det(m.norm_bias.len(), seed * 100 + l as u64 * 20 + 11, 0.2);
+        for (x, dv) in m.norm_bias.iter_mut().zip(d) {
+            *x = dv;
+        }
+    }
+    let d = det(w.norm_f_bias.len(), seed + 13, 0.2);
+    for (x, dv) in w.norm_f_bias.iter_mut().zip(d) {
+        *x = dv;
     }
     w.input_proj_b = det(cfg.d_model, seed + 7, 0.1);
     w
@@ -181,10 +198,12 @@ fn named(w: &Mamba2Weights) -> Vec<(String, &[f32])> {
         ("input_proj_w".to_string(), w.input_proj_w.as_slice()),
         ("input_proj_b".to_string(), w.input_proj_b.as_slice()),
         ("norm_f".to_string(), w.norm_f_weight.as_slice()),
+        ("norm_f_bias".to_string(), w.norm_f_bias.as_slice()),
     ];
     for (l, lw) in w.layers.iter().enumerate() {
         for (name, v) in [
             ("norm", &lw.norm_weight),
+            ("norm_bias", &lw.norm_bias),
             ("in_proj_w", &lw.in_proj_w),
             ("in_proj_b", &lw.in_proj_b),
             ("conv_w", &lw.conv_w),
@@ -202,6 +221,7 @@ fn named(w: &Mamba2Weights) -> Vec<(String, &[f32])> {
     for (l, m) in w.mlp.iter().enumerate() {
         for (name, v) in [
             ("norm", &m.norm_weight),
+            ("norm_bias", &m.norm_bias),
             ("fc1", &m.fc1_w),
             ("fc2", &m.fc2_w),
         ] {

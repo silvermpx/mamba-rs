@@ -21,6 +21,7 @@ tensor_list!(
     pre: [input_proj_w, input_proj_b],
     layers: layers [
         norm_weight,
+        norm_bias,
         in_proj_w,
         in_proj_b,
         conv1d_weight,
@@ -33,8 +34,8 @@ tensor_list!(
         out_proj_w,
         out_proj_b
     ],
-    mlp: mlp [norm_weight, fc1_w, fc2_w],
-    post: [norm_f_weight],
+    mlp: mlp [norm_weight, norm_bias, fc1_w, fc2_w],
+    post: [norm_f_weight, norm_f_bias],
 );
 
 pub(crate) struct MambaCpu {
@@ -162,6 +163,7 @@ impl CpuFamily for MambaCpu {
         for _ in &w.layers {
             roles.extend([
                 role(false, Control::None),
+                role(false, Control::None),
                 role(true, Control::None),
                 role(false, Control::None),
                 role(true, Control::None),
@@ -184,11 +186,12 @@ impl CpuFamily for MambaCpu {
         for _ in &w.mlp {
             roles.extend([
                 role(false, Control::None),
+                role(false, Control::None),
                 role(true, Control::None),
                 role(true, Control::None),
             ]);
         }
-        roles.push(role(false, Control::None));
+        roles.extend([role(false, Control::None), role(false, Control::None)]);
         roles
     }
 
@@ -272,6 +275,7 @@ impl MambaCpuTrainer {
                 .iter()
                 .map(|lw| TrainMambaLayerWeights {
                     norm_weight: lw.norm_weight.clone(),
+                    norm_bias: lw.norm_bias.clone(),
                     in_proj_w: lw.in_proj_w.clone(),
                     in_proj_b: lw.in_proj_b.clone(),
                     conv1d_weight: lw.conv1d_weight.clone(),
@@ -286,6 +290,7 @@ impl MambaCpuTrainer {
                 })
                 .collect(),
             norm_f_weight: weights.norm_f_weight.clone(),
+            norm_f_bias: weights.norm_f_bias.clone(),
             mlp: weights.mlp.clone(),
         };
         let dims = MambaDims::from_config(&cfg, session.seq_len, session.input_dim);
@@ -313,6 +318,7 @@ impl MambaCpuTrainer {
                 .map(|lw| {
                     let mut out = MambaLayerWeights {
                         norm_weight: lw.norm_weight.clone(),
+                        norm_bias: lw.norm_bias.clone(),
                         in_proj_w: lw.in_proj_w.clone(),
                         in_proj_b: lw.in_proj_b.clone(),
                         conv1d_weight: lw.conv1d_weight.clone(),
@@ -331,6 +337,7 @@ impl MambaCpuTrainer {
                 })
                 .collect(),
             norm_f_weight: w.norm_f_weight.clone(),
+            norm_f_bias: w.norm_f_bias.clone(),
             mlp: w.mlp.clone(),
         }
     }

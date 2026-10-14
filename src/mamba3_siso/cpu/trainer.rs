@@ -17,11 +17,12 @@ use crate::mlp::GatedMlpLayerWeights;
 use crate::mlp::cpu::RowsGemm;
 use crate::mlp::cpu::{
     GatedMlpBackwardScratch, GatedMlpRowsScratch, gated_mlp_rows, gated_mlp_rows_backward,
+    mlp_norm_row,
 };
 use crate::module::cpu_trainer::{Control, CpuCore, CpuFamily, TensorRole, cpu_trainer_type};
 use crate::ops::blas::sgemm_forward;
 use crate::ops::lane::round_matrix;
-use crate::ops::norms::{rms_norm_inplace, rms_norm_weighted};
+use crate::ops::norms::{layer_norm_inplace, layer_norm_row_backward_in_place, rms_norm_inplace};
 use crate::ops::rounding::store;
 use crate::optim::session::TrainSessionCfg;
 use crate::optim::tensors::tensor_list;
@@ -36,6 +37,7 @@ pub(crate) struct Mamba3CpuWeights {
     layers: Vec<TrainMamba3LayerWeights>,
     mlp: Vec<GatedMlpLayerWeights>,
     norm_f_weight: Vec<f32>,
+    norm_f_bias: Vec<f32>,
 }
 
 tensor_list!(
@@ -43,6 +45,7 @@ tensor_list!(
     pre: [input_proj_w, input_proj_b],
     layers: layers [
         norm_weight,
+        norm_bias,
         in_proj_w,
         dt_bias,
         b_norm_weight,
@@ -53,8 +56,8 @@ tensor_list!(
         norm_gate_weight,
         out_proj_w
     ],
-    mlp: mlp [norm_weight, fc1_w, fc2_w],
-    post: [norm_f_weight],
+    mlp: mlp [norm_weight, norm_bias, fc1_w, fc2_w],
+    post: [norm_f_weight, norm_f_bias],
 );
 
 pub(crate) struct Mamba3Cpu {
@@ -76,7 +79,8 @@ pub(crate) struct Mamba3CpuSeq {
     input: Vec<f32>,
     /// Each MLP's input rows.
     mlp_in: Vec<Vec<f32>>,
-    /// The rows before the final norm and their inverse RMS.
+    /// The rows before the final norm and their statistics: the inverse
+    /// RMS, or a LayerNorm's std and mean.
     norm_f_in: Vec<f32>,
     norm_f_inv: Vec<f32>,
     mlp: GatedMlpRowsScratch,
@@ -138,7 +142,7 @@ impl CpuFamily for Mamba3Cpu {
             input: vec![0.0; seq_len * self.input_dim],
             mlp_in: w.mlp.iter().map(|_| vec![0.0; seq_len * dm]).collect(),
             norm_f_in: vec![0.0; seq_len * dm],
-            norm_f_inv: vec![0.0; seq_len],
+            norm_f_inv: vec![0.0; seq_len * self.cfg.block_norm.stats_per_row()],
             mlp,
             mlp_bwd,
         })
@@ -194,16 +198,26 @@ impl CpuFamily for Mamba3Cpu {
                 seq.mlp_in[l].copy_from_slice(rows);
                 gated_mlp_rows(rows, t_len, m, &mut seq.mlp, sgemm_forward, |dst, src| {
                     for (d_row, s_row) in dst.chunks_exact_mut(dm).zip(src.chunks_exact(dm)) {
-                        rms_norm_weighted(d_row, s_row, &m.norm_weight, eps);
+                        mlp_norm_row(d_row, s_row, m, eps);
                     }
                 });
             }
         }
         // The final norm in place on a copy, as the inference prefill
-        // applies it, keeping its inverse RMS for the backward.
+        // applies it, keeping its statistics for the backward.
         out[..t_len * dm].copy_from_slice(rows);
-        for (row, inv) in out.chunks_exact_mut(dm).zip(seq.norm_f_inv.iter_mut()) {
-            *inv = rms_norm_inplace(row, &w.norm_f_weight, eps);
+        if w.norm_f_bias.is_empty() {
+            for (row, inv) in out.chunks_exact_mut(dm).zip(seq.norm_f_inv.iter_mut()) {
+                *inv = rms_norm_inplace(row, &w.norm_f_weight, eps);
+            }
+        } else {
+            let p = (&w.norm_f_weight[..], &w.norm_f_bias[..]);
+            for (row, st) in out
+                .chunks_exact_mut(dm)
+                .zip(seq.norm_f_inv.as_chunks_mut::<2>().0)
+            {
+                *st = layer_norm_inplace(row, p, eps);
+            }
         }
         Ok(())
     }
@@ -217,26 +231,43 @@ impl CpuFamily for Mamba3Cpu {
         d_input: &mut [f32],
     ) -> Result<(), String> {
         let (dm, t_len, eps) = (self.cfg.d_model, self.dims.seq_len, self.cfg.rms_norm_eps);
-        // The final norm: dw += dy x_hat, dx = inv (dy w - x_hat mean(dy w x_hat)).
-        for ((d, x), &inv) in d_out
-            .chunks_exact_mut(dm)
-            .zip(seq.norm_f_in.chunks_exact(dm))
-            .zip(&seq.norm_f_inv)
-        {
-            let mut c = 0.0f32;
-            for ((g, &xv), (&dv, &wv)) in grads
-                .norm_f_weight
-                .iter_mut()
-                .zip(x)
-                .zip(d.iter().zip(&w.norm_f_weight))
+        // The final norm: a LayerNorm's backward, or for RMSNorm
+        // dw += dy x_hat, dx = inv (dy w - x_hat mean(dy w x_hat)).
+        if w.norm_f_bias.is_empty() {
+            for ((d, x), &inv) in d_out
+                .chunks_exact_mut(dm)
+                .zip(seq.norm_f_in.chunks_exact(dm))
+                .zip(&seq.norm_f_inv)
             {
-                let xh = xv * inv;
-                *g += dv * xh;
-                c += (dv * wv) * xh;
+                let mut c = 0.0f32;
+                for ((g, &xv), (&dv, &wv)) in grads
+                    .norm_f_weight
+                    .iter_mut()
+                    .zip(x)
+                    .zip(d.iter().zip(&w.norm_f_weight))
+                {
+                    let xh = xv * inv;
+                    *g += dv * xh;
+                    c += (dv * wv) * xh;
+                }
+                let c = c / dm as f32;
+                for ((dv, &xv), &wv) in d.iter_mut().zip(x).zip(&w.norm_f_weight) {
+                    *dv = inv * (*dv * wv - (xv * inv) * c);
+                }
             }
-            let c = c / dm as f32;
-            for ((dv, &xv), &wv) in d.iter_mut().zip(x).zip(&w.norm_f_weight) {
-                *dv = inv * (*dv * wv - (xv * inv) * c);
+        } else {
+            for ((d, x), st) in d_out
+                .chunks_exact_mut(dm)
+                .zip(seq.norm_f_in.chunks_exact(dm))
+                .zip(seq.norm_f_inv.as_chunks::<2>().0)
+            {
+                layer_norm_row_backward_in_place(
+                    d,
+                    (&mut grads.norm_f_weight, &mut grads.norm_f_bias),
+                    x,
+                    &w.norm_f_weight,
+                    *st,
+                );
             }
         }
         seq.phase.zero_all();
@@ -300,6 +331,7 @@ impl CpuFamily for Mamba3Cpu {
         for _ in &w.layers {
             roles.extend([
                 role(false, Control::None),
+                role(false, Control::None),
                 role(
                     true,
                     Control::Columns {
@@ -320,11 +352,12 @@ impl CpuFamily for Mamba3Cpu {
         for _ in &w.mlp {
             roles.extend([
                 role(false, Control::None),
+                role(false, Control::None),
                 role(true, Control::None),
                 role(true, Control::None),
             ]);
         }
-        roles.push(role(false, Control::None));
+        roles.extend([role(false, Control::None), role(false, Control::None)]);
         roles
     }
 
@@ -401,6 +434,7 @@ impl Mamba3CpuTrainer {
                 .iter()
                 .map(|lw| TrainMamba3LayerWeights {
                     norm_weight: lw.norm_weight.clone(),
+                    norm_bias: lw.norm_bias.clone(),
                     in_proj_w: lw.in_proj_w.clone(),
                     dt_bias: lw.dt_bias.clone(),
                     b_norm_weight: lw.b_norm_weight.clone(),
@@ -414,6 +448,7 @@ impl Mamba3CpuTrainer {
                 .collect(),
             mlp: weights.mlp.clone(),
             norm_f_weight: weights.norm_f_weight.clone(),
+            norm_f_bias: weights.norm_f_bias.clone(),
         };
         let fam = Mamba3Cpu {
             cfg,
@@ -437,6 +472,7 @@ impl Mamba3CpuTrainer {
                 .iter()
                 .map(|lw| Mamba3LayerWeights {
                     norm_weight: lw.norm_weight.clone(),
+                    norm_bias: lw.norm_bias.clone(),
                     in_proj_w: lw.in_proj_w.clone(),
                     dt_bias: lw.dt_bias.clone(),
                     b_norm_weight: lw.b_norm_weight.clone(),
@@ -449,6 +485,7 @@ impl Mamba3CpuTrainer {
                 })
                 .collect(),
             norm_f_weight: w.norm_f_weight.clone(),
+            norm_f_bias: w.norm_f_bias.clone(),
             mlp: w.mlp.clone(),
         }
     }

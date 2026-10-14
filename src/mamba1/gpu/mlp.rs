@@ -12,16 +12,17 @@ use std::sync::Arc;
 
 use cudarc::driver::PushKernelArg;
 
-use super::weights::{GpuMambaMlpGrads, GpuMambaTrainMlpWeights, MambaMlpPtrs};
+use super::weights::{GpuMambaMlpGrads, GpuMambaTrainMlpWeights, MambaMlpPtrs, mlp_norm_params};
 use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_bi_backward_grad_raw,
     gpu_gemm_bi_forward_raw, gpu_gemm_ex_backward_dx_typed, gpu_gemm_forward_dispatch,
     gpu_gemm_typed_forward_raw,
 };
+use crate::gpu::block_norm::{self, NormParams};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_norm, launch_elems};
+use crate::gpu::launch::{grid_1d_cover, launch_elems};
 
 type Stream = Arc<cudarc::driver::CudaStream>;
 type DevPtr = cudarc::driver::sys::CUdeviceptr;
@@ -32,7 +33,7 @@ pub struct GpuMambaMlpActs {
     pub x_in: GpuBuffer,
     /// The rows after its norm `[B*T*d_model]`.
     pub post: GpuBuffer,
-    /// The norm's rms per row `[B*T]`.
+    /// The norm's statistics per row `[B*T*stats]`.
     pub rms: GpuBuffer,
     /// The up projection `[B*T*2*hidden]`: value columns, then gate.
     pub up: GpuBuffer,
@@ -48,11 +49,11 @@ pub struct GpuMambaMlpBufs {
 
 impl GpuMambaMlpBufs {
     /// Saves for `n_layers` MLPs `hidden` wide over `rows` rows of
-    /// `d_model`.
+    /// `d_model`, behind a norm of the kind `norm`.
     pub fn new(
         stream: &Stream,
         (rows, d_model, n_layers): (usize, usize, usize),
-        hidden: usize,
+        (hidden, norm): (usize, crate::config::BlockNorm),
     ) -> Result<Self, String> {
         let z = |n: usize| GpuBuffer::zeros(stream, n);
         let layers = (0..n_layers)
@@ -60,7 +61,7 @@ impl GpuMambaMlpBufs {
                 Ok(GpuMambaMlpActs {
                     x_in: z(rows * d_model)?,
                     post: z(rows * d_model)?,
-                    rms: z(rows)?,
+                    rms: z(rows * norm.stats_per_row())?,
                     up: z(rows * 2 * hidden)?,
                     act: z(rows * hidden)?,
                 })
@@ -71,8 +72,8 @@ impl GpuMambaMlpBufs {
 }
 
 /// One layer's gated MLP saves in the mixed lane: the input rows and the
-/// rms in f32 as the residual stream is, the norm's rows, the up projection
-/// and the activation in the lane's storage.
+/// norm's statistics in f32 as the residual stream is, the norm's rows, the
+/// up projection and the activation in the lane's storage.
 pub struct GpuMambaMlpMixedActs {
     pub x_in: GpuBuffer,
     pub post: DtypedBuf,
@@ -92,7 +93,7 @@ impl GpuMambaMlpMixedBufs {
     pub fn new(
         stream: &Stream,
         (rows, d_model, n_layers): (usize, usize, usize),
-        hidden: usize,
+        (hidden, norm): (usize, crate::config::BlockNorm),
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         let layers = (0..n_layers)
@@ -100,7 +101,7 @@ impl GpuMambaMlpMixedBufs {
                 Ok(GpuMambaMlpMixedActs {
                     x_in: GpuBuffer::zeros(stream, rows * d_model)?,
                     post: DtypedBuf::zeros(stream, rows * d_model, dtype)?,
-                    rms: GpuBuffer::zeros(stream, rows)?,
+                    rms: GpuBuffer::zeros(stream, rows * norm.stats_per_row())?,
                     up: DtypedBuf::zeros(stream, rows * 2 * hidden, dtype)?,
                     act: DtypedBuf::zeros(stream, rows * hidden, dtype)?,
                 })
@@ -257,17 +258,14 @@ pub(crate) fn forward_f32(
     (rows, dm, eps): (usize, usize, f32),
 ) -> Result<(), String> {
     let h = w.hidden();
-    let (rows_i, dm_i, _) = ints(rows, dm, h);
-    let nw = w.norm_weight.cached_ptr();
-    let mut norm = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
-    norm.arg(m.post.inner_mut());
-    norm.arg(m.rms.inner_mut());
-    norm.arg(m.x_in.inner());
-    norm.arg(&nw);
-    norm.arg(&rows_i);
-    norm.arg(&dm_i);
-    norm.arg(&eps);
-    unsafe { norm.launch(grid_norm(rows, dm)) }.map_err(|e| format!("MLP norm: {e:?}"))?;
+    block_norm::forward(
+        ctx,
+        WeightDtype::F32,
+        (m.post.cached_ptr(), m.rms.cached_ptr(), m.x_in.cached_ptr()),
+        w.norm(),
+        (rows, dm, eps),
+        "MLP norm",
+    )?;
     gpu_gemm_bi_forward_raw(
         ctx,
         &mut m.up,
@@ -316,7 +314,6 @@ pub(crate) fn backward_f32(
     (rows, dm): (usize, usize),
 ) -> Result<(), String> {
     let h = w.hidden();
-    let (rows_i, dm_i, _) = ints(rows, dm, h);
     if bufs.d_act.len() != rows * h {
         return Err(format!(
             "the scratch's gated MLP buffers hold {} activations, the model needs {rows} x {h}",
@@ -351,22 +348,22 @@ pub(crate) fn backward_f32(
         w.fc1_w.cached_ptr(),
         (rows, dm, 2 * h),
     )?;
-    let nw = w.norm_weight.cached_ptr();
-    let mut norm = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_bwd);
-    norm.arg(d_temporal.inner_mut());
-    norm.arg(&partials);
-    norm.arg(bufs.d_post.inner());
-    norm.arg(m.x_in.inner());
-    norm.arg(&nw);
-    norm.arg(m.rms.inner());
-    norm.arg(&rows_i);
-    norm.arg(&dm_i);
     // Accumulate: the norm's input gradient adds into the residual's.
-    let accumulate: i32 = 1;
-    norm.arg(&accumulate);
-    let no_mirror: DevPtr = 0;
-    norm.arg(&no_mirror);
-    unsafe { norm.launch(grid_norm(rows, dm)) }.map_err(|e| format!("MLP norm backward: {e:?}"))?;
+    block_norm::backward(
+        ctx,
+        WeightDtype::F32,
+        (
+            d_temporal.cached_ptr(),
+            partials,
+            bufs.d_post.cached_ptr(),
+            m.x_in.cached_ptr(),
+            m.rms.cached_ptr(),
+        ),
+        (w.norm(), g.norm_bias_ptr()),
+        (rows, dm),
+        (true, 0),
+        "MLP norm backward",
+    )?;
     reduce_norm_partials(ctx, (g.norm_weight.ptr(), partials), (rows, dm))
 }
 
@@ -383,7 +380,6 @@ pub(crate) fn forward_mixed(
     dtype: WeightDtype,
 ) -> Result<(), String> {
     let h = w.hidden;
-    let (rows_i, dm_i, _) = ints(rows, dm, h);
     let (x_in, post, rms, up, act) = (
         m.x_in.cached_ptr(),
         m.post.cached_ptr(),
@@ -391,16 +387,14 @@ pub(crate) fn forward_mixed(
         m.up.cached_ptr(),
         m.act.cached_ptr(),
     );
-    let mut norm = ctx
-        .stream
-        .launch_builder(ctx.kernels.rmsnorm_fwd_f32in_typed.get(dtype));
-    for p in [&post, &rms, &x_in, &w.norm_weight] {
-        norm.arg(p);
-    }
-    norm.arg(&rows_i);
-    norm.arg(&dm_i);
-    norm.arg(&eps);
-    unsafe { norm.launch(grid_norm(rows, dm)) }.map_err(|e| format!("mixed MLP norm: {e:?}"))?;
+    block_norm::forward(
+        ctx,
+        dtype,
+        (post, rms, x_in),
+        mlp_norm_params(&w),
+        (rows, dm, eps),
+        "mixed MLP norm",
+    )?;
     let typed = |ptr| TypedPtr { ptr, dtype };
     let weight = |(ptr, dtype): (DevPtr, WeightDtype)| TypedPtr { ptr, dtype };
     gpu_gemm_typed_forward_raw(
@@ -445,7 +439,6 @@ pub(crate) fn backward_mixed(
     dtype: WeightDtype,
 ) -> Result<(), String> {
     let h = w.hidden;
-    let (rows_i, dm_i, _) = ints(rows, dm, h);
     if bufs.d_act.len_elems() != rows * h {
         return Err(format!(
             "the mixed scratch's gated MLP buffers hold {} activations, the model needs \
@@ -481,29 +474,23 @@ pub(crate) fn backward_mixed(
         2 * h,
     )?;
     gpu_gemm_ex_backward_dx_typed(ctx, tp(d_post), tp(d_up), weight(w.fc1_w), rows, dm, 2 * h)?;
-    let norm_bwd = match dtype {
-        WeightDtype::F32 | WeightDtype::Tf32 => &ctx.kernels.rmsnorm_bwd,
-        WeightDtype::Bf16 | WeightDtype::F16 => ctx.kernels.rmsnorm_bwd_f32in_typed.get(dtype),
-    };
-    let mut norm = ctx.stream.launch_builder(norm_bwd);
-    let dx = d_temporal.cached_ptr();
-    norm.arg(&dx);
-    norm.arg(&partials);
-    norm.arg(&d_post);
-    let x_in = m.x_in.cached_ptr();
-    norm.arg(&x_in);
-    norm.arg(&w.norm_weight);
-    let rms = m.rms.cached_ptr();
-    norm.arg(&rms);
-    norm.arg(&rows_i);
-    norm.arg(&dm_i);
     // Accumulate: the norm's input gradient adds into the residual's, and
     // the sum's typed mirror is the mixer's upstream gradient.
-    let accumulate: i32 = 1;
-    norm.arg(&accumulate);
-    norm.arg(&d_typed);
-    unsafe { norm.launch(grid_norm(rows, dm)) }
-        .map_err(|e| format!("mixed MLP norm backward: {e:?}"))?;
+    block_norm::backward(
+        ctx,
+        dtype,
+        (
+            d_temporal.cached_ptr(),
+            partials,
+            d_post,
+            m.x_in.cached_ptr(),
+            m.rms.cached_ptr(),
+        ),
+        (mlp_norm_params(&w), g.norm_bias_ptr()),
+        (rows, dm),
+        (true, d_typed),
+        "mixed MLP norm backward",
+    )?;
     reduce_norm_partials(ctx, (g.norm_weight.ptr(), partials), (rows, dm))
 }
 
@@ -600,7 +587,7 @@ pub(crate) fn pending_f32(
     let h = w.hidden;
     pending_norm(
         ctx,
-        (stream, branch.cached_ptr(), rms, w.norm_weight),
+        (stream, branch.cached_ptr(), rms, mlp_norm_params(&w)),
         (rows, dm, eps),
         WeightDtype::F32,
     )?;
@@ -644,7 +631,7 @@ pub(crate) fn pending_typed(
     let (up, act) = (bufs.up.cached_ptr(), bufs.act.cached_ptr());
     pending_norm(
         ctx,
-        (stream, branch, rms, w.norm_weight),
+        (stream, branch, rms, mlp_norm_params(&w)),
         (rows, dm, eps),
         dtype,
     )?;
@@ -673,25 +660,18 @@ pub(crate) fn pending_typed(
 /// reads each element before it stores over it).
 fn pending_norm(
     ctx: &GpuCtx,
-    (stream, branch, rms, norm_w): (DevPtr, DevPtr, DevPtr, DevPtr),
+    (stream, branch, rms, norm): (DevPtr, DevPtr, DevPtr, NormParams),
     (rows, dm, eps): (usize, usize, f32),
     dtype: WeightDtype,
 ) -> Result<(), String> {
-    let (rows_i, dm_i, _) = ints(rows, dm, 0);
-    let mut norm = ctx
-        .stream
-        .launch_builder(ctx.kernels.rmsnorm_fwd_resadd_typed.get(dtype));
-    norm.arg(&branch);
-    norm.arg(&rms);
-    norm.arg(&stream);
-    norm.arg(&branch);
-    norm.arg(&norm_w);
-    norm.arg(&rows_i);
-    norm.arg(&dm_i);
-    norm.arg(&eps);
-    unsafe { norm.launch(grid_norm(rows, dm)) }
-        .map(|_| ())
-        .map_err(|e| format!("MLP norm: {e:?}"))
+    block_norm::forward_resadd(
+        ctx,
+        dtype,
+        (branch, rms, stream, branch),
+        norm,
+        (rows, dm, eps),
+        "MLP norm",
+    )
 }
 
 /// One layer's gated MLP with nothing saved, f32, the target forward's: the
@@ -706,17 +686,14 @@ pub(crate) fn target_f32(
 ) -> Result<(), String> {
     let (up, act) = (&mut bufs.up, &mut bufs.act);
     let h = w.hidden();
-    let (rows_i, dm_i, _) = ints(rows, dm, h);
-    let nw = w.norm_weight.cached_ptr();
-    let mut norm = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
-    norm.arg(out.inner_mut());
-    norm.arg(&rms);
-    norm.arg(rows_buf.inner());
-    norm.arg(&nw);
-    norm.arg(&rows_i);
-    norm.arg(&dm_i);
-    norm.arg(&eps);
-    unsafe { norm.launch(grid_norm(rows, dm)) }.map_err(|e| format!("MLP norm: {e:?}"))?;
+    block_norm::forward(
+        ctx,
+        WeightDtype::F32,
+        (out.cached_ptr(), rms, rows_buf.cached_ptr()),
+        w.norm(),
+        (rows, dm, eps),
+        "MLP norm",
+    )?;
     gpu_gemm_bi_forward_raw(ctx, up, out, w.fc1_w.cached_ptr(), None, (rows, dm, 2 * h))?;
     gate_fwd(
         ctx,

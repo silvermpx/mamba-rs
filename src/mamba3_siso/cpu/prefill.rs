@@ -400,9 +400,14 @@ pub fn forward_mamba3_backbone_prefill_mode(
             (&mut scratch.post_norm[..t_dm], dm),
             (&temporal_out[..t_dm], dm),
             |dst, src| {
-                let sum_sq = simd_sum_sq(src);
-                let inv_rms = 1.0 / (sum_sq / dm as f32 + dims.rms_norm_eps).sqrt();
-                simd_rms_scale(dst, src, &lw.norm_weight[..dm], inv_rms);
+                if lw.norm_bias.is_empty() {
+                    let sum_sq = simd_sum_sq(src);
+                    let inv_rms = 1.0 / (sum_sq / dm as f32 + dims.rms_norm_eps).sqrt();
+                    simd_rms_scale(dst, src, &lw.norm_weight[..dm], inv_rms);
+                } else {
+                    let w = (&lw.norm_weight[..dm], &lw.norm_bias[..dm]);
+                    crate::ops::norms::layer_norm_row(dst, src, w, dims.rms_norm_eps);
+                }
                 store(dtype, dst);
             },
         );
@@ -631,19 +636,29 @@ pub fn forward_mamba3_backbone_prefill_mode(
                 gemm,
                 |dst, src| {
                     zip_rows(mode, (dst, dm), (src, dm), |d_row, s_row| {
-                        let sum_sq = simd_sum_sq(s_row);
-                        let inv_rms = 1.0 / (sum_sq / dm as f32 + dims.rms_norm_eps).sqrt();
-                        simd_rms_scale(d_row, s_row, &mlp.norm_weight[..dm], inv_rms);
+                        if mlp.norm_bias.is_empty() {
+                            let sum_sq = simd_sum_sq(s_row);
+                            let inv_rms = 1.0 / (sum_sq / dm as f32 + dims.rms_norm_eps).sqrt();
+                            simd_rms_scale(d_row, s_row, &mlp.norm_weight[..dm], inv_rms);
+                        } else {
+                            let w = (&mlp.norm_weight[..dm], &mlp.norm_bias[..dm]);
+                            crate::ops::norms::layer_norm_row(d_row, s_row, w, dims.rms_norm_eps);
+                        }
                     });
                 },
             );
         }
     }
 
-    // norm_f at EVERY position, via the public in-place RMSNorm (the anchor
+    // norm_f at EVERY position, via the public in-place norm (the anchor
     // test reproduces the exact same call per row).
     for_rows(mode, &mut temporal_out[..t_dm], dm, |row| {
-        crate::ops::norms::rms_norm_inplace(row, &w.norm_f_weight[..dm], dims.rms_norm_eps);
+        if w.norm_f_bias.is_empty() {
+            crate::ops::norms::rms_norm_inplace(row, &w.norm_f_weight[..dm], dims.rms_norm_eps);
+        } else {
+            let p = (&w.norm_f_weight[..dm], &w.norm_f_bias[..dm]);
+            crate::ops::norms::layer_norm_inplace(row, p, dims.rms_norm_eps);
+        }
         store(dtype, row);
     });
 }

@@ -481,6 +481,7 @@ fn configs() -> Vec<Cfg> {
             conv_bias: false,
             norm_before_gate: true,
             d_intermediate: 100,
+            block_norm: mamba_rs::BlockNorm::Layer,
             n_layers: 2,
             ..Mamba2Config::default()
         }),
@@ -525,6 +526,7 @@ fn configs() -> Vec<Cfg> {
             rope_fraction: 1.0,
             is_outproj_norm: true,
             d_intermediate: 100,
+            block_norm: mamba_rs::BlockNorm::Layer,
             n_layers: 2,
             ..Mamba3Config::default()
         }),
@@ -574,6 +576,7 @@ fn configs() -> Vec<Cfg> {
             mimo_rank: 4,
             is_outproj_norm: true,
             d_intermediate: 100,
+            block_norm: mamba_rs::BlockNorm::Layer,
             n_layers: 2,
             ..Mamba3MimoConfig::default()
         }),

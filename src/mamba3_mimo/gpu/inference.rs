@@ -13,6 +13,7 @@ use cudarc::driver::PushKernelArg;
 use super::kernels::{CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunked_geom, scan_geom};
 use crate::config::ScanMode;
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
+use crate::gpu::block_norm::{self, NormParams};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer};
 use crate::gpu::context::{GemmMode, GemmRole, GpuCtx, gemm_mode_or_env};
 use crate::gpu::device::GpuDevice;
@@ -23,13 +24,15 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d_cover, grid_norm, launch_elems, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, launch_elems, y_runs, yz_runs};
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use crate::matrix::{Path, Request};
 
 struct GpuMimoLayer {
     norm_weight: GpuBuffer,
+    /// The block LayerNorm's bias, None for RMSNorm.
+    norm_bias: Option<GpuBuffer>,
     in_proj_w: DtypedBuf,
     dt_bias: GpuBuffer,
     b_norm_weight: GpuBuffer,
@@ -49,6 +52,8 @@ struct GpuMimoLayer {
 
 struct GpuMlp {
     norm_weight: GpuBuffer,
+    /// The norm's LayerNorm bias, None for RMSNorm.
+    norm_bias: Option<GpuBuffer>,
     fc1_w: DtypedBuf,
     fc2_w: DtypedBuf,
     hidden: usize,
@@ -147,6 +152,8 @@ pub struct Mamba3MimoGpuEngine {
     layers: Vec<GpuMimoLayer>,
     input_proj: Option<(GpuBuffer, GpuBuffer)>,
     norm_f_weight: GpuBuffer,
+    /// The final LayerNorm's bias, None for RMSNorm.
+    norm_f_bias: Option<GpuBuffer>,
     /// The chunked scan's launch geometry on this device, `None` when one
     /// of its kernels cannot fit (the windows then run the recurrence).
     chunked: Option<ChunkedGeom>,
@@ -274,6 +281,13 @@ impl Mamba3MimoGpuEngine {
         }
         let s = &ctx.stream;
         let up = |v: &[f32]| GpuBuffer::from_cpu(s, v);
+        let opt = |v: &[f32]| -> Result<Option<GpuBuffer>, String> {
+            if v.is_empty() {
+                Ok(None)
+            } else {
+                up(v).map(Some)
+            }
+        };
         let typed = |v: &[f32]| -> Result<DtypedBuf, String> {
             let buf = DtypedBuf::zeros(s, v.len(), act)?;
             buf.upload_f32(s, v)?;
@@ -284,6 +298,7 @@ impl Mamba3MimoGpuEngine {
                 None => None,
                 Some(m) => Some(GpuMlp {
                     norm_weight: up(&m.norm_weight)?,
+                    norm_bias: opt(&m.norm_bias)?,
                     fc1_w: typed(&m.fc1_w)?,
                     fc2_w: typed(&m.fc2_w)?,
                     hidden: m.hidden(),
@@ -291,6 +306,7 @@ impl Mamba3MimoGpuEngine {
             };
             Ok(GpuMimoLayer {
                 norm_weight: up(&lw.norm_weight)?,
+                norm_bias: opt(&lw.norm_bias)?,
                 in_proj_w: typed(&lw.in_proj_w)?,
                 dt_bias: up(&lw.dt_bias)?,
                 b_norm_weight: up(&lw.b_norm_weight)?,
@@ -322,6 +338,7 @@ impl Mamba3MimoGpuEngine {
             Some((up(&w.input_proj_w)?, up(&w.input_proj_b)?))
         };
         let norm_f_weight = up(&w.norm_f_weight)?;
+        let norm_f_bias = opt(&w.norm_f_bias)?;
         let scan_done = GpuByteBuffer::zeros(s, (batch * cfg.nheads() * 4).max(4))?;
         Ok(Self {
             kernels,
@@ -333,6 +350,7 @@ impl Mamba3MimoGpuEngine {
             layers,
             input_proj,
             norm_f_weight,
+            norm_f_bias,
             chunked,
             scan,
             scan_done,
@@ -436,7 +454,7 @@ impl Mamba3MimoGpuEngine {
             input: z(rows * self.input_dim)?,
             temporal: z(rows * c.d_model)?,
             post: typed(rows * c.d_model)?,
-            rms: z(rows)?,
+            rms: z(rows * c.block_norm.stats_per_row())?,
             proj: typed(rows * c.in_proj_out_dim())?,
             bn: z(rows * c.bc_width())?,
             cn: z(rows * c.bc_width())?,
@@ -653,29 +671,24 @@ impl Mamba3MimoGpuEngine {
         }
     }
 
-    fn rmsnorm(
+    /// A block norm of f32 rows into `y`: in the activation dtype when
+    /// `typed`, else f32; `stats` takes each row's statistics.
+    fn block_norm(
         &self,
-        (y, x, w, rms): (u64, u64, u64, u64),
+        (y, x, stats): (u64, u64, u64),
+        norm: NormParams,
         (rows, typed): (usize, bool),
     ) -> Result<(), String> {
-        let (rows_i, dm_i) = (rows as i32, self.cfg.d_model as i32);
-        let eps = self.cfg.rms_norm_eps;
-        let kernel = if typed && self.act != WeightDtype::F32 {
-            self.ctx.kernels.rmsnorm_fwd_f32in_typed.get(self.act)
-        } else {
-            &self.ctx.kernels.rmsnorm_fwd
-        };
-        let mut bld = self.ctx.stream.launch_builder(kernel);
-        bld.arg(&y);
-        bld.arg(&rms);
-        bld.arg(&x);
-        bld.arg(&w);
-        bld.arg(&rows_i);
-        bld.arg(&dm_i);
-        bld.arg(&eps);
-        unsafe { bld.launch(grid_norm(rows, self.cfg.d_model)) }
-            .map(|_| ())
-            .map_err(|e| format!("MIMO rmsnorm: {e:?}"))
+        let out = if typed { self.act } else { WeightDtype::F32 };
+        let shape = (rows, self.cfg.d_model, self.cfg.rms_norm_eps);
+        block_norm::forward(
+            &self.ctx,
+            out,
+            (y, stats, x),
+            norm,
+            shape,
+            "MIMO block norm",
+        )
     }
 
     /// `temporal += out` for `n` values, `out` in the activation dtype.
@@ -799,8 +812,9 @@ impl Mamba3MimoGpuEngine {
         let eps = c.ssm_norm_eps;
         let a_floor = c.a_floor;
         for (l, lw) in self.layers.iter().enumerate() {
-            self.rmsnorm(
-                (post, temporal, lw.norm_weight.cached_ptr(), rms),
+            self.block_norm(
+                (post, temporal, rms),
+                norm_params(&lw.norm_weight, &lw.norm_bias),
                 (rows, true),
             )?;
             gpu_gemm_typed_forward_raw(
@@ -937,8 +951,9 @@ impl Mamba3MimoGpuEngine {
             self.residual_add(temporal, out, rows * dm)?;
             if let Some(m) = &lw.mlp {
                 let (upp, actp) = (win.mlp_up.cached_ptr(), win.mlp_act.cached_ptr());
-                self.rmsnorm(
-                    (post, temporal, m.norm_weight.cached_ptr(), rms),
+                self.block_norm(
+                    (post, temporal, rms),
+                    norm_params(&m.norm_weight, &m.norm_bias),
                     (rows, true),
                 )?;
                 gpu_gemm_typed_forward_raw(
@@ -968,15 +983,19 @@ impl Mamba3MimoGpuEngine {
                 self.residual_add(temporal, out, rows * dm)?;
             }
         }
-        self.rmsnorm(
-            (
-                win.final_rows.cached_ptr(),
-                temporal,
-                self.norm_f_weight.cached_ptr(),
-                rms,
-            ),
+        self.block_norm(
+            (win.final_rows.cached_ptr(), temporal, rms),
+            norm_params(&self.norm_f_weight, &self.norm_f_bias),
             (rows, false),
         )
+    }
+}
+
+/// A block norm's parameters on the device.
+fn norm_params(w: &GpuBuffer, b: &Option<GpuBuffer>) -> NormParams {
+    NormParams {
+        w: w.cached_ptr(),
+        b: b.as_ref().map_or(0, GpuBuffer::cached_ptr),
     }
 }
 

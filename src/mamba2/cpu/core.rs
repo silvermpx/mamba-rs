@@ -15,6 +15,7 @@ use pulp::{Arch, Simd, WithSimd};
 use super::super::config::Mamba2Config;
 use super::super::weights::Mamba2LayerWeights;
 use crate::ops::fold16::sum_sq_fold16;
+use crate::ops::norms::layer_norm_row;
 use crate::ops::portable_math::{exp_portable, silu_portable, softplus_portable};
 
 /// `dst = (src * r) * w` with `r = 1 / sqrt(sum(src^2) / n + eps)`.
@@ -23,6 +24,17 @@ pub(crate) fn rms_row(dst: &mut [f32], src: &[f32], w: &[f32], eps: f32) {
     let r = 1.0 / (sum_sq_fold16(src) / src.len() as f32 + eps).sqrt();
     for ((d, &s), &wv) in dst.iter_mut().zip(src).zip(w) {
         *d = (s * r) * wv;
+    }
+}
+
+/// A block norm of one row: [`rms_row`], or LayerNorm for a model whose
+/// norms carry a bias (`b` then holds the row's width).
+#[inline(always)]
+pub(crate) fn block_norm_row(dst: &mut [f32], src: &[f32], (w, b): (&[f32], &[f32]), eps: f32) {
+    if b.is_empty() {
+        rms_row(dst, src, w, eps);
+    } else {
+        layer_norm_row(dst, src, (w, b), eps);
     }
 }
 
