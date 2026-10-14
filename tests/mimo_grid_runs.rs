@@ -133,6 +133,8 @@ fn the_state_pass_gives_elements_past_the_y_extent_their_twins_bits() {
             b.arg(v);
         }
         b.arg(&y_first);
+        // No packing: the row holds one sequence.
+        b.arg(&0u64);
         unsafe { b.launch(cfg) }.expect("state pass");
     }
     assert!(twins_match(&words(&ctx, &enter), nc, pn), "entering states");
