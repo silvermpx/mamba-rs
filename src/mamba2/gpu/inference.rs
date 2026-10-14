@@ -34,6 +34,7 @@ use crate::gpu::graph_capture::{
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::gpu::launch::{grid_1d_cover, launch_elems, y_runs, yz_runs};
+use crate::gpu::train::RowSource;
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 use crate::matrix::{Path, Request};
@@ -807,6 +808,11 @@ impl Mamba2GpuScratch {
     pub fn final_rows(&self) -> &GpuBuffer {
         &self.final_out
     }
+
+    /// The step's input rows, f32 `[batch, input_dim]`, on the device.
+    pub(crate) fn input_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.input.cached_ptr()
+    }
 }
 
 /// The Mamba-2 decode and prefill engine.
@@ -1078,12 +1084,27 @@ impl Mamba2GpuEngine {
         state: &mut Mamba2GpuState,
         scratch: &mut Mamba2GpuScratch,
     ) -> Result<(), String> {
+        self.step_from(RowSource::Host(input), state, scratch)
+    }
+
+    /// [`Self::step_gpu_only`] on rows from the host or already in the
+    /// scratch's input buffer.
+    pub(crate) fn step_from(
+        &self,
+        input: RowSource<'_>,
+        state: &mut Mamba2GpuState,
+        scratch: &mut Mamba2GpuScratch,
+    ) -> Result<(), String> {
         let b = self.batch;
-        Self::check_host_len("step input", input.len(), b * self.input_dim)?;
+        if let Some(input) = input.host() {
+            Self::check_host_len("step input", input.len(), b * self.input_dim)?;
+        }
         Self::check_host_len("step scratch", scratch.input.len(), b * self.input_dim)?;
         self.check_state(state)?;
         self.eager_gemm_manifest.set(None);
-        scratch.input.upload(&self.ctx.stream, input)?;
+        if let Some(input) = input.host() {
+            scratch.input.upload(&self.ctx.stream, input)?;
+        }
         match &self.graph {
             Some((graph, captured)) => self.replay(graph, captured, state, scratch)?,
             None => {
@@ -1424,15 +1445,31 @@ impl Mamba2GpuEngine {
         pf: &mut Mamba2GpuPrefill,
         scratch: &mut Mamba2GpuScratch,
     ) -> Result<(), String> {
+        self.prefill_from(RowSource::Host(input), state, pf, scratch)
+    }
+
+    /// [`Self::prefill_gpu_only`] on rows from the host or already in the
+    /// window's input buffer.
+    pub(crate) fn prefill_from(
+        &self,
+        input: RowSource<'_>,
+        state: &mut Mamba2GpuState,
+        pf: &mut Mamba2GpuPrefill,
+        scratch: &mut Mamba2GpuScratch,
+    ) -> Result<(), String> {
         let rows = self.batch * pf.seq_len;
-        Self::check_host_len("prefill input", input.len(), rows * self.input_dim)?;
+        if let Some(input) = input.host() {
+            Self::check_host_len("prefill input", input.len(), rows * self.input_dim)?;
+        }
         Self::check_host_len(
             "prefill buffers",
             pf.input.len(),
             (rows * self.input_dim).max(1),
         )?;
         self.check_state(state)?;
-        pf.input.upload(&self.ctx.stream, input)?;
+        if let Some(input) = input.host() {
+            pf.input.upload(&self.ctx.stream, input)?;
+        }
         self.run_prefill(state, pf)?;
         if pf.seq_len == 0 || self.batch == 0 {
             return Ok(());
@@ -1612,5 +1649,11 @@ impl Mamba2GpuPrefill {
     /// `[batch, seq_len, d_model]`, on the device.
     pub fn final_rows(&self) -> &GpuBuffer {
         &self.final_rows
+    }
+
+    /// The prompt's input rows, f32 `[batch, seq_len, input_dim]`, on the
+    /// device.
+    pub(crate) fn input_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.input.cached_ptr()
     }
 }

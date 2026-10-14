@@ -48,12 +48,52 @@ pub trait GpuBackbone {
     /// device for a consumer on the GPU.
     fn step_gpu_only(&mut self, input: &[f32]) -> Result<(), String>;
 
+    /// The decode step's input rows on the device, `[batch, input_dim]`
+    /// f32, in the backbone's own buffer: a caller on the GPU (a layer of
+    /// its own below a segment) writes them there on the backbone's stream
+    /// before [`GpuBackbone::step_on_device`], and no row crosses the host.
+    /// [`GpuBackbone::capture_graph`] overwrites them.
+    fn step_input_ptr(&self) -> CUdeviceptr;
+
+    /// [`GpuBackbone::step_gpu_only`] on the rows at
+    /// [`GpuBackbone::step_input_ptr`]; a captured decode graph replays with
+    /// no upload. The bits are the host step's.
+    fn step_on_device(&mut self) -> Result<(), String>;
+
     /// A prompt of `seq_len` tokens per sequence in one pass, from host rows
     /// `[batch, seq_len, input_dim]`, continuing from the current state.
     /// Afterwards the state holds the position after the prompt and the
     /// device rows the prompt's last position, as after a step. An empty
     /// prompt leaves both as they are.
     fn prefill(&mut self, input: &[f32], seq_len: usize) -> Result<(), String>;
+
+    /// The input rows of a prompt of `seq_len` tokens per sequence on the
+    /// device, `[batch, seq_len, input_dim]` f32, in the backbone's own
+    /// buffers of that length: a caller on the GPU writes them there on the
+    /// backbone's stream before [`GpuBackbone::prefill_on_device`]. A prompt
+    /// of another length replaces the buffers, and
+    /// [`GpuBackbone::capture_prefill_graph`] overwrites the rows. An empty
+    /// prompt has none.
+    fn prompt_input_ptr(&mut self, seq_len: usize) -> Result<CUdeviceptr, String>;
+
+    /// [`GpuBackbone::prefill`] on the rows at
+    /// [`GpuBackbone::prompt_input_ptr`] of the same `seq_len`; a captured
+    /// prompt graph replays with no upload. The bits are the host prompt's.
+    fn prefill_on_device(&mut self, seq_len: usize) -> Result<(), String>;
+
+    /// Every position's rows of the last prompt on the device, `[batch,
+    /// seq_len, d_model]` in [`GpuBackbone::prompt_rows_dtype`]: the
+    /// final-norm rows, or the residual stream of a backbone built with
+    /// `final_norm = false`, for a layer of the caller's that takes the
+    /// whole prompt, such as attention between two segments. The rows at
+    /// [`GpuBackbone::temporal_ptr`] are each sequence's last position, in
+    /// their own precision. None until a prompt length has buffers.
+    fn prompt_rows_ptr(&self) -> Option<CUdeviceptr>;
+
+    /// The precision of [`GpuBackbone::prompt_rows_ptr`]'s rows: f32, but
+    /// for the final-norm rows of a bf16 or f16 Mamba-1 backbone, which are
+    /// in the storage precision as its [`GpuBackbone::temporal_ptr`] rows.
+    fn prompt_rows_dtype(&self) -> WeightDtype;
 
     /// Zero the recurrent state, the start of new sequences.
     fn reset(&mut self) -> Result<(), String>;
@@ -125,8 +165,26 @@ macro_rules! gpu_backbone_by_inherent_methods {
             fn step_gpu_only(&mut self, input: &[f32]) -> Result<(), String> {
                 <$ty>::step_gpu_only(self, input)
             }
+            fn step_input_ptr(&self) -> CUdeviceptr {
+                <$ty>::step_input_ptr(self)
+            }
+            fn step_on_device(&mut self) -> Result<(), String> {
+                <$ty>::step_on_device(self)
+            }
             fn prefill(&mut self, input: &[f32], seq_len: usize) -> Result<(), String> {
                 <$ty>::prefill(self, input, seq_len)
+            }
+            fn prompt_input_ptr(&mut self, seq_len: usize) -> Result<CUdeviceptr, String> {
+                <$ty>::prompt_input_ptr(self, seq_len)
+            }
+            fn prefill_on_device(&mut self, seq_len: usize) -> Result<(), String> {
+                <$ty>::prefill_on_device(self, seq_len)
+            }
+            fn prompt_rows_ptr(&self) -> Option<CUdeviceptr> {
+                <$ty>::prompt_rows_ptr(self)
+            }
+            fn prompt_rows_dtype(&self) -> WeightDtype {
+                <$ty>::prompt_rows_dtype(self)
             }
             fn reset(&mut self) -> Result<(), String> {
                 <$ty>::reset(self)
@@ -245,8 +303,26 @@ impl GpuBackbone for AnyGpuBackbone {
     fn step_gpu_only(&mut self, input: &[f32]) -> Result<(), String> {
         self.inner_mut().step_gpu_only(input)
     }
+    fn step_input_ptr(&self) -> CUdeviceptr {
+        self.inner().step_input_ptr()
+    }
+    fn step_on_device(&mut self) -> Result<(), String> {
+        self.inner_mut().step_on_device()
+    }
     fn prefill(&mut self, input: &[f32], seq_len: usize) -> Result<(), String> {
         self.inner_mut().prefill(input, seq_len)
+    }
+    fn prompt_input_ptr(&mut self, seq_len: usize) -> Result<CUdeviceptr, String> {
+        self.inner_mut().prompt_input_ptr(seq_len)
+    }
+    fn prefill_on_device(&mut self, seq_len: usize) -> Result<(), String> {
+        self.inner_mut().prefill_on_device(seq_len)
+    }
+    fn prompt_rows_ptr(&self) -> Option<CUdeviceptr> {
+        self.inner().prompt_rows_ptr()
+    }
+    fn prompt_rows_dtype(&self) -> WeightDtype {
+        self.inner().prompt_rows_dtype()
     }
     fn reset(&mut self) -> Result<(), String> {
         self.inner_mut().reset()

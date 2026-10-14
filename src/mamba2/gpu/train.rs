@@ -32,7 +32,9 @@ use crate::config::ModelFamily;
 use crate::gpu::grad_clip::{GradRegionGeom, StepTail, norm_limit, read_tail, scale_grads};
 use crate::gpu::grad_window::{FoldOverflow, GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
-use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
+use crate::gpu::train::{
+    BackwardMetrics, BackwardOpts, InputGrad, RowSource, StepMetrics, TrainSessionCfg,
+};
 use crate::gpu::train_state::TrainerState;
 use crate::gpu::varlen::GpuVarlen;
 use crate::varlen::Varlen;
@@ -919,10 +921,27 @@ impl Mamba2GpuTrainer {
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         self.check_window_len("step input", input.len(), self.input_dim)?;
         self.check_window_len("step d_temporal", d_temporal.len(), self.cfg.d_model)?;
+        self.step_rows(RowSource::Host(input), RowSource::Host(d_temporal))
+    }
+
+    /// [`Self::step`] on the rows the caller wrote on the device, on the
+    /// trainer's stream: the input at [`Self::input_ptr`] and d loss / d
+    /// the final rows at [`Self::d_temporal_ptr`]. No row crosses to the
+    /// host, and a captured graph replays without an upload; the bits are
+    /// the host step's.
+    pub fn step_on_device(&mut self) -> Result<StepMetrics, String> {
+        self.step_rows(RowSource::Device, RowSource::Device)
+    }
+
+    fn step_rows(
+        &mut self,
+        input: RowSource<'_>,
+        d_temporal: RowSource<'_>,
+    ) -> Result<StepMetrics, String> {
         // A step with a window open adds its micro-batch to the window and
         // applies it, as the split calls would close the window.
         if self.window.is_open() {
-            self.accumulate(input, d_temporal)?;
+            self.accumulate_rows(input, d_temporal)?;
             return self.apply_window();
         }
         if self.graph.is_some() {
@@ -941,7 +960,7 @@ impl Mamba2GpuTrainer {
                 t.forward_unchecked(input, None)?;
                 t.forwarded = true;
                 let opts = t.step_opts;
-                metrics = Some(t.backward_step(d_temporal, opts)?);
+                metrics = Some(t.backward_step_with(d_temporal, opts, InputGrad::None)?);
                 Ok(())
             },
         )?;
@@ -968,6 +987,20 @@ impl Mamba2GpuTrainer {
     ) -> Result<BackwardMetrics, String> {
         self.check_window_len("accumulate input", input.len(), self.input_dim)?;
         self.check_window_len("accumulate d_temporal", d_temporal.len(), self.cfg.d_model)?;
+        self.accumulate_rows(RowSource::Host(input), RowSource::Host(d_temporal))
+    }
+
+    /// [`Self::accumulate`] on the rows the caller wrote on the device
+    /// (see [`Self::step_on_device`]).
+    pub fn accumulate_on_device(&mut self) -> Result<BackwardMetrics, String> {
+        self.accumulate_rows(RowSource::Device, RowSource::Device)
+    }
+
+    fn accumulate_rows(
+        &mut self,
+        input: RowSource<'_>,
+        d_temporal: RowSource<'_>,
+    ) -> Result<BackwardMetrics, String> {
         let loss_scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
         self.window
             .open_for_device(&self.ctx, self.grads.len(), self.scaler.is_some())?;
@@ -1111,7 +1144,18 @@ impl Mamba2GpuTrainer {
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
-        self.backward_step_with(d_temporal, opts, None)
+        self.check_window_len("backward d_out", d_temporal.len(), self.cfg.d_model)?;
+        self.backward_step_with(RowSource::Host(d_temporal), opts, InputGrad::None)
+    }
+
+    /// [`Self::backward_step`] of d loss / d the final rows the caller
+    /// wrote at [`Self::d_temporal_ptr`] on the trainer's stream, after
+    /// [`Self::forward_on_device`] or [`Self::forward`].
+    pub fn backward_step_on_device(
+        &mut self,
+        opts: BackwardOpts,
+    ) -> Result<BackwardMetrics, String> {
+        self.backward_step_with(RowSource::Device, opts, InputGrad::None)
     }
 
     /// [`Self::backward_step`] that also writes d loss / d the window's
@@ -1124,18 +1168,30 @@ impl Mamba2GpuTrainer {
         opts: BackwardOpts,
         d_input: &mut [f32],
     ) -> Result<BackwardMetrics, String> {
-        self.backward_step_with(d_temporal, opts, Some(d_input))
+        self.check_window_len("backward d_out", d_temporal.len(), self.cfg.d_model)?;
+        self.check_window_len("backward d_input", d_input.len(), self.input_dim)?;
+        self.backward_step_with(RowSource::Host(d_temporal), opts, InputGrad::Host(d_input))
+    }
+
+    /// [`Self::backward_step_on_device`] that also leaves d loss / d the
+    /// window's input at [`Self::d_input_ptr`], unscaled in f16, for the
+    /// caller's layer below on the device.
+    pub fn backward_step_input_grad_on_device(
+        &mut self,
+        opts: BackwardOpts,
+    ) -> Result<BackwardMetrics, String> {
+        self.backward_step_with(RowSource::Device, opts, InputGrad::Device)
     }
 
     fn backward_step_with(
         &mut self,
-        d_temporal: &[f32],
+        d_temporal: RowSource<'_>,
         opts: BackwardOpts,
-        d_input: Option<&mut [f32]>,
+        d_input: InputGrad<'_>,
     ) -> Result<BackwardMetrics, String> {
         check_backward_opts(&opts, "Mamba-2 trainer")?;
         let loss_scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
-        self.backward(d_temporal, d_input)?;
+        self.backward_rows(d_temporal, d_input)?;
         if opts.accumulate_only {
             self.window
                 .accumulate(&self.ctx, &self.grads, self.overflowed)?;
@@ -1549,9 +1605,61 @@ impl Mamba2GpuTrainer {
         self.check_window_len("forward output", out.len(), self.cfg.d_model)?;
         self.forwarded = false;
         self.presize_gemm_scratch()?;
-        self.forward_unchecked(input, Some(out))?;
+        self.forward_unchecked(RowSource::Host(input), Some(out))?;
         self.forwarded = true;
         Ok(())
+    }
+
+    /// [`Self::forward`] on the input rows the caller wrote at
+    /// [`Self::input_ptr`] on the trainer's stream; the final rows stay
+    /// at [`Self::temporal_ptr`]. The bits are the host forward's.
+    pub fn forward_on_device(&mut self) -> Result<(), String> {
+        self.forwarded = false;
+        self.presize_gemm_scratch()?;
+        self.forward_unchecked(RowSource::Device, None)?;
+        self.forwarded = true;
+        Ok(())
+    }
+
+    /// The window's input rows on the device, `[batch, seq_len,
+    /// input_dim]` f32: the caller writes them on the trainer's stream
+    /// before [`Self::forward_on_device`], [`Self::step_on_device`] or
+    /// [`Self::accumulate_on_device`].
+    pub fn input_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.input.cached_ptr()
+    }
+
+    /// The final rows of the last forward on the device, `[batch,
+    /// seq_len, d_model]` f32 (the residual stream of a segment built
+    /// with `final_norm = false`).
+    pub fn temporal_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.final_out.cached_ptr()
+    }
+
+    /// d loss / d the final rows on the device, `[batch, seq_len,
+    /// d_model]` f32: the caller writes it on the trainer's stream before
+    /// a backward, step or micro-batch on the device. In f16 the backward
+    /// scales it by the loss scale there, as it scales the host rows.
+    pub fn d_temporal_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.bwd.d_rows.cached_ptr()
+    }
+
+    /// d loss / d the window's input on the device, `[batch, seq_len,
+    /// input_dim]` f32, as [`Self::backward_step_input_grad_on_device`]
+    /// leaves it.
+    pub fn d_input_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.input_grad_buf().cached_ptr()
+    }
+
+    /// The buffer that holds d loss / d the input after a backward: the
+    /// input projection's gradient, or the residual stream's for an
+    /// identity input.
+    fn input_grad_buf(&self) -> &GpuBuffer {
+        if self.layout.input_proj_w.len == 0 {
+            &self.bwd.d_temp
+        } else {
+            &self.bwd.d_input
+        }
     }
 
     /// Size the context's GEMM staging and upcast scratch for this
@@ -1578,9 +1686,15 @@ impl Mamba2GpuTrainer {
     }
 
     /// The forward kernels; `out`, when given, receives the final rows.
-    fn forward_unchecked(&mut self, input: &[f32], out: Option<&mut [f32]>) -> Result<(), String> {
+    fn forward_unchecked(
+        &mut self,
+        input: RowSource<'_>,
+        out: Option<&mut [f32]>,
+    ) -> Result<(), String> {
         let stream = self.ctx.stream.clone();
-        self.input.upload(&stream, input)?;
+        if let Some(input) = input.host() {
+            self.input.upload(&stream, input)?;
+        }
         self.forward_device()?;
         let Some(out) = out else {
             return Ok(());
@@ -1834,12 +1948,24 @@ impl Mamba2GpuTrainer {
     /// not finite: the next [`Self::apply_adamw`] skips its step, and a
     /// caller training anything upstream must skip that step too.
     pub fn backward(&mut self, d_out: &[f32], d_input: Option<&mut [f32]>) -> Result<(), String> {
-        if !self.forwarded {
-            return Err("backward needs a completed forward of this window".into());
-        }
         self.check_window_len("backward d_out", d_out.len(), self.cfg.d_model)?;
         if let Some(d) = d_input.as_deref() {
             self.check_window_len("backward d_input", d.len(), self.input_dim)?;
+        }
+        let d_input = match d_input {
+            Some(d) => InputGrad::Host(d),
+            None => InputGrad::None,
+        };
+        self.backward_rows(RowSource::Host(d_out), d_input)
+    }
+
+    fn backward_rows(
+        &mut self,
+        d_out: RowSource<'_>,
+        d_input: InputGrad<'_>,
+    ) -> Result<(), String> {
+        if !self.forwarded {
+            return Err("backward needs a completed forward of this window".into());
         }
         self.fresh_grads = false;
         self.backward_unchecked(d_out, d_input)?;
@@ -1849,26 +1975,33 @@ impl Mamba2GpuTrainer {
 
     fn backward_unchecked(
         &mut self,
-        d_out: &[f32],
-        d_input: Option<&mut [f32]>,
+        d_out: RowSource<'_>,
+        d_input: InputGrad<'_>,
     ) -> Result<(), String> {
         let stream = self.ctx.stream.clone();
         let scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
         self.upload_d_out(d_out, scale)?;
         self.backward_device()?;
+        // The input gradient left on the device comes out unscaled there,
+        // by the f32 product the host hand-out takes with the same factor.
+        if let (InputGrad::Device, Some(_)) = (&d_input, scale) {
+            let (grad, unscale) = (self.input_grad_buf().cached_ptr(), self.unscale.ptr());
+            let n = self.input_grad_buf().len() as i64;
+            let mut bld = stream.launch_builder(&self.ctx.kernels.scale_grads_dev_f32);
+            bld.arg(&grad);
+            bld.arg(&unscale);
+            bld.arg(&n);
+            unsafe { bld.launch(crate::gpu::launch::grid_1d_wide(n as usize)) }
+                .map_err(|e| format!("unscale of the input gradient: {e:?}"))?;
+        }
         self.overflowed = false;
         if scale.is_some() {
             self.sync("backward")?;
             self.overflowed = self.overflow.read(&stream)? != 0;
         }
         self.sync("backward")?;
-        if let Some(d_input) = d_input {
-            let src = if self.layout.input_proj_w.len == 0 {
-                &self.bwd.d_temp
-            } else {
-                &self.bwd.d_input
-            };
-            src.download(&stream, d_input)?;
+        if let InputGrad::Host(d_input) = d_input {
+            self.input_grad_buf().download(&stream, d_input)?;
             self.sync("backward")?;
             if let Some(sc) = scale {
                 let inv = 1.0 / sc;
@@ -1883,9 +2016,11 @@ impl Mamba2GpuTrainer {
     /// d loss / d the final rows into the backward's input, and in f16 the
     /// loss scale the backward multiplies them by and the factor it
     /// unscales the gradients by.
-    fn upload_d_out(&mut self, d_out: &[f32], scale: Option<f32>) -> Result<(), String> {
+    fn upload_d_out(&mut self, d_out: RowSource<'_>, scale: Option<f32>) -> Result<(), String> {
         let stream = self.ctx.stream.clone();
-        self.bwd.d_rows.upload(&stream, d_out)?;
+        if let Some(d_out) = d_out.host() {
+            self.bwd.d_rows.upload(&stream, d_out)?;
+        }
         if let Some(sc) = scale {
             self.loss_scale.upload(&stream, &[sc])?;
             self.unscale.write(&stream, 1.0 / sc)?;

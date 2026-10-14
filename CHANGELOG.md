@@ -273,6 +273,20 @@
   chunk's cumulative decay restarts at each sequence, so an infinite step
   in one sequence never meets another's in a subtraction. Without a
   packing every kernel keeps its bits.
+- A model's rows can stay on the device. Every GPU trainer, `GpuTrainer`
+  and `AnyGpuTrainer` hand out their own input, row, gradient and
+  input-gradient buffers (`input_ptr`, `temporal_ptr`, `d_temporal_ptr`,
+  `d_input_ptr`) and train on what a caller wrote there on the trainer's
+  stream (`forward_on_device`, `backward_step_on_device`,
+  `backward_step_input_grad_on_device`, `step_on_device`,
+  `accumulate_on_device`). Every GPU backbone, `GpuBackbone` and
+  `AnyGpuBackbone` take a decode step's and a prompt's rows from their own
+  buffers (`step_input_ptr`, `step_on_device`, `prompt_input_ptr`,
+  `prefill_on_device`) and hand out every position of the last prompt
+  (`prompt_rows_ptr`, `prompt_rows_dtype`). A stack of segments and GPU
+  layers of the caller's own trains and runs with no row crossing the
+  host, captured graphs included, with the bits of the host path; in f16
+  a trainer's input gradient comes back unscaled on the device.
 
 ### Changed
 

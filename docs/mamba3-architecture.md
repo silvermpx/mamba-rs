@@ -156,6 +156,20 @@ precision. A segment built with an identity input carries that stream on.
 Counted by kernel family. The typed variants (f32, bf16, f16) of a family
 share one row.
 
+## Packed sequences
+
+A packing (`Varlen`, see `src/varlen.rs`) trains several sequences in
+one row, as the reference does with `seq_idx`. A sequence's first token
+starts from the empty state, previous-step term and angles, so its alpha
+and beta are zero, and the token before it keeps gamma alone as its
+shifted weight. On the chunked scan the chunk's cumulative decay restarts
+at each sequence, the chunk state takes only the chunk's last sequence,
+the entering state reaches only the tokens that continue the sequence
+before the chunk, and a token reads only the earlier tokens of its own
+sequence; the backward cuts every carry at a start and combines the
+decay gradients per sequence. Masked terms are skipped or selected, never
+multiplied by zero, so an overflow in one sequence stays in it.
+
 ## Chunked scan and carried state (contract)
 
 The chunked parallel scan carries state in one direction only. The GPU

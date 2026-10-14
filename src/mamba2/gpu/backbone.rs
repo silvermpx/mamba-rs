@@ -4,11 +4,14 @@
 
 use std::sync::Arc;
 
+use cudarc::driver::sys::CUdeviceptr;
+
 use crate::gpu::GpuOptions;
 use crate::gpu::buffers::DeviceKeep;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
+use crate::gpu::train::RowSource;
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::Mamba2Weights;
 
@@ -80,6 +83,22 @@ impl Mamba2GpuBackbone {
             .step_gpu_only(input, &mut self.state, &mut self.scratch)
     }
 
+    /// The decode step's input rows on the device, `[batch, input_dim]`
+    /// f32, in the backbone's own buffer: a layer of the caller's on the
+    /// GPU writes them there on the backbone's stream before
+    /// [`Self::step_on_device`].
+    pub fn step_input_ptr(&self) -> CUdeviceptr {
+        self.scratch.input_ptr()
+    }
+
+    /// [`Self::step_gpu_only`] on the rows at [`Self::step_input_ptr`]; a
+    /// captured decode graph replays with no upload. The bits are the host
+    /// step's.
+    pub fn step_on_device(&mut self) -> Result<(), String> {
+        self.engine
+            .step_from(RowSource::Device, &mut self.state, &mut self.scratch)
+    }
+
     /// A prompt of `seq_len` tokens per sequence in one pass, from host
     /// rows `[batch, seq_len, input_dim]`, continuing from the current
     /// state. Afterwards the state holds the position after the prompt and
@@ -90,15 +109,69 @@ impl Mamba2GpuBackbone {
         if seq_len == 0 && input.is_empty() {
             return Ok(());
         }
-        if self.prefill.as_ref().map(Mamba2GpuPrefill::seq_len) != Some(seq_len) {
-            self.prefill = None;
-            self.prefill = Some(self.engine.alloc_prefill(seq_len)?);
-        }
+        self.keep_prompt(seq_len)?;
         let Some(pf) = self.prefill.as_mut() else {
             return Err("Mamba-2 prefill buffers missing".into());
         };
         self.engine
             .prefill_gpu_only(input, &mut self.state, pf, &mut self.scratch)
+    }
+
+    /// The input rows of a prompt of `seq_len` tokens per sequence on the
+    /// device, `[batch, seq_len, input_dim]` f32, in the backbone's own
+    /// buffers of that length (a prompt of another length replaces them):
+    /// a layer of the caller's on the GPU writes them there on the
+    /// backbone's stream before [`Self::prefill_on_device`].
+    pub fn prompt_input_ptr(&mut self, seq_len: usize) -> Result<CUdeviceptr, String> {
+        if seq_len == 0 {
+            return Err("Mamba-2 prompt input: an empty prompt has no rows".into());
+        }
+        self.keep_prompt(seq_len)?;
+        self.prefill
+            .as_ref()
+            .map(Mamba2GpuPrefill::input_ptr)
+            .ok_or_else(|| "Mamba-2 prefill buffers missing".into())
+    }
+
+    /// [`Self::prefill`] on the rows at [`Self::prompt_input_ptr`] of the
+    /// same `seq_len`; a captured prompt graph replays with no upload. The
+    /// bits are the host prompt's.
+    pub fn prefill_on_device(&mut self, seq_len: usize) -> Result<(), String> {
+        if seq_len == 0 {
+            return Ok(());
+        }
+        let Some(pf) = self.prefill.as_mut().filter(|pf| pf.seq_len() == seq_len) else {
+            return Err(format!(
+                "Mamba-2 prefill on the device: no input rows of {seq_len} tokens, \
+                 take prompt_input_ptr first"
+            ));
+        };
+        self.engine
+            .prefill_from(RowSource::Device, &mut self.state, pf, &mut self.scratch)
+    }
+
+    /// Every position's rows of the last prompt on the device, `[batch,
+    /// seq_len, d_model]` in [`Self::prompt_rows_dtype`]: the final-norm
+    /// rows, or the residual stream of a backbone built with `final_norm =
+    /// false`, for a layer of the caller's that takes the whole prompt.
+    /// None until a prompt length has buffers.
+    pub fn prompt_rows_ptr(&self) -> Option<CUdeviceptr> {
+        self.prefill.as_ref().map(|pf| pf.final_rows().cached_ptr())
+    }
+
+    /// The precision of [`Self::prompt_rows_ptr`]'s rows: always f32.
+    pub fn prompt_rows_dtype(&self) -> WeightDtype {
+        WeightDtype::F32
+    }
+
+    /// Keep the buffers of a prompt of `seq_len` tokens per sequence,
+    /// replacing those of another length with the graph they hold.
+    fn keep_prompt(&mut self, seq_len: usize) -> Result<(), String> {
+        if self.prefill.as_ref().map(Mamba2GpuPrefill::seq_len) != Some(seq_len) {
+            self.prefill = None;
+            self.prefill = Some(self.engine.alloc_prefill(seq_len)?);
+        }
+        Ok(())
     }
 
     /// Zero the recurrent state, the start of new sequences.
@@ -115,10 +188,7 @@ impl Mamba2GpuBackbone {
     /// GEMM staging can no longer grow.
     pub fn capture_prefill_graph(&mut self, seq_len: usize) -> Result<(), String> {
         let zeros = vec![0.0f32; self.batch() * seq_len * self.input_dim()];
-        if self.prefill.as_ref().map(Mamba2GpuPrefill::seq_len) != Some(seq_len) {
-            self.prefill = None;
-            self.prefill = Some(self.engine.alloc_prefill(seq_len)?);
-        }
+        self.keep_prompt(seq_len)?;
         let Some(pf) = self.prefill.as_mut() else {
             return Err("Mamba-2 prefill buffers missing".into());
         };

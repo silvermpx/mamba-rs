@@ -4198,12 +4198,47 @@ fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
         );
     }
 
+    // An engine whose device-only step takes its rows from the host or
+    // from the device runs the replay in the shared `*_from` body; the
+    // device-only step must hand its rows to that body.
+    for (source, holder, step, body) in [
+        (
+            INFERENCE_SOURCE,
+            "MambaGpuEngine",
+            "step_gpu_only",
+            "step_from",
+        ),
+        (
+            MAMBA3_INFERENCE_SOURCE,
+            "Mamba3GpuEngine",
+            "step_gpu_only",
+            "step_from",
+        ),
+        (
+            INFERENCE_SOURCE,
+            "MambaGpuEngineMixed",
+            "step_gpu_only_mixed_native",
+            "step_mixed_native_from",
+        ),
+        (
+            MAMBA3_INFERENCE_SOURCE,
+            "Mamba3GpuEngineMixed",
+            "step_gpu_only_mixed_native",
+            "step_mixed_native_from",
+        ),
+    ] {
+        let step = source_mask(method_scope_for_type(source, holder, step));
+        assert!(
+            step.contains(&format!("self.{body}(RowSource::Host(input)")),
+            "{holder} must run its device-only step through {body}"
+        );
+    }
     let decode_holders = [
         (
             INFERENCE_SOURCE,
             "MambaGpuEngine",
             "capture_graph",
-            &["step", "step_gpu_only"][..],
+            &["step", "step_from"][..],
         ),
         (
             INFERENCE_SOURCE,
@@ -4215,19 +4250,19 @@ fn exact_graph_inventory_wires_decode_and_existing_prefill_training_holders() {
             INFERENCE_SOURCE,
             "MambaGpuEngineMixed",
             "capture_graph_mixed_native",
-            &["step_mixed_native", "step_gpu_only_mixed_native"][..],
+            &["step_mixed_native", "step_mixed_native_from"][..],
         ),
         (
             MAMBA3_INFERENCE_SOURCE,
             "Mamba3GpuEngine",
             "capture_graph",
-            &["step", "step_gpu_only"][..],
+            &["step", "step_from"][..],
         ),
         (
             MAMBA3_INFERENCE_SOURCE,
             "Mamba3GpuEngineMixed",
             "capture_graph_mixed_native",
-            &["step_mixed_native", "step_gpu_only_mixed_native"][..],
+            &["step_mixed_native", "step_mixed_native_from"][..],
         ),
     ];
     for (source, holder, capture, replays) in decode_holders {

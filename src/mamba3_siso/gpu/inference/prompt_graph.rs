@@ -76,7 +76,7 @@ impl Mamba3GpuBackbone {
                     &states,
                     &sc.prefill_hidden,
                 )?;
-                e.cast_prefill_hidden(sc)
+                e.hand_out_prefill_hidden(sc)
             }
             _ => Err("M3 prefill: engine/scratch precision arms disagree".to_string()),
         }
@@ -97,12 +97,7 @@ impl Mamba3GpuBackbone {
         let kept = self.prompt.take().filter(|p| p.seq_len == seq_len);
         let mut prompt = match kept {
             Some(prompt) => prompt,
-            None => M3BackbonePrompt {
-                graph: None,
-                seq_len,
-                input: GpuBuffer::zeros(self.stream(), want)?,
-                prefill: self.alloc_prefill(seq_len)?,
-            },
+            None => self.alloc_prompt(seq_len)?,
         };
         let result = self.capture_prompt(&mut prompt);
         self.prompt = Some(prompt);

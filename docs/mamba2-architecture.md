@@ -148,6 +148,14 @@ not grow with a state per token. Both run in f32, tf32, bf16 and f16, with
 f32 master weights and the dynamic loss scaler in f16. The CPU trains
 through `forward_mamba2_train` and `backward_mamba2_train`.
 
+A packing (`Varlen`, see `src/varlen.rs`) trains several sequences in
+one row, as the reference does with `seq_idx`. A sequence's first token
+starts from the empty state and an empty conv history; the chunk's
+cumulative decay restarts there, the chunk state takes only the chunk's
+last sequence, the state passes into a chunk only when no sequence starts
+in the one before, and a token reads only the earlier tokens of its own
+sequence. The backward cuts every carry at a start the same way.
+
 ## CUDA kernels
 
 | file | purpose |

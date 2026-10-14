@@ -4,11 +4,14 @@
 
 use std::sync::Arc;
 
+use cudarc::driver::sys::CUdeviceptr;
+
 use crate::gpu::GpuOptions;
 use crate::gpu::buffers::DeviceKeep;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
+use crate::gpu::train::RowSource;
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::Mamba3MimoWeights;
 
@@ -80,6 +83,22 @@ impl Mamba3MimoGpuBackbone {
             .run_gpu_only(input, &mut self.state, &mut self.step_window)
     }
 
+    /// The decode step's input rows on the device, `[batch, input_dim]`
+    /// f32, in the backbone's own buffer: a layer of the caller's on the
+    /// GPU writes them there on the backbone's stream before
+    /// [`Self::step_on_device`].
+    pub fn step_input_ptr(&self) -> CUdeviceptr {
+        self.step_window.input_ptr()
+    }
+
+    /// [`Self::step_gpu_only`] on the rows at [`Self::step_input_ptr`]; a
+    /// captured decode graph replays with no upload. The bits are the host
+    /// step's.
+    pub fn step_on_device(&mut self) -> Result<(), String> {
+        self.engine
+            .run_from(RowSource::Device, &mut self.state, &mut self.step_window)
+    }
+
     /// A prompt of `seq_len` tokens per sequence in one pass, from host
     /// rows `[batch, seq_len, input_dim]`, continuing from the current
     /// state. Afterwards the state holds the position after the prompt and
@@ -90,6 +109,71 @@ impl Mamba3MimoGpuBackbone {
         if seq_len == 0 && input.is_empty() {
             return Ok(());
         }
+        self.keep_prompt(seq_len)?;
+        let Some(win) = self.prompt_window.as_mut() else {
+            return Err("MIMO prompt window missing".into());
+        };
+        self.engine.run_gpu_only(input, &mut self.state, win)?;
+        self.engine.gather_last_rows(win, &mut self.step_window)
+    }
+
+    /// The input rows of a prompt of `seq_len` tokens per sequence on the
+    /// device, `[batch, seq_len, input_dim]` f32, in the backbone's own
+    /// window of that length (a prompt of another length replaces it): a
+    /// layer of the caller's on the GPU writes them there on the backbone's
+    /// stream before [`Self::prefill_on_device`].
+    pub fn prompt_input_ptr(&mut self, seq_len: usize) -> Result<CUdeviceptr, String> {
+        if seq_len == 0 {
+            return Err("MIMO prompt input: an empty prompt has no rows".into());
+        }
+        self.keep_prompt(seq_len)?;
+        self.prompt_window
+            .as_ref()
+            .map(Mamba3MimoGpuWindow::input_ptr)
+            .ok_or_else(|| "MIMO prompt window missing".into())
+    }
+
+    /// [`Self::prefill`] on the rows at [`Self::prompt_input_ptr`] of the
+    /// same `seq_len`; a captured prompt graph replays with no upload. The
+    /// bits are the host prompt's.
+    pub fn prefill_on_device(&mut self, seq_len: usize) -> Result<(), String> {
+        if seq_len == 0 {
+            return Ok(());
+        }
+        let Some(win) = self
+            .prompt_window
+            .as_mut()
+            .filter(|win| win.seq_len() == seq_len)
+        else {
+            return Err(format!(
+                "MIMO prefill on the device: no input rows of {seq_len} tokens, \
+                 take prompt_input_ptr first"
+            ));
+        };
+        self.engine
+            .run_from(RowSource::Device, &mut self.state, win)?;
+        self.engine.gather_last_rows(win, &mut self.step_window)
+    }
+
+    /// Every position's rows of the last prompt on the device, `[batch,
+    /// seq_len, d_model]` in [`Self::prompt_rows_dtype`]: the final-norm
+    /// rows, or the residual stream of a backbone built with `final_norm =
+    /// false`, for a layer of the caller's that takes the whole prompt.
+    /// None until a prompt length has a window.
+    pub fn prompt_rows_ptr(&self) -> Option<CUdeviceptr> {
+        self.prompt_window
+            .as_ref()
+            .map(|win| win.final_rows().cached_ptr())
+    }
+
+    /// The precision of [`Self::prompt_rows_ptr`]'s rows: always f32.
+    pub fn prompt_rows_dtype(&self) -> WeightDtype {
+        WeightDtype::F32
+    }
+
+    /// Keep the window of a prompt of `seq_len` tokens per sequence,
+    /// replacing one of another length with the graph it holds.
+    fn keep_prompt(&mut self, seq_len: usize) -> Result<(), String> {
         if self
             .prompt_window
             .as_ref()
@@ -99,11 +183,7 @@ impl Mamba3MimoGpuBackbone {
             self.prompt_window = None;
             self.prompt_window = Some(self.engine.alloc_window(seq_len)?);
         }
-        let Some(win) = self.prompt_window.as_mut() else {
-            return Err("MIMO prompt window missing".into());
-        };
-        self.engine.run_gpu_only(input, &mut self.state, win)?;
-        self.engine.gather_last_rows(win, &mut self.step_window)
+        Ok(())
     }
 
     /// Zero the recurrent state, the start of new sequences.
@@ -120,15 +200,7 @@ impl Mamba3MimoGpuBackbone {
     /// the GEMM staging can no longer grow.
     pub fn capture_prefill_graph(&mut self, seq_len: usize) -> Result<(), String> {
         let zeros = vec![0.0f32; self.batch() * seq_len * self.input_dim()];
-        if self
-            .prompt_window
-            .as_ref()
-            .map(Mamba3MimoGpuWindow::seq_len)
-            != Some(seq_len)
-        {
-            self.prompt_window = None;
-            self.prompt_window = Some(self.engine.alloc_window(seq_len)?);
-        }
+        self.keep_prompt(seq_len)?;
         let Some(win) = self.prompt_window.as_mut() else {
             return Err("MIMO prompt window missing".into());
         };

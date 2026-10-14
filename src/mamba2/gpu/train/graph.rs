@@ -21,7 +21,7 @@ use crate::gpu::graph_capture::{
 };
 use crate::gpu::kernel_identity::CapturedGemmGraphPlan;
 use crate::gpu::loss_scaler::DynamicLossScaler;
-use crate::gpu::train::StepMetrics;
+use crate::gpu::train::{RowSource, StepMetrics};
 
 /// The captured training bodies and what their replays check.
 pub(super) struct TrainGraph {
@@ -203,12 +203,14 @@ impl Mamba2GpuTrainer {
     /// the caller opened.
     pub(super) fn accumulate_graph(
         &mut self,
-        input: &[f32],
-        d_temporal: &[f32],
+        input: RowSource<'_>,
+        d_temporal: RowSource<'_>,
     ) -> Result<(), String> {
         const LABEL: &str = "Mamba-2 accumulate graph replay";
         let stream = self.ctx.stream.clone();
-        self.input.upload(&stream, input)?;
+        if let Some(input) = input.host() {
+            self.input.upload(&stream, input)?;
+        }
         let scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
         self.upload_d_out(d_temporal, scale)?;
         let g = self.check_replay(LABEL)?;
@@ -234,15 +236,17 @@ impl Mamba2GpuTrainer {
     /// One step through the captured graph.
     pub(super) fn step_graph(
         &mut self,
-        input: &[f32],
-        d_temporal: &[f32],
+        input: RowSource<'_>,
+        d_temporal: RowSource<'_>,
     ) -> Result<StepMetrics, String> {
         const LABEL: &str = "Mamba-2 training graph replay";
         self.check_replay(LABEL)?;
         let stream = self.ctx.stream.clone();
         self.forwarded = false;
         self.fresh_grads = false;
-        self.input.upload(&stream, input)?;
+        if let Some(input) = input.host() {
+            self.input.upload(&stream, input)?;
+        }
         let scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
         self.upload_d_out(d_temporal, scale)?;
         // The step counts before the replay, as the eager step counts it

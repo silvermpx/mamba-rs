@@ -25,6 +25,7 @@ use crate::gpu::graph_capture::{
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::gpu::launch::{grid_1d_cover, launch_elems, y_runs, yz_runs};
+use crate::gpu::train::RowSource;
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use crate::matrix::{Path, Request};
@@ -142,6 +143,12 @@ impl Mamba3MimoGpuWindow {
     /// `[batch, seq_len, d_model]`, on the device.
     pub fn final_rows(&self) -> &GpuBuffer {
         &self.final_rows
+    }
+
+    /// The window's input rows, f32 `[batch, seq_len, input_dim]`, on the
+    /// device.
+    pub(crate) fn input_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.input.cached_ptr()
     }
 }
 
@@ -515,15 +522,30 @@ impl Mamba3MimoGpuEngine {
         state: &mut Mamba3MimoGpuState,
         win: &mut Mamba3MimoGpuWindow,
     ) -> Result<(), String> {
+        self.run_from(RowSource::Host(input), state, win)
+    }
+
+    /// [`Self::run_gpu_only`] on rows from the host or already in the
+    /// window's input buffer.
+    pub(crate) fn run_from(
+        &self,
+        input: RowSource<'_>,
+        state: &mut Mamba3MimoGpuState,
+        win: &mut Mamba3MimoGpuWindow,
+    ) -> Result<(), String> {
         let rows = self.batch * win.seq_len;
-        Self::check_host_len("input", input.len(), rows * self.input_dim)?;
+        if let Some(input) = input.host() {
+            Self::check_host_len("input", input.len(), rows * self.input_dim)?;
+        }
         Self::check_host_len(
             "window buffers",
             win.input.len(),
             (rows * self.input_dim).max(1),
         )?;
         self.check_state(state)?;
-        win.input.upload(&self.ctx.stream, input)?;
+        if let Some(input) = input.host() {
+            win.input.upload(&self.ctx.stream, input)?;
+        }
         if let Some(g) = &win.graph
             && g.state == state_ptrs(state)
         {

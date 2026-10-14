@@ -60,7 +60,20 @@ underneath. The GPU path links only the CUDA driver API and cuBLAS.
   backbone built with `final_norm: false` hands out its f32 residual
   stream, and one built with an identity input carries it on; with
   `backward_step_input_grad` the stack trains end to end. Two segments of
-  two layers give a model of four bit for bit.
+  two layers give a model of four bit for bit. On the GPU the rows can stay
+  on the device: a trainer hands out its own input, row and gradient
+  buffers (`input_ptr`, `temporal_ptr`, `d_temporal_ptr`, `d_input_ptr`)
+  and trains on what your layers wrote there (`forward_on_device`,
+  `backward_step_input_grad_on_device`, `step_on_device`, ...), and a
+  backbone runs prompts and steps from its own buffers
+  (`prompt_input_ptr`, `prefill_on_device`, `step_input_ptr`,
+  `step_on_device`) and hands out every position of a prompt
+  (`prompt_rows_ptr`), with the bits of the host path.
+- Packed sequences (varlen) in training for Mamba-2 and Mamba-3, as the
+  reference trains them with `seq_idx`: several sequences in the rows of
+  one window train as they do alone, on the CPU and on both GPU scans,
+  and an overflow in one sequence stays in it. Mamba-1 has no varlen in
+  the reference and refuses a packing.
 - State dimensions up to 256.
 - MSRV 1.98.1.
 
@@ -224,6 +237,25 @@ trainer.backward_step(&d_temporal, BackwardOpts::default().with_clip_max_norm(1.
 
 let master = trainer.snapshot_master()?; // f32 weights for a checkpoint or the CPU model
 ```
+
+Several sequences of different lengths pack into the rows of a window:
+
+```rust
+use mamba_rs::Varlen;
+
+// Row 0 holds sequences starting at 0, 700 and 1500; row 1 continues the
+// sequence it carries from the last window up to its start at 900.
+let packing = Varlen::from_starts(&[vec![0, 700, 1500], vec![900]], seq_len)?;
+trainer.set_varlen(Some(&packing))?;
+trainer.step(&input, &d_temporal)?;
+```
+
+A sequence that starts in the window starts from the empty state, and
+nothing of one, no state, conv history, previous-step term, angle or
+gradient, reaches the next; the positions before a row's first start
+continue the sequence the row carries in. The state after the window is
+each row's last sequence's. `Varlen::from_seq_idx` takes the reference's
+ids and `from_cu_seqlens` one row's cumulative lengths.
 
 `MambaGpuTrainer`, `Mamba3GpuTrainer` and `Mamba3MimoGpuTrainer` are built
 and driven the same way, and the `GpuTrainer` trait names what they share.

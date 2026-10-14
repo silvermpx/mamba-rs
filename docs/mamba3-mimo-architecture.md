@@ -159,6 +159,19 @@ gates them; in training its backward runs ahead of the scan's.
 The GEMMs, norms, element-wise kernels, AdamW, the loss scaler and the
 gradient clip come from the modules the families share.
 
+## Packed sequences
+
+A packing (`Varlen`, see `src/varlen.rs`) trains several sequences in
+one row, as the reference does with `seq_idx`. A sequence's first token
+starts from the empty state, previous keys, previous input and angles,
+with zero alpha and beta, on every path: the head step on the CPU, the
+sequential scan and its replay on the GPU, and the chunked scan, where
+the token before a start keeps gamma alone as its scale, the chunk's
+cumulative decay and the angle chain restart, the chunk state takes only
+the chunk's last sequence, and a token reads only the earlier tokens of
+its own sequence. The chunked backward runs each row's products over its
+own sequence only and cuts every carry at a start.
+
 ## Checkpoints
 
 `hf::load_mamba3::load_hf_mamba3_mimo` reads the official MIMO

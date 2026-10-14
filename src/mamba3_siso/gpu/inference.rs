@@ -27,6 +27,7 @@ use crate::gpu::graph_capture::{
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::gpu::launch::y_runs;
 use crate::gpu::options::GpuOptions;
+use crate::gpu::train::RowSource;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::Mamba3Weights;
 use crate::matrix::{Path, Request};
@@ -1185,8 +1186,21 @@ impl Mamba3GpuEngine {
         state: &mut Mamba3GpuState,
         scratch: &mut Mamba3GpuScratch,
     ) -> Result<(), String> {
+        self.step_from(RowSource::Host(input), state, scratch)
+    }
+
+    /// [`Self::step_gpu_only`] on rows from the host or already in the
+    /// scratch's input buffer.
+    pub(crate) fn step_from(
+        &self,
+        input: RowSource<'_>,
+        state: &mut Mamba3GpuState,
+        scratch: &mut Mamba3GpuScratch,
+    ) -> Result<(), String> {
         self.eager_gemm_manifest.set(None);
-        scratch.gpu_input.upload(&self.ctx.stream, input)?;
+        if let Some(input) = input.host() {
+            scratch.gpu_input.upload(&self.ctx.stream, input)?;
+        }
         if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.ctx.gemm_route()) {
                 return Err("M3 inference graph replay: GEMM route changed since capture".into());
@@ -1243,6 +1257,21 @@ impl Mamba3GpuEngineMixed {
     /// Downcast the typed prefill's final f32 rows into the decode rows of
     /// the weight dtype, so the logits path continues exactly as after a
     /// step.
+    /// The prompt's last position, left f32 in `prefill_hidden`, into the
+    /// decode rows: rounded to the storage precision behind the final norm,
+    /// or the f32 residual stream itself on a segment without it.
+    pub(super) fn hand_out_prefill_hidden(
+        &self,
+        sc: &mut Mamba3GpuScratchMixed,
+    ) -> Result<(), String> {
+        if self.engine_ref().cfg.final_norm {
+            self.cast_prefill_hidden(sc)
+        } else {
+            sc.residual
+                .copy_from_raw(&sc.prefill_hidden, self.ctx_stream())
+        }
+    }
+
     fn cast_prefill_hidden(&self, sc: &mut Mamba3GpuScratchMixed) -> Result<(), String> {
         let eng = self.engine_ref();
         let ctx = &eng.ctx;
@@ -2025,8 +2054,21 @@ impl Mamba3GpuEngineMixed {
         state: &mut Mamba3GpuState,
         scratch: &mut Mamba3GpuScratchMixed,
     ) -> Result<(), String> {
+        self.step_mixed_native_from(RowSource::Host(input), state, scratch)
+    }
+
+    /// [`Self::step_gpu_only_mixed_native`] on rows from the host or
+    /// already in the scratch's input buffer.
+    pub(crate) fn step_mixed_native_from(
+        &self,
+        input: RowSource<'_>,
+        state: &mut Mamba3GpuState,
+        scratch: &mut Mamba3GpuScratchMixed,
+    ) -> Result<(), String> {
         self.eager_gemm_manifest.set(None);
-        scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
+        if let Some(input) = input.host() {
+            scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
+        }
         if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
                 return Err(
@@ -2348,12 +2390,34 @@ impl Mamba3GpuBackbone {
     /// [`Self::step`] without the download: the rows stay on the device
     /// for a consumer on the GPU.
     pub fn step_gpu_only(&mut self, input: &[f32]) -> Result<(), String> {
+        self.step_from(RowSource::Host(input))
+    }
+
+    /// The decode step's input rows on the device, `[batch, input_dim]`
+    /// f32, in the backbone's own buffer: a layer of the caller's on the
+    /// GPU writes them there on the backbone's stream before
+    /// [`Self::step_on_device`].
+    pub fn step_input_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        match &self.scratch {
+            M3BackboneScratch::F32(s) => s.gpu_input.cached_ptr(),
+            M3BackboneScratch::Mixed(s) => s.gpu_input.cached_ptr(),
+        }
+    }
+
+    /// [`Self::step_gpu_only`] on the rows at [`Self::step_input_ptr`]; a
+    /// captured decode graph replays with no upload. The bits are the host
+    /// step's.
+    pub fn step_on_device(&mut self) -> Result<(), String> {
+        self.step_from(RowSource::Device)
+    }
+
+    fn step_from(&mut self, input: RowSource<'_>) -> Result<(), String> {
         match (&self.engine, &mut self.scratch) {
             (M3BackboneEngine::F32(e), M3BackboneScratch::F32(sc)) => {
-                e.step_gpu_only(input, &mut self.state, sc)
+                e.step_from(input, &mut self.state, sc)
             }
             (M3BackboneEngine::Mixed(e), M3BackboneScratch::Mixed(sc)) => {
-                e.step_gpu_only_mixed_native(input, &mut self.state, sc)
+                e.step_mixed_native_from(input, &mut self.state, sc)
             }
             _ => Err("M3 engine/scratch dtype mismatch".to_string()),
         }
@@ -2488,22 +2552,94 @@ impl Mamba3GpuBackbone {
         let kept = self.prompt.take().filter(|p| p.seq_len == seq_len);
         let mut prompt = match kept {
             Some(prompt) => prompt,
-            None => M3BackbonePrompt {
-                graph: None,
-                seq_len,
-                input: GpuBuffer::zeros(self.stream(), want)?,
-                prefill: self.alloc_prefill(seq_len)?,
-            },
+            None => self.alloc_prompt(seq_len)?,
         };
-        let result = prompt.input.upload(self.stream(), input).and_then(|()| {
-            if prompt.graph.is_some() {
-                self.replay_prompt(&prompt)
-            } else {
-                self.prefill_sequence(&mut prompt.prefill, &prompt.input, seq_len, true)
-            }
-        });
+        let result = prompt
+            .input
+            .upload(self.stream(), input)
+            .and_then(|()| self.run_prompt(&mut prompt));
         self.prompt = Some(prompt);
         result
+    }
+
+    /// The input rows of a prompt of `seq_len` tokens per sequence on the
+    /// device, `[batch, seq_len, input_dim]` f32, in the backbone's own
+    /// buffers of that length (a prompt of another length replaces them):
+    /// a layer of the caller's on the GPU writes them there on the
+    /// backbone's stream before [`Self::prefill_on_device`].
+    pub fn prompt_input_ptr(
+        &mut self,
+        seq_len: usize,
+    ) -> Result<cudarc::driver::sys::CUdeviceptr, String> {
+        if self.batch() * seq_len == 0 {
+            return Err("M3 prompt input: an empty prompt has no rows".into());
+        }
+        if self.prompt.as_ref().is_none_or(|p| p.seq_len != seq_len) {
+            self.prompt = None;
+            self.prompt = Some(self.alloc_prompt(seq_len)?);
+        }
+        self.prompt
+            .as_ref()
+            .map(|p| p.input.cached_ptr())
+            .ok_or_else(|| "M3 prompt buffers missing".into())
+    }
+
+    /// [`Self::prefill`] on the rows at [`Self::prompt_input_ptr`] of the
+    /// same `seq_len`; a captured prompt graph replays with no upload. The
+    /// bits are the host prompt's.
+    pub fn prefill_on_device(&mut self, seq_len: usize) -> Result<(), String> {
+        if self.batch() * seq_len == 0 {
+            return Ok(());
+        }
+        if self.prompt.as_ref().is_none_or(|p| p.seq_len != seq_len) {
+            return Err(format!(
+                "M3 prefill on the device: no input rows of {seq_len} tokens, \
+                 take prompt_input_ptr first"
+            ));
+        }
+        let Some(mut prompt) = self.prompt.take() else {
+            return Err("M3 prompt buffers missing".into());
+        };
+        let result = self.run_prompt(&mut prompt);
+        self.prompt = Some(prompt);
+        result
+    }
+
+    /// Every position's rows of the last prompt on the device, `[batch,
+    /// seq_len, d_model]` in [`Self::prompt_rows_dtype`]: the final-norm
+    /// rows, or the residual stream of a backbone built with `final_norm =
+    /// false`, for a layer of the caller's that takes the whole prompt.
+    /// None until a prompt length has buffers.
+    pub fn prompt_rows_ptr(&self) -> Option<cudarc::driver::sys::CUdeviceptr> {
+        self.prompt
+            .as_ref()
+            .map(|p| p.prefill.tgt.temporal_work.cached_ptr())
+    }
+
+    /// The precision of [`Self::prompt_rows_ptr`]'s rows: always f32, in
+    /// every storage precision.
+    pub fn prompt_rows_dtype(&self) -> WeightDtype {
+        WeightDtype::F32
+    }
+
+    /// The buffers of a prompt of `seq_len` tokens per sequence.
+    fn alloc_prompt(&self, seq_len: usize) -> Result<M3BackbonePrompt, String> {
+        Ok(M3BackbonePrompt {
+            graph: None,
+            seq_len,
+            input: GpuBuffer::zeros(self.stream(), self.batch() * seq_len * self.input_dim())?,
+            prefill: self.alloc_prefill(seq_len)?,
+        })
+    }
+
+    /// The uploaded prompt through its graph when the buffers hold one,
+    /// else eagerly.
+    fn run_prompt(&mut self, prompt: &mut M3BackbonePrompt) -> Result<(), String> {
+        if prompt.graph.is_some() {
+            self.replay_prompt(prompt)
+        } else {
+            self.prefill_sequence(&mut prompt.prefill, &prompt.input, prompt.seq_len, true)
+        }
     }
 
     /// The stream every launch goes to.
@@ -2567,14 +2703,7 @@ impl Mamba3GpuBackbone {
                     carry_state,
                     &mut sc.prefill_hidden,
                 )?;
-                if e.engine_ref().cfg.final_norm {
-                    e.cast_prefill_hidden(sc)
-                } else {
-                    // A segment without the final norm hands out its f32
-                    // residual stream, which the decode rows hold.
-                    sc.residual
-                        .copy_from_raw(&sc.prefill_hidden, e.ctx_stream())
-                }
+                e.hand_out_prefill_hidden(sc)
             }
             _ => Err("M3 prefill: engine/scratch precision arms disagree".to_string()),
         }

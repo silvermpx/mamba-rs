@@ -17,6 +17,7 @@ use crate::mamba2::gpu::Mamba2GpuTrainer;
 use crate::mamba3_mimo::gpu::Mamba3MimoGpuTrainer;
 use crate::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
 use crate::varlen::Varlen;
+use cudarc::driver::sys::CUdeviceptr;
 
 /// What the GPU trainer of every family does.
 ///
@@ -94,6 +95,55 @@ pub trait GpuTrainer {
     /// applying `backward_step` with those options closes a window. A
     /// captured graph replays it.
     fn apply_window(&mut self) -> Result<StepMetrics, String>;
+
+    /// The window's input rows on the device, `[batch, seq_len,
+    /// input_dim]` f32, in the trainer's own buffer: a caller on the GPU
+    /// (a layer of its own below a segment) writes them there on the
+    /// trainer's stream (`ctx().stream`) before
+    /// [`GpuTrainer::forward_on_device`], [`GpuTrainer::step_on_device`] or
+    /// [`GpuTrainer::accumulate_on_device`], and no row crosses the host.
+    fn input_ptr(&self) -> CUdeviceptr;
+
+    /// [`GpuTrainer::forward`] on the rows at [`GpuTrainer::input_ptr`];
+    /// the final rows stay at [`GpuTrainer::temporal_ptr`]. The bits are
+    /// the host forward's.
+    fn forward_on_device(&mut self) -> Result<(), String>;
+
+    /// The final rows of the last forward on the device, `[batch,
+    /// seq_len, d_model]` f32 in every precision (the residual stream of a
+    /// segment built with `final_norm = false`).
+    fn temporal_ptr(&self) -> CUdeviceptr;
+
+    /// d loss / d the final rows on the device, `[batch, seq_len,
+    /// d_model]` f32: the caller writes it there on the trainer's stream
+    /// before a backward, step or micro-batch on the device, which reads
+    /// it (and in f16 scales it in place).
+    fn d_temporal_ptr(&self) -> CUdeviceptr;
+
+    /// [`GpuTrainer::backward_step`] of the rows at
+    /// [`GpuTrainer::d_temporal_ptr`].
+    fn backward_step_on_device(&mut self, opts: BackwardOpts) -> Result<BackwardMetrics, String>;
+
+    /// [`GpuTrainer::backward_step_on_device`] that also leaves d loss / d
+    /// the window's input at [`GpuTrainer::d_input_ptr`], unscaled in f16.
+    fn backward_step_input_grad_on_device(
+        &mut self,
+        opts: BackwardOpts,
+    ) -> Result<BackwardMetrics, String>;
+
+    /// d loss / d the window's input on the device, `[batch, seq_len,
+    /// input_dim]` f32, as
+    /// [`GpuTrainer::backward_step_input_grad_on_device`] leaves it.
+    fn d_input_ptr(&self) -> CUdeviceptr;
+
+    /// [`GpuTrainer::step`] on the rows at [`GpuTrainer::input_ptr`] and
+    /// [`GpuTrainer::d_temporal_ptr`]; a captured graph replays without an
+    /// upload.
+    fn step_on_device(&mut self) -> Result<StepMetrics, String>;
+
+    /// [`GpuTrainer::accumulate`] on the rows at [`GpuTrainer::input_ptr`]
+    /// and [`GpuTrainer::d_temporal_ptr`].
+    fn accumulate_on_device(&mut self) -> Result<BackwardMetrics, String>;
 
     /// Zero the recurrent state, the start of new sequences.
     fn reset_state(&mut self) -> Result<(), String>;
@@ -243,6 +293,39 @@ macro_rules! gpu_trainer_by_inherent_methods {
             }
             fn apply_window(&mut self) -> Result<StepMetrics, String> {
                 <$ty>::apply_window(self)
+            }
+            fn input_ptr(&self) -> CUdeviceptr {
+                <$ty>::input_ptr(self)
+            }
+            fn forward_on_device(&mut self) -> Result<(), String> {
+                <$ty>::forward_on_device(self)
+            }
+            fn temporal_ptr(&self) -> CUdeviceptr {
+                <$ty>::temporal_ptr(self)
+            }
+            fn d_temporal_ptr(&self) -> CUdeviceptr {
+                <$ty>::d_temporal_ptr(self)
+            }
+            fn backward_step_on_device(
+                &mut self,
+                opts: BackwardOpts,
+            ) -> Result<BackwardMetrics, String> {
+                <$ty>::backward_step_on_device(self, opts)
+            }
+            fn backward_step_input_grad_on_device(
+                &mut self,
+                opts: BackwardOpts,
+            ) -> Result<BackwardMetrics, String> {
+                <$ty>::backward_step_input_grad_on_device(self, opts)
+            }
+            fn d_input_ptr(&self) -> CUdeviceptr {
+                <$ty>::d_input_ptr(self)
+            }
+            fn step_on_device(&mut self) -> Result<StepMetrics, String> {
+                <$ty>::step_on_device(self)
+            }
+            fn accumulate_on_device(&mut self) -> Result<BackwardMetrics, String> {
+                <$ty>::accumulate_on_device(self)
             }
             fn reset_state(&mut self) -> Result<(), String> {
                 <$ty>::reset_state(self)
@@ -435,6 +518,36 @@ impl GpuTrainer for AnyGpuTrainer {
     }
     fn apply_window(&mut self) -> Result<StepMetrics, String> {
         self.inner_mut().apply_window()
+    }
+    fn input_ptr(&self) -> CUdeviceptr {
+        self.inner().input_ptr()
+    }
+    fn forward_on_device(&mut self) -> Result<(), String> {
+        self.inner_mut().forward_on_device()
+    }
+    fn temporal_ptr(&self) -> CUdeviceptr {
+        self.inner().temporal_ptr()
+    }
+    fn d_temporal_ptr(&self) -> CUdeviceptr {
+        self.inner().d_temporal_ptr()
+    }
+    fn backward_step_on_device(&mut self, opts: BackwardOpts) -> Result<BackwardMetrics, String> {
+        self.inner_mut().backward_step_on_device(opts)
+    }
+    fn backward_step_input_grad_on_device(
+        &mut self,
+        opts: BackwardOpts,
+    ) -> Result<BackwardMetrics, String> {
+        self.inner_mut().backward_step_input_grad_on_device(opts)
+    }
+    fn d_input_ptr(&self) -> CUdeviceptr {
+        self.inner().d_input_ptr()
+    }
+    fn step_on_device(&mut self) -> Result<StepMetrics, String> {
+        self.inner_mut().step_on_device()
+    }
+    fn accumulate_on_device(&mut self) -> Result<BackwardMetrics, String> {
+        self.inner_mut().accumulate_on_device()
     }
     fn reset_state(&mut self) -> Result<(), String> {
         self.inner_mut().reset_state()

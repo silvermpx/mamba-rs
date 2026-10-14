@@ -822,6 +822,11 @@ path = "tests/segment_stacking_gpu.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "device_io_gpu"
+path = "tests/device_io_gpu.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "matrix_census_host"
 path = "tests/matrix_census_host.rs"
 
