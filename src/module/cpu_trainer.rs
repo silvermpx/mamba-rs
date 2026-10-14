@@ -24,6 +24,7 @@ use crate::optim::session::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSes
 pub(crate) use crate::optim::tensors::TensorList;
 use crate::optim::train_state::TrainerState;
 use crate::precision::WeightDtype;
+use crate::varlen::Varlen;
 
 /// The elements of a tensor in the control channels: none, all of them,
 /// or the columns `cols` of every `row_len`-wide row.
@@ -82,6 +83,18 @@ pub(crate) trait CpuFamily: Send + Sync {
     fn new_seq(&self, w: &Self::Weights, seq_len: usize) -> Result<Self::Seq, String>;
     /// Zero the sequence's carried recurrence.
     fn reset_seq(&self, seq: &mut Self::Seq);
+    /// The sequence ids of this row's windows from now on (see
+    /// [`crate::varlen`]); `None` runs every window as one sequence. A
+    /// family the reference gives no varlen refuses ids.
+    fn set_varlen(&self, _seq: &mut Self::Seq, ids: Option<&[i32]>) -> Result<(), String> {
+        match ids {
+            None => Ok(()),
+            Some(_) => Err(format!(
+                "{:?} has no varlen: the reference packs only Mamba-2 and Mamba-3",
+                Self::FAMILY
+            )),
+        }
+    }
     /// One sequence's forward over its window: `input` `[seq_len,
     /// input_dim]`, `out` `[seq_len, d_model]`, the recurrence carried.
     fn forward(
@@ -610,6 +623,19 @@ impl<F: CpuFamily> CpuCore<F> {
         self.seqs.iter_mut().for_each(|seq| fam.reset_seq(seq));
     }
 
+    /// The sequences packed into the rows of the next windows (see
+    /// [`crate::varlen`]); `None` runs each row as one sequence.
+    pub(crate) fn set_varlen(&mut self, packing: Option<&Varlen>) -> Result<(), String> {
+        if let Some(v) = packing {
+            v.check_shape(self.batch, self.seq_len)?;
+        }
+        let fam = &self.fam;
+        for (b, seq) in self.seqs.iter_mut().enumerate() {
+            fam.set_varlen(seq, packing.map(|v| v.row(b)))?;
+        }
+        Ok(())
+    }
+
     /// The optimizer state for a bit-continuous resume.
     pub(crate) fn optimizer_state(&self) -> AdamWStateBlob {
         self.adam.export_state()
@@ -814,6 +840,13 @@ pub trait CpuTrainer {
     /// Zero every sequence's carried recurrence.
     fn reset_state(&mut self) -> Result<(), String>;
 
+    /// Pack several sequences of different lengths into the rows of the
+    /// next windows (see [`crate::varlen`]): no state or gradient crosses
+    /// from one into the next. `None` runs each row as one sequence. The
+    /// packing holds until replaced; Mamba-1 has none in the reference and
+    /// refuses one.
+    fn set_varlen(&mut self, packing: Option<&Varlen>) -> Result<(), String>;
+
     fn set_lr(&mut self, lr: f32) -> Result<(), String>;
     fn lr(&self) -> f32;
     fn batch(&self) -> usize;
@@ -951,6 +984,14 @@ macro_rules! cpu_trainer_type {
                 Ok(())
             }
 
+            /// See [`CpuTrainer::set_varlen`]($crate::module::CpuTrainer::set_varlen).
+            pub fn set_varlen(
+                &mut self,
+                packing: Option<&$crate::varlen::Varlen>,
+            ) -> Result<(), String> {
+                self.core.set_varlen(packing)
+            }
+
             /// The AdamW learning rate of the next steps.
             pub fn set_lr(&mut self, lr: f32) -> Result<(), String> {
                 self.core.set_lr(lr);
@@ -1078,6 +1119,12 @@ macro_rules! cpu_trainer_type {
             }
             fn reset_state(&mut self) -> Result<(), String> {
                 <$name>::reset_state(self)
+            }
+            fn set_varlen(
+                &mut self,
+                packing: Option<&$crate::varlen::Varlen>,
+            ) -> Result<(), String> {
+                <$name>::set_varlen(self, packing)
             }
             fn set_lr(&mut self, lr: f32) -> Result<(), String> {
                 <$name>::set_lr(self, lr)
@@ -1241,6 +1288,9 @@ impl CpuTrainer for AnyCpuTrainer {
     }
     fn reset_state(&mut self) -> Result<(), String> {
         self.inner_mut().reset_state()
+    }
+    fn set_varlen(&mut self, packing: Option<&Varlen>) -> Result<(), String> {
+        self.inner_mut().set_varlen(packing)
     }
     fn set_lr(&mut self, lr: f32) -> Result<(), String> {
         self.inner_mut().set_lr(lr)

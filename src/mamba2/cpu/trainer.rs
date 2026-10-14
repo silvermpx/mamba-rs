@@ -81,6 +81,11 @@ impl CpuFamily for Mamba2Cpu {
         seq.states.iter_mut().for_each(Mamba2LayerState::reset);
     }
 
+    fn set_varlen(&self, seq: &mut Mamba2CpuSeq, ids: Option<&[i32]>) -> Result<(), String> {
+        seq.tape.set_varlen(ids);
+        Ok(())
+    }
+
     fn forward(
         &self,
         w: &Mamba2Weights,

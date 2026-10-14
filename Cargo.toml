@@ -808,6 +808,10 @@ name = "segment_stacking"
 path = "tests/segment_stacking.rs"
 
 [[test]]
+name = "varlen_cpu"
+path = "tests/varlen_cpu.rs"
+
+[[test]]
 name = "segment_stacking_gpu"
 path = "tests/segment_stacking_gpu.rs"
 required-features = ["cuda"]

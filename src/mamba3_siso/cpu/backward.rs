@@ -113,6 +113,9 @@ pub fn backward_mamba3_layer_batched(
     let o = &acts.offsets;
     let bsize = ng * ds;
     let dtype = scratch.dtype;
+    // The packing stays out of the scratch while the backward borrows it.
+    let varlen = scratch.varlen.take();
+    let starts = |t: usize| varlen.as_ref().is_some_and(|v| v.starts(t));
 
     // ═══ B1: out_proj SGEMM backward ═══
     for t in 0..seq_len {
@@ -218,6 +221,10 @@ pub fn backward_mamba3_layer_batched(
             for t in 0..seq_len {
                 let base_s = acts.base(t);
                 let dt_h = acts.data[base_s + o.dt_val + h];
+                // A sequence's angles start from zero.
+                if starts(t) {
+                    running[..n_angles].fill(0.0);
+                }
                 for (a, r) in running[..n_angles].iter_mut().enumerate() {
                     // Forward saved tanh(raw)*pi in the angle_cumsum field —
                     // reuse it instead of recomputing tanh nh times per t.
@@ -262,7 +269,11 @@ pub fn backward_mamba3_layer_batched(
             let base_t = acts.base(t);
             let (done, next) = scratch.seg_h.split_at_mut((k + 1) * hs);
             let state = &mut next[..hs];
-            state.copy_from_slice(&done[k * hs..]);
+            if starts(t) {
+                state.fill(0.0);
+            } else {
+                state.copy_from_slice(&done[k * hs..]);
+            }
             for h in 0..nh {
                 let at = (k * nh + h) * kq_len;
                 let kq = &mut scratch.seg_kq[at..at + kq_len];
@@ -296,6 +307,7 @@ pub fn backward_mamba3_layer_batched(
             let k = t - t0;
 
             scratch.d_k_carry_next[..nh * ds].fill(0.0);
+            let fresh = starts(t);
 
             for h in 0..nh {
                 let g = h / (nh / ng);
@@ -341,11 +353,15 @@ pub fn backward_mamba3_layer_batched(
                         let h_prev_val = scratch.seg_h[k * hs + idx];
                         let k_prev_n = acts.data[base_t + o.k_prev + h * ds + n];
 
-                        scratch.d_alpha_flat[t * nh + h] += dh * h_prev_val;
+                        // A sequence's first step starts from the empty
+                        // state, whatever the replay holds before it.
+                        if !fresh {
+                            scratch.d_alpha_flat[t * nh + h] += dh * h_prev_val;
+                        }
                         scratch.d_beta_flat[t * nh + h] += dh * v_prev * k_prev_n;
                         scratch.d_gamma_flat[t * nh + h] += dh * x_val * k_local[n];
 
-                        if t > 0 {
+                        if t > 0 && !fresh {
                             scratch.d_x_flat[(t - 1) * di + h * hd + p] += dh * beta_h * k_prev_n;
                         }
                         scratch.d_k_carry_next[h * ds + n] += dh * beta_h * v_prev;
@@ -390,6 +406,14 @@ pub fn backward_mamba3_layer_batched(
                 }
             }
 
+            // Nothing of a sequence's first token reaches the token before
+            // it, the last of another sequence: its carries are cut, not
+            // scaled by the zero alpha and beta, so an overflow in one
+            // sequence leaves the other's gradient untouched.
+            if fresh {
+                scratch.d_h[..hs].fill(0.0);
+                scratch.d_k_carry_next[..nh * ds].fill(0.0);
+            }
             let (carry, carry_next) = (&mut scratch.d_k_carry, &scratch.d_k_carry_next);
             carry[..nh * ds].copy_from_slice(&carry_next[..nh * ds]);
         }
@@ -471,6 +495,11 @@ pub fn backward_mamba3_layer_batched(
     if n_angles > 0 {
         let row = nh * n_angles;
         for t in (0..seq_len.saturating_sub(1)).rev() {
+            // A sequence's angles restart: the next one's gradient does not
+            // reach back.
+            if starts(t + 1) {
+                continue;
+            }
             let (head, tail) = scratch.d_angle_cumsum_flat.split_at_mut((t + 1) * row);
             let cur_row = &mut head[t * row..(t + 1) * row];
             let nxt_row = &tail[..row];
@@ -644,6 +673,7 @@ pub fn backward_mamba3_layer_batched(
     {
         *dt += dr;
     }
+    scratch.varlen = varlen;
 }
 
 #[cfg(test)]

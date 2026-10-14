@@ -106,6 +106,11 @@ impl CpuFamily for Mamba3MimoCpu {
         seq.states.iter_mut().for_each(Mamba3MimoLayerState::reset);
     }
 
+    fn set_varlen(&self, seq: &mut Mamba3MimoCpuSeq, ids: Option<&[i32]>) -> Result<(), String> {
+        seq.tape.set_varlen(ids);
+        Ok(())
+    }
+
     fn forward(
         &self,
         w: &Mamba3MimoWeights,

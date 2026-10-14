@@ -106,6 +106,7 @@ pub mod module;
 pub mod ops;
 pub mod optim;
 pub mod precision;
+pub mod varlen;
 
 /// The 0.7 path of Mamba-1 and of the GPU engine, which 0.8 split into
 /// [`mamba1`] and `gpu`. It re-exports both, so code written for 0.7 still
@@ -191,6 +192,7 @@ pub use optim::{
     TrainerState,
 };
 pub use precision::{CpuOptions, GemmMode, WeightDtype};
+pub use varlen::Varlen;
 // The host trainers of every family and the trait over them.
 pub use mamba1::cpu::trainer::MambaCpuTrainer;
 pub use mamba2::cpu::trainer::Mamba2CpuTrainer;

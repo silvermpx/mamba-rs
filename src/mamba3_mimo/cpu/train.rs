@@ -22,8 +22,8 @@ use super::super::config::Mamba3MimoConfig;
 use super::super::state::Mamba3MimoLayerState;
 use super::super::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use super::core::{
-    HeadScratch, HeadState, MimoRowsIo, TokenIn, advance_angles, block_norm_row, discretize,
-    mimo_head_step, mimo_rows, prepare_token, rope_half_split,
+    HeadScratch, HeadState, MimoRowsIo, TokenIn, advance_angles, block_norm_row, mimo_head_step,
+    mimo_rows, prepare_token, rope_half_split, token_disc,
 };
 use crate::mamba3_siso::cpu::forward::{clamp_a, heavy_tail, heavy_tail_deriv, simd_sum_sq};
 use crate::mlp::cpu::RowsGemm;
@@ -37,6 +37,7 @@ use crate::ops::lane::LaneGemm;
 use crate::ops::norms::{layer_norm_row_backward_in_place, layer_norm_stats};
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
+use crate::varlen::RowStarts;
 
 /// One layer's record.
 struct LayerTape {
@@ -62,6 +63,9 @@ pub struct Mamba3MimoTape {
     input: Vec<f32>,
     final_in: Vec<f32>,
     layers: Vec<LayerTape>,
+    /// The sequences packed into the window's row (see [`crate::varlen`]),
+    /// `None` for one sequence.
+    varlen: Option<RowStarts>,
 }
 
 impl Mamba3MimoTape {
@@ -88,7 +92,14 @@ impl Mamba3MimoTape {
                     },
                 })
                 .collect(),
+            varlen: None,
         }
+    }
+
+    /// The sequences packed into the row of the next windows, `None` for
+    /// one sequence.
+    pub(crate) fn set_varlen(&mut self, ids: Option<&[i32]>) {
+        self.varlen = ids.map(RowStarts::from_ids);
     }
 
     /// The tape of a window computed in `dtype`: the weights it is given
@@ -168,12 +179,13 @@ fn prepare_rows(
     }
 }
 
-/// Token `t`'s view of the window's prepared rows.
+/// Token `t`'s view of the window's prepared rows; `varlen` says whether
+/// it starts a sequence.
 fn token_at<'a>(
     cfg: &Mamba3MimoConfig,
     proj: &'a [f32],
     (bn, cn, tanh_pi): (&'a [f32], &'a [f32], &'a [f32]),
-    t: usize,
+    (t, varlen): (usize, Option<&RowStarts>),
 ) -> TokenIn<'a> {
     let (di, nh, bc, na, ip) = (
         cfg.d_inner(),
@@ -193,6 +205,7 @@ fn token_at<'a>(
         dd_a: &row[heads + nh..heads + 2 * nh],
         trap: &row[heads + 2 * nh..heads + 3 * nh],
         tanh_pi: &tanh_pi[t * na.max(1)..t * na.max(1) + na],
+        start: varlen.is_some_and(|v| v.starts(t)),
     }
 }
 
@@ -267,7 +280,7 @@ pub fn forward_mamba3_mimo_train(
         s.heads = (0..cfg.nheads()).map(|_| HeadScratch::new(cfg)).collect();
         s.head_shape = head_shape;
     }
-    let stride = tape.stride;
+    let (stride, varlen) = (tape.stride, tape.varlen.as_ref());
     for (l, ((lw, st), lt)) in w
         .layers
         .iter()
@@ -275,7 +288,7 @@ pub fn forward_mamba3_mimo_train(
         .zip(tape.layers.iter_mut())
         .enumerate()
     {
-        layer_forward(rows, (lw, st, lt), (cfg, t_len, stride), s);
+        layer_forward(rows, (lw, st, lt), (cfg, t_len, stride, varlen), s);
         if let Some(mlp) = w.mlp.get(l) {
             lt.mlp_in.copy_from_slice(rows);
             let eps = cfg.rms_norm_eps;
@@ -307,7 +320,7 @@ fn layer_forward(
         &mut Mamba3MimoLayerState,
         &mut LayerTape,
     ),
-    (cfg, t_len, stride): (&Mamba3MimoConfig, usize, usize),
+    (cfg, t_len, stride, varlen): (&Mamba3MimoConfig, usize, usize, Option<&RowStarts>),
     s: &mut Mamba3MimoTrainScratch,
 ) {
     let (dm, di, ip, p_len) = (
@@ -336,7 +349,7 @@ fn layer_forward(
         if t % stride == 0 {
             lt.ckpt.push(state.clone());
         }
-        let tok = token_at(cfg, &lt.proj, (&s.bn, &s.cn, &s.tanh_pi), t);
+        let tok = token_at(cfg, &lt.proj, (&s.bn, &s.cn, &s.tanh_pi), (t, varlen));
         for (h, hs) in s.heads.iter_mut().enumerate() {
             mimo_head_step(
                 (cfg, lw, h),
@@ -456,7 +469,7 @@ pub fn backward_mamba3_mimo_train(
         layer_backward(
             d_rows,
             (&w.layers[l], &mut grads.layers[l], lt),
-            (cfg, t_len, tape.stride),
+            (cfg, t_len, tape.stride, tape.varlen.as_ref()),
             s,
         );
     }
@@ -541,6 +554,8 @@ struct HeadBackward {
     dk_carry: Vec<f32>,
     dx_carry: Vec<f32>,
     dtheta_carry: Vec<f32>,
+    /// The empty state and keys a sequence's first token steps from.
+    zeros: Vec<f32>,
 }
 
 /// `v` holding `n` copies of `x`, its allocation reused.
@@ -555,13 +570,14 @@ fn copy_into(v: &mut Vec<f32>, src: &[f32]) {
     v.extend_from_slice(src);
 }
 
-/// Replay one head over tokens `t0..t1` from `start`, filling the first
-/// `t1 - t0` records of `hb.rec`; the arithmetic is [`mimo_head_step`]'s.
+/// Replay one head over tokens `t0..t1` of a window packed as `varlen`
+/// from `start`, filling the first `t1 - t0` records of `hb.rec`; the
+/// arithmetic is [`mimo_head_step`]'s.
 fn replay_head(
     (cfg, lw, h): (&Mamba3MimoConfig, &Mamba3MimoLayerWeights, usize),
     (proj, bn, cn, tanh_pi): (&[f32], &[f32], &[f32], &[f32]),
     start: &Mamba3MimoLayerState,
-    (t0, t1): (usize, usize),
+    (t0, t1, varlen): (usize, usize, Option<&RowStarts>),
     hb: &mut HeadBackward,
 ) {
     let (n, p_len, r, na, g_n) = (
@@ -588,14 +604,17 @@ fn replay_head(
     let proj_rows = h * r * p_len..(h + 1) * r * p_len;
     let mimo_x = &lw.mimo_x[proj_rows];
     for (slot, t) in (t0..t1).enumerate() {
-        let tok = token_at(cfg, proj, (bn, cn, tanh_pi), t);
-        let disc = discretize(
-            tok.dd_a[h],
-            tok.dd_dt[h],
-            lw.dt_bias[h],
-            tok.trap[h],
-            cfg.a_floor,
-        );
+        let tok = token_at(cfg, proj, (bn, cn, tanh_pi), (t, varlen));
+        if tok.start {
+            HeadState {
+                ssm: &mut hb.ssm,
+                k: &mut hb.k,
+                v: &mut hb.v,
+                angle: &mut hb.angle,
+            }
+            .clear();
+        }
+        let disc = token_disc(cfg, lw, h, &tok);
         let rr = &mut hb.rec[slot];
         rr.dt = disc.dt;
         rr.a = clamp_a(-heavy_tail(tok.dd_a[h]), cfg.a_floor);
@@ -732,7 +751,7 @@ fn layer_backward(
         &mut Mamba3MimoLayerWeights,
         &LayerTape,
     ),
-    (cfg, t_len, stride): (&Mamba3MimoConfig, usize, usize),
+    (cfg, t_len, stride, varlen): (&Mamba3MimoConfig, usize, usize, Option<&RowStarts>),
     s: &mut Mamba3MimoTrainScratch,
 ) {
     let (dm, di, ip, bc) = (
@@ -772,6 +791,7 @@ fn layer_backward(
     let heads_col = 2 * di + 2 * bc;
 
     let hb = &mut s.head_bwd;
+    refill(&mut hb.zeros, (p_len * n).max(r * n), 0.0);
     for h in 0..nh {
         let g = h / (nh / g_n);
         let proj_rows = h * r * p_len..(h + 1) * r * p_len;
@@ -786,24 +806,29 @@ fn layer_backward(
                 (cfg, lw, h),
                 (&lt.proj, &s.bn, &s.cn, &s.tanh_pi),
                 &lt.ckpt[seg],
-                (t0, t1),
+                (t0, t1, varlen),
                 hb,
             );
             for t in (t0..t1).rev() {
                 let i_t = t - t0;
                 let rec = &hb.rec;
                 let rr = &rec[i_t];
-                let s_prev: &[f32] = if i_t == 0 {
+                let tok = token_at(cfg, &lt.proj, (&s.bn, &s.cn, &s.tanh_pi), (t, varlen));
+                // A sequence's first token steps from the empty state.
+                let s_prev: &[f32] = if tok.start {
+                    &hb.zeros[..p_len * n]
+                } else if i_t == 0 {
                     &hb.s_start
                 } else {
                     &rec[i_t - 1].s_cur
                 };
-                let k_prev: &[f32] = if i_t == 0 {
+                let k_prev: &[f32] = if tok.start {
+                    &hb.zeros[..r * n]
+                } else if i_t == 0 {
                     &lt.ckpt[seg].k_state[h * r * n..(h + 1) * r * n]
                 } else {
                     &rec[i_t - 1].kc
                 };
-                let tok = token_at(cfg, &lt.proj, (&s.bn, &s.cn, &s.tanh_pi), t);
                 let x_h = &tok.x[h * p_len..(h + 1) * p_len];
                 let z_h = &tok.z[h * p_len..(h + 1) * p_len];
                 let d_o = &s.d_o[t * di + h * p_len..t * di + (h + 1) * p_len];
@@ -962,6 +987,18 @@ fn layer_backward(
                 dp[heads_col + h] += d_sp;
                 dp[heads_col + nh + h] += d_dd_a;
                 dp[heads_col + 2 * nh + h] += d_trap;
+                // Nothing of a sequence's first token reaches the token
+                // before it, the last of another sequence.
+                if tok.start {
+                    for carry in [
+                        &mut hb.ds_carry,
+                        &mut hb.dk_carry,
+                        &mut hb.dx_carry,
+                        &mut hb.dtheta_carry,
+                    ] {
+                        carry.fill(0.0);
+                    }
+                }
             }
         }
     }

@@ -226,6 +226,7 @@ fn token_at<'a>(
         dd_a: &row[heads + nh..heads + 2 * nh],
         trap: &row[heads + 2 * nh..heads + 3 * nh],
         tanh_pi: &tanh_pi[t * na..(t + 1) * na],
+        start: false,
     }
 }
 

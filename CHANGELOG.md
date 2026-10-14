@@ -252,6 +252,18 @@
   in the forward and after a step, on the CPU and the GPU, decode steps
   included. Checkpoints keep the flag (written only when `false`), and a
   language model refuses a segment, whose head would read no final norm.
+- Packed sequences (varlen) in training, as the reference trains Mamba-2
+  and Mamba-3 with `seq_idx`. A `Varlen`, from per-position ids
+  (`from_seq_idx`), per-row starts (`from_starts`) or one row's
+  `cu_seqlens`, set on a host trainer of Mamba-2, Mamba-3 SISO or MIMO
+  with `set_varlen` trains several sequences in the rows of one window: a
+  sequence that starts in the window starts from the empty state, no
+  state, conv history, previous-step term, angle or gradient crosses a
+  start, the positions before a row's first start continue the carried
+  sequence, and the state after the window is the row's last sequence's.
+  Each sequence's rows and input gradient equal its own run bit for bit
+  in every precision, and an overflow in one sequence stays in it.
+  Mamba-1, which the reference does not pack, refuses a packing.
 
 ### Changed
 

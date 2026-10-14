@@ -73,6 +73,9 @@ pub struct Mamba3Scratch {
     /// The precision of the forward and the backward (see `CpuOptions`).
     pub(crate) dtype: WeightDtype,
     pub(crate) gemm: LaneGemm,
+    /// The sequences packed into the window's row (see [`crate::varlen`]),
+    /// `None` for one sequence.
+    pub(crate) varlen: Option<crate::varlen::RowStarts>,
 }
 
 impl Mamba3Scratch {
@@ -122,6 +125,7 @@ impl Mamba3Scratch {
             seg_kq: Vec::new(),
             seg_y: Vec::new(),
             dtype: WeightDtype::F32,
+            varlen: None,
             gemm: LaneGemm::default(),
         }
     }

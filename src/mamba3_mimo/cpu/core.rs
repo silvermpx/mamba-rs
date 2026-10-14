@@ -72,6 +72,34 @@ pub(crate) fn discretize(dd_a: f32, dd_dt: f32, dt_bias: f32, trap: f32, a_floor
     }
 }
 
+/// [`discretize`] for head `h` at token `tok`. A token that starts a
+/// sequence keeps nothing of the step before: its `alpha` and `beta` are
+/// zero.
+#[inline]
+pub(crate) fn token_disc(
+    cfg: &Mamba3MimoConfig,
+    lw: &Mamba3MimoLayerWeights,
+    h: usize,
+    tok: &TokenIn<'_>,
+) -> Disc {
+    let disc = discretize(
+        tok.dd_a[h],
+        tok.dd_dt[h],
+        lw.dt_bias[h],
+        tok.trap[h],
+        cfg.a_floor,
+    );
+    if tok.start {
+        Disc {
+            alpha: 0.0,
+            beta: 0.0,
+            ..disc
+        }
+    } else {
+        disc
+    }
+}
+
 /// Advance one head's angles by `tanh(raw) * pi * dt` and return their
 /// sines and cosines. The sum runs in f64 and wraps into [0, 2*pi), as the
 /// SISO path does, so a long sequence keeps full angle precision.
@@ -288,6 +316,10 @@ pub(crate) struct TokenIn<'a> {
     pub trap: &'a [f32],
     /// `[num_rope_angles]`.
     pub tanh_pi: &'a [f32],
+    /// Whether the token starts a sequence packed into the window (see
+    /// [`crate::varlen`]): it begins from the empty state, previous-step
+    /// term and angles, and keeps nothing of the step before.
+    pub start: bool,
 }
 
 /// Split one token's in_proj row and prepare the shared inputs: B and C
@@ -326,6 +358,7 @@ pub(crate) fn prepare_token<'a>(
         dd_a,
         trap,
         tanh_pi,
+        start: false,
     }
 }
 
@@ -354,6 +387,15 @@ pub(crate) struct HeadState<'a> {
     pub k: &'a mut [f32],
     pub v: &'a mut [f32],
     pub angle: &'a mut [f32],
+}
+
+impl HeadState<'_> {
+    /// The empty state a sequence starts from.
+    pub(crate) fn clear(&mut self) {
+        for part in [&mut *self.ssm, &mut *self.k, &mut *self.v, &mut *self.angle] {
+            part.fill(0.0);
+        }
+    }
 }
 
 /// One head's working buffers.
@@ -390,19 +432,16 @@ impl HeadScratch {
 pub(crate) fn mimo_head_step(
     (cfg, lw, h): (&Mamba3MimoConfig, &Mamba3MimoLayerWeights, usize),
     tok: &TokenIn<'_>,
-    st: HeadState<'_>,
+    mut st: HeadState<'_>,
     hs: &mut HeadScratch,
     o: &mut [f32],
 ) {
     let (n, p_len, g_n, r) = (cfg.d_state, cfg.headdim, cfg.ngroups, cfg.mimo_rank);
     let g = h / (cfg.nheads() / g_n);
-    let disc = discretize(
-        tok.dd_a[h],
-        tok.dd_dt[h],
-        lw.dt_bias[h],
-        tok.trap[h],
-        cfg.a_floor,
-    );
+    if tok.start {
+        st.clear();
+    }
+    let disc = token_disc(cfg, lw, h, tok);
     advance_angles(st.angle, tok.tanh_pi, disc.dt, &mut hs.sc);
 
     // Each rank's key and query: the normalised group row plus the head's

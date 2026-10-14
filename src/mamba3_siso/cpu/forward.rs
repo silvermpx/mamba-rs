@@ -362,6 +362,16 @@ pub fn forward_mamba3_layer_batched(
             acts.ssm_ckpt[j * h_state_len..(j + 1) * h_state_len]
                 .copy_from_slice(&ssm_state[..h_state_len]);
         }
+        // A sequence starts from the empty state, previous-step term and
+        // angles; its first step keeps nothing of the one before (alpha and
+        // beta zero, below), so no gradient flows back into it either.
+        let fresh = scratch.varlen.as_ref().is_some_and(|v| v.starts(t));
+        if fresh {
+            ssm_state[..h_state_len].fill(0.0);
+            k_state[..nh * ds].fill(0.0);
+            v_state[..nh * hd].fill(0.0);
+            angle_state[..nh * n_angles].fill(0.0);
+        }
         // Save k_prev, v_prev
         let kp = base_t + o.k_prev;
         acts.data[kp..kp + nh * ds].copy_from_slice(&k_state[..nh * ds]);
@@ -432,7 +442,11 @@ pub fn forward_mamba3_layer_batched(
             }
 
             // Alpha, beta, gamma
-            let alpha = fast_exp_scalar(a_val * dt_val);
+            let alpha = if fresh {
+                0.0
+            } else {
+                fast_exp_scalar(a_val * dt_val)
+            };
             let trap_sig = 1.0 / (1.0 + fast_exp_scalar(-acts.data[base_t + o.trap_raw + h]));
             let beta = alpha * dt_val * (1.0 - trap_sig);
             let gamma = trap_sig * dt_val;

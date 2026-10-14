@@ -154,6 +154,11 @@ impl CpuFamily for Mamba3Cpu {
         }
     }
 
+    fn set_varlen(&self, seq: &mut Mamba3CpuSeq, ids: Option<&[i32]>) -> Result<(), String> {
+        seq.phase.varlen = ids.map(crate::varlen::RowStarts::from_ids);
+        Ok(())
+    }
+
     fn forward(
         &self,
         w: &Mamba3CpuWeights,

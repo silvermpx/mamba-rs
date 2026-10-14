@@ -39,6 +39,7 @@
 "cpu_trainer_api" = "host"
 "segment_stacking" = "host"
 "segment_stacking_gpu" = "gate"
+"varlen_cpu" = "host"
 "matrix_census_host" = "host"
 "matrix_census_gpu" = "gate"
 "cublas_compute_probe" = "qualification"

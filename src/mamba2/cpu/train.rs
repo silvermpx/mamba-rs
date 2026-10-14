@@ -39,6 +39,7 @@ use crate::ops::portable_math::{
 };
 use crate::ops::rounding::store;
 use crate::precision::WeightDtype;
+use crate::varlen::RowStarts;
 
 /// One layer's record.
 struct LayerTape {
@@ -68,6 +69,9 @@ pub struct Mamba2Tape {
     /// The rows entering the final norm.
     final_in: Vec<f32>,
     layers: Vec<LayerTape>,
+    /// The sequences packed into the window's row (see [`crate::varlen`]),
+    /// `None` for one sequence.
+    varlen: Option<RowStarts>,
 }
 
 impl Mamba2Tape {
@@ -105,7 +109,14 @@ impl Mamba2Tape {
                     mlp_in: vec![0.0; mlp],
                 })
                 .collect(),
+            varlen: None,
         }
+    }
+
+    /// The sequences packed into the row of the next windows, `None` for
+    /// one sequence.
+    pub(crate) fn set_varlen(&mut self, ids: Option<&[i32]>) {
+        self.varlen = ids.map(RowStarts::from_ids);
     }
 
     /// The tape of a window computed in `dtype`: the weights it is given
@@ -150,6 +161,7 @@ pub struct Mamba2TrainScratch {
     seg_states: Vec<f32>,
     carry: Vec<f32>,
     d_xdt: Vec<f32>,
+    zero_state: Vec<f32>,
     u: Vec<f32>,
     mlp: GatedMlpRowsScratch,
     mlp_bwd: GatedMlpBackwardScratch,
@@ -209,7 +221,7 @@ pub fn forward_mamba2_train(
             (t_len, tape.input_dim, dm),
         );
     }
-    let stride = tape.stride;
+    let (stride, varlen) = (tape.stride, tape.varlen.as_ref());
     for (l, ((lw, st), lt)) in w
         .layers
         .iter()
@@ -217,7 +229,7 @@ pub fn forward_mamba2_train(
         .zip(tape.layers.iter_mut())
         .enumerate()
     {
-        layer_forward(rows, (lw, st, lt), (cfg, t_len, stride), s);
+        layer_forward(rows, (lw, st, lt), (cfg, t_len, stride, varlen), s);
         if let Some(mlp) = w.mlp.get(l) {
             lt.mlp_in.copy_from_slice(rows);
             let eps = cfg.rms_norm_eps;
@@ -246,7 +258,7 @@ pub fn forward_mamba2_train(
 fn layer_forward(
     rows: &mut [f32],
     (lw, state, lt): (&Mamba2LayerWeights, &mut Mamba2LayerState, &mut LayerTape),
-    (cfg, t_len, stride): (&Mamba2Config, usize, usize),
+    (cfg, t_len, stride, varlen): (&Mamba2Config, usize, usize, Option<&RowStarts>),
     s: &mut Mamba2TrainScratch,
 ) {
     let (dm, di, ip, cd) = (
@@ -283,7 +295,17 @@ fn layer_forward(
     );
     lt.conv_hist0.copy_from_slice(&state.conv_hist);
     let xbc_col = 2 * d_mlp + d_ssm;
-    for (proj, xbc) in lt.proj.chunks_exact(ip).zip(s.xbc.chunks_exact_mut(cd)) {
+    let starts = |t: usize| varlen.is_some_and(|v| v.starts(t));
+    for (t, (proj, xbc)) in lt
+        .proj
+        .chunks_exact(ip)
+        .zip(s.xbc.chunks_exact_mut(cd))
+        .enumerate()
+    {
+        // A sequence's first token sees no earlier sequence's inputs.
+        if starts(t) {
+            state.conv_hist.fill(0.0);
+        }
         let raw = &proj[xbc_col..xbc_col + cd];
         conv_silu_token(xbc, raw, &state.conv_hist, lw);
         conv_hist_push(&mut state.conv_hist, raw);
@@ -298,6 +320,10 @@ fn layer_forward(
                 let j = t / stride;
                 lt.ckpt[j * state_len + h * n * p_len..j * state_len + (h + 1) * n * p_len]
                     .copy_from_slice(st);
+            }
+            // A sequence starts from the empty state.
+            if starts(t) {
+                st.fill(0.0);
             }
             let row = &s.xbc[t * cd..(t + 1) * cd];
             let (dt, da) = dt_da(
@@ -398,7 +424,7 @@ pub fn backward_mamba2_train(
         layer_backward(
             d_rows,
             (&w.layers[l], &mut grads.layers[l], lt),
-            (cfg, t_len, tape.stride),
+            (cfg, t_len, tape.stride, tape.varlen.as_ref()),
             s,
         );
     }
@@ -475,7 +501,7 @@ fn rms_backward(d_rows: &mut [f32], x_rows: &[f32], (w, gw): (&[f32], &mut [f32]
 fn layer_backward(
     d_rows: &mut [f32],
     (lw, gw, lt): (&Mamba2LayerWeights, &mut Mamba2LayerWeights, &LayerTape),
-    (cfg, t_len, stride): (&Mamba2Config, usize, usize),
+    (cfg, t_len, stride, varlen): (&Mamba2Config, usize, usize, Option<&RowStarts>),
     s: &mut Mamba2TrainScratch,
 ) {
     let (dm, di, ip, cd, width) = (
@@ -552,14 +578,19 @@ fn layer_backward(
     }
 
     // The conv again, keeping its pre-activations.
+    let starts = |t: usize| varlen.is_some_and(|v| v.starts(t));
     {
         let mut hist = lt.conv_hist0.clone();
-        for ((proj, pre), xbc) in lt
+        for (t, ((proj, pre), xbc)) in lt
             .proj
             .chunks_exact(ip)
             .zip(s.pre.chunks_exact_mut(cd))
             .zip(s.xbc.chunks_exact_mut(cd))
+            .enumerate()
         {
+            if starts(t) {
+                hist.fill(0.0);
+            }
             let raw = &proj[xbc_col..xbc_col + cd];
             conv_pre_token(pre, raw, &hist, lw);
             for (x, &v) in xbc.iter_mut().zip(pre.iter()) {
@@ -576,6 +607,8 @@ fn layer_backward(
     grow(&mut s.seg_states, (stride + 1) * n * p_len);
     grow(&mut s.carry, n * p_len);
     grow(&mut s.d_xdt, p_len);
+    // The state a sequence's first token starts from.
+    grow(&mut s.zero_state, n * p_len);
     for h in 0..nh {
         let g = h / (nh / g_n);
         s.carry[..n * p_len].fill(0.0);
@@ -591,7 +624,11 @@ fn layer_backward(
             for t in t0..t1 {
                 let (prev, next) = s.seg_states.split_at_mut((t - t0 + 1) * n * p_len);
                 let cur = &mut next[..n * p_len];
-                cur.copy_from_slice(&prev[(t - t0) * n * p_len..]);
+                if starts(t) {
+                    cur.fill(0.0);
+                } else {
+                    cur.copy_from_slice(&prev[(t - t0) * n * p_len..]);
+                }
                 let row = &s.xbc[t * cd..(t + 1) * cd];
                 let (dt, da) = dt_da(
                     lt.proj[t * ip + dt_col + h],
@@ -612,7 +649,14 @@ fn layer_backward(
             }
             for t in (t0..t1).rev() {
                 let i = t - t0;
-                let s_prev = &s.seg_states[i * n * p_len..(i + 1) * n * p_len];
+                // A sequence's first step left the state before it out: it
+                // starts from zero, and no gradient flows into that state.
+                let start = starts(t);
+                let s_prev = if start {
+                    &s.zero_state[..n * p_len]
+                } else {
+                    &s.seg_states[i * n * p_len..(i + 1) * n * p_len]
+                };
                 let s_cur = &s.seg_states[(i + 1) * n * p_len..(i + 2) * n * p_len];
                 scan_step_backward(
                     (s_prev, s_cur, &mut s.carry[..n * p_len]),
@@ -626,6 +670,9 @@ fn layer_backward(
                     ),
                     (cfg, &mut s.d_xdt[..p_len]),
                 );
+                if start {
+                    s.carry[..n * p_len].fill(0.0);
+                }
             }
         }
     }
@@ -638,8 +685,13 @@ fn layer_backward(
             if let Some(b) = gw.conv_b.get_mut(c) {
                 *b += dv;
             }
+            // A tap in an earlier sequence read zero.
+            let first = varlen.map_or(isize::MIN, |v| v.first(t));
             for k in 0..width {
                 let src = t as isize - (width - 1) as isize + k as isize;
+                if src < first {
+                    continue;
+                }
                 let x = if src >= 0 {
                     lt.proj[src as usize * ip + xbc_col + c]
                 } else {
