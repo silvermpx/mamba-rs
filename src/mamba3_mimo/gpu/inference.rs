@@ -29,6 +29,10 @@ use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use crate::matrix::{Path, Request};
 
+/// Inference runs one sequence per row: the scans take no packing (see
+/// [`crate::varlen`]).
+const NO_PACKING: u64 = 0;
+
 struct GpuMimoLayer {
     norm_weight: GpuBuffer,
     /// The block LayerNorm's bias, None for RMSNorm.
@@ -740,6 +744,7 @@ impl Mamba3MimoGpuEngine {
             mimo_x: lw.mimo_x.cached_ptr(),
             mimo_z: lw.mimo_z.cached_ptr(),
             mimo_o: lw.mimo_o.cached_ptr(),
+            seq_idx: NO_PACKING,
         };
         let x = MimoExec {
             ctx: &self.ctx,
@@ -905,6 +910,7 @@ impl Mamba3MimoGpuEngine {
                     bld.arg(&y_out);
                     bld.arg(&y_first);
                     bld.arg(&z_first);
+                    bld.arg(&NO_PACKING);
                     unsafe { bld.launch(cfg) }.map_err(|e| format!("MIMO scan L{l}: {e:?}"))?;
                 }
             }
@@ -1051,6 +1057,8 @@ pub(crate) struct MimoChunkedPtrs {
     pub mimo_x: u64,
     pub mimo_z: u64,
     pub mimo_o: u64,
+    /// The window's packing (see [`crate::varlen`]), 0 for none.
+    pub seq_idx: u64,
 }
 
 /// One layer's scan over a window of `t_len` tokens of `b` sequences by the
@@ -1103,6 +1111,7 @@ pub(crate) fn launch_chunked_scan(
         mimo_x,
         mimo_z,
         mimo_o,
+        seq_idx,
     } = *ptrs;
     let (seq_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i) = (
         t_len as i32,
@@ -1140,6 +1149,7 @@ pub(crate) fn launch_chunked_scan(
             bld.arg(&na_i);
             bld.arg(&a_floor);
             bld.arg(&y_first);
+            bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(err("prep"))?;
         }
     }
@@ -1179,6 +1189,7 @@ pub(crate) fn launch_chunked_scan(
             bld.arg(&pg_i);
             bld.arg(&y_first);
             bld.arg(&z_first);
+            bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(err("chunk state"))?;
         }
     } else {
@@ -1217,6 +1228,7 @@ pub(crate) fn launch_chunked_scan(
             bld.arg(&pt_i);
             bld.arg(&y_first);
             bld.arg(&z_first);
+            bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(err("chunk state"))?;
         }
     }
@@ -1244,6 +1256,7 @@ pub(crate) fn launch_chunked_scan(
             bld.arg(&ds_i);
             bld.arg(&r_i);
             bld.arg(&y_first);
+            bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(err("state passing"))?;
         }
     }
@@ -1282,6 +1295,7 @@ pub(crate) fn launch_chunked_scan(
             bld.arg(&kt_i);
             bld.arg(&nk_i);
             bld.arg(&y_first);
+            bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(err("scan"))?;
         }
     } else {
@@ -1328,6 +1342,7 @@ pub(crate) fn launch_chunked_scan(
             bld.arg(&pt_i);
             bld.arg(&y_first);
             bld.arg(&z_first);
+            bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(err("scan"))?;
         }
     }

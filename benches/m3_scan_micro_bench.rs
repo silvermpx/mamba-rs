@@ -128,6 +128,7 @@ fn scan_trio_time_and_hash() {
             b.arg(&cs_i);
             b.arg(&y_first);
             b.arg(&z_first);
+            b.arg(&0u64);
             unsafe { b.launch(cfg) }.unwrap();
         }
     };
@@ -157,6 +158,7 @@ fn scan_trio_time_and_hash() {
             b.arg(&ds_i);
             b.arg(&cs_i);
             b.arg(&y_first);
+            b.arg(&0u64);
             unsafe { b.launch(cfg) }.unwrap();
         }
     };
@@ -183,6 +185,7 @@ fn scan_trio_time_and_hash() {
             b.arg(&ds_i);
             b.arg(&cs_i);
             b.arg(&y_first);
+            b.arg(&0u64);
             unsafe { b.launch(cfg) }.unwrap();
         }
     };
@@ -206,6 +209,7 @@ fn scan_trio_time_and_hash() {
             b.arg(&ds_i);
             b.arg(&cs_i);
             b.arg(&y_first);
+            b.arg(&0u64);
             unsafe { b.launch(cfg) }.unwrap();
         }
     };
@@ -286,6 +290,7 @@ fn scan_trio_time_and_hash() {
             b.arg(&ds_i);
             b.arg(&cs_i);
             b.arg(&y_first);
+            b.arg(&0u64);
             unsafe { b.launch(cfg) }.unwrap();
         }
     }
@@ -330,6 +335,7 @@ fn scan_trio_time_and_hash() {
             b.arg(&ds_i);
             b.arg(&cs_i);
             b.arg(&y_first);
+            b.arg(&0u64);
             unsafe { b.launch(cfg) }.unwrap();
         }
     };
@@ -410,6 +416,7 @@ fn scan_trio_time_and_hash() {
                     b.arg(&ds_i);
                     b.arg(&cs_i);
                     b.arg(&y_first);
+                    b.arg(&0u64);
                     unsafe { b.launch(cfg) }.unwrap();
                 }
                 let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(
@@ -436,6 +443,7 @@ fn scan_trio_time_and_hash() {
                     b.arg(&ds_i);
                     b.arg(&cs_i);
                     b.arg(&y_first);
+                    b.arg(&0u64);
                     unsafe { b.launch(cfg) }.unwrap();
                 }
             };
@@ -466,6 +474,7 @@ fn scan_trio_time_and_hash() {
                     b.arg(&ds_i);
                     b.arg(&cs_i);
                     b.arg(&y_first);
+                    b.arg(&0u64);
                     unsafe { b.launch(cfg) }.unwrap();
                 }
             };
@@ -533,6 +542,7 @@ fn scan_trio_time_and_hash() {
             b.arg(&ds_i);
             b.arg(&cs_i);
             b.arg(&y_first);
+            b.arg(&0u64);
             unsafe { b.launch(cfg) }.unwrap();
         }
     };
@@ -584,6 +594,7 @@ fn scan_trio_time_and_hash() {
             b.arg(&cs_i);
             b.arg(&t_i);
             b.arg(&y_first);
+            b.arg(&0u64);
             unsafe { b.launch(cfg) }.unwrap();
         }
     };
@@ -767,6 +778,7 @@ fn coeff_chain_time_and_hash() {
                         heads: nh,
                         angles: na,
                     },
+                    seq_idx: 0,
                 },
             )
         }
@@ -817,6 +829,10 @@ fn coeff_chain_time_and_hash() {
         b.arg(a_val.inner());
         b.arg(trap.inner());
         b.arg(&n_total);
+        let (t_i, nh_i) = (t as i32, nh as i32);
+        b.arg(&t_i);
+        b.arg(&nh_i);
+        b.arg(&0u64);
         unsafe { b.launch(mamba_rs::gpu::launch::grid_1d(bt * nh)) }.unwrap();
     };
 
@@ -935,6 +951,7 @@ fn sequential_prefill_time_and_hash() {
             b.arg(&hd_i);
             b.arg(&ds_i);
             b.arg(&y_first);
+            b.arg(&0u64);
             unsafe { b.launch(cfg) }.unwrap();
         }
     };

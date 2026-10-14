@@ -264,6 +264,15 @@
   Each sequence's rows and input gradient equal its own run bit for bit
   in every precision, and an overflow in one sequence stays in it.
   Mamba-1, which the reference does not pack, refuses a packing.
+- The GPU trainers of Mamba-2, Mamba-3 SISO and MIMO take a packing too
+  (`set_varlen`, also on `GpuTrainer` and `AnyGpuTrainer`), on the
+  sequential and the chunked scan, in every storage precision, and under
+  a captured training step, which replays new packings of its shape and
+  refuses to turn a packing on or off. The kernels read the ids on the
+  device and skip or select every term that would cross a start; a
+  chunk's cumulative decay restarts at each sequence, so an infinite step
+  in one sequence never meets another's in a subtraction. Without a
+  packing every kernel keeps its bits.
 
 ### Changed
 

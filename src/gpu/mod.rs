@@ -46,6 +46,7 @@ pub mod launch;
 pub mod loss_scaler;
 pub mod options;
 pub mod train;
+pub(crate) mod varlen;
 pub use crate::optim::train_state;
 
 pub use dtype::WeightDtype;

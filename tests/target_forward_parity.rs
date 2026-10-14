@@ -313,6 +313,7 @@ fn run_m3_case(cfg: Mamba3Config, parallel: bool, seq_len: usize, max_rel: f32) 
         ctx: &ctx,
         kernels: &m3k,
         dims: &dims,
+        seq_idx: 0,
     };
 
     // Training backbone forward: the reference for the last timestep.

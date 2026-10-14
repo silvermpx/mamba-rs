@@ -32,6 +32,8 @@ use crate::gpu::grad_window::{FoldOverflow, GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
 use crate::gpu::train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
 use crate::gpu::train_state::TrainerState;
+use crate::gpu::varlen::GpuVarlen;
+use crate::varlen::Varlen;
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::{MimoChunkedPtrs, MimoExec, launch_chunked_scan, row_pieces};
@@ -527,6 +529,9 @@ pub struct Mamba3MimoGpuTrainer {
     multi_plan: Option<(AdamWPlanKey, AdamWMultiPlan)>,
     /// The AdamW bias corrections and learning rate, on the device.
     bias: AdamWBiasFactors,
+    /// The sequences packed into the rows of the windows (see
+    /// [`Self::set_varlen`]).
+    varlen: GpuVarlen,
 }
 
 /// Tokens between the sequential scan's checkpoints that [`Mamba3MimoGpuTrainer::new`]
@@ -821,6 +826,7 @@ impl Mamba3MimoGpuTrainer {
             window: GradWindow::new(s)?,
             multi_plan: None,
             bias: AdamWBiasFactors::new(s)?,
+            varlen: GpuVarlen::default(),
             master: GpuBuffer::from_cpu(s, &layout.flatten(w))?,
             grads: z(layout.total)?,
             adamw: GpuAdamW::new(s, layout.total)?
@@ -1543,6 +1549,19 @@ impl Mamba3MimoGpuTrainer {
         self.state_ang.zero(s)
     }
 
+    /// Pack several sequences of different lengths into the rows of the
+    /// next windows (see [`crate::varlen`]): no state, previous-step term,
+    /// RoPE angle or gradient crosses from one into the next. `None` runs
+    /// each row as one sequence. The packing holds until replaced, its ids
+    /// uploaded on the stream ahead of the windows that read them. A
+    /// captured graph replays every packing set while it was on; turning
+    /// one on or off needs `drop_graph` first.
+    pub fn set_varlen(&mut self, packing: Option<&Varlen>) -> Result<(), String> {
+        self.varlen.check_graph(self.graph.is_some(), packing)?;
+        self.varlen
+            .set(&self.ctx.stream, packing, (self.batch, self.seq_len))
+    }
+
     fn refresh_mirror(&self) -> Result<(), String> {
         let Some(mirror) = &self.mirror else {
             return Ok(());
@@ -1840,6 +1859,7 @@ impl Mamba3MimoGpuTrainer {
                     mimo_x: at(base, ls.mimo_x),
                     mimo_z: at(base, ls.mimo_z),
                     mimo_o: at(base, ls.mimo_o),
+                    seq_idx: self.varlen.ptr(),
                 };
                 let x = MimoExec {
                     ctx: &self.ctx,
@@ -1869,6 +1889,7 @@ impl Mamba3MimoGpuTrainer {
                     a.ck_v.cached_ptr(),
                     a.ck_ang.cached_ptr(),
                 ];
+                let seq_idx = self.varlen.ptr();
                 for (y_first, z_first, cfg) in yz_runs(self.scan.cfg(b, nh, hd)) {
                     let mut bld = stream.launch_builder(self.kernels.scan_ckpt.get(self.act));
                     bld.arg(&o);
@@ -1908,6 +1929,7 @@ impl Mamba3MimoGpuTrainer {
                     bld.arg(&y_out);
                     bld.arg(&y_first);
                     bld.arg(&z_first);
+                    bld.arg(&seq_idx);
                     unsafe { bld.launch(cfg) }.map_err(|e| format!("MIMO scan L{l}: {e:?}"))?;
                 }
             }
@@ -2405,6 +2427,7 @@ impl Mamba3MimoGpuTrainer {
         let k = &self.kernels;
         let a = &self.acts[l];
         let s = &self.bwd;
+        let seq_idx = self.varlen.ptr();
         let (ld_proj, rows_l) = (ip as i64, rows as i64);
         let (t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i) = (
             t_len as i32,
@@ -2552,27 +2575,31 @@ impl Mamba3MimoGpuTrainer {
                 }};
             }
             // One launch split into runs along its y axis, the run's first y
-            // block after the arguments.
+            // block after the arguments (and before the tail).
             macro_rules! go_y {
-                ($f:expr, $cfg:expr, $what:expr, [$($arg:expr),* $(,)?]) => {{
+                ($f:expr, $cfg:expr, $what:expr, [$($arg:expr),* $(,)?]
+                 $(, [$($tail:expr),* $(,)?])?) => {{
                     for (y_first, cfg) in y_runs($cfg) {
                         let mut bld = stream.launch_builder($f);
                         $(bld.arg(&$arg);)*
                         bld.arg(&y_first);
+                        $($(bld.arg(&$tail);)*)?
                         unsafe { bld.launch(cfg) }
                             .map_err(|e| format!("MIMO chunked backward {} L{l}: {e:?}", $what))?;
                     }
                 }};
             }
             // One launch split into runs along its y and z axes, the run's
-            // first y and z blocks after the arguments.
+            // first y and z blocks after the arguments (and before the tail).
             macro_rules! go_yz {
-                ($f:expr, $cfg:expr, $what:expr, [$($arg:expr),* $(,)?]) => {{
+                ($f:expr, $cfg:expr, $what:expr, [$($arg:expr),* $(,)?]
+                 $(, [$($tail:expr),* $(,)?])?) => {{
                     for (y_first, z_first, cfg) in yz_runs($cfg) {
                         let mut bld = stream.launch_builder($f);
                         $(bld.arg(&$arg);)*
                         bld.arg(&y_first);
                         bld.arg(&z_first);
+                        $($(bld.arg(&$tail);)*)?
                         unsafe { bld.launch(cfg) }
                             .map_err(|e| format!("MIMO chunked backward {} L{l}: {e:?}", $what))?;
                     }
@@ -2610,7 +2637,8 @@ impl Mamba3MimoGpuTrainer {
                     [
                         dq, inter, dy, enter, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i,
                         r_i, na_i, tt_i
-                    ]
+                    ],
+                    [seq_idx]
                 );
             } else {
                 go_y!(
@@ -2620,7 +2648,8 @@ impl Mamba3MimoGpuTrainer {
                     [
                         dq, inter, dy, enter, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i,
                         r_i, na_i
-                    ]
+                    ],
+                    [seq_idx]
                 );
             }
             if geom.dsloc_tiles.0 > 0 {
@@ -2639,7 +2668,8 @@ impl Mamba3MimoGpuTrainer {
                     [
                         dsl, dy, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i,
                         jc_i, sl_i, pg_i
-                    ]
+                    ],
+                    [seq_idx]
                 );
             } else {
                 let (nt, dsloc_smem) = geom.dsloc;
@@ -2657,14 +2687,16 @@ impl Mamba3MimoGpuTrainer {
                     [
                         dsl, dy, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i,
                         nt_i, pt_i
-                    ]
+                    ],
+                    [seq_idx]
                 );
             }
             go_y!(
                 &k.cb.pass,
                 cfg3(b * nh, (hd * ds).div_ceil(256), 1, 256, 0),
                 "state passing",
-                [dsl, d_init, coef, b_i, t_i, nh_i, hd_i, ds_i]
+                [dsl, d_init, coef, b_i, t_i, nh_i, hd_i, ds_i],
+                [seq_idx]
             );
             let (count, pn_i) = ((b * nc * nh) as i64, (hd * ds) as i32);
             go!(
@@ -2707,7 +2739,8 @@ impl Mamba3MimoGpuTrainer {
                     [
                         dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i,
                         ng_i, hd_i, ds_i, r_i, na_i, tt_i
-                    ]
+                    ],
+                    [seq_idx]
                 );
             } else {
                 go_y!(
@@ -2717,7 +2750,8 @@ impl Mamba3MimoGpuTrainer {
                     [
                         dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, glob, t_i,
                         nh_i, ng_i, hd_i, ds_i, r_i, na_i, tg_i, stage
-                    ]
+                    ],
+                    [seq_idx]
                 );
             }
             let (tl, pairs_smem) = geom.pairs;
@@ -2733,7 +2767,8 @@ impl Mamba3MimoGpuTrainer {
                     [
                         dq, dy, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i, ng_i, hd_i,
                         ds_i, r_i, na_i, tl_i
-                    ]
+                    ],
+                    [seq_idx]
                 );
                 go_y!(
                     k.cb.pairs_dk.get(act),
@@ -2742,7 +2777,8 @@ impl Mamba3MimoGpuTrainer {
                     [
                         dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x, t_i,
                         nh_i, ng_i, hd_i, ds_i, r_i, na_i, tl_i
-                    ]
+                    ],
+                    [seq_idx]
                 );
             } else {
                 let pairs_glob = if geom.pairs_global {
@@ -2757,7 +2793,8 @@ impl Mamba3MimoGpuTrainer {
                     [
                         dq, dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x,
                         pairs_glob, t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i, tl_i
-                    ]
+                    ],
+                    [seq_idx]
                 );
             }
             // A thread per channel, or for a head wider than the block a
@@ -2780,13 +2817,15 @@ impl Mamba3MimoGpuTrainer {
                 "entering lead",
                 [
                     de0, gpsi_init, d_init, e0, k0, v0, w_x, leaves, nh_i, hd_i, ds_i, r_i
-                ]
+                ],
+                [seq_idx, t_i]
             );
             go_y!(
                 &k.cb.combine,
                 cfg3(b * nc, nh, 1, CHUNK, 0),
                 "decay gradients",
-                [dsc3, dwp, dcs, inter, dot, coef, t_i, nh_i]
+                [dsc3, dwp, dcs, inter, dot, coef, t_i, nh_i],
+                [seq_idx]
             );
             go_y!(
                 &k.cb.rot_bwd,
@@ -2804,7 +2843,8 @@ impl Mamba3MimoGpuTrainer {
                     "angles",
                     [
                         d_tanh_h, ddt_ang, dth, coef, proj, ld_proj, ang_col_i, t_i, nh_i, na_i
-                    ]
+                    ],
+                    [seq_idx]
                 );
             }
             go!(
@@ -2813,7 +2853,7 @@ impl Mamba3MimoGpuTrainer {
                 "step scalars",
                 [
                     d_proj, gdtb, dsc3, ddt_ang, de0, coef, proj, ld_proj, w_dtb, rows_l, t_i,
-                    nh_i, heads_i, a_floor
+                    nh_i, heads_i, a_floor, seq_idx
                 ]
             );
             go!(
@@ -2940,6 +2980,7 @@ impl Mamba3MimoGpuTrainer {
                     let dy_in = if normed { s.cb.dy.cached_ptr() } else { 0u64 };
                     bld.arg(&dy_in);
                     bld.arg(&y_first);
+                    bld.arg(&seq_idx);
                     unsafe { bld.launch(cfg) }
                         .map_err(|e| format!("MIMO scan backward L{l}: {e:?}"))?;
                 }

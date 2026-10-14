@@ -45,6 +45,9 @@ pub struct M3Exec<'a> {
     pub ctx: &'a GpuCtx,
     pub kernels: &'a Mamba3Kernels,
     pub dims: &'a GpuMamba3Dims,
+    /// The sequences packed into the rows (see [`crate::varlen`]), i32
+    /// `[B, T]` on the device; 0 for one sequence a row.
+    pub seq_idx: CUptr,
 }
 
 impl M3Exec<'_> {

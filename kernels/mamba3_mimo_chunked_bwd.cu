@@ -205,15 +205,17 @@ DEFINE_M3MB_GATE_NORMED(m3mb_gate_normed_f16, __half)
 
 // The inter-chunk part of dq and its decay term, one block per (chunk,
 // head, token): dq_t[r][n] = e^Acs_t sum_p dy_t[r][p] S_enter[p][n] (the
-// start of dq), and I_t = sum_{r, n} dq_t[r][n] q_t[r][n] by a fixed tree.
-// Grid (B * nc, H, 64), block 256.
+// start of dq), and I_t = sum_{r, n} dq_t[r][n] q_t[r][n] by a fixed tree;
+// both zero for a token that does not continue the packed sequence the
+// entering state holds. Grid (B * nc, H, 64), block 256.
 extern "C" __global__ void m3mb_inter(
     float* __restrict__ dq, float* __restrict__ inter,
     const float* __restrict__ dy, const float* __restrict__ enter,
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     int seq, int nh, int ng, int hd, int ds, int rank, int na,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     __shared__ float red[256];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
@@ -233,20 +235,25 @@ extern "C" __global__ void m3mb_inter(
     const float* sp = enter + (bc * nh + h) * (long long)hd * ds;
     const float* sr = sn + (row * nh + h) * na;
     const float* cr = cs + (row * nh + h) * na;
+    const bool cont = t < vl_cont_end(seq_idx, b, seq, t0, lc);
     float part = 0.0f;
     for (int i = threadIdx.x; i < rank * ds; i += blockDim.x) {
         const int r = i / ds, n = i % ds;
-        float acc = 0.0f;
-        for (int p = 0; p < hd; p++)
-            acc = __fmaf_rn(dy[((row * nh + h) * rank + r) * hd + p], sp[(long long)p * ds + n], acc);
-        const float d = __fmul_rn(acc, ef);
+        float d = 0.0f;
+        if (cont) {
+            float acc = 0.0f;
+            for (int p = 0; p < hd; p++)
+                acc = __fmaf_rn(dy[((row * nh + h) * rank + r) * hd + p],
+                                sp[(long long)p * ds + n], acc);
+            d = __fmul_rn(acc, ef);
+            const float q = m3m_rot(cn + row * rgn + ((long long)r * ng + g) * ds,
+                                    c_bias + ((long long)h * rank + r) * ds, n, half, na, sr, cr);
+            part = __fmaf_rn(d, q, part);
+        }
         dq[((row * nh + h) * rank + r) * ds + n] = d;
-        const float q = m3m_rot(cn + row * rgn + ((long long)r * ng + g) * ds,
-                                c_bias + ((long long)h * rank + r) * ds, n, half, na, sr, cr);
-        part = __fmaf_rn(d, q, part);
     }
     const float s = m3mb_block_sum(part, red);
-    if (threadIdx.x == 0) inter[row * nh + h] = s;
+    if (threadIdx.x == 0) inter[row * nh + h] = cont ? s : 0.0f;
 }
 
 // m3mb_inter for a tile of `tt` tokens at once. dq rows (t, r) by state
@@ -266,7 +273,8 @@ __device__ __forceinline__ void m3mb_inter_tiles_body(
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float4 m3mb_sm4[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
@@ -297,6 +305,9 @@ __device__ __forceinline__ void m3mb_inter_tiles_body(
     const int a0 = 4 * warp;
     const long long row0 = b * seq + t0 + T0;
     const float* sp = enter + (bc * nh + h) * (long long)hd * ds;
+    // The tokens from `ce` on start or follow a packed sequence the
+    // entering state does not hold: their dq starts at zero and I_t is zero.
+    const int ce = vl_cont_end(seq_idx, b, seq, t0, lc);
     for (int p = warp; p < hd; p += nw) {
         for (int n = lane; n < ds; n += 32) st[p * ds + n] = sp[(long long)p * ds + n];
     }
@@ -332,11 +343,12 @@ __device__ __forceinline__ void m3mb_inter_tiles_body(
         if (a >= rows) continue;
         const long long row = row0 + a / rank;
         const float ef = mimo_exp(coef[(row * nh + h) * 4 + 3]);
+        const bool cont = T0 + a / rank < ce;
 #pragma unroll
         for (int j = 0; j < 4; j++) {
             const int n = lane + 32 * j;
             if (n >= ds) continue;
-            const float d = __fmul_rn(acc[i][j], ef);
+            const float d = cont ? __fmul_rn(acc[i][j], ef) : 0.0f;
             dq[((row * nh + h) * rank + a % rank) * ds + n] = d;
             dd[a * ds + n] = d;
         }
@@ -383,7 +395,8 @@ __device__ __forceinline__ void m3mb_inter_tiles_body(
         }
         __syncthreads();
     }
-    for (int tl = tid; tl < tn; tl += blockDim.x) inter[(row0 + tl) * nh + h] = red[tl * 256];
+    for (int tl = tid; tl < tn; tl += blockDim.x)
+        inter[(row0 + tl) * nh + h] = T0 + tl < ce ? red[tl * 256] : 0.0f;
 }
 
 extern "C" __global__ void __launch_bounds__(512) m3mb_inter_tiles(
@@ -392,18 +405,21 @@ extern "C" __global__ void __launch_bounds__(512) m3mb_inter_tiles(
     const float* __restrict__ cn, const float* __restrict__ c_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     m3mb_inter_tiles_body(dq, inter, dy, enter, cn, c_bias, coef, sn, cs, seq, nh, ng, hd, ds,
-                          rank, na, tt, y_first);
+                          rank, na, tt, y_first, seq_idx);
 }
 
 // The state gradient each chunk's outputs give its entering state:
 // dS_loc[p][n] = sum_t e^Acs_t sum_r dy_t[r][p] q_t[r][n] (t, then r,
-// ascending). Laid out as m3m_chunk_state: one block per (chunk, head,
-// n-tile, tile of `pt` channels), the chunk's rotated queries for the tile
-// staged. Grid (B * nc, H, ceil(N / nt) * ceil(P / pt)), the channel tile
-// fastest, block nt * pt threads.
+// ascending), t over the tokens that continue the packed sequence the
+// entering state holds (all of them without a packing). Laid out as
+// m3m_chunk_state: one block per (chunk, head, n-tile, tile of `pt`
+// channels), the chunk's rotated queries for the tile staged. Grid
+// (B * nc, H, ceil(N / nt) * ceil(P / pt)), the channel tile fastest, block
+// nt * pt threads.
 extern "C" __global__ void m3mb_dsloc(
     float* __restrict__ dsl,
     const float* __restrict__ dy,
@@ -411,7 +427,8 @@ extern "C" __global__ void m3mb_dsloc(
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int nt, int pt,
     int y_first, /* this run's first y block */
-    int z_first /* this run's first z block */
+    int z_first, /* this run's first z block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float m3mb_sm[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
@@ -446,8 +463,9 @@ extern "C" __global__ void m3mb_dsloc(
     const int pl = tid % pt, nl = tid / pt;
     const int p = p0 + pl;
     if (nl >= nt || n0 + nl >= ds || pl >= pc) return;
+    const int ce = vl_cont_end(seq_idx, b, seq, t0, lc);
     float acc = 0.0f;
-    for (int t = 0; t < lc; t++) {
+    for (int t = 0; t < ce; t++) {
         const long long row = b * seq + t0 + t;
         for (int r = 0; r < rank; r++) {
             const float d = __fmul_rn(dy[((row * nh + h) * rank + r) * hd + p], et[t]);
@@ -475,7 +493,8 @@ __device__ __forceinline__ void m3mb_dsloc_tiles_body(
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int sl, int pg,
     int y_first, /* this run's first y block */
-    int z_first /* this run's first z block */
+    int z_first, /* this run's first z block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float4 m3mb_sm4[];
     constexpr int NT = 32 * JC;
@@ -506,8 +525,9 @@ __device__ __forceinline__ void m3mb_dsloc_tiles_body(
 #pragma unroll
         for (int j = 0; j < JC; j++) acc[i][j] = 0.0f;
     }
-    for (int s0 = 0; s0 < lc; s0 += sl) {
-        const int sn_ = min(sl, lc - s0);
+    const int ce = vl_cont_end(seq_idx, b, seq, t0, lc);
+    for (int s0 = 0; s0 < ce; s0 += sl) {
+        const int sn_ = min(sl, ce - s0);
         const long long row0 = b * seq + t0 + s0;
         if (s0 > 0) __syncthreads();
         for (int t = tid; t < sn_; t += blockDim.x)
@@ -569,28 +589,31 @@ extern "C" __global__ void m3mb_dsloc_tiles(
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int jc, int sl, int pg,
     int y_first, /* this run's first y block */
-    int z_first /* this run's first z block */
+    int z_first, /* this run's first z block */
+    const int* __restrict__ seq_idx
 ) {
     if (jc == 1)
         m3mb_dsloc_tiles_body<1>(dsl, dy, cn, c_bias, coef, sn, cs, seq, nh, ng, hd, ds,
-                                 rank, na, sl, pg, y_first, z_first);
+                                 rank, na, sl, pg, y_first, z_first, seq_idx);
     else if (jc == 2)
         m3mb_dsloc_tiles_body<2>(dsl, dy, cn, c_bias, coef, sn, cs, seq, nh, ng, hd, ds,
-                                 rank, na, sl, pg, y_first, z_first);
+                                 rank, na, sl, pg, y_first, z_first, seq_idx);
     else
         m3mb_dsloc_tiles_body<4>(dsl, dy, cn, c_bias, coef, sn, cs, seq, nh, ng, hd, ds,
-                                 rank, na, sl, pg, y_first, z_first);
+                                 rank, na, sl, pg, y_first, z_first, seq_idx);
 }
 
 // The state passing backward, in place: dS holds dS_loc on entry and the
 // gradient of each chunk's exit state on exit, from zero after the window;
-// d_init receives the gradient of the state entering the window.
-// Grid (B * H, ceil(P * N / blockDim.x)).
+// d_init receives the gradient of the state entering the window. A chunk
+// where a packed sequence starts passes nothing back into the chunk
+// before it. Grid (B * H, ceil(P * N / blockDim.x)).
 extern "C" __global__ void m3mb_pass(
     float* __restrict__ dst, float* __restrict__ d_init,
     const float* __restrict__ coef,
     int batch, int seq, int nh, int hd, int ds,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bh = blockIdx.x;
@@ -606,7 +629,8 @@ extern "C" __global__ void m3mb_pass(
         const float tmp = dst[idx];
         dst[idx] = ev;
         const float acs_last = coef[((b * seq + c * M3M_CHUNK + lc - 1) * nh + h) * 4 + 3];
-        ev = __fmaf_rn(mimo_exp(acs_last), ev, tmp);
+        ev = vl_passes(seq_idx, b, seq, c * M3M_CHUNK, lc)
+            ? __fmaf_rn(mimo_exp(acs_last), ev, tmp) : tmp;
     }
     d_init[bh * pn + e] = ev;
 }
@@ -632,6 +656,9 @@ extern "C" __global__ void m3mb_chunk_dot(
 //   dk_s[r][n] = c_s sum_p dS_c[p][n] u_s[r][p]   (the start of dk)
 //   ste[r][p]  = sum_n dS_c[p][n] k_s[r][n];  du_s[r][p] += c_s ste
 //   dc_s       = sum_{r, p} u_s[r][p] ste[r][p]   (a fixed tree)
+// for the tokens of the chunk's last packed sequence (every token without a
+// packing); an earlier sequence's token reaches no later chunk, so its dk
+// starts at zero, its du keeps its value and its dc_s is zero.
 // With `stage` the chunk's state gradient dS_c is read into shared memory
 // once for the group, rows padded by one, else every token reads it from
 // global memory. The token's keys and inputs stage in shared memory, or
@@ -647,7 +674,8 @@ __device__ __forceinline__ void m3mb_state_terms_body(
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ mimo_x, float* __restrict__ glob,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg, int stage,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float m3mb_sm[];
     __shared__ float red[256];
@@ -667,6 +695,7 @@ __device__ __forceinline__ void m3mb_state_terms_body(
     const int half = ds / 2;
     const float acs_last = coef[((b * seq + t0 + lc - 1) * nh + h) * 4 + 3];
     const float* dsc = dst + (bc * nh + h) * (long long)hd * ds;
+    const int sf = vl_seq_first(seq_idx, b, seq, t0, t0 + lc - 1) - t0;
     const long long blk = ((long long)bc * nh + h) * gridDim.z + blockIdx.z;
     float* kt = glob == nullptr ? m3mb_sm : glob + blk * ((long long)rank * (ds + hd));  // [R][N]
     float* ut = kt + rank * ds;         // [R][P]
@@ -681,6 +710,12 @@ __device__ __forceinline__ void m3mb_state_terms_body(
     }
     for (int s = s0; s < s1; s++) {
         const long long row = b * seq + t0 + s;
+        if (s < sf) {
+            for (int i = threadIdx.x; i < rank * ds; i += blockDim.x)
+                dk[(row * nh + h) * rank * ds + i] = 0.0f;
+            if (threadIdx.x == 0) dcs[row * nh + h] = 0.0f;
+            continue;
+        }
         const float* cf = coef + (row * nh + h) * 4;
         const float cfs = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
         __syncthreads();
@@ -738,7 +773,8 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ mimo_x,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float4 m3mb_sm4[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
@@ -748,6 +784,8 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
     const int lc = min(M3M_CHUNK, seq - t0);
+    // Only the chunk's last packed sequence reaches the next chunk.
+    const int sf = vl_seq_first(seq_idx, b, seq, t0, t0 + lc - 1) - t0;
     const int S0 = blockIdx.z * tt;
     if (S0 >= lc) return;
     const int tn = min(tt, lc - S0);
@@ -847,10 +885,11 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
             const int a = a0 + i;
             if (a >= rows) continue;
             const long long o = ((row0 + a / rank) * nh + h) * rank + a % rank;
+            const bool kept = S0 + a / rank >= sf;
 #pragma unroll
             for (int j = 0; j < 4; j++) {
                 const int n = lane + 32 * j;
-                if (n < ds) dk[o * ds + n] = __fmul_rn(cfs[i], acc[i][j]);
+                if (n < ds) dk[o * ds + n] = kept ? __fmul_rn(cfs[i], acc[i][j]) : 0.0f;
             }
         }
     }
@@ -882,11 +921,12 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
             const int a = a0 + i;
             if (a >= rows) continue;
             const long long o = ((row0 + a / rank) * nh + h) * rank + a % rank;
+            const bool kept = S0 + a / rank >= sf;
 #pragma unroll
             for (int j = 0; j < 4; j++) {
                 const int p = lane + 32 * j;
                 if (p >= hd) continue;
-                du[o * hd + p] = __fmaf_rn(cfs[i], acc[i][j], du[o * hd + p]);
+                if (kept) du[o * hd + p] = __fmaf_rn(cfs[i], acc[i][j], du[o * hd + p]);
                 steb[a * hd + p] = acc[i][j];
             }
         }
@@ -911,7 +951,8 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
         }
         __syncthreads();
     }
-    for (int tl = tid; tl < tn; tl += blockDim.x) dcs[(row0 + tl) * nh + h] = red[tl * 256];
+    for (int tl = tid; tl < tn; tl += blockDim.x)
+        dcs[(row0 + tl) * nh + h] = S0 + tl >= sf ? red[tl * 256] : 0.0f;
 }
 
 #define DEFINE_M3MB_STATE_TERMS_TILES(NAME, T)                                 \
@@ -923,10 +964,11 @@ extern "C" __global__ void __launch_bounds__(512) NAME(                        \
     const float* __restrict__ coef, const float* __restrict__ sn,              \
     const float* __restrict__ cs, const float* __restrict__ mimo_x,            \
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt,         \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     m3mb_state_terms_tiles_body<T>(dk, du, dcs, dst, proj, ld_proj, bn, b_bias, \
-        coef, sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tt, y_first);     \
+        coef, sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tt, y_first, seq_idx); \
 }
 DEFINE_M3MB_STATE_TERMS_TILES(m3mb_state_terms_tiles, float)
 DEFINE_M3MB_STATE_TERMS_TILES(m3mb_state_terms_tiles_bf16, __nv_bfloat16)
@@ -943,10 +985,12 @@ extern "C" __global__ void NAME(                                               \
     float* __restrict__ glob,                                                  \
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg,         \
     int stage,                                                                 \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     m3mb_state_terms_body<T>(dk, du, dcs, dst, proj, ld_proj, bn, b_bias, coef, \
-        sn, cs, mimo_x, glob, seq, nh, ng, hd, ds, rank, na, tg, stage, y_first); \
+        sn, cs, mimo_x, glob, seq, nh, ng, hd, ds, rank, na, tg, stage, y_first, \
+        seq_idx);                                                              \
 }
 DEFINE_M3MB_STATE_TERMS(m3mb_state_terms, float)
 DEFINE_M3MB_STATE_TERMS(m3mb_state_terms_bf16, __nv_bfloat16)
@@ -967,8 +1011,10 @@ DEFINE_M3MB_STATE_TERMS(m3mb_state_terms_f16, __half)
 // padded by one). With `glob` the queries, keys, dy, u and the dq tile
 // sit in that block's slice of a global scratch [B * nc * H][tl R
 // (3 N + 2 P + 2)] instead, and only G, M and wG in shared memory: the
-// products read the same values in the same order. Grid (B * nc, H),
-// block 256.
+// products read the same values in the same order. With a packing a pair
+// of two sequences is no pair (its dw is zero), and the products run over
+// each row's own sequence only (m3m_tile_product_ranged), so another
+// sequence's values never enter a chain. Grid (B * nc, H), block 256.
 template <typename T>
 __device__ __forceinline__ void m3mb_pairs_body(
     float* __restrict__ dq, float* __restrict__ dk, float* __restrict__ du,
@@ -979,7 +1025,8 @@ __device__ __forceinline__ void m3mb_pairs_body(
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ mimo_x, float* __restrict__ glob,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float m3mb_sm[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
@@ -1051,9 +1098,13 @@ __device__ __forceinline__ void m3mb_pairs_body(
                     __fmul_rn(mimo_x[((long long)h * rank + r) * hd + p], x);
             }
             __syncthreads();
-            // G and M per (t r, s r'), zero where s > t.
+            // G and M per (t r, s r'), zero where s > t or s and t lie in
+            // two packed sequences.
             const int ta = tn * rank, sb = sn_ * rank;
-            auto live = [&](int a, int bcol) { return S0 + bcol / rank <= T0 + a / rank; };
+            auto live = [&](int a, int bcol) {
+                const int t = T0 + a / rank, s = S0 + bcol / rank;
+                return s <= t && vl_id(seq_idx, b, seq, t0 + s) == vl_id(seq_idx, b, seq, t0 + t);
+            };
             m3m_tile_product<1>(
                 ta, sb, ds,
                 [&](int a, int n) { return qs[a * ds + n]; },
@@ -1071,13 +1122,15 @@ __device__ __forceinline__ void m3mb_pairs_body(
             for (int i = tid; i < tn * sn_; i += blockDim.x) {
                 const int tq = i / sn_, sk = i % sn_;
                 const int t = T0 + tq, s = S0 + sk;
-                if (s > t) {
+                const bool apart = vl_id(seq_idx, b, seq, t0 + s) != vl_id(seq_idx, b, seq, t0 + t);
+                if (s > t || apart) {
                     for (int r = 0; r < rank; r++)
                         for (int r2 = 0; r2 < rank; r2++) {
                             const int at = (tq * rank + r) * tr + sk * rank + r2;
                             wg[at] = 0.0f;
                             mm[at] = 0.0f;
                         }
+                    if (s <= t) dwp[(bc * nh + h) * pairs + (long long)t * (t + 1) / 2 + s] = 0.0f;
                     continue;
                 }
                 const long long row_t = b * seq + t0 + t, row_s = b * seq + t0 + s;
@@ -1099,28 +1152,61 @@ __device__ __forceinline__ void m3mb_pairs_body(
             }
             __syncthreads();
             // dq for the t-tile (shared), dk and du for the s-tile (global).
-            m3m_tile_product<4>(
-                ta, ds, sb,
-                [&](int a, int bcol) { return mm[a * tr + bcol]; },
-                [&](int bcol, int n) { return ks[bcol * kld + n]; },
-                [&](int a, int n) { return dqs[a * ds + n]; },
-                [&](int a, int n, float v) { dqs[a * ds + n] = v; });
             auto krow = [&](int bcol) {
                 const long long row = b * seq + t0 + S0 + bcol / rank;
                 return (row * nh + h) * rank + bcol % rank;
             };
-            m3m_tile_product<4>(
-                sb, ds, ta,
-                [&](int bcol, int a) { return mm[a * tr + bcol]; },
-                [&](int a, int n) { return qs[a * ds + n]; },
-                [&](int bcol, int n) { return dk[krow(bcol) * ds + n]; },
-                [&](int bcol, int n, float v) { dk[krow(bcol) * ds + n] = v; });
-            m3m_tile_product<2>(
-                sb, hd, ta,
-                [&](int bcol, int a) { return wg[a * tr + bcol]; },
-                [&](int a, int p) { return dys[a * hd + p]; },
-                [&](int bcol, int p) { return du[krow(bcol) * hd + p]; },
-                [&](int bcol, int p, float v) { du[krow(bcol) * hd + p] = v; });
+            if (seq_idx == nullptr) {
+                m3m_tile_product<4>(
+                    ta, ds, sb,
+                    [&](int a, int bcol) { return mm[a * tr + bcol]; },
+                    [&](int bcol, int n) { return ks[bcol * kld + n]; },
+                    [&](int a, int n) { return dqs[a * ds + n]; },
+                    [&](int a, int n, float v) { dqs[a * ds + n] = v; });
+                m3m_tile_product<4>(
+                    sb, ds, ta,
+                    [&](int bcol, int a) { return mm[a * tr + bcol]; },
+                    [&](int a, int n) { return qs[a * ds + n]; },
+                    [&](int bcol, int n) { return dk[krow(bcol) * ds + n]; },
+                    [&](int bcol, int n, float v) { dk[krow(bcol) * ds + n] = v; });
+                m3m_tile_product<2>(
+                    sb, hd, ta,
+                    [&](int bcol, int a) { return wg[a * tr + bcol]; },
+                    [&](int a, int p) { return dys[a * hd + p]; },
+                    [&](int bcol, int p) { return du[krow(bcol) * hd + p]; },
+                    [&](int bcol, int p, float v) { du[krow(bcol) * hd + p] = v; });
+            } else {
+                // A query row takes the keys of its sequence up to itself, a
+                // key row the queries of its sequence from itself on.
+                auto q_range = [&](int a) {
+                    const int t = T0 + a / rank;
+                    const int f = vl_seq_first(seq_idx, b, seq, t0, t0 + t) - t0;
+                    return make_int2(max(f - S0, 0) * rank, min(t - S0 + 1, sn_) * rank);
+                };
+                auto k_range = [&](int bcol) {
+                    const int s = S0 + bcol / rank;
+                    const int e = vl_span(seq_idx, b, seq, t0, lc, s).end;
+                    return make_int2(max(s - T0, 0) * rank, min(e - T0, tn) * rank);
+                };
+                m3m_tile_product_ranged<4>(
+                    ta, ds,
+                    [&](int a, int bcol) { return mm[a * tr + bcol]; },
+                    [&](int bcol, int n) { return ks[bcol * kld + n]; },
+                    [&](int a, int n) { return dqs[a * ds + n]; },
+                    [&](int a, int n, float v) { dqs[a * ds + n] = v; }, q_range);
+                m3m_tile_product_ranged<4>(
+                    sb, ds,
+                    [&](int bcol, int a) { return mm[a * tr + bcol]; },
+                    [&](int a, int n) { return qs[a * ds + n]; },
+                    [&](int bcol, int n) { return dk[krow(bcol) * ds + n]; },
+                    [&](int bcol, int n, float v) { dk[krow(bcol) * ds + n] = v; }, k_range);
+                m3m_tile_product_ranged<2>(
+                    sb, hd,
+                    [&](int bcol, int a) { return wg[a * tr + bcol]; },
+                    [&](int a, int p) { return dys[a * hd + p]; },
+                    [&](int bcol, int p) { return du[krow(bcol) * hd + p]; },
+                    [&](int bcol, int p, float v) { du[krow(bcol) * hd + p] = v; }, k_range);
+            }
         }
         __syncthreads();
         for (int i = tid; i < tn * rank * ds; i += blockDim.x) {
@@ -1143,10 +1229,12 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ cs, const float* __restrict__ mimo_x,            \
     float* __restrict__ glob,                                                  \
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,         \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     m3mb_pairs_body<T>(dq, dk, du, dwp, dy, proj, ld_proj, bn, cn, b_bias,     \
-        c_bias, coef, sn, cs, mimo_x, glob, seq, nh, ng, hd, ds, rank, na, tl, y_first); \
+        c_bias, coef, sn, cs, mimo_x, glob, seq, nh, ng, hd, ds, rank, na, tl, y_first, \
+        seq_idx);                                                              \
 }
 DEFINE_M3MB_PAIRS(m3mb_pairs, float)
 DEFINE_M3MB_PAIRS(m3mb_pairs_bf16, __nv_bfloat16)
@@ -1164,8 +1252,9 @@ DEFINE_M3MB_PAIRS(m3mb_pairs_f16, __half)
 // fma(w M, k_s[r'], dq). M = dy . u (p ascending from 0), zero past the
 // diagonal. Shared memory: dy [P][TR4 + 4] (transposed), u [tr][P + 1],
 // keys [tr][N], padded to a float4 multiple so the float4 rows of
-// w M [tr][TR4 + 4] (transposed) start on 16 bytes, w [tl][tl].
-// Grid (B * nc, H, ceil(64 / tl)), block 8 TR4 threads.
+// w M [tr][TR4 + 4] (transposed) start on 16 bytes, w [tl][tl]. With a
+// packing a row's chain runs over the keys of its own sequence only, as
+// m3mb_pairs runs it. Grid (B * nc, H, ceil(64 / tl)), block 8 TR4 threads.
 template <typename T>
 __device__ __forceinline__ void m3mb_pairs_dq_body(
     float* __restrict__ dq,
@@ -1174,7 +1263,8 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ mimo_x,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float4 m3mb_sm4[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
@@ -1231,6 +1321,8 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
         }
     }
     float acc[4][4];
+    // Each row's token and the first token of its packed sequence.
+    int trw[4], tfst[4];
 #pragma unroll
     for (int i = 0; i < 4; i++) {
         const int a = a0 + i;
@@ -1240,6 +1332,9 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
             acc[i][j] = a < ta && n < ds
                 ? dq[(((trow0 + a / rank) * nh + h) * rank + a % rank) * ds + n] : 0.0f;
         }
+        trw[i] = a < ta ? T0 + a / rank : -1;
+        tfst[i] = a < ta && seq_idx != nullptr
+            ? vl_seq_first(seq_idx, b, seq, t0, t0 + trw[i]) - t0 : 0;
     }
     for (int S0 = 0; S0 <= T0; S0 += tl) {
         const int sn_ = min(tl, lc - S0);
@@ -1263,7 +1358,7 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
             const int tq = i / sn_, sk = i % sn_;
             const int t = T0 + tq, s = S0 + sk;
             float w = 0.0f;
-            if (s <= t) {
+            if (s <= t && vl_id(seq_idx, b, seq, t0 + s) == vl_id(seq_idx, b, seq, t0 + t)) {
                 const float* ct = coef + ((trow0 + tq) * nh + h) * 4;
                 const float* cs_ = coef + ((srow0 + sk) * nh + h) * 4;
                 w = s < t ? __fmul_rn(mimo_exp(fminf(__fsub_rn(ct[3], cs_[3]), 0.0f)), cs_[2])
@@ -1302,19 +1397,51 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
             }
         }
         __syncthreads();
-        for (int col = 0; col < sb; col++) {
-            const float4 m4 = *reinterpret_cast<const float4*>(mt + col * trs + a0);
-            const float mv[4] = {m4.x, m4.y, m4.z, m4.w};
-            float kv[4];
+        if (seq_idx == nullptr) {
+            for (int col = 0; col < sb; col++) {
+                const float4 m4 = *reinterpret_cast<const float4*>(mt + col * trs + a0);
+                const float mv[4] = {m4.x, m4.y, m4.z, m4.w};
+                float kv[4];
 #pragma unroll
-            for (int j = 0; j < 4; j++) {
-                const int n = lane + 32 * j;
-                kv[j] = n < ds ? ks[col * ds + n] : 0.0f;
+                for (int j = 0; j < 4; j++) {
+                    const int n = lane + 32 * j;
+                    kv[j] = n < ds ? ks[col * ds + n] : 0.0f;
+                }
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+#pragma unroll
+                    for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(mv[i], kv[j], acc[i][j]);
+                }
             }
+        } else {
+            // A row takes the keys of its own sequence up to itself.
+            int lo[4], hi[4];
+            int c0 = sb, c1 = 0;
 #pragma unroll
             for (int i = 0; i < 4; i++) {
+                lo[i] = trw[i] < 0 ? 0 : max(tfst[i] - S0, 0) * rank;
+                hi[i] = trw[i] < 0 ? 0 : min(trw[i] - S0 + 1, sn_) * rank;
+                if (lo[i] < hi[i]) {
+                    c0 = min(c0, lo[i]);
+                    c1 = max(c1, hi[i]);
+                }
+            }
+            for (int col = c0; col < c1; col++) {
+                const float4 m4 = *reinterpret_cast<const float4*>(mt + col * trs + a0);
+                const float mv[4] = {m4.x, m4.y, m4.z, m4.w};
+                float kv[4];
 #pragma unroll
-                for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(mv[i], kv[j], acc[i][j]);
+                for (int j = 0; j < 4; j++) {
+                    const int n = lane + 32 * j;
+                    kv[j] = n < ds ? ks[col * ds + n] : 0.0f;
+                }
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    if (col >= lo[i] && col < hi[i]) {
+#pragma unroll
+                        for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(mv[i], kv[j], acc[i][j]);
+                    }
+                }
             }
         }
     }
@@ -1337,8 +1464,10 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
 // each from its value on entry (the state terms). Shared memory: keys and
 // u of the s-tile transposed [N][TR4 + 4] and [P][TR4 + 4]; per t-tile the
 // queries [tr][N + 1] and dy [tr][P + 1], padded to a float4 multiple so
-// the float4 rows of G, w M, w G [tr][TR4 + 4] start on 16 bytes; w.
-// Grid (B * nc, H, ceil(64 / tl)), block 8 TR4 threads.
+// the float4 rows of G, w M, w G [tr][TR4 + 4] start on 16 bytes; w. With
+// a packing a pair of two sequences is no pair (its dw is zero) and a row's
+// chains run over the queries of its own sequence only, as m3mb_pairs runs
+// them. Grid (B * nc, H, ceil(64 / tl)), block 8 TR4 threads.
 template <typename T>
 __device__ __forceinline__ void m3mb_pairs_dk_body(
     float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dwp,
@@ -1348,7 +1477,8 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
     const float* __restrict__ mimo_x,
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float4 m3mb_sm4[];
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
@@ -1396,6 +1526,8 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
         for (int p = lane; p < hd; p += 32) ut[p * trs + col] = __fmul_rn(mx[p], to_f(xr[p]));
     }
     float dka[4][4], dua[4][4];
+    // Each row's token and the end of its packed sequence in the chunk.
+    int srw[4], send[4];
 #pragma unroll
     for (int i = 0; i < 4; i++) {
         const int col = b0 + i;
@@ -1406,6 +1538,9 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
             dka[i][j] = col < sb && n < ds ? dk[krow * ds + n] : 0.0f;
             dua[i][j] = col < sb && n < hd ? du[krow * hd + n] : 0.0f;
         }
+        srw[i] = col < sb ? S0 + col / rank : -1;
+        send[i] = col < sb && seq_idx != nullptr
+            ? vl_span(seq_idx, b, seq, t0, lc, srw[i]).end : lc;
     }
     for (int T0 = S0; T0 < lc; T0 += tl) {
         const int tn = min(tl, lc - T0);
@@ -1459,7 +1594,9 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
             for (int j = 0; j < 2; j++) {
                 const int a = lane + 32 * j;
                 if (a >= ta || col >= sb) continue;
-                const bool live = S0 + col / rank <= T0 + a / rank;
+                const int t = T0 + a / rank, s = S0 + col / rank;
+                const bool live = s <= t
+                    && vl_id(seq_idx, b, seq, t0 + s) == vl_id(seq_idx, b, seq, t0 + t);
                 gm[a * trs + col] = live ? ga[i][j] : 0.0f;
                 mm[a * trs + col] = live ? ma[i][j] : 0.0f;
             }
@@ -1468,13 +1605,15 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
         for (int i = tid; i < tn * sn_; i += blockDim.x) {
             const int tq = i / sn_, sk = i % sn_;
             const int t = T0 + tq, s = S0 + sk;
-            if (s > t) {
+            const bool apart = vl_id(seq_idx, b, seq, t0 + s) != vl_id(seq_idx, b, seq, t0 + t);
+            if (s > t || apart) {
                 for (int r = 0; r < rank; r++)
                     for (int r2 = 0; r2 < rank; r2++) {
                         const int at = (tq * rank + r) * trs + sk * rank + r2;
                         wg[at] = 0.0f;
                         mm[at] = 0.0f;
                     }
+                if (s <= t) dwp[(bc * nh + h) * pairs + (long long)t * (t + 1) / 2 + s] = 0.0f;
                 continue;
             }
             const float* ct = coef + ((trow0 + tq) * nh + h) * 4;
@@ -1494,24 +1633,62 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
             dwp[(bc * nh + h) * pairs + (long long)t * (t + 1) / 2 + s] = dw;
         }
         __syncthreads();
-        for (int a = 0; a < ta; a++) {
-            const float4 m4 = *reinterpret_cast<const float4*>(mm + a * trs + b0);
-            const float4 w4 = *reinterpret_cast<const float4*>(wg + a * trs + b0);
-            const float mv[4] = {m4.x, m4.y, m4.z, m4.w};
-            const float wv[4] = {w4.x, w4.y, w4.z, w4.w};
-            float qv[4], dv[4];
-#pragma unroll
-            for (int j = 0; j < 4; j++) {
-                const int n = lane + 32 * j;
-                qv[j] = n < ds ? qs[a * qld + n] : 0.0f;
-                dv[j] = n < hd ? dys[a * dld + n] : 0.0f;
-            }
-#pragma unroll
-            for (int i = 0; i < 4; i++) {
+        if (seq_idx == nullptr) {
+            for (int a = 0; a < ta; a++) {
+                const float4 m4 = *reinterpret_cast<const float4*>(mm + a * trs + b0);
+                const float4 w4 = *reinterpret_cast<const float4*>(wg + a * trs + b0);
+                const float mv[4] = {m4.x, m4.y, m4.z, m4.w};
+                const float wv[4] = {w4.x, w4.y, w4.z, w4.w};
+                float qv[4], dv[4];
 #pragma unroll
                 for (int j = 0; j < 4; j++) {
-                    dka[i][j] = __fmaf_rn(mv[i], qv[j], dka[i][j]);
-                    dua[i][j] = __fmaf_rn(wv[i], dv[j], dua[i][j]);
+                    const int n = lane + 32 * j;
+                    qv[j] = n < ds ? qs[a * qld + n] : 0.0f;
+                    dv[j] = n < hd ? dys[a * dld + n] : 0.0f;
+                }
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        dka[i][j] = __fmaf_rn(mv[i], qv[j], dka[i][j]);
+                        dua[i][j] = __fmaf_rn(wv[i], dv[j], dua[i][j]);
+                    }
+                }
+            }
+        } else {
+            // A row takes the queries of its own sequence from itself on.
+            int lo[4], hi[4];
+            int a_lo = ta, a_hi = 0;
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                lo[i] = srw[i] < 0 ? 0 : max(srw[i] - T0, 0) * rank;
+                hi[i] = srw[i] < 0 ? 0 : min(send[i] - T0, tn) * rank;
+                if (lo[i] < hi[i]) {
+                    a_lo = min(a_lo, lo[i]);
+                    a_hi = max(a_hi, hi[i]);
+                }
+            }
+            for (int a = a_lo; a < a_hi; a++) {
+                const float4 m4 = *reinterpret_cast<const float4*>(mm + a * trs + b0);
+                const float4 w4 = *reinterpret_cast<const float4*>(wg + a * trs + b0);
+                const float mv[4] = {m4.x, m4.y, m4.z, m4.w};
+                const float wv[4] = {w4.x, w4.y, w4.z, w4.w};
+                float qv[4], dv[4];
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    const int n = lane + 32 * j;
+                    qv[j] = n < ds ? qs[a * qld + n] : 0.0f;
+                    dv[j] = n < hd ? dys[a * dld + n] : 0.0f;
+                }
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    if (a >= lo[i] && a < hi[i]) {
+#pragma unroll
+                        for (int j = 0; j < 4; j++) {
+                            dka[i][j] = __fmaf_rn(mv[i], qv[j], dka[i][j]);
+                            dua[i][j] = __fmaf_rn(wv[i], dv[j], dua[i][j]);
+                        }
+                    }
                 }
             }
         }
@@ -1539,10 +1716,11 @@ extern "C" __global__ void __launch_bounds__(512) NAME(                        \
     const float* __restrict__ coef, const float* __restrict__ sn,              \
     const float* __restrict__ cs, const float* __restrict__ mimo_x,            \
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,         \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     m3mb_pairs_dq_body<T>(dq, dy, proj, ld_proj, bn, b_bias, coef, sn, cs,     \
-        mimo_x, seq, nh, ng, hd, ds, rank, na, tl, y_first);                   \
+        mimo_x, seq, nh, ng, hd, ds, rank, na, tl, y_first, seq_idx);          \
 }
 DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq, float)
 DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_bf16, __nv_bfloat16)
@@ -1558,10 +1736,12 @@ extern "C" __global__ void __launch_bounds__(512) NAME(                        \
     const float* __restrict__ coef, const float* __restrict__ sn,              \
     const float* __restrict__ cs, const float* __restrict__ mimo_x,            \
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tl,         \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     m3mb_pairs_dk_body<T>(dk, du, dwp, dy, proj, ld_proj, bn, cn, b_bias,      \
-        c_bias, coef, sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tl, y_first); \
+        c_bias, coef, sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tl, y_first, \
+        seq_idx);                                                              \
 }
 DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk, float)
 DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk_bf16, __nv_bfloat16)
@@ -1625,8 +1805,9 @@ extern "C" __global__ void m3mb_rot_bwd(
 
 // The angles over the window, walked back per (sequence, head): the
 // gradient of every angle increment is the sum of the angle gradients from
-// its token on; d tanh_pi = that sum dt into d_tanh_h (the angle
-// projection's backward input), and its share of ddt (sum dt-side, a
+// its token on, to the end of its packed sequence (the angles restart at
+// the next one's first token); d tanh_pi = that sum dt into d_tanh_h (the
+// angle projection's backward input), and its share of ddt (sum dt-side, a
 // ascending) into ddt_ang [rows, H]. Grid (B, H), block 32: one lane per
 // angle, lane 0 sums.
 template <typename T>
@@ -1635,7 +1816,8 @@ __device__ __forceinline__ void m3mb_angles_body(
     const float* __restrict__ dth, const float* __restrict__ coef,
     const T* __restrict__ proj, long long ld_proj, int ang_col,
     int seq, int nh, int na,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float m3mb_sm[];
     float* prod = m3mb_sm;  // [na]
@@ -1656,6 +1838,9 @@ __device__ __forceinline__ void m3mb_angles_body(
                 prod[a] = __fmul_rn(cum[k], mimo_tanh_pi(pr, ang_col, a));
             }
         }
+        if (vl_starts(seq_idx, b, seq, t)) {
+            for (int k = 0; k < per && k < 8; k++) cum[k] = 0.0f;
+        }
         __syncthreads();
         if (threadIdx.x == 0) {
             float s = 0.0f;
@@ -1672,10 +1857,11 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ dth, const float* __restrict__ coef,             \
     const T* __restrict__ proj, long long ld_proj, int ang_col,                \
     int seq, int nh, int na,                                                   \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     m3mb_angles_body<T>(d_tanh_h, ddt_ang, dth, coef, proj, ld_proj, ang_col,  \
-        seq, nh, na, y_first);                                                 \
+        seq, nh, na, y_first, seq_idx);                                        \
 }
 DEFINE_M3MB_ANGLES(m3mb_angles, float)
 DEFINE_M3MB_ANGLES(m3mb_angles_bf16, __nv_bfloat16)
@@ -1688,14 +1874,18 @@ DEFINE_M3MB_ANGLES(m3mb_angles_f16, __half)
 //   dscale_k = sum_{t>k} dw(t, k) e^min(Acs_t - Acs_k, 0)
 //              + dc_k e^min(Acs_last - Acs_k, 0)
 //   dgamma_k = dw(k, k)
-// written [rows, H, 3]. Grid (B * nc, H), block 64.
+// written [rows, H, 3]. With a packing the pairs are those of k's own
+// sequence, the state values those of the chunk's last sequence, and the
+// state passing's term only reaches a chunk where no sequence starts (the
+// inter values of the other tokens are zero). Grid (B * nc, H), block 64.
 extern "C" __global__ void m3mb_combine(
     float* __restrict__ dsc3,
     const float* __restrict__ dwp, const float* __restrict__ dcs,
     const float* __restrict__ inter, const float* __restrict__ dot,
     const float* __restrict__ coef,
     int seq, int nh,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
     const long long bc = blockIdx.x;
@@ -1714,24 +1904,31 @@ extern "C" __global__ void m3mb_combine(
         return __fmul_rn(mimo_exp(fminf(__fsub_rn(acs(t), acs(s)), 0.0f)), scale(s));
     };
     const float acs_last = acs(lc - 1);
+    // k's sequence in the chunk, [k_first, k_end), and the chunk's last
+    // sequence from `last`: the whole chunk without a packing.
+    const VlSpan ks = vl_span(seq_idx, b, seq, t0, lc, k);
+    const int last = vl_seq_first(seq_idx, b, seq, t0, t0 + lc - 1) - t0;
     float stable = 0.0f;
-    for (int t = k; t < lc; t++)
-        for (int s = 0; s < k; s++) {
+    for (int t = k; t < ks.end; t++)
+        for (int s = ks.first; s < k; s++) {
             const float wv = wts(t, s);
             stable = __fadd_rn(stable, __fmul_rn(dw[(long long)t * (t + 1) / 2 + s], wv));
         }
     float nxt = 0.0f;
-    for (int s = 0; s < k; s++) {
+    for (int s = last; s < k; s++) {
         const float cv = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, acs(s)), 0.0f)), scale(s));
         nxt = __fadd_rn(nxt, __fmul_rn(dcs[(b * seq + t0 + s) * nh + h], cv));
     }
-    float prv = __fadd_rn(inter[(b * seq + t0 + lc - 1) * nh + h],
-                          __fmul_rn(dot[bc * nh + h], mimo_exp(acs_last)));
+    const float pass = vl_passes(seq_idx, b, seq, t0, lc)
+        ? __fmul_rn(dot[bc * nh + h], mimo_exp(acs_last)) : 0.0f;
+    float prv = __fadd_rn(inter[(b * seq + t0 + lc - 1) * nh + h], pass);
     for (int t = lc - 2; t >= k; t--) prv = __fadd_rn(prv, inter[(b * seq + t0 + t) * nh + h]);
     const float da = __fadd_rn(stable, __fadd_rn(nxt, prv));
-    float dsc = __fmul_rn(dcs[(b * seq + t0 + k) * nh + h],
-                          mimo_exp(fminf(__fsub_rn(acs_last, acs(k)), 0.0f)));
-    for (int t = k + 1; t < lc; t++)
+    float dsc = k >= last
+        ? __fmul_rn(dcs[(b * seq + t0 + k) * nh + h],
+                    mimo_exp(fminf(__fsub_rn(acs_last, acs(k)), 0.0f)))
+        : 0.0f;
+    for (int t = k + 1; t < ks.end; t++)
         dsc = __fmaf_rn(dw[(long long)t * (t + 1) / 2 + k],
                         mimo_exp(fminf(__fsub_rn(acs(t), acs(k)), 0.0f)), dsc);
     float* o = dsc3 + ((b * seq + t0 + k) * nh + h) * 3;
@@ -1749,18 +1946,26 @@ extern "C" __global__ void m3mb_combine(
 // a power of two then) gives each thread the channels p, p + blockDim and
 // so on, its leaves past the first in `leaves` [B, H, lanes]
 // (mimo_fold_leaves), so the tree is the one a block per channel runs.
+// A row whose first token starts a packed sequence drops the carried state,
+// so both are zero there.
 extern "C" __global__ void m3mb_lead(
     float* __restrict__ de0, float* __restrict__ gpsi_init,
     const float* __restrict__ d_init, const float* __restrict__ e0,
     const float* __restrict__ kst, const float* __restrict__ vst,
     const float* __restrict__ mimo_x, float* __restrict__ leaves,
     int nh, int hd, int ds, int rank,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx, int seq
 ) {
     extern __shared__ float m3mb_sm[];
     const long long bh = (long long)blockIdx.x * nh + (y_first + blockIdx.y);
     const int h = y_first + blockIdx.y;
     const int tid = threadIdx.x, nt = blockDim.x;
+    if (vl_starts(seq_idx, blockIdx.x, seq, 0)) {
+        for (int i = tid; i < rank * hd; i += nt) gpsi_init[bh * rank * hd + i] = 0.0f;
+        if (tid == 0) de0[bh] = 0.0f;
+        return;
+    }
     const int lanes = (hd + 31) & ~31;
     float* gl = leaves == nullptr ? nullptr : leaves + bh * lanes;
     float part0 = 0.0f;
@@ -1789,7 +1994,8 @@ extern "C" __global__ void m3mb_lead(
 }
 
 // The per-token scalars, one thread per (row, head): with scale_t =
-// gamma_t + lead_{t+1} (lead = dt lam_c, the window's first one e0),
+// gamma_t + lead_{t+1} (lead = dt lam_c, the window's first one e0; no lead
+// at a packed sequence's first token, whose step keeps nothing before it),
 //   dgamma_t += dscale_t, dlead_{t+1} = dscale_t, dlead_0 = de0,
 //   ddt = ddt_ang + da a + dgamma lam + dlead lam_c, dA = da dt,
 //   dlam = dgamma dt, dlam_c = dlead dt, dtrap = dlam lam (1 - lam) - dlam_c lam_c (1 - lam_c),
@@ -1802,7 +2008,8 @@ __device__ __forceinline__ void m3mb_scalars_body(
     const float* __restrict__ dsc3, const float* __restrict__ ddt_ang,
     const float* __restrict__ de0, const float* __restrict__ coef,
     const T* __restrict__ proj, long long ld_proj, const float* __restrict__ dt_bias,
-    long long rows, int seq, int nh, int heads, float a_floor
+    long long rows, int seq, int nh, int heads, float a_floor,
+    const int* __restrict__ seq_idx
 ) {
     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= rows * nh) return;
@@ -1824,7 +2031,8 @@ __device__ __forceinline__ void m3mb_scalars_body(
     // gamma_t weighs its own diagonal and, through scale_t, every later
     // token of the window.
     const float dgamma = __fadd_rn(g3[2], g3[1]);
-    const float dlead = t == 0 ? de0[b * nh + h] : dsc3[((row - 1) * nh + h) * 3 + 1];
+    const float dlead = vl_starts(seq_idx, b, seq, t) ? 0.0f
+        : t == 0 ? de0[b * nh + h] : dsc3[((row - 1) * nh + h) * 3 + 1];
     float ddt = ddt_ang[row * nh + h];
     ddt = __fmaf_rn(g3[0], a, ddt);
     ddt = __fmaf_rn(dgamma, lam, ddt);
@@ -1856,10 +2064,11 @@ extern "C" __global__ void NAME(                                                
     const float* __restrict__ de0, const float* __restrict__ coef,              \
     const T* __restrict__ proj, long long ld_proj,                              \
     const float* __restrict__ dt_bias,                                          \
-    long long rows, int seq, int nh, int heads, float a_floor                   \
+    long long rows, int seq, int nh, int heads, float a_floor,                  \
+    const int* __restrict__ seq_idx                                             \
 ) {                                                                             \
     m3mb_scalars_body<T>(d_proj, gdtb, dsc3, ddt_ang, de0, coef, proj, ld_proj, \
-        dt_bias, rows, seq, nh, heads, a_floor);                                \
+        dt_bias, rows, seq, nh, heads, a_floor, seq_idx);                       \
 }
 DEFINE_M3MB_SCALARS(m3mb_scalars, float)
 DEFINE_M3MB_SCALARS(m3mb_scalars_bf16, __nv_bfloat16)

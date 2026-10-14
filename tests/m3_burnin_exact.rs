@@ -329,6 +329,9 @@ fn enqueue(
         }
         if runs {
             builder.arg(&y_first);
+            // The production kernels take a packing last: one sequence a
+            // row, none.
+            builder.arg(&0u64);
         }
         // All pointers refer to disjoint, live allocations on this stream.
         unsafe { builder.launch(cfg) }.expect("burn-in launch");

@@ -255,7 +255,9 @@ DEFINE_M3_STEP_FWD(m3_step_fwd_f16_i64, long long, __half, from_f_f16)
 //   v_prev_saved[B * T * nh * hd] -- v_state (= previous x) entering each timestep
 // Same `DS` contract as the backward: a state width known at compile
 // time turns the state loops into constant trip counts, 0 keeps an
-// arbitrary width working.
+// arbitrary width working. In a packed row (`seq_idx`, see _varlen.cuh) a
+// token that starts a sequence steps from the empty state, previous key
+// and previous input, which the saves then hold for the backward.
 template <int DS, typename IDX>
 __device__ __forceinline__ void m3_burnin_fwd_tpl(
     // In/Out: persistent state (mutated)
@@ -277,7 +279,8 @@ __device__ __forceinline__ void m3_burnin_fwd_tpl(
     const float* __restrict__ gamma_flat,  // [B * T * nh]
     const float* __restrict__ D,           // [nh]
     int batch, int T, int nh, int hd, int ds,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     IDX b = blockIdx.x;
     int h = y_first + blockIdx.y;
@@ -312,6 +315,15 @@ __device__ __forceinline__ void m3_burnin_fwd_tpl(
     }
 
     for (int t = 0; t < T; t++) {
+        if (vl_starts(seq_idx, b, T, t)) {
+            #pragma unroll
+            for (int n = 0; n < sw; n++) h_local[n] = 0.0f;
+            if (p == 0) {
+                #pragma unroll
+                for (int n = 0; n < sw; n++) k_state[b * nh * ds + h * ds + n] = 0.0f;
+            }
+            v_state[b * nh * hd + h * hd + p] = 0.0f;
+        }
         // Save k_prev: only p=0 writes (k_state is per-head, shared across p)
         if (p == 0) {
             #pragma unroll
@@ -399,12 +411,13 @@ void NAME(                                                                   \
     const float* __restrict__ beta_flat, const float* __restrict__ gamma_flat,\
     const float* __restrict__ D,                                             \
     int batch, int T, int nh, int hd, int ds,                                \
-    int y_first /* this run's first y block */                               \
+    int y_first, /* this run's first y block */                              \
+    const int* __restrict__ seq_idx                                          \
 ) {                                                                          \
     m3_burnin_fwd_tpl<DS_VALUE, IDX>(                                        \
         ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved,           \
         v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat,         \
-        gamma_flat, D, batch, T, nh, hd, ds, y_first);                       \
+        gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx);              \
 }
 M3_BURNIN_FWD_ENTRY(m3_burnin_fwd, int, 0)
 M3_BURNIN_FWD_ENTRY(m3_burnin_fwd_i64, long long, 0)
@@ -442,7 +455,8 @@ extern "C" __global__ void NAME(                                             \
     const float* gamma_flat,                                                 \
     const float* D,                                                          \
     int batch, int T, int nh, int hd, int ds,                                \
-    int y_first /* this run's first y block */                               \
+    int y_first, /* this run's first y block */                              \
+    const int* __restrict__ seq_idx                                          \
 ) {                                                                          \
     IDX b = blockIdx.x;                                                      \
     int h = y_first + blockIdx.y;                                            \
@@ -463,6 +477,14 @@ extern "C" __global__ void NAME(                                             \
         h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n];                 \
     }                                                                        \
     for (int t = 0; t < T; t++) {                                            \
+        if (vl_starts(seq_idx, b, T, t)) {                                   \
+            for (int n = 0; n < ds; n++) h_local[n] = 0.0f;                  \
+            if (p == 0) {                                                    \
+                for (int n = 0; n < ds; n++)                                 \
+                    k_state[b * nh * ds + h * ds + n] = 0.0f;                \
+            }                                                                \
+            v_state[b * nh * hd + h * hd + p] = 0.0f;                        \
+        }                                                                    \
         if (p == 0) {                                                        \
             for (int n = 0; n < ds; n++)                                      \
                 k_prev_saved[(b * T + t) * nh * ds + h * ds + n] =           \
@@ -535,7 +557,8 @@ __device__ __forceinline__ void NAME##_generic( \
     const float* beta_flat, \
     const float* gamma_flat, \
     const float* D, \
-    int batch, int T, int nh, int hd, int ds, int y_first \
+    int batch, int T, int nh, int hd, int ds, int y_first, \
+    const int* __restrict__ seq_idx \
 ) { \
     IDX b = blockIdx.x; \
     int h = y_first + blockIdx.y; \
@@ -556,6 +579,14 @@ __device__ __forceinline__ void NAME##_generic( \
         h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n]; \
     } \
     for (int t = 0; t < T; t++) { \
+        if (vl_starts(seq_idx, b, T, t)) { \
+            for (int n = 0; n < ds; n++) h_local[n] = 0.0f; \
+            if (p == 0) { \
+                for (int n = 0; n < ds; n++) \
+                    k_state[b * nh * ds + h * ds + n] = 0.0f; \
+            } \
+            v_state[b * nh * hd + h * hd + p] = 0.0f; \
+        } \
         if (p == 0) { \
             for (int n = 0; n < ds; n++) \
                 k_prev_saved[(b * T + t) * nh * ds + h * ds + n] = \
@@ -621,7 +652,8 @@ __device__ __forceinline__ void NAME##_specialized( \
     const float* beta_flat, \
     const float* gamma_flat, \
     const float* D, \
-    int batch, int T, int nh, int hd, int ds, int y_first \
+    int batch, int T, int nh, int hd, int ds, int y_first, \
+    const int* __restrict__ seq_idx \
 ) { \
     IDX b = blockIdx.x; \
     int h = y_first + blockIdx.y; \
@@ -644,6 +676,16 @@ __device__ __forceinline__ void NAME##_specialized( \
         h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n]; \
     } \
     for (int t = 0; t < T; t++) { \
+        if (vl_starts(seq_idx, b, T, t)) { \
+            _Pragma("unroll") \
+            for (int n = 0; n < DS; n++) h_local[n] = 0.0f; \
+            if (p == 0) { \
+                _Pragma("unroll") \
+                for (int n = 0; n < DS; n++) \
+                    k_state[b * nh * ds + h * ds + n] = 0.0f; \
+            } \
+            v_state[b * nh * hd + h * hd + p] = 0.0f; \
+        } \
         if (p == 0) { \
             _Pragma("unroll") \
             for (int n = 0; n < DS; n++) \
@@ -715,14 +757,15 @@ extern "C" __global__ void NAME( \
     const float* beta_flat, \
     const float* gamma_flat, \
     const float* D, \
-    int batch, int T, int nh, int hd, int ds, int y_first \
+    int batch, int T, int nh, int hd, int ds, int y_first, \
+    const int* __restrict__ seq_idx \
 ) { \
     switch (ds) { \
-    case 8: NAME##_specialized<8>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
-    case 16: NAME##_specialized<16>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
-    case 32: NAME##_specialized<32>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
-    case 64: NAME##_specialized<64>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
-    default: NAME##_generic(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
+    case 8: NAME##_specialized<8>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    case 16: NAME##_specialized<16>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    case 32: NAME##_specialized<32>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    case 64: NAME##_specialized<64>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    default: NAME##_generic(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
     } \
 }
 
@@ -755,7 +798,8 @@ extern "C" __global__ void NAME(                                               \
     const float* gamma_flat,  /* [B * T * nh] */                               \
     const float* D,           /* [nh] */                                       \
     int batch, int T, int nh, int hd, int ds,                                  \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
     int h = y_first + blockIdx.y;                                              \
@@ -780,6 +824,14 @@ extern "C" __global__ void NAME(                                               \
     d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);                            \
                                                                                \
     for (int t = 0; t < T; t++) {                                              \
+        if (vl_starts(seq_idx, b, T, t)) {                                     \
+            for (int n = 0; n < ds; n++) h_local[n] = 0.0f;                    \
+            if (p == 0) {                                                      \
+                for (int n = 0; n < ds; n++)                                   \
+                    k_state[b * nh * ds + h * ds + n] = 0.0f;                  \
+            }                                                                  \
+            v_state[b * nh * hd + h * hd + p] = 0.0f;                          \
+        }                                                                      \
         /* O1: alpha, beta, gamma broadcast from p=0 */                        \
         float alpha_h = 0.0f;                                                  \
         if (p == 0) alpha_h = alpha_flat[(b * T + t) * nh + h];                \
@@ -871,6 +923,10 @@ DEFINE_M3_BURNIN_FWD_NOSAVE(m3_burnin_fwd_nosave_i64, long long)
 // which is what lets the compiler keep the state in registers instead of
 // re-reading it every step; the 0 instantiation keeps an arbitrary width
 // working at the original speed.
+//
+// In a packed row (`seq_idx`, see _varlen.cuh) a token that starts a
+// sequence stepped from the empty state: it takes no alpha gradient and
+// passes no state, key or input gradient back to the token before it.
 template <int DS, typename IDX>
 __device__ __forceinline__ void m3_backward_seq_tpl(
     // Saved activations from forward
@@ -895,7 +951,8 @@ __device__ __forceinline__ void m3_backward_seq_tpl(
     float* __restrict__ d_gamma,     // [B * T * nh] (lane-0 direct store per (b,t,h))
     float* __restrict__ d_D_local,   // [B * d_inner] per-thread, reduced by m3_reduce_d_D
     int batch, int T, int nh, int hd, int ds,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     IDX b = blockIdx.x;
     int h = y_first + blockIdx.y;
@@ -962,6 +1019,7 @@ __device__ __forceinline__ void m3_backward_seq_tpl(
         float dy_val = d_y_flat[x_idx];
         float x_val = x_flat[x_idx];
         float v_prev = v_prev_saved[(b * T + t) * d_inner + h * hd + p];
+        const bool fresh = vl_starts(seq_idx, b, T, t);
 
         // O1: alpha, beta, gamma broadcast from p=0
         float alpha_h = 0.0f;
@@ -1027,8 +1085,9 @@ __device__ __forceinline__ void m3_backward_seq_tpl(
             // Gradients through trapezoidal recurrence
             float dh_n = d_h_reg[n];
 
-            // d_alpha += dh * h_prev  (scalar, reduce over p and n)
-            d_alpha_acc += dh_n * h_prev_n;
+            // d_alpha += dh * h_prev  (scalar, reduce over p and n); a
+            // sequence's first step has no state before it.
+            if (!fresh) d_alpha_acc += dh_n * h_prev_n;
 
             // d_beta += dh * v_prev * k_prev  (scalar, reduce over p and n)
             d_beta_acc += dh_n * v_prev * kp_n;
@@ -1066,15 +1125,17 @@ __device__ __forceinline__ void m3_backward_seq_tpl(
             if (p == 0)
                 d_k_write[n] += d_kc_val;
 
-            // BPTT: propagate d_h backward through alpha
-            d_h_reg[n] = alpha_h * dh_n;
+            // BPTT: propagate d_h backward through alpha, and nothing past a
+            // sequence's first step.
+            d_h_reg[n] = fresh ? 0.0f : alpha_h * dh_n;
+            if (fresh && p == 0) d_k_carry[n] = 0.0f;
         }
 
         // Write d_x for this timestep (includes D skip + v_prev carry + gamma*k_cur path)
         d_x[x_idx] = d_x_val;
 
         // d_v_carry for next iteration: v_prev[t] = x[t-1], so this flows to d_x[t-1]
-        d_v_carry = d_v_prev_acc;
+        d_v_carry = fresh ? 0.0f : d_v_prev_acc;
 
         // flush d_k for this timestep (single writer from lane 0).
         if (p == 0) {
@@ -1136,13 +1197,14 @@ void NAME(                                                                   \
     float* __restrict__ d_alpha, float* __restrict__ d_beta,                 \
     float* __restrict__ d_gamma, float* __restrict__ d_D_local,              \
     int batch, int T, int nh, int hd, int ds,                                \
-    int y_first /* this run's first y block */                               \
+    int y_first, /* this run's first y block */                              \
+    const int* __restrict__ seq_idx                                          \
 ) {                                                                          \
     m3_backward_seq_tpl<DS_VALUE, IDX>(                                      \
         h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat,         \
         alpha_flat, beta_flat, gamma_flat, D, d_y_flat,                      \
         d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local,                  \
-        batch, T, nh, hd, ds, y_first);                                      \
+        batch, T, nh, hd, ds, y_first, seq_idx);                             \
 }
 M3_BACKWARD_SEQ_ENTRY(m3_backward_seq, int, 0)
 M3_BACKWARD_SEQ_ENTRY(m3_backward_seq_i64, long long, 0)

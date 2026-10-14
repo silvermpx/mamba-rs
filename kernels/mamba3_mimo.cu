@@ -94,14 +94,15 @@ DEFINE_MIMO_BC_NORM(mimo_bc_norm_f16, __half)
 
 // The step scalars of head h at one token: alpha = e^(A dt), beta =
 // alpha dt lam_c, gamma = lam dt, and dt, A, lam and lam_c for the
-// backward.
+// backward. A token that starts a packed sequence (`fresh`) keeps nothing
+// of the step before: its alpha and beta are zero.
 struct MimoStep {
     float alpha, beta, gamma, dt, a, lam, lam_c;
 };
 
 template <typename TI>
 __device__ __forceinline__ MimoStep mimo_step_scalars(
-    const TI* pr, int heads, int nh, int h, float dt_bias, float a_floor
+    const TI* pr, int heads, int nh, int h, float dt_bias, float a_floor, bool fresh
 ) {
     MimoStep st;
     float dd_a = to_f(pr[heads + nh + h]);
@@ -117,6 +118,10 @@ __device__ __forceinline__ MimoStep mimo_step_scalars(
     st.lam_c = mimo_sigmoid(-trap);
     st.beta = __fmul_rn(__fmul_rn(st.alpha, st.dt), st.lam_c);
     st.gamma = __fmul_rn(st.lam, st.dt);
+    if (fresh) {
+        st.alpha = 0.0f;
+        st.beta = 0.0f;
+    }
     return st;
 }
 
@@ -185,7 +190,12 @@ __device__ __forceinline__ void mimo_split4(float (&dst)[J][RA], int r, const fl
 // The keys and queries of a batch of four, the same for every channel of a
 // warp, come as one float4 per rank when their rows are 16-byte aligned.
 // The chains are the same, n ascending.
-template <int RK>
+// FRESH is a token that starts a packed sequence: its state row and the
+// previous keys are the empty state, so they read as zeros and the buffers,
+// which still hold the sequence before, are never loaded (the caller also
+// passes zero alpha, beta and v_prev). The chains are the ones a window
+// starting from the empty state runs.
+template <int RK, bool FRESH = false>
 __device__ __forceinline__ void mimo_tok_row(
     float* __restrict__ srow, float* y, float* u, float* up, const float* px, float x,
     float v_prev, const float* __restrict__ kc, const float* __restrict__ kp,
@@ -203,17 +213,22 @@ __device__ __forceinline__ void mimo_tok_row(
         bv[r] = __fmul_rn(beta, up[r]);
         y[r] = 0.0f;
     }
-    const bool vec = J == 4 && mimo_rows_aligned(kc, kp, qv, ds);
+    const bool vec = J == 4 && mimo_rows_aligned(kc, FRESH ? kc : kp, qv, ds);
     int n = 0;
     for (; J > 1 && n + J <= ds; n += J) {
         float sv[J], kcv[J][RK], kpv[J][RK], qvv[J][RK];
 #pragma unroll
-        for (int j = 0; j < J; j++) sv[j] = srow[n + j];
+        for (int j = 0; j < J; j++) sv[j] = FRESH ? 0.0f : srow[n + j];
         if (vec) {
 #pragma unroll
             for (int r = 0; r < R; r++) {
                 mimo_split4(kcv, r, kc + r * ds + n);
-                mimo_split4(kpv, r, kp + r * ds + n);
+                if constexpr (FRESH) {
+#pragma unroll
+                    for (int j = 0; j < J; j++) kpv[j][r] = 0.0f;
+                } else {
+                    mimo_split4(kpv, r, kp + r * ds + n);
+                }
                 mimo_split4(qvv, r, qv + r * ds + n);
             }
         } else {
@@ -222,7 +237,7 @@ __device__ __forceinline__ void mimo_tok_row(
 #pragma unroll
                 for (int r = 0; r < R; r++) {
                     kcv[j][r] = kc[r * ds + n + j];
-                    kpv[j][r] = kp[r * ds + n + j];
+                    kpv[j][r] = FRESH ? 0.0f : kp[r * ds + n + j];
                     qvv[j][r] = qv[r * ds + n + j];
                 }
             }
@@ -244,13 +259,13 @@ __device__ __forceinline__ void mimo_tok_row(
     }
     for (; n < ds; n++) {
         float inner = __fmul_rn(gx[0], kc[n]);
-        inner = __fmaf_rn(bv[0], kp[n], inner);
+        inner = __fmaf_rn(bv[0], FRESH ? 0.0f : kp[n], inner);
 #pragma unroll
         for (int r = 1; r < R; r++) {
             inner = __fmaf_rn(gx[r], kc[r * ds + n], inner);
-            inner = __fmaf_rn(bv[r], kp[r * ds + n], inner);
+            inner = __fmaf_rn(bv[r], FRESH ? 0.0f : kp[r * ds + n], inner);
         }
-        float s = __fmaf_rn(alpha, srow[n], inner);
+        float s = __fmaf_rn(alpha, FRESH ? 0.0f : srow[n], inner);
         srow[n] = s;
 #pragma unroll
         for (int r = 0; r < R; r++) y[r] = __fmaf_rn(s, qv[r * ds + n], y[r]);
@@ -376,6 +391,11 @@ __device__ __forceinline__ bool mimo_last_tile(unsigned int* done, long long bh,
 // before tokens 0, stride, 2 stride, ... is also written to the
 // checkpoints ([B, S, H, ...], S = ceil(seq / stride)), what the training
 // backward replays from.
+//
+// With a packing (`seq_idx`, see _varlen.cuh) a token that starts a
+// sequence runs from the empty state, previous keys, previous input and
+// angles, with zero alpha and beta; a checkpoint keeps the state before
+// it, and the replay starts the sequence again the same way.
 template <typename TI, bool CKPT, int RK>
 __device__ __forceinline__ void mimo_scan_body(
     TI* __restrict__ out,
@@ -393,7 +413,8 @@ __device__ __forceinline__ void mimo_scan_body(
     float* __restrict__ ck_v, float* __restrict__ ck_ang, int stride,
     int tile, unsigned int* __restrict__ done, float* __restrict__ y_out,
     int y_first, /* this run's first y block */
-    int z_first /* this run's first z block */
+    int z_first, /* this run's first z block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float mimo_sm[];
     const int b = blockIdx.x;
@@ -449,12 +470,14 @@ __device__ __forceinline__ void mimo_scan_body(
             if (own) ck_v[q * hd + pch] = v_prev;
             if (lead && angle_owner) ck_ang[q * na + tid] = theta;
         }
-        const MimoStep sc = mimo_step_scalars(pr, heads, nh, h, dtb, a_floor);
+        const bool fresh = vl_starts(seq_idx, b, seq, t);
+        const MimoStep sc = mimo_step_scalars(pr, heads, nh, h, dtb, a_floor, fresh);
         const float dt = sc.dt;
         const float* bnr = bn + row * rgn;
         const float* cnr = cn + row * rgn;
         if (angle_owner) {
             const int a = tid;
+            if (fresh) theta = 0.0f;
             theta = mimo_wrap_add(theta, __fmul_rn(mimo_tanh_pi(pr, ang_col, a), dt));
             float sa, ca;
             sincosf(theta, &sa, &ca);
@@ -486,8 +509,14 @@ __device__ __forceinline__ void mimo_scan_body(
             const float x = to_f(pr[di + h * hd + pch]);
             const float z = to_f(pr[h * hd + pch]);
             float u[RK], up[RK], y[RK];
-            mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev, kcur, kprev, qv,
-                             sc.alpha, sc.beta, sc.gamma, dval, rank, ds);
+            if (fresh) {
+                v_prev = 0.0f;
+                mimo_tok_row<RK, true>(st + tid * (ds + 1), y, u, up, px, x, v_prev, kcur,
+                                       kprev, qv, sc.alpha, sc.beta, sc.gamma, dval, rank, ds);
+            } else {
+                mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev, kcur, kprev, qv,
+                                 sc.alpha, sc.beta, sc.gamma, dval, rank, ds);
+            }
             mimo_put(&out[row * di + h * hd + pch], mimo_tok_gate<RK>(y, pz, po, z, rank));
             if (y_out != nullptr) {
 #pragma unroll
@@ -538,7 +567,8 @@ __device__ __forceinline__ void mimo_scan_pipe_body(
     float* __restrict__ ck_v, float* __restrict__ ck_ang, int stride,
     int tile, unsigned int* __restrict__ done, float* __restrict__ y_out,
     int y_first, /* this run's first y block */
-    int z_first /* this run's first z block */
+    int z_first, /* this run's first z block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float mimo_sm[];
     const int b = blockIdx.x;
@@ -587,7 +617,8 @@ __device__ __forceinline__ void mimo_scan_pipe_body(
     auto build = [&](int t) {
         const long long row = (long long)b * seq + t;
         const TI* pr = proj + row * ld_proj;
-        const MimoStep sc = mimo_step_scalars(pr, heads, nh, h, dtb, a_floor);
+        const bool fresh = vl_starts(seq_idx, b, seq, t);
+        const MimoStep sc = mimo_step_scalars(pr, heads, nh, h, dtb, a_floor, fresh);
         float* kd = kbuf + (t % 3) * rn;
         float* qd = qbuf + (t % 2) * rn;
         if (btid == 0) {
@@ -602,6 +633,7 @@ __device__ __forceinline__ void mimo_scan_pipe_body(
             const int a = btid;
             if (CKPT && lead && t % stride == 0)
                 ck_ang[(((long long)b * nseg + t / stride) * nh + h) * na + a] = theta;
+            if (fresh) theta = 0.0f;
             theta = mimo_wrap_add(theta, __fmul_rn(mimo_tanh_pi(pr, ang_col, a), sc.dt));
             float sa, ca;
             sincosf(theta, &sa, &ca);
@@ -648,9 +680,16 @@ __device__ __forceinline__ void mimo_scan_pipe_body(
             const float x = to_f(pr[di + h * hd + pch]);
             const float z = to_f(pr[h * hd + pch]);
             float u[RK], up[RK], y[RK];
-            mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev,
-                             kbuf + (t % 3) * rn, kbuf + ((t + 2) % 3) * rn,
-                             qbuf + (t % 2) * rn, sd[0], sd[1], sd[2], dval, rank, ds);
+            if (vl_starts(seq_idx, b, seq, t)) {
+                v_prev = 0.0f;
+                mimo_tok_row<RK, true>(st + tid * (ds + 1), y, u, up, px, x, v_prev,
+                                       kbuf + (t % 3) * rn, kbuf + ((t + 2) % 3) * rn,
+                                       qbuf + (t % 2) * rn, sd[0], sd[1], sd[2], dval, rank, ds);
+            } else {
+                mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev,
+                                 kbuf + (t % 3) * rn, kbuf + ((t + 2) % 3) * rn,
+                                 qbuf + (t % 2) * rn, sd[0], sd[1], sd[2], dval, rank, ds);
+            }
             mimo_put(&out[row * di + h * hd + pch], mimo_tok_gate<RK>(y, pz, po, z, rank));
             if (y_out != nullptr) {
 #pragma unroll
@@ -692,18 +731,21 @@ __device__ __forceinline__ void mimo_scan_any(
     float* __restrict__ ck_v, float* __restrict__ ck_ang, int stride,
     int tile, int allow_pipe, unsigned int* __restrict__ done, float* __restrict__ y_out,
     int y_first, /* this run's first y block */
-    int z_first /* this run's first z block */
+    int z_first, /* this run's first z block */
+    const int* __restrict__ seq_idx
 ) {
     const int pc = min(tile, hd - (int)(z_first + blockIdx.z) * tile);
     const int spare = (int)blockDim.x - ((pc + 31) & ~31);
     if (allow_pipe && spare >= 32 && spare >= na)
         mimo_scan_pipe_body<TI, CKPT, RK>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,
             dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd, ds, rank,
-            na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride, tile, done, y_out, y_first, z_first);
+            na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride, tile, done, y_out, y_first, z_first,
+            seq_idx);
     else
         mimo_scan_body<TI, CKPT, RK>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,
             dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd, ds, rank,
-            na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride, tile, done, y_out, y_first, z_first);
+            na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride, tile, done, y_out, y_first, z_first,
+            seq_idx);
 }
 
 #define DEFINE_MIMO_SCAN(NAME, TI)                                             \
@@ -722,12 +764,13 @@ extern "C" __global__ void NAME(                                               \
     float a_floor, int tile, int allow_pipe, unsigned int* __restrict__ done,  \
     float* __restrict__ y_out,                                                 \
     int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
+    int z_first, /* this run's first z block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     mimo_scan_any<TI, false, MIMO_RANK>(out, ssm, kst, vst, ang, proj,         \
         ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,   \
         seq, nh, ng, hd, ds, rank, na, a_floor, nullptr, nullptr, nullptr,     \
-        nullptr, 1, tile, allow_pipe, done, y_out, y_first, z_first);          \
+        nullptr, 1, tile, allow_pipe, done, y_out, y_first, z_first, seq_idx); \
 }
 
 DEFINE_MIMO_SCAN(mimo_scan, float)
@@ -755,12 +798,13 @@ extern "C" __global__ void NAME(                                               \
     int tile, int allow_pipe, unsigned int* __restrict__ done,                 \
     float* __restrict__ y_out,                                                 \
     int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
+    int z_first, /* this run's first z block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     mimo_scan_any<TI, true, MIMO_RANK>(out, ssm, kst, vst, ang, proj,          \
         ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,   \
         seq, nh, ng, hd, ds, rank, na, a_floor, ck_ssm, ck_k, ck_v, ck_ang,    \
-        stride, tile, allow_pipe, done, y_out, y_first, z_first);              \
+        stride, tile, allow_pipe, done, y_out, y_first, z_first, seq_idx);     \
 }
 
 DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt, float)

@@ -24,14 +24,17 @@
 // The conv over the window and the conv state after it. One thread per
 // (row, channel): v = bias + sum_k w[c][k] x[t - W + 1 + k][c], the taps
 // before the window read from the carried state (`state[b][c][k]`, the last
-// d_conv inputs, newest last); out = silu(v). Grid 1-D over B * T * conv_dim.
+// d_conv inputs, newest last); out = silu(v). In a packed row (`seq_idx`,
+// see _varlen.cuh) a tap of another sequence reads 0, the empty history a
+// sequence starts from. Grid 1-D over B * T * conv_dim.
 #define DEFINE_M2_CONV_PREFILL(NAME, TI, FROM_F)                               \
 extern "C" __global__ void NAME(                                               \
     TI* __restrict__ out,                                                      \
     const float* __restrict__ state,                                           \
-    const TI* __restrict__ proj, long long ld_proj, int xbc_col,              \
+    const TI* __restrict__ proj, long long ld_proj, int xbc_col,               \
     const float* __restrict__ w, const float* __restrict__ bias,               \
-    int batch, int seq, int conv_dim, int d_conv                               \
+    int batch, int seq, int conv_dim, int d_conv,                              \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;            \
     long long total = (long long)batch * seq * conv_dim;                       \
@@ -40,12 +43,14 @@ extern "C" __global__ void NAME(                                               \
     const long long row = i / conv_dim;                                        \
     const int t = (int)(row % seq);                                            \
     const int b = (int)(row / seq);                                            \
+    const int sid = vl_id(seq_idx, b, seq, t);                                 \
     float v = bias[c];                                                         \
     for (int k = 0; k < d_conv; k++) {                                         \
         int src = t - (d_conv - 1) + k;                                        \
         float xv = src >= 0                                                    \
             ? to_f(proj[((long long)b * seq + src) * ld_proj + xbc_col + c])   \
             : state[((long long)b * conv_dim + c) * d_conv + d_conv + src];    \
+        if (vl_id(seq_idx, b, seq, src) != sid) xv = 0.0f;                     \
         v = __fmaf_rn(w[(long long)c * d_conv + k], xv, v);                    \
     }                                                                          \
     out[i] = FROM_F(m2_silu(v));                                               \
@@ -85,25 +90,29 @@ DEFINE_M2_CONV_STEP(m2_conv_step_bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M2_CONV_STEP(m2_conv_step_f16, __half, from_f_f16)
 
 // The conv state after the window: the last d_conv raw inputs, from the
-// window or, for a window shorter than that, the previous state. Writes a
-// separate buffer (the prefill conv above still reads the old state).
-// Grid 1-D over B * conv_dim.
+// window or, for a window shorter than that, the previous state; in a
+// packed row only those of the last sequence, the rest 0. Writes a separate
+// buffer (the prefill conv above still reads the old state). Grid 1-D over
+// B * conv_dim.
 #define DEFINE_M2_CONV_STATE(NAME, TI)                                         \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ new_state,                                             \
     const float* __restrict__ state,                                           \
-    const TI* __restrict__ proj, long long ld_proj, int xbc_col,              \
-    int batch, int seq, int conv_dim, int d_conv                               \
+    const TI* __restrict__ proj, long long ld_proj, int xbc_col,               \
+    int batch, int seq, int conv_dim, int d_conv,                              \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;            \
     if (i >= (long long)batch * conv_dim) return;                              \
     const int c = (int)(i % conv_dim);                                         \
     const int b = (int)(i / conv_dim);                                         \
+    const int last = vl_id(seq_idx, b, seq, seq - 1);                          \
     for (int k = 0; k < d_conv; k++) {                                         \
         int src = seq - d_conv + k;                                            \
         float xv = src >= 0                                                    \
             ? to_f(proj[((long long)b * seq + src) * ld_proj + xbc_col + c])   \
             : state[((long long)b * conv_dim + c) * d_conv + d_conv + src];    \
+        if (vl_id(seq_idx, b, seq, src) != last) xv = 0.0f;                    \
         new_state[((long long)b * conv_dim + c) * d_conv + k] = xv;            \
     }                                                                          \
 }
@@ -114,7 +123,9 @@ DEFINE_M2_CONV_STATE(m2_conv_state_f16, __half)
 
 // dt and the chunk cumsum of a = dt A, one block per (b, chunk) and four
 // heads: a head's 64 threads compute the dt of its tokens at once, then one
-// of them runs the sum in token order over shared memory. Outputs
+// of them runs the sum in token order over shared memory. In a packed row
+// the sum restarts where a sequence starts, so every sum of a sequence's
+// tokens is its own, whatever came before it in the chunk. Outputs
 // [B, nc, H, 64]; the tail of a short last chunk is written 0 and never
 // read. Grid (B * nc, ceil(H / 4)), block (64, 4).
 #define DEFINE_M2_DT_CUMSUM(NAME, TI)                                          \
@@ -123,10 +134,12 @@ extern "C" __global__ void NAME(                                               \
     const TI* __restrict__ proj, long long ld_proj, int dt_off,               \
     const float* __restrict__ dt_bias, const float* __restrict__ a_neg,        \
     int batch, int seq, int nh, int has_limit, float dt_min, float dt_max,     \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     __shared__ float dts[4][M2_CHUNK];                                         \
     __shared__ float acss[4][M2_CHUNK];                                        \
+    __shared__ bool fresh[M2_CHUNK];                                           \
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;                            \
     const long long bc = blockIdx.x;                                           \
     if (bc >= (long long)batch * nc) return;                                   \
@@ -146,11 +159,13 @@ extern "C" __global__ void NAME(                                               \
         if (has_limit && dt == dt) dt = fminf(fmaxf(dt, dt_min), dt_max);     \
     }                                                                          \
     dts[hl][t] = dt;                                                           \
+    if (hl == 0) fresh[t] = t < lc && vl_starts(seq_idx, b, seq, t0 + t);      \
     __syncthreads();                                                           \
     if (live && t == 0) {                                                      \
         const float an = a_neg[h];                                             \
         float acc = 0.0f;                                                      \
         for (int s = 0; s < lc; s++) {                                         \
+            if (fresh[s]) acc = 0.0f;                                          \
             acc = __fadd_rn(acc, __fmul_rn(dts[hl][s], an));                   \
             acss[hl][s] = acc;                                                 \
         }                                                                      \
@@ -168,7 +183,7 @@ DEFINE_M2_DT_CUMSUM(m2_dt_cumsum_f16, __half)
 
 // CB[t][s] for s <= t of every chunk and group: [B, nc, G, 64 * 65 / 2],
 // pair (t, s) at t (t + 1) / 2 + s, each the chain over n ascending from 0;
-// past the chunk's tokens 0. One block per (chunk, group): the C and B
+// past the chunk's tokens, and for two sequences of a packed row, 0. One block per (chunk, group): the C and B
 // rows staged transposed [N][68]; thread (tg, sg) of the lower triangle of
 // 4 x 4 token tiles runs its 16 chains, the rows staged up to 128 state
 // indices a pass. Grid (B * nc, G), block 256; dynamic shared memory
@@ -176,9 +191,10 @@ DEFINE_M2_DT_CUMSUM(m2_dt_cumsum_f16, __half)
 #define DEFINE_M2_BMM(NAME, TI)                                                \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ cb,                                                    \
-    const TI* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,       \
+    const TI* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,        \
     int batch, int seq, int ng, int ds,                                        \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     extern __shared__ float m2bmm_sm[];                                        \
     constexpr int LS = M2_CHUNK + 4;                                           \
@@ -230,9 +246,12 @@ extern "C" __global__ void NAME(                                               \
     const long long o = (bc * ng + g) * pairs;                                 \
     _Pragma("unroll") for (int i = 0; i < 4; i++) {                            \
         const int t = 4 * tg + i;                                              \
+        const int it = t < lc ? vl_id(seq_idx, b, seq, t0 + t) : 0;            \
         _Pragma("unroll") for (int j = 0; j < 4; j++) {                        \
             const int s_ = 4 * sg + j;                                         \
-            if (s_ <= t) cb[o + t * (t + 1) / 2 + s_] = t < lc ? acc[i][j] : 0.0f; \
+            if (s_ <= t)                                                       \
+                cb[o + t * (t + 1) / 2 + s_] =                                 \
+                    t < lc && vl_id(seq_idx, b, seq, t0 + s_) == it ? acc[i][j] : 0.0f; \
         }                                                                      \
     }                                                                          \
 }
@@ -264,6 +283,8 @@ __device__ __forceinline__ void m2_stage4(int count, int tid, int nthr, LF load,
 
 // Each chunk's own state S[p][n] = sum_t B_t[n] xw[t][p], from zero, t
 // ascending: [B, nc, H, P, N], with xw = x (e^min(Acs_last - Acs_t, 0) dt_t).
+// In a packed row only the chunk's last sequence reaches its state: t runs
+// from where that sequence begins in the chunk.
 // Register tiles: a warp takes 4 channels p and a lane the state indices
 // lane + 32 j of the block's tile (JC of them). The per-token weights and
 // the B rows [64][32 JC] are staged once per block, xw [64][pt] once per
@@ -278,7 +299,8 @@ __device__ __forceinline__ void m2_chunk_state_body(
     const TI* __restrict__ xbc, long long ld_xbc, int b_col,
     const float* __restrict__ dt, const float* __restrict__ acs,
     int batch, int seq, int nh, int ng, int hd, int ds, int pt,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float4 m2cs_sm4[];
     constexpr int NT = 32 * JC;
@@ -299,8 +321,11 @@ __device__ __forceinline__ void m2_chunk_state_body(
     const int tid = threadIdx.x;
     const int lane = tid & 31, warp = tid >> 5, nw = blockDim.x >> 5;
     const float acs_last = acs[sc + lc - 1];
+    const int kept = vl_seq_first(seq_idx, b, seq, t0, t0 + lc - 1) - t0;
     for (int t = tid; t < lc; t += blockDim.x)
-        ws[t] = __fmul_rn(m2_exp(fminf(__fsub_rn(acs_last, acs[sc + t]), 0.0f)), dt[sc + t]);
+        ws[t] = t >= kept
+            ? __fmul_rn(m2_exp(fminf(__fsub_rn(acs_last, acs[sc + t]), 0.0f)), dt[sc + t])
+            : 0.0f;
     __syncthreads();
     m2_stage4(lc * NT, threadIdx.x, blockDim.x,
               [&](int i) {
@@ -317,7 +342,9 @@ __device__ __forceinline__ void m2_chunk_state_body(
               [&](int i) {
                   const int t = i / pt, p = pt0 + (i - t * pt);
                   const long long r = (b * seq + t0 + t) * ld_xbc;
-                  return p < hd ? __fmul_rn(to_f(xbc[r + (long long)h * hd + p]), ws[t]) : 0.0f;
+                  return p < hd && t >= kept
+                      ? __fmul_rn(to_f(xbc[r + (long long)h * hd + p]), ws[t])
+                      : 0.0f;
               },
               [&](int i, float v) { xs[i] = v; });
     __syncthreads();
@@ -328,7 +355,7 @@ __device__ __forceinline__ void m2_chunk_state_body(
 #pragma unroll
             for (int j = 0; j < JC; j++) acc[i][j] = 0.0f;
         }
-        for (int t = 0; t < lc; t++) {
+        for (int t = kept; t < lc; t++) {
             const float4 x4 = *reinterpret_cast<const float4*>(xs + t * pt + p0);
             const float xv[4] = {x4.x, x4.y, x4.z, x4.w};
             float bv[JC];
@@ -357,20 +384,21 @@ __device__ __forceinline__ void m2_chunk_state_body(
 #define DEFINE_M2_CHUNK_STATE(NAME, TI)                                        \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ states,                                                \
-    const TI* __restrict__ xbc, long long ld_xbc, int b_col,                  \
+    const TI* __restrict__ xbc, long long ld_xbc, int b_col,                   \
     const float* __restrict__ dt, const float* __restrict__ acs,               \
     int batch, int seq, int nh, int ng, int hd, int ds, int pt,                \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     if (ds <= 32)                                                              \
         m2_chunk_state_body<TI, 1>(states, xbc, ld_xbc, b_col, dt, acs, batch, \
-            seq, nh, ng, hd, ds, pt, y_first);                                 \
+            seq, nh, ng, hd, ds, pt, y_first, seq_idx);                        \
     else if (ds <= 64)                                                         \
         m2_chunk_state_body<TI, 2>(states, xbc, ld_xbc, b_col, dt, acs, batch, \
-            seq, nh, ng, hd, ds, pt, y_first);                                 \
+            seq, nh, ng, hd, ds, pt, y_first, seq_idx);                        \
     else                                                                       \
         m2_chunk_state_body<TI, 4>(states, xbc, ld_xbc, b_col, dt, acs, batch, \
-            seq, nh, ng, hd, ds, pt, y_first);                                 \
+            seq, nh, ng, hd, ds, pt, y_first, seq_idx);                        \
 }
 
 DEFINE_M2_CHUNK_STATE(m2_chunk_state, float)
@@ -379,7 +407,9 @@ DEFINE_M2_CHUNK_STATE(m2_chunk_state_f16, __half)
 
 // The states across chunks: the state entering chunk c replaces S_c in
 // `states`, and the carried state `ssm` ([B, H, P, N]) ends as the state
-// after the window: h_c = e^Acs_last h_{c-1} + S_c. One thread per
+// after the window: h_c = e^Acs_last h_{c-1} + S_c, or h_c = S_c for a chunk
+// where a sequence of a packed row starts (its state is the new
+// sequence's, which owes nothing to the state before). One thread per
 // (b, h, p, n) walking the chunks, the chunks' decays computed once per
 // block into shared memory (M2_PASS_WINDOW chunks at a time) and the next
 // four chunks' S loaded ahead, so a step waits on one fma rather than on
@@ -390,9 +420,11 @@ extern "C" __global__ void m2_state_passing(
     float* __restrict__ ssm,
     const float* __restrict__ acs,
     int batch, int seq, int nh, int hd, int ds,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     __shared__ float decay[M2_PASS_WINDOW];
+    __shared__ bool reset[M2_PASS_WINDOW];
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bh = blockIdx.x;
     const long long e = (long long)(y_first + blockIdx.y) * blockDim.x + threadIdx.x;
@@ -414,6 +446,8 @@ extern "C" __global__ void m2_state_passing(
             const int c = c0 + i;
             const int lc = min(M2_CHUNK, seq - c * M2_CHUNK);
             decay[i] = m2_exp(acs[((b * nc + c) * nh + h) * M2_CHUNK + lc - 1]);
+            reset[i] = vl_id(seq_idx, b, seq, c * M2_CHUNK + lc - 1)
+                       != vl_id(seq_idx, b, seq, c * M2_CHUNK - 1);
         }
         __syncthreads();
         if (!live) continue;
@@ -425,26 +459,29 @@ extern "C" __global__ void m2_state_passing(
             ring[2] = ring[3];
             ring[3] = c + 4 < nc ? states[base + (c + 4) * cstride] : 0.0f;
             states[base + c * cstride] = st;
-            st = __fmaf_rn(decay[i], st, s_c);
+            st = reset[i] ? s_c : __fmaf_rn(decay[i], st, s_c);
         }
     }
     if (live) ssm[bh * pn + e] = st;
 }
 
 // The outputs: y_t[p] = (sum_n C_t[n] h_prev[p][n]) e^Acs_t
-// + sum_{s<=t} W[t][s] x_s[p] + D x_t[p], f32 [B * T, d_ssm]. One thread
-// per (t, p). Grid (B * nc, H, ceil(64 * P / blockDim.x)).
+// + sum_{s<=t} W[t][s] x_s[p] + D x_t[p], f32 [B * T, d_ssm]. In a packed
+// row the entering state reaches only the tokens that continue its
+// sequence, and s runs over t's own sequence. One thread per (t, p). Grid
+// (B * nc, H, ceil(64 * P / blockDim.x)).
 #define DEFINE_M2_CHUNK_SCAN(NAME, TI)                                         \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ y,                                                     \
     const float* __restrict__ states,                                          \
     const float* __restrict__ cb,                                              \
-    const TI* __restrict__ xbc, long long ld_xbc, int c_col,                  \
+    const TI* __restrict__ xbc, long long ld_xbc, int c_col,                   \
     const float* __restrict__ dt, const float* __restrict__ acs,               \
     const float* __restrict__ D, int d_per_channel,                            \
     int batch, int seq, int nh, int ng, int hd, int ds,                        \
     int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
+    int z_first, /* this run's first z block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;                            \
     const long long bc = blockIdx.x;                                           \
@@ -462,15 +499,21 @@ extern "C" __global__ void NAME(                                               \
     const long long sc = (bc * nh + h) * M2_CHUNK;                             \
     const long long rt = (b * seq + t0 + t) * ld_xbc;                          \
     const float* hprev = states + ((bc * nh + h) * hd + p) * (long long)ds;    \
-    float acc = 0.0f;                                                          \
-    for (int n = 0; n < ds; n++)                                               \
-        acc = __fmaf_rn(to_f(xbc[rt + c_col + (long long)g * ds + n]),         \
-                        hprev[n], acc);                                        \
+    /* The tokens before the chunk's first start continue the entering */      \
+    /* state's sequence. */                                                    \
+    const int cont = vl_lower_bound(seq_idx, b, seq, t0, t0 + lc,              \
+                                    vl_id(seq_idx, b, seq, t0 - 1) + 1) - t0;  \
     const float acs_t = acs[sc + t];                                           \
-    acc = __fmul_rn(acc, m2_exp(acs_t));                                       \
+    float acc = 0.0f;                                                          \
+    if (t < cont) {                                                            \
+        for (int n = 0; n < ds; n++)                                           \
+            acc = __fmaf_rn(to_f(xbc[rt + c_col + (long long)g * ds + n]),     \
+                            hprev[n], acc);                                    \
+        acc = __fmul_rn(acc, m2_exp(acs_t));                                   \
+    }                                                                          \
     const long long cbo = (bc * ng + g) * (M2_CHUNK * (M2_CHUNK + 1) / 2)      \
                           + (long long)t * (t + 1) / 2;                        \
-    for (int s = 0; s <= t; s++) {                                             \
+    for (int s = vl_seq_first(seq_idx, b, seq, t0, t0 + t) - t0; s <= t; s++) { \
         float wts = __fmul_rn(                                                 \
             __fmul_rn(cb[cbo + s],                                             \
                       m2_exp(fminf(__fsub_rn(acs_t, acs[sc + s]), 0.0f))),     \
@@ -482,7 +525,7 @@ extern "C" __global__ void NAME(                                               \
     const float xt = to_f(xbc[rt + (long long)h * hd + p]);                    \
     const float dv = d_per_channel ? D[(long long)h * hd + p] : D[h];          \
     acc = __fmaf_rn(xt, dv, acc);                                              \
-    y[(b * seq + t0 + t) * ((long long)nh * hd) + (long long)h * hd + p] = acc;\
+    y[(b * seq + t0 + t) * ((long long)nh * hd) + (long long)h * hd + p] = acc; \
 }
 
 DEFINE_M2_CHUNK_SCAN(m2_chunk_scan, float)
@@ -497,7 +540,8 @@ DEFINE_M2_CHUNK_SCAN(m2_chunk_scan_f16, __half)
 // and the x rows of every token up to the tile's last are staged; a warp
 // then takes 4 tokens at a time and a lane the channels lane, lane + 32.
 // Each output keeps m2_chunk_scan's chain: n ascending from zero, times
-// e^Acs_t, then s ascending up to t, then D x_t. Dynamic shared memory:
+// e^Acs_t, then s ascending up to t, then D x_t; a packed row masks as
+// m2_chunk_scan does. Dynamic shared memory:
 // P (N + 1) + TT N + TT 64 + 64 P floats.
 #define M2_SCAN_TT 32
 template <typename TI>
@@ -509,7 +553,8 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
     const float* __restrict__ dt, const float* __restrict__ acs,
     const float* __restrict__ D, int d_per_channel,
     int batch, int seq, int nh, int ng, int hd, int ds,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float m2cs_sm[];
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
@@ -550,7 +595,8 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
                   const int tl = i / M2_CHUNK, s = i - tl * M2_CHUNK;
                   const int t = tile0 + tl;
                   float w = 0.0f;
-                  if (s <= t) {
+                  if (s <= t
+                      && vl_id(seq_idx, b, seq, t0 + s) == vl_id(seq_idx, b, seq, t0 + t)) {
                       const float acs_t = acs[sc + t];
                       w = __fmul_rn(
                           __fmul_rn(cb[tri + (long long)t * (t + 1) / 2 + s],
@@ -569,8 +615,16 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
     __syncthreads();
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nw = blockDim.x >> 5;
     if (warp >= nw) return;
+    // The tokens before the chunk's first start continue the entering
+    // state's sequence; a token sums over its own sequence's tokens.
+    const int cont = vl_lower_bound(seq_idx, b, seq, t0, t0 + lc,
+                                    vl_id(seq_idx, b, seq, t0 - 1) + 1) - t0;
     for (int r0 = 4 * warp; r0 < tn; r0 += 4 * nw) {
         const int rows = min(4, tn - r0);
+        int lo[4];
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+            lo[i] = i < rows ? vl_seq_first(seq_idx, b, seq, t0, t0 + tile0 + r0 + i) - t0 : 0;
         for (int c0 = 0; c0 < hd; c0 += 64) {
             float acc[4][2];
 #pragma unroll
@@ -593,9 +647,10 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
 #pragma unroll
             for (int i = 0; i < 4; i++) {
                 if (i < rows) {
+                    const bool on = tile0 + r0 + i < cont;
                     const float e = m2_exp(acs[sc + tile0 + r0 + i]);
-                    acc[i][0] = __fmul_rn(acc[i][0], e);
-                    acc[i][1] = __fmul_rn(acc[i][1], e);
+                    acc[i][0] = on ? __fmul_rn(acc[i][0], e) : 0.0f;
+                    acc[i][1] = on ? __fmul_rn(acc[i][1], e) : 0.0f;
                 }
             }
             const int last = tile0 + r0 + rows - 1;
@@ -604,7 +659,7 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
                 const float x1 = on1 ? xs[s * hd + p1] : 0.0f;
 #pragma unroll
                 for (int i = 0; i < 4; i++) {
-                    if (i < rows && s <= tile0 + r0 + i) {
+                    if (i < rows && s <= tile0 + r0 + i && s >= lo[i]) {
                         const float w = ws[(r0 + i) * M2_CHUNK + s];
                         acc[i][0] = __fmaf_rn(w, x0, acc[i][0]);
                         acc[i][1] = __fmaf_rn(w, x1, acc[i][1]);
@@ -634,14 +689,15 @@ extern "C" __global__ void NAME(                                               \
     float* __restrict__ y,                                                     \
     const float* __restrict__ states,                                          \
     const float* __restrict__ cb,                                              \
-    const TI* __restrict__ xbc, long long ld_xbc, int c_col,                  \
+    const TI* __restrict__ xbc, long long ld_xbc, int c_col,                   \
     const float* __restrict__ dt, const float* __restrict__ acs,               \
     const float* __restrict__ D, int d_per_channel,                            \
     int batch, int seq, int nh, int ng, int hd, int ds,                        \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     m2_chunk_scan_tiles_body<TI>(y, states, cb, xbc, ld_xbc, c_col, dt, acs,   \
-        D, d_per_channel, batch, seq, nh, ng, hd, ds, y_first);                \
+        D, d_per_channel, batch, seq, nh, ng, hd, ds, y_first, seq_idx);       \
 }
 
 DEFINE_M2_CHUNK_SCAN_TILES(m2_chunk_scan_tiles, float)

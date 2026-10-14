@@ -316,6 +316,7 @@ fn m3_kernels_isolated_bench() {
             bld.arg(&dsi);
             bld.arg(&csi);
             bld.arg(&y_first);
+            bld.arg(&0u64);
             unsafe { bld.launch(cfg) }.unwrap();
         }
     });
@@ -343,6 +344,7 @@ fn m3_kernels_isolated_bench() {
             bld.arg(&dsi);
             bld.arg(&csi);
             bld.arg(&y_first);
+            bld.arg(&0u64);
             unsafe { bld.launch(cfg) }.unwrap();
         }
     });

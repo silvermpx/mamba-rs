@@ -45,6 +45,10 @@ use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// The prefill runs every row as one sequence: the kernels that take a
+/// packing (see [`crate::varlen`]) get none.
+const NO_PACKING: cudarc::driver::sys::CUdeviceptr = 0;
+
 /// Chunk-pipeline intermediates the prefill needs beyond the no-save layer
 /// scratch: per-window buffers consumed inside F6 and released to the next
 /// layer immediately (nothing is kept for a backward).
@@ -259,6 +263,7 @@ impl Mamba3Prefill {
             ctx: run.ctx,
             kernels: run.kernels,
             dims: run.dims,
+            seq_idx: NO_PACKING,
         }
         .check_state_cap()?;
         let has_gemm_work = run.dims.bt() != 0 && (!run.identity_proj || run.dims.n_layers != 0);
@@ -630,6 +635,7 @@ impl Mamba3Prefill {
                                 heads: nh,
                                 angles: na,
                             },
+                            seq_idx: NO_PACKING,
                         },
                     )
                 }?;
@@ -737,6 +743,7 @@ impl Mamba3Prefill {
                         b.arg(&cs);
                         b.arg(&y_first);
                         b.arg(&z_first);
+                        b.arg(&NO_PACKING);
                         unsafe { b.launch(cfg) }
                             .map_err(|e| format!("prefill da_cumsum L{l}: {e:?}"))?;
                     }
@@ -773,6 +780,7 @@ impl Mamba3Prefill {
                             b.arg(&ds_i);
                             b.arg(&cs);
                             b.arg(&y_first);
+                            b.arg(&NO_PACKING);
                             unsafe { b.launch(cfg) }.map_err(|e| {
                                 format!("prefill fused pre+state typed L{l}: {e:?}")
                             })?;
@@ -801,6 +809,7 @@ impl Mamba3Prefill {
                             b.arg(&ds_i);
                             b.arg(&cs);
                             b.arg(&y_first);
+                            b.arg(&NO_PACKING);
                             unsafe { b.launch(cfg) }
                                 .map_err(|e| format!("prefill fused pre+state L{l}: {e:?}"))?;
                         }
@@ -834,6 +843,7 @@ impl Mamba3Prefill {
                                 b.arg(&ds_i);
                                 b.arg(&cs);
                                 b.arg(&y_first);
+                                b.arg(&NO_PACKING);
                                 unsafe { b.launch(cfg) }
                                     .map_err(|e| format!("prefill preprocess typed L{l}: {e:?}"))?;
                             }
@@ -856,6 +866,7 @@ impl Mamba3Prefill {
                                 b.arg(&ds_i);
                                 b.arg(&cs);
                                 b.arg(&y_first);
+                                b.arg(&NO_PACKING);
                                 unsafe { b.launch(cfg) }
                                     .map_err(|e| format!("prefill preprocess L{l}: {e:?}"))?;
                             }
@@ -889,6 +900,7 @@ impl Mamba3Prefill {
                                 b.arg(&ds_i);
                                 b.arg(&cs);
                                 b.arg(&y_first);
+                                b.arg(&NO_PACKING);
                                 unsafe { b.launch(cfg) }.map_err(|e| {
                                     format!("prefill chunk_state typed L{l}: {e:?}")
                                 })?;
@@ -908,6 +920,7 @@ impl Mamba3Prefill {
                                 b.arg(&ds_i);
                                 b.arg(&cs);
                                 b.arg(&y_first);
+                                b.arg(&NO_PACKING);
                                 unsafe { b.launch(cfg) }
                                     .map_err(|e| format!("prefill chunk_state L{l}: {e:?}"))?;
                             }
@@ -959,6 +972,7 @@ impl Mamba3Prefill {
                         b.arg(&cs);
                         b.arg(&t_i);
                         b.arg(&y_first);
+                        b.arg(&NO_PACKING);
                         unsafe { b.launch(cfg) }
                             .map_err(|e| format!("prefill state_pass L{l}: {e:?}"))?;
                     }
@@ -1001,6 +1015,7 @@ impl Mamba3Prefill {
                             b.arg(&ds_i);
                             b.arg(&cs);
                             b.arg(&y_first);
+                            b.arg(&NO_PACKING);
                             unsafe { b.launch(cfg) }
                                 .map_err(|e| format!("prefill chunk_scan typed L{l}: {e:?}"))?;
                         }
@@ -1027,6 +1042,7 @@ impl Mamba3Prefill {
                             b.arg(&ds_i);
                             b.arg(&cs);
                             b.arg(&y_first);
+                            b.arg(&NO_PACKING);
                             unsafe { b.launch(cfg) }
                                 .map_err(|e| format!("prefill chunk_scan L{l}: {e:?}"))?;
                         }
@@ -1072,6 +1088,10 @@ impl Mamba3Prefill {
                     b.arg(tgt.a_val.inner());
                     b.arg(tgt.trap.inner());
                     n_total.push(&mut b);
+                    let (t_seq, nh_seq) = (dims.seq_len as i32, nh as i32);
+                    b.arg(&t_seq);
+                    b.arg(&nh_seq);
+                    b.arg(&NO_PACKING);
                     unsafe { b.launch(grid_1d_cover(bt * nh)?) }
                         .map_err(|e| format!("prefill compute_abg L{l}: {e:?}"))?;
                 }
@@ -1105,6 +1125,7 @@ impl Mamba3Prefill {
                         b.arg(&hd_i);
                         b.arg(&ds_i);
                         b.arg(&y_first);
+                        b.arg(&NO_PACKING);
                         unsafe { b.launch(cfg) }
                             .map_err(|e| format!("prefill sequential scan L{l}: {e:?}"))?;
                     }

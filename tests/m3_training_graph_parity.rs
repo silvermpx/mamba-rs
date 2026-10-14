@@ -244,6 +244,7 @@ fn forward_backward(s: &mut Setup, ctx: &GpuCtx, m3k: &Mamba3Kernels) -> Result<
         ctx,
         kernels: m3k,
         dims: &s.dims,
+        seq_idx: 0,
     };
     gpu_forward_mamba3_backbone_mixed(
         &exec,
@@ -332,6 +333,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
                 ctx: &ctx,
                 kernels: &m3k,
                 dims: &g.dims,
+                seq_idx: 0,
             },
             &cfg_m3(),
             Mamba3MixedCapture {
@@ -452,6 +454,7 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
                 ctx: &ctx,
                 kernels: &m3k,
                 dims: &g.dims,
+                seq_idx: 0,
             },
             &cfg_m3(),
             Mamba3MixedCapture {

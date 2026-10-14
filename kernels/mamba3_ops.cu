@@ -258,6 +258,8 @@ DEFINE_BC_BIAS_ADD(bc_bias_add_i64, long long)
 // Grid: (B, ceil(nh*n_angles/256), 1). Block: (256, 1, 1).
 // angles_raw: [B*T*n_angles], dt_arr: [B*T*nh], angle_state: [B*nh*n_angles]
 // angle_cumsum: [B*T*nh*n_angles] — saves cumulative state at each timestep.
+// A sequence of a packed row (`seq_idx`, see _varlen.cuh) sums its own
+// angles from zero.
 #define DEFINE_M3_ANGLE_DT_FWD_SEQ(NAME, IDX)                                  \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ angle_cumsum,   /* [B*T * nh * n_angles] */            \
@@ -265,7 +267,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ angles_raw, /* [B*T * n_angles] */               \
     const float* __restrict__ dt_arr,    /* [B*T * nh] */                      \
     int B, int T, int nh, int n_angles,                                        \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
     if (b >= B) return;                                                        \
@@ -281,6 +284,7 @@ extern "C" __global__ void NAME(                                               \
                                                                                \
     for (int t = 0; t < T; t++) {                                              \
         IDX bt = b * T + t;                                                    \
+        if (vl_starts(seq_idx, b, T, t)) state = 0.0;                          \
         float raw = angles_raw[bt * n_angles + a];                             \
         float dt_val = dt_arr[bt * nh + h];                                    \
         double delta = (double)(tanhf(raw) * PI * dt_val);                     \
@@ -324,6 +328,10 @@ DEFINE_M3_ANGLE_DT_FWD_SEQ(m3_angle_dt_fwd_seq_i64, long long)
 // carries defer wrapping to chunk boundaries); the difference is a few
 // fp64 ulps, invisible at the f32 output precision. It is a numeric
 // route of its own and is validated by its own parity oracle.
+//
+// In a packed row (`seq_idx`, see _varlen.cuh) a sequence sums its own
+// angles from zero: a chunk's sum runs from its last start, and the carry
+// restarts from that sum at a chunk that holds a start.
 
 #define DEFINE_M3_ANGLE_CHUNK_SUMS(NAME, IDX)                                  \
 extern "C" __global__ void NAME(                                               \
@@ -331,7 +339,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ angles_raw, /* [B*T * n_angles] */               \
     const float* __restrict__ dt_arr,     /* [B*T * nh] */                     \
     int B, int T, int nh, int n_angles, int chunk_size,                        \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
     IDX bc = blockIdx.x;                                                       \
@@ -351,6 +360,7 @@ extern "C" __global__ void NAME(                                               \
     double sum = 0.0;                                                          \
     for (int t = t_start; t < t_end; t++) {                                    \
         IDX bt = b * T + t;                                                    \
+        if (vl_starts(seq_idx, b, T, t)) sum = 0.0;                            \
         float raw = angles_raw[bt * n_angles + a];                             \
         float dt_val = dt_arr[bt * nh + h];                                    \
         sum += (double)(tanhf(raw) * PI * dt_val);                             \
@@ -389,7 +399,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ angles_raw,  /* [B*T * n_angles] */              \
     const float* __restrict__ dt_arr,      /* [B*T * nh] */                    \
     int B, int T, int nh, int n_angles, int chunk_size,                        \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
     IDX bc = blockIdx.x;                                                       \
@@ -413,7 +424,19 @@ extern "C" __global__ void NAME(                                               \
     /* entry state comes from a snapshot because the last chunk's block */     \
     /* writes the exit state into angle_state concurrently. */                 \
     double state = (double)entry_state[b * total_per_env + idx];               \
-    {                                                                          \
+    if (seq_idx != nullptr) {                                                  \
+        /* A packed row: a chunk that holds a start carries only the sum */    \
+        /* from its last start, which m3_angle_chunk_sums wrote. */            \
+        long long stride = (long long)nh * n_angles;                           \
+        const double* base = chunk_sums + (long long)b * n_chunks * stride + idx; \
+        for (int c = 0; c < chunk; c++) {                                      \
+            int c_end = min((c + 1) * chunk_size, T);                          \
+            bool reset = vl_id(seq_idx, b, T, c_end - 1)                       \
+                         != vl_id(seq_idx, b, T, c * chunk_size - 1);          \
+            double s = base[(long long)c * stride];                            \
+            state = m3_angle_wrap(reset ? s : state + s);                      \
+        }                                                                      \
+    } else {                                                                   \
         /* Eight independent loads in flight per step: the adds stay a         \
          * serial chain (same order, same bits) but the loads no longer        \
          * serialize on it. */                                                 \
@@ -444,6 +467,7 @@ extern "C" __global__ void NAME(                                               \
     }                                                                          \
     for (int t = t_start; t < t_end; t++) {                                    \
         IDX bt = b * T + t;                                                    \
+        if (vl_starts(seq_idx, b, T, t)) state = 0.0;                          \
         float raw = angles_raw[bt * n_angles + a];                             \
         float dt_val = dt_arr[bt * nh + h];                                    \
         double delta = (double)(tanhf(raw) * PI * dt_val);                     \
@@ -480,7 +504,9 @@ DEFINE_M3_ANGLE_CHUNK_APPLY(m3_angle_chunk_apply_i64, long long)
 // atomicAdd):
 //   contrib_angles[h, b, t, a] — reduce over h to get d_angles_raw[bt, a]
 //   contrib_dt[a, b, t, h]    — reduce over a to get d_dt_angle[bt, h]
-// Stage 2 (caller): two reduce_sum_axis0 launches finalise the outputs.
+// Stage 2 (caller): two reduce_sum_axis0 launches finalise the outputs. In
+// a packed row (`seq_idx`) the reverse sum restarts after a sequence's
+// first token: its angles never reach the sequence before.
 #define DEFINE_M3_ANGLE_DT_BWD_SEQ(NAME, IDX)                                  \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ contrib_angles,      /* [nh * B*T*n_angles] OUTPUT */  \
@@ -489,7 +515,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ angles_raw,    /* [B*T * n_angles] */            \
     const float* __restrict__ dt_arr,        /* [B*T * nh] */                  \
     int B, int T, int nh, int n_angles,                                        \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
     if (b >= B) return;                                                        \
@@ -507,6 +534,7 @@ extern "C" __global__ void NAME(                                               \
     float running = 0.0f;                                                      \
     for (int t = T - 1; t >= 0; t--) {                                         \
         IDX bt = b * T + t;                                                    \
+        if (t + 1 < T && vl_starts(seq_idx, b, T, t + 1)) running = 0.0f;      \
         running += d_angle_cumsum[bt * total_per_env + h * n_angles + a];      \
         float d_delta = running;                                               \
                                                                                \
@@ -750,6 +778,8 @@ DEFINE_ROPE_BWD(rope_bwd_i64, long long)
 // alpha = exp(a_val * dt)
 // beta  = alpha * dt * (1 - trap)
 // gamma = trap * dt
+// A token that starts a sequence of a packed row (`seq_idx`, [B, T]) keeps
+// nothing of the step before: its alpha and beta are 0.
 #define DEFINE_M3_COMPUTE_ABG(NAME, IDX)                                       \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ alpha,                                                 \
@@ -758,16 +788,20 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ dt,                                              \
     const float* __restrict__ a_val,                                           \
     const float* __restrict__ trap,                                            \
-    IDX N  /* total elements = batch * T * nheads */                           \
+    IDX N,  /* total elements = batch * T * nheads */                          \
+    int T, int nh,                                                             \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                      \
     if (idx >= N) return;                                                      \
     float dt_v = dt[idx];                                                      \
     float a_v = a_val[idx];    /* already negative (-heavy_tail clamped) */    \
     float t_v = trap[idx];     /* already sigmoided */                         \
-    float alpha_v = FAST_EXP(a_v * dt_v);                                      \
+    IDX bt = idx / nh;                                                         \
+    bool fresh = vl_starts(seq_idx, bt / T, T, (int)(bt % T));                 \
+    float alpha_v = fresh ? 0.0f : FAST_EXP(a_v * dt_v);                       \
     alpha[idx] = alpha_v;                                                      \
-    beta[idx] = alpha_v * dt_v * (1.0f - t_v);                                 \
+    beta[idx] = fresh ? 0.0f : alpha_v * dt_v * (1.0f - t_v);                  \
     gamma[idx] = t_v * dt_v;                                                   \
 }
 
@@ -796,6 +830,8 @@ DEFINE_M3_COMPUTE_ABG(m3_compute_abg_i64, long long)
 //         dd_dt_raw[N], dd_a_raw[N], trap_raw[N],
 //         dt_bias[nh], a_floor (scalar)
 // Output: d_dd_dt[N], d_dd_a[N], d_trap_out[N]
+// At a token that starts a sequence of a packed row (`seq_idx`, [B, T])
+// alpha and beta are the constant 0: their gradients are dropped.
 // Grid: ceil(N / 256) blocks, 256 threads
 #define DEFINE_M3_ABG_BWD(NAME, IDX)                                           \
 extern "C" __global__ void NAME(                                               \
@@ -814,15 +850,19 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ trap_raw,  /* [N] -- saved raw (pre-sigmoid) */  \
     const float* __restrict__ dt_bias, /* [nh] */                              \
     float a_floor,                                                             \
-    IDX N, int nh                                                              \
+    IDX N, int nh,                                                             \
+    int T,                                                                     \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                      \
     if (idx >= N) return;                                                      \
                                                                                \
     int h = (int)(idx % nh);                                                   \
+    IDX bt = idx / nh;                                                         \
+    bool fresh = vl_starts(seq_idx, bt / T, T, (int)(bt % T));                 \
                                                                                \
-    float da = d_alpha[idx];                                                   \
-    float db = d_beta[idx];                                                    \
+    float da = fresh ? 0.0f : d_alpha[idx];                                    \
+    float db = fresh ? 0.0f : d_beta[idx];                                     \
     float dg = d_gamma[idx];                                                   \
     float ddt_angle = d_dt_angle[idx];                                         \
                                                                                \

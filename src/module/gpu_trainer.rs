@@ -16,6 +16,7 @@ use crate::mamba1::gpu::trainer::MambaGpuTrainer;
 use crate::mamba2::gpu::Mamba2GpuTrainer;
 use crate::mamba3_mimo::gpu::Mamba3MimoGpuTrainer;
 use crate::mamba3_siso::gpu::trainer::Mamba3GpuTrainer;
+use crate::varlen::Varlen;
 
 /// What the GPU trainer of every family does.
 ///
@@ -96,6 +97,16 @@ pub trait GpuTrainer {
 
     /// Zero the recurrent state, the start of new sequences.
     fn reset_state(&mut self) -> Result<(), String>;
+
+    /// Pack several sequences of different lengths into the rows of the
+    /// next windows (see [`crate::varlen`]): no state or gradient crosses
+    /// from one into the next. `None` runs each row as one sequence. The
+    /// packing holds until replaced, its ids uploaded on the stream ahead
+    /// of the windows that read them. A captured graph replays every
+    /// packing set while it was on; turning one on or off needs
+    /// `drop_graph` and a new capture. Mamba-1 has none in the reference
+    /// and refuses one.
+    fn set_varlen(&mut self, packing: Option<&Varlen>) -> Result<(), String>;
 
     /// Set the AdamW learning rate for the next steps.
     fn set_lr(&mut self, lr: f32) -> Result<(), String>;
@@ -235,6 +246,9 @@ macro_rules! gpu_trainer_by_inherent_methods {
             }
             fn reset_state(&mut self) -> Result<(), String> {
                 <$ty>::reset_state(self)
+            }
+            fn set_varlen(&mut self, packing: Option<&Varlen>) -> Result<(), String> {
+                <$ty>::set_varlen(self, packing)
             }
             fn set_lr(&mut self, lr: f32) -> Result<(), String> {
                 <$ty>::set_lr(self, lr)
@@ -424,6 +438,9 @@ impl GpuTrainer for AnyGpuTrainer {
     }
     fn reset_state(&mut self) -> Result<(), String> {
         self.inner_mut().reset_state()
+    }
+    fn set_varlen(&mut self, packing: Option<&Varlen>) -> Result<(), String> {
+        self.inner_mut().set_varlen(packing)
     }
     fn set_lr(&mut self, lr: f32) -> Result<(), String> {
         self.inner_mut().set_lr(lr)

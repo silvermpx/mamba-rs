@@ -45,6 +45,9 @@ pub struct AngleChunkedFwd<'a> {
     pub sums: &'a GpuByteBuffer,
     pub carries: &'a GpuByteBuffer,
     pub shape: AngleChunkedShape,
+    /// The sequences packed into the rows (see [`crate::varlen`]), i32
+    /// `[batch, seq_len]`; 0 for one sequence a row.
+    pub seq_idx: cudarc::driver::sys::CUdeviceptr,
 }
 
 #[derive(Clone, Copy)]
@@ -220,6 +223,7 @@ pub unsafe fn gpu_angle_chunked_fwd(
                 heads: nh,
                 angles: na,
             },
+        seq_idx,
     } = request;
     let launch = validate_angle_chunked_layout(
         AngleChunkedShape {
@@ -279,6 +283,7 @@ pub unsafe fn gpu_angle_chunked_fwd(
             bld.arg(&na_i);
             bld.arg(&cs_i);
             bld.arg(&y_first);
+            bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(|e| format!("angle chunk sums: {e:?}"))?;
         }
     }
@@ -304,6 +309,7 @@ pub unsafe fn gpu_angle_chunked_fwd(
             bld.arg(&na_i);
             bld.arg(&cs_i);
             bld.arg(&y_first);
+            bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(|e| format!("angle chunk apply: {e:?}"))?;
         }
     }
@@ -340,6 +346,7 @@ pub fn gpu_forward_mamba3_layer(
         ctx,
         kernels: m3k,
         dims,
+        seq_idx,
     } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
@@ -463,6 +470,7 @@ pub fn gpu_forward_mamba3_layer(
                         heads: nh,
                         angles: na,
                     },
+                    seq_idx,
                 },
             )
         }?;
@@ -516,6 +524,10 @@ pub fn gpu_forward_mamba3_layer(
         builder.arg(acts.a_val.inner());
         builder.arg(acts.trap.inner());
         n_total.push(&mut builder);
+        let (t_i, nh_i) = (dims.seq_len as i32, nh as i32);
+        builder.arg(&t_i);
+        builder.arg(&nh_i);
+        builder.arg(&seq_idx);
         unsafe { builder.launch(grid_1d_cover(bt * nh)?) }
             .map_err(|e| format!("m3_compute_abg F5b: {:?}", e))?;
     }
@@ -567,6 +579,7 @@ pub fn gpu_forward_mamba3_layer(
                 builder.arg(&cs);
                 builder.arg(&y_first);
                 builder.arg(&z_first);
+                builder.arg(&seq_idx);
                 unsafe { builder.launch(cfg) }
                     .map_err(|e| format!("m3_dA_cumsum F6 K2: {:?}", e))?;
             }
@@ -597,6 +610,7 @@ pub fn gpu_forward_mamba3_layer(
                 builder.arg(&ds_i);
                 builder.arg(&cs);
                 builder.arg(&y_first);
+                builder.arg(&seq_idx);
                 unsafe { builder.launch(cfg) }
                     .map_err(|e| format!("m3 F6 fused pre+state: {:?}", e))?;
             }
@@ -625,6 +639,7 @@ pub fn gpu_forward_mamba3_layer(
                     builder.arg(&ds_i);
                     builder.arg(&cs);
                     builder.arg(&y_first);
+                    builder.arg(&seq_idx);
                     unsafe { builder.launch(cfg) }
                         .map_err(|e| format!("m3_preprocess_chunks F6 K1: {:?}", e))?;
                 }
@@ -652,6 +667,7 @@ pub fn gpu_forward_mamba3_layer(
                     builder.arg(&ds_i);
                     builder.arg(&cs);
                     builder.arg(&y_first);
+                    builder.arg(&seq_idx);
                     unsafe { builder.launch(cfg) }
                         .map_err(|e| format!("m3_chunk_state_fwd F6 K3: {:?}", e))?;
                 }
@@ -695,6 +711,7 @@ pub fn gpu_forward_mamba3_layer(
                 builder.arg(&cs);
                 builder.arg(&t_i);
                 builder.arg(&y_first);
+                builder.arg(&seq_idx);
                 unsafe { builder.launch(cfg) }
                     .map_err(|e| format!("m3_state_pass_fused F6 K4: {:?}", e))?;
             }
@@ -731,6 +748,7 @@ pub fn gpu_forward_mamba3_layer(
                 builder.arg(&ds_i);
                 builder.arg(&cs);
                 builder.arg(&y_first);
+                builder.arg(&seq_idx);
                 unsafe { builder.launch(cfg) }
                     .map_err(|e| format!("m3_chunk_scan_fwd F6 K5: {:?}", e))?;
             }
@@ -777,6 +795,7 @@ pub fn gpu_forward_mamba3_layer(
             builder.arg(&hd_i);
             builder.arg(&ds_i);
             builder.arg(&y_first);
+            builder.arg(&seq_idx);
             unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_burnin_fwd F6 seq: {:?}", e))?;
         }
     }
@@ -974,6 +993,7 @@ pub fn gpu_forward_mamba3_target_burnin(
         ctx,
         kernels: m3k,
         dims,
+        seq_idx,
     } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
@@ -1155,6 +1175,7 @@ pub fn gpu_forward_mamba3_target_burnin(
                     builder.arg(&nh_i);
                     builder.arg(&na_i);
                     builder.arg(&y_first);
+                    builder.arg(&seq_idx);
                     unsafe { builder.launch(cfg) }
                         .map_err(|e| format!("angle_dt_fwd_seq tgt L{l}: {:?}", e))?;
                 }
@@ -1191,6 +1212,10 @@ pub fn gpu_forward_mamba3_target_burnin(
             builder.arg(tgt.a_val.inner());
             builder.arg(tgt.trap.inner());
             n_total.push(&mut builder);
+            let (t_i, nh_i) = (dims.seq_len as i32, nh as i32);
+            builder.arg(&t_i);
+            builder.arg(&nh_i);
+            builder.arg(&seq_idx);
             unsafe { builder.launch(grid_1d_cover(bt * nh)?) }
                 .map_err(|e| format!("m3_compute_abg tgt L{l}: {:?}", e))?;
         }
@@ -1233,6 +1258,7 @@ pub fn gpu_forward_mamba3_target_burnin(
                 builder.arg(&hd_i);
                 builder.arg(&ds_i);
                 builder.arg(&y_first);
+                builder.arg(&seq_idx);
                 unsafe { builder.launch(cfg) }
                     .map_err(|e| format!("m3_burnin_fwd_nosave tgt L{l}: {:?}", e))?;
             }
@@ -1355,6 +1381,7 @@ fn gpu_forward_mamba3_mlp(
         ctx,
         kernels: m3k,
         dims,
+        ..
     } = *exec;
     let (bt, dm, h) = (dims.bt(), dims.d_model, w.hidden());
     let (bt_i, h_i) = (bt as i32, h as i32);
@@ -1413,6 +1440,7 @@ fn gpu_target_mlp(
         ctx,
         kernels: m3k,
         dims,
+        ..
     } = *exec;
     let (bt, dm, h) = (dims.bt(), dims.d_model, w.hidden());
     let (bt_i, h_i) = (bt as i32, h as i32);

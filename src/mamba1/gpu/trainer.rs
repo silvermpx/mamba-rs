@@ -703,6 +703,17 @@ impl MambaGpuTrainer {
         }
     }
 
+    /// Mamba-1 has no varlen in the reference: a packing is refused, and
+    /// `None` (each row one sequence) is what it always runs.
+    pub fn set_varlen(&mut self, packing: Option<&crate::varlen::Varlen>) -> Result<(), String> {
+        match packing {
+            None => Ok(()),
+            Some(_) => {
+                Err("Mamba-1 has no varlen: the reference packs only Mamba-2 and Mamba-3".into())
+            }
+        }
+    }
+
     /// Record the full training step (forward + backward + AdamW + sync)
     /// into a CUDA Graph. Run at least one warmup [`Self::step`] before
     /// capturing so cuBLAS has settled on its kernel selection. After

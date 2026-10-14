@@ -224,6 +224,8 @@ fn forward(
             b.arg(d);
         }
         b.arg(&y_first);
+        // One sequence a row: no packing.
+        b.arg(&0u64);
         unsafe { b.launch(cfg) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
@@ -299,6 +301,8 @@ fn backward(
             b.arg(d);
         }
         b.arg(&y_first);
+        // One sequence a row: no packing.
+        b.arg(&0u64);
         unsafe { b.launch(cfg) }.unwrap();
     }
     outs.iter()

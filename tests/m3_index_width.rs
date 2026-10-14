@@ -101,7 +101,9 @@ fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
 fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
     for (y_first, cfg) in y_runs(cfg) {
         let mut run = args.to_vec();
-        run.push(Arg::I(y_first));
+        // The run's first y block, then the packing every kernel here takes
+        // last (none).
+        run.extend([Arg::I(y_first), Arg::P(0)]);
         launch(ctx, f, cfg, &run);
     }
 }

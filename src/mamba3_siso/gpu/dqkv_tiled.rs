@@ -58,6 +58,9 @@ pub(super) struct DqkvTiledIo {
     /// The gradient of the state the window entered with, `[B*nh*hd*ds]`.
     pub seed_grad: CUdeviceptr,
     pub dm_chain: CUdeviceptr,
+    /// The sequences packed into the rows (see [`crate::varlen`]), i32
+    /// `[B, T]`; 0 for one sequence a row.
+    pub seq_idx: CUdeviceptr,
 }
 
 /// Runs the stage. The caller reduces `d_partials` into the D gradient,
@@ -107,6 +110,7 @@ pub(super) fn launch(
         }
         terms.arg(&y_first);
         terms.arg(&z_first);
+        terms.arg(&io.seq_idx);
         unsafe { terms.launch(cfg) }.map_err(|e| format!("m3_dqkv_state_terms_tiled: {e:?}"))?;
     }
 
@@ -118,6 +122,9 @@ pub(super) fn launch(
         pass.arg(d);
     }
     pass.arg(&io.seed_grad);
+    pass.arg(&t);
+    pass.arg(&cs);
+    pass.arg(&io.seq_idx);
     unsafe { pass.launch(grid_1d_cover(batch * nheads * headdim * d_state)?) }
         .map_err(|e| format!("m3_dstate_passing_bwd tiled: {e:?}"))?;
 
@@ -165,6 +172,7 @@ pub(super) fn launch(
         }
         stage.arg(&y_first);
         stage.arg(&z_first);
+        stage.arg(&io.seq_idx);
         unsafe { stage.launch(cfg) }.map_err(|e| format!("m3_dqkv_tiled: {e:?}"))?;
     }
     Ok(())

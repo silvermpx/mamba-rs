@@ -11,6 +11,8 @@ use crate::config::ModelFamily;
 use crate::gpu::grad_window::check_backward_opts;
 use crate::gpu::options::GpuOptions;
 use crate::gpu::train_state::TrainerState;
+use crate::gpu::varlen::GpuVarlen;
+use crate::varlen::Varlen;
 use cudarc::driver::PushKernelArg;
 
 use crate::gpu::adamw::{
@@ -567,6 +569,23 @@ impl Mamba3GpuTrainer {
         }
     }
 
+    /// Pack several sequences of different lengths into the rows of the
+    /// next windows (see [`crate::varlen`]): no state, previous-step term,
+    /// RoPE angle or gradient crosses from one into the next. `None` runs
+    /// each row as one sequence. The packing holds until replaced, its ids
+    /// uploaded on the stream ahead of the windows that read them. A
+    /// captured graph replays every packing set while it was on; turning
+    /// one on or off needs `drop_graph` first.
+    pub fn set_varlen(&mut self, packing: Option<&Varlen>) -> Result<(), String> {
+        let captured = self.has_graph();
+        let (varlen, stream, dims) = match &mut self.inner {
+            Trainer3Inner::F32(t) => (&mut t.varlen, &t.ctx.stream, &t.dims),
+            Trainer3Inner::Mixed(t) => (&mut t.varlen, &t.ctx.stream, &t.dims),
+        };
+        varlen.check_graph(captured, packing)?;
+        varlen.set(stream, packing, (dims.batch, dims.seq_len))
+    }
+
     /// Download the four carried recurrences (SSM, K, V, angle) — the
     /// window-handoff counterpart of [`Self::optimizer_state`].
     pub fn recurrent_state(&self) -> Result<Mamba3RecurrentStateBlob, String> {
@@ -936,6 +955,9 @@ pub(crate) struct Mamba3TrainerMixed {
     captured_f16_half_staging_ptr: u64,
     captured_f16_bi_upcast_ptrs: [u64; 3],
     captured_f16_gemm_route: crate::gpu::context::GemmRoute,
+    /// The sequences packed into the rows of the windows (see
+    /// [`Mamba3GpuTrainer::set_varlen`]).
+    varlen: GpuVarlen,
 }
 
 impl Drop for Mamba3TrainerMixed {
@@ -1097,6 +1119,7 @@ impl Mamba3TrainerMixed {
             graph: None,
             graph_acc: None,
             graph_apply: None,
+            varlen: GpuVarlen::default(),
             prepared_gemm_manifest: None,
             split_forward_route: None,
             grads_dirty: false,
@@ -1253,6 +1276,7 @@ impl Mamba3TrainerMixed {
                     ctx: &self.ctx,
                     kernels: &self.m3k,
                     dims: &self.dims,
+                    seq_idx: self.varlen.ptr(),
                 },
                 &self.cfg,
                 Mamba3MixedCapture {
@@ -1334,6 +1358,7 @@ impl Mamba3TrainerMixed {
             ctx,
             m3k,
             dims,
+            varlen,
             weights,
             grads,
             acts,
@@ -1353,6 +1378,7 @@ impl Mamba3TrainerMixed {
             ctx,
             kernels: m3k,
             dims,
+            seq_idx: varlen.ptr(),
         };
         let d_temporal = d_temporal_scaled.as_mut().expect("f16 dt_scaled");
         let manifest = ctx.record_eager_gemm_manifest(|| {
@@ -1563,6 +1589,7 @@ impl Mamba3TrainerMixed {
             ctx,
             m3k,
             dims,
+            varlen,
             weights,
             grads,
             acts,
@@ -1584,6 +1611,7 @@ impl Mamba3TrainerMixed {
             ctx,
             kernels: m3k,
             dims,
+            seq_idx: varlen.ptr(),
         };
         let d = match (scaled, d_temporal_scaled.as_mut()) {
             (true, Some(d)) => d,
@@ -1870,6 +1898,7 @@ impl Mamba3TrainerMixed {
             ctx,
             m3k,
             dims,
+            varlen,
             dtype,
             weights,
             grads,
@@ -1896,6 +1925,7 @@ impl Mamba3TrainerMixed {
             ctx,
             kernels: m3k,
             dims,
+            seq_idx: varlen.ptr(),
         };
         let d_temporal = d_temporal_scaled.as_mut().expect("f16 dt_scaled");
         unsafe {
@@ -1972,6 +2002,7 @@ impl Mamba3TrainerMixed {
             ctx: &self.ctx,
             kernels: &self.m3k,
             dims: &self.dims,
+            seq_idx: self.varlen.ptr(),
         };
         gpu_forward_mamba3_backbone_mixed(
             &exec,
@@ -1998,6 +2029,7 @@ impl Mamba3TrainerMixed {
             ctx: &self.ctx,
             kernels: &self.m3k,
             dims: &self.dims,
+            seq_idx: self.varlen.ptr(),
         };
         let d_temporal = if scaled {
             self.d_temporal_scaled
@@ -2046,6 +2078,7 @@ impl Mamba3TrainerMixed {
             ctx,
             m3k,
             dims,
+            varlen,
             dtype,
             weights,
             grads,
@@ -2071,6 +2104,7 @@ impl Mamba3TrainerMixed {
             ctx,
             kernels: m3k,
             dims,
+            seq_idx: varlen.ptr(),
         };
         let manifest = ctx.record_eager_gemm_manifest(|| {
             grads.zero(&ctx.stream)?;
@@ -2620,6 +2654,9 @@ pub(crate) struct Mamba3TrainerF32 {
     step_opts: BackwardOpts,
     /// The skip flag a measured step tail writes (see [`StepTail`]).
     skip_flag: OverflowFlag,
+    /// The sequences packed into the rows of the windows (see
+    /// [`Mamba3GpuTrainer::set_varlen`]).
+    varlen: GpuVarlen,
 }
 
 impl Drop for Mamba3TrainerF32 {
@@ -2753,6 +2790,7 @@ impl Mamba3TrainerF32 {
             graph: None,
             graph_acc: None,
             graph_apply: None,
+            varlen: GpuVarlen::default(),
             prepared_gemm_manifest: None,
             has_gemm_work,
             split_forward_route: None,
@@ -2855,6 +2893,7 @@ impl Mamba3TrainerF32 {
                     ctx: &self.ctx,
                     kernels: &self.m3k,
                     dims: &self.dims,
+                    seq_idx: self.varlen.ptr(),
                 },
                 Mamba3F32Capture {
                     weights: &mut self.weights,
@@ -2992,6 +3031,7 @@ impl Mamba3TrainerF32 {
             ctx,
             m3k,
             dims,
+            varlen,
             weights,
             grads,
             acts,
@@ -3010,6 +3050,7 @@ impl Mamba3TrainerF32 {
             ctx,
             kernels: m3k,
             dims,
+            seq_idx: varlen.ptr(),
         };
         let manifest = ctx.record_eager_gemm_manifest(|| {
             gpu_forward_mamba3_backbone(
@@ -3068,6 +3109,7 @@ impl Mamba3TrainerF32 {
             ctx: &self.ctx,
             kernels: &self.m3k,
             dims: &self.dims,
+            seq_idx: self.varlen.ptr(),
         };
         gpu_forward_mamba3_backbone(
             &exec,
@@ -3092,6 +3134,7 @@ impl Mamba3TrainerF32 {
             ctx: &self.ctx,
             kernels: &self.m3k,
             dims: &self.dims,
+            seq_idx: self.varlen.ptr(),
         };
         gpu_backward_mamba3_backbone(
             &exec,
@@ -3128,6 +3171,7 @@ impl Mamba3TrainerF32 {
             ctx,
             m3k,
             dims,
+            varlen,
             weights,
             grads,
             adam,
@@ -3151,6 +3195,7 @@ impl Mamba3TrainerF32 {
             ctx,
             kernels: m3k,
             dims,
+            seq_idx: varlen.ptr(),
         };
         let manifest = ctx.record_eager_gemm_manifest(|| {
             grads.zero(&ctx.stream)?;

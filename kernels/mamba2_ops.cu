@@ -179,7 +179,9 @@ __device__ __forceinline__ void m2_tile_store(
 // M2_FLAG_GATE_IN_SCAN (no rmsnorm) the gate is applied here. With CKPT
 // the state before tokens 0, stride, 2 stride, ... is also written to
 // `ckpt` ([B, S, H, P, N], S = ceil(seq / stride)), what the training
-// backward replays from.
+// backward replays from. In a packed row (`seq_idx`, see _varlen.cuh) a
+// token that starts a sequence steps from the empty state; a checkpoint
+// keeps the state before that reset.
 template <typename TI, bool CKPT>
 __device__ __forceinline__ void m2_steps_body(
     float* __restrict__ y,
@@ -192,6 +194,7 @@ __device__ __forceinline__ void m2_steps_body(
     int batch, int seq, int nh, int ng, int hd, int ds,
     int conv_dim, int d_in_proj, int z_off, int dt_off,
     int flags, float dt_min, float dt_max,
+    const int* __restrict__ seq_idx,
     float* __restrict__ ckpt, int stride,
     int y_first, /* this run's first y block */
     int z_first /* this run's first z block */
@@ -242,6 +245,7 @@ __device__ __forceinline__ void m2_steps_body(
     }
     __syncthreads();
     const int nseg = CKPT ? (seq + stride - 1) / stride : 0;
+    int id_prev = 0;
     for (int t = 0; t < seq; t++) {
         const long long row = (long long)b * seq + t;
         if (CKPT && t % stride == 0) {
@@ -275,6 +279,11 @@ __device__ __forceinline__ void m2_steps_body(
             const float* bs = cur;
             const float* cs = cur + ds;
             float* trow = tile + tid * (ds + 1);
+            const int id_t = vl_id(seq_idx, b, seq, t);
+            if (id_t != id_prev) {
+                for (int k = 0; k < ds; k++) trow[k] = 0.0f;
+            }
+            id_prev = id_t;
             float cb = 0.0f, acc = 0.0f;
             int n = 0;
             // Four state indices at a time, B and C (the same for every
@@ -336,7 +345,7 @@ extern "C" __global__ void NAME(                                               \
 ) {                                                                            \
     m2_steps_body<TI, false>(y, ssm, xbc, proj, dt_bias, a_neg, D, batch, 1,   \
         nh, ng, hd, ds, conv_dim, d_in_proj, z_off, dt_off, flags, dt_min,     \
-        dt_max, nullptr, 1, y_first, z_first);                                 \
+        dt_max, nullptr, nullptr, 1, y_first, z_first);                        \
 }
 
 DEFINE_M2_STEP_FWD(m2_step_fwd, float)
@@ -357,11 +366,12 @@ extern "C" __global__ void NAME(                                               \
     int conv_dim, int d_in_proj, int z_off, int dt_off,                        \
     int flags, float dt_min, float dt_max,                                     \
     int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
+    int z_first, /* this run's first z block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     m2_steps_body<TI, false>(y, ssm, xbc, proj, dt_bias, a_neg, D, batch, seq, \
         nh, ng, hd, ds, conv_dim, d_in_proj, z_off, dt_off, flags, dt_min,     \
-        dt_max, nullptr, 1, y_first, z_first);                                 \
+        dt_max, seq_idx, nullptr, 1, y_first, z_first);                        \
 }
 
 DEFINE_M2_SEQ_FWD(m2_seq_fwd, float)
@@ -384,11 +394,12 @@ extern "C" __global__ void NAME(                                               \
     int flags, float dt_min, float dt_max,                                     \
     float* __restrict__ ckpt, int stride,                                      \
     int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
+    int z_first, /* this run's first z block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     m2_steps_body<TI, true>(y, ssm, xbc, proj, dt_bias, a_neg, D, batch, seq,  \
         nh, ng, hd, ds, conv_dim, d_in_proj, z_off, dt_off, flags, dt_min,     \
-        dt_max, ckpt, stride, y_first, z_first);                               \
+        dt_max, seq_idx, ckpt, stride, y_first, z_first);                      \
 }
 
 DEFINE_M2_SEQ_FWD_CKPT(m2_seq_fwd_ckpt, float)

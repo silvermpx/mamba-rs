@@ -144,6 +144,7 @@ impl GpuMamba3TrainingStepGraph {
             ctx,
             kernels: m3k,
             dims,
+            ..
         } = *exec;
         let Mamba3MixedCapture {
             train_w,
@@ -526,6 +527,7 @@ impl GpuMamba3F32TrainingStepGraph {
             ctx,
             kernels: m3k,
             dims,
+            ..
         } = *exec;
         let Mamba3F32Capture {
             weights,

@@ -395,6 +395,7 @@ fn check_cfg_weights(
         ctx: &ctx,
         kernels: &m3k,
         dims: &dims,
+        seq_idx: 0,
     };
     let (dt_ref, grads_ref) = run_f32(&exec, w_f32, &cfg, &mamba_input, &d_temporal);
     let (dt_typ, grads_typ) = run_mixed(&exec, w_mix, &cfg, dtype, &mamba_input, &d_temporal);

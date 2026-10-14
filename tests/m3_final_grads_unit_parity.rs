@@ -234,6 +234,7 @@ fn check_dqkv(dtype: WeightDtype) {
         bld.arg(&use_mats_i);
         bld.arg(&y_first);
         bld.arg(&z_first);
+        bld.arg(&0u64);
         unsafe { bld.launch(cfg) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
@@ -291,6 +292,7 @@ fn check_dqkv(dtype: WeightDtype) {
         bld.arg(&use_mats_i);
         bld.arg(&y_first);
         bld.arg(&z_first);
+        bld.arg(&0u64);
         unsafe { bld.launch(cfg) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
@@ -787,6 +789,7 @@ fn m3_dqkv_output_hash() {
         bld.arg(&use_mats_i);
         bld.arg(&y_first);
         bld.arg(&z_first);
+        bld.arg(&0u64);
         unsafe { bld.launch(cfg) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();

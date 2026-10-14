@@ -432,6 +432,8 @@ impl Mamba3Kernels {
             // Inline the prelude first so each source file's
             // `#include "_typed_prelude.cuh"` can be safely stripped below.
             include_str!("../../../kernels/_typed_prelude.cuh"),
+            // The packed-row helpers (seq_idx) the kernels below read.
+            include_str!("../../../kernels/_varlen.cuh"),
             include_str!("../../../kernels/mamba3_siso.cu"),
             include_str!("../../../kernels/mamba3_ops.cu"),
             include_str!("../../../kernels/mamba3_chunked.cu"),

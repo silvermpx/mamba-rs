@@ -278,6 +278,7 @@ fn m2_chunk_state_tiles_are_the_whole_head() {
                         b.arg(v);
                     }
                     b.arg(&y_first);
+                    b.arg(&0u64);
                     unsafe { b.launch(cfg) }.unwrap();
                 }
                 runs.push(bits_f32(&ctx, &states));
@@ -375,6 +376,7 @@ fn m2_dx_tiles_are_the_dx_and_token_sums() {
                             b.arg(v);
                         }
                         b.arg(&y_first);
+                        b.arg(&0u64);
                         unsafe { b.launch(cfg) }.unwrap();
                     }
                 } else {
@@ -415,6 +417,7 @@ fn m2_dx_tiles_are_the_dx_and_token_sums() {
                         }
                         b.arg(&y_first);
                         b.arg(&z_first);
+                        b.arg(&0u64);
                         unsafe { b.launch(cfg) }.unwrap();
                     }
                     let sums_head = [ddtx, qv, inter, acc, ste, yi, ptrs[0], ptrs[1]];
@@ -489,6 +492,7 @@ fn m2_conv_weight_taps_over_blocks_are_one_block() {
             for v in &ints {
                 b.arg(v);
             }
+            b.arg(&0u64);
             let cfg = LaunchConfig {
                 grid_dim: (
                     cd.div_ceil(32) as u32,
@@ -652,6 +656,7 @@ fn m2_sequential_backward_global_is_the_shared_kernel() {
                         b.arg(&lo);
                         b.arg(&hi);
                         b.arg(&y_first);
+                        b.arg(&0u64);
                         unsafe { b.launch(cfg) }.unwrap();
                     }
                     vec![

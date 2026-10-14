@@ -103,6 +103,16 @@ fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) 
     }
 }
 
+/// [`launch_runs`] for the kernels that take a packing after the run's
+/// first block (none here).
+fn launch_runs_packed(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut run = args.to_vec();
+        run.extend([Arg::I(y_first), Arg::P(0)]);
+        launch(ctx, f, cfg, &run);
+    }
+}
+
 fn compile(ctx: &GpuCtx) -> Mamba3Kernels {
     Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), 64)
         .expect("M3 kernels")
@@ -200,7 +210,7 @@ fn the_sequential_scans_give_heads_past_the_y_extent_their_twins_bits() {
     .map(|b| Arg::P(b.cached_ptr()))
     .collect();
     args.extend(ints);
-    launch_runs(&ctx, &k.m3_burnin_fwd.i32, cfg, &args);
+    launch_runs_packed(&ctx, &k.m3_burnin_fwd.i32, cfg, &args);
     let st = &ctx.stream;
     for (what, buf, layout) in [
         ("y", &y, rows),
@@ -228,7 +238,7 @@ fn the_sequential_scans_give_heads_past_the_y_extent_their_twins_bits() {
     .map(|b| Arg::P(b.cached_ptr()))
     .collect();
     args.extend(ints);
-    launch_runs(&ctx, &k.m3_backward_seq.i32, cfg, &args);
+    launch_runs_packed(&ctx, &k.m3_backward_seq.i32, cfg, &args);
     for (what, buf, layout) in [
         ("dx", &dx, rows),
         ("dk", &dk, krows),
@@ -360,7 +370,7 @@ fn the_chunk_scan_gives_heads_past_the_y_extent_their_twins_bits() {
             .map(|b| Arg::P(b.cached_ptr()))
             .collect();
         args.extend([1, t, NH, hd, ds, CS].map(|v| Arg::I(v as i32)));
-        launch_runs(&ctx, f, cfg, &args);
+        launch_runs_packed(&ctx, f, cfg, &args);
         assert!(
             rows.twins_match(&words(&ctx.stream, &y)),
             "chunk scan, {what} tiles"
@@ -398,7 +408,7 @@ fn the_decay_cumsum_gives_chunks_past_the_y_extent_their_own_bits() {
         ];
         for (y_first, cfg) in y_runs(cfg) {
             let mut run = args.to_vec();
-            run.extend([Arg::I(y_first), Arg::I(0)]);
+            run.extend([Arg::I(y_first), Arg::I(0), Arg::P(0)]);
             launch(&ctx, &k.m3_da_cumsum.i32, cfg, &run);
         }
         words(&ctx.stream, &out)

@@ -83,7 +83,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ DT,       /* [B * T * nh] (post-softplus) */     \
     const float* __restrict__ trap_sig, /* [B * T * nh] (post-sigmoid) */      \
     int batch, int T, int nh, int ds, int chunk_size,                          \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
     IDX bc = blockIdx.x;         /* batch * n_chunks */                        \
@@ -105,7 +106,8 @@ extern "C" __global__ void NAME(                                               \
                                                                                \
     /* shifted_gamma[t] = DT[t+1] * (1 - trap_sig[t+1]), 0 for last timestep */ \
     float shifted_gamma = 0.0f;                                                \
-    if (t + 1 < T) {                                                           \
+    /* The next step's beta is 0 where it starts a sequence. */                \
+    if (t + 1 < T && !vl_starts(seq_idx, b, T, t + 1)) {                       \
         IDX th_next = (b * T + t + 1) * nh + h;                                \
         float dt_next = DT[th_next];                                           \
         float trap_next = trap_sig[th_next];                                   \
@@ -161,7 +163,11 @@ DEFINE_M3_PREPROCESS_CHUNKS_F32(m3_preprocess_chunks_i64, long long)
 // ============================================================================
 //
 // Computes cumulative sum of adt = A * DT within each chunk, per head.
-// Same as Mamba-2 pattern but with Mamba-3's input-dependent ADT.
+// Same as Mamba-2 pattern but with Mamba-3's input-dependent ADT. In a
+// packed row (seq_idx) the sum restarts at every sequence's first token, so
+// a sequence's decays never hold another's terms: every decay the chunked
+// path reads lies inside one sequence, and an overflow in one sequence's
+// a*dt cannot turn another's into inf - inf.
 //
 // Input:  adt[B * T * nh]  (A * DT, already computed by m3_split)
 // Output: dA_cumsum[B * n_chunks * nh * chunk_size]
@@ -173,7 +179,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ adt,      /* [B * T * nh] */                     \
     int batch, int T, int nh, int chunk_size,                                  \
     int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
+    int z_first, /* this run's first z block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     IDX b = blockIdx.x;                                                        \
     int chunk = y_first + blockIdx.y;                                          \
@@ -190,7 +197,7 @@ extern "C" __global__ void NAME(                                               \
                                                                                \
     for (int t = chunk_start; t < chunk_end; t++) {                            \
         float a_dt = adt[(b * T + t) * nh + h];                                \
-        cumsum += a_dt;                                                        \
+        cumsum = (vl_starts(seq_idx, b, T, t) ? 0.0f : cumsum) + a_dt;         \
         dA_cumsum_out[cs_base + (t - chunk_start)] = cumsum;                   \
     }                                                                          \
 }
@@ -222,7 +229,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ K_scaled, /* [B * T * nh * ds] */                \
     const float* __restrict__ dA_cumsum,/* [B * n_chunks * nh * chunk_size] */ \
     int batch, int T, int nh, int hd, int ds, int chunk_size,                  \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     int d_inner = nh * hd;                                                     \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
@@ -252,6 +260,9 @@ extern "C" __global__ void NAME(                                               \
     int chunk_end = chunk_start + chunk_size;                                  \
     if (chunk_end > T) chunk_end = T;                                          \
     int chunk_len = chunk_end - chunk_start;                                   \
+    /* In a packed row (seq_idx) only the chunk's last sequence reaches */     \
+    /* its state: the tokens from where that sequence begins. */               \
+    int kept = vl_seq_first(seq_idx, b, T, chunk_start, chunk_end - 1) - chunk_start; \
     bool wide = (ds % 4 == 0);                                                 \
                                                                                \
     if (!quad) {                                                               \
@@ -268,7 +279,7 @@ extern "C" __global__ void NAME(                                               \
             /* identical expression, so the bits are unchanged. */             \
             float acc[MAMBA_RS_STATE_CAP];                                     \
             for (int n = 0; n < ds; n++) acc[n] = 0.0f;                        \
-            for (int t = chunk_start; t < chunk_end; t++) {                    \
+            for (int t = chunk_start + kept; t < chunk_end; t++) {             \
                 int t_local = t - chunk_start;                                 \
                 float dA_t = dA_cumsum[cs_base + t_local];                     \
                 float decay = FAST_EXP(m3_nonpos(dA_end - dA_t)); /* The cumsum diff is <=0 mathematically; the cap restores the reference safety net against float-noise positives (decay>1). */ \
@@ -358,7 +369,7 @@ extern "C" __global__ void NAME(                                               \
         const float* skh = sk + hz * chunk_size * ds;                          \
         const float* sdah = sda + hz * chunk_size;                             \
         float dA_end_s = sdah[chunk_len - 1];                                  \
-        for (int t_local = 0; t_local < chunk_len; t_local++) {                \
+        for (int t_local = kept; t_local < chunk_len; t_local++) {             \
             float dA_t = sdah[t_local];                                        \
             float decay = FAST_EXP(m3_nonpos(dA_end_s - dA_t));                \
             float v_t = sxh[t_local * hd + p];                                 \
@@ -428,7 +439,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ adt,       /* [B * T * nh] a*dt */               \
     float* __restrict__ dA_cumsum,       /* [B * n_chunks * nh * chunk_size] out */ \
     int batch, int T, int nh, int hd, int ds, int chunk_size,                  \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     int d_inner = nh * hd;                                                     \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
@@ -442,6 +454,9 @@ extern "C" __global__ void NAME(                                               \
     int chunk_end = chunk_start + chunk_size;                                  \
     if (chunk_end > T) chunk_end = T;                                          \
     int chunk_len = chunk_end - chunk_start;                                   \
+    /* In a packed row (seq_idx) only the chunk's last sequence reaches */     \
+    /* its state: the tokens from where that sequence begins. */               \
+    int kept = vl_seq_first(seq_idx, b, T, chunk_start, chunk_end - 1) - chunk_start; \
                                                                                \
     extern __shared__ float m3f_sm[];                                          \
     int k_ld = ds + 4; /* padded rows - see the coop kernel's bank note */     \
@@ -464,7 +479,8 @@ extern "C" __global__ void NAME(                                               \
         float cumsum = 0.0f;                                                   \
         IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;          \
         for (int t_local = 0; t_local < chunk_len; t_local++) {                \
-            cumsum += da_chunk[t_local];                                       \
+            const bool fresh = vl_starts(seq_idx, b, T, chunk_start + t_local); \
+            cumsum = (fresh ? 0.0f : cumsum) + da_chunk[t_local];              \
             da_chunk[t_local] = cumsum;                                        \
             dA_cumsum[cs_base + t_local] = cumsum;                             \
         }                                                                      \
@@ -486,7 +502,8 @@ extern "C" __global__ void NAME(                                               \
         float trap_cur = trap_sig[th];                                         \
         float gamma_val = dt_cur * trap_cur;                                   \
         float shifted_gamma = 0.0f;                                            \
-        if (t + 1 < T) {                                                       \
+        /* The next step's beta is 0 where it starts a sequence. */            \
+        if (t + 1 < T && !vl_starts(seq_idx, b, T, t + 1)) {                   \
             IDX th_next = (b * T + t + 1) * nh + h;                            \
             float dt_next = DT[th_next];                                       \
             float trap_next = trap_sig[th_next];                               \
@@ -559,7 +576,7 @@ extern "C" __global__ void NAME(                                               \
         int p = o / quads;                                                     \
         int nq = o % quads;                                                    \
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;              \
-        for (int t_local = 0; t_local < chunk_len; t_local++) {                \
+        for (int t_local = kept; t_local < chunk_len; t_local++) {             \
             float decay = sm_dec[t_local];                                     \
             float v_t = sm_x[t_local * hd + p];                                \
             const float4* k4 = reinterpret_cast<const float4*>(sm_k + t_local * k_ld); \
@@ -643,7 +660,8 @@ NAME(                                                                         \
     const T_ACT* __restrict__ k_flat,    /* [B*T*nh*ds] */                    \
     const T_ACT* __restrict__ x_flat,    /* [B*T*d_inner] */                  \
     int batch, int n_chunks, int nh, int hd, int ds, int chunk_size, int T,   \
-    int y_first /* this run's first y block */                                \
+    int y_first, /* this run's first y block */                               \
+    const int* __restrict__ seq_idx                                           \
 ) {                                                                           \
     IDX b = blockIdx.x;                                                       \
     int h = y_first + blockIdx.y;                                             \
@@ -687,7 +705,12 @@ NAME(                                                                         \
                     __ldg(&dA_cumsum[(cs_idx + nh) * chunk_size + last_elem_n])); \
             }                                                                 \
             states[state_idx] = state;                                        \
-            state = decay * state + contrib;                                  \
+            /* A chunk where a sequence of a packed row starts passes */      \
+            /* nothing of the state entering it. */                           \
+            int c_end = (c + 1) * chunk_size < T ? (c + 1) * chunk_size : T;  \
+            bool reset = vl_id(seq_idx, b, T, c_end - 1)                      \
+                         != vl_id(seq_idx, b, T, c * chunk_size - 1);         \
+            state = reset ? contrib : decay * state + contrib;                \
             contrib = next_contrib;                                           \
             decay = next_decay;                                               \
             state_idx += nh * dim;                                            \
@@ -742,7 +765,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ prev_states, /* [B * n_chunks * nh * hd * ds] (entering states) */ \
     const float* __restrict__ D,        /* [nh] */                             \
     int batch, int T, int nh, int hd, int ds, int chunk_size,                  \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     int d_inner = nh * hd;                                                     \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
@@ -759,6 +783,11 @@ extern "C" __global__ void NAME(                                               \
     int chunk_end = chunk_start + chunk_size;                                  \
     if (chunk_end > T) chunk_end = T;                                          \
     int chunk_len = chunk_end - chunk_start;                                   \
+    /* In a packed row (seq_idx) the entering state reaches only the */        \
+    /* tokens before the chunk's first start, and a token's pairs stay */      \
+    /* inside its own sequence. */                                             \
+    int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_end,           \
+                              vl_id(seq_idx, b, T, chunk_start - 1) + 1) - chunk_start; \
     if (chunk_size > 64) return;  /* tile rows are sized for the fixed chunk of 64 */ \
     if (ds > MAMBA_RS_STATE_CAP) return;  /* capacity guard for q_reg[] (uniform: all threads agree) */ \
                                                                                \
@@ -783,7 +812,8 @@ extern "C" __global__ void NAME(                                               \
             IDX q_base = (b * T + t) * nh * ds + h * ds;                       \
             float q_reg[MAMBA_RS_STATE_CAP];                                   \
             for (int n = 0; n < ds; n++) q_reg[n] = Q[q_base + n];             \
-            for (int s_local = 0; s_local < t_local; s_local++) {              \
+            int lo = vl_seq_first(seq_idx, b, T, chunk_start, t) - chunk_start; \
+            for (int s_local = lo; s_local < t_local; s_local++) {             \
                 int s = chunk_start + s_local;                                 \
                 float dA_s = dA_cumsum[cs_base + s_local];                     \
                 float decay = FAST_EXP(m3_nonpos(dA_t - dA_s)); /* Same float-noise safety net as the state-passing kernel above. */ \
@@ -813,13 +843,14 @@ extern "C" __global__ void NAME(                                               \
             for (int n = 0; n < ds; n++) {                                     \
                 y_off += Q[q_base + n] * prev_states[state_base + n];          \
             }                                                                  \
-            y_off *= state_decay;                                              \
+            if (t_local >= cont) y_off = 0.0f; y_off *= state_decay;           \
                                                                                \
             /* Y_diag: intra-chunk contribution from positions s <= t (strictly */ \
             /* causal + diagonal). For s < t the decayed Q.K factor comes from */ \
             /* the shared tile; s == t rides qk_dot (gamma contribution). */   \
             float y_diag = 0.0f;                                               \
-            for (int s_local = 0; s_local < t_local; s_local++) {              \
+            int lo = vl_seq_first(seq_idx, b, T, chunk_start, t) - chunk_start; \
+            for (int s_local = lo; s_local < t_local; s_local++) {             \
                 int s = chunk_start + s_local;                                 \
                 float v_s = x[(b * T + s) * d_inner + h * hd + p];             \
                 y_diag += qk_tile[head_row][t_local * 64 + s_local] * v_s;     \
@@ -872,7 +903,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ prev_states,                                     \
     const float* __restrict__ D,                                               \
     int batch, int T, int nh, int hd, int ds, int chunk_size,                  \
-    int y_first /* this run's first y block */                                 \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     int d_inner = nh * hd;                                                     \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                          \
@@ -887,6 +919,11 @@ extern "C" __global__ void NAME(                                               \
     int chunk_end = chunk_start + chunk_size;                                  \
     if (chunk_end > T) chunk_end = T;                                          \
     int chunk_len = chunk_end - chunk_start;                                   \
+    /* In a packed row (seq_idx) the entering state reaches only the */        \
+    /* tokens before the chunk's first start, and a token's pairs stay */      \
+    /* inside its own sequence. */                                             \
+    int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_end,           \
+                              vl_id(seq_idx, b, T, chunk_start - 1) + 1) - chunk_start; \
                                                                                \
     IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;              \
     IDX state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;              \
@@ -976,7 +1013,9 @@ extern "C" __global__ void NAME(                                               \
                 qk_val += sm_q[t_local * qk_ld + n] * sm_k[s_local * qk_ld + n]; \
             }                                                                  \
         }                                                                      \
-        sm_tri[e] = decay * qk_val;                                            \
+        sm_tri[e] = vl_id(seq_idx, b, T, chunk_start + t_local)                \
+                    == vl_id(seq_idx, b, T, chunk_start + s_local)             \
+            ? decay * qk_val : 0.0f;                                           \
     }                                                                          \
     __syncthreads();                                                           \
                                                                                \
@@ -1009,13 +1048,16 @@ extern "C" __global__ void NAME(                                               \
                 acc2 += qv.x * n0.z; acc2 += qv.y * n1.z; acc2 += qv.z * n2.z; acc2 += qv.w * n3.z; \
                 acc3 += qv.x * n0.w; acc3 += qv.y * n1.w; acc3 += qv.z * n2.w; acc3 += qv.w * n3.w; \
             }                                                                  \
-            float y_off0 = acc0 * state_decay;                                 \
-            float y_off1 = acc1 * state_decay;                                 \
-            float y_off2 = acc2 * state_decay;                                 \
-            float y_off3 = acc3 * state_decay;                                 \
+            bool on = t_local < cont;                                          \
+            float y_off0 = (on ? acc0 : 0.0f) * state_decay;                   \
+            float y_off1 = (on ? acc1 : 0.0f) * state_decay;                   \
+            float y_off2 = (on ? acc2 : 0.0f) * state_decay;                   \
+            float y_off3 = (on ? acc3 : 0.0f) * state_decay;                   \
             float yd0 = 0.0f, yd1 = 0.0f, yd2 = 0.0f, yd3 = 0.0f;              \
             int tri_row = t_local * (t_local - 1) / 2;                         \
-            for (int s_local = 0; s_local < t_local; s_local++) {              \
+            int lo = vl_seq_first(seq_idx, b, T, chunk_start, chunk_start + t_local) \
+                     - chunk_start;                                            \
+            for (int s_local = lo; s_local < t_local; s_local++) {             \
                 float w = sm_tri[tri_row + s_local];                           \
                 float4 v =                                                     \
                     *reinterpret_cast<const float4*>(sm_v + s_local * hd + p0); \
@@ -1042,10 +1084,12 @@ extern "C" __global__ void NAME(                                               \
             for (int n = 0; n < ds; n++) {                                     \
                 y_off += sm_q[t_local * qk_ld + n] * sm_ps[n * ps_ld + p];     \
             }                                                                  \
-            y_off *= state_decay;                                              \
+            if (t_local >= cont) y_off = 0.0f; y_off *= state_decay;           \
             float y_diag = 0.0f;                                               \
             int tri_row = t_local * (t_local - 1) / 2;                         \
-            for (int s_local = 0; s_local < t_local; s_local++) {              \
+            int lo = vl_seq_first(seq_idx, b, T, chunk_start, chunk_start + t_local) \
+                     - chunk_start;                                            \
+            for (int s_local = lo; s_local < t_local; s_local++) {             \
                 y_diag += sm_tri[tri_row + s_local] * sm_v[s_local * hd + p];  \
             }                                                                  \
             float y_skip = (d_skip + sm_qkd[t_local]) * sm_v[t_local * hd + p]; \
@@ -1138,7 +1182,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ dO,                                              \
     int B, int T, int nh_total, int hd, int ds, int CS,                        \
     int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
+    int z_first, /* this run's first z block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     int h = blockIdx.x;                                                        \
     IDX b = y_first + blockIdx.y;                                              \
@@ -1152,6 +1197,10 @@ extern "C" __global__ void NAME(                                               \
     int d_inner = nh_total * hd;                                               \
     int chunk_start = chunk_idx * CS;                                          \
     int chunk_len = min(CS, T - chunk_start);                                  \
+    /* In a packed row (seq_idx) only the tokens before the chunk's */         \
+    /* first start read the state entering it. */                              \
+    int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_start + chunk_len, \
+                              vl_id(seq_idx, b, T, chunk_start - 1) + 1) - chunk_start; \
     extern __shared__ float smem_st[];                                         \
     float* q_sm = smem_st;                 /* [CS*ds] */                       \
     float* do_sm = q_sm + CS * ds;         /* [CS*hd] */                       \
@@ -1178,7 +1227,7 @@ extern "C" __global__ void NAME(                                               \
     __syncthreads();                                                           \
     for (int n = ty; n < ds; n += TS) {                                        \
         float acc = 0.0f;                                                      \
-        for (int t = 0; t < chunk_len; t++) {                                  \
+        for (int t = 0; t < cont; t++) {                                       \
             acc += do_sm[t * hd + p] * expf_sm[t] * q_sm[t * ds + n];          \
         }                                                                      \
         state_B[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds          \
@@ -1197,7 +1246,8 @@ extern "C" __global__ void NAME(                                              \
     const T_ACT* __restrict__ dO,                                             \
     int B, int T, int nh_total, int hd, int ds, int CS,                       \
     int y_first, /* this run's first y block */                               \
-    int z_first /* this run's first z block */                                \
+    int z_first, /* this run's first z block */                               \
+    const int* __restrict__ seq_idx                                           \
 ) {                                                                           \
     int h = blockIdx.x;                                                       \
     IDX b = y_first + blockIdx.y;                                             \
@@ -1211,6 +1261,10 @@ extern "C" __global__ void NAME(                                              \
     int d_inner = nh_total * hd;                                              \
     int chunk_start = chunk_idx * CS;                                         \
     int chunk_len = min(CS, T - chunk_start);                                 \
+    /* In a packed row (seq_idx) only the tokens before the chunk's */        \
+    /* first start read the state entering it. */                             \
+    int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_start + chunk_len, \
+                              vl_id(seq_idx, b, T, chunk_start - 1) + 1) - chunk_start; \
     extern __shared__ float smem_st[];                                        \
     float* q_sm = smem_st;                                                    \
     float* do_sm = q_sm + CS * ds;                                            \
@@ -1238,7 +1292,7 @@ extern "C" __global__ void NAME(                                              \
     __syncthreads();                                                          \
     for (int n = ty; n < ds; n += TS) {                                       \
         float acc = 0.0f;                                                     \
-        for (int t = 0; t < chunk_len; t++) {                                 \
+        for (int t = 0; t < cont; t++) {                                      \
             acc += do_sm[t * hd + p] * expf_sm[t] * q_sm[t * ds + n];         \
         }                                                                     \
         state_B[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds         \
@@ -1261,7 +1315,9 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ state_B,                                         \
     const float* __restrict__ DA_CS_SUM, /* [B*n_chunks*nh] */                 \
     int B, int nh_total, int hd, int ds, int n_chunks,                         \
-    float* __restrict__ seed_grad /* [B*nh*hd*ds] or nullptr */                \
+    float* __restrict__ seed_grad, /* [B*nh*hd*ds] or nullptr */               \
+    int T, int CS,                                                             \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                      \
     IDX total = (IDX)B * nh_total * hd * ds;                                   \
@@ -1278,7 +1334,11 @@ extern "C" __global__ void NAME(                                               \
         enter_state[base] = e;                                                 \
         float a_c = exp2f(DA_CS_SUM[(b * n_chunks + c) * nh_total + h]         \
                           * LOG2E);                                            \
-        e = a_c * e + state_B[base];                                           \
+        /* A chunk where a sequence of a packed row starts passes */           \
+        /* nothing back to the state entering it. */                           \
+        e = vl_passes(seq_idx, b, T, c * CS, min(CS, T - c * CS))              \
+            ? a_c * e + state_B[base]                                          \
+            : state_B[base];                                                   \
     }                                                                          \
     if (seed_grad != nullptr) seed_grad[idx] = e;                              \
 }
@@ -1349,7 +1409,8 @@ extern "C" __global__ void NAME(                                               \
     int B, int T, int nh_total, int hd, int ds, int CS,                        \
     int use_pair_mats,  /* 1 = smem holds the triangle pair matrices */        \
     int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
+    int z_first, /* this run's first z block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     /* t-split: blockDim = (hd, T_SPLIT). One head per block; */               \
     /* threadIdx.y strides the per-timestep loops so the block carries */      \
@@ -1537,6 +1598,7 @@ extern "C" __global__ void NAME(                                               \
         for (int t = ty; t < chunk_len; t += TS) {                             \
             int gt = chunk_start + t;                                          \
             float dA_t = da_cs_sm[t];                                          \
+            const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, chunk_len, t); \
             float exp_rev_t = use_pair_mats                                    \
                 ? exp_rev_sm[t]                                                \
                 : exp2f((da_cs_chunk_sum - dA_t) * LOG2E);                     \
@@ -1545,7 +1607,7 @@ extern "C" __global__ void NAME(                                               \
             /* Intra: sum_{s: s has t as source, i.e., t<s in causal} */       \
             /* P^T[t,s] = sum_n(K[t,n]*Q[s,n]) * exp(dA[s]-dA[t]) for s > t */ \
             float dv_intra = 0.0f;                                             \
-            for (int s = t + 1; s < chunk_len; s++) {                          \
+            for (int s = t + 1; s < sp.end; s++) {                             \
                 float kq;                                                      \
                 if (use_pair_mats) {                                           \
                     kq = kq_mat[M3_TRI(t, s, CS)];                             \
@@ -1563,7 +1625,7 @@ extern "C" __global__ void NAME(                                               \
             float dv_inter = 0.0f;                                             \
             for (int n = 0; n < ds; n++)                                       \
                 dv_inter += k_sm[t * dsp + n] * d_state[n];                    \
-            dv_inter *= exp_rev_t;                                             \
+            if (!sp.to_end) dv_inter = 0.0f; dv_inter *= exp_rev_t;            \
             /* Skip: dO * (D + qk_dot) */                                      \
             float dv_skip = do_sm[t * hdp + p] * (D_val + qk_sm[t]);           \
                                                                                \
@@ -1599,6 +1661,7 @@ extern "C" __global__ void NAME(                                               \
             for (int t = ty; t < chunk_len; t += TS) {                         \
                 int gt = chunk_start + t;                                      \
                 float dA_t = da_cs_sm[t];                                      \
+                const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, chunk_len, t); \
                                                                                \
                 /* dK_mid[t,n]: intra = sum_{s>t} dO[s]@V[s]^T * exp * Q[s,n] */ \
                 /* This is dp_t^T[*,t] @ Q[*,n] */                             \
@@ -1617,7 +1680,7 @@ extern "C" __global__ void NAME(                                               \
                 /* So acc_dk[t,n] = sum_{s>t} sum_p(V[t,p]*dO[s,p]) * exp(dA[s]-dA[t]) * Q[s,n] */ \
                                                                                \
                 float dk_intra = 0.0f;                                         \
-                for (int s = t + 1; s < chunk_len; s++) {                      \
+                for (int s = t + 1; s < sp.end; s++) {                         \
                     float vdo;                                                 \
                     if (use_pair_mats) {                                       \
                         vdo = vdo_mat[M3_TRI(t, s, CS)];                       \
@@ -1642,7 +1705,7 @@ extern "C" __global__ void NAME(                                               \
                 /* mask[s,t] = exp(dA[t]-dA[s]) if t>s else 0 */               \
                 /* So: acc_dq[t,n] = sum_{s<t} sum_p(V[s,p]*dO[t,p]) * exp(dA[t]-dA[s]) * K[s,n] */ \
                 float dq_intra = 0.0f;                                         \
-                for (int s = 0; s < t; s++) {                                  \
+                for (int s = sp.first; s < t; s++) {                           \
                     float vdo;                                                 \
                     if (use_pair_mats) {                                       \
                         vdo = vdo_mat[M3_TRI(s, t, CS)];                       \
@@ -1660,6 +1723,7 @@ extern "C" __global__ void NAME(                                               \
                 float dq_inter = 0.0f;                                         \
                 for (int pp = 0; pp < hd; pp++)                                \
                     dq_inter += do_sm[t * hdp + pp] * ssm_sm[pp * ds + n];     \
+                if (!sp.from_before) dq_inter = 0.0f;                          \
                 dq_inter *=                                                    \
                     use_pair_mats ? exp_fwd_sm[t] : exp2f(dA_t * LOG2E);       \
                                                                                \
@@ -1686,6 +1750,9 @@ extern "C" __global__ void NAME(                                               \
                     : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);          \
                 for (int pp = 0; pp < hd; pp++)                                \
                     dk_inter += v_sm[t * hdp + pp] * ssm_sm[pp * ds + n];      \
+                if (vl_id(seq_idx, b, T, chunk_start + t)                      \
+                    != vl_id(seq_idx, b, T, chunk_start + chunk_len - 1))      \
+                    dk_inter = 0.0f;                                           \
                 dk_inter *= exp_rev_t;                                         \
                 int gt = chunk_start + t;                                      \
                 dK_mid[((b * T + gt) * nh_total + h) * ds + n] += dk_inter;    \
@@ -1710,8 +1777,9 @@ extern "C" __global__ void NAME(                                               \
         __syncthreads();                                                       \
         for (int t = lane; t < chunk_len; t += nlanes) {                       \
             float acc = 0.0f;                                                  \
+            const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, chunk_len, t); \
             /* Below-diagonal: pairs (i, t) with i < t contribute +dAinv. */   \
-            for (int i = 0; i < t; i++) {                                      \
+            for (int i = sp.first; i < t; i++) {                               \
                 float vdo;                                                     \
                 if (use_pair_mats) {                                           \
                     vdo = vdo_mat[M3_TRI(i, t, CS)];                           \
@@ -1734,7 +1802,7 @@ extern "C" __global__ void NAME(                                               \
                 acc += vdo * decay * kq;                                       \
             }                                                                  \
             /* Above-diagonal: pairs (t, j) with j > t contribute -dAinv. */   \
-            for (int j = t + 1; j < chunk_len; j++) {                          \
+            for (int j = t + 1; j < sp.end; j++) {                             \
                 float vdo;                                                     \
                 if (use_pair_mats) {                                           \
                     vdo = vdo_mat[M3_TRI(t, j, CS)];                           \
@@ -1764,7 +1832,7 @@ extern "C" __global__ void NAME(                                               \
                     qs += q_sm[t * dsp + n] * ssm2_sm[pp * ds + n];            \
                 qs_do += qs * do_sm[t * hdp + pp];                             \
             }                                                                  \
-            acc += qs_do                                                       \
+            if (sp.from_before) acc += qs_do                                   \
                 * (use_pair_mats ? exp_fwd_sm[t] : exp2f(da_cs_sm[t] * LOG2E)); \
             dm_rev_sm[t] = acc;                                                \
             /* Exit-state term: K @ d_state^T dot V * exp_rev */               \
@@ -1776,7 +1844,7 @@ extern "C" __global__ void NAME(                                               \
                     dsk += k_sm[t * dsp + n] * ssm_sm[pp * ds + n];            \
                 dsk_v += dsk * v_sm[t * hdp + pp];                             \
             }                                                                  \
-            dm_vec_sm[t] = dsk_v                                               \
+            dm_vec_sm[t] = !sp.to_end ? 0.0f : dsk_v                           \
                 * (use_pair_mats ? exp_rev_sm[t]                               \
                                  : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E)); \
         }                                                                      \
@@ -1791,18 +1859,26 @@ extern "C" __global__ void NAME(                                               \
             }                                                                  \
             dM_scalar *= exp2f(da_cs_chunk_sum * LOG2E);                       \
                                                                                \
-            float total_rev = 0.0f;                                            \
-            for (int t = 0; t < chunk_len; t++) total_rev += dm_rev_sm[t];     \
-            total_rev += dM_scalar;                                            \
-            float cumsum = 0.0f;                                               \
-            for (int t = 0; t < chunk_len; t++) {                              \
-                cumsum += dm_vec_sm[t] - dm_rev_sm[t];                         \
-                /* Same grouping as the historical in-place update */          \
-                /* (dM_rev[t] += total + cumsum - vec): the added term is */   \
-                /* evaluated first, then added once. */                        \
-                float out = dm_rev_sm[t] + (total_rev + cumsum - dm_vec_sm[t]); \
-                int gt = chunk_start + t;                                      \
-                dADT[(b * T + gt) * nh_total + h] = out;                       \
+            /* A packed row combines each of its sequences in the chunk on */  \
+            /* its own: no term of one reaches the decays of another, and */   \
+            /* the state pass's scalar belongs to a chunk with no start. */    \
+            const bool passes = vl_passes(seq_idx, b, T, chunk_start, chunk_len); \
+            for (int a = 0; a < chunk_len;) {                                  \
+                const int e = vl_span(seq_idx, b, T, chunk_start, chunk_len, a).end; \
+                float total_rev = 0.0f;                                        \
+                for (int t = a; t < e; t++) total_rev += dm_rev_sm[t];         \
+                if (passes) total_rev += dM_scalar;                            \
+                float cumsum = 0.0f;                                           \
+                for (int t = a; t < e; t++) {                                  \
+                    cumsum += dm_vec_sm[t] - dm_rev_sm[t];                     \
+                    /* Same grouping as the historical in-place update */      \
+                    /* (dM_rev[t] += total + cumsum - vec): the added term */  \
+                    /* is evaluated first, then added once. */                 \
+                    float out = dm_rev_sm[t] + (total_rev + cumsum - dm_vec_sm[t]); \
+                    int gt = chunk_start + t;                                  \
+                    dADT[(b * T + gt) * nh_total + h] = out;                   \
+                }                                                              \
+                a = e;                                                         \
             }                                                                  \
         }                                                                      \
         __syncthreads();                                                       \
@@ -2041,7 +2117,8 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ DT,     /* [B*T*nh] — post-softplus dt */        \
     const float* __restrict__ Trap,   /* [B*T*nh] — post-sigmoid trap */       \
     int B, int T, int nh,                                                      \
-    const float* __restrict__ dScale_enter /* [B*nh] or nullptr */             \
+    const float* __restrict__ dScale_enter, /* [B*nh] or nullptr */            \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                      \
     IDX total = (IDX)B * T * nh;                                               \
@@ -2062,6 +2139,9 @@ extern "C" __global__ void NAME(                                               \
     else if (dScale_enter != nullptr)                                          \
         ds_prev = dScale_enter[(idx / nh / T) * nh + idx % nh];               \
                                                                                \
+    /* A token that starts a sequence of a packed row has no beta: the */      \
+    /* step before it took no shifted gamma from it. */                        \
+    if (vl_starts(seq_idx, idx / nh / T, T, t)) ds_prev = 0.0f;                \
     float d_dt = (dg_cur + ds_cur) * trap_val + ds_prev * (1.0f - trap_val);   \
                                                                                \
     float d_trap_sig = ((dg_cur + ds_cur) - ds_prev) * dt_val;                 \
@@ -2157,7 +2237,8 @@ NAME(                                                                         \
     const float* __restrict__ DT,                                             \
     const float* __restrict__ trap_sig,                                       \
     int batch, int T, int nh, int ds, int chunk_size,                         \
-    int y_first /* this run's first y block */                                \
+    int y_first, /* this run's first y block */                               \
+    const int* __restrict__ seq_idx                                           \
 ) {                                                                           \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
     IDX bc = blockIdx.x;                                                      \
@@ -2173,7 +2254,8 @@ NAME(                                                                         \
     float trap_cur = trap_sig[th];                                            \
     float gamma_val = dt_cur * trap_cur;                                      \
     float shifted_gamma = 0.0f;                                               \
-    if (t + 1 < T) {                                                          \
+    /* The next step's beta is 0 where it starts a sequence. */               \
+    if (t + 1 < T && !vl_starts(seq_idx, b, T, t + 1)) {                      \
         IDX th_next = (b * T + t + 1) * nh + h;                               \
         float dt_next = DT[th_next];                                          \
         float trap_next = trap_sig[th_next];                                  \
@@ -2227,7 +2309,8 @@ NAME(                                                                         \
     const T_ACT* __restrict__ K_scaled,                                       \
     const float* __restrict__ dA_cumsum,                                      \
     int batch, int T, int nh, int hd, int ds, int chunk_size,                 \
-    int y_first /* this run's first y block */                                \
+    int y_first, /* this run's first y block */                               \
+    const int* __restrict__ seq_idx                                           \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
@@ -2243,6 +2326,9 @@ NAME(                                                                         \
     int chunk_end = chunk_start + chunk_size;                                 \
     if (chunk_end > T) chunk_end = T;                                         \
     int chunk_len = chunk_end - chunk_start;                                  \
+    /* In a packed row (seq_idx) only the chunk's last sequence reaches */    \
+    /* its state: the tokens from where that sequence begins. */              \
+    int kept = vl_seq_first(seq_idx, b, T, chunk_start, chunk_end - 1) - chunk_start; \
     if (!quad) {                                                              \
         if (h >= nh) return;                                                  \
         IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;         \
@@ -2250,7 +2336,7 @@ NAME(                                                                         \
         for (int p = threadIdx.x; p < hd; p += blockDim.x) {                  \
             float acc[MAMBA_RS_STATE_CAP];                                    \
             for (int n = 0; n < ds; n++) acc[n] = 0.0f;                       \
-            for (int t = chunk_start; t < chunk_end; t++) {                   \
+            for (int t = chunk_start + kept; t < chunk_end; t++) {            \
                 int t_local = t - chunk_start;                                \
                 float dA_t = dA_cumsum[cs_base + t_local];                    \
                 float decay = FAST_EXP(m3_nonpos(dA_end - dA_t));             \
@@ -2322,7 +2408,7 @@ NAME(                                                                         \
         const float* skh = sk + hz * chunk_size * ds;                         \
         const float* sdah = sda + hz * chunk_size;                            \
         float dA_end_s = sdah[chunk_len - 1];                                 \
-        for (int t_local = 0; t_local < chunk_len; t_local++) {               \
+        for (int t_local = kept; t_local < chunk_len; t_local++) {            \
             float dA_t = sdah[t_local];                                       \
             float decay = FAST_EXP(m3_nonpos(dA_end_s - dA_t));               \
             float v_t = sxh[t_local * hd + p];                                \
@@ -2368,7 +2454,8 @@ extern "C" __global__ void NAME(                                              \
     const float* __restrict__ adt,                                            \
     float* __restrict__ dA_cumsum,                                            \
     int batch, int T, int nh, int hd, int ds, int chunk_size,                 \
-    int y_first /* this run's first y block */                                \
+    int y_first, /* this run's first y block */                               \
+    const int* __restrict__ seq_idx                                           \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
@@ -2381,6 +2468,9 @@ extern "C" __global__ void NAME(                                              \
     int chunk_end = chunk_start + chunk_size;                                 \
     if (chunk_end > T) chunk_end = T;                                         \
     int chunk_len = chunk_end - chunk_start;                                  \
+    /* In a packed row (seq_idx) only the chunk's last sequence reaches */    \
+    /* its state: the tokens from where that sequence begins. */              \
+    int kept = vl_seq_first(seq_idx, b, T, chunk_start, chunk_end - 1) - chunk_start; \
     extern __shared__ float m3f_sm[];                                         \
     int k_ld = ds + 4;                                                        \
     float* sm_k = m3f_sm;                                                     \
@@ -2398,7 +2488,8 @@ extern "C" __global__ void NAME(                                              \
         float cumsum = 0.0f;                                                  \
         IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;         \
         for (int t_local = 0; t_local < chunk_len; t_local++) {               \
-            cumsum += da_chunk[t_local];                                      \
+            const bool fresh = vl_starts(seq_idx, b, T, chunk_start + t_local); \
+            cumsum = (fresh ? 0.0f : cumsum) + da_chunk[t_local];             \
             da_chunk[t_local] = cumsum;                                       \
             dA_cumsum[cs_base + t_local] = cumsum;                            \
         }                                                                     \
@@ -2412,7 +2503,8 @@ extern "C" __global__ void NAME(                                              \
         float trap_cur = trap_sig[th];                                        \
         float gamma_val = dt_cur * trap_cur;                                  \
         float shifted_gamma = 0.0f;                                           \
-        if (t + 1 < T) {                                                      \
+        /* The next step's beta is 0 where it starts a sequence. */           \
+        if (t + 1 < T && !vl_starts(seq_idx, b, T, t + 1)) {                  \
             IDX th_next = (b * T + t + 1) * nh + h;                           \
             float dt_next = DT[th_next];                                      \
             float trap_next = trap_sig[th_next];                              \
@@ -2485,7 +2577,7 @@ extern "C" __global__ void NAME(                                              \
         int p = o / quads;                                                    \
         int nq = o % quads;                                                   \
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;             \
-        for (int t_local = 0; t_local < chunk_len; t_local++) {               \
+        for (int t_local = kept; t_local < chunk_len; t_local++) {            \
             float decay = sm_dec[t_local];                                    \
             float v_t = sm_x[t_local * hd + p];                               \
             const float4* k4 =                                                \
@@ -2528,7 +2620,8 @@ NAME(                                                                         \
     const float* __restrict__ prev_states,                                    \
     const float* __restrict__ D,                                              \
     int batch, int T, int nh, int hd, int ds, int chunk_size,                 \
-    int y_first /* this run's first y block */                                \
+    int y_first, /* this run's first y block */                               \
+    const int* __restrict__ seq_idx                                           \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
@@ -2542,6 +2635,11 @@ NAME(                                                                         \
     int chunk_end = chunk_start + chunk_size;                                 \
     if (chunk_end > T) chunk_end = T;                                         \
     int chunk_len = chunk_end - chunk_start;                                  \
+    /* In a packed row (seq_idx) the entering state reaches only the */       \
+    /* tokens before the chunk's first start, and a token's pairs stay */     \
+    /* inside its own sequence. */                                            \
+    int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_end,          \
+                              vl_id(seq_idx, b, T, chunk_start - 1) + 1) - chunk_start; \
     if (chunk_size > 64) return;                                              \
     if (ds > MAMBA_RS_STATE_CAP) return;                                      \
     IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
@@ -2555,7 +2653,8 @@ NAME(                                                                         \
             IDX q_base = (b * T + t) * nh * ds + h * ds;                      \
             float q_reg[MAMBA_RS_STATE_CAP];                                  \
             for (int n = 0; n < ds; n++) q_reg[n] = to_f(Q[q_base + n]);      \
-            for (int s_local = 0; s_local < t_local; s_local++) {             \
+            int lo = vl_seq_first(seq_idx, b, T, chunk_start, t) - chunk_start; \
+            for (int s_local = lo; s_local < t_local; s_local++) {            \
                 int s = chunk_start + s_local;                                \
                 float dA_s = dA_cumsum[cs_base + s_local];                    \
                 float decay = FAST_EXP(m3_nonpos(dA_t - dA_s));               \
@@ -2582,9 +2681,10 @@ NAME(                                                                         \
             for (int n = 0; n < ds; n++) {                                    \
                 y_off += to_f(Q[q_base + n]) * prev_states[state_base + n];   \
             }                                                                 \
-            y_off *= state_decay;                                             \
+            if (t_local >= cont) y_off = 0.0f; y_off *= state_decay;          \
             float y_diag = 0.0f;                                              \
-            for (int s_local = 0; s_local < t_local; s_local++) {             \
+            int lo = vl_seq_first(seq_idx, b, T, chunk_start, t) - chunk_start; \
+            for (int s_local = lo; s_local < t_local; s_local++) {            \
                 int s = chunk_start + s_local;                                \
                 float v_s = to_f(x[(b * T + s) * d_inner + h * hd + p]);      \
                 y_diag += qk_tile[head_row][t_local * 64 + s_local] * v_s;    \
@@ -2618,7 +2718,8 @@ extern "C" __global__ void NAME(                                              \
     const float* __restrict__ prev_states,                                    \
     const float* __restrict__ D,                                              \
     int batch, int T, int nh, int hd, int ds, int chunk_size,                 \
-    int y_first /* this run's first y block */                                \
+    int y_first, /* this run's first y block */                               \
+    const int* __restrict__ seq_idx                                           \
 ) {                                                                           \
     int d_inner = nh * hd;                                                    \
     int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
@@ -2632,6 +2733,11 @@ extern "C" __global__ void NAME(                                              \
     int chunk_end = chunk_start + chunk_size;                                 \
     if (chunk_end > T) chunk_end = T;                                         \
     int chunk_len = chunk_end - chunk_start;                                  \
+    /* In a packed row (seq_idx) the entering state reaches only the */       \
+    /* tokens before the chunk's first start, and a token's pairs stay */     \
+    /* inside its own sequence. */                                            \
+    int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_end,          \
+                              vl_id(seq_idx, b, T, chunk_start - 1) + 1) - chunk_start; \
     IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
     IDX state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;             \
     extern __shared__ float m3cs_sm[];                                        \
@@ -2698,7 +2804,9 @@ extern "C" __global__ void NAME(                                              \
                 qk_val += sm_q[t_local * qk_ld + n] * sm_k[s_local * qk_ld + n];    \
             }                                                                 \
         }                                                                     \
-        sm_tri[e] = decay * qk_val;                                           \
+        sm_tri[e] = vl_id(seq_idx, b, T, chunk_start + t_local)               \
+                    == vl_id(seq_idx, b, T, chunk_start + s_local)            \
+            ? decay * qk_val : 0.0f;                                          \
     }                                                                         \
     __syncthreads();                                                          \
     float d_skip = D[h];                                                      \
@@ -2735,13 +2843,16 @@ extern "C" __global__ void NAME(                                              \
                 acc3 += qv.z * n2.w;                                          \
                 acc3 += qv.w * n3.w;                                          \
             }                                                                 \
-            float y_off0 = acc0 * state_decay;                                \
-            float y_off1 = acc1 * state_decay;                                \
-            float y_off2 = acc2 * state_decay;                                \
-            float y_off3 = acc3 * state_decay;                                \
+            bool on = t_local < cont;                                         \
+            float y_off0 = (on ? acc0 : 0.0f) * state_decay;                  \
+            float y_off1 = (on ? acc1 : 0.0f) * state_decay;                  \
+            float y_off2 = (on ? acc2 : 0.0f) * state_decay;                  \
+            float y_off3 = (on ? acc3 : 0.0f) * state_decay;                  \
             float yd0 = 0.0f, yd1 = 0.0f, yd2 = 0.0f, yd3 = 0.0f;             \
             int tri_row = t_local * (t_local - 1) / 2;                        \
-            for (int s_local = 0; s_local < t_local; s_local++) {             \
+            int lo = vl_seq_first(seq_idx, b, T, chunk_start, chunk_start + t_local) \
+                     - chunk_start;                                           \
+            for (int s_local = lo; s_local < t_local; s_local++) {            \
                 float w = sm_tri[tri_row + s_local];                          \
                 float4 v = *reinterpret_cast<const float4*>(                  \
                     sm_v + s_local * hd + p0);                                \
@@ -2769,10 +2880,12 @@ extern "C" __global__ void NAME(                                              \
             for (int n = 0; n < ds; n++) {                                    \
                 y_off += sm_q[t_local * qk_ld + n] * sm_ps[n * ps_ld + p];          \
             }                                                                 \
-            y_off *= state_decay;                                             \
+            if (t_local >= cont) y_off = 0.0f; y_off *= state_decay;          \
             float y_diag = 0.0f;                                              \
             int tri_row = t_local * (t_local - 1) / 2;                        \
-            for (int s_local = 0; s_local < t_local; s_local++) {             \
+            int lo = vl_seq_first(seq_idx, b, T, chunk_start, chunk_start + t_local) \
+                     - chunk_start;                                           \
+            for (int s_local = lo; s_local < t_local; s_local++) {            \
                 y_diag += sm_tri[tri_row + s_local] * sm_v[s_local * hd + p]; \
             }                                                                 \
             float y_skip =                                                    \
@@ -2877,7 +2990,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half,
     weighted_kq_mat[idx] = __fmul_rn(kq_acc, decay);
 
 #define M3_DQKV_DV_TERMS_legacy \
-    for (int s = t + 1; s < chunk_len; s++) { \
+    for (int s = t + 1; s < sp.end; s++) { \
         float kq; \
         if (use_pair_mats) { kq = kq_mat[M3_TRI(t, s, CS)]; } \
         else { kq = 0.0f; for (int n = 0; n < ds; n++) \
@@ -2892,7 +3005,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half,
     dv_inter += k_sm[t * dsp + n] * d_state[n];
 
 #define M3_DQKV_DV_TERMS_transport \
-    for (int s = t + 1; s < chunk_len; s++) { \
+    for (int s = t + 1; s < sp.end; s++) { \
         if (use_pair_mats) { \
             const float weighted = weighted_kq_mat[M3_TRI(t, s, CS)]; \
             dv_intra += weighted * do_sm[s * hdp + p]; \
@@ -2909,7 +3022,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half,
     dv_inter += k_sm[t * dsp + n] * ssm_sm[p * ds + n];
 
 #define M3_DQKV_DQ_DK_TERMS_legacy \
-    for (int s = t + 1; s < chunk_len; s++) { \
+    for (int s = t + 1; s < sp.end; s++) { \
         float vdo; \
         if (use_pair_mats) { vdo = vdo_mat[M3_TRI(t, s, CS)]; } \
         else { vdo = 0.0f; for (int pp = 0; pp < hd; pp++) \
@@ -2921,7 +3034,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half,
     } \
     dK_mid[((b * T + gt) * nh_total + h) * ds + n] = dk_intra; \
     float dq_intra = 0.0f; \
-    for (int s = 0; s < t; s++) { \
+    for (int s = sp.first; s < t; s++) { \
         float vdo; \
         if (use_pair_mats) { vdo = vdo_mat[M3_TRI(s, t, CS)]; } \
         else { vdo = 0.0f; for (int pp = 0; pp < hd; pp++) \
@@ -2936,7 +3049,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half,
     dq_inter += do_sm[t * hdp + pp] * ssm_sm[pp * ds + n];
 
 #define M3_DQKV_DQ_DK_TERMS_transport \
-    for (int s = t + 1; s < chunk_len; s++) { \
+    for (int s = t + 1; s < sp.end; s++) { \
         if (use_pair_mats) { \
             const float weighted = vdo_mat[M3_TRI(t, s, CS)]; \
             dk_intra += weighted * q_sm[s * dsp + n]; \
@@ -2950,7 +3063,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half,
     } \
     dK_mid[((b * T + gt) * nh_total + h) * ds + n] = dk_intra; \
     float dq_intra = 0.0f; \
-    for (int s = 0; s < t; s++) { \
+    for (int s = sp.first; s < t; s++) { \
         if (use_pair_mats) { \
             const float weighted = vdo_mat[M3_TRI(s, t, CS)]; \
             dq_intra += weighted * k_sm[s * dsp + n]; \
@@ -2983,7 +3096,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half,
 #define M3_DQKV_RELOAD_PRIMAL_transport
 
 #define M3_DQKV_DADT_PAIRS_legacy \
-    for (int i = 0; i < t; i++) { \
+    for (int i = sp.first; i < t; i++) { \
         float vdo; \
         if (use_pair_mats) { vdo = vdo_mat[M3_TRI(i, t, CS)]; } \
         else { vdo = 0.0f; for (int pp = 0; pp < hd; pp++) \
@@ -2997,7 +3110,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half,
             kq += k_sm[i * dsp + n] * q_sm[t * dsp + n]; } \
         acc += vdo * decay * kq; \
     } \
-    for (int j = t + 1; j < chunk_len; j++) { \
+    for (int j = t + 1; j < sp.end; j++) { \
         float vdo; \
         if (use_pair_mats) { vdo = vdo_mat[M3_TRI(t, j, CS)]; } \
         else { vdo = 0.0f; for (int pp = 0; pp < hd; pp++) \
@@ -3013,7 +3126,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half,
     }
 
 #define M3_DQKV_DADT_PAIRS_transport \
-    for (int i = 0; i < t; i++) { \
+    for (int i = sp.first; i < t; i++) { \
         if (use_pair_mats) { \
             const float weighted = vdo_mat[M3_TRI(i, t, CS)]; \
             const float kq = kq_mat[M3_TRI(i, t, CS)]; \
@@ -3029,7 +3142,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half,
             acc += vdo * decay * kq; \
         } \
     } \
-    for (int j = t + 1; j < chunk_len; j++) { \
+    for (int j = t + 1; j < sp.end; j++) { \
         if (use_pair_mats) { \
             const float weighted = vdo_mat[M3_TRI(t, j, CS)]; \
             const float kq = kq_mat[M3_TRI(t, j, CS)]; \
@@ -3068,7 +3181,8 @@ const float* __restrict__ enter_state, \
 int B, int T, int nh_total, int hd, int ds, int CS, \
 int use_pair_mats, \
     int y_first, /* this run's first y block */ \
-    int z_first /* this run's first z block */ \
+    int z_first, /* this run's first z block */ \
+    const int* __restrict__ seq_idx \
 ) { \
     int h = blockIdx.x; \
     IDX b = y_first + blockIdx.y; \
@@ -3190,12 +3304,13 @@ int use_pair_mats, \
         for (int t = ty; t < chunk_len; t += TS) { \
             int gt = chunk_start + t; \
             float dA_t = da_cs_sm[t]; \
+            const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, chunk_len, t); \
             float exp_rev_t = use_pair_mats \
             ? exp_rev_sm[t] \
             : exp2f((da_cs_chunk_sum - dA_t) * LOG2E); \
             float dv_intra = 0.0f; \
             M3_DQKV_DV_TERMS_##MODE \
-            dv_inter *= exp_rev_t; \
+            if (!sp.to_end) dv_inter = 0.0f; dv_inter *= exp_rev_t; \
             float dv_skip = do_sm[t * hdp + p] * (D_val + qk_sm[t]); \
             dV[(b * T + gt) * d_inner + h * hd + p] = \
             dv_intra + dv_inter + dv_skip; \
@@ -3216,10 +3331,11 @@ int use_pair_mats, \
             for (int t = ty; t < chunk_len; t += TS) { \
                 int gt = chunk_start + t; \
                 float dA_t = da_cs_sm[t]; \
+                const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, chunk_len, t); \
                 float dk_intra = 0.0f; \
                 M3_DQKV_DQ_DK_TERMS_##MODE \
-                dq_inter *= \
-                use_pair_mats ? exp_fwd_sm[t] : exp2f(dA_t * LOG2E); \
+                if (!sp.from_before) dq_inter = 0.0f; \
+                dq_inter *= use_pair_mats ? exp_fwd_sm[t] : exp2f(dA_t * LOG2E); \
                 dQ_mid[((b * T + gt) * nh_total + h) * ds + n] = \
                 dq_intra + dq_inter; \
             } \
@@ -3235,6 +3351,9 @@ int use_pair_mats, \
                 : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E); \
                 for (int pp = 0; pp < hd; pp++) \
                 dk_inter += v_sm[t * hdp + pp] * ssm_sm[pp * ds + n]; \
+                if (vl_id(seq_idx, b, T, chunk_start + t) \
+                    != vl_id(seq_idx, b, T, chunk_start + chunk_len - 1)) \
+                    dk_inter = 0.0f; \
                 dk_inter *= exp_rev_t; \
                 int gt = chunk_start + t; \
                 dK_mid[((b * T + gt) * nh_total + h) * ds + n] += dk_inter; \
@@ -3245,6 +3364,7 @@ int use_pair_mats, \
         __syncthreads(); \
         for (int t = lane; t < chunk_len; t += nlanes) { \
             float acc = 0.0f; \
+            const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, chunk_len, t); \
             M3_DQKV_DADT_PAIRS_##MODE \
             float qs_do = 0.0f; \
             for (int pp = 0; pp < hd; pp++) { \
@@ -3253,7 +3373,7 @@ int use_pair_mats, \
                 qs += q_sm[t * dsp + n] * ssm2_sm[pp * ds + n]; \
                 qs_do += qs * do_sm[t * hdp + pp]; \
             } \
-            acc += qs_do \
+            if (sp.from_before) acc += qs_do \
             * (use_pair_mats ? exp_fwd_sm[t] \
             : exp2f(da_cs_sm[t] * LOG2E)); \
             dm_rev_sm[t] = acc; \
@@ -3264,7 +3384,7 @@ int use_pair_mats, \
                 dsk += k_sm[t * dsp + n] * ssm_sm[pp * ds + n]; \
                 dsk_v += dsk * v_sm[t * hdp + pp]; \
             } \
-            dm_vec_sm[t] = dsk_v \
+            dm_vec_sm[t] = !sp.to_end ? 0.0f : dsk_v \
             * (use_pair_mats ? exp_rev_sm[t] \
             : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E)); \
         } \
@@ -3276,16 +3396,23 @@ int use_pair_mats, \
                 dM_scalar += ssm2_sm[pp * ds + n] * ssm_sm[pp * ds + n]; \
             } \
             dM_scalar *= exp2f(da_cs_chunk_sum * LOG2E); \
-            float total_rev = 0.0f; \
-            for (int t = 0; t < chunk_len; t++) total_rev += dm_rev_sm[t]; \
-            total_rev += dM_scalar; \
-            float cumsum = 0.0f; \
-            for (int t = 0; t < chunk_len; t++) { \
-                cumsum += dm_vec_sm[t] - dm_rev_sm[t]; \
-                float out = \
-                dm_rev_sm[t] + (total_rev + cumsum - dm_vec_sm[t]); \
-                int gt = chunk_start + t; \
-                dADT[(b * T + gt) * nh_total + h] = out; \
+            /* A packed row combines each of its sequences in the */ \
+            /* chunk on its own (see the f32 kernel). */ \
+            const bool passes = vl_passes(seq_idx, b, T, chunk_start, chunk_len); \
+            for (int a = 0; a < chunk_len;) { \
+                const int e = vl_span(seq_idx, b, T, chunk_start, chunk_len, a).end; \
+                float total_rev = 0.0f; \
+                for (int t = a; t < e; t++) total_rev += dm_rev_sm[t]; \
+                if (passes) total_rev += dM_scalar; \
+                float cumsum = 0.0f; \
+                for (int t = a; t < e; t++) { \
+                    cumsum += dm_vec_sm[t] - dm_rev_sm[t]; \
+                    float out = \
+                    dm_rev_sm[t] + (total_rev + cumsum - dm_vec_sm[t]); \
+                    int gt = chunk_start + t; \
+                    dADT[(b * T + gt) * nh_total + h] = out; \
+                } \
+                a = e; \
             } \
         } \
         __syncthreads(); \

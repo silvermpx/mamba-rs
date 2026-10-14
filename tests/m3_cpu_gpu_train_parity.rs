@@ -619,6 +619,7 @@ fn run_gpu(
         ctx: &ctx,
         kernels: &m3k,
         dims: &dims,
+        seq_idx: 0,
     };
     gpu_forward_mamba3_backbone(
         &exec,

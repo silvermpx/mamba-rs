@@ -254,6 +254,7 @@ fn mimo_scan_tiles_are_the_whole_head() {
                         b.arg(&y_ptr);
                         b.arg(&y_first);
                         b.arg(&z_first);
+                        b.arg(&0u64);
                         unsafe { b.launch(cfg) }.unwrap();
                     }
                     let mut got = vec![
@@ -494,6 +495,7 @@ fn mimo_scan_bwd_global_is_the_shared_kernel() {
                     b.arg(&a_floor);
                     b.arg(&dy_in);
                     b.arg(&y_first);
+                    b.arg(&0u64);
                     unsafe { b.launch(cfg) }.unwrap();
                 }
                 vec![
@@ -573,22 +575,27 @@ fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
     unsafe { b.launch(cfg) }.unwrap();
 }
 
+/// No packing (see `mamba_rs::varlen`): the windows here hold one sequence
+/// per row.
+const NO_PACKING: Arg = Arg::P(0);
+
 /// [`launch`] once per run of the grid's y axis, each run's first block
-/// appended as the kernel's last argument.
-fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+/// appended, then `tail` (the kernel's packing and what follows it).
+fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg], tail: &[Arg]) {
     for (y_first, cfg) in y_runs(cfg) {
         let mut run = args.to_vec();
         run.push(Arg::I(y_first));
+        run.extend_from_slice(tail);
         launch(ctx, f, cfg, &run);
     }
 }
 
 /// [`launch`] once per run of the grid's y and z axes, each run's first y
-/// and z blocks appended.
+/// and z blocks appended, then no packing.
 fn launch_yz_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
     for (y_first, z_first, cfg) in yz_runs(cfg) {
         let mut run = args.to_vec();
-        run.extend([Arg::I(y_first), Arg::I(z_first)]);
+        run.extend([Arg::I(y_first), Arg::I(z_first), NO_PACKING]);
         launch(ctx, f, cfg, &run);
     }
 }
@@ -968,6 +975,7 @@ fn mimo_chunked_staging_in_global_is_the_shared_staging() {
                     k.cb.state_terms.get(dtype),
                     cfg((b * inp.nc, nh, 64usize.div_ceil(tg)), 256, smem),
                     &args,
+                    &[NO_PACKING],
                 );
                 terms.push([
                     bits_f32(&ctx, &dk),
@@ -1021,6 +1029,7 @@ fn mimo_chunked_staging_in_global_is_the_shared_staging() {
                     k.cb.pairs.get(dtype),
                     cfg((b * inp.nc, nh, 1), 256, smem),
                     &args,
+                    &[NO_PACKING],
                 );
                 pairs.push([
                     bits_f32(&ctx, &dq),
@@ -1064,6 +1073,7 @@ fn mimo_chunked_staging_in_global_is_the_shared_staging() {
                 &k.cb.lead,
                 cfg((b, nh, 1), threads, lanes.min(threads) * 4),
                 &args,
+                &[NO_PACKING, Arg::I(inp.seq as i32)],
             );
             leads.push([bits_f32(&ctx, &de0), bits_f32(&ctx, &gpsi)]);
         }

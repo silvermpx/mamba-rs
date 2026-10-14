@@ -575,6 +575,7 @@ impl Mamba3MimoKernels {
             &ComposedSpec {
                 sources: &[
                     include_str!("../../../kernels/_typed_prelude.cuh"),
+                    include_str!("../../../kernels/_varlen.cuh"),
                     include_str!("../../../kernels/gated_mlp.cu"),
                     include_str!("../../../kernels/mamba3_mimo.cu"),
                     include_str!("../../../kernels/mamba3_mimo_chunked.cu"),

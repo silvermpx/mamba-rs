@@ -222,6 +222,9 @@ pub(crate) struct WindowPtrs {
     /// none), written every `stride` tokens.
     pub ckpt: u64,
     pub stride: usize,
+    /// The sequences packed into the rows (see [`crate::varlen`]), i32
+    /// `[B, T]`; 0 for one sequence a row.
+    pub seq_idx: u64,
 }
 
 /// What a model needs of this device beyond its config's own envelope: a
@@ -484,6 +487,7 @@ impl M2Exec<'_> {
         let stream = &self.ctx.stream;
         let (proj, xbc, conv, conv_next, ssm) = (w.proj, w.xbc, w.conv, w.conv_next, w.ssm);
         let (dt, acs, cb, states, y) = (w.dt, w.acs, w.cb, w.states, w.y);
+        let seq_idx = w.seq_idx;
         let conv_per_layer = b * cd * c.d_conv;
         let xbc_col = 2 * d_mlp + d_ssm;
         let (b_i, t_i, cd_i, dconv_i) = (b as i32, t_len as i32, cd as i32, c.d_conv as i32);
@@ -532,6 +536,7 @@ impl M2Exec<'_> {
             bld.arg(&t_i);
             bld.arg(&cd_i);
             bld.arg(&dconv_i);
+            bld.arg(&seq_idx);
             bld.launch(g).map(|_| ())
         })?;
         launch(grid_1d_cover(b * cd)?, "conv state", l, &|g| unsafe {
@@ -545,6 +550,7 @@ impl M2Exec<'_> {
             bld.arg(&t_i);
             bld.arg(&cd_i);
             bld.arg(&dconv_i);
+            bld.arg(&seq_idx);
             bld.launch(g).map(|_| ())
         })?;
         let copied = unsafe {
@@ -604,6 +610,7 @@ impl M2Exec<'_> {
                     }
                     bld.arg(&y_first);
                     bld.arg(&z_first);
+                    bld.arg(&seq_idx);
                     bld.launch(g).map(|_| ())
                 },
             );
@@ -629,6 +636,7 @@ impl M2Exec<'_> {
             bld.arg(&lo);
             bld.arg(&hi);
             bld.arg(&y_first);
+            bld.arg(&seq_idx);
             bld.launch(g).map(|_| ())
         })?;
         let bmm_cfg = LaunchConfig {
@@ -648,6 +656,7 @@ impl M2Exec<'_> {
             bld.arg(&ng_i);
             bld.arg(&ds_i);
             bld.arg(&y_first);
+            bld.arg(&seq_idx);
             bld.launch(g).map(|_| ())
         })?;
         let (state_cols, state_pt, state_smem) = chunk_state_geom(hd, ds, self.kernels.smem_optin);
@@ -673,6 +682,7 @@ impl M2Exec<'_> {
             bld.arg(&ds_i);
             bld.arg(&pt_i);
             bld.arg(&y_first);
+            bld.arg(&seq_idx);
             bld.launch(g).map(|_| ())
         })?;
         let pass_cfg = LaunchConfig {
@@ -691,6 +701,7 @@ impl M2Exec<'_> {
             bld.arg(&hd_i);
             bld.arg(&ds_i);
             bld.arg(&y_first);
+            bld.arg(&seq_idx);
             bld.launch(g).map(|_| ())
         })?;
         let dp = lw.d;
@@ -747,6 +758,7 @@ impl M2Exec<'_> {
             if !tiled {
                 bld.arg(&z_first);
             }
+            bld.arg(&seq_idx);
             bld.launch(g).map(|_| ())
         })?;
         Ok(())
@@ -1512,6 +1524,7 @@ impl Mamba2GpuEngine {
                 y,
                 ckpt: 0,
                 stride: 1,
+                seq_idx: 0,
             };
             x.window(l, &lp, &w, (b, t_len, c.prefill_parallel(t_len)))?;
             x.gate_out_residual(

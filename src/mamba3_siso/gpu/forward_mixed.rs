@@ -321,6 +321,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
         ctx,
         kernels: m3k,
         dims,
+        seq_idx,
     } = *exec;
     let Mamba3LayerPtrs {
         ssm_state,
@@ -494,6 +495,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                         heads: nh,
                         angles: na,
                     },
+                    seq_idx,
                 },
             )
         }?;
@@ -559,6 +561,10 @@ pub fn gpu_forward_mamba3_layer_mixed(
         bld.arg(acts.a_val.inner());
         bld.arg(acts.trap.inner());
         n_total.push(&mut bld);
+        let (t_seq, nh_seq) = (dims.seq_len as i32, nh as i32);
+        bld.arg(&t_seq);
+        bld.arg(&nh_seq);
+        bld.arg(&seq_idx);
         unsafe { bld.launch(grid_1d_cover(bt * nh)?) }
             .map_err(|e| format!("m3_mixed F5b abg: {e:?}"))?;
     }
@@ -617,6 +623,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 bld.arg(&cs);
                 bld.arg(&y_first);
                 bld.arg(&z_first);
+                bld.arg(&seq_idx);
                 unsafe { bld.launch(cfg) }
                     .map_err(|e| format!("m3_mixed F6 K2 da_cumsum: {e:?}"))?;
             }
@@ -653,6 +660,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 bld.arg(&ds_i);
                 bld.arg(&cs);
                 bld.arg(&y_first);
+                bld.arg(&seq_idx);
                 unsafe { bld.launch(cfg) }
                     .map_err(|e| format!("m3_mixed F6 fused pre+state: {e:?}"))?;
             }
@@ -687,6 +695,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                     bld.arg(&ds_i);
                     bld.arg(&cs);
                     bld.arg(&y_first);
+                    bld.arg(&seq_idx);
                     unsafe { bld.launch(cfg) }
                         .map_err(|e| format!("m3_mixed F6 K1 preprocess: {e:?}"))?;
                 }
@@ -722,6 +731,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                     bld.arg(&ds_i);
                     bld.arg(&cs);
                     bld.arg(&y_first);
+                    bld.arg(&seq_idx);
                     unsafe { bld.launch(cfg) }
                         .map_err(|e| format!("m3_mixed F6 K3 chunk_state_fwd: {e:?}"))?;
                 }
@@ -765,6 +775,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 bld.arg(&cs);
                 bld.arg(&t_i);
                 bld.arg(&y_first);
+                bld.arg(&seq_idx);
                 unsafe { bld.launch(cfg) }
                     .map_err(|e| format!("m3_mixed F6 K4 state_pass: {e:?}"))?;
             }
@@ -811,6 +822,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
                 bld.arg(&ds_i);
                 bld.arg(&cs);
                 bld.arg(&y_first);
+                bld.arg(&seq_idx);
                 unsafe { bld.launch(cfg) }
                     .map_err(|e| format!("m3_mixed F6 K5 chunk_scan_fwd: {e:?}"))?;
             }
@@ -859,6 +871,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
             bld.arg(&hd_i);
             bld.arg(&ds_i);
             bld.arg(&y_first);
+            bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F6 burnin: {e:?}"))?;
         }
     }
@@ -1074,11 +1087,12 @@ pub fn gpu_forward_mamba3_backbone_mixed(
     scratch: &mut GpuMamba3MixedScratch,
 ) -> Result<(), String> {
     exec.check_state_cap()?;
-    check_mixed_mlp(w, acts)?;
+    check_mixed_mlp(w, acts, exec.dims.bt())?;
     let M3Exec {
         ctx,
         kernels: m3k,
         dims,
+        ..
     } = *exec;
     let dtype = acts.dtype;
     let bt = dims.bt();
@@ -1269,6 +1283,7 @@ fn mixed_mlp_forward(
         ctx,
         kernels: m3k,
         dims,
+        ..
     } = *exec;
     let (bt, dm, h) = (dims.bt(), dims.d_model, w.hidden);
     let (bt_i, h_i) = (bt as i32, h as i32);
@@ -1322,21 +1337,15 @@ fn mixed_mlp_forward(
 }
 
 /// The weights and the activations built for them must agree on the gated
-/// MLP: buffers of another width would be indexed past their end.
+/// MLP: buffers of another width would be indexed past their end. `rows`
+/// is the window's, batch times length.
 pub(super) fn check_mixed_mlp(
     w: &GpuMamba3TrainMixedWeights,
     acts: &GpuMamba3BackboneMixedActs,
+    rows: usize,
 ) -> Result<(), String> {
     let model: Vec<usize> = w.compute.mlp.iter().map(|m| m.hidden).collect();
     let built: Vec<usize> = acts.mlp.iter().map(|m| m.act.len_elems()).collect();
-    // The window's rows from the MLP norm's width, d_model: the final norm
-    // is absent from a segment built without it.
-    let d_model = w
-        .compute
-        .mlp
-        .first()
-        .map_or(1, |m| m.norm_weight.len_elems().max(1));
-    let rows = acts.norm_f_input.len() / d_model;
     if model.len() != built.len() || model.iter().zip(&built).any(|(h, n)| h * rows != *n) {
         return Err(format!(
             "the gated MLP widths {model:?} of the weights do not match the activations \

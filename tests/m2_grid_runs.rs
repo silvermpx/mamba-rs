@@ -255,7 +255,7 @@ fn the_state_passing_gives_elements_past_the_y_extent_their_twins_bits() {
     ];
     for (y_first, cfg) in y_runs(cfg) {
         let mut run = args.to_vec();
-        run.push(Arg::I(y_first));
+        run.extend([Arg::I(y_first), Arg::P(0)]);
         launch(&ctx, &k.state_passing, cfg, &run);
     }
     assert!(

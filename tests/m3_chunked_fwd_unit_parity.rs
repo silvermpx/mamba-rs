@@ -229,6 +229,7 @@ fn check_preprocess_chunks(dtype: WeightDtype) {
         bld.arg(&dsi);
         bld.arg(&csi);
         bld.arg(&y_first);
+        bld.arg(&0u64);
         unsafe { bld.launch(cfg) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
@@ -275,6 +276,7 @@ fn check_preprocess_chunks(dtype: WeightDtype) {
         bld.arg(&dsi);
         bld.arg(&csi);
         bld.arg(&y_first);
+        bld.arg(&0u64);
         unsafe { bld.launch(cfg) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
@@ -359,6 +361,7 @@ fn check_chunk_state_fwd(dtype: WeightDtype) {
         bld.arg(&dsi);
         bld.arg(&csi);
         bld.arg(&y_first);
+        bld.arg(&0u64);
         unsafe { bld.launch(cfg) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
@@ -390,6 +393,7 @@ fn check_chunk_state_fwd(dtype: WeightDtype) {
         bld.arg(&dsi);
         bld.arg(&csi);
         bld.arg(&y_first);
+        bld.arg(&0u64);
         unsafe { bld.launch(cfg) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
@@ -535,6 +539,7 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                                 bld.arg(dim);
                             }
                             bld.arg(&y_first);
+                            bld.arg(&0u64);
                             unsafe { bld.launch(cfg) }.unwrap();
                         }
                     } else {
@@ -559,6 +564,7 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                             }
                             bld.arg(&y_first);
                             bld.arg(&z_first);
+                            bld.arg(&0u64);
                             unsafe { bld.launch(cfg) }.unwrap();
                         }
                         let ptrs = [
@@ -582,6 +588,7 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                                 bld.arg(dim);
                             }
                             bld.arg(&y_first);
+                            bld.arg(&0u64);
                             unsafe { bld.launch(cfg) }.unwrap();
                         }
                         let ptrs = [
@@ -601,6 +608,7 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                                 bld.arg(dim);
                             }
                             bld.arg(&y_first);
+                            bld.arg(&0u64);
                             unsafe { bld.launch(cfg) }.unwrap();
                         }
                     }
@@ -855,6 +863,7 @@ fn m3_state_pass_fused_matches_separate_bits() {
                             bld.arg(arg);
                         }
                         bld.arg(&y_first);
+                        bld.arg(&0u64);
                         unsafe { bld.launch(cfg) }.unwrap();
                     }
                 }
@@ -962,6 +971,7 @@ fn check_chunk_scan_fwd(dtype: WeightDtype) {
         bld.arg(&dsi);
         bld.arg(&csi);
         bld.arg(&y_first);
+        bld.arg(&0u64);
         unsafe { bld.launch(cfg) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
@@ -1002,6 +1012,7 @@ fn check_chunk_scan_fwd(dtype: WeightDtype) {
         bld.arg(&dsi);
         bld.arg(&csi);
         bld.arg(&y_first);
+        bld.arg(&0u64);
         unsafe { bld.launch(cfg) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();

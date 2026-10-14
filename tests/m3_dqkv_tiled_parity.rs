@@ -230,6 +230,7 @@ fn state_terms_reference(
         }
         b.arg(&y_first);
         b.arg(&z_first);
+        b.arg(&0u64);
         unsafe { b.launch(cfg) }.unwrap();
     }
     out
@@ -267,6 +268,7 @@ fn state_terms_tiled(
         }
         b.arg(&y_first);
         b.arg(&z_first);
+        b.arg(&0u64);
         unsafe { b.launch(cfg) }.unwrap();
     }
     out
@@ -294,9 +296,14 @@ fn enter_state(
     for d in &dims {
         b.arg(d);
     }
-    // No gradient of the window's entering state is asked for.
+    // No gradient of the window's entering state is asked for, and the
+    // rows hold one sequence each.
     let no_seed_grad: u64 = 0;
     b.arg(&no_seed_grad);
+    let (t, cs) = (s.t as i32, CS as i32);
+    b.arg(&t);
+    b.arg(&cs);
+    b.arg(&0u64);
     unsafe { b.launch(blocks(B * NH * s.hd * s.ds)) }.unwrap();
     out
 }
@@ -350,6 +357,8 @@ fn dqkv_warp(
         b.arg(&pairs_i);
         b.arg(&y_first);
         b.arg(&z_first);
+        // No packing: the rows hold one sequence each.
+        b.arg(&0u64);
         unsafe { b.launch(cfg) }.unwrap();
     }
     out
@@ -414,6 +423,7 @@ fn dqkv_tiled(
         b.arg(&tile_i);
         b.arg(&y_first);
         b.arg(&z_first);
+        b.arg(&0u64);
         unsafe { b.launch(cfg) }.unwrap();
     }
     out

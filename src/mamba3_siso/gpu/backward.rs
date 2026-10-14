@@ -38,6 +38,7 @@ pub(super) fn launch_enter_fold_bwd(exec: &M3Exec<'_>, op: EnterFold<'_>) -> Res
         ctx,
         kernels: m3k,
         dims,
+        ..
     } = *exec;
     let rows = u32::try_from(dims.batch * dims.nheads)
         .map_err(|_| "m3_enter_fold_bwd: batch * heads exceeds the grid".to_string())?;
@@ -77,6 +78,7 @@ pub fn gpu_backward_mamba3_layer(
         ctx,
         kernels: m3k,
         dims,
+        seq_idx,
     } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
@@ -207,6 +209,7 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(&hd_i);
             builder.arg(&ds_i);
             builder.arg(&y_first);
+            builder.arg(&seq_idx);
             unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_backward_seq B6: {:?}", e))?;
         }
 
@@ -358,6 +361,7 @@ pub fn gpu_backward_mamba3_layer(
                 enter_state: scratch.dstate_enter.cached_ptr(),
                 seed_grad: scratch.dstate_seed.cached_ptr(),
                 dm_chain: scratch.dm_chain.cached_ptr(),
+                seq_idx,
             };
             let shape = super::dqkv_tiled::DqkvShape {
                 batch: dims.batch,
@@ -422,6 +426,7 @@ pub fn gpu_backward_mamba3_layer(
                     sb.arg(&cs);
                     sb.arg(&y_first);
                     sb.arg(&z_first);
+                    sb.arg(&seq_idx);
                     unsafe { sb.launch(cfg) }
                         .map_err(|e| format!("m3_dqkv_state_terms: {:?}", e))?;
                 }
@@ -439,6 +444,9 @@ pub fn gpu_backward_mamba3_layer(
                 pb.arg(&ds_i);
                 pb.arg(&nc_i);
                 pb.arg(scratch.dstate_seed.inner_mut());
+                pb.arg(&t_i);
+                pb.arg(&cs);
+                pb.arg(&seq_idx);
                 unsafe { pb.launch(grid_1d_cover(dims.batch * nh * hd * ds)?) }
                     .map_err(|e| format!("m3_dstate_passing_bwd: {:?}", e))?;
             }
@@ -492,6 +500,7 @@ pub fn gpu_backward_mamba3_layer(
                 builder.arg(&use_pair_mats);
                 builder.arg(&y_first);
                 builder.arg(&z_first);
+                builder.arg(&seq_idx);
                 unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv B6 S1: {:?}", e))?;
             }
         }
@@ -627,6 +636,7 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(&t_i);
             builder.arg(&nh_i);
             builder.arg(scratch.d_scale_enter.inner());
+            builder.arg(&seq_idx);
             unsafe { builder.launch(grid_1d_cover(bt * nh)?) }
                 .map_err(|e| format!("m3_ddt_dtrap B6 S3: {:?}", e))?;
         }
@@ -663,6 +673,7 @@ pub fn gpu_backward_mamba3_layer(
                 builder.arg(&nh_i);
                 builder.arg(&na_i);
                 builder.arg(&y_first);
+                builder.arg(&seq_idx);
                 unsafe { builder.launch(cfg) }
                     .map_err(|e| format!("m3_angle_dt_bwd_seq B5a stage1: {:?}", e))?;
             }
@@ -726,6 +737,9 @@ pub fn gpu_backward_mamba3_layer(
         builder.arg(&dims.a_floor);
         n_total.push(&mut builder);
         builder.arg(&nh_i);
+        let t_seq = dims.seq_len as i32;
+        builder.arg(&t_seq);
+        builder.arg(&seq_idx);
         unsafe { builder.launch(grid_1d_cover(bt * nh)?) }
             .map_err(|e| format!("m3_abg_bwd seq B5b: {:?}", e))?;
     } else {
@@ -978,6 +992,7 @@ pub fn gpu_backward_mamba3_backbone(
         ctx,
         kernels: m3k,
         dims,
+        ..
     } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
@@ -1087,6 +1102,7 @@ fn gpu_backward_mamba3_mlp(
         ctx,
         kernels: m3k,
         dims,
+        ..
     } = *exec;
     let MlpBwd { acts, w, g } = *layer;
     let (bt, dm, h) = (dims.bt(), dims.d_model, w.hidden());

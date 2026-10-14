@@ -88,21 +88,21 @@ fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
 }
 
 /// [`launch`] once per run of the grid's y axis, each run's first block
-/// appended as the kernel's last argument.
+/// appended, then the packing the window kernels take last (none).
 fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
     for (y_first, cfg) in y_runs(cfg) {
         let mut run = args.to_vec();
-        run.push(Arg::I(y_first));
+        run.extend([Arg::I(y_first), Arg::P(0)]);
         launch(ctx, f, cfg, &run);
     }
 }
 
 /// [`launch`] once per run of the grid's y and z axes, each run's first y
-/// and z blocks appended.
+/// and z blocks appended, then the packing (none).
 fn launch_yz_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
     for (y_first, z_first, cfg) in yz_runs(cfg) {
         let mut run = args.to_vec();
-        run.extend([Arg::I(y_first), Arg::I(z_first)]);
+        run.extend([Arg::I(y_first), Arg::I(z_first), Arg::P(0)]);
         launch(ctx, f, cfg, &run);
     }
 }

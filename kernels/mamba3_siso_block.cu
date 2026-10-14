@@ -154,7 +154,8 @@ __device__ __forceinline__ void m3b_store(__half* p, float v) { *p = __float2hal
 // fold the skip term into the first output step, fma(D, x, h0 * q0), and
 // every other warp kernel rounds D * x on its own first. FOLD_SKIP picks
 // the first, so each block-tier entry gives the bits of the warp kernel it
-// twins.
+// twins. In a packed row (`seq_idx`, see _varlen.cuh) a token that starts a
+// sequence steps from the empty state, previous key and previous input.
 template <typename T_ACT, bool SAVE, int DS, bool FOLD_SKIP>
 __device__ __forceinline__ void m3_burnin_block_tpl(
     float* ssm_state, float* k_state, float* v_state,
@@ -164,7 +165,8 @@ __device__ __forceinline__ void m3_burnin_block_tpl(
     const float* alpha_flat, const float* beta_flat, const float* gamma_flat,
     const float* D,
     int batch, int T, int nh, int hd, int ds,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float m3bb_sm[];
     float* coef = m3bb_sm;
@@ -201,14 +203,16 @@ __device__ __forceinline__ void m3_burnin_block_tpl(
         for (int t = 0; t < T; t++) {
             const long long bt = (long long)b * T + t;
             const long long kq_row = bt * row_stride + head_ds;
+            const bool fresh = vl_starts(seq_idx, b, T, t);
             if (tid == 0) {
                 coef[0] = alpha_flat[bt * nh + h];
                 coef[1] = beta_flat[bt * nh + h];
                 coef[2] = gamma_flat[bt * nh + h];
             }
             for (int n = tid; n < ds; n += blockDim.x) {
-                const float kp = (t == 0) ? k_state[k_row + n]
-                                          : to_f(k_flat[kq_row - row_stride + n]);
+                const float kp = fresh    ? 0.0f
+                                 : (t == 0) ? k_state[k_row + n]
+                                            : to_f(k_flat[kq_row - row_stride + n]);
                 kp_sm[n] = kp;
                 if (SAVE && p0 == 0) k_prev_saved[kq_row + n] = kp;
                 kc_sm[n] = to_f(k_flat[kq_row + n]);
@@ -221,8 +225,12 @@ __device__ __forceinline__ void m3_burnin_block_tpl(
                 const float gamma_h = coef[2];
                 const long long x_idx = bt * d_inner + (long long)h * hd + p;
                 const float x_val = to_f(x_flat[x_idx]);
-                const float v_prev = v_state[v_idx];
+                const float v_prev = fresh ? 0.0f : v_state[v_idx];
                 if (SAVE) v_prev_saved[x_idx] = v_prev;
+                if (fresh) {
+                    _Pragma("unroll")
+                    for (int n = 0; n < sw; n++) h_local[n] = 0.0f;
+                }
                 float y_val = __fmul_rn(d_skip, x_val);
                 const float bv = __fmul_rn(beta_h, v_prev);
                 const float gx = __fmul_rn(gamma_h, x_val);
@@ -265,14 +273,15 @@ extern "C" __global__ __launch_bounds__(512) void NAME(                        \
     const T_ACT* x_flat, const T_ACT* k_flat, const T_ACT* q_flat,            \
     const float* alpha_flat, const float* beta_flat, const float* gamma_flat, \
     const float* D, int batch, int T, int nh, int hd, int ds,                 \
-    int y_first /* this run's first y block */                                \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                           \
     switch (ds) {                                                             \
-    case 8: m3_burnin_block_tpl<T_ACT, SAVE, 8, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
-    case 16: m3_burnin_block_tpl<T_ACT, SAVE, 16, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
-    case 32: m3_burnin_block_tpl<T_ACT, SAVE, 32, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
-    case 64: m3_burnin_block_tpl<T_ACT, SAVE, 64, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
-    default: m3_burnin_block_tpl<T_ACT, SAVE, 0, false>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first); return; \
+    case 8: m3_burnin_block_tpl<T_ACT, SAVE, 8, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    case 16: m3_burnin_block_tpl<T_ACT, SAVE, 16, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    case 32: m3_burnin_block_tpl<T_ACT, SAVE, 32, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    case 64: m3_burnin_block_tpl<T_ACT, SAVE, 64, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    default: m3_burnin_block_tpl<T_ACT, SAVE, 0, false>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
     }                                                                         \
 }
 
@@ -287,11 +296,12 @@ extern "C" __global__ __launch_bounds__(512) void m3_burnin_fwd_nosave_block(
     const float* x_flat, const float* k_flat, const float* q_flat,
     const float* alpha_flat, const float* beta_flat, const float* gamma_flat,
     const float* D, int batch, int T, int nh, int hd, int ds,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     m3_burnin_block_tpl<float, false, 0, false>(ssm_state, k_state, v_state, y_out,
         nullptr, nullptr, nullptr, x_flat, k_flat, q_flat, alpha_flat,
-        beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first);
+        beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx);
 }
 
 // One warp's shuffle tree over the head, as the warp kernel runs it: width
@@ -321,7 +331,9 @@ __device__ __forceinline__ float m3b_warp_tree(float v, int width) {
 //
 // A head wider than the block runs in slices of the block's width, each
 // over the whole window; a slice after the first adds its sums to the
-// gradients the slices before it wrote.
+// gradients the slices before it wrote. In a packed row a token that starts
+// a sequence takes no alpha gradient and passes no state, key or input
+// gradient back to the token before it.
 template <typename T_ACT, int DS>
 __device__ __forceinline__ void m3_backward_seq_block_tpl(
     const float* __restrict__ h_saved, const float* __restrict__ k_prev_saved,
@@ -334,7 +346,8 @@ __device__ __forceinline__ void m3_backward_seq_block_tpl(
     float* __restrict__ d_alpha, float* __restrict__ d_beta,
     float* __restrict__ d_gamma, float* __restrict__ d_D_local,
     int batch, int T, int nh, int hd, int ds,
-    int y_first /* this run's first y block */
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
 ) {
     extern __shared__ float m3bs_sm[];
     float* coef = m3bs_sm;
@@ -373,6 +386,7 @@ __device__ __forceinline__ void m3_backward_seq_block_tpl(
         for (int t = T - 1; t >= 0; t--) {
             const long long bt = (long long)b * T + t;
             const long long kq_row = bt * nh * ds + head_ds;
+            const bool fresh = vl_starts(seq_idx, b, T, t);
             if (tid == 0) {
                 coef[0] = alpha_flat[bt * nh + h];
                 coef[1] = beta_flat[bt * nh + h];
@@ -417,14 +431,14 @@ __device__ __forceinline__ void m3_backward_seq_block_tpl(
                     d_h_reg[n] += dy_val * qc_n;
                     d_q_val = dy_val * h_curr_n;
                     const float dh_n = d_h_reg[n];
-                    d_alpha_acc += dh_n * h_prev_n;
+                    if (!fresh) d_alpha_acc += dh_n * h_prev_n;
                     d_beta_acc += dh_n * v_prev * kp_n;
                     d_gamma_acc += dh_n * x_val * kc_n;
                     d_v_prev_acc += dh_n * beta_h * kp_n;
                     d_kp_val = dh_n * beta_h * v_prev;
                     d_x_val += dh_n * gamma_h * kc_n;
                     d_kc_val = dh_n * gamma_h * x_val;
-                    d_h_reg[n] = alpha_h * dh_n;
+                    d_h_reg[n] = fresh ? 0.0f : alpha_h * dh_n;
                 }
                 d_q_val = m3b_warp_tree(d_q_val, width);
                 d_kp_val = m3b_warp_tree(d_kp_val, width);
@@ -450,7 +464,7 @@ __device__ __forceinline__ void m3_backward_seq_block_tpl(
             }
             if (live) {
                 d_x[x_idx] = d_x_val;
-                d_v_carry = d_v_prev_acc;
+                d_v_carry = fresh ? 0.0f : d_v_prev_acc;
             }
             __syncthreads();
             /* One thread per state element and per scalar adds the warps'
@@ -472,7 +486,7 @@ __device__ __forceinline__ void m3_backward_seq_block_tpl(
                         d_k_write += carry_sm[n];
                         carry_sm[n] = 0.0f;
                     }
-                    carry_sm[n] += kp;
+                    if (!fresh) carry_sm[n] += kp;
                     d_k_write += kc;
                     if (first) {
                         d_q[kq_row + n] = q;
@@ -509,14 +523,15 @@ extern "C" __global__ __launch_bounds__(512) void NAME(                        \
     float* __restrict__ d_alpha, float* __restrict__ d_beta,                  \
     float* __restrict__ d_gamma, float* __restrict__ d_D_local,               \
     int batch, int T, int nh, int hd, int ds,                                 \
-    int y_first /* this run's first y block */                                \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                           \
     switch (ds) {                                                             \
-    case 8: m3_backward_seq_block_tpl<T_ACT, 8>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first); return; \
-    case 16: m3_backward_seq_block_tpl<T_ACT, 16>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first); return; \
-    case 32: m3_backward_seq_block_tpl<T_ACT, 32>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first); return; \
-    case 64: m3_backward_seq_block_tpl<T_ACT, 64>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first); return; \
-    default: m3_backward_seq_block_tpl<T_ACT, 0>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first); return; \
+    case 8: m3_backward_seq_block_tpl<T_ACT, 8>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    case 16: m3_backward_seq_block_tpl<T_ACT, 16>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    case 32: m3_backward_seq_block_tpl<T_ACT, 32>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    case 64: m3_backward_seq_block_tpl<T_ACT, 64>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first, seq_idx); return; \
+    default: m3_backward_seq_block_tpl<T_ACT, 0>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first, seq_idx); return; \
     }                                                                         \
 }
 
@@ -578,7 +593,8 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     const T_ACT* __restrict__ dO,                                              \
     int B, int T, int nh_total, int hd, int ds, int CS,                        \
     int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
+    int z_first, /* this run's first z block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     const int h = blockIdx.x;                                                  \
     const int b = y_first + blockIdx.y;                                        \
@@ -588,6 +604,11 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     const int n_chunks = (T + CS - 1) / CS;                                    \
     const int chunk_start = chunk_idx * CS;                                    \
     const int len = min(CS, T - chunk_start);                                  \
+    /* In a packed row (seq_idx) only the tokens before the chunk's */         \
+    /* first start read the state entering it. */                              \
+    const int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_start + len, \
+                                    vl_id(seq_idx, b, T, chunk_start - 1) + 1) \
+                     - chunk_start;                                            \
     const long long d_inner = (long long)nh_total * hd;                        \
     const long long cidx = ((long long)b * n_chunks + chunk_idx) * nh_total + h; \
     __shared__ float w_sm[64 * 17];                                            \
@@ -617,7 +638,7 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
             __syncthreads();                                                   \
             if (r < pw && c < nw) {                                            \
                 float acc = 0.0f;                                              \
-                for (int t = 0; t < len; t++)                                  \
+                for (int t = 0; t < cont; t++)                                 \
                     acc += w_sm[t * 17 + r] * q_sm[t * 17 + c];                \
                 state_B[cidx * hd * ds + (long long)(p0 + r) * ds + n0 + c] =  \
                     acc;                                                       \
@@ -667,7 +688,8 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     const float* __restrict__ dm_chain,                                        \
     int B, int T, int nh_total, int hd, int ds, int CS, int TW,                \
     int y_first, /* this run's first y block */                                \
-    int z_first /* this run's first z block */                                 \
+    int z_first, /* this run's first z block */                                \
+    const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     const int h = blockIdx.x;                                                  \
     const int b = y_first + blockIdx.y;                                        \
@@ -906,14 +928,16 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
             const int t = o / TW;                                              \
             const int j = o % TW;                                              \
             if (k < n_out && t < len && j < pw) {                              \
+                const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, len, t); \
                 float dv_intra = 0.0f;                                         \
-                for (int s = t + 1; s < len; s++) {                            \
+                for (int s = t + 1; s < sp.end; s++) {                         \
                     const int ti = m3t_tri(t, s, CS);                          \
                     float kq = kq_tri[ti];                                     \
                     float decay = dec_tri[ti];                                 \
                     dv_intra += kq * decay * a2[s * RS + j];                   \
                 }                                                              \
                 float dv_inter = ke[k];                                        \
+                if (!sp.to_end) dv_inter = 0.0f;                               \
                 dv_inter *= er_sm[t];                                          \
                 float dv_skip = a2[t * RS + j] * (D_val + qk_sm[t]);           \
                 dV[(row0 + t) * d_inner + (long long)h * hd + p0 + j] =        \
@@ -959,15 +983,16 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
             dko[k] = 0.0f;                                                     \
             dqo[k] = 0.0f;                                                     \
             if (k < n_out && t < len && j < nw) {                              \
+                const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, len, t); \
                 float dk_intra = 0.0f;                                         \
-                for (int s = t + 1; s < len; s++) {                            \
+                for (int s = t + 1; s < sp.end; s++) {                         \
                     const int ti = m3t_tri(t, s, CS);                          \
                     float vdo = vdo_tri[ti];                                   \
                     float decay = dec_tri[ti];                                 \
                     dk_intra += vdo * decay * a1[s * RS + j];                  \
                 }                                                              \
                 float dq_intra = 0.0f;                                         \
-                for (int s = 0; s < t; s++) {                                  \
+                for (int s = sp.first; s < t; s++) {                           \
                     const int ti = m3t_tri(s, t, CS);                          \
                     float vdo = vdo_tri[ti];                                   \
                     float decay = dec_tri[ti];                                 \
@@ -1021,9 +1046,12 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
             const int t = o / TW;                                              \
             const int j = o % TW;                                              \
             if (k < n_out && t < len && j < nw) {                              \
+                const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, len, t); \
                 float dq_inter = dqo[k];                                       \
+                if (!sp.from_before) dq_inter = 0.0f;                          \
                 dq_inter *= ef_sm[t];                                          \
                 float dk_inter = dko[k];                                       \
+                if (!sp.to_end) dk_inter = 0.0f;                               \
                 dk_inter *= er_sm[t];                                          \
                 const long long g = ((row0 + t) * nh_total + h) * ds + n0 + j; \
                 dQ_mid[g] = dqi[k] + dq_inter;                                 \
@@ -1036,36 +1064,44 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     /* entering and exit states, as m3_dqkv orders them. */                    \
     for (int t = tid; t < len; t += 256) {                                     \
         float acc = 0.0f;                                                      \
-        for (int i = 0; i < t; i++) {                                          \
+        const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, len, t);         \
+        for (int i = sp.first; i < t; i++) {                                   \
             const int ti = m3t_tri(i, t, CS);                                  \
             float vdo = vdo_tri[ti];                                           \
             float decay = dec_tri[ti];                                         \
             float kq = kq_tri[ti];                                             \
             acc += vdo * decay * kq;                                           \
         }                                                                      \
-        for (int j = t + 1; j < len; j++) {                                    \
+        for (int j = t + 1; j < sp.end; j++) {                                 \
             const int ti = m3t_tri(t, j, CS);                                  \
             float vdo = vdo_tri[ti];                                           \
             float decay = dec_tri[ti];                                         \
             float kq = kq_tri[ti];                                             \
             acc -= vdo * decay * kq;                                           \
         }                                                                      \
-        acc += qsdo_sm[t] * ef_sm[t];                                          \
+        if (sp.from_before) acc += qsdo_sm[t] * ef_sm[t];                      \
         dmrev_sm[t] = acc;                                                     \
-        dmvec_sm[t] = dskv_sm[t] * er_sm[t];                                   \
+        dmvec_sm[t] = sp.to_end ? dskv_sm[t] * er_sm[t] : 0.0f;                \
     }                                                                          \
     __syncthreads();                                                           \
     if (tid == 0) {                                                            \
         float dM_scalar = dm_chain[cidx];                                      \
         dM_scalar *= exp2f(cs_sum * LOG2E);                                    \
-        float total_rev = 0.0f;                                                \
-        for (int t = 0; t < len; t++) total_rev += dmrev_sm[t];                \
-        total_rev += dM_scalar;                                                \
-        float cumsum = 0.0f;                                                   \
-        for (int t = 0; t < len; t++) {                                       \
-            cumsum += dmvec_sm[t] - dmrev_sm[t];                               \
-            const float out = dmrev_sm[t] + (total_rev + cumsum - dmvec_sm[t]); \
-            dADT[(row0 + t) * nh_total + h] = out;                             \
+        /* A packed row combines each of its sequences in the chunk on */      \
+        /* its own, as m3_dqkv does. */                                        \
+        const bool passes = vl_passes(seq_idx, b, T, chunk_start, len);        \
+        for (int a = 0; a < len;) {                                            \
+            const int e = vl_span(seq_idx, b, T, chunk_start, len, a).end;     \
+            float total_rev = 0.0f;                                            \
+            for (int t = a; t < e; t++) total_rev += dmrev_sm[t];              \
+            if (passes) total_rev += dM_scalar;                                \
+            float cumsum = 0.0f;                                               \
+            for (int t = a; t < e; t++) {                                      \
+                cumsum += dmvec_sm[t] - dmrev_sm[t];                           \
+                const float out = dmrev_sm[t] + (total_rev + cumsum - dmvec_sm[t]); \
+                dADT[(row0 + t) * nh_total + h] = out;                         \
+            }                                                                  \
+            a = e;                                                             \
         }                                                                      \
         float dD_acc = 0.0f;                                                   \
         for (int t = 0; t < len; t++) dD_acc += dqk_sm[t];                     \

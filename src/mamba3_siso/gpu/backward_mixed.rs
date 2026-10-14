@@ -62,11 +62,12 @@ pub fn gpu_backward_mamba3_backbone_mixed(
     mixed_scratch: &mut GpuMamba3MixedScratch,
 ) -> Result<(), String> {
     exec.check_state_cap()?;
-    crate::mamba3_siso::gpu::forward_mixed::check_mixed_mlp(mamba_w, acts)?;
+    crate::mamba3_siso::gpu::forward_mixed::check_mixed_mlp(mamba_w, acts, exec.dims.bt())?;
     let M3Exec {
         ctx,
         kernels: m3k,
         dims,
+        ..
     } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
@@ -234,6 +235,7 @@ fn gpu_backward_mamba3_layer_mixed(
         ctx,
         kernels: m3k,
         dims,
+        seq_idx,
     } = *exec;
     let M3MixedLayerBwd {
         acts,
@@ -430,6 +432,7 @@ fn gpu_backward_mamba3_layer_mixed(
                 enter_state: sc.dstate_enter.cached_ptr(),
                 seed_grad: sc.dstate_seed.cached_ptr(),
                 dm_chain: sc.dm_chain.cached_ptr(),
+                seq_idx,
             };
             let shape = super::dqkv_tiled::DqkvShape {
                 batch: dims.batch,
@@ -497,6 +500,7 @@ fn gpu_backward_mamba3_layer_mixed(
                     sb.arg(&cs);
                     sb.arg(&y_first);
                     sb.arg(&z_first);
+                    sb.arg(&seq_idx);
                     unsafe { sb.launch(cfg) }
                         .map_err(|e| format!("m3_dqkv_state_terms typed: {:?}", e))?;
                 }
@@ -514,6 +518,9 @@ fn gpu_backward_mamba3_layer_mixed(
                 pb.arg(&ds_i);
                 pb.arg(&nc_i);
                 pb.arg(sc.dstate_seed.inner_mut());
+                pb.arg(&t);
+                pb.arg(&cs);
+                pb.arg(&seq_idx);
                 unsafe { pb.launch(grid_1d_cover(dims.batch * nh * hd * ds)?) }
                     .map_err(|e| format!("m3_dstate_passing_bwd typed: {:?}", e))?;
             }
@@ -566,6 +573,7 @@ fn gpu_backward_mamba3_layer_mixed(
                 builder.arg(&use_pair_mats);
                 builder.arg(&y_first);
                 builder.arg(&z_first);
+                builder.arg(&seq_idx);
                 unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv_typed B6: {:?}", e))?;
             }
         }
@@ -705,6 +713,7 @@ fn gpu_backward_mamba3_layer_mixed(
             builder.arg(&t);
             builder.arg(&nh_i);
             builder.arg(sc.d_scale_enter.inner());
+            builder.arg(&seq_idx);
             unsafe { builder.launch(grid_1d_cover(bt * nh)?) }
                 .map_err(|e| format!("m3_ddt_dtrap mixed: {:?}", e))?;
         }
@@ -738,6 +747,7 @@ fn gpu_backward_mamba3_layer_mixed(
                 builder.arg(&nh_i);
                 builder.arg(&na_i);
                 builder.arg(&y_first);
+                builder.arg(&seq_idx);
                 unsafe { builder.launch(cfg) }
                     .map_err(|e| format!("m3_angle_dt_bwd_seq mixed stage1: {:?}", e))?;
             }
@@ -803,6 +813,9 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(&dims.a_floor);
         n_total.push(&mut builder);
         builder.arg(&nh_i);
+        let t_seq = dims.seq_len as i32;
+        builder.arg(&t_seq);
+        builder.arg(&seq_idx);
         unsafe { builder.launch(grid_1d_cover(bt * nh)?) }
             .map_err(|e| format!("m3_abg_bwd mixed: {:?}", e))?;
     } else {
@@ -1105,6 +1118,7 @@ fn sequential_ssm_backward_mixed(
         ctx,
         kernels: m3k,
         dims,
+        seq_idx,
     } = *exec;
     let M3MixedLayerBwd {
         acts,
@@ -1127,6 +1141,10 @@ fn sequential_ssm_backward_mixed(
     abg.arg(acts.a_val.inner());
     abg.arg(acts.trap.inner());
     n_coef.push(&mut abg);
+    let (t_seq, nh_seq) = (dims.seq_len as i32, nh as i32);
+    abg.arg(&t_seq);
+    abg.arg(&nh_seq);
+    abg.arg(&seq_idx);
     unsafe { abg.launch(grid_1d_cover(bt * nh)?) }
         .map_err(|e| format!("m3_compute_abg seq mixed B6: {e:?}"))?;
 
@@ -1168,6 +1186,7 @@ fn sequential_ssm_backward_mixed(
             bptt.arg(d);
         }
         bptt.arg(&y_first);
+        bptt.arg(&seq_idx);
         unsafe { bptt.launch(cfg) }.map_err(|e| format!("m3_backward_seq mixed B6: {e:?}"))?;
     }
 
@@ -1250,6 +1269,7 @@ fn mixed_mlp_backward(
         ctx,
         kernels: m3k,
         dims,
+        ..
     } = *exec;
     let MixedMlpBwd {
         acts,

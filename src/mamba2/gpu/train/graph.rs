@@ -40,6 +40,8 @@ pub(super) struct TrainGraph {
     /// launch took by value.
     plan_key: AdamWPlanKey,
     adam_consts: [u32; 3],
+    /// The packing's ids the captured kernels read, 0 for none.
+    varlen: u64,
 }
 
 fn adam_consts(t: &Mamba2GpuTrainer) -> [u32; 3] {
@@ -152,6 +154,7 @@ impl Mamba2GpuTrainer {
             bi_upcast: self.ctx.bi_upcast_scratch_ptrs(),
             plan_key: AdamWPlanKey::of(&self.adamw),
             adam_consts: adam_consts(self),
+            varlen: self.varlen.ptr(),
         });
         self.ctx.note_graph_capture();
         Ok(())
@@ -182,6 +185,12 @@ impl Mamba2GpuTrainer {
         if g.plan_key != AdamWPlanKey::of(&self.adamw) || g.adam_consts != adam_consts(self) {
             return Err(format!(
                 "{label}: the AdamW settings changed since capture; drop_graph and \
+                 capture again"
+            ));
+        }
+        if g.varlen != self.varlen.ptr() {
+            return Err(format!(
+                "{label}: the packing was turned on or off since capture; drop_graph and \
                  capture again"
             ));
         }

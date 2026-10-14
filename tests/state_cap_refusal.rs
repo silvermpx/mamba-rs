@@ -84,6 +84,7 @@ fn m3_dims_past_the_compiled_capacity_are_refused() {
         ctx: &ctx,
         kernels: &kernels,
         dims: &fits,
+        seq_idx: 0,
     }
     .check_state_cap()
     .expect("16 states fit");
@@ -92,6 +93,7 @@ fn m3_dims_past_the_compiled_capacity_are_refused() {
         ctx: &ctx,
         kernels: &kernels,
         dims: &too_wide,
+        seq_idx: 0,
     }
     .check_state_cap()
     .unwrap_err();
