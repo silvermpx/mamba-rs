@@ -82,6 +82,17 @@ impl AnyBackbone {
         }
     }
 
+    /// Whether the backbone held ends in its final norm, as a whole model
+    /// does; a segment of a stack does not.
+    pub fn final_norm(&self) -> bool {
+        match self {
+            Self::M1(b) => b.config().final_norm,
+            Self::M2(b) => b.config().final_norm,
+            Self::M3(b) => b.config().final_norm,
+            Self::M3Mimo(b) => b.config().final_norm,
+        }
+    }
+
     /// Pack the backbone's projections for decode (see
     /// [`MambaBackbone::pack_for_decode`]): the same outputs without a BLAS,
     /// faster on large layers, at the memory of a second copy of them.
@@ -323,6 +334,13 @@ impl MambaLM {
         lm_head: Option<Vec<f32>>,
         vocab_size: usize,
     ) -> Result<Self, String> {
+        if !any.final_norm() {
+            return Err(
+                "a language model's head reads the final norm: a backbone built without it \
+                 is a segment of a stack"
+                    .into(),
+            );
+        }
         let d_model = any.d_model();
         if d_model == 0 || !embed.len().is_multiple_of(d_model) {
             return Err(format!(

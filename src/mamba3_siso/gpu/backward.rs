@@ -982,48 +982,52 @@ pub fn gpu_backward_mamba3_backbone(
     let bt = dims.bt();
     let dm = dims.d_model;
 
-    // norm_f bwd — no-atomics partials rule.
-    block_norm::backward(
-        ctx,
-        WeightDtype::F32,
-        (
-            scratch.d_norm.cached_ptr(),
-            scratch.axis0_partials.cached_ptr(),
-            d_temporal.cached_ptr(),
-            acts.norm_f_input.cached_ptr(),
-            acts.norm_f_rms.cached_ptr(),
-        ),
-        (
-            mamba_w.final_norm(),
-            grads.norm_f_bias.as_ref().map_or(0, GradSlice::ptr),
-        ),
-        (bt, dm),
-        (false, 0),
-        "norm_f bwd m3",
-    )?;
-    // Stage 2: reduce axis0_partials[bt, dm] → grads.norm_f_weight[dm] (accumulate=1).
-    {
-        let bt_i = bt as i32;
-        let dm_i = dm as i32;
-        let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
-        let accumulate_i: i32 = 1;
-        let d_nf_ptr = grads.norm_f_weight.ptr();
-        let axis0_ptr = scratch.axis0_partials.cached_ptr();
-        let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
-        builder.arg(&d_nf_ptr);
-        builder.arg(&axis0_ptr);
-        builder.arg(&bt_i);
-        builder.arg(&dm_i);
-        builder.arg(&accumulate_i);
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (dm as u32, 1, 1),
-            block_dim: (block_dim, 1, 1),
-            shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
-        };
-        unsafe { builder.launch(cfg) }
-            .map_err(|e| format!("rmsnorm_bwd norm_f m3 reduce: {:?}", e))?;
+    // norm_f bwd — no-atomics partials rule. Without the final norm the
+    // output's gradient already is the residual stream's.
+    let final_norm = mamba_w.final_norm();
+    if !final_norm.is_none() {
+        block_norm::backward(
+            ctx,
+            WeightDtype::F32,
+            (
+                scratch.d_norm.cached_ptr(),
+                scratch.axis0_partials.cached_ptr(),
+                d_temporal.cached_ptr(),
+                acts.norm_f_input.cached_ptr(),
+                acts.norm_f_rms.cached_ptr(),
+            ),
+            (
+                final_norm,
+                grads.norm_f_bias.as_ref().map_or(0, GradSlice::ptr),
+            ),
+            (bt, dm),
+            (false, 0),
+            "norm_f bwd m3",
+        )?;
+        // Stage 2: reduce axis0_partials[bt, dm] → grads.norm_f_weight[dm] (accumulate=1).
+        {
+            let bt_i = bt as i32;
+            let dm_i = dm as i32;
+            let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 1;
+            let d_nf_ptr = grads.norm_f_weight.ptr();
+            let axis0_ptr = scratch.axis0_partials.cached_ptr();
+            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            builder.arg(&d_nf_ptr);
+            builder.arg(&axis0_ptr);
+            builder.arg(&bt_i);
+            builder.arg(&dm_i);
+            builder.arg(&accumulate_i);
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (dm as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("rmsnorm_bwd norm_f m3 reduce: {:?}", e))?;
+        }
+        d_temporal.copy_from_raw(&scratch.d_norm, &ctx.stream)?;
     }
-    d_temporal.copy_from_raw(&scratch.d_norm, &ctx.stream)?;
 
     for l in (0..dims.n_layers).rev() {
         // The MLP came after the mixer, so its backward comes first.

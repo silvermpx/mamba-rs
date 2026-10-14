@@ -47,6 +47,16 @@ Reference: Gu & Dao, *Mamba: Linear-Time Sequence Modeling with Selective State 
     output [B, T, d_model]
 ```
 
+The block norms (`norm`, the gated MLP's `norm2` when `d_intermediate` is
+set, and `norm_f`) are RMSNorm, or LayerNorm with a bias for a model built
+with `rms_norm = false` (`MambaConfig::block_norm`). Both take
+`rms_norm_eps`; FalconMamba's mixer norms stay RMSNorm either way.
+
+A backbone built with `final_norm = false` leaves `norm_f` out: it is a
+segment of a stack that continues in the caller's own layers, and its
+output is the f32 residual stream after its last block in every
+precision. A segment built with an identity input carries that stream on.
+
 ## Modular API
 
 Three levels matching the original architecture:
@@ -131,4 +141,5 @@ graph rules are described in
 ## Checkpoint provenance
 
 `serialize` stores `scan_mode` and `rms_norm_eps` in the checkpoint, so a
-loaded model reproduces the route it was trained with.
+loaded model reproduces the route it was trained with, and `rms_norm =
+false` with the norms' biases for a LayerNorm model.

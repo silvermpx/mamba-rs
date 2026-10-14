@@ -146,6 +146,23 @@ pub(crate) fn block_norm_entry(norm: crate::config::BlockNorm) -> Option<(String
     (!norm.rms_norm()).then(|| ("rms_norm".to_string(), "false".to_string()))
 }
 
+/// Whether the backbone ends in its final norm: files written without the
+/// entry, and every model built with the norm, do.
+pub(crate) fn final_norm(meta: &HashMap<String, String>) -> Result<bool, String> {
+    match meta.get("final_norm").map(String::as_str) {
+        None | Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(other) => Err(format!("unknown final_norm '{other}' in the metadata")),
+    }
+}
+
+/// The metadata entry of a backbone without its final norm, a segment of a
+/// stack: a model with the norm writes nothing, so its files keep their
+/// bytes.
+pub(crate) fn final_norm_entry(final_norm: bool) -> Option<(String, String)> {
+    (!final_norm).then(|| ("final_norm".to_string(), "false".to_string()))
+}
+
 /// The scan mode as the metadata spells it.
 pub(crate) fn scan_mode(meta: &HashMap<String, String>) -> Result<crate::config::ScanMode, String> {
     use crate::config::ScanMode;

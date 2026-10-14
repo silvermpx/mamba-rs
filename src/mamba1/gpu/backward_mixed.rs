@@ -926,7 +926,9 @@ pub fn gpu_backward_mamba_backbone_mixed(
     // norm_f backward — always f32 (dy=f32 d_temporal, x=f32 norm_f_input,
     // dx=f32). Result copied back into d_temporal.
     // Rule B (no atomicAdd): two-stage launch for d_scale accumulator.
-    {
+    // Without the final norm the output's gradient already is the residual
+    // stream's.
+    if !final_norm_params(mamba_w).is_none() {
         let bt_i = bt as i32;
         let dm_i = dims.d_model as i32;
         let axis0_ptr = scratch.axis0_partials.cached_ptr();

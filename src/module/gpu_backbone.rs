@@ -208,6 +208,17 @@ impl AnyGpuBackbone {
         }
     }
 
+    /// Whether the backbone held ends in its final norm, as a whole model
+    /// does; a segment of a stack does not.
+    pub fn final_norm(&self) -> bool {
+        match self {
+            Self::M1(b) => b.config().final_norm,
+            Self::M2(b) => b.config().final_norm,
+            Self::M3(b) => b.config().final_norm,
+            Self::M3Mimo(b) => b.config().final_norm,
+        }
+    }
+
     fn inner(&self) -> &dyn GpuBackbone {
         match self {
             Self::M1(b) => b.as_ref(),

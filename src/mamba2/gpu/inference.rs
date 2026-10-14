@@ -811,7 +811,8 @@ pub struct Mamba2GpuEngine {
     /// Each layer's gated MLP, empty for a model without one.
     mlp: Vec<GpuMamba2Mlp>,
     input_proj: Option<(GpuBuffer, GpuBuffer)>,
-    norm_f_weight: GpuBuffer,
+    /// The final norm's scale, None for a backbone built without it.
+    norm_f_weight: Option<GpuBuffer>,
     /// The final LayerNorm's bias, None for RMSNorm.
     norm_f_bias: Option<GpuBuffer>,
     /// The decode step as one CUDA graph, once [`Self::capture_graph`] ran.
@@ -917,7 +918,12 @@ impl Mamba2GpuEngine {
                 GpuBuffer::from_cpu(&ctx.stream, &w.input_proj_b)?,
             ))
         };
-        let norm_f_weight = GpuBuffer::from_cpu(&ctx.stream, &w.norm_f_weight)?;
+        // A segment built without the final norm uploads none.
+        let norm_f_weight = if w.norm_f_weight.is_empty() {
+            None
+        } else {
+            Some(GpuBuffer::from_cpu(&ctx.stream, &w.norm_f_weight)?)
+        };
         let norm_f_bias = if w.norm_f_bias.is_empty() {
             None
         } else {
@@ -940,10 +946,11 @@ impl Mamba2GpuEngine {
         })
     }
 
-    /// The final norm's parameters on the device.
+    /// The final norm's parameters on the device; none for a backbone
+    /// built without it, whose rows pass through.
     fn norm_f(&self) -> NormParams {
         NormParams {
-            w: self.norm_f_weight.cached_ptr(),
+            w: self.norm_f_weight.as_ref().map_or(0, GpuBuffer::cached_ptr),
             b: self.norm_f_bias.as_ref().map_or(0, GpuBuffer::cached_ptr),
         }
     }

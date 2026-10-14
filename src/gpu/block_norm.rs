@@ -8,13 +8,16 @@
 //! A norm's kind follows its bias: a null bias pointer is RMSNorm. The RMS
 //! launches here are the ones the call sites made by hand, the same kernels
 //! with the same arguments and geometry, so a site routed through them
-//! keeps its bits.
+//! keeps its bits. A null scale is no norm at all: the final norm of a
+//! backbone built without it (a segment of a stack), whose rows pass
+//! through.
 
 use cudarc::driver::PushKernelArg;
 
+use crate::gpu::buffers::copy_device_bytes;
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::grid_norm;
+use crate::gpu::launch::{grid_norm, launch_cast, launch_elems};
 
 /// One block norm's f32 parameters on the device: the scale, and the bias
 /// for LayerNorm (0 for RMSNorm).
@@ -27,6 +30,44 @@ pub(crate) struct NormParams {
 impl NormParams {
     pub(crate) fn is_layer_norm(&self) -> bool {
         self.b != 0
+    }
+
+    /// Whether there is no norm: the final norm of a backbone built
+    /// without it.
+    pub(crate) fn is_none(&self) -> bool {
+        self.w == 0
+    }
+}
+
+/// The f32 rows at `x` into `y` stored as `out`, unnormalised: copied, or
+/// rounded to the half type. Nothing to do when `y` is `x` in f32.
+fn pass_rows(
+    ctx: &GpuCtx,
+    out: WeightDtype,
+    (y, x): (u64, u64),
+    n: usize,
+    what: &str,
+) -> Result<(), String> {
+    let k = &ctx.kernels;
+    match out {
+        WeightDtype::F32 | WeightDtype::Tf32 if y == x => Ok(()),
+        WeightDtype::F32 | WeightDtype::Tf32 => copy_device_bytes(&ctx.stream, y, x, n * 4),
+        WeightDtype::Bf16 => launch_cast(
+            &ctx.stream,
+            &k.cast_f32_to_bf16,
+            (y, 2),
+            (x, 4),
+            n,
+            format_args!("{what} rows"),
+        ),
+        WeightDtype::F16 => launch_cast(
+            &ctx.stream,
+            &k.cast_f32_to_f16,
+            (y, 2),
+            (x, 4),
+            n,
+            format_args!("{what} rows"),
+        ),
     }
 }
 
@@ -43,6 +84,9 @@ pub(crate) fn forward(
 ) -> Result<(), String> {
     if rows == 0 {
         return Ok(());
+    }
+    if p.is_none() {
+        return pass_rows(ctx, out, (y, x), rows * dim, what);
     }
     let k = &ctx.kernels;
     let kernel = match (p.is_layer_norm(), out) {
@@ -81,6 +125,21 @@ pub(crate) fn forward_resadd(
 ) -> Result<(), String> {
     if rows == 0 {
         return Ok(());
+    }
+    if p.is_none() {
+        let (k, n) = (&ctx.kernels, rows * dim);
+        let add = match dtype {
+            WeightDtype::F32 | WeightDtype::Tf32 => &k.residual_add,
+            dt => k.residual_add_f32_typed.get(dt),
+        };
+        launch_elems(
+            &ctx.stream,
+            add,
+            &[resid, resid, branch],
+            n,
+            format_args!("{what} residual add"),
+        )?;
+        return pass_rows(ctx, dtype, (y, resid), n, what);
     }
     let k = &ctx.kernels;
     let kernel = if p.is_layer_norm() {
@@ -123,6 +182,48 @@ pub(crate) fn backward(
 ) -> Result<(), String> {
     if rows == 0 {
         return Ok(());
+    }
+    if p.is_none() {
+        // No norm: the input's gradient is the output's.
+        let (k, n) = (&ctx.kernels, rows * dim);
+        match (dy_dtype, accumulate) {
+            (WeightDtype::F32 | WeightDtype::Tf32, true) => launch_elems(
+                &ctx.stream,
+                &k.residual_add,
+                &[dx, dx, dy],
+                n,
+                format_args!("{what} gradient"),
+            )?,
+            (WeightDtype::F32 | WeightDtype::Tf32, false) if dx == dy => {}
+            (WeightDtype::F32 | WeightDtype::Tf32, false) => {
+                copy_device_bytes(&ctx.stream, dx, dy, n * 4)?;
+            }
+            (dt, true) => launch_elems(
+                &ctx.stream,
+                k.residual_add_f32_typed.get(dt),
+                &[dx, dx, dy],
+                n,
+                format_args!("{what} gradient"),
+            )?,
+            (dt, false) => {
+                let cast = match dt {
+                    WeightDtype::Bf16 => &k.cast_bf16_to_f32,
+                    _ => &k.cast_f16_to_f32,
+                };
+                launch_cast(
+                    &ctx.stream,
+                    cast,
+                    (dx, 4),
+                    (dy, 2),
+                    n,
+                    format_args!("{what} gradient"),
+                )?;
+            }
+        }
+        return match dx_typed {
+            0 => Ok(()),
+            typed => pass_rows(ctx, dy_dtype, (typed, dx), n, what),
+        };
     }
     if p.is_layer_norm() {
         reduce_bias(ctx, dy_dtype, (g_bias, dy), (rows, dim), what)?;

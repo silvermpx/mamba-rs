@@ -991,10 +991,11 @@ impl Mamba3MimoGpuEngine {
     }
 }
 
-/// A block norm's parameters on the device.
+/// A block norm's parameters on the device; an empty scale is no norm at
+/// all, the final norm of a backbone built without it.
 fn norm_params(w: &GpuBuffer, b: &Option<GpuBuffer>) -> NormParams {
     NormParams {
-        w: w.cached_ptr(),
+        w: if w.is_empty() { 0 } else { w.cached_ptr() },
         b: b.as_ref().map_or(0, GpuBuffer::cached_ptr),
     }
 }

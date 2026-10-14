@@ -1526,7 +1526,7 @@ impl MambaTrainerMixed {
         );
         self.staged_upload(0, input)?;
         self.eager_forward()?;
-        {
+        if self.cfg.final_norm {
             let typed = &self.scratch.temporal_typed;
             let kernel = match typed.dtype() {
                 WeightDtype::Bf16 => &self.ctx.kernels.cast_bf16_to_f32,
@@ -1543,6 +1543,11 @@ impl MambaTrainerMixed {
                 self.temporal_f32.len(),
                 format_args!("forward_split: temporal upcast"),
             )?;
+        } else {
+            // A segment without the final norm hands out its residual
+            // stream, which stays f32.
+            self.temporal_f32
+                .copy_from_raw(&self.acts.norm_f_input, &self.ctx.stream)?;
         }
         // Sync AFTER the async D2H enqueue: cuMemcpyDtoHAsync into
         // pageable memory happens to block in the driver, but the

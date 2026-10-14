@@ -92,10 +92,14 @@ impl GpuGatedMlpWeightsInf {
 }
 
 impl GpuMamba3WeightsInf {
-    /// The final norm.
+    /// The final norm; none for a backbone built without it.
     pub(crate) fn final_norm(&self) -> NormParams {
         NormParams {
-            w: self.norm_f_weight.ptr(),
+            w: if self.norm_f_weight.is_empty() {
+                0
+            } else {
+                self.norm_f_weight.ptr()
+            },
             b: self.norm_f_bias.as_ref().map_or(0, WeightSlice::ptr),
         }
     }
@@ -275,10 +279,14 @@ impl GpuMamba3MixedMlpWeights {
 }
 
 impl GpuMamba3MixedWeights {
-    /// The final norm.
+    /// The final norm; none for a backbone built without it.
     pub(crate) fn final_norm(&self) -> NormParams {
         NormParams {
-            w: self.norm_f_weight.ptr(),
+            w: if self.norm_f_weight.len_elems() == 0 {
+                0
+            } else {
+                self.norm_f_weight.ptr()
+            },
             b: self.norm_f_bias.as_ref().map_or(0, WeightSliceDyn::ptr),
         }
     }
@@ -571,8 +579,11 @@ impl GpuMamba3Weights {
             layers: (0..cfg.n_layers)
                 .map(|_| GpuMamba3LayerWeights::zeros(stream, cfg))
                 .collect::<Result<Vec<_>, _>>()?,
-            norm_f_weight: GpuBuffer::zeros(stream, dm)?,
-            norm_f_bias: zeros_opt(stream, cfg.block_norm.bias_len(dm))?,
+            norm_f_weight: GpuBuffer::zeros(
+                stream,
+                cfg.block_norm.final_lens(dm, cfg.final_norm).0,
+            )?,
+            norm_f_bias: zeros_opt(stream, cfg.block_norm.final_lens(dm, cfg.final_norm).1)?,
             mlp: (0..cfg.n_layers)
                 .filter(|_| cfg.mlp_hidden() > 0)
                 .map(|_| {
@@ -588,10 +599,14 @@ impl GpuMamba3Weights {
         })
     }
 
-    /// The final norm.
+    /// The final norm; none for a backbone built without it.
     pub(crate) fn final_norm(&self) -> NormParams {
         NormParams {
-            w: self.norm_f_weight.cached_ptr(),
+            w: if self.norm_f_weight.is_empty() {
+                0
+            } else {
+                self.norm_f_weight.cached_ptr()
+            },
             b: self.norm_f_bias.as_ref().map_or(0, GpuBuffer::cached_ptr),
         }
     }
@@ -693,7 +708,9 @@ impl GpuMamba3Grads {
         } else {
             (0, 0)
         };
-        let total = ipw_len + ipb_len + cfg.n_layers * (per_layer + per_mlp) + dm + nb;
+        // A segment built without the final norm has no slots for it.
+        let (nf, nfb) = cfg.block_norm.final_lens(dm, cfg.final_norm);
+        let total = ipw_len + ipb_len + cfg.n_layers * (per_layer + per_mlp) + nf + nfb;
         let flat = GpuBuffer::zeros(stream, total)?;
         let base = flat.cached_ptr();
 
@@ -732,8 +749,8 @@ impl GpuMamba3Grads {
                 fc2_w: slice(hidden * dm),
             })
             .collect();
-        let norm_f_weight = slice(dm);
-        let norm_f_bias = (nb > 0).then(|| slice(nb));
+        let norm_f_weight = slice(nf);
+        let norm_f_bias = (nfb > 0).then(|| slice(nfb));
         debug_assert_eq!(
             off, total,
             "SISO gradient arena: {off} of {total} values laid out"

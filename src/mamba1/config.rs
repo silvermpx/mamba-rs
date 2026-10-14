@@ -32,6 +32,13 @@ pub struct MambaConfig {
     /// The kind of the block norms (`norm`, `norm2`, `norm_f`): RMSNorm,
     /// or LayerNorm with a bias for a model built with `rms_norm=False`.
     pub block_norm: BlockNorm,
+    /// Whether the backbone ends in the final norm (`norm_f`), as every
+    /// model and every official checkpoint does. A segment of a stack that
+    /// continues in layers of the caller's own, such as attention between
+    /// Mamba segments, is built without it: its output is the residual
+    /// stream after its last block, which the next segment, built with an
+    /// identity input, carries on.
+    pub final_norm: bool,
 
     /// Epsilon of the block norms (`norm`, `norm2`, `norm_f`), of either
     /// kind. Default 1e-5 (state-spaces/mamba). FalconMamba checkpoints use
@@ -228,6 +235,7 @@ impl Default for MambaConfig {
             n_layers: 3,
             scan_mode: ScanMode::Auto,
             block_norm: BlockNorm::Rms,
+            final_norm: true,
             rms_norm_eps: crate::ops::fast_math::RMS_NORM_EPS,
             bcdt_rms_eps: None,
             dt_rank: None,

@@ -188,6 +188,13 @@ impl MambaGpuLM {
         vocab_size: usize,
     ) -> Result<Self, String> {
         let backbone = backbone.into();
+        if !backbone.final_norm() {
+            return Err(
+                "a language model's head reads the final norm: a backbone built without it \
+                 is a segment of a stack"
+                    .into(),
+            );
+        }
         let d_model = backbone.d_model();
         if backbone.input_dim() != d_model {
             return Err(format!(
@@ -906,6 +913,7 @@ mod tied_head_capture_tests {
             n_layers: 1,
             scan_mode: ScanMode::Sequential,
             block_norm: crate::config::BlockNorm::Rms,
+            final_norm: true,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
             dt_rank: None,
@@ -945,6 +953,7 @@ mod tied_head_capture_tests {
             n_layers: 1,
             scan_mode: ScanMode::Sequential,
             block_norm: crate::config::BlockNorm::Rms,
+            final_norm: true,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
             dt_rank: None,

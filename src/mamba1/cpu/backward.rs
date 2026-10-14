@@ -458,8 +458,9 @@ pub fn backward_mamba_backbone_batched(
     let a_neg_per_layer = di * ds;
 
     // --- norm_f backward (before layer loop, since layers are in reverse) ---
-    // d_temporal_flat arrives with upstream gradient. Apply norm_f backward first.
-    {
+    // d_temporal_flat arrives with upstream gradient. Apply norm_f backward
+    // first; without the final norm it already is the residual stream's.
+    if !mamba_w.norm_f_weight.is_empty() {
         let norm_f_dx = &mut scratch.d_input_proj_scratch[..seq_len * dm];
         norm_f_dx.fill(0.0);
         scratch.d_norm_f_weight_local.fill(0.0);

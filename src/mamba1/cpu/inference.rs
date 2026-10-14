@@ -520,6 +520,11 @@ fn mamba_blocks_and_norm(
             }
         }
     }
+    if weights.norm_f_weight.is_empty() {
+        // A segment without the final norm hands out its residual stream,
+        // which stays f32 in every lane.
+        return;
+    }
     if weights.norm_f_bias.is_empty() {
         let mean_sq: f32 = output[..d_model].iter().map(|v| v * v).sum::<f32>() / d_model as f32;
         let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();

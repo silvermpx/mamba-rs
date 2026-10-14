@@ -53,6 +53,7 @@ mod model_gemm_manifest_tests {
             expand: 2,
             scan_mode: ScanMode::Sequential,
             block_norm: crate::config::BlockNorm::Rms,
+            final_norm: true,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
             dt_rank: None,
@@ -2271,9 +2272,15 @@ impl MambaGpuEngineMixed {
             .stream
             .synchronize()
             .map_err(|e| format!("sync: {e:?}"))?;
-        scratch
-            .temporal
-            .download_f32(&self.engine.ctx.stream, output)?;
+        // A segment without the final norm hands out its f32 residual
+        // stream.
+        if self.engine.cfg.final_norm {
+            scratch
+                .temporal
+                .download_f32(&self.engine.ctx.stream, output)?;
+        } else {
+            scratch.residual.download(&self.engine.ctx.stream, output)?;
+        }
         Ok(())
     }
 
@@ -2556,19 +2563,22 @@ enum BackboneScratch {
 
 impl BackboneScratch {
     /// Raw device pointer of the final temporal output (post norm_f).
-    /// f32 for F32 path, bf16/f16 for Mixed native path.
-    fn temporal_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+    /// f32 for F32 path, bf16/f16 for Mixed native path; the f32 residual
+    /// stream of a Mixed backbone built without the final norm.
+    fn temporal_ptr(&self, final_norm: bool) -> cudarc::driver::sys::CUdeviceptr {
         match self {
             BackboneScratch::F32(s) => s.temporal.cached_ptr(),
-            BackboneScratch::Mixed(s) => s.temporal.cached_ptr(),
+            BackboneScratch::Mixed(s) if final_norm => s.temporal.cached_ptr(),
+            BackboneScratch::Mixed(s) => s.residual.cached_ptr(),
         }
     }
 
     /// Dtype of the final temporal output.
-    fn temporal_dtype(&self) -> WeightDtype {
+    fn temporal_dtype(&self, final_norm: bool) -> WeightDtype {
         match self {
             BackboneScratch::F32(_) => WeightDtype::F32,
-            BackboneScratch::Mixed(s) => s.dtype,
+            BackboneScratch::Mixed(s) if final_norm => s.dtype,
+            BackboneScratch::Mixed(_) => WeightDtype::F32,
         }
     }
 }
@@ -3062,13 +3072,14 @@ impl MambaGpuBackbone {
 
     /// GPU temporal buffer pointer (valid after `step_gpu_only`).
     pub fn temporal_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
-        self.scratch.temporal_ptr()
+        self.scratch.temporal_ptr(self.config().final_norm)
     }
 
     /// Dtype of the temporal buffer — f32 for the F32 engine, bf16/f16
-    /// for the Mixed engine's native path.
+    /// for the Mixed engine's native path, f32 for a backbone without the
+    /// final norm, whose rows are its residual stream.
     pub fn temporal_dtype(&self) -> WeightDtype {
-        self.scratch.temporal_dtype()
+        self.scratch.temporal_dtype(self.config().final_norm)
     }
 
     /// Download temporal from GPU to CPU (always f32 output; Mixed path
@@ -3079,7 +3090,10 @@ impl MambaGpuBackbone {
             .map_err(|e| format!("sync: {e:?}"))?;
         match &self.scratch {
             BackboneScratch::F32(s) => s.temporal.download(self.stream(), output),
-            BackboneScratch::Mixed(s) => s.temporal.download_f32(self.stream(), output),
+            BackboneScratch::Mixed(s) if self.config().final_norm => {
+                s.temporal.download_f32(self.stream(), output)
+            }
+            BackboneScratch::Mixed(s) => s.residual.download(self.stream(), output),
         }
     }
 

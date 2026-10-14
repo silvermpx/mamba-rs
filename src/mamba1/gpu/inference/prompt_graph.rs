@@ -58,7 +58,7 @@ fn buffers(state: &MambaGpuState, scratch: &BackboneScratch) -> [u64; 3] {
     [
         state.conv.cached_ptr(),
         state.ssm.cached_ptr(),
-        scratch.temporal_ptr(),
+        scratch.temporal_ptr(true),
     ]
 }
 
@@ -76,6 +76,7 @@ fn prompt_kernels(
         input: rows_in,
         projected,
         scratch: prompt_scratch,
+        seq_len,
         ..
     } = prompt;
     match (engine, scratch, prompt_scratch) {
@@ -117,10 +118,46 @@ fn prompt_kernels(
                 },
                 state,
                 pf,
+            )?;
+            if e.config().final_norm {
+                return Ok(());
+            }
+            // A segment without the final norm hands out its f32 residual
+            // stream: the prompt's last position becomes the decode rows'.
+            let (rows, d_model) = (shape.0, shape.2);
+            let batch = rows / *seq_len;
+            last_rows_f32(
+                e.ctx(),
+                (&sc.residual, &pf.residual),
+                (batch, *seq_len, d_model),
             )
         }
         _ => Err("engine/scratch dtype mismatch (internal invariant)".to_string()),
     }
+}
+
+/// The last position of every sequence of `src` (`[batch, seq_len,
+/// d_model]` f32) into `dst` (`[batch, d_model]`).
+fn last_rows_f32(
+    ctx: &GpuCtx,
+    (dst, src): (
+        &crate::gpu::buffers::GpuBuffer,
+        &crate::gpu::buffers::GpuBuffer,
+    ),
+    (batch, seq_len, d_model): (usize, usize, usize),
+) -> Result<(), String> {
+    use cudarc::driver::PushKernelArg;
+    let (b_i, t_i, d_i) = (batch as i32, seq_len as i32, d_model as i32);
+    let (dst_ptr, src_ptr) = (dst.cached_ptr(), src.cached_ptr());
+    let mut bld = ctx.stream.launch_builder(&ctx.kernels.gather_last_timestep);
+    bld.arg(&dst_ptr);
+    bld.arg(&src_ptr);
+    bld.arg(&b_i);
+    bld.arg(&t_i);
+    bld.arg(&d_i);
+    unsafe { bld.launch(crate::gpu::launch::grid_1d_cover(batch * d_model)?) }
+        .map(|_| ())
+        .map_err(|e| format!("last residual rows: {e:?}"))
 }
 
 fn replay(

@@ -106,9 +106,11 @@ pub(crate) fn checkpoint_parts<'a>(
         list.push(p("mlp.fc1.weight"), &m.fc1_w, &[dm, 2 * hidden])?;
         list.push(p("mlp.fc2.weight"), &m.fc2_w, &[hidden, dm])?;
     }
-    list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
-    if layer_norm {
-        list.push("norm_f.bias".into(), &weights.norm_f_bias, &[dm])?;
+    if cfg.final_norm {
+        list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
+        if layer_norm {
+            list.push("norm_f.bias".into(), &weights.norm_f_bias, &[dm])?;
+        }
     }
 
     // The configuration as JSON. scan_mode and the norm epsilons are part
@@ -135,6 +137,9 @@ pub(crate) fn checkpoint_parts<'a>(
     }
     if layer_norm {
         extra.push_str(r#","rms_norm":false"#);
+    }
+    if !cfg.final_norm {
+        extra.push_str(r#","final_norm":false"#);
     }
     let meta = HashMap::from([
         ("mamba_version".to_string(), VERSION.to_string()),
@@ -239,6 +244,7 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
         block_norm: crate::config::BlockNorm::from_rms_norm(
             !config_json.contains(r#""rms_norm":false"#),
         ),
+        final_norm: !config_json.contains(r#""final_norm":false"#),
         rms_norm_eps,
         bcdt_rms_eps: float("bcdt_rms_eps")?,
         dt_rank: config_json
@@ -326,8 +332,12 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
         });
     }
 
-    let norm_f_weight = read("norm_f.weight")?;
-    let norm_f_bias = norm_bias("norm_f.bias")?;
+    // A segment built without the final norm has none in the file.
+    let (norm_f_weight, norm_f_bias) = if cfg.final_norm {
+        (read("norm_f.weight")?, norm_bias("norm_f.bias")?)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let mlp = (0..n_layers)
         .filter(|_| cfg.mlp_hidden() > 0)
         .map(|i| {

@@ -470,7 +470,12 @@ fn backbone_step(
         }
     }
 
-    // The final norm (reuse scratch.norm_buf to avoid heap allocation)
+    // The final norm (reuse scratch.norm_buf to avoid heap allocation); a
+    // segment without it hands out its residual stream, which stays f32 in
+    // every lane.
+    if weights.norm_f_weight.is_empty() {
+        return;
+    }
     if weights.norm_f_bias.is_empty() {
         rms_norm_weighted(
             &mut scratch.norm_buf[..dm],

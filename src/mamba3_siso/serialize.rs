@@ -20,7 +20,9 @@
 
 use super::config::Mamba3Config;
 use super::weights::{Mamba3LayerWeights, Mamba3Weights};
-use crate::ops::st_io::{TensorList, block_norm, block_norm_entry, read_f32};
+use crate::ops::st_io::{
+    TensorList, block_norm, block_norm_entry, final_norm, final_norm_entry, read_f32,
+};
 use safetensors::tensor::SafeTensors;
 use std::collections::HashMap;
 use std::path::Path;
@@ -84,7 +86,9 @@ pub(crate) fn checkpoint_parts<'a>(
         list.push(p("mlp.fc1.weight"), &m.fc1_w, &[dm, 2 * hidden])?;
         list.push(p("mlp.fc2.weight"), &m.fc2_w, &[hidden, dm])?;
     }
-    list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
+    if !weights.norm_f_weight.is_empty() {
+        list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
+    }
     if !weights.norm_f_bias.is_empty() {
         list.push("norm_f.bias".into(), &weights.norm_f_bias, &[dm])?;
     }
@@ -114,6 +118,7 @@ pub(crate) fn checkpoint_parts<'a>(
         ("mamba_version".to_string(), "3".to_string()),
     ]);
     meta.extend(block_norm_entry(cfg.block_norm));
+    meta.extend(final_norm_entry(cfg.final_norm));
     Ok((list, meta))
 }
 
@@ -182,6 +187,14 @@ fn weights_from_bytes(data: &[u8], cfg: &Mamba3Config) -> Result<(Mamba3Weights,
             cfg.block_norm
         ));
     }
+    let stored_final = final_norm(meta_map)?;
+    if stored_final != cfg.final_norm {
+        return Err(format!(
+            "checkpoint identity mismatch: file has final_norm={stored_final}, caller \
+             config says {} — the backbone's output differs",
+            cfg.final_norm
+        ));
+    }
     let stored_mlp: usize = match meta_map.get("d_intermediate") {
         Some(v) => v
             .parse()
@@ -245,8 +258,17 @@ fn weights_from_bytes(data: &[u8], cfg: &Mamba3Config) -> Result<(Mamba3Weights,
         input_proj_w: get("input_proj.weight")?,
         input_proj_b: get("input_proj.bias")?,
         layers,
-        norm_f_weight: get("norm_f.weight")?,
-        norm_f_bias: norm_bias("norm_f.bias")?,
+        // A segment built without the final norm has none in the file.
+        norm_f_weight: if cfg.final_norm {
+            get("norm_f.weight")?
+        } else {
+            Vec::new()
+        },
+        norm_f_bias: if cfg.final_norm {
+            norm_bias("norm_f.bias")?
+        } else {
+            Vec::new()
+        },
         mlp,
     };
 
@@ -337,6 +359,7 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(Mamba3Weights, Mamba3Config, usiz
         },
         scan_mode,
         block_norm: block_norm(meta_map)?,
+        final_norm: final_norm(meta_map)?,
         // Checkpoints from before the MLP carry no MLP.
         d_intermediate: match meta_map.get("d_intermediate") {
             Some(v) => v

@@ -79,6 +79,7 @@ fn mixer(scan_mode: ScanMode) -> MambaConfig {
         n_layers: LAYERS,
         scan_mode,
         block_norm: mamba_rs::BlockNorm::Rms,
+        final_norm: true,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,

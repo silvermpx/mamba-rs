@@ -111,8 +111,9 @@ impl Mamba2Weights {
             layers: (0..cfg.n_layers)
                 .map(|_| Mamba2LayerWeights::zeros(cfg))
                 .collect(),
-            norm_f_weight: vec![1.0; d],
-            norm_f_bias: vec![0.0; cfg.block_norm.bias_len(d)],
+            // A segment without the final norm has neither tensor.
+            norm_f_weight: vec![1.0; cfg.block_norm.final_lens(d, cfg.final_norm).0],
+            norm_f_bias: vec![0.0; cfg.block_norm.final_lens(d, cfg.final_norm).1],
             mlp: match cfg.mlp_hidden() {
                 0 => Vec::new(),
                 hidden => (0..cfg.n_layers)
@@ -189,12 +190,9 @@ impl Mamba2Weights {
             )?;
             ck("input_proj_b", self.input_proj_b.len(), d)?;
         }
-        ck("norm_f_weight", self.norm_f_weight.len(), d)?;
-        ck(
-            "norm_f_bias",
-            self.norm_f_bias.len(),
-            cfg.block_norm.bias_len(d),
-        )?;
+        let (nf, nfb) = cfg.block_norm.final_lens(d, cfg.final_norm);
+        ck("norm_f_weight", self.norm_f_weight.len(), nf)?;
+        ck("norm_f_bias", self.norm_f_bias.len(), nfb)?;
         ck("n_layers", self.layers.len(), cfg.n_layers)?;
         for (i, lw) in self.layers.iter().enumerate() {
             let n = |s: &str| format!("layer[{i}].{s}");

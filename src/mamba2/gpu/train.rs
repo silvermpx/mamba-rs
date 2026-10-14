@@ -1669,12 +1669,16 @@ impl Mamba2GpuTrainer {
                 )?;
             }
         }
-        self.copy(
-            self.final_in.cached_ptr(),
-            temporal,
-            rows * dm,
-            "final rows",
-        )?;
+        // The final norm's backward reads its input; without the norm the
+        // rows pass through.
+        if self.layout.norm_f_weight.len > 0 {
+            self.copy(
+                self.final_in.cached_ptr(),
+                temporal,
+                rows * dm,
+                "final rows",
+            )?;
+        }
         x.block_norm(
             (
                 self.final_out.cached_ptr(),
@@ -1694,10 +1698,11 @@ impl Mamba2GpuTrainer {
         (span.len > 0).then(|| self.grad(span))
     }
 
-    /// The final norm's parameters in the master at `base`.
+    /// The final norm's parameters in the master at `base`; none for a
+    /// backbone built without it.
     fn norm_f_params(&self, base: u64) -> NormParams {
         NormParams {
-            w: at(base, self.layout.norm_f_weight),
+            w: opt_at(base, self.layout.norm_f_weight).unwrap_or(0),
             b: opt_at(base, self.layout.norm_f_bias).unwrap_or(0),
         }
     }
@@ -1724,6 +1729,10 @@ impl Mamba2GpuTrainer {
             (false, 0),
             "Mamba-2 block norm backward",
         )?;
+        // No norm, no scale to train.
+        if norm.is_none() {
+            return Ok(());
+        }
         self.reduce_axis0(g_scale, axis0, (rows, dm))
     }
 

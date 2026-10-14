@@ -610,7 +610,9 @@ pub fn gpu_backward_mamba_backbone(
     // Rule B (no atomicAdd): two-stage launch.
     // Stage 1: rmsnorm_bwd writes per-sample per-dim partials to axis0_partials.
     // Stage 2: reduce_sum_axis0 reduces across bt → d_mamba.norm_f_weight (accumulate=1).
-    {
+    // Without the final norm the output's gradient already is the residual
+    // stream's.
+    if !mamba_w.norm_f().is_none() {
         let bt_i = bt as i32;
         let dm_i = dims.d_model as i32;
         let axis0_ptr = scratch.axis0_partials.cached_ptr();

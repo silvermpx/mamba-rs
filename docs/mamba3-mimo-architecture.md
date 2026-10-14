@@ -59,6 +59,16 @@ model.
     output [B, T, d_model]
 ```
 
+The block norms (`norm`, the gated MLP's `norm2`, `norm_f`) are RMSNorm, or
+LayerNorm with a bias for a model built with `rms_norm = false`
+(`Mamba3MimoConfig::block_norm`); the B and C norms and the gated output
+norm stay RMSNorm.
+
+A backbone built with `final_norm = false` leaves `norm_f` out: it is a
+segment of a stack that continues in the caller's own layers, and its
+output is the f32 residual stream after its last block in every
+precision. A segment built with an identity input carries that stream on.
+
 ## The step of one head
 
 The discretisation is SISO's trapezoid:

@@ -2007,9 +2007,15 @@ impl Mamba3GpuEngineMixed {
             .stream
             .synchronize()
             .map_err(|e| format!("M3 sync: {e:?}"))?;
-        scratch
-            .temporal
-            .download_f32(&self.engine.ctx.stream, output)?;
+        // A segment without the final norm hands out its f32 residual
+        // stream.
+        if self.engine.cfg.final_norm {
+            scratch
+                .temporal
+                .download_f32(&self.engine.ctx.stream, output)?;
+        } else {
+            scratch.residual.download(&self.engine.ctx.stream, output)?;
+        }
         Ok(())
     }
 
@@ -2130,17 +2136,21 @@ enum M3BackboneScratch {
 }
 
 impl M3BackboneScratch {
-    fn temporal_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+    /// The output rows: the storage precision's on a bf16 or f16 backbone,
+    /// its f32 residual stream without the final norm.
+    fn temporal_ptr(&self, final_norm: bool) -> cudarc::driver::sys::CUdeviceptr {
         match self {
             M3BackboneScratch::F32(s) => s.temporal.cached_ptr(),
-            M3BackboneScratch::Mixed(s) => s.temporal.cached_ptr(),
+            M3BackboneScratch::Mixed(s) if final_norm => s.temporal.cached_ptr(),
+            M3BackboneScratch::Mixed(s) => s.residual.cached_ptr(),
         }
     }
 
-    fn temporal_dtype(&self) -> WeightDtype {
+    fn temporal_dtype(&self, final_norm: bool) -> WeightDtype {
         match self {
             M3BackboneScratch::F32(_) => WeightDtype::F32,
-            M3BackboneScratch::Mixed(s) => s.dtype,
+            M3BackboneScratch::Mixed(s) if final_norm => s.dtype,
+            M3BackboneScratch::Mixed(_) => WeightDtype::F32,
         }
     }
 }
@@ -2311,13 +2321,14 @@ impl Mamba3GpuBackbone {
     /// The final-norm rows of the last step or prompt, `[batch, d_model]`,
     /// on the device, in [`Self::temporal_dtype`].
     pub fn temporal_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
-        self.scratch.temporal_ptr()
+        self.scratch.temporal_ptr(self.config().final_norm)
     }
 
     /// The precision of [`Self::temporal_ptr`]'s rows: f32 on an f32
-    /// backbone, the storage precision on a bf16 or f16 one.
+    /// backbone, the storage precision on a bf16 or f16 one, f32 on a
+    /// backbone without the final norm, whose rows are its residual stream.
     pub fn temporal_dtype(&self) -> WeightDtype {
-        self.scratch.temporal_dtype()
+        self.scratch.temporal_dtype(self.config().final_norm)
     }
 
     /// One token for every sequence: `input` is `[batch, input_dim]`,
@@ -2556,7 +2567,14 @@ impl Mamba3GpuBackbone {
                     carry_state,
                     &mut sc.prefill_hidden,
                 )?;
-                e.cast_prefill_hidden(sc)
+                if e.engine_ref().cfg.final_norm {
+                    e.cast_prefill_hidden(sc)
+                } else {
+                    // A segment without the final norm hands out its f32
+                    // residual stream, which the decode rows hold.
+                    sc.residual
+                        .copy_from_raw(&sc.prefill_hidden, e.ctx_stream())
+                }
             }
             _ => Err("M3 prefill: engine/scratch precision arms disagree".to_string()),
         }
@@ -2593,7 +2611,10 @@ impl Mamba3GpuBackbone {
                 output[..tmp.len()].copy_from_slice(&tmp);
                 Ok(())
             }
-            M3BackboneScratch::Mixed(s) => s.temporal.download_f32(self.stream(), output),
+            M3BackboneScratch::Mixed(s) if self.config().final_norm => {
+                s.temporal.download_f32(self.stream(), output)
+            }
+            M3BackboneScratch::Mixed(s) => s.residual.download(self.stream(), output),
         }
     }
 }

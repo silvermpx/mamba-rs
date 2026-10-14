@@ -56,6 +56,11 @@ underneath. The GPU path links only the CUDA driver API and cuBLAS.
 - Safetensors checkpoints for every family, a language-model checkpoint
   of any family in one file, and loaders for the official HuggingFace and
   `mamba_ssm` checkpoints.
+- Segments to stack with layers of your own, such as attention: a
+  backbone built with `final_norm: false` hands out its f32 residual
+  stream, and one built with an identity input carries it on; with
+  `backward_step_input_grad` the stack trains end to end. Two segments of
+  two layers give a model of four bit for bit.
 - State dimensions up to 256.
 - MSRV 1.98.1.
 

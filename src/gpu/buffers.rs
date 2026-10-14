@@ -735,7 +735,7 @@ impl DeviceKeep {
 }
 
 /// An async device-to-device copy of `bytes` between raw addresses.
-fn copy_device_bytes(
+pub(crate) fn copy_device_bytes(
     stream: &Arc<cudarc::driver::CudaStream>,
     dst: cudarc::driver::sys::CUdeviceptr,
     src: cudarc::driver::sys::CUdeviceptr,

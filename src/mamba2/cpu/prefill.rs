@@ -301,6 +301,10 @@ pub fn forward_mamba2_backbone_prefill_mode(
             );
         }
     }
+    // A segment without the final norm hands out the residual stream.
+    if w.norm_f_weight.is_empty() {
+        return;
+    }
     let norm = &mut scratch.norm[..seq_len * dm];
     norm.copy_from_slice(out);
     zip_rows(mode, (out, dm), (norm, dm), |d, x| {

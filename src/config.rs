@@ -64,6 +64,17 @@ impl BlockNorm {
             Self::Layer => 2,
         }
     }
+
+    /// The lengths of the final norm's scale and bias over `width`
+    /// features, none for a backbone built without the final norm (a
+    /// segment of a stack, `final_norm = false`).
+    pub const fn final_lens(self, width: usize, final_norm: bool) -> (usize, usize) {
+        if final_norm {
+            (width, self.bias_len(width))
+        } else {
+            (0, 0)
+        }
+    }
 }
 
 /// Scan mode for GPU SSM recurrence.

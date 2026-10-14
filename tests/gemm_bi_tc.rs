@@ -451,6 +451,7 @@ fn tc_mixed_training_is_bit_identical_across_runs() {
         n_layers: 2,
         scan_mode: ScanMode::Auto,
         block_norm: mamba_rs::BlockNorm::Rms,
+        final_norm: true,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,

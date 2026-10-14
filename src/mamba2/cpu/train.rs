@@ -228,6 +228,10 @@ pub fn forward_mamba2_train(
             });
         }
     }
+    // A segment without the final norm hands out the residual stream.
+    if w.norm_f_weight.is_empty() {
+        return;
+    }
     tape.final_in.copy_from_slice(rows);
     for (o, x) in rows
         .chunks_exact_mut(dm)
@@ -368,13 +372,17 @@ pub fn backward_mamba2_train(
     s.dtype = tape.dtype;
     s.mlp_bwd.dtype = tape.dtype;
     let d_rows = &mut d_out[..t_len * dm];
-    norm_backward(
-        d_rows,
-        &tape.final_in,
-        (&w.norm_f_weight, &w.norm_f_bias),
-        (&mut grads.norm_f_weight, &mut grads.norm_f_bias),
-        cfg.rms_norm_eps,
-    );
+    // Without the final norm the output's gradient is the residual
+    // stream's.
+    if !w.norm_f_weight.is_empty() {
+        norm_backward(
+            d_rows,
+            &tape.final_in,
+            (&w.norm_f_weight, &w.norm_f_bias),
+            (&mut grads.norm_f_weight, &mut grads.norm_f_bias),
+            cfg.rms_norm_eps,
+        );
+    }
     for l in (0..cfg.n_layers).rev() {
         let lt = &tape.layers[l];
         if let Some(mlp) = w.mlp.get(l) {

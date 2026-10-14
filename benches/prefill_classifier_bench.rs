@@ -39,6 +39,7 @@ fn prefill_bench_classifier_shape() {
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         block_norm: mamba_rs::BlockNorm::Rms,
+        final_norm: true,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,

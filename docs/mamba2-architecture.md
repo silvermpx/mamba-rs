@@ -134,6 +134,8 @@ stored `[in, out]`, as everywhere in this crate. A model with
 | `norm_before_gate` | normalise `y` before the gate instead of after it |
 | `dt_limit` | the clamp of `dt` after the softplus |
 | `proj_bias`, `conv_bias` | the biases of the projections and of the conv |
+| `block_norm` | the block norms (`norm`, `norm2`, `norm_f`): RMSNorm, or LayerNorm with a bias for a model built with `rms_norm = false` |
+| `final_norm` | whether the backbone ends in `norm_f`; `false` builds a segment of a stack, whose output is its f32 residual stream |
 | `rms_norm_eps`, `gated_norm_eps` | the epsilon of the block norms and of the gated norm, which the reference fixes at 1e-5 |
 | `scan_mode` | the GPU scan over a window: `Auto`, `Sequential` or `Parallel` |
 

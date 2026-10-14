@@ -241,6 +241,17 @@
   RMSNorm, as in the reference. `BlockNorm` on each config names the kind.
   Original-format checkpoints with `rms_norm: false` load with their
   biases, and the safetensors checkpoints keep them.
+- Backbone segments to stack with layers of your own, such as attention
+  between Mamba segments. Every family's config takes `final_norm`
+  (default `true`); a backbone built with `false` leaves `norm_f` out and
+  hands out its residual stream after its last block, in f32 in every
+  precision (`temporal_dtype` reports `F32`), and a segment built with an
+  identity input carries that stream on. The input gradient of
+  `backward_step_input_grad` trains the segment below, so a stack trains
+  end to end: two segments of two layers give a model of four bit for bit,
+  in the forward and after a step, on the CPU and the GPU, decode steps
+  included. Checkpoints keep the flag (written only when `false`), and a
+  language model refuses a segment, whose head would read no final norm.
 
 ### Changed
 

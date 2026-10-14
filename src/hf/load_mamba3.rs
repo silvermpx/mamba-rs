@@ -185,6 +185,7 @@ impl HfMamba3Config {
             a_floor: c.a_floor,
             is_outproj_norm: c.is_outproj_norm,
             block_norm: c.block_norm,
+            final_norm: true,
             rms_norm_eps: c.rms_norm_eps,
             ssm_norm_eps: c.ssm_norm_eps,
             d_intermediate: c.d_intermediate,

@@ -31,7 +31,8 @@ use super::config::Mamba3MimoConfig;
 use super::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use crate::mlp::GatedMlpLayerWeights;
 use crate::ops::st_io::{
-    TensorList, block_norm, block_norm_entry, meta, read_f32, read_meta, scan_mode,
+    TensorList, block_norm, block_norm_entry, final_norm, final_norm_entry, meta, read_f32,
+    read_meta, scan_mode,
 };
 
 /// The family marker in the metadata. The SISO checkpoints carry "3".
@@ -115,7 +116,9 @@ pub(crate) fn checkpoint_parts<'a>(
         list.push(p("mlp.fc1.weight"), &m.fc1_w, &[dm, 2 * hidden])?;
         list.push(p("mlp.fc2.weight"), &m.fc2_w, &[hidden, dm])?;
     }
-    list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
+    if !weights.norm_f_weight.is_empty() {
+        list.push("norm_f.weight".into(), &weights.norm_f_weight, &[dm])?;
+    }
     if !weights.norm_f_bias.is_empty() {
         list.push("norm_f.bias".into(), &weights.norm_f_bias, &[dm])?;
     }
@@ -142,6 +145,7 @@ pub(crate) fn checkpoint_parts<'a>(
         ("scan_mode".to_string(), format!("{:?}", cfg.scan_mode)),
     ]);
     meta.extend(block_norm_entry(cfg.block_norm));
+    meta.extend(final_norm_entry(cfg.final_norm));
     Ok((list, meta))
 }
 
@@ -175,6 +179,7 @@ pub fn load_from_bytes(
         a_floor: meta(&m, "a_floor")?,
         is_outproj_norm: meta(&m, "is_outproj_norm")?,
         block_norm: block_norm(&m)?,
+        final_norm: final_norm(&m)?,
         rms_norm_eps: meta(&m, "rms_norm_eps")?,
         ssm_norm_eps: meta(&m, "ssm_norm_eps")?,
         d_intermediate: meta(&m, "d_intermediate")?,
@@ -234,8 +239,17 @@ pub fn load_from_bytes(
         input_proj_w: get("input_proj.weight")?,
         input_proj_b: get("input_proj.bias")?,
         layers,
-        norm_f_weight: get("norm_f.weight")?,
-        norm_f_bias: norm_bias("norm_f.bias")?,
+        // A segment built without the final norm has none in the file.
+        norm_f_weight: if cfg.final_norm {
+            get("norm_f.weight")?
+        } else {
+            Vec::new()
+        },
+        norm_f_bias: if cfg.final_norm {
+            norm_bias("norm_f.bias")?
+        } else {
+            Vec::new()
+        },
         mlp,
     };
     weights.validate(&cfg, input_dim)?;

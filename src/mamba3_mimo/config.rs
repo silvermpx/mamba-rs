@@ -39,6 +39,13 @@ pub struct Mamba3MimoConfig {
     /// The kind of the block norms (`norm`, `norm2`, `norm_f`): RMSNorm,
     /// or LayerNorm with a bias for a model built with `rms_norm=False`.
     pub block_norm: BlockNorm,
+    /// Whether the backbone ends in the final norm (`norm_f`), as every
+    /// model and every official checkpoint does. A segment of a stack that
+    /// continues in layers of the caller's own, such as attention between
+    /// Mamba segments, is built without it: its output is the residual
+    /// stream after its last block, which the next segment, built with an
+    /// identity input, carries on.
+    pub final_norm: bool,
     /// Epsilon of the block norms (`norm`, `norm2`, `norm_f`), of either
     /// kind; the reference's `norm_epsilon`.
     pub rms_norm_eps: f32,
@@ -247,6 +254,7 @@ impl Default for Mamba3MimoConfig {
             a_floor: 1e-4,
             is_outproj_norm: false,
             block_norm: BlockNorm::Rms,
+            final_norm: true,
             rms_norm_eps: 1e-5,
             ssm_norm_eps: 1e-5,
             d_intermediate: 0,

@@ -652,6 +652,11 @@ pub fn forward_mamba3_backbone_prefill_mode(
 
     // norm_f at EVERY position, via the public in-place norm (the anchor
     // test reproduces the exact same call per row).
+    // A segment without the final norm hands out its residual stream, which
+    // stays f32 in every lane.
+    if w.norm_f_weight.is_empty() {
+        return;
+    }
     for_rows(mode, &mut temporal_out[..t_dm], dm, |row| {
         if w.norm_f_bias.is_empty() {
             crate::ops::norms::rms_norm_inplace(row, &w.norm_f_weight[..dm], dims.rms_norm_eps);

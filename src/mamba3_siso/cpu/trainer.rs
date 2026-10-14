@@ -206,7 +206,10 @@ impl CpuFamily for Mamba3Cpu {
         // The final norm in place on a copy, as the inference prefill
         // applies it, keeping its statistics for the backward.
         out[..t_len * dm].copy_from_slice(rows);
-        if w.norm_f_bias.is_empty() {
+        if w.norm_f_weight.is_empty() {
+            // A segment without the final norm hands out the residual
+            // stream.
+        } else if w.norm_f_bias.is_empty() {
             for (row, inv) in out.chunks_exact_mut(dm).zip(seq.norm_f_inv.iter_mut()) {
                 *inv = rms_norm_inplace(row, &w.norm_f_weight, eps);
             }
@@ -233,7 +236,10 @@ impl CpuFamily for Mamba3Cpu {
         let (dm, t_len, eps) = (self.cfg.d_model, self.dims.seq_len, self.cfg.rms_norm_eps);
         // The final norm: a LayerNorm's backward, or for RMSNorm
         // dw += dy x_hat, dx = inv (dy w - x_hat mean(dy w x_hat)).
-        if w.norm_f_bias.is_empty() {
+        if w.norm_f_weight.is_empty() {
+            // Without the norm the output's gradient is the residual
+            // stream's.
+        } else if w.norm_f_bias.is_empty() {
             for ((d, x), &inv) in d_out
                 .chunks_exact_mut(dm)
                 .zip(seq.norm_f_in.chunks_exact(dm))

@@ -746,6 +746,11 @@ pub fn forward_mamba_backbone_prefill_mode(
     }
 
     // norm_f at EVERY position, dims eps.
+    // A segment without the final norm hands out its residual stream, which
+    // stays f32 in every lane.
+    if w.norm_f_weight.is_empty() {
+        return;
+    }
     for_rows(mode, &mut temporal_out[..t_len * dm], dm, |row| {
         if w.norm_f_bias.is_empty() {
             let mut sum_sq = 0.0_f32;

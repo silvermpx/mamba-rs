@@ -170,7 +170,7 @@ impl MambaWeightsView for GpuMambaWeights {
         self.input_proj_b.ptr()
     }
     fn norm_f_weight(&self) -> cudarc::driver::sys::CUdeviceptr {
-        self.norm_f_weight.ptr()
+        present(self.norm_f_weight.len(), self.norm_f_weight.ptr()).unwrap_or(0)
     }
     fn norm_f_bias(&self) -> cudarc::driver::sys::CUdeviceptr {
         present(self.norm_f_bias.len(), self.norm_f_bias.ptr()).unwrap_or(0)
@@ -246,7 +246,7 @@ impl MambaWeightsView for GpuMambaMixedWeights {
         self.input_proj_b.ptr()
     }
     fn norm_f_weight(&self) -> cudarc::driver::sys::CUdeviceptr {
-        self.norm_f_weight.ptr()
+        present(self.norm_f_weight.len_elems(), self.norm_f_weight.ptr()).unwrap_or(0)
     }
     fn norm_f_bias(&self) -> cudarc::driver::sys::CUdeviceptr {
         present(self.norm_f_bias.len_elems(), self.norm_f_bias.ptr()).unwrap_or(0)
@@ -706,10 +706,10 @@ pub struct GpuMambaTrainWeights {
 }
 
 impl GpuMambaTrainWeights {
-    /// The final norm.
+    /// The final norm; none for a backbone built without it.
     pub(crate) fn norm_f(&self) -> NormParams {
         NormParams {
-            w: self.norm_f_weight.cached_ptr(),
+            w: present(self.norm_f_weight.len(), self.norm_f_weight.cached_ptr()).unwrap_or(0),
             b: present(self.norm_f_bias.len(), self.norm_f_bias.cached_ptr()).unwrap_or(0),
         }
     }
@@ -901,7 +901,9 @@ impl GpuMambaGrads {
         } else {
             0
         };
-        let total = ipw_len + ipb_len + cfg.n_layers * (per_layer + per_mlp) + dm + nb;
+        // A segment built without the final norm has no slots for it.
+        let (nf, nfb) = cfg.block_norm.final_lens(dm, cfg.final_norm);
+        let total = ipw_len + ipb_len + cfg.n_layers * (per_layer + per_mlp) + nf + nfb;
 
         let flat = GpuBuffer::zeros(stream, total)?;
         let base = flat.cached_ptr();
@@ -947,8 +949,8 @@ impl GpuMambaGrads {
                 fc2_w: gs!(hidden * dm),
             });
         }
-        let norm_f_weight = gs!(dm);
-        let norm_f_bias = gs!(nb);
+        let norm_f_weight = gs!(nf);
+        let norm_f_bias = gs!(nfb);
         debug_assert_eq!(off, total, "grad layout mismatch: off={off} total={total}");
 
         Ok(Self {

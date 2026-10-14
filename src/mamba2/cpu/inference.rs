@@ -297,6 +297,10 @@ fn backbone_step(
             }
         }
     }
+    // A segment without the final norm hands out the residual stream.
+    if weights.norm_f_weight.is_empty() {
+        return;
+    }
     scratch.norm_buf.copy_from_slice(&temporal[..dm]);
     block_norm_row(
         &mut temporal[..dm],

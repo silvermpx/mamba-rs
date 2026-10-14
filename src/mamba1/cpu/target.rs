@@ -250,8 +250,11 @@ pub fn forward_mamba_target_step(
 }
 
 /// The final norm of one row in place: RMSNorm, or LayerNorm for a model
-/// with its bias.
+/// with its bias; nothing for a segment built without it.
 fn final_norm(row: &mut [f32], w: &TrainMambaWeights, eps: f32) {
+    if w.norm_f_weight.is_empty() {
+        return;
+    }
     if !w.norm_f_bias.is_empty() {
         layer_norm_inplace(row, (&w.norm_f_weight, &w.norm_f_bias), eps);
         return;

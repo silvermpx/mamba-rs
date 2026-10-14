@@ -1631,10 +1631,11 @@ impl Mamba3MimoGpuTrainer {
     }
 
     /// A block norm's parameters in the buffer at `base` laid out as the
-    /// master: its scale, and the bias for LayerNorm (0 for RMSNorm).
+    /// master: its scale, and the bias for LayerNorm (0 for RMSNorm); none
+    /// for the final norm of a backbone built without it.
     fn norm_params(base: u64, (w, b): (Span, Span)) -> NormParams {
         NormParams {
-            w: at(base, w),
+            w: if w.len > 0 { at(base, w) } else { 0 },
             b: if b.len > 0 { at(base, b) } else { 0 },
         }
     }
@@ -1972,12 +1973,16 @@ impl Mamba3MimoGpuTrainer {
                 self.residual_add(temporal, out_rows, rows * dm)?;
             }
         }
-        self.copy(
-            self.final_in.cached_ptr(),
-            temporal,
-            rows * dm,
-            "final rows",
-        )?;
+        // The final norm's backward reads its input; without the norm the
+        // rows pass through.
+        if self.layout.norm_f_weight.len > 0 {
+            self.copy(
+                self.final_in.cached_ptr(),
+                temporal,
+                rows * dm,
+                "final rows",
+            )?;
+        }
         self.block_norm(
             (
                 self.final_out.cached_ptr(),
@@ -2061,6 +2066,10 @@ impl Mamba3MimoGpuTrainer {
             (false, 0),
             "MIMO block norm backward",
         )?;
+        // No norm, no scale to train.
+        if norm.is_none() {
+            return Ok(());
+        }
         self.reduce_axis0(g.w, axis0, (rows, dm))
     }
 

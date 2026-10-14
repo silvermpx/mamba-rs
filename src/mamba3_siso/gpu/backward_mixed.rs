@@ -72,8 +72,11 @@ pub fn gpu_backward_mamba3_backbone_mixed(
     let dm = dims.d_model;
     let dtype = acts.dtype;
 
-    // norm_f bwd (f32, residual stays f32) — no-atomics partials.
-    {
+    // norm_f bwd (f32, residual stays f32) — no-atomics partials. Without
+    // the final norm the output's gradient already is the residual
+    // stream's.
+    let final_norm = mamba_w.master.final_norm();
+    if !final_norm.is_none() {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
         let axis0_ptr = f32_scratch.axis0_partials.cached_ptr();
@@ -88,7 +91,7 @@ pub fn gpu_backward_mamba3_backbone_mixed(
                 acts.norm_f_rms.cached_ptr(),
             ),
             (
-                mamba_w.master.final_norm(),
+                final_norm,
                 grads.norm_f_bias.as_ref().map_or(0, GradSlice::ptr),
             ),
             (bt, dm),
@@ -113,8 +116,8 @@ pub fn gpu_backward_mamba3_backbone_mixed(
             unsafe { builder.launch(cfg) }
                 .map_err(|e| format!("rmsnorm_bwd norm_f m3 mixed reduce: {:?}", e))?;
         }
+        d_temporal.copy_from_raw(&f32_scratch.d_norm, &ctx.stream)?;
     }
-    d_temporal.copy_from_raw(&f32_scratch.d_norm, &ctx.stream)?;
 
     // Per-layer bwd in REVERSE order; the MLP came after the mixer, so its
     // backward comes first.

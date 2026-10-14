@@ -130,8 +130,9 @@ impl MambaWeights {
                     out_proj_b: vec![0.0; cfg.out_proj_bias_len()],
                 })
                 .collect(),
-            norm_f_weight: vec![1.0; d], // norm scale init = ones
-            norm_f_bias: vec![0.0; nb],
+            // A segment without the final norm has neither tensor.
+            norm_f_weight: vec![1.0; cfg.block_norm.final_lens(d, cfg.final_norm).0],
+            norm_f_bias: vec![0.0; cfg.block_norm.final_lens(d, cfg.final_norm).1],
             mlp: match cfg.mlp_hidden() {
                 0 => Vec::new(),
                 hidden => (0..cfg.n_layers)
@@ -278,8 +279,9 @@ impl MambaWeights {
             check("input_proj_b", self.input_proj_b.len(), d)?;
         }
         let nb = cfg.block_norm.bias_len(d);
-        check("norm_f_weight", self.norm_f_weight.len(), d)?;
-        check("norm_f_bias", self.norm_f_bias.len(), nb)?;
+        let (nf, nfb) = cfg.block_norm.final_lens(d, cfg.final_norm);
+        check("norm_f_weight", self.norm_f_weight.len(), nf)?;
+        check("norm_f_bias", self.norm_f_bias.len(), nfb)?;
 
         if self.layers.len() != cfg.n_layers {
             return Err(format!(

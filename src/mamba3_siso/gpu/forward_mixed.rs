@@ -1329,7 +1329,14 @@ pub(super) fn check_mixed_mlp(
 ) -> Result<(), String> {
     let model: Vec<usize> = w.compute.mlp.iter().map(|m| m.hidden).collect();
     let built: Vec<usize> = acts.mlp.iter().map(|m| m.act.len_elems()).collect();
-    let rows = acts.norm_f_input.len() / w.compute.norm_f_weight.len_elems().max(1);
+    // The window's rows from the MLP norm's width, d_model: the final norm
+    // is absent from a segment built without it.
+    let d_model = w
+        .compute
+        .mlp
+        .first()
+        .map_or(1, |m| m.norm_weight.len_elems().max(1));
+    let rows = acts.norm_f_input.len() / d_model;
     if model.len() != built.len() || model.iter().zip(&built).any(|(h, n)| h * rows != *n) {
         return Err(format!(
             "the gated MLP widths {model:?} of the weights do not match the activations \

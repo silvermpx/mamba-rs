@@ -119,6 +119,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize, rms_norm_eps: f32) {
         expand: 2,
         scan_mode,
         block_norm: mamba_rs::BlockNorm::Rms,
+        final_norm: true,
         rms_norm_eps,
         bcdt_rms_eps: None,
         dt_rank: None,

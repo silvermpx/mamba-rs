@@ -133,7 +133,14 @@ Where `in_proj_dim = 2·d_inner + 2·ngroups·d_state + 3·nheads + num_rope_ang
 
 The block norms (`norm`, the MLP's `norm2`, `norm_f`) take `rms_norm_eps`,
 the reference's `norm_epsilon`; the B/C norms and the gated output norm take
-`ssm_norm_eps`, which the reference fixes at 1e-5.
+`ssm_norm_eps`, which the reference fixes at 1e-5. The block norms are
+RMSNorm, or LayerNorm with a bias for a model built with `rms_norm = false`
+(`Mamba3Config::block_norm`); the B/C and gated norms stay RMSNorm.
+
+A backbone built with `final_norm = false` leaves `norm_f` out: it is a
+segment of a stack that continues in the caller's own layers, and its
+output is the f32 residual stream after its last block in every
+precision. A segment built with an identity input carries that stream on.
 
 ## CUDA kernels
 
@@ -142,7 +149,7 @@ the reference's `norm_epsilon`; the B/C norms and the gated output norm take
 | mamba3_siso.cu | 5 | Sequential SSM forward/backward, the decode step |
 | mamba3_ops.cu | 19 | Split, BCNorm, RoPE, ABG, gating |
 | mamba3_chunked.cu | 16 | Chunked parallel scan (T>64) |
-| norms.cu | 3 | RMSNorm forward/backward |
+| norms.cu | 6 | The block norms, RMSNorm and LayerNorm forward/backward (the context's module) |
 | elementwise.cu | 12 | Residual, fill, last-step gather, column sums, vec ops |
 | gemm_bi_inference/casts.cu | 4 | Casts between f32 and bf16/f16 |
 

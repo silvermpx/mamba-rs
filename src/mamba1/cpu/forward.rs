@@ -465,7 +465,11 @@ pub fn forward_mamba_backbone_batched(
         }
     }
 
-    // The final norm (norm_f) after all Mamba layers.
+    // The final norm (norm_f) after all Mamba layers. A segment without it
+    // hands out its residual stream, which stays f32 in every lane.
+    if mamba_w.norm_f_weight.is_empty() {
+        return;
+    }
     // Save pre-norm input for backward, then apply norm in-place.
     acts.norm_f_input[..seq_len * dm].copy_from_slice(&temporal_flat[..seq_len * dm]);
     if !mamba_w.norm_f_bias.is_empty() {
