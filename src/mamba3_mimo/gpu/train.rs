@@ -85,8 +85,10 @@ struct LayerSpans {
     mimo_z: Span,
     mimo_o: Span,
     out_proj_w: Span,
-    /// The output norm's weight, empty for a model without the norm (the
-    /// tensor is in every model but trains only where it runs).
+    /// The output norm's weight. Every model holds it, as the host
+    /// trainer's state does, so the moments of both devices share one
+    /// layout; without the norm (`is_outproj_norm` off) its gradient stays
+    /// zero.
     norm_gate: Span,
 }
 
@@ -112,7 +114,7 @@ struct Layout {
 }
 
 impl Layout {
-    fn of(w: &Mamba3MimoWeights, with_norm: bool) -> Self {
+    fn of(w: &Mamba3MimoWeights) -> Self {
         let mut at = 0usize;
         let mut take = |len: usize| {
             let span = Span { off: at, len };
@@ -138,11 +140,7 @@ impl Layout {
                 mimo_z: take(lw.mimo_z.len()),
                 mimo_o: take(lw.mimo_o.len()),
                 out_proj_w: take(lw.out_proj_w.len()),
-                norm_gate: take(if with_norm {
-                    lw.norm_gate_weight.len()
-                } else {
-                    0
-                }),
+                norm_gate: take(lw.norm_gate_weight.len()),
             })
             .collect();
         let mlp = w
@@ -190,11 +188,7 @@ impl Layout {
                 (lw.mimo_z.as_slice(), ls.mimo_z, true),
                 (lw.mimo_o.as_slice(), ls.mimo_o, true),
                 (lw.out_proj_w.as_slice(), ls.out_proj_w, true),
-                (
-                    &lw.norm_gate_weight[..ls.norm_gate.len],
-                    ls.norm_gate,
-                    false,
-                ),
+                (lw.norm_gate_weight.as_slice(), ls.norm_gate, false),
             ]);
         }
         for (m, ms) in w.mlp.iter().zip(&self.mlp) {
@@ -239,9 +233,7 @@ impl Layout {
             read(&mut lw.mimo_z, ls.mimo_z);
             read(&mut lw.mimo_o, ls.mimo_o);
             read(&mut lw.out_proj_w, ls.out_proj_w);
-            if ls.norm_gate.len > 0 {
-                read(&mut lw.norm_gate_weight, ls.norm_gate);
-            }
+            read(&mut lw.norm_gate_weight, ls.norm_gate);
         }
         for (m, ms) in w.mlp.iter_mut().zip(&self.mlp) {
             read(&mut m.norm_weight, ms.norm_weight);
@@ -632,7 +624,7 @@ impl Mamba3MimoGpuTrainer {
             .then(|| {
                 scan_bwd_global_geom((hd, ds, rank, na), kernels.scan_bwd_global_block, optin)
             });
-        let layout = Layout::of(w, cfg.is_outproj_norm);
+        let layout = Layout::of(w);
         let s = &ctx.stream;
         let scan_done = GpuByteBuffer::zeros(s, (batch * cfg.nheads() * 4).max(4))?;
         let z = |n: usize| GpuBuffer::zeros(s, n.max(1));
@@ -1904,7 +1896,7 @@ impl Mamba3MimoGpuTrainer {
                     bld.arg(&stride_i);
                     let (tile, pipe) = (self.scan.tile as i32, i32::from(self.scan.pipe));
                     let done = self.scan_done.cached_ptr();
-                    let y_out = if ls.norm_gate.len > 0 {
+                    let y_out = if c.is_outproj_norm {
                         a.y.cached_ptr()
                     } else {
                         0u64
@@ -1920,7 +1912,7 @@ impl Mamba3MimoGpuTrainer {
             }
             // The output norm gates the scans' readouts again, over the plain
             // gate's rows.
-            if ls.norm_gate.len > 0 {
+            if c.is_outproj_norm {
                 let (o, y, nw) = (a.o.ptr(), a.y.cached_ptr(), at(base, ls.norm_gate));
                 let (mz, mo) = (at(base, ls.mimo_z), at(base, ls.mimo_o));
                 let cfg = LaunchConfig {
@@ -2426,7 +2418,7 @@ impl Mamba3MimoGpuTrainer {
         // backward. It leaves the readouts' gradient, du, the z column and
         // the gate's weight partials where the plain gate would, and the norm
         // weight's partials in rows of their own.
-        let normed = ls.norm_gate.len > 0;
+        let normed = c.is_outproj_norm;
         if normed {
             let cbuf = &s.cb;
             let (dy, du, gphi, gz, gd, gw) = (

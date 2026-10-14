@@ -1135,20 +1135,8 @@ fn m3_walk(
             (cw.map(|c| &c.out_proj_w), true),
         ));
     }
-    specs.push(spec(
-        (&weights.norm_f_weight, &grads.norm_f_weight),
-        true,
-        (compute.map(|c| &c.norm_f_weight), false),
-    ));
-    if let (Some(w), Some(g)) = (&weights.norm_f_bias, &grads.norm_f_bias) {
-        specs.push(spec(
-            (w, g),
-            true,
-            (compute.and_then(|c| c.norm_f_bias.as_ref()), false),
-        ));
-    }
-    // The gated MLP after every mixer tensor, as the gradient arena lays it
-    // out: the norm undecayed like every norm, the projections decayed
+    // Every layer's gated MLP, as the gradient arena lays it out after the
+    // mixers: the norm undecayed like every norm, the projections decayed
     // like in_proj and out_proj.
     for (mi, (mw, mg)) in weights.mlp.iter().zip(&grads.mlp).enumerate() {
         let cm = compute.map(|c| &c.mlp[mi]);
@@ -1173,6 +1161,18 @@ fn m3_walk(
             (&mw.fc2_w, &mg.fc2_w),
             false,
             (cm.map(|c| &c.fc2_w), true),
+        ));
+    }
+    specs.push(spec(
+        (&weights.norm_f_weight, &grads.norm_f_weight),
+        true,
+        (compute.map(|c| &c.norm_f_weight), false),
+    ));
+    if let (Some(w), Some(g)) = (&weights.norm_f_bias, &grads.norm_f_bias) {
+        specs.push(spec(
+            (w, g),
+            true,
+            (compute.and_then(|c| c.norm_f_bias.as_ref()), false),
         ));
     }
     specs

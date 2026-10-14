@@ -320,8 +320,9 @@ fn run_mixed(
     (dt_out, arena)
 }
 
-/// Per-tensor grad arena layout (mirrors GpuMamba3Grads::new in
-/// src/mamba3_siso/gpu/weights.rs:367-403 so we can compare slice-by-slice).
+/// Per-tensor grad arena layout (mirrors `GpuMamba3Grads::new` in
+/// src/mamba3_siso/gpu/weights.rs so we can compare slice-by-slice): the
+/// mixers, every layer's gated MLP, norm_f last.
 fn grad_layout(cfg: &Mamba3Config, input_dim: usize) -> Vec<(&'static str, usize)> {
     let dm = cfg.d_model;
     let di = cfg.d_inner();
@@ -346,8 +347,6 @@ fn grad_layout(cfg: &Mamba3Config, input_dim: usize) -> Vec<(&'static str, usize
         out.push(("norm_gate_weight", di));
         out.push(("out_proj_w", di * dm));
     }
-    out.push(("norm_f_weight", dm));
-    out.push(("norm_f_bias", nb));
     let h = cfg.mlp_hidden();
     for _ in (0..cfg.n_layers).filter(|_| h > 0) {
         out.push(("mlp.norm_weight", dm));
@@ -355,6 +354,8 @@ fn grad_layout(cfg: &Mamba3Config, input_dim: usize) -> Vec<(&'static str, usize
         out.push(("mlp.fc1_w", dm * 2 * h));
         out.push(("mlp.fc2_w", h * dm));
     }
+    out.push(("norm_f_weight", dm));
+    out.push(("norm_f_bias", nb));
     out.retain(|&(_, len)| len > 0);
     out
 }

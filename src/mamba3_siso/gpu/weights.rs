@@ -624,17 +624,19 @@ pub struct GpuMamba3MlpGrads {
     pub fc2_w: GradSlice,
 }
 
-/// GPU gradients for the full Mamba-3 backbone.
+/// GPU gradients for the full Mamba-3 backbone, laid out in the host
+/// trainer's tensor order: the input projection, every layer's mixer, every
+/// layer's gated MLP, the final norm. The AdamW moments follow the same
+/// layout, so an optimizer state moves between the devices.
 pub struct GpuMamba3Grads {
     pub input_proj_w: GradSlice,
     pub input_proj_b: GradSlice,
     pub layers: Vec<GpuMamba3LayerGrads>,
+    /// The gated MLP of each layer; empty for a model without one.
+    pub mlp: Vec<GpuMamba3MlpGrads>,
     pub norm_f_weight: GradSlice,
     /// The final norm's bias, LayerNorm only.
     pub norm_f_bias: Option<GradSlice>,
-    /// The gated MLP of each layer, after every mixer gradient so those
-    /// keep their offsets; empty for a model without one.
-    pub mlp: Vec<GpuMamba3MlpGrads>,
     pub flat: GpuBuffer,
 }
 
@@ -660,6 +662,19 @@ impl GpuMamba3Grads {
 
     /// Allocate gradient buffer for full Mamba-3 backbone.
     pub fn new(stream: &Stream, cfg: &Mamba3Config, input_dim: usize) -> Result<Self, String> {
+        Self::new_sized(stream, cfg, input_dim, true)
+    }
+
+    /// Like [`Self::new`], with the input projection's slots only when the
+    /// model has the projection: a model that feeds its input straight to
+    /// the first layer (an empty `input_proj_w`) has no such gradient,
+    /// and the host trainer's state holds none either.
+    pub fn new_sized(
+        stream: &Stream,
+        cfg: &Mamba3Config,
+        input_dim: usize,
+        has_input_proj: bool,
+    ) -> Result<Self, String> {
         let dm = cfg.d_model;
         let di = cfg.d_inner();
         let ds = cfg.d_state;
@@ -673,7 +688,12 @@ impl GpuMamba3Grads {
         } else {
             0
         };
-        let total = input_dim * dm + dm + cfg.n_layers * (per_layer + per_mlp) + dm + nb;
+        let (ipw_len, ipb_len) = if has_input_proj {
+            (input_dim * dm, dm)
+        } else {
+            (0, 0)
+        };
+        let total = ipw_len + ipb_len + cfg.n_layers * (per_layer + per_mlp) + dm + nb;
         let flat = GpuBuffer::zeros(stream, total)?;
         let base = flat.cached_ptr();
 
@@ -684,8 +704,8 @@ impl GpuMamba3Grads {
             s
         };
 
-        let input_proj_w = slice(input_dim * dm);
-        let input_proj_b = slice(dm);
+        let input_proj_w = slice(ipw_len);
+        let input_proj_b = slice(ipb_len);
 
         let mut layers = Vec::new();
         for _ in 0..cfg.n_layers {
@@ -703,8 +723,6 @@ impl GpuMamba3Grads {
                 out_proj_w: slice(di * dm),
             });
         }
-        let norm_f_weight = slice(dm);
-        let norm_f_bias = (nb > 0).then(|| slice(nb));
         let mlp = (0..cfg.n_layers)
             .filter(|_| hidden > 0)
             .map(|_| GpuMamba3MlpGrads {
@@ -714,14 +732,20 @@ impl GpuMamba3Grads {
                 fc2_w: slice(hidden * dm),
             })
             .collect();
+        let norm_f_weight = slice(dm);
+        let norm_f_bias = (nb > 0).then(|| slice(nb));
+        debug_assert_eq!(
+            off, total,
+            "SISO gradient arena: {off} of {total} values laid out"
+        );
 
         Ok(Self {
             input_proj_w,
             input_proj_b,
             layers,
+            mlp,
             norm_f_weight,
             norm_f_bias,
-            mlp,
             flat,
         })
     }

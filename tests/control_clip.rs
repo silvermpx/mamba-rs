@@ -138,9 +138,10 @@ fn m2_control(cfg: &Mamba2Config, w: &Mamba2Weights) -> Vec<bool> {
 }
 
 /// A MIMO arena: the input projection, every layer's mixer tensors with
-/// the output norm last and only where the model runs it, every layer's
-/// MLP, the final norm.
-fn mimo_arena(cfg: &Mamba3MimoConfig, w: &Mamba3MimoWeights) -> Vec<f32> {
+/// the output norm's weight last (kept where the model does not run the
+/// norm, as the host trainer's tensor order keeps it), every layer's MLP,
+/// the final norm.
+fn mimo_arena(w: &Mamba3MimoWeights) -> Vec<f32> {
     let mut out = w.input_proj_w.clone();
     out.extend_from_slice(&w.input_proj_b);
     for l in &w.layers {
@@ -157,11 +158,9 @@ fn mimo_arena(cfg: &Mamba3MimoConfig, w: &Mamba3MimoWeights) -> Vec<f32> {
             &l.mimo_z,
             &l.mimo_o,
             &l.out_proj_w,
+            &l.norm_gate_weight,
         ] {
             out.extend_from_slice(t);
-        }
-        if cfg.is_outproj_norm {
-            out.extend_from_slice(&l.norm_gate_weight);
         }
     }
     for m in &w.mlp {
@@ -179,7 +178,7 @@ fn mimo_arena(cfg: &Mamba3MimoConfig, w: &Mamba3MimoWeights) -> Vec<f32> {
 fn mimo_control(cfg: &Mamba3MimoConfig, w: &Mamba3MimoWeights) -> Vec<bool> {
     let (dm, ip) = (cfg.d_model, cfg.in_proj_out_dim());
     let ctrl = 3 * cfg.nheads() + cfg.num_rope_angles();
-    let mut mask = vec![false; mimo_arena(cfg, w).len()];
+    let mut mask = vec![false; mimo_arena(w).len()];
     let mut at = w.input_proj_w.len() + w.input_proj_b.len();
     for l in &w.layers {
         let in_proj = at + l.norm_weight.len();
@@ -198,15 +197,11 @@ fn mimo_control(cfg: &Mamba3MimoConfig, w: &Mamba3MimoWeights) -> Vec<bool> {
                 &l.mimo_z,
                 &l.mimo_o,
                 &l.out_proj_w,
+                &l.norm_gate_weight,
             ]
             .iter()
             .map(|t| t.len())
-            .sum::<usize>()
-            + if cfg.is_outproj_norm {
-                l.norm_gate_weight.len()
-            } else {
-                0
-            };
+            .sum::<usize>();
     }
     mask
 }
@@ -395,7 +390,7 @@ fn control_clip_scales_only_the_control_channels_of_mamba2_and_mimo() {
             check(
                 &format!("MIMO {dtype:?} is_outproj_norm={is_outproj_norm}"),
                 &before,
-                &mimo_arena(&cfg, &t.grads().unwrap()),
+                &mimo_arena(&t.grads().unwrap()),
                 &mask,
                 bound,
                 m.grad_norm.unwrap(),

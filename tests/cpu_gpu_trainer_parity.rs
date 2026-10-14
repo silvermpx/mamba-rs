@@ -6,18 +6,21 @@
 //! layout, so a trainer state either device saved loads into the other.
 //! The steps run once with every window from the empty state and once
 //! with the state carried across the windows, which takes the gradient of
-//! the terms a window's first step reads from the window before. For
-//! Mamba-2, whose host tensor order is the GPU arena's, the optimizer
-//! moments agree too.
+//! the terms a window's first step reads from the window before. In every
+//! family the two devices hold the optimizer moments in one tensor order
+//! and agree on them too, so a whole trainer state either device saved
+//! loads into the other: with LayerNorm block norms and a gated MLP, and
+//! for a model that feeds its input straight to the first layer.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::ScanMode;
+use mamba_rs::mlp::GatedMlpLayerWeights;
 use mamba_rs::{
     AnyCpuTrainer, AnyGpuTrainer, BackwardOpts, CpuTrainer, GpuOptions, GpuTrainer, Mamba2Config,
     Mamba2CpuTrainer, Mamba2GpuTrainer, Mamba2Weights, Mamba3Config, Mamba3CpuTrainer,
     Mamba3GpuTrainer, Mamba3MimoConfig, Mamba3MimoCpuTrainer, Mamba3MimoGpuTrainer,
     Mamba3MimoWeights, Mamba3Weights, MambaConfig, MambaCpuTrainer, MambaGpuTrainer, MambaWeights,
-    ModelFamily, TrainSessionCfg, WeightDtype,
+    TrainSessionCfg, WeightDtype,
 };
 
 const BATCH: usize = 2;
@@ -77,6 +80,15 @@ fn m2_cfg() -> Mamba2Config {
     }
 }
 
+/// [`m2_cfg`] with LayerNorm block norms and a gated MLP after every mixer.
+fn m2_layer_norm_cfg() -> Mamba2Config {
+    Mamba2Config {
+        block_norm: mamba_rs::BlockNorm::Layer,
+        d_intermediate: 48,
+        ..m2_cfg()
+    }
+}
+
 fn siso_cfg() -> Mamba3Config {
     Mamba3Config {
         d_model: D_MODEL,
@@ -109,6 +121,17 @@ fn mimo_cfg() -> Mamba3MimoConfig {
     }
 }
 
+/// [`mimo_cfg`] with LayerNorm block norms, a gated MLP after every mixer
+/// and the output norm.
+fn mimo_layer_norm_cfg() -> Mamba3MimoConfig {
+    Mamba3MimoConfig {
+        block_norm: mamba_rs::BlockNorm::Layer,
+        d_intermediate: 48,
+        is_outproj_norm: true,
+        ..mimo_cfg()
+    }
+}
+
 /// Deterministic values in [-1, 1).
 fn values(n: usize, seed: u32) -> Vec<f32> {
     let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
@@ -138,9 +161,11 @@ fn pairs(scan: ScanMode) -> Vec<(AnyCpuTrainer, AnyGpuTrainer)> {
     let m1 = MambaWeights::init(&m1_cfg(), INPUT_DIM, 1);
     let m1_variant = MambaWeights::init(&m1_variant_cfg(), INPUT_DIM, 5);
     let m2 = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 2);
+    let m2_ln = Mamba2Weights::init(&m2_layer_norm_cfg(), INPUT_DIM, 7);
     let siso = Mamba3Weights::init(&siso_cfg(), INPUT_DIM, 3);
     let siso_ln = Mamba3Weights::init(&siso_layer_norm_cfg(), INPUT_DIM, 6);
     let mimo = Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 4);
+    let mimo_ln = Mamba3MimoWeights::init(&mimo_layer_norm_cfg(), INPUT_DIM, 8);
     vec![
         (
             MambaCpuTrainer::new(&m1, m1_cfg(), s).unwrap().into(),
@@ -157,6 +182,14 @@ fn pairs(scan: ScanMode) -> Vec<(AnyCpuTrainer, AnyGpuTrainer)> {
         (
             Mamba2CpuTrainer::new(&m2, m2_cfg(), s).unwrap().into(),
             Mamba2GpuTrainer::new(&m2, m2_cfg(), s, opts)
+                .unwrap()
+                .into(),
+        ),
+        (
+            Mamba2CpuTrainer::new(&m2_ln, m2_layer_norm_cfg(), s)
+                .unwrap()
+                .into(),
+            Mamba2GpuTrainer::new(&m2_ln, m2_layer_norm_cfg(), s, opts)
                 .unwrap()
                 .into(),
         ),
@@ -182,18 +215,94 @@ fn pairs(scan: ScanMode) -> Vec<(AnyCpuTrainer, AnyGpuTrainer)> {
                 .unwrap()
                 .into(),
         ),
+        (
+            Mamba3MimoCpuTrainer::new(&mimo_ln, mimo_layer_norm_cfg(), s)
+                .unwrap()
+                .into(),
+            Mamba3MimoGpuTrainer::new(&mimo_ln, mimo_layer_norm_cfg(), s, opts)
+                .unwrap()
+                .into(),
+        ),
+    ]
+}
+
+/// Every family without an input projection, the window as wide as the
+/// model and fed straight to the first layer, with LayerNorm block norms
+/// and a gated MLP (Mamba-1 with its other mixer options too).
+fn identity_pairs(scan: ScanMode) -> Vec<(AnyCpuTrainer, AnyGpuTrainer)> {
+    let s = TrainSessionCfg::new(D_MODEL, BATCH, SEQ_LEN);
+    let opts = GpuOptions::default()
+        .dtype(WeightDtype::F32)
+        .scan_mode(scan);
+    macro_rules! identity {
+        ($weights:ty, $cfg:expr, $seed:expr) => {{
+            let mut w = <$weights>::init(&$cfg, D_MODEL, $seed);
+            w.input_proj_w.clear();
+            w.input_proj_b.clear();
+            w
+        }};
+    }
+    let m1 = identity!(MambaWeights, m1_variant_cfg(), 11);
+    let m2 = identity!(Mamba2Weights, m2_layer_norm_cfg(), 12);
+    let siso = identity!(Mamba3Weights, siso_layer_norm_cfg(), 13);
+    let mimo = identity!(Mamba3MimoWeights, mimo_layer_norm_cfg(), 14);
+    vec![
+        (
+            MambaCpuTrainer::new(&m1, m1_variant_cfg(), s)
+                .unwrap()
+                .into(),
+            MambaGpuTrainer::new(&m1, m1_variant_cfg(), s, opts)
+                .unwrap()
+                .into(),
+        ),
+        (
+            Mamba2CpuTrainer::new(&m2, m2_layer_norm_cfg(), s)
+                .unwrap()
+                .into(),
+            Mamba2GpuTrainer::new(&m2, m2_layer_norm_cfg(), s, opts)
+                .unwrap()
+                .into(),
+        ),
+        (
+            Mamba3CpuTrainer::new(&siso, siso_layer_norm_cfg(), s)
+                .unwrap()
+                .into(),
+            Mamba3GpuTrainer::new(&siso, siso_layer_norm_cfg(), s, opts)
+                .unwrap()
+                .into(),
+        ),
+        (
+            Mamba3MimoCpuTrainer::new(&mimo, mimo_layer_norm_cfg(), s)
+                .unwrap()
+                .into(),
+            Mamba3MimoGpuTrainer::new(&mimo, mimo_layer_norm_cfg(), s, opts)
+                .unwrap()
+                .into(),
+        ),
     ]
 }
 
 /// The master weights of a pair, flat in each family's own order: the
-/// same tensors on both sides.
+/// same tensors on both sides, every one the trainers train.
 fn masters(cpu: &AnyCpuTrainer, gpu: &AnyGpuTrainer) -> (Vec<f32>, Vec<f32>) {
+    /// The gated MLPs, then the final norm, after the layers.
+    fn tail(v: &mut Vec<f32>, mlp: &[GatedMlpLayerWeights], norm_f: [&Vec<f32>; 2]) {
+        for m in mlp {
+            for t in [&m.norm_weight, &m.norm_bias, &m.fc1_w, &m.fc2_w] {
+                v.extend_from_slice(t);
+            }
+        }
+        for t in norm_f {
+            v.extend_from_slice(t);
+        }
+    }
     fn m2(w: &Mamba2Weights) -> Vec<f32> {
         let mut v = w.input_proj_w.clone();
         v.extend_from_slice(&w.input_proj_b);
         for l in &w.layers {
             for t in [
                 &l.norm_weight,
+                &l.norm_bias,
                 &l.in_proj_w,
                 &l.in_proj_b,
                 &l.conv_w,
@@ -208,7 +317,7 @@ fn masters(cpu: &AnyCpuTrainer, gpu: &AnyGpuTrainer) -> (Vec<f32>, Vec<f32>) {
                 v.extend_from_slice(t);
             }
         }
-        v.extend_from_slice(&w.norm_f_weight);
+        tail(&mut v, &w.mlp, [&w.norm_f_weight, &w.norm_f_bias]);
         v
     }
     fn mimo(w: &Mamba3MimoWeights) -> Vec<f32> {
@@ -217,6 +326,7 @@ fn masters(cpu: &AnyCpuTrainer, gpu: &AnyGpuTrainer) -> (Vec<f32>, Vec<f32>) {
         for l in &w.layers {
             for t in [
                 &l.norm_weight,
+                &l.norm_bias,
                 &l.in_proj_w,
                 &l.dt_bias,
                 &l.b_norm_weight,
@@ -228,11 +338,12 @@ fn masters(cpu: &AnyCpuTrainer, gpu: &AnyGpuTrainer) -> (Vec<f32>, Vec<f32>) {
                 &l.mimo_z,
                 &l.mimo_o,
                 &l.out_proj_w,
+                &l.norm_gate_weight,
             ] {
                 v.extend_from_slice(t);
             }
         }
-        v.extend_from_slice(&w.norm_f_weight);
+        tail(&mut v, &w.mlp, [&w.norm_f_weight, &w.norm_f_bias]);
         v
     }
     fn m1(w: &MambaWeights) -> Vec<f32> {
@@ -241,7 +352,9 @@ fn masters(cpu: &AnyCpuTrainer, gpu: &AnyGpuTrainer) -> (Vec<f32>, Vec<f32>) {
         for l in &w.layers {
             for t in [
                 &l.norm_weight,
+                &l.norm_bias,
                 &l.in_proj_w,
+                &l.in_proj_b,
                 &l.conv1d_weight,
                 &l.conv1d_bias,
                 &l.x_proj_w,
@@ -250,11 +363,12 @@ fn masters(cpu: &AnyCpuTrainer, gpu: &AnyGpuTrainer) -> (Vec<f32>, Vec<f32>) {
                 &l.a_log,
                 &l.d_param,
                 &l.out_proj_w,
+                &l.out_proj_b,
             ] {
                 v.extend_from_slice(t);
             }
         }
-        v.extend_from_slice(&w.norm_f_weight);
+        tail(&mut v, &w.mlp, [&w.norm_f_weight, &w.norm_f_bias]);
         v
     }
     fn siso(w: &Mamba3Weights) -> Vec<f32> {
@@ -277,13 +391,7 @@ fn masters(cpu: &AnyCpuTrainer, gpu: &AnyGpuTrainer) -> (Vec<f32>, Vec<f32>) {
                 v.extend_from_slice(t);
             }
         }
-        for m in &w.mlp {
-            for t in [&m.norm_weight, &m.norm_bias, &m.fc1_w, &m.fc2_w] {
-                v.extend_from_slice(t);
-            }
-        }
-        v.extend_from_slice(&w.norm_f_weight);
-        v.extend_from_slice(&w.norm_f_bias);
+        tail(&mut v, &w.mlp, [&w.norm_f_weight, &w.norm_f_bias]);
         v
     }
     match (cpu, gpu) {
@@ -309,7 +417,7 @@ fn masters(cpu: &AnyCpuTrainer, gpu: &AnyGpuTrainer) -> (Vec<f32>, Vec<f32>) {
 fn every_family_trains_on_the_cpu_as_on_the_gpu() {
     for scan in [ScanMode::Sequential, ScanMode::Parallel] {
         for carry in [false, true] {
-            for (cpu, gpu) in pairs(scan) {
+            for (cpu, gpu) in pairs(scan).into_iter().chain(identity_pairs(scan)) {
                 train_alike(cpu, gpu, scan, carry);
             }
         }
@@ -317,7 +425,8 @@ fn every_family_trains_on_the_cpu_as_on_the_gpu() {
 }
 
 /// Three steps on both devices, every window from the empty state or the
-/// state carried across them, compared after each window and at the end.
+/// state carried across them, compared after each window and at the end;
+/// then each device's whole trainer state loads into the other.
 fn train_alike(mut cpu: AnyCpuTrainer, mut gpu: AnyGpuTrainer, scan: ScanMode, carry: bool) {
     let opts = BackwardOpts::default()
         .with_clip_max_norm(0.05)
@@ -325,8 +434,15 @@ fn train_alike(mut cpu: AnyCpuTrainer, mut gpu: AnyGpuTrainer, scan: ScanMode, c
     let n_out = BATCH * SEQ_LEN * D_MODEL;
     let family = cpu.family();
     assert_eq!(family, gpu.family());
+    let n_in = BATCH * SEQ_LEN * cpu.input_dim();
+    assert_eq!(
+        cpu.input_dim(),
+        gpu.input_dim(),
+        "{family:?}: the input width"
+    );
     let case = format!(
-        "{family:?} with the {scan:?} scan, {}",
+        "{family:?} ({} inputs) with the {scan:?} scan, {}",
+        cpu.input_dim(),
         if carry {
             "the state carried"
         } else {
@@ -335,7 +451,7 @@ fn train_alike(mut cpu: AnyCpuTrainer, mut gpu: AnyGpuTrainer, scan: ScanMode, c
     );
     let (before, _) = masters(&cpu, &gpu);
     for k in 0..3u32 {
-        let input = values(BATCH * SEQ_LEN * INPUT_DIM, 10 + k);
+        let input = values(n_in, 10 + k);
         let d: Vec<f32> = values(n_out, 20 + k).iter().map(|v| v * 1e-2).collect();
         let (mut oc, mut og) = (vec![0.0f32; n_out], vec![0.0f32; n_out]);
         if !carry {
@@ -382,19 +498,27 @@ fn train_alike(mut cpu: AnyCpuTrainer, mut gpu: AnyGpuTrainer, scan: ScanMode, c
     );
     // The two devices hold the moments in one tensor order, so a state
     // moves from either trainer to the other.
-    if matches!(family, ModelFamily::Mamba1 | ModelFamily::Mamba2) {
-        let (sc, sg) = (
-            cpu.optimizer_state().unwrap(),
-            gpu.optimizer_state().unwrap(),
-        );
-        assert_eq!((sc.m.len(), sc.step), (sg.m.len(), sg.step));
-        let scale = sg.m.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        let moments = worst(&sc.m, &sg.m);
+    let (sc, sg) = (cpu.trainer_state().unwrap(), gpu.trainer_state().unwrap());
+    let (oc, og) = (&sc.optimizer, &sg.optimizer);
+    assert_eq!(
+        (oc.m.len(), oc.v.len(), oc.step),
+        (og.m.len(), og.v.len(), og.step),
+        "{case}: the moments' layout"
+    );
+    for (which, c, g) in [("first", &oc.m, &og.m), ("second", &oc.v, &og.v)] {
+        let scale = g.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let moments = worst(c, g);
         assert!(
             moments <= 1e-3 * scale,
-            "{case}: the first moments differ by {moments:e} of {scale:e}"
+            "{case}: the {which} moments differ by {moments:e} of {scale:e}"
         );
     }
+    gpu.load_trainer_state(&sc)
+        .unwrap_or_else(|e| panic!("{case}: the CPU's state on the GPU: {e}"));
+    cpu.load_trainer_state(&sg)
+        .unwrap_or_else(|e| panic!("{case}: the GPU's state on the CPU: {e}"));
+    assert_eq!(gpu.optimizer_state().unwrap(), sc.optimizer, "{case}");
+    assert_eq!(cpu.optimizer_state().unwrap(), sg.optimizer, "{case}");
 }
 
 /// The relative l2 distance of `a` from `b`.
@@ -447,9 +571,11 @@ fn half_lanes_track_the_cpu_lane() {
         }
     }
     let m2 = Mamba2Weights::init(&m2_cfg(), INPUT_DIM, 2);
+    let m2_ln = Mamba2Weights::init(&m2_layer_norm_cfg(), INPUT_DIM, 7);
     let siso = Mamba3Weights::init(&siso_cfg(), INPUT_DIM, 3);
     let siso_ln = Mamba3Weights::init(&siso_layer_norm_cfg(), INPUT_DIM, 6);
     let mimo = Mamba3MimoWeights::init(&mimo_cfg(), INPUT_DIM, 4);
+    let mimo_ln = Mamba3MimoWeights::init(&mimo_layer_norm_cfg(), INPUT_DIM, 8);
     let measure = BackwardOpts::default().with_clip_max_norm(1e30);
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         let gpu_opts = GpuOptions::default().dtype(dtype);
@@ -508,6 +634,20 @@ fn half_lanes_track_the_cpu_lane() {
                     .into(),
             ),
             (
+                "Mamba-2 LayerNorm",
+                [
+                    Mamba2CpuTrainer::new(&m2_ln, m2_layer_norm_cfg(), s)
+                        .unwrap()
+                        .into(),
+                    Mamba2CpuTrainer::new_with(&m2_ln, m2_layer_norm_cfg(), s, lane)
+                        .unwrap()
+                        .into(),
+                ],
+                Mamba2GpuTrainer::new(&m2_ln, m2_layer_norm_cfg(), s, gpu_opts)
+                    .unwrap()
+                    .into(),
+            ),
+            (
                 "SISO",
                 [
                     Mamba3CpuTrainer::new(&siso, siso_cfg(), s).unwrap().into(),
@@ -544,6 +684,20 @@ fn half_lanes_track_the_cpu_lane() {
                         .into(),
                 ],
                 Mamba3MimoGpuTrainer::new(&mimo, mimo_cfg(), s, gpu_opts)
+                    .unwrap()
+                    .into(),
+            ),
+            (
+                "MIMO LayerNorm",
+                [
+                    Mamba3MimoCpuTrainer::new(&mimo_ln, mimo_layer_norm_cfg(), s)
+                        .unwrap()
+                        .into(),
+                    Mamba3MimoCpuTrainer::new_with(&mimo_ln, mimo_layer_norm_cfg(), s, lane)
+                        .unwrap()
+                        .into(),
+                ],
+                Mamba3MimoGpuTrainer::new(&mimo_ln, mimo_layer_norm_cfg(), s, gpu_opts)
                     .unwrap()
                     .into(),
             ),

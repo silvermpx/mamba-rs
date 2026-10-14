@@ -266,6 +266,9 @@ trainer.trainer_state()?.save(Path::new("trainer.safetensors"))?;
 trainer.load_trainer_state(&TrainerState::load(Path::new("trainer.safetensors"))?)?;
 ```
 
+The CPU and GPU trainers of a family hold the state in one layout, so a
+state either device saved resumes on the other.
+
 `MambaLM::save_checkpoint` writes a language model of any family to one
 file: the backbone as its family's checkpoint, with the embedding, the
 untied head and the vocabulary size beside it. `MambaLM::from_checkpoint`

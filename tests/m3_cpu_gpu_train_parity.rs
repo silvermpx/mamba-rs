@@ -167,8 +167,8 @@ fn train_weights_from(w: &Mamba3Weights) -> TrainMamba3Weights {
 }
 
 /// Flatten CPU grads into the `GpuMamba3Grads.flat` linear order
-/// (src/mamba3_siso/gpu/weights.rs `GpuMamba3Grads::new`): the gated MLPs
-/// come after norm_f.
+/// (src/mamba3_siso/gpu/weights.rs `GpuMamba3Grads::new`), the host
+/// trainer's: the gated MLPs come after the mixers, norm_f last.
 fn flatten_cpu_grads(g: &TrainMamba3Weights, mlp: &[GatedMlpLayerWeights]) -> Vec<f32> {
     let mut out = Vec::new();
     out.extend_from_slice(&g.input_proj_w);
@@ -186,14 +186,14 @@ fn flatten_cpu_grads(g: &TrainMamba3Weights, mlp: &[GatedMlpLayerWeights]) -> Ve
         out.extend_from_slice(&l.norm_gate_weight);
         out.extend_from_slice(&l.out_proj_w);
     }
-    out.extend_from_slice(&g.norm_f_weight);
-    out.extend_from_slice(&g.norm_f_bias);
     for m in mlp {
         out.extend_from_slice(&m.norm_weight);
         out.extend_from_slice(&m.norm_bias);
         out.extend_from_slice(&m.fc1_w);
         out.extend_from_slice(&m.fc2_w);
     }
+    out.extend_from_slice(&g.norm_f_weight);
+    out.extend_from_slice(&g.norm_f_bias);
     out
 }
 
@@ -225,8 +225,6 @@ fn grad_segments(cfg: &Mamba3Config, input_dim: usize) -> Vec<(String, usize)> {
             (format!("L{li}.out_proj_w"), di * dm),
         ]);
     }
-    segs.push(("norm_f_weight".into(), dm));
-    segs.push(("norm_f_bias".into(), nb));
     let h = cfg.mlp_hidden();
     for li in (0..cfg.n_layers).filter(|_| h > 0) {
         segs.extend([
@@ -236,6 +234,8 @@ fn grad_segments(cfg: &Mamba3Config, input_dim: usize) -> Vec<(String, usize)> {
             (format!("L{li}.mlp.fc2_w"), h * dm),
         ]);
     }
+    segs.push(("norm_f_weight".into(), dm));
+    segs.push(("norm_f_bias".into(), nb));
     segs.retain(|&(_, len)| len > 0);
     segs
 }

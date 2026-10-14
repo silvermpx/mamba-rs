@@ -530,6 +530,12 @@
 - A checkpoint with attention layers (`attn_layer_idx`) is refused with
   the same words in every family: attention stays outside mamba-rs, so the
   model would run without the layers it was trained with.
+- The SISO GPU trainer's gradient arena (`grad_arena`) and optimizer
+  state put the gated MLPs before the final norm, and a model without an
+  input projection has no slots for it; `GpuMamba3Grads::new_sized`
+  builds that arena, as `GpuMambaGrads::new_sized` does for Mamba-1. A
+  SISO GPU state that an earlier release saved for a model without the
+  projection is refused on its length.
 
 ### Fixed
 
@@ -654,6 +660,16 @@
   read on the host. It now reads the folded gradient for a window the
   fused call filled, skips the whole window and backs the loss scale
   off; with a clip it no longer fails on the non-finite norm.
+- A trainer state moves between the CPU and the GPU trainer of every
+  family. The SISO GPU trainer laid the final norm's gradients and AdamW
+  moments before the gated MLPs', where the host trainer lays them after,
+  so a state of a model with MLPs resumed with moments in the wrong
+  tensors, and it kept slots for the input projection of a model without
+  one, so such a state was refused. The MIMO GPU trainer left out the
+  output norm's weight of a model without the norm, which the host
+  trainer keeps, and its states were refused the same way. Both GPU
+  trainers now lay the gradients and moments out in the host trainer's
+  tensor order.
 
 ## 0.7.5 (2026-09-23)
 

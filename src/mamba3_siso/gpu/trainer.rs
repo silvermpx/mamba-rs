@@ -821,11 +821,6 @@ impl Mamba3GpuTrainer {
     }
 }
 
-/// The CONTROL region of the M3 grad arena: the dd_dt/dd_A/trap/angle
-/// column stripe of every layer's in_proj gradient plus dt_bias — the
-/// only gradients whose magnitude scales with the sequence length. The
-/// stripe length is derived as `ip - (3*nh + na)` so B/C sizing changes
-/// cannot desync it from the split order.
 /// An error unless a host slice holds the window's `want` values.
 fn check_window_len(what: &str, got: usize, want: usize) -> Result<(), String> {
     if got != want {
@@ -834,16 +829,23 @@ fn check_window_len(what: &str, got: usize, want: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn m3_control_region_geom(cfg: &Mamba3Config, input_dim: usize) -> GradRegionGeom {
+/// The CONTROL region of the M3 grad arena: the dd_dt/dd_A/trap/angle
+/// column stripe of every layer's in_proj gradient plus dt_bias — the
+/// only gradients whose magnitude scales with the sequence length. The
+/// stripe length is derived as `ip - (3*nh + na)` so B/C sizing changes
+/// cannot desync it from the split order.
+fn m3_control_region_geom(cfg: &Mamba3Config, grads: &GpuMamba3Grads) -> GradRegionGeom {
     let dm = cfg.d_model;
     let nh = cfg.nheads();
     let ip = cfg.in_proj_out_dim();
     let na = cfg.num_rope_angles();
     let ctrl_len = 3 * nh + na;
     let ctrl0 = ip - ctrl_len;
-    // The first layer's in_proj gradient, after the input projection's and
-    // the layer's block norm scale and bias.
-    let in_proj0 = input_dim * dm + dm + dm + cfg.block_norm.bias_len(dm);
+    // The first layer's in_proj gradient, after the input projection's
+    // slots (none without the projection) and the layer's block norm
+    // scale and bias.
+    let input_proj = grads.input_proj_w.len() + grads.input_proj_b.len();
+    let in_proj0 = input_proj + dm + cfg.block_norm.bias_len(dm);
     GradRegionGeom {
         n_layers: cfg.n_layers as i32,
         layer_stride: GpuMamba3Grads::layer_len(cfg) as i64,
@@ -1028,7 +1030,12 @@ impl Mamba3TrainerMixed {
         let k_states = GpuBuffer::zeros(&ctx.stream, batch * nl * nh * ds)?;
         let v_states = GpuBuffer::zeros(&ctx.stream, batch * nl * nh * hd)?;
         let angle_states = GpuBuffer::zeros(&ctx.stream, batch * nl * nh * na)?;
-        let grads = GpuMamba3Grads::new(&ctx.stream, &cfg, input_dim)?;
+        let grads = GpuMamba3Grads::new_sized(
+            &ctx.stream,
+            &cfg,
+            input_dim,
+            !cpu_weights.input_proj_w.is_empty(),
+        )?;
 
         let adam = GpuAdamW::new(&ctx.stream, grads.flat.len())?
             .with_lr(lr)
@@ -1137,7 +1144,7 @@ impl Mamba3TrainerMixed {
     fn step_tail(&self) -> StepTail {
         StepTail::of(
             &self.step_opts,
-            m3_control_region_geom(&self.cfg, self.dims.mamba_input_dim),
+            m3_control_region_geom(&self.cfg, &self.grads),
         )
     }
 
@@ -2217,7 +2224,7 @@ impl Mamba3TrainerMixed {
         // gradients get their own bound so a resonant page cannot
         // rescale the whole arena through the global clip below.
         if let Some(cb) = control_clip_max_norm {
-            let geom = m3_control_region_geom(&self.cfg, self.dims.mamba_input_dim);
+            let geom = m3_control_region_geom(&self.cfg, &self.grads);
             clip_region_device(
                 &self.ctx,
                 &mut self.grads.flat,
@@ -2429,7 +2436,7 @@ impl Mamba3TrainerMixed {
             // Control-channel clip first, then the global one: the same
             // order the f32 and bf16 lanes use in `apply_step_inner`.
             if let Some(cb) = control_clip_max_norm {
-                let geom = m3_control_region_geom(&self.cfg, self.dims.mamba_input_dim);
+                let geom = m3_control_region_geom(&self.cfg, &self.grads);
                 clip_region_device(
                     &self.ctx,
                     &mut self.grads.flat,
@@ -2675,7 +2682,12 @@ impl Mamba3TrainerF32 {
         let k_states = GpuBuffer::zeros(&ctx.stream, batch * nl * nh * ds)?;
         let v_states = GpuBuffer::zeros(&ctx.stream, batch * nl * nh * hd)?;
         let angle_states = GpuBuffer::zeros(&ctx.stream, batch * nl * nh * na)?;
-        let grads = GpuMamba3Grads::new(&ctx.stream, &cfg, input_dim)?;
+        let grads = GpuMamba3Grads::new_sized(
+            &ctx.stream,
+            &cfg,
+            input_dim,
+            !cpu_weights.input_proj_w.is_empty(),
+        )?;
 
         let adam = GpuAdamW::new(&ctx.stream, grads.flat.len())?
             .with_lr(lr)
@@ -2756,7 +2768,7 @@ impl Mamba3TrainerF32 {
     fn step_tail(&self) -> StepTail {
         StepTail::of(
             &self.step_opts,
-            m3_control_region_geom(&self.cfg, self.dims.mamba_input_dim),
+            m3_control_region_geom(&self.cfg, &self.grads),
         )
     }
 
@@ -3267,7 +3279,7 @@ impl Mamba3TrainerF32 {
         // gradients get their own bound so a resonant page cannot
         // rescale the whole arena through the global clip below.
         if let Some(cb) = control_clip_max_norm {
-            let geom = m3_control_region_geom(&self.cfg, self.dims.mamba_input_dim);
+            let geom = m3_control_region_geom(&self.cfg, &self.grads);
             clip_region_device(
                 &self.ctx,
                 &mut self.grads.flat,
