@@ -99,6 +99,8 @@ pub struct GpuMamba3Dims {
     /// false = sequential SSM (m3_burnin_fwd/m3_backward_seq), faster at T<=64.
     /// true = parallel chunked scan (10-kernel pipeline), faster at T>64.
     pub use_parallel_scan: bool,
+    /// Layers in forward and reversed pairs (`Mamba3Config::bidirectional`).
+    pub bidirectional: bool,
 }
 
 impl GpuMamba3Dims {
@@ -203,6 +205,7 @@ mod index_width_tests {
             ssm_norm_eps: 1e-5,
             block_norm: crate::config::BlockNorm::Rms,
             use_parallel_scan: true,
+            bidirectional: false,
         }
     }
 
@@ -361,6 +364,11 @@ pub struct GpuMamba3Scratch {
     // Forward
     pub proj_flat: GpuBuffer, // [B*T*in_proj_dim]
     pub out_flat: GpuBuffer,  // [B*T*d_model]
+    /// A bidirectional pair's rows `[B*T*d_model]`: in the forward the
+    /// stream after the pair's first mixer, in the backward d loss / d (the
+    /// pair's output) held aside for the first layer (one element without
+    /// pairs).
+    pub pair: GpuBuffer,
     /// fp64 staging for the chunk-parallel angle accumulation:
     /// per-chunk raw delta sums and entering carries,
     /// `[B * n_chunks * nh * n_angles]` doubles each.
@@ -488,6 +496,9 @@ pub struct GpuMamba3TargetScratch {
     pub temporal_work: GpuBuffer, // [B*T*d_model] — working temporal (input_proj output → layers → norm_f)
     pub out_flat: GpuBuffer,      // [B*T*d_model]
     pub residual: GpuBuffer,      // [B*T*d_model]
+    /// A bidirectional pair's input rows `[B*T*d_model]`, which both its
+    /// layers read (one element without pairs).
+    pub pair_in: GpuBuffer,
     /// Statistics nobody reads back: the gated norm's per-group rstd and
     /// the block norms', `[B*T*max(nheads, stats)]`.
     pub rms_discard: GpuBuffer,
@@ -660,6 +671,7 @@ impl GpuMamba3Scratch {
         Ok(Self {
             proj_flat: GpuBuffer::zeros(stream, bt * ip)?,
             out_flat: GpuBuffer::zeros(stream, bt * dm)?,
+            pair: GpuBuffer::zeros(stream, if dims.bidirectional { bt * dm } else { 1 })?,
             angle_chunk_sums: GpuByteBuffer::zeros(stream, angle_stage_bytes)?,
             angle_chunk_carries: GpuByteBuffer::zeros(stream, angle_stage_bytes)?,
             d_gated: GpuBuffer::zeros(stream, bt * di)?,
@@ -788,6 +800,7 @@ impl GpuMamba3TargetScratch {
             temporal_work: GpuBuffer::zeros(stream, bt * dm)?,
             out_flat: GpuBuffer::zeros(stream, bt * dm)?,
             residual: GpuBuffer::zeros(stream, bt * dm)?,
+            pair_in: GpuBuffer::zeros(stream, if dims.bidirectional { bt * dm } else { 1 })?,
             rms_discard: GpuBuffer::zeros(stream, bt * nh.max(dims.block_norm.stats_per_row()))?,
             mlp_up: GpuBuffer::zeros(stream, 0)?,
             mlp_act: GpuBuffer::zeros(stream, 0)?,

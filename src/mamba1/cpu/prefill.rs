@@ -36,6 +36,7 @@
 
 use rayon::prelude::*;
 
+use crate::bidi::{mlps_after, opens_pair, reads_reversed, reverse_rows};
 use crate::mamba1::state::MambaState;
 use crate::mamba1::weights::{MambaLayerWeights, MambaWeights};
 use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows, mlp_norm_row};
@@ -111,7 +112,7 @@ where
 /// warmed. Keyed on the FULL dims so a shape change can never reuse a
 /// smaller cached buffer out of bounds.
 pub struct PrefillScratch {
-    fingerprint: (usize, usize, usize, usize, usize, usize, usize),
+    fingerprint: Fingerprint,
     post_norm: Vec<f32>,
     proj: Vec<f32>,
     gate_silu: Vec<f32>,
@@ -132,6 +133,9 @@ pub struct PrefillScratch {
     /// The input rows as the input projection multiplies them in a reduced
     /// precision.
     input: Vec<f32>,
+    /// A bidirectional pair's input rows, which both its layers read:
+    /// `[T * d_model]`, empty for a model read one way.
+    pair_in: Vec<f32>,
     /// The gated MLP's window buffers, grown on first use.
     mlp: GatedMlpRowsScratch,
     /// The precision of the prefill (see `CpuOptions`).
@@ -139,15 +143,21 @@ pub struct PrefillScratch {
     gemm: LaneGemm,
 }
 
-fn fingerprint(dims: &MambaDims) -> (usize, usize, usize, usize, usize, usize, usize) {
+/// The dims a scratch is sized for.
+type Fingerprint = ([usize; 7], bool);
+
+fn fingerprint(dims: &MambaDims) -> Fingerprint {
     (
-        dims.seq_len,
-        dims.d_model,
-        dims.d_inner,
-        dims.d_state,
-        dims.d_conv,
-        dims.dt_rank,
-        dims.mamba_input_dim,
+        [
+            dims.seq_len,
+            dims.d_model,
+            dims.d_inner,
+            dims.d_state,
+            dims.d_conv,
+            dims.dt_rank,
+            dims.mamba_input_dim,
+        ],
+        dims.bidirectional,
     )
 }
 
@@ -173,6 +183,14 @@ impl PrefillScratch {
             out: vec![0.0; t * dims.d_model],
             conv_reg: vec![0.0; di * dims.d_conv],
             input: Vec::new(),
+            pair_in: vec![
+                0.0;
+                if dims.bidirectional {
+                    t * dims.d_model
+                } else {
+                    0
+                }
+            ],
             mlp: GatedMlpRowsScratch::default(),
             dtype: WeightDtype::F32,
             gemm: LaneGemm::default(),
@@ -424,7 +442,9 @@ pub(crate) fn transpose_rows_to_cm(
 /// - `w`: inference weights. `a_neg` is the SSM decay source — callers that
 ///   mutate `a_log` must refresh `a_neg` before prefilling.
 /// - `state`: recurrent conv/SSM state, carried in AND out
-///   (prefill-then-decode into [`crate::inference`]'s step path).
+///   (prefill-then-decode into [`crate::inference`]'s step path); a
+///   bidirectional model, which reads whole prompts, starts from the
+///   empty state.
 /// - `scratch`: caller-owned; `ensure`d to `dims` internally.
 pub fn forward_mamba_backbone_prefill(
     temporal_out: &mut [f32],
@@ -503,8 +523,22 @@ pub fn forward_mamba_backbone_prefill_mode(
         );
     }
 
+    let bidi = dims.bidirectional;
+    if bidi {
+        for st in &mut state.layers {
+            st.conv_state.fill(0.0);
+            st.ssm_state.fill(0.0);
+        }
+    }
+    let mut pair_in = std::mem::take(&mut scratch.pair_in);
     for (layer_idx, lw) in w.layers.iter().enumerate() {
         let lstate = &mut state.layers[layer_idx];
+        if opens_pair(bidi, layer_idx) {
+            pair_in.copy_from_slice(&temporal_out[..t_len * dm]);
+        }
+        // The second layer of a pair reads the pair's input and runs from
+        // its norm's rows on with every sequence reversed.
+        let reversed = reads_reversed(bidi, layer_idx).then_some(&pair_in[..]);
 
         // F1: the block norm at every position (dims eps — never
         // hardcoded). `temporal_out` doubles as the residual: it is only
@@ -513,7 +547,7 @@ pub fn forward_mamba_backbone_prefill_mode(
         zip_rows(
             mode,
             (&mut scratch.post_norm[..t_len * dm], dm),
-            (&temporal_out[..t_len * dm], dm),
+            (&reversed.unwrap_or(temporal_out)[..t_len * dm], dm),
             |dst, src| {
                 if lw.norm_bias.is_empty() {
                     let mut sum_sq = 0.0_f32;
@@ -530,6 +564,9 @@ pub fn forward_mamba_backbone_prefill_mode(
                 store(dtype, dst);
             },
         );
+        if reversed.is_some() {
+            reverse_rows(&mut scratch.post_norm[..t_len * dm], dm, None);
+        }
 
         // F2: in_proj GEMM.
         scratch.gemm.forward(
@@ -716,6 +753,9 @@ pub fn forward_mamba_backbone_prefill_mode(
             (&lw.out_proj_w, super::bias(&lw.out_proj_b)),
             (t_len, di, dm),
         );
+        if reversed.is_some() {
+            reverse_rows(&mut scratch.out[..t_len * dm], dm, None);
+        }
         zip_rows(
             mode,
             (&mut temporal_out[..t_len * dm], dm),
@@ -727,8 +767,12 @@ pub fn forward_mamba_backbone_prefill_mode(
             },
         );
 
-        // The MLP branch of a model that has one, over every row.
-        if let Some(m) = w.mlp.get(layer_idx) {
+        // The MLP branch of a model that has one, over every row (a pair's
+        // after both its mixers).
+        for l in mlps_after(bidi, layer_idx) {
+            let Some(m) = w.mlp.get(l) else {
+                continue;
+            };
             scratch.mlp.dtype = dtype;
             gated_mlp_rows(
                 &mut temporal_out[..t_len * dm],
@@ -744,6 +788,7 @@ pub fn forward_mamba_backbone_prefill_mode(
             );
         }
     }
+    scratch.pair_in = pair_in;
 
     // norm_f at EVERY position, dims eps.
     // A segment without the final norm hands out its residual stream, which

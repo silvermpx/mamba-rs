@@ -222,6 +222,11 @@ pub struct MambaKernels {
     pub residual_add: CudaFunction,
     /// Gather the last timestep from `[B*T*D]` into `[B*D]`.
     pub gather_last_timestep: CudaFunction,
+    /// Every sequence's rows reversed in place, moved 16, 4 or 2 bytes a
+    /// thread (sequence_reverse.cu): the bidirectional pairs' second layer.
+    pub rows_reverse_v16: CudaFunction,
+    pub rows_reverse_u32: CudaFunction,
+    pub rows_reverse_u16: CudaFunction,
 
     // -- Mixed precision casts (mixed inference only) --
     /// f32 → bf16 downcast for weight storage.
@@ -1592,6 +1597,9 @@ impl MambaKernels {
             gating_backward: get("gating_backward")?,
             residual_add: get("residual_add")?,
             gather_last_timestep: get("gather_last_timestep")?,
+            rows_reverse_v16: get("rows_reverse_v16")?,
+            rows_reverse_u32: get("rows_reverse_u32")?,
+            rows_reverse_u16: get("rows_reverse_u16")?,
 
             // mixed precision casts
             cast_f32_to_bf16: get("cast_f32_to_bf16")?,

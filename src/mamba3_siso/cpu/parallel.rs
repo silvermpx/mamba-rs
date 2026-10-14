@@ -96,6 +96,10 @@ pub fn parallel_mamba3_forward(
     dims: &Mamba3Dims,
     batch_size: usize,
 ) {
+    assert!(
+        !dims.bidirectional,
+        "the layer-stack helpers read one way: a bidirectional model trains through its trainer"
+    );
     let Mamba3States {
         ssm: ssm_states,
         k: k_states,
@@ -198,6 +202,10 @@ pub fn parallel_mamba3_backward(
     batch_size: usize,
     input_dim: usize,
 ) {
+    assert!(
+        !dims.bidirectional,
+        "the layer-stack helpers read one way: a bidirectional model trains through its trainer"
+    );
     assert_eq!(batch_acts.len(), batch_size);
     if batch_size == 0 {
         return;

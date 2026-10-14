@@ -38,6 +38,7 @@ fn tiny_cfg() -> MambaConfig {
         scan_mode: ScanMode::Auto,
         block_norm: mamba_rs::BlockNorm::Rms,
         final_norm: true,
+        bidirectional: false,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -63,6 +64,7 @@ fn dims_for(cfg: &MambaConfig, batch: usize, seq_len: usize) -> GpuMambaDims {
         rms_norm_eps: cfg.rms_norm_eps,
         block_norm: cfg.block_norm,
         bcdt_rms_eps: None,
+        bidirectional: false,
     }
 }
 

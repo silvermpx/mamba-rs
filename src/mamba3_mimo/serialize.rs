@@ -31,8 +31,8 @@ use super::config::Mamba3MimoConfig;
 use super::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use crate::mlp::GatedMlpLayerWeights;
 use crate::ops::st_io::{
-    TensorList, block_norm, block_norm_entry, final_norm, final_norm_entry, meta, read_f32,
-    read_meta, scan_mode,
+    TensorList, bidirectional, bidirectional_entry, block_norm, block_norm_entry, final_norm,
+    final_norm_entry, meta, read_f32, read_meta, scan_mode,
 };
 
 /// The family marker in the metadata. The SISO checkpoints carry "3".
@@ -146,6 +146,7 @@ pub(crate) fn checkpoint_parts<'a>(
     ]);
     meta.extend(block_norm_entry(cfg.block_norm));
     meta.extend(final_norm_entry(cfg.final_norm));
+    meta.extend(bidirectional_entry(cfg.bidirectional));
     Ok((list, meta))
 }
 
@@ -180,6 +181,7 @@ pub fn load_from_bytes(
         is_outproj_norm: meta(&m, "is_outproj_norm")?,
         block_norm: block_norm(&m)?,
         final_norm: final_norm(&m)?,
+        bidirectional: bidirectional(&m)?,
         rms_norm_eps: meta(&m, "rms_norm_eps")?,
         ssm_norm_eps: meta(&m, "ssm_norm_eps")?,
         d_intermediate: meta(&m, "d_intermediate")?,

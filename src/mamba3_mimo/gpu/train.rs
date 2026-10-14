@@ -26,7 +26,9 @@
 
 mod graph;
 
+use crate::bidi::{mlps_after, reads_reversed};
 use crate::config::ModelFamily;
+use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 use crate::gpu::grad_clip::{GradRegionGeom, StepTail, norm_limit, read_tail, scale_grads};
 use crate::gpu::grad_window::{FoldOverflow, GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
@@ -382,6 +384,10 @@ struct BwdScratch {
     d_proj: Rows,
     d_post: Rows,
     d_pre: GpuBuffer,
+    /// d loss / d (a bidirectional pair's output rows), which both of the
+    /// pair's mixers take while the stream's gradient gathers theirs (one
+    /// element without pairs).
+    d_pair: GpuBuffer,
     d_act: Rows,
     d_up: Rows,
     d_post2: Rows,
@@ -723,6 +729,7 @@ impl Mamba3MimoGpuTrainer {
             d_proj: typed(rows * ip)?,
             d_post: typed(rows * dm)?,
             d_pre: z(rows * dm)?,
+            d_pair: z(if c.bidirectional { rows * dm } else { 1 })?,
             d_act: typed(rows * hidden)?,
             d_up: typed(rows * 2 * hidden)?,
             d_post2: typed(rows * dm)?,
@@ -1903,11 +1910,44 @@ impl Mamba3MimoGpuTrainer {
         let stride_i = self.stride as i32;
         let (eps, a_floor) = (c.ssm_norm_eps, c.a_floor);
         let out_rows = self.out_rows.ptr();
+        let bidi = c.bidirectional;
+        let seq_idx_rows = self.varlen.ptr();
+        // A bidirectional model reads whole sequences: every window starts
+        // from the empty state.
+        if bidi {
+            for st in [
+                &self.state_ssm,
+                &self.state_k,
+                &self.state_v,
+                &self.state_ang,
+            ] {
+                zero_bytes(&self.ctx, st.cached_ptr(), st.len() * 4)?;
+            }
+        }
+        let window = |ptr, elem_bytes| WindowRows {
+            ptr,
+            elem_bytes,
+            batch: b,
+            seq_len: t_len,
+            width: dm,
+        };
         for (l, a) in self.acts.iter().enumerate() {
             let ls = self.layout.layers[l];
-            self.copy(a.x_in.cached_ptr(), temporal, rows * dm, "layer input")?;
+            // The second layer of a pair runs on the reversed window from the
+            // pair's input, which the first layer saved, on: its record holds
+            // the reversed rows and its output turns back before the add.
+            let reversed = reads_reversed(bidi, l);
+            let norm_in = if reversed {
+                let pair_in = self.acts[l - 1].x_in.cached_ptr();
+                self.copy(a.x_in.cached_ptr(), pair_in, rows * dm, "pair input")?;
+                reverse_rows(&self.ctx, window(a.x_in.cached_ptr(), 4), seq_idx_rows)?;
+                a.x_in.cached_ptr()
+            } else {
+                self.copy(a.x_in.cached_ptr(), temporal, rows * dm, "layer input")?;
+                temporal
+            };
             self.block_norm(
-                (a.post.ptr(), temporal, a.rms.cached_ptr()),
+                (a.post.ptr(), norm_in, a.rms.cached_ptr()),
                 Self::norm_params(base, (ls.norm_weight, ls.norm_bias)),
                 (rows, true),
             )?;
@@ -2079,9 +2119,20 @@ impl Mamba3MimoGpuTrainer {
                 (out_rows, a.o.ptr(), self.gemm_weight(ls.out_proj_w)?),
                 (rows, di, dm),
             )?;
+            if reversed {
+                reverse_rows(
+                    &self.ctx,
+                    window(out_rows, self.act.size_bytes()),
+                    seq_idx_rows,
+                )?;
+            }
             self.residual_add(temporal, out_rows, rows * dm)?;
-            if let Some(m) = &a.mlp {
-                let ms = self.layout.mlp[l];
+            // A pair's MLPs follow both its mixers.
+            for m_l in mlps_after(bidi, l) {
+                let Some(m) = &self.acts[m_l].mlp else {
+                    continue;
+                };
+                let ms = self.layout.mlp[m_l];
                 let hidden = ms.fc2_w.len / dm;
                 self.copy(m.x_in.cached_ptr(), temporal, rows * dm, "MLP input")?;
                 self.block_norm(
@@ -2209,12 +2260,13 @@ impl Mamba3MimoGpuTrainer {
         self.reduce_axis0(g.w, axis0, (rows, dm))
     }
 
-    /// `d_temp += d_pre`.
-    fn add_residual_grad(&self, rows: usize) -> Result<(), String> {
+    /// `into += d_pre` (`d_temp`, or a bidirectional pair's gathered
+    /// gradient).
+    fn add_residual_grad(&self, rows: usize, into: u64) -> Result<(), String> {
         launch_elems(
             &self.ctx.stream,
             &self.ctx.kernels.vec_add_inplace,
-            &[self.bwd.d_temp.cached_ptr(), self.bwd.d_pre.cached_ptr()],
+            &[into, self.bwd.d_pre.cached_ptr()],
             rows * self.cfg.d_model,
             format_args!("MIMO backward residual"),
         )
@@ -2395,11 +2447,15 @@ impl Mamba3MimoGpuTrainer {
             ((self.layout.norm_f_weight, self.layout.norm_f_bias), false),
             rows,
         )?;
-        for l in (0..c.n_layers).rev() {
-            if self.acts[l].mlp.is_some() {
-                self.mlp_backward(l)?;
+        if c.bidirectional {
+            self.pairs_backward()?;
+        } else {
+            for l in (0..c.n_layers).rev() {
+                if self.acts[l].mlp.is_some() {
+                    self.mlp_backward(l)?;
+                }
+                self.layer_backward(l, self.bwd.d_temp.cached_ptr())?;
             }
-            self.layer_backward(l)?;
         }
         let identity_input = self.layout.input_proj_w.len == 0;
         if !identity_input {
@@ -2514,10 +2570,56 @@ impl Mamba3MimoGpuTrainer {
             ((ms.norm_weight, ms.norm_bias), true),
             rows,
         )?;
-        self.add_residual_grad(rows)
+        self.add_residual_grad(rows, self.bwd.d_temp.cached_ptr())
     }
 
-    fn layer_backward(&mut self, l: usize) -> Result<(), String> {
+    /// A bidirectional model's layers from the top down, a pair at a time:
+    /// its MLPs, then both mixers on d loss / d (the pair's output). The
+    /// second, which ran on the reversed window, takes that gradient
+    /// reversed and adds its norm's input gradient turned back; the first
+    /// takes it as it is, held aside in `d_pair`, and adds its own on top:
+    /// the pair's input gradient is `(d_out + c_reversed) + c_forward`.
+    fn pairs_backward(&mut self) -> Result<(), String> {
+        let (b, t_len, dm) = (self.batch, self.seq_len, self.cfg.d_model);
+        let rows = b * t_len;
+        let seq_idx = self.varlen.ptr();
+        let window = |ptr| WindowRows {
+            ptr,
+            elem_bytes: 4,
+            batch: b,
+            seq_len: t_len,
+            width: dm,
+        };
+        for l in (0..self.cfg.n_layers).step_by(2).rev() {
+            for m in [l + 1, l] {
+                if self.acts[m].mlp.is_some() {
+                    self.mlp_backward(m)?;
+                }
+            }
+            let d_temp = self.bwd.d_temp.cached_ptr();
+            self.copy(
+                self.bwd.d_pair.cached_ptr(),
+                d_temp,
+                rows * dm,
+                "pair gradient",
+            )?;
+            reverse_rows(&self.ctx, window(d_temp), seq_idx)?;
+            self.layer_backward(l + 1, d_temp)?;
+            reverse_rows(&self.ctx, window(d_temp), seq_idx)?;
+            // The first layer reads the held gradient as its own and adds
+            // into the gathered one; the two trade places back after it.
+            std::mem::swap(&mut self.bwd.d_temp, &mut self.bwd.d_pair);
+            let gathered = self.bwd.d_pair.cached_ptr();
+            let first = self.layer_backward(l, gathered);
+            std::mem::swap(&mut self.bwd.d_temp, &mut self.bwd.d_pair);
+            first?;
+        }
+        Ok(())
+    }
+
+    /// One mixer's backward on d loss / d (its output rows) in `d_temp`,
+    /// its norm's input gradient added into the rows at `residual`.
+    fn layer_backward(&mut self, l: usize, residual: u64) -> Result<(), String> {
         let c = self.cfg;
         let (b, t_len) = (self.batch, self.seq_len);
         let rows = b * t_len;
@@ -3253,7 +3355,7 @@ impl Mamba3MimoGpuTrainer {
             ((ls.norm_weight, ls.norm_bias), true),
             rows,
         )?;
-        self.add_residual_grad(rows)
+        self.add_residual_grad(rows, residual)
     }
 
     /// One AdamW step on the gradients of the last backward (the matrices

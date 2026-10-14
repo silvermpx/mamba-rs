@@ -942,6 +942,7 @@ mod gpu_tests {
             rms_norm_eps: 1e-5,
             block_norm: mamba_rs::BlockNorm::Rms,
             bcdt_rms_eps: None,
+            bidirectional: false,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1090,6 +1091,7 @@ mod gpu_tests {
             rms_norm_eps: 1e-5,
             block_norm: mamba_rs::BlockNorm::Rms,
             bcdt_rms_eps: None,
+            bidirectional: false,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1364,6 +1366,7 @@ mod gpu_tests {
             rms_norm_eps: 1e-5,
             block_norm: mamba_rs::BlockNorm::Rms,
             bcdt_rms_eps: None,
+            bidirectional: false,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1599,6 +1602,7 @@ fn test_custom_config_small() {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         block_norm: mamba_rs::BlockNorm::Rms,
         final_norm: true,
+        bidirectional: false,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -1649,6 +1653,7 @@ fn test_custom_config_large() {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         block_norm: mamba_rs::BlockNorm::Rms,
         final_norm: true,
+        bidirectional: false,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -2127,6 +2132,7 @@ mod gpu_extra_tests {
             rms_norm_eps: 1e-5,
             block_norm: mamba_rs::BlockNorm::Rms,
             bcdt_rms_eps: None,
+            bidirectional: false,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -2218,6 +2224,7 @@ mod gpu_extra_tests {
             scan_mode: mamba_rs::config::ScanMode::Sequential,
             block_norm: mamba_rs::BlockNorm::Rms,
             final_norm: true,
+            bidirectional: false,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
             dt_rank: None,

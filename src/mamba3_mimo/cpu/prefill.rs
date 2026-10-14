@@ -7,6 +7,7 @@
 //! in ascending k whatever the number of rows, so in the default build the
 //! prefill gives the decode chain's bits, for either [`PrefillMode`].
 
+use crate::bidi::{mlps_after, opens_pair, reads_reversed, reverse_rows};
 use rayon::prelude::*;
 
 use super::super::config::Mamba3MimoConfig;
@@ -35,6 +36,8 @@ pub struct Mamba3MimoPrefillScratch {
     /// Row-major gate outputs `[T, d_inner]`, the out_proj input.
     o_rm: Vec<f32>,
     out: Vec<f32>,
+    /// A bidirectional pair's input rows, which both its layers read.
+    pair_in: Vec<f32>,
     heads: Vec<HeadScratch>,
     mlp: GatedMlpRowsScratch,
     /// The precision of the windows (see `CpuOptions`).
@@ -55,6 +58,7 @@ impl Mamba3MimoPrefillScratch {
             o_hm: Vec::new(),
             o_rm: Vec::new(),
             out: Vec::new(),
+            pair_in: Vec::new(),
             heads: (0..cfg.nheads()).map(|_| HeadScratch::new(cfg)).collect(),
             mlp: GatedMlpRowsScratch::default(),
             dtype: WeightDtype::F32,
@@ -90,6 +94,9 @@ impl Mamba3MimoPrefillScratch {
         self.o_hm.resize(rows * di, 0.0);
         self.o_rm.resize(rows * di, 0.0);
         self.out.resize(rows * dm, 0.0);
+        if cfg.bidirectional {
+            self.pair_in.resize(rows * dm, 0.0);
+        }
         self.rows = rows;
     }
 }
@@ -114,12 +121,15 @@ fn gemm_for(mode: PrefillMode) -> Gemm {
 }
 
 /// One MIMO mixer over a window of `t_len` rows of `temporal`
-/// (`[t_len, d_model]`), residual included, advancing `state`.
+/// (`[t_len, d_model]`), residual included, advancing `state`. `pair_in`,
+/// set for the second layer of a bidirectional pair, is the pair's input:
+/// the norm reads it, the mixer reads the window reversed, and the output
+/// joins `temporal`, the stream after the pair's first layer.
 fn mimo_layer_prefill(
     temporal: &mut [f32],
     t_len: usize,
     (lw, state): (&Mamba3MimoLayerWeights, &mut Mamba3MimoLayerState),
-    s: &mut Mamba3MimoPrefillScratch,
+    (s, pair_in): (&mut Mamba3MimoPrefillScratch, Option<&[f32]>),
     (cfg, mode): (&Mamba3MimoConfig, PrefillMode),
 ) {
     let (dm, di, p_len) = (cfg.d_model, cfg.d_inner(), cfg.headdim);
@@ -129,10 +139,13 @@ fn mimo_layer_prefill(
     zip_rows(
         mode,
         (&mut s.norm[..t_len * dm], dm),
-        (&temporal[..t_len * dm], dm),
+        (&pair_in.unwrap_or(temporal)[..t_len * dm], dm),
         |d, x| block_norm_row(d, x, (&lw.norm_weight, &lw.norm_bias), cfg.rms_norm_eps),
     );
     store(s.dtype, &mut s.norm[..t_len * dm]);
+    if pair_in.is_some() {
+        reverse_rows(&mut s.norm[..t_len * dm], dm, None);
+    }
     s.gemm.forward(
         lane,
         (&mut s.proj[..t_len * ip], &s.norm[..t_len * dm]),
@@ -196,6 +209,9 @@ fn mimo_layer_prefill(
         (&lw.out_proj_w, None),
         (t_len, di, dm),
     );
+    if pair_in.is_some() {
+        reverse_rows(&mut s.out[..t_len * dm], dm, None);
+    }
     for (t, &o) in temporal[..t_len * dm].iter_mut().zip(&s.out[..t_len * dm]) {
         *t += o;
     }
@@ -306,9 +322,31 @@ pub fn forward_mamba3_mimo_backbone_prefill_mode(
             (seq_len, input_dim, dm),
         );
     }
+    let bidi = cfg.bidirectional;
+    // A bidirectional model reads whole prompts: each starts from the
+    // empty state.
+    if bidi {
+        for st in states.iter_mut() {
+            for v in [
+                &mut st.ssm_state,
+                &mut st.k_state,
+                &mut st.v_state,
+                &mut st.angle_state,
+            ] {
+                v.fill(0.0);
+            }
+        }
+    }
+    let mut pair_in = std::mem::take(&mut scratch.pair_in);
     for (l, (lw, st)) in w.layers.iter().zip(states.iter_mut()).enumerate() {
-        mimo_layer_prefill(out, seq_len, (lw, st), scratch, (cfg, mode));
-        if let Some(mlp) = w.mlp.get(l) {
+        if opens_pair(bidi, l) {
+            pair_in[..seq_len * dm].copy_from_slice(out);
+        }
+        let reversed = reads_reversed(bidi, l).then(|| &pair_in[..seq_len * dm]);
+        mimo_layer_prefill(out, seq_len, (lw, st), (scratch, reversed), (cfg, mode));
+        // A pair's MLPs follow both its mixers.
+        for m in mlps_after(bidi, l) {
+            let Some(mlp) = w.mlp.get(m) else { continue };
             let eps = cfg.rms_norm_eps;
             gated_mlp_rows(
                 out,
@@ -324,6 +362,7 @@ pub fn forward_mamba3_mimo_backbone_prefill_mode(
             );
         }
     }
+    scratch.pair_in = pair_in;
     // A segment without the final norm hands out the residual stream.
     if w.norm_f_weight.is_empty() {
         return;

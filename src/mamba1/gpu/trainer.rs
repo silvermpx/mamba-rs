@@ -1261,6 +1261,7 @@ impl MambaTrainerMixed {
             rms_norm_eps: cfg.rms_norm_eps,
             block_norm: cfg.block_norm,
             bcdt_rms_eps: cfg.bcdt_rms_eps,
+            bidirectional: cfg.bidirectional,
         };
         dims.check_for(&ctx)?;
 
@@ -3094,6 +3095,7 @@ impl MambaTrainerF32 {
             rms_norm_eps: cfg.rms_norm_eps,
             block_norm: cfg.block_norm,
             bcdt_rms_eps: cfg.bcdt_rms_eps,
+            bidirectional: cfg.bidirectional,
         };
         dims.check_for(&ctx)?;
 

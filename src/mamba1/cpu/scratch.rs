@@ -10,6 +10,16 @@ use crate::ops::dims::MambaDims;
 use crate::ops::lane::LaneGemm;
 use crate::precision::WeightDtype;
 
+/// The rows of a bidirectional pair's buffers, none for a model read one
+/// way.
+fn pair_len(dims: &MambaDims) -> usize {
+    if dims.bidirectional {
+        dims.seq_len * dims.d_model
+    } else {
+        0
+    }
+}
+
 /// Scratch buffers for 7-phase optimized forward (O2).
 ///
 /// Each buffer is `[T * dim]` where T = `dims.seq_len`.
@@ -40,6 +50,9 @@ pub struct PhaseScratch {
     pub delta_raw_flat: Vec<f32>,
     /// The gated MLP's window buffers, grown on first use.
     pub(crate) mlp: GatedMlpRowsScratch,
+    /// A bidirectional pair's input with every sequence reversed:
+    /// `[T * d_model]`, empty for a model read one way.
+    pub(crate) pair: Vec<f32>,
     /// The precision of the forward (see `CpuOptions`).
     pub(crate) dtype: WeightDtype,
     pub(crate) gemm: LaneGemm,
@@ -61,6 +74,7 @@ impl PhaseScratch {
             dt_in_flat: vec![0.0; t * dims.dt_rank],
             delta_raw_flat: vec![0.0; t * dims.d_inner],
             mlp: GatedMlpRowsScratch::default(),
+            pair: vec![0.0; pair_len(dims)],
             dtype: WeightDtype::F32,
             gemm: LaneGemm::default(),
         }
@@ -131,6 +145,10 @@ pub struct BackwardPhaseScratch {
     pub(crate) conv_win: Vec<f32>,
     /// The gated MLP's backward buffers, grown on first use.
     pub(crate) mlp: GatedMlpBackwardScratch,
+    /// d loss / d (a bidirectional pair's output), in the order of the
+    /// pair's layer that takes it: `[T * d_model]`, empty for a model read
+    /// one way.
+    pub(crate) pair: Vec<f32>,
     /// The precision of the backward, the forward's.
     pub(crate) dtype: WeightDtype,
     pub(crate) gemm: LaneGemm,
@@ -170,6 +188,7 @@ impl BackwardPhaseScratch {
             seg_da: Vec::new(),
             conv_win: vec![0.0; di * dims.d_conv],
             mlp: GatedMlpBackwardScratch::default(),
+            pair: vec![0.0; pair_len(dims)],
             dtype: WeightDtype::F32,
             gemm: LaneGemm::default(),
         }

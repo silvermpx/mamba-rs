@@ -218,6 +218,11 @@ fn layer_step_body(
 /// One token through the whole Mamba-2 backbone: input projection, every
 /// layer (mixer, then the MLP when the model has one), final norm.
 /// `input` is `[input_dim]`; `temporal` (`[d_model]`) receives the output.
+///
+/// # Panics
+///
+/// For a bidirectional model, which reads whole sequences and has no
+/// decode step.
 pub fn mamba2_step(
     temporal: &mut [f32],
     input: &[f32],
@@ -234,7 +239,8 @@ pub fn mamba2_step(
 ///
 /// # Panics
 ///
-/// When `packed` holds another number of layers or MLPs than `weights`.
+/// When `packed` holds another number of layers or MLPs than `weights`,
+/// and for a bidirectional model.
 pub fn mamba2_step_packed(
     temporal: &mut [f32],
     input: &[f32],
@@ -265,6 +271,10 @@ fn backbone_step(
     states: &mut [Mamba2LayerState],
     cfg: &Mamba2Config,
 ) {
+    assert!(
+        !cfg.bidirectional,
+        "a bidirectional model reads whole sequences and has no decode step"
+    );
     let dm = cfg.d_model;
     if weights.input_proj_w.is_empty() {
         temporal[..dm].copy_from_slice(&input[..dm]);

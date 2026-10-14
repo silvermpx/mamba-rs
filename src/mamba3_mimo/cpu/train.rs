@@ -25,6 +25,7 @@ use super::core::{
     HeadScratch, HeadState, MimoRowsIo, TokenIn, advance_angles, block_norm_row, mimo_head_step,
     mimo_rows, prepare_token, rope_half_split, token_disc,
 };
+use crate::bidi::{PairGrad, mlps_after, reads_reversed, reverse_rows};
 use crate::mamba3_siso::cpu::forward::{clamp_a, heavy_tail, heavy_tail_deriv, simd_sum_sq};
 use crate::mlp::cpu::RowsGemm;
 use crate::mlp::cpu::{
@@ -124,6 +125,9 @@ pub struct Mamba3MimoTrainScratch {
     d_cn: Vec<f32>,
     d_tanh: Vec<f32>,
     d_post: Vec<f32>,
+    /// d loss / d (a bidirectional pair's output rows), which both of the
+    /// pair's mixers take.
+    d_pair: Vec<f32>,
     heads: Vec<HeadScratch>,
     /// The (heads, rank, d_state, headdim, angles) `heads` was sized for.
     head_shape: (usize, usize, usize, usize, usize),
@@ -280,17 +284,37 @@ pub fn forward_mamba3_mimo_train(
         s.heads = (0..cfg.nheads()).map(|_| HeadScratch::new(cfg)).collect();
         s.head_shape = head_shape;
     }
-    let (stride, varlen) = (tape.stride, tape.varlen.as_ref());
-    for (l, ((lw, st), lt)) in w
-        .layers
-        .iter()
-        .zip(states.iter_mut())
-        .zip(tape.layers.iter_mut())
-        .enumerate()
-    {
-        layer_forward(rows, (lw, st, lt), (cfg, t_len, stride, varlen), s);
-        if let Some(mlp) = w.mlp.get(l) {
-            lt.mlp_in.copy_from_slice(rows);
+    let (stride, varlen, bidi) = (tape.stride, tape.varlen.as_ref(), cfg.bidirectional);
+    // A bidirectional model reads whole sequences: every window starts
+    // from the empty state.
+    if bidi {
+        for st in states.iter_mut() {
+            for v in [
+                &mut st.ssm_state,
+                &mut st.k_state,
+                &mut st.v_state,
+                &mut st.angle_state,
+            ] {
+                v.fill(0.0);
+            }
+        }
+    }
+    for (l, (lw, st)) in w.layers.iter().zip(states.iter_mut()).enumerate() {
+        let (before, rest) = tape.layers.split_at_mut(l);
+        // The second layer of a pair reads the pair's input, which the
+        // first saved.
+        let pair_in = reads_reversed(bidi, l).then(|| before[l - 1].x_in.as_slice());
+        layer_forward(
+            rows,
+            (lw, st, &mut rest[0]),
+            (cfg, t_len, stride, varlen),
+            pair_in,
+            s,
+        );
+        // A pair's MLPs follow both its mixers.
+        for m in mlps_after(bidi, l) {
+            let Some(mlp) = w.mlp.get(m) else { continue };
+            tape.layers[m].mlp_in.copy_from_slice(rows);
             let eps = cfg.rms_norm_eps;
             gated_mlp_rows(rows, t_len, mlp, &mut s.mlp, sgemm_forward, |dst, src| {
                 for (d_row, s_row) in dst.chunks_exact_mut(dm).zip(src.chunks_exact(dm)) {
@@ -313,6 +337,11 @@ pub fn forward_mamba3_mimo_train(
     Ok(())
 }
 
+/// One mixer over the window with its record. `pair_in`, set for the
+/// second layer of a bidirectional pair, is the pair's input: the layer
+/// runs on it with every sequence reversed, from its record on, and its
+/// output joins `rows`, the stream after the pair's first layer, reversed
+/// back.
 fn layer_forward(
     rows: &mut [f32],
     (lw, state, lt): (
@@ -321,6 +350,7 @@ fn layer_forward(
         &mut LayerTape,
     ),
     (cfg, t_len, stride, varlen): (&Mamba3MimoConfig, usize, usize, Option<&RowStarts>),
+    pair_in: Option<&[f32]>,
     s: &mut Mamba3MimoTrainScratch,
 ) {
     let (dm, di, ip, p_len) = (
@@ -332,8 +362,12 @@ fn layer_forward(
     grow(&mut s.norm, t_len * dm);
     grow(&mut s.out, t_len * dm);
     let lane = (sgemm_forward as RowsGemm, s.dtype);
-    lt.x_in.copy_from_slice(rows);
-    for (d, x) in s.norm.chunks_exact_mut(dm).zip(rows.chunks_exact(dm)) {
+    let reversed = pair_in.is_some();
+    lt.x_in.copy_from_slice(pair_in.unwrap_or(rows));
+    if reversed {
+        reverse_rows(&mut lt.x_in, dm, varlen);
+    }
+    for (d, x) in s.norm.chunks_exact_mut(dm).zip(lt.x_in.chunks_exact(dm)) {
         block_norm_row(d, x, (&lw.norm_weight, &lw.norm_bias), cfg.rms_norm_eps);
     }
     store(s.dtype, &mut s.norm[..t_len * dm]);
@@ -368,6 +402,9 @@ fn layer_forward(
         (&lw.out_proj_w, None),
         (t_len, di, dm),
     );
+    if reversed {
+        reverse_rows(&mut s.out[..t_len * dm], dm, varlen);
+    }
     for (r, &o) in rows.iter_mut().zip(&s.out[..t_len * dm]) {
         *r += o;
     }
@@ -454,24 +491,60 @@ pub fn backward_mamba3_mimo_train(
             cfg.rms_norm_eps,
         );
     }
-    for l in (0..cfg.n_layers).rev() {
-        let lt = &tape.layers[l];
+    let (bidi, varlen) = (cfg.bidirectional, tape.varlen.as_ref());
+    let mlp_backward = |l: usize,
+                        d_rows: &mut [f32],
+                        grads: &mut Mamba3MimoWeights,
+                        s: &mut Mamba3MimoTrainScratch| {
         if let Some(mlp) = w.mlp.get(l) {
             gated_mlp_rows_backward(
                 d_rows,
-                &lt.mlp_in,
+                &tape.layers[l].mlp_in,
                 t_len,
                 (mlp, &mut grads.mlp[l]),
                 &mut s.mlp_bwd,
                 cfg.rms_norm_eps,
             );
         }
-        layer_backward(
-            d_rows,
-            (&w.layers[l], &mut grads.layers[l], lt),
-            (cfg, t_len, tape.stride, tape.varlen.as_ref()),
-            s,
-        );
+    };
+    let span = (cfg, t_len, tape.stride, varlen);
+    if bidi {
+        // A pair from its MLPs down: both mixers take d loss / d (the
+        // pair's output), the second reversed, and the pair's input
+        // gathers both norms' gradients on top of the residual's.
+        for l in (0..cfg.n_layers).step_by(2).rev() {
+            mlp_backward(l + 1, d_rows, grads, s);
+            mlp_backward(l, d_rows, grads, s);
+            let mut d_pair = std::mem::take(&mut s.d_pair);
+            grow(&mut d_pair, t_len * dm);
+            let d_pair_rows = &mut d_pair[..t_len * dm];
+            d_pair_rows.copy_from_slice(d_rows);
+            reverse_rows(d_pair_rows, dm, varlen);
+            for (layer, reversed) in [(l + 1, true), (l, false)] {
+                if !reversed {
+                    reverse_rows(d_pair_rows, dm, varlen);
+                }
+                let (lw, lt) = (&w.layers[layer], &tape.layers[layer]);
+                let pair = PairGrad {
+                    d_out: d_pair_rows,
+                    reversed,
+                };
+                layer_backward(
+                    d_rows,
+                    (lw, &mut grads.layers[layer], lt),
+                    span,
+                    Some(pair),
+                    s,
+                );
+            }
+            s.d_pair = d_pair;
+        }
+    } else {
+        for l in (0..cfg.n_layers).rev() {
+            mlp_backward(l, d_rows, grads, s);
+            let (lw, lt) = (&w.layers[l], &tape.layers[l]);
+            layer_backward(d_rows, (lw, &mut grads.layers[l], lt), span, None, s);
+        }
     }
     if !w.input_proj_w.is_empty() {
         let mut discard;
@@ -752,6 +825,7 @@ fn layer_backward(
         &LayerTape,
     ),
     (cfg, t_len, stride, varlen): (&Mamba3MimoConfig, usize, usize, Option<&RowStarts>),
+    pair: Option<PairGrad<'_>>,
     s: &mut Mamba3MimoTrainScratch,
 ) {
     let (dm, di, ip, bc) = (
@@ -776,11 +850,13 @@ fn layer_backward(
     grow(&mut s.d_post, t_len * dm);
     grow(&mut s.norm, t_len * dm);
 
-    // The products take the lane's copy of the residual gradient.
+    // The products take the lane's copy of the residual gradient, or of a
+    // bidirectional pair's output gradient.
+    let d_out: &[f32] = pair.map_or(&*d_rows, |p| p.d_out);
     s.gemm.backward(
         s.dtype,
         (&mut s.d_o[..t_len * di], &mut gw.out_proj_w, None),
-        (d_rows, &lt.o, &lw.out_proj_w),
+        (d_out, &lt.o, &lw.out_proj_w),
         (t_len, di, dm),
     );
     prepare_rows(cfg, lw, &lt.proj, s, t_len);
@@ -1064,6 +1140,10 @@ fn layer_backward(
         (&mut gw.norm_weight, &mut gw.norm_bias),
         cfg.rms_norm_eps,
     );
+    // The second layer of a pair ran on the reversed window.
+    if pair.is_some_and(|p| p.reversed) {
+        reverse_rows(&mut s.d_post[..t_len * dm], dm, varlen);
+    }
     for (d, &dp) in d_rows.iter_mut().zip(&s.d_post[..t_len * dm]) {
         *d += dp;
     }

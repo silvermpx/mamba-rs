@@ -39,6 +39,16 @@ pub struct MambaConfig {
     /// stream after its last block, which the next segment, built with an
     /// identity input, carries on.
     pub final_norm: bool,
+    /// Whether the layers read the sequence in both directions, in pairs:
+    /// layer 2k reads it forward and layer 2k+1 reads every sequence
+    /// reversed, both from the pair's input, and the two mixers' outputs
+    /// join the residual stream together, as the bidirectional stacks of
+    /// Vim, Caduceus and burn-mamba's `BidiLayers` do. A pair's gated MLPs,
+    /// when the model has them, follow its two mixers in layer order. A
+    /// bidirectional model reads whole sequences: it has no decode step and
+    /// carries no state from one window or prompt to the next. It needs an
+    /// even number of layers.
+    pub bidirectional: bool,
 
     /// Epsilon of the block norms (`norm`, `norm2`, `norm_f`), of either
     /// kind. Default 1e-5 (state-spaces/mamba). FalconMamba checkpoints use
@@ -128,6 +138,12 @@ impl MambaConfig {
         }
         if self.n_layers > envelope::MAX_LAYERS {
             return Err(format!("n_layers ({}) must be <= 4096", self.n_layers));
+        }
+        if self.bidirectional && !self.n_layers.is_multiple_of(2) {
+            return Err(format!(
+                "a bidirectional model's layers work in pairs: n_layers ({}) must be even",
+                self.n_layers
+            ));
         }
         self.expand
             .checked_mul(self.d_model)
@@ -236,6 +252,7 @@ impl Default for MambaConfig {
             scan_mode: ScanMode::Auto,
             block_norm: BlockNorm::Rms,
             final_norm: true,
+            bidirectional: false,
             rms_norm_eps: crate::ops::fast_math::RMS_NORM_EPS,
             bcdt_rms_eps: None,
             dt_rank: None,

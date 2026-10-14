@@ -21,6 +21,8 @@ use super::kernels::{
     CHUNK, CHUNK_SCAN_TT, Mamba2Kernels, bmm_smem_bytes, chunk_scan_tiles_smem_bytes,
     chunk_state_geom, decode_rows, gated_norm_cfg, step_cfg, step_rows,
 };
+use crate::bidi::{mlps_after, opens_pair, reads_reversed};
+use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
 use crate::gpu::block_norm::{self, NormParams};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
@@ -307,6 +309,19 @@ impl M2Exec<'_> {
         (temporal, proj, y, gated, out): (u64, u64, u64, u64, u64),
         rows: usize,
     ) -> Result<(), String> {
+        self.gate_out(lw, (proj, y, gated, out), rows)?;
+        self.residual_add(temporal, out, rows)
+    }
+
+    /// [`Self::gate_out_residual`] up to the out_proj GEMM's rows in `out`:
+    /// the second layer of a bidirectional pair turns them back before the
+    /// residual add.
+    pub(crate) fn gate_out(
+        &self,
+        lw: &LayerPtrs,
+        (proj, y, gated, out): (u64, u64, u64, u64),
+        rows: usize,
+    ) -> Result<(), String> {
         let c = &self.cfg;
         let stream = &self.ctx.stream;
         let (dm, di, ip) = (c.d_model, c.d_inner(), c.in_proj_out_dim());
@@ -382,8 +397,7 @@ impl M2Exec<'_> {
             t(lw.out_w),
             lw.out_b,
             (rows, di, dm),
-        )?;
-        self.residual_add(temporal, out, rows)
+        )
     }
 
     /// The gated MLP after the mixer over `rows` rows of `temporal`: its
@@ -433,7 +447,7 @@ impl M2Exec<'_> {
     }
 
     /// `temporal += out` over `rows` rows, `out` in the activation dtype.
-    fn residual_add(&self, temporal: u64, out: u64, rows: usize) -> Result<(), String> {
+    pub(crate) fn residual_add(&self, temporal: u64, out: u64, rows: usize) -> Result<(), String> {
         let k = &self.ctx.kernels;
         let n = rows * self.cfg.d_model;
         let (f, ptrs): (_, &[u64]) = if self.act == WeightDtype::F32 {
@@ -1270,6 +1284,11 @@ impl Mamba2GpuEngine {
         scratch: &mut Mamba2GpuScratch,
     ) -> Result<(), String> {
         let c = &self.cfg;
+        if c.bidirectional {
+            return Err(
+                "a bidirectional model reads whole sequences and has no decode step".into(),
+            );
+        }
         let b = self.batch;
         let (ip, cd) = (c.in_proj_out_dim(), c.conv_dim());
         let (d_mlp, d_ssm, nh, hd, ds, ng) = (
@@ -1430,6 +1449,7 @@ impl Mamba2GpuEngine {
             mlp_up: typed(rows * 2 * hidden)?,
             mlp_act: typed(rows * hidden)?,
             final_rows: z(rows * c.d_model)?,
+            pair_in: z(if c.bidirectional { rows * c.d_model } else { 1 })?,
         })
     }
 
@@ -1526,6 +1546,20 @@ impl Mamba2GpuEngine {
             .map_err(|e| format!("Mamba-2 prefill sync: {e:?}"))
     }
 
+    /// `n` f32 values from `src` to `dst` on the stream.
+    fn copy_rows(&self, dst: u64, src: u64, n: usize) -> Result<(), String> {
+        // SAFETY: both pointers address at least `n` f32 values of device
+        // buffers used on this stream.
+        let r = unsafe {
+            cudarc::driver::sys::cuMemcpyDtoDAsync_v2(dst, src, n * 4, self.ctx.stream.cu_stream())
+        };
+        if r == cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+            Ok(())
+        } else {
+            Err(format!("Mamba-2 prefill pair input copy: {r:?}"))
+        }
+    }
+
     fn prefill_kernels(
         &self,
         state: &mut Mamba2GpuState,
@@ -1544,10 +1578,36 @@ impl Mamba2GpuEngine {
             pf.proj.cached_ptr(),
             pf.y.cached_ptr(),
         );
+        let bidi = c.bidirectional;
+        // A bidirectional prompt is whole sequences from the empty state.
+        if bidi {
+            zero_bytes(&self.ctx, state.conv.cached_ptr(), state.conv.len() * 4)?;
+            zero_bytes(&self.ctx, state.ssm.cached_ptr(), state.ssm.len() * 4)?;
+        }
+        let pair_in = pf.pair_in.cached_ptr();
+        let window = |ptr, elem_bytes| WindowRows {
+            ptr,
+            elem_bytes,
+            batch: b,
+            seq_len: t_len,
+            width: c.d_model,
+        };
         let x = self.exec();
         for (l, lw) in self.layers.iter().enumerate() {
             let lp = lw.ptrs();
-            x.norm_in_proj(&lp, (temporal, post, rms, proj), rows)?;
+            // A pair's first layer keeps the pair's input; its second reads
+            // it reversed, and its output turns back before the add.
+            let reversed = reads_reversed(bidi, l);
+            if opens_pair(bidi, l) {
+                self.copy_rows(pair_in, temporal, rows * c.d_model)?;
+            }
+            let norm_in = if reversed {
+                reverse_rows(&self.ctx, window(pair_in, 4), 0)?;
+                pair_in
+            } else {
+                temporal
+            };
+            x.norm_in_proj(&lp, (norm_in, post, rms, proj), rows)?;
             let w = WindowPtrs {
                 proj,
                 xbc: pf.xbc.cached_ptr(),
@@ -1564,18 +1624,14 @@ impl Mamba2GpuEngine {
                 seq_idx: 0,
             };
             x.window(l, &lp, &w, (b, t_len, c.prefill_parallel(t_len)))?;
-            x.gate_out_residual(
-                &lp,
-                (
-                    temporal,
-                    proj,
-                    y,
-                    pf.gated.cached_ptr(),
-                    pf.out.cached_ptr(),
-                ),
-                rows,
-            )?;
-            if let Some(m) = self.mlp.get(l) {
+            let out = pf.out.cached_ptr();
+            x.gate_out(&lp, (proj, y, pf.gated.cached_ptr(), out), rows)?;
+            if reversed {
+                reverse_rows(&self.ctx, window(out, self.act.size_bytes()), 0)?;
+            }
+            x.residual_add(temporal, out, rows)?;
+            for m_l in mlps_after(bidi, l) {
+                let Some(m) = self.mlp.get(m_l) else { continue };
                 x.mlp_residual(
                     &m.ptrs(),
                     (
@@ -1626,6 +1682,9 @@ pub struct Mamba2GpuPrefill {
     mlp_up: DtypedBuf,
     mlp_act: DtypedBuf,
     final_rows: GpuBuffer,
+    /// A bidirectional pair's input rows, reversed for its second layer
+    /// (one element without pairs).
+    pair_in: GpuBuffer,
 }
 
 impl Mamba2GpuPrefill {

@@ -23,6 +23,7 @@ use super::flat::{MambaBackboneFlat, MambaLayerFlat};
 use super::forward::scan_advance;
 use super::scratch::BackwardPhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
+use crate::bidi::{PairGrad, reverse_rows};
 use crate::mlp::cpu::gated_mlp_rows_backward;
 use crate::ops::dims::MambaDims;
 use crate::ops::fast_math::fast_exp_scalar;
@@ -57,6 +58,27 @@ pub fn backward_mamba_layer_batched(
     scratch: &mut BackwardPhaseScratch,
     dims: &MambaDims,
 ) {
+    backward_mamba_layer_in(
+        d_temporal_flat,
+        d_layer,
+        (acts, w, a_neg),
+        scratch,
+        (dims, None),
+    );
+}
+
+/// [`backward_mamba_layer_batched`] for a layer of a bidirectional pair
+/// as well: with `pair` set the layer's mixer takes d loss / d (the
+/// pair's output) from it, and only its norm's gradient joins
+/// `d_temporal_flat`, reversed back first for the pair's second layer,
+/// which ran on the reversed window.
+fn backward_mamba_layer_in(
+    d_temporal_flat: &mut [f32],
+    d_layer: &mut TrainMambaLayerWeights,
+    (acts, w, a_neg): (&MambaLayerFlat, &TrainMambaLayerWeights, &[f32]),
+    scratch: &mut BackwardPhaseScratch,
+    (dims, pair): (&MambaDims, Option<PairGrad<'_>>),
+) {
     let dm = dims.d_model;
     let di = dims.d_inner;
     let ds = dims.d_state;
@@ -73,6 +95,7 @@ pub fn backward_mamba_layer_batched(
     //                  (T, d_inner, d_model))
     // ===================================================================
     acts.copy_gated_all(&mut scratch.gated_buf);
+    let d_out: &[f32] = pair.map_or(&*d_temporal_flat, |p| p.d_out);
     scratch.gemm.backward(
         dtype,
         (
@@ -80,7 +103,7 @@ pub fn backward_mamba_layer_batched(
             &mut d_layer.out_proj_w,
             super::bias_mut(&mut d_layer.out_proj_b),
         ),
-        (d_temporal_flat, &scratch.gated_buf, &w.out_proj_w),
+        (d_out, &scratch.gated_buf, &w.out_proj_w),
         (seq_len, di, dm),
     );
 
@@ -385,6 +408,7 @@ pub fn backward_mamba_layer_batched(
     // Phase B8: the batch's block norm backward + residual
     // ===================================================================
     let layer_norm = !w.norm_bias.is_empty();
+    let reversed = pair.is_some_and(|p| p.reversed);
     for t in 0..seq_len {
         let off = t * dm;
         if layer_norm {
@@ -411,8 +435,19 @@ pub fn backward_mamba_layer_batched(
         }
 
         // Residual gradient: d_temporal[t] += d_pre_norm[t]
-        for d in 0..dm {
-            d_temporal_flat[off + d] += scratch.d_pre_norm_flat[off + d];
+        if !reversed {
+            for d in 0..dm {
+                d_temporal_flat[off + d] += scratch.d_pre_norm_flat[off + d];
+            }
+        }
+    }
+    if reversed {
+        // The second layer of a pair ran on the reversed window: its norm's
+        // gradient turns back before it joins the stream's.
+        let d_pre_norm = &mut scratch.d_pre_norm_flat[..seq_len * dm];
+        reverse_rows(d_pre_norm, dm, None);
+        for (dt, &dn) in d_temporal_flat[..seq_len * dm].iter_mut().zip(&*d_pre_norm) {
+            *dt += dn;
         }
     }
 }
@@ -515,31 +550,67 @@ pub fn backward_mamba_backbone_batched(
     }
 
     // --- Mamba layers in reverse (batched) ---
-    for layer_idx in (0..n_layers).rev() {
-        let a_neg_start = layer_idx * a_neg_per_layer;
-
-        // The gated MLP's branch first: it ran after the mixer.
-        if let Some(m) = mamba_w.mlp.get(layer_idx) {
+    let a_neg_of = |l: usize| &a_neg_all[l * a_neg_per_layer..(l + 1) * a_neg_per_layer];
+    // The gated MLP's branch first: it ran after the mixer.
+    let mlp_backward = |l: usize,
+                        d_out: &mut [f32],
+                        d_mamba: &mut TrainMambaWeights,
+                        scratch: &mut BackwardPhaseScratch| {
+        if let Some(m) = mamba_w.mlp.get(l) {
             scratch.mlp.dtype = scratch.dtype;
             gated_mlp_rows_backward(
-                &mut d_temporal_flat[..seq_len * dm],
-                &acts.mlp_in[layer_idx],
+                &mut d_out[..seq_len * dm],
+                &acts.mlp_in[l],
                 seq_len,
-                (m, &mut d_mamba.mlp[layer_idx]),
+                (m, &mut d_mamba.mlp[l]),
                 &mut scratch.mlp,
                 dims.rms_norm_eps,
             );
         }
-
-        backward_mamba_layer_batched(
-            d_temporal_flat,
-            &mut d_mamba.layers[layer_idx],
-            &acts.layers[layer_idx],
-            &mamba_w.layers[layer_idx],
-            &a_neg_all[a_neg_start..a_neg_start + a_neg_per_layer],
-            scratch,
-            dims,
-        );
+    };
+    if dims.bidirectional {
+        // A pair from its MLPs down: both mixers take d loss / d (the
+        // pair's output), the second reversed, and each norm's gradient
+        // joins the stream's.
+        let mut pair = std::mem::take(&mut scratch.pair);
+        for l in (0..n_layers).step_by(2).rev() {
+            mlp_backward(l + 1, d_temporal_flat, d_mamba, scratch);
+            mlp_backward(l, d_temporal_flat, d_mamba, scratch);
+            pair.copy_from_slice(&d_temporal_flat[..seq_len * dm]);
+            reverse_rows(&mut pair, dm, None);
+            for (layer, reversed) in [(l + 1, true), (l, false)] {
+                if !reversed {
+                    reverse_rows(&mut pair, dm, None);
+                }
+                backward_mamba_layer_in(
+                    d_temporal_flat,
+                    &mut d_mamba.layers[layer],
+                    (&acts.layers[layer], &mamba_w.layers[layer], a_neg_of(layer)),
+                    scratch,
+                    (
+                        dims,
+                        Some(PairGrad {
+                            d_out: &pair,
+                            reversed,
+                        }),
+                    ),
+                );
+            }
+        }
+        scratch.pair = pair;
+    } else {
+        for layer_idx in (0..n_layers).rev() {
+            mlp_backward(layer_idx, d_temporal_flat, d_mamba, scratch);
+            backward_mamba_layer_batched(
+                d_temporal_flat,
+                &mut d_mamba.layers[layer_idx],
+                &acts.layers[layer_idx],
+                &mamba_w.layers[layer_idx],
+                a_neg_of(layer_idx),
+                scratch,
+                dims,
+            );
+        }
     }
 
     // --- Batched input projection backward ---

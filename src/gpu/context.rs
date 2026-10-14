@@ -2366,6 +2366,7 @@ mod tests {
             rms_norm_eps: 1e-5,
             block_norm: crate::config::BlockNorm::Rms,
             bcdt_rms_eps: None,
+            bidirectional: false,
         };
         assert_eq!(m1_mixed_graph_max_dim(&dims, 0), 258);
         // A gated MLP wider than the two inner projection's rows sets the

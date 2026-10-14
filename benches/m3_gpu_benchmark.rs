@@ -124,6 +124,7 @@ fn m3_gpu_benchmark() {
             block_norm: cfg.block_norm,
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: false,
+            bidirectional: false,
         };
 
         let bt = batch * seq_len;

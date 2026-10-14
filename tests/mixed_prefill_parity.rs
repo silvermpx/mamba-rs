@@ -58,6 +58,7 @@ fn run_route(mode: ScanMode, dtype: WeightDtype, seq_len: usize) -> (Vec<f32>, V
         scan_mode: mode,
         block_norm: mamba_rs::BlockNorm::Rms,
         final_norm: true,
+        bidirectional: false,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -86,6 +87,7 @@ fn run_route(mode: ScanMode, dtype: WeightDtype, seq_len: usize) -> (Vec<f32>, V
         rms_norm_eps: cfg.rms_norm_eps,
         block_norm: cfg.block_norm,
         bcdt_rms_eps: None,
+        bidirectional: false,
     };
     let device = GpuDevice::new(0).expect("device");
     let ctx = GpuCtx::new(&device).expect("ctx");
@@ -182,6 +184,7 @@ fn mixed_prefill_full_rows_end_in_the_last_rows() {
                 scan_mode: ScanMode::Auto,
                 block_norm: mamba_rs::BlockNorm::Rms,
                 final_norm: true,
+                bidirectional: false,
                 rms_norm_eps: 1e-5,
                 bcdt_rms_eps: None,
                 dt_rank: None,
@@ -210,6 +213,7 @@ fn mixed_prefill_full_rows_end_in_the_last_rows() {
                 rms_norm_eps: cfg.rms_norm_eps,
                 block_norm: cfg.block_norm,
                 bcdt_rms_eps: None,
+                bidirectional: false,
             };
             let device = GpuDevice::new(0).expect("device");
             let ctx = GpuCtx::new(&device).expect("ctx");

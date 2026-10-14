@@ -39,6 +39,8 @@
 "cpu_trainer_api" = "host"
 "segment_stacking" = "host"
 "segment_stacking_gpu" = "gate"
+"bidirectional_cpu" = "host"
+"bidirectional_gpu" = "gate"
 "device_io_gpu" = "gate"
 "varlen_cpu" = "host"
 "varlen_gpu" = "gate"

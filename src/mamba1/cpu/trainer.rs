@@ -96,6 +96,11 @@ impl CpuFamily for MambaCpu {
         input: &[f32],
         out: &mut [f32],
     ) -> Result<(), String> {
+        // A bidirectional model reads whole sequences: every window starts
+        // from the empty state.
+        if self.cfg.bidirectional {
+            self.reset_seq(seq);
+        }
         out.fill(0.0);
         forward_mamba_backbone_batched(
             out,

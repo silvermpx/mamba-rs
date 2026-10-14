@@ -19,6 +19,8 @@ use super::state::{
     GpuMamba3StateBufs, GpuMamba3TargetScratch, M3Exec, Mamba3LayerPtrs,
 };
 use super::weights::{GpuMamba3LayerWeights, GpuMamba3MlpWeights, GpuMamba3Weights};
+use crate::bidi::{opens_pair, reads_reversed};
+use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 use crate::gpu::blas::gpu_gemm_bi_forward_raw;
 use crate::gpu::block_norm;
 use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer};
@@ -340,6 +342,24 @@ pub fn gpu_forward_mamba3_layer(
     lw: &GpuMamba3LayerWeights,
     layer_ptrs: &Mamba3LayerPtrs,
     scratch: &mut GpuMamba3Scratch,
+) -> Result<(), String> {
+    layer_forward(exec, stream_out, (acts, lw, layer_ptrs), scratch, None)
+}
+
+/// [`gpu_forward_mamba3_layer`]; `pair_base`, set for the second layer of
+/// a bidirectional pair, is the stream after the pair's first mixer: the
+/// layer ran on the reversed window, so its output turns back and joins
+/// those rows instead of its own input.
+fn layer_forward(
+    exec: &M3Exec<'_>,
+    stream_out: cudarc::driver::sys::CUdeviceptr,
+    (acts, lw, layer_ptrs): (
+        &mut GpuMamba3LayerActs,
+        &GpuMamba3LayerWeights,
+        &Mamba3LayerPtrs,
+    ),
+    scratch: &mut GpuMamba3Scratch,
+    pair_base: Option<cudarc::driver::sys::CUdeviceptr>,
 ) -> Result<(), String> {
     exec.check_state_cap()?;
     let M3Exec {
@@ -844,6 +864,20 @@ pub fn gpu_forward_mamba3_layer(
         None,
         (bt, di, dm),
     )?;
+    let residual = match pair_base {
+        Some(base) => {
+            let rows = WindowRows {
+                ptr: scratch.out_flat.cached_ptr(),
+                elem_bytes: 4,
+                batch: dims.batch,
+                seq_len: dims.seq_len,
+                width: dm,
+            };
+            reverse_rows(ctx, rows, seq_idx)?;
+            base
+        }
+        None => acts.residual.cached_ptr(),
+    };
     {
         // Write the NEXT layer's residual slot (or norm_f_input for the
         // last layer) directly - raw pointer, no aliasing of the
@@ -851,11 +885,7 @@ pub fn gpu_forward_mamba3_layer(
         crate::gpu::launch::launch_elems(
             &ctx.stream,
             &m3k.residual_add,
-            &[
-                stream_out,
-                scratch.out_flat.cached_ptr(),
-                acts.residual.cached_ptr(),
-            ],
+            &[stream_out, scratch.out_flat.cached_ptr(), residual],
             bt * dm,
             format_args!("residual_add m3 F8"),
         )?;
@@ -917,6 +947,15 @@ pub fn gpu_forward_mamba3_backbone(
     let k_base = states.k.raw_ptr(&ctx.stream);
     let v_base = states.v.raw_ptr(&ctx.stream);
     let a_base = states.angle.raw_ptr(&ctx.stream);
+    let bidi = dims.bidirectional;
+    // A bidirectional model reads whole sequences: every window starts
+    // from the empty state.
+    if bidi {
+        for buf in [&*states.ssm, &*states.k, &*states.v, &*states.angle] {
+            zero_bytes(ctx, buf.raw_ptr(&ctx.stream), buf.len() * 4)?;
+        }
+    }
+    let pair_rows = scratch.pair.cached_ptr();
 
     for l in 0..dims.n_layers {
         let ssm_off = dims.batch * l * nh * hd * ds;
@@ -934,22 +973,70 @@ pub fn gpu_forward_mamba3_backbone(
         } else {
             acts.norm_f_input.raw_ptr(&ctx.stream)
         };
+        // A bidirectional pair: the first mixer's sum is the pair's
+        // working rows; the second runs on its reversed input, the pair's
+        // input the first layer's slot holds, and adds onto them. The
+        // pair's MLPs follow both mixers, the first MLP's output the
+        // second's input.
+        let reversed = reads_reversed(bidi, l);
+        if reversed {
+            let (before, rest) = acts.layers.split_at_mut(l);
+            rest[0]
+                .residual
+                .copy_from_raw(&before[l - 1].residual, &ctx.stream)?;
+            let rows = WindowRows {
+                ptr: rest[0].residual.cached_ptr(),
+                elem_bytes: 4,
+                batch: dims.batch,
+                seq_len: dims.seq_len,
+                width: dm,
+            };
+            reverse_rows(ctx, rows, exec.seq_idx)?;
+        }
         // With an MLP the mixer's sum lands in the MLP's input rows, and the
         // MLP writes the layer's output.
-        let mixer_out = match &acts.mlp {
-            Some(m) => m.layers[l].x_in.raw_ptr(&ctx.stream),
-            None => stream_out,
+        let mixer_out = if opens_pair(bidi, l) {
+            pair_rows
+        } else {
+            let first_mlp = if reversed { l - 1 } else { l };
+            match &acts.mlp {
+                Some(m) => m.layers[first_mlp].x_in.raw_ptr(&ctx.stream),
+                None => stream_out,
+            }
         };
-        gpu_forward_mamba3_layer(
+        layer_forward(
             exec,
             mixer_out,
-            &mut acts.layers[l],
-            &mamba_w.layers[l],
-            &layer_ptrs,
+            (&mut acts.layers[l], &mamba_w.layers[l], &layer_ptrs),
             scratch,
+            reversed.then_some(pair_rows),
         )?;
         if let Some(m) = acts.mlp.as_mut() {
-            gpu_forward_mamba3_mlp(exec, stream_out, &mut m.layers[l], &mamba_w.mlp[l], scratch)?;
+            if reversed {
+                let into_second = m.layers[l].x_in.raw_ptr(&ctx.stream);
+                gpu_forward_mamba3_mlp(
+                    exec,
+                    into_second,
+                    &mut m.layers[l - 1],
+                    &mamba_w.mlp[l - 1],
+                    scratch,
+                )?;
+                gpu_forward_mamba3_mlp(
+                    exec,
+                    stream_out,
+                    &mut m.layers[l],
+                    &mamba_w.mlp[l],
+                    scratch,
+                )?;
+            } else if !opens_pair(bidi, l) {
+                gpu_forward_mamba3_mlp(
+                    exec,
+                    stream_out,
+                    &mut m.layers[l],
+                    &mamba_w.mlp[l],
+                    scratch,
+                )?;
+            }
         }
     }
 
@@ -980,6 +1067,11 @@ pub fn gpu_forward_mamba3_target_burnin(
     tgt: &mut GpuMamba3TargetScratch,
 ) -> Result<(), String> {
     exec.check_state_cap()?;
+    if exec.dims.bidirectional {
+        return Err("the target burn-in reads its layers one way: \
+                    a bidirectional model has no target network forward"
+            .into());
+    }
     let mlp_hidden = mamba_w.mlp.first().map(GpuMamba3MlpWeights::hidden);
     if let Some(h) = mlp_hidden
         && tgt.mlp_act.len() != exec.dims.bt() * h

@@ -21,7 +21,8 @@
 use super::config::Mamba3Config;
 use super::weights::{Mamba3LayerWeights, Mamba3Weights};
 use crate::ops::st_io::{
-    TensorList, block_norm, block_norm_entry, final_norm, final_norm_entry, read_f32,
+    TensorList, bidirectional, bidirectional_entry, block_norm, block_norm_entry, final_norm,
+    final_norm_entry, read_f32,
 };
 use safetensors::tensor::SafeTensors;
 use std::collections::HashMap;
@@ -119,6 +120,7 @@ pub(crate) fn checkpoint_parts<'a>(
     ]);
     meta.extend(block_norm_entry(cfg.block_norm));
     meta.extend(final_norm_entry(cfg.final_norm));
+    meta.extend(bidirectional_entry(cfg.bidirectional));
     Ok((list, meta))
 }
 
@@ -193,6 +195,14 @@ fn weights_from_bytes(data: &[u8], cfg: &Mamba3Config) -> Result<(Mamba3Weights,
             "checkpoint identity mismatch: file has final_norm={stored_final}, caller \
              config says {} — the backbone's output differs",
             cfg.final_norm
+        ));
+    }
+    let stored_bidi = bidirectional(meta_map)?;
+    if stored_bidi != cfg.bidirectional {
+        return Err(format!(
+            "checkpoint identity mismatch: file has bidirectional={stored_bidi}, caller \
+             config says {} — every odd layer reads the other way",
+            cfg.bidirectional
         ));
     }
     let stored_mlp: usize = match meta_map.get("d_intermediate") {
@@ -360,6 +370,7 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(Mamba3Weights, Mamba3Config, usiz
         scan_mode,
         block_norm: block_norm(meta_map)?,
         final_norm: final_norm(meta_map)?,
+        bidirectional: bidirectional(meta_map)?,
         // Checkpoints from before the MLP carry no MLP.
         d_intermediate: match meta_map.get("d_intermediate") {
             Some(v) => v

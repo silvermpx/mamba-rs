@@ -90,6 +90,7 @@ fn run_case(cfg: &MambaConfig, input_dim: usize, seq_len: usize, seed: u64, labe
         rms_norm_eps: cfg.rms_norm_eps,
         block_norm: cfg.block_norm,
         bcdt_rms_eps: None,
+        bidirectional: false,
     };
 
     // ---- GPU TRAINING forward (the path the checkpoint was trained on) ----
@@ -208,6 +209,7 @@ fn gpu_inference_prefill_matches_gpu_training_forward_sequential() {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         block_norm: mamba_rs::BlockNorm::Rms,
         final_norm: true,
+        bidirectional: false,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -231,6 +233,7 @@ fn gpu_inference_prefill_matches_gpu_training_forward_parallel_scan() {
         scan_mode: mamba_rs::config::ScanMode::Auto,
         block_norm: mamba_rs::BlockNorm::Rms,
         final_norm: true,
+        bidirectional: false,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,

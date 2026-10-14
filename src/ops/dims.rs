@@ -41,6 +41,9 @@ pub struct MambaDims {
     /// The gated MLP's hidden width, 0 without one (see
     /// [`MambaConfig::mlp_hidden`]).
     pub mlp_hidden: usize,
+    /// Whether the layers read in both directions, in pairs (see
+    /// [`MambaConfig::bidirectional`]).
+    pub bidirectional: bool,
 }
 
 impl MambaDims {
@@ -79,6 +82,7 @@ impl MambaDims {
             proj_bias: false,
             conv_bias: true,
             mlp_hidden: 0,
+            bidirectional: false,
         }
     }
 
@@ -100,6 +104,7 @@ impl MambaDims {
         dims.proj_bias = config.proj_bias;
         dims.conv_bias = config.conv_bias;
         dims.mlp_hidden = config.mlp_hidden();
+        dims.bidirectional = config.bidirectional;
         dims
     }
 }

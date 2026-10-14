@@ -120,6 +120,7 @@ fn m1_gpu_benchmark() {
             rms_norm_eps: 1e-5,
             block_norm: mamba_rs::BlockNorm::Rms,
             bcdt_rms_eps: None,
+            bidirectional: false,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &cpu_weights).unwrap();

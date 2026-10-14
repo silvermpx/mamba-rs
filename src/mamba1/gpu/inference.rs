@@ -55,6 +55,7 @@ mod model_gemm_manifest_tests {
             scan_mode: ScanMode::Sequential,
             block_norm: crate::config::BlockNorm::Rms,
             final_norm: true,
+            bidirectional: false,
             rms_norm_eps: 1e-5,
             bcdt_rms_eps: None,
             dt_rank: None,
@@ -877,6 +878,7 @@ impl MambaGpuEngine {
             rms_norm_eps: self.cfg.rms_norm_eps,
             block_norm: self.cfg.block_norm,
             bcdt_rms_eps: self.cfg.bcdt_rms_eps,
+            bidirectional: self.cfg.bidirectional,
         }
     }
 
@@ -1258,6 +1260,11 @@ impl MambaGpuEngine {
         scratch: &mut MambaGpuScratch,
         stop_after_layer: Option<usize>,
     ) -> Result<(), String> {
+        if self.cfg.bidirectional {
+            return Err(
+                "a bidirectional model reads whole sequences and has no decode step".into(),
+            );
+        }
         let b = self.batch;
         let cfg = &self.cfg;
         let dm = cfg.d_model;
@@ -1904,6 +1911,11 @@ impl MambaGpuEngineMixed {
         stop_after_layer: Option<usize>,
     ) -> Result<(), String> {
         let engine = &self.engine;
+        if engine.cfg.bidirectional {
+            return Err(
+                "a bidirectional model reads whole sequences and has no decode step".into(),
+            );
+        }
         if scratch.dtype != self.mixed_weights.bulk_dtype {
             return Err(format!(
                 "M1 mixed step: scratch dtype {:?} does not match the weights' {:?}",
@@ -3340,6 +3352,7 @@ impl MambaGpuBackbone {
             rms_norm_eps: cfg.rms_norm_eps,
             block_norm: cfg.block_norm,
             bcdt_rms_eps: cfg.bcdt_rms_eps,
+            bidirectional: cfg.bidirectional,
         }
     }
 }

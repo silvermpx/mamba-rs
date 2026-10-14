@@ -19,6 +19,7 @@
 //! bit-equal to Single by construction; both are bit-equal to the training
 //! layer forward (the anchor test pins it).
 
+use crate::bidi::{mlps_after, opens_pair, reads_reversed, reverse_rows};
 use rayon::prelude::*;
 
 use crate::mamba1::cpu::prefill::{
@@ -94,6 +95,9 @@ pub struct Mamba3PrefillScratch {
     y_rm: Vec<f32>,
     gated: Vec<f32>,
     out: Vec<f32>,
+    /// A bidirectional pair's input rows, which both its layers read
+    /// (empty for a model read one way).
+    pair_in: Vec<f32>,
     /// The gated MLP's window buffers, grown on first use.
     mlp: crate::mlp::cpu::GatedMlpRowsScratch,
     /// The input rows as the input projection multiplies them in a reduced
@@ -125,6 +129,14 @@ impl Mamba3PrefillScratch {
             y_rm: vec![0.0; t * di],
             gated: vec![0.0; t * di],
             out: vec![0.0; t * dims.d_model],
+            pair_in: vec![
+                0.0;
+                if dims.bidirectional {
+                    t * dims.d_model
+                } else {
+                    0
+                }
+            ],
             mlp: crate::mlp::cpu::GatedMlpRowsScratch::default(),
             input: Vec::new(),
             dtype: WeightDtype::F32,
@@ -390,15 +402,42 @@ pub fn forward_mamba3_backbone_prefill_mode(
         );
     }
 
+    let bidi = dims.bidirectional;
+    // A bidirectional model reads whole prompts: each starts from the
+    // empty state.
+    if bidi {
+        for st in states.iter_mut() {
+            for s in [
+                &mut st.ssm_state,
+                &mut st.k_state,
+                &mut st.v_state,
+                &mut st.angle_state,
+            ] {
+                s.fill(0.0);
+            }
+        }
+    }
+    let mut pair_in = std::mem::take(&mut scratch.pair_in);
     for (layer_idx, lw) in w.layers.iter().enumerate() {
         let lstate = &mut states[layer_idx];
+        if opens_pair(bidi, layer_idx) {
+            pair_in[..t_dm].copy_from_slice(&temporal_out[..t_dm]);
+        }
+        // The second layer of a pair reads the pair's input and runs on
+        // the prompt reversed, from its normalised rows to its output.
+        let reversed = reads_reversed(bidi, layer_idx);
 
         // F1: RMSNorm rows (temporal_out doubles as the residual — read
         // here, updated in place at F7).
+        let src: &[f32] = if reversed {
+            &pair_in[..t_dm]
+        } else {
+            &temporal_out[..t_dm]
+        };
         zip_rows(
             mode,
             (&mut scratch.post_norm[..t_dm], dm),
-            (&temporal_out[..t_dm], dm),
+            (src, dm),
             |dst, src| {
                 if lw.norm_bias.is_empty() {
                     let sum_sq = simd_sum_sq(src);
@@ -411,6 +450,10 @@ pub fn forward_mamba3_backbone_prefill_mode(
                 store(dtype, dst);
             },
         );
+
+        if reversed {
+            reverse_rows(&mut scratch.post_norm[..t_dm], dm, None);
+        }
 
         // F2: in_proj GEMM.
         scratch.gemm.forward(
@@ -615,6 +658,9 @@ pub fn forward_mamba3_backbone_prefill_mode(
             (&lw.out_proj_w, None),
             (t_len, di, dm),
         );
+        if reversed {
+            reverse_rows(&mut scratch.out[..t_dm], dm, None);
+        }
         zip_rows(
             mode,
             (&mut temporal_out[..t_dm], dm),
@@ -626,8 +672,10 @@ pub fn forward_mamba3_backbone_prefill_mode(
             },
         );
 
-        // The MLP branch of a model that has one, over every row.
-        if let Some(mlp) = w.mlp.get(layer_idx) {
+        // The MLP branch of a model that has one, over every row; a
+        // pair's MLPs follow both its mixers.
+        for m in mlps_after(bidi, layer_idx) {
+            let Some(mlp) = w.mlp.get(m) else { continue };
             crate::mlp::cpu::gated_mlp_rows(
                 &mut temporal_out[..t_dm],
                 t_len,
@@ -649,6 +697,8 @@ pub fn forward_mamba3_backbone_prefill_mode(
             );
         }
     }
+
+    scratch.pair_in = pair_in;
 
     // norm_f at EVERY position, via the public in-place norm (the anchor
     // test reproduces the exact same call per row).

@@ -8124,6 +8124,16 @@ const SHARED_SOURCE_FRAGMENTS: &[SourceFragment] = &[
         allowed_quoted_includes: &["_typed_prelude.cuh"],
     },
     SourceFragment {
+        logical_name: "kernels/_varlen.cuh",
+        source: include_str!("../../../kernels/_varlen.cuh"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/sequence_reverse.cu",
+        source: include_str!("../../../kernels/sequence_reverse.cu"),
+        allowed_quoted_includes: &["_varlen.cuh"],
+    },
+    SourceFragment {
         logical_name: "kernels/loss_scaler.cu",
         source: include_str!("../../../kernels/loss_scaler.cu"),
         allowed_quoted_includes: &[],
@@ -15444,6 +15454,8 @@ mod tests {
         "kernels/_typed_prelude.cuh",
         "kernels/norms.cu",
         "kernels/elementwise.cu",
+        "kernels/_varlen.cuh",
+        "kernels/sequence_reverse.cu",
         "kernels/loss_scaler.cu",
         "kernels/grad_clip.cu",
         "kernels/adamw.cu",

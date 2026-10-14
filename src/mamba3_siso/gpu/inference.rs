@@ -644,6 +644,7 @@ impl Mamba3GpuEngine {
             ssm_norm_eps: self.cfg.ssm_norm_eps,
             block_norm: self.cfg.block_norm,
             use_parallel_scan: self.cfg.prefill_use_parallel_scan(),
+            bidirectional: self.cfg.bidirectional,
         }
     }
 
@@ -710,6 +711,11 @@ impl Mamba3GpuEngine {
         state: &mut Mamba3GpuState,
         scratch: &mut Mamba3GpuScratch,
     ) -> Result<(), String> {
+        if self.cfg.bidirectional {
+            return Err(
+                "a bidirectional model reads whole sequences and has no decode step".into(),
+            );
+        }
         let b = self.batch;
         let dm = self.cfg.d_model;
 
@@ -1525,6 +1531,11 @@ impl Mamba3GpuEngineMixed {
         use cudarc::driver::PushKernelArg;
 
         let engine = &self.engine;
+        if engine.cfg.bidirectional {
+            return Err(
+                "a bidirectional model reads whole sequences and has no decode step".into(),
+            );
+        }
         if scratch.dtype != self.mixed_weights.bulk_dtype {
             return Err(format!(
                 "M3 mixed step: scratch dtype {:?} does not match the weights' {:?}",

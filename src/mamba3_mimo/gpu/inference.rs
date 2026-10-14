@@ -10,6 +10,9 @@
 
 use cudarc::driver::PushKernelArg;
 
+use crate::bidi::{mlps_after, opens_pair, reads_reversed};
+use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
+
 use super::kernels::{CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunked_geom, scan_geom};
 use crate::config::ScanMode;
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
@@ -119,6 +122,9 @@ pub struct Mamba3MimoGpuWindow {
     e0: GpuBuffer,
     contrib: GpuBuffer,
     enter: GpuBuffer,
+    /// A bidirectional pair's input rows, reversed for its second layer
+    /// (one element without pairs).
+    pair_in: GpuBuffer,
 }
 
 impl Mamba3MimoGpuWindow {
@@ -479,6 +485,7 @@ impl Mamba3MimoGpuEngine {
             mlp_up: typed(rows * 2 * hidden)?,
             mlp_act: typed(rows * hidden)?,
             final_rows: z(rows * c.d_model)?,
+            pair_in: z(if c.bidirectional { rows * c.d_model } else { 1 })?,
             coef: z(ch(rows * nh * 4))?,
             sn: z(ch(rows * nh * na))?,
             cs: z(ch(rows * nh * na))?,
@@ -838,9 +845,37 @@ impl Mamba3MimoGpuEngine {
         );
         let eps = c.ssm_norm_eps;
         let a_floor = c.a_floor;
+        let bidi = c.bidirectional;
+        // A bidirectional model's window is whole sequences from the empty
+        // state: it carries nothing in or out.
+        if bidi {
+            for st in [&state.ssm, &state.k, &state.v, &state.angle] {
+                zero_bytes(&self.ctx, st.cached_ptr(), st.len() * 4)?;
+            }
+        }
+        let pair_in = win.pair_in.cached_ptr();
+        let window = |ptr, elem_bytes| WindowRows {
+            ptr,
+            elem_bytes,
+            batch: b,
+            seq_len: t_len,
+            width: dm,
+        };
         for (l, lw) in self.layers.iter().enumerate() {
+            // A pair's first layer keeps the pair's input; its second reads
+            // it reversed, and its output turns back before the add.
+            let reversed = reads_reversed(bidi, l);
+            if opens_pair(bidi, l) {
+                win.pair_in.copy_from_raw(&win.temporal, stream)?;
+            }
+            let norm_in = if reversed {
+                reverse_rows(&self.ctx, window(pair_in, 4), 0)?;
+                pair_in
+            } else {
+                temporal
+            };
             self.block_norm(
-                (post, temporal, rms),
+                (post, norm_in, rms),
                 norm_params(&lw.norm_weight, &lw.norm_bias),
                 (rows, true),
             )?;
@@ -976,8 +1011,15 @@ impl Mamba3MimoGpuEngine {
                 None,
                 (rows, di, dm),
             )?;
+            if reversed {
+                reverse_rows(&self.ctx, window(out, self.act.size_bytes()), 0)?;
+            }
             self.residual_add(temporal, out, rows * dm)?;
-            if let Some(m) = &lw.mlp {
+            // A pair's MLPs follow both its mixers.
+            for m_l in mlps_after(bidi, l) {
+                let Some(m) = &self.layers[m_l].mlp else {
+                    continue;
+                };
                 let (upp, actp) = (win.mlp_up.cached_ptr(), win.mlp_act.cached_ptr());
                 self.block_norm(
                     (post, temporal, rms),

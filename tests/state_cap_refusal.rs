@@ -34,6 +34,7 @@ fn m1_dims(d_state: usize, d_conv: usize) -> GpuMambaDims {
         rms_norm_eps: 1e-5,
         block_norm: mamba_rs::BlockNorm::Rms,
         bcdt_rms_eps: None,
+        bidirectional: false,
     }
 }
 
@@ -78,6 +79,7 @@ fn m3_dims_past_the_compiled_capacity_are_refused() {
         block_norm: mamba_rs::BlockNorm::Rms,
         is_outproj_norm: false,
         use_parallel_scan: true,
+        bidirectional: false,
     };
     let fits = dims(16);
     M3Exec {

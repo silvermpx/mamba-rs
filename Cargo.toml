@@ -822,6 +822,15 @@ path = "tests/segment_stacking_gpu.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "bidirectional_cpu"
+path = "tests/bidirectional_cpu.rs"
+
+[[test]]
+name = "bidirectional_gpu"
+path = "tests/bidirectional_gpu.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "device_io_gpu"
 path = "tests/device_io_gpu.rs"
 required-features = ["cuda"]

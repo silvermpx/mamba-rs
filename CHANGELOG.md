@@ -287,6 +287,18 @@
   layers of the caller's own trains and runs with no row crossing the
   host, captured graphs included, with the bits of the host path; in f16
   a trainer's input gradient comes back unscaled on the device.
+- Bidirectional models in every family, as the stacks of Vim, Caduceus
+  and burn-mamba's `BidiLayers`: `bidirectional: true` in a family's
+  configuration pairs its layers. Layer 2k reads every sequence forward
+  and layer 2k+1 reads it reversed, both from the pair's input, and the
+  pair adds `(x + y_forward) + y_reversed` to the residual stream; the
+  norms, the projections and the gate see each row where it stands and
+  only the convolution and the scan run the other way, each packed
+  sequence within its own span. A pair's gated MLPs follow its two
+  mixers. The CPU and the GPU train and serve prompts, and the
+  safetensors checkpoints record the flag. A bidirectional model reads
+  whole sequences: it needs an even number of layers, has no decode step
+  and carries no state from one window or prompt to the next.
 
 ### Changed
 

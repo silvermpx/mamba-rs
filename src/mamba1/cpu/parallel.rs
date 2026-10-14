@@ -392,6 +392,10 @@ static M1_GRAD_SLOT_POOL: std::sync::Mutex<Option<M1GradSlotPool>> = std::sync::
 /// - `target_w`: target network Mamba weights (read-only).
 /// - `dims`: collected Mamba dimensions (`dims.seq_len` is ignored; target is always T=1).
 /// - `b_sz`: batch size (number of samples).
+///
+/// # Panics
+///
+/// For a bidirectional model, whose layers read in pairs.
 pub fn parallel_mamba_target_forward(
     target_temporal: &mut [f32],
     target_mamba_inputs: &[f32],
@@ -399,6 +403,10 @@ pub fn parallel_mamba_target_forward(
     dims: &MambaDims,
     b_sz: usize,
 ) {
+    assert!(
+        !dims.bidirectional,
+        "the target helpers step one way: a bidirectional model has no target step"
+    );
     let dm = dims.d_model;
     let di = dims.d_inner;
     let ds = dims.d_state;
@@ -475,6 +483,10 @@ unsafe impl Sync for TargetRawPtr {}
 /// Input_proj is pre-batched by the caller for efficiency.
 ///
 /// Source: R2D2 (Kapturowski 2019) — both online and target networks get burn-in.
+///
+/// # Panics
+///
+/// For a bidirectional model, whose layers read in pairs.
 pub fn parallel_mamba_target_forward_burnin(
     target_temporal: &mut [f32], // [B * d_model] — output (last timestep per sample)
     target_ip_out_flat: &[f32],  // [B * seq_len * d_model] — pre-batched input_proj output
@@ -483,6 +495,10 @@ pub fn parallel_mamba_target_forward_burnin(
     b_sz: usize,
     seq_len: usize,
 ) {
+    assert!(
+        !dims.bidirectional,
+        "the target helpers step one way: a bidirectional model has no target step"
+    );
     let dm = dims.d_model;
     let di = dims.d_inner;
     let ds = dims.d_state;

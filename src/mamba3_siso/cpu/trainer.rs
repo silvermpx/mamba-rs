@@ -4,12 +4,13 @@
 //! composes them: the input projection, every layer followed by its gated
 //! MLP when the model has one, the final RMSNorm, and the mirrored backward.
 
-use super::backward::backward_mamba3_layer_batched;
+use super::backward::{backward_mamba3_layer_batched, backward_mamba3_layer_in};
 use super::dims::Mamba3Dims;
 use super::flat::Mamba3LayerFlat;
-use super::forward::{Mamba3LayerStateMut, forward_mamba3_layer_batched};
+use super::forward::{Mamba3LayerStateMut, forward_mamba3_layer_in};
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
+use crate::bidi::{PairGrad, mlps_after, opens_pair, reads_reversed, reverse_rows};
 use crate::config::ModelFamily;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
@@ -83,6 +84,10 @@ pub(crate) struct Mamba3CpuSeq {
     /// RMS, or a LayerNorm's std and mean.
     norm_f_in: Vec<f32>,
     norm_f_inv: Vec<f32>,
+    /// A bidirectional pair's input with every sequence reversed in the
+    /// forward, d loss / d (its output) in the backward; empty for a model
+    /// read one way.
+    pair: Vec<f32>,
     mlp: GatedMlpRowsScratch,
     mlp_bwd: GatedMlpBackwardScratch,
 }
@@ -143,6 +148,14 @@ impl CpuFamily for Mamba3Cpu {
             mlp_in: w.mlp.iter().map(|_| vec![0.0; seq_len * dm]).collect(),
             norm_f_in: vec![0.0; seq_len * dm],
             norm_f_inv: vec![0.0; seq_len * self.cfg.block_norm.stats_per_row()],
+            pair: vec![
+                0.0;
+                if self.cfg.bidirectional {
+                    seq_len * dm
+                } else {
+                    0
+                }
+            ],
             mlp,
             mlp_bwd,
         })
@@ -167,6 +180,12 @@ impl CpuFamily for Mamba3Cpu {
         out: &mut [f32],
     ) -> Result<(), String> {
         let (dm, t_len, eps) = (self.cfg.d_model, self.dims.seq_len, self.cfg.rms_norm_eps);
+        let bidi = self.cfg.bidirectional;
+        // A bidirectional model reads whole sequences: every window starts
+        // from the empty state.
+        if bidi {
+            self.reset_seq(seq);
+        }
         let rows = &mut seq.norm_f_in;
         if w.input_proj_w.is_empty() {
             seq.input.copy_from_slice(input);
@@ -186,7 +205,11 @@ impl CpuFamily for Mamba3Cpu {
         }
         let [ssm_l, k_l, v_l, a_l] = self.per_layer();
         for (l, lw) in w.layers.iter().enumerate() {
-            forward_mamba3_layer_batched(
+            if opens_pair(bidi, l) {
+                seq.pair.copy_from_slice(rows);
+                reverse_rows(&mut seq.pair, dm, seq.phase.varlen.as_ref());
+            }
+            forward_mamba3_layer_in(
                 rows,
                 &mut seq.acts[l],
                 lw,
@@ -198,12 +221,15 @@ impl CpuFamily for Mamba3Cpu {
                 },
                 &mut seq.phase,
                 &self.dims,
+                reads_reversed(bidi, l).then_some(&seq.pair[..]),
             );
-            if let Some(m) = w.mlp.get(l) {
-                seq.mlp_in[l].copy_from_slice(rows);
-                gated_mlp_rows(rows, t_len, m, &mut seq.mlp, sgemm_forward, |dst, src| {
+            // A pair's MLPs follow both its mixers.
+            for m in mlps_after(bidi, l) {
+                let Some(mw) = w.mlp.get(m) else { continue };
+                seq.mlp_in[m].copy_from_slice(rows);
+                gated_mlp_rows(rows, t_len, mw, &mut seq.mlp, sgemm_forward, |dst, src| {
                     for (d_row, s_row) in dst.chunks_exact_mut(dm).zip(src.chunks_exact(dm)) {
-                        mlp_norm_row(d_row, s_row, m, eps);
+                        mlp_norm_row(d_row, s_row, mw, eps);
                     }
                 });
             }
@@ -282,26 +308,61 @@ impl CpuFamily for Mamba3Cpu {
             }
         }
         seq.phase.zero_all();
-        for l in (0..w.layers.len()).rev() {
-            if let Some(m) = w.mlp.get(l) {
-                gated_mlp_rows_backward(
+        let mlp_backward =
+            |l: usize, d_out: &mut [f32], grads: &mut Mamba3CpuWeights, seq: &mut Mamba3CpuSeq| {
+                if let Some(m) = w.mlp.get(l) {
+                    gated_mlp_rows_backward(
+                        d_out,
+                        &seq.mlp_in[l],
+                        t_len,
+                        (m, &mut grads.mlp[l]),
+                        &mut seq.mlp_bwd,
+                        eps,
+                    );
+                }
+            };
+        if self.cfg.bidirectional {
+            // A pair from its MLPs down: both mixers take d loss / d (the
+            // pair's output), the second reversed, and each norm's gradient
+            // joins the stream's.
+            for l in (0..w.layers.len()).step_by(2).rev() {
+                mlp_backward(l + 1, d_out, grads, seq);
+                mlp_backward(l, d_out, grads, seq);
+                seq.pair.copy_from_slice(&d_out[..t_len * dm]);
+                reverse_rows(&mut seq.pair, dm, seq.phase.varlen.as_ref());
+                for (layer, reversed) in [(l + 1, true), (l, false)] {
+                    if !reversed {
+                        reverse_rows(&mut seq.pair, dm, seq.phase.varlen.as_ref());
+                    }
+                    backward_mamba3_layer_in(
+                        d_out,
+                        &seq.acts[layer],
+                        (&w.layers[layer], &mut grads.layers[layer]),
+                        &mut seq.phase,
+                        (
+                            &self.dims,
+                            None,
+                            Some(PairGrad {
+                                d_out: &seq.pair,
+                                reversed,
+                            }),
+                        ),
+                    );
+                }
+            }
+        } else {
+            for l in (0..w.layers.len()).rev() {
+                mlp_backward(l, d_out, grads, seq);
+                backward_mamba3_layer_batched(
                     d_out,
-                    &seq.mlp_in[l],
-                    t_len,
-                    (m, &mut grads.mlp[l]),
-                    &mut seq.mlp_bwd,
-                    eps,
+                    &seq.acts[l],
+                    &w.layers[l],
+                    &mut grads.layers[l],
+                    &mut seq.phase,
+                    &self.dims,
+                    None,
                 );
             }
-            backward_mamba3_layer_batched(
-                d_out,
-                &seq.acts[l],
-                &w.layers[l],
-                &mut grads.layers[l],
-                &mut seq.phase,
-                &self.dims,
-                None,
-            );
         }
         if w.input_proj_w.is_empty() {
             let n = d_input.len();

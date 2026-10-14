@@ -136,6 +136,7 @@ impl Scenario {
             block_norm: cfg.block_norm,
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: self.use_parallel_scan,
+            bidirectional: false,
         }
     }
 }

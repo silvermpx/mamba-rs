@@ -23,6 +23,8 @@ use super::mixer_norms::launch_bcdt_norm;
 use super::weights::{
     MambaLayerWeightsView, MambaWeightsView, final_norm_params, layer_norm_params,
 };
+use crate::bidi::{mlps_after, opens_pair, reads_reversed};
+use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 use crate::gpu::blas::{TypedPtr, gpu_gemm_forward_dispatch, gpu_gemm_typed_forward_raw};
 use crate::gpu::block_norm;
 use crate::gpu::buffers::GpuBuffer;
@@ -560,9 +562,28 @@ fn prefill_body<W: MambaWeightsView>(
     let ts_i = if tmajor_in { ts as i32 } else { 0 };
 
     let f32_sz = std::mem::size_of::<f32>() as u64;
+    let bidi = dims.bidirectional;
+    // A bidirectional prompt is whole sequences from the empty state.
+    if bidi {
+        for buf in [&state.conv, &state.ssm] {
+            zero_bytes(ctx, buf.cached_ptr(), buf.len() * 4)?;
+        }
+    }
+    let window = |ptr| WindowRows {
+        ptr,
+        elem_bytes: 4,
+        batch: b,
+        seq_len: t,
+        width: dm,
+    };
 
     for layer_idx in 0..weights.n_layers() {
         let lw = weights.layer(layer_idx);
+        // A bidirectional pair: the first layer's output joins the stream
+        // before the second runs, which reads the pair's input reversed;
+        // the second's output turns back and stays pending like any
+        // block's.
+        let reversed = reads_reversed(bidi, layer_idx);
 
         // Per-layer state pointers into the inference state (NOT scratch.conv_states).
         // inference state layout: conv[n_layers][batch * d_inner * d_conv],
@@ -588,7 +609,25 @@ fn prefill_body<W: MambaWeightsView>(
             let out_ptr = scratch.out_flat.cached_ptr();
             let rms_ptr = scratch.rms_discard.cached_ptr();
             let shape = (bt, dm, dims.rms_norm_eps);
-            if layer_idx == 0 {
+            if reversed {
+                crate::gpu::launch::launch_elems(
+                    &ctx.stream,
+                    &ctx.kernels.vec_add_inplace,
+                    &[out_ptr, res_ptr],
+                    bt * dm,
+                    format_args!("prefill pair add L{layer_idx}"),
+                )?;
+                let pair_in = scratch.pair_in.cached_ptr();
+                reverse_rows(ctx, window(pair_in), 0)?;
+                block_norm::forward(
+                    ctx,
+                    WeightDtype::F32,
+                    (res_ptr, rms_ptr, pair_in),
+                    layer_norm_params(lw),
+                    shape,
+                    "block norm prefill",
+                )?;
+            } else if layer_idx == 0 {
                 block_norm::forward(
                     ctx,
                     WeightDtype::F32,
@@ -606,6 +645,9 @@ fn prefill_body<W: MambaWeightsView>(
                     shape,
                     "block norm prefill",
                 )?;
+            }
+            if opens_pair(bidi, layer_idx) {
+                scratch.pair_in.copy_from(&scratch.out_flat, &ctx.stream)?;
             }
         }
 
@@ -877,9 +919,15 @@ fn prefill_body<W: MambaWeightsView>(
             (bt, di, dm),
         )?;
 
+        if reversed {
+            reverse_rows(ctx, window(scratch.residual.cached_ptr()), 0)?;
+        }
+
         // The gated MLP: its norm takes the block output's pending add into
-        // out_flat, and its own output is left pending in `residual`.
-        if let Some(m) = weights.mlp(layer_idx) {
+        // out_flat, and its own output is left pending in `residual`. A
+        // pair's MLPs follow both its mixers.
+        for m_l in mlps_after(bidi, layer_idx) {
+            let Some(m) = weights.mlp(m_l) else { continue };
             let (stream_rows, rms) = (
                 scratch.out_flat.cached_ptr(),
                 scratch.rms_discard.cached_ptr(),
@@ -1103,9 +1151,28 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
     scratch.residual.copy_from(ip_out_flat, &ctx.stream)?;
 
     let f32_sz = std::mem::size_of::<f32>() as u64;
+    let bidi = dims.bidirectional;
+    // A bidirectional prompt is whole sequences from the empty state.
+    if bidi {
+        for buf in [&state.conv, &state.ssm] {
+            zero_bytes(ctx, buf.cached_ptr(), buf.len() * 4)?;
+        }
+    }
+    let window = |ptr, elem_bytes| WindowRows {
+        ptr,
+        elem_bytes,
+        batch: b,
+        seq_len: t,
+        width: dm,
+    };
 
     for layer_idx in 0..weights.n_layers() {
         let lw = weights.layer(layer_idx);
+        // A bidirectional pair: the first layer's output joins the stream
+        // before the second runs, which reads the pair's input reversed;
+        // the second's output turns back and stays pending like any
+        // block's.
+        let reversed = reads_reversed(bidi, layer_idx);
         let conv_per_layer = b * di * d_conv;
         let ssm_per_layer = b * di * ds;
         let conv_ptr = state.conv.cached_ptr() + (layer_idx * conv_per_layer) as u64 * f32_sz;
@@ -1123,7 +1190,25 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
             let rms_ptr = scratch.rms_discard.cached_ptr();
             let res_ptr = scratch.residual.cached_ptr();
             let shape = (bt, dm, dims.rms_norm_eps);
-            if layer_idx == 0 {
+            if reversed {
+                crate::gpu::launch::launch_elems(
+                    &ctx.stream,
+                    k.residual_add_f32_typed.get(dt),
+                    &[res_ptr, res_ptr, out_ptr],
+                    bt * dm,
+                    format_args!("prefill pair add L{layer_idx}"),
+                )?;
+                let pair_in = scratch.pair_in.cached_ptr();
+                reverse_rows(ctx, window(pair_in, 4), 0)?;
+                block_norm::forward(
+                    ctx,
+                    dt,
+                    (out_ptr, rms_ptr, pair_in),
+                    layer_norm_params(lw),
+                    shape,
+                    "block norm prefill mixed",
+                )?;
+            } else if layer_idx == 0 {
                 block_norm::forward(
                     ctx,
                     dt,
@@ -1141,6 +1226,9 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                     shape,
                     "block norm prefill mixed",
                 )?;
+            }
+            if opens_pair(bidi, layer_idx) {
+                scratch.pair_in.copy_from(&scratch.residual, &ctx.stream)?;
             }
         }
 
@@ -1459,9 +1547,19 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
             (bt, di, dm),
         )?;
 
+        if reversed {
+            reverse_rows(
+                ctx,
+                window(scratch.out_flat.cached_ptr(), dt.size_bytes()),
+                0,
+            )?;
+        }
+
         // The gated MLP: its norm takes the block output's pending add into
         // the f32 residual, and its own output is left pending in out_flat.
-        if let Some(m) = weights.mlp(layer_idx) {
+        // A pair's MLPs follow both its mixers.
+        for m_l in mlps_after(bidi, layer_idx) {
+            let Some(m) = weights.mlp(m_l) else { continue };
             let ptrs = (
                 scratch.residual.cached_ptr(),
                 scratch.out_flat.cached_ptr(),

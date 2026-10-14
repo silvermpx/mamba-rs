@@ -24,6 +24,7 @@
 //!   launches
 
 pub mod adamw;
+pub(crate) mod bidi;
 pub mod blas;
 pub(crate) mod block_norm;
 pub mod buffers;

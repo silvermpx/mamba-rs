@@ -16,6 +16,7 @@ use super::super::weights::{Mamba2LayerWeights, Mamba2Weights};
 use super::core::{
     DSkip, HeadScan, block_norm_row, conv_hist_push, conv_silu_token, dt_da, gate_token, head_scan,
 };
+use crate::bidi::{mlps_after, opens_pair, reads_reversed, reverse_rows};
 use crate::mamba1::cpu::prefill::{PrefillMode, zip_rows};
 use crate::mlp::cpu::{GatedMlpRowsScratch, gated_mlp_rows, mlp_norm_row};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
@@ -35,6 +36,8 @@ pub struct Mamba2PrefillScratch {
     y_rm: Vec<f32>,
     gated: Vec<f32>,
     out: Vec<f32>,
+    /// A bidirectional pair's input rows, which both its layers read.
+    pair_in: Vec<f32>,
     mlp: GatedMlpRowsScratch,
     /// The precision of the windows (see `CpuOptions`).
     dtype: WeightDtype,
@@ -52,6 +55,7 @@ impl Mamba2PrefillScratch {
             y_rm: Vec::new(),
             gated: Vec::new(),
             out: Vec::new(),
+            pair_in: Vec::new(),
             mlp: GatedMlpRowsScratch::default(),
             dtype: WeightDtype::F32,
             gemm: LaneGemm::default(),
@@ -77,6 +81,9 @@ impl Mamba2PrefillScratch {
         self.y_rm.resize(rows * cfg.ssm_dim(), 0.0);
         self.gated.resize(rows * cfg.d_inner(), 0.0);
         self.out.resize(rows * dm, 0.0);
+        if cfg.bidirectional {
+            self.pair_in.resize(rows * dm, 0.0);
+        }
         self.rows = rows;
     }
 }
@@ -111,12 +118,15 @@ fn input_proj_dtype(dtype: WeightDtype) -> WeightDtype {
 }
 
 /// One Mamba-2 mixer over a window of `t_len` rows of `temporal`
-/// (`[t_len, d_model]`), residual included, advancing `state`.
+/// (`[t_len, d_model]`), residual included, advancing `state`. `pair_in`,
+/// set for the second layer of a bidirectional pair, is the pair's input:
+/// the norm reads it, the mixer reads the window reversed, and the output
+/// joins `temporal`, the stream after the pair's first layer.
 fn mamba2_layer_prefill(
     temporal: &mut [f32],
     t_len: usize,
     (lw, state): (&Mamba2LayerWeights, &mut Mamba2LayerState),
-    s: &mut Mamba2PrefillScratch,
+    (s, pair_in): (&mut Mamba2PrefillScratch, Option<&[f32]>),
     (cfg, mode): (&Mamba2Config, PrefillMode),
 ) {
     let (dm, di, ip, cd) = (
@@ -138,10 +148,13 @@ fn mamba2_layer_prefill(
     zip_rows(
         mode,
         (&mut s.norm[..t_len * dm], dm),
-        (&temporal[..t_len * dm], dm),
+        (&pair_in.unwrap_or(temporal)[..t_len * dm], dm),
         |d, x| block_norm_row(d, x, (&lw.norm_weight, &lw.norm_bias), cfg.rms_norm_eps),
     );
     store(s.dtype, &mut s.norm[..t_len * dm]);
+    if pair_in.is_some() {
+        reverse_rows(&mut s.norm[..t_len * dm], dm, None);
+    }
     s.gemm.forward(
         lane,
         (&mut s.proj[..t_len * ip], &s.norm[..t_len * dm]),
@@ -229,6 +242,9 @@ fn mamba2_layer_prefill(
         (&lw.out_proj_w, bias(&lw.out_proj_b)),
         (t_len, di, dm),
     );
+    if pair_in.is_some() {
+        reverse_rows(&mut s.out[..t_len * dm], dm, None);
+    }
     for (t, &o) in temporal[..t_len * dm].iter_mut().zip(&s.out[..t_len * dm]) {
         *t += o;
     }
@@ -283,9 +299,25 @@ pub fn forward_mamba2_backbone_prefill_mode(
             (seq_len, input_dim, dm),
         );
     }
+    let bidi = cfg.bidirectional;
+    // A bidirectional model reads whole prompts: each starts from the
+    // empty state.
+    if bidi {
+        for st in states.iter_mut() {
+            st.ssm.fill(0.0);
+            st.conv_hist.fill(0.0);
+        }
+    }
+    let mut pair_in = std::mem::take(&mut scratch.pair_in);
     for (l, (lw, st)) in w.layers.iter().zip(states.iter_mut()).enumerate() {
-        mamba2_layer_prefill(out, seq_len, (lw, st), scratch, (cfg, mode));
-        if let Some(mlp) = w.mlp.get(l) {
+        if opens_pair(bidi, l) {
+            pair_in[..seq_len * dm].copy_from_slice(out);
+        }
+        let reversed = reads_reversed(bidi, l).then(|| &pair_in[..seq_len * dm]);
+        mamba2_layer_prefill(out, seq_len, (lw, st), (scratch, reversed), (cfg, mode));
+        // A pair's MLPs follow both its mixers.
+        for m in mlps_after(bidi, l) {
+            let Some(mlp) = w.mlp.get(m) else { continue };
             let eps = cfg.rms_norm_eps;
             gated_mlp_rows(
                 out,
@@ -301,6 +333,7 @@ pub fn forward_mamba2_backbone_prefill_mode(
             );
         }
     }
+    scratch.pair_in = pair_in;
     // A segment without the final norm hands out the residual stream.
     if w.norm_f_weight.is_empty() {
         return;

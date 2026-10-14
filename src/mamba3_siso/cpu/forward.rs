@@ -14,6 +14,7 @@ use super::dims::Mamba3Dims;
 use super::flat::Mamba3LayerFlat;
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
+use crate::bidi::reverse_rows;
 use crate::mlp::cpu::RowsGemm;
 use crate::ops::blas::sgemm_forward;
 use crate::ops::fast_math::fast_exp_scalar;
@@ -215,6 +216,23 @@ pub fn forward_mamba3_layer_batched(
     scratch: &mut Mamba3Scratch,
     dims: &Mamba3Dims,
 ) {
+    forward_mamba3_layer_in(temporal_flat, acts, layer_w, state, scratch, dims, None);
+}
+
+/// [`forward_mamba3_layer_batched`], or for the second layer of a
+/// bidirectional pair, `reversed_in` set to the pair's input rows with
+/// every sequence reversed: the layer runs on them, its record holds them
+/// so, and its output joins `temporal_flat`, the stream after the pair's
+/// first layer, reversed back.
+pub(crate) fn forward_mamba3_layer_in(
+    temporal_flat: &mut [f32],
+    acts: &mut Mamba3LayerFlat,
+    layer_w: &TrainMamba3LayerWeights,
+    state: Mamba3LayerStateMut<'_>,
+    scratch: &mut Mamba3Scratch,
+    dims: &Mamba3Dims,
+    reversed_in: Option<&[f32]>,
+) {
     let Mamba3LayerStateMut {
         ssm: ssm_state,
         k: k_state,
@@ -244,7 +262,7 @@ pub fn forward_mamba3_layer_batched(
     // ═══ F1: the block norm (loop T) ═══
     for t in 0..seq_len {
         let off = t * dm;
-        let src = &temporal_flat[off..off + dm];
+        let src = &reversed_in.unwrap_or(temporal_flat)[off..off + dm];
         let base_t = acts.base(t);
 
         acts.data[base_t + o.residual..base_t + o.residual + dm].copy_from_slice(src);
@@ -523,6 +541,20 @@ pub fn forward_mamba3_layer_batched(
         (seq_len, di, dm),
     );
 
+    if reversed_in.is_some() {
+        reverse_rows(
+            &mut scratch.out_flat[..seq_len * dm],
+            dm,
+            scratch.varlen.as_ref(),
+        );
+        for (t, &o) in temporal_flat[..seq_len * dm]
+            .iter_mut()
+            .zip(&scratch.out_flat[..seq_len * dm])
+        {
+            *t += o;
+        }
+        return;
+    }
     for t in 0..seq_len {
         let off = t * dm;
         let base_t = acts.base(t);

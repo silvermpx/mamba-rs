@@ -21,6 +21,8 @@ use std::sync::Arc;
 
 use cudarc::driver::PushKernelArg;
 
+use crate::bidi::{opens_pair, reads_reversed};
+use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::gpu::block_norm;
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
@@ -213,6 +215,11 @@ pub struct GpuMambaMixedTrainScratch {
     pub c_buf: DtypedBuf,
     /// out_proj output [B*T * d_model].
     pub out_flat: DtypedBuf,
+    /// A bidirectional pair's f32 rows `[B*T*d_model]`: in the forward the
+    /// stream after the pair's first mixer, in the backward d loss / d (the
+    /// pair's output) held aside for the first layer (one element without
+    /// pairs).
+    pub pair: GpuBuffer,
     /// Final lm_head feed (post norm_f) — typed [B*T * d_model].
     pub temporal_typed: DtypedBuf,
 
@@ -329,6 +336,7 @@ impl GpuMambaMixedTrainScratch {
             c_buf: DtypedBuf::zeros(stream, bt * ds, dtype)?,
             out_flat: DtypedBuf::zeros(stream, bt * dm, dtype)?,
             temporal_typed: DtypedBuf::zeros(stream, bt * dm, dtype)?,
+            pair: GpuBuffer::zeros(stream, if dims.bidirectional { bt * dm } else { 1 })?,
             // backward typed
             d_gated: DtypedBuf::zeros(stream, bt * di, dtype)?,
             d_y: DtypedBuf::zeros(stream, bt * di, dtype)?,
@@ -516,12 +524,41 @@ pub fn gpu_forward_mamba_backbone_mixed(
     let conv_base = state.conv_states.cached_ptr();
     let ssm_base = state.ssm_states.cached_ptr();
     let aneg_base = state.a_neg_all.cached_ptr();
+    let bidi = dims.bidirectional;
+    // A bidirectional model reads whole sequences: every window starts
+    // from the empty state.
+    if bidi {
+        for buf in [&state.conv_states, &state.ssm_states] {
+            zero_bytes(ctx, buf.cached_ptr(), buf.len() * 4)?;
+        }
+    }
+    let pair_rows = scratch.pair.cached_ptr();
+    let window = |ptr, elem_bytes| WindowRows {
+        ptr,
+        elem_bytes,
+        batch: b,
+        seq_len: t,
+        width: dm,
+    };
 
     for layer_idx in 0..dims.n_layers {
         let conv_ptr = conv_base + (layer_idx * conv_per_layer) as u64 * f32_sz;
         let ssm_ptr = ssm_base + (layer_idx * ssm_per_layer) as u64 * f32_sz;
         let aneg_ptr = aneg_base + (layer_idx * a_neg_per_layer) as u64 * f32_sz;
         let lw = &mamba_w.layers[layer_idx];
+        // A bidirectional pair: the first mixer's sum is the pair's working
+        // rows; the second runs on its reversed input, the pair's input the
+        // first layer's slot holds, and adds onto them, its output turned
+        // back. The pair's MLPs follow both mixers, the first MLP's output
+        // the second's input.
+        let reversed = reads_reversed(bidi, layer_idx);
+        if reversed {
+            let (before, rest) = acts.layers.split_at_mut(layer_idx);
+            rest[0]
+                .residual
+                .copy_from(&before[layer_idx - 1].residual, &ctx.stream)?;
+            reverse_rows(ctx, window(rest[0].residual.cached_ptr(), 4), 0)?;
+        }
         let layer_acts = &mut acts.layers[layer_idx];
 
         // F1: the block norm — read f32 residual, write typed post_norm.
@@ -826,29 +863,53 @@ pub fn gpu_forward_mamba_backbone_mixed(
         };
         // With an MLP the mixer's sum lands in the MLP's input rows, and the
         // MLP writes the layer's output.
-        let mixer_out = match &acts.mlp {
-            Some(m) => m.layers[layer_idx].x_in.cached_ptr(),
-            None => next_res_ptr,
+        let mixer_out = if opens_pair(bidi, layer_idx) {
+            pair_rows
+        } else {
+            let first_mlp = if reversed { layer_idx - 1 } else { layer_idx };
+            match &acts.mlp {
+                Some(m) => m.layers[first_mlp].x_in.cached_ptr(),
+                None => next_res_ptr,
+            }
+        };
+        let residual = if reversed {
+            reverse_rows(
+                ctx,
+                window(scratch.out_flat.cached_ptr(), dt.size_bytes()),
+                0,
+            )?;
+            pair_rows
+        } else {
+            acts.layers[layer_idx].residual.cached_ptr()
         };
         // dst f32, a f32, b typed.
         crate::gpu::launch::launch_elems(
             &ctx.stream,
             k.residual_add_f32_typed.get(dt),
-            &[
-                mixer_out,
-                acts.layers[layer_idx].residual.cached_ptr(),
-                scratch.out_flat.cached_ptr(),
-            ],
+            &[mixer_out, residual, scratch.out_flat.cached_ptr()],
             bt * dm,
             format_args!("residual_add_f32_typed L{layer_idx}"),
         )?;
-        if let (Some(m), Some(w)) = (&acts.mlp, mamba_w.mlp(layer_idx)) {
+        let shape = (bt, dm, dims.rms_norm_eps);
+        if reversed && let (Some(m), Some(w)) = (&acts.mlp, mamba_w.mlp(layer_idx - 1)) {
+            super::mlp::forward_mixed(
+                ctx,
+                m.layers[layer_idx].x_in.cached_ptr(),
+                (&m.layers[layer_idx - 1], w),
+                scratch.out_flat.cached_ptr(),
+                shape,
+                dt,
+            )?;
+        }
+        if !opens_pair(bidi, layer_idx)
+            && let (Some(m), Some(w)) = (&acts.mlp, mamba_w.mlp(layer_idx))
+        {
             super::mlp::forward_mixed(
                 ctx,
                 next_res_ptr,
                 (&m.layers[layer_idx], w),
                 scratch.out_flat.cached_ptr(),
-                (bt, dm, dims.rms_norm_eps),
+                shape,
                 dt,
             )?;
         }

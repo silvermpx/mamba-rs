@@ -120,6 +120,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize, rms_norm_eps: f32) {
         scan_mode,
         block_norm: mamba_rs::BlockNorm::Rms,
         final_norm: true,
+        bidirectional: false,
         rms_norm_eps,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -174,6 +175,7 @@ fn run_case(scan_mode: ScanMode, seq_len: usize, rms_norm_eps: f32) {
         rms_norm_eps,
         block_norm: cfg.block_norm,
         bcdt_rms_eps: None,
+        bidirectional: false,
     };
     let mut scratch = GpuMambaTargetScratch::new(&ctx.stream, &gpu_dims).expect("target scratch");
     let mut a_neg_flat = vec![0.0f32; nl * di * ds];
@@ -253,6 +255,7 @@ fn m3_dims(cfg: &Mamba3Config, batch: usize, seq_len: usize, parallel: bool) -> 
         block_norm: cfg.block_norm,
         is_outproj_norm: cfg.is_outproj_norm,
         use_parallel_scan: parallel,
+        bidirectional: false,
     }
 }
 

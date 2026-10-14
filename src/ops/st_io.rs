@@ -163,6 +163,22 @@ pub(crate) fn final_norm_entry(final_norm: bool) -> Option<(String, String)> {
     (!final_norm).then(|| ("final_norm".to_string(), "false".to_string()))
 }
 
+/// Whether the layers read the sequence in both directions: files written
+/// without the entry, and every model built one way, do not.
+pub(crate) fn bidirectional(meta: &HashMap<String, String>) -> Result<bool, String> {
+    match meta.get("bidirectional").map(String::as_str) {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(other) => Err(format!("unknown bidirectional '{other}' in the metadata")),
+    }
+}
+
+/// The metadata entry of a bidirectional model: a model read one way
+/// writes nothing, so its files keep their bytes.
+pub(crate) fn bidirectional_entry(bidirectional: bool) -> Option<(String, String)> {
+    bidirectional.then(|| ("bidirectional".to_string(), "true".to_string()))
+}
+
 /// The scan mode as the metadata spells it.
 pub(crate) fn scan_mode(meta: &HashMap<String, String>) -> Result<crate::config::ScanMode, String> {
     use crate::config::ScanMode;

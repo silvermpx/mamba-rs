@@ -21,6 +21,7 @@
 use super::flat::{MambaBackboneFlat, MambaLayerFlat};
 use super::scratch::PhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
+use crate::bidi::{mlps_after, opens_pair, reads_reversed, reverse_rows};
 use crate::mlp::cpu::{RowsGemm, gated_mlp_rows, mlp_norm_row};
 use crate::ops::blas::sgemm_forward;
 use crate::ops::dims::{MambaDims, MambaRecurrentState};
@@ -93,6 +94,22 @@ pub fn forward_mamba_layer_batched(
     scratch: &mut PhaseScratch,
     dims: &MambaDims,
 ) {
+    forward_mamba_layer_in(temporal_flat, acts, (layer_w, None), state, scratch, dims);
+}
+
+/// [`forward_mamba_layer_batched`], or for the second layer of a
+/// bidirectional pair, `reversed_in` set to the pair's input rows with
+/// every sequence reversed: the layer runs on them, its record holds them
+/// so, and its output joins `temporal_flat`, the stream after the pair's
+/// first layer, reversed back.
+fn forward_mamba_layer_in(
+    temporal_flat: &mut [f32],
+    acts: &mut MambaLayerFlat,
+    (layer_w, reversed_in): (&TrainMambaLayerWeights, Option<&[f32]>),
+    state: &mut MambaRecurrentState<'_>,
+    scratch: &mut PhaseScratch,
+    dims: &MambaDims,
+) {
     let conv_state = &mut *state.conv;
     let ssm_state = &mut *state.ssm;
     let a_neg = state.a_neg;
@@ -111,7 +128,7 @@ pub fn forward_mamba_layer_batched(
     // ===================================================================
     for t in 0..seq_len {
         let off = t * dm;
-        let src = &temporal_flat[off..off + dm];
+        let src = &reversed_in.unwrap_or(temporal_flat)[off..off + dm];
 
         // Save residual
         acts.residual_mut(t).copy_from_slice(src);
@@ -351,6 +368,14 @@ pub fn forward_mamba_layer_batched(
     // ===================================================================
     // Phase F6: Residual add (all T)
     // ===================================================================
+    if reversed_in.is_some() {
+        let out = &mut scratch.out_flat[..seq_len * dm];
+        reverse_rows(out, dm, None);
+        for (t, &o) in temporal_flat[..seq_len * dm].iter_mut().zip(&*out) {
+            *t += o;
+        }
+        return;
+    }
     for t in 0..seq_len {
         let off = t * dm;
         let residual = acts.residual(t);
@@ -426,16 +451,25 @@ pub fn forward_mamba_backbone_batched(
     let conv_per_layer = di * dc;
     let ssm_per_layer = di * ds;
     let a_neg_per_layer = di * ds;
+    let bidi = dims.bidirectional;
+    let mut pair = std::mem::take(&mut scratch.pair);
 
     for layer_idx in 0..n_layers {
         let conv_start = layer_idx * conv_per_layer;
         let ssm_start = layer_idx * ssm_per_layer;
         let a_neg_start = layer_idx * a_neg_per_layer;
 
-        forward_mamba_layer_batched(
+        if opens_pair(bidi, layer_idx) {
+            pair.copy_from_slice(&temporal_flat[..seq_len * dm]);
+            reverse_rows(&mut pair, dm, None);
+        }
+        forward_mamba_layer_in(
             temporal_flat,
             &mut acts.layers[layer_idx],
-            &mamba_w.layers[layer_idx],
+            (
+                &mamba_w.layers[layer_idx],
+                reads_reversed(bidi, layer_idx).then_some(&pair[..]),
+            ),
             &mut MambaRecurrentState {
                 conv: &mut conv_states[conv_start..conv_start + conv_per_layer],
                 ssm: &mut ssm_states[ssm_start..ssm_start + ssm_per_layer],
@@ -444,11 +478,14 @@ pub fn forward_mamba_backbone_batched(
             scratch,
             dims,
         );
-        // The gated MLP after the mixer, its input rows kept for the
-        // backward.
-        if let Some(m) = mamba_w.mlp.get(layer_idx) {
+        // The gated MLP after the mixer (a pair's after both its mixers),
+        // its input rows kept for the backward.
+        for l in mlps_after(bidi, layer_idx) {
+            let Some(m) = mamba_w.mlp.get(l) else {
+                continue;
+            };
             let rows = &mut temporal_flat[..seq_len * dm];
-            acts.mlp_in[layer_idx].copy_from_slice(rows);
+            acts.mlp_in[l].copy_from_slice(rows);
             scratch.mlp.dtype = scratch.dtype;
             gated_mlp_rows(
                 rows,
@@ -464,6 +501,7 @@ pub fn forward_mamba_backbone_batched(
             );
         }
     }
+    scratch.pair = pair;
 
     // The final norm (norm_f) after all Mamba layers. A segment without it
     // hands out its residual stream, which stays f32 in every lane.

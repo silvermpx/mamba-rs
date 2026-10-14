@@ -413,6 +413,11 @@ fn block_step(
 /// - `scratch`: pre-allocated scratch
 /// - `cfg`: Mamba config
 /// - `input_dim`: external input dimension
+///
+/// # Panics
+///
+/// For a bidirectional model, which reads whole sequences and has no
+/// decode step.
 pub fn mamba_step(
     input: &[f32],
     output: &mut [f32],
@@ -438,7 +443,8 @@ pub fn mamba_step(
 ///
 /// # Panics
 ///
-/// When `packed` holds another number of layers than `weights`.
+/// When `packed` holds another number of layers than `weights`, and for a
+/// bidirectional model.
 pub fn mamba_step_packed(
     input: &[f32],
     output: &mut [f32],
@@ -463,7 +469,8 @@ pub fn mamba_step_packed(
 ///
 /// # Panics
 ///
-/// When `packed` holds another number of layers than `weights`.
+/// When `packed` holds another number of layers than `weights`, and for a
+/// bidirectional model.
 pub fn mamba_step_no_proj_packed(
     input: &[f32],
     output: &mut [f32],
@@ -478,6 +485,10 @@ pub fn mamba_step_no_proj_packed(
 
 /// Like [`mamba_step`] but skips the input projection (identity: input copied to output).
 /// Used for HF LM models where the embedding output is already `[d_model]`.
+///
+/// # Panics
+///
+/// For a bidirectional model.
 pub fn mamba_step_no_proj(
     input: &[f32],
     output: &mut [f32],
@@ -498,6 +509,10 @@ fn mamba_blocks_and_norm(
     scratch: &mut MambaStepScratch,
     cfg: &MambaConfig,
 ) {
+    assert!(
+        !cfg.bidirectional,
+        "a bidirectional model reads whole sequences and has no decode step"
+    );
     let d_model = cfg.d_model;
     if let Some(p) = packed {
         assert!(
@@ -547,6 +562,10 @@ fn mamba_blocks_and_norm(
 /// Batched T=1 inference: processes B independent samples through the same
 /// weights. A model without an input projection takes each sample's input
 /// as its rows.
+///
+/// # Panics
+///
+/// For a bidirectional model.
 pub fn mamba_step_batch(
     inputs: &[f32],
     outputs: &mut [f32],

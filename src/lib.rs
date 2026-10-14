@@ -90,6 +90,7 @@
 /// (checkpoint sidecars, serve fingerprints) without parsing Cargo.lock.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub(crate) mod bidi;
 pub mod config;
 pub mod dist;
 #[cfg(feature = "cuda")]

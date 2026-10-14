@@ -58,6 +58,7 @@ fn gpu_dims(cfg: &Mamba3Config, input_dim: usize, seq_len: usize) -> GpuMamba3Di
         ssm_norm_eps: cfg.ssm_norm_eps,
         block_norm: cfg.block_norm,
         use_parallel_scan: true,
+        bidirectional: false,
     }
 }
 

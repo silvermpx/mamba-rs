@@ -29,6 +29,8 @@ use super::state::{
     Mamba3PrefillTypedScratch,
 };
 use super::weights::Mamba3WeightsView;
+use crate::bidi::{mlps_after, opens_pair, reads_reversed};
+use crate::gpu::bidi::{WindowRows, reverse_rows};
 use crate::gpu::blas::TypedPtr;
 use crate::gpu::block_norm::{self, NormParams};
 use crate::gpu::buffers::GpuBuffer;
@@ -350,7 +352,9 @@ impl Mamba3Prefill {
         let ng_i = ng as i32;
         let f32_sz = std::mem::size_of::<f32>() as u64;
 
-        if !carry_state {
+        // A bidirectional prompt is whole sequences from the empty state.
+        let bidi = dims.bidirectional;
+        if !carry_state || bidi {
             states.ssm.zero(&ctx.stream)?;
             states.k.zero(&ctx.stream)?;
             states.v.zero(&ctx.stream)?;
@@ -432,6 +436,13 @@ impl Mamba3Prefill {
         let k_base = states.k.raw_ptr(&ctx.stream);
         let v_base = states.v.raw_ptr(&ctx.stream);
         let a_base = states.angle.raw_ptr(&ctx.stream);
+        let window = |ptr, elem_bytes| WindowRows {
+            ptr,
+            elem_bytes,
+            batch: dims.batch,
+            seq_len: dims.seq_len,
+            width: dm,
+        };
 
         for l in 0..dims.n_layers {
             let lw = weights.layer(l);
@@ -441,9 +452,26 @@ impl Mamba3Prefill {
             let a_ptr = a_base + (dims.batch * l * nh * na_alloc) as u64 * f32_sz;
 
             // The block norm over the residual stream, into the typed rows
-            // on the typed lane.
-            tgt.residual
-                .copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
+            // on the typed lane. A pair's first layer keeps the pair's
+            // input; its second reads it reversed, runs on the reversed
+            // prompt and adds its output, turned back, onto the stream.
+            let reversed = reads_reversed(bidi, l);
+            if opens_pair(bidi, l) {
+                tgt.pair_in.copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
+            }
+            if reversed {
+                tgt.residual.copy_from_raw(&tgt.pair_in, &ctx.stream)?;
+                reverse_rows(ctx, window(tgt.residual.cached_ptr(), 4), 0)?;
+            } else {
+                tgt.residual
+                    .copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
+            }
+            // A reversed layer's output joins the stream itself.
+            let residual = if reversed {
+                tgt.temporal_work.cached_ptr()
+            } else {
+                tgt.residual.cached_ptr()
+            };
             {
                 let (out, y) = match typed.as_deref() {
                     Some(ts) => (dtype, ts.post_norm.cached_ptr()),
@@ -1244,6 +1272,10 @@ impl Mamba3Prefill {
                     None,
                     (bt, di, dm),
                 )?;
+                if reversed {
+                    let rows = window(ts.out_flat.cached_ptr(), dtype.size_bytes());
+                    reverse_rows(ctx, rows, 0)?;
+                }
                 // Typed branch output + f32 residual -> f32 temporal (the
                 // trainer's residual_add_f32_typed; note the arg order:
                 // dst, f32 residual, typed branch).
@@ -1252,7 +1284,7 @@ impl Mamba3Prefill {
                     m3k.residual_add_f32_typed.get(dtype),
                     &[
                         tgt.temporal_work.cached_ptr(),
-                        tgt.residual.cached_ptr(),
+                        residual,
                         ts.out_flat.cached_ptr(),
                     ],
                     bt * dm,
@@ -1267,13 +1299,16 @@ impl Mamba3Prefill {
                     None,
                     (bt, di, dm),
                 )?;
+                if reversed {
+                    reverse_rows(ctx, window(tgt.out_flat.cached_ptr(), 4), 0)?;
+                }
                 crate::gpu::launch::launch_elems(
                     &ctx.stream,
                     &m3k.residual_add,
                     &[
                         tgt.temporal_work.cached_ptr(),
                         tgt.out_flat.cached_ptr(),
-                        tgt.residual.cached_ptr(),
+                        residual,
                     ],
                     bt * dm,
                     format_args!("prefill residual L{l}"),
@@ -1282,7 +1317,9 @@ impl Mamba3Prefill {
             // The MLP branch of a model that has one, over every row, in the
             // lane's dtype: norm2 of the f32 residual stream, the two GEMMs
             // around the gate, and the branch added back into the stream.
-            if let Some(m) = weights.mlp(l) {
+            // A pair's MLPs follow both its mixers.
+            for m_l in mlps_after(bidi, l) {
+                let Some(m) = weights.mlp(m_l) else { continue };
                 let Some(win) = self.mlp.as_mut().filter(|w| w.hidden == m.hidden) else {
                     return Err(format!(
                         "prefill: the model's MLP is {} wide but the executor was not \

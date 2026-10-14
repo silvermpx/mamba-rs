@@ -32,6 +32,9 @@ pub struct Mamba3Dims {
     pub ssm_norm_eps: f32,
     /// The kind of the block norms (`Mamba3Config::block_norm`).
     pub block_norm: crate::config::BlockNorm,
+    /// Whether the layers read in both directions, in pairs
+    /// (`Mamba3Config::bidirectional`).
+    pub bidirectional: bool,
 }
 
 impl Mamba3Dims {
@@ -54,6 +57,7 @@ impl Mamba3Dims {
             rms_norm_eps: config.rms_norm_eps,
             ssm_norm_eps: config.ssm_norm_eps,
             block_norm: config.block_norm,
+            bidirectional: config.bidirectional,
         }
     }
 

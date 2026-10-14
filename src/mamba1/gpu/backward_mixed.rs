@@ -62,6 +62,7 @@ use super::weights::{
     GpuMambaGrads, GpuMambaLayerGrads, GpuMambaMixedLayerWeights, GpuMambaMixedWeights,
     MambaLayerWeightsView, MambaWeightsView, final_norm_params, layer_norm_params,
 };
+use crate::gpu::bidi::{WindowRows, reverse_rows};
 use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_ex_backward_dx_typed,
 };
@@ -150,6 +151,21 @@ pub struct MixedLayerBwd<'a> {
 pub fn gpu_backward_mamba_layer_mixed(
     ctx: &GpuCtx,
     d_temporal: &mut GpuBuffer,
+    layer: &MixedLayerBwd<'_>,
+    scratch: &mut GpuMambaMixedTrainScratch,
+    dtype: WeightDtype,
+) -> Result<(), String> {
+    let into = d_temporal.cached_ptr();
+    layer_backward_mixed(ctx, (d_temporal, into), layer, scratch, dtype)
+}
+
+/// [`gpu_backward_mamba_layer_mixed`] with the norm's input gradient (and
+/// its typed mirror) added into the rows at `into` rather than
+/// `d_temporal`: the first layer of a bidirectional pair reads d loss / d
+/// (the pair's output) and adds into the gradient the second gathered.
+fn layer_backward_mixed(
+    ctx: &GpuCtx,
+    (d_temporal, into): (&mut GpuBuffer, u64),
     layer: &MixedLayerBwd<'_>,
     scratch: &mut GpuMambaMixedTrainScratch,
     dtype: WeightDtype,
@@ -855,7 +871,7 @@ pub fn gpu_backward_mamba_layer_mixed(
             ctx,
             dtype,
             (
-                d_temporal.cached_ptr(),
+                into,
                 axis0_ptr,
                 scratch.d_norm.cached_ptr(),
                 acts.residual.cached_ptr(),
@@ -975,50 +991,119 @@ pub fn gpu_backward_mamba_backbone_mixed(
 
     // Layers in reverse with per-layer a_neg offset.
     let a_neg_per_layer = dims.d_inner * dims.d_state;
+    // One layer's MLP backward; its norm leaves the typed mirror of the
+    // gradient the next reader takes. The first MLP processed casts the
+    // incoming gradient itself.
+    let mlp_backward = |l: usize,
+                        top: bool,
+                        d_temporal: &mut GpuBuffer,
+                        scratch: &mut GpuMambaMixedTrainScratch|
+     -> Result<bool, String> {
+        let Some((m, w)) = acts.mlp.as_ref().zip(mamba_w.mlp(l)) else {
+            return Ok(false);
+        };
+        let typed = scratch.temporal_typed.cached_ptr();
+        if top {
+            launch_cast_zplus(
+                ctx,
+                (typed, d_temporal.cached_ptr()),
+                bt * dims.d_model,
+                dtype,
+            )?;
+        }
+        let partials = scratch.axis0_partials.cached_ptr();
+        let bufs = scratch.mlp.as_ref().ok_or(
+            "the mixed scratch has no buffers for the gated MLP (build it with `with_mlp`)",
+        )?;
+        super::mlp::backward_mixed(
+            ctx,
+            (d_temporal, typed),
+            (&m.layers[l], w, &d_mamba.mlp[l]),
+            (bufs, partials),
+            (bt, dims.d_model),
+            dtype,
+        )?;
+        Ok(true)
+    };
     for layer_idx in (0..dims.n_layers).rev() {
         let base = a_neg_all.raw_ptr(&ctx.stream);
         let a_neg_ptr = base + (layer_idx * a_neg_per_layer * std::mem::size_of::<f32>()) as u64;
         let top = layer_idx + 1 == dims.n_layers;
-        // The MLP came after the mixer, so its backward comes first; its
-        // norm leaves the typed mirror of the gradient the mixer reads.
-        let mlp = acts.mlp.as_ref().zip(mamba_w.mlp(layer_idx));
-        if let Some((m, w)) = mlp {
-            let typed = scratch.temporal_typed.cached_ptr();
-            if top {
-                launch_cast_zplus(
-                    ctx,
-                    (typed, d_temporal.cached_ptr()),
-                    bt * dims.d_model,
-                    dtype,
-                )?;
-            }
-            let partials = scratch.axis0_partials.cached_ptr();
-            let bufs = scratch.mlp.as_ref().ok_or(
-                "the mixed scratch has no buffers for the gated MLP (build it with `with_mlp`)",
-            )?;
-            super::mlp::backward_mixed(
+        // A bidirectional pair runs whole at its second layer: both its
+        // MLPs, then both mixers.
+        if dims.bidirectional && layer_idx % 2 == 0 {
+            continue;
+        }
+        // The MLP came after the mixer, so its backward comes first.
+        let has_mlp = mlp_backward(layer_idx, top, d_temporal, scratch)?;
+        if dims.bidirectional {
+            mlp_backward(layer_idx - 1, false, d_temporal, scratch)?;
+        }
+        if !dims.bidirectional {
+            let into = d_temporal.cached_ptr();
+            layer_backward_mixed(
                 ctx,
-                (d_temporal, typed),
-                (&m.layers[layer_idx], w, &d_mamba.mlp[layer_idx]),
-                (bufs, partials),
-                (bt, dims.d_model),
+                (d_temporal, into),
+                &MixedLayerBwd {
+                    d_lw: &d_mamba.layers[layer_idx],
+                    acts: &acts.layers[layer_idx],
+                    lw: &mamba_w.layers[layer_idx],
+                    a_neg_ptr,
+                    cast_d_temporal: top && !has_mlp,
+                    mirror_dx: layer_idx > 0,
+                },
+                scratch,
                 dtype,
             )?;
+            continue;
         }
-        gpu_backward_mamba_layer_mixed(
+        // A bidirectional pair, met at its second layer once both its MLPs
+        // ran: both mixers take d loss / d (the pair's output). The second,
+        // which ran on the reversed window, takes it reversed and adds its
+        // norm's gradient turned back; the first takes it as it is, held
+        // aside, and adds its own on top: (d_out + c_reversed) + c_forward.
+        // Each casts its incoming gradient to the typed mirror itself (the
+        // bits a mirror would carry), and the first leaves the mirror of
+        // the pair's input gradient for the layers below.
+        let first = layer_idx - 1;
+        let window = |ptr| WindowRows {
+            ptr,
+            elem_bytes: 4,
+            batch: dims.batch,
+            seq_len: dims.seq_len,
+            width: dims.d_model,
+        };
+        let pair_layer = |l: usize, mirror_dx: bool| MixedLayerBwd {
+            d_lw: &d_mamba.layers[l],
+            acts: &acts.layers[l],
+            lw: &mamba_w.layers[l],
+            a_neg_ptr: a_neg_all.raw_ptr(&ctx.stream)
+                + (l * a_neg_per_layer * std::mem::size_of::<f32>()) as u64,
+            cast_d_temporal: true,
+            mirror_dx,
+        };
+        scratch.pair.copy_from(d_temporal, &ctx.stream)?;
+        let d = d_temporal.cached_ptr();
+        reverse_rows(ctx, window(d), 0)?;
+        layer_backward_mixed(
             ctx,
-            d_temporal,
-            &MixedLayerBwd {
-                d_lw: &d_mamba.layers[layer_idx],
-                acts: &acts.layers[layer_idx],
-                lw: &mamba_w.layers[layer_idx],
-                a_neg_ptr,
-                cast_d_temporal: top && mlp.is_none(),
-                mirror_dx: layer_idx > 0,
-            },
+            (d_temporal, d),
+            &pair_layer(layer_idx, false),
             scratch,
             dtype,
         )?;
+        reverse_rows(ctx, window(d), 0)?;
+        std::mem::swap(d_temporal, &mut scratch.pair);
+        let gathered = scratch.pair.cached_ptr();
+        let first_bwd = layer_backward_mixed(
+            ctx,
+            (d_temporal, gathered),
+            &pair_layer(first, first > 0),
+            scratch,
+            dtype,
+        );
+        std::mem::swap(d_temporal, &mut scratch.pair);
+        first_bwd?;
     }
 
     // input_proj backward — identity leaves it untouched; non-identity

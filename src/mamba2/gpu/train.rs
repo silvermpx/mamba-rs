@@ -28,7 +28,9 @@
 
 mod graph;
 
+use crate::bidi::{mlps_after, reads_reversed};
 use crate::config::ModelFamily;
+use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 use crate::gpu::grad_clip::{GradRegionGeom, StepTail, norm_limit, read_tail, scale_grads};
 use crate::gpu::grad_window::{FoldOverflow, GradWindow, check_backward_opts};
 use crate::gpu::options::GpuOptions;
@@ -422,6 +424,10 @@ struct BwdScratch {
     dv: GpuBuffer,
     d_post: Rows,
     d_pre: GpuBuffer,
+    /// d loss / d (a bidirectional pair's output rows), which both of the
+    /// pair's mixers take while the stream's gradient gathers theirs (one
+    /// element without pairs).
+    d_pair: GpuBuffer,
     /// The gradients of the MLP's up projection and gate rows.
     d_up: Rows,
     d_act: Rows,
@@ -682,6 +688,7 @@ impl Mamba2GpuTrainer {
             dv: z(rows * cd)?,
             d_post: typed(rows * dm)?,
             d_pre: z(rows * dm)?,
+            d_pair: z(if c.bidirectional { rows * dm } else { 1 })?,
             d_up: typed(rows * 2 * hidden)?,
             d_act: typed(rows * hidden)?,
             axis0: z(rows * dm.max(d_ssm))?,
@@ -1745,13 +1752,48 @@ impl Mamba2GpuTrainer {
         let temporal = self.temporal.cached_ptr();
         let conv_per_layer = b * c.conv_dim() * c.d_conv;
         let ssm_per_layer = b * nh * c.headdim * c.d_state;
+        let bidi = c.bidirectional;
+        let seq_idx = self.varlen.ptr();
+        // A bidirectional model reads whole sequences: every window starts
+        // from the empty state.
+        if bidi {
+            zero_bytes(
+                &self.ctx,
+                self.state.conv.cached_ptr(),
+                self.state.conv.len() * 4,
+            )?;
+            zero_bytes(
+                &self.ctx,
+                self.state.ssm.cached_ptr(),
+                self.state.ssm.len() * 4,
+            )?;
+        }
         let x = self.exec();
         for (l, a) in self.acts.iter().enumerate() {
             let lp = self.layer_ptrs(l)?;
-            self.copy(a.x_in.cached_ptr(), temporal, rows * dm, "layer input")?;
+            // The second layer of a pair runs on the reversed window from the
+            // pair's input, which the first layer saved, on: its record holds
+            // the reversed rows and its output turns back before the add.
+            let reversed = reads_reversed(bidi, l);
+            let window = |ptr, elem_bytes| WindowRows {
+                ptr,
+                elem_bytes,
+                batch: b,
+                seq_len: t_len,
+                width: dm,
+            };
+            let norm_in = if reversed {
+                let pair_in = self.acts[l - 1].x_in.cached_ptr();
+                self.copy(a.x_in.cached_ptr(), pair_in, rows * dm, "pair input")?;
+                reverse_rows(&self.ctx, window(a.x_in.cached_ptr(), 4), seq_idx)?;
+                a.x_in.cached_ptr()
+            } else {
+                self.copy(a.x_in.cached_ptr(), temporal, rows * dm, "layer input")?;
+                temporal
+            };
             x.norm_in_proj(
                 &lp,
-                (temporal, a.post.ptr(), a.rms.cached_ptr(), a.proj.ptr()),
+                (norm_in, a.post.ptr(), a.rms.cached_ptr(), a.proj.ptr()),
                 rows,
             )?;
             let conv = self.state.conv.cached_ptr() + (l * conv_per_layer * 4) as u64;
@@ -1773,21 +1815,24 @@ impl Mamba2GpuTrainer {
                     0
                 },
                 stride: self.stride,
-                seq_idx: self.varlen.ptr(),
+                seq_idx,
             };
             x.window(l, &lp, &w, (b, t_len, !self.seq_mode))?;
-            x.gate_out_residual(
+            let out = self.out_rows.ptr();
+            x.gate_out(
                 &lp,
-                (
-                    temporal,
-                    a.proj.ptr(),
-                    a.y.cached_ptr(),
-                    a.gated.ptr(),
-                    self.out_rows.ptr(),
-                ),
+                (a.proj.ptr(), a.y.cached_ptr(), a.gated.ptr(), out),
                 rows,
             )?;
-            if let (Some(m), Some(mp)) = (&a.mlp, self.mlp_ptrs(l)?) {
+            if reversed {
+                reverse_rows(&self.ctx, window(out, self.act.size_bytes()), seq_idx)?;
+            }
+            x.residual_add(temporal, out, rows)?;
+            // A pair's MLPs follow both its mixers.
+            for m_l in mlps_after(bidi, l) {
+                let (Some(m), Some(mp)) = (&self.acts[m_l].mlp, self.mlp_ptrs(m_l)?) else {
+                    continue;
+                };
                 self.copy(m.x_in.cached_ptr(), temporal, rows * dm, "MLP input")?;
                 x.mlp_residual(
                     &mp,
@@ -2064,11 +2109,15 @@ impl Mamba2GpuTrainer {
             ),
             (rows, false),
         )?;
-        for l in (0..c.n_layers).rev() {
-            if self.acts[l].mlp.is_some() {
-                self.mlp_backward(l)?;
+        if c.bidirectional {
+            self.pairs_backward()?;
+        } else {
+            for l in (0..c.n_layers).rev() {
+                if self.acts[l].mlp.is_some() {
+                    self.mlp_backward(l)?;
+                }
+                self.layer_backward(l, self.bwd.d_temp.cached_ptr())?;
             }
-            self.layer_backward(l)?;
         }
         let identity_input = self.layout.input_proj_w.len == 0;
         if !identity_input {
@@ -2112,7 +2161,53 @@ impl Mamba2GpuTrainer {
         self.overflowed
     }
 
-    fn layer_backward(&mut self, l: usize) -> Result<(), String> {
+    /// A bidirectional model's layers from the top down, a pair at a time:
+    /// its MLPs, then both mixers on d loss / d (the pair's output). The
+    /// second, which ran on the reversed window, takes that gradient
+    /// reversed and adds its norm's input gradient turned back; the first
+    /// takes it as it is, held aside in `d_pair`, and adds its own on top:
+    /// the pair's input gradient is `(d_out + c_reversed) + c_forward`.
+    fn pairs_backward(&mut self) -> Result<(), String> {
+        let (b, t_len, dm) = (self.batch, self.seq_len, self.cfg.d_model);
+        let rows = b * t_len;
+        let seq_idx = self.varlen.ptr();
+        let window = |ptr| WindowRows {
+            ptr,
+            elem_bytes: 4,
+            batch: b,
+            seq_len: t_len,
+            width: dm,
+        };
+        for l in (0..self.cfg.n_layers).step_by(2).rev() {
+            for m in [l + 1, l] {
+                if self.acts[m].mlp.is_some() {
+                    self.mlp_backward(m)?;
+                }
+            }
+            let d_temp = self.bwd.d_temp.cached_ptr();
+            self.copy(
+                self.bwd.d_pair.cached_ptr(),
+                d_temp,
+                rows * dm,
+                "pair gradient",
+            )?;
+            reverse_rows(&self.ctx, window(d_temp), seq_idx)?;
+            self.layer_backward(l + 1, d_temp)?;
+            reverse_rows(&self.ctx, window(d_temp), seq_idx)?;
+            // The first layer reads the held gradient as its own and adds
+            // into the gathered one; the two trade places back after it.
+            std::mem::swap(&mut self.bwd.d_temp, &mut self.bwd.d_pair);
+            let gathered = self.bwd.d_pair.cached_ptr();
+            let first = self.layer_backward(l, gathered);
+            std::mem::swap(&mut self.bwd.d_temp, &mut self.bwd.d_pair);
+            first?;
+        }
+        Ok(())
+    }
+
+    /// One mixer's backward on d loss / d (its output rows) in `d_temp`,
+    /// its norm's input gradient added into the rows at `residual`.
+    fn layer_backward(&mut self, l: usize, residual: u64) -> Result<(), String> {
         let c = self.cfg;
         let (b, t_len) = (self.batch, self.seq_len);
         let rows = b * t_len;
@@ -2846,16 +2941,17 @@ impl Mamba2GpuTrainer {
             ),
             (rows, act != WeightDtype::F32),
         )?;
-        self.add_residual_grad(rows, l)
+        self.add_residual_grad(rows, l, residual)
     }
 
-    /// `d_temp += d_pre` over the window's rows: what a residual branch's
-    /// input gradient adds to the stream's.
-    fn add_residual_grad(&self, rows: usize, l: usize) -> Result<(), String> {
+    /// `into += d_pre` over the window's rows: what a residual branch's
+    /// input gradient adds to the stream's (`d_temp`, or a bidirectional
+    /// pair's gathered gradient).
+    fn add_residual_grad(&self, rows: usize, l: usize, into: u64) -> Result<(), String> {
         crate::gpu::launch::launch_elems(
             &self.ctx.stream,
             &self.ctx.kernels.vec_add_inplace,
-            &[self.bwd.d_temp.cached_ptr(), self.bwd.d_pre.cached_ptr()],
+            &[into, self.bwd.d_pre.cached_ptr()],
             rows * self.cfg.d_model,
             format_args!("Mamba-2 backward residual L{l}"),
         )
@@ -2983,7 +3079,7 @@ impl Mamba2GpuTrainer {
             ),
             (rows, act != WeightDtype::F32),
         )?;
-        self.add_residual_grad(rows, l)
+        self.add_residual_grad(rows, l, self.bwd.d_temp.cached_ptr())
     }
 
     /// One AdamW step on the gradients of the last backward. Under the

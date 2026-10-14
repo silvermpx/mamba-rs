@@ -113,6 +113,11 @@ impl Mamba2Backbone {
 
     /// One token: reads `input` (`input_dim` wide), writes `output`
     /// (`d_model` wide) and advances every layer's state.
+    ///
+    /// # Panics
+    ///
+    /// For a bidirectional model, which has no decode step: it reads whole
+    /// sequences with [`Self::forward_sequence`].
     pub fn forward_step(
         &self,
         input: &[f32],

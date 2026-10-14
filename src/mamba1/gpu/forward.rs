@@ -19,6 +19,8 @@
 use super::backward::GpuMambaTargetScratch;
 use super::mixer_norms::launch_bcdt_norm;
 use super::weights::{GpuMambaTrainLayerWeights, GpuMambaTrainWeights};
+use crate::bidi::{opens_pair, reads_reversed};
+use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 use crate::gpu::blas::gpu_gemm_bi_forward_raw;
 use crate::gpu::block_norm;
 use crate::gpu::buffers::GpuBuffer;
@@ -86,6 +88,9 @@ pub struct GpuMambaDims {
     /// FalconMamba's dt, B and C norm epsilon, `None` for Mamba-1 (see
     /// [`crate::MambaConfig::bcdt_rms_eps`]).
     pub bcdt_rms_eps: Option<f32>,
+    /// Layers in forward and reversed pairs (see
+    /// [`crate::MambaConfig::bidirectional`]).
+    pub bidirectional: bool,
 }
 
 impl GpuMambaDims {
@@ -315,6 +320,11 @@ pub struct GpuMambaScratch {
     // -- Forward scratch --
     /// Out-proj output `[B*T*d_model]`.
     pub out_flat: GpuBuffer,
+    /// A bidirectional pair's rows `[B*T*d_model]`: in the forward the
+    /// stream after the pair's first mixer, in the backward d loss / d (the
+    /// pair's output) held aside for the first layer (one element without
+    /// pairs).
+    pub pair: GpuBuffer,
     /// Gathered dt portion of xdbl for dt_proj SGEMM `[B*T*dt_rank]`.
     /// Separate from backward `d_dt_input` to avoid forward/backward collision.
     pub dt_gather_buf: GpuBuffer,
@@ -422,6 +432,7 @@ impl GpuMambaScratch {
             dims: *dims,
             // Forward scratch
             out_flat: GpuBuffer::zeros(stream, bt * d_model)?,
+            pair: GpuBuffer::zeros(stream, if dims.bidirectional { bt * d_model } else { 1 })?,
             dt_gather_buf: GpuBuffer::zeros(stream, bt * dt_rank)?,
             // Backward scratch
             d_gated: GpuBuffer::zeros(stream, bt * d_inner)?,
@@ -499,6 +510,24 @@ pub fn gpu_forward_mamba_layer(
     lw: &GpuMambaTrainLayerWeights,
     layer_ptrs: &MambaLayerPtrs,
     scratch: &mut GpuMambaScratch,
+) -> Result<(), String> {
+    layer_forward(ctx, stream_out, (acts, lw, layer_ptrs), scratch, None)
+}
+
+/// [`gpu_forward_mamba_layer`]; `pair_base`, set for the second layer of a
+/// bidirectional pair, is the stream after the pair's first mixer: the
+/// layer ran on the reversed window, so its output turns back and joins
+/// those rows instead of its own input.
+fn layer_forward(
+    ctx: &GpuCtx,
+    stream_out: cudarc::driver::sys::CUdeviceptr,
+    (acts, lw, layer_ptrs): (
+        &mut GpuMambaLayerActs,
+        &GpuMambaTrainLayerWeights,
+        &MambaLayerPtrs,
+    ),
+    scratch: &mut GpuMambaScratch,
+    pair_base: Option<cudarc::driver::sys::CUdeviceptr>,
 ) -> Result<(), String> {
     let dims = scratch.dims;
     dims.check_for(ctx)?;
@@ -780,14 +809,24 @@ pub fn gpu_forward_mamba_layer(
     // F6: Residual add — write the NEXT layer's residual slot (or
     // norm_f_input for the last layer) directly, no temporal round trip
     // ===================================================================
+    let residual = match pair_base {
+        Some(base) => {
+            let rows = WindowRows {
+                ptr: scratch.out_flat.cached_ptr(),
+                elem_bytes: 4,
+                batch: dims.batch,
+                seq_len: dims.seq_len,
+                width: dm,
+            };
+            reverse_rows(ctx, rows, 0)?;
+            base
+        }
+        None => acts.residual.cached_ptr(),
+    };
     crate::gpu::launch::launch_elems(
         &ctx.stream,
         &ctx.kernels.residual_add,
-        &[
-            stream_out,
-            acts.residual.cached_ptr(),
-            scratch.out_flat.cached_ptr(),
-        ],
+        &[stream_out, residual, scratch.out_flat.cached_ptr()],
         bt * dm,
         format_args!("residual_add mamba"),
     )?;
@@ -911,6 +950,15 @@ pub fn gpu_forward_mamba_backbone(
     let conv_per_layer = dims.batch * dims.d_inner * dims.d_conv;
     let ssm_per_layer = dims.batch * dims.d_inner * dims.d_state;
     let a_neg_per_layer = dims.d_inner * dims.d_state;
+    let bidi = dims.bidirectional;
+    // A bidirectional model reads whole sequences: every window starts
+    // from the empty state.
+    if bidi {
+        for buf in [&state.conv_states, &state.ssm_states] {
+            zero_bytes(ctx, buf.cached_ptr(), buf.len() * 4)?;
+        }
+    }
+    let pair_rows = scratch.pair.cached_ptr();
 
     for layer_idx in 0..dims.n_layers {
         // Compute per-layer pointers. cached_ptr — no SyncOnDrop, CUDA Graph safe.
@@ -929,32 +977,73 @@ pub fn gpu_forward_mamba_backbone(
         } else {
             acts.norm_f_input.cached_ptr()
         };
+        // A bidirectional pair: the first mixer's sum is the pair's
+        // working rows; the second runs on its reversed input, the pair's
+        // input the first layer's slot holds, and adds onto them. The
+        // pair's MLPs follow both mixers, the first MLP's output the
+        // second's input.
+        let reversed = reads_reversed(bidi, layer_idx);
+        if reversed {
+            let (before, rest) = acts.layers.split_at_mut(layer_idx);
+            rest[0]
+                .residual
+                .copy_from(&before[layer_idx - 1].residual, &ctx.stream)?;
+            let rows = WindowRows {
+                ptr: rest[0].residual.cached_ptr(),
+                elem_bytes: 4,
+                batch: dims.batch,
+                seq_len: dims.seq_len,
+                width: dims.d_model,
+            };
+            reverse_rows(ctx, rows, 0)?;
+        }
         // With an MLP the mixer's sum lands in the MLP's input rows, and the
         // MLP writes the layer's output.
-        let mixer_out = match &acts.mlp {
-            Some(m) => m.layers[layer_idx].x_in.cached_ptr(),
-            None => stream_out,
+        let mixer_out = if opens_pair(bidi, layer_idx) {
+            pair_rows
+        } else {
+            let first_mlp = if reversed { layer_idx - 1 } else { layer_idx };
+            match &acts.mlp {
+                Some(m) => m.layers[first_mlp].x_in.cached_ptr(),
+                None => stream_out,
+            }
         };
         // Split-borrow: the layer body needs &mut acts.layers[layer_idx]
         // while mixer_out points at a DIFFERENT slot (next layer /
         // norm_f_input / the MLP's input) — raw pointer, no aliasing of the
         // borrowed acts.
-        gpu_forward_mamba_layer(
+        layer_forward(
             ctx,
             mixer_out,
-            &mut acts.layers[layer_idx],
-            &mamba_w.layers[layer_idx],
-            &layer_ptrs,
+            (
+                &mut acts.layers[layer_idx],
+                &mamba_w.layers[layer_idx],
+                &layer_ptrs,
+            ),
             scratch,
+            reversed.then_some(pair_rows),
         )?;
         if let Some(m) = acts.mlp.as_mut() {
-            super::mlp::forward_f32(
-                ctx,
-                stream_out,
-                (&mut m.layers[layer_idx], &mamba_w.mlp[layer_idx]),
-                &mut scratch.out_flat,
-                (bt, dims.d_model, dims.rms_norm_eps),
-            )?;
+            let shape = (bt, dims.d_model, dims.rms_norm_eps);
+            if reversed {
+                let into_second = m.layers[layer_idx].x_in.cached_ptr();
+                super::mlp::forward_f32(
+                    ctx,
+                    into_second,
+                    (&mut m.layers[layer_idx - 1], &mamba_w.mlp[layer_idx - 1]),
+                    &mut scratch.out_flat,
+                    shape,
+                )?;
+            }
+            if !opens_pair(bidi, layer_idx) {
+                super::mlp::forward_f32(
+                    ctx,
+                    stream_out,
+                    (&mut m.layers[layer_idx], &mamba_w.mlp[layer_idx]),
+                    &mut scratch.out_flat,
+                    shape,
+                )?;
+            }
         }
         // All kernels for this layer have been launched on stream
     }
@@ -997,6 +1086,11 @@ pub fn gpu_forward_mamba_target_burnin(
 ) -> Result<(), String> {
     let dims = scratch.dims;
     dims.check_for(ctx)?;
+    if dims.bidirectional {
+        return Err("the target burn-in reads its layers one way: \
+                    a bidirectional model has no target network forward"
+            .into());
+    }
     let seq_len = dims.seq_len;
     let b = dims.batch;
     let bt = b * seq_len;

@@ -239,6 +239,10 @@ fn backbone_step(
     states: &mut [Mamba3MimoLayerState],
     cfg: &Mamba3MimoConfig,
 ) {
+    assert!(
+        !cfg.bidirectional,
+        "a bidirectional model reads whole sequences and has no decode step"
+    );
     let dm = cfg.d_model;
     if weights.input_proj_w.is_empty() {
         temporal[..dm].copy_from_slice(&input[..dm]);

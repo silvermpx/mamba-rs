@@ -13,6 +13,7 @@ use super::weights::{
     GpuMamba3Grads, GpuMamba3LayerGrads, GpuMamba3LayerWeights, GpuMamba3MlpGrads,
     GpuMamba3MlpWeights, GpuMamba3Weights,
 };
+use crate::gpu::bidi::{WindowRows, reverse_rows};
 use crate::gpu::blas::gpu_gemm_bi_backward_grad_raw;
 use crate::gpu::block_norm;
 use crate::gpu::buffers::{GpuBuffer, GradSlice};
@@ -71,6 +72,24 @@ pub fn gpu_backward_mamba3_layer(
     acts: &GpuMamba3LayerActs,
     lw: &GpuMamba3LayerWeights,
     lg: &GpuMamba3LayerGrads,
+    scratch: &mut GpuMamba3Scratch,
+) -> Result<(), String> {
+    let into = d_temporal.cached_ptr();
+    layer_backward(exec, (d_temporal, into), (acts, lw, lg), scratch)
+}
+
+/// [`gpu_backward_mamba3_layer`] with the norm's input gradient added into
+/// the rows at `into` rather than `d_temporal`: the first layer of a
+/// bidirectional pair reads d loss / d (the pair's output) and adds into
+/// the gradient the second layer gathered.
+fn layer_backward(
+    exec: &M3Exec<'_>,
+    (d_temporal, into): (&mut GpuBuffer, u64),
+    (acts, lw, lg): (
+        &GpuMamba3LayerActs,
+        &GpuMamba3LayerWeights,
+        &GpuMamba3LayerGrads,
+    ),
     scratch: &mut GpuMamba3Scratch,
 ) -> Result<(), String> {
     exec.check_state_cap()?;
@@ -961,11 +980,11 @@ pub fn gpu_backward_mamba3_layer(
         }
     }
 
-    // Residual pass-through: d_temporal += d_pre_norm.
+    // Residual pass-through: into += d_pre_norm.
     crate::gpu::launch::launch_elems(
         &ctx.stream,
         &m3k.vec_add_inplace,
-        &[d_temporal.cached_ptr(), scratch.d_pre_norm.cached_ptr()],
+        &[into, scratch.d_pre_norm.cached_ptr()],
         bt * dm,
         format_args!("vec_add d_temporal m3"),
     )?;
@@ -1044,24 +1063,55 @@ pub fn gpu_backward_mamba3_backbone(
         d_temporal.copy_from_raw(&scratch.d_norm, &ctx.stream)?;
     }
 
-    for l in (0..dims.n_layers).rev() {
+    let mlp_backward = |l: usize, d: &mut GpuBuffer, scratch: &mut GpuMamba3Scratch| {
         // The MLP came after the mixer, so its backward comes first.
-        if let Some(m) = acts.mlp.as_ref() {
-            let layer = MlpBwd {
-                acts: &m.layers[l],
-                w: &mamba_w.mlp[l],
-                g: &grads.mlp[l],
-            };
-            gpu_backward_mamba3_mlp(exec, d_temporal, &layer, scratch)?;
+        match acts.mlp.as_ref() {
+            Some(m) => {
+                let layer = MlpBwd {
+                    acts: &m.layers[l],
+                    w: &mamba_w.mlp[l],
+                    g: &grads.mlp[l],
+                };
+                gpu_backward_mamba3_mlp(exec, d, &layer, scratch)
+            }
+            None => Ok(()),
         }
-        gpu_backward_mamba3_layer(
-            exec,
-            d_temporal,
-            &acts.layers[l],
-            &mamba_w.layers[l],
-            &grads.layers[l],
-            scratch,
-        )?;
+    };
+    let layer = |l: usize| (&acts.layers[l], &mamba_w.layers[l], &grads.layers[l]);
+    if dims.bidirectional {
+        // A pair from its MLPs down: both mixers take d loss / d (the
+        // pair's output), the second, which ran on the reversed window,
+        // reversed, its norm's gradient turned back; the first adds its own
+        // on top: (d_out + c_reversed) + c_forward.
+        let window = |ptr| WindowRows {
+            ptr,
+            elem_bytes: 4,
+            batch: dims.batch,
+            seq_len: dims.seq_len,
+            width: dm,
+        };
+        for l in (0..dims.n_layers).step_by(2).rev() {
+            mlp_backward(l + 1, d_temporal, scratch)?;
+            mlp_backward(l, d_temporal, scratch)?;
+            scratch.pair.copy_from_raw(d_temporal, &ctx.stream)?;
+            let d = d_temporal.cached_ptr();
+            reverse_rows(ctx, window(d), exec.seq_idx)?;
+            layer_backward(exec, (d_temporal, d), layer(l + 1), scratch)?;
+            reverse_rows(ctx, window(d), exec.seq_idx)?;
+            // The first layer reads the held gradient as its own and adds
+            // into the gathered one; the two trade places back after it.
+            std::mem::swap(d_temporal, &mut scratch.pair);
+            let gathered = scratch.pair.cached_ptr();
+            let first = layer_backward(exec, (d_temporal, gathered), layer(l), scratch);
+            std::mem::swap(d_temporal, &mut scratch.pair);
+            first?;
+        }
+    } else {
+        for l in (0..dims.n_layers).rev() {
+            mlp_backward(l, d_temporal, scratch)?;
+            let into = d_temporal.cached_ptr();
+            layer_backward(exec, (d_temporal, into), layer(l), scratch)?;
+        }
     }
 
     // input_proj bwd. Without a projection there is nothing to train.

@@ -21,6 +21,7 @@ use super::mixer_norms::{NormBackward, launch_pack_xdbl_norm_bwd};
 use super::weights::{
     GpuMambaGrads, GpuMambaLayerGrads, GpuMambaTrainLayerWeights, GpuMambaTrainWeights,
 };
+use crate::gpu::bidi::{WindowRows, reverse_rows};
 use crate::gpu::blas::gpu_gemm_bi_backward_grad_raw;
 use crate::gpu::block_norm;
 use crate::gpu::buffers::GpuBuffer;
@@ -38,6 +39,30 @@ pub fn gpu_backward_mamba_layer(
     acts: &GpuMambaLayerActs,
     lw: &GpuMambaTrainLayerWeights,
     a_neg_ptr: cudarc::driver::sys::CUdeviceptr,
+    scratch: &mut GpuMambaScratch,
+) -> Result<(), String> {
+    let into = d_temporal.cached_ptr();
+    layer_backward(
+        ctx,
+        (d_temporal, into),
+        (d_lw, acts, lw, a_neg_ptr),
+        scratch,
+    )
+}
+
+/// [`gpu_backward_mamba_layer`] with the norm's input gradient added into
+/// the rows at `into` rather than `d_temporal`: the first layer of a
+/// bidirectional pair reads d loss / d (the pair's output) and adds into
+/// the gradient the second layer gathered.
+fn layer_backward(
+    ctx: &GpuCtx,
+    (d_temporal, into): (&mut GpuBuffer, u64),
+    (d_lw, acts, lw, a_neg_ptr): (
+        &GpuMambaLayerGrads,
+        &GpuMambaLayerActs,
+        &GpuMambaTrainLayerWeights,
+        cudarc::driver::sys::CUdeviceptr,
+    ),
     scratch: &mut GpuMambaScratch,
 ) -> Result<(), String> {
     let dims = scratch.dims; // Copy (GpuMambaDims is Copy)
@@ -540,7 +565,7 @@ pub fn gpu_backward_mamba_layer(
             ctx,
             WeightDtype::F32,
             (
-                d_temporal.cached_ptr(),
+                into,
                 axis0_ptr,
                 scratch.d_norm.cached_ptr(),
                 acts.residual.cached_ptr(),
@@ -660,39 +685,74 @@ pub fn gpu_backward_mamba_backbone(
 
     // Mamba layers in reverse — per-layer a_neg offset
     let a_neg_per_layer = dims.d_inner * dims.d_state;
-    for layer_idx in (0..dims.n_layers).rev() {
-        let base = a_neg_all.raw_ptr(&ctx.stream);
-        let a_neg_ptr = base + (layer_idx * a_neg_per_layer * std::mem::size_of::<f32>()) as u64;
-
-        // The MLP came after the mixer, so its backward comes first.
-        if let Some(m) = acts.mlp.as_ref() {
-            let partials = scratch.axis0_partials.cached_ptr();
-            let bufs = scratch
-                .mlp
-                .as_mut()
-                .ok_or("the scratch has no buffers for the gated MLP (build it with `with_mlp`)")?;
-            super::mlp::backward_f32(
-                ctx,
-                d_temporal,
-                (
-                    &m.layers[layer_idx],
-                    &mamba_w.mlp[layer_idx],
-                    &d_mamba.mlp[layer_idx],
-                ),
-                (bufs, partials),
-                (bt, dims.d_model),
-            )?;
-        }
-
-        gpu_backward_mamba_layer(
+    let a_neg = |layer_idx: usize| {
+        a_neg_all.raw_ptr(&ctx.stream)
+            + (layer_idx * a_neg_per_layer * std::mem::size_of::<f32>()) as u64
+    };
+    // The MLP came after the mixer, so its backward comes first.
+    let mlp_backward = |layer_idx: usize, d: &mut GpuBuffer, scratch: &mut GpuMambaScratch| {
+        let Some(m) = acts.mlp.as_ref() else {
+            return Ok(());
+        };
+        let partials = scratch.axis0_partials.cached_ptr();
+        let bufs = scratch
+            .mlp
+            .as_mut()
+            .ok_or("the scratch has no buffers for the gated MLP (build it with `with_mlp`)")?;
+        super::mlp::backward_f32(
             ctx,
-            d_temporal,
+            d,
+            (
+                &m.layers[layer_idx],
+                &mamba_w.mlp[layer_idx],
+                &d_mamba.mlp[layer_idx],
+            ),
+            (bufs, partials),
+            (bt, dims.d_model),
+        )
+    };
+    let layer = |layer_idx: usize| {
+        (
             &d_mamba.layers[layer_idx],
             &acts.layers[layer_idx],
             &mamba_w.layers[layer_idx],
-            a_neg_ptr,
-            scratch,
-        )?;
+            a_neg(layer_idx),
+        )
+    };
+    if dims.bidirectional {
+        // A pair from its MLPs down: both mixers take d loss / d (the
+        // pair's output), the second, which ran on the reversed window,
+        // reversed, its norm's gradient turned back; the first adds its own
+        // on top: (d_out + c_reversed) + c_forward.
+        let window = |ptr| WindowRows {
+            ptr,
+            elem_bytes: 4,
+            batch: dims.batch,
+            seq_len: dims.seq_len,
+            width: dims.d_model,
+        };
+        for l in (0..dims.n_layers).step_by(2).rev() {
+            mlp_backward(l + 1, d_temporal, scratch)?;
+            mlp_backward(l, d_temporal, scratch)?;
+            scratch.pair.copy_from(d_temporal, &ctx.stream)?;
+            let d = d_temporal.cached_ptr();
+            reverse_rows(ctx, window(d), 0)?;
+            layer_backward(ctx, (d_temporal, d), layer(l + 1), scratch)?;
+            reverse_rows(ctx, window(d), 0)?;
+            // The first layer reads the held gradient as its own and adds
+            // into the gathered one; the two trade places back after it.
+            std::mem::swap(d_temporal, &mut scratch.pair);
+            let gathered = scratch.pair.cached_ptr();
+            let first = layer_backward(ctx, (d_temporal, gathered), layer(l), scratch);
+            std::mem::swap(d_temporal, &mut scratch.pair);
+            first?;
+        }
+    } else {
+        for layer_idx in (0..dims.n_layers).rev() {
+            mlp_backward(layer_idx, d_temporal, scratch)?;
+            let into = d_temporal.cached_ptr();
+            layer_backward(ctx, (d_temporal, into), layer(layer_idx), scratch)?;
+        }
     }
 
     // Input projection backward (dx discarded — input embedding detached);
@@ -724,14 +784,17 @@ pub fn gpu_backward_mamba_backbone(
 /// Uses batched B*T pipeline instead of per-sample step-by-step approach.
 pub struct GpuMambaTargetScratch {
     // Batched B*T scratch (reusable from online forward scratch)
-    pub proj_flat: GpuBuffer,   // [B*T*2*d_inner]
-    pub u: GpuBuffer,           // [B*T*d_inner]
-    pub xdbl: GpuBuffer,        // [B*T*xdbl_dim]
-    pub dt_gather: GpuBuffer,   // [B*T*dt_rank]
-    pub delta: GpuBuffer,       // [B*T*d_inner]
-    pub gated: GpuBuffer,       // [B*T*d_inner] the scan's gated store
-    pub out_flat: GpuBuffer,    // [B*T*d_model]
-    pub residual: GpuBuffer,    // [B*T*d_model] (saved before RmsNorm)
+    pub proj_flat: GpuBuffer, // [B*T*2*d_inner]
+    pub u: GpuBuffer,         // [B*T*d_inner]
+    pub xdbl: GpuBuffer,      // [B*T*xdbl_dim]
+    pub dt_gather: GpuBuffer, // [B*T*dt_rank]
+    pub delta: GpuBuffer,     // [B*T*d_inner]
+    pub gated: GpuBuffer,     // [B*T*d_inner] the scan's gated store
+    pub out_flat: GpuBuffer,  // [B*T*d_model]
+    pub residual: GpuBuffer,  // [B*T*d_model] (saved before RmsNorm)
+    /// A bidirectional pair's input rows `[B*T*d_model]`, reversed for its
+    /// second layer (one element without pairs).
+    pub pair_in: GpuBuffer,
     pub rms_discard: GpuBuffer, // [B*T*stats] (the norms' statistics, discarded)
     pub b_gathered: GpuBuffer,  // [B*T*d_state]
     pub c_gathered: GpuBuffer,  // [B*T*d_state]
@@ -790,6 +853,7 @@ impl GpuMambaTargetScratch {
             gated: GpuBuffer::zeros(stream, bt * d_inner)?,
             out_flat: GpuBuffer::zeros(stream, bt * d_model)?,
             residual: GpuBuffer::zeros(stream, bt * d_model)?,
+            pair_in: GpuBuffer::zeros(stream, if dims.bidirectional { bt * d_model } else { 1 })?,
             rms_discard: GpuBuffer::zeros(stream, bt * dims.block_norm.stats_per_row())?,
             b_gathered: GpuBuffer::zeros(stream, bt * d_state)?,
             c_gathered: GpuBuffer::zeros(stream, bt * d_state)?,
@@ -834,6 +898,9 @@ pub struct GpuMambaTargetMixedScratch {
     pub out_flat: DtypedBuf,
     /// Residual accumulator — f32 across layers (HF residual_in_fp32).
     pub residual: GpuBuffer,
+    /// A bidirectional pair's f32 input rows `[B*T*d_model]`, reversed for
+    /// its second layer (one element without pairs).
+    pub pair_in: GpuBuffer,
     pub rms_discard: GpuBuffer,
     pub b_gathered: DtypedBuf,
     pub c_gathered: DtypedBuf,
@@ -887,6 +954,7 @@ impl GpuMambaTargetMixedScratch {
             gated: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
             out_flat: DtypedBuf::zeros(stream, bt * d_model, dtype)?,
             residual: GpuBuffer::zeros(stream, bt * d_model)?,
+            pair_in: GpuBuffer::zeros(stream, if dims.bidirectional { bt * d_model } else { 1 })?,
             rms_discard: GpuBuffer::zeros(stream, bt * dims.block_norm.stats_per_row())?,
             b_gathered: DtypedBuf::zeros(stream, bt * d_state, dtype)?,
             c_gathered: DtypedBuf::zeros(stream, bt * d_state, dtype)?,

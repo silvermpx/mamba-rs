@@ -53,6 +53,7 @@ fn cfg() -> MambaConfig {
         scan_mode: mamba_rs::config::ScanMode::Sequential,
         block_norm: mamba_rs::BlockNorm::Rms,
         final_norm: true,
+        bidirectional: false,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -109,6 +110,7 @@ fn m1_f32_training_graph_matches_eager() {
         rms_norm_eps: 1e-5,
         block_norm: mamba_rs::BlockNorm::Rms,
         bcdt_rms_eps: None,
+        bidirectional: false,
     };
 
     let n = batch * seq_len * dm;
@@ -419,6 +421,7 @@ fn m3_f32_training_graph_matches_eager() {
         block_norm: cfg.block_norm,
         is_outproj_norm: cfg.is_outproj_norm,
         use_parallel_scan: true,
+        bidirectional: false,
     };
 
     let n = batch * seq_len * dm;

@@ -20,6 +20,7 @@
 //!   d_c_raw, d_proj, d_post_norm, d_temporal_typed); otherwise f32 in
 //!   the existing `GpuMamba3Scratch`.
 
+use crate::gpu::bidi::{WindowRows, reverse_rows};
 use crate::gpu::blas::{
     TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_ex_backward_dx_typed,
 };
@@ -122,29 +123,84 @@ pub fn gpu_backward_mamba3_backbone_mixed(
 
     // Per-layer bwd in REVERSE order; the MLP came after the mixer, so its
     // backward comes first.
-    for l in (0..dims.n_layers).rev() {
-        if let Some(m) = acts.mlp.get(l) {
-            let layer = MixedMlpBwd {
-                acts: m,
-                cw: &mamba_w.compute.mlp[l],
-                norm_master: mamba_w.master.mlp[l].norm(),
-                g: &grads.mlp[l],
-            };
-            mixed_mlp_backward(exec, d_temporal, &layer, f32_scratch, mixed_scratch)?;
+    let mlp_backward = |l: usize,
+                        d: &mut GpuBuffer,
+                        f32_scratch: &mut GpuMamba3Scratch,
+                        mixed_scratch: &mut GpuMamba3MixedScratch| {
+        match acts.mlp.get(l) {
+            Some(m) => {
+                let layer = MixedMlpBwd {
+                    acts: m,
+                    cw: &mamba_w.compute.mlp[l],
+                    norm_master: mamba_w.master.mlp[l].norm(),
+                    g: &grads.mlp[l],
+                };
+                mixed_mlp_backward(exec, d, &layer, f32_scratch, mixed_scratch)
+            }
+            None => Ok(()),
         }
-        gpu_backward_mamba3_layer_mixed(
-            exec,
-            d_temporal,
-            &M3MixedLayerBwd {
-                acts: &acts.layers[l],
-                lw: &mamba_w.compute.layers[l],
-                lw_master: &mamba_w.master.layers[l],
-                lg: &grads.layers[l],
-            },
-            f32_scratch,
-            mixed_scratch,
-            dtype,
-        )?;
+    };
+    let layer = |l: usize| M3MixedLayerBwd {
+        acts: &acts.layers[l],
+        lw: &mamba_w.compute.layers[l],
+        lw_master: &mamba_w.master.layers[l],
+        lg: &grads.layers[l],
+    };
+    if dims.bidirectional {
+        // A pair from its MLPs down: both mixers take d loss / d (the
+        // pair's output), the second, which ran on the reversed window,
+        // reversed, its norm's gradient turned back; the first adds its own
+        // on top: (d_out + c_reversed) + c_forward.
+        let window = |ptr| WindowRows {
+            ptr,
+            elem_bytes: 4,
+            batch: dims.batch,
+            seq_len: dims.seq_len,
+            width: dm,
+        };
+        for l in (0..dims.n_layers).step_by(2).rev() {
+            mlp_backward(l + 1, d_temporal, f32_scratch, mixed_scratch)?;
+            mlp_backward(l, d_temporal, f32_scratch, mixed_scratch)?;
+            mixed_scratch.pair.copy_from_raw(d_temporal, &ctx.stream)?;
+            let d = d_temporal.cached_ptr();
+            reverse_rows(ctx, window(d), exec.seq_idx)?;
+            gpu_backward_mamba3_layer_mixed(
+                exec,
+                (d_temporal, d),
+                &layer(l + 1),
+                f32_scratch,
+                mixed_scratch,
+                dtype,
+            )?;
+            reverse_rows(ctx, window(d), exec.seq_idx)?;
+            // The first layer reads the held gradient as its own and adds
+            // into the gathered one; the two trade places back after it.
+            std::mem::swap(d_temporal, &mut mixed_scratch.pair);
+            let gathered = mixed_scratch.pair.cached_ptr();
+            let first = gpu_backward_mamba3_layer_mixed(
+                exec,
+                (d_temporal, gathered),
+                &layer(l),
+                f32_scratch,
+                mixed_scratch,
+                dtype,
+            );
+            std::mem::swap(d_temporal, &mut mixed_scratch.pair);
+            first?;
+        }
+    } else {
+        for l in (0..dims.n_layers).rev() {
+            mlp_backward(l, d_temporal, f32_scratch, mixed_scratch)?;
+            let into = d_temporal.cached_ptr();
+            gpu_backward_mamba3_layer_mixed(
+                exec,
+                (d_temporal, into),
+                &layer(l),
+                f32_scratch,
+                mixed_scratch,
+                dtype,
+            )?;
+        }
     }
 
     // input_proj backward — identity leaves it untouched; non-identity
@@ -223,9 +279,12 @@ struct M3MixedLayerBwd<'a> {
     lg: &'a GpuMamba3LayerGrads,
 }
 
+/// One mixer's backward on d loss / d (its output rows) in `d_temporal`,
+/// its norm's input gradient added into the rows at `into` (`d_temporal`,
+/// or a bidirectional pair's gathered gradient).
 fn gpu_backward_mamba3_layer_mixed(
     exec: &M3Exec<'_>,
-    d_temporal: &mut GpuBuffer,
+    (d_temporal, into): (&mut GpuBuffer, u64),
     layer: &M3MixedLayerBwd<'_>,
     sc: &mut GpuMamba3Scratch,
     msc: &mut GpuMamba3MixedScratch,
@@ -1090,11 +1149,11 @@ fn gpu_backward_mamba3_layer_mixed(
         }
     }
 
-    // Residual: d_temporal += d_pre_norm.
+    // Residual: into += d_pre_norm.
     crate::gpu::launch::launch_elems(
         &ctx.stream,
         &m3k.vec_add_inplace,
-        &[d_temporal.cached_ptr(), sc.d_pre_norm.cached_ptr()],
+        &[into, sc.d_pre_norm.cached_ptr()],
         bt * dm,
         format_args!("vec_add d_temporal mixed"),
     )?;

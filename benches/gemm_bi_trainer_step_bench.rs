@@ -35,6 +35,7 @@ fn cfg() -> MambaConfig {
         scan_mode: ScanMode::Auto,
         block_norm: mamba_rs::BlockNorm::Rms,
         final_norm: true,
+        bidirectional: false,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,

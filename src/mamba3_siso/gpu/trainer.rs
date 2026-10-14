@@ -1135,6 +1135,7 @@ impl Mamba3TrainerMixed {
             block_norm: cfg.block_norm,
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: cfg.train_use_parallel_scan(),
+            bidirectional: cfg.bidirectional,
         };
         dims.check_int_args()?;
 
@@ -2912,6 +2913,7 @@ impl Mamba3TrainerF32 {
             block_norm: cfg.block_norm,
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: cfg.train_use_parallel_scan(),
+            bidirectional: cfg.bidirectional,
         };
         dims.check_int_args()?;
 

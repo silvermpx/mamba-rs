@@ -378,6 +378,11 @@ fn layer_step(
 ///
 /// `input`: `[input_dim]` observation vector.
 /// `temporal`: `[d_model]` working buffer (output after step).
+///
+/// # Panics
+///
+/// For a bidirectional model, which reads whole sequences and has no
+/// decode step.
 pub fn mamba3_step(
     temporal: &mut [f32],
     input: &[f32],
@@ -394,7 +399,8 @@ pub fn mamba3_step(
 ///
 /// # Panics
 ///
-/// When `packed` holds another number of layers or MLPs than `weights`.
+/// When `packed` holds another number of layers or MLPs than `weights`,
+/// and for a bidirectional model.
 pub fn mamba3_step_packed(
     temporal: &mut [f32],
     input: &[f32],
@@ -425,6 +431,10 @@ fn backbone_step(
     states: &mut [Mamba3LayerState],
     cfg: &Mamba3Config,
 ) {
+    assert!(
+        !cfg.bidirectional,
+        "a bidirectional model reads whole sequences and has no decode step"
+    );
     let dm = cfg.d_model;
     let input_dim = input.len();
 
@@ -512,6 +522,10 @@ pub fn mamba3_step_batch(
     cfg: &Mamba3Config,
     input_dim: usize,
 ) {
+    assert!(
+        !cfg.bidirectional,
+        "a bidirectional model reads whole sequences and has no decode step"
+    );
     let batch = states.len();
     let d_model = cfg.d_model;
     assert_eq!(

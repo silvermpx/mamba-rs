@@ -46,6 +46,16 @@ pub struct Mamba3MimoConfig {
     /// stream after its last block, which the next segment, built with an
     /// identity input, carries on.
     pub final_norm: bool,
+    /// Whether the layers read the sequence in both directions, in pairs:
+    /// layer 2k reads it forward and layer 2k+1 reads every sequence
+    /// reversed, both from the pair's input, and the two mixers' outputs
+    /// join the residual stream together, as the bidirectional stacks of
+    /// Vim, Caduceus and burn-mamba's `BidiLayers` do. A pair's gated MLPs,
+    /// when the model has them, follow its two mixers in layer order. A
+    /// bidirectional model reads whole sequences: it has no decode step and
+    /// carries no state from one window or prompt to the next. It needs an
+    /// even number of layers.
+    pub bidirectional: bool,
     /// Epsilon of the block norms (`norm`, `norm2`, `norm_f`), of either
     /// kind; the reference's `norm_epsilon`.
     pub rms_norm_eps: f32,
@@ -146,6 +156,12 @@ impl Mamba3MimoConfig {
         }
         if self.n_layers > envelope::MAX_LAYERS {
             return Err(format!("n_layers ({}) must be <= 4096", self.n_layers));
+        }
+        if self.bidirectional && !self.n_layers.is_multiple_of(2) {
+            return Err(format!(
+                "a bidirectional model's layers work in pairs: n_layers ({}) must be even",
+                self.n_layers
+            ));
         }
         self.d_model
             .checked_mul(self.expand)
@@ -255,6 +271,7 @@ impl Default for Mamba3MimoConfig {
             is_outproj_norm: false,
             block_norm: BlockNorm::Rms,
             final_norm: true,
+            bidirectional: false,
             rms_norm_eps: 1e-5,
             ssm_norm_eps: 1e-5,
             d_intermediate: 0,

@@ -141,6 +141,9 @@ pub(crate) fn checkpoint_parts<'a>(
     if !cfg.final_norm {
         extra.push_str(r#","final_norm":false"#);
     }
+    if cfg.bidirectional {
+        extra.push_str(r#","bidirectional":true"#);
+    }
     let meta = HashMap::from([
         ("mamba_version".to_string(), VERSION.to_string()),
         (
@@ -245,6 +248,7 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize)
             !config_json.contains(r#""rms_norm":false"#),
         ),
         final_norm: !config_json.contains(r#""final_norm":false"#),
+        bidirectional: config_json.contains(r#""bidirectional":true"#),
         rms_norm_eps,
         bcdt_rms_eps: float("bcdt_rms_eps")?,
         dt_rank: config_json

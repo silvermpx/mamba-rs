@@ -15,6 +15,7 @@ use super::flat::Mamba3LayerFlat;
 use super::forward::{SsmHeadStep, simd_ssm_head, simd_sum_sq};
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
+use crate::bidi::{PairGrad, reverse_rows};
 use crate::ops::fast_math::fast_exp_scalar;
 use crate::ops::norms::layer_norm_row_backward;
 use crate::ops::rounding::store;
@@ -99,6 +100,27 @@ pub fn backward_mamba3_layer_batched(
     dims: &Mamba3Dims,
     angle_state_init: Option<&[f32]>,
 ) {
+    backward_mamba3_layer_in(
+        d_temporal_flat,
+        acts,
+        (layer_w, d_layer),
+        scratch,
+        (dims, angle_state_init, None),
+    );
+}
+
+/// [`backward_mamba3_layer_batched`] for a layer of a bidirectional pair
+/// as well: with `pair` set the layer's mixer takes d loss / d (the
+/// pair's output) from it, and only its norm's gradient joins
+/// `d_temporal_flat` as `norm + stream`, reversed back first for the
+/// pair's second layer, which ran on the reversed window.
+pub(crate) fn backward_mamba3_layer_in(
+    d_temporal_flat: &mut [f32],
+    acts: &Mamba3LayerFlat,
+    (layer_w, d_layer): (&TrainMamba3LayerWeights, &mut TrainMamba3LayerWeights),
+    scratch: &mut Mamba3Scratch,
+    (dims, angle_state_init, pair): (&Mamba3Dims, Option<&[f32]>, Option<PairGrad<'_>>),
+) {
     let dm = dims.d_model;
     let di = dims.d_inner;
     let ds = dims.d_state;
@@ -124,10 +146,11 @@ pub fn backward_mamba3_layer_batched(
         scratch.gated_buf[t * di..(t + 1) * di].copy_from_slice(&acts.data[gs..gs + di]);
     }
 
+    let d_out: &[f32] = pair.map_or(&*d_temporal_flat, |p| p.d_out);
     scratch.gemm.backward(
         dtype,
         (&mut scratch.d_gated_flat, &mut d_layer.out_proj_w, None),
-        (d_temporal_flat, &scratch.gated_buf, &layer_w.out_proj_w),
+        (d_out, &scratch.gated_buf, &layer_w.out_proj_w),
         (seq_len, di, dm),
     );
 
@@ -622,7 +645,17 @@ pub fn backward_mamba3_layer_batched(
     );
 
     // ═══ B8: the block norm's backward + residual ═══
-    scratch.d_residual_buf[..seq_len * dm].copy_from_slice(&d_temporal_flat[..seq_len * dm]);
+    // The norm's gradient lands in `d_norm`: over the stream's for a plain
+    // layer, whose stream gradient waits in d_residual_buf; in d_residual_buf
+    // for the second layer of a pair, whose rows are reversed.
+    let reversed = pair.is_some_and(|p| p.reversed);
+    let mut d_residual = std::mem::take(&mut scratch.d_residual_buf);
+    let d_norm: &mut [f32] = if reversed {
+        &mut d_residual[..seq_len * dm]
+    } else {
+        d_residual[..seq_len * dm].copy_from_slice(&d_temporal_flat[..seq_len * dm]);
+        &mut d_temporal_flat[..seq_len * dm]
+    };
 
     let inv_dim = 1.0 / dm as f32;
     let layer_norm = !layer_w.norm_bias.is_empty();
@@ -632,7 +665,7 @@ pub fn backward_mamba3_layer_batched(
             let off = t * dm;
             let st = &acts.data[base_t + o.rms_val..base_t + o.rms_val + 2];
             layer_norm_row_backward(
-                &mut d_temporal_flat[off..off + dm],
+                &mut d_norm[off..off + dm],
                 (&mut d_layer.norm_weight, &mut d_layer.norm_bias),
                 (
                     &scratch.d_post_norm_flat[off..off + dm],
@@ -660,19 +693,32 @@ pub fn backward_mamba3_layer_batched(
         for d in 0..dm {
             let x_hat = acts.data[base_t + o.residual + d] * inv_rms;
             d_layer.norm_weight[d] += scratch.d_post_norm_flat[off + d] * x_hat;
-            d_temporal_flat[off + d] = (layer_w.norm_weight[d] * scratch.d_post_norm_flat[off + d]
+            d_norm[off + d] = (layer_w.norm_weight[d] * scratch.d_post_norm_flat[off + d]
                 - x_hat * mean_rowdot)
                 * inv_rms;
         }
     }
 
-    // Add residual pass-through
-    for (dt, &dr) in d_temporal_flat[..seq_len * dm]
-        .iter_mut()
-        .zip(&scratch.d_residual_buf[..seq_len * dm])
-    {
-        *dt += dr;
+    if reversed {
+        // The second layer of a pair ran on the reversed window: its norm's
+        // gradient turns back before it joins the stream's.
+        reverse_rows(&mut d_residual[..seq_len * dm], dm, varlen.as_ref());
+        for (dt, &dn) in d_temporal_flat[..seq_len * dm]
+            .iter_mut()
+            .zip(&d_residual[..seq_len * dm])
+        {
+            *dt += dn;
+        }
+    } else {
+        // Add residual pass-through
+        for (dt, &dr) in d_temporal_flat[..seq_len * dm]
+            .iter_mut()
+            .zip(&d_residual[..seq_len * dm])
+        {
+            *dt += dr;
+        }
     }
+    scratch.d_residual_buf = d_residual;
     scratch.varlen = varlen;
 }
 

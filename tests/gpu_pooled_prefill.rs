@@ -62,6 +62,7 @@ fn rig_cfg() -> MambaConfig {
         scan_mode: ScanMode::Auto,
         block_norm: mamba_rs::BlockNorm::Rms,
         final_norm: true,
+        bidirectional: false,
         rms_norm_eps: 1e-5,
         bcdt_rms_eps: None,
         dt_rank: None,
@@ -109,6 +110,7 @@ fn rig_with(seq_len: usize, batch: usize, mid: usize, identity: bool) -> Rig {
         rms_norm_eps: cfg.rms_norm_eps,
         block_norm: cfg.block_norm,
         bcdt_rms_eps: None,
+        bidirectional: false,
     };
     let device = GpuDevice::new(0).expect("device");
     let ctx = GpuCtx::new(&device).expect("ctx");
