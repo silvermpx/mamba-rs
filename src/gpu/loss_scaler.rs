@@ -85,6 +85,30 @@ pub fn check_inf_nan_gpu(
     Ok(())
 }
 
+/// Write a NaN into the first value of the f32 buffer at `target` when
+/// the overflow flag at `flag` is set: one thread, launches only. An
+/// overflow in a value the gradient arena's own check does not scan marks
+/// the arena so, and the check then skips the step like any other.
+pub(crate) fn mark_overflow(
+    ctx: &GpuCtx,
+    target: cudarc::driver::sys::CUdeviceptr,
+    flag: cudarc::driver::sys::CUdeviceptr,
+) -> Result<(), String> {
+    let mut b = ctx
+        .stream
+        .launch_builder(&ctx.kernels.grad_mark_overflow_f32);
+    b.arg(&target);
+    b.arg(&flag);
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (1, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    unsafe { b.launch(cfg) }
+        .map(|_| ())
+        .map_err(|e| format!("grad_mark_overflow_f32: {e:?}"))
+}
+
 /// 1-element device buffer holding `1/loss_scale`. CPU writes the value
 /// here BEFORE each f16 graph replay; the captured `scale_grads_skip`
 /// kernel reads it via a stable device pointer baked at capture time.

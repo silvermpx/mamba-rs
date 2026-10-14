@@ -605,3 +605,94 @@ fn half_lanes_scale_skip_and_step() {
         }
     }
 }
+
+/// An applying f16 call of a half lane whose input gradient passes f16's
+/// range at the loss scale never hands the caller a non-finite gradient
+/// with a step taken: the input projection's weight times 1024 and the
+/// input over 1024 leave the forward as it was and lift d loss / d input
+/// past f16's largest value at the scale of 256. A lane that stores the
+/// projection's input gradient in f16 reports the overflow (no step, the
+/// weights as they were, the scale backed off); one that keeps it in f32
+/// returns it finite and steps.
+#[test]
+fn an_input_gradient_past_f16_never_steps_unreported_in_every_family() {
+    use mamba_rs::{CpuOptions, WeightDtype};
+    const SCALE: f32 = 256.0;
+    const BOOST: f32 = 1024.0;
+    let s = session();
+    macro_rules! boosted {
+        ($weights:ty, $cfg:expr, $seed:expr) => {{
+            let mut w = <$weights>::init(&$cfg, INPUT_DIM, $seed);
+            w.input_proj_w.iter_mut().for_each(|x| *x *= BOOST);
+            w
+        }};
+    }
+    let m1 = boosted!(MambaWeights, m1_cfg(), 1);
+    let m2 = boosted!(Mamba2Weights, m2_cfg(), 2);
+    let siso = boosted!(Mamba3Weights, siso_cfg(), 3);
+    let mimo = boosted!(Mamba3MimoWeights, mimo_cfg(), 4);
+    let lanes = |dtype| -> Vec<AnyCpuTrainer> {
+        let o = CpuOptions::default().dtype(dtype);
+        vec![
+            MambaCpuTrainer::new_with(&m1, m1_cfg(), s, o)
+                .unwrap()
+                .into(),
+            Mamba2CpuTrainer::new_with(&m2, m2_cfg(), s, o)
+                .unwrap()
+                .into(),
+            Mamba3CpuTrainer::new_with(&siso, siso_cfg(), s, o)
+                .unwrap()
+                .into(),
+            Mamba3MimoCpuTrainer::new_with(&mimo, mimo_cfg(), s, o)
+                .unwrap()
+                .into(),
+        ]
+    };
+    let input: Vec<f32> = values(BATCH * SEQ_LEN * INPUT_DIM, 51)
+        .into_iter()
+        .map(|v| v / BOOST)
+        .collect();
+    let d = values(BATCH * SEQ_LEN * D_MODEL, 52);
+    let n_out = BATCH * SEQ_LEN * D_MODEL;
+    let run = |t: &mut AnyCpuTrainer, opts: BackwardOpts| {
+        let (mut out, mut d_input) = (vec![0.0f32; n_out], vec![0.0f32; input.len()]);
+        t.reset_state().unwrap();
+        t.forward(&input, &mut out).unwrap();
+        let m = t.backward_step_input_grad(&d, opts, &mut d_input).unwrap();
+        (m, d_input)
+    };
+    let accumulating = BackwardOpts::default().with_accumulate_only(true);
+    let exact: Vec<Vec<f32>> = lanes(WeightDtype::F32)
+        .iter_mut()
+        .map(|t| run(t, accumulating).1)
+        .collect();
+    for (mut t, exact) in lanes(WeightDtype::F16).into_iter().zip(&exact) {
+        let family = t.family();
+        t.load_scaler_state(SCALE, 0).unwrap();
+        let peak = exact.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(
+            peak * SCALE > 65504.0,
+            "{family:?}: the input gradient's peak {peak} fits f16 at the scale"
+        );
+        let before = response(&mut t);
+        let (m, d_input) = run(&mut t, BackwardOpts::default());
+        if m.overflow_skipped == Some(true) {
+            assert!(!m.optimizer_stepped, "{family:?}: a step on an overflow");
+            assert_eq!(response(&mut t), before, "{family:?}: the weights moved");
+            assert_eq!(
+                t.scaler_state().map(|(scale, _)| scale),
+                Some(SCALE / 2.0),
+                "{family:?}: the scale"
+            );
+        } else {
+            assert!(
+                m.optimizer_stepped,
+                "{family:?}: no step without an overflow"
+            );
+            assert!(
+                d_input.iter().all(|x| x.is_finite()),
+                "{family:?}: a non-finite input gradient with the step taken"
+            );
+        }
+    }
+}

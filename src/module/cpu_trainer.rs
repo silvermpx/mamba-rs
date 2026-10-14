@@ -380,6 +380,17 @@ impl<F: CpuFamily> CpuCore<F> {
         if let Some(d) = d_input {
             d.copy_from_slice(&self.d_input_buf);
             if let Some(s) = scale {
+                // A half lane stores the input projection's input gradient
+                // in f16, and no weight gradient reads it: an overflow there
+                // would reach the caller while the step went on. It marks
+                // the window instead, whose overflow check then skips it and
+                // backs the scale off, as the GPU trainers do.
+                if d.iter().any(|x| !x.is_finite())
+                    && let Some(i) =
+                        (0..self.grads.n_tensors()).find(|&i| !self.grads.tensor(i).is_empty())
+                {
+                    self.grads.tensor_mut(i)[0] = f32::NAN;
+                }
                 let inv = 1.0 / s;
                 d.iter_mut().for_each(|x| *x *= inv);
             }

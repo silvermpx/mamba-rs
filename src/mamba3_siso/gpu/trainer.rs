@@ -33,7 +33,8 @@ use crate::gpu::graph_capture::{
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::gpu::loss_scaler::{
-    DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
+    DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, mark_overflow,
+    scale_grads_skip_gpu,
 };
 use crate::gpu::train::StepMetrics;
 pub use crate::gpu::train::{BackwardMetrics, BackwardOpts, TrainSessionCfg};
@@ -2371,6 +2372,25 @@ impl Mamba3TrainerMixed {
                 bt * mid,
                 format_args!("input gradient cast"),
             )?;
+            // The input's gradient is the one value of the backward stored
+            // in f16 that no weight gradient reads: an overflow there would
+            // reach the caller while the step went on. It marks the
+            // gradient arena instead, whose overflow check then skips the
+            // window and backs the scale off.
+            if let Some(flag) = self.overflow_flag.as_mut() {
+                flag.zero(&stream)?;
+                check_inf_nan_gpu(
+                    &self.ctx,
+                    &self.ctx.kernels,
+                    flag,
+                    &self.f32_scratch.d_input_proj_dx,
+                )?;
+                mark_overflow(
+                    &self.ctx,
+                    self.grads.flat.cached_ptr(),
+                    flag.stable_ptr(&stream),
+                )?;
+            }
             self.f32_scratch
                 .d_input_proj_dx
                 .download(&stream, d_input)?;

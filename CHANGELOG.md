@@ -670,6 +670,15 @@
   trainer keeps, and its states were refused the same way. Both GPU
   trainers now lay the gradients and moments out in the host trainer's
   tensor order.
+- In f16 the Mamba-1 and SISO trainers with an input projection handed
+  `backward_step_input_grad` callers an input gradient of inf while the
+  step went on, when the gradient passed f16's range at the loss scale.
+  The projection's input gradient is stored in f16, and no weight
+  gradient reads it, so the overflow check never saw it. Such an
+  overflow now counts as the step's own, on the GPU and the host lanes:
+  the window is skipped, the scale backs off and `overflow_skipped`
+  reports it, so a caller training something upstream skips that step
+  too.
 
 ## 0.7.5 (2026-09-23)
 

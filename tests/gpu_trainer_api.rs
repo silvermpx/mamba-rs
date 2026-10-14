@@ -1203,3 +1203,122 @@ fn every_family_returns_the_input_gradient() {
         }
     }
 }
+
+/// The f16 loss scale and the factor of the input-gradient cases below:
+/// the input projection's weight times `BOOST` and the input over it leave
+/// the forward as it was and multiply d loss / d input by `BOOST`, past
+/// f16's largest value at the scale.
+const OVERFLOW_SCALE: f32 = 256.0;
+const BOOST: f32 = 1024.0;
+
+/// One trainer of each family with the input projection's weight times
+/// [`BOOST`], at the loss scale [`OVERFLOW_SCALE`] in f16.
+fn boosted_trainers(dtype: WeightDtype) -> Vec<AnyGpuTrainer> {
+    let (s, opts) = (session(), GpuOptions::default().dtype(dtype));
+    macro_rules! boosted {
+        ($weights:ty, $cfg:expr, $seed:expr) => {{
+            let mut w = <$weights>::init(&$cfg, INPUT_DIM, $seed);
+            w.input_proj_w.iter_mut().for_each(|x| *x *= BOOST);
+            w
+        }};
+    }
+    let mut out: Vec<AnyGpuTrainer> = vec![
+        MambaGpuTrainer::new(&boosted!(MambaWeights, m1_cfg(), 61), m1_cfg(), s, opts)
+            .unwrap()
+            .into(),
+        Mamba2GpuTrainer::new(&boosted!(Mamba2Weights, m2_cfg(), 62), m2_cfg(), s, opts)
+            .unwrap()
+            .into(),
+        Mamba3GpuTrainer::new(
+            &boosted!(Mamba3Weights, siso_cfg(), 63),
+            siso_cfg(),
+            s,
+            opts,
+        )
+        .unwrap()
+        .into(),
+        Mamba3MimoGpuTrainer::new(
+            &boosted!(Mamba3MimoWeights, mimo_cfg(), 64),
+            mimo_cfg(),
+            s,
+            opts,
+        )
+        .unwrap()
+        .into(),
+    ];
+    for t in &mut out {
+        t.load_scaler_state(OVERFLOW_SCALE, 0).unwrap();
+    }
+    out
+}
+
+/// An applying f16 call whose input gradient passes f16's range at the
+/// loss scale never hands the caller a non-finite gradient with a step
+/// taken. A family that stores the input projection's input gradient in
+/// f16 reports the overflow: no step, the weights as they were, the scale
+/// backed off. One that keeps it in f32 returns it finite, near the f32
+/// trainer's, and steps.
+#[test]
+fn an_input_gradient_past_f16_never_steps_unreported_in_every_family() {
+    let input: Vec<f32> = values(BATCH * SEQ_LEN * INPUT_DIM, 1)
+        .into_iter()
+        .map(|v| v / BOOST)
+        .collect();
+    let d = values(BATCH * SEQ_LEN * D_MODEL, 2);
+    let n_out = BATCH * SEQ_LEN * D_MODEL;
+    let run = |t: &mut AnyGpuTrainer, opts: BackwardOpts| {
+        let (mut out, mut d_input) = (vec![0.0f32; n_out], vec![0.0f32; input.len()]);
+        t.reset_state().unwrap();
+        t.forward(&input, &mut out).unwrap();
+        let m = t.backward_step_input_grad(&d, opts, &mut d_input).unwrap();
+        (m, d_input)
+    };
+    let accumulating = BackwardOpts::default().with_accumulate_only(true);
+    let exact: Vec<Vec<f32>> = boosted_trainers(WeightDtype::F32)
+        .iter_mut()
+        .map(|t| run(t, accumulating).1)
+        .collect();
+    for (mut t, exact) in boosted_trainers(WeightDtype::F16).into_iter().zip(&exact) {
+        let family = t.family();
+        let peak = exact.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(
+            peak * OVERFLOW_SCALE > 65504.0,
+            "{family:?}: the input gradient's peak {peak} fits f16 at the scale"
+        );
+        let before = snapshot_bits(&t);
+        let (m, d_input) = run(&mut t, BackwardOpts::default());
+        if m.overflow_skipped == Some(true) {
+            assert!(!m.optimizer_stepped, "{family:?}: a step on an overflow");
+            assert_eq!(snapshot_bits(&t), before, "{family:?}: the weights moved");
+            assert_eq!(
+                t.scaler_state().map(|(scale, _)| scale),
+                Some(OVERFLOW_SCALE / 2.0),
+                "{family:?}: the scale"
+            );
+        } else {
+            assert!(
+                m.optimizer_stepped,
+                "{family:?}: no step without an overflow"
+            );
+            assert!(
+                d_input.iter().all(|x| x.is_finite()),
+                "{family:?}: a non-finite input gradient with the step taken"
+            );
+            let norm = exact
+                .iter()
+                .map(|v| f64::from(*v).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let diff = d_input
+                .iter()
+                .zip(exact)
+                .map(|(a, b)| f64::from(a - b).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            assert!(
+                diff <= 0.05 * norm,
+                "{family:?}: the input gradient is off f32 by {diff} of {norm}"
+            );
+        }
+    }
+}

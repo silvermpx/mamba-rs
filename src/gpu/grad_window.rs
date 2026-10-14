@@ -12,12 +12,13 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaStream, PushKernelArg};
+use cudarc::driver::CudaStream;
 
 use super::buffers::{GpuBuffer, GpuByteBuffer};
 use super::context::GpuCtx;
 use super::grad_clip::{GradRegionGeom, alloc_partials, clip_grads_device, clip_region_device};
 use super::launch::launch_elems;
+use super::loss_scaler::mark_overflow;
 use crate::mamba1::gpu::trainer::BackwardOpts;
 
 /// The gradient sum of an open accumulation window, and the scratch of
@@ -127,20 +128,7 @@ impl GradWindow {
         if overflow == 0 || sum.is_empty() {
             return Ok(());
         }
-        let ptr = sum.cached_ptr();
-        let mut b = ctx
-            .stream
-            .launch_builder(&ctx.kernels.grad_mark_overflow_f32);
-        b.arg(&ptr);
-        b.arg(&overflow);
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (1, 1, 1),
-            block_dim: (1, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        unsafe { b.launch(cfg) }
-            .map(|_| ())
-            .map_err(|e| format!("grad_mark_overflow_f32: {e:?}"))
+        mark_overflow(ctx, sum.cached_ptr(), overflow)
     }
 
     /// Copy the open window's sum into `grads` through the cached pointers
