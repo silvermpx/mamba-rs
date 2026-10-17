@@ -26,7 +26,7 @@ use crate::gpu::block_norm;
 use crate::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, y_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_rows, y_runs};
 use cudarc::driver::PushKernelArg;
 
 /// Logical dimensions for chunk-parallel angle accumulation.
@@ -1415,7 +1415,7 @@ fn gpu_forward_mamba3_mlp(
     gate.arg(m.up.inner());
     gate.arg(&bt_i);
     gate.arg(&h_i);
-    unsafe { gate.launch(grid_1d_cover(bt * h)?) }.map_err(|e| format!("MLP gate m3: {e:?}"))?;
+    unsafe { gate.launch(grid_rows(bt, h)) }.map_err(|e| format!("MLP gate m3: {e:?}"))?;
     gpu_gemm_bi_forward_raw(
         ctx,
         &mut scratch.out_flat,

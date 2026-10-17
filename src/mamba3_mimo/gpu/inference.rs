@@ -29,7 +29,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d_cover, launch_elems, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_rows, launch_elems, y_runs, yz_runs};
 use crate::gpu::train::RowSource;
 use crate::mamba3_mimo::config::Mamba3MimoConfig;
 use crate::mamba3_mimo::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
@@ -1042,7 +1042,7 @@ impl Mamba3MimoGpuEngine {
                 bld.arg(&upp);
                 bld.arg(&rows_i);
                 bld.arg(&h_i);
-                unsafe { bld.launch(grid_1d_cover(rows * m.hidden)?) }
+                unsafe { bld.launch(grid_rows(rows, m.hidden)) }
                     .map_err(|e| format!("MIMO MLP gate L{l}: {e:?}"))?;
                 gpu_gemm_typed_forward_raw(
                     &self.ctx,

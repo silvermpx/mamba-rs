@@ -12,22 +12,24 @@
 #endif
 
 // act[r, j] = up[r, j] * silu(up[r, hidden + j]) for rows r < rows and
-// columns j < hidden. One thread per output element, 64-bit indices.
-// Grid: 1-D over rows * hidden.
+// columns j < hidden. A block's y threads take rows, strided by the grid,
+// its x threads the columns: no index is divided.
 #define DEFINE_MLP_GATE_FWD(NAME, TY, FROM_F)                                  \
 extern "C" __global__ void NAME(                                               \
     TY* __restrict__ act,                                                      \
     const TY* __restrict__ up,                                                 \
     int rows, int hidden                                                       \
 ) {                                                                            \
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;            \
-    long long n = (long long)rows * hidden;                                    \
-    if (i >= n) return;                                                        \
-    long long r = i / hidden;                                                  \
-    long long j = i - r * hidden;                                              \
-    float v = to_f(up[r * 2 * hidden + j]);                                    \
-    float g = to_f(up[r * 2 * hidden + hidden + j]);                           \
-    act[i] = FROM_F(v * (g / (1.0f + exp2f(-g * LOG2E))));                     \
+    for (long long r = (long long)blockIdx.x * blockDim.y + threadIdx.y;       \
+         r < rows; r += (long long)gridDim.x * blockDim.y) {                   \
+        const TY* u = up + r * 2 * hidden;                                     \
+        for (int j = threadIdx.x; j < hidden; j += blockDim.x) {               \
+            float v = to_f(u[j]);                                              \
+            float g = to_f(u[hidden + j]);                                     \
+            act[r * hidden + j] =                                              \
+                FROM_F(v * (g / (1.0f + exp2f(-g * LOG2E))));                  \
+        }                                                                      \
+    }                                                                          \
 }
 
 DEFINE_MLP_GATE_FWD(mlp_gate_fwd, float, from_f_f32)
@@ -37,8 +39,8 @@ DEFINE_MLP_GATE_FWD(mlp_gate_fwd_f16, __half, from_f_f16)
 // The gate's backward: from d act, the value and gate gradients in place
 // of the up projection's row, d value = d act * silu(gate) and d gate =
 // d act * value * silu'(gate). Every rounding is spelled out, so the
-// kernel gives the same bits in every module that composes it.
-// Grid: 1-D over rows * hidden.
+// kernel gives the same bits in every module that composes it. Rows and
+// columns go to the threads as in the forward.
 __device__ __forceinline__ float mlp_exp(float x) { return exp2f(__fmul_rn(x, LOG2E)); }
 
 __device__ __forceinline__ float mlp_sigmoid(float x) {
@@ -55,18 +57,20 @@ extern "C" __global__ void NAME(                                               \
     TY* __restrict__ d_up, const TY* __restrict__ d_act,                       \
     const TY* __restrict__ up, int rows, int hidden                            \
 ) {                                                                            \
-    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;      \
-    const long long n = (long long)rows * hidden;                              \
-    if (i >= n) return;                                                        \
-    const long long r = i / hidden;                                            \
-    const long long j = i - r * hidden;                                        \
-    const float d = to_f(d_act[i]);                                            \
-    const float v = to_f(up[r * 2 * hidden + j]);                              \
-    const float g = to_f(up[r * 2 * hidden + hidden + j]);                     \
-    const float silu = __fdiv_rn(g, __fadd_rn(1.0f, mlp_exp(-g)));            \
-    d_up[r * 2 * hidden + j] = FROM_F(__fmul_rn(d, silu));                     \
-    d_up[r * 2 * hidden + hidden + j] =                                        \
-        FROM_F(__fmul_rn(__fmul_rn(d, v), mlp_silu_grad(g)));                 \
+    for (long long r = (long long)blockIdx.x * blockDim.y + threadIdx.y;       \
+         r < rows; r += (long long)gridDim.x * blockDim.y) {                   \
+        const TY* u = up + r * 2 * hidden;                                     \
+        TY* du = d_up + r * 2 * hidden;                                        \
+        for (int j = threadIdx.x; j < hidden; j += blockDim.x) {               \
+            const float d = to_f(d_act[r * hidden + j]);                       \
+            const float v = to_f(u[j]);                                        \
+            const float g = to_f(u[hidden + j]);                               \
+            const float silu = __fdiv_rn(g, __fadd_rn(1.0f, mlp_exp(-g)));     \
+            du[j] = FROM_F(__fmul_rn(d, silu));                                \
+            du[hidden + j] =                                                   \
+                FROM_F(__fmul_rn(__fmul_rn(d, v), mlp_silu_grad(g)));          \
+        }                                                                      \
+    }                                                                          \
 }
 
 DEFINE_MLP_GATE_BWD(mlp_gate_bwd, float, from_f_f32)

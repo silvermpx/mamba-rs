@@ -28,7 +28,7 @@ use crate::gpu::block_norm::{self, NormParams};
 use crate::gpu::buffers::{GpuBuffer, GradSlice};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_colsum, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_rows, y_runs, yz_runs};
 use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3LayerMixedActs, GpuMamba3MixedScratch,
     GpuMamba3MlpMixedActs,
@@ -1356,7 +1356,7 @@ fn mixed_mlp_backward(
     }
     gate.arg(&bt_i);
     gate.arg(&h_i);
-    unsafe { gate.launch(grid_1d_cover(bt * h)?) }
+    unsafe { gate.launch(grid_rows(bt, h)) }
         .map_err(|e| format!("m3_mixed MLP gate bwd: {e:?}"))?;
     gpu_gemm_bi_backward_dw_grad_typed(
         ctx,

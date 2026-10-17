@@ -64,9 +64,7 @@ use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
 use crate::gpu::kernel_identity::PreparedGemmCaptureManifest;
-use crate::gpu::launch::{
-    grid_1d, grid_1d_cover, grid_colsum, grid_rows, grid_steps, launch_cast, y_runs,
-};
+use crate::gpu::launch::{grid_1d, grid_colsum, grid_rows, grid_steps, launch_cast, y_runs};
 use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -3009,7 +3007,7 @@ impl Mamba2GpuTrainer {
         bld.arg(&up);
         bld.arg(&rows_i);
         bld.arg(&hidden_i);
-        unsafe { bld.launch(grid_1d_cover(rows * hidden)?) }
+        unsafe { bld.launch(grid_rows(rows, hidden)) }
             .map_err(|e| format!("Mamba-2 MLP gate backward L{l}: {e:?}"))?;
         if act == WeightDtype::F32 {
             let m = self.acts[l].mlp.as_ref().ok_or(no_mlp)?;

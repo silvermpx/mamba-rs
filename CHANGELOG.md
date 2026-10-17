@@ -726,6 +726,9 @@
   256 threads, so a narrow row shares its warps with the next. Each of
   these kernels took a thread an element and found its row and channel by
   a 64-bit division. Every element keeps its chain and its bits.
+- The gated MLP's gate, which every family composes (`mlp_gate_fwd`,
+  `mlp_gate_bwd`), takes rows the same way, where a thread an element
+  divided its index by the hidden width in 64 bits. The bits are the same.
 
 ### Fixed
 

@@ -433,7 +433,7 @@ impl M2Exec<'_> {
         bld.arg(&up);
         bld.arg(&rows_i);
         bld.arg(&hidden_i);
-        unsafe { bld.launch(grid_1d_cover(rows * m.hidden)?) }
+        unsafe { bld.launch(grid_rows(rows, m.hidden)) }
             .map_err(|e| format!("Mamba-2 MLP gate: {e:?}"))?;
         gpu_gemm_typed_forward_raw(
             self.ctx,

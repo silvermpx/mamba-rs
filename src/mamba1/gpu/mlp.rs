@@ -22,7 +22,7 @@ use crate::gpu::block_norm::{self, NormParams};
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, launch_elems};
+use crate::gpu::launch::{grid_rows, launch_elems};
 
 type Stream = Arc<cudarc::driver::CudaStream>;
 type DevPtr = cudarc::driver::sys::CUdeviceptr;
@@ -194,7 +194,7 @@ fn gate_fwd(
     gate.arg(&up);
     gate.arg(&rows_i);
     gate.arg(&h_i);
-    unsafe { gate.launch(grid_1d_cover(rows * h)?) }
+    unsafe { gate.launch(grid_rows(rows, h)) }
         .map(|_| ())
         .map_err(|e| format!("MLP gate: {e:?}"))
 }
@@ -215,7 +215,7 @@ fn gate_bwd(
     gate.arg(&up);
     gate.arg(&rows_i);
     gate.arg(&h_i);
-    unsafe { gate.launch(grid_1d_cover(rows * h)?) }
+    unsafe { gate.launch(grid_rows(rows, h)) }
         .map(|_| ())
         .map_err(|e| format!("MLP gate backward: {e:?}"))
 }

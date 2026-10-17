@@ -62,7 +62,9 @@ use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
 use crate::gpu::kernel_identity::PreparedGemmCaptureManifest;
-use crate::gpu::launch::{grid_1d, grid_1d_cover, launch_cast, launch_elems, y_runs, yz_runs};
+use crate::gpu::launch::{
+    grid_1d, grid_1d_cover, grid_rows, launch_cast, launch_elems, y_runs, yz_runs,
+};
 use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -2152,7 +2154,7 @@ impl Mamba3MimoGpuTrainer {
                 bld.arg(&upp);
                 bld.arg(&rows_i);
                 bld.arg(&h_i);
-                unsafe { bld.launch(grid_1d_cover(rows * hidden)?) }
+                unsafe { bld.launch(grid_rows(rows, hidden)) }
                     .map_err(|e| format!("MIMO MLP gate L{l}: {e:?}"))?;
                 self.gemm(
                     (out_rows, actp, self.gemm_weight(ms.fc2_w)?),
@@ -2535,7 +2537,7 @@ impl Mamba3MimoGpuTrainer {
             bld.arg(&up);
             bld.arg(&rows_i);
             bld.arg(&h_i);
-            unsafe { bld.launch(grid_1d_cover(rows * hidden)?) }
+            unsafe { bld.launch(grid_rows(rows, hidden)) }
                 .map_err(|e| format!("MIMO MLP gate backward L{l}: {e:?}"))?;
         }
         let gw1 = self.grad(ms.fc1_w);

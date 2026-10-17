@@ -18,7 +18,7 @@ use crate::gpu::blas::gpu_gemm_bi_backward_grad_raw;
 use crate::gpu::block_norm;
 use crate::gpu::buffers::{GpuBuffer, GradSlice};
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_colsum, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_colsum, grid_rows, y_runs, yz_runs};
 use cudarc::driver::PushKernelArg;
 
 /// Mamba-3 SISO single-layer GPU backward (sequential SSM backward).
@@ -1156,8 +1156,7 @@ fn gpu_backward_mamba3_mlp(
     gate.arg(acts.up.inner());
     gate.arg(&bt_i);
     gate.arg(&h_i);
-    unsafe { gate.launch(grid_1d_cover(bt * h)?) }
-        .map_err(|e| format!("MLP gate bwd m3: {e:?}"))?;
+    unsafe { gate.launch(grid_rows(bt, h)) }.map_err(|e| format!("MLP gate bwd m3: {e:?}"))?;
     gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.mlp_d_post,

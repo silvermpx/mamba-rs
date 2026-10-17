@@ -30,7 +30,7 @@ use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::gpu::block_norm;
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, y_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_rows, y_runs};
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::kernels::{ChunkArm, bcnorm_fwd_bc_cfg};
 use crate::mamba3_siso::gpu::state::{CHUNK_SIZE, GpuMamba3StateBufs, M3Exec, Mamba3LayerPtrs};
@@ -1314,8 +1314,7 @@ fn mixed_mlp_forward(
     gate.arg(&up);
     gate.arg(&bt_i);
     gate.arg(&h_i);
-    unsafe { gate.launch(grid_1d_cover(bt * h)?) }
-        .map_err(|e| format!("m3_mixed MLP gate: {e:?}"))?;
+    unsafe { gate.launch(grid_rows(bt, h)) }.map_err(|e| format!("m3_mixed MLP gate: {e:?}"))?;
     let out = scratch.out_flat.cached_ptr();
     gpu_gemm_typed_forward_raw(
         ctx,
