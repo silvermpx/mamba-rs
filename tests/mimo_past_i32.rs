@@ -401,7 +401,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
         args.extend([Arg::I(tq as i32), Arg::I(kt as i32), Arg::I(nk as i32)]);
         launch_runs(
             ctx,
-            k.chunk_scan_tiles.get(ACT),
+            k.chunk_scan_tiles_for(s.hd).get(ACT),
             chunk_scan_tiles_cfg((b, nc, s.nh), (s.hd, s.r), tq, smem),
             &args,
             &[Arg::P(0)],

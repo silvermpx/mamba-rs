@@ -388,7 +388,7 @@ fn m3_sequential_block_tier_matches_the_warp_kernels() {
                 );
                 let block = forward(
                     &ctx,
-                    (m3k.m3_burnin_fwd_block.get(dtype), fwd_cfg),
+                    (m3k.burnin_block_for(ds).get(dtype), fwd_cfg),
                     (s, dtype, true),
                     &hv,
                 );
@@ -402,7 +402,7 @@ fn m3_sequential_block_tier_matches_the_warp_kernels() {
             );
             let block = forward(
                 &ctx,
-                (m3k.m3_burnin_fwd_block.get(f32), s.block_cfg(fwd_smem)),
+                (m3k.burnin_block_for(ds).get(f32), s.block_cfg(fwd_smem)),
                 (s, f32, true),
                 &v,
             );
@@ -420,7 +420,10 @@ fn m3_sequential_block_tier_matches_the_warp_kernels() {
             );
             let block_bwd = backward(
                 &ctx,
-                (m3k.m3_backward_seq_block.get(f32), s.block_cfg(bwd_smem)),
+                (
+                    m3k.backward_seq_block_for(ds).get(f32),
+                    s.block_cfg(bwd_smem),
+                ),
                 (s, f32),
                 &v,
                 &warp,
@@ -449,13 +452,13 @@ fn m3_sequential_block_half_kernels_widen_exactly() {
             let v = Values::new(s, dtype);
             let wide = forward(
                 &ctx,
-                (m3k.m3_burnin_fwd_block.get(f32), fwd_cfg),
+                (m3k.burnin_block_for(ds).get(f32), fwd_cfg),
                 (s, f32, true),
                 &v,
             );
             let half = forward(
                 &ctx,
-                (m3k.m3_burnin_fwd_block.get(dtype), fwd_cfg),
+                (m3k.burnin_block_for(ds).get(dtype), fwd_cfg),
                 (s, dtype, true),
                 &v,
             );
@@ -465,14 +468,14 @@ fn m3_sequential_block_half_kernels_widen_exactly() {
             assert_bits(&format!("{label} ssm state"), &wide.ssm, &half.ssm);
             let wide_bwd = backward(
                 &ctx,
-                (m3k.m3_backward_seq_block.get(f32), bwd_cfg),
+                (m3k.backward_seq_block_for(ds).get(f32), bwd_cfg),
                 (s, f32),
                 &v,
                 &wide,
             );
             let half_bwd = backward(
                 &ctx,
-                (m3k.m3_backward_seq_block.get(dtype), bwd_cfg),
+                (m3k.backward_seq_block_for(ds).get(dtype), bwd_cfg),
                 (s, dtype),
                 &v,
                 &wide,
@@ -484,7 +487,7 @@ fn m3_sequential_block_half_kernels_widen_exactly() {
         let v = Values::new(s, f32);
         let train = forward(
             &ctx,
-            (m3k.m3_burnin_fwd_block.get(f32), fwd_cfg),
+            (m3k.burnin_block_for(ds).get(f32), fwd_cfg),
             (s, f32, true),
             &v,
         );

@@ -1283,7 +1283,12 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     }
 }
 
-#define DEFINE_M3M_CHUNK_SCAN_TILES(NAME, TI)                                  \
+// One entry for each channel count a lane takes: 1 for a head of up to
+// 32 channels, 2 up to 64, 4 past that (`chunk_scan_tiles_for` on the
+// host). Each entry takes the registers its own lanes need, where one
+// entry that switched among them at run time took the widest's for every
+// head.
+#define DEFINE_M3M_CHUNK_SCAN_TILES(NAME, TI, JP)                              \
 extern "C" __global__ void __launch_bounds__(512) NAME(                        \
     TI* __restrict__ out, float* __restrict__ y_out,                           \
     const TI* __restrict__ proj, long long ld_proj,                            \
@@ -1300,22 +1305,19 @@ extern "C" __global__ void __launch_bounds__(512) NAME(                        \
     int y_first, /* this run's first y block */                                \
     const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
-    if (hd <= 32)                                                              \
-        m3m_chunk_scan_tiles_body<TI, 1>(out, y_out, proj, ld_proj, bn, cn,    \
-            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,    \
-            seq, nh, ng, hd, ds, rank, na, tq, kt, nk, y_first, seq_idx);      \
-    else if (hd <= 64)                                                         \
-        m3m_chunk_scan_tiles_body<TI, 2>(out, y_out, proj, ld_proj, bn, cn,    \
-            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,    \
-            seq, nh, ng, hd, ds, rank, na, tq, kt, nk, y_first, seq_idx);      \
-    else                                                                       \
-        m3m_chunk_scan_tiles_body<TI, 4>(out, y_out, proj, ld_proj, bn, cn,    \
-            coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,    \
-            seq, nh, ng, hd, ds, rank, na, tq, kt, nk, y_first, seq_idx);      \
+    m3m_chunk_scan_tiles_body<TI, JP>(out, y_out, proj, ld_proj, bn, cn,       \
+        coef, sn, cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,        \
+        seq, nh, ng, hd, ds, rank, na, tq, kt, nk, y_first, seq_idx);          \
 }
-DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles, float)
-DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_bf16, __nv_bfloat16)
-DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_f16, __half)
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_jp1, float, 1)
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_jp1_bf16, __nv_bfloat16, 1)
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_jp1_f16, __half, 1)
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_jp2, float, 2)
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_jp2_bf16, __nv_bfloat16, 2)
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_jp2_f16, __half, 2)
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_jp4, float, 4)
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_jp4_bf16, __nv_bfloat16, 4)
+DEFINE_M3M_CHUNK_SCAN_TILES(m3m_chunk_scan_tiles_jp4_f16, __half, 4)
 
 // The carried keys and input after the window: the last token's rotated
 // biased keys and its raw input. Grid (B, H), threads striding R * N + P.

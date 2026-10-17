@@ -749,6 +749,13 @@
   held in local memory (512 bytes a thread at 128 states, the official
   checkpoints' width). The bits are the released steps', which stay
   frozen in `tests/fixtures/m3_step_reference.cu`.
+- Kernels that switched among template builds at run time get an entry
+  per build, so each takes the registers its own build needs where the
+  one entry took the widest build's for every shape: the MIMO tiled chunk
+  scan per channel count a lane takes (`chunk_scan_tiles_for`; the
+  four-channel build spilled), and the SISO block tier's sequential
+  forward and backward per state build (`burnin_block_for`,
+  `backward_seq_block_for`). The arithmetic of every build is unchanged.
 
 ### Fixed
 

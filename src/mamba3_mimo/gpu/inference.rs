@@ -1332,7 +1332,7 @@ pub(crate) fn launch_chunked_scan(
         let (tq_i, kt_i, nk_i) = (tq as i32, kt as i32, nk as i32);
         let cfg = chunk_scan_tiles_cfg((b, nc, nh), (hd, r), tq, smem);
         for (y_first, cfg) in y_runs(cfg) {
-            let mut bld = stream.launch_builder(x.kernels.chunk_scan_tiles.get(x.act));
+            let mut bld = stream.launch_builder(x.kernels.chunk_scan_tiles_for(hd).get(x.act));
             bld.arg(&gated);
             bld.arg(&y_out);
             bld.arg(&proj);

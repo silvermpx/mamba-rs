@@ -28,7 +28,9 @@ pub struct Mamba3MimoKernels {
     pub chunk_state_tiles: TypedKernel,
     pub state_pass: CudaFunction,
     pub chunk_scan: TypedKernel,
-    pub chunk_scan_tiles: TypedKernel,
+    /// `m3m_chunk_scan_tiles`, one entry for each channel count a lane
+    /// takes (see [`Self::chunk_scan_tiles_for`]).
+    pub chunk_scan_tiles: [TypedKernel; 3],
     pub chunk_writeback: TypedKernel,
     /// The MLP's gate, `value * silu(gate)`.
     pub mlp_gate: TypedKernel,
@@ -675,7 +677,11 @@ impl Mamba3MimoKernels {
             chunk_state_tiles,
             state_pass: get("m3m_state_pass")?,
             chunk_scan,
-            chunk_scan_tiles: typed("m3m_chunk_scan_tiles")?,
+            chunk_scan_tiles: [
+                typed("m3m_chunk_scan_tiles_jp1")?,
+                typed("m3m_chunk_scan_tiles_jp2")?,
+                typed("m3m_chunk_scan_tiles_jp4")?,
+            ],
             chunk_writeback: typed("m3m_writeback")?,
             mlp_gate: typed("mlp_gate_fwd")?,
             gate_normed: typed("mimo_gate_normed")?,
@@ -729,7 +735,9 @@ impl Mamba3MimoKernels {
                 (&kernels.chunk_state, "chunk_state"),
                 (&kernels.chunk_state_tiles, "chunk_state_tiles"),
                 (&kernels.chunk_scan, "chunk_scan"),
-                (&kernels.chunk_scan_tiles, "chunk_scan_tiles"),
+                (&kernels.chunk_scan_tiles[0], "chunk_scan_tiles"),
+                (&kernels.chunk_scan_tiles[1], "chunk_scan_tiles"),
+                (&kernels.chunk_scan_tiles[2], "chunk_scan_tiles"),
                 (&kernels.cb.pairs, "pairs"),
                 (&kernels.cb.pairs_dq, "pairs dq"),
                 (&kernels.cb.pairs_dk, "pairs dk"),
@@ -753,6 +761,17 @@ impl Mamba3MimoKernels {
             )?))
         };
         Ok(kernels)
+    }
+
+    /// The tiled chunk scan for a head of `hd` channels: the entry whose
+    /// lanes take 1 channel of a group of [`SCAN_TILE_CHANNELS`] up to 32
+    /// channels, 2 up to 64 and 4 past that.
+    pub fn chunk_scan_tiles_for(&self, hd: usize) -> &TypedKernel {
+        &self.chunk_scan_tiles[match hd {
+            0..=32 => 0,
+            33..=64 => 1,
+            _ => 2,
+        }]
     }
 
     /// The loaded module, for a graph to hold.

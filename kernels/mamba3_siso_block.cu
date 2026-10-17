@@ -282,28 +282,42 @@ __device__ __forceinline__ void m3_burnin_block_tpl(
     }
 }
 
-#define M3_BURNIN_BLOCK_ENTRY(NAME, T_ACT, SAVE, FOLD)                         \
+// One entry per state width the warp kernels specialise (8, 16, 32 and
+// 64) and a general one for every other width, so each takes the
+// registers its own state loops need, where one entry that switched
+// among them at run time took the widest's for every width. The host
+// picks the entry by the model's d_state.
+#define M3_BURNIN_BLOCK_ENTRY(NAME, T_ACT, SAVE, DS, FOLD)                     \
 extern "C" __global__ __launch_bounds__(512) void NAME(                        \
-    float* ssm_state, float* k_state, float* v_state, T_ACT* y_out,           \
-    float* h_saved, float* k_prev_saved, float* v_prev_saved,                 \
-    const T_ACT* x_flat, const T_ACT* k_flat, const T_ACT* q_flat,            \
-    const float* alpha_flat, const float* beta_flat, const float* gamma_flat, \
-    const float* D, int batch, int T, int nh, int hd, int ds,                 \
+    float* ssm_state, float* k_state, float* v_state, T_ACT* y_out,            \
+    float* h_saved, float* k_prev_saved, float* v_prev_saved,                  \
+    const T_ACT* x_flat, const T_ACT* k_flat, const T_ACT* q_flat,             \
+    const float* alpha_flat, const float* beta_flat, const float* gamma_flat,  \
+    const float* D, int batch, int T, int nh, int hd, int ds,                  \
     int y_first, /* this run's first y block */                                \
     const int* __restrict__ seq_idx                                            \
-) {                                                                           \
-    switch (ds) {                                                             \
-    case 8: m3_burnin_block_tpl<T_ACT, SAVE, 8, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
-    case 16: m3_burnin_block_tpl<T_ACT, SAVE, 16, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
-    case 32: m3_burnin_block_tpl<T_ACT, SAVE, 32, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
-    case 64: m3_burnin_block_tpl<T_ACT, SAVE, 64, FOLD>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
-    default: m3_burnin_block_tpl<T_ACT, SAVE, 0, false>(ssm_state, k_state, v_state, y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx); return; \
-    }                                                                         \
+) {                                                                            \
+    m3_burnin_block_tpl<T_ACT, SAVE, DS, FOLD>(ssm_state, k_state, v_state,    \
+        y_out, h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat,    \
+        alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first,   \
+        seq_idx);                                                              \
 }
 
-M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block, float, true, true)
-M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_bf16, __nv_bfloat16, true, false)
-M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_f16, __half, true, false)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds8, float, true, 8, true)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds8_bf16, __nv_bfloat16, true, 8, false)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds8_f16, __half, true, 8, false)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds16, float, true, 16, true)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds16_bf16, __nv_bfloat16, true, 16, false)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds16_f16, __half, true, 16, false)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds32, float, true, 32, true)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds32_bf16, __nv_bfloat16, true, 32, false)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds32_f16, __half, true, 32, false)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds64, float, true, 64, true)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds64_bf16, __nv_bfloat16, true, 64, false)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_ds64_f16, __half, true, 64, false)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block, float, true, 0, false)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_bf16, __nv_bfloat16, true, 0, false)
+M3_BURNIN_BLOCK_ENTRY(m3_burnin_fwd_block_f16, __half, true, 0, false)
 #undef M3_BURNIN_BLOCK_ENTRY
 
 // The target network's forward: arguments as m3_burnin_fwd_nosave.
@@ -527,33 +541,43 @@ __device__ __forceinline__ void m3_backward_seq_block_tpl(
     }
 }
 
-#define M3_BACKWARD_SEQ_BLOCK_ENTRY(NAME, T_ACT)                               \
+// Entries per state width as for the forward.
+#define M3_BACKWARD_SEQ_BLOCK_ENTRY(NAME, T_ACT, DS)                           \
 extern "C" __global__ __launch_bounds__(512) void NAME(                        \
-    const float* __restrict__ h_saved, const float* __restrict__ k_prev_saved,\
-    const float* __restrict__ v_prev_saved, const T_ACT* __restrict__ x_flat, \
-    const T_ACT* __restrict__ k_flat, const T_ACT* __restrict__ q_flat,       \
-    const float* __restrict__ alpha_flat, const float* __restrict__ beta_flat,\
-    const float* __restrict__ gamma_flat, const float* __restrict__ D,        \
-    const T_ACT* __restrict__ d_y_flat,                                       \
-    float* __restrict__ d_x, float* __restrict__ d_k, float* __restrict__ d_q,\
-    float* __restrict__ d_alpha, float* __restrict__ d_beta,                  \
-    float* __restrict__ d_gamma, float* __restrict__ d_D_local,               \
-    int batch, int T, int nh, int hd, int ds,                                 \
+    const float* __restrict__ h_saved, const float* __restrict__ k_prev_saved, \
+    const float* __restrict__ v_prev_saved, const T_ACT* __restrict__ x_flat,  \
+    const T_ACT* __restrict__ k_flat, const T_ACT* __restrict__ q_flat,        \
+    const float* __restrict__ alpha_flat, const float* __restrict__ beta_flat, \
+    const float* __restrict__ gamma_flat, const float* __restrict__ D,         \
+    const T_ACT* __restrict__ d_y_flat,                                        \
+    float* __restrict__ d_x, float* __restrict__ d_k, float* __restrict__ d_q, \
+    float* __restrict__ d_alpha, float* __restrict__ d_beta,                   \
+    float* __restrict__ d_gamma, float* __restrict__ d_D_local,                \
+    int batch, int T, int nh, int hd, int ds,                                  \
     int y_first, /* this run's first y block */                                \
     const int* __restrict__ seq_idx                                            \
-) {                                                                           \
-    switch (ds) {                                                             \
-    case 8: m3_backward_seq_block_tpl<T_ACT, 8>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first, seq_idx); return; \
-    case 16: m3_backward_seq_block_tpl<T_ACT, 16>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first, seq_idx); return; \
-    case 32: m3_backward_seq_block_tpl<T_ACT, 32>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first, seq_idx); return; \
-    case 64: m3_backward_seq_block_tpl<T_ACT, 64>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first, seq_idx); return; \
-    default: m3_backward_seq_block_tpl<T_ACT, 0>(h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D, d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch, T, nh, hd, ds, y_first, seq_idx); return; \
-    }                                                                         \
+) {                                                                            \
+    m3_backward_seq_block_tpl<T_ACT, DS>(h_saved, k_prev_saved, v_prev_saved,  \
+        x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D,          \
+        d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch,   \
+        T, nh, hd, ds, y_first, seq_idx);                                      \
 }
 
-M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block, float)
-M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_bf16, __nv_bfloat16)
-M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_f16, __half)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds8, float, 8)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds8_bf16, __nv_bfloat16, 8)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds8_f16, __half, 8)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds16, float, 16)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds16_bf16, __nv_bfloat16, 16)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds16_f16, __half, 16)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds32, float, 32)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds32_bf16, __nv_bfloat16, 32)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds32_f16, __half, 32)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds64, float, 64)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds64_bf16, __nv_bfloat16, 64)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_ds64_f16, __half, 64)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block, float, 0)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_bf16, __nv_bfloat16, 0)
+M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_f16, __half, 0)
 #undef M3_BACKWARD_SEQ_BLOCK_ENTRY
 
 // ============================================================================

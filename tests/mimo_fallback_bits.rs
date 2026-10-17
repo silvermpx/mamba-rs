@@ -1241,7 +1241,7 @@ fn mimo_chunked_token_tiles_are_the_per_token_kernels() {
                     args.extend(ints(&[tq as i32, kt as i32, nk as i32]));
                     launch_runs(
                         &ctx,
-                        k.chunk_scan_tiles.get(dtype),
+                        k.chunk_scan_tiles_for(hd).get(dtype),
                         chunk_scan_tiles_cfg((b, inp.nc, nh), (hd, rank), tq, scan_smem),
                         &args,
                         &[NO_PACKING],

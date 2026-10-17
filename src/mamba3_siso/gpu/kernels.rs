@@ -39,6 +39,18 @@ impl SequentialShape {
     }
 }
 
+/// The state build a block-tier sequential kernel takes for `d_state`: an
+/// entry per width the warp kernels specialise, then the general entry.
+const fn state_build(d_state: usize) -> usize {
+    match d_state {
+        8 => 0,
+        16 => 1,
+        32 => 2,
+        64 => 3,
+        _ => 4,
+    }
+}
+
 /// All compiled Mamba-3 SISO CUDA kernels.
 pub struct Mamba3Kernels {
     _modules: CudaModuleAnchors,
@@ -71,13 +83,15 @@ pub struct Mamba3Kernels {
     pub m3_backward_seq_by_state: [(usize, ByIndexWidth<CudaFunction>); 4],
     /// The sequential training forward for heads the warp kernels cannot
     /// hold: one CTA per head, the step's rows staged in shared memory.
-    pub m3_burnin_fwd_block: TypedKernel,
+    /// One entry per state build (see [`Self::burnin_block_for`]).
+    pub m3_burnin_fwd_block: [TypedKernel; 5],
     /// The target network's sequential forward on the block tier.
     pub m3_burnin_fwd_nosave_block: CudaFunction,
     /// The sequential backward on the block tier: the warp kernel's tree in
     /// every warp, the warps' sums added in order. It also serves every
-    /// head of the bf16 and f16 sequential backward.
-    pub m3_backward_seq_block: TypedKernel,
+    /// head of the bf16 and f16 sequential backward. One entry per state
+    /// build (see [`Self::backward_seq_block_for`]).
+    pub m3_backward_seq_block: [TypedKernel; 5],
     pub m3_reduce_d_d: ByIndexWidth<CudaFunction>,
 
     // ── Shared ops (mamba3_ops.cu) ──
@@ -315,6 +329,19 @@ impl Mamba3Kernels {
             .get(width)
     }
 
+    /// The block tier's sequential forward for a model of this state width:
+    /// the entry of its state build (8, 16, 32 or 64), the general one for
+    /// every other width.
+    pub fn burnin_block_for(&self, d_state: usize) -> &TypedKernel {
+        &self.m3_burnin_fwd_block[state_build(d_state)]
+    }
+
+    /// The block tier's sequential backward for a model of this state
+    /// width, by its state build as [`Self::burnin_block_for`].
+    pub fn backward_seq_block_for(&self, d_state: usize) -> &TypedKernel {
+        &self.m3_backward_seq_block[state_build(d_state)]
+    }
+
     /// The burn-in forward to launch for a model of this state width.
     pub fn burnin_fwd_for_state(&self, d_state: usize, width: IndexWidth) -> &CudaFunction {
         self.m3_burnin_fwd_by_state
@@ -376,7 +403,7 @@ impl Mamba3Kernels {
         }
         let smem = crate::mamba3_siso::route::sequential_forward_block_smem_bytes(shape.d_state);
         (
-            self.m3_burnin_fwd_block.get(dtype),
+            self.burnin_block_for(shape.d_state).get(dtype),
             shape.launch(false, smem),
         )
     }
@@ -415,7 +442,7 @@ impl Mamba3Kernels {
             shape.d_state,
         );
         (
-            self.m3_backward_seq_block.get(dtype),
+            self.backward_seq_block_for(shape.d_state).get(dtype),
             shape.launch(false, smem),
         )
     }
@@ -624,6 +651,24 @@ impl Mamba3Kernels {
                 i64: get(&format!("{name}_i64"))?,
             })
         };
+        // The block tier's entries of one kernel: per state build in the
+        // order `state_build` numbers them, each in the three dtypes.
+        let by_state_build = |base: &str| -> Result<[TypedKernel; 5], String> {
+            let entry = |name: String| -> Result<TypedKernel, String> {
+                Ok(TypedKernel {
+                    f32: get(&name)?,
+                    bf16: get(&format!("{name}_bf16"))?,
+                    f16: get(&format!("{name}_f16"))?,
+                })
+            };
+            Ok([
+                entry(format!("{base}_ds8"))?,
+                entry(format!("{base}_ds16"))?,
+                entry(format!("{base}_ds32"))?,
+                entry(format!("{base}_ds64"))?,
+                entry(base.to_owned())?,
+            ])
+        };
         let typed_pair =
             |f32: &str, bf16: &str, f16: &str| -> Result<ByIndexWidth<TypedKernel>, String> {
                 Ok(ByIndexWidth {
@@ -707,17 +752,9 @@ impl Mamba3Kernels {
             ],
             m3_burnin_fwd_nosave: pair("m3_burnin_fwd_nosave")?,
             m3_backward_seq: pair("m3_backward_seq")?,
-            m3_burnin_fwd_block: TypedKernel {
-                f32: get("m3_burnin_fwd_block")?,
-                bf16: get("m3_burnin_fwd_block_bf16")?,
-                f16: get("m3_burnin_fwd_block_f16")?,
-            },
+            m3_burnin_fwd_block: by_state_build("m3_burnin_fwd_block")?,
             m3_burnin_fwd_nosave_block: get("m3_burnin_fwd_nosave_block")?,
-            m3_backward_seq_block: TypedKernel {
-                f32: get("m3_backward_seq_block")?,
-                bf16: get("m3_backward_seq_block_bf16")?,
-                f16: get("m3_backward_seq_block_f16")?,
-            },
+            m3_backward_seq_block: by_state_build("m3_backward_seq_block")?,
             m3_backward_seq_by_state: [
                 (8, pair("m3_backward_seq_ds8")?),
                 (16, pair("m3_backward_seq_ds16")?),
@@ -948,10 +985,11 @@ impl Mamba3Kernels {
                     }
                 }
             }
-            let typed = [
-                (&k.m3_dqkv_tiled, "m3_dqkv_tiled"),
-                (&k.m3_backward_seq_block, "m3_backward_seq_block"),
-            ];
+            let typed = std::iter::once((&k.m3_dqkv_tiled, "m3_dqkv_tiled")).chain(
+                k.m3_backward_seq_block
+                    .iter()
+                    .map(|t| (t, "m3_backward_seq_block")),
+            );
             for (t, name) in typed {
                 for f in [&t.f32, &t.bf16, &t.f16] {
                     budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
