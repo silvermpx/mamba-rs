@@ -646,6 +646,12 @@
   geometry is `angle_backward_cfg` in the SISO kernels module, and
   `Mamba3Kernels::angle_backward_cfg`, the sm_89 transport's geometry for
   it, is gone.
+- The MIMO chunked backward's angle walk (`m3mb_angles`) stages 16 tokens
+  at a time, walks each angle's chain over them, then sums each token's
+  products on a lane of its own, where it took two barriers and a serial
+  sum on one lane every token; the bits are the token-at-a-time walk's,
+  which stays frozen in `tests/fixtures/m3m_angles_reference.cu`. Its
+  shared memory is `kernels::angle_walk_smem_bytes`.
 
 ### Fixed
 

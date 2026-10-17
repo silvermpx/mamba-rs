@@ -1,5 +1,5 @@
-//! SISO kernels frozen as they were released (`fixtures/*_reference.cu`),
-//! compiled as the SISO module compiles its own: the same prelude, the
+//! Mamba-3 kernels frozen as they were released (`fixtures/*_reference.cu`),
+//! compiled as the family modules compile their own: the same prelude, the
 //! packed-row helpers, the numeric options and the state capacity, so each
 //! frozen kernel gives the bits it gave when it was the production one.
 

@@ -467,6 +467,18 @@ pub fn scan_bwd_global_geom(
 /// Tokens per chunk of the chunked path.
 pub const CHUNK: usize = 64;
 
+/// The tokens the chunked backward's angle walk stages at a time
+/// (`M3MB_ANG_STEPS` in `mamba3_mimo_chunked_bwd.cu`).
+pub const ANGLE_WALK_STEPS: usize = 16;
+
+/// The angle walk's shared memory for `na` angles: the staged angle
+/// gradients and tanh_pi values, the products with rows padded by one
+/// float, and the tokens' dt and sequence starts.
+pub fn angle_walk_smem_bytes(na: usize) -> usize {
+    let steps = ANGLE_WALK_STEPS;
+    (2 * steps * na + steps * (na + 1) + 2 * steps) * 4
+}
+
 /// One token's record in the backward's replay buffer, in floats.
 pub fn scan_bwd_record_floats(hd: usize, ds: usize, rank: usize, na: usize) -> usize {
     hd * ds + 4 * rank * ds + 3 * hd * rank + hd + 2 * na + 8
@@ -744,6 +756,18 @@ fn max_block_of(fs: &[&CudaFunction], what: &str) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The angle walk's step count is the kernel's, and its shared memory
+    /// at the most angles a model has (d_state 256 at rope fraction 1)
+    /// stays under the 48 KB default window.
+    #[test]
+    fn the_angle_walk_stages_the_kernel_s_steps() {
+        let source = include_str!("../../../kernels/mamba3_mimo_chunked_bwd.cu");
+        assert!(source.contains("#define M3MB_ANG_STEPS 16"));
+        assert_eq!(ANGLE_WALK_STEPS, 16);
+        assert_eq!(angle_walk_smem_bytes(128), 24_768);
+        assert!(angle_walk_smem_bytes(128) <= 48 * 1024);
+    }
 
     /// The released head keeps the full tiles, a wide rank shrinks the
     /// scan's key tile, and every chosen tile fits the limit. A head wider

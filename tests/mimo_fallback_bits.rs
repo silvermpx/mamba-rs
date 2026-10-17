@@ -12,7 +12,10 @@
 //!   shared memory, and the entering lead over a block narrower than the
 //!   head against a thread per channel,
 //! - the register-tile chunk state and local state gradient, the whole head
-//!   in a block and in channel groups, against the channel-parallel kernels.
+//!   in a block and in channel groups, against the channel-parallel kernels,
+//! - the chunked backward's angle walk, a batch of tokens staged at a time,
+//!   against the walk as it was released, a token at a time (frozen in
+//!   `fixtures/m3m_angles_reference.cu`).
 //!
 //! Each pair runs on shapes both routes serve, at a compiled rank and a
 //! runtime one, in f32, bf16 and f16.
@@ -20,16 +23,19 @@
 
 #[path = "common/arch.rs"]
 mod arch;
+#[path = "common/frozen_kernels.rs"]
+mod frozen_kernels;
 
 use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
+use frozen_kernels::frozen_module;
 use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{
-    Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, scan_bwd_record_floats, scan_bwd_smem_bytes,
-    scan_bwd_threads, scan_smem_bytes,
+    Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, angle_walk_smem_bytes, scan_bwd_record_floats,
+    scan_bwd_smem_bytes, scan_bwd_threads, scan_smem_bytes,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -1079,4 +1085,87 @@ fn mimo_chunked_staging_in_global_is_the_shared_staging() {
         }
         assert!(leads[1] == leads[0], "head {hd}: the entering lead");
     }
+}
+
+/// The chunked backward's angle walk stages a batch of tokens at a time,
+/// walks each angle's chain over them in time order, then sums each token's
+/// products a ascending, so it gives the bits of the walk as it was
+/// released, a token at a time: in f32, bf16 and f16, at windows that are
+/// and are not whole batches, with one sequence a row and with rows packing
+/// several, and from one angle to more than a lane holds.
+#[test]
+fn mimo_angle_walk_keeps_the_token_at_a_time_bits() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), 1).unwrap();
+    let frozen = frozen_module(
+        dev.context(),
+        arch::arch0(),
+        64,
+        include_str!("fixtures/m3m_angles_reference.cu"),
+    );
+    let ang_col = 3usize;
+    let mut cases = 0;
+    for (b, seq, nh, na, packed) in [
+        (1usize, 1usize, 1usize, 1usize, false),
+        (2, 15, 3, 2, false),
+        (2, 16, 3, 2, true),
+        (2, 17, 3, 7, true),
+        (3, 100, 4, 32, true),
+        (2, 129, 2, 64, false),
+        (1, 70, 2, 128, true),
+    ] {
+        let rows = b * seq;
+        let ld_proj = ang_col + na + 5;
+        let dth = f32_buf(&ctx, &det(rows * nh * na, 0xA301, 1.0));
+        let coef = f32_buf(&ctx, &det(rows * nh * 4, 0xA302, 1.0));
+        // Sequences of 7 tokens a row, their ids as the kernel reads them.
+        let ids: Vec<f32> = (0..rows)
+            .map(|i| f32::from_bits(((i % seq) / 7) as u32))
+            .collect();
+        let ids = f32_buf(&ctx, &ids);
+        let seq_idx = if packed { ids.cached_ptr() } else { 0 };
+        for dtype in DTYPES {
+            let proj = typed_buf(&ctx, &det(rows * ld_proj, 0xA303, 3.0), dtype);
+            let run = |f: &CudaFunction, smem: usize, poison: f32| {
+                let d_tanh = f32_buf(&ctx, &vec![poison; rows * nh * na]);
+                let ddt = f32_buf(&ctx, &vec![poison; rows * nh]);
+                let args = [
+                    Arg::P(d_tanh.cached_ptr()),
+                    Arg::P(ddt.cached_ptr()),
+                    Arg::P(dth.cached_ptr()),
+                    Arg::P(coef.cached_ptr()),
+                    Arg::P(proj.cached_ptr()),
+                    Arg::L(ld_proj as i64),
+                    Arg::I(ang_col as i32),
+                    Arg::I(seq as i32),
+                    Arg::I(nh as i32),
+                    Arg::I(na as i32),
+                ];
+                launch_runs(
+                    &ctx,
+                    f,
+                    cfg((b, nh, 1), 32, smem),
+                    &args,
+                    &[Arg::P(seq_idx)],
+                );
+                (bits_f32(&ctx, &d_tanh), bits_f32(&ctx, &ddt))
+            };
+            let suffix = match dtype {
+                WeightDtype::Bf16 => "_bf16",
+                WeightDtype::F16 => "_f16",
+                _ => "",
+            };
+            let released = frozen
+                .load_function(&format!("m3mb_reference_angles{suffix}"))
+                .unwrap();
+            let want = run(&released, na * 4, 8192.0);
+            let got = run(k.cb.angles.get(dtype), angle_walk_smem_bytes(na), -8192.0);
+            let label = format!("{dtype:?} B {b} T {seq} nh {nh} na {na} packed {packed}");
+            assert_eq!(want.0, got.0, "{label}: d_tanh_h");
+            assert_eq!(want.1, got.1, "{label}: ddt_ang");
+            cases += 1;
+        }
+    }
+    eprintln!("m3mb_angles: the token-at-a-time walk's bits on {cases} cases");
 }

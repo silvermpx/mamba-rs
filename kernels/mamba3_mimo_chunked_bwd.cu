@@ -1809,7 +1809,18 @@ extern "C" __global__ void m3mb_rot_bwd(
 // the next one's first token); d tanh_pi = that sum dt into d_tanh_h (the
 // angle projection's backward input), and its share of ddt (sum dt-side, a
 // ascending) into ddt_ang [rows, H]. Grid (B, H), block 32: one lane per
-// angle, lane 0 sums.
+// angle runs its chain, and every token's ddt sum is one lane's.
+//
+// The walk takes M3MB_ANG_STEPS tokens at a time. The block first stages
+// their angle gradients, their tanh_pi values, their dt and whether each
+// starts a sequence, every load in flight at once; then each lane walks its
+// angles' chains over the tokens, in time order; then a lane per token adds
+// that token's products, a ascending. Every value is the one the
+// token-at-a-time walk computed, so the bits are its bits. Shared memory:
+// two [M3MB_ANG_STEPS][na] tiles, the products' tile with rows padded by
+// one float (a lane per token reads down a column), and two per-token lanes
+// (m3mb_angles_smem_bytes).
+#define M3MB_ANG_STEPS 16
 template <typename T>
 __device__ __forceinline__ void m3mb_angles_body(
     float* __restrict__ d_tanh_h, float* __restrict__ ddt_ang,
@@ -1820,31 +1831,51 @@ __device__ __forceinline__ void m3mb_angles_body(
     const int* __restrict__ seq_idx
 ) {
     extern __shared__ float m3mb_sm[];
-    float* prod = m3mb_sm;  // [na]
+    float* dth_sm = m3mb_sm;                               // [steps][na]
+    float* tp_sm = dth_sm + M3MB_ANG_STEPS * na;           // [steps][na]
+    float* prod_sm = tp_sm + M3MB_ANG_STEPS * na;          // [steps][na + 1]
+    float* dt_sm = prod_sm + M3MB_ANG_STEPS * (na + 1);    // [steps]
+    int* start_sm = (int*)(dt_sm + M3MB_ANG_STEPS);        // [steps]
     const int b = blockIdx.x;
     const int h = y_first + blockIdx.y;
     float cum[8];
     const int per = (na + (int)blockDim.x - 1) / (int)blockDim.x;
     for (int k = 0; k < per && k < 8; k++) cum[k] = 0.0f;
-    for (int t = seq - 1; t >= 0; t--) {
-        const long long row = (long long)b * seq + t;
-        const float dt = coef[(row * nh + h) * 4];
-        const T* pr = proj + row * ld_proj;
-        for (int k = 0; k < per && k < 8; k++) {
-            const int a = threadIdx.x + k * blockDim.x;
-            if (a < na) {
-                cum[k] = __fadd_rn(cum[k], dth[(row * nh + h) * na + a]);
-                d_tanh_h[(row * nh + h) * na + a] = __fmul_rn(cum[k], dt);
-                prod[a] = __fmul_rn(cum[k], mimo_tanh_pi(pr, ang_col, a));
-            }
+    for (int hi = seq - 1; hi >= 0; hi -= M3MB_ANG_STEPS) {
+        const int n = min(M3MB_ANG_STEPS, hi + 1);
+        // Stage the tokens hi, hi - 1, .., hi - n + 1 (slot j is token hi - j).
+        for (int i = threadIdx.x; i < n * na; i += blockDim.x) {
+            const int j = i / na;
+            const int a = i - j * na;
+            const long long row = (long long)b * seq + (hi - j);
+            dth_sm[i] = dth[(row * nh + h) * na + a];
+            tp_sm[i] = mimo_tanh_pi(proj + row * ld_proj, ang_col, a);
         }
-        if (vl_starts(seq_idx, b, seq, t)) {
-            for (int k = 0; k < per && k < 8; k++) cum[k] = 0.0f;
+        for (int j = threadIdx.x; j < n; j += blockDim.x) {
+            const long long row = (long long)b * seq + (hi - j);
+            dt_sm[j] = coef[(row * nh + h) * 4];
+            start_sm[j] = vl_starts(seq_idx, b, seq, hi - j);
         }
         __syncthreads();
-        if (threadIdx.x == 0) {
+        for (int j = 0; j < n; j++) {
+            const long long row = (long long)b * seq + (hi - j);
+            for (int k = 0; k < per && k < 8; k++) {
+                const int a = threadIdx.x + k * blockDim.x;
+                if (a < na) {
+                    cum[k] = __fadd_rn(cum[k], dth_sm[j * na + a]);
+                    d_tanh_h[(row * nh + h) * na + a] = __fmul_rn(cum[k], dt_sm[j]);
+                    prod_sm[j * (na + 1) + a] = __fmul_rn(cum[k], tp_sm[j * na + a]);
+                }
+            }
+            if (start_sm[j]) {
+                for (int k = 0; k < per && k < 8; k++) cum[k] = 0.0f;
+            }
+        }
+        __syncthreads();
+        for (int j = threadIdx.x; j < n; j += blockDim.x) {
+            const long long row = (long long)b * seq + (hi - j);
             float s = 0.0f;
-            for (int a = 0; a < na; a++) s = __fadd_rn(s, prod[a]);
+            for (int a = 0; a < na; a++) s = __fadd_rn(s, prod_sm[j * (na + 1) + a]);
             ddt_ang[row * nh + h] = s;
         }
         __syncthreads();
@@ -1866,6 +1897,7 @@ extern "C" __global__ void NAME(                                               \
 DEFINE_M3MB_ANGLES(m3mb_angles, float)
 DEFINE_M3MB_ANGLES(m3mb_angles_bf16, __nv_bfloat16)
 DEFINE_M3MB_ANGLES(m3mb_angles_f16, __half)
+#undef M3MB_ANG_STEPS
 
 // The decay and weight gradients of a chunk and head, one thread per token
 // k (Mamba-2's gathering, with the pair values dw w, the state values

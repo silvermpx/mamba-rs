@@ -42,8 +42,9 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::{MimoChunkedPtrs, MimoExec, launch_chunked_scan, row_pieces};
 use super::kernels::{
-    CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, chunked_geom,
-    scan_bwd_global_geom, scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
+    CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, angle_walk_smem_bytes,
+    chunked_geom, scan_bwd_global_geom, scan_bwd_record_floats, scan_bwd_smem_bytes,
+    scan_bwd_threads, scan_geom,
 };
 use crate::config::ScanMode;
 use crate::gpu::adamw::{
@@ -3076,7 +3077,7 @@ impl Mamba3MimoGpuTrainer {
             if na > 0 {
                 go_y!(
                     k.cb.angles.get(act),
-                    cfg3(b, nh, 1, 32, na * 4),
+                    cfg3(b, nh, 1, 32, angle_walk_smem_bytes(na)),
                     "angles",
                     [
                         d_tanh_h, ddt_ang, dth, coef, proj, ld_proj, ang_col_i, t_i, nh_i, na_i
