@@ -52,16 +52,21 @@ pub const CHUNKED_CHUNK_SIZE: usize = 64;
 /// operand tiles and two chunk-by-headdim tiles, each row padded by one
 /// float against bank conflicts, four per-step lanes and two head-state
 /// tiles. The backward sizes its launch from this, and the loader opts in
-/// to the device's extended budget. 99 KB is the opt-in floor across every
-/// supported part since Ampere; some parts offer more, and the floor keeps
-/// one portable bound.
+/// to the device's extended budget.
 pub fn chunked_backward_smem_bytes(headdim: usize, d_state: usize) -> usize {
     let cs = CHUNKED_CHUNK_SIZE;
     (2 * cs * (d_state + 1) + 2 * cs * (headdim + 1) + 4 * cs + 2 * headdim * d_state) * 4
 }
 
-/// The chunked backward's shared-memory ceiling.
-pub const CHUNKED_BACKWARD_SMEM_MAX: usize = 99 * 1024;
+/// The dynamic shared memory a block of the SISO kernels plans its tiles
+/// with, in bytes. Every kernel that stages more than the 48 KB default
+/// opts in to what its device allows, and every supported part since
+/// Ampere lets a block hold at least this much (the consumer parts stop
+/// here; A100 and H100 allow more). Planning within it gives a shape the
+/// same kernels, and with them the same bits, on every card, so a suite
+/// run on one board covers the routes of all of them.
+/// `MAMBA_RS_SMEM_BUDGET` can lower it further, never raise it.
+pub const PLANNED_SMEM: usize = 99 * 1024;
 
 /// The shared memory of the tiled dQKV kernel in bytes, for tiles `tile`
 /// columns wide: nine per-step lanes, the three pair triangles of a chunk,
@@ -73,14 +78,15 @@ pub fn chunked_backward_tiled_smem_bytes(tile: usize) -> usize {
     (9 * cs + 3 * (cs * (cs - 1) / 2) + 4 * cs * row + 2 * tile * row) * 4
 }
 
-/// Whether the chunked backward's dQKV stage takes the tiled kernels. The
-/// warp kernel serves a head of one warp whose tiles fit its budget; every
-/// other shape takes the tiled kernels, which fit any shape. Where both
-/// serve they give the same bits.
-pub fn chunked_backward_tiled(headdim: usize, d_state: usize) -> bool {
+/// Whether the chunked backward's dQKV stage takes the tiled kernels when a
+/// block may stage `smem` bytes (at most [`PLANNED_SMEM`]). The warp kernel
+/// serves a head of one warp whose tiles fit that budget; every other shape
+/// takes the tiled kernels, which fit any shape. Where both serve they give
+/// the same bits.
+pub fn chunked_backward_tiled(headdim: usize, d_state: usize, smem: usize) -> bool {
     !(headdim <= WARP_HEADDIM_MAX
         && headdim.is_power_of_two()
-        && chunked_backward_smem_bytes(headdim, d_state) <= CHUNKED_BACKWARD_SMEM_MAX)
+        && chunked_backward_smem_bytes(headdim, d_state) <= smem)
 }
 
 /// The most threads a block-tier sequential kernel runs, its launch bound.
@@ -244,7 +250,11 @@ mod tests {
         };
         cfg.validate().unwrap();
         assert_eq!(head_tier(cfg.headdim), HeadTier::Block);
-        assert!(chunked_backward_tiled(cfg.headdim, cfg.d_state));
+        assert!(chunked_backward_tiled(
+            cfg.headdim,
+            cfg.d_state,
+            PLANNED_SMEM
+        ));
     }
 
     /// Every width the warp kernels serve stays on them, and every other
@@ -272,7 +282,7 @@ mod tests {
         assert_eq!(block_tier_threads(4096), 512);
         for hd in [100usize, 512, 640, 4096] {
             let smem = sequential_backward_block_smem_bytes(hd, 256);
-            assert!(smem <= 99 * 1024, "headdim {hd}: {smem} B");
+            assert!(smem <= PLANNED_SMEM, "headdim {hd}: {smem} B");
         }
     }
 
@@ -286,7 +296,11 @@ mod tests {
             ..Mamba3Config::default()
         };
         cfg.validate().unwrap();
-        assert!(chunked_backward_tiled(cfg.headdim, cfg.d_state));
+        assert!(chunked_backward_tiled(
+            cfg.headdim,
+            cfg.d_state,
+            PLANNED_SMEM
+        ));
     }
 
     /// The warp kernel's bound is its tile with its padded rows. Headdim 16
@@ -296,11 +310,11 @@ mod tests {
     fn chunked_backward_bound_counts_the_padded_rows() {
         assert_eq!(chunked_backward_smem_bytes(16, 142), 101_120);
         assert_eq!(chunked_backward_smem_bytes(16, 143), 101_760);
-        assert!(!chunked_backward_tiled(16, 142));
-        assert!(chunked_backward_tiled(16, 143));
-        assert!(chunked_backward_tiled(48, 16));
-        assert!(chunked_backward_tiled(64, 16));
-        assert!(!chunked_backward_tiled(32, 16));
+        assert!(!chunked_backward_tiled(16, 142, PLANNED_SMEM));
+        assert!(chunked_backward_tiled(16, 143, PLANNED_SMEM));
+        assert!(chunked_backward_tiled(48, 16, PLANNED_SMEM));
+        assert!(chunked_backward_tiled(64, 16, PLANNED_SMEM));
+        assert!(!chunked_backward_tiled(32, 16, PLANNED_SMEM));
     }
 
     /// Every head width the warp kernels serve passes, and nothing else.

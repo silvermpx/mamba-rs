@@ -630,7 +630,15 @@ fn layer_forward_mixed(
 
         // K2: m3_dA_cumsum (pure f32) — adt → da_cumsum_saved, for the
         // unfused pair only: the fused kernel writes the cumsum itself.
-        let fused = super::kernels::chunk_fused_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+        let fused = super::kernels::chunk_fused_cfg(
+            dims.batch,
+            nc,
+            nh,
+            hd,
+            ds,
+            dims.chunk_size(),
+            m3k.smem_optin,
+        );
         if fused.is_none() {
             let block_x = nh.min(256) as u32;
             let grid_z = nh.div_ceil(block_x as usize) as u32;
@@ -738,7 +746,7 @@ fn layer_forward_mixed(
                     hd,
                     ds,
                     dims.chunk_size(),
-                    *m3k.chunk_tile_threads.get(width),
+                    m3k.chunk_limits(width),
                 );
                 for (y_first, cfg) in y_runs(cfg) {
                     let mut bld = ctx
@@ -820,7 +828,7 @@ fn layer_forward_mixed(
                 hd,
                 ds,
                 dims.chunk_size(),
-                *m3k.chunk_tile_threads.get(width),
+                m3k.chunk_limits(width),
             );
             let kern = if coop {
                 m3k.m3_chunk_scan_fwd_coop_typed.get(width).get(dtype)

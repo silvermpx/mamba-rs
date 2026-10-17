@@ -33,7 +33,7 @@ use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3LayerMixedActs, GpuMamba3MixedScratch,
     GpuMamba3MlpMixedActs,
 };
-use crate::mamba3_siso::gpu::kernels::{Mamba3Kernels, SequentialShape};
+use crate::mamba3_siso::gpu::kernels::{DQKTHETA_STAGING_MAX, Mamba3Kernels, SequentialShape};
 use crate::mamba3_siso::gpu::mamba3_gpu::GpuMamba3Scratch;
 use crate::mamba3_siso::gpu::state::M3Exec;
 use crate::mamba3_siso::gpu::weights::{
@@ -470,7 +470,7 @@ fn gpu_backward_mamba3_layer_mixed(
         // the three buffers need no zeroing first.
         // No-atomics partials rule: dD_partials[B*nh] via axis0_partials,
         // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1).
-        if crate::mamba3_siso::route::chunked_backward_tiled(hd, ds) {
+        if crate::mamba3_siso::route::chunked_backward_tiled(hd, ds, m3k.smem_optin) {
             let io = super::dqkv_tiled::DqkvTiledIo {
                 d_q: sc.d_q.cached_ptr(),
                 d_k: sc.d_k.cached_ptr(),
@@ -511,21 +511,21 @@ fn gpu_backward_mamba3_layer_mixed(
             // and the route bounds the same tile, so a shape it admits runs.
             let legacy_floats = crate::mamba3_siso::route::chunked_backward_smem_bytes(hd, ds) / 4;
             let mats_floats = legacy_floats + cs_u * (cs_u - 1) * 3 / 2 + 2 * cs_u;
-            // Consumer GPUs cap the per-block dynamic-smem opt-in near 99 KB.
-            // One head per block: pair matrices when the tile
-            // fits, legacy inline dots otherwise (bit-identical, slower).
-            let cap_floats = 99 * 1024 / 4;
+            // One head per block: pair matrices when the tile fits the
+            // block's budget, legacy inline dots otherwise (bit-identical,
+            // slower).
+            let cap_floats = m3k.smem_optin / 4;
             let (per_head_floats, use_pair_mats): (usize, i32) = if mats_floats <= cap_floats {
                 (mats_floats, 1)
             } else {
                 (legacy_floats, 0)
             };
             let smem = per_head_floats * 4;
-            if smem > 99 * 1024 {
+            if smem > m3k.smem_optin {
                 return Err(format!(
-                    "m3_dqkv shared-memory tile {} B exceeds the 99 KB opt-in \
+                    "m3_dqkv shared-memory tile {} B exceeds the {} B a block may stage \
                      (CS={cs_u} hd={hd} ds={ds}) even without the pair matrices",
-                    smem
+                    smem, m3k.smem_optin
                 ));
             }
             // t-split: blockDim.y lanes stride the per-timestep
@@ -674,12 +674,12 @@ fn gpu_backward_mamba3_layer_mixed(
         {
             let na_i = na as i32;
             // The selected route owns its staging-tile count. The retained
-            // half transport uses four; the legacy path uses six.
-            // Large-d_state tiles overflow the 48 KB no-opt-in dynamic
-            // limit — fall back to the direct-global path (staging = 0).
+            // half transport uses four; the legacy path uses six. Tiles past
+            // `DQKTHETA_STAGING_MAX` take the direct-global path
+            // (staging = 0).
             let (dqktheta, dqkt_tiles) = m3k.dqktheta_for_shape(dtype, ds, cs_u, na, width);
             let dqkt_smem = dqkt_tiles * cs_u * ds * 4;
-            let dqkt_staging: i32 = i32::from(dqkt_smem <= 48 * 1024);
+            let dqkt_staging: i32 = i32::from(dqkt_smem <= DQKTHETA_STAGING_MAX);
             let cfg = LaunchConfig {
                 grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
                 block_dim: (cs_u as u32, 1, 1),

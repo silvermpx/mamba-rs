@@ -580,7 +580,15 @@ fn layer_forward(
         }
         // The fused kernel writes the decay cumsum itself; only the unfused
         // pair reads it from its own launch.
-        let fused = super::kernels::chunk_fused_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+        let fused = super::kernels::chunk_fused_cfg(
+            dims.batch,
+            nc,
+            nh,
+            hd,
+            ds,
+            dims.chunk_size(),
+            m3k.smem_optin,
+        );
         if fused.is_none() {
             let block_x = nh.min(256) as u32;
             let grid_z = nh.div_ceil(block_x as usize) as u32;
@@ -672,7 +680,7 @@ fn layer_forward(
                     hd,
                     ds,
                     dims.chunk_size(),
-                    *m3k.chunk_tile_threads.get(width),
+                    m3k.chunk_limits(width),
                 );
                 for (y_first, cfg) in y_runs(cfg) {
                     let mut builder = ctx.stream.launch_builder(m3k.m3_chunk_state_fwd.get(width));
@@ -744,7 +752,7 @@ fn layer_forward(
                 hd,
                 ds,
                 dims.chunk_size(),
-                *m3k.chunk_tile_threads.get(width),
+                m3k.chunk_limits(width),
             );
             let kern = if coop {
                 m3k.m3_chunk_scan_fwd_coop.get(width)

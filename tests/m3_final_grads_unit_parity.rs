@@ -560,6 +560,111 @@ fn m3_dqktheta_f16() {
     check_dqktheta(WeightDtype::F16);
 }
 
+/// `m3_dqktheta` reads its rows through the six staged tiles or straight
+/// from global memory with the same arithmetic, so both forms give the same
+/// bits in every dtype: at state widths the old 48 KB window staged, at
+/// widths only the opted-in budget stages, at odd widths, with no angles
+/// and with angles covering only part of the state.
+#[test]
+fn m3_dqktheta_staged_tiles_keep_the_direct_bits() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let m3k =
+        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), 64).unwrap();
+    let (b, t, nh, cs) = (2usize, 150usize, 3usize, 64usize);
+    let nc = t.div_ceil(cs);
+    for (ds, na) in [
+        (16usize, 4usize),
+        (32, 16),
+        (33, 8),
+        (48, 12),
+        (64, 16),
+        (64, 0),
+    ] {
+        let staged = 6 * cs * ds * 4;
+        assert!(staged <= m3k.smem_optin, "ds {ds}: the staged tiles fit");
+        let n_q = b * t * nh * ds;
+        let n_th = b * t * nh;
+        let n_ang = b * t * nh * na.max(1);
+        let q_vals = det_rand(n_q, 0xD701);
+        let k_vals = det_rand(n_q, 0xD702);
+        let scale = upload_f32(&ctx, &det_rand(n_th, 0xD703));
+        let gamma = upload_f32(&ctx, &det_rand(n_th, 0xD704));
+        let angles = upload_f32(&ctx, &det_rand(n_ang, 0xD705));
+        let dq_mid = upload_f32(&ctx, &det_rand(n_q, 0xD706));
+        let dk_mid = upload_f32(&ctx, &det_rand(n_q, 0xD707));
+        let dqk = upload_f32(&ctx, &det_rand(n_th, 0xD708));
+        for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+            let q = upload_typed(&ctx, &q_vals, dtype);
+            let k = upload_typed(&ctx, &k_vals, dtype);
+            let run = |staging: i32| {
+                // Differently poisoned outputs, so an element neither form
+                // writes cannot agree.
+                let poison = if staging == 1 { -8192.0 } else { 8192.0 };
+                let outs =
+                    [n_q, n_q, n_ang, n_th, n_th].map(|n| upload_f32(&ctx, &vec![poison; n]));
+                let cfg = LaunchConfig {
+                    grid_dim: ((b * nc) as u32, nh as u32, 1),
+                    block_dim: (cs as u32, 1, 1),
+                    shared_mem_bytes: if staging == 1 { staged as u32 } else { 0 },
+                };
+                let ptrs = [
+                    outs[0].cached_ptr(),
+                    outs[1].cached_ptr(),
+                    outs[2].cached_ptr(),
+                    outs[3].cached_ptr(),
+                    outs[4].cached_ptr(),
+                    q.cached_ptr(),
+                    k.cached_ptr(),
+                    scale.cached_ptr(),
+                    gamma.cached_ptr(),
+                    angles.cached_ptr(),
+                    dq_mid.cached_ptr(),
+                    dk_mid.cached_ptr(),
+                    dqk.cached_ptr(),
+                ];
+                let dims = [b, t, nh, ds, na, cs].map(|v| v as i32);
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut bld = ctx
+                        .stream
+                        .launch_builder(m3k.m3_dqktheta_typed.i32.get(dtype));
+                    for p in &ptrs {
+                        bld.arg(p);
+                    }
+                    for d in &dims {
+                        bld.arg(d);
+                    }
+                    bld.arg(&staging);
+                    bld.arg(&y_first);
+                    unsafe { bld.launch(cfg) }.unwrap();
+                }
+                ctx.stream.synchronize().unwrap();
+                outs.iter()
+                    .zip([n_q, n_q, n_ang, n_th, n_th])
+                    .map(|(buf, n)| download_f32(&ctx, buf, n))
+                    .collect::<Vec<_>>()
+            };
+            let (direct, staged_out) = (run(0), run(1));
+            let names = ["dQ_pre", "dK_pre", "dAngles", "dScale", "dGamma"];
+            for ((want, got), name) in direct.iter().zip(&staged_out).zip(names) {
+                // Without angles the kernel writes no angle gradient.
+                let live = if name == "dAngles" && na == 0 {
+                    0
+                } else {
+                    want.len()
+                };
+                for (i, (w, g)) in want.iter().zip(got).enumerate().take(live) {
+                    assert_eq!(
+                        w.to_bits(),
+                        g.to_bits(),
+                        "{dtype:?} ds {ds} na {na}: {name}[{i}]"
+                    );
+                }
+            }
+        }
+    }
+}
+
 // ─── isolated production-shape bench ─────────────────────────────────────
 //
 // Times m3_dqkv (production tier ladder), m3_dqktheta and one

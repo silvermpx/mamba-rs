@@ -891,7 +891,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_F32(m3_chunk_scan_fwd_i64, long long)
 //   da    chunk_size
 //   qkd   chunk_size
 // The Rust launcher routes to this kernel only when that total fits the
-// 48 KB default budget; wider shapes keep the original kernel.
+// block's shared-memory budget; wider shapes keep the original kernel.
 #define DEFINE_M3_CHUNK_SCAN_FWD_COOP_F32(NAME, IDX)                           \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ y_out,                                                 \
@@ -1481,9 +1481,9 @@ extern "C" __global__ void NAME(                                               \
     /* Strict-upper-triangle pair matrices K[a].Q[b] and */                    \
     /* V[a].dO[b] (a < b), computed once per chunk instead of per */           \
     /* consumer lane (hd-fold recompute). Triangle packing keeps the */        \
-    /* two-head tile under the ~99 KB consumer-GPU smem opt-in cap. */         \
-    /* When the matrix-inclusive tile would blow the ~99 KB consumer smem */   \
-    /* opt-in (large d_state), the launcher passes use_pair_mats = 0 with */   \
+    /* tile under the block's shared-memory budget. */                         \
+    /* When the matrix-inclusive tile would pass that budget */                \
+    /* (large d_state), the launcher passes use_pair_mats = 0 with */          \
     /* the legacy tile size and every consumer falls back to the inline */     \
     /* dot — same ascending-index arithmetic, bit-identical values. */         \
     int tri_n = CS * (CS - 1) / 2;                                             \
@@ -1958,8 +1958,8 @@ extern "C" __global__ void NAME(                                               \
     float* out_k_sm = out_q_sm + CS * ds;                                      \
     int t0 = chunk * CS;                                                       \
     int rows = min(CS, T - t0);                                                \
-    /* Large-d_state tiles overflow the 48 KB no-opt-in dynamic-smem */        \
-    /* limit; the launcher then passes use_staging = 0 and every access */     \
+    /* Tiles past the block's shared-memory budget make the launcher */        \
+    /* pass use_staging = 0, and every access */                               \
     /* falls back to the direct global form — identical values, only */        \
     /* the coalescing win is lost. */                                          \
     if (use_staging) {                                                         \

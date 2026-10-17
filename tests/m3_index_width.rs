@@ -23,7 +23,7 @@ use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::kernels::ByIndexWidth;
-use mamba_rs::gpu::launch::{grid_1d_cover, y_runs};
+use mamba_rs::gpu::launch::{IndexWidth, grid_1d_cover, y_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, chunk_scan_cfg};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -629,7 +629,7 @@ fn both_builds_of_the_siso_kernels_give_the_same_bits() {
         c.hd,
         c.ds,
         CS,
-        m3k.chunk_tile_threads.i32,
+        m3k.chunk_limits(IndexWidth::I32),
     );
     assert!(coop, "the small chunk scan takes the cooperative kernel");
     let plain_cfg = chunk_scan_fallback_cfg(c, m3k.chunk_tile_threads.i32);
@@ -957,8 +957,8 @@ fn the_chunk_scan_i64_build_gives_chunks_past_i32_max_their_own_bits() {
     let st = &ctx.stream;
     let m3k = compile(&ctx, 32);
     let (io, bufs) = chunk_bufs(&ctx, s);
-    let threads = m3k.chunk_tile_threads.i64;
-    let (coop, cfg) = chunk_scan_cfg(s.b, s.nc(), s.nh, s.hd, s.ds, CS, threads);
+    let limits = m3k.chunk_limits(IndexWidth::I64);
+    let (coop, cfg) = chunk_scan_cfg(s.b, s.nc(), s.nh, s.hd, s.ds, CS, limits);
     let kernel: &ByIndexWidth<CudaFunction> = if coop {
         &m3k.m3_chunk_scan_fwd_coop
     } else {
@@ -984,7 +984,7 @@ fn the_chunk_scan_i64_build_gives_chunks_past_i32_max_their_own_bits() {
             window.hd,
             window.ds,
             CS,
-            m3k.chunk_tile_threads.i32,
+            m3k.chunk_limits(IndexWidth::I32),
         );
         launch_runs(&ctx, &kernel.i32, own_cfg, &own.args(window));
         assert_bits(

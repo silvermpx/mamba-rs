@@ -22,7 +22,7 @@ use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::yz_runs;
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use mamba_rs::mamba3_siso::route::{
-    CHUNKED_BACKWARD_SMEM_MAX, chunked_backward_smem_bytes, chunked_backward_tiled_smem_bytes,
+    PLANNED_SMEM, chunked_backward_smem_bytes, chunked_backward_tiled_smem_bytes,
 };
 
 const B: usize = 2;
@@ -323,7 +323,7 @@ fn dqkv_warp(
     } else {
         legacy
     };
-    assert!(smem <= CHUNKED_BACKWARD_SMEM_MAX, "{s:?} pairs {pairs}");
+    assert!(smem <= PLANNED_SMEM, "{s:?} pairs {pairs}");
     let t_split = 16.min(1024 / s.hd).max(1) as u32;
     let cfg = LaunchConfig {
         grid_dim: (NH as u32, B as u32, s.nc() as u32),

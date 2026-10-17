@@ -751,8 +751,15 @@ impl Mamba3Prefill {
                 }
                 // The fused kernel writes the decay cumsum itself; only the
                 // unfused pair reads it from its own launch.
-                let fused =
-                    super::kernels::chunk_fused_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+                let fused = super::kernels::chunk_fused_cfg(
+                    dims.batch,
+                    nc,
+                    nh,
+                    hd,
+                    ds,
+                    dims.chunk_size(),
+                    m3k.smem_optin,
+                );
                 if fused.is_none() {
                     let block_x = nh.min(256) as u32;
                     let grid_z = nh.div_ceil(block_x as usize) as u32;
@@ -908,7 +915,7 @@ impl Mamba3Prefill {
                             hd,
                             ds,
                             dims.chunk_size(),
-                            *m3k.chunk_tile_threads.get(width),
+                            m3k.chunk_limits(width),
                         );
                         if let Some(ts) = typed.as_deref_mut() {
                             let xp = ts.x.cached_ptr();
@@ -1014,7 +1021,7 @@ impl Mamba3Prefill {
                         hd,
                         ds,
                         dims.chunk_size(),
-                        *m3k.chunk_tile_threads.get(width),
+                        m3k.chunk_limits(width),
                     );
                     if let Some(ts) = typed.as_deref_mut() {
                         let kern = if coop {

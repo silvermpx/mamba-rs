@@ -26,9 +26,10 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::kernels::{cuda_include_paths, state_capacity};
-use mamba_rs::gpu::launch::{y_runs, yz_runs};
+use mamba_rs::gpu::launch::{IndexWidth, y_runs, yz_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::{
-    Mamba3Kernels, chunk_fused_cfg, chunk_state_cfg, state_pass_fused_cfg,
+    ChunkLimits, Mamba3Kernels, chunk_fused_cfg, chunk_scan_cfg, chunk_state_cfg,
+    state_pass_fused_cfg,
 };
 use std::sync::Arc;
 
@@ -413,20 +414,30 @@ fn m3_chunk_state_fwd_f16() {
     check_chunk_state_fwd(WeightDtype::F16);
 }
 
+/// The fused pre-state kernel against the unfused trio it replaces, bit
+/// for bit in every dtype and with either save omitted, the trio's chunk
+/// states in each of its layouts: the scalar one it runs wherever the quad
+/// tile does not fit, and the quad one where it does.
 #[test]
 fn m3_chunk_pre_state_fused_matches_unfused_bits() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
     // The hd=40 shape gives each fused thread multiple state quads to own.
-    let shapes: [(usize, usize, usize, usize, usize, usize); 6] = [
+    // The last three are past the 48 KB default, the official head among
+    // them: the budget moved them from the unfused trio's scalar layout to
+    // the fused kernel.
+    let shapes: [(usize, usize, usize, usize, usize, usize); 9] = [
         (2, 1, 3, 5, 4, 32),
         (1, 13, 2, 7, 8, 64),
         (2, 64, 3, 16, 16, 64),
         (1, 65, 3, 5, 32, 32),
         (2, 129, 2, 40, 4, 32),
         (1, 13, 2, 3, 64, 32),
+        (2, 70, 2, 96, 96, 64),
+        (2, 129, 2, 64, 128, 64),
+        (1, 100, 3, 100, 128, 64),
     ];
-    for cap in [16, 32, 64] {
+    for cap in [16, 32, 64, 96, 128] {
         let m3k = Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), cap)
             .unwrap();
         for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
@@ -440,15 +451,22 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                 let label =
                     format!("{dtype:?} cap={cap} B={batch} T={t} nh={nh} hd={hd} ds={ds} cs={cs}");
                 let nc = t.div_ceil(cs);
-                let fused_cfg = chunk_fused_cfg(batch, nc, nh, hd, ds, cs)
+                let fused_cfg = chunk_fused_cfg(batch, nc, nh, hd, ds, cs, m3k.smem_optin)
                     .unwrap_or_else(|| panic!("{label}: fused launch must be supported"));
-                let state_cfg =
-                    chunk_state_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads.i32);
+                let limits = m3k.chunk_limits(IndexWidth::I32);
+                let state_cfg = chunk_state_cfg(batch, nc, nh, hd, ds, cs, limits);
+                // The scalar layout, which the unfused trio runs wherever the
+                // quad tile does not fit.
+                let scalar_cfg =
+                    chunk_state_cfg(batch, nc, nh, hd, ds, cs, ChunkLimits { smem: 0, ..limits });
                 assert!(ds <= m3k.state_cap, "{label}: state capacity");
-                for cfg in [&fused_cfg, &state_cfg] {
+                for cfg in [&fused_cfg, &state_cfg, &scalar_cfg] {
                     let (bx, by, bz) = cfg.block_dim;
                     assert!((1..=1024).contains(&(bx * by * bz)), "{label}: block");
-                    assert!(cfg.shared_mem_bytes <= 48 * 1024, "{label}: shared memory");
+                    assert!(
+                        cfg.shared_mem_bytes as usize <= m3k.smem_optin,
+                        "{label}: shared memory"
+                    );
                 }
                 let th_n = batch * t * nh;
                 let ks_n = th_n * ds;
@@ -501,10 +519,12 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                     block_dim: (cs as u32, 1, 1),
                     shared_mem_bytes: 0,
                 };
-                let run = |fused: bool, save_scale: bool, save_gamma: bool| {
+                // The fused kernel for `None`, the unfused trio with its chunk
+                // states in the layout of `Some(cfg)` otherwise.
+                let run = |unfused: Option<LaunchConfig>, save_scale: bool, save_gamma: bool| {
                     // Independent, differently poisoned allocations expose missing
                     // writes even if both kernels skip the same output element.
-                    let poison = if fused { -8192.0 } else { 8192.0 };
+                    let poison = if unfused.is_none() { -8192.0 } else { 8192.0 };
                     let ks = upload_typed(&ctx, &vec![poison; ks_n], dtype);
                     let [qk, scale, gamma, states] = [th_n, th_n, th_n, states_n]
                         .map(|len| upload_f32(&ctx, &vec![poison; len]));
@@ -513,36 +533,7 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                     let da = upload_f32(&ctx, &vec![f32::NAN; da_n]);
                     let scale_ptr = if save_scale { scale.cached_ptr() } else { 0 };
                     let gamma_ptr = if save_gamma { gamma.cached_ptr() } else { 0 };
-                    if fused {
-                        let ptrs = [
-                            ks.cached_ptr(),
-                            qk.cached_ptr(),
-                            scale_ptr,
-                            gamma_ptr,
-                            states.cached_ptr(),
-                            k.cached_ptr(),
-                            q.cached_ptr(),
-                            dt.cached_ptr(),
-                            trap.cached_ptr(),
-                            x.cached_ptr(),
-                            adt.cached_ptr(),
-                            da.cached_ptr(),
-                        ];
-                        for (y_first, cfg) in y_runs(fused_cfg) {
-                            let mut bld = ctx
-                                .stream
-                                .launch_builder(m3k.m3_chunk_pre_state_fused_typed.i32.get(dtype));
-                            for ptr in &ptrs {
-                                bld.arg(ptr);
-                            }
-                            for dim in &dims {
-                                bld.arg(dim);
-                            }
-                            bld.arg(&y_first);
-                            bld.arg(&0u64);
-                            unsafe { bld.launch(cfg) }.unwrap();
-                        }
-                    } else {
+                    if let Some(state_cfg) = unfused {
                         let block_x = nh.min(256) as u32;
                         let da_cfg = LaunchConfig {
                             grid_dim: (
@@ -611,6 +602,35 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                             bld.arg(&0u64);
                             unsafe { bld.launch(cfg) }.unwrap();
                         }
+                    } else {
+                        let ptrs = [
+                            ks.cached_ptr(),
+                            qk.cached_ptr(),
+                            scale_ptr,
+                            gamma_ptr,
+                            states.cached_ptr(),
+                            k.cached_ptr(),
+                            q.cached_ptr(),
+                            dt.cached_ptr(),
+                            trap.cached_ptr(),
+                            x.cached_ptr(),
+                            adt.cached_ptr(),
+                            da.cached_ptr(),
+                        ];
+                        for (y_first, cfg) in y_runs(fused_cfg) {
+                            let mut bld = ctx
+                                .stream
+                                .launch_builder(m3k.m3_chunk_pre_state_fused_typed.i32.get(dtype));
+                            for ptr in &ptrs {
+                                bld.arg(ptr);
+                            }
+                            for dim in &dims {
+                                bld.arg(dim);
+                            }
+                            bld.arg(&y_first);
+                            bld.arg(&0u64);
+                            unsafe { bld.launch(cfg) }.unwrap();
+                        }
                     }
                     ctx.stream.synchronize().unwrap();
                     [
@@ -622,7 +642,6 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                         download_f32(&ctx, &da, da_n),
                     ]
                 };
-                let reference = run(false, true, true);
                 let names = [
                     "K_scaled",
                     "qk_dot",
@@ -631,31 +650,40 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                     "chunk_states",
                     "dA_cumsum",
                 ];
-                for (save_scale, save_gamma) in
-                    [(true, true), (false, true), (true, false), (false, false)]
-                {
-                    let actual = run(true, save_scale, save_gamma);
-                    for (out, ((got, want), name)) in
-                        actual.iter().zip(&reference).zip(names).enumerate()
+                let mut layouts = vec![("scalar layout", scalar_cfg)];
+                if state_cfg.shared_mem_bytes > 0 {
+                    layouts.push(("quad layout", state_cfg));
+                }
+                for (layout, layout_cfg) in layouts {
+                    let reference = run(Some(layout_cfg), true, true);
+                    for (save_scale, save_gamma) in
+                        [(true, true), (false, true), (true, false), (false, false)]
                     {
-                        assert_eq!(got.len(), want.len(), "{label}: {name} length");
-                        for (i, (&got, &want)) in got.iter().zip(want).enumerate() {
-                            let want = if (out == 2 && !save_scale) || (out == 3 && !save_gamma) {
-                                -8192.0f32
-                            } else {
-                                // The cumsum's padding is NaN in both arms.
-                                assert!(
-                                    want.is_finite() || out == 5,
-                                    "{label}: {name}[{i}] oracle nonfinite"
+                        let actual = run(None, save_scale, save_gamma);
+                        for (out, ((got, want), name)) in
+                            actual.iter().zip(&reference).zip(names).enumerate()
+                        {
+                            assert_eq!(got.len(), want.len(), "{label}: {name} length");
+                            for (i, (&got, &want)) in got.iter().zip(want).enumerate() {
+                                let want = if (out == 2 && !save_scale) || (out == 3 && !save_gamma)
+                                {
+                                    -8192.0f32
+                                } else {
+                                    // The cumsum's padding is NaN in both arms.
+                                    assert!(
+                                        want.is_finite() || out == 5,
+                                        "{label}: {name}[{i}] oracle nonfinite"
+                                    );
+                                    want
+                                };
+                                // Widening finite half values is exact, including signed zero.
+                                assert_eq!(
+                                    got.to_bits(),
+                                    want.to_bits(),
+                                    "{label} {layout}: {name}[{i}] save_scale={save_scale} \
+                                     save_gamma={save_gamma}"
                                 );
-                                want
-                            };
-                            // Widening finite half values is exact, including signed zero.
-                            assert_eq!(
-                                got.to_bits(),
-                                want.to_bits(),
-                                "{label}: {name}[{i}] save_scale={save_scale} save_gamma={save_gamma}"
-                            );
+                            }
                         }
                     }
                 }
@@ -1030,4 +1058,28 @@ fn m3_chunk_scan_fwd_bf16() {
 #[test]
 fn m3_chunk_scan_fwd_f16() {
     check_chunk_scan_fwd(WeightDtype::F16);
+}
+
+// ─── the cooperative scan's class ──────────────────────────────────────
+
+/// The cooperative scan keeps the shapes whose tile fits 48 KB, whatever
+/// the block's budget: it rounds the output's last terms differently from
+/// the static-tile kernel, so a shape between 48 KB and the budget (a head
+/// of 100 over 24 states, 58 KB) stays on the static tiles and keeps its
+/// bits, and the serve shape stays cooperative.
+#[test]
+fn the_cooperative_scan_keeps_its_48_kb_shapes_under_any_budget() {
+    for smem in [64 * 1024, 99 * 1024, 227 * 1024] {
+        let limits = ChunkLimits {
+            threads: 1024,
+            smem,
+        };
+        let (coop, _) = chunk_scan_cfg(4, 8, 24, 100, 24, 64, limits);
+        assert!(
+            !coop,
+            "budget {smem}: hd 100 ds 24 stays on the static tiles"
+        );
+        let (coop, _) = chunk_scan_cfg(1, 73, 48, 16, 16, 64, limits);
+        assert!(coop, "budget {smem}: the serve shape stays cooperative");
+    }
 }

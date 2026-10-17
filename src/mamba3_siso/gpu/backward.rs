@@ -359,7 +359,7 @@ fn layer_backward(
         // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1 across
         // layers since GpuMamba3Grads::zero runs once per step).
         let cs_u = dims.chunk_size();
-        if crate::mamba3_siso::route::chunked_backward_tiled(hd, ds) {
+        if crate::mamba3_siso::route::chunked_backward_tiled(hd, ds, m3k.smem_optin) {
             let io = super::dqkv_tiled::DqkvTiledIo {
                 d_q: scratch.d_q.cached_ptr(),
                 d_k: scratch.d_k.cached_ptr(),
@@ -400,21 +400,21 @@ fn layer_backward(
             // and the route bounds the same tile, so a shape it admits runs.
             let legacy_floats = crate::mamba3_siso::route::chunked_backward_smem_bytes(hd, ds) / 4;
             let mats_floats = legacy_floats + cs_u * (cs_u - 1) * 3 / 2 + 2 * cs_u;
-            // Consumer GPUs cap the per-block dynamic-smem opt-in near 99 KB.
-            // One head per block: pair matrices when the tile
-            // fits, legacy inline dots otherwise (bit-identical, slower).
-            let cap_floats = 99 * 1024 / 4;
+            // One head per block: pair matrices when the tile fits the
+            // block's budget, legacy inline dots otherwise (bit-identical,
+            // slower).
+            let cap_floats = m3k.smem_optin / 4;
             let (per_head_floats, use_pair_mats): (usize, i32) = if mats_floats <= cap_floats {
                 (mats_floats, 1)
             } else {
                 (legacy_floats, 0)
             };
             let smem = per_head_floats * 4;
-            if smem > 99 * 1024 {
+            if smem > m3k.smem_optin {
                 return Err(format!(
-                    "m3_dqkv shared-memory tile {} B exceeds the 99 KB opt-in \
+                    "m3_dqkv shared-memory tile {} B exceeds the {} B a block may stage \
                      (CS={cs_u} hd={hd} ds={ds}) even without the pair matrices",
-                    smem
+                    smem, m3k.smem_optin
                 ));
             }
             let nc = dims.n_chunks();
@@ -562,11 +562,11 @@ fn layer_backward(
         {
             let na_i = na as i32;
             // Six [CS][ds] staging tiles (4 inputs + 2 outputs) for the
-            // coalesced I/O path; values identical, bits identical.
-            // Large-d_state tiles overflow the 48 KB no-opt-in dynamic
-            // limit — fall back to the direct-global path (staging = 0).
+            // coalesced I/O path; values identical, bits identical. Tiles
+            // past `DQKTHETA_STAGING_MAX` take the direct-global path
+            // (staging = 0).
             let dqkt_smem = 6 * dims.chunk_size() * ds * 4;
-            let dqkt_staging: i32 = i32::from(dqkt_smem <= 48 * 1024);
+            let dqkt_staging: i32 = i32::from(dqkt_smem <= super::kernels::DQKTHETA_STAGING_MAX);
             let cfg = cudarc::driver::LaunchConfig {
                 grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
                 block_dim: (dims.chunk_size() as u32, 1, 1),

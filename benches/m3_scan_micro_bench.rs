@@ -170,7 +170,7 @@ fn scan_trio_time_and_hash() {
             hd,
             ds,
             cs,
-            m3k.chunk_tile_threads.i32,
+            m3k.chunk_limits(mamba_rs::gpu::launch::IndexWidth::I32),
         );
         for (y_first, cfg) in y_runs(cfg) {
             let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
@@ -190,7 +190,15 @@ fn scan_trio_time_and_hash() {
         }
     };
     let scan = || {
-        let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads.i32);
+        let (coop, cfg) = chunk_scan_cfg(
+            batch,
+            nc,
+            nh,
+            hd,
+            ds,
+            cs,
+            m3k.chunk_limits(mamba_rs::gpu::launch::IndexWidth::I32),
+        );
         assert!(coop, "serve shape must ride the coop kernel");
         for (y_first, cfg) in y_runs(cfg) {
             let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd_coop.i32);
@@ -275,7 +283,7 @@ fn scan_trio_time_and_hash() {
             hd,
             ds,
             cs,
-            m3k.chunk_tile_threads.i32,
+            m3k.chunk_limits(mamba_rs::gpu::launch::IndexWidth::I32),
         );
         for (y_first, cfg) in y_runs(cfg) {
             let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
@@ -310,8 +318,16 @@ fn scan_trio_time_and_hash() {
     let gamma_f = GpuBuffer::zeros(st, batch * t * nh).unwrap();
     let chunk_states_f = GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap();
     let fused = || {
-        let fcfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_fused_cfg(batch, nc, nh, hd, ds, cs)
-            .expect("serve shape must fit the fused kernel");
+        let fcfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_fused_cfg(
+            batch,
+            nc,
+            nh,
+            hd,
+            ds,
+            cs,
+            m3k.smem_optin,
+        )
+        .expect("serve shape must fit the fused kernel");
         for (y_first, cfg) in y_runs(fcfg) {
             let mut b = ctx
                 .stream
@@ -426,7 +442,7 @@ fn scan_trio_time_and_hash() {
                     hd,
                     ds,
                     cs,
-                    m3k.chunk_tile_threads.i32,
+                    m3k.chunk_limits(mamba_rs::gpu::launch::IndexWidth::I32),
                 );
                 for (y_first, cfg) in y_runs(cfg) {
                     let mut b = ctx
@@ -448,9 +464,16 @@ fn scan_trio_time_and_hash() {
                 }
             };
             let fused_typed = || {
-                let fcfg =
-                    mamba_rs::mamba3_siso::gpu::kernels::chunk_fused_cfg(batch, nc, nh, hd, ds, cs)
-                        .expect("serve shape must fit the fused kernel");
+                let fcfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_fused_cfg(
+                    batch,
+                    nc,
+                    nh,
+                    hd,
+                    ds,
+                    cs,
+                    m3k.smem_optin,
+                )
+                .expect("serve shape must fit the fused kernel");
                 for (y_first, cfg) in y_runs(fcfg) {
                     let mut b = ctx
                         .stream
@@ -521,7 +544,15 @@ fn scan_trio_time_and_hash() {
     // bf16 parity test only measures within tolerance.
     let y_t = GpuBuffer::zeros(st, batch * t * d_inner).unwrap();
     let scan_typed = || {
-        let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs, m3k.chunk_tile_threads.i32);
+        let (coop, cfg) = chunk_scan_cfg(
+            batch,
+            nc,
+            nh,
+            hd,
+            ds,
+            cs,
+            m3k.chunk_limits(mamba_rs::gpu::launch::IndexWidth::I32),
+        );
         assert!(coop, "serve shape must ride the coop kernel");
         for (y_first, cfg) in y_runs(cfg) {
             let mut b = ctx

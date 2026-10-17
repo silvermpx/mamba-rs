@@ -178,10 +178,10 @@
   configurations that differ in each shape feature its kernels route on,
   on every path, in a covering set of scan modes, precisions and GEMM
   modes, and holds each cell to the host.
-- `MAMBA_RS_SMEM_BUDGET=<bytes>` holds the Mamba-2 and MIMO kernels to
-  less shared memory than they opted in to (from 64 KB), so their smaller
-  tiles, global staging and fallback kernels run on ordinary shapes and
-  can be tested on one board.
+- `MAMBA_RS_SMEM_BUDGET=<bytes>` holds the Mamba-2, Mamba-3 SISO and
+  MIMO kernels to less shared memory than they plan with (from 64 KB), so
+  their smaller tiles, global staging and fallback kernels run on ordinary
+  shapes and can be tested on one board.
 - CPU precision lanes: `CpuOptions::default().dtype(...)` builds a CPU
   backbone (`new_with`) or trainer (`new_with`) that computes as the GPU
   of that precision does: bf16 and f16 storage of the projections and of
@@ -594,6 +594,22 @@
   builds that arena, as `GpuMambaGrads::new_sized` does for Mamba-1. A
   SISO GPU state that an earlier release saved for a model without the
   projection is refused on its length.
+- The Mamba-3 SISO kernels opt in to the device's shared memory and plan
+  their tiles within the 99 KB every supported part allows
+  (`route::PLANNED_SMEM`, `Mamba3Kernels::smem_optin`), where the chunked
+  forward stopped at the 48 KB default: the fused pre-state kernel now
+  serves shapes up to that budget, with the bits of the kernels it
+  replaces. The cooperative chunk scan keeps the shapes whose tile fits
+  48 KB (`COOP_SCAN_TILE_MAX`): it rounds the last terms of each output
+  differently from the static-tile kernel the larger shapes run on, so
+  that bound is a numeric contract. `m3_dqktheta` keeps staging its tiles
+  up to 48 KB (`DQKTHETA_STAGING_MAX`): larger staged tiles measured
+  slower than its direct reads at some shapes.
+  `chunk_scan_cfg` and `chunk_state_cfg` take the block's `ChunkLimits`
+  (`Mamba3Kernels::chunk_limits`) in place of a thread count,
+  `chunk_fused_cfg` the bytes a block may stage, and
+  `route::chunked_backward_tiled` the budget it decides within;
+  `route::CHUNKED_BACKWARD_SMEM_MAX` is `route::PLANNED_SMEM`.
 
 ### Fixed
 

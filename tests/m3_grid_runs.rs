@@ -19,7 +19,7 @@ use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
-use mamba_rs::gpu::launch::{GRID_YZ_EXTENT, y_runs};
+use mamba_rs::gpu::launch::{GRID_YZ_EXTENT, IndexWidth, y_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, chunk_scan_cfg, step_head_cfg};
 use mamba_rs::mamba3_siso::route::HeadTier;
 
@@ -352,7 +352,7 @@ fn the_chunk_scan_gives_heads_past_the_y_extent_their_twins_bits() {
     .input(&ctx, 36, |v| 0.5 * v);
     let d = Heads { outer: 1, row: 1 }.input(&ctx, 37, |v| v);
     let threads = k.chunk_tile_threads.i32;
-    let (coop, coop_cfg) = chunk_scan_cfg(1, nc, NH, hd, ds, CS, threads);
+    let (coop, coop_cfg) = chunk_scan_cfg(1, nc, NH, hd, ds, CS, k.chunk_limits(IndexWidth::I32));
     assert!(coop, "the cooperative tiles fit this shape");
     let fallback_cfg = LaunchConfig {
         grid_dim: (nc as u32, NH.div_ceil(2) as u32, 1),
