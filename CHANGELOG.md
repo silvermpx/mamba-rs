@@ -715,6 +715,17 @@
   time (34,816 bytes), where a thread a pair read two rows of the head.
   Every output keeps the per-output kernel's chain; both stay frozen in
   `tests/fixtures/m2_backward_reference.cu`.
+- The Mamba-2 element kernels find their rows and channels without a
+  division: the gate without the norm, the inner MLP gate, the sequential
+  step scalars and the B and C groups give a row to a block's y threads,
+  strided by the grid, and its columns to the x threads
+  (`launch::grid_rows`, `launch::row_block`); the conv window and its two
+  gradients give a block a run of steps of one sequence, the sequences on
+  the grid's y axis in runs (`launch::grid_steps`); the conv state and the
+  decode's conv step give a block a few sequences. A block holds 129 to
+  256 threads, so a narrow row shares its warps with the next. Each of
+  these kernels took a thread an element and found its row and channel by
+  a 64-bit division. Every element keeps its chain and its bits.
 
 ### Fixed
 

@@ -1514,7 +1514,8 @@ DEFINE_M2B_GATED_NORM_STREAM(m2b_gated_norm_stream, float)
 DEFINE_M2B_GATED_NORM_STREAM(m2b_gated_norm_stream_bf16, __nv_bfloat16)
 DEFINE_M2B_GATED_NORM_STREAM(m2b_gated_norm_stream_f16, __half)
 
-// The gate without a norm: out = y silu(z). Grid 1-D over rows * d_ssm.
+// The gate without a norm: out = y silu(z). A block's y threads take rows,
+// strided by the grid, its x threads the channels.
 template <typename T>
 __device__ __forceinline__ void m2b_gate_only_body(
     float* __restrict__ dy,
@@ -1524,14 +1525,17 @@ __device__ __forceinline__ void m2b_gate_only_body(
     const T* __restrict__ proj,
     long long rows, int d_ssm
 ) {
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= rows * d_ssm) return;
-    long long r = i / d_ssm;
-    long long c = i - r * d_ssm;
-    const float d = to_f(dout[r * ld_out + out_col + c]);
-    const float zv = to_f(proj[r * ld_proj + z_off + c]);
-    dy[i] = __fmul_rn(d, m2_silu(zv));
-    m2b_put(&d_proj[r * ld_proj + z_off + c], __fmul_rn(__fmul_rn(d, y[i]), m2b_silu_grad(zv)));
+    for (long long r = (long long)blockIdx.x * blockDim.y + threadIdx.y; r < rows;
+         r += (long long)gridDim.x * blockDim.y) {
+        for (int c = threadIdx.x; c < d_ssm; c += blockDim.x) {
+            const long long i = r * d_ssm + c;
+            const float d = to_f(dout[r * ld_out + out_col + c]);
+            const float zv = to_f(proj[r * ld_proj + z_off + c]);
+            dy[i] = __fmul_rn(d, m2_silu(zv));
+            m2b_put(&d_proj[r * ld_proj + z_off + c],
+                    __fmul_rn(__fmul_rn(d, y[i]), m2b_silu_grad(zv)));
+        }
+    }
 }
 
 #define DEFINE_M2B_GATE_ONLY(NAME, T)                                           \
@@ -1556,7 +1560,9 @@ DEFINE_M2B_GATE_ONLY(m2b_gate_only_bf16, __nv_bfloat16)
 DEFINE_M2B_GATE_ONLY(m2b_gate_only_f16, __half)
 
 // The mixer's inner MLP gate, out = silu(z0) x0: dz0 = dout x0 silu'(z0)
-// and dx0 = dout silu(z0) into the first 2 d_mlp columns of d_proj.
+// and dx0 = dout silu(z0) into the first 2 d_mlp columns of d_proj. A
+// block's y threads take rows, strided by the grid, its x threads the
+// columns.
 // Grid 1-D over rows * d_mlp.
 template <typename T>
 __device__ __forceinline__ void m2b_mlp_gate_body(
@@ -1565,15 +1571,17 @@ __device__ __forceinline__ void m2b_mlp_gate_body(
     const T* __restrict__ proj,
     long long rows, int d_mlp
 ) {
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= rows * d_mlp) return;
-    long long r = i / d_mlp;
-    long long j = i - r * d_mlp;
-    const float d = to_f(dout[r * ld_out + j]);
-    const float z0 = to_f(proj[r * ld_proj + j]);
-    const float x0 = to_f(proj[r * ld_proj + d_mlp + j]);
-    m2b_put(&d_proj[r * ld_proj + j], __fmul_rn(__fmul_rn(d, x0), m2b_silu_grad(z0)));
-    m2b_put(&d_proj[r * ld_proj + d_mlp + j], __fmul_rn(d, m2_silu(z0)));
+    for (long long r = (long long)blockIdx.x * blockDim.y + threadIdx.y; r < rows;
+         r += (long long)gridDim.x * blockDim.y) {
+        for (int j = threadIdx.x; j < d_mlp; j += blockDim.x) {
+            const float d = to_f(dout[r * ld_out + j]);
+            const float z0 = to_f(proj[r * ld_proj + j]);
+            const float x0 = to_f(proj[r * ld_proj + d_mlp + j]);
+            m2b_put(&d_proj[r * ld_proj + j],
+                    __fmul_rn(__fmul_rn(d, x0), m2b_silu_grad(z0)));
+            m2b_put(&d_proj[r * ld_proj + d_mlp + j], __fmul_rn(d, m2_silu(z0)));
+        }
+    }
 }
 
 #define DEFINE_M2B_MLP_GATE(NAME, T)                                            \
@@ -1595,7 +1603,9 @@ DEFINE_M2B_MLP_GATE(m2b_mlp_gate_f16, __half)
 // The conv's pre-activation gradient dv = dxbc silu'(v), v recomputed in
 // the forward's chain (bias, then the taps oldest first, the taps before
 // the window from the state the window started from, a tap of another
-// sequence of a packed row 0). Grid 1-D over B * T * conv_dim.
+// sequence of a packed row 0). Grid (steps, B) launched in runs of B: a
+// block's y threads take steps, its x threads the channels, and no index
+// is divided.
 template <typename T>
 __device__ __forceinline__ void m2b_conv_dv_body(
     float* __restrict__ dv,
@@ -1604,26 +1614,27 @@ __device__ __forceinline__ void m2b_conv_dv_body(
     const T* __restrict__ proj, long long ld_proj, int xbc_col,
     const float* __restrict__ w, const float* __restrict__ bias,
     int batch, int seq, int conv_dim, int d_conv,
+    int y_first, /* this run's first y block */
     const int* __restrict__ seq_idx
 ) {
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    long long total = (long long)batch * seq * conv_dim;
-    if (i >= total) return;
-    const int c = (int)(i % conv_dim);
-    const long long row = i / conv_dim;
-    const int t = (int)(row % seq);
-    const int b = (int)(row / seq);
+    const int t = blockIdx.x * blockDim.y + threadIdx.y;
+    const long long b = y_first + blockIdx.y;
+    if (b >= batch || t >= seq) return;
     const int sid = vl_id(seq_idx, b, seq, t);
-    float v = bias[c];
-    for (int k = 0; k < d_conv; k++) {
-        int src = t - (d_conv - 1) + k;
-        float xv = src >= 0
-            ? to_f(proj[((long long)b * seq + src) * ld_proj + xbc_col + c])
-            : state0[((long long)b * conv_dim + c) * d_conv + d_conv + src];
-        if (vl_id(seq_idx, b, seq, src) != sid) xv = 0.0f;
-        v = __fmaf_rn(w[(long long)c * d_conv + k], xv, v);
+    const long long row = b * seq + t;
+    for (int c = threadIdx.x; c < conv_dim; c += blockDim.x) {
+        float v = bias[c];
+        for (int k = 0; k < d_conv; k++) {
+            int src = t - (d_conv - 1) + k;
+            float xv = src >= 0
+                ? to_f(proj[(b * seq + src) * ld_proj + xbc_col + c])
+                : state0[(b * conv_dim + c) * d_conv + d_conv + src];
+            if (vl_id(seq_idx, b, seq, src) != sid) xv = 0.0f;
+            v = __fmaf_rn(w[(long long)c * d_conv + k], xv, v);
+        }
+        const long long i = row * conv_dim + c;
+        dv[i] = __fmul_rn(dxbc[i], m2b_silu_grad(v));
     }
-    dv[i] = __fmul_rn(dxbc[i], m2b_silu_grad(v));
 }
 
 #define DEFINE_M2B_CONV_DV(NAME, T)                                             \
@@ -1640,10 +1651,11 @@ extern "C" __global__ void NAME(                                                
     int seq,                                                                    \
     int conv_dim,                                                               \
     int d_conv,                                                                 \
+    int y_first, /* this run's first y block */                                 \
     const int* __restrict__ seq_idx                                             \
 ) {                                                                             \
     m2b_conv_dv_body<T>(dv, dxbc, state0, proj, ld_proj, xbc_col, w, bias,      \
-        batch, seq, conv_dim, d_conv, seq_idx);                                 \
+        batch, seq, conv_dim, d_conv, y_first, seq_idx);                        \
 }
 DEFINE_M2B_CONV_DV(m2b_conv_dv, float)
 DEFINE_M2B_CONV_DV(m2b_conv_dv_bf16, __nv_bfloat16)
@@ -1651,32 +1663,33 @@ DEFINE_M2B_CONV_DV(m2b_conv_dv_f16, __half)
 
 // The conv's input gradient into the xBC columns of d_proj:
 // d_in[t] = sum_k w[k] dv[t + d_conv - 1 - k] over taps inside the window
-// (and, in a packed row, inside t's sequence), k ascending. Grid 1-D over
-// B * T * conv_dim.
+// (and, in a packed row, inside t's sequence), k ascending. Grid (steps,
+// B) launched in runs of B: a block's y threads take steps, its x threads
+// the channels.
 template <typename T>
 __device__ __forceinline__ void m2b_conv_dx_body(
     T* __restrict__ d_proj, long long ld_proj, int xbc_col,
     const float* __restrict__ dv,
     const float* __restrict__ w,
     int batch, int seq, int conv_dim, int d_conv,
+    int y_first, /* this run's first y block */
     const int* __restrict__ seq_idx
 ) {
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    long long total = (long long)batch * seq * conv_dim;
-    if (i >= total) return;
-    const int c = (int)(i % conv_dim);
-    const long long row = i / conv_dim;
-    const int t = (int)(row % seq);
-    const long long b = row / seq;
+    const int t = blockIdx.x * blockDim.y + threadIdx.y;
+    const long long b = y_first + blockIdx.y;
+    if (b >= batch || t >= seq) return;
     const int sid = vl_id(seq_idx, b, seq, t);
-    float acc = 0.0f;
-    for (int k = 0; k < d_conv; k++) {
-        int dst = t + (d_conv - 1) - k;
-        if (dst < seq && vl_id(seq_idx, b, seq, dst) == sid)
-            acc = __fmaf_rn(w[(long long)c * d_conv + k],
-                            dv[(b * seq + dst) * conv_dim + c], acc);
+    const long long row = b * seq + t;
+    for (int c = threadIdx.x; c < conv_dim; c += blockDim.x) {
+        float acc = 0.0f;
+        for (int k = 0; k < d_conv; k++) {
+            int dst = t + (d_conv - 1) - k;
+            if (dst < seq && vl_id(seq_idx, b, seq, dst) == sid)
+                acc = __fmaf_rn(w[(long long)c * d_conv + k],
+                                dv[(b * seq + dst) * conv_dim + c], acc);
+        }
+        m2b_put(&d_proj[row * ld_proj + xbc_col + c], acc);
     }
-    m2b_put(&d_proj[row * ld_proj + xbc_col + c], acc);
 }
 
 #define DEFINE_M2B_CONV_DX(NAME, T)                                             \
@@ -1690,10 +1703,11 @@ extern "C" __global__ void NAME(                                                
     int seq,                                                                    \
     int conv_dim,                                                               \
     int d_conv,                                                                 \
+    int y_first, /* this run's first y block */                                 \
     const int* __restrict__ seq_idx                                             \
 ) {                                                                             \
     m2b_conv_dx_body<T>(d_proj, ld_proj, xbc_col, dv, w, batch, seq,            \
-        conv_dim, d_conv, seq_idx);                                             \
+        conv_dim, d_conv, y_first, seq_idx);                                    \
 }
 DEFINE_M2B_CONV_DX(m2b_conv_dx, float)
 DEFINE_M2B_CONV_DX(m2b_conv_dx_bf16, __nv_bfloat16)
@@ -2030,7 +2044,8 @@ DEFINE_M2S_BWD(m2s_bwd_f16, __half)
 
 // The step scalars of every (row, head) for the sequential backward, with
 // m2_step_scalars' own expressions: [rows, H, 3] = (e^acs, (C.B) e^0 dt,
-// e^0 dt). One thread per (row, head); grid 1-D over rows * H.
+// e^0 dt). A block's y threads take rows, strided by the grid, its x
+// threads the heads.
 template <typename T>
 __device__ __forceinline__ void m2s_scalars_body(
     float* __restrict__ out,
@@ -2039,23 +2054,26 @@ __device__ __forceinline__ void m2s_scalars_body(
     long long rows, int nh, int ng, int hd, int ds, int conv_dim,
     int flags, float dt_min, float dt_max
 ) {
-    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= rows * nh) return;
-    const long long row = i / nh;
-    const int h = (int)(i % nh);
-    const int g = h / (nh / ng);
-    const long long base = row * conv_dim + (long long)nh * hd;
-    const T* bv = xbc + base + (long long)g * ds;
-    const T* cv = xbc + base + (long long)(ng + g) * ds;
-    float dt = m2_softplus(__fadd_rn(to_f(proj[row * ld_proj + dt_off + h]), dt_bias[h]));
-    if ((flags & M2_FLAG_DT_LIMIT) && dt == dt) dt = fminf(fmaxf(dt, dt_min), dt_max);
-    const float acs = __fadd_rn(0.0f, __fmul_rn(dt, a_neg[h]));
-    float cb = 0.0f;
-    for (int n = 0; n < ds; n++) cb = __fmaf_rn(to_f(cv[n]), to_f(bv[n]), cb);
-    const float e0 = m2_exp(fminf(__fsub_rn(acs, acs), 0.0f));
-    out[i * 3] = m2_exp(acs);
-    out[i * 3 + 1] = __fmul_rn(__fmul_rn(cb, e0), dt);
-    out[i * 3 + 2] = __fmul_rn(e0, dt);
+    for (long long row = (long long)blockIdx.x * blockDim.y + threadIdx.y; row < rows;
+         row += (long long)gridDim.x * blockDim.y) {
+        for (int h = threadIdx.x; h < nh; h += blockDim.x) {
+            const long long i = row * nh + h;
+            const int g = h / (nh / ng);
+            const long long base = row * conv_dim + (long long)nh * hd;
+            const T* bv = xbc + base + (long long)g * ds;
+            const T* cv = xbc + base + (long long)(ng + g) * ds;
+            float dt =
+                m2_softplus(__fadd_rn(to_f(proj[row * ld_proj + dt_off + h]), dt_bias[h]));
+            if ((flags & M2_FLAG_DT_LIMIT) && dt == dt) dt = fminf(fmaxf(dt, dt_min), dt_max);
+            const float acs = __fadd_rn(0.0f, __fmul_rn(dt, a_neg[h]));
+            float cb = 0.0f;
+            for (int n = 0; n < ds; n++) cb = __fmaf_rn(to_f(cv[n]), to_f(bv[n]), cb);
+            const float e0 = m2_exp(fminf(__fsub_rn(acs, acs), 0.0f));
+            out[i * 3] = m2_exp(acs);
+            out[i * 3 + 1] = __fmul_rn(__fmul_rn(cb, e0), dt);
+            out[i * 3 + 2] = __fmul_rn(e0, dt);
+        }
+    }
 }
 
 #define DEFINE_M2S_SCALARS(NAME, T)                                             \
@@ -2872,24 +2890,27 @@ extern "C" __global__ void m2b_reduce_rows(
 }
 
 // dB and dC of the sequential path into the B and C columns of dxbc: the
-// group's heads summed ascending. Grid 1-D over rows * G * N * 2.
+// group's heads summed ascending. Grid (rows, 2 G) launched in runs of
+// 2 G: a block's y threads take rows, strided by the grid, of the B or C
+// columns of one group, its x threads the state indices.
 extern "C" __global__ void m2s_bc_groups(
     float* __restrict__ dxbc,
     const float* __restrict__ db_h, const float* __restrict__ dc_h,
-    long long rows, int nh, int ng, int ds, long long ld_xbc, int b_col, int c_col
+    long long rows, int nh, int ng, int ds, long long ld_xbc, int b_col, int c_col,
+    int y_first /* this run's first y block */
 ) {
-    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    const long long per = (long long)ng * ds;
-    if (i >= rows * per * 2) return;
-    const int which = (int)(i / (rows * per));
-    const long long k = i % (rows * per);
-    const long long row = k / per;
-    const int g = (int)((k % per) / ds);
-    const int n = (int)(k % ds);
+    const int y = y_first + blockIdx.y;
+    const int which = y >= ng;
+    const int g = which ? y - ng : y;
     const float* src = which ? dc_h : db_h;
     const int hpg = nh / ng;
-    float acc = 0.0f;
-    for (int j = 0; j < hpg; j++)
-        acc = __fadd_rn(acc, src[(row * nh + g * hpg + j) * ds + n]);
-    dxbc[row * ld_xbc + (which ? c_col : b_col) + (long long)g * ds + n] = acc;
+    for (long long row = (long long)blockIdx.x * blockDim.y + threadIdx.y; row < rows;
+         row += (long long)gridDim.x * blockDim.y) {
+        for (int n = threadIdx.x; n < ds; n += blockDim.x) {
+            float acc = 0.0f;
+            for (int j = 0; j < hpg; j++)
+                acc = __fadd_rn(acc, src[(row * nh + g * hpg + j) * ds + n]);
+            dxbc[row * ld_xbc + (which ? c_col : b_col) + (long long)g * ds + n] = acc;
+        }
+    }
 }

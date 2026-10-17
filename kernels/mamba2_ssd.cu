@@ -21,12 +21,14 @@
 
 #define M2_CHUNK 64
 
-// The conv over the window and the conv state after it. One thread per
-// (row, channel): v = bias + sum_k w[c][k] x[t - W + 1 + k][c], the taps
+// The conv over the window and the conv state after it. Per (row,
+// channel): v = bias + sum_k w[c][k] x[t - W + 1 + k][c], the taps
 // before the window read from the carried state (`state[b][c][k]`, the last
 // d_conv inputs, newest last); out = silu(v). In a packed row (`seq_idx`,
 // see _varlen.cuh) a tap of another sequence reads 0, the empty history a
-// sequence starts from. Grid 1-D over B * T * conv_dim.
+// sequence starts from. Grid (steps, B) launched in runs of B: a block's
+// y threads take steps, its x threads the channels, and no index is
+// divided.
 #define DEFINE_M2_CONV_PREFILL(NAME, TI, FROM_F)                               \
 extern "C" __global__ void NAME(                                               \
     TI* __restrict__ out,                                                      \
@@ -34,26 +36,26 @@ extern "C" __global__ void NAME(                                               \
     const TI* __restrict__ proj, long long ld_proj, int xbc_col,               \
     const float* __restrict__ w, const float* __restrict__ bias,               \
     int batch, int seq, int conv_dim, int d_conv,                              \
+    int y_first, /* this run's first y block */                                \
     const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;            \
-    long long total = (long long)batch * seq * conv_dim;                       \
-    if (i >= total) return;                                                    \
-    const int c = (int)(i % conv_dim);                                         \
-    const long long row = i / conv_dim;                                        \
-    const int t = (int)(row % seq);                                            \
-    const int b = (int)(row / seq);                                            \
+    const int t = blockIdx.x * blockDim.y + threadIdx.y;                       \
+    const long long b = y_first + blockIdx.y;                                  \
+    if (b >= batch || t >= seq) return;                                        \
     const int sid = vl_id(seq_idx, b, seq, t);                                 \
-    float v = bias[c];                                                         \
-    for (int k = 0; k < d_conv; k++) {                                         \
-        int src = t - (d_conv - 1) + k;                                        \
-        float xv = src >= 0                                                    \
-            ? to_f(proj[((long long)b * seq + src) * ld_proj + xbc_col + c])   \
-            : state[((long long)b * conv_dim + c) * d_conv + d_conv + src];    \
-        if (vl_id(seq_idx, b, seq, src) != sid) xv = 0.0f;                     \
-        v = __fmaf_rn(w[(long long)c * d_conv + k], xv, v);                    \
+    const long long row = b * seq + t;                                         \
+    for (int c = threadIdx.x; c < conv_dim; c += blockDim.x) {                 \
+        float v = bias[c];                                                     \
+        for (int k = 0; k < d_conv; k++) {                                     \
+            int src = t - (d_conv - 1) + k;                                    \
+            float xv = src >= 0                                                \
+                ? to_f(proj[(b * seq + src) * ld_proj + xbc_col + c])          \
+                : state[(b * conv_dim + c) * d_conv + d_conv + src];           \
+            if (vl_id(seq_idx, b, seq, src) != sid) xv = 0.0f;                 \
+            v = __fmaf_rn(w[(long long)c * d_conv + k], xv, v);                \
+        }                                                                      \
+        out[row * conv_dim + c] = FROM_F(m2_silu(v));                          \
     }                                                                          \
-    out[i] = FROM_F(m2_silu(v));                                               \
 }
 
 DEFINE_M2_CONV_PREFILL(m2_conv_prefill, float, from_f_f32)
@@ -62,8 +64,8 @@ DEFINE_M2_CONV_PREFILL(m2_conv_prefill_f16, __half, from_f_f16)
 
 // The decode's conv: one token, the window state `[b][c][k]` shifted and
 // the new input appended, then the prefill's chain, bias first and taps
-// oldest first, so a decode continues a prefill bit for bit. Grid 1-D over
-// B * conv_dim.
+// oldest first, so a decode continues a prefill bit for bit. A block's y
+// threads take sequences, its x threads the channels.
 #define DEFINE_M2_CONV_STEP(NAME, TI, FROM_F)                                  \
 extern "C" __global__ void NAME(                                               \
     TI* __restrict__ out,                                                      \
@@ -72,17 +74,17 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ w, const float* __restrict__ bias,               \
     int batch, int conv_dim, int d_conv                                        \
 ) {                                                                            \
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;            \
-    if (i >= (long long)batch * conv_dim) return;                              \
-    const int c = (int)(i % conv_dim);                                         \
-    const long long b = i / conv_dim;                                          \
-    float* st = state + (b * conv_dim + c) * d_conv;                           \
-    for (int k = 0; k + 1 < d_conv; k++) st[k] = st[k + 1];                    \
-    st[d_conv - 1] = to_f(proj[b * ld_proj + xbc_col + c]);                    \
-    float v = bias[c];                                                         \
-    for (int k = 0; k < d_conv; k++)                                           \
-        v = __fmaf_rn(w[(long long)c * d_conv + k], st[k], v);                 \
-    out[b * conv_dim + c] = FROM_F(m2_silu(v));                                \
+    const long long b = (long long)blockIdx.x * blockDim.y + threadIdx.y;      \
+    if (b >= batch) return;                                                    \
+    for (int c = threadIdx.x; c < conv_dim; c += blockDim.x) {                 \
+        float* st = state + (b * conv_dim + c) * d_conv;                       \
+        for (int k = 0; k + 1 < d_conv; k++) st[k] = st[k + 1];                \
+        st[d_conv - 1] = to_f(proj[b * ld_proj + xbc_col + c]);                \
+        float v = bias[c];                                                     \
+        for (int k = 0; k < d_conv; k++)                                       \
+            v = __fmaf_rn(w[(long long)c * d_conv + k], st[k], v);             \
+        out[b * conv_dim + c] = FROM_F(m2_silu(v));                            \
+    }                                                                          \
 }
 
 DEFINE_M2_CONV_STEP(m2_conv_step, float, from_f_f32)
@@ -92,8 +94,8 @@ DEFINE_M2_CONV_STEP(m2_conv_step_f16, __half, from_f_f16)
 // The conv state after the window: the last d_conv raw inputs, from the
 // window or, for a window shorter than that, the previous state; in a
 // packed row only those of the last sequence, the rest 0. Writes a separate
-// buffer (the prefill conv above still reads the old state). Grid 1-D over
-// B * conv_dim.
+// buffer (the prefill conv above still reads the old state). A block's y
+// threads take sequences, its x threads the channels.
 #define DEFINE_M2_CONV_STATE(NAME, TI)                                         \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ new_state,                                             \
@@ -102,18 +104,18 @@ extern "C" __global__ void NAME(                                               \
     int batch, int seq, int conv_dim, int d_conv,                              \
     const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;            \
-    if (i >= (long long)batch * conv_dim) return;                              \
-    const int c = (int)(i % conv_dim);                                         \
-    const int b = (int)(i / conv_dim);                                         \
+    const long long b = (long long)blockIdx.x * blockDim.y + threadIdx.y;      \
+    if (b >= batch) return;                                                    \
     const int last = vl_id(seq_idx, b, seq, seq - 1);                          \
-    for (int k = 0; k < d_conv; k++) {                                         \
-        int src = seq - d_conv + k;                                            \
-        float xv = src >= 0                                                    \
-            ? to_f(proj[((long long)b * seq + src) * ld_proj + xbc_col + c])   \
-            : state[((long long)b * conv_dim + c) * d_conv + d_conv + src];    \
-        if (vl_id(seq_idx, b, seq, src) != last) xv = 0.0f;                    \
-        new_state[((long long)b * conv_dim + c) * d_conv + k] = xv;            \
+    for (int c = threadIdx.x; c < conv_dim; c += blockDim.x) {                 \
+        for (int k = 0; k < d_conv; k++) {                                     \
+            int src = seq - d_conv + k;                                        \
+            float xv = src >= 0                                                \
+                ? to_f(proj[(b * seq + src) * ld_proj + xbc_col + c])          \
+                : state[(b * conv_dim + c) * d_conv + d_conv + src];           \
+            if (vl_id(seq_idx, b, seq, src) != last) xv = 0.0f;                \
+            new_state[(b * conv_dim + c) * d_conv + k] = xv;                   \
+        }                                                                      \
     }                                                                          \
 }
 

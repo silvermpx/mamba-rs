@@ -35,7 +35,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d_cover, launch_elems, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_rows, grid_steps, launch_elems, y_runs, yz_runs};
 use crate::gpu::train::RowSource;
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
@@ -371,7 +371,7 @@ impl M2Exec<'_> {
             bld.arg(&z_off);
             bld.arg(&rows_l);
             bld.arg(&d_ssm_i);
-            unsafe { bld.launch(grid_1d_cover(rows * d_ssm)?) }
+            unsafe { bld.launch(grid_rows(rows, d_ssm)) }
                 .map_err(|e| format!("Mamba-2 gate: {e:?}"))?;
         }
         if d_mlp > 0 {
@@ -383,7 +383,7 @@ impl M2Exec<'_> {
             bld.arg(&ld_proj);
             bld.arg(&rows_l);
             bld.arg(&d_mlp_i);
-            unsafe { bld.launch(grid_1d_cover(rows * d_mlp)?) }
+            unsafe { bld.launch(grid_rows(rows, d_mlp)) }
                 .map_err(|e| format!("Mamba-2 inner MLP: {e:?}"))?;
         }
         let t = |ptr| TypedPtr {
@@ -488,7 +488,6 @@ impl M2Exec<'_> {
         (b, t_len, chunked): (usize, usize, bool),
     ) -> Result<(), String> {
         let c = self.cfg;
-        let rows = b * t_len;
         let nc = t_len.div_ceil(CHUNK);
         let (ip, cd) = (c.in_proj_out_dim(), c.conv_dim());
         let (d_mlp, d_ssm, nh, hd, ds, ng) = (
@@ -538,23 +537,29 @@ impl M2Exec<'_> {
             Ok::<(), String>(())
         };
         let (cw, cbias) = (lw.conv_w, lw.conv_b);
-        launch(grid_1d_cover(rows * cd)?, "conv", l, &|g| unsafe {
-            let mut bld = stream.launch_builder(self.kernels.conv_prefill.get(self.act));
-            bld.arg(&xbc);
-            bld.arg(&conv);
-            bld.arg(&proj);
-            bld.arg(&ld_proj);
-            bld.arg(&xbc_col_i);
-            bld.arg(&cw);
-            bld.arg(&cbias);
-            bld.arg(&b_i);
-            bld.arg(&t_i);
-            bld.arg(&cd_i);
-            bld.arg(&dconv_i);
-            bld.arg(&seq_idx);
-            bld.launch(g).map(|_| ())
-        })?;
-        launch(grid_1d_cover(b * cd)?, "conv state", l, &|g| unsafe {
+        launch_runs(
+            grid_steps(b, t_len, cd)?,
+            "conv",
+            l,
+            &|g, y_first, _| unsafe {
+                let mut bld = stream.launch_builder(self.kernels.conv_prefill.get(self.act));
+                bld.arg(&xbc);
+                bld.arg(&conv);
+                bld.arg(&proj);
+                bld.arg(&ld_proj);
+                bld.arg(&xbc_col_i);
+                bld.arg(&cw);
+                bld.arg(&cbias);
+                bld.arg(&b_i);
+                bld.arg(&t_i);
+                bld.arg(&cd_i);
+                bld.arg(&dconv_i);
+                bld.arg(&y_first);
+                bld.arg(&seq_idx);
+                bld.launch(g).map(|_| ())
+            },
+        )?;
+        launch(grid_rows(b, cd), "conv state", l, &|g| unsafe {
             let mut bld = stream.launch_builder(self.kernels.conv_state.get(self.act));
             bld.arg(&conv_next);
             bld.arg(&conv);
@@ -1311,7 +1316,7 @@ impl Mamba2GpuEngine {
                 bld.arg(&b_i);
                 bld.arg(&cd_i);
                 bld.arg(&dconv_i);
-                unsafe { bld.launch(grid_1d_cover(b * cd)?) }
+                unsafe { bld.launch(grid_rows(b, cd)) }
                     .map_err(|e| format!("Mamba-2 conv step L{l}: {e:?}"))?;
             }
             let y = scratch.y.cached_ptr();

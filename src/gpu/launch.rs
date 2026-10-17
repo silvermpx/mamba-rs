@@ -228,6 +228,52 @@ pub(crate) fn blocks_1d(n: usize) -> Result<u32, String> {
         .ok_or_else(|| format!("{n} threads need {blocks} blocks, past the grid's x extent"))
 }
 
+/// The block of a row kernel, whose x threads take a row's `cols` columns
+/// and whose y threads take rows: at most [`BLOCK_1D`] threads, the columns
+/// in the fewest passes of at most that many threads, as even as they
+/// split, and the rows filling what is left of the block. Narrow rows share
+/// the block's warps rather than leave their lanes idle: a block holds
+/// from 129 to 256 threads, so its warps run at least 80% full.
+pub fn row_block(cols: usize) -> (u32, u32) {
+    let block = BLOCK_1D as usize;
+    let cols = cols.max(1);
+    let x = cols.div_ceil(cols.div_ceil(block));
+    (x as u32, (block / x) as u32)
+}
+
+/// Launch config of a row kernel over `rows` rows of `cols` columns:
+/// [`row_block`]'s block and a block for every `y` rows, within the grid's
+/// x extent. The kernels stride their rows by the grid, so rows past that
+/// extent run too, and they divide no index.
+pub fn grid_rows(rows: usize, cols: usize) -> LaunchConfig {
+    let (x, y) = row_block(cols);
+    let blocks = rows.div_ceil(y as usize).clamp(1, i32::MAX as usize);
+    LaunchConfig {
+        grid_dim: (blocks as u32, 1, 1),
+        block_dim: (x, y, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
+/// Launch config of a step kernel over `batch` sequences of `seq` steps of
+/// `cols` columns: [`row_block`]'s block over the steps, the sequences on
+/// the y axis, launched through [`y_runs`]. A step kernel does not stride,
+/// so steps that would pass the grid's x extent are refused.
+pub fn grid_steps(batch: usize, seq: usize, cols: usize) -> Result<LaunchConfig, String> {
+    let (x, y) = row_block(cols);
+    let blocks = u32::try_from(seq.div_ceil(y as usize).max(1))
+        .ok()
+        .filter(|&b| b <= i32::MAX as u32)
+        .ok_or_else(|| format!("{seq} steps are past the grid's x extent"))?;
+    let batch =
+        u32::try_from(batch.max(1)).map_err(|_| format!("{batch} sequences are past u32"))?;
+    Ok(LaunchConfig {
+        grid_dim: (blocks, batch, 1),
+        block_dim: (x, y, 1),
+        shared_mem_bytes: 0,
+    })
+}
+
 /// The extent of the grid's y and z axes, in blocks.
 pub const GRID_YZ_EXTENT: u32 = 65535;
 
@@ -877,6 +923,47 @@ mod tests {
 
     /// The runs of an axis cover it in order, each within the extent; an
     /// axis that fits is one run, a longer one ends in a partial run.
+    #[test]
+    fn a_row_block_fills_its_warps_and_covers_its_columns() {
+        for cols in 1..=4096usize {
+            let (x, y) = row_block(cols);
+            let (x, y) = (x as usize, y as usize);
+            let threads = x * y;
+            assert!(
+                (129..=256).contains(&threads),
+                "cols {cols}: {threads} threads"
+            );
+            let lanes = threads.div_ceil(32) * 32;
+            assert!(
+                5 * threads >= 4 * lanes,
+                "cols {cols}: {threads} of {lanes} lanes"
+            );
+            let passes = cols.div_ceil(x);
+            assert_eq!(passes, cols.div_ceil(256), "cols {cols}: {passes} passes");
+            assert!(passes * x - cols < passes, "cols {cols}: x {x}");
+        }
+    }
+
+    #[test]
+    fn the_row_and_step_grids_cover_their_rows() {
+        for (rows, cols) in [(1, 1), (7, 3), (1000, 48), (4097, 1536), (65536, 8)] {
+            let cfg = grid_rows(rows, cols);
+            let y = cfg.block_dim.1 as usize;
+            assert!(cfg.grid_dim.0 as usize * y >= rows, "{rows} x {cols}");
+            assert!(
+                (cfg.grid_dim.0 as usize - 1) * y < rows.max(1),
+                "{rows} x {cols}"
+            );
+            let steps = grid_steps(3, rows, cols).unwrap();
+            assert_eq!(steps.grid_dim.0, cfg.grid_dim.0);
+            assert_eq!(steps.grid_dim.1, 3);
+            assert_eq!(steps.block_dim, cfg.block_dim);
+        }
+        let past = grid_rows(usize::MAX / 2, 1);
+        assert_eq!(past.grid_dim.0, i32::MAX as u32);
+        assert!(grid_steps(1, (i32::MAX as usize + 1) * 256, 256).is_err());
+    }
+
     #[test]
     fn the_runs_of_an_axis_cover_it_within_the_extent() {
         let cfg = |y: u32, z: u32| LaunchConfig {

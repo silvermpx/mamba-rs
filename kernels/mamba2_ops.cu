@@ -545,7 +545,8 @@ DEFINE_M2_GATED_NORM_STREAM(m2_gated_norm_fwd_stream_bf16, __nv_bfloat16, __nv_b
 DEFINE_M2_GATED_NORM_STREAM(m2_gated_norm_fwd_stream_f16, __half, __half, from_f_f16)
 
 // The gate without a norm (rmsnorm off) when the scan did not apply it:
-// out = y silu(z), written at out_col. Grid 1-D over rows * d_ssm.
+// out = y silu(z), written at out_col. A block's y threads take rows,
+// strided by the grid, its x threads the channels: no index is divided.
 #define DEFINE_M2_GATE_ONLY(NAME, TI, TO, FROM_F)                              \
 extern "C" __global__ void NAME(                                               \
     TO* __restrict__ out, long long ld_out, int out_col,                       \
@@ -553,12 +554,14 @@ extern "C" __global__ void NAME(                                               \
     const TI* __restrict__ proj, long long ld_proj, int z_off,                 \
     long long rows, int d_ssm                                                  \
 ) {                                                                            \
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;            \
-    if (i >= rows * d_ssm) return;                                             \
-    long long r = i / d_ssm;                                                   \
-    long long c = i - r * d_ssm;                                               \
-    float zv = to_f(proj[r * ld_proj + z_off + c]);                            \
-    out[r * ld_out + out_col + c] = FROM_F(__fmul_rn(y[i], m2_silu(zv)));      \
+    for (long long r = (long long)blockIdx.x * blockDim.y + threadIdx.y;       \
+         r < rows; r += (long long)gridDim.x * blockDim.y) {                   \
+        for (int c = threadIdx.x; c < d_ssm; c += blockDim.x) {                \
+            float zv = to_f(proj[r * ld_proj + z_off + c]);                    \
+            out[r * ld_out + out_col + c] =                                    \
+                FROM_F(__fmul_rn(y[r * d_ssm + c], m2_silu(zv)));              \
+        }                                                                      \
+    }                                                                          \
 }
 
 DEFINE_M2_GATE_ONLY(m2_gate_only_fwd, float, float, from_f_f32)
@@ -566,20 +569,22 @@ DEFINE_M2_GATE_ONLY(m2_gate_only_fwd_bf16, __nv_bfloat16, __nv_bfloat16, from_f_
 DEFINE_M2_GATE_ONLY(m2_gate_only_fwd_f16, __half, __half, from_f_f16)
 
 // The mixer's inner MLP, the first d_mlp output columns:
-// out[r, j] = silu(z0[r, j]) x0[r, j]. Grid 1-D over rows * d_mlp.
+// out[r, j] = silu(z0[r, j]) x0[r, j]. A block's y threads take rows,
+// strided by the grid, its x threads the columns.
 #define DEFINE_M2_MLP_GATE(NAME, TI, TO, FROM_F)                               \
 extern "C" __global__ void NAME(                                               \
     TO* __restrict__ out, long long ld_out,                                    \
     const TI* __restrict__ proj, long long ld_proj,                            \
     long long rows, int d_mlp                                                  \
 ) {                                                                            \
-    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;            \
-    if (i >= rows * d_mlp) return;                                             \
-    long long r = i / d_mlp;                                                   \
-    long long j = i - r * d_mlp;                                               \
-    float z0 = to_f(proj[r * ld_proj + j]);                                    \
-    float x0 = to_f(proj[r * ld_proj + d_mlp + j]);                            \
-    out[r * ld_out + j] = FROM_F(__fmul_rn(m2_silu(z0), x0));                  \
+    for (long long r = (long long)blockIdx.x * blockDim.y + threadIdx.y;       \
+         r < rows; r += (long long)gridDim.x * blockDim.y) {                   \
+        for (int j = threadIdx.x; j < d_mlp; j += blockDim.x) {                \
+            float z0 = to_f(proj[r * ld_proj + j]);                            \
+            float x0 = to_f(proj[r * ld_proj + d_mlp + j]);                    \
+            out[r * ld_out + j] = FROM_F(__fmul_rn(m2_silu(z0), x0));          \
+        }                                                                      \
+    }                                                                          \
 }
 
 DEFINE_M2_MLP_GATE(m2_mlp_gate_fwd, float, float, from_f_f32)

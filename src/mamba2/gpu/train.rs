@@ -64,7 +64,9 @@ use crate::gpu::device::GpuDevice;
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
 use crate::gpu::kernel_identity::PreparedGemmCaptureManifest;
-use crate::gpu::launch::{grid_1d, grid_1d_cover, grid_colsum, launch_cast, y_runs};
+use crate::gpu::launch::{
+    grid_1d, grid_1d_cover, grid_colsum, grid_rows, grid_steps, launch_cast, y_runs,
+};
 use crate::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -2372,7 +2374,7 @@ impl Mamba2GpuTrainer {
             let d_ssm_i = d_ssm as i32;
             go!(
                 k.gate_only.get(act),
-                grid_1d_cover(rows * d_ssm)?,
+                grid_rows(rows, d_ssm),
                 "gate",
                 [
                     dy, d_proj, ld_proj, z_off, d_gated, ld_out, out_col, y, proj, rows_l, d_ssm_i
@@ -2383,7 +2385,7 @@ impl Mamba2GpuTrainer {
             let d_mlp_i = d_mlp as i32;
             go!(
                 k.mlp_gate.get(act),
-                grid_1d_cover(rows * d_mlp)?,
+                grid_rows(rows, d_mlp),
                 "inner MLP",
                 [d_proj, ld_proj, d_gated, ld_out, proj, rows_l, d_mlp_i]
             );
@@ -2640,7 +2642,7 @@ impl Mamba2GpuTrainer {
             if self.seq_bwd != SeqBwdRoute::Shared {
                 go!(
                     k.seq_scalars.get(act),
-                    grid_1d_cover(rows * nh)?,
+                    grid_rows(rows, nh),
                     "sequential step scalars",
                     [
                         scal, xbc, proj, ld_proj, dt_off, dt_bias, a_neg, rows_l, nh_i, ng_i, hd_i,
@@ -2780,10 +2782,13 @@ impl Mamba2GpuTrainer {
                     );
                 }
             }
-            let n = rows * ng * ds * 2;
-            go!(
+            let bc = grid_rows(rows, ds);
+            go_y!(
                 &k.seq_bc_groups,
-                grid_1d_cover(n)?,
+                LaunchConfig {
+                    grid_dim: (bc.grid_dim.0, 2 * ng as u32, 1),
+                    ..bc
+                },
                 "B and C groups",
                 [
                     dxbc, db_h, dc_h, rows_l, nh_i, ng_i, ds_i, ld_xbc, b_col, c_col
@@ -2813,22 +2818,22 @@ impl Mamba2GpuTrainer {
             let conv0 = a.conv0.cached_ptr();
             let (cw, cbias) = (lp.conv_w, lp.conv_b);
             let (xbc_col_i, cd_i, dconv_i) = (xbc_col as i32, cd as i32, c.d_conv as i32);
-            go!(
+            let steps = grid_steps(b, t_len, cd)?;
+            go_y!(
                 k.conv_dv.get(act),
-                grid_1d_cover(rows * cd)?,
+                steps,
                 "conv dv",
                 [
-                    dv, dxbc, conv0, proj, ld_proj, xbc_col_i, cw, cbias, b_i, t_i, cd_i, dconv_i,
-                    seq_idx
-                ]
+                    dv, dxbc, conv0, proj, ld_proj, xbc_col_i, cw, cbias, b_i, t_i, cd_i, dconv_i
+                ],
+                [seq_idx]
             );
-            go!(
+            go_y!(
                 k.conv_dx.get(act),
-                grid_1d_cover(rows * cd)?,
+                steps,
                 "conv dx",
-                [
-                    d_proj, ld_proj, xbc_col_i, dv, cw, b_i, t_i, cd_i, dconv_i, seq_idx
-                ]
+                [d_proj, ld_proj, xbc_col_i, dv, cw, b_i, t_i, cd_i, dconv_i],
+                [seq_idx]
             );
             let g_w = at(g_base, ls.conv_w);
             let g_b = opt_at(g_base, ls.conv_b).unwrap_or(0);

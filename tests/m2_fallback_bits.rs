@@ -30,7 +30,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::launch::{y_runs, yz_runs};
+use mamba_rs::gpu::launch::{grid_rows, y_runs, yz_runs};
 use mamba_rs::mamba2::gpu::kernels::{
     BC_TILES_SMEM_BYTES, CHUNK, CHUNK_SCAN_TILES_SMEM_BYTES, CHUNK_SCAN_TT, DX_GROUP_CHANNELS,
     DX_GROUPS_SMEM_BYTES, Mamba2Kernels, PAIRS_TILES_SMEM_BYTES, chunk_state_geom, dx_tiles_geom,
@@ -1168,11 +1168,7 @@ fn m2_sequential_backward_global_is_the_shared_kernel() {
                         }
                         b.arg(&lo);
                         b.arg(&hi);
-                        let cfg = LaunchConfig {
-                            grid_dim: ((rows * nh).div_ceil(256) as u32, 1, 1),
-                            block_dim: (256, 1, 1),
-                            shared_mem_bytes: 0,
-                        };
+                        let cfg = grid_rows(rows, nh);
                         unsafe { b.launch(cfg) }.unwrap();
                     }
                     let kernel = if global.is_some() {
