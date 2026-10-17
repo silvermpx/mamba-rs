@@ -214,20 +214,40 @@ fn m1_step_keeps_the_bits_of_its_released_form() {
 /// The Mamba-1 sequential kernels give a channel a warp segment of lanes,
 /// each holding a slice of at most 16 states, and hand the output chains
 /// from lane to lane. Against the released kernels, which held a channel's
-/// whole state in one thread and are frozen and compiled at the largest
-/// capacity: states inside one lane, on a lane's edge, with an idle last
-/// lane and up to 256; a step, a few and more than a lane's rounds; f32,
-/// bf16 and f16 and both index widths; every output of the forward with
-/// and without saves (the latter gated and not) and of both backwards, bit
-/// for bit.
+/// whole state in one thread and are frozen: at state capacities on both
+/// sides of the widest state loop the compiler unrolls whole on some
+/// targets, past which the released walk rounds the other product of its
+/// first d_u add; states inside one lane, on a lane's edge, with an idle
+/// last lane and up to 256; a step, a few and more than a lane's rounds;
+/// f32, bf16 and f16 and both index widths; every output of the forward
+/// with and without saves (the latter gated and not) and of both
+/// backwards, bit for bit.
 #[test]
 fn m1_sequential_kernels_keep_the_bits_of_their_released_form() {
     let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new_with_state_cap(&dev, 256).unwrap();
+    let mut cases = 0;
+    for (cap, sizes) in [
+        (16, &[1usize, 15, 16][..]),
+        (64, &[49, 64][..]),
+        (80, &[65, 80][..]),
+        (
+            256,
+            &[1, 15, 16, 17, 33, 48, 64, 65, 100, 129, 200, 256][..],
+        ),
+    ] {
+        cases += released_sequential_bits(&dev, cap, sizes);
+    }
+    eprintln!("m1 sequential kernels: the released kernels' bits on {cases} cases");
+}
+
+/// One capacity of the test above: the released and the new kernels
+/// compiled at `cap`, over the states `sizes`; the cases it ran.
+fn released_sequential_bits(dev: &GpuDevice, cap: usize, sizes: &[usize]) -> usize {
+    let ctx = GpuCtx::new_with_state_cap(dev, cap).unwrap();
     let frozen = frozen_kernels::frozen_module(
         dev.context(),
         arch::arch0(),
-        Some(256),
+        Some(cap),
         include_str!("fixtures/m1_seq_reference.cu"),
     );
     let (batch, di) = (2usize, 24usize);
@@ -268,7 +288,7 @@ fn m1_sequential_kernels_keep_the_bits_of_their_released_form() {
         ctx.stream.synchronize().unwrap();
     };
     let mut cases = 0;
-    for ds in [1usize, 15, 16, 17, 33, 48, 64, 65, 100, 129, 200, 256] {
+    for ds in sizes.iter().copied() {
         let lanes = mamba_rs::gpu::launch::seq_lanes(ds);
         let a_neg: Vec<f32> = det(di * ds, 0x71)
             .iter()
@@ -340,8 +360,9 @@ fn m1_sequential_kernels_keep_the_bits_of_their_released_form() {
                             &new_dims,
                             batch * di * lanes,
                         );
-                        let what =
-                            format!("{dt:?} {width:?} d_state {ds} T {t} gate {gate_stride}");
+                        let what = format!(
+                            "{dt:?} {width:?} cap {cap} d_state {ds} T {t} gate {gate_stride}"
+                        );
                         assert!(want.0 == got.0, "forward without saves, states: {what}");
                         assert!(want.1 == got.1, "forward without saves, outputs: {what}");
                     }
@@ -377,7 +398,7 @@ fn m1_sequential_kernels_keep_the_bits_of_their_released_form() {
                         &new_dims,
                         batch * di * lanes,
                     );
-                    let what = format!("{dt:?} {width:?} d_state {ds} T {t}");
+                    let what = format!("{dt:?} {width:?} cap {cap} d_state {ds} T {t}");
                     assert!(want == got, "saving forward: {what}");
                     let tape = f32_buf(&tape0);
                     let backward = |f: &CudaFunction, ints: &[i32], threads: usize| {
@@ -438,7 +459,7 @@ fn m1_sequential_kernels_keep_the_bits_of_their_released_form() {
             }
         }
     }
-    eprintln!("m1 sequential kernels: the released kernels' bits on {cases} cases");
+    cases
 }
 
 #[test]

@@ -325,14 +325,33 @@ DEFINE_SSM_BURNIN(ssm_burnin_forward_f16_i64, long long, __half, from_f_f16)
 //
 // Source: CPU reference: train/forward.rs phase B3
 // FIX C2: no atomicAdd, local accumulation + reduction
+// The skip product dy * D and a channel's first state term (d_h delta) B
+// meet in one fused add, so one of the two products is rounded before it.
+// The whole-state walk left that choice to the compiler, and the choice
+// follows the shape of the walk's state loop: unrolled whole, the two
+// products meet in one block and the state term is rounded; kept a loop,
+// the add takes the skip product as the loop's carried value and rounds
+// that. NVRTC unrolls the loop whole at every capacity below compute
+// capability 10.0 and up to 64 states from 10.0 on. Both shapes are spelled
+// out here, so the lane walk's d_u keeps the whole-state walk's bits on
+// every target and capacity.
+__device__ __forceinline__ float m1_du_first(float dy, float D, float p, float B) {
+#if __CUDA_ARCH__ >= 1000 && MAMBA_RS_STATE_CAP > 64
+    return __fmaf_rn(p, B, __fmul_rn(dy, D));
+#else
+    return __fmaf_rn(dy, D, __fmul_rn(p, B));
+#endif
+}
+
 // One lane's slice of a backward step: the whole-state walk's state loop
 // over the lane's states, the d_u and d_delta chains carried in d_u_val and
-// d_delta_val. The guard holds from state GUARD_FROM on, so a caller that
-// knows the lane's first state exists runs it unguarded.
-#define M1_BWD_SLICE(IDX, GUARD_FROM)                                          \
+// d_delta_val. FIRST is 1 on a channel's first lane: its first state always
+// exists, so it runs unguarded, and it starts the d_u chain with the skip
+// product.
+#define M1_BWD_SLICE(IDX, FIRST)                                               \
     _Pragma("unroll")                                                          \
     for (int n = 0; n < M1_SEQ_SLICE; n++)                                     \
-        if (n >= (GUARD_FROM) && n >= len) break; else {                       \
+        if (n >= (FIRST) && n >= len) break; else {                            \
         float h_curr = h_carry[n];                                             \
         float da = exp2f(delta_d * a_local[n] * LOG2E);                        \
         d_h[n] += dy_d * C_saved[bt_ds + n];                                   \
@@ -341,7 +360,11 @@ DEFINE_SSM_BURNIN(ssm_burnin_forward_f16_i64, long long, __half, from_f_f16)
         IDX h_prev_idx = ((b * (T + 1) + t) * d_inner + d) * d_state + n0 + n; \
         float h_prev = h_saved[h_prev_idx];                                    \
         d_delta_val += d_h[n] * (a_local[n] * da * h_prev + u_d * B_saved[bt_ds + n]); \
-        d_u_val += d_h[n] * delta_d * B_saved[bt_ds + n];                      \
+        if ((FIRST) && n == 0)                                                 \
+            d_u_val = m1_du_first(dy_d, D[d], d_h[n] * delta_d,                \
+                                  B_saved[bt_ds + n]);                         \
+        else                                                                   \
+            d_u_val += d_h[n] * delta_d * B_saved[bt_ds + n];                  \
         d_B_local[btdn] = d_h[n] * delta_d * u_d;                              \
         d_a_acc[n] += d_h[n] * da * delta_d * a_local[n] * h_prev;             \
         d_h[n] = da * d_h[n];                                                  \
@@ -404,16 +427,13 @@ extern "C" __global__ void NAME(                                               \
         IDX bt_ds = (b * T + t) * d_state + n0;                                \
         float dy_d, delta_d, u_d, d_u_val, d_delta_val;                        \
         /* Each branch runs the slice loop itself, the first lane with its */  \
-        /* first state unguarded (a live channel has one): its d_u chain */    \
-        /* then starts from the skip product in the block of that state, */    \
-        /* as the whole-state walk's did, and the compiler fuses the */        \
-        /* state's add the same way. */                                        \
+        /* first state unguarded (a live channel has one), the state that */   \
+        /* starts the d_u chain with the skip product. */                      \
         if (k == 0) {                                                          \
             dy_d = dy[bt_di];                                                  \
             delta_d = delta_saved[bt_di];                                      \
             u_d = u_saved[bt_di];                                              \
             local_d_D += dy_d * u_d;                                           \
-            d_u_val = dy_d * D[d];                                             \
             d_delta_val = 0.0f;                                                \
             M1_BWD_SLICE(IDX, 1)                                               \
         } else {                                                               \
@@ -462,10 +482,10 @@ DEFINE_SSM_BACKWARD_LOCAL(ssm_backward_local_i64, long long)
 // Math identical to f32 ssm_backward_local above; only IO dtype differs.
 // The typed twin of M1_BWD_SLICE, its rows promoted on load and its
 // per-state gradients rounded on store.
-#define M1_BWD_SLICE_TYPED(IDX, FROM_F, GUARD_FROM)                            \
+#define M1_BWD_SLICE_TYPED(IDX, FROM_F, FIRST)                                 \
     _Pragma("unroll")                                                          \
     for (int n = 0; n < M1_SEQ_SLICE; n++)                                     \
-        if (n >= (GUARD_FROM) && n >= len) break; else {                       \
+        if (n >= (FIRST) && n >= len) break; else {                            \
         IDX h_prev_idx =                                                       \
             ((b * (T + 1) + t) * d_inner + d) * d_state + n0 + n;              \
         float h_curr = h_carry[n];                                             \
@@ -477,7 +497,10 @@ DEFINE_SSM_BACKWARD_LOCAL(ssm_backward_local_i64, long long)
         IDX btdn = ((b * T + t) * d_inner + d) * d_state + n0 + n;             \
         d_C_local[btdn] = FROM_F(dy_d * h_curr);                               \
         d_delta_val += d_h[n] * (a_local[n] * da * h_prev + u_d * B_n);        \
-        d_u_val     += d_h[n] * delta_d * B_n;                                 \
+        if ((FIRST) && n == 0)                                                 \
+            d_u_val = m1_du_first(dy_d, D[d], d_h[n] * delta_d, B_n);          \
+        else                                                                   \
+            d_u_val += d_h[n] * delta_d * B_n;                                 \
         d_B_local[btdn] = FROM_F(d_h[n] * delta_d * u_d);                      \
         d_a_acc[n] += d_h[n] * da * delta_d * a_local[n] * h_prev;             \
         d_h[n] = da * d_h[n];                                                  \
@@ -540,16 +563,13 @@ extern "C" __global__ void NAME(                                               \
         IDX bt_ds = (b * T + t) * d_state + n0;                                \
         float dy_d, delta_d, u_d, d_u_val, d_delta_val;                        \
         /* Each branch runs the slice loop itself, the first lane with its */  \
-        /* first state unguarded (a live channel has one): its d_u chain */    \
-        /* then starts from the skip product in the block of that state, */    \
-        /* as the whole-state walk's did, and the compiler fuses the */        \
-        /* state's add the same way. */                                        \
+        /* first state unguarded (a live channel has one), the state that */   \
+        /* starts the d_u chain with the skip product. */                      \
         if (k == 0) {                                                          \
             dy_d    = to_f(dy[bt_di]);                                         \
             delta_d = to_f(delta_saved[bt_di]);                                \
             u_d     = to_f(u_saved[bt_di]);                                    \
             local_d_D += dy_d * u_d;                                           \
-            d_u_val = dy_d * D[d];                                             \
             d_delta_val = 0.0f;                                                \
             M1_BWD_SLICE_TYPED(IDX, FROM_F, 1)                                 \
         } else {                                                               \

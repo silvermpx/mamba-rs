@@ -738,8 +738,13 @@
   state in register arrays of the compiled capacity, four of them in the
   backward, which spilled to local memory from 64 states on (up to 1.5 KB
   of spill stores a thread at 64 states, up to 48 KB at 256). The kernels
-  take the lanes as their last argument. Every output keeps its chain and
-  its bits; the released kernels stay frozen in
+  take the lanes as their last argument. The backward's first lane joins
+  the skip product to its first state's term in one fused add that
+  rounds the product the released kernel rounded at that target and
+  capacity: the skip product from compute capability 10.0 on past 64
+  states, where the released walk's state loop stays a loop, and the
+  state term everywhere else. Every output keeps its chain and its bits;
+  the released kernels stay frozen in
   `tests/fixtures/m1_seq_reference.cu`.
 - The Mamba-3 SISO decode steps, the warp tier's and the block tier's
   (`m3_step_fwd`, `m3_step_fwd_block` and their typed builds), take the
