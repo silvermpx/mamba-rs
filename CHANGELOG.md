@@ -756,6 +756,12 @@
   four-channel build spilled), and the SISO block tier's sequential
   forward and backward per state build (`burnin_block_for`,
   `backward_seq_block_for`). The arithmetic of every build is unchanged.
+- The Mamba-1 tiled conv keeps a window of any width up to eight in
+  registers, as it kept the four-tap window: the window, taps, carries and
+  tap gradients sit in arrays of eight whose loops unroll, each step
+  guarded by the width, where the walk of any other width indexed them at
+  run time and kept them in local memory (96 bytes a thread in the
+  forward, 128 in the backward). The chains are unchanged.
 
 ### Fixed
 

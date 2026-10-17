@@ -111,8 +111,10 @@ DEFINE_CONV1D_STEP_FWD_SILU(conv1d_step_forward_silu_f16_i64, long long, __half,
 // CONV1D_FWD_BATCH steps before it computes and stores them: each step's
 // load no longer waits for the previous step's store, and the taps and bias
 // sit in registers. The usual four-tap window is unrolled at compile time
-// so it stays in registers too; any other d_conv walks the same chain with
-// a runtime bound. The arithmetic is the serial walk's in every case.
+// so it stays in registers too; any other width up to eight walks the same
+// chain in arrays of eight whose loops unroll, each step guarded by the
+// width, so they stay in registers as well. The arithmetic is the serial
+// walk's in every case.
 // ============================================================================
 #define CONV1D_TILE_T 128
 #define CONV1D_FWD_TILE_T 32
@@ -177,6 +179,44 @@ __device__ __forceinline__ void conv_store_row8(T* p, int n_valid, const T v[8])
                             t_end - tb, us);                                 \
     }
 
+// The forward walk of any width up to eight, the chain of CONV1D_FWD_WALK
+// with d_conv as its bound: the window and the taps sit in arrays of eight
+// whose loops unroll, each step guarded by the width, so the arrays index
+// statically and stay in registers.
+#define CONV1D_FWD_WALK8(TY, FROM_F, WIN, W, UT, UTS)                          \
+    _Pragma("unroll")                                                          \
+    for (int k = 0; k < 8; k++) if (k < d_conv) W[k] = weight[d * d_conv + k]; \
+    for (int tb = t0; tb < t_end; tb += CONV1D_FWD_BATCH) {                    \
+        float xs[CONV1D_FWD_BATCH];                                            \
+        TY us[CONV1D_FWD_BATCH];                                               \
+        _Pragma("unroll")                                                      \
+        for (int j = 0; j < CONV1D_FWD_BATCH; j++) {                           \
+            int t = tb + j;                                                    \
+            xs[j] = (t < t_end)                                                \
+                ? to_f(x_branch[(b * T_len + t) * x_stride + d]) : 0.0f;       \
+        }                                                                      \
+        _Pragma("unroll")                                                      \
+        for (int j = 0; j < CONV1D_FWD_BATCH; j++) {                           \
+            int t = tb + j;                                                    \
+            if (t < t_end) {                                                   \
+                _Pragma("unroll")                                              \
+                for (int k = 0; k < 7; k++) if (k < d_conv - 1) WIN[k] = WIN[k + 1]; \
+                _Pragma("unroll")                                              \
+                for (int k = 0; k < 8; k++) if (k == d_conv - 1) WIN[k] = xs[j]; \
+                float val = bias_d;                                            \
+                _Pragma("unroll")                                              \
+                for (int k = 0; k < 8; k++) if (k < d_conv) val += WIN[k] * W[k]; \
+                TY u_val =                                                     \
+                    FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f)));  \
+                u_out[(b * T_len + t) * d_inner + d] = u_val;                  \
+                us[j] = u_val;                                                 \
+            }                                                                  \
+        }                                                                      \
+        if ((UT) != nullptr)                                                   \
+            conv_store_row8((UT) + ((long long)b * d_inner + d) * (UTS) + tb,  \
+                            t_end - tb, us);                                   \
+    }
+
 #define DEFINE_CONV1D_BURNIN_TILED(NAME, IDX, TY, FROM_F)                     \
 extern "C" __global__ void NAME(                                              \
     TY* __restrict__ u_out, float* __restrict__ state,                       \
@@ -200,7 +240,8 @@ extern "C" __global__ void NAME(                                              \
     IDX state_base = (b * d_inner + d) * d_conv;                              \
     float win[8];                                                            \
     if (t0 == 0) {                                                           \
-        for (int k = 0; k < d_conv; k++) {                                   \
+        _Pragma("unroll")                                                    \
+        for (int k = 0; k < 8; k++) if (k < d_conv) {                        \
             win[k] = state[state_base + k];                                  \
             /* The ONLY conv tape is the carry-in window — the      \
              * backward reconstructs every later window from x_branch. */   \
@@ -214,18 +255,22 @@ extern "C" __global__ void NAME(                                              \
          * carry-in intact. No other block reads or writes state, so       \
          * the launch carries no cross-block order. */                     \
         float carry[8];                                                      \
-        for (int k = 0; k < d_conv; k++) {                                   \
+        _Pragma("unroll")                                                    \
+        for (int k = 0; k < 8; k++) if (k < d_conv) {                        \
             int th = T_len - d_conv + k;                                     \
             carry[k] = (th >= 0)                                             \
                 ? to_f(x_branch[(b * T_len + th) * x_stride + d])            \
                 : state[state_base + k + T_len];                             \
         }                                                                    \
-        for (int k = 0; k < d_conv; k++) state[state_base + k] = carry[k];   \
+        _Pragma("unroll")                                                    \
+        for (int k = 0; k < 8; k++)                                          \
+            if (k < d_conv) state[state_base + k] = carry[k];                \
     } else {                                                                 \
         /* Halo: the serial walk's window after step t0-1 holds           \
          * win[k] = x[t0 - d_conv + k] (win[0] is about to shift out).   \
          * t0 >= CONV1D_FWD_TILE_T > d_conv, so the halo never underruns. */ \
-        for (int k = 0; k < d_conv; k++) {                                   \
+        _Pragma("unroll")                                                    \
+        for (int k = 0; k < 8; k++) if (k < d_conv) {                        \
             int th = t0 - d_conv + k;                                        \
             win[k] = to_f(x_branch[(b * T_len + th) * x_stride + d]);         \
         }                                                                    \
@@ -237,7 +282,7 @@ extern "C" __global__ void NAME(                                              \
         CONV1D_FWD_WALK(4, TY, FROM_F, win4, w4, (TY*)nullptr, 0)            \
     } else {                                                                 \
         float w[8];                                                          \
-        CONV1D_FWD_WALK(d_conv, TY, FROM_F, win, w, (TY*)nullptr, 0)         \
+        CONV1D_FWD_WALK8(TY, FROM_F, win, w, (TY*)nullptr, 0)                \
     }                                                                        \
 }
 
@@ -278,7 +323,8 @@ extern "C" __global__ void NAME(                                              \
     IDX state_base = (b * d_inner + d) * d_conv;                              \
     float win[8];                                                            \
     if (t0 == 0) {                                                           \
-        for (int k = 0; k < d_conv; k++) {                                   \
+        _Pragma("unroll")                                                    \
+        for (int k = 0; k < 8; k++) if (k < d_conv) {                        \
             win[k] = state[state_base + k];                                  \
         }                                                                    \
         /* Carry-out, written by the block that owns the carry-in and      \
@@ -289,15 +335,19 @@ extern "C" __global__ void NAME(                                              \
          * carry-in intact. No other block reads or writes state, so       \
          * the launch carries no cross-block order. */                     \
         float carry[8];                                                      \
-        for (int k = 0; k < d_conv; k++) {                                   \
+        _Pragma("unroll")                                                    \
+        for (int k = 0; k < 8; k++) if (k < d_conv) {                        \
             int th = T_len - d_conv + k;                                     \
             carry[k] = (th >= 0)                                             \
                 ? to_f(x_branch[(b * T_len + th) * x_stride + d])            \
                 : state[state_base + k + T_len];                             \
         }                                                                    \
-        for (int k = 0; k < d_conv; k++) state[state_base + k] = carry[k];   \
+        _Pragma("unroll")                                                    \
+        for (int k = 0; k < 8; k++)                                          \
+            if (k < d_conv) state[state_base + k] = carry[k];                \
     } else {                                                                 \
-        for (int k = 0; k < d_conv; k++) {                                   \
+        _Pragma("unroll")                                                    \
+        for (int k = 0; k < 8; k++) if (k < d_conv) {                        \
             int th = t0 - d_conv + k;                                        \
             win[k] = to_f(x_branch[(b * T_len + th) * x_stride + d]);         \
         }                                                                    \
@@ -309,7 +359,7 @@ extern "C" __global__ void NAME(                                              \
         CONV1D_FWD_WALK(4, TY, FROM_F, win4, w4, u_t, u_t_stride)           \
     } else {                                                                 \
         float w[8];                                                          \
-        CONV1D_FWD_WALK(d_conv, TY, FROM_F, win, w, u_t, u_t_stride)        \
+        CONV1D_FWD_WALK8(TY, FROM_F, win, w, u_t, u_t_stride)               \
     }                                                                        \
 }
 
@@ -439,6 +489,102 @@ DEFINE_CONV1D_BURNIN_NOSAVE_TILED(conv1d_burnin_forward_nosave_tiled_f16_i64, lo
         }                                                                    \
     }
 
+// The backward walk of any width up to eight, the chain of CONV1D_BWD_WALK
+// with d_conv as its bound and its arrays of eight indexed statically:
+// WR holds the taps from the second-to-last down (WR[k] = w[d_conv - 2 -
+// k]) and WLAST the last tap, which the four-tap walk indexes by its
+// constant width.
+#define CONV1D_BWD_WALK8(TY, FROM_F, WIN, CARRY, DW, W, WR, WLAST)             \
+    for (int tb = ts_top; tb >= t0; tb -= CONV1D_BWD_BATCH) {                  \
+        float xs[CONV1D_BWD_BATCH];                                            \
+        float dus[CONV1D_BWD_BATCH];                                           \
+        if constexpr (sizeof(TY) == sizeof(float)) {                           \
+            _Pragma("unroll")                                                  \
+            for (int j = 0; j < CONV1D_BWD_BATCH; j++) {                       \
+                int ts = tb - j;                                               \
+                int tx = ts - (d_conv - 1);                                    \
+                bool live = (ts >= t0) && (ts < T_);                           \
+                xs[j] = (live && ts < ts0)                                     \
+                    ? ((tx >= 0)                                               \
+                        ? to_f(x_branch[(b * T_ + tx) * x_stride + d])         \
+                        : conv_init[init_base + tx + d_conv])                  \
+                    : 0.0f;                                                    \
+                dus[j] = live ? to_f(d_u[(b * T_ + ts) * d_inner + d])         \
+                              : 0.0f;                                          \
+            }                                                                  \
+        } else {                                                               \
+            TY xr[CONV1D_BWD_BATCH];                                           \
+            TY dur[CONV1D_BWD_BATCH];                                          \
+            _Pragma("unroll")                                                  \
+            for (int j = 0; j < CONV1D_BWD_BATCH; j++) {                       \
+                int ts = tb - j;                                               \
+                int tx = ts - (d_conv - 1);                                    \
+                bool live = (ts >= t0) && (ts < T_);                           \
+                bool windowed = live && ts < ts0;                              \
+                xr[j] = (windowed && tx >= 0)                                  \
+                    ? x_branch[(b * T_ + tx) * x_stride + d] : FROM_F(0.0f);   \
+                xs[j] = (windowed && tx < 0)                                   \
+                    ? conv_init[init_base + tx + d_conv] : 0.0f;               \
+                dur[j] = live ? d_u[(b * T_ + ts) * d_inner + d]               \
+                              : FROM_F(0.0f);                                  \
+            }                                                                  \
+            _Pragma("unroll")                                                  \
+            for (int j = 0; j < CONV1D_BWD_BATCH; j++) {                       \
+                if (tb - j - (d_conv - 1) >= 0) xs[j] = to_f(xr[j]);           \
+                dus[j] = to_f(dur[j]);                                         \
+            }                                                                  \
+        }                                                                      \
+        _Pragma("unroll")                                                      \
+        for (int j = 0; j < CONV1D_BWD_BATCH; j++) {                           \
+            int ts = tb - j;                                                   \
+            if (ts < t0) break;                                                \
+            float dco = 0.0f;                                                  \
+            float du = 0.0f;                                                   \
+            float silu_grad = 0.0f;                                            \
+            if (ts < T_) {                                                     \
+                if (ts < ts0) {                                                \
+                    _Pragma("unroll")                                          \
+                    for (int k = 7; k >= 1; k--)                               \
+                        if (k <= d_conv - 1) WIN[k] = WIN[k - 1];              \
+                    WIN[0] = xs[j];                                            \
+                }                                                              \
+                float val = bias_d;                                            \
+                _Pragma("unroll")                                              \
+                for (int k = 0; k < 8; k++) {                                  \
+                    if (k < d_conv) val += WIN[k] * W[k];                      \
+                }                                                              \
+                float x = to_f(FROM_F(val));                                   \
+                float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));   \
+                silu_grad = sig * (1.0f + x * (1.0f - sig));                   \
+                du = dus[j];                                                   \
+                dco = du * silu_grad;                                          \
+            }                                                                  \
+            if (ts < t_end) {                                                  \
+                _Pragma("unroll")                                              \
+                for (int k = 0; k < 8; k++) if (k < d_conv) DW[k] += dco * WIN[k]; \
+                local_d_bias =                                                 \
+                    __fadd_rn(local_d_bias, __fmul_rn(du, silu_grad));         \
+                float dxb = __fmul_rn(dco, WLAST);                             \
+                if (d_conv > 1) {                                              \
+                    dxb = __fadd_rn(dxb, CARRY[0]);                            \
+                    _Pragma("unroll")                                          \
+                    for (int k = 0; k < 7; k++) {                              \
+                        if (k < d_conv - 2) CARRY[k] = CARRY[k + 1] + dco * WR[k]; \
+                        else if (k == d_conv - 2) CARRY[k] = dco * W[0];       \
+                    }                                                          \
+                }                                                              \
+                d_x_branch[(b * T_ + ts) * out_stride + out_offset + d] =      \
+                    FROM_F(dxb);                                               \
+            } else if (d_conv > 1) {                                           \
+                _Pragma("unroll")                                              \
+                for (int k = 0; k < 7; k++) {                                  \
+                    if (k < d_conv - 2) CARRY[k] = CARRY[k + 1] + dco * WR[k]; \
+                    else if (k == d_conv - 2) CARRY[k] = dco * W[0];           \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    }
+
 #define DEFINE_CONV1D_BWD_TILED(NAME, IDX, TY, FROM_F)                        \
 extern "C" __global__ void NAME(                                              \
     TY* __restrict__ d_x_branch,                                              \
@@ -500,19 +646,27 @@ extern "C" __global__ void NAME(                                              \
         float dw[8];                                                          \
         float win[8];                                                         \
         float w[8];                                                           \
-        for (int k = 0; k < carry_len; k++) carry[k] = 0.0f;                  \
-        for (int k = 0; k < d_conv; k++) {                                    \
-            dw[k] = 0.0f;                                                     \
-            w[k] = weight[d * d_conv + k];                                    \
-            int tx = ts0 - carry_len + k;                                     \
-            win[k] = (tx >= 0)                                                \
-                ? to_f(x_branch[(b * T_ + tx) * x_stride + d])                \
-                : conv_init[init_base + tx + d_conv];                         \
+        float wr[8];                                                          \
+        _Pragma("unroll")                                                     \
+        for (int k = 0; k < 8; k++) {                                         \
+            if (k < carry_len) carry[k] = 0.0f;                               \
+            if (k < d_conv) {                                                 \
+                dw[k] = 0.0f;                                                 \
+                w[k] = weight[d * d_conv + k];                                \
+                int tx = ts0 - carry_len + k;                                 \
+                win[k] = (tx >= 0)                                            \
+                    ? to_f(x_branch[(b * T_ + tx) * x_stride + d])            \
+                    : conv_init[init_base + tx + d_conv];                     \
+            }                                                                 \
+            if (k < d_conv - 1) wr[k] = weight[d * d_conv + d_conv - 2 - k];  \
         }                                                                     \
-        CONV1D_BWD_WALK(d_conv, TY, FROM_F, win, carry, dw, w)                \
-        for (int k = 0; k < d_conv; k++) {                                    \
-            d_weight_partials[row * (d_inner * d_conv) + d * d_conv + k] =    \
-                dw[k];                                                        \
+        const float w_last = weight[d * d_conv + d_conv - 1];                 \
+        CONV1D_BWD_WALK8(TY, FROM_F, win, carry, dw, w, wr, w_last)           \
+        _Pragma("unroll")                                                     \
+        for (int k = 0; k < 8; k++) {                                         \
+            if (k < d_conv)                                                   \
+                d_weight_partials[row * (d_inner * d_conv) + d * d_conv + k] = \
+                    dw[k];                                                    \
         }                                                                     \
     }                                                                         \
     d_bias_partials[row * d_inner + d] = local_d_bias;                        \

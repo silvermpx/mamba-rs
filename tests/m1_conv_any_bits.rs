@@ -103,7 +103,7 @@ fn m1_conv_of_any_width_is_the_tiled_conv() {
     // a row stride of 2 * d_inner, as from the in_proj output.
     let (b, t, di) = (2usize, 150usize, 24usize);
     let (bt, xs) = (b * t, 2 * di);
-    for dc in [1usize, 3, 4, 8] {
+    for dc in [1usize, 2, 3, 4, 5, 6, 7, 8] {
         for dtype in DTYPES {
             let typed = |data: &[f32]| -> DtypedBuf {
                 let buf = DtypedBuf::zeros(s, data.len(), dtype).unwrap();
