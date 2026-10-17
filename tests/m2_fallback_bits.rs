@@ -9,23 +9,27 @@
 //! - the conv weight gradient with its taps spread over blocks against one
 //!   block,
 //! - the sequential backward that reads its states from the replay tape
-//!   against the one that holds them in shared memory.
+//!   against the one that holds them in shared memory,
+//! - the chunk scan in register tiles, sliced over channels and states,
+//!   against the per-output kernel it replaced, frozen as it was released.
 //!
 //! Each pair runs on shapes both routes serve, in f32, bf16 and f16.
 #![cfg(feature = "cuda")]
 
 #[path = "common/arch.rs"]
 mod arch;
+#[path = "common/frozen_kernels.rs"]
+mod frozen_kernels;
 
-use cudarc::driver::{LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba2::gpu::kernels::{
-    CHUNK, Mamba2Kernels, chunk_state_geom, dx_tiles_geom, gated_norm_bwd_smem_bytes,
-    gated_norm_cfg, seq_bwd_smem_bytes,
+    CHUNK, CHUNK_SCAN_TILES_SMEM_BYTES, CHUNK_SCAN_TT, Mamba2Kernels, chunk_state_geom,
+    dx_tiles_geom, gated_norm_bwd_smem_bytes, gated_norm_cfg, seq_bwd_smem_bytes,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -288,6 +292,164 @@ fn m2_chunk_state_tiles_are_the_whole_head() {
     }
 }
 
+/// The chunk scan in register tiles against the per-output kernel it
+/// replaced, frozen as released: heads and states narrower than a pass and
+/// a slice, whole ones, and wider ones with a ragged last pass or slice, D
+/// per head and per channel, one sequence a row and rows packing several
+/// (a start inside a chunk and one on a chunk's first token), in f32, bf16
+/// and f16. The two fill their outputs from different poisons, so an output
+/// the tiles left unwritten fails too.
+#[test]
+fn m2_chunk_scan_tiles_are_the_released_per_output_scan() {
+    let (dev, ctx, k) = setup();
+    let frozen = frozen_kernels::frozen_module(
+        dev.context(),
+        arch::arch0(),
+        None,
+        include_str!("fixtures/m2_chunk_scan_reference.cu"),
+    );
+    let (batch, seq) = (2usize, 150usize);
+    let nc = seq.div_ceil(CHUNK);
+    // Row 0 carries its sequence in, starts one at token 37 and one on the
+    // second chunk's first token; row 1 starts one at token 100. The ids
+    // ride a float buffer as their bits.
+    let ids: Vec<f32> = (0..batch * seq)
+        .map(|i| {
+            let (b, t) = (i / seq, i % seq);
+            let id = match b {
+                0 => usize::from(t >= 37) + usize::from(t >= 64),
+                _ => usize::from(t >= 100),
+            };
+            f32::from_bits(id as u32)
+        })
+        .collect();
+    let ids = f32_buf(&ctx, &ids);
+    let mut cases = 0;
+    for (nh, ng, hd, ds) in [
+        (3usize, 3usize, 7usize, 33usize),
+        (2, 1, 40, 20),
+        (2, 2, 64, 128),
+        (1, 1, 160, 48),
+        (2, 1, 48, 160),
+        (1, 1, 136, 136),
+        (1, 1, 256, 256),
+        (1, 1, 32, 1024),
+        (1, 1, 1024, 16),
+    ] {
+        let di = nh * hd;
+        let ld_xbc = di + 2 * ng * ds;
+        let c_col = (di + ng * ds) as i32;
+        let per = batch * nc * nh * CHUNK;
+        let states = f32_buf(&ctx, &det(batch * nc * nh * hd * ds, 21, 1.0));
+        let cb = f32_buf(
+            &ctx,
+            &det(batch * nc * ng * CHUNK * (CHUNK + 1) / 2, 22, 1.0),
+        );
+        let dt = f32_buf(
+            &ctx,
+            &det(per, 23, 0.5)
+                .iter()
+                .map(|v| v.abs())
+                .collect::<Vec<_>>(),
+        );
+        let acs = f32_buf(&ctx, &det(per, 24, 2.0));
+        let d = f32_buf(&ctx, &det(di, 25, 1.0));
+        for dtype in DTYPES {
+            let xbc = typed_buf(&ctx, &det(batch * seq * ld_xbc, 26, 1.0), dtype);
+            for (d_per_channel, packed) in [(0i32, false), (1, false), (0, true), (1, true)] {
+                let seq_idx = if packed { ids.cached_ptr() } else { 0 };
+                let ptrs = [states.cached_ptr(), cb.cached_ptr(), xbc.cached_ptr()];
+                let ints = [
+                    batch as i32,
+                    seq as i32,
+                    nh as i32,
+                    ng as i32,
+                    hd as i32,
+                    ds as i32,
+                ];
+                // The released kernel takes its run's first z block; the
+                // tiles' z axis never splits.
+                let run = |f: &CudaFunction, cfg: LaunchConfig, takes_z: bool, poison: f32| {
+                    let y = f32_buf(&ctx, &vec![poison; batch * seq * di]);
+                    let yp = y.cached_ptr();
+                    let (dtp, ap, dp) = (dt.cached_ptr(), acs.cached_ptr(), d.cached_ptr());
+                    let ld = ld_xbc as i64;
+                    for (y_first, z_first, cfg) in yz_runs(cfg) {
+                        let mut b = ctx.stream.launch_builder(f);
+                        b.arg(&yp);
+                        for p in &ptrs {
+                            b.arg(p);
+                        }
+                        b.arg(&ld);
+                        b.arg(&c_col);
+                        b.arg(&dtp);
+                        b.arg(&ap);
+                        b.arg(&dp);
+                        b.arg(&d_per_channel);
+                        for v in &ints {
+                            b.arg(v);
+                        }
+                        b.arg(&y_first);
+                        if takes_z {
+                            b.arg(&z_first);
+                        }
+                        b.arg(&seq_idx);
+                        unsafe { b.launch(cfg) }.unwrap();
+                    }
+                    bits_f32(&ctx, &y)
+                };
+                let suffix = match dtype {
+                    WeightDtype::Bf16 => "_bf16",
+                    WeightDtype::F16 => "_f16",
+                    _ => "",
+                };
+                let released = frozen
+                    .load_function(&format!("m2_reference_chunk_scan{suffix}"))
+                    .unwrap();
+                let want = run(
+                    &released,
+                    LaunchConfig {
+                        grid_dim: (
+                            (batch * nc) as u32,
+                            nh as u32,
+                            (CHUNK * hd).div_ceil(128) as u32,
+                        ),
+                        block_dim: (128, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    true,
+                    8192.0,
+                );
+                let got = run(
+                    k.chunk_scan_tiles.get(dtype),
+                    LaunchConfig {
+                        grid_dim: (
+                            (batch * nc) as u32,
+                            nh as u32,
+                            CHUNK.div_ceil(CHUNK_SCAN_TT) as u32,
+                        ),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: CHUNK_SCAN_TILES_SMEM_BYTES as u32,
+                    },
+                    false,
+                    -8192.0,
+                );
+                if let Some(i) = want.iter().zip(&got).position(|(a, b)| a != b) {
+                    let (t, c) = (i / di, i % di);
+                    panic!(
+                        "{dtype:?} nh {nh} ng {ng} hd {hd} ds {ds} D per channel \
+                         {d_per_channel} packed {packed}: token {t} channel {c}: \
+                         {:#010x} != {:#010x}",
+                        want[i], got[i]
+                    );
+                }
+                cases += 1;
+            }
+        }
+    }
+    eprintln!("m2 chunk scan tiles: the released kernel's bits on {cases} cases");
+}
+
 /// The register-tile dx and token sums against `m2b_dx` and `m2b_rowsums`:
 /// a head of 4 channels, one no multiple of 4 over two groups, and one of
 /// 40 over a state of 24, with D per head and per channel. The tiled kernel
@@ -438,6 +600,7 @@ fn m2_dx_tiles_are_the_dx_and_token_sums() {
                             b.arg(v);
                         }
                         b.arg(&y_first);
+                        b.arg(&0u64);
                         unsafe { b.launch(cfg) }.unwrap();
                     }
                 }

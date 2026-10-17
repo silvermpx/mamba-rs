@@ -18,9 +18,9 @@ use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
-use mamba_rs::gpu::launch::{y_runs, yz_runs};
+use mamba_rs::gpu::launch::y_runs;
 use mamba_rs::mamba2::gpu::kernels::{
-    CHUNK, CHUNK_SCAN_TT, Mamba2Kernels, bmm_smem_bytes, chunk_scan_tiles_smem_bytes,
+    CHUNK, CHUNK_SCAN_TILES_SMEM_BYTES, CHUNK_SCAN_TT, Mamba2Kernels, bmm_smem_bytes,
     chunk_state_geom,
 };
 
@@ -97,16 +97,6 @@ fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) 
     }
 }
 
-/// [`launch`] once per run of the grid's y and z axes, each run's first y
-/// and z blocks appended, then the packing (none).
-fn launch_yz_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
-    for (y_first, z_first, cfg) in yz_runs(cfg) {
-        let mut run = args.to_vec();
-        run.extend([Arg::I(y_first), Arg::I(z_first), Arg::P(0)]);
-        launch(ctx, f, cfg, &run);
-    }
-}
-
 fn assert_bits(what: &str, a: &[u32], b: &[u32]) {
     assert_eq!(a.len(), b.len(), "{what}: lengths");
     if let Some(i) = a.iter().zip(b).position(|(x, y)| x != y) {
@@ -178,14 +168,8 @@ fn ints(w: Win) -> [Arg; 2] {
 }
 
 /// The chunk-local kernels of the window: the C B products, the chunk
-/// states, and the outputs through `scan` with its geometry.
-fn run_chunks(
-    ctx: &GpuCtx,
-    k: &Mamba2Kernels,
-    w: Win,
-    p: ChunkPtrs,
-    scan: (&CudaFunction, LaunchConfig, bool),
-) {
+/// states and the outputs.
+fn run_chunks(ctx: &GpuCtx, k: &Mamba2Kernels, w: Win, p: ChunkPtrs) {
     let (ld, b_col, c_col) = (w.ld() as i64, w.di() as i32, (w.di() + w.ng * w.ds) as i32);
     let (nh, ng, hd, ds) = (
         Arg::I(w.nh as i32),
@@ -243,11 +227,19 @@ fn run_chunks(
             Arg::I(pt as i32),
         ],
     );
-    let scan_launch = if scan.2 { launch_yz_runs } else { launch_runs };
-    scan_launch(
+    launch_runs(
         ctx,
-        scan.0,
-        scan.1,
+        k.chunk_scan_tiles
+            .get(mamba_rs::gpu::dtype::WeightDtype::F32),
+        LaunchConfig {
+            grid_dim: (
+                (w.b * w.nc()) as u32,
+                w.nh as u32,
+                CHUNK.div_ceil(CHUNK_SCAN_TT) as u32,
+            ),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: CHUNK_SCAN_TILES_SMEM_BYTES as u32,
+        },
         &[
             Arg::P(p.y),
             Arg::P(p.states),
@@ -286,8 +278,7 @@ fn decay_sums(w: Win, seed: u32) -> Vec<f32> {
 
 /// Past 2^31 elements of the conv rows the C B products, the chunk states
 /// and the outputs of a window's first and last chunks are what those
-/// chunks give in a launch of their own, through the plain chunk scan and
-/// the tiled one.
+/// chunks give in a launch of their own.
 #[test]
 #[ignore = "14 GiB of conv rows and states; run on a 32 GB card"]
 fn the_chunk_kernels_give_chunks_past_i32_max_their_own_bits() {
@@ -304,7 +295,6 @@ fn the_chunk_kernels_give_chunks_past_i32_max_their_own_bits() {
     let ctx = GpuCtx::new(&device).expect("context");
     let st = &ctx.stream;
     let k = Mamba2Kernels::compile(ctx.stream.context(), arch::arch0()).expect("M2 kernels");
-    let f32_ = mamba_rs::gpu::dtype::WeightDtype::F32;
 
     // The conv rows hold one word everywhere but in the chunks compared, so
     // a row read at a wrapped offset reads other bits than its own.
@@ -338,71 +328,33 @@ fn the_chunk_kernels_give_chunks_past_i32_max_their_own_bits() {
         y: y.cached_ptr(),
         d: d.cached_ptr(),
     };
-    let tiles_smem = chunk_scan_tiles_smem_bytes(w.hd, w.ds);
-    let scans = |w: Win| {
-        let mut out = vec![(
-            "plain",
-            k.chunk_scan.get(f32_),
-            LaunchConfig {
-                grid_dim: (
-                    (w.b * w.nc()) as u32,
-                    w.nh as u32,
-                    (CHUNK * w.hd).div_ceil(128) as u32,
-                ),
-                block_dim: (128, 1, 1),
-                shared_mem_bytes: 0,
-            },
-        )];
-        if tiles_smem <= k.smem_optin {
-            out.push((
-                "tiled",
-                k.chunk_scan_tiles.get(f32_),
-                LaunchConfig {
-                    grid_dim: (
-                        (w.b * w.nc()) as u32,
-                        w.nh as u32,
-                        CHUNK.div_ceil(CHUNK_SCAN_TT) as u32,
-                    ),
-                    block_dim: (256, 1, 1),
-                    shared_mem_bytes: tiles_smem as u32,
-                },
-            ));
-        }
-        out
-    };
     let own = Win {
         t: window * CHUNK,
         ..w
     };
-    for (name, scan, cfg) in scans(w) {
-        run_chunks(&ctx, &k, w, all, (scan, cfg, name == "plain"));
-        for &c in &firsts {
-            let own_cb = zeros(&ctx, window * w.ng * w.pairs());
-            let own_states = zeros(&ctx, window * w.nh * w.hd * w.ds);
-            let own_y = zeros(&ctx, own.t * w.di());
-            let p = ChunkPtrs {
-                cb: own_cb.cached_ptr(),
-                states: own_states.cached_ptr(),
-                y: own_y.cached_ptr(),
-                ..all.past(w, c)
-            };
-            let own_scan = scans(own)
-                .into_iter()
-                .find(|(n, _, _)| *n == name)
-                .expect("scan");
-            run_chunks(&ctx, &k, own, p, (own_scan.1, own_scan.2, name == "plain"));
-            let past = all.past(w, c);
-            for (what, a, b, n) in [
-                ("C B", past.cb, p.cb, window * w.ng * w.pairs()),
-                ("states", past.states, p.states, window * w.nh * w.hd * w.ds),
-                ("y", past.y, p.y, own.t * w.di()),
-            ] {
-                assert_bits(
-                    &format!("{name} scan, chunks from {c}: {what}"),
-                    &read(st, a, n),
-                    &read(st, b, n),
-                );
-            }
+    run_chunks(&ctx, &k, w, all);
+    for &c in &firsts {
+        let own_cb = zeros(&ctx, window * w.ng * w.pairs());
+        let own_states = zeros(&ctx, window * w.nh * w.hd * w.ds);
+        let own_y = zeros(&ctx, own.t * w.di());
+        let p = ChunkPtrs {
+            cb: own_cb.cached_ptr(),
+            states: own_states.cached_ptr(),
+            y: own_y.cached_ptr(),
+            ..all.past(w, c)
+        };
+        run_chunks(&ctx, &k, own, p);
+        let past = all.past(w, c);
+        for (what, a, b, n) in [
+            ("C B", past.cb, p.cb, window * w.ng * w.pairs()),
+            ("states", past.states, p.states, window * w.nh * w.hd * w.ds),
+            ("y", past.y, p.y, own.t * w.di()),
+        ] {
+            assert_bits(
+                &format!("chunks from {c}: {what}"),
+                &read(st, a, n),
+                &read(st, b, n),
+            );
         }
     }
 }

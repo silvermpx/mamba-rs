@@ -544,7 +544,7 @@ fn the_register_tiled_stage_keeps_the_staged_stage_s_bits() {
     let frozen = frozen_module(
         ctx.stream.context(),
         arch::arch0(),
-        m3k.state_cap,
+        Some(m3k.state_cap),
         FROZEN_TILED,
     );
     for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {

@@ -18,7 +18,7 @@ use cudarc::driver::PushKernelArg;
 use cudarc::driver::LaunchConfig;
 
 use super::kernels::{
-    CHUNK, CHUNK_SCAN_TT, Mamba2Kernels, bmm_smem_bytes, chunk_scan_tiles_smem_bytes,
+    CHUNK, CHUNK_SCAN_TILES_SMEM_BYTES, CHUNK_SCAN_TT, Mamba2Kernels, bmm_smem_bytes,
     chunk_state_geom, decode_rows, gated_norm_cfg, step_cfg, step_rows,
 };
 use crate::bidi::{mlps_after, opens_pair, reads_reversed};
@@ -720,39 +720,17 @@ impl M2Exec<'_> {
             bld.launch(g).map(|_| ())
         })?;
         let dp = lw.d;
-        // The register-tiled scan when its staging fits; both give the same
-        // bits.
-        let tiles_smem = chunk_scan_tiles_smem_bytes(hd, ds);
-        let tiled = tiles_smem <= self.kernels.smem_optin;
-        let (scan_kernel, scan_cfg) = if tiled {
-            (
-                &self.kernels.chunk_scan_tiles,
-                LaunchConfig {
-                    grid_dim: (
-                        (b * nc) as u32,
-                        nh as u32,
-                        CHUNK.div_ceil(CHUNK_SCAN_TT) as u32,
-                    ),
-                    block_dim: (256, 1, 1),
-                    shared_mem_bytes: tiles_smem as u32,
-                },
-            )
-        } else {
-            (
-                &self.kernels.chunk_scan,
-                LaunchConfig {
-                    grid_dim: (
-                        (b * nc) as u32,
-                        nh as u32,
-                        (CHUNK * hd).div_ceil(128) as u32,
-                    ),
-                    block_dim: (128, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-            )
+        let scan_cfg = LaunchConfig {
+            grid_dim: (
+                (b * nc) as u32,
+                nh as u32,
+                CHUNK.div_ceil(CHUNK_SCAN_TT) as u32,
+            ),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: CHUNK_SCAN_TILES_SMEM_BYTES as u32,
         };
-        launch_runs(scan_cfg, "chunk scan", l, &|g, y_first, z_first| unsafe {
-            let mut bld = stream.launch_builder(scan_kernel.get(self.act));
+        launch_runs(scan_cfg, "chunk scan", l, &|g, y_first, _| unsafe {
+            let mut bld = stream.launch_builder(self.kernels.chunk_scan_tiles.get(self.act));
             bld.arg(&y);
             bld.arg(&states);
             bld.arg(&cb);
@@ -770,9 +748,6 @@ impl M2Exec<'_> {
             bld.arg(&hd_i);
             bld.arg(&ds_i);
             bld.arg(&y_first);
-            if !tiled {
-                bld.arg(&z_first);
-            }
             bld.arg(&seq_idx);
             bld.launch(g).map(|_| ())
         })?;

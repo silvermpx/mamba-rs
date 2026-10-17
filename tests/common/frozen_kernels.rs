@@ -1,7 +1,8 @@
-//! Mamba-3 kernels frozen as they were released (`fixtures/*_reference.cu`),
-//! compiled as the family modules compile their own: the same prelude, the
-//! packed-row helpers, the numeric options and the state capacity, so each
-//! frozen kernel gives the bits it gave when it was the production one.
+//! Kernels frozen as they were released (`fixtures/*_reference.cu`),
+//! compiled as their family modules compile their own: the same prelude,
+//! the packed-row helpers, the numeric options and, for a family that sizes
+//! register arrays by it, the state capacity, so each frozen kernel gives
+//! the bits it gave when it was the production one.
 
 use std::sync::Arc;
 
@@ -9,11 +10,13 @@ use cudarc::driver::{CudaContext, CudaModule};
 use mamba_rs::gpu::kernels::cuda_include_paths;
 
 /// The module of a fixture's frozen kernels (`fixture` is its source) for
-/// `arch`, their register arrays sized for `state_cap` states.
+/// `arch`, their register arrays sized for `state_cap` states when their
+/// family compiles with a capacity (Mamba-3) and without one when it does
+/// not (Mamba-2).
 pub fn frozen_module(
     ctx: &Arc<CudaContext>,
     arch: &'static str,
-    state_cap: usize,
+    state_cap: Option<usize>,
     fixture: &str,
 ) -> Arc<CudaModule> {
     let source = [
@@ -29,8 +32,8 @@ pub fn frozen_module(
         "--fmad=true".to_owned(),
         "--extra-device-vectorization".to_owned(),
         "-DNDEBUG".to_owned(),
-        format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
     ];
+    options.extend(state_cap.map(|cap| format!("-DMAMBA_RS_STATE_CAP={cap}")));
     if (major, minor) >= (12, 9) {
         options.push("--frandom-seed=1295203121".to_owned());
     }

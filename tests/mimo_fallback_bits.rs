@@ -1343,7 +1343,7 @@ fn mimo_angle_walk_keeps_the_token_at_a_time_bits() {
     let frozen = frozen_module(
         dev.context(),
         arch::arch0(),
-        64,
+        Some(64),
         include_str!("fixtures/m3m_angles_reference.cu"),
     );
     let ang_col = 3usize;

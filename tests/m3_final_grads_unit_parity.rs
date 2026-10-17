@@ -572,7 +572,12 @@ fn m3_dqktheta_keeps_the_bits_of_its_released_form() {
     let cap = 64;
     let m3k =
         Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), cap).unwrap();
-    let frozen = frozen_module(ctx.stream.context(), arch::arch0(), cap, FROZEN_DQKTHETA);
+    let frozen = frozen_module(
+        ctx.stream.context(),
+        arch::arch0(),
+        Some(cap),
+        FROZEN_DQKTHETA,
+    );
     let (b, t, nh, cs) = (2usize, 150usize, 3usize, 64usize);
     let rows = b * t * nh;
     let mut cases = 0;
@@ -730,7 +735,7 @@ fn m3_angle_backward_keeps_the_bits_of_its_released_form() {
     let frozen = frozen_module(
         ctx.stream.context(),
         arch::arch0(),
-        64,
+        Some(64),
         FROZEN_ANGLE_BACKWARD,
     );
     let released = frozen

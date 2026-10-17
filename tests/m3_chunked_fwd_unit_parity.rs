@@ -228,7 +228,12 @@ fn the_pre_state_arms_write_the_frozen_trio_bits() {
     for (cap, shapes) in STAGE_SHAPES {
         let m3k = Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), cap)
             .unwrap();
-        let frozen = frozen_module(ctx.stream.context(), arch::arch0(), cap, FROZEN_FORWARD);
+        let frozen = frozen_module(
+            ctx.stream.context(),
+            arch::arch0(),
+            Some(cap),
+            FROZEN_FORWARD,
+        );
         let cumsum = frozen.load_function("m3_reference_da_cumsum").unwrap();
         for &(batch, t, nh, hd, ds, cs) in shapes {
             let nc = t.div_ceil(cs);
@@ -517,7 +522,12 @@ fn the_sliced_scan_writes_the_frozen_static_tile_bits() {
     for (cap, shapes) in STAGE_SHAPES {
         let m3k = Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), cap)
             .unwrap();
-        let frozen = frozen_module(ctx.stream.context(), arch::arch0(), cap, FROZEN_FORWARD);
+        let frozen = frozen_module(
+            ctx.stream.context(),
+            arch::arch0(),
+            Some(cap),
+            FROZEN_FORWARD,
+        );
         for &(batch, t, nh, hd, ds, cs) in shapes {
             let nc = t.div_ceil(cs);
             let th_n = batch * t * nh;

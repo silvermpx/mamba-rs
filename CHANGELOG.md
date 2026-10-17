@@ -661,6 +661,16 @@
   at a time. Every output keeps its chain, so the bits of the
   channel-parallel and per-token kernels those shapes ran on. The split
   pair kernels still stop at 128.
+- The Mamba-2 chunk scan runs every head and state width on its register
+  tiles. A block stages the entering states and the C rows 32 state
+  indices at a time for a pass of 64 channels, so its shared memory is
+  37,120 bytes whatever the shape and needs no opt-in, where the tile
+  staged the whole head and the shapes it did not fit ran a thread an
+  output reading global memory. Every output keeps the chain of that
+  kernel, which stays frozen in `tests/fixtures/m2_chunk_scan_reference.cu`
+  with the tiles held to it. `Mamba2Kernels::chunk_scan` is gone, and
+  `chunk_scan_tiles_smem_bytes` is the constant
+  `CHUNK_SCAN_TILES_SMEM_BYTES`.
 
 ### Fixed
 

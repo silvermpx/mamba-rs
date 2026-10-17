@@ -161,7 +161,7 @@ sequence. The backward cuts every carry at a start the same way.
 | file | purpose |
 |---|---|
 | `mamba2_ops.cu` | the decode step, the sequential scan over a window, the conv, the gates and the gated norm |
-| `mamba2_ssd.cu` | the chunked scan: the chunk cumsum, the CB products, the chunk states, the state passing and the chunk scan, as plain kernels and as register tiles |
+| `mamba2_ssd.cu` | the chunked scan: the chunk cumsum, the CB products, the chunk states, the state passing, and the chunk scan as register tiles sliced over channels and states for any head and state width |
 | `mamba2_bwd.cu` | the training backward of all of the above, and the sequential backward with its replay |
 | `gated_mlp.cu` | the gate of the MLP after the mixer |
 

@@ -44,9 +44,8 @@ pub struct Mamba2Kernels {
     pub bmm_chunk: TypedKernel,
     pub chunk_state: TypedKernel,
     pub state_passing: CudaFunction,
-    pub chunk_scan: TypedKernel,
-    /// The chunk scan as register tiles, for shapes whose staging fits
-    /// (see [`chunk_scan_tiles_smem_bytes`]).
+    /// The chunk scan as register tiles, for every head and state width
+    /// (see [`CHUNK_SCAN_TILES_SMEM_BYTES`]).
     pub chunk_scan_tiles: TypedKernel,
     /// The training backward, f32.
     pub bwd: Mamba2BwdKernels,
@@ -281,7 +280,6 @@ impl Mamba2Kernels {
             bmm_chunk: typed("m2_bmm_chunk")?,
             chunk_state: typed("m2_chunk_state")?,
             state_passing: get("m2_state_passing")?,
-            chunk_scan: typed("m2_chunk_scan")?,
             chunk_scan_tiles: typed("m2_chunk_scan_tiles")?,
             bwd: Mamba2BwdKernels {
                 a_neg: get("m2_a_neg")?,
@@ -338,7 +336,6 @@ impl Mamba2Kernels {
                 (&kernels.bwd.seq_bwd, "sequential backward"),
                 (&kernels.bwd.seq_bwd_tiles, "sequential backward tiles"),
                 (&kernels.bwd.seq_bwd_global, "global sequential backward"),
-                (&kernels.chunk_scan_tiles, "chunk scan tiles"),
                 (&kernels.bmm_chunk, "chunk bmm"),
                 (&kernels.chunk_state, "chunk state"),
                 (&kernels.bwd.dx_tiles, "dx tiles"),
@@ -393,11 +390,22 @@ fn max_block(k: &TypedKernel, what: &str) -> Result<usize, String> {
 /// Tokens per block of the tiled chunk scan.
 pub const CHUNK_SCAN_TT: usize = 32;
 
-/// The tiled chunk scan's shared memory: the entering state rows padded by
-/// one, the tile's C rows and weights, the x rows of the chunk.
-pub fn chunk_scan_tiles_smem_bytes(hd: usize, ds: usize) -> usize {
-    (hd * (ds + 1) + CHUNK_SCAN_TT * ds + CHUNK_SCAN_TT * CHUNK + CHUNK * hd) * 4
-}
+/// Channels of a pass of the tiled chunk scan.
+pub const CHUNK_SCAN_PASS: usize = 64;
+
+/// State indices of a slice of the tiled chunk scan.
+pub const CHUNK_SCAN_SLICE: usize = 32;
+
+/// The tiled chunk scan's shared memory, the same for every head and state
+/// width: a slice's entering state rows of a pass, padded by one, the
+/// tile's C rows of the slice, the tile's weights, and the x rows of the
+/// pass's channels over the chunk. Under the 48 KB every block may take, so
+/// the scan needs no opt-in and two blocks share an SM on every part.
+pub const CHUNK_SCAN_TILES_SMEM_BYTES: usize = (CHUNK_SCAN_PASS * (CHUNK_SCAN_SLICE + 1)
+    + CHUNK_SCAN_TT * CHUNK_SCAN_SLICE
+    + CHUNK_SCAN_TT * CHUNK
+    + CHUNK * CHUNK_SCAN_PASS)
+    * 4;
 
 /// The chunk bmm's shared memory: the chunk's C and B rows transposed,
 /// padded to 68, up to 128 state indices a pass.
@@ -543,6 +551,14 @@ pub fn seq_bwd_global_geom(hd: usize, ds: usize, max_threads: usize, cap: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tiled chunk scan's stage is the kernel's, fixed at 37,120 bytes,
+    /// inside the 48 KB a block takes without opting in.
+    #[test]
+    fn the_chunk_scan_stage_is_the_kernel_s() {
+        assert_eq!(CHUNK_SCAN_TILES_SMEM_BYTES, 37_120);
+        const { assert!(CHUNK_SCAN_TILES_SMEM_BYTES <= 48 * 1024) };
+    }
 
     /// No validated state is refused for shared memory on a supported part:
     /// one channel of the largest state fits the 99 KB every part since

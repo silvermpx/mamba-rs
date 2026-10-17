@@ -465,85 +465,26 @@ extern "C" __global__ void m2_state_passing(
     if (live) ssm[bh * pn + e] = st;
 }
 
-// The outputs: y_t[p] = (sum_n C_t[n] h_prev[p][n]) e^Acs_t
-// + sum_{s<=t} W[t][s] x_s[p] + D x_t[p], f32 [B * T, d_ssm]. In a packed
-// row the entering state reaches only the tokens that continue its
-// sequence, and s runs over t's own sequence. One thread per (t, p). Grid
-// (B * nc, H, ceil(64 * P / blockDim.x)).
-#define DEFINE_M2_CHUNK_SCAN(NAME, TI)                                         \
-extern "C" __global__ void NAME(                                               \
-    float* __restrict__ y,                                                     \
-    const float* __restrict__ states,                                          \
-    const float* __restrict__ cb,                                              \
-    const TI* __restrict__ xbc, long long ld_xbc, int c_col,                   \
-    const float* __restrict__ dt, const float* __restrict__ acs,               \
-    const float* __restrict__ D, int d_per_channel,                            \
-    int batch, int seq, int nh, int ng, int hd, int ds,                        \
-    int y_first, /* this run's first y block */                                \
-    int z_first, /* this run's first z block */                                \
-    const int* __restrict__ seq_idx                                            \
-) {                                                                            \
-    const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;                            \
-    const long long bc = blockIdx.x;                                           \
-    const int h = y_first + blockIdx.y;                                        \
-    const int e = (z_first + blockIdx.z) * blockDim.x + threadIdx.x;           \
-    if (bc >= (long long)batch * nc || h >= nh || e >= M2_CHUNK * hd) return;  \
-    const int t = e / hd;                                                      \
-    const int p = e % hd;                                                      \
-    const int c = (int)(bc % nc);                                              \
-    const long long b = bc / nc;                                               \
-    const int t0 = c * M2_CHUNK;                                               \
-    const int lc = min(M2_CHUNK, seq - t0);                                    \
-    if (t >= lc) return;                                                       \
-    const int g = h / (nh / ng);                                               \
-    const long long sc = (bc * nh + h) * M2_CHUNK;                             \
-    const long long rt = (b * seq + t0 + t) * ld_xbc;                          \
-    const float* hprev = states + ((bc * nh + h) * hd + p) * (long long)ds;    \
-    /* The tokens before the chunk's first start continue the entering */      \
-    /* state's sequence. */                                                    \
-    const int cont = vl_lower_bound(seq_idx, b, seq, t0, t0 + lc,              \
-                                    vl_id(seq_idx, b, seq, t0 - 1) + 1) - t0;  \
-    const float acs_t = acs[sc + t];                                           \
-    float acc = 0.0f;                                                          \
-    if (t < cont) {                                                            \
-        for (int n = 0; n < ds; n++)                                           \
-            acc = __fmaf_rn(to_f(xbc[rt + c_col + (long long)g * ds + n]),     \
-                            hprev[n], acc);                                    \
-        acc = __fmul_rn(acc, m2_exp(acs_t));                                   \
-    }                                                                          \
-    const long long cbo = (bc * ng + g) * (M2_CHUNK * (M2_CHUNK + 1) / 2)      \
-                          + (long long)t * (t + 1) / 2;                        \
-    for (int s = vl_seq_first(seq_idx, b, seq, t0, t0 + t) - t0; s <= t; s++) { \
-        float wts = __fmul_rn(                                                 \
-            __fmul_rn(cb[cbo + s],                                             \
-                      m2_exp(fminf(__fsub_rn(acs_t, acs[sc + s]), 0.0f))),     \
-            dt[sc + s]);                                                       \
-        float xs = to_f(xbc[(b * seq + t0 + s) * ld_xbc                        \
-                            + (long long)h * hd + p]);                         \
-        acc = __fmaf_rn(wts, xs, acc);                                         \
-    }                                                                          \
-    const float xt = to_f(xbc[rt + (long long)h * hd + p]);                    \
-    const float dv = d_per_channel ? D[(long long)h * hd + p] : D[h];          \
-    acc = __fmaf_rn(xt, dv, acc);                                              \
-    y[(b * seq + t0 + t) * ((long long)nh * hd) + (long long)h * hd + p] = acc; \
-}
-
-DEFINE_M2_CHUNK_SCAN(m2_chunk_scan, float)
-DEFINE_M2_CHUNK_SCAN(m2_chunk_scan_bf16, __nv_bfloat16)
-DEFINE_M2_CHUNK_SCAN(m2_chunk_scan_f16, __half)
-
-// The outputs of m2_chunk_scan as register tiles, for the shapes whose
-// staging fits shared memory: one block per (chunk, head, tile of
-// M2_SCAN_TT tokens), 256 threads. The tile's entering states h_prev
-// [P][N + 1] (rows padded so a warp's channel reads fall in distinct
-// banks), its C rows, the weights W[t][s] = cb e^min(Acs_t - Acs_s, 0) dt_s
-// and the x rows of every token up to the tile's last are staged; a warp
-// then takes 4 tokens at a time and a lane the channels lane, lane + 32.
-// Each output keeps m2_chunk_scan's chain: n ascending from zero, times
-// e^Acs_t, then s ascending up to t, then D x_t; a packed row masks as
-// m2_chunk_scan does. Dynamic shared memory:
-// P (N + 1) + TT N + TT 64 + 64 P floats.
+// The chunk outputs y_t[p] = (sum_n C_t[n] h_prev[p][n]) e^Acs_t
+// + sum_{s<=t} W[t][s] x_s[p] + D x_t[p], f32 [B * T, d_ssm], as register
+// tiles for any head and state width: one block per (chunk, head, tile of
+// M2_SCAN_TT tokens), 256 threads, a warp the tile's tokens 4 w .. 4 w + 3
+// and a lane the channels c0 + lane and c0 + lane + 32 of a pass of
+// M2_SCAN_PC channels. The weights W[t][s] = cb e^min(Acs_t - Acs_s, 0) dt_s
+// are staged once per block; per pass, the entering states of the pass's
+// channels and the tile's C rows are staged M2_SCAN_NS state indices at a
+// time, then the x rows of the pass's channels for every token up to the
+// tile's last. In a packed row the entering state reaches only the tokens
+// that continue its sequence, and s runs over t's own sequence. Each output
+// keeps the chain of the per-output kernel this replaced: n ascending from
+// zero across the slices, times e^Acs_t, then s ascending up to t, then
+// D x_t, so it has that kernel's bits. Shared memory, whatever the shape
+// (CHUNK_SCAN_TILES_SMEM_BYTES): PC (NS + 1) + TT NS + TT 64 + 64 PC floats,
+// 37,120 bytes, under the 48 KB a block takes without opting in, so at least
+// two blocks share an SM on every supported part.
 #define M2_SCAN_TT 32
+#define M2_SCAN_NS 32
+#define M2_SCAN_PC 64
 template <typename TI>
 __device__ __forceinline__ void m2_chunk_scan_tiles_body(
     float* __restrict__ y,
@@ -572,25 +513,14 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
     const int g = h / (nh / ng);
     const long long sc = (bc * nh + h) * M2_CHUNK;
     const long long tri = (bc * ng + g) * (M2_CHUNK * (M2_CHUNK + 1) / 2);
-    const int hld = ds + 1;
-    float* hs = m2cs_sm;                       // [P][N + 1]
-    float* cs = hs + hd * hld;                 // [TT][N]
-    float* ws = cs + M2_SCAN_TT * ds;          // [TT][64]
-    float* xs = ws + M2_SCAN_TT * M2_CHUNK;    // [64][P]
+    constexpr int HLD = M2_SCAN_NS + 1;
+    float* hs = m2cs_sm;                          // [PC][NS + 1]
+    float* cs = hs + M2_SCAN_PC * HLD;            // [TT][NS]
+    float* ws = cs + M2_SCAN_TT * M2_SCAN_NS;     // [TT][64]
+    float* xs = ws + M2_SCAN_TT * M2_CHUNK;       // [64][PC]
     const float* hg = states + (bc * nh + h) * (long long)hd * ds;
-    m2_stage4(hd * ds, threadIdx.x, blockDim.x, [&](int i) { return hg[i]; },
-              [&](int i, float v) {
-                  const int p = i / ds;
-                  hs[p * hld + i - p * ds] = v;
-              });
-    m2_stage4(tn * ds, threadIdx.x, blockDim.x,
-              [&](int i) {
-                  const int t = i / ds, n = i - t * ds;
-                  return to_f(
-                      xbc[(b * seq + t0 + tile0 + t) * ld_xbc + c_col + (long long)g * ds + n]);
-              },
-              [&](int i, float v) { cs[i] = v; });
-    m2_stage4(tn * M2_CHUNK, threadIdx.x, blockDim.x,
+    const int tid = threadIdx.x;
+    m2_stage4(tn * M2_CHUNK, tid, blockDim.x,
               [&](int i) {
                   const int tl = i / M2_CHUNK, s = i - tl * M2_CHUNK;
                   const int t = tile0 + tl;
@@ -606,57 +536,87 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
                   return w;
               },
               [&](int i, float v) { ws[i] = v; });
-    m2_stage4(send * hd, threadIdx.x, blockDim.x,
-              [&](int i) {
-                  const int s = i / hd, p = i - s * hd;
-                  return to_f(xbc[(b * seq + t0 + s) * ld_xbc + (long long)h * hd + p]);
-              },
-              [&](int i, float v) { xs[i] = v; });
-    __syncthreads();
-    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nw = blockDim.x >> 5;
-    if (warp >= nw) return;
+    const int lane = tid & 31, warp = tid >> 5;
+    // The warp's tokens; a block of fewer warps than the tile's groups of 4
+    // would leave tokens unwritten, so the block is the tile's 8 warps.
+    const int r0 = 4 * warp;
+    const int rows = max(0, min(4, tn - r0));
     // The tokens before the chunk's first start continue the entering
     // state's sequence; a token sums over its own sequence's tokens.
     const int cont = vl_lower_bound(seq_idx, b, seq, t0, t0 + lc,
                                     vl_id(seq_idx, b, seq, t0 - 1) + 1) - t0;
-    for (int r0 = 4 * warp; r0 < tn; r0 += 4 * nw) {
-        const int rows = min(4, tn - r0);
-        int lo[4];
+    int lo[4];
 #pragma unroll
-        for (int i = 0; i < 4; i++)
-            lo[i] = i < rows ? vl_seq_first(seq_idx, b, seq, t0, t0 + tile0 + r0 + i) - t0 : 0;
-        for (int c0 = 0; c0 < hd; c0 += 64) {
-            float acc[4][2];
+    for (int i = 0; i < 4; i++)
+        lo[i] = i < rows ? vl_seq_first(seq_idx, b, seq, t0, t0 + tile0 + r0 + i) - t0 : 0;
+    for (int c0 = 0; c0 < hd; c0 += M2_SCAN_PC) {
+        const int pw = min(M2_SCAN_PC, hd - c0);
+        const bool on0 = lane < pw, on1 = lane + 32 < pw;
+        float acc[4][2];
 #pragma unroll
-            for (int i = 0; i < 4; i++) {
-                acc[i][0] = 0.0f;
-                acc[i][1] = 0.0f;
-            }
-            const int p0 = c0 + lane, p1 = c0 + lane + 32;
-            const bool on0 = p0 < hd, on1 = p1 < hd;
-            for (int n = 0; n < ds; n++) {
-                const float h0 = on0 ? hs[p0 * hld + n] : 0.0f;
-                const float h1 = on1 ? hs[p1 * hld + n] : 0.0f;
+        for (int i = 0; i < 4; i++) {
+            acc[i][0] = 0.0f;
+            acc[i][1] = 0.0f;
+        }
+        for (int n0 = 0; n0 < ds; n0 += M2_SCAN_NS) {
+            const int nn = min(M2_SCAN_NS, ds - n0);
+            __syncthreads();
+            m2_stage4(pw * nn, tid, blockDim.x,
+                      [&](int i) {
+                          const int pl = i / nn, nl = i - pl * nn;
+                          return hg[(long long)(c0 + pl) * ds + n0 + nl];
+                      },
+                      [&](int i, float v) {
+                          const int pl = i / nn;
+                          hs[pl * HLD + i - pl * nn] = v;
+                      });
+            m2_stage4(tn * nn, tid, blockDim.x,
+                      [&](int i) {
+                          const int t = i / nn, nl = i - t * nn;
+                          return to_f(xbc[(b * seq + t0 + tile0 + t) * ld_xbc + c_col
+                                          + (long long)g * ds + n0 + nl]);
+                      },
+                      [&](int i, float v) {
+                          const int t = i / nn;
+                          cs[t * M2_SCAN_NS + i - t * nn] = v;
+                      });
+            __syncthreads();
+            for (int nl = 0; nl < nn; nl++) {
+                const float h0 = on0 ? hs[lane * HLD + nl] : 0.0f;
+                const float h1 = on1 ? hs[(lane + 32) * HLD + nl] : 0.0f;
 #pragma unroll
                 for (int i = 0; i < 4; i++) {
-                    const float cv = i < rows ? cs[(r0 + i) * ds + n] : 0.0f;
+                    const float cv = i < rows ? cs[(r0 + i) * M2_SCAN_NS + nl] : 0.0f;
                     acc[i][0] = __fmaf_rn(cv, h0, acc[i][0]);
                     acc[i][1] = __fmaf_rn(cv, h1, acc[i][1]);
                 }
             }
+        }
 #pragma unroll
-            for (int i = 0; i < 4; i++) {
-                if (i < rows) {
-                    const bool on = tile0 + r0 + i < cont;
-                    const float e = m2_exp(acs[sc + tile0 + r0 + i]);
-                    acc[i][0] = on ? __fmul_rn(acc[i][0], e) : 0.0f;
-                    acc[i][1] = on ? __fmul_rn(acc[i][1], e) : 0.0f;
-                }
+        for (int i = 0; i < 4; i++) {
+            if (i < rows) {
+                const bool on = tile0 + r0 + i < cont;
+                const float e = m2_exp(acs[sc + tile0 + r0 + i]);
+                acc[i][0] = on ? __fmul_rn(acc[i][0], e) : 0.0f;
+                acc[i][1] = on ? __fmul_rn(acc[i][1], e) : 0.0f;
             }
+        }
+        __syncthreads();
+        m2_stage4(send * pw, tid, blockDim.x,
+                  [&](int i) {
+                      const int s = i / pw, pl = i - s * pw;
+                      return to_f(xbc[(b * seq + t0 + s) * ld_xbc + (long long)h * hd + c0 + pl]);
+                  },
+                  [&](int i, float v) {
+                      const int s = i / pw;
+                      xs[s * M2_SCAN_PC + i - s * pw] = v;
+                  });
+        __syncthreads();
+        if (rows > 0) {
             const int last = tile0 + r0 + rows - 1;
             for (int s = 0; s <= last; s++) {
-                const float x0 = on0 ? xs[s * hd + p0] : 0.0f;
-                const float x1 = on1 ? xs[s * hd + p1] : 0.0f;
+                const float x0 = on0 ? xs[s * M2_SCAN_PC + lane] : 0.0f;
+                const float x1 = on1 ? xs[s * M2_SCAN_PC + lane + 32] : 0.0f;
 #pragma unroll
                 for (int i = 0; i < 4; i++) {
                     if (i < rows && s <= tile0 + r0 + i && s >= lo[i]) {
@@ -670,14 +630,17 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
             for (int i = 0; i < 4; i++) {
                 if (i >= rows) continue;
                 const int t = tile0 + r0 + i;
-                const long long yrow = (b * seq + t0 + t) * ((long long)nh * hd) + (long long)h * hd;
+                const long long yrow =
+                    (b * seq + t0 + t) * ((long long)nh * hd) + (long long)h * hd + c0;
                 if (on0) {
-                    const float dv = d_per_channel ? D[(long long)h * hd + p0] : D[h];
-                    y[yrow + p0] = __fmaf_rn(xs[t * hd + p0], dv, acc[i][0]);
+                    const float dv = d_per_channel ? D[(long long)h * hd + c0 + lane] : D[h];
+                    y[yrow + lane] = __fmaf_rn(xs[t * M2_SCAN_PC + lane], dv, acc[i][0]);
                 }
                 if (on1) {
-                    const float dv = d_per_channel ? D[(long long)h * hd + p1] : D[h];
-                    y[yrow + p1] = __fmaf_rn(xs[t * hd + p1], dv, acc[i][1]);
+                    const float dv =
+                        d_per_channel ? D[(long long)h * hd + c0 + lane + 32] : D[h];
+                    y[yrow + lane + 32] =
+                        __fmaf_rn(xs[t * M2_SCAN_PC + lane + 32], dv, acc[i][1]);
                 }
             }
         }
