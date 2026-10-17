@@ -224,7 +224,7 @@ pub struct MambaKernels {
     pub gather_last_timestep: CudaFunction,
     /// Every sequence's rows reversed in place, moved 16, 4 or 2 bytes a
     /// thread (sequence_reverse.cu): the bidirectional pairs' second layer.
-    pub rows_reverse_v16: CudaFunction,
+    pub rows_reverse_u128: CudaFunction,
     pub rows_reverse_u32: CudaFunction,
     pub rows_reverse_u16: CudaFunction,
 
@@ -1597,7 +1597,7 @@ impl MambaKernels {
             gating_backward: get("gating_backward")?,
             residual_add: get("residual_add")?,
             gather_last_timestep: get("gather_last_timestep")?,
-            rows_reverse_v16: get("rows_reverse_v16")?,
+            rows_reverse_u128: get("rows_reverse_u128")?,
             rows_reverse_u32: get("rows_reverse_u32")?,
             rows_reverse_u16: get("rows_reverse_u16")?,
 

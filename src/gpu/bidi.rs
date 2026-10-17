@@ -35,7 +35,7 @@ pub(crate) fn reverse_rows(ctx: &GpuCtx, rows: WindowRows, seq_idx: u64) -> Resu
     // The widest unit that divides a row and keeps every row aligned: a
     // 16-byte move runs at more than twice the rate of a 4-byte one.
     let (kernel, unit) = if row_bytes % 16 == 0 && ptr % 16 == 0 {
-        (&k.rows_reverse_v16, 16)
+        (&k.rows_reverse_u128, 16)
     } else if row_bytes % 4 == 0 && ptr % 4 == 0 {
         (&k.rows_reverse_u32, 4)
     } else {

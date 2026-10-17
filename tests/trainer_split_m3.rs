@@ -480,10 +480,10 @@ fn f16_trainer() -> (Mamba3GpuTrainer, Vec<f32>, Vec<f32>, Vec<f32>) {
     )
 }
 
-/// Two accumulated micro-batches (batch 1, state reset between) against one
-/// big batch (batch 2) of the same samples: the gradients sum either way,
-/// so the weights agree within the tolerance of a different GEMM batch
-/// shape. In f16 both runs hold the same loss scale, so the window sums
+/// Two accumulated micro-batches of one sequence each, the state reset
+/// between them, against one big batch of both sequences: the gradients sum
+/// either way, so the weights agree within the tolerance of a different GEMM
+/// batch shape. In f16 both runs hold the same loss scale, so the window sums
 /// the same scaled gradients the big batch takes.
 fn assert_accumulation_two_micro_equals_one_big_batch(dtype: WeightDtype, tol: f32) {
     let cfg = test_cfg();

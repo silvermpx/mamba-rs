@@ -35,6 +35,6 @@ extern "C" __global__ void rows_reverse_##SUFFIX(                               
     c[u] = va;                                                                  \
 }
 
-DEFINE_ROWS_REVERSE(v16, uint4)
+DEFINE_ROWS_REVERSE(u128, uint4)
 DEFINE_ROWS_REVERSE(u32, unsigned int)
 DEFINE_ROWS_REVERSE(u16, unsigned short)
