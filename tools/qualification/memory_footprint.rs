@@ -36,6 +36,7 @@ fn classifier_shape_memory_footprint() {
         // footprint must match what ships.
         scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        ..mamba_rs::mamba1::MambaConfig::default()
     };
     let input_dim = 1024usize; // 32x32 grayscale patch
     let seq_len = 4621usize;

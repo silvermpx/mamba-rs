@@ -46,6 +46,7 @@ fn scan_mode_bench_classifier_shape() {
             expand: 2,
             scan_mode: mode,
             rms_norm_eps: 1e-5,
+            ..mamba_rs::mamba1::MambaConfig::default()
         };
         let mut cpu = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
         for lw in cpu.layers.iter_mut() {

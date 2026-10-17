@@ -84,6 +84,7 @@ fn lm_cfg(scan_mode: mamba_rs::config::ScanMode) -> mamba_rs::mamba1::MambaConfi
         expand: 2,
         scan_mode,
         rms_norm_eps: 1e-5,
+        ..mamba_rs::mamba1::MambaConfig::default()
     }
 }
 
@@ -327,6 +328,7 @@ fn bench_lm_train_production_shape() {
         expand: 2,
         scan_mode: scan,
         rms_norm_eps: 1e-5,
+        ..mamba_rs::mamba1::MambaConfig::default()
     };
     eprintln!("production shape: dm={dm} L={layers} B={b} T={t} {dtype:?} scan={scan:?}");
     run_lm_shape(dtype, cfg, b, t, " production").unwrap();
@@ -366,6 +368,7 @@ fn bench_production_split_fwd_bwd() {
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
+        ..mamba_rs::mamba1::MambaConfig::default()
     };
     let input_dim = dm;
     let n = b * t * dm;

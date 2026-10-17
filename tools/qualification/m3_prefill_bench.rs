@@ -428,7 +428,10 @@ fn m3_pooled_page_bench_typed_vs_f32() {
         a_floor: cfg.a_floor,
         is_outproj_norm: cfg.is_outproj_norm,
         rms_norm_eps: cfg.rms_norm_eps,
+        ssm_norm_eps: cfg.ssm_norm_eps,
+        block_norm: cfg.block_norm,
         use_parallel_scan: true,
+        bidirectional: cfg.bidirectional,
     };
 
     // (label, dtype, mode, tc, family)
