@@ -858,7 +858,9 @@ fn prefill_body<W: MambaWeightsView>(
                 builder.arg(&t_i);
                 builder.arg(&di_i);
                 builder.arg(&ds_i);
-                unsafe { builder.launch(grid_1d_cover(b * di)?) }
+                let lanes_i = crate::gpu::launch::seq_lanes(ds) as i32;
+                builder.arg(&lanes_i);
+                unsafe { builder.launch(crate::gpu::launch::grid_seq(b, di, ds)?) }
                     .map_err(|e| format!("ssm_nosave prefill L{layer_idx}: {e:?}"))?;
             }
         }
@@ -1413,13 +1415,6 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                     }
                 }
             } else {
-                if ds > k.state_cap {
-                    return Err(format!(
-                        "ssm_burnin_nosave_typed: d_state {ds} exceeds the compiled state \
-                     capacity {} - the kernel returns without writing y otherwise",
-                        k.state_cap
-                    ));
-                }
                 let width = seq_scan_index_width(b, t, di, ds, 2 * di, false);
                 let mut bld = ctx
                     .stream
@@ -1438,7 +1433,9 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                 bld.arg(&t_i);
                 bld.arg(&di_i);
                 bld.arg(&ds_i);
-                unsafe { bld.launch(grid_1d_cover(b * di)?) }
+                let lanes_i = crate::gpu::launch::seq_lanes(ds) as i32;
+                bld.arg(&lanes_i);
+                unsafe { bld.launch(crate::gpu::launch::grid_seq(b, di, ds)?) }
                     .map_err(|e| format!("ssm_nosave prefill L{layer_idx}: {e:?}"))?;
             }
         }

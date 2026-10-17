@@ -211,6 +211,236 @@ fn m1_step_keeps_the_bits_of_its_released_form() {
     eprintln!("m1 decode step: the released kernel's bits on {cases} cases");
 }
 
+/// The Mamba-1 sequential kernels give a channel a warp segment of lanes,
+/// each holding a slice of at most 16 states, and hand the output chains
+/// from lane to lane. Against the released kernels, which held a channel's
+/// whole state in one thread and are frozen and compiled at the largest
+/// capacity: states inside one lane, on a lane's edge, with an idle last
+/// lane and up to 256; a step, a few and more than a lane's rounds; f32,
+/// bf16 and f16 and both index widths; every output of the forward with
+/// and without saves (the latter gated and not) and of both backwards, bit
+/// for bit.
+#[test]
+fn m1_sequential_kernels_keep_the_bits_of_their_released_form() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new_with_state_cap(&dev, 256).unwrap();
+    let frozen = frozen_kernels::frozen_module(
+        dev.context(),
+        arch::arch0(),
+        Some(256),
+        include_str!("fixtures/m1_seq_reference.cu"),
+    );
+    let (batch, di) = (2usize, 24usize);
+    let typed = |v: &[f32], dt: WeightDtype| {
+        let b = DtypedBuf::zeros(&ctx.stream, v.len(), dt).unwrap();
+        ctx.stream.synchronize().unwrap();
+        b.upload_f32(&ctx.stream, v).unwrap();
+        ctx.stream.synchronize().unwrap();
+        b
+    };
+    let f32_buf = |v: &[f32]| GpuBuffer::from_cpu(&ctx.stream, v).unwrap();
+    let floats = |b: &GpuBuffer| -> Vec<u32> {
+        b.to_cpu(&ctx.stream)
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect()
+    };
+    let typed_bits = |b: &DtypedBuf, n: usize| -> Vec<u32> {
+        let mut v = vec![0f32; n];
+        b.download_f32(&ctx.stream, &mut v).unwrap();
+        v.iter().map(|x| x.to_bits()).collect()
+    };
+    let launch = |f: &CudaFunction, ptrs: &[u64], ints: &[i32], threads: usize| {
+        let mut b = ctx.stream.launch_builder(f);
+        for p in ptrs {
+            b.arg(p);
+        }
+        for v in ints {
+            b.arg(v);
+        }
+        let cfg = LaunchConfig {
+            grid_dim: (threads.div_ceil(256) as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { b.launch(cfg) }.unwrap();
+        ctx.stream.synchronize().unwrap();
+    };
+    let mut cases = 0;
+    for ds in [1usize, 15, 16, 17, 33, 48, 64, 65, 100, 129, 200, 256] {
+        let lanes = mamba_rs::gpu::launch::seq_lanes(ds);
+        let a_neg: Vec<f32> = det(di * ds, 0x71)
+            .iter()
+            .map(|v| -(v + 0.6) * 2.0)
+            .collect();
+        let a = f32_buf(&a_neg);
+        let d = f32_buf(&det(di, 0x72));
+        for t in [1usize, 5, 37] {
+            let (bt, st) = (batch * t, batch * di * ds);
+            let tape_len = batch * (t + 1) * di * ds;
+            let h0 = det(st, 0x73);
+            let tape0 = det(tape_len, 0x74);
+            for dt in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+                let delta_raw = typed(
+                    &det(bt * di, 0x75)
+                        .iter()
+                        .map(|v| v * 4.0)
+                        .collect::<Vec<_>>(),
+                    dt,
+                );
+                let delta = typed(
+                    &det(bt * di, 0x76)
+                        .iter()
+                        .map(|v| v.abs() + 0.05)
+                        .collect::<Vec<_>>(),
+                    dt,
+                );
+                let u = typed(&det(bt * di, 0x77), dt);
+                let bm = typed(&det(bt * ds, 0x78), dt);
+                let cm = typed(&det(bt * ds, 0x79), dt);
+                let gate = typed(&det(bt * 2 * di, 0x7a), dt);
+                let dy = typed(&det(bt * di, 0x7b), dt);
+                let suffix = match dt {
+                    WeightDtype::Bf16 => "bf16",
+                    WeightDtype::F16 => "f16",
+                    _ => "f32",
+                };
+                for width in [IndexWidth::I32, IndexWidth::I64] {
+                    let wide = if width == IndexWidth::I64 { "_i64" } else { "" };
+                    let name = |kernel: &str| format!("m1_reference_{kernel}_{suffix}{wide}");
+                    let dims = [batch as i32, t as i32, di as i32, ds as i32];
+                    let new_dims = [batch as i32, t as i32, di as i32, ds as i32, lanes as i32];
+                    // Each kernel run on fresh outputs: (released, new).
+                    let k = &ctx.kernels;
+                    for gate_stride in [0usize, 2 * di] {
+                        let nosave = |f: &CudaFunction, ints: &[i32], threads: usize| {
+                            let h = f32_buf(&h0);
+                            let y = typed(&vec![0.0; bt * di], dt);
+                            let ptrs = [
+                                h.cached_ptr(),
+                                y.cached_ptr(),
+                                delta.cached_ptr(),
+                                u.cached_ptr(),
+                                bm.cached_ptr(),
+                                cm.cached_ptr(),
+                                a.cached_ptr(),
+                                d.cached_ptr(),
+                                gate.cached_ptr(),
+                            ];
+                            let mut all = vec![gate_stride as i32];
+                            all.extend_from_slice(ints);
+                            launch(f, &ptrs, &all, threads);
+                            (floats(&h), typed_bits(&y, bt * di))
+                        };
+                        let released = frozen.load_function(&name("burnin_nosave")).unwrap();
+                        let want = nosave(&released, &dims, batch * di);
+                        let got = nosave(
+                            k.ssm_burnin_nosave_typed.get(width).get(dt),
+                            &new_dims,
+                            batch * di * lanes,
+                        );
+                        let what =
+                            format!("{dt:?} {width:?} d_state {ds} T {t} gate {gate_stride}");
+                        assert!(want.0 == got.0, "forward without saves, states: {what}");
+                        assert!(want.1 == got.1, "forward without saves, outputs: {what}");
+                    }
+                    let saving = |f: &CudaFunction, ints: &[i32], threads: usize| {
+                        let h = f32_buf(&h0);
+                        let y = typed(&vec![0.0; bt * di], dt);
+                        let tape = f32_buf(&vec![0.0; tape_len]);
+                        let saved = typed(&vec![0.0; bt * di], dt);
+                        let ptrs = [
+                            h.cached_ptr(),
+                            y.cached_ptr(),
+                            tape.cached_ptr(),
+                            delta_raw.cached_ptr(),
+                            saved.cached_ptr(),
+                            u.cached_ptr(),
+                            bm.cached_ptr(),
+                            cm.cached_ptr(),
+                            a.cached_ptr(),
+                            d.cached_ptr(),
+                        ];
+                        launch(f, &ptrs, ints, threads);
+                        (
+                            floats(&h),
+                            typed_bits(&y, bt * di),
+                            floats(&tape),
+                            typed_bits(&saved, bt * di),
+                        )
+                    };
+                    let released = frozen.load_function(&name("burnin")).unwrap();
+                    let want = saving(&released, &dims, batch * di);
+                    let got = saving(
+                        k.ssm_burnin_fwd_typed.get(width).get(dt),
+                        &new_dims,
+                        batch * di * lanes,
+                    );
+                    let what = format!("{dt:?} {width:?} d_state {ds} T {t}");
+                    assert!(want == got, "saving forward: {what}");
+                    let tape = f32_buf(&tape0);
+                    let backward = |f: &CudaFunction, ints: &[i32], threads: usize| {
+                        let dd = typed(&vec![0.0; bt * di], dt);
+                        let du = typed(&vec![0.0; bt * di], dt);
+                        let db = typed(&vec![0.0; bt * di * ds], dt);
+                        let dc = typed(&vec![0.0; bt * di * ds], dt);
+                        let d_d = f32_buf(&vec![0.0; batch * di]);
+                        let d_a = f32_buf(&vec![0.0; st]);
+                        let ptrs = [
+                            tape.cached_ptr(),
+                            delta.cached_ptr(),
+                            u.cached_ptr(),
+                            bm.cached_ptr(),
+                            cm.cached_ptr(),
+                            a.cached_ptr(),
+                            d.cached_ptr(),
+                            dy.cached_ptr(),
+                            dd.cached_ptr(),
+                            du.cached_ptr(),
+                            db.cached_ptr(),
+                            dc.cached_ptr(),
+                            d_d.cached_ptr(),
+                            d_a.cached_ptr(),
+                        ];
+                        launch(f, &ptrs, ints, threads);
+                        (
+                            typed_bits(&dd, bt * di),
+                            typed_bits(&du, bt * di),
+                            typed_bits(&db, bt * di * ds),
+                            typed_bits(&dc, bt * di * ds),
+                            floats(&d_d),
+                            floats(&d_a),
+                        )
+                    };
+                    let released = frozen.load_function(&name("backward_local")).unwrap();
+                    let want = backward(&released, &dims, batch * di);
+                    let got = backward(
+                        k.ssm_backward_local_typed.get(width).get(dt),
+                        &new_dims,
+                        batch * di * lanes,
+                    );
+                    assert!(want == got, "typed backward: {what}");
+                    if dt == WeightDtype::F32 {
+                        let released = frozen
+                            .load_function(&format!("m1_reference_backward_local{wide}"))
+                            .unwrap();
+                        let want = backward(&released, &dims, batch * di);
+                        let got = backward(
+                            k.ssm_backward_local.get(width),
+                            &new_dims,
+                            batch * di * lanes,
+                        );
+                        assert!(want == got, "f32 backward: {what}");
+                    }
+                    cases += 1;
+                }
+            }
+        }
+    }
+    eprintln!("m1 sequential kernels: the released kernels' bits on {cases} cases");
+}
+
 #[test]
 fn m1_gpu_step_matches_cpu_at_d_state_128() {
     check_step_parity(128);

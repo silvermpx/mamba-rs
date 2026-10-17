@@ -729,6 +729,18 @@
 - The gated MLP's gate, which every family composes (`mlp_gate_fwd`,
   `mlp_gate_bwd`), takes rows the same way, where a thread an element
   divided its index by the hidden width in 64 bits. The bits are the same.
+- The Mamba-1 sequential kernels (the burn-in forward with and without
+  its saves, and the local backward over f32 and typed rows) give a
+  channel a warp segment of lanes, a power of two, each holding a slice of
+  at most 16 states (`launch::seq_lanes`, `launch::grid_seq`); lane k
+  takes a step one round after lane k - 1 and continues the output chains
+  that lane hands it through a shuffle. A thread held a channel's whole
+  state in register arrays of the compiled capacity, four of them in the
+  backward, which spilled to local memory from 64 states on (up to 1.5 KB
+  of spill stores a thread at 64 states, up to 48 KB at 256). The kernels
+  take the lanes as their last argument. Every output keeps its chain and
+  its bits; the released kernels stay frozen in
+  `tests/fixtures/m1_seq_reference.cu`.
 
 ### Fixed
 

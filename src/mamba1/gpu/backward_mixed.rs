@@ -434,7 +434,9 @@ fn layer_backward_mixed(
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&ds_i);
-            unsafe { bld.launch(grid_1d_cover(b * di)?) }
+            let lanes_i = crate::gpu::launch::seq_lanes(ds) as i32;
+            bld.arg(&lanes_i);
+            unsafe { bld.launch(crate::gpu::launch::grid_seq(b, di, ds)?) }
                 .map_err(|e| format!("ssm_backward_local_typed: {e:?}"))?;
         }
     }

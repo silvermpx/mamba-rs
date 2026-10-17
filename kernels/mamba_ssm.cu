@@ -16,17 +16,12 @@
 // Source: CPU reference: train/forward.rs (phases F4d, B3)
 // Paper: Gu & Dao 2023 "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
 
-// State-dimension capacity of the per-thread register arrays below.
-// Injected at JIT time (-DMAMBA_RS_STATE_CAP=...) from the model config
-// so any reference-range d_state runs the same code path; 64 covers the
-// common shapes at minimum register pressure. The state loops run to this
-// compiled capacity so the state arrays index statically and stay in
-// registers; each loop leaves at the model's d_state, so a capacity wider
-// than the state costs nothing per step. The decode step holds a slice of
-// 16 states at a time, so no state spills whatever d_state; the sequential
-// kernels hold the whole state, which spills past about 128 states, and
-// run only when the sequential scan is asked for: the Auto mode sends
-// states past 64 to the parallel scan.
+// The state capacity the module is compiled for, injected at JIT time
+// (-DMAMBA_RS_STATE_CAP=...) from the model config. The decode step and
+// the sequential kernels hold slices of 16 states at a time in register
+// arrays that index statically, so no state spills whatever d_state; the
+// decode step refuses a state past the capacity, which the host checks
+// before it launches.
 #ifndef MAMBA_RS_STATE_CAP
 #define MAMBA_RS_STATE_CAP 64
 #endif
@@ -50,6 +45,17 @@ __device__ __forceinline__ float ssm_update_input_fused(float da, float h,
                                                         float du, float B) {
     return __fmaf_rn(du, B, __fmul_rn(da, h));
 }
+
+// The sequential kernels give a channel `lanes` threads of one warp, a
+// power of two, each holding a slice of at most M1_SEQ_SLICE states in
+// registers: lane k the states from k * ceil(d_state / lanes) on. Lane k
+// takes step t at round t + k (the backward walks the steps from the last)
+// and hands the step's output chain, with the step's inputs, to lane k + 1
+// through a shuffle, and that lane continues the chain over its own states.
+// The chain runs over the states in order, as one thread over the whole
+// state ran it, so every output keeps that thread's bits, and no state
+// leaves the registers whatever d_state.
+#define M1_SEQ_SLICE 16
 
 // ======================== FORWARD ========================
 
@@ -132,60 +138,83 @@ DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_f16, int, __half, from_f_f16, s
 DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_f16_i64, long long, __half, from_f_f16, ssm_update_input_fused)
 
 // Templated SSM burnin nosave — sequence forward for prefill / target net.
-// Activations in T_IN, state/a_neg/D stay f32.
-#define DEFINE_SSM_BURNIN_NOSAVE(NAME, IDX, TY, FROM_F)                    \
-extern "C" __global__ void NAME(                                           \
-    float* h,                                                              \
-    TY* y_out,                                                             \
-    const TY* delta, const TY* u,                                          \
-    const TY* B, const TY* C,                                              \
-    const float* a_neg, const float* D,                                    \
-    const TY* proj_gate,                                                   \
-    int gate_stride,                                                       \
-    int batch, int T_len, int d_inner, int d_state                         \
-) {                                                                        \
-    IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                  \
-    IDX total = (IDX)batch * d_inner;                                      \
-    if (idx >= total) return;                                              \
-    IDX b = idx / d_inner;                                                 \
-    int d = (int)(idx % d_inner);                                          \
-    IDX h_base = (b * d_inner + d) * d_state;                              \
-    float h_local[MAMBA_RS_STATE_CAP];                                                     \
-    float a_local[MAMBA_RS_STATE_CAP];                                                     \
-    if (d_state > MAMBA_RS_STATE_CAP) return;                                              \
-    _Pragma("unroll")                                                      \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {        \
-        h_local[n] = h[h_base + n];                                        \
-        a_local[n] = a_neg[(IDX)d * d_state + n];                          \
-    }                                                                      \
-    for (int t = 0; t < T_len; t++) {                                      \
-        IDX bt_di = (b * T_len + t) * d_inner + d;                         \
-        IDX bt_ds = (b * T_len + t) * d_state;                             \
-        float delta_d = to_f(delta[bt_di]);                                \
-        float u_d = to_f(u[bt_di]);                                        \
-        float delta_u_d = delta_d * u_d;                                   \
-        float y_d = D[d] * u_d;                                            \
-        _Pragma("unroll")                                                  \
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {    \
-            float da = exp2f(delta_d * a_local[n] * LOG2E);                \
-            h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d, \
-                                                to_f(B[bt_ds + n]));       \
-            y_d = __fmaf_rn(h_local[n], to_f(C[bt_ds + n]), y_d);          \
-        }                                                                  \
-        TY ty = FROM_F(y_d);                                               \
-        if (gate_stride > 0) {                                             \
-            /* Round-trip emulation of the replaced typed chain (see    \
-             * the parallel nosave twin). */                               \
-            float g = to_f(proj_gate[(b * T_len + t) * gate_stride         \
-                                     + d_inner + d]);                      \
-            TY tg = FROM_F(g / (1.0f + exp2f(-g * 1.4426950408889634f)));  \
-            ty = FROM_F(to_f(ty) * to_f(tg));                              \
-        }                                                                  \
-        y_out[bt_di] = ty;                                                 \
-    }                                                                      \
-    _Pragma("unroll")                                                      \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else          \
-        h[h_base + n] = h_local[n];                                        \
+// Activations in T_IN, state/a_neg/D stay f32. A channel's lanes as above.
+#define DEFINE_SSM_BURNIN_NOSAVE(NAME, IDX, TY, FROM_F)                        \
+extern "C" __global__ void NAME(                                               \
+    float* h,                                                                  \
+    TY* y_out,                                                                 \
+    const TY* delta, const TY* u,                                              \
+    const TY* B, const TY* C,                                                  \
+    const float* a_neg, const float* D,                                        \
+    const TY* proj_gate,                                                       \
+    int gate_stride,                                                           \
+    int batch, int T_len, int d_inner, int d_state, int lanes                  \
+) {                                                                            \
+    const IDX tid = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                \
+    const int k = (int)tid & (lanes - 1);                                      \
+    const IDX ch = tid >> (__ffs(lanes) - 1);                                  \
+    const bool live = ch < (IDX)batch * d_inner;                               \
+    const IDX b = live ? ch / d_inner : 0;                                     \
+    const int d = live ? (int)(ch % d_inner) : 0;                              \
+    const int per = (d_state + lanes - 1) / lanes;                             \
+    const int n0 = k * per;                                                    \
+    const int len = live ? max(0, min(per, d_state - n0)) : 0;                 \
+    const int last = lanes - 1;                                                \
+    const IDX h_base = (b * d_inner + d) * d_state + n0;                       \
+    float h_local[M1_SEQ_SLICE];                                               \
+    float a_local[M1_SEQ_SLICE];                                               \
+    _Pragma("unroll")                                                          \
+    for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else {         \
+        h_local[n] = h[h_base + n];                                            \
+        a_local[n] = a_neg[(IDX)d * d_state + n0 + n];                         \
+    }                                                                          \
+    float y_pass = 0.0f, delta_pass = 0.0f, u_pass = 0.0f;                     \
+    for (int j = 0; j < T_len + last; j++) {                                   \
+        const float y_in = __shfl_up_sync(0xffffffffu, y_pass, 1, lanes);      \
+        const float delta_in =                                                 \
+            __shfl_up_sync(0xffffffffu, delta_pass, 1, lanes);                 \
+        const float u_in = __shfl_up_sync(0xffffffffu, u_pass, 1, lanes);      \
+        const int t = j - k;                                                   \
+        if (!live || t < 0 || t >= T_len) continue;                            \
+        IDX bt_di = (b * T_len + t) * d_inner + d;                             \
+        IDX bt_ds = (b * T_len + t) * d_state + n0;                            \
+        float delta_d, u_d, y_d;                                               \
+        if (k == 0) {                                                          \
+            delta_d = to_f(delta[bt_di]);                                      \
+            u_d = to_f(u[bt_di]);                                              \
+            y_d = D[d] * u_d;                                                  \
+        } else {                                                               \
+            delta_d = delta_in;                                                \
+            u_d = u_in;                                                        \
+            y_d = y_in;                                                        \
+        }                                                                      \
+        float delta_u_d = delta_d * u_d;                                       \
+        _Pragma("unroll")                                                      \
+        for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else {     \
+            float da = exp2f(delta_d * a_local[n] * LOG2E);                    \
+            h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d,     \
+                                                to_f(B[bt_ds + n]));           \
+            y_d = __fmaf_rn(h_local[n], to_f(C[bt_ds + n]), y_d);              \
+        }                                                                      \
+        if (k == last) {                                                       \
+            TY ty = FROM_F(y_d);                                               \
+            if (gate_stride > 0) {                                             \
+                /* Round-trip emulation of the replaced typed chain (see       \
+                 * the parallel nosave twin). */                               \
+                float g = to_f(proj_gate[(b * T_len + t) * gate_stride         \
+                                         + d_inner + d]);                      \
+                TY tg = FROM_F(g / (1.0f + exp2f(-g * 1.4426950408889634f)));  \
+                ty = FROM_F(to_f(ty) * to_f(tg));                              \
+            }                                                                  \
+            y_out[bt_di] = ty;                                                 \
+        }                                                                      \
+        y_pass = y_d;                                                          \
+        delta_pass = delta_d;                                                  \
+        u_pass = u_d;                                                          \
+    }                                                                          \
+    _Pragma("unroll")                                                          \
+    for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else           \
+        h[h_base + n] = h_local[n];                                            \
 }
 
 DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_f32, int, float, from_f_f32)
@@ -196,65 +225,87 @@ DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_f16, int, __half, from_f_f16)
 DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_f16_i64, long long, __half, from_f_f16)
 
 // Templated SSM burnin WITH saves — full forward sequence for training/backward.
-// h_saved and y_out in activation dtype; h_state + a_neg + D in f32.
-#define DEFINE_SSM_BURNIN(NAME, IDX, TY, FROM_F)                            \
-extern "C" __global__ void NAME(                                            \
-    float* h, TY* y_out, float* h_saved,                                    \
-    const TY* delta_raw, TY* delta_saved, const TY* u,                      \
-    const TY* B, const TY* C,                                               \
-    const float* a_neg, const float* D,                                     \
-    int batch, int T_len, int d_inner, int d_state                          \
-) {                                                                         \
-    IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                   \
-    IDX total = (IDX)batch * d_inner;                                       \
-    if (idx >= total) return;                                               \
-    IDX b = idx / d_inner;                                                  \
-    int d = (int)(idx % d_inner);                                           \
-    IDX h_base = (b * d_inner + d) * d_state;                               \
-    float h_local[MAMBA_RS_STATE_CAP];                                                      \
-    float a_local[MAMBA_RS_STATE_CAP];                                                      \
-    if (d_state > MAMBA_RS_STATE_CAP) return;                                               \
-    _Pragma("unroll")                                                       \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {         \
-        h_local[n] = h[h_base + n];                                         \
-        a_local[n] = a_neg[(IDX)d * d_state + n];                           \
-    }                                                                       \
-    _Pragma("unroll")                                                       \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {         \
-        IDX hs_idx =                                                        \
-            ((b * (T_len + 1) + 0) * d_inner + d) * d_state + n;            \
-        h_saved[hs_idx] = h_local[n];                                       \
-    }                                                                       \
-    for (int t = 0; t < T_len; t++) {                                       \
-        IDX bt_di = (b * T_len + t) * d_inner + d;                          \
-        IDX bt_ds = (b * T_len + t) * d_state;                              \
-        float raw = to_f(delta_raw[bt_di]);                                 \
-        float sp = (raw > 20.0f)                                            \
-            ? raw : log1pf(exp2f(raw * 1.4426950408889634f));               \
-        TY spt = FROM_F(sp);                                                \
-        delta_saved[bt_di] = spt;                                           \
-        float delta_d = to_f(spt);                                          \
-        float u_d = to_f(u[bt_di]);                                         \
-        float delta_u_d = delta_d * u_d;                                    \
-        float y_d = D[d] * u_d;                                             \
-        _Pragma("unroll")                                                   \
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {     \
-            float da = exp2f(delta_d * a_local[n] * LOG2E);                 \
-            h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d,  \
-                                                to_f(B[bt_ds + n]));        \
-            y_d = __fmaf_rn(h_local[n], to_f(C[bt_ds + n]), y_d);           \
-        }                                                                   \
-        y_out[bt_di] = FROM_F(y_d);                                         \
-        _Pragma("unroll")                                                   \
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {     \
-            IDX hs_idx =                                                    \
-                ((b * (T_len + 1) + (t + 1)) * d_inner + d) * d_state + n;  \
-            h_saved[hs_idx] = h_local[n];                                   \
-        }                                                                   \
-    }                                                                       \
-    _Pragma("unroll")                                                       \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else           \
-        h[h_base + n] = h_local[n];                                         \
+// h_saved and y_out in activation dtype; h_state + a_neg + D in f32. The
+// first lane computes and saves the step's softplus and hands it on.
+#define DEFINE_SSM_BURNIN(NAME, IDX, TY, FROM_F)                               \
+extern "C" __global__ void NAME(                                               \
+    float* h, TY* y_out, float* h_saved,                                       \
+    const TY* delta_raw, TY* delta_saved, const TY* u,                         \
+    const TY* B, const TY* C,                                                  \
+    const float* a_neg, const float* D,                                        \
+    int batch, int T_len, int d_inner, int d_state, int lanes                  \
+) {                                                                            \
+    const IDX tid = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                \
+    const int k = (int)tid & (lanes - 1);                                      \
+    const IDX ch = tid >> (__ffs(lanes) - 1);                                  \
+    const bool live = ch < (IDX)batch * d_inner;                               \
+    const IDX b = live ? ch / d_inner : 0;                                     \
+    const int d = live ? (int)(ch % d_inner) : 0;                              \
+    const int per = (d_state + lanes - 1) / lanes;                             \
+    const int n0 = k * per;                                                    \
+    const int len = live ? max(0, min(per, d_state - n0)) : 0;                 \
+    const int last = lanes - 1;                                                \
+    const IDX h_base = (b * d_inner + d) * d_state + n0;                       \
+    float h_local[M1_SEQ_SLICE];                                               \
+    float a_local[M1_SEQ_SLICE];                                               \
+    _Pragma("unroll")                                                          \
+    for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else {         \
+        h_local[n] = h[h_base + n];                                            \
+        a_local[n] = a_neg[(IDX)d * d_state + n0 + n];                         \
+    }                                                                          \
+    _Pragma("unroll")                                                          \
+    for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else {         \
+        IDX hs_idx =                                                           \
+            ((b * (T_len + 1) + 0) * d_inner + d) * d_state + n0 + n;          \
+        h_saved[hs_idx] = h_local[n];                                          \
+    }                                                                          \
+    float y_pass = 0.0f, delta_pass = 0.0f, u_pass = 0.0f;                     \
+    for (int j = 0; j < T_len + last; j++) {                                   \
+        const float y_in = __shfl_up_sync(0xffffffffu, y_pass, 1, lanes);      \
+        const float delta_in =                                                 \
+            __shfl_up_sync(0xffffffffu, delta_pass, 1, lanes);                 \
+        const float u_in = __shfl_up_sync(0xffffffffu, u_pass, 1, lanes);      \
+        const int t = j - k;                                                   \
+        if (!live || t < 0 || t >= T_len) continue;                            \
+        IDX bt_di = (b * T_len + t) * d_inner + d;                             \
+        IDX bt_ds = (b * T_len + t) * d_state + n0;                            \
+        float delta_d, u_d, y_d;                                               \
+        if (k == 0) {                                                          \
+            float raw = to_f(delta_raw[bt_di]);                                \
+            float sp = (raw > 20.0f)                                           \
+                ? raw : log1pf(exp2f(raw * 1.4426950408889634f));              \
+            TY spt = FROM_F(sp);                                               \
+            delta_saved[bt_di] = spt;                                          \
+            delta_d = to_f(spt);                                               \
+            u_d = to_f(u[bt_di]);                                              \
+            y_d = D[d] * u_d;                                                  \
+        } else {                                                               \
+            delta_d = delta_in;                                                \
+            u_d = u_in;                                                        \
+            y_d = y_in;                                                        \
+        }                                                                      \
+        float delta_u_d = delta_d * u_d;                                       \
+        _Pragma("unroll")                                                      \
+        for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else {     \
+            float da = exp2f(delta_d * a_local[n] * LOG2E);                    \
+            h_local[n] = ssm_update_decay_fused(da, h_local[n], delta_u_d,     \
+                                                to_f(B[bt_ds + n]));           \
+            y_d = __fmaf_rn(h_local[n], to_f(C[bt_ds + n]), y_d);              \
+        }                                                                      \
+        if (k == last) y_out[bt_di] = FROM_F(y_d);                             \
+        _Pragma("unroll")                                                      \
+        for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else {     \
+            IDX hs_idx =                                                       \
+                ((b * (T_len + 1) + (t + 1)) * d_inner + d) * d_state + n0 + n; \
+            h_saved[hs_idx] = h_local[n];                                      \
+        }                                                                      \
+        y_pass = y_d;                                                          \
+        delta_pass = delta_d;                                                  \
+        u_pass = u_d;                                                          \
+    }                                                                          \
+    _Pragma("unroll")                                                          \
+    for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else           \
+        h[h_base + n] = h_local[n];                                            \
 }
 
 DEFINE_SSM_BURNIN(ssm_burnin_forward_f32, int, float, from_f_f32)
@@ -267,15 +318,38 @@ DEFINE_SSM_BURNIN(ssm_burnin_forward_f16_i64, long long, __half, from_f_f16)
 // ======================== BACKWARD ========================
 
 // SSM backward with per-sample LOCAL gradient accumulation (no atomicAdd).
-// Each thread (b, d) accumulates local d_D and d_a_log, writes to per-sample buffers.
+// A channel's lanes (see the forward) accumulate local d_D (the first lane)
+// and d_a_log (each lane its slice) and write them to per-sample buffers.
 // Separate reduction kernels sum across batch dimension afterward.
 // a_neg cached in registers (Opt A). Uses exp2f (Opt B).
 //
 // Source: CPU reference: train/forward.rs phase B3
 // FIX C2: no atomicAdd, local accumulation + reduction
+// One lane's slice of a backward step: the whole-state walk's state loop
+// over the lane's states, the d_u and d_delta chains carried in d_u_val and
+// d_delta_val. The guard holds from state GUARD_FROM on, so a caller that
+// knows the lane's first state exists runs it unguarded.
+#define M1_BWD_SLICE(IDX, GUARD_FROM)                                          \
+    _Pragma("unroll")                                                          \
+    for (int n = 0; n < M1_SEQ_SLICE; n++)                                     \
+        if (n >= (GUARD_FROM) && n >= len) break; else {                       \
+        float h_curr = h_carry[n];                                             \
+        float da = exp2f(delta_d * a_local[n] * LOG2E);                        \
+        d_h[n] += dy_d * C_saved[bt_ds + n];                                   \
+        IDX btdn = ((b * T + t) * d_inner + d) * d_state + n0 + n;             \
+        d_C_local[btdn] = dy_d * h_curr;                                       \
+        IDX h_prev_idx = ((b * (T + 1) + t) * d_inner + d) * d_state + n0 + n; \
+        float h_prev = h_saved[h_prev_idx];                                    \
+        d_delta_val += d_h[n] * (a_local[n] * da * h_prev + u_d * B_saved[bt_ds + n]); \
+        d_u_val += d_h[n] * delta_d * B_saved[bt_ds + n];                      \
+        d_B_local[btdn] = d_h[n] * delta_d * u_d;                              \
+        d_a_acc[n] += d_h[n] * da * delta_d * a_local[n] * h_prev;             \
+        d_h[n] = da * d_h[n];                                                  \
+        h_carry[n] = h_prev;                                                   \
+    }
+
 #define DEFINE_SSM_BACKWARD_LOCAL(NAME, IDX)                                   \
 extern "C" __global__ void NAME(                                               \
-    /* Inputs (from forward, saved activations) */                             \
     const float* h_saved, /* [batch * (T+1) * d_inner * d_state] saved h BEFORE each step */ \
     const float* delta_saved, /* [batch * T * d_inner] */                      \
     const float* u_saved, /* [batch * T * d_inner] */                          \
@@ -283,117 +357,87 @@ extern "C" __global__ void NAME(                                               \
     const float* C_saved, /* [batch * T * d_state] */                          \
     const float* a_neg, /* [d_inner * d_state] */                              \
     const float* D, /* [d_inner] skip connection weight */                     \
-    /* Incoming gradient */                                                    \
     const float* dy, /* [batch * T * d_inner] */                               \
-    /* Output gradients (per-sample, need reduction across batch) */           \
     float* d_delta, /* [batch * T * d_inner] per-sample */                     \
     float* d_u, /* [batch * T * d_inner] per-sample (includes skip: += dy*D[d]) */ \
     float* d_B_local, /* [batch * T * d_inner * d_state] per-thread */         \
     float* d_C_local, /* [batch * T * d_inner * d_state] per-thread */         \
     float* d_D_local, /* [batch * d_inner] per-sample (sum across T) */        \
     float* d_a_log_local, /* [batch * d_inner * d_state] per-sample (sum across T) */ \
-    /* Dimensions */                                                           \
-    int batch, int T, int d_inner, int d_state                                 \
+    int batch, int T, int d_inner, int d_state, int lanes                      \
 ) {                                                                            \
-    IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                      \
-    IDX total = (IDX)batch * d_inner;                                          \
-    if (idx >= total) return;                                                  \
-                                                                               \
-    IDX b = idx / d_inner;                                                     \
-    int d = (int)(idx % d_inner);                                              \
-                                                                               \
-    /* Per-thread accumulators for D and a_log gradients */                    \
+    const IDX tid = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                \
+    const int k = (int)tid & (lanes - 1);                                      \
+    const IDX ch = tid >> (__ffs(lanes) - 1);                                  \
+    const bool live = ch < (IDX)batch * d_inner;                               \
+    const IDX b = live ? ch / d_inner : 0;                                     \
+    const int d = live ? (int)(ch % d_inner) : 0;                              \
+    const int per = (d_state + lanes - 1) / lanes;                             \
+    const int n0 = k * per;                                                    \
+    const int len = live ? max(0, min(per, d_state - n0)) : 0;                 \
+    const int last = lanes - 1;                                                \
     float local_d_D = 0.0f;                                                    \
-                                                                               \
-    /* Opt A: cache a_neg in registers */                                      \
-    float a_local[MAMBA_RS_STATE_CAP];                                         \
-    if (d_state > MAMBA_RS_STATE_CAP) return;                                  \
+    float a_local[M1_SEQ_SLICE];                                               \
+    float d_h[M1_SEQ_SLICE];                                                   \
+    float d_a_acc[M1_SEQ_SLICE];                                               \
+    float h_carry[M1_SEQ_SLICE];                                               \
     _Pragma("unroll")                                                          \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else \
-        a_local[n] = a_neg[(IDX)d * d_state + n];                              \
-                                                                               \
-    /* d_h carries gradient backward through time */                           \
-    float d_h[MAMBA_RS_STATE_CAP];                                             \
-    /* Register accumulator for d_a_log: the old global `+=` into */           \
-    /* d_a_log_local was ~T*d_state dependent global RMWs per thread in */     \
-    /* the hottest loop; same adds in the same (t,n) order, written once. */   \
-    float d_a_acc[MAMBA_RS_STATE_CAP];                                         \
-    /* Register carry for the BPTT state: in the reverse-T walk, */            \
-    /* h_curr(t) == h_prev(t+1) — carrying it halves h_saved reads. */         \
-    float h_carry[MAMBA_RS_STATE_CAP];                                         \
-    _Pragma("unroll")                                                          \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else { \
+    for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else {         \
+        a_local[n] = a_neg[(IDX)d * d_state + n0 + n];                         \
         d_h[n] = 0.0f;                                                         \
         d_a_acc[n] = 0.0f;                                                     \
-        h_carry[n] = h_saved[((b * (T + 1) + T) * d_inner + d) * d_state + n]; \
+        h_carry[n] =                                                           \
+            h_saved[((b * (T + 1) + T) * d_inner + d) * d_state + n0 + n];     \
     }                                                                          \
-                                                                               \
-    /* Backward through time (reverse T) */                                    \
-    for (int t = T - 1; t >= 0; t--) {                                         \
+    float dy_pass = 0.0f, delta_pass = 0.0f, u_pass = 0.0f;                    \
+    float dd_pass = 0.0f, du_pass = 0.0f;                                      \
+    for (int j = 0; j < T + last; j++) {                                       \
+        const float dy_in = __shfl_up_sync(0xffffffffu, dy_pass, 1, lanes);    \
+        const float delta_in =                                                 \
+            __shfl_up_sync(0xffffffffu, delta_pass, 1, lanes);                 \
+        const float u_in = __shfl_up_sync(0xffffffffu, u_pass, 1, lanes);      \
+        const float dd_in = __shfl_up_sync(0xffffffffu, dd_pass, 1, lanes);    \
+        const float du_in = __shfl_up_sync(0xffffffffu, du_pass, 1, lanes);    \
+        const int t = T - 1 - (j - k);                                         \
+        if (!live || t < 0 || t >= T) continue;                                \
         IDX bt_di = (b * T + t) * d_inner + d;                                 \
-        IDX bt_ds = (b * T + t) * d_state;                                     \
-                                                                               \
-        float dy_d = dy[bt_di];                                                \
-        float delta_d = delta_saved[bt_di];                                    \
-        float u_d = u_saved[bt_di];                                            \
-                                                                               \
-        /* d_D += dy * u (skip connection gradient) */                         \
-        local_d_D += dy_d * u_d;                                               \
-                                                                               \
-        /* d_u from skip connection: dy * D[d] */                              \
-        float d_u_val = dy_d * D[d];                                           \
-                                                                               \
-        float d_delta_val = 0.0f;                                              \
-                                                                               \
-        _Pragma("unroll")                                                      \
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else { \
-            /* h_curr = state AFTER step t (carried register: at t=T-1 it */   \
-            /* was seeded from h_saved[T]; afterwards it is last round's */    \
-            /* h_prev — identical value, one global load saved). */            \
-            float h_curr = h_carry[n];                                         \
-                                                                               \
-            /* Opt B: exp2f instead of expf */                                 \
-            float da = exp2f(delta_d * a_local[n] * LOG2E);                    \
-                                                                               \
-            /* Gradient from output: d_h += dy * C */                          \
-            d_h[n] += dy_d * C_saved[bt_ds + n];                               \
-                                                                               \
-            /* d_C += dy * h_curr (per-thread: indexed by b,t,d,n) */          \
-            IDX btdn = ((b * T + t) * d_inner + d) * d_state + n;              \
-            d_C_local[btdn] = dy_d * h_curr;                                   \
-                                                                               \
-            /* h_prev: state BEFORE step t */                                  \
-            IDX h_prev_idx = ((b * (T + 1) + t) * d_inner + d) * d_state + n;  \
-            float h_prev = h_saved[h_prev_idx];                                \
-                                                                               \
-            /* d_delta += d_h * (a_dn * da * h_prev + u * B) */                \
-            d_delta_val += d_h[n] * (a_local[n] * da * h_prev + u_d * B_saved[bt_ds + n]); \
-                                                                               \
-            /* d_u += d_h * delta * B */                                       \
-            d_u_val += d_h[n] * delta_d * B_saved[bt_ds + n];                  \
-                                                                               \
-            /* d_B += d_h * delta * u (per-thread: indexed by b,t,d,n) */      \
-            d_B_local[btdn] = d_h[n] * delta_d * u_d;                          \
-                                                                               \
-            /* d_a_log += d_h * da * delta * a_dn * h_prev (register acc) */   \
-            d_a_acc[n] += d_h[n] * da * delta_d * a_local[n] * h_prev;         \
-                                                                               \
-            /* Propagate d_h backward through time: d_h_prev = da * d_h */     \
-            d_h[n] = da * d_h[n];                                              \
-            h_carry[n] = h_prev;                                               \
+        IDX bt_ds = (b * T + t) * d_state + n0;                                \
+        float dy_d, delta_d, u_d, d_u_val, d_delta_val;                        \
+        /* Each branch runs the slice loop itself, the first lane with its */  \
+        /* first state unguarded (a live channel has one): its d_u chain */    \
+        /* then starts from the skip product in the block of that state, */    \
+        /* as the whole-state walk's did, and the compiler fuses the */        \
+        /* state's add the same way. */                                        \
+        if (k == 0) {                                                          \
+            dy_d = dy[bt_di];                                                  \
+            delta_d = delta_saved[bt_di];                                      \
+            u_d = u_saved[bt_di];                                              \
+            local_d_D += dy_d * u_d;                                           \
+            d_u_val = dy_d * D[d];                                             \
+            d_delta_val = 0.0f;                                                \
+            M1_BWD_SLICE(IDX, 1)                                               \
+        } else {                                                               \
+            dy_d = dy_in;                                                      \
+            delta_d = delta_in;                                                \
+            u_d = u_in;                                                        \
+            d_u_val = du_in;                                                   \
+            d_delta_val = dd_in;                                               \
+            M1_BWD_SLICE(IDX, 0)                                               \
         }                                                                      \
-                                                                               \
-        d_delta[bt_di] = d_delta_val;                                          \
-        d_u[bt_di] = d_u_val;                                                  \
+        if (k == last) {                                                       \
+            d_delta[bt_di] = d_delta_val;                                      \
+            d_u[bt_di] = d_u_val;                                              \
+        }                                                                      \
+        dy_pass = dy_d;                                                        \
+        delta_pass = delta_d;                                                  \
+        u_pass = u_d;                                                          \
+        dd_pass = d_delta_val;                                                 \
+        du_pass = d_u_val;                                                     \
     }                                                                          \
-                                                                               \
-    /* One store per element replaces T global RMWs; full-domain write, */     \
-    /* so the per-layer zeroing of d_a_log_local is gone with it. */           \
     _Pragma("unroll")                                                          \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else \
-        d_a_log_local[(b * d_inner + d) * d_state + n] = d_a_acc[n];           \
-                                                                               \
-    d_D_local[b * d_inner + d] = local_d_D;                                    \
+    for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else           \
+        d_a_log_local[(b * d_inner + d) * d_state + n0 + n] = d_a_acc[n];      \
+    if (live && k == 0) d_D_local[b * d_inner + d] = local_d_D;                \
 }
 
 DEFINE_SSM_BACKWARD_LOCAL(ssm_backward_local, int)
@@ -410,94 +454,126 @@ DEFINE_SSM_BACKWARD_LOCAL(ssm_backward_local_i64, long long)
 //   - delta, u, B, C, dy                → typed (post-promote on load)
 //   - d_delta, d_u, d_B_local, d_C_local → typed (downcast on store)
 //   - d_D_local, d_a_log_local          → f32 master (T-length += accumulators)
-//   - register dh, a_local (state-capacity sized), local_d_D → f32 (BPTT precision invariant)
+//   - register dh, a_local (a lane's slice), local_d_D → f32 (BPTT precision invariant)
 //
-// CONSTRAINT: d_state ≤ 64 (compile-time register array). All shipped
-// state-spaces/mamba checkpoints use d_state=16.
+// A channel's lanes as for the forward: the first lane reads the step's
+// rows and starts the d_delta and d_u chains, the last one stores them.
 //
 // Math identical to f32 ssm_backward_local above; only IO dtype differs.
-#define DEFINE_SSM_BACKWARD_LOCAL_BWD(NAME, IDX, TY, FROM_F)                    \
-extern "C" __global__ void NAME(                                                \
-    const float* h_saved,                                                       \
-    const TY*    delta_saved,                                                   \
-    const TY*    u_saved,                                                       \
-    const TY*    B_saved,                                                       \
-    const TY*    C_saved,                                                       \
-    const float* a_neg,                                                         \
-    const float* D,                                                             \
-    const TY*    dy,                                                            \
-    TY*          d_delta,                                                       \
-    TY*          d_u,                                                           \
-    TY*          d_B_local,                                                     \
-    TY*          d_C_local,                                                     \
-    float*       d_D_local,                                                     \
-    float*       d_a_log_local,                                                 \
-    int batch, int T, int d_inner, int d_state                                  \
-) {                                                                             \
-    IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                       \
-    IDX total = (IDX)batch * d_inner;                                           \
-    if (idx >= total) return;                                                   \
-    IDX b = idx / d_inner;                                                      \
-    int d = (int)(idx % d_inner);                                               \
-    if (d_state > MAMBA_RS_STATE_CAP) return;                                                   \
-                                                                                \
-    float local_d_D = 0.0f;                                                     \
-    float a_local[MAMBA_RS_STATE_CAP];                                                          \
-    float d_h[MAMBA_RS_STATE_CAP];                                                              \
-    float d_a_acc[MAMBA_RS_STATE_CAP];                                                          \
-    float h_carry[MAMBA_RS_STATE_CAP];                                                          \
-    _Pragma("unroll")                                                           \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {             \
-        a_local[n] = a_neg[(IDX)d * d_state + n];                               \
-        d_h[n] = 0.0f;                                                          \
-        d_a_acc[n] = 0.0f;                                                      \
-        h_carry[n] = h_saved[((b * (T + 1) + T) * d_inner + d) * d_state + n];  \
-    }                                                                           \
-                                                                                \
-    for (int t = T - 1; t >= 0; t--) {                                          \
-        IDX bt_di = (b * T + t) * d_inner + d;                                  \
-        IDX bt_ds = (b * T + t) * d_state;                                      \
-        float dy_d    = to_f(dy[bt_di]);                                        \
-        float delta_d = to_f(delta_saved[bt_di]);                               \
-        float u_d     = to_f(u_saved[bt_di]);                                   \
-                                                                                \
-        local_d_D += dy_d * u_d;                                                \
-        float d_u_val = dy_d * D[d];                                            \
-        float d_delta_val = 0.0f;                                               \
-                                                                                \
-        _Pragma("unroll")                                                       \
-        for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else {         \
-            IDX h_prev_idx =                                                    \
-                ((b * (T + 1) + t) * d_inner + d) * d_state + n;                \
-            float h_curr = h_carry[n];                                          \
-            float h_prev = h_saved[h_prev_idx];                                 \
-            float B_n    = to_f(B_saved[bt_ds + n]);                            \
-            float C_n    = to_f(C_saved[bt_ds + n]);                            \
-            float da     = exp2f(delta_d * a_local[n] * LOG2E);                 \
-                                                                                \
-            d_h[n] += dy_d * C_n;                                               \
-            IDX btdn = ((b * T + t) * d_inner + d) * d_state + n;               \
-            d_C_local[btdn] = FROM_F(dy_d * h_curr);                            \
-                                                                                \
-            d_delta_val += d_h[n] * (a_local[n] * da * h_prev + u_d * B_n);     \
-            d_u_val     += d_h[n] * delta_d * B_n;                              \
-            d_B_local[btdn] = FROM_F(d_h[n] * delta_d * u_d);                   \
-                                                                                \
-            d_a_acc[n] += d_h[n] * da * delta_d * a_local[n] * h_prev;          \
-                                                                                \
-            d_h[n] = da * d_h[n];                                               \
-            h_carry[n] = h_prev;                                                \
-        }                                                                       \
-                                                                                \
-        d_delta[bt_di] = FROM_F(d_delta_val);                                   \
-        d_u[bt_di]     = FROM_F(d_u_val);                                       \
-    }                                                                           \
-                                                                                \
-    _Pragma("unroll")                                                           \
-    for (int n = 0; n < MAMBA_RS_STATE_CAP; n++) if (n >= d_state) break; else               \
-        d_a_log_local[(b * d_inner + d) * d_state + n] = d_a_acc[n];            \
-                                                                                \
-    d_D_local[b * d_inner + d] = local_d_D;                                     \
+// The typed twin of M1_BWD_SLICE, its rows promoted on load and its
+// per-state gradients rounded on store.
+#define M1_BWD_SLICE_TYPED(IDX, FROM_F, GUARD_FROM)                            \
+    _Pragma("unroll")                                                          \
+    for (int n = 0; n < M1_SEQ_SLICE; n++)                                     \
+        if (n >= (GUARD_FROM) && n >= len) break; else {                       \
+        IDX h_prev_idx =                                                       \
+            ((b * (T + 1) + t) * d_inner + d) * d_state + n0 + n;              \
+        float h_curr = h_carry[n];                                             \
+        float h_prev = h_saved[h_prev_idx];                                    \
+        float B_n    = to_f(B_saved[bt_ds + n]);                               \
+        float C_n    = to_f(C_saved[bt_ds + n]);                               \
+        float da     = exp2f(delta_d * a_local[n] * LOG2E);                    \
+        d_h[n] += dy_d * C_n;                                                  \
+        IDX btdn = ((b * T + t) * d_inner + d) * d_state + n0 + n;             \
+        d_C_local[btdn] = FROM_F(dy_d * h_curr);                               \
+        d_delta_val += d_h[n] * (a_local[n] * da * h_prev + u_d * B_n);        \
+        d_u_val     += d_h[n] * delta_d * B_n;                                 \
+        d_B_local[btdn] = FROM_F(d_h[n] * delta_d * u_d);                      \
+        d_a_acc[n] += d_h[n] * da * delta_d * a_local[n] * h_prev;             \
+        d_h[n] = da * d_h[n];                                                  \
+        h_carry[n] = h_prev;                                                   \
+    }
+
+#define DEFINE_SSM_BACKWARD_LOCAL_BWD(NAME, IDX, TY, FROM_F)                   \
+extern "C" __global__ void NAME(                                               \
+    const float* h_saved, /* [batch * (T+1) * d_inner * d_state] saved h BEFORE each step */ \
+    const TY* delta_saved, /* [batch * T * d_inner] */                         \
+    const TY* u_saved, /* [batch * T * d_inner] */                             \
+    const TY* B_saved, /* [batch * T * d_state] */                             \
+    const TY* C_saved, /* [batch * T * d_state] */                             \
+    const float* a_neg, /* [d_inner * d_state] */                              \
+    const float* D, /* [d_inner] skip connection weight */                     \
+    const TY* dy, /* [batch * T * d_inner] */                                  \
+    TY* d_delta, /* [batch * T * d_inner] per-sample */                        \
+    TY* d_u, /* [batch * T * d_inner] per-sample (includes skip: += dy*D[d]) */ \
+    TY* d_B_local, /* [batch * T * d_inner * d_state] per-thread */            \
+    TY* d_C_local, /* [batch * T * d_inner * d_state] per-thread */            \
+    float* d_D_local, /* [batch * d_inner] per-sample (sum across T) */        \
+    float* d_a_log_local, /* [batch * d_inner * d_state] per-sample (sum across T) */ \
+    int batch, int T, int d_inner, int d_state, int lanes                      \
+) {                                                                            \
+    const IDX tid = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                \
+    const int k = (int)tid & (lanes - 1);                                      \
+    const IDX ch = tid >> (__ffs(lanes) - 1);                                  \
+    const bool live = ch < (IDX)batch * d_inner;                               \
+    const IDX b = live ? ch / d_inner : 0;                                     \
+    const int d = live ? (int)(ch % d_inner) : 0;                              \
+    const int per = (d_state + lanes - 1) / lanes;                             \
+    const int n0 = k * per;                                                    \
+    const int len = live ? max(0, min(per, d_state - n0)) : 0;                 \
+    const int last = lanes - 1;                                                \
+    float local_d_D = 0.0f;                                                    \
+    float a_local[M1_SEQ_SLICE];                                               \
+    float d_h[M1_SEQ_SLICE];                                                   \
+    float d_a_acc[M1_SEQ_SLICE];                                               \
+    float h_carry[M1_SEQ_SLICE];                                               \
+    _Pragma("unroll")                                                          \
+    for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else {         \
+        a_local[n] = a_neg[(IDX)d * d_state + n0 + n];                         \
+        d_h[n] = 0.0f;                                                         \
+        d_a_acc[n] = 0.0f;                                                     \
+        h_carry[n] =                                                           \
+            h_saved[((b * (T + 1) + T) * d_inner + d) * d_state + n0 + n];     \
+    }                                                                          \
+    float dy_pass = 0.0f, delta_pass = 0.0f, u_pass = 0.0f;                    \
+    float dd_pass = 0.0f, du_pass = 0.0f;                                      \
+    for (int j = 0; j < T + last; j++) {                                       \
+        const float dy_in = __shfl_up_sync(0xffffffffu, dy_pass, 1, lanes);    \
+        const float delta_in =                                                 \
+            __shfl_up_sync(0xffffffffu, delta_pass, 1, lanes);                 \
+        const float u_in = __shfl_up_sync(0xffffffffu, u_pass, 1, lanes);      \
+        const float dd_in = __shfl_up_sync(0xffffffffu, dd_pass, 1, lanes);    \
+        const float du_in = __shfl_up_sync(0xffffffffu, du_pass, 1, lanes);    \
+        const int t = T - 1 - (j - k);                                         \
+        if (!live || t < 0 || t >= T) continue;                                \
+        IDX bt_di = (b * T + t) * d_inner + d;                                 \
+        IDX bt_ds = (b * T + t) * d_state + n0;                                \
+        float dy_d, delta_d, u_d, d_u_val, d_delta_val;                        \
+        /* Each branch runs the slice loop itself, the first lane with its */  \
+        /* first state unguarded (a live channel has one): its d_u chain */    \
+        /* then starts from the skip product in the block of that state, */    \
+        /* as the whole-state walk's did, and the compiler fuses the */        \
+        /* state's add the same way. */                                        \
+        if (k == 0) {                                                          \
+            dy_d    = to_f(dy[bt_di]);                                         \
+            delta_d = to_f(delta_saved[bt_di]);                                \
+            u_d     = to_f(u_saved[bt_di]);                                    \
+            local_d_D += dy_d * u_d;                                           \
+            d_u_val = dy_d * D[d];                                             \
+            d_delta_val = 0.0f;                                                \
+            M1_BWD_SLICE_TYPED(IDX, FROM_F, 1)                                 \
+        } else {                                                               \
+            dy_d = dy_in;                                                      \
+            delta_d = delta_in;                                                \
+            u_d = u_in;                                                        \
+            d_u_val = du_in;                                                   \
+            d_delta_val = dd_in;                                               \
+            M1_BWD_SLICE_TYPED(IDX, FROM_F, 0)                                 \
+        }                                                                      \
+        if (k == last) {                                                       \
+            d_delta[bt_di] = FROM_F(d_delta_val);                              \
+            d_u[bt_di] = FROM_F(d_u_val);                                      \
+        }                                                                      \
+        dy_pass = dy_d;                                                        \
+        delta_pass = delta_d;                                                  \
+        u_pass = u_d;                                                          \
+        dd_pass = d_delta_val;                                                 \
+        du_pass = d_u_val;                                                     \
+    }                                                                          \
+    _Pragma("unroll")                                                          \
+    for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else           \
+        d_a_log_local[(b * d_inner + d) * d_state + n0 + n] = d_a_acc[n];      \
+    if (live && k == 0) d_D_local[b * d_inner + d] = local_d_D;                \
 }
 
 DEFINE_SSM_BACKWARD_LOCAL_BWD(ssm_backward_local_f32, int, float, from_f_f32)

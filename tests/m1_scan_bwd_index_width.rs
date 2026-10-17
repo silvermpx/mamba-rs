@@ -17,7 +17,7 @@ use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{
     IndexWidth, SCAN_BWD_DGROUP, SCAN_CHUNK, grid_1d_cover, grid_parallel_scan_bwd,
-    grid_parallel_scan_bwd_fold, scan_bwd_index_width, y_runs,
+    grid_parallel_scan_bwd_fold, grid_seq, scan_bwd_index_width, seq_lanes, y_runs,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -120,6 +120,8 @@ fn both_builds_of_the_sequential_scans_give_the_same_bits() {
     let (bt, st) = (b * t, b * di * ds);
     let [bi, ti, dii, dsi] = [b, t, di, ds].map(|v| v as i32);
     let grid = || grid_1d_cover(b * di).expect("grid");
+    let seq_grid = || grid_seq(b, di, ds).expect("grid");
+    let lanes = seq_lanes(ds) as i32;
     for dt in DTYPES {
         let es = dt.size_bytes();
         let an = floats(&ctx, &a_neg(di * ds, 1));
@@ -153,8 +155,14 @@ fn both_builds_of_the_sequential_scans_give_the_same_bits() {
                 Arg::I(ti),
                 Arg::I(dii),
                 Arg::I(dsi),
+                Arg::I(lanes),
             ];
-            launch(&ctx, k.ssm_burnin_fwd_typed.get(w).get(dt), grid(), &args);
+            launch(
+                &ctx,
+                k.ssm_burnin_fwd_typed.get(w).get(dt),
+                seq_grid(),
+                &args,
+            );
             bytes_of(
                 &ctx,
                 &[
@@ -189,11 +197,12 @@ fn both_builds_of_the_sequential_scans_give_the_same_bits() {
                 Arg::I(ti),
                 Arg::I(dii),
                 Arg::I(dsi),
+                Arg::I(lanes),
             ];
             launch(
                 &ctx,
                 k.ssm_burnin_nosave_typed.get(w).get(dt),
-                grid(),
+                seq_grid(),
                 &args,
             );
             bytes_of(
@@ -275,8 +284,9 @@ fn both_builds_of_the_sequential_scans_give_the_same_bits() {
                 Arg::I(ti),
                 Arg::I(dii),
                 Arg::I(dsi),
+                Arg::I(lanes),
             ];
-            launch(&ctx, f, grid(), &args);
+            launch(&ctx, f, seq_grid(), &args);
             bytes_of(
                 &ctx,
                 &[

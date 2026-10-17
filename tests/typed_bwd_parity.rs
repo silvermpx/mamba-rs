@@ -639,7 +639,9 @@ fn run_ssm_backward_local(
     bld.arg(&ti);
     bld.arg(&dii);
     bld.arg(&dsi);
-    unsafe { bld.launch(grid_1d(batch * di)) }.unwrap();
+    let lanes_i = mamba_rs::gpu::launch::seq_lanes(ds) as i32;
+    bld.arg(&lanes_i);
+    unsafe { bld.launch(mamba_rs::gpu::launch::grid_seq(batch, di, ds).unwrap()) }.unwrap();
     ctx.stream.synchronize().unwrap();
     (d_delta, d_u, d_b_local, d_c_local, d_d_local, d_a_log_local)
 }

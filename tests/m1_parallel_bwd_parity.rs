@@ -13,7 +13,7 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::kernels::MambaKernels;
-use mamba_rs::gpu::launch::{grid_1d, grid_parallel_scan_bwd, y_runs};
+use mamba_rs::gpu::launch::{grid_parallel_scan_bwd, y_runs};
 
 fn det_rand(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
@@ -231,7 +231,9 @@ fn run_seq_f32(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs) -> BwdOuts {
     bld.arg(&ti);
     bld.arg(&di_i);
     bld.arg(&ds_i);
-    unsafe { bld.launch(grid_1d(b * di)) }.unwrap();
+    let lanes_i = mamba_rs::gpu::launch::seq_lanes(ds) as i32;
+    bld.arg(&lanes_i);
+    unsafe { bld.launch(mamba_rs::gpu::launch::grid_seq(b, di, ds).unwrap()) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
     // Suppress unused warnings on the input mut bindings.

@@ -128,7 +128,9 @@ The scan is chosen by `ScanMode::{Sequential, Parallel, Auto}` on
 `d_state` above 64 uses it at every length. That rule dates from a time
 when the sequential kernels were capped at 64 and stays because it is part
 of the numeric identity of existing runs. At long sequences the parallel
-scan is also the faster path.
+scan is also the faster path. The sequential kernels give a channel a warp
+segment of lanes, each holding at most 16 states, so an explicit
+`Sequential` runs every `d_state` with its state in registers.
 
 The GEMM is chosen by the context's `GemmMode`. In the default
 `Deterministic` mode a model context uses the Inference kernels and a

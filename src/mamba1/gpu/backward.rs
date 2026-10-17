@@ -141,13 +141,11 @@ fn layer_backward(
 
     // ssm_backward_local(h_saved, delta_saved, u_saved, B_saved, C_saved, a_neg, D,
     //   dy, d_delta, d_u, d_B_local, d_C_local, d_D_local, d_a_log_local,
-    //   batch, T, d_inner, d_state)
+    //   batch, T, d_inner, d_state, lanes)
     //
-    // Dispatch mirrors the mixed-precision path: the sequential kernel keeps
-    // per-(b,d) state in registers and contains a `d_state > 64` early-return
-    // guard, so d_state in (64, 256] MUST take the parallel reverse-scan
-    // kernel (it used to silently no-op, leaving stale scratch as gradients).
-    // Long T also prefers the parallel kernel for wall-clock.
+    // Dispatch mirrors the mixed-precision path: the scan mode picks the
+    // parallel reverse scan or the sequential kernel, which gives a channel
+    // a warp segment of lanes, each holding a slice of the state.
     {
         let b_i = b as i32;
         let t_i = t as i32;
@@ -191,12 +189,13 @@ fn layer_backward(
         } else if use_parallel {
             crate::gpu::launch::grid_parallel_scan_bwd(b, di)
         } else {
-            grid_1d_cover(b * di)?
+            crate::gpu::launch::grid_seq(b, di, ds)?
         };
         // The slim tape rides the h_saved buffer; the flag picks the
         // kernel's replay path. Sequential kernel keeps its signature.
         let tape_p = acts.h_saved.cached_ptr();
         let slim_i: i32 = i32::from(crate::gpu::launch::scan_tape_slim());
+        let lanes_i = crate::gpu::launch::seq_lanes(ds) as i32;
         let dp_ptr = lw.d_param.cached_ptr();
         for (y_first, cfg) in y_runs(cfg) {
             let mut builder = ctx.stream.launch_builder(kernel);
@@ -230,6 +229,8 @@ fn layer_backward(
                 builder.arg(&tape_p);
                 builder.arg(&slim_i);
                 builder.arg(&y_first);
+            } else {
+                builder.arg(&lanes_i);
             }
             unsafe { builder.launch(cfg) }
                 .map_err(|e| format!("ssm bwd (parallel={use_parallel}): {e:?}"))?;

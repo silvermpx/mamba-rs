@@ -750,7 +750,9 @@ fn layer_forward(
             builder.arg(&t_i);
             builder.arg(&di_i);
             builder.arg(&ds_i);
-            unsafe { builder.launch(grid_1d_cover(b * di)?) }
+            let lanes_i = crate::gpu::launch::seq_lanes(ds) as i32;
+            builder.arg(&lanes_i);
+            unsafe { builder.launch(crate::gpu::launch::grid_seq(b, di, ds)?) }
                 .map_err(|e| format!("ssm_burnin_fwd mamba: {:?}", e))?;
         }
     }
@@ -1332,7 +1334,9 @@ pub fn gpu_forward_mamba_target_burnin(
                 builder.arg(&t_i);
                 builder.arg(&di_i);
                 builder.arg(&ds_i);
-                unsafe { builder.launch(grid_1d_cover(b * di)?) }
+                let lanes_i = crate::gpu::launch::seq_lanes(ds) as i32;
+                builder.arg(&lanes_i);
+                unsafe { builder.launch(crate::gpu::launch::grid_seq(b, di, ds)?) }
                     .map_err(|e| format!("ssm_nosave target L{layer_idx}: {:?}", e))?;
             }
         }

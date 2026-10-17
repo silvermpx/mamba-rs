@@ -29,7 +29,7 @@ use crate::gpu::block_norm;
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::context::GpuCtx;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, grid_1d_wide, launch_cast, y_runs};
+use crate::gpu::launch::{grid_1d_wide, launch_cast, y_runs};
 use crate::mamba1::gpu::forward::{GpuMambaDims, GpuRecurrentState};
 use crate::mamba1::gpu::mixer_norms::launch_bcdt_norm;
 use crate::mamba1::gpu::weights::{
@@ -746,13 +746,6 @@ pub fn gpu_forward_mamba_backbone_mixed(
                         .map_err(|e| format!("ssm_parallel_fwd typed L{layer_idx}: {e:?}"))?;
                 }
             } else {
-                if ds > k.state_cap {
-                    return Err(format!(
-                        "ssm_burnin_forward_typed: d_state {ds} exceeds the compiled \
-                     state capacity {}",
-                        k.state_cap
-                    ));
-                }
                 let width = crate::gpu::launch::seq_scan_index_width(b, t, di, ds, di, true);
                 let kernel = k.ssm_burnin_fwd_typed.get(width).get(dt);
                 let mut bld = ctx.stream.launch_builder(kernel);
@@ -778,7 +771,9 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 bld.arg(&t_i);
                 bld.arg(&di_i);
                 bld.arg(&ds_i);
-                unsafe { bld.launch(grid_1d_cover(b * di)?) }
+                let lanes_i = crate::gpu::launch::seq_lanes(ds) as i32;
+                bld.arg(&lanes_i);
+                unsafe { bld.launch(crate::gpu::launch::grid_seq(b, di, ds)?) }
                     .map_err(|e| format!("ssm_burnin_forward typed L{layer_idx}: {e:?}"))?;
             }
         }

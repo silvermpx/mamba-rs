@@ -647,6 +647,23 @@ pub fn seq_scan_index_width(
     ])
 }
 
+/// The most states a lane of the Mamba-1 sequential kernels holds
+/// (`M1_SEQ_SLICE` in `mamba_ssm.cu`).
+pub const SEQ_SLICE: usize = 16;
+
+/// The lanes the Mamba-1 sequential kernels give a channel of `d_state`
+/// states: a power of two, so a channel's lanes are one shuffle segment of
+/// a warp, and enough that no lane holds more than [`SEQ_SLICE`] states.
+pub fn seq_lanes(d_state: usize) -> usize {
+    d_state.div_ceil(SEQ_SLICE).next_power_of_two()
+}
+
+/// Launch config of a Mamba-1 sequential kernel: [`seq_lanes`] threads for
+/// each of the `batch * d_inner` channels.
+pub fn grid_seq(batch: usize, d_inner: usize, d_state: usize) -> Result<LaunchConfig, String> {
+    grid_1d_cover(batch * d_inner * seq_lanes(d_state))
+}
+
 /// Offset width of the parallel scan backward, the fold when `fold`. Its
 /// offsets reach the rows `[batch, T, d_inner]`, the B and C rows `[batch,
 /// d_state, T]`, the h tape (the chunk rows of the slim tape or every step
@@ -962,6 +979,27 @@ mod tests {
         let past = grid_rows(usize::MAX / 2, 1);
         assert_eq!(past.grid_dim.0, i32::MAX as u32);
         assert!(grid_steps(1, (i32::MAX as usize + 1) * 256, 256).is_err());
+    }
+
+    #[test]
+    fn a_sequential_channel_holds_at_most_a_slice_a_lane() {
+        for ds in 1..=256usize {
+            let lanes = seq_lanes(ds);
+            assert!(
+                lanes.is_power_of_two() && lanes <= 16,
+                "d_state {ds}: {lanes} lanes"
+            );
+            assert!(
+                ds.div_ceil(lanes) <= SEQ_SLICE,
+                "d_state {ds}: {lanes} lanes"
+            );
+            assert!(lanes <= ds, "d_state {ds}: {lanes} lanes");
+        }
+        assert_eq!(seq_lanes(16), 1);
+        assert_eq!(seq_lanes(17), 2);
+        assert_eq!(seq_lanes(64), 4);
+        assert_eq!(seq_lanes(65), 8);
+        assert_eq!(grid_seq(3, 48, 64).unwrap().grid_dim.0, 3);
     }
 
     #[test]
