@@ -144,33 +144,6 @@ pub struct Axis0Sum {
     pub accumulate: bool,
 }
 
-fn angle_backward_launch_policy(
-    admission: TransportAdmission,
-    batch: usize,
-    time: usize,
-    heads: usize,
-    angles: usize,
-) -> LaunchConfig {
-    assert!(
-        batch > 0 && time > 0 && heads > 0 && angles > 0,
-        "angle backward dimensions must be positive"
-    );
-    let total = heads * angles;
-    if admission.cap16() && batch <= 32 && time >= 128 && heads == 48 && angles == 4 {
-        LaunchConfig {
-            grid_dim: (batch as u32, (total as u32).div_ceil(32), 1),
-            block_dim: (32, 1, 1),
-            shared_mem_bytes: 0,
-        }
-    } else {
-        LaunchConfig {
-            grid_dim: (batch as u32, (total as u32).div_ceil(256), 1),
-            block_dim: (total.min(256) as u32, 1, 1),
-            shared_mem_bytes: 0,
-        }
-    }
-}
-
 impl Mamba3Kernels {
     /// Select the DQKV function for `route` at the launch's index `width`.
     /// The returned handle must use the same shape, pair-matrix decision, and
@@ -274,19 +247,6 @@ impl Mamba3Kernels {
             col0 += piece;
         }
         Ok(())
-    }
-
-    /// Return the angle-backward launch configuration for `batch`, `time`,
-    /// `heads`, and `angles`. Ineligible dimensions retain the legacy launch
-    /// geometry, and all dimensions must be positive.
-    pub fn angle_backward_cfg(
-        &self,
-        batch: usize,
-        time: usize,
-        heads: usize,
-        angles: usize,
-    ) -> LaunchConfig {
-        angle_backward_launch_policy(self.transport.admission, batch, time, heads, angles)
     }
 }
 
@@ -404,39 +364,5 @@ mod tests {
     #[should_panic(expected = "axis-0 reduction columns must be positive")]
     fn axis0_rejects_zero_columns_before_making_a_cuda_grid() {
         let _ = axis0_launch_policy(TransportAdmission::new(true, 16), 4, 0);
-    }
-
-    #[test]
-    fn angle_backward_admission_and_geometry_preserve_boundaries() {
-        let production =
-            angle_backward_launch_policy(TransportAdmission::new(true, 16), 32, 128, 48, 4);
-        assert_eq!(production.grid_dim, (32, 6, 1));
-        assert_eq!(production.block_dim, (32, 1, 1));
-        assert_eq!(production.shared_mem_bytes, 0);
-
-        for (cap, batch, time, heads, angles, block, grid_y) in [
-            (16, 33, 128, 48, 4, 192, 1),
-            (16, 32, 127, 48, 4, 192, 1),
-            (16, 32, 128, 47, 4, 188, 1),
-            (16, 32, 128, 48, 3, 144, 1),
-            (32, 32, 128, 48, 4, 192, 1),
-        ] {
-            let config = angle_backward_launch_policy(
-                TransportAdmission::new(true, cap),
-                batch,
-                time,
-                heads,
-                angles,
-            );
-            assert_eq!(config.grid_dim, (batch as u32, grid_y, 1));
-            assert_eq!(config.block_dim, (block, 1, 1));
-            assert_eq!(config.shared_mem_bytes, 0);
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "angle backward dimensions must be positive")]
-    fn angle_backward_rejects_zero_dimensions() {
-        let _ = angle_backward_launch_policy(TransportAdmission::new(true, 16), 0, 128, 48, 4);
     }
 }

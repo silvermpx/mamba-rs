@@ -28,12 +28,16 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::launch::{IndexWidth, grid_1d_cover, yz_runs};
-use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
+use mamba_rs::gpu::launch::{IndexWidth, grid_1d_cover, y_runs, yz_runs};
+use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, angle_backward_cfg};
 
 /// The dQK-theta stage as it was released before the row-streaming stage
 /// replaced it: f32, the bf16 and f16 forms, and the half transport form.
 const FROZEN_DQKTHETA: &str = include_str!("fixtures/m3_dqktheta_reference.cu");
+
+/// The angle gradients' reverse sum as it was released before the
+/// batched-load kernel replaced it.
+const FROZEN_ANGLE_BACKWARD: &str = include_str!("fixtures/m3_angle_backward_reference.cu");
 
 // Config: realistic-ish head dims, 2 chunks with partial last chunk coverage.
 const B: usize = 2;
@@ -710,6 +714,113 @@ fn m3_dqktheta_keeps_the_bits_of_its_released_form() {
         }
     }
     eprintln!("m3_dqktheta: the released form's bits on {cases} cases");
+}
+
+/// The angle gradients' reverse sum takes the loads of several steps at once
+/// and adds them one step at a time, in the order and with the rounding of
+/// its released per-step form, so it gives that form's bits: in both index
+/// widths, at windows that are and are not whole batches of steps, with one
+/// sequence a row and with rows packing several, from one column to many,
+/// and with raw angles on both sides of the tangent's polynomial range.
+#[test]
+fn m3_angle_backward_keeps_the_bits_of_its_released_form() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let m3k = make_m3k(&ctx);
+    let frozen = frozen_module(
+        ctx.stream.context(),
+        arch::arch0(),
+        64,
+        FROZEN_ANGLE_BACKWARD,
+    );
+    let released = frozen
+        .load_function("m3_reference_angle_dt_bwd_seq")
+        .unwrap();
+    let mut cases = 0;
+    for (b, t, nh, na, packed) in [
+        (1usize, 1usize, 1usize, 1usize, false),
+        (2, 15, 3, 2, false),
+        (2, 16, 3, 2, true),
+        (2, 17, 3, 2, true),
+        (3, 100, 48, 4, true),
+        (4, 513, 24, 32, false),
+        (1, 1300, 48, 4, false),
+        (2, 33, 5, 7, true),
+    ] {
+        let (bt, total) = (b * t, nh * na);
+        let d_cumsum = upload_f32(&ctx, &det_rand(bt * total, 0xE101));
+        let raw: Vec<f32> = det_rand(bt * na, 0xE102).iter().map(|v| v * 6.0).collect();
+        let raw = upload_f32(&ctx, &raw);
+        let dt: Vec<f32> = det_rand(bt * nh, 0xE103).iter().map(|v| v + 0.55).collect();
+        let dt = upload_f32(&ctx, &dt);
+        // Sequences of 7 steps a row, their ids as the kernel reads them.
+        let ids = upload_f32(
+            &ctx,
+            &(0..bt)
+                .map(|i| f32::from_bits(((i % t) / 7) as u32))
+                .collect::<Vec<_>>(),
+        );
+        let seq_idx = if packed { ids.cached_ptr() } else { 0 };
+        let run = |f: &CudaFunction, cfg: LaunchConfig, poison: f32| {
+            let outs = [
+                upload_f32(&ctx, &vec![poison; total * bt]),
+                upload_f32(&ctx, &vec![poison; total * bt]),
+            ];
+            let dims = [b, t, nh, na].map(|v| v as i32);
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut bld = ctx.stream.launch_builder(f);
+                let ptrs = [
+                    outs[0].cached_ptr(),
+                    outs[1].cached_ptr(),
+                    d_cumsum.cached_ptr(),
+                    raw.cached_ptr(),
+                    dt.cached_ptr(),
+                ];
+                for p in &ptrs {
+                    bld.arg(p);
+                }
+                for d in &dims {
+                    bld.arg(d);
+                }
+                bld.arg(&y_first);
+                bld.arg(&seq_idx);
+                unsafe { bld.launch(cfg) }.unwrap();
+            }
+            ctx.stream.synchronize().unwrap();
+            outs.map(|buf| download_f32(&ctx, &buf, total * bt))
+        };
+        let want = run(
+            &released,
+            LaunchConfig {
+                grid_dim: (b as u32, total.div_ceil(256) as u32, 1),
+                block_dim: (total.min(256) as u32, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            8192.0,
+        );
+        for width in [IndexWidth::I32, IndexWidth::I64] {
+            let got = run(
+                m3k.m3_angle_dt_bwd_seq.get(width),
+                angle_backward_cfg(b, nh, na),
+                -8192.0,
+            );
+            for ((w, g), output) in want
+                .iter()
+                .zip(&got)
+                .zip(["dAngles partials", "dDt partials"])
+            {
+                for (i, (x, y)) in w.iter().zip(g).enumerate() {
+                    assert_eq!(
+                        x.to_bits(),
+                        y.to_bits(),
+                        "B {b} T {t} nh {nh} na {na} packed {packed} {width:?}: {output}[{i}]"
+                    );
+                }
+            }
+        }
+        cases += 1;
+    }
+    eprintln!("m3_angle_dt_bwd_seq: the released form's bits on {cases} cases");
 }
 
 // ─── isolated production-shape bench ─────────────────────────────────────

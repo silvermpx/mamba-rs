@@ -84,14 +84,6 @@ fn compiled_transport_routes_keep_function_and_geometry_together() {
             assert_eq!(cfg.block_dim, (threads, 1, 1));
             assert_eq!(cfg.shared_mem_bytes, threads * 4);
         }
-        let cfg = kernels.angle_backward_cfg(8, 1300, 48, 4);
-        assert_eq!(cfg.grid_dim, (8, if cap == 16 { 6 } else { 1 }, 1));
-        assert_eq!(cfg.block_dim, (if cap == 16 { 32 } else { 192 }, 1, 1));
-        for (batch, time, heads, angles) in [(128, 1300, 48, 4), (8, 127, 48, 4)] {
-            let cfg = kernels.angle_backward_cfg(batch, time, heads, angles);
-            assert_eq!(cfg.grid_dim, (batch as u32, 1, 1));
-            assert_eq!(cfg.block_dim, (192, 1, 1));
-        }
         raw::qualify(&device, &kernels);
     }
 }

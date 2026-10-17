@@ -4,6 +4,7 @@ use super::{Case, check_case, encode, values};
 use cudarc::driver::{CudaModule, CudaStream, LaunchConfig};
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::IndexWidth;
+use mamba_rs::mamba3_siso::gpu::kernels::angle_backward_cfg;
 use mamba_rs::mamba3_siso::gpu::{DqkvRoute, Mamba3Kernels};
 use std::sync::Arc;
 
@@ -239,7 +240,7 @@ pub(super) fn angle(stream: &Arc<CudaStream>, kernels: &Mamba3Kernels, baseline:
                         block_dim: (total.min(256) as u32, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    kernels.angle_backward_cfg(b, t, nh, na),
+                    angle_backward_cfg(b, nh, na),
                 ],
                 initial_output: None,
             },

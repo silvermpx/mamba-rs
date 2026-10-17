@@ -638,6 +638,14 @@
   `dm_chain_cfg`, `state_terms_tiled_cfg`, `DM_CHAIN_WARPS`,
   `STATE_TERMS_TILE`, `route::TILED_DQKV_STEPS` and
   `route::TILED_DQKV_STRIDE` are new.
+- The angle gradients' reverse sum (`m3_angle_dt_bwd_seq`) issues the loads
+  of 16 steps before it adds any of them, and takes a warp a block over the
+  (head, angle) columns, so it no longer waits on memory every step; its
+  chain of adds keeps its order and its bits, and the released kernel stays
+  frozen in `tests/fixtures/m3_angle_backward_reference.cu`. Its launch
+  geometry is `angle_backward_cfg` in the SISO kernels module, and
+  `Mamba3Kernels::angle_backward_cfg`, the sm_89 transport's geometry for
+  it, is gone.
 
 ### Fixed
 

@@ -488,7 +488,7 @@ DEFINE_M3_ANGLE_CHUNK_APPLY(m3_angle_chunk_apply_i64, long long)
 // ============================================================================
 //
 // Batched version of angle_dt_bwd that mirrors m3_angle_dt_fwd_seq.
-// Each block handles one batch element; threads loop backward over T.
+// A thread takes a (batch, head, angle) column and walks it backward in time.
 //
 // Forward: angle_cumsum[bt,h,a] = sum_{s=0..t} delta[s,h,a]
 //          delta[s,h,a] = tanh(angles_raw[s*n_angles+a]) * PI * dt[s*nh+h]
@@ -498,7 +498,15 @@ DEFINE_M3_ANGLE_CHUNK_APPLY(m3_angle_chunk_apply_i64, long long)
 //   d_angles_raw[bt,a] += d_delta * PI * dt_val * sech^2(raw)
 //   d_dt_angle[bt,h]   += d_delta * PI * tanh(raw)
 //
-// Grid: (B, ceil(nh*n_angles/256)). Block: (min(256, nh*n_angles)).
+// The reverse sum is one serial chain of adds per column, in time order, so
+// its bits are fixed by that order. The thread issues the loads of
+// M3A_STEPS steps before it adds any of them: the chain still adds one step
+// at a time, in the same order, but it no longer waits on memory each step.
+// Each value is written as the per-step form wrote it: NVVM leaves the
+// difference in sech^2 unfused and the driver's assembler decides how to
+// fuse it, and only the same expression gets the same decision.
+//
+// Grid: (B, ceil(nh*n_angles / 32)), a warp a block (angle_backward_cfg).
 // The no-atomics partials rule: two-pass deterministic variant. Stage 1 per-(b,h,a)
 // thread writes per-t contributions to two transposed scratch tensors (no
 // atomicAdd):
@@ -507,6 +515,7 @@ DEFINE_M3_ANGLE_CHUNK_APPLY(m3_angle_chunk_apply_i64, long long)
 // Stage 2 (caller): two reduce_sum_axis0 launches finalise the outputs. In
 // a packed row (`seq_idx`) the reverse sum restarts after a sequence's
 // first token: its angles never reach the sequence before.
+#define M3A_STEPS 16
 #define DEFINE_M3_ANGLE_DT_BWD_SEQ(NAME, IDX)                                  \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ contrib_angles,      /* [nh * B*T*n_angles] OUTPUT */  \
@@ -532,26 +541,42 @@ extern "C" __global__ void NAME(                                               \
                                                                                \
     /* Reverse cumsum over T for this (batch, head, angle) */                  \
     float running = 0.0f;                                                      \
-    for (int t = T - 1; t >= 0; t--) {                                         \
-        IDX bt = b * T + t;                                                    \
-        if (t + 1 < T && vl_starts(seq_idx, b, T, t + 1)) running = 0.0f;      \
-        running += d_angle_cumsum[bt * total_per_env + h * n_angles + a];      \
-        float d_delta = running;                                               \
-                                                                               \
-        float raw = angles_raw[bt * n_angles + a];                             \
-        float th = tanhf(raw);                                                 \
-        float dt_val = dt_arr[bt * nh + h];                                    \
-        float sech2 = 1.0f - th * th;                                          \
-                                                                               \
-        /* contrib_angles[h, b, t, a] */                                       \
-        contrib_angles[h * btn + bt * n_angles + a] = d_delta * PI * dt_val * sech2; \
-        /* contrib_dt[a, b, t, h] */                                           \
-        contrib_dt[a * btnh + bt * nh + h] = d_delta * PI * th;                \
+    for (int hi = T - 1; hi >= 0; hi -= M3A_STEPS) {                           \
+        float x[M3A_STEPS], raw[M3A_STEPS], dt_val[M3A_STEPS];                 \
+        bool restart[M3A_STEPS];                                               \
+        _Pragma("unroll")                                                      \
+        for (int k = 0; k < M3A_STEPS; k++) {                                  \
+            const int t = hi - k;                                              \
+            if (t < 0) break;                                                  \
+            const IDX bt = b * T + t;                                          \
+            x[k] = d_angle_cumsum[bt * total_per_env + idx];                   \
+            raw[k] = angles_raw[bt * n_angles + a];                            \
+            dt_val[k] = dt_arr[bt * nh + h];                                   \
+            restart[k] = t + 1 < T && vl_starts(seq_idx, b, T, t + 1);         \
+        }                                                                      \
+        _Pragma("unroll")                                                      \
+        for (int k = 0; k < M3A_STEPS; k++) {                                  \
+            const int t = hi - k;                                              \
+            if (t < 0) break;                                                  \
+            const IDX bt = b * T + t;                                          \
+            if (restart[k]) running = 0.0f;                                    \
+            running += x[k];                                                   \
+            const float d_delta = running;                                     \
+            const float th = tanhf(raw[k]);                                    \
+            const float sech2 = 1.0f - th * th;                                \
+            /* contrib_angles[h, b, t, a] */                                   \
+            contrib_angles[h * btn + bt * n_angles + a] =                      \
+                d_delta * PI * dt_val[k] * sech2;                              \
+            /* contrib_dt[a, b, t, h] */                                       \
+            contrib_dt[a * btnh + bt * nh + h] = d_delta * PI * th;            \
+        }                                                                      \
     }                                                                          \
 }
 
 DEFINE_M3_ANGLE_DT_BWD_SEQ(m3_angle_dt_bwd_seq, int)
 DEFINE_M3_ANGLE_DT_BWD_SEQ(m3_angle_dt_bwd_seq_i64, long long)
+#undef DEFINE_M3_ANGLE_DT_BWD_SEQ
+#undef M3A_STEPS
 
 // reduce_sum_axis0 for the angle gradients' partials once their rows hold
 // more columns than the 32-bit range: one block per column as there, each

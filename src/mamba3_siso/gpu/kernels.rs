@@ -1039,6 +1039,25 @@ fn block_threads_bound(kernels: &[&CudaFunction], what: &str) -> Result<usize, S
     Ok(threads / 32 * 32)
 }
 
+/// Threads a block of `m3_angle_dt_bwd_seq` takes, a (head, angle) column
+/// each: one warp, so the few columns of a narrow model still spread over
+/// every SM, each thread with its own loads in flight.
+pub const ANGLE_BACKWARD_THREADS: usize = 32;
+
+/// Launch geometry for `m3_angle_dt_bwd_seq` over `batch` sequences of
+/// `heads` by `angles` columns.
+pub fn angle_backward_cfg(batch: usize, heads: usize, angles: usize) -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: (
+            batch as u32,
+            (heads * angles).div_ceil(ANGLE_BACKWARD_THREADS) as u32,
+            1,
+        ),
+        block_dim: (ANGLE_BACKWARD_THREADS as u32, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
 /// The warps a block of `m3_dqkv_dm_chain` takes, a (sequence, chunk,
 /// head) row each (`M3D_WARPS` in `mamba3_siso_block.cu`).
 pub const DM_CHAIN_WARPS: usize = 8;

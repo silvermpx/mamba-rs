@@ -771,7 +771,7 @@ fn gpu_backward_mamba3_layer_mixed(
         let contrib_dt_ptr = sc.axis0_partials.cached_ptr() + contrib_dt_offset_bytes;
         // Stage 1
         {
-            let grid = m3k.angle_backward_cfg(dims.batch, dims.seq_len, nh, na);
+            let grid = super::kernels::angle_backward_cfg(dims.batch, nh, na);
             for (y_first, cfg) in y_runs(grid) {
                 let mut builder = ctx
                     .stream
