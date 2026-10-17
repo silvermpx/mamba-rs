@@ -254,12 +254,36 @@ extern "C" __global__ void NAME(                                               \
 DEFINE_BC_BIAS_ADD(bc_bias_add, int)
 DEFINE_BC_BIAS_ADD(bc_bias_add_i64, long long)
 
+
+/* The wrap into [0, 2*pi). CUDA's fmod is exact (0 ulp), so for a state
+ * already in [0, 2*TWO_PI) the answer is either the state itself or one
+ * exact subtraction (Sterbenz: TWO_PI <= x < 2*TWO_PI keeps x - TWO_PI
+ * exact). That covers every hot iteration - deltas are bounded well
+ * below 2*pi - and the general fmod stays as the fallback, so the
+ * result is bit-identical to calling fmod every time while removing a
+ * multi-instruction fp64 library routine from the densest fp64 loop in
+ * the page. */
+static __device__ __forceinline__ double m3_angle_wrap(double state) {
+    const double TWO_PI_64 = 6.283185307179586;
+    if (state >= 0.0 && state < 2.0 * TWO_PI_64) {
+        if (state >= TWO_PI_64) state -= TWO_PI_64;
+        return state;
+    }
+    state = fmod(state, TWO_PI_64);
+    if (state < 0.0) state += TWO_PI_64;
+    return state;
+}
+
 // Sequential angle accumulation for training: B envs, T timesteps each.
-// Grid: (B, ceil(nh*n_angles/256), 1). Block: (256, 1, 1).
+// Grid: (B, ceil(nh*n_angles / 32)), a warp a block (angle_forward_cfg).
 // angles_raw: [B*T*n_angles], dt_arr: [B*T*nh], angle_state: [B*nh*n_angles]
 // angle_cumsum: [B*T*nh*n_angles] — saves cumulative state at each timestep.
 // A sequence of a packed row (`seq_idx`, see _varlen.cuh) sums its own
-// angles from zero.
+// angles from zero. The thread issues the loads of M3AF_STEPS steps before
+// it adds any of them; the fp64 chain still takes one step at a time, in
+// the same order and with the same expressions, and wraps through
+// m3_angle_wrap, fmod's exact answer, so the bits are the per-step form's.
+#define M3AF_STEPS 16
 #define DEFINE_M3_ANGLE_DT_FWD_SEQ(NAME, IDX)                                  \
 extern "C" __global__ void NAME(                                               \
     float* __restrict__ angle_cumsum,   /* [B*T * nh * n_angles] */            \
@@ -280,19 +304,29 @@ extern "C" __global__ void NAME(                                               \
     int a = idx % n_angles;                                                    \
                                                                                \
     double state = (double)angle_state[b * total_per_env + h * n_angles + a];  \
-    const double TWO_PI_64 = 6.283185307179586;                                \
-                                                                               \
-    for (int t = 0; t < T; t++) {                                              \
-        IDX bt = b * T + t;                                                    \
-        if (vl_starts(seq_idx, b, T, t)) state = 0.0;                          \
-        float raw = angles_raw[bt * n_angles + a];                             \
-        float dt_val = dt_arr[bt * nh + h];                                    \
-        double delta = (double)(tanhf(raw) * PI * dt_val);                     \
-        state += delta;                                                        \
-        state = fmod(state, TWO_PI_64);                                        \
-        if (state < 0.0) state += TWO_PI_64;                                   \
-                                                                               \
-        angle_cumsum[bt * total_per_env + h * n_angles + a] = (float)state;    \
+    for (int lo = 0; lo < T; lo += M3AF_STEPS) {                               \
+        float raw[M3AF_STEPS], dt_val[M3AF_STEPS];                             \
+        bool start[M3AF_STEPS];                                                \
+        _Pragma("unroll")                                                      \
+        for (int k = 0; k < M3AF_STEPS; k++) {                                 \
+            const int t = lo + k;                                              \
+            if (t >= T) break;                                                 \
+            const IDX bt = b * T + t;                                          \
+            raw[k] = angles_raw[bt * n_angles + a];                            \
+            dt_val[k] = dt_arr[bt * nh + h];                                   \
+            start[k] = vl_starts(seq_idx, b, T, t);                            \
+        }                                                                      \
+        _Pragma("unroll")                                                      \
+        for (int k = 0; k < M3AF_STEPS; k++) {                                 \
+            const int t = lo + k;                                              \
+            if (t >= T) break;                                                 \
+            const IDX bt = b * T + t;                                          \
+            if (start[k]) state = 0.0;                                         \
+            double delta = (double)(tanhf(raw[k]) * PI * dt_val[k]);           \
+            state += delta;                                                    \
+            state = m3_angle_wrap(state);                                      \
+            angle_cumsum[bt * total_per_env + h * n_angles + a] = (float)state; \
+        }                                                                      \
     }                                                                          \
                                                                                \
     angle_state[b * total_per_env + h * n_angles + a] = (float)state;          \
@@ -300,6 +334,7 @@ extern "C" __global__ void NAME(                                               \
 
 DEFINE_M3_ANGLE_DT_FWD_SEQ(m3_angle_dt_fwd_seq, int)
 DEFINE_M3_ANGLE_DT_FWD_SEQ(m3_angle_dt_fwd_seq_i64, long long)
+#undef M3AF_STEPS
 
 // ============================================================================
 // Chunked angle accumulation -- the parallel replacement for the
@@ -370,25 +405,6 @@ extern "C" __global__ void NAME(                                               \
 
 DEFINE_M3_ANGLE_CHUNK_SUMS(m3_angle_chunk_sums, int)
 DEFINE_M3_ANGLE_CHUNK_SUMS(m3_angle_chunk_sums_i64, long long)
-
-/* The wrap into [0, 2*pi). CUDA's fmod is exact (0 ulp), so for a state
- * already in [0, 2*TWO_PI) the answer is either the state itself or one
- * exact subtraction (Sterbenz: TWO_PI <= x < 2*TWO_PI keeps x - TWO_PI
- * exact). That covers every hot iteration - deltas are bounded well
- * below 2*pi - and the general fmod stays as the fallback, so the
- * result is bit-identical to calling fmod every time while removing a
- * multi-instruction fp64 library routine from the densest fp64 loop in
- * the page. */
-static __device__ __forceinline__ double m3_angle_wrap(double state) {
-    const double TWO_PI_64 = 6.283185307179586;
-    if (state >= 0.0 && state < 2.0 * TWO_PI_64) {
-        if (state >= TWO_PI_64) state -= TWO_PI_64;
-        return state;
-    }
-    state = fmod(state, TWO_PI_64);
-    if (state < 0.0) state += TWO_PI_64;
-    return state;
-}
 
 #define DEFINE_M3_ANGLE_CHUNK_APPLY(NAME, IDX)                                 \
 extern "C" __global__ void NAME(                                               \
@@ -1494,13 +1510,11 @@ extern "C" __global__ void NAME(                                               \
             /* The standalone advance, line for line: f64 accumulation,        \
                the wrap into [0, 2*pi), the f32 store. */                      \
             double state = (double)angle_state[angle_idx];                     \
-            const double TWO_PI_64 = 6.283185307179586;                        \
             float raw = angles_raw[sample * n_angles + a];                     \
             float dt_val = dt_arr[sample * nh + h];                            \
             double delta = (double)(tanhf(raw) * PI * dt_val);                 \
             state += delta;                                                    \
-            state = fmod(state, TWO_PI_64);                                    \
-            if (state < 0.0) state += TWO_PI_64;                               \
+            state = m3_angle_wrap(state);                                      \
             ang = (float)state;                                                \
             angle_state[angle_idx] = ang;                                      \
         } else {                                                               \
@@ -1577,13 +1591,11 @@ extern "C" __global__ void NAME(                                                
         float ang;                                                              \
         if (angle_state != nullptr) {                                           \
             double state = (double)angle_state[angle_idx];                      \
-            const double TWO_PI_64 = 6.283185307179586;                         \
             float raw = angles_raw[sample * n_angles + a];                      \
             float dt_val = dt_arr[sample * nh + h];                             \
             double delta = (double)(tanhf(raw) * PI * dt_val);                  \
             state += delta;                                                     \
-            state = fmod(state, TWO_PI_64);                                     \
-            if (state < 0.0) state += TWO_PI_64;                                \
+            state = m3_angle_wrap(state);                                       \
             ang = (float)state;                                                 \
             angle_state[angle_idx] = ang;                                       \
         } else {                                                                \

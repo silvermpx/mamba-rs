@@ -1170,11 +1170,7 @@ pub fn gpu_forward_mamba3_target_burnin(
                 let t_i = dims.seq_len as i32;
                 let nh_i = nh as i32;
                 let na_i = na as i32;
-                let grid = cudarc::driver::LaunchConfig {
-                    grid_dim: (dims.batch as u32, (nh * na).div_ceil(256) as u32, 1),
-                    block_dim: (256.min((nh * na) as u32), 1, 1),
-                    shared_mem_bytes: 0,
-                };
+                let grid = super::kernels::angle_forward_cfg(dims.batch, nh, na);
                 for (y_first, cfg) in y_runs(grid) {
                     let mut builder = ctx
                         .stream

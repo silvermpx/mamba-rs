@@ -694,6 +694,14 @@
   kernels, which stay frozen in `tests/fixtures/m2_backward_reference.cu`
   with the tiles held to them. `Mamba2BwdKernels::dx`, `db` and `dc` are
   gone, and `bc_tiles_smem_bytes` is the constant `BC_TILES_SMEM_BYTES`.
+- The SISO angles' sequential sum (`m3_angle_dt_fwd_seq`) issues the loads
+  of 16 steps before it adds any of them and takes a warp a block
+  (`angle_forward_cfg`), and it and the decode step wrap the fp64 angle
+  through the exact helper the chunked sum uses, which answers what fmod
+  answers with one comparison and at most one exact subtraction for every
+  step short of a full turn, where every step called fmod. The chain keeps
+  its order and its bits; the released kernel stays frozen in
+  `tests/fixtures/m3_angle_forward_reference.cu`.
 
 ### Fixed
 

@@ -29,7 +29,7 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{IndexWidth, grid_1d_cover, y_runs, yz_runs};
-use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, angle_backward_cfg};
+use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, angle_backward_cfg, angle_forward_cfg};
 
 /// The dQK-theta stage as it was released before the row-streaming stage
 /// replaced it: f32, the bf16 and f16 forms, and the half transport form.
@@ -38,6 +38,9 @@ const FROZEN_DQKTHETA: &str = include_str!("fixtures/m3_dqktheta_reference.cu");
 /// The angle gradients' reverse sum as it was released before the
 /// batched-load kernel replaced it.
 const FROZEN_ANGLE_BACKWARD: &str = include_str!("fixtures/m3_angle_backward_reference.cu");
+/// The angles' sequential sum as released, one step's loads at a time and
+/// fmod's wrap every step.
+const FROZEN_ANGLE_FORWARD: &str = include_str!("fixtures/m3_angle_forward_reference.cu");
 
 // Config: realistic-ish head dims, 2 chunks with partial last chunk coverage.
 const B: usize = 2;
@@ -826,6 +829,122 @@ fn m3_angle_backward_keeps_the_bits_of_its_released_form() {
         cases += 1;
     }
     eprintln!("m3_angle_dt_bwd_seq: the released form's bits on {cases} cases");
+}
+
+/// The angles' sequential sum takes the loads of several steps at once and
+/// walks its fp64 chain one step at a time, wrapping through the exact
+/// helper, so it gives the bits of its released per-step form with fmod
+/// every step: the cumulative angles and the carried state, in both index
+/// widths, at windows that are and are not whole batches of steps, with one
+/// sequence a row and with rows packing several, from one column to many,
+/// with steps that turn back below zero and steps of several turns (dt up
+/// to 6, so fmod's general path runs too).
+#[test]
+fn m3_angle_forward_keeps_the_bits_of_its_released_form() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let m3k = make_m3k(&ctx);
+    let frozen = frozen_module(
+        ctx.stream.context(),
+        arch::arch0(),
+        Some(64),
+        FROZEN_ANGLE_FORWARD,
+    );
+    let released = frozen
+        .load_function("m3_reference_angle_dt_fwd_seq")
+        .unwrap();
+    let mut cases = 0;
+    for (b, t, nh, na, packed, dt_top) in [
+        (1usize, 1usize, 1usize, 1usize, false, 1.0f32),
+        (2, 15, 3, 2, false, 1.0),
+        (2, 16, 3, 2, true, 6.0),
+        (2, 17, 3, 2, true, 1.0),
+        (3, 100, 48, 4, true, 6.0),
+        (4, 513, 24, 32, false, 1.0),
+        (1, 1300, 48, 4, false, 6.0),
+        (2, 33, 5, 7, true, 3.0),
+    ] {
+        let (bt, total) = (b * t, nh * na);
+        let raw: Vec<f32> = det_rand(bt * na, 0xE201).iter().map(|v| v * 6.0).collect();
+        let raw = upload_f32(&ctx, &raw);
+        let dt: Vec<f32> = det_rand(bt * nh, 0xE202)
+            .iter()
+            .map(|v| (v + 1.0) * 0.5 * dt_top)
+            .collect();
+        let dt = upload_f32(&ctx, &dt);
+        let state0: Vec<f32> = det_rand(b * total, 0xE203)
+            .iter()
+            .map(|v| (v + 1.0) * std::f32::consts::PI)
+            .collect();
+        // Sequences of 7 steps a row, their ids as the kernel reads them.
+        let ids = upload_f32(
+            &ctx,
+            &(0..bt)
+                .map(|i| f32::from_bits(((i % t) / 7) as u32))
+                .collect::<Vec<_>>(),
+        );
+        let seq_idx = if packed { ids.cached_ptr() } else { 0 };
+        let run = |f: &CudaFunction, cfg: LaunchConfig, poison: f32| {
+            let cumsum = upload_f32(&ctx, &vec![poison; total * bt]);
+            let state = upload_f32(&ctx, &state0);
+            let dims = [b, t, nh, na].map(|v| v as i32);
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut bld = ctx.stream.launch_builder(f);
+                let ptrs = [
+                    cumsum.cached_ptr(),
+                    state.cached_ptr(),
+                    raw.cached_ptr(),
+                    dt.cached_ptr(),
+                ];
+                for p in &ptrs {
+                    bld.arg(p);
+                }
+                for d in &dims {
+                    bld.arg(d);
+                }
+                bld.arg(&y_first);
+                bld.arg(&seq_idx);
+                unsafe { bld.launch(cfg) }.unwrap();
+            }
+            ctx.stream.synchronize().unwrap();
+            [
+                download_f32(&ctx, &cumsum, total * bt),
+                download_f32(&ctx, &state, b * total),
+            ]
+        };
+        let want = run(
+            &released,
+            LaunchConfig {
+                grid_dim: (b as u32, total.div_ceil(256) as u32, 1),
+                block_dim: (total.min(256) as u32, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            8192.0,
+        );
+        for width in [IndexWidth::I32, IndexWidth::I64] {
+            let got = run(
+                m3k.m3_angle_dt_fwd_seq.get(width),
+                angle_forward_cfg(b, nh, na),
+                -8192.0,
+            );
+            for ((w, g), output) in want
+                .iter()
+                .zip(&got)
+                .zip(["cumulative angles", "carried state"])
+            {
+                for (i, (x, y)) in w.iter().zip(g).enumerate() {
+                    assert_eq!(
+                        x.to_bits(),
+                        y.to_bits(),
+                        "B {b} T {t} nh {nh} na {na} packed {packed} dt {dt_top} {width:?}: \
+                         {output}[{i}]"
+                    );
+                }
+            }
+        }
+        cases += 1;
+    }
+    eprintln!("m3_angle_dt_fwd_seq: the released form's bits on {cases} cases");
 }
 
 // ─── isolated production-shape bench ─────────────────────────────────────
