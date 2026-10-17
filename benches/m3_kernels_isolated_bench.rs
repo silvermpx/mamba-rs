@@ -11,7 +11,7 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
-use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
+use mamba_rs::mamba3_siso::gpu::kernels::{ChunkArm, Mamba3Kernels, chunk_scan_cfg};
 
 fn det_rand(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
@@ -286,45 +286,21 @@ fn m3_kernels_isolated_bench() {
         unsafe { bld.launch(cs_grid) }.unwrap();
     });
 
-    // Forward chunk kernels (bf16, production geometry): grid covers
-    // (b*chunk, head-pair), so occupancy is structurally different from
-    // the backward dqkv — measure, do not assume.
-    let cst_out = GpuBuffer::zeros(&ctx.stream, CB * n_chunks * CNH * CHD * CDS).unwrap();
+    // The intra-chunk scan (bf16) on the kernel the production route
+    // takes at this shape.
     let y_t = upload_typed(&ctx, &det_rand(n_v, 0xA010), WeightDtype::Bf16);
     ctx.stream.synchronize().unwrap();
-    let fwd_cfg = LaunchConfig {
-        grid_dim: ((CB * n_chunks) as u32, (CNH as u32).div_ceil(2), 1),
-        block_dim: (CHD as u32, 2, 1),
-        shared_mem_bytes: 0,
+    let (arm, fwd_cfg) = chunk_scan_cfg(CB, n_chunks, CNH, CHD, CDS, CCS);
+    let scan_kernel = match arm {
+        ChunkArm::Whole => m3k.m3_chunk_scan_fwd_coop_typed.i32.get(WeightDtype::Bf16),
+        ChunkArm::Sliced => m3k
+            .m3_chunk_scan_fwd_sliced_typed
+            .i32
+            .get(WeightDtype::Bf16),
     };
-    time_it("m3_chunk_state_fwd bf16", &|| {
+    time_it(&format!("intra-chunk scan bf16 ({arm:?})"), &|| {
         for (y_first, cfg) in y_runs(fwd_cfg) {
-            let mut bld = ctx
-                .stream
-                .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(WeightDtype::Bf16));
-            let xp = v_t.cached_ptr();
-            let ksp = ks_t.cached_ptr();
-            let cst_p = cst_out.cached_ptr();
-            bld.arg(&cst_p);
-            bld.arg(&xp);
-            bld.arg(&ksp);
-            bld.arg(dcs_buf.inner());
-            bld.arg(&bi);
-            bld.arg(&ti);
-            bld.arg(&nhi);
-            bld.arg(&hdi);
-            bld.arg(&dsi);
-            bld.arg(&csi);
-            bld.arg(&y_first);
-            bld.arg(&0u64);
-            unsafe { bld.launch(cfg) }.unwrap();
-        }
-    });
-    time_it("m3_chunk_scan_fwd bf16", &|| {
-        for (y_first, cfg) in y_runs(fwd_cfg) {
-            let mut bld = ctx
-                .stream
-                .launch_builder(m3k.m3_chunk_scan_fwd_typed.i32.get(WeightDtype::Bf16));
+            let mut bld = ctx.stream.launch_builder(scan_kernel);
             let yp = y_t.cached_ptr();
             let xp = v_t.cached_ptr();
             let qp = q_t.cached_ptr();

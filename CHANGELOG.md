@@ -457,8 +457,8 @@
   angle accumulation no longer refuses its tensors past the range either.
   The angle gradients' reduction takes a wide form past 2^31 columns
   (`Mamba3Kernels::reduce_sum_axis0_wide`). The SISO kernel fields that
-  have two builds hold them as a `ByIndexWidth`, and so do
-  `chunk_tile_threads` and `step_block_threads`, one bound per build. The
+  have two builds hold them as a `ByIndexWidth`, and so does
+  `step_block_threads`, one bound per build. The
   sequential and transport selectors take the launch's `IndexWidth`, and
   `Mamba3Kernels::dqkv_for_shape` takes its shape as a `DqkvRoute`.
 - `MAMBA_RS_INDEX_WIDTH=i64` runs every kernel built at two index widths
@@ -596,20 +596,29 @@
   projection is refused on its length.
 - The Mamba-3 SISO kernels opt in to the device's shared memory and plan
   their tiles within the 99 KB every supported part allows
-  (`route::PLANNED_SMEM`, `Mamba3Kernels::smem_optin`), where the chunked
-  forward stopped at the 48 KB default: the fused pre-state kernel now
-  serves shapes up to that budget, with the bits of the kernels it
-  replaces. The cooperative chunk scan keeps the shapes whose tile fits
-  48 KB (`COOP_SCAN_TILE_MAX`): it rounds the last terms of each output
-  differently from the static-tile kernel the larger shapes run on, so
-  that bound is a numeric contract. `m3_dqktheta` keeps staging its tiles
+  (`route::PLANNED_SMEM`, `Mamba3Kernels::smem_optin`), and the chunked
+  forward runs every head and state width on fast kernels. The pre-state
+  takes the fused kernel where its tile of whole rows fits that budget and
+  a sliced kernel everywhere else, which replaces the preprocess, decay
+  cumsum and chunk state trio. The intra-chunk scan takes the cooperative
+  kernel for the shapes whose tile fits 48 KB (`COOP_SCAN_TILE_MAX`) and a
+  sliced kernel with the static-tile kernel's arithmetic everywhere else,
+  which replaces the two-head static-tile scan; the 48 KB bound is a
+  numeric contract, since the two kernels round the last terms of an
+  output differently. Every shape keeps its bits: the retired kernels stay
+  frozen in `tests/fixtures/m3_chunked_forward_reference.cu`, and the
+  sliced kernels are held to them. `m3_dqktheta` keeps staging its tiles
   up to 48 KB (`DQKTHETA_STAGING_MAX`): larger staged tiles measured
-  slower than its direct reads at some shapes.
-  `chunk_scan_cfg` and `chunk_state_cfg` take the block's `ChunkLimits`
-  (`Mamba3Kernels::chunk_limits`) in place of a thread count,
-  `chunk_fused_cfg` the bytes a block may stage, and
-  `route::chunked_backward_tiled` the budget it decides within;
-  `route::CHUNKED_BACKWARD_SMEM_MAX` is `route::PLANNED_SMEM`.
+  slower than its direct reads at some shapes. `chunk_fused_cfg`
+  takes the bytes a block may stage; `chunk_pre_state_cfg`,
+  `chunk_pre_state_sliced_cfg`, `chunk_scan_coop_cfg`,
+  `chunk_scan_sliced_cfg` and `ChunkArm` are new, and `chunk_scan_cfg`
+  returns the arm it routes to; `chunk_state_cfg`,
+  `Mamba3Kernels::chunk_tile_threads` and the retired kernels' fields are
+  gone. `route::chunked_backward_tiled` takes the budget it decides
+  within, and `route::CHUNKED_BACKWARD_SMEM_MAX` is `route::PLANNED_SMEM`.
+  The scan micro bench takes its `scan_trio/chunk_states` and
+  `state_passing` digests from the pre-state's own decay cumsum.
 
 ### Fixed
 

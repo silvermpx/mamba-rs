@@ -140,13 +140,10 @@ pub struct Mamba3Kernels {
     pub adamw_step_multi: TypedKernel,
 
     // ── Chunked parallel scan (mamba3_chunked.cu) ──
-    pub m3_preprocess_chunks: ByIndexWidth<CudaFunction>,
-    pub m3_da_cumsum: ByIndexWidth<CudaFunction>,
-    pub m3_chunk_state_fwd: ByIndexWidth<CudaFunction>,
-    pub m3_chunk_scan_fwd: ByIndexWidth<CudaFunction>,
-    /// Cooperative-block twin: one head per 256-thread block, triangle
-    /// tile + staged operands in dynamic smem. Routed when the smem total
-    /// fits [`COOP_SCAN_TILE_MAX`] (see there for why that bound stays).
+    /// The intra-chunk scan with whole rows staged, one head per block of
+    /// 256 threads, the triangle and the operands in dynamic shared memory,
+    /// for the shapes whose tile fits [`COOP_SCAN_TILE_MAX`] (see
+    /// [`chunk_scan_cfg`]).
     pub m3_chunk_scan_fwd_coop: ByIndexWidth<CudaFunction>,
     // m3_chunk_scan_bwd, m3_state_passing_bwd, m3_chunk_state_bwd,
     // m3_cumsum_bwd removed — dead code replaced by monolithic m3_dqkv +
@@ -244,18 +241,16 @@ pub struct Mamba3Kernels {
     // through m3_dqkv_typed + m3_dqktheta_typed monolithic kernels).
 
     // -- Typed M3 chunked parallel forward kernels --
-    /// Per-chunk gamma/scale + qk_dot + K prescale. Typed K/Q/K_scaled,
-    /// f32 DT/trap_sig/qk_dot/scale/gamma (these are scalars computed in
-    /// float and reused by the scan path).
-    pub m3_preprocess_chunks_typed: ByIndexWidth<TypedKernel>,
-    /// Per-chunk SSM state matmul (typed x, typed K_scaled, f32 dA_cumsum,
-    /// f32 states_out — BPTT state MUST remain f32 per Tri Dao invariant).
-    pub m3_chunk_state_fwd_typed: ByIndexWidth<TypedKernel>,
-    /// Fused preprocess + chunk_state (3b): one kernel computes K_scaled/
-    /// qk_dot/scale/gamma AND the chunk states, keeping K_scaled in smem
-    /// across the seam instead of round-tripping it through L2. Launched
-    /// only when `chunk_fused_cfg` returns Some; otherwise the pair runs.
+    /// The pre-state in one kernel with whole rows staged: each row's
+    /// scale, gamma and Q.K dot, the prescaled K rows, the chunk's decay
+    /// cumsum and its states. Typed K/Q/K_scaled/x; f32 DT/trap_sig/
+    /// qk_dot/scale/gamma, and f32 states, as BPTT needs them (see
+    /// [`chunk_pre_state_cfg`]).
     pub m3_chunk_pre_state_fused_typed: ByIndexWidth<TypedKernel>,
+    /// The pre-state for any head and state width, the state staged in
+    /// slices: the fused kernel's outputs, bit for bit, and the same
+    /// arguments (see [`chunk_pre_state_cfg`]).
+    pub m3_chunk_pre_state_sliced_typed: ByIndexWidth<TypedKernel>,
     /// The inter-chunk state pass of a window in one launch, one CTA per
     /// (b, h): the trapezoidal entering fold of a carried window, the
     /// exclusive prefix scan over the chunks, and the window's final SSM,
@@ -263,14 +258,14 @@ pub struct Mamba3Kernels {
     /// Typed inputs k_flat/x_flat; every state f32. Launched with
     /// `state_pass_fused_cfg`.
     pub m3_state_pass_fused_typed: ByIndexWidth<TypedKernel>,
-    /// Intra-chunk output: typed y_out/x/Q/K_scaled; f32 qk_dot/dA_cumsum/
-    /// prev_states/D.
-    pub m3_chunk_scan_fwd_typed: ByIndexWidth<TypedKernel>,
-    /// The most threads one block of the chunked forward's scalar fallback
-    /// tiles may run: the fewest any of their f32, bf16 and f16 kernels can
-    /// launch with the registers its state capacity compiled to.
-    pub chunk_tile_threads: ByIndexWidth<usize>,
-    /// The same bound for the block-tier decode step.
+    /// The intra-chunk scan for any head and state width, the state staged
+    /// in slices: typed y_out/x/Q/K_scaled, f32 qk_dot/dA_cumsum/
+    /// prev_states/D, the cooperative scan's arguments and the static-tile
+    /// kernel's arithmetic (see [`chunk_scan_cfg`]).
+    pub m3_chunk_scan_fwd_sliced_typed: ByIndexWidth<TypedKernel>,
+    /// The most threads one block of the block-tier decode step may run:
+    /// the fewest any of its f32, bf16 and f16 kernels can launch with the
+    /// registers its state capacity compiled to.
     pub step_block_threads: ByIndexWidth<usize>,
     /// The dynamic shared memory a block of the staged kernels plans its
     /// tiles with: what each of them opted in to on this device beside its
@@ -650,18 +645,6 @@ impl Mamba3Kernels {
                 .collect::<Result<Vec<_>, _>>()?;
             block_threads_bound(&kernels.iter().collect::<Vec<_>>(), what)
         };
-        let chunk_tiles = [
-            "m3_chunk_state_fwd",
-            "m3_chunk_state_fwd_bf16",
-            "m3_chunk_state_fwd_f16",
-            "m3_chunk_scan_fwd",
-            "m3_chunk_scan_fwd_bf16",
-            "m3_chunk_scan_fwd_f16",
-        ];
-        let chunk_tile_threads = ByIndexWidth {
-            i32: bound(&chunk_tiles, "", "chunked forward's fallback tiles")?,
-            i64: bound(&chunk_tiles, "_i64", "chunked forward's fallback tiles")?,
-        };
         let step_blocks = [
             "m3_step_fwd_block",
             "m3_step_fwd_block_bf16",
@@ -786,10 +769,6 @@ impl Mamba3Kernels {
             },
 
             // Chunked parallel scan
-            m3_preprocess_chunks: pair("m3_preprocess_chunks")?,
-            m3_da_cumsum: pair("m3_dA_cumsum")?,
-            m3_chunk_state_fwd: pair("m3_chunk_state_fwd")?,
-            m3_chunk_scan_fwd: pair("m3_chunk_scan_fwd")?,
             m3_chunk_scan_fwd_coop: pair("m3_chunk_scan_fwd_coop")?,
             m3_extract_da_cs_sum: pair("m3_extract_da_cs_sum")?,
             m3_dqkv: pair("m3_dqkv")?,
@@ -891,20 +870,15 @@ impl Mamba3Kernels {
             m3_dqkv_typed: typed_pair("m3_dqkv", "m3_dqkv_bf16", "m3_dqkv_f16")?,
             m3_dqktheta_typed: typed_pair("m3_dqktheta", "m3_dqktheta_bf16", "m3_dqktheta_f16")?,
 
-            m3_preprocess_chunks_typed: typed_pair(
-                "m3_preprocess_chunks",
-                "m3_preprocess_chunks_bf16",
-                "m3_preprocess_chunks_f16",
-            )?,
-            m3_chunk_state_fwd_typed: typed_pair(
-                "m3_chunk_state_fwd",
-                "m3_chunk_state_fwd_bf16",
-                "m3_chunk_state_fwd_f16",
-            )?,
             m3_chunk_pre_state_fused_typed: typed_pair(
                 "m3_chunk_pre_state_fused",
                 "m3_chunk_pre_state_fused_bf16",
                 "m3_chunk_pre_state_fused_f16",
+            )?,
+            m3_chunk_pre_state_sliced_typed: typed_pair(
+                "m3_chunk_pre_state_sliced",
+                "m3_chunk_pre_state_sliced_bf16",
+                "m3_chunk_pre_state_sliced_f16",
             )?,
             m3_state_pass_fused_typed: typed_pair(
                 "m3_state_pass_fused_f32",
@@ -916,10 +890,10 @@ impl Mamba3Kernels {
                 "m3_chunk_scan_fwd_coop_bf16",
                 "m3_chunk_scan_fwd_coop_f16",
             )?,
-            m3_chunk_scan_fwd_typed: typed_pair(
-                "m3_chunk_scan_fwd",
-                "m3_chunk_scan_fwd_bf16",
-                "m3_chunk_scan_fwd_f16",
+            m3_chunk_scan_fwd_sliced_typed: typed_pair(
+                "m3_chunk_scan_fwd_sliced",
+                "m3_chunk_scan_fwd_sliced_bf16",
+                "m3_chunk_scan_fwd_sliced_f16",
             )?,
 
             residual_add_f32_typed: HalfKernel {
@@ -932,7 +906,6 @@ impl Mamba3Kernels {
                 f16: get("gather_last_timestep_f16")?,
             },
 
-            chunk_tile_threads,
             step_block_threads,
             smem_optin: 0,
             _modules: CudaModuleAnchors::new(vec![module]),
@@ -952,11 +925,7 @@ impl Mamba3Kernels {
                 .max(0) as usize;
             let mut budget = PLANNED_SMEM;
             let k = &kernels;
-            let by_width = [
-                (&k.m3_dqkv, "m3_dqkv"),
-                (&k.m3_chunk_state_fwd, "m3_chunk_state_fwd"),
-                (&k.m3_dqktheta, "m3_dqktheta"),
-            ];
+            let by_width = [(&k.m3_dqkv, "m3_dqkv"), (&k.m3_dqktheta, "m3_dqktheta")];
             for (pair, name) in by_width {
                 for f in [&pair.i32, &pair.i64] {
                     budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
@@ -968,7 +937,6 @@ impl Mamba3Kernels {
                     &k.m3_chunk_pre_state_fused_typed,
                     "m3_chunk_pre_state_fused",
                 ),
-                (&k.m3_chunk_state_fwd_typed, "m3_chunk_state_fwd typed"),
                 (&k.m3_dqktheta_typed, "m3_dqktheta typed"),
             ];
             for (pair, name) in typed_by_width {
@@ -1000,26 +968,6 @@ impl Mamba3Kernels {
     pub(crate) fn module_anchors(&self) -> CudaModuleAnchors {
         self._modules.clone()
     }
-
-    /// The limits the chunked forward's blocks are planned within at an
-    /// index width.
-    pub fn chunk_limits(&self, width: IndexWidth) -> ChunkLimits {
-        ChunkLimits {
-            threads: *self.chunk_tile_threads.get(width),
-            smem: self.smem_optin,
-        }
-    }
-}
-
-/// The limits a block of the chunked forward is planned within.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChunkLimits {
-    /// The most threads a block of the scalar fallback tiles runs
-    /// ([`Mamba3Kernels::chunk_tile_threads`]).
-    pub threads: usize,
-    /// The dynamic shared memory a block may stage
-    /// ([`Mamba3Kernels::smem_optin`]).
-    pub smem: usize,
 }
 
 /// Launch geometry for the fused B/C normalization kernels.
@@ -1089,50 +1037,6 @@ fn block_threads_bound(kernels: &[&CudaFunction], what: &str) -> Result<usize, S
     Ok(threads / 32 * 32)
 }
 
-/// Lanes per head in the chunked forward's scalar fallback tiles: two heads
-/// share a block of at most `threads` threads, and a head wider than its
-/// half takes the lanes in turns.
-fn chunk_fallback_lanes(hd: usize, threads: usize) -> usize {
-    hd.min((threads / 2 / 32 * 32).max(32))
-}
-
-/// Launch geometry for `m3_chunk_state_fwd` within `limits`
-/// ([`Mamba3Kernels::chunk_limits`]).
-///
-/// The kernel derives its thread layout from this block shape. When the
-/// shared tile fits and `ds` is divisible by four, each thread owns four
-/// ascending-timestep accumulation chains; other shapes use the scalar layout.
-pub fn chunk_state_cfg(
-    batch: usize,
-    n_chunks: usize,
-    nh: usize,
-    hd: usize,
-    ds: usize,
-    chunk_size: usize,
-    limits: ChunkLimits,
-) -> cudarc::driver::LaunchConfig {
-    // Quad layout: block (hd, ds/4, 2 heads) with the block's x/K/dA
-    // chunk slices staged in dynamic smem (the kernel is L2-bound; the
-    // staging collapses its redundant global reads). Legacy layout for
-    // shapes that don't fit the smem budget or an odd ds.
-    let ChunkLimits { threads, smem } = limits;
-    let heads = 2usize;
-    let smem_bytes = heads * (chunk_size * hd + chunk_size * ds + chunk_size) * 4;
-    if ds.is_multiple_of(4) && hd * (ds / 4) * heads <= threads && smem_bytes <= smem {
-        cudarc::driver::LaunchConfig {
-            grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(heads) as u32, 1),
-            block_dim: (hd as u32, (ds / 4) as u32, heads as u32),
-            shared_mem_bytes: smem_bytes as u32,
-        }
-    } else {
-        cudarc::driver::LaunchConfig {
-            grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(2) as u32, 1),
-            block_dim: (chunk_fallback_lanes(hd, threads) as u32, 2, 1),
-            shared_mem_bytes: 0,
-        }
-    }
-}
-
 /// Launch geometry for the decode step of a head: the warp tier's one
 /// warp of `headdim` lanes, or the block tier's CTA of `headdim` threads
 /// rounded up to whole warps, at most `block_threads`
@@ -1180,12 +1084,41 @@ pub fn state_pass_fused_cfg(
     }
 }
 
-/// Launch geometry for the FUSED preprocess+chunk_state kernel, or None
-/// when the shape must run the unfused pair (odd ds - phase B is float4;
-/// a tile past the `smem` bytes a block may stage
-/// ([`Mamba3Kernels::smem_optin`]); chunk_size beyond a block). Single
-/// source: the kernel derives everything from blockDim/args, every call
-/// site MUST use this.
+/// Which kernel a stage of the chunked forward runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChunkArm {
+    /// The kernel that stages whole state rows: the fused pre-state, the
+    /// cooperative scan.
+    Whole,
+    /// The kernel that stages the state in slices, for any head and state
+    /// width.
+    Sliced,
+}
+
+/// The channels of a head a block of the sliced kernels takes (`M3PS_PB`
+/// and `M3SS_PB` in `mamba3_chunked.cu`).
+pub const SLICED_CHANNELS: usize = 64;
+
+/// The floats of the sliced pre-state's tile, the kernel's `M3PS_FLOATS`:
+/// a slice of the K rows and of the Q rows, the block's channels of the x
+/// rows, and four per-row values.
+pub const PRE_STATE_SLICED_FLOATS: usize = 2 * 64 * 20 + 64 * SLICED_CHANNELS + 4 * 64;
+
+/// The floats of the sliced scan's tile, the kernel's `M3SS_FLOATS`: the
+/// pair triangle, the slice arena (the Q, K and entering-state slices, or
+/// the value rows after them) and five per-row values.
+pub const SCAN_SLICED_FLOATS: usize = {
+    let tri = (64 * 63 / 2 + 3) & !3;
+    let slices = 2 * 64 * 20 + SLICED_CHANNELS * 20;
+    let values = 64 * (SLICED_CHANNELS + 4);
+    let arena = if slices > values { slices } else { values };
+    tri + arena + 5 * 64
+};
+
+/// Launch geometry for the fused pre-state kernel, or None when its tile of
+/// whole rows passes the `smem` bytes a block may stage
+/// ([`Mamba3Kernels::smem_optin`]), its state width is not a whole number of
+/// quads, or the chunk is wider than a block.
 pub fn chunk_fused_cfg(
     batch: usize,
     n_chunks: usize,
@@ -1207,14 +1140,57 @@ pub fn chunk_fused_cfg(
     })
 }
 
-/// The tile of the cooperative chunk scan the shapes it serves have always
-/// fit: the 48 KB default window. The cooperative kernel and the static-tile
-/// kernel leave the last sums of an output to their compiler, which forms
-/// them differently on some compilers and parts (on Blackwell under NVRTC
-/// 13.2 and later the static one folds the entering-state term into the
-/// diagonal sum with one fused multiply-add, the cooperative one rounds it
-/// first), so this bound is a numeric contract, not a budget: a shape keeps
-/// its kernel, and its bits, whatever shared memory the device offers.
+/// Launch geometry for the sliced pre-state kernel, which serves every head
+/// and state width: a block of 256 threads per (sequence and chunk, head,
+/// [`SLICED_CHANNELS`] channels of the head).
+pub fn chunk_pre_state_sliced_cfg(
+    batch: usize,
+    n_chunks: usize,
+    nh: usize,
+    hd: usize,
+) -> cudarc::driver::LaunchConfig {
+    cudarc::driver::LaunchConfig {
+        grid_dim: (
+            (batch * n_chunks) as u32,
+            nh as u32,
+            hd.div_ceil(SLICED_CHANNELS) as u32,
+        ),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: (PRE_STATE_SLICED_FLOATS * 4) as u32,
+    }
+}
+
+/// The pre-state kernel a shape takes, and its geometry: the fused kernel
+/// where its tile fits the `smem` bytes a block may stage, the sliced
+/// kernel everywhere else. Both take the same arguments and give the same
+/// bits.
+pub fn chunk_pre_state_cfg(
+    batch: usize,
+    n_chunks: usize,
+    nh: usize,
+    hd: usize,
+    ds: usize,
+    chunk_size: usize,
+    smem: usize,
+) -> (ChunkArm, cudarc::driver::LaunchConfig) {
+    match chunk_fused_cfg(batch, n_chunks, nh, hd, ds, chunk_size, smem) {
+        Some(cfg) => (ChunkArm::Whole, cfg),
+        None => (
+            ChunkArm::Sliced,
+            chunk_pre_state_sliced_cfg(batch, n_chunks, nh, hd),
+        ),
+    }
+}
+
+/// The tile of the cooperative scan the shapes it serves have always fit:
+/// the 48 KB default window. The cooperative kernel and the static-tile
+/// kernel the larger shapes ran on, whose arithmetic the sliced scan keeps,
+/// left the last sums of an output to their compiler, which forms them
+/// differently on some compilers and parts (on Blackwell under NVRTC 13.2
+/// and later the static one folds the entering-state term into the diagonal
+/// sum with one fused multiply-add, the cooperative one rounds it first), so
+/// this bound is a numeric contract, not a budget: a shape keeps its kernel,
+/// and its bits, whatever shared memory the device offers.
 pub const COOP_SCAN_TILE_MAX: usize = 48 * 1024;
 
 /// The largest staging `m3_dqktheta` takes. A thread of the stage holds its
@@ -1224,21 +1200,16 @@ pub const COOP_SCAN_TILE_MAX: usize = 48 * 1024;
 /// direct. The staged and direct forms give the same bits.
 pub const DQKTHETA_STAGING_MAX: usize = 48 * 1024;
 
-/// Select the cooperative chunk scan for the shapes whose tile fits
-/// [`COOP_SCAN_TILE_MAX`]. Wider shapes keep the two-head static-tile
-/// kernel, its blocks at most `limits.threads` wide
-/// ([`Mamba3Kernels::chunk_limits`]). Returns `(use_coop, config)`; both
-/// kernels take the same arguments.
-pub fn chunk_scan_cfg(
+/// Launch geometry for the cooperative scan, or None when its tile of whole
+/// rows passes [`COOP_SCAN_TILE_MAX`] or the chunk is wider than 64.
+pub fn chunk_scan_coop_cfg(
     batch: usize,
     n_chunks: usize,
     nh: usize,
     hd: usize,
     ds: usize,
     chunk_size: usize,
-    limits: ChunkLimits,
-) -> (bool, cudarc::driver::LaunchConfig) {
-    let threads = limits.threads;
+) -> Option<cudarc::driver::LaunchConfig> {
     // q/k rows are padded to ds + 4 floats and the transposed entering
     // state's rows to hd + 4, to avoid bank conflicts. Keep this host
     // formula in lockstep with the kernel's layout.
@@ -1248,23 +1219,76 @@ pub fn chunk_scan_cfg(
         + ds * (hd + 4)
         + 2 * chunk_size;
     let smem_bytes = smem_floats * std::mem::size_of::<f32>();
-    if chunk_size <= 64 && smem_bytes <= COOP_SCAN_TILE_MAX {
-        (
-            true,
-            cudarc::driver::LaunchConfig {
-                grid_dim: ((batch * n_chunks) as u32, nh as u32, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: smem_bytes as u32,
-            },
-        )
-    } else {
-        (
-            false,
-            cudarc::driver::LaunchConfig {
-                grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(2) as u32, 1),
-                block_dim: (chunk_fallback_lanes(hd, threads) as u32, 2, 1),
-                shared_mem_bytes: 0,
-            },
-        )
+    (chunk_size <= 64 && smem_bytes <= COOP_SCAN_TILE_MAX).then(|| cudarc::driver::LaunchConfig {
+        grid_dim: ((batch * n_chunks) as u32, nh as u32, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: smem_bytes as u32,
+    })
+}
+
+/// Launch geometry for the sliced scan, which serves every head and state
+/// width: a block of 256 threads per (sequence and chunk, head,
+/// [`SLICED_CHANNELS`] channels of the head).
+pub fn chunk_scan_sliced_cfg(
+    batch: usize,
+    n_chunks: usize,
+    nh: usize,
+    hd: usize,
+) -> cudarc::driver::LaunchConfig {
+    cudarc::driver::LaunchConfig {
+        grid_dim: (
+            (batch * n_chunks) as u32,
+            nh as u32,
+            hd.div_ceil(SLICED_CHANNELS) as u32,
+        ),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: (SCAN_SLICED_FLOATS * 4) as u32,
+    }
+}
+
+/// The intra-chunk scan a shape takes, and its geometry: the cooperative
+/// kernel where its tile fits [`COOP_SCAN_TILE_MAX`], the sliced kernel,
+/// with the static-tile kernel's arithmetic, everywhere else. Both take the
+/// same arguments.
+pub fn chunk_scan_cfg(
+    batch: usize,
+    n_chunks: usize,
+    nh: usize,
+    hd: usize,
+    ds: usize,
+    chunk_size: usize,
+) -> (ChunkArm, cudarc::driver::LaunchConfig) {
+    match chunk_scan_coop_cfg(batch, n_chunks, nh, hd, ds, chunk_size) {
+        Some(cfg) => (ChunkArm::Whole, cfg),
+        None => (
+            ChunkArm::Sliced,
+            chunk_scan_sliced_cfg(batch, n_chunks, nh, hd),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The host's tiles of the sliced kernels are the kernel's own: the
+    /// source defines the same slice, channel block and chunk, and the
+    /// floats each tile takes stay as counted.
+    #[test]
+    fn sliced_tiles_match_the_kernel_defines() {
+        let source = include_str!("../../../kernels/mamba3_chunked.cu");
+        for define in [
+            "#define M3SS_NS 16",
+            "#define M3SS_PB 64",
+            "#define M3SS_CS 64",
+            "#define M3PS_NS 16",
+            "#define M3PS_PB 64",
+            "#define M3PS_CS 64",
+        ] {
+            assert!(source.contains(define), "{define}");
+        }
+        assert_eq!(SLICED_CHANNELS, 64);
+        assert_eq!(PRE_STATE_SLICED_FLOATS, 2560 + 4096 + 256);
+        assert_eq!(SCAN_SLICED_FLOATS, 2016 + 4352 + 320);
     }
 }

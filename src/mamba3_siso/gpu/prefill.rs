@@ -23,7 +23,7 @@
 //! that is what makes prefill-vs-training-forward parity testable at the
 //! bit level on the same device.
 
-use super::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg};
+use super::kernels::{ChunkArm, Mamba3Kernels, bcnorm_fwd_bc_cfg};
 use super::state::{
     CUptr, GpuMamba3Dims, GpuMamba3StateBufs, GpuMamba3TargetScratch, M3Exec,
     Mamba3PrefillTypedScratch,
@@ -42,7 +42,7 @@ use crate::gpu::graph_capture::{
     with_validated_gemm_graph_launch,
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
-use crate::gpu::launch::{grid_1d_cover, grid_colsum, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, grid_colsum, y_runs};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -749,217 +749,65 @@ impl Mamba3Prefill {
                         format_args!("prefill adt L{l}"),
                     )?;
                 }
-                // The fused kernel writes the decay cumsum itself; only the
-                // unfused pair reads it from its own launch.
-                let fused = super::kernels::chunk_fused_cfg(
-                    dims.batch,
-                    nc,
-                    nh,
-                    hd,
-                    ds,
-                    dims.chunk_size(),
-                    m3k.smem_optin,
-                );
-                if fused.is_none() {
-                    let block_x = nh.min(256) as u32;
-                    let grid_z = nh.div_ceil(block_x as usize) as u32;
-                    let cfg = cudarc::driver::LaunchConfig {
-                        grid_dim: (dims.batch as u32, nc as u32, grid_z),
-                        block_dim: (block_x, 1, 1),
-                        shared_mem_bytes: 0,
+                // The pre-state in one launch - each row's scale, gamma and
+                // Q.K dot, the prescaled K rows, the chunk's decay cumsum and
+                // its states - on the fused kernel where its tile of whole
+                // rows fits the block's budget, on the sliced kernel
+                // elsewhere; the same bits.
+                {
+                    let (arm, cfg) = super::kernels::chunk_pre_state_cfg(
+                        dims.batch,
+                        nc,
+                        nh,
+                        hd,
+                        ds,
+                        dims.chunk_size(),
+                        m3k.smem_optin,
+                    );
+                    let kernels = match arm {
+                        ChunkArm::Whole => m3k.m3_chunk_pre_state_fused_typed.get(width),
+                        ChunkArm::Sliced => m3k.m3_chunk_pre_state_sliced_typed.get(width),
                     };
-                    for (y_first, z_first, cfg) in yz_runs(cfg) {
-                        let mut b = ctx.stream.launch_builder(m3k.m3_da_cumsum.get(width));
-                        b.arg(ck.da_cumsum.inner_mut());
+                    let (kern, ks, kp, qp, xp) = match typed.as_deref_mut() {
+                        Some(ts) => (
+                            kernels.get(dtype),
+                            ts.k_scaled.cached_ptr(),
+                            ts.k.cached_ptr(),
+                            ts.q.cached_ptr(),
+                            ts.x.cached_ptr(),
+                        ),
+                        None => (
+                            &kernels.f32,
+                            ck.k_scaled.cached_ptr(),
+                            tgt.k.cached_ptr(),
+                            tgt.q.cached_ptr(),
+                            tgt.x.cached_ptr(),
+                        ),
+                    };
+                    for (y_first, cfg) in y_runs(cfg) {
+                        let mut b = ctx.stream.launch_builder(kern);
+                        b.arg(&ks);
+                        b.arg(ck.qk_dot.inner_mut());
+                        b.arg(&NULL_DEV);
+                        b.arg(&NULL_DEV);
+                        b.arg(ck.chunk_states.inner_mut());
+                        b.arg(&kp);
+                        b.arg(&qp);
+                        b.arg(tgt.dt.inner());
+                        b.arg(tgt.trap.inner());
+                        b.arg(&xp);
                         b.arg(ck.d_alpha.inner());
+                        b.arg(ck.da_cumsum.inner_mut());
                         b.arg(&b_i);
                         b.arg(&t_i);
                         b.arg(&nh_i);
+                        b.arg(&hd_i);
+                        b.arg(&ds_i);
                         b.arg(&cs);
                         b.arg(&y_first);
-                        b.arg(&z_first);
                         b.arg(&NO_PACKING);
                         unsafe { b.launch(cfg) }
-                            .map_err(|e| format!("prefill da_cumsum L{l}: {e:?}"))?;
-                    }
-                }
-                // Fused decay cumsum + preprocess + chunk_state when the shape
-                // allows: K_scaled crosses the seam through shared memory instead
-                // of L2.
-                if let Some(fcfg) = fused {
-                    if let Some(ts) = typed.as_deref_mut() {
-                        let ks = ts.k_scaled.cached_ptr();
-                        let kp = ts.k.cached_ptr();
-                        let qp = ts.q.cached_ptr();
-                        let xp = ts.x.cached_ptr();
-                        for (y_first, cfg) in y_runs(fcfg) {
-                            let mut b = ctx.stream.launch_builder(
-                                m3k.m3_chunk_pre_state_fused_typed.get(width).get(dtype),
-                            );
-                            b.arg(&ks);
-                            b.arg(ck.qk_dot.inner_mut());
-                            b.arg(&NULL_DEV);
-                            b.arg(&NULL_DEV);
-                            b.arg(ck.chunk_states.inner_mut());
-                            b.arg(&kp);
-                            b.arg(&qp);
-                            b.arg(tgt.dt.inner());
-                            b.arg(tgt.trap.inner());
-                            b.arg(&xp);
-                            b.arg(ck.d_alpha.inner());
-                            b.arg(ck.da_cumsum.inner_mut());
-                            b.arg(&b_i);
-                            b.arg(&t_i);
-                            b.arg(&nh_i);
-                            b.arg(&hd_i);
-                            b.arg(&ds_i);
-                            b.arg(&cs);
-                            b.arg(&y_first);
-                            b.arg(&NO_PACKING);
-                            unsafe { b.launch(cfg) }.map_err(|e| {
-                                format!("prefill fused pre+state typed L{l}: {e:?}")
-                            })?;
-                        }
-                    } else {
-                        for (y_first, cfg) in y_runs(fcfg) {
-                            let mut b = ctx
-                                .stream
-                                .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.get(width).f32);
-                            b.arg(ck.k_scaled.inner_mut());
-                            b.arg(ck.qk_dot.inner_mut());
-                            b.arg(&NULL_DEV);
-                            b.arg(&NULL_DEV);
-                            b.arg(ck.chunk_states.inner_mut());
-                            b.arg(tgt.k.inner());
-                            b.arg(tgt.q.inner());
-                            b.arg(tgt.dt.inner());
-                            b.arg(tgt.trap.inner());
-                            b.arg(tgt.x.inner());
-                            b.arg(ck.d_alpha.inner());
-                            b.arg(ck.da_cumsum.inner_mut());
-                            b.arg(&b_i);
-                            b.arg(&t_i);
-                            b.arg(&nh_i);
-                            b.arg(&hd_i);
-                            b.arg(&ds_i);
-                            b.arg(&cs);
-                            b.arg(&y_first);
-                            b.arg(&NO_PACKING);
-                            unsafe { b.launch(cfg) }
-                                .map_err(|e| format!("prefill fused pre+state L{l}: {e:?}"))?;
-                        }
-                    }
-                } else {
-                    {
-                        let cfg = cudarc::driver::LaunchConfig {
-                            grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
-                            block_dim: (dims.chunk_size() as u32, 1, 1),
-                            shared_mem_bytes: 0,
-                        };
-                        if let Some(ts) = typed.as_deref_mut() {
-                            let ks = ts.k_scaled.cached_ptr();
-                            let kp = ts.k.cached_ptr();
-                            let qp = ts.q.cached_ptr();
-                            for (y_first, cfg) in y_runs(cfg) {
-                                let mut b = ctx.stream.launch_builder(
-                                    m3k.m3_preprocess_chunks_typed.get(width).get(dtype),
-                                );
-                                b.arg(&ks);
-                                b.arg(ck.qk_dot.inner_mut());
-                                b.arg(&NULL_DEV);
-                                b.arg(&NULL_DEV);
-                                b.arg(&kp);
-                                b.arg(&qp);
-                                b.arg(tgt.dt.inner());
-                                b.arg(tgt.trap.inner());
-                                b.arg(&b_i);
-                                b.arg(&t_i);
-                                b.arg(&nh_i);
-                                b.arg(&ds_i);
-                                b.arg(&cs);
-                                b.arg(&y_first);
-                                b.arg(&NO_PACKING);
-                                unsafe { b.launch(cfg) }
-                                    .map_err(|e| format!("prefill preprocess typed L{l}: {e:?}"))?;
-                            }
-                        } else {
-                            for (y_first, cfg) in y_runs(cfg) {
-                                let mut b = ctx
-                                    .stream
-                                    .launch_builder(m3k.m3_preprocess_chunks.get(width));
-                                b.arg(ck.k_scaled.inner_mut());
-                                b.arg(ck.qk_dot.inner_mut());
-                                b.arg(&NULL_DEV);
-                                b.arg(&NULL_DEV);
-                                b.arg(tgt.k.inner());
-                                b.arg(tgt.q.inner());
-                                b.arg(tgt.dt.inner());
-                                b.arg(tgt.trap.inner());
-                                b.arg(&b_i);
-                                b.arg(&t_i);
-                                b.arg(&nh_i);
-                                b.arg(&ds_i);
-                                b.arg(&cs);
-                                b.arg(&y_first);
-                                b.arg(&NO_PACKING);
-                                unsafe { b.launch(cfg) }
-                                    .map_err(|e| format!("prefill preprocess L{l}: {e:?}"))?;
-                            }
-                        }
-                    }
-                    {
-                        let cfg = super::kernels::chunk_state_cfg(
-                            dims.batch,
-                            nc,
-                            nh,
-                            hd,
-                            ds,
-                            dims.chunk_size(),
-                            m3k.chunk_limits(width),
-                        );
-                        if let Some(ts) = typed.as_deref_mut() {
-                            let xp = ts.x.cached_ptr();
-                            let ks = ts.k_scaled.cached_ptr();
-                            for (y_first, cfg) in y_runs(cfg) {
-                                let mut b = ctx.stream.launch_builder(
-                                    m3k.m3_chunk_state_fwd_typed.get(width).get(dtype),
-                                );
-                                b.arg(ck.chunk_states.inner_mut());
-                                b.arg(&xp);
-                                b.arg(&ks);
-                                b.arg(ck.da_cumsum.inner());
-                                b.arg(&b_i);
-                                b.arg(&t_i);
-                                b.arg(&nh_i);
-                                b.arg(&hd_i);
-                                b.arg(&ds_i);
-                                b.arg(&cs);
-                                b.arg(&y_first);
-                                b.arg(&NO_PACKING);
-                                unsafe { b.launch(cfg) }.map_err(|e| {
-                                    format!("prefill chunk_state typed L{l}: {e:?}")
-                                })?;
-                            }
-                        } else {
-                            for (y_first, cfg) in y_runs(cfg) {
-                                let mut b =
-                                    ctx.stream.launch_builder(m3k.m3_chunk_state_fwd.get(width));
-                                b.arg(ck.chunk_states.inner_mut());
-                                b.arg(tgt.x.inner());
-                                b.arg(ck.k_scaled.inner());
-                                b.arg(ck.da_cumsum.inner());
-                                b.arg(&b_i);
-                                b.arg(&t_i);
-                                b.arg(&nh_i);
-                                b.arg(&hd_i);
-                                b.arg(&ds_i);
-                                b.arg(&cs);
-                                b.arg(&y_first);
-                                b.arg(&NO_PACKING);
-                                unsafe { b.launch(cfg) }
-                                    .map_err(|e| format!("prefill chunk_state L{l}: {e:?}"))?;
-                            }
-                        }
+                            .map_err(|e| format!("prefill pre-state ({arm:?}) L{l}: {e:?}"))?;
                     }
                 }
                 // The entering fold, the inter-chunk state pass and the exit
@@ -1014,21 +862,20 @@ impl Mamba3Prefill {
                 }
                 {
                     let dp = lw.d_param;
-                    let (coop, cfg) = super::kernels::chunk_scan_cfg(
+                    let (arm, cfg) = super::kernels::chunk_scan_cfg(
                         dims.batch,
                         nc,
                         nh,
                         hd,
                         ds,
                         dims.chunk_size(),
-                        m3k.chunk_limits(width),
                     );
+                    let kernels = match arm {
+                        ChunkArm::Whole => m3k.m3_chunk_scan_fwd_coop_typed.get(width),
+                        ChunkArm::Sliced => m3k.m3_chunk_scan_fwd_sliced_typed.get(width),
+                    };
                     if let Some(ts) = typed.as_deref_mut() {
-                        let kern = if coop {
-                            m3k.m3_chunk_scan_fwd_coop_typed.get(width).get(dtype)
-                        } else {
-                            m3k.m3_chunk_scan_fwd_typed.get(width).get(dtype)
-                        };
+                        let kern = kernels.get(dtype);
                         let yp = ts.y.cached_ptr();
                         let xp = ts.x.cached_ptr();
                         let qp = ts.q.cached_ptr();
@@ -1051,15 +898,12 @@ impl Mamba3Prefill {
                             b.arg(&cs);
                             b.arg(&y_first);
                             b.arg(&NO_PACKING);
-                            unsafe { b.launch(cfg) }
-                                .map_err(|e| format!("prefill chunk_scan typed L{l}: {e:?}"))?;
+                            unsafe { b.launch(cfg) }.map_err(|e| {
+                                format!("prefill intra-chunk scan ({arm:?}) typed L{l}: {e:?}")
+                            })?;
                         }
                     } else {
-                        let kern = if coop {
-                            m3k.m3_chunk_scan_fwd_coop.get(width)
-                        } else {
-                            m3k.m3_chunk_scan_fwd.get(width)
-                        };
+                        let kern = &kernels.f32;
                         for (y_first, cfg) in y_runs(cfg) {
                             let mut b = ctx.stream.launch_builder(kern);
                             b.arg(tgt.y.inner_mut());
@@ -1078,8 +922,9 @@ impl Mamba3Prefill {
                             b.arg(&cs);
                             b.arg(&y_first);
                             b.arg(&NO_PACKING);
-                            unsafe { b.launch(cfg) }
-                                .map_err(|e| format!("prefill chunk_scan L{l}: {e:?}"))?;
+                            unsafe { b.launch(cfg) }.map_err(|e| {
+                                format!("prefill intra-chunk scan ({arm:?}) L{l}: {e:?}")
+                            })?;
                         }
                     }
                 }

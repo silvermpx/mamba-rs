@@ -106,10 +106,10 @@ fn device_and_kernel_facts() {
             0,
         ),
         (
-            "m3_chunk_scan_fwd_bf16",
-            m3k.m3_chunk_scan_fwd_typed.i32.get(dtype),
+            "m3_chunk_scan_fwd_sliced_bf16",
+            m3k.m3_chunk_scan_fwd_sliced_typed.i32.get(dtype),
             256,
-            0,
+            mamba_rs::mamba3_siso::gpu::kernels::SCAN_SLICED_FLOATS * 4,
         ),
         (
             "m3_dqkv (f32)",

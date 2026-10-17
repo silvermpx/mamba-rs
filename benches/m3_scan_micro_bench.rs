@@ -1,16 +1,20 @@
-//! Micro-instrument for the three SSM chunk kernels that dominate the
-//! classifier page (chunk_scan_fwd_coop / preprocess_chunks / chunk_state_fwd):
-//! per-kernel wall time at the serve shape plus an FNV hash of the output
-//! bits, so a scheduling/occupancy change can prove itself bit-preserving
-//! against a pre-change run of this same test.
+//! Micro-instrument for the SSM chunk kernels that dominate the classifier
+//! page (the pre-state, the intra-chunk scan, the state pass), each on the
+//! kernels its shapes take: per-kernel wall time at the serve shape and the
+//! shapes where the kernels part, plus an FNV hash of the output bits, so a
+//! scheduling/occupancy change can prove itself bit-preserving against a
+//! pre-change run of this same test.
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::PushKernelArg;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
-use mamba_rs::gpu::launch::{y_runs, yz_runs};
-use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, bcnorm_fwd_bc_cfg, chunk_scan_cfg};
+use mamba_rs::gpu::launch::y_runs;
+use mamba_rs::mamba3_siso::gpu::kernels::{
+    ChunkArm, Mamba3Kernels, bcnorm_fwd_bc_cfg, chunk_fused_cfg, chunk_pre_state_cfg,
+    chunk_pre_state_sliced_cfg, chunk_scan_cfg, chunk_scan_sliced_cfg,
+};
 use std::time::Instant;
 
 fn det(n: usize, seed: u64) -> Vec<f32> {
@@ -33,623 +37,309 @@ mod evidence;
 mod evidence_digest;
 use digest::fnv1a_f32 as fnv;
 
+/// The chunked forward's stages at the serve shape and at the shapes where
+/// their kernels part: the pre-state on its fused and its sliced kernel,
+/// the intra-chunk scan on the kernel its route takes and on the sliced
+/// one, each timed, the pre-state's arms held to each other bit for bit.
+/// At the serve shape the outputs' hashes are the acceptance digests, and
+/// the state pass runs on the pre-state's chunk states with its digests.
 fn scan_trio_time_and_hash() {
-    // Vision-classifier serve shape.
-    let batch = 1usize;
-    let t = 4621usize;
-    let nh = 48usize;
-    let hd = 16usize;
-    let ds = 16usize;
-    let cs = 64usize;
-    let nc = t.div_ceil(cs);
-    let d_inner = nh * hd;
-
+    // The pre-state's outputs, one set per arm.
+    struct PreState {
+        k_scaled: GpuBuffer,
+        qk_dot: GpuBuffer,
+        scale: GpuBuffer,
+        gamma: GpuBuffer,
+        states: GpuBuffer,
+        da: GpuBuffer,
+    }
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
     let arch = GpuDevice::nvrtc_arch(dev.compute_capability);
-    let m3k = Mamba3Kernels::compile_with_state_cap(dev.context(), arch, ds).expect("m3 kernels");
-    let st = &ctx.stream;
-
-    let x = GpuBuffer::from_cpu(st, &det(batch * t * d_inner, 1)).unwrap();
-    let q = GpuBuffer::from_cpu(st, &det(batch * t * nh * ds, 2)).unwrap();
-    let k = GpuBuffer::from_cpu(st, &det(batch * t * nh * ds, 3)).unwrap();
-    let dt_b = GpuBuffer::from_cpu(
-        st,
-        &det(batch * t * nh, 4)
-            .iter()
-            .map(|v| v.abs())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-    let trap = GpuBuffer::from_cpu(
-        st,
-        &det(batch * t * nh, 5)
-            .iter()
-            .map(|v| v.abs())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-    let da_cumsum = GpuBuffer::from_cpu(
-        st,
-        &det(batch * nc * nh * cs, 6)
-            .iter()
-            .map(|v| -v.abs())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-    let prev_states = GpuBuffer::from_cpu(st, &det(batch * nc * nh * hd * ds, 7)).unwrap();
-    // The a*dt rows the fused kernel folds into its own decay cumsum; the
-    // pair it is held to reads the same cumsum from m3_dA_cumsum.
-    let adt = GpuBuffer::from_cpu(
-        st,
-        &det(batch * t * nh, 9)
-            .iter()
-            .map(|v| -v.abs() * 0.05)
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-    let da_pair = GpuBuffer::zeros(st, batch * nc * nh * cs).unwrap();
-    let da_fused = GpuBuffer::zeros(st, batch * nc * nh * cs).unwrap();
-    let d_param = GpuBuffer::from_cpu(st, &det(nh, 8)).unwrap();
-    let qk_dot = GpuBuffer::zeros(st, batch * t * nh).unwrap();
-    let scale = GpuBuffer::zeros(st, batch * t * nh).unwrap();
-    let gamma = GpuBuffer::zeros(st, batch * t * nh).unwrap();
-    let k_scaled = GpuBuffer::zeros(st, batch * t * nh * ds).unwrap();
-    let y = GpuBuffer::zeros(st, batch * t * d_inner).unwrap();
-    let chunk_states = GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap();
-
-    let b_i = batch as i32;
-    let t_i = t as i32;
-    let nh_i = nh as i32;
-    let hd_i = hd as i32;
-    let ds_i = ds as i32;
-    let cs_i = cs as i32;
-
-    // K2 dA_cumsum: the decay cumsum of the a*dt rows, for the pair the
-    // fused kernel is held to.
-    let cumsum = || {
-        let block_x = nh.min(256) as u32;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (
-                batch as u32,
-                nc as u32,
-                nh.div_ceil(block_x as usize) as u32,
-            ),
-            block_dim: (block_x, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        for (y_first, z_first, cfg) in yz_runs(cfg) {
-            let mut b = ctx.stream.launch_builder(&m3k.m3_da_cumsum.i32);
-            b.arg(da_pair.inner());
-            b.arg(adt.inner());
-            b.arg(&b_i);
-            b.arg(&t_i);
-            b.arg(&nh_i);
-            b.arg(&cs_i);
-            b.arg(&y_first);
-            b.arg(&z_first);
-            b.arg(&0u64);
-            unsafe { b.launch(cfg) }.unwrap();
-        }
-    };
-    cumsum();
-    ctx.stream.synchronize().unwrap();
-
-    // K1 preprocess: writes k_scaled/qk_dot/scale/gamma consumed below.
-    let preprocess = || {
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((batch * nc) as u32, nh as u32, 1),
-            block_dim: (cs as u32, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        for (y_first, cfg) in y_runs(cfg) {
-            let mut b = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks.i32);
-            b.arg(k_scaled.inner());
-            b.arg(qk_dot.inner());
-            b.arg(scale.inner());
-            b.arg(gamma.inner());
-            b.arg(k.inner());
-            b.arg(q.inner());
-            b.arg(dt_b.inner());
-            b.arg(trap.inner());
-            b.arg(&b_i);
-            b.arg(&t_i);
-            b.arg(&nh_i);
-            b.arg(&ds_i);
-            b.arg(&cs_i);
-            b.arg(&y_first);
-            b.arg(&0u64);
-            unsafe { b.launch(cfg) }.unwrap();
-        }
-    };
-    let chunk_state = || {
-        let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(
-            batch,
-            nc,
-            nh,
-            hd,
-            ds,
-            cs,
-            m3k.chunk_limits(mamba_rs::gpu::launch::IndexWidth::I32),
-        );
-        for (y_first, cfg) in y_runs(cfg) {
-            let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
-            b.arg(chunk_states.inner());
-            b.arg(x.inner());
-            b.arg(k_scaled.inner());
-            b.arg(da_cumsum.inner());
-            b.arg(&b_i);
-            b.arg(&t_i);
-            b.arg(&nh_i);
-            b.arg(&hd_i);
-            b.arg(&ds_i);
-            b.arg(&cs_i);
-            b.arg(&y_first);
-            b.arg(&0u64);
-            unsafe { b.launch(cfg) }.unwrap();
-        }
-    };
-    let scan = || {
-        let (coop, cfg) = chunk_scan_cfg(
-            batch,
-            nc,
-            nh,
-            hd,
-            ds,
-            cs,
-            m3k.chunk_limits(mamba_rs::gpu::launch::IndexWidth::I32),
-        );
-        assert!(coop, "serve shape must ride the coop kernel");
-        for (y_first, cfg) in y_runs(cfg) {
-            let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd_coop.i32);
-            b.arg(y.inner());
-            b.arg(x.inner());
-            b.arg(q.inner());
-            b.arg(k_scaled.inner());
-            b.arg(qk_dot.inner());
-            b.arg(da_cumsum.inner());
-            b.arg(prev_states.inner());
-            b.arg(d_param.inner());
-            b.arg(&b_i);
-            b.arg(&t_i);
-            b.arg(&nh_i);
-            b.arg(&hd_i);
-            b.arg(&ds_i);
-            b.arg(&cs_i);
-            b.arg(&y_first);
-            b.arg(&0u64);
-            unsafe { b.launch(cfg) }.unwrap();
-        }
-    };
-
-    preprocess();
-    chunk_state();
-    scan();
-    ctx.stream.synchronize().unwrap();
-
-    let mut host = vec![0.0f32; batch * t * d_inner];
-    y.download(st, &mut host).unwrap();
-    let nonzero = host.iter().filter(|v| **v != 0.0).count();
-    assert!(
-        nonzero > host.len() / 2,
-        "scan output mostly zero: {nonzero}"
-    );
-    let mut ks_h = vec![0.0f32; batch * t * nh * ds];
-    k_scaled.download(st, &mut ks_h).unwrap();
-    let mut cst_h = vec![0.0f32; batch * nc * nh * hd * ds];
-    chunk_states.download(st, &mut cst_h).unwrap();
-    println!(
-        "HASH y={:016x} k_scaled={:016x} chunk_states={:016x}",
-        fnv(&host),
-        fnv(&ks_h),
-        fnv(&cst_h)
-    );
-    evidence_digest::record_digest("m3_scan_micro_bench", "scan_trio", "y", fnv(&host))
-        .expect("acceptance evidence");
-    evidence_digest::record_digest("m3_scan_micro_bench", "scan_trio", "k_scaled", fnv(&ks_h))
-        .expect("acceptance evidence");
-    evidence_digest::record_digest(
-        "m3_scan_micro_bench",
-        "scan_trio",
-        "chunk_states",
-        fnv(&cst_h),
-    )
-    .expect("acceptance evidence");
-
-    let iters = 100usize;
-    let time = |f: &dyn Fn()| -> f64 {
-        f();
-        ctx.stream.synchronize().unwrap();
-        let t0 = Instant::now();
-        for _ in 0..iters {
-            f();
-        }
-        ctx.stream.synchronize().unwrap();
-        t0.elapsed().as_secs_f64() * 1e6 / iters as f64
-    };
-    println!("preprocess  {:8.1} us", time(&preprocess));
-    println!("chunk_state {:8.1} us", time(&chunk_state));
-    println!("scan_coop   {:8.1} us", time(&scan));
-    println!("da_cumsum   {:8.1} us", time(&cumsum));
-
-    // The pair's chunk states over the cumsum of the a*dt rows, which the
-    // fused kernel computes for itself.
-    let chunk_states_real = GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap();
-    {
-        let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(
-            batch,
-            nc,
-            nh,
-            hd,
-            ds,
-            cs,
-            m3k.chunk_limits(mamba_rs::gpu::launch::IndexWidth::I32),
-        );
-        for (y_first, cfg) in y_runs(cfg) {
-            let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
-            b.arg(chunk_states_real.inner());
-            b.arg(x.inner());
-            b.arg(k_scaled.inner());
-            b.arg(da_pair.inner());
-            b.arg(&b_i);
-            b.arg(&t_i);
-            b.arg(&nh_i);
-            b.arg(&hd_i);
-            b.arg(&ds_i);
-            b.arg(&cs_i);
-            b.arg(&y_first);
-            b.arg(&0u64);
-            unsafe { b.launch(cfg) }.unwrap();
-        }
-    }
-    ctx.stream.synchronize().unwrap();
-    let mut cst_real = vec![0.0f32; batch * nc * nh * hd * ds];
-    chunk_states_real.download(st, &mut cst_real).unwrap();
-    let mut da_pair_h = vec![0.0f32; batch * nc * nh * cs];
-    da_pair.download(st, &mut da_pair_h).unwrap();
-
-    // The fused kernel must reproduce the pair's outputs BIT-EXACTLY:
-    // zero the outputs, run fused once, re-hash.
-    // Fresh zero buffers for the fused arm: a silent no-op cannot pass
-    // by inheriting the pair's results.
-    let k_scaled_f = GpuBuffer::zeros(st, batch * t * nh * ds).unwrap();
-    let qk_dot_f = GpuBuffer::zeros(st, batch * t * nh).unwrap();
-    let scale_f = GpuBuffer::zeros(st, batch * t * nh).unwrap();
-    let gamma_f = GpuBuffer::zeros(st, batch * t * nh).unwrap();
-    let chunk_states_f = GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap();
-    let fused = || {
-        let fcfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_fused_cfg(
-            batch,
-            nc,
-            nh,
-            hd,
-            ds,
-            cs,
-            m3k.smem_optin,
+    // (batch, t, nh, hd, ds): the vision-classifier serve shape first, then
+    // the official head, a head of 32 over 64 states and the widest head.
+    let shapes: [(usize, usize, usize, usize, usize); 4] = [
+        (1, 4621, 48, 16, 16),
+        (4, 512, 24, 64, 128),
+        (4, 512, 48, 32, 64),
+        (4, 512, 12, 128, 128),
+    ];
+    let cs = 64usize;
+    for (serve, &(batch, t, nh, hd, ds)) in shapes.iter().enumerate().map(|(i, s)| (i == 0, s)) {
+        let cap = mamba_rs::gpu::kernels::state_capacity(ds).expect("state capacity");
+        let m3k =
+            Mamba3Kernels::compile_with_state_cap(dev.context(), arch, cap).expect("m3 kernels");
+        let st = &ctx.stream;
+        let nc = t.div_ceil(cs);
+        let d_inner = nh * hd;
+        let x = GpuBuffer::from_cpu(st, &det(batch * t * d_inner, 1)).unwrap();
+        let q = GpuBuffer::from_cpu(st, &det(batch * t * nh * ds, 2)).unwrap();
+        let k = GpuBuffer::from_cpu(st, &det(batch * t * nh * ds, 3)).unwrap();
+        let positive = |v: Vec<f32>| v.iter().map(|v| v.abs()).collect::<Vec<_>>();
+        let dt_b = GpuBuffer::from_cpu(st, &positive(det(batch * t * nh, 4))).unwrap();
+        let trap = GpuBuffer::from_cpu(st, &positive(det(batch * t * nh, 5))).unwrap();
+        // The scan reads a decay cumsum and entering states of its own, as
+        // it always has here, so its digest stays the scan's alone.
+        let da_cumsum = GpuBuffer::from_cpu(
+            st,
+            &det(batch * nc * nh * cs, 6)
+                .iter()
+                .map(|v| -v.abs())
+                .collect::<Vec<_>>(),
         )
-        .expect("serve shape must fit the fused kernel");
-        for (y_first, cfg) in y_runs(fcfg) {
-            let mut b = ctx
-                .stream
-                .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.i32.f32);
-            b.arg(k_scaled_f.inner());
-            b.arg(qk_dot_f.inner());
-            b.arg(scale_f.inner());
-            b.arg(gamma_f.inner());
-            b.arg(chunk_states_f.inner());
-            b.arg(k.inner());
-            b.arg(q.inner());
-            b.arg(dt_b.inner());
-            b.arg(trap.inner());
-            b.arg(x.inner());
-            b.arg(adt.inner());
-            b.arg(da_fused.inner());
-            b.arg(&b_i);
-            b.arg(&t_i);
-            b.arg(&nh_i);
-            b.arg(&hd_i);
-            b.arg(&ds_i);
-            b.arg(&cs_i);
-            b.arg(&y_first);
-            b.arg(&0u64);
-            unsafe { b.launch(cfg) }.unwrap();
-        }
-    };
-    fused();
-    ctx.stream.synchronize().unwrap();
-    let mut ks_f = vec![0.0f32; batch * t * nh * ds];
-    k_scaled_f.download(st, &mut ks_f).unwrap();
-    let mut cst_f = vec![0.0f32; batch * nc * nh * hd * ds];
-    chunk_states_f.download(st, &mut cst_f).unwrap();
-    println!(
-        "FUSED HASH k_scaled={:016x} chunk_states={:016x}",
-        fnv(&ks_f),
-        fnv(&cst_f)
-    );
-    assert_eq!(fnv(&ks_f), fnv(&ks_h), "fused k_scaled diverged from pair");
-    assert_eq!(
-        fnv(&cst_f),
-        fnv(&cst_real),
-        "fused chunk_states diverged from pair"
-    );
-    let mut da_f = vec![0.0f32; batch * nc * nh * cs];
-    da_fused.download(st, &mut da_f).unwrap();
-    assert_eq!(
-        fnv(&da_f),
-        fnv(&da_pair_h),
-        "fused dA_cumsum diverged from m3_dA_cumsum"
-    );
-    println!("fused       {:8.1} us", time(&fused));
-
-    // The bf16 and f16 twins: the fused kernel must reproduce the typed
-    // pair bit for bit (its fold reads the round-tripped K_scaled, as the
-    // pair's chunk_state does), and the printed hashes gate any edit of
-    // either macro body, which the dtype parity tests only measure
-    // within tolerance.
-    {
-        use mamba_rs::gpu::buffers::DtypedBuf;
-        use mamba_rs::gpu::dtype::WeightDtype;
-        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-            let typed = |data: Vec<f32>| {
-                let buf = DtypedBuf::zeros(st, data.len(), dtype).unwrap();
-                buf.upload_f32(st, &data).unwrap();
-                buf
-            };
-            let x_t = typed(det(batch * t * d_inner, 1));
-            let q_t = typed(det(batch * t * nh * ds, 2));
-            let k_t = typed(det(batch * t * nh * ds, 3));
-            let ks_pair = DtypedBuf::zeros(st, batch * t * nh * ds, dtype).unwrap();
-            let ks_fused = DtypedBuf::zeros(st, batch * t * nh * ds, dtype).unwrap();
-            let rows = || GpuBuffer::zeros(st, batch * t * nh).unwrap();
-            let (qkd_pair, scale_pair, gamma_pair) = (rows(), rows(), rows());
-            let (qkd_fused, scale_fused, gamma_fused) = (rows(), rows(), rows());
-            let states_pair = GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap();
-            let states_fused = GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap();
-            let (xp, qp, kp) = (x_t.cached_ptr(), q_t.cached_ptr(), k_t.cached_ptr());
-            let (ksp_pair, ksp_fused) = (ks_pair.cached_ptr(), ks_fused.cached_ptr());
-
-            let pair = || {
-                let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: ((batch * nc) as u32, nh as u32, 1),
-                    block_dim: (cs as u32, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                for (y_first, cfg) in y_runs(cfg) {
-                    let mut b = ctx
-                        .stream
-                        .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
-                    b.arg(&ksp_pair);
-                    b.arg(qkd_pair.inner());
-                    b.arg(scale_pair.inner());
-                    b.arg(gamma_pair.inner());
-                    b.arg(&kp);
-                    b.arg(&qp);
-                    b.arg(dt_b.inner());
-                    b.arg(trap.inner());
-                    b.arg(&b_i);
-                    b.arg(&t_i);
-                    b.arg(&nh_i);
-                    b.arg(&ds_i);
-                    b.arg(&cs_i);
-                    b.arg(&y_first);
-                    b.arg(&0u64);
-                    unsafe { b.launch(cfg) }.unwrap();
-                }
-                let cfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_state_cfg(
-                    batch,
-                    nc,
-                    nh,
-                    hd,
-                    ds,
-                    cs,
-                    m3k.chunk_limits(mamba_rs::gpu::launch::IndexWidth::I32),
-                );
-                for (y_first, cfg) in y_runs(cfg) {
-                    let mut b = ctx
-                        .stream
-                        .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
-                    b.arg(states_pair.inner());
-                    b.arg(&xp);
-                    b.arg(&ksp_pair);
-                    b.arg(da_pair.inner());
-                    b.arg(&b_i);
-                    b.arg(&t_i);
-                    b.arg(&nh_i);
-                    b.arg(&hd_i);
-                    b.arg(&ds_i);
-                    b.arg(&cs_i);
-                    b.arg(&y_first);
-                    b.arg(&0u64);
-                    unsafe { b.launch(cfg) }.unwrap();
-                }
-            };
-            let fused_typed = || {
-                let fcfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_fused_cfg(
-                    batch,
-                    nc,
-                    nh,
-                    hd,
-                    ds,
-                    cs,
-                    m3k.smem_optin,
-                )
-                .expect("serve shape must fit the fused kernel");
-                for (y_first, cfg) in y_runs(fcfg) {
-                    let mut b = ctx
-                        .stream
-                        .launch_builder(m3k.m3_chunk_pre_state_fused_typed.i32.get(dtype));
-                    b.arg(&ksp_fused);
-                    b.arg(qkd_fused.inner());
-                    b.arg(scale_fused.inner());
-                    b.arg(gamma_fused.inner());
-                    b.arg(states_fused.inner());
-                    b.arg(&kp);
-                    b.arg(&qp);
-                    b.arg(dt_b.inner());
-                    b.arg(trap.inner());
-                    b.arg(&xp);
-                    b.arg(adt.inner());
-                    b.arg(da_fused.inner());
-                    b.arg(&b_i);
-                    b.arg(&t_i);
-                    b.arg(&nh_i);
-                    b.arg(&hd_i);
-                    b.arg(&ds_i);
-                    b.arg(&cs_i);
-                    b.arg(&y_first);
-                    b.arg(&0u64);
-                    unsafe { b.launch(cfg) }.unwrap();
-                }
-            };
-            pair();
-            fused_typed();
-            ctx.stream.synchronize().unwrap();
-            let typed_down = |buf: &DtypedBuf| {
-                let mut host = vec![0.0f32; buf.len_elems()];
-                buf.download_f32(st, &mut host).unwrap();
-                host
-            };
-            let down = |buf: &GpuBuffer, n: usize| {
-                let mut host = vec![0.0f32; n];
-                buf.download(st, &mut host).unwrap();
-                host
-            };
-            let n_states = batch * nc * nh * hd * ds;
-            let hashes = |ks: &DtypedBuf, qkd: &GpuBuffer, states: &GpuBuffer| {
-                (
-                    fnv(&typed_down(ks)),
-                    fnv(&down(qkd, batch * t * nh)),
-                    fnv(&down(states, n_states)),
-                )
-            };
-            let want = hashes(&ks_pair, &qkd_pair, &states_pair);
-            let got = hashes(&ks_fused, &qkd_fused, &states_fused);
-            println!(
-                "TYPED {dtype:?} HASH k_scaled={:016x} qk_dot={:016x} chunk_states={:016x}",
-                want.0, want.1, want.2
-            );
-            assert_eq!(
-                got, want,
-                "typed {dtype:?} fused diverged from the typed pair"
-            );
-            println!("pair  {dtype:?}  {:8.1} us", time(&pair));
-            println!("fused {dtype:?}  {:8.1} us", time(&fused_typed));
-        }
-    }
-
-    // The typed scan macro instantiates an f32 variant with identity
-    // conversions, so its output must match the plain coop kernel
-    // bit-for-bit. This arm gates the shared macro body: an indexing or
-    // layout slip in the typed twin shows up here even when every
-    // bf16 parity test only measures within tolerance.
-    let y_t = GpuBuffer::zeros(st, batch * t * d_inner).unwrap();
-    let scan_typed = || {
-        let (coop, cfg) = chunk_scan_cfg(
-            batch,
-            nc,
-            nh,
-            hd,
-            ds,
-            cs,
-            m3k.chunk_limits(mamba_rs::gpu::launch::IndexWidth::I32),
+        .unwrap();
+        let prev_states = GpuBuffer::from_cpu(st, &det(batch * nc * nh * hd * ds, 7)).unwrap();
+        let adt = GpuBuffer::from_cpu(
+            st,
+            &det(batch * t * nh, 9)
+                .iter()
+                .map(|v| -v.abs() * 0.05)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let d_param = GpuBuffer::from_cpu(st, &det(nh, 8)).unwrap();
+        let (b_i, t_i, nh_i, hd_i, ds_i, cs_i) = (
+            batch as i32,
+            t as i32,
+            nh as i32,
+            hd as i32,
+            ds as i32,
+            cs as i32,
         );
-        assert!(coop, "serve shape must ride the coop kernel");
-        for (y_first, cfg) in y_runs(cfg) {
-            let mut b = ctx
-                .stream
-                .launch_builder(&m3k.m3_chunk_scan_fwd_coop_typed.i32.f32);
-            b.arg(y_t.inner());
-            b.arg(x.inner());
-            b.arg(q.inner());
-            b.arg(k_scaled.inner());
-            b.arg(qk_dot.inner());
-            b.arg(da_cumsum.inner());
-            b.arg(prev_states.inner());
-            b.arg(d_param.inner());
-            b.arg(&b_i);
-            b.arg(&t_i);
-            b.arg(&nh_i);
-            b.arg(&hd_i);
-            b.arg(&ds_i);
-            b.arg(&cs_i);
-            b.arg(&y_first);
-            b.arg(&0u64);
-            unsafe { b.launch(cfg) }.unwrap();
-        }
-    };
-    scan_typed();
-    ctx.stream.synchronize().unwrap();
-    let mut yt_h = vec![0.0f32; batch * t * d_inner];
-    y_t.download(st, &mut yt_h).unwrap();
-    assert_eq!(
-        fnv(&yt_h),
-        fnv(&host),
-        "typed coop scan diverged from the plain coop kernel"
-    );
 
-    // The state pass mutates its states buffer in place, so the hash arm
-    // runs once on a fresh copy of the pair's chunk_states; the timing loop
-    // then reuses the (already transformed) buffer - values drift there but
-    // the address pattern is identical. The digests keep the keys of the
-    // separate pass the fused one replaced, whose entering and final states
-    // it gives bit for bit.
-    let states_fp = GpuBuffer::from_cpu(st, &cst_h).unwrap();
-    let ssm_out = GpuBuffer::zeros(st, batch * nh * hd * ds).unwrap();
-    let k_out = GpuBuffer::zeros(st, batch * nh * ds).unwrap();
-    let v_out = GpuBuffer::zeros(st, batch * nh * hd).unwrap();
-    let state_pass_fused = || {
-        let cfg = mamba_rs::mamba3_siso::gpu::kernels::state_pass_fused_cfg(batch, nh, hd, ds);
-        let nc_i = nc as i32;
-        let seed_null: u64 = 0;
-        for (y_first, cfg) in y_runs(cfg) {
-            let mut b = ctx
-                .stream
-                .launch_builder(&m3k.m3_state_pass_fused_typed.i32.f32);
-            b.arg(states_fp.inner());
-            b.arg(ssm_out.inner());
-            b.arg(k_out.inner());
-            b.arg(v_out.inner());
-            b.arg(&seed_null);
-            b.arg(k_out.inner());
-            b.arg(v_out.inner());
-            b.arg(dt_b.inner());
-            b.arg(trap.inner());
-            b.arg(da_cumsum.inner());
-            b.arg(k.inner());
-            b.arg(x.inner());
-            b.arg(&b_i);
-            b.arg(&nc_i);
-            b.arg(&nh_i);
-            b.arg(&hd_i);
-            b.arg(&ds_i);
-            b.arg(&cs_i);
-            b.arg(&t_i);
-            b.arg(&y_first);
-            b.arg(&0u64);
-            unsafe { b.launch(cfg) }.unwrap();
+        let outputs = || PreState {
+            k_scaled: GpuBuffer::zeros(st, batch * t * nh * ds).unwrap(),
+            qk_dot: GpuBuffer::zeros(st, batch * t * nh).unwrap(),
+            scale: GpuBuffer::zeros(st, batch * t * nh).unwrap(),
+            gamma: GpuBuffer::zeros(st, batch * t * nh).unwrap(),
+            states: GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap(),
+            da: GpuBuffer::zeros(st, batch * nc * nh * cs).unwrap(),
+        };
+        let pre_state = |kernel: &cudarc::driver::CudaFunction,
+                         cfg: cudarc::driver::LaunchConfig,
+                         out: &PreState| {
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut b = ctx.stream.launch_builder(kernel);
+                b.arg(out.k_scaled.inner());
+                b.arg(out.qk_dot.inner());
+                b.arg(out.scale.inner());
+                b.arg(out.gamma.inner());
+                b.arg(out.states.inner());
+                b.arg(k.inner());
+                b.arg(q.inner());
+                b.arg(dt_b.inner());
+                b.arg(trap.inner());
+                b.arg(x.inner());
+                b.arg(adt.inner());
+                b.arg(out.da.inner());
+                b.arg(&b_i);
+                b.arg(&t_i);
+                b.arg(&nh_i);
+                b.arg(&hd_i);
+                b.arg(&ds_i);
+                b.arg(&cs_i);
+                b.arg(&y_first);
+                b.arg(&0u64);
+                unsafe { b.launch(cfg) }.unwrap();
+            }
+        };
+        let down = |buf: &GpuBuffer, n: usize| {
+            let mut host = vec![0.0f32; n];
+            buf.download(st, &mut host).unwrap();
+            host
+        };
+        let hashes = |out: &PreState| {
+            [
+                fnv(&down(&out.k_scaled, batch * t * nh * ds)),
+                fnv(&down(&out.qk_dot, batch * t * nh)),
+                fnv(&down(&out.scale, batch * t * nh)),
+                fnv(&down(&out.gamma, batch * t * nh)),
+                fnv(&down(&out.states, batch * nc * nh * hd * ds)),
+                fnv(&down(&out.da, batch * nc * nh * cs)),
+            ]
+        };
+        let sliced_kernel = &m3k.m3_chunk_pre_state_sliced_typed.i32.f32;
+        let sliced_cfg = chunk_pre_state_sliced_cfg(batch, nc, nh, hd);
+        let sliced_out = outputs();
+        pre_state(sliced_kernel, sliced_cfg, &sliced_out);
+        ctx.stream.synchronize().unwrap();
+        let want = hashes(&sliced_out);
+        let fused_cfg = chunk_fused_cfg(batch, nc, nh, hd, ds, cs, m3k.smem_optin);
+        let fused_out = outputs();
+        if let Some(cfg) = fused_cfg {
+            pre_state(&m3k.m3_chunk_pre_state_fused_typed.i32.f32, cfg, &fused_out);
+            ctx.stream.synchronize().unwrap();
+            assert_eq!(
+                hashes(&fused_out),
+                want,
+                "B {batch} T {t} nh {nh} hd {hd} ds {ds}: the fused pre-state diverged from the sliced"
+            );
         }
-    };
-    state_pass_fused();
-    ctx.stream.synchronize().unwrap();
-    let mut sp_h = vec![0.0f32; batch * nc * nh * hd * ds];
-    states_fp.download(st, &mut sp_h).unwrap();
-    let mut fs_h = vec![0.0f32; batch * nh * hd * ds];
-    ssm_out.download(st, &mut fs_h).unwrap();
-    println!(
-        "STATE_PASSING HASH entering={:016x} final={:016x}",
-        fnv(&sp_h),
-        fnv(&fs_h)
-    );
-    evidence_digest::record_digest(
-        "m3_scan_micro_bench",
-        "state_passing",
-        "entering",
-        fnv(&sp_h),
-    )
-    .expect("acceptance evidence");
-    evidence_digest::record_digest("m3_scan_micro_bench", "state_passing", "final", fnv(&fs_h))
+
+        let iters = 100usize;
+        let time = |f: &dyn Fn()| -> f64 {
+            f();
+            ctx.stream.synchronize().unwrap();
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                f();
+            }
+            ctx.stream.synchronize().unwrap();
+            t0.elapsed().as_secs_f64() * 1e6 / iters as f64
+        };
+        println!("--- B {batch} T {t} nh {nh} hd {hd} ds {ds}");
+        let (arm, _) = chunk_pre_state_cfg(batch, nc, nh, hd, ds, cs, m3k.smem_optin);
+        println!("pre-state route      {arm:?}");
+        println!(
+            "pre-state sliced     {:8.1} us",
+            time(&|| pre_state(sliced_kernel, sliced_cfg, &sliced_out))
+        );
+        if let Some(cfg) = fused_cfg {
+            println!(
+                "pre-state fused      {:8.1} us",
+                time(&|| pre_state(&m3k.m3_chunk_pre_state_fused_typed.i32.f32, cfg, &fused_out))
+            );
+        }
+
+        // The scan over the pre-state's K and dots, on its route's kernel
+        // and on the sliced one.
+        let y = GpuBuffer::zeros(st, batch * t * d_inner).unwrap();
+        let scan = |kernel: &cudarc::driver::CudaFunction, cfg: cudarc::driver::LaunchConfig| {
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut b = ctx.stream.launch_builder(kernel);
+                b.arg(y.inner());
+                b.arg(x.inner());
+                b.arg(q.inner());
+                b.arg(sliced_out.k_scaled.inner());
+                b.arg(sliced_out.qk_dot.inner());
+                b.arg(da_cumsum.inner());
+                b.arg(prev_states.inner());
+                b.arg(d_param.inner());
+                b.arg(&b_i);
+                b.arg(&t_i);
+                b.arg(&nh_i);
+                b.arg(&hd_i);
+                b.arg(&ds_i);
+                b.arg(&cs_i);
+                b.arg(&y_first);
+                b.arg(&0u64);
+                unsafe { b.launch(cfg) }.unwrap();
+            }
+        };
+        let (arm, route_cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs);
+        let route_kernel = match arm {
+            ChunkArm::Whole => &m3k.m3_chunk_scan_fwd_coop.i32,
+            ChunkArm::Sliced => &m3k.m3_chunk_scan_fwd_sliced_typed.i32.f32,
+        };
+        scan(route_kernel, route_cfg);
+        ctx.stream.synchronize().unwrap();
+        let y_h = down(&y, batch * t * d_inner);
+        let nonzero = y_h.iter().filter(|v| **v != 0.0).count();
+        assert!(
+            nonzero > y_h.len() / 2,
+            "scan output mostly zero: {nonzero}"
+        );
+        println!("scan route           {arm:?}");
+        println!(
+            "scan route kernel    {:8.1} us",
+            time(&|| scan(route_kernel, route_cfg))
+        );
+        println!(
+            "scan sliced          {:8.1} us",
+            time(&|| scan(
+                &m3k.m3_chunk_scan_fwd_sliced_typed.i32.f32,
+                chunk_scan_sliced_cfg(batch, nc, nh, hd)
+            ))
+        );
+        if !serve {
+            continue;
+        }
+
+        // The serve shape's digests: the scan's rows, the pre-state's K and
+        // chunk states, then the state pass over those states.
+        scan(route_kernel, route_cfg);
+        ctx.stream.synchronize().unwrap();
+        let y_h = down(&y, batch * t * d_inner);
+        let ks_h = down(&sliced_out.k_scaled, batch * t * nh * ds);
+        let cst_h = down(&sliced_out.states, batch * nc * nh * hd * ds);
+        println!(
+            "HASH y={:016x} k_scaled={:016x} chunk_states={:016x}",
+            fnv(&y_h),
+            fnv(&ks_h),
+            fnv(&cst_h)
+        );
+        evidence_digest::record_digest("m3_scan_micro_bench", "scan_trio", "y", fnv(&y_h))
+            .expect("acceptance evidence");
+        evidence_digest::record_digest("m3_scan_micro_bench", "scan_trio", "k_scaled", fnv(&ks_h))
+            .expect("acceptance evidence");
+        evidence_digest::record_digest(
+            "m3_scan_micro_bench",
+            "scan_trio",
+            "chunk_states",
+            fnv(&cst_h),
+        )
         .expect("acceptance evidence");
-    println!("state_pass_fused {:8.1} us", time(&state_pass_fused));
+
+        // The state pass mutates its states buffer in place, so the hash
+        // arm runs once on a fresh copy of the chunk states; the timing loop
+        // then reuses the (already transformed) buffer - values drift there
+        // but the address pattern is identical.
+        let states_fp = GpuBuffer::from_cpu(st, &cst_h).unwrap();
+        let ssm_out = GpuBuffer::zeros(st, batch * nh * hd * ds).unwrap();
+        let k_out = GpuBuffer::zeros(st, batch * nh * ds).unwrap();
+        let v_out = GpuBuffer::zeros(st, batch * nh * hd).unwrap();
+        let state_pass_fused = || {
+            let cfg = mamba_rs::mamba3_siso::gpu::kernels::state_pass_fused_cfg(batch, nh, hd, ds);
+            let nc_i = nc as i32;
+            let seed_null: u64 = 0;
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut b = ctx
+                    .stream
+                    .launch_builder(&m3k.m3_state_pass_fused_typed.i32.f32);
+                b.arg(states_fp.inner());
+                b.arg(ssm_out.inner());
+                b.arg(k_out.inner());
+                b.arg(v_out.inner());
+                b.arg(&seed_null);
+                b.arg(k_out.inner());
+                b.arg(v_out.inner());
+                b.arg(dt_b.inner());
+                b.arg(trap.inner());
+                b.arg(da_cumsum.inner());
+                b.arg(k.inner());
+                b.arg(x.inner());
+                b.arg(&b_i);
+                b.arg(&nc_i);
+                b.arg(&nh_i);
+                b.arg(&hd_i);
+                b.arg(&ds_i);
+                b.arg(&cs_i);
+                b.arg(&t_i);
+                b.arg(&y_first);
+                b.arg(&0u64);
+                unsafe { b.launch(cfg) }.unwrap();
+            }
+        };
+        state_pass_fused();
+        ctx.stream.synchronize().unwrap();
+        let sp_h = down(&states_fp, batch * nc * nh * hd * ds);
+        let fs_h = down(&ssm_out, batch * nh * hd * ds);
+        println!(
+            "STATE_PASSING HASH entering={:016x} final={:016x}",
+            fnv(&sp_h),
+            fnv(&fs_h)
+        );
+        evidence_digest::record_digest(
+            "m3_scan_micro_bench",
+            "state_passing",
+            "entering",
+            fnv(&sp_h),
+        )
+        .expect("acceptance evidence");
+        evidence_digest::record_digest("m3_scan_micro_bench", "state_passing", "final", fnv(&fs_h))
+            .expect("acceptance evidence");
+        println!("state_pass_fused {:8.1} us", time(&state_pass_fused));
+    }
 }
 
 /// The coefficient chain at the serve shape: split -> bcnorm -> angle

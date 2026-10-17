@@ -30,9 +30,9 @@ use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::gpu::block_norm;
 use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::launch::{grid_1d_cover, y_runs, yz_runs};
+use crate::gpu::launch::{grid_1d_cover, y_runs};
 use crate::mamba3_siso::config::Mamba3Config;
-use crate::mamba3_siso::gpu::kernels::bcnorm_fwd_bc_cfg;
+use crate::mamba3_siso::gpu::kernels::{ChunkArm, bcnorm_fwd_bc_cfg};
 use crate::mamba3_siso::gpu::state::{CHUNK_SIZE, GpuMamba3StateBufs, M3Exec, Mamba3LayerPtrs};
 use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 
@@ -628,49 +628,27 @@ fn layer_forward_mixed(
             )?;
         }
 
-        // K2: m3_dA_cumsum (pure f32) — adt → da_cumsum_saved, for the
-        // unfused pair only: the fused kernel writes the cumsum itself.
-        let fused = super::kernels::chunk_fused_cfg(
-            dims.batch,
-            nc,
-            nh,
-            hd,
-            ds,
-            dims.chunk_size(),
-            m3k.smem_optin,
-        );
-        if fused.is_none() {
-            let block_x = nh.min(256) as u32;
-            let grid_z = nh.div_ceil(block_x as usize) as u32;
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (dims.batch as u32, nc as u32, grid_z),
-                block_dim: (block_x, 1, 1),
-                shared_mem_bytes: 0,
+        // K1-K3: the pre-state in one launch - typed K/Q/x and f32 DT/trap
+        // in, typed K_scaled and f32 qk_dot/scale/gamma, the decay cumsum
+        // and the chunk states out - on the fused kernel where its tile of
+        // whole rows fits the block's budget, on the sliced kernel
+        // elsewhere; the same bits.
+        {
+            let (arm, cfg) = super::kernels::chunk_pre_state_cfg(
+                dims.batch,
+                nc,
+                nh,
+                hd,
+                ds,
+                dims.chunk_size(),
+                m3k.smem_optin,
+            );
+            let kern = match arm {
+                ChunkArm::Whole => m3k.m3_chunk_pre_state_fused_typed.get(width).get(dtype),
+                ChunkArm::Sliced => m3k.m3_chunk_pre_state_sliced_typed.get(width).get(dtype),
             };
-            for (y_first, z_first, cfg) in yz_runs(cfg) {
-                let mut bld = ctx.stream.launch_builder(m3k.m3_da_cumsum.get(width));
-                bld.arg(acts.da_cumsum_saved.inner_mut());
-                bld.arg(adt_temp_scratch.inner());
-                bld.arg(&b_i);
-                bld.arg(&t_i);
-                bld.arg(&nh_i);
-                bld.arg(&cs);
-                bld.arg(&y_first);
-                bld.arg(&z_first);
-                bld.arg(&seq_idx);
-                unsafe { bld.launch(cfg) }
-                    .map_err(|e| format!("m3_mixed F6 K2 da_cumsum: {e:?}"))?;
-            }
-        }
-
-        // K1+K2+K3 fused (decay cumsum + preprocess + chunk_state) when the
-        // shape allows: K_scaled crosses the seam in shared memory instead
-        // of L2.
-        if let Some(fcfg) = fused {
-            for (y_first, cfg) in y_runs(fcfg) {
-                let mut bld = ctx
-                    .stream
-                    .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(width).get(dtype));
+            for (y_first, cfg) in y_runs(cfg) {
+                let mut bld = ctx.stream.launch_builder(kern);
                 let ks = acts.k_scaled_saved.cached_ptr();
                 let kp = acts.k.cached_ptr();
                 let qp = acts.q.cached_ptr();
@@ -696,79 +674,7 @@ fn layer_forward_mixed(
                 bld.arg(&y_first);
                 bld.arg(&seq_idx);
                 unsafe { bld.launch(cfg) }
-                    .map_err(|e| format!("m3_mixed F6 fused pre+state: {e:?}"))?;
-            }
-        } else {
-            // K1: m3_preprocess_chunks_typed — typed K/Q + f32 DT/trap →
-            // typed K_scaled (acts.k_scaled_saved) + f32 qk_dot/scale/gamma
-            // (acts.qk_dot_saved, scale_saved, gamma_saved).
-            {
-                let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
-                    block_dim: (cs as u32, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                for (y_first, cfg) in y_runs(cfg) {
-                    let mut bld = ctx
-                        .stream
-                        .launch_builder(m3k.m3_preprocess_chunks_typed.get(width).get(dtype));
-                    let ks = acts.k_scaled_saved.cached_ptr();
-                    let kp = acts.k.cached_ptr();
-                    let qp = acts.q.cached_ptr();
-                    bld.arg(&ks);
-                    bld.arg(acts.qk_dot_saved.inner_mut());
-                    bld.arg(acts.scale_saved.inner_mut());
-                    bld.arg(acts.gamma_saved.inner_mut());
-                    bld.arg(&kp);
-                    bld.arg(&qp);
-                    bld.arg(acts.dt.inner());
-                    bld.arg(acts.trap.inner());
-                    bld.arg(&b_i);
-                    bld.arg(&t_i);
-                    bld.arg(&nh_i);
-                    bld.arg(&ds_i);
-                    bld.arg(&cs);
-                    bld.arg(&y_first);
-                    bld.arg(&seq_idx);
-                    unsafe { bld.launch(cfg) }
-                        .map_err(|e| format!("m3_mixed F6 K1 preprocess: {e:?}"))?;
-                }
-            }
-
-            // K3: m3_chunk_state_fwd_typed — typed x + typed K_scaled →
-            // f32 chunk_states (acts.chunk_states_saved, mutated in place
-            // by K4 into the entering states).
-            {
-                let cfg = super::kernels::chunk_state_cfg(
-                    dims.batch,
-                    nc,
-                    nh,
-                    hd,
-                    ds,
-                    dims.chunk_size(),
-                    m3k.chunk_limits(width),
-                );
-                for (y_first, cfg) in y_runs(cfg) {
-                    let mut bld = ctx
-                        .stream
-                        .launch_builder(m3k.m3_chunk_state_fwd_typed.get(width).get(dtype));
-                    let xp = acts.x.cached_ptr();
-                    let ks = acts.k_scaled_saved.cached_ptr();
-                    bld.arg(acts.chunk_states_saved.inner_mut());
-                    bld.arg(&xp);
-                    bld.arg(&ks);
-                    bld.arg(acts.da_cumsum_saved.inner());
-                    bld.arg(&b_i);
-                    bld.arg(&t_i);
-                    bld.arg(&nh_i);
-                    bld.arg(&hd_i);
-                    bld.arg(&ds_i);
-                    bld.arg(&cs);
-                    bld.arg(&y_first);
-                    bld.arg(&seq_idx);
-                    unsafe { bld.launch(cfg) }
-                        .map_err(|e| format!("m3_mixed F6 K3 chunk_state_fwd: {e:?}"))?;
-                }
+                    .map_err(|e| format!("m3_mixed F6 pre-state ({arm:?}): {e:?}"))?;
             }
         }
         // K4: the inter-chunk state pass and the window-final writeback in
@@ -818,22 +724,14 @@ fn layer_forward_mixed(
         // K5 reads the entering states K4 left in acts.chunk_states_saved,
         // which is also what the backward needs.
 
-        // K5: m3_chunk_scan_fwd_typed — typed y_out, x, q, K_scaled +
-        // f32 qk_dot/da_cumsum/prev_states/D.
+        // K5: the intra-chunk scan — typed y_out, x, q, K_scaled + f32
+        // qk_dot/da_cumsum/prev_states/D.
         {
-            let (coop, cfg) = super::kernels::chunk_scan_cfg(
-                dims.batch,
-                nc,
-                nh,
-                hd,
-                ds,
-                dims.chunk_size(),
-                m3k.chunk_limits(width),
-            );
-            let kern = if coop {
-                m3k.m3_chunk_scan_fwd_coop_typed.get(width).get(dtype)
-            } else {
-                m3k.m3_chunk_scan_fwd_typed.get(width).get(dtype)
+            let (arm, cfg) =
+                super::kernels::chunk_scan_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+            let kern = match arm {
+                ChunkArm::Whole => m3k.m3_chunk_scan_fwd_coop_typed.get(width).get(dtype),
+                ChunkArm::Sliced => m3k.m3_chunk_scan_fwd_sliced_typed.get(width).get(dtype),
             };
             for (y_first, cfg) in y_runs(cfg) {
                 let mut bld = ctx.stream.launch_builder(kern);
@@ -858,7 +756,7 @@ fn layer_forward_mixed(
                 bld.arg(&y_first);
                 bld.arg(&seq_idx);
                 unsafe { bld.launch(cfg) }
-                    .map_err(|e| format!("m3_mixed F6 K5 chunk_scan_fwd: {e:?}"))?;
+                    .map_err(|e| format!("m3_mixed F6 K5 intra-chunk scan ({arm:?}): {e:?}"))?;
             }
         }
     } else {
@@ -1047,7 +945,8 @@ pub struct GpuMamba3MixedScratch {
 
     // F6 chunked-forward intermediates (added so use_parallel_scan=true works
     // in the mixed forward; backward path uses the saved versions in acts).
-    /// f32 `[B*nh]` — adt = a_val · dt, fed into m3_dA_cumsum.
+    /// f32 `[B*nh]` — adt = a_val · dt, which the pre-state folds into the
+    /// decay cumsum.
     pub adt_temp: GpuBuffer,
 
     /// The gated MLP backward's typed gradients of its activation

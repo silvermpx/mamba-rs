@@ -22,9 +22,10 @@ use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
-use mamba_rs::gpu::kernels::ByIndexWidth;
-use mamba_rs::gpu::launch::{IndexWidth, grid_1d_cover, y_runs};
-use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, chunk_scan_cfg};
+use mamba_rs::gpu::launch::{grid_1d_cover, y_runs};
+use mamba_rs::mamba3_siso::gpu::kernels::{
+    ChunkArm, Mamba3Kernels, chunk_scan_cfg, chunk_scan_coop_cfg, chunk_scan_sliced_cfg,
+};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -517,13 +518,17 @@ fn chunk_bufs(ctx: &GpuCtx, s: Chunked) -> (ChunkIo, Vec<GpuBuffer>) {
     (io, bufs)
 }
 
-/// The two-head fallback tiles of the chunked scan, its blocks at most
-/// `threads` wide.
-fn chunk_scan_fallback_cfg(s: Chunked, threads: usize) -> LaunchConfig {
-    LaunchConfig {
-        grid_dim: ((s.b * s.nc()) as u32, s.nh.div_ceil(2) as u32, 1),
-        block_dim: (s.hd.min((threads / 2 / 32 * 32).max(32)) as u32, 2, 1),
-        shared_mem_bytes: 0,
+/// The f32 builds of the intra-chunk scan an arm runs, int then `_i64`.
+fn scan_builds(m3k: &Mamba3Kernels, arm: ChunkArm) -> [&CudaFunction; 2] {
+    match arm {
+        ChunkArm::Whole => [
+            &m3k.m3_chunk_scan_fwd_coop.i32,
+            &m3k.m3_chunk_scan_fwd_coop.i64,
+        ],
+        ChunkArm::Sliced => [
+            &m3k.m3_chunk_scan_fwd_sliced_typed.i32.f32,
+            &m3k.m3_chunk_scan_fwd_sliced_typed.i64.f32,
+        ],
     }
 }
 
@@ -622,22 +627,14 @@ fn both_builds_of_the_siso_kernels_give_the_same_bits() {
         hd: 16,
         ds: 16,
     };
-    let (coop, coop_cfg) = chunk_scan_cfg(
-        c.b,
-        c.nc(),
-        c.nh,
-        c.hd,
-        c.ds,
-        CS,
-        m3k.chunk_limits(IndexWidth::I32),
-    );
-    assert!(coop, "the small chunk scan takes the cooperative kernel");
-    let plain_cfg = chunk_scan_fallback_cfg(c, m3k.chunk_tile_threads.i32);
-    for (pair, cfg, what) in [
-        (&m3k.m3_chunk_scan_fwd_coop, coop_cfg, "cooperative"),
-        (&m3k.m3_chunk_scan_fwd, plain_cfg, "fallback"),
+    let coop_cfg = chunk_scan_coop_cfg(c.b, c.nc(), c.nh, c.hd, c.ds, CS)
+        .expect("the small chunk scan fits the cooperative tile");
+    let sliced_cfg = chunk_scan_sliced_cfg(c.b, c.nc(), c.nh, c.hd);
+    for (arm, cfg, what) in [
+        (ChunkArm::Whole, coop_cfg, "cooperative"),
+        (ChunkArm::Sliced, sliced_cfg, "sliced"),
     ] {
-        let ys: Vec<Vec<u32>> = [&pair.i32, &pair.i64]
+        let ys: Vec<Vec<u32>> = scan_builds(&m3k, arm)
             .iter()
             .map(|f| {
                 let (io, bufs) = chunk_bufs(&ctx, c);
@@ -957,14 +954,9 @@ fn the_chunk_scan_i64_build_gives_chunks_past_i32_max_their_own_bits() {
     let st = &ctx.stream;
     let m3k = compile(&ctx, 32);
     let (io, bufs) = chunk_bufs(&ctx, s);
-    let limits = m3k.chunk_limits(IndexWidth::I64);
-    let (coop, cfg) = chunk_scan_cfg(s.b, s.nc(), s.nh, s.hd, s.ds, CS, limits);
-    let kernel: &ByIndexWidth<CudaFunction> = if coop {
-        &m3k.m3_chunk_scan_fwd_coop
-    } else {
-        &m3k.m3_chunk_scan_fwd
-    };
-    launch_runs(&ctx, &kernel.i64, cfg, &io.args(s));
+    let (arm, cfg) = chunk_scan_cfg(s.b, s.nc(), s.nh, s.hd, s.ds, CS);
+    let [narrow, wide] = scan_builds(&m3k, arm);
+    launch_runs(&ctx, wide, cfg, &io.args(s));
     let chunks = 64;
     let window = Chunked {
         t: chunks * CS,
@@ -977,16 +969,10 @@ fn the_chunk_scan_i64_build_gives_chunks_past_i32_max_their_own_bits() {
             y: own_y.cached_ptr(),
             ..io.past_chunks(s, c)
         };
-        let (_, own_cfg) = chunk_scan_cfg(
-            window.b,
-            window.nc(),
-            window.nh,
-            window.hd,
-            window.ds,
-            CS,
-            m3k.chunk_limits(IndexWidth::I32),
-        );
-        launch_runs(&ctx, &kernel.i32, own_cfg, &own.args(window));
+        let (own_arm, own_cfg) =
+            chunk_scan_cfg(window.b, window.nc(), window.nh, window.hd, window.ds, CS);
+        assert_eq!(own_arm, arm, "the window takes the whole scan's arm");
+        launch_runs(&ctx, narrow, own_cfg, &own.args(window));
         assert_bits(
             &format!("chunks from {c}"),
             &read(st, at(io.y, c * CS * di), window.t * di),

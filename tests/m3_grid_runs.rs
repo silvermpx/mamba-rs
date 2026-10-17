@@ -2,11 +2,10 @@
 //! Such an axis is launched in runs, each run passing its first block. A
 //! head in a later run must come out with the bits of its twin, a head of
 //! the first run given the same inputs: the sequential burn-in and its
-//! backward, the decode step on both head tiers, and the chunk scan on its
-//! cooperative and its two-head fallback tiles. The decay cumsum over
-//! chunks past the extent gives the chunks of its later runs the bits of a
-//! launch over just those chunks. Every other split launch of the family is
-//! proven at ordinary shapes by the suites run with `MAMBA_RS_GRID_RUN`.
+//! backward, the decode step on both head tiers, and the pre-state and the
+//! chunk scan on their whole-row and their sliced tiles. Every other split
+//! launch of the family is proven at ordinary shapes by the suites run with
+//! `MAMBA_RS_GRID_RUN`.
 #![cfg(feature = "cuda")]
 
 #[path = "common/arch.rs"]
@@ -19,13 +18,15 @@ use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
-use mamba_rs::gpu::launch::{GRID_YZ_EXTENT, IndexWidth, y_runs};
-use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, chunk_scan_cfg, step_head_cfg};
+use mamba_rs::gpu::launch::{GRID_YZ_EXTENT, y_runs};
+use mamba_rs::mamba3_siso::gpu::kernels::{
+    Mamba3Kernels, chunk_fused_cfg, chunk_pre_state_sliced_cfg, chunk_scan_coop_cfg,
+    chunk_scan_sliced_cfg, step_head_cfg,
+};
 use mamba_rs::mamba3_siso::route::HeadTier;
 
 /// Heads `h < PAIRS` and their twins `h + SHIFT`. SHIFT is two full runs of
-/// the y axis, so a twin sits in the third run whether a block holds one
-/// head or the chunk scan's fallback pair.
+/// the y axis, so a twin sits in the third run.
 const PAIRS: usize = 16;
 const SHIFT: usize = 2 * 65536;
 const NH: usize = SHIFT + PAIRS;
@@ -317,8 +318,8 @@ fn the_decode_step_gives_heads_past_the_y_extent_their_twins_bits() {
 }
 
 /// The chunk scan over heads past the y extent, on its cooperative tiles of
-/// one head per block and on its fallback tiles of two: every twin head's
-/// output carries the bits of its first-run twin.
+/// one head per block and on its sliced tiles: every twin head's output
+/// carries the bits of its first-run twin.
 #[test]
 fn the_chunk_scan_gives_heads_past_the_y_extent_their_twins_bits() {
     let device = GpuDevice::new(0).expect("open CUDA device");
@@ -351,17 +352,15 @@ fn the_chunk_scan_gives_heads_past_the_y_extent_their_twins_bits() {
     }
     .input(&ctx, 36, |v| 0.5 * v);
     let d = Heads { outer: 1, row: 1 }.input(&ctx, 37, |v| v);
-    let threads = k.chunk_tile_threads.i32;
-    let (coop, coop_cfg) = chunk_scan_cfg(1, nc, NH, hd, ds, CS, k.chunk_limits(IndexWidth::I32));
-    assert!(coop, "the cooperative tiles fit this shape");
-    let fallback_cfg = LaunchConfig {
-        grid_dim: (nc as u32, NH.div_ceil(2) as u32, 1),
-        block_dim: (hd.min((threads / 2 / 32 * 32).max(32)) as u32, 2, 1),
-        shared_mem_bytes: 0,
-    };
+    let coop_cfg =
+        chunk_scan_coop_cfg(1, nc, NH, hd, ds, CS).expect("the cooperative tiles fit this shape");
     for (what, f, cfg) in [
         ("cooperative", &k.m3_chunk_scan_fwd_coop.i32, coop_cfg),
-        ("fallback", &k.m3_chunk_scan_fwd.i32, fallback_cfg),
+        (
+            "sliced",
+            &k.m3_chunk_scan_fwd_sliced_typed.i32.f32,
+            chunk_scan_sliced_cfg(1, nc, NH, hd),
+        ),
     ] {
         assert!(cfg.grid_dim.1 > GRID_YZ_EXTENT, "{what}");
         let y = poisoned(&ctx, rows.len());
@@ -378,42 +377,65 @@ fn the_chunk_scan_gives_heads_past_the_y_extent_their_twins_bits() {
     }
 }
 
-/// The decay cumsum over chunks past the y extent: the chunks of the later
-/// runs come out exactly as a launch over just those chunks gives them.
+/// The pre-state over heads past the y extent, on its fused kernel of one
+/// head per block and on its sliced kernel: every output of a twin head
+/// carries its first-run twin's bits, the decay cumsum among them.
 #[test]
-fn the_decay_cumsum_gives_chunks_past_the_y_extent_their_own_bits() {
+fn the_pre_state_gives_heads_past_the_y_extent_their_twins_bits() {
     let device = GpuDevice::new(0).expect("open CUDA device");
     let ctx = GpuCtx::new(&device).expect("context");
     let k = compile(&ctx);
-    let nh = 3usize;
-    let c1 = GRID_YZ_EXTENT as usize;
-    let t = (c1 + 2) * CS + 10;
-    let t1 = c1 * CS;
-    let adt = floats(&ctx, &det(t * nh, 41, 0.05));
-    let run = |first: usize, steps: usize| {
-        let nc = steps.div_ceil(CS);
-        let out = poisoned(&ctx, nc * nh * CS);
-        let cfg = LaunchConfig {
-            grid_dim: (1, nc as u32, 1),
-            block_dim: (nh as u32, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        let args = [
-            Arg::P(out.cached_ptr()),
-            Arg::P(adt.cached_ptr() + (first * nh * 4) as u64),
-            Arg::I(1),
-            Arg::I(steps as i32),
-            Arg::I(nh as i32),
-            Arg::I(CS as i32),
-        ];
-        for (y_first, cfg) in y_runs(cfg) {
-            let mut run = args.to_vec();
-            run.extend([Arg::I(y_first), Arg::I(0), Arg::P(0)]);
-            launch(&ctx, &k.m3_da_cumsum.i32, cfg, &run);
-        }
-        words(&ctx.stream, &out)
+    let (t, hd, ds) = (CS, 4usize, 4usize);
+    let nc = t.div_ceil(CS);
+    let rows = Heads { outer: t, row: hd };
+    let krows = Heads { outer: t, row: ds };
+    let per_step = Heads { outer: t, row: 1 };
+    let states = Heads {
+        outer: nc,
+        row: hd * ds,
     };
-    let big = run(0, t);
-    let own = run(t1, t - t1);
-    assert!(big[c1 * nh * CS..] == own[..], "chunks past the extent");
+    let cumsums = Heads { outer: nc, row: CS };
+    let x = rows.input(&ctx, 41, |v| 0.5 * v);
+    let q = krows.input(&ctx, 42, |v| 0.5 * v);
+    let kk = krows.input(&ctx, 43, |v| 0.5 * v);
+    let dt = per_step.input(&ctx, 44, |v| 0.01 + 0.4 * v.abs());
+    let trap = per_step.input(&ctx, 45, |v| 0.5 + 0.4 * v);
+    let adt = per_step.input(&ctx, 46, |v| -0.05 * v.abs());
+    let fused_cfg = chunk_fused_cfg(1, nc, NH, hd, ds, CS, k.smem_optin)
+        .expect("the fused tile fits this shape");
+    for (what, f, cfg) in [
+        (
+            "fused",
+            &k.m3_chunk_pre_state_fused_typed.i32.f32,
+            fused_cfg,
+        ),
+        (
+            "sliced",
+            &k.m3_chunk_pre_state_sliced_typed.i32.f32,
+            chunk_pre_state_sliced_cfg(1, nc, NH, hd),
+        ),
+    ] {
+        assert!(cfg.grid_dim.1 > GRID_YZ_EXTENT, "{what}");
+        let layouts = [krows, per_step, per_step, per_step, states, cumsums];
+        let outs = layouts.map(|h| poisoned(&ctx, h.len()));
+        let mut args: Vec<Arg> = outs[..5].iter().map(|b| Arg::P(b.cached_ptr())).collect();
+        args.extend([&kk, &q, &dt, &trap, &x, &adt].map(|b| Arg::P(b.cached_ptr())));
+        args.push(Arg::P(outs[5].cached_ptr()));
+        args.extend([1, t, NH, hd, ds, CS].map(|v| Arg::I(v as i32)));
+        launch_runs_packed(&ctx, f, cfg, &args);
+        let names = [
+            "K_scaled",
+            "qk_dot",
+            "scale",
+            "gamma",
+            "chunk_states",
+            "dA_cumsum",
+        ];
+        for ((layout, buf), name) in layouts.iter().zip(&outs).zip(names) {
+            assert!(
+                layout.twins_match(&words(&ctx.stream, buf)),
+                "pre-state, {what} kernel: {name}"
+            );
+        }
+    }
 }

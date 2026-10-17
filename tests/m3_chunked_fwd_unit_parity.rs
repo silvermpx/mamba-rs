@@ -1,16 +1,20 @@
-//! per-kernel parity tests for the typed M3 chunked parallel forward
-//! kernels: `m3_preprocess_chunks`, `m3_chunk_state_fwd` and
-//! `m3_chunk_scan_fwd`. Each typed variant is compared against its f32
-//! oracle on identical random inputs. The fused preprocess/state path also
-//! has exact same-dtype comparisons against the unfused pair, including its
-//! intermediate outputs.
+//! Bit gates for the kernels of the SISO chunked forward, in every dtype.
+//!
+//! The pre-state (each row's scale, gamma and Q.K dot, the prescaled K
+//! rows, the chunk's decay cumsum and its states) runs on the fused kernel
+//! where its tile of whole rows fits a block and on the sliced kernel
+//! everywhere; the intra-chunk scan likewise on the cooperative kernel and
+//! the sliced one. Every arm is held bit for bit to the kernels it
+//! replaced (the preprocess, the decay cumsum, the chunk state and the
+//! two-head static-tile scan), kept frozen in
+//! `fixtures/m3_chunked_forward_reference.cu`.
 //!
 //! The fused state pass is held bit for bit, in every dtype, to the three
 //! launches it replaced (the entering fold, the inter-chunk pass and the
 //! window-final writeback), kept frozen in
 //! `fixtures/m3_state_pass_reference.cu`.
 //!
-//! The scan-state arithmetic (`m3_dA_cumsum`, the inter-chunk pass) stays
+//! The scan-state arithmetic (the decay cumsum, the inter-chunk pass) stays
 //! pure-f32 per the Tri Dao invariant (compounding O(T) prefix arithmetic
 //! must not be stored in half precision); only the K and V inputs of the
 //! writeback are typed.
@@ -19,32 +23,23 @@
 
 #[path = "common/arch.rs"]
 mod arch;
+#[path = "common/chunked_reference.rs"]
+mod chunked_reference;
 
-use cudarc::driver::{CudaModule, LaunchConfig, PushKernelArg};
-use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use chunked_reference::chunked_reference;
+use cudarc::driver::sys::CUfunction_attribute_enum as CUfunction_attribute;
+use cudarc::driver::{CudaFunction, CudaModule, LaunchConfig, PushKernelArg};
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::kernels::{cuda_include_paths, state_capacity};
-use mamba_rs::gpu::launch::{IndexWidth, y_runs, yz_runs};
+use mamba_rs::gpu::kernels::cuda_include_paths;
+use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::{
-    ChunkLimits, Mamba3Kernels, chunk_fused_cfg, chunk_scan_cfg, chunk_state_cfg,
-    state_pass_fused_cfg,
+    ChunkArm, Mamba3Kernels, chunk_fused_cfg, chunk_pre_state_sliced_cfg, chunk_scan_cfg,
+    chunk_scan_coop_cfg, chunk_scan_sliced_cfg, state_pass_fused_cfg,
 };
 use std::sync::Arc;
-
-// Small config — T=10, CS=4 forces 3 chunks with the LAST chunk PARTIAL (len=2).
-// Previously T=8 CS=4 left the partial-last-chunk path of the typed kernels
-// (zero-pad of smem tiles, chunk_len = min(CS, T-chunk_start)) untested at
-// bf16/f16 rounding boundary.
-const B: usize = 2;
-const T: usize = 10;
-const NH: usize = 2;
-const HD: usize = 4;
-const DS: usize = 4;
-const CHUNK_SIZE: usize = 4;
-const N_CHUNKS: usize = T.div_ceil(CHUNK_SIZE);
-const D_INNER: usize = NH * HD;
 
 fn det_rand(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
@@ -56,36 +51,6 @@ fn det_rand(n: usize, seed: u32) -> Vec<f32> {
             (s & 0xFFFF) as f32 / 65536.0 - 0.5
         })
         .collect()
-}
-
-fn cos_norm(a: &[f32], b: &[f32]) -> (f32, f32) {
-    let (mut dot, mut na, mut nb) = (0f64, 0f64, 0f64);
-    for (&x, &y) in a.iter().zip(b) {
-        dot += (x as f64) * (y as f64);
-        na += (x as f64) * (x as f64);
-        nb += (y as f64) * (y as f64);
-    }
-    let cos = if na > 0.0 && nb > 0.0 {
-        (dot / (na.sqrt() * nb.sqrt())) as f32
-    } else {
-        1.0
-    };
-    let ratio = if na > 0.0 {
-        ((nb.sqrt()) / (na.sqrt())) as f32
-    } else {
-        1.0
-    };
-    (cos, ratio)
-}
-
-fn assert_close(label: &str, a: &[f32], b: &[f32], cos_min: f32, norm_tol: f32) {
-    let (cos, ratio) = cos_norm(a, b);
-    eprintln!("  {label}: cos={cos:.6} norm={ratio:.4} n={}", a.len());
-    assert!(cos >= cos_min, "{label}: cos {cos} < {cos_min}");
-    assert!(
-        (ratio - 1.0).abs() <= norm_tol,
-        "{label}: norm {ratio} outside [1 ± {norm_tol}]"
-    );
 }
 
 fn upload_typed(ctx: &GpuCtx, data: &[f32], dtype: WeightDtype) -> DtypedBuf {
@@ -157,385 +122,224 @@ fn state_pass_reference(ctx: &GpuCtx) -> Arc<CudaModule> {
         .expect("load state pass reference")
 }
 
-fn tolerances(dtype: WeightDtype) -> (f32, f32) {
+// ─── the pre-state arms ────────────────────────────────────────────────
+
+/// A chunked forward stage's shape: (batch, t, nh, hd, ds, chunk).
+type StageShape = (usize, usize, usize, usize, usize, usize);
+
+/// One pre-state arm's outputs on the device: K_scaled; qk_dot, scale,
+/// gamma and the chunk states; the decay cumsum.
+type StageOutputs = (DtypedBuf, [GpuBuffer; 4], GpuBuffer);
+
+/// The shapes of each state capacity's module the stage tests run: one
+/// partial chunk, rows that end mid-chunk, heads narrower than a warp and
+/// wider than a block of the sliced kernels, state widths that are not a
+/// whole number of quads, and shapes past every whole-row tile, the
+/// official head among them.
+const STAGE_SHAPES: [(usize, &[StageShape]); 6] = [
+    (
+        16,
+        &[
+            (2, 1, 3, 5, 4, 32),
+            (1, 13, 2, 7, 8, 64),
+            (2, 64, 3, 16, 16, 64),
+            (2, 70, 2, 9, 13, 64),
+        ],
+    ),
+    (32, &[(1, 65, 3, 5, 32, 32), (1, 70, 2, 24, 30, 64)]),
+    (
+        64,
+        &[
+            (2, 129, 2, 40, 4, 32),
+            (1, 13, 2, 3, 64, 32),
+            (2, 130, 3, 32, 64, 64),
+            (1, 100, 2, 70, 50, 64),
+            (1, 70, 2, 130, 64, 64),
+        ],
+    ),
+    (96, &[(2, 70, 2, 96, 96, 64)]),
+    (
+        128,
+        &[
+            (2, 129, 2, 64, 128, 64),
+            (1, 100, 3, 100, 128, 64),
+            (1, 77, 3, 16, 128, 64),
+        ],
+    ),
+    (256, &[(1, 70, 2, 64, 256, 64), (1, 64, 1, 256, 256, 64)]),
+];
+
+/// The sequence ids of `batch` rows of `t` positions: the carried sequence,
+/// then a new one at a different position in every row and another 50
+/// positions later, so chunks begin inside, at and across a start.
+fn packed_ids(batch: usize, t: usize) -> Vec<i32> {
+    let mut ids = Vec::with_capacity(batch * t);
+    for b in 0..batch {
+        let first = 37 + 11 * b;
+        ids.extend((0..t).map(|i| i32::from(i >= first) + i32::from(i >= first + 50)));
+    }
+    ids
+}
+
+/// A packing of `batch` rows of `t` positions on the device.
+fn packing(ctx: &GpuCtx, batch: usize, t: usize) -> GpuByteBuffer {
+    let bytes: Vec<u8> = packed_ids(batch, t)
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let mut buf = GpuByteBuffer::zeros(&ctx.stream, bytes.len()).unwrap();
+    buf.upload_bytes(&ctx.stream, &bytes).unwrap();
+    buf
+}
+
+/// The block a frozen two-head scalar kernel launches for a head: every
+/// lane a thread of the head's elements, at most half the threads the
+/// kernel's registers allow, whole warps.
+fn frozen_lanes(f: &CudaFunction, hd: usize) -> usize {
+    let threads = f
+        .get_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+        .unwrap() as usize;
+    hd.min((threads / 2 / 32 * 32).max(32))
+}
+
+fn reference_name(base: &str, dtype: WeightDtype) -> String {
     match dtype {
-        WeightDtype::Bf16 => (0.99, 0.05),
-        WeightDtype::F16 => (0.999, 0.02),
-        WeightDtype::F32 | WeightDtype::Tf32 => unreachable!(),
+        WeightDtype::Bf16 => format!("{base}_bf16"),
+        WeightDtype::F16 => format!("{base}_f16"),
+        WeightDtype::F32 | WeightDtype::Tf32 => base.to_owned(),
     }
 }
 
-// ─── m3_preprocess_chunks ──────────────────────────────────────────────
-
-fn check_preprocess_chunks(dtype: WeightDtype) {
+/// The fused and the sliced pre-state against the frozen trio they replace
+/// (the preprocess, the decay cumsum and the chunk state), bit for bit in
+/// every dtype, with and without a packing and with either save omitted,
+/// the trio's chunk states in each of its layouts: the scalar one and,
+/// where its tile fits, the quad one. The sliced kernel runs at every
+/// shape; the fused one wherever its tile of whole rows fits the block's
+/// budget.
+#[test]
+fn the_pre_state_arms_write_the_frozen_trio_bits() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = make_m3k(&ctx);
-
-    // Shared random inputs (same values for both f32 and typed runs).
-    let k_vals = det_rand(B * T * NH * DS, 0x8C01);
-    let q_vals = det_rand(B * T * NH * DS, 0x8C02);
-    // DT must be positive (post-softplus), trap_sig in (0,1) (post-sigmoid).
-    let dt_vals: Vec<f32> = (0..B * T * NH)
-        .map(|i| 0.1 + 0.01 * (i as f32 % 5.0))
-        .collect();
-    let trap_vals: Vec<f32> = (0..B * T * NH)
-        .map(|i| 0.3 + 0.02 * (i as f32 % 7.0))
-        .collect();
-
-    let k_f32 = upload_f32(&ctx, &k_vals);
-    let q_f32 = upload_f32(&ctx, &q_vals);
-    let dt_buf = upload_f32(&ctx, &dt_vals);
-    let trap_buf = upload_f32(&ctx, &trap_vals);
-
-    let ks_n = B * T * NH * DS;
-    let th_n = B * T * NH;
-
-    // f32 oracle.
-    let ks_f32 = GpuBuffer::zeros(&ctx.stream, ks_n).unwrap();
-    let qk_f32 = GpuBuffer::zeros(&ctx.stream, th_n).unwrap();
-    let scale_f32 = GpuBuffer::zeros(&ctx.stream, th_n).unwrap();
-    let gamma_f32 = GpuBuffer::zeros(&ctx.stream, th_n).unwrap();
-    ctx.stream.synchronize().unwrap();
-
-    let cfg = LaunchConfig {
-        grid_dim: ((B * N_CHUNKS) as u32, NH as u32, 1),
-        block_dim: (CHUNK_SIZE as u32, 1, 1),
-        shared_mem_bytes: 0,
-    };
-    let (bi, ti, nhi, dsi, csi) = (B as i32, T as i32, NH as i32, DS as i32, CHUNK_SIZE as i32);
-    for (y_first, cfg) in y_runs(cfg) {
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks.i32);
-        let (a, b, c, d, e, f, g, h) = (
-            ks_f32.cached_ptr(),
-            qk_f32.cached_ptr(),
-            scale_f32.cached_ptr(),
-            gamma_f32.cached_ptr(),
-            k_f32.cached_ptr(),
-            q_f32.cached_ptr(),
-            dt_buf.cached_ptr(),
-            trap_buf.cached_ptr(),
-        );
-        bld.arg(&a);
-        bld.arg(&b);
-        bld.arg(&c);
-        bld.arg(&d);
-        bld.arg(&e);
-        bld.arg(&f);
-        bld.arg(&g);
-        bld.arg(&h);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&dsi);
-        bld.arg(&csi);
-        bld.arg(&y_first);
-        bld.arg(&0u64);
-        unsafe { bld.launch(cfg) }.unwrap();
-    }
-    ctx.stream.synchronize().unwrap();
-
-    let ks_ref = download_f32(&ctx, &ks_f32, ks_n);
-    let qk_ref = download_f32(&ctx, &qk_f32, th_n);
-    let scale_ref = download_f32(&ctx, &scale_f32, th_n);
-    let gamma_ref = download_f32(&ctx, &gamma_f32, th_n);
-
-    // Typed variant.
-    let k_t = upload_typed(&ctx, &k_vals, dtype);
-    let q_t = upload_typed(&ctx, &q_vals, dtype);
-    let ks_t = DtypedBuf::zeros(&ctx.stream, ks_n, dtype).unwrap();
-    let qk_t = GpuBuffer::zeros(&ctx.stream, th_n).unwrap();
-    let scale_t = GpuBuffer::zeros(&ctx.stream, th_n).unwrap();
-    let gamma_t = GpuBuffer::zeros(&ctx.stream, th_n).unwrap();
-    ctx.stream.synchronize().unwrap();
-
-    for (y_first, cfg) in y_runs(cfg) {
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
-        let (a, b, c, d, e, f, g, h) = (
-            ks_t.cached_ptr(),
-            qk_t.cached_ptr(),
-            scale_t.cached_ptr(),
-            gamma_t.cached_ptr(),
-            k_t.cached_ptr(),
-            q_t.cached_ptr(),
-            dt_buf.cached_ptr(),
-            trap_buf.cached_ptr(),
-        );
-        bld.arg(&a);
-        bld.arg(&b);
-        bld.arg(&c);
-        bld.arg(&d);
-        bld.arg(&e);
-        bld.arg(&f);
-        bld.arg(&g);
-        bld.arg(&h);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&dsi);
-        bld.arg(&csi);
-        bld.arg(&y_first);
-        bld.arg(&0u64);
-        unsafe { bld.launch(cfg) }.unwrap();
-    }
-    ctx.stream.synchronize().unwrap();
-
-    let ks_got = download_typed(&ctx, &ks_t);
-    let qk_got = download_f32(&ctx, &qk_t, th_n);
-    let scale_got = download_f32(&ctx, &scale_t, th_n);
-    let gamma_got = download_f32(&ctx, &gamma_t, th_n);
-
-    eprintln!("m3_preprocess_chunks {dtype:?}:");
-    let (cos_min, norm_tol) = tolerances(dtype);
-    // scale/gamma derive from f32 DT/trap_sig only → bit-exact.
-    assert_close("scale (f32)", &scale_ref, &scale_got, 1.0 - 1e-6, 1e-4);
-    assert_close("gamma (f32)", &gamma_ref, &gamma_got, 1.0 - 1e-6, 1e-4);
-    // qk_dot = Σ(Q*K) * gamma, reduced from typed Q/K → dtype-bounded drift.
-    assert_close("qk_dot", &qk_ref, &qk_got, cos_min, norm_tol);
-    // K_scaled goes through bf16/f16 round-trip.
-    assert_close("K_scaled", &ks_ref, &ks_got, cos_min, norm_tol);
-}
-
-#[test]
-fn m3_preprocess_chunks_bf16() {
-    check_preprocess_chunks(WeightDtype::Bf16);
-}
-#[test]
-fn m3_preprocess_chunks_f16() {
-    check_preprocess_chunks(WeightDtype::F16);
-}
-
-// ─── m3_chunk_state_fwd ────────────────────────────────────────────────
-
-fn check_chunk_state_fwd(dtype: WeightDtype) {
-    let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = make_m3k(&ctx);
-
-    let x_vals = det_rand(B * T * D_INNER, 0x8C11);
-    let ks_vals = det_rand(B * T * NH * DS, 0x8C12);
-    // dA_cumsum values — negative (decay)
-    let da_vals: Vec<f32> = (0..B * N_CHUNKS * NH * CHUNK_SIZE)
-        .map(|i| -0.02 * (i as f32 % 4.0 + 1.0))
-        .collect();
-
-    let x_f32 = upload_f32(&ctx, &x_vals);
-    let ks_f32_buf = upload_f32(&ctx, &ks_vals);
-    let da_buf = upload_f32(&ctx, &da_vals);
-
-    let states_n = B * N_CHUNKS * NH * HD * DS;
-
-    // f32 oracle.
-    let states_f32 = GpuBuffer::zeros(&ctx.stream, states_n).unwrap();
-    ctx.stream.synchronize().unwrap();
-    let cfg = LaunchConfig {
-        grid_dim: ((B * N_CHUNKS) as u32, NH as u32, 1),
-        block_dim: (HD as u32, 1, 1),
-        shared_mem_bytes: 0,
-    };
-    let (bi, ti, nhi, hdi, dsi, csi) = (
-        B as i32,
-        T as i32,
-        NH as i32,
-        HD as i32,
-        DS as i32,
-        CHUNK_SIZE as i32,
-    );
-    for (y_first, cfg) in y_runs(cfg) {
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd.i32);
-        let (a, b, c, d) = (
-            states_f32.cached_ptr(),
-            x_f32.cached_ptr(),
-            ks_f32_buf.cached_ptr(),
-            da_buf.cached_ptr(),
-        );
-        bld.arg(&a);
-        bld.arg(&b);
-        bld.arg(&c);
-        bld.arg(&d);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&hdi);
-        bld.arg(&dsi);
-        bld.arg(&csi);
-        bld.arg(&y_first);
-        bld.arg(&0u64);
-        unsafe { bld.launch(cfg) }.unwrap();
-    }
-    ctx.stream.synchronize().unwrap();
-    let ref_states = download_f32(&ctx, &states_f32, states_n);
-
-    // Typed variant.
-    let x_t = upload_typed(&ctx, &x_vals, dtype);
-    let ks_t = upload_typed(&ctx, &ks_vals, dtype);
-    let states_t = GpuBuffer::zeros(&ctx.stream, states_n).unwrap();
-    ctx.stream.synchronize().unwrap();
-    for (y_first, cfg) in y_runs(cfg) {
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
-        let (a, b, c, d) = (
-            states_t.cached_ptr(),
-            x_t.cached_ptr(),
-            ks_t.cached_ptr(),
-            da_buf.cached_ptr(),
-        );
-        bld.arg(&a);
-        bld.arg(&b);
-        bld.arg(&c);
-        bld.arg(&d);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&hdi);
-        bld.arg(&dsi);
-        bld.arg(&csi);
-        bld.arg(&y_first);
-        bld.arg(&0u64);
-        unsafe { bld.launch(cfg) }.unwrap();
-    }
-    ctx.stream.synchronize().unwrap();
-    let got_states = download_f32(&ctx, &states_t, states_n);
-
-    eprintln!("m3_chunk_state_fwd {dtype:?}:");
-    let (cos_min, norm_tol) = tolerances(dtype);
-    assert_close("states (f32)", &ref_states, &got_states, cos_min, norm_tol);
-}
-
-#[test]
-fn m3_chunk_state_fwd_bf16() {
-    check_chunk_state_fwd(WeightDtype::Bf16);
-}
-#[test]
-fn m3_chunk_state_fwd_f16() {
-    check_chunk_state_fwd(WeightDtype::F16);
-}
-
-/// The fused pre-state kernel against the unfused trio it replaces, bit
-/// for bit in every dtype and with either save omitted, the trio's chunk
-/// states in each of its layouts: the scalar one it runs wherever the quad
-/// tile does not fit, and the quad one where it does.
-#[test]
-fn m3_chunk_pre_state_fused_matches_unfused_bits() {
-    let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
-    // The hd=40 shape gives each fused thread multiple state quads to own.
-    // The last three are past the 48 KB default, the official head among
-    // them: the budget moved them from the unfused trio's scalar layout to
-    // the fused kernel.
-    let shapes: [(usize, usize, usize, usize, usize, usize); 9] = [
-        (2, 1, 3, 5, 4, 32),
-        (1, 13, 2, 7, 8, 64),
-        (2, 64, 3, 16, 16, 64),
-        (1, 65, 3, 5, 32, 32),
-        (2, 129, 2, 40, 4, 32),
-        (1, 13, 2, 3, 64, 32),
-        (2, 70, 2, 96, 96, 64),
-        (2, 129, 2, 64, 128, 64),
-        (1, 100, 3, 100, 128, 64),
-    ];
-    for cap in [16, 32, 64, 96, 128] {
+    for (cap, shapes) in STAGE_SHAPES {
         let m3k = Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), cap)
             .unwrap();
-        for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
-            for (batch, t, nh, hd, ds, cs) in shapes {
-                let cap = m3k.state_cap;
-                // Match production's tight capacity, and retain the wider-module
-                // oracle coverage for every shape supported by the default cap.
-                if ds > cap || (cap != 64 && state_capacity(ds).unwrap() != cap) {
-                    continue;
-                }
-                let label =
-                    format!("{dtype:?} cap={cap} B={batch} T={t} nh={nh} hd={hd} ds={ds} cs={cs}");
-                let nc = t.div_ceil(cs);
-                let fused_cfg = chunk_fused_cfg(batch, nc, nh, hd, ds, cs, m3k.smem_optin)
-                    .unwrap_or_else(|| panic!("{label}: fused launch must be supported"));
-                let limits = m3k.chunk_limits(IndexWidth::I32);
-                let state_cfg = chunk_state_cfg(batch, nc, nh, hd, ds, cs, limits);
-                // The scalar layout, which the unfused trio runs wherever the
-                // quad tile does not fit.
-                let scalar_cfg =
-                    chunk_state_cfg(batch, nc, nh, hd, ds, cs, ChunkLimits { smem: 0, ..limits });
-                assert!(ds <= m3k.state_cap, "{label}: state capacity");
-                for cfg in [&fused_cfg, &state_cfg, &scalar_cfg] {
-                    let (bx, by, bz) = cfg.block_dim;
-                    assert!((1..=1024).contains(&(bx * by * bz)), "{label}: block");
-                    assert!(
-                        cfg.shared_mem_bytes as usize <= m3k.smem_optin,
-                        "{label}: shared memory"
-                    );
-                }
-                let th_n = batch * t * nh;
-                let ks_n = th_n * ds;
-                let states_n = batch * nc * nh * hd * ds;
-                // Both arms consume the same typed inputs. The unfused arm
-                // materializes K_scaled in its activation dtype before the fold.
-                let k = upload_typed(&ctx, &det_rand(ks_n, 0x8C41), dtype);
-                let q = upload_typed(&ctx, &det_rand(ks_n, 0x8C42), dtype);
-                let x = upload_typed(&ctx, &det_rand(th_n * hd, 0x8C43), dtype);
-                let dt_vals: Vec<f32> = det_rand(th_n, 0x8C44)
-                    .into_iter()
-                    .map(|v| 0.01 + v.abs() * 0.4)
-                    .collect();
-                let trap_vals: Vec<f32> = det_rand(th_n, 0x8C45)
-                    .into_iter()
-                    .map(|v| 0.5 + v * 0.9)
-                    .collect();
-                let dt = upload_f32(&ctx, &dt_vals);
-                let trap = upload_f32(&ctx, &trap_vals);
-                // The a*dt rows both arms fold into the decay cumsum.
-                let mut adt_vals = vec![0.0f32; th_n];
-                for b in 0..batch {
-                    for chunk in 0..nc {
-                        for h in 0..nh {
-                            let chunk_len = cs.min(t - chunk * cs);
-                            for tl in 0..chunk_len {
-                                let mut a =
-                                    -(0.01 + 0.003 * ((tl + 3 * h + b + 5 * chunk) % 7) as f32);
-                                // Earlier timesteps underflow after the midpoint
-                                // drop; later timesteps still have ordinary decay.
-                                if chunk_len >= 4 && tl == chunk_len / 2 {
-                                    a -= 160.0;
-                                }
-                                // A rising last step makes the endpoint
-                                // difference positive, exercising fminf.
-                                if chunk_len >= 3 && tl == chunk_len - 1 {
-                                    a = 0.125;
-                                }
-                                adt_vals[(b * t + chunk * cs + tl) * nh + h] = a;
+        let frozen = chunked_reference(ctx.stream.context(), arch::arch0(), cap);
+        let cumsum = frozen.load_function("m3_reference_da_cumsum").unwrap();
+        for &(batch, t, nh, hd, ds, cs) in shapes {
+            let nc = t.div_ceil(cs);
+            let th_n = batch * t * nh;
+            let ks_n = th_n * ds;
+            let states_n = batch * nc * nh * hd * ds;
+            let da_n = batch * nc * nh * cs;
+            let fused_cfg = chunk_fused_cfg(batch, nc, nh, hd, ds, cs, m3k.smem_optin);
+            let sliced_cfg = chunk_pre_state_sliced_cfg(batch, nc, nh, hd);
+            let dt_vals: Vec<f32> = det_rand(th_n, 0x8C44)
+                .into_iter()
+                .map(|v| 0.01 + v.abs() * 0.4)
+                .collect();
+            let trap_vals: Vec<f32> = det_rand(th_n, 0x8C45)
+                .into_iter()
+                .map(|v| 0.5 + v * 0.9)
+                .collect();
+            let dt = upload_f32(&ctx, &dt_vals);
+            let trap = upload_f32(&ctx, &trap_vals);
+            // The a*dt rows every arm folds into the decay cumsum.
+            let mut adt_vals = vec![0.0f32; th_n];
+            for b in 0..batch {
+                for chunk in 0..nc {
+                    for h in 0..nh {
+                        let chunk_len = cs.min(t - chunk * cs);
+                        for tl in 0..chunk_len {
+                            let mut a = -(0.01 + 0.003 * ((tl + 3 * h + b + 5 * chunk) % 7) as f32);
+                            // Earlier steps underflow after the midpoint drop;
+                            // later steps still have ordinary decay.
+                            if chunk_len >= 4 && tl == chunk_len / 2 {
+                                a -= 160.0;
                             }
+                            // A rising last step makes the endpoint difference
+                            // positive, exercising the cap at zero.
+                            if chunk_len >= 3 && tl == chunk_len - 1 {
+                                a = 0.125;
+                            }
+                            adt_vals[(b * t + chunk * cs + tl) * nh + h] = a;
                         }
                     }
                 }
-                let adt = upload_f32(&ctx, &adt_vals);
-                let da_n = batch * nc * nh * cs;
-                let dims = [batch, t, nh, hd, ds, cs].map(|v| v as i32);
-                let pre_dims = [dims[0], dims[1], dims[2], dims[4], dims[5]];
-                let pre_cfg = LaunchConfig {
-                    grid_dim: ((batch * nc) as u32, nh as u32, 1),
-                    block_dim: (cs as u32, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                // The fused kernel for `None`, the unfused trio with its chunk
-                // states in the layout of `Some(cfg)` otherwise.
-                let run = |unfused: Option<LaunchConfig>, save_scale: bool, save_gamma: bool| {
-                    // Independent, differently poisoned allocations expose missing
-                    // writes even if both kernels skip the same output element.
-                    let poison = if unfused.is_none() { -8192.0 } else { 8192.0 };
-                    let ks = upload_typed(&ctx, &vec![poison; ks_n], dtype);
-                    let [qk, scale, gamma, states] = [th_n, th_n, th_n, states_n]
-                        .map(|len| upload_f32(&ctx, &vec![poison; len]));
-                    // Padding past a chunk's length stays NaN in both arms, so
-                    // the endpoint must use the actual chunk length.
-                    let da = upload_f32(&ctx, &vec![f32::NAN; da_n]);
-                    let scale_ptr = if save_scale { scale.cached_ptr() } else { 0 };
-                    let gamma_ptr = if save_gamma { gamma.cached_ptr() } else { 0 };
-                    if let Some(state_cfg) = unfused {
+            }
+            let adt = upload_f32(&ctx, &adt_vals);
+            let ids = packing(&ctx, batch, t);
+            let dims = [batch, t, nh, hd, ds, cs].map(|v| v as i32);
+            let pre_dims = [dims[0], dims[1], dims[2], dims[4], dims[5]];
+            let cumsum_dims = [dims[0], dims[1], dims[2], dims[5]];
+            for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+                let k = upload_typed(&ctx, &det_rand(ks_n, 0x8C41), dtype);
+                let q = upload_typed(&ctx, &det_rand(ks_n, 0x8C42), dtype);
+                let x = upload_typed(&ctx, &det_rand(th_n * hd, 0x8C43), dtype);
+                let preprocess = frozen
+                    .load_function(&reference_name("m3_reference_preprocess_chunks", dtype))
+                    .unwrap();
+                let state = frozen
+                    .load_function(&reference_name("m3_reference_chunk_state", dtype))
+                    .unwrap();
+                // The trio's chunk states in the scalar layout, and in the
+                // quad one where its tile fits a block without an opt-in.
+                let lanes = frozen_lanes(&state, hd);
+                let mut layouts = vec![(
+                    "scalar layout",
+                    LaunchConfig {
+                        grid_dim: ((batch * nc) as u32, nh.div_ceil(2) as u32, 1),
+                        block_dim: (lanes as u32, 2, 1),
+                        shared_mem_bytes: 0,
+                    },
+                )];
+                let quad_smem = 2 * (cs * hd + cs * ds + cs) * 4;
+                let quad_threads = state
+                    .get_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+                    .unwrap() as usize;
+                if ds.is_multiple_of(4)
+                    && hd * (ds / 4) * 2 <= quad_threads
+                    && quad_smem <= 48 * 1024
+                {
+                    layouts.push((
+                        "quad layout",
+                        LaunchConfig {
+                            grid_dim: ((batch * nc) as u32, nh.div_ceil(2) as u32, 1),
+                            block_dim: (hd as u32, (ds / 4) as u32, 2),
+                            shared_mem_bytes: quad_smem as u32,
+                        },
+                    ));
+                }
+                for packed in [false, true] {
+                    let seq_idx = if packed { ids.cached_ptr() } else { 0 };
+                    // The outputs of one arm: K_scaled, qk_dot, scale, gamma,
+                    // the chunk states and the decay cumsum. Each arm writes
+                    // into its own poisoned buffers, so an element no arm
+                    // writes cannot agree; the cumsum's padding past a chunk's
+                    // end stays NaN in every arm.
+                    let outputs = |poison: f32| {
+                        let ks = upload_typed(&ctx, &vec![poison; ks_n], dtype);
+                        let rows = [th_n, th_n, th_n, states_n]
+                            .map(|len| upload_f32(&ctx, &vec![poison; len]));
+                        let da = upload_f32(&ctx, &vec![f32::NAN; da_n]);
+                        (ks, rows, da)
+                    };
+                    let download = |out: &StageOutputs| {
+                        let (ks, rows, da) = out;
+                        [
+                            download_typed(&ctx, ks),
+                            download_f32(&ctx, &rows[0], th_n),
+                            download_f32(&ctx, &rows[1], th_n),
+                            download_f32(&ctx, &rows[2], th_n),
+                            download_f32(&ctx, &rows[3], states_n),
+                            download_f32(&ctx, da, da_n),
+                        ]
+                    };
+                    let run_frozen = |layout: LaunchConfig| {
+                        let out = outputs(8192.0);
+                        let (ks, rows, da) = &out;
                         let block_x = nh.min(256) as u32;
-                        let da_cfg = LaunchConfig {
+                        let cumsum_cfg = LaunchConfig {
                             grid_dim: (
                                 batch as u32,
                                 nc as u32,
@@ -544,34 +348,36 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                             block_dim: (block_x, 1, 1),
                             shared_mem_bytes: 0,
                         };
-                        for (y_first, z_first, cfg) in yz_runs(da_cfg) {
-                            let mut bld = ctx.stream.launch_builder(&m3k.m3_da_cumsum.i32);
-                            let (da_ptr, adt_ptr) = (da.cached_ptr(), adt.cached_ptr());
-                            bld.arg(&da_ptr);
-                            bld.arg(&adt_ptr);
-                            let da_dims = [dims[0], dims[1], dims[2], dims[5]];
-                            for dim in &da_dims {
+                        for (y_first, z_first, cfg) in yz_runs(cumsum_cfg) {
+                            let mut bld = ctx.stream.launch_builder(&cumsum);
+                            let (dap, adtp) = (da.cached_ptr(), adt.cached_ptr());
+                            bld.arg(&dap);
+                            bld.arg(&adtp);
+                            for dim in &cumsum_dims {
                                 bld.arg(dim);
                             }
                             bld.arg(&y_first);
                             bld.arg(&z_first);
-                            bld.arg(&0u64);
+                            bld.arg(&seq_idx);
                             unsafe { bld.launch(cfg) }.unwrap();
                         }
                         let ptrs = [
                             ks.cached_ptr(),
-                            qk.cached_ptr(),
-                            scale_ptr,
-                            gamma_ptr,
+                            rows[0].cached_ptr(),
+                            rows[1].cached_ptr(),
+                            rows[2].cached_ptr(),
                             k.cached_ptr(),
                             q.cached_ptr(),
                             dt.cached_ptr(),
                             trap.cached_ptr(),
                         ];
+                        let pre_cfg = LaunchConfig {
+                            grid_dim: ((batch * nc) as u32, nh as u32, 1),
+                            block_dim: (cs as u32, 1, 1),
+                            shared_mem_bytes: 0,
+                        };
                         for (y_first, cfg) in y_runs(pre_cfg) {
-                            let mut bld = ctx
-                                .stream
-                                .launch_builder(m3k.m3_preprocess_chunks_typed.i32.get(dtype));
+                            let mut bld = ctx.stream.launch_builder(&preprocess);
                             for ptr in &ptrs {
                                 bld.arg(ptr);
                             }
@@ -579,19 +385,17 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                                 bld.arg(dim);
                             }
                             bld.arg(&y_first);
-                            bld.arg(&0u64);
+                            bld.arg(&seq_idx);
                             unsafe { bld.launch(cfg) }.unwrap();
                         }
                         let ptrs = [
-                            states.cached_ptr(),
+                            rows[3].cached_ptr(),
                             x.cached_ptr(),
                             ks.cached_ptr(),
                             da.cached_ptr(),
                         ];
-                        for (y_first, cfg) in y_runs(state_cfg) {
-                            let mut bld = ctx
-                                .stream
-                                .launch_builder(m3k.m3_chunk_state_fwd_typed.i32.get(dtype));
+                        for (y_first, cfg) in y_runs(layout) {
+                            let mut bld = ctx.stream.launch_builder(&state);
                             for ptr in &ptrs {
                                 bld.arg(ptr);
                             }
@@ -599,16 +403,24 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                                 bld.arg(dim);
                             }
                             bld.arg(&y_first);
-                            bld.arg(&0u64);
+                            bld.arg(&seq_idx);
                             unsafe { bld.launch(cfg) }.unwrap();
                         }
-                    } else {
+                        ctx.stream.synchronize().unwrap();
+                        download(&out)
+                    };
+                    let run_arm = |kernel: &CudaFunction,
+                                   cfg: LaunchConfig,
+                                   save_scale: bool,
+                                   save_gamma: bool| {
+                        let out = outputs(-8192.0);
+                        let (ks, rows, da) = &out;
                         let ptrs = [
                             ks.cached_ptr(),
-                            qk.cached_ptr(),
-                            scale_ptr,
-                            gamma_ptr,
-                            states.cached_ptr(),
+                            rows[0].cached_ptr(),
+                            if save_scale { rows[1].cached_ptr() } else { 0 },
+                            if save_gamma { rows[2].cached_ptr() } else { 0 },
+                            rows[3].cached_ptr(),
                             k.cached_ptr(),
                             q.cached_ptr(),
                             dt.cached_ptr(),
@@ -617,10 +429,8 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                             adt.cached_ptr(),
                             da.cached_ptr(),
                         ];
-                        for (y_first, cfg) in y_runs(fused_cfg) {
-                            let mut bld = ctx
-                                .stream
-                                .launch_builder(m3k.m3_chunk_pre_state_fused_typed.i32.get(dtype));
+                        for (y_first, cfg) in y_runs(cfg) {
+                            let mut bld = ctx.stream.launch_builder(kernel);
                             for ptr in &ptrs {
                                 bld.arg(ptr);
                             }
@@ -628,63 +438,161 @@ fn m3_chunk_pre_state_fused_matches_unfused_bits() {
                                 bld.arg(dim);
                             }
                             bld.arg(&y_first);
-                            bld.arg(&0u64);
+                            bld.arg(&seq_idx);
                             unsafe { bld.launch(cfg) }.unwrap();
                         }
+                        ctx.stream.synchronize().unwrap();
+                        download(&out)
+                    };
+                    let mut arms = vec![(
+                        "sliced",
+                        m3k.m3_chunk_pre_state_sliced_typed.i32.get(dtype),
+                        sliced_cfg,
+                    )];
+                    if let Some(cfg) = fused_cfg {
+                        arms.push((
+                            "fused",
+                            m3k.m3_chunk_pre_state_fused_typed.i32.get(dtype),
+                            cfg,
+                        ));
                     }
-                    ctx.stream.synchronize().unwrap();
-                    [
-                        download_typed(&ctx, &ks),
-                        download_f32(&ctx, &qk, th_n),
-                        download_f32(&ctx, &scale, th_n),
-                        download_f32(&ctx, &gamma, th_n),
-                        download_f32(&ctx, &states, states_n),
-                        download_f32(&ctx, &da, da_n),
-                    ]
-                };
-                let names = [
-                    "K_scaled",
-                    "qk_dot",
-                    "scale",
-                    "gamma",
-                    "chunk_states",
-                    "dA_cumsum",
-                ];
-                let mut layouts = vec![("scalar layout", scalar_cfg)];
-                if state_cfg.shared_mem_bytes > 0 {
-                    layouts.push(("quad layout", state_cfg));
-                }
-                for (layout, layout_cfg) in layouts {
-                    let reference = run(Some(layout_cfg), true, true);
-                    for (save_scale, save_gamma) in
-                        [(true, true), (false, true), (true, false), (false, false)]
-                    {
-                        let actual = run(None, save_scale, save_gamma);
-                        for (out, ((got, want), name)) in
-                            actual.iter().zip(&reference).zip(names).enumerate()
-                        {
-                            assert_eq!(got.len(), want.len(), "{label}: {name} length");
-                            for (i, (&got, &want)) in got.iter().zip(want).enumerate() {
-                                let want = if (out == 2 && !save_scale) || (out == 3 && !save_gamma)
-                                {
-                                    -8192.0f32
-                                } else {
-                                    // The cumsum's padding is NaN in both arms.
-                                    assert!(
-                                        want.is_finite() || out == 5,
-                                        "{label}: {name}[{i}] oracle nonfinite"
-                                    );
-                                    want
-                                };
-                                // Widening finite half values is exact, including signed zero.
-                                assert_eq!(
-                                    got.to_bits(),
-                                    want.to_bits(),
-                                    "{label} {layout}: {name}[{i}] save_scale={save_scale} \
-                                     save_gamma={save_gamma}"
+                    let names = [
+                        "K_scaled",
+                        "qk_dot",
+                        "scale",
+                        "gamma",
+                        "chunk_states",
+                        "dA_cumsum",
+                    ];
+                    for &(layout, layout_cfg) in &layouts {
+                        let reference = run_frozen(layout_cfg);
+                        for (arm, kernel, cfg) in &arms {
+                            for (save_scale, save_gamma) in
+                                [(true, true), (false, true), (true, false), (false, false)]
+                            {
+                                let actual = run_arm(kernel, *cfg, save_scale, save_gamma);
+                                let label = format!(
+                                    "{dtype:?} cap {cap} B {batch} T {t} nh {nh} hd {hd} ds {ds} \
+                                     cs {cs} packed {packed}: {arm} against the trio's {layout}, \
+                                     save_scale {save_scale} save_gamma {save_gamma}"
                                 );
+                                for (out, ((got, want), name)) in
+                                    actual.iter().zip(&reference).zip(names).enumerate()
+                                {
+                                    let skipped =
+                                        (out == 2 && !save_scale) || (out == 3 && !save_gamma);
+                                    for (i, (&got, &want)) in got.iter().zip(want).enumerate() {
+                                        let want = if skipped { -8192.0f32 } else { want };
+                                        assert_eq!(
+                                            got.to_bits(),
+                                            want.to_bits(),
+                                            "{label}: {name}[{i}]"
+                                        );
+                                    }
+                                }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─── the intra-chunk scan arms ─────────────────────────────────────────
+
+/// The sliced scan against the frozen two-head static-tile scan it
+/// replaces, bit for bit in every dtype, with and without a packing, at
+/// every shape: the static kernel's arithmetic, its last sums in the form
+/// the card's compiler gives them, at shapes on both sides of the
+/// cooperative kernel's tile.
+#[test]
+fn the_sliced_scan_writes_the_frozen_static_tile_bits() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    for (cap, shapes) in STAGE_SHAPES {
+        let m3k = Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), cap)
+            .unwrap();
+        let frozen = chunked_reference(ctx.stream.context(), arch::arch0(), cap);
+        for &(batch, t, nh, hd, ds, cs) in shapes {
+            let nc = t.div_ceil(cs);
+            let th_n = batch * t * nh;
+            let sliced_cfg = chunk_scan_sliced_cfg(batch, nc, nh, hd);
+            let x_vals = det_rand(th_n * hd, 0x5C01);
+            let q_vals = det_rand(th_n * ds, 0x5C02);
+            let k_vals = det_rand(th_n * ds, 0x5C03);
+            let qk = upload_f32(&ctx, &det_rand(th_n, 0x5C04));
+            // Decay cumsums falling from zero inside every chunk.
+            let mut da_vals = Vec::with_capacity(batch * nc * nh * cs);
+            let steps = det_rand(batch * nc * nh * cs, 0x5C05);
+            for row in steps.chunks(cs) {
+                let mut acc = 0.0f32;
+                da_vals.extend(row.iter().map(|v| {
+                    acc -= 0.02 + 0.1 * v.abs();
+                    acc
+                }));
+            }
+            let da = upload_f32(&ctx, &da_vals);
+            let prev = upload_f32(&ctx, &det_rand(batch * nc * nh * hd * ds, 0x5C06));
+            let d_vals: Vec<f32> = (0..nh).map(|i| 0.5 + 0.1 * i as f32).collect();
+            let d = upload_f32(&ctx, &d_vals);
+            let ids = packing(&ctx, batch, t);
+            for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+                let x = upload_typed(&ctx, &x_vals, dtype);
+                let q = upload_typed(&ctx, &q_vals, dtype);
+                let k = upload_typed(&ctx, &k_vals, dtype);
+                let frozen_scan = frozen
+                    .load_function(&reference_name("m3_reference_chunk_scan", dtype))
+                    .unwrap();
+                let lanes = frozen_lanes(&frozen_scan, hd);
+                let frozen_cfg = LaunchConfig {
+                    grid_dim: ((batch * nc) as u32, nh.div_ceil(2) as u32, 1),
+                    block_dim: (lanes as u32, 2, 1),
+                    shared_mem_bytes: 0,
+                };
+                for packed in [false, true] {
+                    let seq_idx = if packed { ids.cached_ptr() } else { 0 };
+                    // Each arm writes into its own poisoned rows, so an
+                    // element no arm writes cannot agree.
+                    let run = |kernel: &CudaFunction, cfg: LaunchConfig, poison: f32| {
+                        let y = upload_typed(&ctx, &vec![poison; th_n * hd], dtype);
+                        let ptrs = [
+                            y.cached_ptr(),
+                            x.cached_ptr(),
+                            q.cached_ptr(),
+                            k.cached_ptr(),
+                            qk.cached_ptr(),
+                            da.cached_ptr(),
+                            prev.cached_ptr(),
+                            d.cached_ptr(),
+                        ];
+                        let dims = [batch, t, nh, hd, ds, cs].map(|v| v as i32);
+                        for (y_first, cfg) in y_runs(cfg) {
+                            let mut bld = ctx.stream.launch_builder(kernel);
+                            for ptr in &ptrs {
+                                bld.arg(ptr);
+                            }
+                            for dim in &dims {
+                                bld.arg(dim);
+                            }
+                            bld.arg(&y_first);
+                            bld.arg(&seq_idx);
+                            unsafe { bld.launch(cfg) }.unwrap();
+                        }
+                        ctx.stream.synchronize().unwrap();
+                        download_typed(&ctx, &y)
+                    };
+                    let want = run(&frozen_scan, frozen_cfg, 8192.0);
+                    let got = run(
+                        m3k.m3_chunk_scan_fwd_sliced_typed.i32.get(dtype),
+                        sliced_cfg,
+                        -8192.0,
+                    );
+                    let label = format!(
+                        "{dtype:?} cap {cap} B {batch} T {t} nh {nh} hd {hd} ds {ds} packed {packed}"
+                    );
+                    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                        assert_eq!(g.to_bits(), w.to_bits(), "{label}: y[{i}]");
                     }
                 }
             }
@@ -929,157 +837,17 @@ fn m3_state_pass_fused_matches_separate_bits() {
     }
 }
 
-// ─── m3_chunk_scan_fwd ─────────────────────────────────────────────────
-
-fn check_chunk_scan_fwd(dtype: WeightDtype) {
-    let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = make_m3k(&ctx);
-
-    let x_vals = det_rand(B * T * D_INNER, 0x8C31);
-    let q_vals = det_rand(B * T * NH * DS, 0x8C32);
-    let ks_vals = det_rand(B * T * NH * DS, 0x8C33);
-    let qk_vals = det_rand(B * T * NH, 0x8C34);
-    let da_vals: Vec<f32> = (0..B * N_CHUNKS * NH * CHUNK_SIZE)
-        .map(|i| -0.02 * (i as f32 % 4.0 + 1.0))
-        .collect();
-    let prev_vals = det_rand(B * N_CHUNKS * NH * HD * DS, 0x8C35);
-    let d_vals: Vec<f32> = (0..NH).map(|i| 0.5 + 0.1 * (i as f32)).collect();
-
-    let x_f32 = upload_f32(&ctx, &x_vals);
-    let q_f32 = upload_f32(&ctx, &q_vals);
-    let ks_f32_buf = upload_f32(&ctx, &ks_vals);
-    let qk_buf = upload_f32(&ctx, &qk_vals);
-    let da_buf = upload_f32(&ctx, &da_vals);
-    let prev_buf = upload_f32(&ctx, &prev_vals);
-    let d_buf = upload_f32(&ctx, &d_vals);
-
-    let y_n = B * T * D_INNER;
-
-    // f32 oracle.
-    let y_f32 = GpuBuffer::zeros(&ctx.stream, y_n).unwrap();
-    ctx.stream.synchronize().unwrap();
-    let cfg = LaunchConfig {
-        grid_dim: ((B * N_CHUNKS) as u32, NH as u32, 1),
-        block_dim: (HD as u32, 1, 1),
-        shared_mem_bytes: 0,
-    };
-    let (bi, ti, nhi, hdi, dsi, csi) = (
-        B as i32,
-        T as i32,
-        NH as i32,
-        HD as i32,
-        DS as i32,
-        CHUNK_SIZE as i32,
-    );
-    for (y_first, cfg) in y_runs(cfg) {
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd.i32);
-        let (a, b, c, d, e, f, g, h) = (
-            y_f32.cached_ptr(),
-            x_f32.cached_ptr(),
-            q_f32.cached_ptr(),
-            ks_f32_buf.cached_ptr(),
-            qk_buf.cached_ptr(),
-            da_buf.cached_ptr(),
-            prev_buf.cached_ptr(),
-            d_buf.cached_ptr(),
-        );
-        bld.arg(&a);
-        bld.arg(&b);
-        bld.arg(&c);
-        bld.arg(&d);
-        bld.arg(&e);
-        bld.arg(&f);
-        bld.arg(&g);
-        bld.arg(&h);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&hdi);
-        bld.arg(&dsi);
-        bld.arg(&csi);
-        bld.arg(&y_first);
-        bld.arg(&0u64);
-        unsafe { bld.launch(cfg) }.unwrap();
-    }
-    ctx.stream.synchronize().unwrap();
-    let y_ref = download_f32(&ctx, &y_f32, y_n);
-
-    // Typed variant.
-    let x_t = upload_typed(&ctx, &x_vals, dtype);
-    let q_t = upload_typed(&ctx, &q_vals, dtype);
-    let ks_t = upload_typed(&ctx, &ks_vals, dtype);
-    let y_t = DtypedBuf::zeros(&ctx.stream, y_n, dtype).unwrap();
-    ctx.stream.synchronize().unwrap();
-    for (y_first, cfg) in y_runs(cfg) {
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.m3_chunk_scan_fwd_typed.i32.get(dtype));
-        let (a, b, c, d, e, f, g, h) = (
-            y_t.cached_ptr(),
-            x_t.cached_ptr(),
-            q_t.cached_ptr(),
-            ks_t.cached_ptr(),
-            qk_buf.cached_ptr(),
-            da_buf.cached_ptr(),
-            prev_buf.cached_ptr(),
-            d_buf.cached_ptr(),
-        );
-        bld.arg(&a);
-        bld.arg(&b);
-        bld.arg(&c);
-        bld.arg(&d);
-        bld.arg(&e);
-        bld.arg(&f);
-        bld.arg(&g);
-        bld.arg(&h);
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&hdi);
-        bld.arg(&dsi);
-        bld.arg(&csi);
-        bld.arg(&y_first);
-        bld.arg(&0u64);
-        unsafe { bld.launch(cfg) }.unwrap();
-    }
-    ctx.stream.synchronize().unwrap();
-    let y_got = download_typed(&ctx, &y_t);
-
-    eprintln!("m3_chunk_scan_fwd {dtype:?}:");
-    let (cos_min, norm_tol) = tolerances(dtype);
-    assert_close("y_out", &y_ref, &y_got, cos_min, norm_tol);
-}
-
-#[test]
-fn m3_chunk_scan_fwd_bf16() {
-    check_chunk_scan_fwd(WeightDtype::Bf16);
-}
-#[test]
-fn m3_chunk_scan_fwd_f16() {
-    check_chunk_scan_fwd(WeightDtype::F16);
-}
-
 // ─── the cooperative scan's class ──────────────────────────────────────
 
-/// The cooperative scan keeps the shapes whose tile fits 48 KB, whatever
-/// the block's budget: it rounds the output's last terms differently from
-/// the static-tile kernel, so a shape between 48 KB and the budget (a head
-/// of 100 over 24 states, 58 KB) stays on the static tiles and keeps its
-/// bits, and the serve shape stays cooperative.
+/// The cooperative scan keeps the shapes whose tile fits 48 KB and no more:
+/// it rounds the output's last terms differently from the static-tile
+/// kernel whose arithmetic the sliced scan keeps, so a shape past that tile
+/// (a head of 100 over 24 states, 58 KB) runs sliced and keeps its bits,
+/// and the serve shape stays cooperative.
 #[test]
-fn the_cooperative_scan_keeps_its_48_kb_shapes_under_any_budget() {
-    for smem in [64 * 1024, 99 * 1024, 227 * 1024] {
-        let limits = ChunkLimits {
-            threads: 1024,
-            smem,
-        };
-        let (coop, _) = chunk_scan_cfg(4, 8, 24, 100, 24, 64, limits);
-        assert!(
-            !coop,
-            "budget {smem}: hd 100 ds 24 stays on the static tiles"
-        );
-        let (coop, _) = chunk_scan_cfg(1, 73, 48, 16, 16, 64, limits);
-        assert!(coop, "budget {smem}: the serve shape stays cooperative");
-    }
+fn the_cooperative_scan_keeps_its_48_kb_shapes() {
+    assert!(chunk_scan_coop_cfg(4, 8, 24, 100, 24, 64).is_none());
+    assert!(chunk_scan_coop_cfg(1, 73, 48, 16, 16, 64).is_some());
+    assert_eq!(chunk_scan_cfg(4, 8, 24, 100, 24, 64).0, ChunkArm::Sliced);
+    assert_eq!(chunk_scan_cfg(1, 73, 48, 16, 16, 64).0, ChunkArm::Whole);
 }
