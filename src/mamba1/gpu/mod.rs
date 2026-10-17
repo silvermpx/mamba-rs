@@ -6,12 +6,14 @@
 //! - `forward`, `backward`, `forward_mixed`, `backward_mixed`: the f32 and
 //!   the mixed-precision training passes
 //! - `conv`: the depthwise conv launches they share, at any width
+//! - `bc_gather`: the B and C column gather the scans read
 //! - `mlp`: the gated MLP after the mixer, on every path
 //! - `trainer`, `training_graph`: the training step and its captured graph
 //! - `weights`, `weights_mixed_train`: device weights
 
 pub mod backward;
 pub mod backward_mixed;
+pub(crate) mod bc_gather;
 pub(crate) mod conv;
 pub mod forward;
 pub mod forward_mixed;

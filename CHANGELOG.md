@@ -671,6 +671,17 @@
   with the tiles held to it. `Mamba2Kernels::chunk_scan` is gone, and
   `chunk_scan_tiles_smem_bytes` is the constant
   `CHUNK_SCAN_TILES_SMEM_BYTES`.
+- The Mamba-1 B and C gather that feeds the parallel scan stages 32 tokens
+  of 64 state indices a block (`launch::GBC_SLICE_N`), so its shared memory
+  stays under 17 KB at every d_state, and every t-major route takes it: the
+  training forward and backward wrote those rows a thread an element, one
+  32-byte sector apart, and the prefill did so past 186 states. A copy, so
+  every value keeps its bits. The f32 paths launch the typed kernels' f32
+  instances, and the untyped and the untiled gathers are gone from
+  `MambaKernels` (`gather_bc_cols`, `gather_bc_cols_tmajor`,
+  `gather_bc_cols_tmajor_tiled`, `gather_bc_cols_tmajor_typed`). The scan
+  backward's fold kernels opt in to all the shared memory the device
+  allows, where they took a fixed 66 KB.
 
 ### Fixed
 

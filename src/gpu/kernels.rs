@@ -204,15 +204,6 @@ pub struct MambaKernels {
     pub exp_negate2: CudaFunction,
     /// Gather columns from a wide matrix into a contiguous buffer.
     pub gather_cols: CudaFunction,
-    /// Gather B and C columns from xdbl output.
-    pub gather_bc_cols: CudaFunction,
-    /// T-major twin (`[b][n][t]` outputs) for the parallel-scan route —
-    /// the scan reads B/C per (d, n) lane over consecutive t.
-    pub gather_bc_cols_tmajor: CudaFunction,
-    /// Staged-write twin of the t-major gather: smem transpose tile, writes
-    /// t-contiguous. Falls back to the untiled kernel when the tile exceeds
-    /// the 48 KB static smem budget (f32 at d_state > 186).
-    pub gather_bc_cols_tmajor_tiled: CudaFunction,
     /// Gating forward that recomputes SiLU(gate) from the in_proj output's
     /// gate half, read through a row stride.
     pub gate_mul_silu: CudaFunction,
@@ -304,10 +295,11 @@ pub struct MambaKernels {
     pub elementwise_mul_typed: TypedKernel,
     pub residual_add_typed: TypedKernel,
     pub gather_cols_typed: TypedKernel,
+    /// The B and C columns of the x projection rows, row-major, for the
+    /// sequential scan.
     pub gather_bc_cols_typed: TypedKernel,
-    /// T-major twin of the typed gather (parallel-scan route).
-    pub gather_bc_cols_tmajor_typed: TypedKernel,
-    /// Staged-write twin of the typed t-major gather.
+    /// The same columns t-major for the parallel scan, staged through
+    /// shared memory a slice of states a block, for every d_state.
     pub gather_bc_cols_tmajor_tiled_typed: TypedKernel,
     /// Typed gating forward recomputing SiLU(gate).
     pub gate_mul_silu_typed: TypedKernel,
@@ -385,8 +377,8 @@ pub struct MambaKernels {
     pub ssm_parallel_bwd_typed: ByIndexWidth<TypedKernel>,
     /// d-group fold variant: each block folds SCAN_BWD_DGROUP d lanes'
     /// dB/dC terms and writes one partial row per group. Used when
-    /// d_inner is divisible by the group size; f32 staging needs the
-    /// MAX_DYNAMIC_SHARED opt-in (~65 KB).
+    /// d_inner is divisible by the group size; opted in to the device's
+    /// shared memory, since its stage passes 48 KB.
     pub ssm_parallel_bwd_fold_typed: ByIndexWidth<TypedKernel>,
     ssm_parallel_bwd_fold_short_typed: Option<HalfKernel>,
     ssm_parallel_bwd_fold_staged_typed: Option<HalfKernel>,
@@ -1590,9 +1582,6 @@ impl MambaKernels {
             exp_negate: get("exp_negate")?,
             exp_negate2: get("exp_negate2")?,
             gather_cols: get("gather_cols")?,
-            gather_bc_cols: get("gather_bc_cols")?,
-            gather_bc_cols_tmajor: get("gather_bc_cols_tmajor")?,
-            gather_bc_cols_tmajor_tiled: get("gather_bc_cols_tmajor_tiled")?,
             gate_mul_silu: get("gate_mul_silu")?,
             gating_backward: get("gating_backward")?,
             residual_add: get("residual_add")?,
@@ -1641,37 +1630,35 @@ impl MambaKernels {
                 },
             },
             ssm_parallel_bwd_typed: load_widths("ssm_parallel_scan_bwd")?,
+            // The fold stages its group's delta, u and dy beside its f32
+            // workspace, past the 48 KB a block takes without opting in (54
+            // KB at 256 states); every fold kernel opts in to all the
+            // device allows, which on every supported part holds it.
             ssm_parallel_bwd_fold_typed: {
                 let k = load_widths("ssm_parallel_scan_bwd_fold")?;
-                // The f32 delta/u/dy stage is ~49 KB on top of the ~16 KB
-                // f32 workspace — past the 48 KB static cap.
                 for f in [&k.i32, &k.i64]
                     .into_iter()
                     .flat_map(|w| [&w.f32, &w.bf16, &w.f16])
                 {
-                    f.set_attribute(
-                        cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                        67_584,
-                    )
-                    .map_err(|e| {
-                        format!("set MAX_DYNAMIC_SHARED for scan_bwd_fold: {e:?}")
-                    })?;
+                    super::launch::opt_in_dynamic_smem(f, optin, "scan backward fold")?;
                 }
                 k
             },
             ssm_parallel_bwd_fold_short_typed: if fold_transport_admitted {
-                Some(load_half_dynsmem(
-                    "ssm_parallel_scan_bwd_fold_short",
-                    67_584,
-                )?)
+                let k = load_half("ssm_parallel_scan_bwd_fold_short")?;
+                for f in [&k.bf16, &k.f16] {
+                    super::launch::opt_in_dynamic_smem(f, optin, "short scan backward fold")?;
+                }
+                Some(k)
             } else {
                 None
             },
             ssm_parallel_bwd_fold_staged_typed: if fold_transport_admitted {
-                Some(load_half_dynsmem(
-                    "ssm_parallel_scan_bwd_fold_staged",
-                    67_584,
-                )?)
+                let k = load_half("ssm_parallel_scan_bwd_fold_staged")?;
+                for f in [&k.bf16, &k.f16] {
+                    super::launch::opt_in_dynamic_smem(f, optin, "staged scan backward fold")?;
+                }
+                Some(k)
             } else {
                 None
             },
@@ -1828,7 +1815,6 @@ impl MambaKernels {
             residual_add_typed: load_typed("residual_add")?,
             gather_cols_typed: load_typed("gather_cols")?,
             gather_bc_cols_typed: load_typed("gather_bc_cols")?,
-            gather_bc_cols_tmajor_typed: load_typed("gather_bc_cols_tmajor")?,
             gather_bc_cols_tmajor_tiled_typed: load_typed("gather_bc_cols_tmajor_tiled")?,
             gate_mul_silu_typed: load_typed("gate_mul_silu")?,
             gate_mul_silu_v_typed: load_typed("gate_mul_silu_v")?,

@@ -17,6 +17,7 @@
 //!
 //! Reference: `docs/training-mixed-precision.md` for the full design.
 
+use super::bc_gather::BcGather;
 use std::sync::Arc;
 
 use cudarc::driver::PushKernelArg;
@@ -686,39 +687,19 @@ pub fn gpu_forward_mamba_backbone_mixed(
         // rounding the deleted copy pass produced) and write the
         // post-softplus save the backward replays from.
 
-        // F4d: gather_bc_cols_typed → b_buf, c_buf; ssm_burnin_forward typed.
-        {
-            let bt_i = bt as i32;
-            let xdbl_i = xdbl_dim as i32;
-            let ds_i = ds as i32;
-            let b_off = dt_rank as i32;
-            let c_off = (dt_rank + ds) as i32;
-            // Parallel route gathers T-major (see the f32 twin note).
-            let tmajor = dims.scan_mode.use_parallel(t, ds);
-            let kernel = if tmajor {
-                k.gather_bc_cols_tmajor_typed.get(dt)
-            } else {
-                k.gather_bc_cols_typed.get(dt)
-            };
-            let t_i = t as i32;
-            let mut bld = ctx.stream.launch_builder(kernel);
-            let bb = scratch.b_buf.cached_ptr();
-            let cb = scratch.c_buf.cached_ptr();
-            let xd = layer_acts.xdbl.cached_ptr();
-            bld.arg(&bb);
-            bld.arg(&cb);
-            bld.arg(&xd);
-            bld.arg(&bt_i);
-            if tmajor {
-                bld.arg(&t_i);
-            }
-            bld.arg(&xdbl_i);
-            bld.arg(&ds_i);
-            bld.arg(&b_off);
-            bld.arg(&c_off);
-            unsafe { bld.launch(grid_1d_wide(bt * ds)) }
-                .map_err(|e| format!("gather_bc_cols typed L{layer_idx}: {e:?}"))?;
+        // F4d: B and C into b_buf, c_buf, t-major on the parallel route.
+        BcGather {
+            dst_b: scratch.b_buf.cached_ptr(),
+            dst_c: scratch.c_buf.cached_ptr(),
+            src: layer_acts.xdbl.cached_ptr(),
+            batch: b,
+            seq: t,
+            src_stride: xdbl_dim,
+            d_state: ds,
+            b_offset: dt_rank,
         }
+        .launch(ctx, dt, dims.scan_mode.use_parallel(t, ds))
+        .map_err(|e| format!("typed L{layer_idx}: {e}"))?;
         // SSM forward: parallel prefix scan for T > PARALLEL_SCAN_THRESHOLD
         // or ds > 64 (matches f32 path dispatch in forward.rs:544). Typed
         // variants keep scan state + h_saved + smem f32

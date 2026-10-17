@@ -16,6 +16,7 @@
 //!
 //! Source: CPU reference in train/forward.rs
 
+use super::bc_gather::BcGather;
 use super::forward::{GpuMambaBackboneActs, GpuMambaLayerActs, GpuMambaScratch};
 use super::mixer_norms::{NormBackward, launch_pack_xdbl_norm_bwd};
 use super::weights::{
@@ -118,38 +119,20 @@ fn layer_backward(
     // ===================================================================
     // B3: SSM BPTT + reductions
     // ===================================================================
-    // Gather B and C from xdbl for ssm_backward_local
-    {
-        let bt_i = bt as i32;
-        let xdbl_i = xdbl_dim as i32;
-        let ds_i = ds as i32;
-        let b_offset = dt_rank as i32;
-        let c_offset = (dt_rank + ds) as i32;
-        // Fused gather B+C from xdbl (saves 1 kernel launch). The
-        // parallel route gathers T-major so the scan's per-(d, n) lane
-        // reads contiguous t-runs; identical values either way.
-        let tmajor = dims.scan_mode.use_parallel(t, ds);
-        let kernel = if tmajor {
-            &ctx.kernels.gather_bc_cols_tmajor
-        } else {
-            &ctx.kernels.gather_bc_cols
-        };
-        let t_i = t as i32;
-        let mut builder = ctx.stream.launch_builder(kernel);
-        builder.arg(scratch.d_b_reduced.inner_mut());
-        builder.arg(scratch.d_c_reduced.inner_mut());
-        builder.arg(acts.xdbl.inner());
-        builder.arg(&bt_i);
-        if tmajor {
-            builder.arg(&t_i);
-        }
-        builder.arg(&xdbl_i);
-        builder.arg(&ds_i);
-        builder.arg(&b_offset);
-        builder.arg(&c_offset);
-        unsafe { builder.launch(grid_1d_wide(bt * ds)) }
-            .map_err(|e| format!("gather_bc_cols bwd mamba: {:?}", e))?;
+    // B and C from xdbl for the scan backward, t-major on the parallel
+    // route.
+    BcGather {
+        dst_b: scratch.d_b_reduced.cached_ptr(),
+        dst_c: scratch.d_c_reduced.cached_ptr(),
+        src: acts.xdbl.cached_ptr(),
+        batch: b,
+        seq: t,
+        src_stride: xdbl_dim,
+        d_state: ds,
+        b_offset: dt_rank,
     }
+    .launch(ctx, WeightDtype::F32, dims.scan_mode.use_parallel(t, ds))
+    .map_err(|e| format!("bwd mamba: {e}"))?;
 
     // No zeroing on either route now: the SEQUENTIAL kernel `=`-stores
     // the full domain from a register accumulator, and the PARALLEL fold

@@ -17,6 +17,7 @@
 //! (tests/gpu_inference_prefill_parity.rs).
 
 use super::backward::{GpuMambaTargetMixedScratch, GpuMambaTargetScratch};
+use super::bc_gather::BcGather;
 use super::forward::GpuMambaDims;
 use super::inference::MambaGpuState;
 use super::mixer_norms::launch_bcdt_norm;
@@ -767,62 +768,20 @@ fn prefill_body<W: MambaWeightsView>(
                 .map_err(|e| format!("softplus prefill L{layer_idx}: {e:?}"))?;
         }
 
-        // F4d: gather B/C + SSM burnin nosave (sequential for T ≤ 256, parallel otherwise)
-        {
-            let bt_i = bt as i32;
-            let xdbl_i = xdbl_dim as i32;
-            let ds_i = ds as i32;
-            let b_offset = dt_rank as i32;
-            let c_offset = (dt_rank + ds) as i32;
-            // Parallel route gathers T-major (matches the scan kernels).
-            // The staged tile writes t-contiguous instead of scattering one
-            // sector per element; identical bytes, so bit-free. Falls back
-            // to the untiled kernel past the 48 KB static smem budget.
-            let tmajor = dims.scan_mode.use_parallel(t, ds);
-            let tile_smem =
-                2 * ds * (crate::gpu::launch::GBC_TILE_T + 1) * std::mem::size_of::<f32>();
-            let t_i = t as i32;
-            if tmajor && tile_smem <= 48 * 1024 {
-                let cfg =
-                    crate::gpu::launch::grid_gather_bc_tiled(b, t, ds, std::mem::size_of::<f32>());
-                for (y_first, cfg) in y_runs(cfg) {
-                    let mut builder = ctx
-                        .stream
-                        .launch_builder(&ctx.kernels.gather_bc_cols_tmajor_tiled);
-                    builder.arg(scratch.b_gathered.inner_mut());
-                    builder.arg(scratch.c_gathered.inner_mut());
-                    builder.arg(scratch.xdbl.inner());
-                    builder.arg(&t_i);
-                    builder.arg(&xdbl_i);
-                    builder.arg(&ds_i);
-                    builder.arg(&b_offset);
-                    builder.arg(&c_offset);
-                    builder.arg(&y_first);
-                    unsafe { builder.launch(cfg) }
-                        .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
-                }
-            } else {
-                let kernel = if tmajor {
-                    &ctx.kernels.gather_bc_cols_tmajor
-                } else {
-                    &ctx.kernels.gather_bc_cols
-                };
-                let mut builder = ctx.stream.launch_builder(kernel);
-                builder.arg(scratch.b_gathered.inner_mut());
-                builder.arg(scratch.c_gathered.inner_mut());
-                builder.arg(scratch.xdbl.inner());
-                builder.arg(&bt_i);
-                if tmajor {
-                    builder.arg(&t_i);
-                }
-                builder.arg(&xdbl_i);
-                builder.arg(&ds_i);
-                builder.arg(&b_offset);
-                builder.arg(&c_offset);
-                unsafe { builder.launch(grid_1d_wide(bt * ds)) }
-                    .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
-            }
+        // F4d: gather B/C, t-major on the parallel route, then the SSM
+        // burnin nosave (sequential for T <= 256, parallel otherwise).
+        BcGather {
+            dst_b: scratch.b_gathered.cached_ptr(),
+            dst_c: scratch.c_gathered.cached_ptr(),
+            src: scratch.xdbl.cached_ptr(),
+            batch: b,
+            seq: t,
+            src_stride: xdbl_dim,
+            d_state: ds,
+            b_offset: dt_rank,
         }
+        .launch(ctx, WeightDtype::F32, dims.scan_mode.use_parallel(t, ds))
+        .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e}"))?;
         {
             let b_i = b as i32;
             let t_i = t as i32;
@@ -1370,61 +1329,20 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                 .map_err(|e| format!("softplus prefill L{layer_idx}: {e:?}"))?;
         }
 
-        // F4d: gather_bc_cols typed + ssm_burnin_nosave typed.
-        {
-            let bt_i = bt as i32;
-            let xdbl_i = xdbl_dim as i32;
-            let ds_i = ds as i32;
-            let b_offset = dt_rank as i32;
-            let c_offset = (dt_rank + ds) as i32;
-            // Parallel route gathers T-major (matches the scan kernels);
-            // staged tile when it fits, same fallback rule as the f32 chain.
-            let tmajor = dims.scan_mode.use_parallel(t, ds);
-            let tile_smem = 2 * ds * (crate::gpu::launch::GBC_TILE_T + 1) * dt.size_bytes();
-            let tm_i = t as i32;
-            let bb_ptr = scratch.b_gathered.cached_ptr();
-            let cb_ptr = scratch.c_gathered.cached_ptr();
-            let xdbl_ptr = scratch.xdbl.cached_ptr();
-            if tmajor && tile_smem <= 48 * 1024 {
-                let cfg = crate::gpu::launch::grid_gather_bc_tiled(b, t, ds, dt.size_bytes());
-                for (y_first, cfg) in y_runs(cfg) {
-                    let mut bld = ctx
-                        .stream
-                        .launch_builder(k.gather_bc_cols_tmajor_tiled_typed.get(dt));
-                    bld.arg(&bb_ptr);
-                    bld.arg(&cb_ptr);
-                    bld.arg(&xdbl_ptr);
-                    bld.arg(&tm_i);
-                    bld.arg(&xdbl_i);
-                    bld.arg(&ds_i);
-                    bld.arg(&b_offset);
-                    bld.arg(&c_offset);
-                    bld.arg(&y_first);
-                    unsafe { bld.launch(cfg) }
-                        .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
-                }
-            } else {
-                let kernel = if tmajor {
-                    k.gather_bc_cols_tmajor_typed.get(dt)
-                } else {
-                    k.gather_bc_cols_typed.get(dt)
-                };
-                let mut bld = ctx.stream.launch_builder(kernel);
-                bld.arg(&bb_ptr);
-                bld.arg(&cb_ptr);
-                bld.arg(&xdbl_ptr);
-                bld.arg(&bt_i);
-                if tmajor {
-                    bld.arg(&tm_i);
-                }
-                bld.arg(&xdbl_i);
-                bld.arg(&ds_i);
-                bld.arg(&b_offset);
-                bld.arg(&c_offset);
-                unsafe { bld.launch(grid_1d_wide(bt * ds)) }
-                    .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
-            }
+        // F4d: gather B/C typed, t-major on the parallel route, then the
+        // typed ssm_burnin_nosave.
+        BcGather {
+            dst_b: scratch.b_gathered.cached_ptr(),
+            dst_c: scratch.c_gathered.cached_ptr(),
+            src: scratch.xdbl.cached_ptr(),
+            batch: b,
+            seq: t,
+            src_stride: xdbl_dim,
+            d_state: ds,
+            b_offset: dt_rank,
         }
+        .launch(ctx, dt, dims.scan_mode.use_parallel(t, ds))
+        .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e}"))?;
         {
             let b_i = b as i32;
             let t_i = t as i32;

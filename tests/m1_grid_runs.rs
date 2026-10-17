@@ -476,11 +476,7 @@ fn the_tiled_bc_gather_gives_sequences_past_the_y_extent_their_own_bits() {
     for dt in [WeightDtype::F32, WeightDtype::Bf16] {
         let es = dt.size_bytes();
         let src = typed(&ctx, &det(b * t * stride, 95, 1.0), dt);
-        let f = if dt == WeightDtype::F32 {
-            &k.gather_bc_cols_tmajor_tiled
-        } else {
-            k.gather_bc_cols_tmajor_tiled_typed.get(dt)
-        };
+        let f = k.gather_bc_cols_tmajor_tiled_typed.get(dt);
         let run = |src0: u64, nb: usize| {
             let n = nb * ds * t;
             let (bo, co) = (
@@ -515,6 +511,76 @@ fn the_tiled_bc_gather_gives_sequences_past_the_y_extent_their_own_bits() {
         assert!(big.0[at..] == own.0[..], "{dt:?}: B rows");
         assert!(big.1[at..] == own.1[..], "{dt:?}: C rows");
     }
+}
+
+/// The staged t-major B and C gather at every kind of state width: inside
+/// one slice of states, a whole slice, past it by one, the width the
+/// unsliced tile could no longer stage in 48 KB (187), and several slices
+/// with a ragged last one, over windows that end inside a token tile, in
+/// f32, bf16 and f16. Every value lands at its t-major place, bit for bit
+/// the x projection's.
+#[test]
+fn the_tiled_bc_gather_writes_every_state_width_t_major() {
+    let device = GpuDevice::new(0).expect("open CUDA device");
+    let ctx = GpuCtx::new(&device).expect("context");
+    let st = &ctx.stream;
+    let k = &ctx.kernels;
+    let b_off = 3usize;
+    let mut cases = 0;
+    for (b, t, ds) in [
+        (1usize, 1usize, 1usize),
+        (2, 33, 16),
+        (2, 70, 64),
+        (3, 31, 65),
+        (1, 100, 187),
+        (2, 45, 300),
+    ] {
+        let stride = b_off + 2 * ds + 5;
+        for dt in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+            let es = dt.size_bytes();
+            let src = typed(&ctx, &det(b * t * stride, 96, 1.0), dt);
+            let n = b * ds * t;
+            let (bo, co) = (
+                DtypedBuf::zeros(st, n, dt).expect("b"),
+                DtypedBuf::zeros(st, n, dt).expect("c"),
+            );
+            poison(st, bo.cached_ptr(), n * es);
+            poison(st, co.cached_ptr(), n * es);
+            launch_runs(
+                &ctx,
+                k.gather_bc_cols_tmajor_tiled_typed.get(dt),
+                grid_gather_bc_tiled(b, t, ds, es),
+                &[
+                    Arg::P(bo.cached_ptr()),
+                    Arg::P(co.cached_ptr()),
+                    Arg::P(src.cached_ptr()),
+                    Arg::I(t as i32),
+                    Arg::I(stride as i32),
+                    Arg::I(ds as i32),
+                    Arg::I(b_off as i32),
+                    Arg::I((b_off + ds) as i32),
+                ],
+            );
+            let rows = read(st, src.cached_ptr(), b * t * stride * es);
+            let (gb, gc) = (
+                read(st, bo.cached_ptr(), n * es),
+                read(st, co.cached_ptr(), n * es),
+            );
+            for (bb, nn, tt) in
+                (0..b).flat_map(|bb| (0..ds).flat_map(move |nn| (0..t).map(move |tt| (bb, nn, tt))))
+            {
+                let dst = ((bb * ds + nn) * t + tt) * es;
+                let row = ((bb * t + tt) * stride + b_off + nn) * es;
+                assert!(
+                    gb[dst..dst + es] == rows[row..row + es]
+                        && gc[dst..dst + es] == rows[row + ds * es..row + (ds + 1) * es],
+                    "{dt:?} B {b} T {t} ds {ds}: sequence {bb} state {nn} token {tt}"
+                );
+            }
+            cases += 1;
+        }
+    }
+    eprintln!("t-major B/C gather: every value in place on {cases} cases");
 }
 
 /// The per-sequence column sum over sequences past the grid's y extent:

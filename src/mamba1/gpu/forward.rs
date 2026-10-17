@@ -17,6 +17,7 @@
 //! Source: CPU reference in train/forward.rs
 
 use super::backward::GpuMambaTargetScratch;
+use super::bc_gather::BcGather;
 use super::mixer_norms::launch_bcdt_norm;
 use super::weights::{GpuMambaTrainLayerWeights, GpuMambaTrainWeights};
 use crate::bidi::{opens_pair, reads_reversed};
@@ -672,37 +673,20 @@ fn layer_forward(
     //
     // For now, use a lightweight approach: launch gather_cols for B and C into d_b_reduced/d_c_reduced
     // (reusing scratch buffers that have the right size [B*T*d_state]).
-    // Fused gather B+C from xdbl (saves 1 kernel launch vs 2 separate gather_cols)
-    {
-        let bt_i = bt as i32;
-        let xdbl_i = xdbl_dim as i32;
-        let ds_i = ds as i32;
-        let b_offset = dt_rank as i32;
-        let c_offset = (dt_rank + ds) as i32;
-        // Parallel route gathers T-major so the scan's per-(d, n) lane
-        // reads contiguous t-runs; identical values either way.
-        let tmajor = dims.scan_mode.use_parallel(t, ds);
-        let kernel = if tmajor {
-            &ctx.kernels.gather_bc_cols_tmajor
-        } else {
-            &ctx.kernels.gather_bc_cols
-        };
-        let t_i = t as i32;
-        let mut builder = ctx.stream.launch_builder(kernel);
-        builder.arg(scratch.d_b_reduced.inner_mut());
-        builder.arg(scratch.d_c_reduced.inner_mut());
-        builder.arg(acts.xdbl.inner());
-        builder.arg(&bt_i);
-        if tmajor {
-            builder.arg(&t_i);
-        }
-        builder.arg(&xdbl_i);
-        builder.arg(&ds_i);
-        builder.arg(&b_offset);
-        builder.arg(&c_offset);
-        unsafe { builder.launch(grid_1d_wide(bt * ds)) }
-            .map_err(|e| format!("gather_bc_cols fwd mamba: {:?}", e))?;
+    // B and C from xdbl, t-major on the parallel route so the scan's
+    // per-(d, n) lane reads contiguous t-runs.
+    BcGather {
+        dst_b: scratch.d_b_reduced.cached_ptr(),
+        dst_c: scratch.d_c_reduced.cached_ptr(),
+        src: acts.xdbl.cached_ptr(),
+        batch: b,
+        seq: t,
+        src_stride: xdbl_dim,
+        d_state: ds,
+        b_offset: dt_rank,
     }
+    .launch(ctx, WeightDtype::F32, dims.scan_mode.use_parallel(t, ds))
+    .map_err(|e| format!("fwd mamba: {e}"))?;
 
     // SSM burnin forward: the parallel prefix scan or the sequential
     // kernel, as the scan mode resolves for this window and d_state. Both
@@ -1253,35 +1237,18 @@ pub fn gpu_forward_mamba_target_burnin(
         }
 
         // === F4d: gather B/C + SSM burnin nosave ===
-        {
-            let bt_i = bt as i32;
-            let xdbl_i = xdbl_dim as i32;
-            let ds_i = ds as i32;
-            let b_offset = dt_rank as i32;
-            let c_offset = (dt_rank + ds) as i32;
-            // Fused gather B+C from xdbl; T-major on the parallel route.
-            let tmajor = dims.scan_mode.use_parallel(t, ds);
-            let kernel = if tmajor {
-                &ctx.kernels.gather_bc_cols_tmajor
-            } else {
-                &ctx.kernels.gather_bc_cols
-            };
-            let t_i = t as i32;
-            let mut builder = ctx.stream.launch_builder(kernel);
-            builder.arg(scratch.b_gathered.inner_mut());
-            builder.arg(scratch.c_gathered.inner_mut());
-            builder.arg(scratch.xdbl.inner());
-            builder.arg(&bt_i);
-            if tmajor {
-                builder.arg(&t_i);
-            }
-            builder.arg(&xdbl_i);
-            builder.arg(&ds_i);
-            builder.arg(&b_offset);
-            builder.arg(&c_offset);
-            unsafe { builder.launch(grid_1d_wide(bt * ds)) }
-                .map_err(|e| format!("gather_bc_cols target L{layer_idx}: {:?}", e))?;
+        BcGather {
+            dst_b: scratch.b_gathered.cached_ptr(),
+            dst_c: scratch.c_gathered.cached_ptr(),
+            src: scratch.xdbl.cached_ptr(),
+            batch: b,
+            seq: t,
+            src_stride: xdbl_dim,
+            d_state: ds,
+            b_offset: dt_rank,
         }
+        .launch(ctx, WeightDtype::F32, dims.scan_mode.use_parallel(t, ds))
+        .map_err(|e| format!("target L{layer_idx}: {e}"))?;
         // SSM burnin nosave: the parallel or the sequential scan, as the
         // scan mode resolves for this window and d_state.
         {

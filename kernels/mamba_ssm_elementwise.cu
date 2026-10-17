@@ -127,80 +127,6 @@ DEFINE_GATING_BWD(f32,  float,         from_f_f32)
 DEFINE_GATING_BWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_GATING_BWD(f16,  __half,        from_f_f16)
 
-extern "C" __global__ void gather_bc_cols(
-    float* dst_b, float* dst_c, const float* src,
-    int batch, int src_stride, int ds, int b_offset, int c_offset
-) {
-    ELEM_LOOP(idx, (long long)batch * ds) {
-        long long b = idx / ds;
-        int d = (int)(idx % ds);
-        long long row = b * src_stride;
-        dst_b[b * ds + d] = src[row + b_offset + d];
-        dst_c[b * ds + d] = src[row + c_offset + d];
-    }
-}
-
-// T-major twin of gather_bc_cols: dst[b][n][t] instead of [b][t][n].
-// The parallel scan reads B/C per (d, n) lane over consecutive t; the
-// [t][n] layout paid one 32-byte sector per element (61% of the fwd
-// kernel by ablation). Pure permutation - identical values.
-extern "C" __global__ void gather_bc_cols_tmajor(
-    float* dst_b, float* dst_c, const float* src,
-    int bt_total, int T, int src_stride, int ds, int b_offset, int c_offset
-) {
-    ELEM_LOOP(idx, (long long)bt_total * ds) {
-        long long bt = idx / ds;
-        int d = (int)(idx % ds);
-        long long b = bt / T;
-        int t = (int)(bt % T);
-        long long row = bt * src_stride;
-        dst_b[(b * ds + d) * T + t] = src[row + b_offset + d];
-        dst_c[(b * ds + d) * T + t] = src[row + c_offset + d];
-    }
-}
-
-// Staged-write twin of gather_bc_cols_tmajor. The untiled kernel's writes
-// scatter: consecutive lanes vary n for a fixed t, so each dst element in
-// the [b][n][t] layout lands one 32-byte sector apart (32 sectors per warp
-// for 128 useful bytes). This version stages a GBC_TILE_T x d_state tile
-// through shared memory and writes t-contiguous runs per n instead. Pure
-// permutation of a copy - identical values, identical bits.
-//
-// Grid: (ceil(T / GBC_TILE_T), batch). Dynamic smem:
-// 2 * ds * (GBC_TILE_T + 1) elements (+1 pad kills bank conflicts on the
-// transposed read). The launcher falls back to the untiled kernel when
-// that exceeds the default 48 KB static budget (f32 at d_state > 186).
-#define GBC_TILE_T 32
-
-extern "C" __global__ void gather_bc_cols_tmajor_tiled(
-    float* dst_b, float* dst_c, const float* src,
-    int T, int src_stride, int ds, int b_offset, int c_offset,
-    int y_first /* this run's first y block */
-) {
-    extern __shared__ float gbc_sm[];
-    float* smb = gbc_sm;
-    float* smc = gbc_sm + ds * (GBC_TILE_T + 1);
-    long long b = y_first + blockIdx.y;
-    int t0 = blockIdx.x * GBC_TILE_T;
-    int nt = min(GBC_TILE_T, T - t0);
-    int tile_elems = nt * ds;
-    for (int idx = threadIdx.x; idx < tile_elems; idx += blockDim.x) {
-        int tt = idx / ds;
-        int d = idx % ds;
-        long long row = (b * T + t0 + tt) * src_stride;
-        smb[d * (GBC_TILE_T + 1) + tt] = src[row + b_offset + d];
-        smc[d * (GBC_TILE_T + 1) + tt] = src[row + c_offset + d];
-    }
-    __syncthreads();
-    for (int idx = threadIdx.x; idx < tile_elems; idx += blockDim.x) {
-        int d = idx / nt;
-        int tt = idx % nt;
-        long long col = (b * ds + d) * T + t0 + tt;
-        dst_b[col] = smb[d * (GBC_TILE_T + 1) + tt];
-        dst_c[col] = smc[d * (GBC_TILE_T + 1) + tt];
-    }
-}
-
 #define DEFINE_GATHER_COLS(SUFFIX, T)                                         \
 extern "C" __global__ void gather_cols_##SUFFIX(                              \
     T* dst, const T* src,                                                     \
@@ -235,29 +161,19 @@ DEFINE_GATHER_BC(f32,  float)
 DEFINE_GATHER_BC(bf16, __nv_bfloat16)
 DEFINE_GATHER_BC(f16,  __half)
 
-#define DEFINE_GATHER_BC_TMAJOR(SUFFIX, T_ACT)                                \
-extern "C" __global__ void gather_bc_cols_tmajor_##SUFFIX(                    \
-    T_ACT* dst_b, T_ACT* dst_c, const T_ACT* src,                             \
-    int bt_total, int T, int src_stride, int ds, int b_offset, int c_offset   \
-) {                                                                           \
-    ELEM_LOOP(idx, (long long)bt_total * ds) {                                \
-        long long bt = idx / ds;                                              \
-        int d = (int)(idx % ds);                                              \
-        long long b = bt / T;                                                 \
-        int t = (int)(bt % T);                                                \
-        long long row = bt * src_stride;                                      \
-        dst_b[(b * ds + d) * T + t] = src[row + b_offset + d];                \
-        dst_c[(b * ds + d) * T + t] = src[row + c_offset + d];                \
-    }                                                                         \
-}
-
-DEFINE_GATHER_BC_TMAJOR(f32,  float)
-DEFINE_GATHER_BC_TMAJOR(bf16, __nv_bfloat16)
-DEFINE_GATHER_BC_TMAJOR(f16,  __half)
-
-/* Typed twin of gather_bc_cols_tmajor_tiled (see the f32 kernel for the
- * staging rationale). Dynamic smem is raw bytes reinterpreted to T_ACT so
- * one extern declaration serves every instantiation. */
+// The B and C columns of the x projection rows, t-major ([b][n][t]) for
+// the parallel scan, which reads them per (d, n) lane over consecutive t.
+// A block stages GBC_TILE_T tokens of GBC_SLICE_N state indices through
+// shared memory and writes t-contiguous runs per n, where a thread an
+// element would scatter its writes one 32-byte sector apart. A copy, so
+// every value keeps its bits.
+//
+// Grid (ceil(T / GBC_TILE_T), batch, ceil(ds / GBC_SLICE_N)). Dynamic
+// shared memory: 2 min(ds, GBC_SLICE_N) (GBC_TILE_T + 1) elements, rows
+// padded by one so the transposed reads fall in distinct banks; 16.5 KB in
+// f32 at most, whatever d_state.
+#define GBC_TILE_T 32
+#define GBC_SLICE_N 64
 #define DEFINE_GATHER_BC_TMAJOR_TILED(SUFFIX, T_ACT)                          \
 extern "C" __global__ void gather_bc_cols_tmajor_tiled_##SUFFIX(              \
     T_ACT* dst_b, T_ACT* dst_c, const T_ACT* src,                             \
@@ -265,24 +181,26 @@ extern "C" __global__ void gather_bc_cols_tmajor_tiled_##SUFFIX(              \
     int y_first /* this run's first y block */                                \
 ) {                                                                           \
     extern __shared__ unsigned char gbc_sm_raw[];                             \
+    const int n0 = blockIdx.z * GBC_SLICE_N;                                  \
+    const int ns = min(GBC_SLICE_N, ds - n0);                                 \
     T_ACT* smb = (T_ACT*)gbc_sm_raw;                                          \
-    T_ACT* smc = smb + ds * (GBC_TILE_T + 1);                                 \
+    T_ACT* smc = smb + ns * (GBC_TILE_T + 1);                                 \
     long long b = y_first + blockIdx.y;                                       \
     int t0 = blockIdx.x * GBC_TILE_T;                                         \
     int nt = min(GBC_TILE_T, T - t0);                                         \
-    int tile_elems = nt * ds;                                                 \
+    int tile_elems = nt * ns;                                                 \
     for (int idx = threadIdx.x; idx < tile_elems; idx += blockDim.x) {        \
-        int tt = idx / ds;                                                    \
-        int d = idx % ds;                                                     \
-        long long row = (b * T + t0 + tt) * src_stride;                       \
-        smb[d * (GBC_TILE_T + 1) + tt] = src[row + b_offset + d];             \
-        smc[d * (GBC_TILE_T + 1) + tt] = src[row + c_offset + d];             \
+        int tt = idx / ns;                                                    \
+        int d = idx % ns;                                                     \
+        long long row = (b * T + t0 + tt) * src_stride + n0 + d;              \
+        smb[d * (GBC_TILE_T + 1) + tt] = src[row + b_offset];                 \
+        smc[d * (GBC_TILE_T + 1) + tt] = src[row + c_offset];                 \
     }                                                                         \
     __syncthreads();                                                          \
     for (int idx = threadIdx.x; idx < tile_elems; idx += blockDim.x) {        \
         int d = idx / nt;                                                     \
         int tt = idx % nt;                                                    \
-        long long col = (b * ds + d) * T + t0 + tt;                           \
+        long long col = (b * ds + n0 + d) * T + t0 + tt;                      \
         dst_b[col] = smb[d * (GBC_TILE_T + 1) + tt];                          \
         dst_c[col] = smc[d * (GBC_TILE_T + 1) + tt];                          \
     }                                                                         \

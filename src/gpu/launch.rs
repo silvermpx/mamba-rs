@@ -705,14 +705,19 @@ pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
     }
 }
 
-/// Tile depth of `gather_bc_cols_tmajor_tiled` (must match GBC_TILE_T in
-/// mamba_ssm_elementwise.cu). One block per (t-tile, b); dynamic smem
-/// carries the B and C tiles at `[d_state][GBC_TILE_T + 1]` each (+1 pad
-/// kills bank conflicts on the transposed read).
+/// Tokens of a block of the staged t-major B/C gather (GBC_TILE_T in
+/// mamba_ssm_elementwise.cu).
 pub const GBC_TILE_T: usize = 32;
 
-/// Grid for the staged t-major B/C gather: the sequences on the y axis,
-/// launched in [`y_runs`].
+/// State indices of a block of the staged t-major B/C gather (GBC_SLICE_N
+/// in mamba_ssm_elementwise.cu).
+pub const GBC_SLICE_N: usize = 64;
+
+/// Grid for the staged t-major B/C gather: one block per (t-tile, sequence,
+/// slice of state indices), the sequences on the y axis, launched in
+/// [`y_runs`]. Its shared memory, the B and C tiles of a slice at
+/// `[slice][GBC_TILE_T + 1]` each (the pad keeps the transposed reads in
+/// distinct banks), is at most 16.5 KB whatever d_state.
 pub fn grid_gather_bc_tiled(
     batch: usize,
     t: usize,
@@ -720,9 +725,13 @@ pub fn grid_gather_bc_tiled(
     elem_bytes: usize,
 ) -> LaunchConfig {
     LaunchConfig {
-        grid_dim: ((t as u32).div_ceil(GBC_TILE_T as u32), batch as u32, 1),
+        grid_dim: (
+            (t as u32).div_ceil(GBC_TILE_T as u32),
+            batch as u32,
+            d_state.div_ceil(GBC_SLICE_N) as u32,
+        ),
         block_dim: (256, 1, 1),
-        shared_mem_bytes: (2 * d_state * (GBC_TILE_T + 1) * elem_bytes) as u32,
+        shared_mem_bytes: (2 * d_state.min(GBC_SLICE_N) * (GBC_TILE_T + 1) * elem_bytes) as u32,
     }
 }
 
