@@ -69,18 +69,21 @@ pub struct Mamba2BwdKernels {
     pub dhloc: TypedKernel,
     pub state_passing: CudaFunction,
     pub chunk_dot: CudaFunction,
-    pub dx: TypedKernel,
+    /// The per-token sums over a head's channels of what `dx_groups`
+    /// leaves in scratch.
     pub rowsums: TypedKernel,
-    /// `m2b_dx` and `m2b_rowsums` as one register-tile block per chunk and
+    /// dx and the token sums as one register-tile block per chunk and
     /// head, when [`dx_tiles_geom`] fits the head.
     pub dx_tiles: TypedKernel,
     /// The widest block `dx_tiles` launches, from its register use.
     pub dx_tiles_threads: usize,
+    /// dx as register tiles in groups of [`DX_GROUP_CHANNELS`] channels,
+    /// for the heads `dx_tiles` cannot hold; `rowsums` then sums the
+    /// tokens.
+    pub dx_groups: TypedKernel,
     pub pairs: TypedKernel,
-    pub db: TypedKernel,
-    pub dc: TypedKernel,
-    /// `m2b_db` and `m2b_dc` as register tiles, when
-    /// [`bc_tiles_smem_bytes`] fits.
+    /// dB and dC as register tiles, a pass of channels at a time, for
+    /// every head and state width (see [`BC_TILES_SMEM_BYTES`]).
     pub db_tiles: TypedKernel,
     pub dc_tiles: TypedKernel,
     pub combine: TypedKernel,
@@ -286,13 +289,11 @@ impl Mamba2Kernels {
                 dhloc: typed("m2b_dhloc")?,
                 state_passing: get("m2b_state_passing")?,
                 chunk_dot: get("m2b_chunk_dot")?,
-                dx: typed("m2b_dx")?,
                 rowsums: typed("m2b_rowsums")?,
                 dx_tiles,
+                dx_groups: typed("m2b_dx_groups")?,
                 dx_tiles_threads,
                 pairs: typed("m2b_pairs")?,
-                db: typed("m2b_db")?,
-                dc: typed("m2b_dc")?,
                 db_tiles: typed("m2b_db_tiles")?,
                 dc_tiles: typed("m2b_dc_tiles")?,
                 combine: typed("m2b_combine")?,
@@ -339,8 +340,6 @@ impl Mamba2Kernels {
                 (&kernels.bmm_chunk, "chunk bmm"),
                 (&kernels.chunk_state, "chunk state"),
                 (&kernels.bwd.dx_tiles, "dx tiles"),
-                (&kernels.bwd.db_tiles, "dB tiles"),
-                (&kernels.bwd.dc_tiles, "dC tiles"),
             ] {
                 for f in [&k.f32, &k.bf16, &k.f16] {
                     budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
@@ -451,13 +450,31 @@ pub fn dx_tiles_geom(hd: usize, ds: usize, cap: usize, threads: usize) -> Option
         .map(|nk| (nk, bytes(nk)))
 }
 
-/// The tiled dB and dC's shared memory for a head of `hd` channels: the
-/// head's x or dy rows transposed (padded to 68), its dS or H columns of a
-/// 32-index tile, the group's dCB `[64][64]`, the C or B rows of the tile and
-/// the rows' scales.
-pub fn bc_tiles_smem_bytes(hd: usize) -> usize {
-    ((CHUNK + 4) * hd + 32 * hd + CHUNK * CHUNK + CHUNK * 32 + CHUNK) * 4
-}
+/// Channels of a staging pass of the tiled dB and dC.
+pub const BC_TILES_PASS: usize = 32;
+
+/// The tiled dB and dC's shared memory, the same for every head and state
+/// width: a pass's x or dy rows transposed (padded to 68), its dS or H
+/// columns of a 32-index tile, the group's dCB `[64][64]`, the C or B rows
+/// of the tile and the rows' scales. Under the 48 KB every block may take,
+/// so two blocks share an SM on every part.
+pub const BC_TILES_SMEM_BYTES: usize =
+    ((CHUNK + 4) * BC_TILES_PASS + 32 * BC_TILES_PASS + CHUNK * CHUNK + CHUNK * 32 + CHUNK) * 4;
+
+/// Channels of a block of the grouped dx tiles.
+pub const DX_GROUP_CHANNELS: usize = 64;
+
+/// State indices of a staging pass of the grouped dx tiles.
+pub const DX_GROUP_STATES: usize = 16;
+
+/// The grouped dx tiles' shared memory, the same for every head and state
+/// width: a pass's B or C rows and dS or H rows, the weights `[64][64]`,
+/// the dy rows of the group `[64][64]`, the acs and dt of the chunk.
+pub const DX_GROUPS_SMEM_BYTES: usize = (DX_GROUP_STATES * (CHUNK + 4 + DX_GROUP_CHANNELS + 4)
+    + CHUNK * CHUNK
+    + CHUNK * DX_GROUP_CHANNELS
+    + 2 * CHUNK)
+    * 4;
 
 /// The tiled sequential backward's shared memory for a head: the states
 /// after and before the token and dS (each row padded by one), B and C, x
@@ -558,6 +575,15 @@ mod tests {
     fn the_chunk_scan_stage_is_the_kernel_s() {
         assert_eq!(CHUNK_SCAN_TILES_SMEM_BYTES, 37_120);
         const { assert!(CHUNK_SCAN_TILES_SMEM_BYTES <= 48 * 1024) };
+    }
+
+    /// The sliced backward tiles' stages are the kernels': 37,632 and
+    /// 41,984 bytes, inside the 48 KB a block takes without opting in.
+    #[test]
+    fn the_backward_tile_stages_are_the_kernels() {
+        assert_eq!(BC_TILES_SMEM_BYTES, 37_632);
+        assert_eq!(DX_GROUPS_SMEM_BYTES, 41_984);
+        const { assert!(BC_TILES_SMEM_BYTES <= 48 * 1024 && DX_GROUPS_SMEM_BYTES <= 48 * 1024) };
     }
 
     /// No validated state is refused for shared memory on a supported part:

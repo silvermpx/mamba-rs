@@ -682,6 +682,18 @@
   `gather_bc_cols_tmajor_tiled`, `gather_bc_cols_tmajor_typed`). The scan
   backward's fold kernels opt in to all the shared memory the device
   allows, where they took a fixed 66 KB.
+- The Mamba-2 chunked backward runs every head width on register tiles.
+  dB and dC stage a head's rows 32 channels at a time, so their shared
+  memory is 37,632 bytes whatever the shape, where the tile staged the whole
+  head (one block an SM at 64 channels on the 99 KB parts) and heads past
+  191 channels ran a thread an output. dx keeps its fused tile where a
+  block holds the head and takes tiles in groups of 64 channels past it
+  (`Mamba2BwdKernels::dx_groups`, `DX_GROUP_CHANNELS`,
+  `DX_GROUPS_SMEM_BYTES`), whose token sums `m2b_rowsums` runs, where it ran
+  a thread an output. Every output keeps the chain of the per-output
+  kernels, which stay frozen in `tests/fixtures/m2_backward_reference.cu`
+  with the tiles held to them. `Mamba2BwdKernels::dx`, `db` and `dc` are
+  gone, and `bc_tiles_smem_bytes` is the constant `BC_TILES_SMEM_BYTES`.
 
 ### Fixed
 

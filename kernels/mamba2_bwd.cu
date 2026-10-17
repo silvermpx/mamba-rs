@@ -269,116 +269,6 @@ extern "C" __global__ void m2b_chunk_dot(
     if (threadIdx.x == 0) dot[q] = red[0];
 }
 
-// dx and the per-channel terms the decay gradients need, one thread per
-// (s, p) of a chunk and head:
-//   st = B_s . dS[c][p], ci = C_s . H_c[p]      (n ascending, together)
-//   ste = st E(L-1, s); acc = ste + sum_{t>=s} (CB E(t, s)) dy_t[p]
-//   dx = acc dt_s + D dy_s[p]
-// writing dx into the x columns of dxbc and acc, ste and
-// yi = ci e^Acs_s to [B * T, d_ssm] scratch. In a packed row ste is 0 off
-// the chunk's last sequence, yi 0 past the chunk's first start, and t runs
-// over s's own sequence.
-// Grid (B * nc, H, ceil(64 * P / blockDim.x)), the chunk scan's.
-template <typename T>
-__device__ __forceinline__ void m2b_dx_body(
-    float* __restrict__ dxbc,
-    float* __restrict__ acc_out, float* __restrict__ ste_out, float* __restrict__ yi_out,
-    const float* __restrict__ dy,
-    const T* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,
-    const float* __restrict__ states, const float* __restrict__ ds_in,
-    const float* __restrict__ cb,
-    const float* __restrict__ dt, const float* __restrict__ acs,
-    const float* __restrict__ D, int d_per_channel,
-    int batch, int seq, int nh, int ng, int hd, int dstate,
-    int y_first, /* this run's first y block */
-    int z_first, /* this run's first z block */
-    const int* __restrict__ seq_idx
-) {
-    const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
-    const long long bc = blockIdx.x;
-    const int h = y_first + blockIdx.y;
-    const int e = (z_first + blockIdx.z) * blockDim.x + threadIdx.x;
-    if (bc >= (long long)batch * nc || h >= nh || e >= M2_CHUNK * hd) return;
-    const int s = e / hd;
-    const int p = e % hd;
-    const int c = (int)(bc % nc);
-    const long long b = bc / nc;
-    const int t0 = c * M2_CHUNK;
-    const int lc = min(M2_CHUNK, seq - t0);
-    if (s >= lc) return;
-    const int g = h / (nh / ng);
-    const long long d_ssm = (long long)nh * hd;
-    const long long sc = (bc * nh + h) * M2_CHUNK;
-    const long long rs = b * seq + t0 + s;
-    const long long so = ((bc * nh + h) * hd + p) * (long long)dstate;
-    float st = 0.0f, ci = 0.0f;
-    for (int n = 0; n < dstate; n++) {
-        const long long col = (long long)g * dstate + n;
-        st = __fmaf_rn(to_f(xbc[rs * ld_xbc + b_col + col]), ds_in[so + n], st);
-        ci = __fmaf_rn(to_f(xbc[rs * ld_xbc + c_col + col]), states[so + n], ci);
-    }
-    const float acs_s = acs[sc + s];
-    // The chunk state holds only its last sequence; the entering state
-    // reaches only the tokens before the chunk's first start; s's pairs end
-    // where its sequence does.
-    const int sid = vl_id(seq_idx, b, seq, t0 + s);
-    const bool in_last = sid == vl_id(seq_idx, b, seq, t0 + lc - 1);
-    const bool from_prev = sid == vl_id(seq_idx, b, seq, t0 - 1);
-    const int t_end = vl_lower_bound(seq_idx, b, seq, t0 + s, t0 + lc, sid + 1) - t0;
-    const float ste = in_last
-        ? __fmul_rn(st, m2_exp(fminf(__fsub_rn(acs[sc + lc - 1], acs_s), 0.0f)))
-        : 0.0f;
-    float acc = ste;
-    const long long cbo = (bc * ng + g) * M2B_PAIRS;
-    for (int t = s; t < t_end; t++) {
-        float wv = __fmul_rn(cb[cbo + m2b_pair(t, s)],
-                             m2_exp(fminf(__fsub_rn(acs[sc + t], acs_s), 0.0f)));
-        acc = __fmaf_rn(wv, dy[(b * seq + t0 + t) * d_ssm + (long long)h * hd + p], acc);
-    }
-    const long long o = rs * d_ssm + (long long)h * hd + p;
-    const float dv = d_per_channel ? D[(long long)h * hd + p] : D[h];
-    dxbc[rs * ld_xbc + (long long)h * hd + p] = __fmaf_rn(acc, dt[sc + s], __fmul_rn(dv, dy[o]));
-    acc_out[o] = acc;
-    ste_out[o] = ste;
-    yi_out[o] = from_prev ? __fmul_rn(ci, m2_exp(acs_s)) : 0.0f;
-}
-
-#define DEFINE_M2B_DX(NAME, T)                                                 \
-extern "C" __global__ void NAME(                                               \
-    float* __restrict__ dxbc,                                                  \
-    float* __restrict__ acc_out,                                               \
-    float* __restrict__ ste_out,                                               \
-    float* __restrict__ yi_out,                                                \
-    const float* __restrict__ dy,                                              \
-    const T* __restrict__ xbc,                                                 \
-    long long ld_xbc,                                                          \
-    int b_col,                                                                 \
-    int c_col,                                                                 \
-    const float* __restrict__ states,                                          \
-    const float* __restrict__ ds_in,                                           \
-    const float* __restrict__ cb,                                              \
-    const float* __restrict__ dt,                                              \
-    const float* __restrict__ acs,                                             \
-    const float* __restrict__ D,                                               \
-    int d_per_channel,                                                         \
-    int batch,                                                                 \
-    int seq,                                                                   \
-    int nh,                                                                    \
-    int ng,                                                                    \
-    int hd,                                                                    \
-    int dstate,                                                                \
-    int y_first, /* this run's first y block */                                \
-    int z_first, /* this run's first z block */                                \
-    const int* __restrict__ seq_idx                                            \
-) {                                                                            \
-    m2b_dx_body<T>(dxbc, acc_out, ste_out, yi_out, dy, xbc, ld_xbc, b_col,     \
-        c_col, states, ds_in, cb, dt, acs, D, d_per_channel, batch, seq,       \
-        nh, ng, hd, dstate, y_first, z_first, seq_idx);                        \
-}
-DEFINE_M2B_DX(m2b_dx, float)
-DEFINE_M2B_DX(m2b_dx_bf16, __nv_bfloat16)
-DEFINE_M2B_DX(m2b_dx_f16, __half)
-
 // The per-token sums over a head's channels, p ascending:
 //   ddt_x[t] = sum_p acc x_t,  Q_t = dt_t sum_p ste x_t,  I_t = sum_p dy yi
 // stored [B, nc, H, 64] (zero past the chunk). In a packed row Q_t is 0
@@ -457,24 +347,37 @@ DEFINE_M2B_ROWSUMS(m2b_rowsums, float)
 DEFINE_M2B_ROWSUMS(m2b_rowsums_bf16, __nv_bfloat16)
 DEFINE_M2B_ROWSUMS(m2b_rowsums_f16, __half)
 
-// m2b_dx and m2b_rowsums in one block per chunk and head, as register
-// tiles: thread (s-group, p-group) holds 4 tokens s by 4 channels p.
+// dx and the per-channel terms the decay gradients need, as register tiles
+// over a chunk and head: thread (s-group, p-group) holds 4 tokens s by 4
+// channels p.
 //   st = B_s . dS[c][p] and ci = C_s . H_c[p] run n ascending from 0 over
 //   the rows staged `nk` state indices at a time (B or C transposed [n][s],
 //   dS or H transposed [n][p]);
 //   ste = st E(L-1, s), then acc runs t = s.. ascending over the staged
-//   weights wv[t][s] = CB E(t, s) and dy rows; dx = fma(acc, dt_s, D dy_s);
-//   acc, ste and yi = ci e^Acs_s go to shared rows, where one thread per
-//   token runs the rowsums' p-ascending chains.
-// Every value is the two kernels' own chain, so the bits are theirs; a
-// packed row masks as they do.
-// Shared memory: max(nk (68 + P4 + 4), 3 * 64 (P + 1)) staging floats, then
-// wv [64][64], dy [64][P4], acs and dt [64] each; P4 = P rounded up to 4.
-// Grid (B * nc, H), block 16 ceil(P / 4) threads.
-template <typename T>
+//   weights wv[t][s] = CB E(t, s) and dy rows; dx = fma(acc, dt_s, D dy_s),
+//   written into the x columns of dxbc;
+//   acc, ste and yi = ci e^Acs_s feed the per-token sums over the head's
+//   channels, p ascending:
+//     ddt_x[t] = sum_p acc x_t,  Q_t = dt_t sum_p ste x_t,  I_t = sum_p dy yi.
+// FUSED: one block holds the whole head, 16 ceil(P / 4) threads, and puts
+// acc, ste and yi in shared rows, where a thread per token runs the sums
+// into ddtx, qv and inter (o1, o2, o3).
+// Otherwise a block holds M2DX_PC channels of the head, 256 threads, grid
+// z the channel groups, and writes acc, ste and yi to [B * T, d_ssm]
+// scratch (o1, o2, o3), whose sums m2b_rowsums runs.
+// Every value is one chain in the order of the per-output kernels these
+// replaced, so the bits are theirs; a packed row masks as they do: ste is 0
+// off the chunk's last sequence, yi 0 past the chunk's first start, and t
+// runs over s's own sequence.
+// Shared memory: the staging, nk (68 + P4 + 4) floats (fused, at least
+// 3 * 64 (P + 1) for the shared rows), then wv [64][64], dy [64][P4], acs
+// and dt [64] each; P4 = the block's channels rounded up to 4.
+// Grid (B * nc, H) fused, (B * nc, H, ceil(P / M2DX_PC)) in groups.
+#define M2DX_PC 64
+template <typename T, bool FUSED>
 __device__ __forceinline__ void m2b_dx_tiles_body(
     float* __restrict__ dxbc,
-    float* __restrict__ ddtx, float* __restrict__ qv, float* __restrict__ inter,
+    float* __restrict__ o1, float* __restrict__ o2, float* __restrict__ o3,
     const float* __restrict__ dy,
     const T* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,
     const float* __restrict__ states, const float* __restrict__ ds_in,
@@ -496,10 +399,14 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
     const int g = h / (nh / ng);
     const long long d_ssm = (long long)nh * hd;
     const long long sc = (bc * nh + h) * M2_CHUNK;
-    const int pg = (hd + 3) / 4;
+    // This block's channels: the head (fused) or a group of it.
+    const int c0 = FUSED ? 0 : blockIdx.z * M2DX_PC;
+    const int cw = FUSED ? hd : min(M2DX_PC, hd - c0);
+    const int pg = FUSED ? (hd + 3) / 4 : M2DX_PC / 4;
     const int p4 = 4 * pg;
     const int lts = M2_CHUNK + 4, rts = p4 + 4, rows = hd + 1;
-    const int stage_floats = max(nk * (lts + rts), 3 * M2_CHUNK * rows);
+    const int stage_floats =
+        FUSED ? max(nk * (lts + rts), 3 * M2_CHUNK * rows) : nk * (lts + rts);
     float* lt = reinterpret_cast<float*>(m2bt_sm4);  // [nk][lts]
     float* rt = lt + nk * lts;                        // [nk][rts]
     float* at = lt;                                   // [64][P + 1] each
@@ -530,8 +437,8 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
     m2_stage4(M2_CHUNK * p4, tid, blockDim.x,
               [&](int i) {
                   const int t = i / p4, p = i - t * p4;
-                  return t < lc && p < hd
-                      ? dy[(b * seq + t0 + t) * d_ssm + (long long)h * hd + p] : 0.0f;
+                  return t < lc && p < cw
+                      ? dy[(b * seq + t0 + t) * d_ssm + (long long)h * hd + c0 + p] : 0.0f;
               },
               [&](int i, float v) { dyt[i] = v; });
     float st[4][4], ci[4][4];
@@ -564,7 +471,7 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
             m2_stage4(p4 * mm, tid, blockDim.x,
                       [&](int i) {
                           const int p = i / mm, n = i - p * mm;
-                          return p < hd ? src[(long long)p * dstate + m0 + n] : 0.0f;
+                          return p < cw ? src[(long long)(c0 + p) * dstate + m0 + n] : 0.0f;
                       },
                       [&](int i, float v) {
                           const int p = i / mm;
@@ -638,22 +545,30 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
 #pragma unroll
         for (int j = 0; j < 4; j++) {
             const int p = p0 + j;
-            if (p >= hd) continue;
-            const float dv = d_per_channel ? D[(long long)h * hd + p] : D[h];
-            dxbc[rs * ld_xbc + (long long)h * hd + p] =
-                __fmaf_rn(acc[i][j], dt_s[s], __fmul_rn(dv, dyt[s * p4 + p]));
-            at[s * rows + p] = acc[i][j];
-            et[s * rows + p] = st[i][j];
-            yt[s * rows + p] = from_prev[i] ? __fmul_rn(ci[i][j], ea) : 0.0f;
+            if (p >= cw) continue;
+            const long long ch = (long long)h * hd + c0 + p;
+            const float dv = d_per_channel ? D[ch] : D[h];
+            dxbc[rs * ld_xbc + ch] = __fmaf_rn(acc[i][j], dt_s[s], __fmul_rn(dv, dyt[s * p4 + p]));
+            const float yi = from_prev[i] ? __fmul_rn(ci[i][j], ea) : 0.0f;
+            if (FUSED) {
+                at[s * rows + p] = acc[i][j];
+                et[s * rows + p] = st[i][j];
+                yt[s * rows + p] = yi;
+            } else {
+                o1[rs * d_ssm + ch] = acc[i][j];
+                o2[rs * d_ssm + ch] = st[i][j];
+                o3[rs * d_ssm + ch] = yi;
+            }
         }
     }
+    if (!FUSED) return;
     __syncthreads();
     for (int t = tid; t < M2_CHUNK; t += blockDim.x) {
         const long long o = sc + t;
         if (t >= lc) {
-            ddtx[o] = 0.0f;
-            qv[o] = 0.0f;
-            inter[o] = 0.0f;
+            o1[o] = 0.0f;
+            o2[o] = 0.0f;
+            o3[o] = 0.0f;
             continue;
         }
         const long long row = b * seq + t0 + t;
@@ -666,9 +581,9 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
             q = last_t ? __fmaf_rn(et[t * rows + p], x, q) : q;
             it = prev_t ? __fmaf_rn(dyt[t * p4 + p], yt[t * rows + p], it) : it;
         }
-        ddtx[o] = a;
-        qv[o] = last_t ? __fmul_rn(q, dt_s[t]) : 0.0f;
-        inter[o] = it;
+        o1[o] = a;
+        o2[o] = last_t ? __fmul_rn(q, dt_s[t]) : 0.0f;
+        o3[o] = it;
     }
 }
 
@@ -699,13 +614,52 @@ extern "C" __global__ void NAME(                                               \
     int y_first, /* this run's first y block */                                \
     const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
-    m2b_dx_tiles_body<T>(dxbc, ddtx, qv, inter, dy, xbc, ld_xbc, b_col, c_col, \
-        states, ds_in, cb, dt, acs, D, d_per_channel, seq, nh, ng, hd, dstate, \
-        nk, y_first, seq_idx);                                                 \
+    m2b_dx_tiles_body<T, true>(dxbc, ddtx, qv, inter, dy, xbc, ld_xbc, b_col, \
+        c_col, states, ds_in, cb, dt, acs, D, d_per_channel, seq, nh, ng, hd,  \
+        dstate, nk, y_first, seq_idx);                                         \
 }
 DEFINE_M2B_DX_TILES(m2b_dx_tiles, float)
 DEFINE_M2B_DX_TILES(m2b_dx_tiles_bf16, __nv_bfloat16)
 DEFINE_M2B_DX_TILES(m2b_dx_tiles_f16, __half)
+
+// The heads too wide for one block: the tiles in groups of M2DX_PC
+// channels, acc, ste and yi to scratch for m2b_rowsums; M2DX_NK state
+// indices a staging pass, so the shared memory is DX_GROUPS_SMEM_BYTES
+// whatever the shape.
+#define M2DX_NK 16
+#define DEFINE_M2B_DX_GROUPS(NAME, T)                                          \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ dxbc,                                                  \
+    float* __restrict__ acc_out,                                               \
+    float* __restrict__ ste_out,                                               \
+    float* __restrict__ yi_out,                                                \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc,                                                 \
+    long long ld_xbc,                                                          \
+    int b_col,                                                                 \
+    int c_col,                                                                 \
+    const float* __restrict__ states,                                          \
+    const float* __restrict__ ds_in,                                           \
+    const float* __restrict__ cb,                                              \
+    const float* __restrict__ dt,                                              \
+    const float* __restrict__ acs,                                             \
+    const float* __restrict__ D,                                               \
+    int d_per_channel,                                                         \
+    int seq,                                                                   \
+    int nh,                                                                    \
+    int ng,                                                                    \
+    int hd,                                                                    \
+    int dstate,                                                                \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
+) {                                                                            \
+    m2b_dx_tiles_body<T, false>(dxbc, acc_out, ste_out, yi_out, dy, xbc,       \
+        ld_xbc, b_col, c_col, states, ds_in, cb, dt, acs, D, d_per_channel,    \
+        seq, nh, ng, hd, dstate, M2DX_NK, y_first, seq_idx);                   \
+}
+DEFINE_M2B_DX_GROUPS(m2b_dx_groups, float)
+DEFINE_M2B_DX_GROUPS(m2b_dx_groups_bf16, __nv_bfloat16)
+DEFINE_M2B_DX_GROUPS(m2b_dx_groups_f16, __half)
 
 // The pair terms of a chunk and head, one thread per pair s <= t:
 //   G = dy_t . x_s (p ascending), dcb = G E(t, s) dt_s,
@@ -781,103 +735,27 @@ DEFINE_M2B_PAIRS(m2b_pairs, float)
 DEFINE_M2B_PAIRS(m2b_pairs_bf16, __nv_bfloat16)
 DEFINE_M2B_PAIRS(m2b_pairs_f16, __half)
 
-// dB of a chunk and group, one thread per (s, n): the group's heads
-// ascending (each x_s . dS[c][:, n], p ascending, times dt_s E(L-1, s)),
-// then t >= s ascending of dCB[t][s] C_t[n], where dCB sums the group's
-// heads ascending. Written into the B columns of dxbc. In a packed row the
-// first sum is 0 off the chunk's last sequence and t runs over s's own
-// sequence. Grid (B * nc, G, ceil(64 * N / blockDim.x)).
-template <typename T>
-__device__ __forceinline__ void m2b_db_body(
-    float* __restrict__ dxbc,
-    const T* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,
-    const float* __restrict__ ds_in, const float* __restrict__ dcbh,
-    const float* __restrict__ dt, const float* __restrict__ acs,
-    int batch, int seq, int nh, int ng, int hd, int dstate,
-    int y_first, /* this run's first y block */
-    const int* __restrict__ seq_idx
-) {
-    const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
-    const long long bc = blockIdx.x;
-    const int g = y_first + blockIdx.y;
-    const int e = blockIdx.z * blockDim.x + threadIdx.x;
-    if (bc >= (long long)batch * nc || g >= ng || e >= M2_CHUNK * dstate) return;
-    const int s = e / dstate;
-    const int n = e % dstate;
-    const int c = (int)(bc % nc);
-    const long long b = bc / nc;
-    const int t0 = c * M2_CHUNK;
-    const int lc = min(M2_CHUNK, seq - t0);
-    if (s >= lc) return;
-    const int hpg = nh / ng;
-    const long long rs = b * seq + t0 + s;
-    const int sid = vl_id(seq_idx, b, seq, t0 + s);
-    const bool in_last = sid == vl_id(seq_idx, b, seq, t0 + lc - 1);
-    const int t_end = vl_lower_bound(seq_idx, b, seq, t0 + s, t0 + lc, sid + 1) - t0;
-    float acc = 0.0f;
-    for (int k = 0; in_last && k < hpg; k++) {
-        const int h = g * hpg + k;
-        const long long sc = (bc * nh + h) * M2_CHUNK;
-        const long long so = (bc * nh + h) * hd * (long long)dstate + n;
-        float inner = 0.0f;
-        for (int p = 0; p < hd; p++) {
-            inner = __fmaf_rn(to_f(xbc[rs * ld_xbc + (long long)h * hd + p]),
-                              ds_in[so + (long long)p * dstate], inner);
-        }
-        const float el = m2_exp(fminf(__fsub_rn(acs[sc + lc - 1], acs[sc + s]), 0.0f));
-        acc = __fmaf_rn(inner, __fmul_rn(dt[sc + s], el), acc);
-    }
-    for (int t = s; t < t_end; t++) {
-        float dcb = 0.0f;
-        for (int k = 0; k < hpg; k++) {
-            dcb = __fadd_rn(dcb, dcbh[(bc * nh + g * hpg + k) * M2B_PAIRS + m2b_pair(t, s)]);
-        }
-        const long long ct = (b * seq + t0 + t) * ld_xbc + c_col + (long long)g * dstate + n;
-        acc = __fmaf_rn(dcb, to_f(xbc[ct]), acc);
-    }
-    dxbc[rs * ld_xbc + b_col + (long long)g * dstate + n] = acc;
-}
-
-#define DEFINE_M2B_DB(NAME, T)                                                 \
-extern "C" __global__ void NAME(                                               \
-    float* __restrict__ dxbc,                                                  \
-    const T* __restrict__ xbc,                                                 \
-    long long ld_xbc,                                                          \
-    int b_col,                                                                 \
-    int c_col,                                                                 \
-    const float* __restrict__ ds_in,                                           \
-    const float* __restrict__ dcbh,                                            \
-    const float* __restrict__ dt,                                              \
-    const float* __restrict__ acs,                                             \
-    int batch,                                                                 \
-    int seq,                                                                   \
-    int nh,                                                                    \
-    int ng,                                                                    \
-    int hd,                                                                    \
-    int dstate,                                                                \
-    int y_first, /* this run's first y block */                                \
-    const int* __restrict__ seq_idx                                            \
-) {                                                                            \
-    m2b_db_body<T>(dxbc, xbc, ld_xbc, b_col, c_col, ds_in, dcbh, dt, acs,      \
-        batch, seq, nh, ng, hd, dstate, y_first, seq_idx);                     \
-}
-DEFINE_M2B_DB(m2b_db, float)
-DEFINE_M2B_DB(m2b_db_bf16, __nv_bfloat16)
-DEFINE_M2B_DB(m2b_db_f16, __half)
-
-// m2b_db and m2b_dc as register tiles, one block per (chunk, group, tile
-// of 32 state indices): a warp takes 4 rows (s for dB, t for dC) and a
-// lane an index n. For each head of the group ascending, the head's x (dB)
-// or dy (dC) rows are staged transposed [P][64] with its dS (dB) or H (dC)
-// columns [P][32]; the p-ascending inner sum from 0 then joins the row's
-// chain as fma(inner, scale, acc), scale = dt_s E(L-1, s) (dB) or e^Acs_t
-// (dC). Then the chain runs over the staged dCB of the group (each pair
-// summed over the heads ascending from 0) and the C rows t >= s (dB) or
-// the B rows s <= t (dC), ascending: the bits of m2b_db and m2b_dc, and
-// their masks in a packed row.
-// Shared memory: (68 P + 32 P + 64 * 64 + 64 * 32 + 64) floats (the
-// transposed rows padded to 68 so their staging writes spread over banks).
+// dB and dC of a chunk and group as register tiles, one block per (chunk,
+// group, tile of 32 state indices): a warp takes 4 rows (s for dB, t for
+// dC) and a lane an index n.
+//   dB_s = sum_{h in g} dt_s E(L-1, s) (x_s . dS[c][:, n])
+//          + sum_{t >= s} dCB[t][s] C_t[n]
+//   dC_t = sum_{h in g} e^Acs_t (dy_t . H_c[:, n]) + sum_{s <= t} dCB[t][s] B_s[n]
+// For each head of the group ascending, the head's x (dB) or dy (dC) rows
+// are staged transposed with its dS (dB) or H (dC) columns, M2BT_PC
+// channels at a time ([PC][68] and [PC][32]); the p-ascending inner sum
+// from 0 runs on across the passes, then joins the row's chain as
+// fma(inner, scale, acc), scale = dt_s E(L-1, s) (dB) or e^Acs_t (dC).
+// Then the chain runs over the staged dCB of the group (each pair summed
+// over the heads ascending from 0) and the C rows t >= s (dB) or the B rows
+// s <= t (dC), ascending. In a packed row the first sum takes only the
+// chunk's last sequence (dB) or the tokens before the chunk's first start
+// (dC), and the pairs stay inside a row's own sequence. Shared memory,
+// whatever the head width (BC_TILES_SMEM_BYTES): 68 PC + 32 PC + 64 * 64 +
+// 64 * 32 + 64 floats, 37,632 bytes, the transposed rows padded to 68 so
+// their staging writes spread over banks.
 // Grid (B * nc, G, ceil(N / 32)), block 512.
+#define M2BT_PC 32
 template <typename T, bool DC>
 __device__ __forceinline__ void m2b_bc_tiles_body(
     float* __restrict__ dxbc,
@@ -901,9 +779,9 @@ __device__ __forceinline__ void m2b_bc_tiles_body(
     const int hpg = nh / ng;
     const long long d_ssm = (long long)nh * hd;
     constexpr int LS = M2_CHUNK + 4;
-    float* lt = m2bt_sm;                     // [P][LS]
-    float* rt = lt + hd * LS;                // [P][32]
-    float* dcbg = rt + hd * 32;              // [64][64], t by s
+    float* lt = m2bt_sm;                     // [PC][LS]
+    float* rt = lt + M2BT_PC * LS;           // [PC][32]
+    float* dcbg = rt + M2BT_PC * 32;         // [64][64], t by s
     float* orow = dcbg + M2_CHUNK * M2_CHUNK;// [64][32]
     float* scale = orow + M2_CHUNK * 32;     // [64]
     const int tid = threadIdx.x;
@@ -931,37 +809,43 @@ __device__ __forceinline__ void m2b_bc_tiles_body(
         const int h = g * hpg + k;
         const long long sc = (bc * nh + h) * M2_CHUNK;
         const float* mh = mat + (bc * nh + h) * hd * (long long)dstate;
-        __syncthreads();
-        for (int r = warp; r < M2_CHUNK; r += nw) {
-            for (int p = lane; p < hd; p += 32) {
-                float v = 0.0f;
-                if (r < lc) {
-                    v = DC ? dy[(row0 + r) * d_ssm + (long long)h * hd + p]
-                           : to_f(xbc[(row0 + r) * ld_xbc + (long long)h * hd + p]);
-                }
-                lt[p * LS + r] = v;
-            }
-        }
-        for (int p = warp; p < hd; p += nw)
-            rt[p * 32 + lane] = n < dstate ? mh[(long long)p * dstate + n] : 0.0f;
-        for (int r = tid; r < M2_CHUNK; r += blockDim.x) {
-            float sv = 0.0f;
-            if (r < lc) {
-                sv = DC ? m2_exp(acs[sc + r])
-                        : __fmul_rn(dt[sc + r],
-                                    m2_exp(fminf(__fsub_rn(acs[sc + lc - 1], acs[sc + r]), 0.0f)));
-            }
-            scale[r] = sv;
-        }
-        __syncthreads();
         float inner[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        for (int p = 0; p < hd; p++) {
-            const float4 l4 = *reinterpret_cast<const float4*>(lt + p * LS + r0);
-            const float rv = rt[p * 32 + lane];
-            inner[0] = __fmaf_rn(l4.x, rv, inner[0]);
-            inner[1] = __fmaf_rn(l4.y, rv, inner[1]);
-            inner[2] = __fmaf_rn(l4.z, rv, inner[2]);
-            inner[3] = __fmaf_rn(l4.w, rv, inner[3]);
+        for (int c0 = 0; c0 < hd; c0 += M2BT_PC) {
+            const int pw = min(M2BT_PC, hd - c0);
+            __syncthreads();
+            if (lane < pw) {
+                for (int r = warp; r < M2_CHUNK; r += nw) {
+                    float v = 0.0f;
+                    if (r < lc) {
+                        const long long p = (long long)h * hd + c0 + lane;
+                        v = DC ? dy[(row0 + r) * d_ssm + p] : to_f(xbc[(row0 + r) * ld_xbc + p]);
+                    }
+                    lt[lane * LS + r] = v;
+                }
+            }
+            for (int pl = warp; pl < pw; pl += nw)
+                rt[pl * 32 + lane] = n < dstate ? mh[(long long)(c0 + pl) * dstate + n] : 0.0f;
+            if (c0 == 0) {
+                for (int r = tid; r < M2_CHUNK; r += blockDim.x) {
+                    float sv = 0.0f;
+                    if (r < lc) {
+                        sv = DC ? m2_exp(acs[sc + r])
+                                : __fmul_rn(dt[sc + r],
+                                            m2_exp(fminf(__fsub_rn(acs[sc + lc - 1], acs[sc + r]),
+                                                         0.0f)));
+                    }
+                    scale[r] = sv;
+                }
+            }
+            __syncthreads();
+            for (int pl = 0; pl < pw; pl++) {
+                const float4 l4 = *reinterpret_cast<const float4*>(lt + pl * LS + r0);
+                const float rv = rt[pl * 32 + lane];
+                inner[0] = __fmaf_rn(l4.x, rv, inner[0]);
+                inner[1] = __fmaf_rn(l4.y, rv, inner[1]);
+                inner[2] = __fmaf_rn(l4.z, rv, inner[2]);
+                inner[3] = __fmaf_rn(l4.w, rv, inner[3]);
+            }
         }
 #pragma unroll
         for (int i = 0; i < 4; i++) {
@@ -1033,89 +917,6 @@ DEFINE_M2B_BC_TILES(m2b_db_tiles_f16, __half, false)
 DEFINE_M2B_BC_TILES(m2b_dc_tiles, float, true)
 DEFINE_M2B_BC_TILES(m2b_dc_tiles_bf16, __nv_bfloat16, true)
 DEFINE_M2B_BC_TILES(m2b_dc_tiles_f16, __half, true)
-
-// dC of a chunk and group, one thread per (t, n): the group's heads
-// ascending (each dy_t . H_c[:, n], p ascending, times e^Acs_t), then
-// s <= t ascending of dCB[t][s] B_s[n]. Written into the C columns. In a
-// packed row the first sum is 0 past the chunk's first start and s runs
-// over t's own sequence. Grid (B * nc, G, ceil(64 * N / blockDim.x)).
-template <typename T>
-__device__ __forceinline__ void m2b_dc_body(
-    float* __restrict__ dxbc,
-    const float* __restrict__ dy,
-    const T* __restrict__ xbc, long long ld_xbc, int b_col, int c_col,
-    const float* __restrict__ states, const float* __restrict__ dcbh,
-    const float* __restrict__ acs,
-    int batch, int seq, int nh, int ng, int hd, int dstate,
-    int y_first, /* this run's first y block */
-    const int* __restrict__ seq_idx
-) {
-    const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
-    const long long bc = blockIdx.x;
-    const int g = y_first + blockIdx.y;
-    const int e = blockIdx.z * blockDim.x + threadIdx.x;
-    if (bc >= (long long)batch * nc || g >= ng || e >= M2_CHUNK * dstate) return;
-    const int t = e / dstate;
-    const int n = e % dstate;
-    const int c = (int)(bc % nc);
-    const long long b = bc / nc;
-    const int t0 = c * M2_CHUNK;
-    const int lc = min(M2_CHUNK, seq - t0);
-    if (t >= lc) return;
-    const int hpg = nh / ng;
-    const long long d_ssm = (long long)nh * hd;
-    const long long rt = b * seq + t0 + t;
-    const int tid_ = vl_id(seq_idx, b, seq, t0 + t);
-    const bool from_prev = tid_ == vl_id(seq_idx, b, seq, t0 - 1);
-    const int s_first = vl_lower_bound(seq_idx, b, seq, t0, t0 + t + 1, tid_) - t0;
-    float acc = 0.0f;
-    for (int k = 0; from_prev && k < hpg; k++) {
-        const int h = g * hpg + k;
-        const long long so = (bc * nh + h) * hd * (long long)dstate + n;
-        float inner = 0.0f;
-        for (int p = 0; p < hd; p++) {
-            inner = __fmaf_rn(dy[rt * d_ssm + (long long)h * hd + p],
-                              states[so + (long long)p * dstate], inner);
-        }
-        acc = __fmaf_rn(inner, m2_exp(acs[(bc * nh + h) * M2_CHUNK + t]), acc);
-    }
-    for (int s = s_first; s <= t; s++) {
-        float dcb = 0.0f;
-        for (int k = 0; k < hpg; k++) {
-            dcb = __fadd_rn(dcb, dcbh[(bc * nh + g * hpg + k) * M2B_PAIRS + m2b_pair(t, s)]);
-        }
-        const long long bs = (b * seq + t0 + s) * ld_xbc + b_col + (long long)g * dstate + n;
-        acc = __fmaf_rn(dcb, to_f(xbc[bs]), acc);
-    }
-    dxbc[rt * ld_xbc + c_col + (long long)g * dstate + n] = acc;
-}
-
-#define DEFINE_M2B_DC(NAME, T)                                                 \
-extern "C" __global__ void NAME(                                               \
-    float* __restrict__ dxbc,                                                  \
-    const float* __restrict__ dy,                                              \
-    const T* __restrict__ xbc,                                                 \
-    long long ld_xbc,                                                          \
-    int b_col,                                                                 \
-    int c_col,                                                                 \
-    const float* __restrict__ states,                                          \
-    const float* __restrict__ dcbh,                                            \
-    const float* __restrict__ acs,                                             \
-    int batch,                                                                 \
-    int seq,                                                                   \
-    int nh,                                                                    \
-    int ng,                                                                    \
-    int hd,                                                                    \
-    int dstate,                                                                \
-    int y_first, /* this run's first y block */                                \
-    const int* __restrict__ seq_idx                                            \
-) {                                                                            \
-    m2b_dc_body<T>(dxbc, dy, xbc, ld_xbc, b_col, c_col, states, dcbh, acs,     \
-        batch, seq, nh, ng, hd, dstate, y_first, seq_idx);                     \
-}
-DEFINE_M2B_DC(m2b_dc, float)
-DEFINE_M2B_DC(m2b_dc_bf16, __nv_bfloat16)
-DEFINE_M2B_DC(m2b_dc_f16, __half)
 
 // The decay gradients of a chunk and head, one thread per token k:
 //   da_k = stable_k + (next_k + prev_k)

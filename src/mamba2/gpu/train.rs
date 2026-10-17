@@ -45,8 +45,9 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 use super::inference::check_device_envelope;
 use super::inference::{LayerPtrs, M2Exec, Mamba2GpuState, MlpPtrs, WindowPtrs};
 use super::kernels::{
-    CHUNK, Mamba2Kernels, SeqBwdRoute, bc_tiles_smem_bytes, dx_tiles_geom,
-    gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes, seq_bwd_tiles_smem_bytes, seq_bwd_tiles_threads,
+    BC_TILES_SMEM_BYTES, CHUNK, DX_GROUP_CHANNELS, DX_GROUPS_SMEM_BYTES, Mamba2Kernels,
+    SeqBwdRoute, dx_tiles_geom, gated_norm_bwd_smem_bytes, seq_bwd_smem_bytes,
+    seq_bwd_tiles_smem_bytes, seq_bwd_tiles_threads,
 };
 use crate::gpu::adamw::{
     AdamWBiasFactors, AdamWMultiPlan, AdamWPlanKey, AdamWStateBlob, AdamWTensorSpec, GpuAdamW,
@@ -2495,9 +2496,17 @@ impl Mamba2GpuTrainer {
                 );
             } else {
                 let (acc, ste, yi) = (s.acc.cached_ptr(), s.ste.cached_ptr(), s.yi.cached_ptr());
-                go_yz!(
-                    k.dx.get(act),
-                    cfg3(b * nc, nh, (CHUNK * hd).div_ceil(128), 128),
+                go_y!(
+                    k.dx_groups.get(act),
+                    LaunchConfig {
+                        grid_dim: (
+                            (b * nc) as u32,
+                            nh as u32,
+                            hd.div_ceil(DX_GROUP_CHANNELS) as u32,
+                        ),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: DX_GROUPS_SMEM_BYTES as u32,
+                    },
                     "dx",
                     [
                         dxbc,
@@ -2516,7 +2525,6 @@ impl Mamba2GpuTrainer {
                         acs,
                         d,
                         per_channel,
-                        b_i,
                         t_i,
                         nh_i,
                         ng_i,
@@ -2545,56 +2553,31 @@ impl Mamba2GpuTrainer {
                 ],
                 [seq_idx]
             );
-            let bc_smem = bc_tiles_smem_bytes(hd);
-            if bc_smem <= self.kernels.smem_optin {
-                let tiles = LaunchConfig {
-                    grid_dim: ((b * nc) as u32, ng as u32, ds.div_ceil(32) as u32),
-                    block_dim: (512, 1, 1),
-                    shared_mem_bytes: bc_smem as u32,
-                };
-                go_y!(
-                    k.db_tiles.get(act),
-                    tiles,
-                    "dB",
-                    [
-                        dxbc, dy, xbc, ld_xbc, b_col, c_col, ds_buf, dcbh, dt, acs, t_i, nh_i,
-                        ng_i, hd_i, ds_i
-                    ],
-                    [seq_idx]
-                );
-                go_y!(
-                    k.dc_tiles.get(act),
-                    tiles,
-                    "dC",
-                    [
-                        dxbc, dy, xbc, ld_xbc, b_col, c_col, states, dcbh, dt, acs, t_i, nh_i,
-                        ng_i, hd_i, ds_i
-                    ],
-                    [seq_idx]
-                );
-            } else {
-                let bc_cfg = cfg3(b * nc, ng, (CHUNK * ds).div_ceil(128), 128);
-                go_y!(
-                    k.db.get(act),
-                    bc_cfg,
-                    "dB",
-                    [
-                        dxbc, xbc, ld_xbc, b_col, c_col, ds_buf, dcbh, dt, acs, b_i, t_i, nh_i,
-                        ng_i, hd_i, ds_i
-                    ],
-                    [seq_idx]
-                );
-                go_y!(
-                    k.dc.get(act),
-                    bc_cfg,
-                    "dC",
-                    [
-                        dxbc, dy, xbc, ld_xbc, b_col, c_col, states, dcbh, acs, b_i, t_i, nh_i,
-                        ng_i, hd_i, ds_i
-                    ],
-                    [seq_idx]
-                );
-            }
+            let tiles = LaunchConfig {
+                grid_dim: ((b * nc) as u32, ng as u32, ds.div_ceil(32) as u32),
+                block_dim: (512, 1, 1),
+                shared_mem_bytes: BC_TILES_SMEM_BYTES as u32,
+            };
+            go_y!(
+                k.db_tiles.get(act),
+                tiles,
+                "dB",
+                [
+                    dxbc, dy, xbc, ld_xbc, b_col, c_col, ds_buf, dcbh, dt, acs, t_i, nh_i, ng_i,
+                    hd_i, ds_i
+                ],
+                [seq_idx]
+            );
+            go_y!(
+                k.dc_tiles.get(act),
+                tiles,
+                "dC",
+                [
+                    dxbc, dy, xbc, ld_xbc, b_col, c_col, states, dcbh, dt, acs, t_i, nh_i, ng_i,
+                    hd_i, ds_i
+                ],
+                [seq_idx]
+            );
             {
                 let (da_parts, dbias_parts) = (s.da_parts.cached_ptr(), s.dbias_parts.cached_ptr());
                 let (dt_bias, a_neg) = (lp.dt_bias, lp.a_neg);

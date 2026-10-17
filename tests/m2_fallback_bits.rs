@@ -4,8 +4,11 @@
 //! - the gated norm streamed for a group too wide to stage, forward and
 //!   backward, against the staged kernel,
 //! - the chunk state in narrow channel tiles against the whole head,
-//! - the fused dx and token sums in register tiles against the dx kernel
-//!   and the token sums it replaces,
+//! - dx and the token sums in register tiles, fused for the heads a block
+//!   holds and in channel groups past them, against the per-output dx
+//!   kernel they replaced, frozen as released, and the token sums,
+//! - dB and dC in register tiles, a pass of channels at a time, against the
+//!   per-output kernels they replaced, frozen as released,
 //! - the conv weight gradient with its taps spread over blocks against one
 //!   block,
 //! - the sequential backward that reads its states from the replay tape
@@ -28,8 +31,9 @@ use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba2::gpu::kernels::{
-    CHUNK, CHUNK_SCAN_TILES_SMEM_BYTES, CHUNK_SCAN_TT, Mamba2Kernels, chunk_state_geom,
-    dx_tiles_geom, gated_norm_bwd_smem_bytes, gated_norm_cfg, seq_bwd_smem_bytes,
+    BC_TILES_SMEM_BYTES, CHUNK, CHUNK_SCAN_TILES_SMEM_BYTES, CHUNK_SCAN_TT, DX_GROUP_CHANNELS,
+    DX_GROUPS_SMEM_BYTES, Mamba2Kernels, chunk_state_geom, dx_tiles_geom,
+    gated_norm_bwd_smem_bytes, gated_norm_cfg, seq_bwd_smem_bytes,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -450,29 +454,59 @@ fn m2_chunk_scan_tiles_are_the_released_per_output_scan() {
     eprintln!("m2 chunk scan tiles: the released kernel's bits on {cases} cases");
 }
 
-/// The register-tile dx and token sums against `m2b_dx` and `m2b_rowsums`:
-/// a head of 4 channels, one no multiple of 4 over two groups, and one of
-/// 40 over a state of 24, with D per head and per channel. The tiled kernel
-/// serves only heads its block holds, so past that the backward takes the
-/// pair, and both give every output the same bits.
+/// Two packed rows of `seq` tokens as the kernels read their ids, a float
+/// buffer of their bits: row 0 carries its sequence in, starts one at token
+/// 37 and one on the second chunk's first token; row 1 starts one at 70.
+fn packed_ids(ctx: &GpuCtx, seq: usize) -> GpuBuffer {
+    let ids: Vec<f32> = (0..2 * seq)
+        .map(|i| {
+            let (b, t) = (i / seq, i % seq);
+            let id = match b {
+                0 => usize::from(t >= 37) + usize::from(t >= 64),
+                _ => usize::from(t >= 70),
+            };
+            f32::from_bits(id as u32)
+        })
+        .collect();
+    f32_buf(ctx, &ids)
+}
+
+/// dx and the token sums three ways: the per-output dx kernel as released
+/// (frozen) with `m2b_rowsums`, the fused register tiles where a block
+/// holds the head, and the tiles in groups of 64 channels with
+/// `m2b_rowsums`. Heads of 4 to 300 channels, ragged groups, one and two
+/// heads a group, D per head and per channel, one sequence a row and packed
+/// rows, in f32, bf16 and f16: every output has the released bits.
 #[test]
 fn m2_dx_tiles_are_the_dx_and_token_sums() {
-    let (_dev, ctx, k) = setup();
+    let (dev, ctx, k) = setup();
+    let frozen = frozen_kernels::frozen_module(
+        dev.context(),
+        arch::arch0(),
+        None,
+        include_str!("fixtures/m2_backward_reference.cu"),
+    );
     let (batch, seq) = (2usize, 100usize);
     let nc = seq.div_ceil(CHUNK);
     let pairs = CHUNK * (CHUNK + 1) / 2;
-    for (nh, ng, hd, ds, per_channel) in [
-        (2usize, 1usize, 4usize, 16usize, 0i32),
-        (4, 2, 18, 8, 1),
-        (2, 1, 40, 24, 1),
+    let ids = packed_ids(&ctx, seq);
+    let mut cases = 0;
+    for (nh, ng, hd, ds, per_channel, packed) in [
+        (2usize, 1usize, 4usize, 16usize, 0i32, false),
+        (4, 2, 18, 8, 1, false),
+        (2, 1, 40, 24, 1, true),
+        (2, 2, 64, 128, 0, true),
+        (1, 1, 100, 32, 1, false),
+        (2, 1, 160, 48, 0, true),
+        (1, 1, 256, 16, 1, false),
+        (1, 1, 300, 24, 0, true),
     ] {
         let d_ssm = nh * hd;
         let (b_col, c_col) = (d_ssm, d_ssm + ng * ds);
         let ld_xbc = d_ssm + 2 * ng * ds;
         let rows = batch * seq;
         let per = batch * nc * nh * CHUNK;
-        let (nk, smem) = dx_tiles_geom(hd, ds, k.smem_optin, k.bwd.dx_tiles_threads)
-            .expect("the tiled dx serves this head");
+        let seq_idx = if packed { ids.cached_ptr() } else { 0 };
         let dy = f32_buf(&ctx, &det(rows * d_ssm, 21, 1.0));
         let states = f32_buf(&ctx, &det(batch * nc * nh * hd * ds, 22, 1.0));
         let ds_in = f32_buf(&ctx, &det(batch * nc * nh * hd * ds, 23, 1.0));
@@ -487,13 +521,12 @@ fn m2_dx_tiles_are_the_dx_and_token_sums() {
         let acs = f32_buf(&ctx, &det(per, 26, 2.0));
         let d = f32_buf(&ctx, &det(nh * hd, 27, 1.0));
         let ints = |v: &[usize]| -> Vec<i32> { v.iter().map(|&x| x as i32).collect() };
+        let fused = dx_tiles_geom(hd, ds, k.smem_optin, k.bwd.dx_tiles_threads);
         for dtype in DTYPES {
             let xbc = typed_buf(&ctx, &det(rows * ld_xbc, 28, 1.0), dtype);
             let ld = ld_xbc as i64;
             let (b_col_i, c_col_i) = (b_col as i32, c_col as i32);
-            let ptrs = [
-                dy.cached_ptr(),
-                xbc.cached_ptr(),
+            let ins = [
                 states.cached_ptr(),
                 ds_in.cached_ptr(),
                 cb.cached_ptr(),
@@ -501,88 +534,111 @@ fn m2_dx_tiles_are_the_dx_and_token_sums() {
                 acs.cached_ptr(),
                 d.cached_ptr(),
             ];
+            let suffix = match dtype {
+                WeightDtype::Bf16 => "_bf16",
+                WeightDtype::F16 => "_f16",
+                _ => "",
+            };
+            let released = frozen
+                .load_function(&format!("m2b_reference_dx{suffix}"))
+                .unwrap();
+            // route 0: released dx + token sums; 1: groups + token sums;
+            // 2: fused, where it serves the head.
             let mut runs = Vec::new();
-            for tiled in [false, true] {
+            for route in 0..3 {
+                if route == 2 && fused.is_none() {
+                    continue;
+                }
                 let dxbc = GpuBuffer::zeros(&ctx.stream, rows * ld_xbc).unwrap();
                 let sums: Vec<GpuBuffer> = (0..3)
                     .map(|_| GpuBuffer::zeros(&ctx.stream, per).unwrap())
                     .collect();
-                let (dxp, ddtx, qv, inter) = (
+                let scratch: Vec<GpuBuffer> = (0..3)
+                    .map(|_| GpuBuffer::zeros(&ctx.stream, rows * d_ssm).unwrap())
+                    .collect();
+                let outs = if route == 2 { &sums } else { &scratch };
+                let head = [
                     dxbc.cached_ptr(),
-                    sums[0].cached_ptr(),
-                    sums[1].cached_ptr(),
-                    sums[2].cached_ptr(),
-                );
-                if tiled {
-                    let head = [dxp, ddtx, qv, inter, ptrs[0], ptrs[1]];
-                    let cfg = LaunchConfig {
-                        grid_dim: ((batch * nc) as u32, nh as u32, 1),
-                        block_dim: ((16 * hd.div_ceil(4)) as u32, 1, 1),
-                        shared_mem_bytes: smem as u32,
-                    };
-                    for (y_first, cfg) in y_runs(cfg) {
-                        let mut b = ctx.stream.launch_builder(k.bwd.dx_tiles.get(dtype));
-                        for p in &head {
-                            b.arg(p);
-                        }
-                        b.arg(&ld);
-                        b.arg(&b_col_i);
-                        b.arg(&c_col_i);
-                        let rest = [ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6], ptrs[7]];
-                        for p in &rest {
-                            b.arg(p);
-                        }
-                        b.arg(&per_channel);
-                        let tail = ints(&[seq, nh, ng, hd, ds, nk]);
-                        for v in &tail {
-                            b.arg(v);
-                        }
-                        b.arg(&y_first);
-                        b.arg(&0u64);
-                        unsafe { b.launch(cfg) }.unwrap();
+                    outs[0].cached_ptr(),
+                    outs[1].cached_ptr(),
+                    outs[2].cached_ptr(),
+                    dy.cached_ptr(),
+                    xbc.cached_ptr(),
+                ];
+                let (f, cfg, tail): (&CudaFunction, LaunchConfig, Vec<i32>) = match route {
+                    0 => (
+                        &released,
+                        LaunchConfig {
+                            grid_dim: (
+                                (batch * nc) as u32,
+                                nh as u32,
+                                (CHUNK * hd).div_ceil(128) as u32,
+                            ),
+                            block_dim: (128, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        ints(&[batch, seq, nh, ng, hd, ds]),
+                    ),
+                    1 => (
+                        k.bwd.dx_groups.get(dtype),
+                        LaunchConfig {
+                            grid_dim: (
+                                (batch * nc) as u32,
+                                nh as u32,
+                                hd.div_ceil(DX_GROUP_CHANNELS) as u32,
+                            ),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: DX_GROUPS_SMEM_BYTES as u32,
+                        },
+                        ints(&[seq, nh, ng, hd, ds]),
+                    ),
+                    _ => {
+                        let (nk, smem) = fused.expect("the fused tiles serve this head");
+                        (
+                            k.bwd.dx_tiles.get(dtype),
+                            LaunchConfig {
+                                grid_dim: ((batch * nc) as u32, nh as u32, 1),
+                                block_dim: ((16 * hd.div_ceil(4)) as u32, 1, 1),
+                                shared_mem_bytes: smem as u32,
+                            },
+                            ints(&[seq, nh, ng, hd, ds, nk]),
+                        )
                     }
-                } else {
-                    let scratch: Vec<GpuBuffer> = (0..3)
-                        .map(|_| GpuBuffer::zeros(&ctx.stream, rows * d_ssm).unwrap())
-                        .collect();
-                    let (acc, ste, yi) = (
+                };
+                for (y_first, z_first, cfg) in yz_runs(cfg) {
+                    let mut b = ctx.stream.launch_builder(f);
+                    for p in &head {
+                        b.arg(p);
+                    }
+                    b.arg(&ld);
+                    b.arg(&b_col_i);
+                    b.arg(&c_col_i);
+                    for p in &ins {
+                        b.arg(p);
+                    }
+                    b.arg(&per_channel);
+                    for v in &tail {
+                        b.arg(v);
+                    }
+                    b.arg(&y_first);
+                    if route == 0 {
+                        b.arg(&z_first);
+                    }
+                    b.arg(&seq_idx);
+                    unsafe { b.launch(cfg) }.unwrap();
+                }
+                if route < 2 {
+                    let sums_tail = ints(&[batch, seq, nh, hd]);
+                    let sums_head = [
+                        sums[0].cached_ptr(),
+                        sums[1].cached_ptr(),
+                        sums[2].cached_ptr(),
                         scratch[0].cached_ptr(),
                         scratch[1].cached_ptr(),
                         scratch[2].cached_ptr(),
-                    );
-                    let head = [dxp, acc, ste, yi, ptrs[0], ptrs[1]];
-                    let cfg = LaunchConfig {
-                        grid_dim: (
-                            (batch * nc) as u32,
-                            nh as u32,
-                            (CHUNK * hd).div_ceil(128) as u32,
-                        ),
-                        block_dim: (128, 1, 1),
-                        shared_mem_bytes: 0,
-                    };
-                    for (y_first, z_first, cfg) in yz_runs(cfg) {
-                        let mut b = ctx.stream.launch_builder(k.bwd.dx.get(dtype));
-                        for p in &head {
-                            b.arg(p);
-                        }
-                        b.arg(&ld);
-                        b.arg(&b_col_i);
-                        b.arg(&c_col_i);
-                        let rest = [ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6], ptrs[7]];
-                        for p in &rest {
-                            b.arg(p);
-                        }
-                        b.arg(&per_channel);
-                        let tail = ints(&[batch, seq, nh, ng, hd, ds]);
-                        for v in &tail {
-                            b.arg(v);
-                        }
-                        b.arg(&y_first);
-                        b.arg(&z_first);
-                        b.arg(&0u64);
-                        unsafe { b.launch(cfg) }.unwrap();
-                    }
-                    let sums_head = [ddtx, qv, inter, acc, ste, yi, ptrs[0], ptrs[1]];
+                        dy.cached_ptr(),
+                        xbc.cached_ptr(),
+                    ];
                     let cfg = LaunchConfig {
                         grid_dim: ((batch * nc) as u32, nh as u32, 1),
                         block_dim: (CHUNK as u32, 1, 1),
@@ -594,34 +650,185 @@ fn m2_dx_tiles_are_the_dx_and_token_sums() {
                             b.arg(p);
                         }
                         b.arg(&ld);
-                        b.arg(&ptrs[5]);
-                        let tail = ints(&[batch, seq, nh, hd]);
+                        b.arg(&ins[3]);
+                        for v in &sums_tail {
+                            b.arg(v);
+                        }
+                        b.arg(&y_first);
+                        b.arg(&seq_idx);
+                        unsafe { b.launch(cfg) }.unwrap();
+                    }
+                }
+                runs.push((
+                    route,
+                    [
+                        bits_f32(&ctx, &dxbc),
+                        bits_f32(&ctx, &sums[0]),
+                        bits_f32(&ctx, &sums[1]),
+                        bits_f32(&ctx, &sums[2]),
+                    ],
+                ));
+            }
+            for (route, got) in &runs[1..] {
+                for (i, name) in ["dx", "dt token sums", "decay sums", "inter-chunk sums"]
+                    .iter()
+                    .enumerate()
+                {
+                    assert!(
+                        got[i] == runs[0].1[i],
+                        "{dtype:?} route {route} head {hd} state {ds} groups {ng} packed \
+                         {packed}: {name}"
+                    );
+                }
+                cases += 1;
+            }
+        }
+    }
+    eprintln!("m2 dx tiles: the released kernel's bits on {cases} cases");
+}
+
+/// dB and dC in register tiles, a pass of 32 channels at a time, against
+/// the per-output kernels they replaced, frozen as released: heads of 4 to
+/// 300 channels (past the 191 the unsliced tile could stage), states inside
+/// one 32-index tile and over several, one and two heads a group, one
+/// sequence a row and packed rows, in f32, bf16 and f16.
+#[test]
+fn m2_bc_tiles_are_the_released_db_and_dc() {
+    let (dev, ctx, k) = setup();
+    let frozen = frozen_kernels::frozen_module(
+        dev.context(),
+        arch::arch0(),
+        None,
+        include_str!("fixtures/m2_backward_reference.cu"),
+    );
+    let (batch, seq) = (2usize, 100usize);
+    let nc = seq.div_ceil(CHUNK);
+    let pairs = CHUNK * (CHUNK + 1) / 2;
+    let ids = packed_ids(&ctx, seq);
+    let mut cases = 0;
+    for (nh, ng, hd, ds, packed) in [
+        (2usize, 1usize, 4usize, 16usize, false),
+        (4, 2, 18, 40, true),
+        (2, 2, 64, 128, false),
+        (2, 1, 191, 33, true),
+        (1, 1, 192, 64, false),
+        (2, 1, 256, 16, true),
+        (1, 1, 300, 72, false),
+    ] {
+        let d_ssm = nh * hd;
+        let (b_col, c_col) = (d_ssm, d_ssm + ng * ds);
+        let ld_xbc = d_ssm + 2 * ng * ds;
+        let rows = batch * seq;
+        let per = batch * nc * nh * CHUNK;
+        let seq_idx = if packed { ids.cached_ptr() } else { 0 };
+        let dy = f32_buf(&ctx, &det(rows * d_ssm, 31, 1.0));
+        let states = f32_buf(&ctx, &det(batch * nc * nh * hd * ds, 32, 1.0));
+        let ds_in = f32_buf(&ctx, &det(batch * nc * nh * hd * ds, 33, 1.0));
+        let dcbh = f32_buf(&ctx, &det(batch * nc * nh * pairs, 34, 0.5));
+        let dt = f32_buf(
+            &ctx,
+            &det(per, 35, 0.5)
+                .iter()
+                .map(|v| v.abs())
+                .collect::<Vec<_>>(),
+        );
+        let acs = f32_buf(&ctx, &det(per, 36, 2.0));
+        let ints = |v: &[usize]| -> Vec<i32> { v.iter().map(|&x| x as i32).collect() };
+        for dtype in DTYPES {
+            let xbc = typed_buf(&ctx, &det(rows * ld_xbc, 37, 1.0), dtype);
+            let ld = ld_xbc as i64;
+            let (b_col_i, c_col_i) = (b_col as i32, c_col as i32);
+            let suffix = match dtype {
+                WeightDtype::Bf16 => "_bf16",
+                WeightDtype::F16 => "_f16",
+                _ => "",
+            };
+            for dc in [false, true] {
+                let what = if dc { "dC" } else { "dB" };
+                let mat = if dc {
+                    states.cached_ptr()
+                } else {
+                    ds_in.cached_ptr()
+                };
+                let released = frozen
+                    .load_function(&format!(
+                        "m2b_reference_{}{suffix}",
+                        if dc { "dc" } else { "db" }
+                    ))
+                    .unwrap();
+                let mut runs = Vec::new();
+                for tiled in [false, true] {
+                    let dxbc = GpuBuffer::zeros(&ctx.stream, rows * ld_xbc).unwrap();
+                    let dxp = dxbc.cached_ptr();
+                    let cfg = if tiled {
+                        LaunchConfig {
+                            grid_dim: ((batch * nc) as u32, ng as u32, ds.div_ceil(32) as u32),
+                            block_dim: (512, 1, 1),
+                            shared_mem_bytes: BC_TILES_SMEM_BYTES as u32,
+                        }
+                    } else {
+                        LaunchConfig {
+                            grid_dim: (
+                                (batch * nc) as u32,
+                                ng as u32,
+                                (CHUNK * ds).div_ceil(128) as u32,
+                            ),
+                            block_dim: (128, 1, 1),
+                            shared_mem_bytes: 0,
+                        }
+                    };
+                    let f = match (tiled, dc) {
+                        (true, false) => k.bwd.db_tiles.get(dtype),
+                        (true, true) => k.bwd.dc_tiles.get(dtype),
+                        _ => &released,
+                    };
+                    for (y_first, cfg) in y_runs(cfg) {
+                        let mut b = ctx.stream.launch_builder(f);
+                        b.arg(&dxp);
+                        // The released dB reads no dy; the tiles and the
+                        // released dC do.
+                        let dyp = dy.cached_ptr();
+                        if tiled || dc {
+                            b.arg(&dyp);
+                        }
+                        let xp = xbc.cached_ptr();
+                        b.arg(&xp);
+                        b.arg(&ld);
+                        b.arg(&b_col_i);
+                        b.arg(&c_col_i);
+                        b.arg(&mat);
+                        let dcbp = dcbh.cached_ptr();
+                        b.arg(&dcbp);
+                        // The released dC reads no dt.
+                        let dtp = dt.cached_ptr();
+                        if tiled || !dc {
+                            b.arg(&dtp);
+                        }
+                        let acp = acs.cached_ptr();
+                        b.arg(&acp);
+                        let tail = if tiled {
+                            ints(&[seq, nh, ng, hd, ds])
+                        } else {
+                            ints(&[batch, seq, nh, ng, hd, ds])
+                        };
                         for v in &tail {
                             b.arg(v);
                         }
                         b.arg(&y_first);
-                        b.arg(&0u64);
+                        b.arg(&seq_idx);
                         unsafe { b.launch(cfg) }.unwrap();
                     }
+                    runs.push(bits_f32(&ctx, &dxbc));
                 }
-                runs.push([
-                    bits_f32(&ctx, &dxbc),
-                    bits_f32(&ctx, &sums[0]),
-                    bits_f32(&ctx, &sums[1]),
-                    bits_f32(&ctx, &sums[2]),
-                ]);
-            }
-            for (i, name) in ["dx", "dt token sums", "decay sums", "inter-chunk sums"]
-                .iter()
-                .enumerate()
-            {
                 assert!(
-                    runs[1][i] == runs[0][i],
-                    "{dtype:?} head {hd} state {ds} groups {ng}: {name}"
+                    runs[0] == runs[1],
+                    "{dtype:?} {what}: head {hd} state {ds} heads {nh} groups {ng} packed {packed}"
                 );
+                cases += 1;
             }
         }
     }
+    eprintln!("m2 dB and dC tiles: the released kernels' bits on {cases} cases");
 }
 
 #[test]
