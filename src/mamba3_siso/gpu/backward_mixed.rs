@@ -33,7 +33,7 @@ use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3LayerMixedActs, GpuMamba3MixedScratch,
     GpuMamba3MlpMixedActs,
 };
-use crate::mamba3_siso::gpu::kernels::{DQKTHETA_STAGING_MAX, Mamba3Kernels, SequentialShape};
+use crate::mamba3_siso::gpu::kernels::{Mamba3Kernels, SequentialShape};
 use crate::mamba3_siso::gpu::mamba3_gpu::GpuMamba3Scratch;
 use crate::mamba3_siso::gpu::state::M3Exec;
 use crate::mamba3_siso::gpu::weights::{
@@ -669,56 +669,36 @@ fn gpu_backward_mamba3_layer_mixed(
             )?;
         }
 
-        // m3_dqktheta typed — dQ_bias/dK_bias removed from args
-        // (caller does colsum_accumulate on dQ_pre/dK_pre scratch below).
+        // m3_dqktheta typed, a thread a (b, t, h) row; the bias gradients
+        // are the column sums of dQ_pre / dK_pre below.
         {
-            let na_i = na as i32;
-            // The selected route owns its staging-tile count. The retained
-            // half transport uses four; the legacy path uses six. Tiles past
-            // `DQKTHETA_STAGING_MAX` take the direct-global path
-            // (staging = 0).
-            let (dqktheta, dqkt_tiles) = m3k.dqktheta_for_shape(dtype, ds, cs_u, na, width);
-            let dqkt_smem = dqkt_tiles * cs_u * ds * 4;
-            let dqkt_staging: i32 = i32::from(dqkt_smem <= DQKTHETA_STAGING_MAX);
-            let cfg = LaunchConfig {
-                grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
-                block_dim: (cs_u as u32, 1, 1),
-                shared_mem_bytes: if dqkt_staging == 1 {
-                    dqkt_smem as u32
-                } else {
-                    0
-                },
-            };
-            for (y_first, cfg) in y_runs(cfg) {
-                let mut builder = ctx.stream.launch_builder(dqktheta);
-                builder.arg(sc.d_c_pre_rope.inner_mut());
-                builder.arg(sc.d_b_pre_rope.inner_mut());
-                builder.arg(sc.d_angle_cumsum.inner_mut());
-                let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
-                let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
-                builder.arg(sc.d_scale.inner_mut());
-                builder.arg(sc.d_gamma_par.inner_mut());
-                let cb_p = acts.c_biased.cached_ptr(); // typed Q_raw
-                let bb_p = acts.b_biased.cached_ptr(); // typed K_raw
-                builder.arg(&cb_p);
-                builder.arg(&bb_p);
-                builder.arg(&scale_in_ptr);
-                builder.arg(&gamma_in_ptr);
-                builder.arg(acts.angle_cumsum.inner());
-                builder.arg(sc.d_q.inner());
-                builder.arg(sc.d_k.inner());
-                builder.arg(sc.d_beta.inner());
-                builder.arg(&b);
-                builder.arg(&t);
-                builder.arg(&nh_i);
-                builder.arg(&ds_i);
-                builder.arg(&na_i);
-                builder.arg(&cs);
-                builder.arg(&dqkt_staging);
-                builder.arg(&y_first);
-                unsafe { builder.launch(cfg) }
-                    .map_err(|e| format!("m3_dqktheta_typed B6: {:?}", e))?;
-            }
+            let rows = bt * nh;
+            let (rows_i, na_i) = (rows as i32, na as i32);
+            let mut builder = ctx
+                .stream
+                .launch_builder(m3k.m3_dqktheta_typed.get(width).get(dtype));
+            builder.arg(sc.d_c_pre_rope.inner_mut());
+            builder.arg(sc.d_b_pre_rope.inner_mut());
+            builder.arg(sc.d_angle_cumsum.inner_mut());
+            let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
+            let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
+            builder.arg(sc.d_scale.inner_mut());
+            builder.arg(sc.d_gamma_par.inner_mut());
+            let cb_p = acts.c_biased.cached_ptr(); // typed Q_raw
+            let bb_p = acts.b_biased.cached_ptr(); // typed K_raw
+            builder.arg(&cb_p);
+            builder.arg(&bb_p);
+            builder.arg(&scale_in_ptr);
+            builder.arg(&gamma_in_ptr);
+            builder.arg(acts.angle_cumsum.inner());
+            builder.arg(sc.d_q.inner());
+            builder.arg(sc.d_k.inner());
+            builder.arg(sc.d_beta.inner());
+            builder.arg(&rows_i);
+            builder.arg(&ds_i);
+            builder.arg(&na_i);
+            unsafe { builder.launch(grid_1d_cover(rows)?) }
+                .map_err(|e| format!("m3_dqktheta_typed B6: {:?}", e))?;
         }
         // colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
         {

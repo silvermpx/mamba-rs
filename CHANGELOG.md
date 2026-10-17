@@ -607,10 +607,8 @@
   numeric contract, since the two kernels round the last terms of an
   output differently. Every shape keeps its bits: the retired kernels stay
   frozen in `tests/fixtures/m3_chunked_forward_reference.cu`, and the
-  sliced kernels are held to them. `m3_dqktheta` keeps staging its tiles
-  up to 48 KB (`DQKTHETA_STAGING_MAX`): larger staged tiles measured
-  slower than its direct reads at some shapes. `chunk_fused_cfg`
-  takes the bytes a block may stage; `chunk_pre_state_cfg`,
+  sliced kernels are held to them. `chunk_fused_cfg` takes the bytes a
+  block may stage; `chunk_pre_state_cfg`,
   `chunk_pre_state_sliced_cfg`, `chunk_scan_coop_cfg`,
   `chunk_scan_sliced_cfg` and `ChunkArm` are new, and `chunk_scan_cfg`
   returns the arm it routes to; `chunk_state_cfg`,
@@ -619,6 +617,27 @@
   within, and `route::CHUNKED_BACKWARD_SMEM_MAX` is `route::PLANNED_SMEM`.
   The scan micro bench takes its `scan_trio/chunk_states` and
   `state_passing` digests from the pre-state's own decay cumsum.
+- The chunked backward of Mamba-3 SISO runs every stage on fast kernels.
+  The tiled dQKV stage holds a 4 x 4 block of outputs a thread in
+  registers, fed by two operand tiles of 32 reduction steps (43 KB at a
+  chunk of 64), where an output or a pair slot a thread read tiles TW
+  columns wide; the dADT chain of each chunk's saved state takes a warp a
+  row, and the per-chunk state terms a block a 64 by 64 tile.
+  `m3_dqktheta` walks each (b, t, h) row in registers, a thread a row,
+  where a block took a chunk of a head and every thread held its whole row
+  in state-capacity arrays (local memory), staged or read straight from
+  global memory. Every output keeps its bits: the staged dQKV stage and the
+  released dQK-theta stage stay frozen in
+  `tests/fixtures/m3_dqkv_tiled_reference.cu` and
+  `tests/fixtures/m3_dqktheta_reference.cu`, and the new kernels are held
+  to them. The half dQK-theta transport for sm_89 is gone with the stage it
+  tuned, and `Mamba3Kernels::dqktheta_for_shape` with it; `m3_dqktheta`
+  takes the row count, the state width and the angle count in place of the
+  batch, window, heads, chunk, staging flag and first y block;
+  `route::chunked_backward_tiled_smem_bytes` takes no tile width; and
+  `dm_chain_cfg`, `state_terms_tiled_cfg`, `DM_CHAIN_WARPS`,
+  `STATE_TERMS_TILE`, `route::TILED_DQKV_STEPS` and
+  `route::TILED_DQKV_STRIDE` are new.
 
 ### Fixed
 

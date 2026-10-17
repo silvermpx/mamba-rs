@@ -547,11 +547,10 @@ M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_f16, __half)
 // it serves heads of at most one warp and states whose tiles fit beside
 // them. The kernels below compute the same outputs for any headdim and any
 // d_state in a fixed shared-memory budget: every operand streams through
-// tiles of TW columns, and every sum runs in the order m3_dqkv runs it, its
-// partial carried exactly as a float from one tile to the next. A tile
-// width therefore never changes a bit, and at every width m3_dqkv serves
-// the outputs are its bits. Chains run over valid indices only, so padding
-// never adds a zero that could turn a -0.0 into +0.0.
+// fixed tiles, and every sum runs in the order m3_dqkv runs it, its partial
+// carried exactly as a float from one tile to the next, so at every width
+// m3_dqkv serves the outputs are its bits. Chains run over valid indices
+// only, so padding never adds a zero that could turn a -0.0 into +0.0.
 // ============================================================================
 
 // Index of the pair (a, b), a < b, in a chunk's strict upper triangle.
@@ -560,31 +559,77 @@ __device__ __forceinline__ int m3t_tri(int a, int b, int cs) {
 }
 
 // The scalar the chunk's saved state adds to dADT: the flat chain over
-// (p, n), p-major, of the saved state times its gradient. One thread per
-// (b, chunk, h), since the chain's order is the numeric contract. A kernel
-// of its own, so the chain delays no other work.
-extern "C" __global__ void m3_dqkv_dm_chain(
+// (p, n), p-major, of the saved state times its gradient, one thread's
+// chain in order, since the order is the numeric contract. A warp takes a
+// (b, chunk, h): its lanes stage the two rows M3D_SEG values at a time in
+// the warp's slice of shared memory, coalesced, and lane 0 runs the chain
+// over them while the next segment's loads are in flight. A kernel of its
+// own, so the chain delays no other work.
+// Grid: ceil(rows / M3D_WARPS). Block: 32 * M3D_WARPS.
+#define M3D_WARPS 8
+#define M3D_SEG 128
+extern "C" __global__ __launch_bounds__(32 * M3D_WARPS) void m3_dqkv_dm_chain(
     float* __restrict__ dm_out,             // [B*n_chunks*nh]
     const float* __restrict__ SSM_States,   // [B*n_chunks*nh*hd*ds]
     const float* __restrict__ enter_state,  // [B*n_chunks*nh*hd*ds]
     int rows, int hd, int ds
 ) {
-    const long long row = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ __align__(16) float seg_sm[M3D_WARPS][2][2][M3D_SEG];
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const long long row = (long long)blockIdx.x * M3D_WARPS + warp;
     if (row >= rows) return;
-    const long long base = row * hd * ds;
     const int n_el = hd * ds;
+    const float* s_row = SSM_States + row * n_el;
+    const float* e_row = enter_state + row * n_el;
+    const bool vec = (n_el & 3) == 0 && M3_QUAD_ALIGNED(SSM_States, float)
+                     && M3_QUAD_ALIGNED(enter_state, float);
+    // A lane's four values of the segment from `at`, zeros past the row.
+    int at = 4 * lane;
+    float4 sv = m3_load_quad(s_row + at, n_el - at, vec);
+    float4 ev = m3_load_quad(e_row + at, n_el - at, vec);
+    reinterpret_cast<float4*>(seg_sm[warp][0][0])[lane] = sv;
+    reinterpret_cast<float4*>(seg_sm[warp][0][1])[lane] = ev;
+    __syncwarp();
     float acc = 0.0f;
-    for (int i = 0; i < n_el; i++)
-        acc += SSM_States[base + i] * enter_state[base + i];
-    dm_out[row] = acc;
+    int cur = 0;
+    for (int s0 = 0; s0 < n_el; s0 += M3D_SEG) {
+        const bool more = s0 + M3D_SEG < n_el;
+        if (more) {
+            at = s0 + M3D_SEG + 4 * lane;
+            sv = m3_load_quad(s_row + at, n_el - at, vec);
+            ev = m3_load_quad(e_row + at, n_el - at, vec);
+        }
+        if (lane == 0) {
+            const float* sr = seg_sm[warp][cur][0];
+            const float* er = seg_sm[warp][cur][1];
+            const int m = min(M3D_SEG, n_el - s0);
+            for (int i = 0; i < m; i++) acc = __fmaf_rn(sr[i], er[i], acc);
+        }
+        if (more) {
+            reinterpret_cast<float4*>(seg_sm[warp][cur ^ 1][0])[lane] = sv;
+            reinterpret_cast<float4*>(seg_sm[warp][cur ^ 1][1])[lane] = ev;
+        }
+        __syncwarp();
+        cur ^= 1;
+    }
+    if (lane == 0) dm_out[row] = acc;
 }
+#undef M3D_SEG
+#undef M3D_WARPS
 
-// The per-chunk terms of the reverse state pass: state_B[p][n] =
-// sum over t ascending of dO[t][p] * exp2(dA[t]) * Q[t][n], the chain of
-// m3_dqkv_state_terms, for any width. One block of 256 threads per
-// (b, h, chunk) walks the [hd][ds] output in 16 x 16 tiles, one output per
-// thread. The weighted dO is rounded once into shared memory, the product
-// the original forms before its fused add.
+// The per-chunk terms of the reverse state pass: state_B[p][n] = the
+// ascending-t chain of dO[t][p] * exp2(dA[t]) (the product rounded once)
+// fused with Q[t][n], from +0 over the tokens before the chunk's first
+// sequence start, the chain of m3_dqkv_state_terms, for any width. A block
+// takes a tile of M3S_TILE channels by M3S_TILE states of one (h, b, chunk),
+// the chunk's weighted dO rows and Q rows staged whole; each of its 256
+// threads holds a 4 x 4 block of outputs, so every value it reads feeds
+// four chains.
+// Grid: (nh * ceil(hd / M3S_TILE) * ceil(ds / M3S_TILE), B, n_chunks).
+// Block: 256.
+#define M3S_TILE 64
+#define M3S_LD (M3S_TILE + 4)
 #define DEFINE_M3_DQKV_STATE_TERMS_TILED(NAME, T_ACT)                          \
 extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     float* __restrict__ state_B,                                               \
@@ -596,7 +641,12 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     int z_first, /* this run's first z block */                                \
     const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
-    const int h = blockIdx.x;                                                  \
+    const int p_tiles = (hd + M3S_TILE - 1) / M3S_TILE;                        \
+    const int n_tiles = (ds + M3S_TILE - 1) / M3S_TILE;                        \
+    const int h = blockIdx.x / (p_tiles * n_tiles);                            \
+    const int tile = blockIdx.x - h * p_tiles * n_tiles;                       \
+    const int p0 = (tile / n_tiles) * M3S_TILE;                                \
+    const int n0 = (tile - (tile / n_tiles) * n_tiles) * M3S_TILE;             \
     const int b = y_first + blockIdx.y;                                        \
     const int chunk_idx = z_first + blockIdx.z;                                \
     const int tid = threadIdx.x;                                               \
@@ -611,39 +661,68 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
                      - chunk_start;                                            \
     const long long d_inner = (long long)nh_total * hd;                        \
     const long long cidx = ((long long)b * n_chunks + chunk_idx) * nh_total + h; \
-    __shared__ float w_sm[64 * 17];                                            \
-    __shared__ float q_sm[64 * 17];                                            \
+    const long long row0 = (long long)b * T + chunk_start;                     \
+    __shared__ __align__(16) float w_sm[64 * M3S_LD];                          \
+    __shared__ __align__(16) float q_sm[64 * M3S_LD];                          \
     __shared__ float e_sm[64];                                                 \
-    for (int t = tid; t < len; t += 256)                                       \
+    for (int t = tid; t < cont; t += 256)                                      \
         e_sm[t] = exp2f(DA_CS[cidx * CS + t] * LOG2E);                         \
-    const int r = tid / 16;                                                    \
-    const int c = tid % 16;                                                    \
-    for (int p0 = 0; p0 < hd; p0 += 16) {                                      \
-        const int pw = min(16, hd - p0);                                       \
-        for (int n0 = 0; n0 < ds; n0 += 16) {                                  \
-            const int nw = min(16, ds - n0);                                   \
-            __syncthreads();                                                   \
-            for (int o = tid; o < len * 16; o += 256) {                        \
-                const int t = o / 16;                                          \
-                const int j = o % 16;                                          \
-                const long long row = (long long)b * T + chunk_start + t;      \
-                if (j < pw)                                                    \
-                    w_sm[t * 17 + j] =                                         \
-                        to_f(dO[row * d_inner + (long long)h * hd + p0 + j])   \
-                        * e_sm[t];                                             \
-                if (j < nw)                                                    \
-                    q_sm[t * 17 + j] =                                         \
-                        to_f(Q_rot[(row * nh_total + h) * ds + n0 + j]);       \
-            }                                                                  \
-            __syncthreads();                                                   \
-            if (r < pw && c < nw) {                                            \
-                float acc = 0.0f;                                              \
-                for (int t = 0; t < cont; t++)                                 \
-                    acc += w_sm[t * 17 + r] * q_sm[t * 17 + c];                \
-                state_B[cidx * hd * ds + (long long)(p0 + r) * ds + n0 + c] =  \
-                    acc;                                                       \
-            }                                                                  \
+    __syncthreads();                                                           \
+    /* The tile's dO rows times their decay, each product rounded once, */    \
+    /* and its Q rows, four values a load where the rows allow it. */          \
+    const int pw = min(M3S_TILE, hd - p0);                                     \
+    const int nw = min(M3S_TILE, ds - n0);                                     \
+    const bool vec_o = (hd & 3) == 0 && M3_QUAD_ALIGNED(dO, T_ACT);            \
+    const bool vec_q = (ds & 3) == 0 && M3_QUAD_ALIGNED(Q_rot, T_ACT);         \
+    for (int i = tid; i < cont * (M3S_TILE / 4); i += 256) {                   \
+        const int t = i / (M3S_TILE / 4);                                      \
+        const int c = i - t * (M3S_TILE / 4);                                  \
+        const float4 v = m3_load_quad(                                         \
+            dO + (row0 + t) * d_inner + (long long)h * hd + p0 + 4 * c,        \
+            pw - 4 * c, vec_o);                                                \
+        const float e = e_sm[t];                                               \
+        float4 w;                                                              \
+        w.x = __fmul_rn(v.x, e);                                               \
+        w.y = __fmul_rn(v.y, e);                                               \
+        w.z = __fmul_rn(v.z, e);                                               \
+        w.w = __fmul_rn(v.w, e);                                               \
+        *reinterpret_cast<float4*>(w_sm + t * M3S_LD + 4 * c) = w;             \
+        *reinterpret_cast<float4*>(q_sm + t * M3S_LD + 4 * c) = m3_load_quad(  \
+            Q_rot + ((row0 + t) * nh_total + h) * ds + n0 + 4 * c,             \
+            nw - 4 * c, vec_q);                                                \
+    }                                                                          \
+    __syncthreads();                                                           \
+    /* Thread (tp, tn) holds channels p0 + 4 tp .. + 3 by states */            \
+    /* n0 + 4 tn .. + 3, each output its own ascending-t chain from +0. */     \
+    const int tp = tid >> 4;                                                   \
+    const int tn = tid & 15;                                                   \
+    if (4 * tp >= pw || 4 * tn >= nw) return;                                  \
+    float acc[4][4];                                                           \
+    _Pragma("unroll")                                                          \
+    for (int i = 0; i < 4; i++) {                                              \
+        _Pragma("unroll")                                                      \
+        for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;                          \
+    }                                                                          \
+    for (int t = 0; t < cont; t++) {                                           \
+        const float4 w4 = *reinterpret_cast<const float4*>(w_sm + t * M3S_LD + 4 * tp); \
+        const float4 q4 = *reinterpret_cast<const float4*>(q_sm + t * M3S_LD + 4 * tn); \
+        const float wv[4] = {w4.x, w4.y, w4.z, w4.w};                          \
+        const float qv[4] = {q4.x, q4.y, q4.z, q4.w};                          \
+        _Pragma("unroll")                                                      \
+        for (int i = 0; i < 4; i++) {                                          \
+            _Pragma("unroll")                                                  \
+            for (int j = 0; j < 4; j++)                                        \
+                acc[i][j] = __fmaf_rn(wv[i], qv[j], acc[i][j]);                \
         }                                                                      \
+    }                                                                          \
+    const bool vec_s = (ds & 3) == 0 && M3_QUAD_ALIGNED(state_B, float);       \
+    _Pragma("unroll")                                                          \
+    for (int i = 0; i < 4; i++) {                                              \
+        if (4 * tp + i >= pw) break;                                           \
+        m3_store_quad(state_B + cidx * hd * ds + (long long)(p0 + 4 * tp + i) * ds \
+                          + n0 + 4 * tn,                                       \
+                      make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]), \
+                      nw - 4 * tn, vec_s);                                     \
     }                                                                          \
 }
 
@@ -651,30 +730,140 @@ DEFINE_M3_DQKV_STATE_TERMS_TILED(m3_dqkv_state_terms_tiled, float)
 DEFINE_M3_DQKV_STATE_TERMS_TILED(m3_dqkv_state_terms_tiled_bf16, __nv_bfloat16)
 DEFINE_M3_DQKV_STATE_TERMS_TILED(m3_dqkv_state_terms_tiled_f16, __half)
 #undef DEFINE_M3_DQKV_STATE_TERMS_TILED
+#undef M3S_LD
+#undef M3S_TILE
 
 // m3_dqkv_tiled: m3_dqkv for any headdim and d_state.
 //
-// One block of 256 threads per (head, sequence, chunk), tiles TW columns
-// wide (up to 32, the caller's choice: the bits do not depend on it).
-// Shared memory, in floats: nine per-step lanes of 64, the three pair
-// triangles (K.Q, V.dO and the decay) of CS (CS - 1) / 2 each, four
-// [64][TW + 1] operand tiles and two [TW][TW + 1] state tiles.
+// m3_dqkv's outputs in its order from passes of exact-order products: every
+// output is one thread's chain over its reduction index in m3_dqkv's order,
+// from +0 with the same fused multiply-adds, and every epilogue is m3_dqkv's
+// expression as its compiler forms it. A thread holds a 4 x 4 block of
+// outputs, so each operand it reads from shared memory feeds four chains.
+// Operands stream through two tiles of M3R_KT steps of the reduction by 64
+// rows or columns, the step major, so a thread reads its four rows and its
+// four columns of a step as two float4s. One block of 256 threads per
+// (head, sequence, chunk); thread (ty, tx) = (tid / 16, tid % 16) holds rows
+// 4 ty .. + 3 by columns 4 tx .. + 3 of a 64 x 64 block.
 //
-// The work, in order, each sum in m3_dqkv's order:
-// 1. The pair dots over d_state and over headdim, one slot per thread,
-//    their partials held in registers across the tiles.
-// 2. dQK_dot from global memory, each 32-channel segment through the warp
+// The passes, in order:
+// 1. The pair dots, K.Q over the state and V.dO over the head, a 4 x 4 block
+//    of pairs a thread, then the triangles and the pairs' decays.
+// 2. dQK_dot, a warp a step, each 32-channel segment through the warp
 //    kernel's shuffle tree, the segments added in order.
-// 3. Per head tile: K.dS^T and Q.S^T over d_state, then dV and the two
-//    per-step chains of the dADT state terms over the tile's channels.
-// 4. Per state tile: the intra-chunk dK and dQ, then their state terms
-//    over headdim.
+// 3. Per block of 64 channels: K against the state gradient over the state
+//    and each step's chain of its products with V; the intra-chunk dV over
+//    the later steps of the step's sequence and dV; Q against the saved
+//    state and each step's chain of its products with dO. A step's chain
+//    over the channels is handed from thread to thread across the sixteen
+//    that hold the step, in channel order.
+// 4. Per block of 64 states: dK, the intra-chunk sum over the later steps
+//    and the inter term over the head; then dQ over the earlier steps.
 // 5. dADT from the triangles and the per-step lanes, its serial combine,
 //    and the chunk's dD partial.
-#define M3T_MAX_SLOTS 8
-#define M3T_MAX_OUT 8
+//
+// Shared memory, in floats: nine per-step lanes of 64, the three pair
+// triangles of CS (CS - 1) / 2, then two [M3R_KT][M3R_LD] operand tiles on
+// 16 bytes: 43,904 bytes at a chunk of 64.
+#define M3R_KT 32
+#define M3R_LD 68
+
+// Rows [0, nrows) of a row-major source, steps [k0, k0 + kw) of each, into
+// a step-major tile, every value widened to f32: tile[k][r] =
+// src[r * ld + k0 + k]; rows past nrows and steps past kw hold zeros. A
+// thread loads four steps of a row at once (`vec` when the rows keep their
+// alignment).
+template <typename T_ACT>
+__device__ __forceinline__ void m3r_stage_rows(
+    float* __restrict__ tile, const T_ACT* __restrict__ src, long long ld, int nrows, int k0,
+    int kw, bool vec
+) {
+    constexpr int KQ = M3R_KT >> 2;
+    for (int i = threadIdx.x; i < 64 * KQ; i += blockDim.x) {
+        const int r = i / KQ;
+        const int c = i - r * KQ;
+        float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (r < nrows) v = m3_load_quad(src + r * ld + k0 + 4 * c, kw - 4 * c, vec);
+        tile[(4 * c + 0) * M3R_LD + r] = v.x;
+        tile[(4 * c + 1) * M3R_LD + r] = v.y;
+        tile[(4 * c + 2) * M3R_LD + r] = v.z;
+        tile[(4 * c + 3) * M3R_LD + r] = v.w;
+    }
+}
+
+// Steps [0, kw) of a step-major source, columns [c0, c0 + ncols) of each,
+// into a tile, every value widened to f32: tile[k][c] = src[k * ld + c0 + c];
+// steps past kw and columns past ncols hold zeros.
+template <typename T_ACT>
+__device__ __forceinline__ void m3r_stage_steps(
+    float* __restrict__ tile, const T_ACT* __restrict__ src, long long ld, int kw, int c0,
+    int ncols, bool vec
+) {
+    for (int i = threadIdx.x; i < M3R_KT * 16; i += blockDim.x) {
+        const int k = i >> 4;
+        const int c = i & 15;
+        float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (k < kw) v = m3_load_quad(src + k * ld + c0 + 4 * c, ncols - 4 * c, vec);
+        *reinterpret_cast<float4*>(tile + k * M3R_LD + 4 * c) = v;
+    }
+}
+
+// acc[i][j] = fma(a[k][ra + i], b[k][cb + j], acc[i][j]) over the steps
+// k < kw in order.
+__device__ __forceinline__ void m3r_mma(
+    float (&acc)[4][4], const float* __restrict__ a, const float* __restrict__ b, int kw, int ra,
+    int cb
+) {
+    for (int k = 0; k < kw; k++) {
+        const float4 av = *reinterpret_cast<const float4*>(a + k * M3R_LD + ra);
+        const float4 bv = *reinterpret_cast<const float4*>(b + k * M3R_LD + cb);
+        const float ar[4] = {av.x, av.y, av.z, av.w};
+        const float br[4] = {bv.x, bv.y, bv.z, bv.w};
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+#pragma unroll
+            for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(ar[i], br[j], acc[i][j]);
+        }
+    }
+}
+
+__device__ __forceinline__ void m3r_zero(float (&acc)[4][4]) {
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+#pragma unroll
+        for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;
+    }
+}
+
+// A step's chain over the columns of a block, carried in `cv` (a value for
+// each of the thread's four steps), handed across the sixteen threads that
+// hold the step: thread tx adds its columns' terms x[i][j] * y[i][j], j
+// ascending, in turn, and every thread reads the chain back from the one
+// whose turn it was. Columns past `width` and steps past `len` add nothing.
+__device__ __forceinline__ void m3r_row_chain(
+    float (&cv)[4], const float (&x)[4][4], const float (&y)[4][4], int ty, int tx, int len,
+    int width
+) {
+    const int base = threadIdx.x & 16;
+    for (int step = 0; step < 16; step++) {
+        if (tx == step) {
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                if (4 * ty + i < len) {
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        if (4 * tx + j < width) cv[i] = __fmaf_rn(x[i][j], y[i][j], cv[i]);
+                    }
+                }
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < 4; i++) cv[i] = __shfl_sync(0xFFFFFFFFu, cv[i], base + step);
+    }
+}
+
 #define DEFINE_M3_DQKV_TILED(NAME, T_ACT)                                      \
-extern "C" __global__ __launch_bounds__(256) void NAME(                        \
+extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
     float* __restrict__ dQ_mid, float* __restrict__ dK_mid,                    \
     float* __restrict__ dV, float* __restrict__ dADT,                          \
     float* __restrict__ dQK_dot_out, float* __restrict__ dD_partials,          \
@@ -686,7 +875,7 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     const T_ACT* __restrict__ dO, const float* __restrict__ D_param,           \
     const float* __restrict__ enter_state,                                     \
     const float* __restrict__ dm_chain,                                        \
-    int B, int T, int nh_total, int hd, int ds, int CS, int TW,                \
+    int B, int T, int nh_total, int hd, int ds, int CS,                        \
     int y_first, /* this run's first y block */                                \
     int z_first, /* this run's first z block */                                \
     const int* __restrict__ seq_idx                                            \
@@ -696,21 +885,33 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     const int chunk_idx = z_first + blockIdx.z;                                \
     const int tid = threadIdx.x;                                               \
     /* Uniform across the block, so every thread reaches the barriers. */     \
-    if (h >= nh_total || b >= B || CS > 64 || TW > 32 || TW < 1) return;       \
+    if (h >= nh_total || b >= B || CS > 64) return;                            \
     const int n_chunks = (T + CS - 1) / CS;                                    \
     const int chunk_start = chunk_idx * CS;                                    \
     const int len = min(CS, T - chunk_start);                                  \
     const long long d_inner = (long long)nh_total * hd;                        \
+    const long long kq_ld = (long long)nh_total * ds;                          \
     const long long cidx = ((long long)b * n_chunks + chunk_idx) * nh_total + h; \
     const long long row0 = (long long)b * T + chunk_start;                     \
     const float* ssm = SSM_States + cidx * hd * ds;                            \
     const float* dst = enter_state + cidx * hd * ds;                           \
+    const T_ACT* k_rows = K_scaled + (row0 * nh_total + h) * ds;               \
+    const T_ACT* q_rows = Q_rot + (row0 * nh_total + h) * ds;                  \
+    const T_ACT* v_rows = V_in + row0 * d_inner + (long long)h * hd;           \
+    const T_ACT* do_rows = dO + row0 * d_inner + (long long)h * hd;            \
     const float D_val = D_param[h];                                            \
     const float cs_sum = DA_CS_SUM[cidx];                                      \
-    const int RS = TW + 1;                                                     \
     const int tri_n = CS * (CS - 1) / 2;                                       \
-    extern __shared__ float m3t_sm[];                                          \
-    float* da_sm = m3t_sm;                                                     \
+    const int ty = tid >> 4;                                                   \
+    const int tx = tid & 15;                                                   \
+    const bool vec_kq = (ds & 3) == 0 && M3_QUAD_ALIGNED(K_scaled, T_ACT)      \
+                        && M3_QUAD_ALIGNED(Q_rot, T_ACT);                      \
+    const bool vec_vo = (hd & 3) == 0 && M3_QUAD_ALIGNED(V_in, T_ACT)          \
+                        && M3_QUAD_ALIGNED(dO, T_ACT);                         \
+    const bool vec_st = (ds & 3) == 0 && M3_QUAD_ALIGNED(SSM_States, float)    \
+                        && M3_QUAD_ALIGNED(enter_state, float);                \
+    extern __shared__ __align__(16) float m3r_sm[];                            \
+    float* da_sm = m3r_sm;                                                     \
     float* qk_sm = da_sm + 64;                                                 \
     float* ef_sm = qk_sm + 64;                                                 \
     float* er_sm = ef_sm + 64;                                                 \
@@ -722,12 +923,8 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     float* kq_tri = dskv_sm + 64;                                              \
     float* vdo_tri = kq_tri + tri_n;                                           \
     float* dec_tri = vdo_tri + tri_n;                                          \
-    float* a0 = dec_tri + tri_n; /* [64][RS] K, then K.dS^T */                 \
-    float* a1 = a0 + 64 * RS;    /* [64][RS] Q, then Q.S^T */                  \
-    float* a2 = a1 + 64 * RS;    /* [64][RS] dO */                             \
-    float* a3 = a2 + 64 * RS;    /* [64][RS] V */                              \
-    float* s0 = a3 + 64 * RS;    /* [TW][RS] saved state S */                  \
-    float* s1 = s0 + TW * RS;    /* [TW][RS] state gradient dS */              \
+    float* ta = m3r_sm + ((9 * 64 + 3 * tri_n + 3) & ~3);                      \
+    float* tb = ta + M3R_KT * M3R_LD;                                          \
     for (int t = tid; t < 64; t += 256) {                                      \
         float da = 0.0f, qk = 0.0f;                                            \
         if (t < len) {                                                         \
@@ -739,87 +936,68 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
         ef_sm[t] = exp2f(da * LOG2E);                                          \
         er_sm[t] = exp2f((cs_sum - da) * LOG2E);                               \
     }                                                                          \
-    /* The pair dots. Slot idx is pair (aa, bb) of the triangle. */   \
-    int pa[M3T_MAX_SLOTS], pb[M3T_MAX_SLOTS];                                  \
-    float kq_acc[M3T_MAX_SLOTS], vdo_acc[M3T_MAX_SLOTS];                       \
+    /* The sequence spans of the thread's four steps in a packed row. */       \
+    VlSpan span[4];                                                            \
     _Pragma("unroll")                                                          \
-    for (int k = 0; k < M3T_MAX_SLOTS; k++) {                                  \
-        const int idx = tid + 256 * k;                                         \
-        pa[k] = -1;                                                            \
-        pb[k] = -1;                                                            \
-        kq_acc[k] = 0.0f;                                                      \
-        vdo_acc[k] = 0.0f;                                                     \
-        if (idx < tri_n) {                                                     \
-            int aa = 0, start = 0;                                             \
-            while (start + (CS - 1 - aa) <= idx) {                             \
-                start += CS - 1 - aa;                                          \
-                aa++;                                                          \
+    for (int i = 0; i < 4; i++) {                                              \
+        const int t = 4 * ty + i;                                              \
+        span[i] = vl_span(seq_idx, b, T, chunk_start, len, t < len ? t : 0);   \
+    }                                                                          \
+                                                                               \
+    /* 1. The pair dots: pair block (ba, bb), ba <= bb, of the upper half */   \
+    /* of the chunk's 4 x 4 blocks of steps; a pair (a, c) of it lives */      \
+    /* where a < c < len. */                                                   \
+    {                                                                          \
+        const int nb = (len + 3) >> 2;                                         \
+        const int blocks = nb * (nb + 1) / 2;                                  \
+        int ba = 0;                                                            \
+        int bb = 0;                                                            \
+        if (tid < blocks) {                                                    \
+            int rem = tid;                                                     \
+            while (rem >= nb - ba) {                                           \
+                rem -= nb - ba;                                                \
+                ba++;                                                          \
             }                                                                  \
-            const int bb = idx - start + aa + 1;                               \
-            if (bb < len) {                                                    \
-                pa[k] = aa;                                                    \
-                pb[k] = bb;                                                    \
+            bb = ba + rem;                                                     \
+        }                                                                      \
+        float kq[4][4];                                                        \
+        float vdo[4][4];                                                       \
+        m3r_zero(kq);                                                          \
+        m3r_zero(vdo);                                                         \
+        for (int n0 = 0; n0 < ds; n0 += M3R_KT) {                              \
+            const int nw = min(M3R_KT, ds - n0);                               \
+            __syncthreads();                                                   \
+            m3r_stage_rows(ta, k_rows, kq_ld, len, n0, nw, vec_kq);            \
+            m3r_stage_rows(tb, q_rows, kq_ld, len, n0, nw, vec_kq);            \
+            __syncthreads();                                                   \
+            if (tid < blocks) m3r_mma(kq, ta, tb, nw, 4 * ba, 4 * bb);         \
+        }                                                                      \
+        for (int p0 = 0; p0 < hd; p0 += M3R_KT) {                              \
+            const int pw = min(M3R_KT, hd - p0);                               \
+            __syncthreads();                                                   \
+            m3r_stage_rows(ta, v_rows, d_inner, len, p0, pw, vec_vo);          \
+            m3r_stage_rows(tb, do_rows, d_inner, len, p0, pw, vec_vo);         \
+            __syncthreads();                                                   \
+            if (tid < blocks) m3r_mma(vdo, ta, tb, pw, 4 * ba, 4 * bb);        \
+        }                                                                      \
+        if (tid < blocks) {                                                    \
+            _Pragma("unroll")                                                  \
+            for (int i = 0; i < 4; i++) {                                      \
+                _Pragma("unroll")                                              \
+                for (int j = 0; j < 4; j++) {                                  \
+                    const int pa = 4 * ba + i;                                 \
+                    const int pb = 4 * bb + j;                                 \
+                    if (pa < pb && pb < len) {                                 \
+                        const int idx = m3t_tri(pa, pb, CS);                   \
+                        kq_tri[idx] = kq[i][j];                                \
+                        vdo_tri[idx] = vdo[i][j];                              \
+                        dec_tri[idx] = exp2f((da_sm[pb] - da_sm[pa]) * LOG2E); \
+                    }                                                          \
+                }                                                              \
             }                                                                  \
         }                                                                      \
     }                                                                          \
-    for (int n0 = 0; n0 < ds; n0 += TW) {                                      \
-        const int nw = min(TW, ds - n0);                                       \
-        __syncthreads();                                                       \
-        for (int o = tid; o < len * TW; o += 256) {                            \
-            const int t = o / TW;                                              \
-            const int j = o % TW;                                              \
-            if (j < nw) {                                                      \
-                const long long g = ((row0 + t) * nh_total + h) * ds + n0 + j; \
-                a0[t * RS + j] = to_f(K_scaled[g]);                            \
-                a1[t * RS + j] = to_f(Q_rot[g]);                               \
-            }                                                                  \
-        }                                                                      \
-        __syncthreads();                                                       \
-        _Pragma("unroll")                                                      \
-        for (int k = 0; k < M3T_MAX_SLOTS; k++) {                              \
-            if (pa[k] >= 0) {                                                  \
-                const float* kr = a0 + pa[k] * RS;                             \
-                const float* qr = a1 + pb[k] * RS;                             \
-                float acc = kq_acc[k];                                         \
-                for (int j = 0; j < nw; j++) acc += kr[j] * qr[j];             \
-                kq_acc[k] = acc;                                               \
-            }                                                                  \
-        }                                                                      \
-    }                                                                          \
-    for (int p0 = 0; p0 < hd; p0 += TW) {                                      \
-        const int pw = min(TW, hd - p0);                                       \
-        __syncthreads();                                                       \
-        for (int o = tid; o < len * TW; o += 256) {                            \
-            const int t = o / TW;                                              \
-            const int j = o % TW;                                              \
-            if (j < pw) {                                                      \
-                const long long g = (row0 + t) * d_inner + (long long)h * hd + p0 + j; \
-                a3[t * RS + j] = to_f(V_in[g]);                                \
-                a2[t * RS + j] = to_f(dO[g]);                                  \
-            }                                                                  \
-        }                                                                      \
-        __syncthreads();                                                       \
-        _Pragma("unroll")                                                      \
-        for (int k = 0; k < M3T_MAX_SLOTS; k++) {                              \
-            if (pa[k] >= 0) {                                                  \
-                const float* vr = a3 + pa[k] * RS;                             \
-                const float* dr = a2 + pb[k] * RS;                             \
-                float acc = vdo_acc[k];                                        \
-                for (int j = 0; j < pw; j++) acc += vr[j] * dr[j];             \
-                vdo_acc[k] = acc;                                              \
-            }                                                                  \
-        }                                                                      \
-    }                                                                          \
-    _Pragma("unroll")                                                          \
-    for (int k = 0; k < M3T_MAX_SLOTS; k++) {                                  \
-        if (pa[k] >= 0) {                                                      \
-            const int idx = tid + 256 * k;                                     \
-            kq_tri[idx] = kq_acc[k];                                           \
-            vdo_tri[idx] = vdo_acc[k];                                         \
-            dec_tri[idx] = exp2f((da_sm[pb[k]] - da_sm[pa[k]]) * LOG2E);       \
-        }                                                                      \
-    }                                                                          \
-    /* dQK_dot. A warp takes a step, and lane l holds channel l of */     \
+    /* 2. dQK_dot. A warp takes a step, and lane l holds channel l of */       \
     /* each 32-channel segment. A head under a warp starts its tree at its */  \
     /* power of two, as the warp kernel's width-hd tree does. Lanes past */    \
     /* the head hold -0.0, which leaves every sum as it is. */                 \
@@ -847,221 +1025,221 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
             }                                                                  \
         }                                                                      \
     }                                                                          \
-    /* Per head tile. Output o of a thread is step t = o / TW, */     \
-    /* channel j = o % TW of the tile. */                                      \
-    const int n_out = (64 * TW + 255) / 256;                                   \
-    for (int p0 = 0; p0 < hd; p0 += TW) {                                      \
-        const int pw = min(TW, hd - p0);                                       \
-        float ke[M3T_MAX_OUT], qs[M3T_MAX_OUT];                                \
-        _Pragma("unroll")                                                      \
-        for (int k = 0; k < M3T_MAX_OUT; k++) {                                \
-            ke[k] = 0.0f;                                                      \
-            qs[k] = 0.0f;                                                      \
+    __syncthreads();                                                           \
+                                                                               \
+    /* 3. Per block of 64 channels. */                                        \
+    for (int p0 = 0; p0 < hd; p0 += 64) {                                      \
+        const int pw = min(64, hd - p0);                                       \
+        /* K against the state gradient over the state. */                     \
+        float ke[4][4];                                                        \
+        m3r_zero(ke);                                                          \
+        for (int n0 = 0; n0 < ds; n0 += M3R_KT) {                              \
+            const int nw = min(M3R_KT, ds - n0);                               \
+            __syncthreads();                                                   \
+            m3r_stage_rows(ta, k_rows, kq_ld, len, n0, nw, vec_kq);            \
+            m3r_stage_rows(tb, dst + (long long)p0 * ds, (long long)ds, pw, n0, nw, vec_st); \
+            __syncthreads();                                                   \
+            m3r_mma(ke, ta, tb, nw, 4 * ty, 4 * tx);                           \
         }                                                                      \
-        for (int n0 = 0; n0 < ds; n0 += TW) {                                  \
-            const int nw = min(TW, ds - n0);                                   \
-            __syncthreads();                                                   \
-            for (int o = tid; o < len * TW; o += 256) {                        \
-                const int t = o / TW;                                          \
-                const int j = o % TW;                                          \
-                if (j < nw) {                                                  \
-                    const long long g = ((row0 + t) * nh_total + h) * ds + n0 + j; \
-                    a0[t * RS + j] = to_f(K_scaled[g]);                        \
-                    a1[t * RS + j] = to_f(Q_rot[g]);                           \
-                }                                                              \
-            }                                                                  \
-            for (int o = tid; o < pw * TW; o += 256) {                         \
-                const int r = o / TW;                                          \
-                const int j = o % TW;                                          \
-                if (j < nw) {                                                  \
-                    const long long g = (long long)(p0 + r) * ds + n0 + j;     \
-                    s0[r * RS + j] = ssm[g];                                   \
-                    s1[r * RS + j] = dst[g];                                   \
-                }                                                              \
-            }                                                                  \
-            __syncthreads();                                                   \
+        /* The thread's V and dO of the block. */                              \
+        float vv[4][4];                                                        \
+        float dov[4][4];                                                       \
+        _Pragma("unroll")                                                      \
+        for (int i = 0; i < 4; i++) {                                          \
+            const int t = 4 * ty + i;                                          \
+            const float4 v4 = t < len                                          \
+                ? m3_load_quad(v_rows + t * d_inner + p0 + 4 * tx, pw - 4 * tx, vec_vo) \
+                : make_float4(0.0f, 0.0f, 0.0f, 0.0f);                         \
+            const float4 d4 = t < len                                          \
+                ? m3_load_quad(do_rows + t * d_inner + p0 + 4 * tx, pw - 4 * tx, vec_vo) \
+                : make_float4(0.0f, 0.0f, 0.0f, 0.0f);                         \
+            vv[i][0] = v4.x; vv[i][1] = v4.y; vv[i][2] = v4.z; vv[i][3] = v4.w; \
+            dov[i][0] = d4.x; dov[i][1] = d4.y; dov[i][2] = d4.z; dov[i][3] = d4.w; \
+        }                                                                      \
+        /* Each step's chain of K.dS times V over the channels, carried */     \
+        /* from the block before. */                                           \
+        float chain[4];                                                        \
+        _Pragma("unroll")                                                      \
+        for (int i = 0; i < 4; i++) {                                          \
+            const int t = 4 * ty + i;                                          \
+            chain[i] = (p0 == 0 || t >= len) ? 0.0f : dskv_sm[t];              \
+        }                                                                      \
+        m3r_row_chain(chain, ke, vv, ty, tx, len, pw);                         \
+        __syncthreads();                                                       \
+        if (tx == 0) {                                                         \
             _Pragma("unroll")                                                  \
-            for (int k = 0; k < M3T_MAX_OUT; k++) {                            \
-                const int o = tid + 256 * k;                                   \
-                const int t = o / TW;                                          \
-                const int j = o % TW;                                          \
-                if (k < n_out && t < len && j < pw) {                          \
-                    const float* kr = a0 + t * RS;                             \
-                    const float* qr = a1 + t * RS;                             \
-                    const float* sr = s0 + j * RS;                             \
-                    const float* dr = s1 + j * RS;                             \
-                    float kacc = ke[k], qacc = qs[k];                          \
-                    for (int c = 0; c < nw; c++) {                             \
-                        kacc += kr[c] * dr[c];                                 \
-                        qacc += qr[c] * sr[c];                                 \
+            for (int i = 0; i < 4; i++) {                                      \
+                if (4 * ty + i < len) dskv_sm[4 * ty + i] = chain[i];          \
+            }                                                                  \
+        }                                                                      \
+        /* The intra-chunk dV: each output's chain over the later steps of */  \
+        /* its step's sequence, in order. */                                   \
+        float dvi[4][4];                                                       \
+        m3r_zero(dvi);                                                         \
+        for (int s0 = 0; s0 < len; s0 += M3R_KT) {                             \
+            const int sw = min(M3R_KT, len - s0);                              \
+            __syncthreads();                                                   \
+            m3r_stage_steps(tb, do_rows + s0 * d_inner, d_inner, sw, p0, pw, vec_vo); \
+            __syncthreads();                                                   \
+            for (int k = 0; k < sw; k++) {                                     \
+                const int s = s0 + k;                                          \
+                const float4 bv = *reinterpret_cast<const float4*>(tb + k * M3R_LD + 4 * tx); \
+                const float br[4] = {bv.x, bv.y, bv.z, bv.w};                  \
+                _Pragma("unroll")                                              \
+                for (int i = 0; i < 4; i++) {                                  \
+                    const int t = 4 * ty + i;                                  \
+                    if (t < len && s > t && s < span[i].end) {                 \
+                        const int ti = m3t_tri(t, s, CS);                      \
+                        const float w = __fmul_rn(kq_tri[ti], dec_tri[ti]);    \
+                        _Pragma("unroll")                                      \
+                        for (int j = 0; j < 4; j++)                            \
+                            dvi[i][j] = __fmaf_rn(w, br[j], dvi[i][j]);        \
                     }                                                          \
-                    ke[k] = kacc;                                              \
-                    qs[k] = qacc;                                              \
                 }                                                              \
             }                                                                  \
         }                                                                      \
-        __syncthreads();                                                       \
-        /* The tile's dO and V, and its K.dS^T and Q.S^T where K and Q were. */ \
-        for (int o = tid; o < len * TW; o += 256) {                            \
-            const int t = o / TW;                                              \
-            const int j = o % TW;                                              \
-            if (j < pw) {                                                      \
-                const long long g = (row0 + t) * d_inner + (long long)h * hd + p0 + j; \
-                a2[t * RS + j] = to_f(dO[g]);                                  \
-                a3[t * RS + j] = to_f(V_in[g]);                                \
+        _Pragma("unroll")                                                      \
+        for (int i = 0; i < 4; i++) {                                          \
+            const int t = 4 * ty + i;                                          \
+            if (t >= len) continue;                                            \
+            const float skip_w = __fadd_rn(D_val, qk_sm[t]);                   \
+            _Pragma("unroll")                                                  \
+            for (int j = 0; j < 4; j++) {                                      \
+                if (4 * tx + j >= pw) continue;                                \
+                const float inter = span[i].to_end ? ke[i][j] : 0.0f;          \
+                dV[(row0 + t) * d_inner + (long long)h * hd + p0 + 4 * tx + j] = \
+                    __fmaf_rn(dov[i][j], skip_w,                               \
+                              __fmaf_rn(inter, er_sm[t], dvi[i][j]));          \
             }                                                                  \
+        }                                                                      \
+        /* Q against the saved state over the state, then each step's */       \
+        /* chain of it times dO over the channels. */                          \
+        float qs[4][4];                                                        \
+        m3r_zero(qs);                                                          \
+        for (int n0 = 0; n0 < ds; n0 += M3R_KT) {                              \
+            const int nw = min(M3R_KT, ds - n0);                               \
+            __syncthreads();                                                   \
+            m3r_stage_rows(ta, q_rows, kq_ld, len, n0, nw, vec_kq);            \
+            m3r_stage_rows(tb, ssm + (long long)p0 * ds, (long long)ds, pw, n0, nw, vec_st); \
+            __syncthreads();                                                   \
+            m3r_mma(qs, ta, tb, nw, 4 * ty, 4 * tx);                           \
         }                                                                      \
         _Pragma("unroll")                                                      \
-        for (int k = 0; k < M3T_MAX_OUT; k++) {                                \
-            const int o = tid + 256 * k;                                       \
-            const int t = o / TW;                                              \
-            const int j = o % TW;                                              \
-            if (k < n_out && t < len && j < pw) {                              \
-                a0[t * RS + j] = ke[k];                                        \
-                a1[t * RS + j] = qs[k];                                        \
-            }                                                                  \
+        for (int i = 0; i < 4; i++) {                                          \
+            const int t = 4 * ty + i;                                          \
+            chain[i] = (p0 == 0 || t >= len) ? 0.0f : qsdo_sm[t];              \
         }                                                                      \
+        m3r_row_chain(chain, qs, dov, ty, tx, len, pw);                        \
         __syncthreads();                                                       \
-        _Pragma("unroll")                                                      \
-        for (int k = 0; k < M3T_MAX_OUT; k++) {                                \
-            const int o = tid + 256 * k;                                       \
-            const int t = o / TW;                                              \
-            const int j = o % TW;                                              \
-            if (k < n_out && t < len && j < pw) {                              \
-                const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, len, t); \
-                float dv_intra = 0.0f;                                         \
-                for (int s = t + 1; s < sp.end; s++) {                         \
-                    const int ti = m3t_tri(t, s, CS);                          \
-                    float kq = kq_tri[ti];                                     \
-                    float decay = dec_tri[ti];                                 \
-                    dv_intra += kq * decay * a2[s * RS + j];                   \
-                }                                                              \
-                float dv_inter = ke[k];                                        \
-                if (!sp.to_end) dv_inter = 0.0f;                               \
-                dv_inter *= er_sm[t];                                          \
-                float dv_skip = a2[t * RS + j] * (D_val + qk_sm[t]);           \
-                dV[(row0 + t) * d_inner + (long long)h * hd + p0 + j] =        \
-                    dv_intra + dv_inter + dv_skip;                             \
+        if (tx == 0) {                                                         \
+            _Pragma("unroll")                                                  \
+            for (int i = 0; i < 4; i++) {                                      \
+                if (4 * ty + i < len) qsdo_sm[4 * ty + i] = chain[i];          \
             }                                                                  \
-        }                                                                      \
-        /* The dADT state terms: per step, chains over the channels in */      \
-        /* order, continued from the previous tile. */                         \
-        for (int t = tid; t < len; t += 256) {                                 \
-            float qs_do = (p0 == 0) ? 0.0f : qsdo_sm[t];                       \
-            float dsk_v = (p0 == 0) ? 0.0f : dskv_sm[t];                       \
-            for (int j = 0; j < pw; j++) {                                     \
-                qs_do += a1[t * RS + j] * a2[t * RS + j];                      \
-                dsk_v += a0[t * RS + j] * a3[t * RS + j];                      \
-            }                                                                  \
-            qsdo_sm[t] = qs_do;                                                \
-            dskv_sm[t] = dsk_v;                                                \
         }                                                                      \
     }                                                                          \
-    /* Per state tile, dK and dQ. */                                  \
-    for (int n0 = 0; n0 < ds; n0 += TW) {                                      \
-        const int nw = min(TW, ds - n0);                                       \
-        __syncthreads();                                                       \
-        for (int o = tid; o < len * TW; o += 256) {                            \
-            const int t = o / TW;                                              \
-            const int j = o % TW;                                              \
-            if (j < nw) {                                                      \
-                const long long g = ((row0 + t) * nh_total + h) * ds + n0 + j; \
-                a0[t * RS + j] = to_f(K_scaled[g]);                            \
-                a1[t * RS + j] = to_f(Q_rot[g]);                               \
-            }                                                                  \
-        }                                                                      \
-        __syncthreads();                                                       \
-        float dki[M3T_MAX_OUT], dqi[M3T_MAX_OUT];                              \
-        float dko[M3T_MAX_OUT], dqo[M3T_MAX_OUT];                              \
-        _Pragma("unroll")                                                      \
-        for (int k = 0; k < M3T_MAX_OUT; k++) {                                \
-            const int o = tid + 256 * k;                                       \
-            const int t = o / TW;                                              \
-            const int j = o % TW;                                              \
-            dki[k] = 0.0f;                                                     \
-            dqi[k] = 0.0f;                                                     \
-            dko[k] = 0.0f;                                                     \
-            dqo[k] = 0.0f;                                                     \
-            if (k < n_out && t < len && j < nw) {                              \
-                const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, len, t); \
-                float dk_intra = 0.0f;                                         \
-                for (int s = t + 1; s < sp.end; s++) {                         \
-                    const int ti = m3t_tri(t, s, CS);                          \
-                    float vdo = vdo_tri[ti];                                   \
-                    float decay = dec_tri[ti];                                 \
-                    dk_intra += vdo * decay * a1[s * RS + j];                  \
-                }                                                              \
-                float dq_intra = 0.0f;                                         \
-                for (int s = sp.first; s < t; s++) {                           \
-                    const int ti = m3t_tri(s, t, CS);                          \
-                    float vdo = vdo_tri[ti];                                   \
-                    float decay = dec_tri[ti];                                 \
-                    dq_intra += vdo * decay * a0[s * RS + j];                  \
-                }                                                              \
-                dki[k] = dk_intra;                                             \
-                dqi[k] = dq_intra;                                             \
-            }                                                                  \
-        }                                                                      \
-        for (int p0 = 0; p0 < hd; p0 += TW) {                                  \
-            const int pw = min(TW, hd - p0);                                   \
+                                                                               \
+    /* 4. Per block of 64 states, dK then dQ. */                              \
+    for (int n0 = 0; n0 < ds; n0 += 64) {                                      \
+        const int nw = min(64, ds - n0);                                       \
+        float intra[4][4];                                                     \
+        float inter[4][4];                                                     \
+        m3r_zero(intra);                                                       \
+        m3r_zero(inter);                                                       \
+        /* dK: the intra sum over the later steps of the step's sequence. */   \
+        for (int s0 = 0; s0 < len; s0 += M3R_KT) {                             \
+            const int sw = min(M3R_KT, len - s0);                              \
             __syncthreads();                                                   \
-            for (int o = tid; o < len * TW; o += 256) {                        \
-                const int t = o / TW;                                          \
-                const int j = o % TW;                                          \
-                if (j < pw) {                                                  \
-                    const long long g = (row0 + t) * d_inner + (long long)h * hd + p0 + j; \
-                    a2[t * RS + j] = to_f(dO[g]);                              \
-                    a3[t * RS + j] = to_f(V_in[g]);                            \
-                }                                                              \
-            }                                                                  \
-            for (int o = tid; o < pw * TW; o += 256) {                         \
-                const int r = o / TW;                                          \
-                const int j = o % TW;                                          \
-                if (j < nw) {                                                  \
-                    const long long g = (long long)(p0 + r) * ds + n0 + j;     \
-                    s0[r * RS + j] = ssm[g];                                   \
-                    s1[r * RS + j] = dst[g];                                   \
-                }                                                              \
-            }                                                                  \
+            m3r_stage_steps(tb, q_rows + s0 * kq_ld, kq_ld, sw, n0, nw, vec_kq); \
             __syncthreads();                                                   \
-            _Pragma("unroll")                                                  \
-            for (int k = 0; k < M3T_MAX_OUT; k++) {                            \
-                const int o = tid + 256 * k;                                   \
-                const int t = o / TW;                                          \
-                const int j = o % TW;                                          \
-                if (k < n_out && t < len && j < nw) {                          \
-                    float qacc = dqo[k], kacc = dko[k];                        \
-                    for (int c = 0; c < pw; c++) {                             \
-                        qacc += a2[t * RS + c] * s0[c * RS + j];               \
-                        kacc += a3[t * RS + c] * s1[c * RS + j];               \
+            for (int k = 0; k < sw; k++) {                                     \
+                const int s = s0 + k;                                          \
+                const float4 bv = *reinterpret_cast<const float4*>(tb + k * M3R_LD + 4 * tx); \
+                const float br[4] = {bv.x, bv.y, bv.z, bv.w};                  \
+                _Pragma("unroll")                                              \
+                for (int i = 0; i < 4; i++) {                                  \
+                    const int t = 4 * ty + i;                                  \
+                    if (t < len && s > t && s < span[i].end) {                 \
+                        const int ti = m3t_tri(t, s, CS);                      \
+                        const float w = __fmul_rn(vdo_tri[ti], dec_tri[ti]);   \
+                        _Pragma("unroll")                                      \
+                        for (int j = 0; j < 4; j++)                            \
+                            intra[i][j] = __fmaf_rn(w, br[j], intra[i][j]);    \
                     }                                                          \
-                    dqo[k] = qacc;                                             \
-                    dko[k] = kacc;                                             \
                 }                                                              \
             }                                                                  \
         }                                                                      \
+        /* The inter term over the head: V against the state gradient. */      \
+        for (int q0 = 0; q0 < hd; q0 += M3R_KT) {                              \
+            const int qw = min(M3R_KT, hd - q0);                               \
+            __syncthreads();                                                   \
+            m3r_stage_rows(ta, v_rows, d_inner, len, q0, qw, vec_vo);          \
+            m3r_stage_steps(tb, dst + (long long)q0 * ds, (long long)ds, qw, n0, nw, vec_st); \
+            __syncthreads();                                                   \
+            m3r_mma(inter, ta, tb, qw, 4 * ty, 4 * tx);                        \
+        }                                                                      \
         _Pragma("unroll")                                                      \
-        for (int k = 0; k < M3T_MAX_OUT; k++) {                                \
-            const int o = tid + 256 * k;                                       \
-            const int t = o / TW;                                              \
-            const int j = o % TW;                                              \
-            if (k < n_out && t < len && j < nw) {                              \
-                const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, len, t); \
-                float dq_inter = dqo[k];                                       \
-                if (!sp.from_before) dq_inter = 0.0f;                          \
-                dq_inter *= ef_sm[t];                                          \
-                float dk_inter = dko[k];                                       \
-                if (!sp.to_end) dk_inter = 0.0f;                               \
-                dk_inter *= er_sm[t];                                          \
-                const long long g = ((row0 + t) * nh_total + h) * ds + n0 + j; \
-                dQ_mid[g] = dqi[k] + dq_inter;                                 \
-                dK_mid[g] = dki[k] + dk_inter;                                 \
+        for (int i = 0; i < 4; i++) {                                          \
+            const int t = 4 * ty + i;                                          \
+            if (t >= len) continue;                                            \
+            _Pragma("unroll")                                                  \
+            for (int j = 0; j < 4; j++) {                                      \
+                if (4 * tx + j >= nw) continue;                                \
+                const long long g = ((row0 + t) * nh_total + h) * ds + n0 + 4 * tx + j; \
+                const float sel = span[i].to_end ? inter[i][j] : 0.0f;         \
+                dK_mid[g] = __fmaf_rn(sel, er_sm[t], intra[i][j]);             \
+            }                                                                  \
+        }                                                                      \
+        /* dQ: the intra sum over the earlier steps of the step's */           \
+        /* sequence, then dO against the saved state over the head. */         \
+        m3r_zero(intra);                                                       \
+        m3r_zero(inter);                                                       \
+        for (int s0 = 0; s0 < len; s0 += M3R_KT) {                             \
+            const int sw = min(M3R_KT, len - s0);                              \
+            __syncthreads();                                                   \
+            m3r_stage_steps(tb, k_rows + s0 * kq_ld, kq_ld, sw, n0, nw, vec_kq); \
+            __syncthreads();                                                   \
+            for (int k = 0; k < sw; k++) {                                     \
+                const int s = s0 + k;                                          \
+                const float4 bv = *reinterpret_cast<const float4*>(tb + k * M3R_LD + 4 * tx); \
+                const float br[4] = {bv.x, bv.y, bv.z, bv.w};                  \
+                _Pragma("unroll")                                              \
+                for (int i = 0; i < 4; i++) {                                  \
+                    const int t = 4 * ty + i;                                  \
+                    if (t < len && s < t && s >= span[i].first) {              \
+                        const int ti = m3t_tri(s, t, CS);                      \
+                        const float w = __fmul_rn(vdo_tri[ti], dec_tri[ti]);   \
+                        _Pragma("unroll")                                      \
+                        for (int j = 0; j < 4; j++)                            \
+                            intra[i][j] = __fmaf_rn(w, br[j], intra[i][j]);    \
+                    }                                                          \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        for (int q0 = 0; q0 < hd; q0 += M3R_KT) {                              \
+            const int qw = min(M3R_KT, hd - q0);                               \
+            __syncthreads();                                                   \
+            m3r_stage_rows(ta, do_rows, d_inner, len, q0, qw, vec_vo);         \
+            m3r_stage_steps(tb, ssm + (long long)q0 * ds, (long long)ds, qw, n0, nw, vec_st); \
+            __syncthreads();                                                   \
+            m3r_mma(inter, ta, tb, qw, 4 * ty, 4 * tx);                        \
+        }                                                                      \
+        _Pragma("unroll")                                                      \
+        for (int i = 0; i < 4; i++) {                                          \
+            const int t = 4 * ty + i;                                          \
+            if (t >= len) continue;                                            \
+            _Pragma("unroll")                                                  \
+            for (int j = 0; j < 4; j++) {                                      \
+                if (4 * tx + j >= nw) continue;                                \
+                const long long g = ((row0 + t) * nh_total + h) * ds + n0 + 4 * tx + j; \
+                const float sel = span[i].from_before ? inter[i][j] : 0.0f;    \
+                dQ_mid[g] = __fmaf_rn(sel, ef_sm[t], intra[i][j]);             \
             }                                                                  \
         }                                                                      \
     }                                                                          \
     __syncthreads();                                                           \
-    /* dADT, pairs below the diagonal, then above, then the */        \
-    /* entering and exit states, as m3_dqkv orders them. */                    \
+    /* 5. dADT, pairs below the diagonal, then above, then the entering */     \
+    /* and exit states, as m3_dqkv orders them. */                             \
     for (int t = tid; t < len; t += 256) {                                     \
         float acc = 0.0f;                                                      \
         const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, len, t);         \
@@ -1113,5 +1291,5 @@ DEFINE_M3_DQKV_TILED(m3_dqkv_tiled, float)
 DEFINE_M3_DQKV_TILED(m3_dqkv_tiled_bf16, __nv_bfloat16)
 DEFINE_M3_DQKV_TILED(m3_dqkv_tiled_f16, __half)
 #undef DEFINE_M3_DQKV_TILED
-#undef M3T_MAX_SLOTS
-#undef M3T_MAX_OUT
+#undef M3R_KT
+#undef M3R_LD

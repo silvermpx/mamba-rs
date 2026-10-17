@@ -557,53 +557,32 @@ fn layer_backward(
             )?;
         }
 
-        // m3_dqktheta — dQ_bias/dK_bias removed from kernel args
-        // (caller does colsum_accumulate on dQ_pre/dK_pre scratch below).
+        // m3_dqktheta, a thread a (b, t, h) row; the bias gradients are the
+        // column sums of dQ_pre / dK_pre below.
         {
-            let na_i = na as i32;
-            // Six [CS][ds] staging tiles (4 inputs + 2 outputs) for the
-            // coalesced I/O path; values identical, bits identical. Tiles
-            // past `DQKTHETA_STAGING_MAX` take the direct-global path
-            // (staging = 0).
-            let dqkt_smem = 6 * dims.chunk_size() * ds * 4;
-            let dqkt_staging: i32 = i32::from(dqkt_smem <= super::kernels::DQKTHETA_STAGING_MAX);
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
-                block_dim: (dims.chunk_size() as u32, 1, 1),
-                shared_mem_bytes: if dqkt_staging == 1 {
-                    dqkt_smem as u32
-                } else {
-                    0
-                },
-            };
-            for (y_first, cfg) in y_runs(cfg) {
-                let mut builder = ctx.stream.launch_builder(m3k.m3_dqktheta.get(width));
-                builder.arg(scratch.d_c_pre_rope.inner_mut());
-                builder.arg(scratch.d_b_pre_rope.inner_mut());
-                builder.arg(scratch.d_angle_cumsum.inner_mut());
-                let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
-                let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
-                builder.arg(scratch.d_scale.inner_mut());
-                builder.arg(scratch.d_gamma_par.inner_mut());
-                builder.arg(acts.c_biased.inner());
-                builder.arg(acts.b_biased.inner());
-                builder.arg(&scale_in_ptr);
-                builder.arg(&gamma_in_ptr);
-                builder.arg(acts.angle_cumsum.inner());
-                builder.arg(scratch.d_q.inner());
-                builder.arg(scratch.d_k.inner());
-                builder.arg(scratch.d_beta.inner());
-                builder.arg(&b_i);
-                builder.arg(&t_i);
-                builder.arg(&nh_i);
-                builder.arg(&ds_i);
-                builder.arg(&na_i);
-                builder.arg(&cs);
-                builder.arg(&dqkt_staging);
-                builder.arg(&y_first);
-                unsafe { builder.launch(cfg) }
-                    .map_err(|e| format!("m3_dqktheta B6 S2: {:?}", e))?;
-            }
+            let rows = bt * nh;
+            let (rows_i, na_i) = (rows as i32, na as i32);
+            let mut builder = ctx.stream.launch_builder(m3k.m3_dqktheta.get(width));
+            builder.arg(scratch.d_c_pre_rope.inner_mut());
+            builder.arg(scratch.d_b_pre_rope.inner_mut());
+            builder.arg(scratch.d_angle_cumsum.inner_mut());
+            let scale_in_ptr = acts.scale_saved.raw_ptr(&ctx.stream);
+            let gamma_in_ptr = acts.gamma_saved.raw_ptr(&ctx.stream);
+            builder.arg(scratch.d_scale.inner_mut());
+            builder.arg(scratch.d_gamma_par.inner_mut());
+            builder.arg(acts.c_biased.inner());
+            builder.arg(acts.b_biased.inner());
+            builder.arg(&scale_in_ptr);
+            builder.arg(&gamma_in_ptr);
+            builder.arg(acts.angle_cumsum.inner());
+            builder.arg(scratch.d_q.inner());
+            builder.arg(scratch.d_k.inner());
+            builder.arg(scratch.d_beta.inner());
+            builder.arg(&rows_i);
+            builder.arg(&ds_i);
+            builder.arg(&na_i);
+            unsafe { builder.launch(grid_1d_cover(rows)?) }
+                .map_err(|e| format!("m3_dqktheta B6 S2: {:?}", e))?;
         }
         // colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
         {

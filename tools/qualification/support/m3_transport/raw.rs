@@ -240,7 +240,6 @@ pub(super) fn qualify(device: &GpuDevice, kernels: &Mamba3Kernels) {
     let stream = device.context().new_stream().unwrap();
     for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
         cases::dqkv(&stream, kernels, &baseline, dtype);
-        cases::dqktheta(&stream, kernels, &baseline, dtype);
     }
     cases::axis0(&stream, kernels, &baseline);
     cases::angle(&stream, kernels, &baseline);

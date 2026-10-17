@@ -3,24 +3,29 @@
 //! Where the warp kernel runs a shape, every output of the tiled stage must
 //! carry its bits: the per-chunk state terms, and dQ, dK, dV, dADT, dQK and
 //! the dD partials, in f32, bf16 and f16, with the pair matrices and without.
-//! At widths only the tiled kernels serve, every tile width must give the
-//! same bits, and the state terms must still match the original kernel
-//! wherever that one runs. The training parity suite checks the values
-//! against the CPU.
+//! At widths only the tiled kernels serve, the register-tiled stage must give
+//! the bits of the staged stage it replaced (frozen in
+//! `fixtures/m3_dqkv_tiled_reference.cu`) at every tile width that one took,
+//! and the state terms must still match the original kernel wherever that
+//! one runs. The training parity suite checks the values against the CPU.
 
 #![cfg(feature = "cuda")]
 
 #[path = "common/arch.rs"]
 mod arch;
+#[path = "common/frozen_kernels.rs"]
+mod frozen_kernels;
 
 use cudarc::driver::sys::CUdeviceptr;
-use cudarc::driver::{LaunchConfig, PushKernelArg};
+use cudarc::driver::sys::CUfunction_attribute_enum as CUfunction_attribute;
+use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
+use frozen_kernels::frozen_module;
 use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::yz_runs;
-use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
+use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, dm_chain_cfg, state_terms_tiled_cfg};
 use mamba_rs::mamba3_siso::route::{
     PLANNED_SMEM, chunked_backward_smem_bytes, chunked_backward_tiled_smem_bytes,
 };
@@ -28,6 +33,18 @@ use mamba_rs::mamba3_siso::route::{
 const B: usize = 2;
 const NH: usize = 2;
 const CS: usize = 64;
+
+/// The staged dQKV stage as it was released before the register-tiled
+/// stage replaced it, its tile width the caller's.
+const FROZEN_TILED: &str = include_str!("fixtures/m3_dqkv_tiled_reference.cu");
+
+/// The staged stage's shared memory for tiles `tile` columns wide: nine
+/// per-step lanes, the three pair triangles, four chunk-by-tile operand
+/// tiles and two tile-by-tile state tiles, each row padded by one float.
+fn staged_smem_bytes(tile: usize) -> usize {
+    let row = tile + 1;
+    (9 * CS + 3 * (CS * (CS - 1) / 2) + 4 * CS * row + 2 * tile * row) * 4
+}
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed | 1;
@@ -244,11 +261,7 @@ fn state_terms_tiled(
     inp: &Inputs,
 ) -> GpuBuffer {
     let out = GpuBuffer::zeros(&ctx.stream, B * s.nc() * NH * s.hd * s.ds).unwrap();
-    let cfg = LaunchConfig {
-        grid_dim: (NH as u32, B as u32, s.nc() as u32),
-        block_dim: (256, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = state_terms_tiled_cfg(B, s.nc(), NH, s.hd, s.ds);
     for (y_first, z_first, cfg) in yz_runs(cfg) {
         let mut b = ctx
             .stream
@@ -364,14 +377,14 @@ fn dqkv_warp(
     out
 }
 
-fn dqkv_tiled(
+/// The dADT chain of every chunk's saved state, as the stage takes it.
+fn dm_chain(
     ctx: &GpuCtx,
     m3k: &Mamba3Kernels,
-    dtype: WeightDtype,
-    (s, tile): (Shape, usize),
+    s: Shape,
     inp: &Inputs,
     enter: &GpuBuffer,
-) -> Outputs {
+) -> GpuBuffer {
     let rows = B * s.nc() * NH;
     let chain = GpuBuffer::zeros(&ctx.stream, rows).unwrap();
     let mut c = ctx.stream.launch_builder(&m3k.m3_dqkv_dm_chain);
@@ -387,16 +400,35 @@ fn dqkv_tiled(
     for d in &cdims {
         c.arg(d);
     }
-    unsafe { c.launch(blocks(rows)) }.unwrap();
+    unsafe { c.launch(dm_chain_cfg(rows)) }.unwrap();
+    chain
+}
 
+/// One layer's stage through `stage`: the register-tiled kernel (`tile`
+/// none) or the frozen staged one at its tile width.
+fn dqkv_stage(
+    ctx: &GpuCtx,
+    stage: &CudaFunction,
+    (s, tile): (Shape, Option<usize>),
+    inp: &Inputs,
+    (enter, chain): (&GpuBuffer, &GpuBuffer),
+) -> Outputs {
     let out = Outputs::new(ctx, s);
+    let smem = tile.map_or_else(chunked_backward_tiled_smem_bytes, staged_smem_bytes);
+    stage
+        .set_attribute(
+            CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+            smem as i32,
+        )
+        .unwrap();
     let cfg = LaunchConfig {
         grid_dim: (NH as u32, B as u32, s.nc() as u32),
         block_dim: (256, 1, 1),
-        shared_mem_bytes: chunked_backward_tiled_smem_bytes(tile) as u32,
+        shared_mem_bytes: smem as u32,
     };
+    let tile_i = tile.map(|t| t as i32);
     for (y_first, z_first, cfg) in yz_runs(cfg) {
-        let mut b = ctx.stream.launch_builder(m3k.m3_dqkv_tiled.get(dtype));
+        let mut b = ctx.stream.launch_builder(stage);
         let outs = out.ptrs();
         let mut ptrs = outs.to_vec();
         ptrs.extend([
@@ -419,14 +451,34 @@ fn dqkv_tiled(
         for d in &dims {
             b.arg(d);
         }
-        let tile_i = tile as i32;
-        b.arg(&tile_i);
+        if let Some(tile) = &tile_i {
+            b.arg(tile);
+        }
         b.arg(&y_first);
         b.arg(&z_first);
         b.arg(&0u64);
         unsafe { b.launch(cfg) }.unwrap();
     }
     out
+}
+
+/// One layer's register-tiled stage.
+fn dqkv_tiled(
+    ctx: &GpuCtx,
+    m3k: &Mamba3Kernels,
+    dtype: WeightDtype,
+    s: Shape,
+    inp: &Inputs,
+    enter: &GpuBuffer,
+) -> Outputs {
+    let chain = dm_chain(ctx, m3k, s, inp, enter);
+    dqkv_stage(
+        ctx,
+        m3k.m3_dqkv_tiled.get(dtype),
+        (s, None),
+        inp,
+        (enter, &chain),
+    )
 }
 
 fn setup() -> (GpuCtx, Mamba3Kernels) {
@@ -454,7 +506,7 @@ fn tiled_matches_warp(dtype: WeightDtype) {
                     &download(&ctx, &terms),
                 );
                 let enter = enter_state(&ctx, &m3k, s, &terms_ref, &inp);
-                let tiled = dqkv_tiled(&ctx, &m3k, dtype, (s, 16), &inp, &enter).read(&ctx);
+                let tiled = dqkv_tiled(&ctx, &m3k, dtype, s, &inp, &enter).read(&ctx);
                 for pairs in [true, false] {
                     let warp = dqkv_warp(&ctx, &m3k, dtype, (s, pairs), &inp, &enter).read(&ctx);
                     for ((name, want), (_, got)) in warp.iter().zip(&tiled) {
@@ -483,15 +535,39 @@ fn m3_dqkv_tiled_matches_the_warp_kernel_f16() {
     tiled_matches_warp(WeightDtype::F16);
 }
 
-/// Widths only the tiled kernels serve: every tile width gives the same
-/// bits, and the state terms match the original kernel where it runs.
+/// Widths only the tiled kernels serve: the register-tiled stage gives the
+/// staged stage's bits at every tile width that one took, and the state
+/// terms match the original kernel where it runs.
 #[test]
-fn m3_dqkv_tiled_bits_do_not_depend_on_the_tile_width() {
+fn the_register_tiled_stage_keeps_the_staged_stage_s_bits() {
     let (ctx, m3k) = setup();
+    let frozen = frozen_module(
+        ctx.stream.context(),
+        arch::arch0(),
+        m3k.state_cap,
+        FROZEN_TILED,
+    );
     for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
-        for (hd, ds) in [(48usize, 16usize), (64, 64), (100, 17), (33, 5), (256, 3)] {
-            let s = Shape { hd, ds, t: 100 };
-            let label = format!("{dtype:?} hd {hd} ds {ds}");
+        let suffix = match dtype {
+            WeightDtype::Bf16 => "_bf16",
+            WeightDtype::F16 => "_f16",
+            _ => "",
+        };
+        let staged = frozen
+            .load_function(&format!("m3_reference_dqkv_tiled{suffix}"))
+            .unwrap();
+        for (hd, ds, t) in [
+            (48usize, 16usize, 100usize),
+            (64, 64, 100),
+            (64, 64, 128),
+            (100, 17, 100),
+            (33, 5, 7),
+            (256, 3, 100),
+            (128, 128, 65),
+            (16, 256, 100),
+        ] {
+            let s = Shape { hd, ds, t };
+            let label = format!("{dtype:?} hd {hd} ds {ds} T {t}");
             let inp = Inputs::new(&ctx, s, dtype);
             let terms = state_terms_tiled(&ctx, &m3k, dtype, s, &inp);
             let original_runs = s.hd * 4 <= 1024 && (CS * s.ds + CS * s.hd + CS) * 4 <= 48 * 1024;
@@ -504,19 +580,72 @@ fn m3_dqkv_tiled_bits_do_not_depend_on_the_tile_width() {
                 );
             }
             let enter = enter_state(&ctx, &m3k, s, &terms, &inp);
-            let base = dqkv_tiled(&ctx, &m3k, dtype, (s, 16), &inp, &enter).read(&ctx);
-            for tile in [1usize, 5, 32] {
-                let other = dqkv_tiled(&ctx, &m3k, dtype, (s, tile), &inp, &enter).read(&ctx);
-                for ((name, want), (_, got)) in base.iter().zip(&other) {
-                    assert_bits(&format!("{label} tile {tile} {name}"), want, got);
+            let chain = dm_chain(&ctx, &m3k, s, &inp, &enter);
+            let tiled = dqkv_stage(
+                &ctx,
+                m3k.m3_dqkv_tiled.get(dtype),
+                (s, None),
+                &inp,
+                (&enter, &chain),
+            )
+            .read(&ctx);
+            for tile in [16usize, 1, 5, 32] {
+                let want =
+                    dqkv_stage(&ctx, &staged, (s, Some(tile)), &inp, (&enter, &chain)).read(&ctx);
+                for ((name, want), (_, got)) in want.iter().zip(&tiled) {
+                    assert_bits(&format!("{label} staged tile {tile} {name}"), want, got);
                 }
             }
-            for (name, values) in &base {
+            for (name, values) in &tiled {
                 assert!(
                     values.iter().all(|v| v.is_finite()),
                     "{label} {name}: a value is not finite"
                 );
             }
         }
+    }
+}
+
+/// The dADT chain of a chunk's saved state, a warp a row, is one thread's
+/// chain of fused multiply-adds over the row in order from +0: the same
+/// chain on the CPU gives every bit, at rows whose length is and is not a
+/// whole number of quads and of the warp's segments, and over more rows
+/// than a block holds.
+#[test]
+fn the_dm_chain_is_each_row_s_ordered_chain() {
+    let (ctx, m3k) = setup();
+    for (rows, hd, ds) in [
+        (9usize, 5usize, 7usize),
+        (17, 64, 128),
+        (3, 128, 256),
+        (8, 16, 16),
+        (1, 1, 1),
+    ] {
+        let n = rows * hd * ds;
+        let s_vals = det(n, 71, 1.0);
+        let e_vals = det(n, 72, 1.0);
+        let (s_buf, e_buf) = (upload(&ctx, &s_vals), upload(&ctx, &e_vals));
+        let out = GpuBuffer::zeros(&ctx.stream, rows).unwrap();
+        let mut c = ctx.stream.launch_builder(&m3k.m3_dqkv_dm_chain);
+        let ptrs = [out.cached_ptr(), s_buf.cached_ptr(), e_buf.cached_ptr()];
+        for p in &ptrs {
+            c.arg(p);
+        }
+        let dims = [rows, hd, ds].map(|v| v as i32);
+        for d in &dims {
+            c.arg(d);
+        }
+        unsafe { c.launch(dm_chain_cfg(rows)) }.unwrap();
+        let got = download(&ctx, &out);
+        let want: Vec<f32> = (0..rows)
+            .map(|r| {
+                let row = r * hd * ds..(r + 1) * hd * ds;
+                s_vals[row.clone()]
+                    .iter()
+                    .zip(&e_vals[row])
+                    .fold(0.0f32, |acc, (s, e)| s.mul_add(*e, acc))
+            })
+            .collect();
+        assert_bits(&format!("rows {rows} hd {hd} ds {ds}"), &want, &got);
     }
 }

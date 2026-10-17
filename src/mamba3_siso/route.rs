@@ -68,14 +68,22 @@ pub fn chunked_backward_smem_bytes(headdim: usize, d_state: usize) -> usize {
 /// `MAMBA_RS_SMEM_BUDGET` can lower it further, never raise it.
 pub const PLANNED_SMEM: usize = 99 * 1024;
 
-/// The shared memory of the tiled dQKV kernel in bytes, for tiles `tile`
-/// columns wide: nine per-step lanes, the three pair triangles of a chunk,
-/// four chunk-by-tile operand tiles and two tile-by-tile state tiles, each
-/// row padded by one float. It does not depend on headdim or d_state.
-pub fn chunked_backward_tiled_smem_bytes(tile: usize) -> usize {
+/// The reduction steps an operand tile of the tiled dQKV kernel holds
+/// (`M3R_KT` in `mamba3_siso_block.cu`).
+pub const TILED_DQKV_STEPS: usize = 32;
+
+/// The floats a step of an operand tile spans: 64 rows or columns padded by
+/// four (`M3R_LD` in `mamba3_siso_block.cu`).
+pub const TILED_DQKV_STRIDE: usize = 68;
+
+/// The shared memory of the tiled dQKV kernel in bytes: nine per-step lanes
+/// of 64, the three pair triangles of a chunk, rounded up to a whole quad,
+/// then two operand tiles of [`TILED_DQKV_STEPS`] steps. It does not depend
+/// on headdim or d_state.
+pub fn chunked_backward_tiled_smem_bytes() -> usize {
     let cs = CHUNKED_CHUNK_SIZE;
-    let row = tile + 1;
-    (9 * cs + 3 * (cs * (cs - 1) / 2) + 4 * cs * row + 2 * tile * row) * 4
+    let lanes = (9 * 64 + 3 * (cs * (cs - 1) / 2) + 3) & !3;
+    (lanes + 2 * TILED_DQKV_STEPS * TILED_DQKV_STRIDE) * 4
 }
 
 /// Whether the chunked backward's dQKV stage takes the tiled kernels when a
@@ -315,6 +323,19 @@ mod tests {
         assert!(chunked_backward_tiled(48, 16, PLANNED_SMEM));
         assert!(chunked_backward_tiled(64, 16, PLANNED_SMEM));
         assert!(!chunked_backward_tiled(32, 16, PLANNED_SMEM));
+    }
+
+    /// The tiled dQKV kernel's tile, as its source defines it, and its
+    /// budget at the chunk of 64: under the 48 KB default window, so two
+    /// blocks of 256 threads share an SM on every supported part.
+    #[test]
+    fn the_tiled_dqkv_tile_is_the_kernel_s() {
+        let block = include_str!("../../kernels/mamba3_siso_block.cu");
+        for define in ["#define M3R_KT 32", "#define M3R_LD 68"] {
+            assert!(block.contains(define), "{define}");
+        }
+        assert_eq!((TILED_DQKV_STEPS, TILED_DQKV_STRIDE), (32, 68));
+        assert_eq!(chunked_backward_tiled_smem_bytes(), 43_904);
     }
 
     /// Every head width the warp kernels serve passes, and nothing else.

@@ -8,18 +8,13 @@
 //! headdim and any d_state, and every sum runs in the warp kernel's order:
 //! where both kernels serve a shape their bits are the same.
 
-use super::kernels::Mamba3Kernels;
+use super::kernels::{Mamba3Kernels, dm_chain_cfg, state_terms_tiled_cfg};
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::launch::{IndexWidth, grid_1d_cover, yz_runs};
 use crate::mamba3_siso::route::chunked_backward_tiled_smem_bytes;
 use cudarc::driver::sys::CUdeviceptr;
 use cudarc::driver::{CudaStream, LaunchConfig, PushKernelArg};
 use std::sync::Arc;
-
-/// Tile width of the stage. Any width up to 32 gives the same bits, and 16
-/// keeps a block under the 48 KB default shared-memory window, so two
-/// blocks of 256 threads share an SM on the consumer parts.
-const TILE: usize = 16;
 
 /// Threads per block of the tiled kernels.
 const BLOCK: u32 = 256;
@@ -95,11 +90,7 @@ pub(super) fn launch(
     let (nc, rows_i) = (dim(n_chunks)?, dim(rows)?);
     let grid = (nheads as u32, batch as u32, n_chunks as u32);
 
-    let terms_cfg = LaunchConfig {
-        grid_dim: grid,
-        block_dim: (BLOCK, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let terms_cfg = state_terms_tiled_cfg(batch, n_chunks, nheads, headdim, d_state);
     for (y_first, z_first, cfg) in yz_runs(terms_cfg) {
         let mut terms = stream.launch_builder(m3k.m3_dqkv_state_terms_tiled.get(dtype));
         for p in [&io.state_terms, &io.q_rot, &io.da_cs, &io.d_o] {
@@ -135,14 +126,12 @@ pub(super) fn launch(
     for d in [&rows_i, &hd, &ds] {
         chain.arg(d);
     }
-    unsafe { chain.launch(grid_1d_cover(rows)?) }
-        .map_err(|e| format!("m3_dqkv_dm_chain: {e:?}"))?;
+    unsafe { chain.launch(dm_chain_cfg(rows)) }.map_err(|e| format!("m3_dqkv_dm_chain: {e:?}"))?;
 
-    let tile = TILE as i32;
     let stage_cfg = LaunchConfig {
         grid_dim: grid,
         block_dim: (BLOCK, 1, 1),
-        shared_mem_bytes: chunked_backward_tiled_smem_bytes(TILE) as u32,
+        shared_mem_bytes: chunked_backward_tiled_smem_bytes() as u32,
     };
     for (y_first, z_first, cfg) in yz_runs(stage_cfg) {
         let mut stage = stream.launch_builder(m3k.m3_dqkv_tiled.get(dtype));
@@ -167,7 +156,7 @@ pub(super) fn launch(
         ] {
             stage.arg(p);
         }
-        for d in [&b, &t, &nh, &hd, &ds, &cs, &tile] {
+        for d in [&b, &t, &nh, &hd, &ds, &cs] {
             stage.arg(d);
         }
         stage.arg(&y_first);

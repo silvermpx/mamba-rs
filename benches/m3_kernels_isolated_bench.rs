@@ -10,7 +10,7 @@ use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::launch::{y_runs, yz_runs};
+use mamba_rs::gpu::launch::{grid_1d_cover, y_runs, yz_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::{ChunkArm, Mamba3Kernels, chunk_scan_cfg};
 
 fn det_rand(n: usize, seed: u32) -> Vec<f32> {
@@ -225,44 +225,32 @@ fn m3_kernels_isolated_bench() {
     let dscale = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
     let dgamma = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
     ctx.stream.synchronize().unwrap();
-    let th_cfg = LaunchConfig {
-        grid_dim: ((CB * n_chunks) as u32, CNH as u32, 1),
-        block_dim: (CCS as u32, 1, 1),
-        shared_mem_bytes: (6 * CCS * CDS * 4) as u32,
-    };
-    let nai = CNA as i32;
-    let th_staging: i32 = 1;
+    let th_dims = [CB * CT * CNH, CDS, CNA].map(|v| v as i32);
+    let th_cfg = grid_1d_cover(CB * CT * CNH).unwrap();
     time_it("m3_dqktheta f32", &|| {
-        for (y_first, cfg) in y_runs(th_cfg) {
-            let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
-            let args = [
-                dqpre.cached_ptr(),
-                dkpre.cached_ptr(),
-                dang.cached_ptr(),
-                dscale.cached_ptr(),
-                dgamma.cached_ptr(),
-                q_f32.cached_ptr(),
-                ks_f32.cached_ptr(),
-                scale_buf.cached_ptr(),
-                gamma_buf.cached_ptr(),
-                angle_buf.cached_ptr(),
-                dq.cached_ptr(),
-                dk.cached_ptr(),
-                dqk_dot_buf.cached_ptr(),
-            ];
-            for a in &args {
-                bld.arg(a);
-            }
-            bld.arg(&bi);
-            bld.arg(&ti);
-            bld.arg(&nhi);
-            bld.arg(&dsi);
-            bld.arg(&nai);
-            bld.arg(&csi);
-            bld.arg(&th_staging);
-            bld.arg(&y_first);
-            unsafe { bld.launch(cfg) }.unwrap();
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
+        let args = [
+            dqpre.cached_ptr(),
+            dkpre.cached_ptr(),
+            dang.cached_ptr(),
+            dscale.cached_ptr(),
+            dgamma.cached_ptr(),
+            q_f32.cached_ptr(),
+            ks_f32.cached_ptr(),
+            scale_buf.cached_ptr(),
+            gamma_buf.cached_ptr(),
+            angle_buf.cached_ptr(),
+            dq.cached_ptr(),
+            dk.cached_ptr(),
+            dqk_dot_buf.cached_ptr(),
+        ];
+        for a in &args {
+            bld.arg(a);
         }
+        for d in &th_dims {
+            bld.arg(d);
+        }
+        unsafe { bld.launch(th_cfg) }.unwrap();
     });
 
     // colsum_accumulate over dQ_pre (per layer the trainer runs two of

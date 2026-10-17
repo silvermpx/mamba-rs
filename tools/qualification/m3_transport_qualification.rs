@@ -58,18 +58,6 @@ fn compiled_transport_routes_keep_function_and_geometry_together() {
                     legacy,
                 ));
             }
-
-            let legacy = kernels.m3_dqktheta_typed.i32.get(dtype);
-            let (selected, tiles) = kernels.dqktheta_for_shape(dtype, 16, 64, 4, IndexWidth::I32);
-            let optimized = cap == 16 && dtype != WeightDtype::F32;
-            assert_eq!(!std::ptr::eq(selected, legacy), optimized);
-            assert_eq!(tiles, if optimized { 4 } else { 6 });
-            for (state, chunk, angles) in [(8, 64, 4), (16, 32, 4), (16, 64, 0)] {
-                let (selected, tiles) =
-                    kernels.dqktheta_for_shape(dtype, state, chunk, angles, IndexWidth::I32);
-                assert!(std::ptr::eq(selected, legacy));
-                assert_eq!(tiles, 6);
-            }
         }
 
         let (selected, cfg) = kernels.axis0_reduction(4, 499200);

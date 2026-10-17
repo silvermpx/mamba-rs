@@ -17,14 +17,23 @@
 
 #[path = "common/arch.rs"]
 mod arch;
+#[path = "common/frozen_kernels.rs"]
+mod frozen_kernels;
 
-use cudarc::driver::{LaunchConfig, PushKernelArg};
+use cudarc::driver::sys::CUdeviceptr;
+use cudarc::driver::sys::CUfunction_attribute_enum as CUfunction_attribute;
+use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
+use frozen_kernels::frozen_module;
 use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::launch::{y_runs, yz_runs};
+use mamba_rs::gpu::launch::{IndexWidth, grid_1d_cover, yz_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
+
+/// The dQK-theta stage as it was released before the row-streaming stage
+/// replaced it: f32, the bf16 and f16 forms, and the half transport form.
+const FROZEN_DQKTHETA: &str = include_str!("fixtures/m3_dqktheta_reference.cu");
 
 // Config: realistic-ish head dims, 2 chunks with partial last chunk coverage.
 const B: usize = 2;
@@ -100,6 +109,25 @@ fn download_f32(ctx: &GpuCtx, buf: &GpuBuffer, n: usize) -> Vec<f32> {
     buf.download(&ctx.stream, &mut v).unwrap();
     ctx.stream.synchronize().unwrap();
     v
+}
+
+/// Launches an `m3_dqktheta` build `f` over `rows` rows of `ds` states and
+/// `na` angles: `ptrs` are its five outputs, then its eight inputs.
+fn launch_dqktheta(
+    ctx: &GpuCtx,
+    f: &CudaFunction,
+    ptrs: &[CUdeviceptr; 13],
+    (rows, ds, na): (usize, usize, usize),
+) {
+    let mut bld = ctx.stream.launch_builder(f);
+    for p in ptrs {
+        bld.arg(p);
+    }
+    let dims = [rows, ds, na].map(|v| v as i32);
+    for d in &dims {
+        bld.arg(d);
+    }
+    unsafe { bld.launch(grid_1d_cover(rows).unwrap()) }.unwrap();
 }
 
 fn make_m3k(ctx: &GpuCtx) -> Mamba3Kernels {
@@ -375,24 +403,11 @@ fn check_dqktheta(dtype: WeightDtype) {
     let dkb_ref = GpuBuffer::zeros(&ctx.stream, n_bias).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    let cfg = LaunchConfig {
-        grid_dim: ((B * N_CHUNKS) as u32, NH as u32, 1),
-        block_dim: (CS as u32, 1, 1),
-        shared_mem_bytes: (6 * CS * DS * 4) as u32,
-    };
-    let (bi, ti, nhi, dsi, nai, csi) = (
-        B as i32,
-        T as i32,
-        NH as i32,
-        DS as i32,
-        N_ANGLES as i32,
-        CS as i32,
-    );
-
-    let staging_i: i32 = 1;
-    for (y_first, cfg) in y_runs(cfg) {
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
-        let args = [
+    let dims = (B * T * NH, DS, N_ANGLES);
+    launch_dqktheta(
+        &ctx,
+        &m3k.m3_dqktheta.i32,
+        &[
             dqpre_ref.cached_ptr(),
             dkpre_ref.cached_ptr(),
             dang_ref.cached_ptr(),
@@ -406,20 +421,9 @@ fn check_dqktheta(dtype: WeightDtype) {
             dq_mid_buf.cached_ptr(),
             dk_mid_buf.cached_ptr(),
             dqk_buf.cached_ptr(),
-        ];
-        for a in &args {
-            bld.arg(a);
-        }
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&dsi);
-        bld.arg(&nai);
-        bld.arg(&csi);
-        bld.arg(&staging_i);
-        bld.arg(&y_first);
-        unsafe { bld.launch(cfg) }.unwrap();
-    }
+        ],
+        dims,
+    );
     ctx.stream.synchronize().unwrap();
 
     // produce dQ_bias/dK_bias from dQ_pre/dK_pre via colsum_accumulate.
@@ -473,11 +477,10 @@ fn check_dqktheta(dtype: WeightDtype) {
     let dkb_t = GpuBuffer::zeros(&ctx.stream, n_bias).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    for (y_first, cfg) in y_runs(cfg) {
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.m3_dqktheta_typed.i32.get(dtype));
-        let args = [
+    launch_dqktheta(
+        &ctx,
+        m3k.m3_dqktheta_typed.i32.get(dtype),
+        &[
             dqpre_t.cached_ptr(),
             dkpre_t.cached_ptr(),
             dang_t.cached_ptr(),
@@ -491,20 +494,9 @@ fn check_dqktheta(dtype: WeightDtype) {
             dq_mid_buf.cached_ptr(),
             dk_mid_buf.cached_ptr(),
             dqk_buf.cached_ptr(),
-        ];
-        for a in &args {
-            bld.arg(a);
-        }
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&dsi);
-        bld.arg(&nai);
-        bld.arg(&csi);
-        bld.arg(&staging_i);
-        bld.arg(&y_first);
-        unsafe { bld.launch(cfg) }.unwrap();
-    }
+        ],
+        dims,
+    );
     ctx.stream.synchronize().unwrap();
 
     // typed path also colsums dQ_pre/dK_pre to produce bias grads.
@@ -560,109 +552,164 @@ fn m3_dqktheta_f16() {
     check_dqktheta(WeightDtype::F16);
 }
 
-/// `m3_dqktheta` reads its rows through the six staged tiles or straight
-/// from global memory with the same arithmetic, so both forms give the same
-/// bits in every dtype: at state widths the old 48 KB window staged, at
-/// widths only the opted-in budget stages, at odd widths, with no angles
-/// and with angles covering only part of the state.
+/// `m3_dqktheta` walks each row in registers with the arithmetic its
+/// released whole-row form compiled to, so it gives that form's bits: the
+/// f32 kernel and the bf16 and f16 ones, staged and direct, and the half
+/// transport form that served sm_89, against both index-width builds; at
+/// state widths that do and do not fill whole quads, with no angles, with
+/// angles over part of the state and over all of it, and on rows that sit
+/// one value off a quad's alignment, where every load is element-wise; and
+/// at angles far enough out that the sine and cosine reduce them the slow
+/// way.
 #[test]
-fn m3_dqktheta_staged_tiles_keep_the_direct_bits() {
+fn m3_dqktheta_keeps_the_bits_of_its_released_form() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
+    let cap = 64;
     let m3k =
-        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), 64).unwrap();
+        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), cap).unwrap();
+    let frozen = frozen_module(ctx.stream.context(), arch::arch0(), cap, FROZEN_DQKTHETA);
     let (b, t, nh, cs) = (2usize, 150usize, 3usize, 64usize);
-    let nc = t.div_ceil(cs);
-    for (ds, na) in [
-        (16usize, 4usize),
-        (32, 16),
-        (33, 8),
-        (48, 12),
-        (64, 16),
-        (64, 0),
+    let rows = b * t * nh;
+    let mut cases = 0;
+    for (ds, na, lead, spread) in [
+        (16usize, 4usize, 0usize, 1.0f32),
+        (16, 8, 1, 1.0),
+        (16, 4, 0, 4.0e5),
+        (32, 16, 0, 1.0),
+        (33, 8, 0, 1.0),
+        (33, 16, 0, 1.0),
+        (48, 12, 0, 1.0),
+        (64, 16, 0, 1.0),
+        (64, 32, 1, 1.0),
+        (64, 0, 0, 1.0),
+        (6, 3, 0, 1.0),
+        (5, 2, 0, 1.0),
+        (2, 1, 0, 1.0),
+        (1, 0, 0, 1.0),
     ] {
-        let staged = 6 * cs * ds * 4;
-        assert!(staged <= m3k.smem_optin, "ds {ds}: the staged tiles fit");
-        let n_q = b * t * nh * ds;
-        let n_th = b * t * nh;
-        let n_ang = b * t * nh * na.max(1);
+        let n_q = rows * ds;
+        let n_ang = rows * na.max(1);
         let q_vals = det_rand(n_q, 0xD701);
         let k_vals = det_rand(n_q, 0xD702);
-        let scale = upload_f32(&ctx, &det_rand(n_th, 0xD703));
-        let gamma = upload_f32(&ctx, &det_rand(n_th, 0xD704));
-        let angles = upload_f32(&ctx, &det_rand(n_ang, 0xD705));
-        let dq_mid = upload_f32(&ctx, &det_rand(n_q, 0xD706));
-        let dk_mid = upload_f32(&ctx, &det_rand(n_q, 0xD707));
-        let dqk = upload_f32(&ctx, &det_rand(n_th, 0xD708));
+        let scale = upload_f32(&ctx, &det_rand(rows, 0xD703));
+        let gamma = upload_f32(&ctx, &det_rand(rows, 0xD704));
+        let angle_vals: Vec<f32> = det_rand(n_ang, 0xD705).iter().map(|a| a * spread).collect();
+        let angles = upload_f32(&ctx, &angle_vals);
+        // `lead` values ahead of every row buffer put the rows off a quad's
+        // alignment.
+        let padded = |v: Vec<f32>| [vec![0.0; lead], v].concat();
+        let dq_mid = upload_f32(&ctx, &padded(det_rand(n_q, 0xD706)));
+        let dk_mid = upload_f32(&ctx, &padded(det_rand(n_q, 0xD707)));
+        let dqk = upload_f32(&ctx, &det_rand(rows, 0xD708));
         for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
-            let q = upload_typed(&ctx, &q_vals, dtype);
-            let k = upload_typed(&ctx, &k_vals, dtype);
-            let run = |staging: i32| {
-                // Differently poisoned outputs, so an element neither form
-                // writes cannot agree.
-                let poison = if staging == 1 { -8192.0 } else { 8192.0 };
-                let outs =
-                    [n_q, n_q, n_ang, n_th, n_th].map(|n| upload_f32(&ctx, &vec![poison; n]));
-                let cfg = LaunchConfig {
-                    grid_dim: ((b * nc) as u32, nh as u32, 1),
-                    block_dim: (cs as u32, 1, 1),
-                    shared_mem_bytes: if staging == 1 { staged as u32 } else { 0 },
-                };
-                let ptrs = [
-                    outs[0].cached_ptr(),
-                    outs[1].cached_ptr(),
+            let q = upload_typed(&ctx, &padded(q_vals.clone()), dtype);
+            let k = upload_typed(&ctx, &padded(k_vals.clone()), dtype);
+            let (act, f32_lead) = ((lead * dtype.size_bytes()) as u64, (lead * 4) as u64);
+            let run = |launch: &dyn Fn(&[CUdeviceptr; 13]), poison: f32| {
+                // Poisoned outputs, so an element a form does not write
+                // cannot agree with one it does.
+                let outs = [n_q + lead, n_q + lead, n_ang, rows, rows]
+                    .map(|n| upload_f32(&ctx, &vec![poison; n]));
+                launch(&[
+                    outs[0].cached_ptr() + f32_lead,
+                    outs[1].cached_ptr() + f32_lead,
                     outs[2].cached_ptr(),
                     outs[3].cached_ptr(),
                     outs[4].cached_ptr(),
-                    q.cached_ptr(),
-                    k.cached_ptr(),
+                    q.cached_ptr() + act,
+                    k.cached_ptr() + act,
                     scale.cached_ptr(),
                     gamma.cached_ptr(),
                     angles.cached_ptr(),
-                    dq_mid.cached_ptr(),
-                    dk_mid.cached_ptr(),
+                    dq_mid.cached_ptr() + f32_lead,
+                    dk_mid.cached_ptr() + f32_lead,
                     dqk.cached_ptr(),
-                ];
-                let dims = [b, t, nh, ds, na, cs].map(|v| v as i32);
-                for (y_first, cfg) in y_runs(cfg) {
-                    let mut bld = ctx
-                        .stream
-                        .launch_builder(m3k.m3_dqktheta_typed.i32.get(dtype));
-                    for p in &ptrs {
-                        bld.arg(p);
-                    }
-                    for d in &dims {
-                        bld.arg(d);
-                    }
-                    bld.arg(&staging);
-                    bld.arg(&y_first);
-                    unsafe { bld.launch(cfg) }.unwrap();
-                }
+                ]);
                 ctx.stream.synchronize().unwrap();
-                outs.iter()
-                    .zip([n_q, n_q, n_ang, n_th, n_th])
+                let mut got: Vec<Vec<f32>> = outs
+                    .iter()
+                    .zip([n_q + lead, n_q + lead, n_ang, rows, rows])
                     .map(|(buf, n)| download_f32(&ctx, buf, n))
-                    .collect::<Vec<_>>()
+                    .collect();
+                got[0].drain(..lead);
+                got[1].drain(..lead);
+                // Without angles no form writes an angle gradient.
+                if na == 0 {
+                    got[2].clear();
+                }
+                got
             };
-            let (direct, staged_out) = (run(0), run(1));
-            let names = ["dQ_pre", "dK_pre", "dAngles", "dScale", "dGamma"];
-            for ((want, got), name) in direct.iter().zip(&staged_out).zip(names) {
-                // Without angles the kernel writes no angle gradient.
-                let live = if name == "dAngles" && na == 0 {
-                    0
-                } else {
-                    want.len()
+            // The released form, a block a chunk of a head, its rows through
+            // `tiles` staged tiles or (0) straight from global memory.
+            let released = |name: &str, tiles: usize, poison: f32| {
+                let f = frozen.load_function(name).unwrap();
+                let smem = tiles * cs * ds * 4;
+                f.set_attribute(
+                    CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    smem as i32,
+                )
+                .unwrap();
+                let cfg = LaunchConfig {
+                    grid_dim: ((b * t.div_ceil(cs)) as u32, nh as u32, 1),
+                    block_dim: (cs as u32, 1, 1),
+                    shared_mem_bytes: smem as u32,
                 };
-                for (i, (w, g)) in want.iter().zip(got).enumerate().take(live) {
-                    assert_eq!(
-                        w.to_bits(),
-                        g.to_bits(),
-                        "{dtype:?} ds {ds} na {na}: {name}[{i}]"
-                    );
+                let dims = [b, t, nh, ds, na, cs].map(|v| v as i32);
+                let staging = i32::from(tiles > 0);
+                let y_first = 0i32;
+                run(
+                    &|ptrs: &[CUdeviceptr; 13]| {
+                        let mut bld = ctx.stream.launch_builder(&f);
+                        for p in ptrs {
+                            bld.arg(p);
+                        }
+                        for d in &dims {
+                            bld.arg(d);
+                        }
+                        bld.arg(&staging);
+                        bld.arg(&y_first);
+                        unsafe { bld.launch(cfg) }.unwrap();
+                    },
+                    poison,
+                )
+            };
+            let suffix = match dtype {
+                WeightDtype::Bf16 => "_bf16",
+                WeightDtype::F16 => "_f16",
+                _ => "",
+            };
+            let name = format!("m3_reference_dqktheta{suffix}");
+            let want = released(&name, 0, 8192.0);
+            let mut forms = vec![(format!("{name} staged"), released(&name, 6, -8192.0))];
+            if dtype != WeightDtype::F32 {
+                let transport = format!("m3_reference_dqktheta_transport{suffix}");
+                forms.push((transport.clone(), released(&transport, 4, -4096.0)));
+            }
+            for width in [IndexWidth::I32, IndexWidth::I64] {
+                let f = m3k.m3_dqktheta_typed.get(width).get(dtype);
+                let got = run(
+                    &|ptrs: &[CUdeviceptr; 13]| launch_dqktheta(&ctx, f, ptrs, (rows, ds, na)),
+                    -2048.0,
+                );
+                forms.push((format!("{width:?} build"), got));
+            }
+            let outputs = ["dQ_pre", "dK_pre", "dAngles", "dScale", "dGamma"];
+            for (form, got) in &forms {
+                for ((w, g), output) in want.iter().zip(got).zip(outputs) {
+                    for (i, (a, b)) in w.iter().zip(g).enumerate() {
+                        assert_eq!(
+                            a.to_bits(),
+                            b.to_bits(),
+                            "{dtype:?} ds {ds} na {na} lead {lead} spread {spread}, {form}: {output}[{i}]"
+                        );
+                    }
                 }
             }
+            cases += 1;
         }
     }
+    eprintln!("m3_dqktheta: the released form's bits on {cases} cases");
 }
 
 // ─── isolated production-shape bench ─────────────────────────────────────
@@ -687,9 +734,7 @@ fn m3_dqktheta_output_hash() {
     const CT: usize = 1300;
     const CNH: usize = 48;
     const CDS: usize = 16;
-    const CCS: usize = 64;
     const CNA: usize = 4;
-    let n_chunks = CT.div_ceil(CCS);
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
@@ -717,17 +762,10 @@ fn m3_dqktheta_output_hash() {
     let dgamma = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    let cfg = LaunchConfig {
-        grid_dim: ((CB * n_chunks) as u32, CNH as u32, 1),
-        block_dim: (CCS as u32, 1, 1),
-        shared_mem_bytes: (6 * CCS * CDS * 4) as u32,
-    };
-    let (bi, ti, nhi, dsi, nai, csi) = (
-        CB as i32, CT as i32, CNH as i32, CDS as i32, CNA as i32, CCS as i32,
-    );
-    for (y_first, cfg) in y_runs(cfg) {
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta.i32);
-        let args = [
+    launch_dqktheta(
+        &ctx,
+        &m3k.m3_dqktheta.i32,
+        &[
             dqpre.cached_ptr(),
             dkpre.cached_ptr(),
             dang.cached_ptr(),
@@ -741,21 +779,9 @@ fn m3_dqktheta_output_hash() {
             dq_mid.cached_ptr(),
             dk_mid.cached_ptr(),
             dqk_buf.cached_ptr(),
-        ];
-        for a in &args {
-            bld.arg(a);
-        }
-        bld.arg(&bi);
-        bld.arg(&ti);
-        bld.arg(&nhi);
-        bld.arg(&dsi);
-        bld.arg(&nai);
-        bld.arg(&csi);
-        let staging_i: i32 = 1;
-        bld.arg(&staging_i);
-        bld.arg(&y_first);
-        unsafe { bld.launch(cfg) }.unwrap();
-    }
+        ],
+        (CB * CT * CNH, CDS, CNA),
+    );
     ctx.stream.synchronize().unwrap();
 
     let fnv = |v: &[f32]| -> u64 {

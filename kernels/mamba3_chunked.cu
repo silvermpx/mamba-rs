@@ -1423,208 +1423,276 @@ DEFINE_M3_DQKV_F32(m3_dqkv, int)
 DEFINE_M3_DQKV_F32(m3_dqkv_i64, long long)
 
 // ============================================================================
-// 12. m3_dqktheta -- Inverse RoPE + scale + bias gradients (reference backward stage 3)
+// Row quads for the dQK-theta stage and the sliced chunked kernels
 // ============================================================================
-// Grid: (B*n_chunks, nh), Block: (CS, 1, 1)
-// Each thread handles one timestep within a chunk.
-#define DEFINE_M3_DQKTHETA_F32(NAME, IDX)                                      \
-extern "C" __global__ void NAME(                                               \
-    /* Outputs */                                                              \
-    float* __restrict__ dQ_pre,         /* [B*T*nh*ds] — pre-RoPE Q gradient */ \
-    float* __restrict__ dK_pre,         /* [B*T*nh*ds] — pre-RoPE K gradient */ \
-    float* __restrict__ dAngles_cumsum, /* [B*T*nh*n_angles] */                \
-    /* NO __restrict__ on dScale/dGamma/Scale_in/Gamma_in: the host passes */  \
-    /* the SAME buffer as Scale_in and dScale (resp. Gamma_in/dGamma) — the */ \
-    /* value is loaded into a register before the aliased store, which is */   \
-    /* well-defined only without the no-alias promise. */                      \
-    float* dScale,                      /* [B*T*nh] (may alias Scale_in) */    \
-    float* dGamma,                      /* [B*T*nh] (may alias Gamma_in) */    \
-    /* dQ_bias/dK_bias accumulators removed from kernel — caller */            \
-    /* does colsum_accumulate on dQ_pre/dK_pre (already per-(b,t,h,n) scratch). */ \
-    /* Deterministic, no atomicAdd. */                                         \
-    /* Inputs */                                                               \
-    const float* __restrict__ Q_raw,    /* [B*T*nh*ds] — acts.c_biased (pre-RoPE) */ \
-    const float* __restrict__ K_raw,    /* [B*T*nh*ds] — acts.b_biased (pre-RoPE) */ \
-    const float* Scale_in,              /* [B*T*nh] (may alias dScale) */      \
-    const float* Gamma_in,              /* [B*T*nh] (may alias dGamma) */      \
-    const float* __restrict__ Angles,   /* [B*T*nh*n_angles] — acts.angle_cumsum */ \
-    const float* __restrict__ dQ_mid,   /* [B*T*nh*ds] — from m3_dqkv */       \
-    const float* __restrict__ dK_mid,   /* [B*T*nh*ds] — from m3_dqkv */       \
-    const float* __restrict__ dQK_dot,  /* [B*T*nh] — from m3_dqkv */          \
-    int B, int T, int nh, int ds, int n_angles, int CS,                        \
-    int use_staging,  /* 1 = smem holds the six [CS][ds] I/O tiles */          \
-    int y_first /* this run's first y block */                                 \
-) {                                                                            \
-    int n_chunks = (T + CS - 1) / CS;                                          \
-    IDX bc = blockIdx.x;                                                       \
-    IDX b_chunk = bc; /* b * n_chunks + chunk */                               \
-    int h = y_first + blockIdx.y;                                              \
-    int t_local = threadIdx.x;                                                 \
-                                                                               \
-    IDX b = b_chunk / n_chunks;                                                \
-    int chunk = (int)(b_chunk % n_chunks);                                     \
-    int gt = chunk * CS + t_local;                                             \
-                                                                               \
-    /* Capacity guard for the q_pre/k_pre/dq_in register arrays. All */        \
-    /* threads of the block read the same `ds` arg -> safe early return */     \
-    /* (before any barrier, uniform across the block). */                      \
-    if (ds > MAMBA_RS_STATE_CAP) return;                                       \
-    if (b >= B || h >= nh) return;                                             \
-                                                                               \
-    bool valid = (gt < T);                                                     \
-                                                                               \
-    /* Coalesced staging: the per-thread row loads/stores put adjacent */      \
-    /* threads nh*ds floats apart (one 32-byte sector each). Threads */        \
-    /* jointly stream the [CS][ds] tiles instead; every thread then */         \
-    /* reads ITS OWN row from shared memory — identical values, so the */      \
-    /* per-thread arithmetic (and bits) are unchanged. */                      \
-    extern __shared__ float dqkt_sm[];                                         \
-    float* q_sm     = dqkt_sm;                                                 \
-    float* k_sm     = q_sm + CS * ds;                                          \
-    float* dqi_sm   = k_sm + CS * ds;                                          \
-    float* dki_sm   = dqi_sm + CS * ds;                                        \
-    float* out_q_sm = dki_sm + CS * ds;                                        \
-    float* out_k_sm = out_q_sm + CS * ds;                                      \
-    int t0 = chunk * CS;                                                       \
-    int rows = min(CS, T - t0);                                                \
-    /* Tiles past the block's shared-memory budget make the launcher */        \
-    /* pass use_staging = 0, and every access */                               \
-    /* falls back to the direct global form — identical values, only */        \
-    /* the coalescing win is lost. */                                          \
-    if (use_staging) {                                                         \
-        for (int i = t_local; i < rows * ds; i += CS) {                        \
-            int tt = i / ds;                                                   \
-            int nn = i % ds;                                                   \
-            IDX gbase = ((b * T + t0 + tt) * nh + h) * ds + nn;                \
-            q_sm[i] = Q_raw[gbase];                                            \
-            k_sm[i] = K_raw[gbase];                                            \
-            dqi_sm[i] = dQ_mid[gbase];                                         \
-            dki_sm[i] = dK_mid[gbase];                                         \
-        }                                                                      \
-    }                                                                          \
-    __syncthreads();                                                           \
-                                                                               \
-    if (valid) {                                                               \
-        IDX base = ((b * T + gt) * nh + h) * ds;                               \
-        float scale = Scale_in[(b * T + gt) * nh + h];                         \
-        float gamma = Gamma_in[(b * T + gt) * nh + h];                         \
-        float dqk = dQK_dot[(b * T + gt) * nh + h];                            \
-                                                                               \
-        /* Load Q_raw + K_raw (pre-RoPE, post-bias) from the staged tiles */   \
-        float q_pre[MAMBA_RS_STATE_CAP], k_pre[MAMBA_RS_STATE_CAP]; /* sized by the state capacity */ \
-        for (int n = 0; n < ds; n++) {                                         \
-            q_pre[n] = use_staging ? q_sm[t_local * ds + n] : Q_raw[base + n]; \
-            k_pre[n] = use_staging ? k_sm[t_local * ds + n] : K_raw[base + n]; \
-        }                                                                      \
-        float dq_in[MAMBA_RS_STATE_CAP], dk_in[MAMBA_RS_STATE_CAP];            \
-        for (int n = 0; n < ds; n++) {                                         \
-            dq_in[n] = use_staging ? dqi_sm[t_local * ds + n] : dQ_mid[base + n]; \
-            dk_in[n] = use_staging ? dki_sm[t_local * ds + n] : dK_mid[base + n]; \
-        }                                                                      \
-                                                                               \
-        /* Forward RoPE on K_raw to get K_rot (for dScale computation) */      \
-        float k_rot[MAMBA_RS_STATE_CAP];                                       \
-        IDX angle_base = ((b * T + gt) * nh + h) * n_angles;                   \
-        /* Each angle's cos/sin was computed three times */                    \
-        /* (forward RoPE, inverse RoPE, dtheta) — hoist into registers. */     \
-        /* cosf/sinf of the same input is deterministic, so every read */      \
-        /* stays bit-identical to the inline forms. */                         \
-        float cos_a[MAMBA_RS_STATE_CAP / 2], sin_a[MAMBA_RS_STATE_CAP / 2];    \
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                 \
-            float theta = Angles[angle_base + a];                              \
-            cos_a[a] = cosf(theta);                                            \
-            sin_a[a] = sinf(theta);                                            \
-        }                                                                      \
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                 \
-            float cos_t = cos_a[a];                                            \
-            float sin_t = sin_a[a];                                            \
-            int i0 = 2 * a, i1 = 2 * a + 1;                                    \
-            k_rot[i0] = k_pre[i0] * cos_t - k_pre[i1] * sin_t;                 \
-            k_rot[i1] = k_pre[i0] * sin_t + k_pre[i1] * cos_t;                 \
-        }                                                                      \
-        for (int n = 2 * n_angles; n < ds; n++) k_rot[n] = k_pre[n];           \
-                                                                               \
-        /* dScale = sum_n(dK_mid[n] * K_rot[n]) */                             \
-        float d_scale = 0.0f;                                                  \
-        for (int n = 0; n < ds; n++) d_scale += dk_in[n] * k_rot[n];           \
-        dScale[(b * T + gt) * nh + h] = d_scale;                               \
-                                                                               \
-        /* dGamma = dQK * sum_n(Q_raw[n] * K_raw[n]) */                        \
-        float qk_raw = 0.0f;                                                   \
-        for (int n = 0; n < ds; n++) qk_raw += q_pre[n] * k_pre[n];            \
-        dGamma[(b * T + gt) * nh + h] = dqk * qk_raw;                          \
-                                                                               \
-        /* Scale dK_mid by scale before inverse RoPE */                        \
-        for (int n = 0; n < ds; n++) dk_in[n] *= scale;                        \
-                                                                               \
-        /* Inverse RoPE on dQ_mid and scaled dK_mid */                         \
-        float dq_pre_out[MAMBA_RS_STATE_CAP], dk_pre_out[MAMBA_RS_STATE_CAP];  \
-        for (int n = 0; n < ds; n++) { dq_pre_out[n] = dq_in[n]; dk_pre_out[n] = dk_in[n]; } \
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                 \
-            float cos_t = cos_a[a];                                            \
-            float sin_t = sin_a[a];                                            \
-            int i0 = 2 * a, i1 = 2 * a + 1;                                    \
-            /* Inverse rotation: R^T = [[cos, sin], [-sin, cos]] */            \
-            dq_pre_out[i0] = dq_in[i0] * cos_t + dq_in[i1] * sin_t;            \
-            dq_pre_out[i1] = -dq_in[i0] * sin_t + dq_in[i1] * cos_t;           \
-            dk_pre_out[i0] = dk_in[i0] * cos_t + dk_in[i1] * sin_t;            \
-            dk_pre_out[i1] = -dk_in[i0] * sin_t + dk_in[i1] * cos_t;           \
-        }                                                                      \
-                                                                               \
-        /* Add dQK path: dQ_pre += dqk * gamma * K_raw, dK_pre += dqk * gamma * Q_raw */ \
-        float dqk_gamma = dqk * gamma;                                         \
-        for (int n = 0; n < ds; n++) {                                         \
-            dq_pre_out[n] += dqk_gamma * k_pre[n];                             \
-            dk_pre_out[n] += dqk_gamma * q_pre[n];                             \
-        }                                                                      \
-                                                                               \
-        /* Stage dQ_pre, dK_pre rows; the cooperative store below writes */    \
-        /* them coalesced. (Caller reduces to dQ_bias/dK_bias via */           \
-        /* colsum_accumulate — no atomicAdd here.) */                          \
-        if (use_staging) {                                                     \
-            for (int n = 0; n < ds; n++) {                                     \
-                out_q_sm[t_local * ds + n] = dq_pre_out[n];                    \
-                out_k_sm[t_local * ds + n] = dk_pre_out[n];                    \
-            }                                                                  \
-        } else {                                                               \
-            for (int n = 0; n < ds; n++) {                                     \
-                dQ_pre[base + n] = dq_pre_out[n];                              \
-                dK_pre[base + n] = dk_pre_out[n];                              \
-            }                                                                  \
-        }                                                                      \
-                                                                               \
-        /* dAngles_cumsum from rotary gradient */                              \
-        /* dtheta = dQ_in * d(Q_rot)/d(theta) + dK_in_scaled * d(K_rot)/d(theta) */ \
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                 \
-            float cos_t = cos_a[a];                                            \
-            float sin_t = sin_a[a];                                            \
-            int i0 = 2 * a, i1 = 2 * a + 1;                                    \
-            /* d(Q_rot)/dtheta: Q_rot[i0] = Q[i0]*cos - Q[i1]*sin */           \
-            /* Q_rot[i1] = Q[i0]*sin + Q[i1]*cos */                            \
-            /* d/dtheta: [-Q[i0]*sin - Q[i1]*cos, Q[i0]*cos - Q[i1]*sin] */    \
-            float dtheta_q = dq_in[i0] * (-q_pre[i0] * sin_t - q_pre[i1] * cos_t) \
-                           + dq_in[i1] * (q_pre[i0] * cos_t - q_pre[i1] * sin_t); \
-            float dtheta_k = dk_in[i0] * (-k_pre[i0] * sin_t - k_pre[i1] * cos_t) \
-                           + dk_in[i1] * (k_pre[i0] * cos_t - k_pre[i1] * sin_t); \
-            dAngles_cumsum[((b * T + gt) * nh + h) * n_angles + a] = dtheta_q + dtheta_k; \
-        }                                                                      \
-    }                                                                          \
-    __syncthreads();                                                           \
-    if (use_staging) {                                                         \
-        for (int i = t_local; i < rows * ds; i += CS) {                        \
-            int tt = i / ds;                                                   \
-            int nn = i % ds;                                                   \
-            IDX gbase = ((b * T + t0 + tt) * nh + h) * ds + nn;                \
-            dQ_pre[gbase] = out_q_sm[i];                                       \
-            dK_pre[gbase] = out_k_sm[i];                                       \
-        }                                                                      \
-    }                                                                          \
-    /* dQ_bias/dK_bias produced via colsum_accumulate on */                    \
-    /* dQ_pre/dK_pre by the caller. No atomicAdd here. */                      \
+
+// Four consecutive values of a row, the first `valid` of them and zeros
+// past them: one vector load when all four are there and the row keeps its
+// alignment (`vec`), else one load a value. Widening a half is exact, so
+// either way the values are what an element-wise to_f reads.
+__device__ __forceinline__ float4 m3_load_quad(const float* p, int valid, bool vec) {
+    if (vec && valid >= 4) return *reinterpret_cast<const float4*>(p);
+    float4 r = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (valid > 0) r.x = p[0];
+    if (valid > 1) r.y = p[1];
+    if (valid > 2) r.z = p[2];
+    if (valid > 3) r.w = p[3];
+    return r;
+}
+__device__ __forceinline__ float4 m3_load_quad(const __nv_bfloat16* p, int valid, bool vec) {
+    if (vec && valid >= 4) {
+        const uint2 u = *reinterpret_cast<const uint2*>(p);
+        const float2 lo = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.x));
+        const float2 hi = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.y));
+        return make_float4(lo.x, lo.y, hi.x, hi.y);
+    }
+    float4 r = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (valid > 0) r.x = to_f(p[0]);
+    if (valid > 1) r.y = to_f(p[1]);
+    if (valid > 2) r.z = to_f(p[2]);
+    if (valid > 3) r.w = to_f(p[3]);
+    return r;
+}
+__device__ __forceinline__ float4 m3_load_quad(const __half* p, int valid, bool vec) {
+    if (vec && valid >= 4) {
+        const uint2 u = *reinterpret_cast<const uint2*>(p);
+        const float2 lo = __half22float2(*reinterpret_cast<const __half2*>(&u.x));
+        const float2 hi = __half22float2(*reinterpret_cast<const __half2*>(&u.y));
+        return make_float4(lo.x, lo.y, hi.x, hi.y);
+    }
+    float4 r = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (valid > 0) r.x = to_f(p[0]);
+    if (valid > 1) r.y = to_f(p[1]);
+    if (valid > 2) r.z = to_f(p[2]);
+    if (valid > 3) r.w = to_f(p[3]);
+    return r;
 }
 
-DEFINE_M3_DQKTHETA_F32(m3_dqktheta, int)
-DEFINE_M3_DQKTHETA_F32(m3_dqktheta_i64, long long)
+// Store the first `valid` of four values of a row, each rounded once to
+// the row's dtype as the element-wise store rounds it; one vector store when
+// all four go and the row keeps its alignment.
+__device__ __forceinline__ void m3_store_quad(float* p, float4 v, int valid, bool vec) {
+    if (vec && valid >= 4) {
+        *reinterpret_cast<float4*>(p) = v;
+        return;
+    }
+    if (valid > 0) p[0] = v.x;
+    if (valid > 1) p[1] = v.y;
+    if (valid > 2) p[2] = v.z;
+    if (valid > 3) p[3] = v.w;
+}
+__device__ __forceinline__ void m3_store_quad(__nv_bfloat16* p, float4 v, int valid, bool vec) {
+    if (vec && valid >= 4) {
+        __nv_bfloat162 lo, hi;
+        lo.x = __float2bfloat16_rn(v.x);
+        lo.y = __float2bfloat16_rn(v.y);
+        hi.x = __float2bfloat16_rn(v.z);
+        hi.y = __float2bfloat16_rn(v.w);
+        uint2 u;
+        u.x = *reinterpret_cast<const unsigned int*>(&lo);
+        u.y = *reinterpret_cast<const unsigned int*>(&hi);
+        *reinterpret_cast<uint2*>(p) = u;
+        return;
+    }
+    if (valid > 0) p[0] = __float2bfloat16_rn(v.x);
+    if (valid > 1) p[1] = __float2bfloat16_rn(v.y);
+    if (valid > 2) p[2] = __float2bfloat16_rn(v.z);
+    if (valid > 3) p[3] = __float2bfloat16_rn(v.w);
+}
+__device__ __forceinline__ void m3_store_quad(__half* p, float4 v, int valid, bool vec) {
+    if (vec && valid >= 4) {
+        __half2 lo, hi;
+        lo.x = __float2half_rn(v.x);
+        lo.y = __float2half_rn(v.y);
+        hi.x = __float2half_rn(v.z);
+        hi.y = __float2half_rn(v.w);
+        uint2 u;
+        u.x = *reinterpret_cast<const unsigned int*>(&lo);
+        u.y = *reinterpret_cast<const unsigned int*>(&hi);
+        *reinterpret_cast<uint2*>(p) = u;
+        return;
+    }
+    if (valid > 0) p[0] = __float2half_rn(v.x);
+    if (valid > 1) p[1] = __float2half_rn(v.y);
+    if (valid > 2) p[2] = __float2half_rn(v.z);
+    if (valid > 3) p[3] = __float2half_rn(v.w);
+}
+
+// Whether a row of `T_ACT` starting at `p` takes vector loads: four values
+// in one aligned load.
+#define M3_QUAD_ALIGNED(p, T_ACT) \
+    ((reinterpret_cast<unsigned long long>(p) & (4 * sizeof(T_ACT) - 1)) == 0)
+
+
+// ============================================================================
+// 12. m3_dqktheta -- Inverse RoPE + scale + bias gradients (reference backward stage 3)
+// ============================================================================
+// One thread a (b, t, h) row. The rows lie back to back: a row's Q, K and
+// their gradients are its ds values at row * ds, its angles the n_angles
+// values at row * n_angles, and its scale, gamma, dQK dot, dScale and
+// dGamma one value at row. The thread walks its row a quad at a time in
+// registers: the two sums (dScale's, and the raw Q.K that dGamma scales)
+// take their terms in state order, and every other output of a rotary pair
+// needs that pair alone, so no row is ever held whole. Each value is
+// written as the stage's earlier whole-row form wrote it, and where that
+// form stored a value and read it back (the scaled dK, a rotation the dQK
+// term is then added to) the value is rounded there too. The compiler
+// fuses a sum of products itself, the first product, but leaves a
+// difference to the driver's assembler, so a difference is written as that
+// form's source wrote it and gets the same arithmetic on every compiler and
+// driver. K's forward rotation is spelled out: that form computed it apart
+// from the derivatives that reuse its products, so it must not share them.
+// The outputs keep that form's bits.
+
+// What a thread carries along its row.
+struct M3DqktRow {
+    const float* angles;  // the row's angles
+    float* d_angles;      // the row's angle gradients
+    int n_angles;
+    float scale;          // the row's scale
+    float dg;             // gamma times the dQK dot
+    float d_scale;        // dK times rotated K, summed in state order
+    float qk;             // raw Q times raw K, summed in state order
+};
+
+// A state past the rotary pairs, where K is its own rotation.
+__device__ __forceinline__ void m3_dqkt_plain(
+    M3DqktRow& r, float q, float k, float dq, float dk, float& oq, float& ok
+) {
+    r.d_scale = __fmaf_rn(dk, k, r.d_scale);
+    r.qk = __fmaf_rn(q, k, r.qk);
+    oq = __fmaf_rn(r.dg, k, dq);
+    ok = __fmaf_rn(r.dg, q, __fmul_rn(r.scale, dk));
+}
+
+// States 2p and 2p + 1 of a row: the rotary pair of angle p while p is
+// below n_angles, two plain states past them. (q0, q1) and the rest are
+// the pair's values; (oq0, oq1) and (ok0, ok1) its pre-RoPE gradients.
+__device__ __forceinline__ void m3_dqkt_two(
+    M3DqktRow& r, int p, float q0, float q1, float k0, float k1, float dq0, float dq1,
+    float dk0, float dk1, float& oq0, float& oq1, float& ok0, float& ok1
+) {
+    if (p >= r.n_angles) {
+        m3_dqkt_plain(r, q0, k0, dq0, dk0, oq0, ok0);
+        m3_dqkt_plain(r, q1, k1, dq1, dk1, oq1, ok1);
+        return;
+    }
+    const float theta = r.angles[p];
+    const float c = cosf(theta);
+    const float s = sinf(theta);
+    // K rotated forward, for dScale.
+    const float kr0 = k0 * c - k1 * s;
+    const float kr1 = __fmaf_rn(k0, s, __fmul_rn(k1, c));
+    r.d_scale = __fmaf_rn(dk0, kr0, r.d_scale);
+    r.d_scale = __fmaf_rn(dk1, kr1, r.d_scale);
+    r.qk = __fmaf_rn(q0, k0, r.qk);
+    r.qk = __fmaf_rn(q1, k1, r.qk);
+    // dK scaled, both gradients rotated back, then the dQK path added.
+    const float sk0 = __fmul_rn(r.scale, dk0);
+    const float sk1 = __fmul_rn(r.scale, dk1);
+    oq0 = __fmaf_rn(r.dg, k0, dq0 * c + dq1 * s);
+    oq1 = __fmaf_rn(r.dg, k1, -dq0 * s + dq1 * c);
+    ok0 = __fmaf_rn(r.dg, q0, sk0 * c + sk1 * s);
+    ok1 = __fmaf_rn(r.dg, q1, -sk0 * s + sk1 * c);
+    // The rotations' derivatives in theta against the gradients that
+    // reached them: dQ as it came, dK scaled.
+    const float aq = -q0 * s - q1 * c;
+    const float bq = q0 * c - q1 * s;
+    const float ak = -k0 * s - k1 * c;
+    const float bk = k0 * c - k1 * s;
+    const float dtheta_q = dq0 * aq + dq1 * bq;
+    const float dtheta_k = sk0 * ak + sk1 * bk;
+    r.d_angles[p] = dtheta_q + dtheta_k;
+}
+
+template <typename IDX, typename T_ACT>
+__device__ __forceinline__ void m3_dqktheta_row(
+    float* __restrict__ dQ_pre, float* __restrict__ dK_pre, float* __restrict__ dAngles,
+    float* dScale, float* dGamma, const T_ACT* __restrict__ Q_raw,
+    const T_ACT* __restrict__ K_raw, const float* Scale_in, const float* Gamma_in,
+    const float* __restrict__ Angles, const float* __restrict__ dQ_mid,
+    const float* __restrict__ dK_mid, const float* __restrict__ dQK_dot, IDX row, int ds,
+    int n_angles
+) {
+    // dScale and dGamma may alias Scale_in and Gamma_in: the row reads both
+    // before it stores either.
+    const float gamma = Gamma_in[row];
+    const float dqk = dQK_dot[row];
+    M3DqktRow r;
+    r.angles = Angles + row * n_angles;
+    r.d_angles = dAngles + row * n_angles;
+    r.n_angles = n_angles;
+    r.scale = Scale_in[row];
+    r.dg = __fmul_rn(gamma, dqk);
+    r.d_scale = 0.0f;
+    r.qk = 0.0f;
+    const IDX base = row * ds;
+    // The pointers and ds decide the loads for every row of the launch
+    // alike, and vector and element loads read the same values.
+    const bool vec = (ds & 3) == 0 && M3_QUAD_ALIGNED(Q_raw, T_ACT)
+        && M3_QUAD_ALIGNED(K_raw, T_ACT) && M3_QUAD_ALIGNED(dQ_mid, float)
+        && M3_QUAD_ALIGNED(dK_mid, float) && M3_QUAD_ALIGNED(dQ_pre, float)
+        && M3_QUAD_ALIGNED(dK_pre, float);
+    for (int n = 0; n < ds; n += 4) {
+        const int valid = min(4, ds - n);
+        const float4 q = m3_load_quad(Q_raw + base + n, valid, vec);
+        const float4 k = m3_load_quad(K_raw + base + n, valid, vec);
+        const float4 dq = m3_load_quad(dQ_mid + base + n, valid, vec);
+        const float4 dk = m3_load_quad(dK_mid + base + n, valid, vec);
+        float4 oq = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        float4 ok = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        // A row of odd length ends in one plain state: 2 n_angles <= ds.
+        if (valid >= 2) {
+            m3_dqkt_two(r, n >> 1, q.x, q.y, k.x, k.y, dq.x, dq.y, dk.x, dk.y, oq.x, oq.y,
+                        ok.x, ok.y);
+        } else {
+            m3_dqkt_plain(r, q.x, k.x, dq.x, dk.x, oq.x, ok.x);
+        }
+        if (valid == 4) {
+            m3_dqkt_two(r, (n >> 1) + 1, q.z, q.w, k.z, k.w, dq.z, dq.w, dk.z, dk.w, oq.z,
+                        oq.w, ok.z, ok.w);
+        } else if (valid == 3) {
+            m3_dqkt_plain(r, q.z, k.z, dq.z, dk.z, oq.z, ok.z);
+        }
+        m3_store_quad(dQ_pre + base + n, oq, valid, vec);
+        m3_store_quad(dK_pre + base + n, ok, valid, vec);
+    }
+    dScale[row] = r.d_scale;
+    dGamma[row] = __fmul_rn(dqk, r.qk);
+}
+
+// rows = B * T * nh, a thread a row.
+#define DEFINE_M3_DQKTHETA(NAME, IDX, T_ACT)                                   \
+extern "C" __global__ __launch_bounds__(256) void NAME(                        \
+    float* __restrict__ dQ_pre,          /* [rows * ds] pre-RoPE Q gradient */ \
+    float* __restrict__ dK_pre,          /* [rows * ds] pre-RoPE K gradient */ \
+    float* __restrict__ dAngles_cumsum,  /* [rows * n_angles] */               \
+    float* dScale,                       /* [rows] (may alias Scale_in) */     \
+    float* dGamma,                       /* [rows] (may alias Gamma_in) */     \
+    const T_ACT* __restrict__ Q_raw,     /* [rows * ds] acts.c_biased */       \
+    const T_ACT* __restrict__ K_raw,     /* [rows * ds] acts.b_biased */       \
+    const float* Scale_in,               /* [rows] (may alias dScale) */       \
+    const float* Gamma_in,               /* [rows] (may alias dGamma) */       \
+    const float* __restrict__ Angles,    /* [rows * n_angles] */               \
+    const float* __restrict__ dQ_mid,    /* [rows * ds] from m3_dqkv */        \
+    const float* __restrict__ dK_mid,    /* [rows * ds] from m3_dqkv */        \
+    const float* __restrict__ dQK_dot,   /* [rows] from m3_dqkv */             \
+    int rows, int ds, int n_angles                                             \
+) {                                                                            \
+    const IDX row = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                \
+    if (row >= rows) return;                                                   \
+    m3_dqktheta_row<IDX, T_ACT>(dQ_pre, dK_pre, dAngles_cumsum, dScale,        \
+        dGamma, Q_raw, K_raw, Scale_in, Gamma_in, Angles, dQ_mid, dK_mid,      \
+        dQK_dot, row, ds, n_angles);                                           \
+}
+
+DEFINE_M3_DQKTHETA(m3_dqktheta, int, float)
+DEFINE_M3_DQKTHETA(m3_dqktheta_i64, long long, float)
+DEFINE_M3_DQKTHETA(m3_dqktheta_bf16, int, __nv_bfloat16)
+DEFINE_M3_DQKTHETA(m3_dqktheta_bf16_i64, long long, __nv_bfloat16)
+DEFINE_M3_DQKTHETA(m3_dqktheta_f16, int, __half)
+DEFINE_M3_DQKTHETA(m3_dqktheta_f16_i64, long long, __half)
+#undef DEFINE_M3_DQKTHETA
 
 // ============================================================================
 // 13. m3_ddt_dtrap -- dScale/dGamma -> dDT, dTrap (reference backward stage 4)
@@ -1925,108 +1993,6 @@ DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_bf16, int, __nv_bfloat1
 DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_f16, int, __half, from_f_f16)
 DEFINE_M3_CHUNK_PRE_STATE_FUSED(m3_chunk_pre_state_fused_f16_i64, long long, __half, from_f_f16)
-
-// ============================================================================
-// Row quads for the sliced chunked kernels
-// ============================================================================
-
-// Four consecutive values of a row, the first `valid` of them and zeros
-// past them: one vector load when all four are there and the row keeps its
-// alignment (`vec`), else one load a value. Widening a half is exact, so
-// either way the values are what an element-wise to_f reads.
-__device__ __forceinline__ float4 m3_load_quad(const float* p, int valid, bool vec) {
-    if (vec && valid >= 4) return *reinterpret_cast<const float4*>(p);
-    float4 r = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    if (valid > 0) r.x = p[0];
-    if (valid > 1) r.y = p[1];
-    if (valid > 2) r.z = p[2];
-    if (valid > 3) r.w = p[3];
-    return r;
-}
-__device__ __forceinline__ float4 m3_load_quad(const __nv_bfloat16* p, int valid, bool vec) {
-    if (vec && valid >= 4) {
-        const uint2 u = *reinterpret_cast<const uint2*>(p);
-        const float2 lo = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.x));
-        const float2 hi = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.y));
-        return make_float4(lo.x, lo.y, hi.x, hi.y);
-    }
-    float4 r = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    if (valid > 0) r.x = to_f(p[0]);
-    if (valid > 1) r.y = to_f(p[1]);
-    if (valid > 2) r.z = to_f(p[2]);
-    if (valid > 3) r.w = to_f(p[3]);
-    return r;
-}
-__device__ __forceinline__ float4 m3_load_quad(const __half* p, int valid, bool vec) {
-    if (vec && valid >= 4) {
-        const uint2 u = *reinterpret_cast<const uint2*>(p);
-        const float2 lo = __half22float2(*reinterpret_cast<const __half2*>(&u.x));
-        const float2 hi = __half22float2(*reinterpret_cast<const __half2*>(&u.y));
-        return make_float4(lo.x, lo.y, hi.x, hi.y);
-    }
-    float4 r = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    if (valid > 0) r.x = to_f(p[0]);
-    if (valid > 1) r.y = to_f(p[1]);
-    if (valid > 2) r.z = to_f(p[2]);
-    if (valid > 3) r.w = to_f(p[3]);
-    return r;
-}
-
-// Store the first `valid` of four values of a row, each rounded once to
-// the row's dtype as the element-wise store rounds it; one vector store when
-// all four go and the row keeps its alignment.
-__device__ __forceinline__ void m3_store_quad(float* p, float4 v, int valid, bool vec) {
-    if (vec && valid >= 4) {
-        *reinterpret_cast<float4*>(p) = v;
-        return;
-    }
-    if (valid > 0) p[0] = v.x;
-    if (valid > 1) p[1] = v.y;
-    if (valid > 2) p[2] = v.z;
-    if (valid > 3) p[3] = v.w;
-}
-__device__ __forceinline__ void m3_store_quad(__nv_bfloat16* p, float4 v, int valid, bool vec) {
-    if (vec && valid >= 4) {
-        __nv_bfloat162 lo, hi;
-        lo.x = __float2bfloat16_rn(v.x);
-        lo.y = __float2bfloat16_rn(v.y);
-        hi.x = __float2bfloat16_rn(v.z);
-        hi.y = __float2bfloat16_rn(v.w);
-        uint2 u;
-        u.x = *reinterpret_cast<const unsigned int*>(&lo);
-        u.y = *reinterpret_cast<const unsigned int*>(&hi);
-        *reinterpret_cast<uint2*>(p) = u;
-        return;
-    }
-    if (valid > 0) p[0] = __float2bfloat16_rn(v.x);
-    if (valid > 1) p[1] = __float2bfloat16_rn(v.y);
-    if (valid > 2) p[2] = __float2bfloat16_rn(v.z);
-    if (valid > 3) p[3] = __float2bfloat16_rn(v.w);
-}
-__device__ __forceinline__ void m3_store_quad(__half* p, float4 v, int valid, bool vec) {
-    if (vec && valid >= 4) {
-        __half2 lo, hi;
-        lo.x = __float2half_rn(v.x);
-        lo.y = __float2half_rn(v.y);
-        hi.x = __float2half_rn(v.z);
-        hi.y = __float2half_rn(v.w);
-        uint2 u;
-        u.x = *reinterpret_cast<const unsigned int*>(&lo);
-        u.y = *reinterpret_cast<const unsigned int*>(&hi);
-        *reinterpret_cast<uint2*>(p) = u;
-        return;
-    }
-    if (valid > 0) p[0] = __float2half_rn(v.x);
-    if (valid > 1) p[1] = __float2half_rn(v.y);
-    if (valid > 2) p[2] = __float2half_rn(v.z);
-    if (valid > 3) p[3] = __float2half_rn(v.w);
-}
-
-// Whether a row of `T_ACT` starting at `p` takes vector loads: four values
-// in one aligned load.
-#define M3_QUAD_ALIGNED(p, T_ACT) \
-    ((reinterpret_cast<unsigned long long>(p) & (4 * sizeof(T_ACT) - 1)) == 0)
-
 
 // ============================================================================
 // 3c. m3_chunk_pre_state_sliced -- the pre-state for any head and state width
@@ -2779,8 +2745,8 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
 
 // typed DEFINE_M3_CHUNK_SCAN_BWD + DEFINE_M3_CHUNK_STATE_BWD
 // macros removed (dead — matches f32-section 6/8 removal above). The live
-// typed chunked bwd path routes through DEFINE_M3_DQKV / DEFINE_M3_DQKTHETA
-// below, just like the f32 path.
+// typed chunked bwd path routes through DEFINE_M3_DQKV below and the
+// dQK-theta stage of section 12, just like the f32 path.
 
 // ============================================================================
 // Typed (bf16/f16) variants of the HIGHEST-RISK "final grad"
@@ -2789,7 +2755,8 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
 //
 // Typed:
 //   - m3_dqkv       : typed Q_rot/K_scaled/V_in/dO; all grad outputs f32
-//   - m3_dqktheta   : typed Q_raw/K_raw; all grad outputs f32
+//   - m3_dqktheta   : typed Q_raw/K_raw; all grad outputs f32 (section 12,
+//                     one body for every dtype)
 // Pure f32 (NO typed variant — operate on f32 scalar grad arrays only):
 //   - m3_ddt_dtrap  (scale/gamma → dt/trap grads, f32 scalar math)
 //   - m3_final_grads (combines f32 dADT + dDT + dDT_angle into final grads)
@@ -3291,181 +3258,6 @@ DEFINE_M3_DQKV(m3_dqkv_transport_f32, int, float, from_f_f32, transport)
 DEFINE_M3_DQKV(m3_dqkv_transport_bf16, int, __nv_bfloat16, from_f_bf16, transport)
 DEFINE_M3_DQKV(m3_dqkv_transport_f16, int, __half, from_f_f16, transport)
 
-
-// __launch_bounds__: block_dim=CS <= 64. Six state-capacity register arrays per
-// thread risk spilling under nvcc heuristics — pin to 4 blocks/SM.
-// The output tiles become live only after the input tiles are consumed.
-// Reusing that storage and permuting its addresses leaves the reductions
-// unchanged while reducing shared-memory traffic and bank conflicts.
-#define M3_DQKT_Q_TILE_legacy dki_sm + CS * ds
-#define M3_DQKT_Q_TILE_transport q_sm
-#define M3_DQKT_K_TILE_legacy out_q_sm + CS * ds
-#define M3_DQKT_K_TILE_transport k_sm
-#define M3_DQKT_COOP_INDEX_legacy(i, t, n, ds) i
-#define M3_DQKT_COOP_INDEX_transport(i, t, n, ds) t * ds + (n ^ ((ds == 16) ? ((t >> 1) & 15) : 0))
-#define M3_DQKT_THREAD_INDEX_legacy(t, n, ds) t * ds + n
-#define M3_DQKT_THREAD_INDEX_transport(t, n, ds) t * ds + (n ^ ((ds == 16) ? ((t >> 1) & 15) : 0))
-
-#define DEFINE_M3_DQKTHETA(NAME, IDX, T_ACT, FROM_F, MODE) \
-extern "C" __global__ __launch_bounds__(64, 4) void \
-NAME( \
-float* __restrict__ dQ_pre, \
-float* __restrict__ dK_pre, \
-float* __restrict__ dAngles_cumsum, \
-float* dScale, \
-float* dGamma, \
-const T_ACT* __restrict__ Q_raw, \
-const T_ACT* __restrict__ K_raw, \
-const float* Scale_in, \
-const float* Gamma_in, \
-const float* __restrict__ Angles, \
-const float* __restrict__ dQ_mid, \
-const float* __restrict__ dK_mid, \
-const float* __restrict__ dQK_dot, \
-int B, int T, int nh, int ds, int n_angles, int CS, \
-int use_staging, \
-    int y_first /* this run's first y block */ \
-) { \
-    int n_chunks = (T + CS - 1) / CS; \
-    IDX bc = blockIdx.x; \
-    IDX b_chunk = bc; \
-    int h = y_first + blockIdx.y; \
-    int t_local = threadIdx.x; \
-    IDX b = b_chunk / n_chunks; \
-    int chunk = (int)(b_chunk % n_chunks); \
-    int gt = chunk * CS + t_local; \
-    if (ds > MAMBA_RS_STATE_CAP) return; \
-    if (b >= B || h >= nh) return; \
-    bool valid = (gt < T); \
-    extern __shared__ float dqkt_sm[]; \
-    float* q_sm     = dqkt_sm; \
-    float* k_sm     = q_sm + CS * ds; \
-    float* dqi_sm   = k_sm + CS * ds; \
-    float* dki_sm   = dqi_sm + CS * ds; \
-    float* out_q_sm = M3_DQKT_Q_TILE_##MODE; \
-    float* out_k_sm = M3_DQKT_K_TILE_##MODE; \
-    int t0 = chunk * CS; \
-    int rows = min(CS, T - t0); \
-    if (use_staging) { \
-        for (int i = t_local; i < rows * ds; i += CS) { \
-            int tt = i / ds; \
-            int nn = i % ds; \
-            IDX gbase = ((b * T + t0 + tt) * nh + h) * ds + nn; \
-            q_sm[M3_DQKT_COOP_INDEX_##MODE(i, tt, nn, ds)] = to_f(Q_raw[gbase]); \
-            k_sm[M3_DQKT_COOP_INDEX_##MODE(i, tt, nn, ds)] = to_f(K_raw[gbase]); \
-            dqi_sm[M3_DQKT_COOP_INDEX_##MODE(i, tt, nn, ds)] = dQ_mid[gbase]; \
-            dki_sm[M3_DQKT_COOP_INDEX_##MODE(i, tt, nn, ds)] = dK_mid[gbase]; \
-        } \
-    } \
-    __syncthreads(); \
-    if (valid) { \
-        IDX base = ((b * T + gt) * nh + h) * ds; \
-        float scale = Scale_in[(b * T + gt) * nh + h]; \
-        float gamma = Gamma_in[(b * T + gt) * nh + h]; \
-        float dqk = dQK_dot[(b * T + gt) * nh + h]; \
-        float q_pre[MAMBA_RS_STATE_CAP], k_pre[MAMBA_RS_STATE_CAP]; \
-        for (int n = 0; n < ds; n++) { \
-            q_pre[n] = \
-            use_staging ? q_sm[M3_DQKT_THREAD_INDEX_##MODE(t_local, n, ds)] : to_f(Q_raw[base + n]); \
-            k_pre[n] = \
-            use_staging ? k_sm[M3_DQKT_THREAD_INDEX_##MODE(t_local, n, ds)] : to_f(K_raw[base + n]); \
-        } \
-        float dq_in[MAMBA_RS_STATE_CAP], dk_in[MAMBA_RS_STATE_CAP]; \
-        for (int n = 0; n < ds; n++) { \
-            dq_in[n] = \
-            use_staging ? dqi_sm[M3_DQKT_THREAD_INDEX_##MODE(t_local, n, ds)] : dQ_mid[base + n]; \
-            dk_in[n] = \
-            use_staging ? dki_sm[M3_DQKT_THREAD_INDEX_##MODE(t_local, n, ds)] : dK_mid[base + n]; \
-        } \
-        float k_rot[MAMBA_RS_STATE_CAP]; \
-        IDX angle_base = ((b * T + gt) * nh + h) * n_angles; \
-        float cos_a[MAMBA_RS_STATE_CAP / 2], sin_a[MAMBA_RS_STATE_CAP / 2]; \
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) { \
-            float theta = Angles[angle_base + a]; \
-            cos_a[a] = cosf(theta); \
-            sin_a[a] = sinf(theta); \
-        } \
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) { \
-            float cos_t = cos_a[a]; \
-            float sin_t = sin_a[a]; \
-            int i0 = 2 * a, i1 = 2 * a + 1; \
-            k_rot[i0] = k_pre[i0] * cos_t - k_pre[i1] * sin_t; \
-            k_rot[i1] = k_pre[i0] * sin_t + k_pre[i1] * cos_t; \
-        } \
-        for (int n = 2 * n_angles; n < ds; n++) k_rot[n] = k_pre[n]; \
-        float d_scale = 0.0f; \
-        for (int n = 0; n < ds; n++) d_scale += dk_in[n] * k_rot[n]; \
-        dScale[(b * T + gt) * nh + h] = d_scale; \
-        float qk_raw = 0.0f; \
-        for (int n = 0; n < ds; n++) qk_raw += q_pre[n] * k_pre[n]; \
-        dGamma[(b * T + gt) * nh + h] = dqk * qk_raw; \
-        for (int n = 0; n < ds; n++) dk_in[n] *= scale; \
-        float dq_pre_out[MAMBA_RS_STATE_CAP], dk_pre_out[MAMBA_RS_STATE_CAP]; \
-        for (int n = 0; n < ds; n++) { \
-            dq_pre_out[n] = dq_in[n]; \
-            dk_pre_out[n] = dk_in[n]; \
-        } \
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) { \
-            float cos_t = cos_a[a]; \
-            float sin_t = sin_a[a]; \
-            int i0 = 2 * a, i1 = 2 * a + 1; \
-            dq_pre_out[i0] = dq_in[i0] * cos_t + dq_in[i1] * sin_t; \
-            dq_pre_out[i1] = -dq_in[i0] * sin_t + dq_in[i1] * cos_t; \
-            dk_pre_out[i0] = dk_in[i0] * cos_t + dk_in[i1] * sin_t; \
-            dk_pre_out[i1] = -dk_in[i0] * sin_t + dk_in[i1] * cos_t; \
-        } \
-        float dqk_gamma = dqk * gamma; \
-        for (int n = 0; n < ds; n++) { \
-            dq_pre_out[n] += dqk_gamma * k_pre[n]; \
-            dk_pre_out[n] += dqk_gamma * q_pre[n]; \
-        } \
-        if (use_staging) { \
-            for (int n = 0; n < ds; n++) { \
-                out_q_sm[M3_DQKT_THREAD_INDEX_##MODE(t_local, n, ds)] = dq_pre_out[n]; \
-                out_k_sm[M3_DQKT_THREAD_INDEX_##MODE(t_local, n, ds)] = dk_pre_out[n]; \
-            } \
-        } else { \
-            for (int n = 0; n < ds; n++) { \
-                dQ_pre[base + n] = dq_pre_out[n]; \
-                dK_pre[base + n] = dk_pre_out[n]; \
-            } \
-        } \
-        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) { \
-            float cos_t = cos_a[a]; \
-            float sin_t = sin_a[a]; \
-            int i0 = 2 * a, i1 = 2 * a + 1; \
-            float dtheta_q = dq_in[i0] \
-            * (-q_pre[i0] * sin_t - q_pre[i1] * cos_t) \
-            + dq_in[i1] * (q_pre[i0] * cos_t - q_pre[i1] * sin_t); \
-            float dtheta_k = dk_in[i0] \
-            * (-k_pre[i0] * sin_t - k_pre[i1] * cos_t) \
-            + dk_in[i1] * (k_pre[i0] * cos_t - k_pre[i1] * sin_t); \
-            dAngles_cumsum[((b * T + gt) * nh + h) * n_angles + a] = \
-            dtheta_q + dtheta_k; \
-        } \
-    } \
-    __syncthreads(); \
-    if (use_staging) { \
-        for (int i = t_local; i < rows * ds; i += CS) { \
-            int tt = i / ds; \
-            int nn = i % ds; \
-            IDX gbase = ((b * T + t0 + tt) * nh + h) * ds + nn; \
-            dQ_pre[gbase] = out_q_sm[M3_DQKT_COOP_INDEX_##MODE(i, tt, nn, ds)]; \
-            dK_pre[gbase] = out_k_sm[M3_DQKT_COOP_INDEX_##MODE(i, tt, nn, ds)]; \
-        } \
-    } \
-    (void)FROM_F; \
-}
-
-
-DEFINE_M3_DQKTHETA(m3_dqktheta_bf16, int, __nv_bfloat16, from_f_bf16, legacy)
-DEFINE_M3_DQKTHETA(m3_dqktheta_bf16_i64, long long, __nv_bfloat16, from_f_bf16, legacy)
-DEFINE_M3_DQKTHETA(m3_dqktheta_f16, int, __half, from_f_f16, legacy)
-DEFINE_M3_DQKTHETA(m3_dqktheta_f16_i64, long long, __half, from_f_f16, legacy)
-DEFINE_M3_DQKTHETA(m3_dqktheta_transport_bf16, int, __nv_bfloat16, from_f_bf16, transport)
-DEFINE_M3_DQKTHETA(m3_dqktheta_transport_f16, int, __half, from_f_f16, transport)
-
-
 #undef M3_DQKV_LOCAL_STATE_legacy
 #undef M3_DQKV_LOCAL_STATE_transport
 #undef M3_DQKV_PAIR_STORAGE_legacy
@@ -3486,14 +3278,6 @@ DEFINE_M3_DQKTHETA(m3_dqktheta_transport_f16, int, __half, from_f_f16, transport
 #undef M3_DQKV_RELOAD_PRIMAL_transport
 #undef M3_DQKV_DADT_PAIRS_legacy
 #undef M3_DQKV_DADT_PAIRS_transport
-#undef M3_DQKT_Q_TILE_legacy
-#undef M3_DQKT_Q_TILE_transport
-#undef M3_DQKT_K_TILE_legacy
-#undef M3_DQKT_K_TILE_transport
-#undef M3_DQKT_COOP_INDEX_legacy
-#undef M3_DQKT_COOP_INDEX_transport
-#undef M3_DQKT_THREAD_INDEX_legacy
-#undef M3_DQKT_THREAD_INDEX_transport
 
 // Independent output columns share a block while retaining each original
 // lane's input stride and every step of the shared-memory reduction tree.

@@ -1,25 +1,25 @@
-//! The frozen kernels of the SISO chunked forward
-//! (`fixtures/m3_chunked_forward_reference.cu`), compiled as the SISO
-//! module compiles its own: the same prelude, the packed-row helpers, the
-//! numeric options and the state capacity, so each frozen kernel gives the
-//! bits it gave when it was the production one.
+//! SISO kernels frozen as they were released (`fixtures/*_reference.cu`),
+//! compiled as the SISO module compiles its own: the same prelude, the
+//! packed-row helpers, the numeric options and the state capacity, so each
+//! frozen kernel gives the bits it gave when it was the production one.
 
 use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaModule};
 use mamba_rs::gpu::kernels::cuda_include_paths;
 
-/// The frozen chunked-forward module for `arch`, its register arrays sized
-/// for `state_cap` states.
-pub fn chunked_reference(
+/// The module of a fixture's frozen kernels (`fixture` is its source) for
+/// `arch`, their register arrays sized for `state_cap` states.
+pub fn frozen_module(
     ctx: &Arc<CudaContext>,
     arch: &'static str,
     state_cap: usize,
+    fixture: &str,
 ) -> Arc<CudaModule> {
     let source = [
         include_str!("../../kernels/_typed_prelude.cuh"),
         include_str!("../../kernels/_varlen.cuh"),
-        include_str!("../fixtures/m3_chunked_forward_reference.cu"),
+        fixture,
     ]
     .join("\n");
     let (mut major, mut minor) = (0, 0);
@@ -43,7 +43,6 @@ pub fn chunked_reference(
             ..Default::default()
         },
     )
-    .expect("chunked forward reference compilation");
-    ctx.load_module(ptx)
-        .expect("load chunked forward reference")
+    .expect("frozen kernels compilation");
+    ctx.load_module(ptx).expect("load frozen kernels")
 }

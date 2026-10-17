@@ -23,12 +23,12 @@
 
 #[path = "common/arch.rs"]
 mod arch;
-#[path = "common/chunked_reference.rs"]
-mod chunked_reference;
+#[path = "common/frozen_kernels.rs"]
+mod frozen_kernels;
 
-use chunked_reference::chunked_reference;
 use cudarc::driver::sys::CUfunction_attribute_enum as CUfunction_attribute;
 use cudarc::driver::{CudaFunction, CudaModule, LaunchConfig, PushKernelArg};
+use frozen_kernels::frozen_module;
 use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
@@ -40,6 +40,10 @@ use mamba_rs::mamba3_siso::gpu::kernels::{
     chunk_scan_coop_cfg, chunk_scan_sliced_cfg, state_pass_fused_cfg,
 };
 use std::sync::Arc;
+
+/// The chunked forward's kernels as they were released before the sliced
+/// kernels replaced them.
+const FROZEN_FORWARD: &str = include_str!("fixtures/m3_chunked_forward_reference.cu");
 
 fn det_rand(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
@@ -224,7 +228,7 @@ fn the_pre_state_arms_write_the_frozen_trio_bits() {
     for (cap, shapes) in STAGE_SHAPES {
         let m3k = Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), cap)
             .unwrap();
-        let frozen = chunked_reference(ctx.stream.context(), arch::arch0(), cap);
+        let frozen = frozen_module(ctx.stream.context(), arch::arch0(), cap, FROZEN_FORWARD);
         let cumsum = frozen.load_function("m3_reference_da_cumsum").unwrap();
         for &(batch, t, nh, hd, ds, cs) in shapes {
             let nc = t.div_ceil(cs);
@@ -513,7 +517,7 @@ fn the_sliced_scan_writes_the_frozen_static_tile_bits() {
     for (cap, shapes) in STAGE_SHAPES {
         let m3k = Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), cap)
             .unwrap();
-        let frozen = chunked_reference(ctx.stream.context(), arch::arch0(), cap);
+        let frozen = frozen_module(ctx.stream.context(), arch::arch0(), cap, FROZEN_FORWARD);
         for &(batch, t, nh, hd, ds, cs) in shapes {
             let nc = t.div_ceil(cs);
             let th_n = batch * t * nh;

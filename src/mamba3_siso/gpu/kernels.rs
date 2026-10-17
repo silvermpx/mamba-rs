@@ -170,6 +170,8 @@ pub struct Mamba3Kernels {
     /// The chunked backward's dQKV stage for any head and state width:
     /// `m3_dqkv`'s outputs in its order, through tiles of a fixed budget.
     pub m3_dqkv_tiled: TypedKernel,
+    /// Inverse-RoPE + bias backward, a thread a (b, t, h) row walking it
+    /// in registers (f32 activations).
     pub m3_dqktheta: ByIndexWidth<CudaFunction>,
     pub m3_ddt_dtrap: ByIndexWidth<CudaFunction>,
     pub m3_final_grads: ByIndexWidth<CudaFunction>,
@@ -233,7 +235,8 @@ pub struct Mamba3Kernels {
     /// Huge dqkv kernel with smem tiles — typed Q_rot/K_scaled/V_in/dO;
     /// all 6 grad outputs stay f32 (atomicAdd on dD; master grads on others).
     pub m3_dqkv_typed: ByIndexWidth<TypedKernel>,
-    /// Inverse-RoPE + bias backward — typed Q_raw/K_raw; 7 grad outputs f32.
+    /// Inverse-RoPE + bias backward — typed Q_raw/K_raw; its five gradient
+    /// outputs f32.
     pub m3_dqktheta_typed: ByIndexWidth<TypedKernel>,
 
     // m3_chunk_scan_bwd_typed + m3_chunk_state_bwd_typed
@@ -925,7 +928,7 @@ impl Mamba3Kernels {
                 .max(0) as usize;
             let mut budget = PLANNED_SMEM;
             let k = &kernels;
-            let by_width = [(&k.m3_dqkv, "m3_dqkv"), (&k.m3_dqktheta, "m3_dqktheta")];
+            let by_width = [(&k.m3_dqkv, "m3_dqkv")];
             for (pair, name) in by_width {
                 for f in [&pair.i32, &pair.i64] {
                     budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
@@ -937,7 +940,6 @@ impl Mamba3Kernels {
                     &k.m3_chunk_pre_state_fused_typed,
                     "m3_chunk_pre_state_fused",
                 ),
-                (&k.m3_dqktheta_typed, "m3_dqktheta typed"),
             ];
             for (pair, name) in typed_by_width {
                 for t in [&pair.i32, &pair.i64] {
@@ -1035,6 +1037,42 @@ fn block_threads_bound(kernels: &[&CudaFunction], what: &str) -> Result<usize, S
         threads = threads.min(max.max(32) as usize);
     }
     Ok(threads / 32 * 32)
+}
+
+/// The warps a block of `m3_dqkv_dm_chain` takes, a (sequence, chunk,
+/// head) row each (`M3D_WARPS` in `mamba3_siso_block.cu`).
+pub const DM_CHAIN_WARPS: usize = 8;
+
+/// The channels, and the states, a block of `m3_dqkv_state_terms_tiled`
+/// takes (`M3S_TILE` in `mamba3_siso_block.cu`).
+pub const STATE_TERMS_TILE: usize = 64;
+
+/// Launch geometry for `m3_dqkv_dm_chain` over `rows` (sequence, chunk,
+/// head) rows: a warp a row, [`DM_CHAIN_WARPS`] to a block.
+pub fn dm_chain_cfg(rows: usize) -> cudarc::driver::LaunchConfig {
+    cudarc::driver::LaunchConfig {
+        grid_dim: (rows.div_ceil(DM_CHAIN_WARPS) as u32, 1, 1),
+        block_dim: ((32 * DM_CHAIN_WARPS) as u32, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
+/// Launch geometry for `m3_dqkv_state_terms_tiled`: a block of 256
+/// threads per tile of [`STATE_TERMS_TILE`] channels by as many states of
+/// each head, over the sequences (y) and the chunks (z).
+pub fn state_terms_tiled_cfg(
+    batch: usize,
+    n_chunks: usize,
+    nh: usize,
+    hd: usize,
+    ds: usize,
+) -> cudarc::driver::LaunchConfig {
+    let tiles = hd.div_ceil(STATE_TERMS_TILE) * ds.div_ceil(STATE_TERMS_TILE);
+    cudarc::driver::LaunchConfig {
+        grid_dim: ((nh * tiles) as u32, batch as u32, n_chunks as u32),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    }
 }
 
 /// Launch geometry for the decode step of a head: the warp tier's one
@@ -1193,13 +1231,6 @@ pub fn chunk_pre_state_cfg(
 /// and its bits, whatever shared memory the device offers.
 pub const COOP_SCAN_TILE_MAX: usize = 48 * 1024;
 
-/// The largest staging `m3_dqktheta` takes. A thread of the stage holds its
-/// whole row, so a bigger staged tile only lowers the blocks an SM keeps:
-/// at the state width 48 in bf16 and at head 64 by state 64 the 5090
-/// measured such tiles slower than the direct global reads, so they stay
-/// direct. The staged and direct forms give the same bits.
-pub const DQKTHETA_STAGING_MAX: usize = 48 * 1024;
-
 /// Launch geometry for the cooperative scan, or None when its tile of whole
 /// rows passes [`COOP_SCAN_TILE_MAX`] or the chunk is wider than 64.
 pub fn chunk_scan_coop_cfg(
@@ -1287,6 +1318,11 @@ mod tests {
         ] {
             assert!(source.contains(define), "{define}");
         }
+        let block = include_str!("../../../kernels/mamba3_siso_block.cu");
+        for define in ["#define M3D_WARPS 8", "#define M3S_TILE 64"] {
+            assert!(block.contains(define), "{define}");
+        }
+        assert_eq!((DM_CHAIN_WARPS, STATE_TERMS_TILE), (8, 64));
         assert_eq!(SLICED_CHANNELS, 64);
         assert_eq!(PRE_STATE_SLICED_FLOATS, 2560 + 4096 + 256);
         assert_eq!(SCAN_SLICED_FLOATS, 2016 + 4352 + 320);

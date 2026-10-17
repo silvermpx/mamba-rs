@@ -2,7 +2,7 @@
 
 use super::kernels::Mamba3Kernels;
 use crate::gpu::dtype::WeightDtype;
-use crate::gpu::kernels::{HalfKernel, TypedKernel};
+use crate::gpu::kernels::TypedKernel;
 use crate::gpu::launch::IndexWidth;
 use cudarc::driver::sys::CUdeviceptr;
 use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
@@ -33,7 +33,6 @@ impl TransportAdmission {
 pub(super) struct TransportKernels {
     admission: TransportAdmission,
     pub(super) dqkv: Option<TypedKernel>,
-    dqktheta: Option<HalfKernel>,
     axis0: Option<CudaFunction>,
 }
 
@@ -51,14 +50,6 @@ impl TransportKernels {
         } else {
             None
         };
-        let dqktheta = if admission.cap16() {
-            Some(HalfKernel {
-                bf16: get("m3_dqktheta_transport_bf16")?,
-                f16: get("m3_dqktheta_transport_f16")?,
-            })
-        } else {
-            None
-        };
         let axis0 = if admission.cap16() {
             Some(get("m3_reduce_sum_axis0_packed")?)
         } else {
@@ -67,7 +58,6 @@ impl TransportKernels {
         Ok(Self {
             admission,
             dqkv,
-            dqktheta,
             axis0,
         })
     }
@@ -90,20 +80,6 @@ const fn dqkv_transport_admitted(
     pairs: bool,
 ) -> bool {
     admission.dqkv() && state == 16 && head == 16 && chunk == 64 && time >= 128 && pairs
-}
-
-const fn dqktheta_transport_admitted(
-    admission: TransportAdmission,
-    dtype: WeightDtype,
-    state: usize,
-    chunk: usize,
-    angles: usize,
-) -> bool {
-    admission.cap16()
-        && !matches!(dtype, WeightDtype::F32)
-        && state == 16
-        && chunk == 64
-        && angles == 4
 }
 
 #[derive(Clone, Copy)]
@@ -226,32 +202,6 @@ impl Mamba3Kernels {
         }
     }
 
-    /// Select the DQK-theta function for `state`, `chunk`, and `angles`, and
-    /// return its staging-tile count. The function and tile count are one
-    /// launch contract: callers derive shared memory and staging from the
-    /// count. Ineligible shapes and F32 use the legacy function with six tiles.
-    /// Like the DQKV transport, the DQK-theta transport serves 32-bit launches
-    /// only.
-    pub fn dqktheta_for_shape(
-        &self,
-        dtype: WeightDtype,
-        state: usize,
-        chunk: usize,
-        angles: usize,
-        width: IndexWidth,
-    ) -> (&CudaFunction, usize) {
-        if width == IndexWidth::I32
-            && dqktheta_transport_admitted(self.transport.admission, dtype, state, chunk, angles)
-        {
-            match &self.transport.dqktheta {
-                Some(kernels) => (kernels.get(dtype), 4),
-                None => unreachable!("admitted DQK-theta transport handles were not loaded"),
-            }
-        } else {
-            (self.m3_dqktheta_typed.get(width).get(dtype), 6)
-        }
-    }
-
     /// Select the axis-0 reduction for a `rows` by `columns` input.
     /// The function and configuration must be launched together. Ineligible
     /// dimensions use the legacy reduction configuration; `columns` must be
@@ -343,7 +293,6 @@ impl Mamba3Kernels {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::dtype::WeightDtype;
 
     #[test]
     fn compiler_and_device_admission_is_exact() {
@@ -414,42 +363,6 @@ mod tests {
                 chunk,
                 time,
                 pairs,
-            ));
-        }
-    }
-
-    #[test]
-    fn dqktheta_admission_requires_cap16_half_dtype_and_production_shape() {
-        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-            assert!(dqktheta_transport_admitted(
-                TransportAdmission::new(true, 16),
-                dtype,
-                16,
-                64,
-                4,
-            ));
-        }
-        assert!(!dqktheta_transport_admitted(
-            TransportAdmission::new(true, 16),
-            WeightDtype::F32,
-            16,
-            64,
-            4,
-        ));
-        assert!(!dqktheta_transport_admitted(
-            TransportAdmission::new(true, 32),
-            WeightDtype::Bf16,
-            16,
-            64,
-            4,
-        ));
-        for (state, chunk, angles) in [(8, 64, 4), (16, 32, 4), (16, 64, 0)] {
-            assert!(!dqktheta_transport_admitted(
-                TransportAdmission::new(true, 16),
-                WeightDtype::Bf16,
-                state,
-                chunk,
-                angles,
             ));
         }
     }
