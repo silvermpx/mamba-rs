@@ -7,8 +7,9 @@
 //! - dx and the token sums in register tiles, fused for the heads a block
 //!   holds and in channel groups past them, against the per-output dx
 //!   kernel they replaced, frozen as released, and the token sums,
-//! - dB and dC in register tiles, a pass of channels at a time, against the
-//!   per-output kernels they replaced, frozen as released,
+//! - dB and dC in register tiles, a pass of channels at a time, and dH_loc
+//!   and the pair terms in register tiles, against the per-output kernels
+//!   they replaced, frozen as released,
 //! - the conv weight gradient with its taps spread over blocks against one
 //!   block,
 //! - the sequential backward that reads its states from the replay tape
@@ -32,7 +33,7 @@ use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba2::gpu::kernels::{
     BC_TILES_SMEM_BYTES, CHUNK, CHUNK_SCAN_TILES_SMEM_BYTES, CHUNK_SCAN_TT, DX_GROUP_CHANNELS,
-    DX_GROUPS_SMEM_BYTES, Mamba2Kernels, chunk_state_geom, dx_tiles_geom,
+    DX_GROUPS_SMEM_BYTES, Mamba2Kernels, PAIRS_TILES_SMEM_BYTES, chunk_state_geom, dx_tiles_geom,
     gated_norm_bwd_smem_bytes, gated_norm_cfg, seq_bwd_smem_bytes,
 };
 
@@ -829,6 +830,188 @@ fn m2_bc_tiles_are_the_released_db_and_dc() {
         }
     }
     eprintln!("m2 dB and dC tiles: the released kernels' bits on {cases} cases");
+}
+
+/// dH_loc and the pair terms in register tiles against the per-output
+/// kernels they replaced, frozen as released: heads of 4 to 256 channels,
+/// states inside one 32-index tile and over several, one and two heads a
+/// group, one sequence a row and packed rows, a ragged last chunk, in f32,
+/// bf16 and f16.
+#[test]
+fn m2_dh_and_pair_tiles_are_the_released_kernels() {
+    let (dev, ctx, k) = setup();
+    let frozen = frozen_kernels::frozen_module(
+        dev.context(),
+        arch::arch0(),
+        None,
+        include_str!("fixtures/m2_backward_reference.cu"),
+    );
+    let (batch, seq) = (2usize, 100usize);
+    let nc = seq.div_ceil(CHUNK);
+    let pairs = CHUNK * (CHUNK + 1) / 2;
+    let ids = packed_ids(&ctx, seq);
+    let mut cases = 0;
+    for (nh, ng, hd, ds, packed) in [
+        (2usize, 1usize, 4usize, 16usize, false),
+        (4, 2, 18, 40, true),
+        (2, 2, 64, 128, false),
+        (1, 1, 100, 32, true),
+        (2, 1, 160, 48, false),
+        (1, 1, 256, 16, true),
+        (1, 1, 64, 256, false),
+    ] {
+        let d_ssm = nh * hd;
+        let c_col = (d_ssm + ng * ds) as i32;
+        let ld_xbc = d_ssm + 2 * ng * ds;
+        let rows = batch * seq;
+        let per = batch * nc * nh * CHUNK;
+        let seq_idx = if packed { ids.cached_ptr() } else { 0 };
+        let dy = f32_buf(&ctx, &det(rows * d_ssm, 41, 1.0));
+        let cb = f32_buf(&ctx, &det(batch * nc * ng * pairs, 42, 0.5));
+        let dt = f32_buf(
+            &ctx,
+            &det(per, 43, 0.5)
+                .iter()
+                .map(|v| v.abs())
+                .collect::<Vec<_>>(),
+        );
+        let acs = f32_buf(&ctx, &det(per, 44, 2.0));
+        let ld = ld_xbc as i64;
+        let dims = [batch, seq, nh, ng, hd].map(|v| v as i32);
+        let ds_i = ds as i32;
+        let (dh_cols, dh_pt, dh_smem) = chunk_state_geom(hd, ds, k.smem_optin);
+        let dh_pt_i = dh_pt as i32;
+        for dtype in DTYPES {
+            let xbc = typed_buf(&ctx, &det(rows * ld_xbc, 45, 1.0), dtype);
+            let suffix = match dtype {
+                WeightDtype::Bf16 => "_bf16",
+                WeightDtype::F16 => "_f16",
+                _ => "",
+            };
+            let (xp, dyp, cbp, dtp, acp) = (
+                xbc.cached_ptr(),
+                dy.cached_ptr(),
+                cb.cached_ptr(),
+                dt.cached_ptr(),
+                acs.cached_ptr(),
+            );
+            // dH_loc: released, then the tiles.
+            let mut dh = Vec::new();
+            for tiled in [false, true] {
+                let out = f32_buf(
+                    &ctx,
+                    &vec![if tiled { -7.0 } else { 7.0 }; batch * nc * nh * hd * ds],
+                );
+                let op = out.cached_ptr();
+                let released = frozen
+                    .load_function(&format!("m2b_reference_dhloc{suffix}"))
+                    .unwrap();
+                let (f, cfg) = if tiled {
+                    (
+                        k.bwd.dhloc.get(dtype),
+                        LaunchConfig {
+                            grid_dim: ((batch * nc) as u32, nh as u32, ds.div_ceil(dh_cols) as u32),
+                            block_dim: ((32 * dh_pt / 4).min(256) as u32, 1, 1),
+                            shared_mem_bytes: dh_smem as u32,
+                        },
+                    )
+                } else {
+                    (
+                        &released,
+                        LaunchConfig {
+                            grid_dim: (
+                                (batch * nc) as u32,
+                                nh as u32,
+                                (hd * ds).div_ceil(256) as u32,
+                            ),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                    )
+                };
+                for (y_first, z_first, cfg) in yz_runs(cfg) {
+                    let mut b = ctx.stream.launch_builder(f);
+                    b.arg(&op);
+                    b.arg(&dyp);
+                    b.arg(&xp);
+                    b.arg(&ld);
+                    b.arg(&c_col);
+                    b.arg(&acp);
+                    for v in &dims {
+                        b.arg(v);
+                    }
+                    b.arg(&ds_i);
+                    if tiled {
+                        b.arg(&dh_pt_i);
+                    }
+                    b.arg(&y_first);
+                    if !tiled {
+                        b.arg(&z_first);
+                    }
+                    b.arg(&seq_idx);
+                    unsafe { b.launch(cfg) }.unwrap();
+                }
+                dh.push(bits_f32(&ctx, &out));
+            }
+            assert!(
+                dh[0] == dh[1],
+                "{dtype:?} dH: head {hd} state {ds} heads {nh} groups {ng} packed {packed}"
+            );
+            // The pair terms: released, then the tiles.
+            let mut pr = Vec::new();
+            for tiled in [false, true] {
+                let poison = if tiled { -7.0 } else { 7.0 };
+                let dcbh = f32_buf(&ctx, &vec![poison; batch * nc * nh * pairs]);
+                let mm = f32_buf(&ctx, &vec![poison; batch * nc * nh * pairs]);
+                let (dcp, mmp) = (dcbh.cached_ptr(), mm.cached_ptr());
+                let released = frozen
+                    .load_function(&format!("m2b_reference_pairs{suffix}"))
+                    .unwrap();
+                let (f, cfg) = if tiled {
+                    (
+                        k.bwd.pairs.get(dtype),
+                        LaunchConfig {
+                            grid_dim: ((batch * nc) as u32, nh as u32, 1),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: PAIRS_TILES_SMEM_BYTES as u32,
+                        },
+                    )
+                } else {
+                    (
+                        &released,
+                        LaunchConfig {
+                            grid_dim: ((batch * nc) as u32, nh as u32, pairs.div_ceil(256) as u32),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                    )
+                };
+                for (y_first, cfg) in y_runs(cfg) {
+                    let mut b = ctx.stream.launch_builder(f);
+                    for p in [&dcp, &mmp, &dyp, &xp] {
+                        b.arg(p);
+                    }
+                    b.arg(&ld);
+                    for p in [&cbp, &dtp, &acp] {
+                        b.arg(p);
+                    }
+                    for v in &dims {
+                        b.arg(v);
+                    }
+                    b.arg(&y_first);
+                    b.arg(&seq_idx);
+                    unsafe { b.launch(cfg) }.unwrap();
+                }
+                pr.push((bits_f32(&ctx, &dcbh), bits_f32(&ctx, &mm)));
+            }
+            assert!(
+                pr[0].0 == pr[1].0 && pr[0].1 == pr[1].1,
+                "{dtype:?} pairs: head {hd} heads {nh} groups {ng} packed {packed}"
+            );
+            cases += 1;
+        }
+    }
+    eprintln!("m2 dH and pair tiles: the released kernels' bits on {cases} cases");
 }
 
 #[test]

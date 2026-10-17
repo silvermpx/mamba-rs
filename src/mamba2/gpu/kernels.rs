@@ -66,6 +66,8 @@ pub struct Mamba2Kernels {
 /// or conv rows come in every activation dtype.
 pub struct Mamba2BwdKernels {
     pub a_neg: CudaFunction,
+    /// dH_loc as register tiles, the forward chunk state's geometry
+    /// ([`chunk_state_geom`]).
     pub dhloc: TypedKernel,
     pub state_passing: CudaFunction,
     pub chunk_dot: CudaFunction,
@@ -81,6 +83,8 @@ pub struct Mamba2BwdKernels {
     /// for the heads `dx_tiles` cannot hold; `rowsums` then sums the
     /// tokens.
     pub dx_groups: TypedKernel,
+    /// The pair terms as register tiles, a block per chunk and head
+    /// (see [`PAIRS_TILES_SMEM_BYTES`]).
     pub pairs: TypedKernel,
     /// dB and dC as register tiles, a pass of channels at a time, for
     /// every head and state width (see [`BC_TILES_SMEM_BYTES`]).
@@ -339,6 +343,7 @@ impl Mamba2Kernels {
                 (&kernels.bwd.seq_bwd_global, "global sequential backward"),
                 (&kernels.bmm_chunk, "chunk bmm"),
                 (&kernels.chunk_state, "chunk state"),
+                (&kernels.bwd.dhloc, "dH tiles"),
                 (&kernels.bwd.dx_tiles, "dx tiles"),
             ] {
                 for f in [&k.f32, &k.bf16, &k.f16] {
@@ -449,6 +454,13 @@ pub fn dx_tiles_geom(hd: usize, ds: usize, cap: usize, threads: usize) -> Option
         .find(|&nk| bytes(nk) <= cap)
         .map(|nk| (nk, bytes(nk)))
 }
+
+/// Channels of a staging pass of the tiled pair terms.
+pub const PAIRS_PASS: usize = 64;
+
+/// The tiled pair terms' shared memory, the same for every head width: a
+/// pass's dy and x rows transposed, each padded to 68 tokens.
+pub const PAIRS_TILES_SMEM_BYTES: usize = 2 * PAIRS_PASS * (CHUNK + 4) * 4;
 
 /// Channels of a staging pass of the tiled dB and dC.
 pub const BC_TILES_PASS: usize = 32;
@@ -577,13 +589,20 @@ mod tests {
         const { assert!(CHUNK_SCAN_TILES_SMEM_BYTES <= 48 * 1024) };
     }
 
-    /// The sliced backward tiles' stages are the kernels': 37,632 and
-    /// 41,984 bytes, inside the 48 KB a block takes without opting in.
+    /// The sliced backward tiles' stages are the kernels': 37,632, 41,984
+    /// and 34,816 bytes, inside the 48 KB a block takes without opting in.
     #[test]
     fn the_backward_tile_stages_are_the_kernels() {
         assert_eq!(BC_TILES_SMEM_BYTES, 37_632);
         assert_eq!(DX_GROUPS_SMEM_BYTES, 41_984);
-        const { assert!(BC_TILES_SMEM_BYTES <= 48 * 1024 && DX_GROUPS_SMEM_BYTES <= 48 * 1024) };
+        assert_eq!(PAIRS_TILES_SMEM_BYTES, 34_816);
+        const {
+            assert!(
+                BC_TILES_SMEM_BYTES <= 48 * 1024
+                    && DX_GROUPS_SMEM_BYTES <= 48 * 1024
+                    && PAIRS_TILES_SMEM_BYTES <= 48 * 1024
+            )
+        };
     }
 
     /// No validated state is refused for shared memory on a supported part:

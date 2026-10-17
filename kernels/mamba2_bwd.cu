@@ -110,69 +110,6 @@ extern "C" __global__ void m2_a_neg(
     a_neg[i] = -m2_exp_portable(a_log[i]);
 }
 
-// dH_loc[b, c, h, p, n] = sum_t (dy_t[p] e^Acs_t) C_t[n], t ascending over
-// the tokens the entering state reaches. Grid (B * nc, H,
-// ceil(P * N / blockDim.x)), the forward chunk state's.
-template <typename T>
-__device__ __forceinline__ void m2b_dhloc_body(
-    float* __restrict__ ds_out,
-    const float* __restrict__ dy,
-    const T* __restrict__ xbc, long long ld_xbc, int c_col,
-    const float* __restrict__ acs,
-    int batch, int seq, int nh, int ng, int hd, int ds,
-    int y_first, /* this run's first y block */
-    int z_first, /* this run's first z block */
-    const int* __restrict__ seq_idx
-) {
-    const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
-    const long long bc = blockIdx.x;
-    const int h = y_first + blockIdx.y;
-    const long long e = (long long)(z_first + blockIdx.z) * blockDim.x + threadIdx.x;
-    if (bc >= (long long)batch * nc || h >= nh || e >= (long long)hd * ds) return;
-    const int p = (int)(e / ds);
-    const int n = (int)(e % ds);
-    const int g = h / (nh / ng);
-    const int c = (int)(bc % nc);
-    const long long b = bc / nc;
-    const int t0 = c * M2_CHUNK;
-    const int lc = min(M2_CHUNK, seq - t0);
-    const long long sc = (bc * nh + h) * M2_CHUNK;
-    const long long d_ssm = (long long)nh * hd;
-    const int cont = vl_lower_bound(seq_idx, b, seq, t0, t0 + lc,
-                                    vl_id(seq_idx, b, seq, t0 - 1) + 1) - t0;
-    float acc = 0.0f;
-    for (int t = 0; t < cont; t++) {
-        const long long row = b * seq + t0 + t;
-        float dye = __fmul_rn(dy[row * d_ssm + (long long)h * hd + p], m2_exp(acs[sc + t]));
-        acc = __fmaf_rn(dye, to_f(xbc[row * ld_xbc + c_col + (long long)g * ds + n]), acc);
-    }
-    ds_out[((bc * nh + h) * hd + p) * (long long)ds + n] = acc;
-}
-
-#define DEFINE_M2B_DHLOC(NAME, T)                                              \
-extern "C" __global__ void NAME(                                               \
-    float* __restrict__ ds_out,                                                \
-    const float* __restrict__ dy,                                              \
-    const T* __restrict__ xbc,                                                 \
-    long long ld_xbc,                                                          \
-    int c_col,                                                                 \
-    const float* __restrict__ acs,                                             \
-    int batch,                                                                 \
-    int seq,                                                                   \
-    int nh,                                                                    \
-    int ng,                                                                    \
-    int hd,                                                                    \
-    int ds,                                                                    \
-    int y_first, /* this run's first y block */                                \
-    int z_first, /* this run's first z block */                                \
-    const int* __restrict__ seq_idx                                            \
-) {                                                                            \
-    m2b_dhloc_body<T>(ds_out, dy, xbc, ld_xbc, c_col, acs, batch, seq, nh,     \
-        ng, hd, ds, y_first, z_first, seq_idx);                                \
-}
-DEFINE_M2B_DHLOC(m2b_dhloc, float)
-DEFINE_M2B_DHLOC(m2b_dhloc_bf16, __nv_bfloat16)
-DEFINE_M2B_DHLOC(m2b_dhloc_f16, __half)
 
 // The state passing backward, in place: dS holds dH_loc on entry and
 // dS[c] = d H_c+1 on exit, from zero after the last chunk:
@@ -346,6 +283,127 @@ extern "C" __global__ void NAME(                                               \
 DEFINE_M2B_ROWSUMS(m2b_rowsums, float)
 DEFINE_M2B_ROWSUMS(m2b_rowsums_bf16, __nv_bfloat16)
 DEFINE_M2B_ROWSUMS(m2b_rowsums_f16, __half)
+
+// dH_loc[b, c, h, p, n] = sum_t (dy_t[p] e^Acs_t) C_t[n], t ascending over
+// the tokens the entering state reaches (those before the chunk's first
+// start). Register tiles, the forward chunk state's: a warp takes 4
+// channels p and a lane the state indices lane + 32 j of the block's tile
+// (JC of them). e^Acs_t and the C rows [64][32 JC] are staged once per
+// block, dy e^Acs [64][pt] once per tile of pt channels; each output is one
+// chain, t ascending from 0, whatever the tile, the per-output kernel's.
+// Grid (B * nc, H, ceil(N / (32 JC))), block up to 256 threads, dynamic
+// shared memory 64 (pt + 32 JC + 1) floats (chunk_state_geom).
+template <typename T, int JC>
+__device__ __forceinline__ void m2b_dhloc_body(
+    float* __restrict__ ds_out,
+    const float* __restrict__ dy,
+    const T* __restrict__ xbc, long long ld_xbc, int c_col,
+    const float* __restrict__ acs,
+    int batch, int seq, int nh, int ng, int hd, int ds, int pt,
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
+) {
+    extern __shared__ float4 m2bh_sm4[];
+    constexpr int NT = 32 * JC;
+    const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
+    const long long bc = blockIdx.x;
+    const int h = y_first + blockIdx.y;
+    const int n0 = blockIdx.z * NT;
+    if (bc >= (long long)batch * nc || h >= nh) return;
+    const int g = h / (nh / ng);
+    const int c = (int)(bc % nc);
+    const long long b = bc / nc;
+    const int t0 = c * M2_CHUNK;
+    const int lc = min(M2_CHUNK, seq - t0);
+    const long long sc = (bc * nh + h) * M2_CHUNK;
+    const long long d_ssm = (long long)nh * hd;
+    float* ys = reinterpret_cast<float*>(m2bh_sm4);  // [64][pt]
+    float* cs = ys + M2_CHUNK * pt;                   // [64][NT]
+    float* es = cs + M2_CHUNK * NT;                   // [64]
+    const int tid = threadIdx.x;
+    const int lane = tid & 31, warp = tid >> 5, nw = blockDim.x >> 5;
+    const int cont = vl_lower_bound(seq_idx, b, seq, t0, t0 + lc,
+                                    vl_id(seq_idx, b, seq, t0 - 1) + 1) - t0;
+    for (int t = tid; t < cont; t += blockDim.x) es[t] = m2_exp(acs[sc + t]);
+    m2_stage4(cont * NT, tid, blockDim.x,
+              [&](int i) {
+                  const int t = i / NT, n = n0 + (i - t * NT);
+                  return n < ds
+                      ? to_f(xbc[(b * seq + t0 + t) * ld_xbc + c_col + (long long)g * ds + n])
+                      : 0.0f;
+              },
+              [&](int i, float v) { cs[i] = v; });
+    __syncthreads();
+    for (int pt0 = 0; pt0 < hd; pt0 += pt) {
+        /* The previous tile's reads are done before its rows are replaced. */
+        __syncthreads();
+        m2_stage4(cont * pt, tid, blockDim.x,
+                  [&](int i) {
+                      const int t = i / pt, p = pt0 + (i - t * pt);
+                      return p < hd
+                          ? __fmul_rn(dy[(b * seq + t0 + t) * d_ssm + (long long)h * hd + p], es[t])
+                          : 0.0f;
+                  },
+                  [&](int i, float v) { ys[i] = v; });
+        __syncthreads();
+        for (int p0 = 4 * warp; p0 < pt && pt0 + p0 < hd; p0 += 4 * nw) {
+            float acc[4][JC];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < JC; j++) acc[i][j] = 0.0f;
+            }
+            for (int t = 0; t < cont; t++) {
+                const float4 y4 = *reinterpret_cast<const float4*>(ys + t * pt + p0);
+                const float yv[4] = {y4.x, y4.y, y4.z, y4.w};
+                float cv[JC];
+#pragma unroll
+                for (int j = 0; j < JC; j++) cv[j] = cs[t * NT + lane + 32 * j];
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+#pragma unroll
+                    for (int j = 0; j < JC; j++) acc[i][j] = __fmaf_rn(yv[i], cv[j], acc[i][j]);
+                }
+            }
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                const int p = pt0 + p0 + i;
+                if (p >= hd) continue;
+#pragma unroll
+                for (int j = 0; j < JC; j++) {
+                    const int n = n0 + lane + 32 * j;
+                    if (n < ds) ds_out[((bc * nh + h) * hd + p) * (long long)ds + n] = acc[i][j];
+                }
+            }
+        }
+    }
+}
+
+#define DEFINE_M2B_DHLOC(NAME, T)                                              \
+extern "C" __global__ void NAME(                                               \
+    float* __restrict__ ds_out,                                                \
+    const float* __restrict__ dy,                                              \
+    const T* __restrict__ xbc,                                                 \
+    long long ld_xbc,                                                          \
+    int c_col,                                                                 \
+    const float* __restrict__ acs,                                             \
+    int batch, int seq, int nh, int ng, int hd, int ds, int pt,                \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
+) {                                                                            \
+    if (ds <= 32)                                                              \
+        m2b_dhloc_body<T, 1>(ds_out, dy, xbc, ld_xbc, c_col, acs, batch, seq,  \
+            nh, ng, hd, ds, pt, y_first, seq_idx);                             \
+    else if (ds <= 64)                                                         \
+        m2b_dhloc_body<T, 2>(ds_out, dy, xbc, ld_xbc, c_col, acs, batch, seq,  \
+            nh, ng, hd, ds, pt, y_first, seq_idx);                             \
+    else                                                                       \
+        m2b_dhloc_body<T, 4>(ds_out, dy, xbc, ld_xbc, c_col, acs, batch, seq,  \
+            nh, ng, hd, ds, pt, y_first, seq_idx);                             \
+}
+DEFINE_M2B_DHLOC(m2b_dhloc, float)
+DEFINE_M2B_DHLOC(m2b_dhloc_bf16, __nv_bfloat16)
+DEFINE_M2B_DHLOC(m2b_dhloc_f16, __half)
 
 // dx and the per-channel terms the decay gradients need, as register tiles
 // over a chunk and head: thread (s-group, p-group) holds 4 tokens s by 4
@@ -661,11 +719,17 @@ DEFINE_M2B_DX_GROUPS(m2b_dx_groups, float)
 DEFINE_M2B_DX_GROUPS(m2b_dx_groups_bf16, __nv_bfloat16)
 DEFINE_M2B_DX_GROUPS(m2b_dx_groups_f16, __half)
 
-// The pair terms of a chunk and head, one thread per pair s <= t:
+
+// The pair terms of a chunk and head, for every pair s <= t:
 //   G = dy_t . x_s (p ascending), dcb = G E(t, s) dt_s,
 //   m = dcb CB[t][s] for t > s (0 on the diagonal)
-// stored [B, nc, H, pairs]; both 0 for two sequences of a packed row.
-// Grid (B * nc, H, ceil(pairs / blockDim.x)).
+// stored [B, nc, H, pairs]; both 0 for two sequences of a packed row or a
+// token past the chunk. One block per chunk and head, 256 threads, a
+// thread a 4 x 4 tile of (t, s): dy and x come in transposed, M2BP_PC
+// channels at a time, and each G runs on across the passes, p ascending
+// from 0, the per-output kernel's chain. Dynamic shared memory: two
+// [M2BP_PC][68] tiles (PAIRS_TILES_SMEM_BYTES). Grid (B * nc, H).
+#define M2BP_PC 64
 template <typename T>
 __device__ __forceinline__ void m2b_pairs_body(
     float* __restrict__ dcbh, float* __restrict__ mm,
@@ -677,37 +741,77 @@ __device__ __forceinline__ void m2b_pairs_body(
     int y_first, /* this run's first y block */
     const int* __restrict__ seq_idx
 ) {
+    extern __shared__ float4 m2bp_sm4[];
+    constexpr int LD = M2_CHUNK + 4;
     const int nc = (seq + M2_CHUNK - 1) / M2_CHUNK;
     const long long bc = blockIdx.x;
     const int h = y_first + blockIdx.y;
-    const int q = blockIdx.z * blockDim.x + threadIdx.x;
-    if (bc >= (long long)batch * nc || h >= nh || q >= M2B_PAIRS) return;
-    int t, s;
-    m2b_unpair(q, &t, &s);
+    if (bc >= (long long)batch * nc || h >= nh) return;
     const int c = (int)(bc % nc);
     const long long b = bc / nc;
     const int t0 = c * M2_CHUNK;
     const int lc = min(M2_CHUNK, seq - t0);
-    const long long o = (bc * nh + h) * M2B_PAIRS + q;
-    if (t >= lc || vl_id(seq_idx, b, seq, t0 + t) != vl_id(seq_idx, b, seq, t0 + s)) {
-        dcbh[o] = 0.0f;
-        mm[o] = 0.0f;
-        return;
-    }
     const int g = h / (nh / ng);
     const long long d_ssm = (long long)nh * hd;
-    const long long rt = b * seq + t0 + t;
-    const long long rs = b * seq + t0 + s;
-    float gv = 0.0f;
-    for (int p = 0; p < hd; p++) {
-        gv = __fmaf_rn(dy[rt * d_ssm + (long long)h * hd + p],
-                       to_f(xbc[rs * ld_xbc + (long long)h * hd + p]), gv);
+    float* dyt = reinterpret_cast<float*>(m2bp_sm4);  // [PC][68], token across
+    float* xt = dyt + M2BP_PC * LD;                    // [PC][68]
+    const int tid = threadIdx.x;
+    const int tq = 4 * (tid >> 4), sq = 4 * (tid & 15);
+    float gv[4][4];
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+#pragma unroll
+        for (int j = 0; j < 4; j++) gv[i][j] = 0.0f;
+    }
+    for (int c0 = 0; c0 < hd; c0 += M2BP_PC) {
+        const int pw = min(M2BP_PC, hd - c0);
+        __syncthreads();
+        for (int i = tid; i < M2_CHUNK * pw; i += blockDim.x) {
+            const int r = i / pw, pl = i - r * pw;
+            float dv = 0.0f, xv = 0.0f;
+            if (r < lc) {
+                const long long row = b * seq + t0 + r;
+                dv = dy[row * d_ssm + (long long)h * hd + c0 + pl];
+                xv = to_f(xbc[row * ld_xbc + (long long)h * hd + c0 + pl]);
+            }
+            dyt[pl * LD + r] = dv;
+            xt[pl * LD + r] = xv;
+        }
+        __syncthreads();
+        if (sq <= tq + 3) {
+            for (int pl = 0; pl < pw; pl++) {
+                const float4 d4 = *reinterpret_cast<const float4*>(dyt + pl * LD + tq);
+                const float4 x4 = *reinterpret_cast<const float4*>(xt + pl * LD + sq);
+                const float dv[4] = {d4.x, d4.y, d4.z, d4.w};
+                const float xv[4] = {x4.x, x4.y, x4.z, x4.w};
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+#pragma unroll
+                    for (int j = 0; j < 4; j++) gv[i][j] = __fmaf_rn(dv[i], xv[j], gv[i][j]);
+                }
+            }
+        }
     }
     const long long sc = (bc * nh + h) * M2_CHUNK;
-    const float ev = m2_exp(fminf(__fsub_rn(acs[sc + t], acs[sc + s]), 0.0f));
-    const float dcb = __fmul_rn(__fmul_rn(gv, ev), dt[sc + s]);
-    dcbh[o] = dcb;
-    mm[o] = t > s ? __fmul_rn(dcb, cb[(bc * ng + g) * M2B_PAIRS + q]) : 0.0f;
+    const long long base = (bc * nh + h) * M2B_PAIRS;
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            const int t = tq + i, s = sq + j;
+            if (s > t) continue;
+            const long long o = base + m2b_pair(t, s);
+            if (t >= lc || vl_id(seq_idx, b, seq, t0 + t) != vl_id(seq_idx, b, seq, t0 + s)) {
+                dcbh[o] = 0.0f;
+                mm[o] = 0.0f;
+                continue;
+            }
+            const float ev = m2_exp(fminf(__fsub_rn(acs[sc + t], acs[sc + s]), 0.0f));
+            const float dcb = __fmul_rn(__fmul_rn(gv[i][j], ev), dt[sc + s]);
+            dcbh[o] = dcb;
+            mm[o] = t > s ? __fmul_rn(dcb, cb[(bc * ng + g) * M2B_PAIRS + m2b_pair(t, s)]) : 0.0f;
+        }
+    }
 }
 
 #define DEFINE_M2B_PAIRS(NAME, T)                                              \

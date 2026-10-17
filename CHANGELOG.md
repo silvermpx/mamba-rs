@@ -707,6 +707,14 @@
   of a channel in two register arrays of the compiled capacity, which
   spilled to local memory past about 128 states. The bits are the
   released step's, which stays frozen in `tests/fixtures/m1_step_reference.cu`.
+- The Mamba-2 backward's dH_loc and pair terms run as register tiles:
+  dH_loc on the forward chunk state's tiles, e^Acs and the C rows staged
+  once per block, where a thread an output took 64 exponentials and read
+  its rows from global memory; the pair terms a block per chunk and head,
+  a thread a 4 x 4 tile of pairs over dy and x staged 64 channels at a
+  time (34,816 bytes), where a thread a pair read two rows of the head.
+  Every output keeps the per-output kernel's chain; both stay frozen in
+  `tests/fixtures/m2_backward_reference.cu`.
 
 ### Fixed
 
