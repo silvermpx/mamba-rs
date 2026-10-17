@@ -12,7 +12,9 @@
 //
 // Thread mapping: one thread per (batch, head, p) where p in [0, headdim).
 // Grid: (B, nh, 1), Block: (hd, 1, 1).
-// Each thread carries h_local[d_state] in registers (max ds=64).
+// Each thread carries its element's state: the decode step a slice of 16
+// states at a time in registers, the sequential kernels an array of the
+// compiled capacity.
 //
 // Key differences from the Mamba-2 recurrence:
 // - Trapezoidal recurrence (3 terms: alpha*h + beta*v*k_prev + gamma*x*k_cur)
@@ -37,12 +39,13 @@
 //   All headdim threads in a warp access consecutive addresses at each n step
 //   -> perfectly coalesced (1 cache line per warp per n step).
 
-// State-dimension capacity of the per-thread register arrays below.
+// State-dimension capacity of the sequential kernels' per-thread arrays.
 // Injected at JIT time (-DMAMBA_RS_STATE_CAP=...) from the model config
 // so any reference-range d_state runs the same code path; 64 covers the
 // common shapes at minimum register pressure. Past ~128 the compiler
 // spills these arrays to local memory - correct, measurably slower,
-// and accepted: capacity is a first-class knob, not a fallback.
+// and accepted: capacity is a first-class knob, not a fallback. The
+// decode steps hold slices of 16 states and only refuse a state past it.
 #ifndef MAMBA_RS_STATE_CAP
 #define MAMBA_RS_STATE_CAP 64
 #endif
@@ -50,6 +53,15 @@
 
 #ifndef LOG2E
 #define LOG2E 1.4426950408889634f
+#endif
+
+// The decode steps take the state M3_STEP_SLICE at a time, a slice's
+// states in registers (the loops over a slice unroll, so they index it
+// statically), where one array of the compiled capacity indexed at run
+// time stayed in local memory. The output's chain runs on across the
+// slices in state order, so the bits are those of the whole-state loop.
+#ifndef M3_STEP_SLICE
+#define M3_STEP_SLICE 16
 #endif
 
 // ======================== FORWARD ========================
@@ -95,12 +107,8 @@ extern "C" __global__ void NAME(                                               \
     /* Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1. */        \
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);         \
                                                                                \
-    /* Load h_local into registers */                                          \
-    float h_local[MAMBA_RS_STATE_CAP];                                         \
     if (ds > MAMBA_RS_STATE_CAP) return;                                       \
     IDX h_base = (b * nh * hd + h * hd + p) * ds;                              \
-    for (int n = 0; n < ds; n++)                                               \
-        h_local[n] = ssm_state[h_base + n];                                    \
                                                                                \
     /* O1: alpha, beta, gamma computed on p=0 and broadcast */                 \
     float alpha_h = 0.0f;                                                      \
@@ -129,26 +137,34 @@ extern "C" __global__ void NAME(                                               \
                                                                                \
     float y_val = d_skip * x_val;                                              \
                                                                                \
-    for (int n = 0; n < ds; n++) {                                             \
-        /* O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0 */             \
-        float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;                           \
-        if (p == 0) {                                                          \
-            kc_n = k_cur[b * nh * ds + h * ds + n];                            \
-            kp_n = k_state[b * nh * ds + h * ds + n];                          \
-            qc_n = q_cur[b * nh * ds + h * ds + n];                            \
+    /* The state M3_STEP_SLICE at a time, a slice in registers. */            \
+    for (int n0 = 0; n0 < ds; n0 += M3_STEP_SLICE) {                           \
+        float h_local[M3_STEP_SLICE];                                          \
+        _Pragma("unroll")                                                      \
+        for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else  \
+            h_local[j] = ssm_state[h_base + n0 + j];                           \
+        _Pragma("unroll")                                                      \
+        for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else { \
+            const int n = n0 + j;                                              \
+            /* O1: k_cur[n], k_prev[n], q_cur[n] broadcast from p=0 */         \
+            float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;                       \
+            if (p == 0) {                                                      \
+                kc_n = k_cur[b * nh * ds + h * ds + n];                        \
+                kp_n = k_state[b * nh * ds + h * ds + n];                      \
+                qc_n = q_cur[b * nh * ds + h * ds + n];                        \
+            }                                                                  \
+            kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);                        \
+            kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);                        \
+            qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);                        \
+                                                                               \
+            /* Trapezoidal recurrence */                                       \
+            h_local[j] = alpha_h * h_local[j] + beta_h * v_prev * kp_n + gamma_h * x_val * kc_n; \
+            y_val += h_local[j] * qc_n;                                        \
         }                                                                      \
-        kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);                            \
-        kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);                            \
-        qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);                            \
-                                                                               \
-        /* Trapezoidal recurrence */                                           \
-        h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n + gamma_h * x_val * kc_n; \
-        y_val += h_local[n] * qc_n;                                            \
+        _Pragma("unroll")                                                      \
+        for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else  \
+            ssm_state[h_base + n0 + j] = h_local[j];                           \
     }                                                                          \
-                                                                               \
-    /* Write back SSM state */                                                 \
-    for (int n = 0; n < ds; n++)                                               \
-        ssm_state[h_base + n] = h_local[n];                                    \
                                                                                \
     /* Write output */                                                         \
     y[b * d_inner + h * hd + p] = y_val;                                       \
@@ -188,10 +204,8 @@ extern "C" __global__ void NAME(                                             \
     if (b >= batch || h >= nh || p >= hd) return;                            \
     int d_inner = nh * hd;                                                   \
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);       \
-    float h_local[MAMBA_RS_STATE_CAP];                                                       \
-    if (ds > MAMBA_RS_STATE_CAP) return;                                                     \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                     \
     IDX h_base = (b * nh * hd + h * hd + p) * ds;                            \
-    for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];          \
     float alpha_h = 0.0f;                                                    \
     float beta_h = 0.0f;                                                     \
     float gamma_h = 0.0f;                                                    \
@@ -212,21 +226,31 @@ extern "C" __global__ void NAME(                                             \
     float x_val = to_f(x[b * d_inner + h * hd + p]);                         \
     float v_prev = v_state[b * nh * hd + h * hd + p];                        \
     float y_val = d_skip * x_val;                                            \
-    for (int n = 0; n < ds; n++) {                                            \
-        float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;                         \
-        if (p == 0) {                                                        \
-            kc_n = to_f(k_cur[b * nh * ds + h * ds + n]);                    \
-            kp_n = k_state[b * nh * ds + h * ds + n];                        \
-            qc_n = to_f(q_cur[b * nh * ds + h * ds + n]);                    \
+    for (int n0 = 0; n0 < ds; n0 += M3_STEP_SLICE) {                         \
+        float h_local[M3_STEP_SLICE];                                        \
+        _Pragma("unroll")                                                    \
+        for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else \
+            h_local[j] = ssm_state[h_base + n0 + j];                         \
+        _Pragma("unroll")                                                    \
+        for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else { \
+            const int n = n0 + j;                                            \
+            float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;                     \
+            if (p == 0) {                                                    \
+                kc_n = to_f(k_cur[b * nh * ds + h * ds + n]);                \
+                kp_n = k_state[b * nh * ds + h * ds + n];                    \
+                qc_n = to_f(q_cur[b * nh * ds + h * ds + n]);                \
+            }                                                                \
+            kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);                     \
+            kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);                     \
+            qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);                     \
+            h_local[j] = alpha_h * h_local[j] + beta_h * v_prev * kp_n +     \
+                         gamma_h * x_val * kc_n;                             \
+            y_val += h_local[j] * qc_n;                                      \
         }                                                                    \
-        kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);                         \
-        kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);                         \
-        qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);                         \
-        h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n +         \
-                     gamma_h * x_val * kc_n;                                 \
-        y_val += h_local[n] * qc_n;                                          \
+        _Pragma("unroll")                                                    \
+        for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else \
+            ssm_state[h_base + n0 + j] = h_local[j];                         \
     }                                                                        \
-    for (int n = 0; n < ds; n++) ssm_state[h_base + n] = h_local[n];          \
     y[b * d_inner + h * hd + p] = FROM_F(y_val);                             \
     if (p == 0) {                                                            \
         for (int n = 0; n < ds; n++)                                          \

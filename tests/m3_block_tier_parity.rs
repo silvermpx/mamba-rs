@@ -6,13 +6,15 @@
 
 #[path = "common/arch.rs"]
 mod arch;
+#[path = "common/frozen_kernels.rs"]
+mod frozen_kernels;
 
-use cudarc::driver::PushKernelArg;
+use cudarc::driver::{CudaFunction, PushKernelArg};
 use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
-use mamba_rs::gpu::launch::y_runs;
+use mamba_rs::gpu::launch::{IndexWidth, y_runs};
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::prefill::{Mamba3PrefillScratch, forward_mamba3_backbone_prefill};
@@ -98,6 +100,137 @@ impl StepState {
             v: GpuBuffer::from_cpu(s, v).unwrap(),
         }
     }
+}
+
+/// The decode steps take the state 16 at a time in registers, the output's
+/// chain running on across the slices, where each thread held its
+/// element's whole state in an array of the compiled capacity that stayed
+/// in local memory. Against those steps, frozen and compiled at the
+/// largest capacity: both tiers at widths each serves, states inside one
+/// slice, on a slice's edge and up to 256, two steps in a row (the carried
+/// K and V feed the second), in f32, bf16 and f16 and both index widths,
+/// every state and output bit for bit.
+#[test]
+fn m3_decode_steps_keep_the_bits_of_their_released_form() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let m3k =
+        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), 256).unwrap();
+    let frozen = frozen_kernels::frozen_module(
+        dev.context(),
+        arch::arch0(),
+        Some(256),
+        include_str!("fixtures/m3_step_reference.cu"),
+    );
+    let (batch, nh) = (2usize, 3usize);
+    let mut cases = 0;
+    for (tier, hd) in [
+        (HeadTier::Warp, 4usize),
+        (HeadTier::Warp, 32),
+        (HeadTier::Block, 64),
+        (HeadTier::Block, 96),
+    ] {
+        let di = nh * hd;
+        for ds in [1usize, 15, 16, 17, 33, 64, 100, 128, 200, 256] {
+            for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+                for width in [IndexWidth::I32, IndexWidth::I64] {
+                    let suffix = match dtype {
+                        WeightDtype::Bf16 => "_bf16",
+                        WeightDtype::F16 => "_f16",
+                        _ => "",
+                    };
+                    let wide = if width == IndexWidth::I64 { "_i64" } else { "" };
+                    let (name, current) = match tier {
+                        HeadTier::Warp => ("", m3k.m3_step_fwd_typed.get(width).get(dtype)),
+                        HeadTier::Block => {
+                            ("_block", m3k.m3_step_fwd_block_typed.get(width).get(dtype))
+                        }
+                    };
+                    let released = frozen
+                        .load_function(&format!("m3_reference_step{name}{suffix}{wide}"))
+                        .unwrap();
+                    let cfg =
+                        step_head_cfg(tier, batch, nh, hd, ds, *m3k.step_block_threads.get(width));
+                    let run = |f: &CudaFunction| -> Vec<Vec<f32>> {
+                        let st = StepState::new(
+                            &ctx,
+                            &det(batch * nh * hd * ds, 11, 0.5),
+                            &det(batch * nh * ds, 12, 0.5),
+                            &det(batch * nh * hd, 13, 0.5),
+                        );
+                        let d = GpuBuffer::from_cpu(&ctx.stream, &det(nh, 14, 1.0)).unwrap();
+                        let mut out = Vec::new();
+                        for step in 0..2u64 {
+                            let x = upload_typed(&ctx, &det(batch * di, 20 + step, 1.0), dtype);
+                            let kc =
+                                upload_typed(&ctx, &det(batch * nh * ds, 30 + step, 1.0), dtype);
+                            let qc =
+                                upload_typed(&ctx, &det(batch * nh * ds, 40 + step, 1.0), dtype);
+                            let dt_vals: Vec<f32> = det(batch * nh, 50 + step, 1.0)
+                                .into_iter()
+                                .map(|v| 0.01 + v.abs() * 0.3)
+                                .collect();
+                            let a_vals: Vec<f32> = det(batch * nh, 60 + step, 1.0)
+                                .into_iter()
+                                .map(|v| -0.1 - v.abs())
+                                .collect();
+                            let trap_vals: Vec<f32> = det(batch * nh, 70 + step, 1.0)
+                                .into_iter()
+                                .map(|v| 0.5 + 0.4 * v)
+                                .collect();
+                            let dt = GpuBuffer::from_cpu(&ctx.stream, &dt_vals).unwrap();
+                            let a = GpuBuffer::from_cpu(&ctx.stream, &a_vals).unwrap();
+                            let trap = GpuBuffer::from_cpu(&ctx.stream, &trap_vals).unwrap();
+                            let y = upload_typed(&ctx, &vec![f32::NAN; batch * di], dtype);
+                            let ptrs = [
+                                st.ssm.cached_ptr(),
+                                st.k.cached_ptr(),
+                                st.v.cached_ptr(),
+                                y.cached_ptr(),
+                                x.cached_ptr(),
+                                kc.cached_ptr(),
+                                qc.cached_ptr(),
+                                dt.cached_ptr(),
+                                a.cached_ptr(),
+                                trap.cached_ptr(),
+                                d.cached_ptr(),
+                            ];
+                            let dims = [batch, nh, hd, ds].map(|v| v as i32);
+                            for (y_first, cfg) in y_runs(cfg) {
+                                let mut bld = ctx.stream.launch_builder(f);
+                                for ptr in &ptrs {
+                                    bld.arg(ptr);
+                                }
+                                for dim in &dims {
+                                    bld.arg(dim);
+                                }
+                                bld.arg(&y_first);
+                                unsafe { bld.launch(cfg) }.unwrap();
+                            }
+                            ctx.stream.synchronize().unwrap();
+                            out.push(download_typed(&ctx, &y));
+                        }
+                        out.push(download(&ctx, &st.ssm));
+                        out.push(download(&ctx, &st.k));
+                        out.push(download(&ctx, &st.v));
+                        out
+                    };
+                    let want = run(&released);
+                    let got = run(current);
+                    let label = format!("{tier:?} hd {hd} d_state {ds} {dtype:?} {width:?}");
+                    for (part, (w, g)) in
+                        ["y step 0", "y step 1", "ssm_state", "k_state", "v_state"]
+                            .iter()
+                            .zip(want.iter().zip(&got))
+                    {
+                        assert_bits(&format!("{label} {part}"), w, g);
+                    }
+                    cases += 1;
+                }
+            }
+        }
+    }
+    eprintln!("m3 decode steps: the released steps' bits on {cases} cases");
 }
 
 /// Both step kernels, launched directly on identical inputs for two steps

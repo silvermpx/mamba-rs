@@ -29,6 +29,15 @@
 #define LOG2E 1.4426950408889634f
 #endif
 
+// The decode steps take the state M3_STEP_SLICE at a time, a slice's
+// states in registers (the loops over a slice unroll, so they index it
+// statically), where one array of the compiled capacity indexed at run
+// time stayed in local memory. The output's chain runs on across the
+// slices in state order, so the bits are those of the whole-state loop.
+#ifndef M3_STEP_SLICE
+#define M3_STEP_SLICE 16
+#endif
+
 // m3_step_fwd_block: one decode step of a head wider than a warp.
 //
 // Arguments as m3_step_fwd. Grid: (B, nh). Block: headdim rounded up to
@@ -88,24 +97,31 @@ extern "C" __global__ void NAME(                                              \
     float gamma_h = coef[2];                                                  \
     float d_skip = coef[3];                                                   \
     for (int p = tid; p < hd; p += blockDim.x) {                              \
-        float h_local[MAMBA_RS_STATE_CAP];                                    \
         IDX h_base = (b * nh * hd + h * hd + p) * ds;                         \
-        for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];      \
         float x_val = to_f(x[b * d_inner + h * hd + p]);                      \
         float v_prev = v_state[b * nh * hd + h * hd + p];                     \
         float y_val = d_skip * x_val;                                         \
         float bv = beta_h * v_prev;                                           \
         float gx = gamma_h * x_val;                                           \
-        for (int n = 0; n < ds; n++) {                                        \
-            float kc_n = kc_sm[n];                                            \
-            float kp_n = kp_sm[n];                                            \
-            float qc_n = qc_sm[n];                                            \
-            h_local[n] = __fmaf_rn(gx, kc_n,                                  \
-                                   __fmaf_rn(h_local[n], alpha_h,             \
-                                             __fmul_rn(bv, kp_n)));           \
-            y_val = __fmaf_rn(h_local[n], qc_n, y_val);                       \
+        for (int n0 = 0; n0 < ds; n0 += M3_STEP_SLICE) {                      \
+            float h_local[M3_STEP_SLICE];                                     \
+            _Pragma("unroll")                                                 \
+            for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else \
+                h_local[j] = ssm_state[h_base + n0 + j];                      \
+            _Pragma("unroll")                                                 \
+            for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else { \
+                float kc_n = kc_sm[n0 + j];                                   \
+                float kp_n = kp_sm[n0 + j];                                   \
+                float qc_n = qc_sm[n0 + j];                                   \
+                h_local[j] = __fmaf_rn(gx, kc_n,                              \
+                                       __fmaf_rn(h_local[j], alpha_h,         \
+                                                 __fmul_rn(bv, kp_n)));       \
+                y_val = __fmaf_rn(h_local[j], qc_n, y_val);                   \
+            }                                                                 \
+            _Pragma("unroll")                                                 \
+            for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else \
+                ssm_state[h_base + n0 + j] = h_local[j];                      \
         }                                                                     \
-        for (int n = 0; n < ds; n++) ssm_state[h_base + n] = h_local[n];      \
         y[b * d_inner + h * hd + p] = FROM_F(y_val);                          \
         v_state[b * nh * hd + h * hd + p] = x_val;                            \
     }                                                                         \

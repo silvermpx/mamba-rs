@@ -741,6 +741,14 @@
   take the lanes as their last argument. Every output keeps its chain and
   its bits; the released kernels stay frozen in
   `tests/fixtures/m1_seq_reference.cu`.
+- The Mamba-3 SISO decode steps, the warp tier's and the block tier's
+  (`m3_step_fwd`, `m3_step_fwd_block` and their typed builds), take the
+  state 16 at a time in registers, the output's chain running on across
+  the slices in state order, where each thread kept its element's whole
+  state in an array of the compiled capacity, indexed at run time and so
+  held in local memory (512 bytes a thread at 128 states, the official
+  checkpoints' width). The bits are the released steps', which stay
+  frozen in `tests/fixtures/m3_step_reference.cu`.
 
 ### Fixed
 
