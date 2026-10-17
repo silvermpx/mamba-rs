@@ -1,13 +1,26 @@
-//! Large state dimensions on the fused decode path. The step kernels
-//! keep the SSM state in per-thread register arrays whose size is a
-//! JIT-time capacity knob; these tests prove a d_state past the
-//! historical 64 ceiling runs the SAME code path and matches the CPU
-//! reference, which has no ceiling and serves as the independent oracle.
+//! Large state dimensions on the fused decode path. The step goes a slice
+//! of states at a time whatever d_state, and the sequential kernels keep
+//! the SSM state in per-thread register arrays whose size is a JIT-time
+//! capacity knob; these tests prove a d_state past the historical 64
+//! ceiling runs the same code path and matches the CPU reference, which
+//! has no ceiling and serves as the independent oracle, and that the step
+//! keeps the bits of the released one that held every state at once.
 
 #![cfg(feature = "cuda")]
 
+#[path = "common/arch.rs"]
+mod arch;
+#[path = "common/frozen_kernels.rs"]
+mod frozen_kernels;
+
+use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 use mamba_rs::MambaBackbone;
 use mamba_rs::gpu::GpuOptions;
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::context::GpuCtx;
+use mamba_rs::gpu::device::GpuDevice;
+use mamba_rs::gpu::dtype::WeightDtype;
+use mamba_rs::gpu::launch::IndexWidth;
 use mamba_rs::mamba1::MambaConfig;
 use mamba_rs::mamba1::MambaWeights;
 use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
@@ -80,6 +93,122 @@ fn check_step_parity(d_state: usize) {
              (GPU fused step diverged from the CPU reference)"
         );
     }
+}
+
+/// The decode step as released held every state of a channel in register
+/// arrays of the compiled capacity; it now goes 16 states at a time with
+/// the output's chain unbroken. Against that kernel, frozen and compiled at
+/// the largest capacity: states inside one slice, on a slice's edge, past
+/// it and up to 256, in f32, bf16 and f16 and both index widths, every
+/// state and output bit for bit.
+#[test]
+fn m1_step_keeps_the_bits_of_its_released_form() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new_with_state_cap(&dev, 256).unwrap();
+    let frozen = frozen_kernels::frozen_module(
+        dev.context(),
+        arch::arch0(),
+        Some(256),
+        include_str!("fixtures/m1_step_reference.cu"),
+    );
+    let (batch, di, dt_rank) = (3usize, 48usize, 5usize);
+    let typed = |v: &[f32], dt: WeightDtype| {
+        let b = DtypedBuf::zeros(&ctx.stream, v.len(), dt).unwrap();
+        ctx.stream.synchronize().unwrap();
+        b.upload_f32(&ctx.stream, v).unwrap();
+        ctx.stream.synchronize().unwrap();
+        b
+    };
+    let f32_buf = |v: &[f32]| GpuBuffer::from_cpu(&ctx.stream, v).unwrap();
+    let mut cases = 0;
+    for ds in [1usize, 15, 16, 17, 33, 64, 100, 128, 200, 256] {
+        let xdbl_stride = dt_rank + 2 * ds;
+        let gate_stride = 2 * di;
+        let h0 = det(batch * di * ds, 0x61);
+        let a_neg: Vec<f32> = det(di * ds, 0x62)
+            .iter()
+            .map(|v| -(v + 0.6) * 2.0)
+            .collect();
+        let d = f32_buf(&det(di, 0x63));
+        let a = f32_buf(&a_neg);
+        for dt in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+            let delta_raw = typed(
+                &det(batch * di, 0x64)
+                    .iter()
+                    .map(|v| v * 4.0)
+                    .collect::<Vec<_>>(),
+                dt,
+            );
+            let u = typed(&det(batch * di, 0x65), dt);
+            let xdbl = typed(&det(batch * xdbl_stride, 0x66), dt);
+            let gate = typed(&det(batch * gate_stride, 0x67), dt);
+            let suffix = match dt {
+                WeightDtype::Bf16 => "bf16",
+                WeightDtype::F16 => "f16",
+                _ => "f32",
+            };
+            for width in [IndexWidth::I32, IndexWidth::I64] {
+                let wide = if width == IndexWidth::I64 { "_i64" } else { "" };
+                let released = frozen
+                    .load_function(&format!("m1_reference_step_{suffix}{wide}"))
+                    .unwrap();
+                let run = |f: &CudaFunction| {
+                    let h = f32_buf(&h0);
+                    let y = typed(&vec![0.0; batch * di], dt);
+                    let ints = [gate_stride as i32];
+                    let tail = [
+                        batch as i32,
+                        di as i32,
+                        ds as i32,
+                        xdbl_stride as i32,
+                        dt_rank as i32,
+                        (dt_rank + ds) as i32,
+                    ];
+                    let ptrs = [
+                        h.cached_ptr(),
+                        y.cached_ptr(),
+                        delta_raw.cached_ptr(),
+                        u.cached_ptr(),
+                        xdbl.cached_ptr(),
+                        gate.cached_ptr(),
+                    ];
+                    let mut b = ctx.stream.launch_builder(f);
+                    for p in &ptrs {
+                        b.arg(p);
+                    }
+                    b.arg(&ints[0]);
+                    let (ap, dp) = (a.cached_ptr(), d.cached_ptr());
+                    b.arg(&ap);
+                    b.arg(&dp);
+                    for v in &tail {
+                        b.arg(v);
+                    }
+                    let cfg = LaunchConfig {
+                        grid_dim: ((batch * di).div_ceil(128) as u32, 1, 1),
+                        block_dim: (128, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    unsafe { b.launch(cfg) }.unwrap();
+                    ctx.stream.synchronize().unwrap();
+                    let hs: Vec<u32> = h
+                        .to_cpu(&ctx.stream)
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect();
+                    let mut ys = vec![0f32; batch * di];
+                    y.download_f32(&ctx.stream, &mut ys).unwrap();
+                    (hs, ys.iter().map(|v| v.to_bits()).collect::<Vec<u32>>())
+                };
+                let want = run(&released);
+                let got = run(ctx.kernels.ssm_step_fwd_fused_typed.get(width).get(dt));
+                assert!(want.0 == got.0, "{dt:?} {width:?} d_state {ds}: states");
+                assert!(want.1 == got.1, "{dt:?} {width:?} d_state {ds}: outputs");
+                cases += 1;
+            }
+        }
+    }
+    eprintln!("m1 decode step: the released kernel's bits on {cases} cases");
 }
 
 #[test]

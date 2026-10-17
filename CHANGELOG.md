@@ -702,6 +702,11 @@
   step short of a full turn, where every step called fmod. The chain keeps
   its order and its bits; the released kernel stays frozen in
   `tests/fixtures/m3_angle_forward_reference.cu`.
+- The Mamba-1 decode step goes 16 states at a time, the output's chain
+  running on across the slices in state order, where it held every state
+  of a channel in two register arrays of the compiled capacity, which
+  spilled to local memory past about 128 states. The bits are the
+  released step's, which stays frozen in `tests/fixtures/m1_step_reference.cu`.
 
 ### Fixed
 
