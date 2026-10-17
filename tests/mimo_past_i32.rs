@@ -20,7 +20,9 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
-use mamba_rs::mamba3_mimo::gpu::kernels::{ChunkedGeom, Mamba3MimoKernels, chunked_geom};
+use mamba_rs::mamba3_mimo::gpu::kernels::{
+    ChunkedGeom, Mamba3MimoKernels, chunk_scan_tiles_cfg, chunked_geom,
+};
 
 const CHUNK: usize = 64;
 const ACT: WeightDtype = WeightDtype::Bf16;
@@ -77,21 +79,22 @@ fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
 }
 
 /// [`launch`] once per run of the grid's y axis, each run's first block
-/// appended as the kernel's last argument.
-fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
+/// appended, then `tail` (the packing, for the kernels that take one).
+fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg], tail: &[Arg]) {
     for (y_first, cfg) in y_runs(cfg) {
         let mut run = args.to_vec();
         run.push(Arg::I(y_first));
+        run.extend_from_slice(tail);
         launch(ctx, f, cfg, &run);
     }
 }
 
 /// [`launch`] once per run of the grid's y and z axes, each run's first y
-/// and z blocks appended.
+/// and z blocks appended, then the packing (none).
 fn launch_yz_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
     for (y_first, z_first, cfg) in yz_runs(cfg) {
         let mut run = args.to_vec();
-        run.extend([Arg::I(y_first), Arg::I(z_first)]);
+        run.extend([Arg::I(y_first), Arg::I(z_first), Arg::P(0)]);
         launch(ctx, f, cfg, &run);
     }
 }
@@ -284,6 +287,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
             na,
             Arg::F(1e-4),
         ],
+        &[Arg::P(0)],
     );
     let state_in = [
         Arg::P(at(Slot::Contrib)),
@@ -364,6 +368,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
             ds,
             r,
         ],
+        &[Arg::P(0)],
     );
     let scan_in = [
         Arg::P(at(Slot::Gated)),
@@ -397,12 +402,9 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
         launch_runs(
             ctx,
             k.chunk_scan_tiles.get(ACT),
-            LaunchConfig {
-                grid_dim: ((b * nc) as u32, s.nh as u32, CHUNK.div_ceil(tq) as u32),
-                block_dim: ((8 * (tq * s.r).next_multiple_of(8)) as u32, 1, 1),
-                shared_mem_bytes: smem as u32,
-            },
+            chunk_scan_tiles_cfg((b, nc, s.nh), (s.hd, s.r), tq, smem),
             &args,
+            &[Arg::P(0)],
         );
     } else {
         let (tt, st, smem) = geom.scan;
@@ -448,6 +450,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
             r,
             na,
         ],
+        &[],
     );
 }
 

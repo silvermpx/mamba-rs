@@ -316,41 +316,44 @@ __device__ __forceinline__ void m3mb_inter_tiles_body(
         for (int p = lane; p < hd; p += 32) dyt[p * rs + a] = a < rows ? dr[p] : 0.0f;
     }
     __syncthreads();
-    float acc[4][4];
-#pragma unroll
-    for (int i = 0; i < 4; i++) {
-#pragma unroll
-        for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;
-    }
-    for (int p = 0; p < hd; p++) {
-        const float4 d4 = *reinterpret_cast<const float4*>(dyt + p * rs + a0);
-        const float dv[4] = {d4.x, d4.y, d4.z, d4.w};
-        float sv[4];
-#pragma unroll
-        for (int j = 0; j < 4; j++) {
-            const int n = lane + 32 * j;
-            sv[j] = n < ds ? st[p * ds + n] : 0.0f;
-        }
+    // A lane's 4 columns of a pass of 128 state indices.
+    for (int nb = 0; nb < ds; nb += 128) {
+        float acc[4][4];
 #pragma unroll
         for (int i = 0; i < 4; i++) {
 #pragma unroll
-            for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(dv[i], sv[j], acc[i][j]);
+            for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;
         }
-    }
+        for (int p = 0; p < hd; p++) {
+            const float4 d4 = *reinterpret_cast<const float4*>(dyt + p * rs + a0);
+            const float dv[4] = {d4.x, d4.y, d4.z, d4.w};
+            float sv[4];
 #pragma unroll
-    for (int i = 0; i < 4; i++) {
-        const int a = a0 + i;
-        if (a >= rows) continue;
-        const long long row = row0 + a / rank;
-        const float ef = mimo_exp(coef[(row * nh + h) * 4 + 3]);
-        const bool cont = T0 + a / rank < ce;
+            for (int j = 0; j < 4; j++) {
+                const int n = nb + lane + 32 * j;
+                sv[j] = n < ds ? st[p * ds + n] : 0.0f;
+            }
 #pragma unroll
-        for (int j = 0; j < 4; j++) {
-            const int n = lane + 32 * j;
-            if (n >= ds) continue;
-            const float d = cont ? __fmul_rn(acc[i][j], ef) : 0.0f;
-            dq[((row * nh + h) * rank + a % rank) * ds + n] = d;
-            dd[a * ds + n] = d;
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(dv[i], sv[j], acc[i][j]);
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            const int a = a0 + i;
+            if (a >= rows) continue;
+            const long long row = row0 + a / rank;
+            const float ef = mimo_exp(coef[(row * nh + h) * 4 + 3]);
+            const bool cont = T0 + a / rank < ce;
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                const int n = nb + lane + 32 * j;
+                if (n >= ds) continue;
+                const float d = cont ? __fmul_rn(acc[i][j], ef) : 0.0f;
+                dq[((row * nh + h) * rank + a % rank) * ds + n] = d;
+                dd[a * ds + n] = d;
+            }
         }
     }
     __syncthreads();
@@ -857,8 +860,8 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
             cfs[i] = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
         }
     }
-    // dk: rows by state index, p ascending.
-    {
+    // dk: rows by state index, p ascending, 128 state indices a pass.
+    for (int nb = 0; nb < ds; nb += 128) {
         float acc[4][4];
 #pragma unroll
         for (int i = 0; i < 4; i++) {
@@ -871,7 +874,7 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
             float sv[4];
 #pragma unroll
             for (int j = 0; j < 4; j++) {
-                const int n = lane + 32 * j;
+                const int n = nb + lane + 32 * j;
                 sv[j] = n < ds ? dss[p * dld + n] : 0.0f;
             }
 #pragma unroll
@@ -888,13 +891,14 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
             const bool kept = S0 + a / rank >= sf;
 #pragma unroll
             for (int j = 0; j < 4; j++) {
-                const int n = lane + 32 * j;
+                const int n = nb + lane + 32 * j;
                 if (n < ds) dk[o * ds + n] = kept ? __fmul_rn(cfs[i], acc[i][j]) : 0.0f;
             }
         }
     }
-    // ste: rows by channel, n ascending; du and the trees' operand.
-    {
+    // ste: rows by channel, n ascending, 128 channels a pass; du and the
+    // trees' operand.
+    for (int pb = 0; pb < hd; pb += 128) {
         float acc[4][4];
 #pragma unroll
         for (int i = 0; i < 4; i++) {
@@ -907,7 +911,7 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
             float sv[4];
 #pragma unroll
             for (int j = 0; j < 4; j++) {
-                const int p = lane + 32 * j;
+                const int p = pb + lane + 32 * j;
                 sv[j] = p < hd ? dss[p * dld + n] : 0.0f;
             }
 #pragma unroll
@@ -924,7 +928,7 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
             const bool kept = S0 + a / rank >= sf;
 #pragma unroll
             for (int j = 0; j < 4; j++) {
-                const int p = lane + 32 * j;
+                const int p = pb + lane + 32 * j;
                 if (p >= hd) continue;
                 if (kept) du[o * hd + p] = __fmaf_rn(cfs[i], acc[i][j], du[o * hd + p]);
                 steb[a * hd + p] = acc[i][j];

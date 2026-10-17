@@ -652,6 +652,15 @@
   sum on one lane every token; the bits are the token-at-a-time walk's,
   which stays frozen in `tests/fixtures/m3m_angles_reference.cu`. Its
   shared memory is `kernels::angle_walk_smem_bytes`.
+- The MIMO chunked path keeps its tile kernels past heads of 128 channels
+  and states of 128 indices: the forward scan's register tiles take a wider
+  head in groups of 128 channels (`SCAN_TILE_CHANNELS`,
+  `chunk_scan_tiles_cfg`), the register-tile chunk state and local state
+  gradient take it in the channel groups they already formed, and the
+  backward's token-tile inter term and state terms walk their columns 128
+  at a time. Every output keeps its chain, so the bits of the
+  channel-parallel and per-token kernels those shapes ran on. The split
+  pair kernels still stop at 128.
 
 ### Fixed
 

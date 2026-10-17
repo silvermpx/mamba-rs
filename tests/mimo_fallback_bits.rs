@@ -13,6 +13,9 @@
 //!   head against a thread per channel,
 //! - the register-tile chunk state and local state gradient, the whole head
 //!   in a block and in channel groups, against the channel-parallel kernels,
+//! - the chunked backward's token-tile inter and state terms against the
+//!   per-token kernels, at heads and state widths past one pass of 128
+//!   columns as well as within one,
 //! - the chunked backward's angle walk, a batch of tokens staged at a time,
 //!   against the walk as it was released, a token at a time (frozen in
 //!   `fixtures/m3m_angles_reference.cu`).
@@ -34,8 +37,8 @@ use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{
-    Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, angle_walk_smem_bytes, scan_bwd_record_floats,
-    scan_bwd_smem_bytes, scan_bwd_threads, scan_smem_bytes,
+    Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, angle_walk_smem_bytes, chunk_scan_tiles_cfg,
+    chunked_geom, scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_smem_bytes,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -1085,6 +1088,245 @@ fn mimo_chunked_staging_in_global_is_the_shared_staging() {
         }
         assert!(leads[1] == leads[0], "head {hd}: the entering lead");
     }
+}
+
+/// Shapes past one pass of 128 columns: heads of 160 and 136 channels and
+/// states of 160 and 136 indices, beside the narrow ones.
+const WIDE_SHAPES: [Shape; 3] = [
+    Shape {
+        batch: 1,
+        seq: 100,
+        nh: 2,
+        ng: 1,
+        hd: 160,
+        ds: 48,
+        rank: 2,
+        na: 12,
+    },
+    Shape {
+        batch: 1,
+        seq: 100,
+        nh: 2,
+        ng: 2,
+        hd: 48,
+        ds: 160,
+        rank: 2,
+        na: 40,
+    },
+    Shape {
+        batch: 1,
+        seq: 100,
+        nh: 1,
+        ng: 1,
+        hd: 136,
+        ds: 136,
+        rank: 1,
+        na: 34,
+    },
+];
+
+/// The forward scan's register tiles against the channel-parallel scan, and
+/// the token-tile inter term and state terms against the per-token kernels
+/// (the state terms with every row in global memory): the same bits at the
+/// tiles the trainer plans, at heads and state widths within one pass of
+/// 128 columns and past it (a head past 128 channels in groups of them).
+#[test]
+fn mimo_chunked_token_tiles_are_the_per_token_kernels() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let s = &ctx.stream;
+    let mut checked = 0;
+    for sh in SCAN_SHAPES.into_iter().chain(WIDE_SHAPES) {
+        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
+        let inp = ChunkedInputs::new(&ctx, sh);
+        let (b, nh, hd, ds, rank, na) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank, sh.na);
+        let geom = chunked_geom((hd, ds, rank), k.smem_optin, true, k.chunk_threads).unwrap();
+        let ((tt_i, inter_smem), (tt_t, terms_smem)) = (geom.inter_tiles, geom.terms_tiles);
+        assert!(
+            tt_i > 0 && tt_t > 0,
+            "head {hd} state {ds} rank {rank}: no token tile planned: {geom:?}"
+        );
+        let rows = b * inp.seq;
+        let rn = rank * ds;
+        let ints = |extra: &[i32]| -> Vec<Arg> {
+            [
+                inp.seq as i32,
+                nh as i32,
+                sh.ng as i32,
+                hd as i32,
+                ds as i32,
+                rank as i32,
+                na as i32,
+            ]
+            .iter()
+            .chain(extra)
+            .map(|&v| Arg::I(v))
+            .collect()
+        };
+        let label = format!("head {hd} state {ds} rank {rank}");
+        // The inter-chunk term: dq and I per token.
+        let inter_run = |tiles: bool| {
+            let dq = GpuBuffer::zeros(s, rows * nh * rn).unwrap();
+            let inter = GpuBuffer::zeros(s, rows * nh).unwrap();
+            let mut args = vec![
+                Arg::P(dq.cached_ptr()),
+                Arg::P(inter.cached_ptr()),
+                Arg::P(inp.dy.cached_ptr()),
+                Arg::P(inp.enter.cached_ptr()),
+                Arg::P(inp.cn.cached_ptr()),
+                Arg::P(inp.c_bias.cached_ptr()),
+                Arg::P(inp.coef.cached_ptr()),
+                Arg::P(inp.sn.cached_ptr()),
+                Arg::P(inp.cs.cached_ptr()),
+            ];
+            if tiles {
+                args.extend(ints(&[tt_i as i32]));
+                let threads = 8 * (tt_i * rank).next_multiple_of(4);
+                launch_runs(
+                    &ctx,
+                    &k.cb.inter_tiles,
+                    cfg(
+                        (b * inp.nc, nh, 64usize.div_ceil(tt_i)),
+                        threads,
+                        inter_smem,
+                    ),
+                    &args,
+                    &[NO_PACKING],
+                );
+            } else {
+                args.extend(ints(&[]));
+                launch_runs(
+                    &ctx,
+                    &k.cb.inter,
+                    cfg((b * inp.nc, nh, 64), 256, 0),
+                    &args,
+                    &[NO_PACKING],
+                );
+            }
+            [bits_f32(&ctx, &dq), bits_f32(&ctx, &inter)]
+        };
+        assert!(
+            inter_run(true) == inter_run(false),
+            "{label}: inter-chunk term"
+        );
+        let dk0 = det(rows * nh * rn, 86, 1.0);
+        let du0 = det(rows * nh * rank * hd, 87, 1.0);
+        let (tq, kt, nk, scan_smem) = geom.scan_tiles;
+        assert!(tq > 0, "{label}: no scan tile planned: {geom:?}");
+        for dtype in DTYPES {
+            let proj = typed_buf(&ctx, &det(rows * inp.ld_proj, 89, 1.0), dtype);
+            // The forward scan: the gated outputs and the readouts.
+            let scan_run = |tiles: bool| {
+                let out = typed_buf(&ctx, &vec![0.0; rows * nh * hd], dtype);
+                let y_out = GpuBuffer::zeros(s, rows * nh * rank * hd).unwrap();
+                let mut args = vec![
+                    Arg::P(out.cached_ptr()),
+                    Arg::P(y_out.cached_ptr()),
+                    Arg::P(proj.cached_ptr()),
+                    Arg::L(inp.ld_proj as i64),
+                    Arg::P(inp.bn.cached_ptr()),
+                    Arg::P(inp.cn.cached_ptr()),
+                    Arg::P(inp.coef.cached_ptr()),
+                    Arg::P(inp.sn.cached_ptr()),
+                    Arg::P(inp.cs.cached_ptr()),
+                    Arg::P(inp.enter.cached_ptr()),
+                    Arg::P(inp.b_bias.cached_ptr()),
+                    Arg::P(inp.c_bias.cached_ptr()),
+                    Arg::P(inp.d.cached_ptr()),
+                    Arg::P(inp.mx.cached_ptr()),
+                    Arg::P(inp.mz.cached_ptr()),
+                    Arg::P(inp.mo.cached_ptr()),
+                ];
+                if tiles {
+                    args.extend(ints(&[tq as i32, kt as i32, nk as i32]));
+                    launch_runs(
+                        &ctx,
+                        k.chunk_scan_tiles.get(dtype),
+                        chunk_scan_tiles_cfg((b, inp.nc, nh), (hd, rank), tq, scan_smem),
+                        &args,
+                        &[NO_PACKING],
+                    );
+                } else {
+                    let (tt, st, smem) = geom.scan;
+                    args.extend(ints(&[tt as i32, st as i32, geom.pt as i32]));
+                    launch_yz_runs(
+                        &ctx,
+                        k.chunk_scan.get(dtype),
+                        cfg(
+                            (b * inp.nc, nh, 64usize.div_ceil(tt) * hd.div_ceil(geom.pt)),
+                            (tt * geom.pt).next_multiple_of(32),
+                            smem,
+                        ),
+                        &args,
+                    );
+                }
+                (bits_typed(&ctx, &out), bits_f32(&ctx, &y_out))
+            };
+            assert!(
+                scan_run(true) == scan_run(false),
+                "{dtype:?} {label}: chunk scan"
+            );
+            let terms_run = |tiles: bool| {
+                let (dk, du) = (f32_buf(&ctx, &dk0), f32_buf(&ctx, &du0));
+                let dcs = GpuBuffer::zeros(s, rows * nh).unwrap();
+                let mut args = vec![
+                    Arg::P(dk.cached_ptr()),
+                    Arg::P(du.cached_ptr()),
+                    Arg::P(dcs.cached_ptr()),
+                    Arg::P(inp.dst.cached_ptr()),
+                    Arg::P(proj.cached_ptr()),
+                    Arg::L(inp.ld_proj as i64),
+                    Arg::P(inp.bn.cached_ptr()),
+                    Arg::P(inp.b_bias.cached_ptr()),
+                    Arg::P(inp.coef.cached_ptr()),
+                    Arg::P(inp.sn.cached_ptr()),
+                    Arg::P(inp.cs.cached_ptr()),
+                    Arg::P(inp.mx.cached_ptr()),
+                ];
+                let scratch;
+                if tiles {
+                    args.extend(ints(&[tt_t as i32]));
+                    let threads = 8 * (tt_t * rank).next_multiple_of(4);
+                    launch_runs(
+                        &ctx,
+                        k.cb.state_terms_tiles.get(dtype),
+                        cfg(
+                            (b * inp.nc, nh, 64usize.div_ceil(tt_t)),
+                            threads,
+                            terms_smem,
+                        ),
+                        &args,
+                        &[NO_PACKING],
+                    );
+                } else {
+                    // Eight tokens a block, every row in global memory.
+                    let tg = 8usize;
+                    let blocks = b * inp.nc * nh * 64usize.div_ceil(tg);
+                    scratch = GpuBuffer::zeros(s, blocks * (rn + rank * hd)).unwrap();
+                    args.push(Arg::P(scratch.cached_ptr()));
+                    args.extend(ints(&[tg as i32, 0]));
+                    launch_runs(
+                        &ctx,
+                        k.cb.state_terms.get(dtype),
+                        cfg((b * inp.nc, nh, 64usize.div_ceil(tg)), 256, 0),
+                        &args,
+                        &[NO_PACKING],
+                    );
+                }
+                [
+                    bits_f32(&ctx, &dk),
+                    bits_f32(&ctx, &du),
+                    bits_f32(&ctx, &dcs),
+                ]
+            };
+            assert!(
+                terms_run(true) == terms_run(false),
+                "{dtype:?} {label}: state terms"
+            );
+            checked += 1;
+        }
+    }
+    eprintln!("token tiles against the per-token kernels on {checked} cases");
 }
 
 /// The chunked backward's angle walk stages a batch of tokens at a time,

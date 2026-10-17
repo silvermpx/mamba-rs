@@ -974,8 +974,10 @@ DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan_bf16, __nv_bfloat16)
 DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan_f16, __half)
 
 // The same outputs as three register-tile products over the block's query
-// tile of `tq` tokens. Rows are (t, r), t of the tile and r ascending; a warp
-// takes 8 rows, a lane the channels p = lane + 32 j (JP of them):
+// tile of `tq` tokens and its group of 32 JP channels (the whole head up to
+// 128 channels, groups of 128 past that). Rows are (t, r), t of the tile and
+// r ascending; a warp takes 8 rows, a lane the group's channels
+// p = lane + 32 j (JP of them):
 //   inter: y = sum_n q[n][row] S_enter[p][n], then y *= e^Acs_t;
 //   G:     G[row][col] = sum_n q[n][row] k[n][col] for the key tile's
 //          columns col = (s, r'), then Gw = G w(t, s);
@@ -992,7 +994,8 @@ DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan_f16, __half)
 // QR = tq R rounded up to 8. A warp holds 4 query rows, so a block of 64
 // rows runs 16 warps: one block fills the shared memory of an SM and the
 // extra warps hide the staging loads. The heaviest query tile (the last)
-// runs first. Grid (B * nc, H, ceil(64 / tq)), block 8 QR threads.
+// runs first. Grid (B * nc, H, ceil(64 / tq) ceil(P / 32 JP)), the query
+// tiles innermost, block 8 QR threads.
 template <typename TI, int JP>
 __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     TI* __restrict__ out, float* __restrict__ y_out,
@@ -1021,7 +1024,9 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     const int t0 = c * M3M_CHUNK;
     const int lc = min(M3M_CHUNK, seq - t0);
     const int nz = (M3M_CHUNK + tq - 1) / tq;
-    const int tile0 = (nz - 1 - (int)blockIdx.z) * tq;
+    const int grp = (int)blockIdx.z / nz;
+    const int pb = grp * PP;
+    const int tile0 = (nz - 1 - ((int)blockIdx.z - grp * nz)) * tq;
     if (tile0 >= lc) return;
     const int tn = min(tq, lc - tile0);
     const int g = h / (nh / ng);
@@ -1103,11 +1108,11 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
                 float sv[4][4];
 #pragma unroll
                 for (int u = 0; u < 4; u++) {
-                    const float* row = sp + (long long)(p0 + u * nw) * ds + m0;
+                    const float* row = sp + (long long)(pb + p0 + u * nw) * ds + m0;
 #pragma unroll
                     for (int v = 0; v < 4; v++) {
                         const int n = n0 + lane + 32 * v;
-                        sv[u][v] = p0 + u * nw < hd && n < mm ? row[n] : 0.0f;
+                        sv[u][v] = pb + p0 + u * nw < hd && n < mm ? row[n] : 0.0f;
                     }
                 }
 #pragma unroll
@@ -1146,11 +1151,12 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
         const int cols = min(kt, s_end - s0) * rank;
         __syncthreads();
         // The rank inputs.
-        m3m_stage_u<TI>(warp, nw, cols, KC, hd, PP,
+        m3m_stage_u<TI>(warp, nw, cols, KC, hd - pb, PP,
             [&](int col) {
-                return proj + (b * seq + t0 + s0 + col / rank) * ld_proj + di + (long long)h * hd;
+                return proj + (b * seq + t0 + s0 + col / rank) * ld_proj + di + (long long)h * hd
+                       + pb;
             },
-            [&](int col) { return mimo_x + ((long long)h * rank + col % rank) * hd; },
+            [&](int col) { return mimo_x + ((long long)h * rank + col % rank) * hd + pb; },
             [&](int col, int p, float v) { ut[col * PP + p] = v; });
         for (int i = tid; i < tq * kt; i += blockDim.x) {
             const int t = tile0 + i / kt, s = s0 + i % kt;
@@ -1249,18 +1255,19 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
         const long long row_t = b * seq + t0 + trow[i];
 #pragma unroll
         for (int j = 0; j < JP; j++) {
-            const int p = lane + 32 * j;
+            const int pl = lane + 32 * j;
+            const int p = pb + pl;
             if (p >= hd) continue;
             const float xv = to_f(proj[row_t * ld_proj + di + (long long)h * hd + p]);
             const float u_t = __fmul_rn(mimo_x[((long long)h * rank + r) * hd + p], xv);
             const float v = __fmaf_rn(dval, u_t, y[i][j]);
             if (y_out != nullptr) y_out[((row_t * nh + h) * rank + r) * hd + p] = v;
-            yg[rw * PP + p] = v;
+            yg[rw * PP + pl] = v;
         }
     }
     __syncthreads();
     for (int e = warp * 32 + lane; e < tn * PP; e += blockDim.x) {
-        const int tl = e / PP, p = e % PP;
+        const int tl = e / PP, pl = e % PP, p = pb + pl;
         if (p >= hd) continue;
         const long long row_t = b * seq + t0 + tile0 + tl;
         const float z = to_f(proj[row_t * ld_proj + (long long)h * hd + p]);
@@ -1268,7 +1275,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
         for (int r = 0; r < rank; r++) {
             const float v = __fmul_rn(mimo_z[((long long)h * rank + r) * hd + p], z);
             const float sg = __fdiv_rn(v, __fadd_rn(1.0f, mimo_exp(-v)));
-            const float term = __fmul_rn(__fmul_rn(yg[(tl * rank + r) * PP + p], sg),
+            const float term = __fmul_rn(__fmul_rn(yg[(tl * rank + r) * PP + pl], sg),
                                          mimo_o[((long long)h * rank + r) * hd + p]);
             o = r == 0 ? term : __fadd_rn(o, term);
         }

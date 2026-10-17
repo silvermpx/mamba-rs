@@ -13,7 +13,9 @@ use cudarc::driver::PushKernelArg;
 use crate::bidi::{mlps_after, opens_pair, reads_reversed};
 use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 
-use super::kernels::{CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunked_geom, scan_geom};
+use super::kernels::{
+    CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunk_scan_tiles_cfg, chunked_geom, scan_geom,
+};
 use crate::config::ScanMode;
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
 use crate::gpu::block_norm::{self, NormParams};
@@ -1328,11 +1330,7 @@ pub(crate) fn launch_chunked_scan(
         let (tq, kt, nk, smem) = geom.scan_tiles;
         let w = [b_bias, c_bias, d, mimo_x, mimo_z, mimo_o];
         let (tq_i, kt_i, nk_i) = (tq as i32, kt as i32, nk as i32);
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((b * nc) as u32, nh as u32, CHUNK.div_ceil(tq) as u32),
-            block_dim: ((8 * (tq * r).next_multiple_of(8)) as u32, 1, 1),
-            shared_mem_bytes: smem as u32,
-        };
+        let cfg = chunk_scan_tiles_cfg((b, nc, nh), (hd, r), tq, smem);
         for (y_first, cfg) in y_runs(cfg) {
             let mut bld = stream.launch_builder(x.kernels.chunk_scan_tiles.get(x.act));
             bld.arg(&gated);

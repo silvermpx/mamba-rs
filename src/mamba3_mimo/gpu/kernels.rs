@@ -113,26 +113,27 @@ pub struct ChunkedGeom {
     /// `m3m_chunk_state`: state indices per block, tokens staged per pass,
     /// bytes.
     pub state: (usize, usize, usize),
-    /// `m3m_chunk_state_tiles`: key columns per lane (1, 2 or 4; 0 when a
-    /// head of more than 128 channels leaves it to `m3m_chunk_state`),
-    /// tokens staged per pass, channels per block, bytes.
+    /// `m3m_chunk_state_tiles`: key columns per lane (1, 2 or 4; 0 when no
+    /// pass fits the shared memory and `m3m_chunk_state` serves), tokens
+    /// staged per pass, channels per block, bytes.
     pub state_tiles: (usize, usize, usize, usize),
     /// `m3m_chunk_scan`: query tokens per block, key tokens per pass, bytes.
     pub scan: (usize, usize, usize),
-    /// `m3m_chunk_scan_tiles`: query tokens per block (0 when a head of
-    /// more than 128 channels or a rank past 64 leaves it to
-    /// `m3m_chunk_scan`), key tokens per tile, state indices per key pass,
-    /// bytes.
+    /// `m3m_chunk_scan_tiles`: query tokens per block (0 when a rank past 64
+    /// leaves it to `m3m_chunk_scan`), key tokens per tile, state indices per
+    /// key pass, bytes. A head past [`SCAN_TILE_CHANNELS`] takes groups of
+    /// that many channels (see [`chunk_scan_tiles_cfg`]).
     pub scan_tiles: (usize, usize, usize, usize),
     /// `m3mb_dsloc`: state indices per block, bytes.
     pub dsloc: (usize, usize),
-    /// `m3mb_dsloc_tiles`: key columns per lane (0 when a head of more than
-    /// 128 channels leaves it to `m3mb_dsloc`), tokens staged per pass,
+    /// `m3mb_dsloc_tiles`: key columns per lane (0 when no pass fits the
+    /// shared memory and `m3mb_dsloc` serves), tokens staged per pass,
     /// channels per block, bytes.
     pub dsloc_tiles: (usize, usize, usize, usize),
     /// `m3mb_inter_tiles` and `m3mb_state_terms_tiles`: tokens per block
-    /// and bytes, (0, 0) when a head of more than 128 channels or state
-    /// indices, or a rank past 64, leaves them to the per-token kernels.
+    /// and bytes, (0, 0) when no token tile's staging fits the shared memory
+    /// or a rank past 64 leaves them to the per-token kernels. Both walk
+    /// their columns 128 at a time, so any head and state width serves.
     pub inter_tiles: (usize, usize),
     pub terms_tiles: (usize, usize),
     /// `m3mb_pairs`: tokens per tile, bytes.
@@ -178,8 +179,8 @@ impl ChunkThreads {
 /// The register-tile geometry of the chunk state and the local state
 /// gradient for a head of `hd` channels, `ds` state indices and rank `rank`
 /// under blocks of at most `threads`: key columns per lane, tokens staged
-/// per pass, channels per block and bytes, or zeros for a head of more than
-/// 128 channels. A warp holds 4 channels, so a block of the whole head needs
+/// per pass, channels per block and bytes, or zeros when no pass fits. A
+/// warp holds 4 channels, so a block of the whole head needs
 /// 8 threads per channel; past `threads` the head goes in groups as even as
 /// the limit allows. The staged rows are the group's channels and the keys:
 /// ut [sl][R][pg], kt [sl][R][32 jc], wt [sl]. The largest pass that leaves
@@ -190,9 +191,6 @@ fn tiles_geom(
     cap: usize,
     threads: usize,
 ) -> (usize, usize, usize, usize) {
-    if hd > 128 {
-        return (0, 0, 0, 0);
-    }
     let quads = hd.div_ceil(4);
     let groups = quads.div_ceil((threads / 32).max(1));
     let pg = 4 * quads.div_ceil(groups);
@@ -247,14 +245,18 @@ pub fn chunked_geom(
     // chunk's three scalars, QR = tq R rounded up to 8 (at most 64 rows, so
     // at most 512 threads); the keys take the most state indices per pass
     // that fit.
-    let scan_tiles = if hd <= 128 && rank <= CHUNK {
+    let scan_tiles = if rank <= CHUNK {
         let tq = [16usize, 8, 4, 2, 1]
             .into_iter()
             .find(|&tq| tq * rank <= CHUNK)
             .unwrap_or(1);
         let kt = CHUNK / rank;
         let qrs = (tq * rank).next_multiple_of(8) + 4;
-        let pp = 32 * hd.div_ceil(32).next_power_of_two();
+        let lanes = hd
+            .div_ceil(32)
+            .next_power_of_two()
+            .min(SCAN_TILE_CHANNELS / 32);
+        let pp = 32 * lanes;
         let bytes = |nk: usize| {
             (ds * qrs + nk * (CHUNK + 4) + CHUNK * pp + CHUNK * qrs + tq * kt + 3 * CHUNK) * 4
         };
@@ -313,7 +315,7 @@ pub fn chunked_geom(
     // the keys transposed, ste, the partials. The largest token tile that
     // fits.
     let token_tiles = |bytes: &dyn Fn(usize, usize) -> usize| {
-        if hd > 128 || ds > 128 || rank > CHUNK {
+        if rank > CHUNK {
             return (0, 0);
         }
         [16usize, 8, 4, 2, 1]
@@ -466,6 +468,31 @@ pub fn scan_bwd_global_geom(
 
 /// Tokens per chunk of the chunked path.
 pub const CHUNK: usize = 64;
+
+/// The channels a block of `m3m_chunk_scan_tiles` takes at most: a head up
+/// to this wide in one block, a wider one in groups of it.
+pub const SCAN_TILE_CHANNELS: usize = 128;
+
+/// The launch of `m3m_chunk_scan_tiles` for `b` rows of `nc` chunks, `nh`
+/// heads of `hd` channels at rank `rank`, a query tile of `tq` tokens and
+/// `smem` bytes: the query tiles of each channel group on the grid's z
+/// axis, 8 threads a query row (`tq` rank rows rounded up to 8).
+pub fn chunk_scan_tiles_cfg(
+    (b, nc, nh): (usize, usize, usize),
+    (hd, rank): (usize, usize),
+    tq: usize,
+    smem: usize,
+) -> cudarc::driver::LaunchConfig {
+    cudarc::driver::LaunchConfig {
+        grid_dim: (
+            (b * nc) as u32,
+            nh as u32,
+            (CHUNK.div_ceil(tq) * hd.div_ceil(SCAN_TILE_CHANNELS)) as u32,
+        ),
+        block_dim: ((8 * (tq * rank).next_multiple_of(8)) as u32, 1, 1),
+        shared_mem_bytes: smem as u32,
+    }
+}
 
 /// The tokens the chunked backward's angle walk stages at a time
 /// (`M3MB_ANG_STEPS` in `mamba3_mimo_chunked_bwd.cu`).
@@ -830,7 +857,12 @@ mod tests {
                 }
                 assert!(g.state.0 * g.pt <= 1024 && g.scan.0 * g.pt <= 1024);
                 assert_eq!(g.pt, shape.0.min(1024), "{shape:?}: {g:?}");
-                assert_eq!(g.state_tiles.0 == 0, shape.0 > 128, "{shape:?}: {g:?}");
+                // The register tiles take any head, in channel groups past
+                // what one block holds.
+                assert!(
+                    g.state_tiles.0 > 0 && g.dsloc_tiles.0 > 0,
+                    "{shape:?}: {g:?}"
+                );
             }
         }
         let tiled = chunked_geom((2048, 16, 1), 227 * 1024, true, all).unwrap();
