@@ -2,104 +2,29 @@
 
 ## 0.8.0 (2026-10-18)
 
-The whole Mamba family. Mamba-2 and Mamba-3 MIMO join Mamba and Mamba-3
-SISO: all four run on the CPU and the GPU, for inference and training, in
-f32, tf32, bf16 and f16, behind one API. The kernels were reworked to run
-fast at every size: wide states, wide heads, short and long windows.
+All three generations of Mamba in one crate: Mamba, Mamba-2 and Mamba-3,
+the last in both of its forms, SISO and MIMO. Mamba-2 and MIMO are new.
+Every model runs inference and training on the CPU and on the GPU, in f32,
+tf32, bf16 and f16, and every family has the same API. The kernels were
+reworked to stay fast at every size, and the old names and paths of 0.7
+are gone.
 
-### Added
+### Upgrading from 0.7
 
-- Mamba-2 (Dao and Gu, 2024) and Mamba-3 MIMO on the CPU and the GPU:
-  decode, the chunked and the sequential scan, training, four storage
-  precisions and CUDA graphs.
-- The official checkpoints of every family load and match float64
-  references: `state-spaces/mamba-130m-hf`, `state-spaces/mamba2-130m` and
-  the Mamba-3 SISO and MIMO 187m models (headdim 64, the gated MLP).
-- The loaders read safetensors and `pytorch_model.bin`, one file or
-  shards, and the original `state-spaces/mamba-*` repositories.
-- Mamba-2 checkpoints in the transformers layout, among them
-  `mistralai/Mamba-Codestral-7B-v0.1`.
-- FalconMamba (`bcdt_rms_eps`), and Mamba-1's other mixer options:
-  `dt_rank`, `proj_bias`, `conv_bias = false` and the gated MLP
-  (`d_intermediate`).
-- LayerNorm block norms in every family (`rms_norm = false`).
-- Untied heads for Mamba-2, SISO and MIMO checkpoints.
-- One GPU API for the four families: `GpuOptions` (device, precision,
-  GEMM mode, `scan_mode`), the `GpuBackbone` and `GpuTrainer` traits,
-  `AnyGpuBackbone` and `AnyGpuTrainer`.
-- `set_reference_no_decay` on every GPU trainer and the `GpuTrainer`
-  trait; `n_layers` and `param_count` on every CPU backbone.
-- `MambaGpuLM` generates on the GPU in every family, and
-  `MambaGpuLM::from_hf` reads the family from the checkpoint.
-  `MambaLM::from_hf` loads every family on the CPU.
-- `mamba-generate` runs every family, on the GPU with `--gpu`, and takes
-  `--gemm-mode`, `--scan-mode` and `--batch`.
-- CPU trainers for every family (`MambaCpuTrainer`, `Mamba2CpuTrainer`,
-  `Mamba3CpuTrainer`, `Mamba3MimoCpuTrainer`, the `CpuTrainer` trait,
-  `AnyCpuTrainer`) with the GPU trainers' options. Their bits do not
-  depend on the thread pool.
-- CPU precision lanes: `CpuOptions::dtype` builds a CPU backbone or
-  trainer that computes as the GPU does in that precision.
-- Safetensors checkpoints for every family (`save`, `load`), and a
-  language model of any family in one file (`MambaLM::save_checkpoint`,
-  `from_checkpoint`).
-- Segments to stack with layers of your own, such as attention:
-  `final_norm: false` hands out the residual stream, and
-  `backward_step_input_grad` trains the segment below. Two segments of two
-  layers give the model of four bit for bit. See `examples/hybrid.rs`.
-- Rows that stay on the device: trainers and backbones hand out their
-  input, output and gradient buffers (`input_ptr`, `temporal_ptr`,
-  `d_temporal_ptr`, `d_input_ptr`) and run on them (`forward_on_device`,
-  `step_on_device`, `prefill_on_device` and the rest).
-- Bidirectional models in every family (`bidirectional: true`).
-- Packed sequences in training for Mamba-2, SISO and MIMO, on the CPU and
-  the GPU (`Varlen`, `set_varlen`).
-- Training in every family: data parallel over NCCL
-  (`backward_step_dist`), the split optimizer tail (`grad_arena`,
-  `upload_grad_arena`, `apply_step`), gradient accumulation (fused too:
-  `accumulate`, `apply_window`), f16 with one loss scale a window, and the
-  fused step's options (`set_step_opts`).
-- Bit-continuous resume in every family: the optimizer state, the f16
-  loss scale and the carried recurrence go into one `TrainerState` file,
-  which moves between the CPU and the GPU trainer.
-- CUDA graphs of the Mamba-2 and MIMO training step, and of the prompt
-  pass of one length in every family (`capture_prefill_graph`).
-- `pack_for_decode` on every CPU backbone: the projections in panels for
-  the CPU decode, with the same bits without a BLAS.
-- `matrix::Request` and `route::admit` tell, before anything is built,
-  whether the GPU runs a request, with which scan, or why not.
-- `ModelFamily::Mamba3Mimo` and `hf::read_family`.
-- `benches/family_compare_bench.rs` runs the four families side by side.
-- Test switches: `MAMBA_RS_SMEM_BUDGET` runs the small tiles and
-  fallbacks, `MAMBA_RS_INDEX_WIDTH=i64` the 64-bit kernel builds and
-  `MAMBA_RS_GRID_RUN` the split grids, all on ordinary shapes.
+- The GPU types are named after their family: the family, then `Gpu`, then
+  the role.
 
-### Changed
-
-- MSRV 1.97 -> 1.99.1.
-- The GPU types follow one naming scheme: the family, then `Gpu`, then
-  the role. The old names stay as deprecated aliases for this release.
-
-  | Old name | New name |
+  | 0.7 | 0.8 |
   |---|---|
   | `GpuMambaBackbone` | `MambaGpuBackbone` |
-  | `GpuMambaInference` | `MambaGpuEngine` |
-  | `GpuMambaInferenceMixed` | `MambaGpuEngineMixed` |
-  | `GpuInferenceState` | `MambaGpuState` |
-  | `GpuInferenceScratch` | `MambaGpuScratch` |
-  | `GpuInferenceMixedScratch` | `MambaGpuScratchMixed` |
   | `MambaTrainer` | `MambaGpuTrainer` |
   | `GpuMamba3Backbone` | `Mamba3GpuBackbone` |
-  | `Mamba3GpuInferenceEngine` | `Mamba3GpuEngine` |
-  | `Mamba3GpuInferenceMixed` | `Mamba3GpuEngineMixed` |
-  | `Mamba3GpuInferenceState` | `Mamba3GpuState` |
-  | `Mamba3GpuInferenceScratch` | `Mamba3GpuScratch` |
-  | `Mamba3GpuInferenceMixedScratch` | `Mamba3GpuScratchMixed` |
   | `Mamba3Trainer` | `Mamba3GpuTrainer` |
+  | `GpuMambaLM`, `GpuMamba3LM` | `MambaGpuLM`, for every family |
 
-- The GPU backbones and trainers take one `GpuOptions` in a single `new`,
-  which no longer takes the GPU ordinal. The old constructors stay as
-  deprecated wrappers.
+- GPU backbones and trainers have one constructor that takes a
+  `GpuOptions` value instead of the GPU ordinal. The `new_with_dtype`,
+  `new_full` and `new_with_mode` families are gone.
 
   ```rust
   let opts = GpuOptions::default().dtype(WeightDtype::Bf16);
@@ -107,114 +32,191 @@ fast at every size: wide states, wide heads, short and long windows.
   let trainer = MambaGpuTrainer::new(&weights, cfg, session, opts)?;
   ```
 
-- The CPU backbones share `new(weights, cfg, input_dim)`,
-  `forward_step(input, output, state, scratch)` and `forward_sequence`.
-  The SISO `forward_step` takes the state before the scratch. The old
-  constructors stay as deprecated wrappers.
-- `GpuMambaLM` and `GpuMamba3LM` are deprecated fronts for `MambaGpuLM`.
-  `generate` returns an error for an empty prompt or a batch other than
-  one.
+- CPU backbones work the same way in every family. `init` checks the
+  configuration and returns a `Result`. `alloc_scratch` gives one scratch
+  type per family (`MambaScratch`, `Mamba2Scratch`, `Mamba3Scratch`,
+  `Mamba3MimoScratch`) for both steps and windows. `forward_sequence` runs
+  a window in one batched pass, and the separate `forward_prefill` and
+  `alloc_prefill_scratch` of Mamba and SISO are gone. `MambaState::zeros`
+  and every layer state take the configuration.
+- The checkpoint loaders are `hf::load_mamba`, `hf::load_mamba2`,
+  `hf::load_mamba3` and `hf::load_mamba3_mimo`. Each returns the
+  configuration, the weights, the embedding and the head. The Mamba loader
+  no longer builds a backbone for you.
+- `grad_arena` returns a `Result` in every GPU trainer. `load_scaler_state`
+  returns a `Result` and refuses a scale that is not finite and positive.
 - Mamba-1 lives in `mamba_rs::mamba1`, the shared GPU engine in
-  `mamba_rs::gpu` and the training types in `mamba_rs::optim`. The paths
-  of 0.7 still resolve.
-- The SISO serializer is `save` and `load`. `save_mamba3` and
-  `load_mamba3_auto` are deprecated.
-- `mamba_block_step` takes the layer's gated MLP beside its weights.
-- `load_scaler_state` returns a `Result` and refuses a scale that is not
-  finite and positive.
-- `GpuCtx::cublas()` hands out the context's cuBLAS handle. The `blas`
-  fields and `GpuDevice::create_cublas` are gone.
-- `AnyScratch` holds every family's step scratch in a `Box`.
-- The GPU kernels compile as three modules: `Inference` (the GEMMs),
-  `Mamba1` and `Shared`. The `Fixed` names are now `Inference` names.
-- The kernel handles (`MambaKernels`, `Mamba2Kernels`, `Mamba2BwdKernels`,
-  `Mamba3Kernels`, `Mamba3MimoKernels`) follow their kernels: the retired
-  kernels' fields are gone, and a kernel built at two index widths holds
-  both as a `ByIndexWidth`.
+  `mamba_rs::gpu` and the training types in `mamba_rs::optim`. The 0.7
+  paths (`mamba_ssm`, `inference`, `train`, `gpu3` and the Mamba-1 items
+  at the crate root) are gone. Each family module exports the same
+  types, and the step functions live under its `cpu` module.
+- The SISO serializer is `save` and `load`, as in the other families.
+- `mamba_block_step` takes the layer's gated MLP next to its weights.
+- `GpuCtx::cublas()` gives the context's cuBLAS handle. The `blas` fields
+  and `GpuDevice::create_cublas` are gone.
+- The SISO training scratch is `Mamba3TrainScratch`, and the Mamba prefill
+  scratch is `MambaPrefillScratch`.
+- A checkpoint with attention layers (`attn_layer_idx`) is refused.
+  Attention stays outside mamba-rs.
+- A SISO GPU state saved by 0.7 for a model without an input projection
+  no longer loads.
+- MSRV is 1.99.1.
+
+### New
+
+- Mamba-2 (Dao and Gu, 2024) and Mamba-3 MIMO, on the CPU and the GPU,
+  with decode, the chunked and the sequential scan, training, four
+  precisions and CUDA graphs.
+- The official checkpoints of every family load and match float64
+  references of the papers' models: `state-spaces/mamba-130m-hf`,
+  `state-spaces/mamba2-130m` and the Mamba-3 SISO and MIMO 187m models.
+  The loaders read safetensors and `pytorch_model.bin`, in one file or in
+  shards, and the original `state-spaces/mamba-*` repositories.
+- Mamba-2 checkpoints in the transformers layout, such as
+  `mistralai/Mamba-Codestral-7B-v0.1`.
+- FalconMamba (`bcdt_rms_eps`) and the other Mamba-1 options: `dt_rank`,
+  `proj_bias`, `conv_bias = false` and the gated MLP (`d_intermediate`).
+- LayerNorm block norms in every family (`rms_norm = false`), and untied
+  heads for Mamba-2, SISO and MIMO.
+- One GPU API for all four: `GpuOptions` (device, precision, GEMM mode,
+  scan mode), the `GpuBackbone` and `GpuTrainer` traits, and
+  `AnyGpuBackbone` and `AnyGpuTrainer` for a family chosen at run time.
+- CPU trainers for every family (`MambaCpuTrainer`, `Mamba2CpuTrainer`,
+  `Mamba3CpuTrainer`, `Mamba3MimoCpuTrainer`), with the `CpuTrainer` trait
+  and `AnyCpuTrainer`. They take the GPU trainers' options, and their bits
+  do not depend on the thread pool.
+- CPU precision lanes: `CpuOptions::dtype` builds a CPU backbone or
+  trainer that computes the way the GPU does in that precision.
+- `MambaGpuLM` and `MambaLM` load and run a checkpoint of any family, and
+  `from_hf` reads the family from `config.json`. `mamba-generate` runs
+  every family, on the GPU with `--gpu`, and takes `--gemm-mode`,
+  `--scan-mode` and `--batch`.
+- Checkpoints of every family (`save`, `load`), and a whole language model
+  of any family in one file (`MambaLM::save_checkpoint`,
+  `from_checkpoint`).
+- Segments to stack with your own layers, such as attention. A backbone
+  built with `final_norm: false` hands out its residual stream, and
+  `backward_step_input_grad` trains the segment below. Two segments of two
+  layers give the four-layer model bit for bit. See `examples/hybrid.rs`.
+- Rows that stay on the device. Trainers and backbones hand out their
+  input, output and gradient buffers (`input_ptr`, `temporal_ptr`,
+  `d_temporal_ptr`, `d_input_ptr`) and run on them (`forward_on_device`,
+  `step_on_device`, `prefill_on_device` and the rest).
+- Bidirectional models in every family (`bidirectional: true`).
+- Packed sequences in training for Mamba-2, SISO and MIMO, on the CPU and
+  the GPU (`Varlen`, `set_varlen`).
+- Training in every family: data parallel over NCCL
+  (`backward_step_dist`), the split optimizer step (`grad_arena`,
+  `upload_grad_arena`, `apply_step`), gradient accumulation (`accumulate`,
+  `apply_window`), f16 with one loss scale per window, and the fused
+  step's options (`set_step_opts`).
+- Resume bit for bit in every family. The optimizer state, the f16 loss
+  scale and the carried recurrence go into one `TrainerState` file, which
+  moves between the CPU and the GPU trainer.
+- CUDA graphs of the training step in every family, and of the prompt
+  pass of one length (`capture_prefill_graph`).
+- Every CPU backbone has `weights_mut`, `into_weights`, `layer`,
+  `layer_mut`, `n_layers`, `param_count`, `forward_step_batch` and
+  `pack_for_decode` (the projections in panels for the CPU decode, with
+  the same bits). Every GPU trainer has `set_reference_no_decay`.
+- `matrix::Request` and `route::admit` tell, before anything is built,
+  whether the GPU runs a request, with which scan, or why not.
 - Every family runs windows past 2^31 elements and grids past 65535
-  blocks: 64-bit builds where a tensor needs them, the 32-bit code
-  everywhere else. A deterministic training window whose GEMM operands
-  pass 2^31 elements is refused before it runs.
-- `validate` keeps one envelope in every family: `d_model` and
-  `d_intermediate` up to 2^20 and up to 4096 layers.
-  `Mamba3Config::validate` accepts the reference's headdims, the official
-  64 among them, and the GPU checks its own limits.
-- A checkpoint with attention layers (`attn_layer_idx`) is refused in
-  every family: attention stays outside mamba-rs.
-- Mamba-1 checkpoints carry the family marker (`mamba_version = "1"`).
-  Files without it still load.
-- A SISO GPU state saved by 0.7 for a model without an input projection is
-  refused: the arena no longer keeps slots for the projection.
-- Under the reference no-decay groups every Mamba-1 bias is exempt from
+  blocks. The 64-bit kernel builds run only where a tensor needs them.
+- `benches/family_compare_bench.rs` runs the four families side by side
+  through the shared traits.
+- Test switches for the rare kernel paths on ordinary shapes:
+  `MAMBA_RS_SMEM_BUDGET` (the small tiles and fallbacks),
+  `MAMBA_RS_INDEX_WIDTH=i64` (the 64-bit builds) and `MAMBA_RS_GRID_RUN`
+  (the split grids).
+
+### Faster
+
+Whole steps, 0.7.5 against 0.8.0 on an RTX 5090 (CUDA 13.2), each
+measured in alternating processes:
+
+| what | 0.7.5 | 0.8.0 | |
+|---|---:|---:|---:|
+| Mamba training, 24 layers of 384, B 8, T 1300, bf16 | 69.3 ms | 66.9 ms | 1.04x |
+| SISO training, same shape, bf16 | 104.3 ms | 92.2 ms | 1.13x |
+| Mamba training, 4 layers of 768, 256 states, T 65, f32 | 127.1 ms | 19.9 ms | 6.4x |
+| Mamba training, same, bf16 | 85.4 ms | 15.2 ms | 5.6x |
+| Mamba training, 16 states, T 65, bf16 | 6.4 ms | 2.6 ms | 2.4x |
+| Mamba training, 128 states, B 4, T 512, f32 | 35.4 ms | 23.9 ms | 1.5x |
+| SISO training, head 32, 64 states, T 512, bf16 | 15.7 ms | 6.9 ms | 2.3x |
+| Mamba decode, 128 states, batch 16, f32 | 867 us | 780 us | 1.11x |
+
+SISO with head 64 and the sequential scan trains in 0.8 and was refused in
+0.7.5. The decode of small models did not change. The kernels behind it:
+
+- Mamba: the parallel scan sizes its blocks to the window, the decode step
+  and the sequential kernels keep wide states in registers, the B and C
+  gather stages its rows, and the convolution keeps any window up to eight
+  wide in registers.
+- Mamba-2: the chunk scan and the chunked backward run on register tiles
+  at every head and state width, and so do the conv weight gradient and
+  the element kernels.
+- Mamba-3 SISO: every stage of the chunked forward and backward runs on
+  fast kernels, the decode steps keep the state in registers, the dQKV
+  stage takes the tiled kernel past head 16 or 16 states, and the
+  sequential scan cuts a wide state across the block.
+- Mamba-3 MIMO: the inter-chunk term, the state terms, the pair terms and
+  the angle walk run on token tiles at every shape, and a small grid
+  spreads over all multiprocessors.
+- The gated MLP gate in every family.
+- The Mamba and SISO CPU training tapes keep the state every 16 steps, so
+  a long window needs under a fifth of the memory.
+- Model contexts no longer reserve upcast scratch their GEMMs never use,
+  about 325 MB on a Mamba-2 2.7b decode engine.
+
+### Output bits
+
+Every output keeps the same bits from run to run. These differ from 0.7.5
+and stay as close to the float64 references as before:
+
+- SISO sequential training at the state widths without their own kernel
+  (all but 8, 16, 32 and 64), and the SISO sequential backward at 64
+  states for f32 heads wider than a warp and for every bf16 and f16 head.
+- The Mamba parallel scans, only in the sign of a zero.
+- `forward_sequence` of Mamba and SISO on the CPU, which now runs the
+  batched window instead of one step after another.
+- The CPU sums and the vector exponential now give one result on NEON,
+  AVX2 and AVX-512, and the CPU kernels use AVX-512 where the CPU has it.
+  On some machines the CPU bits differ from 0.7.5.
+- Under the reference no-decay groups every Mamba bias is now exempt from
   weight decay.
-- The CPU sums and the SIMD exponential give one result on NEON, AVX2 and
-  AVX-512, and the CPU kernels take AVX-512 where the CPU has it. On some
-  machines the CPU bits differ from 0.7.5.
-- The Mamba-1 and SISO CPU training tapes keep the state every 16 steps:
-  a long window needs under a fifth of the memory, with the same bits.
-- Model contexts no longer reserve f32 upcast scratch their GEMMs never
-  use: about 325 MB on a Mamba-2 2.7b decode engine.
-- Kernels that keep their output bits and take less time:
-  - Mamba-1: the parallel scan fits its blocks to the window, forward and
-    backward: the training step at short windows up to 86 percent less,
-    the prompt pass up to 81 percent less. The f32 scan backward from 147
-    states up to 26 percent less.
-  - Mamba-1: the decode step and the sequential kernels hold wide states
-    in register slices, the B and C gather stages its rows, and the tiled
-    convolution keeps any window up to eight wide in registers.
-  - Mamba-2: the chunk scan and the chunked backward (dx, dB, dC, dH_loc
-    and the pair terms) run on register tiles at every head and state
-    width. The conv weight gradient and the element kernels too.
-  - Mamba-3 SISO: every stage of the chunked forward and backward runs on
-    fast kernels, the decode steps hold the state in register slices, and
-    the angle sums load ahead. The dQKV stage takes the tiled kernel past
-    head 16 or state 16: 29 to 60 percent less at head 32 or 32 to 64
-    states, 90 to 94 percent less from 96 states.
-  - Mamba-3 MIMO: the inter-chunk term, the state terms, the pair terms
-    and the angle walk run on token tiles at every shape, the tile kernels
-    take heads and states past 128, and a small grid spreads over the
-    multiprocessors.
-  - The gated MLP's gate in every family.
-- Kernels whose output bits change within 0.8's determinism rule (the
-  same bits on every run, as close to the float64 reference as before)
-  and take less time:
-  - SISO sequential training at the state widths no kernel specializes
-    (all but 8, 16, 32 and 64): 49 to 76 percent less.
-  - SISO sequential backward at 64 states, for f32 heads wider than a warp
-    and every bf16 and f16 head: 48 to 66 percent less.
-  - The Mamba-1 parallel scans differ from 0.7.5 only in the sign of a
-    zero.
 
 ### Fixed
 
 - A CUDA graph capture failed when another thread built or dropped a
   model.
-- Mamba-1 indexed in 32 bits: a prompt or a batch past 2^31 elements in
-  one tensor read and wrote the wrong elements.
+- Mamba indexed tensors in 32 bits. A prompt or batch past 2^31 elements
+  in one tensor read and wrote the wrong elements.
 - The SISO chunked training scan started every window from the empty
-  state instead of the carried recurrence.
+  state instead of the carried one.
 - A SISO prompt under `ScanMode::Sequential` ran the chunked scan.
-- SISO's B/C and output-gate norms ran at the block norms' epsilon instead
+- SISO's B, C and output-gate norms used the block norms' epsilon instead
   of the reference's 1e-5 (`Mamba3Config::ssm_norm_eps`).
-- Mamba-3 checkpoints whose block `norm_epsilon` is not 1e-5 were refused.
-- A NaN in Mamba-3's `dd_A` became the finite decay `-a_floor`.
-- The bf16 and f16 decode of Mamba-1 and SISO models with their own input
+- Mamba-3 checkpoints with a block `norm_epsilon` other than 1e-5 were
+  refused.
+- A NaN in Mamba-3's `dd_A` turned into a finite decay.
+- The bf16 and f16 decode of Mamba and SISO models with their own input
   projection panicked on the first step.
 - A prompt longer than any before failed after a bf16 or f16 graph
   capture.
-- Mamba-1 and SISO ignored a control-channel clip on an accumulating call.
+- Mamba and SISO ignored a control-channel clip on an accumulating call.
 - Data-parallel training refused a gradient arena past 2^31 elements.
-- A SISO prefill could leave launches out of a capture after an eager
-  pass.
+- A SISO prefill could leave launches out of a graph capture after an
+  eager pass.
 - `validate` could overflow on a config read from a file before refusing
-  it, and the Mamba-1 loader sized from `n_layer` before bounding it.
+  it, and the Mamba loader sized buffers from `n_layer` before checking
+  it.
 - Deterministic GEMMs refused shapes they now serve: TF32 shapes past the
   fixed workspace, one-column GEMMs, models deeper than about 85 layers,
   operands past 2^31 elements, half projections past 24064 inputs and
   matvecs past 65535 rows.
-- The Inference tensor-core legacy tile and the matvec wrapped their
-  32-bit offsets past 2^31 elements.
-- Every GEMM entry settles an empty axis as BLAS does.
+- Two GEMM paths wrapped their 32-bit offsets past 2^31 elements.
+- Every GEMM entry handles an empty axis as BLAS does.
 - The SISO angle cumsum refused more than 65535 * 256 lanes.
 - The benchmarks ran nothing under a bare `cargo bench`.
 
