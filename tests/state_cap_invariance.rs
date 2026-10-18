@@ -12,7 +12,7 @@ use cudarc::driver::PushKernelArg;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
-use mamba_rs::gpu::launch::grid_1d;
+use mamba_rs::gpu::launch::{grid_1d, grid_seq, seq_lanes};
 
 type SequentialFamilyOutputs = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
 
@@ -126,7 +126,11 @@ fn sequential_family_is_state_cap_invariant() {
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&ds_i);
-            unsafe { bld.launch(grid_1d(b * di)) }.unwrap();
+            // The lanes a channel's state is cut across, and the grid that
+            // gives each channel its lanes, as the prefill launches them.
+            let lanes_i = seq_lanes(ds) as i32;
+            bld.arg(&lanes_i);
+            unsafe { bld.launch(grid_seq(b, di, ds).unwrap()) }.unwrap();
         }
 
         // Decode step on a fresh state, the f32 step of the decode routes.
