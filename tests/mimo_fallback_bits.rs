@@ -20,6 +20,9 @@
 //!   and in slices of channels, against the per-token kernel as it was
 //!   released (frozen in `fixtures/m3mb_inter_reference.cu`), with and
 //!   without packed sequences,
+//! - the split pair kernels at their own tile of tokens, a multiple of the
+//!   pair kernel's, against the pair kernel: dq, dk, du and dw, with and
+//!   without packed sequences, at ranks up to 16,
 //! - the chunked backward's angle walk, a batch of tokens staged at a time,
 //!   against the walk as it was released, a token at a time (frozen in
 //!   `fixtures/m3m_angles_reference.cu`).
@@ -43,7 +46,7 @@ use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{
     Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, angle_walk_smem_bytes, chunk_scan_tiles_cfg,
     chunked_geom, inter_tiles_bytes, inter_tiles_geom, scan_bwd_record_floats, scan_bwd_smem_bytes,
-    scan_bwd_threads, scan_smem_bytes,
+    scan_bwd_threads, scan_smem_bytes, split_pairs_bytes,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -1425,6 +1428,193 @@ fn mimo_inter_slices_keep_the_per_token_bits() {
         }
     }
     eprintln!("inter slices against the per-token kernel on {checked} cases");
+}
+
+/// The split pair kernels at their own tile of tokens against the pair
+/// kernel at its tile, which the trainer runs where they do not serve: dq,
+/// dk, du and dw bit for bit at every multiple of the pair kernel's tile up
+/// to 64 rows (the masked zeros its tiles put in a chain walked as it walks
+/// them), without a packing and with rows packing several sequences, from a
+/// runtime rank of 3 to rank 16 over 16 tokens' rows.
+#[test]
+fn mimo_split_pairs_keep_the_pair_kernel_s_bits_at_any_tile() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let s = &ctx.stream;
+    let wide_ranks = [
+        Shape {
+            batch: 2,
+            seq: 100,
+            nh: 2,
+            ng: 1,
+            hd: 32,
+            ds: 64,
+            rank: 16,
+            na: 8,
+        },
+        Shape {
+            batch: 1,
+            seq: 100,
+            nh: 2,
+            ng: 2,
+            hd: 24,
+            ds: 32,
+            rank: 8,
+            na: 4,
+        },
+    ];
+    let mut checked = 0;
+    for sh in SCAN_SHAPES.into_iter().chain(wide_ranks) {
+        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
+        let inp = ChunkedInputs::new(&ctx, sh);
+        let ids = packed_ids(&ctx, sh.batch, inp.seq);
+        let (b, nh, hd, ds, rank, na) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank, sh.na);
+        let geom = chunked_geom((hd, ds, rank), k.smem_optin, true, k.chunk_threads).unwrap();
+        let (tl, pairs_smem) = geom.pairs;
+        assert!(!geom.pairs_global, "head {hd} rank {rank}: {geom:?}");
+        let tiles: Vec<usize> = [1usize, 2, 4, 8, 16]
+            .into_iter()
+            .map(|m| tl * m)
+            .filter(|&tq| {
+                let (dq, dk) = split_pairs_bytes((hd, ds, rank), tq);
+                tq <= 16 && tq * rank <= 64 && dq.max(dk) <= k.smem_optin
+            })
+            .collect();
+        assert!(!tiles.is_empty(), "head {hd} rank {rank}: no split tile");
+        let rows = b * inp.seq;
+        let rn = rank * ds;
+        let ints = |extra: &[i32]| -> Vec<Arg> {
+            [inp.seq, nh, sh.ng, hd, ds, rank, na]
+                .iter()
+                .map(|&v| v as i32)
+                .chain(extra.iter().copied())
+                .map(Arg::I)
+                .collect()
+        };
+        let dq0 = det(rows * nh * rn, 94, 1.0);
+        let dk0 = det(rows * nh * rn, 95, 1.0);
+        let du0 = det(rows * nh * rank * hd, 96, 1.0);
+        let pairs_len = b * inp.nc * nh * 64 * 65 / 2;
+        for dtype in DTYPES {
+            let proj = typed_buf(&ctx, &det(rows * inp.ld_proj, 97, 1.0), dtype);
+            for packing in [NO_PACKING, Arg::P(ids.cached_ptr())] {
+                let (dq, dk, du) = (
+                    f32_buf(&ctx, &dq0),
+                    f32_buf(&ctx, &dk0),
+                    f32_buf(&ctx, &du0),
+                );
+                let dwp = GpuBuffer::zeros(s, pairs_len).unwrap();
+                let mut args = vec![
+                    Arg::P(dq.cached_ptr()),
+                    Arg::P(dk.cached_ptr()),
+                    Arg::P(du.cached_ptr()),
+                    Arg::P(dwp.cached_ptr()),
+                    Arg::P(inp.dy.cached_ptr()),
+                    Arg::P(proj.cached_ptr()),
+                    Arg::L(inp.ld_proj as i64),
+                    Arg::P(inp.bn.cached_ptr()),
+                    Arg::P(inp.cn.cached_ptr()),
+                    Arg::P(inp.b_bias.cached_ptr()),
+                    Arg::P(inp.c_bias.cached_ptr()),
+                    Arg::P(inp.coef.cached_ptr()),
+                    Arg::P(inp.sn.cached_ptr()),
+                    Arg::P(inp.cs.cached_ptr()),
+                    Arg::P(inp.mx.cached_ptr()),
+                    Arg::P(0),
+                ];
+                args.extend(ints(&[tl as i32]));
+                launch_runs(
+                    &ctx,
+                    k.cb.pairs.get(dtype),
+                    cfg((b * inp.nc, nh, 1), 256, pairs_smem),
+                    &args,
+                    &[packing],
+                );
+                let want = [
+                    bits_f32(&ctx, &dq),
+                    bits_f32(&ctx, &dk),
+                    bits_f32(&ctx, &du),
+                    bits_f32(&ctx, &dwp),
+                ];
+                for &tq in &tiles {
+                    let (dq, dk, du) = (
+                        f32_buf(&ctx, &dq0),
+                        f32_buf(&ctx, &dk0),
+                        f32_buf(&ctx, &du0),
+                    );
+                    let dwp = GpuBuffer::zeros(s, pairs_len).unwrap();
+                    let (dq_smem, dk_smem) = split_pairs_bytes((hd, ds, rank), tq);
+                    let threads = 8 * (tq * rank).next_multiple_of(4);
+                    let grid = (b * inp.nc, nh, 64usize.div_ceil(tq));
+                    let mut q_args = vec![
+                        Arg::P(dq.cached_ptr()),
+                        Arg::P(inp.dy.cached_ptr()),
+                        Arg::P(proj.cached_ptr()),
+                        Arg::L(inp.ld_proj as i64),
+                        Arg::P(inp.bn.cached_ptr()),
+                        Arg::P(inp.b_bias.cached_ptr()),
+                        Arg::P(inp.coef.cached_ptr()),
+                        Arg::P(inp.sn.cached_ptr()),
+                        Arg::P(inp.cs.cached_ptr()),
+                        Arg::P(inp.mx.cached_ptr()),
+                    ];
+                    q_args.extend(ints(&[tq as i32, tl as i32]));
+                    launch_runs(
+                        &ctx,
+                        k.cb.pairs_dq.get(dtype),
+                        cfg(grid, threads, dq_smem),
+                        &q_args,
+                        &[packing],
+                    );
+                    let mut k_args = vec![
+                        Arg::P(dk.cached_ptr()),
+                        Arg::P(du.cached_ptr()),
+                        Arg::P(dwp.cached_ptr()),
+                        Arg::P(inp.dy.cached_ptr()),
+                        Arg::P(proj.cached_ptr()),
+                        Arg::L(inp.ld_proj as i64),
+                        Arg::P(inp.bn.cached_ptr()),
+                        Arg::P(inp.cn.cached_ptr()),
+                        Arg::P(inp.b_bias.cached_ptr()),
+                        Arg::P(inp.c_bias.cached_ptr()),
+                        Arg::P(inp.coef.cached_ptr()),
+                        Arg::P(inp.sn.cached_ptr()),
+                        Arg::P(inp.cs.cached_ptr()),
+                        Arg::P(inp.mx.cached_ptr()),
+                    ];
+                    k_args.extend(ints(&[tq as i32, tl as i32]));
+                    launch_runs(
+                        &ctx,
+                        k.cb.pairs_dk.get(dtype),
+                        cfg(grid, threads, dk_smem),
+                        &k_args,
+                        &[packing],
+                    );
+                    let got = [
+                        bits_f32(&ctx, &dq),
+                        bits_f32(&ctx, &dk),
+                        bits_f32(&ctx, &du),
+                        bits_f32(&ctx, &dwp),
+                    ];
+                    for (name, (g, w)) in ["dq", "dk", "du", "dw"].iter().zip(got.iter().zip(&want))
+                    {
+                        assert!(
+                            g == w,
+                            "{dtype:?} head {hd} state {ds} rank {rank}, pair tile {tl}, split \
+                             tile {tq}, {} packing: {name}",
+                            if matches!(packing, Arg::P(0)) {
+                                "no"
+                            } else {
+                                "a"
+                            }
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+    }
+    eprintln!("split pairs against the pair kernel on {checked} cases");
 }
 
 /// The chunked backward's angle walk stages a batch of tokens at a time,

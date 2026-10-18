@@ -773,6 +773,17 @@
   head (four blocks for a batch of one with four heads on a 142-SM card).
   Every block builds the keys itself and the channels share nothing else,
   so the outputs keep their bits.
+- The MIMO backward's split pair kernels run tiles of their own, a
+  multiple of the pair kernel's tile up to 64 rows
+  (`kernels::split_pairs_bytes`), and the pair weights take the whole
+  block: a thread a pair walks dw's chain, then every thread scales its
+  share of G and M in place, where one thread a pair walked the chain and
+  scaled the pair while the rest of the block waited at the barrier. At
+  rank 16 over a head of 32 channels and 64 states the pair kernel's tile
+  of two tokens kept four of 256 threads busy there; the split kernels take
+  four tokens. Every chain runs over the same columns in the same order,
+  the masked zeros of the pair kernel's tiles included, so the bits are the
+  pair kernel's at any tile.
 - The MIMO backward's inter-chunk term runs every shape on its token
   tiles. A block stages the entering state a slice of channels at a time
   beside dy's slice, each dq element's chain running on across the slices

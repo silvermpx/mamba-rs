@@ -2984,16 +2984,17 @@ impl Mamba3MimoGpuTrainer {
             let (tl, pairs_smem) = geom.pairs;
             let tl_i = tl as i32;
             if geom.pairs_tiles.0 > 0 {
-                let (dq_smem, dk_smem) = geom.pairs_tiles;
-                let threads = 8 * (tl * rank).next_multiple_of(4);
-                let tiles = CHUNK.div_ceil(tl);
+                let (tq, dq_smem, dk_smem) = geom.pairs_tiles;
+                let tq_i = tq as i32;
+                let threads = 8 * (tq * rank).next_multiple_of(4);
+                let tiles = CHUNK.div_ceil(tq);
                 go_y!(
                     k.cb.pairs_dq.get(act),
                     cfg3(b * nc, nh, tiles, threads, dq_smem),
                     "pairs dq",
                     [
                         dq, dy, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i, ng_i, hd_i,
-                        ds_i, r_i, na_i, tl_i
+                        ds_i, r_i, na_i, tq_i, tl_i
                     ],
                     [seq_idx]
                 );
@@ -3003,7 +3004,7 @@ impl Mamba3MimoGpuTrainer {
                     "pairs dk",
                     [
                         dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x, t_i,
-                        nh_i, ng_i, hd_i, ds_i, r_i, na_i, tl_i
+                        nh_i, ng_i, hd_i, ds_i, r_i, na_i, tq_i, tl_i
                     ],
                     [seq_idx]
                 );

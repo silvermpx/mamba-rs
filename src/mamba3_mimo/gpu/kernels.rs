@@ -151,10 +151,12 @@ pub struct ChunkedGeom {
     /// `m3mb_dsloc`: the whole head when its channels fit a block, else a
     /// tile of them (each output keeps its one chain either way).
     pub pt: usize,
-    /// `m3mb_pairs_dq` and `m3mb_pairs_dk` at the same tile: their bytes, or
-    /// zeros when a tile of more than 64 rows, a head of more than 128
-    /// channels or more than 128 state indices leaves it to `m3mb_pairs`.
-    pub pairs_tiles: (usize, usize),
+    /// `m3mb_pairs_dq` and `m3mb_pairs_dk`: their own tile of tokens (a
+    /// multiple of `m3mb_pairs`' tile, whose masked zeros their chains keep)
+    /// and their bytes, or zeros when a tile of more than 64 rows, a head of
+    /// more than 128 channels or more than 128 state indices leaves the pair
+    /// terms to `m3mb_pairs`.
+    pub pairs_tiles: (usize, usize, usize),
 }
 
 /// The widest blocks the chunked path launches, a whole number of warps
@@ -284,7 +286,7 @@ pub fn chunked_geom(
             pairs: (0, 0),
             pairs_global: false,
             pt,
-            pairs_tiles: (0, 0),
+            pairs_tiles: (0, 0, 0),
         });
     }
     // The local state gradient: queries [L][R][nt], decays [L].
@@ -332,23 +334,20 @@ pub fn chunked_geom(
     let terms_tiles = token_tiles(&|tt, rs| {
         ((hd * (ds + 1)).next_multiple_of(4) + hd * rs + ds * rs + tt * rank * hd + tt * 256) * 4
     });
-    // The split pair kernels: dy (transposed), u, the keys, w M (transposed)
-    // and w for dq; the keys and u (transposed), the queries and dy, G, w M
-    // and w G for dk and du. Rows padded to a float4 multiple plus 4, the
-    // blocks before w M and G to a float4 multiple.
-    let pairs_tiles = {
-        let tl = pairs.0;
-        let tr = tl * rank;
-        let trs = tr.next_multiple_of(4) + 4;
-        let dq = (hd * trs + (tr * (hd + 1 + ds)).next_multiple_of(4) + tr * trs + tl * tl) * 4;
-        let dk =
-            (ds * trs + hd * trs + (tr * (ds + 1 + hd + 1)).next_multiple_of(4) + 3 * tr * trs) * 4;
-        if !pairs_global && tr <= 64 && hd <= 128 && ds <= 128 && dq.max(dk) <= cap {
-            (dq, dk)
-        } else {
-            (0, 0)
-        }
-    };
+    // The split pair kernels at their own tile of tokens
+    // ([`split_pairs_bytes`]): the largest multiple of m3mb_pairs' tile up
+    // to 64 rows whose blocks fit, more pairs a pass and fewer passes over
+    // the same chains.
+    let split = !pairs_global && hd <= 128 && ds <= 128;
+    let pairs_tiles = [16usize, 8, 4, 2, 1]
+        .into_iter()
+        .filter(|_| split)
+        .find_map(|m| {
+            let tq = pairs.0 * m;
+            let (dq, dk) = split_pairs_bytes((hd, ds, rank), tq);
+            (tq <= 16 && tq * rank <= 64 && dq.max(dk) <= cap).then_some((tq, dq, dk))
+        })
+        .unwrap_or((0, 0, 0));
     Some(ChunkedGeom {
         state,
         state_tiles,
@@ -363,6 +362,24 @@ pub fn chunked_geom(
         pt,
         pairs_tiles,
     })
+}
+
+/// The shared memory of `m3mb_pairs_dq` and `m3mb_pairs_dk` at a tile of
+/// `tq` tokens (tr = tq R rows, rows padded to a float4 multiple plus 4):
+/// dy transposed, u, the keys, w M transposed and w for dq; the keys and u
+/// transposed, the queries and dy, G and M, and w with the live flags for
+/// dk, the blocks before w M and G padded to a float4 multiple.
+pub fn split_pairs_bytes((hd, ds, rank): (usize, usize, usize), tq: usize) -> (usize, usize) {
+    let tr = tq * rank;
+    let trs = tr.next_multiple_of(4) + 4;
+    let dq = (hd * trs + (tr * (hd + 1 + ds)).next_multiple_of(4) + tr * trs + tq * tq) * 4;
+    let dk = (ds * trs
+        + hd * trs
+        + (tr * (ds + 1 + hd + 1)).next_multiple_of(4)
+        + 2 * tr * trs
+        + 2 * tq * tq)
+        * 4;
+    (dq, dk)
 }
 
 /// The token-tile inter kernel's shared memory for `ds` state indices at
@@ -917,7 +934,7 @@ mod tests {
         );
         let tiles = released.scan_tiles;
         assert_eq!((tiles.0, tiles.1, tiles.2), (16, 16, 64));
-        assert_eq!(released.pairs_tiles, (38784, 66304));
+        assert_eq!(released.pairs_tiles, (8, 38784, 62208));
         assert_eq!(released.inter_tiles.0, 16);
         assert_eq!(released.terms_tiles.0, 8);
         assert_eq!((released.scan.0, released.scan.1), (4, 8));
@@ -948,10 +965,10 @@ mod tests {
                     g.scan_tiles.3,
                     g.dsloc.1,
                     g.pairs.1,
-                    g.pairs_tiles.0,
+                    g.pairs_tiles.1,
                     g.inter_tiles.2,
                     g.terms_tiles.1,
-                    g.pairs_tiles.1,
+                    g.pairs_tiles.2,
                 ];
                 for bytes in sizes {
                     assert!(bytes <= cap, "{shape:?} at {cap}: {g:?}");
@@ -970,7 +987,7 @@ mod tests {
         assert_eq!((tiled.pt, tiled.state.0, tiled.scan.0), (1024, 1, 1));
         let staged = chunked_geom((1024, 256, 16), 99 * 1024, true, all).unwrap();
         assert!(staged.pairs_global, "{staged:?}");
-        assert_eq!(staged.pairs_tiles, (0, 0));
+        assert_eq!(staged.pairs_tiles, (0, 0, 0));
     }
 
     /// The inter kernel plans every shape: the entering state whole where it
