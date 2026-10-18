@@ -50,8 +50,27 @@ is for contributors who change kernels. Users do not need it.
   better.
 - Redundant compute. Stage shared work (pair dots, decay exponentials,
   trigonometric factors) in shared memory once per chunk with the
-  consumer-exact expression, so every read stays bit-identical. Give large
-  shapes a fallback tier that drops the staging rather than the launch.
+  consumer-exact expression, so every read stays bit-identical. A shape
+  whose stage does not fit takes the same kernel with the stage sliced
+  (passes over channels or state indices, each output's chain in its
+  order), never a slower tier; every kernel opts in to the shared memory
+  its card allows (`launch::opt_in_dynamic_smem`).
+- State that does not fit a thread. A step kernel walks its state a slice
+  of 16 at a time in registers, the output's chain running on across the
+  slices (the Mamba-1 and SISO decode steps). A kernel that carries the
+  state across steps gives a channel a warp segment of lanes, each holding
+  a slice; lane k takes step t one round after lane k - 1 and continues the
+  chains that lane hands it through a shuffle (the Mamba-1 sequential
+  kernels). Either way every chain keeps its order, so the bits stay, and
+  no state spills whatever its width.
+- One entry per build. A kernel that switches among template builds at
+  run time compiles to the registers of its widest build for every shape;
+  give each build an entry of its own and let the host pick
+  (`chunk_scan_tiles_for`, `burnin_block_for`).
+- Element kernels without division. Give a row to a block's y threads and
+  its columns to the x threads, 129 to 256 threads a block so a narrow row
+  shares its warps (`launch::grid_rows`, `launch::grid_steps`), instead of
+  decomposing a flat index.
 - Coalescing. A thread walking its own row while its warp neighbours sit a
   stride away pays a sector per access. Stage the tile cooperatively and
   read the row from shared memory. Global-memory shift registers are the
@@ -81,6 +100,38 @@ is for contributors who change kernels. Users do not need it.
   per lane. When the shared-memory tile is what holds occupancy at one
   block, stage fewer lanes and read the rest from global memory into the
   registers they were going to occupy anyway.
+- Move what a block reads rarely out of shared memory before what it reads
+  often, and only to get off one block a SM. The Mamba-1 fold's carries (a
+  postfix pair and a boundary per state, read once a state and chunk) took
+  48 bytes a state; in a global scratch they let a second f32 block onto a
+  100 KB SM past 146 states, 1.36 times as fast on an RTX 6000 Ada. The
+  half folds already ran two blocks there: the third block the same move
+  gave them ran 0.3 to 2% slower than their carries' global reads cost.
+  Staging one lane fewer instead, whose rows the block reads at every
+  state, ran slower even at two blocks a SM.
+- A kernel without spills is not yet a faster kernel. Under a 512-thread
+  bound the MIMO pair kernels spilled their accumulators every token;
+  under `__launch_bounds__(256, 1)` they took their 175 to 221 registers
+  with no spills, and the training step ran 6 to 16% slower at ranks 8
+  and 16 on an RTX 6000 Ada: half the block took half the tokens a
+  launch, and a SM held half the warps. The register-tile chunk scan's
+  widest build lost 8% at rank 8 the same way. Time the step, not the
+  spill count, before a bound ships.
+- Give a launch bound its block count. `__launch_bounds__(256)` without a
+  minimum let ptxas aim at two blocks a SM, give a kernel 128 registers
+  and spill it more than before. Read the `ptxas -v` verdict of every
+  build, not only of the default one.
+- Loads issued ahead pay at a thin grid and cost at a full one. The SISO
+  decode step loading the next state slice while the current one
+  computed ran 1 to 3.6% faster at batch one on an RTX 6000 Ada and 3.5%
+  slower at batch 16 with 256 states: its extra registers cost a full
+  grid the warps that hid the same loads anyway.
+- Let the driver count the blocks. A table built at load from the
+  occupancy calculator, an entry per shape the choice depends on, counts
+  the registers, the reserved shared memory a block and the carveout as
+  the launch meets them (the bytes alone put the half fold's three-block
+  boundary at 89 states; the driver keeps three only up to 87). What the
+  table decides is still a measured rule: here, a single resident block.
 - A column reduction with one thread per column is latency, not
   bandwidth: a few hundred threads on a 142-SM board wait on eight loads
   at a time. Stage a row tile through shared memory with a full block and
@@ -127,7 +178,12 @@ is for contributors who change kernels. Users do not need it.
   4. One-time 64-bit arithmetic per thread or block costs nothing
      measurable and stays.
 - No 64-bit division or modulo per element in a hot loop. A 2-D grid or a
-  row base replaces the decomposition of a flat index.
+  row base replaces the decomposition of a flat index. NVVM guards each
+  64-bit division with a check that both operands fit 32 bits and then
+  divides in 32 bits, so at ordinary sizes a per-element division costs a
+  32-bit division and a branch, not the 64-bit routine; the grid removes
+  both. A grid-stride loop carries one such division per thread in the
+  unroller's trip count.
 - Cast before the first multiply that can pass 2^31, check every
   intermediate product, and size the host predicate by the largest tensor
   the launch touches. The full scan tape `[B, D, N, T + 1]` passes 2^31 long
@@ -242,6 +298,23 @@ Both refuse a malformed value loudly.
   device-wide wait back.
 
 ## Bit discipline
+
+- Order changes for speed are allowed when they stay deterministic. From
+  0.8 a kernel may sum in another order when that makes it faster; its
+  gate is the same bits on every run on a card and compiler (nothing
+  order-dependent such as racing float atomics), accuracy against the f64
+  reference within its precision, and the CPU/GPU parity suites. Its
+  frozen fixture is retired and the commit says so; a kernel that does not
+  change keeps its frozen test.
+
+- Bit-exact rewrites. A kernel held to a released one writes each value as
+  the released source wrote it: NVVM fuses a sum of products itself, but
+  leaves a difference of products to the driver's assembler, which fuses
+  it at load time, so an explicit `__fsub_rn(__fmul_rn(..), ..)` keeps the
+  PTX and changes the SASS. Values the released kernel stored and read
+  back stay rounded at that boundary. Only a bit test against the frozen
+  kernel on the target driver, under every supported NVRTC, proves the
+  rewrite.
 
 - Before changing a kernel without digest coverage, add an output-hash arm:
   FNV-1a over every output buffer at the production shape on deterministic
