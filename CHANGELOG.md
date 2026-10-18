@@ -818,6 +818,13 @@
   with 128 states, among others). Every output keeps its chain and the
   decay term its tree, so the bits are the per-token kernel's, which stays
   frozen in `tests/fixtures/m3mb_inter_reference.cu`.
+- The SISO chunked backward takes the warp dQKV kernel only up to head 16
+  and state 16 (`route::WARP_DQKV_HEAD_MAX`, `WARP_DQKV_STATE_MAX`) and the
+  tiled one past either, where a head of up to 32 took the warp kernel
+  whenever its tile fit, up to state 142 at head 16. On an RTX 5090 the
+  tiled stage ran 1.4 to 2.5 times faster at head 32 or state 32 to 64 and
+  10 to 17 times from state 96 on, and the warp stage stays 1.5 times
+  faster at heads 8 and 16 with state 16. The two give the same bits.
 
 ### Fixed
 

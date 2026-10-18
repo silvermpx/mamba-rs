@@ -86,14 +86,30 @@ pub fn chunked_backward_tiled_smem_bytes() -> usize {
     (lanes + 2 * TILED_DQKV_STEPS * TILED_DQKV_STRIDE) * 4
 }
 
+/// The widest head and the largest state the chunked backward's warp dQKV
+/// kernel takes. Its lanes walk the head and the state one index after
+/// another, while the tiled kernel stages the chunk's operands and runs them
+/// as tiles, so the tiled stage wins as soon as either outgrows a few dozen
+/// steps a lane. Measured on an RTX 5090 at 768 model channels, the warp
+/// stage was 1.5 times faster at heads 8 and 16 with state 16, and slower
+/// everywhere past them: 1.4 to 2.5 times at head 32 or state 32 to 64 (at
+/// head 16 and state 32 also on an RTX 6000 Ada, by 7%), and 10 to 17 times
+/// from state 96 on.
+pub const WARP_DQKV_HEAD_MAX: usize = 16;
+/// The largest state the warp dQKV kernel takes, beside
+/// [`WARP_DQKV_HEAD_MAX`].
+pub const WARP_DQKV_STATE_MAX: usize = 16;
+
 /// Whether the chunked backward's dQKV stage takes the tiled kernels when a
 /// block may stage `smem` bytes (at most [`PLANNED_SMEM`]). The warp kernel
-/// serves a head of one warp whose tiles fit that budget; every other shape
+/// serves a head of at most [`WARP_DQKV_HEAD_MAX`] with a state of at most
+/// [`WARP_DQKV_STATE_MAX`] whose tiles fit that budget; every other shape
 /// takes the tiled kernels, which fit any shape. Where both serve they give
-/// the same bits.
+/// the same bits, so the choice is the faster one's.
 pub fn chunked_backward_tiled(headdim: usize, d_state: usize, smem: usize) -> bool {
-    !(headdim <= WARP_HEADDIM_MAX
+    !(headdim <= WARP_DQKV_HEAD_MAX
         && headdim.is_power_of_two()
+        && d_state <= WARP_DQKV_STATE_MAX
         && chunked_backward_smem_bytes(headdim, d_state) <= smem)
 }
 
@@ -311,18 +327,40 @@ mod tests {
         ));
     }
 
-    /// The warp kernel's bound is its tile with its padded rows. Headdim 16
-    /// keeps the warp kernel up to d_state 142 and takes the tiled one at
-    /// 143, whose padded tile is past 99 KB.
+    /// The warp kernel's bound is its tile with its padded rows: at headdim
+    /// 16 the tile of state 142 is 101,120 bytes and of state 143 past
+    /// 99 KB.
     #[test]
     fn chunked_backward_bound_counts_the_padded_rows() {
         assert_eq!(chunked_backward_smem_bytes(16, 142), 101_120);
         assert_eq!(chunked_backward_smem_bytes(16, 143), 101_760);
-        assert!(!chunked_backward_tiled(16, 142, PLANNED_SMEM));
-        assert!(chunked_backward_tiled(16, 143, PLANNED_SMEM));
+        assert!(
+            chunked_backward_smem_bytes(WARP_DQKV_HEAD_MAX, WARP_DQKV_STATE_MAX) <= PLANNED_SMEM
+        );
+    }
+
+    /// The dQKV stage takes the warp kernel up to the head and the state
+    /// where the tiled kernel overtakes it, and the tiled kernel past either
+    /// and wherever a lowered budget does not hold the warp kernel's tile.
+    #[test]
+    fn chunked_backward_takes_the_warp_kernel_only_where_it_is_faster() {
+        for hd in [1usize, 2, 4, 8, 16, 32, 64] {
+            for ds in 1..=256usize {
+                let warp = hd <= WARP_DQKV_HEAD_MAX && ds <= WARP_DQKV_STATE_MAX;
+                assert_eq!(
+                    chunked_backward_tiled(hd, ds, PLANNED_SMEM),
+                    !warp,
+                    "headdim {hd}, d_state {ds}"
+                );
+            }
+        }
+        assert!(chunked_backward_tiled(16, 142, PLANNED_SMEM));
         assert!(chunked_backward_tiled(48, 16, PLANNED_SMEM));
-        assert!(chunked_backward_tiled(64, 16, PLANNED_SMEM));
-        assert!(!chunked_backward_tiled(32, 16, PLANNED_SMEM));
+        assert!(chunked_backward_tiled(32, 16, PLANNED_SMEM));
+        assert!(!chunked_backward_tiled(16, 16, PLANNED_SMEM));
+        let tile = chunked_backward_smem_bytes(16, 16);
+        assert!(!chunked_backward_tiled(16, 16, tile));
+        assert!(chunked_backward_tiled(16, 16, tile - 1));
     }
 
     /// The tiled dQKV kernel's tile, as its source defines it, and its
