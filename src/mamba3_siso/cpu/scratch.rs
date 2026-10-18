@@ -8,7 +8,7 @@ use crate::ops::lane::LaneGemm;
 use crate::precision::WeightDtype;
 
 /// Reusable scratch buffers for Mamba-3 batched forward and backward.
-pub struct Mamba3Scratch {
+pub struct Mamba3TrainScratch {
     // ── Forward ──
     pub post_norm_flat: Vec<f32>, // [T * d_model]
     pub proj_flat: Vec<f32>,      // [T * in_proj_dim]
@@ -78,7 +78,7 @@ pub struct Mamba3Scratch {
     pub(crate) varlen: Option<crate::varlen::RowStarts>,
 }
 
-impl Mamba3Scratch {
+impl Mamba3TrainScratch {
     /// Allocate zero-filled scratch buffers.
     pub fn zeros(dims: &Mamba3Dims) -> Self {
         let t = dims.seq_len;

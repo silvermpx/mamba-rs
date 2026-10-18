@@ -110,7 +110,7 @@ own rows, so batching a prefill does not change a sample's bits. The modes
 are described in [gemm-modes.md](gemm-modes.md).
 
 The official SISO checkpoints load through
-`hf::load_mamba3::load_hf_mamba3`. `tests/hf_m3_checkpoint_parity.rs`
+`hf::load_mamba3`. `tests/hf_m3_checkpoint_parity.rs`
 holds the 187m model on the CPU and on the GPU to a float64 transcription
 of the reference (`tools/oracles/m3_oracle.py`).
 

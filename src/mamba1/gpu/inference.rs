@@ -605,6 +605,7 @@ mod model_gemm_manifest_tests {
 /// Note: GPU conv uses `d_conv` slots (full window), while CPU inference uses
 /// `d_conv - 1` (history only). The conv1d step kernels handle the
 /// shift-register semantics with the full `d_conv` layout.
+#[doc(hidden)]
 pub struct MambaGpuState {
     pub conv: GpuBuffer,
     pub ssm: GpuBuffer,
@@ -664,6 +665,7 @@ impl MambaGpuState {
 ///
 /// All GPU buffers are sized for a fixed batch size. Host staging buffers
 /// handle H2D/D2H transfers outside CUDA Graph capture.
+#[doc(hidden)]
 pub struct MambaGpuScratch {
     // GPU scratch (reused per step)
     pub gpu_input: GpuBuffer,
@@ -730,6 +732,7 @@ impl MambaGpuScratch {
 ///   (per-batch statistic). The residual stream is the only
 ///   non-negotiable f32: over 24+ layers, bf16 residual drifts
 ///   measurably (llama.cpp #9590).
+#[doc(hidden)]
 pub struct MambaGpuScratchMixed {
     pub gpu_input: GpuBuffer,
     pub temporal: DtypedBuf,
@@ -798,6 +801,7 @@ impl MambaGpuScratchMixed {
 /// 3. Call `step()` each timestep
 /// 4. Optionally call `capture_graph()` for ~2-5x speedup
 /// 5. Call `state.reset()` on episode boundaries
+#[doc(hidden)]
 pub struct MambaGpuEngine {
     pub(super) ctx: GpuCtx,
     pub(super) weights: GpuMambaWeights,
@@ -1602,6 +1606,7 @@ enum MixedGraphPath {
 /// parameters stay F32. The context selects deterministic or vendor GEMMs.
 /// Legacy F32-activation and native half-activation paths have separate eager
 /// permits; their shared graph slot is bound to exactly one captured path.
+#[doc(hidden)]
 pub struct MambaGpuEngineMixed {
     engine: MambaGpuEngine, // owns ctx + (possibly unused) f32 weights
     mixed_weights: GpuMambaMixedWeights,
@@ -2734,58 +2739,6 @@ impl MambaGpuBackbone {
         )
     }
 
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).mode(mode)`"
-    )]
-    pub fn new_with_mode(
-        gpu_ordinal: usize,
-        cpu_weights: &MambaWeights,
-        cfg: MambaConfig,
-        input_dim: usize,
-        batch: usize,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        let opts = GpuOptions::default().device(gpu_ordinal).mode(mode);
-        Self::new(cpu_weights, cfg, input_dim, batch, opts)
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype)`"
-    )]
-    pub fn new_with_dtype(
-        gpu_ordinal: usize,
-        cpu_weights: &MambaWeights,
-        cfg: MambaConfig,
-        input_dim: usize,
-        batch: usize,
-        dtype: WeightDtype,
-    ) -> Result<Self, String> {
-        let opts = GpuOptions::default().device(gpu_ordinal).dtype(dtype);
-        Self::new(cpu_weights, cfg, input_dim, batch, opts)
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype).mode(mode)`"
-    )]
-    pub fn new_with_dtype_and_mode(
-        gpu_ordinal: usize,
-        cpu_weights: &MambaWeights,
-        cfg: MambaConfig,
-        input_dim: usize,
-        batch: usize,
-        dtype: WeightDtype,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        let opts = GpuOptions::default()
-            .device(gpu_ordinal)
-            .dtype(dtype)
-            .mode(mode);
-        Self::new(cpu_weights, cfg, input_dim, batch, opts)
-    }
-
     fn new_with_dtype_inner(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
@@ -3232,6 +3185,7 @@ impl MambaGpuBackbone {
     /// [`Self::prefill`] takes host rows of either precision and keeps its
     /// own buffers. Afterwards the state holds position T and
     /// [`Self::temporal_ptr`] the last position's rows.
+    #[doc(hidden)]
     pub fn prefill_sequence(
         &mut self,
         ip_out_flat: &GpuBuffer,
@@ -3261,6 +3215,7 @@ impl MambaGpuBackbone {
 
     /// [`Self::prefill_sequence`] for a bf16 or f16 backbone, with scratch
     /// from [`Self::alloc_prefill_mixed_scratch`].
+    #[doc(hidden)]
     pub fn prefill_sequence_mixed(
         &mut self,
         ip_out_flat: &GpuBuffer,
@@ -3287,6 +3242,7 @@ impl MambaGpuBackbone {
 
     /// Scratch for [`Self::prefill_sequence_mixed`] at `seq_len` tokens per
     /// sequence.
+    #[doc(hidden)]
     pub fn alloc_prefill_mixed_scratch(
         &self,
         seq_len: usize,
@@ -3308,6 +3264,7 @@ impl MambaGpuBackbone {
 
     /// Scratch for [`Self::prefill_sequence`] at `seq_len` tokens per
     /// sequence.
+    #[doc(hidden)]
     pub fn alloc_prefill_scratch(
         &self,
         seq_len: usize,
@@ -3356,18 +3313,3 @@ impl MambaGpuBackbone {
         }
     }
 }
-
-// The names these types carried before 0.8, when each family named its GPU
-// types its own way.
-#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuBackbone`")]
-pub type GpuMambaBackbone = MambaGpuBackbone;
-#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuEngine`")]
-pub type GpuMambaInference = MambaGpuEngine;
-#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuEngineMixed`")]
-pub type GpuMambaInferenceMixed = MambaGpuEngineMixed;
-#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuState`")]
-pub type GpuInferenceState = MambaGpuState;
-#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuScratch`")]
-pub type GpuInferenceScratch = MambaGpuScratch;
-#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuScratchMixed`")]
-pub type GpuInferenceMixedScratch = MambaGpuScratchMixed;

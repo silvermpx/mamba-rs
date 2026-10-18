@@ -19,11 +19,5 @@ pub mod state;
 pub mod weights;
 
 pub use config::Mamba3MimoConfig;
-pub use cpu::{
-    Mamba3MimoPrefillScratch, Mamba3MimoStepScratch, Mamba3MimoTape, Mamba3MimoTrainScratch,
-    backward_mamba3_mimo_train, forward_mamba3_mimo_backbone_prefill,
-    forward_mamba3_mimo_backbone_prefill_mode, forward_mamba3_mimo_train, mamba3_mimo_layer_step,
-    mamba3_mimo_step,
-};
 pub use state::{Mamba3MimoLayerState, Mamba3MimoState};
 pub use weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};

@@ -14,13 +14,13 @@ use super::backward::backward_mamba3_layer_batched;
 use super::dims::Mamba3Dims;
 use super::flat::Mamba3LayerFlat;
 use super::forward::{Mamba3LayerStateMut, forward_mamba3_layer_batched};
-use super::scratch::Mamba3Scratch;
+use super::scratch::Mamba3TrainScratch;
 use super::weights::TrainMamba3Weights;
 
 // ── Thread-local scratch pool ──
 
 struct Mamba3ThreadScratch {
-    phase: Mamba3Scratch,
+    phase: Mamba3TrainScratch,
     /// Full dims snapshot — any field change resizes some buffer.
     dims: Mamba3Dims,
 }
@@ -28,7 +28,7 @@ struct Mamba3ThreadScratch {
 impl Mamba3ThreadScratch {
     fn new(dims: &Mamba3Dims) -> Self {
         Self {
-            phase: Mamba3Scratch::zeros(dims),
+            phase: Mamba3TrainScratch::zeros(dims),
             dims: *dims,
         }
     }
@@ -497,7 +497,7 @@ mod tests {
         let input_dim = w.input_proj_w.len() / dims.d_model;
         let mut d_w = TrainMamba3Weights::zeros(dims, input_dim);
         let mut d_temporal = d_temporal_seed.to_vec();
-        let mut scratch = Mamba3Scratch::zeros(dims);
+        let mut scratch = Mamba3TrainScratch::zeros(dims);
         for b in 0..batch {
             let d_slice = &mut d_temporal[b * t_per..(b + 1) * t_per];
             for (layer_idx, lw) in w.layers.iter().enumerate().rev() {

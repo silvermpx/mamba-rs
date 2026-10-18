@@ -46,7 +46,7 @@ fn m1_step_cost_across_state_capacities() {
             d_intermediate: 0,
         };
         let input_dim = cfg.d_model;
-        let cpu_bb = MambaBackbone::init(cfg, input_dim, 42);
+        let cpu_bb = MambaBackbone::init(cfg, input_dim, 42).unwrap();
         let weights: MambaWeights = cpu_bb.weights().clone();
         let mut gpu_bb =
             MambaGpuBackbone::new(&weights, cfg, input_dim, 1, GpuOptions::default()).unwrap();

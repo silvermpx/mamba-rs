@@ -7,7 +7,7 @@ use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::flat::Mamba3LayerFlat;
 use mamba_rs::mamba3_siso::cpu::forward::{Mamba3LayerStateMut, forward_mamba3_layer_batched};
 use mamba_rs::mamba3_siso::cpu::inference::{Mamba3StepScratch, mamba3_step};
-use mamba_rs::mamba3_siso::cpu::scratch::Mamba3Scratch;
+use mamba_rs::mamba3_siso::cpu::scratch::Mamba3TrainScratch;
 use mamba_rs::mamba3_siso::cpu::weights::TrainMamba3LayerWeights;
 use mamba_rs::mamba3_siso::state::Mamba3State;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -53,7 +53,7 @@ fn run_training_forward(
     temporal: &mut [f32],
 ) -> Mamba3LayerFlat {
     let mut acts = Mamba3LayerFlat::zeros(*dims);
-    let mut scratch = Mamba3Scratch::zeros(dims);
+    let mut scratch = Mamba3TrainScratch::zeros(dims);
     let nh = dims.nheads;
     let hd = dims.headdim;
     let ds = dims.d_state;
@@ -128,7 +128,7 @@ fn finite_diff_check_cfg(
 
     let mut d_temporal = vec![1.0_f32; dims.seq_len * dims.d_model];
     let mut d_w = TrainMamba3LayerWeights::zeros(&dims);
-    let mut scratch = Mamba3Scratch::zeros(&dims);
+    let mut scratch = Mamba3TrainScratch::zeros(&dims);
     backward_mamba3_layer_batched(
         &mut d_temporal,
         &acts,
@@ -294,7 +294,7 @@ fn test_m3_finite_diff_norm_gate_weight() {
 
     let mut d_temporal = vec![1.0_f32; dims.seq_len * dims.d_model];
     let mut d_w = TrainMamba3LayerWeights::zeros(&dims);
-    let mut scratch = Mamba3Scratch::zeros(&dims);
+    let mut scratch = Mamba3TrainScratch::zeros(&dims);
     backward_mamba3_layer_batched(
         &mut d_temporal,
         &acts,
@@ -603,7 +603,7 @@ fn m3_tape_stride_gives_the_same_bits() {
     };
     let run = |stride: usize| -> Vec<Vec<u32>> {
         let mut acts = Mamba3LayerFlat::zeros_strided(dims, stride);
-        let mut scratch = Mamba3Scratch::zeros(&dims);
+        let mut scratch = Mamba3TrainScratch::zeros(&dims);
         let [mut ssm, mut k, mut v, mut a] = states0.clone();
         let mut out = rows.clone();
         forward_mamba3_layer_batched(
@@ -657,7 +657,7 @@ fn test_m3_all_cpu_gradients_nonzero() {
 
     let mut d_temporal = vec![1.0_f32; seq_len * dims.d_model];
     let mut d_w = TrainMamba3LayerWeights::zeros(&dims);
-    let mut scratch = Mamba3Scratch::zeros(&dims);
+    let mut scratch = Mamba3TrainScratch::zeros(&dims);
     backward_mamba3_layer_batched(
         &mut d_temporal,
         &acts,
@@ -881,7 +881,7 @@ fn test_m3_seq_len_one_backward() {
 
     let mut d_temporal = vec![1.0_f32; dims.d_model];
     let mut d_w = TrainMamba3LayerWeights::zeros(&dims);
-    let mut scratch = Mamba3Scratch::zeros(&dims);
+    let mut scratch = Mamba3TrainScratch::zeros(&dims);
     backward_mamba3_layer_batched(
         &mut d_temporal,
         &acts,
@@ -956,7 +956,7 @@ fn test_m3_long_training_stability() {
 
     let mut d_temporal = vec![1.0_f32; seq_len * dims.d_model];
     let mut d_w = TrainMamba3LayerWeights::zeros(&dims);
-    let mut scratch = Mamba3Scratch::zeros(&dims);
+    let mut scratch = Mamba3TrainScratch::zeros(&dims);
     backward_mamba3_layer_batched(
         &mut d_temporal,
         &acts,
@@ -1076,7 +1076,7 @@ fn test_m3_gradient_accumulation() {
     // Single backward
     let mut d_temporal_1 = vec![1.0_f32; seq_len * dims.d_model];
     let mut d_w_1 = TrainMamba3LayerWeights::zeros(&dims);
-    let mut scratch = Mamba3Scratch::zeros(&dims);
+    let mut scratch = Mamba3TrainScratch::zeros(&dims);
     backward_mamba3_layer_batched(
         &mut d_temporal_1,
         &acts,

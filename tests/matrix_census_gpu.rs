@@ -310,8 +310,8 @@ impl Host {
         }
         match self {
             Host::M1(bb) => window!(bb, |state, scratch| {
-                let mut pf = bb.alloc_prefill_scratch(prompt);
-                bb.forward_prefill(
+                let mut pf = bb.alloc_scratch();
+                bb.forward_sequence_with(
                     head,
                     &mut rows,
                     &mut state,
@@ -324,8 +324,8 @@ impl Host {
                 bb.forward_sequence(head, &mut rows, &mut state, &mut scratch, prompt);
             }),
             Host::Siso(bb) => window!(bb, |state, scratch| {
-                let mut pf = bb.alloc_prefill_scratch(prompt);
-                bb.forward_prefill(
+                let mut pf = bb.alloc_scratch();
+                bb.forward_sequence_with(
                     head,
                     &mut rows,
                     &mut state,

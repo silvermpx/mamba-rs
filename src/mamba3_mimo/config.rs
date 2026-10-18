@@ -84,6 +84,7 @@ impl Mamba3MimoConfig {
     /// Whether a prompt window of `seq_len` tokens runs the chunked scan:
     /// `Sequential` and `Parallel` as named, `Auto` the chunked scan above
     /// [`ScanMode::PARALLEL_SCAN_THRESHOLD`] tokens.
+    #[doc(hidden)]
     pub fn prefill_parallel(&self, seq_len: usize) -> bool {
         match self.scan_mode {
             ScanMode::Sequential => false,
@@ -94,6 +95,7 @@ impl Mamba3MimoConfig {
 
     /// Whether training runs the chunked scan: every mode but `Sequential`,
     /// as Mamba-3 SISO resolves it.
+    #[doc(hidden)]
     pub fn train_use_parallel_scan(&self) -> bool {
         !matches!(self.scan_mode, ScanMode::Sequential)
     }

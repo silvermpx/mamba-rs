@@ -841,7 +841,7 @@ pub struct GpuRecurrentState {
 /// refreshed after every optimizer step, so importing a stale copy
 /// would desynchronize it from the weights.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RecurrentStateBlob {
+pub struct MambaRecurrentStateBlob {
     pub conv_states: Vec<f32>,
     pub ssm_states: Vec<f32>,
 }
@@ -851,8 +851,8 @@ impl GpuRecurrentState {
     pub fn export_state(
         &self,
         stream: &std::sync::Arc<cudarc::driver::CudaStream>,
-    ) -> Result<RecurrentStateBlob, String> {
-        Ok(RecurrentStateBlob {
+    ) -> Result<MambaRecurrentStateBlob, String> {
+        Ok(MambaRecurrentStateBlob {
             conv_states: self.conv_states.to_cpu(stream)?,
             ssm_states: self.ssm_states.to_cpu(stream)?,
         })
@@ -863,7 +863,7 @@ impl GpuRecurrentState {
     pub fn import_state(
         &mut self,
         stream: &std::sync::Arc<cudarc::driver::CudaStream>,
-        blob: &RecurrentStateBlob,
+        blob: &MambaRecurrentStateBlob,
     ) -> Result<(), String> {
         self.import_parts(stream, &blob.conv_states, &blob.ssm_states)
     }

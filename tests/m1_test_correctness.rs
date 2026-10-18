@@ -3,11 +3,12 @@
 //! Covers: CPU inference, batch inference, sequence forward,
 //! training gradient checks, serialization, and GPU parity.
 
-use mamba_rs::{MambaBackbone, MambaConfig, MambaState, MambaStepScratch};
+use mamba_rs::mamba1::cpu::inference::MambaStepScratch;
+use mamba_rs::{MambaBackbone, MambaConfig, MambaState};
 
 fn default_backbone() -> MambaBackbone {
     let cfg = MambaConfig::default();
-    MambaBackbone::init(cfg, 128, 42)
+    MambaBackbone::init(cfg, 128, 42).unwrap()
 }
 
 // =========================================================================
@@ -123,7 +124,8 @@ fn test_batch_matches_individual() {
 
     // Method 1: batch inference
     let mut states_batch: Vec<MambaState> = (0..batch).map(|_| bb.alloc_state()).collect();
-    let mut scratches: Vec<MambaStepScratch> = (0..batch).map(|_| bb.alloc_scratch()).collect();
+    let mut scratches: Vec<mamba_rs::MambaScratch> =
+        (0..batch).map(|_| bb.alloc_scratch()).collect();
     let mut out_batch = vec![0.0f32; batch * dm];
     bb.forward_step_batch(&inputs, &mut out_batch, &mut states_batch, &mut scratches);
 
@@ -152,7 +154,7 @@ fn test_batch_matches_individual() {
 #[test]
 fn test_serialize_roundtrip() {
     let cfg = MambaConfig::default();
-    let bb = MambaBackbone::init(cfg, 128, 42);
+    let bb = MambaBackbone::init(cfg, 128, 42).unwrap();
     let dir = std::env::temp_dir().join("mamba_rs_test_serialize");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("test_model.safetensors");
@@ -198,7 +200,7 @@ fn test_serialize_roundtrip() {
 #[test]
 fn test_serialize_inference_parity() {
     let cfg = MambaConfig::default();
-    let bb = MambaBackbone::init(cfg, 128, 42);
+    let bb = MambaBackbone::init(cfg, 128, 42).unwrap();
     let dir = std::env::temp_dir().join("mamba_rs_test_parity");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("test_model.safetensors");
@@ -245,11 +247,11 @@ fn build_train_scaffolding(
     input_dim: usize,
     seq_len: usize,
 ) -> (
-    mamba_rs::train::weights::TrainMambaWeights,
+    mamba_rs::mamba1::cpu::weights::TrainMambaWeights,
     mamba_rs::ops::dims::MambaDims,
 ) {
+    use mamba_rs::mamba1::cpu::weights::{TrainMambaLayerWeights, TrainMambaWeights};
     use mamba_rs::ops::dims::MambaDims;
-    use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 
     let dims = MambaDims::from_config(cfg, seq_len, input_dim);
 
@@ -288,13 +290,13 @@ fn build_train_scaffolding(
 /// makes sum(y^2) nearly constant, causing pathological near-cancellation
 /// in the backward gradient.
 fn run_forward(
-    tw: &mamba_rs::train::weights::TrainMambaWeights,
+    tw: &mamba_rs::mamba1::cpu::weights::TrainMambaWeights,
     dims: &mamba_rs::ops::dims::MambaDims,
     input: &[f32],
 ) -> (Vec<f32>, f32) {
+    use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+    use mamba_rs::mamba1::cpu::scratch::PhaseScratch;
     use mamba_rs::ops::dims::MambaRecurrentState;
-    use mamba_rs::train::flat::MambaBackboneFlat;
-    use mamba_rs::train::scratch::PhaseScratch;
 
     let di = dims.d_inner;
     let ds = dims.d_state;
@@ -323,7 +325,7 @@ fn run_forward(
     };
 
     let mut temporal = vec![0.0f32; t * dm];
-    mamba_rs::train::forward::forward_mamba_backbone_batched(
+    mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched(
         &mut temporal,
         &mut acts,
         tw,
@@ -371,7 +373,7 @@ fn test_finite_diff_input_proj_bias() {
 
     // Analytical backward
     let d_temporal: Vec<f32> = vec![1.0f32; temporal.len()];
-    let mut grad_tw = mamba_rs::train::weights::TrainMambaWeights::zeros_from_dims(&dims);
+    let mut grad_tw = mamba_rs::mamba1::cpu::weights::TrainMambaWeights::zeros_from_dims(&dims);
 
     // Need a_neg for backward
     let di = dims.d_inner;
@@ -385,9 +387,9 @@ fn test_finite_diff_input_proj_bias() {
 
     let acts = {
         // Re-run forward to get saved activations
+        use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+        use mamba_rs::mamba1::cpu::scratch::PhaseScratch;
         use mamba_rs::ops::dims::MambaRecurrentState;
-        use mamba_rs::train::flat::MambaBackboneFlat;
-        use mamba_rs::train::scratch::PhaseScratch;
 
         let mut acts = MambaBackboneFlat::zeros(dims);
         let mut scratch = PhaseScratch::zeros(&dims);
@@ -399,7 +401,7 @@ fn test_finite_diff_input_proj_bias() {
             a_neg: &a_neg,
         };
         let mut temporal2 = vec![0.0f32; dims.seq_len * dims.d_model];
-        mamba_rs::train::forward::forward_mamba_backbone_batched(
+        mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched(
             &mut temporal2,
             &mut acts,
             &tw,
@@ -412,8 +414,8 @@ fn test_finite_diff_input_proj_bias() {
     };
 
     let mut d_temporal_mut = d_temporal;
-    let mut bwd_scratch = mamba_rs::train::scratch::BackwardPhaseScratch::zeros(&dims);
-    mamba_rs::train::backward::backward_mamba_backbone_batched(
+    let mut bwd_scratch = mamba_rs::mamba1::cpu::scratch::BackwardPhaseScratch::zeros(&dims);
+    mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched(
         &mut d_temporal_mut,
         &mut grad_tw,
         &acts,
@@ -464,7 +466,7 @@ fn test_finite_diff_dt_proj_bias() {
     // with the largest absolute analytical gradient.
     let (temporal, _) = run_forward(&tw, &dims, &input);
     let d_temporal: Vec<f32> = vec![1.0f32; temporal.len()];
-    let mut grad_tw = mamba_rs::train::weights::TrainMambaWeights::zeros_from_dims(&dims);
+    let mut grad_tw = mamba_rs::mamba1::cpu::weights::TrainMambaWeights::zeros_from_dims(&dims);
 
     let di = dims.d_inner;
     let ds = dims.d_state;
@@ -476,9 +478,9 @@ fn test_finite_diff_dt_proj_bias() {
     }
 
     let acts = {
+        use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+        use mamba_rs::mamba1::cpu::scratch::PhaseScratch;
         use mamba_rs::ops::dims::MambaRecurrentState;
-        use mamba_rs::train::flat::MambaBackboneFlat;
-        use mamba_rs::train::scratch::PhaseScratch;
 
         let mut acts = MambaBackboneFlat::zeros(dims);
         let mut scratch = PhaseScratch::zeros(&dims);
@@ -490,7 +492,7 @@ fn test_finite_diff_dt_proj_bias() {
             a_neg: &a_neg,
         };
         let mut temporal2 = vec![0.0f32; dims.seq_len * dims.d_model];
-        mamba_rs::train::forward::forward_mamba_backbone_batched(
+        mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched(
             &mut temporal2,
             &mut acts,
             &tw,
@@ -503,8 +505,8 @@ fn test_finite_diff_dt_proj_bias() {
     };
 
     let mut d_temporal_mut = d_temporal;
-    let mut bwd_scratch = mamba_rs::train::scratch::BackwardPhaseScratch::zeros(&dims);
-    mamba_rs::train::backward::backward_mamba_backbone_batched(
+    let mut bwd_scratch = mamba_rs::mamba1::cpu::scratch::BackwardPhaseScratch::zeros(&dims);
+    mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched(
         &mut d_temporal_mut,
         &mut grad_tw,
         &acts,
@@ -585,9 +587,9 @@ fn test_debug_gradient_trace() {
 
     // Forward to get acts
     let acts = {
+        use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+        use mamba_rs::mamba1::cpu::scratch::PhaseScratch;
         use mamba_rs::ops::dims::MambaRecurrentState;
-        use mamba_rs::train::flat::MambaBackboneFlat;
-        use mamba_rs::train::scratch::PhaseScratch;
 
         let mut acts = MambaBackboneFlat::zeros(dims);
         let mut scratch = PhaseScratch::zeros(&dims);
@@ -599,7 +601,7 @@ fn test_debug_gradient_trace() {
             a_neg: &a_neg,
         };
         let mut temporal = vec![0.0f32; dims.seq_len * dims.d_model];
-        mamba_rs::train::forward::forward_mamba_backbone_batched(
+        mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched(
             &mut temporal,
             &mut acts,
             &tw,
@@ -619,13 +621,13 @@ fn test_debug_gradient_trace() {
 
     // Backward with d_temporal = ones
     let mut d_temporal = vec![1.0f32; dims.seq_len * dims.d_model];
-    let mut grad_tw = mamba_rs::train::weights::TrainMambaWeights::zeros_from_dims(&dims);
-    let mut bwd_scratch = mamba_rs::train::scratch::BackwardPhaseScratch::zeros(&dims);
+    let mut grad_tw = mamba_rs::mamba1::cpu::weights::TrainMambaWeights::zeros_from_dims(&dims);
+    let mut bwd_scratch = mamba_rs::mamba1::cpu::scratch::BackwardPhaseScratch::zeros(&dims);
 
     // Print d_temporal before backward
     eprintln!("BEFORE BWD: d_temporal[0..4] = {:?}", &d_temporal[0..4]);
 
-    mamba_rs::train::backward::backward_mamba_backbone_batched(
+    mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched(
         &mut d_temporal,
         &mut grad_tw,
         &acts,
@@ -742,7 +744,7 @@ fn test_debug_gradient_trace() {
 #[cfg(feature = "cuda")]
 mod gpu_tests {
     use mamba_rs::gpu::GpuOptions;
-    use mamba_rs::{MambaBackbone, MambaConfig, MambaState, MambaStepScratch};
+    use mamba_rs::{MambaBackbone, MambaConfig, MambaState};
 
     #[test]
     fn test_gpu_inference_matches_cpu() {
@@ -752,7 +754,7 @@ mod gpu_tests {
         let input_dim = cfg.d_model;
         let batch = 4;
 
-        let bb = MambaBackbone::init(cfg, input_dim, 42);
+        let bb = MambaBackbone::init(cfg, input_dim, 42).unwrap();
 
         // GPU backbone
         let mut gpu_bb = MambaGpuBackbone::new(
@@ -766,7 +768,7 @@ mod gpu_tests {
 
         // CPU states
         let mut cpu_states: Vec<MambaState> = (0..batch).map(|_| bb.alloc_state()).collect();
-        let mut cpu_scratches: Vec<MambaStepScratch> =
+        let mut cpu_scratches: Vec<mamba_rs::MambaScratch> =
             (0..batch).map(|_| bb.alloc_scratch()).collect();
 
         // Run 20 steps, compare
@@ -806,7 +808,7 @@ mod gpu_tests {
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
 
-        let bb = MambaBackbone::init(cfg, input_dim, 42);
+        let bb = MambaBackbone::init(cfg, input_dim, 42).unwrap();
 
         // Use a SINGLE engine for both paths. This ensures the same cuBLAS
         // handle (and therefore the same TF32 algorithm selections) is used
@@ -855,7 +857,7 @@ mod gpu_tests {
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
-        let bb = MambaBackbone::init(cfg, input_dim, 42);
+        let bb = MambaBackbone::init(cfg, input_dim, 42).unwrap();
 
         let mut gpu_bb = MambaGpuBackbone::new(
             bb.weights(),
@@ -1028,7 +1030,8 @@ mod gpu_tests {
         let (cpu_temporal, _) = super::run_forward(&tw, &dims, &input);
 
         let d_temporal_cpu: Vec<f32> = vec![1.0f32; cpu_temporal.len()];
-        let mut cpu_grads = mamba_rs::train::weights::TrainMambaWeights::zeros_from_dims(&dims);
+        let mut cpu_grads =
+            mamba_rs::mamba1::cpu::weights::TrainMambaWeights::zeros_from_dims(&dims);
         let mut a_neg_cpu = vec![0.0f32; cfg.n_layers * di * ds];
         for (l, lw) in tw.layers.iter().enumerate() {
             for i in 0..di * ds {
@@ -1036,9 +1039,9 @@ mod gpu_tests {
             }
         }
         let cpu_acts = {
+            use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+            use mamba_rs::mamba1::cpu::scratch::PhaseScratch;
             use mamba_rs::ops::dims::MambaRecurrentState;
-            use mamba_rs::train::flat::MambaBackboneFlat;
-            use mamba_rs::train::scratch::PhaseScratch;
             let mut acts = MambaBackboneFlat::zeros(dims);
             let mut scratch = PhaseScratch::zeros(&dims);
             let mut conv = vec![0.0f32; cfg.n_layers * di * cfg.d_conv];
@@ -1049,7 +1052,7 @@ mod gpu_tests {
                 a_neg: &a_neg_cpu,
             };
             let mut t = vec![0.0f32; seq_len * cfg.d_model];
-            mamba_rs::train::forward::forward_mamba_backbone_batched(
+            mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched(
                 &mut t,
                 &mut acts,
                 &tw,
@@ -1061,8 +1064,8 @@ mod gpu_tests {
             acts
         };
         let mut d_temporal_cpu_mut = d_temporal_cpu;
-        let mut bwd_scratch = mamba_rs::train::scratch::BackwardPhaseScratch::zeros(&dims);
-        mamba_rs::train::backward::backward_mamba_backbone_batched(
+        let mut bwd_scratch = mamba_rs::mamba1::cpu::scratch::BackwardPhaseScratch::zeros(&dims);
+        mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched(
             &mut d_temporal_cpu_mut,
             &mut cpu_grads,
             &cpu_acts,
@@ -1236,6 +1239,11 @@ mod gpu_tests {
         use mamba_rs::gpu::context::GpuCtx;
         use mamba_rs::gpu::device::GpuDevice;
         use mamba_rs::gpu::launch::grid_norm;
+        use mamba_rs::mamba1::cpu::backward::backward_mamba_layer_batched;
+        use mamba_rs::mamba1::cpu::backward_ops::backward_rms_norm;
+        use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+        use mamba_rs::mamba1::cpu::scratch::{BackwardPhaseScratch, PhaseScratch};
+        use mamba_rs::mamba1::cpu::weights::TrainMambaWeights;
         use mamba_rs::mamba1::gpu::backward::gpu_backward_mamba_layer;
         use mamba_rs::mamba1::gpu::forward::GpuRecurrentState;
         use mamba_rs::mamba1::gpu::forward::{
@@ -1243,11 +1251,6 @@ mod gpu_tests {
         };
         use mamba_rs::mamba1::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
         use mamba_rs::ops::dims::MambaRecurrentState;
-        use mamba_rs::train::backward::backward_mamba_layer_batched;
-        use mamba_rs::train::backward_ops::backward_rms_norm;
-        use mamba_rs::train::flat::MambaBackboneFlat;
-        use mamba_rs::train::scratch::{BackwardPhaseScratch, PhaseScratch};
-        use mamba_rs::train::weights::TrainMambaWeights;
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
@@ -1285,7 +1288,7 @@ mod gpu_tests {
                 a_neg: &a_neg_cpu,
             };
             let mut t = vec![0.0f32; seq_len * dm];
-            mamba_rs::train::forward::forward_mamba_backbone_batched(
+            mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched(
                 &mut t,
                 &mut acts,
                 &tw,
@@ -1471,7 +1474,7 @@ mod gpu_tests {
         }
 
         // CPU input_proj backward
-        mamba_rs::train::blas::sgemm_backward(
+        mamba_rs::ops::blas::sgemm_backward(
             &mut vec![0.0f32; bt * input_dim], // dx (discarded)
             &mut cpu_grads.input_proj_w,
             Some(&mut cpu_grads.input_proj_b),
@@ -1611,7 +1614,7 @@ fn test_custom_config_small() {
         d_intermediate: 0,
     };
     let input_dim = 32;
-    let bb = MambaBackbone::init(cfg, input_dim, 99);
+    let bb = MambaBackbone::init(cfg, input_dim, 99).unwrap();
     let mut state = bb.alloc_state();
     let mut scratch = bb.alloc_scratch();
     let mut output = vec![0.0f32; cfg.d_model];
@@ -1662,7 +1665,7 @@ fn test_custom_config_large() {
         d_intermediate: 0,
     };
     let input_dim = 256;
-    let bb = MambaBackbone::init(cfg, input_dim, 77);
+    let bb = MambaBackbone::init(cfg, input_dim, 77).unwrap();
     let mut state = bb.alloc_state();
     let mut scratch = bb.alloc_scratch();
     let mut output = vec![0.0f32; cfg.d_model];
@@ -1688,12 +1691,12 @@ fn test_custom_config_large() {
 /// gradient and weight gradients, bit for bit.
 #[test]
 fn tape_stride_gives_the_same_bits() {
+    use mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched;
+    use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+    use mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched;
+    use mamba_rs::mamba1::cpu::scratch::{BackwardPhaseScratch, PhaseScratch};
+    use mamba_rs::mamba1::cpu::weights::TrainMambaWeights;
     use mamba_rs::ops::dims::MambaRecurrentState;
-    use mamba_rs::train::backward::backward_mamba_backbone_batched;
-    use mamba_rs::train::flat::MambaBackboneFlat;
-    use mamba_rs::train::forward::forward_mamba_backbone_batched;
-    use mamba_rs::train::scratch::{BackwardPhaseScratch, PhaseScratch};
-    use mamba_rs::train::weights::TrainMambaWeights;
     let cfg = MambaConfig {
         d_model: 16,
         d_state: 8,
@@ -1819,9 +1822,9 @@ fn test_all_cpu_gradients_nonzero() {
         }
     }
     let acts = {
+        use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+        use mamba_rs::mamba1::cpu::scratch::PhaseScratch;
         use mamba_rs::ops::dims::MambaRecurrentState;
-        use mamba_rs::train::flat::MambaBackboneFlat;
-        use mamba_rs::train::scratch::PhaseScratch;
         let mut acts = MambaBackboneFlat::zeros(dims);
         let mut scratch = PhaseScratch::zeros(&dims);
         let mut conv = vec![0.0f32; dims.n_layers * di * dims.d_conv];
@@ -1832,7 +1835,7 @@ fn test_all_cpu_gradients_nonzero() {
             a_neg: &a_neg,
         };
         let mut t = vec![0.0f32; seq_len * cfg.d_model];
-        mamba_rs::train::forward::forward_mamba_backbone_batched(
+        mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched(
             &mut t,
             &mut acts,
             &tw,
@@ -1845,9 +1848,9 @@ fn test_all_cpu_gradients_nonzero() {
     };
 
     let mut d_temporal = vec![1.0f32; temporal.len()];
-    let mut grad_tw = mamba_rs::train::weights::TrainMambaWeights::zeros_from_dims(&dims);
-    let mut bwd_scratch = mamba_rs::train::scratch::BackwardPhaseScratch::zeros(&dims);
-    mamba_rs::train::backward::backward_mamba_backbone_batched(
+    let mut grad_tw = mamba_rs::mamba1::cpu::weights::TrainMambaWeights::zeros_from_dims(&dims);
+    let mut bwd_scratch = mamba_rs::mamba1::cpu::scratch::BackwardPhaseScratch::zeros(&dims);
+    mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched(
         &mut d_temporal,
         &mut grad_tw,
         &acts,
@@ -1929,7 +1932,7 @@ fn test_seq_len_one() {
 fn test_long_sequence_stability() {
     let cfg = MambaConfig::default();
     let input_dim = 128;
-    let bb = MambaBackbone::init(cfg, input_dim, 42);
+    let bb = MambaBackbone::init(cfg, input_dim, 42).unwrap();
     let mut state = bb.alloc_state();
     let mut scratch = bb.alloc_scratch();
     let mut output = vec![0.0f32; cfg.d_model];
@@ -1964,7 +1967,7 @@ mod gpu_extra_tests {
         let input_dim = cfg.d_model;
         let batch = 4;
 
-        let bb = MambaBackbone::init(cfg, input_dim, 42);
+        let bb = MambaBackbone::init(cfg, input_dim, 42).unwrap();
 
         // GPU batch=4: run all samples together
         let mut gpu_batch = MambaGpuBackbone::new(
@@ -2022,7 +2025,7 @@ mod gpu_extra_tests {
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
-        let bb = MambaBackbone::init(cfg, input_dim, 42);
+        let bb = MambaBackbone::init(cfg, input_dim, 42).unwrap();
         let mut gpu_bb = MambaGpuBackbone::new(
             bb.weights(),
             *bb.config(),
@@ -2051,7 +2054,7 @@ mod gpu_extra_tests {
 
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
-        let bb = MambaBackbone::init(cfg, input_dim, 42);
+        let bb = MambaBackbone::init(cfg, input_dim, 42).unwrap();
 
         // GPU with CUDA Graph
         let mut gpu_bb = MambaGpuBackbone::new(
@@ -2233,7 +2236,7 @@ mod gpu_extra_tests {
             d_intermediate: 0,
         };
         let input_dim = 32;
-        let bb = MambaBackbone::init(cfg, input_dim, 99);
+        let bb = MambaBackbone::init(cfg, input_dim, 99).unwrap();
 
         let mut gpu_bb = MambaGpuBackbone::new(
             bb.weights(),
@@ -2489,9 +2492,9 @@ fn falcon_prompt_decode_and_trainer_agree() {
     };
     for mode in [PrefillMode::Single, PrefillMode::Parallel] {
         let mut st = bb.alloc_state();
-        let mut ps = bb.alloc_prefill_scratch(seq_len);
+        let mut ps = bb.alloc_scratch();
         let mut rows = vec![0f32; seq_len * dm];
-        bb.forward_prefill(&inputs, &mut rows, &mut st, &mut ps, seq_len, mode);
+        bb.forward_sequence_with(&inputs, &mut rows, &mut st, &mut ps, seq_len, mode);
         let diff = max_diff(&rows, &decode);
         assert!(diff < 1e-4, "{mode:?} prefill vs decode: {diff:.3e}");
     }
@@ -2525,13 +2528,13 @@ fn falcon_gradients_match_central_differences() {
 
 /// The trainer's gradients of `sum(output)` over `inputs`.
 fn grads_of_sum(
-    tw: &mamba_rs::train::weights::TrainMambaWeights,
+    tw: &mamba_rs::mamba1::cpu::weights::TrainMambaWeights,
     dims: &mamba_rs::ops::dims::MambaDims,
     inputs: &[f32],
-) -> mamba_rs::train::weights::TrainMambaWeights {
+) -> mamba_rs::mamba1::cpu::weights::TrainMambaWeights {
+    use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+    use mamba_rs::mamba1::cpu::scratch::PhaseScratch;
     use mamba_rs::ops::dims::MambaRecurrentState;
-    use mamba_rs::train::flat::MambaBackboneFlat;
-    use mamba_rs::train::scratch::PhaseScratch;
     let (di, ds, dc, nl) = (dims.d_inner, dims.d_state, dims.d_conv, dims.n_layers);
     let a_neg: Vec<f32> = tw
         .layers
@@ -2547,7 +2550,7 @@ fn grads_of_sum(
         a_neg: &a_neg,
     };
     let mut temporal = vec![0f32; dims.seq_len * dims.d_model];
-    mamba_rs::train::forward::forward_mamba_backbone_batched(
+    mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched(
         &mut temporal,
         &mut acts,
         tw,
@@ -2556,10 +2559,10 @@ fn grads_of_sum(
         &mut scratch,
         dims,
     );
-    let mut grads = mamba_rs::train::weights::TrainMambaWeights::zeros_from_dims(dims);
+    let mut grads = mamba_rs::mamba1::cpu::weights::TrainMambaWeights::zeros_from_dims(dims);
     let mut d_temporal = vec![1f32; temporal.len()];
-    let mut bwd = mamba_rs::train::scratch::BackwardPhaseScratch::zeros(dims);
-    mamba_rs::train::backward::backward_mamba_backbone_batched(
+    let mut bwd = mamba_rs::mamba1::cpu::scratch::BackwardPhaseScratch::zeros(dims);
+    mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched(
         &mut d_temporal,
         &mut grads,
         &acts,
@@ -2571,10 +2574,12 @@ fn grads_of_sum(
     grads
 }
 
-type Field = fn(&mut mamba_rs::train::weights::TrainMambaWeights) -> &mut Vec<f32>;
+type Field = fn(&mut mamba_rs::mamba1::cpu::weights::TrainMambaWeights) -> &mut Vec<f32>;
 
 /// The inference weights of trainer weights.
-fn inference_weights(tw: &mamba_rs::train::weights::TrainMambaWeights) -> mamba_rs::MambaWeights {
+fn inference_weights(
+    tw: &mamba_rs::mamba1::cpu::weights::TrainMambaWeights,
+) -> mamba_rs::MambaWeights {
     mamba_rs::MambaWeights {
         input_proj_w: tw.input_proj_w.clone(),
         input_proj_b: tw.input_proj_b.clone(),
@@ -2611,15 +2616,15 @@ fn inference_weights(tw: &mamba_rs::train::weights::TrainMambaWeights) -> mamba_
 fn assert_central_differences(
     label: &str,
     (tw, cfg, input_dim, inputs): (
-        &mamba_rs::train::weights::TrainMambaWeights,
+        &mamba_rs::mamba1::cpu::weights::TrainMambaWeights,
         &MambaConfig,
         usize,
         &[f32],
     ),
-    grads: &mamba_rs::train::weights::TrainMambaWeights,
+    grads: &mamba_rs::mamba1::cpu::weights::TrainMambaWeights,
     checks: &[(&str, Field)],
 ) {
-    let loss = |tw: &mamba_rs::train::weights::TrainMambaWeights| -> f64 {
+    let loss = |tw: &mamba_rs::mamba1::cpu::weights::TrainMambaWeights| -> f64 {
         f64_reference(&inference_weights(tw), cfg, input_dim, inputs)
             .iter()
             .sum()
@@ -2755,7 +2760,8 @@ fn variant_weights(cfg: &MambaConfig, input_dim: usize, seed: u64) -> mamba_rs::
 /// bits.
 #[test]
 fn block_steps_compose_the_backbone_step() {
-    use mamba_rs::{MambaLayerState, mamba_block_step, mamba_step_no_proj};
+    use mamba_rs::MambaLayerState;
+    use mamba_rs::mamba1::cpu::inference::{mamba_block_step, mamba_step_no_proj};
     for (label, cfg) in variant_cfgs() {
         let mut w = variant_weights(&cfg, cfg.d_model, 23);
         w.input_proj_w.clear();
@@ -2764,7 +2770,7 @@ fn block_steps_compose_the_backbone_step() {
         let x: Vec<f32> = falcon_inputs(1, d);
         let new_states = || {
             (0..cfg.n_layers)
-                .map(|_| MambaLayerState::zeros(cfg.d_inner(), cfg.d_state, cfg.d_conv))
+                .map(|_| MambaLayerState::zeros(&cfg))
                 .collect::<Vec<_>>()
         };
         let mut want = vec![0f32; d];
@@ -2914,9 +2920,9 @@ fn config_variants_prompt_decode_and_trainer_agree() {
         }
         for mode in [PrefillMode::Single, PrefillMode::Parallel] {
             let mut st = bb.alloc_state();
-            let mut ps = bb.alloc_prefill_scratch(seq_len);
+            let mut ps = bb.alloc_scratch();
             let mut rows = vec![0f32; seq_len * dm];
-            bb.forward_prefill(&inputs, &mut rows, &mut st, &mut ps, seq_len, mode);
+            bb.forward_sequence_with(&inputs, &mut rows, &mut st, &mut ps, seq_len, mode);
             let diff = max_diff(&rows, &decode);
             assert!(
                 diff < 1e-4,

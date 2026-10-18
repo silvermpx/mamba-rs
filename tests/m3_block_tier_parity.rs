@@ -17,13 +17,13 @@ use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{IndexWidth, y_runs};
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
+use mamba_rs::mamba3_siso::cpu::inference::{Mamba3StepScratch, mamba3_step};
 use mamba_rs::mamba3_siso::cpu::prefill::{Mamba3PrefillScratch, forward_mamba3_backbone_prefill};
 use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuEngine;
 use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, step_head_cfg};
 use mamba_rs::mamba3_siso::route::HeadTier;
 use mamba_rs::mamba3_siso::state::Mamba3State;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-use mamba_rs::mamba3_siso::{Mamba3StepScratch, mamba3_step};
 
 fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
     let mut s = seed.max(1);

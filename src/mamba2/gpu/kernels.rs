@@ -427,7 +427,7 @@ pub fn bmm_smem_bytes(ds: usize) -> usize {
 
 /// The chunk state kernel's state indices per block (32 per lane column,
 /// one to four columns), the channels of its weighted-input tile and its
-/// shared memory: the tile [64][channels], the B rows of the block's
+/// shared memory: the tile `[64][channels]`, the B rows of the block's
 /// indices and the per-token weights. The tile is the whole head rounded up
 /// to 4 when that fits `cap` bytes, else the widest multiple of 4 that does.
 pub fn chunk_state_geom(hd: usize, ds: usize, cap: usize) -> (usize, usize, usize) {

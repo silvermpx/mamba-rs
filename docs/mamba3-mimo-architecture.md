@@ -174,7 +174,7 @@ own sequence only and cuts every carry at a start.
 
 ## Checkpoints
 
-`hf::load_mamba3::load_hf_mamba3_mimo` reads the official MIMO
+`hf::load_mamba3_mimo` reads the official MIMO
 checkpoints. `tests/hf_m3_mimo_checkpoint_parity.rs` holds the 187m model
 on the CPU and on the GPU to a float64 transcription of the reference
 (`tools/oracles/m3_oracle.py`). `mamba3_mimo::serialize` saves and loads

@@ -219,7 +219,7 @@ fn apply_step_pair_matches_fused_applying_backward() {
         .unwrap();
     assert!(!m1.optimizer_stepped);
     // (a reducer would sum grad_arena() across ranks right here)
-    let _ = split.grad_arena().len();
+    let _ = split.grad_arena().unwrap().len();
     let m2 = split.apply_step(Some(1.0)).unwrap();
     assert!(m2.optimizer_stepped);
     let w_split = weight_bits(&split.snapshot_master().unwrap());

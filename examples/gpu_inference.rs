@@ -25,7 +25,7 @@ fn main() {
         let cfg = MambaConfig::default();
         let input_dim = cfg.d_model;
 
-        let cpu_backbone = MambaBackbone::init(cfg, input_dim, 42);
+        let cpu_backbone = MambaBackbone::init(cfg, input_dim, 42).unwrap();
         println!(
             "Mamba SSM: {} layers, d_model={}, d_inner={}, {} params",
             cpu_backbone.n_layers(),

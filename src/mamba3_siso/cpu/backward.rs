@@ -13,7 +13,7 @@
 use super::dims::Mamba3Dims;
 use super::flat::Mamba3LayerFlat;
 use super::forward::{SsmHeadStep, simd_ssm_head, simd_sum_sq};
-use super::scratch::Mamba3Scratch;
+use super::scratch::Mamba3TrainScratch;
 use super::weights::TrainMamba3LayerWeights;
 use crate::bidi::{PairGrad, reverse_rows};
 use crate::ops::fast_math::fast_exp_scalar;
@@ -96,7 +96,7 @@ pub fn backward_mamba3_layer_batched(
     acts: &Mamba3LayerFlat,
     layer_w: &TrainMamba3LayerWeights,
     d_layer: &mut TrainMamba3LayerWeights,
-    scratch: &mut Mamba3Scratch,
+    scratch: &mut Mamba3TrainScratch,
     dims: &Mamba3Dims,
     angle_state_init: Option<&[f32]>,
 ) {
@@ -118,7 +118,7 @@ pub(crate) fn backward_mamba3_layer_in(
     d_temporal_flat: &mut [f32],
     acts: &Mamba3LayerFlat,
     (layer_w, d_layer): (&TrainMamba3LayerWeights, &mut TrainMamba3LayerWeights),
-    scratch: &mut Mamba3Scratch,
+    scratch: &mut Mamba3TrainScratch,
     (dims, angle_state_init, pair): (&Mamba3Dims, Option<&[f32]>, Option<PairGrad<'_>>),
 ) {
     let dm = dims.d_model;
@@ -754,7 +754,7 @@ mod tests {
         w.c_norm_weight.fill(1.0);
 
         let mut acts = Mamba3LayerFlat::zeros(dims);
-        let mut scratch = Mamba3Scratch::zeros(&dims);
+        let mut scratch = Mamba3TrainScratch::zeros(&dims);
         let mut ssm = vec![0.0; dims.nheads * dims.headdim * dims.d_state];
         let mut k_st = vec![0.0; dims.nheads * dims.d_state];
         let mut v_st = vec![0.0; dims.nheads * dims.headdim];
@@ -819,7 +819,7 @@ mod tests {
         }
 
         let mut acts = Mamba3LayerFlat::zeros(dims);
-        let mut scratch = Mamba3Scratch::zeros(&dims);
+        let mut scratch = Mamba3TrainScratch::zeros(&dims);
         let mut ssm = vec![0.0; dims.nheads * dims.headdim * dims.d_state];
         let mut k_st = vec![0.0; dims.nheads * dims.d_state];
         let mut v_st = vec![0.0; dims.nheads * dims.headdim];

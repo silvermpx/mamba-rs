@@ -7,7 +7,7 @@ use crate::mamba2::cpu::inference::{
 };
 use crate::mamba2::cpu::prefill::{Mamba2PrefillScratch, forward_mamba2_backbone_prefill};
 use crate::mamba2::state::Mamba2State;
-use crate::mamba2::weights::Mamba2Weights;
+use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 use crate::precision::{CpuOptions, WeightDtype};
 
 /// Mamba-2 backbone for CPU inference. The recurrent state is owned by the
@@ -15,8 +15,9 @@ use crate::precision::{CpuOptions, WeightDtype};
 pub struct Mamba2Backbone {
     weights: Mamba2Weights,
     cfg: Mamba2Config,
-    /// The projections packed for decode by [`Self::pack_for_decode`]; the
-    /// weights never change after construction, so the copy stays current.
+    /// The projections packed for decode by [`Self::pack_for_decode`]: a
+    /// copy of `weights`, dropped by every mutable access to them so a step
+    /// never reads stale panels.
     packed: Option<Mamba2PackedLinears>,
     /// Width of an input row.
     input_dim: usize,
@@ -77,6 +78,33 @@ impl Mamba2Backbone {
     /// The weights.
     pub fn weights(&self) -> &Mamba2Weights {
         &self.weights
+    }
+
+    /// The weights, consuming the backbone.
+    pub fn into_weights(self) -> Mamba2Weights {
+        self.weights
+    }
+
+    /// The weights, to change in place. Drops the packed projections; pack
+    /// again with [`Self::pack_for_decode`]. In a reduced precision the
+    /// backbone computes with the values written here as they are;
+    /// [`Self::new_with`] rounds a set of weights as the GPU engine of that
+    /// precision holds them.
+    pub fn weights_mut(&mut self) -> &mut Mamba2Weights {
+        self.packed = None;
+        &mut self.weights
+    }
+
+    /// One layer's weights.
+    pub fn layer(&self, index: usize) -> &Mamba2LayerWeights {
+        &self.weights.layers[index]
+    }
+
+    /// One layer's weights, to change in place, as with
+    /// [`Self::weights_mut`].
+    pub fn layer_mut(&mut self, index: usize) -> &mut Mamba2LayerWeights {
+        self.packed = None;
+        &mut self.weights.layers[index]
     }
 
     /// The model's configuration.
@@ -174,6 +202,24 @@ impl Mamba2Backbone {
         );
     }
 
+    /// One token of `B` independent sequences with the same weights, each
+    /// through [`Self::forward_step`]: `inputs` is `[B * input_dim]`,
+    /// `outputs` `[B * d_model]`, one state and one scratch a sequence.
+    pub fn forward_step_batch(
+        &self,
+        inputs: &[f32],
+        outputs: &mut [f32],
+        states: &mut [Mamba2State],
+        scratches: &mut [Mamba2Scratch],
+    ) {
+        crate::ops::step_batch::step_batch_by(
+            (inputs, outputs),
+            (states, scratches),
+            (self.cfg.d_model, self.input_dim),
+            |inp, out, state, scratch| self.forward_step(inp, out, state, scratch),
+        );
+    }
+
     /// A zeroed recurrent state, the start of a sequence.
     pub fn alloc_state(&self) -> Mamba2State {
         Mamba2State::zeros(&self.cfg)
@@ -190,8 +236,8 @@ impl Mamba2Backbone {
 
 /// The step and window buffers of one Mamba-2 session.
 pub struct Mamba2Scratch {
-    pub step: Mamba2StepScratch,
-    pub prefill: Mamba2PrefillScratch,
+    step: Mamba2StepScratch,
+    prefill: Mamba2PrefillScratch,
 }
 
 #[cfg(test)]

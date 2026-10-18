@@ -324,35 +324,46 @@ impl MambaWeights {
         Ok(())
     }
 
-    /// Total parameter count.
-    pub fn param_count(&self, input_dim: usize, cfg: &MambaConfig) -> usize {
-        let d = cfg.d_model;
-        let di = cfg.d_inner();
-        let ds = cfg.d_state;
-        let dc = cfg.d_conv;
-        let dr = cfg.dt_rank();
-        let xd = cfg.xdbl_dim();
-        let nb = cfg.block_norm.bias_len(d);
-        let per_layer = d
-            + nb
-            + d * 2 * di
-            + cfg.in_proj_bias_len()
-            + di * dc
-            + cfg.conv_bias_len()
-            + di * xd
-            + dr * di
-            + di
-            + di * ds
-            + di
-            + di * d
-            + cfg.out_proj_bias_len();
-        let hidden = cfg.mlp_hidden();
-        let per_mlp = if hidden > 0 {
-            d + nb + 3 * d * hidden
-        } else {
-            0
-        };
-        input_dim * d + d + cfg.n_layers * (per_layer + per_mlp) + d + nb
+    /// Zeros in the shapes of these weights, an absent bias or projection
+    /// staying absent: a gradient buffer of the same model.
+    pub fn zeros_like(&self) -> Self {
+        let z = |v: &Vec<f32>| vec![0.0; v.len()];
+        Self {
+            input_proj_w: z(&self.input_proj_w),
+            input_proj_b: z(&self.input_proj_b),
+            layers: self
+                .layers
+                .iter()
+                .map(|l| MambaLayerWeights {
+                    norm_weight: z(&l.norm_weight),
+                    norm_bias: z(&l.norm_bias),
+                    in_proj_w: z(&l.in_proj_w),
+                    in_proj_b: z(&l.in_proj_b),
+                    conv1d_weight: z(&l.conv1d_weight),
+                    conv1d_bias: z(&l.conv1d_bias),
+                    x_proj_w: z(&l.x_proj_w),
+                    dt_proj_w: z(&l.dt_proj_w),
+                    dt_proj_b: z(&l.dt_proj_b),
+                    a_log: z(&l.a_log),
+                    a_neg: z(&l.a_neg),
+                    d_param: z(&l.d_param),
+                    out_proj_w: z(&l.out_proj_w),
+                    out_proj_b: z(&l.out_proj_b),
+                })
+                .collect(),
+            norm_f_weight: z(&self.norm_f_weight),
+            norm_f_bias: z(&self.norm_f_bias),
+            mlp: self
+                .mlp
+                .iter()
+                .map(|m| crate::mlp::GatedMlpLayerWeights {
+                    norm_weight: z(&m.norm_weight),
+                    norm_bias: z(&m.norm_bias),
+                    fc1_w: z(&m.fc1_w),
+                    fc2_w: z(&m.fc2_w),
+                })
+                .collect(),
+        }
     }
 }
 

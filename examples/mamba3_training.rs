@@ -9,7 +9,7 @@ use mamba_rs::mamba3_siso::cpu::backward::backward_mamba3_layer_batched;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::flat::Mamba3LayerFlat;
 use mamba_rs::mamba3_siso::cpu::forward::{Mamba3LayerStateMut, forward_mamba3_layer_batched};
-use mamba_rs::mamba3_siso::cpu::scratch::Mamba3Scratch;
+use mamba_rs::mamba3_siso::cpu::scratch::Mamba3TrainScratch;
 use mamba_rs::mamba3_siso::cpu::weights::TrainMamba3LayerWeights;
 
 fn main() {
@@ -44,7 +44,7 @@ fn main() {
     }
 
     let mut acts = Mamba3LayerFlat::zeros(dims);
-    let mut scratch = Mamba3Scratch::zeros(&dims);
+    let mut scratch = Mamba3TrainScratch::zeros(&dims);
     let nh = dims.nheads;
     let hd = dims.headdim;
     let ds = dims.d_state;

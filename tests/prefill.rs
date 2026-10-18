@@ -8,19 +8,19 @@
 //! - identity input_proj branch == explicit eye projection, bitwise;
 //! - batch helper == sequential prefills, bitwise.
 
-use mamba_rs::inference::{
-    PrefillMode, PrefillScratch, forward_mamba_backbone_prefill,
-    forward_mamba_backbone_prefill_mode, prefill_batch,
-};
 use mamba_rs::mamba1::MambaConfig;
 use mamba_rs::mamba1::MambaState;
 use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+use mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched;
+use mamba_rs::mamba1::cpu::prefill::{
+    MambaPrefillScratch, PrefillMode, forward_mamba_backbone_prefill,
+    forward_mamba_backbone_prefill_mode, prefill_batch,
+};
+use mamba_rs::mamba1::cpu::scratch::PhaseScratch;
+use mamba_rs::mamba1::cpu::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use mamba_rs::module::MambaBackbone;
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
-use mamba_rs::train::flat::MambaBackboneFlat;
-use mamba_rs::train::forward::forward_mamba_backbone_batched;
-use mamba_rs::train::scratch::PhaseScratch;
-use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -122,10 +122,9 @@ fn an_empty_prompt_leaves_the_state_alone() {
     let cfg = test_cfg();
     let input_dim = 20usize;
     let w = init_weights(&cfg, input_dim, 0xC0FFEE);
-    let (di, ds, dc, nl) = (cfg.d_inner(), cfg.d_state, cfg.d_conv, cfg.n_layers);
     let dims = MambaDims::from_config(&cfg, 5, input_dim);
-    let mut state = MambaState::zeros(nl, di, ds, dc);
-    let mut scratch = PrefillScratch::new(&dims);
+    let mut state = MambaState::zeros(&cfg);
+    let mut scratch = MambaPrefillScratch::new(&dims);
     let mut out = vec![0.0f32; 5 * cfg.d_model];
     let input = det(5 * input_dim, 0xAB, 0.05);
     forward_mamba_backbone_prefill(&mut out, &input, &w, &mut state, &mut scratch, &dims);
@@ -182,8 +181,8 @@ fn check_prefill_matches_training(cfg: MambaConfig) {
     );
 
     // Prefill.
-    let mut state = MambaState::zeros(nl, di, ds, dc);
-    let mut scratch = PrefillScratch::new(&dims);
+    let mut state = MambaState::zeros(&cfg);
+    let mut scratch = MambaPrefillScratch::new(&dims);
     let mut out = vec![0.0f32; seq_len * cfg.d_model];
     forward_mamba_backbone_prefill(&mut out, &input, &w, &mut state, &mut scratch, &dims);
 
@@ -199,11 +198,10 @@ fn prefill_parallel_bit_equals_single() {
     let w = init_weights(&cfg, input_dim, 0xC0FFEE);
     let input = det(seq_len * input_dim, 0xAB, 0.05);
     let dims = MambaDims::from_config(&cfg, seq_len, input_dim);
-    let (di, ds, dc, nl) = (cfg.d_inner(), cfg.d_state, cfg.d_conv, cfg.n_layers);
 
     let run = |mode: PrefillMode| -> (Vec<f32>, MambaState) {
-        let mut state = MambaState::zeros(nl, di, ds, dc);
-        let mut scratch = PrefillScratch::new(&dims);
+        let mut state = MambaState::zeros(&cfg);
+        let mut scratch = MambaPrefillScratch::new(&dims);
         let mut out = vec![0.0f32; seq_len * cfg.d_model];
         forward_mamba_backbone_prefill_mode(
             &mut out,
@@ -240,10 +238,9 @@ fn lane_prefill_parallel_bit_equals_single() {
     // The prompt's rows and the decode row after them.
     let run = |b: &MambaBackbone, mode: PrefillMode| -> Vec<f32> {
         let (mut st, mut sc) = (b.alloc_state(), b.alloc_scratch());
-        let mut pf = b.alloc_prefill_scratch(seq_len);
         let mut out = vec![0.0f32; (seq_len + 1) * dm];
         let (rows, last) = out.split_at_mut(seq_len * dm);
-        b.forward_prefill(prompt, rows, &mut st, &mut pf, seq_len, mode);
+        b.forward_sequence_with(prompt, rows, &mut st, &mut sc, seq_len, mode);
         b.forward_step(next, last, &mut st, &mut sc);
         out
     };
@@ -304,9 +301,9 @@ fn prefill_then_decode_handoff() {
 
     // Prefill T, then decode token T via the step path.
     let mut state = backbone.alloc_state();
-    let mut prefill_scratch = backbone.alloc_prefill_scratch(seq_len);
+    let mut prefill_scratch = backbone.alloc_scratch();
     let mut prefill_out = vec![0.0f32; seq_len * cfg.d_model];
-    backbone.forward_prefill(
+    backbone.forward_sequence_with(
         &inputs[..seq_len * input_dim],
         &mut prefill_out,
         &mut state,
@@ -366,11 +363,10 @@ fn prefill_identity_equals_eye_projection() {
 
     let input = det(seq_len * input_dim, 0xAD, 0.05);
     let dims = MambaDims::from_config(&cfg, seq_len, input_dim);
-    let (di, ds, dc, nl) = (cfg.d_inner(), cfg.d_state, cfg.d_conv, cfg.n_layers);
 
     let run = |w: &MambaWeights| -> Vec<f32> {
-        let mut state = MambaState::zeros(nl, di, ds, dc);
-        let mut scratch = PrefillScratch::new(&dims);
+        let mut state = MambaState::zeros(&cfg);
+        let mut scratch = MambaPrefillScratch::new(&dims);
         let mut out = vec![0.0f32; seq_len * cfg.d_model];
         forward_mamba_backbone_prefill(&mut out, &input, w, &mut state, &mut scratch, &dims);
         out
@@ -387,14 +383,13 @@ fn prefill_batch_matches_sequential() {
     let b = 3usize;
     let w = init_weights(&cfg, input_dim, 0xC0FFEE);
     let dims = MambaDims::from_config(&cfg, seq_len, input_dim);
-    let (di, ds, dc, nl) = (cfg.d_inner(), cfg.d_state, cfg.d_conv, cfg.n_layers);
     let inputs = det(b * seq_len * input_dim, 0xAE, 0.05);
 
     // Sequential reference.
     let mut seq_out = vec![0.0f32; b * seq_len * cfg.d_model];
     for i in 0..b {
-        let mut state = MambaState::zeros(nl, di, ds, dc);
-        let mut scratch = PrefillScratch::new(&dims);
+        let mut state = MambaState::zeros(&cfg);
+        let mut scratch = MambaPrefillScratch::new(&dims);
         forward_mamba_backbone_prefill(
             &mut seq_out[i * seq_len * cfg.d_model..(i + 1) * seq_len * cfg.d_model],
             &inputs[i * seq_len * input_dim..(i + 1) * seq_len * input_dim],
@@ -406,8 +401,9 @@ fn prefill_batch_matches_sequential() {
     }
 
     // Batch helper.
-    let mut states: Vec<MambaState> = (0..b).map(|_| MambaState::zeros(nl, di, ds, dc)).collect();
-    let mut scratches: Vec<PrefillScratch> = (0..b).map(|_| PrefillScratch::new(&dims)).collect();
+    let mut states: Vec<MambaState> = (0..b).map(|_| MambaState::zeros(&cfg)).collect();
+    let mut scratches: Vec<MambaPrefillScratch> =
+        (0..b).map(|_| MambaPrefillScratch::new(&dims)).collect();
     let mut batch_out = vec![0.0f32; b * seq_len * cfg.d_model];
     prefill_batch(
         &mut batch_out,

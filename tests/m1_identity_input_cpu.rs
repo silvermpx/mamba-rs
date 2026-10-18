@@ -5,14 +5,14 @@
 //! and the backbone's batched step is its single step on every sample,
 //! packed projections included.
 
-use mamba_rs::inference::{MambaStepScratch, mamba_step_batch};
+use mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched;
+use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+use mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched;
+use mamba_rs::mamba1::cpu::inference::{MambaStepScratch, mamba_step_batch};
+use mamba_rs::mamba1::cpu::scratch::{BackwardPhaseScratch, PhaseScratch};
+use mamba_rs::mamba1::cpu::target::{MambaTargetScratch, forward_mamba_target_step};
+use mamba_rs::mamba1::cpu::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
-use mamba_rs::train::backward::backward_mamba_backbone_batched;
-use mamba_rs::train::flat::MambaBackboneFlat;
-use mamba_rs::train::forward::forward_mamba_backbone_batched;
-use mamba_rs::train::scratch::{BackwardPhaseScratch, PhaseScratch};
-use mamba_rs::train::target::{MambaTargetScratch, forward_mamba_target_step};
-use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use mamba_rs::{MambaBackbone, MambaConfig, MambaState, MambaWeights};
 
 fn values(n: usize, seed: u32) -> Vec<f32> {
@@ -190,9 +190,7 @@ fn m1_identity_input_decodes_in_batches() {
     let inputs = values(BATCH * dm, 3);
     let mut batched = Vec::new();
     for w in [&explicit, &identity] {
-        let mut states: Vec<MambaState> = (0..BATCH)
-            .map(|_| MambaState::zeros(cfg.n_layers, cfg.d_inner(), cfg.d_state, cfg.d_conv))
-            .collect();
+        let mut states: Vec<MambaState> = (0..BATCH).map(|_| MambaState::zeros(&cfg)).collect();
         let mut scratches: Vec<MambaStepScratch> =
             (0..BATCH).map(|_| MambaStepScratch::new(&cfg)).collect();
         let mut out = vec![0.0f32; BATCH * dm];
@@ -209,7 +207,8 @@ fn m1_identity_input_decodes_in_batches() {
             bb.pack_for_decode();
         }
         let mut states: Vec<MambaState> = (0..BATCH).map(|_| bb.alloc_state()).collect();
-        let mut scratches: Vec<MambaStepScratch> = (0..BATCH).map(|_| bb.alloc_scratch()).collect();
+        let mut scratches: Vec<mamba_rs::MambaScratch> =
+            (0..BATCH).map(|_| bb.alloc_scratch()).collect();
         let mut out = vec![0.0f32; BATCH * dm];
         let mut single = vec![0.0f32; BATCH * dm];
         let mut one_states: Vec<MambaState> = (0..BATCH).map(|_| bb.alloc_state()).collect();

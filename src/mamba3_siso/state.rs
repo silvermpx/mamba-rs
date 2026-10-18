@@ -23,13 +23,14 @@ pub struct Mamba3LayerState {
 }
 
 impl Mamba3LayerState {
-    /// Create a zeroed layer state.
-    pub fn zeros(nheads: usize, headdim: usize, d_state: usize, num_rope_angles: usize) -> Self {
+    /// A zeroed layer state, the start of a sequence.
+    pub fn zeros(cfg: &Mamba3Config) -> Self {
+        let (nh, hd, ds) = (cfg.nheads(), cfg.headdim, cfg.d_state);
         Self {
-            ssm_state: vec![0.0; nheads * headdim * d_state],
-            k_state: vec![0.0; nheads * d_state],
-            v_state: vec![0.0; nheads * headdim],
-            angle_state: vec![0.0; nheads * num_rope_angles.max(1)],
+            ssm_state: vec![0.0; nh * hd * ds],
+            k_state: vec![0.0; nh * ds],
+            v_state: vec![0.0; nh * hd],
+            angle_state: vec![0.0; nh * cfg.num_rope_angles().max(1)],
         }
     }
 
@@ -49,15 +50,11 @@ pub struct Mamba3State {
 }
 
 impl Mamba3State {
-    /// Create zeroed state for all layers from config.
+    /// A zeroed state of every layer, the start of a sequence.
     pub fn zeros(cfg: &Mamba3Config) -> Self {
-        let nh = cfg.nheads();
-        let hd = cfg.headdim;
-        let ds = cfg.d_state;
-        let na = cfg.num_rope_angles();
         Self {
             layers: (0..cfg.n_layers)
-                .map(|_| Mamba3LayerState::zeros(nh, hd, ds, na))
+                .map(|_| Mamba3LayerState::zeros(cfg))
                 .collect(),
         }
     }

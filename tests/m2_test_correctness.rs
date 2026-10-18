@@ -2,10 +2,10 @@
 //! step, prefill against the decode chain, and the decode's invariants.
 
 use mamba_rs::mamba1::cpu::prefill::PrefillMode;
-use mamba_rs::mamba2::{
-    Mamba2Config, Mamba2PrefillScratch, Mamba2State, Mamba2StepScratch, Mamba2Weights,
-    forward_mamba2_backbone_prefill_mode, mamba2_step,
+use mamba_rs::mamba2::cpu::{
+    Mamba2PrefillScratch, Mamba2StepScratch, forward_mamba2_backbone_prefill_mode, mamba2_step,
 };
+use mamba_rs::mamba2::{Mamba2Config, Mamba2State, Mamba2Weights};
 
 fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
     let mut s = seed.max(1);

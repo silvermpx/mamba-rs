@@ -28,5 +28,5 @@ pub use prefill::{
     Mamba3PrefillScratch, forward_mamba3_backbone_prefill, forward_mamba3_backbone_prefill_mode,
     prefill3_batch,
 };
-pub use scratch::Mamba3Scratch;
+pub use scratch::Mamba3TrainScratch;
 pub use weights::{TrainMamba3LayerWeights, TrainMamba3Weights};

@@ -763,6 +763,7 @@ impl M2Exec<'_> {
 /// The recurrent state of every layer: the conv window `[L, B, conv_dim,
 /// d_conv]` (the current input last) and the SSM state `[L, B, nheads,
 /// headdim, d_state]`, both f32.
+#[doc(hidden)]
 pub struct Mamba2GpuState {
     pub conv: GpuBuffer,
     pub ssm: GpuBuffer,
@@ -777,6 +778,7 @@ impl Mamba2GpuState {
 }
 
 /// Reusable device buffers of one engine's steps.
+#[doc(hidden)]
 pub struct Mamba2GpuScratch {
     input: GpuBuffer,
     temporal: GpuBuffer,
@@ -810,6 +812,7 @@ impl Mamba2GpuScratch {
 }
 
 /// The Mamba-2 decode and prefill engine.
+#[doc(hidden)]
 pub struct Mamba2GpuEngine {
     pub kernels: Mamba2Kernels,
     pub ctx: GpuCtx,
@@ -1636,6 +1639,7 @@ impl Mamba2GpuEngine {
 
 /// Buffers of one prompt window length, and the window's CUDA graph once
 /// [`Mamba2GpuEngine::capture_prefill_graph`] ran.
+#[doc(hidden)]
 pub struct Mamba2GpuPrefill {
     // The graph drops first, before the buffers it reads.
     graph: Option<prefill_graph::PrefillGraph>,

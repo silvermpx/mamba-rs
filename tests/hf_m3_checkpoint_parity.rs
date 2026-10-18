@@ -19,11 +19,11 @@
 #![cfg(feature = "hf")]
 
 use mamba_rs::hf::embed::lm_head_logits;
-use mamba_rs::hf::load_mamba3::load_hf_mamba3;
+use mamba_rs::hf::load_mamba3;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
+use mamba_rs::mamba3_siso::cpu::inference::{Mamba3StepScratch, mamba3_step};
 use mamba_rs::mamba3_siso::cpu::prefill::{Mamba3PrefillScratch, forward_mamba3_backbone_prefill};
 use mamba_rs::mamba3_siso::state::Mamba3State;
-use mamba_rs::mamba3_siso::{Mamba3StepScratch, mamba3_step};
 
 #[path = "common/m3_golden.rs"]
 mod m3_golden;
@@ -38,7 +38,7 @@ use m3_golden::{argmax, load_golden, logsumexp, official_dir};
 fn siso_187m_cpu_decode_matches_the_f64_oracle() {
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
     let golden = load_golden(&root.join("goldens/siso-187m"));
-    let model = load_hf_mamba3(&root.join("mamba3-siso-187m")).unwrap();
+    let model = load_mamba3(&root.join("mamba3-siso-187m")).unwrap();
     let cfg = model.cfg;
     let d = cfg.d_model;
     let vocab = model.vocab_size;
@@ -141,7 +141,7 @@ fn siso_187m_cpu_decode_matches_the_f64_oracle() {
 fn siso_187m_cpu_prefill_matches_the_f64_oracle() {
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
     let golden = load_golden(&root.join("goldens/siso-187m"));
-    let model = load_hf_mamba3(&root.join("mamba3-siso-187m")).unwrap();
+    let model = load_mamba3(&root.join("mamba3-siso-187m")).unwrap();
     let cfg = model.cfg;
     let d = cfg.d_model;
     let vocab = model.vocab_size;
@@ -231,7 +231,7 @@ fn siso_187m_gpu_decode_matches_the_f64_oracle() {
 
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
     let golden = load_golden(&root.join("goldens/siso-187m"));
-    let model = load_hf_mamba3(&root.join("mamba3-siso-187m")).unwrap();
+    let model = load_mamba3(&root.join("mamba3-siso-187m")).unwrap();
     let cfg = model.cfg;
     let d = cfg.d_model;
     let vocab = model.vocab_size;
@@ -317,7 +317,7 @@ fn siso_187m_gpu_prefill_then_decode_matches_the_f64_oracle() {
 
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
     let golden = load_golden(&root.join("goldens/siso-187m"));
-    let model = load_hf_mamba3(&root.join("mamba3-siso-187m")).unwrap();
+    let model = load_mamba3(&root.join("mamba3-siso-187m")).unwrap();
     let cfg = model.cfg;
     let d = cfg.d_model;
     let vocab = model.vocab_size;
@@ -422,7 +422,7 @@ fn siso_187m_gpu_bf16_tracks_the_f64_oracle() {
 
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
     let golden = load_golden(&root.join("goldens/siso-187m"));
-    let model = load_hf_mamba3(&root.join("mamba3-siso-187m")).unwrap();
+    let model = load_mamba3(&root.join("mamba3-siso-187m")).unwrap();
     let cfg = model.cfg;
     let d = cfg.d_model;
     let vocab = model.vocab_size;

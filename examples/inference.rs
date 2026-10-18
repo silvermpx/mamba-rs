@@ -15,7 +15,7 @@ fn main() {
     let input_dim = cfg.d_model;
 
     // Initialize backbone with paper-default weights.
-    let backbone = MambaBackbone::init(cfg, input_dim, 42);
+    let backbone = MambaBackbone::init(cfg, input_dim, 42).unwrap();
     println!(
         "Mamba SSM: {} layers, d_model={}, d_inner={}, {} params",
         backbone.n_layers(),

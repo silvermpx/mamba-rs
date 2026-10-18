@@ -78,6 +78,7 @@ impl Mamba2Config {
     /// `Sequential` and `Parallel` always as named (the sequential kernels
     /// serve every d_state), `Auto` the chunked scan above
     /// [`ScanMode::PARALLEL_SCAN_THRESHOLD`] tokens.
+    #[doc(hidden)]
     pub fn prefill_parallel(&self, seq_len: usize) -> bool {
         match self.scan_mode {
             ScanMode::Sequential => false,
@@ -88,6 +89,7 @@ impl Mamba2Config {
 
     /// Whether training runs the chunked scan: every mode but `Sequential`,
     /// as Mamba-3 resolves it (training windows are long).
+    #[doc(hidden)]
     pub fn train_use_parallel_scan(&self) -> bool {
         !matches!(self.scan_mode, ScanMode::Sequential)
     }

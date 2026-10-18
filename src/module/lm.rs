@@ -2,25 +2,23 @@
 
 use std::path::Path;
 
-use crate::mamba1::cpu::inference::MambaStepScratch;
 use crate::mamba1::state::MambaState;
 use crate::mamba2::state::Mamba2State;
 use crate::mamba3_mimo::state::Mamba3MimoState;
-use crate::mamba3_siso::cpu::inference::Mamba3StepScratch;
 use crate::mamba3_siso::state::Mamba3State;
 
-use super::backbone::MambaBackbone;
+use super::backbone::{MambaBackbone, MambaScratch};
 use super::backbone2::{Mamba2Backbone, Mamba2Scratch};
-use super::backbone3::Mamba3Backbone;
+use super::backbone3::{Mamba3Backbone, Mamba3Scratch};
 use super::backbone3_mimo::{Mamba3MimoBackbone, Mamba3MimoScratch};
 use super::sample::{SampleParams, Xoshiro256PlusPlus, sample_token};
 
 use crate::config::ModelFamily;
 use crate::hf::embed::{embed_lookup, lm_head_logits, lm_head_logits_untied};
-use crate::hf::load::{HfModel, load_hf};
-use crate::hf::load_mamba2::load_hf_mamba2;
-use crate::hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo};
+use crate::hf::load_mamba;
+use crate::hf::load_mamba2;
 use crate::hf::read_family;
+use crate::hf::{load_mamba3, load_mamba3_mimo};
 use crate::ops::lane::{input_rows, round_matrix};
 use crate::precision::WeightDtype;
 
@@ -55,9 +53,9 @@ impl AnyState {
 }
 
 pub enum AnyScratch {
-    M1(Box<MambaStepScratch>),
+    M1(Box<MambaScratch>),
     M2(Box<Mamba2Scratch>),
-    M3(Box<Mamba3StepScratch>),
+    M3(Box<Mamba3Scratch>),
     M3Mimo(Box<Mamba3MimoScratch>),
 }
 
@@ -242,29 +240,25 @@ impl MambaLM {
     pub fn from_hf(dir: &Path) -> Result<Self, String> {
         match read_family(dir)? {
             ModelFamily::Mamba1 => {
-                let HfModel {
-                    backbone,
-                    embed,
-                    lm_head,
-                    vocab_size,
-                    ..
-                } = load_hf(dir)?;
-                Self::new(backbone, embed, lm_head, vocab_size)
+                let m = load_mamba(dir)?;
+                let d_model = m.cfg.d_model;
+                let backbone = MambaBackbone::new(m.weights, m.cfg, d_model)?;
+                Self::new(backbone, m.embed, m.lm_head, m.vocab_size)
             }
             ModelFamily::Mamba2 => {
-                let m = load_hf_mamba2(dir)?;
+                let m = load_mamba2(dir)?;
                 let d_model = m.cfg.d_model;
                 let backbone = Mamba2Backbone::new(m.weights, m.cfg, d_model)?;
                 Self::new(backbone, m.embed, m.lm_head, m.vocab_size)
             }
             ModelFamily::Mamba3 => {
-                let m = load_hf_mamba3(dir)?;
+                let m = load_mamba3(dir)?;
                 let d_model = m.cfg.d_model;
                 let backbone = Mamba3Backbone::new(m.weights, m.cfg, d_model)?;
                 Self::new(backbone, m.embed, m.lm_head, m.vocab_size)
             }
             ModelFamily::Mamba3Mimo => {
-                let m = load_hf_mamba3_mimo(dir)?;
+                let m = load_mamba3_mimo(dir)?;
                 let d_model = m.cfg.d_model;
                 let backbone = Mamba3MimoBackbone::new(m.weights, m.cfg, d_model)?;
                 Self::new(backbone, m.embed, m.lm_head, m.vocab_size)
@@ -316,16 +310,6 @@ impl MambaLM {
         vocab_size: usize,
     ) -> Result<Self, String> {
         Self::from_backbone(backbone.into(), embed, lm_head, vocab_size)
-    }
-
-    #[deprecated(since = "0.8.0", note = "use `MambaLM::new`, which takes every family")]
-    pub fn from_mamba3(
-        backbone: Mamba3Backbone,
-        embed: Vec<f32>,
-        lm_head: Option<Vec<f32>>,
-        vocab_size: usize,
-    ) -> Result<Self, String> {
-        Self::from_backbone(AnyBackbone::M3(backbone), embed, lm_head, vocab_size)
     }
 
     fn from_backbone(

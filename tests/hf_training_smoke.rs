@@ -73,7 +73,7 @@ fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
 fn hf_training_130m_bf16_smoke() {
     use mamba_rs::gpu::dtype::WeightDtype;
     use mamba_rs::gpu::train::TrainSessionCfg;
-    use mamba_rs::hf::load::load_hf;
+    use mamba_rs::hf::load_mamba;
     use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
     let dir = match find_model_dir("mamba-130m-hf") {
@@ -83,8 +83,8 @@ fn hf_training_130m_bf16_smoke() {
             return;
         }
     };
-    let hf = load_hf(&dir).expect("load mamba-130m-hf");
-    let cfg = *hf.backbone.config();
+    let hf = load_mamba(&dir).expect("load mamba-130m-hf");
+    let cfg = hf.cfg;
     let input_dim = cfg.d_model;
     eprintln!(
         "loaded mamba-130m-hf: d_model={} n_layers={} d_state={} d_conv={} expand={}",
@@ -92,7 +92,7 @@ fn hf_training_130m_bf16_smoke() {
     );
 
     // Sanity-check the loader populated `a_neg` for every layer.
-    for (li, lw) in hf.backbone.weights().layers.iter().enumerate() {
+    for (li, lw) in hf.weights.layers.iter().enumerate() {
         assert!(
             lw.a_neg.iter().all(|&v| v.is_finite() && v <= 0.0),
             "L{li}.a_neg malformed — HF a_log → a_neg conversion broken"
@@ -105,7 +105,7 @@ fn hf_training_130m_bf16_smoke() {
 
     // lr=1e-6 with bf16 gives small but finite updates on real-weight grads.
     let mut trainer = MambaGpuTrainer::new(
-        hf.backbone.weights(),
+        &hf.weights,
         cfg,
         TrainSessionCfg {
             input_dim,

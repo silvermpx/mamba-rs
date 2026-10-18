@@ -229,7 +229,7 @@ pub(crate) fn blocks_1d(n: usize) -> Result<u32, String> {
 }
 
 /// The block of a row kernel, whose x threads take a row's `cols` columns
-/// and whose y threads take rows: at most [`BLOCK_1D`] threads, the columns
+/// and whose y threads take rows: at most `BLOCK_1D` threads, the columns
 /// in the fewest passes of at most that many threads, as even as they
 /// split, and the rows filling what is left of the block. Narrow rows share
 /// the block's warps rather than leave their lanes idle: a block holds

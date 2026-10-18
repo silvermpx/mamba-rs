@@ -2,15 +2,15 @@
 //! `prefill.rs`, plus the param-labeled M1-vs-M3 head-to-head latency probe.
 
 use mamba_rs::mamba1::cpu::prefill::PrefillMode;
-use mamba_rs::mamba3_siso::Mamba3LayerFlat;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
+use mamba_rs::mamba3_siso::cpu::flat::Mamba3LayerFlat;
 use mamba_rs::mamba3_siso::cpu::forward::{Mamba3LayerStateMut, forward_mamba3_layer_batched};
 use mamba_rs::mamba3_siso::cpu::prefill::{
     Mamba3PrefillScratch, forward_mamba3_backbone_prefill, forward_mamba3_backbone_prefill_mode,
     prefill3_batch,
 };
-use mamba_rs::mamba3_siso::cpu::scratch::Mamba3Scratch;
+use mamba_rs::mamba3_siso::cpu::scratch::Mamba3TrainScratch;
 use mamba_rs::mamba3_siso::cpu::weights::{TrainMamba3LayerWeights, TrainMamba3Weights};
 use mamba_rs::mamba3_siso::state::Mamba3State;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -161,7 +161,7 @@ fn check_prefill_matches_training_layers(cfg: Mamba3Config) {
         input_dim,
         dm,
     );
-    let mut phase = Mamba3Scratch::zeros(&dims);
+    let mut phase = Mamba3TrainScratch::zeros(&dims);
     for lw in &tw.layers {
         let mut acts = Mamba3LayerFlat::zeros(dims);
         let mut ssm = vec![0.0f32; nh * hd * ds];
@@ -286,10 +286,10 @@ fn check_prefill_then_decode_handoff(cfg: Mamba3Config) {
 
     // Reference: the pure step loop over T+1 tokens.
     let mut ref_state = Mamba3State::zeros(&cfg);
-    let mut ref_scratch = mamba_rs::mamba3_siso::Mamba3StepScratch::new(&cfg);
+    let mut ref_scratch = mamba_rs::mamba3_siso::cpu::inference::Mamba3StepScratch::new(&cfg);
     let mut ref_last = vec![0.0f32; dm];
     for t in 0..=seq_len {
-        mamba_rs::mamba3_siso::mamba3_step(
+        mamba_rs::mamba3_siso::cpu::inference::mamba3_step(
             &mut ref_last,
             &inputs[t * input_dim..(t + 1) * input_dim],
             &mut ref_scratch,
@@ -311,9 +311,9 @@ fn check_prefill_then_decode_handoff(cfg: Mamba3Config) {
         &mut prefill_scratch,
         &dims,
     );
-    let mut step_scratch = mamba_rs::mamba3_siso::Mamba3StepScratch::new(&cfg);
+    let mut step_scratch = mamba_rs::mamba3_siso::cpu::inference::Mamba3StepScratch::new(&cfg);
     let mut step_out = vec![0.0f32; dm];
-    mamba_rs::mamba3_siso::mamba3_step(
+    mamba_rs::mamba3_siso::cpu::inference::mamba3_step(
         &mut step_out,
         &inputs[seq_len * input_dim..],
         &mut step_scratch,
@@ -437,10 +437,9 @@ fn check_lane_prefill_parallel_bit_equals_single(cfg: Mamba3Config) {
     // The prompt's rows and the decode row after them.
     let run = |b: &Mamba3Backbone, mode: PrefillMode| -> Vec<f32> {
         let (mut st, mut sc) = (b.alloc_state(), b.alloc_scratch());
-        let mut pf = b.alloc_prefill_scratch(seq_len);
         let mut out = vec![0.0f32; (seq_len + 1) * dm];
         let (rows, last) = out.split_at_mut(seq_len * dm);
-        b.forward_prefill(prompt, rows, &mut st, &mut pf, seq_len, mode);
+        b.forward_sequence_with(prompt, rows, &mut st, &mut sc, seq_len, mode);
         b.forward_step(next, last, &mut st, &mut sc);
         out
     };

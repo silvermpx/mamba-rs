@@ -3,11 +3,11 @@
 //! prefill.
 
 use mamba_rs::mamba1::cpu::prefill::PrefillMode;
-use mamba_rs::mamba3_mimo::{
-    Mamba3MimoConfig, Mamba3MimoPrefillScratch, Mamba3MimoState, Mamba3MimoTape,
-    Mamba3MimoTrainScratch, Mamba3MimoWeights, backward_mamba3_mimo_train,
+use mamba_rs::mamba3_mimo::cpu::{
+    Mamba3MimoPrefillScratch, Mamba3MimoTape, Mamba3MimoTrainScratch, backward_mamba3_mimo_train,
     forward_mamba3_mimo_backbone_prefill_mode, forward_mamba3_mimo_train,
 };
+use mamba_rs::mamba3_mimo::{Mamba3MimoConfig, Mamba3MimoState, Mamba3MimoWeights};
 
 #[path = "common/m3_mimo_oracle.rs"]
 mod m3_mimo_oracle;

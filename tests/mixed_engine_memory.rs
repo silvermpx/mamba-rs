@@ -72,7 +72,9 @@ fn half_engines_hold_no_f32_copy_of_the_model() {
         ..MambaConfig::default()
     };
     let w = MambaWeights::init(&cfg, cfg.d_model, 5);
-    let f32_bytes = 4 * w.param_count(cfg.d_model, &cfg);
+    let f32_bytes = 4 * mamba_rs::MambaBackbone::new(w.clone(), cfg, cfg.d_model)
+        .unwrap()
+        .param_count();
     let before = used(&device);
     let engine =
         MambaGpuEngineMixed::new(&device, &w, cfg, cfg.d_model, 1, WeightDtype::Bf16).unwrap();

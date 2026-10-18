@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use mamba_rs::MambaGpuLM;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::train::TrainSessionCfg;
-use mamba_rs::hf::load::load_hf;
+use mamba_rs::hf::load_mamba;
 use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 use mamba_rs::module::sample::SampleParams;
 
@@ -121,14 +121,14 @@ fn run_full_cycle(dtype: WeightDtype) {
     drop(lm_before);
 
     // ========== PHASE 2: train ==========
-    let hf = load_hf(&dir).expect("reload for trainer");
-    let cfg = *hf.backbone.config();
+    let hf = load_mamba(&dir).expect("reload for trainer");
+    let cfg = hf.cfg;
     let input_dim = cfg.d_model;
     let batch = 1;
     let seq_len = 16;
     let n = batch * seq_len * input_dim;
 
-    let mut hf_weights = hf.backbone.weights().clone();
+    let mut hf_weights = hf.weights.clone();
     if matches!(dtype, WeightDtype::F32) && hf_weights.input_proj_w.is_empty() {
         hf_weights.input_proj_w = (0..input_dim * cfg.d_model)
             .map(|i| {

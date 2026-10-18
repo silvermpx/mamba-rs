@@ -12,11 +12,11 @@ use mamba_rs::config::ScanMode;
 use mamba_rs::gpu::GpuOptions;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::train::TrainSessionCfg;
-use mamba_rs::mamba3_mimo::gpu::Mamba3MimoGpuTrainer;
-use mamba_rs::mamba3_mimo::{
-    Mamba3MimoConfig, Mamba3MimoState, Mamba3MimoTape, Mamba3MimoTrainScratch, Mamba3MimoWeights,
-    backward_mamba3_mimo_train, forward_mamba3_mimo_train,
+use mamba_rs::mamba3_mimo::cpu::{
+    Mamba3MimoTape, Mamba3MimoTrainScratch, backward_mamba3_mimo_train, forward_mamba3_mimo_train,
 };
+use mamba_rs::mamba3_mimo::gpu::Mamba3MimoGpuTrainer;
+use mamba_rs::mamba3_mimo::{Mamba3MimoConfig, Mamba3MimoState, Mamba3MimoWeights};
 
 fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
     let mut s = seed.max(1);

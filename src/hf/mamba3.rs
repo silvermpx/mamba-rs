@@ -343,10 +343,10 @@ pub(super) fn read_mlp(
 }
 
 /// Load an official Mamba-3 MIMO checkpoint directory.
-pub fn load_hf_mamba3_mimo(dir: &Path) -> Result<HfMamba3MimoModel, String> {
+pub fn load_mamba3_mimo(dir: &Path) -> Result<HfMamba3MimoModel, String> {
     let hf = read_mamba3_config(dir)?;
     let Some(cfg) = hf.mimo_config()? else {
-        return Err("a Mamba-3 SISO checkpoint: load it with load_hf_mamba3".into());
+        return Err("a Mamba-3 SISO checkpoint: load it with load_mamba3".into());
     };
     let (d, di, ds, nh, r, p_len, ip) = (
         cfg.d_model,
@@ -438,11 +438,11 @@ pub fn load_hf_mamba3_mimo(dir: &Path) -> Result<HfMamba3MimoModel, String> {
 }
 
 /// Load an official Mamba-3 SISO checkpoint directory.
-pub fn load_hf_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
+pub fn load_mamba3(dir: &Path) -> Result<HfMamba3Model, String> {
     let hf = read_mamba3_config(dir)?;
     if let Some(rank) = hf.mimo_rank {
         return Err(format!(
-            "a Mamba-3 MIMO (rank {rank}) checkpoint: load it with load_hf_mamba3_mimo"
+            "a Mamba-3 MIMO (rank {rank}) checkpoint: load it with load_mamba3_mimo"
         ));
     }
     let cfg = hf.cfg;

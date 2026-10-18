@@ -141,7 +141,7 @@ fn run_emulated_ddp_tier(
                 .unwrap();
             assert!(!m.optimizer_stepped);
             let stream = t.ctx().stream.clone();
-            arenas.push(t.grad_arena().to_cpu(&stream).unwrap());
+            arenas.push(t.grad_arena().unwrap().to_cpu(&stream).unwrap());
         }
         let delivery: Option<Vec<usize>> = if permute_delivery {
             Some((0..world).rev().collect())
@@ -245,7 +245,10 @@ impl Rank for MambaGpuTrainer {
             .unwrap()
     }
     fn arena(&self) -> Vec<f32> {
-        self.grad_arena().to_cpu(&self.ctx().stream).unwrap()
+        self.grad_arena()
+            .unwrap()
+            .to_cpu(&self.ctx().stream)
+            .unwrap()
     }
     fn apply(&mut self, reduced: &[f32]) -> BackwardMetrics {
         self.upload_grad_arena(reduced).unwrap();
@@ -287,7 +290,10 @@ impl Rank for Mamba3GpuTrainer {
             .unwrap()
     }
     fn arena(&self) -> Vec<f32> {
-        self.grad_arena().to_cpu(&self.ctx().stream).unwrap()
+        self.grad_arena()
+            .unwrap()
+            .to_cpu(&self.ctx().stream)
+            .unwrap()
     }
     fn apply(&mut self, reduced: &[f32]) -> BackwardMetrics {
         self.upload_grad_arena(reduced).unwrap();

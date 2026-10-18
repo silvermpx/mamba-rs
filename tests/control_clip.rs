@@ -265,13 +265,13 @@ fn control_clip_scales_only_the_control_channels() {
         )
         .unwrap();
         let stream = t.ctx().stream.clone();
-        let before = t.grad_arena().to_cpu(&stream).unwrap();
+        let before = t.grad_arena().unwrap().to_cpu(&stream).unwrap();
         let mask = siso_control(&cfg, before.len());
         let bound = 0.1 * sum_sq(&before, &mask, true).sqrt() as f32;
         let m = t
             .apply_step_full(Some(f32::INFINITY), None, Some(bound))
             .unwrap();
-        let after = t.grad_arena().to_cpu(&stream).unwrap();
+        let after = t.grad_arena().unwrap().to_cpu(&stream).unwrap();
         check(
             &format!("Mamba-3 SISO {dtype:?}"),
             &before,
@@ -297,13 +297,13 @@ fn control_clip_scales_only_the_control_channels() {
         )
         .unwrap();
         let stream = t.ctx().stream.clone();
-        let before = t.grad_arena().to_cpu(&stream).unwrap();
+        let before = t.grad_arena().unwrap().to_cpu(&stream).unwrap();
         let mask = m1_control(&cfg, before.len());
         let bound = 0.1 * sum_sq(&before, &mask, true).sqrt() as f32;
         let m = t
             .apply_step_full(Some(f32::INFINITY), None, Some(bound))
             .unwrap();
-        let after = t.grad_arena().to_cpu(&stream).unwrap();
+        let after = t.grad_arena().unwrap().to_cpu(&stream).unwrap();
         check(
             &format!("Mamba-1 {dtype:?}"),
             &before,

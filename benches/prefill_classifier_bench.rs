@@ -1,10 +1,12 @@
 //! CPU prefill latency at the vision-classifier page shape (T = 4621,
 //! d384 x 24 layers) for the single and parallel prefill modes.
 //! The prefill contracts are tested in tests/prefill.rs.
-use mamba_rs::inference::{PrefillMode, PrefillScratch, forward_mamba_backbone_prefill_mode};
 use mamba_rs::mamba1::MambaConfig;
 use mamba_rs::mamba1::MambaState;
 use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::cpu::prefill::{
+    MambaPrefillScratch, PrefillMode, forward_mamba_backbone_prefill_mode,
+};
 use mamba_rs::ops::dims::MambaDims;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -53,13 +55,12 @@ fn prefill_bench_classifier_shape() {
     let seq_len = 4621usize;
     let w = init_weights(&cfg, input_dim, 0xC0FFEE);
     let dims = MambaDims::from_config(&cfg, seq_len, input_dim);
-    let (di, ds, dc, nl) = (cfg.d_inner(), cfg.d_state, cfg.d_conv, cfg.n_layers);
     let input = det(seq_len * input_dim, 0xAF, 0.05);
     let mut out = vec![0.0f32; seq_len * cfg.d_model];
 
     for mode in [PrefillMode::Single, PrefillMode::Parallel] {
-        let mut state = MambaState::zeros(nl, di, ds, dc);
-        let mut scratch = PrefillScratch::new(&dims);
+        let mut state = MambaState::zeros(&cfg);
+        let mut scratch = MambaPrefillScratch::new(&dims);
         // Warm-up.
         forward_mamba_backbone_prefill_mode(
             &mut out,

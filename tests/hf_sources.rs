@@ -8,10 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use mamba_rs::hf::load::load_hf;
-use mamba_rs::hf::load_mamba2::{load_hf_mamba2, parse_mamba2_config};
-use mamba_rs::hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo, parse_mamba3_config};
+use mamba_rs::hf::load_mamba;
 use mamba_rs::hf::source::Source;
+use mamba_rs::hf::{load_mamba2, parse_mamba2_config};
+use mamba_rs::hf::{load_mamba3, load_mamba3_mimo, parse_mamba3_config};
 use safetensors::Dtype;
 use safetensors::tensor::TensorView;
 
@@ -468,8 +468,8 @@ fn mamba1_gated_mlp_loads() {
     let dir = scratch("m1-mlp");
     write_safetensors(&dir.join("model.safetensors"), &refs(&ts));
     std::fs::write(dir.join("config.json"), config).unwrap();
-    let m = load_hf(&dir).unwrap();
-    let cfg = m.backbone.config();
+    let m = load_mamba(&dir).unwrap();
+    let cfg = &m.cfg;
     assert_eq!((cfg.d_intermediate, cfg.mlp_hidden()), (100, 128));
     let tensor = |name: &str| {
         ts.iter()
@@ -477,7 +477,7 @@ fn mamba1_gated_mlp_loads() {
             .map(|t| t.read_back())
             .unwrap()
     };
-    let w = m.backbone.weights();
+    let w = &m.weights;
     assert_eq!(w.mlp.len(), 2);
     for (i, mw) in w.mlp.iter().enumerate() {
         let p = |n: &str| format!("backbone.layers.{i}.{n}");
@@ -494,7 +494,7 @@ fn mamba1_gated_mlp_loads() {
         let dir = scratch(tag);
         write_safetensors(&dir.join("model.safetensors"), &refs(tensors));
         std::fs::write(dir.join("config.json"), config).unwrap();
-        assert!(load_hf(&dir).is_err(), "{tag}");
+        assert!(load_mamba(&dir).is_err(), "{tag}");
     };
     let name = "backbone.embedding.weight";
     refused(
@@ -522,7 +522,7 @@ fn mamba1_gated_mlp_loads() {
         let dir = scratch(tag);
         write_safetensors(&dir.join("model.safetensors"), &refs(&ts));
         std::fs::write(dir.join("config.json"), config).unwrap();
-        let err = load_hf(&dir).err().unwrap_or_default();
+        let err = load_mamba(&dir).err().unwrap_or_default();
         assert!(err.contains("out of supported range"), "{tag}: {err}");
     }
 }
@@ -564,9 +564,9 @@ fn mamba1_layer_norm_checkpoints_load() {
     let dir = scratch("m1-layer-norm");
     write_safetensors(&dir.join("model.safetensors"), &refs(&ts));
     std::fs::write(dir.join("config.json"), config).unwrap();
-    let m = load_hf(&dir).unwrap();
-    assert_eq!(m.backbone.config().block_norm, mamba_rs::BlockNorm::Layer);
-    let w = m.backbone.weights();
+    let m = load_mamba(&dir).unwrap();
+    assert_eq!(m.cfg.block_norm, mamba_rs::BlockNorm::Layer);
+    let w = &m.weights;
     assert_eq!(w.norm_f_bias, tensor("backbone.norm_f.bias"));
     for i in 0..2 {
         let p = |n: &str| format!("backbone.layers.{i}.{n}");
@@ -578,7 +578,7 @@ fn mamba1_layer_norm_checkpoints_load() {
         let dir = scratch(tag);
         write_safetensors(&dir.join("model.safetensors"), tensors);
         std::fs::write(dir.join("config.json"), config).unwrap();
-        assert!(load_hf(&dir).is_err(), "{tag}");
+        assert!(load_mamba(&dir).is_err(), "{tag}");
     };
     for missing in [
         "backbone.norm_f.bias",
@@ -620,14 +620,14 @@ fn mamba1_bias_and_rank_options_load() {
             .map(|t| t.read_back())
             .unwrap()
     };
-    let (a, b) = (load_hf(&hf).unwrap(), load_hf(&original).unwrap());
+    let (a, b) = (load_mamba(&hf).unwrap(), load_mamba(&original).unwrap());
     for m in [&a, &b] {
-        let cfg = m.backbone.config();
+        let cfg = &m.cfg;
         assert_eq!(
             (cfg.dt_rank(), cfg.proj_bias, cfg.conv_bias),
             (3, true, false)
         );
-        for (i, lw) in m.backbone.weights().layers.iter().enumerate() {
+        for (i, lw) in m.weights.layers.iter().enumerate() {
             let p = |n: &str| format!("backbone.layers.{i}.mixer.{n}");
             assert_eq!(bits(&lw.in_proj_b), bits(&tensor(&p("in_proj.bias"))));
             assert_eq!(bits(&lw.out_proj_b), bits(&tensor(&p("out_proj.bias"))));
@@ -635,13 +635,7 @@ fn mamba1_bias_and_rank_options_load() {
             assert_eq!(lw.dt_proj_w.len(), 3 * 32);
         }
     }
-    for (la, lb) in a
-        .backbone
-        .weights()
-        .layers
-        .iter()
-        .zip(&b.backbone.weights().layers)
-    {
+    for (la, lb) in a.weights.layers.iter().zip(&b.weights.layers) {
         assert_eq!(bits(&la.dt_proj_w), bits(&lb.dt_proj_w));
         assert_eq!(bits(&la.x_proj_w), bits(&lb.x_proj_w));
     }
@@ -653,7 +647,7 @@ fn mamba1_bias_and_rank_options_load() {
         let dir = scratch(tag);
         write_safetensors(&dir.join("model.safetensors"), &refs(tensors));
         std::fs::write(dir.join("config.json"), config).unwrap();
-        let err = load_hf(&dir).err().unwrap();
+        let err = load_mamba(&dir).err().unwrap();
         assert!(err.contains(needle), "{tag}: {err}");
     };
     let conv_on = hf_config.replace("\"use_conv_bias\": false", "\"use_conv_bias\": true");
@@ -709,13 +703,16 @@ fn mamba1_reads_the_original_bin_as_its_hf_twin() {
         )
         .unwrap();
 
-        let a = load_hf(&original).unwrap();
-        let b = load_hf(&twin).unwrap();
+        let a = load_mamba(&original).unwrap();
+        let b = load_mamba(&twin).unwrap();
         assert!(a.lm_head.is_none() && b.lm_head.is_none());
-        assert_eq!(a.vocab_size_padded, b.vocab_size_padded);
+        assert_eq!(
+            (a.embed.len() / a.cfg.d_model),
+            (b.embed.len() / b.cfg.d_model)
+        );
         let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         assert_eq!(bits(&a.embed), bits(&b.embed), "{dtype:?} embedding");
-        let (wa, wb) = (a.backbone.weights(), b.backbone.weights());
+        let (wa, wb) = (&a.weights, &b.weights);
         assert_eq!(bits(&wa.norm_f_weight), bits(&wb.norm_f_weight));
         for (la, lb) in wa.layers.iter().zip(&wb.layers) {
             for (x, y) in [
@@ -810,7 +807,7 @@ fn untied_heads_load_in_mamba2_siso_and_mimo() {
         &dir.join("model.safetensors"),
         &ts.iter().collect::<Vec<_>>(),
     );
-    let m = load_hf_mamba2(&dir).unwrap();
+    let m = load_mamba2(&dir).unwrap();
     let head = m.lm_head.expect("an untied head");
     assert_eq!(bits(&head), bits(&head_layout(&ts[2].values, 30, d)));
     // The same checkpoint read as tied leaves the saved head unused.
@@ -820,7 +817,7 @@ fn untied_heads_load_in_mamba2_siso_and_mimo() {
             .replace("\"tie_embeddings\": false", "\"tie_embeddings\": true"),
     )
     .unwrap();
-    assert!(load_hf_mamba2(&dir).unwrap().lm_head.is_none());
+    assert!(load_mamba2(&dir).unwrap().lm_head.is_none());
 
     // SISO and MIMO: d_model 32, d_state 16, headdim 16.
     for mimo in [false, true] {
@@ -869,9 +866,9 @@ fn untied_heads_load_in_mamba2_siso_and_mimo() {
         );
         let want = head_layout(&ts[2].read_back(), 30, d);
         let head = if mimo {
-            load_hf_mamba3_mimo(&dir).unwrap().lm_head
+            load_mamba3_mimo(&dir).unwrap().lm_head
         } else {
-            load_hf_mamba3(&dir).unwrap().lm_head
+            load_mamba3(&dir).unwrap().lm_head
         };
         assert_eq!(
             bits(&head.expect("an untied head")),
@@ -987,8 +984,8 @@ fn mamba2_transformers_layout_loads_as_its_original_twin() {
         .collect();
     write_index(&b_dir.join("model.safetensors.index.json"), &map);
 
-    let a = load_hf_mamba2(&a_dir).unwrap();
-    let b = load_hf_mamba2(&b_dir).unwrap();
+    let a = load_mamba2(&a_dir).unwrap();
+    let b = load_mamba2(&b_dir).unwrap();
     assert_eq!(a.cfg, b.cfg);
     assert_eq!(a.vocab_size, b.vocab_size);
     let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
@@ -1027,7 +1024,7 @@ fn mamba2_transformers_layout_loads_as_its_original_twin() {
     std::fs::write(c_dir.join("config.json"), tied).unwrap();
     let c_ts: Vec<&Tensor> = b_ts.iter().filter(|t| t.name != "lm_head.weight").collect();
     write_safetensors(&c_dir.join("model.safetensors"), &c_ts);
-    assert!(load_hf_mamba2(&c_dir).unwrap().lm_head.is_none());
+    assert!(load_mamba2(&c_dir).unwrap().lm_head.is_none());
 }
 
 /// A FalconMamba checkpoint (transformers layout, `model_type`
@@ -1046,8 +1043,8 @@ fn falcon_mamba_loads_with_its_mixer_norms() {
             "layer_norm_epsilon": 1e-5, "mixer_rms_eps": 1e-6, "tie_word_embeddings": false}"#,
     )
     .unwrap();
-    let m = load_hf(&dir).unwrap();
-    let cfg = m.backbone.config();
+    let m = load_mamba(&dir).unwrap();
+    let cfg = &m.cfg;
     assert_eq!(cfg.bcdt_rms_eps, Some(1e-6));
     assert_eq!((cfg.expand, cfg.rms_norm_eps), (2, 1e-5));
     assert!(m.lm_head.is_some());
@@ -1102,7 +1099,7 @@ fn mamba2_layer_norm_checkpoints_load() {
     let dir = scratch("m2-layer-norm");
     std::fs::write(dir.join("config.json"), json).unwrap();
     write_safetensors(&dir.join("model.safetensors"), &refs(&ts));
-    let m = load_hf_mamba2(&dir).unwrap();
+    let m = load_mamba2(&dir).unwrap();
     assert_eq!(m.weights.norm_f_bias, tensor("backbone.norm_f.bias"));
     for i in 0..cfg.n_layers {
         let p = |n: &str| format!("backbone.layers.{i}.{n}");
@@ -1117,7 +1114,7 @@ fn mamba2_layer_norm_checkpoints_load() {
     let dir = scratch("m2-layer-norm-missing");
     std::fs::write(dir.join("config.json"), json).unwrap();
     write_safetensors(&dir.join("model.safetensors"), &refs(&missing));
-    assert!(load_hf_mamba2(&dir).is_err());
+    assert!(load_mamba2(&dir).is_err());
 }
 
 /// Mamba-3 checkpoints built with `rms_norm = false`, SISO and MIMO, load
@@ -1189,7 +1186,7 @@ fn mamba3_layer_norm_checkpoints_load() {
             want.push(tensor(&format!("backbone.layers.{i}.norm2.bias")));
         }
         let got: Vec<Vec<f32>> = if mimo {
-            let w = load_hf_mamba3_mimo(&dir).unwrap().weights;
+            let w = load_mamba3_mimo(&dir).unwrap().weights;
             std::iter::once(w.norm_f_bias.clone())
                 .chain(
                     w.layers
@@ -1199,7 +1196,7 @@ fn mamba3_layer_norm_checkpoints_load() {
                 )
                 .collect()
         } else {
-            let w = load_hf_mamba3(&dir).unwrap().weights;
+            let w = load_mamba3(&dir).unwrap().weights;
             std::iter::once(w.norm_f_bias.clone())
                 .chain(
                     w.layers
@@ -1219,9 +1216,9 @@ fn mamba3_layer_norm_checkpoints_load() {
         std::fs::write(dir.join("config.json"), &json).unwrap();
         write_safetensors(&dir.join("model.safetensors"), &refs(&missing));
         let refused = if mimo {
-            load_hf_mamba3_mimo(&dir).is_err()
+            load_mamba3_mimo(&dir).is_err()
         } else {
-            load_hf_mamba3(&dir).is_err()
+            load_mamba3(&dir).is_err()
         };
         assert!(refused, "mimo {mimo}: a missing block-norm bias loaded");
     }

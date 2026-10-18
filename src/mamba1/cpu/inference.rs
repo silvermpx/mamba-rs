@@ -576,7 +576,7 @@ pub fn mamba_step_batch(
     input_dim: usize,
 ) {
     let identity = weights.input_proj_w.is_empty();
-    step_batch_by(
+    crate::ops::step_batch::step_batch_by(
         (inputs, outputs),
         (states, scratches),
         (cfg.d_model, input_dim),
@@ -596,77 +596,6 @@ pub fn mamba_step_batch(
             }
         },
     );
-}
-
-/// B independent samples through `step`, one T=1 step each: in parallel
-/// when the batch fills the pool, one after another otherwise.
-pub(crate) fn step_batch_by(
-    (inputs, outputs): (&[f32], &mut [f32]),
-    (states, scratches): (
-        &mut [crate::mamba1::state::MambaState],
-        &mut [MambaStepScratch],
-    ),
-    (d_model, input_dim): (usize, usize),
-    step: impl Fn(&[f32], &mut [f32], &mut crate::mamba1::state::MambaState, &mut MambaStepScratch)
-    + Sync,
-) {
-    let batch = states.len();
-    assert_eq!(
-        inputs.len(),
-        batch * input_dim,
-        "inputs size mismatch: expected {}, got {}",
-        batch * input_dim,
-        inputs.len()
-    );
-    assert_eq!(
-        outputs.len(),
-        batch * d_model,
-        "outputs size mismatch: expected {}, got {}",
-        batch * d_model,
-        outputs.len()
-    );
-    assert_eq!(
-        scratches.len(),
-        batch,
-        "scratches count mismatch: expected {batch}, got {}",
-        scratches.len()
-    );
-
-    if batch >= rayon::current_num_threads().max(2) {
-        // Parallel: each sample is independent at T=1 (no cross-sample dependencies)
-        use rayon::prelude::*;
-
-        // par_chunks_mut iterates per-sample output slices directly —
-        // no per-step Vec of pointers (zero-allocation hot path).
-        outputs
-            .par_chunks_mut(d_model)
-            .zip(states.par_iter_mut())
-            .zip(scratches.par_iter_mut())
-            .enumerate()
-            .for_each(|(b, ((out, state), scratch))| {
-                step(
-                    &inputs[b * input_dim..(b + 1) * input_dim],
-                    out,
-                    state,
-                    scratch,
-                );
-            });
-    } else {
-        // Sequential: rayon overhead > compute for small batches
-        for (b, ((out, state), scratch)) in outputs
-            .chunks_mut(d_model)
-            .zip(states.iter_mut())
-            .zip(scratches.iter_mut())
-            .enumerate()
-        {
-            step(
-                &inputs[b * input_dim..(b + 1) * input_dim],
-                out,
-                state,
-                scratch,
-            );
-        }
-    }
 }
 
 // --- BLAS dispatch (delegates to ops/blas.rs for platform-specific SGEMM) ---

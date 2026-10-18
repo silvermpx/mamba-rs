@@ -1,12 +1,7 @@
-//! Mamba-3 SISO backbone wrapper (CPU). Mirrors [`MambaBackbone`] for the
-//! Mamba-3 SISO architecture (Lahoti et al., ICLR 2026): no conv1d,
+//! Mamba-3 SISO backbone wrapper (CPU), the SISO peer of
+//! [`crate::module::MambaBackbone`]: inference, single steps and windows,
+//! for the Mamba-3 SISO architecture (Lahoti et al., ICLR 2026): no conv1d,
 //! input-dependent A, trapezoidal integration, RoPE, BCNorm, output gate.
-//!
-//! This is the **inference-only T=1** entrypoint. Training (forward,
-//! BPTT, parallel rayon) lives in [`crate::mamba3_siso::cpu`] and operates
-//! on `TrainMamba3Weights` instead.
-//!
-//! [`MambaBackbone`]: crate::module::MambaBackbone
 
 use crate::mamba1::cpu::prefill::PrefillMode;
 use crate::mamba3_siso::config::Mamba3Config;
@@ -18,22 +13,17 @@ use crate::mamba3_siso::cpu::prefill::{
     Mamba3PrefillScratch, forward_mamba3_backbone_prefill_mode,
 };
 use crate::mamba3_siso::state::Mamba3State;
-use crate::mamba3_siso::weights::Mamba3Weights;
+use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
 use crate::precision::{CpuOptions, WeightDtype};
 
-/// Mamba-3 SISO backbone for CPU inference. Holds the full set of
-/// per-layer weights and the architecture config; the recurrent state
-/// is owned by the caller (`Mamba3State`) so multiple sessions can run
-/// concurrently against shared weights.
-///
-/// For GPU inference see `crate::mamba3_siso::gpu::Mamba3GpuBackbone`;
-/// for text generation see `crate::module::lm::MambaLM` (feature `hf`)
-/// and `crate::module::gpu_lm::MambaGpuLM` (features `cuda` and `hf`).
+/// Mamba-3 SISO backbone for CPU inference. The recurrent state is owned
+/// by the caller, so several sessions can share one set of weights.
 pub struct Mamba3Backbone {
     weights: Mamba3Weights,
     cfg: Mamba3Config,
-    /// The projections packed for decode by [`Self::pack_for_decode`]; the
-    /// weights never change after construction, so the copy stays current.
+    /// The projections packed for decode by [`Self::pack_for_decode`]: a
+    /// copy of `weights`, dropped by every mutable access to them so a step
+    /// never reads stale panels.
     packed: Option<Mamba3PackedLinears>,
     /// Width of an input row.
     input_dim: usize,
@@ -42,25 +32,16 @@ pub struct Mamba3Backbone {
 }
 
 impl Mamba3Backbone {
-    /// Initialize fresh weights from `cfg`. Uses the Mamba-3 init scheme
-    /// (zeros for biases, ones for B/C bias and norm scales, the
-    /// Mamba-paper dt_proj scheme for the discretization MLP).
-    pub fn init(cfg: Mamba3Config, input_dim: usize, seed: u64) -> Self {
-        let weights = Mamba3Weights::init(&cfg, input_dim, seed);
-        Self {
-            weights,
-            cfg,
-            packed: None,
-            input_dim,
-            dtype: WeightDtype::F32,
-        }
+    /// Fresh weights with the Mamba-3 init: zero biases, ones for the B and
+    /// C biases and the norm scales, and the dt scheme of the Mamba paper.
+    /// Errs on a configuration `validate` refuses.
+    pub fn init(cfg: Mamba3Config, input_dim: usize, seed: u64) -> Result<Self, String> {
+        cfg.validate()?;
+        Self::new(Mamba3Weights::init(&cfg, input_dim, seed), cfg, input_dim)
     }
 
-    /// Wrap loaded weights for input rows `input_dim` wide, from a
-    /// checkpoint ([`crate::mamba3_siso::serialize::load_mamba3`]) or a
-    /// trainer's `snapshot_master`. Every tensor length is checked against
-    /// `cfg` first, so an undersized checkpoint is refused here instead of
-    /// failing mid-inference.
+    /// Wrap loaded weights for input rows `input_dim` wide, after checking
+    /// every tensor against `cfg`.
     pub fn new(
         weights: Mamba3Weights,
         cfg: Mamba3Config,
@@ -96,24 +77,39 @@ impl Mamba3Backbone {
         self.dtype
     }
 
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `Mamba3Backbone::new(weights, cfg, input_dim)`"
-    )]
-    pub fn from_weights(
-        weights: Mamba3Weights,
-        cfg: Mamba3Config,
-        input_dim: usize,
-    ) -> Result<Self, String> {
-        Self::new(weights, cfg, input_dim)
-    }
-
-    /// Borrow the weight bundle (e.g. for serialization).
+    /// The weights.
     pub fn weights(&self) -> &Mamba3Weights {
         &self.weights
     }
 
-    /// Borrow the architecture config.
+    /// The weights, consuming the backbone.
+    pub fn into_weights(self) -> Mamba3Weights {
+        self.weights
+    }
+
+    /// The weights, to change in place. Drops the packed projections; pack
+    /// again with [`Self::pack_for_decode`]. In a reduced precision the
+    /// backbone computes with the values written here as they are;
+    /// [`Self::new_with`] rounds a set of weights as the GPU engine of that
+    /// precision holds them.
+    pub fn weights_mut(&mut self) -> &mut Mamba3Weights {
+        self.packed = None;
+        &mut self.weights
+    }
+
+    /// One layer's weights.
+    pub fn layer(&self, index: usize) -> &Mamba3LayerWeights {
+        &self.weights.layers[index]
+    }
+
+    /// One layer's weights, to change in place, as with
+    /// [`Self::weights_mut`].
+    pub fn layer_mut(&mut self, index: usize) -> &mut Mamba3LayerWeights {
+        self.packed = None;
+        &mut self.weights.layers[index]
+    }
+
+    /// The model's configuration.
     pub fn config(&self) -> &Mamba3Config {
         &self.cfg
     }
@@ -142,7 +138,8 @@ impl Mamba3Backbone {
 
     /// Pack the projections in panels for [`Self::forward_step`]: the same
     /// outputs as the row-major product without a BLAS, faster on large
-    /// layers, at the memory of a second copy of the projections.
+    /// layers, at the memory of a second copy of the projections. A mutable
+    /// access to the weights drops the copy.
     pub fn pack_for_decode(&mut self) {
         let input_dim = self.weights.input_proj_w.len() / self.cfg.d_model.max(1);
         self.packed = Some(Mamba3PackedLinears::pack(
@@ -164,9 +161,9 @@ impl Mamba3Backbone {
         input: &[f32],
         output: &mut [f32],
         state: &mut Mamba3State,
-        scratch: &mut Mamba3StepScratch,
+        scratch: &mut Mamba3Scratch,
     ) {
-        let states = &mut state.layers;
+        let (states, scratch) = (&mut state.layers, &mut scratch.step);
         scratch.set_dtype(self.dtype);
         match &self.packed {
             Some(p) => mamba3_step_packed(
@@ -181,69 +178,98 @@ impl Mamba3Backbone {
         }
     }
 
-    /// `seq_len` tokens in a row, every one through [`Self::forward_step`]:
-    /// `inputs` is `[seq_len, input_dim]`, `outputs` `[seq_len, d_model]`.
+    /// A window of `seq_len` tokens in one pass: `inputs` is
+    /// `[seq_len * input_dim]`, every position's output goes to `outputs`
+    /// (`[seq_len * d_model]`) and the state carries in and out, so
+    /// [`Self::forward_step`] continues the sequence. The window's matrix
+    /// products run batched over its rows on the thread pool, with the same
+    /// bits on any pool; they accumulate in another order than the steps'.
     pub fn forward_sequence(
         &self,
         inputs: &[f32],
         outputs: &mut [f32],
         state: &mut Mamba3State,
-        scratch: &mut Mamba3StepScratch,
+        scratch: &mut Mamba3Scratch,
         seq_len: usize,
     ) {
-        let (din, dm) = (self.input_dim, self.cfg.d_model);
-        for (x, y) in inputs.chunks(din).zip(outputs.chunks_mut(dm)).take(seq_len) {
-            self.forward_step(x, y, state, scratch);
-        }
+        self.forward_sequence_with(
+            inputs,
+            outputs,
+            state,
+            scratch,
+            seq_len,
+            PrefillMode::Parallel,
+        );
     }
 
-    /// Allocate a zero-initialized full-stack recurrent state (SSM + K +
-    /// V + angle accumulators per layer). Reset between independent
-    /// sequences.
-    pub fn alloc_state(&self) -> Mamba3State {
-        Mamba3State::zeros(&self.cfg)
-    }
-
-    /// Allocate a per-step scratch buffer (split, BCNorm, RoPE, gating,
-    /// proj). Reusable across calls; never aliased across threads.
-    pub fn alloc_scratch(&self) -> Mamba3StepScratch {
-        Mamba3StepScratch::new(&self.cfg)
-    }
-
-    /// Allocate a full-sequence prefill scratch for sequences of `seq_len`.
-    pub fn alloc_prefill_scratch(&self, seq_len: usize) -> Mamba3PrefillScratch {
-        let dims = Mamba3Dims::from_config(&self.cfg, seq_len);
-        Mamba3PrefillScratch::new(&dims, self.input_dim)
-    }
-
-    /// Full-sequence prefill: `seq_len` inputs through the batched GEMM
-    /// pipeline, the post-norm_f output written at every position and the
-    /// recurrent state carried, so [`Self::forward_step`] continues from
-    /// it. The rows are the training forward's, not the decode chain's:
-    /// the batched products accumulate in another order than the steps'.
-    ///
-    /// `inputs`: `[seq_len * input_dim]`; `outputs`: `[seq_len * d_model]`.
-    pub fn forward_prefill(
+    /// [`Self::forward_sequence`] in an explicit execution mode, for the
+    /// tests that hold the parallel window to the serial one bit for bit.
+    #[doc(hidden)]
+    pub fn forward_sequence_with(
         &self,
         inputs: &[f32],
         outputs: &mut [f32],
         state: &mut Mamba3State,
-        scratch: &mut Mamba3PrefillScratch,
+        scratch: &mut Mamba3Scratch,
         seq_len: usize,
         mode: PrefillMode,
     ) {
+        if seq_len == 0 {
+            return;
+        }
         let dims = Mamba3Dims::from_config(&self.cfg, seq_len);
-        scratch.set_dtype(self.dtype);
+        let prefill = scratch
+            .prefill
+            .get_or_insert_with(|| Mamba3PrefillScratch::new(&dims, self.input_dim));
+        prefill.set_dtype(self.dtype);
         forward_mamba3_backbone_prefill_mode(
             outputs,
             inputs,
             &self.weights,
             &mut state.layers,
-            scratch,
+            prefill,
             &dims,
             mode,
         );
     }
+
+    /// One token of `B` independent sequences with the same weights, each
+    /// through [`Self::forward_step`]: `inputs` is `[B * input_dim]`,
+    /// `outputs` `[B * d_model]`, one state and one scratch a sequence.
+    pub fn forward_step_batch(
+        &self,
+        inputs: &[f32],
+        outputs: &mut [f32],
+        states: &mut [Mamba3State],
+        scratches: &mut [Mamba3Scratch],
+    ) {
+        crate::ops::step_batch::step_batch_by(
+            (inputs, outputs),
+            (states, scratches),
+            (self.cfg.d_model, self.input_dim),
+            |inp, out, state, scratch| self.forward_step(inp, out, state, scratch),
+        );
+    }
+
+    /// A zeroed recurrent state, the start of a sequence.
+    pub fn alloc_state(&self) -> Mamba3State {
+        Mamba3State::zeros(&self.cfg)
+    }
+
+    /// Buffers for single steps and for windows.
+    pub fn alloc_scratch(&self) -> Mamba3Scratch {
+        Mamba3Scratch {
+            step: Mamba3StepScratch::new(&self.cfg),
+            prefill: None,
+        }
+    }
+}
+
+/// The step and window buffers of one Mamba-3 SISO session. The window
+/// buffers are sized on the first window and follow its length.
+pub struct Mamba3Scratch {
+    step: Mamba3StepScratch,
+    prefill: Option<Mamba3PrefillScratch>,
 }
 
 #[cfg(test)]
@@ -262,7 +288,7 @@ mod tests {
                 n_layers,
                 ..Mamba3Config::default()
             };
-            let b = Mamba3Backbone::init(cfg, 40, 7);
+            let b = Mamba3Backbone::init(cfg, 40, 7).unwrap();
             let (list, _) =
                 crate::mamba3_siso::serialize::checkpoint_parts(b.weights(), b.config(), 40)
                     .unwrap();
@@ -305,8 +331,8 @@ mod tests {
             ..Mamba3Config::default()
         };
         let input_dim = 40;
-        let plain = Mamba3Backbone::init(cfg, input_dim, 7);
-        let mut packed = Mamba3Backbone::init(cfg, input_dim, 7);
+        let plain = Mamba3Backbone::init(cfg, input_dim, 7).unwrap();
+        let mut packed = Mamba3Backbone::init(cfg, input_dim, 7).unwrap();
         packed.pack_for_decode();
         assert!(packed.is_packed());
         let (mut s0, mut s1) = (plain.alloc_state(), packed.alloc_state());

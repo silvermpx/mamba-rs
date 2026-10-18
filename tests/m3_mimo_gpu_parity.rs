@@ -9,11 +9,12 @@
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba1::cpu::prefill::PrefillMode;
-use mamba_rs::mamba3_mimo::gpu::Mamba3MimoGpuEngine;
-use mamba_rs::mamba3_mimo::{
-    Mamba3MimoConfig, Mamba3MimoPrefillScratch, Mamba3MimoState, Mamba3MimoStepScratch,
-    Mamba3MimoWeights, forward_mamba3_mimo_backbone_prefill_mode, mamba3_mimo_step,
+use mamba_rs::mamba3_mimo::cpu::{
+    Mamba3MimoPrefillScratch, Mamba3MimoStepScratch, forward_mamba3_mimo_backbone_prefill_mode,
+    mamba3_mimo_step,
 };
+use mamba_rs::mamba3_mimo::gpu::Mamba3MimoGpuEngine;
+use mamba_rs::mamba3_mimo::{Mamba3MimoConfig, Mamba3MimoState, Mamba3MimoWeights};
 
 fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
     let mut s = seed.max(1);

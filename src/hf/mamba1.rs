@@ -9,24 +9,30 @@ use crate::module::MambaBackbone;
 
 use super::config_json::{ModelFamily, parse_config_json};
 use super::keys::{RemappedKey, remap_m1_hf_key};
-use super::load_mamba3::read_mlp;
+use super::mamba3::read_mlp;
 use super::source::Source;
 
-/// Loaded HF Mamba model components.
-pub struct HfModel {
-    pub backbone: MambaBackbone,
+/// A Mamba checkpoint as read: the backbone's configuration and weights,
+/// the embedding and the head.
+pub struct HfMambaModel {
+    pub cfg: MambaConfig,
+    /// Layer weights with an empty (identity) input projection.
+    pub weights: MambaWeights,
+    /// The embedding `[vocab_padded, d_model]`, also the head when it is
+    /// tied.
     pub embed: Vec<f32>,
+    /// The untied head `[d_model, vocab_size]`; `None` ties the head to the
+    /// embedding.
     pub lm_head: Option<Vec<f32>>,
+    /// The tokenizer's vocabulary size; rows past it are padding.
     pub vocab_size: usize,
-    pub vocab_size_padded: usize,
-    pub d_model: usize,
 }
 
 /// Load a Mamba-1 checkpoint directory: `config.json` in the HF or the
 /// original format, and the weights in any layout [`Source`] reads (one or
 /// several safetensors files, or the `pytorch_model.bin` the original
 /// repositories ship).
-pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
+pub fn load_mamba(dir: &Path) -> Result<HfMambaModel, String> {
     let config_path = dir.join("config.json");
     let config_bytes =
         std::fs::read(&config_path).map_err(|e| format!("cannot read config.json: {e}"))?;
@@ -35,7 +41,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
     if hf_cfg.family != ModelFamily::Mamba1 {
         return Err(format!(
             "this loader reads Mamba-1 checkpoints, got {:?} (Mamba-2 and Mamba-3 \
-             load through hf::load_mamba2 and hf::load_mamba3)",
+             load through hf::load_mamba2, hf::load_mamba3 and hf::load_mamba3_mimo)",
             hf_cfg.family
         ));
     }
@@ -250,15 +256,16 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         mlp,
     };
 
-    let backbone = MambaBackbone::new(weights, mamba_cfg, mamba_cfg.d_model)?;
+    // The backbone checks every tensor against the configuration and
+    // derives the decay the inference reads.
+    let weights = MambaBackbone::new(weights, mamba_cfg, mamba_cfg.d_model)?.into_weights();
 
-    Ok(HfModel {
-        backbone,
+    Ok(HfMambaModel {
+        cfg: mamba_cfg,
+        weights,
         embed,
         lm_head,
         vocab_size: hf_cfg.vocab_size,
-        vocab_size_padded,
-        d_model: hf_cfg.d_model,
     })
 }
 

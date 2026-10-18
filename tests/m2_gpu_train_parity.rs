@@ -12,11 +12,11 @@ use mamba_rs::gpu::GpuOptions;
 use mamba_rs::gpu::WeightDtype;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::train::TrainSessionCfg;
-use mamba_rs::mamba2::gpu::{Mamba2GpuEngine, Mamba2GpuTrainer};
-use mamba_rs::mamba2::{
-    Mamba2Config, Mamba2State, Mamba2Tape, Mamba2TrainScratch, Mamba2Weights,
-    backward_mamba2_train, forward_mamba2_train,
+use mamba_rs::mamba2::cpu::{
+    Mamba2Tape, Mamba2TrainScratch, backward_mamba2_train, forward_mamba2_train,
 };
+use mamba_rs::mamba2::gpu::{Mamba2GpuEngine, Mamba2GpuTrainer};
+use mamba_rs::mamba2::{Mamba2Config, Mamba2State, Mamba2Weights};
 
 fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
     let mut s = seed.max(1);

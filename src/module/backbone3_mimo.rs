@@ -9,7 +9,7 @@ use crate::mamba3_mimo::cpu::prefill::{
     Mamba3MimoPrefillScratch, forward_mamba3_mimo_backbone_prefill,
 };
 use crate::mamba3_mimo::state::Mamba3MimoState;
-use crate::mamba3_mimo::weights::Mamba3MimoWeights;
+use crate::mamba3_mimo::weights::{Mamba3MimoLayerWeights, Mamba3MimoWeights};
 use crate::precision::{CpuOptions, WeightDtype};
 
 /// Mamba-3 MIMO backbone for CPU inference. The recurrent state is owned
@@ -17,8 +17,9 @@ use crate::precision::{CpuOptions, WeightDtype};
 pub struct Mamba3MimoBackbone {
     weights: Mamba3MimoWeights,
     cfg: Mamba3MimoConfig,
-    /// The projections packed for decode by [`Self::pack_for_decode`]; the
-    /// weights never change after construction, so the copy stays current.
+    /// The projections packed for decode by [`Self::pack_for_decode`]: a
+    /// copy of `weights`, dropped by every mutable access to them so a step
+    /// never reads stale panels.
     packed: Option<Mamba3MimoPackedLinears>,
     /// Width of an input row.
     input_dim: usize,
@@ -79,6 +80,33 @@ impl Mamba3MimoBackbone {
     /// The weights.
     pub fn weights(&self) -> &Mamba3MimoWeights {
         &self.weights
+    }
+
+    /// The weights, consuming the backbone.
+    pub fn into_weights(self) -> Mamba3MimoWeights {
+        self.weights
+    }
+
+    /// The weights, to change in place. Drops the packed projections; pack
+    /// again with [`Self::pack_for_decode`]. In a reduced precision the
+    /// backbone computes with the values written here as they are;
+    /// [`Self::new_with`] rounds a set of weights as the GPU engine of that
+    /// precision holds them.
+    pub fn weights_mut(&mut self) -> &mut Mamba3MimoWeights {
+        self.packed = None;
+        &mut self.weights
+    }
+
+    /// One layer's weights.
+    pub fn layer(&self, index: usize) -> &Mamba3MimoLayerWeights {
+        &self.weights.layers[index]
+    }
+
+    /// One layer's weights, to change in place, as with
+    /// [`Self::weights_mut`].
+    pub fn layer_mut(&mut self, index: usize) -> &mut Mamba3MimoLayerWeights {
+        self.packed = None;
+        &mut self.weights.layers[index]
     }
 
     /// The model's configuration.
@@ -172,6 +200,24 @@ impl Mamba3MimoBackbone {
         );
     }
 
+    /// One token of `B` independent sequences with the same weights, each
+    /// through [`Self::forward_step`]: `inputs` is `[B * input_dim]`,
+    /// `outputs` `[B * d_model]`, one state and one scratch a sequence.
+    pub fn forward_step_batch(
+        &self,
+        inputs: &[f32],
+        outputs: &mut [f32],
+        states: &mut [Mamba3MimoState],
+        scratches: &mut [Mamba3MimoScratch],
+    ) {
+        crate::ops::step_batch::step_batch_by(
+            (inputs, outputs),
+            (states, scratches),
+            (self.cfg.d_model, self.input_dim),
+            |inp, out, state, scratch| self.forward_step(inp, out, state, scratch),
+        );
+    }
+
     /// A zeroed recurrent state, the start of a sequence.
     pub fn alloc_state(&self) -> Mamba3MimoState {
         Mamba3MimoState::zeros(&self.cfg)
@@ -188,8 +234,8 @@ impl Mamba3MimoBackbone {
 
 /// The step and window buffers of one MIMO session.
 pub struct Mamba3MimoScratch {
-    pub step: Mamba3MimoStepScratch,
-    pub prefill: Mamba3MimoPrefillScratch,
+    step: Mamba3MimoStepScratch,
+    prefill: Mamba3MimoPrefillScratch,
 }
 
 #[cfg(test)]

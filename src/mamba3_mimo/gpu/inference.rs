@@ -72,6 +72,7 @@ struct GpuMlp {
 /// The recurrent state of every layer, f32: ssm `[L, B, H, P, N]`, keys
 /// `[L, B, H, R, N]`, the raw previous input `[L, B, H, P]`, the angles
 /// `[L, B, H, na]`.
+#[doc(hidden)]
 pub struct Mamba3MimoGpuState {
     pub ssm: GpuBuffer,
     pub k: GpuBuffer,
@@ -92,6 +93,7 @@ impl Mamba3MimoGpuState {
 /// Buffers for windows of one length (a decode step is a window of one),
 /// and the window's CUDA graph once [`Mamba3MimoGpuEngine::capture_graph`]
 /// ran.
+#[doc(hidden)]
 pub struct Mamba3MimoGpuWindow {
     // The graph drops first, before the buffers it reads.
     graph: Option<CapturedWindow>,
@@ -161,6 +163,7 @@ impl Mamba3MimoGpuWindow {
 }
 
 /// The MIMO decode and prefill engine.
+#[doc(hidden)]
 pub struct Mamba3MimoGpuEngine {
     pub kernels: Mamba3MimoKernels,
     pub ctx: GpuCtx,

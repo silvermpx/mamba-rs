@@ -11,12 +11,12 @@
 
 use mamba_rs::MambaWeights;
 use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched;
+use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+use mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched;
+use mamba_rs::mamba1::cpu::scratch::{BackwardPhaseScratch, PhaseScratch};
+use mamba_rs::mamba1::cpu::weights::TrainMambaWeights;
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
-use mamba_rs::train::backward::backward_mamba_backbone_batched;
-use mamba_rs::train::flat::MambaBackboneFlat;
-use mamba_rs::train::forward::forward_mamba_backbone_batched;
-use mamba_rs::train::scratch::{BackwardPhaseScratch, PhaseScratch};
-use mamba_rs::train::weights::TrainMambaWeights;
 
 fn main() {
     let cfg = MambaConfig::default();
@@ -37,21 +37,23 @@ fn main() {
         layers: inf_weights
             .layers
             .iter()
-            .map(|lw| mamba_rs::train::weights::TrainMambaLayerWeights {
-                norm_weight: lw.norm_weight.clone(),
-                norm_bias: lw.norm_bias.clone(),
-                in_proj_w: lw.in_proj_w.clone(),
-                in_proj_b: lw.in_proj_b.clone(),
-                conv1d_weight: lw.conv1d_weight.clone(),
-                conv1d_bias: lw.conv1d_bias.clone(),
-                x_proj_w: lw.x_proj_w.clone(),
-                dt_proj_w: lw.dt_proj_w.clone(),
-                dt_proj_b: lw.dt_proj_b.clone(),
-                a_log: lw.a_log.clone(),
-                d_param: lw.d_param.clone(),
-                out_proj_w: lw.out_proj_w.clone(),
-                out_proj_b: lw.out_proj_b.clone(),
-            })
+            .map(
+                |lw| mamba_rs::mamba1::cpu::weights::TrainMambaLayerWeights {
+                    norm_weight: lw.norm_weight.clone(),
+                    norm_bias: lw.norm_bias.clone(),
+                    in_proj_w: lw.in_proj_w.clone(),
+                    in_proj_b: lw.in_proj_b.clone(),
+                    conv1d_weight: lw.conv1d_weight.clone(),
+                    conv1d_bias: lw.conv1d_bias.clone(),
+                    x_proj_w: lw.x_proj_w.clone(),
+                    dt_proj_w: lw.dt_proj_w.clone(),
+                    dt_proj_b: lw.dt_proj_b.clone(),
+                    a_log: lw.a_log.clone(),
+                    d_param: lw.d_param.clone(),
+                    out_proj_w: lw.out_proj_w.clone(),
+                    out_proj_b: lw.out_proj_b.clone(),
+                },
+            )
             .collect(),
         norm_f_weight: inf_weights.norm_f_weight.clone(),
         norm_f_bias: inf_weights.norm_f_bias.clone(),

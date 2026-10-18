@@ -38,6 +38,7 @@ mod prompt_graph;
 type Stream = Arc<cudarc::driver::CudaStream>;
 
 /// Persistent recurrent state for GPU Mamba-3 inference (all layers).
+#[doc(hidden)]
 pub struct Mamba3GpuState {
     /// SSM hidden state: `[n_layers * batch * nh * hd * ds]`.
     pub ssm_state: GpuBuffer,
@@ -101,6 +102,7 @@ impl Mamba3GpuState {
 }
 
 /// Scratch buffers for T=1 inference (minimal, reused every step).
+#[doc(hidden)]
 pub struct Mamba3GpuScratch {
     pub gpu_input: GpuBuffer,     // [batch * input_dim] — H2D landing
     pub temporal: GpuBuffer,      // [batch * d_model] — working buffer
@@ -195,6 +197,7 @@ impl Mamba3GpuScratch {
 use crate::gpu::buffers::DtypedBuf;
 use crate::gpu::dtype::WeightDtype;
 
+#[doc(hidden)]
 pub struct Mamba3GpuScratchMixed {
     pub gpu_input: GpuBuffer, // f32 — CPU upload staging (seeds f32 residual)
     /// The input cast to the weight dtype for the input projection,
@@ -309,6 +312,7 @@ impl Mamba3GpuScratchMixed {
 /// 3. Call `step()` each timestep
 /// 4. Optionally call `capture_graph()` for faster inference
 /// 5. Call `state.reset()` on episode boundaries
+#[doc(hidden)]
 pub struct Mamba3GpuEngine {
     pub kernels: Mamba3Kernels,
     pub weights: GpuMamba3WeightsInf,
@@ -650,6 +654,7 @@ impl Mamba3GpuEngine {
 
     /// Allocate a prefill executor for a FIXED prompt length (scratch is
     /// shaped by `seq_len`; reuse it for windows of the same length).
+    #[doc(hidden)]
     pub fn alloc_prefill(&self, seq_len: usize) -> Result<super::prefill::Mamba3Prefill, String> {
         self.admit_prefill(seq_len, WeightDtype::F32)?;
         let mut prefill =
@@ -664,6 +669,7 @@ impl Mamba3GpuEngine {
     /// receives the final post-norm hidden state. `carry_state = false`
     /// zeroes the state first (stateless window); `true` continues across
     /// the seam with the trapezoidal boundary fold.
+    #[doc(hidden)]
     pub fn prefill_sequence(
         &self,
         prefill: &mut super::prefill::Mamba3Prefill,
@@ -1239,6 +1245,7 @@ impl Mamba3GpuEngine {
 use crate::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::mamba3_siso::gpu::weights::GpuMamba3MixedWeights;
 
+#[doc(hidden)]
 pub struct Mamba3GpuEngineMixed {
     engine: Mamba3GpuEngine, // owns ctx + kernels + blas + (unused f32 weights)
     mixed_weights: GpuMamba3MixedWeights,
@@ -1455,6 +1462,7 @@ impl Mamba3GpuEngineMixed {
     /// Allocate a TYPED one-pass prompt executor for a fixed prompt
     /// length: the prefill runs the trainer's bf16/f16 kernel chain
     /// against `mixed_weights`.
+    #[doc(hidden)]
     pub fn alloc_prefill(&self, seq_len: usize) -> Result<super::prefill::Mamba3Prefill, String> {
         self.engine
             .admit_prefill(seq_len, self.mixed_weights.bulk_dtype)?;
@@ -1470,6 +1478,7 @@ impl Mamba3GpuEngineMixed {
     /// One-pass typed prompt window straight into the persistent decode
     /// state (which is f32 in both pipelines). `last_hidden`
     /// (`[batch * d_model]`, f32) receives the final post-norm hidden.
+    #[doc(hidden)]
     pub fn prefill_sequence(
         &self,
         prefill: &mut super::prefill::Mamba3Prefill,
@@ -2253,58 +2262,6 @@ impl Mamba3GpuBackbone {
         )
     }
 
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).mode(mode)`"
-    )]
-    pub fn new_with_mode(
-        gpu_ordinal: usize,
-        cpu_weights: &Mamba3Weights,
-        cfg: Mamba3Config,
-        input_dim: usize,
-        batch: usize,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        let opts = GpuOptions::default().device(gpu_ordinal).mode(mode);
-        Self::new(cpu_weights, cfg, input_dim, batch, opts)
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype)`"
-    )]
-    pub fn new_with_dtype(
-        gpu_ordinal: usize,
-        cpu_weights: &Mamba3Weights,
-        cfg: Mamba3Config,
-        input_dim: usize,
-        batch: usize,
-        dtype: WeightDtype,
-    ) -> Result<Self, String> {
-        let opts = GpuOptions::default().device(gpu_ordinal).dtype(dtype);
-        Self::new(cpu_weights, cfg, input_dim, batch, opts)
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype).mode(mode)`"
-    )]
-    pub fn new_with_dtype_and_mode(
-        gpu_ordinal: usize,
-        cpu_weights: &Mamba3Weights,
-        cfg: Mamba3Config,
-        input_dim: usize,
-        batch: usize,
-        dtype: WeightDtype,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        let opts = GpuOptions::default()
-            .device(gpu_ordinal)
-            .dtype(dtype)
-            .mode(mode);
-        Self::new(cpu_weights, cfg, input_dim, batch, opts)
-    }
-
     fn new_with_dtype_inner(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -2661,16 +2618,8 @@ impl Mamba3GpuBackbone {
         }
     }
 
-    /// Whether this backbone can run the one-pass chunked prompt prefill.
-    /// Both precision arms do: the mixed engine runs the TYPED prefill
-    /// against its bf16/f16 weights (the trainer's kernel chain; the
-    /// persistent decode states are f32 in both pipelines), then downcasts
-    /// the final hidden into the typed decode temporal.
-    pub fn supports_prefill(&self) -> bool {
-        true
-    }
-
     /// Allocate a one-pass prompt executor for a fixed prompt length.
+    #[doc(hidden)]
     pub fn alloc_prefill(&self, seq_len: usize) -> Result<super::prefill::Mamba3Prefill, String> {
         match &self.engine {
             M3BackboneEngine::F32(e) => e.alloc_prefill(seq_len),
@@ -2682,6 +2631,7 @@ impl Mamba3GpuBackbone {
     /// straight into the persistent decode state. The final post-norm
     /// hidden lands in the decode temporal, so logits consumers continue
     /// exactly as after a step.
+    #[doc(hidden)]
     pub fn prefill_sequence(
         &mut self,
         prefill: &mut super::prefill::Mamba3Prefill,
@@ -2733,12 +2683,6 @@ impl Mamba3GpuBackbone {
         }
     }
 
-    /// The context's cuBLAS handle, for explicit vendor-only compatibility
-    /// code. A context in the deterministic GEMM mode holds none.
-    pub fn blas(&self) -> Result<std::cell::Ref<'_, cudarc::cublas::CudaBlas>, String> {
-        self.ctx().cublas()
-    }
-
     /// Download the last-computed temporal hidden state to CPU (f32).
     /// Mixed path upcasts from bf16/f16 on the fly.
     pub fn download_temporal(&self, output: &mut [f32]) -> Result<(), String> {
@@ -2758,21 +2702,6 @@ impl Mamba3GpuBackbone {
         }
     }
 }
-
-// The names these types carried before 0.8, when each family named its GPU
-// types its own way.
-#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuBackbone`")]
-pub type GpuMamba3Backbone = Mamba3GpuBackbone;
-#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuEngine`")]
-pub type Mamba3GpuInferenceEngine = Mamba3GpuEngine;
-#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuEngineMixed`")]
-pub type Mamba3GpuInferenceMixed = Mamba3GpuEngineMixed;
-#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuState`")]
-pub type Mamba3GpuInferenceState = Mamba3GpuState;
-#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuScratch`")]
-pub type Mamba3GpuInferenceScratch = Mamba3GpuScratch;
-#[deprecated(since = "0.8.0", note = "renamed to `Mamba3GpuScratchMixed`")]
-pub type Mamba3GpuInferenceMixedScratch = Mamba3GpuScratchMixed;
 
 #[cfg(test)]
 mod model_gemm_manifest_tests {

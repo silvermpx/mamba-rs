@@ -3,7 +3,7 @@
 //! `tools/oracles/m1_oracle.py` runs a Mamba-1 checkpoint in float64 with
 //! numpy, transcribed from the reference's step (state-spaces/mamba
 //! e9594ce), and writes the logits of every prompt position and a greedy
-//! continuation. This test loads the same checkpoint through `hf::load_hf`
+//! continuation. This test loads the same checkpoint through `hf::load_mamba`
 //! and holds the CPU decode and prefill to those goldens, and with `cuda`
 //! the GPU decode and prefill in f32 and bf16.
 //!
@@ -24,31 +24,30 @@
 #[cfg(feature = "cuda")]
 use mamba_rs::gpu::GpuOptions;
 use mamba_rs::hf::embed::lm_head_logits;
-use mamba_rs::hf::load::{HfModel, load_hf};
-use mamba_rs::mamba1::cpu::prefill::PrefillMode;
+use mamba_rs::hf::{HfMambaModel, load_mamba};
 
 #[path = "common/m3_golden.rs"]
 mod m3_golden;
 use m3_golden::{Golden, argmax, load_golden, logsumexp, official_dir};
 
-fn checkpoint() -> (HfModel, Golden) {
+fn checkpoint() -> (HfMambaModel, Golden) {
     let root = official_dir("MAMBA1_OFFICIAL_DIR", ".cache/mamba1-official");
     let golden = load_golden(&root.join("goldens/mamba-130m"));
-    let model = load_hf(&root.join("mamba-130m-hf")).unwrap();
+    let model = load_mamba(&root.join("mamba-130m-hf")).unwrap();
     (model, golden)
 }
 
 /// Logits of one hidden row through the tied head.
 struct Head<'a> {
-    model: &'a HfModel,
+    model: &'a HfMambaModel,
     scratch: Vec<f32>,
 }
 
 impl<'a> Head<'a> {
-    fn new(model: &'a HfModel) -> Self {
+    fn new(model: &'a HfMambaModel) -> Self {
         Self {
             model,
-            scratch: vec![0f32; model.vocab_size_padded],
+            scratch: vec![0f32; model.embed.len() / model.cfg.d_model],
         }
     }
 
@@ -59,15 +58,15 @@ impl<'a> Head<'a> {
             hidden,
             &m.embed,
             m.vocab_size,
-            m.vocab_size_padded,
-            m.d_model,
+            m.embed.len() / m.cfg.d_model,
+            m.cfg.d_model,
             &mut self.scratch,
         );
     }
 }
 
-fn embed(model: &HfModel, token: u32) -> &[f32] {
-    let d = model.d_model;
+fn embed(model: &HfMambaModel, token: u32) -> &[f32] {
+    let d = model.cfg.d_model;
     &model.embed[token as usize * d..(token as usize + 1) * d]
 }
 
@@ -121,16 +120,16 @@ fn follow_greedy(
 #[ignore = "needs both official checkpoints (see the file header)"]
 fn mamba_130m_original_bin_is_its_hf_twin() {
     let root = official_dir("MAMBA1_OFFICIAL_DIR", ".cache/mamba1-official");
-    let a = load_hf(&root.join("mamba-130m")).unwrap();
-    let b = load_hf(&root.join("mamba-130m-hf")).unwrap();
+    let a = load_mamba(&root.join("mamba-130m")).unwrap();
+    let b = load_mamba(&root.join("mamba-130m-hf")).unwrap();
     assert_eq!(
-        (a.vocab_size, a.vocab_size_padded, a.d_model),
-        (b.vocab_size, b.vocab_size_padded, b.d_model)
+        (a.vocab_size, (a.embed.len() / a.cfg.d_model), a.cfg.d_model),
+        (b.vocab_size, (b.embed.len() / b.cfg.d_model), b.cfg.d_model)
     );
     assert!(a.lm_head.is_none() && b.lm_head.is_none());
     let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
     assert!(bits(&a.embed) == bits(&b.embed), "embedding");
-    let (wa, wb) = (a.backbone.weights(), b.backbone.weights());
+    let (wa, wb) = (&a.weights, &b.weights);
     assert!(bits(&wa.norm_f_weight) == bits(&wb.norm_f_weight), "norm_f");
     assert_eq!(wa.layers.len(), wb.layers.len());
     for (i, (la, lb)) in wa.layers.iter().zip(&wb.layers).enumerate() {
@@ -155,8 +154,9 @@ fn mamba_130m_original_bin_is_its_hf_twin() {
 #[ignore = "needs the official checkpoint and its goldens (see the file header)"]
 fn mamba_130m_cpu_matches_the_f64_oracle() {
     let (model, golden) = checkpoint();
-    let backbone = &model.backbone;
-    let d = model.d_model;
+    let backbone =
+        mamba_rs::MambaBackbone::new(model.weights.clone(), model.cfg, model.cfg.d_model).unwrap();
+    let d = model.cfg.d_model;
     let vocab = model.vocab_size;
     let mut head = Head::new(&model);
     let mut state = backbone.alloc_state();
@@ -204,16 +204,9 @@ fn mamba_130m_cpu_matches_the_f64_oracle() {
         .flat_map(|&tok| embed(&model, tok).iter().copied())
         .collect();
     let mut st = backbone.alloc_state();
-    let mut ps = backbone.alloc_prefill_scratch(t_len);
+    let mut ps = backbone.alloc_scratch();
     let mut rows = vec![0f32; t_len * d];
-    backbone.forward_prefill(
-        &prompt,
-        &mut rows,
-        &mut st,
-        &mut ps,
-        t_len,
-        PrefillMode::Single,
-    );
+    backbone.forward_sequence(&prompt, &mut rows, &mut st, &mut ps, t_len);
     let last = &rows[(t_len - 1) * d..];
     let rel = last
         .iter()
@@ -227,7 +220,7 @@ fn mamba_130m_cpu_matches_the_f64_oracle() {
 /// of every prompt position.
 #[cfg(feature = "cuda")]
 fn gpu_decode_rows(
-    model: &HfModel,
+    model: &HfMambaModel,
     golden: &Golden,
     dtype: mamba_rs::gpu::dtype::WeightDtype,
 ) -> (
@@ -236,10 +229,10 @@ fn gpu_decode_rows(
 ) {
     use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
-    let d = model.d_model;
-    let cfg = *model.backbone.config();
+    let d = model.cfg.d_model;
+    let cfg = model.cfg;
     let mut gpu = MambaGpuBackbone::new(
-        model.backbone.weights(),
+        &model.weights,
         cfg,
         d,
         1,
@@ -268,12 +261,11 @@ fn gpu_decode_rows(
 #[test]
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn mamba_130m_gpu_matches_the_f64_oracle() {
-    use mamba_rs::gpu::buffers::GpuBuffer;
     use mamba_rs::gpu::dtype::WeightDtype;
     use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 
     let (model, golden) = checkpoint();
-    let d = model.d_model;
+    let d = model.cfg.d_model;
     let vocab = model.vocab_size;
     let (mut gpu, rows) = gpu_decode_rows(&model, &golden, WeightDtype::F32);
     let mut worst = 0f64;
@@ -296,18 +288,15 @@ fn mamba_130m_gpu_matches_the_f64_oracle() {
     eprintln!("mamba-130m GPU f32 greedy: {produced} tokens match the oracle");
 
     let t_len = golden.ids.len();
-    let cfg = *model.backbone.config();
+    let cfg = model.cfg;
     let mut fresh =
-        MambaGpuBackbone::new(model.backbone.weights(), cfg, d, 1, GpuOptions::default()).unwrap();
+        MambaGpuBackbone::new(&model.weights, cfg, d, 1, GpuOptions::default()).unwrap();
     let prompt: Vec<f32> = golden
         .ids
         .iter()
         .flat_map(|&tok| embed(&model, tok).iter().copied())
         .collect();
-    let mut input = GpuBuffer::zeros(fresh.stream(), prompt.len()).unwrap();
-    input.upload(fresh.stream(), &prompt).unwrap();
-    let mut scratch = fresh.alloc_prefill_scratch(t_len).unwrap();
-    fresh.prefill_sequence(&input, &mut scratch).unwrap();
+    fresh.prefill(&prompt, t_len).unwrap();
     let mut last = vec![0f32; d];
     fresh.download_temporal(&mut last).unwrap();
     let mut prefill_logits = vec![0f32; vocab];
@@ -328,7 +317,7 @@ fn mamba_130m_gpu_bf16_tracks_the_f64_oracle() {
     use mamba_rs::gpu::dtype::WeightDtype;
 
     let (model, golden) = checkpoint();
-    let d = model.d_model;
+    let d = model.cfg.d_model;
     let t_len = golden.ids.len();
     let (mut gpu, rows) = gpu_decode_rows(&model, &golden, WeightDtype::Bf16);
     let (mut nll, mut nll_oracle) = (0f64, 0f64);

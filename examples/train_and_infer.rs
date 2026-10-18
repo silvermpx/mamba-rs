@@ -7,12 +7,12 @@
 use std::path::Path;
 
 use mamba_rs::mamba1::MambaConfig;
+use mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched;
+use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+use mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched;
+use mamba_rs::mamba1::cpu::scratch::{BackwardPhaseScratch, PhaseScratch};
+use mamba_rs::mamba1::cpu::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
-use mamba_rs::train::backward::backward_mamba_backbone_batched;
-use mamba_rs::train::flat::MambaBackboneFlat;
-use mamba_rs::train::forward::forward_mamba_backbone_batched;
-use mamba_rs::train::scratch::{BackwardPhaseScratch, PhaseScratch};
-use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use mamba_rs::{MambaBackbone, MambaWeights};
 
 fn main() {
@@ -29,7 +29,9 @@ fn main() {
         cfg.d_model,
         cfg.n_layers,
         cfg.d_inner(),
-        MambaBackbone::init(cfg, input_dim, 42).param_count()
+        MambaBackbone::init(cfg, input_dim, 42)
+            .unwrap()
+            .param_count()
     );
     println!();
 

@@ -337,7 +337,7 @@ pub fn chunked_geom(
 /// rows, rows padded to a float4 multiple plus 4) and slices of `ps`
 /// channels: dy transposed [ps][TR4 + 4], u [tr][ps + 1] and the keys' 128
 /// state indices [tr][min(N, 128)], padded to a float4 multiple, then w M
-/// transposed [tr][TR4 + 4] and w [tq][tq].
+/// transposed `[tr][TR4 + 4]` and w `[tq][tq]`.
 pub fn pairs_dq_bytes((hd, ds, rank): (usize, usize, usize), tq: usize, ps: usize) -> usize {
     let tr = tq * rank;
     let trs = tr.next_multiple_of(4) + 4;
@@ -351,7 +351,7 @@ pub fn pairs_dq_bytes((hd, ds, rank): (usize, usize, usize), tq: usize, ps: usiz
 /// whole width where a slice is whole, else the larger of the slice and the
 /// 128 columns a block's role reads, plus one), padded to a float4
 /// multiple, then G and M [tr][TR4 + 4] and the pairs' weights and live
-/// flags [tq][tq].
+/// flags `[tq][tq]`.
 pub fn pairs_dk_bytes(
     (hd, ds, rank): (usize, usize, usize),
     tq: usize,
@@ -427,8 +427,8 @@ pub struct TermsPlan {
 
 /// The token-tile state terms' shared memory at `tt` tokens a block (rows
 /// padded to a float4 multiple plus 4, rs) with dS, u and the keys whole:
-/// dS [P][N + 1] padded to a float4 multiple, u [P][rs], the keys [N][rs],
-/// ste [tt R][P] and the trees' [tt][256].
+/// dS `[P][N + 1]` padded to a float4 multiple, u `[P][rs]`, the keys `[N][rs]`,
+/// ste `[tt R][P]` and the trees' `[tt][256]`.
 pub fn terms_whole_bytes((hd, ds, rank): (usize, usize, usize), tt: usize) -> usize {
     let rs = (tt * rank).next_multiple_of(4) + 4;
     ((hd * (ds + 1)).next_multiple_of(4) + hd * rs + ds * rs + tt * rank * hd + tt * 256) * 4
@@ -436,10 +436,10 @@ pub fn terms_whole_bytes((hd, ds, rank): (usize, usize, usize), tt: usize) -> us
 
 /// The token-tile state terms' shared memory at `tt` tokens a block with
 /// slices of `ps` channels and `ns` state indices: the larger of the dk
-/// pass's u and dS slices ([ps][rs], [ps][min(N, 128)]) and the ste pass's
-/// key and dS slices ([ns][rs], [min(P, 128)][ns rounded up to odd]),
-/// padded to a float4 multiple, then ste [tt R][P] unless it goes to the
-/// global scratch, then the trees' [tt][256] unless the slices' room holds
+/// pass's u and dS slices (`[ps][rs]`, `[ps][min(N, 128)]`) and the ste pass's
+/// key and dS slices (`[ns][rs]`, `[min(P, 128)][ns rounded up to odd]`),
+/// padded to a float4 multiple, then ste `[tt R][P]` unless it goes to the
+/// global scratch, then the trees' `[tt][256]` unless the slices' room holds
 /// them.
 pub fn terms_sliced_bytes(
     (hd, ds, rank): (usize, usize, usize),
@@ -510,10 +510,10 @@ pub fn terms_plan((hd, ds, rank): (usize, usize, usize), cap: usize) -> Option<T
 
 /// The token-tile inter kernel's shared memory for `ds` state indices at
 /// rank `rank`, `tt` tokens a block and slices of `ps` channels: per pass
-/// of at most 128 state indices a slice of the entering state ([ps][W]),
+/// of at most 128 state indices a slice of the entering state (`[ps][W]`),
 /// padded to a float4 multiple, and dy's slice transposed after it
-/// ([ps][R4 + 4], R4 = tt R rounded up to 4), then d [tt R][N] for the
-/// trees, whose [tt][256] partials take the slices' room when it holds
+/// (`[ps][R4 + 4]`, R4 = tt R rounded up to 4), then d `[tt R][N]` for the
+/// trees, whose `[tt][256]` partials take the slices' room when it holds
 /// them and follow d otherwise.
 pub fn inter_tiles_bytes((ds, rank): (usize, usize), tt: usize, ps: usize) -> usize {
     let slices =

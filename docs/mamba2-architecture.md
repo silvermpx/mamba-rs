@@ -172,7 +172,7 @@ modes apply to Mamba-2 as to the other families (see
 
 ## Checkpoints
 
-`hf::load_mamba2::load_hf_mamba2` reads the official checkpoints in the
+`hf::load_mamba2` reads the official checkpoints in the
 `mamba_ssm` format (`config.json` with `ssm_cfg.layer = "Mamba2"` and
 `pytorch_model.bin`). `tests/hf_m2_checkpoint_parity.rs` holds
 `state-spaces/mamba2-130m` on the CPU and on the GPU to a float64

@@ -19,10 +19,10 @@ use crate::gpu::context::{GemmMode, GpuCtx};
 use crate::gpu::dtype::WeightDtype;
 use crate::gpu::launch::launch_cast;
 use crate::hf::embed::embed_lookup;
-use crate::hf::load::{HfModel, load_hf};
-use crate::hf::load_mamba2::load_hf_mamba2;
-use crate::hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo};
+use crate::hf::load_mamba;
+use crate::hf::load_mamba2;
 use crate::hf::read_family;
+use crate::hf::{load_mamba3, load_mamba3_mimo};
 use crate::mamba1::gpu::inference::MambaGpuBackbone;
 use crate::mamba2::gpu::Mamba2GpuBackbone;
 use crate::mamba3_mimo::gpu::Mamba3MimoGpuBackbone;
@@ -113,32 +113,25 @@ impl MambaGpuLM {
     pub fn from_hf(dir: &Path, batch: usize, opts: GpuOptions) -> Result<Self, String> {
         match read_family(dir)? {
             ModelFamily::Mamba1 => {
-                let HfModel {
-                    backbone,
-                    embed,
-                    lm_head,
-                    vocab_size,
-                    d_model,
-                    ..
-                } = load_hf(dir)?;
-                let cfg = *backbone.config();
-                let gpu = MambaGpuBackbone::new(backbone.weights(), cfg, d_model, batch, opts)?;
-                Self::new(gpu, embed, lm_head, vocab_size)
+                let m = load_mamba(dir)?;
+                let d_model = m.cfg.d_model;
+                let gpu = MambaGpuBackbone::new(&m.weights, m.cfg, d_model, batch, opts)?;
+                Self::new(gpu, m.embed, m.lm_head, m.vocab_size)
             }
             ModelFamily::Mamba2 => {
-                let m = load_hf_mamba2(dir)?;
+                let m = load_mamba2(dir)?;
                 let d_model = m.cfg.d_model;
                 let gpu = Mamba2GpuBackbone::new(&m.weights, m.cfg, d_model, batch, opts)?;
                 Self::new(gpu, m.embed, m.lm_head, m.vocab_size)
             }
             ModelFamily::Mamba3 => {
-                let m = load_hf_mamba3(dir)?;
+                let m = load_mamba3(dir)?;
                 let d_model = m.cfg.d_model;
                 let gpu = Mamba3GpuBackbone::new(&m.weights, m.cfg, d_model, batch, opts)?;
                 Self::new(gpu, m.embed, m.lm_head, m.vocab_size)
             }
             ModelFamily::Mamba3Mimo => {
-                let m = load_hf_mamba3_mimo(dir)?;
+                let m = load_mamba3_mimo(dir)?;
                 let d_model = m.cfg.d_model;
                 let gpu = Mamba3MimoGpuBackbone::new(&m.weights, m.cfg, d_model, batch, opts)?;
                 Self::new(gpu, m.embed, m.lm_head, m.vocab_size)
@@ -683,172 +676,6 @@ impl MambaGpuLM {
             dst.copy_from_slice(&src[..self.vocab_size]);
         }
         Ok(())
-    }
-}
-
-/// The Mamba-1 language model of 0.7. [`MambaGpuLM`] serves every family
-/// and takes its place; this type forwards to one.
-pub struct GpuMambaLM {
-    lm: MambaGpuLM,
-    /// Vocabulary size, the number of valid token ids.
-    pub vocab_size: usize,
-    /// Backbone width (`d_model`).
-    pub d_model: usize,
-    /// Sequences generated side by side.
-    pub batch: usize,
-}
-
-impl GpuMambaLM {
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `MambaGpuLM::from_hf(dir, 1, GpuOptions::default().device(gpu_ordinal))`"
-    )]
-    pub fn from_hf(dir: &Path, gpu_ordinal: usize) -> Result<Self, String> {
-        Self::load(dir, 1, GpuOptions::default().device(gpu_ordinal))
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `MambaGpuLM::from_hf` with `GpuOptions::default().device(gpu_ordinal).mode(mode)`"
-    )]
-    pub fn from_hf_with_mode(
-        dir: &Path,
-        gpu_ordinal: usize,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        Self::load(dir, 1, GpuOptions::default().device(gpu_ordinal).mode(mode))
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `MambaGpuLM::from_hf` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype)`"
-    )]
-    pub fn from_hf_with_dtype(
-        dir: &Path,
-        gpu_ordinal: usize,
-        dtype: WeightDtype,
-    ) -> Result<Self, String> {
-        Self::load(
-            dir,
-            1,
-            GpuOptions::default().device(gpu_ordinal).dtype(dtype),
-        )
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `MambaGpuLM::from_hf` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype).mode(mode)`"
-    )]
-    pub fn from_hf_with_dtype_and_mode(
-        dir: &Path,
-        gpu_ordinal: usize,
-        dtype: WeightDtype,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        let opts = GpuOptions::default()
-            .device(gpu_ordinal)
-            .dtype(dtype)
-            .mode(mode);
-        Self::load(dir, 1, opts)
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `MambaGpuLM::from_hf(dir, batch, GpuOptions::default().device(gpu_ordinal).dtype(dtype))`"
-    )]
-    pub fn from_hf_with_dtype_batch(
-        dir: &Path,
-        gpu_ordinal: usize,
-        dtype: WeightDtype,
-        batch: usize,
-    ) -> Result<Self, String> {
-        Self::load(
-            dir,
-            batch,
-            GpuOptions::default().device(gpu_ordinal).dtype(dtype),
-        )
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `MambaGpuLM::from_hf(dir, batch, GpuOptions::default().device(gpu_ordinal).dtype(dtype).mode(mode))`"
-    )]
-    pub fn from_hf_with_dtype_batch_and_mode(
-        dir: &Path,
-        gpu_ordinal: usize,
-        dtype: WeightDtype,
-        batch: usize,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        let opts = GpuOptions::default()
-            .device(gpu_ordinal)
-            .dtype(dtype)
-            .mode(mode);
-        Self::load(dir, batch, opts)
-    }
-
-    fn load(dir: &Path, batch: usize, opts: GpuOptions) -> Result<Self, String> {
-        let lm = MambaGpuLM::from_hf(dir, batch, opts)?;
-        Ok(Self {
-            vocab_size: lm.vocab_size,
-            d_model: lm.d_model,
-            batch: lm.batch,
-            lm,
-        })
-    }
-
-    /// See [`MambaGpuLM::ctx`].
-    pub fn ctx(&self) -> &GpuCtx {
-        self.lm.ctx()
-    }
-
-    /// See [`MambaGpuLM::last_logits`].
-    pub fn last_logits(&self, b: usize) -> &[f32] {
-        self.lm.last_logits(b)
-    }
-
-    /// See [`MambaGpuLM::dtype`].
-    pub fn dtype(&self) -> WeightDtype {
-        self.lm.dtype()
-    }
-
-    /// See [`MambaGpuLM::capture_graph`].
-    pub fn capture_graph(&mut self) -> Result<(), String> {
-        self.lm.capture_graph()
-    }
-
-    /// See [`MambaGpuLM::clear_graph`].
-    pub fn clear_graph(&mut self) -> Result<(), String> {
-        self.lm.clear_graph()
-    }
-
-    /// See [`MambaGpuLM::reset`].
-    pub fn reset(&mut self) -> Result<(), String> {
-        self.lm.reset()
-    }
-
-    /// See [`MambaGpuLM::generate`].
-    pub fn generate(&mut self, prompt: &[u32], params: &SampleParams) -> Result<Vec<u32>, String> {
-        self.lm.generate(prompt, params)
-    }
-
-    /// See [`MambaGpuLM::generate_streaming`].
-    pub fn generate_streaming(
-        &mut self,
-        prompt: &[u32],
-        params: &SampleParams,
-        cb: impl FnMut(u32, &str),
-    ) -> Result<(), String> {
-        self.lm.generate_streaming(prompt, params, cb)
-    }
-
-    /// See [`MambaGpuLM::generate_batch`].
-    pub fn generate_batch(
-        &mut self,
-        prompts: &[&[u32]],
-        params: &[SampleParams],
-    ) -> Result<Vec<Vec<u32>>, String> {
-        self.lm.generate_batch(prompts, params)
     }
 }
 

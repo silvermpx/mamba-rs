@@ -221,7 +221,7 @@ fn test_gpu_f32_backbone_unchanged_after_mixed_refactor() {
     let cfg = MambaConfig::default();
     let input_dim = cfg.d_model;
     let batch = 2;
-    let bb = MambaBackbone::init(cfg, input_dim, 0xC0FFEE);
+    let bb = MambaBackbone::init(cfg, input_dim, 0xC0FFEE).unwrap();
 
     let mut gpu_bb = MambaGpuBackbone::new(
         bb.weights(),

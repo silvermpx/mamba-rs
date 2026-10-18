@@ -3,13 +3,13 @@ use std::time::Instant;
 use mamba_rs::MambaBackbone;
 use mamba_rs::mamba1::MambaConfig;
 use mamba_rs::mamba1::MambaWeights;
+use mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched;
+use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+use mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched;
 use mamba_rs::mamba1::cpu::parallel::{parallel_mamba_backward, parallel_mamba_forward};
+use mamba_rs::mamba1::cpu::scratch::{BackwardPhaseScratch, PhaseScratch};
+use mamba_rs::mamba1::cpu::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
-use mamba_rs::train::backward::backward_mamba_backbone_batched;
-use mamba_rs::train::flat::MambaBackboneFlat;
-use mamba_rs::train::forward::forward_mamba_backbone_batched;
-use mamba_rs::train::scratch::{BackwardPhaseScratch, PhaseScratch};
-use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 
 fn configs() -> [(&'static str, MambaConfig); 4] {
     [
@@ -63,7 +63,7 @@ fn m1_cpu_benchmark() {
 
     for (name, cfg) in &configs() {
         let input_dim = cfg.d_model;
-        let mut backbone = MambaBackbone::init(*cfg, input_dim, 42);
+        let mut backbone = MambaBackbone::init(*cfg, input_dim, 42).unwrap();
         let mut state = backbone.alloc_state();
         let mut scratch = backbone.alloc_scratch();
         let mut output = vec![0.0f32; cfg.d_model];
@@ -249,7 +249,9 @@ fn m1_cpu_benchmark() {
         let fwdbwd_us = t0.elapsed().as_micros() as f64 / iters as f64;
         let bwd_us = fwdbwd_us - fwd_us;
 
-        let params = MambaBackbone::init(*cfg, input_dim, 42).param_count();
+        let params = MambaBackbone::init(*cfg, input_dim, 42)
+            .unwrap()
+            .param_count();
         println!(
             "{name:>8}: d_model={:>3}, layers={}, params={:>7} | fwd {fwd_us:>8.1} us | bwd {bwd_us:>8.1} us | total {fwdbwd_us:>8.1} us",
             cfg.d_model, cfg.n_layers, params,

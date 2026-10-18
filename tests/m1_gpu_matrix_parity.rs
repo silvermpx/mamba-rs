@@ -13,15 +13,15 @@ use mamba_rs::config::ScanMode;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::train::{BackwardOpts, TrainSessionCfg};
 use mamba_rs::gpu::{GemmMode, GpuOptions};
+use mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched;
+use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+use mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched;
+use mamba_rs::mamba1::cpu::scratch::{BackwardPhaseScratch, PhaseScratch};
+use mamba_rs::mamba1::cpu::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
 use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 use mamba_rs::mamba1::{MambaConfig, MambaWeights};
 use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
-use mamba_rs::train::backward::backward_mamba_backbone_batched;
-use mamba_rs::train::flat::MambaBackboneFlat;
-use mamba_rs::train::forward::forward_mamba_backbone_batched;
-use mamba_rs::train::scratch::{BackwardPhaseScratch, PhaseScratch};
-use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 
 fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
     let mut s = seed.max(1);
@@ -364,9 +364,9 @@ fn m1_gpu_typed_lanes_track_the_cpu_lane() {
             let dist = |o: CpuOptions| {
                 let cpu = MambaBackbone::new_with(w.clone(), cfg, input_dim, o).unwrap();
                 let (mut st, mut sc) = (cpu.alloc_state(), cpu.alloc_scratch());
-                let mut pf = cpu.alloc_prefill_scratch(seq);
+                let mut pf = cpu.alloc_scratch();
                 let mut rows = vec![0f32; seq * dm];
-                cpu.forward_prefill(
+                cpu.forward_sequence_with(
                     &prompt,
                     &mut rows,
                     &mut st,
@@ -573,7 +573,7 @@ fn m1_gpu_train_matches_cpu_at_any_width() {
                     "{label} {scan_mode:?} {dtype:?}: the step was skipped"
                 );
                 let stream = tr.ctx().stream.clone();
-                let arena = tr.grad_arena().to_cpu(&stream).unwrap();
+                let arena = tr.grad_arena().unwrap().to_cpu(&stream).unwrap();
                 assert_eq!(arena.len(), want_grads.len(), "{label}: arena length");
                 let (mut at, mut worst) = (0usize, (0f64, String::new()));
                 for (name, len) in &tensors {

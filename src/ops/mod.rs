@@ -11,6 +11,7 @@ pub mod packed;
 pub mod portable_math;
 pub(crate) mod rounding;
 pub(crate) mod st_io;
+pub(crate) mod step_batch;
 
 pub use dims::{MambaDims, MambaRecurrentState};
 

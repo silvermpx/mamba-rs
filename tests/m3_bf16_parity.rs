@@ -321,9 +321,9 @@ fn m3_gpu_typed_lanes_track_the_cpu_lane() {
             let dist = |o: CpuOptions| {
                 let cpu = Mamba3Backbone::new_with(w.clone(), cfg, input_dim, o).unwrap();
                 let (mut st, mut sc) = (cpu.alloc_state(), cpu.alloc_scratch());
-                let mut pf = cpu.alloc_prefill_scratch(seq);
+                let mut pf = cpu.alloc_scratch();
                 let mut rows = vec![0f32; seq * dm];
-                cpu.forward_prefill(
+                cpu.forward_sequence_with(
                     &prompt,
                     &mut rows,
                     &mut st,

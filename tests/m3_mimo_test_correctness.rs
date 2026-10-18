@@ -2,12 +2,10 @@
 //! reference step, against SISO through the rank-1 equivalence, and its
 //! own invariants (determinism, reset, long-sequence stability).
 
-use mamba_rs::mamba3_mimo::{
-    Mamba3MimoConfig, Mamba3MimoState, Mamba3MimoStepScratch, Mamba3MimoWeights, mamba3_mimo_step,
-};
-use mamba_rs::mamba3_siso::{
-    Mamba3Config, Mamba3State, Mamba3StepScratch, Mamba3Weights, mamba3_step,
-};
+use mamba_rs::mamba3_mimo::cpu::{Mamba3MimoStepScratch, mamba3_mimo_step};
+use mamba_rs::mamba3_mimo::{Mamba3MimoConfig, Mamba3MimoState, Mamba3MimoWeights};
+use mamba_rs::mamba3_siso::cpu::inference::{Mamba3StepScratch, mamba3_step};
+use mamba_rs::mamba3_siso::{Mamba3Config, Mamba3State, Mamba3Weights};
 
 fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
     let mut s = seed.max(1);
@@ -389,7 +387,7 @@ fn assert_same(label: &str, got: &[f32], want: &[f32]) {
 #[test]
 fn m3_mimo_prefill_matches_the_decode_chain() {
     use mamba_rs::mamba1::cpu::prefill::PrefillMode;
-    use mamba_rs::mamba3_mimo::{
+    use mamba_rs::mamba3_mimo::cpu::{
         Mamba3MimoPrefillScratch, forward_mamba3_mimo_backbone_prefill_mode,
     };
 
@@ -531,7 +529,7 @@ fn drawn_weights_with_input(
 #[test]
 fn m3_mimo_prefill_scratch_follows_the_model_it_serves() {
     use mamba_rs::mamba1::cpu::prefill::PrefillMode;
-    use mamba_rs::mamba3_mimo::{
+    use mamba_rs::mamba3_mimo::cpu::{
         Mamba3MimoPrefillScratch, forward_mamba3_mimo_backbone_prefill_mode,
     };
     let small = Mamba3MimoConfig {

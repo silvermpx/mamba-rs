@@ -60,7 +60,7 @@ fn main() {
             n_layers: LAYERS,
             ..MambaConfig::default()
         };
-        let mut bb = MambaBackbone::init(cfg, D_MODEL, 1);
+        let mut bb = MambaBackbone::init(cfg, D_MODEL, 1).unwrap();
         let time = |bb: &MambaBackbone| {
             let (mut st, mut sc) = (bb.alloc_state(), bb.alloc_scratch());
             time_steps(|x, y| bb.forward_step(x, y, &mut st, &mut sc), runs, steps)
@@ -90,7 +90,7 @@ fn main() {
             n_layers: LAYERS,
             ..Mamba3Config::default()
         };
-        let mut bb = Mamba3Backbone::init(cfg, D_MODEL, 3);
+        let mut bb = Mamba3Backbone::init(cfg, D_MODEL, 3).unwrap();
         let time = |bb: &Mamba3Backbone| {
             let (mut st, mut sc) = (bb.alloc_state(), bb.alloc_scratch());
             time_steps(|x, y| bb.forward_step(x, y, &mut st, &mut sc), runs, steps)

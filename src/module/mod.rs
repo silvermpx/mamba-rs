@@ -13,8 +13,7 @@
 //! - `gpu_trainer` (feature `cuda`): the `GpuTrainer` trait every family's
 //!   GPU trainer implements, and `AnyGpuTrainer`, one chosen at run time.
 //! - `gpu_lm` (features `cuda` and `hf`): `MambaGpuLM`, text generation on
-//!   the GPU for every family. `gpu_lm3` keeps the Mamba-3 language model
-//!   of 0.7.
+//!   the GPU for every family.
 //! - `sample`: token sampling (temperature, top-k, top-p, min-p,
 //!   repetition penalty).
 
@@ -29,8 +28,6 @@ pub(crate) mod cpu_trainer;
 pub mod gpu_backbone;
 #[cfg(all(feature = "hf", feature = "cuda"))]
 pub mod gpu_lm;
-#[cfg(all(feature = "hf", feature = "cuda"))]
-pub mod gpu_lm3;
 #[cfg(feature = "cuda")]
 pub mod gpu_trainer;
 #[cfg(feature = "hf")]
@@ -39,10 +36,10 @@ pub mod lm;
 mod lm_checkpoint;
 pub mod sample;
 
-pub use backbone::MambaBackbone;
-pub use backbone2::Mamba2Backbone;
-pub use backbone3::Mamba3Backbone;
-pub use backbone3_mimo::Mamba3MimoBackbone;
+pub use backbone::{MambaBackbone, MambaScratch};
+pub use backbone2::{Mamba2Backbone, Mamba2Scratch};
+pub use backbone3::{Mamba3Backbone, Mamba3Scratch};
+pub use backbone3_mimo::{Mamba3MimoBackbone, Mamba3MimoScratch};
 pub use cpu_trainer::{AnyCpuTrainer, CpuTrainer};
 #[cfg(feature = "cuda")]
 pub use gpu_backbone::{AnyGpuBackbone, GpuBackbone};

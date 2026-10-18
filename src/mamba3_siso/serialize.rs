@@ -286,16 +286,6 @@ fn weights_from_bytes(data: &[u8], cfg: &Mamba3Config) -> Result<(Mamba3Weights,
     Ok((w, input_dim))
 }
 
-#[deprecated(since = "0.8.0", note = "use `serialize::save`")]
-pub fn save_mamba3(
-    path: &Path,
-    weights: &Mamba3Weights,
-    cfg: &Mamba3Config,
-    input_dim: usize,
-) -> Result<(), String> {
-    save(path, weights, cfg, input_dim)
-}
-
 /// Load a checkpoint [`save`] wrote: the weights, the configuration read
 /// from the file's metadata, and the input width. The caller supplies
 /// nothing, so it cannot describe the model wrongly.
@@ -383,11 +373,6 @@ pub fn load_from_bytes(data: &[u8]) -> Result<(Mamba3Weights, Mamba3Config, usiz
 
     let (w, input_dim) = weights_from_bytes(data, &cfg)?;
     Ok((w, cfg, input_dim))
-}
-
-#[deprecated(since = "0.8.0", note = "use `serialize::load`")]
-pub fn load_mamba3_auto(path: &Path) -> Result<(Mamba3Weights, Mamba3Config, usize), String> {
-    load(path)
 }
 
 #[cfg(test)]

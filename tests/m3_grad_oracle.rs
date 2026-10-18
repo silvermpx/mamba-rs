@@ -14,7 +14,7 @@ use mamba_rs::mamba3_siso::cpu::backward::backward_mamba3_layer_batched;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::flat::Mamba3LayerFlat;
 use mamba_rs::mamba3_siso::cpu::forward::{Mamba3LayerStateMut, forward_mamba3_layer_batched};
-use mamba_rs::mamba3_siso::cpu::scratch::Mamba3Scratch;
+use mamba_rs::mamba3_siso::cpu::scratch::Mamba3TrainScratch;
 use mamba_rs::mamba3_siso::cpu::weights::TrainMamba3LayerWeights;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 use mamba_rs::{Mamba3CpuTrainer, TrainSessionCfg};
@@ -110,7 +110,7 @@ fn forward(
     temporal: &mut [f32],
     states: &mut States,
 ) -> Vec<Mamba3LayerFlat> {
-    let mut scratch = Mamba3Scratch::zeros(dims);
+    let mut scratch = Mamba3TrainScratch::zeros(dims);
     weights
         .iter()
         .enumerate()
@@ -328,7 +328,7 @@ fn m3_gradients_match_f64_central_differences() {
                 .map(|_| TrainMamba3LayerWeights::zeros(&dims))
                 .collect();
             let mut d_temporal = probe.clone();
-            let mut scratch = Mamba3Scratch::zeros(&dims);
+            let mut scratch = Mamba3TrainScratch::zeros(&dims);
             for l in (0..cfg.n_layers).rev() {
                 backward_mamba3_layer_batched(
                     &mut d_temporal,
@@ -434,7 +434,7 @@ fn m3_backward_takes_the_window_start_angles_from_the_tape() {
                 .map(|_| TrainMamba3LayerWeights::zeros(&dims))
                 .collect();
             let mut d_temporal = det(seq * dm, 78, 1.0);
-            let mut scratch = Mamba3Scratch::zeros(&dims);
+            let mut scratch = Mamba3TrainScratch::zeros(&dims);
             for l in (0..cfg.n_layers).rev() {
                 backward_mamba3_layer_batched(
                     &mut d_temporal,

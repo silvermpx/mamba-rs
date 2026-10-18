@@ -6,7 +6,7 @@ use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::flat::Mamba3LayerFlat;
 use mamba_rs::mamba3_siso::cpu::forward::{Mamba3LayerStateMut, forward_mamba3_layer_batched};
 use mamba_rs::mamba3_siso::cpu::inference::{Mamba3StepScratch, mamba3_step};
-use mamba_rs::mamba3_siso::cpu::scratch::Mamba3Scratch;
+use mamba_rs::mamba3_siso::cpu::scratch::Mamba3TrainScratch;
 use mamba_rs::mamba3_siso::cpu::weights::TrainMamba3LayerWeights;
 use mamba_rs::mamba3_siso::state::Mamba3State;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -155,7 +155,7 @@ fn m3_cpu_benchmark() {
 
         // Pre-allocate (reused every iteration)
         let mut acts = Mamba3LayerFlat::zeros(dims);
-        let mut scratch = Mamba3Scratch::zeros(&dims);
+        let mut scratch = Mamba3TrainScratch::zeros(&dims);
         let mut temporal = vec![0.5f32; seq_len * dims.d_model];
         let mut d_temporal = vec![1.0f32; seq_len * dims.d_model];
         let mut d_w = TrainMamba3LayerWeights::zeros(&dims);

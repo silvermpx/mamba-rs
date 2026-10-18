@@ -1,5 +1,6 @@
 //! The Mamba-3 SISO host trainer: the shared CPU trainer over this
-//! family's layer forward and backward ([`forward_mamba3_layer_batched`],
+//! family's layer forward and backward
+//! ([`forward_mamba3_layer_batched`](crate::mamba3_siso::cpu::forward::forward_mamba3_layer_batched),
 //! [`backward_mamba3_layer_batched`]), composed as the GPU backbone
 //! composes them: the input projection, every layer followed by its gated
 //! MLP when the model has one, the final RMSNorm, and the mirrored backward.
@@ -8,7 +9,7 @@ use super::backward::{backward_mamba3_layer_batched, backward_mamba3_layer_in};
 use super::dims::Mamba3Dims;
 use super::flat::Mamba3LayerFlat;
 use super::forward::{Mamba3LayerStateMut, forward_mamba3_layer_in};
-use super::scratch::Mamba3Scratch;
+use super::scratch::Mamba3TrainScratch;
 use super::weights::TrainMamba3LayerWeights;
 use crate::bidi::{PairGrad, mlps_after, opens_pair, reads_reversed, reverse_rows};
 use crate::config::ModelFamily;
@@ -75,7 +76,7 @@ pub(crate) struct Mamba3CpuSeq {
     k: Vec<f32>,
     v: Vec<f32>,
     angle: Vec<f32>,
-    phase: Mamba3Scratch,
+    phase: Mamba3TrainScratch,
     /// The window's input rows, for the input projection's backward.
     input: Vec<f32>,
     /// Each MLP's input rows.
@@ -133,7 +134,7 @@ impl CpuFamily for Mamba3Cpu {
     fn new_seq(&self, w: &Mamba3CpuWeights, seq_len: usize) -> Result<Mamba3CpuSeq, String> {
         let (dm, nl) = (self.cfg.d_model, self.cfg.n_layers);
         let [ssm, k, v, angle] = self.per_layer().map(|n| vec![0.0; nl * n]);
-        let mut phase = Mamba3Scratch::zeros(&self.dims);
+        let mut phase = Mamba3TrainScratch::zeros(&self.dims);
         let mut mlp = GatedMlpRowsScratch::default();
         let mut mlp_bwd = GatedMlpBackwardScratch::default();
         (phase.dtype, mlp.dtype, mlp_bwd.dtype) = (self.dtype, self.dtype, self.dtype);

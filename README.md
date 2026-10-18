@@ -18,13 +18,14 @@ cuBLAS.
   checkpoints. `state-spaces/mamba2-130m` and the Mamba-3 SISO and MIMO
   187m models match float64 reference implementations of the papers'
   models on the CPU and on the GPU.
-- **One API for all four.** A GPU backbone, trainer or language model is
-  built the same way in every family, with one `GpuOptions` value for the
-  device, the storage precision and the GEMM mode. The `GpuBackbone` and
-  `GpuTrainer` traits name what they share, and `MambaGpuLM::from_hf`
-  reads the family from the checkpoint. The old constructors of Mamba and
-  SISO stay for this release as deprecated wrappers. The
-  [changelog](CHANGELOG.md) lists every rename.
+- **One API for all four.** Every family has the same types and calls: a
+  CPU backbone with its scratch, a CPU trainer, a GPU backbone and a GPU
+  trainer, built the same way, with one `GpuOptions` value for the device,
+  the storage precision and the GEMM mode on the GPU. The `GpuBackbone`,
+  `GpuTrainer` and `CpuTrainer` traits name what they share, and
+  `MambaGpuLM::from_hf` reads the family from the checkpoint. The names
+  and constructors of 0.7 are gone, and the [changelog](CHANGELOG.md) maps
+  each one to its 0.8 replacement.
 - **The Mamba kernels compile as their own module**, apart from the GEMM
   kernels and the kernels the families share. They were reworked for this
   release: the convolution walks shallow tiles with batched loads, and the
@@ -135,10 +136,11 @@ let mut outputs = vec![0.0f32; seq_len * cfg.d_model];
 backbone.forward_sequence(&prompt, &mut outputs, &mut state, &mut scratch, seq_len);
 ```
 
-The others are `MambaBackbone`, `Mamba3Backbone` and `Mamba3MimoBackbone`.
-Mamba-2 and MIMO check their configuration in `init` and return a
-`Result`, Mamba and SISO return the backbone itself. `new(weights, cfg,
-input_dim)` wraps weights loaded from a checkpoint or a trainer.
+The others are `MambaBackbone`, `Mamba3Backbone` and `Mamba3MimoBackbone`,
+with the same calls and the same types around them: `init` checks the
+configuration and returns a `Result`, `new(weights, cfg, input_dim)` wraps
+weights loaded from a checkpoint or a trainer, and `alloc_scratch` gives
+the one scratch type a family steps and runs windows in.
 
 Every family also trains on the CPU, through the trainers
 `MambaCpuTrainer`, `Mamba2CpuTrainer`, `Mamba3CpuTrainer` and
@@ -302,8 +304,8 @@ Each family has the same two functions in its own module:
 `mamba1::serialize`, `mamba2::serialize`, `mamba3_siso::serialize` and
 `mamba3_mimo::serialize`. The file carries the configuration and the input
 width, so `load` needs nothing else. The official checkpoints load through
-`hf::load_hf` (Mamba), `hf::load_mamba2::load_hf_mamba2` and
-`hf::load_mamba3::{load_hf_mamba3, load_hf_mamba3_mimo}`, or through
+`hf::load_mamba` (Mamba), `hf::load_mamba2` and
+`hf::{load_mamba3, load_mamba3_mimo}`, or through
 `from_hf` of the language models.
 
 What a trainer needs beside its weights to resume bit for bit (the AdamW

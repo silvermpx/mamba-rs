@@ -22,10 +22,10 @@
 #![cfg(feature = "hf")]
 
 use mamba_rs::hf::embed::lm_head_logits;
-use mamba_rs::hf::load_mamba2::load_hf_mamba2;
-use mamba_rs::mamba2::{
-    Mamba2PrefillScratch, Mamba2State, Mamba2StepScratch, forward_mamba2_backbone_prefill,
-    mamba2_step,
+use mamba_rs::hf::load_mamba2;
+use mamba_rs::mamba2::Mamba2State;
+use mamba_rs::mamba2::cpu::{
+    Mamba2PrefillScratch, Mamba2StepScratch, forward_mamba2_backbone_prefill, mamba2_step,
 };
 
 #[path = "common/m3_golden.rs"]
@@ -43,8 +43,8 @@ use m3_golden::{argmax, load_golden, logsumexp, official_dir};
 #[ignore = "needs both checkpoint layouts (see the file header)"]
 fn mamba2_130m_transformers_layout_is_the_original() {
     let root = official_dir("MAMBA2_OFFICIAL_DIR", ".cache/mamba2-official");
-    let a = load_hf_mamba2(&root.join("mamba2-130m")).unwrap();
-    let b = load_hf_mamba2(&root.join("mamba2-130m-hf")).unwrap();
+    let a = load_mamba2(&root.join("mamba2-130m")).unwrap();
+    let b = load_mamba2(&root.join("mamba2-130m-hf")).unwrap();
     assert_eq!(a.cfg, b.cfg);
     assert_eq!((a.vocab_size, b.vocab_size), (50277, 50288));
     assert!(a.lm_head.is_none() && b.lm_head.is_none());
@@ -73,7 +73,7 @@ fn mamba2_130m_transformers_layout_is_the_original() {
 fn mamba2_130m_cpu_matches_the_f64_oracle() {
     let root = official_dir("MAMBA2_OFFICIAL_DIR", ".cache/mamba2-official");
     let golden = load_golden(&root.join("goldens/mamba2-130m"));
-    let model = load_hf_mamba2(&root.join("mamba2-130m")).unwrap();
+    let model = load_mamba2(&root.join("mamba2-130m")).unwrap();
     let cfg = model.cfg;
     let d = cfg.d_model;
     let vocab = model.vocab_size;
@@ -194,7 +194,7 @@ fn mamba2_130m_gpu_matches_the_f64_oracle() {
 
     let root = official_dir("MAMBA2_OFFICIAL_DIR", ".cache/mamba2-official");
     let golden = load_golden(&root.join("goldens/mamba2-130m"));
-    let model = load_hf_mamba2(&root.join("mamba2-130m")).unwrap();
+    let model = load_mamba2(&root.join("mamba2-130m")).unwrap();
     let cfg = model.cfg;
     let d = cfg.d_model;
     let vocab = model.vocab_size;
@@ -284,7 +284,7 @@ fn mamba2_130m_gpu_bf16_tracks_the_f64_oracle() {
 
     let root = official_dir("MAMBA2_OFFICIAL_DIR", ".cache/mamba2-official");
     let golden = load_golden(&root.join("goldens/mamba2-130m"));
-    let model = load_hf_mamba2(&root.join("mamba2-130m")).unwrap();
+    let model = load_mamba2(&root.join("mamba2-130m")).unwrap();
     let cfg = model.cfg;
     let d = cfg.d_model;
     let vocab = model.vocab_size;

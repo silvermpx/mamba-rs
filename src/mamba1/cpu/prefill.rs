@@ -111,7 +111,7 @@ where
 /// fingerprint changes — zero allocation on the serving hot path once
 /// warmed. Keyed on the FULL dims so a shape change can never reuse a
 /// smaller cached buffer out of bounds.
-pub struct PrefillScratch {
+pub struct MambaPrefillScratch {
     fingerprint: Fingerprint,
     post_norm: Vec<f32>,
     proj: Vec<f32>,
@@ -161,7 +161,7 @@ fn fingerprint(dims: &MambaDims) -> Fingerprint {
     )
 }
 
-impl PrefillScratch {
+impl MambaPrefillScratch {
     /// Allocate scratch sized for `dims`.
     pub fn new(dims: &MambaDims) -> Self {
         let t = dims.seq_len;
@@ -442,7 +442,7 @@ pub(crate) fn transpose_rows_to_cm(
 /// - `w`: inference weights. `a_neg` is the SSM decay source — callers that
 ///   mutate `a_log` must refresh `a_neg` before prefilling.
 /// - `state`: recurrent conv/SSM state, carried in AND out
-///   (prefill-then-decode into [`crate::inference`]'s step path); a
+///   (prefill-then-decode into [`crate::mamba1::cpu::inference`]'s step path); a
 ///   bidirectional model, which reads whole prompts, starts from the
 ///   empty state.
 /// - `scratch`: caller-owned; `ensure`d to `dims` internally.
@@ -451,7 +451,7 @@ pub fn forward_mamba_backbone_prefill(
     mamba_input_flat: &[f32],
     w: &MambaWeights,
     state: &mut MambaState,
-    scratch: &mut PrefillScratch,
+    scratch: &mut MambaPrefillScratch,
     dims: &MambaDims,
 ) {
     forward_mamba_backbone_prefill_mode(
@@ -471,7 +471,7 @@ pub fn forward_mamba_backbone_prefill_mode(
     mamba_input_flat: &[f32],
     w: &MambaWeights,
     state: &mut MambaState,
-    scratch: &mut PrefillScratch,
+    scratch: &mut MambaPrefillScratch,
     dims: &MambaDims,
     mode: PrefillMode,
 ) {
@@ -822,7 +822,7 @@ pub fn prefill_batch(
     inputs: &[f32],
     w: &MambaWeights,
     states: &mut [MambaState],
-    scratches: &mut [PrefillScratch],
+    scratches: &mut [MambaPrefillScratch],
     dims: &MambaDims,
 ) {
     let t_len = dims.seq_len;

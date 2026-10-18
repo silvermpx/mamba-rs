@@ -171,6 +171,45 @@ impl Mamba3Weights {
         w
     }
 
+    /// Zeros in the shapes of these weights, an absent bias or projection
+    /// staying absent: a gradient buffer of the same model.
+    pub fn zeros_like(&self) -> Self {
+        let z = |v: &Vec<f32>| vec![0.0; v.len()];
+        Self {
+            input_proj_w: z(&self.input_proj_w),
+            input_proj_b: z(&self.input_proj_b),
+            layers: self
+                .layers
+                .iter()
+                .map(|l| Mamba3LayerWeights {
+                    norm_weight: z(&l.norm_weight),
+                    norm_bias: z(&l.norm_bias),
+                    in_proj_w: z(&l.in_proj_w),
+                    dt_bias: z(&l.dt_bias),
+                    b_norm_weight: z(&l.b_norm_weight),
+                    c_norm_weight: z(&l.c_norm_weight),
+                    b_bias: z(&l.b_bias),
+                    c_bias: z(&l.c_bias),
+                    d_param: z(&l.d_param),
+                    norm_gate_weight: z(&l.norm_gate_weight),
+                    out_proj_w: z(&l.out_proj_w),
+                })
+                .collect(),
+            norm_f_weight: z(&self.norm_f_weight),
+            norm_f_bias: z(&self.norm_f_bias),
+            mlp: self
+                .mlp
+                .iter()
+                .map(|m| crate::mlp::GatedMlpLayerWeights {
+                    norm_weight: z(&m.norm_weight),
+                    norm_bias: z(&m.norm_bias),
+                    fc1_w: z(&m.fc1_w),
+                    fc2_w: z(&m.fc2_w),
+                })
+                .collect(),
+        }
+    }
+
     /// Verify weight dimensions match the config.
     pub fn validate(&self, cfg: &Mamba3Config, input_dim: usize) -> Result<(), String> {
         cfg.validate()?;

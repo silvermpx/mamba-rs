@@ -4,7 +4,7 @@
 //! numpy, transcribed from the reference's MIMO step and module (state-
 //! spaces/mamba e9594ce), and writes the logits of every prompt position
 //! and a greedy continuation. This test loads the same checkpoint through
-//! `hf::load_mamba3::load_hf_mamba3_mimo` and holds the CPU decode to those
+//! `hf::load_mamba3_mimo` and holds the CPU decode to those
 //! goldens, and with `cuda` the GPU engine in f32 and bf16.
 //!
 //! `#[ignore]`: it needs the downloaded checkpoint and its goldens, under
@@ -19,8 +19,9 @@
 #![cfg(feature = "hf")]
 
 use mamba_rs::hf::embed::lm_head_logits;
-use mamba_rs::hf::load_mamba3::load_hf_mamba3_mimo;
-use mamba_rs::mamba3_mimo::{Mamba3MimoState, Mamba3MimoStepScratch, mamba3_mimo_step};
+use mamba_rs::hf::load_mamba3_mimo;
+use mamba_rs::mamba3_mimo::Mamba3MimoState;
+use mamba_rs::mamba3_mimo::cpu::{Mamba3MimoStepScratch, mamba3_mimo_step};
 
 #[path = "common/m3_golden.rs"]
 mod m3_golden;
@@ -35,7 +36,7 @@ use m3_golden::{argmax, load_golden, logsumexp, official_dir};
 fn mimo_187m_cpu_decode_matches_the_f64_oracle() {
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
     let golden = load_golden(&root.join("goldens/mimo-187m"));
-    let model = load_hf_mamba3_mimo(&root.join("mamba3-mimo-187m")).unwrap();
+    let model = load_mamba3_mimo(&root.join("mamba3-mimo-187m")).unwrap();
     let cfg = model.cfg;
     let d = cfg.d_model;
     let vocab = model.vocab_size;
@@ -129,7 +130,7 @@ fn mimo_187m_gpu_arm(dtype: mamba_rs::gpu::dtype::WeightDtype) {
 
     let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
     let golden = load_golden(&root.join("goldens/mimo-187m"));
-    let model = load_hf_mamba3_mimo(&root.join("mamba3-mimo-187m")).unwrap();
+    let model = load_mamba3_mimo(&root.join("mamba3-mimo-187m")).unwrap();
     let cfg = model.cfg;
     let d = cfg.d_model;
     let vocab = model.vocab_size;

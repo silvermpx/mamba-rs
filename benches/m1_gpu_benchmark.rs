@@ -37,7 +37,9 @@ fn m1_gpu_benchmark() {
         cfg.n_layers,
         cfg.d_inner(),
         cfg.d_state,
-        MambaBackbone::init(cfg, input_dim, 42).param_count()
+        MambaBackbone::init(cfg, input_dim, 42)
+            .unwrap()
+            .param_count()
     );
     println!();
 
@@ -233,7 +235,7 @@ fn m1_gpu_benchmark() {
     // ===================================================================
     println!("--- CPU Inference (T=1) ---");
     {
-        let bb = MambaBackbone::init(cfg, input_dim, 42);
+        let bb = MambaBackbone::init(cfg, input_dim, 42).unwrap();
         let mut state = bb.alloc_state();
         let mut scratch = bb.alloc_scratch();
         let mut output = vec![0.0f32; cfg.d_model];
@@ -261,10 +263,10 @@ fn m1_gpu_benchmark() {
     // ===================================================================
     println!("--- CPU Training (B=1, T={seq_len}) ---");
     {
+        use mamba_rs::mamba1::cpu::flat::MambaBackboneFlat;
+        use mamba_rs::mamba1::cpu::scratch::{BackwardPhaseScratch, PhaseScratch};
+        use mamba_rs::mamba1::cpu::weights::{TrainMambaLayerWeights, TrainMambaWeights};
         use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
-        use mamba_rs::train::flat::MambaBackboneFlat;
-        use mamba_rs::train::scratch::{BackwardPhaseScratch, PhaseScratch};
-        use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 
         let dims = MambaDims::from_config(&cfg, seq_len, input_dim);
         let di = dims.d_inner;
@@ -322,7 +324,7 @@ fn m1_gpu_benchmark() {
                 a_neg: &a_neg,
             };
             let mut temporal = vec![0.0f32; seq_len * cfg.d_model];
-            mamba_rs::train::forward::forward_mamba_backbone_batched(
+            mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched(
                 &mut temporal,
                 &mut acts,
                 &tw,
@@ -349,7 +351,7 @@ fn m1_gpu_benchmark() {
                 a_neg: &a_neg,
             };
             let mut temporal = vec![0.0f32; seq_len * cfg.d_model];
-            mamba_rs::train::forward::forward_mamba_backbone_batched(
+            mamba_rs::mamba1::cpu::forward::forward_mamba_backbone_batched(
                 &mut temporal,
                 &mut acts,
                 &tw,
@@ -361,7 +363,7 @@ fn m1_gpu_benchmark() {
             let mut d_temporal = vec![1.0f32; seq_len * cfg.d_model];
             let mut grad_tw = TrainMambaWeights::zeros_from_dims(&dims);
             let mut bwd_scratch = BackwardPhaseScratch::zeros(&dims);
-            mamba_rs::train::backward::backward_mamba_backbone_batched(
+            mamba_rs::mamba1::cpu::backward::backward_mamba_backbone_batched(
                 &mut d_temporal,
                 &mut grad_tw,
                 &acts,

@@ -888,6 +888,7 @@ impl Mamba2GpuTrainer {
     }
 
     /// The optimizer, to set its learning rate, betas, epsilon and decay.
+    #[doc(hidden)]
     pub fn adamw_mut(&mut self) -> &mut GpuAdamW {
         &mut self.adamw
     }
@@ -1543,6 +1544,7 @@ impl Mamba2GpuTrainer {
     }
 
     /// The gradients of the last backward, shaped like the weights.
+    #[doc(hidden)]
     pub fn grads(&self) -> Result<Mamba2Weights, String> {
         let flat = self.grads.to_cpu(&self.ctx.stream)?;
         // Fields the trainer does not train come out zero, not as weights.
@@ -2011,6 +2013,7 @@ impl Mamba2GpuTrainer {
     /// overflow (see [`Self::overflowed`]) the gradients and `d_input` are
     /// not finite: the next [`Self::apply_adamw`] skips its step, and a
     /// caller training anything upstream must skip that step too.
+    #[doc(hidden)]
     pub fn backward(&mut self, d_out: &[f32], d_input: Option<&mut [f32]>) -> Result<(), String> {
         self.check_window_len("backward d_out", d_out.len(), self.cfg.d_model)?;
         if let Some(d) = d_input.as_deref() {
@@ -2176,6 +2179,7 @@ impl Mamba2GpuTrainer {
 
     /// Whether the last backward's gradients overflowed the f16 loss
     /// scale (its AdamW step will be skipped).
+    #[doc(hidden)]
     pub fn overflowed(&self) -> bool {
         self.overflowed
     }
@@ -3091,6 +3095,7 @@ impl Mamba2GpuTrainer {
     ///
     /// Each backward's gradients take one step: a second call before the
     /// next backward is refused rather than applying them twice.
+    #[doc(hidden)]
     pub fn apply_adamw(&mut self) -> Result<bool, String> {
         if !self.fresh_grads {
             return Err("no new gradients since the last optimizer step".into());

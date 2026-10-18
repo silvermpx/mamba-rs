@@ -26,6 +26,7 @@ pub mod training_graph;
 pub mod weights;
 pub mod weights_mixed_train;
 
+pub use forward::MambaRecurrentStateBlob;
 pub use inference::{
     MambaGpuBackbone, MambaGpuEngine, MambaGpuEngineMixed, MambaGpuScratch, MambaGpuScratchMixed,
     MambaGpuState,

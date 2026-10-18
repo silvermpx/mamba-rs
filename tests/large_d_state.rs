@@ -58,7 +58,7 @@ fn check_step_parity(d_state: usize) {
     let input_dim = cfg.d_model;
     let dm = cfg.d_model;
 
-    let cpu_bb = MambaBackbone::init(cfg, input_dim, 42);
+    let cpu_bb = MambaBackbone::init(cfg, input_dim, 42).unwrap();
     let weights: MambaWeights = cpu_bb.weights().clone();
     let mut state = cpu_bb.alloc_state();
     let mut scratch = cpu_bb.alloc_scratch();
@@ -514,7 +514,7 @@ fn m1_explicit_sequential_trains_at_d_state_128() {
         let d = det(batch * seq_len * dm, 0x72);
         t.backward_step(&d, BackwardOpts::default()).unwrap();
         let stream = t.ctx().stream.clone();
-        (rows, t.grad_arena().to_cpu(&stream).unwrap())
+        (rows, t.grad_arena().unwrap().to_cpu(&stream).unwrap())
     };
     let (seq_rows, seq_grads) = run(ScanMode::Sequential);
     let (par_rows, par_grads) = run(ScanMode::Parallel);

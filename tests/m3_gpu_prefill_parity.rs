@@ -380,7 +380,7 @@ fn gpu_prefill_then_decode_handoff_layer_norm() {
 }
 
 fn prefill_then_decode_handoff(cfg: Mamba3Config) {
-    use mamba_rs::mamba3_siso::Mamba3StepScratch;
+    use mamba_rs::mamba3_siso::cpu::inference::Mamba3StepScratch;
     use mamba_rs::mamba3_siso::cpu::inference::mamba3_step;
     use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuEngine;
 

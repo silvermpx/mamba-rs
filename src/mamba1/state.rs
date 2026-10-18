@@ -1,3 +1,5 @@
+use super::config::MambaConfig;
+
 /// Persistent recurrent state for one Mamba layer.
 ///
 /// Holds the conv1d shift register and SSM hidden state.
@@ -11,16 +13,12 @@ pub struct MambaLayerState {
 }
 
 impl MambaLayerState {
-    /// Create a zeroed layer state for a given Mamba configuration.
-    ///
-    /// - `d_inner`: expanded model dimension (`expand * d_model`)
-    /// - `d_state`: SSM state dimension (memory capacity per channel)
-    /// - `d_conv`: convolution kernel width
-    pub fn zeros(d_inner: usize, d_state: usize, d_conv: usize) -> Self {
-        assert!(d_conv > 0, "d_conv must be > 0");
+    /// A zeroed layer state, the start of a sequence.
+    pub fn zeros(cfg: &MambaConfig) -> Self {
+        let (di, dc) = (cfg.d_inner(), cfg.d_conv.max(1));
         Self {
-            conv_state: vec![0.0; (d_conv - 1) * d_inner],
-            ssm_state: vec![0.0; d_inner * d_state],
+            conv_state: vec![0.0; (dc - 1) * di],
+            ssm_state: vec![0.0; di * cfg.d_state],
         }
     }
 
@@ -38,16 +36,11 @@ pub struct MambaState {
 }
 
 impl MambaState {
-    /// Create zeroed state for all Mamba layers.
-    ///
-    /// - `n_layers`: number of stacked Mamba layers
-    /// - `d_inner`: expanded model dimension (`expand * d_model`)
-    /// - `d_state`: SSM state dimension
-    /// - `d_conv`: convolution kernel width
-    pub fn zeros(n_layers: usize, d_inner: usize, d_state: usize, d_conv: usize) -> Self {
+    /// A zeroed state of every layer, the start of a sequence.
+    pub fn zeros(cfg: &MambaConfig) -> Self {
         Self {
-            layers: (0..n_layers)
-                .map(|_| MambaLayerState::zeros(d_inner, d_state, d_conv))
+            layers: (0..cfg.n_layers)
+                .map(|_| MambaLayerState::zeros(cfg))
                 .collect(),
         }
     }

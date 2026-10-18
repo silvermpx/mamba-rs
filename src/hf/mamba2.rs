@@ -16,7 +16,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::config_json::{config_json, json_f32};
-use super::load_mamba3::{
+use super::mamba3::{
     EMBEDDING, bool_or, check_tensors, expect_common, f32_or, field, read_mlp, read_norm_bias,
     read_untied_head, transpose, usize_or,
 };
@@ -222,7 +222,7 @@ fn parse_transformers_config(root: &Value) -> Result<HfMamba2Config, String> {
 }
 
 /// Load a Mamba-2 checkpoint directory in either layout.
-pub fn load_hf_mamba2(dir: &Path) -> Result<HfMamba2Model, String> {
+pub fn load_mamba2(dir: &Path) -> Result<HfMamba2Model, String> {
     let json = std::fs::read(dir.join("config.json"))
         .map_err(|e| format!("cannot read config.json: {e}"))?;
     let hf = parse_mamba2_config(&json)?;

@@ -109,14 +109,14 @@ fn bench_m1_weight_compression_ratio() {
         }
     };
     use mamba_rs::gpu::dtype::WeightDtype;
-    use mamba_rs::hf::load::load_hf;
-    let hf = load_hf(&dir).unwrap();
+    use mamba_rs::hf::load_mamba;
+    let hf = load_mamba(&dir).unwrap();
     // Count total weight elements in the backbone + embed + lm_head.
     let mut total_elems: usize = hf.embed.len();
     if let Some(ref lm) = hf.lm_head {
         total_elems += lm.len();
     }
-    let w = hf.backbone.weights();
+    let w = &hf.weights;
     total_elems += w.input_proj_w.len() + w.input_proj_b.len() + w.norm_f_weight.len();
     for lw in &w.layers {
         total_elems += lw.norm_weight.len()

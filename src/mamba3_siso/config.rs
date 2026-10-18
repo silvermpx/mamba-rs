@@ -241,6 +241,7 @@ impl Mamba3Config {
     /// takes the chunked parallel scan regardless of T, because the
     /// sequential scan's activation tape costs about the chunk length times
     /// more memory. `Sequential` runs the sequential scan in every lane.
+    #[doc(hidden)]
     pub fn train_use_parallel_scan(&self) -> bool {
         !matches!(self.scan_mode, ScanMode::Sequential)
     }
@@ -248,6 +249,7 @@ impl Mamba3Config {
     /// Resolve the prompt window's scan choice from `scan_mode`, as for
     /// training: the chunked scan in every mode but `Sequential`, so `Auto`
     /// keeps the chunked prompt at every length.
+    #[doc(hidden)]
     pub fn prefill_use_parallel_scan(&self) -> bool {
         !matches!(self.scan_mode, ScanMode::Sequential)
     }

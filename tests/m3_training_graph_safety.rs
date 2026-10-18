@@ -133,6 +133,7 @@ fn graph_replay_digests(dtype: WeightDtype) -> (Vec<(u64, u64)>, u64) {
         let stream = trainer.ctx().stream.clone();
         let gradients = trainer
             .grad_arena()
+            .unwrap()
             .to_cpu(&stream)
             .expect("download gradients");
         replay_digests.push((digest_f32(&output), digest_f32(&gradients)));

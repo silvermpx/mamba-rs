@@ -570,8 +570,8 @@ unsafe impl Sync for RawPtrs {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mamba1::cpu::weights::TrainMambaLayerWeights;
     use crate::ops::fast_math::fast_exp_scalar;
-    use crate::train::weights::TrainMambaLayerWeights;
 
     fn simple_rng(state: &mut u64) -> f32 {
         *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);

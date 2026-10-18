@@ -115,75 +115,20 @@ pub mod optim;
 pub mod precision;
 pub mod varlen;
 
-/// The 0.7 path of Mamba-1 and of the GPU engine, which 0.8 split into
-/// [`mamba1`] and `gpu`. It re-exports both, so code written for 0.7 still
-/// builds for one release.
-#[doc(hidden)]
-pub mod mamba_ssm {
-    pub use crate::mamba1::*;
-    #[cfg(feature = "cuda")]
-    pub mod gpu {
-        // The engine module re-exports the Mamba-1 GPU path itself.
-        pub use crate::gpu::*;
-    }
-}
-
-// Mamba-1's weights, state and serializer were root modules up to 0.7, and
-// the root keeps their paths for one release.
-#[doc(hidden)]
-pub use mamba1::{serialize, state, weights};
-
-// Short aliases kept from earlier releases: `mamba_rs::inference` and
-// `mamba_rs::train` point into the Mamba-1 CPU paths.
-pub mod inference {
-    pub use crate::mamba1::cpu::inference::*;
-    pub use crate::mamba1::cpu::prefill::*;
-}
-pub mod train {
-    pub use crate::mamba1::cpu::backward;
-    pub use crate::mamba1::cpu::backward_ops;
-    pub use crate::mamba1::cpu::flat;
-    pub use crate::mamba1::cpu::forward;
-    pub use crate::mamba1::cpu::parallel;
-    pub use crate::mamba1::cpu::scratch;
-    pub use crate::mamba1::cpu::target;
-    pub use crate::mamba1::cpu::weights;
-
-    // Re-export shared ops that were previously in train/
-    pub use crate::ops::blas;
-    pub use crate::ops::fast_math;
-}
-
-#[cfg(feature = "cuda")]
-pub mod gpu3 {
-    //! Convenience re-exports for the Mamba-3 SISO GPU path.
-    pub use crate::mamba3_siso::gpu::*;
-}
-
 pub use config::{BlockNorm, ModelFamily};
 
-// Mamba-1
-pub use mamba1::config::MambaConfig;
-pub use mamba1::cpu::inference::{
-    MambaLayerPacked, MambaLayerScratch, MambaPackedLinears, MambaStepScratch, mamba_block_step,
-    mamba_layer_step, mamba_step, mamba_step_no_proj, mamba_step_no_proj_packed, mamba_step_packed,
-};
-pub use mamba1::state::{MambaLayerState, MambaState};
-pub use mamba1::weights::{MambaLayerWeights, MambaWeights};
-
-// Mamba-2
+// Every family exports the same set here: its configuration, weights,
+// state, CPU backbone with the scratch it steps in, and CPU trainer, and with
+// `cuda` its GPU backbone and GPU trainer. The low-level step functions stay
+// in the family's own module.
+pub use mamba1::{MambaConfig, MambaLayerState, MambaLayerWeights, MambaState, MambaWeights};
 pub use mamba2::{Mamba2Config, Mamba2LayerState, Mamba2LayerWeights, Mamba2State, Mamba2Weights};
-
-// Mamba-3 SISO
-pub use mamba3_siso::{
-    Mamba3Config, Mamba3Dims, Mamba3LayerState, Mamba3LayerWeights, Mamba3State, Mamba3StepScratch,
-    Mamba3Weights,
-};
-
-// Mamba-3 MIMO
 pub use mamba3_mimo::{
     Mamba3MimoConfig, Mamba3MimoLayerState, Mamba3MimoLayerWeights, Mamba3MimoState,
     Mamba3MimoWeights,
+};
+pub use mamba3_siso::{
+    Mamba3Config, Mamba3LayerState, Mamba3LayerWeights, Mamba3State, Mamba3Weights,
 };
 
 // The CPU backbones and the CPU language model of every family, and the
@@ -191,7 +136,10 @@ pub use mamba3_mimo::{
 #[cfg(feature = "hf")]
 pub use module::MambaLM;
 pub use module::sample::SampleParams;
-pub use module::{Mamba2Backbone, Mamba3Backbone, Mamba3MimoBackbone, MambaBackbone};
+pub use module::{
+    Mamba2Backbone, Mamba2Scratch, Mamba3Backbone, Mamba3MimoBackbone, Mamba3MimoScratch,
+    Mamba3Scratch, MambaBackbone, MambaScratch,
+};
 // What training needs on either device: the session, options and metrics
 // of a trainer, the AdamW state, the loss scaler and the trainer-state file.
 pub use optim::{

@@ -55,10 +55,3 @@ pub use gemm_mode::GemmMode;
 pub use options::GpuOptions;
 pub use train::{BackwardMetrics, BackwardOpts, StepMetrics, TrainSessionCfg};
 pub use train_state::TrainerState;
-
-// Up to 0.7 this module also held the Mamba-1 GPU path, and code written
-// then imports it from here (`mamba_rs::gpu::inference` and the rest). The
-// hidden re-export keeps that code building for one release while it moves
-// to `mamba1::gpu`.
-#[doc(hidden)]
-pub use crate::mamba1::gpu::*;

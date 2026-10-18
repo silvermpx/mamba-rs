@@ -12,7 +12,7 @@
 
 use super::dims::Mamba3Dims;
 use super::flat::Mamba3LayerFlat;
-use super::scratch::Mamba3Scratch;
+use super::scratch::Mamba3TrainScratch;
 use super::weights::TrainMamba3LayerWeights;
 use crate::bidi::reverse_rows;
 use crate::mlp::cpu::RowsGemm;
@@ -213,7 +213,7 @@ pub fn forward_mamba3_layer_batched(
     acts: &mut Mamba3LayerFlat,
     layer_w: &TrainMamba3LayerWeights,
     state: Mamba3LayerStateMut<'_>,
-    scratch: &mut Mamba3Scratch,
+    scratch: &mut Mamba3TrainScratch,
     dims: &Mamba3Dims,
 ) {
     forward_mamba3_layer_in(temporal_flat, acts, layer_w, state, scratch, dims, None);
@@ -229,7 +229,7 @@ pub(crate) fn forward_mamba3_layer_in(
     acts: &mut Mamba3LayerFlat,
     layer_w: &TrainMamba3LayerWeights,
     state: Mamba3LayerStateMut<'_>,
-    scratch: &mut Mamba3Scratch,
+    scratch: &mut Mamba3TrainScratch,
     dims: &Mamba3Dims,
     reversed_in: Option<&[f32]>,
 ) {
@@ -595,7 +595,7 @@ mod tests {
         w.d_param.fill(1.0);
 
         let mut acts = Mamba3LayerFlat::zeros(dims);
-        let mut scratch = Mamba3Scratch::zeros(&dims);
+        let mut scratch = Mamba3TrainScratch::zeros(&dims);
         let mut ssm = vec![0.0; dims.nheads * dims.headdim * dims.d_state];
         let mut k_st = vec![0.0; dims.nheads * dims.d_state];
         let mut v_st = vec![0.0; dims.nheads * dims.headdim];

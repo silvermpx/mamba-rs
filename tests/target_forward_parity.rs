@@ -23,6 +23,7 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::mamba1::MambaWeights;
 use mamba_rs::mamba1::cpu::target::{MambaTargetSeqScratch, forward_mamba_target_sequence};
+use mamba_rs::mamba1::cpu::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use mamba_rs::mamba1::gpu::backward::GpuMambaTargetScratch;
 use mamba_rs::mamba1::gpu::forward::{GpuMambaDims, gpu_forward_mamba_target_burnin};
 use mamba_rs::mamba1::gpu::weights::GpuMambaTrainWeights;
@@ -37,7 +38,6 @@ use mamba_rs::mamba3_siso::gpu::state::{
 };
 use mamba_rs::mamba3_siso::gpu::weights::GpuMamba3Weights;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-use mamba_rs::train::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use mamba_rs::{config::ScanMode, mamba1::MambaConfig};
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {

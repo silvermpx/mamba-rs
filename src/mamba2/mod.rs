@@ -18,10 +18,5 @@ pub mod state;
 pub mod weights;
 
 pub use config::Mamba2Config;
-pub use cpu::{
-    Mamba2PrefillScratch, Mamba2StepScratch, Mamba2Tape, Mamba2TrainScratch, backward_mamba2_train,
-    forward_mamba2_backbone_prefill, forward_mamba2_backbone_prefill_mode, forward_mamba2_train,
-    mamba2_layer_step, mamba2_step,
-};
 pub use state::{Mamba2LayerState, Mamba2State};
 pub use weights::{Mamba2LayerWeights, Mamba2Weights};

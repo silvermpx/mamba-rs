@@ -158,7 +158,7 @@ fn test_m1_through_any_backbone() {
         n_layers: 1,
         ..Default::default()
     };
-    let bb = MambaBackbone::init(cfg, 32, 42);
+    let bb = MambaBackbone::init(cfg, 32, 42).unwrap();
 
     // Direct path
     let mut state_direct = bb.alloc_state();
@@ -173,7 +173,7 @@ fn test_m1_through_any_backbone() {
     );
 
     // Through AnyBackbone
-    let bb2 = MambaBackbone::init(cfg, 32, 42);
+    let bb2 = MambaBackbone::init(cfg, 32, 42).unwrap();
     let any = AnyBackbone::M1(bb2);
     let mut state_any = any.alloc_state();
     let mut scratch_any = any.alloc_scratch();

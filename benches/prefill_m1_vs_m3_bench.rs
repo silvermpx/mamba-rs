@@ -33,10 +33,12 @@ fn m1_vs_m3_prefill_head_to_head() {
 
     // M1 at the classify center shape.
     {
-        use mamba_rs::inference::{PrefillScratch, forward_mamba_backbone_prefill_mode};
         use mamba_rs::mamba1::MambaConfig;
         use mamba_rs::mamba1::MambaState;
         use mamba_rs::mamba1::MambaWeights;
+        use mamba_rs::mamba1::cpu::prefill::{
+            MambaPrefillScratch, forward_mamba_backbone_prefill_mode,
+        };
         use mamba_rs::ops::dims::MambaDims;
         let cfg = MambaConfig {
             d_model: 384,
@@ -62,10 +64,12 @@ fn m1_vs_m3_prefill_head_to_head() {
         let dims = MambaDims::from_config(&cfg, seq_len, input_dim);
         let input = det(seq_len * input_dim, 0xAF, 0.05);
         let mut out = vec![0.0f32; seq_len * cfg.d_model];
-        let n_params = w.param_count(input_dim, &cfg);
+        let n_params = mamba_rs::MambaBackbone::new(w.clone(), cfg, input_dim)
+            .unwrap()
+            .param_count();
         for mode in [PrefillMode::Single, PrefillMode::Parallel] {
-            let mut state = MambaState::zeros(cfg.n_layers, cfg.d_inner(), cfg.d_state, cfg.d_conv);
-            let mut scratch = PrefillScratch::new(&dims);
+            let mut state = MambaState::zeros(&cfg);
+            let mut scratch = MambaPrefillScratch::new(&dims);
             forward_mamba_backbone_prefill_mode(
                 &mut out,
                 &input,

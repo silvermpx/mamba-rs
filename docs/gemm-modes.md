@@ -60,10 +60,7 @@ variable `MAMBA_RS_GEMM_MODE` and defaults to `Deterministic`.
 | a bare context | `GpuCtx::new_from_env`, `GpuCtx::new_from_env_with_state_cap` | `GpuCtx::new_with_mode`, `GpuCtx::new_with_state_cap_and_mode` |
 
 `GpuCtx::new` and `new_with_state_cap` are `Deterministic` and read
-nothing. The 0.7 constructors of the Mamba and SISO types (`new_with_mode`,
-`new_with_dtype`, `new_with_dtype_and_mode`, `new_full`,
-`new_full_with_mode`, and `from_hf_with_*` of the language model) stay as
-deprecated wrappers for this release.
+nothing.
 
 ```rust
 use mamba_rs::{GemmMode, GpuOptions, MambaGpuBackbone, WeightDtype};

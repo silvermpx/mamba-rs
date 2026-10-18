@@ -180,59 +180,6 @@ impl MambaGpuTrainer {
         )
     }
 
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `new` with `TrainSessionCfg::new(input_dim, batch, seq_len)` and \
-                `GpuOptions::default().device(gpu_ordinal).dtype(dtype)`"
-    )]
-    pub fn new_with_dtype(
-        gpu_ordinal: usize,
-        cpu_weights: &MambaWeights,
-        cfg: MambaConfig,
-        input_dim: usize,
-        batch: usize,
-        seq_len: usize,
-        dtype: WeightDtype,
-    ) -> Result<Self, String> {
-        let session = TrainSessionCfg::new(input_dim, batch, seq_len);
-        let opts = GpuOptions::default().device(gpu_ordinal).dtype(dtype);
-        Self::new(cpu_weights, cfg, session, opts)
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype)`"
-    )]
-    pub fn new_full(
-        gpu_ordinal: usize,
-        cpu_weights: &MambaWeights,
-        cfg: MambaConfig,
-        session: TrainSessionCfg,
-        dtype: WeightDtype,
-    ) -> Result<Self, String> {
-        let opts = GpuOptions::default().device(gpu_ordinal).dtype(dtype);
-        Self::new(cpu_weights, cfg, session, opts)
-    }
-
-    #[deprecated(
-        since = "0.8.0",
-        note = "use `new` with `GpuOptions::default().device(gpu_ordinal).dtype(dtype).mode(mode)`"
-    )]
-    pub fn new_full_with_mode(
-        gpu_ordinal: usize,
-        cpu_weights: &MambaWeights,
-        cfg: MambaConfig,
-        session: TrainSessionCfg,
-        dtype: WeightDtype,
-        mode: GemmMode,
-    ) -> Result<Self, String> {
-        let opts = GpuOptions::default()
-            .device(gpu_ordinal)
-            .dtype(dtype)
-            .mode(mode);
-        Self::new(cpu_weights, cfg, session, opts)
-    }
-
     fn new_full_inner(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
@@ -434,22 +381,23 @@ impl MambaGpuTrainer {
     /// per-tensor views and CUDA graphs retain its device address.
     ///
     /// ```compile_fail
-    /// use mamba_rs::mamba1::gpu::{buffers::GpuBuffer, trainer::MambaGpuTrainer};
+    /// use mamba_rs::gpu::buffers::GpuBuffer;
+    /// use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
     /// fn replace_arena(trainer: &mut MambaGpuTrainer, replacement: GpuBuffer) {
-    ///     let _ = std::mem::replace(trainer.grad_arena(), replacement);
+    ///     let _ = std::mem::replace(trainer.grad_arena().unwrap(), replacement);
     /// }
     /// ```
-    pub fn grad_arena(&self) -> &GpuBuffer {
-        match &self.inner {
+    pub fn grad_arena(&self) -> Result<&GpuBuffer, String> {
+        Ok(match &self.inner {
             TrainerInner::F32(t) => &t.grads.flat,
             TrainerInner::Mixed(t) => &t.grads.flat,
-        }
+        })
     }
 
     /// The gradient arena downloaded to the host: the open window's sum
     /// between an accumulating call and the applying one.
     pub fn download_grad_arena(&self) -> Result<Vec<f32>, String> {
-        self.grad_arena().to_cpu(&self.ctx().stream)
+        self.grad_arena()?.to_cpu(&self.ctx().stream)
     }
 
     /// Replace the gradient contents without replacing their allocation.
@@ -476,7 +424,7 @@ impl MambaGpuTrainer {
     /// `step_skip_above` is `Some(t)` and the pre-clip norm exceeds `t`,
     /// the optimizer step is skipped and the window discarded (see
     /// [`BackwardOpts::step_skip_above`]).
-    pub fn apply_step_with(
+    fn apply_step_with(
         &mut self,
         clip_max_norm: Option<f32>,
         step_skip_above: Option<f32>,
@@ -484,7 +432,8 @@ impl MambaGpuTrainer {
         self.apply_step_full(clip_max_norm, step_skip_above, None)
     }
 
-    /// [`Self::apply_step_with`] plus the control-channel clip (see
+    /// [`Self::apply_step`] with the spike skip (see
+    /// [`BackwardOpts::step_skip_above`]) and the control-channel clip (see
     /// [`BackwardOpts::control_clip_max_norm`]).
     pub fn apply_step_full(
         &mut self,
@@ -545,7 +494,7 @@ impl MambaGpuTrainer {
         )?;
         debug_assert!(!m.optimizer_stepped);
         let stream = self.ctx().stream.clone();
-        dist.all_reduce_grad_sum(self.grad_arena(), &stream)?;
+        dist.all_reduce_grad_sum(self.grad_arena()?, &stream)?;
         // Mean = sum then multiply: for power-of-two worlds the scale
         // only moves exponents (exact); other sizes still get one
         // deterministic per-element rounding.
@@ -591,7 +540,7 @@ impl MambaGpuTrainer {
     /// [`Self::optimizer_state`].
     pub fn recurrent_state(
         &self,
-    ) -> Result<crate::mamba1::gpu::forward::RecurrentStateBlob, String> {
+    ) -> Result<crate::mamba1::gpu::forward::MambaRecurrentStateBlob, String> {
         match &self.inner {
             TrainerInner::F32(t) => t.state.export_state(&t.ctx.stream),
             TrainerInner::Mixed(t) => t.state.export_state(&t.ctx.stream),
@@ -601,7 +550,7 @@ impl MambaGpuTrainer {
     /// Upload a previously exported recurrence.
     pub fn load_recurrent_state(
         &mut self,
-        blob: &crate::mamba1::gpu::forward::RecurrentStateBlob,
+        blob: &crate::mamba1::gpu::forward::MambaRecurrentStateBlob,
     ) -> Result<(), String> {
         self.load_recurrent_parts(&blob.conv_states, &blob.ssm_states)
     }
@@ -3847,8 +3796,3 @@ impl MambaTrainerF32 {
         Ok(out)
     }
 }
-
-// The names these types carried before 0.8, when each family named its GPU
-// types its own way.
-#[deprecated(since = "0.8.0", note = "renamed to `MambaGpuTrainer`")]
-pub type MambaTrainer = MambaGpuTrainer;

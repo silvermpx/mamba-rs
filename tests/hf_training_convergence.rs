@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use mamba_rs::MambaGpuLM;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::train::TrainSessionCfg;
-use mamba_rs::hf::load::load_hf;
+use mamba_rs::hf::load_mamba;
 use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 use mamba_rs::module::sample::SampleParams;
 
@@ -147,8 +147,8 @@ fn run_convergence(dtype: WeightDtype) {
             return;
         }
     };
-    let hf = load_hf(&dir).expect("load mamba-130m-hf");
-    let cfg = *hf.backbone.config();
+    let hf = load_mamba(&dir).expect("load mamba-130m-hf");
+    let cfg = hf.cfg;
     let input_dim = cfg.d_model;
 
     // HF checkpoints ship with an empty `input_proj` (the LM bypasses it
@@ -156,7 +156,7 @@ fn run_convergence(dtype: WeightDtype) {
     // training has no identity-branch in its forward kernel so we must
     // synthesize an identity matrix for it. bf16 / f16 take the empty
     // slot as-is — the Mixed forward picks its no-proj path.
-    let mut hf_weights = hf.backbone.weights().clone();
+    let mut hf_weights = hf.weights.clone();
     if matches!(dtype, WeightDtype::F32) && hf_weights.input_proj_w.is_empty() {
         hf_weights.input_proj_w = (0..input_dim * cfg.d_model)
             .map(|i| {

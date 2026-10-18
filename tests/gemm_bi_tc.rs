@@ -496,7 +496,7 @@ fn tc_mixed_training_is_bit_identical_across_runs() {
                 .expect("graph replay");
             assert!(metrics.graph_replayed);
             let stream = tr.ctx().stream.clone();
-            let gradients = tr.grad_arena().to_cpu(&stream).expect("gradients");
+            let gradients = tr.grad_arena().unwrap().to_cpu(&stream).expect("gradients");
             let master = tr.snapshot_master().expect("snapshot");
             replay_digests.push((digest(&gradients), master_digest(&master)));
         }
