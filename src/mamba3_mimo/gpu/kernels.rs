@@ -526,6 +526,38 @@ pub struct ScanGeom {
 }
 
 impl ScanGeom {
+    /// This launch with the heads in more tiles of channels when `groups`
+    /// (sequence, head) pairs in the current tiles would leave most of the
+    /// device's `sms` multiprocessors idle, as a decode step of a few
+    /// sequences does: enough tiles of at least a warp of channels that the
+    /// grid covers every multiprocessor once, the pipelined body where it
+    /// fits `cap` bytes and `max_threads`. The channels share nothing but
+    /// the keys, which every block builds alike, so a tile never changes a
+    /// value.
+    pub fn spread(
+        self,
+        (hd, ds, rank, na): (usize, usize, usize, usize),
+        (groups, sms): (usize, usize),
+        (cap, max_threads): (usize, usize),
+    ) -> ScanGeom {
+        let tiles = hd.div_ceil(self.tile.max(1));
+        let want = sms.div_ceil(groups.max(1)).min(hd.div_ceil(32));
+        if want <= tiles {
+            return self;
+        }
+        let tile = hd.div_ceil(want);
+        [true, false]
+            .into_iter()
+            .map(|pipe| ScanGeom {
+                tile,
+                threads: scan_block_threads(tile, na, pipe),
+                smem: scan_smem_bytes(tile, ds, rank, pipe),
+                pipe,
+            })
+            .find(|g| g.threads <= max_threads / 32 * 32 && g.smem <= cap)
+            .unwrap_or(self)
+    }
+
     /// The launch for `batch` sequences of `nh` heads of `hd` channels: a
     /// block per (sequence, head, tile).
     pub fn cfg(&self, batch: usize, nh: usize, hd: usize) -> LaunchConfig {
@@ -534,6 +566,17 @@ impl ScanGeom {
             block_dim: (self.threads as u32, 1, 1),
             shared_mem_bytes: self.smem as u32,
         }
+    }
+}
+
+/// Threads of a sequential scan block over `tile` channels and `na` angles:
+/// the pipelined body needs a builder per angle (and at least a warp) past
+/// the tile's channels, the plain one a thread per angle.
+fn scan_block_threads(tile: usize, na: usize, pipe: bool) -> usize {
+    if pipe {
+        (tile.next_multiple_of(32) + na.max(32).next_multiple_of(32)).max(256)
+    } else {
+        tile.max(na).next_multiple_of(32)
     }
 }
 
@@ -563,15 +606,7 @@ pub fn scan_geom(
     if hd == 0 || (whole.threads <= max_threads && whole.smem <= cap) {
         return Some(whole);
     }
-    // The pipelined body needs a builder per angle (and at least a warp)
-    // past the tile's channels, the plain one a thread per angle.
-    let threads = |pt: usize, pipe: bool| {
-        if pipe {
-            (pt.next_multiple_of(32) + na.max(32).next_multiple_of(32)).max(256)
-        } else {
-            pt.max(na).next_multiple_of(32)
-        }
-    };
+    let threads = |pt: usize, pipe: bool| scan_block_threads(pt, na, pipe);
     let fits = |pt: usize, pipe: bool| {
         threads(pt, pipe) <= max_threads && scan_smem_bytes(pt, ds, rank, pipe) <= cap
     };
@@ -930,6 +965,29 @@ mod tests {
         for cap in [crate::gpu::launch::SMEM_BUDGET_FLOOR, 99 * 1024] {
             every_validated_head_fits(cap);
         }
+    }
+
+    /// A grid of few (sequence, head) pairs spreads its heads over tiles of
+    /// at least a warp of channels until it covers the multiprocessors, and
+    /// stays as it is when it already does or a head is one warp wide.
+    #[test]
+    fn a_small_scan_grid_spreads_its_heads() {
+        let cap = 99 * 1024;
+        let shape = (64usize, 64usize, 4usize, 16usize);
+        let whole = scan_geom(shape, cap, 1024).unwrap();
+        assert_eq!(whole.tile, 64);
+        let spread = whole.spread(shape, (4, 142), (cap, 1024));
+        assert_eq!(spread.tile, 32);
+        assert!(spread.threads <= 1024 && spread.smem <= cap);
+        assert_eq!(whole.spread(shape, (142, 142), (cap, 1024)), whole);
+        let narrow = (32usize, 64usize, 4usize, 16usize);
+        let w = scan_geom(narrow, cap, 1024).unwrap();
+        assert_eq!(w.spread(narrow, (1, 142), (cap, 1024)), w);
+        let wide = (512usize, 128usize, 2usize, 0usize);
+        let g = scan_geom(wide, cap, 1024).unwrap();
+        let s = g.spread(wide, (2, 170), (cap, 1024));
+        assert!(wide.0.div_ceil(s.tile) * 2 >= 16, "tile {}", s.tile);
+        assert!(s.tile >= 32 && s.smem <= cap && s.threads <= 1024);
     }
 
     fn every_validated_head_fits(cap: usize) {

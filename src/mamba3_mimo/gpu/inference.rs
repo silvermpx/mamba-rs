@@ -934,7 +934,12 @@ impl Mamba3MimoGpuEngine {
                     lw.mimo_z.cached_ptr(),
                     lw.mimo_o.cached_ptr(),
                 ];
-                for (y_first, z_first, cfg) in yz_runs(self.scan.cfg(b, nh, hd)) {
+                let scan = self.scan.spread(
+                    (hd, ds, r, na),
+                    (b * nh, self.ctx.kernels.multiprocessor_count() as usize),
+                    (self.kernels.smem_optin, self.kernels.scan_threads),
+                );
+                for (y_first, z_first, cfg) in yz_runs(scan.cfg(b, nh, hd)) {
                     let mut bld = stream.launch_builder(self.kernels.scan.get(self.act));
                     bld.arg(&gated);
                     bld.arg(&ssm);
@@ -956,7 +961,7 @@ impl Mamba3MimoGpuEngine {
                     bld.arg(&r_i);
                     bld.arg(&na_i);
                     bld.arg(&a_floor);
-                    let (tile, pipe) = (self.scan.tile as i32, i32::from(self.scan.pipe));
+                    let (tile, pipe) = (scan.tile as i32, i32::from(scan.pipe));
                     let done = self.scan_done.cached_ptr();
                     let y_out = if lw.norm_gate.is_some() {
                         win.y.cached_ptr()

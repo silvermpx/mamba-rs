@@ -767,6 +767,12 @@
   guarded by the width, where the walk of any other width indexed them at
   run time and kept them in local memory (96 bytes a thread in the
   forward, 128 in the backward). The chains are unchanged.
+- A MIMO window of few (sequence, head) pairs, a decode step of a small
+  batch above all, splits its heads into tiles of channels until the grid
+  covers the multiprocessors (`ScanGeom::spread`), where it ran a block per
+  head (four blocks for a batch of one with four heads on a 142-SM card).
+  Every block builds the keys itself and the channels share nothing else,
+  so the outputs keep their bits.
 
 ### Fixed
 
