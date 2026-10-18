@@ -659,8 +659,7 @@
   gradient take it in the channel groups they already formed, and the
   backward's token-tile inter term and state terms walk their columns 128
   at a time. Every output keeps its chain, so the bits of the
-  channel-parallel and per-token kernels those shapes ran on. The split
-  pair kernels still stop at 128.
+  channel-parallel and per-token kernels those shapes ran on.
 - The Mamba-2 chunk scan runs every head and state width on its register
   tiles. A block stages the entering states and the C rows 32 state
   indices at a time for a pass of 64 channels, so its shared memory is
@@ -773,17 +772,25 @@
   head (four blocks for a batch of one with four heads on a 142-SM card).
   Every block builds the keys itself and the channels share nothing else,
   so the outputs keep their bits.
-- The MIMO backward's split pair kernels run tiles of their own, a
-  multiple of the pair kernel's tile up to 64 rows
-  (`kernels::split_pairs_bytes`), and the pair weights take the whole
-  block: a thread a pair walks dw's chain, then every thread scales its
-  share of G and M in place, where one thread a pair walked the chain and
-  scaled the pair while the rest of the block waited at the barrier. At
-  rank 16 over a head of 32 channels and 64 states the pair kernel's tile
-  of two tokens kept four of 256 threads busy there; the split kernels take
-  four tokens. Every chain runs over the same columns in the same order,
-  the masked zeros of the pair kernel's tiles included, so the bits are the
-  pair kernel's at any tile.
+- The MIMO backward's pair terms run on the split kernels at every shape.
+  dq takes a block per tile of tokens and 128 state indices; dk, du and dw
+  a block per tile and role, a role holding 128 of dk's state indices and
+  128 of du's channels, with dw on the first. Where a whole head or state
+  does not fit beside the tile, the products stage their operands a slice
+  at a time (`kernels::pairs_plan`, `pairs_dq_bytes`, `pairs_dk_bytes`).
+  The tile of tokens is their own, a power of two up to 16 tokens and 64
+  rows, and the pair weights take the whole block: a thread a pair walks
+  dw's chain, then every thread scales its share of G and M in place,
+  where one thread a pair walked the chain and scaled the pair while the
+  rest of the block waited at the barrier. At rank 16 over a head of 32
+  channels and 64 states the pair kernel's tile of two tokens kept four of
+  256 threads busy there; the split kernels take four tokens. The pair
+  kernel that walked a chunk and head in one block, its rows in a global
+  scratch where they did not fit its shared memory, is gone; it stays
+  frozen in `tests/fixtures/m3mb_pairs_reference.cu`. Its tile still sets
+  the chains: every chain runs over the same columns in the same order,
+  the masked zeros of its tiles included, so the bits are its own at any
+  tile and slice.
 - The MIMO backward's inter-chunk term runs every shape on its token
   tiles. A block stages the entering state a slice of channels at a time
   beside dy's slice, each dq element's chain running on across the slices

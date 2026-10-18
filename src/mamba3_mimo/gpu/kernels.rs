@@ -89,9 +89,8 @@ pub struct MimoChunkedBwd {
     pub pass: CudaFunction,
     pub chunk_dot: CudaFunction,
     pub state_terms: TypedKernel,
-    pub pairs: TypedKernel,
     /// The pair terms split by owner: dq per t-tile, then dk, du and dw per
-    /// s-tile, when [`ChunkedGeom::pairs_tiles`] fits.
+    /// s-tile, at every shape ([`ChunkedGeom::pairs`]).
     pub pairs_dq: TypedKernel,
     pub pairs_dk: TypedKernel,
     pub rot_bwd: CudaFunction,
@@ -141,22 +140,31 @@ pub struct ChunkedGeom {
     /// serves. It walks its columns 128 at a time, so any head and state
     /// width serves when the staging fits.
     pub terms_tiles: (usize, usize),
-    /// `m3mb_pairs`: tokens per tile, bytes.
-    pub pairs: (usize, usize),
-    /// `m3mb_pairs` stages its queries, keys, dy, u and dq tile in a global
-    /// scratch of `tl R (3 N + 2 P + 2)` floats per chunk and head, its
-    /// shared memory holding only G, M and w G.
-    pub pairs_global: bool,
+    /// The pair terms' reference tile: the tokens a tile of the pair kernel
+    /// as it was released (frozen in the tests), whose masked zeros the
+    /// split kernels' chains keep.
+    pub pairs_ref: usize,
     /// Channels per block of `m3m_chunk_state`, `m3m_chunk_scan` and
     /// `m3mb_dsloc`: the whole head when its channels fit a block, else a
     /// tile of them (each output keeps its one chain either way).
     pub pt: usize,
-    /// `m3mb_pairs_dq` and `m3mb_pairs_dk`: their own tile of tokens (a
-    /// multiple of `m3mb_pairs`' tile, whose masked zeros their chains keep)
-    /// and their bytes, or zeros when a tile of more than 64 rows, a head of
-    /// more than 128 channels or more than 128 state indices leaves the pair
-    /// terms to `m3mb_pairs`.
-    pub pairs_tiles: (usize, usize, usize),
+    /// `m3mb_pairs_dq` and `m3mb_pairs_dk`: their tile of tokens, slices and
+    /// bytes ([`pairs_plan`]). Every shape has one.
+    pub pairs: PairsPlan,
+}
+
+/// The split pair kernels' plan: their tile of tokens, the channels a slice
+/// of dy and u in `m3mb_pairs_dq`, the state indices a slice of the keys and
+/// the channels a slice of u in `m3mb_pairs_dk`, and each kernel's bytes. A
+/// slice as wide as its operand stages it once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PairsPlan {
+    pub tq: usize,
+    pub ps: usize,
+    pub dq_bytes: usize,
+    pub kns: usize,
+    pub pss: usize,
+    pub dk_bytes: usize,
 }
 
 /// The widest blocks the chunked path launches, a whole number of warps
@@ -283,10 +291,9 @@ pub fn chunked_geom(
             dsloc_tiles: (0, 0, 0, 0),
             inter_tiles: (0, 0, 0),
             terms_tiles: (0, 0),
-            pairs: (0, 0),
-            pairs_global: false,
+            pairs_ref: 0,
             pt,
-            pairs_tiles: (0, 0, 0),
+            pairs: PairsPlan::default(),
         });
     }
     // The local state gradient: queries [L][R][nt], decays [L].
@@ -294,26 +301,23 @@ pub fn chunked_geom(
         let bytes = (CHUNK * rank * nt + CHUNK) * 4;
         (bytes <= cap).then_some((nt, bytes))
     })?;
-    // The pair terms: queries, keys and the dq tile, dy and u, three
-    // (tile R)^2 blocks, the key and u rows padded by one. When no token
-    // tile stages all of them, the rows go to a global scratch and only
-    // the three blocks stay in shared memory.
-    let staged = [16usize, 8, 4, 2, 1].into_iter().find_map(|tl| {
-        let tr = tl * rank;
-        let bytes = (3 * tr * ds + 2 * tr * hd + 2 * tr + 3 * tr * tr) * 4;
-        (bytes <= cap).then_some((tl, bytes))
-    });
-    let (pairs, pairs_global) = match staged {
-        Some(p) => (p, false),
-        None => (
-            [16usize, 8, 4, 2, 1].into_iter().find_map(|tl| {
-                let tr = tl * rank;
-                let bytes = 3 * tr * tr * 4;
-                (bytes <= cap).then_some((tl, bytes))
-            })?,
-            true,
-        ),
-    };
+    // The pair kernel as it was released took the largest token tile whose
+    // queries, keys and dq tile, dy and u and three (tile R)^2 blocks (the
+    // key and u rows padded by one) its shared memory held, else the
+    // largest whose three blocks it held, its rows then in global memory.
+    // The masked zeros of that tile are part of its chains, which the split
+    // kernels keep, so the tile is still chosen as it chose it.
+    let pairs_ref = [16usize, 8, 4, 2, 1]
+        .into_iter()
+        .find(|&tl| {
+            let tr = tl * rank;
+            (3 * tr * ds + 2 * tr * hd + 2 * tr + 3 * tr * tr) * 4 <= cap
+        })
+        .or_else(|| {
+            [16usize, 8, 4, 2, 1]
+                .into_iter()
+                .find(|&tl| 3 * (tl * rank).pow(2) * 4 <= cap)
+        })?;
     // The token-tile state-terms kernel: rows (t, r) of `tt` tokens padded
     // to a float4 multiple plus 4, and every block the kernel reads as
     // float4 starting on 16 bytes: dS with rows padded by one, u and the
@@ -334,20 +338,7 @@ pub fn chunked_geom(
     let terms_tiles = token_tiles(&|tt, rs| {
         ((hd * (ds + 1)).next_multiple_of(4) + hd * rs + ds * rs + tt * rank * hd + tt * 256) * 4
     });
-    // The split pair kernels at their own tile of tokens
-    // ([`split_pairs_bytes`]): the largest multiple of m3mb_pairs' tile up
-    // to 64 rows whose blocks fit, more pairs a pass and fewer passes over
-    // the same chains.
-    let split = !pairs_global && hd <= 128 && ds <= 128;
-    let pairs_tiles = [16usize, 8, 4, 2, 1]
-        .into_iter()
-        .filter(|_| split)
-        .find_map(|m| {
-            let tq = pairs.0 * m;
-            let (dq, dk) = split_pairs_bytes((hd, ds, rank), tq);
-            (tq <= 16 && tq * rank <= 64 && dq.max(dk) <= cap).then_some((tq, dq, dk))
-        })
-        .unwrap_or((0, 0, 0));
+    let pairs = pairs_plan((hd, ds, rank), cap)?;
     Some(ChunkedGeom {
         state,
         state_tiles,
@@ -357,29 +348,87 @@ pub fn chunked_geom(
         dsloc_tiles: tiles_geom((hd, ds, rank), cap, threads.dsloc_tiles),
         inter_tiles,
         terms_tiles,
-        pairs,
-        pairs_global,
+        pairs_ref,
         pt,
-        pairs_tiles,
+        pairs,
     })
 }
 
-/// The shared memory of `m3mb_pairs_dq` and `m3mb_pairs_dk` at a tile of
-/// `tq` tokens (tr = tq R rows, rows padded to a float4 multiple plus 4):
-/// dy transposed, u, the keys, w M transposed and w for dq; the keys and u
-/// transposed, the queries and dy, G and M, and w with the live flags for
-/// dk, the blocks before w M and G padded to a float4 multiple.
-pub fn split_pairs_bytes((hd, ds, rank): (usize, usize, usize), tq: usize) -> (usize, usize) {
+/// `m3mb_pairs_dq`'s shared memory at a tile of `tq` tokens (tr = tq R
+/// rows, rows padded to a float4 multiple plus 4) and slices of `ps`
+/// channels: dy transposed [ps][TR4 + 4], u [tr][ps + 1] and the keys' 128
+/// state indices [tr][min(N, 128)], padded to a float4 multiple, then w M
+/// transposed [tr][TR4 + 4] and w [tq][tq].
+pub fn pairs_dq_bytes((hd, ds, rank): (usize, usize, usize), tq: usize, ps: usize) -> usize {
     let tr = tq * rank;
     let trs = tr.next_multiple_of(4) + 4;
-    let dq = (hd * trs + (tr * (hd + 1 + ds)).next_multiple_of(4) + tr * trs + tq * tq) * 4;
-    let dk = (ds * trs
-        + hd * trs
-        + (tr * (ds + 1 + hd + 1)).next_multiple_of(4)
+    let ps = ps.min(hd);
+    (ps * trs + (tr * (ps + 1 + ds.min(128))).next_multiple_of(4) + tr * trs + tq * tq) * 4
+}
+
+/// `m3mb_pairs_dk`'s shared memory at a tile of `tq` tokens and slices of
+/// `kns` state indices and `pss` channels: the keys and u transposed
+/// ([kns][TR4 + 4], [pss][TR4 + 4]), the queries and dy a row each (their
+/// whole width where a slice is whole, else the larger of the slice and the
+/// 128 columns a block's role reads, plus one), padded to a float4
+/// multiple, then G and M [tr][TR4 + 4] and the pairs' weights and live
+/// flags [tq][tq].
+pub fn pairs_dk_bytes(
+    (hd, ds, rank): (usize, usize, usize),
+    tq: usize,
+    (kns, pss): (usize, usize),
+) -> usize {
+    let tr = tq * rank;
+    let trs = tr.next_multiple_of(4) + 4;
+    let (kn, pn) = (kns.min(ds), pss.min(hd));
+    let row = |slice: usize, width: usize| if slice == width { width } else { slice.max(128) } + 1;
+    (kn * trs
+        + pn * trs
+        + (tr * (row(kn, ds) + row(pn, hd))).next_multiple_of(4)
         + 2 * tr * trs
         + 2 * tq * tq)
-        * 4;
-    (dq, dk)
+        * 4
+}
+
+/// The split pair kernels' plan for a head of `hd` channels, `ds` state
+/// indices and rank `rank` under `cap` bytes: the largest tile of tokens (a
+/// power of two up to 16, at most 64 rows) whose kernels fit with slices of
+/// at least a warp's worth (32, or the whole width when it is narrower),
+/// each kernel's slices the widest that fit (dk's keys and u halved in turn,
+/// the wider first); else a tile of one token at the widest slices that fit
+/// at all. A tile of one token in slices of one fits any card, so `None`
+/// only under a cap no card has.
+pub fn pairs_plan((hd, ds, rank): (usize, usize, usize), cap: usize) -> Option<PairsPlan> {
+    let dims = (hd, ds, rank);
+    let fit = |tq: usize, floor: usize| {
+        let ps = std::iter::successors(Some(hd), |&ps| (ps > 1).then(|| ps.div_ceil(2)))
+            .take_while(|&ps| ps >= hd.min(floor))
+            .find(|&ps| pairs_dq_bytes(dims, tq, ps) <= cap)?;
+        let (k_floor, p_floor) = (ds.min(floor), hd.min(floor));
+        let (kns, pss) = std::iter::successors(Some((ds, hd)), |&(kn, pn)| {
+            let (k2, p2) = (kn.div_ceil(2), pn.div_ceil(2));
+            match (kn > 1 && k2 >= k_floor, pn > 1 && p2 >= p_floor) {
+                (true, true) if kn >= pn => Some((k2, pn)),
+                (_, true) => Some((kn, p2)),
+                (true, false) => Some((k2, pn)),
+                (false, false) => None,
+            }
+        })
+        .find(|&slices| pairs_dk_bytes(dims, tq, slices) <= cap)?;
+        Some(PairsPlan {
+            tq,
+            ps,
+            dq_bytes: pairs_dq_bytes(dims, tq, ps),
+            kns,
+            pss,
+            dk_bytes: pairs_dk_bytes(dims, tq, (kns, pss)),
+        })
+    };
+    [16usize, 8, 4, 2, 1]
+        .into_iter()
+        .filter(|&tq| tq * rank <= CHUNK)
+        .find_map(|tq| fit(tq, 32))
+        .or_else(|| fit(1, 1))
 }
 
 /// The token-tile inter kernel's shared memory for `ds` state indices at
@@ -805,7 +854,6 @@ impl Mamba3MimoKernels {
                 pass: get("m3mb_pass")?,
                 chunk_dot: get("m3mb_chunk_dot")?,
                 state_terms: typed("m3mb_state_terms")?,
-                pairs: typed("m3mb_pairs")?,
                 pairs_dq: typed("m3mb_pairs_dq")?,
                 pairs_dk: typed("m3mb_pairs_dk")?,
                 rot_bwd: get("m3mb_rot_bwd")?,
@@ -837,7 +885,6 @@ impl Mamba3MimoKernels {
                 (&kernels.chunk_scan_tiles[0], "chunk_scan_tiles"),
                 (&kernels.chunk_scan_tiles[1], "chunk_scan_tiles"),
                 (&kernels.chunk_scan_tiles[2], "chunk_scan_tiles"),
-                (&kernels.cb.pairs, "pairs"),
                 (&kernels.cb.pairs_dq, "pairs dq"),
                 (&kernels.cb.pairs_dk, "pairs dk"),
                 (&kernels.cb.state_terms, "state_terms"),
@@ -916,8 +963,9 @@ mod tests {
 
     /// The released head keeps the full tiles, a wide rank shrinks the
     /// scan's key tile, and every chosen tile fits the limit. A head wider
-    /// than a block runs in tiles of channels, and a head whose rows the pair
-    /// terms cannot stage keeps them in global memory.
+    /// than a block runs in tiles of channels, and a head whose rows the
+    /// released pair kernel kept in global memory takes the split kernels in
+    /// slices.
     #[test]
     fn chunked_geometry_fits_the_shared_memory() {
         let all = ChunkThreads::uniform(1024);
@@ -934,11 +982,21 @@ mod tests {
         );
         let tiles = released.scan_tiles;
         assert_eq!((tiles.0, tiles.1, tiles.2), (16, 16, 64));
-        assert_eq!(released.pairs_tiles, (8, 38784, 62208));
+        assert_eq!(
+            released.pairs,
+            PairsPlan {
+                tq: 8,
+                ps: 64,
+                dq_bytes: 38_784,
+                kns: 128,
+                pss: 64,
+                dk_bytes: 62_208,
+            }
+        );
         assert_eq!(released.inter_tiles.0, 16);
         assert_eq!(released.terms_tiles.0, 8);
         assert_eq!((released.scan.0, released.scan.1), (4, 8));
-        assert_eq!((released.pt, released.pairs_global), (64, false));
+        assert_eq!((released.pt, released.pairs_ref), (64, 8));
         let wide = chunked_geom((16, 16, 16), cap, true, all).unwrap();
         assert_eq!((wide.scan.0, wide.scan.1), (16, 4));
         assert_eq!(wide.dsloc.0, 16);
@@ -964,11 +1022,10 @@ mod tests {
                     g.scan.2,
                     g.scan_tiles.3,
                     g.dsloc.1,
-                    g.pairs.1,
-                    g.pairs_tiles.1,
+                    g.pairs.dq_bytes,
                     g.inter_tiles.2,
                     g.terms_tiles.1,
-                    g.pairs_tiles.2,
+                    g.pairs.dk_bytes,
                 ];
                 for bytes in sizes {
                     assert!(bytes <= cap, "{shape:?} at {cap}: {g:?}");
@@ -985,9 +1042,66 @@ mod tests {
         }
         let tiled = chunked_geom((2048, 16, 1), 227 * 1024, true, all).unwrap();
         assert_eq!((tiled.pt, tiled.state.0, tiled.scan.0), (1024, 1, 1));
-        let staged = chunked_geom((1024, 256, 16), 99 * 1024, true, all).unwrap();
-        assert!(staged.pairs_global, "{staged:?}");
-        assert_eq!(staged.pairs_tiles, (0, 0, 0));
+        // A head whose rows the released pair kernel kept in global memory:
+        // its tile is the one whose three blocks fit, and the split kernels
+        // take the head and the state in slices.
+        let sliced = chunked_geom((1024, 256, 16), 99 * 1024, true, all).unwrap();
+        assert_eq!(sliced.pairs_ref, 4, "{sliced:?}");
+        assert_eq!(
+            sliced.pairs,
+            PairsPlan {
+                tq: 2,
+                ps: 256,
+                dq_bytes: 90_768,
+                kns: 128,
+                pss: 128,
+                dk_bytes: 79_136,
+            }
+        );
+    }
+
+    /// The pair kernels plan every shape the config admits, at every card's
+    /// limit: a power-of-two tile of at most 16 tokens and 64 rows, slices
+    /// within their widths, both kernels within the cap.
+    #[test]
+    fn the_pairs_plan_takes_any_head_and_state_in_slices() {
+        for (hd, ds, rank) in [
+            (64, 128, 4),
+            (256, 128, 2),
+            (2048, 256, 16),
+            (4096, 256, 1),
+            (136, 136, 9),
+            (40, 16, 3),
+            (1, 1, 1),
+            (512, 256, 16),
+        ] {
+            for cap in [48 * 1024, 64 * 1024, 99 * 1024, 227 * 1024] {
+                let p = pairs_plan((hd, ds, rank), cap)
+                    .unwrap_or_else(|| panic!("head {hd} state {ds} rank {rank} at {cap}"));
+                assert!(
+                    p.tq.is_power_of_two()
+                        && p.tq <= 16
+                        && p.tq * rank <= CHUNK
+                        && (1..=hd).contains(&p.ps)
+                        && (1..=ds).contains(&p.kns)
+                        && (1..=hd).contains(&p.pss)
+                        && p.dq_bytes <= cap
+                        && p.dk_bytes <= cap,
+                    "head {hd} state {ds} rank {rank} at {cap}: {p:?}"
+                );
+            }
+        }
+        assert_eq!(
+            pairs_plan((1, 1, 1), 99 * 1024),
+            Some(PairsPlan {
+                tq: 16,
+                ps: 1,
+                dq_bytes: 2_576,
+                kns: 1,
+                pss: 1,
+                dk_bytes: 5_024,
+            })
+        );
     }
 
     /// The inter kernel plans every shape: the entering state whole where it

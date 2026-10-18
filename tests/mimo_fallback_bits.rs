@@ -36,6 +36,7 @@ mod arch;
 #[path = "common/frozen_kernels.rs"]
 mod frozen_kernels;
 
+use cudarc::driver::sys::CUfunction_attribute_enum as CUfunction_attribute;
 use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 use frozen_kernels::frozen_module;
 use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer};
@@ -45,8 +46,8 @@ use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{
     Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, angle_walk_smem_bytes, chunk_scan_tiles_cfg,
-    chunked_geom, inter_tiles_bytes, inter_tiles_geom, scan_bwd_record_floats, scan_bwd_smem_bytes,
-    scan_bwd_threads, scan_smem_bytes, split_pairs_bytes,
+    chunked_geom, inter_tiles_bytes, inter_tiles_geom, pairs_dk_bytes, pairs_dq_bytes,
+    scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_smem_bytes,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -926,10 +927,10 @@ fn mimo_chunked_register_tiles_are_the_channel_parallel_kernels() {
     }
 }
 
-/// The state terms and the pair terms with their rows staged in a global
-/// scratch against shared memory, and the entering lead over a block of 32
-/// threads (the tree's upper levels on each thread's own leaves) against a
-/// thread per channel.
+/// The state terms with their rows staged in a global scratch against
+/// shared memory, and the entering lead over a block of 32 threads (the
+/// tree's upper levels on each thread's own leaves) against a thread per
+/// channel.
 #[test]
 fn mimo_chunked_staging_in_global_is_the_shared_staging() {
     let dev = GpuDevice::new(0).unwrap();
@@ -958,7 +959,6 @@ fn mimo_chunked_staging_in_global_is_the_shared_staging() {
         };
         let dk0 = det(rows * nh * rn, 86, 1.0);
         let du0 = det(rows * nh * rank * hd, 87, 1.0);
-        let dq0 = det(rows * nh * rn, 88, 1.0);
         for dtype in DTYPES {
             let proj = typed_buf(&ctx, &det(rows * inp.ld_proj, 89, 1.0), dtype);
             // The state terms: eight tokens a block, dS staged or not.
@@ -1003,62 +1003,6 @@ fn mimo_chunked_staging_in_global_is_the_shared_staging() {
             for (i, t) in terms.iter().enumerate().skip(1) {
                 assert!(*t == terms[0], "{dtype:?} head {hd}: state terms, run {i}");
             }
-            // The pair terms at a tile of two tokens.
-            let tl = 2usize;
-            let tr = tl * rank;
-            let mut pairs = Vec::new();
-            for glob in [false, true] {
-                let (dq, dk, du) = (
-                    f32_buf(&ctx, &dq0),
-                    f32_buf(&ctx, &dk0),
-                    f32_buf(&ctx, &du0),
-                );
-                let dwp = GpuBuffer::zeros(s, b * inp.nc * nh * 64 * 65 / 2).unwrap();
-                let scratch = glob.then(|| {
-                    GpuBuffer::zeros(s, b * inp.nc * nh * tr * (3 * ds + 2 * hd + 2)).unwrap()
-                });
-                let smem = if glob {
-                    3 * tr * tr * 4
-                } else {
-                    (3 * tr * ds + 2 * tr * hd + 2 * tr + 3 * tr * tr) * 4
-                };
-                let mut args = vec![
-                    Arg::P(dq.cached_ptr()),
-                    Arg::P(dk.cached_ptr()),
-                    Arg::P(du.cached_ptr()),
-                    Arg::P(dwp.cached_ptr()),
-                    Arg::P(inp.dy.cached_ptr()),
-                    Arg::P(proj.cached_ptr()),
-                    Arg::L(inp.ld_proj as i64),
-                    Arg::P(inp.bn.cached_ptr()),
-                    Arg::P(inp.cn.cached_ptr()),
-                    Arg::P(inp.b_bias.cached_ptr()),
-                    Arg::P(inp.c_bias.cached_ptr()),
-                    Arg::P(inp.coef.cached_ptr()),
-                    Arg::P(inp.sn.cached_ptr()),
-                    Arg::P(inp.cs.cached_ptr()),
-                    Arg::P(inp.mx.cached_ptr()),
-                    Arg::P(scratch.as_ref().map_or(0, |g| g.cached_ptr())),
-                ];
-                args.extend(ints(&[tl as i32]));
-                launch_runs(
-                    &ctx,
-                    k.cb.pairs.get(dtype),
-                    cfg((b * inp.nc, nh, 1), 256, smem),
-                    &args,
-                    &[NO_PACKING],
-                );
-                pairs.push([
-                    bits_f32(&ctx, &dq),
-                    bits_f32(&ctx, &dk),
-                    bits_f32(&ctx, &du),
-                    bits_f32(&ctx, &dwp),
-                ]);
-            }
-            assert!(
-                pairs[1] == pairs[0],
-                "{dtype:?} head {hd} rank {rank}: pair terms"
-            );
         }
         // The entering lead, a thread per channel against a block of 32.
         let lanes = hd.next_multiple_of(32);
@@ -1430,18 +1374,36 @@ fn mimo_inter_slices_keep_the_per_token_bits() {
     eprintln!("inter slices against the per-token kernel on {checked} cases");
 }
 
-/// The split pair kernels at their own tile of tokens against the pair
-/// kernel at its tile, which the trainer runs where they do not serve: dq,
-/// dk, du and dw bit for bit at every multiple of the pair kernel's tile up
-/// to 64 rows (the masked zeros its tiles put in a chain walked as it walks
-/// them), without a packing and with rows packing several sequences, from a
-/// runtime rank of 3 to rank 16 over 16 tokens' rows.
+/// The split pair kernels against the pair kernel as it was released
+/// (frozen in `fixtures/m3mb_pairs_reference.cu`) at the reference tile the
+/// trainer plans: dq, dk, du and dw bit for bit at every tile of tokens up
+/// to 16 and 64 rows, below and above the reference tile, with every
+/// operand whole, in slices of about a third and one at a time, in f32,
+/// bf16 and f16, without a packing and with rows packing several
+/// sequences; at heads and states within one block of 128 and past it
+/// (heads of 136 and 256, states of 160 and 256), at ranks from 1 to 16
+/// (9 among them). The reference stages its rows in shared memory where
+/// they fit and in its global scratch otherwise, as it was released.
 #[test]
-fn mimo_split_pairs_keep_the_pair_kernel_s_bits_at_any_tile() {
+fn mimo_split_pairs_keep_the_released_pair_bits() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
     let s = &ctx.stream;
-    let wide_ranks = [
+    let frozen = frozen_module(
+        dev.context(),
+        arch::arch0(),
+        None,
+        include_str!("fixtures/m3mb_pairs_reference.cu"),
+    );
+    let reference: Vec<CudaFunction> = ["", "_bf16", "_f16"]
+        .iter()
+        .map(|t| {
+            frozen
+                .load_function(&format!("m3mb_reference_pairs{t}"))
+                .unwrap()
+        })
+        .collect();
+    let wide = [
         Shape {
             batch: 2,
             seq: 100,
@@ -1462,25 +1424,72 @@ fn mimo_split_pairs_keep_the_pair_kernel_s_bits_at_any_tile() {
             rank: 8,
             na: 4,
         },
+        Shape {
+            batch: 1,
+            seq: 100,
+            nh: 2,
+            ng: 1,
+            hd: 256,
+            ds: 160,
+            rank: 2,
+            na: 20,
+        },
+        Shape {
+            batch: 1,
+            seq: 100,
+            nh: 1,
+            ng: 1,
+            hd: 136,
+            ds: 256,
+            rank: 9,
+            na: 32,
+        },
     ];
     let mut checked = 0;
-    for sh in SCAN_SHAPES.into_iter().chain(wide_ranks) {
+    for sh in SCAN_SHAPES.into_iter().chain(WIDE_SHAPES).chain(wide) {
         let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
         let inp = ChunkedInputs::new(&ctx, sh);
         let ids = packed_ids(&ctx, sh.batch, inp.seq);
         let (b, nh, hd, ds, rank, na) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank, sh.na);
-        let geom = chunked_geom((hd, ds, rank), k.smem_optin, true, k.chunk_threads).unwrap();
-        let (tl, pairs_smem) = geom.pairs;
-        assert!(!geom.pairs_global, "head {hd} rank {rank}: {geom:?}");
-        let tiles: Vec<usize> = [1usize, 2, 4, 8, 16]
+        let cap = k.smem_optin;
+        let geom = chunked_geom((hd, ds, rank), cap, true, k.chunk_threads).unwrap();
+        let tl = geom.pairs_ref;
+        let tr = tl * rank;
+        // The reference as the trainer ran it: rows in shared memory where
+        // they fit, else in the global scratch beside its three blocks.
+        let staged = (3 * tr * ds + 2 * tr * hd + 2 * tr + 3 * tr * tr) * 4;
+        let (ref_smem, glob) = if staged <= cap {
+            (staged, None)
+        } else {
+            let floats = b * inp.nc * nh * tr * (3 * ds + 2 * hd + 2);
+            (3 * tr * tr * 4, Some(GpuBuffer::zeros(s, floats).unwrap()))
+        };
+        for f in &reference {
+            f.set_attribute(
+                CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                ref_smem as i32,
+            )
+            .unwrap();
+        }
+        // The trainer's plan, then every tile of tokens with its operands
+        // whole, in slices of about a third and one at a time, where its
+        // blocks fit.
+        let plan = geom.pairs;
+        let thirds = (hd.div_ceil(3), ds.div_ceil(3), hd.div_ceil(3));
+        let mut cases = vec![(plan.tq, (plan.ps, plan.kns, plan.pss))];
+        for case in [16usize, 8, 4, 2, 1]
             .into_iter()
-            .map(|m| tl * m)
-            .filter(|&tq| {
-                let (dq, dk) = split_pairs_bytes((hd, ds, rank), tq);
-                tq <= 16 && tq * rank <= 64 && dq.max(dk) <= k.smem_optin
+            .filter(|&tq| tq * rank <= 64)
+            .flat_map(|tq| [(hd, ds, hd), thirds, (1, 1, 1)].map(|slices| (tq, slices)))
+            .filter(|&(tq, (ps, kns, pss))| {
+                pairs_dq_bytes((hd, ds, rank), tq, ps) <= cap
+                    && pairs_dk_bytes((hd, ds, rank), tq, (kns, pss)) <= cap
             })
-            .collect();
-        assert!(!tiles.is_empty(), "head {hd} rank {rank}: no split tile");
+        {
+            if !cases.contains(&case) {
+                cases.push(case);
+            }
+        }
         let rows = b * inp.seq;
         let rn = rank * ds;
         let ints = |extra: &[i32]| -> Vec<Arg> {
@@ -1495,7 +1504,7 @@ fn mimo_split_pairs_keep_the_pair_kernel_s_bits_at_any_tile() {
         let dk0 = det(rows * nh * rn, 95, 1.0);
         let du0 = det(rows * nh * rank * hd, 96, 1.0);
         let pairs_len = b * inp.nc * nh * 64 * 65 / 2;
-        for dtype in DTYPES {
+        for (dtype, f) in DTYPES.into_iter().zip(&reference) {
             let proj = typed_buf(&ctx, &det(rows * inp.ld_proj, 97, 1.0), dtype);
             for packing in [NO_PACKING, Arg::P(ids.cached_ptr())] {
                 let (dq, dk, du) = (
@@ -1520,13 +1529,13 @@ fn mimo_split_pairs_keep_the_pair_kernel_s_bits_at_any_tile() {
                     Arg::P(inp.sn.cached_ptr()),
                     Arg::P(inp.cs.cached_ptr()),
                     Arg::P(inp.mx.cached_ptr()),
-                    Arg::P(0),
+                    Arg::P(glob.as_ref().map_or(0, |g| g.cached_ptr())),
                 ];
                 args.extend(ints(&[tl as i32]));
                 launch_runs(
                     &ctx,
-                    k.cb.pairs.get(dtype),
-                    cfg((b * inp.nc, nh, 1), 256, pairs_smem),
+                    f,
+                    cfg((b * inp.nc, nh, 1), 256, ref_smem),
                     &args,
                     &[packing],
                 );
@@ -1536,16 +1545,16 @@ fn mimo_split_pairs_keep_the_pair_kernel_s_bits_at_any_tile() {
                     bits_f32(&ctx, &du),
                     bits_f32(&ctx, &dwp),
                 ];
-                for &tq in &tiles {
+                for &(tq, (ps, kns, pss)) in &cases {
                     let (dq, dk, du) = (
                         f32_buf(&ctx, &dq0),
                         f32_buf(&ctx, &dk0),
                         f32_buf(&ctx, &du0),
                     );
                     let dwp = GpuBuffer::zeros(s, pairs_len).unwrap();
-                    let (dq_smem, dk_smem) = split_pairs_bytes((hd, ds, rank), tq);
                     let threads = 8 * (tq * rank).next_multiple_of(4);
-                    let grid = (b * inp.nc, nh, 64usize.div_ceil(tq));
+                    let tiles = 64usize.div_ceil(tq);
+                    let (n_blocks, p_blocks) = (ds.div_ceil(128), hd.div_ceil(128));
                     let mut q_args = vec![
                         Arg::P(dq.cached_ptr()),
                         Arg::P(inp.dy.cached_ptr()),
@@ -1558,11 +1567,15 @@ fn mimo_split_pairs_keep_the_pair_kernel_s_bits_at_any_tile() {
                         Arg::P(inp.cs.cached_ptr()),
                         Arg::P(inp.mx.cached_ptr()),
                     ];
-                    q_args.extend(ints(&[tq as i32, tl as i32]));
+                    q_args.extend(ints(&[tq as i32, tl as i32, ps as i32]));
                     launch_runs(
                         &ctx,
                         k.cb.pairs_dq.get(dtype),
-                        cfg(grid, threads, dq_smem),
+                        cfg(
+                            (b * inp.nc, nh, tiles * n_blocks),
+                            threads,
+                            pairs_dq_bytes((hd, ds, rank), tq, ps),
+                        ),
                         &q_args,
                         &[packing],
                     );
@@ -1582,11 +1595,15 @@ fn mimo_split_pairs_keep_the_pair_kernel_s_bits_at_any_tile() {
                         Arg::P(inp.cs.cached_ptr()),
                         Arg::P(inp.mx.cached_ptr()),
                     ];
-                    k_args.extend(ints(&[tq as i32, tl as i32]));
+                    k_args.extend(ints(&[tq as i32, tl as i32, kns as i32, pss as i32]));
                     launch_runs(
                         &ctx,
                         k.cb.pairs_dk.get(dtype),
-                        cfg(grid, threads, dk_smem),
+                        cfg(
+                            (b * inp.nc, nh, tiles * n_blocks.max(p_blocks)),
+                            threads,
+                            pairs_dk_bytes((hd, ds, rank), tq, (kns, pss)),
+                        ),
                         &k_args,
                         &[packing],
                     );
@@ -1600,8 +1617,9 @@ fn mimo_split_pairs_keep_the_pair_kernel_s_bits_at_any_tile() {
                     {
                         assert!(
                             g == w,
-                            "{dtype:?} head {hd} state {ds} rank {rank}, pair tile {tl}, split \
-                             tile {tq}, {} packing: {name}",
+                            "{dtype:?} head {hd} state {ds} rank {rank}, reference tile {tl}, \
+                             split tile {tq}, slices {:?}, {} packing: {name}",
+                            (ps, kns, pss),
                             if matches!(packing, Arg::P(0)) {
                                 "no"
                             } else {
@@ -1614,7 +1632,7 @@ fn mimo_split_pairs_keep_the_pair_kernel_s_bits_at_any_tile() {
             }
         }
     }
-    eprintln!("split pairs against the pair kernel on {checked} cases");
+    eprintln!("split pairs against the released pair kernel on {checked} cases");
 }
 
 /// The chunked backward's angle walk stages a batch of tokens at a time,

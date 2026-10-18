@@ -42,9 +42,9 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::{MimoChunkedPtrs, MimoExec, launch_chunked_scan, row_pieces};
 use super::kernels::{
-    CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, angle_walk_smem_bytes,
-    chunked_geom, scan_bwd_global_geom, scan_bwd_record_floats, scan_bwd_smem_bytes,
-    scan_bwd_threads, scan_geom,
+    CHUNK, ChunkedGeom, Mamba3MimoKernels, PairsPlan, ScanBwdGlobalGeom, ScanGeom,
+    angle_walk_smem_bytes, chunked_geom, scan_bwd_global_geom, scan_bwd_record_floats,
+    scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
 };
 use crate::config::ScanMode;
 use crate::gpu::adamw::{
@@ -447,11 +447,10 @@ struct ChunkedBwd {
     tmp: GpuBuffer,
     /// The output norm's weight partials per row `[rows, d_inner]`.
     gw: GpuBuffer,
-    /// The generic state terms' keys and inputs, the generic pair terms'
-    /// staged rows and the lead's block-sum leaves, each in global memory
-    /// only when the head needs it (one element otherwise).
+    /// The generic state terms' keys and inputs and the lead's block-sum
+    /// leaves, each in global memory only when the head needs it (one
+    /// element otherwise).
     terms_glob: GpuBuffer,
-    pairs_glob: GpuBuffer,
     lead_leaves: GpuBuffer,
 }
 
@@ -784,13 +783,6 @@ impl Mamba3MimoGpuTrainer {
                 terms_glob: z(chunked.map_or(1, |_| {
                     if (rank * ds + rank * hd) * 4 > optin {
                         batch * nc * nh * CHUNK.div_ceil(TERMS_GROUP) * (rank * ds + rank * hd)
-                    } else {
-                        1
-                    }
-                }))?,
-                pairs_glob: z(chunked.map_or(1, |g| {
-                    if g.pairs_global {
-                        batch * nc * nh * g.pairs.0 * rank * (3 * ds + 2 * hd + 2)
                     } else {
                         1
                     }
@@ -2981,50 +2973,53 @@ impl Mamba3MimoGpuTrainer {
                     [seq_idx]
                 );
             }
-            let (tl, pairs_smem) = geom.pairs;
-            let tl_i = tl as i32;
-            if geom.pairs_tiles.0 > 0 {
-                let (tq, dq_smem, dk_smem) = geom.pairs_tiles;
-                let tq_i = tq as i32;
-                let threads = 8 * (tq * rank).next_multiple_of(4);
-                let tiles = CHUNK.div_ceil(tq);
-                go_y!(
-                    k.cb.pairs_dq.get(act),
-                    cfg3(b * nc, nh, tiles, threads, dq_smem),
-                    "pairs dq",
-                    [
-                        dq, dy, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i, ng_i, hd_i,
-                        ds_i, r_i, na_i, tq_i, tl_i
-                    ],
-                    [seq_idx]
-                );
-                go_y!(
-                    k.cb.pairs_dk.get(act),
-                    cfg3(b * nc, nh, tiles, threads, dk_smem),
-                    "pairs dk",
-                    [
-                        dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x, t_i,
-                        nh_i, ng_i, hd_i, ds_i, r_i, na_i, tq_i, tl_i
-                    ],
-                    [seq_idx]
-                );
-            } else {
-                let pairs_glob = if geom.pairs_global {
-                    s.cb.pairs_glob.cached_ptr()
-                } else {
-                    0u64
-                };
-                go_y!(
-                    k.cb.pairs.get(act),
-                    cfg3(b * nc, nh, 1, 256, pairs_smem),
-                    "pairs",
-                    [
-                        dq, dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x,
-                        pairs_glob, t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i, tl_i
-                    ],
-                    [seq_idx]
-                );
-            }
+            // The pair terms split by owner at their own tile, dq in blocks of
+            // 128 state indices and dk, du and dw in roles of 128 state
+            // indices and channels, their chains those of the reference tile.
+            let PairsPlan {
+                tq,
+                ps,
+                dq_bytes,
+                kns,
+                pss,
+                dk_bytes,
+            } = geom.pairs;
+            let (tq_i, tl_i, ps_i, kns_i, pss_i) = (
+                tq as i32,
+                geom.pairs_ref as i32,
+                ps as i32,
+                kns as i32,
+                pss as i32,
+            );
+            let threads = 8 * (tq * rank).next_multiple_of(4);
+            let tiles = CHUNK.div_ceil(tq);
+            let (n_blocks, p_blocks) = (ds.div_ceil(128), hd.div_ceil(128));
+            go_y!(
+                k.cb.pairs_dq.get(act),
+                cfg3(b * nc, nh, tiles * n_blocks, threads, dq_bytes),
+                "pairs dq",
+                [
+                    dq, dy, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i, ng_i, hd_i,
+                    ds_i, r_i, na_i, tq_i, tl_i, ps_i
+                ],
+                [seq_idx]
+            );
+            go_y!(
+                k.cb.pairs_dk.get(act),
+                cfg3(
+                    b * nc,
+                    nh,
+                    tiles * n_blocks.max(p_blocks),
+                    threads,
+                    dk_bytes
+                ),
+                "pairs dk",
+                [
+                    dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x, t_i,
+                    nh_i, ng_i, hd_i, ds_i, r_i, na_i, tq_i, tl_i, kns_i, pss_i
+                ],
+                [seq_idx]
+            );
             // A thread per channel, or for a head wider than the block a
             // power of two of them taking the channels in turns.
             let lanes = hd.next_multiple_of(32);
