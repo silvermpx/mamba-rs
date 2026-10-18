@@ -152,8 +152,9 @@ fn deterministic_inference_direct_empty_output_has_no_terminal_record() {
     let ctx = GpuCtx::new(&device).unwrap();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Inference);
-    // Canonical F32 forwarding rejects empty output axes before dispatch.
-    // The direct Inference adapter instead preserves terminal no-op behavior.
+    // Every entry settles an empty output as BLAS does, the canonical F32
+    // forwarding and the direct Inference adapter alike: the call succeeds,
+    // nothing runs and no route is recorded.
     let f32_null = TypedPtr {
         ptr: 0,
         dtype: WeightDtype::F32,
@@ -161,11 +162,7 @@ fn deterministic_inference_direct_empty_output_has_no_terminal_record() {
     for shape in [(0, 37, 96), (3, 37, 0)] {
         let trace = ctx
             .record_eager_gemm_trace(|| {
-                let error =
-                    gpu_gemm_typed_forward_raw(&ctx, f32_null, f32_null, f32_null, None, shape)
-                        .expect_err("canonical F32 forwarding must reject empty output axes");
-                assert!(error.contains("output axes must be positive"), "{error}");
-                Ok(())
+                gpu_gemm_typed_forward_raw(&ctx, f32_null, f32_null, f32_null, None, shape)
             })
             .unwrap();
         assert!(trace.routes().is_empty());
