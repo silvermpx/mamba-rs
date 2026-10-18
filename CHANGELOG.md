@@ -821,9 +821,9 @@
 - The SISO chunked backward takes the warp dQKV kernel only up to head 16
   and state 16 (`route::WARP_DQKV_HEAD_MAX`, `WARP_DQKV_STATE_MAX`) and the
   tiled one past either, where a head of up to 32 took the warp kernel
-  whenever its tile fit, up to state 142 at head 16. On an RTX 5090 the
-  tiled stage ran 1.4 to 2.5 times faster at head 32 or state 32 to 64 and
-  10 to 17 times from state 96 on, and the warp stage stays 1.5 times
+  whenever its tile fit, up to state 142 at head 16. The tiled stage
+  takes 29 to 60% less time at head 32 or state 32 to 64 and 90 to 94%
+  less from state 96 on, and the warp stage stays 1.5 times
   faster at heads 8 and 16 with state 16. The two give the same bits.
 - The Mamba-1 parallel scan forwards hold a group of channels in a block,
   each channel in the fewest threads, a power of two from 8, whose eight
@@ -867,9 +867,8 @@
   driver's occupancy calculator answers at load for every state. On a part
   with 100 KB of shared memory a SM two f32 blocks fit only up to 146
   states; with the carries in global memory they fit at every state, and
-  the fold runs 1.36 times as fast from 147 states on an RTX 6000 Ada and
-  1.17 times on an RTX 5090. A
-  carry is read once a state and chunk and written by one thread, and the
+  from 147 states the fold takes up to 26% less time. A carry is read once
+  a state and chunk and written by one thread, and the
   values and operations are the same, so every output keeps its bits
   (`tests/m1_fold_carries.rs`). The half folds keep two blocks a SM with
   their carries shared at every state; a third block measured no faster
