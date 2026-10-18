@@ -42,7 +42,7 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::{MimoChunkedPtrs, MimoExec, launch_chunked_scan, row_pieces};
 use super::kernels::{
-    CHUNK, ChunkedGeom, Mamba3MimoKernels, PairsPlan, ScanBwdGlobalGeom, ScanGeom,
+    CHUNK, ChunkedGeom, Mamba3MimoKernels, PairsPlan, ScanBwdGlobalGeom, ScanGeom, TermsPlan,
     angle_walk_smem_bytes, chunked_geom, scan_bwd_global_geom, scan_bwd_record_floats,
     scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
 };
@@ -447,15 +447,12 @@ struct ChunkedBwd {
     tmp: GpuBuffer,
     /// The output norm's weight partials per row `[rows, d_inner]`.
     gw: GpuBuffer,
-    /// The generic state terms' keys and inputs and the lead's block-sum
+    /// The state terms' ste rows of every block and the lead's block-sum
     /// leaves, each in global memory only when the head needs it (one
     /// element otherwise).
-    terms_glob: GpuBuffer,
+    terms_steb: GpuBuffer,
     lead_leaves: GpuBuffer,
 }
-
-/// Tokens per block of the generic state terms kernel.
-const TERMS_GROUP: usize = 8;
 
 /// A MIMO trainer's carried recurrence on the host: every layer's SSM
 /// state, the K and V of the last step, and the accumulated angles.
@@ -780,9 +777,10 @@ impl Mamba3MimoGpuTrainer {
                 gdtb: z(ch_n(rows * nh))?,
                 tmp: z(gate_n(nh * rank * hd))?,
                 gw: z(if cfg.is_outproj_norm { rows * di } else { 1 })?,
-                terms_glob: z(chunked.map_or(1, |_| {
-                    if (rank * ds + rank * hd) * 4 > optin {
-                        batch * nc * nh * CHUNK.div_ceil(TERMS_GROUP) * (rank * ds + rank * hd)
+                terms_steb: z(chunked.map_or(1, |g| {
+                    let t = g.terms;
+                    if t.steb_global {
+                        batch * nc * nh * CHUNK.div_ceil(t.tt) * t.tt * rank * hd
                     } else {
                         1
                     }
@@ -2924,55 +2922,39 @@ impl Mamba3MimoGpuTrainer {
                 "chunk dot",
                 [dot, enter, dsl, count, pn_i]
             );
-            // The state terms take the chunk's state gradient into shared
-            // memory once per group of tokens when it fits, and their keys
-            // and inputs into a global scratch when those do not.
-            let (tg, keys_inputs) = (TERMS_GROUP, (rank * ds + rank * hd) * 4);
-            let terms_glob = keys_inputs > k.smem_optin;
-            let terms_base = if terms_glob { 0 } else { keys_inputs };
-            let staged = terms_base + hd * (ds + 1) * 4;
-            let (stage, terms_smem) = if staged <= k.smem_optin {
-                (1i32, staged)
-            } else {
-                (0i32, terms_base)
-            };
-            let glob = if terms_glob {
-                s.cb.terms_glob.cached_ptr()
+            // The state terms a tile of tokens at once: the chunk's dS, u and
+            // the keys whole where they fit, else a slice at a time, the ste
+            // rows in a global scratch where they do not fit beside them.
+            let TermsPlan {
+                tt,
+                whole,
+                ps,
+                ns,
+                steb_global,
+                bytes: terms_bytes,
+            } = geom.terms;
+            let steb = if steb_global {
+                s.cb.terms_steb.cached_ptr()
             } else {
                 0u64
             };
-            let tg_i = tg as i32;
-            if geom.terms_tiles.0 > 0 {
-                let (tt, smem) = geom.terms_tiles;
-                let tt_i = tt as i32;
-                go_y!(
-                    k.cb.state_terms_tiles.get(act),
-                    cfg3(
-                        b * nc,
-                        nh,
-                        CHUNK.div_ceil(tt),
-                        8 * (tt * rank).next_multiple_of(4),
-                        smem
-                    ),
-                    "state terms",
-                    [
-                        dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i,
-                        ng_i, hd_i, ds_i, r_i, na_i, tt_i
-                    ],
-                    [seq_idx]
-                );
-            } else {
-                go_y!(
-                    k.cb.state_terms.get(act),
-                    cfg3(b * nc, nh, CHUNK.div_ceil(tg), 256, terms_smem),
-                    "state terms",
-                    [
-                        dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, glob, t_i,
-                        nh_i, ng_i, hd_i, ds_i, r_i, na_i, tg_i, stage
-                    ],
-                    [seq_idx]
-                );
-            }
+            let (tt_i, whole_i, ps_i, ns_i) = (tt as i32, i32::from(whole), ps as i32, ns as i32);
+            go_y!(
+                k.cb.state_terms_tiles.get(act),
+                cfg3(
+                    b * nc,
+                    nh,
+                    CHUNK.div_ceil(tt),
+                    8 * (tt * rank).next_multiple_of(4),
+                    terms_bytes
+                ),
+                "state terms",
+                [
+                    dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, steb, t_i, nh_i,
+                    ng_i, hd_i, ds_i, r_i, na_i, tt_i, whole_i, ps_i, ns_i
+                ],
+                [seq_idx]
+            );
             // The pair terms split by owner at their own tile, dq in blocks of
             // 128 state indices and dk, du and dw in roles of 128 state
             // indices and channels, their chains those of the reference tile.

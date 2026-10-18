@@ -791,6 +791,16 @@
   the chains: every chain runs over the same columns in the same order,
   the masked zeros of its tiles included, so the bits are its own at any
   tile and slice.
+- The MIMO backward's state terms run every shape on their token tiles.
+  Where the chunk's state gradient, the inputs and the keys do not fit
+  beside a tile, each product stages its operands a slice at a time, dk a
+  slice of channels and ste a slice of state indices, the chains running on
+  across the slices, and a head whose ste rows do not fit beside the slices
+  keeps them in a global scratch (`kernels::terms_plan`,
+  `terms_whole_bytes`, `terms_sliced_bytes`). Those shapes ran a block per
+  group of tokens a token at a time, its rows in global memory; that kernel
+  is gone and stays frozen in `tests/fixtures/m3mb_state_terms_reference.cu`.
+  Every chain is its own, so the bits are unchanged.
 - The MIMO backward's inter-chunk term runs every shape on its token
   tiles. A block stages the entering state a slice of channels at a time
   beside dy's slice, each dq element's chain running on across the slices

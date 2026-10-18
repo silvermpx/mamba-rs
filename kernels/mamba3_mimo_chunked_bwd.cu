@@ -611,128 +611,38 @@ extern "C" __global__ void m3mb_chunk_dot(
     if (threadIdx.x == 0) dot[q] = s;
 }
 
-// The state terms of the chunk's tokens, one block per (chunk, head,
-// group of `tg` tokens), each token's rotated keys and inputs staged:
-//   dk_s[r][n] = c_s sum_p dS_c[p][n] u_s[r][p]   (the start of dk)
-//   ste[r][p]  = sum_n dS_c[p][n] k_s[r][n];  du_s[r][p] += c_s ste
-//   dc_s       = sum_{r, p} u_s[r][p] ste[r][p]   (a fixed tree)
-// for the tokens of the chunk's last packed sequence (every token without a
-// packing); an earlier sequence's token reaches no later chunk, so its dk
-// starts at zero, its du keeps its value and its dc_s is zero.
-// With `stage` the chunk's state gradient dS_c is read into shared memory
-// once for the group, rows padded by one, else every token reads it from
-// global memory. The token's keys and inputs stage in shared memory, or
-// with `glob` in that block's slice of a global scratch [blocks][R N + R P]
-// when they do not fit. Grid (B * nc, H, ceil(64 / tg)), block 256 (the
-// tree's width), dynamic shared memory R * N + R * P floats without
-// `glob`, plus P * (N + 1) with `stage`.
-template <typename T>
-__device__ __forceinline__ void m3mb_state_terms_body(
-    float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dcs,
-    const float* __restrict__ dst, const T* __restrict__ proj, long long ld_proj,
-    const float* __restrict__ bn, const float* __restrict__ b_bias,
-    const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    const float* __restrict__ mimo_x, float* __restrict__ glob,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg, int stage,
-    int y_first, /* this run's first y block */
-    const int* __restrict__ seq_idx
-) {
-    extern __shared__ float m3mb_sm[];
-    __shared__ float red[256];
-    const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
-    const long long bc = blockIdx.x;
-    const int h = y_first + blockIdx.y;
-    const int c = (int)(bc % nc);
-    const long long b = bc / nc;
-    const int t0 = c * M3M_CHUNK;
-    const int lc = min(M3M_CHUNK, seq - t0);
-    const int s0 = blockIdx.z * tg;
-    if (s0 >= lc) return;
-    const int s1 = min(s0 + tg, lc);
-    const int g = h / (nh / ng);
-    const int di = nh * hd;
-    const int rgn = rank * ng * ds;
-    const int half = ds / 2;
-    const float acs_last = coef[((b * seq + t0 + lc - 1) * nh + h) * 4 + 3];
-    const float* dsc = dst + (bc * nh + h) * (long long)hd * ds;
-    const int sf = vl_seq_first(seq_idx, b, seq, t0, t0 + lc - 1) - t0;
-    const long long blk = ((long long)bc * nh + h) * gridDim.z + blockIdx.z;
-    float* kt = glob == nullptr ? m3mb_sm : glob + blk * ((long long)rank * (ds + hd));  // [R][N]
-    float* ut = kt + rank * ds;         // [R][P]
-    float* dss = glob == nullptr ? ut + rank * hd : m3mb_sm;  // [P][N + 1] with stage
-    const int dld = stage ? ds + 1 : ds;
-    const float* dsr = stage ? dss : dsc;
-    if (stage) {
-        for (int i = threadIdx.x; i < hd * ds; i += blockDim.x) {
-            const int p = i / ds;
-            dss[p * (ds + 1) + i - p * ds] = dsc[i];
-        }
-    }
-    for (int s = s0; s < s1; s++) {
-        const long long row = b * seq + t0 + s;
-        if (s < sf) {
-            for (int i = threadIdx.x; i < rank * ds; i += blockDim.x)
-                dk[(row * nh + h) * rank * ds + i] = 0.0f;
-            if (threadIdx.x == 0) dcs[row * nh + h] = 0.0f;
-            continue;
-        }
-        const float* cf = coef + (row * nh + h) * 4;
-        const float cfs = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
-        __syncthreads();
-        for (int i = threadIdx.x; i < rank * ds; i += blockDim.x) {
-            const int r = i / ds, n = i % ds;
-            kt[i] = m3m_rot(bn + row * rgn + ((long long)r * ng + g) * ds,
-                            b_bias + ((long long)h * rank + r) * ds, n, half, na,
-                            sn + (row * nh + h) * na, cs + (row * nh + h) * na);
-        }
-        for (int i = threadIdx.x; i < rank * hd; i += blockDim.x) {
-            const int r = i / hd, p = i % hd;
-            const float x = to_f(proj[row * ld_proj + di + (long long)h * hd + p]);
-            ut[i] = __fmul_rn(mimo_x[((long long)h * rank + r) * hd + p], x);
-        }
-        __syncthreads();
-        for (int i = threadIdx.x; i < rank * ds; i += blockDim.x) {
-            const int r = i / ds, n = i % ds;
-            float acc = 0.0f;
-            for (int p = 0; p < hd; p++)
-                acc = __fmaf_rn(dsr[(long long)p * dld + n], ut[r * hd + p], acc);
-            dk[((row * nh + h) * rank + r) * ds + n] = __fmul_rn(cfs, acc);
-        }
-        float part = 0.0f;
-        for (int i = threadIdx.x; i < rank * hd; i += blockDim.x) {
-            const int r = i / hd, p = i % hd;
-            float ste = 0.0f;
-            for (int n = 0; n < ds; n++)
-                ste = __fmaf_rn(dsr[(long long)p * dld + n], kt[r * ds + n], ste);
-            const long long o = ((row * nh + h) * rank + r) * hd + p;
-            du[o] = __fmaf_rn(cfs, ste, du[o]);
-            part = __fmaf_rn(ut[i], ste, part);
-        }
-        const float sum = m3mb_block_sum(part, red);
-        if (threadIdx.x == 0) dcs[row * nh + h] = sum;
-    }
-}
-
-// m3mb_state_terms for a tile of `tt` tokens at once, rows (s, r):
+// The state terms of a tile of `tt` tokens, rows (s, r):
 //   dk[row][n]  = c_s sum_p u[row][p] dS[p][n]   (p ascending from 0)
 //   ste[row][p] = sum_n k[row][n] dS[p][n]       (n ascending from 0)
-//   du[row][p]  = fma(c_s, ste, du);  dc_s by m3mb_state_terms' 256-thread
-//   tree: virtual thread j sums fma(u, ste) over i = j, j + 256, ...
-//   (i = r P + p), then the halving tree, every token's tree in parallel.
+//   du[row][p]  = fma(c_s, ste, du);  dc_s by a fixed 256-wide tree:
+//   virtual thread j sums fma(u, ste) over i = j, j + 256, ... (i = r P +
+//   p), then the halving tree, every token's tree in parallel
+// for the tokens of the chunk's last packed sequence (every token without a
+// packing); an earlier sequence's token reaches no later chunk, so its dk
+// starts at zero, its du keeps its value and its dc_s is zero. These are the
+// chains of the per-token kernel as it was released (frozen in the tests).
 // The products are register tiles (a warp takes 4 rows, a lane the columns
-// lane + 32 j); dS sits as [P][N + 1], which both products read without
-// bank conflicts. Shared memory: dS padded to a float4 multiple, u and
-// the rotated keys transposed ([P][R4 + 4], [N][R4 + 4], their float4 rows
-// on 16 bytes), ste [tt R][P], the trees' [tt][256].
-// Grid (B * nc, H, ceil(64 / tt)), block 8 R4 threads.
+// lane + 32 j), 128 output columns a pass. With `whole` the chunk's dS
+// stages once as [P][N + 1], which both products read without bank
+// conflicts, beside u and the rotated keys transposed ([P][R4 + 4],
+// [N][R4 + 4], their float4 rows on 16 bytes). Otherwise each pass stages
+// its operands a slice at a time, the chains running on across the slices:
+// dk slices of `ps` channels of u and of dS's 128 columns ([ps][R4 + 4],
+// [ps][min(N, 128)]), ste slices of `ns` state indices of the keys and of
+// dS's 128 rows ([ns][R4 + 4], [min(P, 128)][LDB], LDB = ns rounded up to
+// odd), and the tree recomputes u. ste [tt R][P] follows in shared memory,
+// or with `steb_glob` in that block's slice of a global scratch, and the
+// trees' [tt][256] last; in the sliced layout they take the slices' room
+// when it holds them. Grid (B * nc, H, ceil(64 / tt)), block 8 R4 threads.
 template <typename T>
 __device__ __forceinline__ void m3mb_state_terms_tiles_body(
     float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dcs,
     const float* __restrict__ dst, const T* __restrict__ proj, long long ld_proj,
     const float* __restrict__ bn, const float* __restrict__ b_bias,
     const float* __restrict__ coef, const float* __restrict__ sn, const float* __restrict__ cs,
-    const float* __restrict__ mimo_x,
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt,
+    const float* __restrict__ mimo_x, float* __restrict__ steb_glob,
+    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt, int whole, int ps,
+    int ns,
     int y_first, /* this run's first y block */
     const int* __restrict__ seq_idx
 ) {
@@ -756,11 +666,20 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
     const int rows = tn * rank;
     const int rs = ((tt * rank + 3) & ~3) + 4;
     const int dld = ds + 1;
-    float* dss = reinterpret_cast<float*>(m3mb_sm4);  // [P][N + 1]
-    float* ut = dss + ((hd * dld + 3) & ~3);           // [P][rs]
-    float* kt = ut + hd * rs;                          // [N][rs]
-    float* steb = kt + ds * rs;                        // [tt R][P]
-    float* red = steb + tt * rank * hd;                // [tt][256]
+    const int aw = min(ds, 128), pw = min(hd, 128);
+    const int ldb = (ns & ~1) + 1;
+    float* sm = reinterpret_cast<float*>(m3mb_sm4);
+    // The staged operands' room: dS, u and the keys whole, or the larger of
+    // the two passes' slices.
+    const int room = whole ? ((hd * dld + 3) & ~3) + hd * rs + ds * rs
+                           : (max(ps * rs + ps * aw, ns * rs + pw * ldb) + 3) & ~3;
+    const long long blk = ((long long)bc * nh + h) * gridDim.z + blockIdx.z;
+    float* steb = steb_glob != nullptr ? steb_glob + blk * ((long long)tt * rank * hd)
+                                       : sm + room;  // [tt R][P]
+    float* red = !whole && tt * 256 <= room
+        ? sm
+        : sm + room + (steb_glob != nullptr ? 0 : tt * rank * hd);  // [tt][256]
+    float* ut = sm + ((hd * dld + 3) & ~3);  // [P][rs], whole only
     const int tid = threadIdx.x;
     const int lane = tid & 31;
     const int warp = tid >> 5, nw = blockDim.x >> 5;
@@ -768,45 +687,13 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
     const long long row0 = b * seq + t0 + S0;
     const float acs_last = coef[((b * seq + t0 + lc - 1) * nh + h) * 4 + 3];
     const float* dsc = dst + (bc * nh + h) * (long long)hd * ds;
-    // The chunk's dS, four of a warp's rows and four indices a lane in
-    // flight together.
-    for (int p0 = warp; p0 < hd; p0 += 4 * nw) {
-        for (int n0 = 0; n0 < ds; n0 += 128) {
-            float dv[4][4];
-#pragma unroll
-            for (int u = 0; u < 4; u++) {
-                const int p = p0 + u * nw;
-#pragma unroll
-                for (int j = 0; j < 4; j++) {
-                    const int n = n0 + lane + 32 * j;
-                    dv[u][j] = p < hd && n < ds ? dsc[(long long)p * ds + n] : 0.0f;
-                }
-            }
-#pragma unroll
-            for (int u = 0; u < 4; u++) {
-                const int p = p0 + u * nw;
-#pragma unroll
-                for (int j = 0; j < 4; j++) {
-                    const int n = n0 + lane + 32 * j;
-                    if (p < hd && n < ds) dss[p * dld + n] = dv[u][j];
-                }
-            }
-        }
-    }
-    m3m_stage_rot(warp, nw, rows, rs, 0, ds, half, na,
-        [&](int a) {
-            const int r = a % rank;
-            const long long row = row0 + a / rank;
-            return M3mRotRow{bn + row * rgn + ((long long)r * ng + g) * ds,
-                             b_bias + ((long long)h * rank + r) * ds,
-                             sn + (row * nh + h) * na, cs + (row * nh + h) * na};
-        },
-        [&](int a, int n, float v) { kt[n * rs + a] = v; });
-    m3m_stage_u<T>(warp, nw, rows, rs, hd, hd,
-        [&](int a) { return proj + (row0 + a / rank) * ld_proj + di + (long long)h * hd; },
-        [&](int a) { return mimo_x + ((long long)h * rank + a % rank) * hd; },
-        [&](int a, int p, float v) { ut[p * rs + a] = v; });
-    __syncthreads();
+    auto key_row = [&](int a) {
+        const int r = a % rank;
+        const long long row = row0 + a / rank;
+        return M3mRotRow{bn + row * rgn + ((long long)r * ng + g) * ds,
+                         b_bias + ((long long)h * rank + r) * ds,
+                         sn + (row * nh + h) * na, cs + (row * nh + h) * na};
+    };
     float cfs[4];
 #pragma unroll
     for (int i = 0; i < 4; i++) {
@@ -817,29 +704,8 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
             cfs[i] = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
         }
     }
-    // dk: rows by state index, p ascending, 128 state indices a pass.
-    for (int nb = 0; nb < ds; nb += 128) {
-        float acc[4][4];
-#pragma unroll
-        for (int i = 0; i < 4; i++) {
-#pragma unroll
-            for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;
-        }
-        for (int p = 0; p < hd; p++) {
-            const float4 u4 = *reinterpret_cast<const float4*>(ut + p * rs + a0);
-            const float uv[4] = {u4.x, u4.y, u4.z, u4.w};
-            float sv[4];
-#pragma unroll
-            for (int j = 0; j < 4; j++) {
-                const int n = nb + lane + 32 * j;
-                sv[j] = n < ds ? dss[p * dld + n] : 0.0f;
-            }
-#pragma unroll
-            for (int i = 0; i < 4; i++) {
-#pragma unroll
-                for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(sv[j], uv[i], acc[i][j]);
-            }
-        }
+    // dk's 128 columns from nb: c_s times the chain over p ascending.
+    auto store_dk = [&](int nb, float (&acc)[4][4]) {
 #pragma unroll
         for (int i = 0; i < 4; i++) {
             const int a = a0 + i;
@@ -852,31 +718,9 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
                 if (n < ds) dk[o * ds + n] = kept ? __fmul_rn(cfs[i], acc[i][j]) : 0.0f;
             }
         }
-    }
-    // ste: rows by channel, n ascending, 128 channels a pass; du and the
-    // trees' operand.
-    for (int pb = 0; pb < hd; pb += 128) {
-        float acc[4][4];
-#pragma unroll
-        for (int i = 0; i < 4; i++) {
-#pragma unroll
-            for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;
-        }
-        for (int n = 0; n < ds; n++) {
-            const float4 k4 = *reinterpret_cast<const float4*>(kt + n * rs + a0);
-            const float kv[4] = {k4.x, k4.y, k4.z, k4.w};
-            float sv[4];
-#pragma unroll
-            for (int j = 0; j < 4; j++) {
-                const int p = pb + lane + 32 * j;
-                sv[j] = p < hd ? dss[p * dld + n] : 0.0f;
-            }
-#pragma unroll
-            for (int i = 0; i < 4; i++) {
-#pragma unroll
-                for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(sv[j], kv[i], acc[i][j]);
-            }
-        }
+    };
+    // ste's 128 channels from pb: du and the trees' operand.
+    auto store_ste = [&](int pb, float (&acc)[4][4]) {
 #pragma unroll
         for (int i = 0; i < 4; i++) {
             const int a = a0 + i;
@@ -891,6 +735,192 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
                 steb[a * hd + p] = acc[i][j];
             }
         }
+    };
+    if (whole) {
+        float* dss = sm;           // [P][N + 1]
+        float* kt = ut + hd * rs;  // [N][rs]
+        // The chunk's dS, four of a warp's rows and four indices a lane in
+        // flight together.
+        for (int p0 = warp; p0 < hd; p0 += 4 * nw) {
+            for (int n0 = 0; n0 < ds; n0 += 128) {
+                float dv[4][4];
+#pragma unroll
+                for (int u = 0; u < 4; u++) {
+                    const int p = p0 + u * nw;
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        const int n = n0 + lane + 32 * j;
+                        dv[u][j] = p < hd && n < ds ? dsc[(long long)p * ds + n] : 0.0f;
+                    }
+                }
+#pragma unroll
+                for (int u = 0; u < 4; u++) {
+                    const int p = p0 + u * nw;
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        const int n = n0 + lane + 32 * j;
+                        if (p < hd && n < ds) dss[p * dld + n] = dv[u][j];
+                    }
+                }
+            }
+        }
+        m3m_stage_rot(warp, nw, rows, rs, 0, ds, half, na, key_row,
+            [&](int a, int n, float v) { kt[n * rs + a] = v; });
+        m3m_stage_u<T>(warp, nw, rows, rs, hd, hd,
+            [&](int a) { return proj + (row0 + a / rank) * ld_proj + di + (long long)h * hd; },
+            [&](int a) { return mimo_x + ((long long)h * rank + a % rank) * hd; },
+            [&](int a, int p, float v) { ut[p * rs + a] = v; });
+        __syncthreads();
+        for (int nb = 0; nb < ds; nb += 128) {
+            float acc[4][4];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;
+            }
+            for (int p = 0; p < hd; p++) {
+                const float4 u4 = *reinterpret_cast<const float4*>(ut + p * rs + a0);
+                const float uv[4] = {u4.x, u4.y, u4.z, u4.w};
+                float sv[4];
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    const int n = nb + lane + 32 * j;
+                    sv[j] = n < ds ? dss[p * dld + n] : 0.0f;
+                }
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+#pragma unroll
+                    for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(sv[j], uv[i], acc[i][j]);
+                }
+            }
+            store_dk(nb, acc);
+        }
+        for (int pb = 0; pb < hd; pb += 128) {
+            float acc[4][4];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;
+            }
+            for (int n = 0; n < ds; n++) {
+                const float4 k4 = *reinterpret_cast<const float4*>(kt + n * rs + a0);
+                const float kv[4] = {k4.x, k4.y, k4.z, k4.w};
+                float sv[4];
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    const int p = pb + lane + 32 * j;
+                    sv[j] = p < hd ? dss[p * dld + n] : 0.0f;
+                }
+#pragma unroll
+                for (int i = 0; i < 4; i++) {
+#pragma unroll
+                    for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(sv[j], kv[i], acc[i][j]);
+                }
+            }
+            store_ste(pb, acc);
+        }
+    } else {
+        // dk: u's channels and dS's rows from p0, at the pass's columns.
+        float* us = sm;              // [ps][rs]
+        float* as = sm + ps * rs;    // [ps][aw]
+        for (int nb = 0; nb < ds; nb += 128) {
+            const int nwid = min(128, ds - nb);
+            float acc[4][4];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;
+            }
+            for (int p0 = 0; p0 < hd; p0 += ps) {
+                const int pn = min(ps, hd - p0);
+                __syncthreads();
+                m3m_stage_u<T>(warp, nw, rows, rs, pn, pn,
+                    [&](int a) {
+                        return proj + (row0 + a / rank) * ld_proj + di + (long long)h * hd + p0;
+                    },
+                    [&](int a) { return mimo_x + ((long long)h * rank + a % rank) * hd + p0; },
+                    [&](int a, int p, float v) { us[p * rs + a] = v; });
+                for (int q0 = warp; q0 < pn; q0 += 4 * nw) {
+                    float dv[4][4];
+#pragma unroll
+                    for (int u = 0; u < 4; u++) {
+                        const int p = q0 + u * nw;
+#pragma unroll
+                        for (int j = 0; j < 4; j++) {
+                            const int n = lane + 32 * j;
+                            dv[u][j] = p < pn && n < nwid
+                                ? dsc[(long long)(p0 + p) * ds + nb + n] : 0.0f;
+                        }
+                    }
+#pragma unroll
+                    for (int u = 0; u < 4; u++) {
+                        const int p = q0 + u * nw;
+#pragma unroll
+                        for (int j = 0; j < 4; j++) {
+                            const int n = lane + 32 * j;
+                            if (p < pn && n < nwid) as[p * aw + n] = dv[u][j];
+                        }
+                    }
+                }
+                __syncthreads();
+                for (int p = 0; p < pn; p++) {
+                    const float4 u4 = *reinterpret_cast<const float4*>(us + p * rs + a0);
+                    const float uv[4] = {u4.x, u4.y, u4.z, u4.w};
+                    float sv[4];
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        const int n = lane + 32 * j;
+                        sv[j] = n < nwid ? as[p * aw + n] : 0.0f;
+                    }
+#pragma unroll
+                    for (int i = 0; i < 4; i++) {
+#pragma unroll
+                        for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(sv[j], uv[i], acc[i][j]);
+                    }
+                }
+            }
+            store_dk(nb, acc);
+        }
+        // ste: the keys' state indices and dS's columns from n0, at the
+        // pass's rows.
+        float* ks = sm;              // [ns][rs]
+        float* bs = sm + ns * rs;    // [pw][ldb]
+        for (int pb = 0; pb < hd; pb += 128) {
+            const int pwid = min(128, hd - pb);
+            float acc[4][4];
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;
+            }
+            for (int n0 = 0; n0 < ds; n0 += ns) {
+                const int nn = min(ns, ds - n0);
+                __syncthreads();
+                m3m_stage_rot(warp, nw, rows, rs, n0, nn, half, na, key_row,
+                    [&](int a, int n, float v) { ks[n * rs + a] = v; });
+                for (int q = warp; q < pwid; q += nw) {
+                    const float* src = dsc + (long long)(pb + q) * ds + n0;
+                    for (int n = lane; n < nn; n += 32) bs[q * ldb + n] = src[n];
+                }
+                __syncthreads();
+                for (int n = 0; n < nn; n++) {
+                    const float4 k4 = *reinterpret_cast<const float4*>(ks + n * rs + a0);
+                    const float kv[4] = {k4.x, k4.y, k4.z, k4.w};
+                    float sv[4];
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        const int p = lane + 32 * j;
+                        sv[j] = p < pwid ? bs[p * ldb + n] : 0.0f;
+                    }
+#pragma unroll
+                    for (int i = 0; i < 4; i++) {
+#pragma unroll
+                        for (int j = 0; j < 4; j++) acc[i][j] = __fmaf_rn(sv[j], kv[i], acc[i][j]);
+                    }
+                }
+            }
+            store_ste(pb, acc);
+        }
     }
     __syncthreads();
     const int rp = rank * hd;
@@ -900,7 +930,11 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
         for (int i = j; i < rp; i += 256) {
             const int r = i / hd, p = i - r * hd;
             const int a = tl * rank + r;
-            part = __fmaf_rn(ut[p * rs + a], steb[a * hd + p], part);
+            const float uv = whole
+                ? ut[p * rs + a]
+                : __fmul_rn(mimo_x[((long long)h * rank + r) * hd + p],
+                            to_f(proj[(row0 + tl) * ld_proj + di + (long long)h * hd + p]));
+            part = __fmaf_rn(uv, steb[a * hd + p], part);
         }
         red[e] = part;
     }
@@ -924,38 +958,19 @@ extern "C" __global__ void __launch_bounds__(512) NAME(                        \
     const float* __restrict__ bn, const float* __restrict__ b_bias,            \
     const float* __restrict__ coef, const float* __restrict__ sn,              \
     const float* __restrict__ cs, const float* __restrict__ mimo_x,            \
+    float* __restrict__ steb_glob,                                             \
     int seq, int nh, int ng, int hd, int ds, int rank, int na, int tt,         \
+    int whole, int ps, int ns,                                                 \
     int y_first, /* this run's first y block */                                \
     const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
     m3mb_state_terms_tiles_body<T>(dk, du, dcs, dst, proj, ld_proj, bn, b_bias, \
-        coef, sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tt, y_first, seq_idx); \
+        coef, sn, cs, mimo_x, steb_glob, seq, nh, ng, hd, ds, rank, na, tt,    \
+        whole, ps, ns, y_first, seq_idx);                                      \
 }
 DEFINE_M3MB_STATE_TERMS_TILES(m3mb_state_terms_tiles, float)
 DEFINE_M3MB_STATE_TERMS_TILES(m3mb_state_terms_tiles_bf16, __nv_bfloat16)
 DEFINE_M3MB_STATE_TERMS_TILES(m3mb_state_terms_tiles_f16, __half)
-
-#define DEFINE_M3MB_STATE_TERMS(NAME, T)                                       \
-extern "C" __global__ void NAME(                                               \
-    float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dcs,   \
-    const float* __restrict__ dst, const T* __restrict__ proj,                 \
-    long long ld_proj,                                                         \
-    const float* __restrict__ bn, const float* __restrict__ b_bias,            \
-    const float* __restrict__ coef, const float* __restrict__ sn,              \
-    const float* __restrict__ cs, const float* __restrict__ mimo_x,            \
-    float* __restrict__ glob,                                                  \
-    int seq, int nh, int ng, int hd, int ds, int rank, int na, int tg,         \
-    int stage,                                                                 \
-    int y_first, /* this run's first y block */                                \
-    const int* __restrict__ seq_idx                                            \
-) {                                                                            \
-    m3mb_state_terms_body<T>(dk, du, dcs, dst, proj, ld_proj, bn, b_bias, coef, \
-        sn, cs, mimo_x, glob, seq, nh, ng, hd, ds, rank, na, tg, stage, y_first, \
-        seq_idx);                                                              \
-}
-DEFINE_M3MB_STATE_TERMS(m3mb_state_terms, float)
-DEFINE_M3MB_STATE_TERMS(m3mb_state_terms_bf16, __nv_bfloat16)
-DEFINE_M3MB_STATE_TERMS(m3mb_state_terms_f16, __half)
 
 // The pair terms of a chunk and head. Per pair (t, s), s <= t in one
 // sequence, G = q_t . k_s over the state indices and M = dy_t . u_s over the

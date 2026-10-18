@@ -79,8 +79,8 @@ pub struct MimoChunkedBwd {
     /// The inter-chunk part of dq and its decay term, a tile of tokens at
     /// once, at every shape ([`ChunkedGeom::inter_tiles`]).
     pub inter_tiles: CudaFunction,
-    /// `m3mb_state_terms` for a tile of tokens at once, when
-    /// [`ChunkedGeom::terms_tiles`] fits.
+    /// The state terms for a tile of tokens at once, at every shape
+    /// ([`ChunkedGeom::terms`]).
     pub state_terms_tiles: TypedKernel,
     pub dsloc: CudaFunction,
     /// `m3mb_dsloc` as register tiles, when [`ChunkedGeom::dsloc_tiles`]
@@ -88,7 +88,6 @@ pub struct MimoChunkedBwd {
     pub dsloc_tiles: CudaFunction,
     pub pass: CudaFunction,
     pub chunk_dot: CudaFunction,
-    pub state_terms: TypedKernel,
     /// The pair terms split by owner: dq per t-tile, then dk, du and dw per
     /// s-tile, at every shape ([`ChunkedGeom::pairs`]).
     pub pairs_dq: TypedKernel,
@@ -135,11 +134,9 @@ pub struct ChunkedGeom {
     /// entering state, bytes. Every shape has one: the state is staged a
     /// slice of channels at a time, its columns 128 at a time.
     pub inter_tiles: (usize, usize, usize),
-    /// `m3mb_state_terms_tiles`: tokens per block and bytes, (0, 0) when no
-    /// token tile's staging fits the shared memory and the per-token kernel
-    /// serves. It walks its columns 128 at a time, so any head and state
-    /// width serves when the staging fits.
-    pub terms_tiles: (usize, usize),
+    /// `m3mb_state_terms_tiles`: its plan ([`terms_plan`]). Every shape has
+    /// one.
+    pub terms: TermsPlan,
     /// The pair terms' reference tile: the tokens a tile of the pair kernel
     /// as it was released (frozen in the tests), whose masked zeros the
     /// split kernels' chains keep.
@@ -290,7 +287,7 @@ pub fn chunked_geom(
             dsloc: (0, 0),
             dsloc_tiles: (0, 0, 0, 0),
             inter_tiles: (0, 0, 0),
-            terms_tiles: (0, 0),
+            terms: TermsPlan::default(),
             pairs_ref: 0,
             pt,
             pairs: PairsPlan::default(),
@@ -318,26 +315,8 @@ pub fn chunked_geom(
                 .into_iter()
                 .find(|&tl| 3 * (tl * rank).pow(2) * 4 <= cap)
         })?;
-    // The token-tile state-terms kernel: rows (t, r) of `tt` tokens padded
-    // to a float4 multiple plus 4, and every block the kernel reads as
-    // float4 starting on 16 bytes: dS with rows padded by one, u and the
-    // keys transposed, ste, the trees' partials. The largest token tile
-    // that fits.
-    let token_tiles = |bytes: &dyn Fn(usize, usize) -> usize| {
-        if rank > CHUNK {
-            return (0, 0);
-        }
-        [16usize, 8, 4, 2, 1]
-            .into_iter()
-            .filter(|&tt| tt * rank <= CHUNK)
-            .map(|tt| (tt, bytes(tt, (tt * rank).next_multiple_of(4) + 4)))
-            .find(|&(_, b)| b <= cap)
-            .unwrap_or((0, 0))
-    };
     let inter_tiles = Some(inter_tiles_geom((hd, ds, rank), cap)).filter(|g| g.0 > 0)?;
-    let terms_tiles = token_tiles(&|tt, rs| {
-        ((hd * (ds + 1)).next_multiple_of(4) + hd * rs + ds * rs + tt * rank * hd + tt * 256) * 4
-    });
+    let terms = terms_plan((hd, ds, rank), cap)?;
     let pairs = pairs_plan((hd, ds, rank), cap)?;
     Some(ChunkedGeom {
         state,
@@ -347,7 +326,7 @@ pub fn chunked_geom(
         dsloc,
         dsloc_tiles: tiles_geom((hd, ds, rank), cap, threads.dsloc_tiles),
         inter_tiles,
-        terms_tiles,
+        terms,
         pairs_ref,
         pt,
         pairs,
@@ -429,6 +408,104 @@ pub fn pairs_plan((hd, ds, rank): (usize, usize, usize), cap: usize) -> Option<P
         .filter(|&tq| tq * rank <= CHUNK)
         .find_map(|tq| fit(tq, 32))
         .or_else(|| fit(1, 1))
+}
+
+/// The token-tile state terms' plan: tokens per block, whether dS, u and
+/// the rotated keys stage whole, the channels a slice of u and dS's rows in
+/// the dk pass and the state indices a slice of the keys and dS's columns
+/// in the ste pass (the whole widths when they stage whole), whether the
+/// ste rows go to a global scratch, and the bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TermsPlan {
+    pub tt: usize,
+    pub whole: bool,
+    pub ps: usize,
+    pub ns: usize,
+    pub steb_global: bool,
+    pub bytes: usize,
+}
+
+/// The token-tile state terms' shared memory at `tt` tokens a block (rows
+/// padded to a float4 multiple plus 4, rs) with dS, u and the keys whole:
+/// dS [P][N + 1] padded to a float4 multiple, u [P][rs], the keys [N][rs],
+/// ste [tt R][P] and the trees' [tt][256].
+pub fn terms_whole_bytes((hd, ds, rank): (usize, usize, usize), tt: usize) -> usize {
+    let rs = (tt * rank).next_multiple_of(4) + 4;
+    ((hd * (ds + 1)).next_multiple_of(4) + hd * rs + ds * rs + tt * rank * hd + tt * 256) * 4
+}
+
+/// The token-tile state terms' shared memory at `tt` tokens a block with
+/// slices of `ps` channels and `ns` state indices: the larger of the dk
+/// pass's u and dS slices ([ps][rs], [ps][min(N, 128)]) and the ste pass's
+/// key and dS slices ([ns][rs], [min(P, 128)][ns rounded up to odd]),
+/// padded to a float4 multiple, then ste [tt R][P] unless it goes to the
+/// global scratch, then the trees' [tt][256] unless the slices' room holds
+/// them.
+pub fn terms_sliced_bytes(
+    (hd, ds, rank): (usize, usize, usize),
+    tt: usize,
+    (ps, ns): (usize, usize),
+    steb_global: bool,
+) -> usize {
+    let rs = (tt * rank).next_multiple_of(4) + 4;
+    let (ps, ns) = (ps.min(hd), ns.min(ds));
+    let room = (ps * rs + ps * ds.min(128))
+        .max(ns * rs + hd.min(128) * ((ns & !1) + 1))
+        .next_multiple_of(4);
+    let steb = if steb_global { 0 } else { tt * rank * hd };
+    let trees = if tt * 256 <= room { 0 } else { tt * 256 };
+    (room + steb + trees) * 4
+}
+
+/// The token-tile state terms' plan for a head of `hd` channels, `ds`
+/// state indices and rank `rank` under `cap` bytes: the largest tile of
+/// tokens (a power of two up to 16, at most 64 rows) whose dS, u and keys
+/// stage whole; else the largest whose slices of at least a warp's worth
+/// (32, or the whole width when it is narrower) fit with ste in shared
+/// memory, then with ste in the global scratch, each pass's slices the
+/// widest that fit; else a tile of one token at the widest slices that fit
+/// at all. One token in slices of one fits any card, so `None` only under a
+/// cap no card has.
+pub fn terms_plan((hd, ds, rank): (usize, usize, usize), cap: usize) -> Option<TermsPlan> {
+    let dims = (hd, ds, rank);
+    let tiles = || {
+        [16usize, 8, 4, 2, 1]
+            .into_iter()
+            .filter(move |&tt| tt * rank <= CHUNK)
+    };
+    if let Some(tt) = tiles().find(|&tt| terms_whole_bytes(dims, tt) <= cap) {
+        return Some(TermsPlan {
+            tt,
+            whole: true,
+            ps: hd,
+            ns: ds,
+            steb_global: false,
+            bytes: terms_whole_bytes(dims, tt),
+        });
+    }
+    let halvings = |width: usize, floor: usize| {
+        std::iter::successors(Some(width), |&w| (w > 1).then(|| w.div_ceil(2)))
+            .take_while(move |&w| w >= width.min(floor))
+    };
+    let sliced = |tt: usize, floor: usize, steb_global: bool| {
+        halvings(hd, floor).find_map(|ps| {
+            halvings(ds, floor).find_map(|ns| {
+                let bytes = terms_sliced_bytes(dims, tt, (ps, ns), steb_global);
+                (bytes <= cap).then_some(TermsPlan {
+                    tt,
+                    whole: false,
+                    ps,
+                    ns,
+                    steb_global,
+                    bytes,
+                })
+            })
+        })
+    };
+    tiles()
+        .find_map(|tt| sliced(tt, 32, false))
+        .or_else(|| tiles().find_map(|tt| sliced(tt, 32, true)))
+        .or_else(|| sliced(1, 1, true))
 }
 
 /// The token-tile inter kernel's shared memory for `ds` state indices at
@@ -853,7 +930,6 @@ impl Mamba3MimoKernels {
                 dsloc_tiles,
                 pass: get("m3mb_pass")?,
                 chunk_dot: get("m3mb_chunk_dot")?,
-                state_terms: typed("m3mb_state_terms")?,
                 pairs_dq: typed("m3mb_pairs_dq")?,
                 pairs_dk: typed("m3mb_pairs_dk")?,
                 rot_bwd: get("m3mb_rot_bwd")?,
@@ -887,7 +963,6 @@ impl Mamba3MimoKernels {
                 (&kernels.chunk_scan_tiles[2], "chunk_scan_tiles"),
                 (&kernels.cb.pairs_dq, "pairs dq"),
                 (&kernels.cb.pairs_dk, "pairs dk"),
-                (&kernels.cb.state_terms, "state_terms"),
                 (&kernels.cb.state_terms_tiles, "state_terms tiles"),
             ] {
                 for f in [&k.f32, &k.bf16, &k.f16] {
@@ -895,6 +970,16 @@ impl Mamba3MimoKernels {
                 }
             }
             budget = budget.min(opt_in_dynamic_smem(&kernels.cb.dsloc, optin, "dsloc")?);
+            // The chunk dot's 256-float tree sits in static shared memory, so
+            // it holds the budget 1 KB under the opt-in, as the per-token
+            // state terms kernel with the same tree did. The budget plans the
+            // pair terms' reference tile, whose chains the split kernels
+            // keep, so it must not move when a kernel leaves the module.
+            budget = budget.min(opt_in_dynamic_smem(
+                &kernels.cb.chunk_dot,
+                optin,
+                "chunk dot",
+            )?);
             budget = budget.min(opt_in_dynamic_smem(
                 &kernels.cb.inter_tiles,
                 optin,
@@ -994,7 +1079,14 @@ mod tests {
             }
         );
         assert_eq!(released.inter_tiles.0, 16);
-        assert_eq!(released.terms_tiles.0, 8);
+        assert_eq!(
+            (
+                released.terms.tt,
+                released.terms.whole,
+                released.terms.bytes
+            ),
+            (8, true, terms_whole_bytes((64, 128, 4), 8))
+        );
         assert_eq!((released.scan.0, released.scan.1), (4, 8));
         assert_eq!((released.pt, released.pairs_ref), (64, 8));
         let wide = chunked_geom((16, 16, 16), cap, true, all).unwrap();
@@ -1024,7 +1116,7 @@ mod tests {
                     g.dsloc.1,
                     g.pairs.dq_bytes,
                     g.inter_tiles.2,
-                    g.terms_tiles.1,
+                    g.terms.bytes,
                     g.pairs.dk_bytes,
                 ];
                 for bytes in sizes {
@@ -1101,6 +1193,73 @@ mod tests {
                 pss: 1,
                 dk_bytes: 5_024,
             })
+        );
+    }
+
+    /// The state terms plan every shape the config admits, at every card's
+    /// limit: a power-of-two tile of at most 16 tokens and 64 rows within
+    /// the cap; dS, u and the keys whole where they fit, which keeps the
+    /// released shapes' tiles, else in slices within their widths, and ste
+    /// in the global scratch only when a token's ste rows cannot sit beside
+    /// the slices.
+    #[test]
+    fn the_terms_plan_takes_any_head_and_state_in_slices() {
+        for (hd, ds, rank) in [
+            (64, 128, 4),
+            (256, 128, 2),
+            (1024, 256, 16),
+            (136, 256, 9),
+            (4096, 256, 1),
+            (2048, 256, 16),
+            (512, 64, 1),
+            (32, 64, 16),
+            (40, 16, 3),
+            (1, 1, 1),
+        ] {
+            for cap in [48 * 1024, 64 * 1024, 99 * 1024, 227 * 1024] {
+                let p = terms_plan((hd, ds, rank), cap)
+                    .unwrap_or_else(|| panic!("head {hd} state {ds} rank {rank} at {cap}"));
+                let bytes = if p.whole {
+                    terms_whole_bytes((hd, ds, rank), p.tt)
+                } else {
+                    terms_sliced_bytes((hd, ds, rank), p.tt, (p.ps, p.ns), p.steb_global)
+                };
+                assert!(
+                    p.tt.is_power_of_two()
+                        && p.tt <= 16
+                        && p.tt * rank <= CHUNK
+                        && (1..=hd).contains(&p.ps)
+                        && (1..=ds).contains(&p.ns)
+                        && p.bytes == bytes
+                        && bytes <= cap,
+                    "head {hd} state {ds} rank {rank} at {cap}: {p:?}"
+                );
+            }
+        }
+        let plan = |dims, cap| terms_plan(dims, cap).unwrap();
+        let released = plan((64, 128, 4), 99 * 1024);
+        assert_eq!((released.tt, released.whole), (8, true));
+        assert_eq!(
+            plan((1024, 256, 16), 99 * 1024),
+            TermsPlan {
+                tt: 1,
+                whole: false,
+                ps: 32,
+                ns: 32,
+                steb_global: false,
+                bytes: 84_992,
+            }
+        );
+        assert_eq!(
+            plan((2048, 256, 16), 99 * 1024),
+            TermsPlan {
+                tt: 4,
+                whole: false,
+                ps: 128,
+                ns: 128,
+                steb_global: true,
+                bytes: 100_864,
+            }
         );
     }
 
