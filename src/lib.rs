@@ -1,9 +1,11 @@
 //! # mamba-rs
 //!
-//! The four Mamba families in Rust, on the CPU and on NVIDIA GPUs: Mamba
-//! (Gu and Dao, 2023), Mamba-2 (Dao and Gu, 2024), and Mamba-3 SISO and
-//! MIMO (Lahoti et al., 2026). Every family runs inference and training on
-//! both.
+//! A complete implementation of Mamba in Rust, on the CPU and on NVIDIA
+//! GPUs: all three generations of the architecture, Mamba (Gu and Dao,
+//! 2023), Mamba-2 (Dao and Gu, 2024) and Mamba-3 (Lahoti et al., 2026), the
+//! last in both of its forms, SISO and MIMO. Every model runs inference and
+//! training on both. The API calls each of the four a family
+//! (`ModelFamily`).
 //!
 //! There is no Python, no C++ build step and no framework underneath: the
 //! kernels compile at run time through NVRTC, and the GPU path links only

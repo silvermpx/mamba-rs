@@ -1,10 +1,15 @@
 # mamba-rs
 
-The four Mamba families in Rust, on the CPU and on NVIDIA GPUs: Mamba,
-Mamba-2, Mamba-3 SISO and Mamba-3 MIMO. Every family runs inference and
-training on both, with the crate's own CUDA kernels compiled at run time
-through NVRTC. There is no Python, no C++ build step and no framework
-underneath. The GPU path links only the CUDA driver API and cuBLAS.
+A complete implementation of Mamba in Rust. It covers all three
+generations of the architecture: Mamba (Gu and Dao, 2023), Mamba-2 (Dao
+and Gu, 2024) and Mamba-3 (Lahoti et al., 2026), the last in both of its
+forms, SISO and MIMO. Every model trains and serves on the CPU and on
+NVIDIA GPUs in f32, tf32, bf16 and f16, loads the official checkpoints
+and matches float64 references of the papers' models. The CUDA kernels
+are the crate's own, compiled at run time through NVRTC, and give the same
+bits on every run by default. There is no Python, no C++ build step and no
+framework underneath: the GPU path links only the CUDA driver API and
+cuBLAS.
 
 ## What's new in 0.8
 
@@ -33,7 +38,7 @@ underneath. The GPU path links only the CUDA driver API and cuBLAS.
   specialises, and 2.5 to 3 times at 64 states. The
   [changelog](CHANGELOG.md) lists every kernel.
 
-## Families
+## Models
 
 | | paper | CPU | GPU | checkpoints |
 |---|---|---|---|---|
@@ -41,6 +46,9 @@ underneath. The GPU path links only the CUDA driver API and cuBLAS.
 | Mamba-2 | Dao and Gu, 2024 | inference, training | inference, training | `state-spaces/mamba2-*`, 130m checked against float64 |
 | Mamba-3 SISO | Lahoti et al., 2026 | inference, training | inference, training | the official SISO checkpoints, 187m checked against float64 |
 | Mamba-3 MIMO | Lahoti et al., 2026 | inference, training | inference, training | the official MIMO checkpoints, 187m checked against float64 |
+
+The API calls each row a family (`ModelFamily`): the two forms of Mamba-3
+have kernels and types of their own.
 
 ## Features
 
