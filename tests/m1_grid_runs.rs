@@ -19,8 +19,9 @@ use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{
     GRID_YZ_EXTENT, IndexWidth, SCAN_BWD_DGROUP, conv_index_width, grid_1d_wide,
     grid_conv_fwd_tiled, grid_conv_tiled, grid_gather_bc_tiled, grid_parallel_scan,
-    grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold, grid_tmajor_tiles, scan_bwd_index_width,
-    scan_fwd_index_width, scan_fwd_nosave_index_width, scan_tape_len, y_runs, yz_runs,
+    grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold, grid_tmajor_tiles,
+    scan_bwd_fold_carry_len, scan_bwd_index_width, scan_fwd_index_width,
+    scan_fwd_nosave_index_width, scan_tape_len, y_runs, yz_runs,
 };
 
 const RUN: usize = GRID_YZ_EXTENT as usize;
@@ -93,6 +94,17 @@ fn launch_runs(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) 
     for (y_first, cfg) in y_runs(cfg) {
         let mut run = args.to_vec();
         run.push(Arg::I(y_first));
+        launch(ctx, f, cfg, &run);
+    }
+}
+
+/// [`launch_runs`] with `tail` after each run's first block: the fold's
+/// global carries come last.
+fn launch_runs_tail(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg], tail: &[Arg]) {
+    for (y_first, cfg) in y_runs(cfg) {
+        let mut run = args.to_vec();
+        run.push(Arg::I(y_first));
+        run.extend_from_slice(tail);
         launch(ctx, f, cfg, &run);
     }
 }
@@ -852,18 +864,25 @@ fn the_parallel_scans_give_channels_past_the_y_extent_their_own_bits() {
         args.extend(ints);
         args.extend([Arg::P(tape.cached_ptr()), Arg::I(1)]);
         let width = scan_bwd_index_width(b, t, di, ds, true, fold);
-        let (f, cfg) = if fold {
-            (
+        if fold {
+            // Every fold build takes the global carries' scratch last.
+            let carry = GpuBuffer::zeros(&ctx.stream, scan_bwd_fold_carry_len(b, di, ds)).unwrap();
+            launch_runs_tail(
+                &ctx,
                 k.ssm_parallel_bwd_fold_typed.get(width).get(dt),
                 grid_parallel_scan_bwd_fold(b, di, ds, es),
-            )
+                &args,
+                &[Arg::P(carry.cached_ptr())],
+            );
+            ctx.stream.synchronize().unwrap();
         } else {
-            (
+            launch_runs(
+                &ctx,
                 k.ssm_parallel_bwd_typed.get(width).get(dt),
                 grid_parallel_scan_bwd(b, di),
-            )
-        };
-        launch_runs(&ctx, f, cfg, &args);
+                &args,
+            );
+        }
         let gpairs = (PAIRS / g, SHIFT / g);
         for (what, ptr, bytes, shape, e, (pairs, shift)) in [
             (

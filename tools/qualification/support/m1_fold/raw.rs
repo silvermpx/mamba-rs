@@ -6,7 +6,9 @@ use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::graph_capture::capture_into_graph;
 use mamba_rs::gpu::kernel_identity::{FramedSha256, canonical_ptx_image, digest_hex};
 use mamba_rs::gpu::kernels::{MambaKernels, cuda_include_paths};
-use mamba_rs::gpu::launch::{grid_parallel_scan, grid_parallel_scan_bwd_fold, scan_tape_len};
+use mamba_rs::gpu::launch::{
+    grid_parallel_scan, grid_parallel_scan_bwd_fold, scan_bwd_fold_carry_len, scan_tape_len,
+};
 use std::sync::Arc;
 
 const GUARD: usize = 256;
@@ -327,6 +329,8 @@ fn fixture(
 struct Arm {
     inputs: [Buffer; 10],
     outputs: [Buffer; 6],
+    /// The global carries' scratch every current fold build takes last.
+    carry: Buffer,
     dtype: WeightDtype,
 }
 impl Arm {
@@ -342,6 +346,10 @@ impl Arm {
             outputs: std::array::from_fn(|i| {
                 Buffer::new(stream, &vec![poison; s.output_bytes(dtype)[i]])
             }),
+            carry: Buffer::new(
+                stream,
+                &vec![0; 4 * scan_bwd_fold_carry_len(s.b, s.di, s.ds)],
+            ),
             dtype,
         }
     }
@@ -370,8 +378,9 @@ fn launch(
     let i = &arm.inputs;
     let o = &arm.outputs;
     // 15 pointers, four dimensions, run_tape pointer, slim flag, first block
-    // of the y run: the current fold ABI. The frozen legacy kernel predates
-    // the run argument and reads no further than the flag.
+    // of the y run, the global carries' scratch: the current fold ABI. The
+    // frozen legacy kernel predates the run argument and the scratch and
+    // reads no further than the flag.
     let pointers = [
         i[0].ptr(),
         i[1].ptr(),
@@ -399,7 +408,8 @@ fn launch(
     for dim in &dims {
         builder.arg(dim);
     }
-    builder.arg(&tape).arg(&slim).arg(&0i32);
+    let carry = arm.carry.ptr();
+    builder.arg(&tape).arg(&slim).arg(&0i32).arg(&carry);
     unsafe {
         builder.launch(grid_parallel_scan_bwd_fold(
             s.b,
@@ -648,7 +658,8 @@ pub(crate) fn qualify(device: &GpuDevice, kernels: &MambaKernels) {
         ).unwrap();
         for &shape in &shapes {
             let selected = kernels
-                .ssm_parallel_bwd_fold_for_shape(dtype, shape.b, shape.t, shape.di, shape.ds);
+                .ssm_parallel_bwd_fold_launch(dtype, shape.b, shape.t, shape.di, shape.ds)
+                .0;
             let specialized =
                 !std::ptr::eq(selected, kernels.ssm_parallel_bwd_fold_typed.i32.get(dtype));
             eprintln!("ROUTE shape={shape:?} dtype={dtype:?} specialized={specialized}");

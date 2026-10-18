@@ -262,6 +262,9 @@ pub struct GpuMambaMixedTrainScratch {
     pub d_d_local: GpuBuffer,
     /// Per-sample d_a_log accumulator [B * d_inner * d_state].
     pub d_a_log_local: GpuBuffer,
+    /// The fold backward's carries where they live in global memory, a
+    /// slot a block (`launch::scan_bwd_fold_carry_len`).
+    pub fold_carry: GpuBuffer,
     /// Discarded dx for backbone input_proj backward [B*T * mamba_input_dim].
     pub d_input_proj_dx: GpuBuffer,
 
@@ -358,6 +361,10 @@ impl GpuMambaMixedTrainScratch {
             d_a_log_local: GpuBuffer::zeros(
                 stream,
                 b * dims.seq_len.div_ceil(crate::gpu::launch::SCAN_CHUNK).max(1) * di * ds,
+            )?,
+            fold_carry: GpuBuffer::zeros(
+                stream,
+                crate::gpu::launch::scan_bwd_fold_carry_len(b, di, ds),
             )?,
             d_input_proj_dx: GpuBuffer::zeros(stream, bt * dims.mamba_input_dim)?,
             // Rule-B axis-0 partials scratch — sized to fit largest consumer.

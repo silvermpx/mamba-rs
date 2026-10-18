@@ -365,6 +365,9 @@ pub struct GpuMambaScratch {
     pub d_d_local: GpuBuffer,
     /// Per-channel d_a_log accumulated across (b,t) `[B*d_inner*d_state]`.
     pub d_a_log_local: GpuBuffer,
+    /// The fold backward's carries where they live in global memory, a
+    /// slot a block (`launch::scan_bwd_fold_carry_len`).
+    pub fold_carry: GpuBuffer,
     /// Reduced dB `[B*T*d_state]`.
     pub d_b_reduced: GpuBuffer,
     /// Reduced dC `[B*T*d_state]`.
@@ -459,6 +462,10 @@ impl GpuMambaScratch {
                     * dims.seq_len.div_ceil(crate::gpu::launch::SCAN_CHUNK).max(1)
                     * d_inner
                     * d_state,
+            )?,
+            fold_carry: GpuBuffer::zeros(
+                stream,
+                crate::gpu::launch::scan_bwd_fold_carry_len(batch, d_inner, d_state),
             )?,
             d_b_reduced: GpuBuffer::zeros(stream, bt * d_state)?,
             d_c_reduced: GpuBuffer::zeros(stream, bt * d_state)?,

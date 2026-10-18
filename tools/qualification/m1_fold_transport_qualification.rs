@@ -51,8 +51,12 @@ fn compiled_fold_routes_keep_legacy_and_specialized_entries_available() {
         inference_compilers.push(kernels.compiler_identity());
         for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
             let legacy = kernels.ssm_parallel_bwd_fold_typed.i32.get(dtype);
-            let short = kernels.ssm_parallel_bwd_fold_for_shape(dtype, 8, 33, 768, 16);
-            let long = kernels.ssm_parallel_bwd_fold_for_shape(dtype, 8, 1300, 768, 16);
+            let short = kernels
+                .ssm_parallel_bwd_fold_launch(dtype, 8, 33, 768, 16)
+                .0;
+            let long = kernels
+                .ssm_parallel_bwd_fold_launch(dtype, 8, 1300, 768, 16)
+                .0;
             let admitted = cap == 16 && dtype != WeightDtype::F32;
             assert_eq!(!std::ptr::eq(short, legacy), admitted);
             assert_eq!(!std::ptr::eq(long, legacy), admitted);
@@ -66,7 +70,9 @@ fn compiled_fold_routes_keep_legacy_and_specialized_entries_available() {
                 (8, 33, 767, 16),
             ] {
                 assert!(std::ptr::eq(
-                    kernels.ssm_parallel_bwd_fold_for_shape(dtype, batch, time, inner, state),
+                    kernels
+                        .ssm_parallel_bwd_fold_launch(dtype, batch, time, inner, state)
+                        .0,
                     legacy,
                 ));
             }

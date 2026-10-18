@@ -381,6 +381,17 @@ pub struct MambaKernels {
     /// shared memory, since its stage passes 48 KB.
     pub ssm_parallel_bwd_fold_typed: ByIndexWidth<TypedKernel>,
     ssm_parallel_bwd_fold_staged_typed: Option<HalfKernel>,
+    /// The f32 fold whose carries live in global memory
+    /// ([`super::launch::FoldCarries::Global`]): the same results bit for
+    /// bit, and the same shared memory at every state.
+    pub ssm_parallel_bwd_fold_carry_f32: ByIndexWidth<CudaFunction>,
+    /// Indexed by d_state: whether the f32 fold keeps its carries in global
+    /// memory there, where the shared-carry fold leaves a single block
+    /// resident on a SM and the global-carry one more, as the driver's
+    /// occupancy calculator answers for the shared memory each lays out at
+    /// that state. Set once at load for every state the scan takes; nothing
+    /// changes it after.
+    fold_carries_global_at: ByIndexWidth<Box<[bool]>>,
     /// Grouped variant for windows of one chunk: the forward's channel
     /// groups walk the channels back side by side, its dB/dC rows summing
     /// four channels or one (`launch::ScanBwdRoute`). Its shared memory
@@ -606,6 +617,39 @@ pub fn state_capacity(d_state: usize) -> Result<usize, String> {
     // made them 4x oversized. Callers with larger states still get the
     // exact padded fit.
     Ok(d_state.div_ceil(16) * 16)
+}
+
+/// For every d_state the scan takes (indexed by it), whether the f32 fold
+/// keeps its carries in global memory: where the shared-carry fold leaves a
+/// single block resident on a SM and the global-carry one more. The second
+/// block runs the fold 1.36 times as fast; a third, which the half folds
+/// would gain the same way, ran slower than their carries' global reads
+/// cost, so the rule asks for the single block. The driver's occupancy
+/// calculator answers, so the registers, the reserved shared memory a
+/// block and the part's carveout all count as the launch meets them.
+fn fold_carries_global_states(
+    shared: &CudaFunction,
+    global: &CudaFunction,
+) -> Result<Box<[bool]>, String> {
+    use super::launch::{FoldCarries, SCAN_MAX_DSTATE, SCAN_NTHREADS, scan_bwd_fold_smem_bytes};
+    let resident = |f: &CudaFunction, smem: usize| {
+        f.occupancy_max_active_blocks_per_multiprocessor(SCAN_NTHREADS as u32, smem, None)
+            .map_err(|e| format!("occupancy of the scan backward fold at {smem} bytes: {e:?}"))
+    };
+    // The global-carry build lays out the same shared memory at every state.
+    let global_blocks = resident(global, scan_bwd_fold_smem_bytes(1, 4, FoldCarries::Global))?;
+    (0..=SCAN_MAX_DSTATE)
+        .map(|d_state| {
+            if d_state == 0 {
+                return Ok(false);
+            }
+            let shared_blocks = resident(
+                shared,
+                scan_bwd_fold_smem_bytes(d_state, 4, FoldCarries::Shared),
+            )?;
+            Ok(shared_blocks < 2 && global_blocks > shared_blocks)
+        })
+        .collect()
 }
 
 /// The optional Triad modules a board loads: the common tier and, when
@@ -1542,6 +1586,37 @@ impl MambaKernels {
             matvec_bi_f16_f32,
             matvec_bi_f32_f32,
         ] = matvec;
+        // The fold stages its group's delta, u and dy beside its f32
+        // workspace, past the 48 KB a block takes without opting in (54
+        // KB at 256 states); every fold kernel opts in to all the
+        // device allows, which on every supported part holds it.
+        let ssm_parallel_bwd_fold_typed = load_widths("ssm_parallel_scan_bwd_fold")?;
+        let ssm_parallel_bwd_fold_carry_f32 = ByIndexWidth {
+            i32: get("ssm_parallel_scan_bwd_fold_carry_f32")?,
+            i64: get("ssm_parallel_scan_bwd_fold_carry_f32_i64")?,
+        };
+        for f in [
+            &ssm_parallel_bwd_fold_typed.i32,
+            &ssm_parallel_bwd_fold_typed.i64,
+        ]
+        .into_iter()
+        .flat_map(|w| [&w.f32, &w.bf16, &w.f16])
+        .chain([
+            &ssm_parallel_bwd_fold_carry_f32.i32,
+            &ssm_parallel_bwd_fold_carry_f32.i64,
+        ]) {
+            super::launch::opt_in_dynamic_smem(f, optin, "scan backward fold")?;
+        }
+        let fold_carries_global_at = ByIndexWidth {
+            i32: fold_carries_global_states(
+                &ssm_parallel_bwd_fold_typed.i32.f32,
+                &ssm_parallel_bwd_fold_carry_f32.i32,
+            )?,
+            i64: fold_carries_global_states(
+                &ssm_parallel_bwd_fold_typed.i64.f32,
+                &ssm_parallel_bwd_fold_carry_f32.i64,
+            )?,
+        };
         Ok(Self {
             state_cap,
             compiler_identity,
@@ -1634,20 +1709,9 @@ impl MambaKernels {
                 },
             },
             ssm_parallel_bwd_typed: load_widths("ssm_parallel_scan_bwd")?,
-            // The fold stages its group's delta, u and dy beside its f32
-            // workspace, past the 48 KB a block takes without opting in (54
-            // KB at 256 states); every fold kernel opts in to all the
-            // device allows, which on every supported part holds it.
-            ssm_parallel_bwd_fold_typed: {
-                let k = load_widths("ssm_parallel_scan_bwd_fold")?;
-                for f in [&k.i32, &k.i64]
-                    .into_iter()
-                    .flat_map(|w| [&w.f32, &w.bf16, &w.f16])
-                {
-                    super::launch::opt_in_dynamic_smem(f, optin, "scan backward fold")?;
-                }
-                k
-            },
+            ssm_parallel_bwd_fold_typed,
+            ssm_parallel_bwd_fold_carry_f32,
+            fold_carries_global_at,
             ssm_parallel_bwd_fold_staged_typed: if fold_transport_admitted {
                 let k = load_half("ssm_parallel_scan_bwd_fold_staged")?;
                 for f in [&k.bf16, &k.f16] {
@@ -1912,14 +1976,46 @@ impl MambaKernels {
         self.shared_artifact_identity
     }
 
-    pub fn ssm_parallel_bwd_fold_for_shape(
+    /// Where the fold backward keeps its carries at `state` states with the
+    /// given dtype and index width: the launch
+    /// [`Self::ssm_parallel_bwd_fold_launch`] takes. The half folds keep
+    /// them in shared memory at every state.
+    pub fn fold_carries(
+        &self,
+        dtype: WeightDtype,
+        width: IndexWidth,
+        state: usize,
+    ) -> super::launch::FoldCarries {
+        let global = matches!(dtype, WeightDtype::F32 | WeightDtype::Tf32)
+            && self
+                .fold_carries_global_at
+                .get(width)
+                .get(state)
+                .copied()
+                .unwrap_or(false);
+        if global {
+            super::launch::FoldCarries::Global
+        } else {
+            super::launch::FoldCarries::Shared
+        }
+    }
+
+    /// The fold backward of a window of `time` steps and its launch config,
+    /// whose shared memory is always the one the chosen build lays out: the
+    /// build with its carries in global memory where the device keeps more
+    /// of its blocks resident, else the shared-carry fold, for the halves
+    /// its transport route where that is retained. Every fold build takes
+    /// the global carries' scratch ([`super::launch::scan_bwd_fold_carry_len`]
+    /// floats) as its last argument, the shared-carry builds without reading
+    /// it.
+    pub fn ssm_parallel_bwd_fold_launch(
         &self,
         dtype: WeightDtype,
         batch: usize,
         time: usize,
         inner: usize,
         state: usize,
-    ) -> &CudaFunction {
+    ) -> (&CudaFunction, cudarc::driver::LaunchConfig) {
         let width = super::launch::scan_bwd_index_width(
             batch,
             time,
@@ -1928,19 +2024,32 @@ impl MambaKernels {
             super::launch::scan_tape_slim(),
             true,
         );
+        let bytes = dtype.size_bytes();
+        let carries = self.fold_carries(dtype, width, state);
+        if carries == super::launch::FoldCarries::Global {
+            return (
+                self.ssm_parallel_bwd_fold_carry_f32.get(width),
+                super::launch::grid_parallel_scan_bwd_fold_carries(
+                    batch, inner, state, bytes, carries,
+                ),
+            );
+        }
+        let config = super::launch::grid_parallel_scan_bwd_fold(batch, inner, state, bytes);
         let legacy = self.ssm_parallel_bwd_fold_typed.get(width).get(dtype);
         // The staged route is built with int offsets alone; the shapes it
         // serves always fit them.
         if width == IndexWidth::I64 {
-            return legacy;
+            return (legacy, config);
         }
-        match super::fold_transport::route_for_shape(dtype, batch, time, inner, state) {
+        let kernel = match super::fold_transport::route_for_shape(dtype, batch, time, inner, state)
+        {
             super::fold_transport::FoldRoute::Staged => self
                 .ssm_parallel_bwd_fold_staged_typed
                 .as_ref()
                 .map_or(legacy, |kernel| kernel.get(dtype)),
             super::fold_transport::FoldRoute::Legacy => legacy,
-        }
+        };
+        (kernel, config)
     }
 
     pub(crate) fn specialized_compiler_identity(

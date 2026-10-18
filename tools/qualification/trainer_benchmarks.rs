@@ -873,9 +873,13 @@ fn bench_scan_kernels_isolated() {
     // the slim tape. The pre-0.6.4 ledger timed only the ungrouped
     // kernel, which the trainer launches solely when d_inner is not
     // divisible by the d-group - never at production shapes.
-    use mamba_rs::gpu::launch::{SCAN_BWD_DGROUP, grid_parallel_scan_bwd_fold};
+    use mamba_rs::gpu::launch::{
+        SCAN_BWD_DGROUP, grid_parallel_scan_bwd_fold, scan_bwd_fold_carry_len,
+    };
     let d_b_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
     let d_c_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
+    // Every fold build takes the global carries' scratch last.
+    let carry = GpuBuffer::zeros(&ctx.stream, scan_bwd_fold_carry_len(b, di, ds)).unwrap();
     ctx.stream.synchronize().unwrap();
     let bwd_fold_slim = |ctx: &GpuCtx| {
         for (y_first, cfg) in y_runs(grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())) {
@@ -918,9 +922,11 @@ fn bench_scan_kernels_isolated() {
             bld.arg(&dii);
             bld.arg(&dsi);
             let slim1: i32 = 1;
+            let cy = carry.cached_ptr();
             bld.arg(&tp);
             bld.arg(&slim1);
             bld.arg(&y_first);
+            bld.arg(&cy);
             unsafe { bld.launch(cfg) }.unwrap();
         }
     };

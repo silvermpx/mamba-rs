@@ -154,38 +154,48 @@ fn layer_backward(
         let use_parallel = dims.scan_mode.use_parallel(t, ds);
         let route = crate::gpu::launch::ScanBwdRoute::of(t, di);
         let slim = crate::gpu::launch::scan_tape_slim();
-        let kernel = if !use_parallel {
-            ctx.kernels
-                .ssm_backward_local
-                .get(crate::gpu::launch::seq_scan_index_width(
-                    b, t, di, ds, di, true,
-                ))
-        } else if let crate::gpu::launch::ScanBwdRoute::Groups { fold } = route {
-            ctx.kernels
-                .ssm_parallel_bwd_groups_typed
-                .get(crate::gpu::launch::scan_bwd_index_width(
+        let (kernel, cfg) = if !use_parallel {
+            (
+                ctx.kernels
+                    .ssm_backward_local
+                    .get(crate::gpu::launch::seq_scan_index_width(
+                        b, t, di, ds, di, true,
+                    )),
+                crate::gpu::launch::grid_seq(b, di, ds)?,
+            )
+        } else {
+            match route {
+                crate::gpu::launch::ScanBwdRoute::Groups { fold } => (
+                    ctx.kernels
+                        .ssm_parallel_bwd_groups_typed
+                        .get(crate::gpu::launch::scan_bwd_index_width(
+                            b,
+                            t,
+                            di,
+                            ds,
+                            slim,
+                            fold == crate::gpu::launch::SCAN_BWD_DGROUP,
+                        ))
+                        .get(crate::gpu::dtype::WeightDtype::F32),
+                    crate::gpu::launch::grid_parallel_scan_bwd_groups(b, t, di, fold),
+                ),
+                crate::gpu::launch::ScanBwdRoute::Fold => ctx.kernels.ssm_parallel_bwd_fold_launch(
+                    crate::gpu::dtype::WeightDtype::F32,
                     b,
                     t,
                     di,
                     ds,
-                    slim,
-                    fold == crate::gpu::launch::SCAN_BWD_DGROUP,
-                ))
-                .get(crate::gpu::dtype::WeightDtype::F32)
-        } else if route == crate::gpu::launch::ScanBwdRoute::Fold {
-            ctx.kernels
-                .ssm_parallel_bwd_fold_typed
-                .get(crate::gpu::launch::scan_bwd_index_width(
-                    b, t, di, ds, slim, true,
-                ))
-                .get(crate::gpu::dtype::WeightDtype::F32)
-        } else {
-            ctx.kernels
-                .ssm_parallel_bwd_typed
-                .get(crate::gpu::launch::scan_bwd_index_width(
-                    b, t, di, ds, slim, false,
-                ))
-                .get(crate::gpu::dtype::WeightDtype::F32)
+                ),
+                crate::gpu::launch::ScanBwdRoute::Plain => (
+                    ctx.kernels
+                        .ssm_parallel_bwd_typed
+                        .get(crate::gpu::launch::scan_bwd_index_width(
+                            b, t, di, ds, slim, false,
+                        ))
+                        .get(crate::gpu::dtype::WeightDtype::F32),
+                    crate::gpu::launch::grid_parallel_scan_bwd(b, di),
+                ),
+            }
         };
         if use_parallel && !route.assigns_slots() {
             // The ungrouped parallel kernel accumulates its per-sample
@@ -196,18 +206,6 @@ fn layer_backward(
                 .zero(&ctx.stream)
                 .map_err(|e| format!("zero d_a_log_local: {e:?}"))?;
         }
-        let cfg = match route {
-            _ if !use_parallel => crate::gpu::launch::grid_seq(b, di, ds)?,
-            crate::gpu::launch::ScanBwdRoute::Groups { fold } => {
-                crate::gpu::launch::grid_parallel_scan_bwd_groups(b, t, di, fold)
-            }
-            crate::gpu::launch::ScanBwdRoute::Fold => {
-                crate::gpu::launch::grid_parallel_scan_bwd_fold(b, di, ds, 4)
-            }
-            crate::gpu::launch::ScanBwdRoute::Plain => {
-                crate::gpu::launch::grid_parallel_scan_bwd(b, di)
-            }
-        };
         let fold_i: i32 = match route {
             crate::gpu::launch::ScanBwdRoute::Groups { fold } => fold as i32,
             _ => 0,
@@ -251,8 +249,15 @@ fn layer_backward(
                 builder.arg(&tape_p);
                 builder.arg(&slim_i);
                 builder.arg(&y_first);
-                if matches!(route, crate::gpu::launch::ScanBwdRoute::Groups { .. }) {
-                    builder.arg(&fold_i);
+                match route {
+                    crate::gpu::launch::ScanBwdRoute::Groups { .. } => {
+                        builder.arg(&fold_i);
+                    }
+                    // Every fold build takes the global carries' scratch.
+                    crate::gpu::launch::ScanBwdRoute::Fold => {
+                        builder.arg(scratch.fold_carry.inner_mut());
+                    }
+                    crate::gpu::launch::ScanBwdRoute::Plain => {}
                 }
             } else {
                 builder.arg(&lanes_i);

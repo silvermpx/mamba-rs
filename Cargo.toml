@@ -593,6 +593,11 @@ path = "tests/m1_scan_bwd_hash.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m1_fold_carries"
+path = "tests/m1_fold_carries.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "m1_test_correctness"
 path = "tests/m1_test_correctness.rs"
 

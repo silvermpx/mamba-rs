@@ -23,8 +23,7 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{
-    SCAN_BWD_DGROUP, grid_parallel_scan, grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold,
-    scan_tape_len, y_runs,
+    SCAN_BWD_DGROUP, grid_parallel_scan, grid_parallel_scan_bwd, scan_tape_len, y_runs,
 };
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -165,17 +164,24 @@ fn m1_scan_bwd_output_hashes() {
             // per-sample prefix with +=) - reset between arms.
             d_a_log_local.zero(&ctx.stream).unwrap();
             ctx.stream.synchronize().unwrap();
-            let cfg = if fold {
-                grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())
+            // The fold as the backward launches it, its global carries'
+            // scratch last.
+            let (kernel, cfg) = if fold {
+                k.ssm_parallel_bwd_fold_launch(dtype, b, t, di, ds)
             } else {
-                grid_parallel_scan_bwd(b, di)
+                (
+                    k.ssm_parallel_bwd_typed.i32.get(dtype),
+                    grid_parallel_scan_bwd(b, di),
+                )
             };
+            let carry = GpuBuffer::zeros(
+                &ctx.stream,
+                mamba_rs::gpu::launch::scan_bwd_fold_carry_len(b, di, ds),
+            )
+            .unwrap();
+            let carry_p = carry.cached_ptr();
             for (y_first, cfg) in y_runs(cfg) {
-                let mut bld = ctx.stream.launch_builder(if fold {
-                    k.ssm_parallel_bwd_fold_for_shape(dtype, b, t, di, ds)
-                } else {
-                    k.ssm_parallel_bwd_typed.i32.get(dtype)
-                });
+                let mut bld = ctx.stream.launch_builder(kernel);
                 let hs = h_saved.cached_ptr();
                 let tp = tape.cached_ptr();
                 let dp = delta_saved.cached_ptr();
@@ -227,6 +233,9 @@ fn m1_scan_bwd_output_hashes() {
                 bld.arg(&tape_arg);
                 bld.arg(&slim);
                 bld.arg(&y_first);
+                if fold {
+                    bld.arg(&carry_p);
+                }
                 unsafe { bld.launch(cfg) }.unwrap();
             }
             ctx.stream.synchronize().unwrap();

@@ -494,6 +494,9 @@ pub const SCAN_NTHREADS: usize = 128;
 pub const SCAN_NITEMS: usize = 8;
 /// Timesteps per scan chunk.
 pub const SCAN_CHUNK: usize = SCAN_NTHREADS * SCAN_NITEMS;
+/// The largest d_state the parallel scan takes; mirrors MAX_DSTATE in
+/// mamba_ssm_parallel.cu.
+pub const SCAN_MAX_DSTATE: usize = 256;
 
 /// Slim h-tape switch: `MAMBA_RS_SCAN_TAPE=full` restores the
 /// (T+1)-step `h_saved` tape on the parallel route (escape hatch for one
@@ -740,9 +743,55 @@ pub fn scan_bwd_index_width(
 /// mamba_ssm_parallel.cu.
 pub const SCAN_BWD_DGROUP: usize = 4;
 
-/// Launch config for the d-group fold backward: one block per
-/// (batch, d-group of SCAN_BWD_DGROUP lanes), the groups on the y axis,
-/// launched in [`y_runs`]. Smem = the f32 workspace
+/// Where the fold backward keeps each lane's running postfix and chunk
+/// boundary per state between chunks (its carries, 3 * SCAN_BWD_DGROUP *
+/// d_state floats a block): in shared memory, or in the block's slot of a
+/// global scratch of [`scan_bwd_fold_carry_len`] floats, which leaves the
+/// shared memory the same at every state. Mirrors the CARRY_GLOBAL argument
+/// of DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD in mamba_ssm_parallel.cu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoldCarries {
+    Shared,
+    Global,
+}
+
+/// The fold backward's shared memory in bytes for its carries' home.
+pub fn scan_bwd_fold_smem_bytes(
+    d_state: usize,
+    bytes_per_act: usize,
+    carries: FoldCarries,
+) -> usize {
+    const NWARPS: usize = SCAN_NTHREADS / 32;
+    let g = SCAN_BWD_DGROUP;
+    // Slot stride is the RUNTIME d_state (the kernel guard still bounds
+    // it by its compile-time capacity). Two warp-scan workspaces, four
+    // per-warp hand-off rows (reverse postfix, replay prefix), the
+    // per-group postfix/carry/boundary lanes unless they live in global
+    // memory, the next-decay and replayed-state hand-off rows, and one d_a
+    // reduce tile per group.
+    let carry_floats = match carries {
+        FoldCarries::Shared => 3 * g * d_state,
+        FoldCarries::Global => 0,
+    };
+    let f32_floats = 4 * NWARPS + 4 * NWARPS + carry_floats + NWARPS + g * SCAN_NTHREADS + NWARPS;
+    // The f32 kernel stages three of its four lanes and reads the fourth
+    // from global memory, so two blocks fit the SM's shared memory; the
+    // half kernels stage all four. Mirrors the STAGED argument of
+    // DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD in mamba_ssm_parallel.cu.
+    let staged = if bytes_per_act == 4 { g - 1 } else { g };
+    let stage_bytes = (3 * staged + 1) * SCAN_CHUNK * bytes_per_act;
+    f32_floats * std::mem::size_of::<f32>() + stage_bytes
+}
+
+/// The floats of the fold backward's global carries: one slot of 3 *
+/// SCAN_BWD_DGROUP * d_state per block, a block per (sequence, group).
+pub fn scan_bwd_fold_carry_len(batch: usize, d_inner: usize, d_state: usize) -> usize {
+    3 * batch * d_inner * d_state
+}
+
+/// Launch config for the d-group fold backward with its carries in shared
+/// memory: one block per (batch, d-group of SCAN_BWD_DGROUP lanes), the
+/// groups on the y axis, launched in [`y_runs`]. Smem = the f32 workspace
 /// (warp scans, exchanges, per-group postfix/carry lanes, reduce and
 /// boundary tiles) plus the typed delta/u/dy stage.
 pub fn grid_parallel_scan_bwd_fold(
@@ -751,25 +800,22 @@ pub fn grid_parallel_scan_bwd_fold(
     d_state: usize,
     bytes_per_act: usize,
 ) -> LaunchConfig {
-    const NWARPS: usize = SCAN_NTHREADS / 32;
-    let g = SCAN_BWD_DGROUP;
-    // Slot stride is the RUNTIME d_state (the kernel guard still bounds
-    // it by its compile-time capacity). Two warp-scan workspaces, four
-    // per-warp hand-off rows (reverse postfix, replay prefix), the
-    // per-group postfix/carry/boundary lanes, the next-decay and
-    // replayed-state hand-off rows, and one d_a reduce tile per group.
-    let f32_floats =
-        4 * NWARPS + 4 * NWARPS + 3 * g * d_state + NWARPS + g * SCAN_NTHREADS + NWARPS;
-    // The f32 kernel stages three of its four lanes and reads the fourth
-    // from global memory, so two blocks fit the SM's shared memory; the
-    // half kernels stage all four. Mirrors the STAGED argument of
-    // DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD in mamba_ssm_parallel.cu.
-    let staged = if bytes_per_act == 4 { g - 1 } else { g };
-    let stage_bytes = (3 * staged + 1) * SCAN_CHUNK * bytes_per_act;
+    grid_parallel_scan_bwd_fold_carries(batch, d_inner, d_state, bytes_per_act, FoldCarries::Shared)
+}
+
+/// [`grid_parallel_scan_bwd_fold`] for a build whose carries live where
+/// `carries` says: its shared memory is the one that build lays out.
+pub fn grid_parallel_scan_bwd_fold_carries(
+    batch: usize,
+    d_inner: usize,
+    d_state: usize,
+    bytes_per_act: usize,
+    carries: FoldCarries,
+) -> LaunchConfig {
     LaunchConfig {
-        grid_dim: (batch as u32, (d_inner / g) as u32, 1),
+        grid_dim: (batch as u32, (d_inner / SCAN_BWD_DGROUP) as u32, 1),
         block_dim: (SCAN_NTHREADS as u32, 1, 1),
-        shared_mem_bytes: (f32_floats * std::mem::size_of::<f32>() + stage_bytes) as u32,
+        shared_mem_bytes: scan_bwd_fold_smem_bytes(d_state, bytes_per_act, carries) as u32,
     }
 }
 
@@ -857,12 +903,11 @@ pub fn grid_parallel_scan_bwd_groups(
 /// the channels on the y axis, launched in [`y_runs`].
 pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
     const NWARPS: usize = SCAN_NTHREADS / 32;
-    const MAX_DSTATE: usize = 256;
     // SMEM_TOTAL_FLOATS (fwd layout incl. f32-sized stage) + bwd-extra
     // (reverse warp scan + postfix + next-A exchange + da-reduce +
     // chunk-first-A boundary). Must match SMEM_BWD_FLOATS in the kernel.
-    let fwd_total_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * SCAN_NTHREADS + SCAN_CHUNK;
-    let bwd_extra_floats = 2 * NWARPS + 3 * MAX_DSTATE + 2 * SCAN_NTHREADS;
+    let fwd_total_floats = 2 * NWARPS + 2 * SCAN_MAX_DSTATE + 2 * SCAN_NTHREADS + SCAN_CHUNK;
+    let bwd_extra_floats = 2 * NWARPS + 3 * SCAN_MAX_DSTATE + 2 * SCAN_NTHREADS;
     let total_bytes = (fwd_total_floats + bwd_extra_floats) * std::mem::size_of::<f32>();
     LaunchConfig {
         grid_dim: (batch as u32, d_inner as u32, 1),

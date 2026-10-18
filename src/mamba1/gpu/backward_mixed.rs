@@ -337,6 +337,7 @@ fn layer_backward_mixed(
         let dcl = scratch.d_c_local.cached_ptr();
         let ddd = scratch.d_d_local.cached_ptr();
         let da = scratch.d_a_log_local.cached_ptr();
+        let carry = scratch.fold_carry.cached_ptr();
 
         let route = crate::gpu::launch::ScanBwdRoute::of(t, di);
         if dims.scan_mode.use_parallel(t, ds) {
@@ -371,10 +372,9 @@ fn layer_backward_mixed(
                         .get(dtype),
                     crate::gpu::launch::grid_parallel_scan_bwd_groups(b, t, di, fold),
                 ),
-                crate::gpu::launch::ScanBwdRoute::Fold => (
-                    k.ssm_parallel_bwd_fold_for_shape(dtype, b, t, di, ds),
-                    crate::gpu::launch::grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes()),
-                ),
+                crate::gpu::launch::ScanBwdRoute::Fold => {
+                    k.ssm_parallel_bwd_fold_launch(dtype, b, t, di, ds)
+                }
                 crate::gpu::launch::ScanBwdRoute::Plain => (
                     k.ssm_parallel_bwd_typed
                         .get(crate::gpu::launch::scan_bwd_index_width(
@@ -419,8 +419,15 @@ fn layer_backward_mixed(
                 bld.arg(&h_p);
                 bld.arg(&slim_i);
                 bld.arg(&y_first);
-                if matches!(route, crate::gpu::launch::ScanBwdRoute::Groups { .. }) {
-                    bld.arg(&fold_i);
+                match route {
+                    crate::gpu::launch::ScanBwdRoute::Groups { .. } => {
+                        bld.arg(&fold_i);
+                    }
+                    // Every fold build takes the global carries' scratch.
+                    crate::gpu::launch::ScanBwdRoute::Fold => {
+                        bld.arg(&carry);
+                    }
+                    crate::gpu::launch::ScanBwdRoute::Plain => {}
                 }
                 unsafe { bld.launch(cfg) }.map_err(|e| format!("ssm_parallel_bwd_typed: {e:?}"))?;
             }

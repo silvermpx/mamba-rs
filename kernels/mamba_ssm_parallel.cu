@@ -1483,7 +1483,7 @@ DEFINE_SSM_PARALLEL_SCAN_BWD(ssm_parallel_scan_bwd_f16_i64, long long, __half, f
 // each use so nothing spills. The launcher's byte count mirrors STAGED.
 
 #define DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(NAME, IDX, T_ACT, FROM_F, MINB,     \
-                                          HOLD_ROWS, STAGED)                  \
+                                          HOLD_ROWS, STAGED, CARRY_GLOBAL)    \
 extern "C" __global__ __launch_bounds__(NTHREADS, MINB) void                  \
 NAME(                                                                         \
     const float* __restrict__ h_saved,                                        \
@@ -1509,7 +1509,10 @@ NAME(                                                                         \
     int batch, int T, int d_inner, int d_state,                               \
     const float* run_tape,                                                    \
     int slim_tape,                                                            \
-    int y_first /* this run's first y block */                                \
+    int y_first, /* this run's first y block */                               \
+    /* With CARRY_GLOBAL the block's 3 * G * d_state carries, its slot at     \
+       (bid * d_inner / G + group) * 3 * G * d_state; unread otherwise. */    \
+    float* __restrict__ fold_carry                                            \
 ) {                                                                           \
     const int G = SCAN_BWD_DGROUP;                                            \
     IDX bid = blockIdx.x;                                                     \
@@ -1522,10 +1525,11 @@ NAME(                                                                         \
     /* Layout: rev warp scan (2*NWARPS), fwd-replay warp scan                 \
        (2*NWARPS), the raw warp totals of each scan (2*NWARPS twice; a        \
        warp's edge lane rebuilds its neighbour's composed value from          \
-       them), post (2*G*d_state), chunk_first_a (G*d_state), next_a           \
-       (NWARPS), da_red (G*NTHREADS), hbound (NWARPS), then the typed         \
-       delta/u/dy stage (3*STAGED*CHUNK_SIZE T_ACT slots) and the             \
-       CHUNK_SIZE store tile. The launcher's byte count mirrors this. */      \
+       them), the carries post (2*G*d_state) and first_a (G*d_state)          \
+       unless CARRY_GLOBAL keeps them in fold_carry, next_a (NWARPS), da_red  \
+       (G*NTHREADS), hbound (NWARPS), then the typed delta/u/dy stage         \
+       (3*STAGED*CHUNK_SIZE T_ACT slots) and the CHUNK_SIZE store tile. The   \
+       launcher's byte count mirrors this. */                                 \
     static_assert(HOLD_ROWS || STAGED == SCAN_BWD_DGROUP,                     \
                   "a lane that reloads its rows needs every lane staged");    \
     float *smem_rev_wa = smem;                                                \
@@ -1536,10 +1540,19 @@ NAME(                                                                         \
     float *smem_rev_raw_b = smem_rev_raw_a + NWARPS;                          \
     float *smem_fwd_raw_a = smem_rev_raw_b + NWARPS;                          \
     float *smem_fwd_raw_b = smem_fwd_raw_a + NWARPS;                          \
-    float *smem_post_a = smem_fwd_raw_b + NWARPS;                             \
-    float *smem_post_b = smem_post_a + SCAN_BWD_DGROUP * d_state;             \
-    float *smem_chunk_first_a = smem_post_b + SCAN_BWD_DGROUP * d_state;      \
-    float *smem_next_a = smem_chunk_first_a + SCAN_BWD_DGROUP * d_state;      \
+    /* Each lane's running postfix and chunk boundary per state live in     \
+       shared memory, or with CARRY_GLOBAL in the block's slot of            \
+       fold_carry, where they leave the SM room for another block; the       \
+       values and every operation on them are the same either way. */        \
+    float *carry_post_a = CARRY_GLOBAL                                        \
+        ? fold_carry + ((IDX)bid * n_groups + gid) * 3 * SCAN_BWD_DGROUP      \
+              * d_state                                                       \
+        : smem_fwd_raw_b + NWARPS;                                            \
+    float *carry_post_b = carry_post_a + SCAN_BWD_DGROUP * d_state;           \
+    float *carry_first_a = carry_post_b + SCAN_BWD_DGROUP * d_state;          \
+    float *smem_next_a = CARRY_GLOBAL                                         \
+        ? smem_fwd_raw_b + NWARPS                                             \
+        : carry_first_a + SCAN_BWD_DGROUP * d_state;                          \
     float *smem_da_red = smem_next_a + NWARPS;                                \
     float *smem_hbound = smem_da_red + SCAN_BWD_DGROUP * NTHREADS;            \
     T_ACT *smem_dio = (T_ACT *)(smem_hbound + NWARPS);                        \
@@ -1550,9 +1563,9 @@ NAME(                                                                         \
     unsigned warp_mask = 0xFFFFFFFFu;                                         \
     for (int gg = 0; gg < G; gg++) {                                          \
         for (int n = threadIdx.x; n < d_state; n += NTHREADS) {               \
-            smem_post_a[gg * d_state + n] = 1.0f;                             \
-            smem_post_b[gg * d_state + n] = 0.0f;                             \
-            smem_chunk_first_a[gg * d_state + n] = 1.0f;                      \
+            carry_post_a[gg * d_state + n] = 1.0f;                             \
+            carry_post_b[gg * d_state + n] = 0.0f;                             \
+            carry_first_a[gg * d_state + n] = 1.0f;                      \
         }                                                                     \
     }                                                                         \
     __syncthreads();                                                          \
@@ -1698,8 +1711,8 @@ NAME(                                                                         \
                 /* The running postfix is read before the scans; thread 0     \
                    folds this chunk into it after the reverse scan, when      \
                    every thread has taken its copy. */                        \
-                float run_a = smem_post_a[gg * d_state + n];                  \
-                float run_b = smem_post_b[gg * d_state + n];                  \
+                float run_a = carry_post_a[gg * d_state + n];                  \
+                float run_b = carry_post_b[gg * d_state + n];                  \
                 /* The reverse pairs need the next thread's first decay:      \
                    the lane below hands it up through a shuffle, a warp's     \
                    last lane takes it from the next warp's first lane         \
@@ -1773,7 +1786,7 @@ NAME(                                                                         \
                 /* Warp-uniform slot pick, then a per-lane select: no lane    \
                    walks a branch of its own. */                              \
                 float edge_next_a = ((threadIdx.x >> 5) == NWARPS - 1)        \
-                    ? smem_chunk_first_a[gg * d_state + n]                    \
+                    ? carry_first_a[gg * d_state + n]                    \
                     : smem_next_a[(threadIdx.x >> 5) + 1];                    \
                 float down_next_a =                                           \
                     __shfl_down_sync(warp_mask, da_vals[0], 1);               \
@@ -1822,8 +1835,8 @@ NAME(                                                                         \
                 float h_prev_boundary =                                       \
                     ((threadIdx.x & 31) == 0) ? edge_h_prev : up_h_prev;      \
                 if (threadIdx.x == 0) {                                       \
-                    smem_post_a[gg * d_state + n] = scan_a * run_a;           \
-                    smem_post_b[gg * d_state + n] =                           \
+                    carry_post_a[gg * d_state + n] = scan_a * run_a;           \
+                    carry_post_b[gg * d_state + n] =                           \
                         scan_a * run_b + scan_b;                              \
                 }                                                             \
                 float post_a = next_a * run_a;                                \
@@ -1864,7 +1877,7 @@ NAME(                                                                         \
                    boundary; the last thread read the old value before        \
                    the reverse scan's barriers. */                            \
                 if (threadIdx.x == 0) {                                       \
-                    smem_chunk_first_a[gg * d_state + n] = da_vals[0];        \
+                    carry_first_a[gg * d_state + n] = da_vals[0];        \
                 }                                                             \
             }                                                                 \
             /* d_a: one block reduction per group, the four sharing their     \
@@ -2004,12 +2017,26 @@ NAME(                                                                         \
     }                                                                         \
 }
 
-DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f32, int, float, from_f_f32, 2, 1, 3)
-DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f32_i64, long long, float, from_f_f32, 2, 1, 3)
-DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4)
-DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16_i64, long long, __nv_bfloat16, from_f_bf16, 3, 0, 4)
-DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16, int, __half, from_f_f16, 3, 0, 4)
-DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16_i64, long long, __half, from_f_f16, 3, 0, 4)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f32, int, float, from_f_f32, 2, 1, 3, 0)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f32_i64, long long, float, from_f_f32, 2, 1, 3, 0)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4, 0)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16_i64, long long, __nv_bfloat16, from_f_bf16, 3, 0, 4, 0)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16, int, __half, from_f_f16, 3, 0, 4, 0)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16_i64, long long, __half, from_f_f16, 3, 0, 4, 0)
+
+// The f32 fold with its carries in global memory (fold_carry). The carries
+// take 48 bytes a state in shared memory: on a part with 100 KB of it a SM,
+// two f32 blocks fit only up to 146 states and one past them. In global
+// memory they leave the shared memory the same at every state; each is
+// read once a state and chunk and written once by one thread, so a block's
+// time barely changes, and the second block a SM runs the fold 1.36 times
+// as fast. The launcher takes it where the shared-carry fold would keep a
+// single block resident and this one more. The half folds keep two blocks
+// a SM with their carries in shared memory at every state, and a third
+// block did not pay for the carries' global reads, so they have no such
+// build.
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_carry_f32, int, float, from_f_f32, 2, 1, 3, 1)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_carry_f32_i64, long long, float, from_f_f32, 2, 1, 3, 1)
 
 // ============================================================================
 // `block_scan_ab_with_exclusive` over the `width` threads of a channel's

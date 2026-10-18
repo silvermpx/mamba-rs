@@ -859,6 +859,26 @@
   the same sums in a fixed other order: the same bits on every run, the
   state and its tape the block tier's bits, every output as close to the
   f64 recurrence as the whole-state walk's.
+- The Mamba-1 f32 fold backward keeps each lane's running postfix and
+  chunk boundary per state (its carries, 48 bytes a state) in a global
+  scratch instead of shared memory wherever the shared-carry fold would
+  keep a single block resident on a SM and the global-carry one more
+  (`ssm_parallel_scan_bwd_fold_carry_f32*`, `launch::FoldCarries`), as the
+  driver's occupancy calculator answers at load for every state. On a part
+  with 100 KB of shared memory a SM two f32 blocks fit only up to 146
+  states; with the carries in global memory they fit at every state, and
+  the fold runs 1.36 times as fast from 147 states on an RTX 6000 Ada and
+  1.17 times on an RTX 5090. A
+  carry is read once a state and chunk and written by one thread, and the
+  values and operations are the same, so every output keeps its bits
+  (`tests/m1_fold_carries.rs`). The half folds keep two blocks a SM with
+  their carries shared at every state; a third block measured no faster
+  than the carries' global reads cost. Every fold build takes the scratch
+  (`launch::scan_bwd_fold_carry_len` floats, allocated with the trainer's
+  scratch) as its last argument. `MambaKernels::ssm_parallel_bwd_fold_launch`
+  returns the kernel with its launch config in place of
+  `ssm_parallel_bwd_fold_for_shape`, so the shared memory a launch carries
+  is always its build's.
 
 ### Fixed
 

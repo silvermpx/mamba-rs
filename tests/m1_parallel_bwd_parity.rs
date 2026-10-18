@@ -565,6 +565,14 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
     let d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * nc_fold * di * ds).unwrap();
     ctx.stream.synchronize().unwrap();
     {
+        // Every fold build takes the global carries' scratch as its last
+        // argument; the shared-carry one never reads it.
+        let carry = GpuBuffer::zeros(
+            &ctx.stream,
+            mamba_rs::gpu::launch::scan_bwd_fold_carry_len(b, di, ds),
+        )
+        .unwrap();
+        let carry_p = carry.cached_ptr();
         for (y_first, cfg) in y_runs(grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())) {
             let mut bld = ctx
                 .stream
@@ -610,6 +618,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
             bld.arg(&tape_arg);
             bld.arg(&slim_i);
             bld.arg(&y_first);
+            bld.arg(&carry_p);
             unsafe { bld.launch(cfg) }.unwrap();
         }
     }
@@ -803,6 +812,12 @@ fn diag_fold_slim_vs_full_positions() {
         } else {
             grid_parallel_scan_bwd(b, di)
         };
+        let carry = GpuBuffer::zeros(
+            &ctx.stream,
+            mamba_rs::gpu::launch::scan_bwd_fold_carry_len(b, di, ds),
+        )
+        .unwrap();
+        let carry_p = carry.cached_ptr();
         for (y_first, cfg) in y_runs(cfg) {
             let mut bld = ctx.stream.launch_builder(if fold {
                 k.ssm_parallel_bwd_fold_typed.i32.get(dtype)
@@ -850,6 +865,9 @@ fn diag_fold_slim_vs_full_positions() {
             bld.arg(&tpa);
             bld.arg(&sl);
             bld.arg(&y_first);
+            if fold {
+                bld.arg(&carry_p);
+            }
             unsafe { bld.launch(cfg) }.unwrap();
         }
         ctx.stream.synchronize().unwrap();
