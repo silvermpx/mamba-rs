@@ -438,15 +438,21 @@ pub fn pairs_threads(tq: usize, rank: usize) -> usize {
 
 /// Whether the pair kernels take their narrow builds, which keep dk's
 /// accumulators in registers at half the warps a multiprocessor where the
-/// wide builds spill them. The spills cost more from a head of 128 channels,
-/// and on a head of 64 or more at 256 states, at 128 states past rank 1 and,
-/// from a head of 96, at rank 4 and up. Everywhere else the warps win. Both
-/// give the same bits.
+/// wide builds spill them. At ranks 1 and 2 both builds run the same tile of
+/// tokens, so the narrow one only gives up warps: it pays on a head of 64 or
+/// more at 256 states, and at rank 1 on a head of 256. From rank 3 the wide
+/// build's larger tile spills more, and the narrow one pays from a head of
+/// 96, or of 64 from 128 states. Everywhere else the warps win. Both give
+/// the same bits.
 pub fn pairs_narrow(hd: usize, ds: usize, rank: usize) -> bool {
     if let Some(forced) = pairs_build_forced() {
         return forced;
     }
-    hd >= 128 || (hd >= 64 && (ds >= 256 || (ds >= 128 && rank >= 2) || (hd >= 96 && rank >= 4)))
+    match rank {
+        1 => hd >= 256 || (hd >= 64 && ds >= 256),
+        2 => hd >= 64 && ds >= 256,
+        _ => hd >= 96 || (hd >= 64 && ds >= 128),
+    }
 }
 
 /// `MAMBA_RS_PAIRS_BUILD` picks the pair kernels' build for tests and
@@ -1271,18 +1277,20 @@ mod tests {
     }
 
     /// The pair kernels take the narrow builds where the wide builds' spills
-    /// cost more than half the warps, and the wide builds everywhere else.
+    /// cost more than half the warps, and the wide builds everywhere else,
+    /// with ranks 1 and 2, where both builds run the same tile, apart.
     #[test]
     fn the_pair_kernels_take_the_narrow_build_where_the_spills_cost_more() {
         if std::env::var("MAMBA_RS_PAIRS_BUILD").is_ok() {
             return;
         }
         for (hd, ds, rank) in [
-            (128, 64, 1),
             (256, 16, 1),
             (64, 256, 1),
-            (64, 128, 2),
+            (64, 256, 2),
             (96, 64, 4),
+            (64, 128, 4),
+            (128, 64, 8),
             (1024, 256, 16),
         ] {
             assert!(
@@ -1291,12 +1299,13 @@ mod tests {
             );
         }
         for (hd, ds, rank) in [
+            (128, 128, 2),
+            (128, 64, 1),
+            (64, 128, 1),
+            (96, 128, 2),
             (32, 256, 4),
             (32, 64, 16),
             (64, 64, 16),
-            (64, 128, 1),
-            (96, 64, 2),
-            (96, 128, 1),
             (16, 16, 16),
         ] {
             assert!(

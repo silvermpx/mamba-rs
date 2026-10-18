@@ -1582,10 +1582,9 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
 // to 512 threads, which caps a thread at 128 registers: dk's accumulators
 // and products then spill every token. The narrow one takes at most 256
 // threads at one block a multiprocessor, which keeps dk in 218 to 221
-// registers without a spill at half the warps. The spills cost more than
-// the warps on wide heads, and on narrower heads at wide states and high
-// ranks. Every chain keeps its columns and order at any tile, so both give
-// the same bits, and the host picks one.
+// registers without a spill at half the warps. Which costs more depends on
+// the head, the state and the rank, so the host picks the build. Every chain
+// keeps its columns and order at any tile, so both give the same bits.
 #define M3MB_PAIRS_BOUNDS_WIDE __launch_bounds__(512)
 #define M3MB_PAIRS_BOUNDS_NARROW __launch_bounds__(256, 1)
 
