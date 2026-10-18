@@ -38,6 +38,34 @@
 #define M3_STEP_SLICE 16
 #endif
 
+// The decode steps' slice loop comes in two builds. The plain one (PF 0)
+// loads a slice at the top of its turn. The prefetching one (PF 1) loads
+// the next slice while the current one computes, which pays when a step
+// has few warps on a multiprocessor to hide memory with. Only the loads
+// move, so both give the same bits, and the host picks one by occupancy.
+#ifndef M3_STEP_PRE_0
+#define M3_STEP_PRE_0 float h_local[M3_STEP_SLICE];
+#define M3_STEP_PRE_1                                                         \
+    float h_local[M3_STEP_SLICE];                                             \
+    _Pragma("unroll")                                                         \
+    for (int j = 0; j < M3_STEP_SLICE; j++) if (j >= ds) break; else          \
+        h_local[j] = ssm_state[h_base + j];
+#define M3_STEP_LOAD_0                                                        \
+    _Pragma("unroll")                                                         \
+    for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else     \
+        h_local[j] = ssm_state[h_base + n0 + j];
+#define M3_STEP_LOAD_1                                                        \
+    float h_next[M3_STEP_SLICE];                                              \
+    _Pragma("unroll")                                                         \
+    for (int j = 0; j < M3_STEP_SLICE; j++)                                   \
+        h_next[j] = n0 + M3_STEP_SLICE + j < ds                               \
+            ? ssm_state[h_base + n0 + M3_STEP_SLICE + j] : 0.0f;
+#define M3_STEP_CARRY_0
+#define M3_STEP_CARRY_1                                                       \
+    _Pragma("unroll")                                                         \
+    for (int j = 0; j < M3_STEP_SLICE; j++) h_local[j] = h_next[j];
+#endif
+
 // m3_step_fwd_block: one decode step of a head wider than a warp.
 //
 // Arguments as m3_step_fwd. Grid: (B, nh). Block: headdim rounded up to
@@ -49,7 +77,7 @@
 // The previous K is staged by every thread before the barrier, so the
 // head's new K may overwrite k_state right after it: no thread reads
 // k_state again.
-#define DEFINE_M3_STEP_FWD_BLOCK(NAME, IDX, TY, FROM_F)                       \
+#define DEFINE_M3_STEP_FWD_BLOCK(NAME, IDX, TY, FROM_F, PF)                   \
 extern "C" __global__ void NAME(                                              \
     float* ssm_state,                                                         \
     float* k_state,                                                           \
@@ -103,11 +131,9 @@ extern "C" __global__ void NAME(                                              \
         float y_val = d_skip * x_val;                                         \
         float bv = beta_h * v_prev;                                           \
         float gx = gamma_h * x_val;                                           \
+        M3_STEP_PRE_##PF                                                      \
         for (int n0 = 0; n0 < ds; n0 += M3_STEP_SLICE) {                      \
-            float h_local[M3_STEP_SLICE];                                     \
-            _Pragma("unroll")                                                 \
-            for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else \
-                h_local[j] = ssm_state[h_base + n0 + j];                      \
+            M3_STEP_LOAD_##PF                                                 \
             _Pragma("unroll")                                                 \
             for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else { \
                 float kc_n = kc_sm[n0 + j];                                   \
@@ -119,20 +145,27 @@ extern "C" __global__ void NAME(                                              \
                 y_val = __fmaf_rn(h_local[j], qc_n, y_val);                   \
             }                                                                 \
             _Pragma("unroll")                                                 \
-            for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else \
+            for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else\
                 ssm_state[h_base + n0 + j] = h_local[j];                      \
+            M3_STEP_CARRY_##PF                                                \
         }                                                                     \
         y[b * d_inner + h * hd + p] = FROM_F(y_val);                          \
         v_state[b * nh * hd + h * hd + p] = x_val;                            \
     }                                                                         \
 }
 
-DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block, int, float, from_f_f32)
-DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_i64, long long, float, from_f_f32)
-DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_bf16, int, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
-DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_f16, int, __half, from_f_f16)
-DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_f16_i64, long long, __half, from_f_f16)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block, int, float, from_f_f32, 0)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_i64, long long, float, from_f_f32, 0)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_bf16, int, __nv_bfloat16, from_f_bf16, 0)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_bf16_i64, long long, __nv_bfloat16, from_f_bf16, 0)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_f16, int, __half, from_f_f16, 0)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_f16_i64, long long, __half, from_f_f16, 0)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_pf, int, float, from_f_f32, 1)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_pf_i64, long long, float, from_f_f32, 1)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_pf_bf16, int, __nv_bfloat16, from_f_bf16, 1)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_pf_bf16_i64, long long, __nv_bfloat16, from_f_bf16, 1)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_pf_f16, int, __half, from_f_f16, 1)
+DEFINE_M3_STEP_FWD_BLOCK(m3_step_fwd_block_pf_f16_i64, long long, __half, from_f_f16, 1)
 
 // ============================================================================
 // The sequential scan's training kernels for any head width.

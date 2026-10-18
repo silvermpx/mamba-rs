@@ -953,18 +953,23 @@ impl Mamba3GpuEngine {
         // F6: m3_step_fwd (trapezoidal SSM recurrence)
         {
             let tier = crate::mamba3_siso::route::head_tier(hd);
-            let grid = super::kernels::step_head_cfg(
-                tier,
-                b,
-                nh,
-                hd,
-                ds,
-                *self.kernels.step_block_threads.get(width),
-            );
-            let kernel = match tier {
-                crate::mamba3_siso::route::HeadTier::Warp => self.kernels.m3_step_fwd.get(width),
-                crate::mamba3_siso::route::HeadTier::Block => {
-                    &self.kernels.m3_step_fwd_block_typed.get(width).f32
+            let sms = self.ctx.kernels.multiprocessor_count() as usize;
+            let pf = super::kernels::step_prefetches(b, nh, hd, ds, sms);
+            let k = &self.kernels;
+            let block_threads = if pf {
+                k.step_block_pf_threads.get(width)
+            } else {
+                k.step_block_threads.get(width)
+            };
+            let grid = super::kernels::step_head_cfg(tier, b, nh, hd, ds, *block_threads);
+            let kernel = match (tier, pf) {
+                (crate::mamba3_siso::route::HeadTier::Warp, false) => k.m3_step_fwd.get(width),
+                (crate::mamba3_siso::route::HeadTier::Warp, true) => k.m3_step_fwd_pf.get(width),
+                (crate::mamba3_siso::route::HeadTier::Block, false) => {
+                    &k.m3_step_fwd_block_typed.get(width).f32
+                }
+                (crate::mamba3_siso::route::HeadTier::Block, true) => {
+                    &k.m3_step_fwd_block_pf_typed.get(width).f32
                 }
             };
             let ssm_ptr = state.ssm_state.inner_at(ssm_off);
@@ -1801,20 +1806,26 @@ impl Mamba3GpuEngineMixed {
             // F6: m3_step_fwd typed — f32 state, bf16 x/k_cur/q_cur/y, f32 α/β/γ/D.
             {
                 let tier = crate::mamba3_siso::route::head_tier(hd);
-                let grid = super::kernels::step_head_cfg(
-                    tier,
-                    b,
-                    nh,
-                    hd,
-                    ds,
-                    *k.step_block_threads.get(width),
-                );
-                let kernel = match tier {
-                    crate::mamba3_siso::route::HeadTier::Warp => {
+                let sms = engine.ctx.kernels.multiprocessor_count() as usize;
+                let pf = super::kernels::step_prefetches(b, nh, hd, ds, sms);
+                let block_threads = if pf {
+                    k.step_block_pf_threads.get(width)
+                } else {
+                    k.step_block_threads.get(width)
+                };
+                let grid = super::kernels::step_head_cfg(tier, b, nh, hd, ds, *block_threads);
+                let kernel = match (tier, pf) {
+                    (crate::mamba3_siso::route::HeadTier::Warp, false) => {
                         k.m3_step_fwd_typed.get(width).get(dt)
                     }
-                    crate::mamba3_siso::route::HeadTier::Block => {
+                    (crate::mamba3_siso::route::HeadTier::Warp, true) => {
+                        k.m3_step_fwd_pf_typed.get(width).get(dt)
+                    }
+                    (crate::mamba3_siso::route::HeadTier::Block, false) => {
                         k.m3_step_fwd_block_typed.get(width).get(dt)
+                    }
+                    (crate::mamba3_siso::route::HeadTier::Block, true) => {
+                        k.m3_step_fwd_block_pf_typed.get(width).get(dt)
                     }
                 };
                 let ssm_ptr = state.ssm_state.inner_at(ssm_off);

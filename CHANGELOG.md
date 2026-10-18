@@ -127,8 +127,9 @@ are gone.
   through the shared traits.
 - Test switches for the rare kernel paths on ordinary shapes:
   `MAMBA_RS_SMEM_BUDGET` (the small tiles and fallbacks),
-  `MAMBA_RS_INDEX_WIDTH=i64` (the 64-bit builds) and `MAMBA_RS_GRID_RUN`
-  (the split grids).
+  `MAMBA_RS_INDEX_WIDTH=i64` (the 64-bit builds), `MAMBA_RS_GRID_RUN`
+  (the split grids) and `MAMBA_RS_STEP_PREFETCH` (the SISO decode step
+  with and without the early fetch, which give the same bits).
 
 ### Faster
 
@@ -157,7 +158,8 @@ SISO with head 64 and the sequential scan trains in 0.8 and was refused in
   at every head and state width, and so do the conv weight gradient and
   the element kernels.
 - Mamba-3 SISO: every stage of the chunked forward and backward runs on
-  fast kernels, the decode steps keep the state in registers, the dQKV
+  fast kernels, the decode steps keep the state in registers and fetch its
+  next slice early when the batch leaves the card underfilled, the dQKV
   stage takes the tiled kernel past head 16 or 16 states, and the
   sequential scan cuts a wide state across the block.
 - Mamba-3 MIMO: the inter-chunk term, the state terms, the pair terms and

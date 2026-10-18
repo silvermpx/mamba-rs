@@ -83,6 +83,9 @@ pub struct Mamba3Kernels {
 
     // ── Sequential SSM (mamba3_siso.cu) ──
     pub m3_step_fwd: ByIndexWidth<CudaFunction>,
+    /// [`Self::m3_step_fwd`] loading the next state slice while a slice
+    /// computes; [`step_prefetches`] picks it.
+    pub m3_step_fwd_pf: ByIndexWidth<CudaFunction>,
     pub m3_burnin_fwd: ByIndexWidth<CudaFunction>,
     /// The burn-in forward specialised on a state width, the twin of
     /// [`Self::m3_backward_seq_by_state`].
@@ -237,6 +240,10 @@ pub struct Mamba3Kernels {
     /// head-shared values staged in shared memory. Same arguments as
     /// `m3_step_fwd`; launched with `step_block_cfg`.
     pub m3_step_fwd_block_typed: ByIndexWidth<TypedKernel>,
+    /// The prefetching builds of [`Self::m3_step_fwd_typed`] and
+    /// [`Self::m3_step_fwd_block_typed`].
+    pub m3_step_fwd_pf_typed: ByIndexWidth<TypedKernel>,
+    pub m3_step_fwd_block_pf_typed: ByIndexWidth<TypedKernel>,
     /// The gated MLP's activation `value * silu(gate)` over the up
     /// projection's rows (value columns, then gate columns).
     pub mlp_gate_fwd_typed: TypedKernel,
@@ -306,6 +313,9 @@ pub struct Mamba3Kernels {
     /// the fewest any of its f32, bf16 and f16 kernels can launch with the
     /// registers its state capacity compiled to.
     pub step_block_threads: ByIndexWidth<usize>,
+    /// The block threads of the prefetching block-tier step, which holds a
+    /// second slice in registers.
+    pub step_block_pf_threads: ByIndexWidth<usize>,
     /// The dynamic shared memory a block of the staged kernels plans its
     /// tiles with: what each of them opted in to on this device beside its
     /// own static stage, capped at [`PLANNED_SMEM`], or less when
@@ -763,6 +773,19 @@ impl Mamba3Kernels {
             i32: bound(&step_blocks, "", "block-tier decode step")?,
             i64: bound(&step_blocks, "_i64", "block-tier decode step")?,
         };
+        let step_blocks_pf = [
+            "m3_step_fwd_block_pf",
+            "m3_step_fwd_block_pf_bf16",
+            "m3_step_fwd_block_pf_f16",
+        ];
+        let step_block_pf_threads = ByIndexWidth {
+            i32: bound(&step_blocks_pf, "", "prefetching block-tier decode step")?,
+            i64: bound(
+                &step_blocks_pf,
+                "_i64",
+                "prefetching block-tier decode step",
+            )?,
+        };
 
         // PTX targeting Ada can also run on newer devices. Admission checks
         // the actual device because preserving a compiler's FMA graph alone
@@ -804,6 +827,7 @@ impl Mamba3Kernels {
             artifact_identity,
             // Sequential SSM
             m3_step_fwd: pair("m3_step_fwd")?,
+            m3_step_fwd_pf: pair("m3_step_fwd_pf")?,
             m3_burnin_fwd: pair("m3_burnin_fwd")?,
             m3_burnin_fwd_by_state: [
                 (8, pair("m3_burnin_fwd_ds8")?),
@@ -940,6 +964,16 @@ impl Mamba3Kernels {
                 "m3_step_fwd_block_bf16",
                 "m3_step_fwd_block_f16",
             )?,
+            m3_step_fwd_pf_typed: typed_pair(
+                "m3_step_fwd_pf",
+                "m3_step_fwd_pf_bf16",
+                "m3_step_fwd_pf_f16",
+            )?,
+            m3_step_fwd_block_pf_typed: typed_pair(
+                "m3_step_fwd_block_pf",
+                "m3_step_fwd_block_pf_bf16",
+                "m3_step_fwd_block_pf_f16",
+            )?,
             mlp_gate_fwd_typed: TypedKernel {
                 f32: get("mlp_gate_fwd")?,
                 bf16: get("mlp_gate_fwd_bf16")?,
@@ -1019,6 +1053,7 @@ impl Mamba3Kernels {
             },
 
             step_block_threads,
+            step_block_pf_threads,
             smem_optin: 0,
             _modules: CudaModuleAnchors::new(vec![module]),
         };
@@ -1215,6 +1250,44 @@ pub fn state_terms_tiled_cfg(
         block_dim: (256, 1, 1),
         shared_mem_bytes: 0,
     }
+}
+
+/// Whether a decode step of `batch` sequences of `nh` heads, `hd` wide
+/// with `ds` states, takes the prefetching build: when a head holds at
+/// most 8192 states and the batch's whole state comes to at most 12000
+/// floats a multiprocessor, the step has too few warps on each
+/// multiprocessor to hide its loads, and loading the next slice while one
+/// computes wins. Past either bound the second slice's registers cost
+/// more than the overlap saves. Both builds give the same bits.
+pub fn step_prefetches(batch: usize, nh: usize, hd: usize, ds: usize, sms: usize) -> bool {
+    if let Some(forced) = step_prefetch_forced() {
+        return forced;
+    }
+    hd * ds <= 8192
+        && batch
+            .saturating_mul(nh)
+            .saturating_mul(hd)
+            .saturating_mul(ds)
+            <= 12_000 * sms
+}
+
+/// `MAMBA_RS_STEP_PREFETCH` picks the decode step's build for tests and
+/// measurements: `on` or `off` takes that build at every shape, and unset
+/// or `auto` leaves the choice to [`step_prefetches`]. Any other value is
+/// refused loudly, so a typo cannot report a run that never left the rule.
+fn step_prefetch_forced() -> Option<bool> {
+    static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| match std::env::var("MAMBA_RS_STEP_PREFETCH") {
+        Err(_) => None,
+        Ok(v) => match v.trim() {
+            "auto" | "" => None,
+            "on" => Some(true),
+            "off" => Some(false),
+            other => panic!(
+                "MAMBA_RS_STEP_PREFETCH={other:?} is not a recognized build (use auto, on or off)"
+            ),
+        },
+    })
 }
 
 /// Launch geometry for the decode step of a head: the warp tier's one
@@ -1443,6 +1516,23 @@ pub fn chunk_scan_cfg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The decode step prefetches where a step has few warps a
+    /// multiprocessor: a batch of one at any head the rule admits, and not a
+    /// batch of 32 or a head of 64 by 256 states, on a 142-SM card.
+    #[test]
+    fn the_step_prefetches_where_the_card_is_underfilled() {
+        if std::env::var("MAMBA_RS_STEP_PREFETCH").is_ok() {
+            return;
+        }
+        let sms = 142;
+        assert!(step_prefetches(1, 24, 64, 128, sms));
+        assert!(step_prefetches(16, 96, 16, 64, sms));
+        assert!(!step_prefetches(32, 96, 16, 64, sms));
+        assert!(!step_prefetches(16, 24, 64, 256, sms));
+        assert!(!step_prefetches(1, 24, 64, 256, sms));
+        assert!(!step_prefetches(usize::MAX, 24, 64, 64, sms));
+    }
 
     /// The host's tiles of the sliced kernels are the kernel's own: the
     /// source defines the same slice, channel block and chunk, and the
