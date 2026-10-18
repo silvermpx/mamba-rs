@@ -14,17 +14,21 @@
 //! - CPU and GPU paths for every family, held to each other by parity
 //!   tests on shared weights
 //! - Training with the full backward through the recurrent state, AdamW,
-//!   global norm clipping and gradient accumulation
+//!   global and control-channel norm clipping, the skip of a spiking
+//!   window, gradient accumulation and data-parallel training over NCCL
 //! - `WeightDtype::{F32, Tf32, Bf16, F16}` with f32 master weights and f32
 //!   accumulation. The storage precision decides the product precision
-//! - CUDA graph capture of the inference step, and of the training step
-//!   for Mamba and SISO
+//! - CUDA graph capture of the decode step, of the prompt pass of one
+//!   length and of the training step, in every family
 //! - Deterministic f32, tf32, bf16 and f16 GEMM kernels for inference and
 //!   training, the default since 0.7.0. The inference kernels give a row
 //!   the same bits at any batch size, the training kernels within one
 //!   dispatch bucket
-//! - Safetensors checkpoints for every family, and loaders for the official
-//!   HuggingFace and `mamba_ssm` checkpoints
+//! - Safetensors checkpoints for every family, loaders for the official
+//!   HuggingFace and `mamba_ssm` checkpoints, and a trainer-state file for
+//!   a bit-continuous resume
+//! - Segments to stack with layers of your own, such as attention, and
+//!   packed sequences in training for Mamba-2 and Mamba-3
 //!
 //! ## One surface for every family
 //!

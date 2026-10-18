@@ -258,12 +258,12 @@ old) with private kernel caches and an idle check before every process.
 
 ### Training step
 
-`MambaTrainer::step` with graph replay, three warmups and twenty timed
-steps per arm, median of the four runs of each tree, milliseconds per step.
-The deterministic arms are like for like (the same precision contract in
-both trees). The cuBLAS arms are the same library called from both trees
-and agree to within 1 to 2 percent, which is the control for the
-comparison.
+`MambaGpuTrainer::step` (named `MambaTrainer` before 0.8) with graph
+replay, three warmups and twenty timed steps per arm, median of the four
+runs of each tree, milliseconds per step. The deterministic arms are like
+for like (the same precision contract in both trees). The cuBLAS arms are
+the same library called from both trees and agree to within 1 to 2
+percent, which is the control for the comparison.
 
 | model | precision | 0.6.9 deterministic | 0.7.0 deterministic | speedup | cuBLAS Fast | cuBLAS Pedantic |
 |---|---|---:|---:|---:|---:|---:|
@@ -293,16 +293,15 @@ same time).
 
 ### Inference step
 
-`GpuMambaBackbone::step` on the default synthetic model (d_model 128,
-3 layers, 366 K parameters), batches 1 to 128, twenty warmups, 2000 to
-5000 eager and 5000 to 10000 graph steps per batch, median of the four
-alternating runs of each tree, microseconds per step. Both trees run the
-inference family (`Fixed` with the batch-invariant flag in 0.6.9,
-`Inference` in 0.7.0). bf16 uses an identity input projection on both
-sides. The
-outputs of the two trees are bit-identical at every batch, step and path,
-and the CPU reference agrees (cosine 1.000000 in f32, at least 0.99998 in
-bf16).
+`MambaGpuBackbone::step` (named `GpuMambaBackbone` before 0.8) on the
+default synthetic model (d_model 128, 3 layers, 366 K parameters), batches
+1 to 128, twenty warmups, 2000 to 5000 eager and 5000 to 10000 graph steps
+per batch, median of the four alternating runs of each tree, microseconds
+per step. Both trees run the inference family (`Fixed` with the
+batch-invariant flag in 0.6.9, `Inference` in 0.7.0). bf16 uses an
+identity input projection on both sides. The outputs of the two trees are
+bit-identical at every batch, step and path, and the CPU reference agrees
+(cosine 1.000000 in f32, at least 0.99998 in bf16).
 
 | storage | batch | path | 0.6.9 µs/step | 0.7.0 µs/step | speedup |
 |---|---:|---|---:|---:|---:|

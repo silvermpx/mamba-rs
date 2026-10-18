@@ -516,10 +516,10 @@ pipeline, not a real LLM). From `bench_bf16_vs_f32::bench_m3_bf16_vs_f32_synthet
 Training runs the chunked parallel scan at multi-chunk sequence lengths.
 Earlier editions of this table timed a T=32 sequential configuration that
 is never used, and those numbers are retired. Measured through the public
-trainer (`Mamba3Trainer::step`: forward, backward, AdamW and sync). The
-first two columns were taken on a GPU shared with other load, so their
-ratio is the claim, not their absolute values. The last column is the
-clean re-measurement:
+trainer (`Mamba3GpuTrainer::step`, named `Mamba3Trainer` before 0.8:
+forward, backward, AdamW and sync). The first two columns were taken on a
+GPU shared with other load, so their ratio is the claim, not their
+absolute values. The last column is the clean re-measurement:
 
 | dtype | before the 0.6 kernel pass | after (shared Ada) | idle RTX 5090 |
 |-------|---------------------------:|-------------------:|--------------:|
