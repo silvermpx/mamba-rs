@@ -25,7 +25,9 @@ use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{IndexWidth, y_runs};
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use mamba_rs::mamba3_siso::route::{
-    block_tier_threads, sequential_backward_block_smem_bytes, sequential_forward_block_smem_bytes,
+    block_tier_threads, sequential_backward_block_smem_bytes,
+    sequential_backward_sliced_smem_bytes, sequential_forward_block_smem_bytes,
+    sequential_forward_sliced_smem_bytes, sequential_sliced_block_threads,
 };
 
 const B: usize = 2;
@@ -116,6 +118,23 @@ impl Shape {
             block_dim: (block_tier_threads(self.hd) as u32, 1, 1),
             shared_mem_bytes: smem as u32,
         }
+    }
+    fn sliced_cfg(&self, smem: usize) -> LaunchConfig {
+        LaunchConfig {
+            grid_dim: (B as u32, NH as u32, 1),
+            block_dim: (
+                sequential_sliced_block_threads(self.hd, self.ds) as u32,
+                1,
+                1,
+            ),
+            shared_mem_bytes: smem as u32,
+        }
+    }
+    fn sliced_fwd_cfg(&self) -> LaunchConfig {
+        self.sliced_cfg(sequential_forward_sliced_smem_bytes(self.hd, self.ds))
+    }
+    fn sliced_bwd_cfg(&self) -> LaunchConfig {
+        self.sliced_cfg(sequential_backward_sliced_smem_bytes(self.hd, self.ds))
     }
 }
 
@@ -502,5 +521,404 @@ fn m3_sequential_block_half_kernels_widen_exactly() {
         assert_bits(&format!("{label} ssm state"), &train.ssm, &target.ssm);
         assert_bits(&format!("{label} k state"), &train.k_state, &target.k_state);
         assert_bits(&format!("{label} v state"), &train.v_state, &target.v_state);
+    }
+}
+
+/// A state of one slice: the sliced forwards give the block tier's general
+/// entry's bits, the training forward in f32 and the half types and the
+/// target network's, heads of one warp and of many and one wider than a
+/// block among them.
+#[test]
+fn m3_sliced_forwards_give_the_block_tiers_bits_at_one_slice() {
+    let (ctx, m3k) = setup();
+    let f32 = WeightDtype::F32;
+    for (hd, ds) in [
+        (1, 5),
+        (16, 12),
+        (32, 7),
+        (48, 13),
+        (64, 9),
+        (100, 15),
+        (600, 11),
+    ] {
+        for t in [1usize, 7, 33] {
+            let s = Shape { hd, ds, t };
+            let fwd_cfg = s.block_cfg(sequential_forward_block_smem_bytes(ds));
+            for dtype in [f32, WeightDtype::Bf16, WeightDtype::F16] {
+                let label = format!("{dtype:?} hd {hd} ds {ds} T {t}");
+                let v = Values::new(s, dtype);
+                let block = forward(
+                    &ctx,
+                    (m3k.burnin_block_for(ds).get(dtype), fwd_cfg),
+                    (s, dtype, true),
+                    &v,
+                );
+                let sliced = forward(
+                    &ctx,
+                    (m3k.m3_burnin_fwd_sliced.get(dtype), s.sliced_fwd_cfg()),
+                    (s, dtype, true),
+                    &v,
+                );
+                assert_forward(&format!("{label} sliced forward"), &block, &sliced);
+            }
+            let v = Values::new(s, f32);
+            let block = forward(
+                &ctx,
+                (&m3k.m3_burnin_fwd_nosave_block, fwd_cfg),
+                (s, f32, false),
+                &v,
+            );
+            let sliced = forward(
+                &ctx,
+                (&m3k.m3_burnin_fwd_nosave_sliced, s.sliced_fwd_cfg()),
+                (s, f32, false),
+                &v,
+            );
+            let label = format!("target hd {hd} ds {ds} T {t}");
+            assert_bits(&format!("{label} y"), &block.y, &sliced.y);
+            assert_bits(&format!("{label} ssm state"), &block.ssm, &sliced.ssm);
+            assert_bits(&format!("{label} k state"), &block.k_state, &sliced.k_state);
+            assert_bits(&format!("{label} v state"), &block.v_state, &sliced.v_state);
+        }
+    }
+}
+
+/// The forward in f64 from the same inputs: each step's output, without
+/// the kernels' rounding.
+fn forward_y_f64(s: Shape, v: &Values) -> Vec<f64> {
+    let (t_len, hd, ds) = (s.t, s.hd, s.ds);
+    let di = NH * hd;
+    let mut y = vec![0f64; B * t_len * di];
+    for b in 0..B {
+        for h in 0..NH {
+            let base = (b * NH + h) * hd;
+            let mut state: Vec<f64> = v.ssm[base * ds..(base + hd) * ds]
+                .iter()
+                .map(|&x| f64::from(x))
+                .collect();
+            let mut x_prev: Vec<f64> = v.v_state[base..base + hd]
+                .iter()
+                .map(|&x| f64::from(x))
+                .collect();
+            for t in 0..t_len {
+                let bt = b * t_len + t;
+                let co = bt * NH + h;
+                let (alpha, beta, gamma) = (
+                    f64::from(v.alpha[co]),
+                    f64::from(v.beta[co]),
+                    f64::from(v.gamma[co]),
+                );
+                let row = bt * NH * ds + h * ds;
+                let k_prev = |n: usize| {
+                    f64::from(if t == 0 {
+                        v.k_state[(b * NH + h) * ds + n]
+                    } else {
+                        v.k[row - NH * ds + n]
+                    })
+                };
+                for (p, (st, xp)) in state.chunks_exact_mut(ds).zip(&mut x_prev).enumerate() {
+                    let xi = bt * di + h * hd + p;
+                    let x = f64::from(v.x[xi]);
+                    let (bv, gx) = (beta * *xp, gamma * x);
+                    let mut out = f64::from(v.d_param[h]) * x;
+                    for (n, hn) in st.iter_mut().enumerate() {
+                        *hn = gx * f64::from(v.k[row + n]) + alpha * *hn + bv * k_prev(n);
+                        out += f64::from(v.q[row + n]) * *hn;
+                    }
+                    y[xi] = out;
+                    *xp = x;
+                }
+            }
+        }
+    }
+    y
+}
+
+/// The sliced forward at state widths no entry specialises: the state, its
+/// tape and the carried rows are the block tier's bits (each state is one
+/// thread's, stepped as the block tier steps it), and the output is the
+/// same on every run and as close to the f64 forward as the block tier's.
+#[test]
+fn m3_sliced_forward_keeps_the_state_bits_and_is_as_close_to_f64() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let m3k =
+        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), 256).unwrap();
+    let f32 = WeightDtype::F32;
+    for (hd, ds) in [(16, 128), (64, 96), (100, 256), (32, 48), (8, 200)] {
+        for t in [1usize, 33] {
+            let s = Shape { hd, ds, t };
+            let label = format!("hd {hd} ds {ds} T {t}");
+            let v = Values::new(s, f32);
+            let block = forward(
+                &ctx,
+                (
+                    m3k.burnin_block_for(ds).get(f32),
+                    s.block_cfg(sequential_forward_block_smem_bytes(ds)),
+                ),
+                (s, f32, true),
+                &v,
+            );
+            let sliced = forward(
+                &ctx,
+                (m3k.m3_burnin_fwd_sliced.get(f32), s.sliced_fwd_cfg()),
+                (s, f32, true),
+                &v,
+            );
+            let again = forward(
+                &ctx,
+                (m3k.m3_burnin_fwd_sliced.get(f32), s.sliced_fwd_cfg()),
+                (s, f32, true),
+                &v,
+            );
+            for (name, w, g) in [
+                ("h tape", &block.h_saved, &sliced.h_saved),
+                ("k_prev", &block.k_prev, &sliced.k_prev),
+                ("v_prev", &block.v_prev, &sliced.v_prev),
+                ("ssm state", &block.ssm, &sliced.ssm),
+                ("k state", &block.k_state, &sliced.k_state),
+                ("v state", &block.v_state, &sliced.v_state),
+            ] {
+                assert_bits(&format!("{label} {name}"), w, g);
+            }
+            assert_bits(&format!("{label} y again"), &sliced.y, &again.y);
+            let exact = forward_y_f64(s, &v);
+            let (eb, es) = (
+                relative_error(&block.y, &exact),
+                relative_error(&sliced.y, &exact),
+            );
+            println!("{label} y: block {eb:.2e}, sliced {es:.2e}");
+            assert!(
+                es <= 2.0 * eb + 1e-6 && es < 1e-4,
+                "{label} y: sliced {es:e} against block {eb:e}"
+            );
+        }
+    }
+}
+
+/// A state of one slice: the sliced backward gives the block tier's bits,
+/// heads of one warp and of many and one wider than a block among them, in
+/// f32 and from the half types' inputs.
+#[test]
+fn m3_sliced_backward_gives_the_block_tiers_bits_at_one_slice() {
+    let (ctx, m3k) = setup();
+    let f32 = WeightDtype::F32;
+    for (hd, ds) in [
+        (1, 5),
+        (16, 12),
+        (32, 7),
+        (48, 13),
+        (64, 9),
+        (100, 15),
+        (600, 11),
+    ] {
+        for t in [1usize, 7, 33] {
+            let s = Shape { hd, ds, t };
+            let fwd_cfg = s.block_cfg(sequential_forward_block_smem_bytes(ds));
+            let bwd_cfg = s.block_cfg(sequential_backward_block_smem_bytes(hd, ds));
+            for dtype in [f32, WeightDtype::Bf16, WeightDtype::F16] {
+                let label = format!("{dtype:?} hd {hd} ds {ds} T {t}");
+                let v = Values::new(s, dtype);
+                let fwd = forward(
+                    &ctx,
+                    (m3k.burnin_block_for(ds).get(f32), fwd_cfg),
+                    (s, f32, true),
+                    &v,
+                );
+                let block = backward(
+                    &ctx,
+                    (m3k.backward_seq_block_for(ds).get(dtype), bwd_cfg),
+                    (s, dtype),
+                    &v,
+                    &fwd,
+                );
+                let sliced = backward(
+                    &ctx,
+                    (m3k.m3_backward_seq_sliced.get(dtype), s.sliced_bwd_cfg()),
+                    (s, dtype),
+                    &v,
+                    &fwd,
+                );
+                for ((name, w), (_, g)) in block.iter().zip(&sliced) {
+                    assert_bits(&format!("{label} sliced {name}"), w, g);
+                }
+            }
+        }
+    }
+}
+
+/// The backward through time in f64 from the same inputs and saves: what
+/// the kernels compute, without their rounding.
+fn backward_f64(s: Shape, v: &Values, fwd: &Forward) -> Vec<(&'static str, Vec<f64>)> {
+    let (t_len, hd, ds) = (s.t, s.hd, s.ds);
+    let di = NH * hd;
+    let nhd_ds = di * ds;
+    let mut d_x = vec![0f64; B * t_len * di];
+    let mut d_k = vec![0f64; B * t_len * NH * ds];
+    let mut d_q = vec![0f64; B * t_len * NH * ds];
+    let mut d_ab = [
+        vec![0f64; B * t_len * NH],
+        vec![0f64; B * t_len * NH],
+        vec![0f64; B * t_len * NH],
+    ];
+    let mut d_d = vec![0f64; B * di];
+    for b in 0..B {
+        for h in 0..NH {
+            let mut dh = vec![0f64; hd * ds];
+            let mut dv_carry = vec![0f64; hd];
+            let mut carry = vec![0f64; ds];
+            let mut sum_d = vec![0f64; hd];
+            for t in (0..t_len).rev() {
+                let bt = b * t_len + t;
+                let co = bt * NH + h;
+                let (alpha, beta, gamma) = (
+                    f64::from(v.alpha[co]),
+                    f64::from(v.beta[co]),
+                    f64::from(v.gamma[co]),
+                );
+                let row = bt * NH * ds + h * ds;
+                let mut sums = vec![(0f64, 0f64, 0f64); ds];
+                let mut scal = [0f64; 3];
+                let rows = dh.chunks_exact_mut(ds);
+                for (p, ((dv, sd), dh_row)) in dv_carry
+                    .iter_mut()
+                    .zip(sum_d.iter_mut())
+                    .zip(rows)
+                    .enumerate()
+                {
+                    let xi = bt * di + h * hd + p;
+                    let (dy, x, vp) = (
+                        f64::from(v.d_y[xi]),
+                        f64::from(v.x[xi]),
+                        f64::from(fwd.v_prev[xi]),
+                    );
+                    *sd += dy * x;
+                    let mut dx = f64::from(v.d_param[h]) * dy + *dv;
+                    let mut vprev_acc = 0f64;
+                    for (n, (g, (q_sum, kp_sum, kc_sum))) in
+                        dh_row.iter_mut().zip(sums.iter_mut()).enumerate()
+                    {
+                        let (kc, kp, qc) = (
+                            f64::from(v.k[row + n]),
+                            f64::from(fwd.k_prev[row + n]),
+                            f64::from(v.q[row + n]),
+                        );
+                        let tape = b * (t_len + 1) * nhd_ds + n * di + h * hd + p;
+                        let h_prev = f64::from(fwd.h_saved[tape + t * nhd_ds]);
+                        let h_curr = f64::from(fwd.h_saved[tape + (t + 1) * nhd_ds]);
+                        *g += dy * qc;
+                        *q_sum += dy * h_curr;
+                        let dh_n = *g;
+                        scal[0] += dh_n * h_prev;
+                        scal[1] += dh_n * vp * kp;
+                        scal[2] += dh_n * x * kc;
+                        vprev_acc += dh_n * beta * kp;
+                        *kp_sum += dh_n * beta * vp;
+                        dx += dh_n * gamma * kc;
+                        *kc_sum += dh_n * gamma * x;
+                        *g = alpha * dh_n;
+                    }
+                    d_x[xi] = dx;
+                    *dv = vprev_acc;
+                }
+                let last = t + 1 == t_len;
+                for (n, (c, &(q_sum, kp_sum, kc_sum))) in carry.iter_mut().zip(&sums).enumerate() {
+                    d_k[row + n] = if last { 0.0 } else { *c } + kc_sum;
+                    *c = kp_sum;
+                    d_q[row + n] = q_sum;
+                }
+                for (out, sum) in d_ab.iter_mut().zip(scal) {
+                    out[co] = sum;
+                }
+            }
+            d_d[b * di + h * hd..b * di + (h + 1) * hd].copy_from_slice(&sum_d);
+        }
+    }
+    let [d_alpha, d_beta, d_gamma] = d_ab;
+    vec![
+        ("dX", d_x),
+        ("dK", d_k),
+        ("dQ", d_q),
+        ("dalpha", d_alpha),
+        ("dbeta", d_beta),
+        ("dgamma", d_gamma),
+        ("dD local", d_d),
+    ]
+}
+
+/// The largest distance of `got` from the f64 `want`, over `want`'s largest
+/// magnitude.
+fn relative_error(got: &[f32], want: &[f64]) -> f64 {
+    let scale = want
+        .iter()
+        .fold(0f64, |m, w| m.max(w.abs()))
+        .max(f64::MIN_POSITIVE);
+    got.iter()
+        .zip(want)
+        .fold(0f64, |m, (&g, &w)| m.max((f64::from(g) - w).abs()))
+        / scale
+}
+
+/// The sliced backward at state widths no entry specialises: the same bits
+/// on every run, and every output as close to the f64 backward as the block
+/// tier's whole-state walk it replaces, at heads of a warp and wider.
+#[test]
+fn m3_sliced_backward_is_deterministic_and_as_close_to_f64_as_the_block_tier() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let m3k =
+        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), 256).unwrap();
+    let f32 = WeightDtype::F32;
+    for (hd, ds) in [(16, 128), (64, 96), (100, 256), (32, 48), (8, 200)] {
+        for t in [1usize, 33] {
+            let s = Shape { hd, ds, t };
+            let label = format!("hd {hd} ds {ds} T {t}");
+            let v = Values::new(s, f32);
+            let fwd = forward(
+                &ctx,
+                (
+                    m3k.burnin_block_for(ds).get(f32),
+                    s.block_cfg(sequential_forward_block_smem_bytes(ds)),
+                ),
+                (s, f32, true),
+                &v,
+            );
+            let block = backward(
+                &ctx,
+                (
+                    m3k.backward_seq_block_for(ds).get(f32),
+                    s.block_cfg(sequential_backward_block_smem_bytes(hd, ds)),
+                ),
+                (s, f32),
+                &v,
+                &fwd,
+            );
+            let sliced = backward(
+                &ctx,
+                (m3k.m3_backward_seq_sliced.get(f32), s.sliced_bwd_cfg()),
+                (s, f32),
+                &v,
+                &fwd,
+            );
+            let again = backward(
+                &ctx,
+                (m3k.m3_backward_seq_sliced.get(f32), s.sliced_bwd_cfg()),
+                (s, f32),
+                &v,
+                &fwd,
+            );
+            let exact = backward_f64(s, &v, &fwd);
+            for (((name, b), (_, g)), ((_, a), (_, w))) in
+                block.iter().zip(&sliced).zip(again.iter().zip(&exact))
+            {
+                assert_bits(&format!("{label} {name} again"), g, a);
+                let (eb, es) = (relative_error(b, w), relative_error(g, w));
+                println!("{label} {name}: block {eb:.2e}, sliced {es:.2e}");
+                assert!(
+                    es <= 2.0 * eb + 1e-6 && es < 1e-4,
+                    "{label} {name}: sliced {es:e} against block {eb:e}"
+                );
+            }
+        }
     }
 }

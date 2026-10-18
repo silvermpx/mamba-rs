@@ -846,6 +846,19 @@
   of a zero, against the released fold and ungrouped kernels frozen in
   `tests/fixtures/m1_parallel_bwd_reference.cu`. The sm_89 half-precision
   short fold transport is gone with the windows it served.
+- The SISO sequential training forward, its target network's forward and
+  its backward cut the state into slices of 16 across the block, each
+  slice on threads of its own, a thread a head element
+  (`m3_burnin_fwd_sliced*`, `m3_burnin_fwd_nosave_sliced`,
+  `m3_backward_seq_sliced*`, `route::sequential_takes_sliced`), at every
+  state width no entry specialises (all but 8, 16, 32 and 64) and every
+  head, where the warp and block kernels walked every state of an element
+  from an array of the compiled capacity that stayed in local memory. A
+  step's sums over the state add the slices' partials in slice order, so
+  a state of one slice keeps the block tier's bits, and a wider one rounds
+  the same sums in a fixed other order: the same bits on every run, the
+  state and its tape the block tier's bits, every output as close to the
+  f64 recurrence as the whole-state walk's.
 
 ### Fixed
 

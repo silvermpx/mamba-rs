@@ -581,6 +581,447 @@ M3_BACKWARD_SEQ_BLOCK_ENTRY(m3_backward_seq_block_f16, __half, 0)
 #undef M3_BACKWARD_SEQ_BLOCK_ENTRY
 
 // ============================================================================
+// The sequential backward with the state cut across the block.
+//
+// The block tier's thread walks every state of its head element each step,
+// in an array of the compiled capacity that stays in local memory at a
+// state width no entry specialises. Here the state is cut into slices of
+// M3S_SLICE states and each slice has threads of its own, a thread a head
+// element: a thread's slice of the state gradient stays in registers at any
+// width, and a step takes a slice's work instead of the whole state's.
+//
+// A step's sums over the state (each element's input gradient and its
+// previous input's) add the slices' partials in slice order, the first
+// slice's carrying the skip term and the gradient carried from the step
+// after; its scalars (alpha, beta, gamma) add every warp's tree in warp
+// order; each state's sums over the head add the head's warps in order, as
+// the block tier does. The order is fixed, so the result does not depend on
+// the run; a state of one slice gets the block tier's bits, and a wider one
+// rounds the same sums in another order.
+//
+// Grid (B, nh). Block: the state's slices times the threads of a slice, the
+// head rounded up to whole warps and at most 512 / slices of them, rounded
+// down to whole warps; a head wider than a slice's threads runs in turns,
+// each over the whole window, a turn after the first adding its sums to the
+// gradients the turns before it wrote. Dynamic shared memory, in floats:
+// 4 + 4 * ds for the step's values and the carried previous-K gradient,
+// 3 * ds * pwarps for each state's sums by head warp, 2 * slices * pthreads
+// for each element's two sums by slice, and 3 * slices * pwarps for the
+// scalars' sums by warp. In a packed row a token that starts a sequence
+// takes no alpha gradient and passes no state, key or input gradient back
+// to the token before it.
+#define M3S_SLICE 16
+
+template <typename T_ACT>
+__device__ __forceinline__ void m3_backward_seq_sliced_tpl(
+    const float* __restrict__ h_saved, const float* __restrict__ k_prev_saved,
+    const float* __restrict__ v_prev_saved, const T_ACT* __restrict__ x_flat,
+    const T_ACT* __restrict__ k_flat, const T_ACT* __restrict__ q_flat,
+    const float* __restrict__ alpha_flat, const float* __restrict__ beta_flat,
+    const float* __restrict__ gamma_flat, const float* __restrict__ D,
+    const T_ACT* __restrict__ d_y_flat,
+    float* __restrict__ d_x, float* __restrict__ d_k, float* __restrict__ d_q,
+    float* __restrict__ d_alpha, float* __restrict__ d_beta,
+    float* __restrict__ d_gamma, float* __restrict__ d_D_local,
+    int batch, int T, int nh, int hd, int ds,
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
+) {
+    extern __shared__ float m3ss_sm[];
+    const int b = blockIdx.x;
+    const int h = y_first + blockIdx.y;
+    /* Uniform across the block, so every thread reaches the barriers. */
+    if (b >= batch || h >= nh) return;
+    const int slices = (ds + M3S_SLICE - 1) / M3S_SLICE;
+    const int pthreads = blockDim.x / slices;  /* whole warps, by the launch */
+    const int pwarps = pthreads >> 5;
+    const int tid = threadIdx.x;
+    const int s = tid / pthreads;
+    const int tx = tid - s * pthreads;
+    const int lane = tid & 31;
+    const int pw = tx >> 5;
+    const int width = hd < 32 ? hd : 32;
+    float* coef = m3ss_sm;
+    float* kc_sm = coef + 4;
+    float* kp_sm = kc_sm + ds;
+    float* qc_sm = kp_sm + ds;
+    float* carry_sm = qc_sm + ds;                     /* [ds] previous-K gradient */
+    float* red_n = carry_sm + ds;                     /* [3 * ds * pwarps] */
+    float* part = red_n + 3 * ds * pwarps;            /* [2 * slices * pthreads] */
+    float* red_s = part + 2 * slices * pthreads;      /* [3 * slices * pwarps] */
+    const long long d_inner = (long long)nh * hd;
+    const long long nhd_ds = d_inner * ds;
+    const long long head_ds = (long long)h * ds;
+    const float d_skip = D[h];
+    const int n0 = s * M3S_SLICE;
+    const int n_end = min(n0 + M3S_SLICE, ds);
+    for (int p0 = 0; p0 < hd; p0 += pthreads) {
+        const int p = p0 + tx;
+        const bool live = p < hd;
+        const bool first = p0 == 0;
+        const long long h_tape = (long long)b * (T + 1) * nhd_ds + (long long)h * hd + p;
+        for (int n = tid; n < ds; n += blockDim.x) carry_sm[n] = 0.0f;
+
+        float d_h_reg[M3S_SLICE];
+        _Pragma("unroll")
+        for (int j = 0; j < M3S_SLICE; j++) d_h_reg[j] = 0.0f;
+        float d_v_carry = 0.0f;
+        float sum_d_D = 0.0f;
+
+        for (int t = T - 1; t >= 0; t--) {
+            const long long bt = (long long)b * T + t;
+            const long long kq_row = bt * nh * ds + head_ds;
+            const bool fresh = vl_starts(seq_idx, b, T, t);
+            if (tid == 0) {
+                coef[0] = alpha_flat[bt * nh + h];
+                coef[1] = beta_flat[bt * nh + h];
+                coef[2] = gamma_flat[bt * nh + h];
+            }
+            for (int n = tid; n < ds; n += blockDim.x) {
+                kc_sm[n] = to_f(k_flat[kq_row + n]);
+                kp_sm[n] = k_prev_saved[kq_row + n];
+                qc_sm[n] = to_f(q_flat[kq_row + n]);
+            }
+            __syncthreads();
+            const float alpha_h = coef[0];
+            const float beta_h = coef[1];
+            const float gamma_h = coef[2];
+            const long long x_idx = bt * d_inner + (long long)h * hd + p;
+            float dy_val = 0.0f, x_val = 0.0f, v_prev = 0.0f;
+            if (live) {
+                dy_val = to_f(d_y_flat[x_idx]);
+                x_val = to_f(x_flat[x_idx]);
+                v_prev = v_prev_saved[x_idx];
+            }
+            // The first slice carries the skip term and the gradient the
+            // step after passed back, in the block tier's order, so its sum
+            // is the block tier's whenever the state is one slice.
+            float d_x_val = 0.0f;
+            if (s == 0) {
+                sum_d_D = __fmaf_rn(dy_val, x_val, sum_d_D);
+                d_x_val = d_skip * dy_val;
+                d_x_val += d_v_carry;
+            }
+            float d_alpha_acc = 0.0f;
+            float d_beta_acc = 0.0f;
+            float d_gamma_acc = 0.0f;
+            float d_v_prev_acc = 0.0f;
+            const long long prev = h_tape + (long long)t * nhd_ds;
+            const long long curr = prev + nhd_ds;
+            _Pragma("unroll")
+            for (int j = 0; j < M3S_SLICE; j++) {
+                const int n = n0 + j;
+                /* The same for a slice's every thread: whole warps leave. */
+                if (n >= n_end) break;
+                const float kc_n = kc_sm[n];
+                const float kp_n = kp_sm[n];
+                const float qc_n = qc_sm[n];
+                float d_q_val = -0.0f, d_kp_val = -0.0f, d_kc_val = -0.0f;
+                if (live) {
+                    const float h_prev_n = h_saved[prev + n * d_inner];
+                    const float h_curr_n = h_saved[curr + n * d_inner];
+                    d_h_reg[j] += dy_val * qc_n;
+                    d_q_val = dy_val * h_curr_n;
+                    const float dh_n = d_h_reg[j];
+                    if (!fresh) d_alpha_acc += dh_n * h_prev_n;
+                    d_beta_acc += dh_n * v_prev * kp_n;
+                    d_gamma_acc += dh_n * x_val * kc_n;
+                    d_v_prev_acc += dh_n * beta_h * kp_n;
+                    d_kp_val = dh_n * beta_h * v_prev;
+                    d_x_val += dh_n * gamma_h * kc_n;
+                    d_kc_val = dh_n * gamma_h * x_val;
+                    d_h_reg[j] = fresh ? 0.0f : alpha_h * dh_n;
+                }
+                d_q_val = m3b_warp_tree(d_q_val, width);
+                d_kp_val = m3b_warp_tree(d_kp_val, width);
+                d_kc_val = m3b_warp_tree(d_kc_val, width);
+                if (lane == 0) {
+                    red_n[(3 * n) * pwarps + pw] = d_q_val;
+                    red_n[(3 * n + 1) * pwarps + pw] = d_kp_val;
+                    red_n[(3 * n + 2) * pwarps + pw] = d_kc_val;
+                }
+            }
+            if (!live) {
+                d_alpha_acc = -0.0f;
+                d_beta_acc = -0.0f;
+                d_gamma_acc = -0.0f;
+            }
+            d_alpha_acc = m3b_warp_tree(d_alpha_acc, width);
+            d_beta_acc = m3b_warp_tree(d_beta_acc, width);
+            d_gamma_acc = m3b_warp_tree(d_gamma_acc, width);
+            const int warp = s * pwarps + pw;
+            const int warps = slices * pwarps;
+            if (lane == 0) {
+                red_s[warp] = d_alpha_acc;
+                red_s[warps + warp] = d_beta_acc;
+                red_s[2 * warps + warp] = d_gamma_acc;
+            }
+            part[s * pthreads + tx] = d_x_val;
+            part[(slices + s) * pthreads + tx] = d_v_prev_acc;
+            __syncthreads();
+            /* The first slice's threads add each element's partials in slice
+               order; one thread per state element and per scalar adds the
+               warps' sums in order. The rows are restaged only after the
+               next barrier. */
+            if (s == 0 && live) {
+                float x_sum = part[tx];
+                float v_sum = part[slices * pthreads + tx];
+                for (int r = 1; r < slices; r++) {
+                    x_sum += part[r * pthreads + tx];
+                    v_sum += part[(slices + r) * pthreads + tx];
+                }
+                d_x[x_idx] = x_sum;
+                d_v_carry = fresh ? 0.0f : v_sum;
+            }
+            for (int i = tid; i < ds + 3; i += blockDim.x) {
+                if (i < ds) {
+                    const int n = i;
+                    float q = red_n[(3 * n) * pwarps];
+                    float kp = red_n[(3 * n + 1) * pwarps];
+                    float kc = red_n[(3 * n + 2) * pwarps];
+                    for (int w = 1; w < pwarps; w++) {
+                        q += red_n[(3 * n) * pwarps + w];
+                        kp += red_n[(3 * n + 1) * pwarps + w];
+                        kc += red_n[(3 * n + 2) * pwarps + w];
+                    }
+                    float d_k_write = 0.0f;
+                    if (t < T - 1) {
+                        d_k_write += carry_sm[n];
+                        carry_sm[n] = 0.0f;
+                    }
+                    if (!fresh) carry_sm[n] += kp;
+                    d_k_write += kc;
+                    if (first) {
+                        d_q[kq_row + n] = q;
+                        d_k[kq_row + n] = d_k_write;
+                    } else {
+                        d_q[kq_row + n] += q;
+                        d_k[kq_row + n] += d_k_write;
+                    }
+                } else {
+                    const float* sums = red_s + (i - ds) * warps;
+                    float total = sums[0];
+                    for (int w = 1; w < warps; w++) total += sums[w];
+                    float* out = (i == ds) ? d_alpha : (i == ds + 1) ? d_beta : d_gamma;
+                    if (first)
+                        out[bt * nh + h] = total;
+                    else
+                        out[bt * nh + h] += total;
+                }
+            }
+        }
+        if (s == 0 && live) d_D_local[(long long)b * d_inner + (long long)h * hd + p] = sum_d_D;
+    }
+}
+
+#define M3_BACKWARD_SEQ_SLICED_ENTRY(NAME, T_ACT)                              \
+extern "C" __global__ __launch_bounds__(512) void NAME(                        \
+    const float* __restrict__ h_saved, const float* __restrict__ k_prev_saved, \
+    const float* __restrict__ v_prev_saved, const T_ACT* __restrict__ x_flat,  \
+    const T_ACT* __restrict__ k_flat, const T_ACT* __restrict__ q_flat,        \
+    const float* __restrict__ alpha_flat, const float* __restrict__ beta_flat, \
+    const float* __restrict__ gamma_flat, const float* __restrict__ D,         \
+    const T_ACT* __restrict__ d_y_flat,                                        \
+    float* __restrict__ d_x, float* __restrict__ d_k, float* __restrict__ d_q, \
+    float* __restrict__ d_alpha, float* __restrict__ d_beta,                   \
+    float* __restrict__ d_gamma, float* __restrict__ d_D_local,                \
+    int batch, int T, int nh, int hd, int ds,                                  \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
+) {                                                                            \
+    m3_backward_seq_sliced_tpl<T_ACT>(h_saved, k_prev_saved, v_prev_saved,     \
+        x_flat, k_flat, q_flat, alpha_flat, beta_flat, gamma_flat, D,          \
+        d_y_flat, d_x, d_k, d_q, d_alpha, d_beta, d_gamma, d_D_local, batch,   \
+        T, nh, hd, ds, y_first, seq_idx);                                      \
+}
+
+M3_BACKWARD_SEQ_SLICED_ENTRY(m3_backward_seq_sliced, float)
+M3_BACKWARD_SEQ_SLICED_ENTRY(m3_backward_seq_sliced_bf16, __nv_bfloat16)
+M3_BACKWARD_SEQ_SLICED_ENTRY(m3_backward_seq_sliced_f16, __half)
+#undef M3_BACKWARD_SEQ_SLICED_ENTRY
+
+// The sequential training forward with the state cut across the block, the
+// backward's twin: each slice of M3S_SLICE states on threads of its own, a
+// thread a head element, the slice's states in registers at any width. A
+// step's output adds the slices' partials in slice order, the first
+// slice's starting from the skip term, so a state of one slice gets the
+// block tier's general entry's bits (the skip term rounded on its own, then
+// the state's terms fused in order), and a wider one rounds the same sum in
+// another order. The previous input each thread reads is the one it read
+// the step before (the state's at the first step), so the slices never
+// share the input state while they step. SAVE false drops the three saves,
+// for the target network's forward. Grid (B, nh); block as the sliced
+// backward's. Dynamic shared memory, in floats: 4 + 3 * ds for the step's
+// values and slices * pthreads for the output's partials. In a packed row a
+// token that starts a sequence steps from the empty state, previous key and
+// previous input.
+template <typename T_ACT, bool SAVE>
+__device__ __forceinline__ void m3_burnin_sliced_tpl(
+    float* ssm_state, float* k_state, float* v_state,
+    T_ACT* y_out,
+    float* h_saved, float* k_prev_saved, float* v_prev_saved,
+    const T_ACT* x_flat, const T_ACT* k_flat, const T_ACT* q_flat,
+    const float* alpha_flat, const float* beta_flat, const float* gamma_flat,
+    const float* D,
+    int batch, int T, int nh, int hd, int ds,
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
+) {
+    extern __shared__ float m3sf_sm[];
+    const int b = blockIdx.x;
+    const int h = y_first + blockIdx.y;
+    /* Uniform across the block, so every thread reaches the barriers. */
+    if (b >= batch || h >= nh) return;
+    const int slices = (ds + M3S_SLICE - 1) / M3S_SLICE;
+    const int pthreads = blockDim.x / slices;  /* whole warps, by the launch */
+    const int tid = threadIdx.x;
+    const int s = tid / pthreads;
+    const int tx = tid - s * pthreads;
+    float* coef = m3sf_sm;
+    float* kc_sm = coef + 4;
+    float* kp_sm = kc_sm + ds;
+    float* qc_sm = kp_sm + ds;
+    float* part = qc_sm + ds;                         /* [slices * pthreads] */
+    const long long d_inner = (long long)nh * hd;
+    const long long nhd_ds = d_inner * ds;
+    const long long head_ds = (long long)h * ds;
+    const long long row_stride = (long long)nh * ds;
+    const long long k_row = (long long)b * row_stride + head_ds;
+    const float d_skip = D[h];
+    const int n0 = s * M3S_SLICE;
+    const int n_end = min(n0 + M3S_SLICE, ds);
+    for (int p0 = 0; p0 < hd; p0 += pthreads) {
+        const int p = p0 + tx;
+        const bool live = p < hd;
+        const long long v_idx = (long long)b * nh * hd + (long long)h * hd + p;
+        const long long h_base = v_idx * ds;
+        const long long h_tape = (long long)b * (T + 1) * nhd_ds + (long long)h * hd + p;
+        float h_local[M3S_SLICE];
+        _Pragma("unroll")
+        for (int j = 0; j < M3S_SLICE; j++) h_local[j] = 0.0f;
+        float x_prev = 0.0f;
+        if (live) {
+            _Pragma("unroll")
+            for (int j = 0; j < M3S_SLICE; j++) {
+                const int n = n0 + j;
+                if (n >= n_end) break;
+                h_local[j] = ssm_state[h_base + n];
+                if (SAVE) h_saved[h_tape + n * d_inner] = h_local[j];
+            }
+            x_prev = v_state[v_idx];
+        }
+        for (int t = 0; t < T; t++) {
+            const long long bt = (long long)b * T + t;
+            const long long kq_row = bt * row_stride + head_ds;
+            const bool fresh = vl_starts(seq_idx, b, T, t);
+            if (tid == 0) {
+                coef[0] = alpha_flat[bt * nh + h];
+                coef[1] = beta_flat[bt * nh + h];
+                coef[2] = gamma_flat[bt * nh + h];
+            }
+            for (int n = tid; n < ds; n += blockDim.x) {
+                const float kp = fresh    ? 0.0f
+                                 : (t == 0) ? k_state[k_row + n]
+                                            : to_f(k_flat[kq_row - row_stride + n]);
+                kp_sm[n] = kp;
+                if (SAVE && p0 == 0) k_prev_saved[kq_row + n] = kp;
+                kc_sm[n] = to_f(k_flat[kq_row + n]);
+                qc_sm[n] = to_f(q_flat[kq_row + n]);
+            }
+            __syncthreads();
+            const long long x_idx = bt * d_inner + (long long)h * hd + p;
+            if (live) {
+                const float alpha_h = coef[0];
+                const float beta_h = coef[1];
+                const float gamma_h = coef[2];
+                const float x_val = to_f(x_flat[x_idx]);
+                const float v_prev = fresh ? 0.0f : x_prev;
+                if (SAVE && s == 0) v_prev_saved[x_idx] = v_prev;
+                if (fresh) {
+                    _Pragma("unroll")
+                    for (int j = 0; j < M3S_SLICE; j++) h_local[j] = 0.0f;
+                }
+                float y_part = (s == 0) ? __fmul_rn(d_skip, x_val) : 0.0f;
+                const float bv = __fmul_rn(beta_h, v_prev);
+                const float gx = __fmul_rn(gamma_h, x_val);
+                const long long step = h_tape + (long long)(t + 1) * nhd_ds;
+                _Pragma("unroll")
+                for (int j = 0; j < M3S_SLICE; j++) {
+                    const int n = n0 + j;
+                    if (n >= n_end) break;
+                    h_local[j] = __fmaf_rn(gx, kc_sm[n],
+                        __fmaf_rn(alpha_h, h_local[j], __fmul_rn(bv, kp_sm[n])));
+                    y_part = __fmaf_rn(qc_sm[n], h_local[j], y_part);
+                    if (SAVE) h_saved[step + n * d_inner] = h_local[j];
+                }
+                part[s * pthreads + tx] = y_part;
+                x_prev = x_val;
+            }
+            __syncthreads();
+            /* The first slice's threads add each element's partials in slice
+               order; the rows and the partials are written again only after
+               the next step's first barrier. */
+            if (s == 0 && live) {
+                float y_val = part[tx];
+                for (int r = 1; r < slices; r++) y_val += part[r * pthreads + tx];
+                m3b_store(&y_out[x_idx], y_val);
+            }
+        }
+        if (live) {
+            _Pragma("unroll")
+            for (int j = 0; j < M3S_SLICE; j++) {
+                const int n = n0 + j;
+                if (n >= n_end) break;
+                ssm_state[h_base + n] = h_local[j];
+            }
+            if (s == 0) v_state[v_idx] = x_prev;
+        }
+    }
+    /* Every turn and slice has read the state's K by now. */
+    __syncthreads();
+    if (T > 0) {
+        const long long last = ((long long)b * T + T - 1) * row_stride + head_ds;
+        for (int n = tid; n < ds; n += blockDim.x) k_state[k_row + n] = to_f(k_flat[last + n]);
+    }
+}
+
+#define M3_BURNIN_SLICED_ENTRY(NAME, T_ACT)                                    \
+extern "C" __global__ __launch_bounds__(512) void NAME(                        \
+    float* ssm_state, float* k_state, float* v_state, T_ACT* y_out,            \
+    float* h_saved, float* k_prev_saved, float* v_prev_saved,                  \
+    const T_ACT* x_flat, const T_ACT* k_flat, const T_ACT* q_flat,             \
+    const float* alpha_flat, const float* beta_flat, const float* gamma_flat,  \
+    const float* D, int batch, int T, int nh, int hd, int ds,                  \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
+) {                                                                            \
+    m3_burnin_sliced_tpl<T_ACT, true>(ssm_state, k_state, v_state, y_out,      \
+        h_saved, k_prev_saved, v_prev_saved, x_flat, k_flat, q_flat,           \
+        alpha_flat, beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first,   \
+        seq_idx);                                                              \
+}
+
+M3_BURNIN_SLICED_ENTRY(m3_burnin_fwd_sliced, float)
+M3_BURNIN_SLICED_ENTRY(m3_burnin_fwd_sliced_bf16, __nv_bfloat16)
+M3_BURNIN_SLICED_ENTRY(m3_burnin_fwd_sliced_f16, __half)
+#undef M3_BURNIN_SLICED_ENTRY
+
+// The target network's forward on the sliced tier: arguments as
+// m3_burnin_fwd_nosave.
+extern "C" __global__ __launch_bounds__(512) void m3_burnin_fwd_nosave_sliced(
+    float* ssm_state, float* k_state, float* v_state, float* y_out,
+    const float* x_flat, const float* k_flat, const float* q_flat,
+    const float* alpha_flat, const float* beta_flat, const float* gamma_flat,
+    const float* D, int batch, int T, int nh, int hd, int ds,
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
+) {
+    m3_burnin_sliced_tpl<float, false>(ssm_state, k_state, v_state, y_out,
+        nullptr, nullptr, nullptr, x_flat, k_flat, q_flat, alpha_flat,
+        beta_flat, gamma_flat, D, batch, T, nh, hd, ds, y_first, seq_idx);
+}
+
+// ============================================================================
 // The chunked backward for every head and state width.
 //
 // m3_dqkv keeps a head's whole state in shared memory and in registers, so

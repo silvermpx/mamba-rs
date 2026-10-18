@@ -138,6 +138,56 @@ pub fn sequential_backward_block_smem_bytes(headdim: usize, d_state: usize) -> u
     (4 + 4 * d_state + (3 * d_state + 3) * warps) * 4
 }
 
+/// The states a thread of the sliced sequential kernels holds: the state is
+/// cut into slices of this many, each slice on threads of its own.
+pub const SEQUENTIAL_SLICE: usize = 16;
+
+/// The most threads a sliced sequential kernel's block takes.
+const SEQUENTIAL_SLICED_THREADS_MAX: usize = 512;
+
+/// The sliced sequential kernels serve every state width the warp and block
+/// kernels have no constant-width entry for: at such a width their thread
+/// walks every state of its element each step from an array of the
+/// compiled capacity, which stays in local memory.
+pub fn sequential_takes_sliced(d_state: usize) -> bool {
+    !matches!(d_state, 8 | 16 | 32 | 64)
+}
+
+/// The threads of one slice of the sliced sequential kernels: the head
+/// rounded up to whole warps, at most the slice's share of the block in
+/// whole warps (a head wider than that runs in turns of it). A state of up
+/// to 256 has at most 16 slices, so a slice always has a whole warp.
+pub fn sequential_slice_threads(headdim: usize, d_state: usize) -> usize {
+    let slices = d_state.div_ceil(SEQUENTIAL_SLICE).max(1);
+    let share = SEQUENTIAL_SLICED_THREADS_MAX / slices / 32 * 32;
+    headdim.next_multiple_of(32).min(share.max(32))
+}
+
+/// The block of the sliced sequential kernels: the state's slices times a
+/// slice's threads.
+pub fn sequential_sliced_block_threads(headdim: usize, d_state: usize) -> usize {
+    d_state.div_ceil(SEQUENTIAL_SLICE).max(1) * sequential_slice_threads(headdim, d_state)
+}
+
+/// The shared memory of the sliced sequential forward in bytes: the step's
+/// coefficients and its K, previous K and Q rows, and each element's output
+/// partial by slice.
+pub fn sequential_forward_sliced_smem_bytes(headdim: usize, d_state: usize) -> usize {
+    let slices = d_state.div_ceil(SEQUENTIAL_SLICE).max(1);
+    (4 + 3 * d_state + slices * sequential_slice_threads(headdim, d_state)) * 4
+}
+
+/// The shared memory of the sliced sequential backward in bytes: the step's
+/// coefficients and rows and the carried previous-K gradient, each state's
+/// sums by head warp, each element's two sums by slice, and the scalars'
+/// sums by warp.
+pub fn sequential_backward_sliced_smem_bytes(headdim: usize, d_state: usize) -> usize {
+    let slices = d_state.div_ceil(SEQUENTIAL_SLICE).max(1);
+    let threads = sequential_slice_threads(headdim, d_state);
+    let warps = threads / 32;
+    (4 + 4 * d_state + 3 * d_state * warps + 2 * slices * threads + 3 * slices * warps) * 4
+}
+
 /// Refuses a head the warp-shuffle kernels cannot run, naming the kernel.
 pub fn require_warp(headdim: usize, kernel: &str) -> Result<(), String> {
     if headdim <= WARP_HEADDIM_MAX && headdim.is_power_of_two() {
@@ -292,6 +342,31 @@ mod tests {
                 HeadTier::Block
             };
             assert_eq!(head_tier(hd), want, "headdim {hd}");
+        }
+    }
+
+    /// The sliced sequential kernels take whole warps a slice and at most
+    /// 512 threads at every head and state the models admit, and their
+    /// shared memory stays inside the 48 KB every card gives a block
+    /// without opting in.
+    #[test]
+    fn the_sliced_sequential_blocks_fit_at_every_shape() {
+        for ds in 1..=256usize {
+            for hd in (1..=1024usize).chain([2048, 4096]) {
+                let slice = sequential_slice_threads(hd, ds);
+                assert!(
+                    slice >= 32 && slice.is_multiple_of(32),
+                    "hd {hd} ds {ds}: {slice}"
+                );
+                let block = sequential_sliced_block_threads(hd, ds);
+                assert!(block <= 512, "hd {hd} ds {ds}: {block} threads");
+                for bytes in [
+                    sequential_forward_sliced_smem_bytes(hd, ds),
+                    sequential_backward_sliced_smem_bytes(hd, ds),
+                ] {
+                    assert!(bytes <= 48 * 1024, "hd {hd} ds {ds}: {bytes} bytes");
+                }
+            }
         }
     }
 

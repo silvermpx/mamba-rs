@@ -22,6 +22,18 @@ pub struct SequentialShape {
 }
 
 impl SequentialShape {
+    /// One block per (sequence, head) on the sliced kernels: the state's
+    /// slices times a slice's threads.
+    fn sliced_launch(&self, shared_mem_bytes: usize) -> LaunchConfig {
+        let threads =
+            crate::mamba3_siso::route::sequential_sliced_block_threads(self.headdim, self.d_state);
+        LaunchConfig {
+            grid_dim: (self.batch as u32, self.nheads as u32, 1),
+            block_dim: (threads as u32, 1, 1),
+            shared_mem_bytes: shared_mem_bytes as u32,
+        }
+    }
+
     /// One block per (sequence, head): the head's width in threads on the
     /// warp tier, rounded up to whole warps on the block tier, whose kernels
     /// take a wider head than their launch bound in slices.
@@ -87,11 +99,21 @@ pub struct Mamba3Kernels {
     pub m3_burnin_fwd_block: [TypedKernel; 5],
     /// The target network's sequential forward on the block tier.
     pub m3_burnin_fwd_nosave_block: CudaFunction,
+    /// The sequential training forward and the target network's with the
+    /// state cut into slices across the block, for every head at the state
+    /// widths no entry specialises (see
+    /// [`crate::mamba3_siso::route::sequential_takes_sliced`]).
+    pub m3_burnin_fwd_sliced: TypedKernel,
+    pub m3_burnin_fwd_nosave_sliced: CudaFunction,
     /// The sequential backward on the block tier: the warp kernel's tree in
     /// every warp, the warps' sums added in order. It also serves every
     /// head of the bf16 and f16 sequential backward. One entry per state
     /// build (see [`Self::backward_seq_block_for`]).
     pub m3_backward_seq_block: [TypedKernel; 5],
+    /// The sequential backward with the state cut into slices across the
+    /// block, for every head at the state widths no entry above specialises
+    /// (see [`crate::mamba3_siso::route::sequential_takes_sliced`]).
+    pub m3_backward_seq_sliced: TypedKernel,
     pub m3_reduce_d_d: ByIndexWidth<CudaFunction>,
 
     // ── Shared ops (mamba3_ops.cu) ──
@@ -380,16 +402,28 @@ impl Mamba3Kernels {
         }
     }
 
-    /// The sequential training forward for a shape, with its launch. A head
-    /// of one warp keeps the warp kernels; every other head takes the block
-    /// tier, which gives the warp kernels' bits where both serve. The block
-    /// tier indexes in 64 bits at every width.
+    /// The sequential training forward for a shape, with its launch. A state
+    /// width no entry specialises takes the sliced kernel at every head;
+    /// otherwise a head of one warp keeps the warp kernels and every other
+    /// head takes the block tier, which gives the warp kernels' bits where
+    /// both serve. The block and sliced tiers index in 64 bits at every
+    /// width.
     pub fn sequential_forward(
         &self,
         dtype: WeightDtype,
         shape: SequentialShape,
         width: IndexWidth,
     ) -> (&CudaFunction, LaunchConfig) {
+        if crate::mamba3_siso::route::sequential_takes_sliced(shape.d_state) {
+            let smem = crate::mamba3_siso::route::sequential_forward_sliced_smem_bytes(
+                shape.headdim,
+                shape.d_state,
+            );
+            return (
+                self.m3_burnin_fwd_sliced.get(dtype),
+                shape.sliced_launch(smem),
+            );
+        }
         if head_tier(shape.headdim) == HeadTier::Warp {
             let kernel = match dtype {
                 WeightDtype::F32 | WeightDtype::Tf32 => {
@@ -414,6 +448,13 @@ impl Mamba3Kernels {
         shape: SequentialShape,
         width: IndexWidth,
     ) -> (&CudaFunction, LaunchConfig) {
+        if crate::mamba3_siso::route::sequential_takes_sliced(shape.d_state) {
+            let smem = crate::mamba3_siso::route::sequential_forward_sliced_smem_bytes(
+                shape.headdim,
+                shape.d_state,
+            );
+            return (&self.m3_burnin_fwd_nosave_sliced, shape.sliced_launch(smem));
+        }
         if head_tier(shape.headdim) == HeadTier::Warp {
             return (self.m3_burnin_fwd_nosave.get(width), shape.launch(true, 0));
         }
@@ -421,15 +462,26 @@ impl Mamba3Kernels {
         (&self.m3_burnin_fwd_nosave_block, shape.launch(false, smem))
     }
 
-    /// The sequential backward for a shape, with its launch. The f32 warp
-    /// kernels keep every head of one warp; the block tier serves every
-    /// other head, and every head of the bf16 and f16 backward.
+    /// The sequential backward for a shape, with its launch. A state width
+    /// no entry specialises takes the sliced kernel at every head; otherwise
+    /// the f32 warp kernels keep every head of one warp, and the block tier
+    /// serves every other head and every head of the bf16 and f16 backward.
     pub fn sequential_backward(
         &self,
         dtype: WeightDtype,
         shape: SequentialShape,
         width: IndexWidth,
     ) -> (&CudaFunction, LaunchConfig) {
+        if crate::mamba3_siso::route::sequential_takes_sliced(shape.d_state) {
+            let smem = crate::mamba3_siso::route::sequential_backward_sliced_smem_bytes(
+                shape.headdim,
+                shape.d_state,
+            );
+            return (
+                self.m3_backward_seq_sliced.get(dtype),
+                shape.sliced_launch(smem),
+            );
+        }
         let warp = head_tier(shape.headdim) == HeadTier::Warp;
         if warp && matches!(dtype, WeightDtype::F32 | WeightDtype::Tf32) {
             return (
@@ -754,7 +806,18 @@ impl Mamba3Kernels {
             m3_backward_seq: pair("m3_backward_seq")?,
             m3_burnin_fwd_block: by_state_build("m3_burnin_fwd_block")?,
             m3_burnin_fwd_nosave_block: get("m3_burnin_fwd_nosave_block")?,
+            m3_burnin_fwd_sliced: TypedKernel {
+                f32: get("m3_burnin_fwd_sliced")?,
+                bf16: get("m3_burnin_fwd_sliced_bf16")?,
+                f16: get("m3_burnin_fwd_sliced_f16")?,
+            },
+            m3_burnin_fwd_nosave_sliced: get("m3_burnin_fwd_nosave_sliced")?,
             m3_backward_seq_block: by_state_build("m3_backward_seq_block")?,
+            m3_backward_seq_sliced: TypedKernel {
+                f32: get("m3_backward_seq_sliced")?,
+                bf16: get("m3_backward_seq_sliced_bf16")?,
+                f16: get("m3_backward_seq_sliced_f16")?,
+            },
             m3_backward_seq_by_state: [
                 (8, pair("m3_backward_seq_ds8")?),
                 (16, pair("m3_backward_seq_ds16")?),
@@ -985,7 +1048,12 @@ impl Mamba3Kernels {
                     }
                 }
             }
-            let typed = std::iter::once((&k.m3_dqkv_tiled, "m3_dqkv_tiled")).chain(
+            let typed = [
+                (&k.m3_dqkv_tiled, "m3_dqkv_tiled"),
+                (&k.m3_backward_seq_sliced, "m3_backward_seq_sliced"),
+            ]
+            .into_iter()
+            .chain(
                 k.m3_backward_seq_block
                     .iter()
                     .map(|t| (t, "m3_backward_seq_block")),

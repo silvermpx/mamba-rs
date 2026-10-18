@@ -23,7 +23,10 @@ use mamba_rs::mamba3_siso::gpu::kernels::{
     Mamba3Kernels, chunk_fused_cfg, chunk_pre_state_sliced_cfg, chunk_scan_coop_cfg,
     chunk_scan_sliced_cfg, step_head_cfg,
 };
-use mamba_rs::mamba3_siso::route::HeadTier;
+use mamba_rs::mamba3_siso::route::{
+    HeadTier, sequential_backward_sliced_smem_bytes, sequential_forward_sliced_smem_bytes,
+    sequential_sliced_block_threads,
+};
 
 /// Heads `h < PAIRS` and their twins `h + SHIFT`. SHIFT is two full runs of
 /// the y axis, so a twin sits in the third run.
@@ -162,8 +165,9 @@ impl Heads {
 }
 
 /// The sequential burn-in with its tape, then its backward, over heads
-/// past the y extent on the warp tier, one block per (sequence, head):
-/// every output of a twin head carries its first-run twin's bits.
+/// past the y extent on the warp tier and on the sliced tier, one block per
+/// (sequence, head): every output of a twin head carries its first-run
+/// twin's bits.
 #[test]
 fn the_sequential_scans_give_heads_past_the_y_extent_their_twins_bits() {
     let device = GpuDevice::new(0).expect("open CUDA device");
@@ -180,76 +184,107 @@ fn the_sequential_scans_give_heads_past_the_y_extent_their_twins_bits() {
     let kstate = Heads { outer: 1, row: ds };
     let vstate = Heads { outer: 1, row: hd };
     let per_head = Heads { outer: 1, row: 1 };
-    let same = |v: f32| 0.5 * v;
-    let ssm = state.input(&ctx, 1, same);
-    let k_state = kstate.input(&ctx, 2, same);
-    let v_state = vstate.input(&ctx, 3, same);
-    let x = rows.input(&ctx, 4, same);
-    let kk = krows.input(&ctx, 5, same);
-    let q = krows.input(&ctx, 6, same);
-    // The decays stay in (0, 1) so the walk stays finite.
-    let alpha = per_step.input(&ctx, 7, |v| 0.55 + 0.4 * v);
-    let beta = per_step.input(&ctx, 8, same);
-    let gamma = per_step.input(&ctx, 9, same);
-    let d = per_head.input(&ctx, 10, |v| v);
-    let dy = rows.input(&ctx, 11, |v| 0.2 * v);
-    let y = poisoned(&ctx, rows.len());
-    let h_saved = poisoned(&ctx, (t + 1) * NH * hd * ds);
-    let k_prev = poisoned(&ctx, krows.len());
-    let v_prev = poisoned(&ctx, rows.len());
-    let ints = [1, t, NH, hd, ds].map(|v| Arg::I(v as i32));
-    let cfg = LaunchConfig {
+    let warp = LaunchConfig {
         grid_dim: (1, NH as u32, 1),
         block_dim: (hd as u32, 1, 1),
         shared_mem_bytes: 0,
     };
-    let mut args: Vec<Arg> = [
-        &ssm, &k_state, &v_state, &y, &h_saved, &k_prev, &v_prev, &x, &kk, &q, &alpha, &beta,
-        &gamma, &d,
-    ]
-    .iter()
-    .map(|b| Arg::P(b.cached_ptr()))
-    .collect();
-    args.extend(ints);
-    launch_runs_packed(&ctx, &k.m3_burnin_fwd.i32, cfg, &args);
-    let st = &ctx.stream;
-    for (what, buf, layout) in [
-        ("y", &y, rows),
-        ("state", &ssm, state),
-        ("k state", &k_state, kstate),
-        ("v state", &v_state, vstate),
-        ("k prev", &k_prev, krows),
-        ("v prev", &v_prev, rows),
-    ] {
-        assert!(layout.twins_match(&words(st, buf)), "burn-in: {what}");
-    }
+    let sliced = |smem: usize| LaunchConfig {
+        grid_dim: (1, NH as u32, 1),
+        block_dim: (sequential_sliced_block_threads(hd, ds) as u32, 1, 1),
+        shared_mem_bytes: smem as u32,
+    };
+    let tiers = [
+        (
+            "warp",
+            (&k.m3_burnin_fwd.i32, warp),
+            (&k.m3_backward_seq.i32, warp),
+        ),
+        (
+            "sliced",
+            (
+                &k.m3_burnin_fwd_sliced.f32,
+                sliced(sequential_forward_sliced_smem_bytes(hd, ds)),
+            ),
+            (
+                &k.m3_backward_seq_sliced.f32,
+                sliced(sequential_backward_sliced_smem_bytes(hd, ds)),
+            ),
+        ),
+    ];
+    for (tier, (fwd, fwd_cfg), (bwd, bwd_cfg)) in tiers {
+        let same = |v: f32| 0.5 * v;
+        let ssm = state.input(&ctx, 1, same);
+        let k_state = kstate.input(&ctx, 2, same);
+        let v_state = vstate.input(&ctx, 3, same);
+        let x = rows.input(&ctx, 4, same);
+        let kk = krows.input(&ctx, 5, same);
+        let q = krows.input(&ctx, 6, same);
+        // The decays stay in (0, 1) so the walk stays finite.
+        let alpha = per_step.input(&ctx, 7, |v| 0.55 + 0.4 * v);
+        let beta = per_step.input(&ctx, 8, same);
+        let gamma = per_step.input(&ctx, 9, same);
+        let d = per_head.input(&ctx, 10, |v| v);
+        let dy = rows.input(&ctx, 11, |v| 0.2 * v);
+        let y = poisoned(&ctx, rows.len());
+        let h_saved = poisoned(&ctx, (t + 1) * NH * hd * ds);
+        let k_prev = poisoned(&ctx, krows.len());
+        let v_prev = poisoned(&ctx, rows.len());
+        let ints = [1, t, NH, hd, ds].map(|v| Arg::I(v as i32));
+        let mut args: Vec<Arg> = [
+            &ssm, &k_state, &v_state, &y, &h_saved, &k_prev, &v_prev, &x, &kk, &q, &alpha, &beta,
+            &gamma, &d,
+        ]
+        .iter()
+        .map(|b| Arg::P(b.cached_ptr()))
+        .collect();
+        args.extend(ints);
+        launch_runs_packed(&ctx, fwd, fwd_cfg, &args);
+        let st = &ctx.stream;
+        for (what, buf, layout) in [
+            ("y", &y, rows),
+            ("state", &ssm, state),
+            ("k state", &k_state, kstate),
+            ("v state", &v_state, vstate),
+            ("k prev", &k_prev, krows),
+            ("v prev", &v_prev, rows),
+        ] {
+            assert!(
+                layout.twins_match(&words(st, buf)),
+                "{tier} burn-in: {what}"
+            );
+        }
 
-    let dx = poisoned(&ctx, rows.len());
-    let dk = poisoned(&ctx, krows.len());
-    let dq = poisoned(&ctx, krows.len());
-    let dalpha = poisoned(&ctx, per_step.len());
-    let dbeta = poisoned(&ctx, per_step.len());
-    let dgamma = poisoned(&ctx, per_step.len());
-    let dd = poisoned(&ctx, NH * hd);
-    let mut args: Vec<Arg> = [
-        &h_saved, &k_prev, &v_prev, &x, &kk, &q, &alpha, &beta, &gamma, &d, &dy, &dx, &dk, &dq,
-        &dalpha, &dbeta, &dgamma, &dd,
-    ]
-    .iter()
-    .map(|b| Arg::P(b.cached_ptr()))
-    .collect();
-    args.extend(ints);
-    launch_runs_packed(&ctx, &k.m3_backward_seq.i32, cfg, &args);
-    for (what, buf, layout) in [
-        ("dx", &dx, rows),
-        ("dk", &dk, krows),
-        ("dq", &dq, krows),
-        ("d alpha", &dalpha, per_step),
-        ("d beta", &dbeta, per_step),
-        ("d gamma", &dgamma, per_step),
-        ("d D", &dd, vstate),
-    ] {
-        assert!(layout.twins_match(&words(st, buf)), "backward: {what}");
+        let dx = poisoned(&ctx, rows.len());
+        let dk = poisoned(&ctx, krows.len());
+        let dq = poisoned(&ctx, krows.len());
+        let dalpha = poisoned(&ctx, per_step.len());
+        let dbeta = poisoned(&ctx, per_step.len());
+        let dgamma = poisoned(&ctx, per_step.len());
+        let dd = poisoned(&ctx, NH * hd);
+        let mut args: Vec<Arg> = [
+            &h_saved, &k_prev, &v_prev, &x, &kk, &q, &alpha, &beta, &gamma, &d, &dy, &dx, &dk, &dq,
+            &dalpha, &dbeta, &dgamma, &dd,
+        ]
+        .iter()
+        .map(|b| Arg::P(b.cached_ptr()))
+        .collect();
+        args.extend(ints);
+        launch_runs_packed(&ctx, bwd, bwd_cfg, &args);
+        for (what, buf, layout) in [
+            ("dx", &dx, rows),
+            ("dk", &dk, krows),
+            ("dq", &dq, krows),
+            ("d alpha", &dalpha, per_step),
+            ("d beta", &dbeta, per_step),
+            ("d gamma", &dgamma, per_step),
+            ("d D", &dd, vstate),
+        ] {
+            assert!(
+                layout.twins_match(&words(st, buf)),
+                "{tier} backward: {what}"
+            );
+        }
     }
 }
 
