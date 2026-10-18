@@ -932,6 +932,24 @@ impl Mamba3MimoGpuTrainer {
         self.adamw.lr
     }
 
+    /// Turn the reference no-decay groups on (the default) or off: while
+    /// on, only the matrices decay, and `A_log`, `D`, the dt bias, the
+    /// biases and the norm scales take no weight decay. Errs while a
+    /// captured graph exists, since the capture baked the decay in:
+    /// `drop_graph`, toggle, then capture again. Every family's trainer
+    /// has it.
+    pub fn set_reference_no_decay(&mut self, on: bool) -> Result<(), String> {
+        if self.has_graph() {
+            return Err(
+                "set_reference_no_decay under a captured graph: the capture baked the \
+                 decay in, drop_graph() first, then toggle, then capture again"
+                    .into(),
+            );
+        }
+        self.adamw.reference_no_decay = on;
+        Ok(())
+    }
+
     /// The CUDA context: the GEMM mode and route live here.
     pub fn ctx(&self) -> &GpuCtx {
         &self.ctx

@@ -27,6 +27,8 @@ fast at every size: wide states, wide heads, short and long windows.
 - One GPU API for the four families: `GpuOptions` (device, precision,
   GEMM mode, `scan_mode`), the `GpuBackbone` and `GpuTrainer` traits,
   `AnyGpuBackbone` and `AnyGpuTrainer`.
+- `set_reference_no_decay` on every GPU trainer and the `GpuTrainer`
+  trait; `n_layers` and `param_count` on every CPU backbone.
 - `MambaGpuLM` generates on the GPU in every family, and
   `MambaGpuLM::from_hf` reads the family from the checkpoint.
   `MambaLM::from_hf` loads every family on the CPU.

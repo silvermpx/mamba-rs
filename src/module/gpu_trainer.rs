@@ -164,6 +164,10 @@ pub trait GpuTrainer {
     /// The AdamW learning rate.
     fn lr(&self) -> f32;
 
+    /// Turn the reference no-decay groups on (the default) or off. Errs
+    /// while a captured graph exists.
+    fn set_reference_no_decay(&mut self, on: bool) -> Result<(), String>;
+
     /// Sequences per window.
     fn batch(&self) -> usize;
 
@@ -338,6 +342,9 @@ macro_rules! gpu_trainer_by_inherent_methods {
             }
             fn lr(&self) -> f32 {
                 <$ty>::lr(self)
+            }
+            fn set_reference_no_decay(&mut self, on: bool) -> Result<(), String> {
+                <$ty>::set_reference_no_decay(self, on)
             }
             fn batch(&self) -> usize {
                 <$ty>::batch(self)
@@ -560,6 +567,9 @@ impl GpuTrainer for AnyGpuTrainer {
     }
     fn lr(&self) -> f32 {
         self.inner().lr()
+    }
+    fn set_reference_no_decay(&mut self, on: bool) -> Result<(), String> {
+        self.inner_mut().set_reference_no_decay(on)
     }
     fn batch(&self) -> usize {
         self.inner().batch()

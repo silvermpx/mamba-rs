@@ -444,6 +444,26 @@ impl MambaBackbone {
 mod tests {
     use super::*;
 
+    /// The parameter count is every element of the checkpoint's tensors,
+    /// the gated MLP's included.
+    #[test]
+    fn the_parameter_count_is_the_checkpoints() {
+        for d_intermediate in [0, 300] {
+            let cfg = MambaConfig {
+                d_model: 64,
+                d_state: 16,
+                n_layers: 3,
+                d_intermediate,
+                ..MambaConfig::default()
+            };
+            let b = MambaBackbone::init(cfg, 24, 5);
+            let (list, _) =
+                crate::mamba1::serialize::checkpoint_parts(b.weights(), b.config(), 24).unwrap();
+            assert_eq!(b.n_layers(), 3);
+            assert_eq!(b.param_count(), list.element_count());
+        }
+    }
+
     fn det(n: usize, seed: u64) -> Vec<f32> {
         let mut s = seed.max(1);
         (0..n)

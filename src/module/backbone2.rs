@@ -89,6 +89,18 @@ impl Mamba2Backbone {
         self.input_dim
     }
 
+    /// Number of layers.
+    pub fn n_layers(&self) -> usize {
+        self.cfg.n_layers
+    }
+
+    /// Total parameter count: every tensor the family's checkpoint holds.
+    pub fn param_count(&self) -> usize {
+        // A built backbone's weights always pass the checkpoint's checks.
+        crate::mamba2::serialize::checkpoint_parts(&self.weights, &self.cfg, self.input_dim)
+            .map_or(0, |(list, _)| list.element_count())
+    }
+
     /// Width of an output row.
     pub fn d_model(&self) -> usize {
         self.cfg.d_model
@@ -185,6 +197,31 @@ pub struct Mamba2Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The counts name the model: its layers, and every element its
+    /// checkpoint holds, one more layer adding one layer's elements.
+    #[test]
+    fn the_counts_cover_every_checkpoint_tensor() {
+        let count = |n_layers: usize| {
+            let cfg = Mamba2Config {
+                d_model: 96,
+                d_state: 16,
+                headdim: 16,
+                n_layers,
+                d_intermediate: 200,
+                ..Mamba2Config::default()
+            };
+            let b = Mamba2Backbone::init(cfg, 40, 7).unwrap();
+            let (list, _) =
+                crate::mamba2::serialize::checkpoint_parts(b.weights(), b.config(), 40).unwrap();
+            assert_eq!(b.n_layers(), n_layers);
+            assert_eq!(b.param_count(), list.element_count());
+            b.param_count()
+        };
+        let (two, three, four) = (count(2), count(3), count(4));
+        assert!(two > 0 && three > two);
+        assert_eq!(four - three, three - two);
+    }
 
     fn det(n: usize, seed: u64) -> Vec<f32> {
         let mut s = seed.max(1);

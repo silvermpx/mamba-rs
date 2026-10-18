@@ -773,6 +773,55 @@ fn the_shared_surface_carries_graphs_seam_and_dist_in_every_family() {
     }
 }
 
+/// The reference no-decay groups toggle through the shared surface in
+/// every family, and a toggle after a step takes effect at the next one:
+/// two steps with the groups on, two with them off, and one off then one
+/// on give three different sets of weights. The toggle is refused under
+/// a captured graph and taken again once the graph is dropped.
+#[test]
+fn the_no_decay_toggle_reaches_the_next_step_in_every_family() {
+    let (input, d) = window();
+    let families = [
+        ModelFamily::Mamba1,
+        ModelFamily::Mamba2,
+        ModelFamily::Mamba3,
+        ModelFamily::Mamba3Mimo,
+    ];
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+        let mut on = any_trainers(dtype);
+        let mut off = any_trainers(dtype);
+        let mut switched = any_trainers(dtype);
+        let mut graphs = any_trainers(dtype);
+        for (i, family) in families.iter().enumerate() {
+            let label = format!("{family:?} {dtype:?}");
+            off[i].set_reference_no_decay(false).unwrap();
+            switched[i].set_reference_no_decay(false).unwrap();
+            for t in [&mut on[i], &mut off[i], &mut switched[i]] {
+                assert!(t.step(&input, &d).unwrap().optimizer_stepped, "{label}");
+            }
+            switched[i].set_reference_no_decay(true).unwrap();
+            for t in [&mut on[i], &mut off[i], &mut switched[i]] {
+                assert!(t.step(&input, &d).unwrap().optimizer_stepped, "{label}");
+            }
+            let (a, b, c) = (
+                snapshot_bits(&on[i]),
+                snapshot_bits(&off[i]),
+                snapshot_bits(&switched[i]),
+            );
+            assert_ne!(a, b, "{label}: the groups off decay what on keeps");
+            assert_ne!(c, b, "{label}: the toggle back never reached the step");
+            assert_ne!(c, a, "{label}: the first step ran with the groups on");
+
+            let t = &mut graphs[i];
+            t.step(&input, &d).unwrap();
+            t.capture_graph().unwrap();
+            assert!(t.set_reference_no_decay(false).is_err(), "{label}");
+            t.drop_graph();
+            t.set_reference_no_decay(false).unwrap();
+        }
+    }
+}
+
 /// The step options reach the fused step in every family and precision,
 /// eager and captured: three steps with the control clip and the global
 /// clip give the weights of the split call with the same options bit for

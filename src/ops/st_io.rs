@@ -21,6 +21,14 @@ impl<'a> TensorList<'a> {
         }
     }
 
+    /// The elements of every tensor in the list.
+    pub(crate) fn element_count(&self) -> usize {
+        self.tensors
+            .iter()
+            .map(|(_, t)| t.shape().iter().product::<usize>())
+            .sum()
+    }
+
     /// Add `data` under `name` with `shape`, whose product must be its
     /// length. An empty tensor (an absent bias, an identity projection)
     /// is written with one dimension of zero.
