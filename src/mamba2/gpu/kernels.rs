@@ -105,6 +105,11 @@ pub struct Mamba2BwdKernels {
     pub conv_dv: TypedKernel,
     pub conv_dx: TypedKernel,
     pub conv_dw: TypedKernel,
+    /// The widest block the conv weight gradient launches, a warp a tap:
+    /// 32 warps where the card's registers allow its builds that many, fewer
+    /// where a build takes more registers than a block of 1024 threads
+    /// leaves a thread (the f32 build on sm_89 takes 78).
+    pub conv_dw_threads: usize,
     /// The sequential path's backward of the recurrence (replay per
     /// segment) and the group sums of its dB and dC.
     pub seq_bwd: TypedKernel,
@@ -266,6 +271,8 @@ impl Mamba2Kernels {
         let seq_bwd = typed("m2s_bwd")?;
         let seq_bwd_tiles = typed("m2s_bwd_tiles")?;
         let seq_bwd_global = typed("m2s_bwd_global")?;
+        let conv_dw = typed("m2b_conv_dw")?;
+        let conv_dw_threads = max_block(&conv_dw, "conv weight gradient")?;
         let seq_threads = SeqBwdThreads {
             tiles: max_block(&seq_bwd_tiles, "sequential backward tiles")?,
             shared: max_block(&seq_bwd, "sequential backward")?,
@@ -311,7 +318,8 @@ impl Mamba2Kernels {
                 gated_mlp: typed("mlp_gate_bwd")?,
                 conv_dv: typed("m2b_conv_dv")?,
                 conv_dx: typed("m2b_conv_dx")?,
-                conv_dw: typed("m2b_conv_dw")?,
+                conv_dw,
+                conv_dw_threads,
                 seq_bwd,
                 seq_bwd_tiles,
                 seq_bwd_global,

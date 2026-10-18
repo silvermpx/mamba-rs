@@ -481,7 +481,9 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
         acs_s[i] = i < lc ? acs[sc + i] : 0.0f;
         dt_s[i] = i < lc ? dt[sc + i] : 0.0f;
     }
-    m2_stage4(M2_CHUNK * M2_CHUNK, tid, blockDim.x,
+    // The stagings keep eight loads a thread in flight: a block's rows and
+    // state slices are many round trips deep at four.
+    m2_stage_n<8>(M2_CHUNK * M2_CHUNK, tid, blockDim.x,
               [&](int i) {
                   const int t = i / M2_CHUNK, s = i - t * M2_CHUNK;
                   float w = 0.0f;
@@ -492,7 +494,7 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
                   return w;
               },
               [&](int i, float v) { wv[i] = v; });
-    m2_stage4(M2_CHUNK * p4, tid, blockDim.x,
+    m2_stage_n<8>(M2_CHUNK * p4, tid, blockDim.x,
               [&](int i) {
                   const int t = i / p4, p = i - t * p4;
                   return t < lc && p < cw
@@ -515,7 +517,7 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
         for (int m0 = 0; m0 < dstate; m0 += nk) {
             const int mm = min(nk, dstate - m0);
             __syncthreads();
-            m2_stage4(M2_CHUNK * mm, tid, blockDim.x,
+            m2_stage_n<8>(M2_CHUNK * mm, tid, blockDim.x,
                       [&](int i) {
                           const int s = i / mm, n = i - s * mm;
                           return s < lc ? to_f(xbc[(b * seq + t0 + s) * ld_xbc + col
@@ -526,7 +528,7 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
                           const int s = i / mm;
                           lt[(i - s * mm) * lts + s] = v;
                       });
-            m2_stage4(p4 * mm, tid, blockDim.x,
+            m2_stage_n<8>(p4 * mm, tid, blockDim.x,
                       [&](int i) {
                           const int p = i / mm, n = i - p * mm;
                           return p < cw ? src[(long long)(c0 + p) * dstate + m0 + n] : 0.0f;
@@ -1725,6 +1727,7 @@ DEFINE_M2B_CONV_DX(m2b_conv_dx_f16, __half)
 // rows as the others. A tap of another sequence of a packed row reads 0,
 // as the forward. `g_b` may be null.
 #define M2B_DW_ROWS 128
+#define M2B_DW_AHEAD 8
 template <typename T>
 __device__ __forceinline__ void m2b_conv_dw_body(
     float* __restrict__ g_w, float* __restrict__ g_b,
@@ -1750,8 +1753,10 @@ __device__ __forceinline__ void m2b_conv_dw_body(
     int t = 0;
     for (long long r0 = 0; r0 < rows; r0 += M2B_DW_ROWS) {
         const int rn = (int)min((long long)M2B_DW_ROWS, rows - r0);
+        // A block runs a few warps over few channels, so each thread keeps
+        // sixteen loads in flight to keep the rows' stream fed.
         __syncthreads();
-        m2_stage4((rn + halo) * CH, tid, nthr,
+        m2_stage_n<16>((rn + halo) * CH, tid, nthr,
                   [&](int e) {
                       const int rr = e / CH, ch = c0 + e % CH;
                       const long long xrow = r0 - halo + rr;
@@ -1759,7 +1764,7 @@ __device__ __forceinline__ void m2b_conv_dw_body(
                           ? to_f(proj[xrow * ld_proj + xbc_col + ch]) : 0.0f;
                   },
                   [&](int e, float v) { xs[e] = v; });
-        m2_stage4(rn * CH, tid, nthr,
+        m2_stage_n<16>(rn * CH, tid, nthr,
                   [&](int e) {
                       const int rr = e / CH, ch = c0 + e % CH;
                       return ch < conv_dim ? dv[(r0 + rr) * conv_dim + ch] : 0.0f;
@@ -1767,7 +1772,34 @@ __device__ __forceinline__ void m2b_conv_dw_body(
                   [&](int e, float v) { dvs[e] = v; });
         __syncthreads();
         if (live) {
-            for (int rr = 0; rr < rn; rr++) {
+            // A row's operands do not depend on the chain, so a batch of
+            // M2B_DW_AHEAD rows loads them all before its steps run in row
+            // order; the chain then waits on its own adds, not on the loads.
+            int rr = 0;
+            for (; rr + M2B_DW_AHEAD <= rn; rr += M2B_DW_AHEAD) {
+                float gv[M2B_DW_AHEAD], xv[M2B_DW_AHEAD];
+#pragma unroll
+                for (int q = 0; q < M2B_DW_AHEAD; q++) {
+                    gv[q] = dvs[(rr + q) * CH + lane];
+                    xv[q] = 0.0f;
+                    if (k < d_conv) {
+                        const int src = t - halo + k;
+                        float v = src >= 0
+                            ? xs[(rr + q + k) * CH + lane]
+                            : state0[(b * conv_dim + c) * d_conv + d_conv + src];
+                        if (vl_id(seq_idx, b, seq, src) != vl_id(seq_idx, b, seq, t)) v = 0.0f;
+                        xv[q] = v;
+                    }
+                    if (++t == seq) {
+                        t = 0;
+                        b++;
+                    }
+                }
+#pragma unroll
+                for (int q = 0; q < M2B_DW_AHEAD; q++)
+                    acc = k == d_conv ? __fadd_rn(acc, gv[q]) : __fmaf_rn(xv[q], gv[q], acc);
+            }
+            for (; rr < rn; rr++) {
                 const float g = dvs[rr * CH + lane];
                 if (k == d_conv) {
                     acc = __fadd_rn(acc, g);

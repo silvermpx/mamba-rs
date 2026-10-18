@@ -791,6 +791,14 @@
   the chains: every chain runs over the same columns in the same order,
   the masked zeros of its tiles included, so the bits are its own at any
   tile and slice.
+- The Mamba-2 conv weight and bias gradients keep their memory busy: the
+  rows stage into shared memory sixteen loads a thread at a time, where four
+  left a block of a few warps waiting on each round trip, and each
+  (channel, tap) chain loads a batch of eight rows' operands before it
+  takes their steps in row order. The released kernel stays frozen in
+  `tests/fixtures/m2_conv_dw_reference.cu` and the new one keeps its bits.
+  The register-tile dx kernel stages its rows and state slices eight loads
+  a thread at a time; the values are the same, so are its bits.
 - The MIMO backward's state terms run every shape on their token tiles.
   Where the chunk's state gradient, the inputs and the keys do not fit
   beside a tile, each product stages its operands a slice at a time, dk a

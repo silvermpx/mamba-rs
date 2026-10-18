@@ -263,24 +263,31 @@ DEFINE_M2_BMM(m2_bmm_chunk_bf16, __nv_bfloat16)
 DEFINE_M2_BMM(m2_bmm_chunk_f16, __half)
 
 // Stages `count` values into shared memory through load(i) and put(i, v),
-// thread `tid` of `nthr` taking four indices at a time with every load of
-// the four issued before any store, so a thread waits one round trip a
-// batch rather than one a value. The values are load's, unchanged.
-template <class LF, class PF>
-__device__ __forceinline__ void m2_stage4(int count, int tid, int nthr, LF load, PF put) {
-    for (int i0 = tid; i0 < count; i0 += 4 * nthr) {
-        float v[4];
+// thread `tid` of `nthr` taking N indices at a time with every load of the
+// N issued before any store, so a thread waits one round trip a batch
+// rather than one a value. The values are load's, unchanged.
+template <int N, class LF, class PF>
+__device__ __forceinline__ void m2_stage_n(int count, int tid, int nthr, LF load, PF put) {
+    for (int i0 = tid; i0 < count; i0 += N * nthr) {
+        float v[N];
 #pragma unroll
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < N; k++) {
             const int i = i0 + k * nthr;
             v[k] = i < count ? load(i) : 0.0f;
         }
 #pragma unroll
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < N; k++) {
             const int i = i0 + k * nthr;
             if (i < count) put(i, v[k]);
         }
     }
+}
+
+// Four indices a batch, where a block has warps enough to keep the memory
+// busy.
+template <class LF, class PF>
+__device__ __forceinline__ void m2_stage4(int count, int tid, int nthr, LF load, PF put) {
+    m2_stage_n<4>(count, tid, nthr, load, put);
 }
 
 // Each chunk's own state S[p][n] = sum_t B_t[n] xw[t][p], from zero, t

@@ -1065,6 +1065,90 @@ fn m2_conv_weight_taps_over_blocks_are_one_block() {
     }
 }
 
+/// The conv weight and bias gradients against the kernel as it was released
+/// (frozen in `fixtures/m2_conv_dw_reference.cu`): each (channel, tap)
+/// chain over the rows ascending gives the same bits with its rows staged
+/// sixteen loads deep and a batch of rows loaded ahead of the chain, on
+/// windows whose rows end inside a batch and inside a tile, at four and
+/// twelve taps, one sequence a row and packed rows, in f32, bf16 and f16,
+/// added onto gradients already holding values.
+#[test]
+fn m2_conv_weight_gradient_keeps_the_released_bits() {
+    let (dev, ctx, k) = setup();
+    let frozen = frozen_kernels::frozen_module(
+        dev.context(),
+        arch::arch0(),
+        None,
+        include_str!("fixtures/m2_conv_dw_reference.cu"),
+    );
+    let reference: Vec<CudaFunction> = ["", "_bf16", "_f16"]
+        .iter()
+        .map(|t| {
+            frozen
+                .load_function(&format!("m2b_reference_conv_dw{t}"))
+                .unwrap()
+        })
+        .collect();
+    let mut cases = 0;
+    for (seq, cd, d_conv) in [(150usize, 72usize, 4usize), (151, 100, 12), (77, 36, 2)] {
+        let batch = 2usize;
+        let (ld_proj, xbc_col) = (cd + 9, 4i32);
+        let ids = packed_ids(&ctx, seq);
+        let warps = (d_conv + 1).min(32);
+        let cfg = LaunchConfig {
+            grid_dim: (
+                cd.div_ceil(32) as u32,
+                (d_conv + 1).div_ceil(warps) as u32,
+                1,
+            ),
+            block_dim: (32, warps as u32, 1),
+            shared_mem_bytes: ((128 + 128 + d_conv - 1) * 32 * 4) as u32,
+        };
+        let w0 = det(cd * d_conv, 14, 1.0);
+        let b0 = det(cd, 15, 1.0);
+        for (dtype, f) in DTYPES.into_iter().zip(&reference) {
+            let dv = f32_buf(&ctx, &det(batch * seq * cd, 11, 1.0));
+            let state0 = f32_buf(&ctx, &det(batch * cd * d_conv, 12, 1.0));
+            let proj = typed_buf(&ctx, &det(batch * seq * ld_proj, 13, 1.0), dtype);
+            for packed in [false, true] {
+                let seq_idx = if packed { ids.cached_ptr() } else { 0 };
+                let run = |kernel: &CudaFunction| {
+                    let g_w = f32_buf(&ctx, &w0);
+                    let g_b = f32_buf(&ctx, &b0);
+                    let ptrs = [
+                        g_w.cached_ptr(),
+                        g_b.cached_ptr(),
+                        dv.cached_ptr(),
+                        state0.cached_ptr(),
+                        proj.cached_ptr(),
+                    ];
+                    let ld = ld_proj as i64;
+                    let ints = [batch as i32, seq as i32, cd as i32, d_conv as i32];
+                    let mut b = ctx.stream.launch_builder(kernel);
+                    for p in &ptrs {
+                        b.arg(p);
+                    }
+                    b.arg(&ld);
+                    b.arg(&xbc_col);
+                    for v in &ints {
+                        b.arg(v);
+                    }
+                    b.arg(&seq_idx);
+                    unsafe { b.launch(cfg) }.unwrap();
+                    (bits_f32(&ctx, &g_w), bits_f32(&ctx, &g_b))
+                };
+                assert!(
+                    run(k.bwd.conv_dw.get(dtype)) == run(f),
+                    "{dtype:?} {seq} tokens, {cd} channels, {d_conv} taps, packed {packed}: \
+                     conv weight and bias gradients"
+                );
+                cases += 1;
+            }
+        }
+    }
+    eprintln!("m2 conv weight gradients: the released kernel's bits on {cases} cases");
+}
+
 /// Sequential backward shapes (sequence, heads, groups, headdim, states):
 /// three segments of 16 tokens over rows of four-float steps, and two
 /// segments over rows of 18 states. Both heads leave lanes past the last

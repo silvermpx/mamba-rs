@@ -2837,9 +2837,10 @@ impl Mamba2GpuTrainer {
             let g_b = opt_at(g_base, ls.conv_b).unwrap_or(0);
             // 32 channels a block with a warp per tap and one for the bias,
             // 128 rows of dv and the inputs (plus the d_conv - 1 rows before)
-            // staged at a time. Past 31 taps the taps spread over blocks of
-            // 32 warps, each staging the same rows.
-            let warps = (c.d_conv + 1).min(32);
+            // staged at a time. Past the warps a block of the kernel can
+            // launch on this card (32 where its registers allow) the taps
+            // spread over blocks of that many, each staging the same rows.
+            let warps = (c.d_conv + 1).min(k.conv_dw_threads / 32);
             let dw_cfg = LaunchConfig {
                 grid_dim: (
                     cd.div_ceil(32) as u32,
