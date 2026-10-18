@@ -76,11 +76,11 @@ pub struct MimoChunkedBwd {
     pub gate: TypedKernel,
     /// The gate's backward with the output norm, per (row, head).
     pub gate_normed: TypedKernel,
-    pub inter: CudaFunction,
-    /// `m3mb_inter` and `m3mb_state_terms` for a tile of tokens at once,
-    /// when [`ChunkedGeom::inter_tiles`] and [`ChunkedGeom::terms_tiles`]
-    /// fit.
+    /// The inter-chunk part of dq and its decay term, a tile of tokens at
+    /// once, at every shape ([`ChunkedGeom::inter_tiles`]).
     pub inter_tiles: CudaFunction,
+    /// `m3mb_state_terms` for a tile of tokens at once, when
+    /// [`ChunkedGeom::terms_tiles`] fits.
     pub state_terms_tiles: TypedKernel,
     pub dsloc: CudaFunction,
     /// `m3mb_dsloc` as register tiles, when [`ChunkedGeom::dsloc_tiles`]
@@ -132,11 +132,14 @@ pub struct ChunkedGeom {
     /// shared memory and `m3mb_dsloc` serves), tokens staged per pass,
     /// channels per block, bytes.
     pub dsloc_tiles: (usize, usize, usize, usize),
-    /// `m3mb_inter_tiles` and `m3mb_state_terms_tiles`: tokens per block
-    /// and bytes, (0, 0) when no token tile's staging fits the shared memory
-    /// or a rank past 64 leaves them to the per-token kernels. Both walk
-    /// their columns 128 at a time, so any head and state width serves.
-    pub inter_tiles: (usize, usize),
+    /// `m3mb_inter_tiles`: tokens per block, channels per slice of the
+    /// entering state, bytes. Every shape has one: the state is staged a
+    /// slice of channels at a time, its columns 128 at a time.
+    pub inter_tiles: (usize, usize, usize),
+    /// `m3mb_state_terms_tiles`: tokens per block and bytes, (0, 0) when no
+    /// token tile's staging fits the shared memory and the per-token kernel
+    /// serves. It walks its columns 128 at a time, so any head and state
+    /// width serves when the staging fits.
     pub terms_tiles: (usize, usize),
     /// `m3mb_pairs`: tokens per tile, bytes.
     pub pairs: (usize, usize),
@@ -276,7 +279,7 @@ pub fn chunked_geom(
             scan_tiles,
             dsloc: (0, 0),
             dsloc_tiles: (0, 0, 0, 0),
-            inter_tiles: (0, 0),
+            inter_tiles: (0, 0, 0),
             terms_tiles: (0, 0),
             pairs: (0, 0),
             pairs_global: false,
@@ -309,13 +312,11 @@ pub fn chunked_geom(
             true,
         ),
     };
-    // The token-tile inter and state-terms kernels: rows (t, r) of `tt`
-    // tokens padded to a float4 multiple plus 4, and every block the
-    // kernels read as float4 starting on 16 bytes. inter: the entering
-    // state, dy transposed, d, and the trees' partials past d when the first
-    // two do not hold them; state terms: dS with rows padded by one, u and
-    // the keys transposed, ste, the partials. The largest token tile that
-    // fits.
+    // The token-tile state-terms kernel: rows (t, r) of `tt` tokens padded
+    // to a float4 multiple plus 4, and every block the kernel reads as
+    // float4 starting on 16 bytes: dS with rows padded by one, u and the
+    // keys transposed, ste, the trees' partials. The largest token tile
+    // that fits.
     let token_tiles = |bytes: &dyn Fn(usize, usize) -> usize| {
         if rank > CHUNK {
             return (0, 0);
@@ -327,11 +328,7 @@ pub fn chunked_geom(
             .find(|&(_, b)| b <= cap)
             .unwrap_or((0, 0))
     };
-    let inter_tiles = token_tiles(&|tt, rs| {
-        let front = (hd * ds).next_multiple_of(4) + hd * rs;
-        let red = if tt * 256 > front { tt * 256 } else { 0 };
-        (front + tt * rank * ds + red) * 4
-    });
+    let inter_tiles = Some(inter_tiles_geom((hd, ds, rank), cap)).filter(|g| g.0 > 0)?;
     let terms_tiles = token_tiles(&|tt, rs| {
         ((hd * (ds + 1)).next_multiple_of(4) + hd * rs + ds * rs + tt * rank * hd + tt * 256) * 4
     });
@@ -366,6 +363,57 @@ pub fn chunked_geom(
         pt,
         pairs_tiles,
     })
+}
+
+/// The token-tile inter kernel's shared memory for `ds` state indices at
+/// rank `rank`, `tt` tokens a block and slices of `ps` channels: per pass
+/// of at most 128 state indices a slice of the entering state ([ps][W]),
+/// padded to a float4 multiple, and dy's slice transposed after it
+/// ([ps][R4 + 4], R4 = tt R rounded up to 4), then d [tt R][N] for the
+/// trees, whose [tt][256] partials take the slices' room when it holds
+/// them and follow d otherwise.
+pub fn inter_tiles_bytes((ds, rank): (usize, usize), tt: usize, ps: usize) -> usize {
+    let slices =
+        (ps * ds.min(128)).next_multiple_of(4) + ps * ((tt * rank).next_multiple_of(4) + 4);
+    let red = if tt * 256 <= slices { 0 } else { tt * 256 };
+    (slices + tt * rank * ds + red) * 4
+}
+
+/// The token-tile inter kernel's plan for a head of `hd` channels, `ds`
+/// state indices and rank `rank` under `cap` bytes ([`inter_tiles_bytes`]):
+/// tokens per block, channels per slice of the entering state, bytes. The
+/// largest token tile whose slice holds the whole head serves, else the
+/// largest whose slice takes at least a warp's worth of channels (the whole
+/// head when it is narrower), else the smallest tile that fits at all.
+/// (0, 0, 0) only under a cap no card has.
+pub fn inter_tiles_geom(
+    (hd, ds, rank): (usize, usize, usize),
+    cap: usize,
+) -> (usize, usize, usize) {
+    let per = |tt: usize| ds.min(128) + (tt * rank).next_multiple_of(4) + 4;
+    // The widest slice at a token tile: with the partials in the slices'
+    // room when that holds them, else with them apart. Rounding the state
+    // slice up costs at most 3 floats.
+    let widest = |tt: usize| -> Option<usize> {
+        let room = (cap / 4).checked_sub(tt * rank * ds)?;
+        let fits = |ps: usize| ps > 0 && inter_tiles_bytes((ds, rank), tt, ps) <= cap;
+        let shared = (room.saturating_sub(3) / per(tt)).min(hd);
+        let apart = (room.saturating_sub(tt * 256 + 3) / per(tt)).min(hd);
+        [shared, apart].into_iter().find(|&ps| fits(ps))
+    };
+    let plans = || {
+        [16usize, 8, 4, 2, 1]
+            .into_iter()
+            .filter(|&tt| tt * rank <= CHUNK)
+            .filter_map(|tt| widest(tt).map(|ps| (tt, ps)))
+    };
+    plans()
+        .find(|&(_, ps)| ps == hd)
+        .or_else(|| plans().find(|&(_, ps)| ps >= hd.min(32)))
+        .or_else(|| plans().next_back())
+        .map_or((0, 0, 0), |(tt, ps)| {
+            (tt, ps, inter_tiles_bytes((ds, rank), tt, ps))
+        })
 }
 
 /// The scan's shared memory for `rows` state rows: the rows padded by one,
@@ -733,7 +781,6 @@ impl Mamba3MimoKernels {
             cb: MimoChunkedBwd {
                 gate: typed("m3mb_gate")?,
                 gate_normed: typed("m3mb_gate_normed")?,
-                inter: get("m3mb_inter")?,
                 inter_tiles: get("m3mb_inter_tiles")?,
                 state_terms_tiles: typed("m3mb_state_terms_tiles")?,
                 dsloc,
@@ -902,7 +949,7 @@ mod tests {
                     g.dsloc.1,
                     g.pairs.1,
                     g.pairs_tiles.0,
-                    g.inter_tiles.1,
+                    g.inter_tiles.2,
                     g.terms_tiles.1,
                     g.pairs_tiles.1,
                 ];
@@ -924,6 +971,38 @@ mod tests {
         let staged = chunked_geom((1024, 256, 16), 99 * 1024, true, all).unwrap();
         assert!(staged.pairs_global, "{staged:?}");
         assert_eq!(staged.pairs_tiles, (0, 0));
+    }
+
+    /// The inter kernel plans every shape: the entering state whole where it
+    /// fits beside the largest token tile, else in slices of channels, within
+    /// the cap at every card's limit.
+    #[test]
+    fn the_inter_plan_takes_any_state_in_slices_of_channels() {
+        for (hd, ds, rank) in [
+            (64, 128, 4),
+            (256, 128, 2),
+            (2048, 256, 16),
+            (4096, 256, 1),
+            (136, 136, 1),
+            (40, 16, 3),
+            (1, 1, 1),
+        ] {
+            for cap in [48 * 1024, 64 * 1024, 99 * 1024, 227 * 1024] {
+                let (tt, ps, bytes) = inter_tiles_geom((hd, ds, rank), cap);
+                assert!(
+                    tt > 0 && tt * rank <= CHUNK && (1..=hd).contains(&ps) && bytes <= cap,
+                    "head {hd} state {ds} rank {rank} at {cap}: {:?}",
+                    (tt, ps, bytes)
+                );
+            }
+        }
+        assert_eq!(inter_tiles_geom((64, 128, 4), 99 * 1024), (16, 64, 82_944));
+        assert_eq!(inter_tiles_geom((1, 1, 1), 99 * 1024), (16, 1, 16_544));
+        assert_eq!(
+            inter_tiles_geom((256, 128, 2), 99 * 1024),
+            (16, 129, 101_008)
+        );
+        assert_eq!(inter_tiles_geom((2048, 256, 16), 48 * 1024).0, 1);
     }
 
     /// Register tiles under a kernel that holds fewer threads than the whole

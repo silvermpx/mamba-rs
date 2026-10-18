@@ -13,9 +13,13 @@
 //!   head against a thread per channel,
 //! - the register-tile chunk state and local state gradient, the whole head
 //!   in a block and in channel groups, against the channel-parallel kernels,
-//! - the chunked backward's token-tile inter and state terms against the
-//!   per-token kernels, at heads and state widths past one pass of 128
-//!   columns as well as within one,
+//! - the chunked backward's token-tile state terms against the per-token
+//!   kernel, at heads and state widths past one pass of 128 columns as well
+//!   as within one,
+//! - the chunked backward's token-tile inter term, its entering state whole
+//!   and in slices of channels, against the per-token kernel as it was
+//!   released (frozen in `fixtures/m3mb_inter_reference.cu`), with and
+//!   without packed sequences,
 //! - the chunked backward's angle walk, a batch of tokens staged at a time,
 //!   against the walk as it was released, a token at a time (frozen in
 //!   `fixtures/m3m_angles_reference.cu`).
@@ -38,7 +42,8 @@ use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{
     Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, angle_walk_smem_bytes, chunk_scan_tiles_cfg,
-    chunked_geom, scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_smem_bytes,
+    chunked_geom, inter_tiles_bytes, inter_tiles_geom, scan_bwd_record_floats, scan_bwd_smem_bytes,
+    scan_bwd_threads, scan_smem_bytes,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -1126,10 +1131,10 @@ const WIDE_SHAPES: [Shape; 3] = [
 ];
 
 /// The forward scan's register tiles against the channel-parallel scan, and
-/// the token-tile inter term and state terms against the per-token kernels
-/// (the state terms with every row in global memory): the same bits at the
-/// tiles the trainer plans, at heads and state widths within one pass of
-/// 128 columns and past it (a head past 128 channels in groups of them).
+/// the token-tile state terms against the per-token kernel (with every row
+/// in global memory): the same bits at the tiles the trainer plans, at
+/// heads and state widths within one pass of 128 columns and past it (a
+/// head past 128 channels in groups of them).
 #[test]
 fn mimo_chunked_token_tiles_are_the_per_token_kernels() {
     let dev = GpuDevice::new(0).unwrap();
@@ -1141,9 +1146,9 @@ fn mimo_chunked_token_tiles_are_the_per_token_kernels() {
         let inp = ChunkedInputs::new(&ctx, sh);
         let (b, nh, hd, ds, rank, na) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank, sh.na);
         let geom = chunked_geom((hd, ds, rank), k.smem_optin, true, k.chunk_threads).unwrap();
-        let ((tt_i, inter_smem), (tt_t, terms_smem)) = (geom.inter_tiles, geom.terms_tiles);
+        let (tt_t, terms_smem) = geom.terms_tiles;
         assert!(
-            tt_i > 0 && tt_t > 0,
+            tt_t > 0,
             "head {hd} state {ds} rank {rank}: no token tile planned: {geom:?}"
         );
         let rows = b * inp.seq;
@@ -1164,51 +1169,6 @@ fn mimo_chunked_token_tiles_are_the_per_token_kernels() {
             .collect()
         };
         let label = format!("head {hd} state {ds} rank {rank}");
-        // The inter-chunk term: dq and I per token.
-        let inter_run = |tiles: bool| {
-            let dq = GpuBuffer::zeros(s, rows * nh * rn).unwrap();
-            let inter = GpuBuffer::zeros(s, rows * nh).unwrap();
-            let mut args = vec![
-                Arg::P(dq.cached_ptr()),
-                Arg::P(inter.cached_ptr()),
-                Arg::P(inp.dy.cached_ptr()),
-                Arg::P(inp.enter.cached_ptr()),
-                Arg::P(inp.cn.cached_ptr()),
-                Arg::P(inp.c_bias.cached_ptr()),
-                Arg::P(inp.coef.cached_ptr()),
-                Arg::P(inp.sn.cached_ptr()),
-                Arg::P(inp.cs.cached_ptr()),
-            ];
-            if tiles {
-                args.extend(ints(&[tt_i as i32]));
-                let threads = 8 * (tt_i * rank).next_multiple_of(4);
-                launch_runs(
-                    &ctx,
-                    &k.cb.inter_tiles,
-                    cfg(
-                        (b * inp.nc, nh, 64usize.div_ceil(tt_i)),
-                        threads,
-                        inter_smem,
-                    ),
-                    &args,
-                    &[NO_PACKING],
-                );
-            } else {
-                args.extend(ints(&[]));
-                launch_runs(
-                    &ctx,
-                    &k.cb.inter,
-                    cfg((b * inp.nc, nh, 64), 256, 0),
-                    &args,
-                    &[NO_PACKING],
-                );
-            }
-            [bits_f32(&ctx, &dq), bits_f32(&ctx, &inter)]
-        };
-        assert!(
-            inter_run(true) == inter_run(false),
-            "{label}: inter-chunk term"
-        );
         let dk0 = det(rows * nh * rn, 86, 1.0);
         let du0 = det(rows * nh * rank * hd, 87, 1.0);
         let (tq, kt, nk, scan_smem) = geom.scan_tiles;
@@ -1327,6 +1287,144 @@ fn mimo_chunked_token_tiles_are_the_per_token_kernels() {
         }
     }
     eprintln!("token tiles against the per-token kernels on {checked} cases");
+}
+
+/// Two packed rows of `seq` tokens as the kernels read their ids, a float
+/// buffer of their bits: row 0 carries its sequence in, starts one at token
+/// 37 and one on the second chunk's first token; row 1 starts one at 70.
+fn packed_ids(ctx: &GpuCtx, batch: usize, seq: usize) -> GpuBuffer {
+    let ids: Vec<f32> = (0..batch * seq)
+        .map(|i| {
+            let (b, t) = (i / seq, i % seq);
+            let id = match b {
+                0 => usize::from(t >= 37) + usize::from(t >= 64),
+                _ => usize::from(t >= 70),
+            };
+            f32::from_bits(id as u32)
+        })
+        .collect();
+    f32_buf(ctx, &ids)
+}
+
+/// The token-tile inter term against the per-token kernel as it was
+/// released (frozen in `fixtures/m3mb_inter_reference.cu`): the same dq and
+/// decay terms with the entering state whole and in slices of channels (the
+/// slice the trainer plans, a third of it and one channel at a time), at
+/// heads and states whose whole state fits beside a token tile and past
+/// that, without a packing and with rows packing several sequences.
+#[test]
+fn mimo_inter_slices_keep_the_per_token_bits() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let s = &ctx.stream;
+    let frozen = frozen_module(
+        dev.context(),
+        arch::arch0(),
+        None,
+        include_str!("fixtures/m3mb_inter_reference.cu"),
+    );
+    let reference = frozen.load_function("m3mb_reference_inter").unwrap();
+    let past = [
+        Shape {
+            batch: 2,
+            seq: 100,
+            nh: 2,
+            ng: 1,
+            hd: 256,
+            ds: 160,
+            rank: 2,
+            na: 20,
+        },
+        Shape {
+            batch: 1,
+            seq: 100,
+            nh: 1,
+            ng: 1,
+            hd: 512,
+            ds: 64,
+            rank: 1,
+            na: 8,
+        },
+        Shape {
+            batch: 1,
+            seq: 100,
+            nh: 2,
+            ng: 2,
+            hd: 128,
+            ds: 256,
+            rank: 4,
+            na: 32,
+        },
+    ];
+    let mut checked = 0;
+    for sh in SCAN_SHAPES.into_iter().chain(WIDE_SHAPES).chain(past) {
+        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
+        let inp = ChunkedInputs::new(&ctx, sh);
+        let ids = packed_ids(&ctx, sh.batch, inp.seq);
+        let (b, nh, hd, ds, rank) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank);
+        let (tt, ps, _) = inter_tiles_geom((hd, ds, rank), k.smem_optin);
+        assert!(tt > 0, "head {hd} state {ds} rank {rank}: no inter plan");
+        let rows = b * inp.seq;
+        for packing in [NO_PACKING, Arg::P(ids.cached_ptr())] {
+            // `None` the per-token kernel, else (tokens a block, channels a
+            // slice).
+            let run = |tile: Option<(usize, usize)>| {
+                let dq = GpuBuffer::zeros(s, rows * nh * rank * ds).unwrap();
+                let inter = GpuBuffer::zeros(s, rows * nh).unwrap();
+                let mut args = vec![
+                    Arg::P(dq.cached_ptr()),
+                    Arg::P(inter.cached_ptr()),
+                    Arg::P(inp.dy.cached_ptr()),
+                    Arg::P(inp.enter.cached_ptr()),
+                    Arg::P(inp.cn.cached_ptr()),
+                    Arg::P(inp.c_bias.cached_ptr()),
+                    Arg::P(inp.coef.cached_ptr()),
+                    Arg::P(inp.sn.cached_ptr()),
+                    Arg::P(inp.cs.cached_ptr()),
+                ];
+                args.extend([inp.seq, nh, sh.ng, hd, ds, rank, sh.na].map(|v| Arg::I(v as i32)));
+                match tile {
+                    Some((tt, ps)) => {
+                        args.extend([Arg::I(tt as i32), Arg::I(ps as i32)]);
+                        launch_runs(
+                            &ctx,
+                            &k.cb.inter_tiles,
+                            cfg(
+                                (b * inp.nc, nh, 64usize.div_ceil(tt)),
+                                8 * (tt * rank).next_multiple_of(4),
+                                inter_tiles_bytes((ds, rank), tt, ps),
+                            ),
+                            &args,
+                            &[packing],
+                        );
+                    }
+                    None => launch_runs(
+                        &ctx,
+                        &reference,
+                        cfg((b * inp.nc, nh, 64), 256, 0),
+                        &args,
+                        &[packing],
+                    ),
+                }
+                [bits_f32(&ctx, &dq), bits_f32(&ctx, &inter)]
+            };
+            let want = run(None);
+            let packed = if matches!(packing, Arg::P(0)) {
+                "no"
+            } else {
+                "a"
+            };
+            for tile in [(tt, ps), (tt, ps.div_ceil(3)), (1, 1)] {
+                assert!(
+                    run(Some(tile)) == want,
+                    "head {hd} state {ds} rank {rank}, {packed} packing, (tokens, channels) \
+                     {tile:?}: inter-chunk term"
+                );
+                checked += 1;
+            }
+        }
+    }
+    eprintln!("inter slices against the per-token kernel on {checked} cases");
 }
 
 /// The chunked backward's angle walk stages a batch of tokens at a time,

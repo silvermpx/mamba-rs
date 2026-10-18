@@ -2861,37 +2861,24 @@ impl Mamba3MimoGpuTrainer {
                     ]
                 );
             }
-            if geom.inter_tiles.0 > 0 {
-                let (tt, smem) = geom.inter_tiles;
-                let tt_i = tt as i32;
-                go_y!(
-                    &k.cb.inter_tiles,
-                    cfg3(
-                        b * nc,
-                        nh,
-                        CHUNK.div_ceil(tt),
-                        8 * (tt * rank).next_multiple_of(4),
-                        smem
-                    ),
-                    "inter-chunk term",
-                    [
-                        dq, inter, dy, enter, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i,
-                        r_i, na_i, tt_i
-                    ],
-                    [seq_idx]
-                );
-            } else {
-                go_y!(
-                    &k.cb.inter,
-                    cfg3(b * nc, nh, CHUNK, 256, 0),
-                    "inter-chunk term",
-                    [
-                        dq, inter, dy, enter, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i,
-                        r_i, na_i
-                    ],
-                    [seq_idx]
-                );
-            }
+            let (tt, ps, smem) = geom.inter_tiles;
+            let (tt_i, ps_i) = (tt as i32, ps as i32);
+            go_y!(
+                &k.cb.inter_tiles,
+                cfg3(
+                    b * nc,
+                    nh,
+                    CHUNK.div_ceil(tt),
+                    8 * (tt * rank).next_multiple_of(4),
+                    smem
+                ),
+                "inter-chunk term",
+                [
+                    dq, inter, dy, enter, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i, r_i,
+                    na_i, tt_i, ps_i
+                ],
+                [seq_idx]
+            );
             if geom.dsloc_tiles.0 > 0 {
                 let (jc, sl, pg, smem) = geom.dsloc_tiles;
                 let (jc_i, sl_i, pg_i) = (jc as i32, sl as i32, pg as i32);

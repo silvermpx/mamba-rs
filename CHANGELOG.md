@@ -773,6 +773,15 @@
   head (four blocks for a batch of one with four heads on a 142-SM card).
   Every block builds the keys itself and the channels share nothing else,
   so the outputs keep their bits.
+- The MIMO backward's inter-chunk term runs every shape on its token
+  tiles. A block stages the entering state a slice of channels at a time
+  beside dy's slice, each dq element's chain running on across the slices
+  (`kernels::inter_tiles_geom`, `inter_tiles_bytes`), where a state that
+  did not fit beside a token tile went to a block per token that read the
+  whole state from global memory for every token (a head of 256 channels
+  with 128 states, among others). Every output keeps its chain and the
+  decay term its tree, so the bits are the per-token kernel's, which stays
+  frozen in `tests/fixtures/m3mb_inter_reference.cu`.
 
 ### Fixed
 
