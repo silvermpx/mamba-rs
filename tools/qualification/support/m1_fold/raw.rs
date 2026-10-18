@@ -676,7 +676,11 @@ pub(crate) fn qualify(device: &GpuDevice, kernels: &MambaKernels) {
             let static_shared = selected
                 .get_attribute(Attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)
                 .unwrap();
-            assert_eq!(optin, 67584);
+            // Every fold build opts in to all the shared memory the device
+            // allows a block, which covers the fold's at any state.
+            let launch =
+                grid_parallel_scan_bwd_fold(shape.b, shape.di, shape.ds, dtype.size_bytes());
+            assert!(optin as usize >= launch.shared_mem_bytes as usize);
             eprintln!(
                 "RESOURCE dtype={dtype:?} shape={shape:?} registers={registers} local_bytes={local} static_shared={static_shared} max_dynamic_shared={optin}"
             );

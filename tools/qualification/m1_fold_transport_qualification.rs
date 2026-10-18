@@ -58,7 +58,10 @@ fn compiled_fold_routes_keep_legacy_and_specialized_entries_available() {
                 .ssm_parallel_bwd_fold_launch(dtype, 8, 1300, 768, 16)
                 .0;
             let admitted = cap == 16 && dtype != WeightDtype::F32;
-            assert_eq!(!std::ptr::eq(short, legacy), admitted);
+            // A window of one chunk walks back on the grouped kernel, and the
+            // short fold transport left with those windows: the fold of a
+            // short window is the legacy one at every capacity.
+            assert!(std::ptr::eq(short, legacy));
             assert_eq!(!std::ptr::eq(long, legacy), admitted);
             assert_eq!(!std::ptr::eq(short, long), admitted);
             for (batch, time, inner, state) in [
