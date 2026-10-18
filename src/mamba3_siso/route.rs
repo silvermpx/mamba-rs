@@ -153,6 +153,20 @@ pub fn sequential_takes_sliced(d_state: usize) -> bool {
     !matches!(d_state, 8 | 16 | 32 | 64)
 }
 
+/// The most states the block tier's backward holds for a thread: its
+/// entries up to 32 states keep a thread's state gradients in the 128
+/// registers a block of 512 threads leaves a thread, and its entry for 64
+/// does not (ptxas gives it a 728-byte stack and spills it every step).
+pub const BLOCK_TIER_BACKWARD_STATES_MAX: usize = 32;
+
+/// Whether the sequential backward takes the sliced kernel for a head the
+/// block tier would serve: at every width the sliced kernels serve, and past
+/// [`BLOCK_TIER_BACKWARD_STATES_MAX`] states, where a sliced thread holds 16
+/// states whatever the width.
+pub fn sequential_backward_block_takes_sliced(d_state: usize) -> bool {
+    sequential_takes_sliced(d_state) || d_state > BLOCK_TIER_BACKWARD_STATES_MAX
+}
+
 /// The threads of one slice of the sliced sequential kernels: the head
 /// rounded up to whole warps, at most the slice's share of the block in
 /// whole warps (a head wider than that runs in turns of it). A state of up
@@ -342,6 +356,21 @@ mod tests {
                 HeadTier::Block
             };
             assert_eq!(head_tier(hd), want, "headdim {hd}");
+        }
+    }
+
+    /// The block tier's backward keeps the widths whose state a thread
+    /// holds in registers; every wider width with an entry of its own and
+    /// every width the sliced kernels serve takes the sliced kernel.
+    #[test]
+    fn the_block_backward_takes_the_sliced_kernel_past_its_register_states() {
+        for ds in 1..=256usize {
+            let block = matches!(ds, 8 | 16 | 32);
+            assert_eq!(
+                sequential_backward_block_takes_sliced(ds),
+                !block,
+                "{ds} states"
+            );
         }
     }
 

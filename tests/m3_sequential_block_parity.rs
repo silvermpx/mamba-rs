@@ -23,9 +23,9 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{IndexWidth, y_runs};
-use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
+use mamba_rs::mamba3_siso::gpu::kernels::{Mamba3Kernels, SequentialShape};
 use mamba_rs::mamba3_siso::route::{
-    block_tier_threads, sequential_backward_block_smem_bytes,
+    BLOCK_TIER_BACKWARD_STATES_MAX, block_tier_threads, sequential_backward_block_smem_bytes,
     sequential_backward_sliced_smem_bytes, sequential_forward_block_smem_bytes,
     sequential_forward_sliced_smem_bytes, sequential_sliced_block_threads,
 };
@@ -869,7 +869,18 @@ fn m3_sliced_backward_is_deterministic_and_as_close_to_f64_as_the_block_tier() {
     let m3k =
         Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), arch::arch0(), 256).unwrap();
     let f32 = WeightDtype::F32;
-    for (hd, ds) in [(16, 128), (64, 96), (100, 256), (32, 48), (8, 200)] {
+    // 64 states included: past the block tier's register states the
+    // backward of every head it would serve takes the sliced kernel.
+    for (hd, ds) in [
+        (16, 128),
+        (64, 96),
+        (100, 256),
+        (32, 48),
+        (8, 200),
+        (64, 64),
+        (40, 64),
+        (128, 64),
+    ] {
         for t in [1usize, 33] {
             let s = Shape { hd, ds, t };
             let label = format!("hd {hd} ds {ds} T {t}");
@@ -917,6 +928,48 @@ fn m3_sliced_backward_is_deterministic_and_as_close_to_f64_as_the_block_tier() {
                 assert!(
                     es <= 2.0 * eb + 1e-6 && es < 1e-4,
                     "{label} {name}: sliced {es:e} against block {eb:e}"
+                );
+            }
+        }
+    }
+}
+
+/// The sequential backward's launch at the widths with an entry of their
+/// own: the f32 warp kernels keep the heads of one warp, the block tier
+/// serves every other head up to the states its thread holds, and past them
+/// the sliced kernel takes every head the block tier would have served, the
+/// bf16 and f16 backward included.
+#[test]
+fn m3_sequential_backward_takes_the_sliced_kernel_past_the_block_tier_states() {
+    let (_ctx, m3k) = setup();
+    for ds in [8usize, 16, 32, 64] {
+        for hd in [4usize, 16, 32, 40, 48, 64, 128, 512] {
+            for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+                let shape = SequentialShape {
+                    batch: B,
+                    nheads: NH,
+                    headdim: hd,
+                    d_state: ds,
+                };
+                let (_, cfg) = m3k.sequential_backward(dtype, shape, IndexWidth::I32);
+                let warp = hd <= 32 && hd.is_power_of_two() && dtype == WeightDtype::F32;
+                let want = if warp {
+                    (hd, 0)
+                } else if ds > BLOCK_TIER_BACKWARD_STATES_MAX {
+                    (
+                        sequential_sliced_block_threads(hd, ds),
+                        sequential_backward_sliced_smem_bytes(hd, ds),
+                    )
+                } else {
+                    (
+                        block_tier_threads(hd),
+                        sequential_backward_block_smem_bytes(hd, ds),
+                    )
+                };
+                assert_eq!(
+                    (cfg.block_dim.0 as usize, cfg.shared_mem_bytes as usize),
+                    want,
+                    "{dtype:?} hd {hd} ds {ds}"
                 );
             }
         }

@@ -879,6 +879,16 @@
   returns the kernel with its launch config in place of
   `ssm_parallel_bwd_fold_for_shape`, so the shared memory a launch carries
   is always its build's.
+- The SISO sequential backward at 64 states takes the sliced kernel for
+  every head the block tier served (every head of the bf16 and f16
+  backward, and every f32 head wider than a warp)
+  (`route::sequential_backward_block_takes_sliced`). The block tier's entry
+  for 64 states held a thread's state gradients past the 128 registers a
+  block of 512 threads leaves it: a 728-byte stack and 952 bytes of spill
+  stores every step. A sliced thread holds 16 states (125 registers, no
+  spills). Its sums over the state add the slices' partials in a fixed
+  order: the same bits on every run, as close to the f64 backward as the
+  block tier's (`m3_sequential_block_parity`).
 
 ### Fixed
 

@@ -464,15 +464,25 @@ impl Mamba3Kernels {
 
     /// The sequential backward for a shape, with its launch. A state width
     /// no entry specialises takes the sliced kernel at every head; otherwise
-    /// the f32 warp kernels keep every head of one warp, and the block tier
-    /// serves every other head and every head of the bf16 and f16 backward.
+    /// the f32 warp kernels keep every head of one warp, and every other
+    /// head and every head of the bf16 and f16 backward takes the block tier
+    /// up to the states its thread holds
+    /// ([`crate::mamba3_siso::route::BLOCK_TIER_BACKWARD_STATES_MAX`]) and
+    /// the sliced kernel past them.
     pub fn sequential_backward(
         &self,
         dtype: WeightDtype,
         shape: SequentialShape,
         width: IndexWidth,
     ) -> (&CudaFunction, LaunchConfig) {
-        if crate::mamba3_siso::route::sequential_takes_sliced(shape.d_state) {
+        let warp = head_tier(shape.headdim) == HeadTier::Warp
+            && matches!(dtype, WeightDtype::F32 | WeightDtype::Tf32);
+        let sliced = if warp {
+            crate::mamba3_siso::route::sequential_takes_sliced(shape.d_state)
+        } else {
+            crate::mamba3_siso::route::sequential_backward_block_takes_sliced(shape.d_state)
+        };
+        if sliced {
             let smem = crate::mamba3_siso::route::sequential_backward_sliced_smem_bytes(
                 shape.headdim,
                 shape.d_state,
@@ -482,8 +492,7 @@ impl Mamba3Kernels {
                 shape.sliced_launch(smem),
             );
         }
-        let warp = head_tier(shape.headdim) == HeadTier::Warp;
-        if warp && matches!(dtype, WeightDtype::F32 | WeightDtype::Tf32) {
+        if warp {
             return (
                 self.backward_seq_for_state(shape.d_state, width),
                 shape.launch(true, 0),
