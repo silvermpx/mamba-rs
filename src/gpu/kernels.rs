@@ -380,8 +380,12 @@ pub struct MambaKernels {
     /// d_inner is divisible by the group size; opted in to the device's
     /// shared memory, since its stage passes 48 KB.
     pub ssm_parallel_bwd_fold_typed: ByIndexWidth<TypedKernel>,
-    ssm_parallel_bwd_fold_short_typed: Option<HalfKernel>,
     ssm_parallel_bwd_fold_staged_typed: Option<HalfKernel>,
+    /// Grouped variant for windows of one chunk: the forward's channel
+    /// groups walk the channels back side by side, its dB/dC rows summing
+    /// four channels or one (`launch::ScanBwdRoute`). Its shared memory
+    /// stays under 48 KB at every width.
+    pub ssm_parallel_bwd_groups_typed: ByIndexWidth<TypedKernel>,
 
     // -- AMP loss scaler helpers --
     /// Scan an f32 grad buffer for inf/nan, atomicOr into device int.
@@ -1644,15 +1648,6 @@ impl MambaKernels {
                 }
                 k
             },
-            ssm_parallel_bwd_fold_short_typed: if fold_transport_admitted {
-                let k = load_half("ssm_parallel_scan_bwd_fold_short")?;
-                for f in [&k.bf16, &k.f16] {
-                    super::launch::opt_in_dynamic_smem(f, optin, "short scan backward fold")?;
-                }
-                Some(k)
-            } else {
-                None
-            },
             ssm_parallel_bwd_fold_staged_typed: if fold_transport_admitted {
                 let k = load_half("ssm_parallel_scan_bwd_fold_staged")?;
                 for f in [&k.bf16, &k.f16] {
@@ -1662,6 +1657,7 @@ impl MambaKernels {
             } else {
                 None
             },
+            ssm_parallel_bwd_groups_typed: load_widths("ssm_parallel_scan_bwd_groups")?,
 
             // AMP loss scaler
             check_inf_nan_f32: get("check_inf_nan_f32")?,
@@ -1933,16 +1929,12 @@ impl MambaKernels {
             true,
         );
         let legacy = self.ssm_parallel_bwd_fold_typed.get(width).get(dtype);
-        // The short and staged routes are built with int offsets alone; the
-        // shapes they serve always fit them.
+        // The staged route is built with int offsets alone; the shapes it
+        // serves always fit them.
         if width == IndexWidth::I64 {
             return legacy;
         }
         match super::fold_transport::route_for_shape(dtype, batch, time, inner, state) {
-            super::fold_transport::FoldRoute::Short => self
-                .ssm_parallel_bwd_fold_short_typed
-                .as_ref()
-                .map_or(legacy, |kernel| kernel.get(dtype)),
             super::fold_transport::FoldRoute::Staged => self
                 .ssm_parallel_bwd_fold_staged_typed
                 .as_ref()

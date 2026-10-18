@@ -338,15 +338,15 @@ fn layer_backward_mixed(
         let ddd = scratch.d_d_local.cached_ptr();
         let da = scratch.d_a_log_local.cached_ptr();
 
-        let use_fold = dims.scan_mode.use_parallel(t, ds)
-            && di.is_multiple_of(crate::gpu::launch::SCAN_BWD_DGROUP);
+        let route = crate::gpu::launch::ScanBwdRoute::of(t, di);
         if dims.scan_mode.use_parallel(t, ds) {
-            // Parallel reverse-scan typed bwd (fold variant when the
-            // d-group divides d_inner).
+            // Parallel reverse-scan typed bwd: the grouped kernel for a
+            // window of one chunk, else the fold variant when the d-group
+            // divides d_inner, else the ungrouped kernel.
             // Signature: h_saved, delta, u, B, C, a_neg, D, dy, d_delta,
             //   d_u, d_B_local, d_C_local, d_D_local, d_a_log_local,
             //   batch, T, d_inner, d_state.
-            if !use_fold {
+            if !route.assigns_slots() {
                 // The ungrouped parallel kernel accumulates its per-sample
                 // d_a_log rows chunk by chunk with additions; it needs a
                 // zero slate every step, unlike the fold, which assigns
@@ -356,25 +356,38 @@ fn layer_backward_mixed(
                     .zero(&ctx.stream)
                     .map_err(|e| format!("zero d_a_log_local: {e:?}"))?;
             }
-            let kernel = if use_fold {
-                k.ssm_parallel_bwd_fold_for_shape(dtype, b, t, di, ds)
-            } else {
-                k.ssm_parallel_bwd_typed
-                    .get(crate::gpu::launch::scan_bwd_index_width(
-                        b,
-                        t,
-                        di,
-                        ds,
-                        crate::gpu::launch::scan_tape_slim(),
-                        false,
-                    ))
-                    .get(dtype)
+            let slim = crate::gpu::launch::scan_tape_slim();
+            let (kernel, cfg) = match route {
+                crate::gpu::launch::ScanBwdRoute::Groups { fold } => (
+                    k.ssm_parallel_bwd_groups_typed
+                        .get(crate::gpu::launch::scan_bwd_index_width(
+                            b,
+                            t,
+                            di,
+                            ds,
+                            slim,
+                            fold == crate::gpu::launch::SCAN_BWD_DGROUP,
+                        ))
+                        .get(dtype),
+                    crate::gpu::launch::grid_parallel_scan_bwd_groups(b, t, di, fold),
+                ),
+                crate::gpu::launch::ScanBwdRoute::Fold => (
+                    k.ssm_parallel_bwd_fold_for_shape(dtype, b, t, di, ds),
+                    crate::gpu::launch::grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes()),
+                ),
+                crate::gpu::launch::ScanBwdRoute::Plain => (
+                    k.ssm_parallel_bwd_typed
+                        .get(crate::gpu::launch::scan_bwd_index_width(
+                            b, t, di, ds, slim, false,
+                        ))
+                        .get(dtype),
+                    crate::gpu::launch::grid_parallel_scan_bwd(b, di),
+                ),
             };
-            let slim_i: i32 = i32::from(crate::gpu::launch::scan_tape_slim());
-            let cfg = if use_fold {
-                crate::gpu::launch::grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())
-            } else {
-                crate::gpu::launch::grid_parallel_scan_bwd(b, di)
+            let slim_i: i32 = i32::from(slim);
+            let fold_i: i32 = match route {
+                crate::gpu::launch::ScanBwdRoute::Groups { fold } => fold as i32,
+                _ => 0,
             };
             for (y_first, cfg) in crate::gpu::launch::y_runs(cfg) {
                 let mut bld = ctx.stream.launch_builder(kernel);
@@ -386,8 +399,9 @@ fn layer_backward_mixed(
                 bld.arg(&a_neg_ptr);
                 bld.arg(&dp);
                 bld.arg(&dy);
-                if use_fold {
-                    // Fold epilogue emits the PRE-softplus dt gradient inline.
+                if route.assigns_slots() {
+                    // The fold and grouped epilogues emit the PRE-softplus
+                    // dt gradient inline.
                     bld.arg(&ddr);
                     bld.arg(&raw_p);
                 } else {
@@ -405,6 +419,9 @@ fn layer_backward_mixed(
                 bld.arg(&h_p);
                 bld.arg(&slim_i);
                 bld.arg(&y_first);
+                if matches!(route, crate::gpu::launch::ScanBwdRoute::Groups { .. }) {
+                    bld.arg(&fold_i);
+                }
                 unsafe { bld.launch(cfg) }.map_err(|e| format!("ssm_parallel_bwd_typed: {e:?}"))?;
             }
         } else {
@@ -453,16 +470,17 @@ fn layer_backward_mixed(
         // reads the T-major locals via the tmajor twin (same values,
         // same output layout).
         let use_parallel = dims.scan_mode.use_parallel(t, ds);
-        let use_fold = use_parallel && di.is_multiple_of(crate::gpu::launch::SCAN_BWD_DGROUP);
+        let route = crate::gpu::launch::ScanBwdRoute::of(t, di);
         let reduce_bc = if use_parallel {
             k.ssm_reduce_d_bc_tmajor_typed.get(dtype)
         } else {
             k.ssm_reduce_d_bc_typed.get(dtype)
         };
-        // Under the fold the locals hold one pre-summed row per d group,
-        // so the reducer's d depth is the group count.
-        let reduce_di_i = if use_fold {
-            (di / crate::gpu::launch::SCAN_BWD_DGROUP) as i32
+        // Under the fold and the grouped kernel the locals hold one
+        // pre-summed row per fold group, so the reducer's d depth is the
+        // fold group count.
+        let reduce_di_i = if use_parallel {
+            route.bc_rows(di) as i32
         } else {
             di_i
         };
@@ -492,12 +510,11 @@ fn layer_backward_mixed(
         // chunked reducer folds one sample's slots first, then adds
         // across the batch (the retired accumulate-then-reduce order).
         let p = d_lw.a_log.ptr();
-        // Only the fold writes chunk-partial rows; the ungrouped parallel
-        // kernel and the sequential kernel both leave one accumulated row
-        // per sample, which the flat reducer folds.
-        let use_fold_rows = dims.scan_mode.use_parallel(t, ds)
-            && di.is_multiple_of(crate::gpu::launch::SCAN_BWD_DGROUP);
-        if use_fold_rows {
+        // Only the fold and the grouped kernel write chunk-partial rows;
+        // the ungrouped parallel kernel and the sequential kernel both
+        // leave one accumulated row per sample, which the flat reducer
+        // folds.
+        if use_parallel && route.assigns_slots() {
             let nc = t.div_ceil(crate::gpu::launch::SCAN_CHUNK).max(1) as i32;
             let mut bld = ctx.stream.launch_builder(&k.ssm_reduce_d_a_log_chunks);
             bld.arg(&p);
@@ -531,10 +548,11 @@ fn layer_backward_mixed(
     // f32 sources equals the old cast-then-add-onto-zero double round).
 
     // ─── B4: softplus backward + dt_proj backward ────────────────────
-    // Only the non-fold routes launch it; the fold epilogue already
-    // emitted d_delta_raw with the identical round-first chain.
+    // Only the ungrouped and sequential routes launch it; the fold and
+    // grouped epilogues already emitted d_delta_raw with the identical
+    // round-first chain.
     if !(dims.scan_mode.use_parallel(t, ds)
-        && di.is_multiple_of(crate::gpu::launch::SCAN_BWD_DGROUP))
+        && crate::gpu::launch::ScanBwdRoute::of(t, di).assigns_slots())
     {
         let n = (bt * di) as i64;
         let mut bld = ctx.stream.launch_builder(k.softplus_bwd_typed.get(dtype));

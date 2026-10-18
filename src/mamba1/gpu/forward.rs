@@ -421,10 +421,8 @@ impl GpuMambaScratch {
         let bt = batch * dims.seq_len;
         let xdbl_dim = dt_rank + 2 * d_state;
         // Fold-depth dB/dC partials (see the mixed scratch note).
-        let bc_rows = if dims.scan_mode.use_parallel(dims.seq_len, d_state)
-            && d_inner.is_multiple_of(crate::gpu::launch::SCAN_BWD_DGROUP)
-        {
-            d_inner / crate::gpu::launch::SCAN_BWD_DGROUP
+        let bc_rows = if dims.scan_mode.use_parallel(dims.seq_len, d_state) {
+            crate::gpu::launch::ScanBwdRoute::of(dims.seq_len, d_inner).bc_rows(d_inner)
         } else {
             d_inner
         };

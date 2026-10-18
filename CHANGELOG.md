@@ -834,6 +834,18 @@
   chunks are unchanged, and `grid_parallel_scan` takes the window. Every
   output keeps its bits but for the sign of a zero; the released forwards
   stay frozen in `tests/fixtures/m1_parallel_fwd_reference.cu`.
+- The Mamba-1 parallel scan backward walks a window of at most 512 steps
+  back by the forward's channel groups, side by side
+  (`ssm_parallel_scan_bwd_groups_*`, `launch::ScanBwdRoute`,
+  `grid_parallel_scan_bwd_groups`), where the fold kernel took four
+  channels a block in turn and the ungrouped kernel one, each on all 128
+  threads. Its dB and dC rows sum four channels as the fold's do, or one
+  where four do not divide d_inner, and it emits the pre-softplus dt
+  gradient as the fold does, so short windows skip the separate softplus
+  backward on every d_inner. Every output keeps its bits but for the sign
+  of a zero, against the released fold and ungrouped kernels frozen in
+  `tests/fixtures/m1_parallel_bwd_reference.cu`. The sm_89 half-precision
+  short fold transport is gone with the windows it served.
 
 ### Fixed
 

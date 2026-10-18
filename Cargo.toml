@@ -573,6 +573,11 @@ path = "tests/m1_parallel_bwd_parity.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m1_parallel_scan_bwd_groups"
+path = "tests/m1_parallel_scan_bwd_groups.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "m1_parallel_scan_groups"
 path = "tests/m1_parallel_scan_groups.rs"
 required-features = ["cuda"]

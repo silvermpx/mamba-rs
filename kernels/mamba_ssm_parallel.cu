@@ -2011,6 +2011,552 @@ DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16_i64, long long
 DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16, int, __half, from_f_f16, 3, 0, 4)
 DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16_i64, long long, __half, from_f_f16, 3, 0, 4)
 
+// ============================================================================
+// `block_scan_ab_with_exclusive` over the `width` threads of a channel's
+// group, as `group_inclusive_scan_ab` scans them: the inclusive values of
+// the group's lanes and each lane's exclusive prefix, the inclusive value of
+// the lane before it in its group (the identity for the group's first lane).
+// From a warp up a warp's first lane rebuilds the previous warp's last-lane
+// value from that warp's raw total and the prefix it composed with, as the
+// block scan does. A group gives the values the block scan gives a block
+// whose other lanes hold the identity, but for the sign of a zero.
+// ============================================================================
+__device__ __forceinline__ void group_scan_ab_with_exclusive(
+    float &a, float &b, float &ea, float &eb,
+    float *smem_wa, float *smem_wb, float *smem_raw_a, float *smem_raw_b,
+    int width
+) {
+    int lane = threadIdx.x & 31;
+    if (width < 32) {
+        int seg = threadIdx.x & (width - 1);
+        for (int offset = 1; offset < width; offset <<= 1) {
+            float a_prev = __shfl_up_sync(0xffffffffu, a, offset, width);
+            float b_prev = __shfl_up_sync(0xffffffffu, b, offset, width);
+            if (seg >= offset) {
+                b = a * b_prev + b;
+                a = a * a_prev;
+            }
+        }
+        float up_a = __shfl_up_sync(0xffffffffu, a, 1, width);
+        float up_b = __shfl_up_sync(0xffffffffu, b, 1, width);
+        ea = (seg == 0) ? 1.0f : up_a;
+        eb = (seg == 0) ? 0.0f : up_b;
+        return;
+    }
+    int warp_id = threadIdx.x / 32;
+    int gw      = width / 32;
+    int wg      = warp_id & (gw - 1);
+    warp_inclusive_scan_ab(a, b);
+    if (lane == 31) {
+        smem_wa[warp_id] = a;
+        smem_wb[warp_id] = b;
+        smem_raw_a[warp_id] = a;
+        smem_raw_b[warp_id] = b;
+    }
+    __syncthreads();
+    if (gw > 1 && wg == 0 && lane < gw) {
+        float wa = smem_wa[warp_id + lane];
+        float wb = smem_wb[warp_id + lane];
+        warp_inclusive_scan_ab(wa, wb, (1u << gw) - 1u);
+        smem_wa[warp_id + lane] = wa;
+        smem_wb[warp_id + lane] = wb;
+    }
+    __syncthreads();
+    if (wg > 0) {
+        float pa = smem_wa[warp_id - 1];
+        float pb = smem_wb[warp_id - 1];
+        b = a * pb + b;
+        a = a * pa;
+    }
+    float edge_a = 1.0f;
+    float edge_b = 0.0f;
+    if (wg > 0) {
+        edge_a = smem_raw_a[warp_id - 1];
+        edge_b = smem_raw_b[warp_id - 1];
+        if (wg > 1) {
+            float pa = smem_wa[warp_id - 2];
+            float pb = smem_wb[warp_id - 2];
+            edge_b = edge_a * pb + edge_b;
+            edge_a = edge_a * pa;
+        }
+    }
+    float up_a = __shfl_up_sync(0xffffffffu, a, 1);
+    float up_b = __shfl_up_sync(0xffffffffu, b, 1);
+    ea = (lane == 0) ? edge_a : up_a;
+    eb = (lane == 0) ? edge_b : up_b;
+    // No __syncthreads here -- caller syncs before the workspace is reused.
+}
+
+// ============================================================================
+// Reverse mirror of `group_scan_ab_with_exclusive`: the inclusive values of
+// a reverse scan over a channel's group and each lane's exclusive postfix,
+// the composed value of the lane after it in its group (the identity for
+// the group's last lane), as `block_reverse_scan_ab_with_exclusive` gives
+// them for a block whose other lanes hold the identity.
+// ============================================================================
+__device__ __forceinline__ void group_reverse_scan_ab_with_exclusive(
+    float &a, float &b, float &na, float &nb,
+    float *smem_wa, float *smem_wb, float *smem_raw_a, float *smem_raw_b,
+    int width
+) {
+    int lane = threadIdx.x & 31;
+    if (width < 32) {
+        int seg = threadIdx.x & (width - 1);
+        for (int offset = 1; offset < width; offset <<= 1) {
+            float a_next = __shfl_down_sync(0xffffffffu, a, offset, width);
+            float b_next = __shfl_down_sync(0xffffffffu, b, offset, width);
+            if (seg + offset < width) {
+                b = a * b_next + b;
+                a = a * a_next;
+            }
+        }
+        float down_a = __shfl_down_sync(0xffffffffu, a, 1, width);
+        float down_b = __shfl_down_sync(0xffffffffu, b, 1, width);
+        na = (seg == width - 1) ? 1.0f : down_a;
+        nb = (seg == width - 1) ? 0.0f : down_b;
+        return;
+    }
+    int warp_id = threadIdx.x / 32;
+    int gw      = width / 32;
+    int wg      = warp_id & (gw - 1);
+    warp_inclusive_reverse_scan_ab(a, b);
+    if (lane == 0) {
+        smem_wa[warp_id] = a;
+        smem_wb[warp_id] = b;
+        smem_raw_a[warp_id] = a;
+        smem_raw_b[warp_id] = b;
+    }
+    __syncthreads();
+    if (gw > 1 && wg == 0 && lane < gw) {
+        float wa = smem_wa[warp_id + lane];
+        float wb = smem_wb[warp_id + lane];
+        warp_inclusive_reverse_scan_ab(wa, wb, (1u << gw) - 1u, gw);
+        smem_wa[warp_id + lane] = wa;
+        smem_wb[warp_id + lane] = wb;
+    }
+    __syncthreads();
+    if (wg < gw - 1) {
+        float pa = smem_wa[warp_id + 1];
+        float pb = smem_wb[warp_id + 1];
+        b = a * pb + b;
+        a = a * pa;
+    }
+    float edge_a = 1.0f;
+    float edge_b = 0.0f;
+    if (wg < gw - 1) {
+        edge_a = smem_raw_a[warp_id + 1];
+        edge_b = smem_raw_b[warp_id + 1];
+        if (wg + 1 < gw - 1) {
+            float pa = smem_wa[warp_id + 2];
+            float pb = smem_wb[warp_id + 2];
+            edge_b = edge_a * pb + edge_b;
+            edge_a = edge_a * pa;
+        }
+    }
+    float down_a = __shfl_down_sync(0xffffffffu, a, 1);
+    float down_b = __shfl_down_sync(0xffffffffu, b, 1);
+    na = (lane == 31) ? edge_a : down_a;
+    nb = (lane == 31) ? edge_b : down_b;
+    // No __syncthreads here -- caller syncs before the workspace is reused.
+}
+
+// ============================================================================
+// Sum of `v` over the `width` threads of a channel's group, in the tree the
+// block reductions of the backward take for a whole block: halving strides
+// through `red` down to a warp, then the warp's shuffle tree. The group's
+// first thread holds the sum. From a warp up every thread takes the
+// barriers, the width being one for the whole launch.
+// ============================================================================
+__device__ __forceinline__ float group_tree_sum(float v, float *red, int width) {
+    if (width < 32) {
+        for (int off = width / 2; off > 0; off >>= 1)
+            v += __shfl_down_sync(0xffffffffu, v, off, width);
+        return v;
+    }
+    int tid = threadIdx.x & (width - 1);
+    int base = threadIdx.x - tid;
+    red[threadIdx.x] = v;
+    __syncthreads();
+    for (int stride = width / 2; stride >= 32; stride >>= 1) {
+        if (tid < stride) red[base + tid] += red[base + tid + stride];
+        __syncthreads();
+    }
+    float w = red[base + (tid & 31)];
+    for (int off = 16; off > 0; off >>= 1)
+        w += __shfl_down_sync(0xffffffffu, w, off);
+    // Every lane's `red` read precedes the next writer's barrier.
+    __syncthreads();
+    return w;
+}
+
+// ============================================================================
+// Parallel reverse-scan backward for windows of one chunk, a channel to a
+// group of threads.
+//
+// The fold kernel gives each block four channels in turn, every one on all
+// 128 threads and eight steps a thread, so a window much shorter than the
+// chunk leaves all but a few threads stepping the identity. A window of at
+// most 512 steps here takes the forward's group width (scan_group_width):
+// the block's groups walk channels side by side, the channels of a fold
+// group in one pass, or in two when a fold group has more channels than the
+// block has groups. Each channel's walk back is the fold kernel's for one
+// chunk: the slim tape's replay through the same thread-local scan, the
+// group's scan with exclusive prefixes and the same compose chain, the
+// reverse scan with exclusive postfixes, and the same per-step terms; the
+// running postfix of a single chunk is the identity. A fold group's dB and
+// dC rows add its channels' terms in ascending channel order as fused
+// multiply-adds onto the sum, as the fold's registers add them, through
+// shared memory since the channels are in different threads; d_a and d_D
+// take the block reduction's tree within the group. `fold` is the channels
+// one row sums: four, as the fold kernel's rows, or one where d_inner is
+// not a multiple of four, each channel its own row. The outputs keep the
+// fold kernel's layouts, so its reducers read them as they are.
+// ============================================================================
+#define DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS(NAME, IDX, T_ACT, FROM_F)         \
+extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void             \
+NAME(                                                                         \
+    const float* __restrict__ h_saved,                                        \
+    const T_ACT* __restrict__ delta,                                          \
+    const T_ACT* __restrict__ u,                                              \
+    const T_ACT* __restrict__ B_in,                                           \
+    const T_ACT* __restrict__ C_in,                                           \
+    const float* __restrict__ a_neg,                                          \
+    const float* __restrict__ D,                                              \
+    const T_ACT* __restrict__ dy,                                             \
+    /* The pre-softplus dt gradient, as the fold's epilogue emits it. */      \
+    T_ACT* __restrict__ d_delta_raw_out,                                      \
+    const T_ACT* __restrict__ dt_raw,                                         \
+    T_ACT* __restrict__ d_u,                                                  \
+    T_ACT* __restrict__ d_B_local, /* [B, ds, di / fold, T] fold-group rows */ \
+    T_ACT* __restrict__ d_C_local, /* [B, ds, di / fold, T] fold-group rows */ \
+    float* __restrict__ d_D_local,                                            \
+    float* __restrict__ d_a_log_local, /* [B, di, ds]: the one chunk's slots */ \
+    int batch, int T, int d_inner, int d_state,                               \
+    const float* run_tape,                                                    \
+    int slim_tape,                                                            \
+    int y_first, /* this run's first y block */                               \
+    int fold     /* the channels one dB/dC row sums: 4, or 1 */               \
+) {                                                                           \
+    IDX bid = blockIdx.x;                                                     \
+    if (bid >= batch) return;                                                 \
+    if (d_state > MAX_DSTATE) return;                                         \
+    /* A group of `width` threads walks one channel back; the block's         \
+       groups take the channels of its fold groups, in two passes when a      \
+       fold group has more channels than the block has groups. */             \
+    const int width = scan_group_width(T);                                    \
+    const int groups = NTHREADS / width;                                      \
+    const int grp = threadIdx.x / width;                                      \
+    const int tid = threadIdx.x & (width - 1);                                \
+    const int lanes = groups > fold ? groups : fold;                          \
+    const int passes = lanes / groups;                                        \
+    const int folds = lanes / fold;                                           \
+    const int span = width * NITEMS;                                          \
+    extern __shared__ float smem[];                                           \
+    float *smem_fwd_wa    = smem;                                             \
+    float *smem_fwd_wb    = smem_fwd_wa + NWARPS;                             \
+    float *smem_fwd_raw_a = smem_fwd_wb + NWARPS;                             \
+    float *smem_fwd_raw_b = smem_fwd_raw_a + NWARPS;                          \
+    float *smem_rev_wa    = smem_fwd_raw_b + NWARPS;                          \
+    float *smem_rev_wb    = smem_rev_wa + NWARPS;                             \
+    float *smem_rev_raw_a = smem_rev_wb + NWARPS;                             \
+    float *smem_rev_raw_b = smem_rev_raw_a + NWARPS;                          \
+    float *smem_next_a    = smem_rev_raw_b + NWARPS;                          \
+    float *smem_hbound    = smem_next_a + NWARPS;                             \
+    float *smem_red       = smem_hbound + NWARPS;                             \
+    float *tile_B         = smem_red + NTHREADS;                              \
+    float *tile_C         = tile_B + lanes * span;                            \
+    /* Each lane's dt, u and dy rows, item-major so that a warp's threads     \
+       touch consecutive words; a thread reads back only its own items. */    \
+    float *rows_delta     = tile_C + lanes * span;                            \
+    float *rows_u         = rows_delta + lanes * span;                        \
+    float *rows_dy        = rows_u + lanes * span;                            \
+    const unsigned warp_mask = 0xFFFFFFFFu;                                   \
+    const int seg = width < 32 ? width : 32;                                  \
+    /* Each pass's channel. A fold group past d_inner keeps step with the     \
+       block's barriers on the last channel's rows and stores nothing. */     \
+    int did_p[2];                                                             \
+    bool live_p[2];                                                           \
+    _Pragma("unroll")                                                         \
+    for (int p = 0; p < 2; p++) {                                             \
+        int lane = p * groups + grp;                                          \
+        int f = (y_first + blockIdx.y) * folds + lane / fold;                 \
+        int did = f * fold + lane % fold;                                     \
+        live_p[p] = p < passes && did < d_inner;                              \
+        did_p[p] = live_p[p] ? did : d_inner - 1;                             \
+    }                                                                         \
+    float d_u_acc[2][NITEMS];                                                 \
+    float d_delta_acc[2][NITEMS];                                             \
+    float local_d_D[2];                                                       \
+    _Pragma("unroll")                                                         \
+    for (int p = 0; p < 2; p++) {                                             \
+        local_d_D[p] = 0.0f;                                                  \
+        float D_d = D[did_p[p]];                                              \
+        const int lane = p * groups + grp;                                    \
+        _Pragma("unroll")                                                     \
+        for (int i = 0; i < NITEMS; i++) {                                    \
+            int t = tid * NITEMS + i;                                         \
+            bool in = p < passes && t < T;                                    \
+            IDX row = (bid * T + (in ? t : 0)) * d_inner + did_p[p];          \
+            float dv = in ? to_f(delta[row]) : 0.0f;                          \
+            float uv = in ? to_f(u[row]) : 0.0f;                              \
+            float dyv = in ? to_f(dy[row]) : 0.0f;                            \
+            if (p < passes) {                                                 \
+                int at = (lane * NITEMS + i) * width + tid;                   \
+                rows_delta[at] = dv;                                          \
+                rows_u[at] = uv;                                              \
+                rows_dy[at] = dyv;                                            \
+            }                                                                 \
+            if (in) {                                                         \
+                local_d_D[p] += dyv * uv;                                     \
+                d_u_acc[p][i] = dyv * D_d;                                    \
+            } else {                                                          \
+                d_u_acc[p][i] = 0.0f;                                         \
+            }                                                                 \
+            d_delta_acc[p][i] = 0.0f;                                         \
+        }                                                                     \
+    }                                                                         \
+    for (int n = 0; n < d_state; n++) {                                       \
+        /* The B and C rows are the sequence's, the same for every            \
+           channel of the block. */                                           \
+        float b_vals[NITEMS];                                                 \
+        load_row8(B_in + (bid * d_state + n) * T, tid * NITEMS, T, b_vals);   \
+        float c_vals[NITEMS];                                                 \
+        load_row8(C_in + (bid * d_state + n) * T, tid * NITEMS, T, c_vals);   \
+        _Pragma("unroll")                                                     \
+        for (int p = 0; p < 2; p++) {                                         \
+            if (p >= passes) continue;                                        \
+            const int did = did_p[p];                                         \
+            const int lane = p * groups + grp;                                \
+            float a_dn = a_neg[(IDX)did * d_state + n];                       \
+            float a_dn_log2 = a_dn * LOG2E;                                   \
+            float delta_v[NITEMS];                                            \
+            float u_v[NITEMS];                                                \
+            float dy_v[NITEMS];                                               \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int at = (lane * NITEMS + i) * width + tid;                   \
+                delta_v[i] = rows_delta[at];                                  \
+                u_v[i] = rows_u[at];                                          \
+                dy_v[i] = rows_dy[at];                                        \
+            }                                                                 \
+            float da_vals[NITEMS];                                            \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = tid * NITEMS + i;                                     \
+                da_vals[i] = (t < T) ? exp2f(delta_v[i] * a_dn_log2) : 1.0f;  \
+            }                                                                 \
+            /* The next thread's first decay crosses a warp edge through a    \
+               slot written before the replay scan's barriers. */             \
+            if (width >= 32 && (threadIdx.x & 31) == 0) {                     \
+                smem_next_a[threadIdx.x >> 5] = da_vals[0];                   \
+            }                                                                 \
+            IDX hsave_row = ((IDX)bid * d_inner + did) * d_state;             \
+            float f_hentry = 0.0f;                                            \
+            float H_vals[NITEMS];                                             \
+            if (slim_tape) {                                                  \
+                /* The window is one chunk: its tape row opens with the       \
+                   identity prefix and the entry state. */                    \
+                IDX row = (hsave_row + n) * 3;                                \
+                float f_run_a = run_tape[row + 0];                            \
+                float f_run_b = run_tape[row + 1];                            \
+                f_hentry = run_tape[row + 2];                                 \
+                float f_h0 = run_tape[row + 2];                               \
+                float fwd_a[NITEMS];                                          \
+                float fwd_b[NITEMS];                                          \
+                _Pragma("unroll")                                             \
+                for (int i = 0; i < NITEMS; i++) {                            \
+                    int t = tid * NITEMS + i;                                 \
+                    if (t < T) {                                              \
+                        fwd_a[i] = da_vals[i];                                \
+                        fwd_b[i] = (delta_v[i] * u_v[i]) * b_vals[i];         \
+                    } else {                                                  \
+                        fwd_a[i] = 1.0f;                                      \
+                        fwd_b[i] = 0.0f;                                      \
+                    }                                                         \
+                }                                                             \
+                _Pragma("unroll")                                             \
+                for (int i = 1; i < NITEMS; i++) {                            \
+                    fwd_b[i] = fwd_a[i] * fwd_b[i - 1] + fwd_b[i];            \
+                    fwd_a[i] = fwd_a[i] * fwd_a[i - 1];                       \
+                }                                                             \
+                float fscan_a = fwd_a[NITEMS - 1];                            \
+                float fscan_b = fwd_b[NITEMS - 1];                            \
+                float fexcl_a, fexcl_b;                                       \
+                group_scan_ab_with_exclusive(fscan_a, fscan_b, fexcl_a, fexcl_b, \
+                                             smem_fwd_wa, smem_fwd_wb,        \
+                                             smem_fwd_raw_a, smem_fwd_raw_b,  \
+                                             width);                          \
+                _Pragma("unroll")                                             \
+                for (int i = 0; i < NITEMS; i++) {                            \
+                    float comp_a = fwd_a[i] * fexcl_a;                        \
+                    float comp_b = fwd_a[i] * fexcl_b + fwd_b[i];             \
+                    float final_a = comp_a * f_run_a;                         \
+                    float final_b = comp_a * f_run_b + comp_b;                \
+                    H_vals[i] = final_a * f_h0 + final_b;                     \
+                }                                                             \
+                /* The previous timestep's replayed state crosses a warp      \
+                   edge through this slot; the reverse scan's barriers        \
+                   retire the write before it is read. */                     \
+                if (width >= 32 && (threadIdx.x & 31) == 31) {                \
+                    smem_hbound[threadIdx.x >> 5] = H_vals[NITEMS - 1];       \
+                }                                                             \
+            } else {                                                          \
+                _Pragma("unroll")                                             \
+                for (int i = 0; i < NITEMS; i++) H_vals[i] = 0.0f;            \
+                __syncthreads();                                              \
+            }                                                                 \
+            /* The next timestep's decay: the lane below in the group by      \
+               shuffle, the next warp's first lane through its slot at a      \
+               warp edge inside the group, and none past the window's end,    \
+               which is the group's last thread's. */                         \
+            float down_next_a = __shfl_down_sync(warp_mask, da_vals[0], 1, seg); \
+            float boundary_next_a;                                            \
+            if (tid == width - 1) {                                           \
+                boundary_next_a = 1.0f;                                       \
+            } else if (width >= 32 && (threadIdx.x & 31) == 31) {             \
+                boundary_next_a = smem_next_a[(threadIdx.x >> 5) + 1];        \
+            } else {                                                          \
+                boundary_next_a = down_next_a;                                \
+            }                                                                 \
+            float thread_a[NITEMS];                                           \
+            float thread_b[NITEMS];                                           \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS - 1; i++) {                            \
+                thread_a[i] = da_vals[i + 1];                                 \
+            }                                                                 \
+            thread_a[NITEMS - 1] = boundary_next_a;                           \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = tid * NITEMS + i;                                     \
+                if (t < T) {                                                  \
+                    thread_b[i] = dy_v[i] * c_vals[i];                        \
+                } else {                                                      \
+                    thread_a[i] = 1.0f;                                       \
+                    thread_b[i] = 0.0f;                                       \
+                }                                                             \
+            }                                                                 \
+            _Pragma("unroll")                                                 \
+            for (int i = NITEMS - 2; i >= 0; i--) {                           \
+                thread_b[i] = thread_a[i] * thread_b[i + 1] + thread_b[i];    \
+                thread_a[i] = thread_a[i] * thread_a[i + 1];                  \
+            }                                                                 \
+            float scan_a = thread_a[0];                                       \
+            float scan_b = thread_b[0];                                       \
+            float next_a, next_b;                                             \
+            group_reverse_scan_ab_with_exclusive(scan_a, scan_b, next_a, next_b, \
+                                                 smem_rev_wa, smem_rev_wb,    \
+                                                 smem_rev_raw_a, smem_rev_raw_b, \
+                                                 width);                      \
+            /* The previous timestep's state: the lane above in the group     \
+               by shuffle, the previous warp's last lane through its slot     \
+               at a warp edge inside the group, the entry state at the        \
+               group's first thread. */                                       \
+            float up_h_prev = __shfl_up_sync(warp_mask, H_vals[NITEMS - 1], 1, seg); \
+            float h_prev_boundary;                                            \
+            if (tid == 0) {                                                   \
+                h_prev_boundary = f_hentry;                                   \
+            } else if (width >= 32 && (threadIdx.x & 31) == 0) {              \
+                h_prev_boundary = smem_hbound[(threadIdx.x >> 5) - 1];        \
+            } else {                                                          \
+                h_prev_boundary = up_h_prev;                                  \
+            }                                                                 \
+            /* One chunk: the running postfix is the identity. */             \
+            const float run_b = 0.0f;                                         \
+            float post_b = next_a * run_b + next_b;                           \
+            float da_acc = 0.0f;                                              \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = tid * NITEMS + i;                                     \
+                /* What the fold adds of this lane at t: the product its      \
+                   dB term multiplies by u, and the state its dC term         \
+                   multiplies dy by. */                                       \
+                float fold_B = 0.0f;                                          \
+                float fold_C = 0.0f;                                          \
+                if (t < T) {                                                  \
+                    float dh = thread_a[i] * post_b + thread_b[i];            \
+                    float h_curr, h_prev;                                     \
+                    if (slim_tape) {                                          \
+                        h_curr = H_vals[i];                                   \
+                        h_prev = (i > 0) ? H_vals[i - 1] : h_prev_boundary;   \
+                    } else {                                                  \
+                        IDX h_row = (hsave_row + n) * (T + 1);                \
+                        h_curr = h_saved[h_row + (t + 1)];                    \
+                        h_prev = h_saved[h_row + t];                          \
+                    }                                                         \
+                    fold_C = h_curr;                                          \
+                    fold_B = dh * delta_v[i];                                 \
+                    d_delta_acc[p][i] += dh * (a_dn * da_vals[i] * h_prev     \
+                                               + u_v[i] * b_vals[i]);         \
+                    d_u_acc[p][i] += dh * delta_v[i] * b_vals[i];             \
+                    da_acc += dh * da_vals[i] * delta_v[i] * a_dn * h_prev;   \
+                }                                                             \
+                tile_B[lane * span + t] = fold_B;                             \
+                tile_C[lane * span + t] = fold_C;                             \
+            }                                                                 \
+            float da_sum = group_tree_sum(da_acc, smem_red, width);           \
+            if (tid == 0 && live_p[p]) {                                      \
+                d_a_log_local[((IDX)bid * d_inner + did) * d_state + n] = da_sum; \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+        /* One row per (n, fold group): its channels' terms added in          \
+           ascending channel order, each a fused multiply-add onto the        \
+           sum as the fold's registers add them, stored striped so            \
+           consecutive threads write consecutive t. */                        \
+        for (int e = threadIdx.x; e < folds * span; e += NTHREADS) {          \
+            int f = e / span;                                                 \
+            int t = e - f * span;                                             \
+            int fg = (y_first + blockIdx.y) * folds + f;                      \
+            if (t >= T || fg * fold >= d_inner) continue;                     \
+            float acc_B = 0.0f;                                               \
+            float acc_C = 0.0f;                                               \
+            for (int gg = 0; gg < fold; gg++) {                               \
+                int lane = f * fold + gg;                                     \
+                int at = (lane * NITEMS + (t & (NITEMS - 1))) * width + t / NITEMS; \
+                acc_B = __fmaf_rn(tile_B[lane * span + t], rows_u[at], acc_B); \
+                acc_C = __fmaf_rn(rows_dy[at], tile_C[lane * span + t], acc_C); \
+            }                                                                 \
+            IDX row_bc = ((bid * d_state + n) * (d_inner / fold) + fg) * T;   \
+            d_B_local[row_bc + t] = FROM_F(acc_B);                            \
+            d_C_local[row_bc + t] = FROM_F(acc_C);                            \
+        }                                                                     \
+        /* The tiles are read before the next state writes them. */           \
+        __syncthreads();                                                      \
+    }                                                                         \
+    /* d_delta and d_u: each lane its own items. Round FIRST: the             \
+       accumulator rounds to the activation dtype as the old d_delta store    \
+       did, then the softplus derivative divides the reloaded value. */       \
+    _Pragma("unroll")                                                         \
+    for (int p = 0; p < 2; p++) {                                             \
+        if (!live_p[p]) continue;                                             \
+        _Pragma("unroll")                                                     \
+        for (int i = 0; i < NITEMS; i++) {                                    \
+            int t = tid * NITEMS + i;                                         \
+            if (t >= T) continue;                                             \
+            IDX row = (bid * T + t) * d_inner + did_p[p];                     \
+            float dd = to_f(FROM_F(d_delta_acc[p][i]));                       \
+            float xr = to_f(dt_raw[row]);                                     \
+            d_delta_raw_out[row] = FROM_F(dd / (1.0f + exp2f(-xr * 1.4426950408889634f))); \
+            d_u[row] = FROM_F(d_u_acc[p][i]);                                 \
+        }                                                                     \
+    }                                                                         \
+    _Pragma("unroll")                                                         \
+    for (int p = 0; p < 2; p++) {                                             \
+        if (p >= passes) continue;                                            \
+        float d_sum = group_tree_sum(local_d_D[p], smem_red, width);          \
+        if (tid == 0 && live_p[p]) {                                          \
+            d_D_local[bid * d_inner + did_p[p]] = d_sum;                      \
+        }                                                                     \
+    }                                                                         \
+}
+
+DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS(ssm_parallel_scan_bwd_groups_f32,      int,       float,         from_f_f32)
+DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS(ssm_parallel_scan_bwd_groups_f32_i64,  long long, float,         from_f_f32)
+DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS(ssm_parallel_scan_bwd_groups_bf16,     int,       __nv_bfloat16, from_f_bf16)
+DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS(ssm_parallel_scan_bwd_groups_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
+DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS(ssm_parallel_scan_bwd_groups_f16,      int,       __half,        from_f_f16)
+DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS(ssm_parallel_scan_bwd_groups_f16_i64,  long long, __half,        from_f_f16)
+
 
 // Clean up macros to avoid polluting subsequent translation units
 // (all .cu files are concatenated before NVRTC compilation)

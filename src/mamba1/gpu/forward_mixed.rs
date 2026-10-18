@@ -311,15 +311,11 @@ impl GpuMambaMixedTrainScratch {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         let bt = dims.batch * dims.seq_len;
-        // The fold backward writes dB/dC partials at di/G rows; only the
-        // non-fold routes (sequential scan, or d_inner not divisible by
-        // the d-group) need the full depth. Same predicate as the launcher.
-        let bc_rows = if dims.scan_mode.use_parallel(dims.seq_len, dims.d_state)
-            && dims
-                .d_inner
-                .is_multiple_of(crate::gpu::launch::SCAN_BWD_DGROUP)
-        {
-            dims.d_inner / crate::gpu::launch::SCAN_BWD_DGROUP
+        // The fold and grouped backwards write dB/dC partials at one row
+        // per fold group; the sequential scan and the ungrouped kernel
+        // need the full depth. Same route as the launcher.
+        let bc_rows = if dims.scan_mode.use_parallel(dims.seq_len, dims.d_state) {
+            crate::gpu::launch::ScanBwdRoute::of(dims.seq_len, dims.d_inner).bc_rows(dims.d_inner)
         } else {
             dims.d_inner
         };

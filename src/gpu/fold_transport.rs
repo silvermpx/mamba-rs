@@ -3,9 +3,8 @@ use super::kernel_identity::{FramedSha256, digest_hex};
 
 const OWNER_SOURCE: &str = include_str!("../../kernels/mamba_ssm_parallel.cu");
 const OWNER_SOURCE_SHA256: &str =
-    "4db27925778eb3f162e1ad4a685f92e8dfd35cc9debf2c4e53603d9eade9cb32";
+    "4537ab934028986134c784c2c31d7f3775135ecd00c9247e0c41667f79087b00";
 const FOLD_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD";
-const SHORT_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT";
 const STAGED_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED";
 const STAGE_INDEX_MACRO: &str = "M1_HALF_STAGE_INDEX";
 const LEGACY_INVOCATIONS: &str = concat!(
@@ -20,7 +19,6 @@ const LEGACY_INVOCATIONS: &str = concat!(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FoldRoute {
     Legacy,
-    Short,
     Staged,
 }
 
@@ -45,14 +43,6 @@ pub(crate) fn route_for_shape(
 ) -> FoldRoute {
     if dtype == WeightDtype::F32 || batch == 0 || time == 0 || inner == 0 || state == 0 {
         return FoldRoute::Legacy;
-    }
-    let short = batch <= 8
-        && time <= 256
-        && inner <= 768
-        && inner.is_multiple_of(4)
-        && matches!(state, 8 | 16);
-    if short {
-        return FoldRoute::Short;
     }
     let staged = batch <= 8
         && (1024..=4096).contains(&time)
@@ -111,113 +101,22 @@ fn compose_retained_fold_source(
     if original != owner_macro {
         return Err("M1 fold transport macro differs from its pinned owner source".into());
     }
-    let short = make_short_clone(original)?;
     let staged = make_staged_clone(original)?;
-    let definitions = format!(
-        "\n{short}\n#define {STAGE_INDEX_MACRO}(s) ((s) ^ ((((s) >> 6) & 3) << 1))\n{staged}\n"
-    );
+    let definitions =
+        format!("\n#define {STAGE_INDEX_MACRO}(s) ((s) ^ ((((s) >> 6) & 3) << 1))\n{staged}\n");
     composed.insert_str(invocation_start, &definitions);
 
     let invocation_start = unique_index(&composed, LEGACY_INVOCATIONS, "legacy fold invocations")?;
-    // The short and staged routes serve shapes whose offsets all fit 32
-    // bits (route_for_shape), so each clone is built with int alone.
+    // The staged route serves shapes whose offsets all fit 32 bits
+    // (route_for_shape), so its clone is built with int alone.
     let additions = concat!(
-        "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT(ssm_parallel_scan_bwd_fold_short_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4)\n",
-        "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT(ssm_parallel_scan_bwd_fold_short_f16, int, __half, from_f_f16, 3, 0, 4)\n",
         "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED(ssm_parallel_scan_bwd_fold_staged_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4)\n",
         "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED(ssm_parallel_scan_bwd_fold_staged_f16, int, __half, from_f_f16, 3, 0, 4)\n",
-        "#undef DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT\n",
         "#undef DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED\n",
         "#undef M1_HALF_STAGE_INDEX\n",
     );
     composed.insert_str(invocation_start + LEGACY_INVOCATIONS.len(), additions);
     Ok(composed)
-}
-
-fn make_short_clone(original: &str) -> Result<String, String> {
-    let mut clone = original.to_string();
-    replace_once(&mut clone, FOLD_MACRO, SHORT_MACRO, "short macro name")?;
-    let store_anchor = "            /* One partial row per (n, group):";
-    let epilogue_anchor = "        /* d_delta / d_u:";
-    let store_start = unique_index(&clone, store_anchor, "short B/C stores")?;
-    let epilogue = store_start
-        + unique_index(
-            &clone[store_start..],
-            epilogue_anchor,
-            "short fold epilogue",
-        )?;
-    let state_end = clone[..epilogue]
-        .rfind("        }")
-        .ok_or_else(|| "M1 fold transport is missing the short state-loop close".to_string())?;
-    let old_stores = &clone[store_start..state_end];
-    if old_stores.matches("__syncthreads();").count() != 3
-        || !old_stores.contains("stage_bc[s]")
-        || old_stores.contains("d_delta_raw_out")
-    {
-        return Err("M1 fold transport found an unexpected short B/C store body".into());
-    }
-    let replacement = macro_lines(&[
-        "            /* Short rows need no shared store transpose; arithmetic is unchanged. */",
-        "            IDX row_bc = ((bid * d_state + n) * (d_inner / G) + gid) * T;",
-        "            _Pragma(\"unroll\")",
-        "            for (int i = 0; i < NITEMS; i++) {",
-        "                int t = chunk_start + threadIdx.x * NITEMS + i;",
-        "                if (t < T) {",
-        "                    d_B_local[row_bc + t] = FROM_F(acc_B[i]);",
-        "                    d_C_local[row_bc + t] = FROM_F(acc_C[i]);",
-        "                }",
-        "            }",
-        "            /* Finish all reads before the next state reuses reduction scratch. */",
-        "            __syncthreads();",
-    ]);
-    clone.replace_range(store_start..state_end, &replacement);
-
-    let stage_start = unique_index(
-        &clone,
-        "        /* Stage the group's delta/u/dy rows once per chunk:",
-        "short input stage",
-    )?;
-    let stage_end = stage_start
-        + unique_index(
-            &clone[stage_start..],
-            "        float d_u_acc[SCAN_BWD_DGROUP][NITEMS];",
-            "short input stage end",
-        )?;
-    let mut stage = clone[stage_start..stage_end].to_string();
-    replace_once(
-        &mut stage,
-        "for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {",
-        "for (int s = threadIdx.x; s < min(CHUNK_SIZE, T - chunk_start); s += NTHREADS) {",
-        "short valid input stage loop",
-    )?;
-    clone.replace_range(stage_start..stage_end, &stage);
-    let decay_start = unique_index(
-        &clone,
-        "                float da_vals[NITEMS];",
-        "short decay",
-    )?;
-    let decay_end = decay_start
-        + unique_index(
-            &clone[decay_start..],
-            "                /* The running postfix",
-            "short decay end",
-        )?;
-    let mut decay = clone[decay_start..decay_end].to_string();
-    replace_once(
-        &mut decay,
-        "float delta_v = HOLD_ROWS",
-        "float delta_v = (t < T) ? (HOLD_ROWS",
-        "short guarded decay start",
-    )?;
-    replace_once(
-        &mut decay,
-        ": to_f(stage_delta[gg * CHUNK_SIZE + s]);",
-        ": to_f(stage_delta[gg * CHUNK_SIZE + s])) : 0.0f;",
-        "short guarded decay end",
-    )?;
-    clone.replace_range(decay_start..decay_end, &decay);
-    validate_scan_clone(&clone)?;
-    Ok(clone)
 }
 
 fn make_staged_clone(original: &str) -> Result<String, String> {
@@ -267,18 +166,6 @@ fn wrap_stage_subscripts(source: &mut String, tile: &str) -> Result<usize, Strin
     Ok(count)
 }
 
-fn macro_lines(lines: &[&str]) -> String {
-    let mut output = String::new();
-    for line in lines {
-        output.push_str(line);
-        for _ in line.len()..78 {
-            output.push(' ');
-        }
-        output.push_str("\\\n");
-    }
-    output
-}
-
 fn replace_once(source: &mut String, old: &str, new: &str, label: &str) -> Result<(), String> {
     let index = unique_index(source, old, label)?;
     source.replace_range(index..index + old.len(), new);
@@ -324,12 +211,6 @@ mod tests {
     #[test]
     fn shape_policy_keeps_only_the_retained_half_routes() {
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-            for shape in [(1, 1, 4, 8), (8, 256, 768, 16)] {
-                assert_eq!(
-                    route_for_shape(dtype, shape.0, shape.1, shape.2, shape.3),
-                    FoldRoute::Short
-                );
-            }
             for shape in [(4, 1024, 768, 16), (8, 4096, 768, 16)] {
                 assert_eq!(
                     route_for_shape(dtype, shape.0, shape.1, shape.2, shape.3),
@@ -338,6 +219,8 @@ mod tests {
             }
         }
         for (dtype, shape) in [
+            (WeightDtype::Bf16, (1, 1, 4, 8)),
+            (WeightDtype::Bf16, (8, 256, 768, 16)),
             (WeightDtype::F32, (8, 33, 768, 16)),
             (WeightDtype::Bf16, (0, 33, 768, 16)),
             (WeightDtype::Bf16, (8, 0, 768, 16)),
@@ -369,8 +252,6 @@ mod tests {
                 .unwrap();
         assert!(composed.contains(LEGACY_INVOCATIONS));
         for invocation in [
-            "FOLD_SHORT(ssm_parallel_scan_bwd_fold_short_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4)",
-            "FOLD_SHORT(ssm_parallel_scan_bwd_fold_short_f16, int, __half, from_f_f16, 3, 0, 4)",
             "FOLD_STAGED(ssm_parallel_scan_bwd_fold_staged_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4)",
             "FOLD_STAGED(ssm_parallel_scan_bwd_fold_staged_f16, int, __half, from_f_f16, 3, 0, 4)",
         ] {

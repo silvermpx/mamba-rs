@@ -12039,7 +12039,7 @@ mod tests {
             .unwrap();
             assert!(
                 folded.len() > base.len()
-                    && folded.contains("DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_SHORT("),
+                    && folded.contains("DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED("),
                 "the fold clones did not compose into the Mamba1 module"
             );
             let bundled = crate::gpu::gemm_bi_inference::source_bundle::compose_inference_source(

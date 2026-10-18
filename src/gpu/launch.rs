@@ -773,6 +773,86 @@ pub fn grid_parallel_scan_bwd_fold(
     }
 }
 
+/// Which kernel walks a window of the Mamba-1 parallel scan back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanBwdRoute {
+    /// A window of one chunk that a group of threads narrower than the
+    /// block covers: the grouped kernel, its dB/dC rows each summing
+    /// `fold` channels.
+    Groups { fold: usize },
+    /// The fold kernel: four channels a block, each on the whole block.
+    Fold,
+    /// The ungrouped kernel, for a d_inner the fold's four does not divide.
+    Plain,
+}
+
+impl ScanBwdRoute {
+    /// The route of a window of `seq_len` steps over `d_inner` channels. A
+    /// window short enough for the forward's channel groups
+    /// ([`scan_group_width`]) is walked back by the same groups, its rows
+    /// summing four channels as the fold's do wherever four divide d_inner
+    /// and one otherwise; a longer one takes the fold kernel, or the
+    /// ungrouped one where four do not divide d_inner.
+    pub fn of(seq_len: usize, d_inner: usize) -> Self {
+        let fourfold = d_inner.is_multiple_of(SCAN_BWD_DGROUP);
+        if scan_group_width(seq_len) < SCAN_NTHREADS {
+            Self::Groups {
+                fold: if fourfold { SCAN_BWD_DGROUP } else { 1 },
+            }
+        } else if fourfold {
+            Self::Fold
+        } else {
+            Self::Plain
+        }
+    }
+
+    /// The dB/dC rows the route writes per sequence and state, the depth
+    /// the t-major reducer sums.
+    pub fn bc_rows(self, d_inner: usize) -> usize {
+        match self {
+            Self::Groups { fold } => d_inner / fold,
+            Self::Fold => d_inner / SCAN_BWD_DGROUP,
+            Self::Plain => d_inner,
+        }
+    }
+
+    /// Whether the kernel emits the pre-softplus dt gradient itself and
+    /// assigns every d_a_log slot of each chunk (the fold and the grouped
+    /// kernel), or leaves the softplus backward to its own launch and adds
+    /// its d_a_log rows onto a zeroed slate (the ungrouped kernel).
+    pub fn assigns_slots(self) -> bool {
+        !matches!(self, Self::Plain)
+    }
+}
+
+/// Launch config of the grouped parallel scan backward over a window of
+/// `seq_len` steps, its dB/dC rows summing `fold` channels: a block of
+/// [`SCAN_NTHREADS`] threads holds the forward's channel groups
+/// ([`scan_group_width`]) and walks back as many fold groups as its groups
+/// cover, at least one; the fold groups go on the y axis, launched in
+/// [`y_runs`]. Shared memory: the two scans' warp rows and raw totals, the
+/// next-decay and replayed-state hand-off rows, a reduction row, and per
+/// channel of the block its dB and dC factor rows and its dt, u and dy
+/// rows. Mirrors DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS.
+pub fn grid_parallel_scan_bwd_groups(
+    batch: usize,
+    seq_len: usize,
+    d_inner: usize,
+    fold: usize,
+) -> LaunchConfig {
+    const NWARPS: usize = SCAN_NTHREADS / 32;
+    let width = scan_group_width(seq_len);
+    let lanes = (SCAN_NTHREADS / width).max(fold);
+    let folds = lanes / fold;
+    let span = width * SCAN_NITEMS;
+    let floats = 10 * NWARPS + SCAN_NTHREADS + 5 * lanes * span;
+    LaunchConfig {
+        grid_dim: (batch as u32, (d_inner / fold).div_ceil(folds) as u32, 1),
+        block_dim: (SCAN_NTHREADS as u32, 1, 1),
+        shared_mem_bytes: (floats * std::mem::size_of::<f32>()) as u32,
+    }
+}
+
 /// Grid of the parallel scan backward: one block per (sequence, channel),
 /// the channels on the y axis, launched in [`y_runs`].
 pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
