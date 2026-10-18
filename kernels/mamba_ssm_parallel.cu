@@ -278,6 +278,75 @@ __device__ __forceinline__ void block_inclusive_scan_ab(
 }
 
 // ============================================================================
+// The threads a channel takes in a block of the parallel scan forward: the
+// fewest, a power of two from 8, whose NITEMS steps each cover the window,
+// and at most the whole block. A block holds NTHREADS / width channels side
+// by side; a window longer than a block's chunk takes the whole block a
+// channel and walks its chunks in turn, so a window shorter than a chunk is
+// always one chunk of its group. A window of at most 1024 steps therefore
+// takes one chunk at every width, the chunk the slim tape counts. The
+// launcher divides the channels into blocks by the same count
+// (`scan_group_width` in launch.rs).
+// ============================================================================
+__device__ __forceinline__ int scan_group_width(int T) {
+    int w = 8;
+    while (w < NTHREADS && w * NITEMS < T) w <<= 1;
+    return w;
+}
+
+// ============================================================================
+// Inclusive scan of (a, b) pairs over the `width` threads of a channel's
+// group, `width` a power of two from 8 to NTHREADS. Below a warp a group is
+// a segment of one warp and scans within it; from a warp up it takes the
+// block scan's steps over its own warps, their totals in the slots of those
+// warps. A lane composes the pairs of the lanes before it in its group in
+// the order the block scan composes them, so a group gives the results the
+// block scan gives a block whose other lanes hold the identity. The width is
+// one for the whole launch, so every thread takes the same barriers.
+// ============================================================================
+__device__ __forceinline__ void group_inclusive_scan_ab(
+    float &a, float &b, float *smem_wa, float *smem_wb, int width
+) {
+    if (width < 32) {
+        int seg = threadIdx.x & (width - 1);
+        for (int offset = 1; offset < width; offset <<= 1) {
+            float a_prev = __shfl_up_sync(0xffffffffu, a, offset, width);
+            float b_prev = __shfl_up_sync(0xffffffffu, b, offset, width);
+            if (seg >= offset) {
+                b = a * b_prev + b;
+                a = a * a_prev;
+            }
+        }
+        return;
+    }
+    int warp_id = threadIdx.x / 32;
+    int lane    = threadIdx.x & 31;
+    int gw      = width / 32;            // warps per group
+    int wg      = warp_id & (gw - 1);    // the warp's place in its group
+    warp_inclusive_scan_ab(a, b);
+    if (lane == 31) {
+        smem_wa[warp_id] = a;
+        smem_wb[warp_id] = b;
+    }
+    __syncthreads();
+    if (gw > 1 && wg == 0 && lane < gw) {
+        float wa = smem_wa[warp_id + lane];
+        float wb = smem_wb[warp_id + lane];
+        warp_inclusive_scan_ab(wa, wb, (1u << gw) - 1u);
+        smem_wa[warp_id + lane] = wa;
+        smem_wb[warp_id + lane] = wb;
+    }
+    __syncthreads();
+    if (wg > 0) {
+        float pa = smem_wa[warp_id - 1];
+        float pb = smem_wb[warp_id - 1];
+        b = a * pb + b;
+        a = a * pa;
+    }
+    // No __syncthreads here -- caller syncs before next smem_wa/wb use.
+}
+
+// ============================================================================
 // Block-level inclusive scan of (a, b) pairs that also hands every thread
 // its exclusive prefix without a third barrier. The inclusive values are
 // exactly those of `block_inclusive_scan_ab`. A thread's exclusive prefix
@@ -502,24 +571,38 @@ NAME(                                                                         \
     int y_first /* this run's first y block */                                \
 ) {                                                                           \
     IDX bid = blockIdx.x;                                                     \
-    int did = y_first + blockIdx.y;                                           \
-    if (bid >= batch || did >= d_inner) return;                               \
+    if (bid >= batch) return;                                                 \
     if (d_state > MAX_DSTATE) return;                                         \
+    /* A block holds `groups` channels of `width` threads each. A group       \
+       past d_inner keeps step with the block's barriers on the last          \
+       channel's rows and stores nothing. */                                  \
+    const int width = scan_group_width(T);                                    \
+    const int groups = NTHREADS / width;                                      \
+    const int grp = threadIdx.x / width;                                      \
+    const int tid = threadIdx.x & (width - 1);                                \
+    int did = (y_first + blockIdx.y) * groups + grp;                          \
+    const bool live = did < d_inner;                                          \
+    if (!live) did = d_inner - 1;                                             \
     extern __shared__ float smem[];                                           \
     float *smem_wa     = smem + SMEM_WA_OFF;                                  \
     float *smem_wb     = smem + SMEM_WB_OFF;                                  \
-    /* The run and exchange rows pack at the runtime d_state, not at          \
-       MAX_DSTATE, and the launcher sizes the allocation to match. */         \
-    float *smem_run_a  = smem + 2 * NWARPS;                                   \
-    float *smem_run_b  = smem_run_a + d_state;                                \
-    float *smem_exch_a = smem_run_b + d_state;                                \
+    /* Each group's run rows at the runtime d_state, not at MAX_DSTATE,       \
+       then one exchange slot per warp; the launcher sizes the                \
+       allocation to match. */                                                \
+    float *smem_run_a  = smem + 2 * NWARPS + grp * d_state;                   \
+    float *smem_run_b  = smem + 2 * NWARPS + (groups + grp) * d_state;        \
+    float *smem_exch_a = smem + 2 * NWARPS + 2 * groups * d_state;            \
     float *smem_exch_b = smem_exch_a + NWARPS;                                \
     float D_d = D[did];                                                       \
     IDX h_base = (bid * d_inner + did) * d_state;                             \
-    int n_chunks = (T + CHUNK_SIZE - 1) / CHUNK_SIZE;                         \
+    /* A window past one chunk takes the whole block (width NTHREADS),        \
+       so its chunks are CHUNK_SIZE long, as the slim tape counts them;       \
+       a shorter one is one chunk at every width. */                          \
+    const int chunk_len = width * NITEMS;                                     \
+    int n_chunks = (T + chunk_len - 1) / chunk_len;                           \
     /* The initial state: a slim tape row opens with the identity prefix      \
        and h_0 itself, the entry state of chunk 0. */                         \
-    for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
+    for (int n = tid; n < d_state && live; n += width) {                      \
         if (slim_tape) {                                                      \
             IDX row = ((bid * d_inner + did) * d_state + n) * 3 * n_chunks;   \
             run_tape[row + 0] = 1.0f;                                         \
@@ -533,23 +616,25 @@ NAME(                                                                         \
             h_saved[hs_idx] = h[h_base + n];                                  \
         }                                                                     \
     }                                                                         \
-    for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
+    for (int n = tid; n < d_state; n += width) {                              \
         smem_run_a[n] = 1.0f;                                                 \
         smem_run_b[n] = 0.0f;                                                 \
     }                                                                         \
     __syncthreads();                                                          \
     for (int chunk = 0; chunk < n_chunks; chunk++) {                          \
-        int chunk_start = chunk * CHUNK_SIZE;                                 \
+        int chunk_start = chunk * chunk_len;                                  \
+        const int chunk_end = chunk_start + chunk_len;                        \
         /* Direct per-thread loads. Adjacent t are d_inner elements apart,    \
-         * so the threads of one block never share a sector whichever of      \
+         * so the threads of one group never share a sector whichever of      \
          * them loads, and staging the chunk through shared memory only       \
-         * added barriers. */                                                 \
+         * added barriers; the groups of a block read neighbouring            \
+         * channels at the same t. */                                         \
         float delta_vals[NITEMS];                                             \
         float u_vals[NITEMS];                                                 \
         float delta_u_vals[NITEMS];                                           \
         _Pragma("unroll")                                                     \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            int t = chunk_start + threadIdx.x * NITEMS + i;                   \
+            int t = chunk_start + tid * NITEMS + i;                           \
             if (t < T) {                                                      \
                 /* The scan consumes the softplus after the rounding of       \
                    its save, the value the backward reads back. */            \
@@ -558,7 +643,7 @@ NAME(                                                                         \
                     ? raw                                                     \
                     : log1pf(exp2f(raw * 1.4426950408889634f));               \
                 T_ACT spt = FROM_F(sp);                                       \
-                delta_saved[(bid * T + t) * d_inner + did] = spt;             \
+                if (live) delta_saved[(bid * T + t) * d_inner + did] = spt;   \
                 delta_vals[i] = to_f(spt);                                    \
             } else {                                                          \
                 delta_vals[i] = 0.0f;                                         \
@@ -579,10 +664,10 @@ NAME(                                                                         \
             float thread_b[NITEMS];                                           \
             float b_row[NITEMS];                                              \
             load_row8(B + (bid * d_state + n) * T,                            \
-                      chunk_start + threadIdx.x * NITEMS, T, b_row);          \
+                      chunk_start + tid * NITEMS, T, b_row);                  \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
-                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                int t = chunk_start + tid * NITEMS + i;                       \
                 if (t < T) {                                                  \
                     float da = exp2f(delta_vals[i] * a_dn);                   \
                     float b_t = b_row[i];                                     \
@@ -602,51 +687,64 @@ NAME(                                                                         \
             float scan_a = thread_a[NITEMS - 1];                              \
             float scan_b = thread_b[NITEMS - 1];                              \
             __syncthreads();                                                  \
-            block_inclusive_scan_ab(scan_a, scan_b, smem_wa, smem_wb);        \
-            /* Exclusive prefix of thread t, the inclusive value of thread    \
-               t - 1: the lane above hands it down through a shuffle, a       \
-               warp's first lane takes it from the previous warp's last       \
-               lane through a per-warp slot, and thread 0 takes the           \
-               identity. The last slot is the block total thread 0 folds      \
-               into the running prefix. Every warp reads the running          \
+            group_inclusive_scan_ab(scan_a, scan_b, smem_wa, smem_wb, width); \
+            /* Exclusive prefix of a group's thread t, the inclusive          \
+               value of its thread t - 1: the lane above hands it down        \
+               through a shuffle within the group's lanes of the warp, a      \
+               warp's first lane past the group's first takes it from         \
+               the previous warp's last lane through a per-warp slot,         \
+               and the group's thread 0 takes the identity. The group's       \
+               last value is its total, which its thread 0 folds into         \
+               the group's running prefix. Every warp reads the running       \
                prefix before the barrier, so thread 0 may overwrite it        \
                right after. */                                                \
-            if ((threadIdx.x & 31) == 31) {                                   \
+            if (width >= 32 && (threadIdx.x & 31) == 31) {                    \
                 smem_exch_a[threadIdx.x >> 5] = scan_a;                       \
                 smem_exch_b[threadIdx.x >> 5] = scan_b;                       \
             }                                                                 \
             float run_a = smem_run_a[n];                                      \
             float run_b = smem_run_b[n];                                      \
             __syncthreads();                                                  \
-            float excl_a = __shfl_up_sync(0xffffffffu, scan_a, 1);            \
-            float excl_b = __shfl_up_sync(0xffffffffu, scan_b, 1);            \
-            if (threadIdx.x == 0) {                                           \
+            const int seg = width < 32 ? width : 32;                          \
+            float excl_a = __shfl_up_sync(0xffffffffu, scan_a, 1, seg);       \
+            float excl_b = __shfl_up_sync(0xffffffffu, scan_b, 1, seg);       \
+            if (tid == 0) {                                                   \
                 excl_a = 1.0f;                                                \
                 excl_b = 0.0f;                                                \
-            } else if ((threadIdx.x & 31) == 0) {                             \
+            } else if ((tid & 31) == 0) {                                     \
                 excl_a = smem_exch_a[(threadIdx.x >> 5) - 1];                 \
                 excl_b = smem_exch_b[(threadIdx.x >> 5) - 1];                 \
             }                                                                 \
-            /* Slim tape: this chunk's entry prefix, one writer. */           \
-            if (slim_tape && chunk > 0 && threadIdx.x == 0) {                 \
+            /* The group's total: its last warp's slot from a warp up,        \
+               its last lane below. */                                        \
+            float tot_a, tot_b;                                               \
+            if (width >= 32) {                                                \
+                int last = (threadIdx.x >> 5) | (width / 32 - 1);             \
+                tot_a = smem_exch_a[last];                                    \
+                tot_b = smem_exch_b[last];                                    \
+            } else {                                                          \
+                tot_a = __shfl_sync(0xffffffffu, scan_a, width - 1, width);   \
+                tot_b = __shfl_sync(0xffffffffu, scan_b, width - 1, width);   \
+            }                                                                 \
+            /* Slim tape: this chunk's entry prefix, one writer a             \
+               channel. */                                                    \
+            if (slim_tape && chunk > 0 && tid == 0 && live) {                 \
                 IDX row =                                                     \
                     ((bid * d_inner + did) * d_state + n) * 3 * n_chunks;     \
                 run_tape[row + 3 * chunk + 0] = run_a;                        \
                 run_tape[row + 3 * chunk + 1] = run_b;                        \
             }                                                                 \
             float h_0 = h[h_base + n];                                        \
-            if (threadIdx.x == 0) {                                           \
-                float block_a = smem_exch_a[NWARPS - 1];                      \
-                float block_b = smem_exch_b[NWARPS - 1];                      \
-                smem_run_a[n] = block_a * run_a;                              \
-                smem_run_b[n] = block_a * run_b + block_b;                    \
+            if (tid == 0) {                                                   \
+                smem_run_a[n] = tot_a * run_a;                                \
+                smem_run_b[n] = tot_a * run_b + tot_b;                        \
             }                                                                 \
             float c_row[NITEMS];                                              \
             load_row8(C + (bid * d_state + n) * T,                            \
-                      chunk_start + threadIdx.x * NITEMS, T, c_row);          \
+                      chunk_start + tid * NITEMS, T, c_row);                  \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
-                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                int t = chunk_start + tid * NITEMS + i;                       \
                 if (t < T) {                                                  \
                     float comp_a = thread_a[i] * excl_a;                      \
                     float comp_b = thread_a[i] * excl_b + thread_b[i];        \
@@ -657,13 +755,13 @@ NAME(                                                                         \
                        the next chunk's entry state, the value the            \
                        backward's boundary read loads. */                     \
                     if (slim_tape) {                                          \
-                        if ((t + 1) % CHUNK_SIZE == 0 && t + 1 < T) {         \
+                        if (t + 1 == chunk_end && t + 1 < T && live) {        \
                             IDX row =                                         \
                                 ((bid * d_inner + did) * d_state + n)         \
                                 * 3 * n_chunks;                               \
                             run_tape[row + 3 * (chunk + 1) + 2] = h_t;        \
                         }                                                     \
-                    } else {                                                  \
+                    } else if (live) {                                        \
                         IDX hs_idx = ((bid * d_inner + did) * d_state + n)    \
                                      * (T + 1) + (t + 1);                     \
                         h_saved[hs_idx] = h_t;                                \
@@ -674,20 +772,22 @@ NAME(                                                                         \
             }                                                                 \
         }                                                                     \
                                                                               \
-        /* Each thread stores its own items. Within a block did is            \
+        /* Each thread stores its own items. Within a group did is            \
            fixed, so neighbouring t land in separate sectors whichever        \
-           thread stores them. */                                             \
+           thread stores them; the groups of a block store neighbouring       \
+           channels. */                                                       \
         _Pragma("unroll")                                                     \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            int t = chunk_start + threadIdx.x * NITEMS + i;                   \
-            if (t < T) {                                                      \
+            int t = chunk_start + tid * NITEMS + i;                           \
+            if (t < T && live) {                                              \
                 y_out[(bid * T + t) * d_inner + did] = FROM_F(out_vals[i]);   \
             }                                                                 \
         }                                                                     \
     }                                                                         \
-    /* The last running-prefix write by thread 0 precedes the reads below. */ \
+    /* Each group's last running-prefix write by its thread 0 precedes        \
+       the reads below. */                                                    \
     __syncthreads();                                                          \
-    for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
+    for (int n = tid; n < d_state && live; n += width) {                      \
         float h_0 = h[h_base + n];                                            \
         h[h_base + n] = smem_run_a[n] * h_0 + smem_run_b[n];                  \
     }                                                                         \
@@ -721,28 +821,36 @@ NAME(                                                                         \
     int y_first /* this run's first y block */                                \
 ) {                                                                           \
     IDX bid = blockIdx.x;                                                     \
-    int did = y_first + blockIdx.y;                                           \
-    if (bid >= batch || did >= d_inner) return;                               \
+    if (bid >= batch) return;                                                 \
     if (d_state > MAX_DSTATE) return;                                         \
+    /* Channels in groups, as in the saving forward. */                       \
+    const int width = scan_group_width(T);                                    \
+    const int groups = NTHREADS / width;                                      \
+    const int grp = threadIdx.x / width;                                      \
+    const int tid = threadIdx.x & (width - 1);                                \
+    int did = (y_first + blockIdx.y) * groups + grp;                          \
+    const bool live = did < d_inner;                                          \
+    if (!live) did = d_inner - 1;                                             \
     extern __shared__ float smem[];                                           \
     float *smem_wa     = smem + SMEM_WA_OFF;                                  \
     float *smem_wb     = smem + SMEM_WB_OFF;                                  \
-    /* The run and exchange rows pack at the runtime d_state, not at          \
-       MAX_DSTATE, and the launcher sizes the allocation to match. */         \
-    float *smem_run_a  = smem + 2 * NWARPS;                                   \
-    float *smem_run_b  = smem_run_a + d_state;                                \
-    float *smem_exch_a = smem_run_b + d_state;                                \
+    /* Each group's run rows at the runtime d_state, then one exchange        \
+       slot per warp, as in the saving forward. */                            \
+    float *smem_run_a  = smem + 2 * NWARPS + grp * d_state;                   \
+    float *smem_run_b  = smem + 2 * NWARPS + (groups + grp) * d_state;        \
+    float *smem_exch_a = smem + 2 * NWARPS + 2 * groups * d_state;            \
     float *smem_exch_b = smem_exch_a + NWARPS;                                \
     float D_d = D[did];                                                       \
     IDX h_base = (bid * d_inner + did) * d_state;                             \
-    for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
+    for (int n = tid; n < d_state; n += width) {                              \
         smem_run_a[n] = 1.0f;                                                 \
         smem_run_b[n] = 0.0f;                                                 \
     }                                                                         \
     __syncthreads();                                                          \
-    int n_chunks = (T + CHUNK_SIZE - 1) / CHUNK_SIZE;                         \
+    const int chunk_len = width * NITEMS;                                     \
+    int n_chunks = (T + chunk_len - 1) / chunk_len;                           \
     for (int chunk = 0; chunk < n_chunks; chunk++) {                          \
-        int chunk_start = chunk * CHUNK_SIZE;                                 \
+        int chunk_start = chunk * chunk_len;                                  \
         /* Direct per-thread loads, as in the saving forward. In t-major      \
          * rows a thread's eight times are one span and come in as            \
          * vectors, the way B and C do. */                                    \
@@ -751,13 +859,13 @@ NAME(                                                                         \
         float delta_u_vals[NITEMS];                                           \
         long long row = ((long long)bid * d_inner + did) * tstride;           \
         if (tstride > 0) {                                                    \
-            load_row8(delta + row, chunk_start + threadIdx.x * NITEMS, T,     \
+            load_row8(delta + row, chunk_start + tid * NITEMS, T,             \
                       delta_vals);                                            \
-            load_row8(u + row, chunk_start + threadIdx.x * NITEMS, T, u_vals); \
+            load_row8(u + row, chunk_start + tid * NITEMS, T, u_vals);        \
         } else {                                                              \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
-                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                int t = chunk_start + tid * NITEMS + i;                       \
                 delta_vals[i] = (t < T)                                       \
                     ? to_f(delta[(bid * T + t) * d_inner + did]) : 0.0f;      \
                 u_vals[i] = (t < T) ? to_f(u[(bid * T + t) * d_inner + did])  \
@@ -780,11 +888,11 @@ NAME(                                                                         \
             float thread_b[NITEMS];                                           \
             float b_row[NITEMS];                                              \
             load_row8(B + (bid * d_state + n) * T,                            \
-                      chunk_start + threadIdx.x * NITEMS, T, b_row);          \
+                      chunk_start + tid * NITEMS, T, b_row);                  \
                                                                               \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
-                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                int t = chunk_start + tid * NITEMS + i;                       \
                 if (t < T) {                                                  \
                     float da = exp2f(delta_vals[i] * a_dn);                   \
                     float b_t = b_row[i];                                     \
@@ -804,39 +912,46 @@ NAME(                                                                         \
             float scan_a = thread_a[NITEMS - 1];                              \
             float scan_b = thread_b[NITEMS - 1];                              \
             __syncthreads();                                                  \
-            block_inclusive_scan_ab(scan_a, scan_b, smem_wa, smem_wb);        \
+            group_inclusive_scan_ab(scan_a, scan_b, smem_wa, smem_wb, width); \
             /* Exclusive prefix through the lane above and a per-warp         \
-               slot, as in the saving forward. The last slot is the block     \
-               total. */                                                      \
-            if ((threadIdx.x & 31) == 31) {                                   \
+               slot, and the group's total, as in the saving forward. */      \
+            if (width >= 32 && (threadIdx.x & 31) == 31) {                    \
                 smem_exch_a[threadIdx.x >> 5] = scan_a;                       \
                 smem_exch_b[threadIdx.x >> 5] = scan_b;                       \
             }                                                                 \
             float run_a = smem_run_a[n];                                      \
             float run_b = smem_run_b[n];                                      \
             __syncthreads();                                                  \
-            float excl_a = __shfl_up_sync(0xffffffffu, scan_a, 1);            \
-            float excl_b = __shfl_up_sync(0xffffffffu, scan_b, 1);            \
-            if (threadIdx.x == 0) {                                           \
+            const int seg = width < 32 ? width : 32;                          \
+            float excl_a = __shfl_up_sync(0xffffffffu, scan_a, 1, seg);       \
+            float excl_b = __shfl_up_sync(0xffffffffu, scan_b, 1, seg);       \
+            if (tid == 0) {                                                   \
                 excl_a = 1.0f;                                                \
                 excl_b = 0.0f;                                                \
-            } else if ((threadIdx.x & 31) == 0) {                             \
+            } else if ((tid & 31) == 0) {                                     \
                 excl_a = smem_exch_a[(threadIdx.x >> 5) - 1];                 \
                 excl_b = smem_exch_b[(threadIdx.x >> 5) - 1];                 \
             }                                                                 \
+            float tot_a, tot_b;                                               \
+            if (width >= 32) {                                                \
+                int last = (threadIdx.x >> 5) | (width / 32 - 1);             \
+                tot_a = smem_exch_a[last];                                    \
+                tot_b = smem_exch_b[last];                                    \
+            } else {                                                          \
+                tot_a = __shfl_sync(0xffffffffu, scan_a, width - 1, width);   \
+                tot_b = __shfl_sync(0xffffffffu, scan_b, width - 1, width);   \
+            }                                                                 \
             float h_0 = h[h_base + n];                                        \
-            if (threadIdx.x == 0) {                                           \
-                float block_a = smem_exch_a[NWARPS - 1];                      \
-                float block_b = smem_exch_b[NWARPS - 1];                      \
-                smem_run_a[n] = block_a * run_a;                              \
-                smem_run_b[n] = block_a * run_b + block_b;                    \
+            if (tid == 0) {                                                   \
+                smem_run_a[n] = tot_a * run_a;                                \
+                smem_run_b[n] = tot_a * run_b + tot_b;                        \
             }                                                                 \
             float c_row[NITEMS];                                              \
             load_row8(C + (bid * d_state + n) * T,                            \
-                      chunk_start + threadIdx.x * NITEMS, T, c_row);          \
+                      chunk_start + tid * NITEMS, T, c_row);                  \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
-                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                int t = chunk_start + tid * NITEMS + i;                       \
                 if (t < T) {                                                  \
                     float comp_a = thread_a[i] * excl_a;                      \
                     float comp_b = thread_a[i] * excl_b + thread_b[i];        \
@@ -852,15 +967,15 @@ NAME(                                                                         \
         /* Direct per-thread stores, as in the saving forward. On the         \
            t-major route a thread's eight times are one span of its           \
            channel's row. */                                                  \
-        if (tstride > 0) {                                                    \
+        if (live && tstride > 0) {                                            \
             T_ACT y8[NITEMS];                                                 \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) y8[i] = FROM_F(out_vals[i]);     \
-            store_row8(y_out + row, chunk_start + threadIdx.x * NITEMS, T, y8); \
-        } else {                                                              \
+            store_row8(y_out + row, chunk_start + tid * NITEMS, T, y8);       \
+        } else if (live) {                                                    \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
-                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                int t = chunk_start + tid * NITEMS + i;                       \
                 if (t < T) {                                                  \
                     T_ACT ty = FROM_F(out_vals[i]);                           \
                     if (gate_stride > 0) {                                    \
@@ -880,9 +995,10 @@ NAME(                                                                         \
             }                                                                 \
         }                                                                     \
     }                                                                         \
-    /* The last running-prefix write by thread 0 precedes the reads below. */ \
+    /* Each group's last running-prefix write by its thread 0 precedes        \
+       the reads below. */                                                    \
     __syncthreads();                                                          \
-    for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
+    for (int n = tid; n < d_state && live; n += width) {                      \
         float h_0 = h[h_base + n];                                            \
         h[h_base + n] = smem_run_a[n] * h_0 + smem_run_b[n];                  \
     }                                                                         \

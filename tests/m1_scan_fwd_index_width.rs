@@ -110,7 +110,7 @@ struct SaveIo {
 fn launch_save(ctx: &GpuCtx, f: &CudaFunction, io: &SaveIo, s: Shape, slim: bool) {
     let [b, t, di, ds] = s.args();
     let slim = i32::from(slim);
-    for (y_first, cfg) in y_runs(grid_parallel_scan(s.b, s.di, s.ds)) {
+    for (y_first, cfg) in y_runs(grid_parallel_scan(s.b, s.t, s.di, s.ds)) {
         let mut bld = ctx.stream.launch_builder(f);
         bld.arg(&io.h);
         bld.arg(&io.y);
@@ -179,7 +179,7 @@ fn launch_nosave(ctx: &GpuCtx, f: &CudaFunction, io: &NosaveIo, s: Shape, rows: 
         Rows::TMajor(stride) => stride as i32,
         _ => 0i32,
     };
-    for (y_first, cfg) in y_runs(grid_parallel_scan(s.b, s.di, s.ds)) {
+    for (y_first, cfg) in y_runs(grid_parallel_scan(s.b, s.t, s.di, s.ds)) {
         let mut bld = ctx.stream.launch_builder(f);
         bld.arg(&io.h);
         bld.arg(&io.y);

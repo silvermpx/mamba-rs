@@ -714,7 +714,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 let slim = crate::gpu::launch::scan_tape_slim();
                 let width = crate::gpu::launch::scan_fwd_index_width(b, t, di, ds, slim);
                 let kernel = k.ssm_parallel_fwd_typed.get(width).get(dt);
-                for (y_first, cfg) in y_runs(crate::gpu::launch::grid_parallel_scan(b, di, ds)) {
+                for (y_first, cfg) in y_runs(crate::gpu::launch::grid_parallel_scan(b, t, di, ds)) {
                     let mut bld = ctx.stream.launch_builder(kernel);
                     let y = layer_acts.y.cached_ptr();
                     let hs = layer_acts.h_saved.cached_ptr();

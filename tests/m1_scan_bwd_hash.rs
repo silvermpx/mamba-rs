@@ -91,7 +91,7 @@ fn m1_scan_bwd_output_hashes() {
         // Forward twice: full tape (feeds the ungrouped/full backward) and
         // slim tape (feeds the production fold/slim backward).
         for (slim, tape_ptr) in [(0i32, h_saved.cached_ptr()), (1i32, tape.cached_ptr())] {
-            for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+            for (y_first, cfg) in y_runs(grid_parallel_scan(b, t, di, ds)) {
                 let mut bld = ctx
                     .stream
                     .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
@@ -349,7 +349,7 @@ fn m1_scan_fwd_f32_output_hashes() {
     // Slim tape: the launcher hands the kernel the tape as both the saved
     // states and the tape, so the recorder does the same.
     let slim = 1i32;
-    for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+    for (y_first, cfg) in y_runs(grid_parallel_scan(b, t, di, ds)) {
         let mut bld = ctx.stream.launch_builder(&k.ssm_parallel_fwd.i32);
         let hp = h.cached_ptr();
         let yp = y.cached_ptr();

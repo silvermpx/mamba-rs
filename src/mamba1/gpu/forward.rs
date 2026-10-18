@@ -704,7 +704,7 @@ fn layer_forward(
             let slim = crate::gpu::launch::scan_tape_slim();
             let slim_i: i32 = i32::from(slim);
             let width = scan_fwd_index_width(b, t, di, ds, slim);
-            for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+            for (y_first, cfg) in y_runs(grid_parallel_scan(b, t, di, ds)) {
                 let mut builder = ctx
                     .stream
                     .launch_builder(ctx.kernels.ssm_parallel_fwd.get(width));
@@ -1265,7 +1265,7 @@ pub fn gpu_forward_mamba_target_burnin(
             let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
                 let width = scan_fwd_nosave_index_width(b, t, di, ds, 2 * di, tmajor_in);
-                for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+                for (y_first, cfg) in y_runs(grid_parallel_scan(b, t, di, ds)) {
                     let mut builder = ctx
                         .stream
                         .launch_builder(ctx.kernels.ssm_parallel_fwd_nosave.get(width));

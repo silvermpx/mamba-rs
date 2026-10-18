@@ -825,6 +825,15 @@
   tiled stage ran 1.4 to 2.5 times faster at head 32 or state 32 to 64 and
   10 to 17 times from state 96 on, and the warp stage stays 1.5 times
   faster at heads 8 and 16 with state 16. The two give the same bits.
+- The Mamba-1 parallel scan forwards hold a group of channels in a block,
+  each channel in the fewest threads, a power of two from 8, whose eight
+  steps a thread cover the window (`launch::scan_group_width`), where a
+  block of 128 threads took one channel and a window shorter than its
+  1024-step chunk left all but a few of them stepping the identity. A
+  window past one chunk keeps the whole block a channel, so the slim tape's
+  chunks are unchanged, and `grid_parallel_scan` takes the window. Every
+  output keeps its bits but for the sign of a zero; the released forwards
+  stay frozen in `tests/fixtures/m1_parallel_fwd_reference.cu`.
 
 ### Fixed
 

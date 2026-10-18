@@ -790,7 +790,7 @@ fn prefill_body<W: MambaWeightsView>(
             let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
                 let width = scan_fwd_nosave_index_width(b, t, di, ds, 2 * di, tmajor_in);
-                for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+                for (y_first, cfg) in y_runs(grid_parallel_scan(b, t, di, ds)) {
                     let mut builder = ctx
                         .stream
                         .launch_builder(ctx.kernels.ssm_parallel_fwd_nosave.get(width));
@@ -1373,7 +1373,7 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                     gated_out_ptr
                 };
                 let width = scan_fwd_nosave_index_width(b, t, di, ds, 2 * di, tmajor_in);
-                for (y_first, cfg) in y_runs(crate::gpu::launch::grid_parallel_scan(b, di, ds)) {
+                for (y_first, cfg) in y_runs(crate::gpu::launch::grid_parallel_scan(b, t, di, ds)) {
                     let mut bld = ctx
                         .stream
                         .launch_builder(k.ssm_parallel_fwd_nosave_typed.get(width).get(dt));

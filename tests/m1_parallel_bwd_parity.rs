@@ -494,7 +494,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
     let di_i = di as i32;
     let ds_i = ds as i32;
     let run_fwd = |slim_i: i32, tp: u64, hp: u64| {
-        for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+        for (y_first, cfg) in y_runs(grid_parallel_scan(b, t, di, ds)) {
             let mut bld = ctx
                 .stream
                 .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
@@ -754,7 +754,7 @@ fn diag_fold_slim_vs_full_positions() {
             [(0i32, h_saved.cached_ptr())]
         };
         for (sl, tp) in fwd_modes {
-            for (y_first, cfg) in y_runs(mamba_rs::gpu::launch::grid_parallel_scan(b, di, ds)) {
+            for (y_first, cfg) in y_runs(mamba_rs::gpu::launch::grid_parallel_scan(b, t, di, ds)) {
                 let mut bld = ctx
                     .stream
                     .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));

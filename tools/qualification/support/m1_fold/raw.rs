@@ -302,7 +302,7 @@ fn fixture(
     // The first block of the y run closes the current ABI; the frozen
     // kernels predate it and read no further than the flag.
     builder.arg(&tape).arg(&slim).arg(&0i32);
-    unsafe { builder.launch(grid_parallel_scan(s.b, s.di, s.ds)) }.unwrap();
+    unsafe { builder.launch(grid_parallel_scan(s.b, s.t, s.di, s.ds)) }.unwrap();
     stream.synchronize().unwrap();
     data[0] = input[0].payload(stream, "forward tape");
     data[1] = input[1].payload(stream, "forward delta_saved");

@@ -633,7 +633,7 @@ fn bench_scan_kernels_isolated() {
     let dsi = ds as i32;
 
     let fwd = |ctx: &GpuCtx| {
-        for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+        for (y_first, cfg) in y_runs(grid_parallel_scan(b, t, di, ds)) {
             let mut bld = ctx
                 .stream
                 .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));
@@ -678,7 +678,7 @@ fn bench_scan_kernels_isolated() {
     .unwrap();
     ctx.stream.synchronize().unwrap();
     let fwd_slim = |ctx: &GpuCtx| {
-        for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+        for (y_first, cfg) in y_runs(grid_parallel_scan(b, t, di, ds)) {
             let mut bld = ctx
                 .stream
                 .launch_builder(k.ssm_parallel_fwd_typed.i32.get(dtype));

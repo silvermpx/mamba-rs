@@ -17,7 +17,7 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{
-    grid_parallel_scan, grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold,
+    SCAN_CHUNK, grid_parallel_scan, grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold,
 };
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 
@@ -46,7 +46,8 @@ fn device_and_kernel_facts() {
     let fold_cfg = grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes());
     let fold_f32_cfg = grid_parallel_scan_bwd_fold(b, di, ds, 4);
     let plain_cfg = grid_parallel_scan_bwd(b, di);
-    let fwd_cfg = grid_parallel_scan(b, di, ds);
+    // A whole chunk: one channel a block, the forward's widest launch.
+    let fwd_cfg = grid_parallel_scan(b, SCAN_CHUNK, di, ds);
     // The chunked Mamba-3 backward at the production head shape, the
     // pair-matrix tier: the same tile arithmetic as the launcher.
     let (cs, hd) = (64usize, 16usize);

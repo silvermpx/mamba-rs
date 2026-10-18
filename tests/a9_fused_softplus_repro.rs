@@ -85,7 +85,7 @@ fn fused_softplus_fwd_matches_cpu() {
     };
     let slim = i32::from(slim_mode);
     {
-        for (y_first, cfg) in y_runs(grid_parallel_scan(b, di, ds)) {
+        for (y_first, cfg) in y_runs(grid_parallel_scan(b, t, di, ds)) {
             let mut bld = ctx.stream.launch_builder(&ctx.kernels.ssm_parallel_fwd.i32);
             bld.arg(h.inner_mut());
             bld.arg(y.inner_mut());

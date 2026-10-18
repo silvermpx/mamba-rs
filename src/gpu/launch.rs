@@ -487,15 +487,6 @@ pub fn grid_norm(batch: usize, dim: usize) -> LaunchConfig {
     }
 }
 
-/// Launch config for the parallel prefix scan forward kernels (f32 and
-/// typed alike: every shared-memory cell is f32).
-///
-/// Grid: `(batch, d_inner)` — one block per (b, d) pair.
-/// Block: 128 threads (matches NTHREADS in mamba_ssm_parallel.cu).
-/// Shared memory: the two block-scan rows, the two running-prefix rows at
-/// the actual d_state, and one exchange slot per warp for the prefix
-/// hand-off; the kernels load and store directly, so there is no staging
-/// region. Layout (floats): 2*NWARPS + 2*d_state + 2*NWARPS.
 /// Parallel-scan launch geometry — MUST mirror NTHREADS/NITEMS in
 /// mamba_ssm_parallel.cu (block size, warp count, chunk length and the
 /// slim-tape chunk count all derive from these two numbers).
@@ -536,18 +527,50 @@ pub fn scan_tape_len(batch: usize, seq_len: usize, d_inner: usize, d_state: usiz
     batch * d_inner * d_state * 3 * n_chunks
 }
 
-/// Grid of the parallel scan forward: one block per (sequence, channel),
-/// the channels on the y axis, launched in [`y_runs`].
-pub fn grid_parallel_scan(batch: usize, d_inner: usize, d_state: usize) -> LaunchConfig {
+/// The threads a channel takes in a block of the parallel scan forward
+/// over a window of `seq_len` steps: the fewest, a power of two from 8,
+/// whose [`SCAN_NITEMS`] steps each cover the window, and at most the
+/// block. A window shorter than a chunk is then one chunk of its group,
+/// and a longer one takes the whole block a channel, so the slim tape's
+/// chunks are [`SCAN_CHUNK`] long whatever the width. The kernels compute
+/// the same width from the window (`scan_group_width` in
+/// mamba_ssm_parallel.cu).
+pub fn scan_group_width(seq_len: usize) -> usize {
+    let mut width = 8;
+    while width < SCAN_NTHREADS && width * SCAN_NITEMS < seq_len {
+        width <<= 1;
+    }
+    width
+}
+
+/// Launch config of the parallel scan forward kernels over a window of
+/// `seq_len` steps (f32 and typed alike: every shared-memory cell is f32).
+///
+/// Grid: `(batch, groups of channels)`. A block of [`SCAN_NTHREADS`]
+/// threads holds the channels of [`scan_group_width`] threads each side by
+/// side, so a short window keeps every thread on a step instead of leaving
+/// all but a few of a channel's block idle; the groups go on the y axis,
+/// launched in [`y_runs`]. Shared memory: the two block-scan rows, each
+/// group's two running-prefix rows at the actual d_state, and one exchange
+/// slot per warp for the prefix hand-off; the kernels load and store
+/// directly, so there is no staging region. Layout (floats): 2*NWARPS +
+/// 2*groups*d_state + 2*NWARPS.
+pub fn grid_parallel_scan(
+    batch: usize,
+    seq_len: usize,
+    d_inner: usize,
+    d_state: usize,
+) -> LaunchConfig {
     assert!(
         d_state <= 256,
         "grid_parallel_scan: d_state {d_state} exceeds the kernel MAX_DSTATE guard - \
          the kernel would return without writing y"
     );
     const NWARPS: usize = SCAN_NTHREADS / 32;
-    let smem_floats = 2 * NWARPS + 2 * d_state + 2 * NWARPS;
+    let groups = SCAN_NTHREADS / scan_group_width(seq_len);
+    let smem_floats = 2 * NWARPS + 2 * groups * d_state + 2 * NWARPS;
     LaunchConfig {
-        grid_dim: (batch as u32, d_inner as u32, 1),
+        grid_dim: (batch as u32, d_inner.div_ceil(groups) as u32, 1),
         block_dim: (SCAN_NTHREADS as u32, 1, 1),
         shared_mem_bytes: (smem_floats * std::mem::size_of::<f32>()) as u32,
     }

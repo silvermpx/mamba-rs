@@ -740,7 +740,7 @@ fn the_parallel_scans_give_channels_past_the_y_extent_their_own_bits() {
     launch_runs(
         &ctx,
         k.ssm_parallel_fwd_typed.get(width).get(dt),
-        grid_parallel_scan(b, di, ds),
+        grid_parallel_scan(b, t, di, ds),
         &args,
     );
     let tape_row = ds * 3 * n_chunks;
@@ -779,7 +779,7 @@ fn the_parallel_scans_give_channels_past_the_y_extent_their_own_bits() {
     launch_runs(
         &ctx,
         k.ssm_parallel_fwd_nosave_typed.get(width).get(dt),
-        grid_parallel_scan(b, di, ds),
+        grid_parallel_scan(b, t, di, ds),
         &args,
     );
     assert!(
