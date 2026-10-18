@@ -24,6 +24,14 @@ underneath. The GPU path links only the CUDA driver API and cuBLAS.
   kernels and the kernels the families share. They were reworked for this
   release: the convolution walks shallow tiles with batched loads, and the
   residual add of a layer rides in the next layer's norm.
+- **Faster at large sizes.** Mamba and Mamba-3 SISO walk wide states in
+  register slices, a short window takes only the threads it needs, and the
+  Mamba-2 and MIMO tiles take every head and state width. On an RTX 6000
+  Ada a Mamba training step at a window of 65 runs up to 7.2 times as fast
+  and its prompt pass up to 5.4 times (256 states); the SISO sequential
+  training step runs 2 to 4 times as fast at the state widths no build
+  specialises, and 2.5 to 3 times at 64 states. The
+  [changelog](CHANGELOG.md) lists every kernel.
 
 ## Families
 
