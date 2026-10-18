@@ -92,6 +92,10 @@ pub struct MimoChunkedBwd {
     /// s-tile, at every shape ([`ChunkedGeom::pairs`]).
     pub pairs_dq: TypedKernel,
     pub pairs_dk: TypedKernel,
+    /// The narrow builds of the pair kernels, at most 256 threads a block
+    /// and one block a multiprocessor ([`PairsPlan::narrow`]).
+    pub pairs_dq_narrow: TypedKernel,
+    pub pairs_dk_narrow: TypedKernel,
     pub rot_bwd: CudaFunction,
     pub angles: TypedKernel,
     pub combine: CudaFunction,
@@ -162,6 +166,9 @@ pub struct PairsPlan {
     pub kns: usize,
     pub pss: usize,
     pub dk_bytes: usize,
+    /// The narrow builds run the plan ([`pairs_narrow`]), whose tile keeps
+    /// a block within [`PAIRS_THREADS_NARROW`] threads.
+    pub narrow: bool,
 }
 
 /// The widest blocks the chunked path launches, a whole number of warps
@@ -317,7 +324,7 @@ pub fn chunked_geom(
         })?;
     let inter_tiles = Some(inter_tiles_geom((hd, ds, rank), cap)).filter(|g| g.0 > 0)?;
     let terms = terms_plan((hd, ds, rank), cap)?;
-    let pairs = pairs_plan((hd, ds, rank), cap)?;
+    let pairs = pairs_plan((hd, ds, rank), cap, pairs_narrow(hd, ds, rank))?;
     Some(ChunkedGeom {
         state,
         state_tiles,
@@ -377,7 +384,11 @@ pub fn pairs_dk_bytes(
 /// the wider first); else a tile of one token at the widest slices that fit
 /// at all. A tile of one token in slices of one fits any card, so `None`
 /// only under a cap no card has.
-pub fn pairs_plan((hd, ds, rank): (usize, usize, usize), cap: usize) -> Option<PairsPlan> {
+pub fn pairs_plan(
+    (hd, ds, rank): (usize, usize, usize),
+    cap: usize,
+    narrow: bool,
+) -> Option<PairsPlan> {
     let dims = (hd, ds, rank);
     let fit = |tq: usize, floor: usize| {
         let ps = std::iter::successors(Some(hd), |&ps| (ps > 1).then(|| ps.div_ceil(2)))
@@ -401,13 +412,60 @@ pub fn pairs_plan((hd, ds, rank): (usize, usize, usize), cap: usize) -> Option<P
             kns,
             pss,
             dk_bytes: pairs_dk_bytes(dims, tq, (kns, pss)),
+            narrow,
         })
+    };
+    let fits_block = |tq: usize| match narrow {
+        true => pairs_threads(tq, rank) <= PAIRS_THREADS_NARROW,
+        false => tq * rank <= CHUNK,
     };
     [16usize, 8, 4, 2, 1]
         .into_iter()
-        .filter(|&tq| tq * rank <= CHUNK)
+        .filter(|&tq| fits_block(tq))
         .find_map(|tq| fit(tq, 32))
         .or_else(|| fit(1, 1))
+}
+
+/// The most threads a block of the narrow pair kernels takes. Mirrors
+/// `M3MB_PAIRS_BOUNDS_NARROW` in mamba3_mimo_chunked_bwd.cu.
+pub const PAIRS_THREADS_NARROW: usize = 256;
+
+/// The threads of a pair kernel's block at a tile of `tq` tokens: eight a
+/// row of the tile's `tq * rank` rows, rounded up to four rows.
+pub fn pairs_threads(tq: usize, rank: usize) -> usize {
+    8 * (tq * rank).next_multiple_of(4)
+}
+
+/// Whether the pair kernels take their narrow builds, which keep dk's
+/// accumulators in registers at half the warps a multiprocessor where the
+/// wide builds spill them. The spills cost more from a head of 128 channels,
+/// and on a head of 64 or more at 256 states, at 128 states past rank 1 and,
+/// from a head of 96, at rank 4 and up. Everywhere else the warps win. Both
+/// give the same bits.
+pub fn pairs_narrow(hd: usize, ds: usize, rank: usize) -> bool {
+    if let Some(forced) = pairs_build_forced() {
+        return forced;
+    }
+    hd >= 128 || (hd >= 64 && (ds >= 256 || (ds >= 128 && rank >= 2) || (hd >= 96 && rank >= 4)))
+}
+
+/// `MAMBA_RS_PAIRS_BUILD` picks the pair kernels' build for tests and
+/// measurements: `narrow` or `wide` takes that build at every shape, and
+/// unset or `auto` leaves the choice to [`pairs_narrow`]. Any other value is
+/// refused loudly, so a typo cannot report a run that never left the rule.
+fn pairs_build_forced() -> Option<bool> {
+    static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| match std::env::var("MAMBA_RS_PAIRS_BUILD") {
+        Err(_) => None,
+        Ok(v) => match v.trim() {
+            "auto" | "" => None,
+            "narrow" => Some(true),
+            "wide" => Some(false),
+            other => panic!(
+                "MAMBA_RS_PAIRS_BUILD={other:?} is not a recognized build (use auto, narrow or wide)"
+            ),
+        },
+    })
 }
 
 /// The token-tile state terms' plan: tokens per block, whether dS, u and
@@ -932,6 +990,8 @@ impl Mamba3MimoKernels {
                 chunk_dot: get("m3mb_chunk_dot")?,
                 pairs_dq: typed("m3mb_pairs_dq")?,
                 pairs_dk: typed("m3mb_pairs_dk")?,
+                pairs_dq_narrow: typed("m3mb_pairs_dq_narrow")?,
+                pairs_dk_narrow: typed("m3mb_pairs_dk_narrow")?,
                 rot_bwd: get("m3mb_rot_bwd")?,
                 angles: typed("m3mb_angles")?,
                 combine: get("m3mb_combine")?,
@@ -963,6 +1023,8 @@ impl Mamba3MimoKernels {
                 (&kernels.chunk_scan_tiles[2], "chunk_scan_tiles"),
                 (&kernels.cb.pairs_dq, "pairs dq"),
                 (&kernels.cb.pairs_dk, "pairs dk"),
+                (&kernels.cb.pairs_dq_narrow, "pairs dq narrow"),
+                (&kernels.cb.pairs_dk_narrow, "pairs dk narrow"),
                 (&kernels.cb.state_terms_tiles, "state_terms tiles"),
             ] {
                 for f in [&k.f32, &k.bf16, &k.f16] {
@@ -1076,6 +1138,7 @@ mod tests {
                 kns: 128,
                 pss: 64,
                 dk_bytes: 62_208,
+                narrow: pairs_narrow(64, 128, 4),
             }
         );
         assert_eq!(released.inter_tiles.0, 16);
@@ -1148,12 +1211,14 @@ mod tests {
                 kns: 128,
                 pss: 128,
                 dk_bytes: 79_136,
+                narrow: pairs_narrow(1024, 256, 16),
             }
         );
     }
 
     /// The pair kernels plan every shape the config admits, at every card's
-    /// limit: a power-of-two tile of at most 16 tokens and 64 rows, slices
+    /// limit and in both builds: a power-of-two tile of at most 16 tokens
+    /// whose block fits the build (64 rows wide, 256 threads narrow), slices
     /// within their widths, both kernels within the cap.
     #[test]
     fn the_pairs_plan_takes_any_head_and_state_in_slices() {
@@ -1167,13 +1232,21 @@ mod tests {
             (1, 1, 1),
             (512, 256, 16),
         ] {
-            for cap in [48 * 1024, 64 * 1024, 99 * 1024, 227 * 1024] {
-                let p = pairs_plan((hd, ds, rank), cap)
+            for (cap, narrow) in [48 * 1024, 64 * 1024, 99 * 1024, 227 * 1024]
+                .into_iter()
+                .flat_map(|cap| [(cap, false), (cap, true)])
+            {
+                let p = pairs_plan((hd, ds, rank), cap, narrow)
                     .unwrap_or_else(|| panic!("head {hd} state {ds} rank {rank} at {cap}"));
+                let fits = match narrow {
+                    true => pairs_threads(p.tq, rank) <= PAIRS_THREADS_NARROW,
+                    false => p.tq * rank <= CHUNK,
+                };
                 assert!(
                     p.tq.is_power_of_two()
                         && p.tq <= 16
-                        && p.tq * rank <= CHUNK
+                        && fits
+                        && p.narrow == narrow
                         && (1..=hd).contains(&p.ps)
                         && (1..=ds).contains(&p.kns)
                         && (1..=hd).contains(&p.pss)
@@ -1184,7 +1257,7 @@ mod tests {
             }
         }
         assert_eq!(
-            pairs_plan((1, 1, 1), 99 * 1024),
+            pairs_plan((1, 1, 1), 99 * 1024, false),
             Some(PairsPlan {
                 tq: 16,
                 ps: 1,
@@ -1192,8 +1265,45 @@ mod tests {
                 kns: 1,
                 pss: 1,
                 dk_bytes: 5_024,
+                narrow: false,
             })
         );
+    }
+
+    /// The pair kernels take the narrow builds where the wide builds' spills
+    /// cost more than half the warps, and the wide builds everywhere else.
+    #[test]
+    fn the_pair_kernels_take_the_narrow_build_where_the_spills_cost_more() {
+        if std::env::var("MAMBA_RS_PAIRS_BUILD").is_ok() {
+            return;
+        }
+        for (hd, ds, rank) in [
+            (128, 64, 1),
+            (256, 16, 1),
+            (64, 256, 1),
+            (64, 128, 2),
+            (96, 64, 4),
+            (1024, 256, 16),
+        ] {
+            assert!(
+                pairs_narrow(hd, ds, rank),
+                "head {hd} state {ds} rank {rank}"
+            );
+        }
+        for (hd, ds, rank) in [
+            (32, 256, 4),
+            (32, 64, 16),
+            (64, 64, 16),
+            (64, 128, 1),
+            (96, 64, 2),
+            (96, 128, 1),
+            (16, 16, 16),
+        ] {
+            assert!(
+                !pairs_narrow(hd, ds, rank),
+                "head {hd} state {ds} rank {rank}"
+            );
+        }
     }
 
     /// The state terms plan every shape the config admits, at every card's

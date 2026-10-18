@@ -45,10 +45,10 @@ use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{
-    Mamba3MimoKernels, ScanBwdGlobalGeom, ScanGeom, TermsPlan, angle_walk_smem_bytes,
-    chunk_scan_tiles_cfg, chunked_geom, inter_tiles_bytes, inter_tiles_geom, pairs_dk_bytes,
-    pairs_dq_bytes, scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_smem_bytes,
-    terms_sliced_bytes, terms_whole_bytes,
+    Mamba3MimoKernels, PAIRS_THREADS_NARROW, ScanBwdGlobalGeom, ScanGeom, TermsPlan,
+    angle_walk_smem_bytes, chunk_scan_tiles_cfg, chunked_geom, inter_tiles_bytes, inter_tiles_geom,
+    pairs_dk_bytes, pairs_dq_bytes, pairs_threads, scan_bwd_record_floats, scan_bwd_smem_bytes,
+    scan_bwd_threads, scan_smem_bytes, terms_sliced_bytes, terms_whole_bytes,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -1559,17 +1559,23 @@ fn mimo_split_pairs_keep_the_released_pair_bits() {
             )
             .unwrap();
         }
-        // The trainer's plan, then every tile of tokens with its operands
-        // whole, in slices of about a third and one at a time, where its
-        // blocks fit.
+        // The trainer's plan, then in both builds every tile of tokens with
+        // its operands whole, in slices of about a third and one at a time,
+        // where its blocks fit the build.
         let plan = geom.pairs;
         let thirds = (hd.div_ceil(3), ds.div_ceil(3), hd.div_ceil(3));
-        let mut cases = vec![(plan.tq, (plan.ps, plan.kns, plan.pss))];
-        for case in [16usize, 8, 4, 2, 1]
+        let mut cases = vec![(plan.narrow, plan.tq, (plan.ps, plan.kns, plan.pss))];
+        for case in [false, true]
             .into_iter()
-            .filter(|&tq| tq * rank <= 64)
-            .flat_map(|tq| [(hd, ds, hd), thirds, (1, 1, 1)].map(|slices| (tq, slices)))
-            .filter(|&(tq, (ps, kns, pss))| {
+            .flat_map(|narrow| [16usize, 8, 4, 2, 1].map(|tq| (narrow, tq)))
+            .filter(|&(narrow, tq)| match narrow {
+                true => pairs_threads(tq, rank) <= PAIRS_THREADS_NARROW,
+                false => tq * rank <= 64,
+            })
+            .flat_map(|(narrow, tq)| {
+                [(hd, ds, hd), thirds, (1, 1, 1)].map(|slices| (narrow, tq, slices))
+            })
+            .filter(|&(_, tq, (ps, kns, pss))| {
                 pairs_dq_bytes((hd, ds, rank), tq, ps) <= cap
                     && pairs_dk_bytes((hd, ds, rank), tq, (kns, pss)) <= cap
             })
@@ -1633,14 +1639,18 @@ fn mimo_split_pairs_keep_the_released_pair_bits() {
                     bits_f32(&ctx, &du),
                     bits_f32(&ctx, &dwp),
                 ];
-                for &(tq, (ps, kns, pss)) in &cases {
+                for &(narrow, tq, (ps, kns, pss)) in &cases {
                     let (dq, dk, du) = (
                         f32_buf(&ctx, &dq0),
                         f32_buf(&ctx, &dk0),
                         f32_buf(&ctx, &du0),
                     );
                     let dwp = GpuBuffer::zeros(s, pairs_len).unwrap();
-                    let threads = 8 * (tq * rank).next_multiple_of(4);
+                    let threads = pairs_threads(tq, rank);
+                    let (pairs_dq, pairs_dk) = match narrow {
+                        true => (&k.cb.pairs_dq_narrow, &k.cb.pairs_dk_narrow),
+                        false => (&k.cb.pairs_dq, &k.cb.pairs_dk),
+                    };
                     let tiles = 64usize.div_ceil(tq);
                     let (n_blocks, p_blocks) = (ds.div_ceil(128), hd.div_ceil(128));
                     let mut q_args = vec![
@@ -1658,7 +1668,7 @@ fn mimo_split_pairs_keep_the_released_pair_bits() {
                     q_args.extend(ints(&[tq as i32, tl as i32, ps as i32]));
                     launch_runs(
                         &ctx,
-                        k.cb.pairs_dq.get(dtype),
+                        pairs_dq.get(dtype),
                         cfg(
                             (b * inp.nc, nh, tiles * n_blocks),
                             threads,
@@ -1686,7 +1696,7 @@ fn mimo_split_pairs_keep_the_released_pair_bits() {
                     k_args.extend(ints(&[tq as i32, tl as i32, kns as i32, pss as i32]));
                     launch_runs(
                         &ctx,
-                        k.cb.pairs_dk.get(dtype),
+                        pairs_dk.get(dtype),
                         cfg(
                             (b * inp.nc, nh, tiles * n_blocks.max(p_blocks)),
                             threads,
@@ -1706,7 +1716,8 @@ fn mimo_split_pairs_keep_the_released_pair_bits() {
                         assert!(
                             g == w,
                             "{dtype:?} head {hd} state {ds} rank {rank}, reference tile {tl}, \
-                             split tile {tq}, slices {:?}, {} packing: {name}",
+                             {} split tile {tq}, slices {:?}, {} packing: {name}",
+                            if narrow { "narrow" } else { "wide" },
                             (ps, kns, pss),
                             if matches!(packing, Arg::P(0)) {
                                 "no"

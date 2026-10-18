@@ -2988,7 +2988,12 @@ impl Mamba3MimoGpuTrainer {
                 kns,
                 pss,
                 dk_bytes,
+                narrow,
             } = geom.pairs;
+            let (pairs_dq, pairs_dk) = match narrow {
+                true => (&k.cb.pairs_dq_narrow, &k.cb.pairs_dk_narrow),
+                false => (&k.cb.pairs_dq, &k.cb.pairs_dk),
+            };
             let (tq_i, tl_i, ps_i, kns_i, pss_i) = (
                 tq as i32,
                 geom.pairs_ref as i32,
@@ -2996,11 +3001,11 @@ impl Mamba3MimoGpuTrainer {
                 kns as i32,
                 pss as i32,
             );
-            let threads = 8 * (tq * rank).next_multiple_of(4);
+            let threads = crate::mamba3_mimo::gpu::kernels::pairs_threads(tq, rank);
             let tiles = CHUNK.div_ceil(tq);
             let (n_blocks, p_blocks) = (ds.div_ceil(128), hd.div_ceil(128));
             go_y!(
-                k.cb.pairs_dq.get(act),
+                pairs_dq.get(act),
                 cfg3(b * nc, nh, tiles * n_blocks, threads, dq_bytes),
                 "pairs dq",
                 [
@@ -3010,7 +3015,7 @@ impl Mamba3MimoGpuTrainer {
                 [seq_idx]
             );
             go_y!(
-                k.cb.pairs_dk.get(act),
+                pairs_dk.get(act),
                 cfg3(
                     b * nc,
                     nh,

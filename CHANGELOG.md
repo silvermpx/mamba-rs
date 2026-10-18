@@ -128,8 +128,9 @@ are gone.
 - Test switches for the rare kernel paths on ordinary shapes:
   `MAMBA_RS_SMEM_BUDGET` (the small tiles and fallbacks),
   `MAMBA_RS_INDEX_WIDTH=i64` (the 64-bit builds), `MAMBA_RS_GRID_RUN`
-  (the split grids) and `MAMBA_RS_STEP_PREFETCH` (the SISO decode step
-  with and without the early fetch, which give the same bits).
+  (the split grids), `MAMBA_RS_STEP_PREFETCH` (the SISO decode step with
+  and without the early fetch) and `MAMBA_RS_PAIRS_BUILD` (the two builds
+  of the MIMO pair kernels). Both builds of each give the same bits.
 
 ### Faster
 
@@ -163,8 +164,9 @@ SISO with head 64 and the sequential scan trains in 0.8 and was refused in
   stage takes the tiled kernel past head 16 or 16 states, and the
   sequential scan cuts a wide state across the block.
 - Mamba-3 MIMO: the inter-chunk term, the state terms, the pair terms and
-  the angle walk run on token tiles at every shape, and a small grid
-  spreads over all multiprocessors.
+  the angle walk run on token tiles at every shape, the pair terms keep
+  their sums in registers on wide heads and states instead of spilling
+  them, and a small grid spreads over all multiprocessors.
 - The gated MLP gate in every family.
 - The Mamba and SISO CPU training tapes keep the state every 16 steps, so
   a long window needs under a fifth of the memory.

@@ -1578,8 +1578,19 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
     }
 }
 
-#define DEFINE_M3MB_PAIRS_DQ(NAME, T)                                          \
-extern "C" __global__ void __launch_bounds__(512) NAME(                        \
+// The split pair kernels come in two builds. The wide one takes blocks of up
+// to 512 threads, which caps a thread at 128 registers: dk's accumulators
+// and products then spill every token. The narrow one takes at most 256
+// threads at one block a multiprocessor, which keeps dk in 218 to 221
+// registers without a spill at half the warps. The spills cost more than
+// the warps on wide heads, and on narrower heads at wide states and high
+// ranks. Every chain keeps its columns and order at any tile, so both give
+// the same bits, and the host picks one.
+#define M3MB_PAIRS_BOUNDS_WIDE __launch_bounds__(512)
+#define M3MB_PAIRS_BOUNDS_NARROW __launch_bounds__(256, 1)
+
+#define DEFINE_M3MB_PAIRS_DQ(NAME, T, BOUNDS)                                  \
+extern "C" __global__ void BOUNDS NAME(                                        \
     float* __restrict__ dq,                                                    \
     const float* __restrict__ dy, const T* __restrict__ proj,                  \
     long long ld_proj,                                                         \
@@ -1595,12 +1606,15 @@ extern "C" __global__ void __launch_bounds__(512) NAME(                        \
         mimo_x, seq, nh, ng, hd, ds, rank, na, tl, tl_ref, ps, y_first,        \
         seq_idx);                                                              \
 }
-DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq, float)
-DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_bf16, __nv_bfloat16)
-DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_f16, __half)
+DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq, float, M3MB_PAIRS_BOUNDS_WIDE)
+DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_bf16, __nv_bfloat16, M3MB_PAIRS_BOUNDS_WIDE)
+DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_f16, __half, M3MB_PAIRS_BOUNDS_WIDE)
+DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_narrow, float, M3MB_PAIRS_BOUNDS_NARROW)
+DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_narrow_bf16, __nv_bfloat16, M3MB_PAIRS_BOUNDS_NARROW)
+DEFINE_M3MB_PAIRS_DQ(m3mb_pairs_dq_narrow_f16, __half, M3MB_PAIRS_BOUNDS_NARROW)
 
-#define DEFINE_M3MB_PAIRS_DK(NAME, T)                                          \
-extern "C" __global__ void __launch_bounds__(512) NAME(                        \
+#define DEFINE_M3MB_PAIRS_DK(NAME, T, BOUNDS)                                  \
+extern "C" __global__ void BOUNDS NAME(                                        \
     float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dwp,   \
     const float* __restrict__ dy, const T* __restrict__ proj,                  \
     long long ld_proj,                                                         \
@@ -1617,9 +1631,12 @@ extern "C" __global__ void __launch_bounds__(512) NAME(                        \
         c_bias, coef, sn, cs, mimo_x, seq, nh, ng, hd, ds, rank, na, tl, tl_ref, \
         kns, pss, y_first, seq_idx);                                           \
 }
-DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk, float)
-DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk_bf16, __nv_bfloat16)
-DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk_f16, __half)
+DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk, float, M3MB_PAIRS_BOUNDS_WIDE)
+DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk_bf16, __nv_bfloat16, M3MB_PAIRS_BOUNDS_WIDE)
+DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk_f16, __half, M3MB_PAIRS_BOUNDS_WIDE)
+DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk_narrow, float, M3MB_PAIRS_BOUNDS_NARROW)
+DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk_narrow_bf16, __nv_bfloat16, M3MB_PAIRS_BOUNDS_NARROW)
+DEFINE_M3MB_PAIRS_DK(m3mb_pairs_dk_narrow_f16, __half, M3MB_PAIRS_BOUNDS_NARROW)
 
 // The rotation back, one block per (row, head): the rotated-space dq and
 // dk turned back to the biased queries and keys (written per head as the
