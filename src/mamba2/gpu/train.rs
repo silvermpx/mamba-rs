@@ -104,7 +104,7 @@ struct MlpSpans {
     fc2_w: Span,
 }
 
-/// The slab's alignment of every tensor, in floats (128 bytes).
+/// The slab's alignment of its matrices and blocks, in floats (128 bytes).
 const SLAB_ALIGN: usize = 32;
 
 /// The order of the flat buffers: the input projection, then each layer's
@@ -124,50 +124,52 @@ struct Layout {
 impl Layout {
     fn of(w: &Mamba2Weights) -> Self {
         let mut at = 0usize;
-        // Every tensor the model has starts on 128 bytes of the slab: the
-        // tensor-map GEMM routes describe a matrix sliced from the slab from
-        // its own first element, and their 128-byte swizzle needs that
-        // element aligned.
-        let mut take = |len: usize| {
-            if len > 0 {
+        // Every matrix a GEMM reads, and every block (a mixer layer, an
+        // MLP), starts on 128 bytes of the slab: the tensor-map GEMM routes
+        // describe a matrix sliced from the slab from its own first element,
+        // which their 128-byte swizzle needs aligned, and blocks that start
+        // aligned share one layout, so the layers repeat with one stride. A
+        // vector keeps its place right after the tensor before it.
+        let mut take = |len: usize, align: bool| {
+            if align {
                 at = at.next_multiple_of(SLAB_ALIGN);
             }
             let span = Span { off: at, len };
             at += len;
             span
         };
-        let input_proj_w = take(w.input_proj_w.len());
-        let input_proj_b = take(w.input_proj_b.len());
+        let input_proj_w = take(w.input_proj_w.len(), true);
+        let input_proj_b = take(w.input_proj_b.len(), false);
         let layers = w
             .layers
             .iter()
             .map(|lw| LayerSpans {
-                norm_weight: take(lw.norm_weight.len()),
-                norm_bias: take(lw.norm_bias.len()),
-                in_proj_w: take(lw.in_proj_w.len()),
-                in_proj_b: take(lw.in_proj_b.len()),
-                conv_w: take(lw.conv_w.len()),
-                conv_b: take(lw.conv_b.len()),
-                dt_bias: take(lw.dt_bias.len()),
-                a_log: take(lw.a_log.len()),
-                d_param: take(lw.d_param.len()),
-                gate_norm_weight: take(lw.gate_norm_weight.len()),
-                out_proj_w: take(lw.out_proj_w.len()),
-                out_proj_b: take(lw.out_proj_b.len()),
+                norm_weight: take(lw.norm_weight.len(), true),
+                norm_bias: take(lw.norm_bias.len(), false),
+                in_proj_w: take(lw.in_proj_w.len(), true),
+                in_proj_b: take(lw.in_proj_b.len(), false),
+                conv_w: take(lw.conv_w.len(), false),
+                conv_b: take(lw.conv_b.len(), false),
+                dt_bias: take(lw.dt_bias.len(), false),
+                a_log: take(lw.a_log.len(), false),
+                d_param: take(lw.d_param.len(), false),
+                gate_norm_weight: take(lw.gate_norm_weight.len(), false),
+                out_proj_w: take(lw.out_proj_w.len(), true),
+                out_proj_b: take(lw.out_proj_b.len(), false),
             })
             .collect();
         let mlp = w
             .mlp
             .iter()
             .map(|m| MlpSpans {
-                norm_weight: take(m.norm_weight.len()),
-                norm_bias: take(m.norm_bias.len()),
-                fc1_w: take(m.fc1_w.len()),
-                fc2_w: take(m.fc2_w.len()),
+                norm_weight: take(m.norm_weight.len(), true),
+                norm_bias: take(m.norm_bias.len(), false),
+                fc1_w: take(m.fc1_w.len(), true),
+                fc2_w: take(m.fc2_w.len(), true),
             })
             .collect();
-        let norm_f_weight = take(w.norm_f_weight.len());
-        let norm_f_bias = take(w.norm_f_bias.len());
+        let norm_f_weight = take(w.norm_f_weight.len(), false);
+        let norm_f_bias = take(w.norm_f_bias.len(), false);
         Self {
             input_proj_w,
             input_proj_b,

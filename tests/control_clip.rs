@@ -44,22 +44,23 @@ fn mark_stripe(mask: &mut [bool], off: usize, rows: usize, cols: usize, stride: 
     }
 }
 
-/// The Mamba-2 and MIMO trainers start every tensor the model has on 32
-/// floats (128 bytes) of their slab; the gaps hold zeros.
+/// The Mamba-2 and MIMO trainers start every matrix a GEMM reads and every
+/// block (a mixer layer, an MLP) on 32 floats (128 bytes) of their slab;
+/// the gaps hold zeros.
 const SLAB_ALIGN: usize = 32;
 
-/// `t` appended to a slab's mirror where the trainers place it.
-fn push_aligned(out: &mut Vec<f32>, t: &[f32]) {
-    if !t.is_empty() {
+/// `t` appended to a slab's mirror, on the trainers' alignment when `align`.
+fn push(out: &mut Vec<f32>, t: &[f32], align: bool) {
+    if align {
         out.resize(out.len().next_multiple_of(SLAB_ALIGN), 0.0);
-        out.extend_from_slice(t);
     }
+    out.extend_from_slice(t);
 }
 
-/// The offset of a tensor of `len` floats placed after `*at` in a slab,
-/// and `*at` moved past it.
-fn place(at: &mut usize, len: usize) -> usize {
-    if len > 0 {
+/// The offset of a tensor of `len` floats placed after `*at` in a slab, on
+/// the trainers' alignment when `align`, and `*at` moved past it.
+fn place(at: &mut usize, len: usize, align: bool) -> usize {
+    if align {
         *at = at.next_multiple_of(SLAB_ALIGN);
     }
     let off = *at;
@@ -106,30 +107,30 @@ fn m1_control(cfg: &MambaConfig, len: usize) -> Vec<bool> {
 /// field order, every layer's MLP, the final norm.
 fn m2_arena(w: &Mamba2Weights) -> Vec<f32> {
     let mut out = w.input_proj_w.clone();
-    push_aligned(&mut out, &w.input_proj_b);
+    push(&mut out, &w.input_proj_b, false);
     for l in &w.layers {
-        for t in [
-            &l.norm_weight,
-            &l.in_proj_w,
-            &l.in_proj_b,
-            &l.conv_w,
-            &l.conv_b,
-            &l.dt_bias,
-            &l.a_log,
-            &l.d_param,
-            &l.gate_norm_weight,
-            &l.out_proj_w,
-            &l.out_proj_b,
+        for (t, align) in [
+            (&l.norm_weight, true),
+            (&l.in_proj_w, true),
+            (&l.in_proj_b, false),
+            (&l.conv_w, false),
+            (&l.conv_b, false),
+            (&l.dt_bias, false),
+            (&l.a_log, false),
+            (&l.d_param, false),
+            (&l.gate_norm_weight, false),
+            (&l.out_proj_w, true),
+            (&l.out_proj_b, false),
         ] {
-            push_aligned(&mut out, t);
+            push(&mut out, t, align);
         }
     }
     for m in &w.mlp {
-        for t in [&m.norm_weight, &m.fc1_w, &m.fc2_w] {
-            push_aligned(&mut out, t);
+        for (t, align) in [(&m.norm_weight, true), (&m.fc1_w, true), (&m.fc2_w, true)] {
+            push(&mut out, t, align);
         }
     }
-    push_aligned(&mut out, &w.norm_f_weight);
+    push(&mut out, &w.norm_f_weight, false);
     out
 }
 
@@ -140,29 +141,29 @@ fn m2_control(cfg: &Mamba2Config, w: &Mamba2Weights) -> Vec<bool> {
     let (dm, ip, nh) = (cfg.d_model, cfg.in_proj_out_dim(), cfg.nheads());
     let mut mask = vec![false; m2_arena(w).len()];
     let mut at = 0;
-    place(&mut at, w.input_proj_w.len());
-    place(&mut at, w.input_proj_b.len());
+    place(&mut at, w.input_proj_w.len(), true);
+    place(&mut at, w.input_proj_b.len(), false);
     for l in &w.layers {
-        place(&mut at, l.norm_weight.len());
-        let in_proj = place(&mut at, l.in_proj_w.len());
+        place(&mut at, l.norm_weight.len(), true);
+        let in_proj = place(&mut at, l.in_proj_w.len(), true);
         mark_stripe(&mut mask, in_proj + ip - nh, dm, nh, ip);
-        let bias = place(&mut at, l.in_proj_b.len());
+        let bias = place(&mut at, l.in_proj_b.len(), false);
         if !l.in_proj_b.is_empty() {
             mask[bias + ip - nh..bias + ip].fill(true);
         }
-        place(&mut at, l.conv_w.len());
-        place(&mut at, l.conv_b.len());
+        place(&mut at, l.conv_w.len(), false);
+        place(&mut at, l.conv_b.len(), false);
         for t in [&l.dt_bias, &l.a_log] {
-            let off = place(&mut at, t.len());
+            let off = place(&mut at, t.len(), false);
             mask[off..off + t.len()].fill(true);
         }
-        for t in [
-            &l.d_param,
-            &l.gate_norm_weight,
-            &l.out_proj_w,
-            &l.out_proj_b,
+        for (t, align) in [
+            (&l.d_param, false),
+            (&l.gate_norm_weight, false),
+            (&l.out_proj_w, true),
+            (&l.out_proj_b, false),
         ] {
-            place(&mut at, t.len());
+            place(&mut at, t.len(), align);
         }
     }
     mask
@@ -174,32 +175,32 @@ fn m2_control(cfg: &Mamba2Config, w: &Mamba2Weights) -> Vec<bool> {
 /// the final norm.
 fn mimo_arena(w: &Mamba3MimoWeights) -> Vec<f32> {
     let mut out = w.input_proj_w.clone();
-    push_aligned(&mut out, &w.input_proj_b);
+    push(&mut out, &w.input_proj_b, false);
     for l in &w.layers {
-        for t in [
-            &l.norm_weight,
-            &l.in_proj_w,
-            &l.dt_bias,
-            &l.b_norm_weight,
-            &l.c_norm_weight,
-            &l.b_bias,
-            &l.c_bias,
-            &l.d_param,
-            &l.mimo_x,
-            &l.mimo_z,
-            &l.mimo_o,
-            &l.out_proj_w,
-            &l.norm_gate_weight,
+        for (t, align) in [
+            (&l.norm_weight, true),
+            (&l.in_proj_w, true),
+            (&l.dt_bias, false),
+            (&l.b_norm_weight, false),
+            (&l.c_norm_weight, false),
+            (&l.b_bias, false),
+            (&l.c_bias, false),
+            (&l.d_param, false),
+            (&l.mimo_x, false),
+            (&l.mimo_z, false),
+            (&l.mimo_o, false),
+            (&l.out_proj_w, true),
+            (&l.norm_gate_weight, false),
         ] {
-            push_aligned(&mut out, t);
+            push(&mut out, t, align);
         }
     }
     for m in &w.mlp {
-        for t in [&m.norm_weight, &m.fc1_w, &m.fc2_w] {
-            push_aligned(&mut out, t);
+        for (t, align) in [(&m.norm_weight, true), (&m.fc1_w, true), (&m.fc2_w, true)] {
+            push(&mut out, t, align);
         }
     }
-    push_aligned(&mut out, &w.norm_f_weight);
+    push(&mut out, &w.norm_f_weight, false);
     out
 }
 
@@ -211,27 +212,27 @@ fn mimo_control(cfg: &Mamba3MimoConfig, w: &Mamba3MimoWeights) -> Vec<bool> {
     let ctrl = 3 * cfg.nheads() + cfg.num_rope_angles();
     let mut mask = vec![false; mimo_arena(w).len()];
     let mut at = 0;
-    place(&mut at, w.input_proj_w.len());
-    place(&mut at, w.input_proj_b.len());
+    place(&mut at, w.input_proj_w.len(), true);
+    place(&mut at, w.input_proj_b.len(), false);
     for l in &w.layers {
-        place(&mut at, l.norm_weight.len());
-        let in_proj = place(&mut at, l.in_proj_w.len());
+        place(&mut at, l.norm_weight.len(), true);
+        let in_proj = place(&mut at, l.in_proj_w.len(), true);
         mark_stripe(&mut mask, in_proj + ip - ctrl, dm, ctrl, ip);
-        let dt_bias = place(&mut at, l.dt_bias.len());
+        let dt_bias = place(&mut at, l.dt_bias.len(), false);
         mask[dt_bias..dt_bias + l.dt_bias.len()].fill(true);
-        for t in [
-            &l.b_norm_weight,
-            &l.c_norm_weight,
-            &l.b_bias,
-            &l.c_bias,
-            &l.d_param,
-            &l.mimo_x,
-            &l.mimo_z,
-            &l.mimo_o,
-            &l.out_proj_w,
-            &l.norm_gate_weight,
+        for (t, align) in [
+            (&l.b_norm_weight, false),
+            (&l.c_norm_weight, false),
+            (&l.b_bias, false),
+            (&l.c_bias, false),
+            (&l.d_param, false),
+            (&l.mimo_x, false),
+            (&l.mimo_z, false),
+            (&l.mimo_o, false),
+            (&l.out_proj_w, true),
+            (&l.norm_gate_weight, false),
         ] {
-            place(&mut at, t.len());
+            place(&mut at, t.len(), align);
         }
     }
     mask
