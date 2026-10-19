@@ -218,6 +218,38 @@ impl Layout {
         out
     }
 
+    /// The values the tensors hold, without the slab's gaps.
+    fn packed_len(&self, w: &Mamba2Weights) -> usize {
+        self.pairs(w).iter().map(|(_, span, _)| span.len).sum()
+    }
+
+    /// A slab-shaped arena's tensors back to back in their order: the
+    /// layout the host trainers keep, which a trainer state carries so it
+    /// moves between the devices.
+    fn pack(&self, slab: &[f32], w: &Mamba2Weights) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.packed_len(w));
+        for (_, span, _) in self.pairs(w) {
+            out.extend_from_slice(&slab[span.off..span.off + span.len]);
+        }
+        out
+    }
+
+    /// The inverse of [`Self::pack`]: the tensors placed on the slab, its
+    /// gaps zero. `None` when `packed` holds another number of values.
+    fn unpack(&self, packed: &[f32], w: &Mamba2Weights) -> Option<Vec<f32>> {
+        if packed.len() != self.packed_len(w) {
+            return None;
+        }
+        let pairs = self.pairs(w);
+        let mut slab = vec![0f32; self.total];
+        let mut at = 0;
+        for (_, span, _) in pairs {
+            slab[span.off..span.off + span.len].copy_from_slice(&packed[at..at + span.len]);
+            at += span.len;
+        }
+        Some(slab)
+    }
+
     fn flatten(&self, w: &Mamba2Weights) -> Vec<f32> {
         let mut flat = vec![0f32; self.total];
         for (src, span, _) in self.pairs(w) {
@@ -1477,7 +1509,10 @@ impl Mamba2GpuTrainer {
     /// learning rate belongs to the caller's schedule and is not part of
     /// it.
     pub fn optimizer_state(&self) -> Result<AdamWStateBlob, String> {
-        self.adamw.export_state(&self.ctx.stream)
+        let mut blob = self.adamw.export_state(&self.ctx.stream)?;
+        blob.m = self.layout.pack(&blob.m, &self.template);
+        blob.v = self.layout.pack(&blob.v, &self.template);
+        Ok(blob)
     }
 
     /// Upload a previously exported optimizer state, adopting its step
@@ -1485,7 +1520,27 @@ impl Mamba2GpuTrainer {
     /// an error. A captured graph refuses its replay when the settings it
     /// baked in changed (see [`Self::capture_graph`]).
     pub fn load_optimizer_state(&mut self, blob: &AdamWStateBlob) -> Result<(), String> {
-        self.adamw.import_state(&self.ctx.stream, blob)
+        let unpack = |moments: &[f32]| {
+            self.layout.unpack(moments, &self.template).ok_or_else(|| {
+                format!(
+                    "AdamW state mismatch: the blob holds {} moments, this trainer's tensors {} \
+                     - the blob belongs to a different parameterization",
+                    moments.len(),
+                    self.layout.packed_len(&self.template)
+                )
+            })
+        };
+        let slab = AdamWStateBlob {
+            m: unpack(&blob.m)?,
+            v: unpack(&blob.v)?,
+            step: blob.step,
+            beta1: blob.beta1,
+            beta2: blob.beta2,
+            eps: blob.eps,
+            weight_decay: blob.weight_decay,
+            reference_no_decay: blob.reference_no_decay,
+        };
+        self.adamw.import_state(&self.ctx.stream, &slab)
     }
 
     /// Download the carried recurrence: every layer's conv window and SSM
