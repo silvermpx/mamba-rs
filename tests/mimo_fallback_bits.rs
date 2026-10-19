@@ -45,10 +45,10 @@ use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{
-    Mamba3MimoKernels, PAIRS_THREADS_NARROW, ScanBwdGlobalGeom, ScanGeom, TermsPlan,
-    angle_walk_smem_bytes, chunk_scan_tiles_cfg, chunked_geom, inter_tiles_bytes, inter_tiles_geom,
-    pairs_dk_bytes, pairs_dq_bytes, pairs_threads, scan_bwd_record_floats, scan_bwd_smem_bytes,
-    scan_bwd_threads, scan_smem_bytes, terms_sliced_bytes, terms_whole_bytes,
+    Mamba3MimoKernels, PAIRS_THREADS_NARROW, RELEASED_CHUNK, ScanBwdGlobalGeom, ScanGeom,
+    TermsPlan, angle_walk_smem_bytes, chunk_scan_tiles_cfg, chunked_geom, inter_tiles_bytes,
+    inter_tiles_geom, pairs_dk_bytes, pairs_dq_bytes, pairs_threads, scan_bwd_record_floats,
+    scan_bwd_smem_bytes, scan_bwd_threads, scan_smem_bytes, terms_sliced_bytes, terms_whole_bytes,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -151,7 +151,13 @@ fn mimo_scan_tiles_are_the_whole_head() {
         na,
     } in SCAN_SHAPES
     {
-        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), rank).unwrap();
+        let k = Mamba3MimoKernels::compile_with_chunk(
+            dev.context(),
+            arch::arch0(),
+            rank,
+            RELEASED_CHUNK,
+        )
+        .unwrap();
         let rows = batch * seq;
         let di = nh * hd;
         let rgn = rank * ng * ds;
@@ -343,7 +349,13 @@ fn mimo_scan_bwd_global_is_the_shared_kernel() {
         na,
     } in SCAN_SHAPES
     {
-        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), rank).unwrap();
+        let k = Mamba3MimoKernels::compile_with_chunk(
+            dev.context(),
+            arch::arch0(),
+            rank,
+            RELEASED_CHUNK,
+        )
+        .unwrap();
         let rows = batch * seq;
         let di = nh * hd;
         let rgn = rank * ng * ds;
@@ -687,7 +699,13 @@ fn mimo_chunked_tiles_are_the_whole_head() {
     let ctx = GpuCtx::new(&dev).unwrap();
     let s = &ctx.stream;
     for sh in SCAN_SHAPES {
-        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
+        let k = Mamba3MimoKernels::compile_with_chunk(
+            dev.context(),
+            arch::arch0(),
+            sh.rank,
+            RELEASED_CHUNK,
+        )
+        .unwrap();
         let inp = ChunkedInputs::new(&ctx, sh);
         let (b, nh, hd, ds, rank) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank);
         let rows = b * inp.seq;
@@ -824,7 +842,13 @@ fn mimo_chunked_register_tiles_are_the_channel_parallel_kernels() {
     let ctx = GpuCtx::new(&dev).unwrap();
     let s = &ctx.stream;
     for sh in SCAN_SHAPES {
-        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
+        let k = Mamba3MimoKernels::compile_with_chunk(
+            dev.context(),
+            arch::arch0(),
+            sh.rank,
+            RELEASED_CHUNK,
+        )
+        .unwrap();
         let inp = ChunkedInputs::new(&ctx, sh);
         let (b, nh, hd, ds, rank) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank);
         let rows = b * inp.seq;
@@ -936,7 +960,13 @@ fn mimo_entering_lead_over_a_warp_is_the_lead_a_thread_a_channel() {
     let ctx = GpuCtx::new(&dev).unwrap();
     let s = &ctx.stream;
     for sh in SCAN_SHAPES {
-        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
+        let k = Mamba3MimoKernels::compile_with_chunk(
+            dev.context(),
+            arch::arch0(),
+            sh.rank,
+            RELEASED_CHUNK,
+        )
+        .unwrap();
         let inp = ChunkedInputs::new(&ctx, sh);
         let (b, nh, hd, ds, rank) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank);
         let rn = rank * ds;
@@ -1024,10 +1054,22 @@ fn mimo_chunked_scan_tiles_are_the_channel_parallel_scan() {
     let s = &ctx.stream;
     let mut checked = 0;
     for sh in SCAN_SHAPES.into_iter().chain(WIDE_SHAPES) {
-        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
+        let k = Mamba3MimoKernels::compile_with_chunk(
+            dev.context(),
+            arch::arch0(),
+            sh.rank,
+            RELEASED_CHUNK,
+        )
+        .unwrap();
         let inp = ChunkedInputs::new(&ctx, sh);
         let (b, nh, hd, ds, rank, na) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank, sh.na);
-        let geom = chunked_geom((hd, ds, rank), k.smem_optin, true, k.chunk_threads).unwrap();
+        let geom = chunked_geom(
+            (hd, ds, rank, RELEASED_CHUNK),
+            k.smem_optin,
+            true,
+            k.chunk_threads,
+        )
+        .unwrap();
         let rows = b * inp.seq;
         let ints = |extra: &[i32]| -> Vec<Arg> {
             [
@@ -1076,7 +1118,12 @@ fn mimo_chunked_scan_tiles_are_the_channel_parallel_scan() {
                     launch_runs(
                         &ctx,
                         k.chunk_scan_tiles_for(hd).get(dtype),
-                        chunk_scan_tiles_cfg((b, inp.nc, nh), (hd, rank), tq, scan_smem),
+                        chunk_scan_tiles_cfg(
+                            (b, inp.nc, nh),
+                            (hd, rank, RELEASED_CHUNK),
+                            tq,
+                            scan_smem,
+                        ),
                         &args,
                         &[NO_PACKING],
                     );
@@ -1178,13 +1225,20 @@ fn mimo_state_terms_tiles_keep_the_per_token_bits() {
     ];
     let mut checked = 0;
     for sh in SCAN_SHAPES.into_iter().chain(WIDE_SHAPES).chain(past) {
-        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
+        let k = Mamba3MimoKernels::compile_with_chunk(
+            dev.context(),
+            arch::arch0(),
+            sh.rank,
+            RELEASED_CHUNK,
+        )
+        .unwrap();
         let inp = ChunkedInputs::new(&ctx, sh);
         let ids = packed_ids(&ctx, sh.batch, inp.seq);
         let (b, nh, hd, ds, rank, na) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank, sh.na);
         let dims = (hd, ds, rank);
         let cap = k.smem_optin;
-        let geom = chunked_geom(dims, cap, true, k.chunk_threads).unwrap();
+        let geom =
+            chunked_geom((hd, ds, rank, RELEASED_CHUNK), cap, true, k.chunk_threads).unwrap();
         // The trainer's plan, then the largest and the smallest token tiles
         // whole where they fit and in slices, ste in shared memory and in
         // the global scratch.
@@ -1393,7 +1447,13 @@ fn mimo_inter_slices_keep_the_per_token_bits() {
     ];
     let mut checked = 0;
     for sh in SCAN_SHAPES.into_iter().chain(WIDE_SHAPES).chain(past) {
-        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
+        let k = Mamba3MimoKernels::compile_with_chunk(
+            dev.context(),
+            arch::arch0(),
+            sh.rank,
+            RELEASED_CHUNK,
+        )
+        .unwrap();
         let inp = ChunkedInputs::new(&ctx, sh);
         let ids = packed_ids(&ctx, sh.batch, inp.seq);
         let (b, nh, hd, ds, rank) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank);
@@ -1535,12 +1595,19 @@ fn mimo_split_pairs_keep_the_released_pair_bits() {
     ];
     let mut checked = 0;
     for sh in SCAN_SHAPES.into_iter().chain(WIDE_SHAPES).chain(wide) {
-        let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), sh.rank).unwrap();
+        let k = Mamba3MimoKernels::compile_with_chunk(
+            dev.context(),
+            arch::arch0(),
+            sh.rank,
+            RELEASED_CHUNK,
+        )
+        .unwrap();
         let inp = ChunkedInputs::new(&ctx, sh);
         let ids = packed_ids(&ctx, sh.batch, inp.seq);
         let (b, nh, hd, ds, rank, na) = (sh.batch, sh.nh, sh.hd, sh.ds, sh.rank, sh.na);
         let cap = k.smem_optin;
-        let geom = chunked_geom((hd, ds, rank), cap, true, k.chunk_threads).unwrap();
+        let geom =
+            chunked_geom((hd, ds, rank, RELEASED_CHUNK), cap, true, k.chunk_threads).unwrap();
         let tl = geom.pairs_ref;
         let tr = tl * rank;
         // The reference as the trainer ran it: rows in shared memory where
@@ -1744,7 +1811,8 @@ fn mimo_split_pairs_keep_the_released_pair_bits() {
 fn mimo_angle_walk_keeps_the_token_at_a_time_bits() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let k = Mamba3MimoKernels::compile(dev.context(), arch::arch0(), 1).unwrap();
+    let k = Mamba3MimoKernels::compile_with_chunk(dev.context(), arch::arch0(), 1, RELEASED_CHUNK)
+        .unwrap();
     let frozen = frozen_module(
         dev.context(),
         arch::arch0(),

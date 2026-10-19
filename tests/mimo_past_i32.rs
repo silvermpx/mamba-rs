@@ -402,7 +402,7 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
         launch_runs(
             ctx,
             k.chunk_scan_tiles_for(s.hd).get(ACT),
-            chunk_scan_tiles_cfg((b, nc, s.nh), (s.hd, s.r), tq, smem),
+            chunk_scan_tiles_cfg((b, nc, s.nh), (s.hd, s.r, CHUNK), tq, smem),
             &args,
             &[Arg::P(0)],
         );
@@ -477,9 +477,15 @@ fn the_chunked_scan_gives_a_sequence_past_i32_max_its_own_bits() {
     let device = GpuDevice::new(0).expect("open CUDA device");
     let ctx = GpuCtx::new(&device).expect("context");
     let st = &ctx.stream;
-    let k = Mamba3MimoKernels::compile(ctx.stream.context(), arch::arch0(), s.r).expect("MIMO");
-    let geom = chunked_geom((s.hd, s.ds, s.r), k.smem_optin, false, k.chunk_threads)
-        .expect("a chunked scan of this head fits");
+    let k = Mamba3MimoKernels::compile_with_chunk(ctx.stream.context(), arch::arch0(), s.r, CHUNK)
+        .expect("MIMO");
+    let geom = chunked_geom(
+        (s.hd, s.ds, s.r, CHUNK),
+        k.smem_optin,
+        false,
+        k.chunk_threads,
+    )
+    .expect("a chunked scan of this head fits");
 
     let w = Weights {
         dt_bias: floats(&ctx, &det(s.nh, 1, 0.5)),

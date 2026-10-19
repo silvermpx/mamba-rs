@@ -40,9 +40,11 @@ use crate::gpu::varlen::GpuVarlen;
 use crate::varlen::Varlen;
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
-use super::inference::{MimoChunkedPtrs, MimoExec, launch_chunked_scan, row_pieces};
+use super::inference::{
+    MimoChunkedPtrs, MimoExec, launch_chunk_entries, launch_chunked_scan, row_pieces,
+};
 use super::kernels::{
-    CHUNK, ChunkedGeom, Mamba3MimoKernels, PairsPlan, ScanBwdGlobalGeom, ScanGeom, TermsPlan,
+    ChunkedGeom, Mamba3MimoKernels, PairsPlan, ScanBwdGlobalGeom, ScanGeom, TermsPlan,
     angle_walk_smem_bytes, chunked_geom, scan_bwd_global_geom, scan_bwd_record_floats,
     scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
 };
@@ -356,14 +358,15 @@ struct LayerActs {
     ck_k: GpuBuffer,
     ck_v: GpuBuffer,
     ck_ang: GpuBuffer,
-    /// The chunked path's step scalars, angles, first-token lead, entering
-    /// states, readouts, and the carried keys and input the window started
+    /// The chunked path's step scalars, angles, first-token lead,
+    /// readouts, and the carried state, keys and input the window started
+    /// from, which the backward recomputes the states entering the chunks
     /// from.
     coef: GpuBuffer,
     sn: GpuBuffer,
     cs: GpuBuffer,
     e0: GpuBuffer,
-    enter: GpuBuffer,
+    s0: GpuBuffer,
     y: GpuBuffer,
     k0: GpuBuffer,
     v0: GpuBuffer,
@@ -492,6 +495,15 @@ pub struct Mamba3MimoGpuTrainer {
     scan_done: GpuByteBuffer,
     /// The chunked forward's chunk contributions, one layer's worth.
     contrib: GpuBuffer,
+    /// The states entering the chunks, one layer's worth: the forward's
+    /// scan reads them, and the backward recomputes them before each layer,
+    /// so no layer keeps its own. Kept per layer at the rank's chunk of
+    /// 64 / R tokens, they would be the largest of a layer's activations.
+    enter: GpuBuffer,
+    /// The carried state the backward's recompute starts from, a copy of
+    /// the layer's, as the state passing leaves the state after the window
+    /// in it.
+    s_init: GpuBuffer,
     dtype: WeightDtype,
     act: WeightDtype,
     template: Mamba3MimoWeights,
@@ -617,7 +629,12 @@ impl Mamba3MimoGpuTrainer {
                  {optin} bytes of shared memory"
             )
         })?;
-        let fitted = chunked_geom((hd, ds, rank), optin, true, kernels.chunk_threads);
+        let fitted = chunked_geom(
+            (hd, ds, rank, kernels.chunk),
+            optin,
+            true,
+            kernels.chunk_threads,
+        );
         let chunked = if cfg.train_use_parallel_scan() {
             fitted
         } else {
@@ -656,7 +673,7 @@ impl Mamba3MimoGpuTrainer {
         // LayerNorm.
         let stats = c.block_norm.stats_per_row();
         let nseg = seq_len.div_ceil(stride);
-        let nc = seq_len.div_ceil(CHUNK);
+        let nc = seq_len.div_ceil(kernels.chunk);
         // Each path's buffers; the other path's are left one element long.
         let seq_n = |n: usize| if chunked.is_some() { 1 } else { n };
         let ch_n = |n: usize| if chunked.is_some() { n } else { 1 };
@@ -688,7 +705,7 @@ impl Mamba3MimoGpuTrainer {
                     sn: z(ch_n(rows * nh * na))?,
                     cs: z(ch_n(rows * nh * na))?,
                     e0: z(ch_n(batch * nh))?,
-                    enter: z(ch_n(state_n))?,
+                    s0: z(ch_n(batch * nh * hd * ds))?,
                     y: z(if chunked.is_some() || cfg.is_outproj_norm {
                         rows * nh * rank * hd
                     } else {
@@ -765,7 +782,9 @@ impl Mamba3MimoGpuTrainer {
                 dot: z(ch_n(batch * nc * nh))?,
                 inter: z(ch_n(rows * nh))?,
                 dcs: z(ch_n(rows * nh))?,
-                dwp: z(ch_n(batch * nc * nh * CHUNK * (CHUNK + 1) / 2))?,
+                dwp: z(ch_n(
+                    batch * nc * nh * kernels.chunk * (kernels.chunk + 1) / 2,
+                ))?,
                 dsc3: z(ch_n(rows * nh * 3))?,
                 dth: z(ch_n(rows * nh * na))?,
                 ddt_ang: z(ch_n(rows * nh))?,
@@ -781,7 +800,7 @@ impl Mamba3MimoGpuTrainer {
                 terms_steb: z(chunked.map_or(1, |g| {
                     let t = g.terms;
                     if t.steb_global {
-                        batch * nc * nh * CHUNK.div_ceil(t.tt) * t.tt * rank * hd
+                        batch * nc * nh * kernels.chunk.div_ceil(t.tt) * t.tt * rank * hd
                     } else {
                         1
                     }
@@ -821,6 +840,8 @@ impl Mamba3MimoGpuTrainer {
         };
         let per_layer = |n: usize| z(c.n_layers * batch * nh * n);
         let contrib = z(ch_n(state_n))?;
+        let enter = z(ch_n(state_n))?;
+        let s_init = z(ch_n(batch * nh * hd * ds))?;
         let trainer = Self {
             graph: None,
             eager_gemm_manifest: None,
@@ -870,6 +891,8 @@ impl Mamba3MimoGpuTrainer {
             scan_done,
             seq_bwd,
             contrib,
+            enter,
+            s_init,
             dtype,
             act,
         };
@@ -1999,10 +2022,12 @@ impl Mamba3MimoGpuTrainer {
                 unsafe { bld.launch(cfg) }.map_err(|e| format!("MIMO B/C norm L{l}: {e:?}"))?;
             }
             if let Some(geom) = self.chunked {
-                let (kst, vst) = (
+                let (ssm, kst, vst) = (
+                    self.state_ssm.cached_ptr() + l as u64 * per(hd * ds),
                     self.state_k.cached_ptr() + l as u64 * per(rank * ds),
                     self.state_v.cached_ptr() + l as u64 * per(hd),
                 );
+                self.copy(a.s0.cached_ptr(), ssm, b * nh * hd * ds, "carried state")?;
                 self.copy(a.k0.cached_ptr(), kst, b * nh * rank * ds, "carried keys")?;
                 self.copy(a.v0.cached_ptr(), vst, b * nh * hd, "carried input")?;
                 let ptrs = MimoChunkedPtrs {
@@ -2016,8 +2041,8 @@ impl Mamba3MimoGpuTrainer {
                     cs: a.cs.cached_ptr(),
                     e0: a.e0.cached_ptr(),
                     contrib: self.contrib.cached_ptr(),
-                    enter: a.enter.cached_ptr(),
-                    ssm: self.state_ssm.cached_ptr() + l as u64 * per(hd * ds),
+                    enter: self.enter.cached_ptr(),
+                    ssm,
                     kst,
                     vst,
                     ang: self.state_ang.cached_ptr() + l as u64 * per(na),
@@ -2758,7 +2783,48 @@ impl Mamba3MimoGpuTrainer {
         }
         if let Some(geom) = self.chunked {
             // The chunked path's backward, see kernels/mamba3_mimo_chunked_bwd.cu.
-            let nc = t_len.div_ceil(CHUNK);
+            let nc = t_len.div_ceil(k.chunk);
+            // The states entering the chunks, recomputed from what the
+            // forward kept by the forward's own kernels on the same inputs,
+            // so they carry the forward's bits.
+            self.copy(
+                self.s_init.cached_ptr(),
+                a.s0.cached_ptr(),
+                b * nh * hd * ds,
+                "window's carried state",
+            )?;
+            let entries = MimoChunkedPtrs {
+                proj: a.proj.ptr(),
+                bn: a.bn.cached_ptr(),
+                cn: a.cn.cached_ptr(),
+                out: 0,
+                y_out: 0,
+                coef: a.coef.cached_ptr(),
+                sn: a.sn.cached_ptr(),
+                cs: a.cs.cached_ptr(),
+                e0: a.e0.cached_ptr(),
+                contrib: self.contrib.cached_ptr(),
+                enter: self.enter.cached_ptr(),
+                ssm: self.s_init.cached_ptr(),
+                kst: a.k0.cached_ptr(),
+                vst: a.v0.cached_ptr(),
+                ang: 0,
+                dt_bias: at(base, ls.dt_bias),
+                b_bias: at(base, ls.b_bias),
+                c_bias: at(base, ls.c_bias),
+                d: at(base, ls.d_param),
+                mimo_x: at(base, ls.mimo_x),
+                mimo_z: at(base, ls.mimo_z),
+                mimo_o: at(base, ls.mimo_o),
+                seq_idx,
+            };
+            let x = MimoExec {
+                ctx: &self.ctx,
+                kernels: k,
+                cfg: &self.cfg,
+                act,
+            };
+            launch_chunk_entries(x, &entries, &geom, (b, t_len), l)?;
             let cbuf = &s.cb;
             let (dy, du, dq, dk, dsl, d_init) = (
                 cbuf.dy.cached_ptr(),
@@ -2794,7 +2860,7 @@ impl Mamba3MimoGpuTrainer {
                 a.sn.cached_ptr(),
                 a.cs.cached_ptr(),
                 a.e0.cached_ptr(),
-                a.enter.cached_ptr(),
+                self.enter.cached_ptr(),
                 a.y.cached_ptr(),
             );
             let (k0, v0, bn, cn, d_o) = (
@@ -2881,7 +2947,7 @@ impl Mamba3MimoGpuTrainer {
                 cfg3(
                     b * nc,
                     nh,
-                    CHUNK.div_ceil(tt),
+                    k.chunk.div_ceil(tt),
                     8 * (tt * rank).next_multiple_of(4),
                     smem
                 ),
@@ -2967,7 +3033,7 @@ impl Mamba3MimoGpuTrainer {
                 cfg3(
                     b * nc,
                     nh,
-                    CHUNK.div_ceil(tt),
+                    k.chunk.div_ceil(tt),
                     8 * (tt * rank).next_multiple_of(4),
                     terms_bytes
                 ),
@@ -3002,7 +3068,7 @@ impl Mamba3MimoGpuTrainer {
                 pss as i32,
             );
             let threads = crate::mamba3_mimo::gpu::kernels::pairs_threads(tq, rank);
-            let tiles = CHUNK.div_ceil(tq);
+            let tiles = k.chunk.div_ceil(tq);
             let (n_blocks, p_blocks) = (ds.div_ceil(128), hd.div_ceil(128));
             go_y!(
                 pairs_dq.get(act),
@@ -3055,7 +3121,7 @@ impl Mamba3MimoGpuTrainer {
             );
             go_y!(
                 &k.cb.combine,
-                cfg3(b * nc, nh, 1, CHUNK, 0),
+                cfg3(b * nc, nh, 1, k.chunk, 0),
                 "decay gradients",
                 [dsc3, dwp, dcs, inter, dot, coef, t_i, nh_i],
                 [seq_idx]

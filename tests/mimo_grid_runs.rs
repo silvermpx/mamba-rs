@@ -69,7 +69,7 @@ fn the_state_pass_gives_elements_past_the_y_extent_their_twins_bits() {
     let device = GpuDevice::new(0).expect("open CUDA device");
     let ctx = GpuCtx::new(&device).expect("context");
     let (batch, nh, rank, ds) = (1usize, 1usize, 1usize, 256usize);
-    let k = Mamba3MimoKernels::compile(ctx.stream.context(), arch::arch0(), rank)
+    let k = Mamba3MimoKernels::compile_with_chunk(ctx.stream.context(), arch::arch0(), rank, CHUNK)
         .expect("MIMO kernels");
     assert!(PAIRS <= ds && SHIFT.is_multiple_of(ds));
     let hd = (SHIFT + PAIRS).div_ceil(ds);

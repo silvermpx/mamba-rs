@@ -219,7 +219,7 @@ DEFINE_M3MB_GATE_NORMED(m3mb_gate_normed_f16, __half)
 // multiple, so the float4 rows of dy's slice [ps][R4 + 4] (transposed, R4 =
 // tt R rounded up to 4) start on 16 bytes, then d [tt R][N]; the trees'
 // [tt][256] partials reuse the slices' room when it holds them, else follow
-// d. Grid (B * nc, H, ceil(64 / tt)), block 8 R4 threads.
+// d. Grid (B * nc, H, ceil(M3M_CHUNK / tt)), block 8 R4 threads.
 __device__ __forceinline__ void m3mb_inter_tiles_body(
     float* __restrict__ dq, float* __restrict__ inter,
     const float* __restrict__ dy, const float* __restrict__ enter,
@@ -633,7 +633,8 @@ extern "C" __global__ void m3mb_chunk_dot(
 // odd), and the tree recomputes u. ste [tt R][P] follows in shared memory,
 // or with `steb_glob` in that block's slice of a global scratch, and the
 // trees' [tt][256] last; in the sliced layout they take the slices' room
-// when it holds them. Grid (B * nc, H, ceil(64 / tt)), block 8 R4 threads.
+// when it holds them. Grid (B * nc, H, ceil(M3M_CHUNK / tt)), block 8 R4
+// threads.
 template <typename T>
 __device__ __forceinline__ void m3mb_state_terms_tiles_body(
     float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dcs,
@@ -1002,7 +1003,8 @@ DEFINE_M3MB_STATE_TERMS_TILES(m3mb_state_terms_tiles_f16, __half)
 // 128)), padded to a float4 multiple so the float4 rows of w M [tr][TR4 + 4]
 // (transposed) start on 16 bytes, w [tl][tl]. With a packing a row's chain
 // runs over the keys of its own sequence only, as the released kernel ran
-// it. Grid (B * nc, H, ceil(64 / tl) * ceil(N / 128)), block 8 TR4 threads.
+// it. Grid (B * nc, H, ceil(M3M_CHUNK / tl) * ceil(N / 128)), block 8 TR4
+// threads.
 template <typename T>
 __device__ __forceinline__ void m3mb_pairs_dq_body(
     float* __restrict__ dq,
@@ -1266,8 +1268,8 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
 // every thread scales its share of G and M into w G and w M in place. With
 // a packing a pair of two sequences is no pair (its dw is zero) and a row's
 // chains run over the queries of its own sequence only, as the released
-// kernel ran them. Grid (B * nc, H, ceil(64 / tl) * max(ceil(N / 128),
-// ceil(P / 128))), block 8 TR4 threads.
+// kernel ran them. Grid (B * nc, H, ceil(M3M_CHUNK / tl) *
+// max(ceil(N / 128), ceil(P / 128))), block 8 TR4 threads.
 template <typename T>
 __device__ __forceinline__ void m3mb_pairs_dk_body(
     float* __restrict__ dk, float* __restrict__ du, float* __restrict__ dwp,

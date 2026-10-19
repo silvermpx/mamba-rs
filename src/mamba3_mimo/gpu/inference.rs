@@ -14,7 +14,7 @@ use crate::bidi::{mlps_after, opens_pair, reads_reversed};
 use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 
 use super::kernels::{
-    CHUNK, ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunk_scan_tiles_cfg, chunked_geom, scan_geom,
+    ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunk_scan_tiles_cfg, chunked_geom, scan_geom,
 };
 use crate::config::ScanMode;
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
@@ -288,7 +288,7 @@ impl Mamba3MimoGpuEngine {
             )
         })?;
         let chunked = chunked_geom(
-            (hd, ds, rank),
+            (hd, ds, rank, kernels.chunk),
             kernels.smem_optin,
             false,
             kernels.chunk_threads,
@@ -468,7 +468,7 @@ impl Mamba3MimoGpuEngine {
         let chunked = self.use_chunked(seq_len);
         let ch = |n: usize| if chunked { n } else { 1 };
         let (nh, na) = (c.nheads(), c.num_rope_angles());
-        let nc = seq_len.div_ceil(CHUNK);
+        let nc = seq_len.div_ceil(self.kernels.chunk);
         Ok(Mamba3MimoGpuWindow {
             graph: None,
             eager_gemm_manifest: None,
@@ -1148,7 +1148,7 @@ pub(crate) fn launch_chunked_scan(
     l: usize,
 ) -> Result<(), String> {
     let c = x.cfg;
-    let nc = t_len.div_ceil(CHUNK);
+    let nc = t_len.div_ceil(x.kernels.chunk);
     let (di, bc) = (c.d_inner(), c.bc_width());
     let (nh, hd, ds, r, ng, na) = (
         c.nheads(),
@@ -1172,9 +1172,7 @@ pub(crate) fn launch_chunked_scan(
         sn,
         cs,
         e0,
-        contrib,
         enter,
-        ssm,
         kst,
         vst,
         ang,
@@ -1186,6 +1184,7 @@ pub(crate) fn launch_chunked_scan(
         mimo_z,
         mimo_o,
         seq_idx,
+        ..
     } = *ptrs;
     let (seq_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i) = (
         t_len as i32,
@@ -1196,7 +1195,7 @@ pub(crate) fn launch_chunked_scan(
         r as i32,
         na as i32,
     );
-    let (heads_i, ang_col_i, b_i) = (heads as i32, ang_col as i32, b as i32);
+    let (heads_i, ang_col_i) = (heads as i32, ang_col as i32);
     let a_floor = c.a_floor;
     let err = |what: &'static str| move |e| format!("MIMO chunked {what} L{l}: {e:?}");
     {
@@ -1227,6 +1226,176 @@ pub(crate) fn launch_chunked_scan(
             unsafe { bld.launch(cfg) }.map_err(err("prep"))?;
         }
     }
+    launch_chunk_entries(x, ptrs, geom, (b, t_len), l)?;
+    if geom.scan_tiles.0 > 0 {
+        let (tq, kt, nk, smem) = geom.scan_tiles;
+        let w = [b_bias, c_bias, d, mimo_x, mimo_z, mimo_o];
+        let (tq_i, kt_i, nk_i) = (tq as i32, kt as i32, nk as i32);
+        let cfg = chunk_scan_tiles_cfg((b, nc, nh), (hd, r, x.kernels.chunk), tq, smem);
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut bld = stream.launch_builder(x.kernels.chunk_scan_tiles_for(hd).get(x.act));
+            bld.arg(&gated);
+            bld.arg(&y_out);
+            bld.arg(&proj);
+            bld.arg(&ld_proj);
+            bld.arg(&bn);
+            bld.arg(&cn);
+            bld.arg(&coef);
+            bld.arg(&sn);
+            bld.arg(&cs);
+            bld.arg(&enter);
+            for p in &w {
+                bld.arg(p);
+            }
+            bld.arg(&seq_i);
+            bld.arg(&nh_i);
+            bld.arg(&ng_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            bld.arg(&r_i);
+            bld.arg(&na_i);
+            bld.arg(&tq_i);
+            bld.arg(&kt_i);
+            bld.arg(&nk_i);
+            bld.arg(&y_first);
+            bld.arg(&seq_idx);
+            unsafe { bld.launch(cfg) }.map_err(err("scan"))?;
+        }
+    } else {
+        let (tt, st, smem) = geom.scan;
+        let w = [b_bias, c_bias, d, mimo_x, mimo_z, mimo_o];
+        let (tt_i, st_i, pt_i) = (tt as i32, st as i32, geom.pt as i32);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (
+                (b * nc) as u32,
+                nh as u32,
+                (x.kernels.chunk.div_ceil(tt) * hd.div_ceil(geom.pt)) as u32,
+            ),
+            // Whole warps only: the tile products leave a partial warp out,
+            // so a block under 32 threads would leave G unwritten. Threads
+            // past `tt * pt` own no output, and each product keeps the one
+            // chain its owner runs, so the rounding moves no bits.
+            block_dim: ((tt * geom.pt).next_multiple_of(32) as u32, 1, 1),
+            shared_mem_bytes: smem as u32,
+        };
+        for (y_first, z_first, cfg) in yz_runs(cfg) {
+            let mut bld = stream.launch_builder(x.kernels.chunk_scan.get(x.act));
+            bld.arg(&gated);
+            bld.arg(&y_out);
+            bld.arg(&proj);
+            bld.arg(&ld_proj);
+            bld.arg(&bn);
+            bld.arg(&cn);
+            bld.arg(&coef);
+            bld.arg(&sn);
+            bld.arg(&cs);
+            bld.arg(&enter);
+            for p in &w {
+                bld.arg(p);
+            }
+            bld.arg(&seq_i);
+            bld.arg(&nh_i);
+            bld.arg(&ng_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            bld.arg(&r_i);
+            bld.arg(&na_i);
+            bld.arg(&tt_i);
+            bld.arg(&st_i);
+            bld.arg(&pt_i);
+            bld.arg(&y_first);
+            bld.arg(&z_first);
+            bld.arg(&seq_idx);
+            unsafe { bld.launch(cfg) }.map_err(err("scan"))?;
+        }
+    }
+    {
+        let bb = b_bias;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (b as u32, nh as u32, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut bld = stream.launch_builder(x.kernels.chunk_writeback.get(x.act));
+            bld.arg(&kst);
+            bld.arg(&vst);
+            bld.arg(&proj);
+            bld.arg(&ld_proj);
+            bld.arg(&bn);
+            bld.arg(&sn);
+            bld.arg(&cs);
+            bld.arg(&bb);
+            bld.arg(&seq_i);
+            bld.arg(&nh_i);
+            bld.arg(&ng_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            bld.arg(&r_i);
+            bld.arg(&na_i);
+            bld.arg(&y_first);
+            unsafe { bld.launch(cfg) }.map_err(err("writeback"))?;
+        }
+    }
+    Ok(())
+}
+
+/// One layer's chunk states over a window of `t_len` tokens of `b`
+/// sequences: each chunk's own contribution into `ptrs.contrib`, then the
+/// state passing from the carried state `ptrs.ssm`, with the first token's
+/// lead term over the carried keys and input `ptrs.kst` and `ptrs.vst`,
+/// into the states entering the chunks, `ptrs.enter`. The state after the
+/// window is left in `ptrs.ssm`. It reads the step scalars and angles the
+/// prep wrote. The training backward runs it again on a copy of the
+/// window's carried state, so no layer keeps its chunk states between the
+/// passes.
+pub(crate) fn launch_chunk_entries(
+    x: MimoExec<'_>,
+    ptrs: &MimoChunkedPtrs,
+    geom: &ChunkedGeom,
+    (b, t_len): (usize, usize),
+    l: usize,
+) -> Result<(), String> {
+    let c = x.cfg;
+    let nc = t_len.div_ceil(x.kernels.chunk);
+    let (nh, hd, ds, r, ng, na) = (
+        c.nheads(),
+        c.headdim,
+        c.d_state,
+        c.mimo_rank,
+        c.ngroups,
+        c.num_rope_angles(),
+    );
+    let ld_proj = c.in_proj_out_dim() as i64;
+    let stream = &x.ctx.stream;
+    let MimoChunkedPtrs {
+        proj,
+        bn,
+        coef,
+        sn,
+        cs,
+        e0,
+        contrib,
+        enter,
+        ssm,
+        kst,
+        vst,
+        b_bias,
+        mimo_x,
+        seq_idx,
+        ..
+    } = *ptrs;
+    let (seq_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i) = (
+        t_len as i32,
+        nh as i32,
+        ng as i32,
+        hd as i32,
+        ds as i32,
+        r as i32,
+        na as i32,
+    );
+    let b_i = b as i32;
+    let err = |what: &'static str| move |e| format!("MIMO chunked {what} L{l}: {e:?}");
     if geom.state_tiles.0 > 0 {
         let (jc, sl, pg, smem) = geom.state_tiles;
         let (bb, px) = (b_bias, mimo_x);
@@ -1332,116 +1501,6 @@ pub(crate) fn launch_chunked_scan(
             bld.arg(&y_first);
             bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(err("state passing"))?;
-        }
-    }
-    if geom.scan_tiles.0 > 0 {
-        let (tq, kt, nk, smem) = geom.scan_tiles;
-        let w = [b_bias, c_bias, d, mimo_x, mimo_z, mimo_o];
-        let (tq_i, kt_i, nk_i) = (tq as i32, kt as i32, nk as i32);
-        let cfg = chunk_scan_tiles_cfg((b, nc, nh), (hd, r), tq, smem);
-        for (y_first, cfg) in y_runs(cfg) {
-            let mut bld = stream.launch_builder(x.kernels.chunk_scan_tiles_for(hd).get(x.act));
-            bld.arg(&gated);
-            bld.arg(&y_out);
-            bld.arg(&proj);
-            bld.arg(&ld_proj);
-            bld.arg(&bn);
-            bld.arg(&cn);
-            bld.arg(&coef);
-            bld.arg(&sn);
-            bld.arg(&cs);
-            bld.arg(&enter);
-            for p in &w {
-                bld.arg(p);
-            }
-            bld.arg(&seq_i);
-            bld.arg(&nh_i);
-            bld.arg(&ng_i);
-            bld.arg(&hd_i);
-            bld.arg(&ds_i);
-            bld.arg(&r_i);
-            bld.arg(&na_i);
-            bld.arg(&tq_i);
-            bld.arg(&kt_i);
-            bld.arg(&nk_i);
-            bld.arg(&y_first);
-            bld.arg(&seq_idx);
-            unsafe { bld.launch(cfg) }.map_err(err("scan"))?;
-        }
-    } else {
-        let (tt, st, smem) = geom.scan;
-        let w = [b_bias, c_bias, d, mimo_x, mimo_z, mimo_o];
-        let (tt_i, st_i, pt_i) = (tt as i32, st as i32, geom.pt as i32);
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (
-                (b * nc) as u32,
-                nh as u32,
-                (CHUNK.div_ceil(tt) * hd.div_ceil(geom.pt)) as u32,
-            ),
-            // Whole warps only: the tile products leave a partial warp out,
-            // so a block under 32 threads would leave G unwritten. Threads
-            // past `tt * pt` own no output, and each product keeps the one
-            // chain its owner runs, so the rounding moves no bits.
-            block_dim: ((tt * geom.pt).next_multiple_of(32) as u32, 1, 1),
-            shared_mem_bytes: smem as u32,
-        };
-        for (y_first, z_first, cfg) in yz_runs(cfg) {
-            let mut bld = stream.launch_builder(x.kernels.chunk_scan.get(x.act));
-            bld.arg(&gated);
-            bld.arg(&y_out);
-            bld.arg(&proj);
-            bld.arg(&ld_proj);
-            bld.arg(&bn);
-            bld.arg(&cn);
-            bld.arg(&coef);
-            bld.arg(&sn);
-            bld.arg(&cs);
-            bld.arg(&enter);
-            for p in &w {
-                bld.arg(p);
-            }
-            bld.arg(&seq_i);
-            bld.arg(&nh_i);
-            bld.arg(&ng_i);
-            bld.arg(&hd_i);
-            bld.arg(&ds_i);
-            bld.arg(&r_i);
-            bld.arg(&na_i);
-            bld.arg(&tt_i);
-            bld.arg(&st_i);
-            bld.arg(&pt_i);
-            bld.arg(&y_first);
-            bld.arg(&z_first);
-            bld.arg(&seq_idx);
-            unsafe { bld.launch(cfg) }.map_err(err("scan"))?;
-        }
-    }
-    {
-        let bb = b_bias;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (b as u32, nh as u32, 1),
-            block_dim: (128, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        for (y_first, cfg) in y_runs(cfg) {
-            let mut bld = stream.launch_builder(x.kernels.chunk_writeback.get(x.act));
-            bld.arg(&kst);
-            bld.arg(&vst);
-            bld.arg(&proj);
-            bld.arg(&ld_proj);
-            bld.arg(&bn);
-            bld.arg(&sn);
-            bld.arg(&cs);
-            bld.arg(&bb);
-            bld.arg(&seq_i);
-            bld.arg(&nh_i);
-            bld.arg(&ng_i);
-            bld.arg(&hd_i);
-            bld.arg(&ds_i);
-            bld.arg(&r_i);
-            bld.arg(&na_i);
-            bld.arg(&y_first);
-            unsafe { bld.launch(cfg) }.map_err(err("writeback"))?;
         }
     }
     Ok(())

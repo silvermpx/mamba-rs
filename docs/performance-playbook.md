@@ -304,6 +304,12 @@ forces either one, so a suite run on one board covers both.
   states, rank 2 from head 64 with 256 states, and ranks 3 and up from
   head 96, or from head 64 with 128 states.
 
+`MAMBA_RS_MIMO_CHUNK=auto|<n>` is of another kind. It compiles the MIMO
+chunked kernels at a chunk of n tokens, a power of two from 4 to 64,
+instead of the rank's own 64 / R, to time one against the other. The chunk
+sets the order of the sums, so unlike the switches above it changes the
+bits of the chunked outputs.
+
 Each switch is read once per process, and a value it does not know
 panics.
 

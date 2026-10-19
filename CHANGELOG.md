@@ -132,6 +132,9 @@ are gone.
   (the split grids), `MAMBA_RS_STEP_PREFETCH` (the SISO decode step with
   and without the early fetch) and `MAMBA_RS_PAIRS_BUILD` (the two builds
   of the MIMO pair kernels). Both builds of each give the same bits.
+  `MAMBA_RS_MIMO_CHUNK` sets the MIMO chunk length to a power of two from
+  4 to 64 for measurements. Unlike the others it changes the bits of the
+  chunked MIMO outputs.
 
 ### Faster
 
@@ -167,7 +170,10 @@ SISO with head 64 and the sequential scan trains in 0.8 and was refused in
 - Mamba-3 MIMO: the inter-chunk term, the state terms, the pair terms and
   the angle walk run on token tiles at every shape, the pair terms keep
   their sums in registers on wide heads and states instead of spilling
-  them, and a small grid spreads over all multiprocessors.
+  them, and a small grid spreads over all multiprocessors. A chunk holds
+  64 / R tokens, as in the reference, so the pair terms do about R times
+  less work per token. The trainer recomputes the states entering the
+  chunks in the backward rather than keeping them for every layer.
 - The gated MLP gate in every family.
 - The Mamba and SISO CPU training tapes keep the state every 16 steps, so
   a long window needs under a fifth of the memory.

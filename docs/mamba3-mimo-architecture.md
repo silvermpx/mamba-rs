@@ -141,12 +141,20 @@ tiles over several blocks, with the same bits. The module is compiled for
 the model's rank, so every rank from 1 to 16 runs as a constant, its
 per-rank arrays unrolled into registers.
 
-A prompt longer than 64 tokens runs the chunked scan (chunks of 64), and
-so does every training window unless the configuration asks for
-`ScanMode::Sequential`. The trainer runs in f32, tf32, bf16 and f16 with
-f32 master weights, chunked or sequential. With `is_outproj_norm` either
-scan also writes its readouts, and a kernel of its own normalises and
-gates them; in training its backward runs ahead of the scan's.
+A prompt longer than 64 tokens runs the chunked scan, and so does every
+training window unless the configuration asks for `ScanMode::Sequential`.
+A chunk holds 64 / R tokens, rounded down to a power of two and at least
+4, as the reference sets its MIMO chunk. A chunk then has about 64 rows at
+any rank, so the pair terms, whose work grows with the square of a chunk's
+rows, do about R times less work per token than in chunks of 64 tokens.
+Training keeps no chunk states per layer: the backward recomputes a
+layer's states entering the chunks from what the forward kept (the step
+scalars, the keys and the state the window started from) with the
+forward's own kernels, so they carry the forward's bits. The trainer runs
+in f32, tf32, bf16 and f16 with f32 master weights, chunked or
+sequential. With `is_outproj_norm` either scan also writes its
+readouts, and a kernel of its own normalises and gates them; in training
+its backward runs ahead of the scan's.
 
 | file | purpose |
 |---|---|

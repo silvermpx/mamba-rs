@@ -1,5 +1,5 @@
-// Mamba-3 MIMO on the GPU, the chunked path: a window in chunks of 64
-// tokens, the chunks in parallel.
+// Mamba-3 MIMO on the GPU, the chunked path: a window in chunks of
+// M3M_CHUNK tokens, the chunks in parallel.
 //
 // The trapezoid folds the way SISO's chunked form folds it. Token s's rank
 // inputs u_s[r] = Psi_r x_s and rotated keys k_s[r] enter the state with
@@ -33,7 +33,11 @@
 //
 // Composed after mamba3_mimo.cu in the MIMO module.
 
+// Tokens per chunk: the host compiles the module at the rank's length
+// (`chunk_len` in mamba3_mimo/gpu/kernels.rs), 64 when nothing sets it.
+#ifndef M3M_CHUNK
 #define M3M_CHUNK 64
+#endif
 
 // The rotated value at n of a biased key or query rank row (the group's
 // normalised row `src` plus the head's `bias`), the half-split pairs
@@ -722,10 +726,9 @@ extern "C" __global__ void m3m_state_pass(
 // their G block. Shared memory: tt * R * N (queries) + st * R * (N + 1)
 // (keys, rows padded) + tt * R * st * R (G) + st * pt (inputs) floats. The
 // tile sizes change what a pass stages, never the order of a thread's sum.
-// Grid (B * nc, H, ceil(64 / tt) * ceil(P / pt)), the channel tile
-// fastest, block tt * pt threads. Every channel tile of a token tile
-// computes the same G. `y_out` (may be
-// null) receives the readouts y_t[r][p] with D, [B, T, H, R, P], what the
+// Grid (B * nc, H, ceil(M3M_CHUNK / tt) * ceil(P / pt)), the channel
+// tile fastest, block tt * pt threads. Every channel tile of a token tile
+// computes the same G. `y_out` (may be null) receives the readouts y_t[r][p] with D, [B, T, H, R, P], what the
 // training backward's gate reads.
 template <typename TI, int RK>
 __device__ __forceinline__ void m3m_chunk_scan_body(
@@ -924,12 +927,12 @@ DEFINE_M3M_CHUNK_SCAN(m3m_chunk_scan_f16, __half)
 // rotated once per query tile and staged `nk` state indices at a time; the
 // inter pass streams the entering state through the same space.
 // Shared memory: q [N][QR + 4], keys [nk][68], u [64][32 JP],
-// Gw [64][QR + 4], w [tq][kt], the chunk's Acs, scale and gamma [3][64];
-// QR = tq R rounded up to 8. A warp holds 4 query rows, so a block of 64
+// Gw [64][QR + 4], w [tq][kt], the chunk's Acs, scale and gamma
+// [3][M3M_CHUNK]; QR = tq R rounded up to 8. A warp holds 4 query rows, so a block of 64
 // rows runs 16 warps: one block fills the shared memory of an SM and the
 // extra warps hide the staging loads. The heaviest query tile (the last)
-// runs first. Grid (B * nc, H, ceil(64 / tq) ceil(P / 32 JP)), the query
-// tiles innermost, block 8 QR threads.
+// runs first. Grid (B * nc, H, ceil(M3M_CHUNK / tq) ceil(P / 32 JP)), the
+// query tiles innermost, block 8 QR threads.
 template <typename TI, int JP>
 __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     TI* __restrict__ out, float* __restrict__ y_out,
@@ -976,7 +979,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
     float* ut = kts + nk * KCS;                      // [KC][PP]
     float* gw = ut + KC * PP;                        // [KC][qrs]
     float* wts = gw + KC * qrs;                      // [tq][kt]
-    float* sc = wts + tq * kt;                       // Acs, scale, gamma [3][64]
+    float* sc = wts + tq * kt;                       // Acs, scale, gamma [3][chunk]
     const int rb_floats = nk * KCS + KC * PP + KC * qrs + tq * kt;
     float* stg = rb;                                 // inter: [nsp][PP + 1]
     float* yg = rb;                                  // gate: [qr][PP]

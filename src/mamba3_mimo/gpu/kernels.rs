@@ -64,6 +64,9 @@ pub struct Mamba3MimoKernels {
     /// The widest blocks the chunked path's kernels launch, from their
     /// register use.
     pub chunk_threads: ChunkThreads,
+    /// Tokens per chunk of the chunked path this module was compiled for
+    /// ([`chunk_len`]).
+    pub chunk: usize,
     pub compiler_identity: ki::CompilerIdentity,
     pub artifact_identity: ki::ArtifactIdentity,
     /// The loaded module, held by every graph that launches these kernels
@@ -206,7 +209,7 @@ impl ChunkThreads {
 /// room for a second block on the multiprocessor is taken, else the largest
 /// that fits.
 fn tiles_geom(
-    (hd, ds, rank): (usize, usize, usize),
+    (hd, ds, rank, chunk): (usize, usize, usize, usize),
     cap: usize,
     threads: usize,
 ) -> (usize, usize, usize, usize) {
@@ -219,20 +222,23 @@ fn tiles_geom(
         _ => 4,
     };
     let bytes = |sl: usize| (sl * rank * (pg + 32 * jc) + sl) * 4;
-    let passes = [CHUNK, 32, 16, 8, 4, 2, 1];
-    passes
-        .into_iter()
+    let passes = || {
+        [64usize, 32, 16, 8, 4, 2, 1]
+            .into_iter()
+            .filter(move |&sl| sl <= chunk)
+    };
+    passes()
         .find(|&sl| bytes(sl) <= cap / 2)
-        .or_else(|| passes.into_iter().find(|&sl| bytes(sl) <= cap))
+        .or_else(|| passes().find(|&sl| bytes(sl) <= cap))
         .map_or((0, 0, 0, 0), |sl| (jc, sl, pg, bytes(sl)))
 }
 
 /// The chunked geometry of a head of `hd` channels, `ds` state indices and
-/// rank `rank` within `cap` bytes of shared memory and the blocks `threads`
-/// allows, or `None` when a kernel of the path cannot fit. The backward's
-/// kernels count only when `training`.
+/// rank `rank` in chunks of `chunk` tokens within `cap` bytes of shared
+/// memory and the blocks `threads` allows, or `None` when a kernel of the
+/// path cannot fit. The backward's kernels count only when `training`.
 pub fn chunked_geom(
-    (hd, ds, rank): (usize, usize, usize),
+    (hd, ds, rank, chunk): (usize, usize, usize, usize),
     cap: usize,
     training: bool,
     threads: ChunkThreads,
@@ -244,15 +250,18 @@ pub fn chunked_geom(
     let wide = (256 / pt).max(1);
     // The state kernel: kt [sl][R][nt], xt [sl][P], wt [sl].
     let state = (1..=wide.min(ds)).rev().find_map(|nt| {
-        [CHUNK, 32, 16, 8, 4, 2, 1].into_iter().find_map(|sl| {
-            let bytes = (sl * rank * nt + sl * pt + sl) * 4;
-            (bytes <= cap).then_some((nt, sl, bytes))
-        })
+        [64usize, 32, 16, 8, 4, 2, 1]
+            .into_iter()
+            .filter(|&sl| sl <= chunk)
+            .find_map(|sl| {
+                let bytes = (sl * rank * nt + sl * pt + sl) * 4;
+                (bytes <= cap).then_some((nt, sl, bytes))
+            })
     })?;
-    let state_tiles = tiles_geom((hd, ds, rank), cap, threads.state_tiles);
+    let state_tiles = tiles_geom((hd, ds, rank, chunk), cap, threads.state_tiles);
     // The output kernel: queries [tt][R][N], keys [st][R][N + 1], their
     // block [tt R][st R], the keys' inputs [st][P].
-    let scan = (1..=wide.min(CHUNK)).rev().find_map(|tt| {
+    let scan = (1..=wide.min(chunk)).rev().find_map(|tt| {
         [8usize, 4, 2, 1].into_iter().find_map(|st| {
             let bytes =
                 (tt * rank * ds + st * rank * (ds + 1) + tt * rank * st * rank + st * pt) * 4;
@@ -264,12 +273,12 @@ pub fn chunked_geom(
     // chunk's three scalars, QR = tq R rounded up to 8 (at most 64 rows, so
     // at most 512 threads); the keys take the most state indices per pass
     // that fit.
-    let scan_tiles = if rank <= CHUNK {
+    let scan_tiles = if rank <= ROWS {
         let tq = [16usize, 8, 4, 2, 1]
             .into_iter()
-            .find(|&tq| tq * rank <= CHUNK)
+            .find(|&tq| tq * rank <= ROWS)
             .unwrap_or(1);
-        let kt = CHUNK / rank;
+        let kt = (ROWS / rank).min(chunk);
         let qrs = (tq * rank).next_multiple_of(8) + 4;
         let lanes = hd
             .div_ceil(32)
@@ -277,7 +286,7 @@ pub fn chunked_geom(
             .min(SCAN_TILE_CHANNELS / 32);
         let pp = 32 * lanes;
         let bytes = |nk: usize| {
-            (ds * qrs + nk * (CHUNK + 4) + CHUNK * pp + CHUNK * qrs + tq * kt + 3 * CHUNK) * 4
+            (ds * qrs + nk * (ROWS + 4) + ROWS * pp + ROWS * qrs + tq * kt + 3 * chunk) * 4
         };
         std::iter::successors(Some(ds), |&nk| (nk > 1).then(|| nk.div_ceil(2)))
             .find(|&nk| bytes(nk) <= cap)
@@ -302,7 +311,7 @@ pub fn chunked_geom(
     }
     // The local state gradient: queries [L][R][nt], decays [L].
     let dsloc = (1..=wide.min(ds)).rev().find_map(|nt| {
-        let bytes = (CHUNK * rank * nt + CHUNK) * 4;
+        let bytes = (chunk * rank * nt + chunk) * 4;
         (bytes <= cap).then_some((nt, bytes))
     })?;
     // The pair kernel as it was released took the largest token tile whose
@@ -331,7 +340,7 @@ pub fn chunked_geom(
         scan,
         scan_tiles,
         dsloc,
-        dsloc_tiles: tiles_geom((hd, ds, rank), cap, threads.dsloc_tiles),
+        dsloc_tiles: tiles_geom((hd, ds, rank, chunk), cap, threads.dsloc_tiles),
         inter_tiles,
         terms,
         pairs_ref,
@@ -417,7 +426,7 @@ pub fn pairs_plan(
     };
     let fits_block = |tq: usize| match narrow {
         true => pairs_threads(tq, rank) <= PAIRS_THREADS_NARROW,
-        false => tq * rank <= CHUNK,
+        false => tq * rank <= ROWS,
     };
     [16usize, 8, 4, 2, 1]
         .into_iter()
@@ -535,7 +544,7 @@ pub fn terms_plan((hd, ds, rank): (usize, usize, usize), cap: usize) -> Option<T
     let tiles = || {
         [16usize, 8, 4, 2, 1]
             .into_iter()
-            .filter(move |&tt| tt * rank <= CHUNK)
+            .filter(move |&tt| tt * rank <= ROWS)
     };
     if let Some(tt) = tiles().find(|&tt| terms_whole_bytes(dims, tt) <= cap) {
         return Some(TermsPlan {
@@ -611,7 +620,7 @@ pub fn inter_tiles_geom(
     let plans = || {
         [16usize, 8, 4, 2, 1]
             .into_iter()
-            .filter(|&tt| tt * rank <= CHUNK)
+            .filter(|&tt| tt * rank <= ROWS)
             .filter_map(|tt| widest(tt).map(|ps| (tt, ps)))
     };
     plans()
@@ -723,8 +732,47 @@ pub fn scan_bwd_global_geom(
     }
 }
 
-/// Tokens per chunk of the chunked path.
-pub const CHUNK: usize = 64;
+/// The rows a token tile of the chunked path takes at most, its tokens
+/// times the rank: 512 threads at 8 a row.
+pub const ROWS: usize = 64;
+
+/// Tokens per chunk of the chunked path as it was released, at every rank.
+pub const RELEASED_CHUNK: usize = 64;
+
+/// Tokens per chunk of the chunked path at rank `rank`: 64 / R rounded down
+/// to a power of two and at least 4, so a chunk holds about 64 rows of
+/// pairs, as the Mamba-3 reference sets its MIMO chunk (64 / R). The pair
+/// terms then do the work of a rank-1 chunk at any rank instead of R^2 times
+/// it, for R times as many chunks. The chunked form is exact at any length,
+/// so only the rounding moves.
+pub fn chunk_len(rank: usize) -> usize {
+    if let Some(forced) = chunk_forced() {
+        return forced;
+    }
+    let tokens = (ROWS / rank.max(1)).max(1);
+    (1usize << tokens.ilog2()).max(4)
+}
+
+/// `MAMBA_RS_MIMO_CHUNK` sets the chunk length for tests and measurements: a
+/// power of two from 4 to 64 takes that length at every rank, unset or
+/// `auto` leaves it to [`chunk_len`]. Any other value is refused loudly, so
+/// a typo cannot report a run that never left the rule.
+fn chunk_forced() -> Option<usize> {
+    static FORCED: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| match std::env::var("MAMBA_RS_MIMO_CHUNK") {
+        Err(_) => None,
+        Ok(v) => match v.trim() {
+            "auto" | "" => None,
+            other => match other.parse::<usize>() {
+                Ok(n) if n.is_power_of_two() && (4..=RELEASED_CHUNK).contains(&n) => Some(n),
+                _ => panic!(
+                    "MAMBA_RS_MIMO_CHUNK={other:?} is not a chunk length (use auto or a power \
+                     of two from 4 to 64)"
+                ),
+            },
+        },
+    })
+}
 
 /// The channels a block of `m3m_chunk_scan_tiles` takes at most: a head up
 /// to this wide in one block, a wider one in groups of it.
@@ -736,7 +784,7 @@ pub const SCAN_TILE_CHANNELS: usize = 128;
 /// axis, 8 threads a query row (`tq` rank rows rounded up to 8).
 pub fn chunk_scan_tiles_cfg(
     (b, nc, nh): (usize, usize, usize),
-    (hd, rank): (usize, usize),
+    (hd, rank, chunk): (usize, usize, usize),
     tq: usize,
     smem: usize,
 ) -> cudarc::driver::LaunchConfig {
@@ -744,7 +792,7 @@ pub fn chunk_scan_tiles_cfg(
         grid_dim: (
             (b * nc) as u32,
             nh as u32,
-            (CHUNK.div_ceil(tq) * hd.div_ceil(SCAN_TILE_CHANNELS)) as u32,
+            (chunk.div_ceil(tq) * hd.div_ceil(SCAN_TILE_CHANNELS)) as u32,
         ),
         block_dim: ((8 * (tq * rank).next_multiple_of(8)) as u32, 1, 1),
         shared_mem_bytes: smem as u32,
@@ -892,10 +940,31 @@ impl Mamba3MimoKernels {
         arch: &'static str,
         rank: usize,
     ) -> Result<Self, String> {
+        Self::compile_with_chunk(ctx, arch, rank, chunk_len(rank))
+    }
+
+    /// [`Self::compile`] at a chunk length of the caller's, a power of two
+    /// from 4 to 64: the kernel-level tests compare the kernels with the
+    /// released ones at [`RELEASED_CHUNK`].
+    #[doc(hidden)]
+    pub fn compile_with_chunk(
+        ctx: &Arc<CudaContext>,
+        arch: &'static str,
+        rank: usize,
+        chunk: usize,
+    ) -> Result<Self, String> {
         if !(1..=MAX_MIMO_RANK).contains(&rank) {
             return Err(format!("MIMO rank {rank} lies outside 1..={MAX_MIMO_RANK}"));
         }
-        let rank_define = [format!("-DMIMO_RANK={rank}")];
+        if !chunk.is_power_of_two() || !(4..=RELEASED_CHUNK).contains(&chunk) {
+            return Err(format!(
+                "MIMO chunk length {chunk} is not a power of two from 4 to {RELEASED_CHUNK}"
+            ));
+        }
+        let rank_define = [
+            format!("-DMIMO_RANK={rank}"),
+            format!("-DM3M_CHUNK={chunk}"),
+        ];
         let ComposedModule {
             module,
             compiler_identity,
@@ -1009,6 +1078,7 @@ impl Mamba3MimoKernels {
             },
             smem_optin,
             chunk_threads,
+            chunk,
             compiler_identity,
             artifact_identity,
             _modules: CudaModuleAnchors::new(vec![module.clone()]),
@@ -1123,8 +1193,8 @@ mod tests {
     fn chunked_geometry_fits_the_shared_memory() {
         let all = ChunkThreads::uniform(1024);
         let cap = 99 * 1024;
-        let released = chunked_geom((64, 128, 4), cap, true, all).unwrap();
-        assert_eq!((released.state.0, released.state.1), (4, CHUNK));
+        let released = chunked_geom((64, 128, 4, RELEASED_CHUNK), cap, true, all).unwrap();
+        assert_eq!((released.state.0, released.state.1), (4, RELEASED_CHUNK));
         assert_eq!(
             (
                 released.state_tiles.0,
@@ -1158,7 +1228,7 @@ mod tests {
         );
         assert_eq!((released.scan.0, released.scan.1), (4, 8));
         assert_eq!((released.pt, released.pairs_ref), (64, 8));
-        let wide = chunked_geom((16, 16, 16), cap, true, all).unwrap();
+        let wide = chunked_geom((16, 16, 16, RELEASED_CHUNK), cap, true, all).unwrap();
         assert_eq!((wide.scan.0, wide.scan.1), (16, 4));
         assert_eq!(wide.dsloc.0, 16);
         for shape in [
@@ -1172,8 +1242,12 @@ mod tests {
             (2048, 16, 1),
             (1280, 256, 16),
         ] {
-            for cap in [48 * 1024, 64 * 1024, 99 * 1024, 227 * 1024] {
-                let Some(g) = chunked_geom(shape, cap, true, all) else {
+            for (cap, chunk) in [48 * 1024, 64 * 1024, 99 * 1024, 227 * 1024]
+                .into_iter()
+                .flat_map(|cap| [(cap, RELEASED_CHUNK), (cap, chunk_len(shape.2))])
+            {
+                let Some(g) = chunked_geom((shape.0, shape.1, shape.2, chunk), cap, true, all)
+                else {
                     continue;
                 };
                 let sizes = [
@@ -1201,12 +1275,12 @@ mod tests {
                 );
             }
         }
-        let tiled = chunked_geom((2048, 16, 1), 227 * 1024, true, all).unwrap();
+        let tiled = chunked_geom((2048, 16, 1, RELEASED_CHUNK), 227 * 1024, true, all).unwrap();
         assert_eq!((tiled.pt, tiled.state.0, tiled.scan.0), (1024, 1, 1));
         // A head whose rows the released pair kernel kept in global memory:
         // its tile is the one whose three blocks fit, and the split kernels
         // take the head and the state in slices.
-        let sliced = chunked_geom((1024, 256, 16), 99 * 1024, true, all).unwrap();
+        let sliced = chunked_geom((1024, 256, 16, RELEASED_CHUNK), 99 * 1024, true, all).unwrap();
         assert_eq!(sliced.pairs_ref, 4, "{sliced:?}");
         assert_eq!(
             sliced.pairs,
@@ -1246,7 +1320,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("head {hd} state {ds} rank {rank} at {cap}"));
                 let fits = match narrow {
                     true => pairs_threads(p.tq, rank) <= PAIRS_THREADS_NARROW,
-                    false => p.tq * rank <= CHUNK,
+                    false => p.tq * rank <= ROWS,
                 };
                 assert!(
                     p.tq.is_power_of_two()
@@ -1274,6 +1348,28 @@ mod tests {
                 narrow: false,
             })
         );
+    }
+
+    /// A chunk holds about 64 rows of pairs at every rank: 64 / R tokens
+    /// rounded down to a power of two, at least 4.
+    #[test]
+    fn the_chunk_holds_sixty_four_rows_of_pairs() {
+        if std::env::var("MAMBA_RS_MIMO_CHUNK").is_ok() {
+            return;
+        }
+        for (rank, chunk) in [
+            (1, 64),
+            (2, 32),
+            (3, 16),
+            (4, 16),
+            (5, 8),
+            (7, 8),
+            (8, 8),
+            (9, 4),
+            (16, 4),
+        ] {
+            assert_eq!(chunk_len(rank), chunk, "rank {rank}");
+        }
     }
 
     /// The pair kernels take the narrow builds where the wide builds' spills
@@ -1346,7 +1442,7 @@ mod tests {
                 assert!(
                     p.tt.is_power_of_two()
                         && p.tt <= 16
-                        && p.tt * rank <= CHUNK
+                        && p.tt * rank <= ROWS
                         && (1..=hd).contains(&p.ps)
                         && (1..=ds).contains(&p.ns)
                         && p.bytes == bytes
@@ -1399,7 +1495,7 @@ mod tests {
             for cap in [48 * 1024, 64 * 1024, 99 * 1024, 227 * 1024] {
                 let (tt, ps, bytes) = inter_tiles_geom((hd, ds, rank), cap);
                 assert!(
-                    tt > 0 && tt * rank <= CHUNK && (1..=hd).contains(&ps) && bytes <= cap,
+                    tt > 0 && tt * rank <= ROWS && (1..=hd).contains(&ps) && bytes <= cap,
                     "head {hd} state {ds} rank {rank} at {cap}: {:?}",
                     (tt, ps, bytes)
                 );
@@ -1426,7 +1522,7 @@ mod tests {
                 state_tiles: state,
                 dsloc_tiles: dsloc,
             };
-            let g = chunked_geom((hd, 64, 4), cap, true, threads).unwrap();
+            let g = chunked_geom((hd, 64, 4, RELEASED_CHUNK), cap, true, threads).unwrap();
             for (tiles, limit) in [(g.state_tiles, state), (g.dsloc_tiles, dsloc)] {
                 let pg = tiles.2;
                 assert!(pg > 0 && pg % 4 == 0, "{hd}: {tiles:?}");
@@ -1440,7 +1536,13 @@ mod tests {
             }
         }
         // The whole head when it fits: one group of every channel.
-        let g = chunked_geom((72, 24, 4), cap, true, ChunkThreads::uniform(1024)).unwrap();
+        let g = chunked_geom(
+            (72, 24, 4, RELEASED_CHUNK),
+            cap,
+            true,
+            ChunkThreads::uniform(1024),
+        )
+        .unwrap();
         assert_eq!((g.state_tiles.2, g.dsloc_tiles.2), (72, 72));
     }
     /// No validated head is refused for shared memory on a supported part:
@@ -1487,10 +1589,20 @@ mod tests {
                         let scan = scan_geom((hd, ds, rank, na), cap, 128);
                         assert!(scan.is_some(), "scan hd {hd} ds {ds} rank {rank} na {na}");
                     }
-                    for training in [false, true] {
-                        let geom =
-                            chunked_geom((hd, ds, rank), cap, training, ChunkThreads::uniform(32));
-                        assert!(geom.is_some(), "chunked hd {hd} ds {ds} rank {rank}");
+                    for (training, chunk) in [false, true]
+                        .into_iter()
+                        .flat_map(|t| [(t, RELEASED_CHUNK), (t, chunk_len(rank))])
+                    {
+                        let geom = chunked_geom(
+                            (hd, ds, rank, chunk),
+                            cap,
+                            training,
+                            ChunkThreads::uniform(32),
+                        );
+                        assert!(
+                            geom.is_some(),
+                            "chunked hd {hd} ds {ds} rank {rank} chunk {chunk}"
+                        );
                     }
                 }
             }
