@@ -1271,7 +1271,11 @@ impl MambaKernels {
         }
         // The same disease on the retained Inference members: a rejected
         // bundle used to leave the slower legacy kernels serving every
-        // retained shape with nothing said.
+        // retained shape with nothing said. Only a board that composes the
+        // portable overlay carries them; the CC 12.x family never does, so
+        // there their absence is the design, not a fallback.
+        let retained_composed =
+            super::gemm_bi_triad::modules::inference_portable_overlay_composed(arch);
         for (member, slot) in [
             (
                 "nn_sm89_tc128_f32out_s3_bf16",
@@ -1286,6 +1290,9 @@ impl MambaKernels {
                 &inference_sm89_bundle.exact_m128n64_tail,
             ),
         ] {
+            if !retained_composed {
+                break;
+            }
             if let Err(reason) = slot {
                 static RETAINED: std::sync::Once = std::sync::Once::new();
                 let reason = reason.clone();
@@ -1340,127 +1347,135 @@ impl MambaKernels {
                 )
             });
         }
-        if let Some(reason) = triad.finalist_tf32_rejection() {
-            static FINALIST: std::sync::Once = std::sync::Once::new();
-            super::diagnostics::warn_once(&FINALIST, || {
-                format!(
-                    "the optional Ada TF32 finalist is not bound ({reason}); the portable or exact kernels remain available"
-                )
-            });
-        }
-        if let Some(reason) = triad.sm89_half_rejection() {
-            static HALF_MODULE: std::sync::Once = std::sync::Once::new();
-            super::diagnostics::warn_once(&HALF_MODULE, || {
-                format!(
-                    "the optional Ada half-Triad module is not bound ({reason}); the existing typed kernels remain available"
-                )
-            });
-        }
-        let half_excluded = triad.sm89_half_exclusions();
-        if !half_excluded.is_empty() {
-            static HALF_EXCLUDED: std::sync::Once = std::sync::Once::new();
-            super::diagnostics::warn_once(&HALF_EXCLUDED, || {
-                format!(
-                    "{} Ada half-Triad symbol(s) failed resource admission while their siblings remain bound: {}",
-                    half_excluded.len(),
-                    half_excluded
-                        .iter()
-                        .map(|exclusion| format!("{}: {}", exclusion.symbol, exclusion.reason))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                )
-            });
-        }
-        if let Some(reason) = triad.sm89_exact_f32_rejection() {
-            static EXACT_F32_MODULE: std::sync::Once = std::sync::Once::new();
-            super::diagnostics::warn_once(&EXACT_F32_MODULE, || {
-                format!(
-                    "the optional Ada exact-F32 Triad module is not bound ({reason}); the existing exact kernels remain available"
-                )
-            });
-        }
-        for exclusion in triad.sm89_exact_f32_exclusions() {
-            static D768_IN: std::sync::Once = std::sync::Once::new();
-            static D768_OUT: std::sync::Once = std::sync::Once::new();
-            static PRISM: std::sync::Once = std::sync::Once::new();
-            let once = match exclusion.symbol {
-                super::gemm_bi_triad::D768_IN_FUSED_SYMBOL => &D768_IN,
-                super::gemm_bi_triad::D768_OUT_RAW_SYMBOL => &D768_OUT,
-                super::gemm_bi_triad::PRISM_RAW_SYMBOL => &PRISM,
-                _ => continue,
-            };
-            super::diagnostics::warn_once(once, || {
-                format!(
-                    "Ada exact-F32 Triad symbol {} is excluded while its siblings remain available: {}",
-                    exclusion.symbol, exclusion.reason
-                )
-            });
-        }
-        if let Some(reason) = triad.sm89_exact_f32_d128_rejection() {
-            static EXACT_F32_D128_MODULE: std::sync::Once = std::sync::Once::new();
-            super::diagnostics::warn_once(&EXACT_F32_D128_MODULE, || {
-                format!(
-                    "the optional Ada exact-F32 d128 Triad module is not bound ({reason}); the SplitM64 kernels remain available"
-                )
-            });
-        }
-        for exclusion in triad.sm89_exact_f32_d128_exclusions() {
-            static D128_IN: std::sync::Once = std::sync::Once::new();
-            static D128_OUT: std::sync::Once = std::sync::Once::new();
-            let once = match exclusion.symbol {
-                super::gemm_bi_triad::D128_IN_SYMBOL => &D128_IN,
-                super::gemm_bi_triad::D128_OUT_SYMBOL => &D128_OUT,
-                _ => continue,
-            };
-            super::diagnostics::warn_once(once, || {
-                format!(
-                    "Ada exact-F32 d128 Triad symbol {} is excluded while its sibling remains available: {}",
-                    exclusion.symbol, exclusion.reason
-                )
-            });
-        }
-        if let Some(reason) = triad.sm89_tf32_joint_rejection() {
-            static TF32_JOINT_MODULE: std::sync::Once = std::sync::Once::new();
-            super::diagnostics::warn_once(&TF32_JOINT_MODULE, || {
-                format!(
-                    "the optional Ada TF32 joint module is not bound ({reason}); the existing deterministic TF32 kernels remain available"
-                )
-            });
-        }
-        for exclusion in triad.sm89_tf32_joint_exclusions() {
-            static TRANSPOSE: std::sync::Once = std::sync::Once::new();
-            static TN_N96: std::sync::Once = std::sync::Once::new();
-            static TN_M64N64: std::sync::Once = std::sync::Once::new();
-            static TN_M64N96_S2: std::sync::Once = std::sync::Once::new();
-            static NN_N96: std::sync::Once = std::sync::Once::new();
-            static NN_N96_BASELINE: std::sync::Once = std::sync::Once::new();
-            static NT_A_LDMATRIX_N96: std::sync::Once = std::sync::Once::new();
-            static NT_RNA_M144N96_S2: std::sync::Once = std::sync::Once::new();
-            static NT_ROWSTAGE_M128N192_S2: std::sync::Once = std::sync::Once::new();
-            static TN_DIRECT_M192N192_S2: std::sync::Once = std::sync::Once::new();
-            static TN_M96N192_S2: std::sync::Once = std::sync::Once::new();
-            static TN_M96N96_S3: std::sync::Once = std::sync::Once::new();
-            let once = match exclusion.symbol {
-                super::gemm_bi_triad::TN_PRE_RNA_TRANSPOSE_SYMBOL => &TRANSPOSE,
-                super::gemm_bi_triad::TN_PRE_RNA_N96_SYMBOL => &TN_N96,
-                super::gemm_bi_triad::TN_PRE_RNA_M64N64_SYMBOL => &TN_M64N64,
-                super::gemm_bi_triad::TN_PRE_RNA_M64N96_S2_SYMBOL => &TN_M64N96_S2,
-                super::gemm_bi_triad::NN_ADD_HALF_DIRECT_N96_SYMBOL => &NN_N96,
-                super::gemm_bi_triad::NN_ADD_HALF_N96_SYMBOL => &NN_N96_BASELINE,
-                super::gemm_bi_triad::NT_A_LDMATRIX_N96_SYMBOL => &NT_A_LDMATRIX_N96,
-                super::gemm_bi_triad::NT_RNA_M144N96_S2_SYMBOL => &NT_RNA_M144N96_S2,
-                super::gemm_bi_triad::NT_ROWSTAGE_M128N192_S2_SYMBOL => &NT_ROWSTAGE_M128N192_S2,
-                super::gemm_bi_triad::TN_DIRECT_M192N192_S2_SYMBOL => &TN_DIRECT_M192N192_S2,
-                super::gemm_bi_triad::TN_PRE_RNA_M96N192_S2_SYMBOL => &TN_M96N192_S2,
-                super::gemm_bi_triad::TN_PRE_RNA_M96N96_S3_SYMBOL => &TN_M96N96_S3,
-                _ => continue,
-            };
-            super::diagnostics::warn_once(once, || {
-                format!(
-                    "Ada TF32 joint symbol {} is excluded while its siblings remain available: {}",
-                    exclusion.symbol, exclusion.reason
-                )
-            });
+        // The Ada modules are measured winners on the Ada board alone. On any
+        // other board they are candidates, and one that its toolkit compiles
+        // past the resource gate its Ada measurement set serves nothing there,
+        // as if it had never been loaded, so only the Ada board says so.
+        if ada_measured_board(device_cc) {
+            if let Some(reason) = triad.finalist_tf32_rejection() {
+                static FINALIST: std::sync::Once = std::sync::Once::new();
+                super::diagnostics::warn_once(&FINALIST, || {
+                    format!(
+                        "the optional Ada TF32 finalist is not bound ({reason}); the portable or exact kernels remain available"
+                    )
+                });
+            }
+            if let Some(reason) = triad.sm89_half_rejection() {
+                static HALF_MODULE: std::sync::Once = std::sync::Once::new();
+                super::diagnostics::warn_once(&HALF_MODULE, || {
+                    format!(
+                        "the optional Ada half-Triad module is not bound ({reason}); the existing typed kernels remain available"
+                    )
+                });
+            }
+            let half_excluded = triad.sm89_half_exclusions();
+            if !half_excluded.is_empty() {
+                static HALF_EXCLUDED: std::sync::Once = std::sync::Once::new();
+                super::diagnostics::warn_once(&HALF_EXCLUDED, || {
+                    format!(
+                        "{} Ada half-Triad symbol(s) failed resource admission while their siblings remain bound: {}",
+                        half_excluded.len(),
+                        half_excluded
+                            .iter()
+                            .map(|exclusion| format!("{}: {}", exclusion.symbol, exclusion.reason))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )
+                });
+            }
+            if let Some(reason) = triad.sm89_exact_f32_rejection() {
+                static EXACT_F32_MODULE: std::sync::Once = std::sync::Once::new();
+                super::diagnostics::warn_once(&EXACT_F32_MODULE, || {
+                    format!(
+                        "the optional Ada exact-F32 Triad module is not bound ({reason}); the existing exact kernels remain available"
+                    )
+                });
+            }
+            for exclusion in triad.sm89_exact_f32_exclusions() {
+                static D768_IN: std::sync::Once = std::sync::Once::new();
+                static D768_OUT: std::sync::Once = std::sync::Once::new();
+                static PRISM: std::sync::Once = std::sync::Once::new();
+                let once = match exclusion.symbol {
+                    super::gemm_bi_triad::D768_IN_FUSED_SYMBOL => &D768_IN,
+                    super::gemm_bi_triad::D768_OUT_RAW_SYMBOL => &D768_OUT,
+                    super::gemm_bi_triad::PRISM_RAW_SYMBOL => &PRISM,
+                    _ => continue,
+                };
+                super::diagnostics::warn_once(once, || {
+                    format!(
+                        "Ada exact-F32 Triad symbol {} is excluded while its siblings remain available: {}",
+                        exclusion.symbol, exclusion.reason
+                    )
+                });
+            }
+            if let Some(reason) = triad.sm89_exact_f32_d128_rejection() {
+                static EXACT_F32_D128_MODULE: std::sync::Once = std::sync::Once::new();
+                super::diagnostics::warn_once(&EXACT_F32_D128_MODULE, || {
+                    format!(
+                        "the optional Ada exact-F32 d128 Triad module is not bound ({reason}); the SplitM64 kernels remain available"
+                    )
+                });
+            }
+            for exclusion in triad.sm89_exact_f32_d128_exclusions() {
+                static D128_IN: std::sync::Once = std::sync::Once::new();
+                static D128_OUT: std::sync::Once = std::sync::Once::new();
+                let once = match exclusion.symbol {
+                    super::gemm_bi_triad::D128_IN_SYMBOL => &D128_IN,
+                    super::gemm_bi_triad::D128_OUT_SYMBOL => &D128_OUT,
+                    _ => continue,
+                };
+                super::diagnostics::warn_once(once, || {
+                    format!(
+                        "Ada exact-F32 d128 Triad symbol {} is excluded while its sibling remains available: {}",
+                        exclusion.symbol, exclusion.reason
+                    )
+                });
+            }
+            if let Some(reason) = triad.sm89_tf32_joint_rejection() {
+                static TF32_JOINT_MODULE: std::sync::Once = std::sync::Once::new();
+                super::diagnostics::warn_once(&TF32_JOINT_MODULE, || {
+                    format!(
+                        "the optional Ada TF32 joint module is not bound ({reason}); the existing deterministic TF32 kernels remain available"
+                    )
+                });
+            }
+            for exclusion in triad.sm89_tf32_joint_exclusions() {
+                static TRANSPOSE: std::sync::Once = std::sync::Once::new();
+                static TN_N96: std::sync::Once = std::sync::Once::new();
+                static TN_M64N64: std::sync::Once = std::sync::Once::new();
+                static TN_M64N96_S2: std::sync::Once = std::sync::Once::new();
+                static NN_N96: std::sync::Once = std::sync::Once::new();
+                static NN_N96_BASELINE: std::sync::Once = std::sync::Once::new();
+                static NT_A_LDMATRIX_N96: std::sync::Once = std::sync::Once::new();
+                static NT_RNA_M144N96_S2: std::sync::Once = std::sync::Once::new();
+                static NT_ROWSTAGE_M128N192_S2: std::sync::Once = std::sync::Once::new();
+                static TN_DIRECT_M192N192_S2: std::sync::Once = std::sync::Once::new();
+                static TN_M96N192_S2: std::sync::Once = std::sync::Once::new();
+                static TN_M96N96_S3: std::sync::Once = std::sync::Once::new();
+                let once = match exclusion.symbol {
+                    super::gemm_bi_triad::TN_PRE_RNA_TRANSPOSE_SYMBOL => &TRANSPOSE,
+                    super::gemm_bi_triad::TN_PRE_RNA_N96_SYMBOL => &TN_N96,
+                    super::gemm_bi_triad::TN_PRE_RNA_M64N64_SYMBOL => &TN_M64N64,
+                    super::gemm_bi_triad::TN_PRE_RNA_M64N96_S2_SYMBOL => &TN_M64N96_S2,
+                    super::gemm_bi_triad::NN_ADD_HALF_DIRECT_N96_SYMBOL => &NN_N96,
+                    super::gemm_bi_triad::NN_ADD_HALF_N96_SYMBOL => &NN_N96_BASELINE,
+                    super::gemm_bi_triad::NT_A_LDMATRIX_N96_SYMBOL => &NT_A_LDMATRIX_N96,
+                    super::gemm_bi_triad::NT_RNA_M144N96_S2_SYMBOL => &NT_RNA_M144N96_S2,
+                    super::gemm_bi_triad::NT_ROWSTAGE_M128N192_S2_SYMBOL => {
+                        &NT_ROWSTAGE_M128N192_S2
+                    }
+                    super::gemm_bi_triad::TN_DIRECT_M192N192_S2_SYMBOL => &TN_DIRECT_M192N192_S2,
+                    super::gemm_bi_triad::TN_PRE_RNA_M96N192_S2_SYMBOL => &TN_M96N192_S2,
+                    super::gemm_bi_triad::TN_PRE_RNA_M96N96_S3_SYMBOL => &TN_M96N96_S3,
+                    _ => continue,
+                };
+                super::diagnostics::warn_once(once, || {
+                    format!(
+                        "Ada TF32 joint symbol {} is excluded while its siblings remain available: {}",
+                        exclusion.symbol, exclusion.reason
+                    )
+                });
+            }
         }
         let (mamba1_compiler_identity, mamba1_artifact_identity) =
             (mamba1.compiler_identity, mamba1.artifact_identity);
@@ -2296,6 +2311,12 @@ pub fn cuda_include_paths() -> Vec<String> {
         .collect()
 }
 
+/// Whether the board is the one the Ada modules were measured on, the only
+/// board where one of them failing to bind costs speed.
+fn ada_measured_board(device_cc: Option<(i32, i32)>) -> bool {
+    device_cc == Some((8, 9))
+}
+
 #[cfg(test)]
 mod module_plan_tests {
     use super::MambaKernels;
@@ -2305,6 +2326,37 @@ mod module_plan_tests {
     /// Every board loads the common tier; a board with its own module
     /// loads it beside the common tier, never instead of it. This is the
     /// policy the loader follows, read here without a device.
+    /// A missing Ada-measured kernel is said aloud only where it costs speed:
+    /// the Ada modules on the Ada board, where they are measured winners, and
+    /// the retained Inference members on every board whose Inference module
+    /// composes the portable overlay, which the CC 12.x family never does.
+    /// An RTX 5090 used to print nine such warnings at every start for
+    /// kernels it never carries.
+    #[test]
+    fn ada_kernel_warnings_speak_only_where_a_kernel_is_lost() {
+        use super::ada_measured_board;
+        use crate::gpu::gemm_bi_triad::modules::inference_portable_overlay_composed;
+        assert!(ada_measured_board(Some((8, 9))));
+        for cc in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0), (12, 0), (12, 1)] {
+            assert!(!ada_measured_board(Some(cc)), "CC {cc:?}");
+        }
+        assert!(!ada_measured_board(None));
+        for (cc, composed) in [
+            ((8, 0), true),
+            ((8, 9), true),
+            ((9, 0), true),
+            ((12, 0), false),
+            ((12, 1), false),
+        ] {
+            let arch = GpuDevice::resolve_nvrtc_target(cc).unwrap();
+            assert_eq!(
+                inference_portable_overlay_composed(arch),
+                composed,
+                "CC {cc:?} ({arch})"
+            );
+        }
+    }
+
     #[test]
     fn every_sm80_board_loads_the_common_tier_beside_its_own_module() {
         let expected = [

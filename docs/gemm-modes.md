@@ -255,7 +255,10 @@ symbol. The Inference module holds only the kernels its frozen cohorts pin.
 The `sm89` in a kernel's symbol names the board its tile was measured
 on. Its source lives in the `sm80` folder of its family, the tier every
 supported board runs, beside the portable kernels it is proven against
-on any other board.
+on any other board. On an Ada card such a kernel that does not bind is a
+measured winner lost, and the context says so once. On any other card it
+is a candidate, and one its toolkit compiles past the resources its Ada
+measurement set stays out quietly.
 
 The Hopper and Blackwell native kernels are guarded by a numeric
 self-check against the portable kernels at first use. If it fails, the

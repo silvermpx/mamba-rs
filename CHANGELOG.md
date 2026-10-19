@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.1 (2026-10-20)
+
+### Fixed
+
+- Every card outside the Ada generation printed warnings when it built a
+  GPU context, nine on an RTX 5090, about Ada-tuned GEMM kernels that do
+  not serve on it by design. They now speak only where a missing kernel
+  costs speed: the Ada-tuned modules on the Ada cards (CC 8.9), and the
+  retained Inference kernels on the cards that carry them. Which kernels
+  run does not change.
+
 ## 0.8.0 (2026-10-19)
 
 All three generations of Mamba in one crate: Mamba, Mamba-2 and Mamba-3,

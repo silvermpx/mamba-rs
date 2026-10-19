@@ -1822,7 +1822,7 @@ checksum = "fc04a4c58212d57930a24bf47d3fa87485264a3a054e9c10e042eb373573ad3c"
 
 [[package]]
 name = "mamba-rs"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bytemuck",
  "clap",
