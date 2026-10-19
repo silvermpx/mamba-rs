@@ -247,7 +247,11 @@ fn check_packed_against_alone(starts: &[Vec<usize>], seq_len: usize, seed: u32) 
                 .iter()
                 .zip(&sum)
                 .fold(0.0f32, |m, (g, s)| m.max((g - s).abs()));
-            let tol = if BLAS { blas_tol(dtype).max(1e-5) } else { 1e-5 };
+            let tol = if BLAS {
+                blas_tol(dtype).max(1e-5)
+            } else {
+                1e-5
+            };
             assert!(
                 worst <= tol * scale,
                 "{family} {dtype:?}: the weight gradient is off the separate runs' sum by \
