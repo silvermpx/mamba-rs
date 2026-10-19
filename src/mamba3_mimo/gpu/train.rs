@@ -130,11 +130,14 @@ struct Layout {
 impl Layout {
     fn of(w: &Mamba3MimoWeights) -> Self {
         let mut at = 0usize;
-        // Every tensor starts on 128 bytes of the slab: the tensor-map GEMM
-        // routes describe a matrix sliced from the slab from its own first
-        // element, and their 128-byte swizzle needs that element aligned.
+        // Every tensor the model has starts on 128 bytes of the slab: the
+        // tensor-map GEMM routes describe a matrix sliced from the slab from
+        // its own first element, and their 128-byte swizzle needs that
+        // element aligned.
         let mut take = |len: usize| {
-            at = at.next_multiple_of(SLAB_ALIGN);
+            if len > 0 {
+                at = at.next_multiple_of(SLAB_ALIGN);
+            }
             let span = Span { off: at, len };
             at += len;
             span

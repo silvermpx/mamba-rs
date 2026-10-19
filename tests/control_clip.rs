@@ -44,6 +44,29 @@ fn mark_stripe(mask: &mut [bool], off: usize, rows: usize, cols: usize, stride: 
     }
 }
 
+/// The Mamba-2 and MIMO trainers start every tensor the model has on 32
+/// floats (128 bytes) of their slab; the gaps hold zeros.
+const SLAB_ALIGN: usize = 32;
+
+/// `t` appended to a slab's mirror where the trainers place it.
+fn push_aligned(out: &mut Vec<f32>, t: &[f32]) {
+    if !t.is_empty() {
+        out.resize(out.len().next_multiple_of(SLAB_ALIGN), 0.0);
+        out.extend_from_slice(t);
+    }
+}
+
+/// The offset of a tensor of `len` floats placed after `*at` in a slab,
+/// and `*at` moved past it.
+fn place(at: &mut usize, len: usize) -> usize {
+    if len > 0 {
+        *at = at.next_multiple_of(SLAB_ALIGN);
+    }
+    let off = *at;
+    *at += len;
+    off
+}
+
 /// The control channels of a Mamba-3 SISO arena: the last 3 * nheads +
 /// angles columns of every layer's in_proj gradient, then dt_bias.
 fn siso_control(cfg: &Mamba3Config, len: usize) -> Vec<bool> {
@@ -83,7 +106,7 @@ fn m1_control(cfg: &MambaConfig, len: usize) -> Vec<bool> {
 /// field order, every layer's MLP, the final norm.
 fn m2_arena(w: &Mamba2Weights) -> Vec<f32> {
     let mut out = w.input_proj_w.clone();
-    out.extend_from_slice(&w.input_proj_b);
+    push_aligned(&mut out, &w.input_proj_b);
     for l in &w.layers {
         for t in [
             &l.norm_weight,
@@ -98,15 +121,15 @@ fn m2_arena(w: &Mamba2Weights) -> Vec<f32> {
             &l.out_proj_w,
             &l.out_proj_b,
         ] {
-            out.extend_from_slice(t);
+            push_aligned(&mut out, t);
         }
     }
     for m in &w.mlp {
         for t in [&m.norm_weight, &m.fc1_w, &m.fc2_w] {
-            out.extend_from_slice(t);
+            push_aligned(&mut out, t);
         }
     }
-    out.extend_from_slice(&w.norm_f_weight);
+    push_aligned(&mut out, &w.norm_f_weight);
     out
 }
 
@@ -116,23 +139,31 @@ fn m2_arena(w: &Mamba2Weights) -> Vec<f32> {
 fn m2_control(cfg: &Mamba2Config, w: &Mamba2Weights) -> Vec<bool> {
     let (dm, ip, nh) = (cfg.d_model, cfg.in_proj_out_dim(), cfg.nheads());
     let mut mask = vec![false; m2_arena(w).len()];
-    let mut at = w.input_proj_w.len() + w.input_proj_b.len();
+    let mut at = 0;
+    place(&mut at, w.input_proj_w.len());
+    place(&mut at, w.input_proj_b.len());
     for l in &w.layers {
-        let in_proj = at + l.norm_weight.len();
+        place(&mut at, l.norm_weight.len());
+        let in_proj = place(&mut at, l.in_proj_w.len());
         mark_stripe(&mut mask, in_proj + ip - nh, dm, nh, ip);
-        let bias = in_proj + l.in_proj_w.len();
+        let bias = place(&mut at, l.in_proj_b.len());
         if !l.in_proj_b.is_empty() {
             mask[bias + ip - nh..bias + ip].fill(true);
         }
-        let dt_bias = bias + l.in_proj_b.len() + l.conv_w.len() + l.conv_b.len();
-        mask[dt_bias..dt_bias + l.dt_bias.len() + l.a_log.len()].fill(true);
-        at = dt_bias
-            + l.dt_bias.len()
-            + l.a_log.len()
-            + l.d_param.len()
-            + l.gate_norm_weight.len()
-            + l.out_proj_w.len()
-            + l.out_proj_b.len();
+        place(&mut at, l.conv_w.len());
+        place(&mut at, l.conv_b.len());
+        for t in [&l.dt_bias, &l.a_log] {
+            let off = place(&mut at, t.len());
+            mask[off..off + t.len()].fill(true);
+        }
+        for t in [
+            &l.d_param,
+            &l.gate_norm_weight,
+            &l.out_proj_w,
+            &l.out_proj_b,
+        ] {
+            place(&mut at, t.len());
+        }
     }
     mask
 }
@@ -143,7 +174,7 @@ fn m2_control(cfg: &Mamba2Config, w: &Mamba2Weights) -> Vec<bool> {
 /// the final norm.
 fn mimo_arena(w: &Mamba3MimoWeights) -> Vec<f32> {
     let mut out = w.input_proj_w.clone();
-    out.extend_from_slice(&w.input_proj_b);
+    push_aligned(&mut out, &w.input_proj_b);
     for l in &w.layers {
         for t in [
             &l.norm_weight,
@@ -160,15 +191,15 @@ fn mimo_arena(w: &Mamba3MimoWeights) -> Vec<f32> {
             &l.out_proj_w,
             &l.norm_gate_weight,
         ] {
-            out.extend_from_slice(t);
+            push_aligned(&mut out, t);
         }
     }
     for m in &w.mlp {
         for t in [&m.norm_weight, &m.fc1_w, &m.fc2_w] {
-            out.extend_from_slice(t);
+            push_aligned(&mut out, t);
         }
     }
-    out.extend_from_slice(&w.norm_f_weight);
+    push_aligned(&mut out, &w.norm_f_weight);
     out
 }
 
@@ -179,29 +210,29 @@ fn mimo_control(cfg: &Mamba3MimoConfig, w: &Mamba3MimoWeights) -> Vec<bool> {
     let (dm, ip) = (cfg.d_model, cfg.in_proj_out_dim());
     let ctrl = 3 * cfg.nheads() + cfg.num_rope_angles();
     let mut mask = vec![false; mimo_arena(w).len()];
-    let mut at = w.input_proj_w.len() + w.input_proj_b.len();
+    let mut at = 0;
+    place(&mut at, w.input_proj_w.len());
+    place(&mut at, w.input_proj_b.len());
     for l in &w.layers {
-        let in_proj = at + l.norm_weight.len();
+        place(&mut at, l.norm_weight.len());
+        let in_proj = place(&mut at, l.in_proj_w.len());
         mark_stripe(&mut mask, in_proj + ip - ctrl, dm, ctrl, ip);
-        let dt_bias = in_proj + l.in_proj_w.len();
+        let dt_bias = place(&mut at, l.dt_bias.len());
         mask[dt_bias..dt_bias + l.dt_bias.len()].fill(true);
-        at = dt_bias
-            + [
-                &l.dt_bias,
-                &l.b_norm_weight,
-                &l.c_norm_weight,
-                &l.b_bias,
-                &l.c_bias,
-                &l.d_param,
-                &l.mimo_x,
-                &l.mimo_z,
-                &l.mimo_o,
-                &l.out_proj_w,
-                &l.norm_gate_weight,
-            ]
-            .iter()
-            .map(|t| t.len())
-            .sum::<usize>();
+        for t in [
+            &l.b_norm_weight,
+            &l.c_norm_weight,
+            &l.b_bias,
+            &l.c_bias,
+            &l.d_param,
+            &l.mimo_x,
+            &l.mimo_z,
+            &l.mimo_o,
+            &l.out_proj_w,
+            &l.norm_gate_weight,
+        ] {
+            place(&mut at, t.len());
+        }
     }
     mask
 }
