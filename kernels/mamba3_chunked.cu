@@ -213,14 +213,14 @@ extern "C" __global__ void NAME(                                               \
         for (int i = tid; i < chunk_len * hq; i += nt) {                       \
             int tl = i / hq;                                                   \
             int pq = i - tl * hq;                                              \
-            sm_x4[i] = *reinterpret_cast<const float4*>(                       \
-                x + (long long)(b * T + chunk_start + tl) * d_inner + h * hd + 4 * pq); \
+            sm_x4[i] = __ldg(reinterpret_cast<const float4*>(                  \
+                x + (long long)(b * T + chunk_start + tl) * d_inner + h * hd + 4 * pq)); \
         }                                                                      \
     } else {                                                                   \
         for (int i = tid; i < chunk_len * hd; i += nt) {                       \
             int tl = i / hd;                                                   \
             int pp = i % hd;                                                   \
-            sm_x[tl * hd + pp] = x[(long long)(b * T + chunk_start + tl) * d_inner + h * hd + pp]; \
+            sm_x[tl * hd + pp] = __ldg(x + (long long)(b * T + chunk_start + tl) * d_inner + h * hd + pp); \
         }                                                                      \
     }                                                                          \
     __syncthreads();                                                           \
@@ -237,8 +237,8 @@ extern "C" __global__ void NAME(                                               \
         for (int t_local = kept; t_local < chunk_len; t_local++) {             \
             float decay = sm_dec[t_local];                                     \
             float v_t = sm_x[t_local * hd + p];                                \
-            const float4* k4 = reinterpret_cast<const float4*>(sm_k + t_local * k_ld); \
-            float4 kv = k4[nq];                                                \
+            const float* k_row = sm_k + t_local * k_ld;                        \
+            float4 kv = lds_f32x4(k_row + 4 * nq);                             \
             acc0 += decay * kv.x * v_t;                                        \
             acc1 += decay * kv.y * v_t;                                        \
             acc2 += decay * kv.z * v_t;                                        \
@@ -527,11 +527,11 @@ extern "C" __global__ void NAME(                                               \
         float decay = FAST_EXP(m3_nonpos(sm_da[t_local] - sm_da[s_local]));    \
         float qk_val = 0.0f;                                                   \
         if (wide) {                                                            \
-            const float4* q4 = reinterpret_cast<const float4*>(sm_q + t_local * qk_ld); \
-            const float4* k4 = reinterpret_cast<const float4*>(sm_k + s_local * qk_ld); \
+            const float* q_row = sm_q + t_local * qk_ld;                       \
+            const float* k_row = sm_k + s_local * qk_ld;                       \
             for (int n4 = 0; n4 < ds / 4; n4++) {                              \
-                float4 qv = q4[n4];                                            \
-                float4 kv = k4[n4];                                            \
+                float4 qv = lds_f32x4(q_row + 4 * n4);                         \
+                float4 kv = lds_f32x4(k_row + 4 * n4);                         \
                 qk_val += qv.x * kv.x;                                         \
                 qk_val += qv.y * kv.y;                                         \
                 qk_val += qv.z * kv.z;                                         \
@@ -561,17 +561,17 @@ extern "C" __global__ void NAME(                                               \
             int t_local = o / quads;                                           \
             int p0 = (o % quads) * 4;                                          \
             float state_decay = FAST_EXP(sm_da[t_local]);                      \
-            const float4* q4 = reinterpret_cast<const float4*>(sm_q + t_local * qk_ld); \
+            const float* q_row = sm_q + t_local * qk_ld;                       \
             float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;          \
             for (int n4 = 0; n4 < ds / 4; n4++) {                              \
-                float4 qv = q4[n4];                                            \
+                float4 qv = lds_f32x4(q_row + 4 * n4);                         \
                 /* Row 4 n4 + k holds state index 4 n4 + k for the heads */    \
                 /* p0 .. p0 + 3: component j of nk is head p0 + j. */          \
                 const float* row = sm_ps + 4 * n4 * ps_ld + p0;                \
-                float4 n0 = *reinterpret_cast<const float4*>(row);             \
-                float4 n1 = *reinterpret_cast<const float4*>(row + ps_ld);     \
-                float4 n2 = *reinterpret_cast<const float4*>(row + 2 * ps_ld); \
-                float4 n3 = *reinterpret_cast<const float4*>(row + 3 * ps_ld); \
+                float4 n0 = lds_f32x4(row);                                    \
+                float4 n1 = lds_f32x4(row + ps_ld);                            \
+                float4 n2 = lds_f32x4(row + 2 * ps_ld);                        \
+                float4 n3 = lds_f32x4(row + 3 * ps_ld);                        \
                 acc0 += qv.x * n0.x; acc0 += qv.y * n1.x; acc0 += qv.z * n2.x; acc0 += qv.w * n3.x; \
                 acc1 += qv.x * n0.y; acc1 += qv.y * n1.y; acc1 += qv.z * n2.y; acc1 += qv.w * n3.y; \
                 acc2 += qv.x * n0.z; acc2 += qv.y * n1.z; acc2 += qv.z * n2.z; acc2 += qv.w * n3.z; \
@@ -589,14 +589,14 @@ extern "C" __global__ void NAME(                                               \
             for (int s_local = lo; s_local < t_local; s_local++) {             \
                 float w = sm_tri[tri_row + s_local];                           \
                 float4 v =                                                     \
-                    *reinterpret_cast<const float4*>(sm_v + s_local * hd + p0); \
+                    lds_f32x4(sm_v + s_local * hd + p0);                       \
                 yd0 += w * v.x;                                                \
                 yd1 += w * v.y;                                                \
                 yd2 += w * v.z;                                                \
                 yd3 += w * v.w;                                                \
             }                                                                  \
             float skip_w = d_skip + sm_qkd[t_local];                           \
-            float4 vt = *reinterpret_cast<const float4*>(sm_v + t_local * hd + p0); \
+            float4 vt = lds_f32x4(sm_v + t_local * hd + p0);                   \
             long long out_base =                                               \
                 (long long)(b * T + chunk_start + t_local) * d_inner + h * hd + p0; \
             y_out[out_base + 0] = yd0 + y_off0 + skip_w * vt.x;                \
@@ -1467,6 +1467,47 @@ __device__ __forceinline__ float4 m3_load_quad(const __half* p, int valid, bool 
     if (valid > 3) r.w = to_f(p[3]);
     return r;
 }
+// The quad loader through the read-only data path (`__ldg`), for inputs a
+// kernel never writes. A kernel that also reads shared memory through PTX
+// gets no read-only loads from NVVM on its own: the PTX reads count as
+// possible writes to any memory.
+__device__ __forceinline__ float4 m3_load_quad_ro(const float* p, int valid, bool vec) {
+    if (vec && valid >= 4) return __ldg(reinterpret_cast<const float4*>(p));
+    float4 r = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (valid > 0) r.x = __ldg(p);
+    if (valid > 1) r.y = __ldg(p + 1);
+    if (valid > 2) r.z = __ldg(p + 2);
+    if (valid > 3) r.w = __ldg(p + 3);
+    return r;
+}
+__device__ __forceinline__ float4 m3_load_quad_ro(const __nv_bfloat16* p, int valid, bool vec) {
+    if (vec && valid >= 4) {
+        const uint2 u = __ldg(reinterpret_cast<const uint2*>(p));
+        const float2 lo = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.x));
+        const float2 hi = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u.y));
+        return make_float4(lo.x, lo.y, hi.x, hi.y);
+    }
+    float4 r = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (valid > 0) r.x = to_f(__ldg(p));
+    if (valid > 1) r.y = to_f(__ldg(p + 1));
+    if (valid > 2) r.z = to_f(__ldg(p + 2));
+    if (valid > 3) r.w = to_f(__ldg(p + 3));
+    return r;
+}
+__device__ __forceinline__ float4 m3_load_quad_ro(const __half* p, int valid, bool vec) {
+    if (vec && valid >= 4) {
+        const uint2 u = __ldg(reinterpret_cast<const uint2*>(p));
+        const float2 lo = __half22float2(*reinterpret_cast<const __half2*>(&u.x));
+        const float2 hi = __half22float2(*reinterpret_cast<const __half2*>(&u.y));
+        return make_float4(lo.x, lo.y, hi.x, hi.y);
+    }
+    float4 r = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (valid > 0) r.x = to_f(__ldg(p));
+    if (valid > 1) r.y = to_f(__ldg(p + 1));
+    if (valid > 2) r.z = to_f(__ldg(p + 2));
+    if (valid > 3) r.w = to_f(__ldg(p + 3));
+    return r;
+}
 
 // Store the first `valid` of four values of a row, each rounded once to
 // the row's dtype as the element-wise store rounds it; one vector store when
@@ -1942,9 +1983,9 @@ extern "C" __global__ void NAME(                                              \
             int tl = i / hq;                                                  \
             int pq = i - tl * hq;                                             \
             union { uint2 u; T_ACT e[4]; } xx;                                \
-            xx.u = *reinterpret_cast<const uint2*>(                           \
+            xx.u = __ldg(reinterpret_cast<const uint2*>(                      \
                 x + (long long)(b * T + chunk_start + tl) * d_inner           \
-                  + h * hd + 4 * pq);                                         \
+                  + h * hd + 4 * pq));                                        \
             float4 xf;                                                        \
             xf.x = to_f(xx.e[0]);                                             \
             xf.y = to_f(xx.e[1]);                                             \
@@ -1957,8 +1998,8 @@ extern "C" __global__ void NAME(                                              \
             int tl = i / hd;                                                  \
             int pp = i % hd;                                                  \
             sm_x[tl * hd + pp] = to_f(                                        \
-                x[(long long)(b * T + chunk_start + tl) * d_inner             \
-                  + h * hd + pp]);                                            \
+                __ldg(x + (long long)(b * T + chunk_start + tl) * d_inner     \
+                  + h * hd + pp));                                            \
         }                                                                     \
     }                                                                         \
     __syncthreads();                                                          \
@@ -1970,9 +2011,8 @@ extern "C" __global__ void NAME(                                              \
         for (int t_local = kept; t_local < chunk_len; t_local++) {            \
             float decay = sm_dec[t_local];                                    \
             float v_t = sm_x[t_local * hd + p];                               \
-            const float4* k4 =                                                \
-                reinterpret_cast<const float4*>(sm_k + t_local * k_ld);       \
-            float4 kv = k4[nq];                                               \
+            const float* k_row = sm_k + t_local * k_ld;                       \
+            float4 kv = lds_f32x4(k_row + 4 * nq);                            \
             acc0 += decay * kv.x * v_t;                                       \
             acc1 += decay * kv.y * v_t;                                       \
             acc2 += decay * kv.z * v_t;                                       \
@@ -2305,13 +2345,11 @@ extern "C" __global__ void NAME(                                              \
         float decay = FAST_EXP(m3_nonpos(sm_da[t_local] - sm_da[s_local]));   \
         float qk_val = 0.0f;                                                  \
         if (wide) {                                                           \
-            const float4* q4 =                                                \
-                reinterpret_cast<const float4*>(sm_q + t_local * qk_ld);         \
-            const float4* k4 =                                                \
-                reinterpret_cast<const float4*>(sm_k + s_local * qk_ld);         \
+            const float* q_row = sm_q + t_local * qk_ld;                      \
+            const float* k_row = sm_k + s_local * qk_ld;                      \
             for (int n4 = 0; n4 < ds / 4; n4++) {                             \
-                float4 qv = q4[n4];                                           \
-                float4 kv = k4[n4];                                           \
+                float4 qv = lds_f32x4(q_row + 4 * n4);                        \
+                float4 kv = lds_f32x4(k_row + 4 * n4);                        \
                 qk_val += qv.x * kv.x;                                        \
                 qk_val += qv.y * kv.y;                                        \
                 qk_val += qv.z * kv.z;                                        \
@@ -2334,16 +2372,15 @@ extern "C" __global__ void NAME(                                              \
             int t_local = o / quads;                                          \
             int p0 = (o % quads) * 4;                                         \
             float state_decay = FAST_EXP(sm_da[t_local]);                     \
-            const float4* q4 =                                                \
-                reinterpret_cast<const float4*>(sm_q + t_local * qk_ld);         \
+            const float* q_row = sm_q + t_local * qk_ld;                      \
             float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;         \
             for (int n4 = 0; n4 < ds / 4; n4++) {                             \
-                float4 qv = q4[n4];                                           \
+                float4 qv = lds_f32x4(q_row + 4 * n4);                        \
                 const float* row = sm_ps + 4 * n4 * ps_ld + p0;               \
-                float4 n0 = *reinterpret_cast<const float4*>(row);            \
-                float4 n1 = *reinterpret_cast<const float4*>(row + ps_ld);    \
-                float4 n2 = *reinterpret_cast<const float4*>(row + 2 * ps_ld); \
-                float4 n3 = *reinterpret_cast<const float4*>(row + 3 * ps_ld); \
+                float4 n0 = lds_f32x4(row);                                   \
+                float4 n1 = lds_f32x4(row + ps_ld);                           \
+                float4 n2 = lds_f32x4(row + 2 * ps_ld);                       \
+                float4 n3 = lds_f32x4(row + 3 * ps_ld);                       \
                 acc0 += qv.x * n0.x;                                          \
                 acc0 += qv.y * n1.x;                                          \
                 acc0 += qv.z * n2.x;                                          \
@@ -2372,7 +2409,7 @@ extern "C" __global__ void NAME(                                              \
                      - chunk_start;                                           \
             for (int s_local = lo; s_local < t_local; s_local++) {            \
                 float w = sm_tri[tri_row + s_local];                          \
-                float4 v = *reinterpret_cast<const float4*>(                  \
+                float4 v = lds_f32x4(                                         \
                     sm_v + s_local * hd + p0);                                \
                 yd0 += w * v.x;                                               \
                 yd1 += w * v.y;                                               \
@@ -2381,7 +2418,7 @@ extern "C" __global__ void NAME(                                              \
             }                                                                 \
             float skip_w = d_skip + sm_qkd[t_local];                          \
             float4 vt =                                                       \
-                *reinterpret_cast<const float4*>(sm_v + t_local * hd + p0);   \
+                lds_f32x4(sm_v + t_local * hd + p0);                          \
             long long ob = (long long)(b * T + chunk_start + t_local)         \
                            * d_inner + h * hd + p0;                           \
             y_out[ob + 0] = FROM_F(yd0 + y_off0 + skip_w * vt.x);             \
@@ -2566,11 +2603,11 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
             float4 pv = qv;                                                   \
             if (valid > 0 && row < chunk_len) {                               \
                 IDX base = ((b * T + chunk_start + row) * nh + h) * ds + n0 + 4 * qd; \
-                qv = m3_load_quad(Q + base, valid, vec);                         \
-                kv = m3_load_quad(K_scaled + base, valid, vec);                  \
+                qv = m3_load_quad_ro(Q + base, valid, vec);                   \
+                kv = m3_load_quad_ro(K_scaled + base, valid, vec);            \
             }                                                                 \
             if (valid > 0 && row < p_len) {                                   \
-                pv = m3_load_quad(prev_states + state_head                       \
+                pv = m3_load_quad_ro(prev_states + state_head                 \
                                    + (IDX)(p_lo + row) * ds + n0 + 4 * qd,    \
                                valid, vec);                                   \
             }                                                                 \
@@ -2585,9 +2622,9 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
             float4 s4[4];                                                     \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < 4; i++) {                                     \
-                q4[i] = *reinterpret_cast<const float4*>(                     \
+                q4[i] = lds_f32x4(                                            \
                     sm_q + (4 * tr + i) * M3SS_LD + 4 * qd);                  \
-                s4[i] = *reinterpret_cast<const float4*>(                     \
+                s4[i] = lds_f32x4(                                            \
                     sm_ps + (4 * tc + i) * M3SS_LD + 4 * qd);                 \
             }                                                                 \
             _Pragma("unroll")                                                 \
@@ -2603,9 +2640,9 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
             if (pairs) {                                                      \
                 _Pragma("unroll")                                             \
                 for (int i = 0; i < 4; i++) {                                 \
-                    q4[i] = *reinterpret_cast<const float4*>(                 \
+                    q4[i] = lds_f32x4(                                        \
                         sm_q + (4 * ti + i) * M3SS_LD + 4 * qd);              \
-                    s4[i] = *reinterpret_cast<const float4*>(                 \
+                    s4[i] = lds_f32x4(                                        \
                         sm_k + (4 * si + i) * M3SS_LD + 4 * qd);              \
                 }                                                             \
                 _Pragma("unroll")                                             \
@@ -2671,7 +2708,7 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
         int valid = p_len - 4 * pq;                                           \
         float4 v = make_float4(0.0f, 0.0f, 0.0f, 0.0f);                       \
         if (valid > 0) {                                                      \
-            v = m3_load_quad(x + (b * T + chunk_start + s) * d_inner + h * hd    \
+            v = m3_load_quad_ro(x + (b * T + chunk_start + s) * d_inner + h * hd \
                               + p_lo + 4 * pq,                                \
                           valid, vec_v);                                      \
         }                                                                     \
@@ -2693,14 +2730,14 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
         int tri_row = t * (t - 1) / 2;                                        \
         for (int s = sm_lo[t]; s < t; s++) {                                  \
             float w = sm_tri[tri_row + s];                                    \
-            float4 v = *reinterpret_cast<const float4*>(sm_v + s * M3SS_V_LD + 4 * tc); \
+            float4 v = lds_f32x4(sm_v + s * M3SS_V_LD + 4 * tc);              \
             yd0 = __fmaf_rn(w, v.x, yd0);                                     \
             yd1 = __fmaf_rn(w, v.y, yd1);                                     \
             yd2 = __fmaf_rn(w, v.z, yd2);                                     \
             yd3 = __fmaf_rn(w, v.w, yd3);                                     \
         }                                                                     \
         float skip_w = __fadd_rn(d_skip, sm_qkd[t]);                          \
-        float4 vt = *reinterpret_cast<const float4*>(sm_v + t * M3SS_V_LD + 4 * tc); \
+        float4 vt = lds_f32x4(sm_v + t * M3SS_V_LD + 4 * tc);                 \
         float4 yv;                                                            \
         yv.x = __fmaf_rn(skip_w, vt.x,                                        \
                          M3SS_STATE_TERM(on ? acc_off[i][0] : 0.0f, state_decay, yd0)); \

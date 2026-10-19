@@ -3,7 +3,7 @@ use super::kernel_identity::{FramedSha256, digest_hex};
 
 const OWNER_SOURCE: &str = include_str!("../../kernels/mamba_ssm_parallel.cu");
 const OWNER_SOURCE_SHA256: &str =
-    "6ec574b92c498819c0e1216749de0f34157286acc113589b2af3847c08b64252";
+    "dd87765ab18f87eeba0f3c7983eb8877d7dd18f5ce01d2fbda0f1e7fc4e8cebe";
 const FOLD_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD";
 const STAGED_MACRO: &str = "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD_STAGED";
 const STAGE_INDEX_MACRO: &str = "M1_HALF_STAGE_INDEX";
@@ -13,7 +13,7 @@ const LEGACY_INVOCATIONS: &str = concat!(
     "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4, 0)\n",
     "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16_i64, long long, __nv_bfloat16, from_f_bf16, 3, 0, 4, 0)\n",
     "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16, int, __half, from_f_f16, 3, 0, 4, 0)\n",
-    "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16_i64, long long, __half, from_f_f16, 3, 0, 4, 0)\n",
+    "DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16_i64, long long, __half, from_f_f16, SCAN_BWD_FOLD_HALF_I64_MINB, 0, 4, 0)\n",
 );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

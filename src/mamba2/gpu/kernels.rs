@@ -236,6 +236,7 @@ impl Mamba2Kernels {
                 sources: &[
                     include_str!("../../../kernels/_typed_prelude.cuh"),
                     include_str!("../../../kernels/_varlen.cuh"),
+                    include_str!("../../../kernels/_shared_loads.cuh"),
                     include_str!("../../../kernels/gated_mlp.cu"),
                     include_str!("../../../kernels/mamba2_ops.cu"),
                     include_str!("../../../kernels/mamba2_ssd.cu"),

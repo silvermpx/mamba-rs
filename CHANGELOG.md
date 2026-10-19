@@ -238,31 +238,25 @@ and stay as close to the float64 references as before:
 - Every GEMM entry handles an empty axis as BLAS does.
 - The SISO angle cumsum refused more than 65535 * 256 lanes.
 - The benchmarks ran nothing under a bare `cargo bench`.
-- On the Ada cards the exact-f32 GEMM cell compiled into one of several
-  PTX texts, so its artifact digest moved from one cold compile to the
-  next (the machine code was the same). It now reads shared memory through
-  PTX and compiles the same every time.
+- NVRTC compiled some kernels into one of several PTX texts, so their
+  artifact digests moved from one cold compile to the next: on the Ada
+  cards the exact-f32 GEMM cell and the scan, burn-in and chunk kernels of
+  Mamba-2, Mamba-3 and MIMO, on Blackwell cards (CC 12.x) the Mamba-1
+  grouped backward and the half fold backward with 64-bit offsets. Every
+  float4 read of shared memory in those kernels is now written in PTX, and
+  on Blackwell the two Mamba-1 backward kernels keep two blocks a
+  multiprocessor. In 24 to 72 cold compiles of each module, each now gives
+  one PTX text.
 
 ### Known issues
 
-- NVRTC does not always compile the same source into the same PTX. How it
-  groups neighbouring shared-memory reads, and now and then whether it
-  reuses an index it has already computed, depends on where its own data
-  lands in memory, and address randomization moves that from one process
-  to the next. With the randomization turned off, every compile we ran
-  came out the same. We saw it with CUDA 12.8, 13.0, 13.2 and 13.4. A cold
-  compile can then give a module another artifact digest. The kernel cache
-  keeps the first compile on each machine.
-- On the Ada cards (compute_89) it touches some scan and burn-in kernels
-  of the Mamba-2, Mamba-3 and MIMO modules, in most compiles. Their
-  variants read shared memory differently and keep the same arithmetic,
-  but their machine code differs too, and we have not yet compared their
-  outputs on a card. On Blackwell cards (compute_120) it touches one
-  Mamba-1 backward kernel (half precision with 64-bit indexes) in about
-  one compile in six. The variants we caught there earlier gave the same
-  bits on all 672 cases we checked. The GEMM modules whose identities
-  open the fast routes compiled the same in each of 12 compiles on both
-  cards. 0.8.0 does not fix the family kernels.
+- NVRTC does not always compile the same source into the same PTX. Some of
+  its choices depend on where its own data lands in memory, and address
+  randomization moves that from one process to the next. With the
+  randomization turned off, every compile we ran came out the same. We saw
+  it with CUDA 12.8, 13.0, 13.2 and 13.4 and removed every case we found,
+  but a kernel can show it again after a change. The kernel cache keeps
+  the first compile on each machine.
 
 ## 0.7.5 (2026-09-23)
 

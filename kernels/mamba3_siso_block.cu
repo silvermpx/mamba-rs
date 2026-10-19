@@ -283,14 +283,39 @@ __device__ __forceinline__ void m3_burnin_block_tpl(
                 float y_val = __fmul_rn(d_skip, x_val);
                 const float bv = __fmul_rn(beta_h, v_prev);
                 const float gx = __fmul_rn(gamma_h, x_val);
-                _Pragma("unroll")
-                for (int n = 0; n < sw; n++) {
-                    h_local[n] = __fmaf_rn(gx, kc_sm[n],
-                        __fmaf_rn(alpha_h, h_local[n], __fmul_rn(bv, kp_sm[n])));
-                    if (FOLD_SKIP && n == 0)
-                        y_val = __fmaf_rn(d_skip, x_val, __fmul_rn(qc_sm[0], h_local[0]));
-                    else
-                        y_val = __fmaf_rn(qc_sm[n], h_local[n], y_val);
+                if constexpr (DS > 0 && DS % 4 == 0) {
+                    // A constant width reads the three rows four indices at
+                    // a time through PTX (see _shared_loads.cuh); the chains
+                    // take the same values in the same order.
+                    _Pragma("unroll")
+                    for (int n4 = 0; n4 < DS; n4 += 4) {
+                        const float4 kc4 = lds_f32x4(kc_sm + n4);
+                        const float4 kp4 = lds_f32x4(kp_sm + n4);
+                        const float4 qc4 = lds_f32x4(qc_sm + n4);
+                        const float kc[4] = {kc4.x, kc4.y, kc4.z, kc4.w};
+                        const float kp[4] = {kp4.x, kp4.y, kp4.z, kp4.w};
+                        const float qc[4] = {qc4.x, qc4.y, qc4.z, qc4.w};
+                        _Pragma("unroll")
+                        for (int j = 0; j < 4; j++) {
+                            const int n = n4 + j;
+                            h_local[n] = __fmaf_rn(gx, kc[j],
+                                __fmaf_rn(alpha_h, h_local[n], __fmul_rn(bv, kp[j])));
+                            if (FOLD_SKIP && n == 0)
+                                y_val = __fmaf_rn(d_skip, x_val, __fmul_rn(qc[0], h_local[0]));
+                            else
+                                y_val = __fmaf_rn(qc[j], h_local[n], y_val);
+                        }
+                    }
+                } else {
+                    _Pragma("unroll")
+                    for (int n = 0; n < sw; n++) {
+                        h_local[n] = __fmaf_rn(gx, kc_sm[n],
+                            __fmaf_rn(alpha_h, h_local[n], __fmul_rn(bv, kp_sm[n])));
+                        if (FOLD_SKIP && n == 0)
+                            y_val = __fmaf_rn(d_skip, x_val, __fmul_rn(qc_sm[0], h_local[0]));
+                        else
+                            y_val = __fmaf_rn(qc_sm[n], h_local[n], y_val);
+                    }
                 }
                 m3b_store(&y_out[x_idx], y_val);
                 if (SAVE) {

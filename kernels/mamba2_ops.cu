@@ -82,13 +82,12 @@ __device__ __forceinline__ float m2_row_step(
         reinterpret_cast<unsigned long long>(b_sm) | reinterpret_cast<unsigned long long>(c_sm);
     if (((ds & 3) | (bits & 15)) == 0) {
         for (; n + 4 <= ds; n += 4) {
-            const float4 b4 = *reinterpret_cast<const float4*>(b_sm + n);
-            const float4 c4 = *reinterpret_cast<const float4*>(c_sm + n);
+            const float4 b4 = lds_f32x4(b_sm + n);
+            const float4 c4 = lds_f32x4(c_sm + n);
             const float bb[4] = {b4.x, b4.y, b4.z, b4.w};
             const float cc[4] = {c4.x, c4.y, c4.z, c4.w};
             float hv[4];
-#pragma unroll
-            for (int j = 0; j < 4; j++) hv[j] = trow[n + j];
+            lds_f32_row4(trow + n, hv);
 #pragma unroll
             for (int j = 0; j < 4; j++) {
                 acc = __fmaf_rn(cc[j], hv[j], acc);
@@ -112,6 +111,11 @@ __device__ __forceinline__ bool m2_tile_vec(const float* gl, int ds) {
     return (ds & 3) == 0 && (reinterpret_cast<unsigned long long>(gl) & 15) == 0;
 }
 
+// RO reads the rows through the read-only data path (`__ldg`) for a source
+// the kernel never writes. A kernel that also reads shared memory through
+// PTX gets no read-only loads from NVVM on its own: the PTX reads count as
+// possible writes to any memory.
+template <bool RO = false>
 __device__ __forceinline__ void m2_tile_load(
     float* __restrict__ sh, const float* __restrict__ gl, int rows, int ds
 ) {
@@ -122,7 +126,8 @@ __device__ __forceinline__ void m2_tile_load(
 #pragma unroll 4
         for (int i = lin * 4; i < total; i += nthr * 4) {
             const int r = i / ds, n = i - r * ds;
-            const float4 v = *reinterpret_cast<const float4*>(gl + i);
+            const float4 v = RO ? __ldg(reinterpret_cast<const float4*>(gl + i))
+                                : *reinterpret_cast<const float4*>(gl + i);
             float* d = sh + r * (ds + 1) + n;
             d[0] = v.x;
             d[1] = v.y;
@@ -132,7 +137,7 @@ __device__ __forceinline__ void m2_tile_load(
     } else {
         for (int i = lin; i < total; i += nthr) {
             const int r = i / ds;
-            sh[r * (ds + 1) + i - r * ds] = gl[i];
+            sh[r * (ds + 1) + i - r * ds] = RO ? __ldg(gl + i) : gl[i];
         }
     }
 }
@@ -291,14 +296,34 @@ __device__ __forceinline__ void m2_steps_body(
             // loaded before the chains take them: the row's own stores would
             // otherwise hold every next load back a round trip.
             if (((ds & 3) | (reinterpret_cast<unsigned long long>(cur) & 15)) == 0) {
+                // Sixteen indices a step while they last: B, C and the row
+                // each read in one PTX statement, then the same chains.
+                for (; n + 16 <= ds; n += 16) {
+                    float4 b16[4], c16[4];
+                    float hv[16];
+                    lds_f32x16(bs + n, b16);
+                    lds_f32x16(cs + n, c16);
+                    lds_f32_row16(trow + n, hv);
+#pragma unroll
+                    for (int q = 0; q < 4; q++) {
+                        const float bb[4] = {b16[q].x, b16[q].y, b16[q].z, b16[q].w};
+                        const float cc[4] = {c16[q].x, c16[q].y, c16[q].z, c16[q].w};
+#pragma unroll
+                        for (int j = 0; j < 4; j++) {
+                            const float h = hv[4 * q + j];
+                            cb = __fmaf_rn(cc[j], bb[j], cb);
+                            acc = __fmaf_rn(cc[j], h, acc);
+                            trow[n + 4 * q + j] = __fmaf_rn(eacs, h, __fmaf_rn(bb[j], xw, 0.0f));
+                        }
+                    }
+                }
                 for (; n + 4 <= ds; n += 4) {
-                    const float4 b4 = *reinterpret_cast<const float4*>(bs + n);
-                    const float4 c4 = *reinterpret_cast<const float4*>(cs + n);
+                    const float4 b4 = lds_f32x4(bs + n);
+                    const float4 c4 = lds_f32x4(cs + n);
                     const float bb[4] = {b4.x, b4.y, b4.z, b4.w};
                     const float cc[4] = {c4.x, c4.y, c4.z, c4.w};
                     float hv[4];
-#pragma unroll
-                    for (int j = 0; j < 4; j++) hv[j] = trow[n + j];
+                    lds_f32_row4(trow + n, hv);
 #pragma unroll
                     for (int j = 0; j < 4; j++) {
                         cb = __fmaf_rn(cc[j], bb[j], cb);

@@ -281,7 +281,7 @@ __device__ __forceinline__ void m3mb_inter_tiles_body(
             }
             __syncthreads();
             for (int q = 0; q < pn; q++) {
-                const float4 d4 = *reinterpret_cast<const float4*>(dyt + q * rs + a0);
+                const float4 d4 = lds_f32x4(dyt + q * rs + a0);
                 const float dv[4] = {d4.x, d4.y, d4.z, d4.w};
                 float sv[4];
 #pragma unroll
@@ -518,7 +518,7 @@ __device__ __forceinline__ void m3mb_dsloc_tiles_body(
         __syncthreads();
         const int kd = sn_ * rank;
         for (int k = 0; k < kd; k++) {
-            const float4 l4 = *reinterpret_cast<const float4*>(dt + k * pg + p0);
+            const float4 l4 = lds_f32x4(dt + k * pg + p0);
             const float lv[4] = {l4.x, l4.y, l4.z, l4.w};
             float rv[JC];
 #pragma unroll
@@ -780,7 +780,7 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
                 for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;
             }
             for (int p = 0; p < hd; p++) {
-                const float4 u4 = *reinterpret_cast<const float4*>(ut + p * rs + a0);
+                const float4 u4 = lds_f32x4(ut + p * rs + a0);
                 const float uv[4] = {u4.x, u4.y, u4.z, u4.w};
                 float sv[4];
 #pragma unroll
@@ -804,7 +804,7 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
                 for (int j = 0; j < 4; j++) acc[i][j] = 0.0f;
             }
             for (int n = 0; n < ds; n++) {
-                const float4 k4 = *reinterpret_cast<const float4*>(kt + n * rs + a0);
+                const float4 k4 = lds_f32x4(kt + n * rs + a0);
                 const float kv[4] = {k4.x, k4.y, k4.z, k4.w};
                 float sv[4];
 #pragma unroll
@@ -865,7 +865,7 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
                 }
                 __syncthreads();
                 for (int p = 0; p < pn; p++) {
-                    const float4 u4 = *reinterpret_cast<const float4*>(us + p * rs + a0);
+                    const float4 u4 = lds_f32x4(us + p * rs + a0);
                     const float uv[4] = {u4.x, u4.y, u4.z, u4.w};
                     float sv[4];
 #pragma unroll
@@ -905,7 +905,7 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
                 }
                 __syncthreads();
                 for (int n = 0; n < nn; n++) {
-                    const float4 k4 = *reinterpret_cast<const float4*>(ks + n * rs + a0);
+                    const float4 k4 = lds_f32x4(ks + n * rs + a0);
                     const float kv[4] = {k4.x, k4.y, k4.z, k4.w};
                     float sv[4];
 #pragma unroll
@@ -1159,7 +1159,7 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
                 }
                 __syncthreads();
                 for (int p = 0; p < pn; p++) {
-                    const float4 d4 = *reinterpret_cast<const float4*>(dyt + p * trs + a0);
+                    const float4 d4 = lds_f32x4(dyt + p * trs + a0);
                     const float dv[4] = {d4.x, d4.y, d4.z, d4.w};
                     const float u0 = lane < sb ? us[lane * uld + p] : 0.0f;
                     const float u1 = lane + 32 < sb ? us[(lane + 32) * uld + p] : 0.0f;
@@ -1189,7 +1189,7 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
         __syncthreads();
         if (seq_idx == nullptr && S0 + tl <= T0) {
             for (int col = 0; col < sb; col++) {
-                const float4 m4 = *reinterpret_cast<const float4*>(mt + col * trs + a0);
+                const float4 m4 = lds_f32x4(mt + col * trs + a0);
                 const float mv[4] = {m4.x, m4.y, m4.z, m4.w};
                 float kv[4];
 #pragma unroll
@@ -1220,7 +1220,7 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
                 }
             }
             for (int col = c0; col < c1; col++) {
-                const float4 m4 = *reinterpret_cast<const float4*>(mt + col * trs + a0);
+                const float4 m4 = lds_f32x4(mt + col * trs + a0);
                 const float mv[4] = {m4.x, m4.y, m4.z, m4.w};
                 float kv[4];
 #pragma unroll
@@ -1414,7 +1414,7 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
                 stage_q(trow0, ta, n0, kw);
                 __syncthreads();
                 for (int n = 0; n < kw; n++) {
-                    const float4 k4 = *reinterpret_cast<const float4*>(kt + n * trs + b0);
+                    const float4 k4 = lds_f32x4(kt + n * trs + b0);
                     const float kv[4] = {k4.x, k4.y, k4.z, k4.w};
                     const float q0 = lane < ta ? qs[lane * qld + n] : 0.0f;
                     const float q1 = lane + 32 < ta ? qs[(lane + 32) * qld + n] : 0.0f;
@@ -1434,7 +1434,7 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
                 stage_dy(trow0, ta, p0, pw);
                 __syncthreads();
                 for (int p = 0; p < pw; p++) {
-                    const float4 u4 = *reinterpret_cast<const float4*>(ut + p * trs + b0);
+                    const float4 u4 = lds_f32x4(ut + p * trs + b0);
                     const float uv[4] = {u4.x, u4.y, u4.z, u4.w};
                     const float d0 = lane < ta ? dys[lane * dld + p] : 0.0f;
                     const float d1 = lane + 32 < ta ? dys[(lane + 32) * dld + p] : 0.0f;
@@ -1541,11 +1541,11 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
         for (int a = a_lo; a < a_hi; a++) {
             float mv[4], wv[4], qv[4], dv[4];
             if (do_dk) {
-                const float4 m4 = *reinterpret_cast<const float4*>(mm + a * trs + b0);
+                const float4 m4 = lds_f32x4(mm + a * trs + b0);
                 mv[0] = m4.x; mv[1] = m4.y; mv[2] = m4.z; mv[3] = m4.w;
             }
             if (do_du) {
-                const float4 w4 = *reinterpret_cast<const float4*>(gm + a * trs + b0);
+                const float4 w4 = lds_f32x4(gm + a * trs + b0);
                 wv[0] = w4.x; wv[1] = w4.y; wv[2] = w4.z; wv[3] = w4.w;
             }
 #pragma unroll

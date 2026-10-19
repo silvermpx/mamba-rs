@@ -535,6 +535,8 @@ impl Mamba3Kernels {
             include_str!("../../../kernels/_typed_prelude.cuh"),
             // The packed-row helpers (seq_idx) the kernels below read.
             include_str!("../../../kernels/_varlen.cuh"),
+            // The shared-memory float4 reads written in PTX.
+            include_str!("../../../kernels/_shared_loads.cuh"),
             include_str!("../../../kernels/mamba3_siso.cu"),
             include_str!("../../../kernels/mamba3_ops.cu"),
             include_str!("../../../kernels/mamba3_chunked.cu"),

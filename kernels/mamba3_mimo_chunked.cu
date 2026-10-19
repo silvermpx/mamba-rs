@@ -616,7 +616,7 @@ __device__ __forceinline__ void m3m_chunk_state_tiles_body(
         __syncthreads();
         const int kd = sn_ * rank;
         for (int k = 0; k < kd; k++) {
-            const float4 lv = *reinterpret_cast<const float4*>(ut + k * pg + p0);
+            const float4 lv = lds_f32x4(ut + k * pg + p0);
             float rv[JC];
 #pragma unroll
             for (int j = 0; j < JC; j++) rv[j] = kt[k * NT + lane + 32 * j];
@@ -1064,7 +1064,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
         }
         __syncthreads();
         for (int n = 0; n < mm; n++) {
-            const float4 q0 = *reinterpret_cast<const float4*>(qt + (m0 + n) * qrs + rw0);
+            const float4 q0 = lds_f32x4(qt + (m0 + n) * qrs + rw0);
             const float qv[4] = {q0.x, q0.y, q0.z, q0.w};
             float sv[JP];
 #pragma unroll
@@ -1122,7 +1122,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
                 [&](int col, int n, float v) { kts[n * KCS + col] = v; });
             __syncthreads();
             for (int n = 0; n < mm; n++) {
-                const float4 q0 = *reinterpret_cast<const float4*>(qt + (m0 + n) * qrs + rw0);
+                const float4 q0 = lds_f32x4(qt + (m0 + n) * qrs + rw0);
                 const float qv[4] = {q0.x, q0.y, q0.z, q0.w};
                 const float k0 = kts[n * KCS + lane], k1 = kts[n * KCS + lane + 32];
 #pragma unroll
@@ -1151,7 +1151,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
             for (int k = k_lo; k < cols; k++) {
                 const int s = s0 + k / rank;
                 if (s > tmax) break;
-                const float4 g0 = *reinterpret_cast<const float4*>(gw + k * qrs + rw0);
+                const float4 g0 = lds_f32x4(gw + k * qrs + rw0);
                 const float gv[4] = {g0.x, g0.y, g0.z, g0.w};
                 float uv[JP];
 #pragma unroll
@@ -1168,7 +1168,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
             for (int k = k_lo; k < cols; k++) {
                 const int s = s0 + k / rank;
                 if (s > tmax) break;
-                const float4 g0 = *reinterpret_cast<const float4*>(gw + k * qrs + rw0);
+                const float4 g0 = lds_f32x4(gw + k * qrs + rw0);
                 const float gv[4] = {g0.x, g0.y, g0.z, g0.w};
                 float uv[JP];
 #pragma unroll

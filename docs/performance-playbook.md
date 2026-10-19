@@ -364,8 +364,30 @@ panics.
   a changed reduction order, and shuffle masks that name non-executing
   lanes once trip counts diverge.
 - Deterministic PTX is pinned at the instruction level, not at the C++
-  type level: NVRTC may re-read a shared-memory fragment instead of keeping
-  the register when the source leaves it the choice.
+  type level. NVRTC does not compile a source to the same PTX every time:
+  where NVVM chooses how to group shared-memory reads, or which values to
+  recompute at a kernel's register budget, it follows the order of its own
+  address-keyed tables, and address randomization moves that from one
+  process to the next (CUDA 12.8 to 13.4; with the randomization turned
+  off every compile matches). Two rules keep a kernel's PTX fixed: a float4
+  read of shared memory goes through `lds_f32x4` (`_shared_loads.cuh`, one
+  PTX `ld.shared.v4.f32`), which leaves NVVM nothing to regroup, and a
+  kernel that sits at its register budget gets the room to keep every
+  value (the Blackwell builds of the Mamba-1 grouped backward and half fold
+  backward with 64-bit offsets keep two blocks a multiprocessor). The check
+  is a census: compile the module cold in separate processes with
+  `CUDA_CACHE_DISABLE=1` (NVRTC 13 also caches in the driver's compute
+  cache) and count the distinct PTX texts per function. A variant that
+  assembles to the same SASS still moves the module's artifact digest.
+- A PTX read is a volatile asm, which NVVM treats as a possible write to
+  any memory, and that costs twice. The loads after it no longer move
+  ahead of their first use, so a loop that reads its operands through PTX
+  also reads the values it combines with them through PTX, in the order it
+  wants them issued (`lds_f32_row4`, `lds_f32x16`, `lds_f32_row16` keep the
+  constant offsets of an unrolled step). And NVVM stops reading the
+  kernel's read-only global inputs through the read-only data path, so a
+  kernel with PTX reads takes those inputs with `__ldg` (`m2_tile_load<true>`,
+  `m3_load_quad_ro`). Compare `ld.global.nc` per function before and after.
 - A gate's reference can itself be wrong. Compare families with a different
   summation order against the exact reference, not against another tiled
   kernel. On a numeric failure, diagnose candidate, reference and exact

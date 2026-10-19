@@ -231,8 +231,8 @@ extern "C" __global__ void NAME(                                               \
     __syncthreads();                                                           \
     if (sg <= tg) {                                                            \
     for (int n = 0; n < mn; n++) {                                             \
-        const float4 c4 = *reinterpret_cast<const float4*>(ct + n * LS + 4 * tg); \
-        const float4 b4 = *reinterpret_cast<const float4*>(bt + n * LS + 4 * sg); \
+        const float4 c4 = lds_f32x4(ct + n * LS + 4 * tg);                     \
+        const float4 b4 = lds_f32x4(bt + n * LS + 4 * sg);                     \
         const float cv[4] = {c4.x, c4.y, c4.z, c4.w};                          \
         const float bv[4] = {b4.x, b4.y, b4.z, b4.w};                          \
         _Pragma("unroll") for (int i = 0; i < 4; i++) {                        \
@@ -365,7 +365,7 @@ __device__ __forceinline__ void m2_chunk_state_body(
             for (int j = 0; j < JC; j++) acc[i][j] = 0.0f;
         }
         for (int t = kept; t < lc; t++) {
-            const float4 x4 = *reinterpret_cast<const float4*>(xs + t * pt + p0);
+            const float4 x4 = lds_f32x4(xs + t * pt + p0);
             const float xv[4] = {x4.x, x4.y, x4.z, x4.w};
             float bv[JC];
 #pragma unroll

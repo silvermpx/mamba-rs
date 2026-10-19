@@ -173,9 +173,16 @@ __device__ __forceinline__ bool mimo_rows_aligned(
 
 // The four values at src (16-byte aligned) into column r of rows 0..3 of a
 // batch, the J-by-rank arrays of the row loops (J is 4 wherever it runs).
-template <int J, int RA>
+// SH says src lies in shared memory, where the read is written in PTX (see
+// _shared_loads.cuh); a row in global memory is read as a plain float4.
+template <bool SH, int J, int RA>
 __device__ __forceinline__ void mimo_split4(float (&dst)[J][RA], int r, const float* src) {
-    const float4 v = *reinterpret_cast<const float4*>(src);
+    float4 v;
+    if constexpr (SH) {
+        v = lds_f32x4(src);
+    } else {
+        v = *reinterpret_cast<const float4*>(src);
+    }
     const float w[4] = {v.x, v.y, v.z, v.w};
 #pragma unroll
     for (int j = 0; j < J; j++) dst[j][r] = w[j];
@@ -188,8 +195,9 @@ __device__ __forceinline__ void mimo_split4(float (&dst)[J][RA], int r, const fl
 // row's own store would otherwise hold the next index's loads back a round
 // trip.
 // The keys and queries of a batch of four, the same for every channel of a
-// warp, come as one float4 per rank when their rows are 16-byte aligned.
-// The chains are the same, n ascending.
+// warp, come as one float4 per rank when their rows are 16-byte aligned;
+// every caller keeps those rows in shared memory. The chains are the same,
+// n ascending.
 // FRESH is a token that starts a packed sequence: its state row and the
 // previous keys are the empty state, so they read as zeros and the buffers,
 // which still hold the sequence before, are never loaded (the caller also
@@ -222,14 +230,14 @@ __device__ __forceinline__ void mimo_tok_row(
         if (vec) {
 #pragma unroll
             for (int r = 0; r < R; r++) {
-                mimo_split4(kcv, r, kc + r * ds + n);
+                mimo_split4<true>(kcv, r, kc + r * ds + n);
                 if constexpr (FRESH) {
 #pragma unroll
                     for (int j = 0; j < J; j++) kpv[j][r] = 0.0f;
                 } else {
-                    mimo_split4(kpv, r, kp + r * ds + n);
+                    mimo_split4<true>(kpv, r, kp + r * ds + n);
                 }
-                mimo_split4(qvv, r, qv + r * ds + n);
+                mimo_split4<true>(qvv, r, qv + r * ds + n);
             }
         } else {
 #pragma unroll

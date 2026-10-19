@@ -128,8 +128,9 @@ __device__ __forceinline__ long long mimo_rec_size(int hd, int ds, int rank, int
 // carry dS <- alpha dS. FRESH is a token that starts a packed sequence: the
 // state before it and the previous keys are the empty state, read as zeros
 // (the buffers hold the sequence before), and nothing carries into the
-// token before, so dS leaves as zero.
-template <int RK, bool FRESH>
+// token before, so dS leaves as zero. SH says the key rows lie in shared
+// memory (the shared replay) rather than in the global record.
+template <int RK, bool FRESH, bool SH>
 __device__ __forceinline__ void mimo_bwd_row(
     float* __restrict__ drow, const float* __restrict__ prow,
     const float* __restrict__ kpr, const float* __restrict__ kcr,
@@ -152,9 +153,9 @@ __device__ __forceinline__ void mimo_bwd_row(
                 if constexpr (FRESH) {
                     _Pragma("unroll") for (int j = 0; j < RB; j++) kpb[j][r] = 0.0f;
                 } else {
-                    mimo_split4(kpb, r, kpr + r * ds + n);
+                    mimo_split4<SH>(kpb, r, kpr + r * ds + n);
                 }
-                mimo_split4(kcb, r, kcr + r * ds + n);
+                mimo_split4<SH>(kcb, r, kcr + r * ds + n);
             }
         } else {
             _Pragma("unroll") for (int j = 0; j < RB; j++) {
@@ -739,11 +740,11 @@ __device__ __forceinline__ void mimo_scan_bwd_body(
                 }
                 float3 acc = make_float3(da_loc, db_loc, dg_loc);
                 if (fresh)
-                    mimo_bwd_row<RK, true>(drow, prow, kp, kc, upv, uv, du, dup, alpha, beta,
-                                           gamma, ds, acc);
+                    mimo_bwd_row<RK, true, true>(drow, prow, kp, kc, upv, uv, du, dup, alpha,
+                                                 beta, gamma, ds, acc);
                 else
-                    mimo_bwd_row<RK, false>(drow, prow, kp, kc, upv, uv, du, dup, alpha, beta,
-                                            gamma, ds, acc);
+                    mimo_bwd_row<RK, false, true>(drow, prow, kp, kc, upv, uv, du, dup, alpha,
+                                                  beta, gamma, ds, acc);
                 da_loc = acc.x;
                 db_loc = acc.y;
                 dg_loc = acc.z;
@@ -883,13 +884,13 @@ __device__ __forceinline__ void mimo_tok_row_to(
         _Pragma("unroll") for (int j = 0; j < J; j++) sv[j] = FRESH ? 0.0f : src[n + j];
         if (vec) {
             _Pragma("unroll") for (int r = 0; r < R; r++) {
-                mimo_split4(kcv, r, kc + r * ds + n);
+                mimo_split4<false>(kcv, r, kc + r * ds + n);
                 if constexpr (FRESH) {
                     _Pragma("unroll") for (int j = 0; j < J; j++) kpv[j][r] = 0.0f;
                 } else {
-                    mimo_split4(kpv, r, kp + r * ds + n);
+                    mimo_split4<false>(kpv, r, kp + r * ds + n);
                 }
-                mimo_split4(qvv, r, qv + r * ds + n);
+                mimo_split4<false>(qvv, r, qv + r * ds + n);
             }
         } else {
             _Pragma("unroll") for (int j = 0; j < J; j++) {
@@ -1308,11 +1309,11 @@ __device__ __forceinline__ void mimo_scan_bwd_global_body(
                     }
                     float3 acc = make_float3(da_loc, db_loc, dg_loc);
                     if (fresh)
-                        mimo_bwd_row<RK, true>(drow, prow, k_prev, r_kc, upv, uv, du, dup, alpha,
-                                               beta, gamma, ds, acc);
+                        mimo_bwd_row<RK, true, false>(drow, prow, k_prev, r_kc, upv, uv, du,
+                                                      dup, alpha, beta, gamma, ds, acc);
                     else
-                        mimo_bwd_row<RK, false>(drow, prow, k_prev, r_kc, upv, uv, du, dup, alpha,
-                                                beta, gamma, ds, acc);
+                        mimo_bwd_row<RK, false, false>(drow, prow, k_prev, r_kc, upv, uv, du,
+                                                       dup, alpha, beta, gamma, ds, acc);
                     da_loc = acc.x;
                     db_loc = acc.y;
                     dg_loc = acc.z;

@@ -354,7 +354,7 @@ __device__ __forceinline__ void m2b_dhloc_body(
                 for (int j = 0; j < JC; j++) acc[i][j] = 0.0f;
             }
             for (int t = 0; t < cont; t++) {
-                const float4 y4 = *reinterpret_cast<const float4*>(ys + t * pt + p0);
+                const float4 y4 = lds_f32x4(ys + t * pt + p0);
                 const float yv[4] = {y4.x, y4.y, y4.z, y4.w};
                 float cv[JC];
 #pragma unroll
@@ -539,8 +539,8 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
                       });
             __syncthreads();
             for (int n = 0; n < mm; n++) {
-                const float4 l4 = *reinterpret_cast<const float4*>(lt + n * lts + s0);
-                const float4 r4 = *reinterpret_cast<const float4*>(rt + n * rts + p0);
+                const float4 l4 = lds_f32x4(lt + n * lts + s0);
+                const float4 r4 = lds_f32x4(rt + n * rts + p0);
                 const float lv[4] = {l4.x, l4.y, l4.z, l4.w};
                 const float rv[4] = {r4.x, r4.y, r4.z, r4.w};
 #pragma unroll
@@ -583,8 +583,8 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
         }
     }
     for (int t = s0; t < lc; t++) {
-        const float4 w4 = *reinterpret_cast<const float4*>(wv + t * M2_CHUNK + s0);
-        const float4 y4 = *reinterpret_cast<const float4*>(dyt + t * p4 + p0);
+        const float4 w4 = lds_f32x4(wv + t * M2_CHUNK + s0);
+        const float4 y4 = lds_f32x4(dyt + t * p4 + p0);
         const float wl[4] = {w4.x, w4.y, w4.z, w4.w};
         const float yl[4] = {y4.x, y4.y, y4.z, y4.w};
 #pragma unroll
@@ -782,8 +782,8 @@ __device__ __forceinline__ void m2b_pairs_body(
         __syncthreads();
         if (sq <= tq + 3) {
             for (int pl = 0; pl < pw; pl++) {
-                const float4 d4 = *reinterpret_cast<const float4*>(dyt + pl * LD + tq);
-                const float4 x4 = *reinterpret_cast<const float4*>(xt + pl * LD + sq);
+                const float4 d4 = lds_f32x4(dyt + pl * LD + tq);
+                const float4 x4 = lds_f32x4(xt + pl * LD + sq);
                 const float dv[4] = {d4.x, d4.y, d4.z, d4.w};
                 const float xv[4] = {x4.x, x4.y, x4.z, x4.w};
 #pragma unroll
@@ -945,7 +945,7 @@ __device__ __forceinline__ void m2b_bc_tiles_body(
             }
             __syncthreads();
             for (int pl = 0; pl < pw; pl++) {
-                const float4 l4 = *reinterpret_cast<const float4*>(lt + pl * LS + r0);
+                const float4 l4 = lds_f32x4(lt + pl * LS + r0);
                 const float rv = rt[pl * 32 + lane];
                 inner[0] = __fmaf_rn(l4.x, rv, inner[0]);
                 inner[1] = __fmaf_rn(l4.y, rv, inner[1]);
@@ -1931,7 +1931,7 @@ __device__ __forceinline__ void m2s_bwd_body(
         const int t0 = seg * stride;
         const int t1 = min(t0 + stride, seq);
         const float* ck = ckpt + (((long long)b * nseg + seg) * nh + h) * pn;
-        m2_tile_load(st, ck, hd, ds);
+        m2_tile_load<true>(st, ck, hd, ds);
         __syncthreads();
         for (int t = t0; t < t1; t++) {
             const long long row = (long long)b * seq + t;
@@ -2420,13 +2420,15 @@ __device__ __forceinline__ void m2s_bwd_tiles_body(
                 // loaded before the chains take them.
                 if (((ds & 3) | (reinterpret_cast<unsigned long long>(b_sm) & 15)) == 0) {
                     for (; n + 4 <= ds; n += 4) {
-                        const float4 b4 = *reinterpret_cast<const float4*>(b_sm + n);
+                        const float4 b4 = lds_f32x4(b_sm + n);
                         const float bb[4] = {b4.x, b4.y, b4.z, b4.w};
                         float dv[4], pv[4];
+                        lds_f32_row4(drow + n, dv);
+                        if (split) {
 #pragma unroll
-                        for (int j = 0; j < 4; j++) {
-                            dv[j] = drow[n + j];
-                            pv[j] = split ? 0.0f : prow[n + j];
+                            for (int j = 0; j < 4; j++) pv[j] = 0.0f;
+                        } else {
+                            lds_f32_row4(prow + n, pv);
                         }
 #pragma unroll
                         for (int j = 0; j < 4; j++) {

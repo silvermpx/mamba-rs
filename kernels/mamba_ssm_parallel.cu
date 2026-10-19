@@ -53,6 +53,20 @@
 #define SCAN_MINB 3
 #endif
 
+// On Blackwell (CC 12.x) the grouped backward and the half fold backward
+// with 64-bit offsets keep two blocks a multiprocessor. With three, NVVM
+// works at the register budget, and which values it recomputes there
+// follows the order of its own address-keyed tables, so the same source
+// compiled into different PTX from one process to the next; two leave it
+// the room to compute every value once.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+#define SCAN_BWD_GROUPS_MINB 2
+#define SCAN_BWD_FOLD_HALF_I64_MINB 2
+#else
+#define SCAN_BWD_GROUPS_MINB SCAN_MINB
+#define SCAN_BWD_FOLD_HALF_I64_MINB 3
+#endif
+
 // Must be >= actual d_state. Matches Tri Dao's MAX_DSTATE = 256.
 #define MAX_DSTATE 256
 
@@ -2022,7 +2036,7 @@ DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f32_i64, long long,
 DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16, int, __nv_bfloat16, from_f_bf16, 3, 0, 4, 0)
 DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_bf16_i64, long long, __nv_bfloat16, from_f_bf16, 3, 0, 4, 0)
 DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16, int, __half, from_f_f16, 3, 0, 4, 0)
-DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16_i64, long long, __half, from_f_f16, 3, 0, 4, 0)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(ssm_parallel_scan_bwd_fold_f16_i64, long long, __half, from_f_f16, SCAN_BWD_FOLD_HALF_I64_MINB, 0, 4, 0)
 
 // The f32 fold with its carries in global memory (fold_carry). The carries
 // take 48 bytes a state in shared memory: on a part with 100 KB of it a SM,
@@ -2240,7 +2254,7 @@ __device__ __forceinline__ float group_tree_sum(float v, float *red, int width) 
 // fold kernel's layouts, so its reducers read them as they are.
 // ============================================================================
 #define DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS(NAME, IDX, T_ACT, FROM_F)         \
-extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void             \
+extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_BWD_GROUPS_MINB) void  \
 NAME(                                                                         \
     const float* __restrict__ h_saved,                                        \
     const T_ACT* __restrict__ delta,                                          \
