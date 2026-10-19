@@ -60,7 +60,7 @@ are gone.
   Attention stays outside mamba-rs.
 - A SISO GPU state saved by 0.7 for a model without an input projection
   no longer loads.
-- MSRV is 1.99.1.
+- MSRV rises from 1.97 to 1.99.1.
 
 ### New
 

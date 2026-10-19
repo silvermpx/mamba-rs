@@ -91,7 +91,6 @@ have kernels and types of their own.
   and an overflow in one sequence stays in it. Mamba-1 has no varlen in
   the reference and refuses a packing.
 - State dimensions up to 256.
-- MSRV 1.99.1.
 
 ## Cargo features
 
