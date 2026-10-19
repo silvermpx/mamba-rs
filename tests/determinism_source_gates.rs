@@ -62,7 +62,13 @@ fn kernels_contain_no_numeric_atomics() {
                                 && (j == 0
                                     || !line.as_bytes()[j - 1].is_ascii_alphanumeric())
                         });
-                let file = path.strip_prefix(root()).unwrap().display().to_string();
+                // The entries name files with '/', which Windows paths
+                // display as '\\'.
+                let file = path
+                    .strip_prefix(root())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 let counter = COMPLETION_COUNTERS
                     .iter()
                     .position(|(f, l)| *f == file && *l == raw.trim());
