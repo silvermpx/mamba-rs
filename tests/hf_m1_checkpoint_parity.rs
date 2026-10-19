@@ -307,19 +307,15 @@ fn mamba_130m_gpu_matches_the_f64_oracle() {
     assert!(rel < 2e-3, "GPU prefill logits rel {rel:.3e}");
 }
 
-/// The bf16 engine on the oracle's prompt: the mean prompt NLL within a
-/// few hundredths of a nat and the greedy continuation where the oracle's
-/// margin clears bf16 noise.
+/// A reduced-precision engine on the oracle's prompt: the mean prompt NLL
+/// within a few hundredths of a nat and the greedy continuation where the
+/// oracle's margin clears bf16 noise, which bounds TF32 and f16 too.
 #[cfg(feature = "cuda")]
-#[test]
-#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
-fn mamba_130m_gpu_bf16_tracks_the_f64_oracle() {
-    use mamba_rs::gpu::dtype::WeightDtype;
-
+fn mamba_130m_gpu_lane_tracks_the_f64_oracle(dtype: mamba_rs::gpu::dtype::WeightDtype) {
     let (model, golden) = checkpoint();
     let d = model.cfg.d_model;
     let t_len = golden.ids.len();
-    let (mut gpu, rows) = gpu_decode_rows(&model, &golden, WeightDtype::Bf16);
+    let (mut gpu, rows) = gpu_decode_rows(&model, &golden, dtype);
     let (mut nll, mut nll_oracle) = (0f64, 0f64);
     for t in 0..t_len - 1 {
         let logits = &rows[t];
@@ -328,10 +324,10 @@ fn mamba_130m_gpu_bf16_tracks_the_f64_oracle() {
     }
     let n = (t_len - 1) as f64;
     let (nll, nll_oracle) = (nll / n, nll_oracle / n);
-    eprintln!("mamba-130m GPU bf16 decode: mean NLL {nll:.4} vs oracle {nll_oracle:.4}");
+    eprintln!("mamba-130m GPU {dtype:?} decode: mean NLL {nll:.4} vs oracle {nll_oracle:.4}");
     assert!(
         (nll - nll_oracle).abs() < 3e-2,
-        "bf16 NLL {nll:.4} vs {nll_oracle:.4}"
+        "{dtype:?} NLL {nll:.4} vs {nll_oracle:.4}"
     );
     let mut head = Head::new(&model);
     let mut hidden = vec![0f32; d];
@@ -340,5 +336,26 @@ fn mamba_130m_gpu_bf16_tracks_the_f64_oracle() {
         gpu.step(embed(&model, token), &mut hidden).unwrap();
         head.logits(&hidden, logits);
     });
-    eprintln!("mamba-130m GPU bf16 greedy: {produced} tokens match the oracle");
+    eprintln!("mamba-130m GPU {dtype:?} greedy: {produced} tokens match the oracle");
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
+fn mamba_130m_gpu_bf16_tracks_the_f64_oracle() {
+    mamba_130m_gpu_lane_tracks_the_f64_oracle(mamba_rs::gpu::dtype::WeightDtype::Bf16);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
+fn mamba_130m_gpu_f16_tracks_the_f64_oracle() {
+    mamba_130m_gpu_lane_tracks_the_f64_oracle(mamba_rs::gpu::dtype::WeightDtype::F16);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
+fn mamba_130m_gpu_tf32_tracks_the_f64_oracle() {
+    mamba_130m_gpu_lane_tracks_the_f64_oracle(mamba_rs::gpu::dtype::WeightDtype::Tf32);
 }

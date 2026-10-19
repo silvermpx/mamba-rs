@@ -400,6 +400,100 @@ fn siso_187m_gpu_prefill_then_decode_matches_the_f64_oracle() {
     }
 }
 
+/// The public backbone in a reduced precision on the oracle's prompt,
+/// decoded token by token: the mean prompt NLL within a few hundredths of a
+/// nat and the greedy continuation where the oracle's margin clears bf16
+/// noise, which bounds the TF32 and f16 lanes too.
+#[cfg(feature = "cuda")]
+fn siso_187m_gpu_lane_tracks_the_f64_oracle(dtype: mamba_rs::gpu::dtype::WeightDtype) {
+    use mamba_rs::{GpuOptions, Mamba3GpuBackbone};
+
+    let root = official_dir("MAMBA3_OFFICIAL_DIR", ".cache/mamba3-official");
+    let golden = load_golden(&root.join("goldens/siso-187m"));
+    let model = load_mamba3(&root.join("mamba3-siso-187m")).unwrap();
+    let cfg = model.cfg;
+    let d = cfg.d_model;
+    let vocab = model.vocab_size;
+    let vocab_padded = model.embed.len() / d;
+    let t_len = golden.ids.len();
+    let embed = |tok: u32| &model.embed[tok as usize * d..(tok as usize + 1) * d];
+    let mut gpu = Mamba3GpuBackbone::new(
+        &model.weights,
+        cfg,
+        d,
+        1,
+        GpuOptions::default().dtype(dtype),
+    )
+    .unwrap();
+    let mut hidden = vec![0f32; d];
+    let mut logits = vec![0f32; vocab];
+    let mut head_scratch = vec![0f32; vocab_padded];
+    let (mut nll, mut nll_oracle) = (0f64, 0f64);
+    for (t, &token) in golden.ids.iter().enumerate() {
+        gpu.step(embed(token), &mut hidden).unwrap();
+        lm_head_logits(
+            &mut logits,
+            &hidden,
+            &model.embed,
+            vocab,
+            vocab_padded,
+            d,
+            &mut head_scratch,
+        );
+        if let Some(&next) = golden.ids.get(t + 1) {
+            nll -= f64::from(logits[next as usize]) - logsumexp(&logits);
+            nll_oracle -= golden.target_logprob[t];
+        }
+    }
+    let n = (t_len - 1) as f64;
+    let (nll, nll_oracle) = (nll / n, nll_oracle / n);
+    eprintln!("siso-187m GPU {dtype:?} decode: mean NLL {nll:.4} vs oracle {nll_oracle:.4}");
+    assert!(
+        (nll - nll_oracle).abs() < BF16_NLL_TOL,
+        "{dtype:?} mean NLL {nll:.4} vs {nll_oracle:.4}"
+    );
+    let mut next = argmax(&logits);
+    let mut produced = 0usize;
+    for (i, &want) in golden.greedy.iter().enumerate() {
+        if next != want {
+            assert!(
+                golden.greedy_margin[i] < BF16_MARGIN,
+                "greedy token {i}: {next} vs {want} at margin {}",
+                golden.greedy_margin[i]
+            );
+            eprintln!("greedy token {i}: within the lane's margin, stopping");
+            break;
+        }
+        produced += 1;
+        gpu.step(embed(next), &mut hidden).unwrap();
+        lm_head_logits(
+            &mut logits,
+            &hidden,
+            &model.embed,
+            vocab,
+            vocab_padded,
+            d,
+            &mut head_scratch,
+        );
+        next = argmax(&logits);
+    }
+    eprintln!("siso-187m GPU {dtype:?} greedy: {produced} tokens match the oracle");
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
+fn siso_187m_gpu_f16_tracks_the_f64_oracle() {
+    siso_187m_gpu_lane_tracks_the_f64_oracle(mamba_rs::gpu::dtype::WeightDtype::F16);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
+fn siso_187m_gpu_tf32_tracks_the_f64_oracle() {
+    siso_187m_gpu_lane_tracks_the_f64_oracle(mamba_rs::gpu::dtype::WeightDtype::Tf32);
+}
+
 // bf16 storage and activations against the float64 oracle: a bf16
 // inference of a real LM moves its mean prompt NLL by hundredths of a nat,
 // and its top-1 only where the oracle's own margin is a fraction of a nat.

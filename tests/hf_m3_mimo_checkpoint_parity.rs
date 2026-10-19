@@ -120,8 +120,9 @@ fn mimo_187m_cpu_decode_matches_the_f64_oracle() {
 
 /// The GPU engine on the oracle's prompt, one window then the greedy
 /// continuation decoded: in f32 the recorded logits rows and every top-1;
-/// in bf16 the mean prompt NLL within a few hundredths of a nat; in both
-/// the greedy tokens wherever the oracle's margin clears the lane's noise.
+/// in TF32, bf16 and f16 the mean prompt NLL within a few hundredths of a
+/// nat; in every lane the greedy tokens wherever the oracle's margin clears
+/// the lane's noise.
 #[cfg(feature = "cuda")]
 fn mimo_187m_gpu_arm(dtype: mamba_rs::gpu::dtype::WeightDtype) {
     use mamba_rs::gpu::device::GpuDevice;
@@ -240,4 +241,18 @@ fn mimo_187m_gpu_matches_the_f64_oracle() {
 #[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
 fn mimo_187m_gpu_bf16_tracks_the_f64_oracle() {
     mimo_187m_gpu_arm(mamba_rs::gpu::dtype::WeightDtype::Bf16);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
+fn mimo_187m_gpu_f16_tracks_the_f64_oracle() {
+    mimo_187m_gpu_arm(mamba_rs::gpu::dtype::WeightDtype::F16);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "needs the official checkpoint, its goldens and a CUDA device"]
+fn mimo_187m_gpu_tf32_tracks_the_f64_oracle() {
+    mimo_187m_gpu_arm(mamba_rs::gpu::dtype::WeightDtype::Tf32);
 }
