@@ -283,15 +283,6 @@ and stay as close to the float64 references as before:
   Each module now compiles to one PTX text on both: we checked 24 to 72
   cold compiles of each.
 
-### Known issues
-
-- We checked that every module compiles to the same PTX every time on the
-  Ada (CC 8.9) and Blackwell (CC 12.x) cards, but not yet on the other
-  generations. NVRTC can compile one source in more than one way,
-  depending on where its own data lands in memory. Each machine's kernel
-  cache keeps its first compile, so a machine keeps its bits from run to
-  run either way.
-
 ## 0.7.5 (2026-09-23)
 
 ### Fixed
