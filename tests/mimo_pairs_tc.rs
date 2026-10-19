@@ -261,7 +261,7 @@ fn out_file(dir: &Path, case: usize, dtype: WeightDtype) -> PathBuf {
 /// The gradients of every case and dtype on the CUDA-core pair kernels,
 /// written for the parent.
 #[test]
-#[ignore = "the child of tensor_core_pairs_match_the_cuda_core_pairs"]
+#[ignore = "invoked by tensor_core_pairs_match_the_cuda_core_pairs"]
 fn pairs_child() {
     let dir = PathBuf::from(std::env::var(CHILD_OUT).expect("the parent's output directory"));
     for (i, case) in cases().iter().enumerate() {
