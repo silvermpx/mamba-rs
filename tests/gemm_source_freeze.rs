@@ -77,8 +77,8 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
     ),
     (
         "kernels/gemm_bi_inference/sm80/cells_f32_simt.cu",
-        0xabac21f075fd2bcc,
-        10345,
+        0x07f1b02da4e8c39f,
+        11119,
     ),
     (
         "kernels/gemm_bi_inference/sm80/cells_half_mma.cu",

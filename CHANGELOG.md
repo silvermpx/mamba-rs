@@ -238,17 +238,31 @@ and stay as close to the float64 references as before:
 - Every GEMM entry handles an empty axis as BLAS does.
 - The SISO angle cumsum refused more than 65535 * 256 lanes.
 - The benchmarks ran nothing under a bare `cargo bench`.
+- On the Ada cards the exact-f32 GEMM cell compiled into one of several
+  PTX texts, so its artifact digest moved from one cold compile to the
+  next (the machine code was the same). It now reads shared memory through
+  PTX and compiles the same every time.
 
 ### Known issues
 
-- On Blackwell cards (compute capability 12.x) with CUDA 13.2, NVRTC now
-  and then compiles one kernel source into two different PTX texts. A
-  module's artifact digest can then differ between two cold compiles of
-  the same release. The two variants we caught give the same bits on all
-  672 cases we checked, and the kernel cache keeps the first compile on
-  each machine. 0.8.0 does not fix this. On the Ada cards (compute_89) we
-  caught it once, in the Inference module's Ada cells, and did not compare
-  the outputs of those two variants.
+- NVRTC does not always compile the same source into the same PTX. How it
+  groups neighbouring shared-memory reads, and now and then whether it
+  reuses an index it has already computed, depends on where its own data
+  lands in memory, and address randomization moves that from one process
+  to the next. With the randomization turned off, every compile we ran
+  came out the same. We saw it with CUDA 12.8, 13.0, 13.2 and 13.4. A cold
+  compile can then give a module another artifact digest. The kernel cache
+  keeps the first compile on each machine.
+- On the Ada cards (compute_89) it touches some scan and burn-in kernels
+  of the Mamba-2, Mamba-3 and MIMO modules, in most compiles. Their
+  variants read shared memory differently and keep the same arithmetic,
+  but their machine code differs too, and we have not yet compared their
+  outputs on a card. On Blackwell cards (compute_120) it touches one
+  Mamba-1 backward kernel (half precision with 64-bit indexes) in about
+  one compile in six. The variants we caught there earlier gave the same
+  bits on all 672 cases we checked. The GEMM modules whose identities
+  open the fast routes compiled the same in each of 12 compiles on both
+  cards. 0.8.0 does not fix the family kernels.
 
 ## 0.7.5 (2026-09-23)
 

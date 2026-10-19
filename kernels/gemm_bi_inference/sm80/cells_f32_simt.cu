@@ -14,6 +14,25 @@
 
 namespace sm89_cell_f32_simt {
 
+// The shared-memory reads are written in PTX. Left to NVVM, a float4 read
+// was sometimes split into a half-used vector read plus a second read of
+// the same two floats, and the split moved from one compile to the next
+// with the compiler's own memory layout. ptxas folds every such form into
+// the same machine code, so only the PTX text, and with it the module's
+// identity, moved; a read written in PTX leaves NVVM nothing to choose.
+__device__ __forceinline__ float4 lds128(unsigned address) {
+    float4 v;
+    asm volatile("ld.shared.v4.f32 {%0,%1,%2,%3}, [%4];\n"
+                 : "=f"(v.x), "=f"(v.y), "=f"(v.z), "=f"(v.w) : "r"(address));
+    return v;
+}
+
+__device__ __forceinline__ float2 lds64(unsigned address) {
+    float2 v;
+    asm volatile("ld.shared.v2.f32 {%0,%1}, [%2];\n" : "=f"(v.x), "=f"(v.y) : "r"(address));
+    return v;
+}
+
 template <int BM, int BN, int BK, int STAGES, int THREADS, int TN>
 struct Geometry {
     static constexpr int GX = BN / TN;
@@ -116,33 +135,33 @@ __device__ __forceinline__ void kernel(
         if (next < num_k_tiles) issue(next % STAGES, next * BK);
         sm89_cell_cp_commit();
 
-        const float* a_stage = a_stages + (kt % STAGES) * G::A_STAGE;
-        const float* b_stage = b_stages + (kt % STAGES) * G::B_STAGE;
+        const unsigned a_stage = a_shared + (unsigned)((kt % STAGES) * G::A_STAGE * 4);
+        const unsigned b_stage = b_shared + (unsigned)((kt % STAGES) * G::B_STAGE * 4);
 #pragma unroll
         for (int k4 = 0; k4 < BK / 4; ++k4) {
             float4 a_reg[G::TM];
 #pragma unroll
             for (int i = 0; i < G::TM; ++i) {
-                a_reg[i] = *reinterpret_cast<const float4*>(
-                    a_stage + (ty + G::GY * i) * G::A_STRIDE + k4 * 4);
+                a_reg[i] = lds128(
+                    a_stage + (unsigned)(((ty + G::GY * i) * G::A_STRIDE + k4 * 4) * 4));
             }
 #pragma unroll
             for (int q = 0; q < 4; ++q) {
-                const float* b_row = b_stage + (k4 * 4 + q) * BN + tx * TN;
+                const unsigned b_row = b_stage + (unsigned)(((k4 * 4 + q) * BN + tx * TN) * 4);
                 float b_reg[TN];
                 if constexpr (TN == 6) {
                     // Six-float spans start on 8-byte boundaries only, so
                     // they are read as three float2.
-                    const float2 x0 = *reinterpret_cast<const float2*>(b_row);
-                    const float2 x1 = *reinterpret_cast<const float2*>(b_row + 2);
-                    const float2 x2 = *reinterpret_cast<const float2*>(b_row + 4);
+                    const float2 x0 = lds64(b_row);
+                    const float2 x1 = lds64(b_row + 8);
+                    const float2 x2 = lds64(b_row + 16);
                     b_reg[0] = x0.x; b_reg[1] = x0.y; b_reg[2] = x1.x;
                     b_reg[3] = x1.y; b_reg[4] = x2.x; b_reg[5] = x2.y;
                 } else {
-                    const float4 lo = *reinterpret_cast<const float4*>(b_row);
+                    const float4 lo = lds128(b_row);
                     b_reg[0] = lo.x; b_reg[1] = lo.y; b_reg[2] = lo.z; b_reg[3] = lo.w;
                     if constexpr (TN == 8) {
-                        const float4 hi = *reinterpret_cast<const float4*>(b_row + 4);
+                        const float4 hi = lds128(b_row + 16);
                         b_reg[4] = hi.x; b_reg[5] = hi.y; b_reg[6] = hi.z; b_reg[7] = hi.w;
                     }
                 }
