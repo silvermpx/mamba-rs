@@ -284,6 +284,29 @@ Both refuse a malformed value loudly.
   fallback bit suites, which pin the route a shape takes on the board's
   own budget, do not hold under it.
 
+## Two builds and a measured rule
+
+Where each of two builds of a kernel wins on part of the shapes and
+neither wins on all of them, both ship, and a rule measured on two boards
+picks one for each shape. The two builds give the same bits, and a switch
+forces either one, so a suite run on one board covers both.
+
+- `MAMBA_RS_STEP_PREFETCH=auto|on|off` picks the SISO decode step with or
+  without the early fetch of the state's next slice. The fetch hides a
+  slice's load behind the arithmetic of the slice before it, which pays
+  only while the card runs few blocks. The rule fetches early when a
+  head's state is small (`hd * ds <= 8192`) and the whole state leaves the
+  card underfilled (`B * nh * hd * ds <= 12000 * SMs`).
+- `MAMBA_RS_PAIRS_BUILD=auto|narrow|wide` picks the build of the MIMO pair
+  kernels: the wide one (512 threads, at most 128 registers, part of its
+  sums spilled) or the narrow one (256 threads, every sum in registers).
+  Rank 1 takes the narrow build from head 256, or from head 64 with 256
+  states, rank 2 from head 64 with 256 states, and ranks 3 and up from
+  head 96, or from head 64 with 128 states.
+
+Each switch is read once per process, and a value it does not know
+panics.
+
 ## Graph capture and other threads
 
 - A synchronize of the device or of the context is invalid while any stream

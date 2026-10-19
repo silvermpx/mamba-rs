@@ -17,7 +17,7 @@ cuBLAS.
   the CPU and the GPU, for inference and training, and load the official
   checkpoints. `state-spaces/mamba2-130m` and the Mamba-3 SISO and MIMO
   187m models match float64 reference implementations of the papers'
-  models on the CPU and on the GPU.
+  models on the CPU, and on the GPU in all four precisions.
 - **One API for all four.** Every family has the same types and calls: a
   CPU backbone with its scratch, a CPU trainer, a GPU backbone and a GPU
   trainer, built the same way, with one `GpuOptions` value for the device,
@@ -32,12 +32,11 @@ cuBLAS.
   residual add of a layer rides in the next layer's norm.
 - **Faster at large sizes.** Mamba and Mamba-3 SISO walk wide states in
   register slices, a short window takes only the threads it needs, and the
-  Mamba-2 and MIMO tiles take every head and state width. On an RTX 6000
-  Ada a Mamba training step at a window of 65 runs up to 7.2 times as fast
-  and its prompt pass up to 5.4 times (256 states); the SISO sequential
-  training step runs 2 to 4 times as fast at the state widths no build
-  specialises, and 2.5 to 3 times at 64 states. The
-  [changelog](CHANGELOG.md) lists every kernel.
+  Mamba-2 and MIMO tiles take every head and state width. Against 0.7.5 on
+  an RTX 5090, a Mamba training step at a window of 65 with 256 states
+  runs 6.6 times as fast in f32 and 5.7 times in bf16, and a SISO training
+  step with heads of 32 and 64 states runs 2.3 times as fast. The
+  [changelog](CHANGELOG.md) has the whole table and lists every kernel.
 
 ## Models
 

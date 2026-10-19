@@ -13,6 +13,52 @@ current kernel comparisons against cuBLAS are in
 [determinism-benchmarks.md](determinism-benchmarks.md) and the modes in
 [gemm-modes.md](gemm-modes.md).
 
+## Whole steps, 0.7.5 to 0.8.0 (RTX 5090, CUDA 13.2)
+
+Measured on October 18 and 19, 2026 on a rented RTX 5090 (170 SMs, driver
+595.71.05, CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.99.1, release build, AMD
+EPYC 7543 host). The released `0.7.5` and the final `0.8.0` tree each drive
+the same probe through the public trainer and backbone of the release, in
+the default `Deterministic` GEMM mode, one shape in one process at a time on
+an otherwise idle card. The 0.7.5 cells ran twice on October 18,
+alternating with an earlier 0.8 tree. The final tree ran each cell twice
+early on October 19. A cell is the median of its process medians.
+`old/new` above 1 means 0.8.0 is faster. Training times the whole public
+`step` with the AdamW update. Decode runs through a captured graph.
+
+Training, ms per step:
+
+| shape | storage | execution | 0.7.5 | 0.8.0 | old/new |
+|---|---|---|---:|---:|---:|
+| 24 layers of 384, 16 states, B=8, T=1300 | BF16 | eager | 68.74 | 65.46 | 1.050× |
+| | BF16 | graph | 69.30 | 67.37 | 1.029× |
+| | F16 | eager | 71.07 | 68.55 | 1.037× |
+| | F16 | graph | 70.14 | 67.51 | 1.039× |
+| | F32 | eager | 111.20 | 104.12 | 1.068× |
+| | F32 | graph | 110.93 | 106.78 | 1.039× |
+| 4 layers of 768, 16 states, B=8, T=65 | F32 | graph | 11.18 | 5.27 | 2.12× |
+| | BF16 | graph | 6.40 | 2.60 | 2.46× |
+| 4 layers of 768, 256 states, B=8, T=65 | F32 | graph | 127.08 | 19.17 | 6.63× |
+| | BF16 | graph | 85.41 | 15.07 | 5.67× |
+| 4 layers of 768, 128 states, B=4, T=512 | F32 | graph | 35.40 | 23.65 | 1.50× |
+| | BF16 | graph | 27.18 | 20.08 | 1.35× |
+
+Decode, us per step:
+
+| shape | storage | batch | 0.7.5 | 0.8.0 | old/new |
+|---|---|---:|---:|---:|---:|
+| 3 layers of 128, 16 states | F32 | 1 | 121.8 | 117.8 | 1.03× |
+| | F32 | 16 | 128.2 | 128.4 | 1.00× |
+| | F32 | 128 | 147.8 | 144.6 | 1.02× |
+| 4 layers of 768, 128 states | F32 | 1 | 791.2 | 767.9 | 1.03× |
+| | F32 | 16 | 867.2 | 803.3 | 1.08× |
+| 24 layers of 768, 16 states | BF16 | 1 | panicked | 783.2 | |
+| | BF16 | 16 | panicked | 853.0 | |
+
+0.7.5 panicked on the first bf16 decode step of a model with its own input
+projection. The kernels behind the gains are listed in the 0.8.0 entry of
+the [changelog](../CHANGELOG.md).
+
 ## Training step, 0.7.1 to 0.7.3 (RTX 6000 Ada, CUDA 13.2)
 
 Measurements on September 18, 2026: the assembled `0.7.3` (kernel sources

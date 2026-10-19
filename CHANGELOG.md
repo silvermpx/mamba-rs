@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0 (2026-10-18)
+## 0.8.0 (2026-10-19)
 
 All three generations of Mamba in one crate: Mamba, Mamba-2 and Mamba-3,
 the last in both of its forms, SISO and MIMO. Mamba-2 and MIMO are new.
@@ -70,7 +70,8 @@ are gone.
 - The official checkpoints of every family load and match float64
   references of the papers' models: `state-spaces/mamba-130m-hf`,
   `state-spaces/mamba2-130m` and the Mamba-3 SISO and MIMO 187m models.
-  The loaders read safetensors and `pytorch_model.bin`, in one file or in
+  They match on the CPU, and on the GPU in f32, tf32, bf16 and f16. The
+  loaders read safetensors and `pytorch_model.bin`, in one file or in
   shards, and the original `state-spaces/mamba-*` repositories.
 - Mamba-2 checkpoints in the transformers layout, such as
   `mistralai/Mamba-Codestral-7B-v0.1`.
@@ -134,19 +135,19 @@ are gone.
 
 ### Faster
 
-Whole steps, 0.7.5 against 0.8.0 on an RTX 5090 (CUDA 13.2), each
-measured in alternating processes:
+Whole steps, 0.7.5 against 0.8.0 on an RTX 5090 (CUDA 13.2), each cell
+the median of two processes on the same card:
 
 | what | 0.7.5 | 0.8.0 | |
 |---|---:|---:|---:|
-| Mamba training, 24 layers of 384, B 8, T 1300, bf16 | 69.3 ms | 66.9 ms | 1.04x |
-| SISO training, same shape, bf16 | 104.3 ms | 92.2 ms | 1.13x |
-| Mamba training, 4 layers of 768, 256 states, T 65, f32 | 127.1 ms | 19.9 ms | 6.4x |
-| Mamba training, same, bf16 | 85.4 ms | 15.2 ms | 5.6x |
-| Mamba training, 16 states, T 65, bf16 | 6.4 ms | 2.6 ms | 2.4x |
-| Mamba training, 128 states, B 4, T 512, f32 | 35.4 ms | 23.9 ms | 1.5x |
+| Mamba training, 24 layers of 384, B 8, T 1300, bf16 | 69.3 ms | 67.4 ms | 1.03x |
+| SISO training, same shape, bf16 | 104.3 ms | 91.7 ms | 1.14x |
+| Mamba training, 4 layers of 768, 256 states, T 65, f32 | 127.1 ms | 19.2 ms | 6.6x |
+| Mamba training, same, bf16 | 85.4 ms | 15.1 ms | 5.7x |
+| Mamba training, 16 states, T 65, bf16 | 6.4 ms | 2.6 ms | 2.5x |
+| Mamba training, 128 states, B 4, T 512, f32 | 35.4 ms | 23.7 ms | 1.5x |
 | SISO training, head 32, 64 states, T 512, bf16 | 15.7 ms | 6.9 ms | 2.3x |
-| Mamba decode, 128 states, batch 16, f32 | 867 us | 780 us | 1.11x |
+| Mamba decode, 128 states, batch 16, f32 | 867 us | 803 us | 1.08x |
 
 SISO with head 64 and the sequential scan trains in 0.8 and was refused in
 0.7.5. The decode of small models did not change. The kernels behind it:
@@ -223,6 +224,16 @@ and stay as close to the float64 references as before:
 - Every GEMM entry handles an empty axis as BLAS does.
 - The SISO angle cumsum refused more than 65535 * 256 lanes.
 - The benchmarks ran nothing under a bare `cargo bench`.
+
+### Known issues
+
+- On Blackwell cards (compute capability 12.x) with CUDA 13.2, NVRTC now
+  and then compiles one kernel source into two different PTX texts. A
+  module's artifact digest can then differ between two cold compiles of
+  the same release. The two variants we caught give the same bits on all
+  672 cases we checked, and the kernel cache keeps the first compile on
+  each machine. 0.8.0 does not fix this. Compiles for the Ada cards
+  (compute_89) never varied in our runs.
 
 ## 0.7.5 (2026-09-23)
 

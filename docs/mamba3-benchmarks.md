@@ -12,6 +12,51 @@ model. They measure the implementation at the stated shapes, not model
 quality. For inference measurements using trained Mamba-1 checkpoints,
 see [mamba1-benchmarks.md](mamba1-benchmarks.md).
 
+## Whole steps, 0.7.5 to 0.8.0 (RTX 5090, CUDA 13.2)
+
+Measured on October 18 and 19, 2026 on a rented RTX 5090 (170 SMs, driver
+595.71.05, CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.99.1, release build, AMD
+EPYC 7543 host). The released `0.7.5` and the final `0.8.0` tree each drive
+the same probe through the public trainer and backbone of the release, in
+the default `Deterministic` GEMM mode, one shape in one process at a time on
+an otherwise idle card. The 0.7.5 cells ran twice on October 18,
+alternating with an earlier 0.8 tree. The final tree ran each cell twice
+early on October 19. A cell is the median of its process medians.
+`old/new` above 1 means 0.8.0 is faster. Training times the whole public
+`step` with the AdamW update. Decode runs through a captured graph.
+
+Training, ms per step:
+
+| shape | storage | execution | 0.7.5 | 0.8.0 | old/new |
+|---|---|---|---:|---:|---:|
+| 24 layers of 384, head 16, 16 states, B=8, T=1300 | BF16 | eager | 104.08 | 92.16 | 1.129× |
+| | BF16 | graph | 104.30 | 91.71 | 1.137× |
+| | F16 | eager | 106.37 | 92.55 | 1.149× |
+| | F16 | graph | 105.90 | 92.73 | 1.142× |
+| | F32 | eager | 100.76 | 91.70 | 1.099× |
+| | F32 | graph | 101.19 | 90.10 | 1.123× |
+| 4 layers of 768, head 32, 64 states, B=4, T=512 | F32 | graph | 18.81 | 9.74 | 1.93× |
+| | BF16 | graph | 15.66 | 6.88 | 2.28× |
+| 4 layers of 768, head 64, 48 states, B=4, T=256, sequential scan | F32 | graph | refused | 17.60 | |
+| | BF16 | graph | refused | 17.12 | |
+| 4 layers of 768, head 64, 64 states, B=4, T=256, sequential scan | F32 | graph | refused | 17.74 | |
+| | BF16 | graph | refused | 15.73 | |
+
+Decode, us per step:
+
+| shape | storage | batch | 0.7.5 | 0.8.0 | old/new |
+|---|---|---:|---:|---:|---:|
+| 4 layers of 128, head 16, 16 states | F32 | 1 | 115.0 | 112.2 | 1.03× |
+| | F32 | 16 | 119.2 | 118.9 | 1.00× |
+| | F32 | 128 | 147.4 | 146.2 | 1.01× |
+| 24 layers of 768, head 64, 128 states | BF16 | 1 | panicked | 861.4 | |
+| | BF16 | 16 | panicked | 1620 | |
+
+0.7.5 refused a sequential scan with heads wider than 32 and panicked on
+the first bf16 decode step of a model with its own input projection. The
+kernels behind the gains are listed in the 0.8.0 entry of the
+[changelog](../CHANGELOG.md).
+
 ## Training step, 0.7.1 to 0.7.3 (RTX 6000 Ada, CUDA 13.2)
 
 Measurements on September 18, 2026: the assembled `0.7.3` (kernel sources
