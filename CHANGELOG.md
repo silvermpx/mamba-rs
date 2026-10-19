@@ -246,8 +246,9 @@ and stay as close to the float64 references as before:
   module's artifact digest can then differ between two cold compiles of
   the same release. The two variants we caught give the same bits on all
   672 cases we checked, and the kernel cache keeps the first compile on
-  each machine. 0.8.0 does not fix this. Compiles for the Ada cards
-  (compute_89) never varied in our runs.
+  each machine. 0.8.0 does not fix this. On the Ada cards (compute_89) we
+  caught it once, in the Inference module's Ada cells, and did not compare
+  the outputs of those two variants.
 
 ## 0.7.5 (2026-09-23)
 
