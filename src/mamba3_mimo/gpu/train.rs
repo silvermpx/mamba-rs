@@ -2151,8 +2151,10 @@ impl Mamba3MimoGpuTrainer {
                     a.ck_ang.cached_ptr(),
                 ];
                 let seq_idx = self.varlen.ptr();
+                let sms = self.ctx.kernels.multiprocessor_count() as usize;
                 for (y_first, z_first, cfg) in yz_runs(self.scan.cfg(b, nh, hd)) {
-                    let mut bld = stream.launch_builder(self.kernels.scan_ckpt.get(self.act));
+                    let kernel = self.kernels.scan_kernel(true, &cfg, sms);
+                    let mut bld = stream.launch_builder(kernel.get(self.act));
                     bld.arg(&o);
                     bld.arg(&ssm);
                     bld.arg(&kst);

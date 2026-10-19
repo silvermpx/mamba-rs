@@ -41,6 +41,13 @@ pub struct Mamba3MimoKernels {
     pub scan_ckpt: TypedKernel,
     /// The widest block both scans launch, from their register use.
     pub scan_threads: usize,
+    /// Both scans built to read each batch of states one batch ahead: the
+    /// same chains in the same order, so the same bits, on more registers
+    /// (see [`Self::scan_kernel`]).
+    pub scan_ahead: TypedKernel,
+    pub scan_ckpt_ahead: TypedKernel,
+    /// The widest block both reading-ahead scans launch.
+    pub scan_ahead_threads: usize,
     /// The sequential backward of the scan (replay per segment).
     pub scan_bwd: TypedKernel,
     /// `mimo_scan_bwd` for a head whose rows, keys or tiles do not fit
@@ -483,6 +490,27 @@ fn pairs_build_forced() -> Option<bool> {
             "wide" => Some(false),
             other => panic!(
                 "MAMBA_RS_PAIRS_BUILD={other:?} is not a recognized build (use auto, narrow or wide)"
+            ),
+        },
+    })
+}
+
+/// `MAMBA_RS_SCAN_AHEAD` picks the build of the MIMO sequential scans for
+/// tests and measurements: `on` takes the build that reads ahead wherever
+/// its block launches, `off` the plain build everywhere, and unset or
+/// `auto` leaves the choice to [`Mamba3MimoKernels::scan_kernel`]. Any
+/// other value is refused loudly, so a typo cannot report a run that never
+/// left the rule.
+fn scan_ahead_forced() -> Option<bool> {
+    static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| match std::env::var("MAMBA_RS_SCAN_AHEAD") {
+        Err(_) => None,
+        Ok(v) => match v.trim() {
+            "auto" | "" => None,
+            "on" => Some(true),
+            "off" => Some(false),
+            other => panic!(
+                "MAMBA_RS_SCAN_AHEAD={other:?} is not a recognized build (use auto, on or off)"
             ),
         },
     })
@@ -1050,6 +1078,12 @@ impl Mamba3MimoKernels {
         let scan_ckpt = typed("mimo_scan_ckpt")?;
         let scan_threads =
             max_block(&scan, "scan")?.min(max_block(&scan_ckpt, "checkpointing scan")?);
+        let scan_ahead = typed("mimo_scan_ahead")?;
+        let scan_ckpt_ahead = typed("mimo_scan_ckpt_ahead")?;
+        let scan_ahead_threads = max_block(&scan_ahead, "reading-ahead scan")?.min(max_block(
+            &scan_ckpt_ahead,
+            "reading-ahead checkpointing scan",
+        )?);
         let scan_bwd = typed("mimo_scan_bwd")?;
         let scan_bwd_global = typed("mimo_scan_bwd_global")?;
         let scan_bwd_block = max_block(&scan_bwd, "scan backward")?;
@@ -1085,6 +1119,9 @@ impl Mamba3MimoKernels {
             gate_normed: typed("mimo_gate_normed")?,
             scan_ckpt,
             scan_threads,
+            scan_ahead,
+            scan_ckpt_ahead,
+            scan_ahead_threads,
             scan_bwd,
             scan_bwd_global,
             scan_bwd_block,
@@ -1129,6 +1166,8 @@ impl Mamba3MimoKernels {
             for (k, name) in [
                 (&kernels.scan, "scan"),
                 (&kernels.scan_ckpt, "scan_ckpt"),
+                (&kernels.scan_ahead, "scan_ahead"),
+                (&kernels.scan_ckpt_ahead, "scan_ckpt_ahead"),
                 (&kernels.scan_bwd, "scan_bwd"),
                 (&kernels.scan_bwd_global, "scan_bwd_global"),
                 (&kernels.chunk_state, "chunk_state"),
@@ -1170,6 +1209,26 @@ impl Mamba3MimoKernels {
             )?))
         };
         Ok(kernels)
+    }
+
+    /// The build of the scan (`ckpt`: the training forward's) a launch of
+    /// `cfg` runs on a device of `sms` multiprocessors: the one that reads
+    /// ahead when every block has a multiprocessor to itself, where the
+    /// time is one block's latency and the reads ahead cut it; otherwise
+    /// the plain one, whose blocks take fewer registers and so share the
+    /// multiprocessors without waiting for each other. Both give the same
+    /// bits.
+    pub fn scan_kernel(&self, ckpt: bool, cfg: &LaunchConfig, sms: usize) -> &TypedKernel {
+        let (x, y, z) = cfg.grid_dim;
+        let blocks = x as usize * y as usize * z as usize;
+        let fits = cfg.block_dim.0 as usize <= self.scan_ahead_threads;
+        let ahead = fits && scan_ahead_forced().unwrap_or(blocks <= sms);
+        match (ckpt, ahead) {
+            (false, false) => &self.scan,
+            (false, true) => &self.scan_ahead,
+            (true, false) => &self.scan_ckpt,
+            (true, true) => &self.scan_ckpt_ahead,
+        }
     }
 
     /// The tiled chunk scan for a head of `hd` channels: the entry whose

@@ -130,9 +130,10 @@ are gone.
   `MAMBA_RS_SMEM_BUDGET` (the small tiles and fallbacks),
   `MAMBA_RS_INDEX_WIDTH=i64` (the 64-bit builds), `MAMBA_RS_GRID_RUN`
   (the split grids), `MAMBA_RS_STEP_PREFETCH` (the SISO decode step with
-  and without the early fetch) and `MAMBA_RS_PAIRS_BUILD` (the two builds
-  of the MIMO CUDA-core pair kernels). Both builds of each give the same
-  bits.
+  and without the early fetch), `MAMBA_RS_PAIRS_BUILD` (the two builds
+  of the MIMO CUDA-core pair kernels) and `MAMBA_RS_SCAN_AHEAD` (the MIMO
+  sequential scans with and without their reads one batch ahead). Both
+  builds of each give the same bits.
   `MAMBA_RS_MIMO_CHUNK` sets the MIMO chunk length to a power of two from
   4 to 64 for measurements, and `MAMBA_RS_PAIRS_TC=off` keeps the MIMO
   pair terms of the tf32, bf16 and f16 trainers on the CUDA-core kernels.
@@ -245,8 +246,10 @@ and stay as close to the float64 references as before:
   grouped backward and the half fold backward with 64-bit offsets. Every
   float4 read of shared memory in those kernels is now written in PTX, and
   on Blackwell the two Mamba-1 backward kernels keep two blocks a
-  multiprocessor. In 24 to 72 cold compiles of each module, each now gives
-  one PTX text.
+  multiprocessor. The plain build of the MIMO forward scans compiled for
+  Blackwell keeps its plain reads, which gave one PTX text there, since
+  the PTX reads cost it 6 percent at a prompt of eight sequences. In 24 to
+  72 cold compiles of each module, each now gives one PTX text.
 
 ### Known issues
 

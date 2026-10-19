@@ -32,6 +32,15 @@
 #error "MIMO_RANK lies outside 1..MIMO_MAX_RANK"
 #endif
 
+// The plain build of the forward scans compiled for Blackwell (CC 12.x)
+// reads its shared rows and step scalars plainly (see ROWS_PTX on
+// mimo_tok_row); every other build and target reads them through PTX.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200 && __CUDA_ARCH__ < 1300
+#define MIMO_FWD_ROWS_PTX false
+#else
+#define MIMO_FWD_ROWS_PTX true
+#endif
+
 // The state indices a batch of a channel's row loop takes: four at ranks
 // up to 4, two up to 8 and one past that, so a batch's rank arrays stay in
 // registers.
@@ -203,7 +212,23 @@ __device__ __forceinline__ void mimo_split4(float (&dst)[J][RA], int r, const fl
 // which still hold the sequence before, are never loaded (the caller also
 // passes zero alpha, beta and v_prev). The chains are the ones a window
 // starting from the empty state runs.
-template <int RK, bool FRESH = false>
+// ROWS_PTX is whether the plain loop reads the shared rows through PTX: it
+// does wherever NVVM's own grouping of those reads varies from one compile
+// to the next (the Ada cards); the plain build of the forward scans
+// compiled for Blackwell (CC 12.x), where every compile of the plain float4
+// reads gave one PTX, reads them plainly and keeps the scheduling the PTX
+// reads would take away.
+// AHEAD takes each batch's reads one batch ahead, into a second set of
+// registers: the reads go through PTX (see mimo_split4), which no later
+// read may pass, so without it a batch's reads wait behind the batch before.
+// The forward scans come built both ways: the second set of registers costs
+// blocks an SM holds, so the host takes AHEAD where a launch's blocks fit
+// the SMs at its occupancy and the latency of one block is the time, and
+// the plain build where the blocks need the SMs' room. The backward's
+// recompute, already near its register budget, stays plain. The chains and
+// their order are the same either way, so the bits do not depend on which
+// build ran.
+template <int RK, bool FRESH = false, bool AHEAD = false, bool ROWS_PTX = true>
 __device__ __forceinline__ void mimo_tok_row(
     float* __restrict__ srow, float* y, float* u, float* up, const float* px, float x,
     float v_prev, const float* __restrict__ kc, const float* __restrict__ kp,
@@ -223,6 +248,63 @@ __device__ __forceinline__ void mimo_tok_row(
     }
     const bool vec = J == 4 && mimo_rows_aligned(kc, FRESH ? kc : kp, qv, ds);
     int n = 0;
+    if constexpr (AHEAD && J == 4) {
+        if (vec) {
+            float sv[2][J], kcv[2][J][RK], kpv[2][J][RK], qvv[2][J][RK];
+            float s[J];
+#define MIMO_ROW_READ(B, AT)                                                   \
+    do {                                                                       \
+        _Pragma("unroll") for (int j = 0; j < J; j++) sv[B][j] =               \
+            FRESH ? 0.0f : srow[(AT) + j];                                     \
+        _Pragma("unroll") for (int r = 0; r < R; r++) {                        \
+            mimo_split4<true>(kcv[B], r, kc + r * ds + (AT));                  \
+            if constexpr (FRESH) {                                             \
+                _Pragma("unroll") for (int j = 0; j < J; j++) kpv[B][j][r] = 0.0f; \
+            } else {                                                           \
+                mimo_split4<true>(kpv[B], r, kp + r * ds + (AT));              \
+            }                                                                  \
+            mimo_split4<true>(qvv[B], r, qv + r * ds + (AT));                  \
+        }                                                                      \
+    } while (0)
+#define MIMO_ROW_STATE(B)                                                      \
+    do {                                                                       \
+        _Pragma("unroll") for (int j = 0; j < J; j++) {                        \
+            float inner = __fmul_rn(gx[0], kcv[B][j][0]);                      \
+            inner = __fmaf_rn(bv[0], kpv[B][j][0], inner);                     \
+            _Pragma("unroll") for (int r = 1; r < R; r++) {                    \
+                inner = __fmaf_rn(gx[r], kcv[B][j][r], inner);                 \
+                inner = __fmaf_rn(bv[r], kpv[B][j][r], inner);                 \
+            }                                                                  \
+            s[j] = __fmaf_rn(alpha, sv[B][j], inner);                          \
+        }                                                                      \
+    } while (0)
+#define MIMO_ROW_OUTPUT(B, AT)                                                 \
+    do {                                                                       \
+        _Pragma("unroll") for (int j = 0; j < J; j++) {                        \
+            srow[(AT) + j] = s[j];                                             \
+            _Pragma("unroll") for (int r = 0; r < R; r++)                      \
+                y[r] = __fmaf_rn(s[j], qvv[B][j][r], y[r]);                    \
+        }                                                                      \
+    } while (0)
+            if (n + J <= ds) MIMO_ROW_READ(0, n);
+            for (; n + 2 * J <= ds; n += 2 * J) {
+                MIMO_ROW_STATE(0);
+                MIMO_ROW_READ(1, n + J);
+                MIMO_ROW_OUTPUT(0, n);
+                MIMO_ROW_STATE(1);
+                if (n + 3 * J <= ds) MIMO_ROW_READ(0, n + 2 * J);
+                MIMO_ROW_OUTPUT(1, n + J);
+            }
+            if (n + J <= ds) {
+                MIMO_ROW_STATE(0);
+                MIMO_ROW_OUTPUT(0, n);
+                n += J;
+            }
+#undef MIMO_ROW_READ
+#undef MIMO_ROW_STATE
+#undef MIMO_ROW_OUTPUT
+        }
+    }
     for (; J > 1 && n + J <= ds; n += J) {
         float sv[J], kcv[J][RK], kpv[J][RK], qvv[J][RK];
 #pragma unroll
@@ -230,14 +312,14 @@ __device__ __forceinline__ void mimo_tok_row(
         if (vec) {
 #pragma unroll
             for (int r = 0; r < R; r++) {
-                mimo_split4<true>(kcv, r, kc + r * ds + n);
+                mimo_split4<ROWS_PTX>(kcv, r, kc + r * ds + n);
                 if constexpr (FRESH) {
 #pragma unroll
                     for (int j = 0; j < J; j++) kpv[j][r] = 0.0f;
                 } else {
-                    mimo_split4<true>(kpv, r, kp + r * ds + n);
+                    mimo_split4<ROWS_PTX>(kpv, r, kp + r * ds + n);
                 }
-                mimo_split4<true>(qvv, r, qv + r * ds + n);
+                mimo_split4<ROWS_PTX>(qvv, r, qv + r * ds + n);
             }
         } else {
 #pragma unroll
@@ -404,7 +486,7 @@ __device__ __forceinline__ bool mimo_last_tile(unsigned int* done, long long bh,
 // sequence runs from the empty state, previous keys, previous input and
 // angles, with zero alpha and beta; a checkpoint keeps the state before
 // it, and the replay starts the sequence again the same way.
-template <typename TI, bool CKPT, int RK>
+template <typename TI, bool CKPT, int RK, bool AHEAD>
 __device__ __forceinline__ void mimo_scan_body(
     TI* __restrict__ out,
     float* __restrict__ ssm, float* __restrict__ kst,
@@ -517,13 +599,16 @@ __device__ __forceinline__ void mimo_scan_body(
             const float x = to_f(pr[di + h * hd + pch]);
             const float z = to_f(pr[h * hd + pch]);
             float u[RK], up[RK], y[RK];
+            constexpr bool rows_ptx = AHEAD || MIMO_FWD_ROWS_PTX;
             if (fresh) {
                 v_prev = 0.0f;
-                mimo_tok_row<RK, true>(st + tid * (ds + 1), y, u, up, px, x, v_prev, kcur,
-                                       kprev, qv, sc.alpha, sc.beta, sc.gamma, dval, rank, ds);
+                mimo_tok_row<RK, true, AHEAD, rows_ptx>(
+                    st + tid * (ds + 1), y, u, up, px, x, v_prev, kcur, kprev, qv, sc.alpha,
+                    sc.beta, sc.gamma, dval, rank, ds);
             } else {
-                mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev, kcur, kprev, qv,
-                                 sc.alpha, sc.beta, sc.gamma, dval, rank, ds);
+                mimo_tok_row<RK, false, AHEAD, rows_ptx>(
+                    st + tid * (ds + 1), y, u, up, px, x, v_prev, kcur, kprev, qv, sc.alpha,
+                    sc.beta, sc.gamma, dval, rank, ds);
             }
             mimo_put(&out[row * di + h * hd + pch], mimo_tok_gate<RK>(y, pz, po, z, rank));
             if (y_out != nullptr) {
@@ -558,7 +643,7 @@ __device__ __forceinline__ void mimo_scan_body(
 // builder writes the angle before token t when it builds token t.
 // Dynamic shared memory: the state rows (padded to 16 bytes), 5 R N floats
 // for the keys and queries and 8 for the scalars.
-template <typename TI, bool CKPT, int RK>
+template <typename TI, bool CKPT, int RK, bool AHEAD>
 __device__ __forceinline__ void mimo_scan_pipe_body(
     TI* __restrict__ out,
     float* __restrict__ ssm, float* __restrict__ kst,
@@ -684,19 +769,31 @@ __device__ __forceinline__ void mimo_scan_pipe_body(
         }
         if (own) {
             const TI* pr = proj + row * ld_proj;
-            const float* sd = scal + (t % 2) * 4;
+            // The step's scalars, read through PTX once for either branch
+            // after the token's inputs are on their way: read in each
+            // branch, the place of their address was NVVM's to choose, and
+            // it chose differently from one compile to the next. The plain
+            // build compiled for Blackwell, which reads its rows plainly,
+            // reads them in each branch straight from shared memory, which
+            // compiled the same every time.
+            constexpr bool rows_ptx = AHEAD || MIMO_FWD_ROWS_PTX;
+            float sdv[4];
+            const float* sd = rows_ptx ? sdv : scal + (t % 2) * 4;
             const float x = to_f(pr[di + h * hd + pch]);
             const float z = to_f(pr[h * hd + pch]);
+            if constexpr (rows_ptx) lds_f32_row4(scal + (t % 2) * 4, sdv);
             float u[RK], up[RK], y[RK];
             if (vl_starts(seq_idx, b, seq, t)) {
                 v_prev = 0.0f;
-                mimo_tok_row<RK, true>(st + tid * (ds + 1), y, u, up, px, x, v_prev,
-                                       kbuf + (t % 3) * rn, kbuf + ((t + 2) % 3) * rn,
-                                       qbuf + (t % 2) * rn, sd[0], sd[1], sd[2], dval, rank, ds);
+                mimo_tok_row<RK, true, AHEAD, rows_ptx>(
+                    st + tid * (ds + 1), y, u, up, px, x, v_prev, kbuf + (t % 3) * rn,
+                    kbuf + ((t + 2) % 3) * rn, qbuf + (t % 2) * rn, sd[0], sd[1], sd[2], dval,
+                    rank, ds);
             } else {
-                mimo_tok_row<RK>(st + tid * (ds + 1), y, u, up, px, x, v_prev,
-                                 kbuf + (t % 3) * rn, kbuf + ((t + 2) % 3) * rn,
-                                 qbuf + (t % 2) * rn, sd[0], sd[1], sd[2], dval, rank, ds);
+                mimo_tok_row<RK, false, AHEAD, rows_ptx>(
+                    st + tid * (ds + 1), y, u, up, px, x, v_prev, kbuf + (t % 3) * rn,
+                    kbuf + ((t + 2) % 3) * rn, qbuf + (t % 2) * rn, sd[0], sd[1], sd[2], dval,
+                    rank, ds);
             }
             mimo_put(&out[row * di + h * hd + pch], mimo_tok_gate<RK>(y, pz, po, z, rank));
             if (y_out != nullptr) {
@@ -722,7 +819,7 @@ __device__ __forceinline__ void mimo_scan_pipe_body(
 // The scan of a head's tile of channels: the pipelined body when the
 // host's shared memory takes its keys (`allow_pipe`) and the block has a
 // builder for every angle past the tile's channels, else the plain one.
-template <typename TI, bool CKPT, int RK>
+template <typename TI, bool CKPT, int RK, bool AHEAD>
 __device__ __forceinline__ void mimo_scan_any(
     TI* __restrict__ out,
     float* __restrict__ ssm, float* __restrict__ kst,
@@ -745,18 +842,18 @@ __device__ __forceinline__ void mimo_scan_any(
     const int pc = min(tile, hd - (int)(z_first + blockIdx.z) * tile);
     const int spare = (int)blockDim.x - ((pc + 31) & ~31);
     if (allow_pipe && spare >= 32 && spare >= na)
-        mimo_scan_pipe_body<TI, CKPT, RK>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,
+        mimo_scan_pipe_body<TI, CKPT, RK, AHEAD>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,
             dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd, ds, rank,
             na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride, tile, done, y_out, y_first, z_first,
             seq_idx);
     else
-        mimo_scan_body<TI, CKPT, RK>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,
+        mimo_scan_body<TI, CKPT, RK, AHEAD>(out, ssm, kst, vst, ang, proj, ld_proj, bn, cn,
             dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd, ds, rank,
             na, a_floor, ck_ssm, ck_k, ck_v, ck_ang, stride, tile, done, y_out, y_first, z_first,
             seq_idx);
 }
 
-#define DEFINE_MIMO_SCAN(NAME, TI)                                             \
+#define DEFINE_MIMO_SCAN(NAME, TI, AHEAD)                                      \
 extern "C" __global__ void NAME(                                               \
     TI* __restrict__ out,                                                      \
     float* __restrict__ ssm, float* __restrict__ kst,                          \
@@ -775,19 +872,22 @@ extern "C" __global__ void NAME(                                               \
     int z_first, /* this run's first z block */                                \
     const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
-    mimo_scan_any<TI, false, MIMO_RANK>(out, ssm, kst, vst, ang, proj,         \
+    mimo_scan_any<TI, false, MIMO_RANK, AHEAD>(out, ssm, kst, vst, ang, proj,  \
         ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,   \
         seq, nh, ng, hd, ds, rank, na, a_floor, nullptr, nullptr, nullptr,     \
         nullptr, 1, tile, allow_pipe, done, y_out, y_first, z_first, seq_idx); \
 }
 
-DEFINE_MIMO_SCAN(mimo_scan, float)
-DEFINE_MIMO_SCAN(mimo_scan_bf16, __nv_bfloat16)
-DEFINE_MIMO_SCAN(mimo_scan_f16, __half)
+DEFINE_MIMO_SCAN(mimo_scan, float, false)
+DEFINE_MIMO_SCAN(mimo_scan_bf16, __nv_bfloat16, false)
+DEFINE_MIMO_SCAN(mimo_scan_f16, __half, false)
+DEFINE_MIMO_SCAN(mimo_scan_ahead, float, true)
+DEFINE_MIMO_SCAN(mimo_scan_ahead_bf16, __nv_bfloat16, true)
+DEFINE_MIMO_SCAN(mimo_scan_ahead_f16, __half, true)
 
 // The training forward's scan: the scan above, also writing the
 // checkpoints every `stride` tokens.
-#define DEFINE_MIMO_SCAN_CKPT(NAME, TI)                                        \
+#define DEFINE_MIMO_SCAN_CKPT(NAME, TI, AHEAD)                                 \
 extern "C" __global__ void NAME(                                               \
     TI* __restrict__ out,                                                      \
     float* __restrict__ ssm, float* __restrict__ kst,                          \
@@ -809,15 +909,18 @@ extern "C" __global__ void NAME(                                               \
     int z_first, /* this run's first z block */                                \
     const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
-    mimo_scan_any<TI, true, MIMO_RANK>(out, ssm, kst, vst, ang, proj,          \
+    mimo_scan_any<TI, true, MIMO_RANK, AHEAD>(out, ssm, kst, vst, ang, proj,   \
         ld_proj, bn, cn, dt_bias, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o,   \
         seq, nh, ng, hd, ds, rank, na, a_floor, ck_ssm, ck_k, ck_v, ck_ang,    \
         stride, tile, allow_pipe, done, y_out, y_first, z_first, seq_idx);     \
 }
 
-DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt, float)
-DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt_bf16, __nv_bfloat16)
-DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt_f16, __half)
+DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt, float, false)
+DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt_bf16, __nv_bfloat16, false)
+DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt_f16, __half, false)
+DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt_ahead, float, true)
+DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt_ahead_bf16, __nv_bfloat16, true)
+DEFINE_MIMO_SCAN_CKPT(mimo_scan_ckpt_ahead_f16, __half, true)
 
 // The gate with the per-rank output norm (is_outproj_norm), over the
 // readouts y [B, T, H, R, P] (D included) the scans write: each rank's row

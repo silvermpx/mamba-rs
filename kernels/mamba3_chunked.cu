@@ -234,7 +234,24 @@ extern "C" __global__ void NAME(                                               \
         int p = o / quads;                                                     \
         int nq = o % quads;                                                    \
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;              \
-        for (int t_local = kept; t_local < chunk_len; t_local++) {             \
+        /* Four steps' reads together ahead of their arithmetic; each chain */ \
+        /* takes the same products in the same order as one step at a time. */ \
+        int tr = kept;                                                         \
+        for (; tr + 4 <= chunk_len; tr += 4) {                                 \
+            float dec4[4], vt4[4];                                             \
+            float4 kq4[4];                                                     \
+            lds_f32_row4(sm_dec + tr, dec4);                                   \
+            lds_f32_rows4(sm_x + tr * hd + p, hd, vt4);                        \
+            lds_f32x4_rows4(sm_k + tr * k_ld + 4 * nq, k_ld, kq4);             \
+            _Pragma("unroll")                                                  \
+            for (int j = 0; j < 4; j++) {                                      \
+                acc0 += dec4[j] * kq4[j].x * vt4[j];                           \
+                acc1 += dec4[j] * kq4[j].y * vt4[j];                           \
+                acc2 += dec4[j] * kq4[j].z * vt4[j];                           \
+                acc3 += dec4[j] * kq4[j].w * vt4[j];                           \
+            }                                                                  \
+        }                                                                      \
+        for (int t_local = tr; t_local < chunk_len; t_local++) {             \
             float decay = sm_dec[t_local];                                     \
             float v_t = sm_x[t_local * hd + p];                                \
             const float* k_row = sm_k + t_local * k_ld;                        \
@@ -586,7 +603,23 @@ extern "C" __global__ void NAME(                                               \
             int tri_row = t_local * (t_local - 1) / 2;                         \
             int lo = vl_seq_first(seq_idx, b, T, chunk_start, chunk_start + t_local) \
                      - chunk_start;                                            \
-            for (int s_local = lo; s_local < t_local; s_local++) {             \
+            /* Four rows' reads together ahead of their arithmetic; each chain */ \
+            /* takes the same products in the same order as one row at a time. */ \
+            int sr = lo;                                                       \
+            for (; sr + 4 <= t_local; sr += 4) {                               \
+                float w4[4];                                                   \
+                float4 v4[4];                                                  \
+                lds_f32_row4(sm_tri + tri_row + sr, w4);                       \
+                lds_f32x4_rows4(sm_v + sr * hd + p0, hd, v4);                  \
+                _Pragma("unroll")                                              \
+                for (int j = 0; j < 4; j++) {                                  \
+                    yd0 += w4[j] * v4[j].x;                                    \
+                    yd1 += w4[j] * v4[j].y;                                    \
+                    yd2 += w4[j] * v4[j].z;                                    \
+                    yd3 += w4[j] * v4[j].w;                                    \
+                }                                                              \
+            }                                                                  \
+            for (int s_local = sr; s_local < t_local; s_local++) {             \
                 float w = sm_tri[tri_row + s_local];                           \
                 float4 v =                                                     \
                     lds_f32x4(sm_v + s_local * hd + p0);                       \
@@ -2008,7 +2041,24 @@ extern "C" __global__ void NAME(                                              \
         int p = o / quads;                                                    \
         int nq = o % quads;                                                   \
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;             \
-        for (int t_local = kept; t_local < chunk_len; t_local++) {            \
+        /* Four steps' reads together ahead of their arithmetic; each chain */ \
+        /* takes the same products in the same order as one step at a time. */ \
+        int tr = kept;                                                         \
+        for (; tr + 4 <= chunk_len; tr += 4) {                                 \
+            float dec4[4], vt4[4];                                             \
+            float4 kq4[4];                                                     \
+            lds_f32_row4(sm_dec + tr, dec4);                                   \
+            lds_f32_rows4(sm_x + tr * hd + p, hd, vt4);                        \
+            lds_f32x4_rows4(sm_k + tr * k_ld + 4 * nq, k_ld, kq4);             \
+            _Pragma("unroll")                                                  \
+            for (int j = 0; j < 4; j++) {                                      \
+                acc0 += dec4[j] * kq4[j].x * vt4[j];                           \
+                acc1 += dec4[j] * kq4[j].y * vt4[j];                           \
+                acc2 += dec4[j] * kq4[j].z * vt4[j];                           \
+                acc3 += dec4[j] * kq4[j].w * vt4[j];                           \
+            }                                                                  \
+        }                                                                      \
+        for (int t_local = tr; t_local < chunk_len; t_local++) {            \
             float decay = sm_dec[t_local];                                    \
             float v_t = sm_x[t_local * hd + p];                               \
             const float* k_row = sm_k + t_local * k_ld;                       \
@@ -2199,8 +2249,8 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
             const float* qr = sm_q + tid * M3PS_LD;                           \
             const float* kr = sm_k + tid * M3PS_LD;                           \
             for (int q4i = 0; q4i < full; q4i++) {                            \
-                float4 a = *reinterpret_cast<const float4*>(qr + 4 * q4i);    \
-                float4 c = *reinterpret_cast<const float4*>(kr + 4 * q4i);    \
+                float4 a = lds_f32x4(qr + 4 * q4i);                           \
+                float4 c = lds_f32x4(kr + 4 * q4i);                           \
                 dot = __fmaf_rn(a.x, c.x, dot);                               \
                 dot = __fmaf_rn(a.y, c.y, dot);                               \
                 dot = __fmaf_rn(a.z, c.z, dot);                               \
@@ -2216,7 +2266,7 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
         if (valid > 0 && row < chunk_len) {                                   \
             float scale_val = sm_scale[row];                                  \
             float4* sk = reinterpret_cast<float4*>(sm_k + row * M3PS_LD + 4 * qd); \
-            float4 kv = *sk;                                                  \
+            float4 kv = lds_f32x4(sm_k + row * M3PS_LD + 4 * qd);             \
             float4 sc;                                                        \
             sc.x = to_f(FROM_F(__fmul_rn(kv.x, scale_val)));                  \
             sc.y = to_f(FROM_F(__fmul_rn(kv.y, scale_val)));                  \
@@ -2234,11 +2284,27 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
             int ovalid = width - 4 * oq;                                      \
             if (ovalid <= 0) continue;                                        \
             float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;         \
-            for (int t_local = kept; t_local < chunk_len; t_local++) {        \
+            /* Four steps' reads together ahead of their arithmetic, all of them */ \
+            /* through PTX; each chain takes the same products in the same order. */ \
+            int tr = kept;                                                     \
+            for (; tr + 4 <= chunk_len; tr += 4) {                             \
+                float dec4[4], vt4[4];                                         \
+                float4 kq4[4];                                                 \
+                lds_f32_row4(sm_dec + tr, dec4);                               \
+                lds_f32_rows4(sm_x + tr * M3PS_PB + pl, M3PS_PB, vt4);         \
+                lds_f32x4_rows4(sm_k + tr * M3PS_LD + 4 * oq, M3PS_LD, kq4);   \
+                _Pragma("unroll")                                              \
+                for (int j = 0; j < 4; j++) {                                  \
+                    acc0 = __fmaf_rn(__fmul_rn(dec4[j], kq4[j].x), vt4[j], acc0); \
+                    acc1 = __fmaf_rn(__fmul_rn(dec4[j], kq4[j].y), vt4[j], acc1); \
+                    acc2 = __fmaf_rn(__fmul_rn(dec4[j], kq4[j].z), vt4[j], acc2); \
+                    acc3 = __fmaf_rn(__fmul_rn(dec4[j], kq4[j].w), vt4[j], acc3); \
+                }                                                              \
+            }                                                                  \
+            for (int t_local = tr; t_local < chunk_len; t_local++) {          \
                 float decay = sm_dec[t_local];                                \
                 float v_t = sm_x[t_local * M3PS_PB + pl];                     \
-                float4 kv = *reinterpret_cast<const float4*>(                 \
-                    sm_k + t_local * M3PS_LD + 4 * oq);                       \
+                float4 kv = lds_f32x4(sm_k + t_local * M3PS_LD + 4 * oq);     \
                 acc0 = __fmaf_rn(__fmul_rn(decay, kv.x), v_t, acc0);          \
                 acc1 = __fmaf_rn(__fmul_rn(decay, kv.y), v_t, acc1);          \
                 acc2 = __fmaf_rn(__fmul_rn(decay, kv.z), v_t, acc2);          \
@@ -2407,7 +2473,23 @@ extern "C" __global__ void NAME(                                              \
             int tri_row = t_local * (t_local - 1) / 2;                        \
             int lo = vl_seq_first(seq_idx, b, T, chunk_start, chunk_start + t_local) \
                      - chunk_start;                                           \
-            for (int s_local = lo; s_local < t_local; s_local++) {            \
+            /* Four rows' reads together ahead of their arithmetic; each chain */ \
+            /* takes the same products in the same order as one row at a time. */ \
+            int sr = lo;                                                       \
+            for (; sr + 4 <= t_local; sr += 4) {                               \
+                float w4[4];                                                   \
+                float4 v4[4];                                                  \
+                lds_f32_row4(sm_tri + tri_row + sr, w4);                       \
+                lds_f32x4_rows4(sm_v + sr * hd + p0, hd, v4);                  \
+                _Pragma("unroll")                                              \
+                for (int j = 0; j < 4; j++) {                                  \
+                    yd0 += w4[j] * v4[j].x;                                    \
+                    yd1 += w4[j] * v4[j].y;                                    \
+                    yd2 += w4[j] * v4[j].z;                                    \
+                    yd3 += w4[j] * v4[j].w;                                    \
+                }                                                              \
+            }                                                                  \
+            for (int s_local = sr; s_local < t_local; s_local++) {            \
                 float w = sm_tri[tri_row + s_local];                          \
                 float4 v = lds_f32x4(                                         \
                     sm_v + s_local * hd + p0);                                \
@@ -2728,7 +2810,23 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
         bool on = t < cont;                                                   \
         float yd0 = 0.0f, yd1 = 0.0f, yd2 = 0.0f, yd3 = 0.0f;                 \
         int tri_row = t * (t - 1) / 2;                                        \
-        for (int s = sm_lo[t]; s < t; s++) {                                  \
+        /* Four rows' reads together ahead of their arithmetic; each chain */  \
+        /* takes the same products in the same order as one row at a time. */  \
+        int sr = sm_lo[t];                                                     \
+        for (; sr + 4 <= t; sr += 4) {                                         \
+            float w4[4];                                                       \
+            float4 v4[4];                                                      \
+            lds_f32_row4(sm_tri + tri_row + sr, w4);                           \
+            lds_f32x4_rows4(sm_v + sr * M3SS_V_LD + 4 * tc, M3SS_V_LD, v4);    \
+            _Pragma("unroll")                                                  \
+            for (int j = 0; j < 4; j++) {                                      \
+                yd0 = __fmaf_rn(w4[j], v4[j].x, yd0);                          \
+                yd1 = __fmaf_rn(w4[j], v4[j].y, yd1);                          \
+                yd2 = __fmaf_rn(w4[j], v4[j].z, yd2);                          \
+                yd3 = __fmaf_rn(w4[j], v4[j].w, yd3);                          \
+            }                                                                  \
+        }                                                                      \
+        for (int s = sr; s < t; s++) {                                  \
             float w = sm_tri[tri_row + s];                                    \
             float4 v = lds_f32x4(sm_v + s * M3SS_V_LD + 4 * tc);              \
             yd0 = __fmaf_rn(w, v.x, yd0);                                     \

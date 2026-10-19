@@ -942,8 +942,10 @@ impl Mamba3MimoGpuEngine {
                     (b * nh, self.ctx.kernels.multiprocessor_count() as usize),
                     (self.kernels.smem_optin, self.kernels.scan_threads),
                 );
+                let sms = self.ctx.kernels.multiprocessor_count() as usize;
                 for (y_first, z_first, cfg) in yz_runs(scan.cfg(b, nh, hd)) {
-                    let mut bld = stream.launch_builder(self.kernels.scan.get(self.act));
+                    let kernel = self.kernels.scan_kernel(false, &cfg, sms);
+                    let mut bld = stream.launch_builder(kernel.get(self.act));
                     bld.arg(&gated);
                     bld.arg(&ssm);
                     bld.arg(&kst);

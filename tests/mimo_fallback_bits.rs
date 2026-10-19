@@ -133,7 +133,8 @@ const SCAN_SHAPES: [Shape; 2] = [
 ];
 
 /// The whole head in one block (the launch a fitting head always takes)
-/// against tiles of 8, 16 and 24 channels, pipelined and plain.
+/// against tiles of 8, 16 and 24 channels, pipelined and plain, and every
+/// one of them again in the scans' build that reads each batch ahead.
 #[test]
 fn mimo_scan_tiles_are_the_whole_head() {
     let dev = GpuDevice::new(0).unwrap();
@@ -205,7 +206,7 @@ fn mimo_scan_tiles_are_the_whole_head() {
         for dtype in DTYPES {
             let proj = typed_buf(&ctx, &det(rows * ld_proj, 44, 1.0), dtype);
             for ckpt in [false, true] {
-                let run = |g: &ScanGeom| -> Vec<Vec<u32>> {
+                let run = |g: &ScanGeom, ahead: bool| -> Vec<Vec<u32>> {
                     let out = DtypedBuf::zeros(s, rows * di, dtype).unwrap();
                     let (ssm, kst) = (f32_buf(&ctx, &ssm0), f32_buf(&ctx, &k0));
                     let (vst, ang) = (f32_buf(&ctx, &v0), f32_buf(&ctx, &a0));
@@ -253,7 +254,12 @@ fn mimo_scan_tiles_are_the_whole_head() {
                     ];
                     let (stride_i, tile, pipe) = (stride as i32, g.tile as i32, i32::from(g.pipe));
                     let (done_ptr, y_ptr) = (done.cached_ptr(), y.cached_ptr());
-                    let kernel = if ckpt { &k.scan_ckpt } else { &k.scan };
+                    let kernel = match (ckpt, ahead) {
+                        (false, false) => &k.scan,
+                        (false, true) => &k.scan_ahead,
+                        (true, false) => &k.scan_ckpt,
+                        (true, true) => &k.scan_ckpt_ahead,
+                    };
                     for (y_first, z_first, cfg) in yz_runs(g.cfg(batch, nh, hd)) {
                         let mut b = s.launch_builder(kernel.get(dtype));
                         for p in &ptrs {
@@ -297,7 +303,7 @@ fn mimo_scan_tiles_are_the_whole_head() {
                     }
                     got
                 };
-                let want = run(&geoms[0]);
+                let want = run(&geoms[0], false);
                 let names = [
                     "rows",
                     "readouts",
@@ -310,13 +316,18 @@ fn mimo_scan_tiles_are_the_whole_head() {
                     "ck input",
                     "ck angles",
                 ];
-                for g in &geoms[1..] {
-                    let got = run(g);
+                let builds = geoms[1..]
+                    .iter()
+                    .map(|g| (g, false))
+                    .chain(geoms.iter().map(|g| (g, true)))
+                    .filter(|&(g, ahead)| !ahead || g.threads <= k.scan_ahead_threads);
+                for (g, ahead) in builds {
+                    let got = run(g, ahead);
                     for (i, name) in names.iter().take(want.len()).enumerate() {
                         assert!(
                             got[i] == want[i],
                             "{dtype:?} head {hd} rank {rank} checkpoints {ckpt}, tile {} \
-                             pipelined {}: {name}",
+                             pipelined {} reading ahead {ahead}: {name}",
                             g.tile,
                             g.pipe
                         );

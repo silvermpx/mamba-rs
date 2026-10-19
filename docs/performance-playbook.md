@@ -304,6 +304,16 @@ forces either one, so a suite run on one board covers both.
   Rank 1 takes the narrow build from head 256, or from head 64 with 256
   states, rank 2 from head 64 with 256 states, and ranks 3 and up from
   head 96, or from head 64 with 128 states.
+- `MAMBA_RS_SCAN_AHEAD=auto|on|off` picks the build of the MIMO
+  sequential scans: the one that reads each batch of states one batch
+  ahead into a second set of registers, or the plain one. Reading ahead
+  cuts a block's latency but costs registers (206 against the plain
+  build's 115 on the RTX 5090, where a multiprocessor then holds half the
+  blocks). The rule reads ahead when every
+  block of the launch has a multiprocessor to itself (`blocks <= SMs`), as
+  a prompt of one sequence and the training forward at the reference
+  shape do; past that the plain blocks share the multiprocessors in one
+  wave where the others would need two.
 
 Two switches are of another kind: they change bits.
 
@@ -388,6 +398,12 @@ panics.
   kernel's read-only global inputs through the read-only data path, so a
   kernel with PTX reads takes those inputs with `__ldg` (`m2_tile_load<true>`,
   `m3_load_quad_ro`). Compare `ld.global.nc` per function before and after.
+- The PTX reads pay only where they buy one PTX text. A kernel whose plain
+  reads already compile to one PTX on a target keeps them there: the plain
+  build of the MIMO forward scans compiled for Blackwell (CC 12.x,
+  `MIMO_FWD_ROWS_PTX`) reads its rows and step scalars plainly, as the PTX
+  reads had cost it 6 percent at a prompt of eight sequences, and the
+  census of that target is what allows it.
 - A gate's reference can itself be wrong. Compare families with a different
   summation order against the exact reference, not against another tiled
   kernel. On a numeric failure, diagnose candidate, reference and exact
