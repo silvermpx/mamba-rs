@@ -156,6 +156,18 @@ sequential. With `is_outproj_norm` either scan also writes its
 readouts, and a kernel of its own normalises and gates them; in training
 its backward runs ahead of the scan's.
 
+The backward's pair terms (each pair of tokens in a chunk: their parts of
+dq, dk and the scan input's gradient, and the pair's weight gradient) run
+on the tensor cores in the tf32, bf16 and f16 trainers. One block takes
+the chunk's rows of a head, at most 64 at the rank's own chunk, and forms
+every product with TF32 MMAs that sum in f32, each operand rounded to TF32
+as it enters. The f32 trainer keeps the CUDA-core kernels and their f32
+sums. Both give the same bits from run to run, and a packed sequence the
+bits it gets alone wherever it starts in a chunk: the tensor-core sums take
+one sequence's rows at a time, grouped from its first row, and another
+sequence's overflow never reaches them. `MAMBA_RS_PAIRS_TC=off` keeps the
+CUDA-core kernels in every trainer.
+
 | file | purpose |
 |---|---|
 | `mamba3_mimo.cu` | the B and C row norms, and the scan of a window token by token (decode is the window of one) |

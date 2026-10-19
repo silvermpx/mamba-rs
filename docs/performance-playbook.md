@@ -297,18 +297,26 @@ forces either one, so a suite run on one board covers both.
   only while the card runs few blocks. The rule fetches early when a
   head's state is small (`hd * ds <= 8192`) and the whole state leaves the
   card underfilled (`B * nh * hd * ds <= 12000 * SMs`).
-- `MAMBA_RS_PAIRS_BUILD=auto|narrow|wide` picks the build of the MIMO pair
-  kernels: the wide one (512 threads, at most 128 registers, part of its
-  sums spilled) or the narrow one (256 threads, every sum in registers).
+- `MAMBA_RS_PAIRS_BUILD=auto|narrow|wide` picks the build of the MIMO
+  CUDA-core pair kernels, which the f32 trainer runs: the wide one (512
+  threads, at most 128 registers, part of its sums spilled) or the narrow
+  one (256 threads, every sum in registers).
   Rank 1 takes the narrow build from head 256, or from head 64 with 256
   states, rank 2 from head 64 with 256 states, and ranks 3 and up from
   head 96, or from head 64 with 128 states.
 
-`MAMBA_RS_MIMO_CHUNK=auto|<n>` is of another kind. It compiles the MIMO
-chunked kernels at a chunk of n tokens, a power of two from 4 to 64,
-instead of the rank's own 64 / R, to time one against the other. The chunk
-sets the order of the sums, so unlike the switches above it changes the
-bits of the chunked outputs.
+Two switches are of another kind: they change bits.
+
+- `MAMBA_RS_MIMO_CHUNK=auto|<n>` compiles the MIMO chunked kernels at a
+  chunk of n tokens, a power of two from 4 to 64, instead of the rank's own
+  64 / R, to time one against the other. The chunk sets the order of the
+  sums, so it changes the bits of the chunked outputs.
+- `MAMBA_RS_PAIRS_TC=auto|off` picks the MIMO pair terms of the tf32, bf16
+  and f16 trainers: the tensor-core kernel (`auto`, wherever a chunk's rows
+  fit its block of 64, as they do at every rank's own chunk) or the
+  CUDA-core kernels the f32 trainer runs (`off`). The tensor cores round
+  the operands to TF32, so the two give different gradient bits, each the
+  same from run to run.
 
 Each switch is read once per process, and a value it does not know
 panics.
@@ -373,6 +381,12 @@ panics.
   and count the `HASH` lines in the log, since a run without the flag
   exits green with nothing recorded. A recorder prints one key per
   activation dtype whenever the kernel takes a different path per dtype.
+- A tensor-core product runs every row of its tile, so masking a row by a
+  zero weight does not keep it out: zero times another sequence's infinity
+  is a NaN. The MIMO pair kernel gives each output row back the value it
+  held whenever a pass over another packed sequence ends. The same kernel
+  counts its groups of eight from each sequence's first row, so a packed
+  sequence gets the bits it gets alone wherever it starts in a chunk.
 
 ## Admission
 

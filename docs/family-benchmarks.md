@@ -24,19 +24,19 @@ bf16 storage:
 
 | family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
 |---|---:|---:|---:|---:|
-| Mamba | 142 us | 158 us | 1.47 M tokens/s | 6.9 ms |
-| Mamba-2 | 156 us | 190 us | 1.14 M tokens/s | 8.2 ms |
-| Mamba-3 SISO | 151 us | 284 us | 0.81 M tokens/s | 7.5 ms |
-| Mamba-3 MIMO | 147 us | 205 us | 0.31 M tokens/s | 30.2 ms |
+| Mamba | 144 us | 161 us | 1.33 M tokens/s | 6.4 ms |
+| Mamba-2 | 156 us | 191 us | 1.15 M tokens/s | 8.2 ms |
+| Mamba-3 SISO | 153 us | 299 us | 0.78 M tokens/s | 7.5 ms |
+| Mamba-3 MIMO | 148 us | 201 us | 0.31 M tokens/s | 27.1 ms |
 
 f32 storage:
 
 | family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
 |---|---:|---:|---:|---:|
-| Mamba | 595 us | 628 us | 0.90 M tokens/s | 9.2 ms |
-| Mamba-2 | 401 us | 479 us | 0.80 M tokens/s | 9.7 ms |
-| Mamba-3 SISO | 417 us | 565 us | 0.54 M tokens/s | 10.8 ms |
-| Mamba-3 MIMO | 390 us | 493 us | 0.28 M tokens/s | 33.5 ms |
+| Mamba | 592 us | 617 us | 0.86 M tokens/s | 9.6 ms |
+| Mamba-2 | 402 us | 484 us | 0.76 M tokens/s | 10.1 ms |
+| Mamba-3 SISO | 416 us | 566 us | 0.53 M tokens/s | 10.8 ms |
+| Mamba-3 MIMO | 390 us | 496 us | 0.27 M tokens/s | 32.3 ms |
 
 The families differ in what a token costs. Mamba carries 16 states a
 channel and the others 128, Mamba-3 adds the trapezoid and the angles, and
@@ -50,7 +50,7 @@ about 64 rows at any rank (see [the MIMO architecture
 page](mamba3-mimo-architecture.md)). The training step above, at other
 ranks and widths, with the chunk forced to 64 tokens through
 `MAMBA_RS_MIMO_CHUNK` against the rank's own, on one binary, bf16 unless
-named, the median of two runs a side, measured with the table above:
+named, the median of two runs a side:
 
 | head x states, rank | chunks of 64 | chunks of 64 / R | |
 |---|---:|---:|---:|
@@ -65,4 +65,34 @@ named, the median of two runs a side, measured with the table above:
 
 The training step recomputes each layer's chunk states in its backward
 instead of keeping them, so the shorter chunks enlarge one layer's buffer
-of chunk states, not every layer's.
+of chunk states, not every layer's. Both columns run the CUDA-core pair
+kernels (`MAMBA_RS_PAIRS_TC=off`): at a chunk of 64 tokens and rank 2 or
+more a chunk's rows do not fit the tensor-core kernel's block.
+
+## MIMO pair terms on the tensor cores, RTX 5090
+
+The tf32, bf16 and f16 trainers form the backward's pair terms on the
+tensor cores (see [the MIMO architecture page](mamba3-mimo-architecture.md)).
+The training step of the table above at other ranks and widths, the
+CUDA-core kernels (`MAMBA_RS_PAIRS_TC=off`) against the tensor cores, on
+one binary, runs alternating, bf16 unless named, the median of two runs a
+side. Where the two runs of a side part by more than a few percent both
+are shown:
+
+| head x states, rank | CUDA cores | tensor cores | |
+|---|---:|---:|---:|
+| 64 x 128, rank 1 | 14.0 ms | 13.6 ms | 1.03x |
+| 64 x 128, rank 2 | 21.6 and 18.6 ms | 20.6 and 18.9 ms | about the same |
+| 64 x 128, rank 4 | 33.5 ms | 27.0 ms | 1.24x |
+| 64 x 128, rank 4, f16 | 29.6 ms | 26.6 ms | 1.11x |
+| 64 x 128, rank 8 | 54.8 ms | 48.5 ms | 1.13x |
+| 64 x 128, rank 16 | 105.5 ms | 93.4 ms | 1.13x |
+| 64 x 64, rank 4 | 18.9 ms | 20.9 and 17.6 ms | about the same |
+| 128 x 128, rank 4 | 32.1 and 34.2 ms | 31.6 ms | 1.05x |
+
+On an RTX 6000 Ada at two sequences a step, where every side's two runs
+agree within one percent, the tensor cores take the step at rank 4 from
+21.5 to 19.1 ms in bf16 (1.13x), 22.3 to 20.1 ms in tf32 (1.11x) and 21.0
+to 18.5 ms in f16 (1.14x), at rank 1 from 10.8 to 10.1 ms, at rank 2 from
+13.8 to 12.4 ms, with heads of 64 x 64 from 14.8 to 12.8 ms and with heads
+of 128 x 128 from 21.0 to 19.7 ms. The f32 step is the same either way.

@@ -131,10 +131,13 @@ are gone.
   `MAMBA_RS_INDEX_WIDTH=i64` (the 64-bit builds), `MAMBA_RS_GRID_RUN`
   (the split grids), `MAMBA_RS_STEP_PREFETCH` (the SISO decode step with
   and without the early fetch) and `MAMBA_RS_PAIRS_BUILD` (the two builds
-  of the MIMO pair kernels). Both builds of each give the same bits.
+  of the MIMO CUDA-core pair kernels). Both builds of each give the same
+  bits.
   `MAMBA_RS_MIMO_CHUNK` sets the MIMO chunk length to a power of two from
-  4 to 64 for measurements. Unlike the others it changes the bits of the
-  chunked MIMO outputs.
+  4 to 64 for measurements, and `MAMBA_RS_PAIRS_TC=off` keeps the MIMO
+  pair terms of the tf32, bf16 and f16 trainers on the CUDA-core kernels.
+  Unlike the others these two change bits: those of the chunked MIMO
+  outputs and of those trainers' gradients.
 
 ### Faster
 
@@ -154,7 +157,7 @@ the median of two processes on the same card:
 
 SISO with head 64 and the sequential scan trains in 0.8 and was refused in
 0.7.5. The decode of small models did not change. Mamba-3 MIMO, new in
-0.8, trains 4 layers of 768 with heads of 64 x 128 at rank 4 in 30.2 ms a
+0.8, trains 4 layers of 768 with heads of 64 x 128 at rank 4 in 27.1 ms a
 step in bf16 on the same card, and the four families side by side are on
 [the family page](docs/family-benchmarks.md). The kernels behind it:
 
@@ -176,7 +179,9 @@ step in bf16 on the same card, and the four families side by side are on
   them, and a small grid spreads over all multiprocessors. A chunk holds
   64 / R tokens, as in the reference, so the pair terms do about R times
   less work per token. The trainer recomputes the states entering the
-  chunks in the backward rather than keeping them for every layer.
+  chunks in the backward rather than keeping them for every layer. In the
+  tf32, bf16 and f16 trainers the pair terms run on the tensor cores, a
+  chunk and head a block, 1.24x faster at rank 4 in bf16.
 - The gated MLP gate in every family.
 - The Mamba and SISO CPU training tapes keep the state every 16 steps, so
   a long window needs under a fifth of the memory.

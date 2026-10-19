@@ -371,15 +371,15 @@ forward, the backward and the AdamW update at batch 4 by 512 tokens.
 
 | family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
 |---|---:|---:|---:|---:|
-| Mamba | 142 us | 158 us | 1.47 M tokens/s | 6.9 ms |
-| Mamba-2 | 156 us | 190 us | 1.14 M tokens/s | 8.2 ms |
-| Mamba-3 SISO | 151 us | 284 us | 0.81 M tokens/s | 7.5 ms |
-| Mamba-3 MIMO | 147 us | 205 us | 0.31 M tokens/s | 30.2 ms |
+| Mamba | 144 us | 161 us | 1.33 M tokens/s | 6.4 ms |
+| Mamba-2 | 156 us | 191 us | 1.15 M tokens/s | 8.2 ms |
+| Mamba-3 SISO | 153 us | 299 us | 0.78 M tokens/s | 7.5 ms |
+| Mamba-3 MIMO | 148 us | 201 us | 0.31 M tokens/s | 27.1 ms |
 
-The f32 rows, the MIMO chunk lengths and the protocol are on the [family
-page](docs/family-benchmarks.md). Against 0.7.5 on the same card, whole
-training and decode steps are in the [changelog](CHANGELOG.md) and on the
-[Mamba](docs/mamba1-benchmarks.md) and
+The f32 rows, the MIMO chunk lengths, the MIMO pair terms on the tensor
+cores and the protocol are on the [family page](docs/family-benchmarks.md).
+Against 0.7.5 on the same card, whole training and decode steps are in the
+[changelog](CHANGELOG.md) and on the [Mamba](docs/mamba1-benchmarks.md) and
 [Mamba-3 SISO](docs/mamba3-benchmarks.md) pages.
 
 ### GEMM kernels
