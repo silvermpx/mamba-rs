@@ -1,8 +1,8 @@
 //! Several sequences packed into the rows of one window (varlen) train on
 //! the host as they train alone: the packed rows of every sequence equal
 //! its own run from the empty state, and so does its input gradient, bit
-//! for bit; the weight gradients are the sum of the separate runs' to f32
-//! rounding; a loss on one sequence leaves every other sequence's input
+//! for bit (on a BLAS backend, to the precision's rounding); the weight
+//! gradients are the sum of the separate runs' to f32 rounding; a loss on one sequence leaves every other sequence's input
 //! gradient exactly zero; the sequence before a row's first start
 //! continues the carried state, and the state after the window is the last
 //! sequence's. Every precision of the host trainer holds all of it.
@@ -82,6 +82,44 @@ fn grad(n: usize, seed: u32) -> Vec<f32> {
 
 fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
+}
+
+/// Whether a BLAS backend serves the host GEMMs. It blocks a GEMM by its
+/// size, so a packed window and its sequences' own runs, which differ in
+/// rows, round apart there: their sums agree to the precision's rounding,
+/// not bit for bit as on the BLAS-free GEMMs, whose sums do not depend on
+/// a call's rows.
+const BLAS: bool = cfg!(any(feature = "accelerate", feature = "gemm-blas"));
+
+/// The share of the largest value the two blockings may part by on a BLAS
+/// backend: the f32 rounding for f32, the rounding of the operands for the
+/// lanes that round them.
+fn blas_tol(dtype: WeightDtype) -> f32 {
+    match dtype {
+        WeightDtype::F32 => 1e-5,
+        WeightDtype::Tf32 => 1e-3,
+        WeightDtype::F16 => 4e-3,
+        WeightDtype::Bf16 => 2e-2,
+    }
+}
+
+/// `got` equals `want` bit for bit, or on a BLAS backend within
+/// [`blas_tol`] of the largest value.
+fn assert_same(what: &str, dtype: WeightDtype, got: &[f32], want: &[f32]) {
+    if BLAS {
+        assert_eq!(got.len(), want.len(), "{what}");
+        let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let worst = got
+            .iter()
+            .zip(want)
+            .fold(0.0f32, |m, (g, w)| m.max((g - w).abs()));
+        assert!(
+            worst <= blas_tol(dtype) * scale,
+            "{what}: off by {worst:e} of {scale:e}"
+        );
+    } else {
+        assert_eq!(bits(got), bits(want), "{what}");
+    }
 }
 
 /// A trainer of each packing family over `batch` rows of `seq_len`
@@ -188,15 +226,17 @@ fn check_packed_against_alone(starts: &[Vec<usize>], seq_len: usize, seed: u32) 
                     &input[a * INPUT_DIM..e * INPUT_DIM],
                     &d[a * D_MODEL..e * D_MODEL],
                 );
-                assert_eq!(
-                    bits(&rows[a * D_MODEL..e * D_MODEL]),
-                    bits(&rows_s),
-                    "{family} {dtype:?}: the rows of the sequence at {a}..{e}"
+                assert_same(
+                    &format!("{family} {dtype:?}: the rows of the sequence at {a}..{e}"),
+                    dtype,
+                    &rows[a * D_MODEL..e * D_MODEL],
+                    &rows_s,
                 );
-                assert_eq!(
-                    bits(&d_input[a * INPUT_DIM..e * INPUT_DIM]),
-                    bits(&d_input_s),
-                    "{family} {dtype:?}: the input gradient of the sequence at {a}..{e}"
+                assert_same(
+                    &format!("{family} {dtype:?}: the input gradient of the sequence at {a}..{e}"),
+                    dtype,
+                    &d_input[a * INPUT_DIM..e * INPUT_DIM],
+                    &d_input_s,
                 );
                 for (s, g) in sum.iter_mut().zip(&grads_s) {
                     *s += g;
@@ -207,8 +247,9 @@ fn check_packed_against_alone(starts: &[Vec<usize>], seq_len: usize, seed: u32) 
                 .iter()
                 .zip(&sum)
                 .fold(0.0f32, |m, (g, s)| m.max((g - s).abs()));
+            let tol = if BLAS { blas_tol(dtype).max(1e-5) } else { 1e-5 };
             assert!(
-                worst <= 1e-5 * scale,
+                worst <= tol * scale,
                 "{family} {dtype:?}: the weight gradient is off the separate runs' sum by \
                  {worst:e} of {scale:e}"
             );
@@ -322,15 +363,17 @@ fn the_carried_state_reaches_only_the_first_sequence() {
             packed.forward(&input, &mut rows).unwrap();
             plain.forward(&input, &mut rows_plain).unwrap();
             fresh_b.forward(in_b, &mut rows_b).unwrap();
-            assert_eq!(
-                bits(&rows[..CUT * D_MODEL]),
-                bits(&rows_plain[..CUT * D_MODEL]),
-                "{family} {dtype:?}: the carried sequence"
+            assert_same(
+                &format!("{family} {dtype:?}: the carried sequence"),
+                dtype,
+                &rows[..CUT * D_MODEL],
+                &rows_plain[..CUT * D_MODEL],
             );
-            assert_eq!(
-                bits(&rows[CUT * D_MODEL..]),
-                bits(&rows_b),
-                "{family} {dtype:?}: the sequence that starts"
+            assert_same(
+                &format!("{family} {dtype:?}: the sequence that starts"),
+                dtype,
+                &rows[CUT * D_MODEL..],
+                &rows_b,
             );
             // The state after the window is the last sequence's: the next
             // window of the packed trainer continues as the fresh run does.
@@ -348,10 +391,11 @@ fn the_carried_state_reaches_only_the_first_sequence() {
             let mut cont = trainer(i, SEQ_LEN, dtype);
             cont.load_trainer_state(&state).unwrap();
             cont.forward(&next, &mut b).unwrap();
-            assert_eq!(
-                bits(&a),
-                bits(&b),
-                "{family} {dtype:?}: the state after the window"
+            assert_same(
+                &format!("{family} {dtype:?}: the state after the window"),
+                dtype,
+                &a,
+                &b,
             );
         }
     }

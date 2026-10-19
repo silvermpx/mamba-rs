@@ -95,7 +95,14 @@ fn test_sequence_matches_step_by_step() {
     let mut out_seq = vec![0.0f32; t * dm];
     bb.forward_sequence(&inputs, &mut out_seq, &mut state1, &mut scratch1, t);
 
-    // Method 2: step-by-step
+    // Method 2: step-by-step. The window's projections run as GEMMs over
+    // its rows and a step's as matvecs, which a BLAS backend sums in another
+    // order, so there the two agree to f32 rounding of the value.
+    let tol = if cfg!(any(feature = "accelerate", feature = "gemm-blas")) {
+        1e-5
+    } else {
+        1e-6
+    };
     let mut state2 = bb.alloc_state();
     let mut scratch2 = bb.alloc_scratch();
     let mut out_step = vec![0.0f32; dm];
@@ -105,7 +112,7 @@ fn test_sequence_matches_step_by_step() {
         let expected = &out_seq[step * dm..(step + 1) * dm];
         for (j, (a, b)) in out_step.iter().zip(expected.iter()).enumerate() {
             assert!(
-                (a - b).abs() < 1e-6,
+                (a - b).abs() < tol * b.abs().max(1.0),
                 "step {step} dim {j}: seq={b} vs step={a}"
             );
         }
