@@ -111,6 +111,9 @@ struct MlpSpans {
     fc2_w: Span,
 }
 
+/// The slab's alignment of every tensor, in floats (128 bytes).
+const SLAB_ALIGN: usize = 32;
+
 /// The order of the flat buffers: the input projection, each layer's
 /// mixer tensors, each layer's MLP, the final norm.
 #[derive(Clone, Debug)]
@@ -127,7 +130,11 @@ struct Layout {
 impl Layout {
     fn of(w: &Mamba3MimoWeights) -> Self {
         let mut at = 0usize;
+        // Every tensor starts on 128 bytes of the slab: the tensor-map GEMM
+        // routes describe a matrix sliced from the slab from its own first
+        // element, and their 128-byte swizzle needs that element aligned.
         let mut take = |len: usize| {
+            at = at.next_multiple_of(SLAB_ALIGN);
             let span = Span { off: at, len };
             at += len;
             span

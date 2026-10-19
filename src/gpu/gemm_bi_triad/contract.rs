@@ -1200,18 +1200,30 @@ fn tf32_subview_plan(
             layout.name
         ));
     }
-    let origin_y = logical.offset_bytes / outer_byte_stride;
-    let origin_x = (logical.offset_bytes % outer_byte_stride) / 4;
-    let stride_elements = outer_byte_stride / 4;
-    if origin_x
+    // A subview is normally described from its allocation base with the
+    // operand's first element as the tensor-map origin. A matrix sliced out
+    // of a flat arena (a trainer's parameter slab) starts inside a row of
+    // that grid, so its columns would run past the declared stride; such a
+    // subview is described from its own first element instead, which the
+    // 128-byte swizzle of the TF32 maps accepts at that alignment.
+    let allocation_origin_x = (logical.offset_bytes % outer_byte_stride) / 4;
+    let fits_allocation_grid = allocation_origin_x
         .checked_add(width)
-        .is_none_or(|end| end > stride_elements)
-    {
+        .is_some_and(|end| end <= outer_byte_stride / 4);
+    let (base, origin_x, origin_y) = if fits_allocation_grid {
+        (
+            logical.allocation_base,
+            allocation_origin_x,
+            logical.offset_bytes / outer_byte_stride,
+        )
+    } else if layout.pointer.is_multiple_of(128) {
+        (layout.pointer, 0, 0)
+    } else {
         return Err(format!(
-            "TF32 {} subview crosses its physical row",
+            "TF32 {} subview starts inside a row of its allocation and is not 128-byte aligned",
             layout.name
         ));
-    }
+    };
     let global_dimensions = [
         origin_x
             .checked_add(width)
@@ -1222,7 +1234,7 @@ fn tf32_subview_plan(
     ];
     validate_tf32_issued_coordinates(layout, (origin_x, origin_y))?;
     let key = Tf32TensorMapKey {
-        base: logical.allocation_base,
+        base,
         global_dimensions,
         outer_byte_stride,
         box_dimensions: layout.box_dimensions,
