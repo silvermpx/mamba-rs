@@ -10,6 +10,7 @@ use std::sync::Arc;
 use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig};
 
 use crate::gpu::composed::{ComposedModule, ComposedSpec, compile_composed};
+use crate::gpu::dtype::WeightDtype;
 use crate::gpu::kernel_identity as ki;
 use crate::gpu::kernels::{CudaModuleAnchors, TypedKernel};
 use crate::gpu::launch::{opt_in_dynamic_smem, smem_budget};
@@ -99,6 +100,10 @@ pub struct MimoChunkedBwd {
     /// and one block a multiprocessor ([`PairsPlan::narrow`]).
     pub pairs_dq_narrow: TypedKernel,
     pub pairs_dk_narrow: TypedKernel,
+    /// The pair terms of a chunk and head in one block on the tensor cores,
+    /// the TF32, bf16 and f16 trainers' kernel wherever a chunk's rows fit
+    /// its block ([`pairs_tensor_cores`]).
+    pub pairs_tc: TypedKernel,
     pub rot_bwd: CudaFunction,
     pub angles: TypedKernel,
     pub combine: CudaFunction,
@@ -479,6 +484,39 @@ fn pairs_build_forced() -> Option<bool> {
             other => panic!(
                 "MAMBA_RS_PAIRS_BUILD={other:?} is not a recognized build (use auto, narrow or wide)"
             ),
+        },
+    })
+}
+
+/// The rows one block of `m3mb_pairs_tc` holds, a chunk's tokens times the
+/// rank, and its threads. Mirror `M3MT_ROWS` and its launch bounds in
+/// mamba3_mimo_chunked_bwd.cu.
+pub const PAIRS_TC_ROWS: usize = 64;
+pub const PAIRS_TC_THREADS: usize = 256;
+
+/// Whether the pair terms run on the tensor cores, in `m3mb_pairs_tc`: on
+/// the TF32, bf16 and f16 trainers wherever a chunk's rows fit its block,
+/// as the rank's own chunk of 64 / R tokens does at every rank. Its products
+/// round their operands to TF32, so the f32 trainer keeps the CUDA-core
+/// kernels and their f32 sums.
+pub fn pairs_tensor_cores(dtype: WeightDtype, chunk: usize, rank: usize) -> bool {
+    dtype != WeightDtype::F32 && chunk * rank <= PAIRS_TC_ROWS && !pairs_tc_off()
+}
+
+/// `MAMBA_RS_PAIRS_TC` for tests and measurements: `off` keeps the
+/// CUDA-core pair kernels on every trainer, and unset or `auto` leaves the
+/// choice to [`pairs_tensor_cores`]. Any other value is refused loudly, so a
+/// typo cannot report a run that never left the rule.
+fn pairs_tc_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| match std::env::var("MAMBA_RS_PAIRS_TC") {
+        Err(_) => false,
+        Ok(v) => match v.trim() {
+            "auto" | "" => false,
+            "off" => true,
+            other => {
+                panic!("MAMBA_RS_PAIRS_TC={other:?} is not a recognized setting (use auto or off)")
+            }
         },
     })
 }
@@ -1067,6 +1105,7 @@ impl Mamba3MimoKernels {
                 pairs_dk: typed("m3mb_pairs_dk")?,
                 pairs_dq_narrow: typed("m3mb_pairs_dq_narrow")?,
                 pairs_dk_narrow: typed("m3mb_pairs_dk_narrow")?,
+                pairs_tc: typed("m3mb_pairs_tc")?,
                 rot_bwd: get("m3mb_rot_bwd")?,
                 angles: typed("m3mb_angles")?,
                 combine: get("m3mb_combine")?,

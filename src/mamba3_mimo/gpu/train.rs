@@ -44,9 +44,9 @@ use super::inference::{
     MimoChunkedPtrs, MimoExec, launch_chunk_entries, launch_chunked_scan, row_pieces,
 };
 use super::kernels::{
-    ChunkedGeom, Mamba3MimoKernels, PairsPlan, ScanBwdGlobalGeom, ScanGeom, TermsPlan,
-    angle_walk_smem_bytes, chunked_geom, scan_bwd_global_geom, scan_bwd_record_floats,
-    scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
+    ChunkedGeom, Mamba3MimoKernels, PAIRS_TC_THREADS, PairsPlan, ScanBwdGlobalGeom, ScanGeom,
+    TermsPlan, angle_walk_smem_bytes, chunked_geom, pairs_tensor_cores, scan_bwd_global_geom,
+    scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
 };
 use crate::config::ScanMode;
 use crate::gpu::adamw::{
@@ -2713,6 +2713,7 @@ impl Mamba3MimoGpuTrainer {
         let a = &self.acts[l];
         let s = &self.bwd;
         let seq_idx = self.varlen.ptr();
+        let dtype = self.dtype;
         let (ld_proj, rows_l) = (ip as i64, rows as i64);
         let (t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i) = (
             t_len as i32,
@@ -3051,58 +3052,73 @@ impl Mamba3MimoGpuTrainer {
                 ],
                 [seq_idx]
             );
-            // The pair terms split by owner at their own tile, dq in blocks of
-            // 128 state indices and dk, du and dw in roles of 128 state
-            // indices and channels, their chains those of the reference tile.
-            let PairsPlan {
-                tq,
-                ps,
-                dq_bytes,
-                kns,
-                pss,
-                dk_bytes,
-                narrow,
-            } = geom.pairs;
-            let (pairs_dq, pairs_dk) = match narrow {
-                true => (&k.cb.pairs_dq_narrow, &k.cb.pairs_dk_narrow),
-                false => (&k.cb.pairs_dq, &k.cb.pairs_dk),
-            };
-            let (tq_i, tl_i, ps_i, kns_i, pss_i) = (
-                tq as i32,
-                geom.pairs_ref as i32,
-                ps as i32,
-                kns as i32,
-                pss as i32,
-            );
-            let threads = crate::mamba3_mimo::gpu::kernels::pairs_threads(tq, rank);
-            let tiles = k.chunk.div_ceil(tq);
-            let (n_blocks, p_blocks) = (ds.div_ceil(128), hd.div_ceil(128));
-            go_y!(
-                pairs_dq.get(act),
-                cfg3(b * nc, nh, tiles * n_blocks, threads, dq_bytes),
-                "pairs dq",
-                [
-                    dq, dy, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i, ng_i, hd_i,
-                    ds_i, r_i, na_i, tq_i, tl_i, ps_i
-                ],
-                [seq_idx]
-            );
-            go_y!(
-                pairs_dk.get(act),
-                cfg3(
-                    b * nc,
-                    nh,
-                    tiles * n_blocks.max(p_blocks),
-                    threads,
-                    dk_bytes
-                ),
-                "pairs dk",
-                [
-                    dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x, t_i,
-                    nh_i, ng_i, hd_i, ds_i, r_i, na_i, tq_i, tl_i, kns_i, pss_i
-                ],
-                [seq_idx]
-            );
+            if pairs_tensor_cores(dtype, k.chunk, rank) {
+                // The pair terms of a chunk and head in one block on the
+                // tensor cores.
+                go_y!(
+                    k.cb.pairs_tc.get(act),
+                    cfg3(b * nc, nh, 1, PAIRS_TC_THREADS, 0),
+                    "pairs tc",
+                    [
+                        dq, dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x,
+                        t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i
+                    ],
+                    [seq_idx]
+                );
+            } else {
+                // The pair terms split by owner at their own tile, dq in blocks of
+                // 128 state indices and dk, du and dw in roles of 128 state
+                // indices and channels, their chains those of the reference tile.
+                let PairsPlan {
+                    tq,
+                    ps,
+                    dq_bytes,
+                    kns,
+                    pss,
+                    dk_bytes,
+                    narrow,
+                } = geom.pairs;
+                let (pairs_dq, pairs_dk) = match narrow {
+                    true => (&k.cb.pairs_dq_narrow, &k.cb.pairs_dk_narrow),
+                    false => (&k.cb.pairs_dq, &k.cb.pairs_dk),
+                };
+                let (tq_i, tl_i, ps_i, kns_i, pss_i) = (
+                    tq as i32,
+                    geom.pairs_ref as i32,
+                    ps as i32,
+                    kns as i32,
+                    pss as i32,
+                );
+                let threads = crate::mamba3_mimo::gpu::kernels::pairs_threads(tq, rank);
+                let tiles = k.chunk.div_ceil(tq);
+                let (n_blocks, p_blocks) = (ds.div_ceil(128), hd.div_ceil(128));
+                go_y!(
+                    pairs_dq.get(act),
+                    cfg3(b * nc, nh, tiles * n_blocks, threads, dq_bytes),
+                    "pairs dq",
+                    [
+                        dq, dy, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, t_i, nh_i, ng_i, hd_i,
+                        ds_i, r_i, na_i, tq_i, tl_i, ps_i
+                    ],
+                    [seq_idx]
+                );
+                go_y!(
+                    pairs_dk.get(act),
+                    cfg3(
+                        b * nc,
+                        nh,
+                        tiles * n_blocks.max(p_blocks),
+                        threads,
+                        dk_bytes
+                    ),
+                    "pairs dk",
+                    [
+                        dk, du, dwp, dy, proj, ld_proj, bn, cn, w_bb, w_cb, coef, sn, cs, w_x, t_i,
+                        nh_i, ng_i, hd_i, ds_i, r_i, na_i, tq_i, tl_i, kns_i, pss_i
+                    ],
+                    [seq_idx]
+                );
+            }
             // A thread per channel, or for a head wider than the block a
             // power of two of them taking the channels in turns.
             let lanes = hd.next_multiple_of(32);
