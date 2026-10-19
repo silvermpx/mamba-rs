@@ -362,6 +362,28 @@ not, and the architecture coverage are in
 
 ## Performance
 
+The four families side by side on an RTX 5090 (CUDA 13.2), 0.8.0: 4
+layers of d_model 768, heads of 64 x 128 for Mamba-2 and both forms of
+Mamba-3 (MIMO at rank 4), d_state 16 for Mamba, bf16 storage and the
+default `Deterministic` GEMM mode. A decode step runs through a captured
+graph, the prompt is one pass of 4096 tokens, and a training step is the
+forward, the backward and the AdamW update at batch 4 by 512 tokens.
+
+| family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
+|---|---:|---:|---:|---:|
+| Mamba | 142 us | 158 us | 1.47 M tokens/s | 6.9 ms |
+| Mamba-2 | 156 us | 190 us | 1.14 M tokens/s | 8.2 ms |
+| Mamba-3 SISO | 151 us | 284 us | 0.81 M tokens/s | 7.5 ms |
+| Mamba-3 MIMO | 147 us | 205 us | 0.31 M tokens/s | 30.2 ms |
+
+The f32 rows, the MIMO chunk lengths and the protocol are on the [family
+page](docs/family-benchmarks.md). Against 0.7.5 on the same card, whole
+training and decode steps are in the [changelog](CHANGELOG.md) and on the
+[Mamba](docs/mamba1-benchmarks.md) and
+[Mamba-3 SISO](docs/mamba3-benchmarks.md) pages.
+
+### GEMM kernels
+
 Measured for 0.7 on an RTX 6000 Ada (SM89, driver 595.45.04) and an RTX
 5090 (CC 12.0, driver 595.84 for the serving tables and 595.58.03 for the
 training tables), both on CUDA 13.2. A speedup is the cuBLAS time divided
@@ -443,6 +465,9 @@ For users:
 - [Mamba-3 SISO architecture](docs/mamba3-architecture.md) and
   [benchmarks](docs/mamba3-benchmarks.md)
 - [Mamba-3 MIMO architecture](docs/mamba3-mimo-architecture.md)
+- [The four families side by side](docs/family-benchmarks.md): decode,
+  prompt and training of every family at one size, and the MIMO chunk
+  length at every rank
 - The rustdoc of `GpuOptions`, `GemmMode`, `WeightDtype`, the
   `GpuBackbone` and `GpuTrainer` traits and the family types, which carries
   the API contract

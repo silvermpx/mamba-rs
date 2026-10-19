@@ -153,7 +153,10 @@ the median of two processes on the same card:
 | Mamba decode, 128 states, batch 16, f32 | 867 us | 803 us | 1.08x |
 
 SISO with head 64 and the sequential scan trains in 0.8 and was refused in
-0.7.5. The decode of small models did not change. The kernels behind it:
+0.7.5. The decode of small models did not change. Mamba-3 MIMO, new in
+0.8, trains 4 layers of 768 with heads of 64 x 128 at rank 4 in 30.2 ms a
+step in bf16 on the same card, and the four families side by side are on
+[the family page](docs/family-benchmarks.md). The kernels behind it:
 
 - Mamba: the parallel scan sizes its blocks to the window, the decode step
   and the sequential kernels keep wide states in registers, the B and C
