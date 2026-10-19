@@ -15,28 +15,29 @@ cargo bench --features cuda --bench family_compare_bench
 
 ## 0.8.0, RTX 5090
 
-Measured on October 19, 2026 on an RTX 5090 (170 SMs, driver 595.71.05,
-CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.99.1, release build, AMD EPYC 7543
-host), the card held by the bench alone. Each cell is the median of two
-runs of the bench, and each run reports the median of its timed calls.
+Measured on October 19, 2026 on the released 0.8.0 kernels, on an RTX 5090
+(170 SMs, driver 595.84, CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.99.1,
+release build, AMD Ryzen 5 5600 host), the card held by the bench alone.
+Each cell is the median of two runs of the bench, which agree within 0.3
+percent, and each run reports the median of its timed calls.
 
 bf16 storage:
 
 | family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
 |---|---:|---:|---:|---:|
-| Mamba | 144 us | 161 us | 1.33 M tokens/s | 6.4 ms |
-| Mamba-2 | 156 us | 191 us | 1.15 M tokens/s | 8.2 ms |
-| Mamba-3 SISO | 153 us | 299 us | 0.78 M tokens/s | 7.5 ms |
-| Mamba-3 MIMO | 148 us | 201 us | 0.31 M tokens/s | 27.1 ms |
+| Mamba | 134 us | 150 us | 1.47 M tokens/s | 6.4 ms |
+| Mamba-2 | 146 us | 180 us | 1.18 M tokens/s | 7.8 ms |
+| Mamba-3 SISO | 142 us | 268 us | 0.81 M tokens/s | 7.5 ms |
+| Mamba-3 MIMO | 136 us | 191 us | 0.33 M tokens/s | 26.5 ms |
 
 f32 storage:
 
 | family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
 |---|---:|---:|---:|---:|
-| Mamba | 592 us | 617 us | 0.86 M tokens/s | 9.6 ms |
-| Mamba-2 | 402 us | 484 us | 0.76 M tokens/s | 10.1 ms |
-| Mamba-3 SISO | 416 us | 566 us | 0.53 M tokens/s | 10.8 ms |
-| Mamba-3 MIMO | 390 us | 496 us | 0.27 M tokens/s | 32.3 ms |
+| Mamba | 570 us | 588 us | 0.88 M tokens/s | 9.1 ms |
+| Mamba-2 | 384 us | 461 us | 0.82 M tokens/s | 9.6 ms |
+| Mamba-3 SISO | 400 us | 542 us | 0.56 M tokens/s | 10.3 ms |
+| Mamba-3 MIMO | 371 us | 475 us | 0.28 M tokens/s | 31.5 ms |
 
 The families differ in what a token costs. Mamba carries 16 states a
 channel and the others 128, Mamba-3 adds the trapezoid and the angles, and
@@ -44,6 +45,10 @@ a MIMO head carries R = 4 inputs and outputs, which multiplies the work of
 its scan.
 
 ## MIMO chunk length, RTX 5090
+
+Measured earlier on October 19 on another RTX 5090 (driver 595.71.05,
+AMD EPYC 7543 host), on the kernels of that morning. Each table compares
+two settings on one binary.
 
 A MIMO chunk holds 64 / R tokens, as the reference sets it, so a chunk has
 about 64 rows at any rank (see [the MIMO architecture
@@ -70,6 +75,8 @@ kernels (`MAMBA_RS_PAIRS_TC=off`): at a chunk of 64 tokens and rank 2 or
 more a chunk's rows do not fit the tensor-core kernel's block.
 
 ## MIMO pair terms on the tensor cores, RTX 5090
+
+Measured on the same machine and kernels as the chunk table above.
 
 The tf32, bf16 and f16 trainers form the backward's pair terms on the
 tensor cores (see [the MIMO architecture page](mamba3-mimo-architecture.md)).

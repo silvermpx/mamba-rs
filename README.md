@@ -370,10 +370,10 @@ forward, the backward and the AdamW update at batch 4 by 512 tokens.
 
 | family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
 |---|---:|---:|---:|---:|
-| Mamba | 144 us | 161 us | 1.33 M tokens/s | 6.4 ms |
-| Mamba-2 | 156 us | 191 us | 1.15 M tokens/s | 8.2 ms |
-| Mamba-3 SISO | 153 us | 299 us | 0.78 M tokens/s | 7.5 ms |
-| Mamba-3 MIMO | 148 us | 201 us | 0.31 M tokens/s | 27.1 ms |
+| Mamba | 134 us | 150 us | 1.47 M tokens/s | 6.4 ms |
+| Mamba-2 | 146 us | 180 us | 1.18 M tokens/s | 7.8 ms |
+| Mamba-3 SISO | 142 us | 268 us | 0.81 M tokens/s | 7.5 ms |
+| Mamba-3 MIMO | 136 us | 191 us | 0.33 M tokens/s | 26.5 ms |
 
 The f32 rows, the MIMO chunk lengths, the MIMO pair terms on the tensor
 cores and the protocol are on the [family page](docs/family-benchmarks.md).

@@ -1,12 +1,13 @@
-//! Mamba-3 SISO GPU inference example — requires `cuda` feature and NVIDIA GPU.
+//! Mamba-3 SISO inference on the GPU. Needs the `cuda` feature and an NVIDIA
+//! GPU.
 //!
 //! ```bash
 //! cargo run --example mamba3_gpu_inference --features cuda
 //! ```
 //!
-//! The backbone is built with an explicit `GemmMode`; a model context uses
-//! the Inference family of deterministic kernels in that mode. The no-mode
-//! constructor reads `MAMBA_RS_GEMM_MODE` and defaults to Deterministic.
+//! The backbone asks for a `GemmMode` explicitly; in the deterministic mode a
+//! model context runs the Inference family of kernels. `GpuOptions` without
+//! a mode reads `MAMBA_RS_GEMM_MODE` and defaults to Deterministic.
 
 fn main() {
     #[cfg(feature = "cuda")]

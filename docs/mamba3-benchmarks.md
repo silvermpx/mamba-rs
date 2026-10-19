@@ -16,12 +16,16 @@ see [mamba1-benchmarks.md](mamba1-benchmarks.md).
 
 Measured on October 18 and 19, 2026 on a rented RTX 5090 (170 SMs, driver
 595.71.05, CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.99.1, release build, AMD
-EPYC 7543 host). The released `0.7.5` and the final `0.8.0` tree each drive
+EPYC 7543 host). The released `0.7.5` and the `0.8.0` tree each drive
 the same probe through the public trainer and backbone of the release, in
 the default `Deterministic` GEMM mode, one shape in one process at a time on
 an otherwise idle card. The 0.7.5 cells ran twice on October 18,
-alternating with an earlier 0.8 tree. The final tree ran each cell twice
-early on October 19. A cell is the median of its process medians.
+alternating with an earlier 0.8 tree. The 0.8.0 tree ran each cell twice
+early on October 19. A cell is the median of its process medians. Later
+that day the chunked forward started reading four rows of its operands at
+a time. At the [family page](family-benchmarks.md)'s shape that took 2
+percent off the f32 training step and 0.3 percent off the bf16 one; the
+cells below were not measured again.
 `old/new` above 1 means 0.8.0 is faster. Training times the whole public
 `step` with the AdamW update. Decode runs through a captured graph.
 

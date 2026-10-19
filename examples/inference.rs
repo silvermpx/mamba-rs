@@ -1,4 +1,5 @@
-//! Mamba SSM CPU inference — zero-allocation single-step loop.
+//! Mamba inference on the CPU: a single-step loop that allocates nothing per
+//! token.
 //!
 //! ```bash
 //! cargo run --release --example inference
@@ -17,7 +18,7 @@ fn main() {
     // Initialize backbone with paper-default weights.
     let backbone = MambaBackbone::init(cfg, input_dim, 42).unwrap();
     println!(
-        "Mamba SSM: {} layers, d_model={}, d_inner={}, {} params",
+        "Mamba: {} layers, d_model={}, d_inner={}, {} params",
         backbone.n_layers(),
         backbone.config().d_model,
         backbone.config().d_inner(),

@@ -58,6 +58,9 @@ are gone.
   scratch is `MambaPrefillScratch`.
 - A checkpoint with attention layers (`attn_layer_idx`) is refused.
   Attention stays outside mamba-rs.
+- The checkpoint loaders refuse a tensor or a configuration field they do
+  not model instead of leaving it out, and a missing embedding or final
+  norm is an error.
 - A SISO GPU state saved by 0.7 for a model without an input projection
   no longer loads.
 - MSRV rises from 1.97 to 1.99.1.
@@ -77,6 +80,9 @@ are gone.
   `mistralai/Mamba-Codestral-7B-v0.1`.
 - FalconMamba (`bcdt_rms_eps`) and the other Mamba-1 options: `dt_rank`,
   `proj_bias`, `conv_bias = false` and the gated MLP (`d_intermediate`).
+- Mamba on the GPU runs a convolution of any width and an inner width
+  that is not a multiple of four, and SISO serves every head width and
+  every state width up to 256. 0.7.5 refused them.
 - LayerNorm block norms in every family (`rms_norm = false`), and untied
   heads for Mamba-2, SISO and MIMO.
 - One GPU API for all four: `GpuOptions` (device, precision, GEMM mode,
@@ -158,7 +164,7 @@ the median of two processes on the same card:
 
 SISO with head 64 and the sequential scan trains in 0.8 and was refused in
 0.7.5. The decode of small models did not change. Mamba-3 MIMO, new in
-0.8, trains 4 layers of 768 with heads of 64 x 128 at rank 4 in 27.1 ms a
+0.8, trains 4 layers of 768 with heads of 64 x 128 at rank 4 in 26.5 ms a
 step in bf16 on the same card, and the four families side by side are on
 [the family page](docs/family-benchmarks.md). The kernels behind it:
 
@@ -172,8 +178,9 @@ step in bf16 on the same card, and the four families side by side are on
 - Mamba-3 SISO: every stage of the chunked forward and backward runs on
   fast kernels, the decode steps keep the state in registers and fetch its
   next slice early when the batch leaves the card underfilled, the dQKV
-  stage takes the tiled kernel past head 16 or 16 states, and the
-  sequential scan cuts a wide state across the block.
+  stage takes the tiled kernel past head 16 or 16 states, the chunked
+  forward reads four rows of its operands at a time, and the sequential
+  scan cuts a wide state across the block.
 - Mamba-3 MIMO: the inter-chunk term, the state terms, the pair terms and
   the angle walk run on token tiles at every shape, the pair terms keep
   their sums in registers on wide heads and states instead of spilling
@@ -182,12 +189,21 @@ step in bf16 on the same card, and the four families side by side are on
   less work per token. The trainer recomputes the states entering the
   chunks in the backward rather than keeping them for every layer. In the
   tf32, bf16 and f16 trainers the pair terms run on the tensor cores, a
-  chunk and head a block, 1.24x faster at rank 4 in bf16.
+  chunk and head a block, 1.24x faster at rank 4 in bf16. The sequential
+  scans read the next batch of states while they work on the current one
+  wherever every block of a launch has a multiprocessor to itself, as in a
+  prompt of one sequence.
 - The gated MLP gate in every family.
 - The Mamba and SISO CPU training tapes keep the state every 16 steps, so
   a long window needs under a fifth of the memory.
 - Model contexts no longer reserve upcast scratch their GEMMs never use,
   about 325 MB on a Mamba-2 2.7b decode engine.
+- The bf16 and f16 inference engines of Mamba and SISO no longer keep an
+  f32 copy of the model beside the half weights, so they take a third of
+  the device memory they did.
+- A GPU context whose kernels are cached reads each module once instead
+  of once per symbol. On an RTX 5090 the first context of a process is
+  ready in about 3 seconds and each later one in under 2.
 
 ### Output bits
 
@@ -224,7 +240,27 @@ and stay as close to the float64 references as before:
   projection panicked on the first step.
 - A prompt longer than any before failed after a bf16 or f16 graph
   capture.
-- Mamba and SISO ignored a control-channel clip on an accumulating call.
+- Mamba training ignored the control-channel clip
+  (`control_clip_max_norm`), and Mamba and SISO also ignored it on an
+  accumulating call.
+- A Mamba model without an input projection, the layout of the official
+  checkpoints, could not train: the f32 GPU forward ran the projection
+  over an empty buffer, and CPU training panicked.
+- A captured f16 training step ran AdamW on a step whose gradients
+  overflowed.
+- `step_skip_above` did nothing unless a clip norm was also set.
+- Capturing a decode graph advanced the state by its warm-up step, and a
+  second capture kept the old graph.
+- A state past the kernels' compiled capacity came back unwritten. It is
+  now refused with the reason.
+- The SISO CPU backward lost the window's starting angles, and the Mamba
+  CPU target path ignored the norm epsilon.
+- The gradient clip wrapped its element count past 2^31 elements, and the
+  loss scaler and the gradient window panicked there.
+- Saving a model with an identity input projection panicked.
+- The repetition penalty in generation compounded with every occurrence
+  of a token, and batched generation forgot the prompt. Each distinct
+  token now counts once.
 - Data-parallel training refused a gradient arena past 2^31 elements.
 - A SISO prefill could leave launches out of a graph capture after an
   eager pass.
@@ -239,27 +275,22 @@ and stay as close to the float64 references as before:
 - Every GEMM entry handles an empty axis as BLAS does.
 - The SISO angle cumsum refused more than 65535 * 256 lanes.
 - The benchmarks ran nothing under a bare `cargo bench`.
-- NVRTC compiled some kernels into one of several PTX texts, so their
-  artifact digests moved from one cold compile to the next: on the Ada
-  cards the exact-f32 GEMM cell and the scan, burn-in and chunk kernels of
-  Mamba-2, Mamba-3 and MIMO, on Blackwell cards (CC 12.x) the Mamba-1
-  grouped backward and the half fold backward with 64-bit offsets. Every
-  float4 read of shared memory in those kernels is now written in PTX, and
-  on Blackwell the two Mamba-1 backward kernels keep two blocks a
-  multiprocessor. The plain build of the MIMO forward scans compiled for
-  Blackwell keeps its plain reads, which gave one PTX text there, since
-  the PTX reads cost it 6 percent at a prompt of eight sequences. In 24 to
-  72 cold compiles of each module, each now gives one PTX text.
+- Some kernels did not compile to the same PTX twice, so their artifact
+  digests moved from one cold compile to the next. On the Ada cards these
+  were the exact-f32 GEMM cell and the scan, burn-in and chunk kernels of
+  Mamba-2, Mamba-3 and MIMO. On Blackwell cards (CC 12.x) they were the
+  Mamba-1 grouped backward and the half fold backward with 64-bit offsets.
+  Each module now compiles to one PTX text on both: we checked 24 to 72
+  cold compiles of each.
 
 ### Known issues
 
-- NVRTC does not always compile the same source into the same PTX. Some of
-  its choices depend on where its own data lands in memory, and address
-  randomization moves that from one process to the next. With the
-  randomization turned off, every compile we ran came out the same. We saw
-  it with CUDA 12.8, 13.0, 13.2 and 13.4 and removed every case we found,
-  but a kernel can show it again after a change. The kernel cache keeps
-  the first compile on each machine.
+- We checked that every module compiles to the same PTX every time on the
+  Ada (CC 8.9) and Blackwell (CC 12.x) cards, but not yet on the other
+  generations. NVRTC can compile one source in more than one way,
+  depending on where its own data lands in memory. Each machine's kernel
+  cache keeps its first compile, so a machine keeps its bits from run to
+  run either way.
 
 ## 0.7.5 (2026-09-23)
 

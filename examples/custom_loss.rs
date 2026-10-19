@@ -1,25 +1,26 @@
-//! Bring-your-own-loss GPU training with the forward/backward split.
+//! Training on the GPU with a loss of your own, through the split forward
+//! and backward.
 //!
 //! ```bash
 //! cargo run --release --example custom_loss --features cuda
 //! ```
 //!
-//! The fused `MambaGpuTrainer::step(input, d_temporal)` requires the caller to
-//! already hold the loss gradient, but computing a loss needs the forward
-//! activations first. The split API resolves that:
+//! The fused `MambaGpuTrainer::step(input, d_temporal)` needs the loss
+//! gradient up front, but a loss needs the forward's output first. The
+//! split calls take it in three steps:
 //!
-//!   1. `forward()` — runs the training forward, returns the full
-//!      `batch * seq_len * d_model` post-norm_f temporal output on the host;
-//!   2. the caller computes ANY loss + its gradient w.r.t. that output
-//!      (classification head, distillation KL, contrastive — plain Rust);
-//!   3. `backward_step()` — backprops that gradient through the saved
-//!      activations and runs AdamW (optionally with global-norm clipping,
-//!      or `accumulate_only` for gradient accumulation across micro-batches).
+//!   1. `forward()` runs the training forward and returns the whole
+//!      `batch * seq_len * d_model` output after the final norm, on the host;
+//!   2. you compute any loss and its gradient with respect to that output in
+//!      plain Rust (a classification head, distillation KL, contrastive);
+//!   3. `backward_step()` takes that gradient back through the saved
+//!      activations and runs AdamW, with global-norm clipping if asked, or
+//!      `accumulate_only` to sum gradients over micro-batches.
 //!
 //! The demo trains a tiny backbone to push its mean-pooled output toward a
-//! fixed target vector (MSE), a stand-in for any real head or loss. The
-//! trainer is built with an explicit `GemmMode::Deterministic`; the
-//! no-mode constructor reads `MAMBA_RS_GEMM_MODE` instead.
+//! fixed target vector (MSE), a stand-in for a real head and loss. The
+//! trainer asks for `GemmMode::Deterministic` explicitly; `GpuOptions`
+//! without a mode reads `MAMBA_RS_GEMM_MODE` instead.
 
 #[cfg(not(feature = "cuda"))]
 fn main() {

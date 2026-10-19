@@ -1,4 +1,4 @@
-//! Mamba SSM bf16 mixed-precision training with CUDA Graph capture.
+//! Mamba training in bf16 with f32 master weights, captured as a CUDA graph.
 //!
 //! ```bash
 //! cargo run --release --example gpu_training_bf16 --features cuda
@@ -36,10 +36,10 @@ mod cuda_example {
     use mamba_rs::mamba1::MambaWeights;
     use mamba_rs::mamba1::gpu::trainer::MambaGpuTrainer;
 
-    /// Deterministic pseudo-random input. `scale` caps the magnitude — with
-    /// synthetic random d_temporal (no real loss signal), un-scaled gradients
-    /// blow up master weights to NaN within ~100 steps, so the example keeps
-    /// d_temporal small.
+    /// Deterministic pseudo-random input. `scale` caps the magnitude: with a
+    /// synthetic random d_temporal (no real loss signal), unscaled gradients
+    /// drive the master weights to NaN within about 100 steps, so the example
+    /// keeps d_temporal small.
     fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
         let mut s = seed;
         (0..n)
@@ -83,8 +83,8 @@ mod cuda_example {
             cfg.d_model, cfg.n_layers, batch, seq_len
         );
 
-        // CPU init — clear input_proj for HF identity projection (required by
-        // the mixed forward's identity branch).
+        // CPU init. The input projection is cleared, as in the HF layout,
+        // which the mixed forward's identity branch needs.
         let mut cpu = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
         cpu.input_proj_w.clear();
         cpu.input_proj_b.clear();
@@ -92,9 +92,9 @@ mod cuda_example {
             lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
         }
 
-        // Modest lr — with synthetic random gradients and no real loss signal,
-        // the default lr=1e-3 drives weights to NaN in ~100 steps. Real
-        // training with an actual loss would pick lr based on the problem.
+        // A small lr: with synthetic random gradients and no real loss signal,
+        // the default lr of 1e-3 drives the weights to NaN in about 100 steps.
+        // Real training picks its lr from its own problem.
         let lr = 1e-6_f32;
         let wd = 1e-3_f32;
         // Explicit storage dtype and GEMM mode. Without `.mode(..)` the
@@ -192,10 +192,10 @@ mod cuda_example {
             l0_in_proj_norm,
             l0_in_proj_norm.is_finite()
         );
-        // NB: with synthetic random d_temporal (no real loss), the bf16 SSM
-        // recurrence can accumulate and weights may diverge to NaN over ~100
-        // steps. This is expected for a graph-capture benchmark — real
-        // training with a proper loss keeps gradients bounded.
+        // With a synthetic random d_temporal (no real loss) the bf16
+        // recurrence can accumulate, and the weights may reach NaN within about
+        // 100 steps. That is expected in a graph-capture demo; real training
+        // with a proper loss keeps its gradients bounded.
 
         Ok(())
     }

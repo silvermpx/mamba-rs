@@ -1,13 +1,14 @@
-//! Mamba SSM CPU training — forward + backward + manual SGD.
+//! Mamba training on the CPU: forward, backward and a hand-written SGD step.
 //!
 //! ```bash
 //! cargo run --release --example training
 //! ```
 //!
-//! Demonstrates the low-level CPU training primitives
-//! (`forward_mamba_backbone_batched` + `backward_mamba_backbone_batched`).
-//! Fine for RL actors and research sandboxes. For production GPU training
-//! see [`MambaGpuTrainer`] and the `gpu_training_bf16` example.
+//! It drives the low-level CPU training calls
+//! (`forward_mamba_backbone_batched` and `backward_mamba_backbone_batched`),
+//! enough for RL actors and research sandboxes. For a ready trainer see
+//! `MambaCpuTrainer` on the CPU, or `MambaGpuTrainer` and the
+//! `gpu_training_bf16` example on the GPU.
 
 use mamba_rs::MambaWeights;
 use mamba_rs::mamba1::MambaConfig;
@@ -129,7 +130,7 @@ fn main() {
             &dims,
         );
 
-        // Loss = mean(temporal^2) — regression to zero
+        // Loss = mean(temporal^2), a regression to zero
         let loss: f32 = temporal.iter().map(|v| v * v).sum::<f32>() / (seq_len * dm) as f32;
 
         // Backward: d_loss/d_temporal = 2 * temporal / (seq_len * dm)

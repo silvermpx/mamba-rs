@@ -27,9 +27,9 @@ mod cuda_example {
     use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3GpuTrainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
-    /// Deterministic pseudo-random input. `scale` caps the magnitude — with
-    /// synthetic random d_temporal (no real loss signal), un-scaled gradients
-    /// blow up master weights to NaN within ~100 steps.
+    /// Deterministic pseudo-random input. `scale` caps the magnitude: with a
+    /// synthetic random d_temporal (no real loss signal), unscaled gradients
+    /// drive the master weights to NaN within about 100 steps.
     fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
         let mut s = seed;
         (0..n)
@@ -147,9 +147,9 @@ mod cuda_example {
             l0_norm,
             l0_norm.is_finite()
         );
-        // NB: synthetic random d_temporal provides no real loss signal — over
-        // many steps the bf16 SSM recurrence may diverge. Expected for a
-        // graph-capture benchmark.
+        // A synthetic random d_temporal carries no real loss signal, so over
+        // many steps the bf16 recurrence may diverge. That is expected in a
+        // graph-capture demo.
 
         Ok(())
     }

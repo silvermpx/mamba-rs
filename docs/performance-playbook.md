@@ -309,11 +309,11 @@ forces either one, so a suite run on one board covers both.
   ahead into a second set of registers, or the plain one. Reading ahead
   cuts a block's latency but costs registers (206 against the plain
   build's 115 on the RTX 5090, where a multiprocessor then holds half the
-  blocks). The rule reads ahead when every
-  block of the launch has a multiprocessor to itself (`blocks <= SMs`), as
-  a prompt of one sequence and the training forward at the reference
-  shape do; past that the plain blocks share the multiprocessors in one
-  wave where the others would need two.
+  blocks). The rule reads ahead when every block of the launch has a
+  multiprocessor to itself (`blocks <= SMs`), as a prompt of one sequence
+  and the training forward at the reference shape do. Past that the plain
+  blocks share the multiprocessors in one wave where the others would
+  need two.
 
 Two switches are of another kind: they change bits.
 

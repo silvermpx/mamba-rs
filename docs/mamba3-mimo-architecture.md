@@ -139,7 +139,13 @@ window of one and continues a prefill bit for bit. The state rows live in
 shared memory; a head whose rows do not fit there runs its channels in
 tiles over several blocks, with the same bits. The module is compiled for
 the model's rank, so every rank from 1 to 16 runs as a constant, its
-per-rank arrays unrolled into registers.
+per-rank arrays unrolled into registers. The kernel comes in two builds
+with the same bits. One reads the next batch of states into a second set
+of registers while it works on the current batch, which cuts a block's
+time but takes more registers; the other is the plain one. The host takes
+the first wherever every block of a launch has a multiprocessor to itself,
+as in a prompt of one sequence, and the plain one where blocks must share
+them (`MAMBA_RS_SCAN_AHEAD=auto|on|off` forces either).
 
 A prompt longer than 64 tokens runs the chunked scan, and so does every
 training window unless the configuration asks for `ScanMode::Sequential`.

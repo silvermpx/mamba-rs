@@ -1291,7 +1291,8 @@ impl MambaKernels {
                 let reason = reason.clone();
                 super::diagnostics::warn_once(&RETAINED, || {
                     format!(
-                        "the retained Inference member {member} is not bound on this board                          ({reason}); its shapes fall back to the legacy kernels"
+                        "the retained Inference member {member} is not bound on this board \
+                         ({reason}); its shapes fall back to the legacy kernels"
                     )
                 });
             }

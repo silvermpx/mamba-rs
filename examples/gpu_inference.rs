@@ -1,4 +1,4 @@
-//! Mamba SSM GPU inference example — requires `cuda` feature + NVIDIA GPU.
+//! Mamba inference on the GPU. Needs the `cuda` feature and an NVIDIA GPU.
 //!
 //! ```bash
 //! cargo run --release --example gpu_inference --features cuda
@@ -27,7 +27,7 @@ fn main() {
 
         let cpu_backbone = MambaBackbone::init(cfg, input_dim, 42).unwrap();
         println!(
-            "Mamba SSM: {} layers, d_model={}, d_inner={}, {} params",
+            "Mamba: {} layers, d_model={}, d_inner={}, {} params",
             cpu_backbone.n_layers(),
             cpu_backbone.config().d_model,
             cpu_backbone.config().d_inner(),

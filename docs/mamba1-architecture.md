@@ -62,14 +62,14 @@ precision. A segment built with an identity input carries that stream on.
 Three levels matching the original architecture:
 
 ```rust
-// Level 1: Pure mixer — no norm, no residual (like Mamba class in mamba_simple.py)
+// Level 1: the mixer alone, no norm and no residual (the Mamba class of mamba_simple.py)
 mamba_layer_step(input, output, layer_weights, state, scratch, cfg);
 
-// Level 2: Block — pre-norm + mixer + residual, then the gated MLP branch
-// for a model with one (like Block class in block.py)
+// Level 2: a block, pre-norm + mixer + residual, then the gated MLP branch
+// for a model with one (the Block class of block.py)
 mamba_block_step(hidden, (layer_weights, mlp), state, scratch, cfg);
 
-// Level 3: Full backbone — input_proj + N blocks + norm_f
+// Level 3: the full backbone, input_proj + N blocks + norm_f
 mamba_step(input, output, weights, states, scratch, cfg, input_dim);
 
 // Full-sequence variant of level 3: one batched-SGEMM pass over
