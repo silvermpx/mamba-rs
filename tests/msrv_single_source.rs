@@ -1,7 +1,8 @@
 //! The minimum supported Rust version has one source of truth: the
 //! `rust-version` field in Cargo.toml. Every other place that spells it
-//! (the CI toolchain pins, the release workflow, the README) must
-//! agree, or the published claim silently drifts from what is tested.
+//! (the CI toolchain pins, the release workflow, the changelog's newest
+//! MSRV line) must agree, or the published claim silently drifts from what
+//! is tested.
 
 use std::path::Path;
 
@@ -38,9 +39,16 @@ fn msrv_is_spelled_identically_everywhere() {
             }
         }
     }
-    let readme = std::fs::read_to_string(root.join("README.md")).expect("README.md");
-    if !readme.contains(&format!("MSRV {msrv}")) {
-        offenders.push(format!("README.md: no `MSRV {msrv}` mention"));
+    // The newest release comes first, so the first line that names the MSRV
+    // is the current claim.
+    let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).expect("CHANGELOG.md");
+    match changelog.lines().find(|l| l.contains("MSRV")) {
+        Some(line) if line.contains(msrv) => {}
+        Some(line) => offenders.push(format!(
+            "CHANGELOG.md: `{}` does not name {msrv}",
+            line.trim()
+        )),
+        None => offenders.push("CHANGELOG.md: no MSRV line".to_string()),
     }
     assert!(
         offenders.is_empty(),
