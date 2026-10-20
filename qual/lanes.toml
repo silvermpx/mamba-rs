@@ -187,6 +187,7 @@
 "m1_parallel_scan_bwd_groups" = "gate"
 "m1_fold_carries" = "contract"
 "m1_parallel_scan_typed_parity" = "gate"
+"m1_prompt_first_use" = "gate"
 "m1_scan_bwd_hash" = "contract"
 "m1_state_capacity_bench" = "bench"
 "m1_test_correctness" = "gate"
