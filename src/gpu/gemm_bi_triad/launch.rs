@@ -726,13 +726,15 @@ fn sm120_cache_action(
             Sm120CacheAction::Prepare
         };
     }
-    if !capturing {
-        return Sm120CacheAction::Validate;
-    }
-    match epoch {
-        Sm120ManagedEpochState::Current => Sm120CacheAction::UsePrepared,
-        Sm120ManagedEpochState::Stale => Sm120CacheAction::CaptureStale,
-        Sm120ManagedEpochState::Untracked | Sm120ManagedEpochState::Missing => {
+    // A current allocation epoch proves the prepared maps still name the
+    // allocations they were built on, so an eager launch skips the full
+    // revalidation exactly as a capture does; the f32 prepared launches
+    // follow the same rule. Without that proof an eager launch revalidates.
+    match (epoch, capturing) {
+        (Sm120ManagedEpochState::Current, _) => Sm120CacheAction::UsePrepared,
+        (_, false) => Sm120CacheAction::Validate,
+        (Sm120ManagedEpochState::Stale, true) => Sm120CacheAction::CaptureStale,
+        (Sm120ManagedEpochState::Untracked | Sm120ManagedEpochState::Missing, true) => {
             Sm120CacheAction::CaptureUntracked
         }
     }
@@ -1407,6 +1409,30 @@ fn sm90a_launch_config(route: Sm90aForcedRoute) -> Result<cudarc::driver::Launch
     })
 }
 
+/// The per-launch check of a prepared SM90a entry, as for SM120: the
+/// stream's allocation domain and the loaded module still are the ones the
+/// entry was proven under. The live allocations and the whole route identity
+/// are proven when the entry is prepared and again whenever its allocation
+/// epoch is not current, so a launch does not prove them a second time.
+fn validate_sm90a_prepared_binding(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    entry: &Sm90aPreparedCacheEntry,
+) -> Result<(), String> {
+    let binding = entry.maps.binding;
+    if AllocationDomain::from_context(stream.context())? != binding.allocation_domain
+        || kernels.allocation_domain() != binding.allocation_domain
+        || kernels.sm90a_compiler_identity() != Some(entry.identity.compiler)
+        || kernels.artifact_set_identity().specialized != Some(entry.identity.artifact)
+        || binding.artifact != entry.identity.artifact
+        || binding.compiler != entry.identity.compiler
+        || binding.device != entry.identity.device
+    {
+        return Err("SM90a prepared launch no longer matches its module context".into());
+    }
+    Ok(())
+}
+
 unsafe fn enqueue_sm90a_wgmma_prepared_observed<O: PhysicalLaunchObserver>(
     stream: &Arc<cudarc::driver::CudaStream>,
     kernels: &GpuKernels,
@@ -1414,10 +1440,7 @@ unsafe fn enqueue_sm90a_wgmma_prepared_observed<O: PhysicalLaunchObserver>(
     observer: &mut O,
     observation: Option<PhysicalLaunchObservation>,
 ) -> Result<(), String> {
-    let live = sm90a_forced_identity(stream, kernels, entry.route, &entry.maps, entry.operands)?;
-    entry
-        .identity
-        .ensure_current(live, "SM90a automatic launch")?;
+    validate_sm90a_prepared_binding(stream, kernels, entry)?;
     let symbol = entry.route.symbol();
     let function = kernels
         .sm90a_function(symbol)
@@ -1453,11 +1476,16 @@ pub(in crate::gpu) fn launch_sm90a_auto_observed<O: PhysicalLaunchObserver>(
     if !ctx.kernels.has_sm90a_wgmma() {
         return Ok(None);
     }
-    let device_cc = ctx
-        .stream
-        .context()
-        .compute_capability()
-        .map_err(|error| format!("query compute capability for the SM90a branch: {error:?}"))?;
+    // The board's capabilities are fixed for the context, which recorded
+    // them once; an eager launch reads them there instead of the driver.
+    let live = ctx.gemm_route();
+    let caps = live.device_caps;
+    let device_cc = (
+        i32::try_from(caps.compute_capability.0)
+            .map_err(|_| "SM90a branch: compute capability major exceeds i32".to_string())?,
+        i32::try_from(caps.compute_capability.1)
+            .map_err(|_| "SM90a branch: compute capability minor exceeds i32".to_string())?,
+    );
     let Some(route) = resolve_sm90a_auto(device_cc, true, request) else {
         static NO_ROUTE: std::sync::Once = std::sync::Once::new();
         crate::gpu::diagnostics::warn_once(&NO_ROUTE, || {
@@ -1469,9 +1497,7 @@ pub(in crate::gpu) fn launch_sm90a_auto_observed<O: PhysicalLaunchObserver>(
         });
         return Ok(None);
     };
-    let key = Sm90aPreparedKey::new(ctx.gemm_route(), route, request);
-    let caps =
-        query_specialized_device_caps(&ctx.stream, "sm_90a", crate::gpu::kernels::nvrtc_version())?;
+    let key = Sm90aPreparedKey::new(live, route, request);
     ctx.with_sm90a_prepared_launches(|cache| {
         let entry = cache.ensure_sm90a_prepared(ctx, key, route, request)?;
         let resolved = entry.identity.resolved_route(caps)?;
@@ -14779,6 +14805,14 @@ mod prepared_f32_launch_tests {
         assert_eq!(
             sm120_cache_action(false, true, Sm120ManagedEpochState::Stale),
             Sm120CacheAction::Validate
+        );
+        assert_eq!(
+            sm120_cache_action(false, true, Sm120ManagedEpochState::Untracked),
+            Sm120CacheAction::Validate
+        );
+        assert_eq!(
+            sm120_cache_action(false, true, Sm120ManagedEpochState::Current),
+            Sm120CacheAction::UsePrepared
         );
         assert_eq!(
             sm120_capture_cache_error(Sm120CacheAction::CaptureMissing),
