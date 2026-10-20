@@ -21,6 +21,16 @@ static_assert(alignof(CUtensorMap) == 64, "CUtensorMap alignment changed");
 #define SM90A_STAGE_BYTES 24576
 #define SM90A_DYNAMIC_SHARED_BYTES 73984
 
+// The consumer frees a stage once the WGMMA group that read it is done, and
+// keeps the newest group in flight while it does (a wait depth of 1). ptxas
+// before CUDA 13.3 could copy-propagate across `wgmma.wait_group N` and drop
+// moves the wait protects (CUDA 13.3 release notes); for those toolkits the
+// host compiles a depth of 0, NVIDIA's workaround, which waits for every
+// group: the same products in the same order, with less overlap.
+#ifndef SM90A_PIPELINE_WAIT
+#define SM90A_PIPELINE_WAIT 1
+#endif
+
 enum Sm90aOp {
     Sm90aNn = 0,
     Sm90aTn = 1,
@@ -388,7 +398,11 @@ static __device__ __forceinline__ void sm90a_kernel(
             sm90a_wait_barrier(full_base + stage * 8, full_phase);
             sm90a_issue_tile<T, Op>(acc, storage, tile, first_scale);
             if (tile > 0) {
+#if SM90A_PIPELINE_WAIT == 0
+                asm volatile("wgmma.wait_group.sync.aligned 0;" ::: "memory");
+#else
                 asm volatile("wgmma.wait_group.sync.aligned 1;" ::: "memory");
+#endif
                 int released = (tile - 1) % SM90A_STAGES;
                 sm90a_arrive_empty(empty_base + released * 8);
                 if (!Wg2 && threadIdx.x == issuer && tile + 2 < tile_count) {

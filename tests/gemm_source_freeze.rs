@@ -309,8 +309,8 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
     ),
     (
         "kernels/gemm_bi_triad/sm90a/wgmma.cu",
-        0x82b334836a208846,
-        35510,
+        0x568992c0aef42b56,
+        36146,
     ),
 ];
 

@@ -661,6 +661,12 @@ pub(crate) fn module_compile_options(
     if module_kind == ModuleKind::Mamba1 {
         options.push(format!("-DMAMBA_RS_STATE_CAP={state_cap}"));
     }
+    // ptxas before CUDA 13.3 could copy-propagate across the Hopper
+    // pipeline's `wgmma.wait_group 1`; those toolkits compile the wait that
+    // drains every group, NVIDIA's workaround (see sm90a/wgmma.cu).
+    if module_kind == ModuleKind::TriadSm90a && nvrtc < (13, 3) {
+        options.push("-DSM90A_PIPELINE_WAIT=0".to_string());
+    }
     options.extend(crate::gpu::kernel_identity::deterministic_nvrtc_options(
         nvrtc,
         "1295072049",

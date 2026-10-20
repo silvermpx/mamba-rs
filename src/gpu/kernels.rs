@@ -886,20 +886,15 @@ impl MambaKernels {
     /// board's own architecture module where the toolkit qualifies one;
     /// the loader follows this plan and the host tests read it without a
     /// device.
-    pub(crate) fn triad_module_plan(
-        arch: &str,
-        device_cc: Option<(i32, i32)>,
-        nvrtc: (i32, i32),
-    ) -> TriadModulePlan {
+    pub(crate) fn triad_module_plan(arch: &str, device_cc: Option<(i32, i32)>) -> TriadModulePlan {
         use super::kernel_identity::ModuleKind;
         let common = super::gemm_bi_triad::modules::sm80_tier_module_compiles(arch, device_cc);
         let architecture = match (arch, device_cc) {
-            // The WGMMA kernel waits with `wgmma.wait_group 1`; ptxas
-            // before CUDA 13.3 could copy-propagate across that wait and
-            // drop the register moves it protects (CUDA 13.3 release
-            // notes), so the older toolkits get the common tier alone.
-            ("sm_90a", Some((9, 0))) if nvrtc >= (13, 3) => Some(ModuleKind::TriadSm90a),
-            ("sm_90a", Some((9, 0))) => None,
+            // Every qualified toolkit loads the WGMMA module: before CUDA
+            // 13.3 it compiles the pipeline wait that drains every group
+            // (see `module_compile_options`), so ptxas has no wait to
+            // copy-propagate across.
+            ("sm_90a", Some((9, 0))) => Some(ModuleKind::TriadSm90a),
             ("sm_100a", Some((10, 0)))
             | ("sm_103a", Some((10, 3)))
             | ("sm_107a", Some((10, 7)))
@@ -982,7 +977,7 @@ impl MambaKernels {
                 },
             )
         };
-        let plan = Self::triad_module_plan(arch, device_cc, nvrtc_version());
+        let plan = Self::triad_module_plan(arch, device_cc);
         let (
             inference,
             scalar,
@@ -1016,7 +1011,7 @@ impl MambaKernels {
                 })
                 .unwrap_or(arch);
             let portable_tier = |module_kind| {
-                if Self::triad_module_plan(tier_arch, device_cc, nvrtc_version()).common {
+                if Self::triad_module_plan(tier_arch, device_cc).common {
                     match super::gemm_bi_triad::modules::compile_module(
                         super::gemm_bi_triad::modules::CompileModuleRequest {
                             ctx,
@@ -1119,18 +1114,6 @@ impl MambaKernels {
                         .and_then(|module| {
                             super::gemm_bi_triad::modules::qualify_specialized_module(module).ok()
                         })
-                }
-                ("sm_90a", Some((9, 0))) => {
-                    static WGMMA_TOOLKIT: std::sync::Once = std::sync::Once::new();
-                    super::diagnostics::warn_once(&WGMMA_TOOLKIT, || {
-                        format!(
-                            "the SM90a WGMMA module needs CUDA 13.3 or newer (ptxas before 13.3 \
-                             could drop the register moves after wgmma.wait_group); NVRTC {:?} \
-                             serves this board with the common tier",
-                            nvrtc_version()
-                        )
-                    });
-                    None
                 }
                 ("sm_100a", Some(device_cc @ (10, 0)))
                 | ("sm_103a", Some(device_cc @ (10, 3)))
@@ -2375,29 +2358,46 @@ mod module_plan_tests {
         for (cc, architecture) in expected {
             let arch = GpuDevice::resolve_nvrtc_target(cc).unwrap();
             let device_cc = Some((cc.0 as i32, cc.1 as i32));
-            let plan = MambaKernels::triad_module_plan(arch, device_cc, (13, 4));
+            let plan = MambaKernels::triad_module_plan(arch, device_cc);
             assert!(plan.common, "CC {cc:?} ({arch}) must load the common tier");
             assert_eq!(plan.architecture, architecture, "CC {cc:?} ({arch})");
         }
     }
 
+    /// Hopper loads its WGMMA module on every qualified toolkit; before CUDA
+    /// 13.3 the module compiles the pipeline wait that drains every group,
+    /// NVIDIA's workaround for the ptxas copy propagation across
+    /// `wgmma.wait_group 1`, and from 13.3 on it keeps one group in flight.
     #[test]
-    fn the_wgmma_module_waits_for_the_inference_ptxas() {
-        for nvrtc in [(13, 0), (13, 1), (13, 2)] {
-            let plan = MambaKernels::triad_module_plan("sm_90a", Some((9, 0)), nvrtc);
+    fn the_wgmma_module_loads_on_every_toolkit_with_the_safe_wait_before_13_3() {
+        use crate::gpu::gemm_bi_triad::modules::module_compile_options;
+        for nvrtc in [(12, 8), (13, 0), (13, 2), (13, 3), (13, 4)] {
+            let plan = MambaKernels::triad_module_plan("sm_90a", Some((9, 0)));
             assert!(plan.common);
-            assert_eq!(plan.architecture, None, "NVRTC {nvrtc:?}");
+            assert_eq!(
+                plan.architecture,
+                Some(ModuleKind::TriadSm90a),
+                "NVRTC {nvrtc:?}"
+            );
+            let drains = module_compile_options(ModuleKind::TriadSm90a, "sm_90a", 64, nvrtc)
+                .iter()
+                .any(|option| option == "-DSM90A_PIPELINE_WAIT=0");
+            assert_eq!(drains, nvrtc < (13, 3), "NVRTC {nvrtc:?}");
         }
-        let plan = MambaKernels::triad_module_plan("sm_90a", Some((9, 0)), (13, 3));
-        assert_eq!(plan.architecture, Some(ModuleKind::TriadSm90a));
+        let other = module_compile_options(ModuleKind::TriadSm80, "sm_90a", 64, (13, 2));
+        assert!(
+            !other
+                .iter()
+                .any(|option| option.contains("SM90A_PIPELINE_WAIT"))
+        );
     }
 
     #[test]
     fn an_unknown_capability_loads_neither_tier() {
-        let plan = MambaKernels::triad_module_plan("sm_75", Some((7, 5)), (13, 2));
+        let plan = MambaKernels::triad_module_plan("sm_75", Some((7, 5)));
         assert!(!plan.common);
         assert_eq!(plan.architecture, None);
-        let plan = MambaKernels::triad_module_plan("sm_80", None, (13, 2));
+        let plan = MambaKernels::triad_module_plan("sm_80", None);
         assert!(!plan.common);
     }
 }

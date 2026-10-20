@@ -8,7 +8,7 @@ use super::super::{
 };
 use super::contract::{
     F32_TF32_TUNING_REVISION, F32TriadAvailability, F32TriadOperands, F32TriadRequest,
-    F32TriadSelection, F32TriadShape, Sm90aForcedRoute, Sm90aOp, Sm90aShape,
+    F32TriadSelection, F32TriadShape, SM90A_TILE, Sm90aForcedRoute, Sm90aOp, Sm90aShape,
     Sm90aWarpgroupSchedule, Sm100ForcedRoute, Sm100Op, Sm100TargetCandidate, Sm100TargetKind,
     Sm120Bk, Sm120FmaRoute, Sm120FmaTile, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest,
     Sm120Op, Sm120PhysicalRoute, Sm120Schedule, Sm120Shape, Sm120Stages, Sm120TargetCandidate,
@@ -4531,30 +4531,30 @@ fn resolve_sm90a_auto_from_cells(
     // it earns its threads on a deep reduction and costs occupancy on a
     // shallow one, so the reduction depth is the axis the rule reads. The map,
     // operand and admission checks below apply to both sources equally.
-    let route = cells
-        .iter()
-        .copied()
-        .find(|cell| {
-            cell.op == request.op && cell.dtype == request.dtype && cell.shape == request.shape
-        })
-        .unwrap_or_else(|| {
-            let reduction = match request.op {
-                Sm90aOp::Nn => request.shape.k,
-                Sm90aOp::Tn => request.shape.m,
-                Sm90aOp::Nt => request.shape.n,
-            };
-            let schedule = if reduction >= 1024 {
-                Sm90aWarpgroupSchedule::Wg2
-            } else {
-                Sm90aWarpgroupSchedule::Wg1
-            };
-            Sm90aForcedRoute {
-                op: request.op,
-                dtype: request.dtype,
-                schedule,
-                shape: request.shape,
-            }
-        });
+    let measured = cells.iter().copied().find(|cell| {
+        cell.op == request.op && cell.dtype == request.dtype && cell.shape == request.shape
+    });
+    if measured.is_none() && sm90a_tn_too_small_for_the_wave(request) {
+        return None;
+    }
+    let route = measured.unwrap_or_else(|| {
+        let reduction = match request.op {
+            Sm90aOp::Nn => request.shape.k,
+            Sm90aOp::Tn => request.shape.m,
+            Sm90aOp::Nt => request.shape.n,
+        };
+        let schedule = if reduction >= 1024 {
+            Sm90aWarpgroupSchedule::Wg2
+        } else {
+            Sm90aWarpgroupSchedule::Wg1
+        };
+        Sm90aForcedRoute {
+            op: request.op,
+            dtype: request.dtype,
+            schedule,
+            shape: request.shape,
+        }
+    });
     super::contract::validate_sm90a_map_request(super::contract::Sm90aMapRequest {
         op: request.op,
         dtype: request.dtype,
@@ -4576,6 +4576,27 @@ fn resolve_sm90a_auto_from_cells(
     )
     .ok()?;
     (resolved == Some(route)).then_some(route)
+}
+
+/// Fewer output-tile reduction steps than this leave a weight gradient's
+/// wgmma launch too little work to fill the board: each 64 by 128 output tile
+/// walks its whole reduction in one CTA, so a small gradient runs a handful
+/// of CTAs in series where the portable tiles split the work. On an H100 PCIe
+/// every TN cell up to 256 such steps was faster on the portable tiles and
+/// every cell from about 2300 faster on wgmma.
+pub const SM90A_TN_MIN_TILE_STEPS: usize = 1024;
+
+/// A weight gradient (TN) too small for the wave rule. Its bits depend on
+/// the token count anyway, so choosing by shape keeps every promise the
+/// forward makes; the forward and the input gradient always take the wave.
+fn sm90a_tn_too_small_for_the_wave(request: Sm90aAutoRequest) -> bool {
+    if request.op != Sm90aOp::Tn {
+        return false;
+    }
+    let shape = request.shape;
+    let tiles = shape.k.div_ceil(SM90A_TILE.0 as usize) * shape.n.div_ceil(SM90A_TILE.1 as usize);
+    let steps = shape.m.div_ceil(SM90A_TILE.2 as usize);
+    tiles.saturating_mul(steps) < SM90A_TN_MIN_TILE_STEPS
 }
 
 /// The epilogue contexts the measured SM90a cells were qualified under:
@@ -18463,6 +18484,34 @@ mod sm100_sm90a_auto_tests {
         assert_eq!(
             resolve_sm90a_auto_from_cells(&[cell], (9, 0), true, biased),
             None
+        );
+    }
+
+    #[test]
+    fn a_small_weight_gradient_leaves_the_wave_and_the_forward_never_does() {
+        // A d128 weight gradient: four output tiles over sixteen reduction
+        // steps. The portable tiles serve it; the forward and the input
+        // gradient of the same shape stay on the wave whatever their size.
+        let small = (1024, 256, 128);
+        assert_eq!(
+            resolve_sm90a_auto((9, 0), true, sm90a_request(Sm90aOp::Tn, small)),
+            None
+        );
+        for op in [Sm90aOp::Nn, Sm90aOp::Nt] {
+            assert!(resolve_sm90a_auto((9, 0), true, sm90a_request(op, small)).is_some());
+        }
+        let large = sm90a_request(Sm90aOp::Tn, (2048, 768, 3072));
+        assert!(resolve_sm90a_auto((9, 0), true, large).is_some());
+        // A measured cell is served whatever its size.
+        let cell = Sm90aForcedRoute {
+            op: Sm90aOp::Tn,
+            dtype: WeightDtype::Bf16,
+            schedule: Sm90aWarpgroupSchedule::Wg2,
+            shape: Sm90aShape::contiguous(Sm90aOp::Tn, small),
+        };
+        assert_eq!(
+            resolve_sm90a_auto_from_cells(&[cell], (9, 0), true, sm90a_request(Sm90aOp::Tn, small)),
+            Some(cell)
         );
     }
 }
