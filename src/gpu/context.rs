@@ -2142,11 +2142,16 @@ impl GpuCtx {
     }
 }
 
+/// The schedule revision a captured route must carry to replay. The three
+/// specialized half families record their own schedule revision (their
+/// identities convert field for field), so a replay holds each to the one
+/// its builder writes; every other route follows the context's schedule set.
 fn expected_route_schedule_revision(backend: PhysicalGemmBackend, generic: u16) -> u16 {
-    if backend == PhysicalGemmBackend::Sm120TmaMma16 {
-        super::gemm_bi_triad::SM120_SCHEDULE_REVISION
-    } else {
-        generic
+    match backend {
+        PhysicalGemmBackend::Sm90aWgmma => super::gemm_bi_triad::SM90A_SCHEDULE_REVISION,
+        PhysicalGemmBackend::Sm100Tcgen05 => super::gemm_bi_triad::SM100_SCHEDULE_REVISION,
+        PhysicalGemmBackend::Sm120TmaMma16 => super::gemm_bi_triad::SM120_SCHEDULE_REVISION,
+        _ => generic,
     }
 }
 
@@ -2397,6 +2402,135 @@ mod tests {
             ),
             SCHEDULE_REVISION
         );
+    }
+
+    #[test]
+    fn hopper_and_blackwell_graph_routes_replay_with_the_revisions_they_record() {
+        use crate::gpu::gemm_bi_triad::{
+            SM90A_STAGES, SM90A_TILE, SM100_KERNEL_SPECS, SM100_TENSOR_MAP_REVISION,
+            SM100_TUNING_REVISION, Sm90aNumericContract, Sm90aOp, Sm90aRouteIdentity, Sm90aShape,
+            Sm90aWarpgroupSchedule, Sm100NumericContract, Sm100RouteIdentity, Sm100Shape,
+            sm100_target_candidates,
+        };
+        use crate::gpu::kernel_identity::{
+            ArtifactIdentity, ArtifactKind, CompilerIdentity, CudaTarget, DeviceCaps,
+            DeviceIdentity, DriverIdentity, TUNING_TABLE_REVISION,
+        };
+
+        // A captured graph replays only when its routes carry the revisions
+        // the replay check expects, so each specialized builder is held to it.
+        let identities = |module_kind, nvrtc_arch: &str, ptx_target: &str, cc| {
+            let compiler_target = CudaTarget::new(nvrtc_arch).unwrap();
+            let device_target = CudaTarget::new(ptx_target).unwrap();
+            let artifact = ArtifactIdentity {
+                module_kind,
+                artifact_kind: ArtifactKind::Ptx,
+                compile_key: [1; 32],
+                artifact_digest: [2; 32],
+            };
+            let compiler = CompilerIdentity {
+                source_digest: [3; 32],
+                invocation_digest: [4; 32],
+                header_manifest_digest: [5; 32],
+                target: compiler_target,
+                nvrtc_version: (13, 2),
+                nvrtc_library_domain: [6; 32],
+                nvrtc_library_known: true,
+                output_kind: ArtifactKind::Ptx,
+                composer_revision: 0,
+                compiler_revision: 0,
+                numeric_abi_revision: 0,
+                schedule_revision: 0,
+            };
+            let device = DeviceIdentity {
+                compute_capability: cc,
+                multiprocessor_count: 132,
+                target: device_target,
+                driver: DriverIdentity {
+                    api_version: 13_020,
+                    build_sources: 1,
+                    build_digest: [7; 32],
+                },
+            };
+            let caps = DeviceCaps {
+                compute_capability: cc,
+                nvrtc_version: (13, 2),
+                accepted_target: Some(device_target),
+                optin_shared_bytes: 232_448,
+                tensor_map_access: true,
+            };
+            (artifact, compiler, device, caps)
+        };
+        let replays = |route: &crate::gpu::kernel_identity::ResolvedGemmRoute| {
+            assert_eq!(
+                route.schedule_revision,
+                expected_route_schedule_revision(route.backend, SCHEDULE_REVISION),
+                "{:?} schedule revision",
+                route.backend
+            );
+            assert_eq!(
+                route.tuning_table_revision,
+                expected_route_tuning_revision(route.backend, TUNING_TABLE_REVISION),
+                "{:?} tuning revision",
+                route.backend
+            );
+        };
+
+        let (artifact, compiler, device, caps) =
+            identities(ModuleKind::TriadSm90a, "sm_90a", "sm_90a", (9, 0));
+        let hopper = Sm90aRouteIdentity {
+            numeric_contract: Sm90aNumericContract::Wgmma,
+            op: Sm90aOp::Nn,
+            dtype: WeightDtype::Bf16,
+            schedule: Sm90aWarpgroupSchedule::Wg1,
+            shape: Sm90aShape::contiguous(Sm90aOp::Nn, (2048, 768, 3072)),
+            tile: SM90A_TILE,
+            stages: SM90A_STAGES,
+            cluster: (1, 1, 1),
+            symbol: "nn_sm90a_wgmma_wg1_bf16",
+            module_kind: ModuleKind::TriadSm90a,
+            exact_target: "sm_90a",
+            artifact,
+            compiler,
+            device,
+            tensor_maps_digest: [8; 32],
+            resources_digest: [9; 32],
+            tuning_revision: TUNING_TABLE_REVISION,
+        }
+        .resolved_route(caps)
+        .unwrap();
+        assert_eq!(hopper.backend, PhysicalGemmBackend::Sm90aWgmma);
+        replays(&hopper);
+
+        let target = sm100_target_candidates((10, 0))[0];
+        let spec = SM100_KERNEL_SPECS[0];
+        let (artifact, compiler, device, caps) = identities(
+            ModuleKind::TriadSm100,
+            target.nvrtc_arch,
+            target.ptx_target,
+            (10, 0),
+        );
+        let blackwell = Sm100RouteIdentity {
+            numeric_contract: Sm100NumericContract::Tcgen05F32,
+            op: spec.op,
+            dtype: spec.dtype,
+            physical: spec.physical,
+            shape: Sm100Shape::contiguous(spec.op, (2048, 768, 3072)),
+            symbol: spec.symbol,
+            module_kind: ModuleKind::TriadSm100,
+            target,
+            artifact,
+            compiler,
+            device,
+            tensor_map_revision: SM100_TENSOR_MAP_REVISION,
+            tensor_maps_digest: [8; 32],
+            resources_digest: [9; 32],
+            tuning_revision: SM100_TUNING_REVISION,
+        }
+        .resolved_route(caps)
+        .unwrap();
+        assert_eq!(blackwell.backend, PhysicalGemmBackend::Sm100Tcgen05);
+        replays(&blackwell);
     }
 
     #[test]
