@@ -33,7 +33,51 @@ const WARMUP_LAUNCHES: usize = 128;
 const POST_QUIET_PAIRED_WARMUP_WINDOWS: usize = 4;
 const CALIBRATION_PROBE_LAUNCHES: usize = 16;
 const MAX_WINDOW_LAUNCHES: usize = 1_000_000;
+const FAST_ENV: &str = "MAMBA_RS_SELECTOR_FAST";
 const MIN_MEDIAN_SPEEDUP: f64 = 1.01;
+
+/// The windows and launches a cell's timing takes. The full protocol is the
+/// one the frozen cohorts were measured with: every candidate through a
+/// discovery and a final round. The fast one, for a board the run holds
+/// alone, times every candidate through a short discovery round and only
+/// the best two of each path through the final round; the numeric gates,
+/// the paired orders and the speed gate are the same.
+#[derive(Clone, Copy, Debug)]
+struct Protocol {
+    discovery_windows: usize,
+    final_windows: usize,
+    target_window_ms: f64,
+    warmup_launches: usize,
+    paired_warmup_windows: usize,
+    finalists: Option<usize>,
+}
+
+impl Protocol {
+    const FULL: Self = Self {
+        discovery_windows: DISCOVERY_WINDOWS,
+        final_windows: FINAL_WINDOWS,
+        target_window_ms: TARGET_WINDOW_MS,
+        warmup_launches: WARMUP_LAUNCHES,
+        paired_warmup_windows: POST_QUIET_PAIRED_WARMUP_WINDOWS,
+        finalists: None,
+    };
+    const FAST: Self = Self {
+        discovery_windows: 5,
+        final_windows: 21,
+        target_window_ms: 2.0,
+        warmup_launches: 32,
+        paired_warmup_windows: 1,
+        finalists: Some(2),
+    };
+
+    fn from_env() -> Self {
+        if std::env::var_os(FAST_ENV).is_some() {
+            Self::FAST
+        } else {
+            Self::FULL
+        }
+    }
+}
 const MIN_P05_SPEEDUP: f64 = 1.0;
 const CORPUS_SALT: u64 = 0x1205_32a1;
 const SCHEMA: &str = "MambaBiSm120Tf32SelectorQualificationV2";
@@ -735,9 +779,29 @@ fn calibrate(
     launch: &mut QualifiedPhysicalLaunch<'_>,
     ctx: &GpuCtx,
     path: Path,
+    target_window_ms: f64,
 ) -> Result<usize, String> {
     let per_call_us = measure(launch, ctx, path, CALIBRATION_PROBE_LAUNCHES)?;
-    Ok(((TARGET_WINDOW_MS * 1000.0 / per_call_us).ceil() as usize).clamp(1, MAX_WINDOW_LAUNCHES))
+    Ok(((target_window_ms * 1000.0 / per_call_us).ceil() as usize).clamp(1, MAX_WINDOW_LAUNCHES))
+}
+
+/// Warms both arms of a path and returns the window's launch count, the
+/// larger of the two calibrations, so neither arm's window falls short of
+/// the protocol's target.
+fn warm_and_calibrate(
+    (candidate, candidate_ctx): (&mut QualifiedPhysicalLaunch<'_>, &GpuCtx),
+    (scalar, scalar_ctx): (&mut QualifiedPhysicalLaunch<'_>, &GpuCtx),
+    path: Path,
+    protocol: Protocol,
+) -> Result<usize, String> {
+    candidate.seed_f32_operands(candidate_ctx, CORPUS_SALT)?;
+    scalar.seed_f32_operands(scalar_ctx, CORPUS_SALT)?;
+    measure(candidate, candidate_ctx, path, protocol.warmup_launches)?;
+    measure(scalar, scalar_ctx, path, protocol.warmup_launches)?;
+    let candidate_iterations =
+        calibrate(candidate, candidate_ctx, path, protocol.target_window_ms)?;
+    let scalar_iterations = calibrate(scalar, scalar_ctx, path, protocol.target_window_ms)?;
+    Ok(candidate_iterations.max(scalar_iterations))
 }
 
 fn paired_samples(
@@ -786,10 +850,11 @@ fn paired_warmup(
     scalar_ctx: &GpuCtx,
     path: Path,
     iterations: usize,
+    windows: usize,
 ) -> Result<(), String> {
     candidate.seed_f32_operands(candidate_ctx, CORPUS_SALT)?;
     scalar.seed_f32_operands(scalar_ctx, CORPUS_SALT)?;
-    for _ in 0..POST_QUIET_PAIRED_WARMUP_WINDOWS {
+    for _ in 0..windows {
         measure(candidate, candidate_ctx, path, iterations)?;
         measure(scalar, scalar_ctx, path, iterations)?;
         measure(scalar, scalar_ctx, path, iterations)?;
@@ -917,9 +982,16 @@ fn require_route(
 fn require_exact_route(launch: &QualifiedPhysicalLaunch<'_>) -> Result<(), String> {
     let evidence = launch.evidence();
     let module = evidence.uniform_module_kind();
+    // The comparator is the exact production route of the board, which on a
+    // board that admits the Ada exact-f32 modules is one of theirs.
     let exact_module = matches!(
         module,
-        Some(ModuleKind::TriadScalar | ModuleKind::TriadSm120)
+        Some(
+            ModuleKind::TriadScalar
+                | ModuleKind::TriadSm120
+                | ModuleKind::TriadSm89ExactF32
+                | ModuleKind::TriadSm89ExactF32D128
+        )
     );
     let exact_symbols = evidence.nodes().iter().all(|node| {
         !node.symbol.contains("tf32")
@@ -1316,6 +1388,9 @@ struct CellResult {
     discovery_winners: [&'static str; 2],
     final_winners: [&'static str; 2],
     chosen_selection: &'static str,
+    /// The candidates the fast protocol timed through the final round;
+    /// empty under the full protocol, which times every candidate there.
+    finalists: Vec<&'static str>,
     qualified: bool,
     admitted: bool,
 }
@@ -1401,7 +1476,7 @@ impl CellResult {
                 "\"excluded_candidates\":[{}],",
                 "\"discovery_winners\":{{\"eager\":\"{}\",\"graph\":\"{}\"}},",
                 "\"final_winners\":{{\"eager\":\"{}\",\"graph\":\"{}\"}},",
-                "\"chosen_selection\":\"{}\",",
+                "\"chosen_selection\":\"{}\",\"finalists\":[{}],",
                 "\"qualified\":{},\"admitted\":{}}}"
             ),
             SCHEMA,
@@ -1422,6 +1497,11 @@ impl CellResult {
             self.final_winners[0],
             self.final_winners[1],
             self.chosen_selection,
+            self.finalists
+                .iter()
+                .map(|symbol| format!("\"{symbol}\""))
+                .collect::<Vec<_>>()
+                .join(","),
             self.qualified,
             self.admitted,
         )
@@ -1746,6 +1826,7 @@ fn completion_record(
     postflight: &str,
 ) -> String {
     let identity = device.identity();
+    let protocol = Protocol::from_env();
     format!(
         concat!(
             "{{\"schema\":\"{}\",\"record_type\":\"completion\",",
@@ -1762,11 +1843,11 @@ fn completion_record(
         SCHEMA,
         records,
         digest_hex(&records_digest),
-        DISCOVERY_WINDOWS,
-        FINAL_WINDOWS,
-        TARGET_WINDOW_MS,
-        WARMUP_LAUNCHES,
-        POST_QUIET_PAIRED_WARMUP_WINDOWS,
+        protocol.discovery_windows,
+        protocol.final_windows,
+        protocol.target_window_ms,
+        protocol.warmup_launches,
+        protocol.paired_warmup_windows,
         identity.compute_capability.0,
         identity.compute_capability.1,
         identity.multiprocessor_count,
@@ -1793,6 +1874,7 @@ fn run_cell(
     quiet: &QuietGpu,
     candidate_filter: Option<&str>,
 ) -> Result<CellResult, String> {
+    let protocol = Protocol::from_env();
     let candidate_ctx = configure(device, F32TriadPolicy::AllowDeterministicTf32)?;
     let scalar_ctx = configure(device, F32TriadPolicy::ExactScalarFma)?;
     // The identity the route set is frozen against: the SM120 module where the
@@ -1893,13 +1975,12 @@ fn run_cell(
             };
             let calibration_preflight =
                 quiet.require_cohort(&format!("{label}/{path_name}/calibration"))?;
-            candidate.seed_f32_operands(&candidate_ctx, CORPUS_SALT)?;
-            scalar_gate.seed_f32_operands(&scalar_ctx, CORPUS_SALT)?;
-            measure(&mut candidate, &candidate_ctx, path, WARMUP_LAUNCHES)?;
-            measure(&mut scalar_gate, &scalar_ctx, path, WARMUP_LAUNCHES)?;
-            let candidate_iterations = calibrate(&mut candidate, &candidate_ctx, path)?;
-            let scalar_iterations = calibrate(&mut scalar_gate, &scalar_ctx, path)?;
-            let window_iterations = candidate_iterations.max(scalar_iterations);
+            let window_iterations = warm_and_calibrate(
+                (&mut candidate, &candidate_ctx),
+                (&mut scalar_gate, &scalar_ctx),
+                path,
+                protocol,
+            )?;
             let timed_preflight = quiet.require_cohort(&format!("{label}/{path_name}/timed"))?;
             paired_warmup(
                 &mut candidate,
@@ -1908,6 +1989,7 @@ fn run_cell(
                 &scalar_ctx,
                 path,
                 window_iterations,
+                protocol.paired_warmup_windows,
             )?;
             let discovery_samples = paired_samples(
                 &mut candidate,
@@ -1915,26 +1997,28 @@ fn run_cell(
                 &mut scalar_gate,
                 &scalar_ctx,
                 path,
-                DISCOVERY_WINDOWS,
+                protocol.discovery_windows,
                 window_iterations,
             )?;
             let discovery_pair = discovery_samples.stats()?;
             discovery.insert((path, spec.symbol), discovery_pair.conservative());
             discovery_orders.insert((path, spec.symbol), discovery_pair);
             discovery_raw.insert((path, spec.symbol), discovery_samples);
-            let final_samples = paired_samples(
-                &mut candidate,
-                &candidate_ctx,
-                &mut scalar_gate,
-                &scalar_ctx,
-                path,
-                FINAL_WINDOWS,
-                window_iterations,
-            )?;
-            let final_pair = final_samples.stats()?;
-            final_stats.insert((path, spec.symbol), final_pair.conservative());
-            final_orders.insert((path, spec.symbol), final_pair);
-            final_raw.insert((path, spec.symbol), final_samples);
+            if protocol.finalists.is_none() {
+                let final_samples = paired_samples(
+                    &mut candidate,
+                    &candidate_ctx,
+                    &mut scalar_gate,
+                    &scalar_ctx,
+                    path,
+                    protocol.final_windows,
+                    window_iterations,
+                )?;
+                let final_pair = final_samples.stats()?;
+                final_stats.insert((path, spec.symbol), final_pair.conservative());
+                final_orders.insert((path, spec.symbol), final_pair);
+                final_raw.insert((path, spec.symbol), final_samples);
+            }
             let postflight = quiet.verify_post_cohort(&format!("{label}/{path_name}/post"))?;
             iterations.insert((path, spec.symbol), window_iterations);
             calibration_preflights.insert((path, spec.symbol), calibration_preflight);
@@ -1955,6 +2039,109 @@ fn run_cell(
             return Err(format!(
                 "{} scalar comparator changed output bits after timing {}",
                 cell.id, spec.symbol
+            ));
+        }
+    }
+    // The fast protocol's final round: the best candidates of each path by
+    // their discovery median, timed again from a fresh qualification. The
+    // others carry no final round, so the selection, which asks both rounds
+    // to clear the speed gate, cannot choose them.
+    let mut finalists = Vec::new();
+    if let Some(keep) = protocol.finalists {
+        let passed = candidates
+            .iter()
+            .filter(|spec| {
+                !excluded_candidates
+                    .iter()
+                    .any(|excluded| excluded.symbol == spec.symbol)
+            })
+            .collect::<Vec<_>>();
+        for path in [Path::Eager, Path::Graph] {
+            let mut ranked = passed
+                .iter()
+                .map(|spec| (spec.symbol, discovery[&(path, spec.symbol)].0))
+                .collect::<Vec<_>>();
+            ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(right.0)));
+            for (symbol, _) in ranked.into_iter().take(keep) {
+                if !finalists.contains(&symbol) {
+                    finalists.push(symbol);
+                }
+            }
+        }
+        for spec in passed {
+            if !finalists.contains(&spec.symbol) {
+                for path in [Path::Eager, Path::Graph] {
+                    final_stats.insert((path, spec.symbol), (0.0, 0.0));
+                    final_orders
+                        .insert((path, spec.symbol), discovery_orders[&(path, spec.symbol)]);
+                    final_raw.insert(
+                        (path, spec.symbol),
+                        discovery_raw[&(path, spec.symbol)].clone(),
+                    );
+                }
+                continue;
+            }
+            let mut candidate = qualify(
+                &candidate_ctx,
+                request(cell, PhysicalQualificationRoute::Tf32Forced(spec.route)),
+            )?;
+            require_route(&candidate, spec.module, Some(spec.symbol))?;
+            let gate_reference = if spec.shares_reference_bits() {
+                &reference_bits
+            } else {
+                &scalar_reference_bits
+            };
+            bit_gate(
+                &mut candidate,
+                &candidate_ctx,
+                gate_reference,
+                spec.shares_reference_bits(),
+            )
+            .map_err(|error| format!("{} {} finalist bit gate: {error}", cell.id, spec.symbol))?;
+            for path in [Path::Eager, Path::Graph] {
+                let window_iterations = warm_and_calibrate(
+                    (&mut candidate, &candidate_ctx),
+                    (&mut scalar_gate, &scalar_ctx),
+                    path,
+                    protocol,
+                )?;
+                paired_warmup(
+                    &mut candidate,
+                    &candidate_ctx,
+                    &mut scalar_gate,
+                    &scalar_ctx,
+                    path,
+                    window_iterations,
+                    protocol.paired_warmup_windows,
+                )?;
+                let final_samples = paired_samples(
+                    &mut candidate,
+                    &candidate_ctx,
+                    &mut scalar_gate,
+                    &scalar_ctx,
+                    path,
+                    protocol.final_windows,
+                    window_iterations,
+                )?;
+                let final_pair = final_samples.stats()?;
+                final_stats.insert((path, spec.symbol), final_pair.conservative());
+                final_orders.insert((path, spec.symbol), final_pair);
+                final_raw.insert((path, spec.symbol), final_samples);
+            }
+            candidate.validate_red_zones(&candidate_ctx)?;
+            bit_gate(
+                &mut candidate,
+                &candidate_ctx,
+                gate_reference,
+                spec.shares_reference_bits(),
+            )
+            .map_err(|error| format!("{} {} final bit gate: {error}", cell.id, spec.symbol))?;
+        }
+        scalar_gate.validate_red_zones(&scalar_ctx)?;
+        if eager_graph_bits(&mut scalar_gate, &scalar_ctx)? != scalar_reference_bits {
+            return Err(format!(
+                "{} scalar comparator changed output bits after the final round",
+                cell.id
             ));
         }
     }
@@ -2028,6 +2215,7 @@ fn run_cell(
         discovery_winners: winners,
         final_winners,
         chosen_selection,
+        finalists,
         qualified: true,
         admitted: chosen_selection != "scalar_fma",
     })
@@ -2080,8 +2268,10 @@ fn sm120_tf32_selector_qualification() -> Result<(), String> {
     let postflight = quiet.verify_post_cohort("sm120-selector/post-suite")?;
     sink.finish(&device, CELLS.len(), &pre_context, &postflight)?;
     eprintln!(
-        "{{\"schema\":\"{SCHEMA}\",\"cells\":{},\"discovery_windows_per_order\":{DISCOVERY_WINDOWS},\"final_windows_per_order\":{FINAL_WINDOWS},\"passed\":true}}",
+        "{{\"schema\":\"{SCHEMA}\",\"cells\":{},\"discovery_windows_per_order\":{},\"final_windows_per_order\":{},\"passed\":true}}",
         CELLS.len(),
+        Protocol::from_env().discovery_windows,
+        Protocol::from_env().final_windows,
     );
     Ok(())
 }
@@ -2199,8 +2389,10 @@ fn run_projection_selector_qualification(cells: &[Cell]) -> Result<(), String> {
     let postflight = quiet.verify_post_cohort("sm120-projection-selector/post-suite")?;
     sink.finish(&device, measured, &pre_context, &postflight)?;
     eprintln!(
-        "{{\"schema\":\"{SCHEMA}\",\"projection_cells\":{},\"discovery_windows_per_order\":{DISCOVERY_WINDOWS},\"final_windows_per_order\":{FINAL_WINDOWS},\"passed\":true}}",
+        "{{\"schema\":\"{SCHEMA}\",\"projection_cells\":{},\"discovery_windows_per_order\":{},\"final_windows_per_order\":{},\"passed\":true}}",
         cells.len(),
+        Protocol::from_env().discovery_windows,
+        Protocol::from_env().final_windows,
     );
     Ok(())
 }
@@ -2605,6 +2797,7 @@ fn cell_artifact_schema_has_exact_candidate_and_stat_counts() {
         discovery_winners: ["route2", "route2"],
         final_winners: ["route2", "route2"],
         chosen_selection: "route2",
+        finalists: vec!["route2"],
         qualified: true,
         admitted: true,
     }

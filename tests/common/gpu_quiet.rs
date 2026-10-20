@@ -9,6 +9,11 @@ const MAX_UTILIZATION_PERCENT: u32 = 1;
 const MAX_PRE_CONTEXT_MEMORY_MIB: u64 = 256;
 const ATTEMPTS: usize = 50;
 const REQUIRED_QUIET_SAMPLES: usize = 5;
+// On a box the run holds alone, the gates inside a running cohort only wait
+// for the card's utilization counter to forget the cohort's own last
+// launches. Setting this variable leaves them one check that no other
+// process holds the card; the gate before the context stays whole.
+const FAST_COHORT_GATES_ENV: &str = "MAMBA_RS_QUIET_FAST";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuietGpu {
@@ -208,6 +213,17 @@ impl QuietGpu {
         max_used_memory_mib: Option<u64>,
         allow_own: bool,
     ) -> Result<String, String> {
+        if allow_own && std::env::var_os(FAST_COHORT_GATES_ENV).is_some() {
+            let competing = self.competing_compute_pids(true)?;
+            if !competing.is_empty() {
+                return Err(format!(
+                    "{label}: competing PIDs {competing:?} hold the card"
+                ));
+            }
+            return Ok(format!(
+                "{label}: no competing process, utilization not awaited"
+            ));
+        }
         let mut quiet_samples = 0;
         let mut last_snapshot = String::new();
         let mut last_competing_pids = Vec::new();
