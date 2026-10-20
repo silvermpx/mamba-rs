@@ -8,6 +8,8 @@
   kernels when they build a GPU context.
 - A CUDA graph holding a bf16 or f16 GEMM on Hopper or datacenter
   Blackwell failed with "captured GEMM route revision is stale".
+- A Mamba-1 bf16 or f16 prompt on Hopper or datacenter Blackwell failed
+  when it was the first GEMM work of the process.
 
 ## 0.8.0 (2026-10-19)
 

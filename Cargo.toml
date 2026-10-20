@@ -231,6 +231,11 @@ path = "tests/m1_prefill_digest.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "m1_prompt_first_use"
+path = "tests/m1_prompt_first_use.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "m3_decode_digest"
 path = "tests/m3_decode_digest.rs"
 required-features = ["cuda"]

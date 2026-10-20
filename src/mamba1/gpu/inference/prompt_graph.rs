@@ -14,6 +14,7 @@ use super::{
 };
 use crate::gpu::buffers::DeviceKeep;
 use crate::gpu::context::{GemmRoute, GpuCtx, GpuCtxResources};
+use crate::gpu::gemm_bi_inference::prepare_inference_arch_rung;
 use crate::gpu::graph_capture::{
     capture_into_graph_with_gemm_plan, require_deterministic_gemm_graph_plan,
     with_validated_gemm_graph_launch,
@@ -197,6 +198,10 @@ impl MambaGpuBackbone {
         if let BackboneEngine::Mixed(e) = &self.engine {
             e.prepare_prompt_scratch(prompt.seq_len)?;
         }
+        // A Hopper or datacenter-Blackwell Inference rung proves itself on
+        // first use, which cannot happen inside the recording below; a
+        // prompt that is the process's first GEMM work runs that proof here.
+        prepare_inference_arch_rung(self.engine.ctx())?;
         let Self {
             engine,
             state,
