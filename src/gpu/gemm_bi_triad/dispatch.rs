@@ -2699,6 +2699,396 @@ const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78:
     ],
 };
 
+/// The RTX PRO 6000 Blackwell (188 SMs) compiles the same module on the same
+/// NVRTC 13.2.78 build as the rented RTX 5090s: its identities are theirs on
+/// its own board. A cohort is keyed by the multiprocessor count, so the board
+/// carries its own winners.
+const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78_188_SM:
+    Tf32AutoQualificationIdentity = Tf32AutoQualificationIdentity {
+    multiprocessor_count: 188,
+    ..SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78
+};
+
+const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78_188_SM:
+    Tf32AutoQualificationIdentity = Tf32AutoQualificationIdentity {
+    multiprocessor_count: 188,
+    ..SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78
+};
+
+/// The RTX PRO 6000 Blackwell's own winners, from a tournament on the board.
+/// An NN cell admits no bias, as in every SM120 cohort. Three winners stay
+/// out because the route the board serves without them measured faster:
+/// on both large deep projections a proven Ada kernel the tournament does
+/// not time, by 7 and 19 percent, and on the NT d128 out-projection the
+/// portable kernel, by 14 percent when launched eagerly.
+const SM120_TF32_EVIDENCE_CELLS_188_SM: &[Tf32AutoCell] = &[
+    sm120_tf32_cell(
+        Nn,
+        2048,
+        3072,
+        768,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        768,
+        3072,
+        2048,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        2048,
+        768,
+        3072,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        2048,
+        768,
+        1536,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        1536,
+        768,
+        2048,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        2048,
+        1536,
+        768,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        4621,
+        1928,
+        384,
+        super::contract::Tf32Sm120Tile::M128N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        384,
+        1928,
+        4621,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        4621,
+        384,
+        1928,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        4096,
+        1536,
+        3072,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        2048,
+        768,
+        3072,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        3072,
+        768,
+        2048,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        2048,
+        3072,
+        768,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    Tf32AutoCell {
+        op: Nn,
+        shape: Tf32ExactShape {
+            output_rows: 1024,
+            output_columns: 512,
+            reduction: 128,
+        },
+        route: Tf32PhysicalRoute::MmaTf32Rna(super::contract::Tf32PortableRoute {
+            tile: super::contract::Tf32PortableTile::M64N64,
+            stages: super::contract::Tf32PortableStages::S2,
+        }),
+        operand_gate: RequiresNoBiasAndVectorAlignmentEvidence,
+    },
+    Tf32AutoCell {
+        op: Tn,
+        shape: Tf32ExactShape {
+            output_rows: 128,
+            output_columns: 512,
+            reduction: 1024,
+        },
+        route: Tf32PhysicalRoute::MmaTf32Rna(super::contract::Tf32PortableRoute {
+            tile: super::contract::Tf32PortableTile::M16N32,
+            stages: super::contract::Tf32PortableStages::S4,
+        }),
+        operand_gate: RequiresVectorAlignmentEvidence,
+    },
+    Tf32AutoCell {
+        op: Nt,
+        shape: Tf32ExactShape {
+            output_rows: 1024,
+            output_columns: 128,
+            reduction: 512,
+        },
+        route: Tf32PhysicalRoute::MmaTf32RnaSplitK4(super::contract::Tf32PortableRoute {
+            tile: super::contract::Tf32PortableTile::M16N32,
+            stages: super::contract::Tf32PortableStages::S3,
+        }),
+        operand_gate: RequiresVectorAlignmentEvidence,
+    },
+    Tf32AutoCell {
+        op: Nn,
+        shape: Tf32ExactShape {
+            output_rows: 128,
+            output_columns: 128,
+            reduction: 8192,
+        },
+        route: Tf32PhysicalRoute::MmaTf32RnaSplitK4(super::contract::Tf32PortableRoute {
+            tile: super::contract::Tf32PortableTile::M16N32,
+            stages: super::contract::Tf32PortableStages::S4,
+        }),
+        operand_gate: RequiresNoBiasAndVectorAlignmentEvidence,
+    },
+    sm120_tf32_cell(
+        Nn,
+        10400,
+        1536,
+        384,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Tn,
+        8192,
+        128,
+        128,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S4,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        384,
+        1536,
+        10400,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        128,
+        8192,
+        128,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        10400,
+        384,
+        1536,
+        super::contract::Tf32Sm120Tile::M128N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        4621,
+        384,
+        768,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        768,
+        384,
+        4621,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        4621,
+        768,
+        384,
+        super::contract::Tf32Sm120Tile::M128N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        4621,
+        384,
+        1024,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        1024,
+        384,
+        4621,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        4621,
+        1024,
+        384,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        10400,
+        384,
+        384,
+        super::contract::Tf32Sm120Tile::M128N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        384,
+        384,
+        10400,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        10400,
+        384,
+        384,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        10400,
+        384,
+        768,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        768,
+        384,
+        10400,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        10400,
+        768,
+        384,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        4096,
+        768,
+        512,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        512,
+        768,
+        4096,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        4096,
+        512,
+        768,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    Tf32AutoCell {
+        op: Tn,
+        shape: Tf32ExactShape {
+            output_rows: 512,
+            output_columns: 384,
+            reduction: 256,
+        },
+        route: Tf32PhysicalRoute::MmaTf32Rna(super::contract::Tf32PortableRoute {
+            tile: super::contract::Tf32PortableTile::M16N32,
+            stages: super::contract::Tf32PortableStages::S4,
+        }),
+        operand_gate: RequiresVectorAlignmentEvidence,
+    },
+    Tf32AutoCell {
+        op: Nt,
+        shape: Tf32ExactShape {
+            output_rows: 256,
+            output_columns: 512,
+            reduction: 384,
+        },
+        route: Tf32PhysicalRoute::MmaTf32Rna(super::contract::Tf32PortableRoute {
+            tile: super::contract::Tf32PortableTile::M16N16,
+            stages: super::contract::Tf32PortableStages::S4,
+        }),
+        operand_gate: RequiresVectorAlignmentEvidence,
+    },
+];
+
 /// Stable current-source route/key manifest independently requalified on CUDA
 /// 12.8, 13.0 and 13.2 under driver 595.84. All three packets admitted these
 /// same 23 keys; true G10 `Tn(128,128,8192)` lost and is intentionally absent.
@@ -2968,6 +3358,13 @@ const SM120_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
         portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78),
         tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
         cells: SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
+    },
+    // The RTX PRO 6000 Blackwell: the same compiler build on 188 SMs.
+    Tf32AutoEvidenceCohort {
+        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78_188_SM,
+        portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78_188_SM),
+        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
+        cells: SM120_TF32_EVIDENCE_CELLS_188_SM,
     },
 ];
 
@@ -13028,7 +13425,8 @@ mod tf32_tests {
         SM89_JOINT_TF32_IDENTITY_CUDA_12_8, SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
         SM89_JOINT_TF32_IDENTITY_CUDA_13_2, SM89_TF32_EVIDENCE_CELLS, SM89_TF32_EVIDENCE_COHORTS,
         SM89_TF32_QUALIFICATION_IDENTITY, SM120_TF32_EVIDENCE_CELLS,
-        SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED, SM120_TF32_EVIDENCE_COHORTS,
+        SM120_TF32_EVIDENCE_CELLS_188_SM, SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
+        SM120_TF32_EVIDENCE_COHORTS,
         SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
         SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
         SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
@@ -15200,7 +15598,10 @@ mod tf32_tests {
     /// deterministic TF32 family is dead code until someone requalifies it.
     #[test]
     fn sm120_tf32_live_cohort_manifest_is_exact_and_unique() {
-        let cohorts = SM120_TF32_EVIDENCE_COHORTS.iter().collect::<Vec<_>>();
+        let cohorts = SM120_TF32_EVIDENCE_COHORTS
+            .iter()
+            .filter(|cohort| cohort.identity.multiprocessor_count == 170)
+            .collect::<Vec<_>>();
         // CUDA 13.2 is frozen twice: once per NVRTC library build the
         // boards carry (13.2.51 on the Ada box, 13.2.78 on the rented
         // RTX 5090s). The library domain tells them apart.
@@ -15252,6 +15653,38 @@ mod tf32_tests {
             );
             assert!(cohort.portable.is_some());
         }
+        // The RTX PRO 6000 Blackwell: the RTX 5090's NVRTC 13.2.78 identity on
+        // a board of 188 SMs, with its own winners.
+        let board = SM120_TF32_EVIDENCE_COHORTS
+            .iter()
+            .filter(|cohort| cohort.identity.multiprocessor_count == 188)
+            .collect::<Vec<_>>();
+        assert_eq!(board.len(), 1);
+        let pro = board[0];
+        assert_eq!(
+            pro.identity,
+            Tf32AutoQualificationIdentity {
+                multiprocessor_count: 188,
+                ..second
+            }
+        );
+        assert_eq!(pro.cells, SM120_TF32_EVIDENCE_CELLS_188_SM);
+        let mut keys = pro
+            .cells
+            .iter()
+            .map(|cell| {
+                (
+                    cell.op as u8,
+                    cell.shape.output_rows,
+                    cell.shape.output_columns,
+                    cell.shape.reduction,
+                )
+            })
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), pro.cells.len(), "a shape is measured twice");
+        assert!(pro.portable.is_some());
     }
 
     #[test]
@@ -15489,7 +15922,8 @@ mod tf32_tests {
         assert_eq!(
             SM120_TF32_EVIDENCE_COHORTS
                 .iter()
-                .filter(|cohort| cohort.identity.nvrtc_version == (13, 2))
+                .filter(|cohort| cohort.identity.nvrtc_version == (13, 2)
+                    && cohort.identity.multiprocessor_count == 170)
                 .count(),
             2,
         );
@@ -15503,8 +15937,10 @@ mod tf32_tests {
                 assert!(
                     cohort.identity.nvrtc_version != other.identity.nvrtc_version
                         || cohort.identity.nvrtc_library_domain
-                            != other.identity.nvrtc_library_domain,
-                    "cohort {index} shares a toolkit and a compiler build with a later cohort",
+                            != other.identity.nvrtc_library_domain
+                        || cohort.identity.multiprocessor_count
+                            != other.identity.multiprocessor_count,
+                    "cohort {index} shares a toolkit, a compiler build and a board with a later cohort",
                 );
             }
         }
