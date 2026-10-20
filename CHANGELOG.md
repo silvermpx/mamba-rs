@@ -18,6 +18,8 @@
   average and 1.9 times on large shapes, and a training step 2 to 7
   percent. Hopper's half-precision GEMM bits change with the kernels;
   every run still gives the same bits.
+- Small eager bf16 and f16 GEMMs on Blackwell and Hopper launch faster:
+  on an RTX PRO 6000 a small one takes 5.5 microseconds instead of 14.
 
 ## 0.8.0 (2026-10-19)
 

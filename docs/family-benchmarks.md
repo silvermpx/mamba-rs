@@ -44,6 +44,55 @@ channel and the others 128, Mamba-3 adds the trapezoid and the angles, and
 a MIMO head carries R = 4 inputs and outputs, which multiplies the work of
 its scan.
 
+## 0.8.1, RTX PRO 6000 Blackwell
+
+Measured on October 20, 2026 on the 0.8.1 kernels, on an RTX PRO 6000
+Blackwell Server Edition (188 SMs, ECC on, driver 595.71.05, CUDA 13.2 /
+NVRTC 13.2, Rust 1.99.1, release build, two Intel Xeon 6724P), the bench
+pinned to the CPUs of the card's NUMA node and holding the card alone.
+Each cell is the median of four runs, which agree within 2 percent (the
+batch-16 decode within 5).
+
+bf16 storage:
+
+| family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
+|---|---:|---:|---:|---:|
+| Mamba | 167 us | 201 us | 1.35 M tokens/s | 6.7 ms |
+| Mamba-2 | 184 us | 225 us | 1.07 M tokens/s | 9.1 ms |
+| Mamba-3 SISO | 179 us | 328 us | 0.75 M tokens/s | 8.6 ms |
+| Mamba-3 MIMO | 176 us | 236 us | 0.28 M tokens/s | 29.0 ms |
+
+f32 storage:
+
+| family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
+|---|---:|---:|---:|---:|
+| Mamba | 737 us | 760 us | 0.74 M tokens/s | 11.3 ms |
+| Mamba-2 | 498 us | 542 us | 0.69 M tokens/s | 11.9 ms |
+| Mamba-3 SISO | 517 us | 661 us | 0.49 M tokens/s | 12.7 ms |
+| Mamba-3 MIMO | 483 us | 551 us | 0.24 M tokens/s | 35.6 ms |
+
+The card's GDDR7 runs at 25 Gbit/s with ECC on, against 28 Gbit/s on the
+RTX 5090, and the decode steps and the scans are bound by that bandwidth.
+No TF32 cohort is frozen for 188 multiprocessors, so f32 storage takes the
+common TF32 routes.
+
+## 0.8.1, H100 PCIe
+
+Measured on October 20, 2026 on the 0.8.1 kernels, on an H100 PCIe (114
+SMs, driver 595.71.05, CUDA 13.2 / NVRTC 13.2, Rust 1.99.1, release build,
+two AMD EPYC 7713), the bench pinned to the CPUs of the card's NUMA node
+and holding the card alone. Each cell is the median of two runs, which
+agree within 3 percent. Only bf16 storage was measured on this board.
+
+bf16 storage:
+
+| family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
+|---|---:|---:|---:|---:|
+| Mamba | 534 us | 605 us | 0.98 M tokens/s | 9.5 ms |
+| Mamba-2 | 439 us | 535 us | 0.72 M tokens/s | 12.4 ms |
+| Mamba-3 SISO | 431 us | 733 us | 0.52 M tokens/s | 12.9 ms |
+| Mamba-3 MIMO | 430 us | 659 us | 0.17 M tokens/s | 43.0 ms |
+
 ## MIMO chunk length, RTX 5090
 
 Measured earlier on October 19 on another RTX 5090 (driver 595.71.05,
