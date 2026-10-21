@@ -185,6 +185,7 @@ mod sm89_exact_f32_tn_admission_tests {
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (8, 9),
             partition_reference: 142,
+            sm120_scalar_resources_qualified: false,
         }
     }
 
@@ -518,6 +519,7 @@ mod sm89_exact_f32_d128_admission_tests {
             sm89_exact_f32_d128_symbols_loaded: [true; 2],
             compute_capability: (8, 9),
             partition_reference: 142,
+            sm120_scalar_resources_qualified: false,
         }
     }
 
@@ -5455,7 +5457,7 @@ struct TnNarrowSplitMCell {
     chunks: usize,
 }
 
-const TN_NARROW_SPLITM_SM120_CC120_170_CELLS: [TnNarrowSplitMCell; 3] = [
+const TN_NARROW_SPLITM_SM120_CELLS: [TnNarrowSplitMCell; 3] = [
     TnNarrowSplitMCell {
         shape: F32TriadShape {
             m: 1024,
@@ -5496,7 +5498,7 @@ const TN_NARROW_SPLITM_SM120_CC120_170_CELLS: [TnNarrowSplitMCell; 3] = [
 
 fn qualified_tn_narrow_splitm_cell(request: F32TriadRequest) -> Option<TnNarrowSplitMCell> {
     (request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Tn).then_some(())?;
-    TN_NARROW_SPLITM_SM120_CC120_170_CELLS
+    TN_NARROW_SPLITM_SM120_CELLS
         .iter()
         .copied()
         .find(|cell| cell.shape == request.shape)
@@ -5522,6 +5524,8 @@ pub(super) struct ScalarLaunchFacts {
     /// The architecture's partition reference, not the live SM count: the
     /// scalar plans it feeds decide reduction orders.
     pub partition_reference: u32,
+    /// The SM120 scalar kernels met their resource caps on this toolkit.
+    pub sm120_scalar_resources_qualified: bool,
 }
 
 /// How a scalar route measured on the Ada board is admitted on this one.
@@ -6103,7 +6107,7 @@ fn qualified_nt_inference_copyplan_sibling_environment(facts: ScalarLaunchFacts)
             .any(|identity| identity.matches(facts))
 }
 
-fn qualified_scalar_sm89_ada142_tn_environment(facts: ScalarLaunchFacts) -> bool {
+fn qualified_scalar_sm89_tn_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
         && TN_M16N16_SPLITM16_SM89_BINDINGS
             .iter()
@@ -6168,6 +6172,7 @@ pub(super) fn scalar_sm89_composed_test_facts(index: usize) -> ScalarLaunchFacts
         sm89_exact_f32_d128_symbols_loaded: [false; 2],
         compute_capability: (8, 9),
         partition_reference: 142,
+        sm120_scalar_resources_qualified: false,
     }
 }
 
@@ -6244,20 +6249,32 @@ const NT_PRISM_INFERENCE_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
     ldc: 384,
 };
 
-fn qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts: ScalarLaunchFacts) -> bool {
-    facts.compute_capability == (12, 0)
+/// The SM120 scalar routes' environment: the CC 12.0 generic target, a
+/// well-formed scalar module whose kernels met their resource caps, and the
+/// toolkit the routes were timed on. On any other toolkit the routes are
+/// offered to the first-use proof, which admits those that reproduce the
+/// ordinary plan's words.
+fn scalar_sm120_admitted(admission: ScalarAdmission, facts: ScalarLaunchFacts) -> bool {
+    let measured = match admission {
+        ScalarAdmission::Evidence | ScalarAdmission::Candidate => {
+            facts.scalar_compiler.nvrtc_version == (13, 2)
+        }
+        ScalarAdmission::Proof => true,
+    };
+    measured
+        && facts.sm120_scalar_resources_qualified
+        && facts.compute_capability == (12, 0)
         && facts.scalar_artifact.module_kind == ModuleKind::TriadScalar
         && facts.scalar_artifact.artifact_kind == facts.scalar_compiler.output_kind
         && facts.scalar_artifact.compile_key == facts.scalar_compiler.invocation_digest
         && facts.scalar_artifact.artifact_digest != [0; 32]
         && facts.scalar_compiler.invocation_digest != [0; 32]
         && facts.scalar_compiler.target.as_str() == "compute_120"
-        && facts.scalar_compiler.nvrtc_version == (13, 2)
         && facts.scalar_compiler.nvrtc_library_known
         && facts.scalar_compiler.nvrtc_library_domain != [0; 32]
 }
 
-const NN_M64N64_SM120_CC120_170_NVRTC132_CELLS: [F32TriadShape; 7] = [
+const NN_M64N64_SM120_CELLS: [F32TriadShape; 7] = [
     F32TriadShape {
         m: 2048,
         k: 3072,
@@ -6318,7 +6335,7 @@ const NN_M64N64_SM120_CC120_170_NVRTC132_CELLS: [F32TriadShape; 7] = [
 
 fn qualified_nn_m64n64_request(request: F32TriadRequest) -> bool {
     request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nn
-        && NN_M64N64_SM120_CC120_170_NVRTC132_CELLS.contains(&request.shape)
+        && NN_M64N64_SM120_CELLS.contains(&request.shape)
 }
 
 fn qualified_nn_m64n64_operands(operands: F32TriadOperands) -> bool {
@@ -6331,7 +6348,7 @@ fn qualified_nn_m64n64_operands(operands: F32TriadOperands) -> bool {
             .all(|pointer| pointer != 0 && pointer.is_multiple_of(ALIGNMENT))
 }
 
-const NN_M32N64_SPLITK32_SM120_CC120_170_NVRTC132_CELL: F32TriadShape = F32TriadShape {
+const NN_M32N64_SPLITK32_SM120_CELL: F32TriadShape = F32TriadShape {
     m: 128,
     k: 8_192,
     n: 128,
@@ -6342,14 +6359,14 @@ const NN_M32N64_SPLITK32_SM120_CC120_170_NVRTC132_CELL: F32TriadShape = F32Triad
 
 fn qualified_nn_m32n64_splitk32_request(request: F32TriadRequest) -> bool {
     request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nn
-        && request.shape == NN_M32N64_SPLITK32_SM120_CC120_170_NVRTC132_CELL
+        && request.shape == NN_M32N64_SPLITK32_SM120_CELL
 }
 
 fn qualified_nn_m32n64_splitk32_operands(operands: F32TriadOperands) -> bool {
     qualified_nn_m64n64_operands(operands)
 }
 
-const NT_D768_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL: F32TriadShape = F32TriadShape {
+const NT_D768_TRANSPOSE_M64N64_SM120_CELL: F32TriadShape = F32TriadShape {
     m: 2048,
     k: 768,
     n: 3072,
@@ -6358,7 +6375,7 @@ const NT_D768_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL: F32TriadShape = F3
     ldc: 768,
 };
 
-const NT_D768_OUT_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL: F32TriadShape = F32TriadShape {
+const NT_D768_OUT_TRANSPOSE_M64N64_SM120_CELL: F32TriadShape = F32TriadShape {
     m: 2048,
     k: 1536,
     n: 768,
@@ -6369,7 +6386,7 @@ const NT_D768_OUT_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL: F32TriadShape 
 
 const NT_D768_OUT_TRANSPOSE_ELEMENTS: usize = 1_179_648;
 
-const NT_LARGE_DEEP_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL: F32TriadShape = F32TriadShape {
+const NT_LARGE_DEEP_TRANSPOSE_M64N64_SM120_CELL: F32TriadShape = F32TriadShape {
     m: 4096,
     k: 3072,
     n: 1536,
@@ -6378,7 +6395,7 @@ const NT_LARGE_DEEP_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL: F32TriadShap
     ldc: 3072,
 };
 
-const NT_PRISM_VECTOR_SM120_CC120_170_NVRTC132_CELL: F32TriadShape = F32TriadShape {
+const NT_PRISM_VECTOR_SM120_CELL: F32TriadShape = F32TriadShape {
     m: 4621,
     k: 384,
     n: 1928,
@@ -6394,7 +6411,7 @@ const NT_PRISM_TRANSPOSE_ELEMENTS: usize = 740_352;
 // same shape needed more.
 const NT_LARGE_DEEP_TRANSPOSE_ELEMENTS: usize = 4_718_592;
 
-const NT_D128_OUT_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL: F32TriadShape = F32TriadShape {
+const NT_D128_OUT_TRANSPOSE_M64N64_SM120_CELL: F32TriadShape = F32TriadShape {
     m: 1024,
     k: 256,
     n: 128,
@@ -6405,7 +6422,7 @@ const NT_D128_OUT_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL: F32TriadShape 
 
 const NT_D128_OUT_TRANSPOSE_ELEMENTS: usize = 32_768;
 
-const TN_M16N16_SPLITM16_SM120_CC120_170_NVRTC132_CELL: F32TriadShape = F32TriadShape {
+const TN_M16N16_SPLITM16_SM120_CELL: F32TriadShape = F32TriadShape {
     m: 256,
     k: 512,
     n: 384,
@@ -6425,7 +6442,7 @@ fn qualified_nt_m2n16_splitk32_request(request: F32TriadRequest) -> bool {
 
 fn qualified_tn_m16n16_splitm16_request(request: F32TriadRequest) -> bool {
     request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Tn
-        && request.shape == TN_M16N16_SPLITM16_SM120_CC120_170_NVRTC132_CELL
+        && request.shape == TN_M16N16_SPLITM16_SM120_CELL
 }
 
 fn qualified_tn_m16n16_splitm16_operands(operands: F32TriadOperands) -> bool {
@@ -6440,30 +6457,30 @@ fn qualified_tn_m16n16_splitm16_operands(operands: F32TriadOperands) -> bool {
 
 fn qualified_nt_d768_transpose_m64n64_request(request: F32TriadRequest) -> bool {
     request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nt
-        && request.shape == NT_D768_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL
+        && request.shape == NT_D768_TRANSPOSE_M64N64_SM120_CELL
 }
 
 fn qualified_nt_d768_out_transpose_m64n64_request(request: F32TriadRequest) -> bool {
     request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nt
-        && request.shape == NT_D768_OUT_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL
+        && request.shape == NT_D768_OUT_TRANSPOSE_M64N64_SM120_CELL
         && request.shape.k.checked_mul(request.shape.n) == Some(NT_D768_OUT_TRANSPOSE_ELEMENTS)
 }
 
 fn qualified_nt_large_deep_transpose_m64n64_request(request: F32TriadRequest) -> bool {
     request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nt
-        && request.shape == NT_LARGE_DEEP_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL
+        && request.shape == NT_LARGE_DEEP_TRANSPOSE_M64N64_SM120_CELL
         && request.shape.k.checked_mul(request.shape.n) == Some(NT_LARGE_DEEP_TRANSPOSE_ELEMENTS)
 }
 
 fn qualified_nt_prism_vector_request(request: F32TriadRequest) -> bool {
     request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nt
-        && request.shape == NT_PRISM_VECTOR_SM120_CC120_170_NVRTC132_CELL
+        && request.shape == NT_PRISM_VECTOR_SM120_CELL
         && request.shape.k.checked_mul(request.shape.n) == Some(NT_PRISM_TRANSPOSE_ELEMENTS)
 }
 
 fn qualified_nt_d128_out_transpose_m64n64_request(request: F32TriadRequest) -> bool {
     request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nt
-        && request.shape == NT_D128_OUT_TRANSPOSE_M64N64_SM120_CC120_170_NVRTC132_CELL
+        && request.shape == NT_D128_OUT_TRANSPOSE_M64N64_SM120_CELL
         && request.shape.k.checked_mul(request.shape.n) == Some(NT_D128_OUT_TRANSPOSE_ELEMENTS)
 }
 
@@ -6807,49 +6824,49 @@ fn scalar_plan_with_admission(
             n_main: 2_048,
             n_tail: 0,
         })
-        && qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
+        && scalar_sm120_admitted(admission, facts)
         && qualified_nt_m2n16_splitk32_request(request)
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
         return Ok(ScalarDispatchPlan::NtM2N16SplitK32Qualified);
     }
     if fallback == (ScalarDispatchPlan::NnFinal { slim: false })
-        && qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
+        && scalar_sm120_admitted(admission, facts)
         && qualified_nn_m64n64_request(request)
         && qualified_nn_m64n64_operands(operands)
     {
         return Ok(ScalarDispatchPlan::NnM64N64Qualified);
     }
     if fallback == ScalarDispatchPlan::NnSplitKThin
-        && qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
+        && scalar_sm120_admitted(admission, facts)
         && qualified_nn_m32n64_splitk32_request(request)
         && qualified_nn_m32n64_splitk32_operands(operands)
     {
         return Ok(ScalarDispatchPlan::NnM32N64SplitK32Qualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
-        && qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
+        && scalar_sm120_admitted(admission, facts)
         && qualified_nt_d768_transpose_m64n64_request(request)
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
         return Ok(ScalarDispatchPlan::NtD768TransposeM64N64Qualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
-        && qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
+        && scalar_sm120_admitted(admission, facts)
         && qualified_nt_d768_out_transpose_m64n64_request(request)
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
         return Ok(ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
-        && qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
+        && scalar_sm120_admitted(admission, facts)
         && qualified_nt_large_deep_transpose_m64n64_request(request)
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
         return Ok(ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: true })
-        && qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
+        && scalar_sm120_admitted(admission, facts)
         && qualified_nt_prism_vector_request(request)
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
@@ -6860,7 +6877,7 @@ fn scalar_plan_with_admission(
             n_main: 128,
             n_tail: 0,
         })
-        && qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
+        && scalar_sm120_admitted(admission, facts)
         && qualified_nt_d128_out_transpose_m64n64_request(request)
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
@@ -6871,19 +6888,15 @@ fn scalar_plan_with_admission(
             m_chunk: 16,
             chunks: 16,
         })
-        && (qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
-            || scalar_admitted(
-                admission,
-                facts,
-                qualified_scalar_sm89_ada142_tn_environment,
-            ))
+        && (scalar_sm120_admitted(admission, facts)
+            || scalar_admitted(admission, facts, qualified_scalar_sm89_tn_environment))
         && qualified_tn_m16n16_splitm16_request(request)
         && qualified_tn_m16n16_splitm16_operands(operands)
     {
         return Ok(ScalarDispatchPlan::TnM16N16SplitM16Qualified);
     }
     if fallback != ScalarDispatchPlan::TnNarrow
-        || !qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts)
+        || !scalar_sm120_admitted(admission, facts)
         || !qualified_tn_narrow_splitm_operands(operands)
     {
         return Ok(fallback);
@@ -7368,9 +7381,8 @@ mod scalar_wave_policy_tests {
         NtInferenceCopyPlanComposedQualificationIdentity, ScalarDispatchPlan, ScalarLaunchFacts,
         ScalarTransposeQualificationIdentity, TN_M16N16_SPLITM16_SM89_BINDINGS,
         qualified_inference_copyplan_environment,
-        qualified_nt_inference_copyplan_sibling_environment,
-        qualified_scalar_sm89_ada142_tn_environment, scalar_dispatch_plan, scalar_launch_plan,
-        scalar_proof_plan,
+        qualified_nt_inference_copyplan_sibling_environment, qualified_scalar_sm89_tn_environment,
+        scalar_dispatch_plan, scalar_launch_plan, scalar_proof_plan,
     };
     use crate::gpu::gemm_bi_triad::{F32TriadOperands, F32TriadRequest, F32TriadShape};
     use crate::gpu::kernel_identity::{
@@ -7513,6 +7525,7 @@ mod scalar_wave_policy_tests {
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (8, 9),
             partition_reference: RTX_6000_ADA_SMS,
+            sm120_scalar_resources_qualified: false,
         }
     }
 
@@ -7578,6 +7591,7 @@ mod scalar_wave_policy_tests {
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (12, 0),
             partition_reference: 170,
+            sm120_scalar_resources_qualified: true,
         }
     }
 
@@ -7668,6 +7682,7 @@ mod scalar_wave_policy_tests {
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (8, 9),
             partition_reference: RTX_6000_ADA_SMS,
+            sm120_scalar_resources_qualified: false,
         }
     }
 
@@ -8087,18 +8102,40 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn tn_narrow_split_m_selector_requires_the_exact_device_and_compiler_domain() {
+    fn tn_narrow_split_m_selector_requires_the_architecture_and_met_resource_caps() {
         let request = tn_admission_request((1024, 47, 17));
         let operands = tn_admission_operands();
         let fallback = ScalarDispatchPlan::TnNarrow;
+        let measured = admitted_tn_plan(tn_admission_facts(), request, operands);
+        assert_ne!(measured, fallback);
 
         let mut wrong_arch = tn_admission_facts();
         wrong_arch.compute_capability = (12, 1);
         assert_eq!(admitted_tn_plan(wrong_arch, request, operands), fallback);
 
-        let mut wrong_nvrtc = tn_admission_facts();
-        wrong_nvrtc.scalar_compiler.nvrtc_version = (13, 1);
-        assert_eq!(admitted_tn_plan(wrong_nvrtc, request, operands), fallback);
+        // Another toolkit takes no evidence but offers the route to the
+        // first-use proof.
+        for nvrtc in [(12, 8), (13, 0), (13, 1), (13, 3)] {
+            let mut other_toolkit = tn_admission_facts();
+            other_toolkit.scalar_compiler.nvrtc_version = nvrtc;
+            assert_eq!(
+                admitted_tn_plan(other_toolkit, request, operands),
+                fallback,
+                "CUDA {nvrtc:?}"
+            );
+            assert_eq!(
+                scalar_proof_plan(other_toolkit, request, operands).unwrap(),
+                Some(measured),
+                "CUDA {nvrtc:?}"
+            );
+        }
+        let mut missed_caps = tn_admission_facts();
+        missed_caps.sm120_scalar_resources_qualified = false;
+        assert_eq!(admitted_tn_plan(missed_caps, request, operands), fallback);
+        assert_eq!(
+            scalar_proof_plan(missed_caps, request, operands).unwrap(),
+            None
+        );
 
         let mut unknown_library = tn_admission_facts();
         unknown_library.scalar_compiler.nvrtc_library_known = false;
@@ -8740,7 +8777,7 @@ mod scalar_wave_policy_tests {
                 "scalar+Inference cohort {index}"
             );
             assert!(
-                qualified_scalar_sm89_ada142_tn_environment(facts),
+                qualified_scalar_sm89_tn_environment(facts),
                 "scalar projection for cohort {index}"
             );
 

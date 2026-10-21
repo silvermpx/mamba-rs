@@ -2086,6 +2086,10 @@ impl MambaKernels {
         self.triad.compute_capability()
     }
 
+    pub(crate) fn triad_sm120_scalar_resources_qualified(&self) -> bool {
+        self.triad.sm120_scalar_resources_qualified()
+    }
+
     pub(crate) fn tc64_streamk_resident_ctas(&self) -> u32 {
         self.triad.tc64_streamk_resident_ctas()
     }

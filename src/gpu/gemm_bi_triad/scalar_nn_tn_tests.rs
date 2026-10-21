@@ -1087,6 +1087,7 @@ fn qualified_tn_m16n16_facts() -> ScalarLaunchFacts {
         sm89_exact_f32_d128_symbols_loaded: [false; 2],
         compute_capability: (12, 0),
         partition_reference: 170,
+        sm120_scalar_resources_qualified: true,
     }
 }
 

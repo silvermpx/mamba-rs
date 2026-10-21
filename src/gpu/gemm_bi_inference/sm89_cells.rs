@@ -264,7 +264,7 @@ pub(super) fn select_sm89_cell(
     if !stack.nvrtc_library_known
         || !super::inference_portable_overlay_board(stack.device.compute_capability)
         || stack.device.multiprocessors == 0
-        || !matches!(stack.nvrtc, (12, 8) | (13, 0) | (13, 2))
+        || !super::super::kernel_identity::MEASURED_TOOLKITS.contains(&stack.nvrtc)
         || [operands.c.ptr, operands.x.ptr, operands.w.ptr]
             .into_iter()
             .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))

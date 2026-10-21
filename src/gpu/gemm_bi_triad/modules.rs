@@ -9695,6 +9695,9 @@ pub struct GemmBiKernels {
     sm120_target: Option<super::contract::Sm120TargetCandidate>,
     sm120_device_caps: Option<crate::gpu::kernel_identity::DeviceCaps>,
     sm120_resources: HashMap<&'static str, super::contract::Sm120KernelResources>,
+    /// The SM120 scalar kernels met their resource caps when this module
+    /// loaded; set once at construction and never changed.
+    sm120_scalar_resources_qualified: bool,
     tf32_tensor_maps: Tf32MapCache,
     sm90a_tensor_maps: Sm90aMapCache,
     sm100_tensor_maps: Sm100MapCache,
@@ -10101,16 +10104,35 @@ impl GemmBiKernels {
         let gemm_bi_transpose_f32_32x16_d768 = load("transpose_f32_32x16_d768")?;
         let scalar_compiler = scalar.compiler_identity;
         let scalar_artifact = scalar.artifact_identity;
-        if qualified_scalar_resource_environment(
+        let sm120_scalar_resources_qualified = if qualified_scalar_resource_environment(
             compute_capability,
             scalar_compiler,
             scalar_artifact,
         ) {
-            qualify_scalar_nt_d768_transpose(&gemm_bi_transpose_f32_32x16_d768)?;
-            qualify_scalar_nn_m32n64_splitk32(&gemm_bi_nn_splitk32_m32n64_exact)?;
-            qualify_scalar_nt_m2n16(&gemm_bi_nt_m2n16_bk64_splitk32)?;
-            qualify_scalar_tn_m16n16(&gemm_bi_tn_m16n16_bk16_s2_splitm16)?;
-        }
+            let checked = qualify_scalar_nt_d768_transpose(&gemm_bi_transpose_f32_32x16_d768)
+                .and_then(|()| qualify_scalar_nn_m32n64_splitk32(&gemm_bi_nn_splitk32_m32n64_exact))
+                .and_then(|()| qualify_scalar_nt_m2n16(&gemm_bi_nt_m2n16_bk64_splitk32))
+                .and_then(|()| qualify_scalar_tn_m16n16(&gemm_bi_tn_m16n16_bk16_s2_splitm16));
+            match checked {
+                Ok(()) => true,
+                Err(error) if scalar_compiler.nvrtc_version == SCALAR_RESOURCE_CAPS_TOOLKIT => {
+                    return Err(error);
+                }
+                Err(error) => {
+                    static MISSED: std::sync::Once = std::sync::Once::new();
+                    crate::gpu::diagnostics::warn_once(&MISSED, || {
+                        format!(
+                            "{error} on CUDA {}.{}; the SM120 scalar routes that need these \
+                             resources stay off this card",
+                            scalar_compiler.nvrtc_version.0, scalar_compiler.nvrtc_version.1
+                        )
+                    });
+                    false
+                }
+            }
+        } else {
+            false
+        };
 
         let specialized_functions = specialized
             .as_ref()
@@ -10195,6 +10217,7 @@ impl GemmBiKernels {
             sm120_target,
             sm120_device_caps,
             sm120_resources,
+            sm120_scalar_resources_qualified,
             tf32_tensor_maps: Mutex::new(HashMap::new()),
             sm90a_tensor_maps: Mutex::new(HashMap::new()),
             sm100_tensor_maps: Mutex::new(HashMap::new()),
@@ -10292,6 +10315,10 @@ impl GemmBiKernels {
 
     pub(crate) fn compute_capability(&self) -> (u32, u32) {
         self.compute_capability
+    }
+
+    pub(crate) fn sm120_scalar_resources_qualified(&self) -> bool {
+        self.sm120_scalar_resources_qualified
     }
 
     pub fn f32_triad_availability(&self) -> super::contract::F32TriadAvailability {
@@ -11667,6 +11694,14 @@ fn set_dynamic_shared(function: &CudaFunction, name: &str, bytes: i32) -> Result
         .map_err(|error| format!("set MAX_DYNAMIC_SHARED for {name}: {error:?}"))
 }
 
+/// The toolkit the SM120 scalar resource caps were measured on. A kernel
+/// that misses them there is a defect of its source and fails the load; on
+/// any other toolkit it only keeps its routes off this card.
+const SCALAR_RESOURCE_CAPS_TOOLKIT: (i32, i32) = (13, 2);
+
+/// Whether the SM120 scalar module is checked against the resource caps its
+/// routes need: the CC 12.0 generic target with a known, well-formed compile,
+/// on any toolkit.
 fn qualified_scalar_resource_environment(
     compute_capability: (u32, u32),
     compiler: CompilerIdentity,
@@ -11674,7 +11709,6 @@ fn qualified_scalar_resource_environment(
 ) -> bool {
     compute_capability == (12, 0)
         && compiler.target.as_str() == "compute_120"
-        && compiler.nvrtc_version == (13, 2)
         && compiler.nvrtc_library_known
         && compiler.nvrtc_library_domain != [0; 32]
         && compiler.invocation_digest != [0; 32]
@@ -13220,6 +13254,14 @@ mod tests {
         assert!(qualified_scalar_resource_environment(
             (12, 0),
             compiler,
+            artifact
+        ));
+        // Every toolkit is checked against the caps, not only the measured one.
+        let mut other_toolkit = compiler;
+        other_toolkit.nvrtc_version = (12, 8);
+        assert!(qualified_scalar_resource_environment(
+            (12, 0),
+            other_toolkit,
             artifact
         ));
 

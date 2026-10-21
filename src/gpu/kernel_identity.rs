@@ -848,6 +848,27 @@ fn query_driver_identity_uncached() -> Result<DriverIdentity, String> {
     })
 }
 
+/// The CUDA toolkits the frozen route tables were timed on.
+pub(crate) const MEASURED_TOOLKITS: [(i32, i32); 3] = [(12, 8), (13, 0), (13, 2)];
+
+/// The measured toolkit whose route tables a toolkit follows: itself when
+/// the tables were timed on it, else the newest measured release older than
+/// it, else the oldest measured one. A table only picks among routes that
+/// are each deterministic on any toolkit, so following a neighbour costs no
+/// determinism; a toolkit the tables never met runs the measured routes of
+/// its nearest release instead of falling back to the portable ones.
+pub(crate) fn serving_toolkit(nvrtc: (i32, i32)) -> (i32, i32) {
+    if MEASURED_TOOLKITS.contains(&nvrtc) {
+        return nvrtc;
+    }
+    MEASURED_TOOLKITS
+        .iter()
+        .rev()
+        .copied()
+        .find(|measured| *measured < nvrtc)
+        .unwrap_or(MEASURED_TOOLKITS[0])
+}
+
 pub(crate) fn nvrtc_library_domain() -> Option<Vec<u8>> {
     static DOMAIN: OnceLock<Vec<u8>> = OnceLock::new();
     if let Some(domain) = DOMAIN.get() {
@@ -5396,6 +5417,23 @@ pub(in crate::gpu) mod inference_test_support {
         resolve: impl Fn(u64, u64) -> Result<Sha256Digest, String> + 'static,
     ) -> RecordingPhysicalObserver {
         RecordingPhysicalObserver::with_argument_identity(128, None, resolve).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod serving_toolkit_tests {
+    use super::{MEASURED_TOOLKITS, serving_toolkit};
+
+    #[test]
+    fn a_toolkit_follows_its_own_tables_or_the_nearest_older_measured_ones() {
+        for measured in MEASURED_TOOLKITS {
+            assert_eq!(serving_toolkit(measured), measured);
+        }
+        assert_eq!(serving_toolkit((12, 9)), (12, 8));
+        assert_eq!(serving_toolkit((13, 1)), (13, 0));
+        assert_eq!(serving_toolkit((13, 3)), (13, 2));
+        assert_eq!(serving_toolkit((14, 0)), (13, 2));
+        assert_eq!(serving_toolkit((12, 6)), (12, 8));
     }
 }
 

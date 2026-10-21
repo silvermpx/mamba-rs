@@ -586,10 +586,10 @@ fn inference_select_sm89_half_auto_tile(
         Tc128Sm89Pipeline as Pipeline, Tc128Sm89S3 as S3, Tc128Sm89Swizzle as Swizzle,
     };
 
+    let nvrtc = super::kernel_identity::serving_toolkit(nvrtc);
     if !nvrtc_library_known
         || !inference_portable_overlay_board(device.compute_capability)
         || device.multiprocessors == 0
-        || !matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
         || operands.c.dtype == WeightDtype::F32
         || operands.c.dtype != operands.x.dtype
         || operands.x.dtype != operands.w.dtype
@@ -660,7 +660,7 @@ fn inference_select_sm89_half_finalist_auto_tile(
     if !nvrtc_library_known
         || !inference_portable_overlay_board(device.compute_capability)
         || device.multiprocessors == 0
-        || nvrtc != (13, 2)
+        || super::kernel_identity::serving_toolkit(nvrtc) != (13, 2)
         || operands.c.dtype != WeightDtype::F16
         || operands.x.dtype != WeightDtype::F16
         || operands.w.dtype != WeightDtype::F16
@@ -820,13 +820,18 @@ mod sm89_pipeline_auto_tests {
                 None,
                 "unknown NVRTC library must decline"
             );
-            for nvrtc in [(12, 8), (13, 0), (13, 1), (13, 3)] {
+            for nvrtc in [(12, 8), (13, 0), (13, 1)] {
                 assert_eq!(
                     select_finalist(f16, shape, device, nvrtc, true, true, true),
                     None,
-                    "unmeasured toolkit {nvrtc:?} must retain the old selector"
+                    "toolkit {nvrtc:?} must retain the old selector"
                 );
             }
+            assert_eq!(
+                select_finalist(f16, shape, device, (13, 3), true, true, true),
+                Some(expected),
+                "a newer toolkit follows the CUDA 13.2 rows"
+            );
             for other_board in [
                 InferenceTileDevice {
                     compute_capability: (8, 6),
@@ -1070,8 +1075,20 @@ mod sm89_pipeline_auto_tests {
             ),
             None
         );
-        for version in [(12, 7), (12, 9), (13, 1), (13, 3), (14, 0)] {
-            assert_eq!(choose(ops, shape, device, version, true, true, true), None);
+        // A toolkit the tables never met follows the nearest older measured
+        // release's table.
+        for (version, measured) in [
+            ((12, 7), (12, 8)),
+            ((12, 9), (12, 8)),
+            ((13, 1), (13, 0)),
+            ((13, 3), (13, 2)),
+            ((14, 0), (13, 2)),
+        ] {
+            assert_eq!(
+                choose(ops, shape, device, version, true, true, true),
+                choose(ops, shape, device, measured, true, true, true),
+                "CUDA {version:?}"
+            );
         }
         for cc in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0)] {
             let board = InferenceTileDevice {
@@ -2804,7 +2821,7 @@ fn inference_pick_tf32(
     // SHA256 908b0ffd1fd1e5127b51d7e440d530080a6bd07d985e2aa93720f095accd926a.
     if !sm120_tma
         && compute_capability == (8, 9)
-        && nvrtc_version == (13, 2)
+        && super::kernel_identity::serving_toolkit(nvrtc_version) == (13, 2)
         && nvrtc_library_known
         && matches!(
             (rows, inner, cols, has_bias),
@@ -2814,7 +2831,9 @@ fn inference_pick_tf32(
         return InferenceTile::Tf32M64S2;
     }
     if sm120_tma {
-        if compute_capability == (12, 0) && nvrtc_version == (13, 2) {
+        if compute_capability == (12, 0)
+            && super::kernel_identity::serving_toolkit(nvrtc_version) == (13, 2)
+        {
             match (rows, inner, cols, has_bias) {
                 // A0/A1 M128S2 beat prior AUTO and FAST_TF32 in all four
                 // 101-window eager/graph AFV/VFA cohorts (worst current p95
@@ -3187,7 +3206,7 @@ fn inference_sm120_pair_store_schedule_cell(
     if compute_capability != (12, 0) || !output_aligned {
         return false;
     }
-    match nvrtc_version {
+    match super::kernel_identity::serving_toolkit(nvrtc_version) {
         (13, 0) => matches!(
             dims,
             (4621, 384, 1928)
@@ -3332,7 +3351,7 @@ fn inference_pick_sm120_half_exact(
     device: InferenceSm120HalfExactDevice,
 ) -> Option<InferenceSm120HalfTile> {
     if device.compute_capability != (12, 0)
-        || device.nvrtc_version != (13, 2)
+        || super::kernel_identity::serving_toolkit(device.nvrtc_version) != (13, 2)
         || !request.output_aligned
     {
         return None;
@@ -3474,7 +3493,9 @@ fn inference_pick_sm120_f32out(
         return None;
     }
     let fallback = inference_pick_sm120_half(rows, cols, k, device.multiprocessors);
-    if device.compute_capability != (12, 0) || device.nvrtc_version != (13, 2) {
+    if device.compute_capability != (12, 0)
+        || super::kernel_identity::serving_toolkit(device.nvrtc_version) != (13, 2)
+    {
         return fallback;
     }
     match (rows, k, cols) {
@@ -4473,7 +4494,7 @@ fn inference_sm89_rna_wide_auto_eligible(
         && policy == super::context::F32TriadPolicy::AllowDeterministicTf32
         && inference_portable_overlay_board(device.compute_capability)
         && device.multiprocessors > 0
-        && matches!(nvrtc_version, (12, 8) | (13, 0) | (13, 2))
+        && super::kernel_identity::MEASURED_TOOLKITS.contains(&nvrtc_version)
         && nvrtc_library_known
         && [operands.c.dtype, operands.x.dtype, operands.w.dtype]
             .into_iter()
@@ -4951,15 +4972,18 @@ fn launch_sm89_cell_reference<O: PhysicalLaunchObserver>(
     }
 }
 
-/// Ada found these routes, so every Ada card takes them as measured: the
-/// evidence belongs to the architecture, whatever the card's SM count.
+/// Ada found these routes on the measured toolkits, so every Ada card on
+/// one of them takes them as measured: the evidence belongs to the
+/// architecture, whatever the card's SM count.
 fn ada_evidence_architecture(ctx: &GpuCtx) -> bool {
     ctx.compute_capability() == (8, 9)
+        && super::kernel_identity::MEASURED_TOOLKITS
+            .contains(&ctx.kernels.compiler_identity().nvrtc_version)
 }
 
 /// The candidate arm of an Ada-found inference route on another
-/// architecture: admitted when it reproduces the portable ladder's words for
-/// this shape.
+/// architecture or an unmeasured toolkit: admitted when it reproduces the
+/// portable ladder's words for this shape.
 fn proven_inference_candidate<Candidate, Reference>(
     ctx: &GpuCtx,
     symbol: &'static str,
@@ -5819,7 +5843,7 @@ fn inference_sm120_tma_fma_force_eligible(
     tile: InferenceTile,
 ) -> bool {
     nvrtc_library_known
-        && nvrtc == (13, 2)
+        && super::kernel_identity::serving_toolkit(nvrtc) == (13, 2)
         && inference_sm120_tma_fma_force_physical_eligible(operands, shape, device, policy, tile)
 }
 
@@ -5847,7 +5871,7 @@ fn inference_sm120_exact_n64_auto_eligible(
 ) -> bool {
     loaded
         && nvrtc_library_known
-        && nvrtc == (13, 2)
+        && super::kernel_identity::serving_toolkit(nvrtc) == (13, 2)
         && device.compute_capability == (12, 0)
         && policy == super::context::F32TriadPolicy::ExactScalarFma
         && [operands.c, operands.x, operands.w]
@@ -5943,7 +5967,7 @@ mod sm120_exact_n64_auto_tests {
                 ),
                 None
             );
-            for nvrtc in [(12, 8), (13, 0), (13, 1), (13, 3), (14, 0)] {
+            for nvrtc in [(12, 8), (13, 0), (13, 1)] {
                 assert_eq!(
                     pick(
                         operands(true),
@@ -5955,6 +5979,21 @@ mod sm120_exact_n64_auto_tests {
                         F32TriadPolicy::ExactScalarFma
                     ),
                     None
+                );
+            }
+            // A newer toolkit follows the CUDA 13.2 tables.
+            for nvrtc in [(13, 3), (14, 0)] {
+                assert_eq!(
+                    pick(
+                        operands(true),
+                        shape,
+                        DEVICE,
+                        nvrtc,
+                        true,
+                        true,
+                        F32TriadPolicy::ExactScalarFma
+                    ),
+                    Some(expected)
                 );
             }
             for (known, loaded) in [(false, true), (true, false), (false, false)] {
@@ -6661,7 +6700,7 @@ mod sm120_exact_n64_auto_tests {
                 F32TriadPolicy::ExactScalarFma,
             ),
             (DEVICE, (12, 8), true, F32TriadPolicy::ExactScalarFma),
-            (DEVICE, (13, 3), true, F32TriadPolicy::ExactScalarFma),
+            (DEVICE, (13, 1), true, F32TriadPolicy::ExactScalarFma),
             (DEVICE, (13, 2), false, F32TriadPolicy::ExactScalarFma),
             (
                 DEVICE,
@@ -6806,8 +6845,20 @@ mod sm120_exact_n64_auto_tests {
                 F32TriadPolicy::ExactScalarFma,
             ));
         }
-        for nvrtc in [(0, 0), (12, 8), (13, 0), (13, 1), (13, 3), (14, 0)] {
+        for nvrtc in [(0, 0), (12, 8), (13, 0), (13, 1)] {
             assert!(!eligible(
+                ops,
+                shape,
+                DEVICE,
+                nvrtc,
+                true,
+                true,
+                F32TriadPolicy::ExactScalarFma,
+            ));
+        }
+        // A newer toolkit follows the CUDA 13.2 tables.
+        for nvrtc in [(13, 3), (14, 0)] {
+            assert!(eligible(
                 ops,
                 shape,
                 DEVICE,
@@ -6963,7 +7014,7 @@ fn inference_sm89_exact_n64_auto_eligible(
 ) -> bool {
     loaded
         && nvrtc_library_known
-        && matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
+        && super::kernel_identity::MEASURED_TOOLKITS.contains(&nvrtc)
         && inference_portable_overlay_board(device.compute_capability)
         && device.multiprocessors > 0
         && policy == super::context::F32TriadPolicy::ExactScalarFma
@@ -7756,21 +7807,32 @@ mod pair_store_schedule_tests {
         assert!(!inference_sm120_pair_store_schedule_cell(
             (2048, 768, 2304),
             (12, 0),
-            (12, 7),
-            true,
-        ));
-        assert!(!inference_sm120_pair_store_schedule_cell(
-            (2048, 768, 2304),
-            (12, 0),
             (13, 2),
             true,
         ));
-        assert!(!inference_sm120_pair_store_schedule_cell(
-            (2048, 768, 2304),
-            (12, 0),
-            (13, 1),
-            true,
-        ));
+        // A toolkit the tables never met follows the nearest older measured
+        // release: 12.7 and 12.9 the 12.8 cells, 13.1 the 13.0 cells, 13.3
+        // the 13.2 answer.
+        for (nvrtc, measured) in [
+            ((12, 7), (12, 8)),
+            ((12, 9), (12, 8)),
+            ((13, 1), (13, 0)),
+            ((13, 3), (13, 2)),
+        ] {
+            for cell in [
+                (4621, 384, 1928),
+                (4621, 768, 2304),
+                (4621, 1928, 384),
+                (2048, 768, 2304),
+                (2048, 2304, 768),
+            ] {
+                assert_eq!(
+                    inference_sm120_pair_store_schedule_cell(cell, (12, 0), nvrtc, true),
+                    inference_sm120_pair_store_schedule_cell(cell, (12, 0), measured, true),
+                    "CUDA {nvrtc:?} {cell:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -8215,7 +8277,7 @@ mod tests {
                     ..qualified_device
                 },
                 InferenceSm120HalfExactDevice {
-                    nvrtc_version: (13, 3),
+                    nvrtc_version: (12, 9),
                     ..qualified_device
                 },
                 InferenceSm120HalfExactDevice {
@@ -8509,7 +8571,7 @@ mod tests {
                 (2048, 768, 2304, 170, (12, 0), (12, 8), true),
                 (2048, 768, 2304, 170, (12, 0), (13, 0), true),
                 (2048, 768, 2304, 170, (12, 0), (13, 1), true),
-                (2048, 768, 2304, 170, (12, 0), (13, 3), true),
+                (2048, 768, 2304, 170, (12, 0), (12, 9), true),
                 (2048, 768, 2304, 170, (12, 0), (13, 2), false),
             ] {
                 assert_eq!(
@@ -8533,7 +8595,7 @@ mod tests {
                 );
             }
         }
-        for nvrtc_version in [(12, 8), (13, 0), (13, 1), (13, 3)] {
+        for nvrtc_version in [(12, 8), (13, 0), (13, 1), (12, 9)] {
             assert_eq!(
                 inference_pick_tf32(
                     (4621, 768, 2304),
@@ -8656,7 +8718,7 @@ mod tests {
                 (4621, 384, 1928, 170, (12, 0), (12, 8), true, true, true),
                 (4621, 384, 1928, 170, (12, 0), (13, 0), true, true, true),
                 (4621, 384, 1928, 170, (12, 0), (13, 1), true, true, true),
-                (4621, 384, 1928, 170, (12, 0), (13, 3), true, true, true),
+                (4621, 384, 1928, 170, (12, 0), (12, 9), true, true, true),
                 (4621, 384, 1928, 170, (12, 0), (13, 2), true, true, false),
                 (4621, 384, 1928, 170, (12, 0), (13, 2), true, false, true),
                 (4621, 384, 1928, 170, (12, 0), (13, 2), false, true, true),
@@ -8794,7 +8856,7 @@ mod tests {
                 (4621, 1928, 384, 142, (8, 9), (12, 8), true),
                 (4621, 1928, 384, 142, (8, 9), (13, 0), true),
                 (4621, 1928, 384, 142, (8, 9), (13, 1), true),
-                (4621, 1928, 384, 142, (8, 9), (13, 3), true),
+                (4621, 1928, 384, 142, (8, 9), (12, 9), true),
                 (4621, 1928, 384, 142, (8, 9), (13, 2), false),
             ] {
                 assert_eq!(

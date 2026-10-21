@@ -4068,6 +4068,7 @@ fn scalar_launch_facts(kernels: &GpuKernels) -> ScalarLaunchFacts {
         ],
         compute_capability: kernels.triad_scalar_compute_capability(),
         partition_reference: kernels.partition_reference(),
+        sm120_scalar_resources_qualified: kernels.triad_sm120_scalar_resources_qualified(),
     }
 }
 
@@ -17361,6 +17362,7 @@ mod prepared_f32_launch_tests {
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (12, 0),
             partition_reference: 170,
+            sm120_scalar_resources_qualified: true,
         }
     }
 
