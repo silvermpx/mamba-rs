@@ -2239,8 +2239,9 @@ fn sm120_tf32_selector_qualification() -> Result<(), String> {
     let quiet = QuietGpu::for_cuda_ordinal(0)?;
     let pre_context = quiet.require_pre_context("sm120-selector/pre-context")?;
     let device = GpuDevice::new(0)?;
-    // Any board with a bound TF32 module qualifies its own route set; the JSONL
-    // records the board, and the route set it freezes is scoped to it.
+    // Any card with a bound TF32 module can hold its architecture's
+    // tournament; the JSONL records the card as provenance, and the route set
+    // it freezes serves every card of the architecture.
     if configure(&device, F32TriadPolicy::AllowDeterministicTf32)?
         .kernels
         .f32_triad_availability()
@@ -2323,8 +2324,9 @@ fn run_projection_selector_qualification(cells: &[Cell]) -> Result<(), String> {
     let quiet = QuietGpu::for_cuda_ordinal(0)?;
     let pre_context = quiet.require_pre_context("sm120-projection-selector/pre-context")?;
     let device = GpuDevice::new(0)?;
-    // Any board with a bound TF32 module qualifies its own route set; the JSONL
-    // records the board, and the route set it freezes is scoped to it.
+    // Any card with a bound TF32 module can hold its architecture's
+    // tournament; the JSONL records the card as provenance, and the route set
+    // it freezes serves every card of the architecture.
     if configure(&device, F32TriadPolicy::AllowDeterministicTf32)?
         .kernels
         .f32_triad_availability()

@@ -88,6 +88,26 @@ gate a card:
   where the measurement was taken, and they never decide which card may use
   the result.
 
+## Toolkits and drivers
+
+- **The driver never decides bits.** The kernels are compiled to PTX by
+  NVRTC, and the toolkit's own assembler (nvJitLink, shipped beside NVRTC)
+  turns that PTX into machine code. The driver only loads it, so a box on
+  another driver build runs the same machine code. It is the code the
+  driver of the same release would produce, so nothing runs slower. A box
+  without nvJitLink falls back to the driver's assembler and says so.
+- **Measured toolkits keep their own tables.** Where the route tables were
+  timed on CUDA 12.8, 13.0 and 13.2, each of those releases keeps exactly
+  the routes it was measured with.
+- **Any other toolkit follows the nearest older measured release**
+  (`serving_toolkit`: 12.9 follows 12.8, 13.1 follows 13.0, 13.3 and newer
+  follow 13.2). A route whose bits must equal a reference route (an
+  Ada-found inference route, a scalar plan with frozen evidence, an SM120
+  scalar route) is proven against that reference at first use on such a
+  toolkit, as it is on another architecture.
+- The Mamba-1 and Mamba-3 fold transports have no first-use proof yet, so
+  they stay on the measured toolkits; elsewhere the ordinary fold serves.
+
 ## Forbidden
 
 - A tournament, cohort or qualification run whose result only one card can
@@ -124,9 +144,8 @@ empty.
 
 No selection compares an SM count to a card's number any more (the
 `boards` baseline is empty). What remains:
-- Several measured cells and identities still pin the toolkit (an NVRTC
-  version or the artifact digests); a new toolkit reaches those routes only
-  through the first-use proof.
+- The Mamba-1 and Mamba-3 fold transports stay on the measured toolkits
+  until they have a first-use proof.
 - The SM90a and SM100 TF32 cohorts are empty: Hopper and datacenter
   Blackwell run the portable ladder until a tournament on one of their cards.
 - The SM120 table comes from the tournament on an RTX PRO 6000. It has not
