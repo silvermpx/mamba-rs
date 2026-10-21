@@ -1370,6 +1370,10 @@ fn sm120_auto_typed_qualified_cells() {
     };
     assert_eq!(device.compute_capability, (12, 0), "CC12.0 auto table gate");
     enable_sm120_auto_policy(&ctx);
+    // A context permits stream-K by default, so the tiled table is checked
+    // under the policy that keeps every route on its tiled contract.
+    ctx.route_controls()
+        .set_half_policy(HalfTriadPolicy::TiledParity);
     for route in SM120_AUTO_CELLS_CC120.iter().copied() {
         assert_auto_cell_repeats_bit_for_bit(&ctx, route);
     }
