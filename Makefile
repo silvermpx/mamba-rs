@@ -30,10 +30,12 @@ deny:
 test:
 	cargo test --workspace --locked
 
-# Ratchet the comment baseline DOWN after rewriting comments. Refuses to
-# grow: a new offending line is rewritten, never baselined.
+# Ratchet the comment and board baselines DOWN after rewriting comments or
+# removing per-card pins. Refuses to grow: a new offending line is
+# rewritten, never baselined.
 baseline:
 	cargo run -q -p xtask -- comments --update-baseline
+	cargo run -q -p xtask -- boards --update-baseline
 
 install-hooks:
 	install -m 0755 hooks/pre-push .git/hooks/pre-push

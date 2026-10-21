@@ -5,8 +5,11 @@
 //! Rules today: `comments` - a code comment is plain English prose that
 //! says WHY (no Cyrillic, no task indexes, dates, document numbers or
 //! audit tags), ratcheted against a shrink-only baseline; `names` - no
-//! identifier carries a version suffix, zero and stay zero.
+//! identifier carries a version suffix, zero and stay zero; `boards` - no
+//! kernel choice is keyed to one card's SM count, ratcheted against a
+//! shrink-only baseline that the per-architecture repair empties.
 
+mod boards;
 mod comments;
 mod names;
 
@@ -60,6 +63,10 @@ const NAME_SCANS: &[(&str, &[&str])] = &[
     ("kernels", &["cu", "cuh"]),
 ];
 
+/// What the board gate reads: the production sources of the crate.
+const BOARD_SCANS: &[&str] = &["src"];
+const BOARD_BASELINE: &str = "tools/board_pin_baseline.txt";
+
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let update = args.iter().any(|a| a == "--update-baseline");
@@ -73,12 +80,22 @@ fn main() -> std::process::ExitCode {
         "gate" => comments::run(&root, COMMENT_SCANS, &root.join(COMMENT_BASELINE), update)
             .and_then(|mut v| {
                 v.extend(names::run(&root, NAME_SCANS)?);
+                v.extend(boards::run(
+                    &root,
+                    BOARD_SCANS,
+                    &root.join(BOARD_BASELINE),
+                    false,
+                )?);
                 Ok(v)
             }),
         "comments" => comments::run(&root, COMMENT_SCANS, &root.join(COMMENT_BASELINE), update),
         "names" => names::run(&root, NAME_SCANS),
+        "boards" if args.iter().any(|a| a == "--seed") => {
+            boards::seed(&root, BOARD_SCANS, &root.join(BOARD_BASELINE))
+        }
+        "boards" => boards::run(&root, BOARD_SCANS, &root.join(BOARD_BASELINE), update),
         other => Err(format!(
-            "unknown rule: {other}\nusage: cargo run -q -p xtask -- [gate | comments | names] [--update-baseline]"
+            "unknown rule: {other}\nusage: cargo run -q -p xtask -- [gate | comments | names | boards] [--update-baseline]"
         )),
     };
     match result {
