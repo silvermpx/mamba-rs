@@ -800,9 +800,9 @@ mod live {
     #[ignore = "requires an Ada GPU and explicit CUDA toolkit selection"]
     fn sm89_portable_identity_inventory() -> Result<(), String> {
         let device = GpuDevice::new(0)?;
-        if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
+        if device.compute_capability != (8, 9) {
             return Err(format!(
-                "portable identity inventory requires exact CC8.9/142SM, got {:?}/{}SM",
+                "portable identity inventory requires CC8.9, got {:?}/{}SM",
                 device.compute_capability,
                 device.multiprocessor_count(),
             ));
@@ -838,9 +838,9 @@ mod live {
         let candidate_device = GpuDevice::new(0)?;
         let comparator_device = GpuDevice::new(0)?;
         for device in [&candidate_device, &comparator_device] {
-            if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
+            if device.compute_capability != (8, 9) {
                 return Err(format!(
-                    "the screen requires exact CC8.9/142SM, got {:?}/{}SM",
+                    "the screen requires CC8.9, got {:?}/{}SM",
                     device.compute_capability,
                     device.multiprocessor_count(),
                 ));
@@ -971,9 +971,9 @@ mod live {
         let candidate_device = GpuDevice::new(0)?;
         let comparator_device = GpuDevice::new(0)?;
         for device in [&candidate_device, &comparator_device] {
-            if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
+            if device.compute_capability != (8, 9) {
                 return Err(format!(
-                    "new-body timing requires exact CC8.9/142SM, got {:?}/{}SM",
+                    "new-body timing requires CC8.9, got {:?}/{}SM",
                     device.compute_capability,
                     device.multiprocessor_count(),
                 ));
@@ -1081,9 +1081,9 @@ mod live {
         let candidate_device = GpuDevice::new(0)?;
         let comparator_device = GpuDevice::new(0)?;
         for device in [&candidate_device, &comparator_device] {
-            if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
+            if device.compute_capability != (8, 9) {
                 return Err(format!(
-                    "joint timing requires exact CC8.9/142SM, got {:?}/{}SM",
+                    "joint timing requires CC8.9, got {:?}/{}SM",
                     device.compute_capability,
                     device.multiprocessor_count(),
                 ));

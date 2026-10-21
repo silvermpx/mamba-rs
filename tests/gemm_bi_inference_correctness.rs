@@ -132,12 +132,11 @@ fn inference_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;
     }
-    assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.route_controls()
         .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
@@ -792,7 +791,7 @@ fn inference_sm89_rna_wide_actual_auto_all_cells_prefix_views_and_graph_bits() {
 }
 
 #[test]
-#[ignore = "requires CC8.9/142SM Ada and qualified CUDA12.8/13.0/13.2 AUTO45"]
+#[ignore = "requires CC8.9 Ada and qualified CUDA12.8/13.0/13.2 AUTO45"]
 fn inference_sm89_rna_n96_actual_auto_prefix_views_and_graph_bits() {
     check_rna_wide_prefix_views_and_graph_bits(true, InferenceTile::Tf32RnaM128N96S3);
 }
@@ -801,12 +800,11 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: Inference
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;
     }
-    assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.route_controls()
         .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
@@ -1231,12 +1229,11 @@ fn check_rna_rejects_unsafe_inputs_and_handles_k0(tile: InferenceTile) {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;
     }
-    assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     let null_operands = InferenceFwdOperands {
         c: f32_pointer(0),

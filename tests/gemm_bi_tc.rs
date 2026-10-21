@@ -214,7 +214,7 @@ fn sm89_deep_split_k_policy_is_bitwise_stable_and_keeps_forced_tc() {
     let device = GpuDevice::new(0).expect("gpu");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;

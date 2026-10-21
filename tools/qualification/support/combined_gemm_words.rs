@@ -750,8 +750,8 @@ impl Runtime {
         let monitor = DeviceScopeMonitor::new(scope)?;
         let preflight = monitor.pre_context("combined-gemm/pre-context")?;
         let device = GpuDevice::new(0)?;
-        if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
-            return Err("combined acceptance requires the 142-SM CC8.9 device".into());
+        if device.compute_capability != (8, 9) {
+            return Err("combined acceptance requires a CC8.9 device".into());
         }
         let ctx = GpuCtx::new_with_state_cap(
             &device,

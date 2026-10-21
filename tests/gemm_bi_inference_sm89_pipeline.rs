@@ -93,7 +93,7 @@ fn inference_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;
@@ -262,7 +262,7 @@ fn inference_sm89_half_finalists_fail_closed_outside_exact_forced_contract() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;
@@ -351,12 +351,11 @@ fn inference_sm89_half_hot_cell_prefix_view_graph_bits(
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;
     }
-    assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("NVRTC context");
     if forced.is_none() {
         let compiler = ctx.kernels.compiler_identity();
@@ -572,7 +571,7 @@ fn inference_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;
@@ -931,7 +930,7 @@ fn inference_sm89_half_s3_raw_alpha_beta_strides_graph_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;
@@ -1077,7 +1076,7 @@ fn inference_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;
@@ -1315,7 +1314,7 @@ fn inference_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;
@@ -1416,7 +1415,7 @@ fn inference_sm89_half_pipeline_sanitizer_smoke() {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;

@@ -2222,7 +2222,7 @@ fn run_cell(
 }
 
 #[test]
-#[ignore = "requires an explicitly enabled idle CC12.0/170SM GPU"]
+#[ignore = "requires an explicitly enabled idle CC12.0 GPU"]
 fn sm120_tf32_selector_qualification() -> Result<(), String> {
     match std::env::var(ENABLE_ENV) {
         Ok(value) if value == "1" => {}
@@ -2277,7 +2277,7 @@ fn sm120_tf32_selector_qualification() -> Result<(), String> {
 }
 
 #[test]
-#[ignore = "requires an explicitly enabled idle CC12.0/170SM GPU"]
+#[ignore = "requires an explicitly enabled idle CC12.0 GPU"]
 fn sm120_tf32_projection_selector_qualification() -> Result<(), String> {
     run_projection_selector_qualification(&PROJECTION_CELLS)
 }

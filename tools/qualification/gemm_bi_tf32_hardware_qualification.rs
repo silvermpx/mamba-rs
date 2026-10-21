@@ -281,7 +281,7 @@ fn nt_fixed_split2_sample_bits(
     (0.0_f32 + partials[0] + partials[1]).to_bits()
 }
 #[test]
-#[ignore = "requires exact CC 12.0/170SM with CUDA 13.0 measured-symbol exclusion"]
+#[ignore = "requires CC 12.0 with CUDA 13.0 measured-symbol exclusion"]
 fn sm120_exact_nt_d768_out_reachable_fallback_matches_fixed_split_cpu_bits() -> Result<(), String> {
     use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
     use mamba_rs::gpu::device::GpuDevice;
@@ -297,9 +297,9 @@ fn sm120_exact_nt_d768_out_reachable_fallback_matches_fixed_split_cpu_bits() -> 
     const SALT: u64 = 0x1205_1300;
     const SYMBOL: &str = "nt_sm120_tma_fma_m128n64_bk16_s2_kvec";
     let device = GpuDevice::new(0)?;
-    if device.compute_capability != (12, 0) || device.multiprocessor_count() != 170 {
+    if device.compute_capability != (12, 0) {
         return Err(format!(
-            "fallback probe requires exact CC 12.0/170SM, got {:?}/{}SM",
+            "fallback probe requires CC 12.0, got {:?}/{}SM",
             device.compute_capability,
             device.multiprocessor_count()
         ));

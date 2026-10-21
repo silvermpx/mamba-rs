@@ -297,11 +297,9 @@ mod live {
         let device = GpuDevice::new(0)?;
         let ctx = GpuCtx::new(&device)?;
         let identity = ctx.gemm_route();
-        if identity.device.compute_capability != (8, 9)
-            || identity.device.multiprocessor_count != 142
-        {
+        if identity.device.compute_capability != (8, 9) {
             return Err(format!(
-                "SM89 exact-F32 d128 qualification requires CC8.9/142SM, got {:?}/{}SM",
+                "SM89 exact-F32 d128 qualification requires CC8.9, got {:?}/{}SM",
                 identity.device.compute_capability, identity.device.multiprocessor_count
             ));
         }

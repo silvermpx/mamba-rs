@@ -554,7 +554,6 @@ mod ada_s3_pair {
         inference_sm120_tf32_bd_environment_preflight("Ada S3 mirrored paired").unwrap();
         let device = GpuDevice::new(0).expect("Ada device");
         assert_eq!(device.compute_capability, (8, 9));
-        assert_eq!(device.multiprocessor_count(), 142);
         assert_eq!(TUNING_TABLE_REVISION, stage.revision());
         let ctx = GpuCtx::new(&device).expect("Ada context");
         let compiler = ctx.kernels.compiler_identity();
@@ -602,8 +601,9 @@ mod ada_s3_pair {
                 "\"schema\":\"MambaBiInferenceAdaS3PostAutoPairedV1\",\"stage\":\"post_auto\",\"toolkit\":\"{toolkit}\",\"shape\":[4621,768,2304],\"bias\":false,\"alpha\":1,\"beta\":0,\"revision\":43"
             ),
         };
+        let sm_count = device.multiprocessor_count();
         println!(
-            "{{{metadata},\"kind\":\"identity\",\"uuid\":\"GPU-d1edd7be-e88d-aed6-047d-622163306f0e\",\"cc\":\"8.9\",\"sm_count\":142,\"source_sha\":\"{source_hash}\",\"binary_sha\":\"{binary_hash}\",\"inference_source_digest\":\"{}\",\"inference_invocation_digest\":\"{}\",\"inference_artifact_digest\":\"{}\",\"header_manifest_digest\":\"{}\",\"nvrtc_library_domain\":\"{}\",\"nvrtc_library_known\":true,\"dtypes\":\"{dtype_text}\",\"windows\":{windows},\"logical_ops\":20,\"warmup_eager\":128,\"percentile\":\"round((len-1)*fraction)\",{mode}}}",
+            "{{{metadata},\"kind\":\"identity\",\"cc\":\"8.9\",\"sm_count\":{sm_count},\"source_sha\":\"{source_hash}\",\"binary_sha\":\"{binary_hash}\",\"inference_source_digest\":\"{}\",\"inference_invocation_digest\":\"{}\",\"inference_artifact_digest\":\"{}\",\"header_manifest_digest\":\"{}\",\"nvrtc_library_domain\":\"{}\",\"nvrtc_library_known\":true,\"dtypes\":\"{dtype_text}\",\"windows\":{windows},\"logical_ops\":20,\"warmup_eager\":128,\"percentile\":\"round((len-1)*fraction)\",{mode}}}",
             digest_hex(&compiler.source_digest),
             digest_hex(&compiler.invocation_digest),
             digest_hex(&artifact.artifact_digest),
@@ -1283,11 +1283,10 @@ fn forced_inference_launch_uses_structured_arguments() {
 }
 
 #[test]
-#[ignore = "requires a CC12.0 170-SM CUDA device"]
+#[ignore = "requires a CC12.0 CUDA device"]
 fn inference_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (12, 0));
-    assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     let m64n128 = &ctx
         .kernels
@@ -2286,11 +2285,10 @@ fn inference_tf32_forward_is_batch_prefix_invariant() {
 }
 
 #[test]
-#[ignore = "requires exclusive CC8.9/142-SM CUDA13.2 Ada device"]
+#[ignore = "requires exclusive CC8.9 CUDA13.2 Ada device"]
 fn inference_sm89_tf32_c_auto_prefix_special_bias_graph_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
-    assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     let compiler = ctx.kernels.compiler_identity();
     assert_eq!(compiler.nvrtc_version, (13, 2));
@@ -3498,13 +3496,12 @@ fn half_to_f32_sm120_tma_hot_shapes_smoke() {
 }
 
 #[test]
-#[ignore = "requires a quiet 170-SM SM120 CUDA device and screens mixed-output hot B"]
+#[ignore = "requires a quiet SM120 CUDA device and screens mixed-output hot B"]
 fn half_to_f32_sm120_hot_b_paired_tile_screen() {
     inference_sm120_tf32_bd_environment_preflight("mixed-output hot B")
         .expect("mixed-output hot B preflight");
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (12, 0));
-    assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     let shape = InferenceShape {
         m: 4621,
@@ -3626,13 +3623,12 @@ fn half_to_f32_sm120_hot_b_paired_tile_screen() {
 }
 
 #[test]
-#[ignore = "requires a quiet 170-SM SM120 CUDA device and diagnoses AUTO launch overhead"]
+#[ignore = "requires a quiet SM120 CUDA device and diagnoses AUTO launch overhead"]
 fn half_to_f32_sm120_hot_b_auto_vs_forced() {
     inference_sm120_tf32_bd_environment_preflight("mixed-output hot B AUTO versus forced")
         .expect("mixed-output hot B AUTO/forced preflight");
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (12, 0));
-    assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     let shape = InferenceShape {
         m: 4621,
@@ -4338,7 +4334,6 @@ fn inference_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() 
 
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (12, 0));
-    assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
@@ -5323,7 +5318,7 @@ fn inference_sm120_half_selector_census() {
 }
 
 #[test]
-#[ignore = "requires a quiet 170-SM CC12 CUDA device and emits paired selector evidence"]
+#[ignore = "requires a quiet CC12 CUDA device and emits paired selector evidence"]
 fn inference_sm120_half_selector_paired_gaps() {
     use InferenceSm120HalfTile::M128N128Bk32S2 as B;
     use InferenceSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A};
@@ -5467,11 +5462,6 @@ fn inference_sm120_half_selector_paired_gaps() {
     ];
     let device = GpuDevice::new(0).expect("CUDA device");
     assert!(matches!(device.compute_capability, (12, 0) | (12, 1)));
-    assert_eq!(
-        device.multiprocessor_count(),
-        170,
-        "170-SM qualification required"
-    );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Inference);
@@ -5552,7 +5542,7 @@ fn inference_sm120_half_selector_paired_gaps() {
 }
 
 #[test]
-#[ignore = "requires a quiet 170-SM CC12 CUDA device and screens every SM120 half tile"]
+#[ignore = "requires a quiet CC12 CUDA device and screens every SM120 half tile"]
 fn inference_sm120_half_remaining_gap_all_tile_screen() {
     let shapes = [
         InferenceShape {
@@ -5633,7 +5623,6 @@ fn inference_sm120_half_remaining_gap_all_tile_screen() {
     ];
     let device = GpuDevice::new(0).expect("CUDA device");
     assert!(matches!(device.compute_capability, (12, 0) | (12, 1)));
-    assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Inference);
@@ -5786,7 +5775,7 @@ fn inference_sm120_half_remaining_gap_all_tile_screen() {
 }
 
 #[test]
-#[ignore = "requires a quiet 170-SM CC12 CUDA device and emits paired selector boundary evidence"]
+#[ignore = "requires a quiet CC12 CUDA device and emits paired selector boundary evidence"]
 fn inference_sm120_half_selector_paired_boundaries() {
     use InferenceSm120HalfTile::M128N128Bk32S2 as B;
     use InferenceSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A};
@@ -5894,11 +5883,6 @@ fn inference_sm120_half_selector_paired_boundaries() {
     ];
     let device = GpuDevice::new(0).expect("CUDA device");
     assert!(matches!(device.compute_capability, (12, 0) | (12, 1)));
-    assert_eq!(
-        device.multiprocessor_count(),
-        170,
-        "170-SM qualification required"
-    );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Inference);
@@ -5919,7 +5903,7 @@ fn inference_sm120_half_selector_paired_boundaries() {
 }
 
 #[test]
-#[ignore = "requires a quiet 170-SM CC12 CUDA device and emits paired shallow selector boundary evidence"]
+#[ignore = "requires a quiet CC12 CUDA device and emits paired shallow selector boundary evidence"]
 fn inference_sm120_half_selector_paired_shallow_boundaries() {
     use InferenceSm120HalfTile::M128N128Bk32S2 as B;
     use InferenceSm120HalfTile::{M64N64Bk64S2 as C, M128N64Bk32S3 as A};
@@ -6018,11 +6002,6 @@ fn inference_sm120_half_selector_paired_shallow_boundaries() {
     ];
     let device = GpuDevice::new(0).expect("CUDA device");
     assert!(matches!(device.compute_capability, (12, 0) | (12, 1)));
-    assert_eq!(
-        device.multiprocessor_count(),
-        170,
-        "170-SM qualification required"
-    );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Inference);
@@ -6295,7 +6274,6 @@ fn inference_sm120_half_legacy_overlay_requalification() {
 
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (12, 0));
-    assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     let compiler = ctx.kernels.compiler_identity();
     assert_eq!(compiler.nvrtc_version, (13, 2));
@@ -6310,9 +6288,10 @@ fn inference_sm120_half_legacy_overlay_requalification() {
     let inference_module_source_sha256 = digest_hex(&compiler.source_digest);
     let inference_module_invocation_sha256 = digest_hex(&compiler.invocation_digest);
     let device_sha256 = sha256_bytes(format!("{:?}", device.identity()).as_bytes());
+    let sm_count = device.multiprocessor_count();
     writeln!(
         writer,
-        "{{\"schema\":\"MambaBiInferenceSm120HalfExactPairedV1\",\"record_type\":\"metadata\",\"device_cc\":\"12.0\",\"sm_count\":170,\"device_sha256\":\"{device_sha256}\",\"nvrtc_major\":{},\"nvrtc_minor\":{},\"compiler_target\":\"{:?}\",\"inference_module_source_sha256\":\"{inference_module_source_sha256}\",\"inference_module_invocation_sha256\":\"{inference_module_invocation_sha256}\",\"rust_source_sha256\":\"{rust_source_sha256}\",\"cuda_source_sha256\":\"{cuda_source_sha256}\",\"executable_sha256\":\"{executable_sha256}\",\"tuning_table_revision\":{TUNING_TABLE_REVISION}}}",
+        "{{\"schema\":\"MambaBiInferenceSm120HalfExactPairedV1\",\"record_type\":\"metadata\",\"device_cc\":\"12.0\",\"sm_count\":{sm_count},\"device_sha256\":\"{device_sha256}\",\"nvrtc_major\":{},\"nvrtc_minor\":{},\"compiler_target\":\"{:?}\",\"inference_module_source_sha256\":\"{inference_module_source_sha256}\",\"inference_module_invocation_sha256\":\"{inference_module_invocation_sha256}\",\"rust_source_sha256\":\"{rust_source_sha256}\",\"cuda_source_sha256\":\"{cuda_source_sha256}\",\"executable_sha256\":\"{executable_sha256}\",\"tuning_table_revision\":{TUNING_TABLE_REVISION}}}",
         compiler.nvrtc_version.0,
         compiler.nvrtc_version.1,
         compiler.target,
@@ -7092,7 +7071,6 @@ fn inference_portable_resource_smoke() {
 fn inference_sm120_half_loaded_resources_are_safe() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (12, 0));
-    assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
     let kernels = ctx
@@ -7604,7 +7582,6 @@ fn inference_tc16_occupancy_cliff_paired_census() {
         (8, 9),
         "Tc16 occupancy inventory is qualified on SM89",
     );
-    assert_eq!(device.multiprocessor_count(), 142);
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Inference);
     let shapes = [
@@ -8505,7 +8482,7 @@ fn inference_sm120_tf32_bd_expected_portable_rejection_is_terminal() {
 }
 
 #[test]
-#[ignore = "requires a quiet 170-SM CC12.0 CUDA device and emits raw paired TF32 B/D evidence"]
+#[ignore = "requires a quiet CC12.0 CUDA device and emits raw paired TF32 B/D evidence"]
 fn inference_sm120_tf32_bd_paired_forced_routes() {
     let sink = InferenceSm120Tf32BdJsonlSink::from_env().unwrap_or_else(|error| panic!("{error}"));
     let device = GpuDevice::new(0).expect("CUDA device");
@@ -8513,7 +8490,7 @@ fn inference_sm120_tf32_bd_paired_forced_routes() {
     let sm_count = device.multiprocessor_count();
     let first = INFERENCE_SM120_TF32_BD_PAIRED_COMPARISONS[0];
     let first_emitter = InferenceSm120Tf32BdComparisonEmitter::new(&sink);
-    if device_cc != (12, 0) || sm_count != 170 {
+    if device_cc != (12, 0) {
         inference_sm120_tf32_bd_reject(
             first,
             "none",
@@ -8521,7 +8498,7 @@ fn inference_sm120_tf32_bd_paired_forced_routes() {
             sm_count,
             "device_identity",
             format!(
-                "requires physical CC12.0 with 170 SMs, found CC{}.{} with {} SMs",
+                "requires physical CC12.0, found CC{}.{} with {} SMs",
                 device_cc.0, device_cc.1, sm_count
             ),
             &first_emitter,
@@ -10076,14 +10053,13 @@ fn ada_finalist_auto_harness_oracle_has_exactly_five_promotions() {
 fn inference_auto_vendor_expected_exact_tile(
     cell: InferenceAutoVendorCell,
     device_cc: (u32, u32),
-    sm_count: u32,
     nvrtc_version: (i32, i32),
     nvrtc_library_known: bool,
     has_bias: bool,
     t256_loaded: bool,
 ) -> InferenceTile {
     match device_cc {
-        (12, 0) if sm_count == 170 && nvrtc_version == (13, 2) && nvrtc_library_known => {
+        (12, 0) if nvrtc_version == (13, 2) && nvrtc_library_known => {
             match ((cell.shape.m, cell.shape.k, cell.shape.n), has_bias) {
                 ((4621, 384, 1928), false) => InferenceTile::F32Sm120TmaFmaM64N128,
                 ((4621, 384, 1928), true) if t256_loaded => {
@@ -10111,12 +10087,10 @@ fn inference_auto_vendor_expected_half_tile(
     cell: InferenceAutoVendorCell,
     dtype: WeightDtype,
     device_cc: (u32, u32),
-    sm_count: u32,
     nvrtc_version: (i32, i32),
     has_bias: bool,
 ) -> InferenceTile {
     if device_cc == (12, 0)
-        && sm_count == 170
         && nvrtc_version == (13, 2)
         && matches!(dtype, WeightDtype::Bf16 | WeightDtype::F16)
     {
@@ -10139,7 +10113,6 @@ fn inference_auto_vendor_expected_half_tile(
         }
     }
     if device_cc == (12, 0)
-        && sm_count == 170
         && nvrtc_version == (13, 2)
         && matches!(dtype, WeightDtype::Bf16 | WeightDtype::F16)
         && matches!(
@@ -10166,13 +10139,12 @@ fn inference_auto_vendor_expected_half_tile(
 fn inference_auto_vendor_expected_tf32_tile(
     cell: InferenceAutoVendorCell,
     device_cc: (u32, u32),
-    sm_count: u32,
     nvrtc_version: (i32, i32),
     has_bias: bool,
     output_aligned: bool,
     nvrtc_library_known: bool,
 ) -> InferenceTile {
-    if device_cc == (12, 0) && sm_count == 170 && nvrtc_version == (13, 2) {
+    if device_cc == (12, 0) && nvrtc_version == (13, 2) {
         match (cell.shape.m, cell.shape.k, cell.shape.n, has_bias) {
             (4621, 384, 1928, _) if output_aligned && nvrtc_library_known => {
                 return InferenceTile::Tf32Sm120M128S2;
@@ -10194,10 +10166,9 @@ fn inference_auto_vendor_expected_tf32_tile(
 fn inference_auto_vendor_expected_mixed_tile(
     cell: InferenceAutoVendorCell,
     device_cc: (u32, u32),
-    sm_count: u32,
     nvrtc_version: (i32, i32),
 ) -> InferenceTile {
-    if device_cc == (12, 0) && sm_count == 170 && nvrtc_version == (13, 2) {
+    if device_cc == (12, 0) && nvrtc_version == (13, 2) {
         return cell.expected;
     }
     if cell.label == "hot_b" {
@@ -10208,61 +10179,40 @@ fn inference_auto_vendor_expected_mixed_tile(
 }
 
 #[test]
-fn inference_auto_vendor_exact_expectations_are_device_specific() {
+fn inference_auto_vendor_exact_expectations_follow_the_architecture() {
     let hot_a = INFERENCE_AUTO_VENDOR_EXACT_CELLS[0];
     let hot_b = INFERENCE_AUTO_VENDOR_EXACT_CELLS[1];
     let hot_d = INFERENCE_AUTO_VENDOR_EXACT_CELLS[3];
     for bias in [false, true] {
         assert_eq!(
-            inference_auto_vendor_expected_exact_tile(
-                hot_d,
-                (12, 0),
-                170,
-                (13, 2),
-                true,
-                bias,
-                true
-            ),
+            inference_auto_vendor_expected_exact_tile(hot_d, (12, 0), (13, 2), true, bias, true),
             InferenceTile::F32Sm120N64CopyPlan
-        );
-        assert_eq!(
-            inference_auto_vendor_expected_exact_tile(
-                hot_d,
-                (12, 0),
-                169,
-                (13, 2),
-                true,
-                bias,
-                true
-            ),
-            InferenceTile::Legacy
         );
     }
     assert_eq!(
-        inference_auto_vendor_expected_exact_tile(hot_a, (12, 0), 170, (13, 2), true, false, true),
+        inference_auto_vendor_expected_exact_tile(hot_a, (12, 0), (13, 2), true, false, true),
         InferenceTile::F32Sm120TmaFmaM64N128
     );
     assert_eq!(
-        inference_auto_vendor_expected_exact_tile(hot_a, (12, 0), 170, (13, 2), true, true, true),
+        inference_auto_vendor_expected_exact_tile(hot_a, (12, 0), (13, 2), true, true, true),
         InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64T256
     );
     assert_eq!(
-        inference_auto_vendor_expected_exact_tile(hot_a, (12, 0), 170, (13, 2), true, true, false),
+        inference_auto_vendor_expected_exact_tile(hot_a, (12, 0), (13, 2), true, true, false),
         InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64
     );
     assert_eq!(
-        inference_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 2), true, false, true),
+        inference_auto_vendor_expected_exact_tile(hot_b, (12, 0), (13, 2), true, false, true),
         InferenceTile::F32Sm120TmaFmaM128N64
     );
     assert_eq!(
-        inference_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 2), true, true, true),
+        inference_auto_vendor_expected_exact_tile(hot_b, (12, 0), (13, 2), true, true, true),
         InferenceTile::F32Sm120TmaFmaInferencePostBiasM128N64
     );
     assert_eq!(
         inference_auto_vendor_expected_exact_tile(
             INFERENCE_AUTO_VENDOR_EXACT_CELLS[2],
             (12, 0),
-            170,
             (13, 2),
             true,
             true,
@@ -10274,7 +10224,6 @@ fn inference_auto_vendor_exact_expectations_are_device_specific() {
         inference_auto_vendor_expected_exact_tile(
             INFERENCE_AUTO_VENDOR_EXACT_CELLS[2],
             (12, 0),
-            170,
             (13, 2),
             true,
             false,
@@ -10283,23 +10232,19 @@ fn inference_auto_vendor_exact_expectations_are_device_specific() {
         InferenceTile::Legacy
     );
     assert_eq!(
-        inference_auto_vendor_expected_exact_tile(hot_a, (12, 0), 169, (13, 2), true, false, true),
+        inference_auto_vendor_expected_exact_tile(hot_b, (12, 0), (13, 2), false, false, true),
         InferenceTile::F32N128S2
     );
     assert_eq!(
-        inference_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 2), false, false, true),
+        inference_auto_vendor_expected_exact_tile(hot_b, (12, 0), (13, 3), true, false, true),
         InferenceTile::F32N128S2
     );
     assert_eq!(
-        inference_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 3), true, false, true),
-        InferenceTile::F32N128S2
-    );
-    assert_eq!(
-        inference_auto_vendor_expected_exact_tile(hot_a, (12, 1), 170, (13, 2), true, false, true),
+        inference_auto_vendor_expected_exact_tile(hot_a, (12, 1), (13, 2), true, false, true),
         InferenceTile::Legacy
     );
     assert_eq!(
-        inference_auto_vendor_expected_exact_tile(hot_b, (12, 1), 170, (13, 2), true, false, true),
+        inference_auto_vendor_expected_exact_tile(hot_b, (12, 1), (13, 2), true, false, true),
         InferenceTile::Legacy
     );
 }
@@ -10319,7 +10264,6 @@ fn inference_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() 
                 inference_auto_vendor_expected_tf32_tile(
                     hot_a,
                     (12, 0),
-                    170,
                     (13, 2),
                     has_bias,
                     aligned,
@@ -10329,34 +10273,17 @@ fn inference_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() 
             );
         }
         assert_eq!(
-            inference_auto_vendor_expected_tf32_tile(
-                hot_b,
-                (12, 0),
-                170,
-                (13, 2),
-                has_bias,
-                true,
-                true
-            ),
+            inference_auto_vendor_expected_tf32_tile(hot_b, (12, 0), (13, 2), has_bias, true, true),
             InferenceTile::Tf32Sm120M128S2
         );
         assert_eq!(
-            inference_auto_vendor_expected_tf32_tile(
-                hot_d,
-                (12, 0),
-                170,
-                (13, 2),
-                has_bias,
-                true,
-                true
-            ),
+            inference_auto_vendor_expected_tf32_tile(hot_d, (12, 0), (13, 2), has_bias, true, true),
             InferenceTile::Tf32Sm120M64S2PairStore
         );
         assert_eq!(
             inference_auto_vendor_expected_tf32_tile(
                 hot_d,
                 (12, 0),
-                170,
                 (13, 2),
                 has_bias,
                 false,
@@ -10364,18 +10291,16 @@ fn inference_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() 
             ),
             InferenceTile::Tf32Sm120M64S2ProducerWarp
         );
-        for (device_cc, sm_count, nvrtc_version) in [
-            ((12, 0), 169, (13, 2)),
-            ((12, 1), 170, (13, 2)),
-            ((12, 0), 170, (12, 8)),
-            ((12, 0), 170, (13, 0)),
-            ((12, 0), 170, (13, 3)),
+        for (device_cc, nvrtc_version) in [
+            ((12, 1), (13, 2)),
+            ((12, 0), (12, 8)),
+            ((12, 0), (13, 0)),
+            ((12, 0), (13, 3)),
         ] {
             assert_eq!(
                 inference_auto_vendor_expected_tf32_tile(
                     hot_b,
                     device_cc,
-                    sm_count,
                     nvrtc_version,
                     has_bias,
                     true,
@@ -10387,7 +10312,6 @@ fn inference_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() 
                 inference_auto_vendor_expected_tf32_tile(
                     hot_d,
                     device_cc,
-                    sm_count,
                     nvrtc_version,
                     has_bias,
                     true,
@@ -10403,17 +10327,12 @@ fn inference_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() 
 fn inference_auto_vendor_mixed_expectation_tracks_the_qualified_compiler_cell() {
     let hot_b = INFERENCE_AUTO_VENDOR_MIXED_CELLS[1];
     assert_eq!(
-        inference_auto_vendor_expected_mixed_tile(hot_b, (12, 0), 170, (13, 2)),
+        inference_auto_vendor_expected_mixed_tile(hot_b, (12, 0), (13, 2)),
         InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S3)
     );
-    for (device_cc, sm_count, nvrtc_version) in [
-        ((12, 0), 169, (13, 2)),
-        ((12, 1), 170, (13, 2)),
-        ((12, 0), 170, (12, 8)),
-        ((12, 0), 170, (13, 0)),
-    ] {
+    for (device_cc, nvrtc_version) in [((12, 1), (13, 2)), ((12, 0), (12, 8)), ((12, 0), (13, 0))] {
         assert_eq!(
-            inference_auto_vendor_expected_mixed_tile(hot_b, device_cc, sm_count, nvrtc_version,),
+            inference_auto_vendor_expected_mixed_tile(hot_b, device_cc, nvrtc_version,),
             InferenceTile::Sm120Half(InferenceSm120HalfTile::M128N128Bk32S2)
         );
     }
@@ -10568,7 +10487,6 @@ fn run_inference_auto_vendor_cell(
         inference_auto_vendor_expected_exact_tile(
             cell,
             device_cc,
-            sm_count,
             ctx.kernels.compiler_identity().nvrtc_version,
             ctx.kernels.compiler_identity().nvrtc_library_known,
             has_bias,
@@ -10581,7 +10499,6 @@ fn run_inference_auto_vendor_cell(
         inference_auto_vendor_expected_tf32_tile(
             cell,
             device_cc,
-            sm_count,
             ctx.kernels.compiler_identity().nvrtc_version,
             has_bias,
             custom_operands.c.ptr.is_multiple_of(8),
@@ -10593,7 +10510,6 @@ fn run_inference_auto_vendor_cell(
         inference_auto_vendor_expected_mixed_tile(
             cell,
             device_cc,
-            sm_count,
             ctx.kernels.compiler_identity().nvrtc_version,
         )
     } else if row.output_dtype == row.input_dtype
@@ -10603,7 +10519,6 @@ fn run_inference_auto_vendor_cell(
             cell,
             row.input_dtype,
             device_cc,
-            sm_count,
             ctx.kernels.compiler_identity().nvrtc_version,
             has_bias,
         )
@@ -10740,14 +10655,14 @@ fn run_inference_auto_vendor_cell(
 }
 
 #[test]
-#[ignore = "requires a quiet 170-SM CC12 CUDA device and emits production AUTO/vendor evidence"]
+#[ignore = "requires a quiet CC12 CUDA device and emits production AUTO/vendor evidence"]
 fn inference_production_auto_vs_fast_cublas_hot_and_selector_census() {
     let device = GpuDevice::new(0).expect("CUDA device");
     let device_cc = device.compute_capability;
     let sm_count = device.multiprocessor_count();
-    if !matches!(device_cc, (12, 0) | (12, 1)) || sm_count != 170 {
+    if !matches!(device_cc, (12, 0) | (12, 1)) {
         eprintln!(
-            "skipping the production Inference AUTO/vendor survey on CC{}.{} with {} SMs; CC12.0/12.1 with exactly 170 SMs required",
+            "skipping the production Inference AUTO/vendor survey on CC{}.{} with {} SMs; CC12.0/12.1 required",
             device_cc.0, device_cc.1, sm_count
         );
         return;
@@ -10971,7 +10886,6 @@ fn inference_sm120_exact_tma_fma_b0_spike() {
         .expect("quiet-GPU preflight");
     let device = GpuDevice::new(0).expect("hot-cell spike CUDA device");
     assert_eq!(device.compute_capability, (12, 0));
-    assert_eq!(device.multiprocessor_count(), 170);
     let ctx = GpuCtx::new(&device).expect("hot-cell spike GPU context");
     assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
     assert!(ctx.kernels.compiler_identity().nvrtc_library_known);
@@ -11532,7 +11446,6 @@ fn inference_sm120_exact_tma_fma_b0_tile_tournament() {
     }
     let device = GpuDevice::new(0).expect("B0 tournament CUDA device");
     assert_eq!(device.compute_capability, (12, 0));
-    assert_eq!(device.multiprocessor_count(), 170);
     let contexts = [
         GpuCtx::new(&device).expect("M128N64 context"),
         GpuCtx::new(&device).expect("M64N128 context"),
@@ -11956,7 +11869,6 @@ struct InferenceAutoPhysicalRequest<'a> {
     shape: InferenceShape,
     selected: InferenceTile,
     compute_capability: (u32, u32),
-    multiprocessors: u32,
     compiler_target: &'a str,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
@@ -12040,7 +11952,6 @@ fn inference_auto_bundle_physical_descriptor(
         shape,
         selected,
         compute_capability,
-        multiprocessors,
         compiler_target,
         nvrtc,
         nvrtc_library_known,
@@ -12053,7 +11964,6 @@ fn inference_auto_bundle_physical_descriptor(
             .bias_ptr
             .is_none_or(|pointer| pointer != 0 && pointer.is_multiple_of(4));
     if compute_capability != (8, 9)
-        || multiprocessors != 142
         || compiler_target != "sm_89"
         || !matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
         || !nvrtc_library_known
@@ -14464,7 +14374,6 @@ fn inference_bundle_auto_tooling_request(
             InferenceTile::Tc128Sm89S3
         },
         compute_capability: (8, 9),
-        multiprocessors: 142,
         compiler_target: "sm_89",
         nvrtc,
         nvrtc_library_known: true,
@@ -14716,9 +14625,6 @@ fn inference_bundle_auto_tooling_rejects_request_route_and_graph_mutations_close
     let mut request_mutations = Vec::new();
     let mut changed = request;
     changed.compute_capability = (8, 8);
-    request_mutations.push(changed);
-    let mut changed = request;
-    changed.multiprocessors = 141;
     request_mutations.push(changed);
     let mut changed = request;
     changed.compiler_target = "compute_89";
@@ -15347,11 +15253,8 @@ fn inference_ada_production_auto_paired_precision_cublas() {
     inference_explicit_vendor_admit_cc(requested_cc.as_deref(), device.compute_capability)
         .expect("explicit vendor exact-CC admission");
     assert!(
-        matches!(
-            (device.compute_capability, device.multiprocessor_count()),
-            ((8, 9), 142) | ((12, 0), 170)
-        ),
-        "explicit vendor final evidence supports only CC8.9/142SM or CC12.0/170SM"
+        matches!(device.compute_capability, (8, 9) | (12, 0)),
+        "explicit vendor final evidence supports only CC8.9 or CC12.0"
     );
     let ctx =
         GpuCtx::new_with_state_cap(&device, state_capacity).expect("explicit vendor GPU context");
@@ -15508,7 +15411,6 @@ fn inference_ada_production_auto_paired_precision_cublas() {
                         shape,
                         selected,
                         compute_capability: device.compute_capability,
-                        multiprocessors: device.multiprocessor_count(),
                         compiler_target: compiler.target.as_str(),
                         nvrtc: compiler.nvrtc_version,
                         nvrtc_library_known: compiler.nvrtc_library_known,
@@ -16032,7 +15934,6 @@ fn inference_ada_forced_rungs_paired_precision_cublas() {
                         shape,
                         selected,
                         compute_capability: device.compute_capability,
-                        multiprocessors: device.multiprocessor_count(),
                         compiler_target: compiler.target.as_str(),
                         nvrtc: compiler.nvrtc_version,
                         nvrtc_library_known: compiler.nvrtc_library_known,
@@ -16046,10 +15947,7 @@ fn inference_ada_forced_rungs_paired_precision_cublas() {
                         cell.label
                     )
                 });
-                if device.compute_capability == (8, 9)
-                    && device.multiprocessor_count() == 142
-                    && compiler.nvrtc_library_known
-                {
+                if device.compute_capability == (8, 9) && compiler.nvrtc_library_known {
                     let expected =
                         expected_ada_finalist_auto(compiler.nvrtc_version, row, shape, has_bias)
                             .or_else(|| {
@@ -16676,7 +16574,6 @@ fn inference_ada_half_forced_direct_pair() {
     inference_explicit_vendor_admit_cc(requested_cc.as_deref(), device.compute_capability)
         .expect("Ada half direct-pair exact-CC admission");
     assert_eq!(device.compute_capability, (8, 9), "direct-pair CC");
-    assert_eq!(device.multiprocessor_count(), 142, "direct-pair SM count");
     let ctx = GpuCtx::new(&device).expect("Ada half direct-pair GPU context");
     let compiler = ctx.kernels.compiler_identity();
     assert!(
@@ -17180,8 +17077,7 @@ fn f32_n128_logical_and_guards(
 #[ignore = "requires an SM80+ CUDA device"]
 fn inference_f32_n128_matches_legacy_bits() {
     let device = GpuDevice::new(0).expect("CUDA device");
-    let measured_device =
-        device.compute_capability == (12, 0) && device.multiprocessor_count() == 170;
+    let measured_device = device.compute_capability == (12, 0);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     let compiler = ctx.kernels.compiler_identity();
     let measured_stack =
@@ -17666,18 +17562,13 @@ fn f32_n128_calibrated_iterations(pilot_us: f64) -> usize {
 }
 
 #[test]
-#[ignore = "requires a quiet 170-SM CC12 CUDA device and emits paired F32 N128 evidence"]
+#[ignore = "requires a quiet CC12 CUDA device and emits paired F32 N128 evidence"]
 fn inference_f32_n128_paired_a_e() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(
         device.compute_capability,
         (12, 0),
         "paired gate requires CC12.0"
-    );
-    assert_eq!(
-        device.multiprocessor_count(),
-        170,
-        "paired gate requires 170 SMs"
     );
     let ctx = GpuCtx::new(&device).expect("GPU context");
     assert!(

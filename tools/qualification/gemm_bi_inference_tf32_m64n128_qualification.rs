@@ -1618,9 +1618,9 @@ fn require_environment(device: &GpuDevice, metadata: &RunMetadata) -> Result<(),
     if cfg!(debug_assertions) {
         return Err("Inference TF32 M64N128 qualification requires --release".into());
     }
-    if device.compute_capability != (12, 0) || device.multiprocessor_count() != 170 {
+    if device.compute_capability != (12, 0) {
         return Err(format!(
-            "qualification requires RTX 5090 CC12.0/170SM, got CC{}.{}/{}SM",
+            "qualification requires CC12.0, got CC{}.{}/{}SM",
             device.compute_capability.0,
             device.compute_capability.1,
             device.multiprocessor_count()
@@ -1649,7 +1649,7 @@ fn require_environment(device: &GpuDevice, metadata: &RunMetadata) -> Result<(),
 }
 
 #[test]
-#[ignore = "requires an idle RTX 5090 CC12.0/170SM with NVRTC 12.8+ and a new JSONL path"]
+#[ignore = "requires an idle CC12.0 with NVRTC 12.8+ and a new JSONL path"]
 fn inference_tf32_m64n128_vs_production_auto_qualification() -> Result<(), String> {
     let output_path = require_output_path()?;
     let device = GpuDevice::new(0)?;

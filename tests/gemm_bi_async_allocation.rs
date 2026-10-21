@@ -57,7 +57,7 @@ fn ada_async_allocations_prepare_capture_and_replay_portable_f32() {
     let device = GpuDevice::new(0).expect("open CUDA device 0");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return;

@@ -689,7 +689,7 @@ fn admit_context() -> Option<GpuCtx> {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (8, 9) {
         eprintln!(
-            "skip: this gate pins the RTX 6000 Ada (CC 8.9), this board is {:?}",
+            "skip: this gate serves CC 8.9, this board is {:?}",
             device.compute_capability
         );
         return None;

@@ -2634,19 +2634,13 @@ fn input_manifest(case: &Case, ctx: &GpuCtx) -> Result<String, String> {
 
 fn identity_contract(
     cc: (u32, u32),
-    sm_count: u32,
     nvrtc: (i32, i32),
     known_library: bool,
     target: &str,
 ) -> Result<(), String> {
-    if cc != (12, 0)
-        || sm_count != 170
-        || nvrtc != (13, 2)
-        || !known_library
-        || target != "compute_120"
-    {
+    if cc != (12, 0) || nvrtc != (13, 2) || !known_library || target != "compute_120" {
         return Err(format!(
-            "unqualified SM120 identity: cc={cc:?}, SMs={sm_count}, NVRTC={nvrtc:?}, known={known_library}, target={target}"
+            "unqualified SM120 identity: cc={cc:?}, NVRTC={nvrtc:?}, known={known_library}, target={target}"
         ));
     }
     Ok(())
@@ -2674,18 +2668,16 @@ fn exact_n64_admission_cpu_profile_identity_is_exact_and_explicit() {
     ] {
         assert!(profile_request(enabled, cc).is_err());
     }
-    identity_contract((12, 0), 170, (13, 2), true, "compute_120").unwrap();
-    for (cc, sms, nvrtc, known, target) in [
-        ((12, 1), 170, (13, 2), true, "compute_120"),
-        ((8, 9), 170, (13, 2), true, "compute_120"),
-        ((12, 0), 169, (13, 2), true, "compute_120"),
-        ((12, 0), 171, (13, 2), true, "compute_120"),
-        ((12, 0), 170, (12, 8), true, "compute_120"),
-        ((12, 0), 170, (13, 0), true, "compute_120"),
-        ((12, 0), 170, (13, 2), false, "compute_120"),
-        ((12, 0), 170, (13, 2), true, "sm_120"),
+    identity_contract((12, 0), (13, 2), true, "compute_120").unwrap();
+    for (cc, nvrtc, known, target) in [
+        ((12, 1), (13, 2), true, "compute_120"),
+        ((8, 9), (13, 2), true, "compute_120"),
+        ((12, 0), (12, 8), true, "compute_120"),
+        ((12, 0), (13, 0), true, "compute_120"),
+        ((12, 0), (13, 2), false, "compute_120"),
+        ((12, 0), (13, 2), true, "sm_120"),
     ] {
-        assert!(identity_contract(cc, sms, nvrtc, known, target).is_err());
+        assert!(identity_contract(cc, nvrtc, known, target).is_err());
     }
 }
 
@@ -2695,7 +2687,6 @@ fn identity(ctx: &GpuCtx, device: &GpuDevice) -> Result<String, String> {
     let driver = device.identity().driver;
     identity_contract(
         device.compute_capability,
-        device.multiprocessor_count(),
         compiler.nvrtc_version,
         compiler.nvrtc_library_known,
         compiler.target.as_str(),
@@ -2718,11 +2709,12 @@ fn identity(ctx: &GpuCtx, device: &GpuDevice) -> Result<String, String> {
     }
     Ok(format!(
         concat!(
-            "{{\"cc\":[12,0],\"sm_count\":170,\"nvrtc\":[13,2],\"nvrtc_library_known\":true,\"nvrtc_library_domain\":{},",
+            "{{\"cc\":[12,0],\"sm_count\":{},\"nvrtc\":[13,2],\"nvrtc_library_known\":true,\"nvrtc_library_domain\":{},",
             "\"compiler_target\":\"compute_120\",\"state_capacity\":{},\"source_sha256\":{},\"invocation_sha256\":{},\"headers_sha256\":{},",
             "\"inference_compile_key\":{},\"inference_artifact\":{},\"aggregate_artifact\":{},\"driver_api\":{},\"driver_build_sources\":{},\"driver_build_digest\":{},",
             "\"composer_revision\":{},\"compiler_revision\":{},\"numeric_abi_revision\":{},\"schedule_revision\":{},\"tuning_revision\":{},\"cublas_version\":{version}}}"
         ),
+        device.multiprocessor_count(),
         quoted(&digest_hex(&compiler.nvrtc_library_domain)),
         ctx.kernels.state_cap,
         quoted(&digest_hex(&compiler.source_digest)),
@@ -3016,8 +3008,8 @@ fn run_checked() -> Result<(), String> {
     )?;
     let preflight = telemetry("SM120 exact N64 run preflight")?;
     let device = GpuDevice::new(0)?;
-    if device.compute_capability != (12, 0) || device.multiprocessor_count() != 170 {
-        return Err("SM120 paired qualification requires exact CC12.0/170 SMs".into());
+    if device.compute_capability != (12, 0) {
+        return Err("SM120 paired qualification requires CC12.0".into());
     }
     let ctx = GpuCtx::new(&device)?;
     super::configure_sm120_exact_custom(&ctx, F32TriadPolicy::ExactScalarFma);

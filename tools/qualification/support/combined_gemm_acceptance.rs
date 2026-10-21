@@ -1157,7 +1157,6 @@ fn verify_inference_holder(
             shape: InferenceShape { m, k, n },
             selected: family,
             compute_capability: ctx.gemm_route().device.compute_capability,
-            multiprocessors: ctx.gemm_route().device.multiprocessor_count,
             compiler_target: compiler.target.as_str(),
             nvrtc: compiler.nvrtc_version,
             nvrtc_library_known: compiler.nvrtc_library_known,
@@ -1530,7 +1529,7 @@ fn save_census(runtime: &words::Runtime, census: &Census) -> Result<String, Stri
 }
 
 #[test]
-#[ignore = "requires explicit identities/auto phase, scope, cap, receipt paths and a 142-SM Ada GPU"]
+#[ignore = "requires explicit identities/auto phase, scope, cap, receipt paths and an Ada GPU"]
 fn combined_gemm_module_census() -> Result<(), String> {
     let phase = words::required_env("COMBINED_GEMM_PHASE")?;
     if phase == "verify-six" {

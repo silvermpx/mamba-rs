@@ -689,12 +689,11 @@ fn admit_context() -> Option<GpuCtx> {
     let device = GpuDevice::new(0).expect("CUDA device");
     if device.compute_capability != (12, 0) {
         eprintln!(
-            "skip: this gate pins the RTX 5090 (CC 12.0), this board is {:?}",
+            "skip: this gate serves CC 12.0, this board is {:?}",
             device.compute_capability
         );
         return None;
     }
-    assert_eq!(device.multiprocessor_count(), 170, "exact SM120 SM count");
     let ctx = GpuCtx::new(&device).expect("actual NVRTC Inference context");
     let compiler = ctx.kernels.compiler_identity();
     assert_eq!(compiler.nvrtc_version, (13, 2), "qualified NVRTC version");

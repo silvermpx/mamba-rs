@@ -1464,7 +1464,7 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
     }
     let mut output = Jsonl::create(&config.jsonl, config.mode.schema())?;
     let device = GpuDevice::new(0).map_err(|error| format!("Task7 CUDA device: {error}"))?;
-    if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
+    if device.compute_capability != (8, 9) {
         return Err(format!(
             "Task7 wrong physical device CC{:?}/{}SM",
             device.compute_capability,
@@ -1513,7 +1513,7 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
             "\"kind\":\"identity\",\"family\":\"{}\",\"stage\":\"{}\",",
             "\"windows\":{},\"toolkit\":\"{}\",\"tuning_revision\":{},",
             "\"numeric_abi_revision\":{},\"schedule_revision\":{},",
-            "\"uuid\":\"{}\",\"cc\":\"8.9\",\"sm_count\":142,",
+            "\"cc\":\"8.9\",\"sm_count\":{},",
             "\"compiler_target\":\"sm_89\",\"nvrtc_library_known\":true,",
             "\"source_sha\":\"{}\",\"binary_sha\":\"{}\",",
             "\"screen_sha\":{},\"screen_artifact_sha\":{},\"inference_source_digest\":\"{}\",",
@@ -1529,7 +1529,7 @@ fn run_inner(mode: RunMode) -> Result<(), String> {
         config.mode.tuning_revision(),
         compiler.numeric_abi_revision,
         compiler.schedule_revision,
-        "GPU-d1edd7be-e88d-aed6-047d-622163306f0e",
+        device.multiprocessor_count(),
         measured_source_sha,
         measured_binary_sha,
         config

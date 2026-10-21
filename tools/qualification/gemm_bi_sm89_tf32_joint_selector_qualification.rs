@@ -550,11 +550,9 @@ mod live {
         let auto_ctx = GpuCtx::new(&auto_device)?;
 
         let identity = forced_ctx.gemm_route();
-        if identity.device.compute_capability != (8, 9)
-            || identity.device.multiprocessor_count != 142
-        {
+        if identity.device.compute_capability != (8, 9) {
             return Err(format!(
-                "TF32 joint wiring smoke requires CC8.9/142SM, got {:?}/{}SM",
+                "TF32 joint wiring smoke requires CC8.9, got {:?}/{}SM",
                 identity.device.compute_capability, identity.device.multiprocessor_count,
             ));
         }
@@ -645,11 +643,9 @@ mod live {
         let prior_device = GpuDevice::new(0)?;
         let prior_ctx = GpuCtx::new(&prior_device)?;
         let identity = auto_ctx.gemm_route();
-        if identity.device.compute_capability != (8, 9)
-            || identity.device.multiprocessor_count != 142
-        {
+        if identity.device.compute_capability != (8, 9) {
             return Err(format!(
-                "TF32 joint post-admission smoke requires CC8.9/142SM, got {:?}/{}SM",
+                "TF32 joint post-admission smoke requires CC8.9, got {:?}/{}SM",
                 identity.device.compute_capability, identity.device.multiprocessor_count,
             ));
         }

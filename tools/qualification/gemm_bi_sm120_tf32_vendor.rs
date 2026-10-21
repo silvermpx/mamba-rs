@@ -1142,8 +1142,8 @@ mod gpu {
         let quiet = QuietGpu::for_cuda_ordinal(0)?;
         quiet.require_pre_context("sm120-vendor/pre-context")?;
         let device = GpuDevice::new(0)?;
-        if device.compute_capability != (12, 0) || device.multiprocessor_count() != 170 {
-            return Err("requires exact CC12.0/170SM".into());
+        if device.compute_capability != (12, 0) {
+            return Err("requires CC12.0".into());
         }
         for cell in cells() {
             run_cell(&device, &quiet, cell, count, &mut sink, poison_red)?;

@@ -5370,7 +5370,7 @@ fn validate_final_auto_device(device: &GpuDevice) -> Result<(), String> {
     match (device.compute_capability, device.multiprocessor_count()) {
         ((8, 9), 142) | ((12, 0), 170) => Ok(()),
         (cc, sms) => Err(format!(
-            "final AUTO evidence supports only CC8.9/142SM or CC12.0/170SM, got CC{}.{}/{}SM",
+            "final AUTO evidence supports only CC8.9 or CC12.0, got CC{}.{}/{}SM",
             cc.0, cc.1, sms
         )),
     }
@@ -8862,7 +8862,7 @@ fn run_gemm_bi_production_auto_paired_cublas(
 }
 
 #[test]
-#[ignore = "requires an explicitly idle CC8.9/142SM or CC12.0/170SM GPU and emits paired production AUTO/cuBLAS evidence"]
+#[ignore = "requires an explicitly idle CC8.9 or CC12.0 GPU and emits paired production AUTO/cuBLAS evidence"]
 fn gemm_bi_production_auto_paired_cublas_release_matrix() {
     run_gemm_bi_production_auto_paired_cublas(
         ProductionAutoInventory::Release070,
@@ -8871,7 +8871,7 @@ fn gemm_bi_production_auto_paired_cublas_release_matrix() {
 }
 
 #[test]
-#[ignore = "requires an explicitly idle CC8.9/142SM or CC12.0/170SM GPU and emits the paired production AUTO/cuBLAS outlier screen"]
+#[ignore = "requires an explicitly idle CC8.9 or CC12.0 GPU and emits the paired production AUTO/cuBLAS outlier screen"]
 fn gemm_bi_production_auto_paired_cublas_outlier_matrix() {
     run_gemm_bi_production_auto_paired_cublas(
         ProductionAutoInventory::Outliers071,
@@ -11607,9 +11607,9 @@ mod sm89_nt_finalist_once21 {
         let current_device = GpuDevice::new(0)?;
         let fast_device = GpuDevice::new(0)?;
         for device in [&candidate_device, &current_device, &fast_device] {
-            if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
+            if device.compute_capability != (8, 9) {
                 return Err(format!(
-                    "finalist timing requires exact 142-SM CC8.9, got CC{:?}/{}SM",
+                    "finalist timing requires CC8.9, got CC{:?}/{}SM",
                     device.compute_capability,
                     device.multiprocessor_count()
                 ));

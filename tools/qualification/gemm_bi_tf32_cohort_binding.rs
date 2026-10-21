@@ -1,9 +1,11 @@
-//! Does the frozen TF32 route set of this board bind on this stack? The host
-//! tests prove the frozen sets describe the tree; only a live context proves the
-//! board's compiled module matches a frozen identity. This smoke qualifies
-//! the automatic TF32 policy on the projection shapes and reports which
-//! module served each one; a stack the frozen sets do not describe serves them
-//! all from the exact families and fails here.
+//! Does the frozen TF32 route set of this card's architecture bind on this
+//! stack? The host tests prove the frozen sets describe the tree; only a live
+//! context proves the card's compiled module matches a frozen identity. Any
+//! card of an architecture must bind that architecture's set, whatever its SM
+//! count, toolkit or driver. This smoke qualifies the automatic TF32 policy on
+//! the projection shapes and reports which module served each one; a stack the
+//! frozen sets do not describe serves them all from the exact families and
+//! fails here.
 
 use mamba_rs::gpu::GemmMode;
 use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
@@ -26,26 +28,26 @@ const SM89_NN_PORTABLE_M128N128_SYMBOL: &str = "nn_sm80_mma_tf32_m128n128_bk32_s
 const SM89_NN_JOINT_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3";
 const SM89_NN_JOINT_DIRECT_N96_SYMBOL: &str = "nn_sm89_tf32_addhalf_m128n96_bk32_s3_direct";
 
-fn sm89_ada_nn_wide_winner(
-    dims: (usize, usize, usize),
-    nvrtc: (i32, i32),
-) -> (ModuleKind, &'static str) {
-    match (dims, nvrtc) {
-        ((2048, 768, 3072), (12, 8) | (13, 0) | (13, 2)) => {
-            (ModuleKind::TriadSm80, SM89_NN_PORTABLE_M128N128_SYMBOL)
-        }
-        ((2048, 1536, 768), (12, 8) | (13, 0) | (13, 2)) => {
-            (ModuleKind::TriadSm89Tf32Joint, SM89_NN_JOINT_N96_SYMBOL)
-        }
-        ((4621, 384, 1928), (12, 8) | (13, 0)) => {
-            (ModuleKind::TriadSm80, SM89_NN_PORTABLE_M128N128_SYMBOL)
-        }
-        ((4621, 384, 1928), (13, 2)) => (
+fn sm89_ada_nn_wide_winner(dims: (usize, usize, usize)) -> (ModuleKind, &'static str) {
+    match dims {
+        (2048, 768, 3072) => (ModuleKind::TriadSm80, SM89_NN_PORTABLE_M128N128_SYMBOL),
+        (2048, 1536, 768) => (ModuleKind::TriadSm89Tf32Joint, SM89_NN_JOINT_N96_SYMBOL),
+        (4621, 384, 1928) => (
             ModuleKind::TriadSm89Tf32Joint,
             SM89_NN_JOINT_DIRECT_N96_SYMBOL,
         ),
-        _ => panic!("no frozen Ada NN wide winner for {dims:?} on CUDA {nvrtc:?}"),
+        _ => panic!("no frozen Ada NN wide winner for {dims:?}"),
     }
+}
+
+/// What the SM120 architecture's frozen set says about a case: a cell names
+/// its route, the exact family serves it, or the set names nothing and the
+/// tiers below the cells decide.
+#[derive(Clone, Copy)]
+enum Sm120Expected {
+    Cell(ModuleKind, &'static str),
+    Exact,
+    BelowCells,
 }
 
 #[derive(Clone, Copy)]
@@ -53,9 +55,14 @@ struct Sm120CurrentCohortCase {
     id: &'static str,
     op: ResolvedGemmOp,
     dims: (usize, usize, usize),
-    expected: Option<(ModuleKind, &'static str)>,
+    expected: Sm120Expected,
 }
 
+/// The projection shapes against the SM120 architecture's frozen set (the
+/// tournament on an RTX PRO 6000 Blackwell), which every SM120 card serves.
+/// A case's cell is the set's route for its output rows, output columns and
+/// reduction; the large deep TN and NT projections and the TN d128
+/// out-projection have no cell, so the tiers below the cells serve them.
 const SM120_CURRENT_COHORT_CASES: [Sm120CurrentCohortCase; 24] = [
     sm120_case(
         "nn_d768_in_proj",
@@ -97,14 +104,14 @@ const SM120_CURRENT_COHORT_CASES: [Sm120CurrentCohortCase; 24] = [
         ResolvedGemmOp::Nt,
         (2048, 1536, 768),
         ModuleKind::TriadSm120,
-        "nt_sm120_tma_mma_tf32_m64n64_bk32_s2",
+        "nt_sm120_tma_mma_tf32_m64n128_bk32_s2",
     ),
     sm120_case(
         "nn_prism_in_proj",
         ResolvedGemmOp::Nn,
         (4621, 384, 1928),
         ModuleKind::TriadSm120,
-        "nn_sm120_tma_mma_tf32_m64n64_bk32_s2",
+        "nn_sm120_tma_mma_tf32_m128n64_bk32_s2",
     ),
     sm120_case(
         "tn_prism_in_proj",
@@ -127,20 +134,18 @@ const SM120_CURRENT_COHORT_CASES: [Sm120CurrentCohortCase; 24] = [
         ModuleKind::TriadSm120,
         "nn_sm120_tma_mma_tf32_m64n128_bk32_s2",
     ),
-    sm120_case(
-        "tn_large_deep",
-        ResolvedGemmOp::Tn,
-        (4096, 3072, 1536),
-        ModuleKind::TriadSm120,
-        "tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk",
-    ),
-    sm120_case(
-        "nt_large_deep",
-        ResolvedGemmOp::Nt,
-        (4096, 3072, 1536),
-        ModuleKind::TriadSm120,
-        "nt_sm120_tma_mma_tf32_m64n128_bk32_s2",
-    ),
+    Sm120CurrentCohortCase {
+        id: "tn_large_deep",
+        op: ResolvedGemmOp::Tn,
+        dims: (4096, 3072, 1536),
+        expected: Sm120Expected::BelowCells,
+    },
+    Sm120CurrentCohortCase {
+        id: "nt_large_deep",
+        op: ResolvedGemmOp::Nt,
+        dims: (4096, 3072, 1536),
+        expected: Sm120Expected::BelowCells,
+    },
     sm120_case(
         "nn_large",
         ResolvedGemmOp::Nn,
@@ -167,7 +172,7 @@ const SM120_CURRENT_COHORT_CASES: [Sm120CurrentCohortCase; 24] = [
         ResolvedGemmOp::Nn,
         (1024, 128, 512),
         ModuleKind::TriadSm80,
-        "nn_sm80_mma_tf32_m64n64_bk32_s3",
+        "nn_sm80_mma_tf32_m64n64_bk32_s2",
     ),
     sm120_case(
         "tn_d128_in_proj",
@@ -181,41 +186,40 @@ const SM120_CURRENT_COHORT_CASES: [Sm120CurrentCohortCase; 24] = [
         ResolvedGemmOp::Nt,
         (1024, 128, 512),
         ModuleKind::TriadSm80,
-        "nt_sm80_mma_tf32_m16n16_bk32_s4",
+        "nt_sm80_mma_tf32_splitk4_m16n32_bk32_s3",
     ),
-    sm120_case(
-        "tn_d128_out_proj",
-        ResolvedGemmOp::Tn,
-        (1024, 256, 128),
-        ModuleKind::TriadSm80,
-        "tn_sm80_mma_tf32_m16n16_bk32_s4",
-    ),
+    Sm120CurrentCohortCase {
+        id: "tn_d128_out_proj",
+        op: ResolvedGemmOp::Tn,
+        dims: (1024, 256, 128),
+        expected: Sm120Expected::BelowCells,
+    },
     sm120_case(
         "nn_batch_in_proj",
         ResolvedGemmOp::Nn,
         (10400, 384, 1536),
         ModuleKind::TriadSm120,
-        "nn_sm120_tma_mma_tf32_m64n64_bk32_s2",
+        "nn_sm120_tma_mma_tf32_m64n128_bk32_s2",
     ),
     Sm120CurrentCohortCase {
         id: "tn_m8192_k128_n128",
         op: ResolvedGemmOp::Tn,
         dims: (8192, 128, 128),
-        expected: None,
+        expected: Sm120Expected::Exact,
     },
     sm120_case(
         "nt_split_candidate",
         ResolvedGemmOp::Nt,
         (128, 8192, 128),
-        ModuleKind::TriadSm80,
-        "nt_sm80_mma_tf32_m64n64_bk32_s2",
+        ModuleKind::TriadSm120,
+        "nt_sm120_tma_mma_tf32_m64n128_bk32_s3",
     ),
     sm120_case(
         "nt_batch_in_proj",
         ResolvedGemmOp::Nt,
         (10400, 384, 1536),
         ModuleKind::TriadSm120,
-        "nt_sm120_tma_mma_tf32_m64n128_bk32_s2",
+        "nt_sm120_tma_mma_tf32_m128n64_bk32_s2",
     ),
     sm120_case(
         "tn_underfill",
@@ -237,7 +241,7 @@ const fn sm120_case(
         id,
         op,
         dims,
-        expected: Some((module, symbol)),
+        expected: Sm120Expected::Cell(module, symbol),
     }
 }
 
@@ -516,7 +520,6 @@ fn sm89_finalist_admitted_cells() -> Vec<(&'static str, (usize, usize, usize))> 
 fn sm89_finalist_live_binding_identity() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
-    assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     let binding = ctx
         .kernels
@@ -561,6 +564,28 @@ fn sm120_current_case_lengths(case: Sm120CurrentCohortCase) -> (usize, usize, us
     }
 }
 
+/// The numeric contract a frozen TF32 route runs under, read from its
+/// kernel's name.
+fn tf32_cell_contract(module: ModuleKind, symbol: &str) -> Option<ResolvedNumericContract> {
+    match module {
+        ModuleKind::TriadSm80 if symbol.contains("_splitk2_") => {
+            Some(ResolvedNumericContract::MmaTf32RnaSplitK2)
+        }
+        ModuleKind::TriadSm80 if symbol.contains("_splitk4_") => {
+            Some(ResolvedNumericContract::MmaTf32RnaSplitK4)
+        }
+        ModuleKind::TriadSm80 if symbol.contains("_splitk8_") => {
+            Some(ResolvedNumericContract::MmaTf32RnaSplitK8)
+        }
+        ModuleKind::TriadSm80 => Some(ResolvedNumericContract::MmaTf32Rna),
+        ModuleKind::TriadSm120 if symbol.ends_with("_pair_streamk") => {
+            Some(ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1)
+        }
+        ModuleKind::TriadSm120 => Some(ResolvedNumericContract::Sm120TmaMmaTf32Rna),
+        _ => None,
+    }
+}
+
 fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
     let requests = SM120_CURRENT_COHORT_CASES.map(|case| {
         PhysicalQualificationRequest::contiguous_f32(
@@ -594,17 +619,17 @@ fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
             case.id
         );
         let nodes = launch.evidence().nodes();
+        let served = || {
+            nodes
+                .iter()
+                .map(|node| (node.module_kind, node.symbol, node.numeric_contract))
+                .collect::<Vec<_>>()
+        };
         match case.expected {
-            Some((module, symbol)) => {
+            Sm120Expected::Cell(module, symbol) => {
                 tf32_served += 1;
-                let numeric_contract = match module {
-                    ModuleKind::TriadSm80 => ResolvedNumericContract::MmaTf32Rna,
-                    ModuleKind::TriadSm120 if symbol.ends_with("_pair_streamk") => {
-                        ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1
-                    }
-                    ModuleKind::TriadSm120 => ResolvedNumericContract::Sm120TmaMmaTf32Rna,
-                    _ => panic!("{} has an unsupported TF32 module {module:?}", case.id),
-                };
+                let numeric_contract = tf32_cell_contract(module, symbol)
+                    .unwrap_or_else(|| panic!("{} names an unknown TF32 route {symbol}", case.id));
                 assert!(
                     nodes.iter().any(|node| {
                         node.module_kind == module
@@ -615,18 +640,14 @@ fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
                     case.id,
                     module,
                     symbol,
-                    nodes
-                        .iter()
-                        .map(|node| (node.module_kind, node.symbol))
-                        .collect::<Vec<_>>()
+                    served()
                 );
             }
-            None => {
-                assert_eq!(case.id, "tn_m8192_k128_n128");
-                assert_eq!(case.dims, (8192, 128, 128));
+            Sm120Expected::Exact => {
                 assert!(
                     !nodes.is_empty(),
-                    "true G10 must execute a nonempty exact F32 route"
+                    "{} must execute a nonempty exact F32 route",
+                    case.id
                 );
                 assert!(
                     nodes.iter().all(|node| {
@@ -639,12 +660,29 @@ fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
                             )
                         ) && !node.symbol.contains("tf32")
                     }),
-                    "true G10 must remain on the exact F32 route: {:?}",
+                    "{} must remain on the exact F32 route: {:?}",
+                    case.id,
+                    served()
+                );
+            }
+            // No cell names the shape, so a specialized SM120 tile must not
+            // serve it: those tiles stay on the cells they were measured on.
+            Sm120Expected::BelowCells => {
+                assert!(
+                    !nodes.is_empty(),
+                    "{} must execute a nonempty route",
+                    case.id
+                );
+                assert!(
                     nodes
                         .iter()
-                        .map(|node| (node.module_kind, node.symbol, node.numeric_contract))
-                        .collect::<Vec<_>>()
+                        .all(|node| node.module_kind != ModuleKind::TriadSm120
+                            || !node.symbol.contains("tf32")),
+                    "{} has no SM120 cell but a specialized SM120 TF32 tile served it: {:?}",
+                    case.id,
+                    served()
                 );
+                println!("SM120 below-cells {} served {:?}", case.id, served());
             }
         }
 
@@ -669,7 +707,14 @@ fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
             word_digest(&eager)
         );
     }
-    assert_eq!(tf32_served, 23, "current SM120 retained TF32 count");
+    assert_eq!(
+        tf32_served,
+        SM120_CURRENT_COHORT_CASES
+            .iter()
+            .filter(|case| matches!(case.expected, Sm120Expected::Cell(..)))
+            .count(),
+        "SM120 cells served"
+    );
 }
 
 #[test]
@@ -681,20 +726,16 @@ fn tf32_cohort_binds_on_this_board() {
     ctx.route_controls().set_family(BiGemmFamily::Triad);
     ctx.route_controls()
         .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
-    if device.compute_capability == (12, 0) && device.multiprocessor_count() == 170 {
+    if device.compute_capability == (12, 0) {
         run_sm120_current_cohort_binding(&ctx);
         return;
     }
-    let ada_nvrtc = if device.compute_capability == (8, 9) && device.multiprocessor_count() == 142 {
-        Some(
-            ctx.kernels
-                .triad_sm89_tf32_joint_compiler_identity()
-                .expect("bound TriadSm89Tf32Joint module")
-                .nvrtc_version,
-        )
-    } else {
-        None
-    };
+    let ada = device.compute_capability == (8, 9);
+    if ada {
+        ctx.kernels
+            .triad_sm89_tf32_joint_compiler_identity()
+            .expect("bound TriadSm89Tf32Joint module");
+    }
     let shapes = [
         (2048, 768, 3072),
         (2048, 1536, 768),
@@ -733,18 +774,18 @@ fn tf32_cohort_binds_on_this_board() {
             "cc={:?} dims={dims:?} tf32={tf32} served={served}",
             device.compute_capability
         );
-        if let Some(nvrtc) = ada_nvrtc.filter(|_| {
-            matches!(
+        if ada
+            && matches!(
                 dims,
                 (2048, 768, 3072) | (2048, 1536, 768) | (4621, 384, 1928)
             )
-        }) {
-            let (expected_module, expected_symbol) = sm89_ada_nn_wide_winner(dims, nvrtc);
+        {
+            let (expected_module, expected_symbol) = sm89_ada_nn_wide_winner(dims);
             assert!(
                 nodes.iter().any(|node| {
                     node.module_kind == expected_module && node.symbol == expected_symbol
                 }),
-                "SM89 requalified wide winner {expected_module:?}:{expected_symbol} did not serve {dims:?} on CUDA {nvrtc:?}: {served}",
+                "SM89 requalified wide winner {expected_module:?}:{expected_symbol} did not serve {dims:?}: {served}",
             );
         }
     }
@@ -759,7 +800,6 @@ fn tf32_cohort_binds_on_this_board() {
 fn sm89_tf32_bias_cohort_serves_the_qualified_wide_epilogues() {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
-    assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Triad);
@@ -796,9 +836,7 @@ fn sm89_nt_compact_finalist_forced_matches_portable_rna_bits() {
     let candidate_device = GpuDevice::new(0).expect("candidate CUDA device");
     let reference_device = GpuDevice::new(0).expect("reference CUDA device");
     assert_eq!(candidate_device.compute_capability, (8, 9));
-    assert_eq!(candidate_device.multiprocessor_count(), 142);
     assert_eq!(reference_device.compute_capability, (8, 9));
-    assert_eq!(reference_device.multiprocessor_count(), 142);
     let candidate_ctx = GpuCtx::new(&candidate_device).expect("candidate context");
     let reference_ctx = GpuCtx::new(&reference_device).expect("portable RNA context");
     configure_deterministic_tf32(&candidate_ctx);
@@ -888,9 +926,7 @@ fn sm89_nt_compact_finalist_actual_auto_symbols_graphs_and_bits() {
     let auto_device = GpuDevice::new(0).expect("AUTO CUDA device");
     let forced_device = GpuDevice::new(0).expect("forced CUDA device");
     assert_eq!(auto_device.compute_capability, (8, 9));
-    assert_eq!(auto_device.multiprocessor_count(), 142);
     assert_eq!(forced_device.compute_capability, (8, 9));
-    assert_eq!(forced_device.multiprocessor_count(), 142);
     let auto_ctx = GpuCtx::new(&auto_device).expect("AUTO context");
     let forced_ctx = GpuCtx::new(&forced_device).expect("forced context");
     configure_deterministic_tf32(&auto_ctx);

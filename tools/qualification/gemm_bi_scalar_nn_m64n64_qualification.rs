@@ -84,8 +84,8 @@ fn copyplan_epilogue_supported(alpha: f32, beta: f32, has_bias: bool) -> bool {
     alpha.to_bits() == 1.0_f32.to_bits() && beta.to_bits() == 0 && !has_bias
 }
 
-fn ada_live_toolkit_supported(cc: (u32, u32), sms: u32, nvrtc: (i32, i32)) -> bool {
-    cc == (8, 9) && sms == 142 && matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
+fn ada_live_toolkit_supported(cc: (u32, u32), nvrtc: (i32, i32)) -> bool {
+    cc == (8, 9) && matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,12 +154,11 @@ fn live_comparison_releases_the_qualified_lease_before_other_cuda_work() {
 #[test]
 fn live_copyplan_comparison_only_accepts_the_three_ada_toolkit_lanes() {
     for version in [(12, 8), (13, 0), (13, 2)] {
-        assert!(ada_live_toolkit_supported((8, 9), 142, version));
-        assert!(!ada_live_toolkit_supported((12, 0), 170, version));
-        assert!(!ada_live_toolkit_supported((8, 9), 128, version));
+        assert!(ada_live_toolkit_supported((8, 9), version));
+        assert!(!ada_live_toolkit_supported((12, 0), version));
     }
     for version in [(12, 7), (12, 9), (13, 1), (13, 3)] {
-        assert!(!ada_live_toolkit_supported((8, 9), 142, version));
+        assert!(!ada_live_toolkit_supported((8, 9), version));
     }
 }
 
@@ -666,9 +665,9 @@ mod cuda_qualification {
     fn new_runtime() -> Result<Runtime, String> {
         let device = GpuDevice::new(0)?;
         let identity = device.identity();
-        if identity.compute_capability != (12, 0) || identity.multiprocessor_count != 170 {
+        if identity.compute_capability != (12, 0) {
             return Err(format!(
-                "M64N64 qualification requires CC 12.0 with 170 SMs, found CC {}.{} with {} SMs",
+                "M64N64 qualification requires CC 12.0, found CC {}.{} with {} SMs",
                 identity.compute_capability.0,
                 identity.compute_capability.1,
                 identity.multiprocessor_count
@@ -691,9 +690,9 @@ mod cuda_qualification {
     fn new_ada_runtime(copyplan: bool) -> Result<Runtime, String> {
         let device = GpuDevice::new(0)?;
         let identity = device.identity();
-        if identity.compute_capability != (8, 9) || identity.multiprocessor_count != 142 {
+        if identity.compute_capability != (8, 9) {
             return Err(format!(
-                "Ada M64N64 discovery requires CC 8.9 with 142 SMs, found CC {}.{} with {} SMs",
+                "Ada M64N64 discovery requires CC 8.9, found CC {}.{} with {} SMs",
                 identity.compute_capability.0,
                 identity.compute_capability.1,
                 identity.multiprocessor_count
@@ -1560,7 +1559,7 @@ mod cuda_qualification {
     }
 
     #[test]
-    #[ignore = "requires an exclusive CC 12.0 170-SM GPU"]
+    #[ignore = "requires an exclusive CC 12.0 GPU"]
     fn production_resource_and_exactness_qualification() -> Result<(), String> {
         let runtime = new_runtime()?;
         for case in CASES {
@@ -1570,7 +1569,7 @@ mod cuda_qualification {
     }
 
     #[test]
-    #[ignore = "requires an exclusive quiet CC 12.0 170-SM GPU"]
+    #[ignore = "requires an exclusive quiet CC 12.0 GPU"]
     fn production_vs_generic_abba_baab() -> Result<(), String> {
         let runtime = new_runtime()?;
         for &case in &CASES[1..] {
@@ -2058,11 +2057,8 @@ mod cuda_qualification {
         let compiler = ctx.kernels.compiler_identity();
         let artifact = ctx.kernels.artifact_set_identity().inference;
         let identity = runtime._device.identity();
-        if !ada_live_toolkit_supported(
-            identity.compute_capability,
-            identity.multiprocessor_count,
-            compiler.nvrtc_version,
-        ) || compiler.target.as_str() != "sm_89"
+        if !ada_live_toolkit_supported(identity.compute_capability, compiler.nvrtc_version)
+            || compiler.target.as_str() != "sm_89"
             || !compiler.nvrtc_library_known
             || compiler.source_digest == [0; 32]
             || compiler.invocation_digest == [0; 32]
@@ -2374,20 +2370,20 @@ mod cuda_qualification {
     }
 
     #[test]
-    #[ignore = "requires an exclusive quiet CC 8.9 142-SM GPU; discovery only"]
+    #[ignore = "requires an exclusive quiet CC 8.9 GPU; discovery only"]
     fn ada_exact_nn_m64n64_three_cell_discovery_once7() -> Result<(), String> {
         run_ada_discovery(&ada_short_screen_cells(), "scalar-nn-m64n64-ada")
     }
 
     #[test]
-    #[ignore = "requires an exclusive quiet CC 8.9 142-SM GPU; Prism repair only"]
+    #[ignore = "requires an exclusive quiet CC 8.9 GPU; Prism repair only"]
     fn ada_exact_nn_m64n64_prism_repair_discovery_once7() -> Result<(), String> {
         let cells = ada_short_screen_cells();
         run_ada_discovery(&cells[2..], "scalar-nn-m64n64-ada-prism-repair")
     }
 
     #[test]
-    #[ignore = "requires an exclusive quiet CC 8.9 142-SM GPU; inference reuse discovery only"]
+    #[ignore = "requires an exclusive quiet CC 8.9 GPU; inference reuse discovery only"]
     fn ada_exact_nn_inference_copyplan_overwrite_three_cell_discovery_once7() -> Result<(), String>
     {
         run_ada_discovery(

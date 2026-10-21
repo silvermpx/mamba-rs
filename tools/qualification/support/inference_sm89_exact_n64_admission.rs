@@ -1655,7 +1655,6 @@ fn identity(ctx: &GpuCtx, device: &GpuDevice) -> Result<String, String> {
     let artifacts = ctx.kernels.artifact_set_identity();
     let driver = device.identity().driver;
     if device.compute_capability != (8, 9)
-        || device.multiprocessor_count() != 142
         || compiler.nvrtc_version != (13, 2)
         || !compiler.nvrtc_library_known
         || compiler.target.as_str() != "sm_89"
@@ -1678,11 +1677,12 @@ fn identity(ctx: &GpuCtx, device: &GpuDevice) -> Result<String, String> {
     }
     Ok(format!(
         concat!(
-            "{{\"cc\":[8,9],\"sm_count\":142,\"nvrtc\":[13,2],\"nvrtc_library_known\":true,\"nvrtc_library_domain\":{},",
+            "{{\"cc\":[8,9],\"sm_count\":{},\"nvrtc\":[13,2],\"nvrtc_library_known\":true,\"nvrtc_library_domain\":{},",
             "\"compiler_target\":\"sm_89\",\"state_capacity\":{},\"source_sha256\":{},\"invocation_sha256\":{},\"headers_sha256\":{},",
             "\"inference_compile_key\":{},\"inference_artifact\":{},\"aggregate_artifact\":{},\"driver_api\":{},\"driver_build_sources\":{},\"driver_build_digest\":{},",
             "\"composer_revision\":{},\"compiler_revision\":{},\"numeric_abi_revision\":{},\"schedule_revision\":{},\"tuning_revision\":{},\"cublas_version\":{version}}}"
         ),
+        device.multiprocessor_count(),
         quoted(&digest_hex(&compiler.nvrtc_library_domain)),
         ctx.kernels.state_cap,
         quoted(&digest_hex(&compiler.source_digest)),

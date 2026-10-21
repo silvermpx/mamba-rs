@@ -124,13 +124,14 @@ empty.
 
 No selection compares an SM count to a card's number any more (the
 `boards` baseline is empty). What remains:
-- Stream-K deals its reduction over a grid of the live SM count, so the
-  stream-K routes still give different bits on cards of one architecture.
 - Several measured cells and identities still pin the toolkit (an NVRTC
   version or the artifact digests); a new toolkit reaches those routes only
   through the first-use proof.
 - The SM90a and SM100 TF32 cohorts are empty: Hopper and datacenter
   Blackwell run the portable ladder until a tournament on one of their cards.
+- The SM120 table comes from the tournament on an RTX PRO 6000. It has not
+  yet been timed against the RTX 5090's own former winners (rule 6); three
+  shapes the 5090 had cells for are now served below the table.
 
 Repaired:
 - the TF32 evidence cohorts are keyed by architecture (one cohort per
@@ -140,4 +141,10 @@ Repaired:
 - the exact-family split decisions read the architecture's partition
   reference (`architecture_partition_reference`), never the live count;
 - the Ada half cohort, the SM120 scalar resource check and every inference
-  selector serve every card of their architecture.
+  selector serve every card of their architecture;
+- stream-K deals its reduction over a fixed worker count (340 on SM120, four
+  times the partition reference for the portable tc64 route); the resident
+  grid walks the workers in order, so the partition points and the bits no
+  longer depend on how many SMs the card has;
+- the qualification tools run on any card of their architecture and record
+  the measuring card's SM count as provenance only.

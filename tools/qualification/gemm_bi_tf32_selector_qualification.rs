@@ -685,7 +685,7 @@ fn require_new_sink_parent(path: &FsPath) -> Result<(), String> {
 }
 
 #[test]
-#[ignore = "requires an idle 142-SM CC8.9 GPU and writes 101-window paired JSONL"]
+#[ignore = "requires an idle CC8.9 GPU and writes 101-window paired JSONL"]
 fn sm89_tf32_selector_five_cell_qualification() -> Result<(), String> {
     require_release_profile()?;
     let sink_path = std::env::var_os(OUTPUT_ENV)
@@ -695,9 +695,9 @@ fn sm89_tf32_selector_five_cell_qualification() -> Result<(), String> {
     require_new_sink_parent(&sink_path)?;
     let mut sink = JsonlSink::create_from_env()?;
     let device = GpuDevice::new(0)?;
-    if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
+    if device.compute_capability != (8, 9) {
         return Err(format!(
-            "selector qualification requires CC8.9/142SM, got {:?}/{}SM",
+            "selector qualification requires CC8.9, got {:?}/{}SM",
             device.compute_capability,
             device.multiprocessor_count()
         ));
