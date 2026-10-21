@@ -13,9 +13,14 @@
 //!   (`BLACKWELL_SMS = 170`, a dispatch tuning constant pinned to a card).
 //!
 //! Zero and one stay allowed: they are the "unknown device" sentinel, not a
-//! card. Test modules are not read, since a test may stand in a board of
-//! any size. The stock that predates the rule is a shrink-only baseline;
-//! the repair of those places empties it.
+//! card. Test modules in production code are not read, since a test may
+//! stand in a board of any size. The integration tests and the
+//! qualification tools are read for one shape only: a check that the live
+//! card is one particular board (`device.multiprocessor_count() != 170`,
+//! `assert_eq!(device.multiprocessor_count(), 142)`), which would keep a
+//! test or a tournament from running on the rest of its architecture. The
+//! stock that predates the rule is a shrink-only baseline; the repair of
+//! those places empties it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -234,12 +239,28 @@ fn is_count_name(token: &str) -> bool {
     COUNT_NAMES.contains(&last_segment(token))
 }
 
+/// Which shapes a scan root refuses. Production code refuses all of them.
+/// Tests and qualification tools may stand in a board of any size (a field
+/// or constant set to a count describes the board a host test simulates),
+/// but a check that the live card is one particular board keeps a test or a
+/// tournament from running on the rest of its architecture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Production,
+    LiveChecks,
+}
+
 /// The shape of a per-card pin on this code line, if it carries one.
-pub fn pin_shape(code: &str) -> Option<&'static str> {
+pub fn pin_shape(code: &str, scope: Scope) -> Option<&'static str> {
     let t = tokens(code);
+    let asserts = t.iter().any(|tok| tok == "assert_eq" || tok == "assert_ne");
     for (i, tok) in t.iter().enumerate() {
-        let next = t.get(i + 1).map(String::as_str).unwrap_or("");
-        let after = t.get(i + 2).map(String::as_str).unwrap_or("");
+        // A method read (`device.multiprocessor_count()`) compares like a
+        // field: look past its empty argument list.
+        let call = t.get(i + 1).is_some_and(|x| x == "(") && t.get(i + 2).is_some_and(|x| x == ")");
+        let skip = if call { 2 } else { 0 };
+        let next = t.get(i + 1 + skip).map(String::as_str).unwrap_or("");
+        let after = t.get(i + 2 + skip).map(String::as_str).unwrap_or("");
         let prev = if i > 0 { t[i - 1].as_str() } else { "" };
         let before = if i > 1 { t[i - 2].as_str() } else { "" };
         if is_count_name(tok) {
@@ -249,13 +270,22 @@ pub fn pin_shape(code: &str) -> Option<&'static str> {
             if (prev == "==" || prev == "!=") && names_a_card(before) {
                 return Some("count-compared");
             }
+            if asserts && next == "," && names_a_card(after) {
+                return Some("count-asserted");
+            }
             // A field set to a literal: `name: 170`, but not a type
             // annotation (`name: u32`) or a path (`name::x`).
-            if next == ":" && names_a_card(after) && !tok.contains('.') {
+            if scope == Scope::Production
+                && !call
+                && next == ":"
+                && names_a_card(after)
+                && !tok.contains('.')
+            {
                 return Some("count-field");
             }
         }
-        if (tok == "const" || tok == "static")
+        if scope == Scope::Production
+            && (tok == "const" || tok == "static")
             && let Some(name) = t.get(i + 1)
             && CONST_WORDS.iter().any(|w| name.contains(w))
             && let Some(eq) = t.iter().skip(i + 2).position(|x| x == "=")
@@ -338,15 +368,17 @@ pub struct Hit {
     pub line: usize,
 }
 
-/// Every per-card pin in the production code under the scan roots.
-pub fn scan(root: &Path, dirs: &[&str]) -> Vec<Hit> {
+/// Every per-card pin under the scan roots, each root read in its scope.
+pub fn scan(root: &Path, dirs: &[(&str, Scope)]) -> Vec<Hit> {
     let mut files = Vec::new();
-    for d in dirs {
-        walk(&root.join(d), &mut files);
+    for (d, scope) in dirs {
+        let mut found = Vec::new();
+        walk(&root.join(d), &mut found);
+        files.extend(found.into_iter().map(|path| (path, *scope)));
     }
-    files.sort();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut hits = Vec::new();
-    for path in files {
+    for (path, scope) in files {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -363,7 +395,7 @@ pub fn scan(root: &Path, dirs: &[&str]) -> Vec<Hit> {
                 continue;
             }
             let line_code = code.get(i).map(String::as_str).unwrap_or("");
-            if let Some(shape) = pin_shape(line_code) {
+            if let Some(shape) = pin_shape(line_code, scope) {
                 hits.push(Hit {
                     sig: format!("{rel}\t{}", line.trim()),
                     shape,
@@ -389,11 +421,11 @@ fn load_baseline(path: &Path) -> HashMap<String, usize> {
 /// Returns the violation lines (empty = green).
 pub fn run(
     root: &Path,
-    dirs: &[&str],
+    dirs: &[(&str, Scope)],
     baseline: &Path,
     update: bool,
 ) -> Result<Vec<String>, String> {
-    if dirs.iter().all(|d| !root.join(d).exists()) {
+    if dirs.iter().all(|(d, _)| !root.join(d).exists()) {
         return Err("the board gate found none of its scan roots".to_owned());
     }
     let hits = scan(root, dirs);
@@ -459,7 +491,7 @@ pub fn run(
 
 /// Builds the first baseline when none exists yet. Unlike `--update-baseline`
 /// it takes the whole current stock; it refuses once a baseline is there.
-pub fn seed(root: &Path, dirs: &[&str], baseline: &Path) -> Result<Vec<String>, String> {
+pub fn seed(root: &Path, dirs: &[(&str, Scope)], baseline: &Path) -> Result<Vec<String>, String> {
     if baseline.exists() {
         return Err(format!(
             "{} exists - the board baseline is seeded once and then only shrinks",
@@ -496,6 +528,14 @@ mod tests {
                 Some("count-constant"),
             ),
             ("const BLACKWELL_SMS: usize = 170;", Some("count-constant")),
+            (
+                "if device.multiprocessor_count() != 170 {",
+                Some("count-compared"),
+            ),
+            (
+                "assert_eq!(device.multiprocessor_count(), 142);",
+                Some("count-asserted"),
+            ),
             ("if device.multiprocessors == 0 {", None),
             ("multiprocessor_count: u32,", None),
             ("let waves = tiles.div_ceil(device.multiprocessors);", None),
@@ -504,7 +544,11 @@ mod tests {
             ("// tuned on 170 SMs: multiprocessors == 170", None),
             ("let s = \"multiprocessors == 170\";", None),
         ] {
-            assert_eq!(pin_shape(&code_part(line)), want, "{line}");
+            assert_eq!(
+                pin_shape(&code_part(line), Scope::Production),
+                want,
+                "{line}"
+            );
         }
     }
 
@@ -519,7 +563,10 @@ mod tests {
             test,
             vec![true, true, true, true, true, true, true, true, false]
         );
-        assert_eq!(pin_shape(&code[8]), Some("count-constant"));
+        assert_eq!(
+            pin_shape(&code[8], Scope::Production),
+            Some("count-constant")
+        );
     }
 
     #[test]
@@ -541,5 +588,27 @@ mod tests {
             test,
             vec![false, true, true, true, true, false, true, true, false]
         );
+    }
+
+    #[test]
+    fn live_check_roots_refuse_board_checks_but_not_simulated_boards() {
+        for (line, want) in [
+            (
+                "assert_eq!(device.multiprocessor_count(), 170);",
+                Some("count-asserted"),
+            ),
+            (
+                "if identity.multiprocessor_count != 142 {",
+                Some("count-compared"),
+            ),
+            ("multiprocessor_count: 188,", None),
+            ("const BLACKWELL_SMS: usize = 170;", None),
+        ] {
+            assert_eq!(
+                pin_shape(&code_part(line), Scope::LiveChecks),
+                want,
+                "{line}"
+            );
+        }
     }
 }

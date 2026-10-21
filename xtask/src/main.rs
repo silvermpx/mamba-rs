@@ -64,7 +64,11 @@ const NAME_SCANS: &[(&str, &[&str])] = &[
 ];
 
 /// What the board gate reads: the production sources of the crate.
-const BOARD_SCANS: &[&str] = &["src"];
+const BOARD_SCANS: &[(&str, boards::Scope)] = &[
+    ("src", boards::Scope::Production),
+    ("tools", boards::Scope::LiveChecks),
+    ("tests", boards::Scope::LiveChecks),
+];
 const BOARD_BASELINE: &str = "tools/board_pin_baseline.txt";
 
 fn main() -> std::process::ExitCode {
