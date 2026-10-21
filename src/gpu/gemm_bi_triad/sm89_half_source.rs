@@ -778,11 +778,10 @@ pub(crate) fn select_sm89_half_auto_cell_with_admission(
     {
         return None;
     }
-    // The frozen identities were minted on the Ada board; only that board
-    // may take them as evidence. Every other board proves at first use.
-    let ada_board = context.compute_capability == (8, 9)
-        && context.multiprocessor_count == 142
-        && compiler.target.as_str() == "sm_89";
+    // The frozen identities were minted on an RTX 6000 Ada and serve every
+    // SM89 card, whatever its SM count. Every other architecture proves at
+    // first use.
+    let ada_board = context.compute_capability == (8, 9) && compiler.target.as_str() == "sm_89";
     let admission = if ada_board
         && SM89_HALF_AUTO_IDENTITIES
             .iter()
@@ -1388,9 +1387,16 @@ mod tests {
         let mut changed = context;
         changed.compute_capability = (9, 0);
         assert_declined(changed, valid, "compute capability");
-        let mut changed = context;
-        changed.multiprocessor_count = 141;
-        assert_declined(changed, valid, "SM count");
+        // Another SM89 card, an RTX 4090 or an L40S, takes the same cohort.
+        for multiprocessor_count in [128, 141] {
+            let mut changed = context;
+            changed.multiprocessor_count = multiprocessor_count;
+            assert_eq!(
+                select_sm89_half_auto_cell(changed, valid),
+                select_sm89_half_auto_cell(context, valid),
+                "an SM89 card of {multiprocessor_count} SMs"
+            );
+        }
         let mut changed = context;
         changed.compiler = None;
         assert_declined(changed, valid, "compiler holder");
@@ -1473,8 +1479,12 @@ mod tests {
         changed.compute_capability = (8, 6);
         assert_declined(changed, valid_request, "compute capability");
         let mut changed = valid;
-        changed.multiprocessor_count = 141;
-        assert_declined(changed, valid_request, "SM count");
+        changed.multiprocessor_count = 128;
+        assert_eq!(
+            select_sm89_half_auto_cell(changed, valid_request),
+            select_sm89_half_auto_cell(valid, valid_request),
+            "an SM89 card of another SM count"
+        );
         for nvrtc in [(12, 7), (12, 9), (13, 1), (13, 3)] {
             assert_declined(auto_context(nvrtc), valid_request, "NVRTC version");
         }

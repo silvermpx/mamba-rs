@@ -10107,7 +10107,6 @@ impl GemmBiKernels {
         let scalar_artifact = scalar.artifact_identity;
         if qualified_scalar_resource_environment(
             compute_capability,
-            multiprocessor_count,
             scalar_compiler,
             scalar_artifact,
         ) {
@@ -11674,12 +11673,10 @@ fn set_dynamic_shared(function: &CudaFunction, name: &str, bytes: i32) -> Result
 
 fn qualified_scalar_resource_environment(
     compute_capability: (u32, u32),
-    multiprocessor_count: u32,
     compiler: CompilerIdentity,
     artifact: ArtifactIdentity,
 ) -> bool {
     compute_capability == (12, 0)
-        && multiprocessor_count == 170
         && compiler.target.as_str() == "compute_120"
         && compiler.nvrtc_version == (13, 2)
         && compiler.nvrtc_library_known
@@ -13226,7 +13223,6 @@ mod tests {
         };
         assert!(qualified_scalar_resource_environment(
             (12, 0),
-            170,
             compiler,
             artifact
         ));
@@ -13235,7 +13231,6 @@ mod tests {
         zero_library.nvrtc_library_domain = [0; 32];
         assert!(!qualified_scalar_resource_environment(
             (12, 0),
-            170,
             zero_library,
             artifact
         ));
@@ -13245,7 +13240,6 @@ mod tests {
         zero_key.compile_key = [0; 32];
         assert!(!qualified_scalar_resource_environment(
             (12, 0),
-            170,
             zero_compile,
             zero_key
         ));
@@ -13253,7 +13247,6 @@ mod tests {
         zero_artifact.artifact_digest = [0; 32];
         assert!(!qualified_scalar_resource_environment(
             (12, 0),
-            170,
             compiler,
             zero_artifact
         ));

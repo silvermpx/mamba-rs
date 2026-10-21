@@ -63,35 +63,128 @@ fn names_a_card(token: &str) -> bool {
     literal_value(token).is_some_and(|v| v >= 2)
 }
 
-/// The source line with its `//` comment and the contents of its string
-/// literals blanked, so prose and messages about a card never trip the rule.
-pub fn code_part(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars().peekable();
-    let mut in_str = false;
-    while let Some(c) = chars.next() {
-        if in_str {
-            if c == '\\' {
-                chars.next();
+/// The code of every line of a source file, with comments and the contents
+/// of string and character literals blanked, so prose, messages and the
+/// CUDA source a string carries never trip the rule or skew the brace
+/// count. Literals and block comments may span lines; the scan follows them
+/// across the whole file.
+pub fn code_lines(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut lines = vec![String::new()];
+    let mut i = 0;
+    let push = |lines: &mut Vec<String>, c: char| {
+        if c == '\n' {
+            lines.push(String::new());
+        } else if let Some(line) = lines.last_mut() {
+            line.push(c);
+        }
+    };
+    let newlines = |lines: &mut Vec<String>, from: usize, to: usize, chars: &[char]| {
+        for &c in &chars[from..to.min(chars.len())] {
+            if c == '\n' {
+                lines.push(String::new());
+            }
+        }
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        let prev_ident = i > 0 && is_ident_char(chars[i - 1]);
+        if c == '/' && next == Some('/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && next == Some('*') {
+            let start = i;
+            let mut depth = 0usize;
+            while i < chars.len() {
+                if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                    depth += 1;
+                    i += 2;
+                } else if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            newlines(&mut lines, start, i, &chars);
+            continue;
+        }
+        // A raw string: r"..", r#".."#, br"..".
+        if !prev_ident && (c == 'r' || (c == 'b' && next == Some('r'))) {
+            let mut j = if c == 'b' { i + 2 } else { i + 1 };
+            let mut hashes = 0usize;
+            while chars.get(j) == Some(&'#') {
+                hashes += 1;
+                j += 1;
+            }
+            if chars.get(j) == Some(&'"') {
+                let start = j + 1;
+                let mut k = start;
+                loop {
+                    if k >= chars.len() {
+                        break;
+                    }
+                    if chars[k] == '"' && (0..hashes).all(|h| chars.get(k + 1 + h) == Some(&'#')) {
+                        break;
+                    }
+                    k += 1;
+                }
+                push(&mut lines, '"');
+                newlines(&mut lines, start, k, &chars);
+                push(&mut lines, '"');
+                i = k + 1 + hashes;
                 continue;
             }
-            if c == '"' {
-                in_str = false;
-                out.push('"');
-            }
-            continue;
         }
         if c == '"' {
-            in_str = true;
-            out.push('"');
+            let start = i + 1;
+            let mut k = start;
+            while k < chars.len() && chars[k] != '"' {
+                if chars[k] == '\\' {
+                    k += 1;
+                }
+                k += 1;
+            }
+            push(&mut lines, '"');
+            newlines(&mut lines, start, k, &chars);
+            push(&mut lines, '"');
+            i = k + 1;
             continue;
         }
-        if c == '/' && chars.peek() == Some(&'/') {
-            break;
+        // A character literal ('{', '\''); a lifetime ('a) stays code.
+        if c == '\'' {
+            if next == Some('\\') {
+                let mut k = i + 2;
+                while k < chars.len() && chars[k] != '\'' {
+                    k += 1;
+                }
+                push(&mut lines, ' ');
+                i = k + 1;
+                continue;
+            }
+            if chars.get(i + 2) == Some(&'\'') {
+                push(&mut lines, ' ');
+                i += 3;
+                continue;
+            }
         }
-        out.push(c);
+        push(&mut lines, c);
+        i += 1;
     }
-    out
+    lines
+}
+
+/// The code of one line, for the rule's own tests.
+#[cfg(test)]
+fn code_part(line: &str) -> String {
+    code_lines(line).into_iter().next().unwrap_or_default()
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -178,7 +271,7 @@ pub fn pin_shape(code: &str) -> Option<&'static str> {
 /// The lines of a file that belong to test code: an item under
 /// `#[cfg(test)]` (a test module, helper or impl), from its first line to
 /// the brace that closes it.
-fn test_lines(lines: &[&str]) -> Vec<bool> {
+fn test_lines(lines: &[&str], code: &[String]) -> Vec<bool> {
     let mut test = vec![false; lines.len()];
     let mut i = 0;
     while i < lines.len() {
@@ -194,8 +287,8 @@ fn test_lines(lines: &[&str]) -> Vec<bool> {
         let mut j = i;
         while j < lines.len() {
             test[j] = true;
-            let code = code_part(lines[j]);
-            for c in code.chars() {
+            let line_code = code.get(j).map(String::as_str).unwrap_or("");
+            for c in line_code.chars() {
                 match c {
                     '{' => {
                         depth += 1;
@@ -205,7 +298,7 @@ fn test_lines(lines: &[&str]) -> Vec<bool> {
                     _ => {}
                 }
             }
-            let ends_bare = !opened && code.trim_end().ends_with(';');
+            let ends_bare = !opened && line_code.trim_end().ends_with(';');
             if (opened && depth <= 0) || ends_bare {
                 break;
             }
@@ -263,12 +356,14 @@ pub fn scan(root: &Path, dirs: &[&str]) -> Vec<Hit> {
             .to_string_lossy()
             .replace('\\', "/");
         let lines: Vec<&str> = text.lines().collect();
-        let test = test_lines(&lines);
+        let code = code_lines(&text);
+        let test = test_lines(&lines, &code);
         for (i, line) in lines.iter().enumerate() {
             if test[i] {
                 continue;
             }
-            if let Some(shape) = pin_shape(&code_part(line)) {
+            let line_code = code.get(i).map(String::as_str).unwrap_or("");
+            if let Some(shape) = pin_shape(line_code) {
                 hits.push(Hit {
                     sig: format!("{rel}\t{}", line.trim()),
                     shape,
@@ -414,6 +509,20 @@ mod tests {
     }
 
     #[test]
+    fn literals_spanning_lines_keep_their_braces_out_of_the_count() {
+        let src = "#[cfg(test)]\nmod tests {\n    const SRC: &str = \"{\n  ret;\n}}\";\n    const C: char = '{';\n    const R: &str = r#\"}\"#;\n}\nconst SMS: u32 = 170;";
+        let lines: Vec<&str> = src.lines().collect();
+        let code = code_lines(src);
+        assert_eq!(code.len(), lines.len());
+        let test = test_lines(&lines, &code);
+        assert_eq!(
+            test,
+            vec![true, true, true, true, true, true, true, true, false]
+        );
+        assert_eq!(pin_shape(&code[8]), Some("count-constant"));
+    }
+
+    #[test]
     fn test_items_are_skipped_to_their_closing_brace() {
         let src = [
             "fn live() {}",
@@ -426,7 +535,8 @@ mod tests {
             "use std::fmt;",
             "fn last() {}",
         ];
-        let test = test_lines(&src);
+        let code = code_lines(&src.join("\n"));
+        let test = test_lines(&src, &code);
         assert_eq!(
             test,
             vec![false, true, true, true, true, false, true, true, false]
