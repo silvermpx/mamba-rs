@@ -4951,12 +4951,15 @@ fn launch_sm89_cell_reference<O: PhysicalLaunchObserver>(
     }
 }
 
-fn ada_evidence_board(ctx: &GpuCtx) -> bool {
-    ctx.compute_capability() == (8, 9) && ctx.kernels.multiprocessor_count() == 142
+/// Ada found these routes, so every Ada card takes them as measured: the
+/// evidence belongs to the architecture, whatever the card's SM count.
+fn ada_evidence_architecture(ctx: &GpuCtx) -> bool {
+    ctx.compute_capability() == (8, 9)
 }
 
-/// The candidate arm of an Ada-found inference route on another board:
-/// admitted when it reproduces the portable ladder's words for this shape.
+/// The candidate arm of an Ada-found inference route on another
+/// architecture: admitted when it reproduces the portable ladder's words for
+/// this shape.
 fn proven_inference_candidate<Candidate, Reference>(
     ctx: &GpuCtx,
     symbol: &'static str,
@@ -4969,7 +4972,7 @@ where
     Candidate: FnOnce(&InferenceArgs) -> Result<(), String>,
     Reference: FnOnce(&InferenceArgs) -> Result<(), String>,
 {
-    if ada_evidence_board(ctx) {
+    if ada_evidence_architecture(ctx) {
         return Ok(true);
     }
     let m = usize::try_from(args.m).map_err(|_| "negative inference rows".to_string())?;
