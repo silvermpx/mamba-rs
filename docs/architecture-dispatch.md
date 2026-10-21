@@ -96,11 +96,20 @@ gate a card:
   through the toolkit's nvJitLink instead was measured on an RTX 5090 and
   rejected: the linker assembles relocatable code, and 113 of the 128 SM120
   GEMM kernels took more registers (up to 40 percent more). Every route of
-  the SM120 table still gave the same bits from both assemblers, because the
-  GEMM kernels round explicitly. Kernels that still carry `mul.f32`,
-  `add.f32` or `sub.f32` without a rounding mode (the Mamba scans and some
-  epilogues) leave the assembler free to fuse them; giving them explicit
-  rounding is the remaining step for bits that no driver can move.
+  the SM120 table still gave the same bits from both assemblers.
+- **GEMM modules round every operation as written.** Before a GEMM module
+  (the triad and the inference family) reaches the driver, each `add`,
+  `sub` and `mul` on a floating-point type without a rounding mode gets the
+  round-to-nearest mode it computes anyway, so no driver can fuse it into an
+  FMA (`ptx_rounding`). It moved no bit of the SM120 TF32 table.
+- **The Mamba scans and the shared kernels are not pinned yet.** They write
+  plain arithmetic, about thirty thousand such instructions in the Mamba-3
+  module, and two of their kernel variants (the staged and the
+  register-tiled dQKV stage, the released forms of the angle and dQK theta
+  kernels) agree only while the assembler fuses that arithmetic the same
+  way in both. Pinning them moved those bits by one or two ulps on an RTX
+  6000 Ada. Bits that no driver can move there need their arithmetic spelled
+  out in the sources, kernel by kernel, with those tests as the guard.
 - **Measured toolkits keep their own tables.** Where the route tables were
   timed on CUDA 12.8, 13.0 and 13.2, each of those releases keeps exactly
   the routes it was measured with.
@@ -151,6 +160,8 @@ No selection compares an SM count to a card's number any more (the
 `boards` baseline is empty). What remains:
 - The Mamba-1 and Mamba-3 fold transports stay on the measured toolkits
   until they have a first-use proof.
+- The Mamba scans and the shared kernels still let the driver's assembler
+  fuse their plain arithmetic.
 - The SM90a and SM100 TF32 cohorts are empty: Hopper and datacenter
   Blackwell run the portable ladder until a tournament on one of their cards.
 - The SM120 table comes from the tournament on an RTX PRO 6000. It has not

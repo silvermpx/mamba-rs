@@ -92,9 +92,7 @@ pub(crate) fn compile_composed(
     if let (Some(path), Some(key)) = (&cache_path, cache_key)
         && let Some(hit) = ki::read_cache(path, key, ki::ArtifactKind::Ptx)
         && let Ok(source) = ki::canonical_ptx_from_cache(hit.payload)
-        && let Ok(module) = ctx.load_module(cudarc::nvrtc::Ptx::from_src(
-            crate::gpu::ptx_rounding::pin_rounding(source),
-        ))
+        && let Ok(module) = ctx.load_module(cudarc::nvrtc::Ptx::from_src(source))
         && ki::cache_hit_header_closure_is_current(
             combined.as_bytes(),
             &include_paths,
@@ -143,9 +141,7 @@ pub(crate) fn compile_composed(
                 ki::publish_cache(path, key, ki::ArtifactKind::Ptx, ptx_source.as_bytes());
             }
             let module = ctx
-                .load_module(cudarc::nvrtc::Ptx::from_src(
-                    crate::gpu::ptx_rounding::pin_rounding(ptx_source),
-                ))
+                .load_module(cudarc::nvrtc::Ptx::from_src(ptx_source))
                 .map_err(|e| format!("{} module load failed: {e:?}", spec.label))?;
             (module, artifact_digest)
         }

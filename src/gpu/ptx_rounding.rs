@@ -1,4 +1,5 @@
-//! Every floating-point add, subtract and multiply rounds as written.
+//! Every floating-point add, subtract and multiply of a GEMM module rounds
+//! as written.
 //!
 //! NVRTC compiles the kernels to PTX and the driver assembles that PTX into
 //! machine code. PTX leaves an `add`, `sub` or `mul` on a floating-point type
@@ -8,13 +9,42 @@
 //! driver build carries, so the same kernel could round its last bit
 //! differently from one driver to the next.
 //!
-//! Before a module is handed to the driver, each such instruction gets the
+//! Before a GEMM module is handed to the driver, each such instruction gets the
 //! round-to-nearest-even mode it computes anyway (`add.f32` becomes
 //! `add.rn.f32`). PTX gives an instruction with an explicit rounding mode
 //! exactly that rounding and never fuses it. The FMAs NVRTC already wrote,
 //! and the ones the kernel source spells out, stay as they are; nothing
 //! else in the module changes. The artifact identities still name the PTX
 //! NVRTC produced: this rewrite is a pure function of it.
+
+use super::kernel_identity::ModuleKind;
+
+/// Whether a module's PTX gets the rounding modes: the GEMM families. Their
+/// kernels already round explicitly almost everywhere, so pinning the rest
+/// moves no bit. The Mamba scans and the shared kernels write plain
+/// arithmetic, and two of their kernel variants agree only while the
+/// assembler fuses that arithmetic the same way in both; pinning them would
+/// move bits the variants are held to. Giving those kernels explicit
+/// arithmetic is a source change of its own.
+pub(crate) fn pins_rounding(kind: ModuleKind) -> bool {
+    !matches!(
+        kind,
+        ModuleKind::Mamba1
+            | ModuleKind::Shared
+            | ModuleKind::Mamba2Combined
+            | ModuleKind::Mamba3Combined
+            | ModuleKind::Mamba3MimoCombined
+    )
+}
+
+/// The PTX of a module of `kind` as it is handed to the driver.
+pub(crate) fn module_ptx(kind: ModuleKind, ptx: String) -> String {
+    if pins_rounding(kind) {
+        pin_rounding(ptx)
+    } else {
+        ptx
+    }
+}
 
 /// The floating-point types whose `add`, `sub` and `mul` the assembler may
 /// fuse when no rounding mode is given.
@@ -90,7 +120,42 @@ pub(crate) fn unpinned_instructions(ptx: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{pin_rounding, unpinned_instructions};
+    use super::{ModuleKind, module_ptx, pin_rounding, pins_rounding, unpinned_instructions};
+
+    #[test]
+    fn the_gemm_modules_are_pinned_and_the_mamba_and_shared_modules_are_not() {
+        for kind in [
+            ModuleKind::Inference,
+            ModuleKind::TriadScalar,
+            ModuleKind::TriadSm80,
+            ModuleKind::TriadSm90a,
+            ModuleKind::TriadSm100,
+            ModuleKind::TriadSm120,
+            ModuleKind::TriadSm89Finalist,
+            ModuleKind::TriadSm89Half,
+            ModuleKind::TriadSm89ExactF32,
+            ModuleKind::TriadSm89Tf32Joint,
+            ModuleKind::TriadSm89ExactF32D128,
+            ModuleKind::InferenceSm89Cells,
+        ] {
+            assert!(pins_rounding(kind), "{kind:?}");
+        }
+        for kind in [
+            ModuleKind::Mamba1,
+            ModuleKind::Shared,
+            ModuleKind::Mamba2Combined,
+            ModuleKind::Mamba3Combined,
+            ModuleKind::Mamba3MimoCombined,
+        ] {
+            assert!(!pins_rounding(kind), "{kind:?}");
+        }
+        let ptx = "\tmul.f32 %f1, %f2, %f3;\n".to_string();
+        assert_eq!(module_ptx(ModuleKind::Mamba1, ptx.clone()), ptx);
+        assert_eq!(
+            module_ptx(ModuleKind::TriadSm80, ptx),
+            "\tmul.rn.f32 %f1, %f2, %f3;\n"
+        );
+    }
 
     #[test]
     fn bare_float_arithmetic_takes_round_to_nearest_and_nothing_else_moves() {

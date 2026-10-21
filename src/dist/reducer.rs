@@ -120,9 +120,7 @@ impl DetReduceKernel {
             .map_err(|e| DistError::Transport(format!("NVRTC det_sum_ranks: {e:?}")))?;
         let ctx = device.context().clone();
         let module = ctx
-            .load_module(cudarc::nvrtc::Ptx::from_src(
-                crate::gpu::ptx_rounding::pin_rounding(ptx.to_src()),
-            ))
+            .load_module(ptx)
             .map_err(|e| DistError::Transport(format!("det_sum_ranks module load: {e:?}")))?;
         let func = module
             .load_function("det_sum_ranks")

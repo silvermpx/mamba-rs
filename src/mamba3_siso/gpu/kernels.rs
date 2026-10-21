@@ -623,9 +623,7 @@ impl Mamba3Kernels {
                 crate::gpu::kernel_identity::ArtifactKind::Ptx,
             )
             && let Ok(source) = crate::gpu::kernel_identity::canonical_ptx_from_cache(hit.payload)
-            && let Ok(module) = ctx.load_module(cudarc::nvrtc::Ptx::from_src(
-                crate::gpu::ptx_rounding::pin_rounding(source),
-            ))
+            && let Ok(module) = ctx.load_module(cudarc::nvrtc::Ptx::from_src(source))
             && crate::gpu::kernel_identity::cache_hit_header_closure_is_current(
                 combined.as_bytes(),
                 &include_paths,
@@ -679,9 +677,7 @@ impl Mamba3Kernels {
                     );
                 }
                 let module = ctx
-                    .load_module(cudarc::nvrtc::Ptx::from_src(
-                        crate::gpu::ptx_rounding::pin_rounding(ptx_source),
-                    ))
+                    .load_module(cudarc::nvrtc::Ptx::from_src(ptx_source))
                     .map_err(|e| format!("M3 module load failed: {e:?}"))?;
                 (module, artifact_digest)
             }

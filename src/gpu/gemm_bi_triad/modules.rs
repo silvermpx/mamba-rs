@@ -252,8 +252,8 @@ impl DriverModule {
     fn load(ctx: &CudaContext, ptx: &str) -> Result<Self, String> {
         ctx.bind_to_thread()
             .map_err(|error| format!("bind CUDA context for Driver ABI census: {error:?}"))?;
-        // The census reads the machine code the module runs, so it loads the
-        // same rounding-pinned PTX the module does.
+        // The census reads the machine code a GEMM module runs, so it loads
+        // the same rounding-pinned PTX the module does.
         let image = CString::new(crate::gpu::ptx_rounding::pin_rounding(ptx.to_owned()))
             .map_err(|_| "canonical PTX contains an interior NUL byte".to_string())?;
         let raw = unsafe {
@@ -863,7 +863,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         )
         .is_ok()
         && let Ok(module) = request.ctx.load_module(cudarc::nvrtc::Ptx::from_src(
-            crate::gpu::ptx_rounding::pin_rounding(src.clone()),
+            crate::gpu::ptx_rounding::module_ptx(request.module_kind, src.clone()),
         ))
         && crate::gpu::kernel_identity::cache_hit_header_closure_is_current(
             combined.as_bytes(),
@@ -1185,7 +1185,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             let module = request
                 .ctx
                 .load_module(cudarc::nvrtc::Ptx::from_src(
-                    crate::gpu::ptx_rounding::pin_rounding(ptx_source),
+                    crate::gpu::ptx_rounding::module_ptx(request.module_kind, ptx_source),
                 ))
                 .map_err(|error| {
                     format!("{:?} module load failed: {error:?}", request.module_kind)
