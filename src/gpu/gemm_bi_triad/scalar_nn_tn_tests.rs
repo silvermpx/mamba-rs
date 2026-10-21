@@ -1086,7 +1086,7 @@ fn qualified_tn_m16n16_facts() -> ScalarLaunchFacts {
         sm89_exact_f32_d128_compiler: None,
         sm89_exact_f32_d128_symbols_loaded: [false; 2],
         compute_capability: (12, 0),
-        multiprocessor_count: 170,
+        partition_reference: 170,
     }
 }
 
@@ -1177,13 +1177,6 @@ fn tn_m16n16_selector_is_exact_and_fail_closed() {
     assert_eq!(
         scalar_launch_plan(wrong_arch, request, operands).unwrap(),
         fallback
-    );
-
-    let mut wrong_sm_count = facts;
-    wrong_sm_count.multiprocessor_count = 169;
-    assert_ne!(
-        scalar_launch_plan(wrong_sm_count, request, operands).unwrap(),
-        ScalarDispatchPlan::TnM16N16SplitM16Qualified
     );
 
     let mut wrong_compile_key = facts;

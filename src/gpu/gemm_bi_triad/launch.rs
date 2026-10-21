@@ -4063,7 +4063,7 @@ fn scalar_launch_facts(kernels: &GpuKernels) -> ScalarLaunchFacts {
                 .is_some(),
         ],
         compute_capability: kernels.triad_scalar_compute_capability(),
-        multiprocessor_count: kernels.multiprocessor_count(),
+        partition_reference: kernels.partition_reference(),
     }
 }
 
@@ -5316,7 +5316,7 @@ fn scalar_ledger_plan(
 ) -> Result<ScalarDispatchPlan, String> {
     let facts = scalar_launch_facts(&ctx.kernels);
     let plan = scalar_launch_plan(facts, request, operands)?;
-    if plan != scalar_dispatch_plan(request, facts.multiprocessor_count)? {
+    if plan != scalar_dispatch_plan(request, facts.partition_reference)? {
         return Ok(plan);
     }
     let Some(candidate) = scalar_proof_plan(facts, request, operands)? else {
@@ -5345,7 +5345,7 @@ where
 {
     let facts = scalar_launch_facts(&ctx.kernels);
     let plan = scalar_launch_plan(facts, request, operands)?;
-    if plan != scalar_dispatch_plan(request, facts.multiprocessor_count)? {
+    if plan != scalar_dispatch_plan(request, facts.partition_reference)? {
         return Ok(plan);
     }
     let Some(candidate) = scalar_proof_plan(facts, request, operands)? else {
@@ -13721,7 +13721,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
         batch,
         n_in,
         n_out,
-        environment.kernels.multiprocessor_count(),
+        environment.kernels.partition_reference(),
     ) {
         let total_tiles = checked_tile_grid(checked_dims.m_u32, 128, checked_dims.n_u32, 128)?;
         let cfg = cudarc::driver::LaunchConfig {
@@ -13918,7 +13918,7 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
         batch,
         n_in,
         n_out,
-        environment.kernels.multiprocessor_count(),
+        environment.kernels.partition_reference(),
     ) {
         let alpha: f32 = 1.0;
         let m_red_i = checked_dims.m_i32;
@@ -14064,7 +14064,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
             batch,
             n_in,
             n_out,
-            environment.kernels.multiprocessor_count(),
+            environment.kernels.partition_reference(),
         )
     };
     if ((2..=127).contains(&n_out) || wide_narrow()) && batch >= 1 && n_in >= 1 {
@@ -14124,7 +14124,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
         batch,
         n_in,
         n_out,
-        environment.kernels.multiprocessor_count(),
+        environment.kernels.partition_reference(),
     ) {
         let alpha: f32 = 1.0;
         let m_i = checked_dims.m_i32;
@@ -17329,7 +17329,7 @@ mod prepared_f32_launch_tests {
             sm89_exact_f32_d128_compiler: None,
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (12, 0),
-            multiprocessor_count: 170,
+            partition_reference: 170,
         }
     }
 

@@ -8,14 +8,6 @@ src/gpu/gemm_bi_inference.rs	if compute_capability == (12, 0) && multiprocessors
 src/gpu/gemm_bi_inference.rs	if multiprocessors == 170 && (64..=1024).contains(&k) && matches!(cols, 1536 | 1928 | 2304) {
 src/gpu/gemm_bi_inference.rs	|| device.multiprocessors != 170
 src/gpu/gemm_bi_inference.rs	|| device.multiprocessors != 170
-src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 142
-src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 142
-src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 142
-src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 142
-src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 142
-src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 142
-src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 142
-src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 170
 src/gpu/gemm_bi_triad/modules.rs	&& multiprocessor_count == 170
 src/gpu/gemm_bi_triad/modules.rs	multiprocessor_count: 170,
 src/gpu/gemm_bi_triad/sm89_half_source.rs	&& context.multiprocessor_count == 142

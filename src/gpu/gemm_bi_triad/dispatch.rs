@@ -184,7 +184,7 @@ mod sm89_exact_f32_tn_admission_tests {
             sm89_exact_f32_d128_compiler: None,
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (8, 9),
-            multiprocessor_count: 142,
+            partition_reference: 142,
         }
     }
 
@@ -314,9 +314,6 @@ mod sm89_exact_f32_tn_admission_tests {
             let mut mutations = vec![missing];
             let mut mutation = base;
             mutation.compute_capability = (9, 0);
-            mutations.push(mutation);
-            mutation = base;
-            mutation.multiprocessor_count = 141;
             mutations.push(mutation);
             mutation = base;
             mutation.sm89_exact_f32_artifact = None;
@@ -520,7 +517,7 @@ mod sm89_exact_f32_d128_admission_tests {
             sm89_exact_f32_d128_compiler: Some(compiler),
             sm89_exact_f32_d128_symbols_loaded: [true; 2],
             compute_capability: (8, 9),
-            multiprocessor_count: 142,
+            partition_reference: 142,
         }
     }
 
@@ -603,19 +600,19 @@ mod sm89_exact_f32_d128_admission_tests {
                     "{route:?} is the proof candidate on {cc:?}"
                 );
             }
-            for multiprocessor_count in [84, 108, 132, 148, 170] {
+            for partition_reference in [84, 108, 132, 148, 170] {
                 let board = ScalarLaunchFacts {
                     compute_capability: (9, 0),
-                    multiprocessor_count,
+                    partition_reference,
                     ..ada
                 };
-                let expected = (scalar_dispatch_plan(request(dims), multiprocessor_count).unwrap()
+                let expected = (scalar_dispatch_plan(request(dims), partition_reference).unwrap()
                     == FALLBACK)
                     .then_some(selected);
                 assert_eq!(
                     scalar_proof_plan(board, request(dims), operands()).unwrap(),
                     expected,
-                    "{route:?} stands in for exactly the split it reproduces at {multiprocessor_count} SMs"
+                    "{route:?} stands in for exactly the split it reproduces at a partition reference of {partition_reference}"
                 );
             }
             let pre_ampere = ScalarLaunchFacts {
@@ -755,9 +752,6 @@ mod sm89_exact_f32_d128_admission_tests {
             mutations.push(mutation);
             mutation = base;
             mutation.compute_capability = (9, 0);
-            mutations.push(mutation);
-            mutation = base;
-            mutation.multiprocessor_count = 141;
             mutations.push(mutation);
             mutation = base;
             mutation.sm89_exact_f32_d128_artifact = None;
@@ -5394,20 +5388,21 @@ pub(super) fn splitm_tn_partition(
     batch: usize,
     n_in: usize,
     n_out: usize,
-    multiprocessor_count: u32,
+    partition_reference: u32,
 ) -> Result<Option<(usize, usize)>, String> {
     // No n_in floor: the partial kernel predicates K_out < 128 exactly
     // like the plain kernel, and a small-K dW against a large batch
     // reduction underfills the grid without the split (K_out=24, N=768
     // ran six CTAs). The split changes the dW summation order versus
     // the plain kernel; run-to-run and per-shape determinism hold — the
-    // partition is a pure function of the shape and immutable device size.
+    // partition is a pure function of the shape and the architecture's
+    // partition reference, so every card of the architecture folds alike.
     if !(n_out >= 128 && batch >= 256) {
         return Ok(None);
     }
-    let policy = scalar_wave_policy(multiprocessor_count)?;
+    let policy = scalar_wave_policy(partition_reference)?;
     let target_blocks = wave_target_blocks(
-        multiprocessor_count,
+        partition_reference,
         policy.tn_split_m_wave_numerator,
         policy.tn_split_m_wave_denominator,
     )?;
@@ -5521,7 +5516,9 @@ pub(super) struct ScalarLaunchFacts {
     pub sm89_exact_f32_d128_compiler: Option<CompilerIdentity>,
     pub sm89_exact_f32_d128_symbols_loaded: [bool; 2],
     pub compute_capability: (u32, u32),
-    pub multiprocessor_count: u32,
+    /// The architecture's partition reference, not the live SM count: the
+    /// scalar plans it feeds decide reduction orders.
+    pub partition_reference: u32,
 }
 
 /// How a scalar route measured on the Ada board is admitted on this one.
@@ -5695,7 +5692,6 @@ const SM89_EXACT_F32_D128_EVIDENCE_COHORTS: &[Sm89ExactF32D128QualificationIdent
 
 fn qualified_sm89_exact_f32_d128_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
-        && facts.multiprocessor_count == 142
         && SM89_EXACT_F32_D128_EVIDENCE_COHORTS
             .iter()
             .copied()
@@ -5704,7 +5700,6 @@ fn qualified_sm89_exact_f32_d128_environment(facts: ScalarLaunchFacts) -> bool {
 
 fn qualified_sm89_exact_f32_d128_candidate_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
-        && facts.multiprocessor_count == 142
         && SM89_EXACT_F32_D128_QUALIFICATION_CANDIDATES
             .iter()
             .copied()
@@ -5831,7 +5826,6 @@ const SM89_EXACT_F32_EVIDENCE_COHORTS: &[Sm89ExactF32QualificationIdentity] = &[
 
 fn qualified_sm89_exact_f32_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
-        && facts.multiprocessor_count == 142
         && SM89_EXACT_F32_EVIDENCE_COHORTS
             .iter()
             .copied()
@@ -5840,7 +5834,6 @@ fn qualified_sm89_exact_f32_environment(facts: ScalarLaunchFacts) -> bool {
 
 fn qualified_sm89_exact_f32_candidate_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
-        && facts.multiprocessor_count == 142
         && SM89_EXACT_F32_QUALIFICATION_CANDIDATES
             .iter()
             .copied()
@@ -6101,7 +6094,6 @@ const TN_M16N16_SPLITM16_SM89_BINDINGS: [ScalarTransposeQualificationIdentity; 3
 
 fn qualified_nt_inference_copyplan_sibling_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
-        && facts.multiprocessor_count == 142
         && NT_INFERENCE_COPYPLAN_COMPOSED_EVIDENCE_COHORTS
             .iter()
             .copied()
@@ -6110,7 +6102,6 @@ fn qualified_nt_inference_copyplan_sibling_environment(facts: ScalarLaunchFacts)
 
 fn qualified_scalar_sm89_ada142_tn_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
-        && facts.multiprocessor_count == 142
         && TN_M16N16_SPLITM16_SM89_BINDINGS
             .iter()
             .copied()
@@ -6173,13 +6164,12 @@ pub(super) fn scalar_sm89_composed_test_facts(index: usize) -> ScalarLaunchFacts
         sm89_exact_f32_d128_compiler: None,
         sm89_exact_f32_d128_symbols_loaded: [false; 2],
         compute_capability: (8, 9),
-        multiprocessor_count: 142,
+        partition_reference: 142,
     }
 }
 
 fn qualified_inference_copyplan_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (8, 9)
-        && facts.multiprocessor_count == 142
         && INFERENCE_COPYPLAN_EVIDENCE_COHORTS
             .iter()
             .copied()
@@ -6253,7 +6243,6 @@ const NT_PRISM_INFERENCE_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
 
 fn qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts: ScalarLaunchFacts) -> bool {
     facts.compute_capability == (12, 0)
-        && facts.multiprocessor_count == 170
         && facts.scalar_artifact.module_kind == ModuleKind::TriadScalar
         && facts.scalar_artifact.artifact_kind == facts.scalar_compiler.output_kind
         && facts.scalar_artifact.compile_key == facts.scalar_compiler.invocation_digest
@@ -6577,7 +6566,7 @@ fn sm89_exact_f32_d128_plan_for_route(
             1,
         ),
     };
-    let actual_fallback = scalar_dispatch_plan(request, facts.multiprocessor_count)?;
+    let actual_fallback = scalar_dispatch_plan(request, facts.partition_reference)?;
     let required_fallback = ScalarDispatchPlan::TnSplitM {
         m_chunk: 16,
         chunks: 64,
@@ -6668,7 +6657,7 @@ fn sm89_exact_f32_plan_for_route(
             2,
         ),
     };
-    let actual_fallback = scalar_dispatch_plan(request, facts.multiprocessor_count)?;
+    let actual_fallback = scalar_dispatch_plan(request, facts.partition_reference)?;
     let environment_ok = match admission {
         ScalarAdmission::Evidence => qualified_sm89_exact_f32_environment(facts),
         ScalarAdmission::Candidate => qualified_sm89_exact_f32_candidate_environment(facts),
@@ -6729,7 +6718,7 @@ pub(super) fn scalar_proof_plan(
     operands: F32TriadOperands,
 ) -> Result<Option<ScalarDispatchPlan>, String> {
     let plan = scalar_plan_with_admission(facts, request, operands, ScalarAdmission::Proof)?;
-    Ok((plan != scalar_dispatch_plan(request, facts.multiprocessor_count)?).then_some(plan))
+    Ok((plan != scalar_dispatch_plan(request, facts.partition_reference)?).then_some(plan))
 }
 
 fn scalar_plan_with_admission(
@@ -6738,7 +6727,7 @@ fn scalar_plan_with_admission(
     operands: F32TriadOperands,
     admission: ScalarAdmission,
 ) -> Result<ScalarDispatchPlan, String> {
-    let fallback = scalar_dispatch_plan(request, facts.multiprocessor_count)?;
+    let fallback = scalar_dispatch_plan(request, facts.partition_reference)?;
     for route in [
         super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route::D128InDirectFold,
         super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route::D128OutDirectFold,
@@ -7026,9 +7015,9 @@ fn slim_final(output_rows: usize, output_columns: usize) -> bool {
 }
 
 fn scalar_wave_policy(
-    multiprocessor_count: u32,
+    partition_reference: u32,
 ) -> Result<crate::gpu::kernel_identity::ScalarWavePolicy, String> {
-    if multiprocessor_count == 0 {
+    if partition_reference == 0 {
         return Err("scalar dispatch requires a nonzero multiprocessor count".into());
     }
     let policy = crate::gpu::kernel_identity::ScalarWavePolicy::current();
@@ -7043,33 +7032,33 @@ fn scalar_wave_policy(
 
 fn grid_below_waves(
     blocks: u32,
-    multiprocessor_count: u32,
+    partition_reference: u32,
     numerator: u64,
     denominator: u64,
 ) -> Result<bool, String> {
     let blocks = u64::from(blocks)
         .checked_mul(denominator)
         .ok_or_else(|| "scalar dispatch block-wave comparison overflows u64".to_string())?;
-    let target = u64::from(multiprocessor_count)
+    let target = u64::from(partition_reference)
         .checked_mul(numerator)
         .ok_or_else(|| "scalar dispatch SM-wave comparison overflows u64".to_string())?;
     Ok(blocks < target)
 }
 
 fn wave_target_blocks(
-    multiprocessor_count: u32,
+    partition_reference: u32,
     numerator: u64,
     denominator: u64,
 ) -> Result<u32, String> {
-    let scaled = u64::from(multiprocessor_count)
+    let scaled = u64::from(partition_reference)
         .checked_mul(numerator)
         .ok_or_else(|| "scalar dispatch target wave count overflows u64".to_string())?;
     u32::try_from(scaled.div_ceil(denominator))
         .map_err(|_| "scalar dispatch target block count exceeds u32::MAX".into())
 }
 
-fn scalar_nn_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDispatchPlan, String> {
-    let policy = scalar_wave_policy(multiprocessor_count)?;
+fn scalar_nn_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDispatchPlan, String> {
+    let policy = scalar_wave_policy(partition_reference)?;
     let (batch, n_in, n_out) = dims.tuple();
     if (1..32).contains(&batch) && (32..=2048).contains(&n_in) && n_out >= 32 {
         return Ok(ScalarDispatchPlan::NnUltraThin);
@@ -7088,7 +7077,7 @@ fn scalar_nn_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDis
     let plain_slim_blocks = checked_tile_grid(dims.m_u32, 128, dims.n_u32, 64)?;
     let underfill = grid_below_waves(
         plain_slim_blocks,
-        multiprocessor_count,
+        partition_reference,
         policy.thin_split_wave_numerator,
         policy.thin_split_wave_denominator,
     )?;
@@ -7133,7 +7122,7 @@ fn scalar_nn_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDis
             && plain_slim_blocks > 0
             && grid_below_waves(
                 plain_slim_blocks,
-                multiprocessor_count,
+                partition_reference,
                 policy.slim_split_wave_numerator,
                 policy.slim_split_wave_denominator,
             )?
@@ -7175,8 +7164,8 @@ pub(in crate::gpu) fn tc_half_policy_prefers_scalar_forward(
     })
 }
 
-fn scalar_tn_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDispatchPlan, String> {
-    scalar_wave_policy(multiprocessor_count)?;
+fn scalar_tn_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDispatchPlan, String> {
+    scalar_wave_policy(partition_reference)?;
     let (batch, n_in, n_out) = dims.tuple();
     // The GEMV kernel serves any batch and width: a warp per weight, lanes
     // past the batch add nothing.
@@ -7186,8 +7175,7 @@ fn scalar_tn_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDis
     if (2..=127).contains(&n_out) {
         return Ok(ScalarDispatchPlan::TnNarrow);
     }
-    if let Some((m_chunk, chunks)) = splitm_tn_partition(batch, n_in, n_out, multiprocessor_count)?
-    {
+    if let Some((m_chunk, chunks)) = splitm_tn_partition(batch, n_in, n_out, partition_reference)? {
         return Ok(ScalarDispatchPlan::TnSplitM { m_chunk, chunks });
     }
     if n_in >= 1 && n_out >= GEMM_CUSTOM_MIN {
@@ -7200,8 +7188,8 @@ fn scalar_tn_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDis
     ))
 }
 
-fn scalar_nt_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDispatchPlan, String> {
-    let policy = scalar_wave_policy(multiprocessor_count)?;
+fn scalar_nt_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDispatchPlan, String> {
+    let policy = scalar_wave_policy(partition_reference)?;
     let (batch, n_in, n_out) = dims.tuple();
     if (2..=127).contains(&n_out) {
         return Ok(ScalarDispatchPlan::NtNarrow);
@@ -7218,7 +7206,7 @@ fn scalar_nt_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDis
     let plain_slim_blocks = checked_tile_grid(dims.m_u32, 128, dims.k_u32, 64)?;
     let underfill = grid_below_waves(
         plain_slim_blocks,
-        multiprocessor_count,
+        partition_reference,
         policy.thin_split_wave_numerator,
         policy.thin_split_wave_denominator,
     )?;
@@ -7274,7 +7262,7 @@ fn scalar_nt_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDis
             && plain_slim_blocks > 0
             && grid_below_waves(
                 plain_slim_blocks,
-                multiprocessor_count,
+                partition_reference,
                 policy.slim_split_wave_numerator,
                 policy.slim_split_wave_denominator,
             )?
@@ -7297,20 +7285,20 @@ fn scalar_nt_plan(dims: GemmDims, multiprocessor_count: u32) -> Result<ScalarDis
 
 pub(super) fn scalar_dispatch_plan(
     request: F32TriadRequest,
-    multiprocessor_count: u32,
+    partition_reference: u32,
 ) -> Result<ScalarDispatchPlan, String> {
     request.shape.validate(request.op)?;
-    scalar_wave_policy(multiprocessor_count)?;
+    scalar_wave_policy(partition_reference)?;
     let dims = (request.shape.m, request.shape.k, request.shape.n);
     match request.op {
         crate::gpu::kernel_identity::ResolvedGemmOp::Nn => {
-            scalar_nn_plan(GemmDims::nn(dims, request.shape.lda)?, multiprocessor_count)
+            scalar_nn_plan(GemmDims::nn(dims, request.shape.lda)?, partition_reference)
         }
         crate::gpu::kernel_identity::ResolvedGemmOp::Tn => {
-            scalar_tn_plan(GemmDims::tn(dims)?, multiprocessor_count)
+            scalar_tn_plan(GemmDims::tn(dims)?, partition_reference)
         }
         crate::gpu::kernel_identity::ResolvedGemmOp::Nt => {
-            scalar_nt_plan(GemmDims::nt(dims)?, multiprocessor_count)
+            scalar_nt_plan(GemmDims::nt(dims)?, partition_reference)
         }
     }
 }
@@ -7319,10 +7307,10 @@ pub(super) fn nn_routes_to_big(
     batch: usize,
     n_in: usize,
     n_out: usize,
-    multiprocessor_count: u32,
+    partition_reference: u32,
 ) -> bool {
     GemmDims::nn((batch, n_in, n_out), n_in)
-        .and_then(|dims| scalar_nn_plan(dims, multiprocessor_count))
+        .and_then(|dims| scalar_nn_plan(dims, partition_reference))
         .is_ok_and(|plan| matches!(plan, ScalarDispatchPlan::NnFinal { slim: false }))
 }
 
@@ -7330,10 +7318,10 @@ pub(super) fn tn_routes_to_big(
     batch: usize,
     n_in: usize,
     n_out: usize,
-    multiprocessor_count: u32,
+    partition_reference: u32,
 ) -> bool {
     GemmDims::tn((batch, n_in, n_out))
-        .and_then(|dims| scalar_tn_plan(dims, multiprocessor_count))
+        .and_then(|dims| scalar_tn_plan(dims, partition_reference))
         .is_ok_and(|plan| matches!(plan, ScalarDispatchPlan::TnFinal { slim: false }))
 }
 
@@ -7341,10 +7329,10 @@ pub(super) fn nt_routes_to_big(
     batch: usize,
     n_in: usize,
     n_out: usize,
-    multiprocessor_count: u32,
+    partition_reference: u32,
 ) -> bool {
     GemmDims::nt((batch, n_in, n_out))
-        .and_then(|dims| scalar_nt_plan(dims, multiprocessor_count))
+        .and_then(|dims| scalar_nt_plan(dims, partition_reference))
         .is_ok_and(|plan| matches!(plan, ScalarDispatchPlan::NtFinal { slim: false }))
 }
 
@@ -7356,10 +7344,10 @@ pub(super) fn nt_routes_to_wide_narrow(
     batch: usize,
     n_in: usize,
     n_out: usize,
-    multiprocessor_count: u32,
+    partition_reference: u32,
 ) -> bool {
     GemmDims::nt((batch, n_in, n_out))
-        .and_then(|dims| scalar_nt_plan(dims, multiprocessor_count))
+        .and_then(|dims| scalar_nt_plan(dims, partition_reference))
         .is_ok_and(|plan| {
             matches!(
                 plan,
@@ -7521,7 +7509,7 @@ mod scalar_wave_policy_tests {
             sm89_exact_f32_d128_compiler: None,
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (8, 9),
-            multiprocessor_count: RTX_6000_ADA_SMS,
+            partition_reference: RTX_6000_ADA_SMS,
         }
     }
 
@@ -7586,7 +7574,7 @@ mod scalar_wave_policy_tests {
             sm89_exact_f32_d128_compiler: None,
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (12, 0),
-            multiprocessor_count: 170,
+            partition_reference: 170,
         }
     }
 
@@ -7676,7 +7664,7 @@ mod scalar_wave_policy_tests {
             sm89_exact_f32_d128_compiler: None,
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (8, 9),
-            multiprocessor_count: RTX_6000_ADA_SMS,
+            partition_reference: RTX_6000_ADA_SMS,
         }
     }
 
@@ -7844,7 +7832,7 @@ mod scalar_wave_policy_tests {
         }
         let mut mutations = [facts; 3];
         mutations[0].compute_capability = (8, 9);
-        mutations[1].multiprocessor_count = 169;
+        mutations[1].compute_capability = (10, 0);
         mutations[2].scalar_compiler.nvrtc_version = (13, 0);
         for mutation in mutations {
             assert_ne!(
@@ -7862,7 +7850,7 @@ mod scalar_wave_policy_tests {
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (128, 8_192, 128)),
         };
         let operands = nn_qualified_operands();
-        let fallback = scalar_dispatch_plan(request, facts.multiprocessor_count).unwrap();
+        let fallback = scalar_dispatch_plan(request, facts.partition_reference).unwrap();
         assert_eq!(fallback, ScalarDispatchPlan::NnSplitKThin);
         assert_eq!(
             scalar_launch_plan(facts, request, operands).unwrap(),
@@ -7961,7 +7949,7 @@ mod scalar_wave_policy_tests {
         let mut mutations = [facts; 13];
         mutations[0].compute_capability = (8, 9);
         mutations[1].compute_capability = (12, 1);
-        mutations[2].multiprocessor_count = 169;
+        mutations[2].compute_capability = (9, 0);
         mutations[3].scalar_compiler.nvrtc_version = (13, 0);
         mutations[4].scalar_compiler.target = CudaTarget::new("compute_121").unwrap();
         mutations[5].scalar_compiler.nvrtc_library_known = false;
@@ -8104,13 +8092,6 @@ mod scalar_wave_policy_tests {
         let mut wrong_arch = tn_admission_facts();
         wrong_arch.compute_capability = (12, 1);
         assert_eq!(admitted_tn_plan(wrong_arch, request, operands), fallback);
-
-        let mut wrong_sm_count = tn_admission_facts();
-        wrong_sm_count.multiprocessor_count = 169;
-        assert_eq!(
-            admitted_tn_plan(wrong_sm_count, request, operands),
-            fallback
-        );
 
         let mut wrong_nvrtc = tn_admission_facts();
         wrong_nvrtc.scalar_compiler.nvrtc_version = (13, 1);
@@ -8316,7 +8297,7 @@ mod scalar_wave_policy_tests {
         let facts = inference_copyplan_facts(2);
         let operands = nn_qualified_operands();
         let request = nn_qualified_request((2_048, 1_536, 768));
-        let fallback = scalar_dispatch_plan(request, facts.multiprocessor_count).unwrap();
+        let fallback = scalar_dispatch_plan(request, facts.partition_reference).unwrap();
         assert_eq!(fallback, ScalarDispatchPlan::NnFinal { slim: false });
         let transposed_unmeasured = nn_qualified_request((2_048, 3_072, 768));
         assert_ne!(
@@ -8436,9 +8417,6 @@ mod scalar_wave_policy_tests {
         let mut mutations = Vec::new();
         let mut mutation = facts;
         mutation.compute_capability = (9, 0);
-        mutations.push(mutation);
-        mutation = facts;
-        mutation.multiprocessor_count = 141;
         mutations.push(mutation);
         mutation = facts;
         mutation.inference_copyplan_loaded = false;
@@ -8681,7 +8659,7 @@ mod scalar_wave_policy_tests {
         };
         let selected = ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified;
         assert_eq!(
-            scalar_dispatch_plan(request, facts.multiprocessor_count).unwrap(),
+            scalar_dispatch_plan(request, facts.partition_reference).unwrap(),
             ScalarDispatchPlan::NtFinal { slim: false }
         );
         assert_eq!(
@@ -8850,7 +8828,7 @@ mod scalar_wave_policy_tests {
                     shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
                 };
                 assert_eq!(
-                    scalar_dispatch_plan(request, facts.multiprocessor_count).unwrap(),
+                    scalar_dispatch_plan(request, facts.partition_reference).unwrap(),
                     fallback,
                     "cohort {cohort} cell {dims:?} prior plan"
                 );
@@ -9037,9 +9015,6 @@ mod scalar_wave_policy_tests {
         let mut identity_mutations = Vec::new();
         let mut mutation = facts;
         mutation.compute_capability = (8, 8);
-        identity_mutations.push(mutation);
-        mutation = facts;
-        mutation.multiprocessor_count = 141;
         identity_mutations.push(mutation);
         mutation = facts;
         mutation.scalar_artifact.artifact_digest[0] ^= 1;
@@ -9244,7 +9219,7 @@ mod scalar_wave_policy_tests {
                     };
                     assert_eq!(
                         scalar_launch_plan(facts, neighbor, operands).unwrap(),
-                        scalar_dispatch_plan(neighbor, facts.multiprocessor_count).unwrap(),
+                        scalar_dispatch_plan(neighbor, facts.partition_reference).unwrap(),
                         "shape neighbor {neighbor:?} must retain prior AUTO"
                     );
                 }
@@ -9269,7 +9244,7 @@ mod scalar_wave_policy_tests {
                 };
                 assert_eq!(
                     scalar_launch_plan(facts, mutated, operands).unwrap(),
-                    scalar_dispatch_plan(mutated, facts.multiprocessor_count).unwrap(),
+                    scalar_dispatch_plan(mutated, facts.partition_reference).unwrap(),
                     "stride mutation {shape:?} must retain prior AUTO"
                 );
             }
@@ -9319,9 +9294,6 @@ mod scalar_wave_policy_tests {
             let mut environment_mutations = Vec::new();
             let mut mutation = facts;
             mutation.compute_capability = (9, 0);
-            environment_mutations.push(mutation);
-            mutation = facts;
-            mutation.multiprocessor_count = 141;
             environment_mutations.push(mutation);
             mutation = facts;
             mutation.inference_copyplan_loaded = false;
@@ -9514,9 +9486,6 @@ mod scalar_wave_policy_tests {
 
         let mut facts = tn_admission_facts();
         facts.compute_capability = (12, 1);
-        fact_mutations.push(facts);
-        let mut facts = tn_admission_facts();
-        facts.multiprocessor_count = 169;
         fact_mutations.push(facts);
         let mut facts = tn_admission_facts();
         facts.scalar_compiler.target = CudaTarget::new("compute_121").unwrap();
@@ -9755,9 +9724,6 @@ mod scalar_wave_policy_tests {
         wrong.compute_capability = (12, 1);
         fact_mutations.push(wrong);
         let mut wrong = facts;
-        wrong.multiprocessor_count = 169;
-        fact_mutations.push(wrong);
-        let mut wrong = facts;
         wrong.scalar_compiler.nvrtc_version = (13, 1);
         fact_mutations.push(wrong);
         let mut wrong = facts;
@@ -9822,9 +9788,6 @@ mod scalar_wave_policy_tests {
         fact_mutations.push(facts);
         let mut facts = tn_admission_facts();
         facts.compute_capability = (8, 9);
-        fact_mutations.push(facts);
-        let mut facts = tn_admission_facts();
-        facts.multiprocessor_count = 169;
         fact_mutations.push(facts);
         let mut facts = tn_admission_facts();
         facts.scalar_compiler.target = CudaTarget::new("compute_121").unwrap();
@@ -9940,9 +9903,6 @@ mod scalar_wave_policy_tests {
         facts.compute_capability = (8, 9);
         mutations.push(facts);
         let mut facts = tn_admission_facts();
-        facts.multiprocessor_count = 169;
-        mutations.push(facts);
-        let mut facts = tn_admission_facts();
         facts.scalar_compiler.target = CudaTarget::new("compute_89").unwrap();
         mutations.push(facts);
         let mut facts = tn_admission_facts();
@@ -10034,9 +9994,6 @@ mod scalar_wave_policy_tests {
         facts.compute_capability = (12, 1);
         facts_mutations.push(facts);
         let mut facts = tn_admission_facts();
-        facts.multiprocessor_count = 169;
-        facts_mutations.push(facts);
-        let mut facts = tn_admission_facts();
         facts.scalar_compiler.target = CudaTarget::new("compute_121").unwrap();
         facts_mutations.push(facts);
         let mut facts = tn_admission_facts();
@@ -10104,11 +10061,6 @@ mod scalar_wave_policy_tests {
         let mut facts = tn_admission_facts();
         facts.compute_capability = (12, 1);
         mutations.push(facts);
-        for count in [169, 171] {
-            let mut facts = tn_admission_facts();
-            facts.multiprocessor_count = count;
-            mutations.push(facts);
-        }
         let mut facts = tn_admission_facts();
         facts.scalar_artifact.module_kind = ModuleKind::TriadSm80;
         mutations.push(facts);
