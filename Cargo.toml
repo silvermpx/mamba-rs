@@ -50,7 +50,7 @@ required-features = ["qualification", "cuda"]
 default = []
 # half + bytemuck are needed by the cuda buffers (DtypedBuf bf16/f16 cast
 # helpers); they must be in scope for `cargo build --features cuda` alone.
-cuda = ["cudarc", "dep:half", "dep:bytemuck", "dep:sha2", "dep:libloading"]
+cuda = ["cudarc", "dep:half", "dep:bytemuck", "dep:sha2"]
 cuda-cublaslt-qualification = ["cuda", "cudarc/cublaslt"]
 # Distributed data-parallel over NCCL. The cudarc NCCL binding is pinned
 # to one wire version explicitly; the crate-and-libnccl pair must move
@@ -92,12 +92,6 @@ features = ["derive"]
 
 [dependencies.sha2]
 version = "0.10"
-optional = true
-
-# Opens the toolkit's nvJitLink at run time, the way cudarc opens NVRTC; the
-# same release cudarc already loads its libraries with.
-[dependencies.libloading]
-version = "0.9"
 optional = true
 
 [dependencies.serde]

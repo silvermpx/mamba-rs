@@ -90,12 +90,17 @@ gate a card:
 
 ## Toolkits and drivers
 
-- **The driver never decides bits.** The kernels are compiled to PTX by
-  NVRTC, and the toolkit's own assembler (nvJitLink, shipped beside NVRTC)
-  turns that PTX into machine code. The driver only loads it, so a box on
-  another driver build runs the same machine code. It is the code the
-  driver of the same release would produce, so nothing runs slower. A box
-  without nvJitLink falls back to the driver's assembler and says so.
+- **The driver assembles the machine code, and the bits do not depend on
+  it.** NVRTC compiles the kernels to PTX and the driver assembles the PTX
+  as one whole program, with the assembler its build carries. Assembling
+  through the toolkit's nvJitLink instead was measured on an RTX 5090 and
+  rejected: the linker assembles relocatable code, and 113 of the 128 SM120
+  GEMM kernels took more registers (up to 40 percent more). Every route of
+  the SM120 table still gave the same bits from both assemblers, because the
+  GEMM kernels round explicitly. Kernels that still carry `mul.f32`,
+  `add.f32` or `sub.f32` without a rounding mode (the Mamba scans and some
+  epilogues) leave the assembler free to fuse them; giving them explicit
+  rounding is the remaining step for bits that no driver can move.
 - **Measured toolkits keep their own tables.** Where the route tables were
   timed on CUDA 12.8, 13.0 and 13.2, each of those releases keeps exactly
   the routes it was measured with.

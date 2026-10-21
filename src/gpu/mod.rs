@@ -10,8 +10,7 @@
 //! - `device`: CUDA device and cuBLAS handle
 //! - `buffers`: GPU memory management
 //! - `kernels`, `kernel_identity`: NVRTC compilation and the frozen
-//!   identity of every compiled kernel; `toolkit_link` assembles the PTX
-//!   into machine code with the toolkit's own assembler
+//!   identity of every compiled kernel
 //! - `blas`: the GEMM dispatch boundary, the deterministic families in the
 //!   default mode and cuBLAS in the two vendor modes
 //! - `gemm_bi_inference`, `gemm_bi_triad`: the two deterministic families
@@ -47,7 +46,6 @@ pub mod kernels;
 pub mod launch;
 pub mod loss_scaler;
 pub mod options;
-pub(crate) mod toolkit_link;
 pub mod train;
 pub(crate) mod varlen;
 pub use crate::optim::train_state;

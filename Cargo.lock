@@ -1831,7 +1831,6 @@ dependencies = [
  "half",
  "hf-hub",
  "libc",
- "libloading",
  "pulp",
  "rayon",
  "safetensors",
