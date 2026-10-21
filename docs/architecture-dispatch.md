@@ -122,19 +122,22 @@ empty.
 
 ## Known gaps being repaired
 
-These places still bind a choice to one card or let the SM count move bits;
-they are the baseline's content and the repair removes them:
-- The SM89 exact-f32 identities and the SM89 half auto identity are pinned to
-  142 SMs; the SM120 scalar environment and the TN narrow split-M cells to
-  170.
-- `src/gpu/gemm_bi_inference.rs` admits several selectors only at exactly 170
-  or 142 SMs.
-- Stream-K deals its reduction over a grid of the live SM count, and the TN
-  split-M partition and the scalar split-K admission read it too, so those
-  routes still give different bits on cards of one architecture.
+No selection compares an SM count to a card's number any more (the
+`boards` baseline is empty). What remains:
+- Stream-K deals its reduction over a grid of the live SM count, so the
+  stream-K routes still give different bits on cards of one architecture.
+- Several measured cells and identities still pin the toolkit (an NVRTC
+  version or the artifact digests); a new toolkit reaches those routes only
+  through the first-use proof.
 - The SM90a and SM100 TF32 cohorts are empty: Hopper and datacenter
   Blackwell run the portable ladder until a tournament on one of their cards.
 
-Repaired: the TF32 evidence cohorts are keyed by architecture (one cohort per
-architecture, any SM count, toolkit or driver), and the SM120 exact-f32
-measured cells and generic boundary serve every SM120 card.
+Repaired:
+- the TF32 evidence cohorts are keyed by architecture (one cohort per
+  architecture, any SM count, toolkit or driver);
+- the SM120 exact-f32 measured cells and generic boundary serve every SM120
+  card;
+- the exact-family split decisions read the architecture's partition
+  reference (`architecture_partition_reference`), never the live count;
+- the Ada half cohort, the SM120 scalar resource check and every inference
+  selector serve every card of their architecture.

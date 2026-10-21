@@ -1298,10 +1298,7 @@ fn inference_pick_f32out_tile(
         return InferenceTile::Tc16;
     }
 
-    if device.compute_capability == (12, 0)
-        && device.multiprocessors == 170
-        && (rows, k, cols) == (4621, 1928, 384)
-    {
+    if device.compute_capability == (12, 0) && (rows, k, cols) == (4621, 1928, 384) {
         return InferenceTile::Tc64;
     }
 
@@ -2807,7 +2804,6 @@ fn inference_pick_tf32(
     // SHA256 908b0ffd1fd1e5127b51d7e440d530080a6bd07d985e2aa93720f095accd926a.
     if !sm120_tma
         && compute_capability == (8, 9)
-        && multiprocessors == 142
         && nvrtc_version == (13, 2)
         && nvrtc_library_known
         && matches!(
@@ -2818,7 +2814,7 @@ fn inference_pick_tf32(
         return InferenceTile::Tf32M64S2;
     }
     if sm120_tma {
-        if compute_capability == (12, 0) && multiprocessors == 170 && nvrtc_version == (13, 2) {
+        if compute_capability == (12, 0) && nvrtc_version == (13, 2) {
             match (rows, inner, cols, has_bias) {
                 // A0/A1 M128S2 beat prior AUTO and FAST_TF32 in all four
                 // 101-window eager/graph AFV/VFA cohorts (worst current p95
@@ -2872,7 +2868,6 @@ fn inference_pick_f32_exact(
     device: InferenceTileDevice,
 ) -> InferenceTile {
     if device.compute_capability == (12, 0)
-        && device.multiprocessors == 170
         && matches!((rows, k, cols), (4621, 384, 1928) | (4621, 768, 2304))
     {
         InferenceTile::F32N128S2
@@ -3186,11 +3181,10 @@ fn launch_tf32_wide<O: PhysicalLaunchObserver>(
 fn inference_sm120_pair_store_schedule_cell(
     dims: (usize, usize, usize),
     compute_capability: (u32, u32),
-    multiprocessors: u32,
     nvrtc_version: (i32, i32),
     output_aligned: bool,
 ) -> bool {
-    if compute_capability != (12, 0) || multiprocessors != 170 || !output_aligned {
+    if compute_capability != (12, 0) || !output_aligned {
         return false;
     }
     match nvrtc_version {
@@ -3238,7 +3232,6 @@ fn launch_sm120_tf32<O: PhysicalLaunchObserver>(
                 && inference_sm120_pair_store_schedule_cell(
                     (args.m as usize, args.k as usize, args.n as usize),
                     ctx.compute_capability(),
-                    ctx.kernels.multiprocessor_count(),
                     ctx.kernels.compiler_identity().nvrtc_version,
                     args.c.is_multiple_of(8),
                 );
@@ -3339,7 +3332,6 @@ fn inference_pick_sm120_half_exact(
     device: InferenceSm120HalfExactDevice,
 ) -> Option<InferenceSm120HalfTile> {
     if device.compute_capability != (12, 0)
-        || device.multiprocessors != 170
         || device.nvrtc_version != (13, 2)
         || !request.output_aligned
     {
@@ -3423,7 +3415,7 @@ fn inference_pick_sm120_half(
         });
     }
 
-    if multiprocessors == 170 && (64..=1024).contains(&k) && matches!(cols, 1536 | 1928 | 2304) {
+    if (64..=1024).contains(&k) && matches!(cols, 1536 | 1928 | 2304) {
         let Some(c_grid) = rows.div_ceil(64).checked_mul(cols.div_ceil(64)) else {
             return Some(InferenceSm120HalfTile::M64N64Bk64S2);
         };
@@ -3482,10 +3474,7 @@ fn inference_pick_sm120_f32out(
         return None;
     }
     let fallback = inference_pick_sm120_half(rows, cols, k, device.multiprocessors);
-    if device.compute_capability != (12, 0)
-        || device.multiprocessors != 170
-        || device.nvrtc_version != (13, 2)
-    {
+    if device.compute_capability != (12, 0) || device.nvrtc_version != (13, 2) {
         return fallback;
     }
     match (rows, k, cols) {
@@ -5828,7 +5817,6 @@ fn inference_sm120_tma_fma_force_eligible(
 ) -> bool {
     nvrtc_library_known
         && nvrtc == (13, 2)
-        && device.multiprocessors == 170
         && inference_sm120_tma_fma_force_physical_eligible(operands, shape, device, policy, tile)
 }
 
@@ -5858,7 +5846,6 @@ fn inference_sm120_exact_n64_auto_eligible(
         && nvrtc_library_known
         && nvrtc == (13, 2)
         && device.compute_capability == (12, 0)
-        && device.multiprocessors == 170
         && policy == super::context::F32TriadPolicy::ExactScalarFma
         && [operands.c, operands.x, operands.w]
             .into_iter()
@@ -5981,29 +5968,22 @@ mod sm120_exact_n64_auto_tests {
                     None
                 );
             }
-            for device in [
-                InferenceTileDevice {
-                    multiprocessors: 169,
-                    ..DEVICE
-                },
-                InferenceTileDevice {
-                    compute_capability: (12, 1),
-                    ..DEVICE
-                },
-            ] {
-                assert_eq!(
-                    pick(
-                        operands(true),
-                        shape,
-                        device,
-                        (13, 2),
-                        true,
-                        true,
-                        F32TriadPolicy::ExactScalarFma
-                    ),
-                    None
-                );
-            }
+            let gb10 = InferenceTileDevice {
+                compute_capability: (12, 1),
+                ..DEVICE
+            };
+            assert_eq!(
+                pick(
+                    operands(true),
+                    shape,
+                    gb10,
+                    (13, 2),
+                    true,
+                    true,
+                    F32TriadPolicy::ExactScalarFma
+                ),
+                None
+            );
             for bad in [
                 InferenceFwdOperands {
                     c: TypedPtr {
@@ -6460,17 +6440,6 @@ mod sm120_exact_n64_auto_tests {
             (
                 operands(false),
                 shape,
-                InferenceTileDevice {
-                    multiprocessors: 169,
-                    ..DEVICE
-                },
-                (13, 2),
-                true,
-                F32TriadPolicy::ExactScalarFma,
-            ),
-            (
-                operands(false),
-                shape,
                 DEVICE,
                 (13, 1),
                 true,
@@ -6688,24 +6657,6 @@ mod sm120_exact_n64_auto_tests {
                 true,
                 F32TriadPolicy::ExactScalarFma,
             ),
-            (
-                InferenceTileDevice {
-                    multiprocessors: 169,
-                    ..DEVICE
-                },
-                (13, 2),
-                true,
-                F32TriadPolicy::ExactScalarFma,
-            ),
-            (
-                InferenceTileDevice {
-                    multiprocessors: 171,
-                    ..DEVICE
-                },
-                (13, 2),
-                true,
-                F32TriadPolicy::ExactScalarFma,
-            ),
             (DEVICE, (12, 8), true, F32TriadPolicy::ExactScalarFma),
             (DEVICE, (13, 3), true, F32TriadPolicy::ExactScalarFma),
             (DEVICE, (13, 2), false, F32TriadPolicy::ExactScalarFma),
@@ -6837,8 +6788,9 @@ mod sm120_exact_n64_auto_tests {
                 F32TriadPolicy::ExactScalarFma,
             ));
         }
-        for multiprocessors in [0, 1, 142, 169, 171] {
-            assert!(!eligible(
+        // Every SM120 card takes the qualified rows, whatever its SM count.
+        for multiprocessors in [84, 169, 171, 188] {
+            assert!(eligible(
                 ops,
                 shape,
                 InferenceTileDevice {
@@ -7720,77 +7672,54 @@ mod pair_store_schedule_tests {
             assert!(inference_sm120_pair_store_schedule_cell(
                 cell,
                 (12, 0),
-                170,
                 (13, 0),
                 true,
             ));
             assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0 + 1, cell.1, cell.2),
                 (12, 0),
-                170,
                 (13, 0),
                 true,
             ));
             assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0 - 1, cell.1, cell.2),
                 (12, 0),
-                170,
                 (13, 0),
                 true,
             ));
             assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0, cell.1 + 1, cell.2),
                 (12, 0),
-                170,
                 (13, 0),
                 true,
             ));
             assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0, cell.1 - 1, cell.2),
                 (12, 0),
-                170,
                 (13, 0),
                 true,
             ));
             assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0, cell.1, cell.2 + 1),
                 (12, 0),
-                170,
                 (13, 0),
                 true,
             ));
             assert!(!inference_sm120_pair_store_schedule_cell(
                 (cell.0, cell.1, cell.2 - 1),
                 (12, 0),
-                170,
                 (13, 0),
                 true,
             ));
             assert!(!inference_sm120_pair_store_schedule_cell(
                 cell,
                 (12, 1),
-                170,
                 (13, 0),
                 true,
             ));
             assert!(!inference_sm120_pair_store_schedule_cell(
                 cell,
                 (12, 0),
-                171,
-                (13, 0),
-                true,
-            ));
-            assert!(!inference_sm120_pair_store_schedule_cell(
-                cell,
-                (12, 0),
-                169,
-                (13, 0),
-                true,
-            ));
-            assert!(!inference_sm120_pair_store_schedule_cell(
-                cell,
-                (12, 0),
-                170,
                 (13, 0),
                 false,
             ));
@@ -7798,21 +7727,18 @@ mod pair_store_schedule_tests {
         assert!(!inference_sm120_pair_store_schedule_cell(
             (4621, 768, 2304),
             (12, 0),
-            170,
             (12, 8),
             true,
         ));
         assert!(inference_sm120_pair_store_schedule_cell(
             (2048, 768, 2304),
             (12, 0),
-            170,
             (12, 8),
             true,
         ));
         assert!(inference_sm120_pair_store_schedule_cell(
             (2048, 2304, 768),
             (12, 0),
-            170,
             (12, 8),
             true,
         ));
@@ -7820,7 +7746,6 @@ mod pair_store_schedule_tests {
             assert!(!inference_sm120_pair_store_schedule_cell(
                 cell,
                 (12, 0),
-                170,
                 (12, 8),
                 true,
             ));
@@ -7828,21 +7753,18 @@ mod pair_store_schedule_tests {
         assert!(!inference_sm120_pair_store_schedule_cell(
             (2048, 768, 2304),
             (12, 0),
-            170,
             (12, 7),
             true,
         ));
         assert!(!inference_sm120_pair_store_schedule_cell(
             (2048, 768, 2304),
             (12, 0),
-            170,
             (13, 2),
             true,
         ));
         assert!(!inference_sm120_pair_store_schedule_cell(
             (2048, 768, 2304),
             (12, 0),
-            170,
             (13, 1),
             true,
         ));
@@ -8278,14 +8200,6 @@ mod tests {
                     ..qualified_device
                 },
                 InferenceSm120HalfExactDevice {
-                    multiprocessors: 169,
-                    ..qualified_device
-                },
-                InferenceSm120HalfExactDevice {
-                    multiprocessors: 171,
-                    ..qualified_device
-                },
-                InferenceSm120HalfExactDevice {
                     nvrtc_version: (13, 1),
                     ..qualified_device
                 },
@@ -8444,8 +8358,8 @@ mod tests {
             (1536, 1928, 520, 170, c),
             (4096, 1536, 512, 170, c),
             (4096, 1536, 520, 170, a),
-            (1536, 1536, 768, 169, c),
-            (1536, 1536, 768, 171, c),
+            (1536, 1536, 768, 169, a),
+            (1536, 1536, 768, 171, a),
         ];
 
         for (rows, cols, k, sms, expected) in cases {
@@ -8458,7 +8372,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_f32_selector_promotes_only_measured_cc120_170_sm_points() {
+    fn exact_f32_selector_promotes_only_measured_cc120_points() {
         let measured_device = InferenceTileDevice {
             multiprocessors: 170,
             compute_capability: (12, 0),
@@ -8496,14 +8410,6 @@ mod tests {
         }
 
         for device in [
-            InferenceTileDevice {
-                multiprocessors: 169,
-                compute_capability: (12, 0),
-            },
-            InferenceTileDevice {
-                multiprocessors: 171,
-                compute_capability: (12, 0),
-            },
             InferenceTileDevice {
                 multiprocessors: 170,
                 compute_capability: (12, 1),
@@ -8596,7 +8502,6 @@ mod tests {
                 (2049, 768, 2304, 170, (12, 0), (13, 2), true),
                 (2048, 769, 2304, 170, (12, 0), (13, 2), true),
                 (2048, 768, 2305, 170, (12, 0), (13, 2), true),
-                (2048, 768, 2304, 169, (12, 0), (13, 2), true),
                 (2048, 768, 2304, 170, (12, 1), (13, 2), true),
                 (2048, 768, 2304, 170, (12, 0), (12, 8), true),
                 (2048, 768, 2304, 170, (12, 0), (13, 0), true),
@@ -8659,6 +8564,7 @@ mod tests {
                 "unqualified compiler {nvrtc_version:?} must not use the promoted pair-store schedule"
             );
         }
+        // Every SM120 card takes the measured cell, whatever its SM count.
         assert_eq!(
             inference_pick_tf32(
                 (4621, 768, 2304),
@@ -8672,7 +8578,7 @@ mod tests {
                 false,
                 true
             ),
-            InferenceTile::Tf32Sm120M64S2
+            InferenceTile::Tf32Sm120M128S2
         );
         assert_eq!(
             inference_pick_tf32(
@@ -8743,7 +8649,6 @@ mod tests {
                 (4622, 384, 1928, 170, (12, 0), (13, 2), true, true, true),
                 (4621, 388, 1928, 170, (12, 0), (13, 2), true, true, true),
                 (4621, 384, 1932, 170, (12, 0), (13, 2), true, true, true),
-                (4621, 384, 1928, 169, (12, 0), (13, 2), true, true, true),
                 (4621, 384, 1928, 170, (12, 1), (13, 2), true, true, true),
                 (4621, 384, 1928, 170, (12, 0), (12, 8), true, true, true),
                 (4621, 384, 1928, 170, (12, 0), (13, 0), true, true, true),
@@ -8881,8 +8786,6 @@ mod tests {
                 (4621, 1929, 384, 142, (8, 9), (13, 2), true),
                 (4621, 1928, 383, 142, (8, 9), (13, 2), true),
                 (4621, 1928, 385, 142, (8, 9), (13, 2), true),
-                (4621, 1928, 384, 141, (8, 9), (13, 2), true),
-                (4621, 1928, 384, 143, (8, 9), (13, 2), true),
                 (4621, 1928, 384, 142, (8, 8), (13, 2), true),
                 (4621, 1928, 384, 142, (9, 0), (13, 2), true),
                 (4621, 1928, 384, 142, (8, 9), (12, 8), true),
