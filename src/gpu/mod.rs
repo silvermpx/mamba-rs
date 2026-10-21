@@ -10,7 +10,9 @@
 //! - `device`: CUDA device and cuBLAS handle
 //! - `buffers`: GPU memory management
 //! - `kernels`, `kernel_identity`: NVRTC compilation and the frozen
-//!   identity of every compiled kernel
+//!   identity of every compiled kernel; `ptx_rounding` gives every
+//!   floating-point add, subtract and multiply its rounding before the
+//!   driver assembles a module
 //! - `blas`: the GEMM dispatch boundary, the deterministic families in the
 //!   default mode and cuBLAS in the two vendor modes
 //! - `gemm_bi_inference`, `gemm_bi_triad`: the two deterministic families
@@ -46,6 +48,7 @@ pub mod kernels;
 pub mod launch;
 pub mod loss_scaler;
 pub mod options;
+pub(crate) mod ptx_rounding;
 pub mod train;
 pub(crate) mod varlen;
 pub use crate::optim::train_state;

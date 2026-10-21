@@ -252,7 +252,9 @@ impl DriverModule {
     fn load(ctx: &CudaContext, ptx: &str) -> Result<Self, String> {
         ctx.bind_to_thread()
             .map_err(|error| format!("bind CUDA context for Driver ABI census: {error:?}"))?;
-        let image = CString::new(ptx)
+        // The census reads the machine code the module runs, so it loads the
+        // same rounding-pinned PTX the module does.
+        let image = CString::new(crate::gpu::ptx_rounding::pin_rounding(ptx.to_owned()))
             .map_err(|_| "canonical PTX contains an interior NUL byte".to_string())?;
         let raw = unsafe {
             cudarc::driver::result::module::load_data(image.as_ptr().cast::<c_void>())
@@ -860,9 +862,9 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             &src,
         )
         .is_ok()
-        && let Ok(module) = request
-            .ctx
-            .load_module(cudarc::nvrtc::Ptx::from_src(src.clone()))
+        && let Ok(module) = request.ctx.load_module(cudarc::nvrtc::Ptx::from_src(
+            crate::gpu::ptx_rounding::pin_rounding(src.clone()),
+        ))
         && crate::gpu::kernel_identity::cache_hit_header_closure_is_current(
             combined.as_bytes(),
             &include_paths,
@@ -1182,7 +1184,9 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             }
             let module = request
                 .ctx
-                .load_module(cudarc::nvrtc::Ptx::from_src(ptx_source))
+                .load_module(cudarc::nvrtc::Ptx::from_src(
+                    crate::gpu::ptx_rounding::pin_rounding(ptx_source),
+                ))
                 .map_err(|error| {
                     format!("{:?} module load failed: {error:?}", request.module_kind)
                 })?;
@@ -1798,7 +1802,9 @@ fn probe_sm100_target(
     let ptx = crate::gpu::kernel_identity::canonical_ptx_image(bytes)?;
     validate_sm100_probe_ptx(candidate.nvrtc_arch, &ptx)?;
     let module = ctx
-        .load_module(cudarc::nvrtc::Ptx::from_src(ptx))
+        .load_module(cudarc::nvrtc::Ptx::from_src(
+            crate::gpu::ptx_rounding::pin_rounding(ptx),
+        ))
         .map_err(|error| format!("TriadSm100 target probe load failed: {error:?}"))?;
     module
         .load_function("tcgen05_probe")
