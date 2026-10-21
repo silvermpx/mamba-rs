@@ -252,8 +252,9 @@ impl DriverModule {
     fn load(ctx: &CudaContext, ptx: &str) -> Result<Self, String> {
         ctx.bind_to_thread()
             .map_err(|error| format!("bind CUDA context for Driver ABI census: {error:?}"))?;
-        let image = CString::new(ptx)
-            .map_err(|_| "canonical PTX contains an interior NUL byte".to_string())?;
+        // The census reads the machine code the module runs, so it loads the
+        // same image the module does.
+        let image = crate::gpu::toolkit_link::load_image(ctx, ptx)?;
         let raw = unsafe {
             cudarc::driver::result::module::load_data(image.as_ptr().cast::<c_void>())
         }
@@ -860,9 +861,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             &src,
         )
         .is_ok()
-        && let Ok(module) = request
-            .ctx
-            .load_module(cudarc::nvrtc::Ptx::from_src(src.clone()))
+        && let Ok(module) = crate::gpu::toolkit_link::load_ptx_module(request.ctx, src.clone())
         && crate::gpu::kernel_identity::cache_hit_header_closure_is_current(
             combined.as_bytes(),
             &include_paths,
@@ -1180,11 +1179,9 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                     ptx_source.as_bytes(),
                 );
             }
-            let module = request
-                .ctx
-                .load_module(cudarc::nvrtc::Ptx::from_src(ptx_source))
+            let module = crate::gpu::toolkit_link::load_ptx_module(request.ctx, ptx_source)
                 .map_err(|error| {
-                    format!("{:?} module load failed: {error:?}", request.module_kind)
+                    format!("{:?} module load failed: {error}", request.module_kind)
                 })?;
             (
                 module,
@@ -1797,9 +1794,8 @@ fn probe_sm100_target(
         .ok_or_else(|| "TriadSm100 target probe returned no PTX image".to_string())?;
     let ptx = crate::gpu::kernel_identity::canonical_ptx_image(bytes)?;
     validate_sm100_probe_ptx(candidate.nvrtc_arch, &ptx)?;
-    let module = ctx
-        .load_module(cudarc::nvrtc::Ptx::from_src(ptx))
-        .map_err(|error| format!("TriadSm100 target probe load failed: {error:?}"))?;
+    let module = crate::gpu::toolkit_link::load_ptx_module(ctx, ptx)
+        .map_err(|error| format!("TriadSm100 target probe load failed: {error}"))?;
     module
         .load_function("tcgen05_probe")
         .map_err(|error| format!("TriadSm100 target probe symbol failed: {error:?}"))?;

@@ -915,7 +915,7 @@ fn loaded_library_domain(needle: &str) -> Option<Sha256Digest> {
     )
 }
 
-fn unique_loaded_library_path(needle: &str) -> Option<PathBuf> {
+pub(crate) fn unique_loaded_library_path(needle: &str) -> Option<PathBuf> {
     let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
     let mut paths = BTreeSet::new();
     for line in maps.lines() {

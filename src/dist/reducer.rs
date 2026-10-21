@@ -119,9 +119,8 @@ impl DetReduceKernel {
         let ptx = cudarc::nvrtc::compile_ptx_with_opts(DET_SUM_RANKS_SRC, opts)
             .map_err(|e| DistError::Transport(format!("NVRTC det_sum_ranks: {e:?}")))?;
         let ctx = device.context().clone();
-        let module = ctx
-            .load_module(ptx)
-            .map_err(|e| DistError::Transport(format!("det_sum_ranks module load: {e:?}")))?;
+        let module = crate::gpu::toolkit_link::load_ptx_module(&ctx, ptx.to_src())
+            .map_err(|e| DistError::Transport(format!("det_sum_ranks module load: {e}")))?;
         let func = module
             .load_function("det_sum_ranks")
             .map_err(|e| DistError::Transport(format!("det_sum_ranks lookup: {e:?}")))?;
