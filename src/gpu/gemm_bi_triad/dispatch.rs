@@ -965,40 +965,33 @@ fn tf32_auto_operands_match(op: ResolvedGemmOp, operands: F32TriadOperands) -> b
             .all(|pointer| pointer != 0 && pointer.is_multiple_of(16))
 }
 
+/// The architecture a frozen TF32 evidence cohort belongs to. Evidence
+/// belongs to an architecture, not to the card it was measured on: it serves
+/// any module of the same kind, built by this tree's composer, compiler and
+/// numeric ABI, on a device of the same compute-capability family that offers
+/// at least the shared memory the measuring card offered. The card's SM count,
+/// the toolkit, the driver and the exact bytes the toolkit produced never
+/// decide who may use it (docs/architecture-dispatch.md); each cohort's
+/// comment records where its tournament ran.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Tf32AutoQualificationIdentity {
+struct Tf32EvidenceArchitecture {
     module_kind: ModuleKind,
-    module_target: &'static str,
-    device_target: &'static str,
     compute_capability: (u32, u32),
-    multiprocessor_count: u32,
-    nvrtc_version: (i32, i32),
     optin_shared_bytes: u32,
     tensor_map_access: bool,
-    compile_key: [u8; 32],
-    artifact_digest: [u8; 32],
-    source_digest: [u8; 32],
-    invocation_digest: [u8; 32],
-    header_manifest_digest: [u8; 32],
-    nvrtc_library_domain: [u8; 32],
 }
 
-impl Tf32AutoQualificationIdentity {
+impl Tf32EvidenceArchitecture {
     fn matches(self, module: Tf32QualifiedModule) -> bool {
         self.mismatch(module).is_none()
     }
 
-    /// The first identity field the bound module does not satisfy, or `None`
-    /// when the cohort applies to it. A decline on this path used to be a bare
-    /// `None`; the field name is what tells a wrong board, a moved toolkit and
-    /// an edited kernel apart.
+    /// The first check that keeps this evidence from the bound module, or
+    /// `None` when the evidence serves it. The check's name tells a module of
+    /// another architecture from one this tree did not build.
     fn mismatch(self, module: Tf32QualifiedModule) -> Option<&'static str> {
-        let checks: [(&'static str, bool); 28] = [
+        let checks: [(&'static str, bool); 15] = [
             ("module kind", module.module_kind == self.module_kind),
-            (
-                "module target",
-                module.target.as_str() == self.module_target,
-            ),
             (
                 "artifact module kind",
                 module.artifact.module_kind == self.module_kind,
@@ -1008,42 +1001,10 @@ impl Tf32AutoQualificationIdentity {
                 module.artifact.artifact_kind == ArtifactKind::Ptx,
             ),
             (
-                "compile key",
-                module.artifact.compile_key == self.compile_key,
-            ),
-            (
-                "artifact digest",
-                module.artifact.artifact_digest == self.artifact_digest,
-            ),
-            (
-                "source digest",
-                module.compiler.source_digest == self.source_digest,
-            ),
-            (
-                "invocation digest",
-                module.compiler.invocation_digest == self.invocation_digest,
-            ),
-            (
-                "header manifest digest",
-                module.compiler.header_manifest_digest == self.header_manifest_digest,
-            ),
-            (
-                "compiler target",
-                module.compiler.target.as_str() == self.module_target,
-            ),
-            (
-                "nvrtc version",
-                module.compiler.nvrtc_version == self.nvrtc_version,
-            ),
-            (
-                "nvrtc library domain",
-                module.compiler.nvrtc_library_domain == self.nvrtc_library_domain,
-            ),
-            ("nvrtc library known", module.compiler.nvrtc_library_known),
-            (
                 "compiler output kind",
                 module.compiler.output_kind == ArtifactKind::Ptx,
             ),
+            ("nvrtc library known", module.compiler.nvrtc_library_known),
             (
                 "composer revision",
                 module.compiler.composer_revision == COMPOSER_REVISION,
@@ -1060,43 +1021,30 @@ impl Tf32AutoQualificationIdentity {
                 "schedule revision",
                 module.compiler.schedule_revision == SCHEDULE_REVISION,
             ),
-            (
-                "device compute capability",
-                module.device.compute_capability == self.compute_capability,
-            ),
-            (
-                "multiprocessor count",
-                module.device.multiprocessor_count == self.multiprocessor_count,
-            ),
-            (
-                "device target",
-                module.device.target.as_str() == self.device_target,
-            ),
-            (
-                "caps compute capability",
-                module.device_caps.compute_capability == self.compute_capability,
-            ),
-            (
-                "caps nvrtc version",
-                module.device_caps.nvrtc_version == self.nvrtc_version,
-            ),
+            ("compiler target", module.compiler.target == module.target),
             (
                 "accepted target",
-                module
-                    .device_caps
-                    .accepted_target
-                    .is_some_and(|target| target.as_str() == self.module_target),
+                module.device_caps.accepted_target == Some(module.target),
+            ),
+            (
+                "device architecture",
+                same_architecture(module.device.compute_capability, self.compute_capability),
+            ),
+            (
+                "caps architecture",
+                same_architecture(
+                    module.device_caps.compute_capability,
+                    self.compute_capability,
+                ),
             ),
             (
                 "opt-in shared bytes",
-                module.device_caps.optin_shared_bytes == self.optin_shared_bytes,
+                module.device_caps.optin_shared_bytes >= self.optin_shared_bytes,
             ),
             (
                 "tensor map access",
-                module.device_caps.tensor_map_access == self.tensor_map_access,
+                module.device_caps.tensor_map_access || !self.tensor_map_access,
             ),
-            ("cohort compute capability", true),
-            ("cohort multiprocessor count", true),
         ];
         checks
             .into_iter()
@@ -1105,297 +1053,38 @@ impl Tf32AutoQualificationIdentity {
     }
 }
 
-const SM89_TF32_QUALIFIED_TUNING_REVISION: u16 = F32_TF32_TUNING_REVISION;
-const SM89_TF32_QUALIFICATION_IDENTITY: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm80,
-        module_target: "sm_89",
-        device_target: "sm_89",
-        compute_capability: (8, 9),
-        multiprocessor_count: 142,
-        nvrtc_version: (13, 2),
-        optin_shared_bytes: 101376,
-        tensor_map_access: false,
-        compile_key: [
-            107, 159, 227, 129, 195, 124, 108, 154, 123, 156, 99, 68, 81, 108, 22, 251, 198, 29,
-            127, 97, 242, 163, 153, 234, 246, 164, 13, 54, 8, 127, 92, 145,
-        ],
-        artifact_digest: [
-            231, 99, 117, 186, 165, 73, 173, 147, 139, 253, 100, 157, 179, 177, 141, 194, 9, 186,
-            31, 129, 80, 137, 188, 70, 88, 199, 54, 207, 33, 253, 209, 50,
-        ],
-        source_digest: [
-            50, 13, 224, 95, 151, 71, 128, 115, 170, 111, 113, 10, 168, 54, 132, 169, 93, 239, 203,
-            246, 80, 206, 55, 37, 18, 114, 164, 132, 173, 17, 113, 68,
-        ],
-        invocation_digest: [
-            107, 159, 227, 129, 195, 124, 108, 154, 123, 156, 99, 68, 81, 108, 22, 251, 198, 29,
-            127, 97, 242, 163, 153, 234, 246, 164, 13, 54, 8, 127, 92, 145,
-        ],
-        header_manifest_digest: [
-            196, 91, 169, 154, 3, 92, 71, 60, 50, 151, 5, 130, 146, 233, 70, 16, 235, 186, 65, 10,
-            55, 47, 203, 8, 163, 115, 184, 229, 128, 49, 73, 185,
-        ],
-        nvrtc_library_domain: [
-            208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
-            34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
-        ],
-    };
-
-const fn sm89_observed_tf32_identity(
-    module_kind: ModuleKind,
-    nvrtc_version: (i32, i32),
-    compile_key: [u8; 32],
-    artifact_digest: [u8; 32],
-    source_digest: [u8; 32],
-    header_manifest_digest: [u8; 32],
-    nvrtc_library_domain: [u8; 32],
-) -> Tf32AutoQualificationIdentity {
-    Tf32AutoQualificationIdentity {
-        module_kind,
-        module_target: "sm_89",
-        device_target: "sm_89",
-        compute_capability: (8, 9),
-        multiprocessor_count: 142,
-        nvrtc_version,
-        optin_shared_bytes: 101_376,
-        tensor_map_access: false,
-        compile_key,
-        artifact_digest,
-        source_digest,
-        invocation_digest: compile_key,
-        header_manifest_digest,
-        nvrtc_library_domain,
-    }
+/// Whether two compute capabilities are one architecture for frozen
+/// evidence: the same capability, or two of the SM120 family, whose cards
+/// share the instruction set the SM120 module compiles for.
+fn same_architecture(device: (u32, u32), evidence: (u32, u32)) -> bool {
+    device == evidence
+        || (crate::gpu::device::is_sm120_family(device)
+            && crate::gpu::device::is_sm120_family(evidence))
 }
 
-const SM89_JOINT_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
-    sm89_observed_tf32_identity(
-        ModuleKind::TriadSm89Tf32Joint,
-        (12, 8),
-        [
-            38, 120, 158, 65, 113, 234, 0, 134, 247, 88, 82, 19, 108, 131, 123, 124, 174, 35, 244,
-            229, 104, 25, 37, 193, 42, 234, 233, 45, 233, 213, 69, 143,
-        ],
-        [
-            32, 9, 60, 190, 133, 34, 85, 212, 66, 205, 249, 2, 13, 155, 178, 103, 91, 104, 162,
-            182, 86, 120, 41, 29, 109, 122, 244, 222, 21, 227, 76, 63,
-        ],
-        [
-            68, 88, 41, 196, 70, 172, 249, 9, 15, 206, 255, 38, 102, 62, 75, 212, 77, 239, 164,
-            222, 68, 43, 140, 66, 55, 249, 30, 9, 111, 213, 52, 172,
-        ],
-        [
-            228, 19, 82, 239, 126, 18, 192, 138, 226, 178, 85, 167, 49, 183, 184, 218, 99, 236,
-            165, 56, 90, 110, 24, 165, 76, 194, 66, 96, 149, 80, 105, 95,
-        ],
-        [
-            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
-            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
-        ],
-    );
+const SM89_TF32_QUALIFIED_TUNING_REVISION: u16 = F32_TF32_TUNING_REVISION;
+/// The Ada portable cohort's architecture: the portable module on an SM89
+/// card. Its tournament ran on an RTX 6000 Ada (142 SMs) under NVRTC 13.2; it
+/// serves every SM89 card, the L40S and the RTX 4090 among them, on any
+/// toolkit.
+const SM89_TF32_ARCHITECTURE: Tf32EvidenceArchitecture = Tf32EvidenceArchitecture {
+    module_kind: ModuleKind::TriadSm80,
+    compute_capability: (8, 9),
+    optin_shared_bytes: 101_376,
+    tensor_map_access: false,
+};
 
-const SM89_JOINT_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
-    sm89_observed_tf32_identity(
-        ModuleKind::TriadSm89Tf32Joint,
-        (13, 0),
-        [
-            248, 41, 239, 223, 89, 18, 132, 105, 186, 33, 99, 87, 203, 133, 235, 42, 247, 245, 94,
-            119, 191, 101, 242, 18, 251, 184, 178, 94, 175, 64, 17, 244,
-        ],
-        [
-            237, 242, 114, 157, 174, 250, 214, 92, 156, 75, 145, 238, 124, 183, 170, 3, 193, 58,
-            112, 211, 179, 67, 14, 26, 249, 1, 191, 29, 39, 35, 42, 22,
-        ],
-        [
-            68, 88, 41, 196, 70, 172, 249, 9, 15, 206, 255, 38, 102, 62, 75, 212, 77, 239, 164,
-            222, 68, 43, 140, 66, 55, 249, 30, 9, 111, 213, 52, 172,
-        ],
-        [
-            228, 19, 82, 239, 126, 18, 192, 138, 226, 178, 85, 167, 49, 183, 184, 218, 99, 236,
-            165, 56, 90, 110, 24, 165, 76, 194, 66, 96, 149, 80, 105, 95,
-        ],
-        [
-            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
-            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
-        ],
-    );
-
-const SM89_JOINT_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
-    sm89_observed_tf32_identity(
-        ModuleKind::TriadSm89Tf32Joint,
-        (13, 2),
-        [
-            85, 22, 240, 145, 224, 255, 188, 15, 108, 163, 121, 250, 8, 71, 22, 35, 145, 212, 19,
-            77, 59, 138, 245, 94, 129, 244, 246, 132, 254, 148, 151, 248,
-        ],
-        [
-            222, 166, 84, 206, 254, 31, 156, 26, 12, 181, 199, 224, 118, 62, 143, 205, 161, 66, 35,
-            130, 85, 146, 179, 167, 217, 255, 168, 50, 163, 129, 249, 87,
-        ],
-        [
-            68, 88, 41, 196, 70, 172, 249, 9, 15, 206, 255, 38, 102, 62, 75, 212, 77, 239, 164,
-            222, 68, 43, 140, 66, 55, 249, 30, 9, 111, 213, 52, 172,
-        ],
-        [
-            228, 19, 82, 239, 126, 18, 192, 138, 226, 178, 85, 167, 49, 183, 184, 218, 99, 236,
-            165, 56, 90, 110, 24, 165, 76, 194, 66, 96, 149, 80, 105, 95,
-        ],
-        [
-            208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
-            34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
-        ],
-    );
+/// The Ada joint module's architecture. Its tournaments ran on an RTX 6000
+/// Ada under NVRTC 12.8, 13.0 and 13.2; the 13.2 winners serve every SM89
+/// card.
+const SM89_JOINT_TF32_ARCHITECTURE: Tf32EvidenceArchitecture = Tf32EvidenceArchitecture {
+    module_kind: ModuleKind::TriadSm89Tf32Joint,
+    compute_capability: (8, 9),
+    optin_shared_bytes: 101_376,
+    tensor_map_access: false,
+};
 
 const SM120_TF32_QUALIFIED_TUNING_REVISION: u16 = F32_TF32_TUNING_REVISION;
-#[cfg(test)]
-const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm80,
-        module_target: "compute_120",
-        device_target: "sm_120",
-        compute_capability: (12, 0),
-        multiprocessor_count: 170,
-        nvrtc_version: (13, 2),
-        optin_shared_bytes: 101_376,
-        tensor_map_access: true,
-        compile_key: [
-            152, 216, 153, 132, 10, 117, 104, 1, 208, 62, 15, 125, 19, 15, 218, 83, 180, 144, 4,
-            144, 211, 131, 159, 120, 140, 116, 131, 206, 41, 62, 77, 183,
-        ],
-        artifact_digest: [
-            240, 103, 177, 251, 174, 24, 81, 83, 102, 109, 200, 106, 209, 179, 67, 191, 217, 255,
-            129, 130, 70, 139, 203, 226, 105, 153, 35, 119, 142, 224, 129, 125,
-        ],
-        source_digest: [
-            248, 83, 171, 12, 79, 34, 196, 226, 18, 202, 31, 229, 38, 226, 2, 51, 123, 119, 253,
-            51, 62, 115, 206, 189, 212, 224, 105, 0, 75, 218, 119, 29,
-        ],
-        invocation_digest: [
-            152, 216, 153, 132, 10, 117, 104, 1, 208, 62, 15, 125, 19, 15, 218, 83, 180, 144, 4,
-            144, 211, 131, 159, 120, 140, 116, 131, 206, 41, 62, 77, 183,
-        ],
-        header_manifest_digest: [
-            165, 215, 84, 8, 228, 132, 48, 141, 150, 196, 78, 149, 7, 182, 197, 11, 248, 193, 166,
-            225, 180, 28, 187, 88, 5, 215, 224, 21, 237, 254, 181, 167,
-        ],
-        nvrtc_library_domain: [
-            14, 13, 195, 250, 169, 151, 174, 150, 68, 46, 246, 47, 252, 2, 100, 13, 54, 26, 92, 80,
-            224, 180, 229, 223, 42, 5, 188, 9, 134, 254, 98, 65,
-        ],
-    };
-#[cfg(test)]
-const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm120,
-        module_target: "compute_120",
-        device_target: "sm_120",
-        compute_capability: (12, 0),
-        multiprocessor_count: 170,
-        nvrtc_version: (12, 8),
-        optin_shared_bytes: 101_376,
-        tensor_map_access: true,
-        compile_key: [
-            166, 206, 169, 76, 240, 169, 84, 100, 217, 7, 12, 212, 25, 4, 118, 118, 179, 222, 227,
-            156, 49, 139, 185, 110, 235, 81, 26, 54, 11, 54, 128, 33,
-        ],
-        artifact_digest: [
-            91, 106, 28, 188, 79, 11, 154, 143, 66, 25, 178, 253, 11, 152, 42, 219, 121, 139, 185,
-            24, 232, 18, 21, 222, 72, 132, 54, 144, 222, 61, 247, 171,
-        ],
-        source_digest: [
-            36, 109, 46, 53, 235, 5, 156, 214, 150, 236, 116, 50, 93, 74, 34, 51, 18, 250, 96, 95,
-            232, 79, 245, 143, 23, 246, 99, 141, 153, 184, 24, 44,
-        ],
-        invocation_digest: [
-            166, 206, 169, 76, 240, 169, 84, 100, 217, 7, 12, 212, 25, 4, 118, 118, 179, 222, 227,
-            156, 49, 139, 185, 110, 235, 81, 26, 54, 11, 54, 128, 33,
-        ],
-        header_manifest_digest: [
-            254, 128, 56, 210, 41, 106, 84, 102, 144, 148, 104, 242, 181, 2, 247, 203, 59, 245, 94,
-            236, 49, 74, 64, 150, 164, 59, 2, 159, 109, 139, 29, 48,
-        ],
-        nvrtc_library_domain: [
-            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
-            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
-        ],
-    };
-
-#[cfg(test)]
-const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm120,
-        module_target: "compute_120",
-        device_target: "sm_120",
-        compute_capability: (12, 0),
-        multiprocessor_count: 170,
-        nvrtc_version: (13, 0),
-        optin_shared_bytes: 101_376,
-        tensor_map_access: true,
-        compile_key: [
-            218, 36, 138, 227, 73, 184, 235, 221, 246, 237, 231, 11, 39, 108, 209, 191, 166, 32,
-            167, 221, 251, 169, 63, 201, 34, 81, 127, 134, 136, 166, 71, 79,
-        ],
-        artifact_digest: [
-            81, 129, 108, 141, 121, 6, 25, 109, 73, 170, 104, 7, 116, 44, 14, 147, 172, 23, 50,
-            242, 58, 150, 71, 46, 170, 185, 125, 196, 70, 239, 181, 184,
-        ],
-        source_digest: [
-            36, 109, 46, 53, 235, 5, 156, 214, 150, 236, 116, 50, 93, 74, 34, 51, 18, 250, 96, 95,
-            232, 79, 245, 143, 23, 246, 99, 141, 153, 184, 24, 44,
-        ],
-        invocation_digest: [
-            218, 36, 138, 227, 73, 184, 235, 221, 246, 237, 231, 11, 39, 108, 209, 191, 166, 32,
-            167, 221, 251, 169, 63, 201, 34, 81, 127, 134, 136, 166, 71, 79,
-        ],
-        header_manifest_digest: [
-            244, 255, 248, 65, 139, 210, 195, 70, 200, 110, 198, 240, 127, 94, 116, 23, 20, 124, 1,
-            59, 240, 56, 205, 193, 109, 243, 231, 108, 243, 248, 10, 217,
-        ],
-        nvrtc_library_domain: [
-            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
-            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
-        ],
-    };
-
-/// Frozen CUDA 13.2 qualification identity.
-#[cfg(test)]
-const SM120_TF32_QUALIFICATION_IDENTITY: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm120,
-        module_target: "compute_120",
-        device_target: "sm_120",
-        compute_capability: (12, 0),
-        multiprocessor_count: 170,
-        nvrtc_version: (13, 2),
-        optin_shared_bytes: 101_376,
-        tensor_map_access: true,
-        compile_key: [
-            112, 238, 69, 136, 32, 242, 124, 85, 78, 231, 125, 63, 137, 201, 144, 207, 0, 93, 126,
-            62, 86, 109, 196, 135, 234, 127, 136, 146, 46, 195, 54, 69,
-        ],
-        artifact_digest: [
-            80, 206, 171, 198, 77, 105, 232, 87, 90, 121, 116, 211, 68, 150, 5, 152, 12, 177, 180,
-            45, 222, 248, 149, 42, 206, 55, 37, 7, 60, 217, 4, 65,
-        ],
-        source_digest: [
-            101, 223, 188, 193, 100, 34, 155, 115, 243, 247, 111, 161, 80, 22, 226, 138, 58, 223,
-            154, 210, 50, 128, 48, 235, 31, 230, 217, 126, 227, 208, 26, 175,
-        ],
-        invocation_digest: [
-            112, 238, 69, 136, 32, 242, 124, 85, 78, 231, 125, 63, 137, 201, 144, 207, 0, 93, 126,
-            62, 86, 109, 196, 135, 234, 127, 136, 146, 46, 195, 54, 69,
-        ],
-        header_manifest_digest: [
-            144, 90, 202, 198, 154, 11, 239, 32, 177, 45, 241, 189, 47, 183, 11, 111, 139, 211,
-            143, 197, 48, 236, 2, 191, 245, 242, 177, 36, 191, 141, 145, 87,
-        ],
-        nvrtc_library_domain: [
-            14, 13, 195, 250, 169, 151, 174, 150, 68, 46, 246, 47, 252, 2, 100, 13, 54, 26, 92, 80,
-            224, 180, 229, 223, 42, 5, 188, 9, 134, 254, 98, 65,
-        ],
-    };
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Tf32AutoCell {
     op: crate::gpu::kernel_identity::ResolvedGemmOp,
@@ -1404,17 +1093,15 @@ struct Tf32AutoCell {
     operand_gate: Tf32AutoOperandGate,
 }
 
-/// One frozen qualification: the module identity it was measured on, the
-/// portable module that served its portable routes (a specialized cohort
-/// only; a cell measured into the portable module holds only while that
-/// module is the one measured), the current dispatch epoch authorized to use
-/// those unchanged measurements, and its cells. An epoch-only host change
-/// carries retained identity/cell literals forward; it does not claim fresh
-/// GPU qualification or rewrite the acquisition epoch in archived records.
+/// One architecture's frozen tournament: the module architecture it serves,
+/// the portable module architecture its portable routes run on (a
+/// specialized cohort only), the dispatch epoch authorized to use those
+/// measurements, and its cells. Each architecture has one cohort, so every
+/// card of it takes the same route for a shape and gives the same bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Tf32AutoEvidenceCohort {
-    identity: Tf32AutoQualificationIdentity,
-    portable: Option<Tf32AutoQualificationIdentity>,
+    identity: Tf32EvidenceArchitecture,
+    portable: Option<Tf32EvidenceArchitecture>,
     tuning_revision: u16,
     cells: &'static [Tf32AutoCell],
 }
@@ -2112,616 +1799,15 @@ const fn sm120_tf32_cell(
     }
 }
 
-/// Exact CUDA 12.8 SM120 TF32 evidence inventory from the production
-/// projection suite. This is intentionally literal: CUDA 12.8 and 13.2 chose
-/// different routes for TN d768 input projection.
-#[cfg(test)]
-const SM120_TF32_EVIDENCE_CELLS_CUDA_12_8: &[Tf32AutoCell] = &[
-    sm120_tf32_cell(
-        Nn,
-        2048,
-        3072,
-        768,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Tn,
-        768,
-        3072,
-        2048,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        2048,
-        768,
-        3072,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nn,
-        2048,
-        768,
-        1536,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Tn,
-        1536,
-        768,
-        2048,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S4,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        2048,
-        1536,
-        768,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nn,
-        4621,
-        1928,
-        384,
-        super::contract::Tf32Sm120Tile::M128N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Tn,
-        384,
-        1928,
-        4621,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S4,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        4621,
-        384,
-        1928,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-];
-
-/// Exact CUDA 13.0 SM120 TF32 evidence inventory from the production
-/// projection suite. Routes are bound to the exact 13.0 artifact and device
-/// identity rather than inferred from either neighboring toolchain cohort.
-#[cfg(test)]
-const SM120_TF32_EVIDENCE_CELLS_CUDA_13_0: &[Tf32AutoCell] = &[
-    sm120_tf32_cell(
-        Nn,
-        2048,
-        3072,
-        768,
-        super::contract::Tf32Sm120Tile::M128N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Tn,
-        768,
-        3072,
-        2048,
-        super::contract::Tf32Sm120Tile::M128N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        2048,
-        768,
-        3072,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nn,
-        2048,
-        768,
-        1536,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Tn,
-        1536,
-        768,
-        2048,
-        super::contract::Tf32Sm120Tile::M128N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        2048,
-        1536,
-        768,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nn,
-        4621,
-        1928,
-        384,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Tn,
-        384,
-        1928,
-        4621,
-        super::contract::Tf32Sm120Tile::M128N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        4621,
-        384,
-        1928,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-];
-
-/// Exact CUDA 13.2 SM120 TF32 evidence inventory from the production
-/// projection suite. Operand-aware dispatch remains scalar unless the full
-/// artifact and device identity matches this cohort.
-#[cfg(test)]
-const SM120_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
-    Tf32AutoCell {
-        op: Tn,
-        shape: Tf32ExactShape {
-            output_rows: 512,
-            output_columns: 384,
-            reduction: 256,
-        },
-        route: Tf32PhysicalRoute::MmaTf32Rna(super::contract::Tf32PortableRoute {
-            tile: M16N32,
-            stages: S4,
-        }),
-        operand_gate: RequiresVectorAlignmentEvidence,
-    },
-    sm120_tf32_cell(
-        Nn,
-        512,
-        768,
-        3072,
-        super::contract::Tf32Sm120Tile::M80N32Bk64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nn,
-        2048,
-        3072,
-        768,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_streamk_cell(
-        Tn,
-        768,
-        3072,
-        2048,
-        super::contract::Tf32Sm120Stages::S3,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        2048,
-        768,
-        3072,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nn,
-        2048,
-        768,
-        1536,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_streamk_cell(
-        Tn,
-        1536,
-        768,
-        2048,
-        super::contract::Tf32Sm120Stages::S3,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        2048,
-        1536,
-        768,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nn,
-        4621,
-        1928,
-        384,
-        super::contract::Tf32Sm120Tile::M128N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_streamk_cell(
-        Tn,
-        384,
-        1928,
-        4621,
-        super::contract::Tf32Sm120Stages::S3,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        4621,
-        384,
-        1928,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-];
-
-/// Fresh current-source CUDA 12.8 identities from the complete 24-key V2
-/// packet under driver 595.84. Twenty-three keys admitted; true G10 stayed exact.
-const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm120,
-        module_target: "compute_120",
-        device_target: "sm_120",
-        compute_capability: (12, 0),
-        multiprocessor_count: 170,
-        nvrtc_version: (12, 8),
-        optin_shared_bytes: 101376,
-        tensor_map_access: true,
-        compile_key: [
-            132, 192, 75, 102, 174, 40, 187, 247, 149, 218, 223, 15, 141, 136, 49, 6, 3, 224, 158,
-            95, 254, 234, 211, 120, 131, 253, 125, 21, 244, 106, 76, 83,
-        ],
-        artifact_digest: [
-            171, 133, 41, 159, 53, 47, 98, 207, 49, 83, 34, 1, 58, 251, 253, 237, 183, 189, 3, 61,
-            14, 189, 155, 112, 246, 10, 144, 138, 44, 44, 244, 233,
-        ],
-        source_digest: [
-            36, 139, 183, 205, 251, 199, 80, 186, 15, 165, 225, 86, 237, 248, 80, 16, 137, 15, 170,
-            125, 244, 171, 145, 106, 235, 151, 216, 194, 43, 181, 208, 53,
-        ],
-        invocation_digest: [
-            132, 192, 75, 102, 174, 40, 187, 247, 149, 218, 223, 15, 141, 136, 49, 6, 3, 224, 158,
-            95, 254, 234, 211, 120, 131, 253, 125, 21, 244, 106, 76, 83,
-        ],
-        header_manifest_digest: [
-            107, 105, 213, 249, 88, 161, 184, 94, 143, 181, 202, 198, 90, 59, 174, 52, 166, 245,
-            68, 74, 117, 121, 37, 229, 242, 249, 64, 158, 46, 3, 146, 200,
-        ],
-        nvrtc_library_domain: [
-            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
-            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
-        ],
-    };
-
-const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84:
-    Tf32AutoQualificationIdentity = Tf32AutoQualificationIdentity {
-    module_kind: ModuleKind::TriadSm80,
-    module_target: "compute_120",
-    device_target: "sm_120",
-    compute_capability: (12, 0),
-    multiprocessor_count: 170,
-    nvrtc_version: (12, 8),
-    optin_shared_bytes: 101376,
-    tensor_map_access: true,
-    compile_key: [
-        199, 145, 160, 37, 64, 39, 127, 235, 182, 239, 88, 221, 245, 21, 50, 79, 129, 99, 193, 9,
-        186, 113, 81, 164, 62, 131, 163, 4, 204, 153, 238, 180,
-    ],
-    artifact_digest: [
-        62, 17, 231, 140, 31, 152, 101, 132, 235, 3, 175, 174, 192, 10, 33, 0, 5, 230, 112, 151,
-        162, 245, 19, 231, 169, 100, 8, 184, 12, 149, 37, 63,
-    ],
-    source_digest: [
-        248, 83, 171, 12, 79, 34, 196, 226, 18, 202, 31, 229, 38, 226, 2, 51, 123, 119, 253, 51,
-        62, 115, 206, 189, 212, 224, 105, 0, 75, 218, 119, 29,
-    ],
-    invocation_digest: [
-        199, 145, 160, 37, 64, 39, 127, 235, 182, 239, 88, 221, 245, 21, 50, 79, 129, 99, 193, 9,
-        186, 113, 81, 164, 62, 131, 163, 4, 204, 153, 238, 180,
-    ],
-    header_manifest_digest: [
-        7, 5, 151, 177, 61, 28, 130, 64, 239, 221, 141, 50, 38, 174, 147, 219, 73, 30, 21, 213, 37,
-        14, 242, 205, 239, 142, 174, 43, 43, 210, 194, 118,
-    ],
-    nvrtc_library_domain: [
-        38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166, 146,
-        164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
-    ],
-};
-
-/// Fresh current-source CUDA 13.0 identities from the retained 24-key packet
-/// under driver 595.84. Twenty-three keys admitted; true G10 stayed exact.
-const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm120,
-        module_target: "compute_120",
-        device_target: "sm_120",
-        compute_capability: (12, 0),
-        multiprocessor_count: 170,
-        nvrtc_version: (13, 0),
-        optin_shared_bytes: 101376,
-        tensor_map_access: true,
-        compile_key: [
-            177, 13, 162, 229, 113, 18, 50, 12, 177, 76, 146, 99, 33, 103, 124, 138, 174, 128, 13,
-            210, 183, 78, 203, 127, 79, 216, 243, 238, 214, 147, 255, 40,
-        ],
-        artifact_digest: [
-            11, 17, 185, 170, 132, 100, 215, 204, 34, 200, 23, 181, 117, 237, 214, 12, 148, 68, 99,
-            61, 45, 96, 146, 160, 246, 196, 185, 204, 231, 110, 83, 55,
-        ],
-        source_digest: [
-            36, 139, 183, 205, 251, 199, 80, 186, 15, 165, 225, 86, 237, 248, 80, 16, 137, 15, 170,
-            125, 244, 171, 145, 106, 235, 151, 216, 194, 43, 181, 208, 53,
-        ],
-        invocation_digest: [
-            177, 13, 162, 229, 113, 18, 50, 12, 177, 76, 146, 99, 33, 103, 124, 138, 174, 128, 13,
-            210, 183, 78, 203, 127, 79, 216, 243, 238, 214, 147, 255, 40,
-        ],
-        header_manifest_digest: [
-            185, 56, 225, 115, 89, 191, 148, 212, 209, 134, 65, 155, 74, 209, 60, 31, 158, 99, 216,
-            194, 67, 97, 175, 76, 252, 59, 169, 30, 55, 83, 206, 218,
-        ],
-        nvrtc_library_domain: [
-            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
-            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
-        ],
-    };
-
-const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84:
-    Tf32AutoQualificationIdentity = Tf32AutoQualificationIdentity {
-    module_kind: ModuleKind::TriadSm80,
-    module_target: "compute_120",
-    device_target: "sm_120",
-    compute_capability: (12, 0),
-    multiprocessor_count: 170,
-    nvrtc_version: (13, 0),
-    optin_shared_bytes: 101376,
-    tensor_map_access: true,
-    compile_key: [
-        78, 225, 87, 120, 190, 216, 217, 82, 241, 56, 244, 41, 8, 141, 70, 35, 45, 138, 153, 180,
-        159, 61, 207, 76, 21, 19, 223, 164, 75, 39, 178, 48,
-    ],
-    artifact_digest: [
-        194, 226, 42, 242, 147, 213, 225, 72, 96, 127, 121, 60, 232, 188, 47, 147, 175, 206, 58,
-        255, 202, 228, 161, 212, 88, 129, 172, 135, 1, 159, 21, 229,
-    ],
-    source_digest: [
-        248, 83, 171, 12, 79, 34, 196, 226, 18, 202, 31, 229, 38, 226, 2, 51, 123, 119, 253, 51,
-        62, 115, 206, 189, 212, 224, 105, 0, 75, 218, 119, 29,
-    ],
-    invocation_digest: [
-        78, 225, 87, 120, 190, 216, 217, 82, 241, 56, 244, 41, 8, 141, 70, 35, 45, 138, 153, 180,
-        159, 61, 207, 76, 21, 19, 223, 164, 75, 39, 178, 48,
-    ],
-    header_manifest_digest: [
-        215, 86, 53, 120, 9, 5, 218, 148, 34, 165, 196, 176, 165, 177, 204, 100, 53, 5, 161, 140,
-        142, 24, 140, 31, 125, 214, 241, 126, 144, 170, 26, 128,
-    ],
-    nvrtc_library_domain: [
-        112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
-        238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
-    ],
-};
-
-/// Frozen CUDA 13.2 qualification identity, measured on the 595.84 driver
-/// build and applied on every driver that loads the same artifact.
-const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm120,
-        module_target: "compute_120",
-        device_target: "sm_120",
-        compute_capability: (12, 0),
-        multiprocessor_count: 170,
-        nvrtc_version: (13, 2),
-        optin_shared_bytes: 101376,
-        tensor_map_access: true,
-        compile_key: [
-            161, 21, 120, 21, 231, 39, 162, 110, 82, 73, 43, 75, 145, 145, 102, 200, 102, 47, 196,
-            51, 28, 170, 184, 46, 43, 66, 191, 134, 182, 223, 50, 241,
-        ],
-        artifact_digest: [
-            106, 95, 235, 158, 70, 210, 91, 99, 94, 200, 78, 83, 179, 154, 173, 100, 79, 151, 216,
-            63, 160, 108, 203, 200, 217, 76, 149, 250, 50, 173, 50, 53,
-        ],
-        source_digest: [
-            36, 139, 183, 205, 251, 199, 80, 186, 15, 165, 225, 86, 237, 248, 80, 16, 137, 15, 170,
-            125, 244, 171, 145, 106, 235, 151, 216, 194, 43, 181, 208, 53,
-        ],
-        invocation_digest: [
-            161, 21, 120, 21, 231, 39, 162, 110, 82, 73, 43, 75, 145, 145, 102, 200, 102, 47, 196,
-            51, 28, 170, 184, 46, 43, 66, 191, 134, 182, 223, 50, 241,
-        ],
-        header_manifest_digest: [
-            83, 5, 9, 183, 38, 144, 254, 0, 97, 45, 96, 198, 191, 90, 169, 121, 167, 151, 73, 229,
-            199, 42, 148, 27, 144, 107, 218, 103, 117, 26, 249, 129,
-        ],
-        nvrtc_library_domain: [
-            208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
-            34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
-        ],
-    };
-
-/// Portable identity paired with the CUDA 13.2 specialized module on 595.84.
-/// The portable module the 595.84 cohort measured its portable routes on:
-/// a portable cell of that cohort is admitted only while the board binds
-/// this exact module beside the SM120 one.
-const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84:
-    Tf32AutoQualificationIdentity = Tf32AutoQualificationIdentity {
-    module_kind: ModuleKind::TriadSm80,
-    module_target: "compute_120",
-    device_target: "sm_120",
-    compute_capability: (12, 0),
-    multiprocessor_count: 170,
-    nvrtc_version: (13, 2),
-    optin_shared_bytes: 101376,
-    tensor_map_access: true,
-    compile_key: [
-        188, 71, 140, 5, 199, 170, 187, 192, 19, 111, 242, 3, 52, 145, 171, 220, 158, 182, 94, 75,
-        247, 127, 202, 22, 170, 178, 25, 204, 228, 5, 59, 122,
-    ],
-    artifact_digest: [
-        235, 72, 246, 129, 24, 17, 240, 95, 126, 21, 163, 223, 218, 64, 171, 114, 6, 81, 121, 87,
-        253, 45, 16, 108, 156, 252, 196, 37, 169, 112, 190, 50,
-    ],
-    source_digest: [
-        248, 83, 171, 12, 79, 34, 196, 226, 18, 202, 31, 229, 38, 226, 2, 51, 123, 119, 253, 51,
-        62, 115, 206, 189, 212, 224, 105, 0, 75, 218, 119, 29,
-    ],
-    invocation_digest: [
-        188, 71, 140, 5, 199, 170, 187, 192, 19, 111, 242, 3, 52, 145, 171, 220, 158, 182, 94, 75,
-        247, 127, 202, 22, 170, 178, 25, 204, 228, 5, 59, 122,
-    ],
-    header_manifest_digest: [
-        165, 215, 84, 8, 228, 132, 48, 141, 150, 196, 78, 149, 7, 182, 197, 11, 248, 193, 166, 225,
-        180, 28, 187, 88, 5, 215, 224, 21, 237, 254, 181, 167,
-    ],
-    nvrtc_library_domain: [
-        208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234, 34,
-        156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
-    ],
-};
-
-/// The CUDA 13.2 identity of the same module on the NVRTC 13.2.78 build, the
-/// build the rented RTX 5090 boxes carry; the 595.84 constant above was
-/// minted on the 13.2.51 build. Same source and headers, another compiler.
-const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm120,
-        module_target: "compute_120",
-        device_target: "sm_120",
-        compute_capability: (12, 0),
-        multiprocessor_count: 170,
-        nvrtc_version: (13, 2),
-        optin_shared_bytes: 101376,
-        tensor_map_access: true,
-        compile_key: [
-            83, 14, 55, 193, 108, 148, 105, 217, 72, 113, 63, 255, 96, 137, 255, 91, 224, 104, 191,
-            43, 26, 29, 117, 150, 99, 196, 14, 84, 146, 153, 181, 3,
-        ],
-        artifact_digest: [
-            7, 141, 64, 95, 152, 80, 167, 54, 4, 197, 229, 150, 80, 189, 106, 29, 34, 107, 147, 46,
-            178, 113, 1, 240, 37, 8, 81, 124, 178, 255, 60, 161,
-        ],
-        source_digest: [
-            36, 139, 183, 205, 251, 199, 80, 186, 15, 165, 225, 86, 237, 248, 80, 16, 137, 15, 170,
-            125, 244, 171, 145, 106, 235, 151, 216, 194, 43, 181, 208, 53,
-        ],
-        invocation_digest: [
-            83, 14, 55, 193, 108, 148, 105, 217, 72, 113, 63, 255, 96, 137, 255, 91, 224, 104, 191,
-            43, 26, 29, 117, 150, 99, 196, 14, 84, 146, 153, 181, 3,
-        ],
-        header_manifest_digest: [
-            83, 5, 9, 183, 38, 144, 254, 0, 97, 45, 96, 198, 191, 90, 169, 121, 167, 151, 73, 229,
-            199, 42, 148, 27, 144, 107, 218, 103, 117, 26, 249, 129,
-        ],
-        nvrtc_library_domain: [
-            220, 223, 96, 48, 189, 148, 19, 101, 183, 103, 158, 213, 226, 50, 226, 19, 235, 24,
-            147, 98, 12, 178, 250, 224, 154, 245, 36, 3, 79, 180, 23, 212,
-        ],
-    };
-
-/// The CUDA 13.2 identity of the same module on the NVRTC 13.2.78 build, the
-/// build the rented RTX 5090 boxes carry; the 595.84 constant above was
-/// minted on the 13.2.51 build. Same source and headers, another compiler.
-const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78:
-    Tf32AutoQualificationIdentity = Tf32AutoQualificationIdentity {
-    module_kind: ModuleKind::TriadSm80,
-    module_target: "compute_120",
-    device_target: "sm_120",
-    compute_capability: (12, 0),
-    multiprocessor_count: 170,
-    nvrtc_version: (13, 2),
-    optin_shared_bytes: 101376,
-    tensor_map_access: true,
-    compile_key: [
-        181, 176, 245, 62, 216, 202, 217, 20, 121, 165, 210, 34, 228, 163, 54, 0, 54, 223, 46, 243,
-        176, 29, 207, 45, 170, 255, 148, 250, 200, 31, 45, 93,
-    ],
-    artifact_digest: [
-        52, 15, 227, 135, 175, 180, 249, 167, 251, 98, 32, 132, 30, 113, 28, 255, 51, 228, 67, 213,
-        78, 99, 135, 191, 195, 61, 46, 119, 107, 72, 89, 151,
-    ],
-    source_digest: [
-        248, 83, 171, 12, 79, 34, 196, 226, 18, 202, 31, 229, 38, 226, 2, 51, 123, 119, 253, 51,
-        62, 115, 206, 189, 212, 224, 105, 0, 75, 218, 119, 29,
-    ],
-    invocation_digest: [
-        181, 176, 245, 62, 216, 202, 217, 20, 121, 165, 210, 34, 228, 163, 54, 0, 54, 223, 46, 243,
-        176, 29, 207, 45, 170, 255, 148, 250, 200, 31, 45, 93,
-    ],
-    header_manifest_digest: [
-        165, 215, 84, 8, 228, 132, 48, 141, 150, 196, 78, 149, 7, 182, 197, 11, 248, 193, 166, 225,
-        180, 28, 187, 88, 5, 215, 224, 21, 237, 254, 181, 167,
-    ],
-    nvrtc_library_domain: [
-        220, 223, 96, 48, 189, 148, 19, 101, 183, 103, 158, 213, 226, 50, 226, 19, 235, 24, 147,
-        98, 12, 178, 250, 224, 154, 245, 36, 3, 79, 180, 23, 212,
-    ],
-};
-
-/// The RTX PRO 6000 Blackwell (188 SMs) compiles the same module on the same
-/// NVRTC 13.2.78 build as the rented RTX 5090s: its identities are theirs on
-/// its own board. A cohort is keyed by the multiprocessor count, so the board
-/// carries its own winners.
-const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78_188_SM:
-    Tf32AutoQualificationIdentity = Tf32AutoQualificationIdentity {
-    multiprocessor_count: 188,
-    ..SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78
-};
-
-const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78_188_SM:
-    Tf32AutoQualificationIdentity = Tf32AutoQualificationIdentity {
-    multiprocessor_count: 188,
-    ..SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78
-};
-
-/// The RTX PRO 6000 Blackwell's own winners, from a tournament on the board.
-/// An NN cell admits no bias, as in every SM120 cohort. Three winners stay
-/// out because the route the board serves without them measured faster:
+/// The SM120 architecture's winners, from the tournament on an RTX PRO 6000
+/// Blackwell; they serve every SM120 card. An NN cell admits no bias. Three
+/// winners stay out because the route served without them measured faster:
 /// on both large deep projections a proven Ada kernel the tournament does
 /// not time, by 7 and 19 percent, and on the NT d128 out-projection the
-/// portable kernel, by 14 percent when launched eagerly.
-const SM120_TF32_EVIDENCE_CELLS_188_SM: &[Tf32AutoCell] = &[
+/// portable kernel, by 14 percent when launched eagerly. The TN d128
+/// out-projection has no cell either: there the exact family ran 25 percent
+/// ahead of the best TF32 route.
+const SM120_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
     sm120_tf32_cell(
         Nn,
         2048,
@@ -3089,388 +2175,42 @@ const SM120_TF32_EVIDENCE_CELLS_188_SM: &[Tf32AutoCell] = &[
     },
 ];
 
-/// Stable current-source route/key manifest independently requalified on CUDA
-/// 12.8, 13.0 and 13.2 under driver 595.84. All three packets admitted these
-/// same 23 keys; true G10 `Tn(128,128,8192)` lost and is intentionally absent.
-const SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED: &[Tf32AutoCell] = &[
-    sm120_tf32_cell(
-        Nn,
-        2048,
-        3072,
-        768,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_streamk_cell(
-        Tn,
-        768,
-        3072,
-        2048,
-        super::contract::Tf32Sm120Stages::S3,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        2048,
-        768,
-        3072,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nn,
-        2048,
-        768,
-        1536,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_streamk_cell(
-        Tn,
-        1536,
-        768,
-        2048,
-        super::contract::Tf32Sm120Stages::S3,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        2048,
-        1536,
-        768,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nn,
-        4621,
-        1928,
-        384,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_streamk_cell(
-        Tn,
-        384,
-        1928,
-        4621,
-        super::contract::Tf32Sm120Stages::S3,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        4621,
-        384,
-        1928,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nn,
-        4096,
-        1536,
-        3072,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_streamk_cell(
-        Tn,
-        3072,
-        1536,
-        4096,
-        super::contract::Tf32Sm120Stages::S3,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        4096,
-        3072,
-        1536,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nn,
-        2048,
-        768,
-        3072,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm120_tf32_streamk_cell(
-        Tn,
-        3072,
-        768,
-        2048,
-        super::contract::Tf32Sm120Stages::S3,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm120_tf32_cell(
-        Nt,
-        2048,
-        3072,
-        768,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    Tf32AutoCell {
-        op: Nn,
-        shape: Tf32ExactShape {
-            output_rows: 1024,
-            output_columns: 512,
-            reduction: 128,
-        },
-        route: Tf32PhysicalRoute::MmaTf32Rna(super::contract::Tf32PortableRoute {
-            tile: super::contract::Tf32PortableTile::M64N64,
-            stages: super::contract::Tf32PortableStages::S3,
-        }),
-        operand_gate: RequiresNoBiasAndVectorAlignmentEvidence,
-    },
-    Tf32AutoCell {
-        op: Tn,
-        shape: Tf32ExactShape {
-            output_rows: 128,
-            output_columns: 512,
-            reduction: 1024,
-        },
-        route: Tf32PhysicalRoute::MmaTf32Rna(super::contract::Tf32PortableRoute {
-            tile: super::contract::Tf32PortableTile::M16N32,
-            stages: super::contract::Tf32PortableStages::S4,
-        }),
-        operand_gate: RequiresVectorAlignmentEvidence,
-    },
-    Tf32AutoCell {
-        op: Nt,
-        shape: Tf32ExactShape {
-            output_rows: 1024,
-            output_columns: 128,
-            reduction: 512,
-        },
-        route: Tf32PhysicalRoute::MmaTf32Rna(super::contract::Tf32PortableRoute {
-            tile: super::contract::Tf32PortableTile::M16N16,
-            stages: super::contract::Tf32PortableStages::S4,
-        }),
-        operand_gate: RequiresVectorAlignmentEvidence,
-    },
-    Tf32AutoCell {
-        op: Tn,
-        shape: Tf32ExactShape {
-            output_rows: 256,
-            output_columns: 128,
-            reduction: 1024,
-        },
-        route: Tf32PhysicalRoute::MmaTf32Rna(super::contract::Tf32PortableRoute {
-            tile: super::contract::Tf32PortableTile::M16N16,
-            stages: super::contract::Tf32PortableStages::S4,
-        }),
-        operand_gate: RequiresVectorAlignmentEvidence,
-    },
-    // The deep reductions of the training batch and the split candidate
-    // (internal/perf/sm120-requal-deepk-20260903): no split-K arm won, and the
-    // TN batch projection admitted no TF32 route at all.
-    sm120_tf32_cell(
-        Nn,
-        10400,
-        1536,
-        384,
-        super::contract::Tf32Sm120Tile::M64N64,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    Tf32AutoCell {
-        op: Nt,
-        shape: Tf32ExactShape {
-            output_rows: 128,
-            output_columns: 8192,
-            reduction: 128,
-        },
-        route: Tf32PhysicalRoute::MmaTf32Rna(super::contract::Tf32PortableRoute {
-            tile: super::contract::Tf32PortableTile::M64N64,
-            stages: super::contract::Tf32PortableStages::S2,
-        }),
-        operand_gate: RequiresVectorAlignmentEvidence,
-    },
-    sm120_tf32_cell(
-        Nt,
-        10400,
-        384,
-        1536,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    // Requalified on the current 595.84 / CUDA 13.2 cohort at tuning
-    // revision 45. This portable route beat the exact production fallback in
-    // both eager and graph paths over the independent 21+101-window protocol.
-    Tf32AutoCell {
-        op: Tn,
-        shape: Tf32ExactShape {
-            output_rows: 512,
-            output_columns: 384,
-            reduction: 256,
-        },
-        route: Tf32PhysicalRoute::MmaTf32Rna(super::contract::Tf32PortableRoute {
-            tile: super::contract::Tf32PortableTile::M16N32,
-            stages: super::contract::Tf32PortableStages::S4,
-        }),
-        operand_gate: RequiresVectorAlignmentEvidence,
-    },
-];
+/// The SM120 specialized module's architecture, and the portable module its
+/// portable cells run on. The tournament ran on an RTX PRO 6000 Blackwell
+/// (188 SMs) under NVRTC 13.2.78; its winners serve every SM120 card.
+const SM120_TF32_ARCHITECTURE: Tf32EvidenceArchitecture = Tf32EvidenceArchitecture {
+    module_kind: ModuleKind::TriadSm120,
+    compute_capability: (12, 0),
+    optin_shared_bytes: 101_376,
+    tensor_map_access: true,
+};
 
-/// The SM120 cohorts that describe this tree: every entry is frozen against
-/// the module source the tree contains, so each one can match a board. A
-/// cohort is keyed by the toolkit, the composed source and the board, never
-/// by the driver build: the kernels' bits come from the compiler and the
-/// source, and a box may run any driver that loads the artifact.
-const SM120_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
-    Tf32AutoEvidenceCohort {
-        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
-        portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84),
-        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
-        cells: SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
-    },
-    Tf32AutoEvidenceCohort {
-        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
-        portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84),
-        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
-        cells: SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
-    },
-    Tf32AutoEvidenceCohort {
-        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
-        portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84),
-        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
-        cells: SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
-    },
-    // The same cells, compiled by the NVRTC 13.2.78 build: a cohort binds
-    // one compiler build, and the rented boards carry this one.
-    Tf32AutoEvidenceCohort {
-        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78,
-        portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78),
-        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
-        cells: SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
-    },
-    // The RTX PRO 6000 Blackwell: the same compiler build on 188 SMs.
-    Tf32AutoEvidenceCohort {
-        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78_188_SM,
-        portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_NVRTC_13_2_78_188_SM),
-        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
-        cells: SM120_TF32_EVIDENCE_CELLS_188_SM,
-    },
-];
+const SM120_TF32_PORTABLE_ARCHITECTURE: Tf32EvidenceArchitecture = Tf32EvidenceArchitecture {
+    module_kind: ModuleKind::TriadSm80,
+    compute_capability: (12, 0),
+    optin_shared_bytes: 101_376,
+    tensor_map_access: true,
+};
 
-/// The SM120 cohorts frozen against a module source this tree no longer
-/// contains. None of them can match a board, so they leave the runtime table;
-/// their literal manifests stay as the record of what those stacks chose,
-/// pinned by the tests, until a board of that stack requalifies them.
-#[cfg(test)]
-const SM120_TF32_RETIRED_COHORTS: &[Tf32AutoEvidenceCohort] = &[
-    Tf32AutoEvidenceCohort {
-        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8,
-        portable: None,
-        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
-        cells: SM120_TF32_EVIDENCE_CELLS_CUDA_12_8,
-    },
-    Tf32AutoEvidenceCohort {
-        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0,
-        portable: None,
-        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
-        cells: SM120_TF32_EVIDENCE_CELLS_CUDA_13_0,
-    },
-    Tf32AutoEvidenceCohort {
-        identity: SM120_TF32_QUALIFICATION_IDENTITY,
-        portable: Some(SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2),
-        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
-        cells: SM120_TF32_EVIDENCE_CELLS,
-    },
-];
+/// The SM120 architecture's one cohort.
+const SM120_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidenceCohort {
+    identity: SM120_TF32_ARCHITECTURE,
+    portable: Some(SM120_TF32_PORTABLE_ARCHITECTURE),
+    tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
+    cells: SM120_TF32_EVIDENCE_CELLS,
+}];
 
-/// The portable cohorts: boards without a specialized module read these.
+/// The Ada portable cohort: boards without a specialized module read it.
 const SM89_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidenceCohort {
-    identity: SM89_TF32_QUALIFICATION_IDENTITY,
+    identity: SM89_TF32_ARCHITECTURE,
     portable: None,
     tuning_revision: SM89_TF32_QUALIFIED_TUNING_REVISION,
     cells: SM89_TF32_EVIDENCE_CELLS,
 }];
 
-/// CUDA 12.8 and 13.0 share the same exact-cell winner map, every row in the
-/// joint Ada module. NN Prism kept the portable winner until the direct NN
-/// kernel measured about 3 percent ahead of it under both toolkits.
-const SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER: &[Tf32AutoCell] = &[
-    sm89_tf32_route_cell(
-        Tn,
-        (768, 3072, 2048),
-        Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm89_tf32_route_cell(
-        Tn,
-        (1536, 768, 2048),
-        Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm89_tf32_route_cell(
-        Tn,
-        (384, 1928, 4621),
-        Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm89_tf32_route_cell(
-        Nn,
-        (4621, 1928, 384),
-        Tf32PhysicalRoute::Sm89NnDirectN96,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm89_tf32_route_cell(
-        Nn,
-        (2048, 768, 1536),
-        Tf32PhysicalRoute::Sm89NnN96,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm89_tf32_route_cell(
-        Tn,
-        (3072, 1536, 4096),
-        Tf32PhysicalRoute::Sm89TnDirectM192N192S2,
-        RequiresVectorAlignmentEvidence,
-    ),
-    sm89_tf32_route_cell(
-        Nt,
-        (2048, 768, 3072),
-        Tf32PhysicalRoute::Sm89NtALdmatrixN96,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm89_tf32_route_cell(
-        Nt,
-        (2048, 1536, 768),
-        Tf32PhysicalRoute::Sm89NtALdmatrixN96,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm89_tf32_route_cell(
-        Nt,
-        (4096, 3072, 1536),
-        Tf32PhysicalRoute::Sm89NtRowstageM128N192S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-    sm89_tf32_route_cell(
-        Nt,
-        (4621, 384, 1928),
-        Tf32PhysicalRoute::Sm89NtRnaM144N96S2,
-        RequiresNoBiasAndVectorAlignmentEvidence,
-    ),
-];
-
 /// CUDA 13.2 independently qualified the prior five rows and the NT d768-in
 /// A-ldmatrix winner into the joint Ada module.
-const SM89_JOINT_TF32_EVIDENCE_CELLS_CUDA_13_2: &[Tf32AutoCell] = &[
+const SM89_JOINT_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Tn,
         (768, 3072, 2048),
@@ -3533,138 +2273,12 @@ const SM89_JOINT_TF32_EVIDENCE_CELLS_CUDA_13_2: &[Tf32AutoCell] = &[
     ),
 ];
 
-const SM89_JOINT_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
-    Tf32AutoEvidenceCohort {
-        identity: SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
-        portable: None,
-        tuning_revision: super::contract::SM89_TF32_JOINT_TUNING_REVISION,
-        cells: SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER,
-    },
-    Tf32AutoEvidenceCohort {
-        identity: SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
-        portable: None,
-        tuning_revision: super::contract::SM89_TF32_JOINT_TUNING_REVISION,
-        cells: SM89_JOINT_TF32_EVIDENCE_CELLS_LOWER,
-    },
-    Tf32AutoEvidenceCohort {
-        identity: SM89_JOINT_TF32_IDENTITY_CUDA_13_2,
-        portable: None,
-        tuning_revision: super::contract::SM89_TF32_JOINT_TUNING_REVISION,
-        cells: SM89_JOINT_TF32_EVIDENCE_CELLS_CUDA_13_2,
-    },
-];
-
-/// CUDA 13.2 complete-module identity from the initial six-cohort census.
-/// This unreleased binding does not claim the pending raw-word admission.
-const SM89_FINALIST_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm89Finalist,
-        module_target: "sm_89",
-        device_target: "sm_89",
-        compute_capability: (8, 9),
-        multiprocessor_count: 142,
-        nvrtc_version: (13, 2),
-        optin_shared_bytes: 101376,
-        tensor_map_access: false,
-        compile_key: [
-            171, 72, 1, 138, 112, 54, 19, 38, 208, 129, 191, 41, 41, 158, 244, 127, 79, 40, 99, 49,
-            73, 206, 169, 103, 201, 172, 35, 60, 12, 95, 195, 131,
-        ],
-        artifact_digest: [
-            190, 17, 135, 37, 87, 248, 254, 189, 253, 86, 216, 34, 88, 221, 126, 171, 119, 72, 132,
-            112, 219, 177, 41, 138, 20, 181, 202, 179, 77, 120, 172, 182,
-        ],
-        source_digest: [
-            82, 166, 175, 139, 13, 222, 124, 184, 54, 18, 147, 104, 190, 115, 200, 50, 199, 252,
-            198, 102, 115, 223, 190, 95, 64, 108, 122, 6, 113, 37, 216, 186,
-        ],
-        invocation_digest: [
-            171, 72, 1, 138, 112, 54, 19, 38, 208, 129, 191, 41, 41, 158, 244, 127, 79, 40, 99, 49,
-            73, 206, 169, 103, 201, 172, 35, 60, 12, 95, 195, 131,
-        ],
-        header_manifest_digest: [
-            184, 72, 182, 75, 105, 29, 110, 26, 225, 224, 22, 241, 217, 227, 94, 196, 6, 169, 65,
-            189, 215, 201, 109, 53, 157, 12, 178, 193, 25, 238, 247, 108,
-        ],
-        nvrtc_library_domain: [
-            208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
-            34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
-        ],
-    };
-
-/// CUDA 12.8 complete-module identity from the initial six-cohort census.
-const SM89_FINALIST_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm89Finalist,
-        module_target: "sm_89",
-        device_target: "sm_89",
-        compute_capability: (8, 9),
-        multiprocessor_count: 142,
-        nvrtc_version: (12, 8),
-        optin_shared_bytes: 101376,
-        tensor_map_access: false,
-        compile_key: [
-            235, 193, 182, 130, 116, 103, 174, 159, 63, 206, 131, 175, 205, 64, 119, 151, 34, 203,
-            179, 89, 18, 217, 30, 232, 30, 140, 241, 92, 201, 156, 78, 7,
-        ],
-        artifact_digest: [
-            87, 216, 213, 81, 91, 104, 49, 85, 154, 249, 63, 47, 147, 126, 34, 203, 252, 254, 162,
-            89, 29, 79, 133, 116, 48, 163, 77, 144, 64, 15, 203, 51,
-        ],
-        source_digest: [
-            82, 166, 175, 139, 13, 222, 124, 184, 54, 18, 147, 104, 190, 115, 200, 50, 199, 252,
-            198, 102, 115, 223, 190, 95, 64, 108, 122, 6, 113, 37, 216, 186,
-        ],
-        invocation_digest: [
-            235, 193, 182, 130, 116, 103, 174, 159, 63, 206, 131, 175, 205, 64, 119, 151, 34, 203,
-            179, 89, 18, 217, 30, 232, 30, 140, 241, 92, 201, 156, 78, 7,
-        ],
-        header_manifest_digest: [
-            139, 228, 11, 246, 18, 217, 251, 94, 204, 32, 205, 80, 22, 252, 163, 148, 110, 85, 76,
-            215, 186, 230, 211, 154, 40, 128, 98, 235, 215, 179, 135, 235,
-        ],
-        nvrtc_library_domain: [
-            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
-            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
-        ],
-    };
-
-/// CUDA 13.0 complete-module identity from the initial six-cohort census.
-const SM89_FINALIST_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
-    Tf32AutoQualificationIdentity {
-        module_kind: ModuleKind::TriadSm89Finalist,
-        module_target: "sm_89",
-        device_target: "sm_89",
-        compute_capability: (8, 9),
-        multiprocessor_count: 142,
-        nvrtc_version: (13, 0),
-        optin_shared_bytes: 101376,
-        tensor_map_access: false,
-        compile_key: [
-            252, 44, 190, 165, 133, 77, 131, 111, 149, 245, 3, 142, 141, 94, 215, 174, 96, 5, 162,
-            16, 19, 14, 248, 24, 17, 242, 63, 169, 130, 116, 115, 62,
-        ],
-        artifact_digest: [
-            181, 62, 15, 149, 230, 51, 192, 86, 101, 145, 185, 134, 13, 101, 238, 11, 176, 248, 56,
-            87, 22, 170, 82, 116, 201, 115, 211, 5, 250, 41, 3, 163,
-        ],
-        source_digest: [
-            82, 166, 175, 139, 13, 222, 124, 184, 54, 18, 147, 104, 190, 115, 200, 50, 199, 252,
-            198, 102, 115, 223, 190, 95, 64, 108, 122, 6, 113, 37, 216, 186,
-        ],
-        invocation_digest: [
-            252, 44, 190, 165, 133, 77, 131, 111, 149, 245, 3, 142, 141, 94, 215, 174, 96, 5, 162,
-            16, 19, 14, 248, 24, 17, 242, 63, 169, 130, 116, 115, 62,
-        ],
-        header_manifest_digest: [
-            45, 18, 8, 151, 34, 97, 78, 200, 98, 21, 60, 224, 91, 37, 226, 19, 106, 79, 195, 76,
-            18, 221, 54, 189, 152, 128, 253, 23, 75, 182, 167, 207,
-        ],
-        nvrtc_library_domain: [
-            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
-            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
-        ],
-    };
+const SM89_JOINT_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidenceCohort {
+    identity: SM89_JOINT_TF32_ARCHITECTURE,
+    portable: None,
+    tuning_revision: super::contract::SM89_TF32_JOINT_TUNING_REVISION,
+    cells: SM89_JOINT_TF32_EVIDENCE_CELLS,
+}];
 
 const SM89_FINALIST_TF32_NT_CELLS: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
@@ -3693,27 +2307,22 @@ const SM89_FINALIST_TF32_NT_CELLS: &[Tf32AutoCell] = &[
     ),
 ];
 
+/// The Ada finalist module's architecture. Its tournaments ran on an RTX 6000
+/// Ada under NVRTC 12.8, 13.0 and 13.2 and froze the same winners each time.
+const SM89_FINALIST_TF32_ARCHITECTURE: Tf32EvidenceArchitecture = Tf32EvidenceArchitecture {
+    module_kind: ModuleKind::TriadSm89Finalist,
+    compute_capability: (8, 9),
+    optin_shared_bytes: 101_376,
+    tensor_map_access: false,
+};
+
 /// Separate finalist evidence never rewrites the incumbent portable cohort.
-const SM89_FINALIST_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
-    Tf32AutoEvidenceCohort {
-        identity: SM89_FINALIST_TF32_IDENTITY_CUDA_12_8,
-        portable: None,
-        tuning_revision: super::contract::SM89_FINALIST_TUNING_REVISION,
-        cells: SM89_FINALIST_TF32_NT_CELLS,
-    },
-    Tf32AutoEvidenceCohort {
-        identity: SM89_FINALIST_TF32_IDENTITY_CUDA_13_0,
-        portable: None,
-        tuning_revision: super::contract::SM89_FINALIST_TUNING_REVISION,
-        cells: SM89_FINALIST_TF32_NT_CELLS,
-    },
-    Tf32AutoEvidenceCohort {
-        identity: SM89_FINALIST_TF32_IDENTITY_CUDA_13_2,
-        portable: None,
-        tuning_revision: super::contract::SM89_FINALIST_TUNING_REVISION,
-        cells: SM89_FINALIST_TF32_NT_CELLS,
-    },
-];
+const SM89_FINALIST_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidenceCohort {
+    identity: SM89_FINALIST_TF32_ARCHITECTURE,
+    portable: None,
+    tuning_revision: super::contract::SM89_FINALIST_TUNING_REVISION,
+    cells: SM89_FINALIST_TF32_NT_CELLS,
+}];
 
 /// No SM90a board has frozen a TF32 cohort yet; the family declines to the
 /// portable ladder until one does.
@@ -3889,7 +2498,7 @@ fn sm89_measured_tf32_bias_route(
     operands: F32TriadOperands,
     cohort: &Tf32AutoEvidenceCohort,
 ) -> Option<Tf32PhysicalRoute> {
-    if cohort.identity != SM89_TF32_QUALIFICATION_IDENTITY
+    if cohort.identity != SM89_TF32_ARCHITECTURE
         || request.op != ResolvedGemmOp::Nn
         || !operands
             .bias
@@ -4528,7 +3137,7 @@ const fn sm120_fma_cell(
 /// classifier serve and training-batch projections against what the exact
 /// policy resolved before them (1.21x to 2.07x,
 /// internal/perf/sm120-exact-wide-product-20260903).
-const SM120_FMA_MEASURED_CELLS_CC120_170: [Sm120FmaMeasuredCell; 18] = [
+const SM120_FMA_MEASURED_CELLS: [Sm120FmaMeasuredCell; 18] = [
     sm120_fma_cell(
         ResolvedGemmOp::Nn,
         (2_048, 768, 3_072),
@@ -4657,20 +3266,20 @@ const SM120_FMA_MEASURED_CELLS_CC120_170: [Sm120FmaMeasuredCell; 18] = [
     ),
 ];
 
-/// Shapes past the measured cells take the exact family when they fill the
-/// device with whole tiles on their own: at least one tile per
-/// multiprocessor, no split, and a reduction long enough for the pipeline
-/// to matter. The floor was three; the product-shape screen showed the
-/// family beating the scalar route at 1.3 tiles per multiprocessor (1.68x
-/// on the 4621x384 output) and at 2.9 (1.81x on the 10400x384 output).
-const SM120_FMA_GENERIC_TILES_PER_MULTIPROCESSOR: usize = 1;
+/// Shapes past the measured cells take the exact family when their output
+/// holds enough whole tiles, no split, and a reduction long enough for the
+/// pipeline to matter. The boundary is a tile count of the shape, never of
+/// the card: the route decides whether the reduction folds as the plain
+/// chain or through the scalar plan, so every SM120 card must take the same
+/// one. It sits at one tile per multiprocessor of the RTX 5090 the product
+/// screen ran on, where the family beat the scalar route from 1.3 tiles per
+/// multiprocessor (1.68x on the 4621x384 output) up (1.81x at 2.9 on the
+/// 10400x384 output).
+const SM120_FMA_GENERIC_MIN_TILES: usize = 170;
 const SM120_FMA_GENERIC_MIN_EDGE: usize = 128;
 const SM120_FMA_GENERIC_MIN_REDUCTION: usize = 256;
 
-fn sm120_fma_generic_route(
-    request: F32TriadRequest,
-    multiprocessor_count: u32,
-) -> Option<Sm120FmaRoute> {
+fn sm120_fma_generic_route(request: F32TriadRequest) -> Option<Sm120FmaRoute> {
     let (tile, kvec) = match request.op {
         ResolvedGemmOp::Nn => (Sm120FmaTile::M128N64, false),
         ResolvedGemmOp::Tn => (Sm120FmaTile::M64N128, false),
@@ -4689,9 +3298,7 @@ fn sm120_fma_generic_route(
     let tiles = rows
         .div_ceil(bm as usize)
         .checked_mul(columns.div_ceil(bn as usize))?;
-    let required =
-        (multiprocessor_count as usize).checked_mul(SM120_FMA_GENERIC_TILES_PER_MULTIPROCESSOR)?;
-    (tiles >= required).then_some(Sm120FmaRoute {
+    (tiles >= SM120_FMA_GENERIC_MIN_TILES).then_some(Sm120FmaRoute {
         tile,
         kvec,
         splits: 1,
@@ -4703,10 +3310,11 @@ fn f32_pointer_is_tma_aligned(pointer: super::contract::CUptr) -> bool {
 }
 
 /// The exact-F32 SM120 route for a request under the exact policy: the
-/// specialized module must be bound on a CC 12.0 device, every operand must
+/// specialized module must be bound on an SM120 device, every operand must
 /// sit on a 16-byte boundary with float4 leading dimensions (the tensor
-/// maps demand it), and the shape must be a measured cell or fill the
-/// device on its own. Anything else keeps the scalar routes.
+/// maps demand it), and the shape must be a measured cell or hold enough
+/// whole tiles. Every SM120 card takes the same route for a shape. Anything
+/// else keeps the scalar routes.
 pub(super) fn sm120_fma_exact_route(
     request: F32TriadRequest,
     operands: F32TriadOperands,
@@ -4732,11 +3340,10 @@ pub(super) fn sm120_fma_exact_route(
     {
         return None;
     }
-    let measured = SM120_FMA_MEASURED_CELLS_CC120_170
+    let measured = SM120_FMA_MEASURED_CELLS
         .iter()
         .find(|cell| cell.op == request.op && cell.shape == shape)
-        .map(|cell| cell.route)
-        .filter(|_| qualified.device.multiprocessor_count == 170);
+        .map(|cell| cell.route);
     let route = measured
         .filter(|&route| {
             !qualified
@@ -4744,8 +3351,7 @@ pub(super) fn sm120_fma_exact_route(
                 .is_excluded(request.op, route)
         })
         .or_else(|| {
-            let mut route =
-                sm120_fma_generic_route(request, qualified.device.multiprocessor_count)?;
+            let mut route = sm120_fma_generic_route(request)?;
             if let Some(measured) = measured {
                 route.splits = measured.splits;
             }
@@ -13421,21 +12027,13 @@ mod tf32_tests {
     use super::{
         INFERENCE_COPYPLAN_EVIDENCE_COHORTS, INFERENCE_COPYPLAN_SOURCE_DIGEST,
         SM89_EXACT_F32_D128_EVIDENCE_COHORTS, SM89_EXACT_F32_EVIDENCE_COHORTS,
-        SM89_FINALIST_TF32_EVIDENCE_COHORTS, SM89_JOINT_TF32_EVIDENCE_COHORTS,
-        SM89_JOINT_TF32_IDENTITY_CUDA_12_8, SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
-        SM89_JOINT_TF32_IDENTITY_CUDA_13_2, SM89_TF32_EVIDENCE_CELLS, SM89_TF32_EVIDENCE_COHORTS,
-        SM89_TF32_QUALIFICATION_IDENTITY, SM120_TF32_EVIDENCE_CELLS,
-        SM120_TF32_EVIDENCE_CELLS_188_SM, SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED,
-        SM120_TF32_EVIDENCE_COHORTS,
-        SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
-        SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
-        SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
-        SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
-        SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
-        SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84, SM120_TF32_RETIRED_COHORTS,
-        Tf32AutoEvidenceCohort, Tf32AutoOperandGate, Tf32AutoQualificationIdentity,
-        matching_tf32_cohort, measured_tf32_cell, measured_tf32_route_with_operands,
-        resolve_f32_triad_auto, resolve_f32_triad_auto_with_operands, resolve_tf32_forced,
+        SM89_FINALIST_TF32_ARCHITECTURE, SM89_FINALIST_TF32_EVIDENCE_COHORTS,
+        SM89_JOINT_TF32_ARCHITECTURE, SM89_JOINT_TF32_EVIDENCE_COHORTS, SM89_TF32_ARCHITECTURE,
+        SM89_TF32_EVIDENCE_CELLS, SM89_TF32_EVIDENCE_COHORTS, SM120_TF32_ARCHITECTURE,
+        SM120_TF32_EVIDENCE_CELLS, SM120_TF32_EVIDENCE_COHORTS, SM120_TF32_PORTABLE_ARCHITECTURE,
+        Tf32AutoEvidenceCohort, Tf32AutoOperandGate, matching_tf32_cohort,
+        measured_tf32_route_with_operands, resolve_f32_triad_auto,
+        resolve_f32_triad_auto_with_operands, resolve_tf32_forced,
     };
     use crate::gpu::context::F32TriadPolicy;
     use crate::gpu::gemm_bi_triad::contract::{
@@ -13451,7 +12049,7 @@ mod tf32_tests {
     use crate::gpu::kernel_identity::{
         ArtifactIdentity, ArtifactKind, COMPILER_REVISION, COMPOSER_REVISION, CompilerIdentity,
         CudaTarget, DeviceCaps, DeviceIdentity, DriverIdentity, ModuleKind, NUMERIC_ABI_REVISION,
-        ResolvedGemmOp, SCHEDULE_REVISION, TUNING_TABLE_REVISION, digest_hex,
+        ResolvedGemmOp, SCHEDULE_REVISION, TUNING_TABLE_REVISION,
     };
 
     fn qualified_module(
@@ -13534,22 +12132,7 @@ mod tf32_tests {
     }
 
     fn sm89_availability() -> F32TriadAvailability {
-        let mut portable = qualified_module(
-            ModuleKind::TriadSm80,
-            "sm_89",
-            "sm_89",
-            (8, 9),
-            false,
-            101_376,
-        );
-        portable.artifact.compile_key = SM89_TF32_QUALIFICATION_IDENTITY.compile_key;
-        portable.artifact.artifact_digest = SM89_TF32_QUALIFICATION_IDENTITY.artifact_digest;
-        portable.compiler.source_digest = SM89_TF32_QUALIFICATION_IDENTITY.source_digest;
-        portable.compiler.invocation_digest = SM89_TF32_QUALIFICATION_IDENTITY.invocation_digest;
-        portable.compiler.header_manifest_digest =
-            SM89_TF32_QUALIFICATION_IDENTITY.header_manifest_digest;
-        portable.compiler.nvrtc_library_domain =
-            SM89_TF32_QUALIFICATION_IDENTITY.nvrtc_library_domain;
+        let portable = qualified_module_for_auto_identity(SM89_TF32_ARCHITECTURE);
         F32TriadAvailability {
             portable: Some(portable),
             specialized: None,
@@ -13573,45 +12156,23 @@ mod tf32_tests {
     }
 
     #[test]
-    fn sm89_joint_cohorts_freeze_the_toolkit_specific_winner_map() {
-        let expected = [
-            (
-                SM89_JOINT_TF32_IDENTITY_CUDA_12_8,
-                None,
-                10,
-                Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
-                Tf32PhysicalRoute::Sm89NnDirectN96,
-            ),
-            (
-                SM89_JOINT_TF32_IDENTITY_CUDA_13_0,
-                None,
-                10,
-                Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
-                Tf32PhysicalRoute::Sm89NnDirectN96,
-            ),
-            (
-                SM89_JOINT_TF32_IDENTITY_CUDA_13_2,
-                None,
-                10,
-                Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
-                Tf32PhysicalRoute::Sm89NnDirectN96,
-            ),
-        ];
-        assert_eq!(SM89_JOINT_TF32_EVIDENCE_COHORTS.len(), expected.len());
-        for (cohort, (identity, portable, cells, tn_prism, nn_prism)) in
-            SM89_JOINT_TF32_EVIDENCE_COHORTS.iter().zip(expected)
-        {
-            assert_eq!(cohort.identity, identity);
-            assert_eq!(cohort.portable, portable);
-            assert_eq!(cohort.cells.len(), cells);
-            assert_eq!(cohort.cells[2].route, tn_prism);
-            assert_eq!(cohort.cells[3].route, nn_prism);
-        }
+    fn sm89_joint_cohort_is_one_table_for_the_architecture() {
+        let [cohort] = SM89_JOINT_TF32_EVIDENCE_COHORTS else {
+            panic!("SM89 joint must have exactly one TF32 cohort");
+        };
+        assert_eq!(cohort.identity, SM89_JOINT_TF32_ARCHITECTURE);
+        assert_eq!(cohort.portable, None);
+        assert_eq!(cohort.cells.len(), 10);
+        assert_eq!(
+            cohort.cells[2].route,
+            Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+        );
+        assert_eq!(cohort.cells[3].route, Tf32PhysicalRoute::Sm89NnDirectN96);
     }
 
     fn sm89_joint_availability(
-        joint: super::Tf32AutoQualificationIdentity,
-        portable: Option<super::Tf32AutoQualificationIdentity>,
+        joint: super::Tf32EvidenceArchitecture,
+        portable: Option<super::Tf32EvidenceArchitecture>,
     ) -> F32TriadAvailability {
         F32TriadAvailability {
             portable: portable.map(qualified_module_for_auto_identity),
@@ -13655,8 +12216,7 @@ mod tf32_tests {
                     )
                     .unwrap(),
                     F32TriadSelection::Tf32(cell.route),
-                    "CUDA {:?} failed to select {op:?}/{rows}/{columns}/{reduction}",
-                    cohort.identity.nvrtc_version,
+                    "failed to select {op:?}/{rows}/{columns}/{reduction}",
                 );
                 assert_no_tf32_route(
                     resolve_f32_triad_auto_with_operands(
@@ -13672,25 +12232,34 @@ mod tf32_tests {
     }
 
     #[test]
-    fn sm89_joint_identities_reject_every_single_field_mutation() {
-        for cohort in SM89_JOINT_TF32_EVIDENCE_COHORTS {
-            let exact = qualified_module_for_auto_identity(cohort.identity);
-            assert_eq!(
-                matching_tf32_cohort(exact, SM89_JOINT_TF32_EVIDENCE_COHORTS),
-                Some(cohort),
-            );
-            for (field, mutate) in sm120_identity_mutations().into_iter().enumerate() {
-                let mut drifted = exact;
-                mutate(&mut drifted);
-                if drifted == exact {
-                    drifted.device_caps.tensor_map_access = !exact.device_caps.tensor_map_access;
-                }
-                assert!(
-                    matching_tf32_cohort(drifted, SM89_JOINT_TF32_EVIDENCE_COHORTS).is_none(),
-                    "CUDA {:?} identity mutation {field} was admitted",
-                    cohort.identity.nvrtc_version,
-                );
+    fn sm89_joint_evidence_serves_every_sm89_card_and_no_other_module() {
+        let [cohort] = SM89_JOINT_TF32_EVIDENCE_COHORTS else {
+            panic!("SM89 joint must have exactly one TF32 cohort");
+        };
+        let exact = qualified_module_for_auto_identity(cohort.identity);
+        assert_eq!(
+            matching_tf32_cohort(exact, SM89_JOINT_TF32_EVIDENCE_COHORTS),
+            Some(cohort),
+        );
+        for (field, mutate) in sm120_identity_mutations().into_iter().enumerate() {
+            let mut drifted = exact;
+            mutate(&mut drifted);
+            if drifted == exact {
+                continue;
             }
+            assert!(
+                matching_tf32_cohort(drifted, SM89_JOINT_TF32_EVIDENCE_COHORTS).is_none(),
+                "architecture mutation {field} was admitted",
+            );
+        }
+        for (field, mutate) in provenance_mutations().into_iter().enumerate() {
+            let mut card = exact;
+            mutate(&mut card);
+            assert_eq!(
+                matching_tf32_cohort(card, SM89_JOINT_TF32_EVIDENCE_COHORTS),
+                Some(cohort),
+                "another SM89 card (provenance mutation {field}) lost the evidence",
+            );
         }
     }
 
@@ -13941,9 +12510,7 @@ mod tf32_tests {
         );
     }
 
-    fn sm120_availability_for(
-        identity: super::Tf32AutoQualificationIdentity,
-    ) -> F32TriadAvailability {
+    fn sm120_availability_for(identity: super::Tf32EvidenceArchitecture) -> F32TriadAvailability {
         let specialized = qualified_module_for_auto_identity(identity);
         F32TriadAvailability {
             portable: None,
@@ -13954,203 +12521,86 @@ mod tf32_tests {
         }
     }
 
+    /// The targets a module of the evidence's architecture compiles for.
+    fn architecture_targets(
+        identity: super::Tf32EvidenceArchitecture,
+    ) -> (&'static str, &'static str) {
+        match identity.compute_capability {
+            (12, _) => ("compute_120", "sm_120"),
+            (8, 9) => ("sm_89", "sm_89"),
+            other => panic!("no test targets for compute capability {other:?}"),
+        }
+    }
+
+    /// The module a card of the evidence's architecture binds. The test
+    /// module's SM count, toolkit and artifact bytes are its own, never the
+    /// measuring card's: evidence serves the whole architecture.
     fn qualified_module_for_auto_identity(
-        identity: super::Tf32AutoQualificationIdentity,
+        identity: super::Tf32EvidenceArchitecture,
     ) -> Tf32QualifiedModule {
-        let mut module = qualified_module(
+        let (target, device_target) = architecture_targets(identity);
+        qualified_module(
             identity.module_kind,
-            identity.module_target,
-            identity.device_target,
+            target,
+            device_target,
             identity.compute_capability,
             identity.tensor_map_access,
             identity.optin_shared_bytes,
-        );
-        module.artifact.compile_key = identity.compile_key;
-        module.artifact.artifact_digest = identity.artifact_digest;
-        module.compiler.source_digest = identity.source_digest;
-        module.compiler.invocation_digest = identity.invocation_digest;
-        module.compiler.header_manifest_digest = identity.header_manifest_digest;
-        module.compiler.nvrtc_version = identity.nvrtc_version;
-        module.compiler.nvrtc_library_domain = identity.nvrtc_library_domain;
-        module.device.multiprocessor_count = identity.multiprocessor_count;
-        module.device_caps.nvrtc_version = identity.nvrtc_version;
-        module
+        )
     }
 
-    fn measured_finalist_identities() -> [Tf32AutoQualificationIdentity; 3] {
-        fn digest(hex: &str) -> [u8; 32] {
-            assert_eq!(hex.len(), 64);
-            std::array::from_fn(|index| {
-                u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap()
-            })
-        }
-        let identity =
-            |nvrtc_version,
-             compile_key,
-             artifact_digest,
-             header_manifest_digest,
-             nvrtc_library_domain| Tf32AutoQualificationIdentity {
-                module_kind: ModuleKind::TriadSm89Finalist,
-                module_target: "sm_89",
-                device_target: "sm_89",
-                compute_capability: (8, 9),
-                multiprocessor_count: 142,
-                nvrtc_version,
-                optin_shared_bytes: 101_376,
-                tensor_map_access: false,
-                compile_key: digest(compile_key),
-                artifact_digest: digest(artifact_digest),
-                source_digest: digest(
-                    "52a6af8b0dde7cb836129368be73c832c7fcc66673dfbe5f406c7a067125d8ba",
-                ),
-                invocation_digest: digest(compile_key),
-                header_manifest_digest: digest(header_manifest_digest),
-                nvrtc_library_domain: digest(nvrtc_library_domain),
-            };
-        [
-            identity(
-                (12, 8),
-                "ebc1b6827467ae9f3fce83afcd40779722cbb35912d91ee81e8cf15cc99c4e07",
-                "57d8d5515b6831559af93f2f937e22cbfcfea2591d4f857430a34d90400fcb33",
-                "8be40bf612d9fb5ecc20cd5016fca3946e554cd7bae6d39a288062ebd7b387eb",
-                "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
-            ),
-            identity(
-                (13, 0),
-                "fc2cbea5854d836f95f5038e8d5ed7ae6005a210130ef81811f23fa98274733e",
-                "b53e0f95e633c0566591b9860d65ee0bb0f8385716aa5274c973d305fa2903a3",
-                "2d12089722614ec862153ce05b25e2136a4fc34c12dd36bd9880fd174bb6a7cf",
-                "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
-            ),
-            identity(
-                (13, 2),
-                "ab48018a70361326d081bf29299ef47f4f28633149cea967c9ac233c0c5fc383",
-                "be11872557f8febdfd56d82258dd7eab77488470dbb1298a14b5cab34d78acb6",
-                "b848b64b691d6e1ae1e016f1d9e35ec406a941bdd7c96d359d0cb2c119eef76c",
-                "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
-            ),
-        ]
+    /// The SM120 architecture's one cohort.
+    fn sm120_cohort() -> Tf32AutoEvidenceCohort {
+        let [cohort] = SM120_TF32_EVIDENCE_COHORTS else {
+            panic!("SM120 must have exactly one TF32 cohort")
+        };
+        *cohort
     }
 
-    /// The live SM120 cohort of a toolkit.
-    fn sm120_cohort(nvrtc_version: (i32, i32)) -> Tf32AutoEvidenceCohort {
-        SM120_TF32_EVIDENCE_COHORTS
-            .iter()
-            .copied()
-            .find(|cohort| cohort.identity.nvrtc_version == nvrtc_version)
-            .unwrap_or_else(|| panic!("missing live SM120 TF32 CUDA {nvrtc_version:?} cohort"))
-    }
-
-    /// A retired SM120 cohort of a toolkit: frozen against a source this tree
-    /// no longer contains, kept as the record of what that stack chose.
-    fn sm120_retired_cohort(nvrtc_version: (i32, i32)) -> Tf32AutoEvidenceCohort {
-        SM120_TF32_RETIRED_COHORTS
-            .iter()
-            .copied()
-            .find(|cohort| cohort.identity.nvrtc_version == nvrtc_version)
-            .unwrap_or_else(|| panic!("missing retired SM120 TF32 CUDA {nvrtc_version:?} cohort"))
-    }
-
-    fn sm120_identity_mutations() -> [fn(&mut Tf32QualifiedModule); 26] {
+    /// Changes that move a module out of the evidence's architecture or out
+    /// of what this tree builds: each must keep the evidence away.
+    fn sm120_identity_mutations() -> [fn(&mut Tf32QualifiedModule); 15] {
         [
             |module| module.module_kind = ModuleKind::Inference,
             |module| module.target = CudaTarget::new("compute_121").unwrap(),
             |module| module.artifact.module_kind = ModuleKind::Inference,
             |module| module.artifact.artifact_kind = ArtifactKind::Cubin,
-            |module| module.artifact.compile_key[0] ^= 1,
-            |module| module.artifact.artifact_digest[0] ^= 1,
-            |module| module.compiler.source_digest[0] ^= 1,
-            |module| module.compiler.invocation_digest[0] ^= 1,
-            |module| module.compiler.header_manifest_digest[0] ^= 1,
             |module| module.compiler.target = CudaTarget::new("compute_121").unwrap(),
-            |module| module.compiler.nvrtc_version.1 ^= 1,
-            |module| module.compiler.nvrtc_library_domain[0] ^= 1,
             |module| module.compiler.nvrtc_library_known = false,
             |module| module.compiler.output_kind = ArtifactKind::Cubin,
             |module| module.compiler.composer_revision ^= 1,
             |module| module.compiler.compiler_revision ^= 1,
             |module| module.compiler.numeric_abi_revision ^= 1,
             |module| module.compiler.schedule_revision ^= 1,
-            |module| module.device.compute_capability = (12, 1),
-            |module| module.device.multiprocessor_count -= 1,
-            |module| module.device.target = CudaTarget::new("sm_121").unwrap(),
-            |module| module.device_caps.compute_capability = (12, 1),
-            |module| module.device_caps.nvrtc_version.1 ^= 1,
+            |module| module.device.compute_capability = (8, 6),
             |module| module.device_caps.accepted_target = None,
             |module| module.device_caps.optin_shared_bytes -= 1,
             |module| module.device_caps.tensor_map_access = false,
         ]
     }
 
-    fn portable_sm120_coupled_mutations() -> [fn(&mut Tf32QualifiedModule); 6] {
+    /// Changes that stay inside the evidence's architecture: another card's
+    /// SM count, another toolkit, another driver, the bytes another toolkit
+    /// produces. None of them may keep the evidence away.
+    fn provenance_mutations() -> [fn(&mut Tf32QualifiedModule); 10] {
         [
             |module| {
                 module.artifact.compile_key[0] ^= 1;
                 module.compiler.invocation_digest[0] ^= 1;
             },
+            |module| module.artifact.artifact_digest[0] ^= 1,
+            |module| module.compiler.source_digest[0] ^= 1,
+            |module| module.compiler.header_manifest_digest[0] ^= 1,
             |module| {
-                let target = CudaTarget::new("compute_121").unwrap();
-                module.target = target;
-                module.compiler.target = target;
-                module.device_caps.accepted_target = Some(target);
+                module.compiler.nvrtc_version.1 ^= 1;
+                module.device_caps.nvrtc_version.1 ^= 1;
             },
-            |module| {
-                module.artifact.artifact_kind = ArtifactKind::Cubin;
-                module.compiler.output_kind = ArtifactKind::Cubin;
-            },
-            |module| {
-                module.device.compute_capability = (12, 1);
-                module.device_caps.compute_capability = (12, 1);
-            },
-            |module| {
-                module.compiler.nvrtc_version = (13, 1);
-                module.device_caps.nvrtc_version = (13, 1);
-            },
-            |module| {
-                module.module_kind = ModuleKind::Inference;
-                module.artifact.module_kind = ModuleKind::Inference;
-            },
+            |module| module.compiler.nvrtc_library_domain[0] ^= 1,
+            |module| module.device.multiprocessor_count = 188,
+            |module| module.device.multiprocessor_count = 84,
+            |module| module.device.driver.build_digest[0] ^= 1,
+            |module| module.device_caps.optin_shared_bytes += 1024,
         ]
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    enum Sm120ManifestRoute {
-        Tiled(Tf32Sm120Tile, Tf32Sm120Stages),
-        StreamK(Tf32Sm120Tile, Tf32Sm120Stages),
-    }
-
-    impl Sm120ManifestRoute {
-        fn route(self) -> Tf32PhysicalRoute {
-            match self {
-                Self::Tiled(tile, stages) => {
-                    Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route { tile, stages })
-                }
-                Self::StreamK(tile, stages) => {
-                    Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(Tf32Sm120Route { tile, stages })
-                }
-            }
-        }
-    }
-
-    type Sm120RouteManifestEntry = (ResolvedGemmOp, usize, usize, usize, Sm120ManifestRoute);
-
-    fn assert_sm120_route_manifest<const N: usize>(
-        cells: &[super::Tf32AutoCell],
-        expected: [Sm120RouteManifestEntry; N],
-    ) {
-        assert_eq!(cells.len(), expected.len());
-        for (cell, (op, rows, columns, reduction, route)) in cells.iter().zip(expected) {
-            assert_eq!(cell.op, op);
-            assert_eq!(
-                cell.shape,
-                super::Tf32ExactShape {
-                    output_rows: rows,
-                    output_columns: columns,
-                    reduction,
-                }
-            );
-            assert_eq!(cell.route, route.route());
-        }
     }
 
     #[test]
@@ -14192,496 +12642,6 @@ mod tf32_tests {
         }
     }
 
-    #[test]
-    fn sm120_tf32_cuda_12_8_identity_matches_the_literal_qualification_manifest() {
-        let identity = sm120_retired_cohort((12, 8)).identity;
-        assert_eq!(identity.module_kind, ModuleKind::TriadSm120);
-        assert_eq!(identity.module_target, "compute_120");
-        assert_eq!(identity.device_target, "sm_120");
-        assert_eq!(identity.compute_capability, (12, 0));
-        assert_eq!(identity.multiprocessor_count, 170);
-        assert_eq!(identity.nvrtc_version, (12, 8));
-        assert_eq!(identity.optin_shared_bytes, 101_376);
-        assert!(identity.tensor_map_access);
-        assert_eq!(
-            digest_hex(&identity.compile_key),
-            "a6cea94cf0a95464d9070cd419047676b3dee39c318bb96eeb511a360b368021"
-        );
-        assert_eq!(
-            digest_hex(&identity.artifact_digest),
-            "5b6a1cbc4f0b9a8f4219b2fd0b982adb798bb918e81215de48843690de3df7ab"
-        );
-        assert_eq!(
-            digest_hex(&identity.source_digest),
-            "246d2e35eb059cd696ec74325d4a223312fa605fe84ff58f17f6638d99b8182c"
-        );
-        assert_eq!(
-            digest_hex(&identity.invocation_digest),
-            "a6cea94cf0a95464d9070cd419047676b3dee39c318bb96eeb511a360b368021"
-        );
-        assert_eq!(
-            digest_hex(&identity.header_manifest_digest),
-            "fe8038d2296a5466909468f2b502f7cb3bf55eec314a4096a43b029f6d8b1d30"
-        );
-        assert_eq!(
-            digest_hex(&identity.nvrtc_library_domain),
-            "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155"
-        );
-
-        let module = qualified_module_for_auto_identity(identity);
-        assert_eq!(module.artifact.module_kind, ModuleKind::TriadSm120);
-        assert_eq!(module.artifact.artifact_kind, ArtifactKind::Ptx);
-        assert_eq!(module.compiler.target.as_str(), "compute_120");
-        assert!(module.compiler.nvrtc_library_known);
-        assert_eq!(module.compiler.output_kind, ArtifactKind::Ptx);
-        assert_eq!(module.compiler.composer_revision, 1);
-        assert_eq!(module.compiler.compiler_revision, COMPILER_REVISION);
-        assert_eq!(module.compiler.numeric_abi_revision, 5);
-        assert_eq!(module.compiler.schedule_revision, 8);
-        assert_eq!(module.device_caps.compute_capability, (12, 0));
-        assert_eq!(module.device_caps.nvrtc_version, (12, 8));
-        assert_eq!(
-            module
-                .device_caps
-                .accepted_target
-                .expect("accepted CUDA 12.8 target")
-                .as_str(),
-            "compute_120"
-        );
-        assert_eq!(module.device_caps.optin_shared_bytes, 101_376);
-        assert!(module.device_caps.tensor_map_access);
-    }
-
-    #[test]
-    fn sm120_tf32_cuda_12_8_route_manifest_is_literal_and_complete() {
-        let cohort = sm120_retired_cohort((12, 8));
-        assert_sm120_route_manifest(
-            cohort.cells,
-            [
-                (
-                    ResolvedGemmOp::Nn,
-                    2048,
-                    3072,
-                    768,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Tn,
-                    768,
-                    3072,
-                    2048,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Nt,
-                    2048,
-                    768,
-                    3072,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Nn,
-                    2048,
-                    768,
-                    1536,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Tn,
-                    1536,
-                    768,
-                    2048,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S4),
-                ),
-                (
-                    ResolvedGemmOp::Nt,
-                    2048,
-                    1536,
-                    768,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Nn,
-                    4621,
-                    1928,
-                    384,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Tn,
-                    384,
-                    1928,
-                    4621,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S4),
-                ),
-                (
-                    ResolvedGemmOp::Nt,
-                    4621,
-                    384,
-                    1928,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-            ],
-        );
-        for cell in cohort.cells {
-            let request = normalized_request(
-                cell.op,
-                cell.shape.output_rows,
-                cell.shape.output_columns,
-                cell.shape.reduction,
-            );
-            let operands = F32TriadOperands {
-                output: 0x1000,
-                a: 0x2000,
-                b: 0x3000,
-                bias: None,
-                alpha: 1.0,
-                beta: if cell.op == ResolvedGemmOp::Tn {
-                    1.0
-                } else {
-                    0.0
-                },
-            };
-            // The record still names the cell; the runtime table no longer
-            // holds this cohort, so the resolver declines it.
-            assert_eq!(
-                measured_tf32_cell(request, operands, cohort.cells),
-                Some(cell.route)
-            );
-            assert_no_tf32_route(
-                resolve_f32_triad_auto_with_operands(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    request,
-                    operands,
-                    sm120_availability_for(cohort.identity),
-                )
-                .unwrap(),
-            );
-            assert_eq!(
-                resolve_f32_triad_auto(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    request,
-                    sm120_availability_for(cohort.identity),
-                )
-                .unwrap(),
-                F32TriadSelection::ScalarFma,
-            );
-        }
-    }
-
-    #[test]
-    fn sm120_tf32_cuda_13_0_identity_matches_the_literal_qualification_manifest() {
-        let identity = sm120_retired_cohort((13, 0)).identity;
-        assert_eq!(identity.module_kind, ModuleKind::TriadSm120);
-        assert_eq!(identity.module_target, "compute_120");
-        assert_eq!(identity.device_target, "sm_120");
-        assert_eq!(identity.compute_capability, (12, 0));
-        assert_eq!(identity.multiprocessor_count, 170);
-        assert_eq!(identity.nvrtc_version, (13, 0));
-        assert_eq!(identity.optin_shared_bytes, 101_376);
-        assert!(identity.tensor_map_access);
-        assert_eq!(
-            digest_hex(&identity.compile_key),
-            "da248ae349b8ebddf6ede70b276cd1bfa620a7ddfba93fc922517f8688a6474f"
-        );
-        assert_eq!(
-            digest_hex(&identity.artifact_digest),
-            "51816c8d7906196d49aa6807742c0e93ac1732f23a96472eaab97dc446efb5b8"
-        );
-        assert_eq!(
-            digest_hex(&identity.source_digest),
-            "246d2e35eb059cd696ec74325d4a223312fa605fe84ff58f17f6638d99b8182c"
-        );
-        assert_eq!(
-            digest_hex(&identity.invocation_digest),
-            "da248ae349b8ebddf6ede70b276cd1bfa620a7ddfba93fc922517f8688a6474f"
-        );
-        assert_eq!(
-            digest_hex(&identity.header_manifest_digest),
-            "f4fff8418bd2c346c86ec6f07f5e7417147c013bf038cdc16df3e76cf3f80ad9"
-        );
-        assert_eq!(
-            digest_hex(&identity.nvrtc_library_domain),
-            "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d"
-        );
-
-        let module = qualified_module_for_auto_identity(identity);
-        assert_eq!(module.artifact.module_kind, ModuleKind::TriadSm120);
-        assert_eq!(module.artifact.artifact_kind, ArtifactKind::Ptx);
-        assert_eq!(module.compiler.target.as_str(), "compute_120");
-        assert!(module.compiler.nvrtc_library_known);
-        assert_eq!(module.compiler.output_kind, ArtifactKind::Ptx);
-        assert_eq!(module.compiler.composer_revision, 1);
-        assert_eq!(module.compiler.compiler_revision, COMPILER_REVISION);
-        assert_eq!(module.compiler.numeric_abi_revision, 5);
-        assert_eq!(module.compiler.schedule_revision, 8);
-        assert_eq!(module.device_caps.compute_capability, (12, 0));
-        assert_eq!(module.device_caps.nvrtc_version, (13, 0));
-        assert_eq!(
-            module
-                .device_caps
-                .accepted_target
-                .expect("accepted CUDA 13.0 target")
-                .as_str(),
-            "compute_120"
-        );
-        assert_eq!(module.device_caps.optin_shared_bytes, 101_376);
-        assert!(module.device_caps.tensor_map_access);
-    }
-
-    #[test]
-    fn sm120_tf32_cuda_13_0_route_manifest_is_literal_and_complete() {
-        let cohort = sm120_retired_cohort((13, 0));
-        assert_sm120_route_manifest(
-            cohort.cells,
-            [
-                (
-                    ResolvedGemmOp::Nn,
-                    2048,
-                    3072,
-                    768,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Tn,
-                    768,
-                    3072,
-                    2048,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Nt,
-                    2048,
-                    768,
-                    3072,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Nn,
-                    2048,
-                    768,
-                    1536,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Tn,
-                    1536,
-                    768,
-                    2048,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Nt,
-                    2048,
-                    1536,
-                    768,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Nn,
-                    4621,
-                    1928,
-                    384,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Tn,
-                    384,
-                    1928,
-                    4621,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Nt,
-                    4621,
-                    384,
-                    1928,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-            ],
-        );
-        for cell in cohort.cells {
-            let request = normalized_request(
-                cell.op,
-                cell.shape.output_rows,
-                cell.shape.output_columns,
-                cell.shape.reduction,
-            );
-            let operands = F32TriadOperands {
-                output: 0x1000,
-                a: 0x2000,
-                b: 0x3000,
-                bias: None,
-                alpha: 1.0,
-                beta: if cell.op == ResolvedGemmOp::Tn {
-                    1.0
-                } else {
-                    0.0
-                },
-            };
-            // The record still names the cell; the runtime table no longer
-            // holds this cohort, so the resolver declines it.
-            assert_eq!(
-                measured_tf32_cell(request, operands, cohort.cells),
-                Some(cell.route)
-            );
-            assert_no_tf32_route(
-                resolve_f32_triad_auto_with_operands(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    request,
-                    operands,
-                    sm120_availability_for(cohort.identity),
-                )
-                .unwrap(),
-            );
-            assert_eq!(
-                resolve_f32_triad_auto(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    request,
-                    sm120_availability_for(cohort.identity),
-                )
-                .unwrap(),
-                F32TriadSelection::ScalarFma,
-            );
-        }
-    }
-
-    #[test]
-    fn sm120_tf32_cuda_13_0_all_nine_routes_fail_closed_on_request_or_operand_drift() {
-        let cohort = sm120_retired_cohort((13, 0));
-        assert_eq!(cohort.cells.len(), 9);
-        for cell in cohort.cells {
-            let request = normalized_request(
-                cell.op,
-                cell.shape.output_rows,
-                cell.shape.output_columns,
-                cell.shape.reduction,
-            );
-            let operands = F32TriadOperands {
-                output: 0x1000,
-                a: 0x2000,
-                b: 0x3000,
-                bias: None,
-                alpha: 1.0,
-                beta: if cell.op == ResolvedGemmOp::Tn {
-                    1.0
-                } else {
-                    0.0
-                },
-            };
-
-            for (axis, value) in [
-                cell.shape.output_rows,
-                cell.shape.output_columns,
-                cell.shape.reduction,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                for changed in [value - 1, value + 1] {
-                    let mut shape = [
-                        cell.shape.output_rows,
-                        cell.shape.output_columns,
-                        cell.shape.reduction,
-                    ];
-                    shape[axis] = changed;
-                    assert_no_tf32_route(
-                        resolve_f32_triad_auto_with_operands(
-                            F32TriadPolicy::AllowDeterministicTf32,
-                            normalized_request(cell.op, shape[0], shape[1], shape[2]),
-                            operands,
-                            sm120_availability_for(cohort.identity),
-                        )
-                        .unwrap(),
-                    );
-                }
-            }
-
-            for stride in 0..3 {
-                let mut noncontiguous = request;
-                match stride {
-                    0 => noncontiguous.shape.lda += 1,
-                    1 => noncontiguous.shape.ldb += 1,
-                    _ => noncontiguous.shape.ldc += 1,
-                }
-                assert_no_tf32_route(
-                    resolve_f32_triad_auto_with_operands(
-                        F32TriadPolicy::AllowDeterministicTf32,
-                        noncontiguous,
-                        operands,
-                        sm120_availability_for(cohort.identity),
-                    )
-                    .unwrap(),
-                );
-            }
-
-            for rejected in [
-                F32TriadOperands {
-                    output: 0,
-                    ..operands
-                },
-                F32TriadOperands { a: 0, ..operands },
-                F32TriadOperands { b: 0, ..operands },
-                F32TriadOperands {
-                    output: 0x1004,
-                    ..operands
-                },
-                F32TriadOperands {
-                    a: 0x2004,
-                    ..operands
-                },
-                F32TriadOperands {
-                    b: 0x3004,
-                    ..operands
-                },
-                F32TriadOperands {
-                    bias: Some(0x4000),
-                    ..operands
-                },
-                F32TriadOperands {
-                    alpha: 0.5,
-                    ..operands
-                },
-                F32TriadOperands {
-                    beta: if cell.op == ResolvedGemmOp::Tn {
-                        0.0
-                    } else {
-                        1.0
-                    },
-                    ..operands
-                },
-            ] {
-                assert_no_tf32_route(
-                    resolve_f32_triad_auto_with_operands(
-                        F32TriadPolicy::AllowDeterministicTf32,
-                        request,
-                        rejected,
-                        sm120_availability_for(cohort.identity),
-                    )
-                    .unwrap(),
-                );
-            }
-
-            // The exact policy owns the exact-F32 SM120 family: a measured
-            // cell resolves to its qualified arm whatever the TF32
-            // qualification identity says, everything else stays scalar.
-            assert_eq!(
-                resolve_f32_triad_auto_with_operands(
-                    F32TriadPolicy::ExactScalarFma,
-                    request,
-                    operands,
-                    sm120_availability_for(cohort.identity),
-                )
-                .unwrap(),
-                expected_exact_selection(
-                    request,
-                    operands,
-                    sm120_availability_for(cohort.identity)
-                ),
-            );
-        }
-    }
-
     /// The exact-policy selection the measured-cell table implies: the
     /// official arm for a measured shape on a bound CC 12.0 module with
     /// tensor-map-aligned operands, otherwise the scalar routes.
@@ -14698,9 +12658,9 @@ mod tf32_tests {
 
     #[test]
     fn exact_policy_measured_cells_resolve_to_their_official_arms() {
-        let identity = sm120_cohort((13, 2)).identity;
+        let identity = sm120_cohort().identity;
         let availability = sm120_availability_for(identity);
-        for cell in super::SM120_FMA_MEASURED_CELLS_CC120_170 {
+        for cell in super::SM120_FMA_MEASURED_CELLS {
             let request = F32TriadRequest {
                 op: cell.op,
                 shape: cell.shape,
@@ -14765,16 +12725,12 @@ mod tf32_tests {
 
     fn exact_sm120_availability_with_exclusions(
         excluded: &[(ResolvedGemmOp, Sm120FmaRoute)],
-        matching_tf32_cohort: bool,
     ) -> F32TriadAvailability {
-        let identity = sm120_cohort((13, 2)).identity;
+        let identity = sm120_cohort().identity;
         let mut availability = sm120_availability_for(identity);
         let specialized = availability.specialized.as_mut().unwrap();
         specialized.sm120_fma_exclusions =
             Sm120FmaExclusions::from_routes(excluded).expect("literal exact-F32 routes");
-        if !matching_tf32_cohort {
-            specialized.compiler.source_digest = [0xee; 32];
-        }
         availability
     }
 
@@ -14808,20 +12764,35 @@ mod tf32_tests {
             splits: 2,
         };
         let availability =
-            exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, measured)], false);
+            exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, measured)]);
         let (request, operands) = nt_d768_out_request_and_operands();
 
-        for policy in [
-            F32TriadPolicy::ExactScalarFma,
-            F32TriadPolicy::AllowDeterministicTf32,
-        ] {
-            assert_eq!(
-                resolve_f32_triad_auto_with_operands(policy, request, operands, availability)
-                    .unwrap(),
-                F32TriadSelection::ExactSm120Fma(generic),
-                "{policy:?} must skip the excluded measured arm"
-            );
-        }
+        assert_eq!(
+            resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::ExactScalarFma,
+                request,
+                operands,
+                availability
+            )
+            .unwrap(),
+            F32TriadSelection::ExactSm120Fma(generic),
+            "the exact policy must skip the excluded measured arm"
+        );
+        // Under the TF32 policy the architecture's TF32 cell for the shape
+        // serves before the exact family is consulted.
+        assert_eq!(
+            resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::AllowDeterministicTf32,
+                request,
+                operands,
+                availability
+            )
+            .unwrap(),
+            F32TriadSelection::Tf32(Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route {
+                tile: Tf32Sm120Tile::M64N128,
+                stages: Tf32Sm120Stages::S2,
+            })),
+        );
     }
 
     #[test]
@@ -14836,13 +12807,10 @@ mod tf32_tests {
             kvec: true,
             splits: 2,
         };
-        let availability = exact_sm120_availability_with_exclusions(
-            &[
-                (ResolvedGemmOp::Nt, measured),
-                (ResolvedGemmOp::Nt, generic),
-            ],
-            false,
-        );
+        let availability = exact_sm120_availability_with_exclusions(&[
+            (ResolvedGemmOp::Nt, measured),
+            (ResolvedGemmOp::Nt, generic),
+        ]);
         let (request, operands) = nt_d768_out_request_and_operands();
 
         assert_eq!(
@@ -14865,7 +12833,7 @@ mod tf32_tests {
             splits: 2,
         };
         let availability =
-            exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, excluded)], true);
+            exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, excluded)]);
         for (op, dims, expected) in [
             (
                 ResolvedGemmOp::Nn,
@@ -14918,8 +12886,7 @@ mod tf32_tests {
             kvec: false,
             splits: 2,
         };
-        let availability =
-            exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, exact)], true);
+        let availability = exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, exact)]);
         let (request, _) = nt_d768_out_request_and_operands();
         let error = resolve_tf32_forced(
             request,
@@ -14935,102 +12902,6 @@ mod tf32_tests {
     }
 
     #[test]
-    fn sm120_tf32_cuda_13_2_route_manifest_is_literal_and_complete() {
-        let cells = sm120_retired_cohort((13, 2)).cells;
-        assert_eq!(
-            cells[0],
-            super::Tf32AutoCell {
-                op: ResolvedGemmOp::Tn,
-                shape: super::Tf32ExactShape {
-                    output_rows: 512,
-                    output_columns: 384,
-                    reduction: 256,
-                },
-                route: Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
-                    tile: Tf32PortableTile::M16N32,
-                    stages: Tf32PortableStages::S4,
-                }),
-                operand_gate: Tf32AutoOperandGate::RequiresVectorAlignmentEvidence,
-            }
-        );
-        assert_sm120_route_manifest(
-            &cells[1..],
-            [
-                (
-                    ResolvedGemmOp::Nn,
-                    512,
-                    768,
-                    3072,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M80N32Bk64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Nn,
-                    2048,
-                    3072,
-                    768,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Tn,
-                    768,
-                    3072,
-                    2048,
-                    Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
-                ),
-                (
-                    ResolvedGemmOp::Nt,
-                    2048,
-                    768,
-                    3072,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Nn,
-                    2048,
-                    768,
-                    1536,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Tn,
-                    1536,
-                    768,
-                    2048,
-                    Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
-                ),
-                (
-                    ResolvedGemmOp::Nt,
-                    2048,
-                    1536,
-                    768,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Nn,
-                    4621,
-                    1928,
-                    384,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
-                ),
-                (
-                    ResolvedGemmOp::Tn,
-                    384,
-                    1928,
-                    4621,
-                    Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
-                ),
-                (
-                    ResolvedGemmOp::Nt,
-                    4621,
-                    384,
-                    1928,
-                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-                ),
-            ],
-        );
-    }
-
-    #[test]
     fn tf32_tn_underfill_qualification_uses_current_tuning_revision() {
         assert_eq!(TUNING_TABLE_REVISION, 46);
         assert_eq!(F32_TF32_TUNING_REVISION, 46);
@@ -15038,7 +12909,7 @@ mod tf32_tests {
 
     #[test]
     fn sm120_tf32_tn_underfill_uses_the_requalified_portable_winner() {
-        let cohort = sm120_cohort((13, 2));
+        let cohort = sm120_cohort();
         let mut availability = sm120_availability_for(cohort.identity);
         availability.portable =
             Some(qualified_module_for_auto_identity(cohort.portable.expect(
@@ -15071,7 +12942,7 @@ mod tf32_tests {
 
     #[test]
     fn sm120_tf32_live_portable_tn_cell_is_exact_and_fail_closed() {
-        let cohort = sm120_cohort((13, 2));
+        let cohort = sm120_cohort();
         let identity = cohort.identity;
         let request = normalized_request(ResolvedGemmOp::Tn, 128, 512, 1024);
         let operands = F32TriadOperands {
@@ -15221,68 +13092,66 @@ mod tf32_tests {
                 "drifted specialized identity selected {selection:?}"
             );
         }
-        for (specialized, portable) in [
-            (
-                SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
-                SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
+        let twinned = || {
+            let mut value = sm120_availability_for(SM120_TF32_ARCHITECTURE);
+            value.portable = Some(qualified_module_for_auto_identity(
+                SM120_TF32_PORTABLE_ARCHITECTURE,
+            ));
+            value
+        };
+        assert_eq!(
+            resolve(
+                F32TriadPolicy::AllowDeterministicTf32,
+                request,
+                operands,
+                twinned(),
             ),
-            (
-                SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
-                SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
-            ),
-            (
-                SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
-                SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
-            ),
-        ] {
-            let availability = || {
-                let mut value = sm120_availability_for(specialized);
-                value.portable = Some(qualified_module_for_auto_identity(portable));
-                value
-            };
+            F32TriadSelection::Tf32(route),
+            "the architecture's portable twin",
+        );
+        // Another SM120 card binds a portable module of its own toolkit, SM
+        // count and driver: the cohort's portable route serves it unchanged.
+        for (field, mutate) in provenance_mutations().into_iter().enumerate() {
+            let mut card = twinned();
+            mutate(card.portable.as_mut().unwrap());
             assert_eq!(
                 resolve(
                     F32TriadPolicy::AllowDeterministicTf32,
                     request,
                     operands,
-                    availability(),
+                    card,
                 ),
                 F32TriadSelection::Tf32(route),
-                "CUDA {:?} exact portable twin",
-                specialized.nvrtc_version,
+                "provenance mutation {field} of the portable twin lost the route",
             );
-            // A mismatched portable twin is no evidence for the cohort's
-            // route; the portable tier may still serve the cell by design
-            // where the twin's structure is sound.
-            for mutate in sm120_identity_mutations()
-                .into_iter()
-                .chain(portable_sm120_coupled_mutations())
-            {
-                let mut rejected = availability();
-                mutate(rejected.portable.as_mut().unwrap());
-                let selection = resolve(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    request,
-                    operands,
-                    rejected,
-                );
-                assert!(
-                    matches!(selection, F32TriadSelection::ScalarFma)
-                        || matches!(
-                            selection,
-                            F32TriadSelection::Tf32(route)
-                                if route.module_kind() == ModuleKind::TriadSm80
-                        ),
-                    "CUDA {:?} mismatched portable twin selected {selection:?}",
-                    specialized.nvrtc_version,
-                );
-            }
+        }
+        // A portable module of another architecture or another build is no
+        // evidence for the cohort's route; the portable tier may still serve
+        // the cell by design where the module's structure is sound.
+        for mutate in sm120_identity_mutations() {
+            let mut rejected = twinned();
+            mutate(rejected.portable.as_mut().unwrap());
+            let selection = resolve(
+                F32TriadPolicy::AllowDeterministicTf32,
+                request,
+                operands,
+                rejected,
+            );
+            assert!(
+                matches!(selection, F32TriadSelection::ScalarFma)
+                    || matches!(
+                        selection,
+                        F32TriadSelection::Tf32(route)
+                            if route.module_kind() == ModuleKind::TriadSm80
+                    ),
+                "mismatched portable twin selected {selection:?}",
+            );
         }
     }
 
     #[test]
     fn sm120_tf32_live_nn_cell_is_exact_and_fail_closed() {
-        let cohort = sm120_cohort((13, 2));
+        let cohort = sm120_cohort();
         let request = normalized_request(ResolvedGemmOp::Nn, 2048, 768, 1536);
         let operands = F32TriadOperands {
             output: 0x1000,
@@ -15448,228 +13317,34 @@ mod tf32_tests {
                 &format!("identity field {field}"),
             );
         }
-        for version in [(12, 8), (13, 0)] {
-            assert_no_tf32_route(resolve(
-                F32TriadPolicy::AllowDeterministicTf32,
-                request,
-                operands,
-                sm120_availability_for(sm120_retired_cohort(version).identity),
-            ));
-        }
-    }
-
-    #[test]
-    fn sm120_tf32_cuda_12_8_identity_rejects_all_29_single_field_mutations() {
-        let cohort = sm120_retired_cohort((12, 8));
-        let exact = qualified_module_for_auto_identity(cohort.identity);
-        assert_eq!(
-            matching_tf32_cohort(exact, SM120_TF32_RETIRED_COHORTS),
-            Some(&cohort),
-        );
-        for (field, mutate) in sm120_identity_mutations().into_iter().enumerate() {
-            let mut module = exact;
-            mutate(&mut module);
-            assert!(
-                matching_tf32_cohort(module, SM120_TF32_RETIRED_COHORTS).is_none(),
-                "12.8 identity mutation {field} was admitted",
-            );
-        }
-    }
-
-    #[test]
-    fn sm120_tf32_cuda_13_0_identity_rejects_all_29_single_field_mutations() {
-        let cohort = sm120_retired_cohort((13, 0));
-        let exact = qualified_module_for_auto_identity(cohort.identity);
-        assert_eq!(
-            matching_tf32_cohort(exact, SM120_TF32_RETIRED_COHORTS),
-            Some(&cohort),
-        );
-        for (field, mutate) in sm120_identity_mutations().into_iter().enumerate() {
-            let mut module = exact;
-            mutate(&mut module);
-            assert!(
-                matching_tf32_cohort(module, SM120_TF32_RETIRED_COHORTS).is_none(),
-                "13.0 identity mutation {field} was admitted",
-            );
-        }
-    }
-
-    #[test]
-    fn sm120_tf32_real_cohorts_bind_routes_and_reject_cross_version_splices() {
-        let cuda_12_8 = sm120_cohort((12, 8));
-        let cuda_13_0 = sm120_cohort((13, 0));
-        let cuda_13_2 = sm120_cohort((13, 2));
-        let request = normalized_request(ResolvedGemmOp::Tn, 768, 3072, 2048);
-        let operands = F32TriadOperands {
-            output: 0x1000,
-            a: 0x2000,
-            b: 0x3000,
-            bias: None,
-            alpha: 1.0,
-            beta: 1.0,
-        };
-        assert_eq!(
-            measured_tf32_cell(request, operands, cuda_12_8.cells,),
-            Some(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(
-                Tf32Sm120Route {
-                    tile: Tf32Sm120Tile::M64N128,
-                    stages: Tf32Sm120Stages::S3,
-                },
-            )),
-        );
-        assert_eq!(
-            measured_tf32_cell(request, operands, cuda_13_0.cells,),
-            Some(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(
-                Tf32Sm120Route {
-                    tile: Tf32Sm120Tile::M64N128,
-                    stages: Tf32Sm120Stages::S3,
-                },
-            )),
-        );
-        assert_eq!(
-            measured_tf32_cell(request, operands, cuda_13_2.cells,),
-            Some(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(
-                Tf32Sm120Route {
-                    tile: Tf32Sm120Tile::M64N128,
-                    stages: Tf32Sm120Stages::S3,
-                },
-            )),
-        );
-
-        for live in [cuda_12_8, cuda_13_0, cuda_13_2] {
+        // Every other SM120 card takes the same route: another SM count,
+        // another toolkit, another driver, other artifact bytes.
+        for (field, mutate) in provenance_mutations().into_iter().enumerate() {
+            let mut availability = sm120_availability_for(cohort.identity);
+            mutate(availability.specialized.as_mut().unwrap());
             assert_eq!(
-                resolve_f32_triad_auto_with_operands(
+                resolve(
                     F32TriadPolicy::AllowDeterministicTf32,
                     request,
                     operands,
-                    sm120_availability_for(live.identity),
-                )
-                .unwrap(),
-                F32TriadSelection::Tf32(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(
-                    Tf32Sm120Route {
-                        tile: Tf32Sm120Tile::M64N128,
-                        stages: Tf32Sm120Stages::S3,
-                    },
-                )),
+                    availability,
+                ),
+                F32TriadSelection::Tf32(route),
+                "provenance mutation {field} lost the live NN route",
             );
-        }
-
-        // Historical lower-toolkit records retain their old manifests but
-        // remain unreachable because only fresh current-source identities are live.
-        for retired in [sm120_retired_cohort((12, 8)), sm120_retired_cohort((13, 0))] {
-            assert_no_tf32_route(
-                resolve_f32_triad_auto_with_operands(
-                    F32TriadPolicy::AllowDeterministicTf32,
-                    request,
-                    operands,
-                    sm120_availability_for(retired.identity),
-                )
-                .unwrap(),
-            );
-        }
-        let cohorts = SM120_TF32_EVIDENCE_COHORTS
-            .iter()
-            .chain(SM120_TF32_RETIRED_COHORTS)
-            .copied()
-            .collect::<Vec<_>>();
-        for source in cohorts.iter().copied() {
-            for destination in cohorts.iter().copied() {
-                if source.identity.nvrtc_version == destination.identity.nvrtc_version {
-                    continue;
-                }
-                let mut spliced = qualified_module_for_auto_identity(source.identity);
-                spliced.compiler.nvrtc_version = destination.identity.nvrtc_version;
-                spliced.device_caps.nvrtc_version = destination.identity.nvrtc_version;
-                assert!(
-                    matching_tf32_cohort(spliced, SM120_TF32_EVIDENCE_COHORTS).is_none(),
-                    "CUDA {:?} body admitted with CUDA {:?} versions",
-                    source.identity.nvrtc_version,
-                    destination.identity.nvrtc_version,
-                );
-            }
         }
     }
 
-    /// A cohort is frozen against the module source it was measured on. Editing
-    /// any kernel of that module changes the source digest, and every cohort
-    /// whose digest no longer matches is silently unreachable: the TF32 policy
-    /// resolves nothing and falls through to the exact floor with no error.
-    /// At least one cohort has to still describe this tree, or the whole
-    /// deterministic TF32 family is dead code until someone requalifies it.
+    /// The SM120 architecture has one cohort: the tournament on one card,
+    /// serving every card of the architecture, each shape measured once.
     #[test]
-    fn sm120_tf32_live_cohort_manifest_is_exact_and_unique() {
-        let cohorts = SM120_TF32_EVIDENCE_COHORTS
-            .iter()
-            .filter(|cohort| cohort.identity.multiprocessor_count == 170)
-            .collect::<Vec<_>>();
-        // CUDA 13.2 is frozen twice: once per NVRTC library build the
-        // boards carry (13.2.51 on the Ada box, 13.2.78 on the rented
-        // RTX 5090s). The library domain tells them apart.
-        assert_eq!(
-            cohorts
-                .iter()
-                .map(|cohort| cohort.identity.nvrtc_version)
-                .collect::<Vec<_>>(),
-            [(12, 8), (13, 0), (13, 2), (13, 2)]
-        );
-        let (first, second) = (cohorts[2].identity, cohorts[3].identity);
-        assert_ne!(first.nvrtc_library_domain, second.nvrtc_library_domain);
-        assert_eq!(first.source_digest, second.source_digest);
-        assert_eq!(first.header_manifest_digest, second.header_manifest_digest);
-        for cohort in cohorts {
-            assert_eq!(
-                cohort.cells,
-                SM120_TF32_EVIDENCE_CELLS_DRIVER_595_84_RETAINED
-            );
-            assert_eq!(cohort.cells.len(), 23);
-            let mut keys = cohort
-                .cells
-                .iter()
-                .map(|cell| (cell.op, cell.shape))
-                .collect::<Vec<_>>();
-            keys.sort_unstable_by_key(|(op, shape)| {
-                (
-                    *op as u8,
-                    shape.output_rows,
-                    shape.output_columns,
-                    shape.reduction,
-                )
-            });
-            keys.dedup();
-            assert_eq!(keys.len(), cohort.cells.len(), "a shape is measured twice");
-            assert!(!cohort.cells.iter().any(|cell| {
-                cell.op == ResolvedGemmOp::Tn
-                    && cell.shape.output_rows == 128
-                    && cell.shape.output_columns == 128
-                    && cell.shape.reduction == 8192
-            }));
-            assert_eq!(
-                cohort
-                    .cells
-                    .iter()
-                    .filter(|cell| cell.route.module_kind() == ModuleKind::TriadSm80)
-                    .count(),
-                6
-            );
-            assert!(cohort.portable.is_some());
-        }
-        // The RTX PRO 6000 Blackwell: the RTX 5090's NVRTC 13.2.78 identity on
-        // a board of 188 SMs, with its own winners.
-        let board = SM120_TF32_EVIDENCE_COHORTS
-            .iter()
-            .filter(|cohort| cohort.identity.multiprocessor_count == 188)
-            .collect::<Vec<_>>();
-        assert_eq!(board.len(), 1);
-        let pro = board[0];
-        assert_eq!(
-            pro.identity,
-            Tf32AutoQualificationIdentity {
-                multiprocessor_count: 188,
-                ..second
-            }
-        );
-        assert_eq!(pro.cells, SM120_TF32_EVIDENCE_CELLS_188_SM);
-        let mut keys = pro
+    fn sm120_has_one_cohort_for_every_card_of_the_architecture() {
+        let cohort = sm120_cohort();
+        assert_eq!(cohort.identity, SM120_TF32_ARCHITECTURE);
+        assert_eq!(cohort.portable, Some(SM120_TF32_PORTABLE_ARCHITECTURE));
+        assert_eq!(cohort.cells, SM120_TF32_EVIDENCE_CELLS);
+        assert_eq!(cohort.cells.len(), 39);
+        let mut keys = cohort
             .cells
             .iter()
             .map(|cell| {
@@ -15683,157 +13358,23 @@ mod tf32_tests {
             .collect::<Vec<_>>();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(keys.len(), pro.cells.len(), "a shape is measured twice");
-        assert!(pro.portable.is_some());
-    }
-
-    #[test]
-    fn sm120_tf32_lower_toolkit_595_84_identities_are_literal_and_live() {
-        fn digest(hex: &str) -> [u8; 32] {
-            assert_eq!(hex.len(), 64);
-            std::array::from_fn(|index| {
-                u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap()
-            })
-        }
-        type LowerToolkitCase = (
-            Tf32AutoQualificationIdentity,
-            Tf32AutoQualificationIdentity,
-            (i32, i32),
-            &'static str,
-            &'static str,
-            &'static str,
-            &'static str,
-            &'static str,
-            &'static str,
-            &'static str,
+        assert_eq!(keys.len(), cohort.cells.len(), "a shape is measured twice");
+        assert_eq!(
+            cohort
+                .cells
+                .iter()
+                .filter(|cell| cell.route.module_kind() == ModuleKind::TriadSm80)
+                .count(),
+            6
         );
-        let cases: [LowerToolkitCase; 2] = [
-            (
-                SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
-                SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_12_8_DRIVER_595_84,
-                (12, 8),
-                "84c04b66ae28bbf795dadf0f8d88310603e09e5ffeead37883fd7d15f46a4c53",
-                "ab85299f352f62cf315322013afbfdedb7bd033d0ebd9b70f60a908a2c2cf4e9",
-                "6b69d5f958a1b85e8fb5cac65a3bae34a6f5444a757925e5f2f9409e2e0392c8",
-                "c791a02540277febb6ef58ddf515324f8163c109ba7151a43e83a304cc99eeb4",
-                "3e11e78c1f986584eb03afaec00a210005e67097a2f513e7a96408b80c95253f",
-                "070597b13d1c8240efdd8d3226ae93db491e15d5250ef2cdef8eae2b2bd2c276",
-                "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
-            ),
-            (
-                SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
-                SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_0_DRIVER_595_84,
-                (13, 0),
-                "b10da2e57112320cb14c926321677c8aae800dd2b74ecb7f4fd8f3eed693ff28",
-                "0b11b9aa8464d7cc22c817b575edd60c9444633d2d6092a0f6c4b9cce76e5337",
-                "b938e17359bf94d4d186419b4ad13c1f9e63d8c24361af4cfc3ba91e3753ceda",
-                "4ee15778bed8d952f138f429088d46232d8a99b49f3dcf4c1513dfa44b27b230",
-                "c2e22af293d5e148607f793ce8bc2f93afce3affcae4a1d45881ac87019f15e5",
-                "d75635780905da9422a5c4b0a5b1cc643505a18c8e188c1f7dd6f17e90aa1a80",
-                "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
-            ),
-        ];
-        for (
-            specialized,
-            portable,
-            version,
-            specialized_key,
-            specialized_artifact,
-            specialized_header,
-            portable_key,
-            portable_artifact,
-            portable_header,
-            nvrtc_domain,
-        ) in cases
-        {
-            assert_eq!(specialized.module_kind, ModuleKind::TriadSm120);
-            assert_eq!(portable.module_kind, ModuleKind::TriadSm80);
-            for identity in [specialized, portable] {
-                assert_eq!(identity.module_target, "compute_120");
-                assert_eq!(identity.device_target, "sm_120");
-                assert_eq!(identity.compute_capability, (12, 0));
-                assert_eq!(identity.multiprocessor_count, 170);
-                assert_eq!(identity.nvrtc_version, version);
-                assert_eq!(identity.optin_shared_bytes, 101376);
-                assert!(identity.tensor_map_access);
-                assert!(identity.matches(qualified_module_for_auto_identity(identity)));
-            }
-            assert_eq!(specialized.compile_key, digest(specialized_key));
-            assert_eq!(specialized.artifact_digest, digest(specialized_artifact));
-            assert_eq!(specialized.invocation_digest, digest(specialized_key));
-            assert_eq!(
-                specialized.header_manifest_digest,
-                digest(specialized_header)
-            );
-            assert_eq!(portable.compile_key, digest(portable_key));
-            assert_eq!(portable.artifact_digest, digest(portable_artifact));
-            assert_eq!(portable.invocation_digest, digest(portable_key));
-            assert_eq!(portable.header_manifest_digest, digest(portable_header));
-            assert_eq!(specialized.nvrtc_library_domain, digest(nvrtc_domain));
-            assert_eq!(portable.nvrtc_library_domain, digest(nvrtc_domain));
-            assert_eq!(
-                specialized.source_digest,
-                digest("248bb7cdfbc750ba0fa5e156edf85010890faa7df4ab916aeb97d8c22bb5d035")
-            );
-            assert_eq!(
-                portable.source_digest,
-                digest("f853ab0c4f22c4e212ca1fe526e202337b77fd333e73cebdd4e069004bda771d")
-            );
-        }
     }
 
+    /// The exact-f32 Ada cohorts and the Inference copy-plan cohorts still pin
+    /// the module source they were measured on; an edit to those sources
+    /// would let their routes fall back without any test noticing. Hold them
+    /// to the source this tree composes so such an edit fails here first.
     #[test]
-    fn at_least_one_sm120_tf32_cohort_matches_this_tree() {
-        let live = super::super::modules::module_source_digest(ModuleKind::TriadSm120, "sm_120a")
-            .expect("compose the SM120 module source");
-        let stale: Vec<usize> = SM120_TF32_EVIDENCE_COHORTS
-            .iter()
-            .enumerate()
-            .filter(|(_, cohort)| cohort.identity.source_digest != live)
-            .map(|(index, _)| index)
-            .collect();
-        assert!(
-            stale.is_empty(),
-            "a live SM120 TF32 cohort is frozen against a source this tree no \
-             longer contains and can never match a board: requalify it against \
-             the current kernels or retire it. Stale cohort indices: {stale:?}",
-        );
-        assert!(!SM120_TF32_EVIDENCE_COHORTS.is_empty());
-        for cohort in SM120_TF32_EVIDENCE_COHORTS {
-            if let Some(twin) = cohort.portable {
-                assert_eq!(twin.module_kind, ModuleKind::TriadSm80);
-                // The portable module a CC 12.x board compiles leaves the
-                // sm80 stream-K fragment out, so the twin's source is the
-                // composition for its own target.
-                let portable_live = super::super::modules::module_source_digest(
-                    ModuleKind::TriadSm80,
-                    twin.module_target,
-                )
-                .expect("compose the portable module source");
-                assert_eq!(
-                    twin.source_digest, portable_live,
-                    "a live cohort's portable twin is frozen against a portable source this \
-                     tree no longer contains"
-                );
-            }
-            assert_eq!(cohort.tuning_revision, F32_TF32_TUNING_REVISION);
-        }
-        // A retired cohort is retired for exactly this reason.
-        for cohort in SM120_TF32_RETIRED_COHORTS {
-            assert_ne!(
-                cohort.identity.source_digest, live,
-                "a retired SM120 TF32 cohort matches the live source; it belongs in the live table"
-            );
-        }
-    }
-
-    /// The portable module carries the stream-K kernel and the Inference
-    /// module the copy-plan GEMMs; an edit to any of those sources moves the
-    /// module identity these Ada cohorts pin, and the routes they admit fall
-    /// back without any test noticing. Hold every Ada cohort to the source
-    /// this tree composes so such an edit fails here first.
-    #[test]
-    fn every_ada_cohort_matches_the_source_this_tree_composes() {
+    fn every_source_pinned_ada_cohort_matches_the_source_this_tree_composes() {
         let live = |kind| {
             super::super::modules::module_source_digest(kind, "sm_89")
                 .unwrap_or_else(|error| panic!("compose {kind:?} for sm_89: {error}"))
@@ -15862,33 +13403,6 @@ mod tf32_tests {
                 );
             }
         }
-        let tf32 = [
-            (
-                "portable",
-                ModuleKind::TriadSm80,
-                SM89_TF32_EVIDENCE_COHORTS,
-            ),
-            (
-                "joint",
-                ModuleKind::TriadSm89Tf32Joint,
-                SM89_JOINT_TF32_EVIDENCE_COHORTS,
-            ),
-            (
-                "finalist",
-                ModuleKind::TriadSm89Finalist,
-                SM89_FINALIST_TF32_EVIDENCE_COHORTS,
-            ),
-        ];
-        for (name, kind, cohorts) in tf32 {
-            let digest = live(kind);
-            for cohort in cohorts {
-                assert_eq!(cohort.identity.module_kind, kind, "{name} cohort module");
-                assert_eq!(
-                    cohort.identity.source_digest, digest,
-                    "an Ada {name} TF32 cohort pins a source this tree no longer composes"
-                );
-            }
-        }
         let exact = live(ModuleKind::TriadSm89ExactF32);
         for cohort in SM89_EXACT_F32_EVIDENCE_COHORTS {
             assert_eq!(
@@ -15905,201 +13419,65 @@ mod tf32_tests {
         }
     }
 
+    /// Every card of an architecture reaches its cohort, and nothing outside
+    /// the architecture does: a 5090, a PRO 6000, a 5080 and a GB10 all take
+    /// the SM120 cohort under any toolkit; an Ada card or a module this tree
+    /// did not build takes none.
     #[test]
-    fn sm120_tf32_evidence_cohorts_are_exact_and_unambiguous() {
-        assert!(!SM120_TF32_EVIDENCE_COHORTS.is_empty());
-        // The retired record holds the three stacks that measured earlier
-        // sources: CUDA 12.8, CUDA 13.0 and CUDA 13.2.
-        assert_eq!(
-            SM120_TF32_RETIRED_COHORTS
-                .iter()
-                .map(|cohort| cohort.identity.nvrtc_version)
-                .collect::<Vec<_>>(),
-            vec![(12, 8), (13, 0), (13, 2)]
-        );
-        // One cohort per NVRTC library build: the driver build is not part
-        // of the identity, the compiler build is. CUDA 13.2 carries two.
-        assert_eq!(
-            SM120_TF32_EVIDENCE_COHORTS
-                .iter()
-                .filter(|cohort| cohort.identity.nvrtc_version == (13, 2)
-                    && cohort.identity.multiprocessor_count == 170)
-                .count(),
-            2,
-        );
-        assert!(
-            SM120_TF32_EVIDENCE_COHORTS
-                .iter()
-                .all(|cohort| cohort.identity.nvrtc_version != (13, 1))
-        );
-        for (index, cohort) in SM120_TF32_EVIDENCE_COHORTS.iter().enumerate() {
-            for other in SM120_TF32_EVIDENCE_COHORTS.iter().skip(index + 1) {
+    fn tf32_cohorts_serve_their_whole_architecture_and_nothing_else() {
+        for (cohorts, identity) in [
+            (SM120_TF32_EVIDENCE_COHORTS, SM120_TF32_ARCHITECTURE),
+            (SM89_TF32_EVIDENCE_COHORTS, SM89_TF32_ARCHITECTURE),
+            (
+                SM89_JOINT_TF32_EVIDENCE_COHORTS,
+                SM89_JOINT_TF32_ARCHITECTURE,
+            ),
+            (
+                SM89_FINALIST_TF32_EVIDENCE_COHORTS,
+                SM89_FINALIST_TF32_ARCHITECTURE,
+            ),
+        ] {
+            let [cohort] = cohorts else {
+                panic!("{identity:?} must have exactly one cohort");
+            };
+            let exact = qualified_module_for_auto_identity(identity);
+            assert_eq!(matching_tf32_cohort(exact, cohorts), Some(cohort));
+            for multiprocessors in [24, 48, 84, 128, 142, 170, 188] {
+                for nvrtc_version in [(12, 8), (13, 0), (13, 2), (13, 4)] {
+                    let mut card = exact;
+                    card.device.multiprocessor_count = multiprocessors;
+                    card.compiler.nvrtc_version = nvrtc_version;
+                    card.device_caps.nvrtc_version = nvrtc_version;
+                    assert_eq!(
+                        matching_tf32_cohort(card, cohorts),
+                        Some(cohort),
+                        "{identity:?} on {multiprocessors} SMs under NVRTC {nvrtc_version:?}",
+                    );
+                }
+            }
+            for (field, mutate) in sm120_identity_mutations().into_iter().enumerate() {
+                let mut drifted = exact;
+                mutate(&mut drifted);
+                if drifted == exact {
+                    continue;
+                }
                 assert!(
-                    cohort.identity.nvrtc_version != other.identity.nvrtc_version
-                        || cohort.identity.nvrtc_library_domain
-                            != other.identity.nvrtc_library_domain
-                        || cohort.identity.multiprocessor_count
-                            != other.identity.multiprocessor_count,
-                    "cohort {index} shares a toolkit, a compiler build and a board with a later cohort",
+                    matching_tf32_cohort(drifted, cohorts).is_none(),
+                    "{identity:?}: architecture mutation {field} was admitted",
                 );
             }
         }
-        for (index, cohort) in SM120_TF32_EVIDENCE_COHORTS.iter().enumerate() {
-            assert_eq!(cohort.identity.module_kind, ModuleKind::TriadSm120);
-            assert!(!cohort.cells.is_empty());
-            assert_eq!(
-                SM120_TF32_EVIDENCE_COHORTS
-                    .iter()
-                    .filter(|candidate| {
-                        candidate
-                            .identity
-                            .matches(qualified_module_for_auto_identity(cohort.identity))
-                    })
-                    .count(),
-                1,
-                "cohort {index} did not match exactly once",
-            );
-            assert_eq!(
-                matching_tf32_cohort(
-                    qualified_module_for_auto_identity(cohort.identity),
-                    SM120_TF32_EVIDENCE_COHORTS,
-                ),
-                Some(cohort),
-            );
-            for other in &SM120_TF32_EVIDENCE_COHORTS[index + 1..] {
-                assert_ne!(cohort.identity, other.identity);
-            }
-        }
+        let mut gb10 = qualified_module_for_auto_identity(SM120_TF32_ARCHITECTURE);
+        gb10.device.compute_capability = (12, 1);
+        gb10.device_caps.compute_capability = (12, 1);
+        assert_eq!(
+            matching_tf32_cohort(gb10, SM120_TF32_EVIDENCE_COHORTS),
+            Some(&sm120_cohort())
+        );
     }
 
     #[test]
     fn sm120_tf32_operand_aware_resolution_admits_only_archived_cells() {
-        assert_eq!(SM120_TF32_EVIDENCE_CELLS.len(), 11);
-        assert_eq!(
-            SM120_TF32_EVIDENCE_CELLS
-                .iter()
-                .filter(|cell| matches!(
-                    cell.operand_gate,
-                    Tf32AutoOperandGate::RequiresNoBiasAndVectorAlignmentEvidence
-                ))
-                .count(),
-            4
-        );
-        assert_eq!(
-            SM120_TF32_EVIDENCE_CELLS
-                .iter()
-                .filter(|cell| matches!(
-                    cell.operand_gate,
-                    Tf32AutoOperandGate::RequiresVectorAlignmentEvidence
-                ))
-                .count(),
-            7
-        );
-        let unique_keys = SM120_TF32_EVIDENCE_CELLS
-            .iter()
-            .map(|cell| {
-                (
-                    cell.op as u8,
-                    cell.shape.output_rows,
-                    cell.shape.output_columns,
-                    cell.shape.reduction,
-                )
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(unique_keys.len(), SM120_TF32_EVIDENCE_CELLS.len());
-        let expected = [
-            (
-                ResolvedGemmOp::Nn,
-                512,
-                768,
-                3072,
-                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M80N32Bk64, Tf32Sm120Stages::S2),
-            ),
-            (
-                ResolvedGemmOp::Nn,
-                2048,
-                3072,
-                768,
-                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S2),
-            ),
-            (
-                ResolvedGemmOp::Tn,
-                768,
-                3072,
-                2048,
-                Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
-            ),
-            (
-                ResolvedGemmOp::Nt,
-                2048,
-                768,
-                3072,
-                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-            ),
-            (
-                ResolvedGemmOp::Nn,
-                2048,
-                768,
-                1536,
-                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-            ),
-            (
-                ResolvedGemmOp::Tn,
-                1536,
-                768,
-                2048,
-                Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
-            ),
-            (
-                ResolvedGemmOp::Nt,
-                2048,
-                1536,
-                768,
-                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-            ),
-            (
-                ResolvedGemmOp::Nn,
-                4621,
-                1928,
-                384,
-                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
-            ),
-            (
-                ResolvedGemmOp::Tn,
-                384,
-                1928,
-                4621,
-                Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
-            ),
-            (
-                ResolvedGemmOp::Nt,
-                4621,
-                384,
-                1928,
-                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
-            ),
-        ];
-        assert_eq!(
-            SM120_TF32_EVIDENCE_CELLS[0].route,
-            Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
-                tile: Tf32PortableTile::M16N32,
-                stages: Tf32PortableStages::S4,
-            })
-        );
-        for (cell, (op, rows, columns, reduction, route)) in
-            SM120_TF32_EVIDENCE_CELLS[1..].iter().zip(expected)
-        {
-            assert_eq!(cell.op, op);
-            assert_eq!(
-                cell.shape,
-                super::Tf32ExactShape {
-                    output_rows: rows,
-                    output_columns: columns,
-                    reduction,
-                }
-            );
-            assert_eq!(cell.route, route.route());
-        }
         for cohort in SM120_TF32_EVIDENCE_COHORTS {
             let mut exact_availability = sm120_availability_for(cohort.identity);
             exact_availability.portable = cohort.portable.map(qualified_module_for_auto_identity);
@@ -16295,103 +13673,37 @@ mod tf32_tests {
                     .unwrap(),
                 );
             }
-            for version in [(12, 8), (13, 0), (13, 1), (13, 2), (13, 3)]
-                .into_iter()
-                .filter(|version| *version != cohort.identity.nvrtc_version)
-            {
-                let mut availability = exact_availability;
-                let module = availability.specialized.as_mut().unwrap();
-                module.compiler.nvrtc_version = version;
-                module.device_caps.nvrtc_version = version;
-                assert_no_tf32_route(
-                    resolve_f32_triad_auto_with_operands(
-                        F32TriadPolicy::AllowDeterministicTf32,
-                        measured,
-                        operands,
-                        availability,
-                    )
-                    .unwrap(),
-                );
-            }
-            for multiprocessors in [169, 171] {
-                let mut availability = exact_availability;
-                availability
-                    .specialized
-                    .as_mut()
-                    .unwrap()
-                    .device
-                    .multiprocessor_count = multiprocessors;
-                assert_no_tf32_route(
-                    resolve_f32_triad_auto_with_operands(
-                        F32TriadPolicy::AllowDeterministicTf32,
-                        measured,
-                        operands,
-                        availability,
-                    )
-                    .unwrap(),
-                );
+            // Every SM120 card under any toolkit takes the measured route.
+            let measured_route = resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::AllowDeterministicTf32,
+                measured,
+                operands,
+                exact_availability,
+            )
+            .unwrap();
+            assert!(matches!(measured_route, F32TriadSelection::Tf32(_)));
+            for version in [(12, 8), (13, 0), (13, 1), (13, 2), (13, 3)] {
+                for multiprocessors in [84, 169, 170, 171, 188] {
+                    let mut availability = exact_availability;
+                    let module = availability.specialized.as_mut().unwrap();
+                    module.compiler.nvrtc_version = version;
+                    module.device_caps.nvrtc_version = version;
+                    module.device.multiprocessor_count = multiprocessors;
+                    availability.multiprocessors = multiprocessors;
+                    assert_eq!(
+                        resolve_f32_triad_auto_with_operands(
+                            F32TriadPolicy::AllowDeterministicTf32,
+                            measured,
+                            operands,
+                            availability,
+                        )
+                        .unwrap(),
+                        measured_route,
+                        "NVRTC {version:?} on {multiprocessors} SMs",
+                    );
+                }
             }
         }
-    }
-
-    #[test]
-    fn sm120_tf32_cuda_13_2_identity_matches_the_literal_qualification_manifest() {
-        let identity = sm120_retired_cohort((13, 2)).identity;
-        assert_eq!(identity.module_kind, ModuleKind::TriadSm120);
-        assert_eq!(identity.module_target, "compute_120");
-        assert_eq!(identity.device_target, "sm_120");
-        assert_eq!(identity.compute_capability, (12, 0));
-        assert_eq!(identity.multiprocessor_count, 170);
-        assert_eq!(identity.nvrtc_version, (13, 2));
-        assert_eq!(identity.optin_shared_bytes, 101_376);
-        assert!(identity.tensor_map_access);
-        assert_eq!(
-            digest_hex(&identity.compile_key),
-            "70ee458820f27c554ee77d3f89c990cf005d7e3e566dc487ea7f88922ec33645"
-        );
-        assert_eq!(
-            digest_hex(&identity.artifact_digest),
-            "50ceabc64d69e8575a7974d3449605980cb1b42ddef8952ace3725073cd90441"
-        );
-        assert_eq!(
-            digest_hex(&identity.source_digest),
-            "65dfbcc164229b73f3f76fa15016e28a3adf9ad2328030eb1fe6d97ee3d01aaf"
-        );
-        assert_eq!(
-            digest_hex(&identity.invocation_digest),
-            "70ee458820f27c554ee77d3f89c990cf005d7e3e566dc487ea7f88922ec33645"
-        );
-        assert_eq!(
-            digest_hex(&identity.header_manifest_digest),
-            "905acac69a0bef20b12df1bd2fb70b6f8bd38fc530ec02bff5f2b124bf8d9157"
-        );
-        assert_eq!(
-            digest_hex(&identity.nvrtc_library_domain),
-            "0e0dc3faa997ae96442ef62ffc02640d361a5c50e0b4e5df2a05bc0986fe6241"
-        );
-
-        let module = qualified_module_for_auto_identity(identity);
-        assert_eq!(module.artifact.module_kind, ModuleKind::TriadSm120);
-        assert_eq!(module.artifact.artifact_kind, ArtifactKind::Ptx);
-        assert_eq!(module.compiler.target.as_str(), "compute_120");
-        assert!(module.compiler.nvrtc_library_known);
-        assert_eq!(module.compiler.output_kind, ArtifactKind::Ptx);
-        assert_eq!(module.compiler.composer_revision, 1);
-        assert_eq!(module.compiler.compiler_revision, COMPILER_REVISION);
-        assert_eq!(module.compiler.numeric_abi_revision, 5);
-        assert_eq!(module.compiler.schedule_revision, 8);
-        assert_eq!(module.device_caps.compute_capability, (12, 0));
-        assert_eq!(module.device_caps.nvrtc_version, (13, 2));
-        assert_eq!(
-            module
-                .device_caps
-                .accepted_target
-                .expect("accepted CUDA 13.2 target")
-                .as_str(),
-            "compute_120"
-        );
-        assert_eq!(module.device_caps.optin_shared_bytes, 101_376);
-        assert!(module.device_caps.tensor_map_access);
     }
 
     const SCALAR_STRIDE_CELLS: [(ResolvedGemmOp, usize, usize, usize); 5] = [
@@ -18387,20 +15699,15 @@ mod tf32_tests {
                     Ok(F32TriadSelection::Tf32(cell.route))
                 );
 
-                // The existing mutation inventory's first 25 fields are architecture-neutral;
-                // its last field sets tensor-map access false, already false on Ada.
-                for mutate in
-                    sm120_identity_mutations()
-                        .into_iter()
-                        .take(25)
-                        .chain(std::iter::once(
-                            (|module: &mut Tf32QualifiedModule| {
-                                module.device_caps.tensor_map_access = true;
-                            }) as fn(&mut Tf32QualifiedModule),
-                        ))
-                {
+                // A module of another architecture or another build keeps
+                // the evidence away; the tensor-map mutation leaves an Ada
+                // module as it was and is skipped.
+                for mutate in sm120_identity_mutations() {
                     let mut changed = availability;
                     mutate(changed.finalist.as_mut().unwrap());
+                    if changed == availability {
+                        continue;
+                    }
                     assert!(
                         matching_tf32_cohort(
                             changed.finalist.unwrap(),
@@ -18461,50 +15768,25 @@ mod tf32_tests {
     }
 
     #[test]
-    fn triad_retained_identity_finalist_bindings_match_three_measured_modules() {
-        let expected = measured_finalist_identities();
-        assert_eq!(SM89_FINALIST_TF32_EVIDENCE_COHORTS.len(), 3);
-        for identity in expected {
-            let module = qualified_module_for_auto_identity(identity);
-            let cohort = matching_tf32_cohort(module, SM89_FINALIST_TF32_EVIDENCE_COHORTS)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "measured CUDA {:?} finalist module must enter AUTO",
-                        identity.nvrtc_version
-                    )
-                });
-            assert_eq!(cohort.identity, identity);
-            assert_eq!(
-                cohort.tuning_revision,
-                super::super::contract::SM89_FINALIST_TUNING_REVISION
-            );
-
-            let mut changed = module;
-            changed.compiler.nvrtc_version.1 += 1;
-            assert!(matching_tf32_cohort(changed, SM89_FINALIST_TF32_EVIDENCE_COHORTS).is_none());
-            let mut changed = module;
-            changed.compiler.source_digest[0] ^= 1;
-            assert!(matching_tf32_cohort(changed, SM89_FINALIST_TF32_EVIDENCE_COHORTS).is_none());
-            let mut changed = module;
-            changed.artifact.compile_key[0] ^= 1;
-            assert!(matching_tf32_cohort(changed, SM89_FINALIST_TF32_EVIDENCE_COHORTS).is_none());
-            let mut changed = module;
-            changed.artifact.artifact_digest[0] ^= 1;
-            assert!(matching_tf32_cohort(changed, SM89_FINALIST_TF32_EVIDENCE_COHORTS).is_none());
-        }
-        let actual = SM89_FINALIST_TF32_EVIDENCE_COHORTS
-            .iter()
-            .map(|cohort| cohort.identity)
-            .collect::<Vec<_>>();
-        assert_eq!(actual.as_slice(), expected.as_slice());
+    fn finalist_cohort_serves_every_sm89_finalist_module() {
+        let [cohort] = SM89_FINALIST_TF32_EVIDENCE_COHORTS else {
+            panic!("SM89 finalist must have exactly one TF32 cohort");
+        };
+        assert_eq!(cohort.identity, SM89_FINALIST_TF32_ARCHITECTURE);
         assert_eq!(
-            SM89_FINALIST_TF32_EVIDENCE_COHORTS
-                .iter()
-                .map(|cohort| cohort.identity.compile_key)
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            3
+            cohort.tuning_revision,
+            super::super::contract::SM89_FINALIST_TUNING_REVISION
         );
+        let module = qualified_module_for_auto_identity(SM89_FINALIST_TF32_ARCHITECTURE);
+        for (field, mutate) in provenance_mutations().into_iter().enumerate() {
+            let mut card = module;
+            mutate(&mut card);
+            assert_eq!(
+                matching_tf32_cohort(card, SM89_FINALIST_TF32_EVIDENCE_COHORTS),
+                Some(cohort),
+                "provenance mutation {field} lost the finalist cohort",
+            );
+        }
     }
 
     #[test]

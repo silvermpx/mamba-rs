@@ -67,6 +67,11 @@ that architecture's rules and cells:
 - Their board-dependent parts are derived from the live device when a route
   is chosen.
 
+A tournament runs again only for a new architecture or for new kernels. A new
+card, a new CUDA toolkit or a new driver does not need one: the frozen
+architecture rules serve it from the first launch, and the first-use bit proof
+confirms that each fast route still gives the reference bits.
+
 A second card of the same architecture never gets a tournament or a cohort of
 its own. It runs the architecture's frozen rules from its first launch, and a
 check on it only confirms that the rules hold there. A cell that loses there
@@ -117,14 +122,19 @@ empty.
 
 ## Known gaps being repaired
 
-These places still bind selection to one card. They are the baseline's
-content, and the repair removes them:
-- `Tf32AutoQualificationIdentity` in `src/gpu/gemm_bi_triad/dispatch.rs`.
-  Its TF32 evidence cohorts match the exact multiprocessor count (142, 170,
-  188), which is why the RTX PRO 6000 needed a cohort of its own.
-- The SM90a and SM100 TF32 cohorts are empty, so Hopper and datacenter
-  Blackwell decline to the portable ladder.
+These places still bind a choice to one card or let the SM count move bits;
+they are the baseline's content and the repair removes them:
 - The SM89 exact-f32 identities and the SM89 half auto identity are pinned to
-  142 SMs.
+  142 SMs; the SM120 scalar environment and the TN narrow split-M cells to
+  170.
 - `src/gpu/gemm_bi_inference.rs` admits several selectors only at exactly 170
   or 142 SMs.
+- Stream-K deals its reduction over a grid of the live SM count, and the TN
+  split-M partition and the scalar split-K admission read it too, so those
+  routes still give different bits on cards of one architecture.
+- The SM90a and SM100 TF32 cohorts are empty: Hopper and datacenter
+  Blackwell run the portable ladder until a tournament on one of their cards.
+
+Repaired: the TF32 evidence cohorts are keyed by architecture (one cohort per
+architecture, any SM count, toolkit or driver), and the SM120 exact-f32
+measured cells and generic boundary serve every SM120 card.

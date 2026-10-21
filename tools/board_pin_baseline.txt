@@ -16,22 +16,6 @@ src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 142
 src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 142
 src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 142
 src/gpu/gemm_bi_triad/dispatch.rs	&& facts.multiprocessor_count == 170
-src/gpu/gemm_bi_triad/dispatch.rs	.filter(|_| qualified.device.multiprocessor_count == 170);
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 142,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 142,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 142,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 142,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 142,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 170,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 170,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 170,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 170,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 170,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 170,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 170,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 170,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 188,
-src/gpu/gemm_bi_triad/dispatch.rs	multiprocessor_count: 188,
 src/gpu/gemm_bi_triad/modules.rs	&& multiprocessor_count == 170
 src/gpu/gemm_bi_triad/modules.rs	multiprocessor_count: 170,
 src/gpu/gemm_bi_triad/sm89_half_source.rs	&& context.multiprocessor_count == 142
