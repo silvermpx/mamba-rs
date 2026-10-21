@@ -4947,8 +4947,11 @@ pub(in crate::gpu) struct Sm120AutoRequest {
     pub a_ptr: super::contract::CUptr,
     pub b_ptr: super::contract::CUptr,
     pub operands: Sm120LaunchOperands,
-    /// Live multiprocessor count of the board: the neighbour rule refuses a
-    /// tile whose grid cannot fill one wave of it.
+    /// The architecture's partition reference
+    /// (`crate::gpu::device::architecture_partition_reference`), not the live
+    /// count: the neighbour rule's choices - the smallest tile for an
+    /// underfilled shape, a stream-K neighbour declined once the tiles cover
+    /// the device - must be the same on every SM120 card.
     pub multiprocessors: u32,
     /// The live half-precision policy. Only its stream-K permission opens
     /// the measured stream-K cells; every other request sees the tiled table.
@@ -10502,6 +10505,7 @@ pub(super) fn tc_pick_tile_backward_for_device(
     op: super::super::kernel_identity::PolicyOp,
     dims: (usize, usize, usize),
     multiprocessor_count: u32,
+    partition_reference: u32,
     compute_capability: (i32, i32),
     half_policy: HalfTriadPolicy,
 ) -> Option<TcTile> {
@@ -10531,7 +10535,9 @@ pub(super) fn tc_pick_tile_backward_for_device(
         let tiles64 = tc_grid_ctas(n_in, n_out, 64, 64)?;
         let slabs = u64::try_from(batch).ok()?.div_ceil(64);
         let units = tiles64.checked_mul(slabs)?;
-        let sms = u64::from(multiprocessor_count);
+        // Stream-K or the tiled kernel is a choice of reduction order, so it
+        // reads the architecture's partition reference, never the live count.
+        let sms = u64::from(partition_reference);
         let deep_enough = units >= sms.checked_mul(policy.stream_k_min_slabs_per_cta)?;
         if tiles64 > 0 && deep_enough {
             return Some(TcTile::Tile64StreamK);
@@ -10600,7 +10606,14 @@ mod tc_policy_tests {
     #[test]
     fn sm89_stream_k_dw_needs_the_half_permission_an_underfilled_grid_and_depth() {
         let pick = |dims, policy, cc| {
-            tc_pick_tile_backward_for_device(PolicyOp::Dw, dims, RTX_6000_ADA_SMS, cc, policy)
+            tc_pick_tile_backward_for_device(
+                PolicyOp::Dw,
+                dims,
+                RTX_6000_ADA_SMS,
+                RTX_6000_ADA_SMS,
+                cc,
+                policy,
+            )
         };
         let tiled = HalfTriadPolicy::TiledParity;
         let stream_k = HalfTriadPolicy::AllowStreamKFixedOrder;
@@ -10688,12 +10701,14 @@ mod tc_policy_tests {
                 PolicyOp::Dx,
                 (10400, 384, 384),
                 RTX_6000_ADA_SMS,
+                RTX_6000_ADA_SMS,
                 (8, 9),
                 stream_k
             ),
             tc_pick_tile_backward_for_device(
                 PolicyOp::Dx,
                 (10400, 384, 384),
+                RTX_6000_ADA_SMS,
                 RTX_6000_ADA_SMS,
                 (8, 9),
                 tiled
@@ -11079,6 +11094,7 @@ mod tc_policy_tests {
                 PolicyOp::Dw,
                 (2048, 1536, 768),
                 RTX_6000_ADA_SMS,
+                RTX_6000_ADA_SMS,
                 sm89,
                 HalfTriadPolicy::TiledParity,
             ),
@@ -11088,6 +11104,7 @@ mod tc_policy_tests {
             tc_pick_tile_backward_for_device(
                 PolicyOp::Dw,
                 (4096, 3072, 1536),
+                RTX_6000_ADA_SMS,
                 RTX_6000_ADA_SMS,
                 sm89,
                 HalfTriadPolicy::TiledParity,
@@ -11099,6 +11116,7 @@ mod tc_policy_tests {
                 PolicyOp::Dx,
                 (2048, 1536, 768),
                 RTX_6000_ADA_SMS,
+                RTX_6000_ADA_SMS,
                 sm89,
                 HalfTriadPolicy::TiledParity,
             ),
@@ -11109,6 +11127,7 @@ mod tc_policy_tests {
                 PolicyOp::Dx,
                 (2048, 3072, 768),
                 RTX_6000_ADA_SMS,
+                RTX_6000_ADA_SMS,
                 sm89,
                 HalfTriadPolicy::TiledParity,
             ),
@@ -11118,6 +11137,7 @@ mod tc_policy_tests {
             tc_pick_tile_backward_for_device(
                 PolicyOp::Dw,
                 (4096, 3072, 1536),
+                RTX_6000_ADA_SMS,
                 RTX_6000_ADA_SMS,
                 sm80,
                 HalfTriadPolicy::TiledParity,

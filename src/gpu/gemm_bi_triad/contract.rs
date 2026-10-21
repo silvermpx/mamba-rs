@@ -3162,6 +3162,23 @@ const SM120_TF32_NN_M80N32_BK64_S2: Tf32KernelSpec = Tf32KernelSpec {
 pub const SM120_TF32_STREAMK_SLAB_FLOATS: usize = 256 * 32;
 pub const SM120_TF32_STREAMK_SLOTS_PER_CTA: usize = 2;
 
+/// The workers an SM120 stream-K reduction is dealt to, the kernels'
+/// `SM120_STREAMK_WORKERS`: a fixed count, so the partition points and the
+/// bits are the same on every SM120 card, and the grid of resident CTAs
+/// walks the workers. It is twice the SM count of the RTX 5090 the schedule
+/// was measured on.
+pub const SM120_STREAMK_WORKERS: usize = 340;
+
+/// The workers a stream-K reduction of `units` (tile, k-tile) units is dealt
+/// to: one per unit up to the fixed count.
+pub const fn sm120_streamk_workers(units: usize) -> usize {
+    if units < SM120_STREAMK_WORKERS {
+        units
+    } else {
+        SM120_STREAMK_WORKERS
+    }
+}
+
 const SM120_TF32_TN_M64N128_S3_PAIR_STREAMK: Tf32KernelSpec = Tf32KernelSpec {
     op: ResolvedGemmOp::Tn,
     route: Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(Tf32Sm120Route {
@@ -9406,5 +9423,20 @@ mod tests {
         assert!(error.contains("alpha == 1.0"), "{error}");
         validate_bias_preseed(0.5, 0, "triad-test").unwrap();
         validate_bias_preseed(1.0, 1, "triad-test").unwrap();
+    }
+
+    /// The host sizes the stream-K workspace and grid from the worker count
+    /// the SM120 kernels deal to; the two must name the same number, or a
+    /// launch would index slabs past the workspace.
+    #[test]
+    fn sm120_streamk_workers_match_the_kernel_source() {
+        use super::{SM120_STREAMK_WORKERS, sm120_streamk_workers};
+        let source = include_str!("../../../kernels/gemm_bi_triad/sm120/tma.cu");
+        assert!(source.contains(&format!(
+            "#define SM120_STREAMK_WORKERS {SM120_STREAMK_WORKERS}\n"
+        )));
+        assert_eq!(sm120_streamk_workers(0), 0);
+        assert_eq!(sm120_streamk_workers(17), 17);
+        assert_eq!(sm120_streamk_workers(1_000_000), SM120_STREAMK_WORKERS);
     }
 }

@@ -4,7 +4,7 @@
 // module they compile byte-identical to the one their TF32 cohort was frozen
 // against. Every constant here is fragment-local (GEMM_BI_SK64_*); the body
 // mirrors the tc64 TN kernel of sm80.cu instruction for instruction, so a
-// one-CTA grid reproduces that kernel bit for bit.
+// single worker reproduces that kernel bit for bit.
 
 #define GEMM_BI_SK64_BM 64
 #define GEMM_BI_SK64_BN 64
@@ -80,47 +80,49 @@
 // A training batch runs the dW reduction ten thousand rows deep over a few
 // dozen 64x64 output tiles, so the tiled kernel above leaves most of the
 // device idle (a 384x384 output is 36 CTAs on 142 multiprocessors). Here the
-// grid is the multiprocessor count: every CTA walks a contiguous range of
-// (tile, m-slab) units dealt by the same formula the SM120 stream-K kernels
-// use, computes each segment with the tc64 mainloop (ascending slabs, the
-// same mma chain per element), stores a partial slab where its range ends
-// inside a tile, and the CTA holding a tile's last unit folds the lower
-// contributors' slabs in ascending CTA order before the ordinary accumulate
-// epilogue. The fold order depends on the shape and the grid alone, so the
-// output is bit-stable per device but differs from the tiled reduction: the
+// (tile, m-slab) units are dealt by the formula the SM120 stream-K kernels
+// use to a number of workers the host fixes per architecture, never to the
+// grid, so every card of an architecture folds alike and gives the same
+// bits. Each resident CTA walks the workers in ascending order, every
+// grid-th one; a worker computes each segment of its range with the tc64
+// mainloop (ascending slabs, the same mma chain per element), stores a
+// partial slab where its range ends inside a tile, and the worker holding a
+// tile's last unit folds the lower contributors' slabs in ascending worker
+// order before the ordinary accumulate epilogue. The output is bit-stable
+// for a shape on an architecture but differs from the tiled reduction: the
 // kernel carries its own numeric contract and is never dispatched under the
-// tiled parity policy. With one CTA in the grid every tile is one segment
-// walked in ascending order and the output equals the tiled kernel bit for
-// bit; the tests pin that.
+// tiled parity policy. With one worker every tile is one segment walked in
+// ascending order and the output equals the tiled kernel bit for bit; the
+// tests pin that.
 //
-// Flags form a (CTA, slot) matrix that is zero before the first launch;
+// Flags form a (worker, slot) matrix that is zero before the first launch;
 // every consumer clears the flags it waited on, so the matrix is zero again
-// when the kernel exits. Waits target lower CTAs only, and with one resident
-// CTA per multiprocessor (__launch_bounds__(128, 1), grid <= SM count)
-// every waited-on CTA is running: no wait can starve.
+// when the kernel exits. Waits target lower workers only, and every worker
+// below a waiting one is done or held by a running CTA, so with the grid no
+// larger than the device keeps resident no wait can starve.
 
 struct GemmBiStreamKRange {
     long long first;
     long long last;
 };
 
-// Units [first, last) of CTA `cta`: the first `remainder` CTAs take one unit
-// more, so every CTA differs from any other by at most one unit.
+// Units [first, last) of worker `worker`: the first `remainder` workers take
+// one unit more, so every worker differs from any other by at most one unit.
 static __device__ __forceinline__ GemmBiStreamKRange streamk_range(
-    long long units, int grid, int cta) {
-    long long base = units / grid;
-    long long remainder = units % grid;
-    long long first = (long long)cta * base + min((long long)cta, remainder);
-    long long last = first + base + (cta < remainder ? 1 : 0);
+    long long units, int workers, int worker) {
+    long long base = units / workers;
+    long long remainder = units % workers;
+    long long first = (long long)worker * base + min((long long)worker, remainder);
+    long long last = first + base + (worker < remainder ? 1 : 0);
     GemmBiStreamKRange range = {first, last};
     return range;
 }
 
-// The CTA whose range contains `unit`: the inverse of the dealing formula.
-static __device__ __forceinline__ int streamk_cta_of(
-    long long units, int grid, long long unit) {
-    long long base = units / grid;
-    long long remainder = units % grid;
+// The worker whose range contains `unit`: the inverse of the dealing formula.
+static __device__ __forceinline__ int streamk_worker_of(
+    long long units, int workers, long long unit) {
+    long long base = units / workers;
+    long long remainder = units % workers;
     long long wide = remainder * (base + 1);
     if (unit < wide) return (int)(unit / (base + 1));
     return (int)(remainder + (unit - wide) / base);
@@ -129,8 +131,8 @@ static __device__ __forceinline__ int streamk_cta_of(
 #define GEMM_BI_SK64_STREAMK_SLOTS 2
 #define GEMM_BI_SK64_STREAMK_ACCUMULATORS 32
 
-// One slab per (CTA, slot): every thread's 2 x 4 x 4 accumulators as eight
-// float4 stores straight to L2, where the folding CTA reads them.
+// One slab per (worker, slot): every thread's 2 x 4 x 4 accumulators as eight
+// float4 stores straight to L2, where the folding worker reads them.
 static __device__ __forceinline__ void tc64_streamk_store_slab(
     float* slab, const float (&acc)[2][4][4]) {
     float4* destination = reinterpret_cast<float4*>(
@@ -163,11 +165,11 @@ static __device__ __forceinline__ void streamk_clear(unsigned* flag) {
 }
 
 // Folds the lower contributors' slabs into the accumulators: the slabs are
-// summed in ascending CTA order, then the CTA's own value is added last,
-// every sum an __fadd_rn. Slabs are read through cache-global loads so the
-// eight loads of one slab issue together and bypass the incoherent L1.
+// summed in ascending worker order, then the worker's own value is added
+// last, every sum an __fadd_rn. Slabs are read through cache-global loads so
+// the eight loads of one slab issue together and bypass the incoherent L1.
 static __device__ __forceinline__ void tc64_streamk_fold_slabs(
-    const float* partial, long long units, int grid, int first_cta, int cta,
+    const float* partial, long long units, int workers, int first_worker, int worker,
     int tile, int k_tiles, float (&acc)[2][4][4]) {
     const long long slab_floats =
         (long long)GEMM_BI_SK64_THREADS * GEMM_BI_SK64_STREAMK_ACCUMULATORS;
@@ -183,8 +185,8 @@ static __device__ __forceinline__ void tc64_streamk_fold_slabs(
         }
     }
     bool first = true;
-    for (int source = first_cta; source < cta; ++source) {
-        GemmBiStreamKRange theirs = streamk_range(units, grid, source);
+    for (int source = first_worker; source < worker; ++source) {
+        GemmBiStreamKRange theirs = streamk_range(units, workers, source);
         int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;
         const float4* slab = reinterpret_cast<const float4*>(
             partial + ((long long)source * GEMM_BI_SK64_STREAMK_SLOTS + slot) * slab_floats
@@ -238,7 +240,8 @@ void tn_tc64_streamk_##SUFFIX(                                        \
     float alpha,                                                               \
     int M_red, int K_out, int N,                                               \
     float* __restrict__ partial,                                               \
-    unsigned* __restrict__ flags                                               \
+    unsigned* __restrict__ flags,                                              \
+    int workers                                                                \
 ) {                                                                            \
     __shared__ __align__(16) T_ACT Xs[2][GEMM_BI_SK64_BK][GEMM_BI_SK64_LDB];           \
     __shared__ __align__(16) T_ACT Ys[2][GEMM_BI_SK64_BK][GEMM_BI_SK64_LDB];           \
@@ -246,12 +249,6 @@ void tn_tc64_streamk_##SUFFIX(                                        \
     int num_pid_m = (K_out + GEMM_BI_SK64_BM - 1) / GEMM_BI_SK64_BM;                   \
     int k_tiles = (M_red + GEMM_BI_SK64_BK - 1) / GEMM_BI_SK64_BK;                     \
     long long units = (long long)num_pid_m * num_pid_n * k_tiles;              \
-    int grid = (int)gridDim.x;                                                 \
-    int cta = (int)blockIdx.x;                                                 \
-    GemmBiStreamKRange mine = streamk_range(units, grid, cta);         \
-    int range_first = (int)mine.first;                                         \
-    int range_end = (int)mine.last;                                            \
-    int first_tile = k_tiles > 0 ? range_first / k_tiles : 0;                  \
     const long long slab_floats =                                              \
         (long long)GEMM_BI_SK64_THREADS * GEMM_BI_SK64_STREAMK_ACCUMULATORS;   \
     int warp = threadIdx.x / 32;                                               \
@@ -272,6 +269,12 @@ void tn_tc64_streamk_##SUFFIX(                                        \
     float acc[2][4][4];                                                        \
     int pid_m = 0;                                                             \
     int pid_n = 0;                                                             \
+    for (int worker = (int)blockIdx.x; worker < workers;                       \
+         worker += (int)gridDim.x) {                                           \
+    GemmBiStreamKRange mine = streamk_range(units, workers, worker);           \
+    int range_first = (int)mine.first;                                         \
+    int range_end = (int)mine.last;                                            \
+    int first_tile = k_tiles > 0 ? range_first / k_tiles : 0;                  \
     for (int unit = range_end; unit > range_first;) {                          \
         int tile = (unit - 1) / k_tiles;                                       \
         int k_end = unit - tile * k_tiles;                                     \
@@ -363,36 +366,37 @@ void tn_tc64_streamk_##SUFFIX(                                        \
         if (!covers_end) {                                                     \
             int slot = tile == first_tile ? 0 : 1;                             \
             tc64_streamk_store_slab(                                   \
-                partial + ((long long)cta * GEMM_BI_SK64_STREAMK_SLOTS + slot) * slab_floats, \
+                partial + ((long long)worker * GEMM_BI_SK64_STREAMK_SLOTS + slot) * slab_floats, \
                 acc);                                                          \
             __threadfence();                                                   \
             __syncthreads();                                                   \
             if (threadIdx.x == 0) {                                            \
                 streamk_raise(                                         \
-                    flags + (long long)cta * GEMM_BI_SK64_STREAMK_SLOTS + slot); \
+                    flags + (long long)worker * GEMM_BI_SK64_STREAMK_SLOTS + slot); \
             }                                                                  \
             unit -= k_end - k_begin;                                           \
             continue;                                                          \
         }                                                                      \
         if (!covers_start) {                                                   \
-            int first_cta = streamk_cta_of(units, grid, (long long)tile * k_tiles); \
-            int sources = cta - first_cta;                                     \
+            int first_worker =                                                 \
+                streamk_worker_of(units, workers, (long long)tile * k_tiles);  \
+            int sources = worker - first_worker;                               \
             for (int index = (int)threadIdx.x; index < sources;                \
                  index += GEMM_BI_SK64_THREADS) {                              \
-                int source = first_cta + index;                                \
-                GemmBiStreamKRange theirs = streamk_range(units, grid, source); \
+                int source = first_worker + index;                             \
+                GemmBiStreamKRange theirs = streamk_range(units, workers, source); \
                 int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;     \
                 streamk_await(                                         \
                     flags + (long long)source * GEMM_BI_SK64_STREAMK_SLOTS + slot); \
             }                                                                  \
             __syncthreads();                                                   \
             tc64_streamk_fold_slabs(                                   \
-                partial, units, grid, first_cta, cta, tile, k_tiles, acc);     \
+                partial, units, workers, first_worker, worker, tile, k_tiles, acc); \
             __syncthreads();                                                   \
             for (int index = (int)threadIdx.x; index < sources;                \
                  index += GEMM_BI_SK64_THREADS) {                              \
-                int source = first_cta + index;                                \
-                GemmBiStreamKRange theirs = streamk_range(units, grid, source); \
+                int source = first_worker + index;                             \
+                GemmBiStreamKRange theirs = streamk_range(units, workers, source); \
                 int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;     \
                 streamk_clear(                                         \
                     flags + (long long)source * GEMM_BI_SK64_STREAMK_SLOTS + slot); \
@@ -415,6 +419,7 @@ void tn_tc64_streamk_##SUFFIX(                                        \
             }                                                                  \
         }                                                                      \
         unit -= k_end - k_begin;                                               \
+    }                                                                          \
     }                                                                          \
 }
 

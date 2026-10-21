@@ -412,9 +412,10 @@ struct Tf32StreamKLaunchPlan {
 }
 
 /// The persistent grid of a stream-K launch and the workspace it needs. The
-/// kernel waits on lower CTAs, so the grid is one CTA per multiprocessor,
-/// which the device keeps resident together; the dealing of units depends on
-/// the grid, so the same device gives the same bits.
+/// units are dealt to a fixed number of workers, so every SM120 card gives the
+/// same bits; the grid is at most one CTA per multiprocessor, which the device
+/// keeps resident together, because a worker waits on lower workers held by
+/// running CTAs.
 fn tf32_streamk_launch_plan(
     request: F32TriadRequest,
     spec: &Tf32KernelSpec,
@@ -449,8 +450,11 @@ fn tf32_streamk_launch_plan(
             "stream-K TF32 unit count exceeds the kernel's 32-bit range",
         ));
     }
-    let grid = multiprocessor_count;
-    let partial_elements = (grid as usize)
+    let workers = super::contract::sm120_streamk_workers(units);
+    let grid = u32::try_from(workers)
+        .map_err(|_| invalid_gemm_dimensions("stream-K TF32 worker count exceeds u32"))?
+        .min(multiprocessor_count);
+    let partial_elements = workers
         .checked_mul(SM120_TF32_STREAMK_SLOTS_PER_CTA)
         .and_then(|slots| slots.checked_mul(SM120_TF32_STREAMK_SLAB_FLOATS))
         .ok_or_else(|| invalid_gemm_dimensions("stream-K TF32 slab extent overflows usize"))?;
@@ -459,7 +463,7 @@ fn tf32_streamk_launch_plan(
             "stream-K TF32 slabs exceed the fixed workspace",
         ));
     }
-    let flag_elements = (grid as usize) * SM120_TF32_STREAMK_SLOTS_PER_CTA;
+    let flag_elements = workers * SM120_TF32_STREAMK_SLOTS_PER_CTA;
     if flag_elements > TF32_SPLITK_COUNTER_CAP {
         return Err(invalid_gemm_dimensions(
             "stream-K TF32 flags exceed the fixed counter workspace",
@@ -8638,7 +8642,7 @@ unsafe fn enqueue_sm120_tma_prepared_observed<O: PhysicalLaunchObserver>(
         block_dim: (spec.threads, 1, 1),
         shared_mem_bytes: spec.dynamic_shared_bytes,
     };
-    let workspace = sm120_streamk_workspace(stream, kernels, prepared.route, spec, grid)?;
+    let workspace = sm120_streamk_workspace(stream, kernels, prepared.route, spec)?;
     let mut builder = stream.launch_builder(function);
     builder.arg(&prepared.operands.output_ptr);
     if let Some(workspace) = &workspace {
@@ -8654,8 +8658,9 @@ unsafe fn enqueue_sm120_tma_prepared_observed<O: PhysicalLaunchObserver>(
         .map_err(|error| error.with_driver_context(format_args!("launch {}", spec.symbol)))
 }
 
-/// The grid of an SM120 launch: one CTA per output tile, or the persistent
-/// grid of one CTA per multiprocessor under the stream-K schedule.
+/// The grid of an SM120 launch: one CTA per output tile, or under the stream-K
+/// schedule the persistent grid walking the fixed workers, at most one CTA
+/// per multiprocessor.
 fn sm120_launch_grid(
     kernels: &GpuKernels,
     route: Sm120ForcedRoute,
@@ -8692,7 +8697,9 @@ fn sm120_launch_grid(
                 return Err("SM120 stream-K unit count exceeds the kernel's 32-bit range".into());
             }
             let _ = spec;
-            Ok(grid)
+            let workers = u32::try_from(super::contract::sm120_streamk_workers(units))
+                .map_err(|_| "SM120 stream-K worker count exceeds u32".to_string())?;
+            Ok(workers.min(grid))
         }
     }
 }
@@ -8709,23 +8716,24 @@ fn sm120_streamk_workspace(
     kernels: &GpuKernels,
     route: Sm120ForcedRoute,
     spec: &Sm120KernelSpec,
-    grid: u32,
 ) -> Result<Option<Sm120StreamKWorkspace>, String> {
     use cudarc::driver::DevicePtr;
     if route.physical.schedule != Sm120Schedule::StreamK {
         return Ok(None);
     }
-    // One slab per (CTA, slot): every thread holds MAtoms x 16 accumulators.
+    // One slab per (worker, slot): every thread holds MAtoms x 16
+    // accumulators. The workspace covers the most workers a launch deals to.
     let m_atoms = if route.physical.wide_m_warp() { 4 } else { 2 };
     let slab_floats = (spec.threads as usize) * m_atoms * 16;
-    let partial_floats = (grid as usize)
+    let workers = super::contract::SM120_STREAMK_WORKERS;
+    let partial_floats = workers
         .checked_mul(SM120_TF32_STREAMK_SLOTS_PER_CTA)
         .and_then(|slots| slots.checked_mul(slab_floats))
         .ok_or_else(|| "SM120 stream-K slab extent overflows usize".to_string())?;
     if partial_floats > SPLITK_SCRATCH_CAP {
         return Err("SM120 stream-K slabs exceed the fixed workspace".into());
     }
-    if (grid as usize) * SM120_TF32_STREAMK_SLOTS_PER_CTA > TF32_SPLITK_COUNTER_CAP {
+    if workers * SM120_TF32_STREAMK_SLOTS_PER_CTA > TF32_SPLITK_COUNTER_CAP {
         return Err("SM120 stream-K flags exceed the fixed counter workspace".into());
     }
     let (partial, _) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
@@ -8854,13 +8862,9 @@ pub(in crate::gpu) fn prepare_sm120_auto_graph_sequence<O: PhysicalLaunchObserve
         let mut arguments = PhysicalScalarKernelArguments::new();
         arguments.push(prepared.operands.output_ptr)?;
         let spec = prepared.route.kernel_spec()?;
-        if let Some(workspace) = sm120_streamk_workspace(
-            &ctx.stream,
-            &ctx.kernels,
-            prepared.route,
-            spec,
-            resolved.launch.grid_dim.0,
-        )? {
+        if let Some(workspace) =
+            sm120_streamk_workspace(&ctx.stream, &ctx.kernels, prepared.route, spec)?
+        {
             arguments.push(workspace.partial)?;
             arguments.push(workspace.flags)?;
         }
@@ -12235,7 +12239,8 @@ pub const SM89_HALF_RELAY_BASE: &str = "tn_sm89_relay_m64n64_bk64_s3";
 pub fn half_tn_graph_parameter_count(base: &str) -> usize {
     match base {
         "tn_gemv" => 8,
-        "tn_tc64_streamk" | SM89_HALF_RELAY_BASE => 9,
+        "tn_tc64_streamk" => 10,
+        SM89_HALF_RELAY_BASE => 9,
         _ => 7,
     }
 }
@@ -12980,10 +12985,8 @@ const SM80_STREAMK_SLAB_FLOATS: usize = 128 * 32;
 /// Slots per CTA: a range can end inside its first tile or a later one.
 const SM80_STREAMK_SLOTS_PER_CTA: usize = 2;
 
-/// The persistent grid of the tc64 TN stream-K kernel: as many CTAs per
-/// multiprocessor as stay resident, never more CTAs than (tile, slab)
-/// units or than the fixed slab and flag workspaces hold, never zero.
-pub fn sm80_streamk_grid(kernels: &GpuKernels, dims: (usize, usize, usize)) -> Result<u32, String> {
+/// The (tile, slab) units of a tc64 TN stream-K launch.
+fn sm80_streamk_units(dims: (usize, usize, usize)) -> Result<u64, String> {
     let checked = GemmDims::tn(dims)?;
     let (batch, n_in, n_out) = checked.tuple();
     let tiles = checked_tile_grid(
@@ -12993,30 +12996,50 @@ pub fn sm80_streamk_grid(kernels: &GpuKernels, dims: (usize, usize, usize)) -> R
         64,
     )?;
     let slabs = checked_u32(batch, "reduction rows")?.div_ceil(64);
-    let units = u64::from(tiles) * u64::from(slabs);
-    // The kernel's waits target lower CTAs and cannot starve while every
-    // CTA of the grid is resident, so the grid is bounded by the resident
-    // CTA count the loader read from the driver, not by one per SM.
-    let resident = u64::from(kernels.multiprocessor_count().max(1))
-        * u64::from(kernels.tc64_streamk_resident_ctas().max(1));
-    // No supported board reaches this bound (an RTX 6000 Ada keeps 284 CTAs
-    // resident); a larger part takes fewer CTAs, all still resident.
+    Ok(u64::from(tiles) * u64::from(slabs))
+}
+
+/// The workers the tc64 TN stream-K kernel deals its units to: four per
+/// multiprocessor of the architecture's partition reference, never more than
+/// there are units or than the fixed slab and flag workspaces hold. The count
+/// never reads the live SM count, so every card of an architecture folds
+/// alike and gives the same bits; an RTX 6000 Ada deals to 568.
+pub fn sm80_streamk_workers(
+    kernels: &GpuKernels,
+    dims: (usize, usize, usize),
+) -> Result<u32, String> {
+    let units = sm80_streamk_units(dims)?;
+    let fixed = 4 * u64::from(kernels.partition_reference().max(1));
     let workspace = (SPLITK_SCRATCH_CAP / (SM80_STREAMK_SLOTS_PER_CTA * SM80_STREAMK_SLAB_FLOATS))
         .min(TF32_SPLITK_COUNTER_CAP / SM80_STREAMK_SLOTS_PER_CTA) as u64;
-    u32::try_from(units.min(resident).min(workspace).max(1))
+    u32::try_from(units.min(fixed).min(workspace).max(1))
+        .map_err(|_| "stream-K worker count exceeds u32".to_string())
+}
+
+/// The persistent grid of the tc64 TN stream-K kernel: as many CTAs per
+/// multiprocessor as stay resident, never more CTAs than workers. A worker
+/// waits on lower workers only, and those are done or held by a running
+/// CTA while every CTA of the grid is resident, so the grid is bounded by
+/// the resident CTA count the loader read from the driver.
+pub fn sm80_streamk_grid(kernels: &GpuKernels, dims: (usize, usize, usize)) -> Result<u32, String> {
+    let workers = sm80_streamk_workers(kernels, dims)?;
+    let resident = u64::from(kernels.multiprocessor_count().max(1))
+        * u64::from(kernels.tc64_streamk_resident_ctas().max(1));
+    u32::try_from(u64::from(workers).min(resident).max(1))
         .map_err(|_| "stream-K grid exceeds u32".to_string())
 }
 
-/// The partial-slab and flag pointers of the stream-K dW kernel, from the
-/// fixed split-K workspaces; the extents are checked against their caps so
-/// a grid the workspace cannot hold fails here, not in the kernel.
+/// The partial-slab and flag pointers of the stream-K dW kernel, one slab and
+/// flag per (worker, slot), from the fixed split-K workspaces; the extents are
+/// checked against their caps so a deal the workspace cannot hold fails
+/// here, not in the kernel.
 pub fn sm80_streamk_workspace(
     stream: &Arc<cudarc::driver::CudaStream>,
     kernels: &GpuKernels,
-    grid: u32,
+    workers: u32,
 ) -> Result<(CUptr, CUptr), String> {
     use cudarc::driver::DevicePtr;
-    let slots = (grid as usize)
+    let slots = (workers as usize)
         .checked_mul(SM80_STREAMK_SLOTS_PER_CTA)
         .ok_or_else(|| "sm80 stream-K slot count overflows usize".to_string())?;
     let partial_floats = slots
@@ -13242,6 +13265,7 @@ fn gemm_bi_backward_dw_tc_in<O: PhysicalLaunchObserver>(
         super::super::kernel_identity::PolicyOp::Dw,
         dims,
         environment.kernels.multiprocessor_count(),
+        environment.kernels.partition_reference(),
         compute_capability,
         half_policy,
     ).ok_or_else(|| {
@@ -13307,7 +13331,12 @@ fn gemm_bi_backward_dw_tc_with_tile_in<O: PhysicalLaunchObserver>(
         ),
         TcTile::Tile64StreamK => {
             let grid = sm80_streamk_grid(environment.kernels, dims)?;
-            let workspace = sm80_streamk_workspace(environment.stream, environment.kernels, grid)?;
+            let workers = sm80_streamk_workers(environment.kernels, dims)?;
+            let (partial, flags) =
+                sm80_streamk_workspace(environment.stream, environment.kernels, workers)?;
+            let workers = i32::try_from(workers)
+                .map_err(|_| "stream-K worker count exceeds i32".to_string())?;
+            let workspace = (partial, flags, workers);
             (
                 cudarc::driver::LaunchConfig {
                     grid_dim: (grid, 1, 1),
@@ -13341,9 +13370,10 @@ fn gemm_bi_backward_dw_tc_with_tile_in<O: PhysicalLaunchObserver>(
     b.arg(&m_red_i);
     b.arg(&k_out_i);
     b.arg(&n_i);
-    if let Some((partial, flags)) = &workspace {
+    if let Some((partial, flags, workers)) = &workspace {
         b.arg(partial);
         b.arg(flags);
+        b.arg(workers);
     }
     unsafe {
         enqueue_half_gemm(
@@ -13406,6 +13436,7 @@ fn gemm_bi_backward_dx_tc_in<O: PhysicalLaunchObserver>(
         super::super::kernel_identity::PolicyOp::Dx,
         dims,
         environment.kernels.multiprocessor_count(),
+        environment.kernels.partition_reference(),
         compute_capability,
         HalfTriadPolicy::TiledParity,
     ).ok_or_else(|| {
