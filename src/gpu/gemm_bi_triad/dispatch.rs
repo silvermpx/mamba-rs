@@ -218,6 +218,60 @@ mod sm89_exact_f32_tn_admission_tests {
     }
 
     #[test]
+    fn every_aligned_ada_split_m_takes_the_direct_partial_of_its_partition() {
+        let base = facts(KNOWN_IDENTITIES[2]);
+        let tn = |dims| F32TriadRequest {
+            op: ResolvedGemmOp::Tn,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Tn, dims),
+        };
+        for dims in [(4_096, 256, 128), (1_024, 1_024, 256), (4_096, 128, 796)] {
+            let ScalarDispatchPlan::TnSplitM { m_chunk, chunks } =
+                scalar_dispatch_plan(tn(dims)).unwrap()
+            else {
+                panic!("{dims:?} is a split-M shape");
+            };
+            assert_eq!(
+                scalar_launch_plan(base, tn(dims), operands()).unwrap(),
+                ScalarDispatchPlan::TnSm89DirectSplitM { m_chunk, chunks },
+                "{dims:?}"
+            );
+        }
+        // A width that is not whole 16-byte chunks, an unaligned operand, a
+        // board without the module's evidence and a missing kernel keep the
+        // portable partial.
+        let fallback = scalar_dispatch_plan(tn((4_096, 130, 128))).unwrap();
+        assert_eq!(
+            scalar_launch_plan(base, tn((4_096, 130, 128)), operands()).unwrap(),
+            fallback
+        );
+        let unaligned = F32TriadOperands {
+            a: 0x1004,
+            ..operands()
+        };
+        let plain = scalar_dispatch_plan(tn((4_096, 256, 128))).unwrap();
+        assert_eq!(
+            scalar_launch_plan(base, tn((4_096, 256, 128)), unaligned).unwrap(),
+            plain
+        );
+        let other_board = ScalarLaunchFacts {
+            compute_capability: (8, 6),
+            ..base
+        };
+        assert_eq!(
+            scalar_launch_plan(other_board, tn((4_096, 256, 128)), operands()).unwrap(),
+            plain
+        );
+        let without_kernel = ScalarLaunchFacts {
+            sm89_exact_f32_symbols_loaded: [true, false, true],
+            ..base
+        };
+        assert_eq!(
+            scalar_launch_plan(without_kernel, tn((4_096, 256, 128)), operands()).unwrap(),
+            plain
+        );
+    }
+
+    #[test]
     fn actual_auto_large_tn_admission_fails_closed() {
         for (symbol_index, (route, dims, expected, fallback)) in CASES.into_iter().enumerate() {
             let request = F32TriadRequest {
@@ -430,11 +484,20 @@ mod sm89_exact_f32_tn_admission_tests {
                 .unwrap()
                 .schedule_revision += 1;
             mutations.push(mutation);
+            // A mutation that only drops the cell's own kernel leaves the
+            // general direct partial of the same partition, which writes the
+            // fallback's bits.
+            let general = match fallback {
+                ScalarDispatchPlan::TnSplitM { m_chunk, chunks } => {
+                    ScalarDispatchPlan::TnSm89DirectSplitM { m_chunk, chunks }
+                }
+                other => other,
+            };
             for mutation in mutations {
-                assert_eq!(
-                    scalar_launch_plan(mutation, request, operands()).unwrap(),
-                    fallback,
-                    "identity mutation admitted {route:?}: {mutation:?}",
+                let plan = scalar_launch_plan(mutation, request, operands()).unwrap();
+                assert!(
+                    plan == fallback || plan == general,
+                    "identity mutation admitted {route:?}: {plan:?} on {mutation:?}",
                 );
             }
 
@@ -7188,6 +7251,27 @@ fn scalar_plan_with_admission(
             return Ok(plan);
         }
     }
+    // Every other split-M partition on an Ada board whose exact module
+    // carries the direct partial: the kernel masks every edge of its 64 x 64
+    // tiles and of its chunk, writes the planes the portable partial writes,
+    // and the same reducer folds them, so the bits stay the plan's. The
+    // standalone Lilly GEMMs serve every split-M weight gradient this way
+    // (about half the time of the portable partial on their cells).
+    if let ScalarDispatchPlan::TnSplitM { m_chunk, chunks } = fallback
+        && admission == ScalarAdmission::Evidence
+        && qualified_sm89_exact_f32_environment(facts)
+        && facts.sm89_exact_f32_symbols_loaded[1]
+        && request.shape
+            == F32TriadShape::contiguous(
+                crate::gpu::kernel_identity::ResolvedGemmOp::Tn,
+                (request.shape.m, request.shape.k, request.shape.n),
+            )
+        && request.shape.k.is_multiple_of(4)
+        && request.shape.n.is_multiple_of(4)
+        && qualified_sm89_exact_f32_tn_operands(operands)
+    {
+        return Ok(ScalarDispatchPlan::TnSm89DirectSplitM { m_chunk, chunks });
+    }
     if fallback == (ScalarDispatchPlan::NnFinal { slim: false })
         && inference_overlay_admitted(admission, facts, qualified_inference_copyplan_environment)
         && request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nn
@@ -7422,6 +7506,12 @@ pub(super) enum ScalarDispatchPlan {
     TnD768InSm89DualChunkQualified,
     TnD768OutSm89DirectBk16Qualified,
     TnPrismSm89DirectBk16Qualified,
+    /// The split-M plan's partition written by the Ada's direct 64 x 64
+    /// partial: the same planes and the same fold as the portable partial.
+    TnSm89DirectSplitM {
+        m_chunk: usize,
+        chunks: usize,
+    },
     TnD128InSm89DirectFoldQualified,
     TnD128OutSm89DirectFoldQualified,
     TnM16N16SplitM16Qualified,
@@ -7471,6 +7561,7 @@ impl ScalarDispatchPlan {
                 | Self::TnSplitM { .. }
                 | Self::TnD768OutSm89DirectBk16Qualified
                 | Self::TnPrismSm89DirectBk16Qualified
+                | Self::TnSm89DirectSplitM { .. }
                 | Self::NtSplitKTail { .. }
                 | Self::NtSplitKMain { .. }
                 | Self::NtSplitKSlim { .. }
