@@ -2800,11 +2800,14 @@ fn rna_batch_invariant_selection(
         return Ok(F32TriadSelection::Tf32(bound));
     }
     // A measured cell keeps its route when the cohort crowned a specialized
-    // kernel for it. A cell whose cohort winner is a portable tile takes the
-    // gradients' rules instead: they pick among the split members and the
-    // multistage tiles, which the cohort's tournaments never ran. A tile the
-    // rules stage from the operands falls back to the portable rule when
-    // this toolkit cannot bind it.
+    // kernel for it. A cell whose cohort winner is a portable tile or a
+    // portable split member takes the gradients' rules instead: they pick
+    // among the split members, the multistage tiles and the pre-rounded
+    // tiles, most of which the cohort's tournaments never ran (TN
+    // 1024x256x1024 37.7 -> 19.4 us on the RTX 6000 Ada), and they cut a
+    // reduction by its shape where the cohort split it by its own cell. A
+    // tile the rules stage from the operands falls back to the portable rule
+    // when this toolkit cannot bind it.
     let measured = operands
         .and_then(|operands| {
             measured_tf32_route_with_operands(
@@ -2817,7 +2820,13 @@ fn rna_batch_invariant_selection(
         .filter(|route| keeps(*route))
         .and_then(|route| resolve_tf32_forced(request, availability, route).ok());
     if let Some(route) = measured
-        && !matches!(route, Tf32PhysicalRoute::MmaTf32Rna(_))
+        && !matches!(
+            route,
+            Tf32PhysicalRoute::MmaTf32Rna(_)
+                | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+                | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+                | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        )
     {
         return Ok(F32TriadSelection::Tf32(route));
     }
@@ -2859,6 +2868,11 @@ fn rna_batch_invariant_selection(
 /// eight ways: the deep batches whose few output tiles leave the card idle
 /// over one long chain.
 const RNA_TN_SPLIT_MIN_REDUCTION: usize = 2048;
+
+/// The reduction and the 64 x 64 output grid inside which a small layer's
+/// weight gradient splits eight ways below the deep-batch split.
+const RNA_TN_SMALL_SPLIT_MIN_REDUCTION: usize = 1024;
+const RNA_TN_SMALL_SPLIT_MAX_TILES: usize = 16;
 
 /// The batch below which an input gradient's output is a few 16-row slabs,
 /// and the reduction and output bounds inside which splitting its reduction
@@ -2950,6 +2964,21 @@ fn rna_backward_rule_route(
             Tf32PortableTile::M16N32,
             Tf32PortableStages::S4,
         ))),
+        // A small layer's weight gradient at least 128 wide over a reduction
+        // of 1024 or more splits eight ways as well: a 64 x 64 grid of 16
+        // tiles or fewer leaves most of the card idle, and the 32 x 32
+        // member's four times the CTAs fill it (RTX 6000 Ada: TN
+        // 1536x128x384 25.8 -> 14.4 us on the pre-rounded tile, 1024x192x256
+        // 18.8 -> 9.9).
+        ResolvedGemmOp::Tn
+            if reduction >= RNA_TN_SMALL_SPLIT_MIN_REDUCTION
+                && rows.div_ceil(64) * columns.div_ceil(64) <= RNA_TN_SMALL_SPLIT_MAX_TILES =>
+        {
+            Some(Tf32PhysicalRoute::MmaTf32RnaSplitK8(portable(
+                Tf32PortableTile::M32N32,
+                Tf32PortableStages::S3,
+            )))
+        }
         ResolvedGemmOp::Tn if rna_pre_tn_admits(request, operands, availability) => Some(
             if reduction >= 256 && rows * columns >= RNA_PRE_TN_WIDE_OUTPUTS {
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
@@ -3094,8 +3123,17 @@ fn rna_blackwell_backward_route(
             },
         );
     }
-    if (2_048..8_192).contains(&rows) && columns <= 512 && reduction <= 64 {
-        return portable(Tf32PortableTile::M64N64, Tf32PortableStages::S3);
+    // A few thousand rows over an output up to 512 wide keep the 64 x 64
+    // tile, three stages over a short reduction.
+    if (2_048..8_192).contains(&rows) && columns <= 512 {
+        return portable(
+            Tf32PortableTile::M64N64,
+            if reduction <= 64 {
+                Tf32PortableStages::S3
+            } else {
+                Tf32PortableStages::S2
+            },
+        );
     }
     // An input gradient whose reduction is no longer than its output is
     // wide fills the twelve-warp 144 x 96 tile (NT 1024x1536x384 30.4 ->
@@ -7624,15 +7662,19 @@ fn scalar_plan_with_admission(
     {
         return Ok(ScalarDispatchPlan::TnM16N16SplitM16Qualified);
     }
-    // Every slim plain input gradient whose weights the transpose scratch
-    // holds runs the slim tile's chain as the NN 64 x 64 tile over the
+    // A slim plain input gradient whose weights the transpose scratch holds
+    // may run the slim tile's chain as the NN 64 x 64 tile over the
     // transposed weights: the chain per output is the same, so the bits are
-    // the plan's, at about half the time on the cells the standalone Lilly
-    // GEMMs measured (NT 4096x128x796 53.5 -> 27.2 us on the RTX 5090,
-    // 16384x384x768 225 -> 178). Outputs 16 past a multiple of 32 stay on
-    // the slim tile, which they measured faster.
+    // the plan's and the choice is speed alone. A CC 12.x board takes it on
+    // every such gradient (RTX 5090: NT 4096x128x796 53 -> 29 us,
+    // 4096x256x2112 138 -> 112, 16384x256x128 29 -> 26); the other
+    // architectures only over a reduction that is not whole 32-column steps,
+    // where the slim tile's tail is slow (RTX 6000 Ada: 4096x128x796 62 ->
+    // 48) and whole steps keep the slim tile (4096x256x2112 183 against 214).
+    // Outputs 16 past a multiple of 32 stay on the slim tile everywhere.
     if fallback == (ScalarDispatchPlan::NtFinal { slim: true })
         && admission == ScalarAdmission::Evidence
+        && (facts.compute_capability.0 == 12 || !request.shape.n.is_multiple_of(32))
         && nt_slim_via_transpose_request(request)
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
@@ -7669,15 +7711,15 @@ pub(super) const GEMM_CUSTOM_MIN: usize = 128;
 pub(super) const GEMM_SLIM_MAX: usize = 512;
 
 /// v6.5 Phase C-1.5av: separate Slim Split-K NT-via-T n_in cap for backward dx.
-/// The forward Slim NN path uses N as output dim → GEMM_SLIM_MAX=512 bounds
-/// wave-fill correctness there. But NT-via-T backward dx reads n_in (input dim
-/// of original forward), and the kernel itself tiles arbitrary n_in via N-axis
-/// tiling — the 512 cap is conservative, not load-bearing. v6.5 multi-step
-/// Production input widths can exceed 512; 768 keeps those shapes on Slim
-/// Split-K NT-via-T
-/// with F=4 K-tile partials (576 blocks vs plain Big NT 144 blocks).
-/// Determinism preserved: F is shape-keyed (function of n_out, not batch).
+/// The forward Slim NN path uses N as output dim; NT-via-T backward dx reads
+/// n_in, and the kernel tiles any n_in. 768 keeps the production input
+/// widths on the slim split with F=4 K-tile partials (576 blocks against
+/// the plain big NT's 144). Determinism preserved: F is shape-keyed (a
+/// function of n_out, not of the batch).
 pub(super) const GEMM_SLIM_NT_NIN_MAX: usize = 768;
+
+/// The reduction from which the slim NT split also serves 512 to 1024 rows.
+pub(super) const GEMM_SLIM_NT_SHORT_BATCH_MIN_REDUCTION: usize = 1536;
 
 /// M threshold below which we force Slim-N even for N ≥ 129 (wave underfill protection).
 /// At M < 512, Big tile BM=128 gives ≤4 M-blocks; adding N-blocks via Slim's BN=64 (vs Big's BN=128)
@@ -8002,6 +8044,38 @@ fn scalar_nt_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
     if batch < 32 && n_out >= 128 {
         return Ok(ScalarDispatchPlan::NtSmallBatchWide);
     }
+    // The slim split through the transposed weights, 64-wide chunks: past
+    // 1024 rows wherever its own grid stays under the slim bound, and from
+    // 512 rows over a reduction of 1536 or more, where it runs in about half
+    // the time on both the RTX 5090 and the RTX 6000 Ada (NT 1024x384x1536
+    // 99.6 -> 40.4 us and 111.8 -> 61.1); over a shorter reduction at 1024
+    // rows the two cards disagree, and the exact plan is one for all of
+    // them. Up to 1024 rows its own grid must fill the thin split's bound.
+    if batch >= 512
+        && (128..=GEMM_SLIM_NT_NIN_MAX).contains(&n_in)
+        && n_out >= 64
+        && n_out.is_multiple_of(32)
+        && dims.kn <= super::contract::SCALAR_GENERIC_TRANSPOSE_ROUTE_CAP_ELEMENTS
+    {
+        let chunks = dims.n_u32.div_ceil(64);
+        if chunks >= 2
+            && checked_mul3(
+                checked_usize(chunks, "NT slim split-K chunks")?,
+                batch,
+                n_in,
+                "NT slim split-K scratch",
+            )? <= SPLITK_SCRATCH_CAP
+            && plain_slim_blocks > 0
+            && plain_slim_blocks < policy.slim_split_max_tiles
+            && (batch > 1024
+                || (n_out >= GEMM_SLIM_NT_SHORT_BATCH_MIN_REDUCTION
+                    && checked_usize(plain_slim_blocks, "NT slim split-K grid")?
+                        .checked_mul(checked_usize(chunks, "NT slim split-K chunks")?)
+                        .is_some_and(|ctas| ctas >= policy.thin_split_max_tiles as usize)))
+        {
+            return Ok(ScalarDispatchPlan::NtSplitKSlim { chunks });
+        }
+    }
     if (32..=1024).contains(&batch)
         && (64..=4096).contains(&n_in)
         && n_in >= 33
@@ -8033,26 +8107,6 @@ fn scalar_nt_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
         && underfill
     {
         return Ok(ScalarDispatchPlan::NtSplitKMain { n_main, n_tail });
-    }
-    if batch > 1024
-        && (128..=GEMM_SLIM_NT_NIN_MAX).contains(&n_in)
-        && n_out >= 64
-        && n_out.is_multiple_of(32)
-        && dims.kn <= super::contract::SCALAR_GENERIC_TRANSPOSE_ROUTE_CAP_ELEMENTS
-    {
-        let chunks = dims.n_u32.div_ceil(64);
-        if chunks >= 2
-            && checked_mul3(
-                checked_usize(chunks, "NT slim split-K chunks")?,
-                batch,
-                n_in,
-                "NT slim split-K scratch",
-            )? <= SPLITK_SCRATCH_CAP
-            && plain_slim_blocks > 0
-            && plain_slim_blocks < policy.slim_split_max_tiles
-        {
-            return Ok(ScalarDispatchPlan::NtSplitKSlim { chunks });
-        }
     }
     if (32..128).contains(&batch) && n_out >= 128 {
         return Ok(ScalarDispatchPlan::NtMidBatchWide);
@@ -8576,13 +8630,26 @@ mod scalar_split_policy_tests {
 
     #[test]
     fn nt_split_admission_counts_the_shapes_own_tiles() {
+        // The 32-wide split takes the underfilled grid; the slim split takes
+        // 512 to 1024 rows only over a reduction of 1536 or more.
+        for dims in [(256, 2048, 128), (512, 2048, 128)] {
+            assert_eq!(
+                plan(ResolvedGemmOp::Nt, dims).unwrap(),
+                ScalarDispatchPlan::NtSplitKMain {
+                    n_main: 128,
+                    n_tail: 0,
+                },
+                "{dims:?}"
+            );
+        }
         assert_eq!(
-            plan(ResolvedGemmOp::Nt, (512, 2048, 128)).unwrap(),
-            ScalarDispatchPlan::NtSplitKMain {
-                n_main: 128,
-                n_tail: 0,
-            }
+            plan(ResolvedGemmOp::Nt, (1024, 384, 1536)).unwrap(),
+            ScalarDispatchPlan::NtSplitKSlim { chunks: 24 }
         );
+        assert!(!matches!(
+            plan(ResolvedGemmOp::Nt, (1024, 1536, 384)).unwrap(),
+            ScalarDispatchPlan::NtSplitKSlim { .. }
+        ));
         assert!(!matches!(
             plan(ResolvedGemmOp::Nt, (1024, 1536, 128)).unwrap(),
             ScalarDispatchPlan::NtSplitKMain { .. } | ScalarDispatchPlan::NtSplitKTail { .. }
@@ -8862,9 +8929,16 @@ mod scalar_split_policy_tests {
                     ScalarDispatchPlan::NtFinal { slim: true },
                     "{dims:?}"
                 );
+                // Whole 32-column reduction steps take the transposed chain
+                // on a CC 12.x board only.
+                let transposed = compute_capability.0 == 12 || dims.2 % 32 != 0;
                 assert_eq!(
                     scalar_launch_plan(facts, nt(dims), operands).unwrap(),
-                    ScalarDispatchPlan::NtSlimViaTranspose,
+                    if transposed {
+                        ScalarDispatchPlan::NtSlimViaTranspose
+                    } else {
+                        ScalarDispatchPlan::NtFinal { slim: true }
+                    },
                     "{compute_capability:?} {dims:?}"
                 );
                 assert_eq!(
@@ -16993,11 +17067,17 @@ mod tf32_tests {
                     availability,
                 )
                 .unwrap();
-                // A specialized cohort winner keeps its cell; a portable one
-                // yields to the gradients' shape rules.
+                // A specialized cohort winner keeps its cell; a portable tile
+                // or split member yields to the gradients' shape rules.
                 if let F32TriadSelection::Tf32(route) = allowed
                     && rna_batch_invariant_route(cell.op, route)
-                    && !matches!(route, Tf32PhysicalRoute::MmaTf32Rna(_))
+                    && !matches!(
+                        route,
+                        Tf32PhysicalRoute::MmaTf32Rna(_)
+                            | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+                            | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+                            | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+                    )
                 {
                     assert_eq!(selection, allowed, "{cell:?}");
                     kept += 1;

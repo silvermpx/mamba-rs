@@ -8068,9 +8068,18 @@ fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     expected.extend(super::contract::tf32_module_symbols(ModuleKind::TriadSm120));
     let parsed = validate_exact_ptx_exports("TriadSm120", 128, &expected, ptx)?;
     validate_sm120_entry_features(&parsed)?;
+    // The stream-K kernels count each tile's parts in with one wrapping
+    // atomicInc; every other entry holds no atomic at all.
+    for entry in &parsed.entries {
+        if entry.symbol.contains("_streamk") {
+            require_ptx_entry_tokens("TriadSm120", entry, &["atom.global.inc.u32"])?;
+        } else {
+            reject_ptx_entry_tokens("TriadSm120", entry, &["atom.global.inc.u32"])?;
+        }
+    }
     let ptx = strip_ptx_comments(ptx)?;
     if ptx_has_unquoted_token(&ptx, |token| {
-        token.starts_with("atom.")
+        (token.starts_with("atom.") && token != "atom.global.inc.u32")
             || token.starts_with("atom::")
             || token.starts_with("red.")
             || token.starts_with("red::")
@@ -8226,8 +8235,13 @@ fn validate_tf32_feature_instructions(
                 kernel_spec.symbol
             ));
         }
+        // An SM120 stream-K kernel counts each tile's parts in with one
+        // wrapping atomicInc, which adds no value; no TF32 kernel holds a
+        // numeric atomic or reduction.
+        let counts_arrivals =
+            module_kind == ModuleKind::TriadSm120 && kernel_spec.symbol.contains("_streamk");
         if ptx_has_unquoted_token(entry, |token| {
-            token.starts_with("atom.")
+            (token.starts_with("atom.") && !(counts_arrivals && token == "atom.global.inc.u32"))
                 || token.starts_with("atom::")
                 || token.starts_with("red.")
                 || token.starts_with("red::")
@@ -14840,6 +14854,10 @@ mod tests {
                 }
             }
             ModuleKind::TriadSm120 => {
+                // The stream-K kernels count each tile's parts in.
+                if symbol.contains("_streamk") {
+                    instructions.push("atom.global.inc.u32");
+                }
                 if symbol.contains("_tma_fma_") {
                     instructions.push("fma.rn.f32");
                 } else if symbol.contains("_tf32_") {
@@ -16938,8 +16956,36 @@ mod tests {
             )
             .is_err()
         );
+        // A stream-K entry needs its arrival counter, and no other entry
+        // may count.
+        let streamk = super::super::contract::SM120_STREAMK_KERNEL_SPECS[0].symbol;
+        assert!(streamk.contains("_streamk"));
+        let tiled = super::super::contract::SM120_KERNEL_SPECS[0].symbol;
+        assert!(!tiled.contains("_streamk"));
+        let entry_body = |ptx: &str, symbol: &str| {
+            let start = ptx.find(&format!(".entry {symbol}(")).unwrap();
+            let end = ptx[start..].find("\n}").map(|end| start + end).unwrap();
+            (start, end)
+        };
+        let (start, end) = entry_body(&valid, streamk);
+        let without = format!(
+            "{}{}",
+            &valid[..start],
+            valid[start..].replacen("atom.global.inc.u32", "add.u32", 1)
+        );
+        assert!(end > start);
+        assert!(validate_sm120_ptx("compute_121", &without).is_err());
+        let (start, end) = entry_body(&valid, tiled);
+        let counting = format!(
+            "{}\natom.global.inc.u32 %r1, [%rd1], %r2;{}",
+            &valid[..end],
+            &valid[end..]
+        );
+        assert!(start < end);
+        assert!(validate_sm120_ptx("compute_121", &counting).is_err());
         for forbidden in [
             "atom.global.add.f32",
+            "atom.global.add.u32",
             "red.global.add.f32",
             "tcgen05.mma.cta_group::1.kind::f16",
             "tcgen05.mma.cta_group::1.kind::tf32",

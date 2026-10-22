@@ -199,11 +199,12 @@ Repaired:
   per eight 64-row slabs, at most 512 workers; the resident grid walks the
   workers in order, so the partition points and the bits do not depend on
   how many SMs the card has;
-- the SM120 stream-K kernels (bf16, f16 and TF32) deal one worker per 32
-  units, at most 1024 workers, by the shape alone; measured on an RTX 5090
-  at its 170 SMs and with the grid held to 84 and 48 CTAs, no grid ran more
-  than 6% behind its best schedule, and a deep gradient over few tiles no
-  longer folds a slab per unit (127 -> 24 us on 128 x 128 over 8192 rows);
+- the SM120 stream-K kernels (bf16, f16 and TF32) deal one worker per 16
+  units, at most 2048 workers, by the shape alone, and fold the split tiles
+  after a grid barrier; measured on an RTX 5090 at its 170 SMs and with the
+  grid held to 84 and 48 CTAs, the bits are the same on all three grids and
+  the cells run in 65%, 55% and 58% of the time of the 340-worker deal
+  (127 -> 15 us on 128 x 128 over 8192 rows);
 - the exact narrow weight gradient (2 to 127 outputs) splits its batch by
   the shape rule of the wider ones on every architecture, where only three
   RTX 5090 cells split before;

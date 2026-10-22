@@ -2855,8 +2855,14 @@ fn assert_sass_entry_contract(sass: &str, symbol: &str, label: &str) {
         }
         tcgen_management_syntax(&instructions, symbol);
     } else {
+        // An SM120 stream-K kernel's grid barrier counts arrivals with
+        // wrapping increments, which add no value.
+        let barrier = label == "SM120" && symbol.contains("_streamk");
         for instruction in &instructions {
             let mnemonic = instruction.mnemonic;
+            if barrier && mnemonic.starts_with("ATOMG.E.INC.") {
+                continue;
+            }
             assert!(
                 !mnemonic.contains("ATOM")
                     && !mnemonic.starts_with("RED")
@@ -8627,6 +8633,16 @@ fn compiled_tf32_ptx_exports_exact_five_parameter_abis() {
                     "{label} {symbol} must retain its portable one-CTA launch bound"
                 );
             }
+            // An SM120 stream-K kernel's grid barrier counts arrivals with
+            // wrapping increments, which add no value; nothing else may.
+            let barrier = label == "SM120" && symbol.contains("_streamk");
+            let without_barrier;
+            let scanned = if barrier {
+                without_barrier = entry.replace("atom.global.inc.u32", "barrier.counter");
+                without_barrier.as_str()
+            } else {
+                entry
+            };
             for forbidden in [
                 "atom.",
                 "red.",
@@ -8640,9 +8656,9 @@ fn compiled_tf32_ptx_exports_exact_five_parameter_abis() {
                 "fma.rn.ftz",
             ] {
                 let present = if matches!(forbidden, "atom." | "red." | "atom::" | "red::") {
-                    contains_opcode_prefix(entry, forbidden)
+                    contains_opcode_prefix(scanned, forbidden)
                 } else {
-                    entry.contains(forbidden)
+                    scanned.contains(forbidden)
                 };
                 assert!(
                     !present,

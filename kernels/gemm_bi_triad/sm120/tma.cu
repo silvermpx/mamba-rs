@@ -1823,44 +1823,36 @@ static __device__ __forceinline__ void sm120_tf32_pair_entry(
 
 
 // TN stream-K. The reduction of every output tile is cut into K-tile units
-// and the whole (tile, k) space is dealt to a persistent grid in equal
-// contiguous ranges, so the machine stays full whatever the tile count. A
-// CTA whose range covers a whole tile stores it directly. A tile that
-// straddles CTAs is combined by the CTA holding its last unit, which adds
-// the lower contributors' slabs in ascending CTA order and its own value
-// last, all with __fadd_rn: the partition points are a pure function of the
-// shape and the grid, so the bits are deterministic and replay-stable.
+// and the whole (tile, k) space is dealt in contiguous ranges, so the
+// machine stays full whatever the tile count. A worker whose range covers a
+// whole tile stores it directly. Every worker holding part of a tile
+// publishes that part as a slab; once the whole grid has published, the
+// CTAs fold the split tiles in parallel, a tile each in turn, every part in
+// ascending worker order with __fadd_rn. Folding at the end keeps every
+// fold off the workers' path: a CTA that folded while others still computed
+// arrived late at its next tiles, folded those too, and the folds piled up
+// on the slowest CTAs. The order of every sum is the shape's alone.
 //
-// Each CTA walks its range from the end, so the segment it publishes comes
-// first and the one it owns last: a publisher never waits, and an owner
-// waits only on slabs that are already being produced. The pipeline is one
-// for the whole range: the producer lane runs `Stages` steps ahead across
-// segment boundaries, and the barriers are armed once per launch.
-//
-// Contributors publish through fragment-order slabs and per-slot flags with
-// release/acquire at GPU scope; owners clear the flags they consumed, so the
+// The pipeline is one for the CTA's whole stage sequence: the producer lane
+// runs `Stages` steps ahead across segment and worker boundaries, and the
+// barriers are armed once per launch. The grid barrier resets itself, so the
 // workspace is reusable across launches without a reset.
 //
 // The units are dealt to workers by the shape alone, never to the grid: the
 // partition points - and so the bits - are the same on every SM120 card
-// whatever its SM count. The resident grid
-// walks the workers in ascending order, each CTA taking every grid-th one,
-// and the pipeline runs on across a CTA's workers. Waits target lower
-// workers only, and every worker below a waiting one is either done or held
-// by a running CTA, so with the grid no larger than the device keeps
-// resident at once no wait can starve; the host derives the grid from that.
+// whatever its SM count. The resident grid walks the workers in ascending
+// order, each CTA taking every grid-th one, and the pipeline runs on across
+// a CTA's workers.
 
 static constexpr int SM120_STREAMK_ACCUMULATORS = 32;
 static constexpr int SM120_STREAMK_SLOTS = 2;
 
-// The workers a stream-K reduction is dealt to: one per 32 units, so a
-// worker's slab and its owner's fold stay a small share of its k-tiles,
-// and at most 1024, a count no card's wave divides badly by much. With a
-// worker per unit a 128 x 128 gradient over 8192 rows folded 128 slabs per
-// tile and ran 127 us where 32 units a worker take 24 us. The host reads
-// the same constants to size the workspace and the grid.
-#define SM120_STREAMK_MIN_SPAN 32
-#define SM120_STREAMK_WORKERS 1024
+// The workers a stream-K reduction is dealt to: one per 16 units and at
+// most 2048, so a worker's slab stays a small share of its k-tiles and the
+// grid of any card walks enough workers to balance. The host reads the same
+// constants to size the workspace and the grid.
+#define SM120_STREAMK_MIN_SPAN 16
+#define SM120_STREAMK_WORKERS 2048
 
 static __device__ __forceinline__ long long sm120_streamk_workers(long long units) {
     long long workers = units / SM120_STREAMK_MIN_SPAN;
@@ -2037,8 +2029,7 @@ static __device__ __forceinline__ void sm120_streamk_segment(
 
 static __device__ __forceinline__ void sm120_streamk_store_slab(
     float* slab, const float (&accumulator)[2][4][4]) {
-    float4* destination = reinterpret_cast<float4*>(
-        slab + (long long)threadIdx.x * SM120_STREAMK_ACCUMULATORS);
+    float4* destination = reinterpret_cast<float4*>(slab) + threadIdx.x;
 #pragma unroll
     for (int m_atom = 0; m_atom < 2; ++m_atom) {
 #pragma unroll
@@ -2047,83 +2038,103 @@ static __device__ __forceinline__ void sm120_streamk_store_slab(
                 accumulator[m_atom][n_atom][0], accumulator[m_atom][n_atom][1],
                 accumulator[m_atom][n_atom][2], accumulator[m_atom][n_atom][3]);
             asm volatile("st.global.cg.v4.f32 [%0], {%1, %2, %3, %4};\n"
-                :: "l"(destination + m_atom * 4 + n_atom),
+                :: "l"(destination + (m_atom * 4 + n_atom) * blockDim.x),
                    "f"(value.x), "f"(value.y), "f"(value.z), "f"(value.w) : "memory");
         }
     }
 }
 
-static __device__ __forceinline__ void sm120_streamk_raise(unsigned* flag) {
-    asm volatile("st.release.gpu.global.u32 [%0], %1;\n" :: "l"(flag), "r"(1U) : "memory");
-}
-
-static __device__ __forceinline__ void sm120_streamk_await(const unsigned* flag) {
-    unsigned value;
-    do {
-        asm volatile("ld.acquire.gpu.global.u32 %0, [%1];\n" : "=r"(value) : "l"(flag) : "memory");
-    } while (value == 0U);
-}
-
-static __device__ __forceinline__ void sm120_streamk_clear(unsigned* flag) {
-    asm volatile("st.relaxed.gpu.global.u32 [%0], %1;\n" :: "l"(flag), "r"(0U) : "memory");
-}
-
-// Folds the lower contributors' slabs into the accumulators: the slabs are
-// summed in ascending worker order, then the worker's own value is added
-// last.
-// Every slab is read through ordinary cache-global loads so the eight loads
-// of one slab issue together.
-static __device__ __forceinline__ void sm120_streamk_fold_slabs(
-    const float* partial, long long slab_floats, const Sm120StreamKDeal& deal,
-    int first_worker, int worker, int tile,
-    float (&accumulator)[2][4][4]) {
-    const long long lane_offset = (long long)threadIdx.x * SM120_STREAMK_ACCUMULATORS;
-    const int k_tiles = deal.k_tiles;
-    float sum[2][4][4];
-    bool first = true;
-    for (int source = first_worker; source < worker; ++source) {
-        Sm120StreamKRange theirs = sm120_streamk_range(deal.units, deal.workers, source);
-        int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;
-        const float4* slab = reinterpret_cast<const float4*>(
-            partial + ((long long)source * SM120_STREAMK_SLOTS + slot) * slab_floats
-            + lane_offset);
-        float4 value[2][4];
-#pragma unroll
-        for (int m_atom = 0; m_atom < 2; ++m_atom) {
-#pragma unroll
-            for (int n_atom = 0; n_atom < 4; ++n_atom) {
-                value[m_atom][n_atom] = __ldcg(slab + m_atom * 4 + n_atom);
-            }
+// Holds every CTA until all of them have published their slabs. The grid
+// is never larger than the device keeps resident at once, so every CTA
+// arrives. The count wraps to zero as the last CTA arrives, and that CTA
+// moves the generation on, which the others wait for; both words are ready
+// for the next launch.
+static __device__ __forceinline__ void sm120_streamk_grid_sync(unsigned* barrier) {
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        unsigned generation;
+        asm volatile("ld.acquire.gpu.global.u32 %0, [%1];\n"
+            : "=r"(generation) : "l"(barrier + 1) : "memory");
+        __threadfence();
+        if (atomicInc(barrier, gridDim.x - 1U) == gridDim.x - 1U) {
+            __threadfence();
+            // The generation flips between zero and one: it moves once per
+            // launch, after every CTA of that launch has read it.
+            atomicInc(barrier + 1, 1U);
+        } else {
+            unsigned now;
+            do {
+                asm volatile("ld.acquire.gpu.global.u32 %0, [%1];\n"
+                    : "=r"(now) : "l"(barrier + 1) : "memory");
+            } while (now == generation);
         }
-#pragma unroll
-        for (int m_atom = 0; m_atom < 2; ++m_atom) {
-#pragma unroll
-            for (int n_atom = 0; n_atom < 4; ++n_atom) {
-                float4 v = value[m_atom][n_atom];
-                if (first) {
-                    sum[m_atom][n_atom][0] = v.x;
-                    sum[m_atom][n_atom][1] = v.y;
-                    sum[m_atom][n_atom][2] = v.z;
-                    sum[m_atom][n_atom][3] = v.w;
-                } else {
-                    sum[m_atom][n_atom][0] = __fadd_rn(sum[m_atom][n_atom][0], v.x);
-                    sum[m_atom][n_atom][1] = __fadd_rn(sum[m_atom][n_atom][1], v.y);
-                    sum[m_atom][n_atom][2] = __fadd_rn(sum[m_atom][n_atom][2], v.z);
-                    sum[m_atom][n_atom][3] = __fadd_rn(sum[m_atom][n_atom][3], v.w);
-                }
-            }
-        }
-        first = false;
+        __threadfence();
     }
+    __syncthreads();
+}
+
+// One worker's slab of `tile` for this thread: slot 0 holds the part of the
+// worker's first tile, slot 1 the part of its last. A slab interleaves the
+// threads' fragments, so each warp's load reads four whole cache lines; a
+// thread-major slab touched 32 lines per load and made the fold run at a
+// tenth of the cache's bandwidth.
+template <int MAtoms>
+static __device__ __forceinline__ void sm120_streamk_load_slab(
+    const float* partial, long long slab_floats, const Sm120StreamKDeal& deal,
+    int source, int tile, float4 (&value)[MAtoms][4]) {
+    Sm120StreamKRange theirs = sm120_streamk_range(deal.units, deal.workers, source);
+    int slot = tile == (int)(theirs.first / deal.k_tiles) ? 0 : 1;
+    const float4* slab = reinterpret_cast<const float4*>(
+        partial + ((long long)source * SM120_STREAMK_SLOTS + slot) * slab_floats)
+        + threadIdx.x;
 #pragma unroll
-    for (int m_atom = 0; m_atom < 2; ++m_atom) {
+    for (int fm = 0; fm < MAtoms; ++fm) {
 #pragma unroll
-        for (int n_atom = 0; n_atom < 4; ++n_atom) {
+        for (int fn = 0; fn < 4; ++fn) {
+            value[fm][fn] = __ldcg(slab + (fm * 4 + fn) * blockDim.x);
+        }
+    }
+}
+
+// Folds the parts of `tile` from every worker that holds one, in ascending
+// worker order, into the accumulators. The slabs two ahead are already in
+// flight while one is added, so the fold costs about one cache round trip
+// per two workers rather than one per worker.
+template <int MAtoms>
+static __device__ __forceinline__ void sm120_streamk_fold_all(
+    const float* partial, long long slab_floats, const Sm120StreamKDeal& deal,
+    int first_worker, int last_worker, int tile,
+    float (&accumulator)[MAtoms][4][4]) {
+    float4 current[MAtoms][4];
+    float4 following[MAtoms][4];
+    sm120_streamk_load_slab<MAtoms>(partial, slab_floats, deal, first_worker, tile, current);
+    if (first_worker < last_worker) {
+        sm120_streamk_load_slab<MAtoms>(
+            partial, slab_floats, deal, first_worker + 1, tile, following);
+    }
+    for (int source = first_worker; source <= last_worker; ++source) {
 #pragma unroll
-            for (int element = 0; element < 4; ++element) {
-                accumulator[m_atom][n_atom][element] = __fadd_rn(
-                    sum[m_atom][n_atom][element], accumulator[m_atom][n_atom][element]);
+        for (int fm = 0; fm < MAtoms; ++fm) {
+#pragma unroll
+            for (int fn = 0; fn < 4; ++fn) {
+                float4 v = current[fm][fn];
+                if (source == first_worker) {
+                    accumulator[fm][fn][0] = v.x;
+                    accumulator[fm][fn][1] = v.y;
+                    accumulator[fm][fn][2] = v.z;
+                    accumulator[fm][fn][3] = v.w;
+                } else {
+                    accumulator[fm][fn][0] = __fadd_rn(accumulator[fm][fn][0], v.x);
+                    accumulator[fm][fn][1] = __fadd_rn(accumulator[fm][fn][1], v.y);
+                    accumulator[fm][fn][2] = __fadd_rn(accumulator[fm][fn][2], v.z);
+                    accumulator[fm][fn][3] = __fadd_rn(accumulator[fm][fn][3], v.w);
+                }
+                current[fm][fn] = following[fm][fn];
             }
+        }
+        if (source + 2 <= last_worker) {
+            sm120_streamk_load_slab<MAtoms>(
+                partial, slab_floats, deal, source + 2, tile, following);
         }
     }
 }
@@ -2265,17 +2276,16 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_kernel(
     }
     __syncthreads();
 
-    if ((int)blockIdx.x >= deal.workers) {
-        return;
-    }
     Sm120StreamKCursor producer;
-    sm120_streamk_cursor_open(producer, deal, (int)blockIdx.x);
-    if (warp == 0 && lane == 0) {
+    if ((int)blockIdx.x < deal.workers) {
+        sm120_streamk_cursor_open(producer, deal, (int)blockIdx.x);
+        if (warp == 0 && lane == 0) {
 #pragma unroll
-        for (int step = 0; step < Stages; ++step) {
-            if (step < flow.total) {
-                sm120_streamk_produce<M, N, Stages>(flow, producer, step);
-                sm120_streamk_cursor_advance(producer, deal);
+            for (int step = 0; step < Stages; ++step) {
+                if (step < flow.total) {
+                    sm120_streamk_produce<M, N, Stages>(flow, producer, step);
+                    sm120_streamk_cursor_advance(producer, deal);
+                }
             }
         }
     }
@@ -2303,42 +2313,30 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_kernel(
             sm120_streamk_epilogue<M, N>(
                 output, rows, columns, output_row, output_column,
                 warp_m, warp_n, bias, params, accumulator);
-        } else if (!covers_end) {
+        } else {
             int slot = tile == first_tile ? 0 : 1;
             sm120_streamk_store_slab(
                 partial + ((long long)worker * SM120_STREAMK_SLOTS + slot) * slab_floats,
                 accumulator);
-            __syncthreads();
-            if (threadIdx.x == 0) {
-                __threadfence();
-                sm120_streamk_raise(flags + (long long)worker * SM120_STREAMK_SLOTS + slot);
-            }
-        } else {
-            int first_worker =
-                sm120_streamk_worker_of(units, deal.workers, (long long)tile * k_tiles);
-            int sources = worker - first_worker;
-            for (int index = (int)threadIdx.x; index < sources; index += threads) {
-                int source = first_worker + index;
-                Sm120StreamKRange theirs = sm120_streamk_range(units, deal.workers, source);
-                int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;
-                sm120_streamk_await(flags + (long long)source * SM120_STREAMK_SLOTS + slot);
-            }
-            __syncthreads();
-            sm120_streamk_fold_slabs(
-                partial, slab_floats, deal, first_worker, worker, tile, accumulator);
-            __syncthreads();
-            for (int index = (int)threadIdx.x; index < sources; index += threads) {
-                int source = first_worker + index;
-                Sm120StreamKRange theirs = sm120_streamk_range(units, deal.workers, source);
-                int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;
-                sm120_streamk_clear(flags + (long long)source * SM120_STREAMK_SLOTS + slot);
-            }
-            sm120_streamk_epilogue<M, N>(
-                output, rows, columns, output_row, output_column,
-                warp_m, warp_n, bias, params, accumulator);
         }
         unit -= k_end - k_begin;
     }
+    }
+    sm120_streamk_grid_sync(flags);
+    for (int tile = (int)blockIdx.x; tile < row_tiles * column_tiles;
+         tile += (int)gridDim.x) {
+        long long tile_first = (long long)tile * k_tiles;
+        int first_worker = sm120_streamk_worker_of(units, deal.workers, tile_first);
+        int last_worker =
+            sm120_streamk_worker_of(units, deal.workers, tile_first + k_tiles - 1);
+        if (first_worker == last_worker) {
+            continue;
+        }
+        sm120_streamk_fold_all<2>(
+            partial, slab_floats, deal, first_worker, last_worker, tile, accumulator);
+        sm120_streamk_epilogue<M, N>(
+            output, rows, columns, (tile / column_tiles) * M, (tile % column_tiles) * N,
+            warp_m, warp_n, bias, params, accumulator);
     }
 }
 
@@ -2385,8 +2383,7 @@ static __device__ __forceinline__ void sm120_half_streamk_zero(
 template <int MAtoms>
 static __device__ __forceinline__ void sm120_half_streamk_store_slab(
     float* slab, const float (&accumulator)[MAtoms][4][4]) {
-    float4* destination = reinterpret_cast<float4*>(
-        slab + (long long)threadIdx.x * (MAtoms * 16));
+    float4* destination = reinterpret_cast<float4*>(slab) + threadIdx.x;
 #pragma unroll
     for (int fm = 0; fm < MAtoms; ++fm) {
 #pragma unroll
@@ -2395,66 +2392,8 @@ static __device__ __forceinline__ void sm120_half_streamk_store_slab(
                 accumulator[fm][fn][0], accumulator[fm][fn][1],
                 accumulator[fm][fn][2], accumulator[fm][fn][3]);
             asm volatile("st.global.cg.v4.f32 [%0], {%1, %2, %3, %4};\n"
-                :: "l"(destination + fm * 4 + fn),
+                :: "l"(destination + (fm * 4 + fn) * blockDim.x),
                    "f"(value.x), "f"(value.y), "f"(value.z), "f"(value.w) : "memory");
-        }
-    }
-}
-
-// Sums the lower contributors' slabs in ascending worker order and adds the
-// worker's own value last, exactly as the TF32 fold does.
-template <int MAtoms>
-static __device__ __forceinline__ void sm120_half_streamk_fold_slabs(
-    const float* partial, long long slab_floats, const Sm120StreamKDeal& deal,
-    int first_worker, int worker, int tile,
-    float (&accumulator)[MAtoms][4][4]) {
-    const long long lane_offset = (long long)threadIdx.x * (MAtoms * 16);
-    const int k_tiles = deal.k_tiles;
-    float sum[MAtoms][4][4];
-    bool first = true;
-    for (int source = first_worker; source < worker; ++source) {
-        Sm120StreamKRange theirs = sm120_streamk_range(deal.units, deal.workers, source);
-        int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;
-        const float4* slab = reinterpret_cast<const float4*>(
-            partial + ((long long)source * SM120_STREAMK_SLOTS + slot) * slab_floats
-            + lane_offset);
-        float4 value[MAtoms][4];
-#pragma unroll
-        for (int fm = 0; fm < MAtoms; ++fm) {
-#pragma unroll
-            for (int fn = 0; fn < 4; ++fn) {
-                value[fm][fn] = __ldcg(slab + fm * 4 + fn);
-            }
-        }
-#pragma unroll
-        for (int fm = 0; fm < MAtoms; ++fm) {
-#pragma unroll
-            for (int fn = 0; fn < 4; ++fn) {
-                float4 v = value[fm][fn];
-                if (first) {
-                    sum[fm][fn][0] = v.x;
-                    sum[fm][fn][1] = v.y;
-                    sum[fm][fn][2] = v.z;
-                    sum[fm][fn][3] = v.w;
-                } else {
-                    sum[fm][fn][0] = __fadd_rn(sum[fm][fn][0], v.x);
-                    sum[fm][fn][1] = __fadd_rn(sum[fm][fn][1], v.y);
-                    sum[fm][fn][2] = __fadd_rn(sum[fm][fn][2], v.z);
-                    sum[fm][fn][3] = __fadd_rn(sum[fm][fn][3], v.w);
-                }
-            }
-        }
-        first = false;
-    }
-#pragma unroll
-    for (int fm = 0; fm < MAtoms; ++fm) {
-#pragma unroll
-        for (int fn = 0; fn < 4; ++fn) {
-#pragma unroll
-            for (int element = 0; element < 4; ++element) {
-                accumulator[fm][fn][element] = __fadd_rn(
-                    sum[fm][fn][element], accumulator[fm][fn][element]);
-            }
         }
     }
 }
@@ -2558,17 +2497,16 @@ static __device__ __forceinline__ void sm120_half_tn_streamk_kernel(
     }
     __syncthreads();
 
-    if ((int)blockIdx.x >= deal.workers) {
-        return;
-    }
     Sm120StreamKCursor producer;
-    sm120_streamk_cursor_open(producer, deal, (int)blockIdx.x);
-    if (warp == 0 && lane == 0) {
+    if ((int)blockIdx.x < deal.workers) {
+        sm120_streamk_cursor_open(producer, deal, (int)blockIdx.x);
+        if (warp == 0 && lane == 0) {
 #pragma unroll
-        for (int step = 0; step < Stages; ++step) {
-            if (step < flow.total) {
-                sm120_half_streamk_produce<M, N, BK, Stages>(flow, producer, step);
-                sm120_streamk_cursor_advance(producer, deal);
+            for (int step = 0; step < Stages; ++step) {
+                if (step < flow.total) {
+                    sm120_half_streamk_produce<M, N, BK, Stages>(flow, producer, step);
+                    sm120_streamk_cursor_advance(producer, deal);
+                }
             }
         }
     }
@@ -2598,47 +2536,37 @@ static __device__ __forceinline__ void sm120_half_tn_streamk_kernel(
         if (covers_start && covers_end) {
             sm120_epilogue<T, Op, M, N, BK, Stages, m_atoms>(
                 destination, accumulator);
-        } else if (!covers_end) {
+        } else {
             int slot = tile == first_tile ? 0 : 1;
             sm120_half_streamk_store_slab<m_atoms>(
                 partial + ((long long)worker * SM120_STREAMK_SLOTS + slot) * slab_floats,
                 accumulator);
-            __syncthreads();
-            if (threadIdx.x == 0) {
-                __threadfence();
-                sm120_streamk_raise(flags + (long long)worker * SM120_STREAMK_SLOTS + slot);
-            }
-        } else {
-            int first_worker =
-                sm120_streamk_worker_of(units, deal.workers, (long long)tile * k_tiles);
-            int sources = worker - first_worker;
-            for (int index = (int)threadIdx.x; index < sources; index += threads) {
-                int source = first_worker + index;
-                Sm120StreamKRange theirs = sm120_streamk_range(units, deal.workers, source);
-                int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;
-                sm120_streamk_await(flags + (long long)source * SM120_STREAMK_SLOTS + slot);
-            }
-            __syncthreads();
-            sm120_half_streamk_fold_slabs<m_atoms>(
-                partial, slab_floats, deal, first_worker, worker, tile, accumulator);
-            __syncthreads();
-            for (int index = (int)threadIdx.x; index < sources; index += threads) {
-                int source = first_worker + index;
-                Sm120StreamKRange theirs = sm120_streamk_range(units, deal.workers, source);
-                int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;
-                sm120_streamk_clear(flags + (long long)source * SM120_STREAMK_SLOTS + slot);
-            }
-            sm120_epilogue<T, Op, M, N, BK, Stages, m_atoms>(
-                destination, accumulator);
         }
         unit -= k_end - k_begin;
     }
     }
+    sm120_streamk_grid_sync(flags);
+    for (int tile = (int)blockIdx.x; tile < row_tiles * column_tiles;
+         tile += (int)gridDim.x) {
+        long long tile_first = (long long)tile * k_tiles;
+        int first_worker = sm120_streamk_worker_of(units, deal.workers, tile_first);
+        int last_worker =
+            sm120_streamk_worker_of(units, deal.workers, tile_first + k_tiles - 1);
+        if (first_worker == last_worker) {
+            continue;
+        }
+        sm120_streamk_fold_all<m_atoms>(
+            partial, slab_floats, deal, first_worker, last_worker, tile, accumulator);
+        Sm120Output destination = {
+            output, params.alpha, params.beta, rows, columns, params.ldc,
+            (tile / column_tiles) * M, (tile % column_tiles) * N, warp_columns};
+        sm120_epilogue<T, Op, M, N, BK, Stages, m_atoms>(destination, accumulator);
+    }
 }
 
 // One resident CTA per multiprocessor, as the TF32 stream-K kernel: the
-// grid is at most the multiprocessor count and every wait is on a running
-// CTA.
+// grid is at most the multiprocessor count, so every CTA reaches the grid
+// barrier.
 #define SM120_DEFINE_HALF_TN_STREAMK_KERNEL(NAME, TYPE, M, N, BK, STAGES)   \
 extern "C" __global__                                                       \
 __launch_bounds__(Sm120Storage<M, N, BK, STAGES>::threads, 1) void NAME(     \

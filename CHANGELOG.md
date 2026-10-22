@@ -25,10 +25,13 @@
   its own table: the pre-rounded weight-gradient tiles and the 144 x 96
   input-gradient tile included.
 - The SM120 stream-K weight gradients (bf16, f16 and TF32) deal at least
-  32 units to a worker and at most 1024 workers, by the shape alone. A
-  deep gradient over few tiles no longer folds a slab per unit: a 128 x 128
-  bf16 gradient over 8192 rows on an RTX 5090 runs in 24 us instead of 127.
-  Their bits change once.
+  16 units to a worker and at most 2048 workers, by the shape alone, and
+  fold the split tiles after the whole grid has published its parts instead
+  of in the CTA that finished a tile. On an RTX 5090 the stream-K cells run
+  in 65% of their former time at its 170 SMs and in 55% and 58% with the
+  grid held to 84 and 48 CTAs, with the same bits on all three; a 128 x 128
+  bf16 gradient over 8192 rows runs in 15 us instead of 127. Their bits
+  change once.
 - Exact narrow weight gradients (2 to 127 outputs) split their batch by the
   same shape rule as wider ones on every architecture (384 x 101 over 1024
   rows: 33 -> 10 us on an RTX 5090), and a slim exact input gradient runs

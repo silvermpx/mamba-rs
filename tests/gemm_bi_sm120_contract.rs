@@ -718,6 +718,25 @@ fn sm120_source_freezes_tma_swizzle_and_pipeline_contract() {
             "forbidden SM120 opcode {forbidden_opcode}"
         );
     }
+    // The stream-K grid barrier's two wrapping increments are the source's
+    // only atomics; no atomic adds a value.
+    assert_eq!(
+        SOURCE.matches("atomicInc(").count(),
+        2,
+        "SM120 source atomics"
+    );
+    for forbidden in [
+        "atomicAdd",
+        "atomicCAS",
+        "atomicExch",
+        "atomicMin",
+        "atomicMax",
+    ] {
+        assert!(
+            !SOURCE.contains(forbidden),
+            "forbidden SM120 atomic {forbidden}"
+        );
+    }
     assert!(contains_opcode_prefix(
         "asm(\"red.global.add.u32\");",
         "red."

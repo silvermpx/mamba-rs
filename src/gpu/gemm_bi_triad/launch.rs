@@ -512,7 +512,8 @@ fn tf32_streamk_launch_plan(
             "stream-K TF32 slabs exceed the fixed workspace",
         ));
     }
-    let flag_elements = workers * SM120_TF32_STREAMK_SLOTS_PER_CTA;
+    // The grid barrier's count and generation.
+    let flag_elements = SM120_STREAMK_BARRIER_WORDS;
     if flag_elements > TF32_SPLITK_COUNTER_CAP {
         return Err(invalid_gemm_dimensions(
             "stream-K TF32 flags exceed the fixed counter workspace",
@@ -575,6 +576,10 @@ pub(in crate::gpu) struct PreparedF32TriadLaunch {
     routes: Box<[ResolvedGemmRoute]>,
     resolved_launch_set: ResolvedGemmLaunchSet,
     kind: PreparedF32Kind,
+    /// The one kernel a tiled, stream-K or fused split-K launch enqueues,
+    /// looked up once at preparation: a launch of a tiny product otherwise
+    /// spends a measurable share of its time finding it by name.
+    function: Option<CudaFunction>,
 }
 
 impl PreparedF32TriadLaunch {
@@ -4377,6 +4382,7 @@ fn prepare_scalar_f32_with_plan(
         managed_epoch,
         routes,
         resolved_launch_set,
+        function: None,
         kind: PreparedF32Kind::Scalar(plan),
     })
 }
@@ -4450,6 +4456,7 @@ fn prepare_scalar_zero_f32(
         managed_epoch,
         routes,
         resolved_launch_set,
+        function: None,
         kind: PreparedF32Kind::ScalarZero {
             maps,
             params,
@@ -4579,6 +4586,7 @@ fn prepare_tf32_f32(
     let routes = vec![resolved].into_boxed_slice();
     let resolved_launch_set = build_resolved_gemm_launch_set(&routes)?;
     let managed_epoch = resources.managed_epoch();
+    let function = Some(prepared_tf32_function(ctx, &routes)?);
     Ok(PreparedF32TriadLaunch {
         context_token: ctx.instance_token(),
         stream_token: ctx.stream_token(),
@@ -4588,6 +4596,7 @@ fn prepare_tf32_f32(
         managed_epoch,
         routes,
         resolved_launch_set,
+        function,
         kind: PreparedF32Kind::Tf32 {
             route,
             maps,
@@ -4595,6 +4604,41 @@ fn prepare_tf32_f32(
             config,
         },
     })
+}
+
+/// The kernel of a single-kernel TF32 launch, for the prepared entry.
+fn prepared_tf32_function(
+    ctx: &GpuCtx,
+    routes: &[ResolvedGemmRoute],
+) -> Result<CudaFunction, String> {
+    let [resolved] = routes else {
+        return Err("prepared TF32 launch requires exactly one route".into());
+    };
+    ctx.kernels
+        .triad_kernels()
+        .tf32_function(resolved.symbol)
+        .cloned()
+        .ok_or_else(|| format!("qualified TF32 symbol {} is unavailable", resolved.symbol))
+}
+
+/// The kernel of a fused TF32 split-K launch, for the prepared entry.
+fn prepared_tf32_splitk_function(
+    ctx: &GpuCtx,
+    routes: &[ResolvedGemmRoute],
+) -> Result<CudaFunction, String> {
+    let [resolved] = routes else {
+        return Err("prepared fused TF32 split-K launch requires exactly one route".into());
+    };
+    ctx.kernels
+        .triad_kernels()
+        .tf32_splitk_function(resolved.symbol)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "qualified fused TF32 split-K symbol {} is unavailable",
+                resolved.symbol
+            )
+        })
 }
 
 /// The batch-invariant TF32 forward's own tiles copy whole 16-byte chunks:
@@ -4790,6 +4834,7 @@ fn prepare_sm89_tf32_tn_pre_rna(
         managed_epoch,
         routes,
         resolved_launch_set,
+        function: None,
         kind: PreparedF32Kind::Tf32TnPreRna {
             route,
             transpose_params,
@@ -4888,6 +4933,7 @@ fn prepare_tf32_streamk_f32(
     let routes = vec![resolved].into_boxed_slice();
     let resolved_launch_set = build_resolved_gemm_launch_set(&routes)?;
     let managed_epoch = resources.managed_epoch();
+    let function = Some(prepared_tf32_function(ctx, &routes)?);
     Ok(PreparedF32TriadLaunch {
         context_token: ctx.instance_token(),
         stream_token: ctx.stream_token(),
@@ -4897,6 +4943,7 @@ fn prepare_tf32_streamk_f32(
         managed_epoch,
         routes,
         resolved_launch_set,
+        function,
         kind: PreparedF32Kind::Tf32StreamK {
             route,
             maps,
@@ -4980,6 +5027,7 @@ fn prepare_sm120_fma_f32(
     let routes = vec![resolved].into_boxed_slice();
     let resolved_launch_set = build_resolved_gemm_launch_set(&routes)?;
     let managed_epoch = resources.managed_epoch();
+    let function = Some(prepared_tf32_function(ctx, &routes)?);
     Ok(PreparedF32TriadLaunch {
         context_token: ctx.instance_token(),
         stream_token: ctx.stream_token(),
@@ -4989,6 +5037,7 @@ fn prepare_sm120_fma_f32(
         managed_epoch,
         routes,
         resolved_launch_set,
+        function,
         kind: PreparedF32Kind::Tf32StreamK {
             route,
             maps,
@@ -5058,6 +5107,7 @@ fn prepare_tf32_splitk_f32(
         return Err("portable TF32 split-K resolved a non-SM80 parameter ABI".into());
     };
     let managed_epoch = resources.managed_epoch();
+    let function = Some(prepared_tf32_splitk_function(ctx, &routes)?);
     Ok(PreparedF32TriadLaunch {
         context_token: ctx.instance_token(),
         stream_token: ctx.stream_token(),
@@ -5067,6 +5117,7 @@ fn prepare_tf32_splitk_f32(
         managed_epoch,
         routes,
         resolved_launch_set,
+        function,
         kind: PreparedF32Kind::Tf32SplitK {
             route,
             params,
@@ -5852,7 +5903,7 @@ impl F32PreparedLaunchCache {
             request,
             operands,
         );
-        let stale = match self.entries.get_mut(&key) {
+        let (present, stale) = match self.entries.get_mut(&key) {
             Some(prepared) => {
                 let mut managed_epoch = prepared.managed_epoch.take();
                 let validation = refresh_cached_validation(
@@ -5875,11 +5926,11 @@ impl F32PreparedLaunchCache {
                     },
                 );
                 prepared.managed_epoch = managed_epoch;
-                validation.is_err()
+                (true, validation.is_err())
             }
-            None => false,
+            None => (false, false),
         };
-        if !self.entries.contains_key(&key) || stale {
+        if !present || stale {
             let capturing = ctx
                 .stream
                 .capture_status()
@@ -7547,16 +7598,19 @@ unsafe fn enqueue_tf32_f32<O: PhysicalLaunchObserver>(
     launch: Tf32RawLaunch<'_>,
     observer: &mut O,
 ) -> Result<(), String> {
-    let function = ctx
-        .kernels
-        .triad_kernels()
-        .tf32_function(prepared.routes[0].symbol)
-        .ok_or_else(|| {
-            format!(
-                "qualified TF32 symbol {} is unavailable",
-                prepared.routes[0].symbol
-            )
-        })?;
+    let function = match &prepared.function {
+        Some(function) => function,
+        None => ctx
+            .kernels
+            .triad_kernels()
+            .tf32_function(prepared.routes[0].symbol)
+            .ok_or_else(|| {
+                format!(
+                    "qualified TF32 symbol {} is unavailable",
+                    prepared.routes[0].symbol
+                )
+            })?,
+    };
     unsafe { enqueue_tf32_raw(&ctx.stream, function, launch, observer) }
 }
 
@@ -7686,16 +7740,19 @@ unsafe fn enqueue_tf32_splitk_f32<O: PhysicalLaunchObserver>(
     let [resolved] = prepared.routes.as_ref() else {
         return Err("prepared fused TF32 split-K launch requires exactly one route".into());
     };
-    let function = ctx
-        .kernels
-        .triad_kernels()
-        .tf32_splitk_function(resolved.symbol)
-        .ok_or_else(|| {
-            format!(
-                "qualified fused TF32 split-K symbol {} is unavailable",
-                resolved.symbol
-            )
-        })?;
+    let function = match &prepared.function {
+        Some(function) => function,
+        None => ctx
+            .kernels
+            .triad_kernels()
+            .tf32_splitk_function(resolved.symbol)
+            .ok_or_else(|| {
+                format!(
+                    "qualified fused TF32 split-K symbol {} is unavailable",
+                    resolved.symbol
+                )
+            })?,
+    };
     ctx.record_resolved_gemm_route(*resolved)?;
     // The physical route digests every resource, which costs more than the
     // launch itself; only an observer reads it.
@@ -9105,9 +9162,6 @@ fn sm120_streamk_workspace(
         .ok_or_else(|| "SM120 stream-K slab extent overflows usize".to_string())?;
     if partial_floats > SPLITK_SCRATCH_CAP {
         return Err("SM120 stream-K slabs exceed the fixed workspace".into());
-    }
-    if workers * SM120_TF32_STREAMK_SLOTS_PER_CTA > TF32_SPLITK_COUNTER_CAP {
-        return Err("SM120 stream-K flags exceed the fixed counter workspace".into());
     }
     let (partial, _) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
     let (flags, _) = kernels

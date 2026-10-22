@@ -3404,12 +3404,16 @@ pub const SM120_TF32_STREAMK_SLOTS_PER_CTA: usize = 2;
 /// bits are the same on every SM120 card, and the grid of resident CTAs
 /// walks the workers. Measured on the RTX 5090 at its own 170 SMs and with
 /// the grid held to 84 and 48 CTAs (the SM counts of the smaller CC 12.x
-/// cards), one worker per 32 units with at most 1024 left no grid more than
-/// 6% behind its best schedule, where one worker per unit up to 340 left
-/// the 84- and 48-CTA grids 25 and 30% behind and ran a 128 x 128 gradient
-/// over 8192 rows at 127 us instead of 24.
-pub const SM120_STREAMK_MIN_SPAN: usize = 32;
-pub const SM120_STREAMK_WORKERS: usize = 1024;
+/// cards), one worker per 16 units with at most 2048 ran the stream-K cells
+/// in 65%, 55% and 58% of the time of one worker per unit up to 340, with
+/// the same bits on all three grids; a 128 x 128 bf16 gradient over 8192
+/// rows went from 127 us to 15.
+pub const SM120_STREAMK_MIN_SPAN: usize = 16;
+
+/// The words of the SM120 stream-K grid barrier in the counter workspace:
+/// the arrival count and the generation the last arrival moves on.
+pub const SM120_STREAMK_BARRIER_WORDS: usize = 2;
+pub const SM120_STREAMK_WORKERS: usize = 2048;
 
 /// The workers a stream-K reduction of `units` (tile, k-tile) units is dealt
 /// to: one per `SM120_STREAMK_MIN_SPAN` units, at least one and at most the
@@ -9690,10 +9694,10 @@ mod tests {
             "#define SM120_STREAMK_MIN_SPAN {SM120_STREAMK_MIN_SPAN}\n"
         )));
         assert_eq!(sm120_streamk_workers(0), 0);
-        assert_eq!(sm120_streamk_workers(17), 1);
-        assert_eq!(sm120_streamk_workers(63), 1);
-        assert_eq!(sm120_streamk_workers(64), 2);
-        assert_eq!(sm120_streamk_workers(512), 16);
+        assert_eq!(sm120_streamk_workers(15), 1);
+        assert_eq!(sm120_streamk_workers(31), 1);
+        assert_eq!(sm120_streamk_workers(32), 2);
+        assert_eq!(sm120_streamk_workers(512), 32);
         assert_eq!(sm120_streamk_workers(1_000_000), SM120_STREAMK_WORKERS);
     }
 }
