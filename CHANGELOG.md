@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- GEMM kernels are chosen per architecture, never per card: every card of
+  one architecture (an RTX 4090, an RTX 6000 Ada and an L40S; an RTX 5090
+  and an RTX PRO 6000; an H100 and an H200) runs the same routes with the
+  same bits, whatever its number of multiprocessors.
+- A CUDA toolkit no table was measured on follows the tables of the
+  nearest older measured toolkit.
+- cuBLAS is behind the new `cublas` feature. Without it the crate asks
+  cudarc for the driver and NVRTC only, so a program that links its CUDA
+  libraries at build time links no cuBLAS on this crate's account, and
+  the vendor GEMM modes are refused where they are selected. Code that
+  uses `CublasFast`, `CublasPedantic` or the `_blas` entry points adds the
+  feature. cuRAND and the CUDA runtime API are no longer requested at all.
+
+### Added
+
+- `F32TriadPolicy::RnaTf32BatchInvariant`: every f32 product on TF32 with
+  `cvt.rna` rounding, and a forward whose output rows do not depend on the
+  batch, for a program that checks its products against a CPU model of the
+  tensor core.
+- GEMMs on a caller's CUDA context and stream:
+  `GpuDevice::from_context`, `GpuCtx::new_on_stream`, and raw-pointer
+  forward, input-gradient and weight-gradient entries.
+
 ## 0.8.1 (2026-10-20)
 
 ### Fixed

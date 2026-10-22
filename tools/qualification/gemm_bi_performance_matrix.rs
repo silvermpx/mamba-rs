@@ -3119,6 +3119,9 @@ fn logical_route_name(route: Route) -> String {
         Route::F32Policy {
             policy: F32TriadPolicy::AllowDeterministicTf32,
         } => "f32_policy_allow_tf32".into(),
+        Route::F32Policy {
+            policy: F32TriadPolicy::RnaTf32BatchInvariant,
+        } => "f32_policy_rna_tf32_batch_invariant".into(),
         Route::HalfPolicy {
             dtype,
             tensor_cores,

@@ -490,18 +490,23 @@ pub(crate) mod model_gemm_guard_tests {
             .is_err()
         );
         ctx.set_bi_gemm_family(family);
-        ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
-        assert!(
-            with_validated_gemm_graph_launch(ctx, true, Some(plan), "mode", || {
-                calls.set(calls.get() + 1);
-                Ok(())
-            })
-            .is_err()
-        );
-        ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+        // A vendor mode is a mutation only where it can be selected.
+        #[cfg(feature = "cublas")]
+        {
+            ctx.set_gemm_mode(GemmMode::CublasPedantic).unwrap();
+            assert!(
+                with_validated_gemm_graph_launch(ctx, true, Some(plan), "mode", || {
+                    calls.set(calls.get() + 1);
+                    Ok(())
+                })
+                .is_err()
+            );
+            ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+        }
         assert_eq!(calls.get(), 1);
     }
 
+    #[cfg(feature = "cublas")]
     #[test]
     #[ignore = "needs a CUDA device"]
     fn model_graph_guard_zero_vendor_and_poison_controls() {

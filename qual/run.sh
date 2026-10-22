@@ -23,7 +23,7 @@ suites() {
 
 case "$lane" in
 gate)
-    exec cargo test --release --features cuda
+    exec cargo test --release --features cuda,cublas
     ;;
 toolkit | board)
     # Each target on its own; the lane names each red at its end. The
@@ -33,7 +33,7 @@ toolkit | board)
     red=""
     for t in $(suites "$( [ "$lane" = board ] && echo gate || echo toolkit )"); do
         echo "== $lane: $t"
-        cargo test --release --features cuda,hf --test "$t" || red="$red $t"
+        cargo test --release --features cuda,cublas,hf --test "$t" || red="$red $t"
     done
     if [ -n "$red" ]; then
         echo "$(echo "$lane" | tr a-z A-Z) RED:$red"
@@ -51,7 +51,7 @@ contract)
     red=""
     for t in $(suites contract); do
         echo "== contract: $t"
-        cargo test --release --features cuda,hf --test "$t" -- --ignored --skip diag_ --nocapture || red="$red $t"
+        cargo test --release --features cuda,cublas,hf --test "$t" -- --ignored --skip diag_ --nocapture || red="$red $t"
     done
     if [ -n "$red" ]; then
         echo "CONTRACT RED:$red"
@@ -61,15 +61,15 @@ contract)
     ;;
 record)
     echo "record-lane instruments (run by hand, one at a time):"
-    suites record | sed 's/^/  cargo test --release --features "cuda hf" --test /;s/$/ -- --ignored --nocapture/'
+    suites record | sed 's/^/  cargo test --release --features "cuda cublas hf" --test /;s/$/ -- --ignored --nocapture/'
     ;;
 bench)
     echo "bench entry points (each runs every instrument, or the names given after --):"
-    suites bench | sed 's/^/  cargo bench --features cuda --bench /'
+    suites bench | sed 's/^/  cargo bench --features cuda,cublas --bench /'
     ;;
 qualification)
     echo "qualification tools (built only with the qualification feature; run one on its board):"
-    suites qualification | sed 's/^/  cargo test --release --features "cuda hf qualification" --test /;s/$/ -- --ignored --nocapture/'
+    suites qualification | sed 's/^/  cargo test --release --features "cuda cublas hf qualification" --test /;s/$/ -- --ignored --nocapture/'
     ;;
 *)
     echo "usage: qual/run.sh [gate|board|toolkit|contract|record|bench|qualification]" >&2

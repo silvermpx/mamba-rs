@@ -33,7 +33,7 @@ exclude = [
 # bindings version only shapes the docs build; runtime linking stays
 # dynamic and version-probed.
 [package.metadata.docs.rs]
-features = ["cuda", "hf", "gemm-blas", "cli", "cudarc/cuda-12080"]
+features = ["cuda", "cublas", "hf", "gemm-blas", "cli", "cudarc/cuda-12080"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [[bin]]
@@ -51,7 +51,13 @@ default = []
 # half + bytemuck are needed by the cuda buffers (DtypedBuf bf16/f16 cast
 # helpers); they must be in scope for `cargo build --features cuda` alone.
 cuda = ["cudarc", "dep:half", "dep:bytemuck", "dep:sha2"]
-cuda-cublaslt-qualification = ["cuda", "cudarc/cublaslt"]
+# The vendor GEMM modes (`CublasFast`, `CublasPedantic`) and the
+# context-free cuBLAS entry points. Without it the crate needs only the
+# driver and NVRTC, and a program that links its CUDA libraries at build
+# time links no cuBLAS on mamba-rs's account; a vendor mode is then refused
+# where it is selected.
+cublas = ["cuda", "cudarc/cublas"]
+cuda-cublaslt-qualification = ["cublas", "cudarc/cublaslt"]
 # Distributed data-parallel over NCCL. The cudarc NCCL binding is pinned
 # to one wire version explicitly; the crate-and-libnccl pair must move
 # together (the same discipline as any native-library pair).
@@ -146,10 +152,7 @@ optional = true
 default-features = false
 features = [
     "std",
-    "cublas",
-    "curand",
     "driver",
-    "runtime",
     "nvrtc",
     "fallback-dynamic-loading",
     "cuda-version-from-build-system",
@@ -401,7 +404,7 @@ required-features = ["cuda"]
 [[test]]
 name = "gemm_mode_api"
 path = "tests/gemm_mode_api.rs"
-required-features = ["cuda"]
+required-features = ["cublas"]
 
 [[test]]
 name = "gemm_mode_live"
@@ -1200,7 +1203,7 @@ required-features = ["qualification", "hf", "cuda"]
 [[test]]
 name = "cublas_compute_probe"
 path = "tools/qualification/cublas_compute_probe.rs"
-required-features = ["qualification", "cuda"]
+required-features = ["qualification", "cublas"]
 
 [[test]]
 name = "device_facts"
@@ -1220,12 +1223,12 @@ required-features = ["qualification", "cuda"]
 [[test]]
 name = "gemm_bi_inference_performance"
 path = "tools/qualification/gemm_bi_inference_performance.rs"
-required-features = ["qualification", "cuda"]
+required-features = ["qualification", "cublas"]
 
 [[test]]
 name = "gemm_bi_inference_sm120_performance"
 path = "tools/qualification/gemm_bi_inference_sm120_performance.rs"
-required-features = ["qualification", "cuda"]
+required-features = ["qualification", "cublas"]
 
 [[test]]
 name = "gemm_bi_inference_tf32_m64n128_qualification"
@@ -1240,12 +1243,12 @@ required-features = ["qualification", "cuda"]
 [[test]]
 name = "gemm_bi_performance_matrix"
 path = "tools/qualification/gemm_bi_performance_matrix.rs"
-required-features = ["qualification", "cuda"]
+required-features = ["qualification", "cublas"]
 
 [[test]]
 name = "gemm_bi_scalar_nn_m64n64_qualification"
 path = "tools/qualification/gemm_bi_scalar_nn_m64n64_qualification.rs"
-required-features = ["qualification"]
+required-features = ["qualification", "cublas"]
 
 [[test]]
 name = "gemm_bi_scalar_nt_slim_qualification"
@@ -1265,7 +1268,7 @@ required-features = ["qualification", "cuda"]
 [[test]]
 name = "gemm_bi_sm120_tf32_vendor"
 path = "tools/qualification/gemm_bi_sm120_tf32_vendor.rs"
-required-features = ["qualification"]
+required-features = ["qualification", "cublas"]
 
 [[test]]
 name = "gemm_bi_sm120_triad_census"
@@ -1335,7 +1338,7 @@ required-features = ["qualification", "cuda"]
 [[test]]
 name = "gemm_bi_tf32_nt_cublas"
 path = "tools/qualification/gemm_bi_tf32_nt_cublas.rs"
-required-features = ["qualification"]
+required-features = ["qualification", "cublas"]
 
 [[test]]
 name = "gemm_bi_tf32_selector_qualification"

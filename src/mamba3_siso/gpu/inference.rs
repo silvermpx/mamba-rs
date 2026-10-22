@@ -3065,6 +3065,7 @@ mod model_gemm_manifest_tests {
         drop(engine);
     }
 
+    #[cfg(feature = "cublas")]
     #[test]
     #[ignore = "needs a CUDA device"]
     fn m3_explicit_vendor_graph_without_custom_plan_replays() {

@@ -1,6 +1,6 @@
 # Qualification lanes: which suites run when, on a GPU box.
 #
-# gate          - every run, plain `cargo test --features cuda --release`
+# gate          - every run, plain `cargo test --features cuda,cublas --release`
 #                 (a gate file may not contain #[ignore] tests, except a child
 #                 test a parent in the same file launches by itself, marked
 #                 `#[ignore = "invoked by ..."]`).

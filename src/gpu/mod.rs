@@ -32,6 +32,7 @@ pub(crate) mod block_norm;
 pub mod buffers;
 pub(crate) mod composed;
 pub mod context;
+#[cfg(feature = "cublas")]
 mod cublas_pool;
 pub mod device;
 pub(crate) mod diagnostics;

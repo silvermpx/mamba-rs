@@ -10,6 +10,7 @@ use super::gemm_bi_triad::{
     Sm120PreparedLaunchCache,
 };
 pub use super::gemm_mode::GemmMode;
+#[cfg(feature = "cublas")]
 use super::gemm_mode::{MathModeBackend, MathTransitionError, change_math_mode};
 use super::kernel_identity::{
     ArtifactIdentity, BackendSet, CapturedGemmGraphPlan, CompilerIdentity, ModuleKind,
@@ -361,6 +362,7 @@ pub struct GpuCtxResources {
     /// and kept until it drops, since a captured graph records its
     /// workspace. A context that only ran the deterministic GEMMs holds
     /// none.
+    #[cfg(feature = "cublas")]
     blas: RefCell<Option<super::cublas_pool::PooledBlas>>,
     /// Reusable GPU byte staging buffer for f32→bf16/f16 activation downcast
     /// before mixed-precision GEMM. Grown lazily on first use.
@@ -460,10 +462,27 @@ fn validate_multiprocessor_identity(
     Ok(())
 }
 
+/// A build without the `cublas` feature has no vendor GEMM, so a vendor
+/// mode is refused where it is selected and no later call reaches a cuBLAS
+/// that was never built.
+#[cfg(not(feature = "cublas"))]
+fn refuse_vendor_mode_without_cublas(mode: GemmMode) -> Result<(), String> {
+    if mode == GemmMode::Deterministic {
+        Ok(())
+    } else {
+        Err(format!(
+            "the {} GEMM mode needs mamba-rs built with the `cublas` feature",
+            mode.as_str()
+        ))
+    }
+}
+
+#[cfg(feature = "cublas")]
 struct CublasMathBackend<'a> {
     blas: &'a cudarc::cublas::CudaBlas,
 }
 
+#[cfg(feature = "cublas")]
 impl MathModeBackend for CublasMathBackend<'_> {
     type Mode = cudarc::cublas::sys::cublasMath_t;
 
@@ -689,6 +708,7 @@ impl GpuCtx {
             .default_stream()
             .synchronize()
             .map_err(|e| format!("default-stream drain after kernel compile: {e:?}"))?;
+        #[cfg(feature = "cublas")]
         let blas = if config.mode == GemmMode::Deterministic {
             None
         } else {
@@ -697,6 +717,8 @@ impl GpuCtx {
                 config.mode.cublas_math(),
             )?)
         };
+        #[cfg(not(feature = "cublas"))]
+        refuse_vendor_mode_without_cublas(config.mode)?;
         // Numeric routing defaults are nonambient. Explicit setters or the
         // `new_from_env*` constructors are the only ways to change them.
         let instance_token = next_gpu_ctx_token()?;
@@ -729,6 +751,7 @@ impl GpuCtx {
             resources: Rc::new(GpuCtxResources {
                 stream,
                 kernels,
+                #[cfg(feature = "cublas")]
                 blas: RefCell::new(blas),
                 half_staging: RefCell::new(None),
                 half_staging_ptr: RefCell::new(0),
@@ -1121,6 +1144,24 @@ impl GpuCtx {
             ));
         }
 
+        #[cfg(feature = "cublas")]
+        self.enter_cublas_math(mode)?;
+        #[cfg(not(feature = "cublas"))]
+        refuse_vendor_mode_without_cublas(mode)?;
+        if self.graphs_captured.get() > 0 {
+            eprintln!(
+                "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
+            );
+        }
+        self.gemm_mode.set(mode);
+        Ok(())
+    }
+
+    /// Sets the cuBLAS math of `mode` on the context's handle, taking one
+    /// when the context holds none and the mode is a vendor one. A rollback
+    /// that cannot be verified leaves the context unusable.
+    #[cfg(feature = "cublas")]
+    fn enter_cublas_math(&self, mode: GemmMode) -> Result<(), String> {
         let math = mode.cublas_math();
         let mut held = self
             .blas
@@ -1140,15 +1181,7 @@ impl GpuCtx {
         };
         drop(held);
         match changed {
-            Ok(()) => {
-                if self.graphs_captured.get() > 0 {
-                    eprintln!(
-                        "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
-                    );
-                }
-                self.gemm_mode.set(mode);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(MathTransitionError::Recoverable(error)) => Err(error),
             Err(MathTransitionError::Unusable(error)) => {
                 let diagnostic = format!(
@@ -1165,6 +1198,7 @@ impl GpuCtx {
         self.gemm_mode.get()
     }
 
+    #[cfg(feature = "cublas")]
     /// The context's cuBLAS handle. A context takes one when it enters a
     /// cuBLAS GEMM mode and keeps it, and one that only ran the deterministic
     /// GEMMs holds none.
@@ -1175,6 +1209,7 @@ impl GpuCtx {
         .map_err(|_| "the context holds no cuBLAS handle: it runs the deterministic GEMMs".into())
     }
 
+    #[cfg(feature = "cublas")]
     /// The context's cuBLAS handle, taken now when it holds none, with the
     /// math of its GEMM mode. A comparison against cuBLAS calls it beside
     /// the deterministic GEMMs, whose mode it leaves as it is.
@@ -1208,11 +1243,13 @@ impl GpuCtx {
         self.cublas()
     }
 
+    #[cfg(feature = "cublas")]
     /// Bytes of workspace a cuBLAS handle of the context runs with.
     pub fn cublas_workspace_bytes(&self) -> usize {
         super::cublas_pool::WORKSPACE_BYTES
     }
 
+    #[cfg(feature = "cublas")]
     /// The raw handle of [`Self::cublas`], for a cuBLAS call.
     pub(crate) fn cublas_handle(&self) -> Result<cudarc::cublas::sys::cublasHandle_t, String> {
         Ok(*self.cublas()?.handle())

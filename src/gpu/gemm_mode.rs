@@ -1,3 +1,4 @@
+#[cfg(feature = "cublas")]
 use cudarc::cublas::sys::{cublasComputeType_t, cublasMath_t};
 
 pub use crate::precision::GemmMode;
@@ -15,6 +16,7 @@ impl GemmMode {
         matches!(self, Self::CublasFast)
     }
 
+    #[cfg(feature = "cublas")]
     pub(crate) const fn cublas_math(self) -> cublasMath_t {
         match self {
             Self::Deterministic | Self::CublasPedantic => cublasMath_t::CUBLAS_PEDANTIC_MATH,
@@ -22,6 +24,7 @@ impl GemmMode {
         }
     }
 
+    #[cfg(feature = "cublas")]
     pub(crate) fn vendor_compute(self) -> Result<cublasComputeType_t, String> {
         match self {
             Self::Deterministic => {
@@ -33,6 +36,7 @@ impl GemmMode {
     }
 }
 
+#[cfg(feature = "cublas")]
 pub(crate) trait MathModeBackend {
     type Mode: Copy + std::fmt::Debug + Eq;
 
@@ -40,12 +44,14 @@ pub(crate) trait MathModeBackend {
     fn update(&mut self, mode: Self::Mode) -> Result<(), String>;
 }
 
+#[cfg(feature = "cublas")]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MathTransitionError {
     Recoverable(String),
     Unusable(String),
 }
 
+#[cfg(feature = "cublas")]
 pub(crate) fn change_math_mode<B: MathModeBackend>(
     backend: &mut B,
     target: B::Mode,
@@ -89,7 +95,7 @@ pub(crate) fn change_math_mode<B: MathModeBackend>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cublas"))]
 mod tests {
     use super::*;
     use std::collections::VecDeque;

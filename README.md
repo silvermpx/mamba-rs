@@ -100,6 +100,7 @@ have kernels and types of their own.
 | `gemm-blas` | the [`gemm`] crate's BLAS-class CPU GEMM (with rayon) | any serious CPU use |
 | `accelerate` | Apple Accelerate GEMM (macOS) | macOS deployments |
 | `cuda` | GPU inference and training (NVRTC-compiled kernels) | needs the CUDA toolkit |
+| `cublas` | the vendor GEMM modes (`CublasFast`, `CublasPedantic`) and the context-free cuBLAS calls | comparing against cuBLAS; without it the crate needs only the driver and NVRTC |
 | `hf` | checkpoint loaders and the language models | text generation, fine-tuning |
 | `cli` | the `mamba-generate` binary (tokenizers and hf-hub) | text generation from the command line |
 | `nccl` | data-parallel transport (pinned NCCL binding) | multi-GPU training |
@@ -432,17 +433,17 @@ Every target is declared in `Cargo.toml` and has a lane in
   f32 and half, scalar and tensor-core), gradient checks against finite
   differences, the official checkpoints against float64 references,
   source and dispatch contracts, batch invariance and determinism gates.
-  `cargo test --release --features cuda` runs the CUDA gate, and
+  `cargo test --release --features cuda,cublas` runs the CUDA gate, and
   `cargo test --no-default-features` runs the host part on any machine.
   Tests marked `contract` hold arms that need a checkpoint or a specific
   board and run with `-- --ignored`. Tests marked `record` write evidence
   and never run on their own.
 - **Benches** (`benches/`): timing instruments with no verdict,
-  `cargo bench --features cuda --bench <name>`, optionally followed by
+  `cargo bench --features cuda,cublas --bench <name>`, optionally followed by
   `-- <instrument>`.
 - **Qualification tools** (`tools/qualification/`): hardware, toolkit and
   inventory instruments for a specific board, built with
-  `--features "cuda hf qualification"` and run by name with `-- --ignored`.
+  `--features "cuda cublas hf qualification"` and run by name with `-- --ignored`.
 
 `qual/run.sh <lane>` runs or lists one lane.
 [docs/release-qualification.md](docs/release-qualification.md) describes

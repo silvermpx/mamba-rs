@@ -7871,6 +7871,7 @@ mod tests {
     // general half-GEMM accuracy qualification: the inherited three-term corpus
     // has an independent exact reference for EVERY output, but only three
     // nonzero reduction rows. No cross-schedule floating-point parity is claimed.
+    #[cfg(feature = "cublas")]
     fn g2_other_half_policy(policy: HalfTriadPolicy) -> HalfTriadPolicy {
         match policy {
             HalfTriadPolicy::TiledParity => HalfTriadPolicy::AllowStreamKFixedOrder,
@@ -8212,6 +8213,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cublas")]
     fn g2_half_allocation_words(
         ctx: &GpuCtx,
         qualified: &QualifiedPhysicalLaunch<'_>,
@@ -8232,6 +8234,7 @@ mod tests {
         Ok([c, a, b].map(|values| values.into_iter().map(f32::to_bits).collect()))
     }
 
+    #[cfg(feature = "cublas")]
     #[test]
     #[ignore = "requires CC8.9/142SM; physical half lease rejects drift and restores all policy fields"]
     fn g2_half_tn_policy_lease_drift_restore_sm89() {

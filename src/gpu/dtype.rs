@@ -8,10 +8,13 @@
 //!
 //! Based on official state-spaces/mamba design and NVIDIA cuBLAS best practices.
 
+#[cfg(feature = "cublas")]
 use cudarc::cublas::sys as cublas_sys;
 
 pub use crate::precision::WeightDtype;
 
+/// The cuBLAS names of a storage dtype, for the vendor GEMM modes.
+#[cfg(feature = "cublas")]
 impl WeightDtype {
     /// cuBLAS/CUDA data type identifier for cublasGemmEx.
     pub fn cuda_data_type(self) -> cublas_sys::cudaDataType {
@@ -65,7 +68,7 @@ impl WeightDtype {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cublas"))]
 mod tests {
     use super::*;
 

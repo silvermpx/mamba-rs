@@ -160,12 +160,14 @@ jobs:
       # The pregenerated CUDA 12.8 bindings, the same ones docs.rs renders
       # with: the distribution toolkit on the runner is older than the
       # driver API the tests and tools use.
+      # Without cuBLAS: the build a program gets that links its CUDA
+      # libraries at build time and wants no cuBLAS from this crate.
       - run: cargo check --workspace --all-targets --features cuda,cudarc/cuda-12080
       # The live-DDP surface (dist reducer, comm, watchdog wiring) only
       # compiles with the nccl feature; without this leg it would bit-rot
       # invisibly (cudarc's nccl bindings dlopen at runtime — no libnccl
       # needed to type-check).
-      - run: cargo check --workspace --all-targets --features cuda,hf,gemm-blas,nccl,cudarc/cuda-12080
+      - run: cargo check --workspace --all-targets --features cuda,cublas,hf,gemm-blas,nccl,cudarc/cuda-12080
 
   publish-check:
     name: Publish dry-run
