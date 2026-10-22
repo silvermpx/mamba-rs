@@ -2702,6 +2702,14 @@ fn resolve_f32_triad_auto_impl(
         F32TriadPolicy::RnaTf32BatchInvariant => {
             rna_batch_invariant_selection(request, operands, availability)
         }
+        // The forward folds by its layer's shape on the scalar tiles, whose
+        // plan the launcher takes from `exact_batch_invariant_nn_plan`; the
+        // gradients are the exact policy's.
+        F32TriadPolicy::ExactFmaBatchInvariant => Ok(if request.op == ResolvedGemmOp::Nn {
+            F32TriadSelection::ScalarFma
+        } else {
+            exact_or_scalar_selection(request, operands, availability)
+        }),
     }
 }
 
@@ -2787,6 +2795,16 @@ fn rna_batch_invariant_route(op: ResolvedGemmOp, route: Tf32PhysicalRoute) -> bo
         }),
     };
     rounds_rna && (op != ResolvedGemmOp::Nn || matches!(route, Tf32PhysicalRoute::MmaTf32Rna(_)))
+}
+
+/// The portable plain tile of the strict policy for `request`, bound on this
+/// stack: the route that serves a shape whose measured route this toolkit
+/// cannot run.
+pub(super) fn rna_batch_invariant_ladder(
+    request: F32TriadRequest,
+    availability: F32TriadAvailability,
+) -> Result<Tf32PhysicalRoute, String> {
+    resolve_tf32_forced(request, availability, rna_portable_ladder_route(request))
 }
 
 /// The portable plain tile the strict policy falls to for a shape no table
@@ -7050,30 +7068,62 @@ pub(super) enum ScalarDispatchPlan {
     NnNarrowSmall,
     NnNarrow,
     NnGemv,
-    NnSplitKThinTail { k_main: usize, k_tail: usize },
+    NnSplitKThinTail {
+        k_main: usize,
+        k_tail: usize,
+    },
     NnSplitKThin,
-    NnSplitKSlim { chunks: u32 },
+    NnSplitKSlim {
+        chunks: u32,
+    },
     NnM32N64SplitK32Qualified,
     NnM64N64Qualified,
     NnSm89InferenceCopyPlanQualified,
-    NnFinal { slim: bool },
+    NnFinal {
+        slim: bool,
+    },
+    /// The batch-invariant exact policy's chunk fold: the slim partial
+    /// writes one 64-input chunk per plane and `splitk_reduce` sums the
+    /// planes in order and adds the bias, `piece_rows` rows at a time so
+    /// the planes fit the split scratch at any batch.
+    NnExactChunkSlim {
+        chunks: u32,
+        piece_rows: u32,
+        pieces: u32,
+    },
     TnGemv,
     TnNarrow,
-    TnNarrowSplitM { m_chunk: usize, chunks: usize },
-    TnSplitM { m_chunk: usize, chunks: usize },
+    TnNarrowSplitM {
+        m_chunk: usize,
+        chunks: usize,
+    },
+    TnSplitM {
+        m_chunk: usize,
+        chunks: usize,
+    },
     TnD768InSm89DualChunkQualified,
     TnD768OutSm89DirectBk16Qualified,
     TnPrismSm89DirectBk16Qualified,
     TnD128InSm89DirectFoldQualified,
     TnD128OutSm89DirectFoldQualified,
     TnM16N16SplitM16Qualified,
-    TnFinal { slim: bool },
+    TnFinal {
+        slim: bool,
+    },
     NtNarrow,
     NtSmallBatchWide,
     NtGemv,
-    NtSplitKTail { k_main: usize, k_tail: usize },
-    NtSplitKMain { n_main: usize, n_tail: usize },
-    NtSplitKSlim { chunks: u32 },
+    NtSplitKTail {
+        k_main: usize,
+        k_tail: usize,
+    },
+    NtSplitKMain {
+        n_main: usize,
+        n_tail: usize,
+    },
+    NtSplitKSlim {
+        chunks: u32,
+    },
     NtMidBatchWide,
     NtM2N16SplitK32Qualified,
     NtD768TransposeM64N64Qualified,
@@ -7085,7 +7135,9 @@ pub(super) enum ScalarDispatchPlan {
     NtLargeDeepTransposeM64N64Qualified,
     NtPrismVectorQualified,
     NtD128OutTransposeM64N64Qualified,
-    NtFinal { slim: bool },
+    NtFinal {
+        slim: bool,
+    },
 }
 
 impl ScalarDispatchPlan {
@@ -7095,6 +7147,7 @@ impl ScalarDispatchPlan {
             Self::NnSplitKThinTail { .. }
                 | Self::NnSplitKThin
                 | Self::NnSplitKSlim { .. }
+                | Self::NnExactChunkSlim { .. }
                 | Self::NnM32N64SplitK32Qualified
                 | Self::TnNarrowSplitM { .. }
                 | Self::TnSplitM { .. }
@@ -7398,6 +7451,85 @@ fn scalar_nt_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDisp
     Err(format!(
         "UNCOVERED scalar NT route M={batch} K={n_in} N={n_out}"
     ))
+}
+
+/// Reductions at least this deep fold as 64-input chunks under the
+/// batch-invariant exact policy, shallower ones as one chain.
+pub(crate) const EXACT_CHUNKS_MIN_K: usize = 512;
+
+/// A narrow layer (fewer outputs than this) folds as chunks from
+/// [`EXACT_CHUNKS_NARROW_MIN_K`] inputs: a chain tile has too few columns to
+/// keep the card busy, and the chunks add the reduction's parallelism.
+pub(crate) const EXACT_CHUNKS_NARROW_N: usize = 128;
+
+/// The chunk threshold of a narrow layer.
+pub(crate) const EXACT_CHUNKS_NARROW_MIN_K: usize = 384;
+
+/// The inputs one chunk of a deep layer's fold sums.
+pub(crate) const EXACT_CHUNK: usize = 64;
+
+/// Whether a layer of `k` inputs and `n` outputs folds as chunks under the
+/// batch-invariant exact policy. The rule reads the layer's shape alone, so
+/// a layer folds the same way at every row count, and a CPU twin that
+/// applies it reproduces the GPU's bits.
+pub(crate) const fn exact_chunks(k: usize, n: usize) -> bool {
+    k >= EXACT_CHUNKS_MIN_K || (n < EXACT_CHUNKS_NARROW_N && k >= EXACT_CHUNKS_NARROW_MIN_K)
+}
+
+/// The batch-invariant exact policy's forward plan. A shallow layer runs
+/// one of the chain tiles, each of which seeds an output with its bias and
+/// walks the reduction with one `fma` per input in ascending order, padding
+/// a ragged end with zero products; which tile serves is scheduling alone.
+/// The slim tile pads to 32 inputs, not 16, so it serves only where the two
+/// paddings agree. A deep layer runs the chunk fold. The tile thresholds are
+/// in waves of the architecture's partition reference, never of one card.
+pub(super) fn exact_batch_invariant_nn_plan(
+    request: F32TriadRequest,
+    partition_reference: u32,
+) -> Result<ScalarDispatchPlan, String> {
+    if request.op != ResolvedGemmOp::Nn {
+        return Err(format!(
+            "the batch-invariant exact forward plan takes NN, not {:?}",
+            request.op
+        ));
+    }
+    request.shape.validate(request.op)?;
+    if partition_reference == 0 {
+        return Err("the batch-invariant exact plan needs a partition reference".into());
+    }
+    let (m, k, n) = (request.shape.m, request.shape.k, request.shape.n);
+    if m == 0 || k == 0 || n == 0 {
+        return Err(format!(
+            "the batch-invariant exact plan takes no empty axis: {m}x{k}x{n}"
+        ));
+    }
+    let waves = partition_reference as usize;
+    if exact_chunks(k, n) {
+        let chunks = k.div_ceil(EXACT_CHUNK);
+        let piece_rows = (SPLITK_SCRATCH_CAP / chunks.saturating_mul(n).max(1)).clamp(1, m);
+        if chunks.saturating_mul(n) > SPLITK_SCRATCH_CAP {
+            return Err(format!(
+                "a chunk-fold row of {chunks} chunks x {n} outputs passes the split scratch \
+                 of {SPLITK_SCRATCH_CAP} floats"
+            ));
+        }
+        return Ok(ScalarDispatchPlan::NnExactChunkSlim {
+            chunks: u32::try_from(chunks)
+                .map_err(|_| format!("{chunks} chunks pass the grid's third axis"))?,
+            piece_rows: u32::try_from(piece_rows)
+                .map_err(|_| format!("a piece of {piece_rows} rows passes u32"))?,
+            pieces: u32::try_from(m.div_ceil(piece_rows))
+                .map_err(|_| format!("{m} rows in pieces of {piece_rows} pass u32"))?,
+        });
+    }
+    let big_grid = m.div_ceil(128).saturating_mul(n.div_ceil(128));
+    if m >= GEMM_CUSTOM_MIN && n >= GEMM_CUSTOM_MIN && big_grid >= 8 * waves {
+        return Ok(ScalarDispatchPlan::NnFinal { slim: false });
+    }
+    if m.div_ceil(64).saturating_mul(n.div_ceil(64)) >= waves / 2 {
+        return Ok(ScalarDispatchPlan::NnM64N64Qualified);
+    }
+    Ok(ScalarDispatchPlan::NnNarrowSmall)
 }
 
 pub(super) fn scalar_dispatch_plan(
@@ -16529,5 +16661,90 @@ mod sm100_sm90a_auto_tests {
             resolve_sm90a_auto_from_cells(&[cell], (9, 0), true, sm90a_request(Sm90aOp::Tn, small)),
             Some(cell)
         );
+    }
+}
+
+#[cfg(test)]
+mod exact_batch_invariant_tests {
+    use super::{
+        EXACT_CHUNK, SPLITK_SCRATCH_CAP, ScalarDispatchPlan, exact_batch_invariant_nn_plan,
+        exact_chunks, resolve_f32_triad_auto,
+    };
+    use crate::gpu::context::F32TriadPolicy;
+    use crate::gpu::gemm_bi_triad::contract::{
+        F32TriadAvailability, F32TriadRequest, F32TriadSelection, F32TriadShape,
+    };
+    use crate::gpu::kernel_identity::ResolvedGemmOp;
+
+    fn nn(m: usize, k: usize, n: usize) -> F32TriadRequest {
+        F32TriadRequest {
+            op: ResolvedGemmOp::Nn,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (m, k, n)),
+        }
+    }
+
+    #[test]
+    fn exact_batch_invariant_plan_folds_by_the_layer_alone() {
+        for reference in [84, 108, 128, 132, 142, 148, 170] {
+            for k in [1, 15, 16, 33, 256, 383, 384, 511, 512, 833, 1536, 3000] {
+                for n in [1, 17, 40, 101, 127, 128, 384, 1536, 2112] {
+                    for m in [1, 7, 16, 17, 64, 65, 128, 513, 1024, 4096, 32_768] {
+                        let plan = exact_batch_invariant_nn_plan(nn(m, k, n), reference).unwrap();
+                        let what = format!("{m}x{k}x{n} on {reference}: {plan:?}");
+                        match plan {
+                            ScalarDispatchPlan::NnExactChunkSlim {
+                                chunks,
+                                piece_rows,
+                                pieces,
+                            } => {
+                                assert!(exact_chunks(k, n), "{what}");
+                                assert_eq!(chunks as usize, k.div_ceil(EXACT_CHUNK), "{what}");
+                                let (rows, pieces) = (piece_rows as usize, pieces as usize);
+                                assert!(rows >= 1 && rows <= m, "{what}");
+                                assert!(rows * pieces >= m && rows * (pieces - 1) < m, "{what}");
+                                assert!(chunks as usize * rows * n <= SPLITK_SCRATCH_CAP, "{what}");
+                            }
+                            ScalarDispatchPlan::NnFinal { slim: false } => {
+                                assert!(!exact_chunks(k, n) && m >= 128 && n >= 128, "{what}");
+                            }
+                            ScalarDispatchPlan::NnM64N64Qualified
+                            | ScalarDispatchPlan::NnNarrowSmall => {
+                                assert!(!exact_chunks(k, n), "{what}");
+                            }
+                            other => panic!("{what}: {other:?} is not a batch-invariant tile"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_batch_invariant_forward_never_leaves_the_scalar_tiles() {
+        let availability = F32TriadAvailability {
+            portable: None,
+            specialized: None,
+            finalist: None,
+            joint: None,
+            multiprocessors: 170,
+        };
+        for (m, k, n) in [
+            (1, 64, 96),
+            (128, 256, 2112),
+            (4096, 512, 256),
+            (513, 96, 40),
+        ] {
+            assert_eq!(
+                resolve_f32_triad_auto(
+                    F32TriadPolicy::ExactFmaBatchInvariant,
+                    nn(m, k, n),
+                    availability
+                )
+                .unwrap(),
+                F32TriadSelection::ScalarFma,
+            );
+        }
+        assert!(exact_batch_invariant_nn_plan(nn(0, 64, 96), 170).is_err());
+        assert!(exact_batch_invariant_nn_plan(nn(4, 64, 96), 0).is_err());
     }
 }

@@ -211,6 +211,14 @@ pub enum F32TriadPolicy {
     /// A program whose TF32 products must equal a CPU model of the tensor
     /// core (Lilly) runs under it. The Triad family serves it.
     RnaTf32BatchInvariant = 2,
+    /// Exact f32 products whose forward does not depend on the batch. A
+    /// forward (NN) folds each output by its layer's shape alone: a shallow
+    /// layer as one `fma` chain seeded with the bias, a deep or narrow one
+    /// as 64-input chunks summed in order before the bias, so every row
+    /// count gives a row the same bits and a CPU twin of the two folds
+    /// reproduces them. The gradients take the exact policy's routes. The
+    /// Triad family serves it.
+    ExactFmaBatchInvariant = 3,
 }
 
 impl F32TriadPolicy {
@@ -2031,7 +2039,9 @@ impl GpuCtx {
             F32TriadPolicy::AllowDeterministicTf32 | F32TriadPolicy::RnaTf32BatchInvariant => {
                 WeightDtype::Tf32
             }
-            F32TriadPolicy::ExactScalarFma => WeightDtype::F32,
+            F32TriadPolicy::ExactScalarFma | F32TriadPolicy::ExactFmaBatchInvariant => {
+                WeightDtype::F32
+            }
         }
     }
 

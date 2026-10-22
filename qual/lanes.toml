@@ -38,6 +38,7 @@
 "cpu_gpu_train_parity" = "gate"
 "cpu_gpu_trainer_parity" = "gate"
 "cpu_trainer_api" = "host"
+"exact_batch_invariant" = "gate"
 "segment_stacking" = "host"
 "segment_stacking_gpu" = "gate"
 "bidirectional_cpu" = "host"

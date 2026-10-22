@@ -2129,6 +2129,7 @@ struct ScalarNodeSpec {
 fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
     match plan {
         ScalarDispatchPlan::NtSplitKTail { k_tail, .. } => 3 + k_tail,
+        ScalarDispatchPlan::NnExactChunkSlim { pieces, .. } => 2 * pieces as usize,
         ScalarDispatchPlan::NnSplitKThinTail { .. }
         | ScalarDispatchPlan::NnSplitKThin
         | ScalarDispatchPlan::NnSplitKSlim { .. }
@@ -2188,6 +2189,9 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NnM64N64Qualified => (24, 0, 0),
         ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified => (37, 0, 0),
         ScalarDispatchPlan::NnFinal { slim } => (8, u64::from(slim), 0),
+        ScalarDispatchPlan::NnExactChunkSlim {
+            chunks, piece_rows, ..
+        } => (47, u64::from(chunks), u64::from(piece_rows)),
         ScalarDispatchPlan::TnGemv => (9, 0, 0),
         ScalarDispatchPlan::TnNarrow => (10, 0, 0),
         ScalarDispatchPlan::TnNarrowSplitM { m_chunk, chunks } => {
@@ -2328,6 +2332,23 @@ fn scalar_argument_layout(
         (ScalarDispatchPlan::NtSplitKMain { .. }, _)
         | (ScalarDispatchPlan::NtSplitKTail { .. }, _)
         | (ScalarDispatchPlan::NtSplitKSlim { .. }, _) => ScalarArgumentLayout::default(),
+        // Each piece is a partial over its rows of A, then the reduction
+        // into its rows of the output.
+        (ScalarDispatchPlan::NnExactChunkSlim { piece_rows, .. }, index) => {
+            let first_row = (index / 2) as u64 * u64::from(piece_rows);
+            if index % 2 == 0 {
+                ScalarArgumentLayout {
+                    a_offset: first_row * request.shape.lda as u64 * 4,
+                    ..ScalarArgumentLayout::default()
+                }
+            } else {
+                ScalarArgumentLayout {
+                    output_offset: first_row * request.shape.ldc as u64 * 4,
+                    null_pointer_mask: 0b11000 | (bias_null << 2),
+                    ..ScalarArgumentLayout::default()
+                }
+            }
+        }
         _ => ScalarArgumentLayout {
             null_pointer_mask: bias_null << 3,
             ..ScalarArgumentLayout::default()
@@ -2569,6 +2590,49 @@ fn scalar_physical_nodes(
                     0,
                 ),
             );
+        }
+        ScalarDispatchPlan::NnExactChunkSlim {
+            chunks,
+            piece_rows,
+            pieces,
+        } => {
+            for piece in 0..pieces {
+                let first_row = piece * piece_rows;
+                let rows = piece_rows.min(m - first_row);
+                push_scalar_node(
+                    &mut nodes,
+                    context,
+                    "nn_splitk_slim_partial",
+                    (128, 64),
+                    (32, 1),
+                    cfg(
+                        (
+                            checked_grid_product(rows.div_ceil(128), n.div_ceil(64), 1)?,
+                            1,
+                            chunks,
+                        ),
+                        (128, 1, 1),
+                        0,
+                    ),
+                );
+                push_scalar_node(
+                    &mut nodes,
+                    context,
+                    "splitk_reduce",
+                    (1, 1),
+                    (1, 1),
+                    cfg(
+                        (
+                            checked_u32_product(rows, n, "NN chunk-fold reducer outputs")?
+                                .div_ceil(256),
+                            1,
+                            1,
+                        ),
+                        (256, 1, 1),
+                        0,
+                    ),
+                );
+            }
         }
         ScalarDispatchPlan::NnM32N64SplitK32Qualified => {
             push_scalar_node(
@@ -5314,11 +5378,30 @@ fn scalar_proof_key(
 
 /// The scalar plan a prepared launch takes: the frozen evidence, or the
 /// proof-tier candidate the ledger has already admitted for the cell.
+/// The forward plan of the batch-invariant exact policy, which no evidence
+/// or proof overrides: every chain tile writes the same bits, so the table
+/// alone picks one.
+fn batch_invariant_exact_plan(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+) -> Result<Option<ScalarDispatchPlan>, String> {
+    if ctx.f32_triad_policy() != crate::gpu::context::F32TriadPolicy::ExactFmaBatchInvariant
+        || request.op != ResolvedGemmOp::Nn
+    {
+        return Ok(None);
+    }
+    let reference = scalar_launch_facts(&ctx.kernels).partition_reference;
+    super::dispatch::exact_batch_invariant_nn_plan(request, reference).map(Some)
+}
+
 fn scalar_ledger_plan(
     ctx: &GpuCtx,
     request: F32TriadRequest,
     operands: F32TriadOperands,
 ) -> Result<ScalarDispatchPlan, String> {
+    if let Some(plan) = batch_invariant_exact_plan(ctx, request)? {
+        return Ok(plan);
+    }
     let facts = scalar_launch_facts(&ctx.kernels);
     let plan = scalar_launch_plan(facts, request, operands)?;
     if plan != scalar_dispatch_plan(request, facts.partition_reference)? {
@@ -5348,6 +5431,9 @@ fn prove_scalar_plan<Arm>(
 where
     Arm: Fn(CUptr, ScalarDispatchPlan) -> Result<(), String>,
 {
+    if let Some(plan) = batch_invariant_exact_plan(ctx, request)? {
+        return Ok(plan);
+    }
     let facts = scalar_launch_facts(&ctx.kernels);
     let plan = scalar_launch_plan(facts, request, operands)?;
     if plan != scalar_dispatch_plan(request, facts.partition_reference)? {
@@ -5453,6 +5539,31 @@ pub(in crate::gpu) fn prepare_f32_triad(
                     .triad_kernels()
                     .tf32_symbol_exclusion(spec.symbol)
             {
+                // The strict policy never leaves TF32: its portable plain
+                // tile serves instead, or the shape is refused.
+                if ctx.f32_triad_policy()
+                    == crate::gpu::context::F32TriadPolicy::RnaTf32BatchInvariant
+                {
+                    let ladder = super::dispatch::rna_batch_invariant_ladder(
+                        request,
+                        ctx.kernels.f32_triad_availability(),
+                    )?;
+                    let ladder_excluded = super::contract::tf32_kernel_spec(request.op, ladder)
+                        .map(|spec| {
+                            ctx.kernels
+                                .triad_kernels()
+                                .tf32_symbol_exclusion(spec.symbol)
+                                .is_some()
+                        })?;
+                    if ladder == route || ladder_excluded {
+                        return Err(format!(
+                            "TF32 route {} is excluded on this toolkit ({reason}) and the RNA \
+                             batch-invariant TF32 policy has no other route for {request:?}",
+                            spec.symbol
+                        ));
+                    }
+                    return prepare_tf32_f32(ctx, request, operands, output_resources, ladder);
+                }
                 static EXCLUDED: std::sync::Once = std::sync::Once::new();
                 crate::gpu::diagnostics::warn_once(&EXCLUDED, || {
                     format!(
@@ -9506,6 +9617,112 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
     // logical reductions at different batch sizes use different chunk counts,
     // changes reduction order, and causes bit drift.
     const SPLITK_SLIM_K_CHUNK: u32 = 64; // PURE K-BASED, batch-invariant
+    if let ScalarDispatchPlan::NnExactChunkSlim {
+        chunks,
+        piece_rows,
+        pieces,
+    } = scalar_plan
+    {
+        // The batch-invariant chunk fold: per piece of rows, the slim
+        // partial writes one 64-input chunk per plane into the split
+        // scratch and the reducer sums the planes in order, then adds the
+        // bias, into that piece's rows of the output. A row folds the same
+        // way in any piece.
+        let partial_ptr = {
+            use cudarc::driver::DevicePtr;
+            let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
+            ptr
+        };
+        let output_base = y.scalar_ptr();
+        let n_i = checked_dims.n_i32;
+        let k_i = checked_dims.k_i32;
+        let k_chunk_i = checked_i32(
+            checked_usize(SPLITK_SLIM_K_CHUNK, "NN chunk-fold chunk")?,
+            "NN chunk-fold chunk",
+        )?;
+        let chunks_i = checked_i32(
+            checked_usize(chunks, "NN chunk-fold chunks")?,
+            "NN chunk-fold chunks",
+        )?;
+        let null_tail: u64 = 0;
+        let zero_i32_local: i32 = 0;
+        for piece in 0..pieces {
+            let first_row = piece * piece_rows;
+            let rows = piece_rows.min(checked_dims.m_u32 - first_row);
+            let rows_i = checked_i32(
+                checked_usize(rows, "NN chunk-fold piece rows")?,
+                "NN chunk-fold piece rows",
+            )?;
+            let a_ptr = x_ptr + u64::from(first_row) * lda_i as u64 * 4;
+            let out_ptr = output_base + u64::from(first_row) * n_i as u64 * 4;
+            let partial_cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (
+                    checked_tile_grid(rows, 128, checked_dims.n_u32, 64)?,
+                    1,
+                    chunks,
+                ),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut pb =
+                scalar_launch_builder(stream, &kernels.gemm_bi_nn_splitk_slim_partial, &control);
+            pb.arg(&partial_ptr);
+            pb.arg(&a_ptr);
+            pb.arg(&w_ptr);
+            pb.arg(&rows_i);
+            pb.arg(&n_i);
+            pb.arg(&k_i);
+            pb.arg(&lda_i);
+            pb.arg(&n_i);
+            pb.arg(&k_chunk_i);
+            enqueue_scalar_forward(
+                &mut control,
+                request,
+                actual_operands,
+                "nn_splitk_slim_partial",
+                partial_cfg,
+                &mut pb,
+            )
+            .map_err(|error| {
+                error.with_driver_context(format_args!("nn_splitk_slim_partial (chunk fold)"))
+            })?;
+            let reduce_cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (
+                    checked_u32_product(rows, checked_dims.n_u32, "NN chunk-fold outputs")?
+                        .div_ceil(256),
+                    1,
+                    1,
+                ),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut rb = scalar_launch_builder(stream, &kernels.gemm_bi_splitk_reduce, &control);
+            rb.arg(&out_ptr);
+            rb.arg(&partial_ptr);
+            rb.arg(&bias_ptr);
+            rb.arg(&null_tail);
+            rb.arg(&null_tail);
+            rb.arg(&alpha);
+            rb.arg(&rows_i);
+            rb.arg(&n_i);
+            rb.arg(&chunks_i);
+            rb.arg(&zero_i32_local);
+            rb.arg(&zero_i32_local);
+            rb.arg(&zero_i32_local);
+            enqueue_scalar_forward(
+                &mut control,
+                request,
+                actual_operands,
+                "splitk_reduce",
+                reduce_cfg,
+                &mut rb,
+            )
+            .map_err(|error| {
+                error.with_driver_context(format_args!("splitk_reduce (chunk fold)"))
+            })?;
+        }
+        return Ok(());
+    }
     if let ScalarDispatchPlan::NnSplitKSlim { chunks: f_final } = scalar_plan {
         // F ≥ 6 (K ≥ 384). Ncu profiles:
         //   - SALE L1 (M=4224 K=128 N=128, F=2): reducer 35% of time → moved
