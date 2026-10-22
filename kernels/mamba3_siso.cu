@@ -163,7 +163,9 @@ extern "C" __global__ void NAME(                                               \
     float x_val = x[b * d_inner + h * hd + p];                                 \
     float v_prev = v_state[b * nh * hd + h * hd + p];                          \
                                                                                \
-    float y_val = d_skip * x_val;                                              \
+    float y_val = __fmul_rn(d_skip, x_val);                                    \
+    float bv = __fmul_rn(beta_h, v_prev);                                      \
+    float gx = __fmul_rn(gamma_h, x_val);                                      \
                                                                                \
     /* The state M3_STEP_SLICE at a time, a slice in registers. */            \
     M3_STEP_PRE_##PF                                                          \
@@ -183,9 +185,12 @@ extern "C" __global__ void NAME(                                               \
             kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);                        \
             qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);                        \
                                                                                \
-            /* Trapezoidal recurrence */                                       \
-            h_local[j] = alpha_h * h_local[j] + beta_h * v_prev * kp_n + gamma_h * x_val * kc_n; \
-            y_val += h_local[j] * qc_n;                                        \
+            /* Trapezoidal recurrence, spelled as the block tier spells it */  \
+            /* so the prefetching and plain builds round alike. */             \
+            h_local[j] = __fmaf_rn(gx, kc_n,                                   \
+                                   __fmaf_rn(h_local[j], alpha_h,              \
+                                             __fmul_rn(bv, kp_n)));            \
+            y_val = __fmaf_rn(h_local[j], qc_n, y_val);                        \
         }                                                                      \
         _Pragma("unroll")                                                     \
         for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else \
@@ -254,7 +259,9 @@ extern "C" __global__ void NAME(                                             \
     d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);                         \
     float x_val = to_f(x[b * d_inner + h * hd + p]);                         \
     float v_prev = v_state[b * nh * hd + h * hd + p];                        \
-    float y_val = d_skip * x_val;                                            \
+    float y_val = __fmul_rn(d_skip, x_val);                                  \
+    float bv = __fmul_rn(beta_h, v_prev);                                    \
+    float gx = __fmul_rn(gamma_h, x_val);                                    \
     M3_STEP_PRE_##PF                                                          \
     for (int n0 = 0; n0 < ds; n0 += M3_STEP_SLICE) {                          \
         M3_STEP_LOAD_##PF                                                     \
@@ -270,9 +277,10 @@ extern "C" __global__ void NAME(                                             \
             kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);                     \
             kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);                     \
             qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);                     \
-            h_local[j] = alpha_h * h_local[j] + beta_h * v_prev * kp_n +     \
-                         gamma_h * x_val * kc_n;                             \
-            y_val += h_local[j] * qc_n;                                      \
+            h_local[j] = __fmaf_rn(gx, kc_n,                                 \
+                                   __fmaf_rn(h_local[j], alpha_h,            \
+                                             __fmul_rn(bv, kp_n)));          \
+            y_val = __fmaf_rn(h_local[j], qc_n, y_val);                      \
         }                                                                    \
         _Pragma("unroll")                                                     \
         for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else \
