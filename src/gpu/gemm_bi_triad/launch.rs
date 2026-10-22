@@ -13626,9 +13626,10 @@ pub fn sm80_streamk_workers(dims: (usize, usize, usize)) -> Result<u32, String> 
     let units = sm80_streamk_units(dims)?;
     let workspace = (SPLITK_SCRATCH_CAP / (SM80_STREAMK_SLOTS_PER_CTA * SM80_STREAMK_SLAB_FLOATS))
         .min(TF32_SPLITK_COUNTER_CAP / SM80_STREAMK_SLOTS_PER_CTA) as u64;
-    let span = super::super::kernel_identity::Sm80TcPolicy::current()
+    let policy = super::super::kernel_identity::Sm80TcPolicy::current();
+    let span = policy
         .stream_k_worker_slabs
-        .max(units.div_ceil(workspace))
+        .max(units.div_ceil(workspace.min(policy.stream_k_max_workers)))
         .max(1);
     u32::try_from(units.div_ceil(span).max(1))
         .map_err(|_| "stream-K worker count exceeds u32".to_string())

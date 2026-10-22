@@ -2664,16 +2664,28 @@ pub struct Sm80TcPolicy {
     pub deep_split_k_aligned_min_reduction: usize,
     /// The dW stream-K schedule (under the half policy that permits the
     /// fixed-order fold) takes a shape only when its reduction holds at
-    /// least this many 64-row slabs. The census shows it winning on every
-    /// shape with a reduction of 2048 rows or more, from one wave of tiles
-    /// (the classifier page, 0.82) to eight (0.83), and losing wherever the
-    /// reduction is 1024 rows or fewer (the d128 and thin cells).
+    /// least this many 64-row slabs; it loses wherever the reduction is 1024
+    /// rows or fewer.
     pub stream_k_min_reduction_slabs: u64,
+    /// The schedule takes a reduction under `stream_k_deep_reduction_slabs`
+    /// slabs only on a grid of at most `stream_k_shallow_max_tiles` 64x64
+    /// tiles, and a deeper one on at most `stream_k_deep_max_tiles`. On the
+    /// RTX 6000 Ada against the tiled kernel, interleaved: 8 and 36 tiles won
+    /// at every depth from 2048 rows (0.29-0.88); 72 to 186 tiles lost under
+    /// 8192 rows (1.02-1.63) and won or tied from 8192 (0.72-1.06); 576 and
+    /// 768 tiles split by the card's waves, not by the shape.
+    pub stream_k_deep_reduction_slabs: u64,
+    pub stream_k_shallow_max_tiles: u64,
+    pub stream_k_deep_max_tiles: u64,
     /// The 64-row slabs one stream-K worker sums before it hands its
-    /// partial on. The pieces are a function of the shape alone, so every
-    /// card folds the same ones in the same order; a card runs them in as
-    /// many waves as its resident CTAs need.
+    /// partial on, and the most workers a launch deals to; past that count
+    /// the span grows. The pieces are a function of the shape alone, so
+    /// every card folds the same ones in the same order; a card runs them in
+    /// as many waves as its resident CTAs need, which no fixed count can
+    /// match on every card (the 568 workers the Ada once took were exactly
+    /// two of its waves; 512 measured within a few percent of them).
     pub stream_k_worker_slabs: u64,
+    pub stream_k_max_workers: u64,
 }
 
 impl Sm80TcPolicy {
@@ -2704,7 +2716,11 @@ impl Sm80TcPolicy {
             deep_split_k_tail_min_reduction: 511,
             deep_split_k_aligned_min_reduction: 1024,
             stream_k_min_reduction_slabs: 32,
+            stream_k_deep_reduction_slabs: 128,
+            stream_k_shallow_max_tiles: 48,
+            stream_k_deep_max_tiles: 192,
             stream_k_worker_slabs: 8,
+            stream_k_max_workers: 512,
         }
     }
 
@@ -2812,8 +2828,24 @@ impl Sm80TcPolicy {
                 &self.stream_k_min_reduction_slabs.to_le_bytes(),
             )
             .required(
+                b"stream-k-deep-reduction-slabs",
+                &self.stream_k_deep_reduction_slabs.to_le_bytes(),
+            )
+            .required(
+                b"stream-k-shallow-max-tiles",
+                &self.stream_k_shallow_max_tiles.to_le_bytes(),
+            )
+            .required(
+                b"stream-k-deep-max-tiles",
+                &self.stream_k_deep_max_tiles.to_le_bytes(),
+            )
+            .required(
                 b"stream-k-worker-slabs",
                 &self.stream_k_worker_slabs.to_le_bytes(),
+            )
+            .required(
+                b"stream-k-max-workers",
+                &self.stream_k_max_workers.to_le_bytes(),
             )
             .finish()
     }
@@ -2822,10 +2854,12 @@ impl Sm80TcPolicy {
 /// The thresholds of the exact scalar planner's splits. Each one counts the
 /// problem's own tiles or CTAs, never a card's multiprocessors, so a plan is
 /// a function of the shape alone and every card of every architecture cuts
-/// a reduction at the same places. The values are sized for the largest
-/// card in service (188 multiprocessors): a smaller card runs the same
-/// pieces in more waves, which costs it the split's extra partial traffic
-/// on the few shapes between its own wave and that one.
+/// a reduction at the same places. The values are the RTX 6000 Ada's
+/// measured ones: sized for the largest card (192, 576, 288) the split cost
+/// the Ada 7-80% on the shapes between its own grid and that one, up to
+/// 4.7x on a thin input gradient, and 16-row split-M chunks ran 1.45x
+/// slower than the 32-row ones these keep. A card with more multiprocessors
+/// leaves a few of them idle on the shapes just past these counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ScalarSplitPolicy {
     /// The thin split-K takes a shape whose plain 128 x 64 grid holds fewer
@@ -2842,9 +2876,9 @@ pub struct ScalarSplitPolicy {
 impl ScalarSplitPolicy {
     pub const fn current() -> Self {
         Self {
-            thin_split_max_tiles: 192,
-            slim_split_max_tiles: 576,
-            tn_split_m_target_blocks: 288,
+            thin_split_max_tiles: 144,
+            slim_split_max_tiles: 432,
+            tn_split_m_target_blocks: 284,
         }
     }
 

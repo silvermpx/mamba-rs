@@ -1096,15 +1096,18 @@ fn tc64_backward_qualified_routes_match_the_forced_kernel() {
                 .into_iter()
                 .map(f32::to_bits)
                 .collect::<Vec<_>>();
-            if resolved_route.0 == ModuleKind::TriadSm80 {
+            if resolved_route.0 == ModuleKind::TriadSm80
+                && !resolved_route.1.starts_with("tn_tc64_streamk")
+            {
                 assert_eq!(
                     forced_bits, resolved_bits,
                     "{dt:?} TN resolved path differs from forced Tile64 at M{m} K{k} N{n}"
                 );
             } else {
-                // A board-specialized module serves this cell here; its bits
-                // are its own contract, so the check is that the route is
-                // declared and repeatable.
+                // A board-specialized module serves this cell here, or the
+                // stream-K schedule the half policy permits for a deep
+                // reduction over a few tiles; its bits are its own contract,
+                // so the check is that the route is declared and repeatable.
                 let repeat = t.f32_buf(&initial);
                 mamba_rs::gpu::blas::gemm_bi_backward_dw_typed(
                     &t.ctx,

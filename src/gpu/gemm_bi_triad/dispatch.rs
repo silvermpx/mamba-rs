@@ -2736,6 +2736,12 @@ fn rna_batch_invariant_selection(
         })?;
         return Ok(F32TriadSelection::Tf32(bound));
     }
+    // A measured cell keeps its route when the cohort crowned a specialized
+    // kernel for it. A cell whose cohort winner is a portable tile takes the
+    // gradients' rules instead: they pick among the split members and the
+    // multistage tiles, which the cohort's tournaments never ran. A tile the
+    // rules stage from the operands falls back to the portable rule when
+    // this toolkit cannot bind it.
     let measured = operands
         .and_then(|operands| {
             measured_tf32_route_with_operands(
@@ -2747,18 +2753,18 @@ fn rna_batch_invariant_selection(
         })
         .filter(|route| keeps(*route))
         .and_then(|route| resolve_tf32_forced(request, availability, route).ok());
-    if let Some(route) = measured {
+    if let Some(route) = measured
+        && !matches!(route, Tf32PhysicalRoute::MmaTf32Rna(_))
+    {
         return Ok(F32TriadSelection::Tf32(route));
     }
-    // A tile the rules stage from the operands falls back to the portable
-    // rule when this toolkit cannot bind it.
     let ruled = rna_backward_rule_route(request, operands, availability)
         .and_then(|route| resolve_tf32_forced(request, availability, route).ok())
         .or_else(|| {
             rna_backward_rule_route(request, None, availability)
                 .and_then(|route| resolve_tf32_forced(request, availability, route).ok())
         });
-    if let Some(bound) = ruled {
+    if let Some(bound) = ruled.or(measured) {
         return Ok(F32TriadSelection::Tf32(bound));
     }
     let proven = operands
@@ -11002,13 +11008,12 @@ pub(super) fn tc_pick_tile_backward_for_device(
     if !composed || multiprocessor_count == 0 {
         return portable;
     }
-    // The stream-K dW schedule serves any 64x64 grid whose reduction is
-    // deep enough, and only when the half policy permits its fixed-order
-    // fold; a request that stays on the tiled contract never sees it. The
-    // census shows it winning wherever the reduction runs 2048 rows or more
-    // and losing at 1024 or fewer. Stream-K or the tiled kernel is a choice
-    // of reduction order, so the rule reads the shape alone and every card
-    // takes the same one. It runs on every board whose portable module
+    // The stream-K dW schedule serves a deep reduction over few enough
+    // 64x64 tiles (the policy's measured bounds), and only when the half
+    // policy permits its fixed-order fold; a request that stays on the
+    // tiled contract never sees it. Stream-K or the tiled kernel is a
+    // choice of reduction order, so the rule reads the shape alone and every
+    // card takes the same one. It runs on every board whose portable module
     // composes it; the CC 12.x boards keep their own stream-K kernel.
     if op == super::super::kernel_identity::PolicyOp::Dw
         && half_policy == HalfTriadPolicy::AllowStreamKFixedOrder
@@ -11017,7 +11022,12 @@ pub(super) fn tc_pick_tile_backward_for_device(
         let policy = super::super::kernel_identity::Sm80TcPolicy::current();
         let tiles64 = tc_grid_ctas(n_in, n_out, 64, 64)?;
         let slabs = u64::try_from(batch).ok()?.div_ceil(64);
-        if tiles64 > 0 && slabs >= policy.stream_k_min_reduction_slabs {
+        let max_tiles = if slabs >= policy.stream_k_deep_reduction_slabs {
+            policy.stream_k_deep_max_tiles
+        } else {
+            policy.stream_k_shallow_max_tiles
+        };
+        if tiles64 > 0 && slabs >= policy.stream_k_min_reduction_slabs && tiles64 <= max_tiles {
             return Some(TcTile::Tile64StreamK);
         }
     }
@@ -11082,7 +11092,7 @@ mod tc_policy_tests {
     const RTX_6000_ADA_SMS: u32 = 142;
 
     #[test]
-    fn stream_k_dw_needs_the_half_permission_and_a_deep_reduction() {
+    fn stream_k_dw_needs_the_half_permission_a_deep_reduction_and_few_tiles() {
         let pick = |dims, policy, cc| {
             let picks = [24, 82, 108, 128, 132, 142, 170, 188].map(|multiprocessors| {
                 tc_pick_tile_backward_for_device(PolicyOp::Dw, dims, multiprocessors, cc, policy)
@@ -11098,16 +11108,15 @@ mod tc_policy_tests {
         };
         let tiled = HalfTriadPolicy::TiledParity;
         let stream_k = HalfTriadPolicy::AllowStreamKFixedOrder;
-        // The measured winners (internal/perf/sm89-streamk-tn-20260904, ratio
-        // to the best tiled route): batch_input_proj 0.34, batch_out_proj
-        // 0.56, prism_out_proj 0.64, prism_input_proj 0.79, rect_tall 0.80,
-        // and batch_in_proj 0.86 with 144 tiles on 142 multiprocessors.
+        // Stream-K serves a deep reduction over few tiles: every grid of up to
+        // 48 tiles from 2048 rows (the thin and few-tile gradients ran it at
+        // 0.29-0.88 of the tiled kernel), and up to 192 tiles from 8192 rows.
         for dims in [
+            (2048, 16, 512),
+            (4096, 64, 512),
+            (2048, 384, 384),
             (10400, 384, 384),
             (10400, 768, 384),
-            (4621, 768, 384),
-            (4621, 1024, 384),
-            (4096, 512, 768),
             (10400, 384, 1536),
         ] {
             assert_ne!(
@@ -11138,18 +11147,26 @@ mod tc_policy_tests {
                 "{dims:?}"
             );
         }
-        // Grids of more than a wave of tiles used to stay tiled; with the
-        // persistent grid bounded by the resident CTA count the depth rule
-        // alone decides, and these three (prism_in_proj 186 tiles x 73
-        // slabs, large 576 x 32, a filled 32 x 24 grid) are deep enough.
-        for dims in [(4621, 384, 1928), (2048, 3072, 768), (10400, 2048, 1536)] {
+        // More tiles over a shallower reduction, and any grid past 192
+        // tiles, keep the tiled kernel, which the interleaved measurement
+        // found as fast or faster there: prism_out_proj 72 tiles x 73 slabs,
+        // prism_input_proj 96 x 73, rect_tall 96 x 64, prism_in_proj 186 x
+        // 73, large 576 x 32, a filled 768-tile grid.
+        for dims in [
+            (4621, 768, 384),
+            (4621, 1024, 384),
+            (4096, 512, 768),
+            (4621, 384, 1928),
+            (2048, 3072, 768),
+            (10400, 2048, 1536),
+        ] {
             assert_eq!(
                 pick(dims, stream_k, (8, 9)),
-                Some(TcTile::Tile64StreamK),
+                pick(dims, tiled, (8, 9)),
                 "{dims:?}"
             );
             assert_ne!(
-                pick(dims, tiled, (8, 9)),
+                pick(dims, stream_k, (8, 9)),
                 Some(TcTile::Tile64StreamK),
                 "{dims:?}"
             );
@@ -11289,7 +11306,7 @@ mod tc_policy_tests {
     fn selector_policy_identity_is_pinned_and_the_same_on_every_card() {
         let actual = digest_hex(&gemm_dispatch_policy_digest());
         assert_eq!(
-            actual, "abcb426a748b91768a5dba45a35f7a7de82404f441e40220718f4ef2672b9c33",
+            actual, "dc4bdadc015028be186c7b3f35923cd701b174db9082402c9978e8cd38fad0a8",
             "policy identity moved; repin it from the live digest"
         );
     }
@@ -16678,7 +16695,7 @@ mod tf32_tests {
     }
 
     #[test]
-    fn rna_strict_gradients_keep_every_measured_rna_route_and_never_fall_to_exact() {
+    fn rna_strict_gradients_keep_every_specialized_measured_route_and_never_fall_to_exact() {
         let mut cohorts: Vec<(F32TriadAvailability, &[_])> = SM89_JOINT_TF32_EVIDENCE_COHORTS
             .iter()
             .filter(|cohort| cohort.portable.is_some())
@@ -16719,8 +16736,11 @@ mod tf32_tests {
                     availability,
                 )
                 .unwrap();
+                // A specialized cohort winner keeps its cell; a portable one
+                // yields to the gradients' shape rules.
                 if let F32TriadSelection::Tf32(route) = allowed
                     && rna_batch_invariant_route(cell.op, route)
+                    && !matches!(route, Tf32PhysicalRoute::MmaTf32Rna(_))
                 {
                     assert_eq!(selection, allowed, "{cell:?}");
                     kept += 1;
