@@ -956,82 +956,79 @@ fn run_runtime_case(ctx: &GpuCtx, spec: RuntimeCase) -> Vec<u32> {
 
 #[test]
 fn runtime_production_shapes_resolve_to_single_big_routes() {
-    for multiprocessor_count in [20, 56, 82, 108, 120, 128, 132, 142, 148, 170] {
-        for (op, dims, expected) in [
-            (
-                ResolvedGemmOp::Nn,
-                (512, 16, 640),
-                ScalarDispatchPlan::NnFinal { slim: false },
-            ),
-            (
-                ResolvedGemmOp::Nn,
-                (512, 33, 641),
-                ScalarDispatchPlan::NnFinal { slim: false },
-            ),
-            (
-                ResolvedGemmOp::Nn,
-                (513, 17, 513),
-                ScalarDispatchPlan::NnFinal { slim: false },
-            ),
-            (
-                ResolvedGemmOp::Tn,
-                (16, 512, 640),
-                ScalarDispatchPlan::TnFinal { slim: false },
-            ),
-            (
-                ResolvedGemmOp::Tn,
-                (33, 512, 640),
-                ScalarDispatchPlan::TnFinal { slim: false },
-            ),
-            (
-                ResolvedGemmOp::Tn,
-                (17, 513, 513),
-                ScalarDispatchPlan::TnFinal { slim: false },
-            ),
-        ] {
-            let request = F32TriadRequest {
+    for (op, dims, expected) in [
+        (
+            ResolvedGemmOp::Nn,
+            (512, 16, 640),
+            ScalarDispatchPlan::NnFinal { slim: false },
+        ),
+        (
+            ResolvedGemmOp::Nn,
+            (512, 33, 641),
+            ScalarDispatchPlan::NnFinal { slim: false },
+        ),
+        (
+            ResolvedGemmOp::Nn,
+            (513, 17, 513),
+            ScalarDispatchPlan::NnFinal { slim: false },
+        ),
+        (
+            ResolvedGemmOp::Tn,
+            (16, 512, 640),
+            ScalarDispatchPlan::TnFinal { slim: false },
+        ),
+        (
+            ResolvedGemmOp::Tn,
+            (33, 512, 640),
+            ScalarDispatchPlan::TnFinal { slim: false },
+        ),
+        (
+            ResolvedGemmOp::Tn,
+            (17, 513, 513),
+            ScalarDispatchPlan::TnFinal { slim: false },
+        ),
+    ] {
+        let request = F32TriadRequest {
+            op,
+            shape: F32TriadShape::contiguous(op, dims),
+        };
+        let plan = scalar_dispatch_plan(request).expect("resolve production runtime shape");
+        assert_eq!(plan, expected, "{op:?} {dims:?}");
+        let operands = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: (op == ResolvedGemmOp::Nn).then_some(0x4000),
+            alpha: 1.0,
+            beta: if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
+        };
+        let nodes = scalar_physical_nodes(request, operands, plan).expect("build Big route");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            nodes[0].symbol,
+            if op == ResolvedGemmOp::Nn {
+                "nn_big"
+            } else {
+                "tn_aligned"
+            }
+        );
+        assert_eq!(
+            nodes[0].launch.grid_dim.0,
+            big_grid(RuntimeCase {
+                label: "route",
                 op,
-                shape: F32TriadShape::contiguous(op, dims),
-            };
-            let plan = scalar_dispatch_plan(request, multiprocessor_count)
-                .expect("resolve production runtime shape");
-            assert_eq!(plan, expected, "{op:?} {dims:?} {multiprocessor_count} SMs");
-            let operands = F32TriadOperands {
-                output: 0x1000,
-                a: 0x2000,
-                b: 0x3000,
-                bias: (op == ResolvedGemmOp::Nn).then_some(0x4000),
-                alpha: 1.0,
-                beta: if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
-            };
-            let nodes = scalar_physical_nodes(request, operands, plan).expect("build Big route");
-            assert_eq!(nodes.len(), 1);
-            assert_eq!(
-                nodes[0].symbol,
-                if op == ResolvedGemmOp::Nn {
-                    "nn_big"
-                } else {
-                    "tn_aligned"
-                }
-            );
-            assert_eq!(
-                nodes[0].launch.grid_dim.0,
-                big_grid(RuntimeCase {
-                    label: "route",
-                    op,
-                    shape: request.shape,
-                    epilogue: Epilogue {
-                        alpha: operands.alpha,
-                        beta: operands.beta,
-                        bias: operands.bias.is_some(),
-                    },
-                    path: LaunchPath::Production,
-                    parity: None,
-                    exceptional: false,
-                    poison_output: false,
-                })
-            );
-        }
+                shape: request.shape,
+                epilogue: Epilogue {
+                    alpha: operands.alpha,
+                    beta: operands.beta,
+                    bias: operands.bias.is_some(),
+                },
+                path: LaunchPath::Production,
+                parity: None,
+                exceptional: false,
+                poison_output: false,
+            })
+        );
     }
 }
 
@@ -1086,7 +1083,6 @@ fn qualified_tn_m16n16_facts() -> ScalarLaunchFacts {
         sm89_exact_f32_d128_compiler: None,
         sm89_exact_f32_d128_symbols_loaded: [false; 2],
         compute_capability: (12, 0),
-        partition_reference: 170,
         sm120_scalar_resources_qualified: true,
     }
 }

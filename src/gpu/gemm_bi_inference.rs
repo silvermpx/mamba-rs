@@ -8155,7 +8155,7 @@ mod tests {
                 TUNING_TABLE_REVISION,
                 SCHEDULE_REVISION,
             ),
-            (5, 46, 8),
+            (5, 47, 8),
             "the release compiler identity must remain explicitly pinned"
         );
         let mut promoted = Vec::new();

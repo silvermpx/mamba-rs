@@ -34,7 +34,7 @@ pub const NUMERIC_ABI_REVISION: u16 = 5;
 // evidence or by first-use proof, and the portable TF32 tier serves the
 // nearest measured cell within its neighbour band; the frozen cohorts keep
 // their evidence.
-pub const TUNING_TABLE_REVISION: u16 = 46;
+pub const TUNING_TABLE_REVISION: u16 = 47;
 pub const SCHEDULE_REVISION: u16 = 8;
 
 const NUMERIC_CONTRACT_DOMAIN: &[u8] = b"mamba-rs.resolved-numeric-contract.v2";
@@ -2813,69 +2813,63 @@ impl Sm80TcPolicy {
     }
 }
 
+/// The thresholds of the exact scalar planner's splits. Each one counts the
+/// problem's own tiles or CTAs, never a card's multiprocessors, so a plan is
+/// a function of the shape alone and every card of every architecture cuts
+/// a reduction at the same places. The values are sized for the largest
+/// card in service (188 multiprocessors): a smaller card runs the same
+/// pieces in more waves, which costs it the split's extra partial traffic
+/// on the few shapes between its own wave and that one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ScalarWavePolicy {
-    pub thin_split_wave_numerator: u64,
-    pub thin_split_wave_denominator: u64,
-    pub slim_split_wave_numerator: u64,
-    pub slim_split_wave_denominator: u64,
-    pub tn_split_m_wave_numerator: u64,
-    pub tn_split_m_wave_denominator: u64,
+pub struct ScalarSplitPolicy {
+    /// The thin split-K takes a shape whose plain 128 x 64 grid holds fewer
+    /// tiles than this.
+    pub thin_split_max_tiles: u32,
+    /// The slim split-K takes a shape whose plain 128 x 64 grid holds fewer
+    /// tiles than this.
+    pub slim_split_max_tiles: u32,
+    /// The TN split-M cuts the batch into pieces until its grid holds at
+    /// least this many CTAs.
+    pub tn_split_m_target_blocks: u32,
 }
 
-impl ScalarWavePolicy {
+impl ScalarSplitPolicy {
     pub const fn current() -> Self {
         Self {
-            thin_split_wave_numerator: 1,
-            thin_split_wave_denominator: 1,
-            slim_split_wave_numerator: 3,
-            slim_split_wave_denominator: 1,
-            tn_split_m_wave_numerator: 2,
-            tn_split_m_wave_denominator: 1,
+            thin_split_max_tiles: 192,
+            slim_split_max_tiles: 576,
+            tn_split_m_target_blocks: 288,
         }
     }
 
-    pub fn digest(&self, multiprocessor_count: u32) -> Sha256Digest {
-        FramedSha256::new(b"scalar-wave-policy.v1")
+    pub fn digest(&self) -> Sha256Digest {
+        FramedSha256::new(b"scalar-split-policy")
             .required(
-                b"thin-split-wave-numerator",
-                &self.thin_split_wave_numerator.to_le_bytes(),
+                b"thin-split-max-tiles",
+                &self.thin_split_max_tiles.to_le_bytes(),
             )
             .required(
-                b"thin-split-wave-denominator",
-                &self.thin_split_wave_denominator.to_le_bytes(),
+                b"slim-split-max-tiles",
+                &self.slim_split_max_tiles.to_le_bytes(),
             )
             .required(
-                b"slim-split-wave-numerator",
-                &self.slim_split_wave_numerator.to_le_bytes(),
+                b"tn-split-m-target-blocks",
+                &self.tn_split_m_target_blocks.to_le_bytes(),
             )
-            .required(
-                b"slim-split-wave-denominator",
-                &self.slim_split_wave_denominator.to_le_bytes(),
-            )
-            .required(
-                b"tn-split-m-wave-numerator",
-                &self.tn_split_m_wave_numerator.to_le_bytes(),
-            )
-            .required(
-                b"tn-split-m-wave-denominator",
-                &self.tn_split_m_wave_denominator.to_le_bytes(),
-            )
-            .required(b"multiprocessor-count", &multiprocessor_count.to_le_bytes())
             .finish()
     }
 }
 
 pub fn gemm_dispatch_policy_digest(multiprocessor_count: u32) -> Sha256Digest {
     let tensor_core = Sm80TcPolicy::current().digest(multiprocessor_count);
-    let scalar = ScalarWavePolicy::current().digest(multiprocessor_count);
-    FramedSha256::new(b"gemm-dispatch-policy.v5")
+    let scalar = ScalarSplitPolicy::current().digest();
+    FramedSha256::new(b"gemm-dispatch-policy.v6")
         .required(
             b"vendor-policy-revision",
             &CUBLAS_POLICY_REVISION.to_le_bytes(),
         )
         .required(b"sm80-tensor-core-policy", &tensor_core)
-        .required(b"scalar-wave-policy", &scalar)
+        .required(b"scalar-split-policy", &scalar)
         .required(b"multiprocessor-count", &multiprocessor_count.to_le_bytes())
         .finish()
 }
@@ -5649,7 +5643,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_rna_auto_epoch_rejects_revision39_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 46);
+        assert_eq!(current.tuning_table_revision, 47);
         let mut captured = current;
         captured.tuning_table_revision = 39;
         assert_eq!(captured.compiler, current.compiler);
@@ -5751,7 +5745,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_rna_toolkit_auto_epoch_rejects_revision40_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 46);
+        assert_eq!(current.tuning_table_revision, 47);
         let mut captured = current;
         captured.tuning_table_revision = 40;
         assert_eq!(captured.compiler, current.compiler);
@@ -5791,7 +5785,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_half_auto_epoch_rejects_revision41_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 46);
+        assert_eq!(current.tuning_table_revision, 47);
         let mut captured = current;
         captured.tuning_table_revision = 41;
         assert_eq!(captured.compiler, current.compiler);
@@ -5813,7 +5807,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_half_s3_auto_epoch_rejects_revision42_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 46);
+        assert_eq!(current.tuning_table_revision, 47);
         let mut captured = current;
         captured.tuning_table_revision = 42;
         assert_eq!(captured.compiler, current.compiler);
@@ -5835,7 +5829,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_exact_toolkit_auto_epoch_rejects_revision43_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 46);
+        assert_eq!(current.tuning_table_revision, 47);
         let mut captured = current;
         captured.tuning_table_revision = 43;
         assert_eq!(captured.compiler, current.compiler);
@@ -5857,7 +5851,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_finalist_auto_epoch_rejects_revision44_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 46);
+        assert_eq!(current.tuning_table_revision, 47);
         let mut captured = current;
         captured.tuning_table_revision = 44;
         assert_eq!(captured.compiler, current.compiler);
@@ -5888,7 +5882,7 @@ mod physical_launch_tests {
             captured.artifacts.triad_sm80,
         ])
         .unwrap();
-        assert_eq!(captured.tuning_table_revision, 46);
+        assert_eq!(captured.tuning_table_revision, 47);
         assert_eq!(
             current.tuning_table_revision,
             captured.tuning_table_revision
@@ -6648,7 +6642,7 @@ mod cache_and_header_tests {
     #[test]
     fn only_the_tuning_table_revision_moved() {
         assert_eq!(NUMERIC_ABI_REVISION, 5);
-        assert_eq!(TUNING_TABLE_REVISION, 46);
+        assert_eq!(TUNING_TABLE_REVISION, 47);
     }
 
     #[test]

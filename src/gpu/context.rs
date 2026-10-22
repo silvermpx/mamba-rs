@@ -2663,7 +2663,7 @@ mod tests {
         assert_ne!(finalist, 1);
 
         let portable = expected_route_tuning_revision(PhysicalGemmBackend::MmaTf32Rna, generic);
-        assert_eq!(portable, 46);
+        assert_eq!(portable, 47);
         assert_ne!(portable, finalist);
     }
 
@@ -2686,11 +2686,11 @@ mod tests {
                 crate::gpu::gemm_bi_triad::SM89_TF32_JOINT_TUNING_REVISION
             );
         }
-        assert_eq!(generic, 46);
+        assert_eq!(generic, 47);
     }
 
     #[test]
-    fn sm89_inference_copyplan_routes_use_a_private_revision_without_moving_global_46() {
+    fn sm89_inference_copyplan_routes_use_a_private_revision_without_moving_the_global_one() {
         let generic = crate::gpu::gemm_bi_triad::F32_TF32_TUNING_REVISION;
         let copyplan = expected_route_tuning_revision(
             PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan,
@@ -2704,7 +2704,7 @@ mod tests {
         assert_ne!(copyplan, 2);
         assert_eq!(
             expected_route_tuning_revision(PhysicalGemmBackend::ScalarFma, generic),
-            46
+            47
         );
         assert_eq!(
             expected_route_module(PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan),
@@ -2730,7 +2730,7 @@ mod tests {
             );
             assert_eq!(expected_route_module(backend), ModuleKind::TriadSm89Half);
         }
-        assert_eq!(generic, 46);
+        assert_eq!(generic, 47);
     }
 
     #[test]
@@ -2744,7 +2744,7 @@ mod tests {
                 ModuleKind::TriadSm89ExactF32
             );
             assert_eq!(
-                expected_route_tuning_revision(backend, 46),
+                expected_route_tuning_revision(backend, 47),
                 crate::gpu::kernel_identity::SM89_EXACT_F32_TN_ROUTE_REVISION
             );
             assert!(scalar_backend_supports_logical_f32(backend));
@@ -2759,7 +2759,7 @@ mod tests {
             ModuleKind::TriadSm89ExactF32D128
         );
         assert_eq!(
-            expected_route_tuning_revision(backend, 46),
+            expected_route_tuning_revision(backend, 47),
             crate::gpu::kernel_identity::SM89_EXACT_F32_D128_ROUTE_REVISION
         );
         assert!(scalar_backend_supports_logical_f32(backend));

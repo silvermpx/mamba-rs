@@ -359,7 +359,7 @@ fn inference_sm89_half_hot_cell_prefix_view_graph_bits(
     let ctx = GpuCtx::new(&device).expect("NVRTC context");
     if forced.is_none() {
         let compiler = ctx.kernels.compiler_identity();
-        assert_eq!(TUNING_TABLE_REVISION, 46);
+        assert_eq!(TUNING_TABLE_REVISION, 47);
         assert!(compiler.nvrtc_library_known);
         assert!(matches!(
             compiler.nvrtc_version,

@@ -2050,7 +2050,7 @@ mod tests {
             );
             assert_eq!(
                 route.tuning_table_revision,
-                if backend == 22 { 1 } else { 46 }
+                if backend == 22 { 1 } else { 47 }
             );
             assert_eq!(route.schedule_revision, 8);
             let observer = bounded_observer(args, route.shape);

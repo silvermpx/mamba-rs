@@ -4260,7 +4260,6 @@ fn scalar_launch_facts(kernels: &GpuKernels) -> ScalarLaunchFacts {
                 .is_some(),
         ],
         compute_capability: kernels.triad_scalar_compute_capability(),
-        partition_reference: kernels.partition_reference(),
         sm120_scalar_resources_qualified: kernels.triad_sm120_scalar_resources_qualified(),
     }
 }
@@ -5554,8 +5553,8 @@ fn batch_invariant_exact_plan(
             operands.alpha, operands.beta
         ));
     }
-    let reference = scalar_launch_facts(&ctx.kernels).partition_reference;
-    super::dispatch::exact_batch_invariant_nn_plan(request, reference).map(Some)
+    super::dispatch::exact_batch_invariant_nn_plan(request, ctx.kernels.multiprocessor_count())
+        .map(Some)
 }
 
 fn scalar_ledger_plan(
@@ -5568,7 +5567,7 @@ fn scalar_ledger_plan(
     }
     let facts = scalar_launch_facts(&ctx.kernels);
     let plan = scalar_launch_plan(facts, request, operands)?;
-    if plan != scalar_dispatch_plan(request, facts.partition_reference)? {
+    if plan != scalar_dispatch_plan(request)? {
         return Ok(plan);
     }
     let Some(candidate) = scalar_proof_plan(facts, request, operands)? else {
@@ -5600,7 +5599,7 @@ where
     }
     let facts = scalar_launch_facts(&ctx.kernels);
     let plan = scalar_launch_plan(facts, request, operands)?;
-    if plan != scalar_dispatch_plan(request, facts.partition_reference)? {
+    if plan != scalar_dispatch_plan(request)? {
         return Ok(plan);
     }
     let Some(candidate) = scalar_proof_plan(facts, request, operands)? else {
@@ -10255,10 +10254,9 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
 fn scalar_backward_launch_plan(
     op: ResolvedGemmOp,
     dims: (usize, usize, usize),
-    multiprocessor_count: u32,
 ) -> Result<(GemmDims, F32TriadRequest, ScalarDispatchPlan), String> {
     let (checked_dims, request) = scalar_backward_request(op, dims)?;
-    let plan = scalar_dispatch_plan(request, multiprocessor_count)?;
+    let plan = scalar_dispatch_plan(request)?;
     Ok((checked_dims, request, plan))
 }
 
@@ -14336,12 +14334,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
 
     // Native typed Big NN fires exactly
     // where the f32 cascade would run Big (predicate-mirrored gates).
-    if nn_routes_to_big(
-        batch,
-        n_in,
-        n_out,
-        environment.kernels.partition_reference(),
-    ) {
+    if nn_routes_to_big(batch, n_in, n_out) {
         let total_tiles = checked_tile_grid(checked_dims.m_u32, 128, checked_dims.n_u32, 128)?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
@@ -14533,12 +14526,7 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
     }
 
     // Native typed Big TN keeps dW in f32 with += accumulation.
-    if tn_routes_to_big(
-        batch,
-        n_in,
-        n_out,
-        environment.kernels.partition_reference(),
-    ) {
+    if tn_routes_to_big(batch, n_in, n_out) {
         let alpha: f32 = 1.0;
         let m_red_i = checked_dims.m_i32;
         let k_out_i = checked_dims.k_i32;
@@ -14678,14 +14666,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
     // Narrow reduction N (2..=127), and the wider reductions the f32 cascade
     // serves with the same narrow kernel: its typed twin keeps the same FMA
     // chain, so these shapes give the bits of the upcast route they took.
-    let wide_narrow = || {
-        nt_routes_to_wide_narrow(
-            batch,
-            n_in,
-            n_out,
-            environment.kernels.partition_reference(),
-        )
-    };
+    let wide_narrow = || nt_routes_to_wide_narrow(batch, n_in, n_out);
     if ((2..=127).contains(&n_out) || wide_narrow()) && batch >= 1 && n_in >= 1 {
         let m_i = checked_dims.m_i32;
         let n_i = checked_dims.n_i32;
@@ -14739,12 +14720,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
     }
 
     // Native typed Big NT overwrites the typed dX output.
-    if nt_routes_to_big(
-        batch,
-        n_in,
-        n_out,
-        environment.kernels.partition_reference(),
-    ) {
+    if nt_routes_to_big(batch, n_in, n_out) {
         let alpha: f32 = 1.0;
         let m_i = checked_dims.m_i32;
         let n_i = checked_dims.n_i32;
@@ -14947,7 +14923,7 @@ mod prepared_f32_launch_tests {
             alpha: 1.0,
             beta: if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
         };
-        let plan = scalar_dispatch_plan(request, 142).unwrap();
+        let plan = scalar_dispatch_plan(request).unwrap();
         (request, operands, plan)
     }
 
@@ -17641,7 +17617,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(resolved.tensor_maps_digest, [0; 32]);
         assert_eq!(resolved.resources_digest, [2; 32]);
         assert_eq!(resolved.launch.arguments_digest, [3; 32]);
-        assert_eq!(resolved.tuning_table_revision, 46);
+        assert_eq!(resolved.tuning_table_revision, 47);
 
         let eager = build_resolved_gemm_launch_set(&[resolved]).unwrap();
         let graph = build_resolved_gemm_launch_set(&[resolved]).unwrap();
@@ -17705,7 +17681,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(resolved.tensor_maps_digest, [1; 32]);
         assert_eq!(resolved.resources_digest, [2; 32]);
         assert_eq!(resolved.launch.arguments_digest, [3; 32]);
-        assert_eq!(resolved.tuning_table_revision, 46);
+        assert_eq!(resolved.tuning_table_revision, 47);
 
         let launch_set = build_resolved_gemm_launch_set(&[resolved]).unwrap();
         assert_eq!(launch_set.launch_count, 1);
@@ -17948,7 +17924,6 @@ mod prepared_f32_launch_tests {
             sm89_exact_f32_d128_compiler: None,
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (12, 0),
-            partition_reference: 170,
             sm120_scalar_resources_qualified: true,
         }
     }
@@ -17956,7 +17931,7 @@ mod prepared_f32_launch_tests {
     #[test]
     fn backward_launch_plan_uses_the_canonical_op_and_contiguous_abi() {
         let (tn_dims, tn_request, tn_plan) =
-            scalar_backward_launch_plan(ResolvedGemmOp::Tn, (32, 4, 1), 142).unwrap();
+            scalar_backward_launch_plan(ResolvedGemmOp::Tn, (32, 4, 1)).unwrap();
         assert_eq!(
             scalar_backward_request(ResolvedGemmOp::Tn, (32, 4, 1)).unwrap(),
             (tn_dims, tn_request)
@@ -17976,7 +17951,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(tn_plan, ScalarDispatchPlan::TnGemv);
 
         let (nt_dims, nt_request, nt_plan) =
-            scalar_backward_launch_plan(ResolvedGemmOp::Nt, (1, 7, 1), 142).unwrap();
+            scalar_backward_launch_plan(ResolvedGemmOp::Nt, (1, 7, 1)).unwrap();
         assert_eq!(
             scalar_backward_request(ResolvedGemmOp::Nt, (1, 7, 1)).unwrap(),
             (nt_dims, nt_request)
@@ -17999,7 +17974,7 @@ mod prepared_f32_launch_tests {
     #[test]
     fn tn_splitm_plan_matches_enqueue_geometry_at_the_batch_boundary() {
         let (_, request, plan) =
-            scalar_backward_launch_plan(ResolvedGemmOp::Tn, (256, 128, 128), 142).unwrap();
+            scalar_backward_launch_plan(ResolvedGemmOp::Tn, (256, 128, 128)).unwrap();
         assert_eq!(
             plan,
             ScalarDispatchPlan::TnSplitM {
@@ -18019,7 +17994,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(nodes[1].launch.block_dim, (256, 1, 1));
 
         let (_, below_request, below_plan) =
-            scalar_backward_launch_plan(ResolvedGemmOp::Tn, (255, 128, 128), 142).unwrap();
+            scalar_backward_launch_plan(ResolvedGemmOp::Tn, (255, 128, 128)).unwrap();
         assert_eq!(below_plan, ScalarDispatchPlan::TnFinal { slim: true });
         let below = scalar_physical_nodes(
             below_request,
@@ -18039,7 +18014,7 @@ mod prepared_f32_launch_tests {
             ((4096, 64, 64), (48, 86), (1, 2, 86), (16, 1, 1)),
         ] {
             let (_, request, automatic) =
-                scalar_backward_launch_plan(ResolvedGemmOp::Tn, dims, 170).unwrap();
+                scalar_backward_launch_plan(ResolvedGemmOp::Tn, dims).unwrap();
             assert_eq!(automatic, ScalarDispatchPlan::TnNarrow, "{dims:?}");
             let aligned = scalar_test_operands(ResolvedGemmOp::Tn, 1.0);
             let plan = scalar_launch_plan(scalar_tn_admission_facts(), request, aligned).unwrap();
@@ -18112,8 +18087,7 @@ mod prepared_f32_launch_tests {
             ),
             ((128, 1024, 1024), "tn_aligned", "tn_big"),
         ] {
-            let (_, request, plan) =
-                scalar_backward_launch_plan(ResolvedGemmOp::Tn, dims, 142).unwrap();
+            let (_, request, plan) = scalar_backward_launch_plan(ResolvedGemmOp::Tn, dims).unwrap();
             let aligned = scalar_test_operands(ResolvedGemmOp::Tn, 1.0);
             let mut unaligned = aligned;
             unaligned.a += std::mem::size_of::<f32>() as u64;
@@ -18133,7 +18107,7 @@ mod prepared_f32_launch_tests {
     #[test]
     fn nt_k_tail_34_node_plan_preserves_repeated_symbol_arguments_and_neighbors() {
         let (_, request, plan) =
-            scalar_backward_launch_plan(ResolvedGemmOp::Nt, (32, 95, 128), 142).unwrap();
+            scalar_backward_launch_plan(ResolvedGemmOp::Nt, (32, 95, 128)).unwrap();
         assert_eq!(
             plan,
             ScalarDispatchPlan::NtSplitKTail {
@@ -18166,7 +18140,7 @@ mod prepared_f32_launch_tests {
         }
 
         let (_, tail_30_request, tail_30_plan) =
-            scalar_backward_launch_plan(ResolvedGemmOp::Nt, (32, 94, 128), 142).unwrap();
+            scalar_backward_launch_plan(ResolvedGemmOp::Nt, (32, 94, 128)).unwrap();
         assert_eq!(
             scalar_physical_nodes(tail_30_request, operands, tail_30_plan)
                 .unwrap()
@@ -18174,7 +18148,7 @@ mod prepared_f32_launch_tests {
             33
         );
         let (_, aligned_request, aligned_plan) =
-            scalar_backward_launch_plan(ResolvedGemmOp::Nt, (32, 96, 128), 142).unwrap();
+            scalar_backward_launch_plan(ResolvedGemmOp::Nt, (32, 96, 128)).unwrap();
         assert!(matches!(
             aligned_plan,
             ScalarDispatchPlan::NtSplitKMain {
@@ -18182,7 +18156,7 @@ mod prepared_f32_launch_tests {
                 n_tail: 0
             }
         ));
-        assert!(!nt_routes_to_wide_narrow(32, 96, 128, 142));
+        assert!(!nt_routes_to_wide_narrow(32, 96, 128));
         assert_eq!(
             scalar_physical_nodes(aligned_request, operands, aligned_plan)
                 .unwrap()
@@ -18196,10 +18170,10 @@ mod prepared_f32_launch_tests {
             ((32, 95, 129), ScalarDispatchPlan::NtMidBatchWide),
         ] {
             let (_, neighbor_request, neighbor_plan) =
-                scalar_backward_launch_plan(ResolvedGemmOp::Nt, dims, 142).unwrap();
+                scalar_backward_launch_plan(ResolvedGemmOp::Nt, dims).unwrap();
             assert_eq!(neighbor_plan, expected_plan, "neighbor {dims:?}");
             assert_eq!(
-                nt_routes_to_wide_narrow(dims.0, dims.1, dims.2, 142),
+                nt_routes_to_wide_narrow(dims.0, dims.1, dims.2),
                 expected_plan != ScalarDispatchPlan::NtNarrow,
                 "neighbor {dims:?}"
             );

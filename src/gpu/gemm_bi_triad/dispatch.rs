@@ -184,7 +184,6 @@ mod sm89_exact_f32_tn_admission_tests {
             sm89_exact_f32_d128_compiler: None,
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (8, 9),
-            partition_reference: 142,
             sm120_scalar_resources_qualified: false,
         }
     }
@@ -518,7 +517,6 @@ mod sm89_exact_f32_d128_admission_tests {
             sm89_exact_f32_d128_compiler: Some(compiler),
             sm89_exact_f32_d128_symbols_loaded: [true; 2],
             compute_capability: (8, 9),
-            partition_reference: 142,
             sm120_scalar_resources_qualified: false,
         }
     }
@@ -548,7 +546,7 @@ mod sm89_exact_f32_d128_admission_tests {
             let facts = facts(*identity);
             assert!(identity.matches(facts));
             for (route, dims, selected) in CASES {
-                assert_eq!(scalar_dispatch_plan(request(dims), 142).unwrap(), FALLBACK);
+                assert_eq!(scalar_dispatch_plan(request(dims)).unwrap(), FALLBACK);
                 assert_eq!(
                     forced_sm89_exact_f32_d128_plan(facts, request(dims), operands(), route)
                         .unwrap(),
@@ -602,21 +600,17 @@ mod sm89_exact_f32_d128_admission_tests {
                     "{route:?} is the proof candidate on {cc:?}"
                 );
             }
-            for partition_reference in [84, 108, 132, 148, 170] {
-                let board = ScalarLaunchFacts {
-                    compute_capability: (9, 0),
-                    partition_reference,
-                    ..ada
-                };
-                let expected = (scalar_dispatch_plan(request(dims), partition_reference).unwrap()
-                    == FALLBACK)
-                    .then_some(selected);
-                assert_eq!(
-                    scalar_proof_plan(board, request(dims), operands()).unwrap(),
-                    expected,
-                    "{route:?} stands in for exactly the split it reproduces at a partition reference of {partition_reference}"
-                );
-            }
+            let hopper = ScalarLaunchFacts {
+                compute_capability: (9, 0),
+                ..ada
+            };
+            let expected =
+                (scalar_dispatch_plan(request(dims)).unwrap() == FALLBACK).then_some(selected);
+            assert_eq!(
+                scalar_proof_plan(hopper, request(dims), operands()).unwrap(),
+                expected,
+                "{route:?} stands in for exactly the split it reproduces"
+            );
             let pre_ampere = ScalarLaunchFacts {
                 compute_capability: (7, 5),
                 ..ada
@@ -5627,24 +5621,17 @@ pub(super) fn splitm_tn_partition(
     batch: usize,
     n_in: usize,
     n_out: usize,
-    partition_reference: u32,
 ) -> Result<Option<(usize, usize)>, String> {
     // No n_in floor: the partial kernel predicates K_out < 128 exactly
     // like the plain kernel, and a small-K dW against a large batch
     // reduction underfills the grid without the split (K_out=24, N=768
     // ran six CTAs). The split changes the dW summation order versus
-    // the plain kernel; run-to-run and per-shape determinism hold — the
-    // partition is a pure function of the shape and the architecture's
-    // partition reference, so every card of the architecture folds alike.
+    // the plain kernel; the partition is a pure function of the shape, so
+    // every card of every architecture folds alike.
     if !(n_out >= 128 && batch >= 256) {
         return Ok(None);
     }
-    let policy = scalar_wave_policy(partition_reference)?;
-    let target_blocks = wave_target_blocks(
-        partition_reference,
-        policy.tn_split_m_wave_numerator,
-        policy.tn_split_m_wave_denominator,
-    )?;
+    let target_blocks = scalar_split_policy().tn_split_m_target_blocks;
     let batch_u32 = u32::try_from(batch).map_err(|_| "TN split-M batch exceeds u32::MAX")?;
     let k_tiles = u32::try_from(n_in)
         .map_err(|_| "TN split-M input width exceeds u32::MAX")?
@@ -5755,9 +5742,6 @@ pub(super) struct ScalarLaunchFacts {
     pub sm89_exact_f32_d128_compiler: Option<CompilerIdentity>,
     pub sm89_exact_f32_d128_symbols_loaded: [bool; 2],
     pub compute_capability: (u32, u32),
-    /// The architecture's partition reference, not the live SM count: the
-    /// scalar plans it feeds decide reduction orders.
-    pub partition_reference: u32,
     /// The SM120 scalar kernels met their resource caps on this toolkit.
     pub sm120_scalar_resources_qualified: bool,
 }
@@ -6405,7 +6389,6 @@ pub(super) fn scalar_sm89_composed_test_facts(index: usize) -> ScalarLaunchFacts
         sm89_exact_f32_d128_compiler: None,
         sm89_exact_f32_d128_symbols_loaded: [false; 2],
         compute_capability: (8, 9),
-        partition_reference: 142,
         sm120_scalar_resources_qualified: false,
     }
 }
@@ -6820,7 +6803,7 @@ fn sm89_exact_f32_d128_plan_for_route(
             1,
         ),
     };
-    let actual_fallback = scalar_dispatch_plan(request, facts.partition_reference)?;
+    let actual_fallback = scalar_dispatch_plan(request)?;
     let required_fallback = ScalarDispatchPlan::TnSplitM {
         m_chunk: 16,
         chunks: 64,
@@ -6911,7 +6894,7 @@ fn sm89_exact_f32_plan_for_route(
             2,
         ),
     };
-    let actual_fallback = scalar_dispatch_plan(request, facts.partition_reference)?;
+    let actual_fallback = scalar_dispatch_plan(request)?;
     let environment_ok = match admission {
         ScalarAdmission::Evidence => qualified_sm89_exact_f32_environment(facts),
         ScalarAdmission::Candidate => qualified_sm89_exact_f32_candidate_environment(facts),
@@ -6972,7 +6955,7 @@ pub(super) fn scalar_proof_plan(
     operands: F32TriadOperands,
 ) -> Result<Option<ScalarDispatchPlan>, String> {
     let plan = scalar_plan_with_admission(facts, request, operands, ScalarAdmission::Proof)?;
-    Ok((plan != scalar_dispatch_plan(request, facts.partition_reference)?).then_some(plan))
+    Ok((plan != scalar_dispatch_plan(request)?).then_some(plan))
 }
 
 fn scalar_plan_with_admission(
@@ -6981,7 +6964,7 @@ fn scalar_plan_with_admission(
     operands: F32TriadOperands,
     admission: ScalarAdmission,
 ) -> Result<ScalarDispatchPlan, String> {
-    let fallback = scalar_dispatch_plan(request, facts.partition_reference)?;
+    let fallback = scalar_dispatch_plan(request)?;
     for route in [
         super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route::D128InDirectFold,
         super::sm89_exact_f32_d128_source::Sm89ExactF32D128Route::D128OutDirectFold,
@@ -7315,51 +7298,12 @@ fn slim_final(output_rows: usize, output_columns: usize) -> bool {
         || (output_rows < GEMM_M_SLIM_FORCE && output_columns >= GEMM_CUSTOM_MIN)
 }
 
-fn scalar_wave_policy(
-    partition_reference: u32,
-) -> Result<crate::gpu::kernel_identity::ScalarWavePolicy, String> {
-    if partition_reference == 0 {
-        return Err("scalar dispatch requires a nonzero multiprocessor count".into());
-    }
-    let policy = crate::gpu::kernel_identity::ScalarWavePolicy::current();
-    if policy.thin_split_wave_denominator == 0
-        || policy.slim_split_wave_denominator == 0
-        || policy.tn_split_m_wave_denominator == 0
-    {
-        return Err("scalar dispatch wave policy has a zero denominator".into());
-    }
-    Ok(policy)
+const fn scalar_split_policy() -> crate::gpu::kernel_identity::ScalarSplitPolicy {
+    crate::gpu::kernel_identity::ScalarSplitPolicy::current()
 }
 
-fn grid_below_waves(
-    blocks: u32,
-    partition_reference: u32,
-    numerator: u64,
-    denominator: u64,
-) -> Result<bool, String> {
-    let blocks = u64::from(blocks)
-        .checked_mul(denominator)
-        .ok_or_else(|| "scalar dispatch block-wave comparison overflows u64".to_string())?;
-    let target = u64::from(partition_reference)
-        .checked_mul(numerator)
-        .ok_or_else(|| "scalar dispatch SM-wave comparison overflows u64".to_string())?;
-    Ok(blocks < target)
-}
-
-fn wave_target_blocks(
-    partition_reference: u32,
-    numerator: u64,
-    denominator: u64,
-) -> Result<u32, String> {
-    let scaled = u64::from(partition_reference)
-        .checked_mul(numerator)
-        .ok_or_else(|| "scalar dispatch target wave count overflows u64".to_string())?;
-    u32::try_from(scaled.div_ceil(denominator))
-        .map_err(|_| "scalar dispatch target block count exceeds u32::MAX".into())
-}
-
-fn scalar_nn_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDispatchPlan, String> {
-    let policy = scalar_wave_policy(partition_reference)?;
+fn scalar_nn_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
+    let policy = scalar_split_policy();
     let (batch, n_in, n_out) = dims.tuple();
     if (1..32).contains(&batch) && (32..=2048).contains(&n_in) && n_out >= 32 {
         return Ok(ScalarDispatchPlan::NnUltraThin);
@@ -7376,12 +7320,7 @@ fn scalar_nn_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDisp
         return Ok(ScalarDispatchPlan::NnGemv);
     }
     let plain_slim_blocks = checked_tile_grid(dims.m_u32, 128, dims.n_u32, 64)?;
-    let underfill = grid_below_waves(
-        plain_slim_blocks,
-        partition_reference,
-        policy.thin_split_wave_numerator,
-        policy.thin_split_wave_denominator,
-    )?;
+    let underfill = plain_slim_blocks < policy.thin_split_max_tiles;
     if (32..=1024).contains(&batch)
         && (64..=2048).contains(&n_out)
         && n_out.is_multiple_of(4)
@@ -7421,12 +7360,7 @@ fn scalar_nn_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDisp
                 "NN slim split-K scratch",
             )? <= SPLITK_SCRATCH_CAP
             && plain_slim_blocks > 0
-            && grid_below_waves(
-                plain_slim_blocks,
-                partition_reference,
-                policy.slim_split_wave_numerator,
-                policy.slim_split_wave_denominator,
-            )?
+            && plain_slim_blocks < policy.slim_split_max_tiles
         {
             return Ok(ScalarDispatchPlan::NnSplitKSlim { chunks });
         }
@@ -7447,7 +7381,6 @@ fn scalar_nn_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDisp
 pub(in crate::gpu) fn tc_half_policy_prefers_scalar_forward(
     compute_capability: (u32, u32),
     dims: (usize, usize, usize),
-    multiprocessor_count: u32,
 ) -> Result<bool, String> {
     let policy = super::super::kernel_identity::Sm80TcPolicy::current();
     if compute_capability != policy.deep_split_k_compute_capability
@@ -7455,7 +7388,7 @@ pub(in crate::gpu) fn tc_half_policy_prefers_scalar_forward(
     {
         return Ok(false);
     }
-    let plan = scalar_nn_plan(GemmDims::nn(dims, dims.1)?, multiprocessor_count)?;
+    let plan = scalar_nn_plan(GemmDims::nn(dims, dims.1)?)?;
     Ok(match plan {
         ScalarDispatchPlan::NnSplitKThinTail { .. } => {
             dims.1 >= policy.deep_split_k_tail_min_reduction
@@ -7465,8 +7398,7 @@ pub(in crate::gpu) fn tc_half_policy_prefers_scalar_forward(
     })
 }
 
-fn scalar_tn_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDispatchPlan, String> {
-    scalar_wave_policy(partition_reference)?;
+fn scalar_tn_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
     let (batch, n_in, n_out) = dims.tuple();
     // The GEMV kernel serves any batch and width: a warp per weight, lanes
     // past the batch add nothing.
@@ -7476,7 +7408,7 @@ fn scalar_tn_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDisp
     if (2..=127).contains(&n_out) {
         return Ok(ScalarDispatchPlan::TnNarrow);
     }
-    if let Some((m_chunk, chunks)) = splitm_tn_partition(batch, n_in, n_out, partition_reference)? {
+    if let Some((m_chunk, chunks)) = splitm_tn_partition(batch, n_in, n_out)? {
         return Ok(ScalarDispatchPlan::TnSplitM { m_chunk, chunks });
     }
     if n_in >= 1 && n_out >= GEMM_CUSTOM_MIN {
@@ -7489,8 +7421,8 @@ fn scalar_tn_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDisp
     ))
 }
 
-fn scalar_nt_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDispatchPlan, String> {
-    let policy = scalar_wave_policy(partition_reference)?;
+fn scalar_nt_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
+    let policy = scalar_split_policy();
     let (batch, n_in, n_out) = dims.tuple();
     if (2..=127).contains(&n_out) {
         return Ok(ScalarDispatchPlan::NtNarrow);
@@ -7505,12 +7437,7 @@ fn scalar_nt_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDisp
         });
     }
     let plain_slim_blocks = checked_tile_grid(dims.m_u32, 128, dims.k_u32, 64)?;
-    let underfill = grid_below_waves(
-        plain_slim_blocks,
-        partition_reference,
-        policy.thin_split_wave_numerator,
-        policy.thin_split_wave_denominator,
-    )?;
+    let underfill = plain_slim_blocks < policy.thin_split_max_tiles;
     if batch < 32 && n_out >= 128 {
         return Ok(ScalarDispatchPlan::NtSmallBatchWide);
     }
@@ -7561,12 +7488,7 @@ fn scalar_nt_plan(dims: GemmDims, partition_reference: u32) -> Result<ScalarDisp
                 "NT slim split-K scratch",
             )? <= SPLITK_SCRATCH_CAP
             && plain_slim_blocks > 0
-            && grid_below_waves(
-                plain_slim_blocks,
-                partition_reference,
-                policy.slim_split_wave_numerator,
-                policy.slim_split_wave_denominator,
-            )?
+            && plain_slim_blocks < policy.slim_split_max_tiles
         {
             return Ok(ScalarDispatchPlan::NtSplitKSlim { chunks });
         }
@@ -7612,11 +7534,12 @@ pub(crate) const fn exact_chunks(k: usize, n: usize) -> bool {
 /// walks the reduction with one `fma` per input in ascending order, padding
 /// a ragged end with zero products; which tile serves is scheduling alone.
 /// The slim tile pads to 32 inputs, not 16, so it serves only where the two
-/// paddings agree. A deep layer runs the chunk fold. The tile thresholds are
-/// in waves of the architecture's partition reference, never of one card.
+/// paddings agree. A deep layer runs the chunk fold. Every tile and every
+/// partial writes the same bits, so the thresholds read the card's own
+/// multiprocessor count and each card runs the tiles that fill it.
 pub(super) fn exact_batch_invariant_nn_plan(
     request: F32TriadRequest,
-    partition_reference: u32,
+    multiprocessors: u32,
 ) -> Result<ScalarDispatchPlan, String> {
     if request.op != ResolvedGemmOp::Nn {
         return Err(format!(
@@ -7625,8 +7548,8 @@ pub(super) fn exact_batch_invariant_nn_plan(
         ));
     }
     request.shape.validate(request.op)?;
-    if partition_reference == 0 {
-        return Err("the batch-invariant exact plan needs a partition reference".into());
+    if multiprocessors == 0 {
+        return Err("the batch-invariant exact plan needs the card's multiprocessor count".into());
     }
     let (m, k, n) = (request.shape.m, request.shape.k, request.shape.n);
     if m == 0 || k == 0 || n == 0 {
@@ -7634,7 +7557,7 @@ pub(super) fn exact_batch_invariant_nn_plan(
             "the batch-invariant exact plan takes no empty axis: {m}x{k}x{n}"
         ));
     }
-    let waves = partition_reference as usize;
+    let waves = multiprocessors as usize;
     if exact_chunks(k, n) {
         let chunks = k.div_ceil(EXACT_CHUNK);
         let piece_rows = (SPLITK_SCRATCH_CAP / chunks.saturating_mul(n).max(1)).clamp(1, m);
@@ -7645,8 +7568,7 @@ pub(super) fn exact_batch_invariant_nn_plan(
             ));
         }
         // The slim partial once its grid fills three quarters of a wave of
-        // the partition reference, the single-row tile for one row, the
-        // small tile between.
+        // the card, the single-row tile for one row, the small tile between.
         let slim_grid = m
             .div_ceil(128)
             .saturating_mul(n.div_ceil(64))
@@ -7693,56 +7615,36 @@ pub(super) fn exact_batch_invariant_nn_plan(
 /// 16-row tiles.
 pub(super) const EXACT_SLAB_GRID_ROWS_MAX: usize = 65_535;
 
-pub(super) fn scalar_dispatch_plan(
-    request: F32TriadRequest,
-    partition_reference: u32,
-) -> Result<ScalarDispatchPlan, String> {
+/// The exact scalar plan of a request: a function of the shape alone, so
+/// every card of every architecture cuts each reduction at the same places
+/// and writes the same bits.
+pub(super) fn scalar_dispatch_plan(request: F32TriadRequest) -> Result<ScalarDispatchPlan, String> {
     request.shape.validate(request.op)?;
-    scalar_wave_policy(partition_reference)?;
     let dims = (request.shape.m, request.shape.k, request.shape.n);
     match request.op {
         crate::gpu::kernel_identity::ResolvedGemmOp::Nn => {
-            scalar_nn_plan(GemmDims::nn(dims, request.shape.lda)?, partition_reference)
+            scalar_nn_plan(GemmDims::nn(dims, request.shape.lda)?)
         }
-        crate::gpu::kernel_identity::ResolvedGemmOp::Tn => {
-            scalar_tn_plan(GemmDims::tn(dims)?, partition_reference)
-        }
-        crate::gpu::kernel_identity::ResolvedGemmOp::Nt => {
-            scalar_nt_plan(GemmDims::nt(dims)?, partition_reference)
-        }
+        crate::gpu::kernel_identity::ResolvedGemmOp::Tn => scalar_tn_plan(GemmDims::tn(dims)?),
+        crate::gpu::kernel_identity::ResolvedGemmOp::Nt => scalar_nt_plan(GemmDims::nt(dims)?),
     }
 }
 
-pub(super) fn nn_routes_to_big(
-    batch: usize,
-    n_in: usize,
-    n_out: usize,
-    partition_reference: u32,
-) -> bool {
+pub(super) fn nn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
     GemmDims::nn((batch, n_in, n_out), n_in)
-        .and_then(|dims| scalar_nn_plan(dims, partition_reference))
+        .and_then(scalar_nn_plan)
         .is_ok_and(|plan| matches!(plan, ScalarDispatchPlan::NnFinal { slim: false }))
 }
 
-pub(super) fn tn_routes_to_big(
-    batch: usize,
-    n_in: usize,
-    n_out: usize,
-    partition_reference: u32,
-) -> bool {
+pub(super) fn tn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
     GemmDims::tn((batch, n_in, n_out))
-        .and_then(|dims| scalar_tn_plan(dims, partition_reference))
+        .and_then(scalar_tn_plan)
         .is_ok_and(|plan| matches!(plan, ScalarDispatchPlan::TnFinal { slim: false }))
 }
 
-pub(super) fn nt_routes_to_big(
-    batch: usize,
-    n_in: usize,
-    n_out: usize,
-    partition_reference: u32,
-) -> bool {
+pub(super) fn nt_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
     GemmDims::nt((batch, n_in, n_out))
-        .and_then(|dims| scalar_nt_plan(dims, partition_reference))
+        .and_then(scalar_nt_plan)
         .is_ok_and(|plan| matches!(plan, ScalarDispatchPlan::NtFinal { slim: false }))
 }
 
@@ -7750,14 +7652,9 @@ pub(super) fn nt_routes_to_big(
 /// 128 or more: a batch under 128 rows that no split-K route takes. No
 /// qualified cell replaces either plan on any board, so the plain narrow
 /// kernel is the exact f32 route of these shapes everywhere.
-pub(super) fn nt_routes_to_wide_narrow(
-    batch: usize,
-    n_in: usize,
-    n_out: usize,
-    partition_reference: u32,
-) -> bool {
+pub(super) fn nt_routes_to_wide_narrow(batch: usize, n_in: usize, n_out: usize) -> bool {
     GemmDims::nt((batch, n_in, n_out))
-        .and_then(|dims| scalar_nt_plan(dims, partition_reference))
+        .and_then(scalar_nt_plan)
         .is_ok_and(|plan| {
             matches!(
                 plan,
@@ -7767,7 +7664,7 @@ pub(super) fn nt_routes_to_wide_narrow(
 }
 
 #[cfg(test)]
-mod scalar_wave_policy_tests {
+mod scalar_split_policy_tests {
     use super::{
         INFERENCE_COPYPLAN_EVIDENCE_COHORTS, InferenceCopyPlanQualificationIdentity,
         NT_INFERENCE_COPYPLAN_COMPOSED_EVIDENCE_COHORTS,
@@ -7783,8 +7680,6 @@ mod scalar_wave_policy_tests {
         ArtifactIdentity, ArtifactKind, COMPILER_REVISION, COMPOSER_REVISION, CompilerIdentity,
         CudaTarget, ModuleKind, NUMERIC_ABI_REVISION, ResolvedGemmOp, SCHEDULE_REVISION,
     };
-
-    const RTX_6000_ADA_SMS: u32 = 142;
 
     #[derive(Clone, Copy)]
     struct MeasuredComposedRow {
@@ -7918,23 +7813,15 @@ mod scalar_wave_policy_tests {
             sm89_exact_f32_d128_compiler: None,
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (8, 9),
-            partition_reference: RTX_6000_ADA_SMS,
             sm120_scalar_resources_qualified: false,
         }
     }
 
-    fn plan(
-        op: ResolvedGemmOp,
-        dims: (usize, usize, usize),
-        multiprocessor_count: u32,
-    ) -> Result<ScalarDispatchPlan, String> {
-        scalar_dispatch_plan(
-            F32TriadRequest {
-                op,
-                shape: F32TriadShape::contiguous(op, dims),
-            },
-            multiprocessor_count,
-        )
+    fn plan(op: ResolvedGemmOp, dims: (usize, usize, usize)) -> Result<ScalarDispatchPlan, String> {
+        scalar_dispatch_plan(F32TriadRequest {
+            op,
+            shape: F32TriadShape::contiguous(op, dims),
+        })
     }
 
     fn tn_admission_compiler(
@@ -7984,7 +7871,6 @@ mod scalar_wave_policy_tests {
             sm89_exact_f32_d128_compiler: None,
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (12, 0),
-            partition_reference: 170,
             sm120_scalar_resources_qualified: true,
         }
     }
@@ -8075,7 +7961,6 @@ mod scalar_wave_policy_tests {
             sm89_exact_f32_d128_compiler: None,
             sm89_exact_f32_d128_symbols_loaded: [false; 2],
             compute_capability: (8, 9),
-            partition_reference: RTX_6000_ADA_SMS,
             sm120_scalar_resources_qualified: false,
         }
     }
@@ -8107,64 +7992,52 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn scalar_dispatch_rejects_zero_multiprocessors() {
-        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
-            let error = plan(op, (128, 128, 128), 0)
-                .expect_err("scalar dispatch requires a nonzero multiprocessor count");
-            assert!(error.contains("multiprocessor count"), "{error}");
-        }
-    }
-
-    #[test]
-    fn nn_thin_split_admission_uses_the_live_multiprocessor_count() {
-        let dims = (512, 64, 2048);
+    fn nn_thin_split_admission_counts_the_shapes_own_tiles() {
+        // 128 plain 128 x 64 tiles split; 192 do not, on every card.
         assert_eq!(
-            plan(ResolvedGemmOp::Nn, dims, 108).unwrap(),
-            ScalarDispatchPlan::NnFinal { slim: false }
-        );
-        assert_eq!(
-            plan(ResolvedGemmOp::Nn, dims, RTX_6000_ADA_SMS).unwrap(),
+            plan(ResolvedGemmOp::Nn, (512, 64, 2048)).unwrap(),
             ScalarDispatchPlan::NnSplitKThin
         );
+        assert!(!matches!(
+            plan(ResolvedGemmOp::Nn, (1024, 64, 1536)).unwrap(),
+            ScalarDispatchPlan::NnSplitKThin | ScalarDispatchPlan::NnSplitKThinTail { .. }
+        ));
     }
 
     #[test]
-    fn nt_split_admission_uses_the_live_multiprocessor_count() {
-        let dims = (512, 2048, 128);
+    fn nt_split_admission_counts_the_shapes_own_tiles() {
         assert_eq!(
-            plan(ResolvedGemmOp::Nt, dims, 108).unwrap(),
-            ScalarDispatchPlan::NtFinal { slim: false }
-        );
-        assert_eq!(
-            plan(ResolvedGemmOp::Nt, dims, RTX_6000_ADA_SMS).unwrap(),
+            plan(ResolvedGemmOp::Nt, (512, 2048, 128)).unwrap(),
             ScalarDispatchPlan::NtSplitKMain {
                 n_main: 128,
                 n_tail: 0,
             }
         );
+        assert!(!matches!(
+            plan(ResolvedGemmOp::Nt, (1024, 1536, 128)).unwrap(),
+            ScalarDispatchPlan::NtSplitKMain { .. } | ScalarDispatchPlan::NtSplitKTail { .. }
+        ));
     }
 
     #[test]
     fn nt_generic_split_admission_keeps_the_pre_large_deep_scratch_boundary() {
         assert_eq!(
-            plan(ResolvedGemmOp::Nt, (32, 2_304, 2_048), 170).unwrap(),
+            plan(ResolvedGemmOp::Nt, (32, 2_304, 2_048)).unwrap(),
             ScalarDispatchPlan::NtMidBatchWide
         );
     }
 
     #[test]
     fn nt_split_admission_promotes_the_two_qualified_thin_output_cells() {
-        for multiprocessor_count in [20, 56, 82, 108, 120, 128, 132, 142, 148, 170] {
-            for dims in [(512, 16, 2048), (16, 512, 2048)] {
-                assert_eq!(
-                    plan(ResolvedGemmOp::Nt, dims, multiprocessor_count).unwrap(),
-                    ScalarDispatchPlan::NtSplitKMain {
-                        n_main: 2048,
-                        n_tail: 0,
-                    },
-                    "{dims:?} {multiprocessor_count} SMs"
-                );
-            }
+        for dims in [(512, 16, 2048), (16, 512, 2048)] {
+            assert_eq!(
+                plan(ResolvedGemmOp::Nt, dims).unwrap(),
+                ScalarDispatchPlan::NtSplitKMain {
+                    n_main: 2048,
+                    n_tail: 0,
+                },
+                "{dims:?}"
+            );
         }
 
         for (dims, expected) in [
@@ -8174,7 +8047,7 @@ mod scalar_wave_policy_tests {
             ((16, 512, 2016), ScalarDispatchPlan::NtSmallBatchWide),
         ] {
             assert_eq!(
-                plan(ResolvedGemmOp::Nt, dims, 170).unwrap(),
+                plan(ResolvedGemmOp::Nt, dims).unwrap(),
                 expected,
                 "neighbor {dims:?}"
             );
@@ -8262,7 +8135,7 @@ mod scalar_wave_policy_tests {
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (128, 8_192, 128)),
         };
         let operands = nn_qualified_operands();
-        let fallback = scalar_dispatch_plan(request, facts.partition_reference).unwrap();
+        let fallback = scalar_dispatch_plan(request).unwrap();
         assert_eq!(fallback, ScalarDispatchPlan::NnSplitKThin);
         assert_eq!(
             scalar_launch_plan(facts, request, operands).unwrap(),
@@ -8381,17 +8254,9 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn tn_split_m_partition_targets_two_live_waves() {
-        let dims = (4096, 128, 128);
+    fn tn_split_m_partition_is_a_function_of_the_shape() {
         assert_eq!(
-            plan(ResolvedGemmOp::Tn, dims, 108).unwrap(),
-            ScalarDispatchPlan::TnSplitM {
-                m_chunk: 32,
-                chunks: 128,
-            }
-        );
-        assert_eq!(
-            plan(ResolvedGemmOp::Tn, dims, RTX_6000_ADA_SMS).unwrap(),
+            plan(ResolvedGemmOp::Tn, (4096, 128, 128)).unwrap(),
             ScalarDispatchPlan::TnSplitM {
                 m_chunk: 16,
                 chunks: 256,
@@ -8401,7 +8266,7 @@ mod scalar_wave_policy_tests {
 
     #[test]
     fn tn_small_input_splitm_gap_is_covered_by_the_generic_member() {
-        let plan = plan(ResolvedGemmOp::Tn, (4096, 24, 768), RTX_6000_ADA_SMS).unwrap();
+        let plan = plan(ResolvedGemmOp::Tn, (4096, 24, 768)).unwrap();
         assert!(matches!(
             plan,
             ScalarDispatchPlan::TnSplitM {
@@ -8731,7 +8596,7 @@ mod scalar_wave_policy_tests {
         let facts = inference_copyplan_facts(2);
         let operands = nn_qualified_operands();
         let request = nn_qualified_request((2_048, 1_536, 768));
-        let fallback = scalar_dispatch_plan(request, facts.partition_reference).unwrap();
+        let fallback = scalar_dispatch_plan(request).unwrap();
         assert_eq!(fallback, ScalarDispatchPlan::NnFinal { slim: false });
         let transposed_unmeasured = nn_qualified_request((2_048, 3_072, 768));
         assert_ne!(
@@ -9093,7 +8958,7 @@ mod scalar_wave_policy_tests {
         };
         let selected = ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified;
         assert_eq!(
-            scalar_dispatch_plan(request, facts.partition_reference).unwrap(),
+            scalar_dispatch_plan(request).unwrap(),
             ScalarDispatchPlan::NtFinal { slim: false }
         );
         assert_eq!(
@@ -9262,7 +9127,7 @@ mod scalar_wave_policy_tests {
                     shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
                 };
                 assert_eq!(
-                    scalar_dispatch_plan(request, facts.partition_reference).unwrap(),
+                    scalar_dispatch_plan(request).unwrap(),
                     fallback,
                     "cohort {cohort} cell {dims:?} prior plan"
                 );
@@ -9323,7 +9188,7 @@ mod scalar_wave_policy_tests {
             );
         }
 
-        let fallback = scalar_dispatch_plan(request, RTX_6000_ADA_SMS).unwrap();
+        let fallback = scalar_dispatch_plan(request).unwrap();
         assert_eq!(
             fallback,
             ScalarDispatchPlan::TnSplitM {
@@ -9471,7 +9336,7 @@ mod scalar_wave_policy_tests {
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (4_096, 3_072, 1_536)),
         };
         let operands = nn_qualified_operands();
-        let fallback = scalar_dispatch_plan(request, RTX_6000_ADA_SMS).unwrap();
+        let fallback = scalar_dispatch_plan(request).unwrap();
         assert_eq!(fallback, ScalarDispatchPlan::NtFinal { slim: false });
         for cohort in 0..NT_INFERENCE_COPYPLAN_COMPOSED_QUALIFICATION_CANDIDATES.len() {
             assert_eq!(
@@ -9653,7 +9518,7 @@ mod scalar_wave_policy_tests {
                     };
                     assert_eq!(
                         scalar_launch_plan(facts, neighbor, operands).unwrap(),
-                        scalar_dispatch_plan(neighbor, facts.partition_reference).unwrap(),
+                        scalar_dispatch_plan(neighbor).unwrap(),
                         "shape neighbor {neighbor:?} must retain prior AUTO"
                     );
                 }
@@ -9678,7 +9543,7 @@ mod scalar_wave_policy_tests {
                 };
                 assert_eq!(
                     scalar_launch_plan(facts, mutated, operands).unwrap(),
-                    scalar_dispatch_plan(mutated, facts.partition_reference).unwrap(),
+                    scalar_dispatch_plan(mutated).unwrap(),
                     "stride mutation {shape:?} must retain prior AUTO"
                 );
             }
@@ -10005,7 +9870,7 @@ mod scalar_wave_policy_tests {
         };
         let qualified = ScalarDispatchPlan::NtPrismVectorQualified;
         assert_eq!(
-            scalar_dispatch_plan(request, 170).unwrap(),
+            scalar_dispatch_plan(request).unwrap(),
             ScalarDispatchPlan::NtFinal { slim: true }
         );
         assert_eq!(
@@ -10084,7 +9949,7 @@ mod scalar_wave_policy_tests {
         };
         let qualified = ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified;
         assert_eq!(
-            scalar_dispatch_plan(request, 170).unwrap(),
+            scalar_dispatch_plan(request).unwrap(),
             ScalarDispatchPlan::NtSplitKMain {
                 n_main: 128,
                 n_tail: 0,
@@ -10629,20 +10494,15 @@ mod scalar_wave_policy_tests {
     }
 
     #[test]
-    fn nn_slim_split_admission_uses_three_live_waves() {
-        let dims = (2560, 384, 512);
+    fn nn_slim_split_admission_counts_the_shapes_own_tiles() {
         assert_eq!(
-            plan(ResolvedGemmOp::Nn, dims, 48).unwrap(),
-            ScalarDispatchPlan::NnFinal { slim: true }
-        );
-        assert_eq!(
-            plan(ResolvedGemmOp::Nn, dims, RTX_6000_ADA_SMS).unwrap(),
+            plan(ResolvedGemmOp::Nn, (2560, 384, 512)).unwrap(),
             ScalarDispatchPlan::NnSplitKSlim { chunks: 6 }
         );
     }
 
     #[test]
-    fn live_sm_policy_preserves_the_frozen_142_sm_scalar_table() {
+    fn shape_only_split_policy_keeps_the_frozen_scalar_table() {
         let cases = [
             (
                 ResolvedGemmOp::Nn,
@@ -10758,11 +10618,7 @@ mod scalar_wave_policy_tests {
         ];
 
         for (op, dims, expected) in cases {
-            assert_eq!(
-                plan(op, dims, RTX_6000_ADA_SMS).unwrap(),
-                expected,
-                "{op:?} {dims:?}"
-            );
+            assert_eq!(plan(op, dims).unwrap(), expected, "{op:?} {dims:?}");
         }
     }
 }
@@ -11149,8 +11005,7 @@ mod tc_policy_tests {
 
     #[test]
     fn sm89_half_policy_prefers_proven_split_k_scalar_boundaries_only() {
-        let prefers_scalar =
-            |dims| tc_half_policy_prefers_scalar_forward((8, 9), dims, RTX_6000_ADA_SMS).unwrap();
+        let prefers_scalar = |dims| tc_half_policy_prefers_scalar_forward((8, 9), dims).unwrap();
 
         for dims in [
             (127, 511, 128),
@@ -11189,12 +11044,8 @@ mod tc_policy_tests {
     fn deep_split_k_scalar_preference_is_sm89_specific() {
         for compute_capability in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0), (12, 0)] {
             assert!(
-                !tc_half_policy_prefers_scalar_forward(
-                    compute_capability,
-                    (128, 8192, 128),
-                    RTX_6000_ADA_SMS,
-                )
-                .unwrap(),
+                !tc_half_policy_prefers_scalar_forward(compute_capability, (128, 8192, 128))
+                    .unwrap(),
                 "unmeasured architecture {compute_capability:?} must keep TC"
             );
         }
@@ -11249,23 +11100,23 @@ mod tc_policy_tests {
         for (multiprocessor_count, expected) in [
             (
                 48,
-                "8ffb9f41f6b4df65840cc56b04d9075d5dc90023bf669af69ed36767f8cd78ae",
+                "74bf14343e3c91214469021ec13b79e602f1b2447cc9957f8d8a292fc73227f4",
             ),
             (
                 80,
-                "716558ebb2cc88e4c6e478b2dfddba5f183fe16ed58bcfd5fa46b4e147424746",
+                "77de34a2e3fe606ca6d56964f9c107c59bec301e5c6b7e10fbb627113c58cf51",
             ),
             (
                 108,
-                "62fd8115a3fed77d4a5fb1e958cc1c1f8bfeedc41fd9e86d624bf7f1c438a28f",
+                "33c6c6a598c7e7597384bd6e5ca3c613fefc6c9071a17dadad1c3f0190294b40",
             ),
             (
                 120,
-                "27df93074ce978142c01210058242d9a1b715302f722f656d6b0b6fde370e569",
+                "5a61c3cbca17bcbfb4fd02cc92b7072657a3a97f43ebb6bff2eb8ec2413de8b7",
             ),
             (
                 142,
-                "05849a39ab8eaafd08f55ee27e72c18b3bb9bc4aa009818be5ba6ae872093012",
+                "d7bf5a18a06b6a31966e857d1852a2d617ecce996dc83d739e0b0db3ca5a5b57",
             ),
         ] {
             let actual = digest_hex(&gemm_dispatch_policy_digest(multiprocessor_count));
@@ -13310,8 +13161,8 @@ mod tf32_tests {
 
     #[test]
     fn tf32_tn_underfill_qualification_uses_current_tuning_revision() {
-        assert_eq!(TUNING_TABLE_REVISION, 46);
-        assert_eq!(F32_TF32_TUNING_REVISION, 46);
+        assert_eq!(TUNING_TABLE_REVISION, 47);
+        assert_eq!(F32_TF32_TUNING_REVISION, 47);
     }
 
     #[test]
@@ -16979,12 +16830,13 @@ mod exact_batch_invariant_tests {
 
     #[test]
     fn exact_batch_invariant_plan_folds_by_the_layer_alone() {
-        for reference in [84, 108, 128, 132, 142, 148, 170] {
+        for multiprocessors in [24, 84, 108, 128, 132, 142, 148, 170, 188] {
             for k in [1, 15, 16, 33, 256, 383, 384, 511, 512, 833, 1536, 3000] {
                 for n in [1, 17, 40, 101, 127, 128, 384, 1536, 2112] {
                     for m in [1, 7, 16, 17, 64, 65, 128, 513, 1024, 4096, 32_768] {
-                        let plan = exact_batch_invariant_nn_plan(nn(m, k, n), reference).unwrap();
-                        let what = format!("{m}x{k}x{n} on {reference}: {plan:?}");
+                        let plan =
+                            exact_batch_invariant_nn_plan(nn(m, k, n), multiprocessors).unwrap();
+                        let what = format!("{m}x{k}x{n} on {multiprocessors} SMs: {plan:?}");
                         match plan {
                             ScalarDispatchPlan::NnExactChunk {
                                 partial,

@@ -14,7 +14,7 @@ use mamba_rs::gpu::kernel_identity::{
     NumericContractSet, POLICY_REVISION, PhysicalGemmBackend, PhysicalLaunchKind, PolicyDtype,
     ResolvedGemmLaunchSet, ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute,
     ResolvedInstructionFamily, ResolvedInstructionShape, ResolvedNumericContract,
-    ResolvedOperandConversion, ResolvedOutputOwnership, SCHEDULE_REVISION, ScalarWavePolicy,
+    ResolvedOperandConversion, ResolvedOutputOwnership, SCHEDULE_REVISION, ScalarSplitPolicy,
     Sm80TcPolicy, TUNING_TABLE_REVISION, build_artifact_set, build_resolved_gemm_launch_set,
     canonical_ptx_image, gemm_dispatch_policy_digest, route_backend_contract_sets,
 };
@@ -638,25 +638,21 @@ fn sm80_tc_policy_digest_covers_geometry_waves_device_and_deep_split_k() {
 }
 
 #[test]
-fn scalar_wave_policy_digest_covers_every_wave_and_device_field() {
-    let policy = ScalarWavePolicy::current();
-    let hash = policy.digest(142);
-    assert_ne!(policy.digest(141), hash);
+fn scalar_split_policy_digest_covers_every_threshold() {
+    let policy = ScalarSplitPolicy::current();
+    let hash = policy.digest();
 
     macro_rules! assert_field_changes_digest {
         ($field:ident) => {{
             let mut changed = policy;
             changed.$field += 1;
-            assert_ne!(changed.digest(142), hash, stringify!($field));
+            assert_ne!(changed.digest(), hash, stringify!($field));
         }};
     }
 
-    assert_field_changes_digest!(thin_split_wave_numerator);
-    assert_field_changes_digest!(thin_split_wave_denominator);
-    assert_field_changes_digest!(slim_split_wave_numerator);
-    assert_field_changes_digest!(slim_split_wave_denominator);
-    assert_field_changes_digest!(tn_split_m_wave_numerator);
-    assert_field_changes_digest!(tn_split_m_wave_denominator);
+    assert_field_changes_digest!(thin_split_max_tiles);
+    assert_field_changes_digest!(slim_split_max_tiles);
+    assert_field_changes_digest!(tn_split_m_target_blocks);
 
     assert_ne!(
         gemm_dispatch_policy_digest(141),
@@ -673,7 +669,7 @@ fn scalar_wave_policy_digest_covers_every_wave_and_device_field() {
 fn vendor_policy_decoy_changes_the_dispatch_identity() {
     let multiprocessor_count = 142;
     let tensor_core = Sm80TcPolicy::current().digest(multiprocessor_count);
-    let scalar = ScalarWavePolicy::current().digest(multiprocessor_count);
+    let scalar = ScalarSplitPolicy::current().digest();
     let previous = FramedSha256::new(b"gemm-dispatch-policy.v4")
         .required(b"sm80-tensor-core-policy", &tensor_core)
         .required(b"scalar-wave-policy", &scalar)

@@ -914,7 +914,6 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
         && !super::gemm_bi_triad::tc_half_policy_prefers_scalar_forward(
             ctx.compute_capability(),
             dims,
-            ctx.kernels.multiprocessor_count(),
         )?
     {
         let ops = super::gemm_bi_triad::TcFwdOperands { y, x, w, bias_ptr };
