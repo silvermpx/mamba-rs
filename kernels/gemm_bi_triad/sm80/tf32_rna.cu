@@ -1489,20 +1489,28 @@ void nn_sm80_tf32_rna_m128n128_bk32_s3(
     tf32w_nn_kernel<3>(output, a, b, bias, params);
 }
 
-#define TF32_RNA_MS_TILE(NAME, BM, BN, BK, WARPS_M, WARPS_N, STAGES, MIN_BLOCKS)          \
+#define TF32_RNA_MS_TILE(NAME, OP, BM, BN, BK, WARPS_M, WARPS_N, STAGES, MIN_BLOCKS)      \
     extern "C" __global__ __launch_bounds__(32 * WARPS_M * WARPS_N, MIN_BLOCKS)           \
     void NAME(float* output, const float* a, const float* b, const float* bias,           \
               Sm80Tf32KernelParams params) {                                              \
-        tf32_ms_tile_kernel<SgbTf32Nn, BM, BN, BK, WARPS_M, WARPS_N, STAGES>(              \
+        tf32_ms_tile_kernel<OP, BM, BN, BK, WARPS_M, WARPS_N, STAGES>(                     \
             output, a, b, bias, params);                                                  \
     }
 
-TF32_RNA_MS_TILE(nn_sm80_tf32_rna_ms_m64n128_bk16_s6, 64, 128, 16, 2, 2, 6, 1)
-TF32_RNA_MS_TILE(nn_sm80_tf32_rna_ms_m128n64_bk32_s3, 128, 64, 32, 2, 2, 3, 1)
-TF32_RNA_MS_TILE(nn_sm80_tf32_rna_ms_m64n64_bk32_s3, 64, 64, 32, 2, 2, 3, 2)
+TF32_RNA_MS_TILE(nn_sm80_tf32_rna_ms_m64n128_bk16_s6, SgbTf32Nn, 64, 128, 16, 2, 2, 6, 1)
+TF32_RNA_MS_TILE(nn_sm80_tf32_rna_ms_m128n64_bk32_s3, SgbTf32Nn, 128, 64, 32, 2, 2, 3, 1)
+TF32_RNA_MS_TILE(nn_sm80_tf32_rna_ms_m64n64_bk32_s3, SgbTf32Nn, 64, 64, 32, 2, 2, 3, 2)
+// The input gradient's tiles: B is the weight read across its rows, the
+// same ring and chain as the forward's.
+TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m64n128_bk16_s6, SgbTf32Nt, 64, 128, 16, 2, 2, 6, 1)
+TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m128n64_bk32_s3, SgbTf32Nt, 128, 64, 32, 2, 2, 3, 1)
+TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m128n128_bk16_s5, SgbTf32Nt, 128, 128, 16, 2, 2, 5, 1)
 
 #undef TF32_RNA_MS_TILE
 
 static_assert(Tf32MsConfig<SgbTf32Nn, 64, 128, 16, 2, 2, 6>::SharedBytes == 76800, "NN ms 64x128 ring");
 static_assert(Tf32MsConfig<SgbTf32Nn, 128, 64, 32, 2, 2, 3>::SharedBytes == 76800, "NN ms 128x64 ring");
 static_assert(Tf32MsConfig<SgbTf32Nn, 64, 64, 32, 2, 2, 3>::SharedBytes == 52224, "NN ms 64x64 ring");
+static_assert(Tf32MsConfig<SgbTf32Nt, 64, 128, 16, 2, 2, 6>::SharedBytes == 73728, "NT ms 64x128 ring");
+static_assert(Tf32MsConfig<SgbTf32Nt, 128, 64, 32, 2, 2, 3>::SharedBytes == 73728, "NT ms 128x64 ring");
+static_assert(Tf32MsConfig<SgbTf32Nt, 128, 128, 16, 2, 2, 5>::SharedBytes == 81920, "NT ms 128x128 ring");

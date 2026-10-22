@@ -4571,10 +4571,10 @@ fn validate_tf32_rna_wide_operands(
     operands: F32TriadOperands,
     route: Tf32PhysicalRoute,
 ) -> Result<(), String> {
-    if !matches!(route, Tf32PhysicalRoute::MmaTf32RnaWide(_)) {
+    let Tf32PhysicalRoute::MmaTf32RnaWide(tile) = route else {
         return Ok(());
-    }
-    if request.op != ResolvedGemmOp::Nn
+    };
+    if request.op != tile.op()
         || [operands.a, operands.b]
             .into_iter()
             .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))
@@ -4582,8 +4582,8 @@ fn validate_tf32_rna_wide_operands(
         || !request.shape.ldb.is_multiple_of(4)
     {
         return Err(format!(
-            "TF32 RNA wide route {route:?} serves NN on 16-byte aligned operands with \
-             whole-chunk strides"
+            "TF32 RNA wide route {route:?} serves its own product on 16-byte aligned \
+             operands with whole-chunk strides"
         ));
     }
     Ok(())

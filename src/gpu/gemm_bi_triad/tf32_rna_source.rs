@@ -1,16 +1,17 @@
 //! The source owner of the batch-invariant TF32 forward's wide and
-//! multistage NN tiles (`kernels/gemm_bi_triad/sm80/tf32_rna.cu`). The
-//! module is its own so that no other module's identity moves with it; it
-//! composes on every SM80-tier target. Every tile seeds an output with its
-//! bias, rounds both operands with cvt.rna and walks the reduction in the
-//! portable tiles' k8 order, so any of them gives an output the portable
-//! tiles' bits.
+//! multistage NN tiles and of the multistage input-gradient tiles
+//! (`kernels/gemm_bi_triad/sm80/tf32_rna.cu`). The module is its own so that
+//! no other module's identity moves with it; it composes on every SM80-tier
+//! target. Every tile rounds both operands with cvt.rna and walks the
+//! reduction in the portable tiles' k8 order; the forward's tiles seed an
+//! output with its bias, so any of them gives an output the portable tiles'
+//! bits.
 
 use std::collections::BTreeSet;
 
 pub const SOURCE: &str = include_str!("../../../kernels/gemm_bi_triad/sm80/tf32_rna.cu");
 
-pub const SOURCE_SHA256: &str = "66e8d70f0d27737f6c508ce05712b8290bc5598b3629eac443e4c607d3b44691";
+pub const SOURCE_SHA256: &str = "7b3a1c97e06994aae1fbf52d142a80adab0f3ecf47302c0e9e719b2aaac54695";
 
 pub const NN_M128N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m128n96_w2x4_bk32_s3";
 pub const NN_M96N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m96n96_w2x4_bk32_s3";
@@ -18,15 +19,21 @@ pub const NN_M128N128_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m128n128_bk32_s3";
 pub const NN_MS_M64N128_BK16_S6_SYMBOL: &str = "nn_sm80_tf32_rna_ms_m64n128_bk16_s6";
 pub const NN_MS_M128N64_S3_SYMBOL: &str = "nn_sm80_tf32_rna_ms_m128n64_bk32_s3";
 pub const NN_MS_M64N64_S3_SYMBOL: &str = "nn_sm80_tf32_rna_ms_m64n64_bk32_s3";
+pub const NT_MS_M64N128_BK16_S6_SYMBOL: &str = "nt_sm80_tf32_rna_ms_m64n128_bk16_s6";
+pub const NT_MS_M128N64_S3_SYMBOL: &str = "nt_sm80_tf32_rna_ms_m128n64_bk32_s3";
+pub const NT_MS_M128N128_BK16_S5_SYMBOL: &str = "nt_sm80_tf32_rna_ms_m128n128_bk16_s5";
 
 /// Every export of the module, in lexicographic order.
-pub const TF32_RNA_SYMBOLS: [&str; 6] = [
+pub const TF32_RNA_SYMBOLS: [&str; 9] = [
     NN_M128N128_S3_SYMBOL,
     NN_M128N96_S3_SYMBOL,
     NN_M96N96_S3_SYMBOL,
     NN_MS_M128N64_S3_SYMBOL,
     NN_MS_M64N128_BK16_S6_SYMBOL,
     NN_MS_M64N64_S3_SYMBOL,
+    NT_MS_M128N128_BK16_S5_SYMBOL,
+    NT_MS_M128N64_S3_SYMBOL,
+    NT_MS_M64N128_BK16_S6_SYMBOL,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,7 +105,7 @@ const fn spec(
 
 /// The launch geometry of every tile: threads, the dynamic shared memory of
 /// its stages, and the CTAs a multiprocessor must hold at once.
-pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 6] = [
+pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 9] = [
     spec(
         NN_M128N96_S3_SYMBOL,
         Tf32RnaKernelKind::Wide,
@@ -136,6 +143,27 @@ pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 6] = [
         Tf32RnaKernelKind::Multistage,
         128,
         52_224,
+        1,
+    ),
+    spec(
+        NT_MS_M64N128_BK16_S6_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        73_728,
+        1,
+    ),
+    spec(
+        NT_MS_M128N64_S3_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        73_728,
+        1,
+    ),
+    spec(
+        NT_MS_M128N128_BK16_S5_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        81_920,
         1,
     ),
 ];

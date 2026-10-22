@@ -1,7 +1,8 @@
 //! Under the strict TF32 policy the gradients take the routes the shape
 //! rules pick - the eight-way weight-gradient split, the Ada's pre-rounded
-//! weight-gradient tiles, the four-way input-gradient split and the narrow
-//! tiles - on ragged shapes as well as whole ones. Every product stays
+//! weight-gradient tiles, the four-way input-gradient split, the Ada's
+//! multistage input-gradient tiles and the narrow tiles - on ragged shapes as
+//! well as whole ones. Every product stays
 //! within TF32's rounding of an f64 reference, and two runs of one product
 //! write the same bits.
 #![cfg(feature = "cuda")]
@@ -130,10 +131,14 @@ fn strict_tf32_gradients_are_tf32_products_and_repeat_their_bits() {
     }
 
     // (batch, inputs, outputs): the four-way split (whole and ragged), the
-    // narrow tile past its column bound and under its reduction floor, and
-    // the 64 x 64 tile.
+    // Ada's multistage tiles (both sizes and a ragged output), the narrow
+    // tile past its column bound and under its reduction floor, and the
+    // 64 x 64 tile.
     for (index, dims) in [
         (64, 384, 1536),
+        (1024, 1536, 384),
+        (4096, 256, 2112),
+        (777, 300, 260),
         (100, 250, 300),
         (64, 1536, 384),
         (64, 384, 101),

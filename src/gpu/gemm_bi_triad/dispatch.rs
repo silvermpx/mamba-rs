@@ -2750,9 +2750,15 @@ fn rna_batch_invariant_selection(
     if let Some(route) = measured {
         return Ok(F32TriadSelection::Tf32(route));
     }
-    if let Some(route) = rna_backward_rule_route(request, operands, availability)
-        && let Ok(bound) = resolve_tf32_forced(request, availability, route)
-    {
+    // A tile the rules stage from the operands falls back to the portable
+    // rule when this toolkit cannot bind it.
+    let ruled = rna_backward_rule_route(request, operands, availability)
+        .and_then(|route| resolve_tf32_forced(request, availability, route).ok())
+        .or_else(|| {
+            rna_backward_rule_route(request, None, availability)
+                .and_then(|route| resolve_tf32_forced(request, availability, route).ok())
+        });
+    if let Some(bound) = ruled {
         return Ok(F32TriadSelection::Tf32(bound));
     }
     let proven = operands
@@ -2866,11 +2872,50 @@ fn rna_backward_rule_route(
         ResolvedGemmOp::Nt if rows < RNA_NT_NARROW_ROWS => Some(Tf32PhysicalRoute::MmaTf32Rna(
             portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4),
         )),
+        // The Ada's multistage input-gradient tiles, as the standalone Lilly
+        // GEMMs measured them on the RTX 6000 Ada against the portable tiles
+        // (NT 1024x1536x384 34.9 -> 16.2 us, 4096x256x2112 75.0 -> 49.8): the
+        // 128 x 128 tile once its grid fills two thirds of the card, the
+        // 64 x 128 tile's twice the CTAs below.
+        ResolvedGemmOp::Nt
+            if rows >= 512
+                && columns >= 128
+                && reduction >= 64
+                && rna_tiles_stage(request, operands, availability) =>
+        {
+            let tiles = rows.div_ceil(128) * columns.div_ceil(128);
+            let sms = availability.multiprocessors as usize;
+            Some(Tf32PhysicalRoute::MmaTf32RnaWide(if 3 * tiles >= 2 * sms {
+                super::contract::Tf32RnaWideTile::NtMsM128N128Bk16S5
+            } else {
+                super::contract::Tf32RnaWideTile::NtMsM64N128Bk16S6
+            }))
+        }
         ResolvedGemmOp::Tn | ResolvedGemmOp::Nt => Some(Tf32PhysicalRoute::MmaTf32Rna(portable(
             Tf32PortableTile::M64N64,
             Tf32PortableStages::S2,
         ))),
     }
+}
+
+/// Whether the batch-invariant module's tiles can stage a request's operands
+/// on this board: the module is bound on an Ada board and both operands are
+/// 16-byte aligned with whole-chunk strides.
+fn rna_tiles_stage(
+    request: F32TriadRequest,
+    operands: Option<F32TriadOperands>,
+    availability: F32TriadAvailability,
+) -> bool {
+    operands.is_some_and(|operands| {
+        availability
+            .rna
+            .is_some_and(|rna| rna.device.compute_capability == (8, 9))
+            && request.shape.lda.is_multiple_of(4)
+            && request.shape.ldb.is_multiple_of(4)
+            && [operands.a, operands.b]
+                .into_iter()
+                .all(|pointer| pointer != 0 && pointer.is_multiple_of(16))
+    })
 }
 
 /// Whether a weight gradient may run the Ada's pre-rounded tiles: the joint
@@ -16729,6 +16774,49 @@ mod tf32_tests {
                     stages: Tf32PortableStages::S4,
                 })),
                 "{dims:?}"
+            );
+        }
+        // With the batch-invariant module bound and staged operands the Ada
+        // takes its multistage input-gradient tiles.
+        let mut staged = ada;
+        staged.rna = Some(qualified_module(
+            ModuleKind::TriadTf32Rna,
+            "sm_89",
+            "sm_89",
+            (8, 9),
+            false,
+            101_376,
+        ));
+        let aligned = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: None,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        for (dims, tile) in [
+            (
+                (1024, 1536, 384),
+                super::super::contract::Tf32RnaWideTile::NtMsM128N128Bk16S5,
+            ),
+            (
+                (4096, 256, 2112),
+                super::super::contract::Tf32RnaWideTile::NtMsM64N128Bk16S6,
+            ),
+        ] {
+            assert_eq!(
+                super::rna_backward_rule_route(nt(dims), Some(aligned), staged),
+                Some(Tf32PhysicalRoute::MmaTf32RnaWide(tile)),
+                "{dims:?}"
+            );
+            assert_eq!(
+                super::rna_backward_rule_route(nt(dims), None, staged),
+                Some(Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M64N64,
+                    stages: Tf32PortableStages::S2,
+                })),
+                "{dims:?} without operands"
             );
         }
         assert_eq!(

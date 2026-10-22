@@ -1855,16 +1855,28 @@ pub enum Tf32RnaWideTile {
     MsM128N64S3,
     /// The multistage 64 x 64 tile over 32-deep slabs, three stages.
     MsM64N64S3,
+    /// The input gradient's multistage 64 x 128 tile over 16-deep slabs,
+    /// six stages.
+    NtMsM64N128Bk16S6,
+    /// The input gradient's multistage 128 x 64 tile over 32-deep slabs,
+    /// three stages.
+    NtMsM128N64S3,
+    /// The input gradient's multistage 128 x 128 tile over 16-deep slabs,
+    /// five stages.
+    NtMsM128N128Bk16S5,
 }
 
 impl Tf32RnaWideTile {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 9] = [
         Self::M128N96S3,
         Self::M96N96S3,
         Self::M128N128S3,
         Self::MsM64N128Bk16S6,
         Self::MsM128N64S3,
         Self::MsM64N64S3,
+        Self::NtMsM64N128Bk16S6,
+        Self::NtMsM128N64S3,
+        Self::NtMsM128N128Bk16S5,
     ];
 
     pub const fn digest_code(self) -> u8 {
@@ -1875,6 +1887,19 @@ impl Tf32RnaWideTile {
             Self::MsM64N128Bk16S6 => 4,
             Self::MsM128N64S3 => 5,
             Self::MsM64N64S3 => 6,
+            Self::NtMsM64N128Bk16S6 => 7,
+            Self::NtMsM128N64S3 => 8,
+            Self::NtMsM128N128Bk16S5 => 9,
+        }
+    }
+
+    /// The product the tile computes: the forward's or the input gradient's.
+    pub const fn op(self) -> ResolvedGemmOp {
+        match self {
+            Self::NtMsM64N128Bk16S6 | Self::NtMsM128N64S3 | Self::NtMsM128N128Bk16S5 => {
+                ResolvedGemmOp::Nt
+            }
+            _ => ResolvedGemmOp::Nn,
         }
     }
 }
@@ -2839,7 +2864,7 @@ const fn tf32_rna_spec(
     dynamic_shared_bytes: u32,
 ) -> Tf32KernelSpec {
     Tf32KernelSpec {
-        op: ResolvedGemmOp::Nn,
+        op: tile.op(),
         route: Tf32PhysicalRoute::MmaTf32RnaWide(tile),
         symbol,
         module_kind: ModuleKind::TriadTf32Rna,
@@ -2857,9 +2882,9 @@ const fn tf32_rna_spec(
     }
 }
 
-/// The batch-invariant TF32 forward's own tiles; the threads and shared
+/// The batch-invariant TF32 policy's own tiles; the threads and shared
 /// memory are the source owner's launch table.
-pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
+pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 9] = [
     tf32_rna_spec(
         Tf32RnaWideTile::M128N96S3,
         super::tf32_rna_source::NN_M128N96_S3_SYMBOL,
@@ -2901,6 +2926,27 @@ pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
         (64, 64),
         (32, 3, 128),
         52_224,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::NtMsM64N128Bk16S6,
+        super::tf32_rna_source::NT_MS_M64N128_BK16_S6_SYMBOL,
+        (64, 128),
+        (16, 6, 128),
+        73_728,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::NtMsM128N64S3,
+        super::tf32_rna_source::NT_MS_M128N64_S3_SYMBOL,
+        (128, 64),
+        (32, 3, 128),
+        73_728,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::NtMsM128N128Bk16S5,
+        super::tf32_rna_source::NT_MS_M128N128_BK16_S5_SYMBOL,
+        (128, 128),
+        (16, 5, 128),
+        81_920,
     ),
 ];
 
@@ -7698,7 +7744,7 @@ mod tests {
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
             (ModuleKind::TriadSm120, 30, [9, 10, 11]),
-            (ModuleKind::TriadTf32Rna, 6, [6, 0, 0]),
+            (ModuleKind::TriadTf32Rna, 9, [6, 0, 3]),
         ];
         let expected_total = expected.iter().map(|(_, count, _)| count).sum::<usize>();
         let mut all_symbols = std::collections::BTreeSet::new();
