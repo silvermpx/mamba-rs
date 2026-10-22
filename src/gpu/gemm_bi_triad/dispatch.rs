@@ -2890,6 +2890,14 @@ fn rna_backward_rule_route(
     let rows = request.shape.output_rows(request.op);
     let columns = request.shape.output_columns(request.op);
     let reduction = request.shape.reduction(request.op);
+    if request.op != ResolvedGemmOp::Nn && availability.portable?.device.compute_capability.0 == 12
+    {
+        return Some(rna_blackwell_backward_route(
+            request,
+            operands,
+            availability,
+        ));
+    }
     match request.op {
         ResolvedGemmOp::Nn => None,
         // The Ada's multistage members of the same eight partitions, where
@@ -2988,6 +2996,110 @@ fn rna_backward_rule_route(
     }
 }
 
+/// The strict policy's gradient routes on a CC 12.x board, as the
+/// standalone Lilly GEMMs measured them on the RTX 5090 (interleaved sweeps,
+/// device minimum per launch): the multistage 64 x 64 member of the eight
+/// partitions for a deep weight gradient, the 16 x 32 tile for a small
+/// layer over a few hundred to a thousand rows (TN 896x256x256 18.1 -> 9.9
+/// us, NT 896x256x256 16.0 -> 7.8), the pre-rounded tiles for a wider
+/// weight gradient, and the multistage input-gradient tiles from 786k
+/// outputs over a reduction of 256 or more (NT 4096x256x2112 77.5 -> 54.9,
+/// 1024x833x384 24.2 -> 16.0). The partition counts are the shape's; the
+/// tiles walk one chain each, so no pick moves a bit.
+fn rna_blackwell_backward_route(
+    request: F32TriadRequest,
+    operands: Option<F32TriadOperands>,
+    availability: F32TriadAvailability,
+) -> Tf32PhysicalRoute {
+    use super::contract::{
+        Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile, Tf32RnaWideTile,
+    };
+    let portable = |tile, stages| Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute { tile, stages });
+    let (m, k, n) = (request.shape.m, request.shape.k, request.shape.n);
+    let rows = request.shape.output_rows(request.op);
+    let columns = request.shape.output_columns(request.op);
+    let reduction = request.shape.reduction(request.op);
+    let staged = rna_tiles_stage(request, operands, availability);
+    const SMALL_LAYER_WIDTH: usize = 512;
+    const SMALL_LAYER_GRID: usize = 64;
+    const MS_NT_MIN_OUTPUTS: usize = 3 << 18;
+    const MS_NT_NARROW_OUTPUTS: usize = 1 << 20;
+    const MS_NT_SQUARE_OUTPUTS: usize = 1 << 22;
+    let small_layer = (RNA_NT_NARROW_ROWS..2_048).contains(&m)
+        && k <= SMALL_LAYER_WIDTH
+        && n <= SMALL_LAYER_WIDTH;
+    if request.op == ResolvedGemmOp::Tn {
+        if reduction >= RNA_TN_SPLIT_MIN_REDUCTION {
+            if staged && columns >= 128 && rows.is_multiple_of(4) && columns.is_multiple_of(4) {
+                return Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(
+                    super::contract::Tf32RnaSplitTile::M64N64S4,
+                );
+            }
+            // The portable members of the same partitions; where the board's
+            // portable module does not compose them the forced resolution
+            // refuses this and the next route serves.
+            let ctas = rows.div_ceil(64) * columns.div_ceil(64) * 8;
+            let sms = availability.multiprocessors as usize;
+            let (tile, stages) = if 2 * ctas < sms {
+                (Tf32PortableTile::M32N32, Tf32PortableStages::S3)
+            } else if ctas >= 4 * sms {
+                (Tf32PortableTile::M64N64, Tf32PortableStages::S3)
+            } else {
+                (Tf32PortableTile::M64N64, Tf32PortableStages::S2)
+            };
+            return Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute { tile, stages });
+        }
+        if small_layer || columns < 128 {
+            return portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4);
+        }
+        if rna_pre_tn_admits(request, operands, availability) {
+            return if reduction >= 256 && rows * columns >= RNA_PRE_TN_WIDE_OUTPUTS {
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+            } else {
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N64
+            };
+        }
+        return if rows < RNA_NT_NARROW_ROWS {
+            portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
+        } else {
+            portable(Tf32PortableTile::M64N64, Tf32PortableStages::S2)
+        };
+    }
+    if small_layer {
+        return if rows.div_ceil(64) * columns.div_ceil(64) < SMALL_LAYER_GRID {
+            portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
+        } else {
+            portable(Tf32PortableTile::M64N64, Tf32PortableStages::S2)
+        };
+    }
+    if rows < RNA_NT_NARROW_ROWS {
+        return if reduction >= RNA_NT_SPLIT_MIN_REDUCTION && columns <= RNA_NT_SPLIT_MAX_COLUMNS {
+            Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
+                tile: Tf32PortableTile::M16N32,
+                stages: Tf32PortableStages::S3,
+            })
+        } else {
+            portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
+        };
+    }
+    let outputs = rows * columns;
+    if staged && reduction >= 256 && columns <= 1_024 && outputs >= MS_NT_MIN_OUTPUTS {
+        return Tf32PhysicalRoute::MmaTf32RnaWide(
+            if reduction < 1_024 || outputs > MS_NT_SQUARE_OUTPUTS {
+                Tf32RnaWideTile::NtMsM64N128Bk16S6
+            } else if outputs <= MS_NT_NARROW_OUTPUTS {
+                Tf32RnaWideTile::NtMsM128N64S3
+            } else {
+                Tf32RnaWideTile::NtMsM128N128Bk16S5
+            },
+        );
+    }
+    if (2_048..8_192).contains(&rows) && columns <= 512 && reduction <= 64 {
+        return portable(Tf32PortableTile::M64N64, Tf32PortableStages::S3);
+    }
+    portable(Tf32PortableTile::M64N64, Tf32PortableStages::S2)
+}
+
 /// Whether the batch-invariant module's tiles can stage a request's operands
 /// on this board: the module is bound on an Ada board and both operands are
 /// 16-byte aligned with whole-chunk strides.
@@ -2997,10 +3109,10 @@ fn rna_tiles_stage(
     availability: F32TriadAvailability,
 ) -> bool {
     operands.is_some_and(|operands| {
-        availability
-            .rna
-            .is_some_and(|rna| rna.device.compute_capability == (8, 9))
-            && request.shape.lda.is_multiple_of(4)
+        availability.rna.is_some_and(|rna| {
+            let cc = rna.device.compute_capability;
+            cc == (8, 9) || cc.0 == 12
+        }) && request.shape.lda.is_multiple_of(4)
             && request.shape.ldb.is_multiple_of(4)
             && [operands.a, operands.b]
                 .into_iter()
@@ -3022,10 +3134,10 @@ fn rna_pre_tn_admits(
     };
     let shape = request.shape;
     let copy_stride = shape.m.next_multiple_of(4);
-    availability
-        .joint
-        .is_some_and(|joint| joint.device.compute_capability == (8, 9))
-        && request.op == ResolvedGemmOp::Tn
+    availability.joint.is_some_and(|joint| {
+        let cc = joint.device.compute_capability;
+        cc == (8, 9) || cc.0 == 12
+    }) && request.op == ResolvedGemmOp::Tn
         && shape == F32TriadShape::contiguous(ResolvedGemmOp::Tn, (shape.m, shape.k, shape.n))
         && shape.m > 0
         && shape.n.is_multiple_of(4)
@@ -3055,8 +3167,9 @@ fn rna_forward_table_route(
     use super::contract::{
         Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile, Tf32RnaWideTile,
     };
+    let compute_capability = availability.portable?.device.compute_capability;
     if request.op != ResolvedGemmOp::Nn
-        || availability.portable?.device.compute_capability != (8, 9)
+        || (compute_capability != (8, 9) && compute_capability.0 != 12)
     {
         return None;
     }
@@ -3076,6 +3189,13 @@ fn rna_forward_table_route(
     const NARROW_WIDE_ROWS: usize = 2_048;
     const TALL_ROWS: usize = 8_192;
     const TALLER_ROWS: usize = 16_384;
+    if compute_capability.0 == 12 {
+        return Some(rna_blackwell_forward_route(
+            request,
+            staged,
+            availability.multiprocessors as usize,
+        ));
+    }
     Some(if m < NARROW_ROWS {
         portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
     } else if staged && (512..TALL_ROWS).contains(&m) && (128..=512).contains(&n) {
@@ -3110,6 +3230,110 @@ fn rna_forward_table_route(
     } else {
         portable(Tf32PortableTile::M64N64, Tf32PortableStages::S2)
     })
+}
+
+/// The batch-invariant TF32 forward's table on a CC 12.x board, as the
+/// standalone Lilly GEMMs measured it on the RTX 5090 (interleaved sweeps,
+/// device minimum per launch): the narrow tiles for a few columns, the
+/// 64 x 64 tile while a narrow forward's tiles fill no more than one wave of
+/// the card's own SMs, the multistage tiles over a long reduction of 129 to
+/// 256 columns, and the wide tiles as the rows and columns grow (NN
+/// 4096x128x796 24.2 -> 20.1 us, 4096x128x16 7.8 -> 3.3, 896x256x256 11.9 ->
+/// 7.8). Every tile walks an output's reduction in one chain, so the table
+/// moves time and never a bit.
+fn rna_blackwell_forward_route(
+    request: F32TriadRequest,
+    staged: bool,
+    multiprocessors: usize,
+) -> Tf32PhysicalRoute {
+    use super::contract::{
+        Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile, Tf32RnaWideTile,
+    };
+    let (m, k, n) = (request.shape.m, request.shape.k, request.shape.n);
+    let portable = |tile, stages| Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute { tile, stages });
+    let wide = |tile| Tf32PhysicalRoute::MmaTf32RnaWide(tile);
+    const NARROW_ROWS: usize = 256;
+    const NARROW_WIDE_ROWS: usize = 2_048;
+    const TALL_ROWS: usize = 8_192;
+    const TALLER_ROWS: usize = 16_384;
+    const SMALL_LAYER_WIDTH: usize = 512;
+    const SMALL_LAYER_GRID: usize = 64;
+    if m < NARROW_ROWS {
+        return portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4);
+    }
+    if staged && (129..=256).contains(&n) && k >= 512 {
+        return wide(if m.div_ceil(64) * n.div_ceil(64) <= multiprocessors {
+            Tf32RnaWideTile::MsM64N64S3
+        } else {
+            Tf32RnaWideTile::MsM128N64S3
+        });
+    }
+    if (TALLER_ROWS..2 * TALLER_ROWS).contains(&m) && (129..512).contains(&n) && staged {
+        return wide(Tf32RnaWideTile::M128N128S3);
+    }
+    if (NARROW_WIDE_ROWS..TALL_ROWS).contains(&m) {
+        if n <= 16 {
+            return portable(Tf32PortableTile::M16N16, Tf32PortableStages::S4);
+        }
+        if n <= 48 {
+            return portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4);
+        }
+        if n <= 128 {
+            return portable(
+                Tf32PortableTile::M64N64,
+                if k.is_multiple_of(4) {
+                    Tf32PortableStages::S3
+                } else {
+                    Tf32PortableStages::S2
+                },
+            );
+        }
+        if staged && (512..=640).contains(&n) && m >= 4_096 {
+            return wide(Tf32RnaWideTile::M128N128S3);
+        }
+        if staged && n >= 1_536 {
+            return wide(Tf32RnaWideTile::M96N96S3);
+        }
+        if staged && n >= 512 {
+            return wide(Tf32RnaWideTile::M128N96S3);
+        }
+    }
+    if (NARROW_ROWS..NARROW_WIDE_ROWS).contains(&m)
+        && k <= SMALL_LAYER_WIDTH
+        && n <= SMALL_LAYER_WIDTH
+    {
+        return if m.div_ceil(64) * n.div_ceil(64) < SMALL_LAYER_GRID {
+            portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
+        } else {
+            portable(Tf32PortableTile::M64N64, Tf32PortableStages::S2)
+        };
+    }
+    if n < 128 {
+        return if staged && m >= NARROW_WIDE_ROWS {
+            wide(Tf32RnaWideTile::M96N96S3)
+        } else {
+            portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
+        };
+    }
+    if !staged {
+        return portable(
+            Tf32PortableTile::M64N64,
+            if n <= 128 {
+                Tf32PortableStages::S3
+            } else {
+                Tf32PortableStages::S2
+            },
+        );
+    }
+    if n >= 1_536 {
+        wide(Tf32RnaWideTile::M128N96S3)
+    } else if (n >= 512 && m >= 4_096) || (n <= 128 && m >= TALLER_ROWS) {
+        wide(Tf32RnaWideTile::M128N128S3)
+    } else if n <= 128 && m >= TALL_ROWS {
+        wide(Tf32RnaWideTile::M128N96S3)
+    } else {
+        wide(Tf32RnaWideTile::M96N96S3)
+    }
 }
 
 /// The portable tile that serves a shape whose wide tile this board does
@@ -16680,13 +16904,15 @@ mod tf32_tests {
                             "{availability:?} {request:?}: {selection:?}",
                         );
                     }
-                    // Without operands no wide tile can be staged: the Ada
-                    // table names a portable tile, every other board the ladder.
+                    // Without operands no wide tile can be staged: the Ada and
+                    // CC 12.x tables name a portable tile, every other board
+                    // the ladder.
                     let selection = resolve_f32_triad_auto(STRICT, request, availability).unwrap();
-                    let ada = availability
-                        .portable
-                        .is_some_and(|module| module.device.compute_capability == (8, 9));
-                    if ada {
+                    let tabled = availability.portable.is_some_and(|module| {
+                        let cc = module.device.compute_capability;
+                        cc == (8, 9) || cc.0 == 12
+                    });
+                    if tabled {
                         assert!(
                             matches!(
                                 selection,
@@ -16778,12 +17004,19 @@ mod tf32_tests {
                 "{m}x{k}x{n}: {selection:?}"
             );
         }
-        // Another architecture keeps its portable tiles.
+        // A CC 12.x board follows its own table, not the Ada's.
         let mut sm120 = sm120_availability_for(SM120_TF32_ARCHITECTURE);
         sm120.portable = Some(qualified_module_for_auto_identity(
             SM120_TF32_PORTABLE_ARCHITECTURE,
         ));
-        sm120.rna = availability.rna;
+        sm120.rna = Some(qualified_module(
+            ModuleKind::TriadTf32Rna,
+            "compute_120",
+            "sm_120",
+            (12, 0),
+            true,
+            101_376,
+        ));
         let request = normalized_request(ResolvedGemmOp::Nn, 4096, 2112, 256);
         let selection = resolve_f32_triad_auto_with_operands(
             STRICT,
@@ -16792,12 +17025,13 @@ mod tf32_tests {
             sm120,
         )
         .unwrap();
-        assert!(
-            matches!(
-                selection,
-                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32Rna(_))
-            ),
-            "{selection:?}"
+        assert_eq!(
+            selection,
+            F32TriadSelection::Tf32(super::rna_blackwell_forward_route(
+                request,
+                true,
+                sm120.multiprocessors as usize
+            )),
         );
     }
 
