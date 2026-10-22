@@ -838,6 +838,9 @@ pub(super) fn append_tf32_route_digest(
         Tf32PhysicalRoute::MmaTf32RnaWide(tile) => digest
             .required(b"route-family", &[22])
             .required(b"tile", &[tile.digest_code()]),
+        Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(tile) => digest
+            .required(b"route-family", &[23])
+            .required(b"tile", &[tile.digest_code()]),
     }
 }
 
@@ -1288,7 +1291,8 @@ pub(super) fn tf32_tensor_map_plan(
         | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
-        | Tf32PhysicalRoute::MmaTf32RnaWide(_) => {
+        | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
             return Err("portable TF32 does not use tensor maps".into());
         }
     };
@@ -1835,6 +1839,28 @@ pub enum Tf32PhysicalRoute {
     /// A wide or multistage NN tile of the batch-invariant TF32 forward's
     /// own module.
     MmaTf32RnaWide(Tf32RnaWideTile),
+    /// A multistage member of the weight gradient's eight-way split in the
+    /// batch-invariant module: the portable split members' partitions and
+    /// fold.
+    MmaTf32RnaWideSplitK8(Tf32RnaSplitTile),
+}
+
+/// The batch-invariant module's eight-way weight-gradient split members.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tf32RnaSplitTile {
+    /// 128 x 64 over 32-deep slabs, three stages.
+    M128N64S3,
+    /// 64 x 64 over 32-deep slabs, four stages.
+    M64N64S4,
+}
+
+impl Tf32RnaSplitTile {
+    pub const fn digest_code(self) -> u8 {
+        match self {
+            Self::M128N64S3 => 1,
+            Self::M64N64S4 => 2,
+        }
+    }
 }
 
 /// The batch-invariant TF32 forward's wide and multistage NN tiles. Each
@@ -1928,7 +1954,7 @@ impl Tf32PhysicalRoute {
             | Self::Sm89TnDirectM192N192S2
             | Self::Sm89TnPreRnaM96N192S2
             | Self::Sm89TnPreRnaM96N96S3 => ModuleKind::TriadSm89Tf32Joint,
-            Self::MmaTf32RnaWide(_) => ModuleKind::TriadTf32Rna,
+            Self::MmaTf32RnaWide(_) | Self::MmaTf32RnaWideSplitK8(_) => ModuleKind::TriadTf32Rna,
         }
     }
 
@@ -2277,11 +2303,44 @@ pub fn tf32_splitk_specs_all() -> impl Iterator<Item = &'static Tf32SplitKSpec> 
     tf32_splitk_specs_for(true)
 }
 
+/// The batch-invariant module's multistage split members; they fold the
+/// portable split members' partitions, so they are members of the same
+/// partition count.
+pub const TF32_RNA_SPLITK_SPECS: [Tf32SplitKSpec; 2] = [
+    Tf32SplitKSpec {
+        op: ResolvedGemmOp::Tn,
+        route: Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(Tf32RnaSplitTile::M128N64S3),
+        symbol: super::tf32_rna_source::TN_MS_SPLITK8_M128N64_S3_SYMBOL,
+        tile: (128, 64),
+        bk: 32,
+        stages: 3,
+        partitions: 8,
+        threads: 128,
+        dynamic_shared_bytes: 79_872,
+        register_cap: 255,
+        occupancy_gate: 1,
+    },
+    Tf32SplitKSpec {
+        op: ResolvedGemmOp::Tn,
+        route: Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(Tf32RnaSplitTile::M64N64S4),
+        symbol: super::tf32_rna_source::TN_MS_SPLITK8_M64N64_S4_SYMBOL,
+        tile: (64, 64),
+        bk: 32,
+        stages: 4,
+        partitions: 8,
+        threads: 128,
+        dynamic_shared_bytes: 73_728,
+        register_cap: 255,
+        occupancy_gate: 1,
+    },
+];
+
 pub fn tf32_splitk_spec(
     op: ResolvedGemmOp,
     route: Tf32PhysicalRoute,
 ) -> Result<&'static Tf32SplitKSpec, String> {
     tf32_splitk_specs_all()
+        .chain(TF32_RNA_SPLITK_SPECS.iter())
         .find(|spec| spec.op == op && spec.route == route)
         .ok_or_else(|| format!("no TF32 split-K kernel matches {op:?}/{route:?}"))
 }
@@ -3551,7 +3610,8 @@ pub fn tf32_kernel_spec(
         Tf32PhysicalRoute::MmaTf32Rna(portable) => portable.validate()?,
         Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => {
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
             return Err(format!(
                 "TF32 split-K route {op:?}/{route:?} has a fused-kernel specification"
             ));
@@ -7783,7 +7843,8 @@ mod tests {
                     | super::Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
                     | super::Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
                     | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
-                    | super::Tf32PhysicalRoute::MmaTf32RnaWide(_) => {
+                    | super::Tf32PhysicalRoute::MmaTf32RnaWide(_)
+                    | super::Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
                         assert_eq!(spec.instruction_family, ResolvedInstructionFamily::MmaSync);
                         assert_eq!(
                             spec.instruction_shape,

@@ -2823,6 +2823,27 @@ fn rna_backward_rule_route(
     let reduction = request.shape.reduction(request.op);
     match request.op {
         ResolvedGemmOp::Nn => None,
+        // The Ada's multistage members of the same eight partitions, where
+        // the rows and columns are whole 16-byte chunks and the operands
+        // stage, as the standalone Lilly GEMMs measured them against the
+        // portable members (TN 4096x256x2112 123.9 -> 58.4 us, 4096x128x796
+        // 33.8 -> 19.5, 4096x256x128 20.5 -> 11.3): 128 x 64 from 256
+        // columns, 64 x 64 from 128.
+        ResolvedGemmOp::Tn
+            if reduction >= RNA_TN_SPLIT_MIN_REDUCTION
+                && columns >= 128
+                && rows.is_multiple_of(4)
+                && columns.is_multiple_of(4)
+                && rna_tiles_stage(request, operands, availability) =>
+        {
+            Some(Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(
+                if columns >= 256 {
+                    super::contract::Tf32RnaSplitTile::M128N64S3
+                } else {
+                    super::contract::Tf32RnaSplitTile::M64N64S4
+                },
+            ))
+        }
         ResolvedGemmOp::Tn if reduction >= RNA_TN_SPLIT_MIN_REDUCTION => {
             let ada = availability.portable?.device.compute_capability == (8, 9);
             let member = if ada {
@@ -3059,7 +3080,8 @@ fn rna_batch_invariant_route(op: ResolvedGemmOp, route: Tf32PhysicalRoute) -> bo
     let rounds_rna = match route {
         Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => {
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
             super::contract::tf32_splitk_spec(op, route).is_ok()
         }
         _ => tf32_kernel_spec(op, route).is_ok_and(|spec| {
@@ -3240,13 +3262,14 @@ pub fn resolve_tf32_forced(
     let (module_kind, dynamic_shared_bytes) = match route {
         Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => {
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
             let spec = super::contract::tf32_splitk_spec(request.op, route)?;
             // A neighbour's split-K route can outgrow the fixed partial
             // and counter workspaces on a larger shape: it does not bind,
             // and the exact family serves.
             super::launch::tf32_splitk_launch_plan(request, spec)?;
-            (ModuleKind::TriadSm80, spec.dynamic_shared_bytes)
+            (route.module_kind(), spec.dynamic_shared_bytes)
         }
         _ => {
             let spec = tf32_kernel_spec(request.op, route)?;
@@ -3270,7 +3293,9 @@ pub fn resolve_tf32_forced(
         | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => availability.joint,
-        Tf32PhysicalRoute::MmaTf32RnaWide(_) => availability.rna,
+        Tf32PhysicalRoute::MmaTf32RnaWide(_) | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
+            availability.rna
+        }
         Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_)
         | Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_)
         | Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
@@ -3412,6 +3437,7 @@ fn ensure_tf32_binding_contract(
             | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
             | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
             | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+            | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_)
     ) && !binding.device_caps.tensor_map_access
     {
         return Err(format!(
@@ -3466,7 +3492,8 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
         | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
-        | Tf32PhysicalRoute::MmaTf32RnaWide(_) => {
+        | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
             cc.0 >= 8 && super::modules::sm80_ptx_target(target) == Some(device_target)
         }
         Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_) => {
@@ -16819,6 +16846,33 @@ mod tf32_tests {
                 "{dims:?} without operands"
             );
         }
+        // A staged deep weight gradient takes the multistage members of the
+        // same eight partitions.
+        let accumulate = F32TriadOperands {
+            beta: 1.0,
+            ..aligned
+        };
+        for (dims, tile) in [
+            (
+                (4096, 128, 796),
+                super::super::contract::Tf32RnaSplitTile::M128N64S3,
+            ),
+            (
+                (4096, 256, 128),
+                super::super::contract::Tf32RnaSplitTile::M64N64S4,
+            ),
+        ] {
+            assert_eq!(
+                super::rna_backward_rule_route(tn(dims), Some(accumulate), staged),
+                Some(Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(tile)),
+                "{dims:?}"
+            );
+        }
+        // An output that is not whole chunks keeps the portable member.
+        assert!(matches!(
+            super::rna_backward_rule_route(tn((4096, 130, 798)), Some(accumulate), staged),
+            Some(Tf32PhysicalRoute::MmaTf32RnaSplitK8(_))
+        ));
         assert_eq!(
             rna_backward_rule_route_for(
                 F32TriadRequest {

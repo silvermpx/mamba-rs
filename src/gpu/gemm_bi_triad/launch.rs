@@ -3571,7 +3571,9 @@ fn f32_map_binding(ctx: &GpuCtx, route: Tf32PhysicalRoute) -> Result<Tf32MapBind
         | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => ctx.kernels.f32_triad_availability().joint,
-        Tf32PhysicalRoute::MmaTf32RnaWide(_) => ctx.kernels.f32_triad_availability().rna,
+        Tf32PhysicalRoute::MmaTf32RnaWide(_) | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
+            ctx.kernels.f32_triad_availability().rna
+        }
         _ => ctx.kernels.f32_triad_availability().specialized,
     }
     .ok_or_else(|| format!("TF32 route {route:?} has no qualified module"))?;
@@ -3634,6 +3636,7 @@ fn tf32_params(
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_)
         | Tf32PhysicalRoute::Sm89MmaTf32Compact8
         | Tf32PhysicalRoute::Sm89NnDirectN96
         | Tf32PhysicalRoute::Sm89NnN96
@@ -3939,6 +3942,11 @@ fn tf32_splitk_resolved_routes(
             ResolvedNumericContract::MmaTf32RnaSplitK8,
             ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK8Reduce,
         ),
+        Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => (
+            PhysicalGemmBackend::MmaTf32RnaWideSplitK8,
+            ResolvedNumericContract::MmaTf32RnaSplitK8,
+            ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK8Reduce,
+        ),
         _ => unreachable!("split-K spec admitted a non-split route"),
     };
     let fused = ResolvedGemmRoute {
@@ -4036,6 +4044,10 @@ fn tf32_resolved_route(
         ),
         Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => (
             PhysicalGemmBackend::MmaTf32RnaSplitK8,
+            ResolvedNumericContract::MmaTf32RnaSplitK8,
+        ),
+        Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => (
+            PhysicalGemmBackend::MmaTf32RnaWideSplitK8,
             ResolvedNumericContract::MmaTf32RnaSplitK8,
         ),
         Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_) => (
@@ -4449,6 +4461,7 @@ fn prepare_tf32_f32(
         Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
             | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
             | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+            | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_)
     ) {
         return prepare_tf32_splitk_f32(ctx, request, operands, output_resources, route);
     }
@@ -4571,10 +4584,12 @@ fn validate_tf32_rna_wide_operands(
     operands: F32TriadOperands,
     route: Tf32PhysicalRoute,
 ) -> Result<(), String> {
-    let Tf32PhysicalRoute::MmaTf32RnaWide(tile) = route else {
-        return Ok(());
+    let op = match route {
+        Tf32PhysicalRoute::MmaTf32RnaWide(tile) => tile.op(),
+        Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => ResolvedGemmOp::Tn,
+        _ => return Ok(()),
     };
-    if request.op != tile.op()
+    if request.op != op
         || [operands.a, operands.b]
             .into_iter()
             .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))

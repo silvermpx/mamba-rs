@@ -2334,18 +2334,20 @@ fn validate_tf32_rna_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             .map(str::trim)
             .filter(|line| line.starts_with(".param "))
             .collect::<Vec<_>>();
-        if !(declarations.len() == 5
-            && declarations[..4]
+        let pointers = spec.kind.driver_abi().len() - 1;
+        if !(declarations.len() == pointers + 1
+            && declarations[..pointers]
                 .iter()
                 .all(|line| line.starts_with(".param .u64 "))
-            && declarations[4].starts_with(".param .align 4 .b8 ")
-            && declarations[4].contains("[32]"))
+            && declarations[pointers].starts_with(".param .align 4 .b8 ")
+            && declarations[pointers].contains("[32]"))
         {
             return Err(format!(
                 "{} has the wrong static PTX parameter ABI",
                 spec.symbol
             ));
         }
+        let split = spec.kind == Tf32RnaKernelKind::SplitK8;
         let mut tokens = vec![
             "cvt.rna.tf32.f32",
             "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
@@ -2353,12 +2355,23 @@ fn validate_tf32_rna_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         if spec.kind != Tf32RnaKernelKind::Wide {
             tokens.push("cp.async.cg.shared.global");
         }
+        if split {
+            tokens.extend(["atom.global.inc.u32", "membar.gl", "add.rn.f32"]);
+        }
         require_ptx_entry_tokens("TriadTf32Rna GEMM", entry, &tokens)?;
+        // A split member's only atomic is the arrival counter, wrapping at
+        // its eight partitions; every other kernel holds none.
+        if split && ptx_atomic_inc_limits(&entry.body)? != [7] {
+            return Err(format!(
+                "{} must count its arrivals with one atomicInc wrapping at eight",
+                spec.symbol
+            ));
+        }
         if ptx_has_unquoted_token(&entry.body, |token| {
             token == ".local"
                 || token.starts_with("ld.local")
                 || token.starts_with("st.local")
-                || token.starts_with("atom.")
+                || (token.starts_with("atom.") && !(split && token == "atom.global.inc.u32"))
                 || token.starts_with("atom::")
                 || token.starts_with("red.")
                 || token.starts_with("red::")
@@ -3606,9 +3619,8 @@ fn validate_tf32_rna_driver_abi(
     spec: &super::tf32_rna_source::Tf32RnaKernelSpec,
     abi: &Tf32DriverAbi,
 ) -> Result<(), String> {
-    let expected = &super::tf32_rna_source::GEMM_DRIVER_ABI;
+    let expected = spec.kind.driver_abi();
     if abi.parameter_count() != expected.len()
-        || super::tf32_rna_source::GEMM_TERMINAL_ARGUMENT as usize != expected.len()
         || !abi
             .parameters()
             .iter()
@@ -3662,7 +3674,7 @@ fn census_tf32_rna_driver_abi(
                     })?;
             let abi = query_driver_parameter_abi(
                 spec.symbol,
-                super::tf32_rna_source::GEMM_DRIVER_ABI.len(),
+                spec.kind.driver_abi().len(),
                 |index, offset, size| unsafe { get(function, index, offset, size) },
             )?;
             validate_tf32_rna_driver_abi(spec, &abi)?;
@@ -10790,6 +10802,9 @@ impl GemmBiKernels {
     }
 
     pub(crate) fn tf32_splitk_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        if super::tf32_rna_source::kernel_spec(symbol).is_some() {
+            return self.tf32_rna_function(symbol);
+        }
         self.f32_triad_availability.portable?;
         self.tf32_driver_abi(symbol)?;
         self.tf32_splitk_functions.get(symbol)

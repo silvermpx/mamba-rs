@@ -2302,7 +2302,9 @@ const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
         | PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix
         | PhysicalGemmBackend::Sm89MmaTf32NtRna
         | PhysicalGemmBackend::Sm89MmaTf32TnDirectRna => ModuleKind::TriadSm89Tf32Joint,
-        PhysicalGemmBackend::MmaTf32RnaWide => ModuleKind::TriadTf32Rna,
+        PhysicalGemmBackend::MmaTf32RnaWide | PhysicalGemmBackend::MmaTf32RnaWideSplitK8 => {
+            ModuleKind::TriadTf32Rna
+        }
         PhysicalGemmBackend::Sm89Mma16HalfS3
         | PhysicalGemmBackend::Sm89Mma16HalfS2
         | PhysicalGemmBackend::Sm89Mma16HalfS4 => ModuleKind::TriadSm89Half,
@@ -2331,7 +2333,9 @@ fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) ->
         | PhysicalGemmBackend::Sm89MmaTf32TnDirectRna => {
             super::gemm_bi_triad::SM89_TF32_JOINT_TUNING_REVISION
         }
-        PhysicalGemmBackend::MmaTf32RnaWide => super::gemm_bi_triad::TF32_RNA_TUNING_REVISION,
+        PhysicalGemmBackend::MmaTf32RnaWide | PhysicalGemmBackend::MmaTf32RnaWideSplitK8 => {
+            super::gemm_bi_triad::TF32_RNA_TUNING_REVISION
+        }
         PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan => {
             super::kernel_identity::SM89_INFERENCE_COPYPLAN_ROUTE_REVISION
         }

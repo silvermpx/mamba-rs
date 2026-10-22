@@ -3076,6 +3076,9 @@ pub enum PhysicalGemmBackend {
     Sm89MmaTf32TnDirectRna = 43,
     /// The batch-invariant TF32 forward's wide and multistage NN tiles.
     MmaTf32RnaWide = 44,
+    /// The batch-invariant module's multistage eight-way weight-gradient
+    /// split members.
+    MmaTf32RnaWideSplitK8 = 45,
 }
 
 /// Scoped route epoch for the Ada scalar NN reuse of the already-qualified

@@ -1489,6 +1489,170 @@ void nn_sm80_tf32_rna_m128n128_bk32_s3(
     tf32w_nn_kernel<3>(output, a, b, bias, params);
 }
 
+// One output tile's share of eight reduction partitions: every partition
+// leaves its partial in the scratch, and the CTA that arrives last for the
+// tile reads all eight and folds p0..p7 in index order, then alpha, then
+// beta, the fused split-K members' epilogue.
+template <int BM, int BN, int BK, int WarpsM, int WarpsN, int Stages>
+__device__ __forceinline__ void tf32_ms_tn_split8_kernel(
+    float* output, float* partial, unsigned* counters,
+    const float* a, const float* b, const float* bias, Sm80Tf32KernelParams params) {
+    constexpr SgbTf32Op Op = SgbTf32Tn;
+    constexpr int Partitions = 8;
+    using Cfg = Tf32MsConfig<Op, BM, BN, BK, WarpsM, WarpsN, Stages>;
+    using Out = Tf32MsOut<Op, BM, BN, BK, WarpsM, WarpsN, Stages>;
+    constexpr int Vec = Out::Vec;
+    int rows = tf32_ms_rows<Op>(params);
+    int columns = tf32_ms_columns<Op>(params);
+    int reduction = tf32_ms_reduction<Op>(params);
+    int partition = (int)blockIdx.z;
+    int groups = (reduction + 31) / 32;
+    int per_partition = (groups + Partitions - 1) / Partitions;
+    int group_begin = min(partition * per_partition, groups);
+    int group_end = min(group_begin + per_partition, groups);
+    Tf32MsTile<Op, BM, BN, BK, WarpsM, WarpsN, Stages> tile(
+        a, b, rows, columns, reduction, params.lda, params.ldb,
+        (int)blockIdx.y * BM, (int)blockIdx.x * BN, group_begin * 32);
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int warp_m = warp / WarpsN * Cfg::WM;
+    int warp_n = warp % WarpsN * Cfg::WN;
+    int group = lane >> 2;
+    int thread = lane & 3;
+    int row_base = tile.tile_row + warp_m;
+    int column_base = tile.tile_column + warp_n;
+
+    float acc[Cfg::MAtoms][Cfg::NAtoms][4] = {};
+    int tiles = (group_end - group_begin) * (32 / BK);
+    if (tile.tile_row + BM <= rows && tile.tile_column + BN <= columns && reduction % 32 == 0) {
+        tf32_ms_mainloop<true>(tile, tiles, warp_m, warp_n, lane, acc);
+    } else {
+        tf32_ms_mainloop<false>(tile, tiles, warp_m, warp_n, lane, acc);
+    }
+
+    long long plane = (long long)rows * columns;
+    float* own = partial + (long long)partition * plane;
+    bool full_tile = tile.tile_row + BM <= rows && tile.tile_column + BN <= columns;
+    if (full_tile && (columns & 1) == 0) {
+        // A whole tile of an even-width output: every pair lands, so the
+        // stores carry no bounds.
+#pragma unroll
+        for (int m_atom = 0; m_atom < Cfg::MAtoms; ++m_atom) {
+#pragma unroll
+            for (int half = 0; half < 2; ++half) {
+                float* row_out = own + (long long)(row_base + Out::row(m_atom, half, group)) * columns
+                    + column_base;
+#pragma unroll
+                for (int n_atom = 0; n_atom < Cfg::NAtoms; ++n_atom) {
+                    float v[Vec];
+#pragma unroll
+                    for (int i = 0; i < Vec; ++i) v[i] = Out::value(acc, m_atom, half, n_atom, i);
+                    tf32_ms_store_vec_cg(row_out + Out::column(n_atom, thread), v);
+                }
+            }
+        }
+    } else {
+#pragma unroll
+        for (int m_atom = 0; m_atom < Cfg::MAtoms; ++m_atom) {
+#pragma unroll
+            for (int half = 0; half < 2; ++half) {
+                int row = row_base + Out::row(m_atom, half, group);
+                if (row >= rows) continue;
+#pragma unroll
+                for (int n_atom = 0; n_atom < Cfg::NAtoms; ++n_atom) {
+                    int column = column_base + Out::column(n_atom, thread);
+#pragma unroll
+                    for (int i = 0; i < Vec; ++i) {
+                        if (column + i < columns) {
+                            __stcg(own + (long long)row * columns + column + i,
+                                   Out::value(acc, m_atom, half, n_atom, i));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // The CTA's partials are ordered before thread 0's fence by the
+    // barrier, and the fence is cumulative, so one thread publishes them
+    // all; the last arriver's fence orders the reads that follow.
+    __syncthreads();
+    __shared__ bool last;
+    if (threadIdx.x == 0) {
+        unsigned slot = (unsigned)blockIdx.y * gridDim.x + (unsigned)blockIdx.x;
+        __threadfence();
+        last = atomicInc(counters + slot, Partitions - 1U) == Partitions - 1U;
+        if (last) __threadfence();
+    }
+    __syncthreads();
+    if (!last) return;
+
+    // The last arriver folds the tile with all its threads, a 16-byte
+    // chunk of one row at a time, every partition's chunk loaded before
+    // the sum; the fold is a short loop, not the accumulators' unrolled
+    // layout, so it stays small in the instruction cache.
+    int tile_rows = min(BM, rows - tile.tile_row);
+    int tile_columns = min(BN, columns - tile.tile_column);
+    float* output_tile = output + (long long)tile.tile_row * params.ldc + tile.tile_column;
+    const float* partial_tile = partial + (long long)tile.tile_row * columns + tile.tile_column;
+    bool chunks = (columns & 3) == 0 && (params.ldc & 3) == 0
+        && ((reinterpret_cast<unsigned long long>(output) & 15ULL) == 0ULL);
+    if (chunks) {
+        int row_chunks = tile_columns / 4;
+#pragma unroll 1
+        for (int chunk = (int)threadIdx.x; chunk < tile_rows * row_chunks; chunk += Cfg::Threads) {
+            int r = chunk / row_chunks;
+            int c = chunk % row_chunks * 4;
+            const float* source = partial_tile + (long long)r * columns + c;
+            float4 p[Partitions];
+#pragma unroll
+            for (int q = 0; q < Partitions; ++q) {
+                p[q] = __ldcg(reinterpret_cast<const float4*>(source + (long long)q * plane));
+            }
+            float4 sum = make_float4(__fadd_rn(p[0].x, p[1].x), __fadd_rn(p[0].y, p[1].y),
+                                     __fadd_rn(p[0].z, p[1].z), __fadd_rn(p[0].w, p[1].w));
+#pragma unroll
+            for (int q = 2; q < Partitions; ++q) {
+                sum.x = __fadd_rn(sum.x, p[q].x);
+                sum.y = __fadd_rn(sum.y, p[q].y);
+                sum.z = __fadd_rn(sum.z, p[q].z);
+                sum.w = __fadd_rn(sum.w, p[q].w);
+            }
+            if (params.alpha != 1.0f) {
+                sum.x = __fmul_rn(params.alpha, sum.x);
+                sum.y = __fmul_rn(params.alpha, sum.y);
+                sum.z = __fmul_rn(params.alpha, sum.z);
+                sum.w = __fmul_rn(params.alpha, sum.w);
+            }
+            float4* destination = reinterpret_cast<float4*>(output_tile + (long long)r * params.ldc + c);
+            if (params.beta != 0.0f) {
+                float4 old = *destination;
+                sum.x = __fmaf_rn(params.beta, old.x, sum.x);
+                sum.y = __fmaf_rn(params.beta, old.y, sum.y);
+                sum.z = __fmaf_rn(params.beta, old.z, sum.z);
+                sum.w = __fmaf_rn(params.beta, old.w, sum.w);
+            }
+            *destination = sum;
+        }
+    } else {
+#pragma unroll 1
+        for (int element = (int)threadIdx.x; element < tile_rows * tile_columns; element += Cfg::Threads) {
+            int r = element / tile_columns;
+            int c = element % tile_columns;
+            const float* source = partial_tile + (long long)r * columns + c;
+            float p[Partitions];
+#pragma unroll
+            for (int q = 0; q < Partitions; ++q) p[q] = __ldcg(source + (long long)q * plane);
+            float sum = __fadd_rn(p[0], p[1]);
+#pragma unroll
+            for (int q = 2; q < Partitions; ++q) sum = __fadd_rn(sum, p[q]);
+            float value = params.alpha == 1.0f ? sum : __fmul_rn(params.alpha, sum);
+            float* destination = output_tile + (long long)r * params.ldc + c;
+            if (params.beta != 0.0f) value = __fmaf_rn(params.beta, *destination, value);
+            *destination = value;
+        }
+    }
+}
+
 #define TF32_RNA_MS_TILE(NAME, OP, BM, BN, BK, WARPS_M, WARPS_N, STAGES, MIN_BLOCKS)      \
     extern "C" __global__ __launch_bounds__(32 * WARPS_M * WARPS_N, MIN_BLOCKS)           \
     void NAME(float* output, const float* a, const float* b, const float* bias,           \
@@ -1508,9 +1672,28 @@ TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m128n128_bk16_s5, SgbTf32Nt, 128, 128, 16, 
 
 #undef TF32_RNA_MS_TILE
 
+// The weight gradient's eight-way split members: the portable split
+// members' partitions, partial planes and last-arriver fold, over the
+// multistage ring.
+#define TF32_RNA_MS_TN_SPLIT8(NAME, BM, BN, BK, WARPS_M, WARPS_N, STAGES, MIN_BLOCKS)     \
+    extern "C" __global__ __launch_bounds__(32 * WARPS_M * WARPS_N, MIN_BLOCKS)           \
+    void NAME(float* output, float* partial, unsigned* counters,                          \
+              const float* a, const float* b, const float* bias,                          \
+              Sm80Tf32KernelParams params) {                                              \
+        tf32_ms_tn_split8_kernel<BM, BN, BK, WARPS_M, WARPS_N, STAGES>(                    \
+            output, partial, counters, a, b, bias, params);                               \
+    }
+
+TF32_RNA_MS_TN_SPLIT8(tn_sm80_tf32_rna_ms_splitk8_m128n64_bk32_s3, 128, 64, 32, 2, 2, 3, 1)
+TF32_RNA_MS_TN_SPLIT8(tn_sm80_tf32_rna_ms_splitk8_m64n64_bk32_s4, 64, 64, 32, 2, 2, 4, 1)
+
+#undef TF32_RNA_MS_TN_SPLIT8
+
 static_assert(Tf32MsConfig<SgbTf32Nn, 64, 128, 16, 2, 2, 6>::SharedBytes == 76800, "NN ms 64x128 ring");
 static_assert(Tf32MsConfig<SgbTf32Nn, 128, 64, 32, 2, 2, 3>::SharedBytes == 76800, "NN ms 128x64 ring");
 static_assert(Tf32MsConfig<SgbTf32Nn, 64, 64, 32, 2, 2, 3>::SharedBytes == 52224, "NN ms 64x64 ring");
 static_assert(Tf32MsConfig<SgbTf32Nt, 64, 128, 16, 2, 2, 6>::SharedBytes == 73728, "NT ms 64x128 ring");
 static_assert(Tf32MsConfig<SgbTf32Nt, 128, 64, 32, 2, 2, 3>::SharedBytes == 73728, "NT ms 128x64 ring");
 static_assert(Tf32MsConfig<SgbTf32Nt, 128, 128, 16, 2, 2, 5>::SharedBytes == 81920, "NT ms 128x128 ring");
+static_assert(Tf32MsConfig<SgbTf32Tn, 128, 64, 32, 2, 2, 3>::SharedBytes == 79872, "TN ms split 128x64 ring");
+static_assert(Tf32MsConfig<SgbTf32Tn, 64, 64, 32, 2, 2, 4>::SharedBytes == 73728, "TN ms split 64x64 ring");
