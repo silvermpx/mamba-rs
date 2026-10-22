@@ -538,16 +538,15 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
 }
 
 #[test]
-fn sm80_tc_policy_digest_covers_geometry_waves_device_and_deep_split_k() {
+fn sm80_tc_policy_digest_covers_geometry_waves_stream_k_and_deep_split_k() {
     let policy = Sm80TcPolicy::current();
-    let hash = policy.digest(142);
-    assert_ne!(policy.digest(141), hash);
+    let hash = policy.digest();
 
     macro_rules! assert_field_changes_digest {
         ($field:ident, $value:expr) => {{
             let mut changed = policy;
             changed.$field = $value;
-            assert_ne!(changed.digest(142), hash, stringify!($field));
+            assert_ne!(changed.digest(), hash, stringify!($field));
         }};
     }
 
@@ -635,6 +634,11 @@ fn sm80_tc_policy_digest_covers_geometry_waves_device_and_deep_split_k() {
         deep_split_k_aligned_min_reduction,
         policy.deep_split_k_aligned_min_reduction + 1
     );
+    assert_field_changes_digest!(
+        stream_k_min_reduction_slabs,
+        policy.stream_k_min_reduction_slabs + 1
+    );
+    assert_field_changes_digest!(stream_k_worker_slabs, policy.stream_k_worker_slabs + 1);
 }
 
 #[test]
@@ -654,29 +658,23 @@ fn scalar_split_policy_digest_covers_every_threshold() {
     assert_field_changes_digest!(slim_split_max_tiles);
     assert_field_changes_digest!(tn_split_m_target_blocks);
 
+    assert_ne!(gemm_dispatch_policy_digest(), hash);
     assert_ne!(
-        gemm_dispatch_policy_digest(141),
-        gemm_dispatch_policy_digest(142)
-    );
-    assert_ne!(gemm_dispatch_policy_digest(142), hash);
-    assert_ne!(
-        gemm_dispatch_policy_digest(142),
-        Sm80TcPolicy::current().digest(142)
+        gemm_dispatch_policy_digest(),
+        Sm80TcPolicy::current().digest()
     );
 }
 
 #[test]
 fn vendor_policy_decoy_changes_the_dispatch_identity() {
-    let multiprocessor_count = 142;
-    let tensor_core = Sm80TcPolicy::current().digest(multiprocessor_count);
+    let tensor_core = Sm80TcPolicy::current().digest();
     let scalar = ScalarSplitPolicy::current().digest();
-    let previous = FramedSha256::new(b"gemm-dispatch-policy.v4")
+    let without_vendor = FramedSha256::new(b"gemm-dispatch-policy")
         .required(b"sm80-tensor-core-policy", &tensor_core)
-        .required(b"scalar-wave-policy", &scalar)
-        .required(b"multiprocessor-count", &multiprocessor_count.to_le_bytes())
+        .required(b"scalar-split-policy", &scalar)
         .finish();
 
-    assert_ne!(gemm_dispatch_policy_digest(multiprocessor_count), previous);
+    assert_ne!(gemm_dispatch_policy_digest(), without_vendor);
 }
 
 fn route() -> GemmRouteIdentity {
@@ -716,7 +714,7 @@ fn route() -> GemmRouteIdentity {
         compiler,
         artifacts,
         policy_revision: POLICY_REVISION,
-        policy_hash: gemm_dispatch_policy_digest(142),
+        policy_hash: gemm_dispatch_policy_digest(),
         device: DeviceIdentity {
             compute_capability: (8, 9),
             multiprocessor_count: 142,

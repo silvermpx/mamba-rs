@@ -793,9 +793,7 @@ impl GpuCtx {
             instance_token,
             device_identity,
             device_caps,
-            policy_hash: super::kernel_identity::gemm_dispatch_policy_digest(
-                device_identity.multiprocessor_count,
-            ),
+            policy_hash: super::kernel_identity::gemm_dispatch_policy_digest(),
             graphs_captured: Cell::new(0),
             graph_scratch_frozen: Cell::new(false),
         })

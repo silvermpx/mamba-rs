@@ -841,7 +841,6 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
             ),
             a_ptr: x.ptr,
             b_ptr: w.ptr,
-            multiprocessors: ctx.kernels.partition_reference(),
             half_policy: ctx.half_triad_policy(),
             operands: super::gemm_bi_triad::Sm120LaunchOperands {
                 output_ptr: y.ptr,
@@ -1003,7 +1002,6 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
             ),
             a_ptr: x_saved.ptr,
             b_ptr: dy.ptr,
-            multiprocessors: ctx.kernels.partition_reference(),
             half_policy: ctx.half_triad_policy(),
             operands: super::gemm_bi_triad::Sm120LaunchOperands {
                 output_ptr: dw_ptr,
@@ -1160,7 +1158,6 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
             ),
             a_ptr: dy.ptr,
             b_ptr: w.ptr,
-            multiprocessors: ctx.kernels.partition_reference(),
             half_policy: ctx.half_triad_policy(),
             operands: super::gemm_bi_triad::Sm120LaunchOperands {
                 output_ptr: dx.ptr,
@@ -1814,8 +1811,7 @@ fn prepare_native_half_graph_launch(
             // schedule this builder does not bind, so a missing arm is an
             // error and never a short argument array handed to the Driver.
             if base == "tn_tc64_streamk" {
-                let workers =
-                    super::gemm_bi_triad::sm80_streamk_workers(&ctx.kernels, request.dims)?;
+                let workers = super::gemm_bi_triad::sm80_streamk_workers(request.dims)?;
                 let (partial, flags) = super::gemm_bi_triad::sm80_streamk_workspace(
                     &ctx.stream,
                     &ctx.kernels,
@@ -2103,7 +2099,6 @@ pub(super) fn prepare_half_physical_graph_package<'a>(
                 shape: super::gemm_bi_triad::Sm120Shape::contiguous(op, request.dims),
                 a_ptr: request.a,
                 b_ptr: request.b,
-                multiprocessors: ctx.kernels.partition_reference(),
                 half_policy: ctx.half_triad_policy(),
                 operands: super::gemm_bi_triad::Sm120LaunchOperands {
                     output_ptr: request.output,

@@ -13274,8 +13274,23 @@ pub(in crate::gpu) fn launch_sm89_half_tn_auto_observed<O: PhysicalLaunchObserve
             .1
             .checked_mul(dims.2)
             .ok_or_else(|| "SM89 half TN output span overflows usize".to_string())?;
+        // A declined cell keeps the bit family it proves against: the tiled
+        // 64x64 reference, never the automatic pick, which may take the
+        // stream-K order for a deep reduction and give this shape other bits
+        // than the boards that admit the cell.
+        let reference = |observer: &mut O| {
+            gemm_bi_backward_dw_tc_with_tile_in(
+                &mut HalfLaunchEnvironment::observed(ctx, observer),
+                dw_ptr,
+                dy,
+                x_saved,
+                dims,
+                TcTile::Tile64,
+            )
+            .map(Some)
+        };
         if !half_wave_guard_admits(ctx, spec, key, (dims.1, dims.2))? {
-            return Ok(None);
+            return reference(observer);
         }
         let admitted = proven_candidate(
             ctx,
@@ -13308,7 +13323,7 @@ pub(in crate::gpu) fn launch_sm89_half_tn_auto_observed<O: PhysicalLaunchObserve
             },
         )?;
         if !admitted {
-            return Ok(None);
+            return reference(observer);
         }
     }
     enqueue_sm89_half_tn(ctx, observer, spec, dw_ptr, dy, x_saved, dims).map(Some)
@@ -13585,20 +13600,22 @@ fn sm80_streamk_units(dims: (usize, usize, usize)) -> Result<u64, String> {
     Ok(u64::from(tiles) * u64::from(slabs))
 }
 
-/// The workers the tc64 TN stream-K kernel deals its units to: four per
-/// multiprocessor of the architecture's partition reference, never more than
-/// there are units or than the fixed slab and flag workspaces hold. The count
-/// never reads the live SM count, so every card of an architecture folds
-/// alike and gives the same bits; an RTX 6000 Ada deals to 568.
-pub fn sm80_streamk_workers(
-    kernels: &GpuKernels,
-    dims: (usize, usize, usize),
-) -> Result<u32, String> {
+/// The workers the tc64 TN stream-K kernel deals its units to: one per
+/// `stream_k_worker_slabs` units, with the span widened only where the
+/// fixed slab and flag workspaces would run out of workers. The count is a
+/// function of the shape alone, so every card of every architecture cuts
+/// each tile's reduction at the same places and gives the same bits; the
+/// persistent grid then runs the workers in as many waves as the card's
+/// resident CTAs need.
+pub fn sm80_streamk_workers(dims: (usize, usize, usize)) -> Result<u32, String> {
     let units = sm80_streamk_units(dims)?;
-    let fixed = 4 * u64::from(kernels.partition_reference().max(1));
     let workspace = (SPLITK_SCRATCH_CAP / (SM80_STREAMK_SLOTS_PER_CTA * SM80_STREAMK_SLAB_FLOATS))
         .min(TF32_SPLITK_COUNTER_CAP / SM80_STREAMK_SLOTS_PER_CTA) as u64;
-    u32::try_from(units.min(fixed).min(workspace).max(1))
+    let span = super::super::kernel_identity::Sm80TcPolicy::current()
+        .stream_k_worker_slabs
+        .max(units.div_ceil(workspace))
+        .max(1);
+    u32::try_from(units.div_ceil(span).max(1))
         .map_err(|_| "stream-K worker count exceeds u32".to_string())
 }
 
@@ -13608,7 +13625,7 @@ pub fn sm80_streamk_workers(
 /// CTA while every CTA of the grid is resident, so the grid is bounded by
 /// the resident CTA count the loader read from the driver.
 pub fn sm80_streamk_grid(kernels: &GpuKernels, dims: (usize, usize, usize)) -> Result<u32, String> {
-    let workers = sm80_streamk_workers(kernels, dims)?;
+    let workers = sm80_streamk_workers(dims)?;
     let resident = u64::from(kernels.multiprocessor_count().max(1))
         * u64::from(kernels.tc64_streamk_resident_ctas().max(1));
     u32::try_from(u64::from(workers).min(resident).max(1))
@@ -13851,7 +13868,6 @@ fn gemm_bi_backward_dw_tc_in<O: PhysicalLaunchObserver>(
         super::super::kernel_identity::PolicyOp::Dw,
         dims,
         environment.kernels.multiprocessor_count(),
-        environment.kernels.partition_reference(),
         compute_capability,
         half_policy,
     ).ok_or_else(|| {
@@ -13917,7 +13933,7 @@ fn gemm_bi_backward_dw_tc_with_tile_in<O: PhysicalLaunchObserver>(
         ),
         TcTile::Tile64StreamK => {
             let grid = sm80_streamk_grid(environment.kernels, dims)?;
-            let workers = sm80_streamk_workers(environment.kernels, dims)?;
+            let workers = sm80_streamk_workers(dims)?;
             let (partial, flags) =
                 sm80_streamk_workspace(environment.stream, environment.kernels, workers)?;
             let workers = i32::try_from(workers)
@@ -14022,7 +14038,6 @@ fn gemm_bi_backward_dx_tc_in<O: PhysicalLaunchObserver>(
         super::super::kernel_identity::PolicyOp::Dx,
         dims,
         environment.kernels.multiprocessor_count(),
-        environment.kernels.partition_reference(),
         compute_capability,
         HalfTriadPolicy::TiledParity,
     ).ok_or_else(|| {
@@ -15153,7 +15168,6 @@ mod prepared_f32_launch_tests {
             shape: route.shape,
             a_ptr: 0x1_0000,
             b_ptr: 0x2_0000,
-            multiprocessors: 170,
             half_policy: HalfTriadPolicy::TiledParity,
             operands: Sm120LaunchOperands {
                 output_ptr: 0x3_0000,

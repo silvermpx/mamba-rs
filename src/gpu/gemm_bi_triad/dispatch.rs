@@ -5177,12 +5177,6 @@ pub(in crate::gpu) struct Sm120AutoRequest {
     pub a_ptr: super::contract::CUptr,
     pub b_ptr: super::contract::CUptr,
     pub operands: Sm120LaunchOperands,
-    /// The architecture's partition reference
-    /// (`crate::gpu::device::architecture_partition_reference`), not the live
-    /// count: the neighbour rule's choices - the smallest tile for an
-    /// underfilled shape, a stream-K neighbour declined once the tiles cover
-    /// the device - must be the same on every SM120 card.
-    pub multiprocessors: u32,
     /// The live half-precision policy. Only its stream-K permission opens
     /// the measured stream-K cells; every other request sees the tiled table.
     pub half_policy: HalfTriadPolicy,
@@ -5239,12 +5233,19 @@ fn sm120_auto_geometry(op: Sm120Op, shape: Sm120Shape) -> [f64; 3] {
 /// The tile of the nearest measured cell of the same operation and dtype,
 /// when one lies within the neighbour band. Ties keep table order, so the
 /// choice is deterministic for a given table.
+///
+/// Both bounds of the rule are tile counts of the shape, never the card's:
+/// the stream-K decline picks a reduction order and the tile swap a tile
+/// whose bits no test has pinned against the neighbour's, so every SM120
+/// card must take the same branch. The count is one wave of the card the
+/// census ran on; a census on a second SM120 card re-measures it.
+const SM120_NEIGHBOUR_WAVE_TILES: f64 = 170.0;
+
 fn nearest_sm120_cell(
     cells: &[Sm120ForcedRoute],
     op: Sm120Op,
     dtype: WeightDtype,
     shape: Sm120Shape,
-    multiprocessors: u32,
 ) -> Option<Sm120PhysicalRoute> {
     let target = sm120_auto_geometry(op, shape).map(f64::ln);
     let mut best: Option<(f64, &Sm120ForcedRoute)> = None;
@@ -5272,26 +5273,26 @@ fn nearest_sm120_cell(
     let (_, neighbour) = best?;
     let mut physical = neighbour.physical;
     // A neighbour measured on a larger output may carry a tile whose grid
-    // leaves most of this board idle. When the shape fills less than one
-    // wave with that tile and less than half of what the neighbour filled,
-    // the smallest tile serves instead: the census shows it winning every
-    // cell that far into underfill. The pipeline depth and reduction step
-    // stay the neighbour's. A neighbour that won underfilled itself keeps
-    // its tile for shapes that are underfilled the same way.
+    // leaves most of the card idle. When the shape fills less than the
+    // census wave with that tile and less than half of what the neighbour
+    // filled, the smallest tile serves instead: the census shows it winning
+    // every cell that far into underfill. The pipeline depth and reduction
+    // step stay the neighbour's. A neighbour that won underfilled itself
+    // keeps its tile for shapes that are underfilled the same way.
     let grid = |cell_shape: Sm120Shape| {
         let [rows, columns, _] = sm120_auto_geometry(op, cell_shape);
         (rows / f64::from(physical.tile.output_rows())).ceil()
             * (columns / f64::from(physical.tile.output_columns())).ceil()
     };
     let target_grid = grid(shape);
-    if target_grid < f64::from(multiprocessors) && target_grid * 2.0 < grid(neighbour.shape) {
+    if target_grid < SM120_NEIGHBOUR_WAVE_TILES && target_grid * 2.0 < grid(neighbour.shape) {
         physical.tile = Sm120Tile::M64N64;
     }
     // A stream-K neighbour earns its persistent grid only while the target's
-    // own grid underfills the device; a shape whose tiles already cover the
-    // multiprocessors declines here so the tiled table serves it (measured on
-    // the 5090: stream-K loses 22-77% wherever the tiles reach the SM count).
-    if physical.schedule == Sm120Schedule::StreamK && target_grid >= f64::from(multiprocessors) {
+    // own grid underfills the census wave; a shape whose tiles already cover
+    // it declines here so the tiled table serves it (stream-K lost 22-77% on
+    // every cell whose tiles reached it).
+    if physical.schedule == Sm120Schedule::StreamK && target_grid >= SM120_NEIGHBOUR_WAVE_TILES {
         return None;
     }
     Some(physical)
@@ -5314,13 +5315,7 @@ fn resolve_sm120_auto_from_cells(
         None => Sm120ForcedRoute {
             op: request.op,
             dtype: request.dtype,
-            physical: nearest_sm120_cell(
-                cells,
-                request.op,
-                request.dtype,
-                request.shape,
-                request.multiprocessors,
-            )?,
+            physical: nearest_sm120_cell(cells, request.op, request.dtype, request.shape)?,
             shape: request.shape,
         },
     };
@@ -10792,7 +10787,6 @@ pub(super) fn tc_pick_tile_backward_for_device(
     op: super::super::kernel_identity::PolicyOp,
     dims: (usize, usize, usize),
     multiprocessor_count: u32,
-    partition_reference: u32,
     compute_capability: (i32, i32),
     half_policy: HalfTriadPolicy,
 ) -> Option<TcTile> {
@@ -10805,15 +10799,14 @@ pub(super) fn tc_pick_tile_backward_for_device(
     if !composed || multiprocessor_count == 0 {
         return portable;
     }
-    // The stream-K dW schedule serves any 64x64 grid whose (tile, slab)
-    // units give every multiprocessor a deep enough reduction, and only
-    // when the half policy permits its fixed-order fold; a request that
-    // stays on the tiled contract never sees it. Its persistent grid is
-    // bounded by the resident CTA count, so the tile count itself no longer
-    // limits it: the census shows it winning from one wave of tiles to
-    // eight wherever the reduction runs 2048 rows or more. It runs on every
-    // board whose portable module composes it; the CC 12.x boards keep
-    // their own stream-K kernel instead.
+    // The stream-K dW schedule serves any 64x64 grid whose reduction is
+    // deep enough, and only when the half policy permits its fixed-order
+    // fold; a request that stays on the tiled contract never sees it. The
+    // census shows it winning wherever the reduction runs 2048 rows or more
+    // and losing at 1024 or fewer. Stream-K or the tiled kernel is a choice
+    // of reduction order, so the rule reads the shape alone and every card
+    // takes the same one. It runs on every board whose portable module
+    // composes it; the CC 12.x boards keep their own stream-K kernel.
     if op == super::super::kernel_identity::PolicyOp::Dw
         && half_policy == HalfTriadPolicy::AllowStreamKFixedOrder
     {
@@ -10821,12 +10814,7 @@ pub(super) fn tc_pick_tile_backward_for_device(
         let policy = super::super::kernel_identity::Sm80TcPolicy::current();
         let tiles64 = tc_grid_ctas(n_in, n_out, 64, 64)?;
         let slabs = u64::try_from(batch).ok()?.div_ceil(64);
-        let units = tiles64.checked_mul(slabs)?;
-        // Stream-K or the tiled kernel is a choice of reduction order, so it
-        // reads the architecture's partition reference, never the live count.
-        let sms = u64::from(partition_reference);
-        let deep_enough = units >= sms.checked_mul(policy.stream_k_min_slabs_per_cta)?;
-        if tiles64 > 0 && deep_enough {
+        if tiles64 > 0 && slabs >= policy.stream_k_min_reduction_slabs {
             return Some(TcTile::Tile64StreamK);
         }
     }
@@ -10891,16 +10879,19 @@ mod tc_policy_tests {
     const RTX_6000_ADA_SMS: u32 = 142;
 
     #[test]
-    fn sm89_stream_k_dw_needs_the_half_permission_an_underfilled_grid_and_depth() {
+    fn stream_k_dw_needs_the_half_permission_and_a_deep_reduction() {
         let pick = |dims, policy, cc| {
-            tc_pick_tile_backward_for_device(
-                PolicyOp::Dw,
-                dims,
-                RTX_6000_ADA_SMS,
-                RTX_6000_ADA_SMS,
-                cc,
-                policy,
-            )
+            let picks = [24, 82, 108, 128, 132, 142, 170, 188].map(|multiprocessors| {
+                tc_pick_tile_backward_for_device(PolicyOp::Dw, dims, multiprocessors, cc, policy)
+                    == Some(TcTile::Tile64StreamK)
+            });
+            // Stream-K or the tiled kernel is a reduction order: every card
+            // takes the same one.
+            assert!(
+                picks.iter().all(|&picked| picked == picks[0]),
+                "{dims:?} {policy:?} {cc:?}: {picks:?}"
+            );
+            tc_pick_tile_backward_for_device(PolicyOp::Dw, dims, RTX_6000_ADA_SMS, cc, policy)
         };
         let tiled = HalfTriadPolicy::TiledParity;
         let stream_k = HalfTriadPolicy::AllowStreamKFixedOrder;
@@ -10960,10 +10951,9 @@ mod tc_policy_tests {
                 "{dims:?}"
             );
         }
-        // Too few (tile, slab) units to give every multiprocessor a deep
-        // reduction keep the tiled pick under both policies: d128_out_proj
-        // 8 tiles x 16 slabs, d128_in_proj 16 x 16, underfill 48 x 4,
-        // split_candidate 256 x 2, a shallow 512-row batch.
+        // A reduction of 1024 rows or fewer keeps the tiled pick under both
+        // policies: d128_out_proj 8 tiles x 16 slabs, d128_in_proj 16 x 16,
+        // underfill 48 x 4, split_candidate 256 x 2, a shallow 512-row batch.
         for dims in [
             (1024, 256, 128),
             (1024, 128, 512),
@@ -10988,14 +10978,12 @@ mod tc_policy_tests {
                 PolicyOp::Dx,
                 (10400, 384, 384),
                 RTX_6000_ADA_SMS,
-                RTX_6000_ADA_SMS,
                 (8, 9),
                 stream_k
             ),
             tc_pick_tile_backward_for_device(
                 PolicyOp::Dx,
                 (10400, 384, 384),
-                RTX_6000_ADA_SMS,
                 RTX_6000_ADA_SMS,
                 (8, 9),
                 tiled
@@ -11095,41 +11083,11 @@ mod tc_policy_tests {
     }
 
     #[test]
-    fn selector_policy_identity_is_pinned_for_sm80_plus_device_sizes() {
-        let mut mismatches = Vec::new();
-        for (multiprocessor_count, expected) in [
-            (
-                48,
-                "74bf14343e3c91214469021ec13b79e602f1b2447cc9957f8d8a292fc73227f4",
-            ),
-            (
-                80,
-                "77de34a2e3fe606ca6d56964f9c107c59bec301e5c6b7e10fbb627113c58cf51",
-            ),
-            (
-                108,
-                "33c6c6a598c7e7597384bd6e5ca3c613fefc6c9071a17dadad1c3f0190294b40",
-            ),
-            (
-                120,
-                "5a61c3cbca17bcbfb4fd02cc92b7072657a3a97f43ebb6bff2eb8ec2413de8b7",
-            ),
-            (
-                142,
-                "d7bf5a18a06b6a31966e857d1852a2d617ecce996dc83d739e0b0db3ca5a5b57",
-            ),
-        ] {
-            let actual = digest_hex(&gemm_dispatch_policy_digest(multiprocessor_count));
-            if actual != expected {
-                mismatches.push(format!(
-                    "{multiprocessor_count} SM: pinned {expected}, live {actual}"
-                ));
-            }
-        }
-        assert!(
-            mismatches.is_empty(),
-            "policy identity moved; repin every size from the live digests:\n{}",
-            mismatches.join("\n")
+    fn selector_policy_identity_is_pinned_and_the_same_on_every_card() {
+        let actual = digest_hex(&gemm_dispatch_policy_digest());
+        assert_eq!(
+            actual, "abcb426a748b91768a5dba45a35f7a7de82404f441e40220718f4ef2672b9c33",
+            "policy identity moved; repin it from the live digest"
         );
     }
 
@@ -11376,7 +11334,6 @@ mod tc_policy_tests {
                 PolicyOp::Dw,
                 (2048, 1536, 768),
                 RTX_6000_ADA_SMS,
-                RTX_6000_ADA_SMS,
                 sm89,
                 HalfTriadPolicy::TiledParity,
             ),
@@ -11386,7 +11343,6 @@ mod tc_policy_tests {
             tc_pick_tile_backward_for_device(
                 PolicyOp::Dw,
                 (4096, 3072, 1536),
-                RTX_6000_ADA_SMS,
                 RTX_6000_ADA_SMS,
                 sm89,
                 HalfTriadPolicy::TiledParity,
@@ -11398,7 +11354,6 @@ mod tc_policy_tests {
                 PolicyOp::Dx,
                 (2048, 1536, 768),
                 RTX_6000_ADA_SMS,
-                RTX_6000_ADA_SMS,
                 sm89,
                 HalfTriadPolicy::TiledParity,
             ),
@@ -11409,7 +11364,6 @@ mod tc_policy_tests {
                 PolicyOp::Dx,
                 (2048, 3072, 768),
                 RTX_6000_ADA_SMS,
-                RTX_6000_ADA_SMS,
                 sm89,
                 HalfTriadPolicy::TiledParity,
             ),
@@ -11419,7 +11373,6 @@ mod tc_policy_tests {
             tc_pick_tile_backward_for_device(
                 PolicyOp::Dw,
                 (4096, 3072, 1536),
-                RTX_6000_ADA_SMS,
                 RTX_6000_ADA_SMS,
                 sm80,
                 HalfTriadPolicy::TiledParity,
@@ -11832,13 +11785,7 @@ mod sm120_tests {
         // projections and takes their tiles, one per operation.
         let tall = Sm120Shape::contiguous(Sm120Op::Nn, (4096, 512, 768));
         assert_eq!(
-            nearest_sm120_cell(
-                SM120_AUTO_CELLS_CC120,
-                Sm120Op::Nn,
-                WeightDtype::Bf16,
-                tall,
-                170
-            ),
+            nearest_sm120_cell(SM120_AUTO_CELLS_CC120, Sm120Op::Nn, WeightDtype::Bf16, tall),
             Some(Sm120PhysicalRoute {
                 tile: Sm120Tile::M64N64,
                 bk: Sm120Bk::Bk64,
@@ -11852,8 +11799,7 @@ mod sm120_tests {
                 SM120_AUTO_CELLS_CC120,
                 Sm120Op::Tn,
                 WeightDtype::F16,
-                tall_tn,
-                170,
+                tall_tn
             ),
             Some(Sm120PhysicalRoute {
                 tile: Sm120Tile::M64N64,
@@ -11869,8 +11815,7 @@ mod sm120_tests {
                 SM120_AUTO_CELLS_CC120,
                 Sm120Op::Nt,
                 WeightDtype::Bf16,
-                measured,
-                170,
+                measured
             ),
             Some(Sm120PhysicalRoute {
                 tile: Sm120Tile::M128N64,
@@ -11887,7 +11832,6 @@ mod sm120_tests {
             Sm120Op::Nt,
             WeightDtype::Bf16,
             narrow,
-            170,
         )
         .expect("the narrow projection is inside the band");
         assert_eq!(picked.tile, Sm120Tile::M64N64);
@@ -11895,13 +11839,7 @@ mod sm120_tests {
         // least one axis and gets no tile: the portable tiles serve it.
         let tiny = Sm120Shape::contiguous(Sm120Op::Nn, (64, 64, 64));
         assert_eq!(
-            nearest_sm120_cell(
-                SM120_AUTO_CELLS_CC120,
-                Sm120Op::Nn,
-                WeightDtype::Bf16,
-                tiny,
-                170
-            ),
+            nearest_sm120_cell(SM120_AUTO_CELLS_CC120, Sm120Op::Nn, WeightDtype::Bf16, tiny),
             None
         );
     }
@@ -11914,7 +11852,6 @@ mod sm120_tests {
             shape: route.shape,
             a_ptr: 0x1_0000,
             b_ptr: 0x2_0000,
-            multiprocessors: 170,
             half_policy: HalfTriadPolicy::TiledParity,
             operands: Sm120LaunchOperands {
                 output_ptr: 0x3_0000,
@@ -11995,7 +11932,7 @@ mod sm120_tests {
         // carries over.
         let near = Sm120Shape::contiguous(Sm120Op::Tn, (10400, 768, 512));
         assert_eq!(
-            super::nearest_sm120_cell(&cells, Sm120Op::Tn, WeightDtype::Bf16, near, 170)
+            super::nearest_sm120_cell(&cells, Sm120Op::Tn, WeightDtype::Bf16, near)
                 .map(|physical| physical.schedule),
             Some(Sm120Schedule::StreamK)
         );
@@ -12004,7 +11941,7 @@ mod sm120_tests {
         // to the tiled table.
         let wide = Sm120Shape::contiguous(Sm120Op::Tn, (10400, 2048, 2048));
         assert_eq!(
-            super::nearest_sm120_cell(&cells, Sm120Op::Tn, WeightDtype::Bf16, wide, 170),
+            super::nearest_sm120_cell(&cells, Sm120Op::Tn, WeightDtype::Bf16, wide),
             None
         );
     }

@@ -253,33 +253,6 @@ pub fn is_sm120_family(cc: (u32, u32)) -> bool {
     cc.0 == 12
 }
 
-/// The SM count an architecture's reduction partitions are sized for: that
-/// of the card its tables were measured on. A choice that changes the
-/// reduction order - a split-K on or off, a split-M partition, the chunks a
-/// reduction is dealt into - reads this, never the live count, so every card
-/// of the architecture folds the same way and gives the same bits; on the
-/// measuring card nothing changes. Scheduling (wave fill, persistent grids,
-/// a tile among tiles of equal bits) reads the live count
-/// (docs/architecture-dispatch.md). An architecture with no measured card
-/// takes the flagship of its family.
-pub(crate) const fn architecture_partition_reference(cc: (u32, u32)) -> u32 {
-    match cc {
-        // A100.
-        (8, 0) => 108,
-        // RTX 6000 Ada, where the Ada tables were measured.
-        (8, 9) => 142,
-        // GA10x (RTX A6000, A40) and the other Ampere minors.
-        (8, _) => 84,
-        // H100 SXM and H200.
-        (9, _) => 132,
-        // B200.
-        (10, _) | (11, _) => 148,
-        // RTX 5090, where the SM120 scalar plans were measured.
-        (12, _) => 170,
-        _ => 128,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{GpuDevice, is_sm120_family};

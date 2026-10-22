@@ -2662,16 +2662,18 @@ pub struct Sm80TcPolicy {
     pub deep_split_k_output_columns: usize,
     pub deep_split_k_tail_min_reduction: usize,
     pub deep_split_k_aligned_min_reduction: usize,
-    /// The dW stream-K schedule (SM89, under the half policy that permits
-    /// the fixed-order fold) takes a shape only when its (tile, slab) units
-    /// give every multiprocessor at least this many 64-row slabs of work.
-    /// With the persistent grid bounded by the resident CTA count rather
-    /// than one CTA per multiprocessor, the census shows the schedule
-    /// winning on every shape with a reduction of 2048 rows or more, from
-    /// one wave of tiles (the classifier page, 0.82) to eight (0.83), and
-    /// losing wherever the reduction is 1024 rows or fewer (the d128 and
-    /// thin cells, where a CTA holds one or two units).
-    pub stream_k_min_slabs_per_cta: u64,
+    /// The dW stream-K schedule (under the half policy that permits the
+    /// fixed-order fold) takes a shape only when its reduction holds at
+    /// least this many 64-row slabs. The census shows it winning on every
+    /// shape with a reduction of 2048 rows or more, from one wave of tiles
+    /// (the classifier page, 0.82) to eight (0.83), and losing wherever the
+    /// reduction is 1024 rows or fewer (the d128 and thin cells).
+    pub stream_k_min_reduction_slabs: u64,
+    /// The 64-row slabs one stream-K worker sums before it hands its
+    /// partial on. The pieces are a function of the shape alone, so every
+    /// card folds the same ones in the same order; a card runs them in as
+    /// many waves as its resident CTAs need.
+    pub stream_k_worker_slabs: u64,
 }
 
 impl Sm80TcPolicy {
@@ -2701,12 +2703,13 @@ impl Sm80TcPolicy {
             deep_split_k_output_columns: 128,
             deep_split_k_tail_min_reduction: 511,
             deep_split_k_aligned_min_reduction: 1024,
-            stream_k_min_slabs_per_cta: 32,
+            stream_k_min_reduction_slabs: 32,
+            stream_k_worker_slabs: 8,
         }
     }
 
-    pub fn digest(&self, multiprocessor_count: u32) -> Sha256Digest {
-        FramedSha256::new(b"sm80-tc-policy.v4")
+    pub fn digest(&self) -> Sha256Digest {
+        FramedSha256::new(b"sm80-tc-policy")
             .required(b"reject-zero-axes", &[self.reject_zero_axes as u8])
             .required(
                 b"square-tile-min",
@@ -2805,10 +2808,13 @@ impl Sm80TcPolicy {
                 &(self.deep_split_k_aligned_min_reduction as u64).to_le_bytes(),
             )
             .required(
-                b"stream-k-min-slabs-per-cta",
-                &self.stream_k_min_slabs_per_cta.to_le_bytes(),
+                b"stream-k-min-reduction-slabs",
+                &self.stream_k_min_reduction_slabs.to_le_bytes(),
             )
-            .required(b"multiprocessor-count", &multiprocessor_count.to_le_bytes())
+            .required(
+                b"stream-k-worker-slabs",
+                &self.stream_k_worker_slabs.to_le_bytes(),
+            )
             .finish()
     }
 }
@@ -2860,17 +2866,18 @@ impl ScalarSplitPolicy {
     }
 }
 
-pub fn gemm_dispatch_policy_digest(multiprocessor_count: u32) -> Sha256Digest {
-    let tensor_core = Sm80TcPolicy::current().digest(multiprocessor_count);
+/// The identity of the dispatch rules: the same on every card, since no rule
+/// that decides a reduction order reads the card's multiprocessor count.
+pub fn gemm_dispatch_policy_digest() -> Sha256Digest {
+    let tensor_core = Sm80TcPolicy::current().digest();
     let scalar = ScalarSplitPolicy::current().digest();
-    FramedSha256::new(b"gemm-dispatch-policy.v6")
+    FramedSha256::new(b"gemm-dispatch-policy")
         .required(
             b"vendor-policy-revision",
             &CUBLAS_POLICY_REVISION.to_le_bytes(),
         )
         .required(b"sm80-tensor-core-policy", &tensor_core)
         .required(b"scalar-split-policy", &scalar)
-        .required(b"multiprocessor-count", &multiprocessor_count.to_le_bytes())
         .finish()
 }
 

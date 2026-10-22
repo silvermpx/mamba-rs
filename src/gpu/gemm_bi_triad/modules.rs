@@ -10668,13 +10668,6 @@ impl GemmBiKernels {
         self.multiprocessor_count
     }
 
-    /// The SM count this architecture's reduction partitions are sized for,
-    /// the same on every card of it; see
-    /// [`crate::gpu::device::architecture_partition_reference`].
-    pub(crate) fn partition_reference(&self) -> u32 {
-        crate::gpu::device::architecture_partition_reference(self.compute_capability)
-    }
-
     pub(crate) fn tc64_streamk_resident_ctas(&self) -> u32 {
         self.tc64_streamk_resident_ctas
     }
