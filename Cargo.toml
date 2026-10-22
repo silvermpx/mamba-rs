@@ -264,6 +264,11 @@ path = "tests/caller_stream_gemm.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "rna_tf32_batch_invariant"
+path = "tests/rna_tf32_batch_invariant.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "gemm_empty_axes"
 path = "tests/gemm_empty_axes.rs"
 required-features = ["cuda"]

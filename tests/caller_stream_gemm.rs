@@ -1,8 +1,8 @@
 //! A program that owns its CUDA context, stream and buffers runs its GEMMs
 //! through mamba-rs on them: the forward, the input gradient and the
 //! accumulated weight gradient on raw device pointers give the bits a
-//! context with its own stream and buffers gives, under the exact and the
-//! TF32 policy.
+//! context with its own stream and buffers gives, under the exact policy and
+//! both TF32 policies.
 #![cfg(feature = "cuda")]
 
 use std::sync::Arc;
@@ -142,6 +142,7 @@ fn caller_stream_gemms_give_the_owned_context_bits() {
     for policy in [
         F32TriadPolicy::ExactScalarFma,
         F32TriadPolicy::AllowDeterministicTf32,
+        F32TriadPolicy::RnaTf32BatchInvariant,
     ] {
         caller.route_controls().set_f32_policy(policy);
         owned.route_controls().set_f32_policy(policy);
