@@ -2296,7 +2296,7 @@ impl MambaKernels {
         &self.triad
     }
 
-    /// The Split-K/Split-M partial scratch (8M f32 = 32 MB), allocated on
+    /// The Split-K/Split-M partial scratch (32M f32 = 128 MB), allocated on
     /// first batch-invariant use. Zero-initialized like the old eager
     /// alloc; the partial kernels overwrite their region before the
     /// reduce reads it, so first-use contents were never load-bearing.

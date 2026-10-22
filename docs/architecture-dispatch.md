@@ -179,10 +179,9 @@ No selection compares an SM count to a card's number any more (the
   shapes the 5090 had cells for are now served below the table.
 
 Still keyed to one card's count, until an SM120 card re-measures them:
-- the SM120 stream-K kernels deal to 340 workers (twice the RTX 5090's
-  SMs), and the SM120 neighbour rule bounds its tile swap and stream-K
-  decline at 170 tiles;
-- four SM120 exact-f32 overlays cut or fold a reduction their own way, so
+- the SM120 neighbour rule bounds its tile swap and stream-K decline at 170
+  tiles;
+- three SM120 exact-f32 overlays cut or fold a reduction their own way, so
   exact bits on SM120 can differ from the other architectures.
 
 Repaired:
@@ -200,6 +199,14 @@ Repaired:
   per eight 64-row slabs, at most 512 workers; the resident grid walks the
   workers in order, so the partition points and the bits do not depend on
   how many SMs the card has;
+- the SM120 stream-K kernels (bf16, f16 and TF32) deal one worker per 32
+  units, at most 1024 workers, by the shape alone; measured on an RTX 5090
+  at its 170 SMs and with the grid held to 84 and 48 CTAs, no grid ran more
+  than 6% behind its best schedule, and a deep gradient over few tiles no
+  longer folds a slab per unit (127 -> 24 us on 128 x 128 over 8192 rows);
+- the exact narrow weight gradient (2 to 127 outputs) splits its batch by
+  the shape rule of the wider ones on every architecture, where only three
+  RTX 5090 cells split before;
 - a proof-path half cell that its wave guard declines falls back to the
   tiled reference it proves against, never to an automatic pick of another
   reduction order;

@@ -2196,6 +2196,7 @@ fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
         | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
+        | ScalarDispatchPlan::NtSlimViaTranspose
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => 2,
         ScalarDispatchPlan::NtSplitKMain { .. } | ScalarDispatchPlan::NtSplitKSlim { .. } => 3,
@@ -2218,6 +2219,7 @@ fn scalar_plan_requires_zero_beta(plan: ScalarDispatchPlan) -> bool {
             | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
+            | ScalarDispatchPlan::NtSlimViaTranspose
             | ScalarDispatchPlan::NtPrismVectorQualified
             | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified
             | ScalarDispatchPlan::NtM2N16SplitK32Qualified
@@ -2286,6 +2288,7 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified => (40, 0, 0),
         ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified => (46, 0, 0),
         ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified => (27, 0, 0),
+        ScalarDispatchPlan::NtSlimViaTranspose => (53, 0, 0),
         ScalarDispatchPlan::NtPrismVectorQualified => (30, 0, 0),
         ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => (29, 0, 0),
         ScalarDispatchPlan::NtFinal { slim } => (20, u64::from(slim), 0),
@@ -2342,6 +2345,7 @@ fn scalar_argument_layout(
         | (ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified, 1)
         | (ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified, 1)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 1)
+        | (ScalarDispatchPlan::NtSlimViaTranspose, 1)
         | (ScalarDispatchPlan::NtPrismVectorQualified, 1)
         | (ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified, 1) => ScalarArgumentLayout {
             null_pointer_mask: bias_null << 3,
@@ -2354,6 +2358,7 @@ fn scalar_argument_layout(
         | (ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified, 0)
         | (ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified, 0)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 0)
+        | (ScalarDispatchPlan::NtSlimViaTranspose, 0)
         | (ScalarDispatchPlan::NtPrismVectorQualified, 0)
         | (ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified, 0) => {
             ScalarArgumentLayout::default()
@@ -3089,6 +3094,7 @@ fn scalar_physical_nodes(
         | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
+        | ScalarDispatchPlan::NtSlimViaTranspose
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => {
             let (m64_symbol, bk, shared_mem_bytes) =
@@ -4233,6 +4239,7 @@ fn scalar_transpose_scratch_elements(
         | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
+        | ScalarDispatchPlan::NtSlimViaTranspose
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => request.shape.k,
         ScalarDispatchPlan::TnD768InSm89DualChunkQualified => request.shape.m,
@@ -7640,9 +7647,13 @@ unsafe fn enqueue_sm89_tf32_tn_pre_rna<O: PhysicalLaunchObserver>(
     }
     .map_err(|error| error.with_driver_context(format_args!("{TN_PRE_RNA_TRANSPOSE_SYMBOL}")))?;
 
-    let physical = physical_prepared_f32_route(prepared, *resolved);
-    let gemm_observation =
-        logical_dtype.map(|dtype| PhysicalLaunchObservation::gemm(dtype, None, physical));
+    let gemm_observation = logical_dtype.map(|dtype| {
+        PhysicalLaunchObservation::gemm(
+            dtype,
+            None,
+            physical_prepared_f32_route(prepared, *resolved),
+        )
+    });
     let output = prepared.operands.output;
     let b = prepared.operands.b;
     let bias = 0_u64;
@@ -7686,9 +7697,15 @@ unsafe fn enqueue_tf32_splitk_f32<O: PhysicalLaunchObserver>(
             )
         })?;
     ctx.record_resolved_gemm_route(*resolved)?;
-    let physical = physical_prepared_f32_route(prepared, *resolved);
-    let observation =
-        logical_dtype.map(|dtype| PhysicalLaunchObservation::gemm(dtype, None, physical));
+    // The physical route digests every resource, which costs more than the
+    // launch itself; only an observer reads it.
+    let observation = logical_dtype.map(|dtype| {
+        PhysicalLaunchObservation::gemm(
+            dtype,
+            None,
+            physical_prepared_f32_route(prepared, *resolved),
+        )
+    });
     let output = prepared.operands.output;
     let bias = prepared.operands.bias.unwrap_or(0);
     let mut builder = ctx.stream.launch_builder(function);
@@ -11045,6 +11062,7 @@ fn gemm_bi_backward_dx_with_control<
             | ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
+            | ScalarDispatchPlan::NtSlimViaTranspose
             | ScalarDispatchPlan::NtPrismVectorQualified
             | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified
     ) {
@@ -11305,8 +11323,8 @@ fn gemm_bi_backward_dx_with_control<
     } = scalar_plan
     {
         // The W cap matches transpose_scratch and the partial cap matches splitk_scratch.
-        // (the GPU splitk_scratch capacity). Earlier hardcoded `1<<23` partial
-        // cap was tighter than the underlying scratch (1<<23) and caused k_tail
+        // (the GPU splitk_scratch capacity). An earlier hardcoded partial
+        // cap was tighter than the underlying scratch and caused k_tail
         // to fall through at batch=1024 (partial=10.5M > 8M cap) while CPU has
         // no cap caused catastrophic dispatch divergence for a large-batch
         // K-tail dX shape (max_ulp=2.1M on synthetic LCG). Lifting matches the
@@ -14523,8 +14541,8 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
         return Ok(seal);
     }
 
-    // Narrow N (2..=127).
-    if (2..=127).contains(&n_out) && batch >= 1 && n_in >= 1 {
+    // Narrow N (2..=127) where the f32 cascade keeps the batch whole.
+    if tn_routes_to_narrow(batch, n_in, n_out) {
         let m_red_i = checked_dims.m_i32;
         let k_out_i = checked_dims.k_i32;
         let n_i = checked_dims.n_i32;
@@ -14991,9 +15009,10 @@ mod prepared_f32_launch_tests {
         assert_eq!(plan.fused.block_dim, (128, 1, 1));
         assert_eq!(plan.fused.shared_mem_bytes, 29_696);
 
+        // Four partitions of a 16384 x 1024 output pass the 32M-float scratch.
         let oversized = F32TriadRequest {
             op: ResolvedGemmOp::Nn,
-            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (4_096, 128, 1_024)),
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (16_384, 128, 1_024)),
         };
         assert!(tf32_splitk_launch_plan(oversized, &TF32_SPLITK4_SPEC).is_err());
         let oversized_row_grid = F32TriadRequest {
@@ -18057,15 +18076,23 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
-    fn tn_narrow_splitm_qualified_manifests_have_exact_two_node_geometry() {
+    fn tn_narrow_splitm_manifests_have_exact_two_node_geometry() {
         for (dims, partition, partial_grid, reducer_grid) in [
-            ((1024, 47, 17), (32, 32), (1, 1, 32), (4, 1, 1)),
-            ((1024, 128, 25), (32, 32), (2, 1, 32), (13, 1, 1)),
-            ((4096, 64, 64), (48, 86), (1, 2, 86), (16, 1, 1)),
+            ((1024, 47, 17), (16, 64), (1, 1, 64), (4, 1, 1)),
+            ((1024, 128, 25), (16, 64), (2, 1, 64), (13, 1, 1)),
+            ((4096, 64, 64), (32, 128), (1, 2, 128), (16, 1, 1)),
+            ((1024, 384, 101), (96, 11), (6, 4, 11), (152, 1, 1)),
         ] {
             let (_, request, automatic) =
                 scalar_backward_launch_plan(ResolvedGemmOp::Tn, dims).unwrap();
-            assert_eq!(automatic, ScalarDispatchPlan::TnNarrow, "{dims:?}");
+            assert_eq!(
+                automatic,
+                ScalarDispatchPlan::TnNarrowSplitM {
+                    m_chunk: partition.0,
+                    chunks: partition.1,
+                },
+                "{dims:?}"
+            );
             let aligned = scalar_test_operands(ResolvedGemmOp::Tn, 1.0);
             let plan = scalar_launch_plan(scalar_tn_admission_facts(), request, aligned).unwrap();
             assert_eq!(

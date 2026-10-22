@@ -3398,18 +3398,28 @@ const SM120_TF32_NN_M80N32_BK64_S2: Tf32KernelSpec = Tf32KernelSpec {
 pub const SM120_TF32_STREAMK_SLAB_FLOATS: usize = 256 * 32;
 pub const SM120_TF32_STREAMK_SLOTS_PER_CTA: usize = 2;
 
-/// The workers an SM120 stream-K reduction is dealt to, the kernels'
-/// `SM120_STREAMK_WORKERS`: a fixed count, so the partition points and the
+/// The units an SM120 stream-K worker takes at least and the most workers a
+/// reduction is dealt to, the kernels' `SM120_STREAMK_MIN_SPAN` and
+/// `SM120_STREAMK_WORKERS`: both fixed, so the partition points and the
 /// bits are the same on every SM120 card, and the grid of resident CTAs
-/// walks the workers. It is twice the SM count of the RTX 5090 the schedule
-/// was measured on.
-pub const SM120_STREAMK_WORKERS: usize = 340;
+/// walks the workers. Measured on the RTX 5090 at its own 170 SMs and with
+/// the grid held to 84 and 48 CTAs (the SM counts of the smaller CC 12.x
+/// cards), one worker per 32 units with at most 1024 left no grid more than
+/// 6% behind its best schedule, where one worker per unit up to 340 left
+/// the 84- and 48-CTA grids 25 and 30% behind and ran a 128 x 128 gradient
+/// over 8192 rows at 127 us instead of 24.
+pub const SM120_STREAMK_MIN_SPAN: usize = 32;
+pub const SM120_STREAMK_WORKERS: usize = 1024;
 
 /// The workers a stream-K reduction of `units` (tile, k-tile) units is dealt
-/// to: one per unit up to the fixed count.
+/// to: one per `SM120_STREAMK_MIN_SPAN` units, at least one and at most the
+/// fixed count.
 pub const fn sm120_streamk_workers(units: usize) -> usize {
-    if units < SM120_STREAMK_WORKERS {
-        units
+    let workers = units / SM120_STREAMK_MIN_SPAN;
+    if workers == 0 {
+        if units == 0 { 0 } else { 1 }
+    } else if workers < SM120_STREAMK_WORKERS {
+        workers
     } else {
         SM120_STREAMK_WORKERS
     }
@@ -6088,7 +6098,7 @@ pub const SM120_TENSOR_MAP_REVISION: u16 = 3;
 /// Qualified automatic-route table revision for SM120.
 pub const SM120_TUNING_REVISION: u16 = 0;
 /// Device schedule revision sealed into SM120 route identities.
-pub const SM120_SCHEDULE_REVISION: u16 = 9;
+pub const SM120_SCHEDULE_REVISION: u16 = 10;
 
 /// Logical GEMM operation implemented by the SM120 Triad module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -9671,13 +9681,19 @@ mod tests {
     /// launch would index slabs past the workspace.
     #[test]
     fn sm120_streamk_workers_match_the_kernel_source() {
-        use super::{SM120_STREAMK_WORKERS, sm120_streamk_workers};
+        use super::{SM120_STREAMK_MIN_SPAN, SM120_STREAMK_WORKERS, sm120_streamk_workers};
         let source = include_str!("../../../kernels/gemm_bi_triad/sm120/tma.cu");
         assert!(source.contains(&format!(
             "#define SM120_STREAMK_WORKERS {SM120_STREAMK_WORKERS}\n"
         )));
+        assert!(source.contains(&format!(
+            "#define SM120_STREAMK_MIN_SPAN {SM120_STREAMK_MIN_SPAN}\n"
+        )));
         assert_eq!(sm120_streamk_workers(0), 0);
-        assert_eq!(sm120_streamk_workers(17), 17);
+        assert_eq!(sm120_streamk_workers(17), 1);
+        assert_eq!(sm120_streamk_workers(63), 1);
+        assert_eq!(sm120_streamk_workers(64), 2);
+        assert_eq!(sm120_streamk_workers(512), 16);
         assert_eq!(sm120_streamk_workers(1_000_000), SM120_STREAMK_WORKERS);
     }
 }

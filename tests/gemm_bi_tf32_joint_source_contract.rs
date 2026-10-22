@@ -745,6 +745,16 @@ fn twelve_typed_specs_bind_symbols_abi_and_retained_resources() {
         assert_eq!(spec.dynamic_shared_bytes, dynamic);
         assert_eq!(spec.static_shared_bytes, static_bytes);
         assert_eq!(spec.register_cap, regs);
+        assert_eq!(spec.register_cap_on((8, 9)), regs);
+        // A CC 12.x board gates on the sm_120 JIT's allocation: the
+        // transpose and the 64 x 64 pre-rounded tile take a few registers
+        // more there, every other kernel the same gate.
+        let blackwell = match spec.symbol {
+            joint::TN_PRE_RNA_TRANSPOSE_SYMBOL => 28,
+            joint::TN_PRE_RNA_M64N64_SYMBOL => 106,
+            _ => regs,
+        };
+        assert_eq!(spec.register_cap_on((12, 0)), blackwell);
         assert_eq!(
             spec.local_bytes,
             if spec.symbol == joint::TN_DIRECT_M192N192_S2_SYMBOL {

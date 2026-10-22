@@ -3997,6 +3997,7 @@ fn physical_graph_package_covers_all_prepared_triad_route_shapes() {
         "NtSplitKMain",
         "NtSplitKSlim",
         "NtMidBatchWide",
+        "NtSlimViaTranspose",
         "NtFinal",
     ] {
         assert!(

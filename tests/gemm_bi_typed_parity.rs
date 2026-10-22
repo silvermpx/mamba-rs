@@ -310,9 +310,9 @@ fn typed_stage2_buckets_bit_match_f32_triad() {
         // K-tail (K % 16 != 0) inside narrow buckets.
         check_forward(&t, dt, (32, 100, 80), true, false);
 
-        // dW: gemv (N=1) + narrow.
+        // dW: gemv (N=1) + narrow, below the batch the split-M rule cuts.
         check_dw(&t, dt, (64, 384, 1), false);
-        check_dw(&t, dt, (256, 96, 80), false);
+        check_dw(&t, dt, (255, 96, 80), false);
         check_dw(&t, dt, (250, 100, 80), false);
 
         // dX: gemv (N=1) + narrow.
@@ -351,7 +351,10 @@ fn typed_full_coverage_bit_match_f32_triad() {
         check_forward(&t, dt, (64, 768, 3072), true, true);
         check_forward(&t, dt, (16, 2560, 5120), true, true);
 
-        // dW: TN big/split-M shapes (dW stays f32 — direct bit compare).
+        // dW: TN big/split-M shapes (dW stays f32 — direct bit compare),
+        // narrow ones included.
+        check_dw(&t, dt, (256, 96, 80), true);
+        check_dw(&t, dt, (4096, 384, 101), true);
         check_dw(&t, dt, (256, 384, 512), true);
         check_dw(&t, dt, (2048, 768, 512), true);
         check_dw(&t, dt, (250, 100, 512), true);

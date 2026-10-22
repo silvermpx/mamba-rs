@@ -1841,9 +1841,9 @@ static __device__ __forceinline__ void sm120_tf32_pair_entry(
 // release/acquire at GPU scope; owners clear the flags they consumed, so the
 // workspace is reusable across launches without a reset.
 //
-// The units are dealt to a fixed number of workers, never to the grid: the
-// partition points - and so the bits - are a function of the shape alone,
-// the same on every SM120 card whatever its SM count. The resident grid
+// The units are dealt to workers by the shape alone, never to the grid: the
+// partition points - and so the bits - are the same on every SM120 card
+// whatever its SM count. The resident grid
 // walks the workers in ascending order, each CTA taking every grid-th one,
 // and the pipeline runs on across a CTA's workers. Waits target lower
 // workers only, and every worker below a waiting one is either done or held
@@ -1853,14 +1853,21 @@ static __device__ __forceinline__ void sm120_tf32_pair_entry(
 static constexpr int SM120_STREAMK_ACCUMULATORS = 32;
 static constexpr int SM120_STREAMK_SLOTS = 2;
 
-// The workers a stream-K reduction is dealt to: twice the SM count of the
-// RTX 5090 the schedule was measured on, so a card with fewer SMs stays
-// within one worker per CTA of balance. The host reads the same constant
-// to size the workspace and the grid.
-#define SM120_STREAMK_WORKERS 340
+// The workers a stream-K reduction is dealt to: one per 32 units, so a
+// worker's slab and its owner's fold stay a small share of its k-tiles,
+// and at most 1024, a count no card's wave divides badly by much. With a
+// worker per unit a 128 x 128 gradient over 8192 rows folded 128 slabs per
+// tile and ran 127 us where 32 units a worker take 24 us. The host reads
+// the same constants to size the workspace and the grid.
+#define SM120_STREAMK_MIN_SPAN 32
+#define SM120_STREAMK_WORKERS 1024
 
 static __device__ __forceinline__ long long sm120_streamk_workers(long long units) {
-    return units < SM120_STREAMK_WORKERS ? units : SM120_STREAMK_WORKERS;
+    long long workers = units / SM120_STREAMK_MIN_SPAN;
+    if (workers < 1) {
+        workers = units < 1 ? units : 1;
+    }
+    return workers < SM120_STREAMK_WORKERS ? workers : SM120_STREAMK_WORKERS;
 }
 
 struct Sm120StreamKRange {
@@ -2740,5 +2747,6 @@ TF32_ASSERT_KERNEL_SIGNATURE(nt_sm120_tma_mma_tf32_m64n64_bk32_s2);
 #undef SM120_SWIZZLE_128B
 #undef SM120_SWIZZLE_64B
 #undef SM120_STREAMK_WORKERS
+#undef SM120_STREAMK_MIN_SPAN
 
 #endif

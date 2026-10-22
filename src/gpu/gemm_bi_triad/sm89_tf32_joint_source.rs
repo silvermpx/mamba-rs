@@ -151,6 +151,10 @@ pub struct Sm89Tf32JointKernelSpec {
     pub dynamic_shared_bytes: u32,
     pub static_shared_bytes: u32,
     pub register_cap: u32,
+    /// The register gate on a CC 12.x board, whose JIT allocates some of
+    /// these kernels more registers than the sm_89 JIT does, spill-free
+    /// and at the same occupancy.
+    pub blackwell_register_cap: u32,
     pub local_bytes: u32,
     pub minimum_max_threads: u32,
     pub minimum_active_blocks: Option<u32>,
@@ -197,6 +201,7 @@ const fn wide_spec(
         dynamic_shared_bytes,
         static_shared_bytes: 0,
         register_cap,
+        blackwell_register_cap: register_cap,
         local_bytes,
         minimum_max_threads: 256,
         minimum_active_blocks: Some(minimum_active_blocks),
@@ -205,6 +210,27 @@ const fn wide_spec(
         abi_parameter_bytes: 64,
         params_bytes: 32,
         params_alignment: 4,
+    }
+}
+
+const fn with_blackwell_register_cap(
+    spec: Sm89Tf32JointKernelSpec,
+    blackwell_register_cap: u32,
+) -> Sm89Tf32JointKernelSpec {
+    Sm89Tf32JointKernelSpec {
+        blackwell_register_cap,
+        ..spec
+    }
+}
+
+impl Sm89Tf32JointKernelSpec {
+    /// The register gate on a board of `compute_capability`.
+    pub const fn register_cap_on(&self, compute_capability: (u32, u32)) -> u32 {
+        if compute_capability.0 == 12 {
+            self.blackwell_register_cap
+        } else {
+            self.register_cap
+        }
     }
 }
 
@@ -272,12 +298,17 @@ pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 12] = [
         135,
         1,
     ),
-    gemm_spec(
-        TN_PRE_RNA_M64N64_SYMBOL,
-        Sm89Tf32JointKernelKind::TnPreRnaM64N64Bk32S3,
-        49_152,
-        83,
-        2,
+    // The CUDA 13.2 JIT gives this tile 106 registers for sm_120; two CTAs
+    // of 256 threads still fit the register file.
+    with_blackwell_register_cap(
+        gemm_spec(
+            TN_PRE_RNA_M64N64_SYMBOL,
+            Sm89Tf32JointKernelKind::TnPreRnaM64N64Bk32S3,
+            49_152,
+            83,
+            2,
+        ),
+        106,
     ),
     gemm_spec(
         TN_PRE_RNA_M64N96_S2_SYMBOL,
@@ -311,6 +342,8 @@ pub const SM89_TF32_JOINT_KERNEL_SPECS: [Sm89Tf32JointKernelSpec; 12] = [
         dynamic_shared_bytes: 0,
         static_shared_bytes: 4_224,
         register_cap: 26,
+        // The CUDA 13.2 JIT gives the transpose 28 registers for sm_120.
+        blackwell_register_cap: 28,
         local_bytes: 0,
         minimum_max_threads: 256,
         minimum_active_blocks: None,

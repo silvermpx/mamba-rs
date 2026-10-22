@@ -21,7 +21,21 @@
 - Strict TF32 gradients split a deep weight gradient eight ways and a
   few-row input gradient four ways, and on an Ada board run the multistage
   input-gradient tiles, the multistage split members and the pre-rounded
-  weight-gradient tiles.
+  weight-gradient tiles. A CC 12.x board (RTX 5090, RTX PRO 6000) follows
+  its own table: the pre-rounded weight-gradient tiles and the 144 x 96
+  input-gradient tile included.
+- The SM120 stream-K weight gradients (bf16, f16 and TF32) deal at least
+  32 units to a worker and at most 1024 workers, by the shape alone. A
+  deep gradient over few tiles no longer folds a slab per unit: a 128 x 128
+  bf16 gradient over 8192 rows on an RTX 5090 runs in 24 us instead of 127.
+  Their bits change once.
+- Exact narrow weight gradients (2 to 127 outputs) split their batch by the
+  same shape rule as wider ones on every architecture (384 x 101 over 1024
+  rows: 33 -> 10 us on an RTX 5090), and a slim exact input gradient runs
+  the slim tile's chain over the transposed weights, at the same bits and
+  about half the time.
+- The split scratch is 128 MB (was 32 MB), allocated on the first split, so
+  the 32-wide input-gradient split serves layers up to 48 planes deep.
 - The Mamba-3 decode step's warp tier spells its arithmetic, so its
   prefetching and plain builds round alike on every card.
 - cuBLAS is behind the new `cublas` feature. Without it the crate asks

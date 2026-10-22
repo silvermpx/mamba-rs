@@ -9732,6 +9732,7 @@ fn sm89_tf32_joint_abi_for_symbol<'a>(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Sm89Tf32JointResourceFacts {
+    compute_capability: (u32, u32),
     local_bytes: u32,
     registers: u32,
     static_shared_bytes: u32,
@@ -9754,7 +9755,7 @@ fn validate_sm89_tf32_joint_resources(
         facts.local_bytes,
         spec.local_bytes,
         facts.registers,
-        spec.register_cap,
+        spec.register_cap_on(facts.compute_capability),
         facts.max_threads,
         i32::try_from(spec.minimum_max_threads)
             .map_err(|_| format!("{} max-thread floor exceeds i32::MAX", spec.symbol))?,
@@ -9780,13 +9781,16 @@ fn load_sm89_tf32_joint_functions(
     ),
     String,
 > {
+    let (major, minor) = ctx
+        .compute_capability()
+        .map_err(|error| format!("query TriadSm89Tf32Joint CC: {error:?}"))?;
+    let compute_capability = (
+        u32::try_from(major).map_err(|_| format!("negative TriadSm89Tf32Joint CC {major}"))?,
+        u32::try_from(minor).map_err(|_| format!("negative TriadSm89Tf32Joint CC {minor}"))?,
+    );
     if module.artifact_identity.module_kind != ModuleKind::TriadSm89Tf32Joint
         || sm80_ptx_target(module.compiler_identity.target.as_str()).is_none()
-        || ctx
-            .compute_capability()
-            .map_err(|error| format!("query TriadSm89Tf32Joint CC: {error:?}"))?
-            .0
-            < 8
+        || compute_capability.0 < 8
     {
         return Err("TriadSm89Tf32Joint requires an SM80+ portable binding".into());
     }
@@ -9855,6 +9859,7 @@ fn load_sm89_tf32_joint_functions(
             validate_sm89_tf32_joint_resources(
                 spec,
                 Sm89Tf32JointResourceFacts {
+                    compute_capability,
                     local_bytes,
                     registers,
                     static_shared_bytes,
@@ -11172,7 +11177,7 @@ impl GemmBiKernels {
     pub fn splitk_scratch_buf(&self, stream: &Arc<CudaStream>) -> Result<&CudaSlice<f32>, String> {
         if self.splitk_scratch.get().is_none() {
             let buffer = stream
-                .alloc_zeros::<f32>(1 << 23)
+                .alloc_zeros::<f32>(super::dispatch::SPLITK_SCRATCH_CAP)
                 .map_err(|error| format!("splitk_scratch alloc: {error:?}"))?;
             let _ = self.splitk_scratch.set(buffer);
         }
@@ -13530,6 +13535,7 @@ mod tests {
             assert!(super::validate_sm89_tf32_joint_driver_abi(spec, &wrong).is_err());
 
             let valid = super::Sm89Tf32JointResourceFacts {
+                compute_capability: (8, 9),
                 local_bytes: spec.local_bytes,
                 registers: spec.register_cap,
                 static_shared_bytes: spec.static_shared_bytes,
@@ -13569,6 +13575,25 @@ mod tests {
                     .is_err()
                 );
             }
+            // A CC 12.x board gates on its own allocation, never below the
+            // Ada's.
+            assert!(spec.blackwell_register_cap >= spec.register_cap);
+            let blackwell = super::Sm89Tf32JointResourceFacts {
+                compute_capability: (12, 0),
+                registers: spec.blackwell_register_cap,
+                ..valid
+            };
+            super::validate_sm89_tf32_joint_resources(spec, blackwell).unwrap();
+            assert!(
+                super::validate_sm89_tf32_joint_resources(
+                    spec,
+                    super::Sm89Tf32JointResourceFacts {
+                        registers: spec.blackwell_register_cap + 1,
+                        ..blackwell
+                    }
+                )
+                .is_err()
+            );
 
             let loaded =
                 if spec.symbol == super::super::sm89_tf32_joint_source::TN_PRE_RNA_M64N64_SYMBOL {

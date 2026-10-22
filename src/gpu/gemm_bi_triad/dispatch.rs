@@ -3097,6 +3097,18 @@ fn rna_blackwell_backward_route(
     if (2_048..8_192).contains(&rows) && columns <= 512 && reduction <= 64 {
         return portable(Tf32PortableTile::M64N64, Tf32PortableStages::S3);
     }
+    // An input gradient whose reduction is no longer than its output is
+    // wide fills the twelve-warp 144 x 96 tile (NT 1024x1536x384 30.4 ->
+    // 20.1 us on the RTX 5090); a long reduction under a narrow output
+    // keeps the 64 x 64 tile.
+    if staged
+        && reduction <= columns
+        && availability
+            .joint
+            .is_some_and(|joint| joint.device.compute_capability.0 == 12)
+    {
+        return Tf32PhysicalRoute::Sm89NtRnaM144N96S2;
+    }
     portable(Tf32PortableTile::M64N64, Tf32PortableStages::S2)
 }
 
@@ -3120,10 +3132,10 @@ fn rna_tiles_stage(
     })
 }
 
-/// Whether a weight gradient may run the Ada's pre-rounded tiles: the joint
-/// module is bound on an Ada board, the gradient accumulates with unit
-/// scales into 16-byte aligned operands, the saved activations' rows are
-/// whole 16-byte chunks, and the transposed copy fits its scratch.
+/// Whether a weight gradient may run the pre-rounded tiles: the joint
+/// module is bound on an Ada or CC 12.x board, the gradient accumulates
+/// with unit scales into 16-byte aligned operands, the saved activations'
+/// rows are whole 16-byte chunks, and the transposed copy fits its scratch.
 fn rna_pre_tn_admits(
     request: F32TriadRequest,
     operands: Option<F32TriadOperands>,
@@ -3134,12 +3146,12 @@ fn rna_pre_tn_admits(
     };
     let shape = request.shape;
     let copy_stride = shape.m.next_multiple_of(4);
-    // The joint module composes on every SM80-tier board, but its
-    // pre-rounding transpose is bound only on the Ada.
-    availability
-        .joint
-        .is_some_and(|joint| joint.device.compute_capability == (8, 9))
-        && request.op == ResolvedGemmOp::Tn
+    // The joint module composes on every SM80-tier board; its pre-rounding
+    // transpose and tiles are gated for the Ada and CC 12.x JITs.
+    availability.joint.is_some_and(|joint| {
+        let cc = joint.device.compute_capability;
+        cc == (8, 9) || cc.0 == 12
+    }) && request.op == ResolvedGemmOp::Tn
         && shape == F32TriadShape::contiguous(ResolvedGemmOp::Tn, (shape.m, shape.k, shape.n))
         && shape.m > 0
         && shape.n.is_multiple_of(4)
@@ -3670,9 +3682,9 @@ fn sm89_joint_route_matches_request(route: Tf32PhysicalRoute, request: F32TriadR
                 )
                 && contiguous
         }
-        Tf32PhysicalRoute::Sm89NtRnaM144N96S2 => {
-            request.op == ResolvedGemmOp::Nt && dims == (4_621, 384, 1_928) && contiguous
-        }
+        // The twelve-warp input-gradient tile masks every edge of its
+        // output and reduction, so it runs any contiguous input gradient.
+        Tf32PhysicalRoute::Sm89NtRnaM144N96S2 => request.op == ResolvedGemmOp::Nt && contiguous,
         Tf32PhysicalRoute::Sm89NtRowstageM128N192S2 => {
             request.op == ResolvedGemmOp::Nt && dims == DEEP && contiguous
         }
@@ -6140,14 +6152,42 @@ pub(super) fn splitm_tn_partition(
     if !(n_out >= 128 && batch >= 256) {
         return Ok(None);
     }
+    splitm_tn_partition_over_tiles(batch, (n_in, n_out), (128, 128))
+}
+
+/// The split-M partition of a narrow weight gradient (2 to 127 outputs),
+/// the same rule over the narrow kernel's 64 x 32 tiles. Without it a
+/// narrow gradient walks the whole batch on a CTA per tile: 24 CTAs for
+/// 384 x 101 over 1024 rows, three times the split's time.
+#[inline]
+pub(super) fn splitm_tn_narrow_partition(
+    batch: usize,
+    n_in: usize,
+    n_out: usize,
+) -> Result<Option<(usize, usize)>, String> {
+    if !((2..=127).contains(&n_out) && batch >= 256) {
+        return Ok(None);
+    }
+    splitm_tn_partition_over_tiles(batch, (n_in, n_out), (64, 32))
+}
+
+/// The row chunks a weight gradient's batch is cut into so its `tile`
+/// grid reaches the policy's target block count, every chunk a whole
+/// number of the partial kernel's 16-row steps; `None` where the grid
+/// already reaches the target or the planes would not fit the scratch.
+fn splitm_tn_partition_over_tiles(
+    batch: usize,
+    (n_in, n_out): (usize, usize),
+    (tile_rows, tile_columns): (u32, u32),
+) -> Result<Option<(usize, usize)>, String> {
     let target_blocks = scalar_split_policy().tn_split_m_target_blocks;
     let batch_u32 = u32::try_from(batch).map_err(|_| "TN split-M batch exceeds u32::MAX")?;
     let k_tiles = u32::try_from(n_in)
         .map_err(|_| "TN split-M input width exceeds u32::MAX")?
-        .div_ceil(128);
+        .div_ceil(tile_rows);
     let n_tiles = u32::try_from(n_out)
         .map_err(|_| "TN split-M output width exceeds u32::MAX")?
-        .div_ceil(128);
+        .div_ceil(tile_columns);
     let base_blocks = k_tiles
         .checked_mul(n_tiles)
         .ok_or_else(|| "TN split-M base grid overflows u32".to_string())?;
@@ -6178,60 +6218,6 @@ pub(super) fn splitm_tn_partition(
         usize::try_from(m_chunk).map_err(|_| "TN split-M chunk exceeds usize")?,
         usize::try_from(f_final).map_err(|_| "TN split-M partition count exceeds usize")?,
     )))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TnNarrowSplitMCell {
-    shape: F32TriadShape,
-    m_chunk: usize,
-    chunks: usize,
-}
-
-const TN_NARROW_SPLITM_SM120_CELLS: [TnNarrowSplitMCell; 3] = [
-    TnNarrowSplitMCell {
-        shape: F32TriadShape {
-            m: 1024,
-            k: 47,
-            n: 17,
-            lda: 47,
-            ldb: 17,
-            ldc: 17,
-        },
-        m_chunk: 32,
-        chunks: 32,
-    },
-    TnNarrowSplitMCell {
-        shape: F32TriadShape {
-            m: 1024,
-            k: 128,
-            n: 25,
-            lda: 128,
-            ldb: 25,
-            ldc: 25,
-        },
-        m_chunk: 32,
-        chunks: 32,
-    },
-    TnNarrowSplitMCell {
-        shape: F32TriadShape {
-            m: 4096,
-            k: 64,
-            n: 64,
-            lda: 64,
-            ldb: 64,
-            ldc: 64,
-        },
-        m_chunk: 48,
-        chunks: 86,
-    },
-];
-
-fn qualified_tn_narrow_splitm_cell(request: F32TriadRequest) -> Option<TnNarrowSplitMCell> {
-    (request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Tn).then_some(())?;
-    TN_NARROW_SPLITM_SM120_CELLS
-        .iter()
-        .copied()
-        .find(|cell| cell.shape == request.shape)
 }
 
 /// The facts a tuned scalar cell is admitted on. The f32 policy is not one
@@ -7220,16 +7206,6 @@ fn qualified_nt_d768_transpose_m64n64_operands(operands: F32TriadOperands) -> bo
             .all(|pointer| pointer != 0 && pointer.is_multiple_of(ALIGNMENT))
 }
 
-fn qualified_tn_narrow_splitm_operands(operands: F32TriadOperands) -> bool {
-    let alignment = std::mem::align_of::<f32>() as u64;
-    operands.bias.is_none()
-        && operands.alpha.to_bits() == 1.0_f32.to_bits()
-        && operands.beta.to_bits() == 1.0_f32.to_bits()
-        && [operands.output, operands.a, operands.b]
-            .into_iter()
-            .all(|pointer| pointer != 0 && pointer.is_multiple_of(alignment))
-}
-
 fn qualified_sm89_exact_f32_tn_operands(operands: F32TriadOperands) -> bool {
     const ALIGNMENT: u64 = 16;
     operands.bias.is_none()
@@ -7493,15 +7469,21 @@ fn scalar_plan_with_admission(
             return Ok(plan);
         }
     }
-    // Every other split-M partition on an Ada board whose exact module
-    // carries the direct partial: the kernel masks every edge of its 64 x 64
-    // tiles and of its chunk, writes the planes the portable partial writes,
-    // and the same reducer folds them, so the bits stay the plan's. The
+    // Every other split-M partition on a board whose exact module carries
+    // the direct partial: the kernel masks every edge of its 64 x 64 tiles
+    // and of its chunk, writes the planes the portable partial writes, and
+    // the same reducer folds them, so the bits stay the plan's. The
     // standalone Lilly GEMMs serve every split-M weight gradient this way
-    // (about half the time of the portable partial on their cells).
+    // (about half the time of the portable partial on their cells). An Ada
+    // toolkit the module was qualified on takes it outright; any other board
+    // and toolkit proves the partial's planes against the portable ones at
+    // first use.
     if let ScalarDispatchPlan::TnSplitM { m_chunk, chunks } = fallback
-        && admission == ScalarAdmission::Evidence
-        && qualified_sm89_exact_f32_environment(facts)
+        && match admission {
+            ScalarAdmission::Evidence => qualified_sm89_exact_f32_environment(facts),
+            ScalarAdmission::Proof => !qualified_sm89_exact_f32_environment(facts),
+            ScalarAdmission::Candidate => false,
+        }
         && facts.sm89_exact_f32_symbols_loaded[1]
         && request.shape
             == F32TriadShape::contiguous(
@@ -7642,19 +7624,39 @@ fn scalar_plan_with_admission(
     {
         return Ok(ScalarDispatchPlan::TnM16N16SplitM16Qualified);
     }
-    if fallback != ScalarDispatchPlan::TnNarrow
-        || !scalar_sm120_admitted(admission, facts)
-        || !qualified_tn_narrow_splitm_operands(operands)
+    // Every slim plain input gradient whose weights the transpose scratch
+    // holds runs the slim tile's chain as the NN 64 x 64 tile over the
+    // transposed weights: the chain per output is the same, so the bits are
+    // the plan's, at about half the time on the cells the standalone Lilly
+    // GEMMs measured (NT 4096x128x796 53.5 -> 27.2 us on the RTX 5090,
+    // 16384x384x768 225 -> 178). Outputs 16 past a multiple of 32 stay on
+    // the slim tile, which they measured faster.
+    if fallback == (ScalarDispatchPlan::NtFinal { slim: true })
+        && admission == ScalarAdmission::Evidence
+        && nt_slim_via_transpose_request(request)
+        && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
-        return Ok(fallback);
+        return Ok(ScalarDispatchPlan::NtSlimViaTranspose);
     }
-    let Some(cell) = qualified_tn_narrow_splitm_cell(request) else {
-        return Ok(fallback);
-    };
-    Ok(ScalarDispatchPlan::TnNarrowSplitM {
-        m_chunk: cell.m_chunk,
-        chunks: cell.chunks,
-    })
+    Ok(fallback)
+}
+
+/// Whether an input gradient's weights fit the transpose scratch and its
+/// shape is one the transposed chain serves: the outputs' row stride whole
+/// 16-byte chunks and the reduction not 16 past a multiple of 32.
+fn nt_slim_via_transpose_request(request: F32TriadRequest) -> bool {
+    let shape = request.shape;
+    request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nt
+        && shape
+            == F32TriadShape::contiguous(
+                crate::gpu::kernel_identity::ResolvedGemmOp::Nt,
+                (shape.m, shape.k, shape.n),
+            )
+        && shape.k.is_multiple_of(4)
+        && shape.n % 32 != 16
+        && shape.k.checked_mul(shape.n).is_some_and(|elements| {
+            elements <= super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS
+        })
 }
 
 /// Minimum N (output cols) before the dispatcher switches from Slim-N tiles
@@ -7682,10 +7684,13 @@ pub(super) const GEMM_SLIM_NT_NIN_MAX: usize = 768;
 /// doubles grid to reduce wave underfill on Ada's 142 SMs. Only matters when N ≥ 129 (otherwise slim already chosen).
 pub(super) const GEMM_M_SLIM_FORCE: usize = 512;
 
-/// Single source of truth for Split-K/M scratch buffer cap, in f32 elements.
-/// Must match `splitk_scratch` allocation in `kernels.rs` (1 << 23 = 8M f32 = 32 MB).
-/// All Split-K dispatch gates (NN fwd, NT bwd_dx, Split-M TN bwd_dw) read this.
-pub(super) const SPLITK_SCRATCH_CAP: usize = 1 << 23;
+/// Single source of truth for Split-K/M scratch buffer cap, in f32 elements:
+/// 32M f32 = 128 MB, allocated on the first split. All Split-K dispatch gates
+/// (NN fwd, NT bwd_dx, Split-M TN bwd_dw) and the allocation read this. A
+/// 32-wide split of an input gradient over 1024 rows of 384 inputs and 1536
+/// outputs keeps 48 planes, 18.9M floats; under a quarter of this cap the
+/// gradient fell to the plain slim tile at two and a half times the time.
+pub(super) const SPLITK_SCRATCH_CAP: usize = 1 << 25;
 
 /// One device-scope completion counter per fused TF32 split-K output tile.
 pub(super) const TF32_SPLITK_COUNTER_CAP: usize = 1 << 16;
@@ -7783,6 +7788,9 @@ pub(super) enum ScalarDispatchPlan {
     NtPrismSm89InferenceCopyPlanQualified,
     NtLargeDeepSm89InferenceCopyPlanQualified,
     NtLargeDeepTransposeM64N64Qualified,
+    /// The slim plain tile's chain as the NN 64 x 64 tile over the
+    /// transposed weights: the same chain per output, so the same bits.
+    NtSlimViaTranspose,
     NtPrismVectorQualified,
     NtD128OutTransposeM64N64Qualified,
     NtFinal {
@@ -7823,6 +7831,7 @@ impl ScalarDispatchPlan {
                 | Self::NtPrismSm89InferenceCopyPlanQualified
                 | Self::NtLargeDeepSm89InferenceCopyPlanQualified
                 | Self::NtLargeDeepTransposeM64N64Qualified
+                | Self::NtSlimViaTranspose
                 | Self::NtPrismVectorQualified
                 | Self::NtD128OutTransposeM64N64Qualified
                 | Self::TnD768InSm89DualChunkQualified
@@ -7925,6 +7934,18 @@ pub(in crate::gpu) fn tc_half_policy_prefers_scalar_forward(
     {
         return Ok(false);
     }
+    // The scalar split was measured against the tensor-core tile only while
+    // its partial planes fit 8M floats; past that the tile keeps the cell.
+    const MEASURED_PARTIAL_FLOATS: usize = 1 << 23;
+    if checked_mul3(
+        dims.1 / 32,
+        dims.0,
+        dims.2,
+        "half split-K preference planes",
+    )? > MEASURED_PARTIAL_FLOATS
+    {
+        return Ok(false);
+    }
     let plan = scalar_nn_plan(GemmDims::nn(dims, dims.1)?)?;
     Ok(match plan {
         ScalarDispatchPlan::NnSplitKThinTail { .. } => {
@@ -7943,6 +7964,9 @@ fn scalar_tn_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
         return Ok(ScalarDispatchPlan::TnGemv);
     }
     if (2..=127).contains(&n_out) {
+        if let Some((m_chunk, chunks)) = splitm_tn_narrow_partition(batch, n_in, n_out)? {
+            return Ok(ScalarDispatchPlan::TnNarrowSplitM { m_chunk, chunks });
+        }
         return Ok(ScalarDispatchPlan::TnNarrow);
     }
     if let Some((m_chunk, chunks)) = splitm_tn_partition(batch, n_in, n_out)? {
@@ -8171,6 +8195,15 @@ pub(super) fn nn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool 
     GemmDims::nn((batch, n_in, n_out), n_in)
         .and_then(scalar_nn_plan)
         .is_ok_and(|plan| matches!(plan, ScalarDispatchPlan::NnFinal { slim: false }))
+}
+
+/// Whether the f32 TN cascade runs the narrow kernel unsplit: a narrow
+/// weight gradient whose batch the split-M rule leaves whole. A split one
+/// folds its chunks in the f32 reducer, so a typed launch upcasts into it.
+pub(super) fn tn_routes_to_narrow(batch: usize, n_in: usize, n_out: usize) -> bool {
+    GemmDims::tn((batch, n_in, n_out))
+        .and_then(scalar_tn_plan)
+        .is_ok_and(|plan| plan == ScalarDispatchPlan::TnNarrow)
 }
 
 pub(super) fn tn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
@@ -8814,227 +8847,96 @@ mod scalar_split_policy_tests {
     }
 
     #[test]
-    fn tn_narrow_split_m_selector_admits_only_the_three_exact_cells() {
+    fn nt_slim_input_gradients_run_through_the_transposed_weights() {
+        let nt = |dims| F32TriadRequest {
+            op: ResolvedGemmOp::Nt,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims),
+        };
+        let operands = nn_qualified_operands();
+        for compute_capability in [(8, 0), (8, 9), (12, 0)] {
+            let mut facts = tn_admission_facts();
+            facts.compute_capability = compute_capability;
+            for dims in [(4096, 128, 796), (16384, 384, 768), (8192, 128, 796)] {
+                assert_eq!(
+                    plan(ResolvedGemmOp::Nt, dims).unwrap(),
+                    ScalarDispatchPlan::NtFinal { slim: true },
+                    "{dims:?}"
+                );
+                assert_eq!(
+                    scalar_launch_plan(facts, nt(dims), operands).unwrap(),
+                    ScalarDispatchPlan::NtSlimViaTranspose,
+                    "{compute_capability:?} {dims:?}"
+                );
+                assert_eq!(
+                    scalar_proof_plan(facts, nt(dims), operands).unwrap(),
+                    None,
+                    "{dims:?}"
+                );
+            }
+            // Outputs 16 past a multiple of 32, an accumulating epilogue, a
+            // bias, a scale or an unaligned operand keep the slim tile.
+            let slim = ScalarDispatchPlan::NtFinal { slim: true };
+            assert_eq!(
+                scalar_launch_plan(facts, nt((4096, 128, 784)), operands).unwrap(),
+                slim
+            );
+            for rejected in [
+                F32TriadOperands {
+                    beta: 1.0,
+                    ..operands
+                },
+                F32TriadOperands {
+                    bias: Some(0x4000),
+                    ..operands
+                },
+                F32TriadOperands {
+                    alpha: 0.5,
+                    ..operands
+                },
+                F32TriadOperands {
+                    b: operands.b + 4,
+                    ..operands
+                },
+            ] {
+                assert_eq!(
+                    scalar_launch_plan(facts, nt((4096, 128, 796)), rejected).unwrap(),
+                    slim
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tn_narrow_split_m_is_the_shape_rule_on_every_board() {
+        // The narrow band cuts its batch like the wide split-M, over the
+        // narrow kernel's 64 x 32 tiles, whatever the board or operands.
         for (dims, expected) in [
-            ((1024, 47, 17), (32, 32)),
-            ((1024, 128, 25), (32, 32)),
-            ((4096, 64, 64), (48, 86)),
+            ((1024, 47, 17), Some((16, 64))),
+            ((1024, 128, 25), Some((16, 64))),
+            ((4096, 64, 64), Some((32, 128))),
+            ((1024, 384, 101), Some((96, 11))),
+            ((4096, 256, 101), Some((240, 18))),
+            ((4111, 257, 127), Some((288, 15))),
+            ((256, 32, 2), Some((16, 16))),
+            ((255, 32, 2), None),
+            ((1024, 64 * 72, 127), None),
         ] {
+            let want = match expected {
+                Some((m_chunk, chunks)) => ScalarDispatchPlan::TnNarrowSplitM { m_chunk, chunks },
+                None => ScalarDispatchPlan::TnNarrow,
+            };
+            assert_eq!(plan(ResolvedGemmOp::Tn, dims).unwrap(), want, "{dims:?}");
+            let mut other_board = tn_admission_facts();
+            other_board.compute_capability = (8, 9);
             assert_eq!(
                 admitted_tn_plan(
-                    tn_admission_facts(),
+                    other_board,
                     tn_admission_request(dims),
-                    tn_admission_operands(),
+                    tn_admission_operands()
                 ),
-                ScalarDispatchPlan::TnNarrowSplitM {
-                    m_chunk: expected.0,
-                    chunks: expected.1,
-                },
+                want,
                 "{dims:?}"
             );
-        }
-
-        let request = tn_admission_request((1024, 47, 17));
-        let operands = tn_admission_operands();
-        for admitted in [
-            F32TriadOperands {
-                output: operands.output + 4,
-                ..operands
-            },
-            F32TriadOperands {
-                a: operands.a + 4,
-                ..operands
-            },
-            F32TriadOperands {
-                b: operands.b + 4,
-                ..operands
-            },
-            F32TriadOperands {
-                a: operands.a + 4,
-                b: operands.b + 4,
-                ..operands
-            },
-        ] {
-            assert_eq!(
-                admitted_tn_plan(tn_admission_facts(), request, admitted),
-                ScalarDispatchPlan::TnNarrowSplitM {
-                    m_chunk: 32,
-                    chunks: 32,
-                }
-            );
-        }
-
-        for dims in [
-            (256, 32, 2),
-            (4096, 128, 96),
-            (4096, 256, 101),
-            (4111, 257, 127),
-        ] {
-            assert_eq!(
-                admitted_tn_plan(
-                    tn_admission_facts(),
-                    tn_admission_request(dims),
-                    tn_admission_operands(),
-                ),
-                ScalarDispatchPlan::TnNarrow,
-                "rejected tournament cell {dims:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn tn_narrow_split_m_selector_admits_from_independent_scalar_facts() {
-        assert_eq!(
-            admitted_tn_plan(
-                tn_admission_facts(),
-                tn_admission_request((1024, 47, 17)),
-                tn_admission_operands(),
-            ),
-            ScalarDispatchPlan::TnNarrowSplitM {
-                m_chunk: 32,
-                chunks: 32,
-            }
-        );
-    }
-
-    #[test]
-    fn tn_narrow_split_m_selector_requires_the_architecture_and_met_resource_caps() {
-        let request = tn_admission_request((1024, 47, 17));
-        let operands = tn_admission_operands();
-        let fallback = ScalarDispatchPlan::TnNarrow;
-        let measured = admitted_tn_plan(tn_admission_facts(), request, operands);
-        assert_ne!(measured, fallback);
-
-        let mut wrong_arch = tn_admission_facts();
-        wrong_arch.compute_capability = (12, 1);
-        assert_eq!(admitted_tn_plan(wrong_arch, request, operands), fallback);
-
-        // Another toolkit takes no evidence but offers the route to the
-        // first-use proof.
-        for nvrtc in [(12, 8), (13, 0), (13, 1), (13, 3)] {
-            let mut other_toolkit = tn_admission_facts();
-            other_toolkit.scalar_compiler.nvrtc_version = nvrtc;
-            assert_eq!(
-                admitted_tn_plan(other_toolkit, request, operands),
-                fallback,
-                "CUDA {nvrtc:?}"
-            );
-            assert_eq!(
-                scalar_proof_plan(other_toolkit, request, operands).unwrap(),
-                Some(measured),
-                "CUDA {nvrtc:?}"
-            );
-        }
-        let mut missed_caps = tn_admission_facts();
-        missed_caps.sm120_scalar_resources_qualified = false;
-        assert_eq!(admitted_tn_plan(missed_caps, request, operands), fallback);
-        assert_eq!(
-            scalar_proof_plan(missed_caps, request, operands).unwrap(),
-            None
-        );
-
-        let mut unknown_library = tn_admission_facts();
-        unknown_library.scalar_compiler.nvrtc_library_known = false;
-        assert_eq!(
-            admitted_tn_plan(unknown_library, request, operands),
-            fallback
-        );
-
-        let mut wrong_compile_key = tn_admission_facts();
-        wrong_compile_key.scalar_artifact.compile_key = [8; 32];
-        assert_eq!(
-            admitted_tn_plan(wrong_compile_key, request, operands),
-            fallback
-        );
-
-        let mut wrong_target = tn_admission_facts();
-        wrong_target.scalar_compiler.target = CudaTarget::new("compute_121").unwrap();
-        assert_eq!(admitted_tn_plan(wrong_target, request, operands), fallback);
-    }
-
-    #[test]
-    fn tn_narrow_split_m_selector_rejects_neighboring_requests_and_epilogues() {
-        let facts = tn_admission_facts();
-        let request = tn_admission_request((1024, 47, 17));
-        let operands = tn_admission_operands();
-        let fallback = ScalarDispatchPlan::TnNarrow;
-
-        let nn_request = F32TriadRequest {
-            op: ResolvedGemmOp::Nn,
-            shape: request.shape,
-        };
-        assert_eq!(
-            admitted_tn_plan(facts, nn_request, operands),
-            ScalarDispatchPlan::NnNarrow
-        );
-
-        for dims in [(1023, 47, 17), (1024, 48, 17), (1024, 47, 18)] {
-            assert_eq!(
-                admitted_tn_plan(facts, tn_admission_request(dims), operands),
-                fallback,
-                "shape neighbor {dims:?}"
-            );
-        }
-        for shape in [
-            F32TriadShape {
-                lda: request.shape.lda + 1,
-                ..request.shape
-            },
-            F32TriadShape {
-                ldb: request.shape.ldb + 1,
-                ..request.shape
-            },
-            F32TriadShape {
-                ldc: request.shape.ldc + 1,
-                ..request.shape
-            },
-        ] {
-            assert_eq!(
-                admitted_tn_plan(
-                    facts,
-                    F32TriadRequest {
-                        op: ResolvedGemmOp::Tn,
-                        shape,
-                    },
-                    operands,
-                ),
-                fallback,
-                "stride neighbor {shape:?}"
-            );
-        }
-        for rejected in [
-            F32TriadOperands {
-                bias: Some(0x4000),
-                ..operands
-            },
-            F32TriadOperands {
-                alpha: f32::from_bits(1.0_f32.to_bits() + 1),
-                ..operands
-            },
-            F32TriadOperands {
-                beta: 0.0,
-                ..operands
-            },
-            F32TriadOperands {
-                output: 0,
-                ..operands
-            },
-            F32TriadOperands {
-                output: operands.output + 2,
-                ..operands
-            },
-            F32TriadOperands { a: 0, ..operands },
-            F32TriadOperands {
-                a: operands.a + 2,
-                ..operands
-            },
-            F32TriadOperands { b: 0, ..operands },
-            F32TriadOperands {
-                b: operands.b + 2,
-                ..operands
-            },
-        ] {
-            assert_eq!(admitted_tn_plan(facts, request, rejected), fallback);
         }
     }
 
@@ -10053,10 +9955,11 @@ mod scalar_split_policy_tests {
                             (neighbor[0], neighbor[1], neighbor[2]),
                         ),
                     };
-                    assert_eq!(
-                        scalar_launch_plan(facts, neighbor, operands).unwrap(),
-                        scalar_dispatch_plan(neighbor).unwrap(),
-                        "shape neighbor {neighbor:?} must retain prior AUTO"
+                    let general = scalar_launch_plan(facts, neighbor, operands).unwrap();
+                    assert!(
+                        general == scalar_dispatch_plan(neighbor).unwrap()
+                            || general == ScalarDispatchPlan::NtSlimViaTranspose,
+                        "shape neighbor {neighbor:?} must retain prior AUTO, got {general:?}"
                     );
                 }
             }
@@ -10218,10 +10121,17 @@ mod scalar_split_policy_tests {
             mutation = facts;
             mutation.scalar_compiler.schedule_revision = SCHEDULE_REVISION + 1;
             environment_mutations.push(mutation);
+            // Without the cohort the cell keeps the plan every board serves:
+            // the slim tile, or its chain over the transposed weights.
+            let general = if fallback == (ScalarDispatchPlan::NtFinal { slim: true }) {
+                ScalarDispatchPlan::NtSlimViaTranspose
+            } else {
+                fallback
+            };
             for mutation in environment_mutations {
                 assert_eq!(
                     scalar_launch_plan(mutation, request, operands).unwrap(),
-                    fallback,
+                    general,
                     "identity mutation {mutation:?}"
                 );
             }
@@ -16287,18 +16197,22 @@ mod tf32_tests {
                 }
                 neighbors.push(neighbor);
             }
-            // The two pre-rounded weight-gradient tiles mask every edge and
-            // run any contiguous gradient whose rows are whole 16-byte
-            // chunks; every other joint route stays on its cells.
-            let general = matches!(
+            // The two pre-rounded weight-gradient tiles and the 144 x 96
+            // input-gradient tile mask every edge: the first two run any
+            // contiguous gradient whose rows are whole 16-byte chunks, the
+            // last any contiguous input gradient; every other joint route
+            // stays on its cells.
+            let pre_rounded = matches!(
                 route,
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N64 | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
             );
             for neighbor in neighbors {
                 let shape = neighbor.shape;
-                let runs_any_shape = general
-                    && shape == F32TriadShape::contiguous(neighbor.op, (shape.m, shape.k, shape.n))
-                    && shape.n.is_multiple_of(4);
+                let contiguous =
+                    shape == F32TriadShape::contiguous(neighbor.op, (shape.m, shape.k, shape.n));
+                let runs_any_shape = contiguous
+                    && ((pre_rounded && shape.n.is_multiple_of(4))
+                        || route == Tf32PhysicalRoute::Sm89NtRnaM144N96S2);
                 assert_eq!(
                     resolve_tf32_forced(neighbor, availability, route).is_ok(),
                     runs_any_shape,
