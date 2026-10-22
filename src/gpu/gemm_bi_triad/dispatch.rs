@@ -3134,10 +3134,12 @@ fn rna_pre_tn_admits(
     };
     let shape = request.shape;
     let copy_stride = shape.m.next_multiple_of(4);
-    availability.joint.is_some_and(|joint| {
-        let cc = joint.device.compute_capability;
-        cc == (8, 9) || cc.0 == 12
-    }) && request.op == ResolvedGemmOp::Tn
+    // The joint module composes on every SM80-tier board, but its
+    // pre-rounding transpose is bound only on the Ada.
+    availability
+        .joint
+        .is_some_and(|joint| joint.device.compute_capability == (8, 9))
+        && request.op == ResolvedGemmOp::Tn
         && shape == F32TriadShape::contiguous(ResolvedGemmOp::Tn, (shape.m, shape.k, shape.n))
         && shape.m > 0
         && shape.n.is_multiple_of(4)
