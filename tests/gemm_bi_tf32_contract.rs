@@ -3178,12 +3178,24 @@ fn deterministic_tf32_policy_is_separate_from_cublas_tf32_state() {
     ));
     assert_contains_all(
         &set_mode,
-        &["change_math_mode", "mode.cublas_math()"],
+        &[
+            "self.enter_cublas_math(mode)",
+            "refuse_vendor_mode_without_cublas(mode)",
+        ],
         "GEMM mode owns the cuBLAS math mode",
     );
     assert!(
         !set_mode.contains("f32_triad_policy.set"),
         "the mode must not mutate the deterministic triad policy"
+    );
+    let enter_math = source_mask(braced_scope_after(
+        CONTEXT_SOURCE,
+        "fn enter_cublas_math(&self, mode: GemmMode)",
+    ));
+    assert_contains_all(
+        &enter_math,
+        &["change_math_mode", "mode.cublas_math()"],
+        "the cuBLAS math transition",
     );
     assert_contains_all(
         &source_mask(CONTEXT_SOURCE),
