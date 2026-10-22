@@ -3338,6 +3338,22 @@ pub fn resolve_tf32_forced(
             // and counter workspaces on a larger shape: it does not bind,
             // and the exact family serves.
             super::launch::tf32_splitk_launch_plan(request, spec)?;
+            // The portable module carries its extension members only where
+            // it composes the extension fragment (not on CC 12.x).
+            let extension = super::contract::TF32_SPLITK_EXTENSION_SPECS
+                .iter()
+                .any(|member| member.route == route && member.op == request.op);
+            if extension
+                && availability.portable.is_none_or(|portable| {
+                    !super::contract::portable_extensions_composed_for_cc(
+                        portable.device.compute_capability,
+                    )
+                })
+            {
+                return Err(format!(
+                    "TF32 split-K extension member {route:?} is not composed on this board"
+                ));
+            }
             (route.module_kind(), spec.dynamic_shared_bytes)
         }
         _ => {
@@ -16993,6 +17009,31 @@ mod tf32_tests {
                 ada
             ),
             None
+        );
+    }
+
+    #[test]
+    fn rna_strict_deep_weight_gradient_on_sm120_never_binds_an_uncomposed_member() {
+        let mut availability = sm120_availability_for(SM120_TF32_ARCHITECTURE);
+        availability.portable = Some(qualified_module(
+            ModuleKind::TriadSm80,
+            "compute_120",
+            "sm_120",
+            (12, 0),
+            true,
+            101_376,
+        ));
+        let request = F32TriadRequest {
+            op: ResolvedGemmOp::Tn,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Tn, (4096, 128, 796)),
+        };
+        let selection = resolve_f32_triad_auto(STRICT, request, availability).unwrap();
+        assert!(
+            !matches!(
+                selection,
+                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaSplitK8(_))
+            ),
+            "{selection:?}"
         );
     }
 
