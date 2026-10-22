@@ -259,6 +259,11 @@ name = "inference_epilogue_pins"
 path = "tests/inference_epilogue_pins.rs"
 
 [[test]]
+name = "caller_stream_gemm"
+path = "tests/caller_stream_gemm.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "gemm_empty_axes"
 path = "tests/gemm_empty_axes.rs"
 required-features = ["cuda"]

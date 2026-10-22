@@ -302,7 +302,7 @@ fn effective_compute(
 ///
 /// The caller must uphold the pointer, allocation-domain, aliasing, stream,
 /// and captured-replay lifetime requirements above.
-pub(crate) unsafe fn gpu_gemm_f32_forward_ptrs(
+pub unsafe fn gpu_gemm_f32_forward_ptrs(
     ctx: &GpuCtx,
     y: cudarc::driver::sys::CUdeviceptr,
     x: cudarc::driver::sys::CUdeviceptr,
@@ -582,6 +582,126 @@ pub fn gpu_gemm_bi_backward_dw_grad(
             n_out_c,
         )
         .map_err(|e| format!("cuBLAS sgemm_backward_dw_grad failed: {e:?}"))?;
+    }
+    Ok(())
+}
+
+/// Input gradient on raw device pointers: `dX[B,K] = dY[B,N] @ W[K,N]^T`,
+/// through the context's GEMM route, for a caller that owns its buffers
+/// (see [`GpuCtx::new_on_stream`](super::context::GpuCtx::new_on_stream)).
+/// `dims` is `(B,K,N)`; the pointers name F32 elements on the context's
+/// device: `dx[B*K]`, `dy[B*N]`, `w[K*N]`. `dx` is overwritten.
+///
+/// # Safety
+///
+/// The spans above are live device memory of the context's CUDA context,
+/// stay alive on `ctx.stream` until the launch completes, and the inputs do
+/// not overlap `dx`.
+pub unsafe fn gpu_gemm_f32_backward_dx_ptrs(
+    ctx: &GpuCtx,
+    dx: cudarc::driver::sys::CUdeviceptr,
+    dy: cudarc::driver::sys::CUdeviceptr,
+    w: cudarc::driver::sys::CUdeviceptr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
+    let output = TypedPtr {
+        ptr: dx,
+        dtype: WeightDtype::F32,
+    };
+    if overwrite_empty_axis(ctx, output, dims)? {
+        return Ok(());
+    }
+    if ctx.batch_invariant() {
+        return unsafe {
+            super::gemm_bi_triad::launch_cached_f32_backward_dx_ptrs(ctx, dx, dy, w, dims)
+        };
+    }
+    ctx.ensure_vendor_gemm("gpu_gemm_f32_backward_dx_ptrs")?;
+    let (batch, n_in, n_out) = dims;
+    let alpha: f32 = 1.0;
+    let beta: f32 = 0.0;
+    let [n_in_c, batch_c, n_out_c] =
+        cublas_ints([n_in, batch, n_out], "gpu_gemm_f32_backward_dx_ptrs")?;
+    unsafe {
+        #[cfg(test)]
+        vendor_gemm_test::boundary()?;
+        cudarc::cublas::result::sgemm(
+            ctx.cublas_handle()?,
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            n_in_c,
+            batch_c,
+            n_out_c,
+            &alpha as *const f32,
+            w as *const f32,
+            n_out_c,
+            dy as *const f32,
+            n_out_c,
+            &beta as *const f32,
+            dx as *mut f32,
+            n_in_c,
+        )
+        .map_err(|e| format!("cuBLAS sgemm_backward_dx_ptrs failed: {e:?}"))?;
+    }
+    Ok(())
+}
+
+/// Weight gradient on raw device pointers: `dW[K,N] += X[B,K]^T @ dY[B,N]`,
+/// accumulated in place, through the context's GEMM route. `dims` is
+/// `(B,K,N)`; the pointers name F32 elements on the context's device:
+/// `dw[K*N]`, `dy[B*N]`, `x_saved[B*K]`.
+///
+/// # Safety
+///
+/// As for [`gpu_gemm_f32_backward_dx_ptrs`], with `dw` the output.
+pub unsafe fn gpu_gemm_f32_backward_dw_ptrs(
+    ctx: &GpuCtx,
+    dw: cudarc::driver::sys::CUdeviceptr,
+    dy: cudarc::driver::sys::CUdeviceptr,
+    x_saved: cudarc::driver::sys::CUdeviceptr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    ctx.ensure_gemm_usable()?;
+    if accumulate_empty_axis(dims) {
+        return Ok(());
+    }
+    if ctx.batch_invariant() {
+        return match ctx.bi_gemm_family() {
+            super::context::BiGemmFamily::Triad => unsafe {
+                super::gemm_bi_triad::launch_cached_f32_backward_dw_ptrs(ctx, dw, dy, x_saved, dims)
+            },
+            super::context::BiGemmFamily::Inference => unsafe {
+                super::gemm_bi_triad::gemm_bi_backward_dw_ptrs(ctx, dw, dy, x_saved, dims)
+            },
+        };
+    }
+    ctx.ensure_vendor_gemm("gpu_gemm_f32_backward_dw_ptrs")?;
+    let (batch, n_in, n_out) = dims;
+    let alpha: f32 = 1.0;
+    let beta: f32 = 1.0;
+    let [n_out_c, n_in_c, batch_c] =
+        cublas_ints([n_out, n_in, batch], "gpu_gemm_f32_backward_dw_ptrs")?;
+    unsafe {
+        #[cfg(test)]
+        vendor_gemm_test::boundary()?;
+        cudarc::cublas::result::sgemm(
+            ctx.cublas_handle()?,
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
+            n_out_c,
+            n_in_c,
+            batch_c,
+            &alpha as *const f32,
+            dy as *const f32,
+            n_out_c,
+            x_saved as *const f32,
+            n_in_c,
+            &beta as *const f32,
+            dw as *mut f32,
+            n_out_c,
+        )
+        .map_err(|e| format!("cuBLAS sgemm_backward_dw_ptrs failed: {e:?}"))?;
     }
     Ok(())
 }

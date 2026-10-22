@@ -6656,6 +6656,57 @@ pub(crate) fn launch_cached_f32_backward_dw(
     )
 }
 
+/// Launches row-major `dW[K,N] += X[B,K]^T @ dY[B,N]` on raw pointers
+/// through the context's cached deterministic Triad TN route. `dims` is
+/// `(B,K,N)`; the pointers name F32 elements on the context's device.
+///
+/// # Safety
+///
+/// `dw` spans `K*N`, `dy` spans `B*N` and `x_saved` spans `B*K` live
+/// elements that stay alive on `ctx.stream` until the launch completes;
+/// the inputs do not overlap `dw`.
+pub(crate) unsafe fn launch_cached_f32_backward_dw_ptrs(
+    ctx: &GpuCtx,
+    dw_ptr: CUptr,
+    dy: CUptr,
+    x_saved: CUptr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let shape = F32TriadShape::contiguous(ResolvedGemmOp::Tn, dims);
+    let request = F32TriadRequest {
+        op: ResolvedGemmOp::Tn,
+        shape,
+    };
+    let reduction_is_zero = shape.reduction(request.op) == 0;
+    let operands = F32TriadOperands {
+        output: dw_ptr,
+        a: if reduction_is_zero { 0 } else { x_saved },
+        b: if reduction_is_zero { 0 } else { dy },
+        bias: None,
+        alpha: 1.0,
+        beta: 1.0,
+    };
+    let dy_arg = RawScalarArgument(operands.b);
+    let x_arg = RawScalarArgument(operands.a);
+    launch_cached_f32_triad(
+        ctx,
+        F32PreparedSelection::Automatic,
+        request,
+        operands,
+        |control| {
+            gemm_bi_backward_dw_with_control(
+                &ctx.stream,
+                &ctx.kernels,
+                dw_ptr,
+                &dy_arg,
+                &x_arg,
+                dims,
+                Some(control),
+            )
+        },
+    )
+}
+
 pub(in crate::gpu) fn record_physical_exact_scalar_f32_backward_dw<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     observer: &mut O,
@@ -9777,6 +9828,44 @@ pub fn gemm_bi_backward_dw(
         dw_ptr,
         dy,
         x_saved,
+        dims,
+        Some(&mut control),
+    )
+}
+
+/// [`gemm_bi_backward_dw`] on raw pointers: the exact scalar family's
+/// weight gradient, `dW[K,N] += X[B,K]^T @ dY[B,N]`.
+///
+/// # Safety
+///
+/// As for [`launch_cached_f32_backward_dw_ptrs`].
+pub(crate) unsafe fn gemm_bi_backward_dw_ptrs(
+    ctx: &GpuCtx,
+    dw_ptr: CUptr,
+    dy: CUptr,
+    x_saved: CUptr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (_, request) = scalar_backward_request(ResolvedGemmOp::Tn, dims)?;
+    let operands = F32TriadOperands {
+        output: dw_ptr,
+        a: x_saved,
+        b: dy,
+        bias: None,
+        alpha: 1.0,
+        beta: 1.0,
+    };
+    validate_f32_triad_pointer_request(ctx, request, operands)?;
+    let plan = prove_scalar_plan(ctx, request, operands, |output, plan| {
+        launch_scalar_plan_raw(ctx, request, F32TriadOperands { output, ..operands }, plan)
+    })?;
+    let mut control = ProvenScalarLaunch { plan, operands };
+    gemm_bi_backward_dw_with_control(
+        &ctx.stream,
+        &ctx.kernels,
+        dw_ptr,
+        &RawScalarArgument(dy),
+        &RawScalarArgument(x_saved),
         dims,
         Some(&mut control),
     )

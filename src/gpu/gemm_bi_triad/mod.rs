@@ -102,7 +102,8 @@ pub(in crate::gpu) use launch::validate_f32_triad_pointer_request;
 pub use launch::*;
 pub(crate) use launch::{
     F32PreparedLaunchCache, Sm90aPreparedLaunchCache, Sm100PreparedLaunchCache,
-    Sm120PreparedLaunchCache, launch_cached_f32_backward_dw, launch_cached_f32_backward_dx,
+    Sm120PreparedLaunchCache, gemm_bi_backward_dw_ptrs, launch_cached_f32_backward_dw,
+    launch_cached_f32_backward_dw_ptrs, launch_cached_f32_backward_dx,
     launch_cached_f32_backward_dx_ptrs, launch_cached_f32_forward_ptrs,
 };
 #[doc(hidden)]

@@ -31,7 +31,15 @@ impl GpuDevice {
     pub fn new(ordinal: usize) -> Result<Self, String> {
         let ctx = cudarc::driver::CudaContext::new(ordinal)
             .map_err(|e| format!("CUDA device {} init failed: {:?}", ordinal, e))?;
+        Self::from_context(ctx)
+    }
 
+    /// Wrap a CUDA context the caller already holds, so a program with its
+    /// own context and streams can run mamba-rs kernels on them. Every
+    /// `CudaContext::new` of one ordinal retains the same primary context,
+    /// so the caller's allocations and this device's kernels share it.
+    pub fn from_context(ctx: Arc<cudarc::driver::CudaContext>) -> Result<Self, String> {
+        let ordinal = ctx.ordinal();
         let cc = Self::query_compute_capability(ordinal)?;
         let multiprocessor_count = Self::query_multiprocessor_count(ordinal)?;
         let nvrtc_target = Self::resolve_nvrtc_target_for_nvrtc(cc, Self::query_nvrtc_version()?)?;

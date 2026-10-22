@@ -32,6 +32,7 @@
 "classifier_gemm_tier_bench" = "bench"
 "coverage_gaps" = "gate"
 "capture_beside_teardown" = "gate"
+"caller_stream_gemm" = "gate"
 "cpu_gemv_bench" = "bench"
 "control_clip" = "gate"
 "cpu_gpu_train_parity" = "gate"

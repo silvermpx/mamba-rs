@@ -580,10 +580,46 @@ impl GpuCtx {
         Self::new_with_state_cap_and_config(device, state_cap, explicit_gemm_config(mode, role))
     }
 
+    /// Create a context that issues all its work on the caller's `stream`,
+    /// for a program that owns its context and streams and runs the GEMMs
+    /// through mamba-rs. The stream must belong to `device`'s context.
+    ///
+    /// The context owns its kernels and scratch, so a program that runs
+    /// GEMMs on two streams at once creates one context per stream; two
+    /// contexts must never share a stream. Construction compiles or loads
+    /// the kernels and drains the default stream, so it runs outside graph
+    /// capture. The caller's stream keeps its ordering: everything the
+    /// caller enqueued before a GEMM runs before it.
+    pub fn new_on_stream(
+        device: &GpuDevice,
+        stream: Arc<cudarc::driver::CudaStream>,
+        state_cap: usize,
+        mode: GemmMode,
+    ) -> Result<Self, String> {
+        if stream.context().cu_ctx() != device.context().cu_ctx() {
+            return Err("the stream belongs to another CUDA context than the device".to_string());
+        }
+        Self::new_with_state_cap_config_and_stream(
+            device,
+            state_cap,
+            explicit_gemm_config(mode, GemmRole::triad(WeightDtype::F32)),
+            Some(stream),
+        )
+    }
+
     fn new_with_state_cap_and_config(
         device: &GpuDevice,
         state_cap: usize,
         config: ResolvedGemmEnv,
+    ) -> Result<Self, String> {
+        Self::new_with_state_cap_config_and_stream(device, state_cap, config, None)
+    }
+
+    fn new_with_state_cap_config_and_stream(
+        device: &GpuDevice,
+        state_cap: usize,
+        config: ResolvedGemmEnv,
+        stream: Option<Arc<cudarc::driver::CudaStream>>,
     ) -> Result<Self, String> {
         // Disable cudarc's per-slice CudaEvent tracking. Rationale: we
         // execute every op on a single ctx.stream throughout fwd / bwd /
@@ -605,11 +641,16 @@ impl GpuCtx {
         //      ✓ (we sync on ctx.stream after every batch alloc)
         //   3. No concurrent writes from multiple streams. ✓ (single stream)
         // All three hold by construction since GpuCtx owns exactly ONE
-        // CudaStream and every op routes through it.
+        // CudaStream and every op routes through it. A context built on a
+        // caller's stream holds them the same way for its own work; the
+        // caller keeps them for the other streams of its context.
         unsafe {
             device.context().disable_event_tracking();
         }
-        let stream = device.fork_stream()?;
+        let stream = match stream {
+            Some(stream) => stream,
+            None => device.fork_stream()?,
+        };
         let arch = device.nvrtc_target();
         let kernels = MambaKernels::compile_with_state_cap(device.context(), arch, state_cap)?;
         let device_identity = device.identity();
