@@ -2699,7 +2699,108 @@ fn resolve_f32_triad_auto_impl(
                 }
             }
         }
+        F32TriadPolicy::RnaTf32BatchInvariant => {
+            rna_batch_invariant_selection(request, operands, availability)
+        }
     }
+}
+
+/// The strict policy's selection: the architecture's measured route when it
+/// keeps the contract, else the first-use proof tier's routes that keep it,
+/// else the portable tier's plain tile for the shape. A shape no route can
+/// serve is an error, never the exact family.
+fn rna_batch_invariant_selection(
+    request: F32TriadRequest,
+    operands: Option<F32TriadOperands>,
+    availability: F32TriadAvailability,
+) -> Result<F32TriadSelection, String> {
+    if availability.portable.is_none() {
+        return Err(
+            "the RNA batch-invariant TF32 policy needs the portable TF32 module, and this \
+             context bound none"
+                .to_string(),
+        );
+    }
+    let keeps = |route: Tf32PhysicalRoute| rna_batch_invariant_route(request.op, route);
+    let measured = operands
+        .and_then(|operands| {
+            measured_tf32_route_with_operands(
+                request,
+                operands,
+                availability,
+                F32_TF32_TUNING_REVISION,
+            )
+        })
+        .filter(|route| keeps(*route))
+        .and_then(|route| resolve_tf32_forced(request, availability, route).ok());
+    if let Some(route) = measured {
+        return Ok(F32TriadSelection::Tf32(route));
+    }
+    let proven = operands
+        .and_then(|operands| proof_tf32_selection(request, operands, availability))
+        .and_then(|selection| match selection {
+            F32TriadSelection::Tf32(route) => keeps(route).then_some(selection),
+            F32TriadSelection::Tf32Proof {
+                candidate,
+                reference,
+            } if keeps(reference) => Some(if keeps(candidate) {
+                selection
+            } else {
+                F32TriadSelection::Tf32(reference)
+            }),
+            _ => None,
+        });
+    if let Some(selection) = proven {
+        return Ok(selection);
+    }
+    let route = rna_portable_ladder_route(request);
+    resolve_tf32_forced(request, availability, route)
+        .map(F32TriadSelection::Tf32)
+        .map_err(|reason| {
+            format!("the RNA batch-invariant TF32 policy has no route for {request:?}: {reason}")
+        })
+}
+
+/// Whether a TF32 route keeps the strict policy's contract. Both operands
+/// round with cvt.rna: in registers, after a tensor-map load, or in an
+/// explicit pre-rounding pass; the half-ulp shortcut and the tensor map's
+/// own tfloat32 conversion round a subnormal differently and are refused.
+/// A forward (NN) also takes only the portable tier's plain tiles: every one
+/// of them seeds an output with its bias and walks the reduction in 32-wide
+/// steps of eight from zero to the same zero-filled end, so the tile a row
+/// count selects never moves an output's bits.
+fn rna_batch_invariant_route(op: ResolvedGemmOp, route: Tf32PhysicalRoute) -> bool {
+    use crate::gpu::kernel_identity::ResolvedOperandConversion as Conversion;
+    let rounds_rna = match route {
+        Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => {
+            super::contract::tf32_splitk_spec(op, route).is_ok()
+        }
+        _ => tf32_kernel_spec(op, route).is_ok_and(|spec| {
+            matches!(
+                spec.operand_conversion,
+                Conversion::RegisterCvtRnaTf32F32
+                    | Conversion::TensorMapUint32ThenCvtRnaTf32F32
+                    | Conversion::PreRnaAThenRegisterCvtRnaBV1
+            )
+        }),
+    };
+    rounds_rna && (op != ResolvedGemmOp::Nn || matches!(route, Tf32PhysicalRoute::MmaTf32Rna(_)))
+}
+
+/// The portable plain tile the strict policy falls to for a shape no table
+/// names: the narrow tiles for a few output rows, the wider ones as rows
+/// grow. Every one of them keeps the contract.
+fn rna_portable_ladder_route(request: F32TriadRequest) -> Tf32PhysicalRoute {
+    use super::contract::{Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile};
+    let (tile, stages) = match (request.shape.m, request.shape.n) {
+        (0..=16, 0..=16) => (Tf32PortableTile::M16N16, Tf32PortableStages::S4),
+        (0..=16, _) => (Tf32PortableTile::M16N32, Tf32PortableStages::S4),
+        (17..=64, _) => (Tf32PortableTile::M64N64, Tf32PortableStages::S3),
+        _ => (Tf32PortableTile::M128N64, Tf32PortableStages::S3),
+    };
+    Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute { tile, stages })
 }
 
 /// The Ada evidence offered to a board that holds no cohort of its own.
@@ -12042,7 +12143,8 @@ mod tf32_tests {
         SM120_TF32_EVIDENCE_CELLS, SM120_TF32_EVIDENCE_COHORTS, SM120_TF32_PORTABLE_ARCHITECTURE,
         Tf32AutoEvidenceCohort, Tf32AutoOperandGate, matching_tf32_cohort,
         measured_tf32_route_with_operands, resolve_f32_triad_auto,
-        resolve_f32_triad_auto_with_operands, resolve_tf32_forced,
+        resolve_f32_triad_auto_with_operands, resolve_tf32_forced, rna_batch_invariant_route,
+        rna_portable_ladder_route,
     };
     use crate::gpu::context::F32TriadPolicy;
     use crate::gpu::gemm_bi_triad::contract::{
@@ -16021,6 +16123,193 @@ mod tf32_tests {
             )
             .is_err()
         );
+    }
+
+    const STRICT: F32TriadPolicy = F32TriadPolicy::RnaTf32BatchInvariant;
+
+    /// The boards the strict policy is checked on: the Ada portable module
+    /// alone, with the finalist, with each joint cohort, and the SM120 board
+    /// with its portable twin.
+    fn strict_boards() -> Vec<F32TriadAvailability> {
+        let mut boards = vec![sm89_availability(), sm89_finalist_availability()];
+        boards.extend(
+            SM89_JOINT_TF32_EVIDENCE_COHORTS
+                .iter()
+                .map(|cohort| sm89_joint_availability(cohort.identity, cohort.portable))
+                .filter(|availability| availability.portable.is_some()),
+        );
+        boards.push(F32TriadAvailability {
+            portable: Some(qualified_module_for_auto_identity(
+                SM120_TF32_PORTABLE_ARCHITECTURE,
+            )),
+            ..sm120_availability_for(SM120_TF32_ARCHITECTURE)
+        });
+        boards
+    }
+
+    fn strict_keeps(op: ResolvedGemmOp, selection: F32TriadSelection) -> bool {
+        match selection {
+            F32TriadSelection::Tf32(route) => rna_batch_invariant_route(op, route),
+            F32TriadSelection::Tf32Proof {
+                candidate,
+                reference,
+            } => {
+                rna_batch_invariant_route(op, candidate) && rna_batch_invariant_route(op, reference)
+            }
+            F32TriadSelection::ScalarFma | F32TriadSelection::ExactSm120Fma(_) => false,
+        }
+    }
+
+    #[test]
+    fn rna_strict_admits_only_rna_routes_and_plain_forward_tiles() {
+        use crate::gpu::kernel_identity::ResolvedOperandConversion as Conversion;
+        for module_kind in [
+            ModuleKind::TriadSm80,
+            ModuleKind::TriadSm90a,
+            ModuleKind::TriadSm100,
+            ModuleKind::TriadSm120,
+            ModuleKind::TriadSm89Finalist,
+            ModuleKind::TriadSm89Tf32Joint,
+        ] {
+            for spec in crate::gpu::gemm_bi_triad::contract::tf32_route_specs_all(module_kind) {
+                let rna = matches!(
+                    spec.operand_conversion,
+                    Conversion::RegisterCvtRnaTf32F32
+                        | Conversion::TensorMapUint32ThenCvtRnaTf32F32
+                        | Conversion::PreRnaAThenRegisterCvtRnaBV1
+                );
+                let plain = matches!(spec.route, Tf32PhysicalRoute::MmaTf32Rna(_));
+                assert_eq!(
+                    rna_batch_invariant_route(spec.op, spec.route),
+                    rna && (spec.op != ResolvedGemmOp::Nn || plain),
+                    "{}",
+                    spec.symbol,
+                );
+            }
+        }
+        for spec in crate::gpu::gemm_bi_triad::contract::tf32_splitk_specs_all() {
+            assert_eq!(
+                rna_batch_invariant_route(spec.op, spec.route),
+                spec.op != ResolvedGemmOp::Nn,
+                "{}",
+                spec.symbol,
+            );
+        }
+        let wide = Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
+            tile: Tf32PortableTile::M128N128,
+            stages: Tf32PortableStages::S3,
+        });
+        assert!(!rna_batch_invariant_route(ResolvedGemmOp::Nn, wide));
+    }
+
+    #[test]
+    fn rna_strict_forward_takes_a_plain_portable_tile_at_every_row_count() {
+        for availability in strict_boards() {
+            for (reduction, columns) in [
+                (64, 96),
+                (96, 40),
+                (384, 384),
+                (512, 128),
+                (768, 768),
+                (768, 1536),
+                (3072, 768),
+            ] {
+                for rows in [1, 7, 16, 17, 64, 65, 128, 513, 1024, 4096] {
+                    let request = normalized_request(ResolvedGemmOp::Nn, rows, columns, reduction);
+                    for operands in [
+                        sm89_joint_operands(ResolvedGemmOp::Nn),
+                        F32TriadOperands {
+                            bias: Some(0x4000),
+                            ..sm89_joint_operands(ResolvedGemmOp::Nn)
+                        },
+                    ] {
+                        let selection = resolve_f32_triad_auto_with_operands(
+                            STRICT,
+                            request,
+                            operands,
+                            availability,
+                        )
+                        .unwrap();
+                        assert!(
+                            matches!(
+                                selection,
+                                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32Rna(_))
+                            ) && strict_keeps(ResolvedGemmOp::Nn, selection),
+                            "{availability:?} {request:?}: {selection:?}",
+                        );
+                    }
+                    let selection = resolve_f32_triad_auto(STRICT, request, availability).unwrap();
+                    assert_eq!(
+                        selection,
+                        F32TriadSelection::Tf32(rna_portable_ladder_route(request)),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rna_strict_gradients_keep_every_measured_rna_route_and_never_fall_to_exact() {
+        let mut cohorts: Vec<(F32TriadAvailability, &[_])> = SM89_JOINT_TF32_EVIDENCE_COHORTS
+            .iter()
+            .filter(|cohort| cohort.portable.is_some())
+            .map(|cohort| {
+                (
+                    sm89_joint_availability(cohort.identity, cohort.portable),
+                    cohort.cells,
+                )
+            })
+            .collect();
+        for cohort in SM120_TF32_EVIDENCE_COHORTS {
+            let mut availability = sm120_availability_for(cohort.identity);
+            availability.portable = cohort.portable.map(qualified_module_for_auto_identity);
+            cohorts.push((availability, cohort.cells));
+        }
+        cohorts.push((sm89_availability(), SM89_TF32_EVIDENCE_CELLS));
+        let mut kept = 0;
+        for (availability, cells) in cohorts {
+            for cell in cells.iter().filter(|cell| cell.op != ResolvedGemmOp::Nn) {
+                let request = normalized_request(
+                    cell.op,
+                    cell.shape.output_rows,
+                    cell.shape.output_columns,
+                    cell.shape.reduction,
+                );
+                let selection = resolve_f32_triad_auto_with_operands(
+                    STRICT,
+                    request,
+                    sm89_joint_operands(cell.op),
+                    availability,
+                )
+                .unwrap();
+                assert!(strict_keeps(cell.op, selection), "{cell:?}: {selection:?}");
+                let allowed = resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::AllowDeterministicTf32,
+                    request,
+                    sm89_joint_operands(cell.op),
+                    availability,
+                )
+                .unwrap();
+                if let F32TriadSelection::Tf32(route) = allowed
+                    && rna_batch_invariant_route(cell.op, route)
+                {
+                    assert_eq!(selection, allowed, "{cell:?}");
+                    kept += 1;
+                }
+            }
+        }
+        assert!(
+            kept > 0,
+            "no measured gradient route kept the strict contract"
+        );
+    }
+
+    #[test]
+    fn rna_strict_policy_refuses_a_context_without_the_portable_module() {
+        let availability = sm120_availability_for(SM120_TF32_ARCHITECTURE);
+        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
+            assert!(resolve_f32_triad_auto(STRICT, request(op), availability).is_err());
+        }
     }
 }
 

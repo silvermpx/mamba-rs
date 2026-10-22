@@ -784,6 +784,9 @@ fn timed_request_digest(identity: PhysicalTimedRequestIdentity) -> [u8; 32] {
         PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32) => {
             digest.required(b"route", b"f32-policy-allow-deterministic-tf32-v1")
         }
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::RnaTf32BatchInvariant) => {
+            digest.required(b"route", b"f32-policy-rna-tf32-batch-invariant-v1")
+        }
         PhysicalQualificationRoute::HalfPolicy {
             dtype,
             tensor_cores,

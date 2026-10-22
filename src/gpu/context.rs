@@ -198,6 +198,28 @@ pub enum F32TriadPolicy {
     /// This is permission, not a forced backend. Unsupported or unmeasured
     /// cells keep the exact scalar FMA contract.
     AllowDeterministicTf32 = 1,
+    /// Every f32 product runs on TF32 and rounds its operands with
+    /// `cvt.rna` (in registers, after a tensor-map load, or in a separate
+    /// pre-rounding pass), never by the half-ulp shortcut. A forward (NN)
+    /// walks each output's reduction as one chain in a plain tile of the
+    /// portable tier, so no row count changes an output's bits; the
+    /// gradients may take split or stream-K routes, deterministic but
+    /// keyed on their shape. The architecture's tables choose among the
+    /// routes that keep this contract, and every other shape takes the
+    /// portable tier's plain tile; nothing falls back to the exact family.
+    /// A program whose TF32 products must equal a CPU model of the tensor
+    /// core (Lilly) runs under it. The Triad family serves it.
+    RnaTf32BatchInvariant = 2,
+}
+
+impl F32TriadPolicy {
+    /// Whether the policy runs f32 products on TF32 routes.
+    pub const fn allows_tf32(self) -> bool {
+        matches!(
+            self,
+            Self::AllowDeterministicTf32 | Self::RnaTf32BatchInvariant
+        )
+    }
 }
 
 /// Numeric policy for deterministic half-precision (bf16/f16) Triad GEMMs.
@@ -1766,8 +1788,7 @@ impl GpuCtx {
                 | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1
         );
         if tf32_numeric
-            && (route.dtype != PolicyDtype::F32
-                || self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32)
+            && (route.dtype != PolicyDtype::F32 || !self.f32_triad_policy().allows_tf32())
         {
             return Err(format!(
                 "{label}: captured deterministic TF32 route is disabled by the live policy"
@@ -1865,7 +1886,7 @@ impl GpuCtx {
         label: &str,
     ) -> Result<(), String> {
         use super::kernel_identity::{ResolvedOperandConversion, ResolvedTransformOutputOwnership};
-        if self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32
+        if !self.f32_triad_policy().allows_tf32()
             || transform.numeric_contract != ResolvedNumericContract::Tf32RnaPreprocess
             || transform.operand_conversion != ResolvedOperandConversion::RegisterCvtRnaTf32F32
             || transform.output_ownership
@@ -1970,7 +1991,9 @@ impl GpuCtx {
     /// `F32` otherwise.
     pub(crate) fn f32_storage_dtype(&self) -> WeightDtype {
         match self.f32_triad_policy.get() {
-            F32TriadPolicy::AllowDeterministicTf32 => WeightDtype::Tf32,
+            F32TriadPolicy::AllowDeterministicTf32 | F32TriadPolicy::RnaTf32BatchInvariant => {
+                WeightDtype::Tf32
+            }
             F32TriadPolicy::ExactScalarFma => WeightDtype::F32,
         }
     }

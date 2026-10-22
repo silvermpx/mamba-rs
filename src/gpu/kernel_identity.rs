@@ -2955,19 +2955,18 @@ pub fn route_backend_contract_sets(policy: GemmPolicy) -> (BackendSet, NumericCo
                 .union(NumericContractSet::TRIAD_MMA_SYNC),
         ),
     };
-    let contracts = if policy.bi_gemm_family == BiGemmFamily::Triad
-        && policy.f32_triad_policy == F32TriadPolicy::AllowDeterministicTf32
-    {
-        contracts
-            .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32)
-            .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32_SPLIT_K)
-    } else if policy.bi_gemm_family == BiGemmFamily::Inference
-        && policy.f32_triad_policy == F32TriadPolicy::AllowDeterministicTf32
-    {
-        contracts.union(NumericContractSet::INFERENCE_DETERMINISTIC_TF32)
-    } else {
-        contracts
-    };
+    let contracts =
+        if policy.bi_gemm_family == BiGemmFamily::Triad && policy.f32_triad_policy.allows_tf32() {
+            contracts
+                .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32)
+                .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32_SPLIT_K)
+        } else if policy.bi_gemm_family == BiGemmFamily::Inference
+            && policy.f32_triad_policy == F32TriadPolicy::AllowDeterministicTf32
+        {
+            contracts.union(NumericContractSet::INFERENCE_DETERMINISTIC_TF32)
+        } else {
+            contracts
+        };
     // The stream-K half routes are reachable only through the tensor-core
     // tier, under either family, and only with the half policy's permission.
     let contracts = if policy.bi_tensor_cores

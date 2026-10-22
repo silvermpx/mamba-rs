@@ -5048,6 +5048,16 @@ pub(in crate::gpu) fn inference_forward_observed<O: PhysicalLaunchObserver>(
     let args = InferenceArgs::try_new(operands, shape)?;
     let homogeneous_f32 =
         c.dtype == WeightDtype::F32 && x.dtype == WeightDtype::F32 && w.dtype == WeightDtype::F32;
+    if homogeneous_f32
+        && ctx.f32_triad_policy() == super::context::F32TriadPolicy::RnaTf32BatchInvariant
+    {
+        // The inference family's own f32 routes neither round every operand
+        // with cvt.rna nor keep one reduction chain per output, so serving
+        // the policy here would break it silently.
+        return Err(
+            "the RNA batch-invariant TF32 policy is served by the Triad family only".to_string(),
+        );
+    }
     if let Some(spec) = select_sm89_cell_for_context(ctx, operands, shape) {
         let admitted = proven_inference_candidate(
             ctx,
