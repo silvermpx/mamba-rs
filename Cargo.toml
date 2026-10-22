@@ -277,6 +277,11 @@ path = "tests/rna_tf32_batch_invariant.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "rna_tf32_gradients"
+path = "tests/rna_tf32_gradients.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "gemm_empty_axes"
 path = "tests/gemm_empty_axes.rs"
 required-features = ["cuda"]

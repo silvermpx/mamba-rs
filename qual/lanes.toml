@@ -256,6 +256,7 @@
 "rl_llm_bench" = "qualification"
 "rmsnorm_bf16_768" = "gate"
 "rna_tf32_batch_invariant" = "gate"
+"rna_tf32_gradients" = "gate"
 "scan_mode_bench" = "qualification"
 "scan_mode_boundary" = "host"
 "scan_mode_option" = "gate"

@@ -2750,7 +2750,7 @@ fn rna_batch_invariant_selection(
     if let Some(route) = measured {
         return Ok(F32TriadSelection::Tf32(route));
     }
-    if let Some(route) = rna_backward_rule_route(request, availability)
+    if let Some(route) = rna_backward_rule_route(request, operands, availability)
         && let Ok(bound) = resolve_tf32_forced(request, availability, route)
     {
         return Ok(F32TriadSelection::Tf32(bound));
@@ -2792,14 +2792,22 @@ const RNA_NT_NARROW_ROWS: usize = 256;
 const RNA_NT_SPLIT_MIN_REDUCTION: usize = 256;
 const RNA_NT_SPLIT_MAX_COLUMNS: usize = 1024;
 
+/// The output size from which the 64 x 96 pre-rounded weight-gradient tile
+/// beats the 64 x 64 one on the Ada: the 590k-output gradients take it at
+/// 1024 rows, the 262k-320k ones do not.
+const RNA_PRE_TN_WIDE_OUTPUTS: usize = 1 << 19;
+
 /// The strict policy's gradient routes. The gradients only keep cvt.rna and
 /// a fixed order, so a split by a shape-only partition count serves them; the
 /// members of one partition count fold the same partitions, so which member
 /// runs is speed alone and may read the card. A weight gradient over a deep
 /// batch splits eight ways, an input gradient of a few rows over a long
-/// reduction four ways, and a narrow output takes the 16 x 32 tile.
+/// reduction four ways, and a narrow output takes the 16 x 32 tile. On the
+/// Ada a weight gradient no split claims runs over a pre-rounded copy of its
+/// input when the joint module is bound and the operands stage whole chunks.
 fn rna_backward_rule_route(
     request: F32TriadRequest,
+    operands: Option<F32TriadOperands>,
     availability: F32TriadAvailability,
 ) -> Option<Tf32PhysicalRoute> {
     use super::contract::{Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile};
@@ -2838,6 +2846,13 @@ fn rna_backward_rule_route(
             Tf32PortableTile::M16N32,
             Tf32PortableStages::S4,
         ))),
+        ResolvedGemmOp::Tn if rna_pre_tn_admits(request, operands, availability) => Some(
+            if reduction >= 256 && rows * columns >= RNA_PRE_TN_WIDE_OUTPUTS {
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+            } else {
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N64
+            },
+        ),
         ResolvedGemmOp::Nt
             if rows < RNA_NT_NARROW_ROWS
                 && reduction >= RNA_NT_SPLIT_MIN_REDUCTION
@@ -2856,6 +2871,39 @@ fn rna_backward_rule_route(
             Tf32PortableStages::S2,
         ))),
     }
+}
+
+/// Whether a weight gradient may run the Ada's pre-rounded tiles: the joint
+/// module is bound on an Ada board, the gradient accumulates with unit
+/// scales into 16-byte aligned operands, the saved activations' rows are
+/// whole 16-byte chunks, and the transposed copy fits its scratch.
+fn rna_pre_tn_admits(
+    request: F32TriadRequest,
+    operands: Option<F32TriadOperands>,
+    availability: F32TriadAvailability,
+) -> bool {
+    let Some(operands) = operands else {
+        return false;
+    };
+    let shape = request.shape;
+    let copy_stride = shape.m.next_multiple_of(4);
+    availability
+        .joint
+        .is_some_and(|joint| joint.device.compute_capability == (8, 9))
+        && request.op == ResolvedGemmOp::Tn
+        && shape == F32TriadShape::contiguous(ResolvedGemmOp::Tn, (shape.m, shape.k, shape.n))
+        && shape.m > 0
+        && shape.n.is_multiple_of(4)
+        && shape
+            .k
+            .checked_mul(copy_stride)
+            .is_some_and(|floats| floats <= super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS)
+        && operands.alpha.to_bits() == 1.0_f32.to_bits()
+        && operands.beta.to_bits() == 1.0_f32.to_bits()
+        && operands.bias.is_none()
+        && [operands.output, operands.a, operands.b]
+            .into_iter()
+            .all(|pointer| pointer != 0 && pointer.is_multiple_of(16))
 }
 
 /// The batch-invariant TF32 forward's table on an Ada board (CC 8.9), the
@@ -3217,15 +3265,11 @@ fn sm89_joint_route_matches_request(route: Tf32PhysicalRoute, request: F32TriadR
                 && matches!(dims, (2_048, 768, 3_072) | (2_048, 1_536, 768) | DEEP)
                 && contiguous
         }
-        Tf32PhysicalRoute::Sm89TnPreRnaM64N64 => {
-            request.op == ResolvedGemmOp::Tn
-                && matches!(dims, (4_621, 384, 1_928) | DEEP)
-                && contiguous
-        }
-        Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2 => {
-            request.op == ResolvedGemmOp::Tn
-                && matches!(dims, (4_621, 384, 1_928) | (2_048, 768, 3_072) | DEEP)
-                && contiguous
+        // The two pre-rounded members mask every edge of the output and of
+        // the reduction, so they run any contiguous weight gradient whose
+        // saved activations' rows are whole 16-byte chunks.
+        Tf32PhysicalRoute::Sm89TnPreRnaM64N64 | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2 => {
+            request.op == ResolvedGemmOp::Tn && contiguous && shape.n.is_multiple_of(4)
         }
         Tf32PhysicalRoute::Sm89NnDirectN96 => {
             request.op == ResolvedGemmOp::Nn
@@ -15719,7 +15763,7 @@ mod tf32_tests {
     }
 
     #[test]
-    fn sm89_joint_forced_routes_are_exact_cell_only_and_unqualified_auto_stays_closed() {
+    fn sm89_joint_forced_routes_keep_their_cells_and_unqualified_auto_stays_closed() {
         let joint = qualified_module(
             ModuleKind::TriadSm89Tf32Joint,
             "sm_89",
@@ -15821,10 +15865,22 @@ mod tf32_tests {
                 }
                 neighbors.push(neighbor);
             }
+            // The two pre-rounded weight-gradient tiles mask every edge and
+            // run any contiguous gradient whose rows are whole 16-byte
+            // chunks; every other joint route stays on its cells.
+            let general = matches!(
+                route,
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N64 | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+            );
             for neighbor in neighbors {
-                assert!(
-                    resolve_tf32_forced(neighbor, availability, route).is_err(),
-                    "joint route {route:?} accepted neighboring request {neighbor:?}"
+                let shape = neighbor.shape;
+                let runs_any_shape = general
+                    && shape == F32TriadShape::contiguous(neighbor.op, (shape.m, shape.k, shape.n))
+                    && shape.n.is_multiple_of(4);
+                assert_eq!(
+                    resolve_tf32_forced(neighbor, availability, route).is_ok(),
+                    runs_any_shape,
+                    "joint route {route:?} on neighboring request {neighbor:?}"
                 );
             }
         }
@@ -16607,7 +16663,8 @@ mod tf32_tests {
 
     #[test]
     fn rna_strict_gradients_split_by_the_shape_and_fill_by_the_card() {
-        use super::rna_backward_rule_route;
+        let rna_backward_rule_route_for =
+            |request, availability| super::rna_backward_rule_route(request, None, availability);
         let split8 = |tile, stages| {
             Some(Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute {
                 tile,
@@ -16626,11 +16683,11 @@ mod tf32_tests {
         // A deep weight gradient splits eight ways on its 128 x 796 output,
         // which the 13 CTAs of one plain tile left idle.
         assert_eq!(
-            rna_backward_rule_route(tn((4096, 128, 796)), ada),
+            rna_backward_rule_route_for(tn((4096, 128, 796)), ada),
             split8(Tf32PortableTile::M64N64, Tf32PortableStages::S2)
         );
         assert_eq!(
-            rna_backward_rule_route(tn((4096, 256, 128)), ada),
+            rna_backward_rule_route_for(tn((4096, 256, 128)), ada),
             split8(Tf32PortableTile::M32N32, Tf32PortableStages::S3)
         );
         // Every card splits the same shapes; only the member moves.
@@ -16640,7 +16697,7 @@ mod tf32_tests {
             for dims in [(4096, 128, 796), (2048, 512, 256), (1024, 384, 1536)] {
                 assert_eq!(
                     matches!(
-                        rna_backward_rule_route(tn(dims), board),
+                        rna_backward_rule_route_for(tn(dims), board),
                         Some(Tf32PhysicalRoute::MmaTf32RnaSplitK8(_))
                     ),
                     dims.0 >= 2048,
@@ -16649,7 +16706,7 @@ mod tf32_tests {
             }
         }
         assert_eq!(
-            rna_backward_rule_route(tn((1024, 384, 101)), ada),
+            rna_backward_rule_route_for(tn((1024, 384, 101)), ada),
             Some(Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                 tile: Tf32PortableTile::M16N32,
                 stages: Tf32PortableStages::S4,
@@ -16658,7 +16715,7 @@ mod tf32_tests {
         // A few rows over a long reduction split four ways; a wide output
         // or a short reduction keeps the narrow tile.
         assert_eq!(
-            rna_backward_rule_route(nt((64, 384, 1536)), ada),
+            rna_backward_rule_route_for(nt((64, 384, 1536)), ada),
             Some(Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
                 tile: Tf32PortableTile::M16N32,
                 stages: Tf32PortableStages::S3,
@@ -16666,7 +16723,7 @@ mod tf32_tests {
         );
         for dims in [(64, 1536, 384), (64, 384, 101)] {
             assert_eq!(
-                rna_backward_rule_route(nt(dims), ada),
+                rna_backward_rule_route_for(nt(dims), ada),
                 Some(Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
                     tile: Tf32PortableTile::M16N32,
                     stages: Tf32PortableStages::S4,
@@ -16675,7 +16732,7 @@ mod tf32_tests {
             );
         }
         assert_eq!(
-            rna_backward_rule_route(
+            rna_backward_rule_route_for(
                 F32TriadRequest {
                     op: ResolvedGemmOp::Nn,
                     shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (4096, 128, 796)),
