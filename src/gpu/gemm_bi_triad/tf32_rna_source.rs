@@ -87,9 +87,10 @@ const fn spec(
         kind,
         block: (threads, 1, 1),
         dynamic_shared_bytes,
-        // The launch bounds cap the registers; a tile that spills to local
+        // The launch bounds set the compiler's register budget; the gate
+        // keeps the hardware's ceiling, and a tile that spills to local
         // memory is excluded rather than served slowly.
-        register_cap: 65_536 / (threads * minimum_active_blocks),
+        register_cap: 255,
         local_bytes: 0,
         minimum_active_blocks,
     }
@@ -127,12 +128,15 @@ pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 6] = [
         76_800,
         1,
     ),
+    // Its launch bounds ask the compiler for two CTAs' registers, but two
+    // of its 52 KB rings exceed the 100 KB a CC 8.6, 8.9 or 12.x
+    // multiprocessor holds; one CTA is the gate everywhere.
     spec(
         NN_MS_M64N64_S3_SYMBOL,
         Tf32RnaKernelKind::Multistage,
         128,
         52_224,
-        2,
+        1,
     ),
 ];
 

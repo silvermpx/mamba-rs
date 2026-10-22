@@ -380,7 +380,8 @@ fn active_artifacts(artifacts: ArtifactSetIdentity) -> Vec<ArtifactIdentity> {
         + usize::from(artifacts.sm89_exact_f32.is_some())
         + usize::from(artifacts.sm89_exact_f32_d128.is_some())
         + usize::from(artifacts.sm89_tf32_joint.is_some())
-        + usize::from(artifacts.sm89_cells.is_some());
+        + usize::from(artifacts.sm89_cells.is_some())
+        + usize::from(artifacts.tf32_rna.is_some());
     assert_eq!(
         usize::from(artifacts.module_count),
         expected_count,
@@ -411,6 +412,9 @@ fn active_artifacts(artifacts: ArtifactSetIdentity) -> Vec<ArtifactIdentity> {
     }
     if let Some(sm89_cells) = artifacts.sm89_cells {
         active.push(sm89_cells);
+    }
+    if let Some(tf32_rna) = artifacts.tf32_rna {
+        active.push(tf32_rna);
     }
     let kinds: std::collections::HashSet<_> =
         active.iter().map(|artifact| artifact.module_kind).collect();
