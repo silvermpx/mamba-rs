@@ -78,6 +78,9 @@ pub const ZERO_REDUCTION_MAP_REVISION: u16 = 1;
 pub const ZERO_REDUCTION_DIGEST_DOMAIN: &[u8] = b"tf32-zero-reduction-maps.v1";
 pub const SCALAR_BIG_NT_DYNAMIC_SHARED_BYTES: u32 = 33_376;
 pub const SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES: u32 = 17_408;
+/// The batch-invariant exact thin tile's six stages of 64-deep slabs, A
+/// [16 x 64] and B [64 x 32] each; the kernel static_asserts the same.
+pub const EXACT_THIN_DYNAMIC_SHARED_BYTES: u32 = 73_728;
 pub const SCALAR_NN_M32N64_SPLITK32_THREADS: u32 = 128;
 pub const SCALAR_NN_M32N64_SPLITK32_DYNAMIC_SHARED_BYTES: u32 = 0;
 pub const SCALAR_NN_M32N64_SPLITK32_STATIC_SHARED_BYTES: usize = 13_312;

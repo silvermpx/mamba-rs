@@ -23,6 +23,11 @@
   `cvt.rna` rounding, and a forward whose output rows do not depend on the
   batch, for a program that checks its products against a CPU model of the
   tensor core.
+- `F32TriadPolicy::ExactFmaBatchInvariant`: exact f32 products whose
+  forward folds each output by its layer's shape alone (one `fma` chain, or
+  64-input chunks summed in order for a deep layer), so a row has the same
+  bits at every batch size and a CPU model of the two folds reproduces
+  them. A batch of one row or a few rows runs on thin pipelined tiles.
 - GEMMs on a caller's CUDA context and stream:
   `GpuDevice::from_context`, `GpuCtx::new_on_stream`, and raw-pointer
   forward, input-gradient and weight-gradient entries.

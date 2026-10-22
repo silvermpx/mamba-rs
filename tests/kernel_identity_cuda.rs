@@ -79,6 +79,10 @@ const SCALAR_ENTRIES: &[&str] = &[
     "tn_big_f16",
     "nt_big_bf16",
     "nt_big_f16",
+    "nn_exact_thin_r1_m16n32_bk64_s6",
+    "nn_exact_m16n16_bk16_s4",
+    "exact_chunk_partial_m32n64",
+    "exact_chunk_partial_m16n16_bk16_s4",
 ];
 
 #[cfg(target_os = "linux")]

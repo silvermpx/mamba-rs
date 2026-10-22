@@ -8370,6 +8370,12 @@ const SCALAR_SOURCE_FRAGMENTS: &[SourceFragment] = &[
         source: include_str!("../../../kernels/gemm_bi_triad/scalar_tn_m16n16.cu"),
         allowed_quoted_includes: &[],
     },
+    // Last, so the kernels composed before it keep the code they had.
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/sm80/exact_thin.cu",
+        source: include_str!("../../../kernels/gemm_bi_triad/sm80/exact_thin.cu"),
+        allowed_quoted_includes: &[],
+    },
 ];
 
 const SM80_SOURCE_FRAGMENTS: &[SourceFragment] = &[
@@ -8542,6 +8548,10 @@ pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "tn_big_f16",
     "nt_big_bf16",
     "nt_big_f16",
+    "nn_exact_thin_r1_m16n32_bk64_s6",
+    "nn_exact_m16n16_bk16_s4",
+    "exact_chunk_partial_m32n64",
+    "exact_chunk_partial_m16n16_bk16_s4",
 ];
 
 pub(super) const SM80_SYMBOLS: &[&str] = &[
@@ -9741,6 +9751,14 @@ pub struct GemmBiKernels {
     pub gemm_bi_tn_splitm_partial_aligned: CudaFunction,
     pub gemm_bi_splitm_reduce: CudaFunction,
     pub gemm_bi_nn_splitk_slim_partial: CudaFunction,
+    /// The batch-invariant exact forward's thin tile, one row per thread.
+    pub gemm_bi_nn_exact_thin_r1: CudaFunction,
+    /// Its pipelined 16 x 16 tile.
+    pub gemm_bi_nn_exact_m16n16: CudaFunction,
+    /// Its 64-input chunk partials on a 32 x 64 tile.
+    pub gemm_bi_exact_chunk_partial_m32n64: CudaFunction,
+    /// Its 64-input chunk partials on the pipelined 16 x 16 tile.
+    pub gemm_bi_exact_chunk_partial_m16n16: CudaFunction,
     pub gemm_bi_transpose_f32_2d: CudaFunction,
     pub gemm_bi_transpose_f32_32x16_d768: CudaFunction,
     pub gemm_bi_dx_col_gemv: CudaFunction,
@@ -10112,6 +10130,12 @@ impl GemmBiKernels {
             super::contract::SCALAR_NT_M2N16_DYNAMIC_SHARED_BYTES as i32,
         )?;
         let gemm_bi_transpose_f32_32x16_d768 = load("transpose_f32_32x16_d768")?;
+        let gemm_bi_nn_exact_thin_r1 = load("nn_exact_thin_r1_m16n32_bk64_s6")?;
+        set_dynamic_shared(
+            &gemm_bi_nn_exact_thin_r1,
+            "nn_exact_thin_r1_m16n32_bk64_s6",
+            super::contract::EXACT_THIN_DYNAMIC_SHARED_BYTES as i32,
+        )?;
         let scalar_compiler = scalar.compiler_identity;
         let scalar_artifact = scalar.artifact_identity;
         let sm120_scalar_resources_qualified = if qualified_scalar_resource_environment(
@@ -10260,6 +10284,10 @@ impl GemmBiKernels {
             gemm_bi_tn_splitm_partial_aligned: load("tn_splitm_partial_aligned")?,
             gemm_bi_splitm_reduce: load("splitm_reduce")?,
             gemm_bi_nn_splitk_slim_partial: load("nn_splitk_slim_partial")?,
+            gemm_bi_nn_exact_thin_r1,
+            gemm_bi_nn_exact_m16n16: load("nn_exact_m16n16_bk16_s4")?,
+            gemm_bi_exact_chunk_partial_m32n64: load("exact_chunk_partial_m32n64")?,
+            gemm_bi_exact_chunk_partial_m16n16: load("exact_chunk_partial_m16n16_bk16_s4")?,
             gemm_bi_transpose_f32_2d: load("transpose_f32_2d")?,
             gemm_bi_transpose_f32_32x16_d768,
             gemm_bi_dx_col_gemv: load("dx_col_gemv")?,
@@ -14252,7 +14280,7 @@ mod tests {
         const D768_TRANSPOSE_SYMBOL: &str = "transpose_f32_32x16_d768";
         const TN_M16N16_SYMBOL: &str = "tn_m16n16_bk16_s2_splitm16";
         let valid = synthetic_scalar_splitm_module_ptx();
-        assert_eq!(super::SCALAR_SYMBOLS.len(), 56);
+        assert_eq!(super::SCALAR_SYMBOLS.len(), 60);
         validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid)
             .expect("complete TriadScalar export inventory");
 
@@ -15550,6 +15578,7 @@ mod tests {
         "kernels/gemm_bi_triad/scalar_nt_d768_transpose.cu",
         "kernels/gemm_bi_triad/scalar_nt_m2n16.cu",
         "kernels/gemm_bi_triad/scalar_tn_m16n16.cu",
+        "kernels/gemm_bi_triad/sm80/exact_thin.cu",
     ];
 
     const SM80_FRAGMENTS: &[&str] = &[
@@ -15646,6 +15675,10 @@ mod tests {
         "tn_big_f16",
         "nt_big_bf16",
         "nt_big_f16",
+        "nn_exact_thin_r1_m16n32_bk64_s6",
+        "nn_exact_m16n16_bk16_s4",
+        "exact_chunk_partial_m32n64",
+        "exact_chunk_partial_m16n16_bk16_s4",
     ];
 
     const SM80_SYMBOLS: &[&str] = &[
@@ -16040,7 +16073,7 @@ mod tests {
 
         let scalar: BTreeSet<_> = SCALAR_SYMBOLS.iter().copied().collect();
         let sm80: BTreeSet<_> = SM80_SYMBOLS.iter().copied().collect();
-        assert_eq!(scalar.len(), 56);
+        assert_eq!(scalar.len(), 60);
         assert_eq!(sm80.len(), 16);
         let sm80_streamk: BTreeSet<_> = super::SM80_STREAMK_SYMBOLS.iter().copied().collect();
         assert_eq!(sm80_streamk.len(), 2);
@@ -16085,7 +16118,7 @@ mod tests {
         assert!(sm80.is_disjoint(&sm90a));
         assert!(sm80.is_disjoint(&sm100));
         assert!(sm90a.is_disjoint(&sm100));
-        assert_eq!(scalar.union(&sm80).count(), 72);
+        assert_eq!(scalar.union(&sm80).count(), 76);
         assert!(
             scalar
                 .union(&sm80)

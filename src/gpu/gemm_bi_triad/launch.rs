@@ -136,6 +136,55 @@ struct SgbNnM64N64Params {
 
 unsafe impl DeviceRepr for SgbNnM64N64Params {}
 
+/// Parameters of the batch-invariant exact thin and pipelined 16 x 16
+/// tiles; mirrors `ExactThinParams` in `sm80/exact_thin.cu`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+struct ExactThinParams {
+    m: i32,
+    n: i32,
+    k: i32,
+    lda: i32,
+    ldb: i32,
+    ldc: i32,
+    /// The inputs one CTA folds: `k` for a whole chain, the chunk for a
+    /// partial plane.
+    slab: i32,
+    /// The padding grain the +0.0 close stands for.
+    close: i32,
+}
+
+unsafe impl DeviceRepr for ExactThinParams {}
+
+const _: () = assert!(std::mem::size_of::<ExactThinParams>() == 32);
+
+/// Parameters of the 32 x 64 chunk partial; mirrors `ExactChunkParams` in
+/// `sm80/exact_thin.cu`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+struct ExactChunkParams {
+    m: i32,
+    n: i32,
+    k: i32,
+    lda: i32,
+    ldb: i32,
+    ldc: i32,
+    chunk: i32,
+    pad: i32,
+}
+
+unsafe impl DeviceRepr for ExactChunkParams {}
+
+const _: () = assert!(std::mem::size_of::<ExactChunkParams>() == 32);
+
+/// A whole chain ends a ragged reduction the way the chain tiles' 16-deep
+/// zero-filled slab does.
+const EXACT_CHAIN_CLOSE: i32 = 16;
+
+/// A chunk partial ends a ragged chunk the way the slim partial's 32-deep
+/// zero-filled slab does.
+const EXACT_CHUNK_CLOSE: i32 = 32;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 struct Sm90aTf32KernelParams {
@@ -2129,7 +2178,7 @@ struct ScalarNodeSpec {
 fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
     match plan {
         ScalarDispatchPlan::NtSplitKTail { k_tail, .. } => 3 + k_tail,
-        ScalarDispatchPlan::NnExactChunkSlim { pieces, .. } => 2 * pieces as usize,
+        ScalarDispatchPlan::NnExactChunk { pieces, .. } => 2 * pieces as usize,
         ScalarDispatchPlan::NnSplitKThinTail { .. }
         | ScalarDispatchPlan::NnSplitKThin
         | ScalarDispatchPlan::NnSplitKSlim { .. }
@@ -2189,9 +2238,22 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NnM64N64Qualified => (24, 0, 0),
         ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified => (37, 0, 0),
         ScalarDispatchPlan::NnFinal { slim } => (8, u64::from(slim), 0),
-        ScalarDispatchPlan::NnExactChunkSlim {
-            chunks, piece_rows, ..
-        } => (47, u64::from(chunks), u64::from(piece_rows)),
+        ScalarDispatchPlan::NnExactThin => (50, 0, 0),
+        ScalarDispatchPlan::NnExactNarrow16 => (51, 0, 0),
+        ScalarDispatchPlan::NnExactChunk {
+            partial,
+            chunks,
+            piece_rows,
+            ..
+        } => (
+            match partial {
+                ExactChunkPartial::Slim => 47,
+                ExactChunkPartial::Small => 48,
+                ExactChunkPartial::Narrow16 => 49,
+            },
+            u64::from(chunks),
+            u64::from(piece_rows),
+        ),
         ScalarDispatchPlan::TnGemv => (9, 0, 0),
         ScalarDispatchPlan::TnNarrow => (10, 0, 0),
         ScalarDispatchPlan::TnNarrowSplitM { m_chunk, chunks } => {
@@ -2334,11 +2396,25 @@ fn scalar_argument_layout(
         | (ScalarDispatchPlan::NtSplitKSlim { .. }, _) => ScalarArgumentLayout::default(),
         // Each piece is a partial over its rows of A, then the reduction
         // into its rows of the output.
-        (ScalarDispatchPlan::NnExactChunkSlim { piece_rows, .. }, index) => {
+        (
+            ScalarDispatchPlan::NnExactChunk {
+                partial,
+                piece_rows,
+                ..
+            },
+            index,
+        ) => {
             let first_row = (index / 2) as u64 * u64::from(piece_rows);
             if index % 2 == 0 {
                 ScalarArgumentLayout {
                     a_offset: first_row * request.shape.lda as u64 * 4,
+                    // The 16 x 16 partial takes the chain tile's bias slot,
+                    // always null over a chunk.
+                    null_pointer_mask: if partial == ExactChunkPartial::Narrow16 {
+                        0b1000
+                    } else {
+                        0
+                    },
                     ..ScalarArgumentLayout::default()
                 }
             } else {
@@ -2591,7 +2667,28 @@ fn scalar_physical_nodes(
                 ),
             );
         }
-        ScalarDispatchPlan::NnExactChunkSlim {
+        ScalarDispatchPlan::NnExactThin => push_scalar_node(
+            &mut nodes,
+            context,
+            "nn_exact_thin_r1_m16n32_bk64_s6",
+            (16, 32),
+            (64, 6),
+            cfg(
+                (n.div_ceil(32), m.div_ceil(16), 1),
+                (512, 1, 1),
+                super::contract::EXACT_THIN_DYNAMIC_SHARED_BYTES,
+            ),
+        ),
+        ScalarDispatchPlan::NnExactNarrow16 => push_scalar_node(
+            &mut nodes,
+            context,
+            "nn_exact_m16n16_bk16_s4",
+            (16, 16),
+            (16, 4),
+            cfg((n.div_ceil(16), m.div_ceil(16), 1), (64, 1, 1), 0),
+        ),
+        ScalarDispatchPlan::NnExactChunk {
+            partial,
             chunks,
             piece_rows,
             pieces,
@@ -2599,21 +2696,44 @@ fn scalar_physical_nodes(
             for piece in 0..pieces {
                 let first_row = piece * piece_rows;
                 let rows = piece_rows.min(m - first_row);
-                push_scalar_node(
-                    &mut nodes,
-                    context,
-                    "nn_splitk_slim_partial",
-                    (128, 64),
-                    (32, 1),
-                    cfg(
+                let (symbol, tile, bk_stages, grid, threads) = match partial {
+                    ExactChunkPartial::Slim => (
+                        "nn_splitk_slim_partial",
+                        (128, 64),
+                        (32, 1),
                         (
                             checked_grid_product(rows.div_ceil(128), n.div_ceil(64), 1)?,
                             1,
                             chunks,
                         ),
-                        (128, 1, 1),
-                        0,
+                        128,
                     ),
+                    ExactChunkPartial::Small => (
+                        "exact_chunk_partial_m32n64",
+                        (32, 64),
+                        (32, 2),
+                        (
+                            checked_grid_product(rows.div_ceil(32), n.div_ceil(64), 1)?,
+                            1,
+                            chunks,
+                        ),
+                        128,
+                    ),
+                    ExactChunkPartial::Narrow16 => (
+                        "exact_chunk_partial_m16n16_bk16_s4",
+                        (16, 16),
+                        (16, 4),
+                        (n.div_ceil(16), rows.div_ceil(16), chunks),
+                        64,
+                    ),
+                };
+                push_scalar_node(
+                    &mut nodes,
+                    context,
+                    symbol,
+                    tile,
+                    bk_stages,
+                    cfg(grid, (threads, 1, 1), 0),
                 );
                 push_scalar_node(
                     &mut nodes,
@@ -3209,7 +3329,11 @@ fn scalar_route_contract(
     }
     if matches!(
         symbol,
-        "nn_splitk32_partial" | "nn_splitk_slim_partial" | "nn_splitk32_m32n64_exact"
+        "nn_splitk32_partial"
+            | "nn_splitk_slim_partial"
+            | "nn_splitk32_m32n64_exact"
+            | "exact_chunk_partial_m32n64"
+            | "exact_chunk_partial_m16n16_bk16_s4"
     ) {
         return (
             PhysicalGemmBackend::ScalarFmaSplitKPartial,
@@ -5384,11 +5508,19 @@ fn scalar_proof_key(
 fn batch_invariant_exact_plan(
     ctx: &GpuCtx,
     request: F32TriadRequest,
+    operands: F32TriadOperands,
 ) -> Result<Option<ScalarDispatchPlan>, String> {
     if ctx.f32_triad_policy() != crate::gpu::context::F32TriadPolicy::ExactFmaBatchInvariant
         || request.op != ResolvedGemmOp::Nn
     {
         return Ok(None);
+    }
+    // The folds store the chain and add nothing of the old output.
+    if operands.alpha.to_bits() != 1.0f32.to_bits() || operands.beta.to_bits() != 0 {
+        return Err(format!(
+            "the batch-invariant exact forward takes alpha 1 and beta 0, not {} and {}",
+            operands.alpha, operands.beta
+        ));
     }
     let reference = scalar_launch_facts(&ctx.kernels).partition_reference;
     super::dispatch::exact_batch_invariant_nn_plan(request, reference).map(Some)
@@ -5399,7 +5531,7 @@ fn scalar_ledger_plan(
     request: F32TriadRequest,
     operands: F32TriadOperands,
 ) -> Result<ScalarDispatchPlan, String> {
-    if let Some(plan) = batch_invariant_exact_plan(ctx, request)? {
+    if let Some(plan) = batch_invariant_exact_plan(ctx, request, operands)? {
         return Ok(plan);
     }
     let facts = scalar_launch_facts(&ctx.kernels);
@@ -5431,7 +5563,7 @@ fn prove_scalar_plan<Arm>(
 where
     Arm: Fn(CUptr, ScalarDispatchPlan) -> Result<(), String>,
 {
-    if let Some(plan) = batch_invariant_exact_plan(ctx, request)? {
+    if let Some(plan) = batch_invariant_exact_plan(ctx, request, operands)? {
         return Ok(plan);
     }
     let facts = scalar_launch_facts(&ctx.kernels);
@@ -9617,17 +9749,79 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
     // logical reductions at different batch sizes use different chunk counts,
     // changes reduction order, and causes bit drift.
     const SPLITK_SLIM_K_CHUNK: u32 = 64; // PURE K-BASED, batch-invariant
-    if let ScalarDispatchPlan::NnExactChunkSlim {
+    if matches!(
+        scalar_plan,
+        ScalarDispatchPlan::NnExactThin | ScalarDispatchPlan::NnExactNarrow16
+    ) {
+        // A whole chain per output: the bias seeds it, and a reduction that
+        // is not a whole number of 16-input slabs ends with one +0.0 add.
+        let params = ExactThinParams {
+            m: checked_dims.m_i32,
+            n: checked_dims.n_i32,
+            k: checked_dims.k_i32,
+            lda: lda_i,
+            ldb: checked_dims.n_i32,
+            ldc: checked_dims.n_i32,
+            slab: checked_dims.k_i32,
+            close: EXACT_CHAIN_CLOSE,
+        };
+        let thin = scalar_plan == ScalarDispatchPlan::NnExactThin;
+        let (function, symbol, columns, threads, shared) = if thin {
+            (
+                &kernels.gemm_bi_nn_exact_thin_r1,
+                "nn_exact_thin_r1_m16n32_bk64_s6",
+                32,
+                512,
+                super::contract::EXACT_THIN_DYNAMIC_SHARED_BYTES,
+            )
+        } else {
+            (
+                &kernels.gemm_bi_nn_exact_m16n16,
+                "nn_exact_m16n16_bk16_s4",
+                16,
+                64,
+                0,
+            )
+        };
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (
+                checked_dims.n_u32.div_ceil(columns),
+                checked_dims.m_u32.div_ceil(16),
+                1,
+            ),
+            block_dim: (threads, 1, 1),
+            shared_mem_bytes: shared,
+        };
+        let mut builder = scalar_launch_builder(stream, function, &control);
+        builder.arg_buffer_mut(y);
+        builder.arg(&x_ptr);
+        builder.arg(&w_ptr);
+        builder.arg(&bias_ptr);
+        builder.arg(&params);
+        enqueue_scalar_forward(
+            &mut control,
+            request,
+            actual_operands,
+            symbol,
+            cfg,
+            &mut builder,
+        )
+        .map_err(|error| error.with_driver_context(format_args!("{symbol} forward")))?;
+        return Ok(());
+    }
+
+    if let ScalarDispatchPlan::NnExactChunk {
+        partial,
         chunks,
         piece_rows,
         pieces,
     } = scalar_plan
     {
-        // The batch-invariant chunk fold: per piece of rows, the slim
-        // partial writes one 64-input chunk per plane into the split
-        // scratch and the reducer sums the planes in order, then adds the
-        // bias, into that piece's rows of the output. A row folds the same
-        // way in any piece.
+        // The batch-invariant chunk fold: per piece of rows, the partial
+        // writes one 64-input chunk per plane into the split scratch and the
+        // reducer sums the planes in order, then adds the bias, into that
+        // piece's rows of the output. A row folds the same way in any piece
+        // and on any of the three partials.
         let partial_ptr = {
             use cudarc::driver::DevicePtr;
             let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
@@ -9645,6 +9839,7 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             "NN chunk-fold chunks",
         )?;
         let null_tail: u64 = 0;
+        let null_bias: u64 = 0;
         let zero_i32_local: i32 = 0;
         for piece in 0..pieces {
             let first_row = piece * piece_rows;
@@ -9655,37 +9850,89 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             )?;
             let a_ptr = x_ptr + u64::from(first_row) * lda_i as u64 * 4;
             let out_ptr = output_base + u64::from(first_row) * n_i as u64 * 4;
-            let partial_cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (
-                    checked_tile_grid(rows, 128, checked_dims.n_u32, 64)?,
-                    1,
-                    chunks,
+            let chunk_params = ExactChunkParams {
+                m: rows_i,
+                n: n_i,
+                k: k_i,
+                lda: lda_i,
+                ldb: n_i,
+                ldc: n_i,
+                chunk: k_chunk_i,
+                pad: 0,
+            };
+            let slab_params = ExactThinParams {
+                m: rows_i,
+                n: n_i,
+                k: k_i,
+                lda: lda_i,
+                ldb: n_i,
+                ldc: n_i,
+                slab: k_chunk_i,
+                close: EXACT_CHUNK_CLOSE,
+            };
+            let (function, symbol, grid, threads) = match partial {
+                ExactChunkPartial::Slim => (
+                    &kernels.gemm_bi_nn_splitk_slim_partial,
+                    "nn_splitk_slim_partial",
+                    (
+                        checked_tile_grid(rows, 128, checked_dims.n_u32, 64)?,
+                        1,
+                        chunks,
+                    ),
+                    128,
                 ),
-                block_dim: (128, 1, 1),
+                ExactChunkPartial::Small => (
+                    &kernels.gemm_bi_exact_chunk_partial_m32n64,
+                    "exact_chunk_partial_m32n64",
+                    (
+                        checked_tile_grid(rows, 32, checked_dims.n_u32, 64)?,
+                        1,
+                        chunks,
+                    ),
+                    128,
+                ),
+                ExactChunkPartial::Narrow16 => (
+                    &kernels.gemm_bi_exact_chunk_partial_m16n16,
+                    "exact_chunk_partial_m16n16_bk16_s4",
+                    (checked_dims.n_u32.div_ceil(16), rows.div_ceil(16), chunks),
+                    64,
+                ),
+            };
+            let partial_cfg = cudarc::driver::LaunchConfig {
+                grid_dim: grid,
+                block_dim: (threads, 1, 1),
                 shared_mem_bytes: 0,
             };
-            let mut pb =
-                scalar_launch_builder(stream, &kernels.gemm_bi_nn_splitk_slim_partial, &control);
+            let mut pb = scalar_launch_builder(stream, function, &control);
             pb.arg(&partial_ptr);
             pb.arg(&a_ptr);
             pb.arg(&w_ptr);
-            pb.arg(&rows_i);
-            pb.arg(&n_i);
-            pb.arg(&k_i);
-            pb.arg(&lda_i);
-            pb.arg(&n_i);
-            pb.arg(&k_chunk_i);
+            match partial {
+                ExactChunkPartial::Slim => {
+                    pb.arg(&rows_i);
+                    pb.arg(&n_i);
+                    pb.arg(&k_i);
+                    pb.arg(&lda_i);
+                    pb.arg(&n_i);
+                    pb.arg(&k_chunk_i);
+                }
+                ExactChunkPartial::Small => {
+                    pb.arg(&chunk_params);
+                }
+                ExactChunkPartial::Narrow16 => {
+                    pb.arg(&null_bias);
+                    pb.arg(&slab_params);
+                }
+            }
             enqueue_scalar_forward(
                 &mut control,
                 request,
                 actual_operands,
-                "nn_splitk_slim_partial",
+                symbol,
                 partial_cfg,
                 &mut pb,
             )
-            .map_err(|error| {
-                error.with_driver_context(format_args!("nn_splitk_slim_partial (chunk fold)"))
-            })?;
+            .map_err(|error| error.with_driver_context(format_args!("{symbol} (chunk fold)")))?;
             let reduce_cfg = cudarc::driver::LaunchConfig {
                 grid_dim: (
                     checked_u32_product(rows, checked_dims.n_u32, "NN chunk-fold outputs")?

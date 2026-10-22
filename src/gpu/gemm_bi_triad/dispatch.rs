@@ -7062,6 +7062,17 @@ pub(super) const SPLITK_SCRATCH_CAP: usize = 1 << 23;
 /// One device-scope completion counter per fused TF32 split-K output tile.
 pub(super) const TF32_SPLITK_COUNTER_CAP: usize = 1 << 16;
 
+/// The tile that writes the batch-invariant chunk fold's partial planes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ExactChunkPartial {
+    /// The 128 x 64 slim tile, for a large grid.
+    Slim,
+    /// A 32 x 64 tile, four times the CTAs of the slim one for a thin batch.
+    Small,
+    /// The pipelined 16 x 16 tile, for a single row.
+    Narrow16,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ScalarDispatchPlan {
     NnUltraThin,
@@ -7082,11 +7093,16 @@ pub(super) enum ScalarDispatchPlan {
     NnFinal {
         slim: bool,
     },
-    /// The batch-invariant exact policy's chunk fold: the slim partial
-    /// writes one 64-input chunk per plane and `splitk_reduce` sums the
-    /// planes in order and adds the bias, `piece_rows` rows at a time so
-    /// the planes fit the split scratch at any batch.
-    NnExactChunkSlim {
+    /// The batch-invariant exact forward's thin tile, one row per thread.
+    NnExactThin,
+    /// The batch-invariant exact forward's pipelined 16 x 16 tile.
+    NnExactNarrow16,
+    /// The batch-invariant exact policy's chunk fold: the partial writes one
+    /// 64-input chunk per plane and `splitk_reduce` sums the planes in order
+    /// and adds the bias, `piece_rows` rows at a time so the planes fit the
+    /// split scratch at any batch. Every partial writes the same planes.
+    NnExactChunk {
+        partial: ExactChunkPartial,
         chunks: u32,
         piece_rows: u32,
         pieces: u32,
@@ -7147,7 +7163,7 @@ impl ScalarDispatchPlan {
             Self::NnSplitKThinTail { .. }
                 | Self::NnSplitKThin
                 | Self::NnSplitKSlim { .. }
-                | Self::NnExactChunkSlim { .. }
+                | Self::NnExactChunk { .. }
                 | Self::NnM32N64SplitK32Qualified
                 | Self::TnNarrowSplitM { .. }
                 | Self::TnSplitM { .. }
@@ -7513,7 +7529,22 @@ pub(super) fn exact_batch_invariant_nn_plan(
                  of {SPLITK_SCRATCH_CAP} floats"
             ));
         }
-        return Ok(ScalarDispatchPlan::NnExactChunkSlim {
+        // The slim partial once its grid fills three quarters of a wave of
+        // the partition reference, the single-row tile for one row, the
+        // small tile between.
+        let slim_grid = m
+            .div_ceil(128)
+            .saturating_mul(n.div_ceil(64))
+            .saturating_mul(chunks);
+        let partial = if m > 64 && slim_grid.saturating_mul(4) >= waves.saturating_mul(3) {
+            ExactChunkPartial::Slim
+        } else if m == 1 {
+            ExactChunkPartial::Narrow16
+        } else {
+            ExactChunkPartial::Small
+        };
+        return Ok(ScalarDispatchPlan::NnExactChunk {
+            partial,
             chunks: u32::try_from(chunks)
                 .map_err(|_| format!("{chunks} chunks pass the grid's third axis"))?,
             piece_rows: u32::try_from(piece_rows)
@@ -7529,8 +7560,23 @@ pub(super) fn exact_batch_invariant_nn_plan(
     if m.div_ceil(64).saturating_mul(n.div_ceil(64)) >= waves / 2 {
         return Ok(ScalarDispatchPlan::NnM64N64Qualified);
     }
-    Ok(ScalarDispatchPlan::NnNarrowSmall)
+    // A thin batch: the chain's length sets the time. One row takes the thin
+    // tile with a row per thread, every other thin batch the pipelined 16 x
+    // 16 tile, whose grid spreads furthest with its next slabs in flight.
+    // Both put their 16-row tiles on the grid's row axis.
+    if m.div_ceil(16) > EXACT_SLAB_GRID_ROWS_MAX {
+        return Ok(ScalarDispatchPlan::NnNarrowSmall);
+    }
+    Ok(if m == 1 {
+        ScalarDispatchPlan::NnExactThin
+    } else {
+        ScalarDispatchPlan::NnExactNarrow16
+    })
 }
+
+/// The grid's row axis, where the thin and pipelined 16 x 16 tiles put their
+/// 16-row tiles.
+pub(super) const EXACT_SLAB_GRID_ROWS_MAX: usize = 65_535;
 
 pub(super) fn scalar_dispatch_plan(
     request: F32TriadRequest,
@@ -16667,8 +16713,8 @@ mod sm100_sm90a_auto_tests {
 #[cfg(test)]
 mod exact_batch_invariant_tests {
     use super::{
-        EXACT_CHUNK, SPLITK_SCRATCH_CAP, ScalarDispatchPlan, exact_batch_invariant_nn_plan,
-        exact_chunks, resolve_f32_triad_auto,
+        EXACT_CHUNK, ExactChunkPartial, SPLITK_SCRATCH_CAP, ScalarDispatchPlan,
+        exact_batch_invariant_nn_plan, exact_chunks, resolve_f32_triad_auto,
     };
     use crate::gpu::context::F32TriadPolicy;
     use crate::gpu::gemm_bi_triad::contract::{
@@ -16692,12 +16738,18 @@ mod exact_batch_invariant_tests {
                         let plan = exact_batch_invariant_nn_plan(nn(m, k, n), reference).unwrap();
                         let what = format!("{m}x{k}x{n} on {reference}: {plan:?}");
                         match plan {
-                            ScalarDispatchPlan::NnExactChunkSlim {
+                            ScalarDispatchPlan::NnExactChunk {
+                                partial,
                                 chunks,
                                 piece_rows,
                                 pieces,
                             } => {
                                 assert!(exact_chunks(k, n), "{what}");
+                                assert_eq!(
+                                    partial == ExactChunkPartial::Narrow16,
+                                    m == 1,
+                                    "{what}"
+                                );
                                 assert_eq!(chunks as usize, k.div_ceil(EXACT_CHUNK), "{what}");
                                 let (rows, pieces) = (piece_rows as usize, pieces as usize);
                                 assert!(rows >= 1 && rows <= m, "{what}");
@@ -16707,8 +16759,13 @@ mod exact_batch_invariant_tests {
                             ScalarDispatchPlan::NnFinal { slim: false } => {
                                 assert!(!exact_chunks(k, n) && m >= 128 && n >= 128, "{what}");
                             }
-                            ScalarDispatchPlan::NnM64N64Qualified
-                            | ScalarDispatchPlan::NnNarrowSmall => {
+                            ScalarDispatchPlan::NnExactThin => {
+                                assert!(!exact_chunks(k, n) && m == 1, "{what}");
+                            }
+                            ScalarDispatchPlan::NnExactNarrow16 => {
+                                assert!(!exact_chunks(k, n) && m > 1, "{what}");
+                            }
+                            ScalarDispatchPlan::NnM64N64Qualified => {
                                 assert!(!exact_chunks(k, n), "{what}");
                             }
                             other => panic!("{what}: {other:?} is not a batch-invariant tile"),
