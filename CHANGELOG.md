@@ -10,6 +10,20 @@
   same bits, whatever its number of multiprocessors.
 - A CUDA toolkit no table was measured on follows the tables of the
   nearest older measured toolkit.
+- No reduction is cut by a multiprocessor count any more, live or per
+  architecture: the exact split-K and split-M plans and the bf16/f16
+  stream-K weight gradient cut by the shape alone, so a product writes the
+  same bits on any card (the scalar family on every architecture, the
+  tensor cores within one generation). The exact cuts are the RTX 6000
+  Ada's; other architectures' exact products change bits. The stream-K
+  weight gradient now runs a deep reduction over few tiles (up to 3.4x
+  faster on thin gradients) and leaves wider grids to the tiled kernel.
+- Strict TF32 gradients split a deep weight gradient eight ways and a
+  few-row input gradient four ways, and on an Ada board run the multistage
+  input-gradient tiles, the multistage split members and the pre-rounded
+  weight-gradient tiles.
+- The Mamba-3 decode step's warp tier spells its arithmetic, so its
+  prefetching and plain builds round alike on every card.
 - cuBLAS is behind the new `cublas` feature. Without it the crate asks
   cudarc for the driver and NVRTC only, so a program that links its CUDA
   libraries at build time links no cuBLAS on this crate's account, and
@@ -33,6 +47,8 @@
 - GEMMs on a caller's CUDA context and stream:
   `GpuDevice::from_context`, `GpuCtx::new_on_stream`, and raw-pointer
   forward, input-gradient and weight-gradient entries.
+- `ExternalAllocation`: a caller registers its own device allocations, and
+  launches over them check their operands once instead of on every launch.
 
 ## 0.8.1 (2026-10-20)
 

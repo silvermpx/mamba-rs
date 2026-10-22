@@ -45,13 +45,23 @@ its GEMMs from this triad).
    - Wave fill, residency and persistent grid sizes are computed from the
      live SM count.
 
-5. **Bits are identical on every card of an architecture.**
+5. **Bits never depend on how many SMs a card has.**
    - Choices that adapt to the board are made only among routes that give the
      same bits: tile shape, stages, persistent grid, rasterisation and
-     swizzle, all over a fixed per-output k-order.
+     swizzle, all over a fixed per-output k-order. The live SM count decides
+     only these, and how many pieces of a cut reduction run at once.
    - Choices that change the reduction order (split-K partitions, split-M,
-     stream-K) are decided by the shape and the architecture only, never by
-     the SM count or any other property of one card.
+     stream-K workers) are decided by the shape alone: a constant counts the
+     shape's own tiles, CTAs or slabs, never an SM count, live or per
+     architecture. The scalar FMA family therefore writes the same bits on
+     every card of every architecture.
+   - Tensor-core products are identical within one tensor-core generation:
+     A100 sums four products into a 29-bit accumulator, H100 and B200 eight
+     into 31 bits (Khattak and Mikaitis, arXiv 2512.07004), so bits differ
+     between generations by the hardware, never by the SM count.
+   - The constants come from measurements on the card at hand. A count that
+     no card's waves divide costs a stream-K launch part of its last wave on
+     some card; that is the price of bits that do not move with the card.
 
 6. **A rule ships only after it is checked on a second card of its
    architecture**, or is derived from properties that card exposes. Faster on
@@ -168,18 +178,31 @@ No selection compares an SM count to a card's number any more (the
   yet been timed against the RTX 5090's own former winners (rule 6); three
   shapes the 5090 had cells for are now served below the table.
 
+Still keyed to one card's count, until an SM120 card re-measures them:
+- the SM120 stream-K kernels deal to 340 workers (twice the RTX 5090's
+  SMs), and the SM120 neighbour rule bounds its tile swap and stream-K
+  decline at 170 tiles;
+- four SM120 exact-f32 overlays cut or fold a reduction their own way, so
+  exact bits on SM120 can differ from the other architectures.
+
 Repaired:
 - the TF32 evidence cohorts are keyed by architecture (one cohort per
   architecture, any SM count, toolkit or driver);
 - the SM120 exact-f32 measured cells and generic boundary serve every SM120
   card;
-- the exact-family split decisions read the architecture's partition
-  reference (`architecture_partition_reference`), never the live count;
+- the exact-family split decisions read tile and CTA counts of the shape
+  alone (144 and 432 tiles, a 284-CTA split-M target, the RTX 6000 Ada's
+  measured cuts); the per-architecture partition reference is gone;
 - the Ada half cohort, the SM120 scalar resource check and every inference
   selector serve every card of their architecture;
-- stream-K deals its reduction over a fixed worker count (340 on SM120, four
-  times the partition reference for the portable tc64 route); the resident
-  grid walks the workers in order, so the partition points and the bits no
-  longer depend on how many SMs the card has;
+- the portable tc64 stream-K takes a reduction of 2048 rows or more over at
+  most 48 tiles, or 8192 rows or more over at most 192, and deals one worker
+  per eight 64-row slabs, at most 512 workers; the resident grid walks the
+  workers in order, so the partition points and the bits do not depend on
+  how many SMs the card has;
+- a proof-path half cell that its wave guard declines falls back to the
+  tiled reference it proves against, never to an automatic pick of another
+  reduction order;
+- the dispatch policy digest no longer carries the SM count;
 - the qualification tools run on any card of their architecture and record
   the measuring card's SM count as provenance only.
