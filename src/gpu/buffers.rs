@@ -163,6 +163,88 @@ impl Drop for ManagedAllocationRegistration {
     }
 }
 
+/// A device allocation the caller owns, registered with mamba-rs. While the
+/// registration lives, a launch whose operands all fall inside registered
+/// ranges asks the driver about them once and reuses the answer on every
+/// later launch, as it does for its own buffers; a program that hands
+/// mamba-rs its own pointers saves that query on every launch. Dropping the
+/// registration ends it: the next launch over the range asks the driver
+/// again.
+pub struct ExternalAllocation {
+    _registration: ManagedAllocationRegistration,
+}
+
+impl ExternalAllocation {
+    /// Registers `bytes` bytes at `base` on the stream's context. The range
+    /// must lie inside one device allocation of that context, which the
+    /// driver confirms here; ranges registered on one context must not
+    /// overlap.
+    ///
+    /// # Safety
+    /// The allocation must stay alive, and the range inside it, until the
+    /// returned value drops: launches over the range no longer ask the
+    /// driver whether the memory is still allocated.
+    pub unsafe fn register(
+        stream: &Arc<cudarc::driver::CudaStream>,
+        base: cudarc::driver::sys::CUdeviceptr,
+        bytes: usize,
+    ) -> Result<Self, String> {
+        use cudarc::driver::sys;
+        let bytes = u64::try_from(bytes).map_err(|_| "external allocation size exceeds u64")?;
+        if base == 0 || bytes == 0 {
+            return Err("an external allocation must be a non-empty device range".into());
+        }
+        let context_handle = stream.context().cu_ctx() as usize;
+        let mut context: sys::CUcontext = std::ptr::null_mut();
+        let mut device_ordinal = -1_i32;
+        let mut start = 0_u64;
+        let mut size = 0_usize;
+        let mut attributes = [
+            sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_CONTEXT,
+            sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
+            sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_RANGE_START_ADDR,
+            sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_RANGE_SIZE,
+        ];
+        let mut outputs = [
+            std::ptr::from_mut(&mut context).cast(),
+            std::ptr::from_mut(&mut device_ordinal).cast(),
+            std::ptr::from_mut(&mut start).cast(),
+            std::ptr::from_mut(&mut size).cast(),
+        ];
+        let result = unsafe {
+            sys::cuPointerGetAttributes(
+                attributes.len() as u32,
+                attributes.as_mut_ptr(),
+                outputs.as_mut_ptr(),
+                base,
+            )
+        };
+        if result != sys::CUresult::CUDA_SUCCESS {
+            return Err(format!(
+                "query the external allocation at {base:#x}: {result:?}"
+            ));
+        }
+        let end = base
+            .checked_add(bytes)
+            .ok_or_else(|| "external allocation range overflows u64".to_string())?;
+        let allocation_end = start
+            .checked_add(size as u64)
+            .ok_or_else(|| "driver allocation range overflows u64".to_string())?;
+        // A stream-ordered allocation answers no context, only its device.
+        let foreign_context = !context.is_null() && context as usize != context_handle;
+        let foreign_device =
+            usize::try_from(device_ordinal).ok() != Some(stream.context().ordinal());
+        if foreign_context || foreign_device || base < start || end > allocation_end {
+            return Err(format!(
+                "{bytes} bytes at {base:#x} are not inside one allocation of the stream's context"
+            ));
+        }
+        Ok(Self {
+            _registration: register_managed_allocation_range(context_handle, base, bytes)?,
+        })
+    }
+}
+
 /// GPU memory buffer — the fundamental GPU data type.
 ///
 /// Wraps `CudaSlice<f32>` with convenience methods for upload/download.

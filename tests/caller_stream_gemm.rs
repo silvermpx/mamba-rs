@@ -12,7 +12,7 @@ use mamba_rs::gpu::GemmMode;
 use mamba_rs::gpu::blas::{
     gpu_gemm_f32_backward_dw_ptrs, gpu_gemm_f32_backward_dx_ptrs, gpu_gemm_f32_forward_ptrs,
 };
-use mamba_rs::gpu::buffers::GpuBuffer;
+use mamba_rs::gpu::buffers::{ExternalAllocation, GpuBuffer};
 use mamba_rs::gpu::context::{F32TriadPolicy, GpuCtx};
 use mamba_rs::gpu::device::GpuDevice;
 
@@ -52,12 +52,14 @@ impl Operands {
     }
 }
 
-/// The three products on buffers the caller allocated with cudarc.
+/// The three products on buffers the caller allocated with cudarc, with
+/// the buffers registered as external allocations when `register` is set.
 fn caller_products(
     ctx: &GpuCtx,
     stream: &Arc<CudaStream>,
     dims: (usize, usize, usize),
     ops: &Operands,
+    register: bool,
 ) -> [Vec<f32>; 3] {
     let (b, k, n) = dims;
     let x: CudaSlice<f32> = stream.clone_htod(&ops.x).unwrap();
@@ -75,6 +77,21 @@ fn caller_products(
         let (dwp, _g5) = dw.device_ptr(stream);
         let (yp, _g6) = y.device_ptr(stream);
         let (dxp, _g7) = dx.device_ptr(stream);
+        let _registrations = register.then(|| {
+            [
+                (xp, ops.x.len()),
+                (wp, ops.w.len()),
+                (bp, ops.bias.len()),
+                (dyp, ops.dy.len()),
+                (dwp, ops.dw0.len()),
+                (yp, b * n),
+                (dxp, b * k),
+            ]
+            .map(|(pointer, floats)| unsafe {
+                ExternalAllocation::register(stream, pointer, floats * 4)
+                    .expect("register a caller allocation")
+            })
+        });
         unsafe {
             gpu_gemm_f32_forward_ptrs(ctx, yp, xp, wp, Some(bp), dims).unwrap();
             gpu_gemm_f32_backward_dx_ptrs(ctx, dxp, dyp, wp, dims).unwrap();
@@ -156,14 +173,42 @@ fn caller_stream_gemms_give_the_owned_context_bits() {
         .enumerate()
         {
             let ops = Operands::new(dims, 0x5eed_0000 + index as u64 * 16);
-            let got = caller_products(&caller, &stream, dims, &ops);
             let want = owned_products(&owned, dims, &ops);
-            for (label, (g, w)) in ["forward", "input gradient", "weight gradient"]
-                .iter()
-                .zip(got.iter().zip(want.iter()))
-            {
-                assert_eq!(bits(g), bits(w), "{policy:?} {dims:?} {label}");
+            for register in [false, true] {
+                let got = caller_products(&caller, &stream, dims, &ops, register);
+                for (label, (g, w)) in ["forward", "input gradient", "weight gradient"]
+                    .iter()
+                    .zip(got.iter().zip(want.iter()))
+                {
+                    assert_eq!(
+                        bits(g),
+                        bits(w),
+                        "{policy:?} {dims:?} {label} registered={register}"
+                    );
+                }
             }
         }
     }
+}
+
+#[test]
+fn an_external_allocation_must_lie_inside_one_allocation_and_not_overlap() {
+    let Ok(raw) = CudaContext::new(0) else {
+        eprintln!("skip: no CUDA device");
+        return;
+    };
+    let stream = raw.new_stream().unwrap();
+    let buffer: CudaSlice<f32> = stream.alloc_zeros(1024).unwrap();
+    let (base, _guard) = buffer.device_ptr(&stream);
+    let whole = unsafe { ExternalAllocation::register(&stream, base, 4096) }.unwrap();
+    assert!(
+        unsafe { ExternalAllocation::register(&stream, base + 1024, 1024) }.is_err(),
+        "an overlapping range is refused"
+    );
+    drop(whole);
+    assert!(
+        unsafe { ExternalAllocation::register(&stream, base, 4100) }.is_err(),
+        "a range past the allocation is refused"
+    );
+    assert!(unsafe { ExternalAllocation::register(&stream, base + 1024, 1024) }.is_ok());
 }
