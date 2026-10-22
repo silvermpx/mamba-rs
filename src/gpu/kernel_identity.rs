@@ -640,6 +640,10 @@ pub enum ModuleKind {
     /// composes its own copies), apart from the Inference GEMMs for the same
     /// reason.
     Shared = 17,
+    /// The batch-invariant TF32 forward's wide and multistage NN tiles,
+    /// rounding with cvt.rna, on every SM80-tier target. In a module of
+    /// their own so adding them moves no other module's identity.
+    TriadTf32Rna = 18,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -668,11 +672,13 @@ pub struct ArtifactSetIdentity {
     pub sm89_exact_f32_d128: Option<ArtifactIdentity>,
     pub sm89_tf32_joint: Option<ArtifactIdentity>,
     pub sm89_cells: Option<ArtifactIdentity>,
+    /// The batch-invariant TF32 forward's wide and multistage tiles.
+    pub tf32_rna: Option<ArtifactIdentity>,
 }
 
 pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetIdentity, String> {
-    if !(3..=10).contains(&artifacts.len()) {
-        return Err("artifact set must contain inference, scalar triad, SM80 triad, one optional SM89 finalist module, one optional architecture-specialized module, one optional SM89 half module, one optional SM89 exact-F32 module, one optional SM89 exact-F32 d128 module, one optional SM89 TF32 joint module, and one optional SM89 inference cells module".into());
+    if !(3..=11).contains(&artifacts.len()) {
+        return Err("artifact set must contain inference, scalar triad, SM80 triad, one optional SM89 finalist module, one optional architecture-specialized module, one optional SM89 half module, one optional SM89 exact-F32 module, one optional SM89 exact-F32 d128 module, one optional SM89 TF32 joint module, one optional SM89 inference cells module, and one optional TF32 RNA module".into());
     }
     if artifacts[0].module_kind != ModuleKind::Inference
         || artifacts[1].module_kind != ModuleKind::TriadScalar
@@ -689,6 +695,7 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
     let mut sm89_exact_f32_d128 = None;
     let mut sm89_tf32_joint = None;
     let mut sm89_cells = None;
+    let mut tf32_rna = None;
     let mut cursor = 3;
     if let Some(artifact) = artifacts.get(cursor).copied()
         && artifact.module_kind == ModuleKind::TriadSm89Finalist
@@ -735,8 +742,14 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
         sm89_cells = Some(artifact);
         cursor += 1;
     }
+    if let Some(artifact) = artifacts.get(cursor).copied()
+        && artifact.module_kind == ModuleKind::TriadTf32Rna
+    {
+        tf32_rna = Some(artifact);
+        cursor += 1;
+    }
     if cursor != artifacts.len() {
-        return Err("optional artifacts must be ordered as SM89 finalist, architecture-specialized, SM89 half, SM89 exact-F32, SM89 exact-F32 d128, SM89 TF32 joint, then SM89 inference cells".into());
+        return Err("optional artifacts must be ordered as SM89 finalist, architecture-specialized, SM89 half, SM89 exact-F32, SM89 exact-F32 d128, SM89 TF32 joint, SM89 inference cells, then TF32 RNA".into());
     }
     let module_count = u8::try_from(artifacts.len())
         .map_err(|_| "artifact set contains more than 255 modules".to_string())?;
@@ -769,6 +782,7 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
         sm89_exact_f32_d128,
         sm89_tf32_joint,
         sm89_cells,
+        tf32_rna,
     })
 }
 
@@ -3059,6 +3073,8 @@ pub enum PhysicalGemmBackend {
     Sm89Mma16HalfS4 = 41,
     Sm89MmaTf32NtRna = 42,
     Sm89MmaTf32TnDirectRna = 43,
+    /// The batch-invariant TF32 forward's wide and multistage NN tiles.
+    MmaTf32RnaWide = 44,
 }
 
 /// Scoped route epoch for the Ada scalar NN reuse of the already-qualified

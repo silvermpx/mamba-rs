@@ -2730,6 +2730,18 @@ fn rna_batch_invariant_selection(
         );
     }
     let keeps = |route: Tf32PhysicalRoute| rna_batch_invariant_route(request.op, route);
+    // The architecture's own forward table, where it has one: every tile it
+    // names walks the portable tiles' chain, so it picks by speed alone.
+    if let Some(route) = rna_forward_table_route(request, operands, availability) {
+        let bound = resolve_tf32_forced(request, availability, route).or_else(|_| {
+            resolve_tf32_forced(
+                request,
+                availability,
+                rna_wide_portable_twin(request, route),
+            )
+        })?;
+        return Ok(F32TriadSelection::Tf32(bound));
+    }
     let measured = operands
         .and_then(|operands| {
             measured_tf32_route_with_operands(
@@ -2769,14 +2781,109 @@ fn rna_batch_invariant_selection(
         })
 }
 
+/// The batch-invariant TF32 forward's table on an Ada board (CC 8.9), the
+/// architecture it was measured on: the narrow tile below 256 rows, the
+/// multistage tiles for a few thousand rows of a layer up to 512 wide, the
+/// wide tiles as the rows and columns grow, the 64 x 64 tile where the wide
+/// tiles cannot stage the operands. `None` on any other architecture, whose
+/// forward keeps the portable tiles until its own table is measured.
+fn rna_forward_table_route(
+    request: F32TriadRequest,
+    operands: Option<F32TriadOperands>,
+    availability: F32TriadAvailability,
+) -> Option<Tf32PhysicalRoute> {
+    use super::contract::{
+        Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile, Tf32RnaWideTile,
+    };
+    if request.op != ResolvedGemmOp::Nn
+        || availability.portable?.device.compute_capability != (8, 9)
+    {
+        return None;
+    }
+    let (m, n) = (request.shape.m, request.shape.n);
+    let portable = |tile, stages| Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute { tile, stages });
+    let wide = |tile| Tf32PhysicalRoute::MmaTf32RnaWide(tile);
+    // The wide and multistage tiles copy whole 16-byte chunks.
+    let staged = availability.rna.is_some()
+        && request.shape.lda.is_multiple_of(4)
+        && request.shape.ldb.is_multiple_of(4)
+        && operands.is_some_and(|operands| {
+            [operands.a, operands.b]
+                .into_iter()
+                .all(|pointer| pointer != 0 && pointer.is_multiple_of(16))
+        });
+    const NARROW_ROWS: usize = 256;
+    const NARROW_WIDE_ROWS: usize = 2_048;
+    const TALL_ROWS: usize = 8_192;
+    const TALLER_ROWS: usize = 16_384;
+    Some(if m < NARROW_ROWS {
+        portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
+    } else if staged && (512..TALL_ROWS).contains(&m) && (128..=512).contains(&n) {
+        if n > 128 && n <= 384 {
+            wide(Tf32RnaWideTile::MsM128N64S3)
+        } else {
+            wide(Tf32RnaWideTile::MsM64N128Bk16S6)
+        }
+    } else if n < 128 {
+        if staged && m >= NARROW_WIDE_ROWS {
+            wide(Tf32RnaWideTile::M96N96S3)
+        } else {
+            portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
+        }
+    } else if staged {
+        if n >= 1_536 && m >= NARROW_WIDE_ROWS {
+            wide(Tf32RnaWideTile::M128N128S3)
+        } else if n >= 1_536 {
+            wide(Tf32RnaWideTile::M128N96S3)
+        } else if (n >= 512 && m >= 4_096)
+            || (n <= 128 && m >= TALLER_ROWS)
+            || (n > 128 && m >= TALL_ROWS)
+        {
+            wide(Tf32RnaWideTile::M128N128S3)
+        } else if n <= 128 && m >= TALL_ROWS {
+            wide(Tf32RnaWideTile::M128N96S3)
+        } else {
+            wide(Tf32RnaWideTile::M96N96S3)
+        }
+    } else if n <= 128 {
+        portable(Tf32PortableTile::M64N64, Tf32PortableStages::S3)
+    } else {
+        portable(Tf32PortableTile::M64N64, Tf32PortableStages::S2)
+    })
+}
+
+/// The portable tile that serves a shape whose wide tile this board does
+/// not bind: the one the table gives where the wide tiles cannot stage.
+fn rna_wide_portable_twin(request: F32TriadRequest, route: Tf32PhysicalRoute) -> Tf32PhysicalRoute {
+    use super::contract::{Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile};
+    match route {
+        Tf32PhysicalRoute::MmaTf32RnaWide(_) if request.shape.n < 128 => {
+            Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
+                tile: Tf32PortableTile::M16N32,
+                stages: Tf32PortableStages::S4,
+            })
+        }
+        Tf32PhysicalRoute::MmaTf32RnaWide(_) => Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
+            tile: Tf32PortableTile::M64N64,
+            stages: if request.shape.n <= 128 {
+                Tf32PortableStages::S3
+            } else {
+                Tf32PortableStages::S2
+            },
+        }),
+        other => other,
+    }
+}
+
 /// Whether a TF32 route keeps the strict policy's contract. Both operands
 /// round with cvt.rna: in registers, after a tensor-map load, or in an
 /// explicit pre-rounding pass; the half-ulp shortcut and the tensor map's
 /// own tfloat32 conversion round a subnormal differently and are refused.
-/// A forward (NN) also takes only the portable tier's plain tiles: every one
-/// of them seeds an output with its bias and walks the reduction in 32-wide
-/// steps of eight from zero to the same zero-filled end, so the tile a row
-/// count selects never moves an output's bits.
+/// A forward (NN) also takes only the portable tier's plain tiles and the
+/// strict policy's own wide and multistage tiles: every one of them seeds an
+/// output with its bias and walks the reduction in 32-wide steps of eight
+/// from zero to the same zero-filled end, so the tile a row count selects
+/// never moves an output's bits.
 fn rna_batch_invariant_route(op: ResolvedGemmOp, route: Tf32PhysicalRoute) -> bool {
     use crate::gpu::kernel_identity::ResolvedOperandConversion as Conversion;
     let rounds_rna = match route {
@@ -2794,7 +2901,12 @@ fn rna_batch_invariant_route(op: ResolvedGemmOp, route: Tf32PhysicalRoute) -> bo
             )
         }),
     };
-    rounds_rna && (op != ResolvedGemmOp::Nn || matches!(route, Tf32PhysicalRoute::MmaTf32Rna(_)))
+    rounds_rna
+        && (op != ResolvedGemmOp::Nn
+            || matches!(
+                route,
+                Tf32PhysicalRoute::MmaTf32Rna(_) | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+            ))
 }
 
 /// The portable plain tile of the strict policy for `request`, bound on this
@@ -2984,6 +3096,7 @@ pub fn resolve_tf32_forced(
         | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => availability.joint,
+        Tf32PhysicalRoute::MmaTf32RnaWide(_) => availability.rna,
         Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_)
         | Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_)
         | Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
@@ -3128,6 +3241,7 @@ fn ensure_tf32_binding_contract(
             | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
             | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
             | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
+            | Tf32PhysicalRoute::MmaTf32RnaWide(_)
     ) && !binding.device_caps.tensor_map_access
     {
         return Err(format!(
@@ -3181,7 +3295,8 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
         | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
         | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
-        | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => {
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
+        | Tf32PhysicalRoute::MmaTf32RnaWide(_) => {
             cc.0 >= 8 && super::modules::sm80_ptx_target(target) == Some(device_target)
         }
         Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_) => {
@@ -12427,6 +12542,7 @@ mod tf32_tests {
             specialized: None,
             finalist: None,
             joint: None,
+            rna: None,
             multiprocessors: 142,
         }
     }
@@ -12468,6 +12584,7 @@ mod tf32_tests {
             specialized: None,
             finalist: None,
             joint: Some(qualified_module_for_auto_identity(joint)),
+            rna: None,
             multiprocessors: 142,
         }
     }
@@ -12806,6 +12923,7 @@ mod tf32_tests {
             specialized: Some(specialized),
             finalist: None,
             joint: None,
+            rna: None,
             multiprocessors: 170,
         }
     }
@@ -14187,6 +14305,7 @@ mod tf32_tests {
                 specialized: None,
                 finalist: None,
                 joint: None,
+                rna: None,
                 multiprocessors: 142,
             },
             F32TriadAvailability {
@@ -14201,6 +14320,7 @@ mod tf32_tests {
                 specialized: None,
                 finalist: None,
                 joint: None,
+                rna: None,
                 multiprocessors: 142,
             },
             F32TriadAvailability {
@@ -14215,6 +14335,7 @@ mod tf32_tests {
                 specialized: None,
                 finalist: None,
                 joint: None,
+                rna: None,
                 multiprocessors: 142,
             },
             F32TriadAvailability {
@@ -14229,6 +14350,7 @@ mod tf32_tests {
                 specialized: None,
                 finalist: None,
                 joint: None,
+                rna: None,
                 multiprocessors: 142,
             },
         ];
@@ -15599,6 +15721,7 @@ mod tf32_tests {
                     specialized: None,
                     finalist: None,
                     joint: None,
+                    rna: None,
                     multiprocessors: 142,
                 },
             ] {
@@ -15644,6 +15767,7 @@ mod tf32_tests {
                     specialized: None,
                     finalist: None,
                     joint: None,
+                    rna: None,
                     multiprocessors: 142,
                 },
             ),
@@ -15663,6 +15787,7 @@ mod tf32_tests {
                     )),
                     finalist: None,
                     joint: None,
+                    rna: None,
                     multiprocessors: 142,
                 },
             ),
@@ -15684,6 +15809,7 @@ mod tf32_tests {
                     )),
                     finalist: None,
                     joint: None,
+                    rna: None,
                     multiprocessors: 142,
                 },
             ),
@@ -15704,6 +15830,7 @@ mod tf32_tests {
                     )),
                     finalist: None,
                     joint: None,
+                    rna: None,
                     multiprocessors: 142,
                 },
             ),
@@ -16096,6 +16223,7 @@ mod tf32_tests {
             specialized: None,
             finalist: None,
             joint: None,
+            rna: None,
             multiprocessors: 142,
         };
 
@@ -16123,6 +16251,7 @@ mod tf32_tests {
             specialized: None,
             finalist: None,
             joint: None,
+            rna: None,
             multiprocessors: 142,
         };
 
@@ -16173,6 +16302,7 @@ mod tf32_tests {
                 )),
                 finalist: None,
                 joint: None,
+                rna: None,
                 multiprocessors: 142,
             };
             assert_eq!(
@@ -16193,6 +16323,7 @@ mod tf32_tests {
             )),
             finalist: None,
             joint: None,
+            rna: None,
             multiprocessors: 142,
         };
         assert!(resolve_tf32_forced(request(ResolvedGemmOp::Nn), generic, route).is_err());
@@ -16267,6 +16398,7 @@ mod tf32_tests {
                         specialized: Some(invalid),
                         finalist: None,
                         joint: None,
+                        rna: None,
                         multiprocessors: 142,
                     },
                     route,
@@ -16295,6 +16427,7 @@ mod tf32_tests {
                     specialized: None,
                     finalist: None,
                     joint: None,
+                    rna: None,
                     multiprocessors: 142,
                 },
                 illegal,
@@ -16348,6 +16481,7 @@ mod tf32_tests {
             ModuleKind::TriadSm120,
             ModuleKind::TriadSm89Finalist,
             ModuleKind::TriadSm89Tf32Joint,
+            ModuleKind::TriadTf32Rna,
         ] {
             for spec in crate::gpu::gemm_bi_triad::contract::tf32_route_specs_all(module_kind) {
                 let rna = matches!(
@@ -16356,7 +16490,10 @@ mod tf32_tests {
                         | Conversion::TensorMapUint32ThenCvtRnaTf32F32
                         | Conversion::PreRnaAThenRegisterCvtRnaBV1
                 );
-                let plain = matches!(spec.route, Tf32PhysicalRoute::MmaTf32Rna(_));
+                let plain = matches!(
+                    spec.route,
+                    Tf32PhysicalRoute::MmaTf32Rna(_) | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+                );
                 assert_eq!(
                     rna_batch_invariant_route(spec.op, spec.route),
                     rna && (spec.op != ResolvedGemmOp::Nn || plain),
@@ -16416,14 +16553,125 @@ mod tf32_tests {
                             "{availability:?} {request:?}: {selection:?}",
                         );
                     }
+                    // Without operands no wide tile can be staged: the Ada
+                    // table names a portable tile, every other board the ladder.
                     let selection = resolve_f32_triad_auto(STRICT, request, availability).unwrap();
-                    assert_eq!(
-                        selection,
-                        F32TriadSelection::Tf32(rna_portable_ladder_route(request)),
-                    );
+                    let ada = availability
+                        .portable
+                        .is_some_and(|module| module.device.compute_capability == (8, 9));
+                    if ada {
+                        assert!(
+                            matches!(
+                                selection,
+                                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32Rna(_))
+                            ),
+                            "{request:?}: {selection:?}"
+                        );
+                    } else {
+                        assert_eq!(
+                            selection,
+                            F32TriadSelection::Tf32(rna_portable_ladder_route(request)),
+                        );
+                    }
                 }
             }
         }
+    }
+
+    #[test]
+    fn rna_strict_ada_forward_follows_the_ada_table() {
+        use crate::gpu::gemm_bi_triad::contract::Tf32RnaWideTile as Wide;
+        let mut availability = sm89_availability();
+        availability.rna = Some(qualified_module(
+            ModuleKind::TriadTf32Rna,
+            "sm_89",
+            "sm_89",
+            (8, 9),
+            false,
+            101_376,
+        ));
+        let plain =
+            |tile, stages| Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute { tile, stages });
+        let wide = Tf32PhysicalRoute::MmaTf32RnaWide;
+        let cases = [
+            (
+                (128, 256, 2112),
+                plain(Tf32PortableTile::M16N32, Tf32PortableStages::S4),
+            ),
+            ((4096, 256, 2112), wide(Wide::M128N128S3)),
+            ((1024, 384, 1536), wide(Wide::M128N96S3)),
+            ((1024, 256, 256), wide(Wide::MsM128N64S3)),
+            ((1024, 256, 128), wide(Wide::MsM64N128Bk16S6)),
+            ((1024, 256, 1024), wide(Wide::M96N96S3)),
+            ((4096, 128, 64), wide(Wide::M96N96S3)),
+            (
+                (1024, 128, 64),
+                plain(Tf32PortableTile::M16N32, Tf32PortableStages::S4),
+            ),
+            ((8192, 256, 128), wide(Wide::M128N96S3)),
+            ((16384, 256, 128), wide(Wide::M128N128S3)),
+            ((8192, 512, 256), wide(Wide::M128N128S3)),
+        ];
+        for ((m, k, n), expected) in cases {
+            let request = normalized_request(ResolvedGemmOp::Nn, m, n, k);
+            let aligned = sm89_joint_operands(ResolvedGemmOp::Nn);
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(STRICT, request, aligned, availability)
+                    .unwrap(),
+                F32TriadSelection::Tf32(expected),
+                "{m}x{k}x{n}"
+            );
+            // A misaligned operand stages no wide tile: its portable twin serves.
+            let misaligned = F32TriadOperands {
+                a: aligned.a + 4,
+                ..aligned
+            };
+            let selection =
+                resolve_f32_triad_auto_with_operands(STRICT, request, misaligned, availability)
+                    .unwrap();
+            assert!(
+                matches!(
+                    selection,
+                    F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32Rna(_))
+                ),
+                "{m}x{k}x{n}: {selection:?}"
+            );
+            // Without the module the same holds.
+            let without = F32TriadAvailability {
+                rna: None,
+                ..availability
+            };
+            let selection =
+                resolve_f32_triad_auto_with_operands(STRICT, request, aligned, without).unwrap();
+            assert!(
+                matches!(
+                    selection,
+                    F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32Rna(_))
+                ),
+                "{m}x{k}x{n}: {selection:?}"
+            );
+        }
+        // Another architecture keeps its portable tiles.
+        let mut sm120 = sm120_availability_for(SM120_TF32_ARCHITECTURE);
+        sm120.portable = Some(qualified_module_for_auto_identity(
+            SM120_TF32_PORTABLE_ARCHITECTURE,
+        ));
+        sm120.rna = availability.rna;
+        let request = normalized_request(ResolvedGemmOp::Nn, 4096, 2112, 256);
+        let selection = resolve_f32_triad_auto_with_operands(
+            STRICT,
+            request,
+            sm89_joint_operands(ResolvedGemmOp::Nn),
+            sm120,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                selection,
+                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32Rna(_))
+            ),
+            "{selection:?}"
+        );
     }
 
     #[test]
@@ -16783,6 +17031,7 @@ mod exact_batch_invariant_tests {
             specialized: None,
             finalist: None,
             joint: None,
+            rna: None,
             multiprocessors: 170,
         };
         for (m, k, n) in [

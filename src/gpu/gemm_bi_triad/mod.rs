@@ -51,6 +51,7 @@ mod sm89_half_small_source;
 mod sm89_half_source;
 mod sm89_half_tn_source;
 mod sm89_tf32_joint_source;
+mod tf32_rna_source;
 #[cfg(test)]
 mod training_pipeline_tests;
 
@@ -76,14 +77,14 @@ pub use contract::{
     Sm120KernelResources, Sm120KernelSpec, Sm120LaunchOperands, Sm120MapRequest,
     Sm120NumericContract, Sm120Op, Sm120PhysicalRoute, Sm120PreparedLaunch,
     Sm120PreparedTensorMaps, Sm120RouteIdentity, Sm120Schedule, Sm120Shape, Sm120Stages,
-    Sm120TargetCandidate, Sm120TensorMap, Sm120Tile, TF32_SCHEDULE_REVISION,
-    TF32_SPLITK_EXTENSION_SPECS, TF32_TENSOR_MAP_REVISION, TcFwdOperands, Tf32KernelSpec,
-    Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile,
-    Tf32QualifiedModule, Tf32Sm90aRoute, Tf32Sm100Route, Tf32Sm120Route, Tf32Sm120Stages,
-    Tf32Sm120Tile, portable_extensions_composed_for_cc, sm120_kernel_specs,
-    tf32_extension_route_specs, tf32_kernel_spec, tf32_module_symbols, tf32_route_specs,
-    tf32_route_specs_all, validate_sm90a_map_request, validate_sm100_map_request,
-    validate_sm120_map_request,
+    Sm120TargetCandidate, Sm120TensorMap, Sm120Tile, TF32_RNA_ROUTE_SPECS,
+    TF32_RNA_TUNING_REVISION, TF32_SCHEDULE_REVISION, TF32_SPLITK_EXTENSION_SPECS,
+    TF32_TENSOR_MAP_REVISION, TcFwdOperands, Tf32KernelSpec, Tf32PhysicalRoute, Tf32PortableRoute,
+    Tf32PortableStages, Tf32PortableTile, Tf32QualifiedModule, Tf32RnaWideTile, Tf32Sm90aRoute,
+    Tf32Sm100Route, Tf32Sm120Route, Tf32Sm120Stages, Tf32Sm120Tile,
+    portable_extensions_composed_for_cc, sm120_kernel_specs, tf32_extension_route_specs,
+    tf32_kernel_spec, tf32_module_symbols, tf32_route_specs, tf32_route_specs_all,
+    validate_sm90a_map_request, validate_sm100_map_request, validate_sm120_map_request,
 };
 #[cfg(test)]
 pub(crate) use contract::{ZERO_REDUCTION_DIGEST_DOMAIN, ZERO_REDUCTION_MAP_REVISION};

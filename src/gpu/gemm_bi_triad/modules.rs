@@ -538,6 +538,7 @@ pub(crate) struct CompiledModule {
         Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String>,
     sm89_tf32_joint_driver_abi:
         Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String>,
+    tf32_rna_driver_abi: Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String>,
     /// Separate from Triad TF32 qualification: the optional Ada Inference half
     /// extension has the same generic Driver layout representation only.
     inference_sm89_half_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
@@ -899,6 +900,8 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 request.arch,
                 &src,
             );
+            let tf32_rna_abi =
+                census_tf32_rna_driver_abi(request.ctx, request.module_kind, request.arch, &src);
             let inference_half_abi = census_inference_sm89_half_driver_abi(
                 request.ctx,
                 request.module_kind,
@@ -984,6 +987,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 sm89_exact_f32_abi,
                 sm89_exact_f32_d128_abi,
                 sm89_tf32_joint_abi,
+                tf32_rna_abi,
                 inference_half_abi,
                 inference_half_swizzle_abi,
                 inference_half_s3_abi,
@@ -1008,6 +1012,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         sm89_exact_f32_driver_abi,
         sm89_exact_f32_d128_driver_abi,
         sm89_tf32_joint_driver_abi,
+        tf32_rna_driver_abi,
         inference_sm89_half_driver_abi,
         inference_sm89_half_swizzle_driver_abi,
         inference_sm89_half_s3_driver_abi,
@@ -1060,6 +1065,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 &ptx_source,
             );
             let sm89_tf32_joint_abi = census_sm89_tf32_joint_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &ptx_source,
+            );
+            let tf32_rna_abi = census_tf32_rna_driver_abi(
                 request.ctx,
                 request.module_kind,
                 request.arch,
@@ -1199,6 +1210,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 sm89_exact_f32_abi,
                 sm89_exact_f32_d128_abi,
                 sm89_tf32_joint_abi,
+                tf32_rna_abi,
                 inference_half_abi,
                 inference_half_swizzle_abi,
                 inference_half_s3_abi,
@@ -1248,6 +1260,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         sm89_exact_f32_driver_abi,
         sm89_exact_f32_d128_driver_abi,
         sm89_tf32_joint_driver_abi,
+        tf32_rna_driver_abi,
         inference_sm89_half_driver_abi,
         inference_sm89_half_swizzle_driver_abi,
         inference_sm89_half_s3_driver_abi,
@@ -1848,6 +1861,11 @@ fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
             "TriadSm89ExactF32D128 requires an admitted SM80+ portable target, got {arch}"
         ));
     }
+    if kind == ModuleKind::TriadTf32Rna && sm80_ptx_target(arch).is_none() {
+        return Err(format!(
+            "TriadTf32Rna requires an admitted SM80+ portable target, got {arch}"
+        ));
+    }
     if kind == ModuleKind::TriadSm89Tf32Joint && sm80_ptx_target(arch).is_none() {
         return Err(format!(
             "TriadSm89Tf32Joint requires an admitted SM80+ portable target, got {arch}"
@@ -2274,6 +2292,80 @@ fn validate_sm89_exact_f32_d128_ptx(arch: &str, ptx: &str) -> Result<(), String>
     Ok(())
 }
 
+/// The batch-invariant TF32 forward's module: its exact exports, the
+/// four-pointer and 32-byte parameter ABI, cvt.rna rounding into m16n8k8
+/// TF32 mma, and none of the instruction families its tiles never use.
+fn validate_tf32_rna_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    use super::tf32_rna_source::Tf32RnaKernelKind;
+
+    if sm80_ptx_target(arch).is_none_or(|target| ptx_target(ptx).ok().as_deref() != Some(target)) {
+        return Err("TriadTf32Rna requires matching SM80+ portable source and PTX targets".into());
+    }
+    let expected = super::tf32_rna_source::TF32_RNA_KERNEL_SPECS
+        .iter()
+        .map(|spec| spec.symbol)
+        .collect::<BTreeSet<_>>();
+    let symbols = ptx_entry_symbols(ptx)?;
+    let actual = symbols.iter().map(String::as_str).collect::<Vec<_>>();
+    let unique = actual.iter().copied().collect::<BTreeSet<_>>();
+    if actual.len() != unique.len() || unique != expected {
+        return Err("TriadTf32Rna PTX inventory is incomplete, duplicated, or foreign".into());
+    }
+    let parsed = parse_ptx(ptx)?;
+    for spec in super::tf32_rna_source::TF32_RNA_KERNEL_SPECS {
+        let entry = parsed_ptx_entry_ref(&parsed, spec.symbol)?;
+        let parameters = entry
+            .text
+            .split_once('(')
+            .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+            .ok_or_else(|| format!("{} has no PTX parameter list", spec.symbol))?;
+        let declarations = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect::<Vec<_>>();
+        if !(declarations.len() == 5
+            && declarations[..4]
+                .iter()
+                .all(|line| line.starts_with(".param .u64 "))
+            && declarations[4].starts_with(".param .align 4 .b8 ")
+            && declarations[4].contains("[32]"))
+        {
+            return Err(format!(
+                "{} has the wrong static PTX parameter ABI",
+                spec.symbol
+            ));
+        }
+        let mut tokens = vec![
+            "cvt.rna.tf32.f32",
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+        ];
+        if spec.kind != Tf32RnaKernelKind::Wide {
+            tokens.push("cp.async.cg.shared.global");
+        }
+        require_ptx_entry_tokens("TriadTf32Rna GEMM", entry, &tokens)?;
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token == ".local"
+                || token.starts_with("ld.local")
+                || token.starts_with("st.local")
+                || token.starts_with("atom.")
+                || token.starts_with("atom::")
+                || token.starts_with("red.")
+                || token.starts_with("red::")
+                || token.starts_with("redux.")
+                || token.starts_with("wgmma.")
+                || token.starts_with("tcgen05.")
+                || token.starts_with("cp.async.bulk.tensor.")
+        }) {
+            return Err(format!(
+                "TriadTf32Rna {} contains a forbidden instruction family",
+                spec.symbol
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_sm89_tf32_joint_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     use super::sm89_tf32_joint_source::Sm89Tf32JointKernelKind;
 
@@ -2536,6 +2628,7 @@ fn validate_module_ptx_parts(module_kind: ModuleKind, arch: &str, ptx: &str) -> 
         ModuleKind::TriadSm89ExactF32 => validate_sm89_exact_f32_ptx(arch, ptx),
         ModuleKind::TriadSm89ExactF32D128 => validate_sm89_exact_f32_d128_ptx(arch, ptx),
         ModuleKind::TriadSm89Tf32Joint => validate_sm89_tf32_joint_ptx(arch, ptx),
+        ModuleKind::TriadTf32Rna => validate_tf32_rna_ptx(arch, ptx),
         ModuleKind::TriadSm90a => validate_sm90a_ptx(ptx),
         ModuleKind::TriadSm100 => validate_sm100_ptx(arch, ptx),
         ModuleKind::TriadSm120 => validate_sm120_ptx(arch, ptx),
@@ -3493,6 +3586,80 @@ fn census_sm89_exact_f32_d128_driver_abi(
                 "duplicate TriadSm89ExactF32D128 ABI symbol {}",
                 spec.symbol
             ));
+        }
+    }
+    module.unload()?;
+    Ok(census)
+}
+
+fn validate_tf32_rna_driver_abi(
+    spec: &super::tf32_rna_source::Tf32RnaKernelSpec,
+    abi: &Tf32DriverAbi,
+) -> Result<(), String> {
+    let expected = &super::tf32_rna_source::GEMM_DRIVER_ABI;
+    if abi.parameter_count() != expected.len()
+        || super::tf32_rna_source::GEMM_TERMINAL_ARGUMENT as usize != expected.len()
+        || !abi
+            .parameters()
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| {
+                actual.offset() == expected.offset as usize
+                    && actual.size() == expected.size as usize
+            })
+    {
+        return Err(format!(
+            "{} has the wrong live Driver parameter ABI",
+            spec.symbol
+        ));
+    }
+    Ok(())
+}
+
+fn census_tf32_rna_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Result<Tf32DriverAbi, String>>, String> {
+    if kind != ModuleKind::TriadTf32Rna {
+        return Ok(BTreeMap::new());
+    }
+    if sm80_ptx_target(arch).is_none() {
+        return Err("TriadTf32Rna Driver ABI census requires an sm_80-tier target".into());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = DriverModule::load(ctx, ptx)?;
+    let get: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let mut census = BTreeMap::new();
+    for spec in &super::tf32_rna_source::TF32_RNA_KERNEL_SPECS {
+        let abi = (|| {
+            let symbol = CString::new(spec.symbol)
+                .map_err(|_| format!("{} is not a C symbol", spec.symbol))?;
+            let function =
+                unsafe { cudarc::driver::result::module::get_function(module.raw(), symbol) }
+                    .map_err(|error| {
+                        format!(
+                            "load TriadTf32Rna/{} for Driver ABI: {error:?}",
+                            spec.symbol
+                        )
+                    })?;
+            let abi = query_driver_parameter_abi(
+                spec.symbol,
+                super::tf32_rna_source::GEMM_DRIVER_ABI.len(),
+                |index, offset, size| unsafe { get(function, index, offset, size) },
+            )?;
+            validate_tf32_rna_driver_abi(spec, &abi)?;
+            Ok(abi)
+        })();
+        if census.insert(spec.symbol, abi).is_some() {
+            return Err(format!("duplicate TriadTf32Rna ABI symbol {}", spec.symbol));
         }
     }
     module.unload()?;
@@ -8652,6 +8819,17 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         super::sm89_exact_f32_d128_source::validate_source()?;
         return super::sm89_exact_f32_d128_source::compose_source();
     }
+    if kind == ModuleKind::TriadTf32Rna {
+        validate_module_target(kind, arch)?;
+        let owner_digest = FramedSha256::bytes(super::tf32_rna_source::SOURCE.as_bytes());
+        if crate::gpu::kernel_identity::digest_hex(&owner_digest)
+            != super::tf32_rna_source::SOURCE_SHA256
+        {
+            return Err("TriadTf32Rna CUDA owner SHA-256 changed".into());
+        }
+        super::tf32_rna_source::validate_source()?;
+        return super::tf32_rna_source::compose_source();
+    }
     if kind == ModuleKind::TriadSm89Tf32Joint {
         validate_module_target(kind, arch)?;
         let owner_digest = FramedSha256::bytes(super::sm89_tf32_joint_source::SOURCE.as_bytes());
@@ -9674,6 +9852,114 @@ fn load_sm89_tf32_joint_functions(
     Ok((functions, exclusions))
 }
 
+/// The batch-invariant TF32 forward's tiles this board serves: every tile
+/// whose live parameter ABI is the module's, whose shared memory the board
+/// opts into, and that keeps its registers, local memory and occupancy; any
+/// other tile is an exclusion.
+fn load_tf32_rna_functions(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> Result<
+    (
+        HashMap<&'static str, CudaFunction>,
+        Vec<Tf32SymbolExclusion>,
+    ),
+    String,
+> {
+    if module.artifact_identity.module_kind != ModuleKind::TriadTf32Rna
+        || sm80_ptx_target(module.compiler_identity.target.as_str()).is_none()
+        || ctx
+            .compute_capability()
+            .map_err(|error| format!("query TriadTf32Rna CC: {error:?}"))?
+            .0
+            < 8
+    {
+        return Err("TriadTf32Rna requires an SM80+ portable binding".into());
+    }
+    let optin_shared = ctx
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+        )
+        .map_err(|error| format!("query TriadTf32Rna opt-in shared memory: {error:?}"))?;
+    let optin_shared = u32::try_from(optin_shared)
+        .map_err(|_| format!("negative TriadTf32Rna opt-in shared memory {optin_shared}"))?;
+    let abi = module.tf32_rna_driver_abi.as_ref().map_err(Clone::clone)?;
+    let mut functions = HashMap::new();
+    let mut exclusions = Vec::new();
+    for spec in &super::tf32_rna_source::TF32_RNA_KERNEL_SPECS {
+        let loaded = (|| {
+            validate_tf32_rna_driver_abi(spec, sm89_tf32_joint_abi_for_symbol(abi, spec.symbol)?)?;
+            if optin_shared < spec.dynamic_shared_bytes {
+                return Err(format!(
+                    "{} needs {} dynamic shared bytes, device exposes {optin_shared}",
+                    spec.symbol, spec.dynamic_shared_bytes
+                ));
+            }
+            let function = load_function(&module.module, ModuleKind::TriadTf32Rna, spec.symbol)?;
+            set_dynamic_shared(
+                &function,
+                spec.symbol,
+                i32::try_from(spec.dynamic_shared_bytes)
+                    .map_err(|_| format!("{} shared memory exceeds i32::MAX", spec.symbol))?,
+            )?;
+            let local_bytes = u32::try_from(
+                function
+                    .local_size_bytes()
+                    .map_err(|error| format!("query {} local memory: {error:?}", spec.symbol))?,
+            )
+            .map_err(|_| format!("{} returned negative local memory", spec.symbol))?;
+            let registers = u32::try_from(
+                function
+                    .num_regs()
+                    .map_err(|error| format!("query {} registers: {error:?}", spec.symbol))?,
+            )
+            .map_err(|_| format!("{} returned negative register count", spec.symbol))?;
+            let max_threads = function
+                .max_threads_per_block()
+                .map_err(|error| format!("query {} max threads: {error:?}", spec.symbol))?;
+            let occupancy = function
+                .occupancy_max_active_blocks_per_multiprocessor(
+                    spec.block.0 * spec.block.1 * spec.block.2,
+                    spec.dynamic_shared_bytes as usize,
+                    None,
+                )
+                .map_err(|error| format!("query {} occupancy: {error:?}", spec.symbol))?;
+            tf32_symbol_admission(
+                spec.symbol,
+                local_bytes,
+                spec.local_bytes,
+                registers,
+                spec.register_cap,
+                max_threads,
+                i32::try_from(spec.block.0)
+                    .map_err(|_| format!("{} block exceeds i32::MAX", spec.symbol))?,
+            )?;
+            if occupancy < spec.minimum_active_blocks {
+                return Err(format!(
+                    "{} occupancy {occupancy} misses its {}-CTA gate",
+                    spec.symbol, spec.minimum_active_blocks
+                ));
+            }
+            Ok(function)
+        })();
+        match loaded {
+            Ok(function) => {
+                if functions.insert(spec.symbol, function).is_some() {
+                    return Err(format!("duplicate TriadTf32Rna function {}", spec.symbol));
+                }
+            }
+            Err(reason) => exclusions.push(Tf32SymbolExclusion {
+                symbol: spec.symbol,
+                reason,
+            }),
+        }
+    }
+    if functions.len() + exclusions.len() != super::tf32_rna_source::TF32_RNA_KERNEL_SPECS.len() {
+        return Err("TriadTf32Rna lost a symbol while applying resource gates".into());
+    }
+    Ok((functions, exclusions))
+}
+
 pub struct GemmBiKernels {
     _modules: CudaModuleAnchors,
     allocation_domain: super::contract::AllocationDomain,
@@ -9686,6 +9972,7 @@ pub struct GemmBiKernels {
     sm89_exact_f32_compiler_identity: Option<CompilerIdentity>,
     sm89_exact_f32_d128_compiler_identity: Option<CompilerIdentity>,
     sm89_tf32_joint_compiler_identity: Option<CompilerIdentity>,
+    tf32_rna_compiler_identity: Option<CompilerIdentity>,
     specialized_compiler_identity: Option<CompilerIdentity>,
     artifact_set_identity: crate::gpu::kernel_identity::ArtifactSetIdentity,
     f32_triad_availability: super::contract::F32TriadAvailability,
@@ -9702,6 +9989,7 @@ pub struct GemmBiKernels {
     sm89_exact_f32_d128_exclusions: Vec<Tf32SymbolExclusion>,
     sm89_tf32_joint_functions: HashMap<&'static str, CudaFunction>,
     sm89_tf32_joint_exclusions: Vec<Tf32SymbolExclusion>,
+    tf32_rna_functions: HashMap<&'static str, CudaFunction>,
     specialized_tf32_functions: HashMap<&'static str, CudaFunction>,
     portable_tf32_rejection: Option<String>,
     finalist_tf32_rejection: Option<String>,
@@ -9709,6 +9997,7 @@ pub struct GemmBiKernels {
     sm89_exact_f32_rejection: Option<String>,
     sm89_exact_f32_d128_rejection: Option<String>,
     sm89_tf32_joint_rejection: Option<String>,
+    tf32_rna_rejection: Option<String>,
     specialized_tf32_rejection: Option<String>,
     tf32_excluded_symbols: Vec<Tf32SymbolExclusion>,
     specialized_functions: HashMap<&'static str, CudaFunction>,
@@ -9817,6 +10106,10 @@ pub(crate) struct GemmBiModuleSet {
     pub sm89_exact_f32_d128_compile_rejection: Option<String>,
     pub sm89_tf32_joint: Option<CompiledModule>,
     pub sm89_tf32_joint_compile_rejection: Option<String>,
+    /// The batch-invariant TF32 forward's own module, on every SM80-tier
+    /// board that composed it.
+    pub tf32_rna: Option<CompiledModule>,
+    pub tf32_rna_compile_rejection: Option<String>,
     pub specialized: Option<QualifiedSpecializedModule>,
     /// The inference cells module's identity, when the board composed it.
     pub sm89_cells: Option<ArtifactIdentity>,
@@ -9838,6 +10131,8 @@ impl GemmBiKernels {
             sm89_exact_f32_d128_compile_rejection,
             sm89_tf32_joint,
             sm89_tf32_joint_compile_rejection,
+            tf32_rna,
+            tf32_rna_compile_rejection,
             specialized,
             sm89_cells,
         } = modules;
@@ -9888,6 +10183,9 @@ impl GemmBiKernels {
         }
         if let Some(sm89_cells) = sm89_cells {
             artifacts.push(sm89_cells);
+        }
+        if let Some(tf32_rna) = tf32_rna.as_ref() {
+            artifacts.push(tf32_rna.artifact_identity);
         }
         let artifact_set_identity = crate::gpu::kernel_identity::build_artifact_set(&artifacts)?;
         let mut finalist_tf32_rejection = finalist_compile_rejection;
@@ -10067,11 +10365,36 @@ impl GemmBiKernels {
             },
             None => None,
         };
+        let mut tf32_rna_rejection = tf32_rna_compile_rejection;
+        let (tf32_rna_functions, tf32_rna_exclusions) = match tf32_rna.as_ref() {
+            Some(module) => match load_tf32_rna_functions(ctx, module) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    tf32_rna_rejection = Some(error);
+                    (HashMap::new(), Vec::new())
+                }
+            },
+            None => (HashMap::new(), Vec::new()),
+        };
+        // A tile this board cannot serve is an exclusion the strict TF32
+        // policy reads before it prepares a route.
+        tf32_excluded_symbols.extend(tf32_rna_exclusions);
+        let rna_binding = match tf32_rna.as_ref().filter(|_| !tf32_rna_functions.is_empty()) {
+            Some(module) => match qualify_tf32_module_binding(ctx, module) {
+                Ok(binding) => Some(binding),
+                Err(error) => {
+                    tf32_rna_rejection = Some(error);
+                    None
+                }
+            },
+            None => None,
+        };
         let f32_triad_availability = super::contract::F32TriadAvailability {
             portable,
             specialized: specialized_binding,
             finalist: finalist_binding,
             joint: joint_binding,
+            rna: rna_binding,
             multiprocessors: multiprocessor_count,
         };
         let load = |name: &str| load_owned_function(name, &scalar.module, &sm80.module);
@@ -10198,6 +10521,9 @@ impl GemmBiKernels {
         if let Some(sm89_tf32_joint) = sm89_tf32_joint.as_ref() {
             anchors.push(sm89_tf32_joint.module.clone());
         }
+        if let Some(tf32_rna) = tf32_rna.as_ref() {
+            anchors.push(tf32_rna.module.clone());
+        }
         if let Some(specialized) = specialized.as_ref() {
             anchors.push(specialized.module.module.clone());
         }
@@ -10220,6 +10546,7 @@ impl GemmBiKernels {
             sm89_tf32_joint_compiler_identity: sm89_tf32_joint
                 .as_ref()
                 .map(|module| module.compiler_identity),
+            tf32_rna_compiler_identity: tf32_rna.as_ref().map(|module| module.compiler_identity),
             specialized_compiler_identity: specialized
                 .as_ref()
                 .map(|specialized| specialized.module.compiler_identity),
@@ -10238,6 +10565,7 @@ impl GemmBiKernels {
             sm89_exact_f32_d128_exclusions,
             sm89_tf32_joint_functions,
             sm89_tf32_joint_exclusions,
+            tf32_rna_functions,
             tf32_excluded_symbols,
             specialized_tf32_functions,
             portable_tf32_rejection,
@@ -10246,6 +10574,7 @@ impl GemmBiKernels {
             sm89_exact_f32_rejection,
             sm89_exact_f32_d128_rejection,
             sm89_tf32_joint_rejection,
+            tf32_rna_rejection,
             specialized_tf32_rejection,
             specialized_functions,
             sm120_target,
@@ -10431,6 +10760,7 @@ impl GemmBiKernels {
             ModuleKind::TriadSm80 => self.portable_tf32_rejection.as_deref(),
             ModuleKind::TriadSm89Finalist => self.finalist_tf32_rejection.as_deref(),
             ModuleKind::TriadSm89Tf32Joint => self.sm89_tf32_joint_rejection.as_deref(),
+            ModuleKind::TriadTf32Rna => self.tf32_rna_rejection.as_deref(),
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => {
                 self.specialized_tf32_rejection.as_deref()
             }
@@ -10445,6 +10775,9 @@ impl GemmBiKernels {
     pub(crate) fn tf32_function(&self, symbol: &str) -> Option<&CudaFunction> {
         if super::sm89_tf32_joint_source::kernel_spec(symbol).is_some() {
             return self.sm89_tf32_joint_function(symbol);
+        }
+        if super::tf32_rna_source::kernel_spec(symbol).is_some() {
+            return self.tf32_rna_function(symbol);
         }
         self.tf32_driver_abi(symbol)?;
         self.portable_tf32_functions
@@ -10529,6 +10862,22 @@ impl GemmBiKernels {
         super::sm89_tf32_joint_source::kernel_spec(symbol)?;
         self.sm89_tf32_joint_compiler_identity()?;
         self.sm89_tf32_joint_functions.get(symbol)
+    }
+
+    pub fn tf32_rna_compiler_identity(&self) -> Option<CompilerIdentity> {
+        self.artifact_set_identity
+            .tf32_rna
+            .and(self.tf32_rna_compiler_identity)
+    }
+
+    pub fn tf32_rna_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        super::tf32_rna_source::kernel_spec(symbol)?;
+        self.tf32_rna_compiler_identity()?;
+        self.tf32_rna_functions.get(symbol)
+    }
+
+    pub(crate) fn tf32_rna_rejection(&self) -> Option<&str> {
+        self.tf32_rna_rejection.as_deref()
     }
 
     pub fn sm90a_compiler_identity(&self) -> Option<CompilerIdentity> {
@@ -10626,6 +10975,7 @@ impl GemmBiKernels {
             ModuleKind::TriadSm80 => self.f32_triad_availability.portable,
             ModuleKind::TriadSm89Finalist => self.f32_triad_availability.finalist,
             ModuleKind::TriadSm89Tf32Joint => self.f32_triad_availability.joint,
+            ModuleKind::TriadTf32Rna => self.f32_triad_availability.rna,
             _ => self.f32_triad_availability.specialized,
         };
         if binding.allocation_domain != self.allocation_domain
@@ -11436,6 +11786,7 @@ fn qualify_tf32_module_binding(
                 ModuleKind::TriadSm80
                     | ModuleKind::TriadSm89Finalist
                     | ModuleKind::TriadSm89Tf32Joint
+                    | ModuleKind::TriadTf32Rna
             ) =>
         {
             false
@@ -11444,7 +11795,10 @@ fn qualify_tf32_module_binding(
     };
     if !matches!(
         module_kind,
-        ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist | ModuleKind::TriadSm89Tf32Joint
+        ModuleKind::TriadSm80
+            | ModuleKind::TriadSm89Finalist
+            | ModuleKind::TriadSm89Tf32Joint
+            | ModuleKind::TriadTf32Rna
     ) && !tensor_map_access
     {
         return Err(format!("{module_kind:?} requires tensor-map access"));
@@ -11500,7 +11854,9 @@ fn qualified_ptx_target(
                     format!("TriadSm80 target {compiler_target} does not own CC {device_cc:?}")
                 })
         }
-        ModuleKind::TriadSm89Finalist | ModuleKind::TriadSm89Tf32Joint => {
+        ModuleKind::TriadSm89Finalist
+        | ModuleKind::TriadSm89Tf32Joint
+        | ModuleKind::TriadTf32Rna => {
             let expected = portable_target_for_device(device_cc)?;
             let actual = sm80_ptx_target(compiler_target).ok_or_else(|| {
                 format!("{module_kind:?} target {compiler_target} is not admitted")

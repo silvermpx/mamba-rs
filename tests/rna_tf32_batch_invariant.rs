@@ -1,7 +1,8 @@
 //! Under the strict TF32 policy a forward's output rows do not depend on
 //! how many rows the batch holds: each prefix of a batch gives the bits the
 //! whole batch gives for those rows, on every layer shape, with and without
-//! a bias. The products really run on TF32 (they differ from the exact
+//! a bias. The prefixes run from one row to the whole batch, so every tile
+//! the architecture's table picks meets every other one row for row. The products really run on TF32 (they differ from the exact
 //! policy's), and the gradients run under the policy without falling to the
 //! exact family.
 #![cfg(feature = "cuda")]
@@ -62,16 +63,22 @@ fn forward(
     y.to_cpu(&ctx.stream).unwrap()
 }
 
-const LAYERS: [(usize, usize); 6] = [
+/// Layers whose rows, at the batch sizes below, take every tile of an
+/// architecture's forward table: the narrow and 64 x 64 portable tiles, the
+/// multistage tiles of a few thousand rows, the wide tiles of tall batches.
+const LAYERS: [(usize, usize); 9] = [
     (64, 96),
     (96, 40),
-    (384, 384),
-    (512, 128),
+    (128, 64),
+    (256, 128),
+    (256, 256),
+    (256, 2112),
+    (384, 1536),
+    (512, 256),
     (768, 768),
-    (3072, 768),
 ];
-const BATCH: usize = 1024;
-const PREFIXES: [usize; 8] = [1, 7, 16, 17, 64, 65, 513, 1000];
+const BATCH: usize = 8192;
+const PREFIXES: [usize; 10] = [1, 7, 255, 256, 600, 1024, 2048, 4096, 5000, 8191];
 
 #[test]
 fn strict_tf32_forward_rows_do_not_depend_on_the_batch() {

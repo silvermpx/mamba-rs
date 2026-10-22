@@ -22,7 +22,9 @@
 - `F32TriadPolicy::RnaTf32BatchInvariant`: every f32 product on TF32 with
   `cvt.rna` rounding, and a forward whose output rows do not depend on the
   batch, for a program that checks its products against a CPU model of the
-  tensor core.
+  tensor core. On an Ada board its forward follows the architecture's own
+  table, with wide and multistage tiles from a new module that compiles on
+  every SM80-tier board; every tile gives a row the same bits.
 - `F32TriadPolicy::ExactFmaBatchInvariant`: exact f32 products whose
   forward folds each output by its layer's shape alone (one `fma` chain, or
   64-input chunks summed in order for a deep layer), so a row has the same

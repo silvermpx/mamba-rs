@@ -1615,6 +1615,9 @@ impl GpuCtx {
             ModuleKind::InferenceSm89Cells => artifacts
                 .sm89_cells
                 .zip(self.kernels.sm89_cells_compiler_identity()),
+            ModuleKind::TriadTf32Rna => artifacts
+                .tf32_rna
+                .zip(self.kernels.triad_tf32_rna_compiler_identity()),
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => self
                 .kernels
                 .artifact_set_identity()
@@ -1641,6 +1644,7 @@ impl GpuCtx {
             ModuleKind::TriadSm89ExactF32 => None,
             ModuleKind::TriadSm89ExactF32D128 => None,
             ModuleKind::TriadSm89Tf32Joint => availability.joint,
+            ModuleKind::TriadTf32Rna => availability.rna,
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => {
                 availability.specialized
             }
@@ -2300,6 +2304,7 @@ const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
         | PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix
         | PhysicalGemmBackend::Sm89MmaTf32NtRna
         | PhysicalGemmBackend::Sm89MmaTf32TnDirectRna => ModuleKind::TriadSm89Tf32Joint,
+        PhysicalGemmBackend::MmaTf32RnaWide => ModuleKind::TriadTf32Rna,
         PhysicalGemmBackend::Sm89Mma16HalfS3
         | PhysicalGemmBackend::Sm89Mma16HalfS2
         | PhysicalGemmBackend::Sm89Mma16HalfS4 => ModuleKind::TriadSm89Half,
@@ -2328,6 +2333,7 @@ fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) ->
         | PhysicalGemmBackend::Sm89MmaTf32TnDirectRna => {
             super::gemm_bi_triad::SM89_TF32_JOINT_TUNING_REVISION
         }
+        PhysicalGemmBackend::MmaTf32RnaWide => super::gemm_bi_triad::TF32_RNA_TUNING_REVISION,
         PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan => {
             super::kernel_identity::SM89_INFERENCE_COPYPLAN_ROUTE_REVISION
         }

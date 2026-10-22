@@ -994,6 +994,8 @@ impl MambaKernels {
             sm89_exact_f32_d128_rejection,
             sm89_tf32_joint,
             sm89_tf32_joint_rejection,
+            tf32_rna,
+            tf32_rna_rejection,
             specialized,
         ) = if let Some(artifacts) = sm120_artifacts {
             // The common SM89-measured modules are sm_80-tier PTX; a CC 12.x
@@ -1037,6 +1039,8 @@ impl MambaKernels {
                 portable_tier(super::kernel_identity::ModuleKind::TriadSm89ExactF32D128);
             let (sm89_tf32_joint, sm89_tf32_joint_rejection) =
                 portable_tier(super::kernel_identity::ModuleKind::TriadSm89Tf32Joint);
+            let (tf32_rna, tf32_rna_rejection) =
+                portable_tier(super::kernel_identity::ModuleKind::TriadTf32Rna);
             (
                 artifacts.inference,
                 artifacts.scalar,
@@ -1053,6 +1057,8 @@ impl MambaKernels {
                 sm89_exact_f32_d128_rejection,
                 sm89_tf32_joint,
                 sm89_tf32_joint_rejection,
+                tf32_rna,
+                tf32_rna_rejection,
                 artifacts.specialized,
             )
         } else {
@@ -1104,6 +1110,14 @@ impl MambaKernels {
             } else {
                 (None, None)
             };
+            let (tf32_rna, tf32_rna_rejection) = if plan.common {
+                match compile(super::kernel_identity::ModuleKind::TriadTf32Rna) {
+                    Ok(module) => (Some(module), None),
+                    Err(error) => (None, Some(error)),
+                }
+            } else {
+                (None, None)
+            };
             let specialized = match (arch, device_cc) {
                 ("sm_90a", Some((9, 0)))
                     if plan.architecture
@@ -1141,6 +1155,8 @@ impl MambaKernels {
                 sm89_exact_f32_d128_rejection,
                 sm89_tf32_joint,
                 sm89_tf32_joint_rejection,
+                tf32_rna,
+                tf32_rna_rejection,
                 specialized,
             )
         };
@@ -1235,6 +1251,8 @@ impl MambaKernels {
                 sm89_exact_f32_d128_compile_rejection: sm89_exact_f32_d128_rejection,
                 sm89_tf32_joint,
                 sm89_tf32_joint_compile_rejection: sm89_tf32_joint_rejection,
+                tf32_rna,
+                tf32_rna_compile_rejection: tf32_rna_rejection,
                 specialized,
                 sm89_cells: sm89_cells_module
                     .as_ref()
@@ -1327,6 +1345,17 @@ impl MambaKernels {
                 format!(
                     "the specialized TF32 module is not bound on this board ({reason}); the \
                      portable or exact kernels serve every TF32 request"
+                )
+            });
+        }
+        // The batch-invariant TF32 forward's own tiles serve every SM80-tier
+        // board, so a rejection or an excluded tile is said on every one.
+        if let Some(reason) = triad.tf32_rna_rejection() {
+            static TF32_RNA_MODULE: std::sync::Once = std::sync::Once::new();
+            super::diagnostics::warn_once(&TF32_RNA_MODULE, || {
+                format!(
+                    "the batch-invariant TF32 wide tiles are not bound ({reason}); the strict \
+                     TF32 policy's forward runs on the portable tiles"
                 )
             });
         }
@@ -2218,6 +2247,22 @@ impl MambaKernels {
 
     pub fn sm89_cells_compiler_identity(&self) -> Option<super::kernel_identity::CompilerIdentity> {
         self.sm89_cells_compiler_identity
+    }
+
+    pub fn triad_tf32_rna_compiler_identity(
+        &self,
+    ) -> Option<super::kernel_identity::CompilerIdentity> {
+        self.triad.tf32_rna_compiler_identity()
+    }
+
+    pub fn triad_tf32_rna_artifact_identity(
+        &self,
+    ) -> Option<super::kernel_identity::ArtifactIdentity> {
+        self.triad.artifact_set_identity().tf32_rna
+    }
+
+    pub fn triad_tf32_rna_rejection(&self) -> Option<&str> {
+        self.triad.tf32_rna_rejection()
     }
 
     pub fn triad_sm89_tf32_joint_artifact_identity(

@@ -3571,6 +3571,7 @@ fn f32_map_binding(ctx: &GpuCtx, route: Tf32PhysicalRoute) -> Result<Tf32MapBind
         | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => ctx.kernels.f32_triad_availability().joint,
+        Tf32PhysicalRoute::MmaTf32RnaWide(_) => ctx.kernels.f32_triad_availability().rna,
         _ => ctx.kernels.f32_triad_availability().specialized,
     }
     .ok_or_else(|| format!("TF32 route {route:?} has no qualified module"))?;
@@ -3639,18 +3640,17 @@ fn tf32_params(
         | Tf32PhysicalRoute::Sm89NtALdmatrixN96
         | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
         | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
-        | Tf32PhysicalRoute::Sm89TnDirectM192N192S2 => {
-            PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
-                alpha: operands.alpha,
-                beta: operands.beta,
-                m,
-                k,
-                n,
-                lda: checked_i32(shape.lda, "lda")?,
-                ldb: checked_i32(shape.ldb, "ldb")?,
-                ldc,
-            })
-        }
+        | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
+        | Tf32PhysicalRoute::MmaTf32RnaWide(_) => PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
+            alpha: operands.alpha,
+            beta: operands.beta,
+            m,
+            k,
+            n,
+            lda: checked_i32(shape.lda, "lda")?,
+            ldb: checked_i32(shape.ldb, "ldb")?,
+            ldc,
+        }),
         Tf32PhysicalRoute::Sm89TnPreRnaN96
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
@@ -4058,6 +4058,10 @@ fn tf32_resolved_route(
             PhysicalGemmBackend::Sm120TmaFmaExact,
             sm120_fma_numeric_contract(exact),
         ),
+        Tf32PhysicalRoute::MmaTf32RnaWide(_) => (
+            PhysicalGemmBackend::MmaTf32RnaWide,
+            ResolvedNumericContract::MmaTf32Rna,
+        ),
     };
     let ownership = match spec.route {
         Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
@@ -4120,6 +4124,7 @@ fn tf32_resolved_route(
         tuning_table_revision: match spec.module_kind {
             ModuleKind::TriadSm89Finalist => SM89_FINALIST_TUNING_REVISION,
             ModuleKind::TriadSm89Tf32Joint => SM89_TF32_JOINT_TUNING_REVISION,
+            ModuleKind::TriadTf32Rna => super::contract::TF32_RNA_TUNING_REVISION,
             _ => F32_TF32_TUNING_REVISION,
         },
         schedule_revision: spec.schedule_revision,
@@ -4439,6 +4444,7 @@ fn prepare_tf32_f32(
             .unwrap_or(error)
     })?;
     validate_sm89_tf32_joint_operands(request, operands, route)?;
+    validate_tf32_rna_wide_operands(request, operands, route)?;
     if matches!(
         route,
         Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
@@ -4493,6 +4499,7 @@ fn prepare_tf32_f32(
             | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
             | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
             | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
+            | Tf32PhysicalRoute::MmaTf32RnaWide(_)
     ) {
         None
     } else {
@@ -4556,6 +4563,31 @@ fn prepare_tf32_f32(
             config,
         },
     })
+}
+
+/// The batch-invariant TF32 forward's own tiles copy whole 16-byte chunks:
+/// both operand bases 16-byte aligned and both strides whole chunks.
+fn validate_tf32_rna_wide_operands(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    route: Tf32PhysicalRoute,
+) -> Result<(), String> {
+    if !matches!(route, Tf32PhysicalRoute::MmaTf32RnaWide(_)) {
+        return Ok(());
+    }
+    if request.op != ResolvedGemmOp::Nn
+        || [operands.a, operands.b]
+            .into_iter()
+            .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))
+        || !request.shape.lda.is_multiple_of(4)
+        || !request.shape.ldb.is_multiple_of(4)
+    {
+        return Err(format!(
+            "TF32 RNA wide route {route:?} serves NN on 16-byte aligned operands with \
+             whole-chunk strides"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_sm89_tf32_joint_operands(
@@ -6401,7 +6433,8 @@ pub(in crate::gpu) fn prepare_prepared_f32_direct_graph_sequence<O: PhysicalLaun
                     | Tf32PhysicalRoute::Sm89NtALdmatrixN96
                     | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
                     | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
-                    | Tf32PhysicalRoute::Sm89TnDirectM192N192S2,
+                    | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
+                    | Tf32PhysicalRoute::MmaTf32RnaWide(_),
                     PreparedTf32Params::Sm80(params),
                 ) => {
                     let reduction_is_zero =
@@ -7660,7 +7693,8 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
             | Tf32PhysicalRoute::Sm89NtALdmatrixN96
             | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
             | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
-            | Tf32PhysicalRoute::Sm89TnDirectM192N192S2,
+            | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
+            | Tf32PhysicalRoute::MmaTf32RnaWide(_),
             PreparedTf32Params::Sm80(params),
         ) => {
             let a = if launch.zero_reduction {

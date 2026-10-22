@@ -835,6 +835,9 @@ pub(super) fn append_tf32_route_digest(
         Tf32PhysicalRoute::Sm89TnDirectM192N192S2 => digest.required(b"route-family", &[19]),
         Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2 => digest.required(b"route-family", &[20]),
         Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => digest.required(b"route-family", &[21]),
+        Tf32PhysicalRoute::MmaTf32RnaWide(tile) => digest
+            .required(b"route-family", &[22])
+            .required(b"tile", &[tile.digest_code()]),
     }
 }
 
@@ -1284,7 +1287,8 @@ pub(super) fn tf32_tensor_map_plan(
         | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
         | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
-        | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => {
+        | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
+        | Tf32PhysicalRoute::MmaTf32RnaWide(_) => {
             return Err("portable TF32 does not use tensor maps".into());
         }
     };
@@ -1828,6 +1832,51 @@ pub enum Tf32PhysicalRoute {
     Sm89TnPreRnaM96N192S2,
     /// Ada TN d768-out 96x96 three-stage tile after the explicit RNA+transpose of A.
     Sm89TnPreRnaM96N96S3,
+    /// A wide or multistage NN tile of the batch-invariant TF32 forward's
+    /// own module.
+    MmaTf32RnaWide(Tf32RnaWideTile),
+}
+
+/// The batch-invariant TF32 forward's wide and multistage NN tiles. Each
+/// seeds an output with its bias, rounds both operands with cvt.rna and
+/// walks the reduction in the portable tiles' k8 order over zero-filled
+/// 32-deep groups, so each gives an output the portable tiles' bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tf32RnaWideTile {
+    /// 128 x 96 on eight warps, three stages, the wide NN template.
+    M128N96S3,
+    /// 96 x 96 on eight warps, three stages, the wide NN template.
+    M96N96S3,
+    /// 128 x 128 on eight computing warps, three stages.
+    M128N128S3,
+    /// The multistage 64 x 128 tile over 16-deep slabs, six stages.
+    MsM64N128Bk16S6,
+    /// The multistage 128 x 64 tile over 32-deep slabs, three stages.
+    MsM128N64S3,
+    /// The multistage 64 x 64 tile over 32-deep slabs, three stages.
+    MsM64N64S3,
+}
+
+impl Tf32RnaWideTile {
+    pub const ALL: [Self; 6] = [
+        Self::M128N96S3,
+        Self::M96N96S3,
+        Self::M128N128S3,
+        Self::MsM64N128Bk16S6,
+        Self::MsM128N64S3,
+        Self::MsM64N64S3,
+    ];
+
+    pub const fn digest_code(self) -> u8 {
+        match self {
+            Self::M128N96S3 => 1,
+            Self::M96N96S3 => 2,
+            Self::M128N128S3 => 3,
+            Self::MsM64N128Bk16S6 => 4,
+            Self::MsM128N64S3 => 5,
+            Self::MsM64N64S3 => 6,
+        }
+    }
 }
 
 impl Tf32PhysicalRoute {
@@ -1854,6 +1903,7 @@ impl Tf32PhysicalRoute {
             | Self::Sm89TnDirectM192N192S2
             | Self::Sm89TnPreRnaM96N192S2
             | Self::Sm89TnPreRnaM96N96S3 => ModuleKind::TriadSm89Tf32Joint,
+            Self::MmaTf32RnaWide(_) => ModuleKind::TriadTf32Rna,
         }
     }
 
@@ -1943,6 +1993,8 @@ pub struct F32TriadAvailability {
     pub specialized: Option<Tf32QualifiedModule>,
     pub finalist: Option<Tf32QualifiedModule>,
     pub joint: Option<Tf32QualifiedModule>,
+    /// The batch-invariant TF32 forward's own module.
+    pub rna: Option<Tf32QualifiedModule>,
     /// Multiprocessors of the board the modules were bound on; zero when
     /// unknown, which keeps the automatic selection to exact measured cells.
     pub multiprocessors: u32,
@@ -2776,6 +2828,82 @@ pub const SM89_FINALIST_TF32_ROUTE_SPECS: [Tf32KernelSpec; 1] = [Tf32KernelSpec 
 /// Scoped route epoch for the isolated Ada retained-winner TF32 module.
 pub const SM89_TF32_JOINT_TUNING_REVISION: u16 = 3;
 
+/// Route epoch of the batch-invariant TF32 forward's own tiles.
+pub const TF32_RNA_TUNING_REVISION: u16 = 1;
+
+const fn tf32_rna_spec(
+    tile: Tf32RnaWideTile,
+    symbol: &'static str,
+    (rows, columns): (u32, u32),
+    (bk, stages, threads): (u32, u8, u32),
+    dynamic_shared_bytes: u32,
+) -> Tf32KernelSpec {
+    Tf32KernelSpec {
+        op: ResolvedGemmOp::Nn,
+        route: Tf32PhysicalRoute::MmaTf32RnaWide(tile),
+        symbol,
+        module_kind: ModuleKind::TriadTf32Rna,
+        instruction_family: ResolvedInstructionFamily::MmaSync,
+        instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+        operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
+        tile: (rows, columns),
+        bk,
+        map_bk: 32,
+        stages,
+        threads,
+        dynamic_shared_bytes,
+        tensor_map_revision: 0,
+        schedule_revision: TF32_SCHEDULE_REVISION,
+    }
+}
+
+/// The batch-invariant TF32 forward's own tiles; the threads and shared
+/// memory are the source owner's launch table.
+pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
+    tf32_rna_spec(
+        Tf32RnaWideTile::M128N96S3,
+        super::tf32_rna_source::NN_M128N96_S3_SYMBOL,
+        (128, 96),
+        (32, 3, 256),
+        86_016,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::M96N96S3,
+        super::tf32_rna_source::NN_M96N96_S3_SYMBOL,
+        (96, 96),
+        (32, 3, 256),
+        73_728,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::M128N128S3,
+        super::tf32_rna_source::NN_M128N128_S3_SYMBOL,
+        (128, 128),
+        (32, 3, 256),
+        98_304,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::MsM64N128Bk16S6,
+        super::tf32_rna_source::NN_MS_M64N128_BK16_S6_SYMBOL,
+        (64, 128),
+        (16, 6, 128),
+        76_800,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::MsM128N64S3,
+        super::tf32_rna_source::NN_MS_M128N64_S3_SYMBOL,
+        (128, 64),
+        (32, 3, 128),
+        76_800,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::MsM64N64S3,
+        super::tf32_rna_source::NN_MS_M64N64_S3_SYMBOL,
+        (64, 64),
+        (32, 3, 128),
+        52_224,
+    ),
+];
+
 pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 11] = [
     Tf32KernelSpec {
         op: ResolvedGemmOp::Nn,
@@ -3347,6 +3475,7 @@ pub fn tf32_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
         ModuleKind::TriadSm80 => &SM80_TF32_ROUTE_SPECS,
         ModuleKind::TriadSm89Finalist => &SM89_FINALIST_TF32_ROUTE_SPECS,
         ModuleKind::TriadSm89Tf32Joint => &SM89_TF32_JOINT_ROUTE_SPECS,
+        ModuleKind::TriadTf32Rna => &TF32_RNA_ROUTE_SPECS,
         ModuleKind::TriadSm90a => &SM90A_TF32_ROUTE_SPECS,
         ModuleKind::TriadSm100 => &SM100_TF32_ROUTE_SPECS,
         ModuleKind::TriadSm120 => &SM120_TF32_ROUTE_SPECS,
@@ -7569,6 +7698,7 @@ mod tests {
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
             (ModuleKind::TriadSm120, 30, [9, 10, 11]),
+            (ModuleKind::TriadTf32Rna, 6, [6, 0, 0]),
         ];
         let expected_total = expected.iter().map(|(_, count, _)| count).sum::<usize>();
         let mut all_symbols = std::collections::BTreeSet::new();
@@ -7606,7 +7736,8 @@ mod tests {
                     | super::Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
                     | super::Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
                     | super::Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
-                    | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
+                    | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+                    | super::Tf32PhysicalRoute::MmaTf32RnaWide(_) => {
                         assert_eq!(spec.instruction_family, ResolvedInstructionFamily::MmaSync);
                         assert_eq!(
                             spec.instruction_shape,
