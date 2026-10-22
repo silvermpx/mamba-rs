@@ -753,6 +753,16 @@ pub fn mint_module_identity(
         .as_bytes()
         .ok_or_else(|| format!("{module_kind:?} NVRTC returned no PTX image"))?;
     let ptx_source = crate::gpu::kernel_identity::canonical_ptx_image(ptx_image)?;
+    // The PTX beside the source, so a re-pin can show the kernels the
+    // cohorts admit compiled to the same instructions.
+    if let Some(directory) = std::env::var_os("MAMBA_RS_MINT_DUMP") {
+        let file = std::path::Path::new(&directory).join(format!(
+            "{module_kind:?}-{arch}-cap{state_cap}-nvrtc{}.{}.ptx",
+            nvrtc.0, nvrtc.1
+        ));
+        std::fs::write(&file, ptx_source.as_bytes())
+            .map_err(|error| format!("could not write {file:?}: {error}"))?;
+    }
     validate_module_ptx(module_kind, arch, &ptx_source)?;
     Ok(MintedModuleIdentity {
         module_kind,

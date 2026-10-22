@@ -12,7 +12,7 @@
 //! -- --ignored --nocapture`, logs kept per tree as `mint-<toolkit>.log`),
 //! then `tools/identity_repin.py <old_logs> <new_logs> --apply`.
 //! `MAMBA_RS_MINT_ONLY=Kind,Kind` restricts the table; `MAMBA_RS_MINT_DUMP=<dir>`
-//! also writes each composed source.
+//! also writes each composed source and the PTX it compiles to.
 
 #![cfg(feature = "cuda")]
 
