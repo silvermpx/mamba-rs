@@ -1,128 +1,83 @@
 # Changelog
 
-## Unreleased
+## 0.8.2 (2026-10-24)
 
 ### Changed
 
-- The Mamba-1 GPU trainers guard each pinned staging buffer with its own
-  event. One shared guard made the second upload of a step wait for the
-  whole previous step while the card idled (RTX 5090 training step: f32
-  8.78 -> 8.57 ms, bf16 6.13 -> 5.94). No bit changes.
-- The SM120 stream-K weight gradients deal a reduction of at most 256
-  units one worker per 8 instead of 16, by the shape alone: the 32- to
-  256-unit bf16 cells run in 0.75 to 0.79 of their time on an RTX 5090,
-  with the same bits at grids of 170, 84 and 48 CTAs. Their bits change
-  once.
-- Strict TF32 picks among tiles that write the same bits by rules that hold
-  on both an RTX 5090 and an RTX PRO 6000: a pre-rounded weight gradient
-  takes the 64 x 96 tile once the 64 x 64 grid needs more than one wave of
-  the live multiprocessors (every board); a CC 12.x forward takes the
-  multistage 64 x 64 tile for the portable one and within one wave, else
-  the multistage 128 x 64 tile where it does at most four fifths of the
-  work; a CC 12.x input gradient takes the SM120 TMA twin of the portable
-  64 x 64 tile. RTX 5090 / RTX PRO 6000, of the former time: forward 0.95 /
-  0.97 (0.56 where the portable tile ran), weight gradients 0.98 / 0.99,
-  input gradients 0.91 / 0.88, no shape slower on either card; Lilly's TF32
-  cells at 0.91 of her own GEMMs' time.
-- GEMM kernels are chosen per architecture, never per card: every card of
-  one architecture (an RTX 4090, an RTX 6000 Ada and an L40S; an RTX 5090
-  and an RTX PRO 6000; an H100 and an H200) runs the same routes with the
-  same bits, whatever its number of multiprocessors.
-- A CUDA toolkit no table was measured on follows the tables of the
-  nearest older measured toolkit.
-- No reduction is cut by a multiprocessor count any more, live or per
-  architecture: the exact split-K and split-M plans and the bf16/f16
-  stream-K weight gradient cut by the shape alone, so a product writes the
-  same bits on any card (the scalar family on every architecture, the
-  tensor cores within one generation). The exact cuts are the RTX 6000
-  Ada's; other architectures' exact products change bits. The stream-K
-  weight gradient now runs a deep reduction over few tiles (up to 3.4x
-  faster on thin gradients) and leaves wider grids to the tiled kernel.
-- Strict TF32 gradients split a deep weight gradient eight ways and a
-  few-row input gradient four ways, and on an Ada board run the multistage
-  input-gradient tiles, the multistage split members and the pre-rounded
-  weight-gradient tiles. A small weight gradient (16 or fewer 64 x 64
-  tiles over a reduction of 1024 or more) splits eight ways on the 32 x 32
-  member, and a measured cell whose winner is a portable split member
-  yields to these shape rules like the portable tiles. A CC 12.x board
-  (RTX 5090, RTX PRO 6000) follows its own table: the pre-rounded
-  weight-gradient tiles, the 64 x 64 input-gradient tile for 2048 to 8192
-  rows over an output up to 512 wide, and the 144 x 96 tile elsewhere.
-- The exact SM120 kernels (RTX 5090, RTX PRO 6000) cut a reduction where
-  the portable plan cuts it and fold the pieces as the portable reducers
-  do, so an exact product has the same bits on these boards as on every
-  other architecture. They used to deal two to five pieces of their own,
-  or one chain where the portable plan splits the batch, and five of the
-  measured products differed from an RTX 6000 Ada's. A cut whose pieces are
-  a few k tiles long (the thin and slim plans), or that runs a tail after
-  the fold, folds inside one CTA per tile, and a shape past the measured
-  cells takes the family from half a tile per multiprocessor (a whole tile
-  when the cut deals a CTA per piece). On an RTX 5090 the thin and slim
-  products the family took from the portable route run in 0.46 to 0.89 of
-  their time (14 of 16 shapes; 1.03 and 1.11 on two of 96 and 100 tiles),
-  two slim measured cells in 0.78 and 0.83, and the one-chain shapes it took
-  in 0.79 to 0.97 (26 of 337), at the same bits.
-- An exact weight gradient that splits its batch folds the pieces in f32
-  instead of double, in the portable reducer and in every fused fold alike,
-  so its bits change once on every card. The double fold ran about three
-  times as long on GeForce and workstation boards, whose double pipe runs at
-  a 64th of the float rate: the reducer alone took 16-25 us per call on an
-  RTX 6000 Ada and 13-17 us on an RTX 5090, against 6-8 and 4-7 us in f32.
-- The exact slim input-gradient split serves 512 to 1024 rows only over a
-  reduction of 1536 or more and an input of at most 768, where it halves
-  the time on both an RTX 5090 and an RTX 6000 Ada; past 1024 rows it
-  serves as before.
-- The SM120 stream-K weight gradients (bf16, f16 and TF32) deal at least
-  16 units to a worker and at most 2048 workers, by the shape alone, and
-  fold the split tiles after the whole grid has published its parts instead
-  of in the CTA that finished a tile. On an RTX 5090 the stream-K cells run
-  in 65% of their former time at its 170 SMs and in 55% and 58% with the
-  grid held to 84 and 48 CTAs, with the same bits on all three; a 128 x 128
-  bf16 gradient over 8192 rows runs in 15 us instead of 127. Their bits
-  change once.
-- Exact narrow weight gradients (2 to 127 outputs) split their batch by the
-  same shape rule as wider ones on every architecture (384 x 101 over 1024
-  rows: 33 -> 10 us on an RTX 5090), and a slim exact input gradient runs
-  the slim tile's chain over the transposed weights, at the same bits and
-  about half the time, on a CC 12.x board everywhere and on other boards
-  over a reduction that is not a whole number of 32 inputs.
-- A bf16 or f16 SM120 weight gradient whose shape no cell names takes its
-  neighbour's stream-K schedule up to the largest grid a measured stream-K
-  cell won on (186 tiles of 64 x 64), a bound read from the table instead
-  of the RTX 5090's 170 multiprocessors.
-- The split scratch is 128 MB (was 32 MB), allocated on the first split, so
-  the 32-wide input-gradient split serves layers up to 48 planes deep.
-- The Mamba-3 decode step's warp tier spells its arithmetic, so its
-  prefetching and plain builds round alike on every card.
+- GEMM kernels are chosen per architecture and never per card. Every card
+  of one architecture runs the same kernels and writes the same bits
+  whatever its number of multiprocessors: an RTX 4090, an RTX 6000 Ada and
+  an L40S, an RTX 5090 and an RTX PRO 6000, an H100 and an H200. The number
+  of multiprocessors only decides how many pieces run at once. A CUDA
+  toolkit that no table was measured on follows the nearest older measured
+  one.
+- Exact f32 products write the same bits on every architecture. A sum is cut
+  into pieces by the shape of the product alone, the RTX 5090 and RTX PRO
+  6000 cut it where every other architecture does, and a weight gradient
+  that splits its batch adds the pieces in f32 instead of double. These
+  products change their bits once in this release. An RTX 6000 Ada, an
+  RTX 5090 and an RTX PRO 6000 wrote identical bits on all 414 exact
+  products checked on the three, and the two Blackwell cards on all 993
+  products checked on both. The f32 sum is also faster on GeForce and
+  workstation cards, whose double pipe is slow: on an RTX 5090 the sum of a
+  split weight gradient took 13 to 17 microseconds per call and now takes 4
+  to 7.
+- Exact f32 is faster on the RTX 5090 and RTX PRO 6000. Their own kernels
+  serve more products, and a sum cut into short pieces is added inside one
+  block. On an RTX PRO 6000 a set of about 400 exact products runs in 0.90
+  to 0.93 of its former time, and thin products in as little as half.
+- Exact narrow weight gradients, with 2 to 127 outputs, split their batch
+  like wider ones on every architecture (384 x 101 over 1024 rows: 33 to 10
+  microseconds on an RTX 5090). A slim exact input gradient runs at the
+  same bits in about half the time on an RTX 5090 and an RTX 6000 Ada.
+- The bf16, f16 and TF32 weight gradients that the RTX 5090 and RTX PRO
+  6000 run with their stream-K schedule add their parts after the whole
+  grid has published them, and a short sum goes to more workers. They run
+  in 55 to 79 percent of their former time, with the same bits at every
+  grid size. A 128 x 128 bf16 gradient over 8192 rows takes 15
+  microseconds instead of 127. Their bits change once.
+- The Mamba-1 GPU trainers no longer leave the card idle between the two
+  uploads of a step. On an RTX 5090 a training step takes 8.57 ms instead
+  of 8.78 in f32 and 5.94 ms instead of 6.13 in bf16.
+- The scratch for split sums is 128 MB instead of 32 MB and is allocated
+  on the first split, so layers up to 48 planes deep take the 32-wide
+  input-gradient split.
 - cuBLAS is behind the new `cublas` feature. Without it the crate asks
   cudarc for the driver and NVRTC only, so a program that links its CUDA
-  libraries at build time links no cuBLAS on this crate's account, and
-  the vendor GEMM modes are refused where they are selected. Code that
-  uses `CublasFast`, `CublasPedantic` or the `_blas` entry points adds the
-  feature. cuRAND and the CUDA runtime API are no longer requested at all.
+  libraries at build time links no cuBLAS because of this crate, and the
+  vendor GEMM modes are refused when they are selected. Code that uses
+  `CublasFast`, `CublasPedantic` or the `_blas` entry points has to enable
+  the feature. cuRAND and the CUDA runtime API are no longer requested.
+
+### Fixed
+
+- The prefetching and plain builds of the Mamba-3 decode step round alike
+  on every card.
 
 ### Added
 
-- `F32TriadPolicy::RnaTf32BatchInvariant`: every f32 product on TF32 with
-  `cvt.rna` rounding, and a forward whose output rows do not depend on the
-  batch, for a program that checks its products against a CPU model of the
-  tensor core. On an Ada board its forward follows the architecture's own
-  table, with wide and multistage tiles from a new module that compiles on
-  every SM80-tier board; every tile gives a row the same bits.
-- `F32TriadPolicy::ExactFmaBatchInvariant`: exact f32 products whose
-  forward folds each output by its layer's shape alone (one `fma` chain, or
-  64-input chunks summed in order for a deep layer), so a row has the same
-  bits at every batch size and a CPU model of the two folds reproduces
-  them. A batch of one row or a few rows runs on thin pipelined tiles, and
-  a layer whose 128 x 128 tiles cover the card enough times runs that tile:
-  three quarters of a wave on an Ada board (4096 x 256 x 2112 on an RTX
-  6000 Ada: about 200 -> 110 us), four waves on a CC 12.x board,
-  which keeps the 64 x 64 tile longer (3136 x 128 x 796 on an RTX 5090:
-  23 -> 16.5 us). Every tile gives the same bits.
-- GEMMs on a caller's CUDA context and stream:
-  `GpuDevice::from_context`, `GpuCtx::new_on_stream`, and raw-pointer
-  forward, input-gradient and weight-gradient entries.
-- `ExternalAllocation`: a caller registers its own device allocations, and
+- `F32TriadPolicy::RnaTf32BatchInvariant` runs every f32 product on TF32
+  tensor cores with `cvt.rna` rounding, and its forward gives a row the
+  same bits at every batch size, for a program that checks its products
+  against a CPU model of the tensor core. Every tile it may use gives the
+  same bits, and it picks among them by the shape and the number of
+  multiprocessors. A deep weight gradient splits eight ways and a few-row
+  input gradient four ways by the shape alone. An Ada board adds its
+  multistage and pre-rounded tiles, and an RTX 5090 or RTX PRO 6000 its own
+  forward table, the multistage tiles and the TMA input-gradient tile. Its
+  picks were checked on 552 products on both an RTX 5090 and an RTX PRO
+  6000, and none is slower than the plain table on either card.
+- `F32TriadPolicy::ExactFmaBatchInvariant` runs exact f32 products whose
+  forward adds each output by its layer's shape alone, as one `fma` chain
+  or as 64-input chunks summed in order for a deep layer, so a row has the
+  same bits at every batch size and a CPU model of the two folds
+  reproduces them. A batch of a few rows runs on thin pipelined tiles, and
+  a layer whose 128 x 128 tiles cover the card enough times runs that tile
+  (4096 x 256 x 2112 on an RTX 6000 Ada: about 200 to 110 microseconds).
+- GEMMs on a caller's CUDA context and stream: `GpuDevice::from_context`,
+  `GpuCtx::new_on_stream`, and raw-pointer forward, input-gradient and
+  weight-gradient entries.
+- `ExternalAllocation` registers a caller's own device allocations, so
   launches over them check their operands once instead of on every launch.
 
 ## 0.8.1 (2026-10-20)

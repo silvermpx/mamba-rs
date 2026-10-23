@@ -3,8 +3,7 @@
 This is how kernel selection in mamba-rs must work. It is a standing rule of
 the project, and it applies to every kernel family: the deterministic GEMM
 triad, the inference GEMMs, the Mamba scans and every kernel added later. The
-same rule binds any project that carries these kernels (SQV-RS / Lilly takes
-its GEMMs from this triad).
+same rule binds any project that carries these kernels.
 
 ## The rule
 
