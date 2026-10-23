@@ -4,6 +4,16 @@
 
 ### Changed
 
+- Strict TF32 picks a tile by the work its busiest multiprocessor does at
+  the live multiprocessor count, where every candidate writes the same
+  bits. The pre-rounded weight-gradient tiles choose by it on every board
+  (it reproduces the RTX 6000 Ada's measured picks); on a CC 12.x board the
+  forward takes the multistage tiles where they do clearly less work, and
+  the input gradient also weighs the SM120 TMA 64 x 64 tile. RTX 5090:
+  forward shapes in 0.90 of their time (0.60 where the portable 64 x 64
+  tile ran), weight gradients 0.92, input gradients 0.85, no shape slower,
+  the same bits on all 552 swept shapes; Lilly's TF32 cells moved from
+  1.00 to 0.91 of her own GEMMs' time.
 - GEMM kernels are chosen per architecture, never per card: every card of
   one architecture (an RTX 4090, an RTX 6000 Ada and an L40S; an RTX 5090
   and an RTX PRO 6000; an H100 and an H200) runs the same routes with the
