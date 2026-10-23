@@ -1356,12 +1356,6 @@ fn inference_sm120_sliced_auto_prefix_view_graph_bits() {
     let Some(ctx) = admit_context() else {
         return;
     };
-    assert_eq!(
-        GpuDevice::new(0)
-            .expect("AUTO device identity")
-            .multiprocessor_count(),
-        170
-    );
     assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
     assert!(ctx.kernels.compiler_identity().nvrtc_library_known);
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();

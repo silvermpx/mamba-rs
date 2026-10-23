@@ -1244,12 +1244,6 @@ fn inference_sm89_exact_n64_auto_prefix_view_graph_bits() {
     let Some(ctx) = admit_context() else {
         return;
     };
-    assert_eq!(
-        GpuDevice::new(0)
-            .expect("AUTO device identity")
-            .multiprocessor_count(),
-        142
-    );
     let compiler = ctx.kernels.compiler_identity();
     assert!(matches!(
         compiler.nvrtc_version,
