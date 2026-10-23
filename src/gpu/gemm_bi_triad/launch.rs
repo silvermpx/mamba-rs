@@ -5645,8 +5645,12 @@ fn batch_invariant_exact_plan(
             operands.alpha, operands.beta
         ));
     }
-    super::dispatch::exact_batch_invariant_nn_plan(request, ctx.kernels.multiprocessor_count())
-        .map(Some)
+    super::dispatch::exact_batch_invariant_nn_plan(
+        request,
+        ctx.kernels.multiprocessor_count(),
+        ctx.compute_capability(),
+    )
+    .map(Some)
 }
 
 fn scalar_ledger_plan(

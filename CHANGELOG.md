@@ -81,8 +81,11 @@
   64-input chunks summed in order for a deep layer), so a row has the same
   bits at every batch size and a CPU model of the two folds reproduces
   them. A batch of one row or a few rows runs on thin pipelined tiles, and
-  a layer whose 128 x 128 tiles fill three quarters of the card runs that
-  tile (4096 x 256 x 2112 on an RTX 6000 Ada: about 200 -> 110 us).
+  a layer whose 128 x 128 tiles cover the card enough times runs that tile:
+  three quarters of a wave on an Ada board (4096 x 256 x 2112 on an RTX
+  6000 Ada: about 200 -> 110 us), four waves on a CC 12.x board,
+  which keeps the 64 x 64 tile longer (3136 x 128 x 796 on an RTX 5090:
+  23 -> 16.5 us). Every tile gives the same bits.
 - GEMMs on a caller's CUDA context and stream:
   `GpuDevice::from_context`, `GpuCtx::new_on_stream`, and raw-pointer
   forward, input-gradient and weight-gradient entries.

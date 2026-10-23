@@ -8242,6 +8242,7 @@ pub(crate) const fn exact_chunks(k: usize, n: usize) -> bool {
 pub(super) fn exact_batch_invariant_nn_plan(
     request: F32TriadRequest,
     multiprocessors: u32,
+    compute_capability: (u32, u32),
 ) -> Result<ScalarDispatchPlan, String> {
     if request.op != ResolvedGemmOp::Nn {
         return Err(format!(
@@ -8292,14 +8293,19 @@ pub(super) fn exact_batch_invariant_nn_plan(
                 .map_err(|_| format!("{m} rows in pieces of {piece_rows} pass u32"))?,
         });
     }
-    // The 128 x 128 chain tile from three quarters of a wave of its own
-    // tiles: on an RTX 6000 Ada it ran in 0.53 to 0.94 of the 64 x 64
-    // tile's time on every shape from there up to eight waves (164 shapes,
-    // 64 to 384 inputs, the same bits on all), and lost below half a wave.
+    // The 128 x 128 chain tile once its own grid covers the card enough
+    // times; the two tiles give the same bits, so the bound is speed alone
+    // and differs by architecture. Over the same 164 shapes (64 to 384
+    // inputs, up to eight waves), three quarters of a wave came within 0.6%
+    // of the best tile per shape on an RTX 6000 Ada, where the large tile
+    // ran in 0.53 to 0.94 of the small one's time; an RTX 5090 keeps the
+    // small tile longer, and four waves came within 1.0% there, where three
+    // quarters lost 3%.
+    let quarter_waves = if compute_capability.0 == 12 { 16 } else { 3 };
     let big_grid = m.div_ceil(128).saturating_mul(n.div_ceil(128));
     if m >= GEMM_CUSTOM_MIN
         && n >= GEMM_CUSTOM_MIN
-        && big_grid.saturating_mul(4) >= waves.saturating_mul(3)
+        && big_grid.saturating_mul(4) >= waves.saturating_mul(quarter_waves)
     {
         return Ok(ScalarDispatchPlan::NnFinal { slim: false });
     }
@@ -17696,41 +17702,55 @@ mod exact_batch_invariant_tests {
             for k in [1, 15, 16, 33, 256, 383, 384, 511, 512, 833, 1536, 3000] {
                 for n in [1, 17, 40, 101, 127, 128, 384, 1536, 2112] {
                     for m in [1, 7, 16, 17, 64, 65, 128, 513, 1024, 4096, 32_768] {
-                        let plan =
-                            exact_batch_invariant_nn_plan(nn(m, k, n), multiprocessors).unwrap();
-                        let what = format!("{m}x{k}x{n} on {multiprocessors} SMs: {plan:?}");
-                        match plan {
-                            ScalarDispatchPlan::NnExactChunk {
-                                partial,
-                                chunks,
-                                piece_rows,
-                                pieces,
-                            } => {
-                                assert!(exact_chunks(k, n), "{what}");
-                                assert_eq!(
-                                    partial == ExactChunkPartial::Narrow16,
-                                    m == 1,
-                                    "{what}"
-                                );
-                                assert_eq!(chunks as usize, k.div_ceil(EXACT_CHUNK), "{what}");
-                                let (rows, pieces) = (piece_rows as usize, pieces as usize);
-                                assert!(rows >= 1 && rows <= m, "{what}");
-                                assert!(rows * pieces >= m && rows * (pieces - 1) < m, "{what}");
-                                assert!(chunks as usize * rows * n <= SPLITK_SCRATCH_CAP, "{what}");
+                        for compute_capability in [(8, 9), (12, 0)] {
+                            let plan = exact_batch_invariant_nn_plan(
+                                nn(m, k, n),
+                                multiprocessors,
+                                compute_capability,
+                            )
+                            .unwrap();
+                            let what = format!(
+                                "{m}x{k}x{n} on {multiprocessors} SMs of {compute_capability:?}: {plan:?}"
+                            );
+                            match plan {
+                                ScalarDispatchPlan::NnExactChunk {
+                                    partial,
+                                    chunks,
+                                    piece_rows,
+                                    pieces,
+                                } => {
+                                    assert!(exact_chunks(k, n), "{what}");
+                                    assert_eq!(
+                                        partial == ExactChunkPartial::Narrow16,
+                                        m == 1,
+                                        "{what}"
+                                    );
+                                    assert_eq!(chunks as usize, k.div_ceil(EXACT_CHUNK), "{what}");
+                                    let (rows, pieces) = (piece_rows as usize, pieces as usize);
+                                    assert!(rows >= 1 && rows <= m, "{what}");
+                                    assert!(
+                                        rows * pieces >= m && rows * (pieces - 1) < m,
+                                        "{what}"
+                                    );
+                                    assert!(
+                                        chunks as usize * rows * n <= SPLITK_SCRATCH_CAP,
+                                        "{what}"
+                                    );
+                                }
+                                ScalarDispatchPlan::NnFinal { slim: false } => {
+                                    assert!(!exact_chunks(k, n) && m >= 128 && n >= 128, "{what}");
+                                }
+                                ScalarDispatchPlan::NnExactThin => {
+                                    assert!(!exact_chunks(k, n) && m == 1, "{what}");
+                                }
+                                ScalarDispatchPlan::NnExactNarrow16 => {
+                                    assert!(!exact_chunks(k, n) && m > 1, "{what}");
+                                }
+                                ScalarDispatchPlan::NnM64N64Qualified => {
+                                    assert!(!exact_chunks(k, n), "{what}");
+                                }
+                                other => panic!("{what}: {other:?} is not a batch-invariant tile"),
                             }
-                            ScalarDispatchPlan::NnFinal { slim: false } => {
-                                assert!(!exact_chunks(k, n) && m >= 128 && n >= 128, "{what}");
-                            }
-                            ScalarDispatchPlan::NnExactThin => {
-                                assert!(!exact_chunks(k, n) && m == 1, "{what}");
-                            }
-                            ScalarDispatchPlan::NnExactNarrow16 => {
-                                assert!(!exact_chunks(k, n) && m > 1, "{what}");
-                            }
-                            ScalarDispatchPlan::NnM64N64Qualified => {
-                                assert!(!exact_chunks(k, n), "{what}");
-                            }
-                            other => panic!("{what}: {other:?} is not a batch-invariant tile"),
                         }
                     }
                 }
@@ -17764,7 +17784,7 @@ mod exact_batch_invariant_tests {
                 F32TriadSelection::ScalarFma,
             );
         }
-        assert!(exact_batch_invariant_nn_plan(nn(0, 64, 96), 170).is_err());
-        assert!(exact_batch_invariant_nn_plan(nn(4, 64, 96), 0).is_err());
+        assert!(exact_batch_invariant_nn_plan(nn(0, 64, 96), 170, (12, 0)).is_err());
+        assert!(exact_batch_invariant_nn_plan(nn(4, 64, 96), 0, (8, 9)).is_err());
     }
 }

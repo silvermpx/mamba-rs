@@ -378,37 +378,52 @@ __device__ __forceinline__ void sm120_fma_body(
             }
         }
         __syncthreads();
-        // One float4 of the microtile at a time, through every slab in split
-        // order and then the owner's own piece, so the double sums of the
-        // weight gradient never hold the whole microtile in registers.
-        #pragma unroll
-        for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
-            const float* first = slabs + ((size_t)chunk * THREADS + threadIdx.x) * 4;
-            float4 head = __ldcg(reinterpret_cast<const float4*>(first));
-            float* own = threadResults + chunk * 4;
-            if (OP == SM120_FMA_OP_TN) {
-                double sum0 = (double)head.x;
-                double sum1 = (double)head.y;
-                double sum2 = (double)head.z;
-                double sum3 = (double)head.w;
-                for (int s = 1; s < splits - 1; ++s) {
-                    float4 value = __ldcg(reinterpret_cast<const float4*>(
-                        first + (size_t)s * SLAB_FLOATS));
-                    sum0 += (double)value.x;
-                    sum1 += (double)value.y;
-                    sum2 += (double)value.z;
-                    sum3 += (double)value.w;
+        if (OP == SM120_FMA_OP_TN) {
+            // Four float4s of the microtile at a time, through every slab in
+            // split order and then the owner's own piece: sixteen independent
+            // double sums keep the double-precision pipe busy, where four
+            // left it waiting on each add.
+            #pragma unroll
+            for (int group = 0; group < TM * TN / 16; ++group) {
+                double sum[16];
+                #pragma unroll
+                for (int quad = 0; quad < 4; ++quad) {
+                    int chunk = group * 4 + quad;
+                    float4 head = __ldcg(reinterpret_cast<const float4*>(
+                        slabs + ((size_t)chunk * THREADS + threadIdx.x) * 4));
+                    sum[quad * 4 + 0] = (double)head.x;
+                    sum[quad * 4 + 1] = (double)head.y;
+                    sum[quad * 4 + 2] = (double)head.z;
+                    sum[quad * 4 + 3] = (double)head.w;
                 }
-                sum0 += (double)own[0];
-                sum1 += (double)own[1];
-                sum2 += (double)own[2];
-                sum3 += (double)own[3];
+                for (int s = 1; s < splits - 1; ++s) {
+                    #pragma unroll
+                    for (int quad = 0; quad < 4; ++quad) {
+                        int chunk = group * 4 + quad;
+                        float4 value = __ldcg(reinterpret_cast<const float4*>(
+                            slabs + (size_t)s * SLAB_FLOATS
+                                + ((size_t)chunk * THREADS + threadIdx.x) * 4));
+                        sum[quad * 4 + 0] += (double)value.x;
+                        sum[quad * 4 + 1] += (double)value.y;
+                        sum[quad * 4 + 2] += (double)value.z;
+                        sum[quad * 4 + 3] += (double)value.w;
+                    }
+                }
                 double scale = (double)params.alpha;
-                own[0] = (float)(scale * sum0);
-                own[1] = (float)(scale * sum1);
-                own[2] = (float)(scale * sum2);
-                own[3] = (float)(scale * sum3);
-            } else {
+                #pragma unroll
+                for (int lane = 0; lane < 16; ++lane) {
+                    float* own = threadResults + group * 16 + lane;
+                    own[0] = (float)(scale * (sum[lane] + (double)own[0]));
+                }
+            }
+        } else {
+            // One float4 of the microtile at a time, through every slab in
+            // split order and then the owner's own piece.
+            #pragma unroll
+            for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
+                const float* first = slabs + ((size_t)chunk * THREADS + threadIdx.x) * 4;
+                float4 head = __ldcg(reinterpret_cast<const float4*>(first));
+                float* own = threadResults + chunk * 4;
                 float sum0 = head.x;
                 float sum1 = head.y;
                 float sum2 = head.z;
