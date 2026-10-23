@@ -3817,7 +3817,13 @@ fn tf32_params(
                 n: checked_i32(shape.output_columns(request.op), "exact-F32 columns")?,
                 k: checked_i32(shape.reduction(request.op), "exact-F32 reduction")?,
                 ldc,
-                splits: i32::from(exact.splits),
+                // A negative count tells the kernel the CTA folds its own
+                // pieces.
+                splits: if exact.in_cta {
+                    -i32::from(exact.splits)
+                } else {
+                    i32::from(exact.splits)
+                },
                 tiles_per_split: checked_i32(plan.tiles_per_split, "exact-F32 tiles per split")?,
             })
         }
@@ -3860,7 +3866,11 @@ pub(super) fn sm120_fma_launch_plan(
         k_tiles
     } else {
         match super::dispatch::sm120_fma_portable_cut(request) {
-            Some(cut) if usize::from(cut.splits) == splits => cut.piece_tiles,
+            // A tail continues the folded chain, which only a CTA that folds
+            // its own pieces can do.
+            Some(cut) if usize::from(cut.splits) == splits && (route.in_cta || !cut.tail) => {
+                cut.piece_tiles
+            }
             _ => {
                 return Err(format!(
                     "exact-F32 SM120 split of {splits} pieces is not the portable plan's cut of {:?} {}x{}x{}",
@@ -3869,8 +3879,15 @@ pub(super) fn sm120_fma_launch_plan(
             }
         }
     };
+    // One unit per tile and piece, or one per tile when the CTA folds its
+    // own pieces through a slab of its tile.
+    let (dealt, slabs_per_tile, flags_per_tile) = if route.in_cta {
+        (1, 1, 0)
+    } else {
+        (splits, splits - 1, splits - 1)
+    };
     let units = tiles
-        .checked_mul(splits)
+        .checked_mul(dealt)
         .and_then(|units| u32::try_from(units).ok())
         .filter(|units| *units <= i32::MAX as u32)
         .ok_or_else(|| {
@@ -3878,14 +3895,14 @@ pub(super) fn sm120_fma_launch_plan(
         })?;
     let slab_elements = tiles
         .checked_mul((bm * bn) as usize)
-        .and_then(|slab| slab.checked_mul(splits - 1))
+        .and_then(|slab| slab.checked_mul(slabs_per_tile))
         .ok_or_else(|| invalid_gemm_dimensions("exact-F32 slab extent overflows usize"))?;
     if slab_elements > SPLITK_SCRATCH_CAP {
         return Err(invalid_gemm_dimensions(
             "exact-F32 slabs exceed the fixed workspace",
         ));
     }
-    let flag_elements = tiles * (splits - 1);
+    let flag_elements = tiles * flags_per_tile;
     if flag_elements > TF32_SPLITK_COUNTER_CAP {
         return Err(invalid_gemm_dimensions(
             "exact-F32 flags exceed the fixed counter workspace",
@@ -5149,7 +5166,7 @@ fn sm120_fma_numeric_contract(route: Sm120FmaRoute) -> ResolvedNumericContract {
 }
 
 fn sm120_fma_ownership(route: Sm120FmaRoute) -> ResolvedOutputOwnership {
-    if route.splits == 1 {
+    if route.splits == 1 || route.in_cta {
         ResolvedOutputOwnership::OneCtaPerOutputTile
     } else {
         ResolvedOutputOwnership::OwnerCtaPerOutputTileFixedSplitFold
@@ -6163,6 +6180,7 @@ pub(in crate::gpu) fn launch_cached_inference_sm120_exact_tma<O: PhysicalLaunchO
         },
         kvec: false,
         splits: 1,
+        in_cta: false,
     });
     if resolve_tf32_forced(request, ctx.kernels.f32_triad_availability(), route).is_err() {
         return Ok(false);
@@ -15466,6 +15484,7 @@ mod prepared_f32_launch_tests {
             tile: Sm120FmaTile::M128N64,
             kvec: false,
             splits: 1,
+            in_cta: false,
         });
         assert_distinct(
             context_token,
@@ -15489,6 +15508,7 @@ mod prepared_f32_launch_tests {
                     tile: Sm120FmaTile::M64N128,
                     kvec: false,
                     splits: 1,
+                    in_cta: false,
                 },)),
                 request,
                 operands,

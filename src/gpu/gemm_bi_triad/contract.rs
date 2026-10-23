@@ -822,7 +822,8 @@ pub(super) fn append_tf32_route_digest(
             .required(b"route-family", &[9])
             .required(b"tile", &[route.tile.digest_code()])
             .required(b"kvec", &[u8::from(route.kvec)])
-            .required(b"splits", &[route.splits]),
+            .required(b"splits", &[route.splits])
+            .required(b"in-cta", &[u8::from(route.in_cta)]),
         Tf32PhysicalRoute::Sm89MmaTf32Compact8 => digest.required(b"route-family", &[10]),
         Tf32PhysicalRoute::Sm89TnPreRnaN96 => digest.required(b"route-family", &[11]),
         Tf32PhysicalRoute::Sm89TnPreRnaM64N64 => digest.required(b"route-family", &[12]),
@@ -1774,6 +1775,9 @@ pub struct Sm120FmaRoute {
     pub tile: Sm120FmaTile,
     pub kvec: bool,
     pub splits: u8,
+    /// One CTA walks all the pieces of its tile and folds them itself,
+    /// instead of one CTA per piece and an owner that folds the slabs.
+    pub in_cta: bool,
 }
 
 impl Sm120FmaRoute {
@@ -1783,6 +1787,9 @@ impl Sm120FmaRoute {
         }
         if self.kvec && op != ResolvedGemmOp::Nt {
             return Err("the k-vector B fragment only exists for NT".into());
+        }
+        if self.in_cta && self.splits < 2 {
+            return Err("an in-CTA fold needs at least two pieces".into());
         }
         Ok(())
     }
@@ -1794,6 +1801,7 @@ impl Sm120FmaRoute {
             tile: self.tile,
             kvec: self.kvec,
             splits: 1,
+            in_cta: false,
         }
     }
 }
@@ -3462,6 +3470,7 @@ const fn sm120_fma_spec(
             tile,
             kvec,
             splits: 1,
+            in_cta: false,
         }),
         symbol,
         module_kind: ModuleKind::TriadSm120,

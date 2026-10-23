@@ -13801,6 +13801,7 @@ mod tests {
             tile: Sm120FmaTile::M64N128,
             kvec: false,
             splits: 2,
+            in_cta: false,
         };
         let excluded_symbol = "nt_sm120_tma_fma_m64n128_bk16_s2";
         let exclusions = [

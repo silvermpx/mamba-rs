@@ -181,15 +181,17 @@ No selection compares an SM count to a card's number any more (the
 Repaired:
 - the SM120 exact-f32 kernels deal the portable plan's pieces (the batch
   chunks of a split-M weight gradient, the 64-input chunks of a slim split
-  product, one chain otherwise) and fold them as the portable reducers do
-  (f32 in piece order, then alpha, then the bias or the old gradient), so an
-  exact product has the same bits on SM120 as on every other architecture;
-  a plan they cannot reproduce (a tail chain, 32-input pieces) keeps the
-  portable route. Which shapes take the family is speed alone and reads the
-  live SM count. The grid barrier of the stream-K fold was run on an RTX
-  6000 Ada (900,000 crossings per CTA at grids of 1 to 852, and 3001
-  one-barrier launches per grid) with no stale read; the new exact fold has
-  not yet run on an SM120 card;
+  product, the 32-input chunks of a thin one with the tail chain its reducer
+  runs after the fold, one chain otherwise) and fold them as the portable
+  reducers do (f32 in piece order, then alpha, then the bias or the old
+  gradient), so an exact product has the same bits on SM120 as on every
+  other architecture (756 shapes on an RTX 5090 and an RTX 6000 Ada). Pieces
+  of at most four k tiles and a cut with a tail fold inside one CTA per
+  tile; the long pieces of a split-M gradient get a CTA each. Which shapes
+  take the family and how they fold is speed alone and reads the live SM
+  count. The grid barrier of the stream-K fold ran on an RTX 6000 Ada
+  (900,000 crossings per CTA at grids of 1 to 852, and 3001 one-barrier
+  launches per grid) and on an RTX 5090 with no stale read;
 - the SM120 neighbour rule bounds its tile swap and stream-K decline at the
   largest grid a measured stream-K cell won on (186 tiles), read from the
   table;

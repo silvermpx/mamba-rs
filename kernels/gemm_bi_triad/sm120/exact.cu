@@ -153,7 +153,14 @@ __device__ __forceinline__ void sm120_fma_body(
     unsigned smem_base = __cvta_generic_to_shared(sm120_fma_smem);
     unsigned barrier_base = smem_base + K_PIPE * STAGE_BYTES;
 
-    int splits = params.splits;
+    // A negative split count asks one CTA to walk every piece of its tile:
+    // -splits pieces of tiles_per_split k tiles, each a chain from zero,
+    // folded in piece order through the tile's slab; k tiles past the
+    // pieces are the tail a portable plan adds after the fold, and they
+    // continue the folded chain.
+    bool fold_pieces = params.splits < 0;
+    int pieces = fold_pieces ? -params.splits : 1;
+    int splits = fold_pieces ? 1 : params.splits;
     int unit = blockIdx.x;
     int tile_id = unit / splits;
     int split = unit - tile_id * splits;
@@ -191,7 +198,7 @@ __device__ __forceinline__ void sm120_fma_body(
     };
 
     float threadResults[TM * TN];
-    if (splits == 1 && bias != nullptr) {
+    if (splits == 1 && !fold_pieces && bias != nullptr) {
         #pragma unroll
         for (int c = 0; c < TN; ++c) {
             int global_column = pid_n * BN + local_column(c);
@@ -238,9 +245,11 @@ __device__ __forceinline__ void sm120_fma_body(
     };
 
     int num_k_tiles = (params.k + BK - 1) / BK;
-    int begin = split * params.tiles_per_split;
-    int end = min(begin + params.tiles_per_split, num_k_tiles);
+    int span = fold_pieces ? num_k_tiles : params.tiles_per_split;
+    int begin = split * span;
+    int end = min(begin + span, num_k_tiles);
     int range = max(end - begin, 0);
+    int piece_end = fold_pieces ? min(pieces * params.tiles_per_split, range) : 0;
     if (threadIdx.x == 0) {
         #pragma unroll
         for (int stage = 0; stage < K_PIPE - 1; ++stage) {
@@ -249,7 +258,10 @@ __device__ __forceinline__ void sm120_fma_body(
             }
         }
     }
-    for (int step = 0; step < range; ++step) {
+    // One k tile of the pipelined chain. A folding CTA runs it in a loop of
+    // its own that stops at every piece's end; the plain loop below keeps the
+    // codegen of a unit that never folds.
+    auto k_step = [&](int step) {
         int stage = step % K_PIPE;
         sm120_fma_wait_barrier(barrier_base + stage * 8,
                           (unsigned)((step / K_PIPE) & 1));
@@ -341,6 +353,60 @@ __device__ __forceinline__ void sm120_fma_body(
                 }
             }
         }
+    };
+
+    int step = 0;
+    if (fold_pieces) {
+        // The end of a piece: its chain joins the fold, which waits in this
+        // thread's own cells of the tile's slab until the last piece takes
+        // it back into the registers, where a tail then continues it.
+        float* slab = partials + (size_t)tile_id * SLAB_FLOATS;
+        for (int piece_start = 0; piece_start < piece_end;
+             piece_start += params.tiles_per_split) {
+            int stop = min(piece_start + params.tiles_per_split, piece_end);
+            for (; step < stop; ++step) {
+                k_step(step);
+            }
+            bool first = piece_start == 0;
+            bool last = stop == piece_end;
+            #pragma unroll
+            for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
+                float4* cell = reinterpret_cast<float4*>(
+                    slab + ((size_t)chunk * THREADS + threadIdx.x) * 4);
+                float* own = threadResults + chunk * 4;
+                float4 sum = {own[0], own[1], own[2], own[3]};
+                if (!first) {
+                    float4 held = __ldcg(cell);
+                    sum.x = __fadd_rn(held.x, own[0]);
+                    sum.y = __fadd_rn(held.y, own[1]);
+                    sum.z = __fadd_rn(held.z, own[2]);
+                    sum.w = __fadd_rn(held.w, own[3]);
+                }
+                if (last) {
+                    own[0] = sum.x;
+                    own[1] = sum.y;
+                    own[2] = sum.z;
+                    own[3] = sum.w;
+                } else {
+                    __stcg(cell, sum);
+                    own[0] = 0.0f;
+                    own[1] = 0.0f;
+                    own[2] = 0.0f;
+                    own[3] = 0.0f;
+                }
+            }
+        }
+    }
+    // The whole range of a plain unit, the tail of a folding one.
+    for (; step < range; ++step) {
+        k_step(step);
+    }
+
+    if (fold_pieces && OP == SM120_FMA_OP_TN) {
+        #pragma unroll
+        for (int result = 0; result < TM * TN; ++result) {
+            threadResults[result] = __fmul_rn(params.alpha, threadResults[result]);
+        }
     }
 
     if (splits > 1) {
@@ -419,8 +485,9 @@ __device__ __forceinline__ void sm120_fma_body(
     // A split weight gradient already carries alpha in its folded sum; a
     // split NN product adds its bias after alpha, as the portable reducer
     // does, where one split seeded the chain with it.
-    float alpha = OP == SM120_FMA_OP_TN && splits > 1 ? 1.0f : params.alpha;
-    const float* bias_last = splits > 1 ? bias : nullptr;
+    bool folded = splits > 1 || fold_pieces;
+    float alpha = OP == SM120_FMA_OP_TN && folded ? 1.0f : params.alpha;
+    const float* bias_last = folded ? bias : nullptr;
     #pragma unroll
     for (int i = 0; i < TM; ++i) {
         int global_row = pid_m * BM + local_row(i);

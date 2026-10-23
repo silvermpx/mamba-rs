@@ -33,8 +33,15 @@
   do, so an exact product has the same bits on these boards as on every
   other architecture. They used to deal two to five pieces of their own,
   or one chain where the portable plan splits the batch, and five of the
-  measured products differed from an RTX 6000 Ada's. Their speed under the
-  new cut has not been measured on a CC 12.x board.
+  measured products differed from an RTX 6000 Ada's. A cut whose pieces are
+  a few k tiles long (the thin and slim plans), or that runs a tail after
+  the fold, folds inside one CTA per tile, and a shape past the measured
+  cells takes the family from half a tile per multiprocessor (a whole tile
+  when the cut deals a CTA per piece). On an RTX 5090 the thin and slim
+  products the family took from the portable route run in 0.46 to 0.89 of
+  their time (14 of 16 shapes; 1.03 and 1.11 on two of 96 and 100 tiles),
+  two slim measured cells in 0.78 and 0.83, and the one-chain shapes it took
+  in 0.79 to 0.97 (26 of 337), at the same bits.
 - An exact weight gradient that splits its batch folds the pieces in f32
   instead of double, in the portable reducer and in every fused fold alike,
   so its bits change once on every card. The double fold ran about three
