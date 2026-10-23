@@ -4,6 +4,10 @@
 
 ### Changed
 
+- The Mamba-1 GPU trainers guard each pinned staging buffer with its own
+  event. One shared guard made the second upload of a step wait for the
+  whole previous step while the card idled (RTX 5090 training step: f32
+  8.78 -> 8.57 ms, bf16 6.13 -> 5.94). No bit changes.
 - The SM120 stream-K weight gradients deal a reduction of at most 256
   units one worker per 8 instead of 16, by the shape alone: the 32- to
   256-unit bf16 cells run in 0.75 to 0.79 of their time on an RTX 5090,

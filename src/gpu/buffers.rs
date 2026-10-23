@@ -1239,6 +1239,56 @@ impl Drop for PinnedHostBuf {
     }
 }
 
+/// The pinned host stage of one device buffer's per-step uploads, with the
+/// event that guards its reuse. The copy runs as true DMA, and an upload
+/// waits only for the stage's own previous copy: two buffers staged through
+/// one shared event made the second upload wait for the whole previous step
+/// while the card idled. A trainer whose step ends in a stream sync gains
+/// nothing from a stage, since its host copy cannot overlap the card's work
+/// and a pageable upload overlaps the two in the driver's own chunks.
+pub struct PinnedStage {
+    buf: PinnedHostBuf,
+    guard: cudarc::driver::CudaEvent,
+}
+
+impl PinnedStage {
+    /// A stage of `len` floats on the context of `stream`.
+    pub fn new(stream: &Arc<cudarc::driver::CudaStream>, len: usize) -> Result<Self, String> {
+        let guard = stream
+            .context()
+            .new_event(None)
+            .map_err(|e| format!("upload guard event: {e:?}"))?;
+        Ok(Self {
+            buf: PinnedHostBuf::zeroed(len)?,
+            guard,
+        })
+    }
+
+    /// Upload `src` into `dst` through the stage, on `stream`.
+    pub fn upload(
+        &mut self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dst: &mut GpuBuffer,
+        src: &[f32],
+    ) -> Result<(), String> {
+        let len = self.buf.len();
+        let Some(stage) = self.buf.as_mut_slice().get_mut(..src.len()) else {
+            return Err(format!(
+                "a pinned stage of {len} floats cannot hold {} floats",
+                src.len()
+            ));
+        };
+        self.guard
+            .synchronize()
+            .map_err(|e| format!("upload guard sync: {e:?}"))?;
+        stage.copy_from_slice(src);
+        dst.upload(stream, &self.buf.as_slice()[..src.len()])?;
+        self.guard
+            .record(stream)
+            .map_err(|e| format!("upload guard record: {e:?}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

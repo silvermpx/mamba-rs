@@ -1089,13 +1089,12 @@ pub(crate) struct MambaTrainerMixed {
     captured_f16_half_staging_ptr: u64,
     captured_f16_bi_upcast_ptrs: [u64; 3],
     captured_f16_gemm_flags: crate::gpu::context::GemmRoute,
-    // Pinned host staging for the per-step H2D uploads. The pin
-    // turns the copies into true async DMA; the guard event serializes
-    // staging-buffer reuse against the previous step's in-flight copy
-    // (rewriting a pinned source mid-DMA is silent wrong input).
-    pin_input: crate::gpu::buffers::PinnedHostBuf,
-    pin_dtemp: crate::gpu::buffers::PinnedHostBuf,
-    upload_guard: cudarc::driver::CudaEvent,
+    // Pinned stages of the per-step host rows: true async DMA, each reused
+    // only after its own previous copy (rewriting a pinned source mid-DMA
+    // is silent wrong input). The f16 lane's pre-scale copy shares the
+    // d_temporal stage.
+    input_stage: crate::gpu::buffers::PinnedStage,
+    dtemp_stage: crate::gpu::buffers::PinnedStage,
 }
 
 impl Drop for MambaTrainerMixed {
@@ -1106,28 +1105,20 @@ impl Drop for MambaTrainerMixed {
 }
 
 impl MambaTrainerMixed {
-    /// Upload through the pinned stage. Waits out the previous
-    /// step's DMA (guard event) before rewriting the staging buffer,
-    /// then records the guard after the enqueue. `which`: 0 = input into
-    /// mamba_input, 1 = d_temporal into d_temporal.
+    /// Upload through the pinned stages. `which`: 0 = input into
+    /// mamba_input, 1 = d_temporal into d_temporal, 2 = the f16 lane's
+    /// d_temporal into its pre-scale buffer.
     fn staged_upload(&mut self, which: usize, data: &[f32]) -> Result<(), String> {
-        self.upload_guard
-            .synchronize()
-            .map_err(|e| format!("upload guard sync: {e:?}"))?;
-        let (pin, dst) = match which {
-            0 => (&mut self.pin_input, &mut self.mamba_input),
-            1 => (&mut self.pin_dtemp, &mut self.d_temporal),
-            // 2 = f16 lane: d_temporal into the pre-scale staging buffer.
-            _ => (
-                &mut self.pin_dtemp,
+        let stream = &self.ctx.stream;
+        match which {
+            0 => self.input_stage.upload(stream, &mut self.mamba_input, data),
+            1 => self.dtemp_stage.upload(stream, &mut self.d_temporal, data),
+            _ => self.dtemp_stage.upload(
+                stream,
                 self.d_temporal_scaled.as_mut().expect("f16 dt_scaled"),
+                data,
             ),
-        };
-        pin.as_mut_slice()[..data.len()].copy_from_slice(data);
-        dst.upload(&self.ctx.stream, &pin.as_slice()[..data.len()])?;
-        self.upload_guard
-            .record(&self.ctx.stream)
-            .map_err(|e| format!("upload guard record: {e:?}"))
+        }
     }
 
     /// [`Self::staged_upload`] of host rows; rows the caller wrote on the
@@ -1295,13 +1286,10 @@ impl MambaTrainerMixed {
         let clip_scratch = GpuBuffer::zeros(&ctx.stream, 2)?;
         let skip_flag = OverflowFlag::new(&ctx.stream)?;
 
-        let pin_input = crate::gpu::buffers::PinnedHostBuf::zeroed(batch * seq_len * input_dim)?;
-        let pin_dtemp = crate::gpu::buffers::PinnedHostBuf::zeroed(batch * seq_len * cfg.d_model)?;
-        let upload_guard = ctx
-            .stream
-            .context()
-            .new_event(None)
-            .map_err(|e| format!("upload guard event: {e:?}"))?;
+        let input_stage =
+            crate::gpu::buffers::PinnedStage::new(&ctx.stream, batch * seq_len * input_dim)?;
+        let dtemp_stage =
+            crate::gpu::buffers::PinnedStage::new(&ctx.stream, batch * seq_len * cfg.d_model)?;
         let initial_gemm_route = ctx.gemm_route();
         let has_gemm_work = batch != 0
             && seq_len != 0
@@ -1356,9 +1344,8 @@ impl MambaTrainerMixed {
             captured_f16_half_staging_ptr: 0,
             captured_f16_bi_upcast_ptrs: [0; 3],
             captured_f16_gemm_flags: initial_gemm_route,
-            pin_input,
-            pin_dtemp,
-            upload_guard,
+            input_stage,
+            dtemp_stage,
         })
     }
 
@@ -2944,11 +2931,10 @@ pub(crate) struct MambaTrainerF32 {
     step_opts: BackwardOpts,
     /// The skip flag a measured step tail writes (see [`StepTail`]).
     skip_flag: OverflowFlag,
-    // Pinned host staging + reuse guard (see the twin fields on
-    // MambaTrainerMixed for the interlock rationale).
-    pin_input: crate::gpu::buffers::PinnedHostBuf,
-    pin_dtemp: crate::gpu::buffers::PinnedHostBuf,
-    upload_guard: cudarc::driver::CudaEvent,
+    // Pinned stages of the per-step host rows (see the twin fields on
+    // MambaTrainerMixed).
+    input_stage: crate::gpu::buffers::PinnedStage,
+    dtemp_stage: crate::gpu::buffers::PinnedStage,
 }
 
 impl Drop for MambaTrainerF32 {
@@ -2959,24 +2945,15 @@ impl Drop for MambaTrainerF32 {
 }
 
 impl MambaTrainerF32 {
-    /// Upload through the pinned stage. Waits out the previous
-    /// step's DMA (guard event) before rewriting the staging buffer,
-    /// then records the guard after the enqueue. `which`: 0 = input into
+    /// Upload through the pinned stages. `which`: 0 = input into
     /// mamba_input, 1 = d_temporal into d_temporal.
     fn staged_upload(&mut self, which: usize, data: &[f32]) -> Result<(), String> {
-        self.upload_guard
-            .synchronize()
-            .map_err(|e| format!("upload guard sync: {e:?}"))?;
-        let (pin, dst) = if which == 0 {
-            (&mut self.pin_input, &mut self.mamba_input)
+        let stream = &self.ctx.stream;
+        if which == 0 {
+            self.input_stage.upload(stream, &mut self.mamba_input, data)
         } else {
-            (&mut self.pin_dtemp, &mut self.d_temporal)
-        };
-        pin.as_mut_slice()[..data.len()].copy_from_slice(data);
-        dst.upload(&self.ctx.stream, &pin.as_slice()[..data.len()])?;
-        self.upload_guard
-            .record(&self.ctx.stream)
-            .map_err(|e| format!("upload guard record: {e:?}"))
+            self.dtemp_stage.upload(stream, &mut self.d_temporal, data)
+        }
     }
 
     /// [`Self::staged_upload`] of host rows; rows the caller wrote on the
@@ -3106,13 +3083,10 @@ impl MambaTrainerF32 {
         let clip_scratch = GpuBuffer::zeros(&ctx.stream, 2)?;
         let skip_flag = OverflowFlag::new(&ctx.stream)?;
 
-        let pin_input = crate::gpu::buffers::PinnedHostBuf::zeroed(batch * seq_len * input_dim)?;
-        let pin_dtemp = crate::gpu::buffers::PinnedHostBuf::zeroed(batch * seq_len * cfg.d_model)?;
-        let upload_guard = ctx
-            .stream
-            .context()
-            .new_event(None)
-            .map_err(|e| format!("upload guard event: {e:?}"))?;
+        let input_stage =
+            crate::gpu::buffers::PinnedStage::new(&ctx.stream, batch * seq_len * input_dim)?;
+        let dtemp_stage =
+            crate::gpu::buffers::PinnedStage::new(&ctx.stream, batch * seq_len * cfg.d_model)?;
         let has_gemm_work = batch != 0 && seq_len != 0;
         Ok(Self {
             ctx,
@@ -3142,9 +3116,8 @@ impl MambaTrainerF32 {
             clip_scratch,
             step_opts: BackwardOpts::default(),
             skip_flag,
-            pin_input,
-            pin_dtemp,
-            upload_guard,
+            input_stage,
+            dtemp_stage,
         })
     }
 
