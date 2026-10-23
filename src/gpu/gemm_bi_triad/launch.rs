@@ -670,7 +670,7 @@ impl PreparedF32Key {
 
 #[derive(Default)]
 pub(crate) struct F32PreparedLaunchCache {
-    entries: HashMap<PreparedF32Key, Box<PreparedF32TriadLaunch>>,
+    entries: PreparedMap<PreparedF32Key, Box<PreparedF32TriadLaunch>>,
 }
 
 // Every GEMM call site of a step keeps its own entry (the key holds its
@@ -682,13 +682,69 @@ pub(crate) struct F32PreparedLaunchCache {
 // metadata bounded per context.
 const PREPARED_CACHE_LIMIT: usize = 1 << 17;
 
-fn make_room_in_bounded_cache<K, V>(
-    entries: &mut HashMap<K, V>,
+/// The prepared-launch caches hash their keys once or twice on every GEMM
+/// call. Their keys are our own pointers, shapes and enums, never input an
+/// attacker chooses, so a multiply-rotate word hash serves them where the
+/// standard SipHash spent a fifth of a microsecond per lookup.
+#[derive(Clone, Copy, Default)]
+struct WordHasher(u64);
+
+impl WordHasher {
+    const SEED: u64 = 0x517c_c1b7_2722_0a95;
+
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(Self::SEED);
+    }
+}
+
+impl std::hash::Hasher for WordHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let (words, rest) = bytes.as_chunks::<8>();
+        for word in words {
+            self.add(u64::from_le_bytes(*word));
+        }
+        if !rest.is_empty() {
+            let mut word = [0_u8; 8];
+            word[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(word) ^ ((rest.len() as u64) << 56));
+        }
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.add(u64::from(value));
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.add(u64::from(value));
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.add(u64::from(value));
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.add(value);
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.add(value as u64);
+    }
+}
+
+type PreparedMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<WordHasher>>;
+
+fn make_room_in_bounded_cache<K, V, S>(
+    entries: &mut HashMap<K, V, S>,
     incoming: &K,
     limit: usize,
     mut keep: impl FnMut(&V) -> bool,
 ) where
     K: Eq + std::hash::Hash,
+    S: std::hash::BuildHasher,
 {
     entries.retain(|_, value| keep(value));
     if !entries.contains_key(incoming) && entries.len() >= limit {
@@ -710,7 +766,10 @@ struct Sm120PreparedKey {
 
 impl std::hash::Hash for Sm120PreparedKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.context.hash(state);
+        // The route identity is a kilobyte of digests that stays fixed for
+        // a context's life; its policy is the part that moves, and equality
+        // still compares the whole identity.
+        self.context.policy.hash(state);
         self.route.op.hash(state);
         match self.route.dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => 0_u8,
@@ -751,7 +810,7 @@ struct Sm120PreparedCacheEntry {
 
 #[derive(Default)]
 pub(crate) struct Sm120PreparedLaunchCache {
-    entries: HashMap<Sm120PreparedKey, Sm120PreparedCacheEntry>,
+    entries: PreparedMap<Sm120PreparedKey, Sm120PreparedCacheEntry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -839,13 +898,18 @@ impl Sm120PreparedLaunchCache {
         route: Sm120ForcedRoute,
         request: Sm120AutoRequest,
     ) -> Result<&Sm120PreparedLaunch, String> {
+        // A current allocation epoch serves the entry whether or not the
+        // stream is capturing, so only the other states ask the driver.
+        let epoch = Self::managed_epoch_state(self.entries.get(&key));
+        if epoch == Sm120ManagedEpochState::Current {
+            return Ok(&self.entries.get(&key).expect("current cache hit").prepared);
+        }
         let capturing = ctx
             .stream
             .capture_status()
             .map_err(|error| format!("query SM120 TMA capture status: {error:?}"))?
             != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
-        let epoch = Self::managed_epoch_state(self.entries.get(&key));
-        let action = sm120_cache_action(capturing, self.entries.contains_key(&key), epoch);
+        let action = sm120_cache_action(capturing, epoch != Sm120ManagedEpochState::Missing, epoch);
         match action {
             Sm120CacheAction::UsePrepared => {
                 return Ok(&self.entries.get(&key).expect("cache hit above").prepared);
@@ -929,7 +993,10 @@ impl Eq for Sm100PreparedKey {}
 
 impl std::hash::Hash for Sm100PreparedKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.context.hash(state);
+        // The route identity is a kilobyte of digests that stays fixed for
+        // a context's life; its policy is the part that moves, and equality
+        // still compares the whole identity.
+        self.context.policy.hash(state);
         self.route.op.hash(state);
         match self.route.dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => 0_u8,
@@ -973,7 +1040,7 @@ struct Sm100PreparedCacheEntry {
 /// closed.
 #[derive(Default)]
 pub(crate) struct Sm100PreparedLaunchCache {
-    entries: HashMap<Sm100PreparedKey, Sm100PreparedCacheEntry>,
+    entries: PreparedMap<Sm100PreparedKey, Sm100PreparedCacheEntry>,
 }
 
 fn sm100_capture_cache_error(action: Sm120CacheAction) -> &'static str {
@@ -1017,13 +1084,18 @@ impl Sm100PreparedLaunchCache {
         route: Sm100ForcedRoute,
         request: Sm100AutoRequest,
     ) -> Result<&Sm100PreparedLaunch, String> {
+        // A current allocation epoch serves the entry whether or not the
+        // stream is capturing, so only the other states ask the driver.
+        let epoch = Self::managed_epoch_state(self.entries.get(&key));
+        if epoch == Sm120ManagedEpochState::Current {
+            return Ok(&self.entries.get(&key).expect("current cache hit").prepared);
+        }
         let capturing = ctx
             .stream
             .capture_status()
             .map_err(|error| format!("query SM100 TCGEN capture status: {error:?}"))?
             != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
-        let epoch = Self::managed_epoch_state(self.entries.get(&key));
-        let action = sm120_cache_action(capturing, self.entries.contains_key(&key), epoch);
+        let action = sm120_cache_action(capturing, epoch != Sm120ManagedEpochState::Missing, epoch);
         match action {
             Sm120CacheAction::UsePrepared => {
                 return Ok(&self.entries.get(&key).expect("cache hit above").prepared);
@@ -1268,7 +1340,10 @@ impl Eq for Sm90aPreparedKey {}
 
 impl std::hash::Hash for Sm90aPreparedKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.context.hash(state);
+        // The route identity is a kilobyte of digests that stays fixed for
+        // a context's life; its policy is the part that moves, and equality
+        // still compares the whole identity.
+        self.context.policy.hash(state);
         self.route.op.hash(state);
         match self.route.dtype {
             WeightDtype::F32 | WeightDtype::Tf32 => 0_u8,
@@ -1317,7 +1392,7 @@ struct Sm90aPreparedCacheEntry {
 /// closed.
 #[derive(Default)]
 pub(crate) struct Sm90aPreparedLaunchCache {
-    entries: HashMap<Sm90aPreparedKey, Sm90aPreparedCacheEntry>,
+    entries: PreparedMap<Sm90aPreparedKey, Sm90aPreparedCacheEntry>,
 }
 
 fn sm90a_capture_cache_error(action: Sm120CacheAction) -> &'static str {
@@ -1361,13 +1436,18 @@ impl Sm90aPreparedLaunchCache {
         route: Sm90aForcedRoute,
         request: Sm90aAutoRequest,
     ) -> Result<&Sm90aPreparedCacheEntry, String> {
+        // A current allocation epoch serves the entry whether or not the
+        // stream is capturing, so only the other states ask the driver.
+        let epoch = Self::managed_epoch_state(self.entries.get(&key));
+        if epoch == Sm120ManagedEpochState::Current {
+            return Ok(self.entries.get(&key).expect("current cache hit"));
+        }
         let capturing = ctx
             .stream
             .capture_status()
             .map_err(|error| format!("query SM90a WGMMA capture status: {error:?}"))?
             != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
-        let epoch = Self::managed_epoch_state(self.entries.get(&key));
-        let action = sm120_cache_action(capturing, self.entries.contains_key(&key), epoch);
+        let action = sm120_cache_action(capturing, epoch != Sm120ManagedEpochState::Missing, epoch);
         match action {
             Sm120CacheAction::UsePrepared => {
                 return Ok(self.entries.get(&key).expect("cache hit above"));
