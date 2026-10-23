@@ -2882,20 +2882,16 @@ const RNA_NT_SPLIT_MIN_REDUCTION: usize = 256;
 const RNA_NT_SPLIT_MAX_COLUMNS: usize = 1024;
 
 /// Whether the 64 x 96 pre-rounded weight-gradient tile serves rather than
-/// the 64 x 64 one: its busiest multiprocessor does no more work, counted as
-/// whole-card rounds of CTAs times the tile's outputs. Both tiles walk one
-/// chain per output, so the pick reads the live multiprocessor count. It
-/// reproduces the RTX 6000 Ada's measured picks (the 590k-output gradients
-/// take the wider tile, the 262k-320k ones do not), and on an RTX 5090 it
-/// chose the faster tile on 143 of the 144 pre-rounded shapes of a sweep
-/// (1.05 times the other's time on the last), where an output-size bound set
-/// on the Ada ran them in 1.09 times the time.
+/// the 64 x 64 one: the 64 x 64 grid needs more than one wave of the live
+/// multiprocessors. Both tiles walk one chain per output, so the pick reads
+/// the live count. It reproduces the RTX 6000 Ada's measured picks (the
+/// 590k-output gradients take the wider tile, the 262k-320k ones do not);
+/// on an RTX 5090 and an RTX PRO 6000 it ran 144 pre-rounded shapes in 0.98
+/// and 0.99 of the time of an output-size bound set on the Ada, none slower.
+/// Weighing the busiest multiprocessor's work instead gained 0.92 on the
+/// RTX 5090 but slowed 20 shapes on the RTX PRO 6000.
 fn rna_pre_tn_wide_pays(rows: usize, columns: usize, multiprocessors: usize) -> bool {
-    if multiprocessors == 0 {
-        return false;
-    }
-    let rounds = |bn: usize| (rows.div_ceil(64) * columns.div_ceil(bn)).div_ceil(multiprocessors);
-    rounds(96) * 96 <= rounds(64) * 64
+    multiprocessors != 0 && rows.div_ceil(64) * columns.div_ceil(64) > multiprocessors
 }
 
 /// The outputs, rows by columns, one CTA of a wide or multistage tile covers.
@@ -3061,9 +3057,9 @@ fn rna_backward_rule_route(
 /// weight gradient, and the multistage input-gradient tiles from 786k
 /// outputs over a reduction of 256 or more (NT 4096x256x2112 77.5 -> 54.9,
 /// 1024x833x384 24.2 -> 16.0). The partition counts are the shape's; the
-/// tiles walk one chain each, so no pick moves a bit. A staged input
-/// gradient then takes the tile its busiest multiprocessor does the least
-/// work with ([`rna_nt_least_work`]).
+/// tiles walk one chain each, so no pick moves a bit. Where the table names
+/// the portable 64 x 64 tile for a staged input gradient, the SM120 TMA
+/// 64 x 64 tile walks the same chain ([`rna_nt_tma_twin`]).
 fn rna_blackwell_backward_route(
     request: F32TriadRequest,
     operands: Option<F32TriadOperands>,
@@ -3073,80 +3069,36 @@ fn rna_blackwell_backward_route(
     if request.op != ResolvedGemmOp::Nt || !rna_tiles_stage(request, operands, availability) {
         return table;
     }
-    rna_nt_least_work(request, table, availability)
+    rna_nt_tma_twin(table, availability)
 }
 
-/// The strict input gradient's tile on a CC 12.x board by the work its
-/// busiest multiprocessor does: whole-card rounds of the tile's CTAs, times
-/// the CTAs one multiprocessor holds, times the tile's outputs. The SM120 TMA
-/// 64 x 64 tile (two CTAs a multiprocessor) and the multistage tiles (one)
-/// count nine tenths of that work against the 144 x 96 and portable 64 x 64
-/// tiles, which stage their operands through registers; the table's pick
-/// keeps a tie. Every one of these tiles walks one chain per output, so the
-/// pick reads the live multiprocessor count and moves no bit. On an RTX 5090
-/// it ran 207 input-gradient shapes in 0.85 of the table's time and none
-/// slower (the best tile per shape: 0.81). The table's split and narrow
-/// tiles keep their shapes.
-fn rna_nt_least_work(
-    request: F32TriadRequest,
+/// The SM120 TMA 64 x 64 tile in place of the portable 64 x 64 one the
+/// table names for a strict input gradient, when the SM120 module is bound
+/// with tensor-map access: the same tile and chain fed by TMA. On an RTX
+/// 5090 and an RTX PRO 6000 the input gradients ran in 0.91 and 0.90 of the
+/// table's time, none slower. Weighing the busiest multiprocessor's work
+/// over the TMA, 144 x 96 and multistage tiles gained 0.85 on the RTX 5090
+/// but slowed 61 shapes on the RTX PRO 6000, up to 1.42 times.
+fn rna_nt_tma_twin(
     table: Tf32PhysicalRoute,
     availability: F32TriadAvailability,
 ) -> Tf32PhysicalRoute {
     use super::contract::{
-        Tf32PortableRoute, Tf32PortableTile, Tf32RnaWideTile, Tf32Sm120Route, Tf32Sm120Stages,
-        Tf32Sm120Tile,
+        Tf32PortableRoute, Tf32PortableTile, Tf32Sm120Route, Tf32Sm120Stages, Tf32Sm120Tile,
     };
-    let multiprocessors = availability.multiprocessors as usize;
-    if multiprocessors == 0 {
-        return table;
-    }
-    let tma = Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route {
-        tile: Tf32Sm120Tile::M64N64,
-        stages: Tf32Sm120Stages::S2,
-    });
     let tma_binds = availability.specialized.is_some_and(|module| {
         module.module_kind == ModuleKind::TriadSm120 && module.device_caps.tensor_map_access
     });
-    // Outputs a CTA covers, CTAs a multiprocessor holds, tenths of the work.
-    let footprint = |route: Tf32PhysicalRoute| match route {
-        route if route == tma => Some((64, 64, 2, 9)),
-        Tf32PhysicalRoute::MmaTf32RnaWide(tile) if tile.op() == ResolvedGemmOp::Nt => {
-            let (bm, bn) = rna_wide_tile_outputs(tile);
-            Some((bm, bn, 1, 9))
-        }
-        Tf32PhysicalRoute::Sm89NtRnaM144N96S2 => Some((144, 96, 1, 10)),
+    match table {
         Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
             tile: Tf32PortableTile::M64N64,
             ..
-        }) => Some((64, 64, 2, 10)),
-        _ => None,
-    };
-    let rows = request.shape.output_rows(request.op);
-    let columns = request.shape.output_columns(request.op);
-    let work = |route| {
-        footprint(route).map(|(bm, bn, held, tenths)| {
-            let tiles = rows.div_ceil(bm) * columns.div_ceil(bn);
-            tiles.div_ceil(multiprocessors * held) * held * bm * bn * tenths
-        })
-    };
-    let Some(mut least) = work(table) else {
-        return table;
-    };
-    let mut pick = table;
-    let multistage = [
-        Tf32RnaWideTile::NtMsM64N128Bk16S6,
-        Tf32RnaWideTile::NtMsM128N64S3,
-        Tf32RnaWideTile::NtMsM128N128Bk16S5,
-    ]
-    .map(Tf32PhysicalRoute::MmaTf32RnaWide);
-    for candidate in tma_binds.then_some(tma).into_iter().chain(multistage) {
-        if let Some(candidate_work) = work(candidate)
-            && candidate_work < least
-        {
-            (pick, least) = (candidate, candidate_work);
-        }
+        }) if tma_binds => Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(Tf32Sm120Route {
+            tile: Tf32Sm120Tile::M64N64,
+            stages: Tf32Sm120Stages::S2,
+        }),
+        other => other,
     }
-    pick
 }
 
 /// The CC 12.x gradient table [`rna_blackwell_backward_route`] starts from.
@@ -3413,12 +3365,14 @@ fn rna_forward_table_route(
 ///
 /// Staged operands then take the multistage tiles where they pay: the
 /// multistage 64 x 64 tile in place of the portable one (0.54 to 0.87 of its
-/// time on all 76 such shapes of two RTX 5090 sweeps), and a multistage
-/// tile in place of a wide one when its busiest multiprocessor does at most
-/// nine tenths of the work, counted as whole-card rounds of one CTA each
-/// times the tile's outputs, the larger tile on a tie. On the RTX 5090 that
-/// ran 168 forward shapes in 0.90 of the table's time with none slower (the
-/// best tile per shape: 0.88); a margin of one twentieth slowed four.
+/// time on all 76 such shapes of two RTX 5090 sweeps) and in place of a wide
+/// one while its grid fits one wave of the live multiprocessors, and else
+/// the multistage 128 x 64 tile where its busiest multiprocessor does at
+/// most four fifths of the wide tile's work, counted as whole-card rounds of
+/// one CTA each times the tile's outputs. That ran 168 forward shapes in
+/// 0.95 of the table's time on an RTX 5090 and 0.97 on an RTX PRO 6000, none
+/// slower on either. The 64 x 64 tile over several waves, by the same work
+/// count, slowed up to 21 shapes on the RTX PRO 6000.
 fn rna_blackwell_forward_route(
     request: F32TriadRequest,
     staged: bool,
@@ -3442,15 +3396,12 @@ fn rna_blackwell_forward_route(
         let (bm, bn) = rna_wide_tile_outputs(tile);
         (m.div_ceil(bm) * n.div_ceil(bn)).div_ceil(multiprocessors) * bm * bn
     };
-    let tabled_work = work(tabled);
-    let (mut pick, mut least) = (tabled, tabled_work);
-    for candidate in [Tf32RnaWideTile::MsM128N64S3, Tf32RnaWideTile::MsM64N64S3] {
-        if work(candidate) < least {
-            (pick, least) = (candidate, work(candidate));
-        }
-    }
-    Tf32PhysicalRoute::MmaTf32RnaWide(if least * 10 <= tabled_work * 9 {
-        pick
+    let one_wave = m.div_ceil(64) * n.div_ceil(64) <= multiprocessors;
+    let wide = Tf32RnaWideTile::MsM128N64S3;
+    Tf32PhysicalRoute::MmaTf32RnaWide(if one_wave {
+        Tf32RnaWideTile::MsM64N64S3
+    } else if work(wide) * 5 <= work(tabled) * 4 {
+        wide
     } else {
         tabled
     })
