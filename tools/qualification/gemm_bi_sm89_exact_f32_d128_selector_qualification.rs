@@ -70,7 +70,7 @@ fn splitm64_delta(dims: (usize, usize, usize), a: &[f32], b: &[f32], alpha: f32)
     let mut delta = vec![0.0_f32; k * n];
     for row in 0..k {
         for column in 0..n {
-            let mut sum = 0.0_f64;
+            let mut sum = 0.0_f32;
             for chunk in 0..64 {
                 let mut partial = 0.0_f32;
                 for offset in 0..16 {
@@ -78,12 +78,12 @@ fn splitm64_delta(dims: (usize, usize, usize), a: &[f32], b: &[f32], alpha: f32)
                     partial = a[reduction * k + row].mul_add(b[reduction * n + column], partial);
                 }
                 if chunk == 0 {
-                    sum = partial as f64;
+                    sum = partial;
                 } else {
-                    sum += partial as f64;
+                    sum += partial;
                 }
             }
-            delta[row * n + column] = ((alpha as f64) * sum) as f32;
+            delta[row * n + column] = alpha * sum;
         }
     }
     delta
@@ -651,7 +651,7 @@ mod live {
             || node.shape != case.dims
             || node.strides != (k, n, n)
             || node.tile != Some(case.tile)
-            || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce)
+            || node.numeric_contract != Some(ResolvedNumericContract::ScalarFmaTnSplitMReduce)
             || node.ownership != Some(ResolvedOutputOwnership::OneCtaPerOutputTile)
             || node.launch.grid_dim != (256, 1, 1)
             || node.launch.block_dim != (64, 1, 1)
@@ -675,7 +675,7 @@ mod live {
         let expected_tiles = [(128, 128), (1, 1)];
         let expected_numeric = [
             ResolvedNumericContract::ScalarFma,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+            ResolvedNumericContract::ScalarFmaTnSplitMReduce,
         ];
         let expected_ownership = [
             ResolvedOutputOwnership::OneCtaPerOutputTile,
@@ -1255,7 +1255,7 @@ mod native_contract_tests {
     }
 
     #[test]
-    fn independent_oracle_uses_positive_zero_chunks_and_ascending_f64_fold() {
+    fn independent_oracle_uses_positive_zero_chunks_and_ascending_f32_fold() {
         let dims = (1_024, 1, 1);
         let mut a = vec![0.0_f32; 1_024];
         let mut b = vec![0.0_f32; 1_024];

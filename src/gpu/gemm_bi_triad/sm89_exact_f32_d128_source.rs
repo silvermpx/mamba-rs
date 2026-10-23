@@ -3,10 +3,10 @@ use std::collections::BTreeSet;
 pub const OWNER_TEMPLATE: &str =
     include_str!("../../../kernels/gemm_bi_triad/sm80/exact_f32_d128.cu");
 
-pub const OWNER_SHA256: &str = "3d5226abe9d28b17fd0c6d02718da57a2bd2fa5906fbe1305cac9f60d019e70f";
+pub const OWNER_SHA256: &str = "353180ca666567f1a4aa9e074f331e714c9f16e4ec6d3c1fbcd021d9e9cb664d";
 pub const OWNER_SHA256_BYTES: [u8; 32] = [
-    0x3d, 0x52, 0x26, 0xab, 0xe9, 0xd2, 0x8b, 0x17, 0xfd, 0x0c, 0x6d, 0x02, 0x71, 0x8d, 0xa5, 0x7a,
-    0x2b, 0xd2, 0xfa, 0x59, 0x06, 0xfb, 0xe1, 0x30, 0x5c, 0xac, 0x9f, 0x60, 0xd0, 0x19, 0xe7, 0x0f,
+    0x35, 0x31, 0x80, 0xca, 0x66, 0x65, 0x67, 0xf1, 0xa4, 0xaa, 0x9e, 0x07, 0x4f, 0x33, 0x1e, 0x71,
+    0x4c, 0x9f, 0x16, 0xe4, 0xec, 0x6d, 0x3c, 0x1f, 0xbc, 0xd0, 0x21, 0xd9, 0xe9, 0xcb, 0x66, 0x4d,
 ];
 
 pub const D128_IN_SYMBOL: &str = "tn_sm89_f32_d128_in_m16n16_g8_s2_cg";
@@ -20,7 +20,7 @@ pub const DIRECT_FOLD_TERMINAL_ARGUMENT: u32 = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sm89ExactF32D128KernelKind {
-    DirectF64FoldFinal,
+    DirectFoldFinal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,7 +63,7 @@ pub struct Sm89ExactF32D128KernelSpec {
 pub const SM89_EXACT_F32_D128_KERNEL_SPECS: [Sm89ExactF32D128KernelSpec; 2] = [
     Sm89ExactF32D128KernelSpec {
         symbol: D128_IN_SYMBOL,
-        kind: Sm89ExactF32D128KernelKind::DirectF64FoldFinal,
+        kind: Sm89ExactF32D128KernelKind::DirectFoldFinal,
         shape: (1_024, 128, 512),
         tile: (16, 16),
         grid: (256, 1, 1),
@@ -80,7 +80,7 @@ pub const SM89_EXACT_F32_D128_KERNEL_SPECS: [Sm89ExactF32D128KernelSpec; 2] = [
     },
     Sm89ExactF32D128KernelSpec {
         symbol: D128_OUT_SYMBOL,
-        kind: Sm89ExactF32D128KernelKind::DirectF64FoldFinal,
+        kind: Sm89ExactF32D128KernelKind::DirectFoldFinal,
         shape: (1_024, 256, 128),
         tile: (16, 16),
         grid: (128, 1, 1),

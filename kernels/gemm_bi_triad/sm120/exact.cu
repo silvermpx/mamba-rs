@@ -14,11 +14,9 @@
 // pieces: unit (tile, s) accumulates its contiguous range of k tiles from
 // zero, splits 0..S-2 publish partial slabs, and split S-1 owns the tile and
 // folds the pieces the way the portable reducers do, so a product has the
-// same bits as on any other architecture. NN and NT sum p0 + ... + p(S-1)
-// with __fadd_rn in that order, scale by alpha and add the bias last, as
-// splitk_reduce does; TN sums the pieces in double in the same order and
-// adds alpha times the sum, rounded to float, to the output, as
-// splitm_reduce does.
+// same bits as on any other architecture: p0 + ... + p(S-1) with __fadd_rn
+// in that order, then alpha, then the bias for NN (splitk_reduce) or the old
+// output for TN (splitm_reduce).
 //
 // Shape of the schedule:
 //   - A and B tiles arrive through cp.async.bulk.tensor, one 2d box each
@@ -378,68 +376,36 @@ __device__ __forceinline__ void sm120_fma_body(
             }
         }
         __syncthreads();
-        if (OP == SM120_FMA_OP_TN) {
-            // Four float4s of the microtile at a time, through every slab in
-            // split order and then the owner's own piece: sixteen independent
-            // double sums keep the double-precision pipe busy, where four
-            // left it waiting on each add.
-            #pragma unroll
-            for (int group = 0; group < TM * TN / 16; ++group) {
-                double sum[16];
-                #pragma unroll
-                for (int quad = 0; quad < 4; ++quad) {
-                    int chunk = group * 4 + quad;
-                    float4 head = __ldcg(reinterpret_cast<const float4*>(
-                        slabs + ((size_t)chunk * THREADS + threadIdx.x) * 4));
-                    sum[quad * 4 + 0] = (double)head.x;
-                    sum[quad * 4 + 1] = (double)head.y;
-                    sum[quad * 4 + 2] = (double)head.z;
-                    sum[quad * 4 + 3] = (double)head.w;
-                }
-                for (int s = 1; s < splits - 1; ++s) {
-                    #pragma unroll
-                    for (int quad = 0; quad < 4; ++quad) {
-                        int chunk = group * 4 + quad;
-                        float4 value = __ldcg(reinterpret_cast<const float4*>(
-                            slabs + (size_t)s * SLAB_FLOATS
-                                + ((size_t)chunk * THREADS + threadIdx.x) * 4));
-                        sum[quad * 4 + 0] += (double)value.x;
-                        sum[quad * 4 + 1] += (double)value.y;
-                        sum[quad * 4 + 2] += (double)value.z;
-                        sum[quad * 4 + 3] += (double)value.w;
-                    }
-                }
-                double scale = (double)params.alpha;
-                #pragma unroll
-                for (int lane = 0; lane < 16; ++lane) {
-                    float* own = threadResults + group * 16 + lane;
-                    own[0] = (float)(scale * (sum[lane] + (double)own[0]));
-                }
+        // One float4 of the microtile at a time, through every slab in split
+        // order and then the owner's own piece.
+        #pragma unroll
+        for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
+            const float* first = slabs + ((size_t)chunk * THREADS + threadIdx.x) * 4;
+            float4 head = __ldcg(reinterpret_cast<const float4*>(first));
+            float* own = threadResults + chunk * 4;
+            float sum0 = head.x;
+            float sum1 = head.y;
+            float sum2 = head.z;
+            float sum3 = head.w;
+            for (int s = 1; s < splits - 1; ++s) {
+                float4 value = __ldcg(reinterpret_cast<const float4*>(
+                    first + (size_t)s * SLAB_FLOATS));
+                sum0 = __fadd_rn(sum0, value.x);
+                sum1 = __fadd_rn(sum1, value.y);
+                sum2 = __fadd_rn(sum2, value.z);
+                sum3 = __fadd_rn(sum3, value.w);
             }
-        } else {
-            // One float4 of the microtile at a time, through every slab in
-            // split order and then the owner's own piece.
-            #pragma unroll
-            for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
-                const float* first = slabs + ((size_t)chunk * THREADS + threadIdx.x) * 4;
-                float4 head = __ldcg(reinterpret_cast<const float4*>(first));
-                float* own = threadResults + chunk * 4;
-                float sum0 = head.x;
-                float sum1 = head.y;
-                float sum2 = head.z;
-                float sum3 = head.w;
-                for (int s = 1; s < splits - 1; ++s) {
-                    float4 value = __ldcg(reinterpret_cast<const float4*>(
-                        first + (size_t)s * SLAB_FLOATS));
-                    sum0 = __fadd_rn(sum0, value.x);
-                    sum1 = __fadd_rn(sum1, value.y);
-                    sum2 = __fadd_rn(sum2, value.z);
-                    sum3 = __fadd_rn(sum3, value.w);
-                }
-                own[0] = __fadd_rn(sum0, own[0]);
-                own[1] = __fadd_rn(sum1, own[1]);
-                own[2] = __fadd_rn(sum2, own[2]);
-                own[3] = __fadd_rn(sum3, own[3]);
+            own[0] = __fadd_rn(sum0, own[0]);
+            own[1] = __fadd_rn(sum1, own[1]);
+            own[2] = __fadd_rn(sum2, own[2]);
+            own[3] = __fadd_rn(sum3, own[3]);
+            // A weight gradient scales here, rounded once, so the epilogue
+            // only adds it to the old value, as splitm_reduce does.
+            if (OP == SM120_FMA_OP_TN) {
+                own[0] = __fmul_rn(params.alpha, own[0]);
+                own[1] = __fmul_rn(params.alpha, own[1]);
+                own[2] = __fmul_rn(params.alpha, own[2]);
+                own[3] = __fmul_rn(params.alpha, own[3]);
             }
         }
         __syncthreads();

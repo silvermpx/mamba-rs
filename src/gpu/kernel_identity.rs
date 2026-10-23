@@ -3079,7 +3079,7 @@ pub enum PhysicalGemmBackend {
     MmaTf32RnaSplitK4 = 10,
     MmaTf32RnaSplitK2 = 11,
     ScalarFmaTnNarrowSplitMPartial = 13,
-    ScalarFmaTnSplitMF64Reduce = 15,
+    ScalarFmaTnSplitMReduce = 15,
     MmaTf32RnaSplitK8 = 16,
     ScalarFmaSplitKPartial = 17,
     ScalarFmaSplitKF32Reduce = 18,
@@ -3094,7 +3094,7 @@ pub enum PhysicalGemmBackend {
     Sm89MmaTf32AddHalf = 27,
     Sm89Mma16HalfS2 = 28,
     Sm89MmaTf32NtALdmatrix = 29,
-    ScalarFmaTnDirectF64FoldSm89 = 30,
+    ScalarFmaTnDirectFoldSm89 = 30,
     InferenceScalarFma = 31,
     InferenceWmma = 32,
     InferenceMma16 = 33,
@@ -3139,9 +3139,9 @@ pub enum ResolvedNumericContract {
     ZeroReductionEpilogueF32 = 9,
     MmaTf32RnaSplitK4 = 10,
     MmaTf32RnaSplitK2 = 11,
-    ScalarFmaTnSplitMF64Reduce = 12,
+    ScalarFmaTnSplitMReduce = 12,
     ScalarFmaTnNarrowSplitMPartial = 13,
-    ScalarFmaTnNarrowSplitMF64Reduce = 14,
+    ScalarFmaTnNarrowSplitMReduce = 14,
     MmaTf32RnaSplitK8 = 15,
     ScalarFmaSplitKPartial = 16,
     ScalarFmaSplitKF32Reduce = 17,
@@ -5510,7 +5510,7 @@ mod physical_launch_tests {
                 PhysicalGemmBackend::MmaTf32RnaSplitK4 as u8,
                 PhysicalGemmBackend::MmaTf32RnaSplitK2 as u8,
                 PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial as u8,
-                PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce as u8,
+                PhysicalGemmBackend::ScalarFmaTnSplitMReduce as u8,
                 PhysicalGemmBackend::MmaTf32RnaSplitK8 as u8,
                 PhysicalGemmBackend::ScalarFmaSplitKPartial as u8,
                 PhysicalGemmBackend::ScalarFmaSplitKF32Reduce as u8,
@@ -5525,7 +5525,7 @@ mod physical_launch_tests {
                 PhysicalGemmBackend::Sm89MmaTf32AddHalf as u8,
                 PhysicalGemmBackend::Sm89Mma16HalfS2 as u8,
                 PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix as u8,
-                PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 as u8,
+                PhysicalGemmBackend::ScalarFmaTnDirectFoldSm89 as u8,
                 PhysicalGemmBackend::InferenceScalarFma as u8,
                 PhysicalGemmBackend::InferenceWmma as u8,
                 PhysicalGemmBackend::InferenceMma16 as u8,
@@ -5558,9 +5558,9 @@ mod physical_launch_tests {
                 ResolvedNumericContract::ZeroReductionEpilogueF32 as u8,
                 ResolvedNumericContract::MmaTf32RnaSplitK4 as u8,
                 ResolvedNumericContract::MmaTf32RnaSplitK2 as u8,
-                ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce as u8,
+                ResolvedNumericContract::ScalarFmaTnSplitMReduce as u8,
                 ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartial as u8,
-                ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64Reduce as u8,
+                ResolvedNumericContract::ScalarFmaTnNarrowSplitMReduce as u8,
                 ResolvedNumericContract::MmaTf32RnaSplitK8 as u8,
                 ResolvedNumericContract::ScalarFmaSplitKPartial as u8,
                 ResolvedNumericContract::ScalarFmaSplitKF32Reduce as u8,
@@ -5770,7 +5770,7 @@ mod physical_launch_tests {
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32NtRna as u8, 42);
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32TnDirectRna as u8, 43);
         assert_eq!(PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix as u8, 29);
-        assert_eq!(PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 as u8, 30);
+        assert_eq!(PhysicalGemmBackend::ScalarFmaTnDirectFoldSm89 as u8, 30);
         assert_eq!(ResolvedNumericContract::ScalarFmaTnSplitMPartial as u8, 21);
         assert_eq!(ResolvedNumericContract::MmaTf32PreRnaAV1 as u8, 22);
         assert_eq!(ResolvedNumericContract::MmaTf32AddHalfUlp as u8, 23);

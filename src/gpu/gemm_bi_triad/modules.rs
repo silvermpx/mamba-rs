@@ -2183,18 +2183,16 @@ fn validate_sm89_exact_f32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             Sm89ExactF32KernelKind::DualChunkFusedFinalize => require_ptx_entry_tokens(
                 "TriadSm89ExactF32 fused finalize",
                 entry,
-                &["add.rn.f64", "mul.rn.f64", "cvt.rn.f32.f64"],
+                &["add.rn.f32", "mul.rn.f32"],
             )?,
-            Sm89ExactF32KernelKind::DirectSplitMRaw => {
-                if ptx_has_unquoted_token(&entry.body, |token| {
-                    matches!(token, "add.rn.f64" | "mul.rn.f64" | "cvt.rn.f32.f64")
-                }) {
-                    return Err(format!(
-                        "{} raw partial unexpectedly contains the fused FP64 finalize",
-                        spec.symbol
-                    ));
-                }
-            }
+            Sm89ExactF32KernelKind::DirectSplitMRaw => {}
+        }
+        // Every split-M fold sums in f32, so no route of the module may
+        // carry a double.
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token.ends_with(".f64") || token.contains(".f64.")
+        }) {
+            return Err(format!("{} folds in double precision", spec.symbol));
         }
         if ptx_has_unquoted_token(&entry.body, |token| {
             token == ".local"
@@ -2270,12 +2268,16 @@ fn validate_sm89_exact_f32_d128_ptx(arch: &str, ptx: &str) -> Result<(), String>
             entry,
             &[
                 "fma.rn.f32",
-                "add.rn.f64",
-                "mul.rn.f64",
-                "cvt.rn.f32.f64",
+                "add.rn.f32",
+                "mul.rn.f32",
                 "cp.async.cg.shared.global",
             ],
         )?;
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token.ends_with(".f64") || token.contains(".f64.")
+        }) {
+            return Err(format!("{} folds in double precision", spec.symbol));
+        }
         if ptx_has_unquoted_token(&entry.body, |token| {
             token == ".local"
                 || token.starts_with("ld.local")
@@ -6483,14 +6485,15 @@ fn validate_scalar_tn_m16n16_ptx(ptx: &str) -> Result<(), String> {
         return Err(format!("{SYMBOL} has the wrong seven-parameter ABI"));
     }
     let body = ptx_entry_body(ptx, SYMBOL)?;
+    // The chunks fold in f32 in order, then alpha scales and one add lands
+    // on the output: the split-M reducer's operations, never a double.
+    if ptx_has_unquoted_token(&body, |token| {
+        token.ends_with(".f64") || token.contains(".f64.")
+    }) {
+        return Err(format!("{SYMBOL} folds in double precision"));
+    }
     let mut previous = 0;
-    for required in [
-        "fma.rn.f32",
-        "add.rn.f64",
-        "mul.rn.f64",
-        "cvt.rn.f32.f64",
-        "add.rn.f32",
-    ] {
+    for required in ["fma.rn.f32", "add.rn.f32", "mul.rn.f32", "add.rn.f32"] {
         let offset = body[previous..]
             .find(required)
             .map(|offset| previous + offset)
@@ -12883,12 +12886,12 @@ mod tests {
         let (async_copy, finalize) = match spec.kind {
             Sm89ExactF32KernelKind::DualChunkFusedFinalize => (
                 "cp.async.cg.shared.global",
-                "add.rn.f64 %fd0, %fd1, %fd2;\nmul.rn.f64 %fd0, %fd0, %fd1;\ncvt.rn.f32.f64 %f0, %fd0;\n",
+                "add.rn.f32 %f0, %f1, %f2;\nmul.rn.f32 %f0, %f0, %f1;\nadd.rn.f32 %f3, %f3, %f0;\n",
             ),
             Sm89ExactF32KernelKind::DirectSplitMRaw => ("cp.async.ca.shared.global", ""),
         };
         format!(
-            ".visible .entry {}(\n{}\n)\n{{\n.reg .b32 %r<4>;\n.reg .b64 %rd<2>;\n.reg .f32 %f<4>;\n.reg .f64 %fd<3>;\n{} [%r0], [%rd0], 16;\nfma.rn.f32 %f0, %f1, %f2, %f3;\n{}ret;\n}}\n",
+            ".visible .entry {}(\n{}\n)\n{{\n.reg .b32 %r<4>;\n.reg .b64 %rd<2>;\n.reg .f32 %f<4>;\n{} [%r0], [%rd0], 16;\nfma.rn.f32 %f0, %f1, %f2, %f3;\n{}ret;\n}}\n",
             spec.symbol, parameters, async_copy, finalize
         )
     }
@@ -13094,7 +13097,7 @@ mod tests {
 
     fn sm89_exact_f32_d128_test_entry(symbol: &str) -> String {
         format!(
-            ".visible .entry {symbol}(\n.param .u64 p0,\n.param .u64 p1,\n.param .u64 p2,\n.param .f32 p3,\n.param .u32 p4,\n.param .u32 p5,\n.param .u32 p6\n)\n{{\n.reg .b32 %r<4>;\n.reg .b64 %rd<2>;\n.reg .f32 %f<4>;\n.reg .f64 %fd<3>;\ncp.async.cg.shared.global [%r0], [%rd0], 16;\nfma.rn.f32 %f0, %f1, %f2, %f3;\nadd.rn.f64 %fd0, %fd1, %fd2;\nmul.rn.f64 %fd0, %fd0, %fd1;\ncvt.rn.f32.f64 %f0, %fd0;\nret;\n}}\n"
+            ".visible .entry {symbol}(\n.param .u64 p0,\n.param .u64 p1,\n.param .u64 p2,\n.param .f32 p3,\n.param .u32 p4,\n.param .u32 p5,\n.param .u32 p6\n)\n{{\n.reg .b32 %r<4>;\n.reg .b64 %rd<2>;\n.reg .f32 %f<4>;\ncp.async.cg.shared.global [%r0], [%rd0], 16;\nfma.rn.f32 %f0, %f1, %f2, %f3;\nadd.rn.f32 %f0, %f1, %f2;\nmul.rn.f32 %f0, %f0, %f1;\nret;\n}}\n"
         )
     }
 
@@ -13194,9 +13197,8 @@ mod tests {
             }
             for required in [
                 "fma.rn.f32",
-                "add.rn.f64",
-                "mul.rn.f64",
-                "cvt.rn.f32.f64",
+                "add.rn.f32",
+                "mul.rn.f32",
                 "cp.async.cg.shared.global",
             ] {
                 let wrong = entry.replacen(required, "missing.instruction", 1);
@@ -13212,6 +13214,8 @@ mod tests {
             }
             for forbidden in [
                 "ld.local.u32",
+                "add.rn.f64",
+                "cvt.f64.f32",
                 "atom.global.add.f32",
                 "atom::sc.global.add.f32",
                 "red.global.add.f32",
@@ -14473,7 +14477,7 @@ mod tests {
             }
             if *symbol == "tn_m16n16_bk16_s2_splitm16" {
                 let parameters = ".param .u64 output,\n.param .u64 a,\n.param .u64 b,\n.param .f32 alpha,\n.param .u32 m,\n.param .u32 k,\n.param .u32 n";
-                let body = "fma.rn.f32 %f1, %f2, %f3, %f4; add.rn.f64 %fd1, %fd2, %fd3; mul.rn.f64 %fd4, %fd1, %fd2; cvt.rn.f32.f64 %f6, %fd4; add.rn.f32 %f5, %f1, %f6; ret;";
+                let body = "fma.rn.f32 %f1, %f2, %f3, %f4; add.rn.f32 %f6, %f1, %f2; mul.rn.f32 %f7, %f6, %f3; add.rn.f32 %f5, %f1, %f7; ret;";
                 ptx.push_str(&format!(
                     ".visible .entry {symbol}(\n{parameters}\n) {{ {body} }}\n"
                 ));
@@ -14595,18 +14599,26 @@ mod tests {
                 ".param .u32 alpha",
             ),
             ("missing FFMA", "fma.rn.f32", "mad.rn.f32"),
-            ("missing rounded f64 add", "add.rn.f64", "sub.rn.f64"),
-            ("missing rounded f64 multiply", "mul.rn.f64", "div.rn.f64"),
             (
-                "missing rounded f64 conversion",
-                "cvt.rn.f32.f64",
-                "cvt.rz.f32.f64",
+                "missing rounded fold add",
+                "add.rn.f32 %f6",
+                "sub.rn.f32 %f6",
             ),
-            ("missing rounded output add", "add.rn.f32", "sub.rn.f32"),
+            ("missing rounded multiply", "mul.rn.f32", "div.rn.f32"),
+            (
+                "missing rounded output add",
+                "add.rn.f32 %f5",
+                "sub.rn.f32 %f5",
+            ),
             (
                 "reordered reducer scale",
-                "add.rn.f64 %fd1, %fd2, %fd3; mul.rn.f64 %fd4, %fd1, %fd2;",
-                "mul.rn.f64 %fd4, %fd1, %fd2; add.rn.f64 %fd1, %fd2, %fd3;",
+                "add.rn.f32 %f6, %f1, %f2; mul.rn.f32 %f7, %f6, %f3;",
+                "mul.rn.f32 %f7, %f6, %f3; add.rn.f32 %f6, %f1, %f2;",
+            ),
+            (
+                "double-precision fold",
+                "ret;",
+                "add.rn.f64 %fd1, %fd2, %fd3; ret;",
             ),
             (
                 "atomic reduction",

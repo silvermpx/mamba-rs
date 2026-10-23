@@ -215,9 +215,8 @@ fn source_contract_keeps_exact_fma_and_finalize_order_without_reduced_math() {
         "DUAL_RUN_CHAIN(acc0, a, b, k0);",
         "DUAL_RUN_CHAIN(acc1, a1, b1, k1);",
         "__fmaf_rn(",
-        "__dadd_rn((double)acc0[i][j], (double)acc1[i][j])",
-        "__dmul_rn((double)alpha, sum)",
-        "__double2float_rn",
+        "const float sum = __fadd_rn(acc0[i][j], acc1[i][j]);",
+        "const float update = __fmul_rn(alpha, sum);",
         "output[idx] = __fadd_rn(output[idx], update);",
     ] {
         assert!(fused.contains(marker), "fused source lost {marker}");
@@ -234,10 +233,16 @@ fn source_contract_keeps_exact_fma_and_finalize_order_without_reduced_math() {
         let raw = production::source_unit(&source, symbol).unwrap();
         assert!(raw.contains("__fmaf_rn(a_reg[i], b_reg[j], acc[i][j])"));
         assert!(raw.contains("partial_chunk[(long long)row * N + column] = acc[i][j]"));
-        assert!(!raw.contains("__dadd_rn"));
-        assert!(!raw.contains("__double2float_rn"));
+        assert!(!raw.contains("__fmul_rn(alpha"));
     }
-    for forbidden in ["mma.sync", "atomic", "atom.", "redux"] {
+    for forbidden in [
+        "mma.sync",
+        "atomic",
+        "atom.",
+        "redux",
+        "double",
+        "__dadd_rn",
+    ] {
         assert!(
             !source.contains(forbidden),
             "exact source contains forbidden {forbidden}"

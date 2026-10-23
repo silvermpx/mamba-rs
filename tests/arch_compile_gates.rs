@@ -559,13 +559,18 @@ fn scalar_tn_m16n16_has_one_exact_source_owner_abi_and_resource_contract() {
     for required in [
         "SHARED_BYTES == 4096",
         "__fmaf_rn(",
-        "__dadd_rn(",
-        "__dmul_rn(",
+        "__fmul_rn(",
         "__fadd_rn(",
     ] {
         assert!(
             fragment.contains(required),
             "M16N16 source omitted {required}"
+        );
+    }
+    for forbidden in ["double", "__dadd_rn(", "__dmul_rn("] {
+        assert!(
+            !fragment.contains(forbidden),
+            "M16N16 source folds in double precision ({forbidden})"
         );
     }
     assert!(!fragment.to_ascii_lowercase().contains("atomic"));
@@ -4316,13 +4321,17 @@ fn scalar_tn_m16n16_compiles_for_compute80_and_sm120_with_exact_numeric_contract
         assert!(has_exact_maxntid(&entry, 64));
         assert!(has_exact_minnctapersm(&entry, 4));
         let mut previous = 0;
-        for opcode in ["fma.rn.f32", "add.rn.f64", "mul.rn.f64", "add.rn.f32"] {
+        for opcode in ["fma.rn.f32", "add.rn.f32", "mul.rn.f32", "add.rn.f32"] {
             let offset = entry[previous..]
                 .find(opcode)
                 .map(|offset| previous + offset)
                 .unwrap_or_else(|| panic!("{target} TN M16N16 omitted ordered {opcode}"));
             previous = offset + opcode.len();
         }
+        assert!(
+            !entry.contains(".f64"),
+            "{target} TN M16N16 folds in double precision"
+        );
         for forbidden in [
             "atom.", "atom::", "red.", "red::", "redux.", "mma.", "call.",
         ] {
@@ -4362,14 +4371,14 @@ fn scalar_tn_m16n16_compiles_for_compute80_and_sm120_with_exact_numeric_contract
                 "SM120 TN M16N16 uses {registers} registers"
             );
             let sass = sass_entry(&sass, SCALAR_TN_M16N16_SYMBOL);
-            for required in ["LDGSTS", "FFMA", "DADD", "DMUL", "FADD"] {
+            for required in ["LDGSTS", "FFMA", "FMUL", "FADD"] {
                 assert!(
                     sass.lines()
                         .any(|line| contains_opcode_prefix(line, required)),
                     "SM120 TN M16N16 SASS omitted {required}"
                 );
             }
-            for forbidden in ["LDL", "STL", "ATOM", "RED", "REDUX"] {
+            for forbidden in ["LDL", "STL", "ATOM", "RED", "REDUX", "DADD", "DMUL"] {
                 assert!(
                     !contains_opcode_prefix(sass, forbidden),
                     "SM120 TN M16N16 SASS contains {forbidden}"
@@ -4595,9 +4604,11 @@ fn scalar_sm89_splitm_reducer_uses_a_portable_launch_bound() {
     assert!(has_exact_minnctapersm(&entry, 4));
     assert!(!has_exact_minnctapersm(&entry, 8));
     assert_eq!(entry.matches(".param ").count(), 6);
-    assert!(entry.contains("add.f64"));
-    assert!(entry.contains("mul.f64"));
-    assert!(entry.contains("cvt.rn.f32.f64"));
+    // The planes fold in f32 with explicit rounding, and alpha scales the
+    // sum before one add lands it on the output.
+    assert!(entry.contains("add.rn.f32"));
+    assert!(entry.contains("mul.rn.f32"));
+    assert!(!entry.contains(".f64"));
 }
 
 #[test]

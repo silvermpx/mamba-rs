@@ -8,11 +8,11 @@
  * Bit contract, the one the split-M fold of the scalar family defines: for
  * every output element the 1024-row reduction is cut into 64 chunks of 16
  * rows; each chunk is an f32 fma chain over its 16 rows in ascending order
- * seeded from +0; chunk 0 seeds an f64 accumulator, chunks 1..63 are added
+ * seeded from +0; chunk 0 seeds an f32 accumulator, chunks 1..63 are added
  * to it in ascending order with round-to-nearest; the epilogue multiplies by
- * alpha in f64, rounds once to f32 and adds that to the existing output
- * value in f32. Seeding is expressed here as adding chunk 0 to negative
- * zero, which is the same value for every input.
+ * alpha and adds that to the existing output value, each rounded once in
+ * f32. Seeding is expressed here as adding chunk 0 to negative zero, which
+ * is the same value for every input.
  *
  * What differs from a serial walk over the chunks is only where the work
  * happens. A CTA holds Groups warp groups; in round r group g computes the
@@ -21,12 +21,6 @@
  * over the round's Groups chunks in ascending chunk order. The fold order is
  * therefore unchanged, the chunk partials come from the same fma chain, and
  * the CTA keeps Groups chunks of loads in flight per stage.
- *
- * The float-to-double widening runs as integer bit manipulation instead of
- * the hardware conversion: conversions to 64-bit types issue at the same
- * rate as the f64 add itself, so the hardware cvt would double the time on
- * the f64 pipe, which is the floor of this kernel. The widening is exact for
- * every input, NaN payloads included.
  */
 
 // SM89_EXACT_F32_D128_ROUTE_BEGIN
@@ -63,53 +57,6 @@ __device__ __forceinline__ void commit_group() {
 template <int Pending>
 __device__ __forceinline__ void wait_group() {
     asm volatile("cp.async.wait_group %0;\n" :: "n"(Pending));
-}
-
-// Widening of the unusual values: zeros, subnormals, infinities and NaNs. A
-// NaN widens the way the hardware widens it: the quiet bit is set, then the
-// payload is shifted into the double's fraction.
-__device__ __forceinline__ double widen_full(unsigned u) {
-    unsigned sign = u & 0x80000000u;
-    unsigned mag = u & 0x7fffffffu;
-    unsigned hi = sign | ((mag >> 3) + 0x38000000u);
-    unsigned lo = u << 29;
-    if (mag == 0u) {
-        hi = sign;
-        lo = 0u;
-    } else if (mag < 0x00800000u) {
-        // Subnormal: value = mag * 2^-149. Shift the leading one to bit 23,
-        // then it is a normal double with exponent 897 - shift.
-        unsigned shift = (unsigned)__clz((int)mag) - 8u;
-        unsigned normalized = (mag << shift) & 0x007fffffu;
-        hi = sign | ((897u - shift) << 20) | (normalized >> 3);
-        lo = normalized << 29;
-    } else if (mag >= 0x7f800000u) {
-        if (mag == 0x7f800000u) {
-            hi = sign | 0x7ff00000u;
-            lo = 0u;
-        } else {
-            unsigned quiet = mag | 0x00400000u;
-            hi = sign | 0x7ff00000u | ((quiet & 0x007fffffu) >> 3);
-            lo = quiet << 29;
-        }
-    }
-    return __hiloint2double((int)hi, (int)lo);
-}
-
-// Fast path for normal values and zeros; the warp takes the full path only
-// when some lane holds a subnormal, an infinity or a NaN. One unsigned
-// compare separates the normal range from everything else.
-__device__ __forceinline__ double widen(float value) {
-    unsigned u = __float_as_uint(value);
-    unsigned mag = u & 0x7fffffffu;
-    bool unusual = (mag - 0x00800000u) >= 0x7f000000u;
-    unsigned sign = u & 0x80000000u;
-    unsigned hi = (mag == 0u) ? sign : (sign | ((mag >> 3) + 0x38000000u));
-    unsigned lo = u << 29;
-    if (__any_sync(0xffffffffu, unusual && mag != 0u)) {
-        return widen_full(u);
-    }
-    return __hiloint2double((int)hi, (int)lo);
 }
 
 template <int TileM, int TileN, int Groups, int RowsPerThread, int ColsPerThread,
@@ -277,13 +224,13 @@ struct Kernel {
         }
     }
 
-    // Folds one round's chunks, ascending, into the f64 sums. With several
+    // Folds one round's chunks, ascending, into the sums. With several
     // groups every partial comes from the exchange (the own group's too: one
     // shared load is cheaper than a select chain); a single group folds its
     // own registers.
     static __device__ __forceinline__ void fold_round(
         const float* xchg_round, int group, int lane_in_group,
-        const float (&partial)[OutputsPerThread], double (&sums)[FoldPerThread]) {
+        const float (&partial)[OutputsPerThread], float (&sums)[FoldPerThread]) {
         #pragma unroll
         for (int j = 0; j < Groups; ++j) {
             #pragma unroll
@@ -295,7 +242,7 @@ struct Kernel {
                     int owned = group + Groups * f;
                     value = xchg_round[(j * OutputsPerThread + owned) * GroupThreads + lane_in_group];
                 }
-                sums[f] = __dadd_rn(sums[f], widen(value));
+                sums[f] = __fadd_rn(sums[f], value);
             }
         }
     }
@@ -346,13 +293,13 @@ struct Kernel {
 
         float partial[OutputsPerThread];
         // Negative zero is the identity of round-to-nearest addition for
-        // every double, including both zeros, so adding chunk 0 to it yields
+        // every float, including both zeros, so adding chunk 0 to it yields
         // exactly the value a fold seeded from chunk 0 holds, and the fold
         // needs no first-chunk special case.
-        double sums[FoldPerThread];
+        float sums[FoldPerThread];
         #pragma unroll
         for (int f = 0; f < FoldPerThread; ++f) {
-            sums[f] = -0.0;
+            sums[f] = -0.0f;
         }
 
         // Two exchange buffers, used in alternate rounds, so one barrier per
@@ -400,8 +347,7 @@ struct Kernel {
             int row = output_row_base + row_base + i;
             int column = output_column_base + column_base + j;
             long long index = (long long)row * N + column;
-            double scaled = __dmul_rn((double)alpha, sums[f]);
-            output[index] = __fadd_rn(output[index], __double2float_rn(scaled));
+            output[index] = __fadd_rn(output[index], __fmul_rn(alpha, sums[f]));
         }
     }
 };

@@ -137,7 +137,7 @@ mod live {
             tiles: [(32, 32), (64, 64)],
             numeric: [
                 ResolvedNumericContract::ScalarFma,
-                ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+                ResolvedNumericContract::ScalarFmaTnSplitMReduce,
             ],
             ownership: [
                 ResolvedOutputOwnership::OneCtaPerOutputTile,
@@ -163,7 +163,7 @@ mod live {
             tiles: [(64, 64), (1, 1)],
             numeric: [
                 ResolvedNumericContract::ScalarFmaTnSplitMPartial,
-                ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+                ResolvedNumericContract::ScalarFmaTnSplitMReduce,
             ],
             ownership: [
                 ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartition,
@@ -189,7 +189,7 @@ mod live {
             tiles: [(64, 64), (1, 1)],
             numeric: [
                 ResolvedNumericContract::ScalarFmaTnSplitMPartial,
-                ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+                ResolvedNumericContract::ScalarFmaTnSplitMReduce,
             ],
             ownership: [
                 ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitMPartition,
@@ -409,7 +409,7 @@ mod live {
         let expected_tiles = [(128, 128), (1, 1)];
         let expected_numeric = [
             ResolvedNumericContract::ScalarFma,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+            ResolvedNumericContract::ScalarFmaTnSplitMReduce,
         ];
         let expected_ownership = [
             ResolvedOutputOwnership::OneCtaPerOutputTile,

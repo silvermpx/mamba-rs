@@ -91,7 +91,7 @@ struct GemmBiTnM16N16Kernel {
         int local_row = (int)threadIdx.x / COLUMN_GROUPS;
         int local_column_base =
             ((int)threadIdx.x - local_row * COLUMN_GROUPS) * OUTPUTS_PER_THREAD;
-        double sums[OUTPUTS_PER_THREAD];
+        float sums[OUTPUTS_PER_THREAD];
         extern __shared__ __align__(16) float shared[];
 
         issue_stage(shared, a, b, output_row_base, output_column_base, 0);
@@ -130,15 +130,15 @@ struct GemmBiTnM16N16Kernel {
                 }
             }
 
-            // Chunk zero seeds the double sum; the remaining chunks add in
+            // Chunk zero seeds the sum; the remaining chunks add in
             // ascending Split-M order.
 #pragma unroll
             for (int owned = 0; owned < OUTPUTS_PER_THREAD; ++owned) {
-                double value = (double)partial[owned];
+                float value = partial[owned];
                 if (chunk == 0) {
                     sums[owned] = value;
                 } else {
-                    sums[owned] = __dadd_rn(sums[owned], value);
+                    sums[owned] = __fadd_rn(sums[owned], value);
                 }
             }
             read_stage ^= 1;
@@ -149,9 +149,8 @@ struct GemmBiTnM16N16Kernel {
             int row = output_row_base + local_row;
             int column = output_column_base + local_column_base + owned;
             long long index = (long long)row * N + column;
-            double scaled = __dmul_rn((double)alpha, sums[owned]);
             output[index] = __fadd_rn(
-                output[index], __double2float_rn(scaled));
+                output[index], __fmul_rn(alpha, sums[owned]));
         }
     }
 };

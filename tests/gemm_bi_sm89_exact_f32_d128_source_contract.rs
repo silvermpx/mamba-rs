@@ -67,10 +67,9 @@ fn wrappers_pin_driver_abi_shape_and_exact_fold_order() {
             "constexpr int BK = 16;".into(),
             "static_assert(Chunks == 64".into(),
             "__fmaf_rn(rows[i], columns[j], partial[i * ColsPerThread + j]);".into(),
-            "sums[f] = -0.0;".into(),
-            "sums[f] = __dadd_rn(sums[f], widen(value));".into(),
-            "double scaled = __dmul_rn((double)alpha, sums[f]);".into(),
-            "output[index] = __fadd_rn(output[index], __double2float_rn(scaled));".into(),
+            "sums[f] = -0.0f;".into(),
+            "sums[f] = __fadd_rn(sums[f], value);".into(),
+            "output[index] = __fadd_rn(output[index], __fmul_rn(alpha, sums[f]));".into(),
             "using Route = Kernel<16, 16, 8, 2, 4, 2, true>;".into(),
             "static_assert(Route::Threads == 256".into(),
             "static_assert(Route::SharedBytes == 49152".into(),
@@ -99,7 +98,14 @@ fn wrappers_pin_driver_abi_shape_and_exact_fold_order() {
         assert!(wrapper.contains("extern \"C\" __global__ __launch_bounds__(256, 2)"));
         assert!(wrapper.contains("::Route::run(output, a, b, alpha, m, k, n);"));
     }
-    for forbidden in ["mma.sync", "atomic", "atom.", "redux", "(double)value"] {
+    for forbidden in [
+        "mma.sync",
+        "atomic",
+        "atom.",
+        "redux",
+        "double",
+        "__dadd_rn",
+    ] {
         assert!(
             !source.contains(forbidden),
             "exact source contains {forbidden}"
@@ -140,7 +146,7 @@ fn specs_pin_direct_fold_geometry_and_resource_limits() {
         (production::D128_OUT_SYMBOL, (1024, 256, 128), 128),
     ] {
         let spec = production::kernel_spec(symbol).expect("d128 symbol");
-        assert_eq!(spec.kind, Sm89ExactF32D128KernelKind::DirectF64FoldFinal);
+        assert_eq!(spec.kind, Sm89ExactF32D128KernelKind::DirectFoldFinal);
         assert_eq!(spec.shape, shape);
         assert_eq!(spec.tile, (16, 16));
         assert_eq!(spec.grid, (grid, 1, 1));

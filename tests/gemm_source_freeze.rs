@@ -174,8 +174,8 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
     ("kernels/gemm_bi_triad/mma16.cuh", 0x5407785dd217d044, 1097),
     (
         "kernels/gemm_bi_triad/scalar.cu",
-        0x132a584d47838c08,
-        289795,
+        0xab0b7c5248d47c5e,
+        289900,
     ),
     (
         "kernels/gemm_bi_triad/scalar_nn_m64n64.cu",
@@ -199,8 +199,8 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
     ),
     (
         "kernels/gemm_bi_triad/scalar_tn_m16n16.cu",
-        0x757d11be8d5e979b,
-        6956,
+        0xe2407ce1a016096a,
+        6876,
     ),
     (
         "kernels/gemm_bi_triad/sm100/tcgen05.cu",
@@ -209,8 +209,8 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
     ),
     (
         "kernels/gemm_bi_triad/sm120/exact.cu",
-        0x73844bdc93fcfa90,
-        25383,
+        0xb1e9e29ef668a4e2,
+        23574,
     ),
     (
         "kernels/gemm_bi_triad/sm120/tma.cu",
@@ -219,13 +219,13 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
     ),
     (
         "kernels/gemm_bi_triad/sm80/exact_f32.cu",
-        0xc554574bd1d9ba00,
-        30217,
+        0x6e94fc50d1464174,
+        30173,
     ),
     (
         "kernels/gemm_bi_triad/sm80/exact_f32_d128.cu",
-        0x89e16e876efba3f0,
-        18304,
+        0xc4274641cd08ee8,
+        15975,
     ),
     (
         "kernels/gemm_bi_triad/sm80/half.cu",

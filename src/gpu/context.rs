@@ -1730,8 +1730,8 @@ impl GpuCtx {
             | ResolvedNumericContract::ScalarFmaSplitKPartial
             | ResolvedNumericContract::ScalarFmaSplitKF32Reduce
             | ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartial
-            | ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64Reduce
-            | ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce
+            | ResolvedNumericContract::ScalarFmaTnNarrowSplitMReduce
+            | ResolvedNumericContract::ScalarFmaTnSplitMReduce
             | ResolvedNumericContract::ScalarFmaTnSplitMPartial
             | ResolvedNumericContract::ScalarFmaFixedSplitFold
             | ResolvedNumericContract::ZeroReductionEpilogueF32 => {
@@ -2274,12 +2274,12 @@ const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
         | PhysicalGemmBackend::ScalarFmaSplitKPartial
         | PhysicalGemmBackend::ScalarFmaSplitKF32Reduce
         | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial
-        | PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce => ModuleKind::TriadScalar,
+        | PhysicalGemmBackend::ScalarFmaTnSplitMReduce => ModuleKind::TriadScalar,
         PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused
         | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial => {
             ModuleKind::TriadSm89ExactF32
         }
-        PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 => ModuleKind::TriadSm89ExactF32D128,
+        PhysicalGemmBackend::ScalarFmaTnDirectFoldSm89 => ModuleKind::TriadSm89ExactF32D128,
         PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan
         | PhysicalGemmBackend::InferenceScalarFma
         | PhysicalGemmBackend::InferenceWmma
@@ -2346,7 +2346,7 @@ fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) ->
         | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial => {
             super::kernel_identity::SM89_EXACT_F32_TN_ROUTE_REVISION
         }
-        PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 => {
+        PhysicalGemmBackend::ScalarFmaTnDirectFoldSm89 => {
             super::kernel_identity::SM89_EXACT_F32_D128_ROUTE_REVISION
         }
         _ => generic,
@@ -2360,11 +2360,11 @@ const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bo
             | PhysicalGemmBackend::ScalarFmaSplitKPartial
             | PhysicalGemmBackend::ScalarFmaSplitKF32Reduce
             | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial
-            | PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce
+            | PhysicalGemmBackend::ScalarFmaTnSplitMReduce
             | PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan
             | PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused
             | PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial
-            | PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89
+            | PhysicalGemmBackend::ScalarFmaTnDirectFoldSm89
             | PhysicalGemmBackend::Sm120TmaFmaExact
     )
 }
@@ -2755,7 +2755,7 @@ mod tests {
 
     #[test]
     fn sm89_exact_f32_d128_routes_use_their_isolated_module_and_private_revision() {
-        let backend = PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89;
+        let backend = PhysicalGemmBackend::ScalarFmaTnDirectFoldSm89;
         assert_eq!(
             expected_route_module(backend),
             ModuleKind::TriadSm89ExactF32D128
@@ -2774,11 +2774,11 @@ mod tests {
             PhysicalGemmBackend::ScalarFmaSplitKPartial,
             PhysicalGemmBackend::ScalarFmaSplitKF32Reduce,
             PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial,
-            PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce,
+            PhysicalGemmBackend::ScalarFmaTnSplitMReduce,
             PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan,
             PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused,
             PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial,
-            PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89,
+            PhysicalGemmBackend::ScalarFmaTnDirectFoldSm89,
             PhysicalGemmBackend::Sm120TmaFmaExact,
         ] {
             assert!(scalar_backend_supports_logical_f32(backend), "{backend:?}");

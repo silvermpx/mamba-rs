@@ -656,7 +656,7 @@ fn run_sm120_current_cohort_binding(ctx: &GpuCtx) {
                             Some(
                                 ResolvedNumericContract::ScalarFma
                                     | ResolvedNumericContract::ScalarFmaTnSplitMPartial
-                                    | ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce
+                                    | ResolvedNumericContract::ScalarFmaTnSplitMReduce
                             )
                         ) && !node.symbol.contains("tf32")
                     }),

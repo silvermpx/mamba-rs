@@ -1209,7 +1209,7 @@ mod cuda_qualification {
                                 (4096, 64, 64) => (48, 86),
                                 _ => unreachable!("only admitted Task 8 cells are scheduled"),
                             };
-                            let mut ordered = 0.0f64;
+                            let mut ordered = 0.0f32;
                             for partition in 0..chunks {
                                 let mut partial = 0.0f32;
                                 let begin = partition * chunk;
@@ -1220,9 +1220,9 @@ mod cuda_qualification {
                                         partial,
                                     );
                                 }
-                                ordered += f64::from(partial);
+                                ordered += partial;
                             }
-                            ordered as f32
+                            ordered
                         }
                     };
                     let target = call.offset + row * call.n + column;

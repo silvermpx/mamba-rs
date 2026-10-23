@@ -3325,15 +3325,15 @@ fn scalar_route_contract(
 ) {
     if symbol == super::D128_IN_SYMBOL || symbol == super::D128_OUT_SYMBOL {
         return (
-            PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+            PhysicalGemmBackend::ScalarFmaTnDirectFoldSm89,
+            ResolvedNumericContract::ScalarFmaTnSplitMReduce,
             ResolvedOutputOwnership::OneCtaPerOutputTile,
         );
     }
     if symbol == super::D768_IN_FUSED_SYMBOL {
         return (
             PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+            ResolvedNumericContract::ScalarFmaTnSplitMReduce,
             ResolvedOutputOwnership::OneCtaPerOutputTile,
         );
     }
@@ -3381,15 +3381,15 @@ fn scalar_route_contract(
     }
     if symbol == "splitm_reduce" {
         return (
-            PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+            PhysicalGemmBackend::ScalarFmaTnSplitMReduce,
+            ResolvedNumericContract::ScalarFmaTnSplitMReduce,
             ResolvedOutputOwnership::OneThreadPerOutputElementFixedSplitMReduce,
         );
     }
     if symbol == "tn_m16n16_bk16_s2_splitm16" {
         return (
-            PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce,
-            ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+            PhysicalGemmBackend::ScalarFmaTnSplitMReduce,
+            ResolvedNumericContract::ScalarFmaTnSplitMReduce,
             ResolvedOutputOwnership::OneCtaPerOutputTile,
         );
     }
@@ -3422,7 +3422,7 @@ fn scalar_resolved_routes(
                 ctx.kernels.compiler_identity(),
                 SM89_INFERENCE_COPYPLAN_ROUTE_REVISION,
             )
-        } else if backend == PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 {
+        } else if backend == PhysicalGemmBackend::ScalarFmaTnDirectFoldSm89 {
             (
                 ModuleKind::TriadSm89ExactF32D128,
                 context.artifacts.sm89_exact_f32_d128.ok_or_else(|| {
@@ -9873,8 +9873,8 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
     // Determinism: K_CHUNK is a COMPILE-TIME CONSTANT → F = ceil(K / K_CHUNK)
     // depends ONLY on K. Same K always produces same F (and same per-fc
     // k-range) regardless of M, N, batch, stream, or SM scheduling.
-    // Reducer f32 ascending-fc order (`gemm_bi_splitk_reduce`; only the
-    // split-M TN reducer is f64). Batch-invariant by construction.
+    // Reducer f32 ascending-fc order (`gemm_bi_splitk_reduce`, as the
+    // split-M TN reducer). Batch-invariant by construction.
     //
     // Gate ordering: fires AFTER Thin-M cap (batch > 1024) so it never steals
     // shapes Thin-M handles well (M ≤ 1024 has 4× BM=32 tiles vs 1× BM=128,
@@ -17096,8 +17096,8 @@ mod prepared_f32_launch_tests {
             assert_eq!(
                 scalar_route_contract(node.symbol),
                 (
-                    PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce,
-                    ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+                    PhysicalGemmBackend::ScalarFmaTnSplitMReduce,
+                    ResolvedNumericContract::ScalarFmaTnSplitMReduce,
                     ResolvedOutputOwnership::OneCtaPerOutputTile,
                 )
             );
@@ -19006,7 +19006,7 @@ mod sm89_exact_f32_tn_route_tests {
             scalar_route_contract(super::super::D768_IN_FUSED_SYMBOL),
             (
                 PhysicalGemmBackend::ScalarFmaSm89ExactF32DualChunkFused,
-                ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+                ResolvedNumericContract::ScalarFmaTnSplitMReduce,
                 ResolvedOutputOwnership::OneCtaPerOutputTile,
             )
         );
@@ -19072,8 +19072,8 @@ mod sm89_exact_f32_tn_route_tests {
             assert_eq!(
                 scalar_route_contract(symbol),
                 (
-                    PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89,
-                    ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce,
+                    PhysicalGemmBackend::ScalarFmaTnDirectFoldSm89,
+                    ResolvedNumericContract::ScalarFmaTnSplitMReduce,
                     ResolvedOutputOwnership::OneCtaPerOutputTile,
                 )
             );

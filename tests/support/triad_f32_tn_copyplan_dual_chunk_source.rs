@@ -327,8 +327,8 @@ const FUSED_EPILOGUE: &str = r#"#pragma unroll
             const int col = col_base + j;
             if (col >= n) continue;
             const long long idx = (long long)r * ldc + col;
-            const double sum = __dadd_rn((double)acc0[i][j], (double)acc1[i][j]);
-            const float update = __double2float_rn(__dmul_rn((double)alpha, sum));
+            const float sum = __fadd_rn(acc0[i][j], acc1[i][j]);
+            const float update = __fmul_rn(alpha, sum);
             output[idx] = __fadd_rn(output[idx], update);
         }
     }"#;
@@ -386,12 +386,9 @@ mod tests {
         let source = compose_fused_source();
         assert_common_dual_chunk_contract(&source, DUAL_FUSED_SYMBOL);
         let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            normalized
-                .contains("const double sum = __dadd_rn((double)acc0[i][j], (double)acc1[i][j]);")
-        );
-        assert!(source.contains("__dmul_rn((double)alpha, sum)"));
-        assert!(source.contains("__double2float_rn"));
+        assert!(normalized.contains("const float sum = __fadd_rn(acc0[i][j], acc1[i][j]);"));
+        assert!(source.contains("const float update = __fmul_rn(alpha, sum);"));
+        assert!(!source.contains("double"));
         assert!(source.contains("output[idx] = __fadd_rn(output[idx], update);"));
     }
 

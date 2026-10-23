@@ -1047,11 +1047,12 @@ void tn_splitm_partial_aligned(
 // Accumulate (+=) semantic matches tn_big contract.
 // Each thread owns one (k, n) output — no atomics, no race.
 //
-// f64 accumulator (Option B): F-step linear sum lives in double, cast back to
-// f32 once at the end. Reduces accumulation error from γ_F·ε_f32 to ~ε_f32
-// (single round-down on cast). Kernel is bandwidth-bound on the F partial
-// loads, so the f64 add cost is masked by the load latency. Bit-exact
-// run-to-run preserved (same operations every launch).
+// The planes sum in f32 with explicit round-to-nearest adds, then alpha
+// scales the sum and one add puts it on the output; every fused fold of the
+// split-M plans spells the same operations. A double sum ran three times as
+// long on GeForce and workstation boards, where the f64 pipe runs at a 64th
+// of the f32 rate, and it bought little: each plane is itself an f32 chain
+// over its rows, so the fold of a few planes is not where the error lives.
 // ============================================================================
 extern "C" __global__ __launch_bounds__(256, 4)
 // `K_out` is the row count and leading dimension of the per-chunk partial
@@ -1067,11 +1068,11 @@ void splitm_reduce(
     if (idx >= total) return;
 
     long long kn_stride = (long long)K_out * N;
-    double sum = (double)partial[idx];
+    float sum = partial[idx];
     for (int fc = 1; fc < F; ++fc) {
-        sum += (double)partial[(long long)fc * kn_stride + idx];
+        sum = __fadd_rn(sum, partial[(long long)fc * kn_stride + idx]);
     }
-    dW[idx] += (float)((double)alpha * sum);
+    dW[idx] = __fadd_rn(dW[idx], __fmul_rn(alpha, sum));
 }
 
 // ============================================================================

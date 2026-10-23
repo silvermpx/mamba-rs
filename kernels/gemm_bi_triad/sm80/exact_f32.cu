@@ -315,8 +315,8 @@ __DUAL_EPILOGUE__
             const int col = col_base + j;
             if (col >= n) continue;
             const long long idx = (long long)r * ldc + col;
-            const double sum = __dadd_rn((double)acc0[i][j], (double)acc1[i][j]);
-            const float update = __double2float_rn(__dmul_rn((double)alpha, sum));
+            const float sum = __fadd_rn(acc0[i][j], acc1[i][j]);
+            const float update = __fmul_rn(alpha, sum);
             output[idx] = __fadd_rn(output[idx], update);
         }
     }

@@ -1061,7 +1061,7 @@ fn scalar_split_m_identity_variants_have_stable_distinct_discriminants() {
         PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartial as u8,
         13
     );
-    assert_eq!(PhysicalGemmBackend::ScalarFmaTnSplitMF64Reduce as u8, 15);
+    assert_eq!(PhysicalGemmBackend::ScalarFmaTnSplitMReduce as u8, 15);
     assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS3 as u8, 23);
     assert_eq!(PhysicalGemmBackend::Sm89Mma16HalfS2 as u8, 28);
     assert_eq!(
@@ -1072,17 +1072,14 @@ fn scalar_split_m_identity_variants_have_stable_distinct_discriminants() {
         PhysicalGemmBackend::ScalarFmaSm89ExactF32DirectSplitMPartial as u8,
         25
     );
-    assert_eq!(PhysicalGemmBackend::ScalarFmaTnDirectF64FoldSm89 as u8, 30);
-    assert_eq!(
-        ResolvedNumericContract::ScalarFmaTnSplitMF64Reduce as u8,
-        12
-    );
+    assert_eq!(PhysicalGemmBackend::ScalarFmaTnDirectFoldSm89 as u8, 30);
+    assert_eq!(ResolvedNumericContract::ScalarFmaTnSplitMReduce as u8, 12);
     assert_eq!(
         ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartial as u8,
         13
     );
     assert_eq!(
-        ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64Reduce as u8,
+        ResolvedNumericContract::ScalarFmaTnNarrowSplitMReduce as u8,
         14
     );
     assert_eq!(ResolvedNumericContract::ScalarFmaTnSplitMPartial as u8, 21);

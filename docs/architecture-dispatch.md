@@ -182,7 +182,7 @@ Repaired:
 - the SM120 exact-f32 kernels deal the portable plan's pieces (the batch
   chunks of a split-M weight gradient, the 64-input chunks of a slim split
   product, one chain otherwise) and fold them as the portable reducers do
-  (f32 in piece order with the bias last; f64 for a weight gradient), so an
+  (f32 in piece order, then alpha, then the bias or the old gradient), so an
   exact product has the same bits on SM120 as on every other architecture;
   a plan they cannot reproduce (a tail chain, 32-input pieces) keeps the
   portable route. Which shapes take the family is speed alone and reads the

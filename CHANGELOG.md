@@ -35,6 +35,12 @@
   or one chain where the portable plan splits the batch, and five of the
   measured products differed from an RTX 6000 Ada's. Their speed under the
   new cut has not been measured on a CC 12.x board.
+- An exact weight gradient that splits its batch folds the pieces in f32
+  instead of double, in the portable reducer and in every fused fold alike,
+  so its bits change once on every card. The double fold ran about three
+  times as long on GeForce and workstation boards, whose double pipe runs at
+  a 64th of the float rate: the reducer alone took 16-25 us per call on an
+  RTX 6000 Ada and 13-17 us on an RTX 5090, against 6-8 and 4-7 us in f32.
 - The exact slim input-gradient split serves 512 to 1024 rows only over a
   reduction of 1536 or more and an input of at most 768, where it halves
   the time on both an RTX 5090 and an RTX 6000 Ada; past 1024 rows it

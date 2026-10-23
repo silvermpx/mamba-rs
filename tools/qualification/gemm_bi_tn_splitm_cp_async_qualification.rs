@@ -506,11 +506,11 @@ mod cuda_qualification {
         }
         let output = (0..kn)
             .map(|index| {
-                let mut sum = f64::from(partial[index]);
+                let mut sum = partial[index];
                 for partition in 1..case.chunks {
-                    sum += f64::from(partial[partition * kn + index]);
+                    sum += partial[partition * kn + index];
                 }
-                (seed[index] + sum as f32).to_bits()
+                (seed[index] + sum).to_bits()
             })
             .collect();
         Oracle {
