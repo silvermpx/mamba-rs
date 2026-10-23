@@ -1849,13 +1849,18 @@ static constexpr int SM120_STREAMK_SLOTS = 2;
 
 // The workers a stream-K reduction is dealt to: one per 16 units and at
 // most 2048, so a worker's slab stays a small share of its k-tiles and the
-// grid of any card walks enough workers to balance. The host reads the same
-// constants to size the workspace and the grid.
+// grid of any card walks enough workers to balance; a reduction of at most
+// 256 units, one per 8, whose few workers would otherwise each walk a long
+// chain. The host reads the same constants to size the workspace and the
+// grid.
 #define SM120_STREAMK_MIN_SPAN 16
+#define SM120_STREAMK_SHORT_UNITS 256
+#define SM120_STREAMK_SHORT_SPAN 8
 #define SM120_STREAMK_WORKERS 2048
 
 static __device__ __forceinline__ long long sm120_streamk_workers(long long units) {
-    long long workers = units / SM120_STREAMK_MIN_SPAN;
+    long long workers = units / (units <= SM120_STREAMK_SHORT_UNITS
+        ? SM120_STREAMK_SHORT_SPAN : SM120_STREAMK_MIN_SPAN);
     if (workers < 1) {
         workers = units < 1 ? units : 1;
     }
@@ -2676,5 +2681,7 @@ TF32_ASSERT_KERNEL_SIGNATURE(nt_sm120_tma_mma_tf32_m64n64_bk32_s2);
 #undef SM120_SWIZZLE_64B
 #undef SM120_STREAMK_WORKERS
 #undef SM120_STREAMK_MIN_SPAN
+#undef SM120_STREAMK_SHORT_UNITS
+#undef SM120_STREAMK_SHORT_SPAN
 
 #endif

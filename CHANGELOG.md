@@ -4,6 +4,11 @@
 
 ### Changed
 
+- The SM120 stream-K weight gradients deal a reduction of at most 256
+  units one worker per 8 instead of 16, by the shape alone: the 32- to
+  256-unit bf16 cells run in 0.75 to 0.79 of their time on an RTX 5090,
+  with the same bits at grids of 170, 84 and 48 CTAs. Their bits change
+  once.
 - Strict TF32 picks a tile by the work its busiest multiprocessor does at
   the live multiprocessor count, where every candidate writes the same
   bits. The pre-rounded weight-gradient tiles choose by it on every board

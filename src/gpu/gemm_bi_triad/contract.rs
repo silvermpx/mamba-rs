@@ -3418,16 +3418,30 @@ pub const SM120_TF32_STREAMK_SLOTS_PER_CTA: usize = 2;
 /// rows went from 127 us to 15.
 pub const SM120_STREAMK_MIN_SPAN: usize = 16;
 
+/// A reduction of at most `SM120_STREAMK_SHORT_UNITS` units is dealt one
+/// worker per `SM120_STREAMK_SHORT_SPAN`, the kernels' constants of the same
+/// names. On the RTX 5090 the 32- to 256-unit cells ran in 0.73 to 0.79 of
+/// the time of one worker per 16 at grids of 170, 84 and 48 CTAs; at 512
+/// units and more the shorter span lost up to 1.44 times on some grid.
+pub const SM120_STREAMK_SHORT_UNITS: usize = 256;
+pub const SM120_STREAMK_SHORT_SPAN: usize = 8;
+
 /// The words of the SM120 stream-K grid barrier in the counter workspace:
 /// the arrival count and the generation the last arrival moves on.
 pub const SM120_STREAMK_BARRIER_WORDS: usize = 2;
 pub const SM120_STREAMK_WORKERS: usize = 2048;
 
 /// The workers a stream-K reduction of `units` (tile, k-tile) units is dealt
-/// to: one per `SM120_STREAMK_MIN_SPAN` units, at least one and at most the
-/// fixed count.
+/// to: one per `SM120_STREAMK_MIN_SPAN` units, or per
+/// `SM120_STREAMK_SHORT_SPAN` up to `SM120_STREAMK_SHORT_UNITS`, at least
+/// one and at most the fixed count.
 pub const fn sm120_streamk_workers(units: usize) -> usize {
-    let workers = units / SM120_STREAMK_MIN_SPAN;
+    let span = if units <= SM120_STREAMK_SHORT_UNITS {
+        SM120_STREAMK_SHORT_SPAN
+    } else {
+        SM120_STREAMK_MIN_SPAN
+    };
+    let workers = units / span;
     if workers == 0 {
         if units == 0 { 0 } else { 1 }
     } else if workers < SM120_STREAMK_WORKERS {
@@ -9694,7 +9708,10 @@ mod tests {
     /// launch would index slabs past the workspace.
     #[test]
     fn sm120_streamk_workers_match_the_kernel_source() {
-        use super::{SM120_STREAMK_MIN_SPAN, SM120_STREAMK_WORKERS, sm120_streamk_workers};
+        use super::{
+            SM120_STREAMK_MIN_SPAN, SM120_STREAMK_SHORT_SPAN, SM120_STREAMK_SHORT_UNITS,
+            SM120_STREAMK_WORKERS, sm120_streamk_workers,
+        };
         let source = include_str!("../../../kernels/gemm_bi_triad/sm120/tma.cu");
         assert!(source.contains(&format!(
             "#define SM120_STREAMK_WORKERS {SM120_STREAMK_WORKERS}\n"
@@ -9702,10 +9719,18 @@ mod tests {
         assert!(source.contains(&format!(
             "#define SM120_STREAMK_MIN_SPAN {SM120_STREAMK_MIN_SPAN}\n"
         )));
+        assert!(source.contains(&format!(
+            "#define SM120_STREAMK_SHORT_UNITS {SM120_STREAMK_SHORT_UNITS}\n"
+        )));
+        assert!(source.contains(&format!(
+            "#define SM120_STREAMK_SHORT_SPAN {SM120_STREAMK_SHORT_SPAN}\n"
+        )));
         assert_eq!(sm120_streamk_workers(0), 0);
+        assert_eq!(sm120_streamk_workers(7), 1);
         assert_eq!(sm120_streamk_workers(15), 1);
-        assert_eq!(sm120_streamk_workers(31), 1);
-        assert_eq!(sm120_streamk_workers(32), 2);
+        assert_eq!(sm120_streamk_workers(32), 4);
+        assert_eq!(sm120_streamk_workers(256), 32);
+        assert_eq!(sm120_streamk_workers(257), 16);
         assert_eq!(sm120_streamk_workers(512), 32);
         assert_eq!(sm120_streamk_workers(1_000_000), SM120_STREAMK_WORKERS);
     }
