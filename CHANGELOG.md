@@ -21,9 +21,24 @@
 - Strict TF32 gradients split a deep weight gradient eight ways and a
   few-row input gradient four ways, and on an Ada board run the multistage
   input-gradient tiles, the multistage split members and the pre-rounded
-  weight-gradient tiles. A CC 12.x board (RTX 5090, RTX PRO 6000) follows
-  its own table: the pre-rounded weight-gradient tiles and the 144 x 96
-  input-gradient tile included.
+  weight-gradient tiles. A small weight gradient (16 or fewer 64 x 64
+  tiles over a reduction of 1024 or more) splits eight ways on the 32 x 32
+  member, and a measured cell whose winner is a portable split member
+  yields to these shape rules like the portable tiles. A CC 12.x board
+  (RTX 5090, RTX PRO 6000) follows its own table: the pre-rounded
+  weight-gradient tiles, the 64 x 64 input-gradient tile for 2048 to 8192
+  rows over an output up to 512 wide, and the 144 x 96 tile elsewhere.
+- The exact SM120 kernels (RTX 5090, RTX PRO 6000) cut a reduction where
+  the portable plan cuts it and fold the pieces as the portable reducers
+  do, so an exact product has the same bits on these boards as on every
+  other architecture. They used to deal two to five pieces of their own,
+  or one chain where the portable plan splits the batch, and five of the
+  measured products differed from an RTX 6000 Ada's. Their speed under the
+  new cut has not been measured on a CC 12.x board.
+- The exact slim input-gradient split serves 512 to 1024 rows only over a
+  reduction of 1536 or more and an input of at most 768, where it halves
+  the time on both an RTX 5090 and an RTX 6000 Ada; past 1024 rows it
+  serves as before.
 - The SM120 stream-K weight gradients (bf16, f16 and TF32) deal at least
   16 units to a worker and at most 2048 workers, by the shape alone, and
   fold the split tiles after the whole grid has published its parts instead
@@ -36,7 +51,12 @@
   same shape rule as wider ones on every architecture (384 x 101 over 1024
   rows: 33 -> 10 us on an RTX 5090), and a slim exact input gradient runs
   the slim tile's chain over the transposed weights, at the same bits and
-  about half the time.
+  about half the time, on a CC 12.x board everywhere and on other boards
+  over a reduction that is not a whole number of 32 inputs.
+- A bf16 or f16 SM120 weight gradient whose shape no cell names takes its
+  neighbour's stream-K schedule up to the largest grid a measured stream-K
+  cell won on (186 tiles of 64 x 64), a bound read from the table instead
+  of the RTX 5090's 170 multiprocessors.
 - The split scratch is 128 MB (was 32 MB), allocated on the first split, so
   the 32-wide input-gradient split serves layers up to 48 planes deep.
 - The Mamba-3 decode step's warp tier spells its arithmetic, so its
@@ -60,7 +80,9 @@
   forward folds each output by its layer's shape alone (one `fma` chain, or
   64-input chunks summed in order for a deep layer), so a row has the same
   bits at every batch size and a CPU model of the two folds reproduces
-  them. A batch of one row or a few rows runs on thin pipelined tiles.
+  them. A batch of one row or a few rows runs on thin pipelined tiles, and
+  a layer whose 128 x 128 tiles fill three quarters of the card runs that
+  tile (4096 x 256 x 2112 on an RTX 6000 Ada: about 200 -> 110 us).
 - GEMMs on a caller's CUDA context and stream:
   `GpuDevice::from_context`, `GpuCtx::new_on_stream`, and raw-pointer
   forward, input-gradient and weight-gradient entries.

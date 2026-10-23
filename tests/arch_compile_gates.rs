@@ -5257,9 +5257,32 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
         ] {
             assert!(!ptx.contains(forbidden), "{requested} contains {forbidden}");
         }
+        // A stream-K kernel's grid barrier counts arrivals with two wrapping
+        // increments, which add nothing to any output; no other entry may
+        // hold one, and no other atomic may appear at all.
+        let mut barriers = 0;
+        for entry in &parsed.entries {
+            let increments = entry.body.matches("atom.global.inc.u32").count();
+            if entry.symbol.contains("_streamk") {
+                assert_eq!(increments, 2, "{requested}/{} grid barrier", entry.symbol);
+                barriers += 1;
+            } else {
+                assert_eq!(
+                    increments, 0,
+                    "{requested}/{} counts with an atomic",
+                    entry.symbol
+                );
+            }
+        }
+        assert_eq!(
+            ptx.matches("atom.global.inc.u32").count(),
+            2 * barriers,
+            "{requested} holds an increment outside the stream-K barriers"
+        );
+        let scanned = ptx.replace("atom.global.inc.u32", "barrier.counter");
         for forbidden_opcode in ["atom.", "red.", "redux."] {
             assert!(
-                !contains_opcode_prefix(&ptx, forbidden_opcode),
+                !contains_opcode_prefix(&scanned, forbidden_opcode),
                 "{requested} contains opcode {forbidden_opcode}"
             );
         }

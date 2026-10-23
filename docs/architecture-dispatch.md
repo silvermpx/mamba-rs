@@ -178,13 +178,21 @@ No selection compares an SM count to a card's number any more (the
   yet been timed against the RTX 5090's own former winners (rule 6); three
   shapes the 5090 had cells for are now served below the table.
 
-Still keyed to one card's count, until an SM120 card re-measures them:
-- the SM120 neighbour rule bounds its tile swap and stream-K decline at 170
-  tiles;
-- three SM120 exact-f32 overlays cut or fold a reduction their own way, so
-  exact bits on SM120 can differ from the other architectures.
-
 Repaired:
+- the SM120 exact-f32 kernels deal the portable plan's pieces (the batch
+  chunks of a split-M weight gradient, the 64-input chunks of a slim split
+  product, one chain otherwise) and fold them as the portable reducers do
+  (f32 in piece order with the bias last; f64 for a weight gradient), so an
+  exact product has the same bits on SM120 as on every other architecture;
+  a plan they cannot reproduce (a tail chain, 32-input pieces) keeps the
+  portable route. Which shapes take the family is speed alone and reads the
+  live SM count. The grid barrier of the stream-K fold was run on an RTX
+  6000 Ada (900,000 crossings per CTA at grids of 1 to 852, and 3001
+  one-barrier launches per grid) with no stale read; the new exact fold has
+  not yet run on an SM120 card;
+- the SM120 neighbour rule bounds its tile swap and stream-K decline at the
+  largest grid a measured stream-K cell won on (186 tiles), read from the
+  table;
 - the TF32 evidence cohorts are keyed by architecture (one cohort per
   architecture, any SM count, toolkit or driver);
 - the SM120 exact-f32 measured cells and generic boundary serve every SM120

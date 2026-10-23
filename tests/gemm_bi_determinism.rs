@@ -159,6 +159,8 @@ fn flag_on_training_is_bit_identical_across_runs() {
     );
 }
 
+// cuBLAS is the reference, so the comparison needs the `cublas` feature.
+#[cfg(feature = "cublas")]
 #[test]
 fn flag_on_matches_cublas_loosely() {
     // Same training trajectory with the deterministic triad vs cuBLAS TF32.
@@ -207,6 +209,8 @@ fn flag_on_mixed_training_is_bit_identical_across_runs() {
     }
 }
 
+// cuBLAS is the reference, so the comparison needs the `cublas` feature.
+#[cfg(feature = "cublas")]
 #[test]
 fn flag_on_mixed_matches_pedantic_loosely() {
     // Same bf16 trajectory: deterministic typed triad vs cuBLAS GemmEx

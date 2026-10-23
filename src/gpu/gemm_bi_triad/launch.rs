@@ -3774,15 +3774,21 @@ pub(super) fn sm120_fma_launch_plan(
         .ok_or_else(|| invalid_gemm_dimensions("exact-F32 tile count overflows usize"))?;
     let splits = usize::from(route.splits);
     let k_tiles = reduction.div_ceil(SM120_FMA_BK as usize);
-    let tiles_per_split = k_tiles.div_ceil(splits);
-    if tiles_per_split
-        .checked_mul(splits - 1)
-        .is_none_or(|covered| covered >= k_tiles)
-    {
-        return Err(invalid_gemm_dimensions(
-            "exact-F32 split leaves a reduction range empty",
-        ));
-    }
+    // A split deals the portable plan's pieces and nothing else, so the
+    // product keeps the bits the other architectures write.
+    let tiles_per_split = if splits == 1 {
+        k_tiles
+    } else {
+        match super::dispatch::sm120_fma_portable_cut(request) {
+            Some(cut) if usize::from(cut.splits) == splits => cut.piece_tiles,
+            _ => {
+                return Err(format!(
+                    "exact-F32 SM120 split of {splits} pieces is not the portable plan's cut of {:?} {}x{}x{}",
+                    request.op, request.shape.m, request.shape.k, request.shape.n
+                ));
+            }
+        }
+    };
     let units = tiles
         .checked_mul(splits)
         .and_then(|units| u32::try_from(units).ok())
@@ -9880,7 +9886,7 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
     // F must not depend on base_blocks (M_tiles*N_tiles/SMs): that makes equal
     // logical reductions at different batch sizes use different chunk counts,
     // changes reduction order, and causes bit drift.
-    const SPLITK_SLIM_K_CHUNK: u32 = 64; // PURE K-BASED, batch-invariant
+    const SPLITK_SLIM_K_CHUNK: u32 = super::dispatch::SLIM_SPLIT_K_CHUNK;
     if matches!(
         scalar_plan,
         ScalarDispatchPlan::NnExactThin | ScalarDispatchPlan::NnExactNarrow16
@@ -11735,7 +11741,7 @@ fn gemm_bi_backward_dx_with_control<
     // is a pure function of N. Same N always produces same F for any batch.
     //
     // Fires AFTER M<=1024 NT-via-T gate so never steals shapes Thin-M handles.
-    const SLIM_NT_K_CHUNK: u32 = 64;
+    const SLIM_NT_K_CHUNK: u32 = super::dispatch::SLIM_SPLIT_K_CHUNK;
     if let ScalarDispatchPlan::NtSplitKSlim { chunks: f_final } = scalar_plan {
         let base_blocks = checked_grid_product(
             checked_dims.m_u32.div_ceil(128),

@@ -6102,7 +6102,7 @@ pub const SM120_TENSOR_MAP_REVISION: u16 = 3;
 /// Qualified automatic-route table revision for SM120.
 pub const SM120_TUNING_REVISION: u16 = 0;
 /// Device schedule revision sealed into SM120 route identities.
-pub const SM120_SCHEDULE_REVISION: u16 = 10;
+pub const SM120_SCHEDULE_REVISION: u16 = 11;
 
 /// Logical GEMM operation implemented by the SM120 Triad module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

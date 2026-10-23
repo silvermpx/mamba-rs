@@ -10,10 +10,15 @@
 //
 // Bits. With one split every output walks its reduction in ascending k with
 // one __fmaf_rn per step starting from the bias (or zero), exactly the
-// scalar 64x64 NN chain. With S splits, unit (tile, s) accumulates its
-// contiguous range of k tiles from zero; splits 0..S-2 publish partial slabs
-// and split S-1 owns the tile: it folds bias + p0 + ... + p(S-1) with
-// __fadd_rn in that fixed order. Both are deterministic run to run.
+// scalar 64x64 NN chain. With S splits the host deals the portable plan's
+// pieces: unit (tile, s) accumulates its contiguous range of k tiles from
+// zero, splits 0..S-2 publish partial slabs, and split S-1 owns the tile and
+// folds the pieces the way the portable reducers do, so a product has the
+// same bits as on any other architecture. NN and NT sum p0 + ... + p(S-1)
+// with __fadd_rn in that order, scale by alpha and add the bias last, as
+// splitk_reduce does; TN sums the pieces in double in the same order and
+// adds alpha times the sum, rounded to float, to the output, as
+// splitm_reduce does.
 //
 // Shape of the schedule:
 //   - A and B tiles arrive through cp.async.bulk.tensor, one 2d box each
@@ -373,33 +378,54 @@ __device__ __forceinline__ void sm120_fma_body(
             }
         }
         __syncthreads();
-        float folded[TM * TN];
+        // One float4 of the microtile at a time, through every slab in split
+        // order and then the owner's own piece, so the double sums of the
+        // weight gradient never hold the whole microtile in registers.
         #pragma unroll
-        for (int c = 0; c < TN; ++c) {
-            int global_column = pid_n * BN + local_column(c);
-            float bias_value = bias != nullptr && global_column < params.n
-                ? bias[global_column]
-                : 0.0f;
-            #pragma unroll
-            for (int i = 0; i < TM; ++i) {
-                folded[i * TN + c] = bias_value;
+        for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
+            const float* first = slabs + ((size_t)chunk * THREADS + threadIdx.x) * 4;
+            float4 head = __ldcg(reinterpret_cast<const float4*>(first));
+            float* own = threadResults + chunk * 4;
+            if (OP == SM120_FMA_OP_TN) {
+                double sum0 = (double)head.x;
+                double sum1 = (double)head.y;
+                double sum2 = (double)head.z;
+                double sum3 = (double)head.w;
+                for (int s = 1; s < splits - 1; ++s) {
+                    float4 value = __ldcg(reinterpret_cast<const float4*>(
+                        first + (size_t)s * SLAB_FLOATS));
+                    sum0 += (double)value.x;
+                    sum1 += (double)value.y;
+                    sum2 += (double)value.z;
+                    sum3 += (double)value.w;
+                }
+                sum0 += (double)own[0];
+                sum1 += (double)own[1];
+                sum2 += (double)own[2];
+                sum3 += (double)own[3];
+                double scale = (double)params.alpha;
+                own[0] = (float)(scale * sum0);
+                own[1] = (float)(scale * sum1);
+                own[2] = (float)(scale * sum2);
+                own[3] = (float)(scale * sum3);
+            } else {
+                float sum0 = head.x;
+                float sum1 = head.y;
+                float sum2 = head.z;
+                float sum3 = head.w;
+                for (int s = 1; s < splits - 1; ++s) {
+                    float4 value = __ldcg(reinterpret_cast<const float4*>(
+                        first + (size_t)s * SLAB_FLOATS));
+                    sum0 = __fadd_rn(sum0, value.x);
+                    sum1 = __fadd_rn(sum1, value.y);
+                    sum2 = __fadd_rn(sum2, value.z);
+                    sum3 = __fadd_rn(sum3, value.w);
+                }
+                own[0] = __fadd_rn(sum0, own[0]);
+                own[1] = __fadd_rn(sum1, own[1]);
+                own[2] = __fadd_rn(sum2, own[2]);
+                own[3] = __fadd_rn(sum3, own[3]);
             }
-        }
-        for (int s = 0; s < splits - 1; ++s) {
-            const float* slab = slabs + (size_t)s * SLAB_FLOATS;
-            #pragma unroll
-            for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
-                float4 value = __ldcg(reinterpret_cast<const float4*>(
-                    slab + ((size_t)chunk * THREADS + threadIdx.x) * 4));
-                folded[chunk * 4 + 0] = __fadd_rn(folded[chunk * 4 + 0], value.x);
-                folded[chunk * 4 + 1] = __fadd_rn(folded[chunk * 4 + 1], value.y);
-                folded[chunk * 4 + 2] = __fadd_rn(folded[chunk * 4 + 2], value.z);
-                folded[chunk * 4 + 3] = __fadd_rn(folded[chunk * 4 + 3], value.w);
-            }
-        }
-        #pragma unroll
-        for (int result = 0; result < TM * TN; ++result) {
-            threadResults[result] = __fadd_rn(folded[result], threadResults[result]);
         }
         __syncthreads();
         if (threadIdx.x == 0) {
@@ -409,6 +435,11 @@ __device__ __forceinline__ void sm120_fma_body(
         }
     }
 
+    // A split weight gradient already carries alpha in its folded sum; a
+    // split NN product adds its bias after alpha, as the portable reducer
+    // does, where one split seeded the chain with it.
+    float alpha = OP == SM120_FMA_OP_TN && splits > 1 ? 1.0f : params.alpha;
+    const float* bias_last = splits > 1 ? bias : nullptr;
     #pragma unroll
     for (int i = 0; i < TM; ++i) {
         int global_row = pid_m * BM + local_row(i);
@@ -424,7 +455,7 @@ __device__ __forceinline__ void sm120_fma_body(
                 }
                 float* destination =
                     C + (long long)global_row * params.ldc + global_column;
-                float value = params.alpha * threadResults[i * TN + c];
+                float value = alpha * threadResults[i * TN + c];
                 if (params.beta != 0.0f) {
                     value += params.beta * destination[0];
                 }
@@ -444,7 +475,10 @@ __device__ __forceinline__ void sm120_fma_body(
                 for (int element = 0;
                      element < 4 && global_column + element < params.n;
                      ++element) {
-                    float value = params.alpha * threadResults[idx + element];
+                    float value = alpha * threadResults[idx + element];
+                    if (bias_last != nullptr) {
+                        value += bias_last[global_column + element];
+                    }
                     if (params.beta != 0.0f) {
                         value += params.beta * destination[element];
                     }
@@ -457,10 +491,16 @@ __device__ __forceinline__ void sm120_fma_body(
             if (params.beta != 0.0f) {
                 previous = reinterpret_cast<float4*>(destination)[0];
             }
-            float v0 = params.alpha * threadResults[idx + 0];
-            float v1 = params.alpha * threadResults[idx + 1];
-            float v2 = params.alpha * threadResults[idx + 2];
-            float v3 = params.alpha * threadResults[idx + 3];
+            float v0 = alpha * threadResults[idx + 0];
+            float v1 = alpha * threadResults[idx + 1];
+            float v2 = alpha * threadResults[idx + 2];
+            float v3 = alpha * threadResults[idx + 3];
+            if (bias_last != nullptr) {
+                v0 += bias_last[global_column + 0];
+                v1 += bias_last[global_column + 1];
+                v2 += bias_last[global_column + 2];
+                v3 += bias_last[global_column + 3];
+            }
             if (params.beta != 0.0f) {
                 v0 += params.beta * previous.x;
                 v1 += params.beta * previous.y;

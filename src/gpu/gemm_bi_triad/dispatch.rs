@@ -8,11 +8,11 @@ use super::super::{
 };
 use super::contract::{
     F32_TF32_TUNING_REVISION, F32TriadAvailability, F32TriadOperands, F32TriadRequest,
-    F32TriadSelection, F32TriadShape, SM90A_TILE, Sm90aForcedRoute, Sm90aOp, Sm90aShape,
-    Sm90aWarpgroupSchedule, Sm100ForcedRoute, Sm100Op, Sm100TargetCandidate, Sm100TargetKind,
-    Sm120Bk, Sm120FmaRoute, Sm120FmaTile, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest,
-    Sm120Op, Sm120PhysicalRoute, Sm120Schedule, Sm120Shape, Sm120Stages, Sm120TargetCandidate,
-    Sm120Tile, Tf32PhysicalRoute, Tf32QualifiedModule, tf32_kernel_spec,
+    F32TriadSelection, F32TriadShape, SM90A_TILE, SM120_FMA_BK, Sm90aForcedRoute, Sm90aOp,
+    Sm90aShape, Sm90aWarpgroupSchedule, Sm100ForcedRoute, Sm100Op, Sm100TargetCandidate,
+    Sm100TargetKind, Sm120Bk, Sm120FmaRoute, Sm120FmaTile, Sm120ForcedRoute, Sm120LaunchOperands,
+    Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Schedule, Sm120Shape, Sm120Stages,
+    Sm120TargetCandidate, Sm120Tile, Tf32PhysicalRoute, Tf32QualifiedModule, tf32_kernel_spec,
     validate_sm120_map_request,
 };
 use super::contract::{GemmDims, checked_mul3, checked_tile_grid, checked_usize};
@@ -3883,13 +3883,16 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
 }
 
 /// One exact-F32 SM120 cell measured under the exact policy: the shape in
-/// the performance-matrix convention with contiguous strides, and the arm
-/// that won its official 101-window qualification.
+/// the performance-matrix convention with contiguous strides, and the tile
+/// and B fragment of the arm that won its official 101-window
+/// qualification. How the reduction is cut is not the cell's to say: the
+/// portable plan of the shape names the pieces on every architecture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Sm120FmaMeasuredCell {
     op: ResolvedGemmOp,
     shape: F32TriadShape,
-    route: Sm120FmaRoute,
+    tile: Sm120FmaTile,
+    kvec: bool,
 }
 
 const fn sm120_fma_cell(
@@ -3897,7 +3900,6 @@ const fn sm120_fma_cell(
     dims: (usize, usize, usize),
     tile: Sm120FmaTile,
     kvec: bool,
-    splits: u8,
 ) -> Sm120FmaMeasuredCell {
     let (m, k, n) = dims;
     let (lda, ldb, ldc) = match op {
@@ -3915,159 +3917,144 @@ const fn sm120_fma_cell(
             ldb,
             ldc,
         },
-        route: Sm120FmaRoute { tile, kvec, splits },
+        tile,
+        kvec,
     }
 }
 
-/// The measured cells, each carrying the arm that won its qualification:
+/// The measured cells, each carrying the tile that won its qualification:
 /// the nine research projections against the scalar production route
 /// (1.22x to 1.60x, internal/perf/sm120-exact-nn-wide-20260903), and the
 /// classifier serve and training-batch projections against what the exact
 /// policy resolved before them (1.21x to 2.07x,
-/// internal/perf/sm120-exact-wide-product-20260903).
+/// internal/perf/sm120-exact-wide-product-20260903). Those arms also cut
+/// some reductions into two to five pieces of their own; the cut now follows
+/// the portable plan, so an RTX 5090 writes the bits an RTX 6000 Ada writes.
 const SM120_FMA_MEASURED_CELLS: [Sm120FmaMeasuredCell; 18] = [
     sm120_fma_cell(
         ResolvedGemmOp::Nn,
         (2_048, 768, 3_072),
         Sm120FmaTile::M128N64,
         false,
-        1,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nn,
         (2_048, 1_536, 768),
         Sm120FmaTile::M128N64,
         false,
-        4,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nn,
         (4_621, 384, 1_928),
         Sm120FmaTile::M64N128,
         false,
-        1,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Tn,
         (2_048, 768, 3_072),
         Sm120FmaTile::M64N128,
         false,
-        1,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Tn,
         (2_048, 1_536, 768),
         Sm120FmaTile::M128N64,
         false,
-        2,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Tn,
         (4_621, 384, 1_928),
         Sm120FmaTile::M128N64,
         false,
-        5,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nt,
         (2_048, 768, 3_072),
         Sm120FmaTile::M128N64,
         true,
-        5,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nt,
         (2_048, 1_536, 768),
         Sm120FmaTile::M64N128,
         false,
-        2,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nt,
         (4_621, 384, 1_928),
         Sm120FmaTile::M128N64,
         true,
-        3,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nn,
         (4_621, 768, 384),
         Sm120FmaTile::M64N64,
         false,
-        2,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nn,
         (4_621, 1_024, 384),
         Sm120FmaTile::M64N64,
         false,
-        2,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nn,
         (10_400, 384, 384),
         Sm120FmaTile::M128N64,
         false,
-        1,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nn,
         (10_400, 768, 384),
         Sm120FmaTile::M128N64,
         false,
-        1,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Tn,
         (10_400, 384, 1_536),
         Sm120FmaTile::M64N128,
         false,
-        5,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Tn,
         (4_096, 3_072, 1_536),
         Sm120FmaTile::M64N128,
         false,
-        2,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nt,
         (10_400, 384, 1_536),
         Sm120FmaTile::M128N64,
         false,
-        1,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nt,
         (10_400, 384, 384),
         Sm120FmaTile::M64N64,
         false,
-        1,
     ),
     sm120_fma_cell(
         ResolvedGemmOp::Nt,
         (4_621, 768, 384),
         Sm120FmaTile::M64N64,
         false,
-        1,
     ),
 ];
 
 /// Shapes past the measured cells take the exact family when their output
-/// holds enough whole tiles, no split, and a reduction long enough for the
-/// pipeline to matter. The boundary is a tile count of the shape, never of
-/// the card: the route decides whether the reduction folds as the plain
-/// chain or through the scalar plan, so every SM120 card must take the same
-/// one. It sits at one tile per multiprocessor of the RTX 5090 the product
-/// screen ran on, where the family beat the scalar route from 1.3 tiles per
-/// multiprocessor (1.68x on the 4621x384 output) up (1.81x at 2.9 on the
-/// 10400x384 output).
-const SM120_FMA_GENERIC_MIN_TILES: usize = 170;
+/// holds whole tiles enough to fill the card, an edge of at least a tile
+/// and a reduction long enough for the pipeline to matter. The route writes
+/// the portable plan's bits whichever tile serves, so the live
+/// multiprocessor count decides here: on the RTX 5090 the family beat the
+/// scalar route from 1.3 tiles per multiprocessor (1.68x on the 4621x384
+/// output) up (1.81x at 2.9 on the 10400x384 output).
 const SM120_FMA_GENERIC_MIN_EDGE: usize = 128;
 const SM120_FMA_GENERIC_MIN_REDUCTION: usize = 256;
 
-fn sm120_fma_generic_route(request: F32TriadRequest) -> Option<Sm120FmaRoute> {
+fn sm120_fma_generic_tile(
+    request: F32TriadRequest,
+    multiprocessors: u32,
+) -> Option<(Sm120FmaTile, bool)> {
     let (tile, kvec) = match request.op {
         ResolvedGemmOp::Nn => (Sm120FmaTile::M128N64, false),
         ResolvedGemmOp::Tn => (Sm120FmaTile::M64N128, false),
@@ -4086,10 +4073,57 @@ fn sm120_fma_generic_route(request: F32TriadRequest) -> Option<Sm120FmaRoute> {
     let tiles = rows
         .div_ceil(bm as usize)
         .checked_mul(columns.div_ceil(bn as usize))?;
-    (tiles >= SM120_FMA_GENERIC_MIN_TILES).then_some(Sm120FmaRoute {
-        tile,
-        kvec,
-        splits: 1,
+    (multiprocessors > 0 && tiles >= multiprocessors as usize).then_some((tile, kvec))
+}
+
+/// How the portable exact plan of a request cuts its reduction, in the
+/// SM120 kernels' 16-deep k tiles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Sm120FmaCut {
+    /// The pieces, one unit of the launch per tile and piece.
+    pub splits: u8,
+    /// The k tiles of every piece; the last one may hold fewer.
+    pub piece_tiles: usize,
+}
+
+/// The portable plan's cut of a request when the SM120 kernels can write
+/// its bits: one chain for a plain big or slim tile, the batch chunks of a
+/// split-M weight gradient, the 64-input chunks of a slim split-K product.
+/// Every other plan folds in a way the SM120 kernels do not (a tail chain
+/// after the sum, 32-input pieces, a warp-parallel row), and the request
+/// keeps the portable route.
+pub(super) fn sm120_fma_portable_cut(request: F32TriadRequest) -> Option<Sm120FmaCut> {
+    let k_tiles = request
+        .shape
+        .reduction(request.op)
+        .div_ceil(SM120_FMA_BK as usize);
+    let (splits, piece_tiles) = match scalar_dispatch_plan(request).ok()? {
+        ScalarDispatchPlan::NnFinal { .. }
+        | ScalarDispatchPlan::TnFinal { .. }
+        | ScalarDispatchPlan::NtFinal { .. } => (1, k_tiles),
+        ScalarDispatchPlan::TnSplitM { m_chunk, chunks } => {
+            if !m_chunk.is_multiple_of(SM120_FMA_BK as usize) {
+                return None;
+            }
+            (chunks, m_chunk / SM120_FMA_BK as usize)
+        }
+        ScalarDispatchPlan::NnSplitKSlim { chunks }
+        | ScalarDispatchPlan::NtSplitKSlim { chunks } => (
+            usize::try_from(chunks).ok()?,
+            SLIM_SPLIT_K_CHUNK as usize / SM120_FMA_BK as usize,
+        ),
+        _ => return None,
+    };
+    // Every piece but the last is whole and the last holds at least a tile.
+    if piece_tiles == 0
+        || piece_tiles.checked_mul(splits)? < k_tiles
+        || piece_tiles.checked_mul(splits.checked_sub(1)?)? >= k_tiles
+    {
+        return None;
+    }
+    Some(Sm120FmaCut {
+        splits: u8::try_from(splits).ok()?,
+        piece_tiles,
     })
 }
 
@@ -4100,9 +4134,11 @@ fn f32_pointer_is_tma_aligned(pointer: super::contract::CUptr) -> bool {
 /// The exact-F32 SM120 route for a request under the exact policy: the
 /// specialized module must be bound on an SM120 device, every operand must
 /// sit on a 16-byte boundary with float4 leading dimensions (the tensor
-/// maps demand it), and the shape must be a measured cell or hold enough
-/// whole tiles. Every SM120 card takes the same route for a shape. Anything
-/// else keeps the scalar routes.
+/// maps demand it), the portable plan's cut must be one the kernels write,
+/// and the shape must be a measured cell or fill the card with whole tiles.
+/// The route deals the portable plan's pieces and folds them as the
+/// portable reducers do, so it writes the bits of every other architecture.
+/// Anything else keeps the scalar routes.
 pub(super) fn sm120_fma_exact_route(
     request: F32TriadRequest,
     operands: F32TriadOperands,
@@ -4128,25 +4164,46 @@ pub(super) fn sm120_fma_exact_route(
     {
         return None;
     }
-    let measured = SM120_FMA_MEASURED_CELLS
+    let cut = sm120_fma_portable_cut(request)?;
+    // The portable split refuses a nonzero beta on NN, and its slim tile
+    // pads a ragged reduction to 32 inputs where these kernels pad to 16:
+    // a zero product turns a negative-zero sum seeded by a bias positive.
+    if cut.splits > 1 && request.op == ResolvedGemmOp::Nn && operands.beta != 0.0 {
+        return None;
+    }
+    if request.op == ResolvedGemmOp::Nn
+        && operands.bias.is_some()
+        && matches!(
+            scalar_dispatch_plan(request),
+            Ok(ScalarDispatchPlan::NnFinal { slim: true })
+        )
+        && shape.reduction(request.op).div_ceil(32) * 32
+            != shape.reduction(request.op).div_ceil(16) * 16
+    {
+        return None;
+    }
+    let with_cut = |(tile, kvec)| Sm120FmaRoute {
+        tile,
+        kvec,
+        splits: cut.splits,
+    };
+    let route = SM120_FMA_MEASURED_CELLS
         .iter()
         .find(|cell| cell.op == request.op && cell.shape == shape)
-        .map(|cell| cell.route);
-    let route = measured
-        .filter(|&route| {
+        .map(|cell| with_cut((cell.tile, cell.kvec)))
+        .filter(|route| {
             !qualified
                 .sm120_fma_exclusions
-                .is_excluded(request.op, route)
+                .is_excluded(request.op, *route)
         })
         .or_else(|| {
-            let mut route = sm120_fma_generic_route(request)?;
-            if let Some(measured) = measured {
-                route.splits = measured.splits;
-            }
-            (!qualified
-                .sm120_fma_exclusions
-                .is_excluded(request.op, route))
-            .then_some(route)
+            sm120_fma_generic_tile(request, qualified.device.multiprocessor_count)
+                .map(with_cut)
+                .filter(|route| {
+                    !qualified
+                        .sm120_fma_exclusions
+                        .is_excluded(request.op, *route)
+                })
         })?;
     super::launch::sm120_fma_launch_plan(request, route).ok()?;
     Some(route)
@@ -5497,7 +5554,7 @@ pub const SM120_AUTO_CELLS_CC121: &[Sm120ForcedRoute] = &[];
 
 /// Stream-K half cells measured on the 5090 (CC 12.0, driver 595.84;
 /// internal/perf/sm120-streamk-tn-20260904): the TN shapes whose tile grid
-/// underfills the 170 multiprocessors. Each names the persistent-grid twin of
+/// underfilled its multiprocessors. Each names the persistent-grid twin of
 /// the M64N64/BK64/S3 body and is served only under
 /// `HalfTriadPolicy::AllowStreamKFixedOrder`; the tiled table keeps its own
 /// cell for every one of these shapes, so the default policy loses nothing.
@@ -5801,9 +5858,34 @@ fn sm120_auto_geometry(op: Sm120Op, shape: Sm120Shape) -> [f64; 3] {
 /// Both bounds of the rule are tile counts of the shape, never the card's:
 /// the stream-K decline picks a reduction order and the tile swap a tile
 /// whose bits no test has pinned against the neighbour's, so every SM120
-/// card must take the same branch. The count is one wave of the card the
-/// census ran on; a census on a second SM120 card re-measures it.
-const SM120_NEIGHBOUR_WAVE_TILES: f64 = 170.0;
+/// card must take the same branch. The count is the largest grid a measured
+/// stream-K cell won on (384 x 1928 in 64 x 64 tiles: 186, at 0.93 of the
+/// best tiled route), read from the table, so a census that adds a winner
+/// moves it; past it the census found the same body losing 1.22-1.77x.
+const SM120_STREAMK_NEIGHBOUR_MAX_TILES: f64 =
+    sm120_streamk_largest_winning_grid(SM120_STREAMK_CELLS_CC120) as f64;
+
+const fn sm120_streamk_largest_winning_grid(cells: &[Sm120ForcedRoute]) -> usize {
+    let mut largest = 0;
+    let mut index = 0;
+    while index < cells.len() {
+        let cell = cells[index];
+        if matches!(cell.physical.schedule, Sm120Schedule::StreamK) {
+            let (rows, columns) = match cell.op {
+                Sm120Op::Nn => (cell.shape.m, cell.shape.n),
+                Sm120Op::Tn => (cell.shape.k, cell.shape.n),
+                Sm120Op::Nt => (cell.shape.m, cell.shape.k),
+            };
+            let grid = rows.div_ceil(cell.physical.tile.output_rows() as usize)
+                * columns.div_ceil(cell.physical.tile.output_columns() as usize);
+            if grid > largest {
+                largest = grid;
+            }
+        }
+        index += 1;
+    }
+    largest
+}
 
 fn nearest_sm120_cell(
     cells: &[Sm120ForcedRoute],
@@ -5837,10 +5919,10 @@ fn nearest_sm120_cell(
     let (_, neighbour) = best?;
     let mut physical = neighbour.physical;
     // A neighbour measured on a larger output may carry a tile whose grid
-    // leaves most of the card idle. When the shape fills less than the
-    // census wave with that tile and less than half of what the neighbour
-    // filled, the smallest tile serves instead: the census shows it winning
-    // every cell that far into underfill. The pipeline depth and reduction
+    // leaves most of the card idle. When the shape's grid with that tile is
+    // under the stream-K bound and under half of what the neighbour filled,
+    // the smallest tile serves instead: the census shows it winning every
+    // cell that far into underfill. The pipeline depth and reduction
     // step stay the neighbour's. A neighbour that won underfilled itself
     // keeps its tile for shapes that are underfilled the same way.
     let grid = |cell_shape: Sm120Shape| {
@@ -5849,14 +5931,16 @@ fn nearest_sm120_cell(
             * (columns / f64::from(physical.tile.output_columns())).ceil()
     };
     let target_grid = grid(shape);
-    if target_grid < SM120_NEIGHBOUR_WAVE_TILES && target_grid * 2.0 < grid(neighbour.shape) {
+    if target_grid <= SM120_STREAMK_NEIGHBOUR_MAX_TILES && target_grid * 2.0 < grid(neighbour.shape)
+    {
         physical.tile = Sm120Tile::M64N64;
     }
-    // A stream-K neighbour earns its persistent grid only while the target's
-    // own grid underfills the census wave; a shape whose tiles already cover
-    // it declines here so the tiled table serves it (stream-K lost 22-77% on
-    // every cell whose tiles reached it).
-    if physical.schedule == Sm120Schedule::StreamK && target_grid >= SM120_NEIGHBOUR_WAVE_TILES {
+    // A stream-K neighbour earns its persistent grid only up to the largest
+    // grid stream-K won on; a larger shape declines here so the tiled table
+    // serves it.
+    if physical.schedule == Sm120Schedule::StreamK
+        && target_grid > SM120_STREAMK_NEIGHBOUR_MAX_TILES
+    {
         return None;
     }
     Some(physical)
@@ -7881,6 +7965,9 @@ impl ScalarDispatchPlan {
     }
 }
 
+/// The inputs one piece of a slim split-K product sums, NN and NT alike.
+pub(super) const SLIM_SPLIT_K_CHUNK: u32 = 64;
+
 fn slim_final(output_rows: usize, output_columns: usize) -> bool {
     output_columns <= GEMM_SLIM_MAX
         || (output_rows < GEMM_M_SLIM_FORCE && output_columns >= GEMM_CUSTOM_MIN)
@@ -7939,7 +8026,7 @@ fn scalar_nn_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
         && n_in >= 64
         && n_in.is_multiple_of(32)
     {
-        let chunks = dims.k_u32.div_ceil(64);
+        let chunks = dims.k_u32.div_ceil(SLIM_SPLIT_K_CHUNK);
         if chunks >= 6
             && checked_mul3(
                 checked_usize(chunks, "NN slim split-K chunks")?,
@@ -8057,7 +8144,7 @@ fn scalar_nt_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
         && n_out.is_multiple_of(32)
         && dims.kn <= super::contract::SCALAR_GENERIC_TRANSPOSE_ROUTE_CAP_ELEMENTS
     {
-        let chunks = dims.n_u32.div_ceil(64);
+        let chunks = dims.n_u32.div_ceil(SLIM_SPLIT_K_CHUNK);
         if chunks >= 2
             && checked_mul3(
                 checked_usize(chunks, "NT slim split-K chunks")?,
@@ -8205,8 +8292,15 @@ pub(super) fn exact_batch_invariant_nn_plan(
                 .map_err(|_| format!("{m} rows in pieces of {piece_rows} pass u32"))?,
         });
     }
+    // The 128 x 128 chain tile from three quarters of a wave of its own
+    // tiles: on an RTX 6000 Ada it ran in 0.53 to 0.94 of the 64 x 64
+    // tile's time on every shape from there up to eight waves (164 shapes,
+    // 64 to 384 inputs, the same bits on all), and lost below half a wave.
     let big_grid = m.div_ceil(128).saturating_mul(n.div_ceil(128));
-    if m >= GEMM_CUSTOM_MIN && n >= GEMM_CUSTOM_MIN && big_grid >= 8 * waves {
+    if m >= GEMM_CUSTOM_MIN
+        && n >= GEMM_CUSTOM_MIN
+        && big_grid.saturating_mul(4) >= waves.saturating_mul(3)
+    {
         return Ok(ScalarDispatchPlan::NnFinal { slim: false });
     }
     if m.div_ceil(64).saturating_mul(n.div_ceil(64)) >= waves / 2 {
@@ -12450,6 +12544,13 @@ mod sm120_tests {
     }
 
     #[test]
+    fn the_streamk_neighbour_bound_is_the_largest_measured_winner() {
+        // 384 x 1928 in 64 x 64 tiles: a shape of the table, not a card's
+        // multiprocessor count.
+        assert_eq!(super::SM120_STREAMK_NEIGHBOUR_MAX_TILES, 186.0);
+    }
+
+    #[test]
     fn a_streamk_neighbour_serves_only_an_underfilled_grid() {
         // One measured stream-K cell: the batch out projection, whose
         // twelve-by-six tile grid leaves most of the device idle.
@@ -13389,6 +13490,75 @@ mod tf32_tests {
     }
 
     #[test]
+    fn sm120_exact_splits_only_where_the_portable_plan_splits() {
+        // An RTX 5090 writes an exact product's bits only if it cuts the
+        // reduction where every other architecture does: the pieces of the
+        // portable plan, nowhere else.
+        let identity = sm120_cohort().identity;
+        let availability = sm120_availability_for(identity);
+        let mut served = [0_usize; 2];
+        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
+            for m in [256, 1_024, 2_048, 4_621, 10_400] {
+                for k in [128, 384, 768, 1_024, 1_536, 1_928, 3_072] {
+                    for n in [128, 384, 768, 1_536, 1_928, 3_072] {
+                        let request = F32TriadRequest {
+                            op,
+                            shape: F32TriadShape::contiguous(op, (m, k, n)),
+                        };
+                        let operands = F32TriadOperands {
+                            output: 0x1000,
+                            a: 0x2000,
+                            b: 0x3000,
+                            bias: None,
+                            alpha: 1.0,
+                            beta: if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
+                        };
+                        let Some(route) =
+                            super::sm120_fma_exact_route(request, operands, availability)
+                        else {
+                            continue;
+                        };
+                        let plan = super::scalar_dispatch_plan(request).unwrap();
+                        let cut = super::sm120_fma_portable_cut(request)
+                            .expect("a served shape has a portable cut");
+                        assert_eq!(route.splits, cut.splits, "{op:?} {m}x{k}x{n} {plan:?}");
+                        assert_eq!(
+                            route.splits > 1,
+                            plan.needs_split_scratch(),
+                            "{op:?} {m}x{k}x{n} {plan:?}"
+                        );
+                        let launch = crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(
+                            request, route,
+                        )
+                        .unwrap();
+                        assert_eq!(launch.tiles_per_split, cut.piece_tiles);
+                        served[usize::from(route.splits > 1)] += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            served[0] > 0 && served[1] > 0,
+            "the sweep reaches both chains and splits: {served:?}"
+        );
+    }
+
+    #[test]
+    fn sm120_exact_launch_refuses_a_cut_of_its_own() {
+        // NT 2048x1536x768 is one chain in the portable plan; the two pieces
+        // its measured arm once dealt are refused.
+        let (request, _) = nt_d768_out_request_and_operands();
+        let route = Sm120FmaRoute {
+            tile: Sm120FmaTile::M64N128,
+            kvec: false,
+            splits: 2,
+        };
+        let error = crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(request, route)
+            .expect_err("a split the portable plan does not make");
+        assert!(error.contains("portable plan's cut"), "{error}");
+    }
+
+    #[test]
     fn exact_policy_measured_cells_resolve_to_their_official_arms() {
         let identity = sm120_cohort().identity;
         let availability = sm120_availability_for(identity);
@@ -13417,7 +13587,13 @@ mod tf32_tests {
                     availability,
                 )
                 .unwrap(),
-                F32TriadSelection::ExactSm120Fma(cell.route),
+                F32TriadSelection::ExactSm120Fma(Sm120FmaRoute {
+                    tile: cell.tile,
+                    kvec: cell.kvec,
+                    splits: super::sm120_fma_portable_cut(request)
+                        .expect("every measured cell has a portable cut the kernels write")
+                        .splits,
+                }),
                 "{:?} {:?}",
                 cell.op,
                 cell.shape
@@ -13488,12 +13664,12 @@ mod tf32_tests {
         let measured = Sm120FmaRoute {
             tile: Sm120FmaTile::M64N128,
             kvec: false,
-            splits: 2,
+            splits: 1,
         };
         let generic = Sm120FmaRoute {
             tile: Sm120FmaTile::M128N64,
             kvec: true,
-            splits: 2,
+            splits: 1,
         };
         let availability =
             exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, measured)]);
@@ -13573,7 +13749,7 @@ mod tf32_tests {
                 Sm120FmaRoute {
                     tile: Sm120FmaTile::M128N64,
                     kvec: false,
-                    splits: 4,
+                    splits: 1,
                 },
             ),
             (
@@ -13582,7 +13758,7 @@ mod tf32_tests {
                 Sm120FmaRoute {
                     tile: Sm120FmaTile::M128N64,
                     kvec: false,
-                    splits: 2,
+                    splits: 4,
                 },
             ),
         ] {
