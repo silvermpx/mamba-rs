@@ -227,7 +227,7 @@ fn inference_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
 }
 
 #[test]
-#[ignore = "requires exact Ada 142SM CUDA12.8/13.0/13.2 and qualified hot-cell AUTO promotion"]
+#[ignore = "requires an Ada CC8.9 board, CUDA12.8/13.0/13.2 and qualified hot-cell AUTO promotion"]
 fn inference_sm89_half_pipeline_auto_hot_cell_prefix_view_graph_bits() {
     inference_sm89_half_hot_cell_prefix_view_graph_bits(None, None);
 }
