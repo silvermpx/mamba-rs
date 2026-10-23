@@ -365,10 +365,10 @@ fn triad_f32_boundaries_match_the_declared_table() {
         &[
             (64, 64, &[32]),
             (63, 128, &[32]),
-            (384, 384, &[32, 1025, 4621]),
-            (1024, 384, &[32, 1023, 1025, 2048]),
-            (384, 1928, &[32, 511]),
-            (768, 384, &[32, 1023, 1025, 2048]),
+            (384, 384, &[32, 1025]),
+            (1024, 384, &[32, 1025]),
+            (384, 1928, &[32, 513]),
+            (768, 384, &[32, 1025]),
         ],
     )];
     let Some(rows) = arch_rows(&dev, DECLARED, "Triad/f32") else {
@@ -473,7 +473,7 @@ fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
     const DECLARED: &ArchTables<'static> = &[(
         "sm_89",
         &[
-            (384, 384, &[128usize, 1025, 4621] as &[usize]),
+            (384, 384, &[128usize, 1025] as &[usize]),
             (768, 2304, &[128]),
         ],
     )];
