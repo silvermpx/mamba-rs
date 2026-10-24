@@ -8080,9 +8080,10 @@ pub(super) enum ScalarDispatchPlan {
     /// The batch-invariant exact forward's pipelined 16 x 16 tile.
     NnExactNarrow16,
     /// The batch-invariant exact policy's chunk fold: the partial writes one
-    /// 64-input chunk per plane and `splitk_reduce` sums the planes in order
-    /// and adds the bias, `piece_rows` rows at a time so the planes fit the
-    /// split scratch at any batch. Every partial writes the same planes.
+    /// piece of the layer's fold per plane and `splitk_reduce` sums the
+    /// planes in order and adds the bias, `piece_rows` rows at a time so the
+    /// planes fit the split scratch at any batch. Every partial writes the
+    /// same planes.
     NnExactChunk {
         partial: ExactChunkPartial,
         chunks: u32,
@@ -8441,27 +8442,17 @@ fn scalar_nt_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
     ))
 }
 
-/// Reductions at least this deep fold as 64-input chunks under the
-/// batch-invariant exact policy, shallower ones as one chain.
-pub(crate) const EXACT_CHUNKS_MIN_K: usize = 512;
+/// Whether a layer of `k` inputs and `n` outputs folds in pieces under the
+/// batch-invariant exact policy. The rule is the one [`crate::gemm_fold`]
+/// states and reads the layer's shape alone, so a layer folds the same way
+/// at every row count, and the CPU twin there reproduces the GPU's bits.
+pub(crate) fn exact_chunks(k: usize, n: usize) -> bool {
+    crate::gemm_fold::is_cut(k, n, crate::gemm_fold::BATCH_INVARIANT_FORWARD.threshold)
+}
 
-/// A narrow layer (fewer outputs than this) folds as chunks from
-/// [`EXACT_CHUNKS_NARROW_MIN_K`] inputs: a chain tile has too few columns to
-/// keep the card busy, and the chunks add the reduction's parallelism.
-pub(crate) const EXACT_CHUNKS_NARROW_N: usize = 128;
-
-/// The chunk threshold of a narrow layer.
-pub(crate) const EXACT_CHUNKS_NARROW_MIN_K: usize = 384;
-
-/// The inputs one chunk of a deep layer's fold sums.
-pub(crate) const EXACT_CHUNK: usize = 64;
-
-/// Whether a layer of `k` inputs and `n` outputs folds as chunks under the
-/// batch-invariant exact policy. The rule reads the layer's shape alone, so
-/// a layer folds the same way at every row count, and a CPU twin that
-/// applies it reproduces the GPU's bits.
-pub(crate) const fn exact_chunks(k: usize, n: usize) -> bool {
-    k >= EXACT_CHUNKS_MIN_K || (n < EXACT_CHUNKS_NARROW_N && k >= EXACT_CHUNKS_NARROW_MIN_K)
+/// The inputs one piece of a cut layer's batch-invariant fold sums.
+pub(crate) fn exact_chunk(k: usize, n: usize) -> usize {
+    crate::gemm_fold::exact_piece_len(k, n, crate::gemm_fold::BATCH_INVARIANT_FORWARD)
 }
 
 /// The batch-invariant exact policy's forward plan. A shallow layer runs
@@ -8495,7 +8486,7 @@ pub(super) fn exact_batch_invariant_nn_plan(
     }
     let waves = multiprocessors as usize;
     if exact_chunks(k, n) {
-        let chunks = k.div_ceil(EXACT_CHUNK);
+        let chunks = k.div_ceil(exact_chunk(k, n));
         let piece_rows = (SPLITK_SCRATCH_CAP / chunks.saturating_mul(n).max(1)).clamp(1, m);
         if chunks.saturating_mul(n) > SPLITK_SCRATCH_CAP {
             return Err(format!(
@@ -18088,8 +18079,8 @@ mod sm100_sm90a_auto_tests {
 #[cfg(test)]
 mod exact_batch_invariant_tests {
     use super::{
-        EXACT_CHUNK, ExactChunkPartial, SPLITK_SCRATCH_CAP, ScalarDispatchPlan,
-        exact_batch_invariant_nn_plan, exact_chunks, resolve_f32_triad_auto,
+        ExactChunkPartial, SPLITK_SCRATCH_CAP, ScalarDispatchPlan, exact_batch_invariant_nn_plan,
+        exact_chunk, exact_chunks, resolve_f32_triad_auto,
     };
     use crate::gpu::context::F32TriadPolicy;
     use crate::gpu::gemm_bi_triad::contract::{
@@ -18133,7 +18124,11 @@ mod exact_batch_invariant_tests {
                                         m == 1,
                                         "{what}"
                                     );
-                                    assert_eq!(chunks as usize, k.div_ceil(EXACT_CHUNK), "{what}");
+                                    assert_eq!(
+                                        chunks as usize,
+                                        k.div_ceil(exact_chunk(k, n)),
+                                        "{what}"
+                                    );
                                     let (rows, pieces) = (piece_rows as usize, pieces as usize);
                                     assert!(rows >= 1 && rows <= m, "{what}");
                                     assert!(

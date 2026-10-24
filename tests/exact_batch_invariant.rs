@@ -1,12 +1,11 @@
 //! Under the batch-invariant exact policy every row of a forward equals the
-//! CPU fold of its layer, bit for bit, at every row count: a shallow layer
-//! as one `fma` chain seeded with the bias (one `+0.0` where the reduction
-//! is not a whole number of 16-input slabs), a deep or narrow one as
-//! 64-input chunks summed in order (a chunk closed with `+0.0` where it is
-//! not a whole number of 32-input slabs) before the bias. Rows that pass the
-//! split scratch go in pieces and fold the same way.
+//! CPU fold of its layer, bit for bit, at every row count: the fold
+//! `mamba_rs::gemm_fold` states for the batch-invariant forward, evaluated
+//! by its CPU twin. Rows that pass the split scratch go in pieces of rows
+//! and fold the same way.
 #![cfg(feature = "cuda")]
 
+use mamba_rs::gemm_fold::{self, BATCH_INVARIANT_FORWARD};
 use mamba_rs::gpu::blas::gpu_gemm_f32_forward_ptrs;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::{F32TriadPolicy, GpuCtx};
@@ -25,37 +24,21 @@ fn synth(n: usize, seed: u64) -> Vec<f32> {
 }
 
 fn chunked(k: usize, n: usize) -> bool {
-    k >= 512 || (n < 128 && k >= 384)
+    gemm_fold::is_cut(k, n, BATCH_INVARIANT_FORWARD.threshold)
 }
 
-/// The fold of one row, as a CPU twin computes it.
+/// The fold of one row, as the CPU twin computes it.
 fn fold_row(w: &[f32], x: &[f32], bias: Option<&[f32]>, k: usize, n: usize) -> Vec<f32> {
     (0..n)
         .map(|column| {
-            if chunked(k, n) {
-                let mut sum = 0.0f32;
-                for chunk in 0..k.div_ceil(64) {
-                    let (first, end) = (chunk * 64, ((chunk + 1) * 64).min(k));
-                    let mut partial = 0.0f32;
-                    for input in first..end {
-                        partial = x[input].mul_add(w[input * n + column], partial);
-                    }
-                    if !(end - first).is_multiple_of(32) {
-                        partial += 0.0;
-                    }
-                    sum = if chunk == 0 { partial } else { sum + partial };
-                }
-                bias.map_or(sum, |b| sum + b[column])
-            } else {
-                let mut acc = bias.map_or(0.0, |b| b[column]);
-                for input in 0..k {
-                    acc = x[input].mul_add(w[input * n + column], acc);
-                }
-                if !k.is_multiple_of(16) {
-                    acc += 0.0;
-                }
-                acc
-            }
+            gemm_fold::exact_output(
+                |input| x[input],
+                |input| w[input * n + column],
+                bias.map(|b| b[column]),
+                k,
+                n,
+                BATCH_INVARIANT_FORWARD,
+            )
         })
         .collect()
 }

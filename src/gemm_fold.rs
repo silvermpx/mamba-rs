@@ -96,6 +96,9 @@ impl FoldRule {
     };
 }
 
+/// The fold the batch-invariant exact forward follows.
+pub const BATCH_INVARIANT_FORWARD: FoldRule = FoldRule::CHUNKS_TODAY;
+
 /// The piece length that cuts `r` inputs into at most `p` pieces on a
 /// granule of `g`: `g * ceil(ceil(r / g) / p)`. Zero for an empty reduction.
 pub fn piece_len(r: usize, p: usize, g: usize) -> usize {

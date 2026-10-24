@@ -10246,10 +10246,10 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
     } = scalar_plan
     {
         // The batch-invariant chunk fold: per piece of rows, the partial
-        // writes one 64-input chunk per plane into the split scratch and the
-        // reducer sums the planes in order, then adds the bias, into that
-        // piece's rows of the output. A row folds the same way in any piece
-        // and on any of the three partials.
+        // writes one piece of the layer's fold per plane into the split
+        // scratch and the reducer sums the planes in order, then adds the
+        // bias, into that piece's rows of the output. A row folds the same
+        // way in any piece of rows and on any of the three partials.
         let partial_ptr = {
             use cudarc::driver::DevicePtr;
             let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
@@ -10258,8 +10258,9 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
         let output_base = y.scalar_ptr();
         let n_i = checked_dims.n_i32;
         let k_i = checked_dims.k_i32;
+        let (_, n_in, n_out) = checked_dims.tuple();
         let k_chunk_i = checked_i32(
-            checked_usize(SPLITK_SLIM_K_CHUNK, "NN chunk-fold chunk")?,
+            super::dispatch::exact_chunk(n_in, n_out),
             "NN chunk-fold chunk",
         )?;
         let chunks_i = checked_i32(
