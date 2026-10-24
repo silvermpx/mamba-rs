@@ -83,6 +83,10 @@ const SCALAR_ENTRIES: &[&str] = &[
     "nn_exact_m16n16_bk16_s4",
     "exact_chunk_partial_m32n64",
     "exact_chunk_partial_m16n16_bk16_s4",
+    "nt_exact_thin_r1_m16n32_bk64_s6",
+    "nt_exact_m16n16_bk16_s4",
+    "nt_exact_chunk_partial_m32n64",
+    "nt_exact_chunk_partial_m16n16_bk16_s4",
 ];
 
 #[cfg(target_os = "linux")]

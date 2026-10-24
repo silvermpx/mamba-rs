@@ -14,6 +14,12 @@
 // bias - the planes `nn_splitk_slim_partial` writes, which `splitk_reduce`
 // then sums in order.
 //
+// Every tile also serves the input gradient: with B_T the B operand is the
+// forward's weight W stored [columns][k], so the stage element (k, column)
+// is read from W[column][k]. Only the loader changes; the slabs, the chains
+// and the planes are the forward's, so an input gradient folds its
+// reduction exactly as a forward over the transposed weight would.
+//
 // A batch of one or a few rows has few outputs and long chains, and a
 // chain cannot be cut. One row per thread puts as many warps on the machine
 // as the batch has outputs. A six-stage cp.async ring keeps the next
@@ -76,7 +82,18 @@ __device__ __forceinline__ void exact_thin_copy_word(
     }
 }
 
-template <int ROWS>
+// One stage element of a transposed B: (k, column) from W[column][k], or a
+// zero past an edge.
+__device__ __forceinline__ void exact_copy_bt(
+    unsigned dst, const float* B, int ldb, int g_k, int k_limit, int g_column, int n
+) {
+    const bool valid = g_k < k_limit && g_column < n;
+    const float* src = valid ? B + (long long)g_column * ldb + g_k : B;
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
+                 :: "r"(dst), "l"(src), "r"(valid ? 4 : 0));
+}
+
+template <int ROWS, bool B_T>
 __device__ __forceinline__ void exact_thin_tile(
     float* __restrict__ C,
     const float* __restrict__ A,
@@ -96,7 +113,7 @@ __device__ __forceinline__ void exact_thin_tile(
     const int k_begin = blockIdx.z * params.slab;
     const int k_len = min(params.slab, params.k - k_begin);
     A += k_begin;
-    B += (long long)k_begin * params.ldb;
+    B += B_T ? (long long)k_begin : (long long)k_begin * params.ldb;
     C += (long long)blockIdx.z * params.m * params.ldc;
 
     const int row_tile = blockIdx.y * EXACT_THIN_BM;
@@ -136,17 +153,29 @@ __device__ __forceinline__ void exact_thin_tile(
                 exact_thin_copy_word(dst, A, 0, 0, false);
             }
         }
-        for (int word = threadIdx.x; word < EXACT_THIN_B_STAGE / 4; word += THREADS) {
-            int kk = word / (EXACT_THIN_BN / 4);
-            int c4 = (word % (EXACT_THIN_BN / 4)) * 4;
-            int g_k = k0 + kk;
-            unsigned dst = (unsigned)__cvta_generic_to_shared(
-                Bs + stage * EXACT_THIN_B_STAGE + kk * EXACT_THIN_BN + c4);
-            if (g_k < k_len) {
-                exact_thin_copy_word(dst, B + (long long)g_k * params.ldb, column_tile + c4,
-                                     params.n, b_rows_vector);
-            } else {
-                exact_thin_copy_word(dst, B, 0, 0, false);
+        if (B_T) {
+            // A lane per k down a column's row of W, so a warp reads 32
+            // consecutive inputs of one column.
+            for (int e = threadIdx.x; e < EXACT_THIN_B_STAGE; e += THREADS) {
+                int kk = e % EXACT_THIN_BK;
+                int c = e / EXACT_THIN_BK;
+                unsigned dst = (unsigned)__cvta_generic_to_shared(
+                    Bs + stage * EXACT_THIN_B_STAGE + kk * EXACT_THIN_BN + c);
+                exact_copy_bt(dst, B, params.ldb, k0 + kk, k_len, column_tile + c, params.n);
+            }
+        } else {
+            for (int word = threadIdx.x; word < EXACT_THIN_B_STAGE / 4; word += THREADS) {
+                int kk = word / (EXACT_THIN_BN / 4);
+                int c4 = (word % (EXACT_THIN_BN / 4)) * 4;
+                int g_k = k0 + kk;
+                unsigned dst = (unsigned)__cvta_generic_to_shared(
+                    Bs + stage * EXACT_THIN_B_STAGE + kk * EXACT_THIN_BN + c4);
+                if (g_k < k_len) {
+                    exact_thin_copy_word(dst, B + (long long)g_k * params.ldb, column_tile + c4,
+                                         params.n, b_rows_vector);
+                } else {
+                    exact_thin_copy_word(dst, B, 0, 0, false);
+                }
             }
         }
     };
@@ -273,7 +302,20 @@ void nn_exact_thin_r1_m16n32_bk64_s6(
     ExactThinParams params
 ) {
     extern __shared__ __align__(16) float exact_thin_smem[];
-    exact_thin_tile<1>(C, A, B, bias, params, exact_thin_smem);
+    exact_thin_tile<1, false>(C, A, B, bias, params, exact_thin_smem);
+}
+
+// The thin tile of an input gradient: dX = dY W^T, B the weight [n][k].
+extern "C" __global__ __launch_bounds__(512)
+void nt_exact_thin_r1_m16n32_bk64_s6(
+    float* __restrict__ C,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    ExactThinParams params
+) {
+    extern __shared__ __align__(16) float exact_thin_smem[];
+    exact_thin_tile<1, true>(C, A, B, bias, params, exact_thin_smem);
 }
 
 // The chunk partial on a small tile: 32 rows x 64 columns per CTA on 128
@@ -306,12 +348,12 @@ struct ExactChunkParams {
 static_assert(sizeof(ExactChunkParams) == 32, "chunk partial parameter ABI drift");
 static_assert(alignof(ExactChunkParams) == 4, "chunk partial parameter alignment drift");
 
-extern "C" __global__ __launch_bounds__(128, 4)
-void exact_chunk_partial_m32n64(
+template <bool B_T>
+__device__ __forceinline__ void exact_chunk_partial_m32n64_tile(
     float* __restrict__ partial,
     const float* __restrict__ A,
     const float* __restrict__ B,
-    ExactChunkParams params
+    const ExactChunkParams& params
 ) {
     const int M = params.m;
     const int N = params.n;
@@ -360,8 +402,20 @@ void exact_chunk_partial_m32n64(
             asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
                          :: "r"(dst), "l"(src), "r"(valid ? 4 : 0));
         }
-        // B [32 k x 64 columns]: 512 words of 16 bytes, four per thread.
+        // B [32 k x 64 columns]: 512 words of 16 bytes, four per thread, or
+        // for a transposed B 2048 elements, a lane per k of a column's row.
         unsigned b_base = (unsigned)__cvta_generic_to_shared(&Bs[stage][0]);
+        if (B_T) {
+            #pragma unroll
+            for (int i = 0; i < (EXACT_CHUNK_BK * EXACT_CHUNK_BN) / 128; ++i) {
+                int e = threadIdx.x + i * 128;
+                int kk = e % EXACT_CHUNK_BK;
+                int c = e / EXACT_CHUNK_BK;
+                unsigned dst = b_base + (unsigned)((kk * EXACT_CHUNK_B_ROW + c) * 4);
+                exact_copy_bt(dst, B, ldb, k0 + kk, k_end, column_tile + c, N);
+            }
+            return;
+        }
         #pragma unroll
         for (int i = 0; i < (EXACT_CHUNK_BK * EXACT_CHUNK_BN) / (4 * 128); ++i) {
             int e = threadIdx.x + i * 128;
@@ -445,6 +499,27 @@ void exact_chunk_partial_m32n64(
     }
 }
 
+extern "C" __global__ __launch_bounds__(128, 4)
+void exact_chunk_partial_m32n64(
+    float* __restrict__ partial,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    ExactChunkParams params
+) {
+    exact_chunk_partial_m32n64_tile<false>(partial, A, B, params);
+}
+
+// The chunk partial of an input gradient, B the weight [n][k].
+extern "C" __global__ __launch_bounds__(128, 4)
+void nt_exact_chunk_partial_m32n64(
+    float* __restrict__ partial,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    ExactChunkParams params
+) {
+    exact_chunk_partial_m32n64_tile<true>(partial, A, B, params);
+}
+
 #undef EXACT_CHUNK_B_ROW
 #undef EXACT_CHUNK_A_ROW
 #undef EXACT_CHUNK_TN
@@ -471,6 +546,7 @@ void exact_chunk_partial_m32n64(
 #define EXACT_C16_A_ROW (EXACT_C16_BM + 2)
 #define EXACT_C16_B_ROW EXACT_C16_BN
 
+template <bool B_T>
 __device__ __forceinline__ void exact_m16n16_tile(
     float* __restrict__ C,
     const float* __restrict__ A,
@@ -484,7 +560,7 @@ __device__ __forceinline__ void exact_m16n16_tile(
     const int k_begin = blockIdx.z * params.slab;
     const int k_len = min(params.slab, params.k - k_begin);
     A += k_begin;
-    B += (long long)k_begin * params.ldb;
+    B += B_T ? (long long)k_begin : (long long)k_begin * params.ldb;
     C += (long long)blockIdx.z * params.m * params.ldc;
 
     const int row_tile = blockIdx.y * EXACT_C16_BM;
@@ -523,8 +599,21 @@ __device__ __forceinline__ void exact_m16n16_tile(
             asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
                          :: "r"(dst), "l"(src), "r"(valid ? 4 : 0));
         }
-        // B [16 k x 16 columns]: 64 words of 16 bytes, one per thread.
+        // B [16 k x 16 columns]: 64 words of 16 bytes, one per thread, or
+        // for a transposed B 256 elements, four per thread, a half-warp per
+        // column's 16 k.
         unsigned b_base = (unsigned)__cvta_generic_to_shared(&Bs[stage][0]);
+        if (B_T) {
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int e = threadIdx.x + i * 64;
+                const int kt = e & 15;
+                const int c = e >> 4;
+                exact_copy_bt(b_base + (unsigned)((kt * EXACT_C16_B_ROW + c) * 4), B,
+                              params.ldb, k0 + kt, k_len, column_tile + c, params.n);
+            }
+            return;
+        }
         const int kk = threadIdx.x >> 2;
         const int c4 = (threadIdx.x & 3) * 4;
         const int g_k = k0 + kk;
@@ -600,7 +689,19 @@ void nn_exact_m16n16_bk16_s4(
     const float* __restrict__ bias,
     ExactThinParams params
 ) {
-    exact_m16n16_tile(C, A, B, bias, params);
+    exact_m16n16_tile<false>(C, A, B, bias, params);
+}
+
+// The whole chain of an input-gradient output, B the weight [n][k].
+extern "C" __global__ __launch_bounds__(64)
+void nt_exact_m16n16_bk16_s4(
+    float* __restrict__ C,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    ExactThinParams params
+) {
+    exact_m16n16_tile<true>(C, A, B, bias, params);
 }
 
 // The same tile over a deep layer's chunks, one partial plane per chunk:
@@ -614,7 +715,19 @@ void exact_chunk_partial_m16n16_bk16_s4(
     const float* __restrict__ bias,
     ExactThinParams params
 ) {
-    exact_m16n16_tile(partial, A, B, bias, params);
+    exact_m16n16_tile<false>(partial, A, B, bias, params);
+}
+
+// The 16 x 16 chunk partial of an input gradient, B the weight [n][k].
+extern "C" __global__ __launch_bounds__(64)
+void nt_exact_chunk_partial_m16n16_bk16_s4(
+    float* __restrict__ partial,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    ExactThinParams params
+) {
+    exact_m16n16_tile<true>(partial, A, B, bias, params);
 }
 
 #undef EXACT_C16_B_ROW

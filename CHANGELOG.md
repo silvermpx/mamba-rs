@@ -28,11 +28,14 @@
 - Every exact f32 forward adds each output by its layer's shape alone, so
   a row has the same bits at every batch size: one `fma` chain, or four
   pieces summed in order for a layer of 512 inputs or more (384 when it has
-  fewer than 128 outputs), the bias after the pieces. The RTX 5090 and RTX
-  PRO 6000 serve it on their own kernels where the operands sit on 16-byte
-  boundaries, every other board on the portable chunk fold, and a CPU model
-  of the fold reproduces both. Forwards change their bits once in this
-  release. A scaled or accumulating forward keeps the plan of its shape.
+  fewer than 128 outputs), the bias after the pieces. An input gradient
+  folds the same way over the forward's outputs, as a forward over the
+  transposed weight would. The RTX 5090 and RTX PRO 6000 serve both on
+  their own kernels where the operands sit on 16-byte boundaries, every
+  other board on portable tiles that read the weight either way, and a CPU
+  model of the fold reproduces all of them. Forwards and input gradients
+  change their bits once in this release. A scaled or accumulating forward
+  keeps the plan of its shape.
 - Exact f32 is faster on the RTX 5090 and RTX PRO 6000. Their own kernels
   serve more products, and a sum cut into short pieces is added inside one
   block. On an RTX PRO 6000 a set of about 400 exact products runs in 0.90

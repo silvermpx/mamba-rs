@@ -3764,13 +3764,13 @@ pub(super) fn exact_or_scalar_selection(
     operands: Option<F32TriadOperands>,
     availability: F32TriadAvailability,
 ) -> F32TriadSelection {
-    // A forward folds by its layer's shape at every batch size: the SM120
-    // kernels serve that cut where they bind, the portable chunk fold
-    // everywhere else.
-    let route = if request.op == ResolvedGemmOp::Nn {
-        operands.and_then(|operands| sm120_fma_layer_route(request, operands, availability))
-    } else {
+    // A forward and an input gradient fold by the layer's shape at every
+    // batch size: the SM120 kernels serve that cut where they bind, the
+    // portable layer plans everywhere else.
+    let route = if request.op == ResolvedGemmOp::Tn {
         operands.and_then(|operands| sm120_fma_exact_route(request, operands, availability))
+    } else {
+        operands.and_then(|operands| sm120_fma_layer_route(request, operands, availability))
     };
     route.map_or(
         F32TriadSelection::ScalarFma,
@@ -4456,7 +4456,8 @@ pub(super) fn sm120_fma_exact_route(
     Some(route)
 }
 
-/// The exact-F32 SM120 route of a forward under its layer's fold: the cut
+/// The exact-F32 SM120 route of a forward or an input gradient under its
+/// layer's fold: the cut
 /// [`crate::gemm_fold`] reads from the layer alone, served by the SM120
 /// kernels where the card binds them with tensor-map access and every
 /// operand sits on a 16-byte boundary. A CTA walks its tile's pieces and
@@ -4470,7 +4471,7 @@ pub(super) fn sm120_fma_layer_route(
     operands: F32TriadOperands,
     availability: F32TriadAvailability,
 ) -> Option<Sm120FmaRoute> {
-    if request.op != ResolvedGemmOp::Nn
+    if request.op == ResolvedGemmOp::Tn
         || operands.alpha.to_bits() != 1.0f32.to_bits()
         || operands.beta.to_bits() != 0
     {
@@ -4506,11 +4507,14 @@ pub(super) fn sm120_fma_layer_route(
     };
     let splits = u8::try_from(reduction.div_ceil(piece)).ok()?;
     let (tile, kvec) = sm120_fma_generic_tile(request, qualified.device.multiprocessor_count, 1)?;
+    // A forward's CTA folds its own pieces; an input gradient deals a CTA
+    // to each, which ran ahead of the k-vector fold on most of the RTX
+    // 5090's input gradients.
     let route = Sm120FmaRoute {
         tile,
         kvec,
         splits,
-        in_cta: splits > 1,
+        in_cta: splits > 1 && request.op == ResolvedGemmOp::Nn,
         layer_fold: true,
     };
     if qualified
@@ -8161,6 +8165,20 @@ pub(super) enum ScalarDispatchPlan {
         piece_rows: u32,
         pieces: u32,
     },
+    /// The input gradient's thin tile under its layer's fold, a row per
+    /// thread: the forward's tile over the weight read transposed.
+    NtExactThin,
+    /// The input gradient's pipelined 16 x 16 tile under its layer's fold.
+    NtExactNarrow16,
+    /// The input gradient's chunk fold: the forward's partials over the
+    /// weight read transposed, one piece of the layer's fold per plane,
+    /// `piece_rows` rows at a time.
+    NtExactChunk {
+        partial: ExactChunkPartial,
+        chunks: u32,
+        piece_rows: u32,
+        pieces: u32,
+    },
     TnGemv,
     TnNarrow,
     TnNarrowSplitM {
@@ -8226,6 +8244,7 @@ impl ScalarDispatchPlan {
                 | Self::NnSplitKThin
                 | Self::NnSplitKSlim { .. }
                 | Self::NnExactChunk { .. }
+                | Self::NtExactChunk { .. }
                 | Self::NnM32N64SplitK32Qualified
                 | Self::TnNarrowSplitM { .. }
                 | Self::TnSplitM { .. }
@@ -8624,6 +8643,79 @@ pub(super) fn exact_batch_invariant_nn_plan(
 /// The grid's row axis, where the thin and pipelined 16 x 16 tiles put their
 /// 16-row tiles.
 pub(super) const EXACT_SLAB_GRID_ROWS_MAX: usize = 65_535;
+
+/// The input gradient's plan under its layer's fold: `dX[m][i]` sums
+/// `dY[m][r] * W[i][r]` over the forward's outputs r, cut as a forward of
+/// that many inputs and `n_in` outputs would be. A cut layer folds its
+/// pieces on the forward's chunk partials, which read the weight
+/// transposed; a chain runs the native slim tile once its grid covers the
+/// card and the reduction is not 16 past a multiple of 32 (that tile pads
+/// at 32 where the fold closes at 16), the forward's thin tiles otherwise.
+/// The plan reads the layer, the row count only to pick among tiles that
+/// write the same bits.
+pub(super) fn exact_batch_invariant_nt_plan(
+    request: F32TriadRequest,
+    multiprocessors: u32,
+) -> Result<ScalarDispatchPlan, String> {
+    if request.op != ResolvedGemmOp::Nt {
+        return Err(format!(
+            "the input gradient's layer plan takes NT, not {:?}",
+            request.op
+        ));
+    }
+    request.shape.validate(request.op)?;
+    if multiprocessors == 0 {
+        return Err("the input gradient's layer plan needs the card's multiprocessor count".into());
+    }
+    let (m, n_in, n_out) = (request.shape.m, request.shape.k, request.shape.n);
+    if m == 0 || n_in == 0 || n_out == 0 {
+        return Err(format!(
+            "the input gradient's layer plan takes no empty axis: {m}x{n_in}x{n_out}"
+        ));
+    }
+    if exact_chunks(n_out, n_in) {
+        let chunks = n_out.div_ceil(exact_chunk(n_out, n_in));
+        if chunks.saturating_mul(n_in) > SPLITK_SCRATCH_CAP {
+            return Err(format!(
+                "an input-gradient row of {chunks} pieces x {n_in} outputs passes the split \
+                 scratch of {SPLITK_SCRATCH_CAP} floats"
+            ));
+        }
+        let piece_rows = (SPLITK_SCRATCH_CAP / chunks.saturating_mul(n_in).max(1)).clamp(1, m);
+        let partial = if m == 1 {
+            ExactChunkPartial::Narrow16
+        } else {
+            ExactChunkPartial::Small
+        };
+        return Ok(ScalarDispatchPlan::NtExactChunk {
+            partial,
+            chunks: u32::try_from(chunks)
+                .map_err(|_| format!("{chunks} pieces pass the grid's third axis"))?,
+            piece_rows: u32::try_from(piece_rows)
+                .map_err(|_| format!("a piece of {piece_rows} rows passes u32"))?,
+            pieces: u32::try_from(m.div_ceil(piece_rows))
+                .map_err(|_| format!("{m} rows in pieces of {piece_rows} pass u32"))?,
+        });
+    }
+    let slim_grid = m.div_ceil(128).saturating_mul(n_in.div_ceil(64));
+    if m >= GEMM_CUSTOM_MIN
+        && n_in >= GEMM_CUSTOM_MIN
+        && n_out % 32 != 16
+        && slim_grid >= multiprocessors as usize
+    {
+        return Ok(ScalarDispatchPlan::NtFinal { slim: true });
+    }
+    if m.div_ceil(16) > EXACT_SLAB_GRID_ROWS_MAX {
+        return Err(format!(
+            "an input gradient of {m} rows passes the thin tiles' grid rows"
+        ));
+    }
+    Ok(if m == 1 {
+        ScalarDispatchPlan::NtExactThin
+    } else {
+        ScalarDispatchPlan::NtExactNarrow16
+    })
+}
 
 /// The exact scalar plan of a request: a function of the shape alone, so
 /// every card of every architecture cuts each reduction at the same places
@@ -13823,6 +13915,61 @@ mod tf32_tests {
     }
 
     #[test]
+    fn sm120_input_gradient_cuts_by_the_layer_and_deals_its_pieces() {
+        let availability = sm120_availability_for(sm120_cohort().identity);
+        let operands = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: None,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        let mut served = [0_usize; 2];
+        for (m, n_in, n_out) in [
+            (4_096, 512, 2_048),
+            (4_096, 1_536, 3_072),
+            (10_400, 768, 1_024),
+            (4_096, 2_048, 256),
+            (8_192, 1_024, 384),
+        ] {
+            let request = F32TriadRequest {
+                op: ResolvedGemmOp::Nt,
+                shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (m, n_in, n_out)),
+            };
+            let selection = resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::ExactScalarFma,
+                request,
+                operands,
+                availability,
+            )
+            .unwrap();
+            let what = format!("NT {m}x{n_in}x{n_out}: {selection:?}");
+            match selection {
+                F32TriadSelection::ExactSm120Fma(route) => {
+                    assert!(route.layer_fold && !route.in_cta, "{what}");
+                    let cut = super::exact_chunks(n_out, n_in);
+                    let piece = if cut {
+                        super::exact_chunk(n_out, n_in)
+                    } else {
+                        n_out
+                    };
+                    assert_eq!(usize::from(route.splits), n_out.div_ceil(piece), "{what}");
+                    crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(request, route)
+                        .unwrap();
+                    served[usize::from(route.splits > 1)] += 1;
+                }
+                F32TriadSelection::ScalarFma => {}
+                other => panic!("{what}: {other:?} is not an exact input gradient"),
+            }
+        }
+        assert!(
+            served[0] > 0 && served[1] > 0,
+            "the sweep reaches chains and pieces: {served:?}"
+        );
+    }
+
+    #[test]
     fn sm120_exact_folds_short_pieces_and_tails_in_one_cta() {
         // A thin cut's two-tile pieces and a cut with a tail fold inside one
         // CTA per tile, which half the card's tiles admit; the long pieces
@@ -13991,9 +14138,10 @@ mod tf32_tests {
                     0.0
                 },
             };
-            // A forward folds by its layer now, whatever cell measured it;
-            // the gradients keep their measured arms.
-            let expected = if cell.op == ResolvedGemmOp::Nn {
+            // A forward and an input gradient fold by their layer now,
+            // whatever cell measured them; the weight gradients keep their
+            // measured arms.
+            let expected = if cell.op != ResolvedGemmOp::Tn {
                 super::sm120_fma_layer_route(request, operands, availability).map_or(
                     F32TriadSelection::ScalarFma,
                     F32TriadSelection::ExactSm120Fma,
@@ -14093,17 +14241,15 @@ mod tf32_tests {
             in_cta: false,
             layer_fold: false,
         };
-        let generic = Sm120FmaRoute {
-            tile: Sm120FmaTile::M128N64,
-            kvec: true,
-            splits: 1,
-            in_cta: false,
-            layer_fold: false,
-        };
         let availability =
             exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, measured)]);
         let (request, operands) = nt_d768_out_request_and_operands();
 
+        // An input gradient folds by its layer, on the generic k-vector tile
+        // that no exclusion here names.
+        let layer = super::sm120_fma_layer_route(request, operands, availability)
+            .expect("the layer route binds the d768 input gradient");
+        assert!(layer.layer_fold && layer.tile == Sm120FmaTile::M128N64 && layer.kvec);
         assert_eq!(
             resolve_f32_triad_auto_with_operands(
                 F32TriadPolicy::ExactScalarFma,
@@ -14112,7 +14258,7 @@ mod tf32_tests {
                 availability
             )
             .unwrap(),
-            F32TriadSelection::ExactSm120Fma(generic),
+            F32TriadSelection::ExactSm120Fma(layer),
             "the exact policy must skip the excluded measured arm"
         );
         // Under the TF32 policy the architecture's TF32 cell for the shape
@@ -18282,8 +18428,9 @@ mod sm100_sm90a_auto_tests {
 #[cfg(test)]
 mod exact_batch_invariant_tests {
     use super::{
-        ExactChunkPartial, SPLITK_SCRATCH_CAP, ScalarDispatchPlan, exact_batch_invariant_nn_plan,
-        exact_chunk, exact_chunks, resolve_f32_triad_auto,
+        ExactChunkPartial, GEMM_CUSTOM_MIN, SPLITK_SCRATCH_CAP, ScalarDispatchPlan,
+        exact_batch_invariant_nn_plan, exact_batch_invariant_nt_plan, exact_chunk, exact_chunks,
+        resolve_f32_triad_auto,
     };
     use crate::gpu::context::F32TriadPolicy;
     use crate::gpu::gemm_bi_triad::contract::{
@@ -18357,6 +18504,63 @@ mod exact_batch_invariant_tests {
                                 }
                                 other => panic!("{what}: {other:?} is not a batch-invariant tile"),
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_input_gradient_plan_folds_by_the_layer_alone() {
+        for multiprocessors in [24, 84, 108, 128, 132, 142, 148, 170, 188] {
+            for n_in in [1, 15, 16, 33, 256, 383, 384, 511, 512, 833, 1536, 3000] {
+                for n_out in [1, 17, 40, 101, 127, 128, 384, 528, 1536, 2112] {
+                    for m in [1, 7, 16, 17, 64, 65, 128, 513, 1024, 4096, 32_768] {
+                        let request = F32TriadRequest {
+                            op: ResolvedGemmOp::Nt,
+                            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (m, n_in, n_out)),
+                        };
+                        let plan = exact_batch_invariant_nt_plan(request, multiprocessors).unwrap();
+                        let what =
+                            format!("NT {m}x{n_in}x{n_out} on {multiprocessors} SMs: {plan:?}");
+                        let cut = exact_chunks(n_out, n_in);
+                        match plan {
+                            ScalarDispatchPlan::NtExactChunk {
+                                partial,
+                                chunks,
+                                piece_rows,
+                                pieces,
+                            } => {
+                                assert!(cut, "{what}");
+                                assert_eq!(
+                                    partial == ExactChunkPartial::Narrow16,
+                                    m == 1,
+                                    "{what}"
+                                );
+                                assert_eq!(
+                                    chunks as usize,
+                                    n_out.div_ceil(exact_chunk(n_out, n_in)),
+                                    "{what}"
+                                );
+                                let (rows, pieces) = (piece_rows as usize, pieces as usize);
+                                assert!(rows >= 1 && rows <= m, "{what}");
+                                assert!(rows * pieces >= m && rows * (pieces - 1) < m, "{what}");
+                                assert!(
+                                    chunks as usize * rows * n_in <= SPLITK_SCRATCH_CAP,
+                                    "{what}"
+                                );
+                            }
+                            ScalarDispatchPlan::NtFinal { slim: true } => {
+                                assert!(!cut && m >= GEMM_CUSTOM_MIN && n_out % 32 != 16, "{what}");
+                            }
+                            ScalarDispatchPlan::NtExactThin => {
+                                assert!(!cut && m == 1, "{what}");
+                            }
+                            ScalarDispatchPlan::NtExactNarrow16 => {
+                                assert!(!cut && m > 1, "{what}");
+                            }
+                            other => panic!("{what}: {other:?} is not a layer-fold tile"),
                         }
                     }
                 }

@@ -1803,8 +1803,8 @@ impl Sm120FmaRoute {
         if self.in_cta && self.splits < 2 {
             return Err("an in-CTA fold needs at least two pieces".into());
         }
-        if self.layer_fold && op != ResolvedGemmOp::Nn {
-            return Err("the layer's fold serves the forward only".into());
+        if self.layer_fold && op == ResolvedGemmOp::Tn {
+            return Err("the layer's fold serves the forward and the input gradient".into());
         }
         Ok(())
     }
