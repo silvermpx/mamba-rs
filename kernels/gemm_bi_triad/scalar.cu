@@ -3677,29 +3677,121 @@ void splitk_reduce(
     C[(long long)m * write_stride + n] = sum;
 }
 
-// GEMV-style fill for backward_dx K=1 tail column: dX[m, col_idx] = Σ dY[m,n] · W_row[n].
-// Used alongside Split-K main (via transpose) to close K_out%4 != 0 shapes
-// (e.g. SALE action K_out=257 → main 256 via Split-K NT-via-T + 1 tail here).
-// One block per M row-group; each thread handles one m, sequential N reduction.
-extern "C" __global__ __launch_bounds__(256, 8)
-void dx_col_gemv(
-    float* __restrict__ dX,           // [M, out_col_stride]
-    const float* __restrict__ dY,     // [M, N]
-    const float* __restrict__ w_row,  // [N] — W[K_tail_row, :]
-    int M, int N,
-    int col_idx,                      // column in dX to fill
-    int out_col_stride                // dX row stride
+// The column tail of an input gradient whose first columns ran through the
+// transpose and the split sum: dX[m, col0 + c] = sum over n of dY[m, n] *
+// W[col0 + c, n] for the up to 31 tail columns, each output one fma chain
+// from n = 0 up, the chain a CPU model folds. A block takes eight rows and
+// every tail column, and stages its rows of dY and the tail rows of W through
+// shared memory a chunk of N at a time, four chunks in flight, so a chain
+// reads its operands from shared memory instead of waiting on a strided load
+// at every step, and one launch serves all the tail columns.
+#define DX_COL_TAIL_ROWS 8
+#define DX_COL_TAIL_COLUMNS 31
+#define DX_COL_TAIL_CHUNK 64
+// One float of padding keeps the eight rows a chain step reads in distinct
+// banks.
+#define DX_COL_TAIL_PITCH (DX_COL_TAIL_CHUNK + 1)
+#define DX_COL_TAIL_STAGES 4
+#define DX_COL_TAIL_THREADS 128
+
+__device__ __forceinline__ void dx_col_tail_stage(
+    float (*slot)[DX_COL_TAIL_PITCH], const float* __restrict__ dY,
+    const float* __restrict__ w_tail, int row0, int rows, int N, int tail, int n0
 ) {
-    int m = blockIdx.x * blockDim.x + threadIdx.x;
-    if (m >= M) return;
-    float sum = 0.0f;
-    const float* dy_row = dY + (long long)m * N;
-    // explicit __fmaf_rn for bit-exact match with CPU FMA.
-    for (int n = 0; n < N; ++n) {
-        sum = __fmaf_rn(dy_row[n], w_row[n], sum);
+    const int tile_rows = DX_COL_TAIL_ROWS + tail;
+    for (int e = threadIdx.x; e < tile_rows * DX_COL_TAIL_CHUNK; e += DX_COL_TAIL_THREADS) {
+        int r = e / DX_COL_TAIL_CHUNK;
+        int j = e % DX_COL_TAIL_CHUNK;
+        int n = n0 + j;
+        bool valid = n < N && (r >= DX_COL_TAIL_ROWS || r < rows);
+        // A copy past the operands reads nothing and fills zeros, which no
+        // chain reads.
+        const float* src = dY;
+        if (valid) {
+            src = r < DX_COL_TAIL_ROWS
+                ? dY + (long long)(row0 + r) * N + n
+                : w_tail + (long long)(r - DX_COL_TAIL_ROWS) * N + n;
+        }
+        unsigned dst = (unsigned)__cvta_generic_to_shared(&slot[r][j]);
+        asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
+                     :: "r"(dst), "l"(src), "r"(valid ? 4 : 0));
     }
-    dX[(long long)m * out_col_stride + col_idx] = sum;
 }
+
+extern "C" __global__ __launch_bounds__(DX_COL_TAIL_THREADS)
+void dx_col_tail(
+    float* __restrict__ dX,             // [M, out_col_stride]
+    const float* __restrict__ dY,       // [M, N]
+    const float* __restrict__ w_tail,   // [tail, N]: W[col0 + c, :]
+    float alpha,                        // the scale the reducer gives the main columns
+    int M, int N,
+    int tail,                           // tail columns, 1 to 31
+    int col0,                           // first tail column of dX
+    int out_col_stride                  // dX row stride
+) {
+    __shared__ float stage[DX_COL_TAIL_STAGES][DX_COL_TAIL_ROWS + DX_COL_TAIL_COLUMNS][DX_COL_TAIL_PITCH];
+    const int row0 = blockIdx.x * DX_COL_TAIL_ROWS;
+    const int rows = min(DX_COL_TAIL_ROWS, M - row0);
+    const int outputs = rows * tail;
+    const int chunks = (N + DX_COL_TAIL_CHUNK - 1) / DX_COL_TAIL_CHUNK;
+    // Eight rows by 31 columns are at most two outputs a thread.
+    const int first = threadIdx.x;
+    const int second = threadIdx.x + DX_COL_TAIL_THREADS;
+    const int first_row = first / tail, first_column = first % tail;
+    const int second_row = second / tail, second_column = second % tail;
+    float sum_first = 0.0f;
+    float sum_second = 0.0f;
+    for (int chunk = 0; chunk < DX_COL_TAIL_STAGES - 1; ++chunk) {
+        if (chunk < chunks) {
+            dx_col_tail_stage(stage[chunk], dY, w_tail, row0, rows, N, tail,
+                              chunk * DX_COL_TAIL_CHUNK);
+        }
+        asm volatile("cp.async.commit_group;\n" ::);
+    }
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        int ahead = chunk + DX_COL_TAIL_STAGES - 1;
+        if (ahead < chunks) {
+            dx_col_tail_stage(stage[ahead % DX_COL_TAIL_STAGES], dY, w_tail, row0, rows, N,
+                              tail, ahead * DX_COL_TAIL_CHUNK);
+        }
+        // One group a step, empty past the last chunk, so the chunk read
+        // below is always the group three behind the newest.
+        asm volatile("cp.async.commit_group;\n" ::);
+        asm volatile("cp.async.wait_group %0;\n" :: "n"(DX_COL_TAIL_STAGES - 1));
+        __syncthreads();
+        float (*slot)[DX_COL_TAIL_PITCH] = stage[chunk % DX_COL_TAIL_STAGES];
+        int length = min(DX_COL_TAIL_CHUNK, N - chunk * DX_COL_TAIL_CHUNK);
+        if (first < outputs) {
+            const float* a = slot[first_row];
+            const float* b = slot[DX_COL_TAIL_ROWS + first_column];
+            for (int j = 0; j < length; ++j) {
+                sum_first = __fmaf_rn(a[j], b[j], sum_first);
+            }
+        }
+        if (second < outputs) {
+            const float* a = slot[second_row];
+            const float* b = slot[DX_COL_TAIL_ROWS + second_column];
+            for (int j = 0; j < length; ++j) {
+                sum_second = __fmaf_rn(a[j], b[j], sum_second);
+            }
+        }
+        // The next step stages into the slot just read.
+        __syncthreads();
+    }
+    if (first < outputs) {
+        dX[(long long)(row0 + first_row) * out_col_stride + col0 + first_column] = sum_first * alpha;
+    }
+    if (second < outputs) {
+        dX[(long long)(row0 + second_row) * out_col_stride + col0 + second_column] = sum_second * alpha;
+    }
+}
+
+#undef DX_COL_TAIL_ROWS
+#undef DX_COL_TAIL_COLUMNS
+#undef DX_COL_TAIL_CHUNK
+#undef DX_COL_TAIL_PITCH
+#undef DX_COL_TAIL_STAGES
+#undef DX_COL_TAIL_THREADS
 
 #undef GEMM_BI_SPLITK32_BM
 #undef GEMM_BI_SPLITK32_BN

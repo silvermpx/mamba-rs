@@ -16,7 +16,12 @@
 // folds the pieces the way the portable reducers do, so a product has the
 // same bits as on any other architecture: p0 + ... + p(S-1) with __fadd_rn
 // in that order, then alpha, then the bias for NN (splitk_reduce) or the old
-// output for TN (splitm_reduce).
+// output for TN (splitm_reduce). A plan with a column tail (the thin NT
+// split over an output width that is not whole 32-column blocks) writes the
+// columns from chain_from on as one chain over the whole reduction, as the
+// portable tail kernel does; an NT k-vector CTA that folds its own pieces
+// keeps those columns out of the fold, and the other kernels never see such
+// a cut.
 //
 // Shape of the schedule:
 //   - A and B tiles arrive through cp.async.bulk.tensor, one 2d box each
@@ -51,9 +56,10 @@ struct Sm120FmaKernelParams {
     int ldc;
     int splits;
     int tiles_per_split;
+    int chain_from;
 };
 
-static_assert(sizeof(Sm120FmaKernelParams) == 32,
+static_assert(sizeof(Sm120FmaKernelParams) == 36,
               "SM120 FMA parameter ABI drift");
 static_assert(alignof(Sm120FmaKernelParams) == 4,
               "SM120 FMA parameter alignment drift");
@@ -357,42 +363,81 @@ __device__ __forceinline__ void sm120_fma_body(
 
     int step = 0;
     if (fold_pieces) {
-        // The end of a piece: its chain joins the fold, which waits in this
-        // thread's own cells of the tile's slab until the last piece takes
-        // it back into the registers, where a tail then continues it.
-        float* slab = partials + (size_t)tile_id * SLAB_FLOATS;
-        for (int piece_start = 0; piece_start < piece_end;
-             piece_start += params.tiles_per_split) {
-            int stop = min(piece_start + params.tiles_per_split, piece_end);
-            for (; step < stop; ++step) {
-                k_step(step);
-            }
-            bool first = piece_start == 0;
-            bool last = stop == piece_end;
-            #pragma unroll
-            for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
-                float4* cell = reinterpret_cast<float4*>(
-                    slab + ((size_t)chunk * THREADS + threadIdx.x) * 4);
-                float* own = threadResults + chunk * 4;
-                float4 sum = {own[0], own[1], own[2], own[3]};
-                if (!first) {
-                    float4 held = __ldcg(cell);
-                    sum.x = __fadd_rn(held.x, own[0]);
-                    sum.y = __fadd_rn(held.y, own[1]);
-                    sum.z = __fadd_rn(held.z, own[2]);
-                    sum.w = __fadd_rn(held.w, own[3]);
+        if constexpr (OP == SM120_FMA_OP_NT && NT_KVEC) {
+            // The NT k-vector kernels hold the fold in registers, which
+            // their two blocks a multiprocessor leave room for: the thin
+            // cut's two-tile pieces would otherwise spend longer moving the
+            // fold through L2 than computing. Only these kernels serve a cut
+            // with a column tail, and only a CTA on the last column tile
+            // holds tail columns, whose chains run on through every piece.
+            bool chains = pid_n * BN + BN > params.chain_from;
+            float folded[TM * TN];
+            for (int piece_start = 0; piece_start < piece_end;
+                 piece_start += params.tiles_per_split) {
+                int stop = min(piece_start + params.tiles_per_split, piece_end);
+                for (; step < stop; ++step) {
+                    k_step(step);
                 }
-                if (last) {
-                    own[0] = sum.x;
-                    own[1] = sum.y;
-                    own[2] = sum.z;
-                    own[3] = sum.w;
-                } else {
-                    __stcg(cell, sum);
-                    own[0] = 0.0f;
-                    own[1] = 0.0f;
-                    own[2] = 0.0f;
-                    own[3] = 0.0f;
+                bool first = piece_start == 0;
+                bool last = stop == piece_end;
+                #pragma unroll
+                for (int result = 0; result < TM * TN; ++result) {
+                    if (chains) {
+                        int global_column = pid_n * BN + local_column(result % TN);
+                        if (global_column >= params.chain_from && global_column < params.n) {
+                            continue;
+                        }
+                    }
+                    float sum = first
+                        ? threadResults[result]
+                        : __fadd_rn(folded[result], threadResults[result]);
+                    if (last) {
+                        threadResults[result] = sum;
+                    } else {
+                        folded[result] = sum;
+                        threadResults[result] = 0.0f;
+                    }
+                }
+            }
+        } else {
+            // The end of a piece: its chain joins the fold, which waits in
+            // this thread's own cells of the tile's slab until the last piece
+            // takes it back into the registers, where a tail then continues
+            // it.
+            float* slab = partials + (size_t)tile_id * SLAB_FLOATS;
+            for (int piece_start = 0; piece_start < piece_end;
+                 piece_start += params.tiles_per_split) {
+                int stop = min(piece_start + params.tiles_per_split, piece_end);
+                for (; step < stop; ++step) {
+                    k_step(step);
+                }
+                bool first = piece_start == 0;
+                bool last = stop == piece_end;
+                #pragma unroll
+                for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
+                    float4* cell = reinterpret_cast<float4*>(
+                        slab + ((size_t)chunk * THREADS + threadIdx.x) * 4);
+                    float* own = threadResults + chunk * 4;
+                    float4 sum = {own[0], own[1], own[2], own[3]};
+                    if (!first) {
+                        float4 held = __ldcg(cell);
+                        sum.x = __fadd_rn(held.x, own[0]);
+                        sum.y = __fadd_rn(held.y, own[1]);
+                        sum.z = __fadd_rn(held.z, own[2]);
+                        sum.w = __fadd_rn(held.w, own[3]);
+                    }
+                    if (last) {
+                        own[0] = sum.x;
+                        own[1] = sum.y;
+                        own[2] = sum.z;
+                        own[3] = sum.w;
+                    } else {
+                        __stcg(cell, sum);
+                        own[0] = 0.0f;
+                        own[1] = 0.0f;
+                        own[2] = 0.0f;
+                        own[3] = 0.0f;
+                    }
                 }
             }
         }

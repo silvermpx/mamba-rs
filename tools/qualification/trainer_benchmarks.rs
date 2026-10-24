@@ -5,7 +5,7 @@
 //! Two workloads:
 //!   * **LM** — Mamba-1 at mamba-130m-ish shape (d_model=768, n_layers=24,
 //!     batch=2, seq_len=64) — full forward+backward+AdamW+sync per step
-//!   * **RL** — Mamba-3 at SQV-RS actor shape (d_model=128, n_layers=4,
+//!   * **RL** — Mamba-3 at a small actor shape (d_model=128, n_layers=4,
 //!     headdim=16, ngroups=1, batch=64, seq_len=32)
 //!
 //! All tests are `#[ignore]` — opt-in:
@@ -441,7 +441,7 @@ fn bench_lm_train_f32_t60() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// RL workload — Mamba-3 actor shape (SQV-RS-ish), all 3 dtypes
+// RL workload — a small Mamba-3 actor, all 3 dtypes
 // ═══════════════════════════════════════════════════════════════════════
 
 fn rl_cfg() -> mamba_rs::mamba3_siso::config::Mamba3Config {

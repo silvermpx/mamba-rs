@@ -30,6 +30,19 @@
   like wider ones on every architecture (384 x 101 over 1024 rows: 33 to 10
   microseconds on an RTX 5090). A slim exact input gradient runs at the
   same bits in about half the time on an RTX 5090 and an RTX 6000 Ada.
+- An exact input gradient whose width is not a whole number of 32 columns
+  fills its last columns, up to 31, in one launch that stages its operands
+  through shared memory, where it launched one kernel per column: 833 x 384
+  over 64 rows takes 11.8 microseconds instead of 20.0 on an RTX 5090. On
+  an RTX 5090 and an RTX PRO 6000 such a gradient over more rows runs whole
+  in their exact kernels, whose blocks fold their pieces in registers and
+  keep the tail columns as one chain: 833 x 384 over 1024 rows takes 22.6
+  microseconds instead of 54. Neither changes a bit.
+- An exact input gradient that sums 1024 to 1535 outputs over more than
+  512 rows, or into 512 inputs or more, cuts its sum into fewer, longer
+  pieces. On an RTX 6000 Ada 59 of 72 measured shapes run in about half the
+  time and none slower; on an RTX 5090 the 72 run in 0.73 of their former
+  time, two narrow ones 4 and 8 percent slower. Their bits change once.
 - The bf16, f16 and TF32 weight gradients that the RTX 5090 and RTX PRO
   6000 run with their stream-K schedule add their parts after the whole
   grid has published them, and a short sum goes to more workers. They run
@@ -53,6 +66,21 @@
 
 - The prefetching and plain builds of the Mamba-3 decode step round alike
   on every card.
+- A TF32 split member that the toolkit cannot serve is declined like every
+  other TF32 kernel, to the exact family, and under the strict TF32 policy
+  to the member that folds the same partitions or a refusal, instead of
+  failing the call.
+- A board whose driver compiles the RTX 5090 and RTX PRO 6000 scalar cells
+  past their resource caps turns those cells off with a warning instead of
+  failing the context.
+- The exact input gradient's column tail is scaled like its first columns,
+  and that route refuses an accumulating call instead of overwriting the
+  output.
+- A board of compute capability 10.7 builds its context: the tcgen05 typed
+  forward warns and the portable tiles serve. The sm_90a and SM100 modules
+  say why they are not bound instead of staying off silently.
+- The RTX 5090 and RTX PRO 6000 exact kernels that fold in registers bind
+  no split workspace.
 
 ### Added
 
@@ -61,12 +89,14 @@
   same bits at every batch size, for a program that checks its products
   against a CPU model of the tensor core. Every tile it may use gives the
   same bits, and it picks among them by the shape and the number of
-  multiprocessors. A deep weight gradient splits eight ways and a few-row
-  input gradient four ways by the shape alone. An Ada board adds its
-  multistage and pre-rounded tiles, and an RTX 5090 or RTX PRO 6000 its own
-  forward table, the multistage tiles and the TMA input-gradient tile. Its
-  picks were checked on 552 products on both an RTX 5090 and an RTX PRO
-  6000, and none is slower than the plain table on either card.
+  multiprocessors. A deep weight gradient splits eight ways, wherever its
+  operands sit, and a few-row input gradient four ways, by the shape alone.
+  An Ada board adds its multistage and pre-rounded tiles, and an RTX 5090
+  or RTX PRO 6000 its own forward table, the multistage tiles and the TMA
+  input-gradient tile. Its picks were checked on 552 products on both an
+  RTX 5090 and an RTX PRO 6000, and none is slower than the plain table on
+  either card; the persistent forward tile, up to 13 percent faster on a
+  band of tall layers, was measured on the RTX 5090 alone.
 - `F32TriadPolicy::ExactFmaBatchInvariant` runs exact f32 products whose
   forward adds each output by its layer's shape alone, as one `fma` chain
   or as 64-input chunks summed in order for a deep layer, so a row has the

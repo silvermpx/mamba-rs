@@ -4,7 +4,7 @@
 //! multistage input-gradient tiles and the narrow tiles - on ragged shapes as
 //! well as whole ones. Every product stays
 //! within TF32's rounding of an f64 reference, and two runs of one product
-//! write the same bits.
+//! write the same bits, wherever its operands sit.
 #![cfg(feature = "cuda")]
 
 use mamba_rs::gpu::blas::{gpu_gemm_f32_backward_dw_ptrs, gpu_gemm_f32_backward_dx_ptrs};
@@ -54,12 +54,33 @@ fn weight_gradient(
     x: &[f32],
     dw0: &[f32],
 ) -> Vec<f32> {
-    let dy = upload(ctx, dy);
-    let x = upload(ctx, x);
+    weight_gradient_at(ctx, dims, (dy, false), (x, false), dw0)
+}
+
+/// An operand's device copy, one float past the start of its allocation
+/// when `shift` is set, so that its pointer sits off every 16-byte boundary.
+fn upload_at(ctx: &GpuCtx, values: &[f32], shift: bool) -> (GpuBuffer, u64) {
+    let pad = usize::from(shift);
+    let mut placed = vec![0.0; pad];
+    placed.extend_from_slice(values);
+    let buffer = upload(ctx, &placed);
+    let pointer = buffer.cached_ptr() + (pad * size_of::<f32>()) as u64;
+    (buffer, pointer)
+}
+
+/// The weight gradient with either operand placed by [`upload_at`].
+fn weight_gradient_at(
+    ctx: &GpuCtx,
+    dims: (usize, usize, usize),
+    dy: (&[f32], bool),
+    x: (&[f32], bool),
+    dw0: &[f32],
+) -> Vec<f32> {
+    let (_dy, dy_pointer) = upload_at(ctx, dy.0, dy.1);
+    let (_x, x_pointer) = upload_at(ctx, x.0, x.1);
     let dw = upload(ctx, dw0);
     unsafe {
-        gpu_gemm_f32_backward_dw_ptrs(ctx, dw.cached_ptr(), dy.cached_ptr(), x.cached_ptr(), dims)
-            .unwrap();
+        gpu_gemm_f32_backward_dw_ptrs(ctx, dw.cached_ptr(), dy_pointer, x_pointer, dims).unwrap();
     }
     ctx.stream.synchronize().unwrap();
     dw.to_cpu(&ctx.stream).unwrap()
@@ -167,5 +188,39 @@ fn strict_tf32_gradients_are_tf32_products_and_repeat_their_bits() {
             }
         }
         assert_close(&format!("dX {dims:?}"), &first, &want, &magnitude);
+    }
+}
+
+/// A deep weight gradient's bits follow its shape, never where its operands
+/// sit: with the output gradient or the activations one float off a 16-byte
+/// boundary, the product cuts the same eight partitions and folds them to
+/// the bits of the aligned run.
+#[test]
+fn strict_tf32_weight_gradient_bits_do_not_follow_alignment() {
+    let Ok(device) = GpuDevice::new(0) else {
+        eprintln!("skip: no CUDA device");
+        return;
+    };
+    let ctx = GpuCtx::new(&device).unwrap();
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::RnaTf32BatchInvariant);
+    for (index, dims) in [(4096, 128, 796), (4096, 256, 128), (2048, 512, 256)]
+        .into_iter()
+        .enumerate()
+    {
+        let (m, k, n) = dims;
+        let seed = 0xa119_0000 + index as u64 * 8;
+        let dy = synth(m * n, seed);
+        let x = synth(m * k, seed + 1);
+        let dw0 = synth(k * n, seed + 2);
+        let aligned = weight_gradient(&ctx, dims, &dy, &x, &dw0);
+        for (shift_dy, shift_x) in [(true, false), (false, true), (true, true)] {
+            let shifted = weight_gradient_at(&ctx, dims, (&dy, shift_dy), (&x, shift_x), &dw0);
+            assert_eq!(
+                bits(&shifted),
+                bits(&aligned),
+                "dW {dims:?}, output gradient shifted {shift_dy}, activations shifted {shift_x}"
+            );
+        }
     }
 }

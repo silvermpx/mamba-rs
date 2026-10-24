@@ -1860,6 +1860,9 @@ pub enum Tf32RnaSplitTile {
     M128N64S3,
     /// 64 x 64 over 32-deep slabs, four stages.
     M64N64S4,
+    /// The 64 x 64 member staging its operands four bytes at a time, for
+    /// rows or bases that do not sit on 16-byte boundaries.
+    M64N64S4AnyAlignment,
 }
 
 impl Tf32RnaSplitTile {
@@ -1867,7 +1870,14 @@ impl Tf32RnaSplitTile {
         match self {
             Self::M128N64S3 => 1,
             Self::M64N64S4 => 2,
+            Self::M64N64S4AnyAlignment => 3,
         }
+    }
+
+    /// Whether the member stages whole 16-byte chunks, which needs aligned
+    /// bases and rows of whole chunks.
+    pub const fn stages_whole_chunks(self) -> bool {
+        !matches!(self, Self::M64N64S4AnyAlignment)
     }
 }
 
@@ -1889,6 +1899,11 @@ pub enum Tf32RnaWideTile {
     MsM128N64S3,
     /// The multistage 64 x 64 tile over 32-deep slabs, three stages.
     MsM64N64S3,
+    /// The multistage 128 x 64 tile over 16-deep slabs, three stages, on a
+    /// resident grid of two CTAs a multiprocessor that walks the output
+    /// tiles of a shape it covers whole, its ring running on from one tile
+    /// into the next.
+    MsPersistM128N64Bk16S3,
     /// The input gradient's multistage 64 x 128 tile over 16-deep slabs,
     /// six stages.
     NtMsM64N128Bk16S6,
@@ -1901,13 +1916,14 @@ pub enum Tf32RnaWideTile {
 }
 
 impl Tf32RnaWideTile {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::M128N96S3,
         Self::M96N96S3,
         Self::M128N128S3,
         Self::MsM64N128Bk16S6,
         Self::MsM128N64S3,
         Self::MsM64N64S3,
+        Self::MsPersistM128N64Bk16S3,
         Self::NtMsM64N128Bk16S6,
         Self::NtMsM128N64S3,
         Self::NtMsM128N128Bk16S5,
@@ -1924,6 +1940,7 @@ impl Tf32RnaWideTile {
             Self::NtMsM64N128Bk16S6 => 7,
             Self::NtMsM128N64S3 => 8,
             Self::NtMsM128N128Bk16S5 => 9,
+            Self::MsPersistM128N64Bk16S3 => 10,
         }
     }
 
@@ -2060,7 +2077,9 @@ pub struct F32TriadAvailability {
 }
 
 /// Kernel parameters of the exact-F32 SM120 routes: kernel-side (M, N, K),
-/// the output stride, and the reduction split the launch deals.
+/// the output stride, the reduction split the launch deals, and the first
+/// column of the plan's column tail (`n` when it has none), whose outputs a
+/// CTA folding its own pieces keeps as one chain over the whole reduction.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sm120FmaKernelParams {
@@ -2072,6 +2091,7 @@ pub struct Sm120FmaKernelParams {
     pub ldc: i32,
     pub splits: i32,
     pub tiles_per_split: i32,
+    pub chain_from: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2314,7 +2334,7 @@ pub fn tf32_splitk_specs_all() -> impl Iterator<Item = &'static Tf32SplitKSpec> 
 /// The batch-invariant module's multistage split members; they fold the
 /// portable split members' partitions, so they are members of the same
 /// partition count.
-pub const TF32_RNA_SPLITK_SPECS: [Tf32SplitKSpec; 2] = [
+pub const TF32_RNA_SPLITK_SPECS: [Tf32SplitKSpec; 3] = [
     Tf32SplitKSpec {
         op: ResolvedGemmOp::Tn,
         route: Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(Tf32RnaSplitTile::M128N64S3),
@@ -2341,6 +2361,19 @@ pub const TF32_RNA_SPLITK_SPECS: [Tf32SplitKSpec; 2] = [
         register_cap: 255,
         occupancy_gate: 1,
     },
+    Tf32SplitKSpec {
+        op: ResolvedGemmOp::Tn,
+        route: Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(Tf32RnaSplitTile::M64N64S4AnyAlignment),
+        symbol: super::tf32_rna_source::TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL,
+        tile: (64, 64),
+        bk: 32,
+        stages: 4,
+        partitions: 8,
+        threads: 128,
+        dynamic_shared_bytes: 73_728,
+        register_cap: 255,
+        occupancy_gate: 1,
+    },
 ];
 
 pub fn tf32_splitk_spec(
@@ -2351,6 +2384,23 @@ pub fn tf32_splitk_spec(
         .chain(TF32_RNA_SPLITK_SPECS.iter())
         .find(|spec| spec.op == op && spec.route == route)
         .ok_or_else(|| format!("no TF32 split-K kernel matches {op:?}/{route:?}"))
+}
+
+/// The kernel a TF32 route launches: the fused kernel's symbol, or the split
+/// member's for a split-K route, whose specification is its own.
+pub fn tf32_route_symbol(
+    op: ResolvedGemmOp,
+    route: Tf32PhysicalRoute,
+) -> Result<&'static str, String> {
+    match route {
+        Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
+            tf32_splitk_spec(op, route).map(|spec| spec.symbol)
+        }
+        _ => tf32_kernel_spec(op, route).map(|spec| spec.symbol),
+    }
 }
 
 pub fn tf32_splitk_partition_bounds(
@@ -2951,7 +3001,7 @@ const fn tf32_rna_spec(
 
 /// The batch-invariant TF32 policy's own tiles; the threads and shared
 /// memory are the source owner's launch table.
-pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 9] = [
+pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 10] = [
     tf32_rna_spec(
         Tf32RnaWideTile::M128N96S3,
         super::tf32_rna_source::NN_M128N96_S3_SYMBOL,
@@ -2993,6 +3043,13 @@ pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 9] = [
         (64, 64),
         (32, 3, 128),
         52_224,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::MsPersistM128N64Bk16S3,
+        super::tf32_rna_source::NN_MS_PERSIST_M128N64_BK16_S3_SYMBOL,
+        (128, 64),
+        (16, 3, 128),
+        38_400,
     ),
     tf32_rna_spec(
         Tf32RnaWideTile::NtMsM64N128Bk16S6,
@@ -7841,7 +7898,7 @@ mod tests {
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
             (ModuleKind::TriadSm120, 30, [9, 10, 11]),
-            (ModuleKind::TriadTf32Rna, 9, [6, 0, 3]),
+            (ModuleKind::TriadTf32Rna, 10, [7, 0, 3]),
         ];
         let expected_total = expected.iter().map(|(_, count, _)| count).sum::<usize>();
         let mut all_symbols = std::collections::BTreeSet::new();

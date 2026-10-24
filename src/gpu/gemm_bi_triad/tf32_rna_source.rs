@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 pub const SOURCE: &str = include_str!("../../../kernels/gemm_bi_triad/sm80/tf32_rna.cu");
 
-pub const SOURCE_SHA256: &str = "efee229a0b22deb8b65cc401a9b22d4a3fbb8dff04c7c090c9194487600be6a0";
+pub const SOURCE_SHA256: &str = "511c4997835f32b470e893b6573f6d843427dcadc17323f25d9060f8a91e8dd1";
 
 pub const NN_M128N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m128n96_w2x4_bk32_s3";
 pub const NN_M96N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m96n96_w2x4_bk32_s3";
@@ -20,25 +20,31 @@ pub const NN_M128N128_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m128n128_bk32_s3";
 pub const NN_MS_M64N128_BK16_S6_SYMBOL: &str = "nn_sm80_tf32_rna_ms_m64n128_bk16_s6";
 pub const NN_MS_M128N64_S3_SYMBOL: &str = "nn_sm80_tf32_rna_ms_m128n64_bk32_s3";
 pub const NN_MS_M64N64_S3_SYMBOL: &str = "nn_sm80_tf32_rna_ms_m64n64_bk32_s3";
+pub const NN_MS_PERSIST_M128N64_BK16_S3_SYMBOL: &str =
+    "nn_sm80_tf32_rna_ms_persist_m128n64_bk16_s3";
 pub const NT_MS_M64N128_BK16_S6_SYMBOL: &str = "nt_sm80_tf32_rna_ms_m64n128_bk16_s6";
 pub const NT_MS_M128N64_S3_SYMBOL: &str = "nt_sm80_tf32_rna_ms_m128n64_bk32_s3";
 pub const NT_MS_M128N128_BK16_S5_SYMBOL: &str = "nt_sm80_tf32_rna_ms_m128n128_bk16_s5";
 pub const TN_MS_SPLITK8_M128N64_S3_SYMBOL: &str = "tn_sm80_tf32_rna_ms_splitk8_m128n64_bk32_s3";
 pub const TN_MS_SPLITK8_M64N64_S4_SYMBOL: &str = "tn_sm80_tf32_rna_ms_splitk8_m64n64_bk32_s4";
+pub const TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL: &str =
+    "tn_sm80_tf32_rna_ms_splitk8_m64n64_bk32_s4_any";
 
 /// Every export of the module, in lexicographic order.
-pub const TF32_RNA_SYMBOLS: [&str; 11] = [
+pub const TF32_RNA_SYMBOLS: [&str; 13] = [
     NN_M128N128_S3_SYMBOL,
     NN_M128N96_S3_SYMBOL,
     NN_M96N96_S3_SYMBOL,
     NN_MS_M128N64_S3_SYMBOL,
     NN_MS_M64N128_BK16_S6_SYMBOL,
     NN_MS_M64N64_S3_SYMBOL,
+    NN_MS_PERSIST_M128N64_BK16_S3_SYMBOL,
     NT_MS_M128N128_BK16_S5_SYMBOL,
     NT_MS_M128N64_S3_SYMBOL,
     NT_MS_M64N128_BK16_S6_SYMBOL,
     TN_MS_SPLITK8_M128N64_S3_SYMBOL,
     TN_MS_SPLITK8_M64N64_S4_SYMBOL,
+    TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +106,9 @@ pub enum Tf32RnaKernelKind {
     Wide128,
     /// A multistage tile.
     Multistage,
+    /// The multistage 128 x 64 forward on a resident grid of two CTAs a
+    /// multiprocessor, which walks the output tiles.
+    Persistent,
     /// A multistage member of the weight gradient's eight-way split.
     SplitK8,
 }
@@ -109,7 +118,7 @@ impl Tf32RnaKernelKind {
     pub const fn driver_abi(self) -> &'static [Tf32RnaAbiParameter] {
         match self {
             Self::SplitK8 => &SPLITK_DRIVER_ABI,
-            Self::Wide | Self::Wide128 | Self::Multistage => &GEMM_DRIVER_ABI,
+            Self::Wide | Self::Wide128 | Self::Multistage | Self::Persistent => &GEMM_DRIVER_ABI,
         }
     }
 }
@@ -148,7 +157,7 @@ const fn spec(
 
 /// The launch geometry of every tile: threads, the dynamic shared memory of
 /// its stages, and the CTAs a multiprocessor must hold at once.
-pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 11] = [
+pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 13] = [
     spec(
         NN_M128N96_S3_SYMBOL,
         Tf32RnaKernelKind::Wide,
@@ -188,6 +197,15 @@ pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 11] = [
         52_224,
         1,
     ),
+    // Two of its 38 KB rings fit every SM80-tier multiprocessor, and the
+    // resident grid it launches counts on both.
+    spec(
+        NN_MS_PERSIST_M128N64_BK16_S3_SYMBOL,
+        Tf32RnaKernelKind::Persistent,
+        128,
+        38_400,
+        2,
+    ),
     spec(
         NT_MS_M64N128_BK16_S6_SYMBOL,
         Tf32RnaKernelKind::Multistage,
@@ -218,6 +236,13 @@ pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 11] = [
     ),
     spec(
         TN_MS_SPLITK8_M64N64_S4_SYMBOL,
+        Tf32RnaKernelKind::SplitK8,
+        128,
+        73_728,
+        1,
+    ),
+    spec(
+        TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL,
         Tf32RnaKernelKind::SplitK8,
         128,
         73_728,
@@ -266,7 +291,12 @@ pub fn validate_source_text(source: &str) -> Result<(), String> {
         .into_iter()
         .filter(|name| !name.contains("NAME"))
         .collect::<Vec<_>>();
-    for macro_name in ["TF32_RNA_MS_TILE(", "TF32_RNA_MS_TN_SPLIT8("] {
+    for macro_name in [
+        "TF32_RNA_MS_TILE(",
+        "TF32_RNA_MS_TN_SPLIT8(",
+        "TF32_RNA_MS_TN_SPLIT8_ANY(",
+        "TF32_RNA_MS_NN_PERSISTENT(",
+    ] {
         let mut remaining = source;
         while let Some(at) = remaining.find(macro_name) {
             let rest = &remaining[at + macro_name.len()..];

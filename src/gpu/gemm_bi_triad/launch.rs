@@ -185,6 +185,11 @@ const EXACT_CHAIN_CLOSE: i32 = 16;
 /// zero-filled slab does.
 const EXACT_CHUNK_CLOSE: i32 = 32;
 
+/// The rows a block of the input gradient's column-tail kernel takes, and
+/// its threads, as `scalar.cu` fixes them.
+const DX_COL_TAIL_ROWS: u32 = 8;
+const DX_COL_TAIL_THREADS: u32 = 128;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 struct Sm90aTf32KernelParams {
@@ -420,6 +425,38 @@ abi_const_assert_eq!(std::mem::offset_of!(Sm120KernelParams, m), 24);
 abi_const_assert_eq!(std::mem::offset_of!(Sm120KernelParams, k), 28);
 abi_const_assert_eq!(std::mem::offset_of!(Sm120KernelParams, n), 32);
 abi_const_assert_eq!(std::mem::offset_of!(Sm120KernelParams, ldc), 36);
+abi_const_assert_eq!(std::mem::size_of::<Sm120FmaKernelParams>(), 36);
+abi_const_assert_eq!(std::mem::align_of::<Sm120FmaKernelParams>(), 4);
+abi_const_assert_eq!(std::mem::offset_of!(Sm120FmaKernelParams, alpha), 0);
+abi_const_assert_eq!(std::mem::offset_of!(Sm120FmaKernelParams, beta), 4);
+abi_const_assert_eq!(std::mem::offset_of!(Sm120FmaKernelParams, m), 8);
+abi_const_assert_eq!(std::mem::offset_of!(Sm120FmaKernelParams, n), 12);
+abi_const_assert_eq!(std::mem::offset_of!(Sm120FmaKernelParams, k), 16);
+abi_const_assert_eq!(std::mem::offset_of!(Sm120FmaKernelParams, ldc), 20);
+abi_const_assert_eq!(std::mem::offset_of!(Sm120FmaKernelParams, splits), 24);
+abi_const_assert_eq!(
+    std::mem::offset_of!(Sm120FmaKernelParams, tiles_per_split),
+    28
+);
+abi_const_assert_eq!(std::mem::offset_of!(Sm120FmaKernelParams, chain_from), 32);
+
+#[cfg(test)]
+mod sm120_fma_abi_tests {
+    /// The CUDA side asserts the size the asserts above pin, so a field added
+    /// on one side only fails here instead of on a board's module loader.
+    #[test]
+    fn sm120_fma_parameter_size_matches_the_cuda_static_assert() {
+        let source = include_str!("../../../kernels/gemm_bi_triad/sm120/exact.cu");
+        let marker = "static_assert(sizeof(Sm120FmaKernelParams) == ";
+        let start = source.find(marker).expect("the CUDA side asserts its size") + marker.len();
+        let size: usize = source[start..]
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|digits| digits.parse().ok())
+            .expect("the asserted size");
+        assert_eq!(size, std::mem::size_of::<super::Sm120FmaKernelParams>());
+    }
+}
 
 #[derive(Clone, Copy)]
 enum PreparedTf32Params {
@@ -2262,7 +2299,6 @@ struct ScalarNodeSpec {
 
 fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
     match plan {
-        ScalarDispatchPlan::NtSplitKTail { k_tail, .. } => 3 + k_tail,
         ScalarDispatchPlan::NnExactChunk { pieces, .. } => 2 * pieces as usize,
         ScalarDispatchPlan::NnSplitKThinTail { .. }
         | ScalarDispatchPlan::NnSplitKThin
@@ -2285,6 +2321,7 @@ fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
         | ScalarDispatchPlan::NtPrismVectorQualified
         | ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified => 2,
         ScalarDispatchPlan::NtSplitKMain { .. } | ScalarDispatchPlan::NtSplitKSlim { .. } => 3,
+        ScalarDispatchPlan::NtSplitKTail { .. } => 4,
         _ => 1,
     }
 }
@@ -2293,6 +2330,7 @@ fn scalar_plan_requires_zero_beta(plan: ScalarDispatchPlan) -> bool {
     matches!(
         plan,
         ScalarDispatchPlan::NnSplitKThinTail { .. }
+            | ScalarDispatchPlan::NtSplitKTail { .. }
             | ScalarDispatchPlan::NnSplitKThin
             | ScalarDispatchPlan::NnSplitKSlim { .. }
             | ScalarDispatchPlan::NnM32N64SplitK32Qualified
@@ -3229,7 +3267,7 @@ fn scalar_physical_nodes(
                 ),
             );
         }
-        ScalarDispatchPlan::NtSplitKTail { k_main, k_tail } => {
+        ScalarDispatchPlan::NtSplitKTail { k_main, .. } => {
             let k_main_u32 = checked_u32(k_main, "NT K main")?;
             push_scalar_node(
                 &mut nodes,
@@ -3272,16 +3310,18 @@ fn scalar_physical_nodes(
                     0,
                 ),
             );
-            for _ in 0..k_tail {
-                push_scalar_node(
-                    &mut nodes,
-                    context,
-                    "dx_col_gemv",
-                    (1, 1),
-                    (1, 1),
-                    cfg((m.div_ceil(128), 1, 1), (128, 1, 1), 0),
-                );
-            }
+            push_scalar_node(
+                &mut nodes,
+                context,
+                "dx_col_tail",
+                (1, 1),
+                (1, 1),
+                cfg(
+                    (m.div_ceil(DX_COL_TAIL_ROWS), 1, 1),
+                    (DX_COL_TAIL_THREADS, 1, 1),
+                    0,
+                ),
+            );
         }
         ScalarDispatchPlan::NtSplitKMain { n_main, .. } => {
             let n_main = checked_u32(n_main, "NT N main")?;
@@ -3810,11 +3850,12 @@ fn tf32_params(
             // The exact kernels speak in output rows, output columns and the
             // reduction, whatever the operation stores as m, k and n.
             let plan = sm120_fma_launch_plan(request, exact)?;
+            let columns = shape.output_columns(request.op);
             PreparedTf32Params::Sm120Fma(Sm120FmaKernelParams {
                 alpha: operands.alpha,
                 beta: operands.beta,
                 m: checked_i32(shape.output_rows(request.op), "exact-F32 rows")?,
-                n: checked_i32(shape.output_columns(request.op), "exact-F32 columns")?,
+                n: checked_i32(columns, "exact-F32 columns")?,
                 k: checked_i32(shape.reduction(request.op), "exact-F32 reduction")?,
                 ldc,
                 // A negative count tells the kernel the CTA folds its own
@@ -3825,13 +3866,18 @@ fn tf32_params(
                     i32::from(exact.splits)
                 },
                 tiles_per_split: checked_i32(plan.tiles_per_split, "exact-F32 tiles per split")?,
+                chain_from: checked_i32(
+                    plan.chain_from.unwrap_or(columns),
+                    "exact-F32 column tail",
+                )?,
             })
         }
     })
 }
 
 /// The launch of an exact-F32 SM120 route: one unit per (tile, split), the
-/// slabs the non-owning splits publish, and one flag per slab.
+/// slabs the non-owning splits publish, one flag per slab, and the first
+/// column of the plan's column tail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Sm120FmaLaunchPlan {
     pub tiles: usize,
@@ -3839,6 +3885,7 @@ pub(super) struct Sm120FmaLaunchPlan {
     pub units: u32,
     pub slab_elements: usize,
     pub flag_elements: usize,
+    pub chain_from: Option<usize>,
 }
 
 pub(super) fn sm120_fma_launch_plan(
@@ -3862,14 +3909,20 @@ pub(super) fn sm120_fma_launch_plan(
     let k_tiles = reduction.div_ceil(SM120_FMA_BK as usize);
     // A split deals the portable plan's pieces and nothing else, so the
     // product keeps the bits the other architectures write.
-    let tiles_per_split = if splits == 1 {
-        k_tiles
+    let (tiles_per_split, chain_from) = if splits == 1 {
+        (k_tiles, None)
     } else {
         match super::dispatch::sm120_fma_portable_cut(request) {
-            // A tail continues the folded chain, which only a CTA that folds
-            // its own pieces can do.
-            Some(cut) if usize::from(cut.splits) == splits && (route.in_cta || !cut.tail) => {
-                cut.piece_tiles
+            // A tail continues the folded chain and a column tail keeps its
+            // chains out of the fold, which only a CTA that folds its own
+            // pieces can do, and the column tail only in the NT k-vector
+            // kernels.
+            Some(cut)
+                if usize::from(cut.splits) == splits
+                    && (route.in_cta || (!cut.tail && cut.chain_from.is_none()))
+                    && (cut.chain_from.is_none() || route.kvec) =>
+            {
+                (cut.piece_tiles, cut.chain_from)
             }
             _ => {
                 return Err(format!(
@@ -3880,11 +3933,12 @@ pub(super) fn sm120_fma_launch_plan(
         }
     };
     // One unit per tile and piece, or one per tile when the CTA folds its
-    // own pieces through a slab of its tile.
-    let (dealt, slabs_per_tile, flags_per_tile) = if route.in_cta {
-        (1, 1, 0)
-    } else {
-        (splits, splits - 1, splits - 1)
+    // own pieces: through a slab of its tile, or in registers in the NT
+    // k-vector kernels, which take no workspace.
+    let (dealt, slabs_per_tile, flags_per_tile) = match (route.in_cta, route.kvec) {
+        (true, true) => (1, 0, 0),
+        (true, false) => (1, 1, 0),
+        (false, _) => (splits, splits - 1, splits - 1),
     };
     let units = tiles
         .checked_mul(dealt)
@@ -3914,6 +3968,7 @@ pub(super) fn sm120_fma_launch_plan(
         units,
         slab_elements,
         flag_elements,
+        chain_from,
     })
 }
 
@@ -4663,12 +4718,19 @@ fn prepare_tf32_f32(
         request.shape.output_columns(request.op),
         "TF32 output columns",
     )?;
+    let tiles = checked_tile_grid(rows, spec.tile.0, columns, spec.tile.1)?;
+    // The persistent tile launches the two CTAs a multiprocessor holds and
+    // walks the tiles with them; which CTA takes a tile moves no bit.
+    let grid = if route
+        == Tf32PhysicalRoute::MmaTf32RnaWide(
+            super::contract::Tf32RnaWideTile::MsPersistM128N64Bk16S3,
+        ) {
+        tiles.min(ctx.kernels.multiprocessor_count().max(1).saturating_mul(2))
+    } else {
+        tiles
+    };
     let config = cudarc::driver::LaunchConfig {
-        grid_dim: (
-            checked_tile_grid(rows, spec.tile.0, columns, spec.tile.1)?,
-            1,
-            1,
-        ),
+        grid_dim: (grid, 1, 1),
         block_dim: (spec.threads, 1, 1),
         shared_mem_bytes: spec.dynamic_shared_bytes,
     };
@@ -4751,22 +4813,48 @@ fn validate_tf32_rna_wide_operands(
     operands: F32TriadOperands,
     route: Tf32PhysicalRoute,
 ) -> Result<(), String> {
-    let op = match route {
-        Tf32PhysicalRoute::MmaTf32RnaWide(tile) => tile.op(),
-        Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => ResolvedGemmOp::Tn,
+    let (op, whole_chunks) = match route {
+        Tf32PhysicalRoute::MmaTf32RnaWide(tile) => (tile.op(), true),
+        Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(tile) => {
+            (ResolvedGemmOp::Tn, tile.stages_whole_chunks())
+        }
         _ => return Ok(()),
     };
     if request.op != op
         || [operands.a, operands.b]
             .into_iter()
-            .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))
-        || !request.shape.lda.is_multiple_of(4)
-        || !request.shape.ldb.is_multiple_of(4)
+            .any(|pointer| pointer == 0)
+        || (whole_chunks
+            && ([operands.a, operands.b]
+                .into_iter()
+                .any(|pointer| !pointer.is_multiple_of(16))
+                || !request.shape.lda.is_multiple_of(4)
+                || !request.shape.ldb.is_multiple_of(4)))
     {
         return Err(format!(
             "TF32 RNA wide route {route:?} serves its own product on 16-byte aligned \
              operands with whole-chunk strides"
         ));
+    }
+    // The persistent tile stages every slab whole and never masks an edge.
+    if route
+        == Tf32PhysicalRoute::MmaTf32RnaWide(
+            super::contract::Tf32RnaWideTile::MsPersistM128N64Bk16S3,
+        )
+    {
+        let shape = request.shape;
+        if shape.m == 0
+            || !shape.m.is_multiple_of(128)
+            || !shape.n.is_multiple_of(64)
+            || shape.k == 0
+            || !shape.k.is_multiple_of(32)
+        {
+            return Err(format!(
+                "the persistent TF32 RNA tile serves only whole 128 x 64 tiles over whole \
+                 32-deep groups, not {}x{}x{}",
+                shape.m, shape.k, shape.n
+            ));
+        }
     }
     Ok(())
 }
@@ -5079,9 +5167,8 @@ fn prepare_sm120_fma_f32(
     let binding = f32_map_binding(ctx, route)?;
     let allocation_domain = binding.allocation_domain;
     let resources = output_resources.with_inputs(request, operands, allocation_domain)?;
-    let (resources, partial, flags) = if exact.splits == 1 {
-        debug_assert_eq!(plan.slab_elements, 0);
-        debug_assert_eq!(plan.flag_elements, 0);
+    // One split, or a fold held in registers, binds no workspace.
+    let (resources, partial, flags) = if plan.slab_elements == 0 && plan.flag_elements == 0 {
         (resources, 0, 0)
     } else {
         let scratch_buffer = ctx.kernels.splitk_scratch_buf(&ctx.stream)?;
@@ -5889,33 +5976,66 @@ pub(in crate::gpu) fn prepare_f32_triad(
         F32TriadSelection::Tf32(route) => {
             // A measured TF32 route whose kernel this toolkit could not serve
             // declines to the exact floor, with the reason said once.
-            if let Ok(spec) = super::contract::tf32_kernel_spec(request.op, route)
-                && let Some(reason) = ctx
-                    .kernels
-                    .triad_kernels()
-                    .tf32_symbol_exclusion(spec.symbol)
+            if let Ok(symbol) = tf32_route_symbol(request.op, route)
+                && let Some(reason) = ctx.kernels.triad_kernels().tf32_symbol_exclusion(symbol)
             {
                 // The strict policy never leaves TF32: its portable plain
                 // tile serves instead, or the shape is refused.
                 if ctx.f32_triad_policy()
                     == crate::gpu::context::F32TriadPolicy::RnaTf32BatchInvariant
                 {
+                    // A split keeps its cut: the plain tile would sum the
+                    // reduction in one chain and write other bits. Only the
+                    // member that stages any operand folds the same eight
+                    // partitions in its place.
+                    if tf32_splitk_spec(request.op, route).is_ok() {
+                        let twin = Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(
+                            Tf32RnaSplitTile::M64N64S4AnyAlignment,
+                        );
+                        let twin_serves = twin != route
+                            && tf32_splitk_spec(request.op, twin).is_ok_and(|twin_spec| {
+                                tf32_splitk_spec(request.op, route)
+                                    .is_ok_and(|spec| spec.partitions == twin_spec.partitions)
+                                    && ctx
+                                        .kernels
+                                        .triad_kernels()
+                                        .tf32_symbol_exclusion(twin_spec.symbol)
+                                        .is_none()
+                            });
+                        if twin_serves
+                            && let Ok(twin) = super::dispatch::resolve_tf32_forced(
+                                request,
+                                ctx.kernels.f32_triad_availability(),
+                                twin,
+                            )
+                        {
+                            return prepare_tf32_f32(
+                                ctx,
+                                request,
+                                operands,
+                                output_resources,
+                                twin,
+                            );
+                        }
+                        return Err(format!(
+                            "TF32 split member {symbol} is excluded on this toolkit ({reason}) and \
+                             no other member folds its partitions for {request:?}"
+                        ));
+                    }
                     let ladder = super::dispatch::rna_batch_invariant_ladder(
                         request,
                         ctx.kernels.f32_triad_availability(),
                     )?;
-                    let ladder_excluded = super::contract::tf32_kernel_spec(request.op, ladder)
-                        .map(|spec| {
-                            ctx.kernels
-                                .triad_kernels()
-                                .tf32_symbol_exclusion(spec.symbol)
-                                .is_some()
-                        })?;
+                    let ladder_excluded = tf32_route_symbol(request.op, ladder).map(|symbol| {
+                        ctx.kernels
+                            .triad_kernels()
+                            .tf32_symbol_exclusion(symbol)
+                            .is_some()
+                    })?;
                     if ladder == route || ladder_excluded {
                         return Err(format!(
-                            "TF32 route {} is excluded on this toolkit ({reason}) and the RNA \
-                             batch-invariant TF32 policy has no other route for {request:?}",
-                            spec.symbol
+                            "TF32 route {symbol} is excluded on this toolkit ({reason}) and the RNA \
+                             batch-invariant TF32 policy has no other route for {request:?}"
                         ));
                     }
                     return prepare_tf32_f32(ctx, request, operands, output_resources, ladder);
@@ -5923,9 +6043,8 @@ pub(in crate::gpu) fn prepare_f32_triad(
                 static EXCLUDED: std::sync::Once = std::sync::Once::new();
                 crate::gpu::diagnostics::warn_once(&EXCLUDED, || {
                     format!(
-                        "TF32 route {} is excluded on this toolkit ({reason}); the exact \
-                         family serves this shape",
-                        spec.symbol
+                        "TF32 route {symbol} is excluded on this toolkit ({reason}); the exact \
+                         family serves this shape"
                     )
                 });
                 return match super::dispatch::exact_or_scalar_selection(
@@ -11469,7 +11588,7 @@ fn gemm_bi_backward_dx_with_control<
     // Covers SALE action backward_dx (K_out=257, tail=1), SimbaV2 hyperplane
     // backward_dx (K_out=642, tail=2), and any K_out%32 ∈ {1..31}: main is the
     // first K_out - (K_out%32) rows (multiple of 32 → %4 safe for vectorized
-    // stores), tail is K_out%32 columns filled via sequential dx_col_gemv calls.
+    // stores), tail is the K_out%32 columns dx_col_tail fills in one launch.
     // Same transpose_scratch (4,718,592 f32 = 18 MiB) + splitk_scratch
     // (8 M f32) as the main
     // NT-via-T path below, so envelope caps match: K_out ≤ 4096, N ≤ 2048.
@@ -11608,49 +11727,43 @@ fn gemm_bi_backward_dx_with_control<
             error.with_driver_context(format_args!("splitk_reduce (NT K-tail main)"))
         })?;
 
-        // Step 4: loop over tail columns. For each k in [0, k_tail_cnt):
-        // dX[:, k_main + k] = Σ_n dY[m, n] · W[k_main + k, n]. Each call is
-        // one gemv; tail_cnt ≤ 31 so total overhead is bounded. Sequential
-        // (not parallel) to keep kernel launches small and deterministic.
-        let w_base_ptr = w_ptr;
+        // Step 4: the tail columns in one launch. dX[:, k_main + c] =
+        // Σ_n dY[m, n] · W[k_main + c, n], one fma chain per output from
+        // n = 0, eight rows a block.
+        let row_elements = k_main
+            .checked_mul(n_out)
+            .ok_or_else(|| invalid_gemm_dimensions("W tail row offset overflows usize"))?;
+        let w_tail_ptr = checked_ptr_add(
+            w_ptr,
+            checked_byte_offset(row_elements, std::mem::size_of::<f32>(), "W tail rows")?,
+            "W tail rows",
+        )?;
         let n_i = checked_dims.n_i32;
-        let block = 128u32;
+        let tail_i = checked_i32(k_tail_cnt, "NT K-tail columns")?;
         let tail_cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (checked_dims.m_u32.div_ceil(block), 1, 1),
-            block_dim: (block, 1, 1),
+            grid_dim: (checked_dims.m_u32.div_ceil(DX_COL_TAIL_ROWS), 1, 1),
+            block_dim: (DX_COL_TAIL_THREADS, 1, 1),
             shared_mem_bytes: 0,
         };
-        for k in 0..k_tail_cnt {
-            let k_tail_col = k_main + k;
-            let row_elements = k_tail_col
-                .checked_mul(n_out)
-                .ok_or_else(|| invalid_gemm_dimensions("W tail row offset overflows usize"))?;
-            let w_tail_row_ptr = checked_ptr_add(
-                w_base_ptr,
-                checked_byte_offset(row_elements, std::mem::size_of::<f32>(), "W tail row")?,
-                "W tail row",
-            )?;
-            let col_idx_i = checked_i32(k_tail_col, "NT K-tail column")?;
-            let mut gb = scalar_launch_builder(stream, &kernels.gemm_bi_dx_col_gemv, &control);
-            gb.arg_buffer_mut(dx);
-            gb.arg_buffer(dy);
-            gb.arg(&w_tail_row_ptr);
-            gb.arg(&m_i);
-            gb.arg(&n_i);
-            gb.arg(&col_idx_i);
-            gb.arg(&out_stride_i);
-            enqueue_scalar_backward(
-                &mut control,
-                request,
-                operands,
-                "dx_col_gemv",
-                tail_cfg,
-                &mut gb,
-            )
-            .map_err(|error| {
-                error.with_driver_context(format_args!("dx_col_gemv (NT K-tail col={})", k))
-            })?;
-        }
+        let mut gb = scalar_launch_builder(stream, &kernels.gemm_bi_dx_col_tail, &control);
+        gb.arg_buffer_mut(dx);
+        gb.arg_buffer(dy);
+        gb.arg(&w_tail_ptr);
+        gb.arg(&alpha);
+        gb.arg(&m_i);
+        gb.arg(&n_i);
+        gb.arg(&tail_i);
+        gb.arg(&k_main_i);
+        gb.arg(&out_stride_i);
+        enqueue_scalar_backward(
+            &mut control,
+            request,
+            operands,
+            "dx_col_tail",
+            tail_cfg,
+            &mut gb,
+        )
+        .map_err(|error| error.with_driver_context(format_args!("dx_col_tail (NT K-tail)")))?;
         return Ok(());
     }
 
@@ -16533,7 +16646,7 @@ mod prepared_f32_launch_tests {
         for (op, dims, expected) in [
             (ResolvedGemmOp::Nn, (32, 32, 128), 2),
             (ResolvedGemmOp::Tn, (256, 128, 128), 2),
-            (ResolvedGemmOp::Nt, (32, 95, 128), 34),
+            (ResolvedGemmOp::Nt, (32, 95, 128), 4),
             (ResolvedGemmOp::Nt, (32, 96, 128), 3),
             (ResolvedGemmOp::Nt, (31, 95, 128), 1),
             (ResolvedGemmOp::Nt, (32, 95, 127), 1),
@@ -18346,7 +18459,7 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
-    fn nt_k_tail_34_node_plan_preserves_repeated_symbol_arguments_and_neighbors() {
+    fn nt_k_tail_plan_fills_every_tail_column_in_one_node_and_keeps_its_neighbors() {
         let (_, request, plan) =
             scalar_backward_launch_plan(ResolvedGemmOp::Nt, (32, 95, 128)).unwrap();
         assert_eq!(
@@ -18358,7 +18471,7 @@ mod prepared_f32_launch_tests {
         );
         let operands = scalar_test_operands(ResolvedGemmOp::Nt, 1.0);
         let nodes = scalar_physical_nodes(request, operands, plan).unwrap();
-        assert_eq!(nodes.len(), 34);
+        assert_eq!(nodes.len(), 4);
         assert_eq!(nodes[0].symbol, "transpose_f32_2d");
         assert_eq!(nodes[0].launch.grid_dim, (4, 2, 1));
         assert_eq!(nodes[0].launch.block_dim, (32, 32, 1));
@@ -18366,27 +18479,18 @@ mod prepared_f32_launch_tests {
         assert_eq!(nodes[1].launch.grid_dim, (4, 1, 1));
         assert_eq!(nodes[2].symbol, "splitk_reduce");
         assert_eq!(nodes[2].launch.grid_dim, (8, 1, 1));
-        for node in &nodes[3..] {
-            assert_eq!(node.symbol, "dx_col_gemv");
-            assert_eq!(node.launch.grid_dim, (1, 1, 1));
-            assert_eq!(node.launch.block_dim, (128, 1, 1));
-        }
-        for (index, node) in nodes[3..].iter().enumerate() {
-            assert!(
-                nodes[3..index + 3]
-                    .iter()
-                    .all(|prior| prior.launch.arguments_digest != node.launch.arguments_digest),
-                "tail node {index} collided with an earlier physical argument digest"
-            );
-        }
+        assert_eq!(nodes[3].symbol, "dx_col_tail");
+        assert_eq!(nodes[3].launch.grid_dim, (4, 1, 1));
+        assert_eq!(nodes[3].launch.block_dim, (128, 1, 1));
 
+        // Thirty tail columns are the same four launches.
         let (_, tail_30_request, tail_30_plan) =
             scalar_backward_launch_plan(ResolvedGemmOp::Nt, (32, 94, 128)).unwrap();
         assert_eq!(
             scalar_physical_nodes(tail_30_request, operands, tail_30_plan)
                 .unwrap()
                 .len(),
-            33
+            4
         );
         let (_, aligned_request, aligned_plan) =
             scalar_backward_launch_plan(ResolvedGemmOp::Nt, (32, 96, 128)).unwrap();

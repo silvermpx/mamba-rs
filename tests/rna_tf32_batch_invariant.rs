@@ -80,6 +80,19 @@ const LAYERS: [(usize, usize); 9] = [
 const BATCH: usize = 8192;
 const PREFIXES: [usize; 10] = [1, 7, 255, 256, 600, 1024, 2048, 4096, 5000, 8191];
 
+/// The strict policy's own tiles must bind wherever they are built: a
+/// module its own PTX check refuses leaves the policy on the portable tiles,
+/// where every other test here still passes.
+#[test]
+fn strict_tf32_tiles_bind() {
+    let Ok(device) = GpuDevice::new(0) else {
+        eprintln!("skip: no CUDA device");
+        return;
+    };
+    let ctx = GpuCtx::new(&device).unwrap();
+    assert_eq!(ctx.kernels.triad_tf32_rna_rejection(), None);
+}
+
 #[test]
 fn strict_tf32_forward_rows_do_not_depend_on_the_batch() {
     let Ok(device) = GpuDevice::new(0) else {

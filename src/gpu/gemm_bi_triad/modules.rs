@@ -1310,8 +1310,21 @@ pub(crate) fn compile_sm100_optional(
     state_cap: usize,
     device_cc: (i32, i32),
 ) -> Option<QualifiedSpecializedModule> {
+    let nvrtc = nvrtc_version();
+    let candidates = super::dispatch::sm100_target_candidates_for_nvrtc(device_cc, nvrtc);
+    if candidates.is_empty() {
+        static NO_TARGET: std::sync::Once = std::sync::Once::new();
+        crate::gpu::diagnostics::warn_once(&NO_TARGET, || {
+            format!(
+                "CUDA {}.{} has no SM100 target for compute capability {}.{}; the portable \
+                 kernels serve",
+                nvrtc.0, nvrtc.1, device_cc.0, device_cc.1
+            )
+        });
+        return None;
+    }
     select_sm100_candidate(
-        &super::dispatch::sm100_target_candidates_for_nvrtc(device_cc, nvrtc_version()),
+        &candidates,
         |candidate| probe_sm100_target(ctx, candidate),
         |candidate| {
             compile_module(CompileModuleRequest {
@@ -1337,6 +1350,10 @@ fn select_sm100_candidate<T, U>(
     mut compile: impl FnMut(super::contract::Sm100TargetCandidate) -> Result<T, String>,
     mut qualify: impl FnMut(T) -> Result<U, String>,
 ) -> Option<U> {
+    // Every rejection is said, in one warning, so a second candidate's
+    // reason is not hidden behind the first's.
+    let mut rejected = Vec::new();
+    let mut chosen = None;
     for &candidate in candidates {
         let (stage, error) = match probe(candidate) {
             Err(error) => ("probe", error),
@@ -1344,19 +1361,30 @@ fn select_sm100_candidate<T, U>(
                 Err(error) => ("compile", error),
                 Ok(compiled) => match qualify(compiled) {
                     Err(error) => ("qualify", error),
-                    Ok(qualified) => return Some(qualified),
+                    Ok(qualified) => {
+                        chosen = Some(qualified);
+                        break;
+                    }
                 },
             },
         };
+        rejected.push(format!("{candidate:?} at {stage}: {error}"));
+    }
+    if !rejected.is_empty() {
         static REJECTED: std::sync::Once = std::sync::Once::new();
+        let serves = if chosen.is_some() {
+            "the next candidate serves"
+        } else {
+            "the portable kernels serve"
+        };
         crate::gpu::diagnostics::warn_once(&REJECTED, || {
             format!(
-                "SM100 candidate {candidate:?} rejected at {stage}: {error}; the next \
-                 candidate or the portable kernels serve"
+                "SM100 candidates rejected: {}; {serves}",
+                rejected.join("; ")
             )
         });
     }
-    None
+    chosen
 }
 
 pub(crate) fn compile_sm120_artifact_set(
@@ -2350,11 +2378,18 @@ fn validate_tf32_rna_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             ));
         }
         let split = spec.kind == Tf32RnaKernelKind::SplitK8;
+        // The any-alignment member stages its operands one float at a time,
+        // so it must hold the 4-byte copy and none of the 16-byte ones, which
+        // fault on an address that is not 16-byte aligned.
+        let any_alignment =
+            spec.symbol == super::tf32_rna_source::TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL;
         let mut tokens = vec![
             "cvt.rna.tf32.f32",
             "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
         ];
-        if spec.kind != Tf32RnaKernelKind::Wide {
+        if any_alignment {
+            tokens.push("cp.async.ca.shared.global");
+        } else if spec.kind != Tf32RnaKernelKind::Wide {
             tokens.push("cp.async.cg.shared.global");
         }
         if split {
@@ -2381,6 +2416,7 @@ fn validate_tf32_rna_ptx(arch: &str, ptx: &str) -> Result<(), String> {
                 || token.starts_with("wgmma.")
                 || token.starts_with("tcgen05.")
                 || token.starts_with("cp.async.bulk.tensor.")
+                || (any_alignment && token.starts_with("cp.async.cg."))
         }) {
             return Err(format!(
                 "TriadTf32Rna {} contains a forbidden instruction family",
@@ -7353,7 +7389,7 @@ fn validate_tf32_parameter_abi(
         let map = format!(".param .align {map_alignment} .b8 ");
         let is_map = |line: &str| line.starts_with(&map) && line.contains("[128]");
         let seven_parameter_bundle = if kernel_spec.route.is_exact_fma() {
-            Some(32)
+            Some(std::mem::size_of::<super::contract::Sm120FmaKernelParams>())
         } else if matches!(
             kernel_spec.route,
             super::contract::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
@@ -8729,7 +8765,7 @@ pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "nt_narrow",
     "nn_splitk32_partial",
     "splitk_reduce",
-    "dx_col_gemv",
+    "dx_col_tail",
     "transpose_f32_2d",
     "transpose_f32_32x16_d768",
     "nn_gemv_bf16",
@@ -10094,7 +10130,7 @@ pub struct GemmBiKernels {
     pub gemm_bi_exact_chunk_partial_m16n16: CudaFunction,
     pub gemm_bi_transpose_f32_2d: CudaFunction,
     pub gemm_bi_transpose_f32_32x16_d768: CudaFunction,
-    pub gemm_bi_dx_col_gemv: CudaFunction,
+    pub gemm_bi_dx_col_tail: CudaFunction,
     pub gemm_bi_nn_zero_reduction: CudaFunction,
     pub gemm_bi_tn_zero_reduction: CudaFunction,
     pub gemm_bi_nt_zero_reduction: CudaFunction,
@@ -10514,11 +10550,12 @@ impl GemmBiKernels {
                 .and_then(|()| qualify_scalar_nn_m32n64_splitk32(&gemm_bi_nn_splitk32_m32n64_exact))
                 .and_then(|()| qualify_scalar_nt_m2n16(&gemm_bi_nt_m2n16_bk64_splitk32))
                 .and_then(|()| qualify_scalar_tn_m16n16(&gemm_bi_tn_m16n16_bk16_s2_splitm16));
+            // A miss turns these routes off and leaves the context usable: the
+            // driver compiles the PTX, so a driver update can move a register
+            // count under the same toolkit. The device test holds the measured
+            // toolkit to the caps.
             match checked {
                 Ok(()) => true,
-                Err(error) if scalar_compiler.nvrtc_version == SCALAR_RESOURCE_CAPS_TOOLKIT => {
-                    return Err(error);
-                }
                 Err(error) => {
                     static MISSED: std::sync::Once = std::sync::Once::new();
                     crate::gpu::diagnostics::warn_once(&MISSED, || {
@@ -10663,7 +10700,7 @@ impl GemmBiKernels {
             gemm_bi_exact_chunk_partial_m16n16: load("exact_chunk_partial_m16n16_bk16_s4")?,
             gemm_bi_transpose_f32_2d: load("transpose_f32_2d")?,
             gemm_bi_transpose_f32_32x16_d768,
-            gemm_bi_dx_col_gemv: load("dx_col_gemv")?,
+            gemm_bi_dx_col_tail: load("dx_col_tail")?,
             gemm_bi_nn_zero_reduction: load("nn_zero_reduction")?,
             gemm_bi_tn_zero_reduction: load("tn_zero_reduction")?,
             gemm_bi_nt_zero_reduction: load("nt_zero_reduction")?,
@@ -12127,11 +12164,6 @@ fn set_dynamic_shared(function: &CudaFunction, name: &str, bytes: i32) -> Result
         )
         .map_err(|error| format!("set MAX_DYNAMIC_SHARED for {name}: {error:?}"))
 }
-
-/// The toolkit the SM120 scalar resource caps were measured on. A kernel
-/// that misses them there is a defect of its source and fails the load; on
-/// any other toolkit it only keeps its routes off this card.
-const SCALAR_RESOURCE_CAPS_TOOLKIT: (i32, i32) = (13, 2);
 
 /// Whether the SM120 scalar module is checked against the resource caps its
 /// routes need: the CC 12.0 generic target with a known, well-formed compile,
@@ -13684,6 +13716,24 @@ mod tests {
         );
     }
 
+    /// On the toolkit the SM120 scalar resource caps were measured on, a
+    /// kernel that misses them is a defect of its source; the load only warns
+    /// and keeps the routes off, so this test is what fails.
+    #[test]
+    #[ignore = "requires a CC 12.0 CUDA device"]
+    fn sm120_scalar_resources_hold_on_the_toolkit_they_were_measured_on() {
+        const MEASURED_TOOLKIT: (i32, i32) = (13, 2);
+        let device = crate::gpu::device::GpuDevice::new(0).expect("open CUDA device");
+        let ctx = crate::gpu::context::GpuCtx::new(&device).expect("context");
+        if ctx.kernels.triad_scalar_compute_capability() != (12, 0)
+            || crate::gpu::kernels::nvrtc_version() != MEASURED_TOOLKIT
+        {
+            eprintln!("skip: not a CC 12.0 board on CUDA 13.2");
+            return;
+        }
+        assert!(ctx.kernels.triad_sm120_scalar_resources_qualified());
+    }
+
     #[test]
     fn scalar_resource_environment_rejects_zero_identity_domains() {
         let compiler = CompilerIdentity {
@@ -14225,7 +14275,11 @@ mod tests {
                      .param .align {map_alignment} .b8 b_map[128],\n"
                 ));
                 ptx.push_str(".param .u64 bias,\n");
-                let bundle = if exact { 32 } else { 40 };
+                let bundle = if exact {
+                    std::mem::size_of::<super::super::contract::Sm120FmaKernelParams>()
+                } else {
+                    40
+                };
                 ptx.push_str(&format!(".param .align 4 .b8 bundle[{bundle}]\n) {{}}\n"));
             }
         }
@@ -16080,7 +16134,7 @@ mod tests {
         "nt_narrow",
         "nn_splitk32_partial",
         "splitk_reduce",
-        "dx_col_gemv",
+        "dx_col_tail",
         "transpose_f32_2d",
         "transpose_f32_32x16_d768",
         "nn_gemv_bf16",

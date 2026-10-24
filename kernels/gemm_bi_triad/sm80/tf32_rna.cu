@@ -963,6 +963,19 @@ __device__ __forceinline__ void tf32_ms_copy(unsigned shared_dst, const float* g
                  :: "r"(shared_dst), "l"(global_src), "r"(bytes));
 }
 
+// The same chunk four bytes at a time, for an operand whose rows do not sit
+// on 16-byte boundaries: the floats land where the 16-byte copy puts them,
+// and those past `bytes` are zero-filled as it does.
+__device__ __forceinline__ void tf32_ms_copy4(unsigned shared_dst, const float* global_src, int bytes) {
+#pragma unroll
+    for (int element = 0; element < 4; ++element) {
+        int element_bytes = bytes > element * 4 ? 4 : 0;
+        asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
+                     :: "r"(shared_dst + 4U * (unsigned)element), "l"(global_src + element),
+                        "r"(element_bytes));
+    }
+}
+
 __device__ __forceinline__ void tf32_ms_commit() {
     asm volatile("cp.async.commit_group;\n" ::);
 }
@@ -1001,7 +1014,7 @@ __device__ __forceinline__ unsigned tf32_ms_round(float value) {
 // A [BK][columns] operand (output contiguous): the thread keeps one chunk
 // of columns, whose bytes inside the output are `column_bytes`, and its
 // reduction rows are `pass / ld` apart from `k_row`.
-template <bool Cross, int Copies, int ShiftBytes>
+template <bool Cross, int Copies, int ShiftBytes, bool Aligned = true>
 struct Tf32MsCopy {
     const float* source;
     long long pass;
@@ -1028,7 +1041,11 @@ struct Tf32MsCopy {
             } else {
                 bytes = on && k + copy * k_pass < reduction ? column_bytes : 0;
             }
-            tf32_ms_copy(slot_base + shared + (unsigned)(copy * ShiftBytes), source + copy * pass, bytes);
+            if constexpr (Aligned) {
+                tf32_ms_copy(slot_base + shared + (unsigned)(copy * ShiftBytes), source + copy * pass, bytes);
+            } else {
+                tf32_ms_copy4(slot_base + shared + (unsigned)(copy * ShiftBytes), source + copy * pass, bytes);
+            }
         }
     }
 
@@ -1038,7 +1055,8 @@ struct Tf32MsCopy {
     }
 };
 
-template <SgbTf32Op Op, int BM, int BN, int BK, int WarpsM, int WarpsN, int Stages>
+template <SgbTf32Op Op, int BM, int BN, int BK, int WarpsM, int WarpsN, int Stages,
+          bool Aligned = true>
 struct Tf32MsTile {
     using Cfg = Tf32MsConfig<Op, BM, BN, BK, WarpsM, WarpsN, Stages>;
     static constexpr int ARowsPerPass = Cfg::ACross ? Cfg::Threads / (BK / 4) : Cfg::Threads / (BM / 4);
@@ -1050,8 +1068,8 @@ struct Tf32MsTile {
     static_assert(!Cfg::BCross || BRowsPerPass % (8 * (32 / BK)) == 0,
                   "every pass keeps the first chunk's swizzle");
 
-    Tf32MsCopy<Cfg::ACross, Cfg::ACopies, AShift> a_copy;
-    Tf32MsCopy<Cfg::BCross, Cfg::BCopies, BShift> b_copy;
+    Tf32MsCopy<Cfg::ACross, Cfg::ACopies, AShift, Aligned> a_copy;
+    Tf32MsCopy<Cfg::BCross, Cfg::BCopies, BShift, Aligned> b_copy;
     int reduction;
     int tile_row;
     int tile_column;
@@ -1059,7 +1077,7 @@ struct Tf32MsTile {
 
     // A [rows][BK] operand's plan: rows `row0 + copy * pass` of the tile.
     template <int Copies, int Shift, int RowsPerPass>
-    __device__ __forceinline__ static Tf32MsCopy<true, Copies, Shift> cross_plan(
+    __device__ __forceinline__ static Tf32MsCopy<true, Copies, Shift, Aligned> cross_plan(
         const float* base, int ld, int edge, int tile_origin, int k_begin) {
         int chunk = (int)threadIdx.x % (BK / 4);
         int row = (int)threadIdx.x / (BK / 4);
@@ -1068,7 +1086,7 @@ struct Tf32MsTile {
         for (int copy = 0; copy < Copies; ++copy) {
             if (tile_origin + row + copy * RowsPerPass < edge) valid |= 1U << copy;
         }
-        Tf32MsCopy<true, Copies, Shift> plan;
+        Tf32MsCopy<true, Copies, Shift, Aligned> plan;
         plan.source = base + (long long)(tile_origin + row) * ld + k_begin + chunk * 4;
         plan.pass = (long long)RowsPerPass * ld;
         plan.slab = BK;
@@ -1082,11 +1100,11 @@ struct Tf32MsTile {
 
     // A [BK][Columns] operand's plan: reduction rows `k_row + copy * pass`.
     template <int Copies, int Shift, int RowsPerPass, int Columns>
-    __device__ __forceinline__ static Tf32MsCopy<false, Copies, Shift> cong_plan(
+    __device__ __forceinline__ static Tf32MsCopy<false, Copies, Shift, Aligned> cong_plan(
         const float* base, int ld, int edge, int tile_origin, int k_begin) {
         int column = (int)threadIdx.x % (Columns / 4) * 4;
         int k_row = (int)threadIdx.x / (Columns / 4);
-        Tf32MsCopy<false, Copies, Shift> plan;
+        Tf32MsCopy<false, Copies, Shift, Aligned> plan;
         plan.source = base + (long long)(k_begin + k_row) * ld + tile_origin + column;
         plan.pass = (long long)RowsPerPass * ld;
         plan.slab = (long long)BK * ld;
@@ -1220,9 +1238,10 @@ __device__ __forceinline__ void tf32_ms_round_fragments(Tf32MsFragments<MAtoms, 
 // fragments, loaded a step earlier, just before its products, so the
 // rounding overlaps the previous step's products still in the tensor pipe
 // instead of waiting on loads just issued.
-template <bool Full, SgbTf32Op Op, int BM, int BN, int BK, int WarpsM, int WarpsN, int Stages>
+template <bool Full, SgbTf32Op Op, int BM, int BN, int BK, int WarpsM, int WarpsN, int Stages,
+          bool Aligned>
 __device__ __forceinline__ void tf32_ms_mainloop(
-    Tf32MsTile<Op, BM, BN, BK, WarpsM, WarpsN, Stages>& tile, int tiles,
+    Tf32MsTile<Op, BM, BN, BK, WarpsM, WarpsN, Stages, Aligned>& tile, int tiles,
     int warp_m, int warp_n, int lane,
     float (&acc)[Tf32MsConfig<Op, BM, BN, BK, WarpsM, WarpsN, Stages>::MAtoms]
                 [Tf32MsConfig<Op, BM, BN, BK, WarpsM, WarpsN, Stages>::NAtoms][4]) {
@@ -1493,7 +1512,7 @@ void nn_sm80_tf32_rna_m128n128_bk32_s3(
 // leaves its partial in the scratch, and the CTA that arrives last for the
 // tile reads all eight and folds p0..p7 in index order, then alpha, then
 // beta, the fused split-K members' epilogue.
-template <int BM, int BN, int BK, int WarpsM, int WarpsN, int Stages>
+template <int BM, int BN, int BK, int WarpsM, int WarpsN, int Stages, bool Aligned = true>
 __device__ __forceinline__ void tf32_ms_tn_split8_kernel(
     float* output, float* partial, unsigned* counters,
     const float* a, const float* b, const float* bias, Sm80Tf32KernelParams params) {
@@ -1510,7 +1529,7 @@ __device__ __forceinline__ void tf32_ms_tn_split8_kernel(
     int per_partition = (groups + Partitions - 1) / Partitions;
     int group_begin = min(partition * per_partition, groups);
     int group_end = min(group_begin + per_partition, groups);
-    Tf32MsTile<Op, BM, BN, BK, WarpsM, WarpsN, Stages> tile(
+    Tf32MsTile<Op, BM, BN, BK, WarpsM, WarpsN, Stages, Aligned> tile(
         a, b, rows, columns, reduction, params.lda, params.ldb,
         (int)blockIdx.y * BM, (int)blockIdx.x * BN, group_begin * 32);
     int warp = (int)threadIdx.x >> 5;
@@ -1653,6 +1672,161 @@ __device__ __forceinline__ void tf32_ms_tn_split8_kernel(
     }
 }
 
+// The persistent NN form: a resident grid walks the output tiles of a
+// shape every tile covers whole (rows a multiple of BM, columns of BN, the
+// reduction of 32), and the slab ring runs on from one tile into the next.
+// A short reduction then pays no pipeline fill per tile, and a tile's
+// epilogue overlaps the next tile's first copies. Each output is one tile's
+// alone, its chain the tile kernel's: seeded with the bias, one ascending
+// k8 chain over the reduction, then alpha and beta as the tile kernel's.
+template <int BM, int BN, int BK, int WarpsM, int WarpsN, int Stages>
+__device__ __forceinline__ void tf32_ms_nn_persistent_kernel(
+    float* output, const float* a, const float* b, const float* bias,
+    Sm80Tf32KernelParams params) {
+    constexpr SgbTf32Op Op = SgbTf32Nn;
+    using Cfg = Tf32MsConfig<Op, BM, BN, BK, WarpsM, WarpsN, Stages>;
+    using Out = Tf32MsOut<Op, BM, BN, BK, WarpsM, WarpsN, Stages>;
+    using Tile = Tf32MsTile<Op, BM, BN, BK, WarpsM, WarpsN, Stages>;
+    constexpr int Vec = Out::Vec;
+    constexpr unsigned SlotBytes = (unsigned)Cfg::StageFloats * 4U;
+    constexpr unsigned RingBytes = SlotBytes * (unsigned)Stages;
+    const int rows = params.m;
+    const int columns = params.n;
+    const int reduction = params.k;
+    const int row_tiles = rows / BM;
+    const int tiles = row_tiles * (columns / BN);
+    const int slabs = reduction / BK;
+    int tile_id = (int)blockIdx.x;
+    if (tile_id >= tiles || slabs == 0) return;
+
+    // The stager runs Stages - 1 slabs ahead of the products, crossing
+    // into the CTA's next tile as soon as the current one is staged.
+    int stage_tile = tile_id;
+    int stage_slab = 0;
+    Tile stager(a, b, rows, columns, reduction, params.lda, params.ldb,
+                stage_tile % row_tiles * BM, stage_tile / row_tiles * BN, 0);
+    auto stage = [&](unsigned slot) {
+        const bool on = stage_tile < tiles;
+        stager.template stage_next<true>(slot, on);
+        if (on && ++stage_slab == slabs) {
+            stage_slab = 0;
+            stage_tile += (int)gridDim.x;
+            if (stage_tile < tiles) {
+                stager = Tile(a, b, rows, columns, reduction, params.lda, params.ldb,
+                              stage_tile % row_tiles * BM, stage_tile / row_tiles * BN, 0);
+            }
+        }
+    };
+
+    const int warp = (int)threadIdx.x >> 5;
+    const int lane = (int)threadIdx.x & 31;
+    const int warp_m = warp / WarpsN * Cfg::WM;
+    const int warp_n = warp % WarpsN * Cfg::WN;
+    const int group = lane >> 2;
+    const int thread = lane & 3;
+    const unsigned shared = stager.shared;
+
+#pragma unroll
+    for (int slab = 0; slab < Stages - 1; ++slab) {
+        stage((unsigned)slab * SlotBytes);
+        tf32_ms_commit();
+    }
+    tf32_ms_wait<Stages - 2>();
+    __syncthreads();
+    unsigned read_slot = 0;
+    unsigned write_slot = (unsigned)(Stages - 1) * SlotBytes;
+    Tf32MsFragments<Cfg::MAtoms, Cfg::NAtoms> f[2];
+    tf32_ms_fragments<Op, BM, BN, BK, WarpsM, WarpsN, Stages>(
+        f[0], shared, read_slot, 0, warp_m, warp_n, lane);
+
+    const bool reads = params.beta != 0.0f;
+    // Pairs land as one 8-byte store where the output allows it.
+    const bool vectors = (params.ldc & 1) == 0
+        && ((reinterpret_cast<unsigned long long>(output) & 7ULL) == 0ULL);
+    while (tile_id < tiles) {
+        const int row_base = tile_id % row_tiles * BM + warp_m;
+        const int column_base = tile_id / row_tiles * BN + warp_n;
+        float acc[Cfg::MAtoms][Cfg::NAtoms][4];
+#pragma unroll
+        for (int column_group = 0; column_group < Out::Groups; ++column_group) {
+#pragma unroll
+            for (int v = 0; v < Vec; ++v) {
+                const int column = column_base + Out::column(column_group, thread) + v;
+                const float seed = bias != nullptr ? bias[column] : 0.0f;
+#pragma unroll
+                for (int m_atom = 0; m_atom < Cfg::MAtoms; ++m_atom) {
+                    Out::value(acc, m_atom, 0, column_group, v) = seed;
+                    Out::value(acc, m_atom, 1, column_group, v) = seed;
+                }
+            }
+        }
+        // The mainloop's steps, slab after slab; the fragments loaded on a
+        // tile's last step are the next tile's first.
+        for (int t = 0; t < slabs; ++t) {
+#pragma unroll
+            for (int step = 0; step < Cfg::KSteps; ++step) {
+                tf32_ms_fragments<Op, BM, BN, BK, WarpsM, WarpsN, Stages>(
+                    f[(step + 1) & 1], shared, read_slot,
+                    step + 1 < Cfg::KSteps ? step + 1 : 0, warp_m, warp_n, lane);
+                tf32_ms_round_fragments(f[step & 1]);
+                if (step == 0) stage(write_slot);
+#pragma unroll
+                for (int m_atom = 0; m_atom < Cfg::MAtoms; ++m_atom) {
+#pragma unroll
+                    for (int n_atom = 0; n_atom < Cfg::NAtoms; ++n_atom) {
+                        tf32_mma_m16n8k8(acc[m_atom][n_atom], f[step & 1].a[m_atom],
+                                         f[step & 1].b[n_atom]);
+                    }
+                }
+                if (step == Cfg::KSteps - 2) {
+                    tf32_ms_commit();
+                    tf32_ms_wait<Stages - 2>();
+                    __syncthreads();
+                    read_slot = read_slot + SlotBytes == RingBytes ? 0U : read_slot + SlotBytes;
+                    write_slot = write_slot + SlotBytes == RingBytes ? 0U : write_slot + SlotBytes;
+                }
+            }
+        }
+#pragma unroll
+        for (int m_atom = 0; m_atom < Cfg::MAtoms; ++m_atom) {
+#pragma unroll
+            for (int half = 0; half < 2; ++half) {
+                float* output_row = output
+                    + (long long)(row_base + Out::row(m_atom, half, group)) * params.ldc + column_base;
+#pragma unroll
+                for (int n_atom = 0; n_atom < Cfg::NAtoms; ++n_atom) {
+                    float* destination = output_row + Out::column(n_atom, thread);
+                    float v[Vec];
+                    float old[Vec] = {0.0f, 0.0f};
+                    if (reads) {
+                        if (vectors) {
+                            tf32_ms_load_vec(old, destination);
+                        } else {
+#pragma unroll
+                            for (int i = 0; i < Vec; ++i) old[i] = destination[i];
+                        }
+                    }
+#pragma unroll
+                    for (int i = 0; i < Vec; ++i) {
+                        v[i] = Out::value(acc, m_atom, half, n_atom, i);
+                        if (params.alpha != 1.0f) v[i] = __fmul_rn(params.alpha, v[i]);
+                        if (reads) v[i] = __fmaf_rn(params.beta, old[i], v[i]);
+                    }
+                    if (vectors) {
+                        tf32_ms_store_vec(destination, v);
+                    } else {
+#pragma unroll
+                        for (int i = 0; i < Vec; ++i) destination[i] = v[i];
+                    }
+                }
+            }
+        }
+        tile_id += (int)gridDim.x;
+    }
+    tf32_ms_wait<0>();
+}
+
+
 #define TF32_RNA_MS_TILE(NAME, OP, BM, BN, BK, WARPS_M, WARPS_N, STAGES, MIN_BLOCKS)      \
     extern "C" __global__ __launch_bounds__(32 * WARPS_M * WARPS_N, MIN_BLOCKS)           \
     void NAME(float* output, const float* a, const float* b, const float* bias,           \
@@ -1672,6 +1846,20 @@ TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m128n128_bk16_s5, SgbTf32Nt, 128, 128, 16, 
 
 #undef TF32_RNA_MS_TILE
 
+// The persistent forward: two resident CTAs a multiprocessor walk the
+// output tiles of a shape the 128 x 64 tile covers whole.
+#define TF32_RNA_MS_NN_PERSISTENT(NAME, BM, BN, BK, WARPS_M, WARPS_N, STAGES, MIN_BLOCKS) \
+    extern "C" __global__ __launch_bounds__(32 * WARPS_M * WARPS_N, MIN_BLOCKS)           \
+    void NAME(float* output, const float* a, const float* b, const float* bias,           \
+              Sm80Tf32KernelParams params) {                                              \
+        tf32_ms_nn_persistent_kernel<BM, BN, BK, WARPS_M, WARPS_N, STAGES>(                \
+            output, a, b, bias, params);                                                  \
+    }
+
+TF32_RNA_MS_NN_PERSISTENT(nn_sm80_tf32_rna_ms_persist_m128n64_bk16_s3, 128, 64, 16, 2, 2, 3, 2)
+
+#undef TF32_RNA_MS_NN_PERSISTENT
+
 // The weight gradient's eight-way split members: the portable split
 // members' partitions, partial planes and last-arriver fold, over the
 // multistage ring.
@@ -1689,9 +1877,28 @@ TF32_RNA_MS_TN_SPLIT8(tn_sm80_tf32_rna_ms_splitk8_m64n64_bk32_s4, 64, 64, 32, 2,
 
 #undef TF32_RNA_MS_TN_SPLIT8
 
+// The 64 x 64 member for operands whose rows or bases do not sit on 16-byte
+// boundaries: it stages them four bytes at a time into the same slots, so
+// it folds the same partitions to the same bits, and a board whose portable
+// module carries no split members still cuts every such gradient eight
+// ways.
+#define TF32_RNA_MS_TN_SPLIT8_ANY(NAME, BM, BN, BK, WARPS_M, WARPS_N, STAGES, MIN_BLOCKS) \
+    extern "C" __global__ __launch_bounds__(32 * WARPS_M * WARPS_N, MIN_BLOCKS)           \
+    void NAME(float* output, float* partial, unsigned* counters,                          \
+              const float* a, const float* b, const float* bias,                          \
+              Sm80Tf32KernelParams params) {                                              \
+        tf32_ms_tn_split8_kernel<BM, BN, BK, WARPS_M, WARPS_N, STAGES, false>(             \
+            output, partial, counters, a, b, bias, params);                               \
+    }
+
+TF32_RNA_MS_TN_SPLIT8_ANY(tn_sm80_tf32_rna_ms_splitk8_m64n64_bk32_s4_any, 64, 64, 32, 2, 2, 4, 1)
+
+#undef TF32_RNA_MS_TN_SPLIT8_ANY
+
 static_assert(Tf32MsConfig<SgbTf32Nn, 64, 128, 16, 2, 2, 6>::SharedBytes == 76800, "NN ms 64x128 ring");
 static_assert(Tf32MsConfig<SgbTf32Nn, 128, 64, 32, 2, 2, 3>::SharedBytes == 76800, "NN ms 128x64 ring");
 static_assert(Tf32MsConfig<SgbTf32Nn, 64, 64, 32, 2, 2, 3>::SharedBytes == 52224, "NN ms 64x64 ring");
+static_assert(Tf32MsConfig<SgbTf32Nn, 128, 64, 16, 2, 2, 3>::SharedBytes == 38400, "NN ms persistent 128x64 ring");
 static_assert(Tf32MsConfig<SgbTf32Nt, 64, 128, 16, 2, 2, 6>::SharedBytes == 73728, "NT ms 64x128 ring");
 static_assert(Tf32MsConfig<SgbTf32Nt, 128, 64, 32, 2, 2, 3>::SharedBytes == 73728, "NT ms 128x64 ring");
 static_assert(Tf32MsConfig<SgbTf32Nt, 128, 128, 16, 2, 2, 5>::SharedBytes == 81920, "NT ms 128x128 ring");

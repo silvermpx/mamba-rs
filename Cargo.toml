@@ -282,6 +282,11 @@ path = "tests/rna_tf32_gradients.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "exact_input_gradient_tail"
+path = "tests/exact_input_gradient_tail.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "gemm_empty_axes"
 path = "tests/gemm_empty_axes.rs"
 required-features = ["cuda"]

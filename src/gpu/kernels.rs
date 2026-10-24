@@ -1123,11 +1123,21 @@ impl MambaKernels {
                     if plan.architecture
                         == Some(super::kernel_identity::ModuleKind::TriadSm90a) =>
                 {
-                    compile(super::kernel_identity::ModuleKind::TriadSm90a)
-                        .ok()
-                        .and_then(|module| {
-                            super::gemm_bi_triad::modules::qualify_specialized_module(module).ok()
-                        })
+                    match compile(super::kernel_identity::ModuleKind::TriadSm90a)
+                        .and_then(super::gemm_bi_triad::modules::qualify_specialized_module)
+                    {
+                        Ok(module) => Some(module),
+                        Err(error) => {
+                            static SM90A: std::sync::Once = std::sync::Once::new();
+                            super::diagnostics::warn_once(&SM90A, || {
+                                format!(
+                                    "the sm_90a WGMMA module is not bound ({error}); the \
+                                     portable tiles serve its products"
+                                )
+                            });
+                            None
+                        }
+                    }
                 }
                 ("sm_100a", Some(device_cc @ (10, 0)))
                 | ("sm_103a", Some(device_cc @ (10, 3)))
@@ -1328,8 +1338,9 @@ impl MambaKernels {
             static EXCLUDED: std::sync::Once = std::sync::Once::new();
             super::diagnostics::warn_once(&EXCLUDED, || {
                 format!(
-                    "{} TF32 route(s) are excluded on this toolkit and decline to the exact \
-                     family: {}",
+                    "{} TF32 route(s) are excluded on this toolkit: they decline to the \
+                     exact family, and under the strict TF32 policy to a tile of the same \
+                     bits or a refusal: {}",
                     excluded.len(),
                     excluded
                         .iter()
@@ -1964,9 +1975,24 @@ impl MambaKernels {
             } else {
                 None
             },
+            // An optional fast tile: a toolkit or board that cannot serve it
+            // leaves the typed forward on the portable tiles, never the
+            // context unbuilt.
             gemm_bi_nn_sm100_typed: if matches!(arch, "sm_100a" | "sm_103a" | "sm_107a" | "sm_110a")
             {
-                Some(load_half_dynsmem("nn_sm100_tcgen_c4", 65_536)?)
+                match load_half_dynsmem("nn_sm100_tcgen_c4", 65_536) {
+                    Ok(function) => Some(function),
+                    Err(error) => {
+                        static SM100_TYPED: std::sync::Once = std::sync::Once::new();
+                        super::diagnostics::warn_once(&SM100_TYPED, || {
+                            format!(
+                                "the {arch} tcgen05 typed forward is not available ({error}); \
+                                 the portable tiles serve it"
+                            )
+                        });
+                        None
+                    }
+                }
             } else {
                 None
             },

@@ -54,7 +54,7 @@ const SCALAR_ENTRIES: &[&str] = &[
     "nt_narrow",
     "nn_splitk32_partial",
     "splitk_reduce",
-    "dx_col_gemv",
+    "dx_col_tail",
     "transpose_f32_2d",
     "transpose_f32_32x16_d768",
     "nn_gemv_bf16",

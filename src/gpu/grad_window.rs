@@ -357,6 +357,7 @@ mod tests {
     /// The add covers every element once: the arena plus the window is the
     /// host sum.
     #[test]
+    #[ignore = "requires a CUDA device"]
     fn the_window_add_covers_every_element_once() {
         let device = GpuDevice::new(0).expect("open CUDA device");
         let ctx = GpuCtx::new(&device).expect("context");

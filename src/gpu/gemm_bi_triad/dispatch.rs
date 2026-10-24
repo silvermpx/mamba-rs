@@ -2902,7 +2902,7 @@ const fn rna_wide_tile_outputs(tile: super::contract::Tf32RnaWideTile) -> (usize
         Wide::M96N96S3 => (96, 96),
         Wide::M128N128S3 | Wide::NtMsM128N128Bk16S5 => (128, 128),
         Wide::MsM64N128Bk16S6 | Wide::NtMsM64N128Bk16S6 => (64, 128),
-        Wide::MsM128N64S3 | Wide::NtMsM128N64S3 => (128, 64),
+        Wide::MsM128N64S3 | Wide::NtMsM128N64S3 | Wide::MsPersistM128N64Bk16S3 => (128, 64),
         Wide::MsM64N64S3 => (64, 64),
     }
 }
@@ -2937,10 +2937,9 @@ fn rna_backward_rule_route(
         ResolvedGemmOp::Nn => None,
         // The Ada's multistage members of the same eight partitions, where
         // the rows and columns are whole 16-byte chunks and the operands
-        // stage, as the standalone Lilly GEMMs measured them against the
-        // portable members (TN 4096x256x2112 123.9 -> 58.4 us, 4096x128x796
-        // 33.8 -> 19.5, 4096x256x128 20.5 -> 11.3): 128 x 64 from 256
-        // columns, 64 x 64 from 128.
+        // stage, measured against the portable members (TN 4096x256x2112
+        // 123.9 -> 58.4 us, 4096x128x796 33.8 -> 19.5, 4096x256x128 20.5 ->
+        // 11.3): 128 x 64 from 256 columns, 64 x 64 from 128.
         ResolvedGemmOp::Tn
             if reduction >= RNA_TN_SPLIT_MIN_REDUCTION
                 && columns >= 128
@@ -3022,8 +3021,8 @@ fn rna_backward_rule_route(
         ResolvedGemmOp::Nt if rows < RNA_NT_NARROW_ROWS => Some(Tf32PhysicalRoute::MmaTf32Rna(
             portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4),
         )),
-        // The Ada's multistage input-gradient tiles, as the standalone Lilly
-        // GEMMs measured them on the RTX 6000 Ada against the portable tiles
+        // The Ada's multistage input-gradient tiles, measured on an RTX 6000
+        // Ada against the portable tiles
         // (NT 1024x1536x384 34.9 -> 16.2 us, 4096x256x2112 75.0 -> 49.8): the
         // 128 x 128 tile once its grid fills two thirds of the card, the
         // 64 x 128 tile's twice the CTAs below.
@@ -3048,8 +3047,8 @@ fn rna_backward_rule_route(
     }
 }
 
-/// The strict policy's gradient routes on a CC 12.x board, as the
-/// standalone Lilly GEMMs measured them on the RTX 5090 (interleaved sweeps,
+/// The strict policy's gradient routes on a CC 12.x board, as measured on
+/// an RTX 5090 (interleaved sweeps,
 /// device minimum per launch): the multistage 64 x 64 member of the eight
 /// partitions for a deep weight gradient, the 16 x 32 tile for a small
 /// layer over a few hundred to a thousand rows (TN 896x256x256 18.1 -> 9.9
@@ -3126,24 +3125,18 @@ fn rna_blackwell_backward_table(
         && n <= SMALL_LAYER_WIDTH;
     if request.op == ResolvedGemmOp::Tn {
         if reduction >= RNA_TN_SPLIT_MIN_REDUCTION {
-            if staged && columns >= 128 && rows.is_multiple_of(4) && columns.is_multiple_of(4) {
-                return Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(
-                    super::contract::Tf32RnaSplitTile::M64N64S4,
-                );
-            }
-            // The portable members of the same partitions; where the board's
-            // portable module does not compose them the forced resolution
-            // refuses this and the next route serves.
-            let ctas = rows.div_ceil(64) * columns.div_ceil(64) * 8;
-            let sms = availability.multiprocessors as usize;
-            let (tile, stages) = if 2 * ctas < sms {
-                (Tf32PortableTile::M32N32, Tf32PortableStages::S3)
-            } else if ctas >= 4 * sms {
-                (Tf32PortableTile::M64N64, Tf32PortableStages::S3)
-            } else {
-                (Tf32PortableTile::M64N64, Tf32PortableStages::S2)
-            };
-            return Tf32PhysicalRoute::MmaTf32RnaSplitK8(Tf32PortableRoute { tile, stages });
+            // Every deep weight gradient cuts eight ways, whatever its
+            // operands' alignment: a CC 12.x portable module carries no
+            // split members, so operands the 16-byte member cannot stage go
+            // to the member that stages them four bytes at a time, which
+            // folds the same partitions to the same bits.
+            return Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(
+                if staged && columns >= 128 && rows.is_multiple_of(4) && columns.is_multiple_of(4) {
+                    super::contract::Tf32RnaSplitTile::M64N64S4
+                } else {
+                    super::contract::Tf32RnaSplitTile::M64N64S4AnyAlignment
+                },
+            );
         }
         if small_layer || columns < 128 {
             return portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4);
@@ -3353,8 +3346,8 @@ fn rna_forward_table_route(
     })
 }
 
-/// The batch-invariant TF32 forward's table on a CC 12.x board, as the
-/// standalone Lilly GEMMs measured it on the RTX 5090 (interleaved sweeps,
+/// The batch-invariant TF32 forward's table on a CC 12.x board, as measured
+/// on an RTX 5090 (interleaved sweeps,
 /// device minimum per launch): the narrow tiles for a few columns, the
 /// 64 x 64 tile while a narrow forward's tiles fill no more than one wave of
 /// the card's own SMs, the multistage tiles over a long reduction of 129 to
@@ -3383,6 +3376,9 @@ fn rna_blackwell_forward_route(
     if !staged || multiprocessors == 0 {
         return table;
     }
+    if rna_persistent_forward(request) {
+        return Tf32PhysicalRoute::MmaTf32RnaWide(Tf32RnaWideTile::MsPersistM128N64Bk16S3);
+    }
     let tabled = match table {
         Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
             tile: Tf32PortableTile::M64N64,
@@ -3405,6 +3401,26 @@ fn rna_blackwell_forward_route(
     } else {
         tabled
     })
+}
+
+/// Whether a CC 12.x forward takes the persistent 128 x 64 tile: a wide
+/// output of 2304 to 4096 rows and at least 1536 columns over a reduction of
+/// 129 to 256, every tile and every 32-deep group of it whole. Its resident
+/// grid pays no pipeline fill per tile, which a short reduction feels most.
+/// On an RTX 5090 it ran every shape of a sweep over those rows (every 128
+/// rows, 1536 to 2112 columns) as fast as the best other tile or up to 13%
+/// faster (NN 4096x256x2112 63.6 -> 57.2 us); below 2304 rows another tile
+/// wins at some row counts. Each output is one CTA's chain, as on every
+/// other tile, so the pick moves no bit.
+fn rna_persistent_forward(request: F32TriadRequest) -> bool {
+    let (m, k, n) = (request.shape.m, request.shape.k, request.shape.n);
+    request.op == ResolvedGemmOp::Nn
+        && (2_304..=4_096).contains(&m)
+        && n >= 1_536
+        && (129..=256).contains(&k)
+        && m.is_multiple_of(128)
+        && n.is_multiple_of(64)
+        && k.is_multiple_of(32)
 }
 
 /// The CC 12.x forward table [`rna_blackwell_forward_route`] starts from.
@@ -4216,15 +4232,20 @@ pub(super) struct Sm120FmaCut {
     /// continues the folded sum over it: only a CTA that folds its own
     /// pieces writes those bits.
     pub tail: bool,
+    /// The first output column of the plan's column tail: from it on the
+    /// portable route writes each output as one chain over the whole
+    /// reduction in a kernel of its own, so only a CTA that folds its own
+    /// pieces, keeping those columns out of the fold, writes those bits.
+    pub chain_from: Option<usize>,
 }
 
 /// The portable plan's cut of a request when the SM120 kernels can write
 /// its bits: one chain for a plain big or slim tile, the batch chunks of a
 /// split-M weight gradient, the 64-input chunks of a slim split-K product,
-/// and the 32-input chunks of a thin split-K product with the tail chain
-/// its reducer runs after the sum. Every other plan folds in a way the
-/// SM120 kernels do not (a column tail in its own kernel, a warp-parallel
-/// row), and the request keeps the portable route.
+/// and the 32-input chunks of a thin split-K product, with the tail chain
+/// its reducer runs after the sum or the column tail whose chains a kernel
+/// of their own writes. Every other plan folds in a way the SM120 kernels
+/// do not (a warp-parallel row), and the request keeps the portable route.
 pub(super) fn sm120_fma_portable_cut(request: F32TriadRequest) -> Option<Sm120FmaCut> {
     let k_tiles = request
         .shape
@@ -4232,6 +4253,7 @@ pub(super) fn sm120_fma_portable_cut(request: F32TriadRequest) -> Option<Sm120Fm
         .div_ceil(SM120_FMA_BK as usize);
     // The thin split-K partials sum 32 inputs a piece.
     let thin = 32 / SM120_FMA_BK as usize;
+    let mut chain_from = None;
     let (splits, piece_tiles, tail) = match scalar_dispatch_plan(request).ok()? {
         ScalarDispatchPlan::NnFinal { .. }
         | ScalarDispatchPlan::TnFinal { .. }
@@ -4251,6 +4273,12 @@ pub(super) fn sm120_fma_portable_cut(request: F32TriadRequest) -> Option<Sm120Fm
         ScalarDispatchPlan::NnSplitKThin => (k_tiles / thin, thin, false),
         ScalarDispatchPlan::NnSplitKThinTail { k_main, k_tail } => (k_main / 32, thin, k_tail > 0),
         ScalarDispatchPlan::NtSplitKMain { n_main, n_tail } => (n_main / 32, thin, n_tail > 0),
+        // The main columns fold 32-input pieces of the whole reduction; the
+        // columns past them are the tail kernel's chains.
+        ScalarDispatchPlan::NtSplitKTail { k_main, .. } => {
+            chain_from = Some(k_main);
+            (k_tiles / thin, thin, false)
+        }
         _ => return None,
     };
     let covered = piece_tiles.checked_mul(splits)?;
@@ -4268,6 +4296,7 @@ pub(super) fn sm120_fma_portable_cut(request: F32TriadRequest) -> Option<Sm120Fm
         splits: u8::try_from(splits).ok()?,
         piece_tiles,
         tail,
+        chain_from,
     })
 }
 
@@ -4315,6 +4344,12 @@ pub(super) fn sm120_fma_exact_route(
     if cut.splits > 1 && request.op == ResolvedGemmOp::Nn && operands.beta != 0.0 {
         return None;
     }
+    // The portable column tail overwrites the output with the bare chain
+    // and its reducer never reads the old output, so only an unscaled,
+    // overwriting product has those bits here.
+    if cut.chain_from.is_some() && (operands.alpha != 1.0 || operands.beta != 0.0) {
+        return None;
+    }
     if request.op == ResolvedGemmOp::Nn
         && operands.bias.is_some()
         && matches!(
@@ -4327,14 +4362,16 @@ pub(super) fn sm120_fma_exact_route(
         return None;
     }
     let multiprocessors = qualified.device.multiprocessor_count;
-    // Only a CTA that folds its own pieces can continue the sum over a tail,
-    // and it serves pieces of a few k tiles best: on an RTX 5090 the thin
-    // and slim cuts it took from the portable route ran in 0.46 to 0.89 of
-    // their time on 14 of 16 shapes (1.03 and 1.11 on two of 96 and 100
-    // tiles), where a CTA per piece managed 0.78 to 0.97 and lost up to 1.24
-    // on short reductions. Long pieces, the split-M weight gradients', run a
-    // CTA each: one CTA walking them in a row was 1.27 to 1.57 times slower.
-    let in_cta = cut.splits > 1 && (cut.tail || cut.piece_tiles <= SM120_FMA_SHORT_PIECE_TILES);
+    // Only a CTA that folds its own pieces can continue the sum over a tail
+    // or keep a column tail's chains out of the fold, and it serves pieces
+    // of a few k tiles best: on an RTX 5090 the thin and slim cuts it took
+    // from the portable route ran in 0.46 to 0.89 of their time on 14 of 16
+    // shapes (1.03 and 1.11 on two of 96 and 100 tiles), where a CTA per
+    // piece managed 0.78 to 0.97 and lost up to 1.24 on short reductions.
+    // Long pieces, the split-M weight gradients', run a CTA each: one CTA
+    // walking them in a row was 1.27 to 1.57 times slower.
+    let in_cta = cut.splits > 1
+        && (cut.tail || cut.chain_from.is_some() || cut.piece_tiles <= SM120_FMA_SHORT_PIECE_TILES);
     let with_cut = |(tile, kvec): (Sm120FmaTile, bool)| Sm120FmaRoute {
         tile,
         kvec,
@@ -7754,9 +7791,8 @@ fn scalar_plan_with_admission(
     // Every other split-M partition on a board whose exact module carries
     // the direct partial: the kernel masks every edge of its 64 x 64 tiles
     // and of its chunk, writes the planes the portable partial writes, and
-    // the same reducer folds them, so the bits stay the plan's. The
-    // standalone Lilly GEMMs serve every split-M weight gradient this way
-    // (about half the time of the portable partial on their cells). An Ada
+    // the same reducer folds them, so the bits stay the plan's. It takes
+    // about half the time of the portable partial. An Ada
     // toolkit the module was qualified on takes it outright; any other board
     // and toolkit proves the partial's planes against the portable ones at
     // first use.
@@ -7964,6 +8000,15 @@ pub(super) const GEMM_SLIM_NT_NIN_MAX: usize = 768;
 
 /// The reduction from which the slim NT split also serves 512 to 1024 rows.
 pub(super) const GEMM_SLIM_NT_SHORT_BATCH_MIN_REDUCTION: usize = 1536;
+
+/// The reduction from which the slim NT split takes over from the thin one
+/// past 512 rows, and at 512 rows from [`GEMM_SLIM_NT_MID_MIN_WIDTH`]
+/// inputs.
+pub(super) const GEMM_SLIM_NT_MID_MIN_REDUCTION: usize = 1024;
+
+/// The input width from which 512 rows over a reduction of 1024 or more
+/// take the slim NT split.
+pub(super) const GEMM_SLIM_NT_MID_MIN_WIDTH: usize = 512;
 
 /// M threshold below which we force Slim-N even for N ≥ 129 (wave underfill protection).
 /// At M < 512, Big tile BM=128 gives ≤4 M-blocks; adding N-blocks via Slim's BN=64 (vs Big's BN=128)
@@ -8295,9 +8340,16 @@ fn scalar_nt_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
     // 1024 rows wherever its own grid stays under the slim bound, and from
     // 512 rows over a reduction of 1536 or more, where it runs in about half
     // the time on both the RTX 5090 and the RTX 6000 Ada (NT 1024x384x1536
-    // 99.6 -> 40.4 us and 111.8 -> 61.1); over a shorter reduction at 1024
-    // rows the two cards disagree, and the exact plan is one for all of
-    // them. Up to 1024 rows its own grid must fill the thin split's bound.
+    // 99.6 -> 40.4 us and 111.8 -> 61.1). Over a reduction of 1024 to 1535
+    // it takes over from the thin split wherever that split's planes would
+    // fit, past 512 rows or from 512 inputs at 512 rows: with half the planes
+    // to write and fold, the 59 shapes this moves of a 72-shape grid ran on
+    // an RTX 6000 Ada in 0.53 of the thin split's time (0.41 to 1.00, none
+    // slower), while at 512 rows under 512 inputs the thin split's finer
+    // pieces stayed up to 1.24 ahead.
+    // Over a shorter reduction at 1024 rows the two cards disagree, and the
+    // exact plan is one for all of them. Up to 1024 rows its own grid must
+    // fill the thin split's bound.
     if batch >= 512
         && (128..=GEMM_SLIM_NT_NIN_MAX).contains(&n_in)
         && n_out >= 64
@@ -8305,20 +8357,25 @@ fn scalar_nt_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
         && dims.kn <= super::contract::SCALAR_GENERIC_TRANSPOSE_ROUTE_CAP_ELEMENTS
     {
         let chunks = dims.n_u32.div_ceil(SLIM_SPLIT_K_CHUNK);
+        let partials = checked_mul3(
+            checked_usize(chunks, "NT slim split-K chunks")?,
+            batch,
+            n_in,
+            "NT slim split-K scratch",
+        )?;
+        let fills_thin_bound = checked_usize(plain_slim_blocks, "NT slim split-K grid")?
+            .checked_mul(checked_usize(chunks, "NT slim split-K chunks")?)
+            .is_some_and(|ctas| ctas >= policy.thin_split_max_tiles as usize);
         if chunks >= 2
-            && checked_mul3(
-                checked_usize(chunks, "NT slim split-K chunks")?,
-                batch,
-                n_in,
-                "NT slim split-K scratch",
-            )? <= SPLITK_SCRATCH_CAP
+            && partials <= SPLITK_SCRATCH_CAP
             && plain_slim_blocks > 0
             && plain_slim_blocks < policy.slim_split_max_tiles
             && (batch > 1024
-                || (n_out >= GEMM_SLIM_NT_SHORT_BATCH_MIN_REDUCTION
-                    && checked_usize(plain_slim_blocks, "NT slim split-K grid")?
-                        .checked_mul(checked_usize(chunks, "NT slim split-K chunks")?)
-                        .is_some_and(|ctas| ctas >= policy.thin_split_max_tiles as usize)))
+                || (n_out >= GEMM_SLIM_NT_SHORT_BATCH_MIN_REDUCTION && fills_thin_bound)
+                || (n_out >= GEMM_SLIM_NT_MID_MIN_REDUCTION
+                    && (batch > 512 || n_in >= GEMM_SLIM_NT_MID_MIN_WIDTH)
+                    && partials <= SPLITK_SCRATCH_CAP / 2
+                    && fills_thin_bound))
         {
             return Ok(ScalarDispatchPlan::NtSplitKSlim { chunks });
         }
@@ -13758,6 +13815,87 @@ mod tf32_tests {
     }
 
     #[test]
+    fn sm120_exact_keeps_a_column_tail_out_of_the_fold() {
+        // NT 1024x833x384 folds 32-input pieces over its first 832 output
+        // columns, and the portable route writes the last column as one
+        // chain in a kernel of its own: the CTA that folds its own pieces
+        // keeps that column's chain apart, and only for the unscaled,
+        // overwriting product that portable route writes.
+        let identity = sm120_cohort().identity;
+        let availability = sm120_availability_for(identity);
+        let request = F32TriadRequest {
+            op: ResolvedGemmOp::Nt,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (1_024, 833, 384)),
+        };
+        assert_eq!(
+            super::scalar_dispatch_plan(request),
+            Ok(super::ScalarDispatchPlan::NtSplitKTail {
+                k_main: 832,
+                k_tail: 1
+            })
+        );
+        let cut = super::sm120_fma_portable_cut(request).expect("a cut with a column tail");
+        assert_eq!(
+            cut,
+            super::Sm120FmaCut {
+                splits: 12,
+                piece_tiles: 2,
+                tail: false,
+                chain_from: Some(832),
+            }
+        );
+        let operands = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: None,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        let route = super::sm120_fma_exact_route(request, operands, availability)
+            .expect("112 tiles fold their own pieces");
+        assert!(
+            route.splits == 12 && route.in_cta && route.kvec,
+            "{route:?}"
+        );
+        let launch =
+            crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(request, route).unwrap();
+        assert_eq!(launch.chain_from, Some(832), "{launch:?}");
+        assert_eq!(launch.units as usize, launch.tiles, "{launch:?}");
+        for (alpha, beta) in [(2.0, 0.0), (1.0, 1.0)] {
+            assert_eq!(
+                super::sm120_fma_exact_route(
+                    request,
+                    F32TriadOperands {
+                        alpha,
+                        beta,
+                        ..operands
+                    },
+                    availability
+                ),
+                None,
+                "alpha {alpha} beta {beta}"
+            );
+        }
+        let dealt = Sm120FmaRoute {
+            in_cta: false,
+            ..route
+        };
+        assert!(
+            crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(request, dealt).is_err(),
+            "a CTA per piece cannot keep the tail's chains"
+        );
+        let scalar_b = Sm120FmaRoute {
+            kvec: false,
+            ..route
+        };
+        assert!(
+            crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(request, scalar_b).is_err(),
+            "only the k-vector NT kernels keep a column tail apart"
+        );
+    }
+
+    #[test]
     fn sm120_exact_launch_refuses_a_cut_of_its_own() {
         // NT 2048x1536x768 is one chain in the portable plan; the two pieces
         // its measured arm once dealt are refused.
@@ -13809,7 +13947,9 @@ mod tf32_tests {
                     kvec: cell.kvec,
                     splits: cut.splits,
                     in_cta: cut.splits > 1
-                        && (cut.tail || cut.piece_tiles <= super::SM120_FMA_SHORT_PIECE_TILES),
+                        && (cut.tail
+                            || cut.chain_from.is_some()
+                            || cut.piece_tiles <= super::SM120_FMA_SHORT_PIECE_TILES),
                 }),
                 "{:?} {:?}",
                 cell.op,
@@ -17665,6 +17805,99 @@ mod tf32_tests {
                 F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaSplitK8(_))
             ),
             "{selection:?}"
+        );
+    }
+
+    #[test]
+    fn rna_strict_deep_weight_gradient_on_sm120_cuts_eight_ways_at_any_alignment() {
+        // The cut of a deep strict weight gradient must not follow where its
+        // operands sit: rows of 798 floats or a base off a 16-byte boundary
+        // take the member that stages four bytes at a time, which folds the
+        // same eight partitions as the 16-byte member.
+        let mut availability = sm120_availability_for(SM120_TF32_ARCHITECTURE);
+        availability.portable = Some(qualified_module(
+            ModuleKind::TriadSm80,
+            "compute_120",
+            "sm_120",
+            (12, 0),
+            true,
+            101_376,
+        ));
+        availability.rna = Some(qualified_module(
+            ModuleKind::TriadTf32Rna,
+            "compute_120",
+            "sm_120",
+            (12, 0),
+            true,
+            101_376,
+        ));
+        let tn = |dims| F32TriadRequest {
+            op: ResolvedGemmOp::Tn,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Tn, dims),
+        };
+        let aligned = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: None,
+            alpha: 1.0,
+            beta: 1.0,
+        };
+        let member = |tile| Some(Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(tile));
+        use super::super::contract::Tf32RnaSplitTile as Split;
+        assert_eq!(
+            super::rna_backward_rule_route(tn((4096, 256, 128)), Some(aligned), availability),
+            member(Split::M64N64S4)
+        );
+        let shifted = F32TriadOperands {
+            a: 0x2004,
+            ..aligned
+        };
+        assert_eq!(
+            super::rna_backward_rule_route(tn((4096, 256, 128)), Some(shifted), availability),
+            member(Split::M64N64S4AnyAlignment)
+        );
+        assert_eq!(
+            super::rna_backward_rule_route(tn((4096, 130, 798)), Some(aligned), availability),
+            member(Split::M64N64S4AnyAlignment)
+        );
+        let any = super::super::contract::tf32_splitk_spec(
+            ResolvedGemmOp::Tn,
+            Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(Split::M64N64S4AnyAlignment),
+        )
+        .unwrap();
+        let whole = super::super::contract::tf32_splitk_spec(
+            ResolvedGemmOp::Tn,
+            Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(Split::M64N64S4),
+        )
+        .unwrap();
+        assert_eq!(any.partitions, whole.partitions);
+        assert_eq!((any.tile, any.bk), (whole.tile, whole.bk));
+    }
+
+    #[test]
+    fn a_split_member_is_held_to_its_own_kernel_symbol() {
+        // The launch checks a route's exclusion by this symbol, so a split
+        // member must resolve to its own kernel and not miss the check.
+        use super::super::contract::{
+            Tf32RnaSplitTile as Split, Tf32RnaWideTile, tf32_route_symbol,
+        };
+        use super::super::tf32_rna_source::{
+            NN_MS_PERSIST_M128N64_BK16_S3_SYMBOL, TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL,
+        };
+        assert_eq!(
+            tf32_route_symbol(
+                ResolvedGemmOp::Tn,
+                Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(Split::M64N64S4AnyAlignment)
+            ),
+            Ok(TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL)
+        );
+        assert_eq!(
+            tf32_route_symbol(
+                ResolvedGemmOp::Nn,
+                Tf32PhysicalRoute::MmaTf32RnaWide(Tf32RnaWideTile::MsPersistM128N64Bk16S3)
+            ),
+            Ok(NN_MS_PERSIST_M128N64_BK16_S3_SYMBOL)
         );
     }
 

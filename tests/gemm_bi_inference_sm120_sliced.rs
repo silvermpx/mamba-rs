@@ -648,6 +648,9 @@ fn assert_exact_n64_graph(
         (threads, 1, 1)
     );
     assert_eq!(params.sharedMemBytes, dynamic_shared);
+    // The Triad's exact kernel carries the first column of a column tail
+    // after its eight words; the inference module's post-bias kernel does not.
+    let triad_exact = symbol == "nn_sm120_tma_fma_m128n64_bk16_s2";
     let abi: Vec<(usize, usize)> = if tma {
         vec![
             (0, 8),
@@ -656,7 +659,7 @@ fn assert_exact_n64_graph(
             (128, 128),
             (256, 128),
             (384, 8),
-            (392, 32),
+            (392, if triad_exact { 36 } else { 32 }),
         ]
     } else if compact {
         vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
@@ -708,19 +711,24 @@ fn assert_exact_n64_graph(
             graph_parameter::<u64>(&params, 5),
             operands.bias_ptr.unwrap_or(0)
         );
-        assert_eq!(
-            graph_parameter::<[u32; 8]>(&params, 6),
-            [
-                f.alpha.to_bits(),
-                f.beta.to_bits(),
-                f.m as u32,
-                f.n as u32,
-                f.k as u32,
-                f.ldc as u32,
-                1,
-                f.k.div_ceil(16) as u32,
-            ]
-        );
+        let words = [
+            f.alpha.to_bits(),
+            f.beta.to_bits(),
+            f.m as u32,
+            f.n as u32,
+            f.k as u32,
+            f.ldc as u32,
+            1,
+            f.k.div_ceil(16) as u32,
+        ];
+        if triad_exact {
+            // Its column tail starts at the output width: the plan has none.
+            let captured = graph_parameter::<[u32; 9]>(&params, 6);
+            assert_eq!(captured[..8], words);
+            assert_eq!(captured[8], f.n as u32);
+        } else {
+            assert_eq!(graph_parameter::<[u32; 8]>(&params, 6), words);
+        }
         return;
     }
     for (i, expected) in [

@@ -209,7 +209,7 @@ pub enum F32TriadPolicy {
     /// routes that keep this contract, and every other shape takes the
     /// portable tier's plain tile; nothing falls back to the exact family.
     /// A program whose TF32 products must equal a CPU model of the tensor
-    /// core (Lilly) runs under it. The Triad family serves it.
+    /// core runs under it. The Triad family serves it.
     RnaTf32BatchInvariant = 2,
     /// Exact f32 products whose forward does not depend on the batch. A
     /// forward (NN) folds each output by its layer's shape alone: a shallow

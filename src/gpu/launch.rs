@@ -1307,6 +1307,7 @@ mod tests {
     /// downcast and an upcast in pieces of three blocks and a tail write the
     /// bits of one launch over every element.
     #[test]
+    #[ignore = "requires a CUDA device"]
     fn a_cast_in_pieces_writes_what_one_launch_writes() {
         use crate::gpu::buffers::{DtypedBuf, GpuBuffer};
         use crate::gpu::context::GpuCtx;
