@@ -99,6 +99,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) mod bidi;
 pub mod config;
 pub mod dist;
+#[doc(hidden)]
+pub mod gemm_fold;
 #[cfg(feature = "cuda")]
 pub mod gpu;
 #[cfg(feature = "hf")]
