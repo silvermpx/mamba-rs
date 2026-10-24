@@ -171,14 +171,14 @@ pub fn tn_cases() -> &'static [TnCase] {
             288,
         ),
         TnCase::new(
-            "prism_in_proj",
+            "d384_in_proj",
             (4_621, 384, 1_928),
             HalfDtype::F16,
             RetainedFamily::Compact,
             186,
         ),
         TnCase::new(
-            "prism_in_proj",
+            "d384_in_proj",
             (4_621, 384, 1_928),
             HalfDtype::Bf16,
             RetainedFamily::Compact,

@@ -935,7 +935,7 @@ fn sm120_scalar_nt_large_deep_production_route_is_exact_and_graph_stable() {
 
 #[test]
 #[ignore = "requires an exclusive SM120/170-SM/NVRTC-13.2 CUDA GPU"]
-fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
+fn sm120_scalar_nt_d384_production_route_is_exact_and_graph_stable() {
     let device = GpuDevice::new(0).expect("open CUDA device 0");
     assert_eq!(device.compute_capability, (12, 0));
     let ctx = GpuCtx::new(&device).expect("create GPU context");
@@ -957,7 +957,7 @@ fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
     assert_ne!(artifact.artifact_digest, [0; 32]);
 
     let case = NtCase {
-        label: "prism-transpose-m64n64",
+        label: "d384-transpose-m64n64",
         dims: (4_621, 384, 1_928),
         misaligned_b: false,
         exceptional: false,
@@ -970,7 +970,7 @@ fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
         PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFma),
     );
     let qualified =
-        qualify_physical_launch(&ctx, request).expect("qualify production prism scalar NT route");
+        qualify_physical_launch(&ctx, request).expect("qualify production d384 scalar NT route");
     let evidence = qualified.evidence();
     assert_eq!(evidence.route_identity().artifacts.triad_scalar, artifact);
     assert_eq!(evidence.route_identity().device.compute_capability, (12, 0));
@@ -983,7 +983,7 @@ fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
             .iter()
             .map(|node| node.symbol)
             .collect::<Vec<_>>(),
-        ["transpose_f32_32x16_d768", "nn_prism_m64n64_bk16_s2",]
+        ["transpose_f32_32x16_d768", "nn_d384_m64n64_bk16_s2",]
     );
     assert!(
         evidence
@@ -1037,7 +1037,7 @@ fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
             .expect("transpose occupancy")
             >= 2
     );
-    let m64 = &kernels.gemm_bi_nn_prism_m64n64_bk16_s2;
+    let m64 = &kernels.gemm_bi_nn_d384_m64n64_bk16_s2;
     assert!(m64.num_regs().expect("M64 registers") <= 103);
     assert_eq!(m64.local_size_bytes().expect("M64 local"), 0);
     assert_eq!(m64.shared_size_bytes().expect("M64 static shared"), 0);
@@ -1055,7 +1055,7 @@ fn sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable() {
     assert_transpose_m64n64_production_matches_generic(
         &ctx,
         NtCase {
-            label: "prism-transpose-m64n64-exceptional",
+            label: "d384-transpose-m64n64-exceptional",
             exceptional: true,
             rounding_sensitive: false,
             ..case

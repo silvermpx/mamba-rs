@@ -126,7 +126,7 @@ pub use sm89_exact_f32_d128_source::{
 };
 #[doc(hidden)]
 pub use sm89_exact_f32_source::{
-    D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL, SM89_EXACT_F32_KERNEL_SPECS,
+    D384_RAW_SYMBOL, D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, SM89_EXACT_F32_KERNEL_SPECS,
     Sm89ExactF32DualChunkParams, Sm89ExactF32KernelKind, Sm89ExactF32KernelSpec,
     Sm89ExactF32TnRoute,
 };

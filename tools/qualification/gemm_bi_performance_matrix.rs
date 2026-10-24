@@ -142,16 +142,16 @@ const SHAPES: [Shape; 22] = [
         dims: (2048, 1536, 768),
     },
     Shape {
-        name: "prism_in_proj",
+        name: "d384_in_proj",
         dims: (4621, 384, 1928),
     },
     // The classifier serve projections and the production training batch.
     Shape {
-        name: "prism_out_proj",
+        name: "d384_out_proj",
         dims: (4621, 768, 384),
     },
     Shape {
-        name: "prism_input_proj",
+        name: "d384_input_proj",
         dims: (4621, 1024, 384),
     },
     Shape {
@@ -181,7 +181,7 @@ const FORCED_SQUARE_SHAPES: [&str; 13] = [
     "d128_out_proj",
     "d768_in_proj",
     "d768_out_proj",
-    "prism_in_proj",
+    "d384_in_proj",
 ];
 const FORCED_THIN_SHAPES: [&str; 5] = [
     "sq64",
@@ -195,14 +195,14 @@ const TF32_PROJECTION_SHAPES: [&str; 5] = [
     "d128_out_proj",
     "d768_in_proj",
     "d768_out_proj",
-    "prism_in_proj",
+    "d384_in_proj",
 ];
 const SM120_TF32_HOT_SHAPES: [&str; 5] = [
     "large",
     "large_deep",
     "d768_in_proj",
     "d768_out_proj",
-    "prism_in_proj",
+    "d384_in_proj",
 ];
 
 #[derive(Clone, Copy)]
@@ -9601,7 +9601,7 @@ fn inventory_includes_cached_f32_and_forced_production_cells() {
         "d128_out_proj",
         "d768_in_proj",
         "d768_out_proj",
-        "prism_in_proj",
+        "d384_in_proj",
     ] {
         for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
             for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
@@ -9622,7 +9622,7 @@ fn inventory_includes_cached_f32_and_forced_production_cells() {
         }
     }
     assert!(cells.iter().any(|cell| {
-        cell.shape.name == "prism_in_proj"
+        cell.shape.name == "d384_in_proj"
             && cell.op == ResolvedGemmOp::Tn
             && matches!(cell.route, Route::F32Policy { .. })
     }));
@@ -9637,7 +9637,7 @@ fn canonical_inventory_count_order_and_digest_are_frozen() {
     assert_eq!(ids.first().unwrap(), "f32_policy_exact/nn/sq64/contiguous");
     assert_eq!(
         ids.last().unwrap(),
-        "f32_tf32_forced_sm80_mma_tf32_m16n16_bk32_s4/nt/prism_in_proj/contiguous"
+        "f32_tf32_forced_sm80_mma_tf32_m16n16_bk32_s4/nt/d384_in_proj/contiguous"
     );
     assert_eq!(
         hex_digest(canonical_inventory_digest(&cells)),
@@ -9709,14 +9709,14 @@ fn f32_policy_comparison_uses_matching_production_call_scopes() {
 }
 
 #[test]
-fn every_tf32_candidate_covers_projection_and_prism_shapes() {
+fn every_tf32_candidate_covers_projection_and_d384_shapes() {
     let cells = build_cells();
     let projection_shapes = [
         "d128_in_proj",
         "d128_out_proj",
         "d768_in_proj",
         "d768_out_proj",
-        "prism_in_proj",
+        "d384_in_proj",
     ];
 
     for spec in &SM80_TF32_ROUTE_SPECS {
@@ -10162,11 +10162,11 @@ fn final_auto_inventory_is_the_exact_66_cell_release_set() {
     );
     for required in [
         "f32_policy_exact/nn/d128_in_proj/contiguous",
-        "f32_policy_exact/tn/prism_in_proj/contiguous",
+        "f32_policy_exact/tn/d384_in_proj/contiguous",
         "f32_policy_allow_tf32/nt/underfill/contiguous",
         "f32_policy_allow_tf32/tn/large_deep/contiguous",
         "bf16_policy_tc/tn/d768_out_proj/contiguous",
-        "f16_policy_tc/nt/prism_in_proj/contiguous",
+        "f16_policy_tc/nt/d384_in_proj/contiguous",
     ] {
         assert!(ids.contains(required), "missing final AUTO cell {required}");
     }
@@ -11041,7 +11041,7 @@ mod sm89_nt_finalist_once21 {
             dims: (2048, 1536, 768),
         },
         NtCell {
-            name: "prism",
+            name: "d384",
             dims: (4621, 384, 1928),
         },
         NtCell {

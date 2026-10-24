@@ -298,7 +298,7 @@ const PROJECTION_CELLS: [Cell; 46] = [
         bias: false,
     },
     Cell {
-        id: "nn_prism_in_proj",
+        id: "nn_d384_in_proj",
         op: ResolvedGemmOp::Nn,
         dims: (4621, 384, 1928),
         alpha: 1.0,
@@ -306,7 +306,7 @@ const PROJECTION_CELLS: [Cell; 46] = [
         bias: false,
     },
     Cell {
-        id: "tn_prism_in_proj",
+        id: "tn_d384_in_proj",
         op: ResolvedGemmOp::Tn,
         dims: (4621, 384, 1928),
         alpha: 1.0,
@@ -314,7 +314,7 @@ const PROJECTION_CELLS: [Cell; 46] = [
         bias: false,
     },
     Cell {
-        id: "nt_prism_in_proj",
+        id: "nt_d384_in_proj",
         op: ResolvedGemmOp::Nt,
         dims: (4621, 384, 1928),
         alpha: 1.0,
@@ -476,10 +476,10 @@ const PROJECTION_CELLS: [Cell; 46] = [
         bias: false,
     },
     // The hot training shapes the SM89 inventory still ran scalar under the
-    // TF32 policy (sm89-hotall-20260904): the projections of the prism and
+    // TF32 policy (sm89-hotall-20260904): the projections of the d384 and
     // batch cells, the tall rectangle and the underfilled grid.
     Cell {
-        id: "nn_prism_out_proj",
+        id: "nn_d384_out_proj",
         op: ResolvedGemmOp::Nn,
         dims: (4621, 768, 384),
         alpha: 1.0,
@@ -487,7 +487,7 @@ const PROJECTION_CELLS: [Cell; 46] = [
         bias: false,
     },
     Cell {
-        id: "tn_prism_out_proj",
+        id: "tn_d384_out_proj",
         op: ResolvedGemmOp::Tn,
         dims: (4621, 768, 384),
         alpha: 1.0,
@@ -495,7 +495,7 @@ const PROJECTION_CELLS: [Cell; 46] = [
         bias: false,
     },
     Cell {
-        id: "nt_prism_out_proj",
+        id: "nt_d384_out_proj",
         op: ResolvedGemmOp::Nt,
         dims: (4621, 768, 384),
         alpha: 1.0,
@@ -503,7 +503,7 @@ const PROJECTION_CELLS: [Cell; 46] = [
         bias: false,
     },
     Cell {
-        id: "nn_prism_input_proj",
+        id: "nn_d384_input_proj",
         op: ResolvedGemmOp::Nn,
         dims: (4621, 1024, 384),
         alpha: 1.0,
@@ -511,7 +511,7 @@ const PROJECTION_CELLS: [Cell; 46] = [
         bias: false,
     },
     Cell {
-        id: "tn_prism_input_proj",
+        id: "tn_d384_input_proj",
         op: ResolvedGemmOp::Tn,
         dims: (4621, 1024, 384),
         alpha: 1.0,
@@ -519,7 +519,7 @@ const PROJECTION_CELLS: [Cell; 46] = [
         bias: false,
     },
     Cell {
-        id: "nt_prism_input_proj",
+        id: "nt_d384_input_proj",
         op: ResolvedGemmOp::Nt,
         dims: (4621, 1024, 384),
         alpha: 1.0,

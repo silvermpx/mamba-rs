@@ -37,20 +37,20 @@ mod sm89_exact_f32_tn_admission_tests {
         Sm89ExactF32QualificationIdentity {
             nvrtc_version: (12, 8),
             compile_key: [
-                22, 133, 2, 113, 79, 140, 174, 92, 64, 55, 72, 26, 191, 32, 144, 16, 129, 71, 18,
-                169, 163, 233, 151, 238, 254, 194, 137, 67, 229, 238, 69, 233,
+                159, 76, 219, 29, 82, 131, 173, 140, 162, 140, 218, 165, 30, 235, 77, 237, 215, 51,
+                244, 18, 108, 165, 129, 156, 198, 212, 138, 10, 181, 67, 66, 214,
             ],
             artifact_digest: [
-                119, 139, 6, 165, 228, 20, 145, 219, 6, 35, 85, 77, 245, 101, 64, 247, 248, 158,
-                74, 71, 51, 150, 150, 18, 252, 81, 0, 54, 194, 68, 144, 112,
+                159, 130, 85, 144, 117, 18, 124, 197, 0, 13, 217, 27, 242, 158, 208, 214, 49, 23,
+                248, 137, 39, 250, 135, 203, 116, 13, 187, 227, 91, 84, 103, 229,
             ],
             source_digest: [
-                42, 227, 116, 0, 192, 38, 217, 202, 183, 32, 74, 114, 1, 61, 242, 232, 153, 15,
-                166, 209, 101, 53, 119, 255, 89, 36, 101, 191, 82, 161, 129, 35,
+                93, 25, 188, 94, 3, 157, 78, 81, 240, 54, 253, 154, 51, 47, 34, 115, 254, 219, 83,
+                61, 148, 197, 74, 77, 215, 54, 226, 113, 18, 126, 132, 65,
             ],
             header_manifest_digest: [
-                58, 2, 32, 37, 216, 76, 62, 36, 155, 189, 92, 49, 247, 246, 159, 151, 126, 27, 28,
-                65, 56, 204, 94, 105, 113, 193, 67, 69, 3, 189, 58, 15,
+                153, 63, 194, 115, 246, 71, 157, 163, 80, 26, 96, 121, 58, 191, 186, 7, 152, 78,
+                71, 57, 151, 115, 51, 9, 52, 151, 94, 150, 93, 176, 14, 239,
             ],
             nvrtc_library_domain: [
                 38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -60,20 +60,20 @@ mod sm89_exact_f32_tn_admission_tests {
         Sm89ExactF32QualificationIdentity {
             nvrtc_version: (13, 0),
             compile_key: [
-                19, 69, 61, 20, 203, 144, 94, 87, 123, 178, 25, 92, 62, 171, 168, 54, 114, 169,
-                222, 191, 56, 153, 243, 49, 147, 85, 9, 200, 223, 137, 172, 184,
+                215, 163, 73, 239, 131, 130, 243, 182, 253, 249, 159, 30, 107, 136, 178, 45, 236,
+                243, 84, 135, 143, 77, 233, 123, 5, 78, 154, 69, 55, 158, 82, 154,
             ],
             artifact_digest: [
-                31, 208, 236, 148, 231, 189, 226, 21, 247, 7, 136, 202, 101, 180, 43, 62, 225, 201,
-                46, 5, 21, 235, 33, 219, 8, 8, 252, 210, 60, 150, 180, 61,
+                36, 54, 47, 109, 167, 121, 21, 173, 97, 98, 230, 234, 125, 103, 86, 94, 20, 208,
+                202, 97, 37, 235, 110, 180, 13, 252, 34, 121, 23, 195, 58, 211,
             ],
             source_digest: [
-                42, 227, 116, 0, 192, 38, 217, 202, 183, 32, 74, 114, 1, 61, 242, 232, 153, 15,
-                166, 209, 101, 53, 119, 255, 89, 36, 101, 191, 82, 161, 129, 35,
+                93, 25, 188, 94, 3, 157, 78, 81, 240, 54, 253, 154, 51, 47, 34, 115, 254, 219, 83,
+                61, 148, 197, 74, 77, 215, 54, 226, 113, 18, 126, 132, 65,
             ],
             header_manifest_digest: [
-                132, 239, 3, 50, 67, 109, 203, 137, 227, 80, 84, 20, 197, 231, 41, 9, 26, 76, 5,
-                67, 51, 57, 230, 106, 95, 57, 79, 61, 144, 75, 194, 62,
+                122, 103, 189, 74, 230, 212, 73, 157, 48, 219, 132, 84, 181, 154, 163, 53, 62, 33,
+                160, 115, 146, 200, 203, 190, 126, 246, 56, 87, 29, 236, 0, 69,
             ],
             nvrtc_library_domain: [
                 112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241,
@@ -83,20 +83,20 @@ mod sm89_exact_f32_tn_admission_tests {
         Sm89ExactF32QualificationIdentity {
             nvrtc_version: (13, 2),
             compile_key: [
-                83, 124, 13, 149, 236, 157, 74, 190, 239, 221, 245, 103, 76, 179, 93, 193, 227,
-                154, 223, 88, 202, 153, 140, 158, 163, 158, 181, 28, 112, 82, 234, 187,
+                201, 25, 3, 251, 103, 227, 97, 7, 169, 248, 62, 231, 213, 68, 68, 187, 123, 115,
+                242, 127, 249, 142, 71, 175, 99, 201, 212, 166, 198, 222, 81, 17,
             ],
             artifact_digest: [
-                104, 186, 214, 68, 145, 122, 106, 172, 70, 82, 22, 20, 112, 248, 126, 174, 157, 4,
-                72, 49, 184, 100, 198, 228, 141, 126, 12, 21, 25, 171, 244, 73,
+                36, 49, 177, 99, 147, 91, 107, 47, 249, 122, 93, 190, 137, 184, 165, 141, 166, 182,
+                24, 95, 36, 5, 238, 199, 38, 34, 24, 219, 251, 202, 197, 42,
             ],
             source_digest: [
-                42, 227, 116, 0, 192, 38, 217, 202, 183, 32, 74, 114, 1, 61, 242, 232, 153, 15,
-                166, 209, 101, 53, 119, 255, 89, 36, 101, 191, 82, 161, 129, 35,
+                93, 25, 188, 94, 3, 157, 78, 81, 240, 54, 253, 154, 51, 47, 34, 115, 254, 219, 83,
+                61, 148, 197, 74, 77, 215, 54, 226, 113, 18, 126, 132, 65,
             ],
             header_manifest_digest: [
-                252, 26, 221, 32, 31, 26, 175, 118, 209, 248, 228, 199, 168, 92, 58, 101, 51, 220,
-                250, 147, 173, 57, 210, 137, 130, 77, 100, 73, 16, 27, 233, 223,
+                208, 32, 135, 120, 102, 69, 113, 120, 153, 247, 237, 54, 212, 242, 16, 155, 235,
+                181, 89, 29, 80, 111, 232, 29, 167, 214, 75, 73, 141, 233, 189, 83,
             ],
             nvrtc_library_domain: [
                 208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40,
@@ -131,9 +131,9 @@ mod sm89_exact_f32_tn_admission_tests {
             },
         ),
         (
-            Sm89ExactF32TnRoute::PrismDirectBk16,
+            Sm89ExactF32TnRoute::D384DirectBk16,
             (4_621, 384, 1_928),
-            ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified,
+            ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified,
             ScalarDispatchPlan::TnSplitM {
                 m_chunk: 784,
                 chunks: 6,
@@ -1538,12 +1538,12 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         RequiresVectorAlignmentEvidence,
     ),
     // The hot training projections of the SM89 census, qualified on the
-    // RTX 6000 Ada (internal/perf/sm89-requal-hot-20260904): prism_out_proj,
-    // prism_input_proj, batch_input_proj, batch_out_proj, rect_tall and
-    // underfill. Three TN cells (prism_out_proj, batch_input_proj,
+    // RTX 6000 Ada (internal/perf/sm89-requal-hot-20260904): d384_out_proj,
+    // d384_input_proj, batch_input_proj, batch_out_proj, rect_tall and
+    // underfill. Three TN cells (d384_out_proj, batch_input_proj,
     // batch_out_proj) kept the scalar winner: the TN TF32 family has no split
     // schedule for a 72-tile grid over a ten-thousand-row reduction.
-    // nn_prism_out_proj: gemm_bi_nn_sm80_mma_tf32_m128n128_bk32_s3
+    // nn_d384_out_proj: gemm_bi_nn_sm80_mma_tf32_m128n128_bk32_s3
     sm89_tf32_cell(
         Nn,
         4621,
@@ -1553,7 +1553,7 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         S3,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
-    // nt_prism_out_proj: gemm_bi_nt_sm80_mma_tf32_m64n64_bk32_s2
+    // nt_d384_out_proj: gemm_bi_nt_sm80_mma_tf32_m64n64_bk32_s2
     sm89_tf32_cell(
         Nt,
         4621,
@@ -1563,7 +1563,7 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         S2,
         RequiresVectorAlignmentEvidence,
     ),
-    // nn_prism_input_proj: gemm_bi_nn_sm80_mma_tf32_m128n128_bk32_s3
+    // nn_d384_input_proj: gemm_bi_nn_sm80_mma_tf32_m128n128_bk32_s3
     sm89_tf32_cell(
         Nn,
         4621,
@@ -1573,7 +1573,7 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         S3,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
-    // tn_prism_input_proj: gemm_bi_tn_sm80_mma_tf32_splitk8_m64n64_bk32_s3
+    // tn_d384_input_proj: gemm_bi_tn_sm80_mma_tf32_splitk8_m64n64_bk32_s3
     sm89_tf32_route_cell(
         Tn,
         (1024, 384, 4621),
@@ -1583,7 +1583,7 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         }),
         RequiresVectorAlignmentEvidence,
     ),
-    // nt_prism_input_proj: gemm_bi_nt_sm80_mma_tf32_m64n64_bk32_s2
+    // nt_d384_input_proj: gemm_bi_nt_sm80_mma_tf32_m64n64_bk32_s2
     sm89_tf32_cell(
         Nt,
         4621,
@@ -1693,7 +1693,7 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         S4,
         RequiresVectorAlignmentEvidence,
     ),
-    // tn_prism_out_proj: gemm_bi_tn_sm80_mma_tf32_splitk8_m64n64_bk32_s3
+    // tn_d384_out_proj: gemm_bi_tn_sm80_mma_tf32_splitk8_m64n64_bk32_s3
     sm89_tf32_route_cell(
         Tn,
         (768, 384, 4621),
@@ -1723,7 +1723,7 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         S3,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
-    // nn_prism_in_proj: gemm_bi_nn_sm80_mma_tf32_m128n128_bk32_s3
+    // nn_d384_in_proj: gemm_bi_nn_sm80_mma_tf32_m128n128_bk32_s3
     sm89_tf32_cell(
         Nn,
         4621,
@@ -2819,6 +2819,13 @@ fn rna_batch_invariant_selection(
         })
         .filter(|route| keeps(*route))
         .and_then(|route| resolve_tf32_forced(request, availability, route).ok());
+    // The cut a gradient's shape asks for, read without its operands: where
+    // they sit, which module bound and what a cohort measured only choose
+    // among routes of this cut, never a different one.
+    let shape_cut = rna_shape_cut(request, availability);
+    let same_cut = |route: Tf32PhysicalRoute| {
+        shape_cut.is_none_or(|cut| cut == rna_route_partitions(request.op, route))
+    };
     if let Some(route) = measured
         && !matches!(
             route,
@@ -2827,6 +2834,7 @@ fn rna_batch_invariant_selection(
                 | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
                 | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
         )
+        && same_cut(route)
     {
         return Ok(F32TriadSelection::Tf32(route));
     }
@@ -2836,21 +2844,31 @@ fn rna_batch_invariant_selection(
             rna_backward_rule_route(request, None, availability)
                 .and_then(|route| resolve_tf32_forced(request, availability, route).ok())
         });
-    if let Some(bound) = ruled.or(measured) {
+    if let Some(bound) = ruled.or(measured.filter(|route| same_cut(*route))) {
         return Ok(F32TriadSelection::Tf32(bound));
+    }
+    if let Some(cut) = shape_cut.filter(|cut| *cut > 1) {
+        return Err(format!(
+            "the RNA batch-invariant TF32 policy cuts {request:?} into {cut} partitions and no \
+             route of that cut binds on this stack"
+        ));
     }
     let proven = operands
         .and_then(|operands| proof_tf32_selection(request, operands, availability))
         .and_then(|selection| match selection {
-            F32TriadSelection::Tf32(route) => keeps(route).then_some(selection),
+            F32TriadSelection::Tf32(route) => {
+                (keeps(route) && same_cut(route)).then_some(selection)
+            }
             F32TriadSelection::Tf32Proof {
                 candidate,
                 reference,
-            } if keeps(reference) => Some(if keeps(candidate) {
-                selection
-            } else {
-                F32TriadSelection::Tf32(reference)
-            }),
+            } if keeps(reference) && same_cut(reference) => {
+                Some(if keeps(candidate) && same_cut(candidate) {
+                    selection
+                } else {
+                    F32TriadSelection::Tf32(reference)
+                })
+            }
             _ => None,
         });
     if let Some(selection) = proven {
@@ -2862,6 +2880,34 @@ fn rna_batch_invariant_selection(
         .map_err(|reason| {
             format!("the RNA batch-invariant TF32 policy has no route for {request:?}: {reason}")
         })
+}
+
+/// The partitions a strict route cuts its reduction into: one for a tile
+/// that walks the whole reduction, the split member's own count otherwise.
+fn rna_route_partitions(op: ResolvedGemmOp, route: Tf32PhysicalRoute) -> u32 {
+    super::contract::tf32_splitk_spec(op, route).map_or(1, |spec| spec.partitions)
+}
+
+/// The partitions a strict gradient's shape cuts its reduction into: the
+/// rules' split while its partial planes fit the fixed split workspace,
+/// else one, the whole reduction every plain tile walks. A 3072 x 1536
+/// weight gradient's eight planes overflow it, so no split member can bind
+/// there on any card, and its measured whole-reduction tile serves.
+fn rna_shape_cut(request: F32TriadRequest, availability: F32TriadAvailability) -> Option<u32> {
+    let partitions = rna_route_partitions(
+        request.op,
+        rna_backward_rule_route(request, None, availability)?,
+    );
+    let planes = request
+        .shape
+        .output_rows(request.op)
+        .saturating_mul(request.shape.output_columns(request.op))
+        .saturating_mul(partitions as usize);
+    Some(if planes <= SPLITK_SCRATCH_CAP {
+        partitions
+    } else {
+        1
+    })
 }
 
 /// A weight gradient's reduction from which the strict policy splits it
@@ -6786,25 +6832,25 @@ impl Sm89ExactF32QualificationIdentity {
 // records are frozen. An empty cohort deliberately keeps public AUTO on its
 // retained portable Split-M routes while forced qualification remains usable.
 const SM89_EXACT_F32_SOURCE_DIGEST: [u8; 32] = [
-    42, 227, 116, 0, 192, 38, 217, 202, 183, 32, 74, 114, 1, 61, 242, 232, 153, 15, 166, 209, 101,
-    53, 119, 255, 89, 36, 101, 191, 82, 161, 129, 35,
+    93, 25, 188, 94, 3, 157, 78, 81, 240, 54, 253, 154, 51, 47, 34, 115, 254, 219, 83, 61, 148,
+    197, 74, 77, 215, 54, 226, 113, 18, 126, 132, 65,
 ];
 
 const SM89_EXACT_F32_QUALIFICATION_CANDIDATES: &[Sm89ExactF32QualificationIdentity] = &[
     Sm89ExactF32QualificationIdentity {
         nvrtc_version: (12, 8),
         compile_key: [
-            22, 133, 2, 113, 79, 140, 174, 92, 64, 55, 72, 26, 191, 32, 144, 16, 129, 71, 18, 169,
-            163, 233, 151, 238, 254, 194, 137, 67, 229, 238, 69, 233,
+            159, 76, 219, 29, 82, 131, 173, 140, 162, 140, 218, 165, 30, 235, 77, 237, 215, 51,
+            244, 18, 108, 165, 129, 156, 198, 212, 138, 10, 181, 67, 66, 214,
         ],
         artifact_digest: [
-            119, 139, 6, 165, 228, 20, 145, 219, 6, 35, 85, 77, 245, 101, 64, 247, 248, 158, 74,
-            71, 51, 150, 150, 18, 252, 81, 0, 54, 194, 68, 144, 112,
+            159, 130, 85, 144, 117, 18, 124, 197, 0, 13, 217, 27, 242, 158, 208, 214, 49, 23, 248,
+            137, 39, 250, 135, 203, 116, 13, 187, 227, 91, 84, 103, 229,
         ],
         source_digest: SM89_EXACT_F32_SOURCE_DIGEST,
         header_manifest_digest: [
-            58, 2, 32, 37, 216, 76, 62, 36, 155, 189, 92, 49, 247, 246, 159, 151, 126, 27, 28, 65,
-            56, 204, 94, 105, 113, 193, 67, 69, 3, 189, 58, 15,
+            153, 63, 194, 115, 246, 71, 157, 163, 80, 26, 96, 121, 58, 191, 186, 7, 152, 78, 71,
+            57, 151, 115, 51, 9, 52, 151, 94, 150, 93, 176, 14, 239,
         ],
         nvrtc_library_domain: [
             38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
@@ -6814,17 +6860,17 @@ const SM89_EXACT_F32_QUALIFICATION_CANDIDATES: &[Sm89ExactF32QualificationIdenti
     Sm89ExactF32QualificationIdentity {
         nvrtc_version: (13, 0),
         compile_key: [
-            19, 69, 61, 20, 203, 144, 94, 87, 123, 178, 25, 92, 62, 171, 168, 54, 114, 169, 222,
-            191, 56, 153, 243, 49, 147, 85, 9, 200, 223, 137, 172, 184,
+            215, 163, 73, 239, 131, 130, 243, 182, 253, 249, 159, 30, 107, 136, 178, 45, 236, 243,
+            84, 135, 143, 77, 233, 123, 5, 78, 154, 69, 55, 158, 82, 154,
         ],
         artifact_digest: [
-            31, 208, 236, 148, 231, 189, 226, 21, 247, 7, 136, 202, 101, 180, 43, 62, 225, 201, 46,
-            5, 21, 235, 33, 219, 8, 8, 252, 210, 60, 150, 180, 61,
+            36, 54, 47, 109, 167, 121, 21, 173, 97, 98, 230, 234, 125, 103, 86, 94, 20, 208, 202,
+            97, 37, 235, 110, 180, 13, 252, 34, 121, 23, 195, 58, 211,
         ],
         source_digest: SM89_EXACT_F32_SOURCE_DIGEST,
         header_manifest_digest: [
-            132, 239, 3, 50, 67, 109, 203, 137, 227, 80, 84, 20, 197, 231, 41, 9, 26, 76, 5, 67,
-            51, 57, 230, 106, 95, 57, 79, 61, 144, 75, 194, 62,
+            122, 103, 189, 74, 230, 212, 73, 157, 48, 219, 132, 84, 181, 154, 163, 53, 62, 33, 160,
+            115, 146, 200, 203, 190, 126, 246, 56, 87, 29, 236, 0, 69,
         ],
         nvrtc_library_domain: [
             112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
@@ -6834,17 +6880,17 @@ const SM89_EXACT_F32_QUALIFICATION_CANDIDATES: &[Sm89ExactF32QualificationIdenti
     Sm89ExactF32QualificationIdentity {
         nvrtc_version: (13, 2),
         compile_key: [
-            83, 124, 13, 149, 236, 157, 74, 190, 239, 221, 245, 103, 76, 179, 93, 193, 227, 154,
-            223, 88, 202, 153, 140, 158, 163, 158, 181, 28, 112, 82, 234, 187,
+            201, 25, 3, 251, 103, 227, 97, 7, 169, 248, 62, 231, 213, 68, 68, 187, 123, 115, 242,
+            127, 249, 142, 71, 175, 99, 201, 212, 166, 198, 222, 81, 17,
         ],
         artifact_digest: [
-            104, 186, 214, 68, 145, 122, 106, 172, 70, 82, 22, 20, 112, 248, 126, 174, 157, 4, 72,
-            49, 184, 100, 198, 228, 141, 126, 12, 21, 25, 171, 244, 73,
+            36, 49, 177, 99, 147, 91, 107, 47, 249, 122, 93, 190, 137, 184, 165, 141, 166, 182, 24,
+            95, 36, 5, 238, 199, 38, 34, 24, 219, 251, 202, 197, 42,
         ],
         source_digest: SM89_EXACT_F32_SOURCE_DIGEST,
         header_manifest_digest: [
-            252, 26, 221, 32, 31, 26, 175, 118, 209, 248, 228, 199, 168, 92, 58, 101, 51, 220, 250,
-            147, 173, 57, 210, 137, 130, 77, 100, 73, 16, 27, 233, 223,
+            208, 32, 135, 120, 102, 69, 113, 120, 153, 247, 237, 54, 212, 242, 16, 155, 235, 181,
+            89, 29, 80, 111, 232, 29, 167, 214, 75, 73, 141, 233, 189, 83,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -7271,7 +7317,7 @@ const NT_D768_IN_INFERENCE_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
     ldc: 768,
 };
 
-const NT_PRISM_INFERENCE_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
+const NT_D384_INFERENCE_COPYPLAN_SM89_CELL: F32TriadShape = F32TriadShape {
     m: 4621,
     k: 384,
     n: 1928,
@@ -7426,7 +7472,7 @@ const NT_LARGE_DEEP_TRANSPOSE_M64N64_SM120_CELL: F32TriadShape = F32TriadShape {
     ldc: 3072,
 };
 
-const NT_PRISM_VECTOR_SM120_CELL: F32TriadShape = F32TriadShape {
+const NT_D384_VECTOR_SM120_CELL: F32TriadShape = F32TriadShape {
     m: 4621,
     k: 384,
     n: 1928,
@@ -7435,23 +7481,12 @@ const NT_PRISM_VECTOR_SM120_CELL: F32TriadShape = F32TriadShape {
     ldc: 384,
 };
 
-const NT_PRISM_TRANSPOSE_ELEMENTS: usize = 740_352;
+const NT_D384_TRANSPOSE_ELEMENTS: usize = 740_352;
 
 // The deep 4096-row product's transposed input: the largest exact-route
 // transpose, which sized the scratch before the TF32 weight gradient of the
 // same shape needed more.
 const NT_LARGE_DEEP_TRANSPOSE_ELEMENTS: usize = 4_718_592;
-
-const NT_D128_OUT_TRANSPOSE_M64N64_SM120_CELL: F32TriadShape = F32TriadShape {
-    m: 1024,
-    k: 256,
-    n: 128,
-    lda: 128,
-    ldb: 128,
-    ldc: 256,
-};
-
-const NT_D128_OUT_TRANSPOSE_ELEMENTS: usize = 32_768;
 
 const TN_M16N16_SPLITM16_SM120_CELL: F32TriadShape = F32TriadShape {
     m: 256,
@@ -7503,16 +7538,10 @@ fn qualified_nt_large_deep_transpose_m64n64_request(request: F32TriadRequest) ->
         && request.shape.k.checked_mul(request.shape.n) == Some(NT_LARGE_DEEP_TRANSPOSE_ELEMENTS)
 }
 
-fn qualified_nt_prism_vector_request(request: F32TriadRequest) -> bool {
+fn qualified_nt_d384_vector_request(request: F32TriadRequest) -> bool {
     request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nt
-        && request.shape == NT_PRISM_VECTOR_SM120_CELL
-        && request.shape.k.checked_mul(request.shape.n) == Some(NT_PRISM_TRANSPOSE_ELEMENTS)
-}
-
-fn qualified_nt_d128_out_transpose_m64n64_request(request: F32TriadRequest) -> bool {
-    request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nt
-        && request.shape == NT_D128_OUT_TRANSPOSE_M64N64_SM120_CELL
-        && request.shape.k.checked_mul(request.shape.n) == Some(NT_D128_OUT_TRANSPOSE_ELEMENTS)
+        && request.shape == NT_D384_VECTOR_SM120_CELL
+        && request.shape.k.checked_mul(request.shape.n) == Some(NT_D384_TRANSPOSE_ELEMENTS)
 }
 
 fn qualified_nt_d768_transpose_m64n64_operands(operands: F32TriadOperands) -> bool {
@@ -7560,7 +7589,7 @@ const TN_D768_OUT_SM89_EXACT_F32_CELL: F32TriadShape = F32TriadShape {
     ldb: 768,
     ldc: 768,
 };
-const TN_PRISM_SM89_EXACT_F32_CELL: F32TriadShape = F32TriadShape {
+const TN_D384_SM89_EXACT_F32_CELL: F32TriadShape = F32TriadShape {
     m: 4_621,
     k: 384,
     n: 1_928,
@@ -7688,13 +7717,13 @@ fn sm89_exact_f32_plan_for_route(
             ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified,
             1,
         ),
-        Sm89ExactF32TnRoute::PrismDirectBk16 => (
-            TN_PRISM_SM89_EXACT_F32_CELL,
+        Sm89ExactF32TnRoute::D384DirectBk16 => (
+            TN_D384_SM89_EXACT_F32_CELL,
             ScalarDispatchPlan::TnSplitM {
                 m_chunk: 784,
                 chunks: 6,
             },
-            ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified,
+            ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified,
             2,
         ),
     };
@@ -7728,7 +7757,7 @@ pub(super) fn forced_sm89_exact_f32_plan(
         plan,
         ScalarDispatchPlan::TnD768InSm89DualChunkQualified
             | ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified
-            | ScalarDispatchPlan::TnPrismSm89DirectBk16Qualified
+            | ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified
     ) {
         Ok(plan)
     } else {
@@ -7781,7 +7810,7 @@ fn scalar_plan_with_admission(
     for route in [
         super::sm89_exact_f32_source::Sm89ExactF32TnRoute::D768InDualChunkFused,
         super::sm89_exact_f32_source::Sm89ExactF32TnRoute::D768OutDirectBk16,
-        super::sm89_exact_f32_source::Sm89ExactF32TnRoute::PrismDirectBk16,
+        super::sm89_exact_f32_source::Sm89ExactF32TnRoute::D384DirectBk16,
     ] {
         let plan = sm89_exact_f32_plan_for_route(facts, request, operands, route, admission)?;
         if plan != fallback {
@@ -7849,10 +7878,10 @@ fn scalar_plan_with_admission(
             qualified_nt_inference_copyplan_sibling_environment,
         )
         && request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nt
-        && request.shape == NT_PRISM_INFERENCE_COPYPLAN_SM89_CELL
+        && request.shape == NT_D384_INFERENCE_COPYPLAN_SM89_CELL
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
-        return Ok(ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified);
+        return Ok(ScalarDispatchPlan::NtD384Sm89InferenceCopyPlanQualified);
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: false })
         && inference_overlay_admitted(
@@ -7914,21 +7943,10 @@ fn scalar_plan_with_admission(
     }
     if fallback == (ScalarDispatchPlan::NtFinal { slim: true })
         && scalar_sm120_admitted(admission, facts)
-        && qualified_nt_prism_vector_request(request)
+        && qualified_nt_d384_vector_request(request)
         && qualified_nt_d768_transpose_m64n64_operands(operands)
     {
-        return Ok(ScalarDispatchPlan::NtPrismVectorQualified);
-    }
-    if fallback
-        == (ScalarDispatchPlan::NtSplitKMain {
-            n_main: 128,
-            n_tail: 0,
-        })
-        && scalar_sm120_admitted(admission, facts)
-        && qualified_nt_d128_out_transpose_m64n64_request(request)
-        && qualified_nt_d768_transpose_m64n64_operands(operands)
-    {
-        return Ok(ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified);
+        return Ok(ScalarDispatchPlan::NtD384VectorQualified);
     }
     if fallback
         == (ScalarDispatchPlan::TnSplitM {
@@ -8083,7 +8101,7 @@ pub(super) enum ScalarDispatchPlan {
     },
     TnD768InSm89DualChunkQualified,
     TnD768OutSm89DirectBk16Qualified,
-    TnPrismSm89DirectBk16Qualified,
+    TnD384Sm89DirectBk16Qualified,
     /// The split-M plan's partition written by the Ada's direct 64 x 64
     /// partial: the same planes and the same fold as the portable partial.
     TnSm89DirectSplitM {
@@ -8116,14 +8134,13 @@ pub(super) enum ScalarDispatchPlan {
     NtD768OutTransposeM64N64Qualified,
     NtD768OutSm89InferenceCopyPlanQualified,
     NtD768InSm89InferenceCopyPlanQualified,
-    NtPrismSm89InferenceCopyPlanQualified,
+    NtD384Sm89InferenceCopyPlanQualified,
     NtLargeDeepSm89InferenceCopyPlanQualified,
     NtLargeDeepTransposeM64N64Qualified,
     /// The slim plain tile's chain as the NN 64 x 64 tile over the
     /// transposed weights: the same chain per output, so the same bits.
     NtSlimViaTranspose,
-    NtPrismVectorQualified,
-    NtD128OutTransposeM64N64Qualified,
+    NtD384VectorQualified,
     NtFinal {
         slim: bool,
     },
@@ -8141,7 +8158,7 @@ impl ScalarDispatchPlan {
                 | Self::TnNarrowSplitM { .. }
                 | Self::TnSplitM { .. }
                 | Self::TnD768OutSm89DirectBk16Qualified
-                | Self::TnPrismSm89DirectBk16Qualified
+                | Self::TnD384Sm89DirectBk16Qualified
                 | Self::TnSm89DirectSplitM { .. }
                 | Self::NtSplitKTail { .. }
                 | Self::NtSplitKMain { .. }
@@ -8159,12 +8176,11 @@ impl ScalarDispatchPlan {
                 | Self::NtD768OutTransposeM64N64Qualified
                 | Self::NtD768OutSm89InferenceCopyPlanQualified
                 | Self::NtD768InSm89InferenceCopyPlanQualified
-                | Self::NtPrismSm89InferenceCopyPlanQualified
+                | Self::NtD384Sm89InferenceCopyPlanQualified
                 | Self::NtLargeDeepSm89InferenceCopyPlanQualified
                 | Self::NtLargeDeepTransposeM64N64Qualified
                 | Self::NtSlimViaTranspose
-                | Self::NtPrismVectorQualified
-                | Self::NtD128OutTransposeM64N64Qualified
+                | Self::NtD384VectorQualified
                 | Self::TnD768InSm89DualChunkQualified
         )
     }
@@ -9938,7 +9954,7 @@ mod scalar_split_policy_tests {
             ),
             (
                 (4_621, 384, 1_928),
-                ScalarDispatchPlan::NtPrismSm89InferenceCopyPlanQualified,
+                ScalarDispatchPlan::NtD384Sm89InferenceCopyPlanQualified,
                 ScalarDispatchPlan::NtFinal { slim: true },
             ),
         ];
@@ -10699,14 +10715,14 @@ mod scalar_split_policy_tests {
     }
 
     #[test]
-    fn nt_prism_vector_selector_is_an_exact_slim_cell() {
+    fn nt_d384_vector_selector_is_an_exact_slim_cell() {
         let facts = tn_admission_facts();
         let operands = nn_qualified_operands();
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nt,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (4_621, 384, 1_928)),
         };
-        let qualified = ScalarDispatchPlan::NtPrismVectorQualified;
+        let qualified = ScalarDispatchPlan::NtD384VectorQualified;
         assert_eq!(
             scalar_dispatch_plan(request).unwrap(),
             ScalarDispatchPlan::NtFinal { slim: true }
@@ -10778,146 +10794,13 @@ mod scalar_split_policy_tests {
     }
 
     #[test]
-    fn nt_d128_out_transpose_m64n64_selector_is_an_exact_splitk_cell() {
-        let facts = tn_admission_facts();
-        let operands = nn_qualified_operands();
-        let request = F32TriadRequest {
-            op: ResolvedGemmOp::Nt,
-            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (1_024, 256, 128)),
-        };
-        let qualified = ScalarDispatchPlan::NtD128OutTransposeM64N64Qualified;
-        assert_eq!(
-            scalar_dispatch_plan(request).unwrap(),
-            ScalarDispatchPlan::NtSplitKMain {
-                n_main: 128,
-                n_tail: 0,
-            }
-        );
-        assert_eq!(
-            scalar_launch_plan(facts, request, operands).unwrap(),
-            qualified
-        );
-        assert!(qualified.needs_transpose_scratch());
-        assert!(!qualified.needs_split_scratch());
-
-        let dimensions = [request.shape.m, request.shape.k, request.shape.n];
-        for axis in 0..3 {
-            for delta in [-1_isize, 1] {
-                let mut neighbor = dimensions;
-                neighbor[axis] = neighbor[axis].checked_add_signed(delta).unwrap();
-                let neighbor = F32TriadRequest {
-                    op: ResolvedGemmOp::Nt,
-                    shape: F32TriadShape::contiguous(
-                        ResolvedGemmOp::Nt,
-                        (neighbor[0], neighbor[1], neighbor[2]),
-                    ),
-                };
-                assert_ne!(
-                    scalar_launch_plan(facts, neighbor, operands).unwrap(),
-                    qualified
-                );
-            }
-        }
-        for shape in [
-            F32TriadShape {
-                lda: 129,
-                ..request.shape
-            },
-            F32TriadShape {
-                ldb: 129,
-                ..request.shape
-            },
-            F32TriadShape {
-                ldc: 257,
-                ..request.shape
-            },
-        ] {
-            assert_ne!(
-                scalar_launch_plan(
-                    facts,
-                    F32TriadRequest {
-                        op: ResolvedGemmOp::Nt,
-                        shape
-                    },
-                    operands,
-                )
-                .unwrap(),
-                qualified
-            );
-        }
-        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn] {
-            let mutated = F32TriadRequest {
-                op,
-                shape: F32TriadShape::contiguous(op, (1_024, 256, 128)),
-            };
-            assert_ne!(
-                scalar_launch_plan(facts, mutated, operands).unwrap(),
-                qualified
-            );
-        }
-
-        let mut fact_mutations = Vec::new();
-        let mut wrong = facts;
-        wrong.compute_capability = (12, 1);
-        fact_mutations.push(wrong);
-        let mut wrong = facts;
-        wrong.scalar_compiler.nvrtc_version = (13, 1);
-        fact_mutations.push(wrong);
-        let mut wrong = facts;
-        wrong.scalar_compiler.nvrtc_library_domain = [0; 32];
-        fact_mutations.push(wrong);
-        let mut wrong = facts;
-        wrong.scalar_compiler.invocation_digest = [0; 32];
-        wrong.scalar_artifact.compile_key = [0; 32];
-        fact_mutations.push(wrong);
-        let mut wrong = facts;
-        wrong.scalar_artifact.artifact_digest = [0; 32];
-        fact_mutations.push(wrong);
-        for wrong in fact_mutations {
-            assert_ne!(
-                scalar_launch_plan(wrong, request, operands).unwrap(),
-                qualified
-            );
-        }
-        for mutation in [
-            F32TriadOperands {
-                alpha: f32::from_bits(1.0_f32.to_bits() + 1),
-                ..operands
-            },
-            F32TriadOperands {
-                beta: -0.0,
-                ..operands
-            },
-            F32TriadOperands {
-                bias: Some(0x4000),
-                ..operands
-            },
-            F32TriadOperands {
-                b: operands.b + 4,
-                ..operands
-            },
-            F32TriadOperands {
-                output: 0,
-                ..operands
-            },
-            F32TriadOperands { a: 0, ..operands },
-            F32TriadOperands { b: 0, ..operands },
-        ] {
-            assert_ne!(
-                scalar_launch_plan(facts, request, mutation).unwrap(),
-                qualified
-            );
-        }
-    }
-
-    #[test]
-    fn nt_prism_vector_rejects_environment_and_operand_mutations() {
+    fn nt_d384_vector_rejects_environment_and_operand_mutations() {
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nt,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (4_621, 384, 1_928)),
         };
         let operands = nn_qualified_operands();
-        let qualified = ScalarDispatchPlan::NtPrismVectorQualified;
+        let qualified = ScalarDispatchPlan::NtD384VectorQualified;
         let mut fact_mutations = Vec::new();
 
         let mut facts = tn_admission_facts();
@@ -11783,8 +11666,8 @@ mod tc_policy_tests {
         }
         // More tiles over a shallower reduction, and any grid past 192
         // tiles, keep the tiled kernel, which the interleaved measurement
-        // found as fast or faster there: prism_out_proj 72 tiles x 73 slabs,
-        // prism_input_proj 96 x 73, rect_tall 96 x 64, prism_in_proj 186 x
+        // found as fast or faster there: d384_out_proj 72 tiles x 73 slabs,
+        // d384_input_proj 96 x 73, rect_tall 96 x 64, d384_in_proj 186 x
         // 73, large 576 x 32, a filled 768-tile grid.
         for dims in [
             (4621, 768, 384),
@@ -12382,7 +12265,7 @@ mod sm120_tests {
         let large = (2048, 3072, 768);
         let deep = (4096, 3072, 1536);
         let input_projection = (2048, 768, 3072);
-        let prism = (4621, 384, 1928);
+        let d384 = (4621, 384, 1928);
         let out_projection = (4621, 768, 384);
         let input_projection_wide = (4621, 1024, 384);
         let batch_input_projection = (10400, 384, 384);
@@ -12413,42 +12296,42 @@ mod sm120_tests {
                 input_projection,
                 m128n64_bk32_s2,
             ),
-            route(Sm120Op::Nn, WeightDtype::Bf16, prism, m128n64_bk64_s2),
+            route(Sm120Op::Nn, WeightDtype::Bf16, d384, m128n64_bk64_s2),
             route(
                 Sm120Op::Nn,
                 WeightDtype::F16,
                 input_projection,
                 m128n64_bk32_s2,
             ),
-            route(Sm120Op::Nn, WeightDtype::F16, prism, m128n64_bk64_s2),
+            route(Sm120Op::Nn, WeightDtype::F16, d384, m128n64_bk64_s2),
             route(
                 Sm120Op::Tn,
                 WeightDtype::Bf16,
                 input_projection,
                 m64n128_bk32_s3,
             ),
-            route(Sm120Op::Tn, WeightDtype::Bf16, prism, m64n128_bk32_s3),
+            route(Sm120Op::Tn, WeightDtype::Bf16, d384, m64n128_bk32_s3),
             route(
                 Sm120Op::Tn,
                 WeightDtype::F16,
                 input_projection,
                 m64n128_bk32_s3,
             ),
-            route(Sm120Op::Tn, WeightDtype::F16, prism, m64n128_bk32_s3),
+            route(Sm120Op::Tn, WeightDtype::F16, d384, m64n128_bk32_s3),
             route(
                 Sm120Op::Nt,
                 WeightDtype::Bf16,
                 input_projection,
                 m64n64_bk64_s2,
             ),
-            route(Sm120Op::Nt, WeightDtype::Bf16, prism, m128n128_bk64_s3),
+            route(Sm120Op::Nt, WeightDtype::Bf16, d384, m128n128_bk64_s3),
             route(
                 Sm120Op::Nt,
                 WeightDtype::F16,
                 input_projection,
                 m64n64_bk64_s2,
             ),
-            route(Sm120Op::Nt, WeightDtype::F16, prism, m128n128_bk64_s3),
+            route(Sm120Op::Nt, WeightDtype::F16, d384, m128n128_bk64_s3),
             route(
                 Sm120Op::Nn,
                 WeightDtype::Bf16,
@@ -17581,6 +17464,17 @@ mod tf32_tests {
         for cohort in SM120_TF32_EVIDENCE_COHORTS {
             let mut availability = sm120_availability_for(cohort.identity);
             availability.portable = cohort.portable.map(qualified_module_for_auto_identity);
+            // The gradients' multistage members of the shape's cut live in
+            // the RNA module, which a CC 12.x card binds beside the others.
+            let (target, device_target) = architecture_targets(cohort.identity);
+            availability.rna = Some(qualified_module(
+                ModuleKind::TriadTf32Rna,
+                target,
+                device_target,
+                cohort.identity.compute_capability,
+                cohort.identity.tensor_map_access,
+                cohort.identity.optin_shared_bytes,
+            ));
             cohorts.push((availability, cohort.cells));
         }
         cohorts.push((sm89_availability(), SM89_TF32_EVIDENCE_CELLS));
@@ -17601,6 +17495,25 @@ mod tf32_tests {
                 )
                 .unwrap();
                 assert!(strict_keeps(cell.op, selection), "{cell:?}: {selection:?}");
+                // Whatever serves, it cuts the reduction as the shape asks.
+                let shape_cut = super::rna_shape_cut(request, availability);
+                let served = match selection {
+                    F32TriadSelection::Tf32(route) => vec![route],
+                    F32TriadSelection::Tf32Proof {
+                        candidate,
+                        reference,
+                    } => vec![candidate, reference],
+                    _ => Vec::new(),
+                };
+                if let Some(cut) = shape_cut {
+                    for route in served {
+                        assert_eq!(
+                            super::rna_route_partitions(cell.op, route),
+                            cut,
+                            "{cell:?}: {selection:?}"
+                        );
+                    }
+                }
                 let allowed = resolve_f32_triad_auto_with_operands(
                     F32TriadPolicy::AllowDeterministicTf32,
                     request,
@@ -17608,8 +17521,10 @@ mod tf32_tests {
                     availability,
                 )
                 .unwrap();
-                // A specialized cohort winner keeps its cell; a portable tile
-                // or split member yields to the gradients' shape rules.
+                // A specialized cohort winner of the shape's cut keeps its
+                // cell; a portable tile or split member, or a winner that
+                // cuts the sum otherwise, yields to the gradients' shape
+                // rules.
                 if let F32TriadSelection::Tf32(route) = allowed
                     && rna_batch_invariant_route(cell.op, route)
                     && !matches!(
@@ -17619,6 +17534,8 @@ mod tf32_tests {
                             | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
                             | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
                     )
+                    && shape_cut
+                        .is_none_or(|cut| cut == super::rna_route_partitions(cell.op, route))
                 {
                     assert_eq!(selection, allowed, "{cell:?}");
                     kept += 1;
@@ -17798,14 +17715,53 @@ mod tf32_tests {
             op: ResolvedGemmOp::Tn,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Tn, (4096, 128, 796)),
         };
-        let selection = resolve_f32_triad_auto(STRICT, request, availability).unwrap();
-        assert!(
-            !matches!(
-                selection,
-                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaSplitK8(_))
-            ),
-            "{selection:?}"
-        );
+        // Without the module whose member composes the shape's eight
+        // partitions, the strict policy refuses rather than bind a route
+        // that cuts the sum another way.
+        let error = resolve_f32_triad_auto(STRICT, request, availability).unwrap_err();
+        assert!(error.contains("into 8 partitions"), "{error}");
+    }
+
+    #[test]
+    fn rna_strict_deep_weight_gradient_too_wide_to_split_walks_the_whole_reduction() {
+        // Eight partial planes of a 3072 x 1536 weight gradient overflow the
+        // fixed split workspace, so its shape cuts the sum once and a
+        // whole-reduction tile serves on either architecture, never a
+        // refusal.
+        let request = normalized_request(ResolvedGemmOp::Tn, 3072, 1536, 4096);
+        let mut sm120 = sm120_availability_for(SM120_TF32_ARCHITECTURE);
+        sm120.portable = Some(qualified_module_for_auto_identity(
+            SM120_TF32_PORTABLE_ARCHITECTURE,
+        ));
+        sm120.rna = Some(qualified_module(
+            ModuleKind::TriadTf32Rna,
+            "compute_120",
+            "sm_120",
+            (12, 0),
+            true,
+            101_376,
+        ));
+        for availability in [sm89_availability(), sm120] {
+            assert_eq!(super::rna_shape_cut(request, availability), Some(1));
+            let selection = resolve_f32_triad_auto_with_operands(
+                STRICT,
+                request,
+                sm89_joint_operands(ResolvedGemmOp::Tn),
+                availability,
+            )
+            .unwrap();
+            let F32TriadSelection::Tf32(route) = selection else {
+                panic!("{selection:?}");
+            };
+            assert_eq!(
+                super::rna_route_partitions(ResolvedGemmOp::Tn, route),
+                1,
+                "{selection:?}"
+            );
+        }
+        // A 1024 x 1536 one keeps its eight planes.
+        let request = normalized_request(ResolvedGemmOp::Tn, 1024, 1536, 4096);
+        assert_eq!(super::rna_shape_cut(request, sm89_availability()), Some(8));
     }
 
     #[test]

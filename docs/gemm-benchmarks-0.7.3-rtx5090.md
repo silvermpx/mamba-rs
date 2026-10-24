@@ -56,21 +56,21 @@ Eager microseconds, p50 over 21 windows, one run, kernel cache on. `det` is the 
 | d768_in_proj | nn | 2048 x 768 x 3072 | `nn_sm120_tma_128x64_bk32_s2_bf16` | 48.63 | 53.03 | 224.28 | 1.091 | 4.612 |
 | d768_out_proj | nn | 2048 x 1536 x 768 | `nn_sm120_tma_64x64_bk64_s2_bf16` | 30.86 | 36.67 | 120.62 | 1.188 | 3.909 |
 | large_deep | nn | 4096 x 3072 x 1536 | `nn_sm120_tma_128x64_bk32_s2_bf16` | 187.17 | 189.97 | 902.80 | 1.015 | 4.823 |
-| prism_in_proj | nn | 4621 x 384 x 1928 | `nn_sm120_tma_128x64_bk64_s2_bf16` | 38.56 | 43.35 | 159.76 | 1.124 | 4.143 |
+| d384_in_proj | nn | 4621 x 384 x 1928 | `nn_sm120_tma_128x64_bk64_s2_bf16` | 38.56 | 43.35 | 159.76 | 1.124 | 4.143 |
 | underfill | nn | 256 x 512 x 384 | `nn_sm120_tma_64x64_bk64_s2_bf16` | 14.83 | 4.25 | 17.71 | 0.287 | 1.195 |
 | d128_in_proj | nt | 1024 x 128 x 512 | `nt_sm120_tma_64x64_bk64_s3_bf16` | 14.88 | 3.94 | 24.36 | 0.265 | 1.637 |
 | d128_out_proj | nt | 1024 x 256 x 128 | `nt_sm120_tma_64x64_bk32_s2_bf16` | 14.91 | 3.95 | 7.84 | 0.265 | 0.525 |
 | d768_in_proj | nt | 2048 x 768 x 3072 | `nt_sm120_tma_64x64_bk64_s2_bf16` | 59.45 | 57.44 | 234.95 | 0.966 | 3.952 |
 | d768_out_proj | nt | 2048 x 1536 x 768 | `nt_sm120_tma_64x64_bk64_s2_bf16` | 26.91 | 37.73 | 119.18 | 1.402 | 4.429 |
 | large_deep | nt | 4096 x 3072 x 1536 | `nt_sm120_tma_128x128_bk32_s3_bf16` | 178.69 | 185.49 | 818.85 | 1.038 | 4.583 |
-| prism_in_proj | nt | 4621 x 384 x 1928 | `nt_sm120_tma_128x128_bk64_s3_bf16` | 47.46 | 47.02 | 154.53 | 0.991 | 3.256 |
+| d384_in_proj | nt | 4621 x 384 x 1928 | `nt_sm120_tma_128x128_bk64_s3_bf16` | 47.46 | 47.02 | 154.53 | 0.991 | 3.256 |
 | underfill | nt | 256 x 512 x 384 | `nt_sm120_tma_64x64_bk64_s2_bf16` | 14.92 | 3.96 | 18.94 | 0.265 | 1.270 |
 | d128_in_proj | tn | 1024 x 128 x 512 | `tn_sm120_tma_64x64_bk64_s3_streamk_bf16` | 14.98 | 6.00 | 32.24 | 0.401 | 2.152 |
 | d128_out_proj | tn | 1024 x 256 x 128 | `tn_sm120_tma_64x64_bk64_s3_streamk_bf16` | 15.05 | 5.97 | 32.22 | 0.397 | 2.141 |
 | d768_in_proj | tn | 2048 x 768 x 3072 | `tn_sm120_tma_64x128_bk32_s3_bf16` | 49.24 | 50.74 | 192.44 | 1.030 | 3.908 |
 | d768_out_proj | tn | 2048 x 1536 x 768 | `tn_sm120_tma_64x128_bk32_s3_bf16` | 26.21 | 26.72 | 101.23 | 1.019 | 3.862 |
 | large_deep | tn | 4096 x 3072 x 1536 | `tn_sm120_tma_128x128_bk32_s3_bf16` | 190.33 | 193.55 | 698.89 | 1.017 | 3.672 |
-| prism_in_proj | tn | 4621 x 384 x 1928 | `tn_sm120_tma_64x64_bk64_s3_streamk_bf16` | 50.73 | 46.93 | 214.25 | 0.925 | 4.223 |
+| d384_in_proj | tn | 4621 x 384 x 1928 | `tn_sm120_tma_64x64_bk64_s3_streamk_bf16` | 50.73 | 46.93 | 214.25 | 0.925 | 4.223 |
 | underfill | tn | 256 x 512 x 384 | `tn_sm120_tma_64x64_bk32_s3_bf16` | 14.96 | 4.03 | 10.49 | 0.269 | 0.701 |
 
 Geometric mean fast/det over 21 cells: 0.615.
@@ -84,21 +84,21 @@ Geometric mean fast/det over 21 cells: 0.615.
 | d768_in_proj | nn | 2048 x 768 x 3072 | `nn_sm120_tma_128x64_bk32_s2_f16` | 49.56 | 54.37 | 248.57 | 1.097 | 5.015 |
 | d768_out_proj | nn | 2048 x 1536 x 768 | `nn_sm120_tma_64x64_bk64_s2_f16` | 30.66 | 36.50 | 130.26 | 1.190 | 4.248 |
 | large_deep | nn | 4096 x 3072 x 1536 | `nn_sm120_tma_128x64_bk32_s2_f16` | 193.78 | 198.21 | 992.24 | 1.023 | 5.121 |
-| prism_in_proj | nn | 4621 x 384 x 1928 | `nn_sm120_tma_128x64_bk64_s2_f16` | 38.94 | 43.60 | 178.37 | 1.120 | 4.581 |
+| d384_in_proj | nn | 4621 x 384 x 1928 | `nn_sm120_tma_128x64_bk64_s2_f16` | 38.94 | 43.60 | 178.37 | 1.120 | 4.581 |
 | underfill | nn | 256 x 512 x 384 | `nn_sm120_tma_64x64_bk64_s2_f16` | 14.84 | 4.27 | 29.05 | 0.288 | 1.957 |
 | d128_in_proj | nt | 1024 x 128 x 512 | `nt_sm120_tma_64x64_bk64_s3_f16` | 14.88 | 4.24 | 24.36 | 0.285 | 1.637 |
 | d128_out_proj | nt | 1024 x 256 x 128 | `nt_sm120_tma_64x64_bk32_s2_f16` | 14.89 | 4.06 | 7.83 | 0.273 | 0.526 |
 | d768_in_proj | nt | 2048 x 768 x 3072 | `nt_sm120_tma_64x64_bk64_s2_f16` | 60.98 | 57.44 | 236.50 | 0.942 | 3.878 |
 | d768_out_proj | nt | 2048 x 1536 x 768 | `nt_sm120_tma_64x64_bk64_s2_f16` | 27.35 | 37.80 | 119.73 | 1.382 | 4.378 |
 | large_deep | nt | 4096 x 3072 x 1536 | `nt_sm120_tma_128x128_bk32_s3_f16` | 181.21 | 191.40 | 843.12 | 1.056 | 4.653 |
-| prism_in_proj | nt | 4621 x 384 x 1928 | `nt_sm120_tma_128x128_bk64_s3_f16` | 47.56 | 46.94 | 155.97 | 0.987 | 3.279 |
+| d384_in_proj | nt | 4621 x 384 x 1928 | `nt_sm120_tma_128x128_bk64_s3_f16` | 47.56 | 46.94 | 155.97 | 0.987 | 3.279 |
 | underfill | nt | 256 x 512 x 384 | `nt_sm120_tma_64x64_bk64_s2_f16` | 14.92 | 3.99 | 18.92 | 0.268 | 1.268 |
 | d128_in_proj | tn | 1024 x 128 x 512 | `tn_sm120_tma_64x64_bk64_s3_streamk_f16` | 14.94 | 5.92 | 32.26 | 0.396 | 2.160 |
 | d128_out_proj | tn | 1024 x 256 x 128 | `tn_sm120_tma_64x64_bk64_s3_streamk_f16` | 15.06 | 5.90 | 32.22 | 0.392 | 2.140 |
 | d768_in_proj | tn | 2048 x 768 x 3072 | `tn_sm120_tma_64x128_bk32_s3_f16` | 49.54 | 50.85 | 195.66 | 1.026 | 3.949 |
 | d768_out_proj | tn | 2048 x 1536 x 768 | `tn_sm120_tma_64x128_bk32_s3_f16` | 26.23 | 26.73 | 103.15 | 1.019 | 3.932 |
 | large_deep | tn | 4096 x 3072 x 1536 | `tn_sm120_tma_128x128_bk32_s3_f16` | 190.42 | 196.67 | 719.14 | 1.033 | 3.777 |
-| prism_in_proj | tn | 4621 x 384 x 1928 | `tn_sm120_tma_64x64_bk64_s3_streamk_f16` | 50.73 | 47.04 | 214.28 | 0.927 | 4.224 |
+| d384_in_proj | tn | 4621 x 384 x 1928 | `tn_sm120_tma_64x64_bk64_s3_streamk_f16` | 50.73 | 47.04 | 214.28 | 0.927 | 4.224 |
 | underfill | tn | 256 x 512 x 384 | `tn_sm120_tma_64x64_bk32_s3_f16` | 14.93 | 3.93 | 10.48 | 0.263 | 0.702 |
 
 Geometric mean fast/det over 21 cells: 0.620.
@@ -112,21 +112,21 @@ Geometric mean fast/det over 21 cells: 0.620.
 | d768_in_proj | nn | 2048 x 768 x 3072 | `nn_sm120_tma_fma_m128n64_bk16_s2` | 145.10 | 114.52 | 172.18 | 0.789 | 1.187 |
 | d768_out_proj | nn | 2048 x 1536 x 768 | `nn_sm120_tma_fma_m128n64_bk16_s2` | 81.56 | 72.12 | 88.15 | 0.884 | 1.081 |
 | large_deep | nn | 4096 x 3072 x 1536 | `nn_sm120_tma_fma_m128n64_bk16_s2` | 588.26 | 436.94 | 569.90 | 0.743 | 0.969 |
-| prism_in_proj | nn | 4621 x 384 x 1928 | `nn_sm120_tma_fma_m64n128_bk16_s2` | 115.46 | 81.57 | 131.92 | 0.706 | 1.143 |
+| d384_in_proj | nn | 4621 x 384 x 1928 | `nn_sm120_tma_fma_m64n128_bk16_s2` | 115.46 | 81.57 | 131.92 | 0.706 | 1.143 |
 | underfill | nn | 256 x 512 x 384 | `nn_splitk32_partial+splitk_reduce` | 6.53 | 7.26 | 6.44 | 1.111 | 0.985 |
 | d128_in_proj | nt | 1024 x 128 x 512 | `transpose_f32_2d+nn_splitk32_partial+splitk_reduce` | 8.61 | 7.41 | 7.70 | 0.860 | 0.894 |
 | d128_out_proj | nt | 1024 x 256 x 128 | `transpose_f32_32x16_d768+nn_m64n64_bk16_s2` | 6.26 | 3.91 | 6.05 | 0.625 | 0.966 |
 | d768_in_proj | nt | 2048 x 768 x 3072 | `nt_sm120_tma_fma_m128n64_bk16_s2_kvec` | 160.47 | 141.15 | 185.57 | 0.880 | 1.156 |
 | d768_out_proj | nt | 2048 x 1536 x 768 | `nt_sm120_tma_fma_m64n128_bk16_s2` | 86.06 | 76.68 | 106.95 | 0.891 | 1.243 |
 | large_deep | nt | 4096 x 3072 x 1536 | `nt_sm120_tma_fma_m128n64_bk16_s2_kvec` | 679.04 | 376.66 | 741.00 | 0.555 | 1.091 |
-| prism_in_proj | nt | 4621 x 384 x 1928 | `nt_sm120_tma_fma_m128n64_bk16_s2_kvec` | 113.36 | 90.71 | 140.54 | 0.800 | 1.240 |
+| d384_in_proj | nt | 4621 x 384 x 1928 | `nt_sm120_tma_fma_m128n64_bk16_s2_kvec` | 113.36 | 90.71 | 140.54 | 0.800 | 1.240 |
 | underfill | nt | 256 x 512 x 384 | `transpose_f32_2d+nn_splitk32_partial+splitk_reduce` | 8.07 | 5.94 | 8.47 | 0.736 | 1.050 |
 | d128_in_proj | tn | 1024 x 128 x 512 | `tn_sm89_f32_d128_in_m16n16_g8_s2_cg` | 10.81 | 5.99 | 6.17 | 0.554 | 0.571 |
 | d128_out_proj | tn | 1024 x 256 x 128 | `tn_sm89_f32_d128_out_m16n16_g8_s2_cg` | 7.54 | 5.96 | 5.67 | 0.791 | 0.752 |
 | d768_in_proj | tn | 2048 x 768 x 3072 | `tn_sm120_tma_fma_m64n128_bk16_s2` | 148.28 | 98.29 | 148.34 | 0.663 | 1.000 |
 | d768_out_proj | tn | 2048 x 1536 x 768 | `tn_sm120_tma_fma_m128n64_bk16_s2` | 79.58 | 51.17 | 86.65 | 0.643 | 1.089 |
 | large_deep | tn | 4096 x 3072 x 1536 | `tn_sm120_tma_fma_m64n128_bk16_s2` | 578.10 | 383.09 | 590.78 | 0.663 | 1.022 |
-| prism_in_proj | tn | 4621 x 384 x 1928 | `tn_sm120_tma_fma_m128n64_bk16_s2` | 108.04 | 81.42 | 118.74 | 0.754 | 1.099 |
+| d384_in_proj | tn | 4621 x 384 x 1928 | `tn_sm120_tma_fma_m128n64_bk16_s2` | 108.04 | 81.42 | 118.74 | 0.754 | 1.099 |
 | underfill | tn | 256 x 512 x 384 | `tn_m16n16_bk16_s2_splitm16` | 14.44 | 5.35 | 6.82 | 0.371 | 0.472 |
 
 Geometric mean fast/det over 21 cells: 0.715.
@@ -140,21 +140,21 @@ Geometric mean fast/det over 21 cells: 0.715.
 | d768_in_proj | nn | 2048 x 768 x 3072 | `nn_sm120_tma_mma_tf32_m64n128_bk32_s2` | 104.05 | 114.63 | 172.10 | 1.102 | 1.654 |
 | d768_out_proj | nn | 2048 x 1536 x 768 | `nn_sm120_tma_mma_tf32_m64n64_bk32_s2` | 66.40 | 71.95 | 88.10 | 1.084 | 1.327 |
 | large_deep | nn | 4096 x 3072 x 1536 | `nn_sm120_tma_mma_tf32_m64n128_bk32_s2` | 391.80 | 425.89 | 564.34 | 1.087 | 1.440 |
-| prism_in_proj | nn | 4621 x 384 x 1928 | `nn_sm120_tma_mma_tf32_m64n64_bk32_s2` | 79.86 | 81.68 | 131.65 | 1.023 | 1.648 |
+| d384_in_proj | nn | 4621 x 384 x 1928 | `nn_sm120_tma_mma_tf32_m64n64_bk32_s2` | 79.86 | 81.68 | 131.65 | 1.023 | 1.648 |
 | underfill | nn | 256 x 512 x 384 | `nn_splitk32_partial+splitk_reduce` | 6.52 | 7.28 | 6.43 | 1.115 | 0.987 |
 | d128_in_proj | nt | 1024 x 128 x 512 | `nt_sm80_mma_tf32_m16n16_bk32_s4` | 7.58 | 7.39 | 7.70 | 0.975 | 1.016 |
 | d128_out_proj | nt | 1024 x 256 x 128 | `nt_sm80_mma_tf32_m16n32_bk32_s4` | 4.18 | 3.94 | 6.04 | 0.942 | 1.446 |
 | d768_in_proj | nt | 2048 x 768 x 3072 | `nt_sm120_tma_mma_tf32_m64n64_bk32_s2` | 126.30 | 140.70 | 184.49 | 1.114 | 1.461 |
 | d768_out_proj | nt | 2048 x 1536 x 768 | `nt_sm120_tma_mma_tf32_m64n64_bk32_s2` | 56.81 | 76.52 | 106.98 | 1.347 | 1.883 |
 | large_deep | nt | 4096 x 3072 x 1536 | `nt_sm120_tma_mma_tf32_m64n128_bk32_s2` | 406.31 | 370.90 | 728.34 | 0.913 | 1.793 |
-| prism_in_proj | nt | 4621 x 384 x 1928 | `nt_sm120_tma_mma_tf32_m64n64_bk32_s2` | 83.15 | 90.47 | 139.97 | 1.088 | 1.683 |
+| d384_in_proj | nt | 4621 x 384 x 1928 | `nt_sm120_tma_mma_tf32_m64n64_bk32_s2` | 83.15 | 90.47 | 139.97 | 1.088 | 1.683 |
 | underfill | nt | 256 x 512 x 384 | `nt_sm80_mma_tf32_m16n32_bk32_s4` | 5.39 | 5.93 | 8.47 | 1.101 | 1.572 |
 | d128_in_proj | tn | 1024 x 128 x 512 | `tn_sm80_mma_tf32_m16n32_bk32_s4` | 9.93 | 5.99 | 6.17 | 0.603 | 0.622 |
 | d128_out_proj | tn | 1024 x 256 x 128 | `tn_sm80_mma_tf32_m16n16_bk32_s4` | 9.64 | 5.96 | 5.71 | 0.619 | 0.592 |
 | d768_in_proj | tn | 2048 x 768 x 3072 | `tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk` | 99.05 | 97.20 | 147.68 | 0.981 | 1.491 |
 | d768_out_proj | tn | 2048 x 1536 x 768 | `tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk` | 54.84 | 51.05 | 86.28 | 0.931 | 1.573 |
 | large_deep | tn | 4096 x 3072 x 1536 | `tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk` | 377.12 | 373.15 | 566.36 | 0.989 | 1.502 |
-| prism_in_proj | tn | 4621 x 384 x 1928 | `tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk` | 76.72 | 78.51 | 116.89 | 1.023 | 1.524 |
+| d384_in_proj | tn | 4621 x 384 x 1928 | `tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk` | 76.72 | 78.51 | 116.89 | 1.023 | 1.524 |
 | underfill | tn | 256 x 512 x 384 | `tn_sm80_mma_tf32_m16n32_bk32_s4` | 6.23 | 5.35 | 6.81 | 0.859 | 1.094 |
 
 Geometric mean fast/det over 21 cells: 0.982.

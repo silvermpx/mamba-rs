@@ -133,7 +133,7 @@ mod live {
             prior_symbol: "tn_sm80_mma_tf32_m64n64_bk32_s2",
         },
         Case {
-            name: "tn_prism",
+            name: "tn_d384",
             op: ResolvedGemmOp::Tn,
             dims: (4_621, 384, 1_928),
             route: Tf32PhysicalRoute::Sm89TnPreRnaM64N64,
@@ -145,7 +145,7 @@ mod live {
             prior_symbol: "tn_sm80_mma_tf32_m128n64_bk32_s3",
         },
         Case {
-            name: "nn_prism",
+            name: "nn_d384",
             op: ResolvedGemmOp::Nn,
             dims: (4_621, 384, 1_928),
             route: Tf32PhysicalRoute::Sm89NnDirectN96,
@@ -181,7 +181,7 @@ mod live {
             prior_symbol: "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2",
         },
         Case {
-            name: "tn_prism_new_body",
+            name: "tn_d384_new_body",
             op: ResolvedGemmOp::Tn,
             dims: (4_621, 384, 1_928),
             route: Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2,
@@ -359,7 +359,7 @@ mod live {
             prior_symbol: "nt_sm89_mma_tf32_compact8_m128n64_bk32_s2",
         },
         Case {
-            name: "nt_prism_ldmatrix",
+            name: "nt_d384_ldmatrix",
             op: ResolvedGemmOp::Nt,
             dims: (4_621, 384, 1_928),
             route: Tf32PhysicalRoute::Sm89NtALdmatrixN96,
@@ -742,9 +742,9 @@ mod live {
                 (2_048, 768, 3_072),
                 wide,
             ),
-            ("nn_wide_prism", ResolvedGemmOp::Nn, (4_621, 768, 384), wide),
+            ("nn_wide_d384", ResolvedGemmOp::Nn, (4_621, 768, 384), wide),
             (
-                "nn_prism_direct",
+                "nn_d384_direct",
                 ResolvedGemmOp::Nn,
                 (4_621, 384, 1_928),
                 Tf32PhysicalRoute::Sm89NnDirectN96,

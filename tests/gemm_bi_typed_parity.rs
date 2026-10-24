@@ -902,7 +902,7 @@ const ADA_HALF_NT_D768_OUT: (usize, usize, usize) = (2_048, 1_536, 768);
 enum AdaHalfNtCell {
     D768Out,
     D768In,
-    Prism,
+    D384,
 }
 
 impl AdaHalfNtCell {
@@ -910,7 +910,7 @@ impl AdaHalfNtCell {
         match self {
             Self::D768Out => ADA_HALF_NT_D768_OUT,
             Self::D768In => (2_048, 768, 3_072),
-            Self::Prism => (4_621, 384, 1_928),
+            Self::D384 => (4_621, 384, 1_928),
         }
     }
 
@@ -944,7 +944,7 @@ fn ada_half_nt_cells_freeze_storage_strides_and_launch_grids() {
             ),
         ),
         (
-            AdaHalfNtCell::Prism,
+            AdaHalfNtCell::D384,
             (
                 (4_621, 384, 1_928),
                 (8_909_288, 740_352, 1_774_464),

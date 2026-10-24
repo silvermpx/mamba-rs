@@ -11,7 +11,7 @@ pub const WIDE_NT_EPI: &str =
 pub const WIDE_TN: &str = include_str!("../../../kernels/gemm_bi_triad/sm80/tf32_wide_tn.cu");
 pub const WIDE_NN: &str = include_str!("../../../kernels/gemm_bi_triad/sm80/tf32_wide_nn.cu");
 
-pub const SOURCE_SHA256: &str = "7ec0df279ae301f9eaf7a34846ae032c8f6974f67e0903f8b123c562557f22ca";
+pub const SOURCE_SHA256: &str = "ed458cc3ccbb1d1e80b41c3038955fe3972f2c9da2eda16ca2271b1917ad5bda";
 pub const PRIMITIVES_SHA256: &str =
     "c16e81fdcc4745352c97ee7daa39f2629716d7ebe38b6eea0a91393268303b0e";
 pub const WIDE_NT_SHA256: &str = "4e74410d3045e8fc21583c64c409777b29593c81a1884974e1c6a701d3fc5458";

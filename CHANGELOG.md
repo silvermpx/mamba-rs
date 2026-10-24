@@ -18,10 +18,13 @@
   products change their bits once in this release. An RTX 6000 Ada, an
   RTX 5090 and an RTX PRO 6000 wrote identical bits on all 414 exact
   products checked on the three, and the two Blackwell cards on all 993
-  products checked on both. The f32 sum is also faster on GeForce and
-  workstation cards, whose double pipe is slow: on an RTX 5090 the sum of a
-  split weight gradient took 13 to 17 microseconds per call and now takes 4
-  to 7.
+  products checked on both. One case still differs: the sign of an output
+  that is exactly zero, in a slim chain over a reduction 16 past a multiple
+  of 32 and in a thin cut with a tail, where the RTX 5090 and RTX PRO 6000
+  pad the reduction differently from the other boards. The f32 sum is also
+  faster on GeForce and workstation cards, whose double pipe is slow: on an
+  RTX 5090 the sum of a split weight gradient took 13 to 17 microseconds
+  per call and now takes 4 to 7.
 - Exact f32 is faster on the RTX 5090 and RTX PRO 6000. Their own kernels
   serve more products, and a sum cut into short pieces is added inside one
   block. On an RTX PRO 6000 a set of about 400 exact products runs in 0.90
@@ -48,7 +51,9 @@
   grid has published them, and a short sum goes to more workers. They run
   in 55 to 79 percent of their former time, with the same bits at every
   grid size. A 128 x 128 bf16 gradient over 8192 rows takes 15
-  microseconds instead of 127. Their bits change once.
+  microseconds instead of 127. Their bits change once. Operands off a
+  16-byte boundary, or a toolkit that declines these kernels, take the
+  portable schedule, which cuts the sum differently.
 - The Mamba-1 GPU trainers no longer leave the card idle between the two
   uploads of a step. On an RTX 5090 a training step takes 8.57 ms instead
   of 8.78 in f32 and 5.94 ms instead of 6.13 in bf16.
@@ -81,6 +86,21 @@
   say why they are not bound instead of staying off silently.
 - The RTX 5090 and RTX PRO 6000 exact kernels that fold in registers bind
   no split workspace.
+- An exact input gradient from 128 outputs to 256 inputs over 1024 rows
+  summed as one chain on an RTX 5090 or RTX PRO 6000 with CUDA 13.2, where
+  every other board and toolkit sums four pieces of 32; it now sums the
+  pieces like the others.
+- Under the strict TF32 policy a gradient's cut follows its shape alone. A
+  measured cell, the operands' alignment or a module that did not bind only
+  choose among routes of that cut, and a shape whose cut cannot run here is
+  refused instead of taking a tile that cuts it differently. A deep weight
+  gradient whose eight partial planes overflow the split workspace (over
+  4M outputs, such as 3072 x 1536) walks the whole reduction on every card.
+- The RTX 5090 and RTX PRO 6000 stream-K weight gradients, whose blocks wait
+  for each other, launch cooperatively: two of them on concurrent streams,
+  or a device whose multiprocessors are partitioned, can no longer leave
+  each other waiting for blocks that have no room to run. A grid that cannot
+  be resident at once fails its launch instead.
 
 ### Added
 
@@ -600,7 +620,7 @@ candidate over incumbent.
 | triad half | d128 out_proj dW, bf16 | `tn_sm89_half_d128_out_m32n16_bk64_s4_cg` | 12.08 us | 5.82 us | 0.482 |
 | triad half | d128 out_proj forward, bf16 | `nn_sm89_m16n64_bk64_s4` | 6.50 us | 4.42 us | 0.685 |
 | triad half | d768 out_proj dW, bf16 | `tn_sm89_relay_m64n64_bk64_s3` | 55.05 us | 48.71 us | 0.885 |
-| triad TF32 | prism in_proj dX (4621, 384, 1928) | `nt_sm89_tf32_rna_m144n96_w3x4_bk32_s2` | 150.46 us | 100.66 us | 0.669 |
+| triad TF32 | d384 in_proj dX (4621, 384, 1928) | `nt_sm89_tf32_rna_m144n96_w3x4_bk32_s2` | 150.46 us | 100.66 us | 0.669 |
 | triad TF32 | 4096 x 3072 x 1536 dX | `nt_sm89_tf32_rowstage_m128n192_w2x4_bk32_s2` | 632.90 us | 507.95 us | 0.803 |
 | triad TF32 | 3072 x 1536 x 4096 dW | `tn_sm89_tf32_m192n192_w3x4_bk32_s2` | 637.64 us | 486.32 us | 0.763 |
 | triad TF32 | d768 in_proj dW | `tn_sm89_tf32_pre_rna_m96n192_w3x4_bk32_s2` | 158.71 us | 142.70 us | 0.899 |

@@ -8737,7 +8737,7 @@ pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "nn_big",
     "nn_m64n64_bk16_s2",
     "nn_splitk32_m32n64_exact",
-    "nn_prism_m64n64_bk16_s2",
+    "nn_d384_m64n64_bk16_s2",
     "nn_zero_reduction",
     "tn_big",
     "tn_aligned",
@@ -10095,7 +10095,7 @@ pub struct GemmBiKernels {
     pub gemm_bi_nn: CudaFunction,
     pub gemm_bi_nn_m64n64_bk16_s2: CudaFunction,
     pub gemm_bi_nn_splitk32_m32n64_exact: CudaFunction,
-    pub gemm_bi_nn_prism_m64n64_bk16_s2: CudaFunction,
+    pub gemm_bi_nn_d384_m64n64_bk16_s2: CudaFunction,
     pub gemm_bi_tn: CudaFunction,
     pub gemm_bi_tn_aligned: CudaFunction,
     pub gemm_bi_tn_m16n16_bk16_s2_splitm16: CudaFunction,
@@ -10504,10 +10504,10 @@ impl GemmBiKernels {
             super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES as i32,
         )?;
         let gemm_bi_nn_splitk32_m32n64_exact = load("nn_splitk32_m32n64_exact")?;
-        let gemm_bi_nn_prism_m64n64_bk16_s2 = load("nn_prism_m64n64_bk16_s2")?;
+        let gemm_bi_nn_d384_m64n64_bk16_s2 = load("nn_d384_m64n64_bk16_s2")?;
         set_dynamic_shared(
-            &gemm_bi_nn_prism_m64n64_bk16_s2,
-            "nn_prism_m64n64_bk16_s2",
+            &gemm_bi_nn_d384_m64n64_bk16_s2,
+            "nn_d384_m64n64_bk16_s2",
             super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES as i32,
         )?;
         let gemm_bi_tn = load("tn_big")?;
@@ -10669,7 +10669,7 @@ impl GemmBiKernels {
             gemm_bi_nn,
             gemm_bi_nn_m64n64_bk16_s2,
             gemm_bi_nn_splitk32_m32n64_exact,
-            gemm_bi_nn_prism_m64n64_bk16_s2,
+            gemm_bi_nn_d384_m64n64_bk16_s2,
             gemm_bi_tn,
             gemm_bi_tn_aligned,
             gemm_bi_tn_m16n16_bk16_s2_splitm16,
@@ -14756,7 +14756,7 @@ mod tests {
     fn triad_scalar_module_validation_requires_the_exact_whole_module_exports() {
         const M64N64_SYMBOL: &str = "nn_m64n64_bk16_s2";
         const M32N64_SPLITK32_SYMBOL: &str = "nn_splitk32_m32n64_exact";
-        const PRISM_M64N64_SYMBOL: &str = "nn_prism_m64n64_bk16_s2";
+        const D384_M64N64_SYMBOL: &str = "nn_d384_m64n64_bk16_s2";
         const D768_TRANSPOSE_SYMBOL: &str = "transpose_f32_32x16_d768";
         const TN_M16N16_SYMBOL: &str = "tn_m16n16_bk16_s2_splitm16";
         let valid = synthetic_scalar_splitm_module_ptx();
@@ -14790,18 +14790,18 @@ mod tests {
         assert!(error.contains(M64N64_SYMBOL), "{error}");
 
         let missing = valid.replacen(
-            &format!(".visible .entry {PRISM_M64N64_SYMBOL}()"),
-            ".visible .entry removed_prism_m64n64_kernel()",
+            &format!(".visible .entry {D384_M64N64_SYMBOL}()"),
+            ".visible .entry removed_d384_m64n64_kernel()",
             1,
         );
         let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &missing)
-            .expect_err("TriadScalar module validation accepted a missing prism M64N64 export");
-        assert!(error.contains(PRISM_M64N64_SYMBOL), "{error}");
+            .expect_err("TriadScalar module validation accepted a missing d384 M64N64 export");
+        assert!(error.contains(D384_M64N64_SYMBOL), "{error}");
 
-        let duplicate = format!("{valid}.visible .entry {PRISM_M64N64_SYMBOL}() {{ ret; }}\n");
+        let duplicate = format!("{valid}.visible .entry {D384_M64N64_SYMBOL}() {{ ret; }}\n");
         let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &duplicate)
-            .expect_err("TriadScalar module validation accepted a duplicate prism M64N64 export");
-        assert!(error.contains(PRISM_M64N64_SYMBOL), "{error}");
+            .expect_err("TriadScalar module validation accepted a duplicate d384 M64N64 export");
+        assert!(error.contains(D384_M64N64_SYMBOL), "{error}");
 
         let missing = valid.replacen(
             &format!(".visible .entry {D768_TRANSPOSE_SYMBOL}()"),
@@ -16106,7 +16106,7 @@ mod tests {
         "nn_big",
         "nn_m64n64_bk16_s2",
         "nn_splitk32_m32n64_exact",
-        "nn_prism_m64n64_bk16_s2",
+        "nn_d384_m64n64_bk16_s2",
         "nn_zero_reduction",
         "tn_big",
         "tn_aligned",

@@ -1824,17 +1824,17 @@ pub enum Tf32PhysicalRoute {
     Sm89MmaTf32Compact8,
     /// Ada TN after an explicit, separately observed RNA+transpose of A.
     Sm89TnPreRnaN96,
-    /// Ada TN Prism after an explicit, separately observed RNA+transpose of A.
+    /// Ada TN D384 after an explicit, separately observed RNA+transpose of A.
     Sm89TnPreRnaM64N64,
-    /// Ada TN Prism M64xN96/BK32/S2 after an explicit RNA+transpose of A.
+    /// Ada TN D384 M64xN96/BK32/S2 after an explicit RNA+transpose of A.
     Sm89TnPreRnaM64N96S2,
-    /// Ada NN Prism with retained add-half conversion and direct full-tile stores.
+    /// Ada NN D384 with retained add-half conversion and direct full-tile stores.
     Sm89NnDirectN96,
     /// Ada NN d768-out with retained add-half conversion and shared epilogue.
     Sm89NnN96,
     /// Ada NT d768-in direct A-ldmatrix N96 winner.
     Sm89NtALdmatrixN96,
-    /// Ada NT Prism 144x96 wide tile with RNA operand rounding.
+    /// Ada NT D384 144x96 wide tile with RNA operand rounding.
     Sm89NtRnaM144N96S2,
     /// Ada NT deep-cell 128x192 wide tile with row-staged stores.
     Sm89NtRowstageM128N192S2,

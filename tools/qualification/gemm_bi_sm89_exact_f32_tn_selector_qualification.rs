@@ -89,7 +89,7 @@ mod live {
     use mamba_rs::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
     use mamba_rs::gpu::device::GpuDevice;
     use mamba_rs::gpu::gemm_bi_triad::{
-        D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL,
+        D384_RAW_SYMBOL, D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL,
         PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
         QualifiedPhysicalLaunch, SM89_EXACT_F32_KERNEL_SPECS, Sm89ExactF32TnRoute,
         qualify_physical_launch,
@@ -171,7 +171,7 @@ mod live {
             ],
         },
         Case {
-            route: Sm89ExactF32TnRoute::PrismDirectBk16,
+            route: Sm89ExactF32TnRoute::D384DirectBk16,
             target: RawCell {
                 dims: (4_621, 384, 1_928),
                 chunks: 6,
@@ -182,7 +182,7 @@ mod live {
                 chunks: 6,
                 m_chunk: 784,
             },
-            symbols: [PRISM_RAW_SYMBOL, "splitm_reduce"],
+            symbols: [D384_RAW_SYMBOL, "splitm_reduce"],
             grids: [(186, 1, 6), (2_892, 1, 1)],
             blocks: [(128, 1, 1), (256, 1, 1)],
             modules: [ModuleKind::TriadSm89ExactF32, ModuleKind::TriadScalar],
@@ -563,7 +563,7 @@ mod live {
         }
         let mut auto = qualify_physical_launch(ctx, auto_request)?;
         if node_symbols(&auto).iter().any(|symbol| {
-            [D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL].contains(symbol)
+            [D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, D384_RAW_SYMBOL].contains(symbol)
         }) {
             return Err(
                 "public AUTO admitted an exact-F32 B2 route before the route-set evidence".into(),

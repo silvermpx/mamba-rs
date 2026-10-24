@@ -3808,7 +3808,10 @@ fn physical_graph_capture_has_one_opaque_package_and_guarded_graph_boundary() {
     ));
     assert_code_contains_all(
         &triad_enqueue,
-        &["enqueue_prepared_physical_launch"],
+        &[
+            "enqueue_prepared_physical_launch",
+            "enqueue_cooperative_prepared_physical_launch",
+        ],
         "fixed prepared variable-triad enqueue sequence",
     );
     for forbidden in [
@@ -4505,16 +4508,35 @@ fn direct_function_body(source: &str, name: &str) -> Result<String, String> {
 }
 
 fn validate_concrete_physical_enqueue_primitive(source: &str) -> Result<(), String> {
-    let function =
-        active_inlined_production_function_scope(source, "enqueue_with_physical_observation")?;
+    validate_concrete_physical_enqueue_primitive_named(
+        source,
+        "enqueue_with_physical_observation",
+        "launch",
+    )?;
+    validate_concrete_physical_enqueue_primitive_named(
+        source,
+        "enqueue_cooperative_with_physical_observation",
+        "launch_cooperative",
+    )
+}
+
+/// One concrete enqueue primitive: `name` with its one real cudarc launch
+/// `launch` (`launch` for a plain kernel, `launch_cooperative` for a kernel
+/// whose CTAs wait on each other at a grid barrier).
+fn validate_concrete_physical_enqueue_primitive_named(
+    source: &str,
+    name: &str,
+    launch: &str,
+) -> Result<(), String> {
+    let function = active_inlined_production_function_scope(source, name)?;
     let compact = compact_code(&source_mask(function));
     let signature = compact
         .split_once('{')
         .map(|(signature, _)| signature)
         .ok_or_else(|| "physical enqueue primitive has no body".to_string())?;
-    let expected_signature = compact_code(
-        "fn enqueue_with_physical_observation<O: PhysicalLaunchObserver>(observer: &mut O, builder: &mut cudarc::driver::LaunchArgs<'_>, config: cudarc::driver::LaunchConfig, observation: Option<PhysicalLaunchObservation>,) -> Result<(), PhysicalCudaLaunchError>",
-    );
+    let expected_signature = compact_code(&format!(
+        "fn {name}<O: PhysicalLaunchObserver>(observer: &mut O, builder: &mut cudarc::driver::LaunchArgs<'_>, config: cudarc::driver::LaunchConfig, observation: Option<PhysicalLaunchObservation>,) -> Result<(), PhysicalCudaLaunchError>",
+    ));
     if signature != expected_signature {
         return Err(format!(
             "physical enqueue primitive must accept only an observer, a concrete pre-bound cudarc builder, one config, and opaque semantic observation: actual={signature:?}, expected={expected_signature:?}"
@@ -4532,37 +4554,37 @@ fn validate_concrete_physical_enqueue_primitive(source: &str) -> Result<(), Stri
     {
         return Err("physical enqueue primitive regained a callback or caller-built node".into());
     }
-    let body = direct_function_body(function, "enqueue_with_physical_observation")?;
-    let expected_body = compact_code(&source_mask(
+    let body = direct_function_body(function, name)?;
+    let expected_body = compact_code(&source_mask(&format!(
         r#"
         let mut authority = physical_observer_private::Authority::new();
-        if O::ENABLED {
+        if O::ENABLED {{
             let record = observation
                 .ok_or_else(|| "recording CUDA launch has no physical observation".to_string())
                 .and_then(|observation| observation.resolve(observer, config))
-                .and_then(|launch| {
+                .and_then(|launch| {{
                     physical_observer_private::Sealed::record_before_enqueue(
                         observer,
                         &mut authority,
                         launch,
                     )
-                });
-            if let Err(error) = record {
+                }});
+            if let Err(error) = record {{
                 physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
                 return Err(PhysicalCudaLaunchError::Identity(error));
-            }
-        }
-        match unsafe { builder.launch(config) } {
+            }}
+        }}
+        match unsafe {{ builder.{launch}(config) }} {{
             Ok(_) => Ok(()),
-            Err(error) => {
-                if O::ENABLED {
+            Err(error) => {{
+                if O::ENABLED {{
                     physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
-                }
+                }}
                 Err(PhysicalCudaLaunchError::Driver(error))
-            }
-        }
+            }}
+        }}
         "#,
-    ));
+    )));
     if body != expected_body {
         return Err(
             "physical enqueue primitive must resolve and privately record once before its sole same-config real cudarc launch, with sticky failure invalidation"
@@ -4573,16 +4595,34 @@ fn validate_concrete_physical_enqueue_primitive(source: &str) -> Result<(), Stri
 }
 
 fn validate_prepared_physical_enqueue_primitive(source: &str) -> Result<(), String> {
-    let function =
-        active_inlined_production_function_scope(source, "enqueue_prepared_physical_launch")?;
+    validate_prepared_physical_enqueue_primitive_named(
+        source,
+        "enqueue_prepared_physical_launch",
+        "launch",
+    )?;
+    validate_prepared_physical_enqueue_primitive_named(
+        source,
+        "enqueue_cooperative_prepared_physical_launch",
+        "launch_cooperative",
+    )
+}
+
+/// One prepared enqueue primitive: `name` with its one real cudarc launch
+/// `launch`, as [`validate_concrete_physical_enqueue_primitive_named`].
+fn validate_prepared_physical_enqueue_primitive_named(
+    source: &str,
+    name: &str,
+    launch: &str,
+) -> Result<(), String> {
+    let function = active_inlined_production_function_scope(source, name)?;
     let compact = compact_code(&source_mask(function));
     let signature = compact
         .split_once('{')
         .map(|(signature, _)| signature)
         .ok_or_else(|| "prepared physical enqueue primitive has no body".to_string())?;
-    let expected_signature = compact_code(
-        "fn enqueue_prepared_physical_launch(observer: &mut RecordingPhysicalObserver, builder: &mut cudarc::driver::LaunchArgs<'_>, config: cudarc::driver::LaunchConfig, launch: ResolvedPhysicalKernelLaunch,) -> Result<(), PhysicalCudaLaunchError>",
-    );
+    let expected_signature = compact_code(&format!(
+        "fn {name}(observer: &mut RecordingPhysicalObserver, builder: &mut cudarc::driver::LaunchArgs<'_>, config: cudarc::driver::LaunchConfig, launch: ResolvedPhysicalKernelLaunch,) -> Result<(), PhysicalCudaLaunchError>",
+    ));
     if signature != expected_signature {
         return Err(format!(
             "prepared physical enqueue primitive must accept only the recorder, concrete pre-bound cudarc builder, one config, and one resolved node: actual={signature:?}, expected={expected_signature:?}"
@@ -4596,25 +4636,25 @@ fn validate_prepared_physical_enqueue_primitive(source: &str) -> Result<(), Stri
     if function.contains("FnOnce") || function.contains("FnMut") || function.contains("Fn(") {
         return Err("prepared physical enqueue primitive regained a callback".into());
     }
-    let body = direct_function_body(function, "enqueue_prepared_physical_launch")?;
-    let expected_body = compact_code(&source_mask(
+    let body = direct_function_body(function, name)?;
+    let expected_body = compact_code(&source_mask(&format!(
         r#"
         let mut authority = physical_observer_private::Authority::new();
         if let Err(error) =
             physical_observer_private::Sealed::record_before_enqueue(observer, &mut authority, launch)
-        {
+        {{
             physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
             return Err(PhysicalCudaLaunchError::Identity(error));
-        }
-        match unsafe { builder.launch(config) } {
+        }}
+        match unsafe {{ builder.{launch}(config) }} {{
             Ok(_) => Ok(()),
-            Err(error) => {
+            Err(error) => {{
                 physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
                 Err(PhysicalCudaLaunchError::Driver(error))
-            }
-        }
+            }}
+        }}
         "#,
-    ));
+    )));
     if body != expected_body {
         return Err(
             "prepared physical enqueue primitive must privately record exactly once before its sole same-config concrete cudarc launch and make Driver failure sticky"
@@ -4622,7 +4662,7 @@ fn validate_prepared_physical_enqueue_primitive(source: &str) -> Result<(), Stri
         );
     }
     if matching_call_ranges(function, "record_before_enqueue")?.len() != 1
-        || matching_call_ranges(function, "builder.launch")?.len() != 1
+        || matching_call_ranges(function, &format!("builder.{launch}"))?.len() != 1
     {
         return Err(
             "prepared physical enqueue topology must contain one recorder operation and one concrete Driver launch"
@@ -4686,7 +4726,9 @@ fn top_level_arguments(call: &str) -> Result<Vec<&str>, String> {
 }
 
 fn assert_no_raw_cuda_launch(scope: &str, owner: &str) -> Result<(), String> {
-    if !matching_call_ranges(scope, "launch")?.is_empty() {
+    if !matching_call_ranges(scope, "launch")?.is_empty()
+        || !matching_call_ranges(scope, "launch_cooperative")?.is_empty()
+    {
         return Err(format!("{owner} contains a raw cudarc launch bypass"));
     }
     Ok(())
@@ -5283,8 +5325,13 @@ fn physical_sensitive_calls(
             "invalidate_enqueue" if token_is_path_member(&tokens, index, &aliases, "Sealed") => {
                 Some(PhysicalSensitiveCall::SealedRecorderInvalidation)
             }
-            "enqueue_with_physical_observation" => Some(PhysicalSensitiveCall::Submission),
-            "enqueue_prepared_physical_launch" => Some(PhysicalSensitiveCall::PreparedSubmission),
+            "enqueue_with_physical_observation"
+            | "enqueue_cooperative_with_physical_observation" => {
+                Some(PhysicalSensitiveCall::Submission)
+            }
+            "enqueue_prepared_physical_launch" | "enqueue_cooperative_prepared_physical_launch" => {
+                Some(PhysicalSensitiveCall::PreparedSubmission)
+            }
             "resolve_physical_launch_observation" => {
                 Some(PhysicalSensitiveCall::ObservationResolution)
             }
@@ -5345,6 +5392,8 @@ fn validate_owner_sensitive_function_topology(identity_source: &str) -> Result<(
     }
 
     let allowed = [
+        "enqueue_cooperative_prepared_physical_launch",
+        "enqueue_cooperative_with_physical_observation",
         "enqueue_prepared_physical_launch",
         "enqueue_with_physical_observation",
         "finish_recording_physical_capture",
@@ -5529,6 +5578,27 @@ fn validate_physical_sensitive_call_site_ownership(
                     active_inlined_production_function_scope(
                         source,
                         "enqueue_prepared_physical_launch",
+                    )?,
+                    &[
+                        (PhysicalSensitiveCall::SealedRecorderMutation, 1),
+                        (PhysicalSensitiveCall::SealedRecorderInvalidation, 2),
+                    ][..],
+                ),
+                (
+                    active_inlined_production_function_scope(
+                        source,
+                        "enqueue_cooperative_with_physical_observation",
+                    )?,
+                    &[
+                        (PhysicalSensitiveCall::ObservationResolver, 1),
+                        (PhysicalSensitiveCall::SealedRecorderMutation, 1),
+                        (PhysicalSensitiveCall::SealedRecorderInvalidation, 2),
+                    ][..],
+                ),
+                (
+                    active_inlined_production_function_scope(
+                        source,
+                        "enqueue_cooperative_prepared_physical_launch",
                     )?,
                     &[
                         (PhysicalSensitiveCall::SealedRecorderMutation, 1),
@@ -5758,8 +5828,10 @@ fn validate_physical_sensitive_call_site_ownership(
                     &[(PhysicalSensitiveCall::Submission, 1)][..],
                 ),
                 (
+                    // Four ABI alternatives, and the SM120 stream-K one
+                    // either plain or cooperative.
                     audited_function_scope(source, "enqueue_tf32_raw", "")?,
-                    &[(PhysicalSensitiveCall::Submission, 4)][..],
+                    &[(PhysicalSensitiveCall::Submission, 5)][..],
                 ),
                 (
                     audited_function_scope(source, "enqueue_tf32_splitk_f32", "")?,
@@ -5805,7 +5877,7 @@ fn validate_physical_sensitive_call_site_ownership(
                         "BoundTriadPhysicalGraphSequence",
                         "enqueue",
                     )?,
-                    &[(PhysicalSensitiveCall::PreparedSubmission, 1)][..],
+                    &[(PhysicalSensitiveCall::PreparedSubmission, 2)][..],
                 ),
                 (
                     active_inlined_production_method_scope(
@@ -5842,7 +5914,7 @@ fn validate_physical_sensitive_call_site_ownership(
                 ),
                 (
                     audited_function_scope(source, "enqueue_sm120_tma_prepared_observed", "")?,
-                    &[(PhysicalSensitiveCall::Submission, 1)][..],
+                    &[(PhysicalSensitiveCall::Submission, 2)][..],
                 ),
                 (
                     audited_function_scope(source, "launch_sm120_auto_observed", "")?,
@@ -6038,10 +6110,11 @@ fn validate_physical_sensitive_call_site_ownership(
             .into_iter()
             .collect::<BTreeMap<_, _>>()
         } else if path.ends_with("gpu/gemm_bi_triad/launch.rs") {
+            // The imports: each submission comes plain and cooperative.
             [
                 (PhysicalSensitiveCall::ObserverConstructionAuthority, 1),
-                (PhysicalSensitiveCall::Submission, 1),
-                (PhysicalSensitiveCall::PreparedSubmission, 1),
+                (PhysicalSensitiveCall::Submission, 2),
+                (PhysicalSensitiveCall::PreparedSubmission, 2),
                 (PhysicalSensitiveCall::ObservationResolution, 1),
             ]
             .into_iter()
@@ -6106,6 +6179,8 @@ fn validate_physical_owner_exports(identity_source: &str) -> Result<(), String> 
         "finish",
         "enqueue_with_physical_observation",
         "enqueue_prepared_physical_launch",
+        "enqueue_cooperative_with_physical_observation",
+        "enqueue_cooperative_prepared_physical_launch",
         "resolve_physical_launch_observation",
     ];
     let mut macro_bodies = BTreeMap::<String, Vec<String>>::new();
@@ -6815,7 +6890,21 @@ fn validate_physical_observation_topology(
         2,
         "launch.config",
     )?;
-    for (start, end) in matching_call_ranges(tf32_raw, "enqueue_with_physical_observation")? {
+    assert_calls_with_config(
+        tf32_raw,
+        "enqueue_tf32_raw",
+        "enqueue_cooperative_with_physical_observation",
+        1,
+        2,
+        "launch.config",
+    )?;
+    for (start, end) in matching_call_ranges(tf32_raw, "enqueue_with_physical_observation")?
+        .into_iter()
+        .chain(matching_call_ranges(
+            tf32_raw,
+            "enqueue_cooperative_with_physical_observation",
+        )?)
+    {
         let arguments = top_level_arguments(&tf32_raw[start..end])?;
         if arguments.len() != 4 || compact_code(&source_mask(arguments[3])) != "launch.observation"
         {

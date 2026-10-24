@@ -1,4 +1,4 @@
-pub const GEMM_SYMBOL: &str = "tn_test_pre_rna_m64n96_bk32_s2_prism";
+pub const GEMM_SYMBOL: &str = "tn_test_pre_rna_m64n96_bk32_s2_d384";
 pub const RETAINED_GEMM_SYMBOL: &str = "tn_sm89_tf32_pre_rna_m64n64_bk32_s3";
 pub const K8_ISSUE_OFFSETS: [u32; 4] = [0, 8, 16, 24];
 

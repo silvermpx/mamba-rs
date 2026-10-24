@@ -99,7 +99,7 @@ the corresponding input gradient (NT) and weight gradient (TN).
 | Triad | d128_out_proj | 1024 × 256 × 128 |
 | Triad | d768_in_proj | 2048 × 768 × 3072 |
 | Triad | d768_out_proj | 2048 × 1536 × 768 |
-| Triad | prism_in_proj | 4621 × 384 × 1928 |
+| Triad | d384_in_proj | 4621 × 384 × 1928 |
 | Triad | underfill | 256 × 512 × 384 |
 | Triad | large_deep | 4096 × 3072 × 1536 |
 
@@ -298,8 +298,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | nn / d768_in_proj | graph | 61.78 | 61.78 | 1.000× | 75.65 | 1.224× |
 | nn / d768_out_proj | eager | 37.95 | 37.95 | 1.000× | 47.42 | 1.249× |
 | nn / d768_out_proj | graph | 37.76 | 37.75 | 1.000× | 47.16 | 1.250× |
-| nn / prism_in_proj | eager | 59.67 | 59.68 | 1.000× | 73.53 | 1.232× |
-| nn / prism_in_proj | graph | 59.12 | 59.13 | 1.000× | 73.14 | 1.237× |
+| nn / d384_in_proj | eager | 59.67 | 59.68 | 1.000× | 73.53 | 1.232× |
+| nn / d384_in_proj | graph | 59.12 | 59.13 | 1.000× | 73.14 | 1.237× |
 | nt / d128_in_proj | eager | 9.37 | 9.37 | 1.000× | 7.64 | 0.816× |
 | nt / d128_in_proj | graph | 9.16 | 9.16 | 1.000× | 7.15 | 0.781× |
 | nt / d128_out_proj | eager | 5.39 | 5.39 | 1.000× | 4.71 | 0.872× |
@@ -308,8 +308,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | nt / d768_in_proj | graph | 70.74 | 70.66 | 1.001× | 77.13 | 1.092× |
 | nt / d768_out_proj | eager | 36.50 | 36.55 | 0.999× | 38.87 | 1.063× |
 | nt / d768_out_proj | graph | 36.18 | 36.22 | 0.999× | 39.20 | 1.082× |
-| nt / prism_in_proj | eager | 48.65 | 48.65 | 1.000× | 62.97 | 1.294× |
-| nt / prism_in_proj | graph | 48.68 | 48.68 | 1.000× | 62.28 | 1.280× |
+| nt / d384_in_proj | eager | 48.65 | 48.65 | 1.000× | 62.97 | 1.294× |
+| nt / d384_in_proj | graph | 48.68 | 48.68 | 1.000× | 62.28 | 1.280× |
 | tn / d128_in_proj | eager | 18.34 | 18.34 | 1.000× | 7.92 | 0.432× |
 | tn / d128_in_proj | graph | 18.21 | 18.20 | 1.000× | 7.45 | 0.409× |
 | tn / d128_out_proj | eager | 18.26 | 12.27 | 1.487× | 7.15 | 0.583× |
@@ -318,8 +318,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | tn / d768_in_proj | graph | 86.56 | 86.61 | 0.999× | 87.71 | 1.013× |
 | tn / d768_out_proj | eager | 55.26 | 55.23 | 1.001× | 50.68 | 0.918× |
 | tn / d768_out_proj | graph | 55.09 | 55.13 | 0.999× | 49.29 | 0.894× |
-| tn / prism_in_proj | eager | 77.60 | 77.59 | 1.000× | 54.88 | 0.707× |
-| tn / prism_in_proj | graph | 76.96 | 77.02 | 0.999× | 53.46 | 0.694× |
+| tn / d384_in_proj | eager | 77.60 | 77.59 | 1.000× | 54.88 | 0.707× |
+| tn / d384_in_proj | graph | 76.96 | 77.02 | 0.999× | 53.46 | 0.694× |
 
 ### triad, F16 / Fast
 
@@ -333,8 +333,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | nn / d768_in_proj | graph | 61.77 | 61.79 | 1.000× | 58.81 | 0.952× |
 | nn / d768_out_proj | eager | 37.96 | 37.99 | 0.999× | 47.09 | 1.240× |
 | nn / d768_out_proj | graph | 37.76 | 37.76 | 1.000× | 46.79 | 1.239× |
-| nn / prism_in_proj | eager | 59.77 | 59.79 | 1.000× | 73.35 | 1.227× |
-| nn / prism_in_proj | graph | 59.21 | 59.21 | 1.000× | 72.83 | 1.230× |
+| nn / d384_in_proj | eager | 59.77 | 59.79 | 1.000× | 73.35 | 1.227× |
+| nn / d384_in_proj | graph | 59.21 | 59.21 | 1.000× | 72.83 | 1.230× |
 | nt / d128_in_proj | eager | 9.37 | 9.37 | 1.000× | 5.82 | 0.622× |
 | nt / d128_in_proj | graph | 9.16 | 9.16 | 1.000× | 5.27 | 0.576× |
 | nt / d128_out_proj | eager | 5.39 | 5.39 | 1.000× | 4.50 | 0.834× |
@@ -343,8 +343,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | nt / d768_in_proj | graph | 70.70 | 70.74 | 0.999× | 75.99 | 1.074× |
 | nt / d768_out_proj | eager | 36.51 | 36.55 | 0.999× | 39.84 | 1.090× |
 | nt / d768_out_proj | graph | 36.18 | 36.22 | 0.999× | 39.89 | 1.101× |
-| nt / prism_in_proj | eager | 48.66 | 48.66 | 1.000× | 96.56 | 1.984× |
-| nt / prism_in_proj | graph | 48.68 | 48.68 | 1.000× | 95.79 | 1.968× |
+| nt / d384_in_proj | eager | 48.66 | 48.66 | 1.000× | 96.56 | 1.984× |
+| nt / d384_in_proj | graph | 48.68 | 48.68 | 1.000× | 95.79 | 1.968× |
 | tn / d128_in_proj | eager | 18.34 | 18.34 | 1.000× | 7.87 | 0.429× |
 | tn / d128_in_proj | graph | 18.11 | 18.11 | 1.000× | 7.47 | 0.413× |
 | tn / d128_out_proj | eager | 18.26 | 12.27 | 1.488× | 7.44 | 0.607× |
@@ -353,8 +353,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | tn / d768_in_proj | graph | 86.64 | 86.66 | 1.000× | 86.79 | 1.002× |
 | tn / d768_out_proj | eager | 56.20 | 56.14 | 1.001× | 50.67 | 0.903× |
 | tn / d768_out_proj | graph | 56.03 | 56.09 | 0.999× | 49.35 | 0.880× |
-| tn / prism_in_proj | eager | 77.58 | 77.67 | 0.999× | 54.91 | 0.707× |
-| tn / prism_in_proj | graph | 76.95 | 77.06 | 0.999× | 53.47 | 0.694× |
+| tn / d384_in_proj | eager | 77.58 | 77.67 | 0.999× | 54.91 | 0.707× |
+| tn / d384_in_proj | graph | 76.95 | 77.06 | 0.999× | 53.47 | 0.694× |
 
 ### triad, exact F32 / Fast TF32
 
@@ -368,8 +368,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | nn / d768_in_proj | graph | 294.97 | 294.71 | 1.001× | 119.38 | 0.405× |
 | nn / d768_out_proj | eager | 137.80 | 138.03 | 0.998× | 64.35 | 0.466× |
 | nn / d768_out_proj | graph | 138.36 | 138.36 | 1.000× | 64.34 | 0.465× |
-| nn / prism_in_proj | eager | 200.05 | 200.17 | 0.999× | 111.03 | 0.555× |
-| nn / prism_in_proj | graph | 201.38 | 200.36 | 1.005× | 111.11 | 0.555× |
+| nn / d384_in_proj | eager | 200.05 | 200.17 | 0.999× | 111.03 | 0.555× |
+| nn / d384_in_proj | graph | 201.38 | 200.36 | 1.005× | 111.11 | 0.555× |
 | nt / d128_in_proj | eager | 17.16 | 17.16 | 1.000× | 9.42 | 0.549× |
 | nt / d128_in_proj | graph | 15.69 | 15.69 | 1.000× | 9.06 | 0.577× |
 | nt / d128_out_proj | eager | 12.83 | 12.83 | 1.000× | 5.14 | 0.401× |
@@ -378,8 +378,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | nt / d768_in_proj | graph | 284.99 | 285.44 | 0.998× | 122.86 | 0.430× |
 | nt / d768_out_proj | eager | 140.09 | 139.96 | 1.001× | 66.97 | 0.478× |
 | nt / d768_out_proj | graph | 139.19 | 139.59 | 0.997× | 66.62 | 0.477× |
-| nt / prism_in_proj | eager | 299.01 | 298.99 | 1.000× | 76.97 | 0.257× |
-| nt / prism_in_proj | graph | 297.98 | 298.00 | 1.000× | 76.48 | 0.257× |
+| nt / d384_in_proj | eager | 299.01 | 298.99 | 1.000× | 76.97 | 0.257× |
+| nt / d384_in_proj | graph | 297.98 | 298.00 | 1.000× | 76.48 | 0.257× |
 | tn / d128_in_proj | eager | 35.24 | 35.24 | 1.000× | 10.09 | 0.286× |
 | tn / d128_in_proj | graph | 35.27 | 35.26 | 1.000× | 9.34 | 0.265× |
 | tn / d128_out_proj | eager | 27.50 | 27.50 | 1.000× | 9.78 | 0.356× |
@@ -388,8 +388,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | tn / d768_in_proj | graph | 308.00 | 307.97 | 1.000× | 131.98 | 0.429× |
 | tn / d768_out_proj | eager | 188.83 | 188.78 | 1.000× | 82.60 | 0.438× |
 | tn / d768_out_proj | graph | 188.04 | 188.03 | 1.000× | 82.29 | 0.438× |
-| tn / prism_in_proj | eager | 235.04 | 235.05 | 1.000× | 100.29 | 0.427× |
-| tn / prism_in_proj | graph | 234.06 | 234.05 | 1.000× | 99.28 | 0.424× |
+| tn / d384_in_proj | eager | 235.04 | 235.05 | 1.000× | 100.29 | 0.427× |
+| tn / d384_in_proj | graph | 234.06 | 234.05 | 1.000× | 99.28 | 0.424× |
 
 ### triad, exact F32 / Pedantic
 
@@ -403,8 +403,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | nn / d768_in_proj | graph | 276.66 | 276.43 | 1.001× | 333.30 | 1.206× |
 | nn / d768_out_proj | eager | 167.71 | 167.77 | 1.000× | 173.56 | 1.035× |
 | nn / d768_out_proj | graph | 168.14 | 168.33 | 0.999× | 174.04 | 1.034× |
-| nn / prism_in_proj | eager | 255.10 | 254.99 | 1.000× | 281.63 | 1.104× |
-| nn / prism_in_proj | graph | 256.26 | 256.03 | 1.001× | 283.29 | 1.106× |
+| nn / d384_in_proj | eager | 255.10 | 254.99 | 1.000× | 281.63 | 1.104× |
+| nn / d384_in_proj | graph | 256.26 | 256.03 | 1.001× | 283.29 | 1.106× |
 | nt / d128_in_proj | eager | 17.15 | 17.15 | 1.000× | 13.75 | 0.802× |
 | nt / d128_in_proj | graph | 15.69 | 15.69 | 1.000× | 13.36 | 0.851× |
 | nt / d128_out_proj | eager | 12.83 | 12.83 | 1.000× | 8.19 | 0.638× |
@@ -413,8 +413,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | nt / d768_in_proj | graph | 361.05 | 358.80 | 1.006× | 355.70 | 0.991× |
 | nt / d768_out_proj | eager | 172.98 | 172.42 | 1.003× | 178.14 | 1.033× |
 | nt / d768_out_proj | graph | 172.72 | 171.81 | 1.005× | 178.04 | 1.036× |
-| nt / prism_in_proj | eager | 308.43 | 312.26 | 0.988× | 253.30 | 0.811× |
-| nt / prism_in_proj | graph | 306.81 | 310.80 | 0.987× | 252.46 | 0.812× |
+| nt / d384_in_proj | eager | 308.43 | 312.26 | 0.988× | 253.30 | 0.811× |
+| nt / d384_in_proj | graph | 306.81 | 310.80 | 0.987× | 252.46 | 0.812× |
 | tn / d128_in_proj | eager | 35.24 | 35.24 | 1.000× | 12.70 | 0.360× |
 | tn / d128_in_proj | graph | 35.26 | 35.26 | 1.000× | 11.31 | 0.321× |
 | tn / d128_out_proj | eager | 27.50 | 27.50 | 1.000× | 10.55 | 0.383× |
@@ -423,8 +423,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | tn / d768_in_proj | graph | 307.97 | 308.07 | 1.000× | 266.95 | 0.867× |
 | tn / d768_out_proj | eager | 188.86 | 188.81 | 1.000× | 134.48 | 0.712× |
 | tn / d768_out_proj | graph | 188.03 | 188.06 | 1.000× | 133.77 | 0.711× |
-| tn / prism_in_proj | eager | 235.11 | 235.17 | 1.000× | 189.60 | 0.806× |
-| tn / prism_in_proj | graph | 234.12 | 234.13 | 1.000× | 187.87 | 0.802× |
+| tn / d384_in_proj | eager | 235.11 | 235.17 | 1.000× | 189.60 | 0.806× |
+| tn / d384_in_proj | graph | 234.12 | 234.13 | 1.000× | 187.87 | 0.802× |
 
 ### triad, TF32 / Fast TF32
 
@@ -440,8 +440,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | nn / d768_out_proj | graph | 63.31 | 63.32 | 1.000× | 62.56 | 0.988× |
 | nn / large_deep | eager | 512.79 | 507.43 | 1.011× | 403.26 | 0.795× |
 | nn / large_deep | graph | 510.59 | 506.39 | 1.008× | 402.74 | 0.795× |
-| nn / prism_in_proj | eager | 104.17 | 104.17 | 1.000× | 103.07 | 0.989× |
-| nn / prism_in_proj | graph | 102.44 | 102.45 | 1.000× | 102.70 | 1.002× |
+| nn / d384_in_proj | eager | 104.17 | 104.17 | 1.000× | 103.07 | 0.989× |
+| nn / d384_in_proj | graph | 102.44 | 102.45 | 1.000× | 102.70 | 1.002× |
 | nn / underfill | eager | 11.14 | 11.00 | 1.013× | 9.98 | 0.908× |
 | nn / underfill | graph | 10.72 | 10.73 | 0.999× | 9.70 | 0.905× |
 | nt / d128_in_proj | eager | 12.16 | 12.16 | 1.000× | 9.42 | 0.775× |
@@ -454,8 +454,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | nt / d768_out_proj | graph | 63.30 | 63.31 | 1.000× | 66.26 | 1.047× |
 | nt / large_deep | eager | 553.39 | 549.05 | 1.008× | 425.94 | 0.776× |
 | nt / large_deep | graph | 552.96 | 550.49 | 1.004× | 426.72 | 0.775× |
-| nt / prism_in_proj | eager | 144.66 | 134.54 | 1.075× | 76.98 | 0.572× |
-| nt / prism_in_proj | graph | 144.40 | 134.32 | 1.075× | 76.46 | 0.569× |
+| nt / d384_in_proj | eager | 144.66 | 134.54 | 1.075× | 76.98 | 0.572× |
+| nt / d384_in_proj | graph | 144.40 | 134.32 | 1.075× | 76.46 | 0.569× |
 | nt / underfill | eager | 10.13 | 10.13 | 1.000× | 7.99 | 0.788× |
 | nt / underfill | graph | 10.14 | 10.14 | 1.000× | 7.64 | 0.753× |
 | tn / d128_in_proj | eager | 16.62 | 16.63 | 1.000× | 10.09 | 0.607× |
@@ -468,8 +468,8 @@ view. The exact-F32 underfill/deep supplement is separate from these means.
 | tn / d768_out_proj | graph | 93.41 | 93.44 | 1.000× | 82.28 | 0.881× |
 | tn / large_deep | eager | 602.19 | 601.88 | 1.001× | 475.01 | 0.789× |
 | tn / large_deep | graph | 600.14 | 600.06 | 1.000× | 471.36 | 0.786× |
-| tn / prism_in_proj | eager | 140.58 | 140.43 | 1.001× | 100.33 | 0.714× |
-| tn / prism_in_proj | graph | 139.11 | 139.03 | 1.001× | 99.28 | 0.714× |
+| tn / d384_in_proj | eager | 140.58 | 140.43 | 1.001× | 100.33 | 0.714× |
+| tn / d384_in_proj | graph | 139.11 | 139.03 | 1.001× | 99.28 | 0.714× |
 | tn / underfill | eager | 10.43 | 10.43 | 1.000× | 7.82 | 0.750× |
 | tn / underfill | graph | 10.22 | 10.22 | 1.001× | 7.82 | 0.766× |
 
@@ -665,8 +665,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | nn / d768_in_proj | graph | 61.77 | 75.67 | 1.225× |
 | nn / d768_out_proj | eager | 37.95 | 47.89 | 1.262× |
 | nn / d768_out_proj | graph | 37.76 | 47.72 | 1.264× |
-| nn / prism_in_proj | eager | 59.66 | 73.54 | 1.233× |
-| nn / prism_in_proj | graph | 59.13 | 73.16 | 1.237× |
+| nn / d384_in_proj | eager | 59.66 | 73.54 | 1.233× |
+| nn / d384_in_proj | graph | 59.13 | 73.16 | 1.237× |
 | nt / d128_in_proj | eager | 9.37 | 7.64 | 0.816× |
 | nt / d128_in_proj | graph | 9.16 | 7.15 | 0.781× |
 | nt / d128_out_proj | eager | 5.39 | 4.71 | 0.872× |
@@ -675,8 +675,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | nt / d768_in_proj | graph | 70.68 | 77.00 | 1.089× |
 | nt / d768_out_proj | eager | 36.50 | 39.39 | 1.079× |
 | nt / d768_out_proj | graph | 36.18 | 39.44 | 1.090× |
-| nt / prism_in_proj | eager | 48.65 | 63.00 | 1.295× |
-| nt / prism_in_proj | graph | 48.67 | 62.30 | 1.280× |
+| nt / d384_in_proj | eager | 48.65 | 63.00 | 1.295× |
+| nt / d384_in_proj | graph | 48.67 | 62.30 | 1.280× |
 | tn / d128_in_proj | eager | 18.34 | 7.93 | 0.432× |
 | tn / d128_in_proj | graph | 18.20 | 7.45 | 0.409× |
 | tn / d128_out_proj | eager | 12.27 | 7.14 | 0.582× |
@@ -685,8 +685,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | tn / d768_in_proj | graph | 86.57 | 87.64 | 1.012× |
 | tn / d768_out_proj | eager | 55.31 | 50.81 | 0.919× |
 | tn / d768_out_proj | graph | 55.09 | 49.27 | 0.894× |
-| tn / prism_in_proj | eager | 77.73 | 55.01 | 0.708× |
-| tn / prism_in_proj | graph | 77.06 | 53.46 | 0.694× |
+| tn / d384_in_proj | eager | 77.73 | 55.01 | 0.708× |
+| tn / d384_in_proj | graph | 77.06 | 53.46 | 0.694× |
 
 ### triad, F16 / Fast
 
@@ -700,8 +700,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | nn / d768_in_proj | graph | 61.77 | 58.81 | 0.952× |
 | nn / d768_out_proj | eager | 37.96 | 47.64 | 1.255× |
 | nn / d768_out_proj | graph | 37.76 | 47.36 | 1.254× |
-| nn / prism_in_proj | eager | 59.78 | 73.33 | 1.227× |
-| nn / prism_in_proj | graph | 59.22 | 72.82 | 1.230× |
+| nn / d384_in_proj | eager | 59.78 | 73.33 | 1.227× |
+| nn / d384_in_proj | graph | 59.22 | 72.82 | 1.230× |
 | nt / d128_in_proj | eager | 9.37 | 5.83 | 0.622× |
 | nt / d128_in_proj | graph | 9.16 | 5.27 | 0.576× |
 | nt / d128_out_proj | eager | 5.39 | 4.50 | 0.835× |
@@ -710,8 +710,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | nt / d768_in_proj | graph | 70.70 | 76.94 | 1.088× |
 | nt / d768_out_proj | eager | 36.52 | 40.84 | 1.118× |
 | nt / d768_out_proj | graph | 36.19 | 40.30 | 1.114× |
-| nt / prism_in_proj | eager | 48.66 | 96.58 | 1.985× |
-| nt / prism_in_proj | graph | 48.68 | 95.75 | 1.967× |
+| nt / d384_in_proj | eager | 48.66 | 96.58 | 1.985× |
+| nt / d384_in_proj | graph | 48.68 | 95.75 | 1.967× |
 | tn / d128_in_proj | eager | 18.34 | 7.88 | 0.430× |
 | tn / d128_in_proj | graph | 18.11 | 7.47 | 0.413× |
 | tn / d128_out_proj | eager | 12.27 | 7.44 | 0.606× |
@@ -720,8 +720,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | tn / d768_in_proj | graph | 86.68 | 86.82 | 1.002× |
 | tn / d768_out_proj | eager | 56.25 | 50.82 | 0.903× |
 | tn / d768_out_proj | graph | 56.06 | 49.27 | 0.879× |
-| tn / prism_in_proj | eager | 77.60 | 54.90 | 0.707× |
-| tn / prism_in_proj | graph | 76.80 | 53.48 | 0.696× |
+| tn / d384_in_proj | eager | 77.60 | 54.90 | 0.707× |
+| tn / d384_in_proj | graph | 76.80 | 53.48 | 0.696× |
 
 ### triad, exact F32 / Fast TF32
 
@@ -735,8 +735,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | nn / d768_in_proj | graph | 292.33 | 118.61 | 0.406× |
 | nn / d768_out_proj | eager | 137.55 | 64.14 | 0.466× |
 | nn / d768_out_proj | graph | 137.73 | 63.97 | 0.464× |
-| nn / prism_in_proj | eager | 200.51 | 110.61 | 0.552× |
-| nn / prism_in_proj | graph | 202.84 | 112.22 | 0.553× |
+| nn / d384_in_proj | eager | 200.51 | 110.61 | 0.552× |
+| nn / d384_in_proj | graph | 202.84 | 112.22 | 0.553× |
 | nt / d128_in_proj | eager | 17.16 | 9.42 | 0.549× |
 | nt / d128_in_proj | graph | 15.69 | 9.06 | 0.577× |
 | nt / d128_out_proj | eager | 12.83 | 5.15 | 0.401× |
@@ -745,8 +745,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | nt / d768_in_proj | graph | 286.64 | 123.38 | 0.430× |
 | nt / d768_out_proj | eager | 140.78 | 67.36 | 0.478× |
 | nt / d768_out_proj | graph | 138.96 | 66.39 | 0.478× |
-| nt / prism_in_proj | eager | 299.04 | 76.98 | 0.257× |
-| nt / prism_in_proj | graph | 298.04 | 76.47 | 0.257× |
+| nt / d384_in_proj | eager | 299.04 | 76.98 | 0.257× |
+| nt / d384_in_proj | graph | 298.04 | 76.47 | 0.257× |
 | tn / d128_in_proj | eager | 35.24 | 10.10 | 0.287× |
 | tn / d128_in_proj | graph | 35.26 | 9.35 | 0.265× |
 | tn / d128_out_proj | eager | 27.50 | 9.77 | 0.355× |
@@ -755,8 +755,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | tn / d768_in_proj | graph | 307.95 | 131.99 | 0.429× |
 | tn / d768_out_proj | eager | 189.07 | 82.79 | 0.438× |
 | tn / d768_out_proj | graph | 188.20 | 82.30 | 0.437× |
-| tn / prism_in_proj | eager | 235.03 | 100.22 | 0.426× |
-| tn / prism_in_proj | graph | 234.07 | 99.29 | 0.424× |
+| tn / d384_in_proj | eager | 235.03 | 100.22 | 0.426× |
+| tn / d384_in_proj | graph | 234.07 | 99.29 | 0.424× |
 
 ### triad, exact F32 / Pedantic
 
@@ -770,8 +770,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | nn / d768_in_proj | graph | 278.52 | 335.09 | 1.203× |
 | nn / d768_out_proj | eager | 166.15 | 171.88 | 1.035× |
 | nn / d768_out_proj | graph | 166.99 | 172.97 | 1.036× |
-| nn / prism_in_proj | eager | 255.73 | 282.42 | 1.104× |
-| nn / prism_in_proj | graph | 257.32 | 285.16 | 1.108× |
+| nn / d384_in_proj | eager | 255.73 | 282.42 | 1.104× |
+| nn / d384_in_proj | graph | 257.32 | 285.16 | 1.108× |
 | nt / d128_in_proj | eager | 17.15 | 13.75 | 0.802× |
 | nt / d128_in_proj | graph | 15.69 | 13.36 | 0.851× |
 | nt / d128_out_proj | eager | 12.83 | 8.19 | 0.638× |
@@ -780,8 +780,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | nt / d768_in_proj | graph | 357.97 | 357.49 | 0.999× |
 | nt / d768_out_proj | eager | 170.07 | 176.17 | 1.036× |
 | nt / d768_out_proj | graph | 170.54 | 176.67 | 1.036× |
-| nt / prism_in_proj | eager | 310.42 | 251.57 | 0.810× |
-| nt / prism_in_proj | graph | 307.83 | 248.85 | 0.808× |
+| nt / d384_in_proj | eager | 310.42 | 251.57 | 0.810× |
+| nt / d384_in_proj | graph | 307.83 | 248.85 | 0.808× |
 | tn / d128_in_proj | eager | 35.24 | 12.70 | 0.360× |
 | tn / d128_in_proj | graph | 35.26 | 11.31 | 0.321× |
 | tn / d128_out_proj | eager | 27.51 | 10.55 | 0.383× |
@@ -790,8 +790,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | tn / d768_in_proj | graph | 307.89 | 266.85 | 0.867× |
 | tn / d768_out_proj | eager | 189.19 | 135.05 | 0.714× |
 | tn / d768_out_proj | graph | 188.15 | 133.80 | 0.711× |
-| tn / prism_in_proj | eager | 235.14 | 189.51 | 0.806× |
-| tn / prism_in_proj | graph | 234.11 | 187.84 | 0.802× |
+| tn / d384_in_proj | eager | 235.14 | 189.51 | 0.806× |
+| tn / d384_in_proj | graph | 234.11 | 187.84 | 0.802× |
 
 ### triad, TF32 / Fast TF32
 
@@ -807,8 +807,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | nn / d768_out_proj | graph | 63.32 | 62.53 | 0.988× |
 | nn / large_deep | eager | 513.67 | 408.31 | 0.795× |
 | nn / large_deep | graph | 512.47 | 407.86 | 0.796× |
-| nn / prism_in_proj | eager | 104.17 | 103.06 | 0.989× |
-| nn / prism_in_proj | graph | 102.44 | 102.70 | 1.003× |
+| nn / d384_in_proj | eager | 104.17 | 103.06 | 0.989× |
+| nn / d384_in_proj | graph | 102.44 | 102.70 | 1.003× |
 | nn / underfill | eager | 11.00 | 9.99 | 0.908× |
 | nn / underfill | graph | 10.73 | 9.71 | 0.905× |
 | nt / d128_in_proj | eager | 12.16 | 9.42 | 0.775× |
@@ -821,8 +821,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | nt / d768_out_proj | graph | 63.30 | 66.27 | 1.047× |
 | nt / large_deep | eager | 554.46 | 429.45 | 0.775× |
 | nt / large_deep | graph | 553.15 | 428.73 | 0.775× |
-| nt / prism_in_proj | eager | 134.56 | 76.98 | 0.572× |
-| nt / prism_in_proj | graph | 134.34 | 76.47 | 0.569× |
+| nt / d384_in_proj | eager | 134.56 | 76.98 | 0.572× |
+| nt / d384_in_proj | graph | 134.34 | 76.47 | 0.569× |
 | nt / underfill | eager | 10.13 | 7.98 | 0.788× |
 | nt / underfill | graph | 10.14 | 7.64 | 0.753× |
 | tn / d128_in_proj | eager | 16.64 | 10.13 | 0.609× |
@@ -835,8 +835,8 @@ Capacity 16 has no matched old-source run. No release speedup is inferred for it
 | tn / d768_out_proj | graph | 93.41 | 82.28 | 0.881× |
 | tn / large_deep | eager | 601.94 | 475.41 | 0.790× |
 | tn / large_deep | graph | 600.17 | 471.50 | 0.786× |
-| tn / prism_in_proj | eager | 140.32 | 100.18 | 0.714× |
-| tn / prism_in_proj | graph | 138.98 | 99.27 | 0.714× |
+| tn / d384_in_proj | eager | 140.32 | 100.18 | 0.714× |
+| tn / d384_in_proj | graph | 138.98 | 99.27 | 0.714× |
 | tn / underfill | eager | 10.43 | 7.82 | 0.750× |
 | tn / underfill | graph | 10.22 | 7.82 | 0.765× |
 

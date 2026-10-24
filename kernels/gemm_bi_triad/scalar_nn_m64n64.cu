@@ -346,7 +346,7 @@ void nn_m64n64_bk16_s2(
 #undef EXACT_NN_M64N64_BN
 #undef EXACT_NN_M64N64_BM
 
-// Exact-F32 NN schedule specialized for the prism backward cell.
+// Exact-F32 NN schedule specialized for the d384 backward cell.
 #define EXACT_NN_M64N64_BM 64
 #define EXACT_NN_M64N64_BN 64
 #define EXACT_NN_M64N64_BK 16
@@ -362,7 +362,7 @@ void nn_m64n64_bk16_s2(
 #define EXACT_NN_M64N64_B_ROW_STRIDE \
     (EXACT_NN_M64N64_THREADS / (EXACT_NN_M64N64_BN / 4))
 
-struct SgbNnPrismM64N64Params {
+struct SgbNnD384M64N64Params {
     float alpha;
     float beta;
     int m;
@@ -373,20 +373,20 @@ struct SgbNnPrismM64N64Params {
     int ldc;
 };
 
-static_assert(sizeof(SgbNnPrismM64N64Params) == 32,
+static_assert(sizeof(SgbNnD384M64N64Params) == 32,
               "M64N64 parameter ABI drift");
-static_assert(alignof(SgbNnPrismM64N64Params) == 4,
+static_assert(alignof(SgbNnD384M64N64Params) == 4,
               "M64N64 parameter alignment drift");
-static_assert(__is_standard_layout(SgbNnPrismM64N64Params),
+static_assert(__is_standard_layout(SgbNnD384M64N64Params),
               "M64N64 parameters must remain standard layout");
 
 extern "C" __global__ __launch_bounds__(EXACT_NN_M64N64_THREADS, 3)
-void nn_prism_m64n64_bk16_s2(
+void nn_d384_m64n64_bk16_s2(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
     const float* __restrict__,
-    SgbNnPrismM64N64Params params
+    SgbNnD384M64N64Params params
 ) {
     constexpr int K_PIPE = 2;
     constexpr int A_STAGE =

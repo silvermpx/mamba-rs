@@ -61,7 +61,7 @@ fn expand_inventory() -> Vec<AcceptanceCase> {
     let triad = [
         ("d768_in", (2048, 768, 3072)),
         ("d768_out", (2048, 1536, 768)),
-        ("prism", (4621, 384, 1928)),
+        ("d384", (4621, 384, 1928)),
     ];
     for row in ["bf16", "f16"] {
         for op in ["nn", "tn", "nt"] {
@@ -85,14 +85,7 @@ fn expand_inventory() -> Vec<AcceptanceCase> {
         .into_iter()
         .chain([("large_deep", (4096, 3072, 1536))])
     {
-        cases.push(case(
-            "triad",
-            "nt",
-            "tf32",
-            shape,
-            false,
-            shape.0 == "prism",
-        ));
+        cases.push(case("triad", "nt", "tf32", shape, false, shape.0 == "d384"));
         cases.push(case("triad", "nn", "f32_exact", shape, false, false));
         cases.push(case(
             "triad",

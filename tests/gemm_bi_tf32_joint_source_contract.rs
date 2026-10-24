@@ -53,7 +53,7 @@ fn retained_tn_m64n96_s2() -> String {
         .expect("missing proven TN M64N96/S2 candidate namespace terminator");
     body.replace(
         "// Test-only Ada TF32 TN M64xN96/BK32/S2 candidate.",
-        "// Ada TF32 TN M64xN96/BK32/S2 Prism winner for CUDA 13.2.",
+        "// Ada TF32 TN M64xN96/BK32/S2 D384 winner for CUDA 13.2.",
     )
     .replace(
         tn_m64n96_s2::GEMM_SYMBOL,

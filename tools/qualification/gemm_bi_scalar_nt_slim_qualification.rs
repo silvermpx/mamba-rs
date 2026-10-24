@@ -225,7 +225,7 @@ mod cuda_qualification {
 
     const CASES: [Case; 3] = [
         Case {
-            id: "prism_aligned",
+            id: "d384_aligned",
             dims: (4_621, 384, 1_928),
             offsets: (0, 0, 0),
             cpu_oracle: false,

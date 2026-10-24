@@ -9,7 +9,7 @@ use mamba_rs::gpu::blas::gpu_gemm_bi_backward_dw_grad;
 use mamba_rs::gpu::buffers::{GpuBuffer, GradSlice};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::gemm_bi_triad::{
-    D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL, Sm89ExactF32DualChunkParams,
+    D384_RAW_SYMBOL, D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, Sm89ExactF32DualChunkParams,
     Sm89ExactF32TnRoute,
 };
 use mamba_rs::gpu::graph_capture::capture_into_graph;
@@ -293,10 +293,10 @@ fn launch_candidate(
                 .map(|_| ())
                 .map_err(|error| format!("launch {D768_IN_FUSED_SYMBOL}: {error:?}"))
         }
-        Sm89ExactF32TnRoute::D768OutDirectBk16 | Sm89ExactF32TnRoute::PrismDirectBk16 => {
+        Sm89ExactF32TnRoute::D768OutDirectBk16 | Sm89ExactF32TnRoute::D384DirectBk16 => {
             let symbol = match route {
                 Sm89ExactF32TnRoute::D768OutDirectBk16 => D768_OUT_RAW_SYMBOL,
-                Sm89ExactF32TnRoute::PrismDirectBk16 => PRISM_RAW_SYMBOL,
+                Sm89ExactF32TnRoute::D384DirectBk16 => D384_RAW_SYMBOL,
                 Sm89ExactF32TnRoute::D768InDualChunkFused => unreachable!(),
             };
             let function = ctx

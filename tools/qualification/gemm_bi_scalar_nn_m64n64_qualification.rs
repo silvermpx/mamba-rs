@@ -32,7 +32,7 @@ fn ada_short_screen_cells() -> Vec<AdaShortScreenCell> {
             symbol: PRODUCTION_SYMBOL,
         },
         AdaShortScreenCell {
-            id: "prism_in_proj",
+            id: "d384_in_proj",
             dims: (4_621, 384, 1_928),
             symbol: PRODUCTION_SYMBOL,
         },
@@ -213,7 +213,7 @@ fn ada_short_screen_cells_and_direction_are_exact() {
                 symbol: PRODUCTION_SYMBOL,
             },
             AdaShortScreenCell {
-                id: "prism_in_proj",
+                id: "d384_in_proj",
                 dims: (4_621, 384, 1_928),
                 symbol: PRODUCTION_SYMBOL,
             },
@@ -262,11 +262,11 @@ fn production_source_is_an_isolated_one_owner_exact_kernel() {
         .split_once(") {")
         .expect("production parameter list");
     assert!(parameters.matches(',').count() < 7);
-    // The fragment now also owns the prism twin of this schedule; nothing
+    // The fragment now also owns the d384 twin of this schedule; nothing
     // else may join it without being named here.
     assert_eq!(source.matches("threadResults[idx] = __fmaf_rn(").count(), 2);
     assert_eq!(source.matches("extern \"C\" __global__").count(), 2);
-    assert!(source.contains("void nn_prism_m64n64_bk16_s2("));
+    assert!(source.contains("void nn_d384_m64n64_bk16_s2("));
     let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut ascending = normalized.as_str();
     for token in [
@@ -299,7 +299,7 @@ fn qualification_cells_match_the_exact_nn_performance_matrix() {
         "id: \"rect_tall\", dims: (4_096, 512, 768)",
         "id: \"d768_in_proj\", dims: (2_048, 768, 3_072)",
         "id: \"d768_out_proj\", dims: (2_048, 1_536, 768)",
-        "id: \"prism_in_proj\", dims: (4_621, 384, 1_928)",
+        "id: \"d384_in_proj\", dims: (4_621, 384, 1_928)",
     ] {
         assert!(source.contains(required), "qualification lost {required}");
     }
@@ -474,7 +474,7 @@ mod cuda_qualification {
             cpu_oracle: false,
         },
         Case {
-            id: "prism_in_proj",
+            id: "d384_in_proj",
             dims: (4_621, 384, 1_928),
             alpha: 1.0,
             beta: 0.0,
@@ -2376,10 +2376,10 @@ mod cuda_qualification {
     }
 
     #[test]
-    #[ignore = "requires an exclusive quiet CC 8.9 GPU; Prism repair only"]
-    fn ada_exact_nn_m64n64_prism_repair_discovery_once7() -> Result<(), String> {
+    #[ignore = "requires an exclusive quiet CC 8.9 GPU; D384 repair only"]
+    fn ada_exact_nn_m64n64_d384_repair_discovery_once7() -> Result<(), String> {
         let cells = ada_short_screen_cells();
-        run_ada_discovery(&cells[2..], "scalar-nn-m64n64-ada-prism-repair")
+        run_ada_discovery(&cells[2..], "scalar-nn-m64n64-ada-d384-repair")
     }
 
     #[test]

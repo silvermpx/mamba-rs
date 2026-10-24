@@ -1698,7 +1698,7 @@ void nn_sm89_tf32_addhalf_m128n96_bk32_s3(
 
 // BEGIN RETAINED TN_M64N96_S2
 namespace sm89_tf32_joint_tn_m64n96_s2 {
-// Ada TF32 TN M64xN96/BK32/S2 Prism winner for CUDA 13.2.
+// Ada TF32 TN M64xN96/BK32/S2 D384 winner for CUDA 13.2.
 
 struct GbfTf32N96Params {
     float alpha;

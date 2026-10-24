@@ -1779,16 +1779,16 @@ const SM120_HOT_SHAPES: [Sm120HotShape; 15] = [
         dims: (2048, 768, 3072),
     },
     Sm120HotShape {
-        name: "prism_in_proj",
+        name: "d384_in_proj",
         dims: (4621, 384, 1928),
     },
     // The classifier serve projections the table never covered.
     Sm120HotShape {
-        name: "prism_out_proj",
+        name: "d384_out_proj",
         dims: (4621, 768, 384),
     },
     Sm120HotShape {
-        name: "prism_input_proj",
+        name: "d384_input_proj",
         dims: (4621, 1024, 384),
     },
     // The designated production training batch: B*T = 8 * 1300.

@@ -12,8 +12,8 @@ pub const D768_IN_TARGET: ScreenTarget = ScreenTarget {
     shape: (2_048, 768, 3_072),
 };
 
-pub const PRISM_TARGET: ScreenTarget = ScreenTarget {
-    cell: "prism_in_proj",
+pub const D384_TARGET: ScreenTarget = ScreenTarget {
+    cell: "d384_in_proj",
     shape: (4_621, 384, 1_928),
 };
 
@@ -529,8 +529,8 @@ mod tests {
     fn missing_ada_nn_cells_and_aligned_guard_are_exact() {
         assert_eq!(D768_IN_TARGET.cell, "d768_in_proj");
         assert_eq!(D768_IN_TARGET.shape, (2_048, 768, 3_072));
-        assert_eq!(PRISM_TARGET.cell, "prism_in_proj");
-        assert_eq!(PRISM_TARGET.shape, (4_621, 384, 1_928));
+        assert_eq!(D384_TARGET.cell, "d384_in_proj");
+        assert_eq!(D384_TARGET.shape, (4_621, 384, 1_928));
         assert_eq!(logical_alignment_guard_elements(256, 4), Ok(64));
         assert!(logical_alignment_guard_elements(0, 4).is_err());
         assert!(logical_alignment_guard_elements(256, 0).is_err());

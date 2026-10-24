@@ -37,7 +37,7 @@ fn cells() -> Vec<Cell> {
             symbol: "nn_sm120_tma_mma_tf32_m64n64_bk32_s2",
         },
         Cell {
-            name: "prism_in_proj",
+            name: "d384_in_proj",
             dims: (4621, 384, 1928),
             bn: 128,
             grid: 1168,
@@ -145,7 +145,7 @@ fn vendor_cpu_inventory_admits_only_the_three_exact_winners() {
         [
             ("d768_in_proj", (2048, 768, 3072), 128),
             ("d768_out_proj", (2048, 1536, 768), 64),
-            ("prism_in_proj", (4621, 384, 1928), 128),
+            ("d384_in_proj", (4621, 384, 1928), 128),
         ]
     );
 }

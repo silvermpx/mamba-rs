@@ -1053,8 +1053,8 @@ impl Census {
     fn complete_finalist(&mut self, runtime: &words::Runtime) -> Result<(), String> {
         let case = words::inventory()?
             .into_iter()
-            .find(|case| case.id == "triad.nt.tf32.prism.bias0")
-            .ok_or("missing finalist Prism cell")?;
+            .find(|case| case.id == "triad.nt.tf32.d384.bias0")
+            .ok_or("missing finalist D384 cell")?;
         words::configure(&runtime.ctx, &case)?;
         let spec =
             expected_nodes(&case, runtime.ctx.kernels.compiler_identity().nvrtc_version)?.remove(0);
@@ -1067,7 +1067,7 @@ impl Census {
             || trace.routes()[0].symbol != spec.symbol
             || trace.routes()[0].module_kind != ModuleKind::TriadSm89Finalist
         {
-            return Err("provisional measured identities must admit literal finalist Prism AUTO before completing census".into());
+            return Err("provisional measured identities must admit literal finalist D384 AUTO before completing census".into());
         }
         let expected_identity = module_identity(&runtime.ctx, ModuleKind::TriadSm89Finalist)?;
         if (trace.routes()[0].compiler, trace.routes()[0].artifact) != expected_identity {

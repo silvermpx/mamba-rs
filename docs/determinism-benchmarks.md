@@ -731,7 +731,7 @@ Geometric mean over the 21 cells: eager 0.800×, graph 0.792× (mamba-rs faster 
 | d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_f32_m64n64_bk16_s2_d768_out_raw + splitm_reduce` | 188.749 | 82.572 | 0.437× | 187.961 | 82.300 | 0.438× |
 | classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_sm89_f32_n64_copyplan` | 198.805 | 110.416 | 0.555× | 194.999 | 109.025 | 0.559× |
 | classifier page in_proj | NT | 4621 × 384 × 1928 | `transpose_f32_32x16_d768 + nn_sm89_f32_n64_copyplan` | 298.965 | 76.982 | 0.257× | 297.984 | 76.614 | 0.257× |
-| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_f32_m64n64_bk16_s2_prism_raw + splitm_reduce` | 235.082 | 100.295 | 0.427× | 234.095 | 99.354 | 0.424× |
+| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_f32_m64n64_bk16_s2_d384_raw + splitm_reduce` | 235.082 | 100.295 | 0.427× | 234.095 | 99.354 | 0.424× |
 
 Geometric mean over the 15 cells: eager 0.423×, graph 0.423× (mamba-rs faster in 0 of 15 cells eager, 0 of 15 graph).
 
@@ -753,7 +753,7 @@ Geometric mean over the 15 cells: eager 0.423×, graph 0.423× (mamba-rs faster 
 | d768 out_proj | TN | 2048 × 1536 × 768 | `tn_sm89_f32_m64n64_bk16_s2_d768_out_raw + splitm_reduce` | 188.757 | 134.256 | 0.711× | 187.961 | 133.635 | 0.711× |
 | classifier page in_proj | NN | 4621 × 384 × 1928 | `nn_sm89_f32_n64_copyplan` | 248.301 | 276.005 | 1.112× | 251.502 | 278.656 | 1.108× |
 | classifier page in_proj | NT | 4621 × 384 × 1928 | `transpose_f32_32x16_d768 + nn_sm89_f32_n64_copyplan` | 298.963 | 243.517 | 0.815× | 297.978 | 242.639 | 0.814× |
-| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_f32_m64n64_bk16_s2_prism_raw + splitm_reduce` | 235.085 | 189.318 | 0.805× | 234.089 | 187.740 | 0.802× |
+| classifier page in_proj | TN | 4621 × 384 × 1928 | `tn_sm89_f32_m64n64_bk16_s2_d384_raw + splitm_reduce` | 235.085 | 189.318 | 0.805× | 234.089 | 187.740 | 0.802× |
 
 Geometric mean over the 15 cells: eager 0.776×, graph 0.773× (mamba-rs faster in 4 of 15 cells eager, 4 of 15 graph).
 

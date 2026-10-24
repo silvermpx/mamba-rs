@@ -3896,6 +3896,81 @@ pub(super) unsafe fn enqueue_prepared_physical_launch(
     }
 }
 
+/// [`enqueue_with_physical_observation`] for a kernel whose CTAs wait on each
+/// other at a grid barrier: the launch is cooperative, so the driver starts
+/// it only when every CTA can be resident at once, and a kernel on a
+/// concurrent stream or a partition of the device's multiprocessors can
+/// never leave part of the grid spinning for CTAs that have no room to run.
+/// A grid that cannot be resident at once fails its launch instead.
+///
+/// # Safety
+///
+/// As for [`enqueue_with_physical_observation`].
+#[inline(always)]
+pub(super) unsafe fn enqueue_cooperative_with_physical_observation<O: PhysicalLaunchObserver>(
+    observer: &mut O,
+    builder: &mut cudarc::driver::LaunchArgs<'_>,
+    config: cudarc::driver::LaunchConfig,
+    observation: Option<PhysicalLaunchObservation>,
+) -> Result<(), PhysicalCudaLaunchError> {
+    let mut authority = physical_observer_private::Authority::new();
+    if O::ENABLED {
+        let record = observation
+            .ok_or_else(|| "recording CUDA launch has no physical observation".to_string())
+            .and_then(|observation| observation.resolve(observer, config))
+            .and_then(|launch| {
+                physical_observer_private::Sealed::record_before_enqueue(
+                    observer,
+                    &mut authority,
+                    launch,
+                )
+            });
+        if let Err(error) = record {
+            physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
+            return Err(PhysicalCudaLaunchError::Identity(error));
+        }
+    }
+    match unsafe { builder.launch_cooperative(config) } {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            if O::ENABLED {
+                physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
+            }
+            Err(PhysicalCudaLaunchError::Driver(error))
+        }
+    }
+}
+
+/// [`enqueue_prepared_physical_launch`] for a kernel whose CTAs wait on each
+/// other at a grid barrier, launched cooperatively as
+/// [`enqueue_cooperative_with_physical_observation`] is.
+///
+/// # Safety
+///
+/// As for [`enqueue_prepared_physical_launch`].
+#[inline(always)]
+pub(super) unsafe fn enqueue_cooperative_prepared_physical_launch(
+    observer: &mut RecordingPhysicalObserver,
+    builder: &mut cudarc::driver::LaunchArgs<'_>,
+    config: cudarc::driver::LaunchConfig,
+    launch: ResolvedPhysicalKernelLaunch,
+) -> Result<(), PhysicalCudaLaunchError> {
+    let mut authority = physical_observer_private::Authority::new();
+    if let Err(error) =
+        physical_observer_private::Sealed::record_before_enqueue(observer, &mut authority, launch)
+    {
+        physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
+        return Err(PhysicalCudaLaunchError::Identity(error));
+    }
+    match unsafe { builder.launch_cooperative(config) } {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
+            Err(PhysicalCudaLaunchError::Driver(error))
+        }
+    }
+}
+
 struct PhysicalTraceRecorder {
     capacity: usize,
     nodes: Vec<ResolvedPhysicalKernelLaunch>,

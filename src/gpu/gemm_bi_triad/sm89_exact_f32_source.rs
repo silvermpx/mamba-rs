@@ -3,21 +3,21 @@ use std::collections::BTreeSet;
 const PRELUDE: &str = include_str!("../../../kernels/_typed_prelude.cuh");
 pub const OWNER_TEMPLATE: &str = include_str!("../../../kernels/gemm_bi_triad/sm80/exact_f32.cu");
 
-pub const OWNER_SHA256: &str = "bccf89e03f6fd4aa74aeb1507667f6a519b5e235ec479f6bf461047f44189442";
+pub const OWNER_SHA256: &str = "b40ed7eb6da92c4ee62e9db2fb5ee4519bab99d71192a86241ec6290244ab5ad";
 pub const OWNER_SHA256_BYTES: [u8; 32] = [
-    0xbc, 0xcf, 0x89, 0xe0, 0x3f, 0x6f, 0xd4, 0xaa, 0x74, 0xae, 0xb1, 0x50, 0x76, 0x67, 0xf6, 0xa5,
-    0x19, 0xb5, 0xe2, 0x35, 0xec, 0x47, 0x9f, 0x6b, 0xf4, 0x61, 0x04, 0x7f, 0x44, 0x18, 0x94, 0x42,
+    0xb4, 0x0e, 0xd7, 0xeb, 0x6d, 0xa9, 0x2c, 0x4e, 0xe6, 0x2e, 0x9d, 0xb2, 0xfb, 0x5e, 0xe4, 0x51,
+    0x9b, 0xab, 0x99, 0xd7, 0x11, 0x92, 0xa8, 0x62, 0x41, 0xec, 0x62, 0x90, 0x24, 0x4a, 0xb5, 0xad,
 ];
 
 pub const D768_IN_FUSED_SYMBOL: &str = "tn_sm89_f32_n64_dual_chunk_fused_finalize";
 pub const D768_OUT_RAW_SYMBOL: &str = "tn_sm89_f32_m64n64_bk16_s2_d768_out_raw";
-pub const PRISM_RAW_SYMBOL: &str = "tn_sm89_f32_m64n64_bk16_s2_prism_raw";
+pub const D384_RAW_SYMBOL: &str = "tn_sm89_f32_m64n64_bk16_s2_d384_raw";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sm89ExactF32TnRoute {
     D768InDualChunkFused,
     D768OutDirectBk16,
-    PrismDirectBk16,
+    D384DirectBk16,
 }
 
 impl Sm89ExactF32TnRoute {
@@ -25,7 +25,7 @@ impl Sm89ExactF32TnRoute {
         match self {
             Self::D768InDualChunkFused => D768_IN_FUSED_SYMBOL,
             Self::D768OutDirectBk16 => D768_OUT_RAW_SYMBOL,
-            Self::PrismDirectBk16 => PRISM_RAW_SYMBOL,
+            Self::D384DirectBk16 => D384_RAW_SYMBOL,
         }
     }
 }
@@ -110,7 +110,7 @@ pub const SM89_EXACT_F32_KERNEL_SPECS: [Sm89ExactF32KernelSpec; 3] = [
         abi_parameter_bytes: 40,
     },
     Sm89ExactF32KernelSpec {
-        symbol: PRISM_RAW_SYMBOL,
+        symbol: D384_RAW_SYMBOL,
         kind: Sm89ExactF32KernelKind::DirectSplitMRaw,
         shape: (4_621, 384, 1_928),
         grid: (186, 1, 6),
@@ -152,8 +152,8 @@ pub fn compose_source() -> Result<String, String> {
         .replace("__DUAL_SYMBOL__", D768_IN_FUSED_SYMBOL)
         .replace("__DUAL_EPILOGUE__", epilogue);
     let d768_out = direct.replace("__SM89_EXACT_F32_DIRECT_SYMBOL__", D768_OUT_RAW_SYMBOL);
-    let prism = direct.replace("__SM89_EXACT_F32_DIRECT_SYMBOL__", PRISM_RAW_SYMBOL);
-    Ok(format!("{PRELUDE}\n{fused}\n{d768_out}\n{prism}\n"))
+    let d384 = direct.replace("__SM89_EXACT_F32_DIRECT_SYMBOL__", D384_RAW_SYMBOL);
+    Ok(format!("{PRELUDE}\n{fused}\n{d768_out}\n{d384}\n"))
 }
 
 pub fn export_inventory(source: &str) -> Result<Vec<&str>, String> {
@@ -193,9 +193,9 @@ pub fn source_unit<'a>(source: &'a str, symbol: &str) -> Option<&'a str> {
             .map_or(source.len(), |offset| marker_at + offset);
         return Some(&source[start..end]);
     }
-    if symbol == D768_OUT_RAW_SYMBOL || symbol == PRISM_RAW_SYMBOL {
-        let start = source[..symbol_at].rfind("#define PRISM_DIRECT_TN_BM")?;
-        let end_marker = "#undef PRISM_DIRECT_TN_SMEM_BYTES";
+    if symbol == D768_OUT_RAW_SYMBOL || symbol == D384_RAW_SYMBOL {
+        let start = source[..symbol_at].rfind("#define D384_DIRECT_TN_BM")?;
+        let end_marker = "#undef D384_DIRECT_TN_SMEM_BYTES";
         let marker_at = source[symbol_at..].find(end_marker)? + symbol_at;
         let end = source[marker_at..]
             .find('\n')
@@ -220,7 +220,7 @@ pub fn validate_source_text(source: &str) -> Result<(), String> {
         }
     }
     let exports = export_inventory(source)?;
-    let expected = [D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, PRISM_RAW_SYMBOL]
+    let expected = [D768_IN_FUSED_SYMBOL, D768_OUT_RAW_SYMBOL, D384_RAW_SYMBOL]
         .into_iter()
         .collect::<BTreeSet<_>>();
     let observed = exports.iter().copied().collect::<BTreeSet<_>>();

@@ -1417,11 +1417,11 @@ impl MambaKernels {
             for exclusion in triad.sm89_exact_f32_exclusions() {
                 static D768_IN: std::sync::Once = std::sync::Once::new();
                 static D768_OUT: std::sync::Once = std::sync::Once::new();
-                static PRISM: std::sync::Once = std::sync::Once::new();
+                static D384: std::sync::Once = std::sync::Once::new();
                 let once = match exclusion.symbol {
                     super::gemm_bi_triad::D768_IN_FUSED_SYMBOL => &D768_IN,
                     super::gemm_bi_triad::D768_OUT_RAW_SYMBOL => &D768_OUT,
-                    super::gemm_bi_triad::PRISM_RAW_SYMBOL => &PRISM,
+                    super::gemm_bi_triad::D384_RAW_SYMBOL => &D384,
                     _ => continue,
                 };
                 super::diagnostics::warn_once(once, || {

@@ -107,21 +107,21 @@ const SM120_CURRENT_COHORT_CASES: [Sm120CurrentCohortCase; 24] = [
         "nt_sm120_tma_mma_tf32_m64n128_bk32_s2",
     ),
     sm120_case(
-        "nn_prism_in_proj",
+        "nn_d384_in_proj",
         ResolvedGemmOp::Nn,
         (4621, 384, 1928),
         ModuleKind::TriadSm120,
         "nn_sm120_tma_mma_tf32_m128n64_bk32_s2",
     ),
     sm120_case(
-        "tn_prism_in_proj",
+        "tn_d384_in_proj",
         ResolvedGemmOp::Tn,
         (4621, 384, 1928),
         ModuleKind::TriadSm120,
         "tn_sm120_tma_mma_tf32_m64n128_bk32_s3_pair_streamk",
     ),
     sm120_case(
-        "nt_prism_in_proj",
+        "nt_d384_in_proj",
         ResolvedGemmOp::Nt,
         (4621, 384, 1928),
         ModuleKind::TriadSm120,
@@ -485,7 +485,7 @@ fn parse_sm89_finalist_admitted_cells(filter: Option<&str>) -> Result<Vec<Admitt
     const CELLS: [(&str, (usize, usize, usize)); 4] = [
         ("d768_in", (2048, 768, 3072)),
         ("d768_out", (2048, 1536, 768)),
-        ("prism", (4621, 384, 1928)),
+        ("d384", (4621, 384, 1928)),
         ("large_deep", (4096, 3072, 1536)),
     ];
     let Some(filter) = filter else {
@@ -846,7 +846,7 @@ fn sm89_nt_compact_finalist_forced_matches_portable_rna_bits() {
     for (name, dims) in [
         ("d768_in", (2048, 768, 3072)),
         ("d768_out", (2048, 1536, 768)),
-        ("prism", (4621, 384, 1928)),
+        ("d384", (4621, 384, 1928)),
         ("large_deep", (4096, 3072, 1536)),
     ] {
         qualify_nt_pair(&candidate_ctx, &reference_ctx, dims, normal, name);
@@ -905,14 +905,14 @@ fn sm89_nt_compact_finalist_forced_matches_portable_rna_bits() {
 fn sm89_finalist_admitted_cell_filter_is_strict() {
     assert_eq!(parse_sm89_finalist_admitted_cells(None).unwrap().len(), 4);
     assert_eq!(
-        parse_sm89_finalist_admitted_cells(Some("prism,d768_in"))
+        parse_sm89_finalist_admitted_cells(Some("d384,d768_in"))
             .unwrap()
             .iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>(),
-        ["prism", "d768_in"]
+        ["d384", "d768_in"]
     );
-    for invalid in ["", "unknown", "prism,prism", "prism,"] {
+    for invalid in ["", "unknown", "d384,d384", "d384,"] {
         assert!(
             parse_sm89_finalist_admitted_cells(Some(invalid)).is_err(),
             "accepted invalid admitted-cell filter {invalid:?}"

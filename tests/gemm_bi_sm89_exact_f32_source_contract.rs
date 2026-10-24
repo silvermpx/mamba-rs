@@ -1,11 +1,11 @@
 #![cfg(feature = "cuda")]
 
+#[path = "support/triad_f32_tn_direct_d384_bk16_source.rs"]
+mod frozen_d384;
 #[path = "support/triad_f32_tn_direct_d768_out_bk16_source.rs"]
 mod frozen_d768_out;
 #[path = "support/triad_f32_tn_copyplan_dual_chunk_source.rs"]
 mod frozen_dual;
-#[path = "support/triad_f32_tn_direct_prism_bk16_source.rs"]
-mod frozen_prism;
 #[path = "../src/gpu/gemm_bi_triad/sm89_exact_f32_source.rs"]
 mod production;
 
@@ -46,13 +46,13 @@ fn production_units_are_normalized_body_identical_to_frozen_winners() {
     );
     assert_eq!(
         normalized(
-            production::source_unit(&source, production::PRISM_RAW_SYMBOL)
-                .expect("production Prism raw source unit"),
+            production::source_unit(&source, production::D384_RAW_SYMBOL)
+                .expect("production D384 raw source unit"),
         ),
         normalized(&production_named(
-            frozen_prism::compose_source(),
-            frozen_prism::SYMBOL,
-            production::PRISM_RAW_SYMBOL,
+            frozen_d384::compose_source(),
+            frozen_d384::SYMBOL,
+            production::D384_RAW_SYMBOL,
         )),
     );
 }
@@ -67,7 +67,7 @@ fn routes_specs_and_exports_name_the_same_three_kernels() {
     let routes = [
         production::Sm89ExactF32TnRoute::D768InDualChunkFused,
         production::Sm89ExactF32TnRoute::D768OutDirectBk16,
-        production::Sm89ExactF32TnRoute::PrismDirectBk16,
+        production::Sm89ExactF32TnRoute::D384DirectBk16,
     ];
     for route in routes {
         let symbol = route.symbol();
@@ -88,7 +88,7 @@ fn production_owner_is_sealed_to_exactly_three_large_tn_exports() {
         [
             production::D768_IN_FUSED_SYMBOL,
             production::D768_OUT_RAW_SYMBOL,
-            production::PRISM_RAW_SYMBOL,
+            production::D384_RAW_SYMBOL,
         ]
     );
     for forbidden in [
@@ -108,18 +108,18 @@ fn production_owner_is_sealed_to_exactly_three_large_tn_exports() {
 #[test]
 fn sealed_validator_rejects_discovery_markers_and_inventory_mutations() {
     let source = production::compose_source().expect("compose sealed production source");
-    let discovery = source.replacen(production::PRISM_RAW_SYMBOL, "tn_test_leak", 1);
+    let discovery = source.replacen(production::D384_RAW_SYMBOL, "tn_test_leak", 1);
     assert!(production::validate_source_text(&discovery).is_err());
 
     let duplicate = source.replacen(
-        production::PRISM_RAW_SYMBOL,
+        production::D384_RAW_SYMBOL,
         production::D768_OUT_RAW_SYMBOL,
         1,
     );
     assert!(production::validate_source_text(&duplicate).is_err());
 
-    let prism_unit = production::source_unit(&source, production::PRISM_RAW_SYMBOL).unwrap();
-    let missing = source.replacen(prism_unit, "", 1);
+    let d384_unit = production::source_unit(&source, production::D384_RAW_SYMBOL).unwrap();
+    let missing = source.replacen(d384_unit, "", 1);
     assert!(production::validate_source_text(&missing).is_err());
 
     for extra in ["tn_sm89_f32_foreign", "tn_sm89_f32_d128_m16n16"] {
@@ -178,7 +178,7 @@ fn source_specs_pin_shape_partition_abi_and_resource_contracts() {
     assert_eq!(
         specs[2],
         production::Sm89ExactF32KernelSpec {
-            symbol: production::PRISM_RAW_SYMBOL,
+            symbol: production::D384_RAW_SYMBOL,
             kind: DirectSplitMRaw,
             shape: (4_621, 384, 1_928),
             grid: (186, 1, 6),
@@ -226,10 +226,7 @@ fn source_contract_keeps_exact_fma_and_finalize_order_without_reduced_math() {
             < fused.find("DUAL_RUN_CHAIN(acc1, a1, b1, k1);").unwrap()
     );
 
-    for symbol in [
-        production::D768_OUT_RAW_SYMBOL,
-        production::PRISM_RAW_SYMBOL,
-    ] {
+    for symbol in [production::D768_OUT_RAW_SYMBOL, production::D384_RAW_SYMBOL] {
         let raw = production::source_unit(&source, symbol).unwrap();
         assert!(raw.contains("__fmaf_rn(a_reg[i], b_reg[j], acc[i][j])"));
         assert!(raw.contains("partial_chunk[(long long)row * N + column] = acc[i][j]"));

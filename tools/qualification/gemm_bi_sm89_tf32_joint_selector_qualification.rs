@@ -101,7 +101,7 @@ const CASES: [LiteralCase; 6] = [
         gemm_shared_bytes: 86_016,
     },
     LiteralCase {
-        name: "tn_prism",
+        name: "tn_d384",
         op: LiteralOp::Tn,
         dims: (4_621, 384, 1_928),
         route: LiteralRoute::TnM64N96S2,
@@ -115,7 +115,7 @@ const CASES: [LiteralCase; 6] = [
         gemm_shared_bytes: 40_960,
     },
     LiteralCase {
-        name: "nn_prism",
+        name: "nn_d384",
         op: LiteralOp::Nn,
         dims: (4_621, 384, 1_928),
         route: LiteralRoute::NnDirectN96,
@@ -165,10 +165,10 @@ fn post_admission_symbol_and_module(
     match case.name {
         "tn_d768_in" => (WIDE_TN_M96N192_S2_SYMBOL, LiteralModule::Sm89Joint),
         "tn_d768_out" => (WIDE_TN_M96N96_S3_SYMBOL, LiteralModule::Sm89Joint),
-        "tn_prism" if matches!(nvrtc, (12, 8) | (13, 0)) => {
+        "tn_d384" if matches!(nvrtc, (12, 8) | (13, 0)) => {
             (LOWER_TN_M64N64_SYMBOL, LiteralModule::Sm89Joint)
         }
-        "nn_prism" if matches!(nvrtc, (12, 8) | (13, 0)) => {
+        "nn_d384" if matches!(nvrtc, (12, 8) | (13, 0)) => {
             (case.old_auto_symbol, LiteralModule::Sm80)
         }
         "nt_d768_in" if matches!(nvrtc, (12, 8) | (13, 0)) => {
@@ -183,8 +183,8 @@ fn six_cell_literal_map_is_complete_and_has_independent_launch_geometry() {
     let expected_keys = [
         ("tn_d768_in", LiteralOp::Tn, (2_048, 768, 3_072)),
         ("tn_d768_out", LiteralOp::Tn, (2_048, 1_536, 768)),
-        ("tn_prism", LiteralOp::Tn, (4_621, 384, 1_928)),
-        ("nn_prism", LiteralOp::Nn, (4_621, 384, 1_928)),
+        ("tn_d384", LiteralOp::Tn, (4_621, 384, 1_928)),
+        ("nn_d384", LiteralOp::Nn, (4_621, 384, 1_928)),
         ("nn_d768_out", LiteralOp::Nn, (2_048, 1_536, 768)),
         ("nt_d768_in", LiteralOp::Nt, (2_048, 768, 3_072)),
     ];
@@ -326,7 +326,7 @@ mod live {
                 case.gemm_tile = (96, 96);
                 case.gemm_shared_bytes = 73_728;
             }
-            "tn_prism" if matches!(nvrtc, (12, 8) | (13, 0)) => {
+            "tn_d384" if matches!(nvrtc, (12, 8) | (13, 0)) => {
                 case.route = LiteralRoute::TnM64N64;
                 case.gemm_symbol = LOWER_TN_M64N64_SYMBOL;
                 case.gemm_grid = (186, 1, 1);

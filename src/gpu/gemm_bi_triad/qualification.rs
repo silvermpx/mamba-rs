@@ -8028,8 +8028,8 @@ mod tests {
         let fixtures = [
             ("winner_batch_input", (10400, 384, 384), None, 36, true),
             ("winner_batch_out", (10400, 768, 384), None, 72, true),
-            ("winner_prism_out", (4621, 768, 384), None, 72, true),
-            ("winner_prism_input", (4621, 1024, 384), None, 96, true),
+            ("winner_d384_out", (4621, 768, 384), None, 72, true),
+            ("winner_d384_input", (4621, 1024, 384), None, 96, true),
             ("winner_rect_tall", (4096, 512, 768), None, 96, true),
             ("winner_batch_in", (10400, 384, 1536), None, 144, true),
             ("fallback_filled_tail", (4621, 384, 1928), None, 186, false),
