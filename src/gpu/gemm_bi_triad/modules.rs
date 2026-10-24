@@ -13852,6 +13852,7 @@ mod tests {
             kvec: false,
             splits: 2,
             in_cta: false,
+            layer_fold: false,
         };
         let excluded_symbol = "nt_sm120_tma_fma_m64n128_bk16_s2";
         let exclusions = [

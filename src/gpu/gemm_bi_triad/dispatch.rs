@@ -2759,14 +2759,11 @@ fn resolve_f32_triad_auto_impl(
         F32TriadPolicy::RnaTf32BatchInvariant => {
             rna_batch_invariant_selection(request, operands, availability)
         }
-        // The forward folds by its layer's shape on the scalar tiles, whose
-        // plan the launcher takes from `exact_batch_invariant_nn_plan`; the
-        // gradients are the exact policy's.
-        F32TriadPolicy::ExactFmaBatchInvariant => Ok(if request.op == ResolvedGemmOp::Nn {
-            F32TriadSelection::ScalarFma
-        } else {
-            exact_or_scalar_selection(request, operands, availability)
-        }),
+        // Every exact forward folds by its layer's shape now; the gradients
+        // are the exact policy's.
+        F32TriadPolicy::ExactFmaBatchInvariant => {
+            Ok(exact_or_scalar_selection(request, operands, availability))
+        }
     }
 }
 
@@ -3767,12 +3764,18 @@ pub(super) fn exact_or_scalar_selection(
     operands: Option<F32TriadOperands>,
     availability: F32TriadAvailability,
 ) -> F32TriadSelection {
-    operands
-        .and_then(|operands| sm120_fma_exact_route(request, operands, availability))
-        .map_or(
-            F32TriadSelection::ScalarFma,
-            F32TriadSelection::ExactSm120Fma,
-        )
+    // A forward folds by its layer's shape at every batch size: the SM120
+    // kernels serve that cut where they bind, the portable chunk fold
+    // everywhere else.
+    let route = if request.op == ResolvedGemmOp::Nn {
+        operands.and_then(|operands| sm120_fma_layer_route(request, operands, availability))
+    } else {
+        operands.and_then(|operands| sm120_fma_exact_route(request, operands, availability))
+    };
+    route.map_or(
+        F32TriadSelection::ScalarFma,
+        F32TriadSelection::ExactSm120Fma,
+    )
 }
 
 pub fn resolve_tf32_forced(
@@ -4423,6 +4426,7 @@ pub(super) fn sm120_fma_exact_route(
         kvec,
         splits: cut.splits,
         in_cta,
+        layer_fold: false,
     };
     let route = SM120_FMA_MEASURED_CELLS
         .iter()
@@ -4448,6 +4452,73 @@ pub(super) fn sm120_fma_exact_route(
                         .is_excluded(request.op, *route)
                 })
         })?;
+    super::launch::sm120_fma_launch_plan(request, route).ok()?;
+    Some(route)
+}
+
+/// The exact-F32 SM120 route of a forward under its layer's fold: the cut
+/// [`crate::gemm_fold`] reads from the layer alone, served by the SM120
+/// kernels where the card binds them with tensor-map access and every
+/// operand sits on a 16-byte boundary. A CTA walks its tile's pieces and
+/// folds them itself, which ran ahead of a CTA per piece on most forwards
+/// measured on an RTX 5090. The kernels close a ragged k tile at 16 inputs
+/// where the portable chunk partials close at 32, so a cut layer whose last
+/// piece ends 16 inputs into a 32-input group keeps the portable route: an
+/// exactly-zero last piece would come out with another sign there.
+pub(super) fn sm120_fma_layer_route(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    availability: F32TriadAvailability,
+) -> Option<Sm120FmaRoute> {
+    if request.op != ResolvedGemmOp::Nn
+        || operands.alpha.to_bits() != 1.0f32.to_bits()
+        || operands.beta.to_bits() != 0
+    {
+        return None;
+    }
+    let qualified = availability.specialized?;
+    if qualified.module_kind != ModuleKind::TriadSm120
+        || !matches!(qualified.device.compute_capability, (12, 0) | (12, 1))
+        || !qualified.device_caps.tensor_map_access
+    {
+        return None;
+    }
+    let shape = request.shape;
+    let reduction = shape.reduction(request.op);
+    let columns = shape.output_columns(request.op);
+    if reduction == 0
+        || !f32_pointer_is_tma_aligned(operands.a)
+        || !f32_pointer_is_tma_aligned(operands.b)
+        || !f32_pointer_is_tma_aligned(operands.output)
+        || !shape.lda.is_multiple_of(4)
+        || !shape.ldb.is_multiple_of(4)
+    {
+        return None;
+    }
+    let cut = exact_chunks(reduction, columns);
+    if cut && reduction % 32 == 16 {
+        return None;
+    }
+    let piece = if cut {
+        exact_chunk(reduction, columns)
+    } else {
+        reduction
+    };
+    let splits = u8::try_from(reduction.div_ceil(piece)).ok()?;
+    let (tile, kvec) = sm120_fma_generic_tile(request, qualified.device.multiprocessor_count, 1)?;
+    let route = Sm120FmaRoute {
+        tile,
+        kvec,
+        splits,
+        in_cta: splits > 1,
+        layer_fold: true,
+    };
+    if qualified
+        .sm120_fma_exclusions
+        .is_excluded(request.op, route)
+    {
+        return None;
+    }
     super::launch::sm120_fma_launch_plan(request, route).ok()?;
     Some(route)
 }
@@ -13641,6 +13712,117 @@ mod tf32_tests {
     }
 
     #[test]
+    fn sm120_forward_cuts_by_the_layer_at_every_batch_size() {
+        // Every exact forward folds by its layer's shape: on an RTX 5090 the
+        // SM120 kernels serve that cut, the same at every row count, and a
+        // forward they cannot serve takes the portable chunk fold, which
+        // writes the same bits.
+        let identity = sm120_cohort().identity;
+        let availability = sm120_availability_for(identity);
+        let aligned = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: None,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        let forward = |m: usize, k: usize, n: usize| F32TriadRequest {
+            op: ResolvedGemmOp::Nn,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (m, k, n)),
+        };
+        let mut served = [0_usize; 2];
+        for k in [128, 256, 384, 511, 512, 768, 1_024, 1_040, 1_536, 3_072] {
+            for n in [256, 512, 1_536] {
+                let mut cut_seen = None;
+                for m in [512, 1_024, 4_096, 10_400] {
+                    let request = forward(m, k, n);
+                    for policy in [
+                        F32TriadPolicy::ExactScalarFma,
+                        F32TriadPolicy::ExactFmaBatchInvariant,
+                    ] {
+                        let selection = resolve_f32_triad_auto_with_operands(
+                            policy,
+                            request,
+                            aligned,
+                            availability,
+                        )
+                        .unwrap();
+                        let what = format!("{policy:?} {m}x{k}x{n}: {selection:?}");
+                        match selection {
+                            F32TriadSelection::ExactSm120Fma(route) => {
+                                assert!(route.layer_fold, "{what}");
+                                let cut = super::exact_chunks(k, n);
+                                let piece = if cut { super::exact_chunk(k, n) } else { k };
+                                assert_eq!(usize::from(route.splits), k.div_ceil(piece), "{what}");
+                                assert_eq!(route.in_cta, route.splits > 1, "{what}");
+                                assert!(!(cut && k % 32 == 16), "{what}");
+                                let launch =
+                                    crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(
+                                        request, route,
+                                    )
+                                    .unwrap();
+                                let piece_tiles = if route.splits > 1 {
+                                    piece / 16
+                                } else {
+                                    k.div_ceil(16)
+                                };
+                                assert_eq!(launch.tiles_per_split, piece_tiles, "{what}");
+                                assert_eq!(launch.chain_from, None, "{what}");
+                                // The cut does not move with the row count.
+                                assert_eq!(
+                                    *cut_seen.get_or_insert(route.splits),
+                                    route.splits,
+                                    "{what}"
+                                );
+                                served[usize::from(route.splits > 1)] += 1;
+                            }
+                            F32TriadSelection::ScalarFma => {}
+                            other => panic!("{what}: {other:?} is not an exact forward"),
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            served[0] > 0 && served[1] > 0,
+            "the sweep reaches chains and pieces: {served:?}"
+        );
+        // A forward off a 16-byte boundary, or one whose last piece would end
+        // 16 inputs into a 32-input group, keeps the portable fold.
+        let misaligned = F32TriadOperands {
+            a: 0x2004,
+            ..aligned
+        };
+        for (request, operands) in [
+            (forward(4_096, 1_024, 512), misaligned),
+            (forward(4_096, 1_040, 512), aligned),
+        ] {
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::ExactScalarFma,
+                    request,
+                    operands,
+                    availability
+                )
+                .unwrap(),
+                F32TriadSelection::ScalarFma,
+                "{request:?}"
+            );
+        }
+        // A scaled forward has no layer route; the gradients keep the
+        // portable plan's cut.
+        let scaled = F32TriadOperands {
+            alpha: 2.0,
+            ..aligned
+        };
+        assert_eq!(
+            super::sm120_fma_layer_route(forward(4_096, 1_024, 512), scaled, availability),
+            None
+        );
+    }
+
+    #[test]
     fn sm120_exact_folds_short_pieces_and_tails_in_one_cta() {
         // A thin cut's two-tile pieces and a cut with a tail fold inside one
         // CTA per tile, which half the card's tiles admit; the long pieces
@@ -13779,6 +13961,7 @@ mod tf32_tests {
             kvec: false,
             splits: 2,
             in_cta: false,
+            layer_fold: false,
         };
         let error = crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(request, route)
             .expect_err("a split the portable plan does not make");
@@ -13808,14 +13991,14 @@ mod tf32_tests {
                     0.0
                 },
             };
-            assert_eq!(
-                resolve_f32_triad_auto_with_operands(
-                    F32TriadPolicy::ExactScalarFma,
-                    request,
-                    operands,
-                    availability,
+            // A forward folds by its layer now, whatever cell measured it;
+            // the gradients keep their measured arms.
+            let expected = if cell.op == ResolvedGemmOp::Nn {
+                super::sm120_fma_layer_route(request, operands, availability).map_or(
+                    F32TriadSelection::ScalarFma,
+                    F32TriadSelection::ExactSm120Fma,
                 )
-                .unwrap(),
+            } else {
                 F32TriadSelection::ExactSm120Fma(Sm120FmaRoute {
                     tile: cell.tile,
                     kvec: cell.kvec,
@@ -13824,7 +14007,18 @@ mod tf32_tests {
                         && (cut.tail
                             || cut.chain_from.is_some()
                             || cut.piece_tiles <= super::SM120_FMA_SHORT_PIECE_TILES),
-                }),
+                    layer_fold: false,
+                })
+            };
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::ExactScalarFma,
+                    request,
+                    operands,
+                    availability,
+                )
+                .unwrap(),
+                expected,
                 "{:?} {:?}",
                 cell.op,
                 cell.shape
@@ -13897,12 +14091,14 @@ mod tf32_tests {
             kvec: false,
             splits: 1,
             in_cta: false,
+            layer_fold: false,
         };
         let generic = Sm120FmaRoute {
             tile: Sm120FmaTile::M128N64,
             kvec: true,
             splits: 1,
             in_cta: false,
+            layer_fold: false,
         };
         let availability =
             exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, measured)]);
@@ -13943,12 +14139,14 @@ mod tf32_tests {
             kvec: false,
             splits: 2,
             in_cta: false,
+            layer_fold: false,
         };
         let generic = Sm120FmaRoute {
             tile: Sm120FmaTile::M128N64,
             kvec: true,
             splits: 2,
             in_cta: false,
+            layer_fold: false,
         };
         let availability = exact_sm120_availability_with_exclusions(&[
             (ResolvedGemmOp::Nt, measured),
@@ -13975,18 +14173,21 @@ mod tf32_tests {
             kvec: false,
             splits: 2,
             in_cta: false,
+            layer_fold: false,
         };
         let availability =
             exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, excluded)]);
         for (op, dims, expected) in [
             (
+                // The forward folds by its layer: four pieces of 384 inputs.
                 ResolvedGemmOp::Nn,
                 (2_048, 1_536, 768),
                 Sm120FmaRoute {
                     tile: Sm120FmaTile::M128N64,
                     kvec: false,
-                    splits: 1,
-                    in_cta: false,
+                    splits: 4,
+                    in_cta: true,
+                    layer_fold: true,
                 },
             ),
             (
@@ -13997,6 +14198,7 @@ mod tf32_tests {
                     kvec: false,
                     splits: 4,
                     in_cta: false,
+                    layer_fold: false,
                 },
             ),
         ] {
@@ -14032,6 +14234,7 @@ mod tf32_tests {
             kvec: false,
             splits: 2,
             in_cta: false,
+            layer_fold: false,
         };
         let availability = exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, exact)]);
         let (request, _) = nt_d768_out_request_and_operands();

@@ -818,12 +818,21 @@ pub(super) fn append_tf32_route_digest(
                 .required(b"tile", &[tile])
                 .required(b"stages", &[route.stages.count()])
         }
-        Tf32PhysicalRoute::Sm120TmaFmaExact(route) => digest
-            .required(b"route-family", &[9])
-            .required(b"tile", &[route.tile.digest_code()])
-            .required(b"kvec", &[u8::from(route.kvec)])
-            .required(b"splits", &[route.splits])
-            .required(b"in-cta", &[u8::from(route.in_cta)]),
+        Tf32PhysicalRoute::Sm120TmaFmaExact(route) => {
+            let digest = digest
+                .required(b"route-family", &[9])
+                .required(b"tile", &[route.tile.digest_code()])
+                .required(b"kvec", &[u8::from(route.kvec)])
+                .required(b"splits", &[route.splits])
+                .required(b"in-cta", &[u8::from(route.in_cta)]);
+            // Only a layer-fold route adds the word, so the digests of the
+            // portable-cut routes stay what they were.
+            if route.layer_fold {
+                digest.required(b"layer-fold", &[1])
+            } else {
+                digest
+            }
+        }
         Tf32PhysicalRoute::Sm89MmaTf32Compact8 => digest.required(b"route-family", &[10]),
         Tf32PhysicalRoute::Sm89TnPreRnaN96 => digest.required(b"route-family", &[11]),
         Tf32PhysicalRoute::Sm89TnPreRnaM64N64 => digest.required(b"route-family", &[12]),
@@ -1778,6 +1787,9 @@ pub struct Sm120FmaRoute {
     /// One CTA walks all the pieces of its tile and folds them itself,
     /// instead of one CTA per piece and an owner that folds the slabs.
     pub in_cta: bool,
+    /// The cut is the batch-invariant forward's, read from the layer alone
+    /// ([`crate::gemm_fold`]), instead of the portable plan's.
+    pub layer_fold: bool,
 }
 
 impl Sm120FmaRoute {
@@ -1791,6 +1803,9 @@ impl Sm120FmaRoute {
         if self.in_cta && self.splits < 2 {
             return Err("an in-CTA fold needs at least two pieces".into());
         }
+        if self.layer_fold && op != ResolvedGemmOp::Nn {
+            return Err("the layer's fold serves the forward only".into());
+        }
         Ok(())
     }
 
@@ -1802,6 +1817,7 @@ impl Sm120FmaRoute {
             kvec: self.kvec,
             splits: 1,
             in_cta: false,
+            layer_fold: false,
         }
     }
 }
@@ -3542,6 +3558,7 @@ const fn sm120_fma_spec(
             kvec,
             splits: 1,
             in_cta: false,
+            layer_fold: false,
         }),
         symbol,
         module_kind: ModuleKind::TriadSm120,

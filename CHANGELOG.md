@@ -25,6 +25,14 @@
   faster on GeForce and workstation cards, whose double pipe is slow: on an
   RTX 5090 the sum of a split weight gradient took 13 to 17 microseconds
   per call and now takes 4 to 7.
+- Every exact f32 forward adds each output by its layer's shape alone, so
+  a row has the same bits at every batch size: one `fma` chain, or four
+  pieces summed in order for a layer of 512 inputs or more (384 when it has
+  fewer than 128 outputs), the bias after the pieces. The RTX 5090 and RTX
+  PRO 6000 serve it on their own kernels where the operands sit on 16-byte
+  boundaries, every other board on the portable chunk fold, and a CPU model
+  of the fold reproduces both. Forwards change their bits once in this
+  release. A scaled or accumulating forward keeps the plan of its shape.
 - Exact f32 is faster on the RTX 5090 and RTX PRO 6000. Their own kernels
   serve more products, and a sum cut into short pieces is added inside one
   block. On an RTX PRO 6000 a set of about 400 exact products runs in 0.90
@@ -117,13 +125,12 @@
   RTX 5090 and an RTX PRO 6000, and none is slower than the plain table on
   either card; the persistent forward tile, up to 13 percent faster on a
   band of tall layers, was measured on the RTX 5090 alone.
-- `F32TriadPolicy::ExactFmaBatchInvariant` runs exact f32 products whose
-  forward adds each output by its layer's shape alone, as one `fma` chain
-  or as 64-input chunks summed in order for a deep layer, so a row has the
-  same bits at every batch size and a CPU model of the two folds
-  reproduces them. A batch of a few rows runs on thin pipelined tiles, and
-  a layer whose 128 x 128 tiles cover the card enough times runs that tile
-  (4096 x 256 x 2112 on an RTX 6000 Ada: about 200 to 110 microseconds).
+- `F32TriadPolicy::ExactFmaBatchInvariant` runs the exact f32 products
+  with the forward every exact policy now has, and refuses a scaled or
+  accumulating forward instead of taking the plan of its shape. A batch of
+  a few rows runs on thin pipelined tiles, and a layer whose 128 x 128
+  tiles cover the card enough times runs that tile (4096 x 256 x 2112 on
+  an RTX 6000 Ada: about 200 to 110 microseconds).
 - GEMMs on a caller's CUDA context and stream: `GpuDevice::from_context`,
   `GpuCtx::new_on_stream`, and raw-pointer forward, input-gradient and
   weight-gradient entries.

@@ -3923,9 +3923,23 @@ pub(super) fn sm120_fma_launch_plan(
         .ok_or_else(|| invalid_gemm_dimensions("exact-F32 tile count overflows usize"))?;
     let splits = usize::from(route.splits);
     let k_tiles = reduction.div_ceil(SM120_FMA_BK as usize);
-    // A split deals the portable plan's pieces and nothing else, so the
-    // product keeps the bits the other architectures write.
-    let (tiles_per_split, chain_from) = if splits == 1 {
+    // A split deals the portable plan's pieces, or the layer's pieces for a
+    // forward under its layer's fold, and nothing else, so the product
+    // keeps the bits the other architectures write.
+    let (tiles_per_split, chain_from) = if route.layer_fold {
+        let piece_tiles = if super::dispatch::exact_chunks(reduction, columns) {
+            super::dispatch::exact_chunk(reduction, columns) / SM120_FMA_BK as usize
+        } else {
+            k_tiles
+        };
+        if piece_tiles == 0 || k_tiles.div_ceil(piece_tiles) != splits {
+            return Err(format!(
+                "exact-F32 SM120 layer fold of {splits} pieces is not the layer's cut of {:?} {}x{}x{}",
+                request.op, request.shape.m, request.shape.k, request.shape.n
+            ));
+        }
+        (piece_tiles, None)
+    } else if splits == 1 {
         (k_tiles, None)
     } else {
         match super::dispatch::sm120_fma_portable_cut(request) {
@@ -5824,25 +5838,28 @@ fn scalar_proof_key(
 
 /// The scalar plan a prepared launch takes: the frozen evidence, or the
 /// proof-tier candidate the ledger has already admitted for the cell.
-/// The forward plan of the batch-invariant exact policy, which no evidence
-/// or proof overrides: every chain tile writes the same bits, so the table
-/// alone picks one.
+/// The plan of every exact forward: its layer's fold, which no evidence or
+/// proof overrides, since every chain tile writes the same bits and the
+/// table alone picks one.
 fn batch_invariant_exact_plan(
     ctx: &GpuCtx,
     request: F32TriadRequest,
     operands: F32TriadOperands,
 ) -> Result<Option<ScalarDispatchPlan>, String> {
-    if ctx.f32_triad_policy() != crate::gpu::context::F32TriadPolicy::ExactFmaBatchInvariant
-        || request.op != ResolvedGemmOp::Nn
-    {
+    if request.op != ResolvedGemmOp::Nn {
         return Ok(None);
     }
-    // The folds store the chain and add nothing of the old output.
+    // The folds store the chain and add nothing of the old output. Only the
+    // batch-invariant policy refuses a scaled or accumulating forward; the
+    // others keep the plan of its shape for one.
     if operands.alpha.to_bits() != 1.0f32.to_bits() || operands.beta.to_bits() != 0 {
-        return Err(format!(
-            "the batch-invariant exact forward takes alpha 1 and beta 0, not {} and {}",
-            operands.alpha, operands.beta
-        ));
+        if ctx.f32_triad_policy() == crate::gpu::context::F32TriadPolicy::ExactFmaBatchInvariant {
+            return Err(format!(
+                "the batch-invariant exact forward takes alpha 1 and beta 0, not {} and {}",
+                operands.alpha, operands.beta
+            ));
+        }
+        return Ok(None);
     }
     super::dispatch::exact_batch_invariant_nn_plan(
         request,
@@ -6315,6 +6332,7 @@ pub(in crate::gpu) fn launch_cached_inference_sm120_exact_tma<O: PhysicalLaunchO
         kvec: false,
         splits: 1,
         in_cta: false,
+        layer_fold: false,
     });
     if resolve_tf32_forced(request, ctx.kernels.f32_triad_availability(), route).is_err() {
         return Ok(false);
@@ -15667,6 +15685,7 @@ mod prepared_f32_launch_tests {
             kvec: false,
             splits: 1,
             in_cta: false,
+            layer_fold: false,
         });
         assert_distinct(
             context_token,
@@ -15691,6 +15710,7 @@ mod prepared_f32_launch_tests {
                     kvec: false,
                     splits: 1,
                     in_cta: false,
+                    layer_fold: false,
                 },)),
                 request,
                 operands,

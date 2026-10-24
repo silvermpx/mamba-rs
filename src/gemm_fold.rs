@@ -85,7 +85,7 @@ impl FoldRule {
         bias: BiasPlace::SeedOnePiece,
     };
 
-    /// The batch-invariant exact forward as it ships today: 64-input
+    /// The batch-invariant exact forward of the 0.8.2 candidates: 64-input
     /// chunks from the same depths, zeros as the kernels' padding leaves
     /// them.
     pub const CHUNKS_TODAY: Self = Self {
@@ -94,10 +94,22 @@ impl FoldRule {
         zero: ZeroSign::Grain,
         bias: BiasPlace::SeedOnePiece,
     };
+
+    /// Four pieces from the same depths, zeros as the kernels' padding
+    /// leaves them: the proposed cut on the kernels as they are.
+    pub const FOUR_PIECES: Self = Self {
+        cut: DeepCut::FourPieces,
+        threshold: CutThreshold::Deep512Narrow384,
+        zero: ZeroSign::Grain,
+        bias: BiasPlace::SeedOnePiece,
+    };
 }
 
-/// The fold the batch-invariant exact forward follows.
-pub const BATCH_INVARIANT_FORWARD: FoldRule = FoldRule::CHUNKS_TODAY;
+/// The fold every exact f32 forward follows. Four pieces ran in 0.58 of
+/// the 64-input chunks' total time on the portable kernels of an RTX 5090,
+/// and 0.93 of the exact default on its SM120 kernels where the chunks
+/// took 1.14.
+pub const BATCH_INVARIANT_FORWARD: FoldRule = FoldRule::FOUR_PIECES;
 
 /// The piece length that cuts `r` inputs into at most `p` pieces on a
 /// granule of `g`: `g * ceil(ceil(r / g) / p)`. Zero for an empty reduction.
