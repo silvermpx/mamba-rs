@@ -3127,7 +3127,7 @@ fn exact_f32_policy_is_the_default_and_tf32_storage_is_its_only_door() {
     assert_contains_all(
         &numeric,
         &[
-            "Self::Tf32 => F32TriadPolicy::AllowDeterministicTf32",
+            "Self::Tf32 => F32TriadPolicy::RnaTf32BatchInvariant",
             "Self::F32 | Self::Bf16 | Self::F16 => F32TriadPolicy::ExactScalarFma",
         ],
         "storage precision to f32 numeric contract",
@@ -6762,7 +6762,7 @@ fn validate_physical_observation_topology(
         ("gemm_bi_forward_tc_with_tile_in", 1),
         ("gemm_bi_backward_dw_tc_with_tile_in", 1),
         ("gemm_bi_backward_dx_tc_with_tile_in", 1),
-        ("gemm_bi_forward_typed_in", 4),
+        ("gemm_bi_forward_typed_in", 2),
         ("gemm_bi_backward_dw_typed_in", 3),
         ("gemm_bi_backward_dx_typed_in", 3),
     ] {
