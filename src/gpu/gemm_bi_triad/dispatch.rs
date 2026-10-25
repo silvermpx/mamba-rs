@@ -8704,7 +8704,13 @@ pub(super) fn exact_batch_invariant_nn_plan(
         if big_fills {
             return Ok(ScalarDispatchPlan::NnExactPiecesBig);
         }
-        if m.div_ceil(64).saturating_mul(n.div_ceil(64)) >= waves {
+        // The 64 x 64 tile only once its rows fill a tile: a thin batch over a
+        // wide layer (a language model's head over a 32000-word vocabulary)
+        // covers the card with tiles that are almost all padding, and the
+        // chunk partials then ran in 0.54 to 0.91 of its time on an RTX 5090
+        // from 1 to 32 rows, while at 64 rows the tile ran 1.6x faster.
+        if m >= EXACT_PIECES_M64_MIN_ROWS && m.div_ceil(64).saturating_mul(n.div_ceil(64)) >= waves
+        {
             return Ok(ScalarDispatchPlan::NnExactPiecesM64);
         }
         let chunks = k.div_ceil(exact_chunk(k, n));
@@ -8777,6 +8783,10 @@ fn exact_small_partial_underfills(m: usize, outputs: usize, chunks: usize, waves
 /// The grid's row axis, where the thin and pipelined 16 x 16 tiles put their
 /// 16-row tiles.
 pub(super) const EXACT_SLAB_GRID_ROWS_MAX: usize = 65_535;
+
+/// The rows from which a cut layer's forward folds its pieces in the 64 x 64
+/// tile; a thinner batch takes the chunk partials, which write the same bits.
+pub(super) const EXACT_PIECES_M64_MIN_ROWS: usize = 64;
 
 /// The input gradient's plan under its layer's fold: `dX[m][i]` sums
 /// `dY[m][r] * W[i][r]` over the forward's outputs r, cut as a forward of
@@ -18923,9 +18933,9 @@ mod sm100_sm90a_auto_tests {
 #[cfg(test)]
 mod exact_batch_invariant_tests {
     use super::{
-        ExactChunkPartial, GEMM_CUSTOM_MIN, SPLITK_SCRATCH_CAP, ScalarDispatchPlan,
-        exact_batch_invariant_nn_plan, exact_batch_invariant_nt_plan, exact_chunk, exact_chunks,
-        resolve_f32_triad_auto,
+        EXACT_PIECES_M64_MIN_ROWS, ExactChunkPartial, GEMM_CUSTOM_MIN, SPLITK_SCRATCH_CAP,
+        ScalarDispatchPlan, exact_batch_invariant_nn_plan, exact_batch_invariant_nt_plan,
+        exact_chunk, exact_chunks, resolve_f32_triad_auto,
     };
     use crate::gpu::context::F32TriadPolicy;
     use crate::gpu::gemm_bi_triad::contract::{
@@ -18998,6 +19008,7 @@ mod exact_batch_invariant_tests {
                                 ScalarDispatchPlan::NnExactPiecesM64 => {
                                     assert!(
                                         exact_chunks(k, n)
+                                            && m >= EXACT_PIECES_M64_MIN_ROWS
                                             && m.div_ceil(64) * n.div_ceil(64)
                                                 >= multiprocessors as usize,
                                         "{what}"
@@ -19031,6 +19042,40 @@ mod exact_batch_invariant_tests {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_forward_keeps_a_thin_batch_off_the_64_row_pieces_tile() {
+        // A language model's head: a few rows over a 32000-word vocabulary.
+        for multiprocessors in [128, 142, 170, 188] {
+            for compute_capability in [(8, 9), (12, 0)] {
+                for k in [768, 1024, 2048] {
+                    for m in [1, 2, 4, 8, 16, 32] {
+                        let plan = exact_batch_invariant_nn_plan(
+                            nn(m, k, 32_000),
+                            multiprocessors,
+                            compute_capability,
+                        )
+                        .unwrap();
+                        assert!(
+                            matches!(plan, ScalarDispatchPlan::NnExactChunk { .. }),
+                            "{m}x{k}x32000 on {multiprocessors} SMs: {plan:?}"
+                        );
+                    }
+                    let plan = exact_batch_invariant_nn_plan(
+                        nn(64, k, 32_000),
+                        multiprocessors,
+                        compute_capability,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        plan,
+                        ScalarDispatchPlan::NnExactPiecesM64,
+                        "64x{k}x32000 on {multiprocessors} SMs"
+                    );
                 }
             }
         }
