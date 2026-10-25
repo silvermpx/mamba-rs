@@ -2323,6 +2323,11 @@ struct ScalarNodeSpec {
 
 fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
     match plan {
+        ScalarDispatchPlan::NtExactChunk {
+            partial: ExactChunkPartial::Slim,
+            pieces,
+            ..
+        } => 1 + 2 * pieces as usize,
         ScalarDispatchPlan::NnExactChunk { pieces, .. }
         | ScalarDispatchPlan::NtExactChunk { pieces, .. } => 2 * pieces as usize,
         ScalarDispatchPlan::NnSplitKThinTail { .. }
@@ -2581,6 +2586,37 @@ fn scalar_argument_layout(
         (ScalarDispatchPlan::NtSplitKMain { .. }, _)
         | (ScalarDispatchPlan::NtSplitKTail { .. }, _)
         | (ScalarDispatchPlan::NtSplitKSlim { .. }, _) => ScalarArgumentLayout::default(),
+        // The slim input-gradient fold transposes the weight first; its
+        // pieces then follow the forward's layout one node later.
+        (
+            ScalarDispatchPlan::NtExactChunk {
+                partial: ExactChunkPartial::Slim,
+                ..
+            },
+            0,
+        ) => ScalarArgumentLayout::default(),
+        (
+            ScalarDispatchPlan::NtExactChunk {
+                partial: ExactChunkPartial::Slim,
+                piece_rows,
+                ..
+            },
+            index,
+        ) => {
+            let first_row = ((index - 1) / 2) as u64 * u64::from(piece_rows);
+            if (index - 1) % 2 == 0 {
+                ScalarArgumentLayout {
+                    a_offset: first_row * request.shape.lda as u64 * 4,
+                    ..ScalarArgumentLayout::default()
+                }
+            } else {
+                ScalarArgumentLayout {
+                    output_offset: first_row * request.shape.ldc as u64 * 4,
+                    null_pointer_mask: 0b11000 | (bias_null << 2),
+                    ..ScalarArgumentLayout::default()
+                }
+            }
+        }
         // Each piece is a partial over its rows of A, then the reduction
         // into its rows of the output.
         (
@@ -3006,6 +3042,16 @@ fn scalar_physical_nodes(
             piece_rows,
             pieces,
         } => {
+            if partial == ExactChunkPartial::Slim {
+                push_scalar_node(
+                    &mut nodes,
+                    context,
+                    "transpose_f32_2d",
+                    (32, 32),
+                    (1, 1),
+                    cfg((n.div_ceil(32), k.div_ceil(32), 1), (32, 32, 1), 0),
+                );
+            }
             for piece in 0..pieces {
                 let first_row = piece * piece_rows;
                 let rows = piece_rows.min(m - first_row);
@@ -3028,9 +3074,17 @@ fn scalar_physical_nodes(
                         (k.div_ceil(16), rows.div_ceil(16), chunks),
                         64,
                     ),
-                    ExactChunkPartial::Slim => {
-                        return Err("the input gradient's chunk fold has no slim partial".into());
-                    }
+                    ExactChunkPartial::Slim => (
+                        "nn_splitk_slim_partial",
+                        (128, 64),
+                        (32, 1),
+                        (
+                            checked_grid_product(rows.div_ceil(128), k.div_ceil(64), 1)?,
+                            1,
+                            chunks,
+                        ),
+                        128,
+                    ),
                 };
                 push_scalar_node(
                     &mut nodes,
@@ -4619,6 +4673,10 @@ fn scalar_transpose_scratch_elements(
         ScalarDispatchPlan::NtSplitKTail { k_main, .. } => k_main,
         ScalarDispatchPlan::NtSplitKMain { .. }
         | ScalarDispatchPlan::NtSplitKSlim { .. }
+        | ScalarDispatchPlan::NtExactChunk {
+            partial: ExactChunkPartial::Slim,
+            ..
+        }
         | ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified
@@ -11731,6 +11789,53 @@ fn gemm_bi_backward_dx_with_control<
         let null_tail: u64 = 0;
         let null_bias: u64 = 0;
         let zero_i32_local: i32 = 0;
+        // The slim partial folds the pieces over the weight transposed into
+        // the scratch, W[n_in][n_out] to W_T[n_out][n_in], once for all the
+        // pieces of rows.
+        let w_t_ptr = if partial == ExactChunkPartial::Slim {
+            use cudarc::driver::DevicePtr;
+            let scratch = kernels.transpose_scratch_buf(stream)?;
+            let required =
+                scalar_transpose_scratch_elements(request, scalar_plan)?.ok_or_else(|| {
+                    "the input gradient's slim chunk fold lost its transpose extent".to_string()
+                })?;
+            if required > scratch.len() {
+                return Err(format!(
+                    "the input gradient's slim chunk fold needs {required} transposed weights, \
+                     the scratch holds {}",
+                    scratch.len()
+                ));
+            }
+            let (pointer, _) = scratch.device_ptr(stream);
+            let t_cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (
+                    checked_dims.n_u32.div_ceil(32),
+                    checked_dims.k_u32.div_ceil(32),
+                    1,
+                ),
+                block_dim: (32, 32, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut tb = scalar_launch_builder(stream, &kernels.gemm_bi_transpose_f32_2d, &control);
+            tb.arg(&pointer);
+            tb.arg(&w_ptr);
+            tb.arg(&columns_i);
+            tb.arg(&reduction_i);
+            enqueue_scalar_backward(
+                &mut control,
+                request,
+                operands,
+                "transpose_f32_2d",
+                t_cfg,
+                &mut tb,
+            )
+            .map_err(|error| {
+                error.with_driver_context(format_args!("transpose_f32_2d (input-gradient fold)"))
+            })?;
+            pointer
+        } else {
+            0
+        };
         for piece in 0..pieces {
             let first_row = piece * piece_rows;
             let rows = piece_rows.min(checked_dims.m_u32 - first_row);
@@ -11777,9 +11882,16 @@ fn gemm_bi_backward_dx_with_control<
                     (checked_dims.k_u32.div_ceil(16), rows.div_ceil(16), chunks),
                     64,
                 ),
-                ExactChunkPartial::Slim => {
-                    return Err("the input gradient's chunk fold has no slim partial".into());
-                }
+                ExactChunkPartial::Slim => (
+                    &kernels.gemm_bi_nn_splitk_slim_partial,
+                    "nn_splitk_slim_partial",
+                    (
+                        checked_tile_grid(rows, 128, checked_dims.k_u32, 64)?,
+                        1,
+                        chunks,
+                    ),
+                    128,
+                ),
             };
             let partial_cfg = cudarc::driver::LaunchConfig {
                 grid_dim: grid,
@@ -11789,12 +11901,28 @@ fn gemm_bi_backward_dx_with_control<
             let mut pb = scalar_launch_builder(stream, function, &control);
             pb.arg(&partial_ptr);
             pb.arg(&a_ptr);
-            pb.arg(&w_ptr);
-            if partial == ExactChunkPartial::Narrow16 {
-                pb.arg(&null_bias);
-                pb.arg(&slab_params);
-            } else {
-                pb.arg(&chunk_params);
+            match partial {
+                ExactChunkPartial::Slim => {
+                    // NN over the transposed weight: M rows, N = n_in
+                    // outputs, K = n_out, dY rows n_out apart, W_T rows
+                    // n_in apart.
+                    pb.arg(&w_t_ptr);
+                    pb.arg(&rows_i);
+                    pb.arg(&columns_i);
+                    pb.arg(&reduction_i);
+                    pb.arg(&reduction_i);
+                    pb.arg(&columns_i);
+                    pb.arg(&k_chunk_i);
+                }
+                ExactChunkPartial::Narrow16 => {
+                    pb.arg(&w_ptr);
+                    pb.arg(&null_bias);
+                    pb.arg(&slab_params);
+                }
+                ExactChunkPartial::Small => {
+                    pb.arg(&w_ptr);
+                    pb.arg(&chunk_params);
+                }
             }
             enqueue_scalar_backward(
                 &mut control,

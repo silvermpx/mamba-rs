@@ -8266,6 +8266,22 @@ fn scalar_plan_with_admission(
     Ok(fallback)
 }
 
+/// Whether a cut input gradient's weights fit the transpose scratch, so the
+/// forward's slim partial can fold its pieces over the transposed weight.
+/// The transpose and the partial take any row stride and alignment.
+fn nt_chunk_transpose_fits(request: F32TriadRequest) -> bool {
+    let shape = request.shape;
+    request.op == crate::gpu::kernel_identity::ResolvedGemmOp::Nt
+        && shape
+            == F32TriadShape::contiguous(
+                crate::gpu::kernel_identity::ResolvedGemmOp::Nt,
+                (shape.m, shape.k, shape.n),
+            )
+        && shape.k.checked_mul(shape.n).is_some_and(|elements| {
+            elements <= super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS
+        })
+}
+
 /// Whether an input gradient's weights fit the transpose scratch and its
 /// shape is one the transposed chain serves: the outputs' row stride whole
 /// 16-byte chunks and the reduction not 16 past a multiple of 32.
@@ -8495,6 +8511,10 @@ impl ScalarDispatchPlan {
                 | Self::NtSlimViaTranspose
                 | Self::NtD384VectorQualified
                 | Self::TnD768InSm89DualChunkQualified
+                | Self::NtExactChunk {
+                    partial: ExactChunkPartial::Slim,
+                    ..
+                }
         )
     }
 }
@@ -8923,7 +8943,24 @@ pub(super) fn exact_batch_invariant_nt_plan(
             ));
         }
         let piece_rows = (SPLITK_SCRATCH_CAP / chunks.saturating_mul(n_in).max(1)).clamp(1, m);
-        let partial = if m == 1
+        // The forward's slim partial over the weight transposed into the
+        // scratch writes the same planes as the native partials: each piece
+        // is the same chain of the same products. It takes over where the
+        // forward of the transposed shape takes it, once its grid fills
+        // three quarters of a wave. The native 32 x 64 partial reads the
+        // weight across its rows: on an RTX 5090 it ran NT 1024x384x1536 in
+        // 69 us, where the slim partial runs the forward of the same layer
+        // in 49.
+        let slim_grid = m
+            .div_ceil(128)
+            .saturating_mul(n_in.div_ceil(64))
+            .saturating_mul(chunks);
+        let partial = if m > 64
+            && slim_grid.saturating_mul(4) >= (multiprocessors as usize).saturating_mul(3)
+            && nt_chunk_transpose_fits(request)
+        {
+            ExactChunkPartial::Slim
+        } else if m == 1
             || exact_small_partial_underfills(m, n_in, chunks, multiprocessors as usize)
         {
             ExactChunkPartial::Narrow16
@@ -19238,15 +19275,22 @@ mod exact_batch_invariant_tests {
                                 pieces,
                             } => {
                                 assert!(cut, "{what}");
-                                let underfill = m.div_ceil(32)
-                                    * n_in.div_ceil(64)
-                                    * n_out.div_ceil(exact_chunk(n_out, n_in))
+                                let chunk_count = n_out.div_ceil(exact_chunk(n_out, n_in));
+                                let underfill = m.div_ceil(32) * n_in.div_ceil(64) * chunk_count
                                     < multiprocessors as usize;
-                                assert_eq!(
-                                    partial == ExactChunkPartial::Narrow16,
-                                    m == 1 || underfill,
-                                    "{what}"
-                                );
+                                let slim = m > 64
+                                    && m.div_ceil(128) * n_in.div_ceil(64) * chunk_count * 4
+                                        >= multiprocessors as usize * 3
+                                    && n_in * n_out
+                                        <= super::super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS;
+                                let expected = if slim {
+                                    ExactChunkPartial::Slim
+                                } else if m == 1 || underfill {
+                                    ExactChunkPartial::Narrow16
+                                } else {
+                                    ExactChunkPartial::Small
+                                };
+                                assert_eq!(partial, expected, "{what}");
                                 assert_eq!(
                                     chunks as usize,
                                     n_out.div_ceil(exact_chunk(n_out, n_in)),
@@ -19293,6 +19337,46 @@ mod exact_batch_invariant_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn exact_cut_input_gradients_fold_on_the_slim_partial_over_the_transposed_weight() {
+        let nt = |m: usize, n_in: usize, n_out: usize| F32TriadRequest {
+            op: ResolvedGemmOp::Nt,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (m, n_in, n_out)),
+        };
+        // A cut layer's gradient whose slim grid fills three quarters of the
+        // card: four pieces of the 1536-input fold over the transposed weight.
+        for (m, n_in, n_out) in [(1024, 384, 1536), (768, 384, 1536), (512, 1536, 2112)] {
+            let plan = exact_batch_invariant_nt_plan(nt(m, n_in, n_out), 170, false).unwrap();
+            assert!(
+                matches!(
+                    plan,
+                    ScalarDispatchPlan::NtExactChunk {
+                        partial: ExactChunkPartial::Slim,
+                        ..
+                    }
+                ),
+                "NT {m}x{n_in}x{n_out}: {plan:?}"
+            );
+            assert!(plan.needs_transpose_scratch() && plan.needs_split_scratch());
+        }
+        // A thin batch keeps the native partials, and a weight the transpose
+        // scratch cannot hold never takes the slim partial.
+        assert!(matches!(
+            exact_batch_invariant_nt_plan(nt(64, 384, 1536), 170, false).unwrap(),
+            ScalarDispatchPlan::NtExactChunk {
+                partial: ExactChunkPartial::Small | ExactChunkPartial::Narrow16,
+                ..
+            }
+        ));
+        assert!(!matches!(
+            exact_batch_invariant_nt_plan(nt(128, 4096, 4096), 170, false).unwrap(),
+            ScalarDispatchPlan::NtExactChunk {
+                partial: ExactChunkPartial::Slim,
+                ..
+            }
+        ));
     }
 
     #[test]
