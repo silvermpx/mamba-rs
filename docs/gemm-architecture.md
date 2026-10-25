@@ -225,8 +225,12 @@ that family's routes.
 
 The plans in force:
 - **Exact NN:** cut when k is at least 512, or at least 384 with n under
-  128, into pieces of 128 inputs, the last one ragged
-  (`FoldRule::CHUNKS_128`); otherwise one chain from the bias.
+  128, into pieces of 128 inputs, or of 64 below 512 inputs, the last one
+  ragged (`FoldRule::CHUNKS_128_SHALLOW_64`); otherwise one chain from the
+  bias. Among rules on the layer's shape alone this one scored best on 793
+  cut cells against the fastest length per cell (1.0506 of the best in
+  geometric mean; 128-input pieces everywhere 1.0510); the rest depends on
+  the row count, which no cut may read.
 - **Exact NT:** the NN rule applied to the forward's layer: cut when n is
   at least 512, or at least 384 with k under 128.
 - **Exact TN:** a split of the batch read from (m, k, n), today the

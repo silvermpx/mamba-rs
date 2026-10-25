@@ -27,8 +27,9 @@
   per call and now takes 4 to 7.
 - Every exact f32 forward adds each output by its layer's shape alone, so
   a row has the same bits at every batch size: one `fma` chain, or pieces
-  of 128 inputs summed in order for a layer of 512 inputs or more (384 when
-  it has fewer than 128 outputs), the bias after the pieces. Over the 779
+  of 128 inputs summed in order for a layer of 512 inputs or more (pieces
+  of 64 for a layer of 384 to 511 inputs with fewer than 128 outputs), the
+  bias after the pieces. Over the 779
   cut products of the census on an RTX 6000 Ada, 128-input pieces ran in
   0.94 of the time of four pieces per layer (geometric mean), 64-input
   pieces in 0.97 and 256-input pieces in 0.98. An input gradient

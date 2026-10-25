@@ -7,7 +7,8 @@
 //! evaluates them on the CPU, so a kernel's words can be checked against
 //! the fold it claims.
 //!
-//! A deep or narrow layer is cut into pieces of 128 inputs. The depth
+//! A deep or narrow layer is cut into pieces of 128 inputs, or of 64 when it
+//! has fewer than 512 inputs (a narrow layer cut from 384). The depth
 //! threshold, the sign of an exact zero and the place of the bias are open;
 //! [`FoldRule`] carries each choice, the other cuts that were measured
 //! included, so that every side of a choice can be measured.
@@ -22,8 +23,17 @@ pub const GEMM_CONTRACT_REVISION: u32 = 2;
 /// this many inputs.
 pub const PIECE_GRANULE: usize = 32;
 
-/// The length of a piece under the batch-invariant forward's cut.
+/// The length of a piece under the batch-invariant forward's cut, for a
+/// layer of [`CHUNK_DEEP_FROM`] inputs or more.
 pub const CHUNK_INPUTS: usize = 128;
+
+/// The length of a piece under the batch-invariant forward's cut for a
+/// shallower layer, which only a narrow layer's cut reaches.
+pub const CHUNK_INPUTS_SHALLOW: usize = 64;
+
+/// The depth from which the batch-invariant forward's pieces are
+/// [`CHUNK_INPUTS`] long.
+pub const CHUNK_DEEP_FROM: usize = 512;
 
 /// How a deep or narrow layer cuts its reduction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -33,6 +43,13 @@ pub enum DeepCut {
     /// Pieces of this many inputs, a whole number of 32-input groups, the
     /// last one ragged.
     Chunks(usize),
+    /// Pieces of `shallow` inputs below `from` inputs and of `deep` inputs
+    /// from there, each a whole number of 32-input groups, the last ragged.
+    ChunksByDepth {
+        shallow: usize,
+        deep: usize,
+        from: usize,
+    },
 }
 
 /// From what depth a layer is cut at all.
@@ -98,7 +115,20 @@ impl FoldRule {
     /// 128-input pieces from the same depths, zeros as the kernels' padding
     /// leaves them.
     pub const CHUNKS_128: Self = Self {
-        cut: DeepCut::Chunks(CHUNK_INPUTS),
+        cut: DeepCut::Chunks(128),
+        threshold: CutThreshold::Deep512Narrow384,
+        zero: ZeroSign::Grain,
+        bias: BiasPlace::SeedOnePiece,
+    };
+
+    /// 128-input pieces from 512 inputs and 64-input pieces for the narrow
+    /// layers cut below, zeros as the kernels' padding leaves them.
+    pub const CHUNKS_128_SHALLOW_64: Self = Self {
+        cut: DeepCut::ChunksByDepth {
+            shallow: CHUNK_INPUTS_SHALLOW,
+            deep: CHUNK_INPUTS,
+            from: CHUNK_DEEP_FROM,
+        },
         threshold: CutThreshold::Deep512Narrow384,
         zero: ZeroSign::Grain,
         bias: BiasPlace::SeedOnePiece,
@@ -121,8 +151,13 @@ impl FoldRule {
 /// four pieces' time in geometric mean (faster by more than 3% in 397
 /// cells, slower in 151), 64-input pieces in 0.967 and 256-input pieces in
 /// 0.982; on an RTX 5090, without the register tiles, 128-input pieces ran
-/// in 0.968.
-pub const BATCH_INVARIANT_FORWARD: FoldRule = FoldRule::CHUNKS_128;
+/// in 0.968. Among rules on the layer's shape alone, scored on 793 cut
+/// cells against the fastest length per cell, 64-input pieces below 512
+/// inputs and 128-input pieces from there came first (1.0506 of the best
+/// in geometric mean, 128-input pieces everywhere 1.0510, 64 1.079, 256
+/// 1.099, four pieces 1.109); what is left depends on the row count, which
+/// no cut may read.
+pub const BATCH_INVARIANT_FORWARD: FoldRule = FoldRule::CHUNKS_128_SHALLOW_64;
 
 /// The piece length that cuts `r` inputs into at most `p` pieces on a
 /// granule of `g`: `g * ceil(ceil(r / g) / p)`. Zero for an empty reduction.
@@ -157,6 +192,17 @@ pub fn exact_piece_len(r: usize, w: usize, rule: FoldRule) -> usize {
     match rule.cut {
         DeepCut::FourPieces => piece_len(r, 4, PIECE_GRANULE),
         DeepCut::Chunks(len) => len,
+        DeepCut::ChunksByDepth {
+            shallow,
+            deep,
+            from,
+        } => {
+            if r < from {
+                shallow
+            } else {
+                deep
+            }
+        }
     }
 }
 
@@ -375,11 +421,13 @@ mod tests {
     }
 
     #[test]
-    fn the_forward_cut_is_128_input_pieces_from_the_same_depths() {
+    fn the_forward_cut_is_64_input_pieces_below_512_and_128_from_there() {
         let rule = BATCH_INVARIANT_FORWARD;
         assert_eq!(exact_piece_len(511, 128, rule), 511);
         assert_eq!(exact_piece_len(512, 128, rule), 128);
-        assert_eq!(exact_piece_len(384, 127, rule), 128);
+        assert_eq!(exact_piece_len(384, 127, rule), 64);
+        assert_eq!(exact_piece_len(511, 101, rule), 64);
+        assert_eq!(exact_piece_len(512, 101, rule), 128);
         assert_eq!(exact_piece_len(383, 127, rule), 383);
         assert_eq!(exact_piece_len(3000, 101, rule), 128);
         assert_eq!(pieces(3000, 128).count(), 24);
@@ -432,6 +480,7 @@ mod tests {
             FoldRule::PROPOSED,
             FoldRule::CHUNKS_64,
             FoldRule::CHUNKS_128,
+            FoldRule::CHUNKS_128_SHALLOW_64,
         ] {
             assert_eq!(
                 exact_output(|_| 1.0, |_| 1.0, None, 0, 8, rule).to_bits(),
