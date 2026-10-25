@@ -8946,18 +8946,20 @@ fn exact_big_tile_fills(m: usize, n: usize, waves: usize, compute_capability: (u
         && big_grid.saturating_mul(4) >= waves.saturating_mul(quarter_waves)
 }
 
-/// Whether the chunk fold's 32 x 64 partial leaves a multiprocessor of the
-/// card without a CTA, `outputs` columns wide; the 16 x 16 partial, which
+/// Whether the chunk fold's 32 x 64 partial covers the card less than one
+/// and a half times, `outputs` columns wide; the 16 x 16 partial, which
 /// writes the same planes, then spreads the pieces over eight times the
-/// CTAs. Over 510 cut-layer cells of 2 to 255 rows on an RTX 6000 Ada the
-/// rule took the faster partial within 1.1% of the best per cell in total,
-/// 16% under the small partial alone; once the small grid covers the card
-/// its four times denser tile wins by up to 1.6x.
+/// CTAs. Over 112 cut-layer cells of 16 to 128 rows under the 128-input
+/// cut on an RTX 6000 Ada, one and a half waves came within 1.3% of the
+/// fastest partial per cell in geometric mean (worst 1.20), where one wave
+/// took 3.2% (worst 1.41); a denser small grid wins by its four times
+/// denser tile, up to 1.6x.
 fn exact_small_partial_underfills(m: usize, outputs: usize, chunks: usize, waves: usize) -> bool {
     m.div_ceil(32)
         .saturating_mul(outputs.div_ceil(64))
         .saturating_mul(chunks)
-        < waves
+        .saturating_mul(2)
+        < waves.saturating_mul(3)
 }
 
 /// The grid's row axis, where the thin and pipelined 16 x 16 tiles put their
@@ -9074,13 +9076,26 @@ pub(super) fn exact_batch_invariant_nt_plan(
     // ran in 0.40 to 0.97 of the 16 x 16 tile's time from a third of a wave
     // of its tiles up and in 1.0 to 2.3 of it below.
     let blackwell = compute_capability.0 == 12;
+    let transposed_tiles = m.div_ceil(64).saturating_mul(n_in.div_ceil(64));
+    // Into fewer than 128 forward outputs the narrow tile, a 64 x 32 tile
+    // that reads the weight natively, wins while a 64 x 64 grid would cover
+    // a quarter of the card to one wave: over 252 such input gradients on an
+    // RTX 6000 Ada that came within 1.7% of the fastest same-bit tile per
+    // cell in geometric mean (worst 1.28), where the chain tiles alone took
+    // 5.7% (worst 1.50).
+    if !blackwell
+        && (2..=127).contains(&n_out)
+        && transposed_tiles.saturating_mul(4) >= waves
+        && transposed_tiles < waves
+    {
+        return Ok(ScalarDispatchPlan::NtNarrow);
+    }
     let slim_grid = m.div_ceil(128).saturating_mul(n_in.div_ceil(64));
     let slim_from = if blackwell { waves } else { waves.div_ceil(2) };
     if m >= GEMM_CUSTOM_MIN && n_in >= GEMM_CUSTOM_MIN && slim_grid >= slim_from && n_out % 32 != 16
     {
         return Ok(ScalarDispatchPlan::NtFinal { slim: true });
     }
-    let transposed_tiles = m.div_ceil(64).saturating_mul(n_in.div_ceil(64));
     let transposed_from = if blackwell {
         waves.div_ceil(3)
     } else {
@@ -19267,8 +19282,8 @@ mod exact_batch_invariant_tests {
                                     let slim = m > 64
                                         && m.div_ceil(128) * n.div_ceil(64) * pieces_n * 4
                                             >= multiprocessors as usize * 3;
-                                    let underfill = m.div_ceil(32) * n.div_ceil(64) * pieces_n
-                                        < multiprocessors as usize;
+                                    let underfill = 2 * m.div_ceil(32) * n.div_ceil(64) * pieces_n
+                                        < 3 * multiprocessors as usize;
                                     assert_eq!(partial == ExactChunkPartial::Slim, slim, "{what}");
                                     assert_eq!(
                                         partial == ExactChunkPartial::Narrow16,
@@ -19407,8 +19422,9 @@ mod exact_batch_invariant_tests {
                             } => {
                                 assert!(cut, "{what}");
                                 let chunk_count = n_out.div_ceil(exact_chunk(n_out, n_in));
-                                let underfill = m.div_ceil(32) * n_in.div_ceil(64) * chunk_count
-                                    < multiprocessors as usize;
+                                let underfill =
+                                    2 * m.div_ceil(32) * n_in.div_ceil(64) * chunk_count
+                                        < 3 * multiprocessors as usize;
                                 let slim = m > 64
                                     && m.div_ceil(128) * n_in.div_ceil(64) * chunk_count * 4
                                         >= multiprocessors as usize * 3
@@ -19458,6 +19474,16 @@ mod exact_batch_invariant_tests {
                                         && nt_slim_via_transpose_request(request)
                                         && m.div_ceil(64) * n_in.div_ceil(64) * 3
                                             >= multiprocessors as usize,
+                                    "{what}"
+                                );
+                            }
+                            ScalarDispatchPlan::NtNarrow => {
+                                let tiles = m.div_ceil(64) * n_in.div_ceil(64);
+                                assert!(
+                                    !cut && compute_capability.0 != 12
+                                        && (2..=127).contains(&n_out)
+                                        && tiles * 4 >= multiprocessors as usize
+                                        && tiles < multiprocessors as usize,
                                     "{what}"
                                 );
                             }
