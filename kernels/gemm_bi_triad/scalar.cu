@@ -71,196 +71,6 @@ __device__ __forceinline__ void scalar_load_fragment(float* out, const float* sr
     }
 }
 
-// Sixteen bytes of the output tile, read and written as one vector access
-// through the global space. The asm keeps the order the fold asks for: a
-// group's loads go out together, then its stores.
-__device__ __forceinline__ float4 scalar_load_global4(const float* pointer) {
-    float4 value;
-    asm volatile("ld.global.v4.f32 {%0, %1, %2, %3}, [%4];"
-                 : "=f"(value.x), "=f"(value.y), "=f"(value.z), "=f"(value.w)
-                 : "l"((unsigned long long)__cvta_generic_to_global(pointer)));
-    return value;
-}
-
-__device__ __forceinline__ void scalar_store_global4(float* pointer, float4 value) {
-    asm volatile("st.global.v4.f32 [%0], {%1, %2, %3, %4};"
-                 :
-                 : "l"((unsigned long long)__cvta_generic_to_global(pointer)),
-                   "f"(value.x), "f"(value.y), "f"(value.z), "f"(value.w)
-                 : "memory");
-}
-
-// Whether a thread's whole sub-tile lies inside the output and every row of
-// it starts on a 16-byte boundary, so the fold moves it in vector accesses.
-template <int WMITER, int TM, int WNITER, int TN, int WSUBM, int WSUBN>
-__device__ __forceinline__ bool scalar_tile_is_whole(
-    const float* out, int ldc, int rows, int columns, int row_base, int col_base) {
-    return TN % 4 == 0 && (ldc & 3) == 0 && (col_base & 3) == 0 && is_aligned_16(out)
-        && row_base + (WMITER - 1) * WSUBM + TM <= rows
-        && col_base + (WNITER - 1) * WSUBN + TN <= columns;
-}
-
-// Closes a piece of a cut layer's reduction in a scalar tile, every piece but
-// the last. The finished pieces' sum waits in the output tile, each thread
-// over its own elements, so no barrier guards it and no second set of
-// accumulators competes for registers: the first piece's chain is stored,
-// every later one is added to the stored sum in order, and the accumulators
-// restart from +0.0. A whole sub-tile moves in 16-byte accesses, GROUP of
-// them at a time (a row by default), a group's loads issued together before
-// its stores: the compiler cannot tell the rows apart under a runtime
-// stride, so element by element every load would wait for the store before
-// it. An edge sub-tile goes element by element. The base, the stride and the
-// bounds pass through an empty asm on every fold, so the compiler cannot
-// hoist the tile's addresses or its bound checks out of the k loop and hold
-// them across it, and the element path puts a memory barrier every four rows
-// to keep its loads in one place. A thread holds TM rows in each of WMITER
-// sub-tiles WSUBM apart and TN consecutive columns in each of WNITER
-// sub-tiles WSUBN apart, from (row_base, col_base).
-template <int WMITER, int TM, int WNITER, int TN, int WSUBM, int WSUBN,
-          int GROUP = WNITER * TN / 4>
-__device__ __forceinline__ void scalar_fold_piece(
-    float* acc, float* out, int ldc, int rows, int columns, int row_base, int col_base,
-    bool first) {
-    asm volatile("" : "+l"(out), "+r"(ldc), "+r"(rows), "+r"(columns), "+r"(row_base), "+r"(col_base));
-    constexpr int ROWS = WMITER * TM;
-    constexpr int COLS = WNITER * TN;
-    if (scalar_tile_is_whole<WMITER, TM, WNITER, TN, WSUBM, WSUBN>(
-            out, ldc, rows, columns, row_base, col_base)) {
-        constexpr int CHUNKS = ROWS * COLS / 4;
-        static_assert(CHUNKS % GROUP == 0, "the fold groups whole chunks");
-#pragma unroll
-        for (int g = 0; g < CHUNKS; g += GROUP) {
-            float4 staged[GROUP];
-            if (!first) {
-#pragma unroll
-                for (int c = 0; c < GROUP; ++c) {
-                    int i = (g + c) / (COLS / 4);
-                    int j = (g + c) % (COLS / 4);
-                    int row = row_base + (i / TM) * WSUBM + i % TM;
-                    int column = col_base + (j / (TN / 4)) * WSUBN + 4 * (j % (TN / 4));
-                    staged[c] = scalar_load_global4(out + (long long)row * ldc + column);
-                }
-            }
-#pragma unroll
-            for (int c = 0; c < GROUP; ++c) {
-                int i = (g + c) / (COLS / 4);
-                int j = (g + c) % (COLS / 4);
-                int row = row_base + (i / TM) * WSUBM + i % TM;
-                int column = col_base + (j / (TN / 4)) * WSUBN + 4 * (j % (TN / 4));
-                int idx = i * COLS + (j / (TN / 4)) * TN + 4 * (j % (TN / 4));
-                float4 value = make_float4(acc[idx], acc[idx + 1], acc[idx + 2], acc[idx + 3]);
-                if (!first) {
-                    float4 sum = staged[c];
-                    value = make_float4(__fadd_rn(sum.x, value.x), __fadd_rn(sum.y, value.y),
-                                        __fadd_rn(sum.z, value.z), __fadd_rn(sum.w, value.w));
-                }
-                scalar_store_global4(out + (long long)row * ldc + column, value);
-                acc[idx] = 0.0f;
-                acc[idx + 1] = 0.0f;
-                acc[idx + 2] = 0.0f;
-                acc[idx + 3] = 0.0f;
-            }
-        }
-        return;
-    }
-#pragma unroll
-    for (int wm = 0; wm < WMITER; ++wm) {
-#pragma unroll
-        for (int rm = 0; rm < TM; ++rm) {
-            int row = row_base + wm * WSUBM + rm;
-#pragma unroll
-            for (int wn = 0; wn < WNITER; ++wn) {
-#pragma unroll
-                for (int rn = 0; rn < TN; ++rn) {
-                    int column = col_base + wn * WSUBN + rn;
-                    int idx = (wm * TM + rm) * (WNITER * TN) + wn * TN + rn;
-                    float chain = acc[idx];
-                    if (row < rows && column < columns) {
-                        float* slot = out + (long long)row * ldc + column;
-                        *slot = first ? chain : __fadd_rn(*slot, chain);
-                    }
-                    acc[idx] = 0.0f;
-                }
-            }
-            if ((wm * TM + rm) % 4 == 3) asm volatile("" ::: "memory");
-        }
-    }
-}
-
-// The last piece of a cut layer meets the sum the earlier pieces left in the
-// output tile, and the bias follows: the order the split reduction adds the
-// pieces' planes and the bias in, so the tile writes the split's bits. A
-// whole sub-tile reads the sum a row at a time in 16-byte loads, as the fold
-// writes it; an edge sub-tile goes element by element with the fold's
-// barrier every four rows.
-template <int WMITER, int TM, int WNITER, int TN, int WSUBM, int WSUBN>
-__device__ __forceinline__ void scalar_finish_pieces(
-    float* acc, const float* out, int ldc, int rows, int columns, int row_base, int col_base,
-    bool staged, const float* bias) {
-    constexpr int ROWS = WMITER * TM;
-    constexpr int COLS = WNITER * TN;
-    if (staged && scalar_tile_is_whole<WMITER, TM, WNITER, TN, WSUBM, WSUBN>(
-                      out, ldc, rows, columns, row_base, col_base)) {
-#pragma unroll
-        for (int i = 0; i < ROWS; ++i) {
-            int row = row_base + (i / TM) * WSUBM + i % TM;
-            float4 sums[COLS / 4];
-#pragma unroll
-            for (int wn = 0; wn < WNITER; ++wn) {
-#pragma unroll
-                for (int q = 0; q < TN / 4; ++q) {
-                    sums[wn * (TN / 4) + q] = scalar_load_global4(
-                        out + (long long)row * ldc + col_base + wn * WSUBN + 4 * q);
-                }
-            }
-            {
-#pragma unroll
-                for (int wn = 0; wn < WNITER; ++wn) {
-#pragma unroll
-                    for (int q = 0; q < TN / 4; ++q) {
-                        int idx = i * COLS + wn * TN + 4 * q;
-                        float4 sum = sums[wn * (TN / 4) + q];
-                        float lanes[4] = {sum.x, sum.y, sum.z, sum.w};
-#pragma unroll
-                        for (int e = 0; e < 4; ++e) {
-                            float value = __fadd_rn(lanes[e], acc[idx + e]);
-                            if (bias != nullptr) {
-                                value = __fadd_rn(value, bias[col_base + wn * WSUBN + 4 * q + e]);
-                            }
-                            acc[idx + e] = value;
-                        }
-                    }
-                }
-            }
-        }
-        return;
-    }
-#pragma unroll
-    for (int wm = 0; wm < WMITER; ++wm) {
-#pragma unroll
-        for (int rm = 0; rm < TM; ++rm) {
-            int row = row_base + wm * WSUBM + rm;
-#pragma unroll
-            for (int wn = 0; wn < WNITER; ++wn) {
-#pragma unroll
-                for (int rn = 0; rn < TN; ++rn) {
-                    int column = col_base + wn * WSUBN + rn;
-                    int idx = (wm * TM + rm) * (WNITER * TN) + wn * TN + rn;
-                    float value = acc[idx];
-                    if (row < rows && column < columns) {
-                        if (staged) {
-                            value = __fadd_rn(out[(long long)row * ldc + column], value);
-                        }
-                        if (bias != nullptr) value = __fadd_rn(value, bias[column]);
-                    }
-                    acc[idx] = value;
-                }
-            }
-            if ((wm * TM + rm) % 4 == 3) asm volatile("" ::: "memory");
-        }
-    }
-}
-
 // Derived constants
 #define GEMM_BI_SCALAR_NUM_WARPS (GEMM_BI_SCALAR_NUM_THREADS / GEMM_BI_SCALAR_WARP_SIZE)  // 8
 #define GEMM_BI_SCALAR_WMITER ((GEMM_BI_SCALAR_WM * GEMM_BI_SCALAR_WN) / (GEMM_BI_SCALAR_WARP_SIZE * GEMM_BI_SCALAR_TM * GEMM_BI_SCALAR_TN * GEMM_BI_SCALAR_WNITER))  // (64*32)/(32*8*8*1) = 2
@@ -2309,9 +2119,6 @@ void tn_slim(
 // B = W [K, N] — read transposed as W^T[N,K]
 // C = dX [M, K] — overwrite
 // __launch_bounds__(128, 2) — qualified at 254 registers and two CTAs/SM on SM120.
-// PIECES above one folds a cut layer's pieces of `piece_inputs` inputs each,
-// a whole number of 32-deep slabs.
-template <int PIECES>
 __device__ __forceinline__ void nt_slim_impl(
     float* __restrict__ C,
     const float* __restrict__ A,
@@ -2319,8 +2126,7 @@ __device__ __forceinline__ void nt_slim_impl(
     float alpha,
     int M,
     int N,
-    int K_out,
-    int piece_inputs
+    int K_out
 ) {
     constexpr int A_STAGE = 32 * 132;
     constexpr int B_RAW_STAGE = 64 * 32;
@@ -2389,11 +2195,6 @@ __device__ __forceinline__ void nt_slim_impl(
         int _m_in_warp_ntsl = _lane / GEMM_BI_SCALAR_BK;
         int _n_local_lane = _lane % GEMM_BI_SCALAR_BK;
         bool b_vec16_aligned = (N & 3) == 0 && is_aligned_16(B);
-        // A cut layer folds the reduction in pieces of whole 32-deep slabs,
-        // the chunk partials' pieces; fold_at is the input that closes the
-        // current one.
-        static_assert(GEMM_BI_SCALAR_BK == 32, "NT Slim pieces are whole 32-deep slabs");
-        int fold_at = PIECES > 1 ? piece_inputs : N;
 
         for (int nIdx = 0; nIdx < N; nIdx += GEMM_BI_SCALAR_BK) {
             #pragma unroll
@@ -2481,34 +2282,6 @@ __device__ __forceinline__ void nt_slim_impl(
                             }
             }
             __syncthreads();
-            if constexpr (PIECES > 1) {
-                if (nIdx + GEMM_BI_SCALAR_BK == fold_at && fold_at < N) {
-                    scalar_fold_piece<GEMM_BI_SCALAR_WMITER, GEMM_BI_SCALAR_TM,
-                                      GEMM_BI_SCALAR_WNITER, GEMM_BI_SCALAR_TN,
-                                      GEMM_BI_SCALAR_WSUBM, GEMM_BI_SCALAR_WSUBN>(
-                        threadResults, C, K_out, M, K_out,
-                        pid_m * GEMM_BI_SCALAR_BM + warpRow * GEMM_BI_SCALAR_WM
-                            + threadRowInWarp * GEMM_BI_SCALAR_TM,
-                        pid_n * GEMM_BI_SCALAR_BN + warpCol * GEMM_BI_SCALAR_WN
-                            + threadColInWarp * GEMM_BI_SCALAR_TN,
-                        fold_at == piece_inputs);
-                    fold_at += piece_inputs;
-                }
-            }
-        }
-
-        if constexpr (PIECES > 1) {
-            // An input gradient has no bias; the plan serves a cut layer
-            // with alpha 1 only.
-            scalar_finish_pieces<GEMM_BI_SCALAR_WMITER, GEMM_BI_SCALAR_TM,
-                                 GEMM_BI_SCALAR_WNITER, GEMM_BI_SCALAR_TN,
-                                 GEMM_BI_SCALAR_WSUBM, GEMM_BI_SCALAR_WSUBN>(
-                threadResults, C, K_out, M, K_out,
-                pid_m * GEMM_BI_SCALAR_BM + warpRow * GEMM_BI_SCALAR_WM
-                    + threadRowInWarp * GEMM_BI_SCALAR_TM,
-                pid_n * GEMM_BI_SCALAR_BN + warpCol * GEMM_BI_SCALAR_WN
-                    + threadColInWarp * GEMM_BI_SCALAR_TN,
-                N > piece_inputs, nullptr);
         }
 
         for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx) {
@@ -2566,26 +2339,7 @@ void nt_slim(
     int N,
     int K_out
 ) {
-    nt_slim_impl<1>(C, A, B, alpha, M, N, K_out, 0);
-}
-
-// The same tile for an input gradient whose layer's fold cuts the reduction:
-// each piece of `piece_inputs` inputs a chain from +0.0 over its whole
-// 32-deep slabs, added in order to the sum the CTA keeps in its own output
-// tile - the bits the chunk partials and their reduction write, without the
-// planes.
-extern "C" __global__ __launch_bounds__(GEMM_BI_SCALAR_NUM_THREADS, 2)
-void nt_slim_pieces4(
-    float* __restrict__ C,
-    const float* __restrict__ A,
-    const float* __restrict__ B,
-    float alpha,
-    int M,
-    int N,
-    int K_out,
-    int piece_inputs
-) {
-    nt_slim_impl<4>(C, A, B, alpha, M, N, K_out, piece_inputs);
+    nt_slim_impl(C, A, B, alpha, M, N, K_out);
 }
 
 // Slim geometry ends here — undef everything so no later-appended section

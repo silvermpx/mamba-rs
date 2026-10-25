@@ -26,9 +26,12 @@
   RTX 5090 the sum of a split weight gradient took 13 to 17 microseconds
   per call and now takes 4 to 7.
 - Every exact f32 forward adds each output by its layer's shape alone, so
-  a row has the same bits at every batch size: one `fma` chain, or four
-  pieces summed in order for a layer of 512 inputs or more (384 when it has
-  fewer than 128 outputs), the bias after the pieces. An input gradient
+  a row has the same bits at every batch size: one `fma` chain, or pieces
+  of 128 inputs summed in order for a layer of 512 inputs or more (384 when
+  it has fewer than 128 outputs), the bias after the pieces. Over the 779
+  cut products of the census on an RTX 6000 Ada, 128-input pieces ran in
+  0.94 of the time of four pieces per layer (geometric mean), 64-input
+  pieces in 0.97 and 256-input pieces in 0.98. An input gradient
   folds the same way over the forward's outputs, as a forward over the
   transposed weight would. The RTX 5090 and RTX PRO 6000 serve both on
   their own kernels where the operands sit on 16-byte boundaries, every
@@ -36,15 +39,16 @@
   model of the fold reproduces all of them. Forwards and input gradients
   change their bits once in this release. A scaled or accumulating forward
   keeps the plan of its shape.
-- A cut layer's exact forward or input gradient folds its four pieces inside
-  the block once its grid covers the card: the 128 x 128 and 64 x 64
-  forward tiles keep the finished pieces' sum in registers and add the bias
-  last, the bits the split partials and their reduction write, without
-  writing and reading four output-sized planes. A cut input gradient runs as
-  the forward of its transposed weight on the same tiles where the weight
-  fits the transpose scratch, and on the slim input-gradient tile, which
-  keeps the sum in its own output tile, elsewhere. The tiles read the piece
-  length at launch. A smaller grid keeps the split partials, and where
+- A cut layer's exact forward or input gradient folds its pieces inside the
+  block once its grid covers the card: the 128 x 128 and 64 x 64 forward
+  tiles keep the finished pieces' sum in registers and add the bias last,
+  the bits the split partials and their reduction write, without writing
+  and reading an output-sized plane per piece. A cut input gradient runs as
+  the forward of its transposed weight on the 128 x 128 tile where the
+  weight fits the transpose scratch and that tile's grid covers the card,
+  in 0.62 to 0.65 of the split partials' time over the census's cut input
+  gradients on an RTX 6000 Ada, and on the split partials elsewhere. The
+  tiles read the piece length at launch. A smaller grid keeps the split partials, and where
   the 32 x 64 partial's grid would leave a multiprocessor idle the 16 x 16
   partial spreads the same pieces over eight times the blocks: on an RTX
   6000 Ada, 510 cut products of 2 to 255 rows run in 0.84 of their former
@@ -67,7 +71,7 @@
   at every row count, where about 128 rows used to run a scalar split; the
   models' forward keeps one kernel across 128 rows, where without the
   tensor cores, or under 32 outputs, it switched there. A layer the f32
-  plan cuts folds its four pieces in half precision too, through the f32
+  plan cuts folds its pieces in half precision too, through the f32
   plan, and so do a single output column and a batch under 32 rows on the
   scalar tier, which added their products in a tree of lane or warp parts.
   These products change their bits once in this release.

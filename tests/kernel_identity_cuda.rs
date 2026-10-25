@@ -44,7 +44,6 @@ const SCALAR_ENTRIES: &[&str] = &[
     "nn_splitk_slim_partial",
     "tn_slim",
     "nt_slim",
-    "nt_slim_pieces4",
     "nn_ultra_thin",
     "nn_gemv",
     "tn_gemv",

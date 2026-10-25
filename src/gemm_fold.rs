@@ -7,31 +7,32 @@
 //! evaluates them on the CPU, so a kernel's words can be checked against
 //! the fold it claims.
 //!
-//! The cut of deep and narrow layers is still open between two candidates
-//! (four pieces, or 64-input chunks), and so are the depth threshold, the
-//! sign of an exact zero and the place of the bias; [`FoldRule`] carries
-//! each choice so that both sides of every choice can be measured.
+//! A deep or narrow layer is cut into pieces of 128 inputs. The depth
+//! threshold, the sign of an exact zero and the place of the bias are open;
+//! [`FoldRule`] carries each choice, the other cuts that were measured
+//! included, so that every side of a choice can be measured.
 
 use std::ops::Range;
 
 /// The revision of the fold rules below. A change that moves any output
 /// word bumps it.
-pub const GEMM_CONTRACT_REVISION: u32 = 1;
+pub const GEMM_CONTRACT_REVISION: u32 = 2;
 
 /// The granule of the four-piece cut: piece bounds fall on whole groups of
 /// this many inputs.
 pub const PIECE_GRANULE: usize = 32;
 
-/// The length of a chunk under the 64-input cut.
-pub const CHUNK_INPUTS: usize = 64;
+/// The length of a piece under the batch-invariant forward's cut.
+pub const CHUNK_INPUTS: usize = 128;
 
 /// How a deep or narrow layer cuts its reduction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DeepCut {
     /// Four pieces of whole 32-input groups, the last one shorter.
     FourPieces,
-    /// Pieces of 64 inputs, the last one ragged.
-    Chunks64,
+    /// Pieces of this many inputs, a whole number of 32-input groups, the
+    /// last one ragged.
+    Chunks(usize),
 }
 
 /// From what depth a layer is cut at all.
@@ -85,11 +86,19 @@ impl FoldRule {
         bias: BiasPlace::SeedOnePiece,
     };
 
-    /// The batch-invariant exact forward of the 0.8.2 candidates: 64-input
-    /// chunks from the same depths, zeros as the kernels' padding leaves
-    /// them.
-    pub const CHUNKS_TODAY: Self = Self {
-        cut: DeepCut::Chunks64,
+    /// 64-input chunks from the same depths, zeros as the kernels' padding
+    /// leaves them.
+    pub const CHUNKS_64: Self = Self {
+        cut: DeepCut::Chunks(64),
+        threshold: CutThreshold::Deep512Narrow384,
+        zero: ZeroSign::Grain,
+        bias: BiasPlace::SeedOnePiece,
+    };
+
+    /// 128-input pieces from the same depths, zeros as the kernels' padding
+    /// leaves them.
+    pub const CHUNKS_128: Self = Self {
+        cut: DeepCut::Chunks(CHUNK_INPUTS),
         threshold: CutThreshold::Deep512Narrow384,
         zero: ZeroSign::Grain,
         bias: BiasPlace::SeedOnePiece,
@@ -105,11 +114,15 @@ impl FoldRule {
     };
 }
 
-/// The fold every exact f32 forward follows. Four pieces ran in 0.58 of
-/// the 64-input chunks' total time on the portable kernels of an RTX 5090,
-/// and 0.93 of the exact default on its SM120 kernels where the chunks
-/// took 1.14.
-pub const BATCH_INVARIANT_FORWARD: FoldRule = FoldRule::FOUR_PIECES;
+/// The fold every exact f32 forward follows. Over the 779 cut cells of the
+/// census on an RTX 6000 Ada, with the in-CTA tiles keeping their sum in
+/// registers and reading the piece length at launch and each cell at the
+/// fastest same-bit route of each cut, 128-input pieces ran in 0.938 of
+/// four pieces' time in geometric mean (faster by more than 3% in 397
+/// cells, slower in 151), 64-input pieces in 0.967 and 256-input pieces in
+/// 0.982; on an RTX 5090, without the register tiles, 128-input pieces ran
+/// in 0.968.
+pub const BATCH_INVARIANT_FORWARD: FoldRule = FoldRule::CHUNKS_128;
 
 /// The piece length that cuts `r` inputs into at most `p` pieces on a
 /// granule of `g`: `g * ceil(ceil(r / g) / p)`. Zero for an empty reduction.
@@ -143,7 +156,7 @@ pub fn exact_piece_len(r: usize, w: usize, rule: FoldRule) -> usize {
     }
     match rule.cut {
         DeepCut::FourPieces => piece_len(r, 4, PIECE_GRANULE),
-        DeepCut::Chunks64 => CHUNK_INPUTS,
+        DeepCut::Chunks(len) => len,
     }
 }
 
@@ -357,8 +370,20 @@ mod tests {
         assert_eq!(exact_piece_len(383, 127, FoldRule::PROPOSED), 383);
         assert_eq!(exact_piece_len(582, 64, FoldRule::PROPOSED), 160);
         assert_eq!(pieces(582, 160).count(), 4);
-        assert_eq!(exact_piece_len(3000, 101, FoldRule::CHUNKS_TODAY), 64);
+        assert_eq!(exact_piece_len(3000, 101, FoldRule::CHUNKS_64), 64);
         assert_eq!(pieces(3000, 64).count(), 47);
+    }
+
+    #[test]
+    fn the_forward_cut_is_128_input_pieces_from_the_same_depths() {
+        let rule = BATCH_INVARIANT_FORWARD;
+        assert_eq!(exact_piece_len(511, 128, rule), 511);
+        assert_eq!(exact_piece_len(512, 128, rule), 128);
+        assert_eq!(exact_piece_len(384, 127, rule), 128);
+        assert_eq!(exact_piece_len(383, 127, rule), 383);
+        assert_eq!(exact_piece_len(3000, 101, rule), 128);
+        assert_eq!(pieces(3000, 128).count(), 24);
+        assert_eq!(pieces(3000, 128).last(), Some(2944..3000));
     }
 
     #[test]
@@ -403,7 +428,11 @@ mod tests {
 
     #[test]
     fn an_empty_reduction_writes_the_bias_or_positive_zero() {
-        for rule in [FoldRule::PROPOSED, FoldRule::CHUNKS_TODAY] {
+        for rule in [
+            FoldRule::PROPOSED,
+            FoldRule::CHUNKS_64,
+            FoldRule::CHUNKS_128,
+        ] {
             assert_eq!(
                 exact_output(|_| 1.0, |_| 1.0, None, 0, 8, rule).to_bits(),
                 0

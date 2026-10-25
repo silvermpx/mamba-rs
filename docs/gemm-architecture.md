@@ -225,9 +225,8 @@ that family's routes.
 
 The plans in force:
 - **Exact NN:** cut when k is at least 512, or at least 384 with n under
-  128, into four pieces of whole 32-input groups,
-  `32 * ceil(ceil(k / 32) / 4)` inputs each, the last shorter
-  (`FoldRule::FOUR_PIECES`); otherwise one chain from the bias.
+  128, into pieces of 128 inputs, the last one ragged
+  (`FoldRule::CHUNKS_128`); otherwise one chain from the bias.
 - **Exact NT:** the NN rule applied to the forward's layer: cut when n is
   at least 512, or at least 384 with k under 128.
 - **Exact TN:** a split of the batch read from (m, k, n), today the
@@ -236,7 +235,10 @@ The plans in force:
   over the rows l, l + 32, l + 64, ... from +0.0, added by a 16-8-4-2-1 warp
   butterfly, which the twin models (`tn_column_output`); otherwise one
   chain.
-- **TF32 NN and NT:** the exact cut. **TF32 TN:** eight partitions for a
+- **TF32 NN and NT:** the exact threshold, cut into four pieces of whole
+  32-input groups, `32 * ceil(ceil(k / 32) / 4)` inputs each, the last
+  shorter (`FoldRule::FOUR_PIECES`); the TF32 pieces kernels still compile
+  the count. **TF32 TN:** eight partitions for a
   batch of at least 2048 rows and, off CC 12.x, for a batch of 1024 to 2047
   rows into at least 128 columns and at most 16 tiles of 64 x 64; one chain
   otherwise, and wherever the eight partial planes overflow the split
@@ -251,7 +253,24 @@ writes their bits. Each is a ledger entry until step 3 of
 section 8 moves its kernel to the ascending fold or adopts its tree as that
 plan's fold under 2.6, with a twin.
 
-**The cut of deep, narrow layers is open.** Four pieces cap such a layer at
+**The cut of deep, narrow layers: 128-input pieces.** On an RTX 6000 Ada,
+over the census's 779 cut cells under the batch-invariant exact policy,
+with the in-CTA tiles keeping their sum in registers and reading the
+piece length at launch, all cuts interleaved in one process and each cell
+at its fastest same-bit route of each cut, the time against four pieces
+was (geometric means; cells faster or slower by more than 3 percent):
+
+| piece length | all | faster | slower | 1-64 rows | 65-256 | 257-1024 | over 1024 |
+|---|---|---|---|---|---|---|---|
+| 64 inputs | 0.967 | 325 | 197 | 0.940 | 0.967 | 1.058 | 1.014 |
+| 128 inputs | 0.938 | 397 | 151 | 0.926 | 0.928 | 0.957 | 0.985 |
+| 256 inputs | 0.982 | 278 | 250 | 0.984 | 0.993 | 0.958 | 0.974 |
+
+The worst cells of the 128-input cut are input gradients (NT 4096 x 256 x
+2112 1.55); SM120 was not measured with the register tiles. The earlier
+measurement on an RTX 5090, before them:
+
+Four pieces cap such a layer at
 four units per output tile at every depth; a fixed piece length on the
 32-input granule gives a deeper layer more pieces. On an RTX 5090, over the census's cut cells under the batch-invariant exact f32 policy (`ExactFmaBatchInvariant`), each piece length built as its own binary (the
 plan is still a compiled constant) and each cell taking its fastest
@@ -270,12 +289,10 @@ pieces, so under any other cut their bits differ and they leave the
 candidate set, and the SM120 TMA exact kernel folds through its slab in L2
 at every piece end (NT 4096 x 256 x 2112: 93 us with four pieces, 105 with
 pieces of 128 inputs, 144 with pieces of 64). Separate binaries are only
-indicative, since timings move between processes (5.4). A fixed piece
-length of 128 to 256 inputs is the
-leading candidate once the in-CTA folds keep their sum on chip. Four
-pieces stay in force until step 3 of section 8 measures every candidate
-cut interleaved in one process, with the plan as a launch parameter, on two
-cards; the choice is then frozen under 2.6.
+indicative, since timings move between processes (5.4). The 128-input cut
+is in force on the RTX 6000 Ada measurement above; the SM120 kernels follow
+it, their TMA fold through L2 at every piece end being the open cost, and
+the measurement on a second card is owed (section 8).
 
 ### 2.3 Epilogue
 
@@ -480,11 +497,16 @@ card.
   the 128 x 128 tile that folded through its output at two CTAs per SM
   spilled under three of those four toolkits and was removed. Rows of both
   tiles equal their CPU fold on an RTX 6000 Ada (the exact batch-invariance
-  test at 1 to 4096 rows). The NT slim pieces tile still folds through its
-  output tile with batched 16-byte loads; a cut input gradient whose
-  weights fit the transpose scratch runs instead as the forward of the
-  transposed weight on the forward's register tiles. All of them take the
-  piece length at launch. Their time against the former batched fold on
+  test at 1 to 4096 rows). A cut input gradient whose weights fit the
+  transpose scratch runs as the forward of the transposed weight on the
+  128 x 128 register tile where that tile's grid covers the card: over the
+  census's 414 cut input gradients on an RTX 6000 Ada it ran in 0.62 to
+  0.65 of the chunk partials' time there, while the 64 x 64 tile over the
+  transposed weight lost to them below four waves of its tiles and tied
+  beyond. The native slim pieces tile, which folded through its output
+  tile, was the fastest in none of those cells and is removed, and with it
+  the last fold through an output tile in the exact family. The pieces
+  tiles take the piece length at launch. Their time against the former batched fold on
   large batches is not measured yet. The SM120 exact in-CTA fold keeps a
   thread-private slab with independent 16-byte `__stcg` and `__ldcg`
   accesses, which goes through L2 at every piece end.

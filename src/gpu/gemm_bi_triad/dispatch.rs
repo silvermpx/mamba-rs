@@ -8482,17 +8482,12 @@ pub(super) enum ScalarDispatchPlan {
         piece_rows: u32,
         pieces: u32,
     },
-    /// The input gradient's 128 x 64 slim tile over a cut layer, folding
-    /// the pieces through its output tile as the forward's twin does.
-    NtExactPieces,
     /// The input gradient of a cut layer as the forward of the transposed
     /// weight: the weight transposed into the scratch, then the forward's
-    /// 128 x 128 (`big`) or 64 x 64 pieces tile, which keeps the pieces' sum
-    /// in registers. Each piece is the same chain of the same products, so
-    /// the bits are the slim tile's and the chunk partials'.
-    NtExactPiecesViaTranspose {
-        big: bool,
-    },
+    /// 128 x 128 pieces tile, which keeps the pieces' sum in registers. Each
+    /// piece is the same chain of the same products, so the bits are the
+    /// chunk partials'.
+    NtExactPiecesViaTranspose,
     TnGemv,
     TnNarrow,
     TnNarrowSplitM {
@@ -8585,7 +8580,7 @@ impl ScalarDispatchPlan {
                 | Self::NtLargeDeepSm89InferenceCopyPlanQualified
                 | Self::NtLargeDeepTransposeM64N64Qualified
                 | Self::NtSlimViaTranspose
-                | Self::NtExactPiecesViaTranspose { .. }
+                | Self::NtExactPiecesViaTranspose
                 | Self::NtD384VectorQualified
                 | Self::TnD768InSm89DualChunkQualified
                 | Self::NtExactChunk {
@@ -9007,29 +9002,22 @@ pub(super) fn exact_batch_invariant_nt_plan(
             "the input gradient's layer plan takes no empty axis: {m}x{n_in}x{n_out}"
         ));
     }
-    let slim_grid = m.div_ceil(128).saturating_mul(n_in.div_ceil(64));
-    let slim_fills =
-        m >= GEMM_CUSTOM_MIN && n_in >= GEMM_CUSTOM_MIN && slim_grid >= multiprocessors as usize;
+    let waves = multiprocessors as usize;
     if exact_chunks(n_out, n_in) {
-        // The forward of the transposed weight over the same pieces, on the
-        // forward's pieces tiles, which keep the sum in registers, wherever
-        // their grid covers the card as the forward's would.
-        if transposable && nt_pieces_via_transpose_request(request) {
-            let waves = multiprocessors as usize;
-            if exact_big_tile_fills(m, n_in, waves, compute_capability) {
-                return Ok(ScalarDispatchPlan::NtExactPiecesViaTranspose { big: true });
-            }
-            if m >= EXACT_PIECES_M64_MIN_ROWS
-                && m.div_ceil(64).saturating_mul(n_in.div_ceil(64)) >= waves
-            {
-                return Ok(ScalarDispatchPlan::NtExactPiecesViaTranspose { big: false });
-            }
-        }
-        // The slim tile folds a cut layer's pieces through its output tile
-        // once its grid covers the card; it closes every piece at 32
-        // inputs, as the chunk partials do, so any reduction length serves.
-        if slim_fills {
-            return Ok(ScalarDispatchPlan::NtExactPieces);
+        // The forward of the transposed weight over the same pieces on the
+        // forward's 128 x 128 tile, which keeps the sum in registers, where
+        // that tile's grid covers the card as the forward's would. Over the
+        // census's 414 cut input gradients on an RTX 6000 Ada it ran in 0.62
+        // to 0.65 of the chunk partials' time there (geometric means by how
+        // many times its grid covers the card), while the 64 x 64 tile over
+        // the transposed weight lost to the partials below four waves of its
+        // tiles and tied beyond, and the slim tile folding through its output
+        // tile was never the fastest.
+        if transposable
+            && nt_pieces_via_transpose_request(request)
+            && exact_big_tile_fills(m, n_in, waves, compute_capability)
+        {
+            return Ok(ScalarDispatchPlan::NtExactPiecesViaTranspose);
         }
         let chunks = n_out.div_ceil(exact_chunk(n_out, n_in));
         if chunks.saturating_mul(n_in) > SPLITK_SCRATCH_CAP {
@@ -9073,18 +9061,29 @@ pub(super) fn exact_batch_invariant_nt_plan(
                 .map_err(|_| format!("{m} rows in pieces of {piece_rows} pass u32"))?,
         });
     }
-    if slim_fills && n_out % 32 != 16 {
+    // A chain runs the native slim tile, then the 64 x 64 chain tile over the
+    // transposed weight, from half a wave of either tile's grid, and the 16 x
+    // 16 tile below: over the census's 427 uncut input gradients on an RTX
+    // 6000 Ada that came within 0.4% of the fastest same-bit tile per cell in
+    // geometric mean (worst 1.25), where the full wave and the third of a
+    // wave an RTX 5090 measured took 3.2% (worst 1.80). A CC 12.x board keeps
+    // its own thresholds: over its 828 input gradients the transposed chain
+    // ran in 0.40 to 0.97 of the 16 x 16 tile's time from a third of a wave
+    // of its tiles up and in 1.0 to 2.3 of it below.
+    let blackwell = compute_capability.0 == 12;
+    let slim_grid = m.div_ceil(128).saturating_mul(n_in.div_ceil(64));
+    let slim_from = if blackwell { waves } else { waves.div_ceil(2) };
+    if m >= GEMM_CUSTOM_MIN && n_in >= GEMM_CUSTOM_MIN && slim_grid >= slim_from && n_out % 32 != 16
+    {
         return Ok(ScalarDispatchPlan::NtFinal { slim: true });
     }
-    // The same chain as the 64 x 64 tile over the transposed weight, once that
-    // tile's grid covers a third of the card. Over the 828 input gradients of
-    // the census on an RTX 5090 (170 SMs) the transposed chain ran in 0.40 to
-    // 0.97 of the 16 x 16 tile's time from 64 of its tiles up and in 1.0 to
-    // 2.3 of it from 48 down, with the same bits everywhere.
     let transposed_tiles = m.div_ceil(64).saturating_mul(n_in.div_ceil(64));
-    if transposable
-        && nt_slim_via_transpose_request(request)
-        && transposed_tiles.saturating_mul(3) >= multiprocessors as usize
+    let transposed_from = if blackwell {
+        waves.div_ceil(3)
+    } else {
+        waves.div_ceil(2)
+    };
+    if transposable && nt_slim_via_transpose_request(request) && transposed_tiles >= transposed_from
     {
         return Ok(ScalarDispatchPlan::NtSlimViaTranspose);
     }
@@ -14718,13 +14717,13 @@ mod tf32_tests {
             exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, excluded)]);
         for (op, dims, expected) in [
             (
-                // The forward folds by its layer: four pieces of 384 inputs.
+                // The forward folds by its layer: twelve pieces of 128 inputs.
                 ResolvedGemmOp::Nn,
                 (2_048, 1_536, 768),
                 Sm120FmaRoute {
                     tile: Sm120FmaTile::M128N64,
                     kvec: false,
-                    splits: 4,
+                    splits: 12,
                     in_cta: true,
                     layer_fold: true,
                 },
@@ -19436,29 +19435,16 @@ mod exact_batch_invariant_tests {
                             ScalarDispatchPlan::NtFinal { slim: true } => {
                                 assert!(!cut && m >= GEMM_CUSTOM_MIN && n_out % 32 != 16, "{what}");
                             }
-                            ScalarDispatchPlan::NtExactPiecesViaTranspose { big } => {
-                                let waves = multiprocessors as usize;
+                            ScalarDispatchPlan::NtExactPiecesViaTranspose => {
                                 assert!(
-                                    cut && transposable && nt_pieces_via_transpose_request(request),
-                                    "{what}"
-                                );
-                                assert_eq!(
-                                    big,
-                                    exact_big_tile_fills(m, n_in, waves, compute_capability),
-                                    "{what}"
-                                );
-                                assert!(
-                                    big || (m >= EXACT_PIECES_M64_MIN_ROWS
-                                        && m.div_ceil(64) * n_in.div_ceil(64) >= waves),
-                                    "{what}"
-                                );
-                            }
-                            ScalarDispatchPlan::NtExactPieces => {
-                                assert!(
-                                    cut && m >= GEMM_CUSTOM_MIN
-                                        && n_in >= GEMM_CUSTOM_MIN
-                                        && m.div_ceil(128) * n_in.div_ceil(64)
-                                            >= multiprocessors as usize,
+                                    cut && transposable
+                                        && nt_pieces_via_transpose_request(request)
+                                        && exact_big_tile_fills(
+                                            m,
+                                            n_in,
+                                            multiprocessors as usize,
+                                            compute_capability
+                                        ),
                                     "{what}"
                                 );
                             }

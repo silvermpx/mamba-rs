@@ -8757,7 +8757,6 @@ pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "nn_splitk_slim_partial",
     "tn_slim",
     "nt_slim",
-    "nt_slim_pieces4",
     "nn_ultra_thin",
     "nn_gemv",
     "tn_gemv",
@@ -10117,8 +10116,6 @@ pub struct GemmBiKernels {
     pub gemm_bi_nn_slim: CudaFunction,
     pub gemm_bi_tn_slim: CudaFunction,
     pub gemm_bi_nt_slim: CudaFunction,
-    /// The slim input-gradient tile folding a cut layer's four pieces.
-    pub gemm_bi_nt_slim_pieces4: CudaFunction,
     pub gemm_bi_nn_ultra_thin: CudaFunction,
     pub gemm_bi_nn_gemv: CudaFunction,
     pub gemm_bi_tn_gemv: CudaFunction,
@@ -10717,7 +10714,6 @@ impl GemmBiKernels {
             gemm_bi_nn_slim: load("nn_slim")?,
             gemm_bi_tn_slim: load("tn_slim")?,
             gemm_bi_nt_slim: load("nt_slim")?,
-            gemm_bi_nt_slim_pieces4: load("nt_slim_pieces4")?,
             gemm_bi_nn_ultra_thin: load("nn_ultra_thin")?,
             gemm_bi_nn_gemv: load("nn_gemv")?,
             gemm_bi_tn_gemv: load("tn_gemv")?,
@@ -14809,7 +14805,7 @@ mod tests {
         const D768_TRANSPOSE_SYMBOL: &str = "transpose_f32_32x16_d768";
         const TN_M16N16_SYMBOL: &str = "tn_m16n16_bk16_s2_splitm16";
         let valid = synthetic_scalar_splitm_module_ptx();
-        assert_eq!(super::SCALAR_SYMBOLS.len(), 67);
+        assert_eq!(super::SCALAR_SYMBOLS.len(), 66);
         validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid)
             .expect("complete TriadScalar export inventory");
 
@@ -16175,7 +16171,6 @@ mod tests {
         "nn_splitk_slim_partial",
         "tn_slim",
         "nt_slim",
-        "nt_slim_pieces4",
         "nn_ultra_thin",
         "nn_gemv",
         "tn_gemv",
@@ -16613,7 +16608,7 @@ mod tests {
 
         let scalar: BTreeSet<_> = SCALAR_SYMBOLS.iter().copied().collect();
         let sm80: BTreeSet<_> = SM80_SYMBOLS.iter().copied().collect();
-        assert_eq!(scalar.len(), 67);
+        assert_eq!(scalar.len(), 66);
         assert_eq!(sm80.len(), 16);
         let sm80_streamk: BTreeSet<_> = super::SM80_STREAMK_SYMBOLS.iter().copied().collect();
         assert_eq!(sm80_streamk.len(), 2);
@@ -16658,7 +16653,7 @@ mod tests {
         assert!(sm80.is_disjoint(&sm90a));
         assert!(sm80.is_disjoint(&sm100));
         assert!(sm90a.is_disjoint(&sm100));
-        assert_eq!(scalar.union(&sm80).count(), 83);
+        assert_eq!(scalar.union(&sm80).count(), 82);
         assert!(
             scalar
                 .union(&sm80)
