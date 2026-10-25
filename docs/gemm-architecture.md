@@ -471,15 +471,23 @@ card.
   equal bit for bit to the four-warp tiles; the dispatcher's tests and the census of the
   cut-layer rule with them have not run on a card yet, a blocking ledger
   entry. Host overhead on small cells was the other gap (4.6).
-- Exact: the 64 x 64 pieces tile and the NT slim pieces tile fold through
-  the output tile with batched 16-byte loads, a row of the thread's
-  sub-tile at a time; the 128 x 128 pieces tile, at its 128-register cap
-  (`__launch_bounds__(256, 2)`), one access at a time; edge sub-tiles
-  element by element. For the 128 x 128 tile, a register sum at one CTA per
-  SM, a shared-memory sum and a grouped slab are measured before one is
-  chosen. The SM120 exact in-CTA fold keeps a thread-private slab with
-  independent 16-byte `__stcg` and `__ldcg` accesses, which goes through L2
-  at every piece end.
+- Exact: the 64 x 64 and 128 x 128 pieces tiles keep the sum in registers.
+  The sum starts at -0.0, the additive identity of IEEE addition, so every
+  piece end is `kept = __fadd_rn(kept, acc)` with no first-piece select, and
+  the last piece meets it the same way. On SM89 under CUDA 12.8, 13.0, 13.2
+  and 13.4 the 64 x 64 tile takes 143 to 152 registers at three CTAs per SM
+  and the 128 x 128 tile 197 to 217 at one CTA per SM, neither with a spill;
+  the 128 x 128 tile that folded through its output at two CTAs per SM
+  spilled under three of those four toolkits and was removed. Rows of both
+  tiles equal their CPU fold on an RTX 6000 Ada (the exact batch-invariance
+  test at 1 to 4096 rows). The NT slim pieces tile still folds through its
+  output tile with batched 16-byte loads; a cut input gradient whose
+  weights fit the transpose scratch runs instead as the forward of the
+  transposed weight on the forward's register tiles. All of them take the
+  piece length at launch. Their time against the former batched fold on
+  large batches is not measured yet. The SM120 exact in-CTA fold keeps a
+  thread-private slab with independent 16-byte `__stcg` and `__ldcg`
+  accesses, which goes through L2 at every piece end.
 
 ### 3.2 Sliced pieces
 
@@ -1284,28 +1292,31 @@ scarce, so V0 and V1 carry as much of the proof as they can on the CPU.
    - Route controls set once, when a context is created; tests and
      instruments that compare families or policies create a context per
      setting.
-   - Planes stay a candidate on every architecture.   - Confirm the four rules measured on one RTX 5090 (the chunk partials
+   - Planes stay a candidate on every architecture.
+   - Confirm the four rules measured on one RTX 5090 (the chunk partials
      for a thin batch over a wide cut layer, the input gradient's
      transposed 64 x 64 chain tile, the strict TF32 cut-layer rule, the cut
      input gradient's slim chunk partial over the transposed weight) on an SM89 card, the second card the card rule asks of a rule that applies on several architectures, and check their S dependence at a second SM120 SM count on compute-bound cells. A rule the SM89 card does not confirm is withdrawn before the release, and the rule it replaced serves again.
 2. **One kernel batch, one requalification.**
    - The plan as launch parameters in every kernel, TN included: piece
      bounds, stream-K deals, close grain. The exact in-CTA pieces kernels
-     (`nn_big_pieces4`, `nn_m64n64_pieces4`, `nt_slim_pieces4`) and the TF32
-     pieces kernels take the piece length at launch instead of a compiled
-     count of four.
+     take the piece length at launch; the TF32 pieces kernels still compile
+     a count of four.
    - Running sums on chip in those kernels: in registers where a second set
      fits, in shared memory where residency allows, batched output-tile
      loads only where neither does. For TF32 the 128 x 64 multistage tiles
      already keep it in registers on eight warps, and the 64 x 128 tile is
      measured with the same options; the wide 128 x 96,
      96 x 96 and 128 x 128 tiles stay on batched loads until their
-     register-fold difference is explained. For exact f32 the three options
-     of the 128 x 128 tile are measured, and the SM120 TMA in-CTA fold keeps
+     register-fold difference is explained. For exact f32 the 64 x 64 and
+     128 x 128 tiles keep it in registers (3.1), and the SM120 TMA in-CTA fold keeps
      its slab on chip where it fits instead of sending it through L2 at
-     every piece end.   - The input gradient's cut layers onto the NN in-CTA pieces tiles
+     every piece end.
+   - The input gradient's cut layers onto the NN in-CTA pieces tiles
      through the transposed weight, as its chain layers already reach the
-     64 x 64 tile and its cut layers the forward's slim chunk partial.
+     64 x 64 tile and its cut layers the forward's slim chunk partial: done
+     for exact f32 (3.1); the TF32 input gradient keeps its native pieces
+     tiles.
    - The layer-plan kernels take the whole epilogue of 2.3, so that a
      scaled or accumulating exact forward or input gradient can leave the
      legacy plan.

@@ -2353,6 +2353,7 @@ fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
         | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtSlimViaTranspose
+        | ScalarDispatchPlan::NtExactPiecesViaTranspose { .. }
         | ScalarDispatchPlan::NtD384VectorQualified => 2,
         ScalarDispatchPlan::NtSplitKMain { .. } | ScalarDispatchPlan::NtSplitKSlim { .. } => 3,
         ScalarDispatchPlan::NtSplitKTail { .. } => 4,
@@ -2380,6 +2381,7 @@ fn scalar_plan_requires_zero_beta(plan: ScalarDispatchPlan) -> bool {
             | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
             | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
             | ScalarDispatchPlan::NtSlimViaTranspose
+            | ScalarDispatchPlan::NtExactPiecesViaTranspose { .. }
             | ScalarDispatchPlan::NtD384VectorQualified
             | ScalarDispatchPlan::NtM2N16SplitK32Qualified
     )
@@ -2394,6 +2396,7 @@ fn scalar_plan_requires_unit_alpha(plan: ScalarDispatchPlan) -> bool {
         ScalarDispatchPlan::NnExactPiecesBig
             | ScalarDispatchPlan::NnExactPiecesM64
             | ScalarDispatchPlan::NtExactPieces
+            | ScalarDispatchPlan::NtExactPiecesViaTranspose { .. }
     )
 }
 
@@ -2419,6 +2422,7 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NnExactPiecesBig => (59, 4, 0),
         ScalarDispatchPlan::NnExactPiecesM64 => (61, 4, 0),
         ScalarDispatchPlan::NtExactPieces => (60, 4, 0),
+        ScalarDispatchPlan::NtExactPiecesViaTranspose { big } => (if big { 63 } else { 62 }, 4, 0),
         ScalarDispatchPlan::NtExactChunk {
             partial,
             chunks,
@@ -2536,6 +2540,7 @@ fn scalar_argument_layout(
         | (ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified, 1)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 1)
         | (ScalarDispatchPlan::NtSlimViaTranspose, 1)
+        | (ScalarDispatchPlan::NtExactPiecesViaTranspose { .. }, 1)
         | (ScalarDispatchPlan::NtD384VectorQualified, 1) => ScalarArgumentLayout {
             null_pointer_mask: bias_null << 3,
             ..ScalarArgumentLayout::default()
@@ -2548,6 +2553,7 @@ fn scalar_argument_layout(
         | (ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified, 0)
         | (ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified, 0)
         | (ScalarDispatchPlan::NtSlimViaTranspose, 0)
+        | (ScalarDispatchPlan::NtExactPiecesViaTranspose { .. }, 0)
         | (ScalarDispatchPlan::NtD384VectorQualified, 0) => ScalarArgumentLayout::default(),
         (ScalarDispatchPlan::TnGemv, _)
         | (ScalarDispatchPlan::TnNarrow, _)
@@ -2923,7 +2929,7 @@ fn scalar_physical_nodes(
         ScalarDispatchPlan::NnExactPiecesBig => push_scalar_node(
             &mut nodes,
             context,
-            "nn_big_pieces4",
+            "nn_big_pieces_keep",
             (128, 128),
             (16, 2),
             cfg(
@@ -3503,6 +3509,51 @@ fn scalar_physical_nodes(
                 ),
             );
         }
+        ScalarDispatchPlan::NtExactPiecesViaTranspose { big } => {
+            push_scalar_node(
+                &mut nodes,
+                context,
+                "transpose_f32_32x16_d768",
+                (32, 32),
+                (1, 1),
+                cfg((n.div_ceil(32), k.div_ceil(32), 1), (32, 16, 1), 0),
+            );
+            if big {
+                push_scalar_node(
+                    &mut nodes,
+                    context,
+                    "nn_big_pieces_keep",
+                    (128, 128),
+                    (16, 2),
+                    cfg(
+                        (
+                            checked_grid_product(m.div_ceil(128), k.div_ceil(128), 1)?,
+                            1,
+                            1,
+                        ),
+                        (256, 1, 1),
+                        34 * 1024,
+                    ),
+                );
+            } else {
+                push_scalar_node(
+                    &mut nodes,
+                    context,
+                    "nn_m64n64_pieces4",
+                    (64, 64),
+                    (16, 2),
+                    cfg(
+                        (
+                            checked_grid_product(m.div_ceil(64), k.div_ceil(64), 1)?,
+                            1,
+                            1,
+                        ),
+                        (128, 1, 1),
+                        super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
+                    ),
+                );
+            }
+        }
         ScalarDispatchPlan::NtSplitKTail { k_main, .. } => {
             let k_main_u32 = checked_u32(k_main, "NT K main")?;
             push_scalar_node(
@@ -3725,7 +3776,7 @@ fn scalar_route_contract(
     }
     if matches!(
         symbol,
-        "nn_big_pieces4" | "nn_m64n64_pieces4" | "nt_slim_pieces4"
+        "nn_big_pieces_keep" | "nn_m64n64_pieces4" | "nt_slim_pieces4"
     ) {
         return (
             PhysicalGemmBackend::ScalarFma,
@@ -4690,6 +4741,7 @@ fn scalar_transpose_scratch_elements(
         | ScalarDispatchPlan::NtLargeDeepSm89InferenceCopyPlanQualified
         | ScalarDispatchPlan::NtLargeDeepTransposeM64N64Qualified
         | ScalarDispatchPlan::NtSlimViaTranspose
+        | ScalarDispatchPlan::NtExactPiecesViaTranspose { .. }
         | ScalarDispatchPlan::NtD384VectorQualified => request.shape.k,
         ScalarDispatchPlan::TnD768InSm89DualChunkQualified => request.shape.m,
         _ => return Err("scalar plan declares unsupported transpose scratch".into()),
@@ -6165,6 +6217,7 @@ fn batch_invariant_exact_plan(
         return super::dispatch::exact_batch_invariant_nt_plan(
             request,
             ctx.kernels.multiprocessor_count(),
+            ctx.compute_capability(),
             super::dispatch::qualified_nt_d768_transpose_m64n64_operands(operands),
         )
         .map(Some);
@@ -10867,9 +10920,15 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
         scalar_plan,
         ScalarDispatchPlan::NnM64N64Qualified | ScalarDispatchPlan::NnExactPiecesM64
     ) {
-        // The 64 x 64 tile also serves a cut layer, folding its pieces
-        // through the output tile, with the same launch.
-        let (function, symbol) = if scalar_plan == ScalarDispatchPlan::NnExactPiecesM64 {
+        // The 64 x 64 tile also serves a cut layer, keeping the finished
+        // pieces' sum in registers; the plan's piece length reaches it at
+        // launch, in 16-deep tiles.
+        let pieces = scalar_plan == ScalarDispatchPlan::NnExactPiecesM64;
+        let piece_tiles = checked_i32(
+            super::dispatch::exact_chunk(n_in, n_out) / 16,
+            "64 x 64 piece tiles",
+        )?;
+        let (function, symbol) = if pieces {
             (&kernels.gemm_bi_nn_m64n64_pieces4, "nn_m64n64_pieces4")
         } else {
             (&kernels.gemm_bi_nn_m64n64_bk16_s2, "nn_m64n64_bk16_s2")
@@ -10896,6 +10955,9 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
         builder.arg(&w_ptr);
         builder.arg(&bias_ptr);
         builder.arg(&params);
+        if pieces {
+            builder.arg(&piece_tiles);
+        }
         enqueue_scalar_forward(
             &mut control,
             request,
@@ -10913,8 +10975,9 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
     // Non-%4 K handled by kernel scalar K-fallback (runtime lda%4 check).
     // K<BK: kernel's scalar bounds check zero-fills smem for dotIdx≥K; wastes a few FMAs
     // but correct (handles Mamba-1 dt_proj K=4,8). dropped `n_in >= 16` guard.
-    // The 128 x 128 tile also serves a cut layer, folding its pieces
-    // through the output tile, with the same launch.
+    // The 128 x 128 tile also serves a cut layer, keeping the finished
+    // pieces' sum in registers, one CTA per multiprocessor; the plan's piece
+    // length reaches it at launch, in 16-deep tiles.
     let final_tile = match scalar_plan {
         ScalarDispatchPlan::NnFinal { slim } => Some((slim, false)),
         ScalarDispatchPlan::NnExactPiecesBig => Some((false, true)),
@@ -10925,12 +10988,20 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
         let n_i = checked_dims.n_i32;
         let k_i = checked_dims.k_i32;
         let (func, bn, symbol) = if pieces {
-            (&kernels.gemm_bi_nn_big_pieces4, 128, "nn_big_pieces4")
+            (
+                &kernels.gemm_bi_nn_big_pieces_keep,
+                128,
+                "nn_big_pieces_keep",
+            )
         } else if slim {
             (&kernels.gemm_bi_nn_slim, 64, "nn_slim")
         } else {
             (&kernels.gemm_bi_nn, 128, "nn_big")
         };
+        let piece_tiles = checked_i32(
+            super::dispatch::exact_chunk(n_in, n_out) / 16,
+            "128 x 128 piece tiles",
+        )?;
         // Opt1: Big uses 256 threads/block for TLP; Slim stays 128.
         let threads = if slim { 128u32 } else { 256u32 };
         // Big NN uses dynamic smem for its 2-stage cp.async pipeline.
@@ -10957,6 +11028,9 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
         builder.arg(&lda_i); // lda (A row stride; = K for contiguous X)
         builder.arg(&n_i); // ldb = n_out (B is [K, N])
         builder.arg(&n_i); // ldc = n_out (C is [M, N])
+        if pieces {
+            builder.arg(&piece_tiles);
+        }
         enqueue_scalar_forward(
             &mut control,
             request,
@@ -12008,6 +12082,144 @@ fn gemm_bi_backward_dx_with_control<
         })?;
         return Ok(());
     }
+    // A cut layer's input gradient as the forward of the transposed weight:
+    // the weight transposed into the scratch, then the forward's pieces tile
+    // over it with the plan's piece length at launch, the sum in registers.
+    if let ScalarDispatchPlan::NtExactPiecesViaTranspose { big } = scalar_plan {
+        use cudarc::driver::DevicePtr;
+        let transpose_scratch = kernels.transpose_scratch_buf(stream)?;
+        let required =
+            scalar_transpose_scratch_elements(request, scalar_plan)?.ok_or_else(|| {
+                "the cut input gradient's transpose plan lost its scratch extent".to_string()
+            })?;
+        if required > transpose_scratch.len() {
+            return Err(format!(
+                "the cut input gradient's transpose needs {required} f32 elements, the scratch \
+                 holds {}",
+                transpose_scratch.len()
+            ));
+        }
+        let (w_t_ptr, _) = transpose_scratch.device_ptr(stream);
+        let rows = checked_dims.k_i32;
+        let columns = checked_dims.n_i32;
+        let transpose_cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (
+                checked_dims.n_u32.div_ceil(32),
+                checked_dims.k_u32.div_ceil(32),
+                1,
+            ),
+            block_dim: (32, 16, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut transpose =
+            scalar_launch_builder(stream, &kernels.gemm_bi_transpose_f32_32x16_d768, &control);
+        transpose.arg(&w_t_ptr);
+        transpose.arg(&w_ptr);
+        transpose.arg(&rows);
+        transpose.arg(&columns);
+        enqueue_scalar_backward(
+            &mut control,
+            request,
+            operands,
+            "transpose_f32_32x16_d768",
+            transpose_cfg,
+            &mut transpose,
+        )
+        .map_err(|error| {
+            error.with_driver_context(format_args!("transpose_f32_32x16_d768 cut backward_dx"))
+        })?;
+        let piece_tiles = checked_i32(
+            super::dispatch::exact_chunk(n_out, n_in) / 16,
+            "transposed piece tiles",
+        )?;
+        let bias = 0_u64;
+        if big {
+            // The transposed forward: m rows, n_in outputs, n_out inputs.
+            let rows_i = checked_dims.m_i32;
+            let outputs_i = checked_dims.k_i32;
+            let inputs_i = checked_dims.n_i32;
+            let beta = 0.0f32;
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (
+                    checked_tile_grid(checked_dims.m_u32, 128, checked_dims.k_u32, 128)?,
+                    1,
+                    1,
+                ),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 34 * 1024,
+            };
+            let mut builder =
+                scalar_launch_builder(stream, &kernels.gemm_bi_nn_big_pieces_keep, &control);
+            builder.arg_buffer_mut(dx);
+            builder.arg_buffer(dy);
+            builder.arg(&w_t_ptr);
+            builder.arg(&bias);
+            builder.arg(&alpha);
+            builder.arg(&beta);
+            builder.arg(&rows_i);
+            builder.arg(&outputs_i);
+            builder.arg(&inputs_i);
+            builder.arg(&inputs_i); // lda: a row of dY holds the forward's n_out outputs
+            builder.arg(&outputs_i); // ldb: a row of the transposed weight holds n_in
+            builder.arg(&outputs_i); // ldc: a row of dX holds n_in
+            builder.arg(&piece_tiles);
+            enqueue_scalar_backward(
+                &mut control,
+                request,
+                operands,
+                "nn_big_pieces_keep",
+                cfg,
+                &mut builder,
+            )
+            .map_err(|error| {
+                error.with_driver_context(format_args!("nn_big_pieces_keep cut backward_dx"))
+            })?;
+        } else {
+            let params = SgbNnM64N64Params {
+                alpha,
+                beta: 0.0,
+                m: checked_dims.m_i32,
+                n: checked_dims.k_i32,
+                k: checked_dims.n_i32,
+                lda: checked_dims.n_i32,
+                ldb: checked_dims.k_i32,
+                ldc: checked_dims.k_i32,
+            };
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (
+                    checked_grid_product(
+                        checked_dims.m_u32.div_ceil(64),
+                        checked_dims.k_u32.div_ceil(64),
+                        1,
+                    )?,
+                    1,
+                    1,
+                ),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
+            };
+            let mut builder =
+                scalar_launch_builder(stream, &kernels.gemm_bi_nn_m64n64_pieces4, &control);
+            builder.arg_buffer_mut(dx);
+            builder.arg_buffer(dy);
+            builder.arg(&w_t_ptr);
+            builder.arg(&bias);
+            builder.arg(&params);
+            builder.arg(&piece_tiles);
+            enqueue_scalar_backward(
+                &mut control,
+                request,
+                operands,
+                "nn_m64n64_pieces4",
+                cfg,
+                &mut builder,
+            )
+            .map_err(|error| {
+                error.with_driver_context(format_args!("nn_m64n64_pieces4 cut backward_dx"))
+            })?;
+        }
+        return Ok(());
+    }
     if matches!(
         scalar_plan,
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
@@ -12805,7 +13017,7 @@ fn gemm_bi_backward_dx_with_control<
     // scalar K-fallback for non-%4 K_out.
     // Dropped `n_in >= 128` — covers Mamba-1 dt_proj backward_dx (K_out=8).
     // The slim tile also serves a cut layer, folding its pieces through the
-    // output tile, with the same launch.
+    // output tile; the plan's piece length reaches it at launch.
     let final_tile = match scalar_plan {
         ScalarDispatchPlan::NtFinal { slim } => Some((slim, false)),
         ScalarDispatchPlan::NtExactPieces => Some((true, true)),
@@ -12845,6 +13057,13 @@ fn gemm_bi_backward_dx_with_control<
         builder.arg(&m_i);
         builder.arg(&n_i);
         builder.arg(&k_i);
+        let piece_inputs = checked_i32(
+            super::dispatch::exact_chunk(n_out, n_in),
+            "slim piece inputs",
+        )?;
+        if pieces {
+            builder.arg(&piece_inputs);
+        }
         enqueue_scalar_backward(&mut control, request, operands, symbol, cfg, &mut builder)
             .map_err(|error| error.with_driver_context(format_args!("{symbol} backward_dx")))?;
         return Ok(());

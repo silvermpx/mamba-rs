@@ -24,7 +24,7 @@ use mamba_rs::gpu::kernel_identity::{
 #[cfg(target_os = "linux")]
 const SCALAR_ENTRIES: &[&str] = &[
     "nn_big",
-    "nn_big_pieces4",
+    "nn_big_pieces_keep",
     "nn_m64n64_bk16_s2",
     "nn_m64n64_pieces4",
     "nn_splitk32_m32n64_exact",

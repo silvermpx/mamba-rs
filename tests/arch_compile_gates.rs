@@ -4414,7 +4414,7 @@ fn scalar_sm89_main_and_splitk_have_bounded_resources_without_reduction_instruct
     .expect("SM89 scalar PTX must be canonical UTF-8");
     let resource_contracts = [
         ("nn_big", 256, 2, 128),
-        ("nn_big_pieces4", 256, 2, 128),
+        ("nn_big_pieces_keep", 256, 1, 255),
         ("nn_m64n64_bk16_s2", 128, 3, 128),
         ("nn_m64n64_pieces4", 128, 3, 168),
         ("tn_big", 256, 2, 128),

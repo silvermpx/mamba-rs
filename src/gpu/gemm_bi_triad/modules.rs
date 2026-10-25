@@ -8735,7 +8735,7 @@ pub(super) const SCALAR_TN_SPLITM_PARTIAL_SYMBOLS: &[&str] =
 
 pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "nn_big",
-    "nn_big_pieces4",
+    "nn_big_pieces_keep",
     "nn_m64n64_bk16_s2",
     "nn_m64n64_pieces4",
     "nn_splitk32_m32n64_exact",
@@ -10100,10 +10100,12 @@ pub struct GemmBiKernels {
     sm120_tensor_maps: Sm120MapCache,
 
     pub gemm_bi_nn: CudaFunction,
-    /// The 128 x 128 forward tile folding a cut layer's four pieces.
-    pub gemm_bi_nn_big_pieces4: CudaFunction,
+    /// The 128 x 128 forward tile folding a cut layer's pieces, their sum in
+    /// registers, one CTA per multiprocessor.
+    pub gemm_bi_nn_big_pieces_keep: CudaFunction,
     pub gemm_bi_nn_m64n64_bk16_s2: CudaFunction,
-    /// The 64 x 64 forward tile folding a cut layer's four pieces.
+    /// The 64 x 64 forward tile folding a cut layer's pieces, their sum in
+    /// registers.
     pub gemm_bi_nn_m64n64_pieces4: CudaFunction,
     pub gemm_bi_nn_splitk32_m32n64_exact: CudaFunction,
     pub gemm_bi_nn_d384_m64n64_bk16_s2: CudaFunction,
@@ -10518,8 +10520,8 @@ impl GemmBiKernels {
         };
         let gemm_bi_nn = load("nn_big")?;
         set_dynamic_shared(&gemm_bi_nn, "nn_big", 34 * 1024)?;
-        let gemm_bi_nn_big_pieces4 = load("nn_big_pieces4")?;
-        set_dynamic_shared(&gemm_bi_nn_big_pieces4, "nn_big_pieces4", 34 * 1024)?;
+        let gemm_bi_nn_big_pieces_keep = load("nn_big_pieces_keep")?;
+        set_dynamic_shared(&gemm_bi_nn_big_pieces_keep, "nn_big_pieces_keep", 34 * 1024)?;
         let gemm_bi_nn_m64n64_bk16_s2 = load("nn_m64n64_bk16_s2")?;
         set_dynamic_shared(
             &gemm_bi_nn_m64n64_bk16_s2,
@@ -10702,7 +10704,7 @@ impl GemmBiKernels {
             sm100_tensor_maps: Mutex::new(HashMap::new()),
             sm120_tensor_maps: Mutex::new(HashMap::new()),
             gemm_bi_nn,
-            gemm_bi_nn_big_pieces4,
+            gemm_bi_nn_big_pieces_keep,
             gemm_bi_nn_m64n64_bk16_s2,
             gemm_bi_nn_m64n64_pieces4,
             gemm_bi_nn_splitk32_m32n64_exact,
@@ -16151,7 +16153,7 @@ mod tests {
 
     const SCALAR_SYMBOLS: &[&str] = &[
         "nn_big",
-        "nn_big_pieces4",
+        "nn_big_pieces_keep",
         "nn_m64n64_bk16_s2",
         "nn_m64n64_pieces4",
         "nn_splitk32_m32n64_exact",

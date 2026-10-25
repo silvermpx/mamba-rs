@@ -32,13 +32,18 @@ static_assert(alignof(SgbNnM64N64Params) == 4,
 static_assert(__is_standard_layout(SgbNnM64N64Params),
               "M64N64 parameters must remain standard layout");
 
+// PIECES above one folds a cut layer's pieces of `piece_tiles` 16-deep
+// tiles each (whole 32-deep groups); the finished pieces' sum stays in a
+// second set of registers, which the tile's 32 accumulators a thread leave
+// room for, so no piece end touches memory.
 template <int PIECES>
 __device__ __forceinline__ void nn_m64n64_impl(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
     const float* __restrict__ bias,
-    SgbNnM64N64Params params
+    SgbNnM64N64Params params,
+    int piece_tiles
 ) {
     assert(params.alpha == 1.0f || bias == nullptr);
     constexpr int K_PIPE = 2;
@@ -83,6 +88,7 @@ __device__ __forceinline__ void nn_m64n64_impl(
     float reg_m[EXACT_NN_M64N64_TM] = {0.0f};
     float reg_n[EXACT_NN_M64N64_TN] = {0.0f};
     float threadResults[EXACT_NN_M64N64_TM * EXACT_NN_M64N64_TN];
+    float kept[EXACT_NN_M64N64_TM * EXACT_NN_M64N64_TN];
 
     // A cut layer starts every piece from +0.0 and adds the bias after the
     // pieces instead of seeding the chain with it.
@@ -110,6 +116,17 @@ __device__ __forceinline__ void nn_m64n64_impl(
              result < EXACT_NN_M64N64_TM * EXACT_NN_M64N64_TN;
              ++result) {
             threadResults[result] = 0.0f;
+        }
+    }
+    // The finished pieces' sum starts at -0.0, the one value whose sum with
+    // any chain is that chain, so a piece end adds without asking whether it
+    // closes the first piece.
+    if constexpr (PIECES > 1) {
+        #pragma unroll
+        for (int result = 0;
+             result < EXACT_NN_M64N64_TM * EXACT_NN_M64N64_TN;
+             ++result) {
+            kept[result] = -0.0f;
         }
     }
 
@@ -202,9 +219,7 @@ __device__ __forceinline__ void nn_m64n64_impl(
     int num_k_tiles = PIECES > 1
         ? (params.k + 31) / 32 * (32 / EXACT_NN_M64N64_BK)
         : (params.k + EXACT_NN_M64N64_BK - 1) / EXACT_NN_M64N64_BK;
-    int fold_tile = PIECES > 1
-        ? scalar_piece_groups<PIECES>(params.k) * (32 / EXACT_NN_M64N64_BK)
-        : num_k_tiles;
+    int fold_tile = PIECES > 1 ? piece_tiles : num_k_tiles;
     ISSUE_EXACT_NN_M64N64_TILE(0, 0);
     int read_stage = 0;
     int write_stage = 1;
@@ -284,16 +299,15 @@ __device__ __forceinline__ void nn_m64n64_impl(
 
         if constexpr (PIECES > 1) {
             if (tile + 1 == fold_tile && fold_tile < num_k_tiles) {
-                int piece_tiles =
-                    scalar_piece_groups<PIECES>(params.k) * (32 / EXACT_NN_M64N64_BK);
-                scalar_fold_piece<1, EXACT_NN_M64N64_TM, 1, EXACT_NN_M64N64_TN,
-                                  EXACT_NN_M64N64_WM, EXACT_NN_M64N64_WN>(
-                    threadResults, C, params.ldc, params.m, params.n,
-                    pid_m * EXACT_NN_M64N64_BM + warp_row * EXACT_NN_M64N64_WM
-                        + thread_row * EXACT_NN_M64N64_TM,
-                    pid_n * EXACT_NN_M64N64_BN + warp_column * EXACT_NN_M64N64_WN
-                        + thread_column * EXACT_NN_M64N64_TN,
-                    fold_tile == piece_tiles);
+                // The piece's chain is added to the kept sum in order, and
+                // the chain restarts from +0.0.
+                #pragma unroll
+                for (int result = 0;
+                     result < EXACT_NN_M64N64_TM * EXACT_NN_M64N64_TN;
+                     ++result) {
+                    kept[result] = __fadd_rn(kept[result], threadResults[result]);
+                    threadResults[result] = 0.0f;
+                }
                 fold_tile += piece_tiles;
             }
         }
@@ -304,18 +318,28 @@ __device__ __forceinline__ void nn_m64n64_impl(
     #undef ISSUE_EXACT_NN_M64N64_TILE
 
     if constexpr (PIECES > 1) {
+        // The last piece meets the earlier pieces' sum, then the bias: the
+        // order the chunk fold's reduction adds the planes and the bias in.
         // The plan serves a cut layer with alpha 1 and beta 0 only, so the
-        // epilogue below stores the pieces' sum plus the bias as they are.
-        scalar_finish_pieces<1, EXACT_NN_M64N64_TM, 1, EXACT_NN_M64N64_TN,
-                             EXACT_NN_M64N64_WM, EXACT_NN_M64N64_WN>(
-            threadResults, C, params.ldc, params.m, params.n,
-            pid_m * EXACT_NN_M64N64_BM + warp_row * EXACT_NN_M64N64_WM
-                + thread_row * EXACT_NN_M64N64_TM,
-            pid_n * EXACT_NN_M64N64_BN + warp_column * EXACT_NN_M64N64_WN
-                + thread_column * EXACT_NN_M64N64_TN,
-            num_k_tiles
-                > scalar_piece_groups<PIECES>(params.k) * (32 / EXACT_NN_M64N64_BK),
-            bias);
+        // epilogue below stores the result as it is.
+        #pragma unroll
+        for (int result_column = 0;
+             result_column < EXACT_NN_M64N64_TN;
+             ++result_column) {
+            int global_column = pid_n * EXACT_NN_M64N64_BN
+                + warp_column * EXACT_NN_M64N64_WN
+                + thread_column * EXACT_NN_M64N64_TN + result_column;
+            bool biased = bias != nullptr && global_column < params.n;
+            float add = biased ? bias[global_column] : 0.0f;
+            #pragma unroll
+            for (int result_row = 0;
+                 result_row < EXACT_NN_M64N64_TM;
+                 ++result_row) {
+                int idx = result_row * EXACT_NN_M64N64_TN + result_column;
+                float value = __fadd_rn(kept[idx], threadResults[idx]);
+                threadResults[idx] = biased ? __fadd_rn(value, add) : value;
+            }
+        }
     }
 
     #pragma unroll
@@ -381,7 +405,7 @@ void nn_m64n64_bk16_s2(
     const float* __restrict__ bias,
     SgbNnM64N64Params params
 ) {
-    nn_m64n64_impl<1>(C, A, B, bias, params);
+    nn_m64n64_impl<1>(C, A, B, bias, params, 0);
 }
 
 // The same tile for a layer whose fold cuts the reduction into four pieces:
@@ -395,9 +419,10 @@ void nn_m64n64_pieces4(
     const float* __restrict__ A,
     const float* __restrict__ B,
     const float* __restrict__ bias,
-    SgbNnM64N64Params params
+    SgbNnM64N64Params params,
+    int piece_tiles
 ) {
-    nn_m64n64_impl<4>(C, A, B, bias, params);
+    nn_m64n64_impl<4>(C, A, B, bias, params, piece_tiles);
 }
 
 #undef EXACT_NN_M64N64_B_ROW_STRIDE

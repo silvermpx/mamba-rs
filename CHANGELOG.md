@@ -38,10 +38,13 @@
   keeps the plan of its shape.
 - A cut layer's exact forward or input gradient folds its four pieces inside
   the block once its grid covers the card: the 128 x 128 and 64 x 64
-  forward tiles and the slim input-gradient tile keep the finished pieces'
-  sum in their own output tile and add the bias last, the bits the split
-  partials and their reduction write, without writing and reading four
-  output-sized planes. A smaller grid keeps the split partials, and where
+  forward tiles keep the finished pieces' sum in registers and add the bias
+  last, the bits the split partials and their reduction write, without
+  writing and reading four output-sized planes. A cut input gradient runs as
+  the forward of its transposed weight on the same tiles where the weight
+  fits the transpose scratch, and on the slim input-gradient tile, which
+  keeps the sum in its own output tile, elsewhere. The tiles read the piece
+  length at launch. A smaller grid keeps the split partials, and where
   the 32 x 64 partial's grid would leave a multiprocessor idle the 16 x 16
   partial spreads the same pieces over eight times the blocks: on an RTX
   6000 Ada, 510 cut products of 2 to 255 rows run in 0.84 of their former
