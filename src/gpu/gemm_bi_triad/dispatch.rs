@@ -2906,33 +2906,57 @@ fn rna_one_chain_selection(
 
 /// A forward or an input gradient that its layer's fold cuts, under the
 /// strict policy: four pieces of whole 32-input groups at every batch size.
-/// The tile the one-chain rules would run folds the pieces inside the CTA
-/// where it has a four-piece twin, else the portable tile of its rows does.
-/// The four-way split members run the pieces as CTAs of their own for a few
-/// rows, whose 16 x 32 tiles leave a multiprocessor short of warps over a
-/// long reduction (on an RTX 5090, 102 such forwards over a reduction of
-/// 1024 or more ran in 0.51 of the one-chain tile's time), and for any grid
-/// under half a wave of the card. Every route here takes the same
-/// partitions and folds them in the same order with the bias last, so the
-/// choice among them is speed alone.
+/// Every route here takes the same partitions and folds them in the same
+/// order with the bias last, so the choice among them is speed alone and
+/// may read the live multiprocessor count. It weighs the output's work as
+/// its rows times its 64-column strips, the rows counted as the batch holds
+/// them rather than as whole tiles (65 rows weigh just over one 64-row
+/// tile, not two):
+///
+/// - a forward folds the pieces in the multistage 64 x 64 tile, which keeps
+///   the finished pieces in registers, once that work covers a quarter of a
+///   wave of its tiles; a batch of at most 16 rows over a layer wide enough
+///   for four waves of 16 x 32 tiles folds them in those tiles instead;
+/// - an input gradient folds them in the multistage 128 x 64 tile once the
+///   work covers half a wave of those tiles, and in the portable 64 x 64
+///   tile once it covers half a wave of its own;
+/// - any smaller output runs the pieces as CTAs of their own on the
+///   four-way split members, whose partial planes then fold them.
+///
+/// Over the 779 cut cells of a 2384-shape census on an RTX 5090, with every
+/// route of the cut timed on every cell, this came within 0.13% of the
+/// fastest route per cell in geometric mean (1.11 at the worst cell) and
+/// ran the cells in 0.83 of the time of the rule before it, which split
+/// every batch under 256 rows and folded larger ones in the twin of the
+/// tile the one-chain table picks: the split lost up to 3.1x on a thin
+/// batch over a wide layer, and the wide tiles' twins, which fold through
+/// their output, up to 1.7x.
 fn rna_layer_pieces_selection(
     request: F32TriadRequest,
     operands: Option<F32TriadOperands>,
     availability: F32TriadAvailability,
 ) -> Result<F32TriadSelection, String> {
-    use super::contract::{Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile};
+    use super::contract::{
+        Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile, Tf32RnaWideTile,
+    };
     let rows = request.shape.output_rows(request.op);
     let columns = request.shape.output_columns(request.op);
+    let sms = availability.multiprocessors as usize;
+    let forward = request.op == ResolvedGemmOp::Nn;
     let binds = |route: Tf32PhysicalRoute| resolve_tf32_forced(request, availability, route).ok();
     let split = Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
         tile: Tf32PortableTile::M16N32,
-        stages: if request.op == ResolvedGemmOp::Nn {
+        stages: if forward {
             Tf32PortableStages::S4
         } else {
             Tf32PortableStages::S3
         },
     });
-    // The in-CTA tiles keep the finished pieces' sum in the output itself,
+    let portable =
+        |tile, stages| Tf32PhysicalRoute::MmaTf32RnaPieces4(Tf32PortableRoute { tile, stages });
+    let tile_64 = portable(Tf32PortableTile::M64N64, Tf32PortableStages::S2);
+    let tile_16 = portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4);
+    // Some in-CTA tiles keep the finished pieces' sum in the output itself,
     // so a forward that blends the old output folds through the split
     // members' partial planes instead.
     if operands.is_some_and(|operands| operands.beta.to_bits() != 0.0_f32.to_bits()) {
@@ -2943,67 +2967,42 @@ fn rna_layer_pieces_selection(
             )
         });
     }
-    let twin = match rna_one_chain_selection(request, operands, availability) {
-        Ok(F32TriadSelection::Tf32(route)) => Some(route),
-        Ok(F32TriadSelection::Tf32Proof { reference, .. }) => Some(reference),
-        _ => None,
-    }
-    .and_then(rna_pieces_twin)
-    .and_then(binds);
-    let pieces = twin
-        .or_else(|| {
-            binds(Tf32PhysicalRoute::MmaTf32RnaPieces4(Tf32PortableRoute {
-                tile: if rows < RNA_NT_NARROW_ROWS {
-                    Tf32PortableTile::M16N32
-                } else {
-                    Tf32PortableTile::M64N64
-                },
-                stages: if rows < RNA_NT_NARROW_ROWS {
-                    Tf32PortableStages::S4
-                } else {
-                    Tf32PortableStages::S2
-                },
-            }))
-        })
+    let work = rows.saturating_mul(columns.div_ceil(64));
+    // The tiles the work fills, best first. The multistage tiles copy whole
+    // 16-byte chunks and are qualified on the Ada and CC 12.x boards; the
+    // portable tile of the same shape serves where they do not stage.
+    let staged = rna_tiles_stage(request, operands, availability);
+    let multistage = |tile| staged.then_some(Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile));
+    let filled = if forward {
+        if rows <= 16 && columns.div_ceil(32) >= sms.saturating_mul(4) {
+            [Some(tile_16), None]
+        } else if work >= sms.saturating_mul(16) {
+            [multistage(Tf32RnaWideTile::MsM64N64S3), Some(tile_64)]
+        } else {
+            [None, None]
+        }
+    } else if work >= sms.saturating_mul(64) {
+        [multistage(Tf32RnaWideTile::NtMsM128N64S3), Some(tile_64)]
+    } else if work >= sms.saturating_mul(32) {
+        [Some(tile_64), None]
+    } else {
+        [None, None]
+    };
+    // A split whose partial planes outgrow the fixed workspace does not bind;
+    // the in-CTA tiles then fold the pieces whatever the grid.
+    let route = filled
+        .into_iter()
+        .flatten()
+        .find_map(binds)
+        .or_else(|| binds(split))
+        .or_else(|| [tile_64, tile_16].into_iter().find_map(binds))
         .ok_or_else(|| {
             format!(
                 "the RNA batch-invariant TF32 policy cuts {request:?} into four pieces and no \
                  tile of that cut binds on this stack"
             )
         })?;
-    let ctas = tf32_kernel_spec(request.op, pieces).map_or(usize::MAX, |spec| {
-        rows.div_ceil(spec.tile.0 as usize)
-            .saturating_mul(columns.div_ceil(spec.tile.1 as usize))
-    });
-    let route = if rows < RNA_NT_NARROW_ROWS
-        || ctas.saturating_mul(2) < availability.multiprocessors as usize
-    {
-        binds(split).unwrap_or(pieces)
-    } else {
-        pieces
-    };
     Ok(F32TriadSelection::Tf32(route))
-}
-
-/// The tile that folds a cut layer's four pieces inside the CTA in place of
-/// `route`, when `route` has one: the same tile, staging and k walk.
-fn rna_pieces_twin(route: Tf32PhysicalRoute) -> Option<Tf32PhysicalRoute> {
-    use super::contract::Tf32RnaWideTile;
-    match route {
-        Tf32PhysicalRoute::MmaTf32Rna(route) => Some(Tf32PhysicalRoute::MmaTf32RnaPieces4(route)),
-        // The 128 x 128 input-gradient tile has no pieces twin of its own:
-        // its 64 x 128 sibling of the same ring and staging folds the pieces.
-        Tf32PhysicalRoute::MmaTf32RnaWide(Tf32RnaWideTile::NtMsM128N128Bk16S5) => Some(
-            Tf32PhysicalRoute::MmaTf32RnaWidePieces4(Tf32RnaWideTile::NtMsM64N128Bk16S6),
-        ),
-        Tf32PhysicalRoute::MmaTf32RnaWide(tile) => {
-            Some(Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile))
-        }
-        Tf32PhysicalRoute::MmaTf32RnaPieces4(_) | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_) => {
-            Some(route)
-        }
-        _ => None,
-    }
 }
 
 /// The partitions a strict route cuts its reduction into: one for a tile
@@ -17924,7 +17923,7 @@ mod tf32_tests {
     }
 
     #[test]
-    fn rna_strict_cut_layers_fold_their_pieces_in_the_table_tiles_twin() {
+    fn rna_strict_cut_layers_fold_their_pieces_in_the_tile_their_work_fills() {
         use crate::gpu::gemm_bi_triad::contract::Tf32RnaWideTile as Wide;
         let mut staged = sm89_availability();
         staged.rna = Some(qualified_module(
@@ -17935,26 +17934,55 @@ mod tf32_tests {
             false,
             101_376,
         ));
-        let twin = |tile| F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile));
-        // The forward's 128 x 128 tile and the input gradient's 64 x 128 one,
-        // as the one-chain rules pick them for these shapes, fold the pieces;
-        // the input gradient's 128 x 128 tile hands them to its 64 x 128
-        // sibling.
+        let wide = |tile| F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile));
+        let portable = |tile, stages| {
+            F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaPieces4(Tf32PortableRoute {
+                tile,
+                stages,
+            }))
+        };
+        let split =
+            F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
+                tile: Tf32PortableTile::M16N32,
+                stages: Tf32PortableStages::S4,
+            }));
+        // On the 142 multiprocessors of this board: a forward whose work
+        // covers a quarter of a wave of 64 x 64 tiles folds in that tile, a
+        // thin batch over a vocabulary-wide layer in the 16 x 32 tile, and a
+        // small output splits; an input gradient folds in the 128 x 64 tile
+        // from half a wave of those tiles and in the portable 64 x 64 tile
+        // from half a wave of its own.
         for (op, rows, columns, reduction, expected) in [
-            (ResolvedGemmOp::Nn, 8192, 256, 512, twin(Wide::M128N128S3)),
+            (ResolvedGemmOp::Nn, 8192, 256, 512, wide(Wide::MsM64N64S3)),
+            (ResolvedGemmOp::Nn, 64, 32_000, 768, wide(Wide::MsM64N64S3)),
+            (
+                ResolvedGemmOp::Nn,
+                8,
+                32_000,
+                768,
+                portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4),
+            ),
+            (ResolvedGemmOp::Nn, 64, 256, 1536, split),
             (
                 ResolvedGemmOp::Nt,
                 4096,
                 256,
                 2112,
-                twin(Wide::NtMsM64N128Bk16S6),
+                wide(Wide::NtMsM128N64S3),
             ),
             (
                 ResolvedGemmOp::Nt,
                 1024,
                 1536,
                 768,
-                twin(Wide::NtMsM64N128Bk16S6),
+                wide(Wide::NtMsM128N64S3),
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                255,
+                1536,
+                768,
+                portable(Tf32PortableTile::M64N64, Tf32PortableStages::S2),
             ),
         ] {
             let request = normalized_request(op, rows, columns, reduction);
@@ -17970,8 +17998,8 @@ mod tf32_tests {
                 "{request:?}"
             );
         }
-        // Without the module or with a misaligned operand no wide tile
-        // stages, and the portable twin folds the pieces.
+        // Without the module or with a misaligned operand no multistage tile
+        // stages, and the portable tile of the same shape folds the pieces.
         let request = normalized_request(ResolvedGemmOp::Nn, 8192, 256, 512);
         let misaligned = F32TriadOperands {
             a: sm89_joint_operands(ResolvedGemmOp::Nn).a + 4,
