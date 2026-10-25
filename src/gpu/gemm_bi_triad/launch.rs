@@ -6091,6 +6091,7 @@ fn batch_invariant_exact_plan(
         return super::dispatch::exact_batch_invariant_nt_plan(
             request,
             ctx.kernels.multiprocessor_count(),
+            super::dispatch::qualified_nt_d768_transpose_m64n64_operands(operands),
         )
         .map(Some);
     }
