@@ -1,8 +1,11 @@
-//! Under the strict TF32 policy a forward's output rows do not depend on
-//! how many rows the batch holds: each prefix of a batch gives the bits the
-//! whole batch gives for those rows, on every layer shape, with and without
-//! a bias. The prefixes run from one row to the whole batch, so every tile
-//! the architecture's table picks meets every other one row for row. The products really run on TF32 (they differ from the exact
+//! Under the strict TF32 policy a forward's output rows, and an input
+//! gradient's, do not depend on how many rows the batch holds: each prefix
+//! of a batch gives the bits the whole batch gives for those rows, on every
+//! layer shape, with and without a bias. The prefixes run from one row to
+//! the whole batch, so every tile the architecture's table picks meets every
+//! other one row for row, and on a layer the fold cuts into four pieces the
+//! split members of a few rows meet the tiles that fold the pieces inside
+//! the CTA. The products really run on TF32 (they differ from the exact
 //! policy's), and the gradients run under the policy without falling to the
 //! exact family.
 #![cfg(feature = "cuda")]
@@ -61,6 +64,19 @@ fn forward(
     }
     ctx.stream.synchronize().unwrap();
     y.to_cpu(&ctx.stream).unwrap()
+}
+
+fn input_gradient(ctx: &GpuCtx, dy: &[f32], w: &[f32], dims: (usize, usize, usize)) -> Vec<f32> {
+    let (rows, k, _) = dims;
+    let dy = upload(ctx, dy);
+    let w = upload(ctx, w);
+    let dx = GpuBuffer::zeros(&ctx.stream, rows * k).unwrap();
+    unsafe {
+        gpu_gemm_f32_backward_dx_ptrs(ctx, dx.cached_ptr(), dy.cached_ptr(), w.cached_ptr(), dims)
+            .unwrap();
+    }
+    ctx.stream.synchronize().unwrap();
+    dx.to_cpu(&ctx.stream).unwrap()
 }
 
 /// Layers whose rows, at the batch sizes below, take every tile of an
@@ -126,6 +142,136 @@ fn strict_tf32_forward_rows_do_not_depend_on_the_batch() {
                 bits(&whole),
                 "layer {k}x{n}: the strict policy ran no TF32 product",
             );
+        }
+    }
+}
+
+#[test]
+fn strict_tf32_input_gradient_rows_do_not_depend_on_the_batch() {
+    let Ok(device) = GpuDevice::new(0) else {
+        eprintln!("skip: no CUDA device");
+        return;
+    };
+    let ctx = GpuCtx::new(&device).unwrap();
+    for (index, (k, n)) in LAYERS.into_iter().enumerate() {
+        let seed = 0x6e70_0000 + index as u64 * 16;
+        let dy = synth(BATCH * n, seed);
+        let w = synth(k * n, seed + 1);
+        ctx.route_controls()
+            .set_f32_policy(F32TriadPolicy::RnaTf32BatchInvariant);
+        let whole = input_gradient(&ctx, &dy, &w, (BATCH, k, n));
+        for rows in PREFIXES {
+            let prefix = input_gradient(&ctx, &dy[..rows * n], &w, (rows, k, n));
+            assert_eq!(
+                bits(&prefix),
+                bits(&whole[..rows * k]),
+                "layer {k}x{n}, {rows} rows",
+            );
+        }
+        ctx.route_controls()
+            .set_f32_policy(F32TriadPolicy::ExactScalarFma);
+        let exact = input_gradient(&ctx, &dy, &w, (BATCH, k, n));
+        assert_ne!(
+            bits(&exact),
+            bits(&whole),
+            "layer {k}x{n}: the strict policy ran no TF32 product",
+        );
+    }
+}
+
+/// The length of each of a cut layer's four pieces: whole 32-input groups.
+fn piece_len(reduction: usize) -> usize {
+    32 * reduction.div_ceil(32).div_ceil(4)
+}
+
+/// A cut layer's strict TF32 output equals the one-chain products of its four
+/// pieces, each over its own inputs, added in order with the bias last. Every
+/// route of the cut keeps it, the split members of a few rows and the tiles
+/// that fold the pieces inside the CTA alike, and the reference walks one
+/// chain per piece on a layer the fold keeps whole.
+#[test]
+fn strict_tf32_cut_forwards_fold_their_pieces_one_chain_products() {
+    let Ok(device) = GpuDevice::new(0) else {
+        eprintln!("skip: no CUDA device");
+        return;
+    };
+    let ctx = GpuCtx::new(&device).unwrap();
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::RnaTf32BatchInvariant);
+    for (index, (k, n)) in [(512, 256), (768, 768), (1536, 384)]
+        .into_iter()
+        .enumerate()
+    {
+        let len = piece_len(k);
+        for rows in [1, 64, 300, 4096] {
+            let seed = 0x51ce_0000 + index as u64 * 16 + rows as u64;
+            let x = synth(rows * k, seed);
+            let w = synth(k * n, seed + 1);
+            let bias = synth(n, seed + 2);
+            let whole = forward(&ctx, &x, &w, Some(&bias), (rows, k, n));
+            let mut sum = vec![0.0f32; rows * n];
+            for (piece, start) in (0..k).step_by(len).enumerate() {
+                let width = len.min(k - start);
+                let xp: Vec<f32> = (0..rows)
+                    .flat_map(|row| x[row * k + start..row * k + start + width].iter().copied())
+                    .collect();
+                let wp = &w[start * n..(start + width) * n];
+                let part = forward(&ctx, &xp, wp, None, (rows, width, n));
+                for (total, value) in sum.iter_mut().zip(part) {
+                    *total = if piece == 0 { value } else { *total + value };
+                }
+            }
+            let reference: Vec<f32> = sum
+                .iter()
+                .enumerate()
+                .map(|(i, total)| total + bias[i % n])
+                .collect();
+            assert_eq!(bits(&whole), bits(&reference), "layer {k}x{n}, {rows} rows");
+        }
+    }
+}
+
+/// The input gradient's form of the same contract: the pieces cut the
+/// forward's outputs, and each piece's one-chain product reads its own
+/// columns of the output gradient and of the weight.
+#[test]
+fn strict_tf32_cut_input_gradients_fold_their_pieces_one_chain_products() {
+    let Ok(device) = GpuDevice::new(0) else {
+        eprintln!("skip: no CUDA device");
+        return;
+    };
+    let ctx = GpuCtx::new(&device).unwrap();
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::RnaTf32BatchInvariant);
+    for (index, (k, n)) in [(256, 1536), (768, 768), (384, 1024)]
+        .into_iter()
+        .enumerate()
+    {
+        let len = piece_len(n);
+        for rows in [1, 64, 300, 4096] {
+            let seed = 0x52ce_0000 + index as u64 * 16 + rows as u64;
+            let dy = synth(rows * n, seed);
+            let w = synth(k * n, seed + 1);
+            let whole = input_gradient(&ctx, &dy, &w, (rows, k, n));
+            let mut sum = vec![0.0f32; rows * k];
+            for (piece, start) in (0..n).step_by(len).enumerate() {
+                let width = len.min(n - start);
+                let dyp: Vec<f32> = (0..rows)
+                    .flat_map(|row| dy[row * n + start..row * n + start + width].iter().copied())
+                    .collect();
+                let wp: Vec<f32> = (0..k)
+                    .flat_map(|input| {
+                        w[input * n + start..input * n + start + width]
+                            .iter()
+                            .copied()
+                    })
+                    .collect();
+                let part = input_gradient(&ctx, &dyp, &wp, (rows, k, width));
+                for (total, value) in sum.iter_mut().zip(part) {
+                    *total = if piece == 0 { value } else { *total + value };
+                }
+            }
+            assert_eq!(bits(&whole), bits(&sum), "layer {k}x{n}, {rows} rows");
         }
     }
 }

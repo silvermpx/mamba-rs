@@ -2240,13 +2240,73 @@ struct SgbTf32ThreadPlan {
     int thread;
 };
 
+// Closes a piece of a cut reduction, every piece but the last. The sum of
+// the finished pieces waits in the output tile rather than in a second set
+// of accumulators, which a thread's registers would not hold: each thread
+// keeps its own elements there, so no barrier guards them. The first
+// piece's chain is stored, every later one is added to the stored sum in
+// order, and the accumulators restart from +0.0; the last piece meets the
+// sum in the epilogue, before the bias.
+template <SgbTf32Op Op, int MAtoms, int NAtoms>
+__device__ __forceinline__ void tf32_fold_piece(
+    float (&accumulators)[MAtoms][NAtoms][4], const SgbTf32Problem& problem,
+    const SgbTf32ThreadPlan& thread_plan, bool first) {
+    int rows = tf32_rows<Op>(problem.params);
+    int columns = tf32_columns<Op>(problem.params);
+    // The base and the stride pass through an empty asm on every fold, so
+    // the compiler cannot hoist the tile's addresses out of the k loop and
+    // hold them in registers across it.
+    float* output = problem.output;
+    int ldc = problem.params.ldc;
+    asm volatile("" : "+l"(output), "+r"(ldc));
+    // A lane's two columns of a row are adjacent: one 8-byte access holds
+    // both where the output allows it.
+    bool pairs = (ldc & 1) == 0
+        && ((reinterpret_cast<unsigned long long>(output) & 7ULL) == 0ULL);
+    int row0 = problem.tile_row + thread_plan.warp_m + thread_plan.group;
+    int column0 = problem.tile_column + thread_plan.warp_n + 2 * thread_plan.thread;
+#pragma unroll
+    for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+#pragma unroll
+        for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+#pragma unroll
+            for (int half = 0; half < 2; ++half) {
+                int row = row0 + m_atom * 16 + 8 * half;
+                int column = column0 + n_atom * 8;
+                float chain0 = accumulators[m_atom][n_atom][2 * half];
+                float chain1 = accumulators[m_atom][n_atom][2 * half + 1];
+                if (row < rows) {
+                    float* slot = output + (long long)row * ldc + column;
+                    if (pairs && column + 1 < columns) {
+                        if (!first) {
+                            float2 sum = *reinterpret_cast<const float2*>(slot);
+                            chain0 = __fadd_rn(sum.x, chain0);
+                            chain1 = __fadd_rn(sum.y, chain1);
+                        }
+                        *reinterpret_cast<float2*>(slot) = make_float2(chain0, chain1);
+                    } else {
+                        if (column < columns) {
+                            slot[0] = first ? chain0 : __fadd_rn(slot[0], chain0);
+                        }
+                        if (column + 1 < columns) {
+                            slot[1] = first ? chain1 : __fadd_rn(slot[1], chain1);
+                        }
+                    }
+                }
+                accumulators[m_atom][n_atom][2 * half] = 0.0f;
+                accumulators[m_atom][n_atom][2 * half + 1] = 0.0f;
+            }
+        }
+    }
+}
+
 template <SgbTf32Op Op, int BM, int BN, int Stages,
-          int MAtoms, int NAtoms, bool NarrowA, bool NarrowB>
+          int MAtoms, int NAtoms, bool NarrowA, bool NarrowB, int Pieces>
 __device__ __forceinline__ void tf32_async_mainloop(
     SgbTf32Storage<Op, BM, BN, Stages>* storage,
     const SgbTf32Problem& problem, unsigned tile_count,
     const SgbTf32ThreadPlan& thread_plan,
-    float (&accumulators)[MAtoms][NAtoms][4]) {
+    float (&accumulators)[MAtoms][NAtoms][4], unsigned piece_tiles) {
 #pragma unroll
     for (unsigned tile = 0; tile < Stages - 1; ++tile) {
         if (tile < tile_count) {
@@ -2273,12 +2333,18 @@ __device__ __forceinline__ void tf32_async_mainloop(
                 storage, static_cast<int>(tile % Stages),
                 thread_plan.warp_m, thread_plan.warp_n,
                 thread_plan.group, thread_plan.thread, accumulators);
+            if constexpr (Pieces > 1) {
+                if ((tile + 1) % piece_tiles == 0 && tile + 1 < tile_count) {
+                    tf32_fold_piece<Op, MAtoms, NAtoms>(
+                        accumulators, problem, thread_plan, tile + 1 == piece_tiles);
+                }
+            }
         }
         __syncthreads();
     }
 }
 
-template <SgbTf32Op Op, int BM, int BN, int Stages>
+template <SgbTf32Op Op, int BM, int BN, int Stages, int Pieces>
 __device__ __forceinline__ void tf32_kernel(
     float* output, const float* a, const float* b, const float* bias,
     Sm80Tf32KernelParams params) {
@@ -2302,6 +2368,8 @@ __device__ __forceinline__ void tf32_kernel(
     int warp_n = BM == 16 ? warp * 8 : (warp & 1) * 32;
     int group = lane >> 2;
     int thread = lane & 3;
+    // A tile that cuts its reduction starts every piece from +0.0 and adds
+    // the bias after the pieces instead of seeding the chain with it.
     float accumulators[MAtoms][NAtoms][4];
 
 #pragma unroll
@@ -2315,7 +2383,7 @@ __device__ __forceinline__ void tf32_kernel(
                 int column = problem.tile_column + warp_n + n_atom * 8
                     + 2 * thread + (element & 1);
                 float seed = 0.0f;
-                if constexpr (Op == SgbTf32Nn) {
+                if constexpr (Op == SgbTf32Nn && Pieces == 1) {
                     if (compute && row < params.m && column < params.n && bias != nullptr) {
                         seed = bias[column];
                     }
@@ -2327,26 +2395,34 @@ __device__ __forceinline__ void tf32_kernel(
 
     unsigned tile_count =
         (static_cast<unsigned>(tf32_reduction<Op>(params)) + 31U) / 32U;
+    // Pieces of whole 32-input k tiles, at most Pieces of them: the cut
+    // ceil(ceil(K / 32) / Pieces) tiles long that a layer's fold takes.
+    unsigned piece_tiles = Pieces > 1
+        ? (tile_count + Pieces - 1) / Pieces : tile_count;
     SgbTf32ThreadPlan thread_plan = {compute, warp_m, warp_n, group, thread};
     bool wide_a = tf32_can_stage_a16(a, params);
     bool wide_b = tf32_can_stage_b16(b, params);
     if (wide_a && wide_b) {
         tf32_async_mainloop<
-            Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
-            storage, problem, tile_count, thread_plan, accumulators);
+            Op, BM, BN, Stages, MAtoms, NAtoms, false, false, Pieces>(
+            storage, problem, tile_count, thread_plan, accumulators,
+            piece_tiles);
     } else if (tf32_can_stage_async_4(a, b, params)) {
         if (wide_a) {
             tf32_async_mainloop<
-                Op, BM, BN, Stages, MAtoms, NAtoms, false, true>(
-                storage, problem, tile_count, thread_plan, accumulators);
+                Op, BM, BN, Stages, MAtoms, NAtoms, false, true, Pieces>(
+                storage, problem, tile_count, thread_plan, accumulators,
+                piece_tiles);
         } else if (wide_b) {
             tf32_async_mainloop<
-                Op, BM, BN, Stages, MAtoms, NAtoms, true, false>(
-                storage, problem, tile_count, thread_plan, accumulators);
+                Op, BM, BN, Stages, MAtoms, NAtoms, true, false, Pieces>(
+                storage, problem, tile_count, thread_plan, accumulators,
+                piece_tiles);
         } else {
             tf32_async_mainloop<
-                Op, BM, BN, Stages, MAtoms, NAtoms, true, true>(
-                storage, problem, tile_count, thread_plan, accumulators);
+                Op, BM, BN, Stages, MAtoms, NAtoms, true, true, Pieces>(
+                storage, problem, tile_count, thread_plan, accumulators,
+                piece_tiles);
         }
     } else {
         for (unsigned tile = 0; tile < tile_count; ++tile) {
@@ -2358,6 +2434,12 @@ __device__ __forceinline__ void tf32_kernel(
                 tf32_compute_stage<Op, BM, BN, Stages, MAtoms, NAtoms>(
                     storage, stage, warp_m, warp_n,
                     group, thread, accumulators);
+                if constexpr (Pieces > 1) {
+                    if ((tile + 1) % piece_tiles == 0 && tile + 1 < tile_count) {
+                        tf32_fold_piece<Op, MAtoms, NAtoms>(
+                            accumulators, problem, thread_plan, tile + 1 == piece_tiles);
+                    }
+                }
             }
             __syncthreads();
         }
@@ -2374,15 +2456,26 @@ __device__ __forceinline__ void tf32_kernel(
                         + group + (element >= 2 ? 8 : 0);
                     int column = problem.tile_column + warp_n + n_atom * 8
                         + 2 * thread + (element & 1);
-                    tf32_store<Op>(output, row, column,
-                        accumulators[m_atom][n_atom][element], bias, params);
+                    float value = accumulators[m_atom][n_atom][element];
+                    if constexpr (Pieces > 1) {
+                        if (row < tf32_rows<Op>(params) && column < tf32_columns<Op>(params)) {
+                            if (tile_count > piece_tiles) {
+                                value = __fadd_rn(
+                                    output[(long long)row * params.ldc + column], value);
+                            }
+                            if constexpr (Op == SgbTf32Nn) {
+                                if (bias != nullptr) value = __fadd_rn(value, bias[column]);
+                            }
+                        }
+                    }
+                    tf32_store<Op>(output, row, column, value, bias, params);
                 }
             }
         }
     }
 }
 
-template <SgbTf32Op Op, int BM, int BN, int Stages>
+template <SgbTf32Op Op, int BM, int BN, int Stages, int Pieces = 1>
 __device__ __forceinline__ void tf32_entry(
     float* output, const float* a, const float* b, const float* bias,
     Sm80Tf32KernelParams params) {
@@ -2395,7 +2488,7 @@ __device__ __forceinline__ void tf32_entry(
         return;
     }
 #line 1750 "sm80.cu"
-    tf32_kernel<Op, BM, BN, Stages>(output, a, b, bias, params);
+    tf32_kernel<Op, BM, BN, Stages, Pieces>(output, a, b, bias, params);
 }
 
 template <SgbTf32Op Op, int BM, int BN, int Stages,
@@ -2765,13 +2858,15 @@ __device__ __forceinline__ void tf32_splitk_fused_kernel(
                 }
                 float value0;
                 if constexpr (Op == SgbTf32Nn) {
-                    float bias0 = bias == nullptr ? 0.0f : bias[column];
-                    float sum0 = bias0;
-                    sum0 = __fadd_rn(sum0, p0.x);
-                    sum0 = __fadd_rn(sum0, p1.x);
+                    // The partitions in order, then the bias: the fold of a
+                    // layer cut into pieces.
+                    float sum0 = __fadd_rn(p0.x, p1.x);
                     if constexpr (Partitions == 4) {
                         sum0 = __fadd_rn(sum0, p2.x);
                         sum0 = __fadd_rn(sum0, p3.x);
+                    }
+                    if (bias != nullptr) {
+                        sum0 = __fadd_rn(sum0, bias[column]);
                     }
                     value0 = params.alpha == 1.0f
                         ? sum0 : __fmul_rn(params.alpha, sum0);
@@ -2794,12 +2889,13 @@ __device__ __forceinline__ void tf32_splitk_fused_kernel(
                 if (has_second) {
                     float value1;
                     if constexpr (Op == SgbTf32Nn) {
-                        float sum1 = bias == nullptr ? 0.0f : bias[column + 1];
-                        sum1 = __fadd_rn(sum1, p0.y);
-                        sum1 = __fadd_rn(sum1, p1.y);
+                        float sum1 = __fadd_rn(p0.y, p1.y);
                         if constexpr (Partitions == 4) {
                             sum1 = __fadd_rn(sum1, p2.y);
                             sum1 = __fadd_rn(sum1, p3.y);
+                        }
+                        if (bias != nullptr) {
+                            sum1 = __fadd_rn(sum1, bias[column + 1]);
                         }
                         value1 = params.alpha == 1.0f
                             ? sum1 : __fmul_rn(params.alpha, sum1);
@@ -2914,6 +3010,30 @@ GEMM_BI_TF32_DEFINE_KERNEL(nt_sm80_mma_tf32_m64n64_bk32_s3, SgbTf32Nt, 64, 64, 3
 GEMM_BI_TF32_DEFINE_KERNEL(nt_sm80_mma_tf32_m16n32_bk32_s4, SgbTf32Nt, 16, 32, 4, 128, 3)
 GEMM_BI_TF32_DEFINE_KERNEL(nt_sm80_mma_tf32_m16n16_bk32_s4, SgbTf32Nt, 16, 16, 4, 64, 4)
 
+// The plain tiles of a layer cut into four pieces: each piece is a chain
+// from +0.0 over its whole k tiles, added in order to the sum the CTA keeps
+// in its own output tile, the bias after the pieces - the fold the split-K
+// members write through their partial planes, without the planes.
+#define GEMM_BI_TF32_DEFINE_PIECES_KERNEL(NAME, OP, BM, BN, STAGES, THREADS, MIN_BLOCKS) \
+extern "C" __global__ __launch_bounds__(THREADS, MIN_BLOCKS) void NAME(              \
+    float* output, const float* a, const float* b, const float* bias,                 \
+    Sm80Tf32KernelParams params) {                                                    \
+    tf32_entry<OP, BM, BN, STAGES, 4>(output, a, b, bias, params);                    \
+}
+
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nn_sm80_mma_tf32_pieces4_m128n64_bk32_s2, SgbTf32Nn, 128, 64, 2, 256, 1)
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nn_sm80_mma_tf32_pieces4_m128n64_bk32_s3, SgbTf32Nn, 128, 64, 3, 256, 1)
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nn_sm80_mma_tf32_pieces4_m64n64_bk32_s2, SgbTf32Nn, 64, 64, 2, 128, 1)
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nn_sm80_mma_tf32_pieces4_m64n64_bk32_s3, SgbTf32Nn, 64, 64, 3, 128, 1)
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nn_sm80_mma_tf32_pieces4_m16n32_bk32_s4, SgbTf32Nn, 16, 32, 4, 128, 3)
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nn_sm80_mma_tf32_pieces4_m16n16_bk32_s4, SgbTf32Nn, 16, 16, 4, 64, 4)
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nt_sm80_mma_tf32_pieces4_m128n64_bk32_s2, SgbTf32Nt, 128, 64, 2, 256, 1)
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nt_sm80_mma_tf32_pieces4_m128n64_bk32_s3, SgbTf32Nt, 128, 64, 3, 256, 1)
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nt_sm80_mma_tf32_pieces4_m64n64_bk32_s2, SgbTf32Nt, 64, 64, 2, 128, 1)
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nt_sm80_mma_tf32_pieces4_m64n64_bk32_s3, SgbTf32Nt, 64, 64, 3, 128, 1)
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nt_sm80_mma_tf32_pieces4_m16n32_bk32_s4, SgbTf32Nt, 16, 32, 4, 128, 3)
+GEMM_BI_TF32_DEFINE_PIECES_KERNEL(nt_sm80_mma_tf32_pieces4_m16n16_bk32_s4, SgbTf32Nt, 16, 16, 4, 64, 4)
+
 template <typename A, typename B> struct SgbTf32SameType { static constexpr bool value = false; };
 template <typename A> struct SgbTf32SameType<A, A> { static constexpr bool value = true; };
 using SgbTf32KernelSignature = void (*)(
@@ -2939,6 +3059,18 @@ TF32_ASSERT_KERNEL_SIGNATURE(nt_sm80_mma_tf32_m64n64_bk32_s2);
 TF32_ASSERT_KERNEL_SIGNATURE(nt_sm80_mma_tf32_m64n64_bk32_s3);
 TF32_ASSERT_KERNEL_SIGNATURE(nt_sm80_mma_tf32_m16n32_bk32_s4);
 TF32_ASSERT_KERNEL_SIGNATURE(nt_sm80_mma_tf32_m16n16_bk32_s4);
+TF32_ASSERT_KERNEL_SIGNATURE(nn_sm80_mma_tf32_pieces4_m128n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(nn_sm80_mma_tf32_pieces4_m128n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(nn_sm80_mma_tf32_pieces4_m64n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(nn_sm80_mma_tf32_pieces4_m64n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(nn_sm80_mma_tf32_pieces4_m16n32_bk32_s4);
+TF32_ASSERT_KERNEL_SIGNATURE(nn_sm80_mma_tf32_pieces4_m16n16_bk32_s4);
+TF32_ASSERT_KERNEL_SIGNATURE(nt_sm80_mma_tf32_pieces4_m128n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(nt_sm80_mma_tf32_pieces4_m128n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(nt_sm80_mma_tf32_pieces4_m64n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(nt_sm80_mma_tf32_pieces4_m64n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(nt_sm80_mma_tf32_pieces4_m16n32_bk32_s4);
+TF32_ASSERT_KERNEL_SIGNATURE(nt_sm80_mma_tf32_pieces4_m16n16_bk32_s4);
 using SgbTf32SplitKKernelSignature = void (*)(
     float*, float*, unsigned*, const float*, const float*, const float*,
     Sm80Tf32KernelParams);
@@ -2954,4 +3086,5 @@ TF32_ASSERT_SPLITK_KERNEL_SIGNATURE(nt_sm80_mma_tf32_splitk8_m32n32_bk32_s4);
 
 #undef TF32_ASSERT_SPLITK_KERNEL_SIGNATURE
 #undef TF32_ASSERT_KERNEL_SIGNATURE
+#undef GEMM_BI_TF32_DEFINE_PIECES_KERNEL
 #undef GEMM_BI_TF32_DEFINE_KERNEL

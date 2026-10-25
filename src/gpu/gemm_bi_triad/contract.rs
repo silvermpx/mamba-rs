@@ -741,6 +741,21 @@ pub(super) fn append_tf32_route_digest(
                 .required(b"tile", &[tile])
                 .required(b"stages", &[route.stages.count()])
         }
+        Tf32PhysicalRoute::MmaTf32RnaPieces4(route) => {
+            let tile = match route.tile {
+                Tf32PortableTile::M128N64 => 1,
+                Tf32PortableTile::M64N64 => 2,
+                Tf32PortableTile::M16N32 => 3,
+                Tf32PortableTile::M16N16 => 4,
+                Tf32PortableTile::M32N32 => 5,
+                Tf32PortableTile::M128N128 => 6,
+            };
+            digest
+                .required(b"route-family", &[24])
+                .required(b"tile", &[tile])
+                .required(b"stages", &[route.stages.count()])
+                .required(b"pieces", &[4])
+        }
         Tf32PhysicalRoute::MmaTf32RnaSplitK4(route) => {
             let tile = match route.tile {
                 Tf32PortableTile::M128N64 => 1,
@@ -851,6 +866,10 @@ pub(super) fn append_tf32_route_digest(
         Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(tile) => digest
             .required(b"route-family", &[23])
             .required(b"tile", &[tile.digest_code()]),
+        Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile) => digest
+            .required(b"route-family", &[25])
+            .required(b"tile", &[tile.digest_code()])
+            .required(b"pieces", &[4]),
     }
 }
 
@@ -907,7 +926,10 @@ fn tf32_operand_layouts(
     if request.shape.reduction(request.op) == 0 {
         return Err("zero-reduction TF32 routes use the mapless sentinel".into());
     }
-    if matches!(route, Tf32PhysicalRoute::MmaTf32Rna(_)) {
+    if matches!(
+        route,
+        Tf32PhysicalRoute::MmaTf32Rna(_) | Tf32PhysicalRoute::MmaTf32RnaPieces4(_)
+    ) {
         return Err("portable TF32 does not use tensor maps".into());
     }
     if route.is_exact_fma() {
@@ -1289,6 +1311,7 @@ pub(super) fn tf32_tensor_map_plan(
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::MmaTf32RnaPieces4(_)
         | Tf32PhysicalRoute::Sm89MmaTf32Compact8
         | Tf32PhysicalRoute::Sm89TnPreRnaN96
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
@@ -1302,6 +1325,7 @@ pub(super) fn tf32_tensor_map_plan(
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
         | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_)
         | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
             return Err("portable TF32 does not use tensor maps".into());
         }
@@ -1828,6 +1852,10 @@ pub enum Tf32PhysicalRoute {
     MmaTf32RnaSplitK2(Tf32PortableRoute),
     MmaTf32RnaSplitK4(Tf32PortableRoute),
     MmaTf32RnaSplitK8(Tf32PortableRoute),
+    /// A plain portable tile that cuts its reduction into four pieces of
+    /// whole k tiles and folds them inside the CTA: the four-way split
+    /// members' partitions and fold, without the partial planes.
+    MmaTf32RnaPieces4(Tf32PortableRoute),
     Sm90aWgmmaTf32Tma(Tf32Sm90aRoute),
     Sm100Tcgen05Tf32Tma(Tf32Sm100Route),
     Sm120TmaMmaTf32Rna(Tf32Sm120Route),
@@ -1863,6 +1891,10 @@ pub enum Tf32PhysicalRoute {
     /// A wide or multistage NN tile of the batch-invariant TF32 forward's
     /// own module.
     MmaTf32RnaWide(Tf32RnaWideTile),
+    /// The same tile folding a cut layer's four pieces inside the CTA: the
+    /// four-way split members' partitions and fold, without the partial
+    /// planes.
+    MmaTf32RnaWidePieces4(Tf32RnaWideTile),
     /// A multistage member of the weight gradient's eight-way split in the
     /// batch-invariant module: the portable split members' partitions and
     /// fold.
@@ -1977,7 +2009,8 @@ impl Tf32PhysicalRoute {
             Self::MmaTf32Rna(_)
             | Self::MmaTf32RnaSplitK2(_)
             | Self::MmaTf32RnaSplitK4(_)
-            | Self::MmaTf32RnaSplitK8(_) => ModuleKind::TriadSm80,
+            | Self::MmaTf32RnaSplitK8(_)
+            | Self::MmaTf32RnaPieces4(_) => ModuleKind::TriadSm80,
             Self::Sm90aWgmmaTf32Tma(_) => ModuleKind::TriadSm90a,
             Self::Sm100Tcgen05Tf32Tma(_) => ModuleKind::TriadSm100,
             Self::Sm120TmaMmaTf32Rna(_)
@@ -1995,7 +2028,9 @@ impl Tf32PhysicalRoute {
             | Self::Sm89TnDirectM192N192S2
             | Self::Sm89TnPreRnaM96N192S2
             | Self::Sm89TnPreRnaM96N96S3 => ModuleKind::TriadSm89Tf32Joint,
-            Self::MmaTf32RnaWide(_) | Self::MmaTf32RnaWideSplitK8(_) => ModuleKind::TriadTf32Rna,
+            Self::MmaTf32RnaWide(_)
+            | Self::MmaTf32RnaWidePieces4(_)
+            | Self::MmaTf32RnaWideSplitK8(_) => ModuleKind::TriadTf32Rna,
         }
     }
 
@@ -2965,6 +3000,38 @@ const SM80_TF32_NN: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::N
 const SM80_TF32_TN: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::Tn, "tn");
 const SM80_TF32_NT: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::Nt, "nt");
 
+/// The four-piece twin of a plain portable tile: the same tile, stages,
+/// threads, staging and register budget, the finished pieces' sum kept in
+/// the output tile between pieces.
+const fn portable_tf32_pieces_spec(plain: Tf32KernelSpec, symbol: &'static str) -> Tf32KernelSpec {
+    let route = match plain.route {
+        Tf32PhysicalRoute::MmaTf32Rna(route) => Tf32PhysicalRoute::MmaTf32RnaPieces4(route),
+        other => other,
+    };
+    Tf32KernelSpec {
+        route,
+        symbol,
+        ..plain
+    }
+}
+
+/// The plain tiles of a cut forward or input gradient, each folding the
+/// layer's four pieces inside the CTA.
+const SM80_TF32_PIECES: [Tf32KernelSpec; 12] = [
+    portable_tf32_pieces_spec(SM80_TF32_NN[0], "nn_sm80_mma_tf32_pieces4_m128n64_bk32_s2"),
+    portable_tf32_pieces_spec(SM80_TF32_NN[1], "nn_sm80_mma_tf32_pieces4_m128n64_bk32_s3"),
+    portable_tf32_pieces_spec(SM80_TF32_NN[2], "nn_sm80_mma_tf32_pieces4_m64n64_bk32_s2"),
+    portable_tf32_pieces_spec(SM80_TF32_NN[3], "nn_sm80_mma_tf32_pieces4_m64n64_bk32_s3"),
+    portable_tf32_pieces_spec(SM80_TF32_NN[4], "nn_sm80_mma_tf32_pieces4_m16n32_bk32_s4"),
+    portable_tf32_pieces_spec(SM80_TF32_NN[5], "nn_sm80_mma_tf32_pieces4_m16n16_bk32_s4"),
+    portable_tf32_pieces_spec(SM80_TF32_NT[0], "nt_sm80_mma_tf32_pieces4_m128n64_bk32_s2"),
+    portable_tf32_pieces_spec(SM80_TF32_NT[1], "nt_sm80_mma_tf32_pieces4_m128n64_bk32_s3"),
+    portable_tf32_pieces_spec(SM80_TF32_NT[2], "nt_sm80_mma_tf32_pieces4_m64n64_bk32_s2"),
+    portable_tf32_pieces_spec(SM80_TF32_NT[3], "nt_sm80_mma_tf32_pieces4_m64n64_bk32_s3"),
+    portable_tf32_pieces_spec(SM80_TF32_NT[4], "nt_sm80_mma_tf32_pieces4_m16n32_bk32_s4"),
+    portable_tf32_pieces_spec(SM80_TF32_NT[5], "nt_sm80_mma_tf32_pieces4_m16n16_bk32_s4"),
+];
+
 pub const SM89_FINALIST_TF32_ROUTE_SPECS: [Tf32KernelSpec; 1] = [Tf32KernelSpec {
     op: ResolvedGemmOp::Nt,
     route: Tf32PhysicalRoute::Sm89MmaTf32Compact8,
@@ -3015,9 +3082,10 @@ const fn tf32_rna_spec(
     }
 }
 
-/// The batch-invariant TF32 policy's own tiles; the threads and shared
-/// memory are the source owner's launch table.
-pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 10] = [
+/// The batch-invariant TF32 policy's own tiles walking one chain per
+/// output; the threads and shared memory are the source owner's launch
+/// table.
+const TF32_RNA_CHAIN_SPECS: [Tf32KernelSpec; 10] = [
     tf32_rna_spec(
         Tf32RnaWideTile::M128N96S3,
         super::tf32_rna_source::NN_M128N96_S3_SYMBOL,
@@ -3087,6 +3155,71 @@ pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 10] = [
         (128, 128),
         (16, 5, 128),
         81_920,
+    ),
+];
+
+/// The four-piece twin of a one-chain tile of the batch-invariant module:
+/// the same tile, slabs, threads and ring.
+const fn tf32_rna_pieces_spec(chain: Tf32KernelSpec, symbol: &'static str) -> Tf32KernelSpec {
+    let route = match chain.route {
+        Tf32PhysicalRoute::MmaTf32RnaWide(tile) => Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile),
+        other => other,
+    };
+    Tf32KernelSpec {
+        route,
+        symbol,
+        ..chain
+    }
+}
+
+/// The batch-invariant TF32 policy's own tiles: the one-chain tiles, then
+/// their four-piece twins. The input gradient's 128 x 128 tile has none.
+pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 19] = [
+    TF32_RNA_CHAIN_SPECS[0],
+    TF32_RNA_CHAIN_SPECS[1],
+    TF32_RNA_CHAIN_SPECS[2],
+    TF32_RNA_CHAIN_SPECS[3],
+    TF32_RNA_CHAIN_SPECS[4],
+    TF32_RNA_CHAIN_SPECS[5],
+    TF32_RNA_CHAIN_SPECS[6],
+    TF32_RNA_CHAIN_SPECS[7],
+    TF32_RNA_CHAIN_SPECS[8],
+    TF32_RNA_CHAIN_SPECS[9],
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[0],
+        super::tf32_rna_source::NN_PIECES4_M128N96_S3_SYMBOL,
+    ),
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[1],
+        super::tf32_rna_source::NN_PIECES4_M96N96_S3_SYMBOL,
+    ),
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[2],
+        super::tf32_rna_source::NN_PIECES4_M128N128_S3_SYMBOL,
+    ),
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[3],
+        super::tf32_rna_source::NN_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
+    ),
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[4],
+        super::tf32_rna_source::NN_PIECES4_MS_M128N64_S3_SYMBOL,
+    ),
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[5],
+        super::tf32_rna_source::NN_PIECES4_MS_M64N64_S3_SYMBOL,
+    ),
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[6],
+        super::tf32_rna_source::NN_PIECES4_MS_PERSIST_M128N64_BK16_S3_SYMBOL,
+    ),
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[7],
+        super::tf32_rna_source::NT_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
+    ),
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[8],
+        super::tf32_rna_source::NT_PIECES4_MS_M128N64_S3_SYMBOL,
     ),
 ];
 
@@ -3353,7 +3486,7 @@ pub fn tf32_route_specs_all(
     tf32_route_specs_for(module_kind, true)
 }
 
-pub const SM80_TF32_ROUTE_SPECS: [Tf32KernelSpec; 18] = [
+pub const SM80_TF32_ROUTE_SPECS: [Tf32KernelSpec; 30] = [
     SM80_TF32_NN[0],
     SM80_TF32_NN[1],
     SM80_TF32_NN[2],
@@ -3372,6 +3505,18 @@ pub const SM80_TF32_ROUTE_SPECS: [Tf32KernelSpec; 18] = [
     SM80_TF32_NT[3],
     SM80_TF32_NT[4],
     SM80_TF32_NT[5],
+    SM80_TF32_PIECES[0],
+    SM80_TF32_PIECES[1],
+    SM80_TF32_PIECES[2],
+    SM80_TF32_PIECES[3],
+    SM80_TF32_PIECES[4],
+    SM80_TF32_PIECES[5],
+    SM80_TF32_PIECES[6],
+    SM80_TF32_PIECES[7],
+    SM80_TF32_PIECES[8],
+    SM80_TF32_PIECES[9],
+    SM80_TF32_PIECES[10],
+    SM80_TF32_PIECES[11],
 ];
 
 const SM90A_TF32_NN: [Tf32KernelSpec; 2] = sm90a_tf32_specs!(ResolvedGemmOp::Nn, "nn");
@@ -3718,7 +3863,8 @@ pub fn tf32_kernel_spec(
     route: Tf32PhysicalRoute,
 ) -> Result<&'static Tf32KernelSpec, String> {
     match route {
-        Tf32PhysicalRoute::MmaTf32Rna(portable) => portable.validate()?,
+        Tf32PhysicalRoute::MmaTf32Rna(portable)
+        | Tf32PhysicalRoute::MmaTf32RnaPieces4(portable) => portable.validate()?,
         Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
@@ -7909,13 +8055,13 @@ mod tests {
     #[test]
     fn tf32_route_spec_inventories_are_exact_and_unique() {
         let expected = [
-            (ModuleKind::TriadSm80, 18, [6, 6, 6]),
+            (ModuleKind::TriadSm80, 30, [12, 6, 12]),
             (ModuleKind::TriadSm89Finalist, 1, [0, 0, 1]),
             (ModuleKind::TriadSm89Tf32Joint, 11, [2, 6, 3]),
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
             (ModuleKind::TriadSm120, 30, [9, 10, 11]),
-            (ModuleKind::TriadTf32Rna, 10, [7, 0, 3]),
+            (ModuleKind::TriadTf32Rna, 19, [14, 0, 5]),
         ];
         let expected_total = expected.iter().map(|(_, count, _)| count).sum::<usize>();
         let mut all_symbols = std::collections::BTreeSet::new();
@@ -7940,6 +8086,7 @@ mod tests {
                     | super::Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
                     | super::Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
                     | super::Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+                    | super::Tf32PhysicalRoute::MmaTf32RnaPieces4(_)
                     | super::Tf32PhysicalRoute::Sm89MmaTf32Compact8
                     | super::Tf32PhysicalRoute::Sm89TnPreRnaN96
                     | super::Tf32PhysicalRoute::Sm89TnPreRnaM64N64
@@ -7955,6 +8102,7 @@ mod tests {
                     | super::Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
                     | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
                     | super::Tf32PhysicalRoute::MmaTf32RnaWide(_)
+                    | super::Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_)
                     | super::Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
                         assert_eq!(spec.instruction_family, ResolvedInstructionFamily::MmaSync);
                         assert_eq!(
@@ -8401,7 +8549,9 @@ mod tests {
         ] {
             let actual = tf32_route_specs(ModuleKind::TriadSm80)
                 .iter()
-                .filter(|spec| spec.op == op)
+                .filter(|spec| {
+                    spec.op == op && matches!(spec.route, Tf32PhysicalRoute::MmaTf32Rna(_))
+                })
                 .map(|spec| spec.dynamic_shared_bytes)
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected, "{op:?} portable TF32 shared bytes");

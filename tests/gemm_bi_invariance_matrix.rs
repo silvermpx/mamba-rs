@@ -5,18 +5,12 @@
 //! plan — never on `M`, never on `r`, never on which other rows shared
 //! the launch.
 //!
-//! The load-bearing part is the VERDICT TABLE: each reachable family
-//! declares its invariance class (`Strict` or `Bucketed`), the test
-//! derives the OBSERVED boundary set (the ladder values where the probe
-//! row's bits change) and asserts it against the declaration. A new
-//! M-keyed heuristic, a moved bucket edge, or a silently removed one all
-//! fail; removing a boundary legitimately (a ladder unification) requires
-//! updating the contract row in the same commit.
-//!
-//! The typed route's M=128 matvec/TC break was the live defect the first
-//! recording of this suite encoded; the tile ladder removed it from the TC
-//! tier (that arm is Strict now), and the scalar tier's bucket table
-//! keeps the remaining edges pinned.
+//! Every reachable family is STRICT: the test derives the OBSERVED
+//! boundary set (the ladder values where the probe rows' bits change) and
+//! asserts it is empty. The families once declared bucket tables, edges
+//! where an M-keyed rule switched the arithmetic (the typed route's M=128
+//! matvec/TC break, the f32 split-K and slim entries); one deterministic
+//! mode removed them, so any boundary now is a defect.
 //!
 //! No absolute bits are captured — the suite asserts relations only, so
 //! it stays green across a legitimate arithmetic re-golden (that is
@@ -46,14 +40,6 @@ const M_LADDER: &[usize] = &[
     1, 2, 4, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025,
     2048, 4621,
 ];
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Invariance {
-    /// No boundary anywhere on the ladder — any bit change across M fails.
-    Strict,
-    /// Boundaries allowed ONLY at the declared first-m-of-new-bucket set.
-    Bucketed(&'static [usize]),
-}
 
 fn synth(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed;
@@ -102,7 +88,7 @@ fn observed_boundaries(launch: &mut LaunchFn<'_>, k: usize, n: usize) -> Vec<usi
     bounds
 }
 
-fn assert_contract(family: &str, k: usize, n: usize, declared: Invariance, observed: &[usize]) {
+fn assert_strict(family: &str, k: usize, n: usize, observed: &[usize]) {
     evidence::record(
         "gemm_bi_invariance_matrix",
         family,
@@ -114,21 +100,11 @@ fn assert_contract(family: &str, k: usize, n: usize, declared: Invariance, obser
             .join(","),
     )
     .expect("acceptance evidence");
-    match declared {
-        Invariance::Strict => assert!(
-            observed.is_empty(),
-            "{family} (K={k} N={n}) declared STRICT but the probe row's bits \
-             changed at M in {observed:?} — an M-keyed arithmetic switch"
-        ),
-        Invariance::Bucketed(edges) => {
-            assert_eq!(
-                observed, edges,
-                "{family} (K={k} N={n}) declared bucket edges {edges:?} but \
-                 observed {observed:?} — a new, moved or removed boundary \
-                 must update the contract row in the SAME commit"
-            );
-        }
-    }
+    assert!(
+        observed.is_empty(),
+        "{family} (K={k} N={n}): the probe rows' bits changed at M in \
+         {observed:?} — an M-keyed arithmetic switch"
+    );
 }
 
 /// Shared fixture: A[M_MAX, K] with a fixed probe vector in row 0 and
@@ -229,37 +205,6 @@ fn ctx_new() -> (GpuDevice, GpuCtx) {
     (dev, ctx)
 }
 
-/// One bucketed contract row: (K, N, the first m of each new bucket).
-type ContractRow<'a> = (usize, usize, &'a [usize]);
-/// Bucketed contract tables keyed by architecture target.
-type ArchTables<'a> = [(&'a str, &'a [ContractRow<'a>])];
-
-/// Bucketed contract rows are per-architecture data: the split gates
-/// key on the frozen SM-count cell and on tile geometry, so an edge
-/// set observed on one arch is not a claim about another. A box whose
-/// arch has no recorded table skips loudly - record a table there
-/// before trusting the bucketed family on it. Strict declarations
-/// carry no table: "no boundary anywhere" is arch-independent and is
-/// asserted on every box.
-fn arch_rows<'a>(
-    dev: &GpuDevice,
-    tables: &'a ArchTables<'a>,
-    family: &str,
-) -> Option<&'a [ContractRow<'a>]> {
-    let arch = GpuDevice::nvrtc_arch(dev.compute_capability);
-    match tables.iter().find(|(a, _)| *a == arch) {
-        Some((_, rows)) => Some(rows),
-        None => {
-            println!(
-                "{family}: no bucketed contract recorded for {arch}; \
-                 run the boundary observer on this box and add its \
-                 table before trusting the family here"
-            );
-            None
-        }
-    }
-}
-
 const SHAPES: &[(usize, usize)] = &[
     (64, 64),
     (63, 128),
@@ -302,7 +247,7 @@ fn inference_f32_is_strictly_invariant() {
             fx.prefix_bits(&ctx, m)
         };
         let obs = observed_boundaries(&mut launch, k, n);
-        assert_contract("Inference/f32", k, n, Invariance::Strict, &obs);
+        assert_strict("Inference/f32", k, n, &obs);
         println!("Inference/f32   K={k:<5} N={n:<5} boundaries: {obs:?}");
     }
 }
@@ -339,42 +284,21 @@ fn inference_bf16_is_strictly_invariant() {
             fx.prefix_bits(&ctx, m)
         };
         let obs = observed_boundaries(&mut launch, k, n);
-        assert_contract("Inference/bf16", k, n, Invariance::Strict, &obs);
+        assert_strict("Inference/bf16", k, n, &obs);
         println!("Inference/bf16  K={k:<5} N={n:<5} boundaries: {obs:?}");
     }
 }
 
-/// Triad family, f32: per-bucket invariance. The declaration is EXACT
-/// set equality per (K, N) with the current dispatcher - the
-/// honest documentation of a family whose buckets are keyed on M, N and
-/// K together (ultra-thin exit at 32; the split-K underfill saturation
-/// edges, whose position depends on the bucket's BM and on N; the fat-M
-/// splitk-slim entry at 1025 for K with >= 6 chunks; the Slim/Big
-/// crossover at 2048; the slim-force edge at 511 for wide N). Any new,
-/// moved or removed boundary means the dispatcher changed and this
-/// table must be updated in the SAME commit, consciously.
+/// Triad family, f32: strict on every architecture. Each layer folds the
+/// same way at every row count, cut layers in their pieces, so no row
+/// count moves a row's bits.
 #[test]
 #[ignore = "needs a CUDA device"]
-fn triad_f32_boundaries_match_the_declared_table() {
-    let (dev, ctx) = ctx_new();
+fn triad_f32_is_strictly_invariant() {
+    let (_dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Triad);
-    // (K, N) -> the first-m-of-a-new-bucket set, one table per arch.
-    const DECLARED: &ArchTables<'static> = &[(
-        "sm_89",
-        &[
-            (64, 64, &[32]),
-            (63, 128, &[32]),
-            (384, 384, &[32, 1025]),
-            (1024, 384, &[32, 1025]),
-            (384, 1928, &[32, 513]),
-            (768, 384, &[32, 1025]),
-        ],
-    )];
-    let Some(rows) = arch_rows(&dev, DECLARED, "Triad/f32") else {
-        return;
-    };
-    for &(k, n, edges) in rows {
+    for &(k, n) in SHAPES {
         let m_max = *M_LADDER.last().expect("ladder non-empty");
         let mut a_host = synth(m_max * k, 0xA5EED ^ (k * n) as u64);
         for (i, slot) in a_host[..k].iter_mut().enumerate() {
@@ -393,119 +317,69 @@ fn triad_f32_boundaries_match_the_declared_table() {
                 .collect()
         };
         let obs = observed_boundaries(&mut launch, k, n);
-        assert_contract("Triad/f32", k, n, Invariance::Bucketed(edges), &obs);
+        assert_strict("Triad/f32", k, n, &obs);
         println!("Triad/f32   K={k:<5} N={n:<5} boundaries: {obs:?}");
     }
 }
 
-/// The typed BI route (what the m3 mixed forward and the future typed
-/// prefill call) with the TC tier ON: STRICT across all M. The G4 ladder
-/// (tc_pick_tile_forward) closed the tensor-core tier over every M at
-/// N >= 32 - Thin16 below the Tile64 band, all rungs bit-identical per
-/// element - so the old matvec/TC family break at M=128 is GONE from
-/// this tier (this declaration went Bucketed[128] -> Strict in the same
-/// commit as the dispatcher change, as the contract law requires).
+/// The typed route (what the mixed forwards and the typed prefill call):
+/// strict across all M with the tensor cores on and off. The layer alone
+/// picks the arithmetic: the tile ladder (Thin16/Tile64/Tile128, the same
+/// bits per element) for N >= 32 under the tensor cores, the scalar entry
+/// for N >= 32 without them, and matvec for N < 32 on either tier.
 ///
-/// Chronicle, because this arm flip-flopped once before G4: the first
-/// recording declared STRICT on a row-0-only comparison with
-/// cancellation-symmetric probes (adjacent +x/-x pairs sum exactly in ANY
-/// contiguous ascending K-partition, and row 0 alone samples ~0.1% of
-/// the output) - a probe too weak to see the then-live switch. The defect
-/// census (gemm_bi_contract_census) exposed it with the i%4 magnitude
-/// pattern; the matrix gained the full-prefix comparison, observed the
-/// M=128 edge, and G4 then removed the edge for real.
+/// The probe matters: adjacent +x/-x pairs sum exactly in any contiguous
+/// ascending K-partition, and row 0 alone samples ~0.1% of the output, so
+/// the fixture interleaves signs and magnitudes and the walk compares the
+/// whole 128-row prefix. A row-0 walk once passed over the live M=128
+/// matvec/TC break.
 #[test]
 #[ignore = "needs a CUDA device"]
-fn typed_route_tc_tier_boundaries_match_the_declared_table() {
+fn typed_route_is_strictly_invariant_on_both_tiers() {
     let (_dev, ctx) = ctx_new();
     ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
     ctx.route_controls().set_family(BiGemmFamily::Triad);
-    // The C2<->C4 family switch is a TC-tier phenomenon: with the tensor
-    // cores ON, M>=128 runs the mma.sync K-slab while M<128 stays on the
-    // scalar matvec. (The first run of this suite discovered that WITHOUT
-    // the TC tier the two sides agree bitwise - see the scalar arm below.)
-    ctx.route_controls().set_tensor_cores(true);
-    for &(k, n) in &[(384usize, 384usize), (768, 2304)] {
-        let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
-        let mut launch = |m: usize| -> Vec<u32> {
-            gpu_gemm_typed_forward_raw(
-                &ctx,
-                TypedPtr {
-                    ptr: fx.c.cached_ptr(),
-                    dtype: WeightDtype::Bf16,
-                },
-                TypedPtr {
-                    ptr: fx.a.cached_ptr(),
-                    dtype: WeightDtype::Bf16,
-                },
-                TypedPtr {
-                    ptr: fx.b.cached_ptr(),
-                    dtype: WeightDtype::Bf16,
-                },
-                None,
-                (m, k, n),
-            )
-            .expect("typed route forward");
-            fx.prefix_bits(&ctx, m)
+    for tensor_cores in [true, false] {
+        ctx.route_controls().set_tensor_cores(tensor_cores);
+        let family = if tensor_cores {
+            "Typed-route/bf16+tc"
+        } else {
+            "Typed-route/bf16"
         };
-        let obs = observed_boundaries(&mut launch, k, n);
-        assert_contract("Typed-route/bf16+tc", k, n, Invariance::Strict, &obs);
-        println!("Typed/bf16+tc K={k:<5} N={n:<5} boundaries: {obs:?}");
-    }
-}
-
-/// The same typed route WITHOUT the tensor-core tier. The scalar tier is
-/// bucketed too: matvec below 128, the typed scalar tile at and above it,
-/// and the tile's split-K engagement adds its own edges at large M. (The
-/// first recording declared this arm STRICT off the same weak row-0
-/// comparison as the TC arm - see the chronicle there.)
-#[test]
-#[ignore = "needs a CUDA device"]
-fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
-    let (dev, ctx) = ctx_new();
-    ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
-    ctx.route_controls().set_family(BiGemmFamily::Triad);
-    // Tensor cores are permitted by default since 0.7.0; this arm declares
-    // the scalar tier's buckets, so it must switch them off explicitly.
-    ctx.route_controls().set_tensor_cores(false);
-    // Declared per (K, N) under the 128-row prefix comparison, one
-    // table per arch. Re-record (do not hand-edit) on change.
-    const DECLARED: &ArchTables<'static> = &[(
-        "sm_89",
-        &[
-            (384, 384, &[128usize, 1025] as &[usize]),
-            (768, 2304, &[128]),
-        ],
-    )];
-    let Some(rows) = arch_rows(&dev, DECLARED, "Typed-scalar/bf16") else {
-        return;
-    };
-    for &(k, n, edges) in rows {
-        let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
-        let mut launch = |m: usize| -> Vec<u32> {
-            gpu_gemm_typed_forward_raw(
-                &ctx,
-                TypedPtr {
-                    ptr: fx.c.cached_ptr(),
-                    dtype: WeightDtype::Bf16,
-                },
-                TypedPtr {
-                    ptr: fx.a.cached_ptr(),
-                    dtype: WeightDtype::Bf16,
-                },
-                TypedPtr {
-                    ptr: fx.b.cached_ptr(),
-                    dtype: WeightDtype::Bf16,
-                },
-                None,
-                (m, k, n),
-            )
-            .expect("typed route forward");
-            fx.prefix_bits(&ctx, m)
-        };
-        let obs = observed_boundaries(&mut launch, k, n);
-        assert_contract("Typed-scalar/bf16", k, n, Invariance::Bucketed(edges), &obs);
-        println!("TypedNoTc   K={k:<5} N={n:<5} boundaries: {obs:?}");
+        for &(k, n) in &[
+            (384usize, 384usize),
+            (768, 2304),
+            (1024, 384),
+            (96, 40),
+            (384, 16),
+            (2048, 8),
+        ] {
+            let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
+            let mut launch = |m: usize| -> Vec<u32> {
+                gpu_gemm_typed_forward_raw(
+                    &ctx,
+                    TypedPtr {
+                        ptr: fx.c.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    TypedPtr {
+                        ptr: fx.a.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    TypedPtr {
+                        ptr: fx.b.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    None,
+                    (m, k, n),
+                )
+                .expect("typed route forward");
+                fx.prefix_bits(&ctx, m)
+            };
+            let obs = observed_boundaries(&mut launch, k, n);
+            assert_strict(family, k, n, &obs);
+            println!("{family:<20} K={k:<5} N={n:<5} boundaries: {obs:?}");
+        }
     }
 }
 

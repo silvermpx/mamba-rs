@@ -2783,6 +2783,27 @@ fn rna_batch_invariant_selection(
                 .to_string(),
         );
     }
+    // A forward or an input gradient the layer's fold cuts runs four pieces
+    // at every batch size; every other product walks one chain.
+    if request.op != ResolvedGemmOp::Tn
+        && exact_chunks(
+            request.shape.reduction(request.op),
+            request.shape.output_columns(request.op),
+        )
+    {
+        return rna_layer_pieces_selection(request, operands, availability);
+    }
+    rna_one_chain_selection(request, operands, availability)
+}
+
+/// The strict policy's route for a product its layer's fold keeps whole, or
+/// for a weight gradient: the architecture's tables and measured cells, the
+/// gradients' shape rules, the proof tier, then the portable ladder.
+fn rna_one_chain_selection(
+    request: F32TriadRequest,
+    operands: Option<F32TriadOperands>,
+    availability: F32TriadAvailability,
+) -> Result<F32TriadSelection, String> {
     let keeps = |route: Tf32PhysicalRoute| rna_batch_invariant_route(request.op, route);
     // The architecture's own forward table, where it has one: every tile it
     // names walks the portable tiles' chain, so it picks by speed alone.
@@ -2819,7 +2840,11 @@ fn rna_batch_invariant_selection(
     // The cut a gradient's shape asks for, read without its operands: where
     // they sit, which module bound and what a cohort measured only choose
     // among routes of this cut, never a different one.
-    let shape_cut = rna_shape_cut(request, availability);
+    let shape_cut = if request.op == ResolvedGemmOp::Tn {
+        rna_shape_cut(request, availability)
+    } else {
+        Some(1)
+    };
     let same_cut = |route: Tf32PhysicalRoute| {
         shape_cut.is_none_or(|cut| cut == rna_route_partitions(request.op, route))
     };
@@ -2879,9 +2904,116 @@ fn rna_batch_invariant_selection(
         })
 }
 
+/// A forward or an input gradient that its layer's fold cuts, under the
+/// strict policy: four pieces of whole 32-input groups at every batch size.
+/// The tile the one-chain rules would run folds the pieces inside the CTA
+/// where it has a four-piece twin, else the portable tile of its rows does.
+/// The four-way split members run the pieces as CTAs of their own for a few
+/// rows, whose 16 x 32 tiles leave a multiprocessor short of warps over a
+/// long reduction (on an RTX 5090, 102 such forwards over a reduction of
+/// 1024 or more ran in 0.51 of the one-chain tile's time), and for any grid
+/// under half a wave of the card. Every route here takes the same
+/// partitions and folds them in the same order with the bias last, so the
+/// choice among them is speed alone.
+fn rna_layer_pieces_selection(
+    request: F32TriadRequest,
+    operands: Option<F32TriadOperands>,
+    availability: F32TriadAvailability,
+) -> Result<F32TriadSelection, String> {
+    use super::contract::{Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile};
+    let rows = request.shape.output_rows(request.op);
+    let columns = request.shape.output_columns(request.op);
+    let binds = |route: Tf32PhysicalRoute| resolve_tf32_forced(request, availability, route).ok();
+    let split = Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
+        tile: Tf32PortableTile::M16N32,
+        stages: if request.op == ResolvedGemmOp::Nn {
+            Tf32PortableStages::S4
+        } else {
+            Tf32PortableStages::S3
+        },
+    });
+    // The in-CTA tiles keep the finished pieces' sum in the output itself,
+    // so a forward that blends the old output folds through the split
+    // members' partial planes instead.
+    if operands.is_some_and(|operands| operands.beta.to_bits() != 0.0_f32.to_bits()) {
+        return binds(split).map(F32TriadSelection::Tf32).ok_or_else(|| {
+            format!(
+                "the RNA batch-invariant TF32 policy folds the cut {request:?} that blends its \
+                 old output through the split pieces, and they do not bind on this stack"
+            )
+        });
+    }
+    let twin = match rna_one_chain_selection(request, operands, availability) {
+        Ok(F32TriadSelection::Tf32(route)) => Some(route),
+        Ok(F32TriadSelection::Tf32Proof { reference, .. }) => Some(reference),
+        _ => None,
+    }
+    .and_then(rna_pieces_twin)
+    .and_then(binds);
+    let pieces = twin
+        .or_else(|| {
+            binds(Tf32PhysicalRoute::MmaTf32RnaPieces4(Tf32PortableRoute {
+                tile: if rows < RNA_NT_NARROW_ROWS {
+                    Tf32PortableTile::M16N32
+                } else {
+                    Tf32PortableTile::M64N64
+                },
+                stages: if rows < RNA_NT_NARROW_ROWS {
+                    Tf32PortableStages::S4
+                } else {
+                    Tf32PortableStages::S2
+                },
+            }))
+        })
+        .ok_or_else(|| {
+            format!(
+                "the RNA batch-invariant TF32 policy cuts {request:?} into four pieces and no \
+                 tile of that cut binds on this stack"
+            )
+        })?;
+    let ctas = tf32_kernel_spec(request.op, pieces).map_or(usize::MAX, |spec| {
+        rows.div_ceil(spec.tile.0 as usize)
+            .saturating_mul(columns.div_ceil(spec.tile.1 as usize))
+    });
+    let route = if rows < RNA_NT_NARROW_ROWS
+        || ctas.saturating_mul(2) < availability.multiprocessors as usize
+    {
+        binds(split).unwrap_or(pieces)
+    } else {
+        pieces
+    };
+    Ok(F32TriadSelection::Tf32(route))
+}
+
+/// The tile that folds a cut layer's four pieces inside the CTA in place of
+/// `route`, when `route` has one: the same tile, staging and k walk.
+fn rna_pieces_twin(route: Tf32PhysicalRoute) -> Option<Tf32PhysicalRoute> {
+    use super::contract::Tf32RnaWideTile;
+    match route {
+        Tf32PhysicalRoute::MmaTf32Rna(route) => Some(Tf32PhysicalRoute::MmaTf32RnaPieces4(route)),
+        // The 128 x 128 input-gradient tile has no pieces twin of its own:
+        // its 64 x 128 sibling of the same ring and staging folds the pieces.
+        Tf32PhysicalRoute::MmaTf32RnaWide(Tf32RnaWideTile::NtMsM128N128Bk16S5) => Some(
+            Tf32PhysicalRoute::MmaTf32RnaWidePieces4(Tf32RnaWideTile::NtMsM64N128Bk16S6),
+        ),
+        Tf32PhysicalRoute::MmaTf32RnaWide(tile) => {
+            Some(Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile))
+        }
+        Tf32PhysicalRoute::MmaTf32RnaPieces4(_) | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_) => {
+            Some(route)
+        }
+        _ => None,
+    }
+}
+
 /// The partitions a strict route cuts its reduction into: one for a tile
 /// that walks the whole reduction, the split member's own count otherwise.
 fn rna_route_partitions(op: ResolvedGemmOp, route: Tf32PhysicalRoute) -> u32 {
+    if let Tf32PhysicalRoute::MmaTf32RnaPieces4(_) | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_) =
+        route
+    {
+        return 4;
+    }
     super::contract::tf32_splitk_spec(op, route).map_or(1, |spec| spec.partitions)
 }
 
@@ -2917,12 +3049,8 @@ const RNA_TN_SPLIT_MIN_REDUCTION: usize = 2048;
 const RNA_TN_SMALL_SPLIT_MIN_REDUCTION: usize = 1024;
 const RNA_TN_SMALL_SPLIT_MAX_TILES: usize = 16;
 
-/// The batch below which an input gradient's output is a few 16-row slabs,
-/// and the reduction and output bounds inside which splitting its reduction
-/// four ways fills the card.
+/// The batch below which an input gradient's output is a few 16-row slabs.
 const RNA_NT_NARROW_ROWS: usize = 256;
-const RNA_NT_SPLIT_MIN_REDUCTION: usize = 256;
-const RNA_NT_SPLIT_MAX_COLUMNS: usize = 1024;
 
 /// Whether the 64 x 96 pre-rounded weight-gradient tile serves rather than
 /// the 64 x 64 one: the 64 x 64 grid needs more than one wave of the live
@@ -3051,16 +3179,6 @@ fn rna_backward_rule_route(
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N64
             },
         ),
-        ResolvedGemmOp::Nt
-            if rows < RNA_NT_NARROW_ROWS
-                && reduction >= RNA_NT_SPLIT_MIN_REDUCTION
-                && columns <= RNA_NT_SPLIT_MAX_COLUMNS =>
-        {
-            Some(Tf32PhysicalRoute::MmaTf32RnaSplitK4(portable(
-                Tf32PortableTile::M16N32,
-                Tf32PortableStages::S3,
-            )))
-        }
         ResolvedGemmOp::Nt if rows < RNA_NT_NARROW_ROWS => Some(Tf32PhysicalRoute::MmaTf32Rna(
             portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4),
         )),
@@ -3207,14 +3325,7 @@ fn rna_blackwell_backward_table(
         };
     }
     if rows < RNA_NT_NARROW_ROWS {
-        return if reduction >= RNA_NT_SPLIT_MIN_REDUCTION && columns <= RNA_NT_SPLIT_MAX_COLUMNS {
-            Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
-                tile: Tf32PortableTile::M16N32,
-                stages: Tf32PortableStages::S3,
-            })
-        } else {
-            portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
-        };
+        return portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4);
     }
     let outputs = rows * columns;
     if staged && reduction >= 256 && columns <= 1_024 && outputs >= MS_NT_MIN_OUTPUTS {
@@ -3589,11 +3700,14 @@ fn rna_wide_portable_twin(request: F32TriadRequest, route: Tf32PhysicalRoute) ->
 /// round with cvt.rna: in registers, after a tensor-map load, or in an
 /// explicit pre-rounding pass; the half-ulp shortcut and the tensor map's
 /// own tfloat32 conversion round a subnormal differently and are refused.
-/// A forward (NN) also takes only the portable tier's plain tiles and the
-/// strict policy's own wide and multistage tiles: every one of them seeds an
-/// output with its bias and walks the reduction in 32-wide steps of eight
-/// from zero to the same zero-filled end, so the tile a row count selects
-/// never moves an output's bits.
+/// A forward or an input gradient walks one chain or the four pieces its
+/// layer's fold cuts, never another partition count. A forward also takes
+/// only the portable tier's plain tiles, the strict policy's own wide and
+/// multistage tiles and the four-piece routes: a one-chain tile seeds an
+/// output with its bias, a four-piece route adds the bias after its pieces,
+/// and every one walks the reduction in 32-wide steps of eight to the same
+/// zero-filled end, so the tile a row count selects never moves an output's
+/// bits. Which of the two a layer takes is its shape's alone.
 fn rna_batch_invariant_route(op: ResolvedGemmOp, route: Tf32PhysicalRoute) -> bool {
     use crate::gpu::kernel_identity::ResolvedOperandConversion as Conversion;
     let rounds_rna = match route {
@@ -3612,11 +3726,18 @@ fn rna_batch_invariant_route(op: ResolvedGemmOp, route: Tf32PhysicalRoute) -> bo
             )
         }),
     };
+    // A forward or an input gradient walks one chain or the layer's four
+    // pieces; a forward's one chain is a plain or wide tile's.
     rounds_rna
+        && (op == ResolvedGemmOp::Tn || matches!(rna_route_partitions(op, route), 1 | 4))
         && (op != ResolvedGemmOp::Nn
             || matches!(
                 route,
-                Tf32PhysicalRoute::MmaTf32Rna(_) | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+                Tf32PhysicalRoute::MmaTf32Rna(_)
+                    | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+                    | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+                    | Tf32PhysicalRoute::MmaTf32RnaPieces4(_)
+                    | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_)
             ))
 }
 
@@ -3821,7 +3942,8 @@ pub fn resolve_tf32_forced(
         Tf32PhysicalRoute::MmaTf32Rna(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => availability.portable,
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::MmaTf32RnaPieces4(_) => availability.portable,
         Tf32PhysicalRoute::Sm89MmaTf32Compact8 => availability.finalist,
         Tf32PhysicalRoute::Sm89TnPreRnaN96
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
@@ -3834,9 +3956,9 @@ pub fn resolve_tf32_forced(
         | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => availability.joint,
-        Tf32PhysicalRoute::MmaTf32RnaWide(_) | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
-            availability.rna
-        }
+        Tf32PhysicalRoute::MmaTf32RnaWide(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => availability.rna,
         Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_)
         | Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_)
         | Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
@@ -3965,6 +4087,7 @@ fn ensure_tf32_binding_contract(
             | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
             | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
             | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+            | Tf32PhysicalRoute::MmaTf32RnaPieces4(_)
             | Tf32PhysicalRoute::Sm89MmaTf32Compact8
             | Tf32PhysicalRoute::Sm89TnPreRnaN96
             | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
@@ -3978,6 +4101,7 @@ fn ensure_tf32_binding_contract(
             | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
             | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
             | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+            | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_)
             | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_)
     ) && !binding.device_caps.tensor_map_access
     {
@@ -4002,7 +4126,8 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
         Tf32PhysicalRoute::MmaTf32Rna(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => matches!(
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::MmaTf32RnaPieces4(_) => matches!(
             (cc, target, device_target),
             ((8, 0), "sm_80", "sm_80")
                 | ((8, 6), "sm_86", "sm_86")
@@ -4034,6 +4159,7 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3
         | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_)
         | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
             cc.0 >= 8 && super::modules::sm80_ptx_target(target) == Some(device_target)
         }
@@ -8365,38 +8491,6 @@ fn scalar_nn_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
     ))
 }
 
-pub(in crate::gpu) fn tc_half_policy_prefers_scalar_forward(
-    compute_capability: (u32, u32),
-    dims: (usize, usize, usize),
-) -> Result<bool, String> {
-    let policy = super::super::kernel_identity::Sm80TcPolicy::current();
-    if compute_capability != policy.deep_split_k_compute_capability
-        || dims.2 != policy.deep_split_k_output_columns
-    {
-        return Ok(false);
-    }
-    // The scalar split was measured against the tensor-core tile only while
-    // its partial planes fit 8M floats; past that the tile keeps the cell.
-    const MEASURED_PARTIAL_FLOATS: usize = 1 << 23;
-    if checked_mul3(
-        dims.1 / 32,
-        dims.0,
-        dims.2,
-        "half split-K preference planes",
-    )? > MEASURED_PARTIAL_FLOATS
-    {
-        return Ok(false);
-    }
-    let plan = scalar_nn_plan(GemmDims::nn(dims, dims.1)?)?;
-    Ok(match plan {
-        ScalarDispatchPlan::NnSplitKThinTail { .. } => {
-            dims.1 >= policy.deep_split_k_tail_min_reduction
-        }
-        ScalarDispatchPlan::NnSplitKThin => dims.1 >= policy.deep_split_k_aligned_min_reduction,
-        _ => false,
-    })
-}
-
 fn scalar_tn_plan(dims: GemmDims) -> Result<ScalarDispatchPlan, String> {
     let (batch, n_in, n_out) = dims.tuple();
     // The GEMV kernel serves any batch and width: a warp per weight, lanes
@@ -11654,13 +11748,26 @@ pub(super) fn tc_pick_tile_backward(
         return tc_pick_square_tile(Some(op), geometry, multiprocessor_count);
     }
 
-    let one_long_axis =
-        geometry.rows >= policy.square_tile_min || geometry.columns >= policy.square_tile_min;
-    let grid64 = tc_grid_ctas(geometry.rows, geometry.columns, 64, 64)?;
-    (one_long_axis
-        && geometry.reduction >= policy.backward_tail_min_reduction
-        && grid64 >= policy.backward_tail_min_tile64_ctas)
-        .then_some(TcTile::Tile64)
+    match op {
+        super::super::kernel_identity::PolicyOp::Dw => {
+            let one_long_axis = geometry.rows >= policy.square_tile_min
+                || geometry.columns >= policy.square_tile_min;
+            let grid64 = tc_grid_ctas(geometry.rows, geometry.columns, 64, 64)?;
+            (one_long_axis
+                && geometry.reduction >= policy.backward_tail_min_reduction
+                && grid64 >= policy.backward_tail_min_tile64_ctas)
+                .then_some(TcTile::Tile64)
+        }
+        // The input gradient's rows are the batch, so the layer alone decides
+        // whether the tensor cores serve it: a layer the square tiles take
+        // keeps the 64x64 tile below 64 rows, and a narrow layer takes that
+        // tile at every row count once its reduction is deep enough. The
+        // tiles walk each output's reduction in the same order, so a row
+        // writes the same bits whatever the batch holds.
+        super::super::kernel_identity::PolicyOp::Dx => (geometry.columns >= policy.square_tile_min
+            || geometry.reduction >= policy.backward_tail_min_reduction)
+            .then_some(TcTile::Tile64),
+    }
 }
 
 pub(super) fn tc_pick_tile_backward_for_device(
@@ -11752,8 +11859,7 @@ pub(super) fn tc_pick_tile_backward_for_device(
 #[cfg(test)]
 mod tc_policy_tests {
     use super::{
-        TcTile, tc_half_policy_prefers_scalar_forward, tc_pick_tile_backward,
-        tc_pick_tile_backward_for_device, tc_pick_tile_forward,
+        TcTile, tc_pick_tile_backward, tc_pick_tile_backward_for_device, tc_pick_tile_forward,
     };
     use crate::gpu::context::HalfTriadPolicy;
     use crate::gpu::kernel_identity::{
@@ -11882,54 +11988,6 @@ mod tc_policy_tests {
         );
     }
 
-    #[test]
-    fn sm89_half_policy_prefers_proven_split_k_scalar_boundaries_only() {
-        let prefers_scalar = |dims| tc_half_policy_prefers_scalar_forward((8, 9), dims).unwrap();
-
-        for dims in [
-            (127, 511, 128),
-            (128, 511, 128),
-            (129, 511, 128),
-            (128, 513, 128),
-            (128, 1023, 128),
-            (128, 1024, 128),
-            (128, 16_384, 128),
-            (128, 16_385, 128),
-        ] {
-            assert!(prefers_scalar(dims), "approved SM89 scalar cell {dims:?}");
-            assert_eq!(
-                tc_pick_tile_forward(dims, RTX_6000_ADA_SMS),
-                Some(TcTile::Tile64),
-                "forced TC selection stays available for {dims:?}"
-            );
-        }
-
-        for dims in [
-            (128, 510, 128),
-            (128, 512, 128),
-            (128, 768, 128),
-            (128, 1023, 127),
-            (128, 1023, 129),
-            (128, 16_416, 128),
-        ] {
-            assert!(
-                !prefers_scalar(dims),
-                "unapproved SM89 scalar cell {dims:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn deep_split_k_scalar_preference_is_sm89_specific() {
-        for compute_capability in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0), (12, 0)] {
-            assert!(
-                !tc_half_policy_prefers_scalar_forward(compute_capability, (128, 8192, 128))
-                    .unwrap(),
-                "unmeasured architecture {compute_capability:?} must keep TC"
-            );
-        }
-    }
-
     fn selector_tile_name(tile: Option<TcTile>) -> &'static str {
         match tile {
             None => "none",
@@ -11977,7 +12035,7 @@ mod tc_policy_tests {
     fn selector_policy_identity_is_pinned_and_the_same_on_every_card() {
         let actual = digest_hex(&gemm_dispatch_policy_digest());
         assert_eq!(
-            actual, "dc4bdadc015028be186c7b3f35923cd701b174db9082402c9978e8cd38fad0a8",
+            actual, "dc9536f8cf015f94b32e478e1760c87824647347e6c2003e004e8420d8ca3d8b",
             "policy identity moved; repin it from the live digest"
         );
     }
@@ -12016,12 +12074,12 @@ mod tc_policy_tests {
                     "tile128,tile128,tile64",
                     "tile64,none,tile64",
                     "tile64,tile64,tile64",
-                    "thin16,tile64,none",
+                    "thin16,tile64,tile64",
                     "thin16,tile64,tile64",
                     "tile64,tile128,tile64",
                     "tile64,tile64,tile64",
                 ],
-                "63b5e7e9a2e9077eb0be28dfc9182cceb0346ae5a599e50432b5f73d4d803089",
+                "8d8610e5970148bf5aba391d5e1f8cae8063bc581e7411f16583208abb09a814",
             ),
             (
                 80,
@@ -12037,12 +12095,12 @@ mod tc_policy_tests {
                     "tile128,tile128,tile64",
                     "tile64,none,tile64",
                     "tile64,tile64,tile64",
-                    "thin16,tile64,none",
+                    "thin16,tile64,tile64",
                     "thin16,tile64,tile64",
                     "tile64,tile64,tile64",
                     "tile64,tile64,tile64",
                 ],
-                "f7171ad4ff1d4aca745d7fa851a906e32e22eba1532c22f28205b9459c16c5ef",
+                "cd46bd446d4724def7a4da1dd7ac6b93e555b1fc6f7b6bcc3a7f3b4502f621a7",
             ),
             (
                 108,
@@ -12058,12 +12116,12 @@ mod tc_policy_tests {
                     "tile128,tile128,tile64",
                     "thin16,none,tile64",
                     "thin16,tile64,tile64",
-                    "thin16,tile64,none",
+                    "thin16,tile64,tile64",
                     "thin16,tile64,tile64",
                     "tile64,tile64,tile64",
                     "tile64,tile64,tile64",
                 ],
-                "ce7836babc059753e82b0a771cd8cd2db2033ae4e4842783f4d990e64ed90dcb",
+                "6d66fe4cee38702a4503bd0174438829db76a3a2dc5f09d5b8eb39f9a6f38a29",
             ),
             (
                 120,
@@ -12079,12 +12137,12 @@ mod tc_policy_tests {
                     "tile128,tile128,tile64",
                     "thin16,none,tile64",
                     "thin16,tile64,tile64",
-                    "thin16,tile64,none",
+                    "thin16,tile64,tile64",
                     "thin16,tile64,tile64",
                     "tile64,tile64,tile64",
                     "tile64,tile64,tile64",
                 ],
-                "9ffbbbac14c9bbdbfcc10270ac51d054d24402d02d52bfaf39e9fae2ebfa0090",
+                "c1d3e9a9e61de7532279a8ef182d77435ffedaca7587903c8397ae11f7016247",
             ),
             (
                 142,
@@ -12100,12 +12158,12 @@ mod tc_policy_tests {
                     "tile128,tile128,tile64",
                     "thin16,none,tile64",
                     "thin16,tile64,tile64",
-                    "thin16,tile64,none",
+                    "thin16,tile64,tile64",
                     "thin16,tile64,tile64",
                     "thin16,tile64,tile64",
                     "tile64,tile64,tile64",
                 ],
-                "9c5fe15f7ed7bc426d35f2fce3017ed489aef0958ef7b7a049b66419e9e71bc1",
+                "b5b6fcbacb761470de40304815e7b32287eea30f3db05ce4c82cf2d2a467773e",
             ),
         ] {
             let outcomes = shapes.map(|dims| {
@@ -12285,10 +12343,56 @@ mod tc_policy_tests {
         assert_eq!(dx((16, 512, 2048)), Some(TcTile::Tile64));
 
         assert_eq!(dw((255, 16, 2048)), None);
-        assert_eq!(dx((16, 192, 256)), None);
+        assert_eq!(dx((16, 192, 256)), Some(TcTile::Tile64));
         assert_eq!(dx((16, 256, 256)), Some(TcTile::Tile64));
         assert_eq!(dw((256, 63, 63)), None);
         assert_eq!(dw((256, 0, 256)), None);
+    }
+
+    #[test]
+    fn dx_tensor_core_choice_reads_the_layer_alone() {
+        // The tensor-core tiles and the scalar chain sum a reduction in
+        // different orders, so a layer must keep one of them at every row
+        // count, on every card.
+        for multiprocessors in [24, 48, 82, 108, 128, 142, 170, 188] {
+            for inputs in [1, 16, 33, 63, 64, 65, 96, 128, 384, 1024] {
+                for outputs in [1, 16, 96, 255, 256, 257, 512, 2050] {
+                    let served = |rows| {
+                        tc_pick_tile_backward(
+                            PolicyOp::Dx,
+                            (rows, inputs, outputs),
+                            multiprocessors,
+                        )
+                        .is_some()
+                    };
+                    let first = served(1);
+                    for rows in [2, 15, 16, 31, 63, 64, 65, 127, 128, 255, 600, 4096] {
+                        assert_eq!(
+                            served(rows),
+                            first,
+                            "{multiprocessors} SMs, layer {inputs}x{outputs}: {rows} rows"
+                        );
+                    }
+                    for compute_capability in [(8, 0), (8, 6), (8, 9), (9, 0), (12, 0)] {
+                        for rows in [1, 63, 64, 4096] {
+                            assert_eq!(
+                                tc_pick_tile_backward_for_device(
+                                    PolicyOp::Dx,
+                                    (rows, inputs, outputs),
+                                    multiprocessors,
+                                    compute_capability,
+                                    HalfTriadPolicy::TiledParity,
+                                )
+                                .is_some(),
+                                first,
+                                "{compute_capability:?} {multiprocessors} SMs, layer \
+                                 {inputs}x{outputs}: {rows} rows"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -13120,7 +13224,7 @@ mod tf32_tests {
         SM89_JOINT_TF32_ARCHITECTURE, SM89_JOINT_TF32_EVIDENCE_COHORTS, SM89_TF32_ARCHITECTURE,
         SM89_TF32_EVIDENCE_CELLS, SM89_TF32_EVIDENCE_COHORTS, SM120_TF32_ARCHITECTURE,
         SM120_TF32_EVIDENCE_CELLS, SM120_TF32_EVIDENCE_COHORTS, SM120_TF32_PORTABLE_ARCHITECTURE,
-        Tf32AutoEvidenceCohort, Tf32AutoOperandGate, matching_tf32_cohort,
+        Tf32AutoEvidenceCohort, Tf32AutoOperandGate, exact_chunks, matching_tf32_cohort,
         measured_tf32_route_with_operands, resolve_f32_triad_auto,
         resolve_f32_triad_auto_with_operands, resolve_tf32_forced, rna_batch_invariant_route,
         rna_portable_ladder_route,
@@ -17597,7 +17701,10 @@ mod tf32_tests {
                 );
                 let plain = matches!(
                     spec.route,
-                    Tf32PhysicalRoute::MmaTf32Rna(_) | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+                    Tf32PhysicalRoute::MmaTf32Rna(_)
+                        | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+                        | Tf32PhysicalRoute::MmaTf32RnaPieces4(_)
+                        | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_)
                 );
                 assert_eq!(
                     rna_batch_invariant_route(spec.op, spec.route),
@@ -17607,10 +17714,12 @@ mod tf32_tests {
                 );
             }
         }
+        // A split serves a forward or an input gradient only as the layer's
+        // four pieces.
         for spec in crate::gpu::gemm_bi_triad::contract::tf32_splitk_specs_all() {
             assert_eq!(
                 rna_batch_invariant_route(spec.op, spec.route),
-                spec.op != ResolvedGemmOp::Nn,
+                spec.op == ResolvedGemmOp::Tn || spec.partitions == 4,
                 "{}",
                 spec.symbol,
             );
@@ -17622,8 +17731,285 @@ mod tf32_tests {
         assert!(!rna_batch_invariant_route(ResolvedGemmOp::Nn, wide));
     }
 
+    /// Whether a strict selection cuts a forward or an input gradient as its
+    /// layer's fold does: four pieces where the fold cuts, else one chain.
+    fn strict_cuts_by_the_layer(request: F32TriadRequest, selection: F32TriadSelection) -> bool {
+        let pieces = if exact_chunks(
+            request.shape.reduction(request.op),
+            request.shape.output_columns(request.op),
+        ) {
+            4
+        } else {
+            1
+        };
+        match selection {
+            F32TriadSelection::Tf32(route) => {
+                super::rna_route_partitions(request.op, route) == pieces
+            }
+            F32TriadSelection::Tf32Proof {
+                candidate,
+                reference,
+            } => {
+                super::rna_route_partitions(request.op, candidate) == pieces
+                    && super::rna_route_partitions(request.op, reference) == pieces
+            }
+            F32TriadSelection::ScalarFma | F32TriadSelection::ExactSm120Fma(_) => false,
+        }
+    }
+
     #[test]
-    fn rna_strict_forward_takes_a_plain_portable_tile_at_every_row_count() {
+    fn rna_strict_cuts_forwards_and_input_gradients_by_the_layer_at_every_batch_size() {
+        for availability in strict_boards() {
+            for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Nt] {
+                for (reduction, columns) in [
+                    (64, 96),
+                    (384, 64),
+                    (384, 384),
+                    (511, 768),
+                    (512, 128),
+                    (768, 768),
+                    (1536, 768),
+                    (3072, 768),
+                    (768, 50_288),
+                ] {
+                    for rows in [1, 7, 16, 64, 255, 256, 1024, 4096, 16_384] {
+                        let request = normalized_request(op, rows, columns, reduction);
+                        for operands in [
+                            Some(sm89_joint_operands(op)),
+                            Some(F32TriadOperands {
+                                a: sm89_joint_operands(op).a + 4,
+                                ..sm89_joint_operands(op)
+                            }),
+                            None,
+                        ] {
+                            let selection = match operands {
+                                Some(operands) => resolve_f32_triad_auto_with_operands(
+                                    STRICT,
+                                    request,
+                                    operands,
+                                    availability,
+                                ),
+                                None => resolve_f32_triad_auto(STRICT, request, availability),
+                            }
+                            .unwrap();
+                            assert!(
+                                strict_keeps(op, selection)
+                                    && strict_cuts_by_the_layer(request, selection),
+                                "{availability:?} {request:?}: {selection:?}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rna_strict_cut_layers_split_while_the_grid_leaves_the_card_idle() {
+        let availability = sm89_availability();
+        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Nt] {
+            let split = |stages| {
+                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M16N32,
+                    stages,
+                }))
+            };
+            let split = split(if op == ResolvedGemmOp::Nn {
+                Tf32PortableStages::S4
+            } else {
+                Tf32PortableStages::S3
+            });
+            // Four 16 x 32 tiles of the narrow rows: the split's four times
+            // the CTAs fill the card.
+            let narrow = normalized_request(op, 16, 128, 1536);
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(
+                    STRICT,
+                    narrow,
+                    sm89_joint_operands(op),
+                    availability
+                )
+                .unwrap(),
+                split
+            );
+            // A grid of several waves folds the pieces in its tiles.
+            let deep = normalized_request(op, 4096, 768, 768);
+            let selection = resolve_f32_triad_auto_with_operands(
+                STRICT,
+                deep,
+                sm89_joint_operands(op),
+                availability,
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    selection,
+                    F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaPieces4(_))
+                ),
+                "{deep:?}: {selection:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rna_strict_cut_layers_fold_their_pieces_in_the_table_tiles_twin() {
+        use crate::gpu::gemm_bi_triad::contract::Tf32RnaWideTile as Wide;
+        let mut staged = sm89_availability();
+        staged.rna = Some(qualified_module(
+            ModuleKind::TriadTf32Rna,
+            "sm_89",
+            "sm_89",
+            (8, 9),
+            false,
+            101_376,
+        ));
+        let twin = |tile| F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile));
+        // The forward's 128 x 128 tile and the input gradient's 64 x 128 one,
+        // as the one-chain rules pick them for these shapes, fold the pieces;
+        // the input gradient's 128 x 128 tile hands them to its 64 x 128
+        // sibling.
+        for (op, rows, columns, reduction, expected) in [
+            (ResolvedGemmOp::Nn, 8192, 256, 512, twin(Wide::M128N128S3)),
+            (
+                ResolvedGemmOp::Nt,
+                4096,
+                256,
+                2112,
+                twin(Wide::NtMsM64N128Bk16S6),
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                1024,
+                1536,
+                768,
+                twin(Wide::NtMsM64N128Bk16S6),
+            ),
+        ] {
+            let request = normalized_request(op, rows, columns, reduction);
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(
+                    STRICT,
+                    request,
+                    sm89_joint_operands(op),
+                    staged
+                )
+                .unwrap(),
+                expected,
+                "{request:?}"
+            );
+        }
+        // Without the module or with a misaligned operand no wide tile
+        // stages, and the portable twin folds the pieces.
+        let request = normalized_request(ResolvedGemmOp::Nn, 8192, 256, 512);
+        let misaligned = F32TriadOperands {
+            a: sm89_joint_operands(ResolvedGemmOp::Nn).a + 4,
+            ..sm89_joint_operands(ResolvedGemmOp::Nn)
+        };
+        for (availability, operands) in [
+            (sm89_availability(), sm89_joint_operands(ResolvedGemmOp::Nn)),
+            (staged, misaligned),
+        ] {
+            assert!(matches!(
+                resolve_f32_triad_auto_with_operands(STRICT, request, operands, availability)
+                    .unwrap(),
+                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaPieces4(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn rna_wide_pieces_tiles_are_the_wide_tiles_folding_four_pieces() {
+        use crate::gpu::gemm_bi_triad::contract::{Tf32RnaWideTile as Wide, tf32_route_specs_all};
+        let specs: Vec<_> = tf32_route_specs_all(ModuleKind::TriadTf32Rna).collect();
+        let mut twins = 0;
+        for spec in &specs {
+            let Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile) = spec.route else {
+                continue;
+            };
+            assert_ne!(tile, Wide::NtMsM128N128Bk16S5, "{}", spec.symbol);
+            let chain = specs
+                .iter()
+                .find(|chain| chain.route == Tf32PhysicalRoute::MmaTf32RnaWide(tile))
+                .unwrap_or_else(|| panic!("{} has no one-chain tile", spec.symbol));
+            assert_eq!(
+                spec.symbol,
+                chain.symbol.replace("_tf32_rna_", "_tf32_rna_pieces4_"),
+            );
+            assert_eq!(
+                (
+                    spec.op,
+                    spec.tile,
+                    spec.bk,
+                    spec.stages,
+                    spec.threads,
+                    spec.dynamic_shared_bytes
+                ),
+                (
+                    chain.op,
+                    chain.tile,
+                    chain.bk,
+                    chain.stages,
+                    chain.threads,
+                    chain.dynamic_shared_bytes
+                ),
+                "{}",
+                spec.symbol
+            );
+            assert!(
+                rna_batch_invariant_route(spec.op, spec.route),
+                "{}",
+                spec.symbol
+            );
+            twins += 1;
+        }
+        assert_eq!(twins, 9);
+    }
+
+    #[test]
+    fn rna_pieces_tiles_are_the_plain_tiles_folding_four_pieces() {
+        use crate::gpu::gemm_bi_triad::contract::tf32_route_specs_all;
+        let specs: Vec<_> = tf32_route_specs_all(ModuleKind::TriadSm80).collect();
+        let mut twins = 0;
+        for spec in &specs {
+            let Tf32PhysicalRoute::MmaTf32RnaPieces4(route) = spec.route else {
+                continue;
+            };
+            let plain = specs
+                .iter()
+                .find(|plain| {
+                    plain.op == spec.op && plain.route == Tf32PhysicalRoute::MmaTf32Rna(route)
+                })
+                .unwrap_or_else(|| panic!("{} has no plain tile", spec.symbol));
+            assert_eq!(
+                spec.symbol,
+                plain.symbol.replace("_mma_tf32_", "_mma_tf32_pieces4_"),
+            );
+            assert_eq!(
+                (
+                    spec.tile,
+                    spec.bk,
+                    spec.stages,
+                    spec.threads,
+                    spec.dynamic_shared_bytes
+                ),
+                (
+                    plain.tile,
+                    plain.bk,
+                    plain.stages,
+                    plain.threads,
+                    plain.dynamic_shared_bytes
+                ),
+                "{}",
+                spec.symbol
+            );
+            assert_ne!(spec.op, ResolvedGemmOp::Tn, "{}", spec.symbol);
+            twins += 1;
+        }
+        assert_eq!(twins, 12);
+    }
+
+    #[test]
+    fn rna_strict_forward_walks_one_chain_or_the_layers_pieces_at_every_row_count() {
         for availability in strict_boards() {
             for (reduction, columns) in [
                 (64, 96),
@@ -17650,23 +18036,39 @@ mod tf32_tests {
                             availability,
                         )
                         .unwrap();
+                        let cut = exact_chunks(reduction, columns);
                         assert!(
                             matches!(
                                 selection,
-                                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32Rna(_))
-                            ) && strict_keeps(ResolvedGemmOp::Nn, selection),
+                                F32TriadSelection::Tf32(
+                                    Tf32PhysicalRoute::MmaTf32Rna(_)
+                                        | Tf32PhysicalRoute::MmaTf32RnaPieces4(_)
+                                        | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
+                                )
+                            ) && strict_keeps(ResolvedGemmOp::Nn, selection)
+                                && strict_cuts_by_the_layer(request, selection)
+                                && (cut
+                                    || matches!(
+                                        selection,
+                                        F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32Rna(_))
+                                    )),
                             "{availability:?} {request:?}: {selection:?}",
                         );
                     }
                     // Without operands no wide tile can be staged: the Ada and
                     // CC 12.x tables name a portable tile, every other board
-                    // the ladder.
+                    // the ladder; a cut layer takes the pieces.
                     let selection = resolve_f32_triad_auto(STRICT, request, availability).unwrap();
                     let tabled = availability.portable.is_some_and(|module| {
                         let cc = module.device.compute_capability;
                         cc == (8, 9) || cc.0 == 12
                     });
-                    if tabled {
+                    if exact_chunks(reduction, columns) {
+                        assert!(
+                            strict_cuts_by_the_layer(request, selection),
+                            "{request:?}: {selection:?}"
+                        );
+                    } else if tabled {
                         assert!(
                             matches!(
                                 selection,
@@ -17717,7 +18119,6 @@ mod tf32_tests {
             ),
             ((8192, 256, 128), wide(Wide::M128N96S3)),
             ((16384, 256, 128), wide(Wide::M128N128S3)),
-            ((8192, 512, 256), wide(Wide::M128N128S3)),
         ];
         for ((m, k, n), expected) in cases {
             let request = normalized_request(ResolvedGemmOp::Nn, m, n, k);
@@ -17835,8 +18236,24 @@ mod tf32_tests {
                 )
                 .unwrap();
                 assert!(strict_keeps(cell.op, selection), "{cell:?}: {selection:?}");
-                // Whatever serves, it cuts the reduction as the shape asks.
-                let shape_cut = super::rna_shape_cut(request, availability);
+                // Whatever serves, it cuts the reduction as the shape asks: a
+                // weight gradient by its shape cut, an input gradient by its
+                // layer's fold.
+                let shape_cut = if cell.op == ResolvedGemmOp::Tn {
+                    super::rna_shape_cut(request, availability)
+                } else {
+                    assert!(
+                        strict_cuts_by_the_layer(request, selection),
+                        "{cell:?}: {selection:?}"
+                    );
+                    Some(
+                        if exact_chunks(cell.shape.reduction, cell.shape.output_columns) {
+                            4
+                        } else {
+                            1
+                        },
+                    )
+                };
                 let served = match selection {
                     F32TriadSelection::Tf32(route) => vec![route],
                     F32TriadSelection::Tf32Proof {
@@ -17939,16 +18356,10 @@ mod tf32_tests {
                 stages: Tf32PortableStages::S4,
             }))
         );
-        // A few rows over a long reduction split four ways; a wide output
-        // or a short reduction keeps the narrow tile.
-        assert_eq!(
-            rna_backward_rule_route_for(nt((64, 384, 1536)), ada),
-            Some(Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
-                tile: Tf32PortableTile::M16N32,
-                stages: Tf32PortableStages::S3,
-            }))
-        );
-        for dims in [(64, 1536, 384), (64, 384, 101)] {
+        // An input gradient of a few rows walks one chain on the narrow tile
+        // whatever its reduction: the four-piece cut is its layer's, taken
+        // before these rules.
+        for dims in [(64, 384, 1536), (64, 1536, 384), (64, 384, 101)] {
             assert_eq!(
                 rna_backward_rule_route_for(nt(dims), ada),
                 Some(Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {

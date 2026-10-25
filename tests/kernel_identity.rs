@@ -538,7 +538,7 @@ fn artifact_set_tracks_all_five_sm89_optional_modules_in_canonical_order() {
 }
 
 #[test]
-fn sm80_tc_policy_digest_covers_geometry_waves_stream_k_and_deep_split_k() {
+fn sm80_tc_policy_digest_covers_geometry_waves_and_stream_k() {
     let policy = Sm80TcPolicy::current();
     let hash = policy.digest();
 
@@ -614,25 +614,6 @@ fn sm80_tc_policy_digest_covers_geometry_waves_stream_k_and_deep_split_k() {
     assert_field_changes_digest!(
         backward_tail_min_tile64_ctas,
         policy.backward_tail_min_tile64_ctas + 1
-    );
-    assert_field_changes_digest!(
-        deep_split_k_compute_capability,
-        (
-            policy.deep_split_k_compute_capability.0 + 1,
-            policy.deep_split_k_compute_capability.1
-        )
-    );
-    assert_field_changes_digest!(
-        deep_split_k_output_columns,
-        policy.deep_split_k_output_columns + 1
-    );
-    assert_field_changes_digest!(
-        deep_split_k_tail_min_reduction,
-        policy.deep_split_k_tail_min_reduction + 1
-    );
-    assert_field_changes_digest!(
-        deep_split_k_aligned_min_reduction,
-        policy.deep_split_k_aligned_min_reduction + 1
     );
     assert_field_changes_digest!(
         stream_k_min_reduction_slabs,

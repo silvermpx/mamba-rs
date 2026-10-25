@@ -205,25 +205,37 @@ fn tc_forward_is_deterministic_and_all_m_batch_invariant() {
     }
 }
 
+/// A deep reduction into 128 outputs once ran the scalar split-K tier at
+/// some row counts and the tensor-core tile at others, two reduction orders
+/// for one layer. The automatic forward now takes the tile at every row
+/// count, with the bits of the direct and the forced Tile64 launch.
 #[test]
-#[ignore = "requires an SM89 GPU and exercises the deep Split-K policy boundary"]
-fn sm89_deep_split_k_policy_is_bitwise_stable_and_keeps_forced_tc() {
+fn deep_reduction_forward_keeps_the_tensor_core_tile() {
     use mamba_rs::gpu::blas::gemm_bi_forward_typed;
     use mamba_rs::gpu::gemm_bi_triad::TcTile;
 
+    // The Hopper and Blackwell boards serve measured cells of their own
+    // kernels ahead of the portable tiles; this gate reads the portable tier.
     let device = GpuDevice::new(0).expect("gpu");
-    if device.compute_capability != (8, 9) {
+    if device.compute_capability.0 != 8 {
         eprintln!(
-            "skip: this gate serves CC 8.9, this board is {:?}",
+            "skip: the portable tile tier serves CC 8.x, this board is {:?}",
             device.compute_capability
         );
         return;
     }
     let t = Ctx::new();
     t.ctx.set_gemm_mode(GemmMode::Deterministic).unwrap();
+    t.ctx.route_controls().set_tensor_cores(true);
 
     for dt in [WeightDtype::Bf16, WeightDtype::F16] {
-        for dims in [(128usize, 511usize, 128usize), (128, 1024, 128)] {
+        for dims in [
+            (127usize, 511usize, 128usize),
+            (128, 511, 128),
+            (128, 1024, 128),
+            (129, 1023, 128),
+            (128, 16_384, 128),
+        ] {
             let (m, k, n) = dims;
             let qx = quantize(&det(m * k, 0x8911, 1.0), dt);
             let qw = quantize(&det(k * n, 0x8922, 0.5), dt);
@@ -236,8 +248,13 @@ fn sm89_deep_split_k_policy_is_bitwise_stable_and_keeps_forced_tc() {
                 ptr: buffer.cached_ptr(),
                 dtype: dt,
             };
-            let run_policy = |tensor_cores: bool| {
-                t.ctx.route_controls().set_tensor_cores(tensor_cores);
+            let read = |buffer: &DtypedBuf| {
+                t.ctx.stream.synchronize().unwrap();
+                let mut values = vec![0.0f32; m * n];
+                buffer.download_f32(&t.ctx.stream, &mut values).unwrap();
+                values.into_iter().map(f32::to_bits).collect::<Vec<_>>()
+            };
+            let run_policy = || {
                 gemm_bi_forward_typed(
                     &t.ctx,
                     typed(&policy_output),
@@ -247,20 +264,13 @@ fn sm89_deep_split_k_policy_is_bitwise_stable_and_keeps_forced_tc() {
                     dims,
                 )
                 .unwrap();
-                t.ctx.stream.synchronize().unwrap();
-                let mut values = vec![0.0f32; m * n];
-                policy_output
-                    .download_f32(&t.ctx.stream, &mut values)
-                    .unwrap();
-                values.into_iter().map(f32::to_bits).collect::<Vec<_>>()
+                read(&policy_output)
             };
 
-            let scalar = run_policy(false);
-            let automatic = run_policy(true);
-            assert_eq!(automatic, scalar, "{dt:?} automatic scalar route {dims:?}");
+            let automatic = run_policy();
             for repeat in 0..20 {
                 assert_eq!(
-                    run_policy(true),
+                    run_policy(),
                     automatic,
                     "{dt:?} automatic repeat {repeat} at {dims:?}"
                 );
@@ -291,26 +301,13 @@ fn sm89_deep_split_k_policy_is_bitwise_stable_and_keeps_forced_tc() {
                 TcTile::Tile64,
             )
             .unwrap();
-            t.ctx.stream.synchronize().unwrap();
-            let mut direct = vec![0.0f32; m * n];
-            let mut forced = vec![0.0f32; m * n];
-            direct_output
-                .download_f32(&t.ctx.stream, &mut direct)
-                .unwrap();
-            forced_output
-                .download_f32(&t.ctx.stream, &mut forced)
-                .unwrap();
+            let direct = read(&direct_output);
             assert_eq!(
-                direct
-                    .iter()
-                    .map(|value| value.to_bits())
-                    .collect::<Vec<_>>(),
-                forced
-                    .iter()
-                    .map(|value| value.to_bits())
-                    .collect::<Vec<_>>(),
-                "{dt:?} direct and forced Tile64 bits at {dims:?}"
+                read(&forced_output),
+                direct,
+                "{dt:?} forced Tile64 at {dims:?}"
             );
+            assert_eq!(automatic, direct, "{dt:?} automatic forward at {dims:?}");
         }
     }
 }
@@ -1525,9 +1522,9 @@ fn tc_route_gate_boundary_sweep() {
     };
     assert_eq!(dw_route(128, n_wide).unwrap(), wide_dw_tile);
 
-    // dX routes on (M, K_out).
-    let dx_route = |m: usize, kk: usize| -> Result<TcTile, String> {
-        let n = 256usize;
+    // dX picks its tile on (M, K_out), and whether the tiles serve it on the
+    // layer alone: K_out of 64 or more, or a reduction of 256 or more.
+    let dx_route = |m: usize, kk: usize, n: usize| -> Result<TcTile, String> {
         let qdy = quantize(&det(m * n, 55, 0.5), dt);
         let qw = quantize(&det(kk * n, 77, 0.5), dt);
         let dyt = t.typed_buf(&qdy, dt);
@@ -1553,11 +1550,19 @@ fn tc_route_gate_boundary_sweep() {
         t.ctx.stream.synchronize().unwrap();
         r
     };
-    assert_eq!(dx_route(63, 512).unwrap(), TcTile::Tile64);
-    assert!(dx_route(63, 63).unwrap_err().starts_with("UNCOVERED"));
-    assert_eq!(dx_route(64, 64).unwrap(), TcTile::Tile64);
-    assert_eq!(dx_route(1024, 128).unwrap(), square_tile(8));
-    assert_eq!(dx_route(9216, 128).unwrap(), square_tile(72));
+    assert_eq!(dx_route(63, 512, 256).unwrap(), TcTile::Tile64);
+    assert_eq!(dx_route(63, 63, 256).unwrap(), TcTile::Tile64);
+    assert_eq!(dx_route(4096, 63, 256).unwrap(), TcTile::Tile64);
+    assert!(dx_route(63, 63, 255).unwrap_err().starts_with("UNCOVERED"));
+    assert!(
+        dx_route(4096, 63, 255)
+            .unwrap_err()
+            .starts_with("UNCOVERED")
+    );
+    assert_eq!(dx_route(1, 64, 96).unwrap(), TcTile::Tile64);
+    assert_eq!(dx_route(64, 64, 256).unwrap(), TcTile::Tile64);
+    assert_eq!(dx_route(1024, 128, 256).unwrap(), square_tile(8));
+    assert_eq!(dx_route(9216, 128, 256).unwrap(), square_tile(72));
 }
 
 /// Strict all-M batch invariance of the TC fwd ACROSS the Tile64/Tile128

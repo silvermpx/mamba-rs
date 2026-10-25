@@ -708,6 +708,11 @@ pub(crate) fn expected_sm80_symbols() -> BTreeSet<String> {
         ] {
             for stage in stages {
                 symbols.insert(format!("{op}_sm80_mma_tf32_{tile}_bk32_s{stage}"));
+                // A forward's and an input gradient's tiles each have the
+                // twin that folds a cut layer's four pieces.
+                if op != "tn" {
+                    symbols.insert(format!("{op}_sm80_mma_tf32_pieces4_{tile}_bk32_s{stage}"));
+                }
             }
         }
     }

@@ -15,13 +15,14 @@ const PREAMBLES: [&str; 5] = [
 const ORIGINAL_SYMBOL: &str = "nt_sm80_mma_tf32_m128n64_bk32_s2";
 
 const ASYNC_MAINLOOP_MARKER: &str = r#"template <SgbTf32Op Op, int BM, int BN, int Stages,
-          int MAtoms, int NAtoms, bool NarrowA, bool NarrowB>
+          int MAtoms, int NAtoms, bool NarrowA, bool NarrowB, int Pieces>
 __device__ __forceinline__ void tf32_async_mainloop("#;
 
 const WIDE_BRANCH: &str = r#"    if (wide_a && wide_b) {
         tf32_async_mainloop<
-            Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
-            storage, problem, tile_count, thread_plan, accumulators);
+            Op, BM, BN, Stages, MAtoms, NAtoms, false, false, Pieces>(
+            storage, problem, tile_count, thread_plan, accumulators,
+            piece_tiles);
     } else if (tf32_can_stage_async_4(a, b, params)) {"#;
 
 const A_LOAD: &str = r#"#pragma unroll
@@ -70,7 +71,7 @@ const A_LDMATRIX_LOAD: &str = r#"#pragma unroll
 "#;
 
 const SLICED_BRANCH: &str = r#"    if (wide_a && wide_b) {
-        if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2) {
+        if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2 && Pieces == 1) {
             bool use_stage_sliced =
                 (params.m == 2048 && params.k == 1536 && params.n == 768
                     && params.lda == 768 && params.ldb == 768 && params.ldc == 1536)
@@ -83,13 +84,15 @@ const SLICED_BRANCH: &str = r#"    if (wide_a && wide_b) {
                     storage, problem, tile_count, thread_plan, accumulators);
             } else {
                 tf32_async_mainloop<
-                    Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
-                    storage, problem, tile_count, thread_plan, accumulators);
+                    Op, BM, BN, Stages, MAtoms, NAtoms, false, false, Pieces>(
+                    storage, problem, tile_count, thread_plan, accumulators,
+                    piece_tiles);
             }
         } else {
             tf32_async_mainloop<
-                Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(
-                storage, problem, tile_count, thread_plan, accumulators);
+                Op, BM, BN, Stages, MAtoms, NAtoms, false, false, Pieces>(
+                storage, problem, tile_count, thread_plan, accumulators,
+                piece_tiles);
         }
     } else if (tf32_can_stage_async_4(a, b, params)) {"#;
 
@@ -401,7 +404,11 @@ fn install_stage_sliced_winners(source: &mut String) -> Result<(), String> {
 fn finalist_body_from(helper: &str, source: &str) -> Result<String, String> {
     reject_quoted_include("kernels/gemm_bi_triad/sm80/nt_compact.cuh", helper)?;
     let transformed = transform_sm80_source(source)?;
-    let exports = macro_names(&transformed, "GEMM_BI_TF32_DEFINE_KERNEL")?;
+    let mut exports = macro_names(&transformed, "GEMM_BI_TF32_DEFINE_KERNEL")?;
+    exports.extend(macro_names(
+        &transformed,
+        "GEMM_BI_TF32_DEFINE_PIECES_KERNEL",
+    )?);
     let assertions = macro_names(&transformed, "TF32_ASSERT_KERNEL_SIGNATURE")?;
     if exports != assertions {
         return Err("SM89 finalist export and signature-assert sets differ".into());
@@ -640,11 +647,12 @@ mod tests {
     #[test]
     fn exports_and_signature_asserts_are_balanced() {
         let body = finalist_body_from(COMPACT_HELPER, SM80_SOURCE).unwrap();
-        let exports = macro_names(&body, "GEMM_BI_TF32_DEFINE_KERNEL").unwrap();
+        let mut exports = macro_names(&body, "GEMM_BI_TF32_DEFINE_KERNEL").unwrap();
+        exports.extend(macro_names(&body, "GEMM_BI_TF32_DEFINE_PIECES_KERNEL").unwrap());
         let assertions = macro_names(&body, "TF32_ASSERT_KERNEL_SIGNATURE").unwrap();
         assert_eq!(exports, assertions);
         assert!(exports.contains(SM89_FINALIST_SYMBOL));
-        assert_eq!(exports.len(), 18);
+        assert_eq!(exports.len(), 30);
     }
 
     #[test]
@@ -728,8 +736,9 @@ mod tests {
             "                    storage, problem, tile_count, thread_plan, accumulators);\n",
             "            } else {\n",
             "                tf32_async_mainloop<\n",
-            "                    Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(\n",
-            "                    storage, problem, tile_count, thread_plan, accumulators);\n",
+            "                    Op, BM, BN, Stages, MAtoms, NAtoms, false, false, Pieces>(\n",
+            "                    storage, problem, tile_count, thread_plan, accumulators,\n",
+            "                    piece_tiles);\n",
             "            }"
         )));
     }

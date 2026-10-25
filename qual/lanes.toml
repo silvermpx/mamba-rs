@@ -40,6 +40,7 @@
 "cpu_trainer_api" = "host"
 "exact_batch_invariant" = "gate"
 "exact_input_gradient_tail" = "gate"
+"half_batch_invariant" = "gate"
 "segment_stacking" = "host"
 "segment_stacking_gpu" = "gate"
 "bidirectional_cpu" = "host"

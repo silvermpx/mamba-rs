@@ -638,16 +638,15 @@ fn half_physical_trace_records_complete_upcast_routes() {
             PolicyDtype::F16,
         ),
     ] {
+        // The forward keeps its layer whole and runs one chain tile; the
+        // input gradient's layer (512 outputs summed) is cut, so its four
+        // pieces come from the chunk partial and fold in the reducer.
         for (op, expected_gemms, has_downcast) in [
-            (
-                ResolvedGemmOp::Nn,
-                &["nn_splitk32_partial", "splitk_reduce"][..],
-                true,
-            ),
+            (ResolvedGemmOp::Nn, &["nn_exact_m16n16_bk16_s4"][..], true),
             (ResolvedGemmOp::Tn, &["tn_slim"][..], false),
             (
                 ResolvedGemmOp::Nt,
-                &["transpose_f32_2d", "nn_splitk32_partial", "splitk_reduce"][..],
+                &["nt_exact_chunk_partial_m32n64", "splitk_reduce"][..],
                 true,
             ),
         ] {

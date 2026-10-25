@@ -3823,7 +3823,8 @@ fn f32_map_binding(ctx: &GpuCtx, route: Tf32PhysicalRoute) -> Result<Tf32MapBind
         Tf32PhysicalRoute::MmaTf32Rna(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_) => ctx.kernels.f32_triad_availability().portable,
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::MmaTf32RnaPieces4(_) => ctx.kernels.f32_triad_availability().portable,
         Tf32PhysicalRoute::Sm89MmaTf32Compact8 => ctx.kernels.f32_triad_availability().finalist,
         Tf32PhysicalRoute::Sm89TnPreRnaN96
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
@@ -3836,10 +3837,16 @@ fn f32_map_binding(ctx: &GpuCtx, route: Tf32PhysicalRoute) -> Result<Tf32MapBind
         | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N192S2
         | Tf32PhysicalRoute::Sm89TnPreRnaM96N96S3 => ctx.kernels.f32_triad_availability().joint,
-        Tf32PhysicalRoute::MmaTf32RnaWide(_) | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => {
-            ctx.kernels.f32_triad_availability().rna
+        Tf32PhysicalRoute::MmaTf32RnaWide(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_) => ctx.kernels.f32_triad_availability().rna,
+        Tf32PhysicalRoute::Sm90aWgmmaTf32Tma(_)
+        | Tf32PhysicalRoute::Sm100Tcgen05Tf32Tma(_)
+        | Tf32PhysicalRoute::Sm120TmaMmaTf32Rna(_)
+        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+        | Tf32PhysicalRoute::Sm120TmaFmaExact(_) => {
+            ctx.kernels.f32_triad_availability().specialized
         }
-        _ => ctx.kernels.f32_triad_availability().specialized,
     }
     .ok_or_else(|| format!("TF32 route {route:?} has no qualified module"))?;
     Ok(Tf32MapBinding {
@@ -3901,6 +3908,7 @@ fn tf32_params(
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK8(_)
+        | Tf32PhysicalRoute::MmaTf32RnaPieces4(_)
         | Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(_)
         | Tf32PhysicalRoute::Sm89MmaTf32Compact8
         | Tf32PhysicalRoute::Sm89NnDirectN96
@@ -3909,16 +3917,19 @@ fn tf32_params(
         | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
         | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
         | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
-        | Tf32PhysicalRoute::MmaTf32RnaWide(_) => PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
-            alpha: operands.alpha,
-            beta: operands.beta,
-            m,
-            k,
-            n,
-            lda: checked_i32(shape.lda, "lda")?,
-            ldb: checked_i32(shape.ldb, "ldb")?,
-            ldc,
-        }),
+        | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+        | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_) => {
+            PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
+                alpha: operands.alpha,
+                beta: operands.beta,
+                m,
+                k,
+                n,
+                lda: checked_i32(shape.lda, "lda")?,
+                ldb: checked_i32(shape.ldb, "ldb")?,
+                ldc,
+            })
+        }
         Tf32PhysicalRoute::Sm89TnPreRnaN96
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N64
         | Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
@@ -4323,6 +4334,11 @@ fn tf32_resolved_route(
             PhysicalGemmBackend::MmaTf32Rna,
             ResolvedNumericContract::MmaTf32Rna,
         ),
+        // The four-way split's partitions and fold, kept in the CTA.
+        Tf32PhysicalRoute::MmaTf32RnaPieces4(_) => (
+            PhysicalGemmBackend::MmaTf32RnaPieces4,
+            ResolvedNumericContract::MmaTf32RnaSplitK4,
+        ),
         Tf32PhysicalRoute::Sm89MmaTf32Compact8 => (
             PhysicalGemmBackend::Sm89MmaTf32Compact8,
             ResolvedNumericContract::MmaTf32Rna,
@@ -4390,6 +4406,11 @@ fn tf32_resolved_route(
         Tf32PhysicalRoute::MmaTf32RnaWide(_) => (
             PhysicalGemmBackend::MmaTf32RnaWide,
             ResolvedNumericContract::MmaTf32Rna,
+        ),
+        // The four-way split's partitions and fold, kept in the CTA.
+        Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_) => (
+            PhysicalGemmBackend::MmaTf32RnaWidePieces4,
+            ResolvedNumericContract::MmaTf32RnaSplitK4,
         ),
     };
     let ownership = match spec.route {
@@ -4775,6 +4796,7 @@ fn prepare_tf32_f32(
     })?;
     validate_sm89_tf32_joint_operands(request, operands, route)?;
     validate_tf32_rna_wide_operands(request, operands, route)?;
+    validate_tf32_pieces_operands(operands, route)?;
     if matches!(
         route,
         Tf32PhysicalRoute::MmaTf32RnaSplitK2(_)
@@ -4823,6 +4845,7 @@ fn prepare_tf32_f32(
     } else if matches!(
         route,
         Tf32PhysicalRoute::MmaTf32Rna(_)
+            | Tf32PhysicalRoute::MmaTf32RnaPieces4(_)
             | Tf32PhysicalRoute::Sm89MmaTf32Compact8
             | Tf32PhysicalRoute::Sm89NnDirectN96
             | Tf32PhysicalRoute::Sm89NnN96
@@ -4831,6 +4854,7 @@ fn prepare_tf32_f32(
             | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
             | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
             | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+            | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_)
     ) {
         None
     } else {
@@ -4855,10 +4879,13 @@ fn prepare_tf32_f32(
     let tiles = checked_tile_grid(rows, spec.tile.0, columns, spec.tile.1)?;
     // The persistent tile launches the two CTAs a multiprocessor holds and
     // walks the tiles with them; which CTA takes a tile moves no bit.
-    let grid = if route
-        == Tf32PhysicalRoute::MmaTf32RnaWide(
-            super::contract::Tf32RnaWideTile::MsPersistM128N64Bk16S3,
-        ) {
+    let grid = if matches!(
+        route,
+        Tf32PhysicalRoute::MmaTf32RnaWide(super::contract::Tf32RnaWideTile::MsPersistM128N64Bk16S3)
+            | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(
+                super::contract::Tf32RnaWideTile::MsPersistM128N64Bk16S3
+            )
+    ) {
         tiles.min(ctx.kernels.multiprocessor_count().max(1).saturating_mul(2))
     } else {
         tiles
@@ -4948,7 +4975,8 @@ fn validate_tf32_rna_wide_operands(
     route: Tf32PhysicalRoute,
 ) -> Result<(), String> {
     let (op, whole_chunks) = match route {
-        Tf32PhysicalRoute::MmaTf32RnaWide(tile) => (tile.op(), true),
+        Tf32PhysicalRoute::MmaTf32RnaWide(tile)
+        | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile) => (tile.op(), true),
         Tf32PhysicalRoute::MmaTf32RnaWideSplitK8(tile) => {
             (ResolvedGemmOp::Tn, tile.stages_whole_chunks())
         }
@@ -4971,11 +4999,13 @@ fn validate_tf32_rna_wide_operands(
         ));
     }
     // The persistent tile stages every slab whole and never masks an edge.
-    if route
-        == Tf32PhysicalRoute::MmaTf32RnaWide(
-            super::contract::Tf32RnaWideTile::MsPersistM128N64Bk16S3,
-        )
-    {
+    if matches!(
+        route,
+        Tf32PhysicalRoute::MmaTf32RnaWide(super::contract::Tf32RnaWideTile::MsPersistM128N64Bk16S3)
+            | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(
+                super::contract::Tf32RnaWideTile::MsPersistM128N64Bk16S3
+            )
+    ) {
         let shape = request.shape;
         if shape.m == 0
             || !shape.m.is_multiple_of(128)
@@ -4989,6 +5019,26 @@ fn validate_tf32_rna_wide_operands(
                 shape.m, shape.k, shape.n
             ));
         }
+    }
+    Ok(())
+}
+
+/// The tiles that fold a cut layer inside the CTA keep the finished pieces'
+/// sum in the output until the last piece, so nothing of the old output
+/// is left for a blend to read.
+fn validate_tf32_pieces_operands(
+    operands: F32TriadOperands,
+    route: Tf32PhysicalRoute,
+) -> Result<(), String> {
+    if matches!(
+        route,
+        Tf32PhysicalRoute::MmaTf32RnaPieces4(_) | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_)
+    ) && operands.beta.to_bits() != 0.0_f32.to_bits()
+    {
+        return Err(format!(
+            "TF32 route {route:?} folds its pieces through the output and takes beta 0, not {}",
+            operands.beta
+        ));
     }
     Ok(())
 }
@@ -6899,7 +6949,9 @@ pub(in crate::gpu) fn prepare_prepared_f32_direct_graph_sequence<O: PhysicalLaun
                     | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
                     | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
                     | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
-                    | Tf32PhysicalRoute::MmaTf32RnaWide(_),
+                    | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+                    | Tf32PhysicalRoute::MmaTf32RnaPieces4(_)
+                    | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_),
                     PreparedTf32Params::Sm80(params),
                 ) => {
                     let reduction_is_zero =
@@ -8179,7 +8231,9 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
             | Tf32PhysicalRoute::Sm89NtRnaM144N96S2
             | Tf32PhysicalRoute::Sm89NtRowstageM128N192S2
             | Tf32PhysicalRoute::Sm89TnDirectM192N192S2
-            | Tf32PhysicalRoute::MmaTf32RnaWide(_),
+            | Tf32PhysicalRoute::MmaTf32RnaWide(_)
+            | Tf32PhysicalRoute::MmaTf32RnaPieces4(_)
+            | Tf32PhysicalRoute::MmaTf32RnaWidePieces4(_),
             PreparedTf32Params::Sm80(params),
         ) => {
             let a = if launch.zero_reduction {
@@ -14897,113 +14951,22 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
     validate_bias_preseed(alpha, bias_ptr, "gemm_bi_forward_typed_native")?;
+    // The f32 plan folds a cut layer's pieces and every bucket here sums one
+    // chain, so a cut layer takes the upcast path the f32 plan serves.
+    if super::dispatch::exact_chunks(n_in, n_out) {
+        return Err(format!(
+            "UNCOVERED gemm_bi_forward_typed_native: the layer of {n_in} inputs and {n_out} \
+             outputs folds in pieces - shape M={batch} K={n_in} N={n_out}"
+        ));
+    }
     let m_i = checked_dims.m_i32;
     let n_i = checked_dims.n_i32;
     let k_i = checked_dims.k_i32;
 
-    // GEMV N=1.
-    if n_out == 1 && batch >= 1 && n_in >= 32 {
-        let lda_i = checked_dims.k_i32;
-        let ldy_i: i32 = 1;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (checked_dims.m_u32.div_ceil(4), 1, 1),
-            block_dim: (128, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        let choice =
-            HalfKernelChoice::new("nn_gemv", environment.kernels.gemm_bi_nn_gemv_typed.get(dt));
-        let mut b = environment.stream.launch_builder(choice.function);
-        b.arg(&y.ptr);
-        b.arg(&x.ptr);
-        b.arg(&w.ptr);
-        b.arg(&bias_ptr);
-        b.arg(&alpha);
-        b.arg(&beta);
-        b.arg(&m_i);
-        b.arg(&k_i);
-        b.arg(&lda_i);
-        b.arg(&ldy_i);
-        let seal = unsafe {
-            enqueue_half_gemm(
-                &mut environment.observer,
-                (environment.kernels, environment.context),
-                &mut b,
-                cfg,
-                HalfGemmObservation {
-                    base: choice.base,
-                    op: ResolvedGemmOp::Nn,
-                    dtype: dt,
-                    dims,
-                    strides: (dims.1, dims.2, dims.2),
-                    tile: (4, 1),
-                    bk_stages: (32, 1),
-                    arguments: HalfGemmArguments {
-                        output: y.ptr,
-                        a: x.ptr,
-                        b: w.ptr,
-                        bias: bias_ptr,
-                    },
-                },
-                format_args!("nn_gemv typed"),
-            )
-        }?;
-        return Ok(seal);
-    }
-
-    // Ultra-thin M (1..32).
-    if (1..32).contains(&batch) && (32..=2048).contains(&n_in) && n_out >= 32 {
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (checked_dims.n_u32.div_ceil(32), checked_dims.m_u32, 1),
-            block_dim: (256, 1, 1),
-            shared_mem_bytes: checked_u32_product(
-                checked_dims.k_u32,
-                checked_u32(std::mem::size_of::<f32>(), "f32 byte width")?,
-                "typed ultra-thin shared memory",
-            )?,
-        };
-        let choice = HalfKernelChoice::new(
-            "nn_ultra_thin",
-            environment.kernels.gemm_bi_nn_ultra_thin_typed.get(dt),
-        );
-        let mut b = environment.stream.launch_builder(choice.function);
-        b.arg(&y.ptr);
-        b.arg(&x.ptr);
-        b.arg(&w.ptr);
-        b.arg(&bias_ptr);
-        b.arg(&alpha);
-        b.arg(&beta);
-        b.arg(&m_i);
-        b.arg(&n_i);
-        b.arg(&k_i);
-        b.arg(&k_i);
-        b.arg(&n_i);
-        b.arg(&n_i);
-        let seal = unsafe {
-            enqueue_half_gemm(
-                &mut environment.observer,
-                (environment.kernels, environment.context),
-                &mut b,
-                cfg,
-                HalfGemmObservation {
-                    base: choice.base,
-                    op: ResolvedGemmOp::Nn,
-                    dtype: dt,
-                    dims,
-                    strides: (dims.1, dims.2, dims.2),
-                    tile: (1, 32),
-                    bk_stages: (32, 1),
-                    arguments: HalfGemmArguments {
-                        output: y.ptr,
-                        a: x.ptr,
-                        b: w.ptr,
-                        bias: bias_ptr,
-                    },
-                },
-                format_args!("nn_ultra_thin typed"),
-            )
-        }?;
-        return Ok(seal);
-    }
+    // The single-row GEMV and the ultra-thin bucket split each output's
+    // reduction across lanes and warps and add the parts in a tree, which
+    // is not the f32 plan's chain: those shapes take the upcast path, and the
+    // buckets below, one bias-seeded chain per output, serve the rest.
 
     // Narrow N (2..=127): small tile for batch <= 64, big-narrow otherwise.
     if (2..=127).contains(&n_out) && batch >= 1 && n_in >= 1 {
@@ -15354,6 +15317,14 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
     }
     let dt = dx.dtype;
     let alpha: f32 = 1.0;
+    // The input gradient folds as the forward of its layer does: a cut
+    // layer's pieces come from the f32 plan through the upcast path.
+    if super::dispatch::exact_chunks(n_out, n_in) {
+        return Err(format!(
+            "UNCOVERED gemm_bi_backward_dx_typed_native: the layer of {n_in} inputs and \
+             {n_out} outputs folds in pieces - shape M={batch} K={n_in} N={n_out}"
+        ));
+    }
 
     // GEMV N=1 (outer product).
     if n_out == 1 && batch >= 1 && n_in >= 1 {

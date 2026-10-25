@@ -906,15 +906,10 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
             return Ok(HalfPolicyBranchSeal::Native(seal));
         }
     }
-    // The SM89 deep-K N=128 bucket keeps the exact
-    // scalar contract when its measured Split-K plan wins. Other admitted
-    // shapes use the separate tensor-core contract in `gemm_bi_forward_tc`.
-    if ctx.bi_tensor_cores()
-        && !super::gemm_bi_triad::tc_half_policy_prefers_scalar_forward(
-            ctx.compute_capability(),
-            dims,
-        )?
-    {
+    // Whether the tensor cores serve a forward reads the layer alone, so a
+    // row's bits never change with the batch: the scalar tier sums in
+    // another order and takes only the layers the tiles never serve.
+    if ctx.bi_tensor_cores() {
         let ops = super::gemm_bi_triad::TcFwdOperands { y, x, w, bias_ptr };
         match super::gemm_bi_triad::gemm_bi_forward_tc_observed(ctx, observer, &ops, dims) {
             Ok((_tile, seal)) => return Ok(HalfPolicyBranchSeal::Native(seal)),
@@ -4229,23 +4224,22 @@ pub fn gpu_gemm_typed_forward_raw(
     // Selected by `GemmMode::Deterministic`; the environment default is also
     // deterministic. The deprecated batch-invariant environment variable is
     // accepted only as a legacy adapter.
-    // Typed gemm_bi, homogeneous bf16/f16 operand triples only.
-    // Routing:
-    //   - TC tier ON, N >= 32: the forward tile ladder
-    //     (Thin16/Tile64/Tile128 — bit-identical per output element)
-    //     covers EVERY M, so one arithmetic family serves decode and
-    //     prefill alike and a row's bits never depend on M. This removes
-    //     the old matvec/TC family break at M=128 (the invariance-matrix
-    //     bucket edge) at a measured M=1 cost of ~1.4-1.9x vs matvec
-    //     (thin_rung_decode_bench); from M=4 the ladder is FASTER.
-    //   - scalar tier (TC off), M >= 128: full-coverage typed entry —
-    //     native typed buckets, else upcast → f32 gemm_bi → RNE
-    //     downcast. Bit-identical by contract.
-    //   - scalar tier M < 128, and N < 32 on either tier: matvec_bi
-    //     below — one reduction order for every M within its band.
+    // Typed gemm_bi, homogeneous bf16/f16 operand triples only. The layer
+    // alone picks the arithmetic, so a row's bits never depend on how many
+    // rows the batch holds:
+    //   - N >= 32 with the tensor cores on: the forward tile ladder
+    //     (Thin16/Tile64/Tile128, bit-identical per output element) at
+    //     every M, decode and prefill alike, at a measured M=1 cost of
+    //     ~1.4-1.9x against matvec (thin_rung_decode_bench); from M=4 the
+    //     ladder is faster.
+    //   - N >= 32 with the tensor cores off: the full-coverage scalar
+    //     entry at every M — native typed buckets, else upcast → f32
+    //     gemm_bi → RNE downcast, bit-identical by contract.
+    //   - N < 32 on either tier: matvec_bi below at every M; its weight
+    //     block is small enough to stay cached across the rows.
     // Inference batch-parity asserts STRICT all-M bit-invariance of
-    // decode logits (KL ~1e-12 across batch sizes); both the ladder and
-    // matvec hold it — each is one reduction order for every M it serves.
+    // decode logits (KL ~1e-12 across batch sizes); each of these is one
+    // reduction order for every M.
     // Mixed a/b dtype combos have NO matvec_bi kernel (the a==b guard in
     // pick_bi_matvec): under the batch-invariant contract they FAIL LOUD
     // below instead of silently taking the vendor cuBLAS route.
@@ -4257,11 +4251,8 @@ pub fn gpu_gemm_typed_forward_raw(
     }
 
     let homogeneous_half = c.dtype != WeightDtype::F32 && c.dtype == x.dtype && x.dtype == w.dtype;
-    if ctx.batch_invariant() && homogeneous_half && n_out >= 2 {
-        let tc_ladder = ctx.bi_tensor_cores() && n_out >= 32;
-        if tc_ladder || batch >= 128 {
-            return gemm_bi_forward_typed(ctx, c, x, w, bias_ptr.unwrap_or(0), dims);
-        }
+    if ctx.batch_invariant() && homogeneous_half && n_out >= 32 {
+        return gemm_bi_forward_typed(ctx, c, x, w, bias_ptr.unwrap_or(0), dims);
     }
 
     if ctx.batch_invariant()

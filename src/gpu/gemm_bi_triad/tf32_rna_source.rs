@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 pub const SOURCE: &str = include_str!("../../../kernels/gemm_bi_triad/sm80/tf32_rna.cu");
 
-pub const SOURCE_SHA256: &str = "511c4997835f32b470e893b6573f6d843427dcadc17323f25d9060f8a91e8dd1";
+pub const SOURCE_SHA256: &str = "2daff4377e06ec067e5915bf0933fdb6d731a9d580a9b73378ca1bfdff145f76";
 
 pub const NN_M128N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m128n96_w2x4_bk32_s3";
 pub const NN_M96N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m96n96_w2x4_bk32_s3";
@@ -30,8 +30,21 @@ pub const TN_MS_SPLITK8_M64N64_S4_SYMBOL: &str = "tn_sm80_tf32_rna_ms_splitk8_m6
 pub const TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL: &str =
     "tn_sm80_tf32_rna_ms_splitk8_m64n64_bk32_s4_any";
 
+pub const NN_PIECES4_M128N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_pieces4_m128n96_w2x4_bk32_s3";
+pub const NN_PIECES4_M96N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_pieces4_m96n96_w2x4_bk32_s3";
+pub const NN_PIECES4_M128N128_S3_SYMBOL: &str = "nn_sm80_tf32_rna_pieces4_m128n128_bk32_s3";
+pub const NN_PIECES4_MS_M64N128_BK16_S6_SYMBOL: &str =
+    "nn_sm80_tf32_rna_pieces4_ms_m64n128_bk16_s6";
+pub const NN_PIECES4_MS_M128N64_S3_SYMBOL: &str = "nn_sm80_tf32_rna_pieces4_ms_m128n64_bk32_s3";
+pub const NN_PIECES4_MS_M64N64_S3_SYMBOL: &str = "nn_sm80_tf32_rna_pieces4_ms_m64n64_bk32_s3";
+pub const NN_PIECES4_MS_PERSIST_M128N64_BK16_S3_SYMBOL: &str =
+    "nn_sm80_tf32_rna_pieces4_ms_persist_m128n64_bk16_s3";
+pub const NT_PIECES4_MS_M64N128_BK16_S6_SYMBOL: &str =
+    "nt_sm80_tf32_rna_pieces4_ms_m64n128_bk16_s6";
+pub const NT_PIECES4_MS_M128N64_S3_SYMBOL: &str = "nt_sm80_tf32_rna_pieces4_ms_m128n64_bk32_s3";
+
 /// Every export of the module, in lexicographic order.
-pub const TF32_RNA_SYMBOLS: [&str; 13] = [
+pub const TF32_RNA_SYMBOLS: [&str; 22] = [
     NN_M128N128_S3_SYMBOL,
     NN_M128N96_S3_SYMBOL,
     NN_M96N96_S3_SYMBOL,
@@ -39,9 +52,18 @@ pub const TF32_RNA_SYMBOLS: [&str; 13] = [
     NN_MS_M64N128_BK16_S6_SYMBOL,
     NN_MS_M64N64_S3_SYMBOL,
     NN_MS_PERSIST_M128N64_BK16_S3_SYMBOL,
+    NN_PIECES4_M128N128_S3_SYMBOL,
+    NN_PIECES4_M128N96_S3_SYMBOL,
+    NN_PIECES4_M96N96_S3_SYMBOL,
+    NN_PIECES4_MS_M128N64_S3_SYMBOL,
+    NN_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
+    NN_PIECES4_MS_M64N64_S3_SYMBOL,
+    NN_PIECES4_MS_PERSIST_M128N64_BK16_S3_SYMBOL,
     NT_MS_M128N128_BK16_S5_SYMBOL,
     NT_MS_M128N64_S3_SYMBOL,
     NT_MS_M64N128_BK16_S6_SYMBOL,
+    NT_PIECES4_MS_M128N64_S3_SYMBOL,
+    NT_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
     TN_MS_SPLITK8_M128N64_S3_SYMBOL,
     TN_MS_SPLITK8_M64N64_S4_SYMBOL,
     TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL,
@@ -157,7 +179,7 @@ const fn spec(
 
 /// The launch geometry of every tile: threads, the dynamic shared memory of
 /// its stages, and the CTAs a multiprocessor must hold at once.
-pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 13] = [
+pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 22] = [
     spec(
         NN_M128N96_S3_SYMBOL,
         Tf32RnaKernelKind::Wide,
@@ -248,6 +270,70 @@ pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 13] = [
         73_728,
         1,
     ),
+    // The four-piece twins: each one its one-chain tile's geometry.
+    spec(
+        NN_PIECES4_M128N96_S3_SYMBOL,
+        Tf32RnaKernelKind::Wide,
+        256,
+        86_016,
+        1,
+    ),
+    spec(
+        NN_PIECES4_M96N96_S3_SYMBOL,
+        Tf32RnaKernelKind::Wide,
+        256,
+        73_728,
+        1,
+    ),
+    spec(
+        NN_PIECES4_M128N128_S3_SYMBOL,
+        Tf32RnaKernelKind::Wide128,
+        256,
+        98_304,
+        1,
+    ),
+    spec(
+        NN_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        76_800,
+        1,
+    ),
+    spec(
+        NN_PIECES4_MS_M128N64_S3_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        76_800,
+        1,
+    ),
+    spec(
+        NN_PIECES4_MS_M64N64_S3_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        52_224,
+        1,
+    ),
+    spec(
+        NN_PIECES4_MS_PERSIST_M128N64_BK16_S3_SYMBOL,
+        Tf32RnaKernelKind::Persistent,
+        128,
+        38_400,
+        2,
+    ),
+    spec(
+        NT_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        73_728,
+        1,
+    ),
+    spec(
+        NT_PIECES4_MS_M128N64_S3_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        73_728,
+        1,
+    ),
 ];
 
 pub fn kernel_spec(symbol: &str) -> Option<&'static Tf32RnaKernelSpec> {
@@ -293,6 +379,7 @@ pub fn validate_source_text(source: &str) -> Result<(), String> {
         .collect::<Vec<_>>();
     for macro_name in [
         "TF32_RNA_MS_TILE(",
+        "TF32_RNA_MS_TILE_PIECES(",
         "TF32_RNA_MS_TN_SPLIT8(",
         "TF32_RNA_MS_TN_SPLIT8_ANY(",
         "TF32_RNA_MS_NN_PERSISTENT(",

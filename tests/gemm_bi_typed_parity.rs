@@ -3,12 +3,14 @@
 //! Contract under test: a typed GEMM is BIT-IDENTICAL to "quantize inputs
 //! to the 16-bit dtype, upcast to f32, run the f32 kernel, RNE-downcast the
 //! output" — because the typed kernels keep f32 smem/accumulation and the
-//! exact FMA chains of their f32 twins, upcasting only at the load site.
+//! exact FMA chains of their f32 twins, upcasting only at the load site. A
+//! layer the f32 plan cuts folds in pieces there, and the single-row GEMV and
+//! the ultra-thin bucket add each output's lane or warp parts in a tree, so
+//! the native path refuses those shapes and the upcast fallback serves them.
 //!
 //! Two layers:
-//! - stage-2 native buckets (NN gemv / ultra-thin / narrow / narrow-small,
-//!   TN gemv / narrow with f32 dW, NT gemv / narrow) — direct dispatcher
-//!   calls;
+//! - stage-2 native buckets (NN narrow / narrow-small / big, TN gemv /
+//!   narrow with f32 dW, NT gemv / narrow) — direct dispatcher calls;
 //! - full-coverage `gemm_bi_*_typed` blas entries — uncovered shapes route
 //!   through the upcast → f32 gemm_bi → RNE-downcast fallback, which must
 //!   satisfy the SAME bit contract.
@@ -299,11 +301,8 @@ fn check_dx(t: &Ctx, dt: WeightDtype, dims: (usize, usize, usize), full: bool) {
 fn typed_stage2_buckets_bit_match_f32_triad() {
     let t = Ctx::new();
     for dt in [WeightDtype::Bf16, WeightDtype::F16] {
-        // Forward: gemv (N=1), ultra-thin (M<32), narrow-small (M<=64),
-        // narrow (M>64), each with and without bias.
-        check_forward(&t, dt, (64, 384, 1), true, false);
-        check_forward(&t, dt, (64, 384, 1), false, false);
-        check_forward(&t, dt, (8, 384, 512), true, false);
+        // Forward: narrow-small (M<=64) and narrow (M>64), with and without
+        // bias.
         check_forward(&t, dt, (32, 96, 80), true, false);
         check_forward(&t, dt, (256, 96, 80), true, false);
         check_forward(&t, dt, (256, 96, 80), false, false);
@@ -326,7 +325,62 @@ fn typed_stage2_buckets_bit_match_f32_triad() {
         check_dx(&t, dt, (31, 95, 128), false);
         check_dx(&t, dt, (32, 95, 129), false);
         check_dx(&t, dt, (100, 70, 130), false);
-        check_dx(&t, dt, (127, 70, 2050), false);
+    }
+}
+
+/// A layer the f32 plan cuts folds its pieces, and a single output column or
+/// a batch under 32 rows once took buckets that add lane or warp parts in a
+/// tree: the native surface refuses all of them, and the full entry serves
+/// them through the upcast fallback with the f32 bits.
+#[test]
+fn typed_cut_layers_and_split_buckets_take_the_upcast_path() {
+    let t = Ctx::new();
+    let refuses = |result: Result<(), String>| {
+        let error = result.expect_err("a cut layer has no native bucket");
+        assert!(error.starts_with("UNCOVERED"), "{error}");
+    };
+    for dt in [WeightDtype::Bf16, WeightDtype::F16] {
+        let typed = |buffer: &DtypedBuf| TypedPtr {
+            ptr: buffer.cached_ptr(),
+            dtype: dt,
+        };
+        for (m, k, n) in [
+            (64, 384, 1),
+            (256, 512, 80),
+            (32, 1024, 512),
+            (64, 320, 1),
+            (8, 384, 512),
+            (1, 256, 2112),
+        ] {
+            let x = t.typed_buf(&det(m * k, 5, 1.0), dt);
+            let w = t.typed_buf(&det(k * n, 6, 0.5), dt);
+            let y = DtypedBuf::zeros(&t.ctx.stream, m * n, dt).unwrap();
+            refuses(gemm_bi_triad::gemm_bi_forward_typed_native(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                typed(&y),
+                typed(&x),
+                typed(&w),
+                0,
+                (m, k, n),
+            ));
+            check_forward(&t, dt, (m, k, n), true, true);
+            check_forward(&t, dt, (m, k, n), false, true);
+        }
+        for (m, k, n) in [(127, 70, 2050), (64, 768, 3072), (31, 100, 400)] {
+            let dy = t.typed_buf(&det(m * n, 7, 0.5), dt);
+            let w = t.typed_buf(&det(k * n, 8, 0.5), dt);
+            let dx = DtypedBuf::zeros(&t.ctx.stream, m * k, dt).unwrap();
+            refuses(gemm_bi_triad::gemm_bi_backward_dx_typed_native(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                typed(&dx),
+                typed(&dy),
+                typed(&w),
+                (m, k, n),
+            ));
+            check_dx(&t, dt, (m, k, n), true);
+        }
     }
 }
 
@@ -408,14 +462,12 @@ fn typed_gate_boundary_sweep_bit_match() {
     }
 }
 
-/// Typed forward is batch-invariant WITHIN a dispatch bucket: row 0 of Y is
-/// bit-identical across batch sizes that route to the same bucket, exactly
-/// like the f32 triad (see `nn_forward_is_batch_invariant_within_bucket`).
-/// Native bucket pair: M=1 vs M=16 (ultra-thin). Fallback pair: M=64 vs
-/// M=256 (upcast → f32 split-K32 → RNE downcast; elementwise casts are
-/// trivially batch-invariant, so the f32 kernel's invariance carries over).
+/// Typed forward is batch-invariant across its buckets: row 0 of Y keeps
+/// its bits at M=1, 16, 64 and 256, since every native bucket and the f32
+/// plan behind the upcast fallback sum one bias-seeded ascending chain per
+/// output for an uncut layer.
 #[test]
-fn typed_forward_is_batch_invariant_within_bucket() {
+fn typed_forward_is_batch_invariant_across_buckets() {
     let t = Ctx::new();
     let (k, n) = (384usize, 512usize);
     for dt in [WeightDtype::Bf16, WeightDtype::F16] {
@@ -453,25 +505,16 @@ fn typed_forward_is_batch_invariant_within_bucket() {
             out[..n].to_vec()
         };
 
-        // Native ultra-thin bucket: M in [1, 32).
         let y1 = run(1);
-        let y16 = run(16);
-        // Fallback split-K32 bucket: M in [32, 1024], K % 32 == 0.
-        let y64 = run(64);
-        let y256 = run(256);
-        for (i, (&a, &b)) in y1.iter().zip(&y16).enumerate() {
-            assert_eq!(
-                a.to_bits(),
-                b.to_bits(),
-                "{dt:?} ultra-thin bucket variance at col {i}: M=1 {a:?} vs M=16 {b:?}"
-            );
-        }
-        for (i, (&a, &b)) in y64.iter().zip(&y256).enumerate() {
-            assert_eq!(
-                a.to_bits(),
-                b.to_bits(),
-                "{dt:?} split-K fallback bucket variance at col {i}: M=64 {a:?} vs M=256 {b:?}"
-            );
+        for m in [16, 64, 256] {
+            let ym = run(m);
+            for (i, (&a, &b)) in y1.iter().zip(&ym).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "{dt:?} batch variance at col {i}: M=1 {a:?} vs M={m} {b:?}"
+                );
+            }
         }
     }
 }

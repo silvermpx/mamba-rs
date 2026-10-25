@@ -2991,20 +2991,20 @@ where
 #[test]
 fn hardware_artifact_expected_exports_cover_wide_without_changing_frozen_base() {
     const WIDE: &str = "nn_sm80_mma_tf32_m128n128_bk32_s3";
-    assert_eq!(expected_sm80_symbols().len(), 18);
+    assert_eq!(expected_sm80_symbols().len(), 30);
     assert!(!expected_sm80_symbols().contains(WIDE));
     for (cc, count, wide) in [
-        ((8, 0), 19, true),
-        ((8, 6), 19, true),
-        ((8, 7), 19, true),
-        ((8, 9), 19, true),
-        ((9, 0), 25, true),
-        ((10, 0), 55, true),
-        ((10, 3), 55, true),
-        ((10, 7), 55, true),
-        ((11, 0), 55, true),
-        ((12, 0), 36, false),
-        ((12, 1), 36, false),
+        ((8, 0), 31, true),
+        ((8, 6), 31, true),
+        ((8, 7), 31, true),
+        ((8, 9), 31, true),
+        ((9, 0), 37, true),
+        ((10, 0), 67, true),
+        ((10, 3), 67, true),
+        ((10, 7), 67, true),
+        ((11, 0), 67, true),
+        ((12, 0), 48, false),
+        ((12, 1), 48, false),
     ] {
         let symbols = expected_hardware_symbols(cc);
         assert_eq!(symbols.len(), count, "hardware artifact CC={cc:?}");
@@ -8442,7 +8442,7 @@ fn production_f32_wrappers_preserve_the_complete_auto_operand_contract() {
 #[test]
 fn tf32_sources_export_the_exact_planned_symbol_inventories() {
     let inventories = [
-        (SM80_SOURCE, "_sm80_mma_tf32_", expected_sm80_symbols(), 18),
+        (SM80_SOURCE, "_sm80_mma_tf32_", expected_sm80_symbols(), 30),
         (
             SM90A_SOURCE,
             "_sm90a_wgmma_tf32_",
@@ -8493,7 +8493,7 @@ fn rust_contract_and_module_loader_own_the_same_exact_tf32_inventories() {
             "tf32_module_symbols",
             "load_function",
             "assert_eq!",
-            "18",
+            "30",
             "6",
             "36",
         ],
@@ -9272,11 +9272,13 @@ fn portable_tf32_splitk2_and_splitk4_have_fixed_partitions_and_distinct_ownershi
         "portable TF32 split-K async mainloop",
     );
     let mut cursor = 0;
+    // The partitions in order, then the bias: the fold of a layer cut into
+    // pieces.
     for operation in [
-        "sum0=__fadd_rn(sum0,p0.x)",
-        "sum0=__fadd_rn(sum0,p1.x)",
+        "sum0=__fadd_rn(p0.x,p1.x)",
         "sum0=__fadd_rn(sum0,p2.x)",
         "sum0=__fadd_rn(sum0,p3.x)",
+        "sum0=__fadd_rn(sum0,bias[column])",
     ] {
         let offset = fused[cursor..]
             .find(operation)
@@ -12152,14 +12154,14 @@ fn driver_abi_lookup_uses_the_cuda12_compatible_symbol() {
 #[test]
 fn wide_qualification_op_census_includes_the_composed_nn_extension() {
     for (cc, total, expected) in [
-        ((8, 0), 19, (7, 6, 6)),
-        ((8, 6), 19, (7, 6, 6)),
-        ((8, 7), 19, (7, 6, 6)),
-        ((8, 9), 19, (7, 6, 6)),
-        ((9, 0), 25, (9, 8, 8)),
-        ((10, 0), 55, (19, 18, 18)),
-        ((10, 3), 55, (19, 18, 18)),
-        ((11, 0), 55, (19, 18, 18)),
+        ((8, 0), 31, (13, 6, 12)),
+        ((8, 6), 31, (13, 6, 12)),
+        ((8, 7), 31, (13, 6, 12)),
+        ((8, 9), 31, (13, 6, 12)),
+        ((9, 0), 37, (15, 8, 14)),
+        ((10, 0), 67, (25, 18, 24)),
+        ((10, 3), 67, (25, 18, 24)),
+        ((11, 0), 67, (25, 18, 24)),
     ] {
         let census = qualified_op_census(cc, total);
         assert_eq!((census.nn, census.tn, census.nt), expected, "CC {cc:?}");
@@ -12169,7 +12171,7 @@ fn wide_qualification_op_census_includes_the_composed_nn_extension() {
 #[test]
 fn wide_qualification_op_census_preserves_cc12_without_the_extension() {
     for cc in [(12, 0), (12, 1)] {
-        let census = qualified_op_census(cc, 36);
-        assert_eq!((census.nn, census.tn, census.nt), (12, 13, 11), "CC {cc:?}");
+        let census = qualified_op_census(cc, 48);
+        assert_eq!((census.nn, census.tn, census.nt), (18, 13, 17), "CC {cc:?}");
     }
 }

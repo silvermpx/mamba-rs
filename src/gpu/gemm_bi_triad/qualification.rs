@@ -3492,7 +3492,8 @@ fn shape_for_spec(
 ) -> Result<F32TriadShape, String> {
     if matches!(
         spec.route,
-        Tf32PhysicalRoute::MmaTf32Rna(route) if route.tile != Tf32PortableTile::M128N128
+        Tf32PhysicalRoute::MmaTf32Rna(route) | Tf32PhysicalRoute::MmaTf32RnaPieces4(route)
+            if route.tile != Tf32PortableTile::M128N128
     ) {
         Ok(F32TriadShape::contiguous(spec.op, dims))
     } else {
@@ -5967,17 +5968,17 @@ mod tests {
     #[test]
     fn route_inventory_counts_match_the_release_contract() {
         for (cc, count) in [
-            ((8, 0), 19),
-            ((8, 6), 19),
-            ((8, 7), 19),
-            ((8, 9), 19),
-            ((9, 0), 25),
-            ((10, 0), 55),
-            ((10, 3), 55),
-            ((10, 7), 55),
-            ((11, 0), 55),
-            ((12, 0), 36),
-            ((12, 1), 36),
+            ((8, 0), 31),
+            ((8, 6), 31),
+            ((8, 7), 31),
+            ((8, 9), 31),
+            ((9, 0), 37),
+            ((10, 0), 67),
+            ((10, 3), 67),
+            ((10, 7), 67),
+            ((11, 0), 67),
+            ((12, 0), 48),
+            ((12, 1), 48),
         ] {
             assert_eq!(
                 tf32_qualification_route_specs(cc)
@@ -6029,7 +6030,7 @@ mod tests {
             .filter(|spec| !spec.route.is_exact_fma())
             .map(|spec| spec.symbol)
             .collect::<Vec<_>>();
-        assert_eq!(frozen.len(), 36);
+        assert_eq!(frozen.len(), 48);
         for cc in [(12, 0), (12, 1)] {
             let actual = tf32_qualification_route_specs(cc)
                 .expect("frozen CC12 inventory")
@@ -6911,12 +6912,12 @@ mod tests {
     fn adversarial_counts_are_derived_from_the_live_route_inventory() {
         let specs = tf32_qualification_route_specs((8, 9)).unwrap();
         let counts = adversarial_counts(&specs);
-        assert_eq!(counts.staged_cases, 76);
-        assert_eq!(counts.guard_poison_pairs, 19);
-        assert_eq!(counts.exceptional_symbols, 19);
-        assert_eq!(counts.cross_m_symbols, 13);
-        assert_eq!(counts.cross_m_shapes, 52);
-        assert_eq!(counts.nn_bias_beta_symbols, 7);
+        assert_eq!(counts.staged_cases, 124);
+        assert_eq!(counts.guard_poison_pairs, 31);
+        assert_eq!(counts.exceptional_symbols, 31);
+        assert_eq!(counts.cross_m_symbols, 25);
+        assert_eq!(counts.cross_m_shapes, 100);
+        assert_eq!(counts.nn_bias_beta_symbols, 13);
     }
 
     fn physical_node(symbol: &'static str) -> QualifiedPhysicalLaunchNode {

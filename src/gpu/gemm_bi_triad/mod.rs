@@ -88,6 +88,7 @@ pub use contract::{
 };
 #[cfg(test)]
 pub(crate) use contract::{ZERO_REDUCTION_DIGEST_DOMAIN, ZERO_REDUCTION_MAP_REVISION};
+pub(in crate::gpu) use dispatch::Sm120AutoRequest;
 pub use dispatch::{
     SM90A_AUTO_CELLS, SM100_AUTO_CELLS_CC100, SM100_AUTO_CELLS_CC103, SM100_AUTO_CELLS_CC110,
     SM120_AUTO_CELLS_CC120, SM120_AUTO_CELLS_CC121, SM120_STREAMK_CELLS_CC120,
@@ -96,7 +97,6 @@ pub use dispatch::{
     resolve_sm120_forced, resolve_tf32_forced, sm100_auto_cells, sm100_target_candidates,
     sm120_target_candidates,
 };
-pub(in crate::gpu) use dispatch::{Sm120AutoRequest, tc_half_policy_prefers_scalar_forward};
 pub(in crate::gpu) use launch::proven_candidate;
 pub(in crate::gpu) use launch::record_physical_exact_scalar_f32_backward_dx_ptrs;
 pub(in crate::gpu) use launch::validate_f32_triad_pointer_request;

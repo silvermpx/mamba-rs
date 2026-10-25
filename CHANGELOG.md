@@ -36,6 +36,18 @@
   model of the fold reproduces all of them. Forwards and input gradients
   change their bits once in this release. A scaled or accumulating forward
   keeps the plan of its shape.
+- A bf16 or f16 forward and input gradient pick their arithmetic by the
+  layer's shape alone, so a row has the same bits at every batch size, with
+  the tensor cores on or off. An input gradient takes the tensor-core tile
+  below 64 rows wherever the layer takes it above, where it used to drop to
+  the scalar tier; a deep reduction into 128 outputs on SM89 keeps the tile
+  at every row count, where about 128 rows used to run a scalar split; the
+  models' forward keeps one kernel across 128 rows, where without the
+  tensor cores, or under 32 outputs, it switched there. A layer the f32
+  plan cuts folds its four pieces in half precision too, through the f32
+  plan, and so do a single output column and a batch under 32 rows on the
+  scalar tier, which added their products in a tree of lane or warp parts.
+  These products change their bits once in this release.
 - Exact f32 is faster on the RTX 5090 and RTX PRO 6000. Their own kernels
   serve more products, and a sum cut into short pieces is added inside one
   block. On an RTX PRO 6000 a set of about 400 exact products runs in 0.90
@@ -116,18 +128,23 @@
 ### Added
 
 - `F32TriadPolicy::RnaTf32BatchInvariant` runs every f32 product on TF32
-  tensor cores with `cvt.rna` rounding, and its forward gives a row the
-  same bits at every batch size, for a program that checks its products
-  against a CPU model of the tensor core. Every tile it may use gives the
-  same bits, and it picks among them by the shape and the number of
-  multiprocessors. A deep weight gradient splits eight ways, wherever its
-  operands sit, and a few-row input gradient four ways, by the shape alone.
-  An Ada board adds its multistage and pre-rounded tiles, and an RTX 5090
-  or RTX PRO 6000 its own forward table, the multistage tiles and the TMA
-  input-gradient tile. Its picks were checked on 552 products on both an
-  RTX 5090 and an RTX PRO 6000, and none is slower than the plain table on
-  either card; the persistent forward tile, up to 13 percent faster on a
-  band of tall layers, was measured on the RTX 5090 alone.
+  tensor cores with `cvt.rna` rounding, and its forward and input gradient
+  give a row the same bits at every batch size, for a program that checks
+  its products against a CPU model of the tensor core. A layer the exact
+  forward's fold cuts, 512 inputs or more (384 when it has fewer than 128
+  outputs), sums four pieces of whole 32-input groups in order with the
+  bias after them; every other layer walks one chain. Every tile it may use
+  for a shape gives the same bits, and it picks among them by the shape and
+  the number of multiprocessors: a few rows, or a grid under half a wave,
+  run the four pieces as split members, a larger grid folds them inside
+  the tile the shape's table names. A deep weight gradient splits eight
+  ways, wherever its operands sit, by the shape alone. An Ada board adds
+  its multistage and pre-rounded tiles, and an RTX 5090 or RTX PRO 6000 its
+  own forward table, the multistage tiles and the TMA input-gradient tile.
+  The one-chain picks were checked on 552 products on both an RTX 5090 and
+  an RTX PRO 6000, and none is slower than the plain table on either card;
+  the persistent forward tile, up to 13 percent faster on a band of tall
+  layers, was measured on the RTX 5090 alone.
 - `F32TriadPolicy::ExactFmaBatchInvariant` runs the exact f32 products
   with the forward every exact policy now has, and refuses a scaled or
   accumulating forward instead of taking the plan of its shape. A batch of

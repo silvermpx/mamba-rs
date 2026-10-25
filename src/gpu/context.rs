@@ -169,10 +169,11 @@ pub enum BiGemmFamily {
     /// The multi-tile dispatcher (`kernels/gemm_bi_triad/`) - the default.
     /// Carries the full triad (NN + TN + NT), so it is the only family
     /// that can serve a backward, and it is the fastest deterministic
-    /// path. It picks a kernel by shape (ultra-thin M<32, narrow-N,
-    /// GEMV, split-K M<=1024, Slim/Big above), so its invariance holds
-    /// across every M INSIDE one bucket; crossing a boundary changes the
-    /// reduction association deterministically.
+    /// path. It picks a kernel by shape and row count, but an exact or
+    /// TF32 forward or input gradient sums each output by its layer's
+    /// shape alone, so a row has the same bits at every batch size; a
+    /// bf16 or f16 forward on the tensor-core ladder does too. A weight
+    /// gradient sums over the batch, so its cut follows the whole shape.
     #[default]
     Triad,
     /// The standalone inference ladder (`kernels/gemm_bi_inference/`):
@@ -202,22 +203,25 @@ pub enum F32TriadPolicy {
     /// Every f32 product runs on TF32 and rounds its operands with
     /// `cvt.rna` (in registers, after a tensor-map load, or in a separate
     /// pre-rounding pass), never by the half-ulp shortcut. A forward (NN)
-    /// walks each output's reduction as one chain in a plain tile of the
-    /// portable tier, so no row count changes an output's bits; the
-    /// gradients may take split or stream-K routes, deterministic but
-    /// keyed on their shape. The architecture's tables choose among the
-    /// routes that keep this contract, and every other shape takes the
-    /// portable tier's plain tile; nothing falls back to the exact family.
-    /// A program whose TF32 products must equal a CPU model of the tensor
-    /// core runs under it. The Triad family serves it.
+    /// or an input gradient (NT) sums each output by its layer's shape
+    /// alone: one chain, or, where the exact fold cuts the layer, four
+    /// pieces of whole 32-input groups added in order with the bias after
+    /// them, so no row count changes an output's bits. A weight gradient's
+    /// cut follows its whole shape. The architecture's tables choose among
+    /// the routes that keep this contract, and every other shape takes the
+    /// portable tier's tile of the same cut; nothing falls back to the
+    /// exact family. A program whose TF32 products must equal a CPU model
+    /// of the tensor core runs under it. The Triad family serves it.
     RnaTf32BatchInvariant = 2,
-    /// Exact f32 products whose forward does not depend on the batch. A
-    /// forward (NN) folds each output by its layer's shape alone: a shallow
-    /// layer as one `fma` chain seeded with the bias, a deep or narrow one
-    /// as 64-input chunks summed in order before the bias, so every row
-    /// count gives a row the same bits and a CPU twin of the two folds
-    /// reproduces them. The gradients take the exact policy's routes. The
-    /// Triad family serves it.
+    /// Exact f32 products whose forward does not depend on the batch,
+    /// which every exact policy now gives: a forward (NN) or an input
+    /// gradient (NT) folds each output by its layer's shape alone, a
+    /// shallow layer as one `fma` chain seeded with the bias, a deep or
+    /// narrow one as four pieces of whole 32-input groups summed in order
+    /// before the bias, so every row count gives a row the same bits and a
+    /// CPU twin of the folds reproduces them. Unlike the exact policy it
+    /// refuses a scaled or accumulating forward instead of taking the plan
+    /// of its shape. The Triad family serves it.
     ExactFmaBatchInvariant = 3,
 }
 
@@ -2295,16 +2299,17 @@ const fn expected_route_module(backend: PhysicalGemmBackend) -> ModuleKind {
         | PhysicalGemmBackend::MmaTf32Rna
         | PhysicalGemmBackend::MmaTf32RnaSplitK2
         | PhysicalGemmBackend::MmaTf32RnaSplitK4
-        | PhysicalGemmBackend::MmaTf32RnaSplitK8 => ModuleKind::TriadSm80,
+        | PhysicalGemmBackend::MmaTf32RnaSplitK8
+        | PhysicalGemmBackend::MmaTf32RnaPieces4 => ModuleKind::TriadSm80,
         PhysicalGemmBackend::Sm89MmaTf32Compact8 => ModuleKind::TriadSm89Finalist,
         PhysicalGemmBackend::Sm89MmaTf32PreRna
         | PhysicalGemmBackend::Sm89MmaTf32AddHalf
         | PhysicalGemmBackend::Sm89MmaTf32NtALdmatrix
         | PhysicalGemmBackend::Sm89MmaTf32NtRna
         | PhysicalGemmBackend::Sm89MmaTf32TnDirectRna => ModuleKind::TriadSm89Tf32Joint,
-        PhysicalGemmBackend::MmaTf32RnaWide | PhysicalGemmBackend::MmaTf32RnaWideSplitK8 => {
-            ModuleKind::TriadTf32Rna
-        }
+        PhysicalGemmBackend::MmaTf32RnaWide
+        | PhysicalGemmBackend::MmaTf32RnaWidePieces4
+        | PhysicalGemmBackend::MmaTf32RnaWideSplitK8 => ModuleKind::TriadTf32Rna,
         PhysicalGemmBackend::Sm89Mma16HalfS3
         | PhysicalGemmBackend::Sm89Mma16HalfS2
         | PhysicalGemmBackend::Sm89Mma16HalfS4 => ModuleKind::TriadSm89Half,
@@ -2333,7 +2338,9 @@ fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) ->
         | PhysicalGemmBackend::Sm89MmaTf32TnDirectRna => {
             super::gemm_bi_triad::SM89_TF32_JOINT_TUNING_REVISION
         }
-        PhysicalGemmBackend::MmaTf32RnaWide | PhysicalGemmBackend::MmaTf32RnaWideSplitK8 => {
+        PhysicalGemmBackend::MmaTf32RnaWide
+        | PhysicalGemmBackend::MmaTf32RnaWidePieces4
+        | PhysicalGemmBackend::MmaTf32RnaWideSplitK8 => {
             super::gemm_bi_triad::TF32_RNA_TUNING_REVISION
         }
         PhysicalGemmBackend::ScalarFmaSm89InferenceCopyPlan => {

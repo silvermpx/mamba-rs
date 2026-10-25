@@ -15705,7 +15705,7 @@ mod tests {
     #[test]
     fn tf32_contract_and_loader_inventories_match_cuda_exports() {
         for (module_kind, expected) in [
-            (ModuleKind::TriadSm80, 18),
+            (ModuleKind::TriadSm80, 30),
             (ModuleKind::TriadSm90a, 6),
             (ModuleKind::TriadSm100, 36),
             (ModuleKind::TriadSm120, 30),
@@ -15734,11 +15734,11 @@ mod tests {
         }
         assert_eq!(
             super::super::contract::tf32_route_specs_for(ModuleKind::TriadSm80, true).count(),
-            19
+            31
         );
         assert_eq!(
             super::super::contract::tf32_route_specs_for(ModuleKind::TriadSm80, false).count(),
-            18
+            30
         );
     }
 

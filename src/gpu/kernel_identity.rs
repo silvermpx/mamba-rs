@@ -2658,10 +2658,6 @@ pub struct Sm80TcPolicy {
     pub tn_rectangular_wave_denominator: u64,
     pub backward_tail_min_reduction: usize,
     pub backward_tail_min_tile64_ctas: u64,
-    pub deep_split_k_compute_capability: (u32, u32),
-    pub deep_split_k_output_columns: usize,
-    pub deep_split_k_tail_min_reduction: usize,
-    pub deep_split_k_aligned_min_reduction: usize,
     /// The dW stream-K schedule (under the half policy that permits the
     /// fixed-order fold) takes a shape only when its reduction holds at
     /// least this many 64-row slabs; it loses wherever the reduction is 1024
@@ -2711,10 +2707,6 @@ impl Sm80TcPolicy {
             tn_rectangular_wave_denominator: 8,
             backward_tail_min_reduction: 256,
             backward_tail_min_tile64_ctas: 4,
-            deep_split_k_compute_capability: (8, 9),
-            deep_split_k_output_columns: 128,
-            deep_split_k_tail_min_reduction: 511,
-            deep_split_k_aligned_min_reduction: 1024,
             stream_k_min_reduction_slabs: 32,
             stream_k_deep_reduction_slabs: 128,
             stream_k_shallow_max_tiles: 48,
@@ -2804,26 +2796,6 @@ impl Sm80TcPolicy {
                 &self.backward_tail_min_tile64_ctas.to_le_bytes(),
             )
             .required(
-                b"deep-split-k-cc-major",
-                &self.deep_split_k_compute_capability.0.to_le_bytes(),
-            )
-            .required(
-                b"deep-split-k-cc-minor",
-                &self.deep_split_k_compute_capability.1.to_le_bytes(),
-            )
-            .required(
-                b"deep-split-k-output-columns",
-                &(self.deep_split_k_output_columns as u64).to_le_bytes(),
-            )
-            .required(
-                b"deep-split-k-tail-min-reduction",
-                &(self.deep_split_k_tail_min_reduction as u64).to_le_bytes(),
-            )
-            .required(
-                b"deep-split-k-aligned-min-reduction",
-                &(self.deep_split_k_aligned_min_reduction as u64).to_le_bytes(),
-            )
-            .required(
                 b"stream-k-min-reduction-slabs",
                 &self.stream_k_min_reduction_slabs.to_le_bytes(),
             )
@@ -2854,12 +2826,15 @@ impl Sm80TcPolicy {
 /// The thresholds of the exact scalar planner's splits. Each one counts the
 /// problem's own tiles or CTAs, never a card's multiprocessors, so a plan is
 /// a function of the shape alone and every card of every architecture cuts
-/// a reduction at the same places. The values are the RTX 6000 Ada's
-/// measured ones: sized for the largest card (192, 576, 288) the split cost
-/// the Ada 7-80% on the shapes between its own grid and that one, up to
-/// 4.7x on a thin input gradient, and 16-row split-M chunks ran 1.45x
-/// slower than the 32-row ones these keep. A card with more multiprocessors
-/// leaves a few of them idle on the shapes just past these counts.
+/// a reduction at the same places. Each was swept on an RTX 6000 Ada and an
+/// RTX 5090 over the same products: 96 to 288 tiles for the thin split, 288
+/// to 864 for the slim one, 192 to 768 for the weight gradient's target. A
+/// smaller weight-gradient target ran some gradients faster and others up
+/// to 1.25x slower on both cards, a larger one slowed 70 to 100 of the 168
+/// by up to 1.5x; the thin and slim values were the fastest in total or
+/// within half a percent of it. 16-row split-M chunks ran 1.45x slower than
+/// the 32-row ones these keep. A card with more multiprocessors leaves a
+/// few of them idle on the shapes just past these counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ScalarSplitPolicy {
     /// The thin split-K takes a shape whose plain 128 x 64 grid holds fewer
@@ -2878,7 +2853,7 @@ impl ScalarSplitPolicy {
         Self {
             thin_split_max_tiles: 144,
             slim_split_max_tiles: 432,
-            tn_split_m_target_blocks: 284,
+            tn_split_m_target_blocks: 288,
         }
     }
 
@@ -3113,6 +3088,12 @@ pub enum PhysicalGemmBackend {
     /// The batch-invariant module's multistage eight-way weight-gradient
     /// split members.
     MmaTf32RnaWideSplitK8 = 45,
+    /// The portable plain tiles that fold a cut layer's four pieces in the
+    /// CTA.
+    MmaTf32RnaPieces4 = 46,
+    /// The batch-invariant module's wide and multistage tiles that fold a
+    /// cut layer's four pieces in the CTA.
+    MmaTf32RnaWidePieces4 = 47,
 }
 
 /// Scoped route epoch for the Ada scalar NN reuse of the already-qualified
