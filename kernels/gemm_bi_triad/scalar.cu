@@ -78,24 +78,123 @@ __device__ __forceinline__ int scalar_piece_groups(int reduction) {
     return ((reduction + 31) / 32 + PIECES - 1) / PIECES;
 }
 
+// Sixteen bytes of the output tile, read and written as one vector access
+// through the global space. The asm keeps the order the fold asks for: a
+// group's loads go out together, then its stores.
+__device__ __forceinline__ float4 scalar_load_global4(const float* pointer) {
+    float4 value;
+    asm volatile("ld.global.v4.f32 {%0, %1, %2, %3}, [%4];"
+                 : "=f"(value.x), "=f"(value.y), "=f"(value.z), "=f"(value.w)
+                 : "l"((unsigned long long)__cvta_generic_to_global(pointer)));
+    return value;
+}
+
+__device__ __forceinline__ void scalar_store_global4(float* pointer, float4 value) {
+    asm volatile("st.global.v4.f32 [%0], {%1, %2, %3, %4};"
+                 :
+                 : "l"((unsigned long long)__cvta_generic_to_global(pointer)),
+                   "f"(value.x), "f"(value.y), "f"(value.z), "f"(value.w)
+                 : "memory");
+}
+
+// Whether a thread's whole sub-tile lies inside the output and every row of
+// it starts on a 16-byte boundary, so the fold moves it in vector accesses.
+template <int WMITER, int TM, int WNITER, int TN, int WSUBM, int WSUBN>
+__device__ __forceinline__ bool scalar_tile_is_whole(
+    const float* out, int ldc, int rows, int columns, int row_base, int col_base) {
+    return TN % 4 == 0 && (ldc & 3) == 0 && (col_base & 3) == 0 && is_aligned_16(out)
+        && row_base + (WMITER - 1) * WSUBM + TM <= rows
+        && col_base + (WNITER - 1) * WSUBN + TN <= columns;
+}
+
 // Closes a piece of a cut layer's reduction in a scalar tile, every piece but
 // the last. The finished pieces' sum waits in the output tile, each thread
 // over its own elements, so no barrier guards it and no second set of
 // accumulators competes for registers: the first piece's chain is stored,
 // every later one is added to the stored sum in order, and the accumulators
-// restart from +0.0. The base, the stride and the bounds pass through an
-// empty asm on every fold, so the compiler cannot hoist the tile's addresses
-// or its bound checks out of the k loop and hold them across it, and a
-// memory barrier every four rows keeps the fold's loads in one place instead
-// of spread over the main loop; without both the 128-register tiles spill.
-// A thread holds TM rows in each of WMITER sub-tiles WSUBM apart and TN
-// consecutive columns in each of WNITER sub-tiles WSUBN apart, from
-// (row_base, col_base).
-template <int WMITER, int TM, int WNITER, int TN, int WSUBM, int WSUBN>
+// restart from +0.0. A whole sub-tile moves in 16-byte accesses, GROUP of
+// them at a time (a row by default), a group's loads issued together before
+// its stores: the compiler cannot tell the rows apart under a runtime
+// stride, so element by element every load would wait for the store before
+// it. The 128 x 128 tile, six registers short of its 128-register cap, folds
+// one access at a time. An edge sub-tile goes element by element. The base, the stride and the bounds pass through
+// an empty asm on every fold, so the compiler cannot hoist the tile's
+// addresses or its bound checks out of the k loop and hold them across it,
+// and the element path puts a memory barrier every four rows to keep its
+// loads in one place; without both the 128-register tiles spill. A thread
+// holds TM rows in each of WMITER sub-tiles WSUBM apart and TN consecutive
+// columns in each of WNITER sub-tiles WSUBN apart, from (row_base, col_base).
+template <int WMITER, int TM, int WNITER, int TN, int WSUBM, int WSUBN,
+          int GROUP = WNITER * TN / 4>
 __device__ __forceinline__ void scalar_fold_piece(
     float* acc, float* out, int ldc, int rows, int columns, int row_base, int col_base,
     bool first) {
     asm volatile("" : "+l"(out), "+r"(ldc), "+r"(rows), "+r"(columns), "+r"(row_base), "+r"(col_base));
+    constexpr int ROWS = WMITER * TM;
+    constexpr int COLS = WNITER * TN;
+    if (scalar_tile_is_whole<WMITER, TM, WNITER, TN, WSUBM, WSUBN>(
+            out, ldc, rows, columns, row_base, col_base)) {
+        constexpr int CHUNKS = ROWS * COLS / 4;
+        static_assert(CHUNKS % GROUP == 0, "the fold groups whole chunks");
+        if constexpr (GROUP == 1) {
+            // One access at a time, each load beside its own add and store:
+            // the shape the 128-register tile compiles without a spill.
+#pragma unroll
+            for (int c = 0; c < CHUNKS; ++c) {
+                int i = c / (COLS / 4);
+                int j = c % (COLS / 4);
+                int row = row_base + (i / TM) * WSUBM + i % TM;
+                int column = col_base + (j / (TN / 4)) * WSUBN + 4 * (j % (TN / 4));
+                int idx = i * COLS + (j / (TN / 4)) * TN + 4 * (j % (TN / 4));
+                float4 value = make_float4(acc[idx], acc[idx + 1], acc[idx + 2], acc[idx + 3]);
+                if (!first) {
+                    float4 sum = scalar_load_global4(out + (long long)row * ldc + column);
+                    value = make_float4(__fadd_rn(sum.x, value.x), __fadd_rn(sum.y, value.y),
+                                        __fadd_rn(sum.z, value.z), __fadd_rn(sum.w, value.w));
+                }
+                scalar_store_global4(out + (long long)row * ldc + column, value);
+                acc[idx] = 0.0f;
+                acc[idx + 1] = 0.0f;
+                acc[idx + 2] = 0.0f;
+                acc[idx + 3] = 0.0f;
+            }
+            return;
+        }
+#pragma unroll
+        for (int g = 0; g < CHUNKS; g += GROUP) {
+            float4 staged[GROUP];
+            if (!first) {
+#pragma unroll
+                for (int c = 0; c < GROUP; ++c) {
+                    int i = (g + c) / (COLS / 4);
+                    int j = (g + c) % (COLS / 4);
+                    int row = row_base + (i / TM) * WSUBM + i % TM;
+                    int column = col_base + (j / (TN / 4)) * WSUBN + 4 * (j % (TN / 4));
+                    staged[c] = scalar_load_global4(out + (long long)row * ldc + column);
+                }
+            }
+#pragma unroll
+            for (int c = 0; c < GROUP; ++c) {
+                int i = (g + c) / (COLS / 4);
+                int j = (g + c) % (COLS / 4);
+                int row = row_base + (i / TM) * WSUBM + i % TM;
+                int column = col_base + (j / (TN / 4)) * WSUBN + 4 * (j % (TN / 4));
+                int idx = i * COLS + (j / (TN / 4)) * TN + 4 * (j % (TN / 4));
+                float4 value = make_float4(acc[idx], acc[idx + 1], acc[idx + 2], acc[idx + 3]);
+                if (!first) {
+                    float4 sum = staged[c];
+                    value = make_float4(__fadd_rn(sum.x, value.x), __fadd_rn(sum.y, value.y),
+                                        __fadd_rn(sum.z, value.z), __fadd_rn(sum.w, value.w));
+                }
+                scalar_store_global4(out + (long long)row * ldc + column, value);
+                acc[idx] = 0.0f;
+                acc[idx + 1] = 0.0f;
+                acc[idx + 2] = 0.0f;
+                acc[idx + 3] = 0.0f;
+            }
+        }
+        return;
+    }
 #pragma unroll
     for (int wm = 0; wm < WMITER; ++wm) {
 #pragma unroll
@@ -122,12 +221,52 @@ __device__ __forceinline__ void scalar_fold_piece(
 
 // The last piece of a cut layer meets the sum the earlier pieces left in the
 // output tile, and the bias follows: the order the split reduction adds the
-// pieces' planes and the bias in, so the tile writes the split's bits. The
-// same barrier every four rows as the fold keeps the loads together.
+// pieces' planes and the bias in, so the tile writes the split's bits. A
+// whole sub-tile reads the sum a row at a time in 16-byte loads, as the fold
+// writes it; an edge sub-tile goes element by element with the fold's
+// barrier every four rows.
 template <int WMITER, int TM, int WNITER, int TN, int WSUBM, int WSUBN>
 __device__ __forceinline__ void scalar_finish_pieces(
     float* acc, const float* out, int ldc, int rows, int columns, int row_base, int col_base,
     bool staged, const float* bias) {
+    constexpr int ROWS = WMITER * TM;
+    constexpr int COLS = WNITER * TN;
+    if (staged && scalar_tile_is_whole<WMITER, TM, WNITER, TN, WSUBM, WSUBN>(
+                      out, ldc, rows, columns, row_base, col_base)) {
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) {
+            int row = row_base + (i / TM) * WSUBM + i % TM;
+            float4 sums[COLS / 4];
+#pragma unroll
+            for (int wn = 0; wn < WNITER; ++wn) {
+#pragma unroll
+                for (int q = 0; q < TN / 4; ++q) {
+                    sums[wn * (TN / 4) + q] = scalar_load_global4(
+                        out + (long long)row * ldc + col_base + wn * WSUBN + 4 * q);
+                }
+            }
+            {
+#pragma unroll
+                for (int wn = 0; wn < WNITER; ++wn) {
+#pragma unroll
+                    for (int q = 0; q < TN / 4; ++q) {
+                        int idx = i * COLS + wn * TN + 4 * q;
+                        float4 sum = sums[wn * (TN / 4) + q];
+                        float lanes[4] = {sum.x, sum.y, sum.z, sum.w};
+#pragma unroll
+                        for (int e = 0; e < 4; ++e) {
+                            float value = __fadd_rn(lanes[e], acc[idx + e]);
+                            if (bias != nullptr) {
+                                value = __fadd_rn(value, bias[col_base + wn * WSUBN + 4 * q + e]);
+                            }
+                            acc[idx + e] = value;
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
 #pragma unroll
     for (int wm = 0; wm < WMITER; ++wm) {
 #pragma unroll
@@ -543,7 +682,7 @@ __device__ __forceinline__ void nn_big_impl(
             if (tile + 1 == fold_tile && fold_tile < num_k_tiles) {
                 int piece_tiles = scalar_piece_groups<PIECES>(K) * (32 / GEMM_BI_SCALAR_BK);
                 scalar_fold_piece<GEMM_BI_SCALAR_WMITER, GEMM_BI_SCALAR_TM, GEMM_BI_SCALAR_WNITER,
-                                  GEMM_BI_SCALAR_TN, GEMM_BI_SCALAR_WSUBM, GEMM_BI_SCALAR_WSUBN>(
+                                  GEMM_BI_SCALAR_TN, GEMM_BI_SCALAR_WSUBM, GEMM_BI_SCALAR_WSUBN, 1>(
                     threadResults, C, ldc, M, N,
                     pid_m * GEMM_BI_SCALAR_BM + warpRow * GEMM_BI_SCALAR_WM
                         + threadRowInWarp * GEMM_BI_SCALAR_TM,

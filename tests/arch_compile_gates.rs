@@ -4416,7 +4416,7 @@ fn scalar_sm89_main_and_splitk_have_bounded_resources_without_reduction_instruct
         ("nn_big", 256, 2, 128),
         ("nn_big_pieces4", 256, 2, 128),
         ("nn_m64n64_bk16_s2", 128, 3, 128),
-        ("nn_m64n64_pieces4", 128, 3, 128),
+        ("nn_m64n64_pieces4", 128, 3, 168),
         ("tn_big", 256, 2, 128),
         ("tn_aligned", 256, 2, 128),
         ("nt_big", 256, 2, 128),
