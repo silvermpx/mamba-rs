@@ -52,8 +52,9 @@
 //!
 //! - `Deterministic` (default): the crate's own fixed-reduction-order
 //!   kernels serve every GEMM that goes through the context, and cuBLAS is
-//!   never called. Model contexts use the Inference family, trainers and
-//!   plain contexts the Triad family.
+//!   never called. Models stored in bf16 or f16 use the Inference family;
+//!   trainers, plain contexts and models stored in f32 or TF32 the Triad
+//!   family.
 //! - `CublasFast`: cuBLAS with TF32 permitted for f32 operands and f32
 //!   accumulation for half operands.
 //! - `CublasPedantic`: cuBLAS with pedantic f32 compute, the default of

@@ -121,6 +121,15 @@ fn session(d_model: usize) -> TrainSessionCfg {
     }
 }
 
+/// The family a model context serves: f32 and TF32 storage fold on Triad,
+/// as training does; bf16 and f16 keep the Inference family's half ladder.
+fn model_family(dtype: WeightDtype) -> BiGemmFamily {
+    match dtype {
+        WeightDtype::F32 | WeightDtype::Tf32 => BiGemmFamily::Triad,
+        WeightDtype::Bf16 | WeightDtype::F16 => BiGemmFamily::Inference,
+    }
+}
+
 fn assert_route(ctx: &GpuCtx, mode: GemmMode, family: BiGemmFamily) {
     assert_eq!(ctx.gemm_mode(), mode);
     assert_eq!(ctx.route_controls().family(), family);
@@ -133,8 +142,10 @@ fn construction_error<T>(result: Result<T, String>, label: &str) -> String {
     }
 }
 
+// An f32 model folds its layers on the trainer's family, so its forwards
+// give the bits training and the CPU twin give.
 #[test]
-fn m1_default_constructor_uses_inference_family() {
+fn m1_default_f32_constructor_uses_the_triad_family() {
     let cfg = small_m1_cfg();
     let weights = m1_weights(&cfg, true);
 
@@ -144,7 +155,7 @@ fn m1_default_constructor_uses_inference_family() {
     assert_eq!(backbone.ctx().gemm_mode(), GemmMode::Deterministic);
     assert_eq!(
         backbone.ctx().route_controls().family(),
-        BiGemmFamily::Inference
+        BiGemmFamily::Triad
     );
 }
 
@@ -217,11 +228,7 @@ fn absent_environment_uses_role_defaults() {
             GpuOptions::default().dtype(dtype),
         )
         .expect("M1 default model");
-        assert_route(
-            model.ctx(),
-            GemmMode::Deterministic,
-            BiGemmFamily::Inference,
-        );
+        assert_route(model.ctx(), GemmMode::Deterministic, model_family(dtype));
     }
     let m1_train_weights = m1_weights(&m1_cfg, false);
     for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
@@ -246,11 +253,7 @@ fn absent_environment_uses_role_defaults() {
             GpuOptions::default().dtype(dtype),
         )
         .expect("M3 default model");
-        assert_route(
-            model.ctx(),
-            GemmMode::Deterministic,
-            BiGemmFamily::Inference,
-        );
+        assert_route(model.ctx(), GemmMode::Deterministic, model_family(dtype));
     }
     for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
         let weights = m3_weights(&m3_cfg, dtype != WeightDtype::F32);
@@ -280,11 +283,7 @@ fn explicit_overloads_bypass_conflicting_environment() {
         GemmMode::CublasFast,
     )
     .expect("M1 explicit f32 engine");
-    assert_route(
-        m1_engine.ctx(),
-        GemmMode::CublasFast,
-        BiGemmFamily::Inference,
-    );
+    assert_route(m1_engine.ctx(), GemmMode::CublasFast, BiGemmFamily::Triad);
     assert_eq!(m1_engine.ctx().state_cap(), 16);
 
     let m1_mixed = MambaGpuEngineMixed::new_with_mode(
@@ -311,11 +310,7 @@ fn explicit_overloads_bypass_conflicting_environment() {
         GpuOptions::default().mode(GemmMode::CublasFast),
     )
     .expect("M1 explicit f32 backbone");
-    assert_route(
-        m1_backbone.ctx(),
-        GemmMode::CublasFast,
-        BiGemmFamily::Inference,
-    );
+    assert_route(m1_backbone.ctx(), GemmMode::CublasFast, BiGemmFamily::Triad);
     let m1_bf16 = MambaGpuBackbone::new(
         &m1_model,
         m1_cfg,
@@ -372,7 +367,7 @@ fn explicit_overloads_bypass_conflicting_environment() {
     assert_route(
         m3_engine.ctx(),
         GemmMode::CublasPedantic,
-        BiGemmFamily::Inference,
+        BiGemmFamily::Triad,
     );
     let m3_mixed = Mamba3GpuEngineMixed::new_with_mode(
         &device,
@@ -397,11 +392,7 @@ fn explicit_overloads_bypass_conflicting_environment() {
         GpuOptions::default().mode(GemmMode::CublasFast),
     )
     .expect("M3 explicit f32 backbone");
-    assert_route(
-        m3_backbone.ctx(),
-        GemmMode::CublasFast,
-        BiGemmFamily::Inference,
-    );
+    assert_route(m3_backbone.ctx(), GemmMode::CublasFast, BiGemmFamily::Triad);
     let m3_bf16 = Mamba3GpuBackbone::new(
         &m3_model,
         m3_cfg,
@@ -455,7 +446,7 @@ fn explicit_overloads_bypass_conflicting_environment() {
     assert_route(
         from_env.ctx(),
         GemmMode::CublasPedantic,
-        BiGemmFamily::Inference,
+        BiGemmFamily::Triad,
     );
 }
 
@@ -469,7 +460,7 @@ fn exercise_lm_overloads() {
         GpuOptions::default().mode(GemmMode::CublasFast),
     )
     .expect("M1 LM f32 explicit");
-    assert_route(m1_f32.ctx(), GemmMode::CublasFast, BiGemmFamily::Inference);
+    assert_route(m1_f32.ctx(), GemmMode::CublasFast, BiGemmFamily::Triad);
     let m1_bf16 = MambaGpuLM::from_hf(
         checkpoint.path(),
         1,
@@ -505,11 +496,7 @@ fn exercise_lm_overloads() {
     };
     let m3_f32 =
         m3_lm(GpuOptions::default().mode(GemmMode::CublasPedantic)).expect("M3 LM f32 explicit");
-    assert_route(
-        m3_f32.ctx(),
-        GemmMode::CublasPedantic,
-        BiGemmFamily::Inference,
-    );
+    assert_route(m3_f32.ctx(), GemmMode::CublasPedantic, BiGemmFamily::Triad);
     let m3_f16 = m3_lm(
         GpuOptions::default()
             .dtype(WeightDtype::F16)
@@ -537,11 +524,7 @@ fn explicit_overload_bypasses_invalid_mode() {
         GpuOptions::default().mode(GemmMode::CublasFast),
     )
     .expect("explicit mode ignores invalid mode env");
-    assert_route(
-        explicit.ctx(),
-        GemmMode::CublasFast,
-        BiGemmFamily::Inference,
-    );
+    assert_route(explicit.ctx(), GemmMode::CublasFast, BiGemmFamily::Triad);
     let error = construction_error(
         MambaGpuBackbone::new(&weights, cfg, cfg.d_model, 1, GpuOptions::default()),
         "env lane rejects invalid mode",

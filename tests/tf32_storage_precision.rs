@@ -89,7 +89,8 @@ fn tf32_storage_reaches_the_context_and_reports_itself() {
     assert_eq!(model.dtype(), WeightDtype::Tf32);
     assert_eq!(model.ctx().gemm_mode(), GemmMode::Deterministic);
     let controls = model.ctx().route_controls();
-    assert_eq!(controls.family(), BiGemmFamily::Inference);
+    // A model stored in TF32 folds its layers on the trainer's family.
+    assert_eq!(controls.family(), BiGemmFamily::Triad);
     assert_eq!(
         controls.f32_policy(),
         F32TriadPolicy::AllowDeterministicTf32

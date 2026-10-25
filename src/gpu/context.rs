@@ -73,10 +73,12 @@ impl GemmEnvValues {
 }
 
 /// What a context serves and how its f32 products round. The constructor
-/// that knows the role sets it once: a model context serves the Inference
-/// family, a trainer or a plain context the Triad family, and the storage
-/// precision the caller asked for decides whether f32 products stay exact
-/// or take the deterministic TF32 kernels where one is measured.
+/// that knows the role sets it once: a trainer or a plain context serves the
+/// Triad family, and so does a model stored in f32 or TF32, whose forwards
+/// then fold every layer the way training and the CPU twin of the fold do; a
+/// model stored in bf16 or f16 serves the Inference family's half ladder.
+/// The storage precision the caller asked for decides whether f32 products
+/// stay exact or take the deterministic TF32 kernels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct GemmRole {
     pub(crate) family: BiGemmFamily,
@@ -93,7 +95,12 @@ impl GemmRole {
 
     pub(crate) fn inference(dtype: WeightDtype) -> Self {
         Self {
-            family: BiGemmFamily::Inference,
+            // The Inference family's f32 arm walks one chain per output for
+            // every layer, which a cut layer's four pieces do not match.
+            family: match dtype {
+                WeightDtype::F32 | WeightDtype::Tf32 => BiGemmFamily::Triad,
+                WeightDtype::Bf16 | WeightDtype::F16 => BiGemmFamily::Inference,
+            },
             f32_numeric: dtype.f32_numeric(),
         }
     }
@@ -2813,8 +2820,12 @@ mod tests {
                 (WeightDtype::Bf16, F32TriadPolicy::ExactScalarFma),
                 (WeightDtype::F16, F32TriadPolicy::ExactScalarFma),
             ] {
+                let model_family = match dtype {
+                    WeightDtype::F32 | WeightDtype::Tf32 => BiGemmFamily::Triad,
+                    WeightDtype::Bf16 | WeightDtype::F16 => BiGemmFamily::Inference,
+                };
                 for (role, family) in [
-                    (GemmRole::inference(dtype), BiGemmFamily::Inference),
+                    (GemmRole::inference(dtype), model_family),
                     (GemmRole::triad(dtype), BiGemmFamily::Triad),
                 ] {
                     assert_eq!(
@@ -2863,8 +2874,11 @@ mod tests {
         let resolved =
             resolve_gemm_env(empty_gemm_env(), GemmRole::inference(WeightDtype::F32)).unwrap();
         assert_eq!(resolved.mode, GemmMode::Deterministic);
-        assert_eq!(resolved.family, BiGemmFamily::Inference);
+        assert_eq!(resolved.family, BiGemmFamily::Triad);
         assert_eq!(resolved.f32_policy, F32TriadPolicy::ExactScalarFma);
+        let resolved =
+            resolve_gemm_env(empty_gemm_env(), GemmRole::inference(WeightDtype::Bf16)).unwrap();
+        assert_eq!(resolved.family, BiGemmFamily::Inference);
         let error = resolve_gemm_env(
             GemmEnvValues {
                 mode: Ok("fast".into()),
