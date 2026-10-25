@@ -1105,7 +1105,7 @@ required-features = ["cuda"]
 name = "classifier_gemm_tier_bench"
 path = "benches/classifier_gemm_tier_bench.rs"
 harness = false
-required-features = ["cuda"]
+required-features = ["cuda", "cublas"]
 
 [[bench]]
 name = "epilogue_bench"
@@ -1123,7 +1123,7 @@ required-features = ["cuda"]
 name = "gemm_bi_trainer_step_bench"
 path = "benches/gemm_bi_trainer_step_bench.rs"
 harness = false
-required-features = ["cuda"]
+required-features = ["cuda", "cublas"]
 
 [[bench]]
 name = "gemm_bi_typed_fallback_bench"
@@ -1213,7 +1213,7 @@ harness = false
 name = "thin_rung_decode_bench"
 path = "benches/thin_rung_decode_bench.rs"
 harness = false
-required-features = ["cuda"]
+required-features = ["cuda", "cublas"]
 
 [[test]]
 name = "bench_bf16_vs_f32"
