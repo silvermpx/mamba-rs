@@ -2240,13 +2240,15 @@ struct SgbTf32ThreadPlan {
     int thread;
 };
 
-// Closes a piece of a cut reduction, every piece but the last. The sum of
-// the finished pieces waits in the output tile rather than in a second set
-// of accumulators, which a thread's registers would not hold: each thread
-// keeps its own elements there, so no barrier guards them. The first
-// piece's chain is stored, every later one is added to the stored sum in
-// order, and the accumulators restart from +0.0; the last piece meets the
-// sum in the epilogue, before the bias.
+// Closes a piece of a cut reduction, every piece but the last, for the tiles
+// whose registers would not hold a second set of accumulators: the sum of the
+// finished pieces waits in the output tile, each thread over its own
+// elements, so no barrier guards them. The first piece's chain is stored,
+// every later one is added to the stored sum in order, and the accumulators
+// restart from +0.0; the last piece meets the sum in the epilogue, before the
+// bias. An atom row's stored sums are all read before any of its stores:
+// with each load next to the store before it, every load waited for that
+// store, one round trip to memory per element.
 template <SgbTf32Op Op, int MAtoms, int NAtoms>
 __device__ __forceinline__ void tf32_fold_piece(
     float (&accumulators)[MAtoms][NAtoms][4], const SgbTf32Problem& problem,
@@ -2267,6 +2269,27 @@ __device__ __forceinline__ void tf32_fold_piece(
     int column0 = problem.tile_column + thread_plan.warp_n + 2 * thread_plan.thread;
 #pragma unroll
     for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+        float2 stored[NAtoms][2];
+        if (!first) {
+#pragma unroll
+            for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+#pragma unroll
+                for (int half = 0; half < 2; ++half) {
+                    int row = row0 + m_atom * 16 + 8 * half;
+                    int column = column0 + n_atom * 8;
+                    stored[n_atom][half] = make_float2(0.0f, 0.0f);
+                    if (row < rows) {
+                        const float* slot = output + (long long)row * ldc + column;
+                        if (pairs && column + 1 < columns) {
+                            stored[n_atom][half] = *reinterpret_cast<const float2*>(slot);
+                        } else {
+                            if (column < columns) stored[n_atom][half].x = slot[0];
+                            if (column + 1 < columns) stored[n_atom][half].y = slot[1];
+                        }
+                    }
+                }
+            }
+        }
 #pragma unroll
         for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
 #pragma unroll
@@ -2275,22 +2298,17 @@ __device__ __forceinline__ void tf32_fold_piece(
                 int column = column0 + n_atom * 8;
                 float chain0 = accumulators[m_atom][n_atom][2 * half];
                 float chain1 = accumulators[m_atom][n_atom][2 * half + 1];
+                if (!first) {
+                    chain0 = __fadd_rn(stored[n_atom][half].x, chain0);
+                    chain1 = __fadd_rn(stored[n_atom][half].y, chain1);
+                }
                 if (row < rows) {
                     float* slot = output + (long long)row * ldc + column;
                     if (pairs && column + 1 < columns) {
-                        if (!first) {
-                            float2 sum = *reinterpret_cast<const float2*>(slot);
-                            chain0 = __fadd_rn(sum.x, chain0);
-                            chain1 = __fadd_rn(sum.y, chain1);
-                        }
                         *reinterpret_cast<float2*>(slot) = make_float2(chain0, chain1);
                     } else {
-                        if (column < columns) {
-                            slot[0] = first ? chain0 : __fadd_rn(slot[0], chain0);
-                        }
-                        if (column + 1 < columns) {
-                            slot[1] = first ? chain1 : __fadd_rn(slot[1], chain1);
-                        }
+                        if (column < columns) slot[0] = chain0;
+                        if (column + 1 < columns) slot[1] = chain1;
                     }
                 }
                 accumulators[m_atom][n_atom][2 * half] = 0.0f;
@@ -2300,6 +2318,55 @@ __device__ __forceinline__ void tf32_fold_piece(
     }
 }
 
+// Closes a piece of a cut reduction in registers, every piece but the last:
+// the first piece's chain is kept, every later one is added to the kept sum
+// in order, and the accumulators restart from +0.0; the last piece meets the
+// sum after the main loop, before the bias. These are the additions the fold
+// through the output tile makes, in the same order, without its round trip to
+// memory at each piece boundary, which serialized a load, an add and a store
+// per element. The tiles whose accumulators leave room for a second set take
+// it (TF32_PIECES_KEPT_IN_REGISTERS); the 128-row tile, which would spill,
+// keeps the output-tile fold.
+template <int MAtoms, int NAtoms>
+__device__ __forceinline__ void tf32_keep_piece(
+    float (&accumulators)[MAtoms][NAtoms][4], float (&kept)[MAtoms][NAtoms][4], bool first) {
+#pragma unroll
+    for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+#pragma unroll
+        for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+#pragma unroll
+            for (int element = 0; element < 4; ++element) {
+                kept[m_atom][n_atom][element] = first
+                    ? accumulators[m_atom][n_atom][element]
+                    : __fadd_rn(kept[m_atom][n_atom][element], accumulators[m_atom][n_atom][element]);
+                accumulators[m_atom][n_atom][element] = 0.0f;
+            }
+        }
+    }
+}
+
+// Adds the kept sum of the earlier pieces to the last piece's chain, in the
+// fold's order; the bias follows in the epilogue.
+template <int MAtoms, int NAtoms>
+__device__ __forceinline__ void tf32_meet_kept_pieces(
+    float (&accumulators)[MAtoms][NAtoms][4], const float (&kept)[MAtoms][NAtoms][4]) {
+#pragma unroll
+    for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+#pragma unroll
+        for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+#pragma unroll
+            for (int element = 0; element < 4; ++element) {
+                accumulators[m_atom][n_atom][element] =
+                    __fadd_rn(kept[m_atom][n_atom][element], accumulators[m_atom][n_atom][element]);
+            }
+        }
+    }
+}
+
+// Whether a tile of MAtoms x NAtoms m16n8 atoms per warp keeps a cut
+// reduction's finished pieces in registers rather than in its output tile.
+#define TF32_PIECES_KEPT_IN_REGISTERS(MAtoms, NAtoms) ((MAtoms) * (NAtoms) <= 8)
+
 template <SgbTf32Op Op, int BM, int BN, int Stages,
           int MAtoms, int NAtoms, bool NarrowA, bool NarrowB, int Pieces>
 __device__ __forceinline__ void tf32_async_mainloop(
@@ -2307,6 +2374,10 @@ __device__ __forceinline__ void tf32_async_mainloop(
     const SgbTf32Problem& problem, unsigned tile_count,
     const SgbTf32ThreadPlan& thread_plan,
     float (&accumulators)[MAtoms][NAtoms][4], unsigned piece_tiles) {
+    constexpr bool kept_in_registers = TF32_PIECES_KEPT_IN_REGISTERS(MAtoms, NAtoms);
+    // The finished pieces' sum of a cut reduction, for the tiles that keep it
+    // in registers.
+    float kept[MAtoms][NAtoms][4];
 #pragma unroll
     for (unsigned tile = 0; tile < Stages - 1; ++tile) {
         if (tile < tile_count) {
@@ -2335,12 +2406,22 @@ __device__ __forceinline__ void tf32_async_mainloop(
                 thread_plan.group, thread_plan.thread, accumulators);
             if constexpr (Pieces > 1) {
                 if ((tile + 1) % piece_tiles == 0 && tile + 1 < tile_count) {
-                    tf32_fold_piece<Op, MAtoms, NAtoms>(
-                        accumulators, problem, thread_plan, tile + 1 == piece_tiles);
+                    if constexpr (kept_in_registers) {
+                        tf32_keep_piece<MAtoms, NAtoms>(
+                            accumulators, kept, tile + 1 == piece_tiles);
+                    } else {
+                        tf32_fold_piece<Op, MAtoms, NAtoms>(
+                            accumulators, problem, thread_plan, tile + 1 == piece_tiles);
+                    }
                 }
             }
         }
         __syncthreads();
+    }
+    if constexpr (Pieces > 1 && kept_in_registers) {
+        if (thread_plan.compute && tile_count > piece_tiles) {
+            tf32_meet_kept_pieces<MAtoms, NAtoms>(accumulators, kept);
+        }
     }
 }
 
@@ -2425,6 +2506,9 @@ __device__ __forceinline__ void tf32_kernel(
                 piece_tiles);
         }
     } else {
+        // The finished pieces' sum of a cut reduction, for the tiles that keep
+        // it in registers.
+        float kept[MAtoms][NAtoms][4];
         for (unsigned tile = 0; tile < tile_count; ++tile) {
             int stage = static_cast<int>(tile % Stages);
             tf32_stage_scalar<Op>(
@@ -2436,12 +2520,22 @@ __device__ __forceinline__ void tf32_kernel(
                     group, thread, accumulators);
                 if constexpr (Pieces > 1) {
                     if ((tile + 1) % piece_tiles == 0 && tile + 1 < tile_count) {
-                        tf32_fold_piece<Op, MAtoms, NAtoms>(
-                            accumulators, problem, thread_plan, tile + 1 == piece_tiles);
+                        if constexpr (TF32_PIECES_KEPT_IN_REGISTERS(MAtoms, NAtoms)) {
+                            tf32_keep_piece<MAtoms, NAtoms>(
+                                accumulators, kept, tile + 1 == piece_tiles);
+                        } else {
+                            tf32_fold_piece<Op, MAtoms, NAtoms>(
+                                accumulators, problem, thread_plan, tile + 1 == piece_tiles);
+                        }
                     }
                 }
             }
             __syncthreads();
+        }
+        if constexpr (Pieces > 1 && TF32_PIECES_KEPT_IN_REGISTERS(MAtoms, NAtoms)) {
+            if (compute && tile_count > piece_tiles) {
+                tf32_meet_kept_pieces<MAtoms, NAtoms>(accumulators, kept);
+            }
         }
     }
 
@@ -2459,7 +2553,8 @@ __device__ __forceinline__ void tf32_kernel(
                     float value = accumulators[m_atom][n_atom][element];
                     if constexpr (Pieces > 1) {
                         if (row < tf32_rows<Op>(params) && column < tf32_columns<Op>(params)) {
-                            if (tile_count > piece_tiles) {
+                            if (!TF32_PIECES_KEPT_IN_REGISTERS(MAtoms, NAtoms)
+                                && tile_count > piece_tiles) {
                                 value = __fadd_rn(
                                     output[(long long)row * params.ldc + column], value);
                             }

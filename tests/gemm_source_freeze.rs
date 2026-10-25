@@ -250,8 +250,8 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
     ),
     (
         "kernels/gemm_bi_triad/sm80/mma.cu",
-        0x12244dae103f4e46,
-        197508,
+        0x0a086039e58fa277,
+        202095,
     ),
     (
         "kernels/gemm_bi_triad/sm80/nt_compact.cuh",
@@ -280,8 +280,8 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
     ),
     (
         "kernels/gemm_bi_triad/sm80/tf32_rna.cu",
-        0xe75a739d38ae167a,
-        100097,
+        0x8ffcb60873548163,
+        103192,
     ),
     (
         "kernels/gemm_bi_triad/sm80/tf32_wide.cu",

@@ -11593,6 +11593,10 @@ fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, Strin
         // the 128x64 body plus a second fragment set, on all eight warps and
         // one CTA per multiprocessor.
         ModuleKind::TriadSm80 if symbol.contains("_m128n128_") => Ok(224),
+        // A 64x64 pieces tile keeps its finished pieces' sum in a second set
+        // of 32 accumulators per thread: 162 to 174 registers and no local
+        // memory under CUDA 13.2, by target.
+        ModuleKind::TriadSm80 if symbol.contains("_pieces4_m64n64_") => Ok(176),
         ModuleKind::TriadSm80 if symbol.contains("_m64n64_") => Ok(128),
         ModuleKind::TriadSm80 if symbol.contains("_m16n32_") || symbol.contains("_m16n16_") => {
             Ok(96)

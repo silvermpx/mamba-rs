@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 pub const SOURCE: &str = include_str!("../../../kernels/gemm_bi_triad/sm80/tf32_rna.cu");
 
-pub const SOURCE_SHA256: &str = "2daff4377e06ec067e5915bf0933fdb6d731a9d580a9b73378ca1bfdff145f76";
+pub const SOURCE_SHA256: &str = "93ecac1b58d463eb5714fda4eb42880cacc0c34fe28a948306d1a713940a52d9";
 
 pub const NN_M128N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m128n96_w2x4_bk32_s3";
 pub const NN_M96N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m96n96_w2x4_bk32_s3";

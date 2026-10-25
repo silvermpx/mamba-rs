@@ -1441,7 +1441,14 @@ fn tf32_resource_caps(symbol: &str) -> (u64, u64) {
             (192, stage_bytes * stage)
         } else if symbol.contains("_m64n64_") {
             assert!(matches!(stage, 2 | 3), "invalid SM80 M64N64 stage");
-            (128, 18_432 * stage)
+            // A pieces tile keeps its finished pieces' sum in a second set of
+            // 32 accumulators per thread.
+            let registers = if symbol.contains("_pieces4_") {
+                176
+            } else {
+                128
+            };
+            (registers, 18_432 * stage)
         } else if symbol.contains("_m16n32_") {
             assert!(matches!(stage, 3 | 4), "invalid SM80 M16N32 stage");
             let shared = if symbol.starts_with("nn_") {

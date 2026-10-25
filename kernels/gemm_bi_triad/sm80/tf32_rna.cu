@@ -127,13 +127,16 @@ __device__ __forceinline__ void tf32_store(
     *destination = value;
 }
 
-// Closes a piece of a cut reduction, every piece but the last. The sum of
-// the finished pieces waits in the output tile rather than in a second set
-// of accumulators, which a thread's registers would not hold: each thread
-// keeps its own elements there, so no barrier guards them. The first
-// piece's chain is stored, every later one is added to the stored sum in
-// order, and the accumulators restart from +0.0; the last piece meets the
-// sum in the epilogue, before the bias. A lane's elements sit where an
+// Closes a piece of a cut reduction, every piece but the last, for the tiles
+// whose registers would not hold a second set of accumulators: the sum of the
+// finished pieces waits in the output tile, each thread over its own
+// elements, so no barrier guards them. The first piece's chain is stored,
+// every later one is added to the stored sum in order, and the accumulators
+// restart from +0.0; the last piece meets the sum in the epilogue, before the
+// bias. An atom row's stored sums are all read before any of its stores:
+// with each load next to the store before it, the compiler, unable to tell
+// the rows apart under a runtime stride, made every load wait for that store,
+// one round trip to memory per element. A lane's elements sit where an
 // m16n8k8 accumulator puts them from the warp's tile at (`row_base`,
 // `column_base`), the rows of a transposed A permuted as its tiles store
 // them.
@@ -151,6 +154,27 @@ __device__ __forceinline__ void tf32_rna_fold_piece(
         && ((reinterpret_cast<unsigned long long>(output) & 7ULL) == 0ULL);
 #pragma unroll
     for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+        float2 stored[NAtoms][2];
+        if (!first) {
+#pragma unroll
+            for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+#pragma unroll
+                for (int half = 0; half < 2; ++half) {
+                    int row = row_base + m_atom * 16 + (APerm ? 2 * group + half : group + 8 * half);
+                    int column = column_base + n_atom * 8 + 2 * thread;
+                    stored[n_atom][half] = make_float2(0.0f, 0.0f);
+                    if (row < rows) {
+                        const float* slot = output + (long long)row * ldc + column;
+                        if (pairs && column + 1 < columns) {
+                            stored[n_atom][half] = *reinterpret_cast<const float2*>(slot);
+                        } else {
+                            if (column < columns) stored[n_atom][half].x = slot[0];
+                            if (column + 1 < columns) stored[n_atom][half].y = slot[1];
+                        }
+                    }
+                }
+            }
+        }
 #pragma unroll
         for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
 #pragma unroll
@@ -159,26 +183,47 @@ __device__ __forceinline__ void tf32_rna_fold_piece(
                 int column = column_base + n_atom * 8 + 2 * thread;
                 float chain0 = acc[m_atom][n_atom][2 * half];
                 float chain1 = acc[m_atom][n_atom][2 * half + 1];
+                if (!first) {
+                    chain0 = __fadd_rn(stored[n_atom][half].x, chain0);
+                    chain1 = __fadd_rn(stored[n_atom][half].y, chain1);
+                }
                 if (row < rows) {
                     float* slot = output + (long long)row * ldc + column;
                     if (pairs && column + 1 < columns) {
-                        if (!first) {
-                            float2 sum = *reinterpret_cast<const float2*>(slot);
-                            chain0 = __fadd_rn(sum.x, chain0);
-                            chain1 = __fadd_rn(sum.y, chain1);
-                        }
                         *reinterpret_cast<float2*>(slot) = make_float2(chain0, chain1);
                     } else {
-                        if (column < columns) {
-                            slot[0] = first ? chain0 : __fadd_rn(slot[0], chain0);
-                        }
-                        if (column + 1 < columns) {
-                            slot[1] = first ? chain1 : __fadd_rn(slot[1], chain1);
-                        }
+                        if (column < columns) slot[0] = chain0;
+                        if (column + 1 < columns) slot[1] = chain1;
                     }
                 }
                 acc[m_atom][n_atom][2 * half] = 0.0f;
                 acc[m_atom][n_atom][2 * half + 1] = 0.0f;
+            }
+        }
+    }
+}
+
+// Closes a piece of a cut reduction in registers, every piece but the last:
+// the first piece's chain is kept, every later one is added to the kept sum
+// in order, and the accumulators restart from +0.0; the last piece meets the
+// sum in the epilogue, before the bias. These are the additions the output
+// tile fold makes, in the same order, without a round trip to memory at each
+// piece boundary, which serialized a load, an add and a store per element
+// there. It costs a second set of accumulators, which the tiles that take it
+// have room for under their register bounds.
+template <int MAtoms, int NAtoms>
+__device__ __forceinline__ void tf32_rna_keep_piece(
+    float (&acc)[MAtoms][NAtoms][4], float (&kept)[MAtoms][NAtoms][4], bool first) {
+#pragma unroll
+    for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+#pragma unroll
+        for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+#pragma unroll
+            for (int element = 0; element < 4; ++element) {
+                kept[m_atom][n_atom][element] = first
+                    ? acc[m_atom][n_atom][element]
+                    : __fadd_rn(kept[m_atom][n_atom][element], acc[m_atom][n_atom][element]);
+                acc[m_atom][n_atom][element] = 0.0f;
             }
         }
     }
@@ -423,6 +468,8 @@ __device__ __forceinline__ void nn_wide_kernel(
     // A cut reduction starts every piece from +0.0 and adds the bias after
     // the pieces instead of seeding the chain with it.
     float acc[MAtoms][NAtoms][4];
+    // The finished pieces' sum of a cut reduction.
+    float kept[MAtoms][NAtoms][4];
 #pragma unroll
     for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
 #pragma unroll
@@ -882,6 +929,8 @@ __device__ __forceinline__ void tf32w_nn_kernel(
     // A cut reduction starts every piece from +0.0 and adds the bias after
     // the pieces instead of seeding the chain with it.
     float acc[4][4][4];
+    // The finished pieces' sum of a cut reduction.
+    float kept[4][4][4];
 #pragma unroll
     for (int m_atom = 0; m_atom < 4; ++m_atom) {
 #pragma unroll
@@ -947,8 +996,7 @@ __device__ __forceinline__ void tf32w_nn_kernel(
     }
     if constexpr (Pieces > 1) {
         // The last piece meets the earlier pieces' sum, then the bias: what
-        // the store below writes. Every thread reads its own elements before
-        // the barrier that opens the tile to the row stores.
+        // the store below writes.
         bool staged = (int)tile_count > piece_tiles;
 #pragma unroll
         for (int m_atom = 0; m_atom < 4; ++m_atom) {
@@ -1533,6 +1581,10 @@ __device__ __forceinline__ void tf32_ms_tile_kernel(
     // A cut reduction starts every piece from +0.0 and adds the bias after
     // the pieces instead of seeding the chain with it.
     float acc[Cfg::MAtoms][Cfg::NAtoms][4];
+    // The finished pieces' sum of a cut reduction, for the tiles of up to 32
+    // accumulators per thread; a larger tile would spill with a second set,
+    // so it folds through its output tile.
+    float kept[Cfg::MAtoms][Cfg::NAtoms][4];
 #pragma unroll
     for (int column_group = 0; column_group < Out::Groups; ++column_group) {
 #pragma unroll
@@ -1556,9 +1608,13 @@ __device__ __forceinline__ void tf32_ms_tile_kernel(
     auto after_slab = [&](int t) {
         if constexpr (Pieces > 1) {
             if (tf32_rna_piece_ends(t + 1, tiles, piece_tiles)) {
-                tf32_rna_fold_piece<Cfg::APerm, Cfg::MAtoms, Cfg::NAtoms>(
-                    acc, output, params.ldc, rows, columns, row_base, column_base, group, thread,
-                    t < piece_tiles);
+                if constexpr (Cfg::MAtoms * Cfg::NAtoms <= 8) {
+                    tf32_rna_keep_piece<Cfg::MAtoms, Cfg::NAtoms>(acc, kept, t < piece_tiles);
+                } else {
+                    tf32_rna_fold_piece<Cfg::APerm, Cfg::MAtoms, Cfg::NAtoms>(
+                        acc, output, params.ldc, rows, columns, row_base, column_base, group,
+                        thread, t < piece_tiles);
+                }
             }
         }
     };
@@ -1589,7 +1645,13 @@ __device__ __forceinline__ void tf32_ms_tile_kernel(
                         int row = row_base + Out::row(m_atom, half, group);
                         float value = Out::value(acc, m_atom, half, column_group, v);
                         if (staged && row < rows && column < columns) {
-                            value = __fadd_rn(output[(long long)row * params.ldc + column], value);
+                            float earlier;
+                            if constexpr (Cfg::MAtoms * Cfg::NAtoms <= 8) {
+                                earlier = Out::value(kept, m_atom, half, column_group, v);
+                            } else {
+                                earlier = output[(long long)row * params.ldc + column];
+                            }
+                            value = __fadd_rn(earlier, value);
                         }
                         Out::value(acc, m_atom, half, column_group, v) =
                             biased ? __fadd_rn(value, add) : value;
