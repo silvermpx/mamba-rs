@@ -111,7 +111,7 @@ them, chosen by its role:
 | family | kernels | used by | shapes | batch invariance |
 |---|---|---|---|---|
 | `Inference` | `kernels/gemm_bi_inference/` | model and language model contexts (the GPU backbones of every family, `MambaGpuLM` and the engines under them) | the forward product only (`Y = X W + b`) | every output element is computed from its own row of X and its own column of W in one fixed order, never split across thread blocks, so a row's result is bit-identical at any batch size |
-| `Triad` | `kernels/gemm_bi_triad/` | the trainers of every family and plain `GpuCtx` | forward, weight gradient and input gradient (the NN, TN and NT products) | bit-identical across every batch size that lands in the same dispatch bucket. Crossing a bucket boundary changes the association deterministically |
+| `Triad` | `kernels/gemm_bi_triad/` | the trainers of every family and plain `GpuCtx` | forward, weight gradient and input gradient (the NN, TN and NT products) | a forward or input gradient in f32, bf16 or f16 gives a row the same bits at every batch size: each layer's reduction is cut by its shape alone, and the batch only picks among tiles of the same bits. TF32 products keep the measured kernels, bit-identical within one dispatch bucket. The weight gradient sums over the batch and is deterministic for its shape |
 
 The weight-gradient product always runs on the Triad kernels, whatever the
 family, because the Inference family has no transposed products. The
@@ -163,7 +163,9 @@ after this one lists what is not claimed.
   at every batch size. Measured through a whole model, batch 1 against
   batch 32 on the same prompt gives a KL divergence of about 8e-11
   (`tests/extreme_edge_coverage.rs`), where cuBLAS gives about 1e-3. The
-  Triad family gives the same bits within a dispatch bucket.
+  Triad family gives a row of a forward or input gradient the same bits
+  at every batch size in f32, bf16 and f16, and within a dispatch bucket
+  in TF32.
 - **No hidden vendor call.** In the deterministic mode every cuBLAS entry
   point in the crate returns an error instead of running. A model context
   never reaches one.
