@@ -3,8 +3,9 @@
 //! Every kernel accumulates in f32. Only bulk linear weights (in_proj,
 //! out_proj, x_proj, dt_proj, embed, lm_head) and activations between GEMMs
 //! use reduced precision; norms, biases, a_log and D stay f32. `Tf32` is f32
-//! storage whose deterministic GEMM products run on the tensor cores in
-//! TF32 where a measured kernel exists.
+//! storage whose deterministic GEMM products all run on the tensor cores in
+//! TF32, each operand rounded with `cvt.rna` and each forward or input
+//! gradient cut by its layer alone.
 //!
 //! Based on official state-spaces/mamba design and NVIDIA cuBLAS best practices.
 

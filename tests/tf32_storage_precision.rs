@@ -1,7 +1,9 @@
-//! `WeightDtype::Tf32` is f32 storage whose deterministic GEMMs may take the
-//! TF32 kernels. The constructors must carry it to the context's f32 numeric
-//! contract, report it back, and produce the bits the route produced when it
-//! was still spelled as a policy on an f32 context.
+//! `WeightDtype::Tf32` is f32 storage whose deterministic GEMMs run on the
+//! TF32 kernels under the strict contract: `cvt.rna` operands and each
+//! forward or input gradient cut by its layer alone. The constructors must
+//! carry it to the context's f32 numeric contract, report it back, and
+//! produce the bits the same policy gives when it is set on an f32 context
+//! by hand.
 
 #![cfg(feature = "cuda")]
 
@@ -91,10 +93,7 @@ fn tf32_storage_reaches_the_context_and_reports_itself() {
     let controls = model.ctx().route_controls();
     // A model stored in TF32 folds its layers on the trainer's family.
     assert_eq!(controls.family(), BiGemmFamily::Triad);
-    assert_eq!(
-        controls.f32_policy(),
-        F32TriadPolicy::AllowDeterministicTf32
-    );
+    assert_eq!(controls.f32_policy(), F32TriadPolicy::RnaTf32BatchInvariant);
 
     let exact = MambaGpuBackbone::new(
         &weights,
@@ -120,10 +119,7 @@ fn tf32_storage_reaches_the_context_and_reports_itself() {
     assert_eq!(trainer.dtype(), WeightDtype::Tf32);
     let controls = trainer.ctx().route_controls();
     assert_eq!(controls.family(), BiGemmFamily::Triad);
-    assert_eq!(
-        controls.f32_policy(),
-        F32TriadPolicy::AllowDeterministicTf32
-    );
+    assert_eq!(controls.f32_policy(), F32TriadPolicy::RnaTf32BatchInvariant);
 
     let vendor = MambaGpuTrainer::new(
         &weights,
@@ -150,7 +146,7 @@ fn tf32_storage_reaches_the_context_and_reports_itself() {
     assert_eq!(model3.dtype(), WeightDtype::Tf32);
     assert_eq!(
         model3.ctx().route_controls().f32_policy(),
-        F32TriadPolicy::AllowDeterministicTf32
+        F32TriadPolicy::RnaTf32BatchInvariant
     );
     let trainer3 = Mamba3GpuTrainer::new(
         &weights3,
@@ -162,15 +158,15 @@ fn tf32_storage_reaches_the_context_and_reports_itself() {
     assert_eq!(trainer3.dtype(), WeightDtype::Tf32);
     assert_eq!(
         trainer3.ctx().route_controls().f32_policy(),
-        F32TriadPolicy::AllowDeterministicTf32
+        F32TriadPolicy::RnaTf32BatchInvariant
     );
 }
 
 /// The storage precision is the same route the f32 context reaches when its
-/// numeric contract is switched to TF32 permission by hand: bit for bit,
-/// on a model step and on a training step.
+/// numeric contract is switched to the strict TF32 policy by hand: bit for
+/// bit, on a model step and on a training step.
 #[test]
-fn tf32_storage_produces_the_bits_of_the_tf32_permitted_f32_route() {
+fn tf32_storage_produces_the_bits_of_the_strict_tf32_f32_route() {
     let cfg = m1_cfg();
     let weights = MambaWeights::init(&cfg, cfg.d_model, 0x7f32_0011);
     let batch = 2;
@@ -195,7 +191,7 @@ fn tf32_storage_produces_the_bits_of_the_tf32_permitted_f32_route() {
     by_policy
         .ctx()
         .route_controls()
-        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
+        .set_f32_policy(F32TriadPolicy::RnaTf32BatchInvariant);
     let mut out_dtype = vec![0.0f32; batch * cfg.d_model];
     let mut out_policy = vec![0.0f32; batch * cfg.d_model];
     for _ in 0..3 {
@@ -225,7 +221,7 @@ fn tf32_storage_produces_the_bits_of_the_tf32_permitted_f32_route() {
     train_policy
         .ctx()
         .route_controls()
-        .set_f32_policy(F32TriadPolicy::AllowDeterministicTf32);
+        .set_f32_policy(F32TriadPolicy::RnaTf32BatchInvariant);
     let x = ramp(sess.batch * sess.seq_len * cfg.d_model, 2);
     let d_temporal = ramp(sess.batch * sess.seq_len * cfg.d_model, 3);
     for _ in 0..2 {

@@ -44,7 +44,7 @@ context's role (a model context or a trainer). There is no further knob.
 | `WeightDtype` | storage | products in the deterministic mode |
 |---|---|---|
 | `F32` (default) | f32 | exact: one fused multiply-add per step in ascending K order, f32 throughout |
-| `Tf32` | f32 | deterministic TF32 for every f32 product of a model context's layers (the backbones and the language model); in a trainer, and for the language model's tied head, where a measured kernel exists for the shape and the board, the exact f32 kernel elsewhere. Deterministic TF32 rounds each input to TF32 once and accumulates in f32 in a fixed order. It is not the vendor's Fast TF32, and its bits are reproducible like the rest of the mode. Under `CublasFast` the vendor's TF32 already applies to every f32 product. Under `CublasPedantic` the products are pedantic f32 |
+| `Tf32` | f32 | deterministic TF32 for every f32 product, in a model, a trainer and the language model's tied head alike. Deterministic TF32 rounds each input to TF32 once with `cvt.rna`, accumulates in f32 in a fixed order and cuts a forward or input gradient by its layer alone, so a row keeps its bits at any batch size. It is not the vendor's Fast TF32, and its bits are reproducible like the rest of the mode. Under `CublasFast` the vendor's TF32 already applies to every f32 product. Under `CublasPedantic` the products are pedantic f32 |
 | `Bf16` | bf16 | tensor-core kernels with f32 accumulation |
 | `F16` | f16 | tensor-core kernels with f32 accumulation. Training runs the dynamic loss scaler |
 
@@ -111,7 +111,7 @@ them, chosen by its role:
 | family | kernels | used by | shapes | batch invariance |
 |---|---|---|---|---|
 | `Inference` | `kernels/gemm_bi_inference/` | model and language model contexts stored in bf16 or f16 (the GPU backbones of every family, `MambaGpuLM` and the engines under them) | the forward product only (`Y = X W + b`) | every output element is computed from its own row of X and its own column of W in one fixed order, never split across thread blocks, so a row's result is bit-identical at any batch size |
-| `Triad` | `kernels/gemm_bi_triad/` | the trainers of every family, plain `GpuCtx`, and model contexts stored in f32 or TF32, so a model serves the bits it trained with | forward, weight gradient and input gradient (the NN, TN and NT products) | a forward or input gradient in f32, bf16 or f16 gives a row the same bits at every batch size: each layer's reduction is cut by its shape alone, and the batch only picks among tiles of the same bits. TF32 products keep the measured kernels, bit-identical within one dispatch bucket. The weight gradient sums over the batch and is deterministic for its shape |
+| `Triad` | `kernels/gemm_bi_triad/` | the trainers of every family, plain `GpuCtx`, and model contexts stored in f32 or TF32, so a model serves the bits it trained with | forward, weight gradient and input gradient (the NN, TN and NT products) | a forward or input gradient gives a row the same bits at every batch size in every precision: each layer's reduction is cut by its shape alone, and the batch only picks among tiles of the same bits. The weight gradient sums over the batch and is deterministic for its shape |
 
 The weight-gradient product always runs on the Triad kernels, whatever the
 family, because the Inference family has no transposed products. The
@@ -135,12 +135,9 @@ family refuses to replay with the other.
   chain crosses a block boundary the earlier block hands its accumulators
   to the next one untouched. Nothing is folded, so the relay reproduces
   the tiled kernel bit for bit. Only the grid differs.
-- f32 products are exact unless the weights are stored as `Tf32`. A
-  model context's layers then run deterministic TF32 for every f32
-  product; a trainer and the tied head take the deterministic TF32 kernels
-  on the shapes and boards where they were measured and stay exact
-  everywhere else. A `Tf32` model therefore trains and serves with
-  different bits; both are reproducible.
+- f32 products are exact unless the weights are stored as `Tf32`. Every
+  f32 product then runs deterministic TF32, in a model, a trainer and the
+  tied head alike, so a `Tf32` model trains and serves with the same bits.
 - The Hopper and Blackwell native kernels run behind a first-use
   self-check (see [Architecture coverage](#architecture-coverage)).
 
@@ -164,8 +161,7 @@ after this one lists what is not claimed.
   batch 32 on the same prompt gives a KL divergence of about 8e-11
   (`tests/extreme_edge_coverage.rs`), where cuBLAS gives about 1e-3. The
   Triad family gives a row of a forward or input gradient the same bits
-  at every batch size in f32, bf16 and f16, and within a dispatch bucket
-  in TF32.
+  at every batch size in every precision.
 - **No hidden vendor call.** In the deterministic mode every cuBLAS entry
   point in the crate returns an error instead of running. A model context
   never reaches one.

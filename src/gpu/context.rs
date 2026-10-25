@@ -107,12 +107,13 @@ impl GemmRole {
 }
 
 impl WeightDtype {
-    /// The f32 numeric contract a storage precision asks for: `Tf32` permits
-    /// the deterministic TF32 kernels, everything else keeps every f32
-    /// product exact.
+    /// The f32 numeric contract a storage precision asks for: `Tf32` runs
+    /// every f32 product on TF32 with `cvt.rna` rounding, each forward and
+    /// input gradient cut by its layer alone so a row keeps its bits at any
+    /// batch size; everything else keeps every f32 product exact.
     pub(crate) fn f32_numeric(self) -> F32TriadPolicy {
         match self {
-            Self::Tf32 => F32TriadPolicy::AllowDeterministicTf32,
+            Self::Tf32 => F32TriadPolicy::RnaTf32BatchInvariant,
             Self::F32 | Self::Bf16 | Self::F16 => F32TriadPolicy::ExactScalarFma,
         }
     }
@@ -2816,7 +2817,7 @@ mod tests {
         ] {
             for (dtype, f32_policy) in [
                 (WeightDtype::F32, F32TriadPolicy::ExactScalarFma),
-                (WeightDtype::Tf32, F32TriadPolicy::AllowDeterministicTf32),
+                (WeightDtype::Tf32, F32TriadPolicy::RnaTf32BatchInvariant),
                 (WeightDtype::Bf16, F32TriadPolicy::ExactScalarFma),
                 (WeightDtype::F16, F32TriadPolicy::ExactScalarFma),
             ] {
@@ -2864,7 +2865,7 @@ mod tests {
             let resolved = resolve_gemm_env(values, GemmRole::triad(WeightDtype::Tf32)).unwrap();
             assert_eq!(resolved.mode, expected);
             assert_eq!(resolved.family, BiGemmFamily::Triad);
-            assert_eq!(resolved.f32_policy, F32TriadPolicy::AllowDeterministicTf32);
+            assert_eq!(resolved.f32_policy, F32TriadPolicy::RnaTf32BatchInvariant);
             assert!(resolved.tensor_cores);
             assert_eq!(
                 resolved.half_policy,

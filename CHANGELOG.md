@@ -46,6 +46,16 @@
   partial spreads the same pieces over eight times the blocks: on an RTX
   6000 Ada, 510 cut products of 2 to 255 rows run in 0.84 of their former
   time, the 32-row input gradient of a 256 x 2112 layer in 0.27.
+- `WeightDtype::Tf32` runs every f32 product under the strict TF32
+  contract: each operand rounded with `cvt.rna` and each forward or input
+  gradient cut by its layer alone, so a row keeps its bits at any batch
+  size, in a model, a trainer and the language model's tied head alike,
+  where a trainer and the tied head used to take TF32 only on measured
+  shapes and stay exact elsewhere. A model stored in f32 or TF32 now serves
+  the Triad family, whose forwards fold every layer as training and the CPU
+  twin of the fold do; models in bf16 or f16 keep the Inference family. A
+  `Tf32` model therefore trains and serves with the same bits. These
+  products change their bits once in this release.
 - A bf16 or f16 forward and input gradient pick their arithmetic by the
   layer's shape alone, so a row has the same bits at every batch size, with
   the tensor cores on or off. An input gradient takes the tensor-core tile

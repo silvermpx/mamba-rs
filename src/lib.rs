@@ -23,10 +23,9 @@
 //! - CUDA graph capture of the decode step, of the prompt pass of one
 //!   length and of the training step, in every family
 //! - Deterministic f32, tf32, bf16 and f16 GEMM kernels for inference and
-//!   training, the default since 0.7.0. A forward or an input gradient in
-//!   f32, bf16 or f16 gives a row the same bits at any batch size, each
-//!   layer cut by its shape alone; TF32 products keep the measured kernels,
-//!   whose bits hold within one dispatch bucket
+//!   training, the default since 0.7.0. A forward or an input gradient
+//!   gives a row the same bits at any batch size in every precision, each
+//!   layer cut by its shape alone
 //! - Safetensors checkpoints for every family, loaders for the official
 //!   HuggingFace and `mamba_ssm` checkpoints, and a trainer-state file for
 //!   a bit-continuous resume
