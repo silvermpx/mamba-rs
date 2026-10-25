@@ -137,7 +137,8 @@
   for a shape gives the same bits, and it picks among them by the shape and
   the number of multiprocessors: a few rows, or a grid under half a wave,
   run the four pieces as split members, a larger grid folds them inside
-  the tile the shape's table names. A deep weight gradient splits eight
+  the tile the shape's table names, and a forward that blends into its old
+  output always takes the split members. A deep weight gradient splits eight
   ways, wherever its operands sit, by the shape alone. An Ada board adds
   its multistage and pre-rounded tiles, and an RTX 5090 or RTX PRO 6000 its
   own forward table, the multistage tiles and the TMA input-gradient tile.

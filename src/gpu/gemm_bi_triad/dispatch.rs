@@ -17918,6 +17918,43 @@ mod tf32_tests {
     }
 
     #[test]
+    fn rna_strict_blending_cut_forwards_fold_through_the_split_members() {
+        // The in-CTA tiles keep the finished pieces' sum in the output, so a
+        // forward that blends its old output takes the split members at
+        // every row count, the large grids included.
+        let mut staged = sm89_availability();
+        staged.rna = Some(qualified_module(
+            ModuleKind::TriadTf32Rna,
+            "sm_89",
+            "sm_89",
+            (8, 9),
+            false,
+            101_376,
+        ));
+        for rows in [1, 64, 300, 8192] {
+            let request = normalized_request(ResolvedGemmOp::Nn, rows, 256, 512);
+            // Without a blend the large grid folds inside its tile.
+            for (beta, split) in [(1.0_f32, true), (0.5, true), (0.0, rows != 8192)] {
+                let operands = F32TriadOperands {
+                    beta,
+                    ..sm89_joint_operands(ResolvedGemmOp::Nn)
+                };
+                let selection =
+                    resolve_f32_triad_auto_with_operands(STRICT, request, operands, staged)
+                        .unwrap();
+                assert_eq!(
+                    matches!(
+                        selection,
+                        F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaSplitK4(_))
+                    ),
+                    split,
+                    "{rows} rows, beta {beta}: {selection:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rna_wide_pieces_tiles_are_the_wide_tiles_folding_four_pieces() {
         use crate::gpu::gemm_bi_triad::contract::{Tf32RnaWideTile as Wide, tf32_route_specs_all};
         let specs: Vec<_> = tf32_route_specs_all(ModuleKind::TriadTf32Rna).collect();
