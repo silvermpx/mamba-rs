@@ -18200,7 +18200,6 @@ mod tf32_tests {
                     spec.tile,
                     spec.bk,
                     spec.stages,
-                    spec.threads,
                     spec.dynamic_shared_bytes
                 ),
                 (
@@ -18208,12 +18207,20 @@ mod tf32_tests {
                     chain.tile,
                     chain.bk,
                     chain.stages,
-                    chain.threads,
                     chain.dynamic_shared_bytes
                 ),
                 "{}",
                 spec.symbol
             );
+            // A twin keeps its tile's warps, except the multistage 128 x 64
+            // tiles, which spread over twice the warps to hold the pieces'
+            // sum in registers.
+            let warps = if matches!(tile, Wide::MsM128N64S3 | Wide::NtMsM128N64S3) {
+                2
+            } else {
+                1
+            };
+            assert_eq!(spec.threads, warps * chain.threads, "{}", spec.symbol);
             assert!(
                 rna_batch_invariant_route(spec.op, spec.route),
                 "{}",

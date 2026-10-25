@@ -2163,9 +2163,13 @@ TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m128n128_bk16_s5, SgbTf32Nt, 128, 128, 16, 
 
 // The same tiles for a layer whose fold cuts the reduction into four
 // pieces: each piece a chain from +0.0 over its whole 32-deep groups, added
-// in order to the sum the CTA keeps in its own output tile, the bias after
-// the pieces. The input gradient's 128 x 128 tile folds a cut layer on its
-// 64 x 128 sibling of the same ring and staging.
+// in order to the finished pieces' sum, the bias after the pieces. The input
+// gradient's 128 x 128 tile folds a cut layer on its 64 x 128 sibling of the
+// same ring and staging. The 128 x 64 tiles spread the tile over eight warps
+// of 32 x 32, so each thread holds 32 accumulators and keeps the finished
+// pieces' sum in a second set of registers instead of folding it through
+// the output: on an RTX 5090 the input gradient 4096x256x2112 ran in 54.5 us
+// against 60.7 on four warps, with the same bits.
 #define TF32_RNA_MS_TILE_PIECES(NAME, OP, BM, BN, BK, WARPS_M, WARPS_N, STAGES, MIN_BLOCKS) \
     extern "C" __global__ __launch_bounds__(32 * WARPS_M * WARPS_N, MIN_BLOCKS)           \
     void NAME(float* output, const float* a, const float* b, const float* bias,           \
@@ -2175,10 +2179,10 @@ TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m128n128_bk16_s5, SgbTf32Nt, 128, 128, 16, 
     }
 
 TF32_RNA_MS_TILE_PIECES(nn_sm80_tf32_rna_pieces4_ms_m64n128_bk16_s6, SgbTf32Nn, 64, 128, 16, 2, 2, 6, 1)
-TF32_RNA_MS_TILE_PIECES(nn_sm80_tf32_rna_pieces4_ms_m128n64_bk32_s3, SgbTf32Nn, 128, 64, 32, 2, 2, 3, 1)
+TF32_RNA_MS_TILE_PIECES(nn_sm80_tf32_rna_pieces4_ms_m128n64_bk32_s3, SgbTf32Nn, 128, 64, 32, 4, 2, 3, 1)
 TF32_RNA_MS_TILE_PIECES(nn_sm80_tf32_rna_pieces4_ms_m64n64_bk32_s3, SgbTf32Nn, 64, 64, 32, 2, 2, 3, 2)
 TF32_RNA_MS_TILE_PIECES(nt_sm80_tf32_rna_pieces4_ms_m64n128_bk16_s6, SgbTf32Nt, 64, 128, 16, 2, 2, 6, 1)
-TF32_RNA_MS_TILE_PIECES(nt_sm80_tf32_rna_pieces4_ms_m128n64_bk32_s3, SgbTf32Nt, 128, 64, 32, 2, 2, 3, 1)
+TF32_RNA_MS_TILE_PIECES(nt_sm80_tf32_rna_pieces4_ms_m128n64_bk32_s3, SgbTf32Nt, 128, 64, 32, 4, 2, 3, 1)
 
 #undef TF32_RNA_MS_TILE_PIECES
 

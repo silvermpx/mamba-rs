@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 pub const SOURCE: &str = include_str!("../../../kernels/gemm_bi_triad/sm80/tf32_rna.cu");
 
-pub const SOURCE_SHA256: &str = "93ecac1b58d463eb5714fda4eb42880cacc0c34fe28a948306d1a713940a52d9";
+pub const SOURCE_SHA256: &str = "ddfaaeebebd6f99f8ffb71f18ddd9da43cb54ecb44943d7feff53f339b12b604";
 
 pub const NN_M128N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m128n96_w2x4_bk32_s3";
 pub const NN_M96N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m96n96_w2x4_bk32_s3";
@@ -302,7 +302,7 @@ pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 22] = [
     spec(
         NN_PIECES4_MS_M128N64_S3_SYMBOL,
         Tf32RnaKernelKind::Multistage,
-        128,
+        256,
         76_800,
         1,
     ),
@@ -330,7 +330,7 @@ pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 22] = [
     spec(
         NT_PIECES4_MS_M128N64_S3_SYMBOL,
         Tf32RnaKernelKind::Multistage,
-        128,
+        256,
         73_728,
         1,
     ),

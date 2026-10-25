@@ -3201,10 +3201,15 @@ pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 19] = [
         TF32_RNA_CHAIN_SPECS[3],
         super::tf32_rna_source::NN_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
     ),
-    tf32_rna_pieces_spec(
-        TF32_RNA_CHAIN_SPECS[4],
-        super::tf32_rna_source::NN_PIECES4_MS_M128N64_S3_SYMBOL,
-    ),
+    // The 128 x 64 pieces tiles run on eight warps, so the finished pieces'
+    // sum fits in registers (see tf32_rna.cu).
+    Tf32KernelSpec {
+        threads: 256,
+        ..tf32_rna_pieces_spec(
+            TF32_RNA_CHAIN_SPECS[4],
+            super::tf32_rna_source::NN_PIECES4_MS_M128N64_S3_SYMBOL,
+        )
+    },
     tf32_rna_pieces_spec(
         TF32_RNA_CHAIN_SPECS[5],
         super::tf32_rna_source::NN_PIECES4_MS_M64N64_S3_SYMBOL,
@@ -3217,10 +3222,13 @@ pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 19] = [
         TF32_RNA_CHAIN_SPECS[7],
         super::tf32_rna_source::NT_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
     ),
-    tf32_rna_pieces_spec(
-        TF32_RNA_CHAIN_SPECS[8],
-        super::tf32_rna_source::NT_PIECES4_MS_M128N64_S3_SYMBOL,
-    ),
+    Tf32KernelSpec {
+        threads: 256,
+        ..tf32_rna_pieces_spec(
+            TF32_RNA_CHAIN_SPECS[8],
+            super::tf32_rna_source::NT_PIECES4_MS_M128N64_S3_SYMBOL,
+        )
+    },
 ];
 
 pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 11] = [
