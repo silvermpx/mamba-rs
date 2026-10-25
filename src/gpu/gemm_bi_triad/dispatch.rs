@@ -2976,25 +2976,75 @@ fn rna_layer_pieces_selection(
         return rna_layer_pieces_table_selection(request, operands, availability, split);
     }
     let work = rows.saturating_mul(columns.div_ceil(64));
+    let wide_tiles = rows.div_ceil(128).saturating_mul(columns.div_ceil(64));
     let multistage = |tile| Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile);
-    // The tiles the work fills, best first.
-    let filled = if forward {
-        if rows <= 16 && columns.div_ceil(32) >= sms.saturating_mul(4) {
-            [Some(tile_16), None]
-        } else if work >= sms.saturating_mul(16) {
-            [Some(multistage(Tf32RnaWideTile::MsM64N64S3)), Some(tile_64)]
+    let ada = availability
+        .rna
+        .is_some_and(|rna| rna.device.compute_capability == (8, 9));
+    // The tiles the work fills, best first. The rules are measured per
+    // architecture over the census's cut cells, each as the time of the
+    // chosen tile against the fastest same-bit route of the cell. On an RTX
+    // 6000 Ada the 128 x 64 multistage tiles win from a fraction of a wave,
+    // and the persistent one, which serves whole 128-row tiles only, from a
+    // full wave: the rule below came within 1.0% of the best per cell in
+    // geometric mean over 365 forwards (worst 1.25) and within 0.3% over 414
+    // input gradients (worst 1.27), where the RTX 5090 rule took 2.4% and
+    // 1.4% (worst 1.47 and 1.51).
+    let filled = if forward && rows <= 16 && columns.div_ceil(32) >= sms.saturating_mul(4) {
+        [Some(tile_16), None, None]
+    } else if ada && forward {
+        if wide_tiles >= sms && rows.is_multiple_of(128) {
+            [
+                Some(multistage(Tf32RnaWideTile::MsPersistM128N64Bk16S3)),
+                Some(multistage(Tf32RnaWideTile::MsM128N64S3)),
+                Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
+            ]
+        } else if rows >= 128 && wide_tiles.saturating_mul(2) >= sms {
+            [
+                Some(multistage(Tf32RnaWideTile::MsM128N64S3)),
+                Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
+                None,
+            ]
+        } else if work >= sms.saturating_mul(12) {
+            [
+                Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
+                Some(tile_64),
+                None,
+            ]
         } else {
-            [None, None]
+            [None, None, None]
+        }
+    } else if ada {
+        if rows >= 128 && wide_tiles.saturating_mul(5) >= sms {
+            [
+                Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
+                Some(tile_64),
+                None,
+            ]
+        } else {
+            [None, None, None]
+        }
+    } else if forward {
+        // Measured on an RTX 5090.
+        if work >= sms.saturating_mul(16) {
+            [
+                Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
+                Some(tile_64),
+                None,
+            ]
+        } else {
+            [None, None, None]
         }
     } else if work >= sms.saturating_mul(64) {
         [
             Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
             Some(tile_64),
+            None,
         ]
     } else if work >= sms.saturating_mul(32) {
-        [Some(tile_64), None]
+        [Some(tile_64), None, None]
     } else {
-        [None, None]
+        [None, None, None]
     };
     // A split whose partial planes outgrow the fixed workspace does not bind;
     // the in-CTA tiles then fold the pieces whatever the grid.
@@ -18114,14 +18164,22 @@ mod tf32_tests {
                 tile: Tf32PortableTile::M16N32,
                 stages: Tf32PortableStages::S4,
             }));
-        // On the 142 multiprocessors of this board: a forward whose work
-        // covers a quarter of a wave of 64 x 64 tiles folds in that tile, a
-        // thin batch over a vocabulary-wide layer in the 16 x 32 tile, and a
-        // small output splits; an input gradient folds in the 128 x 64 tile
-        // from half a wave of those tiles and in the portable 64 x 64 tile
-        // from half a wave of its own.
+        // On the 142 multiprocessors of this Ada board: a forward whose
+        // whole 128-row tiles cover a wave folds in the persistent 128 x 64
+        // tile, one with half a wave of 128 x 64 tiles in the multistage
+        // 128 x 64 tile, a 64-row batch over a vocabulary-wide layer in the
+        // multistage 64 x 64 tile, a thin batch in the 16 x 32 tile, and a
+        // small output splits; an input gradient of 128 rows or more folds in
+        // the 128 x 64 tile from a fifth of a wave of those tiles.
         for (op, rows, columns, reduction, expected) in [
-            (ResolvedGemmOp::Nn, 8192, 256, 512, wide(Wide::MsM64N64S3)),
+            (
+                ResolvedGemmOp::Nn,
+                8192,
+                256,
+                512,
+                wide(Wide::MsPersistM128N64Bk16S3),
+            ),
+            (ResolvedGemmOp::Nn, 1000, 768, 1536, wide(Wide::MsM128N64S3)),
             (ResolvedGemmOp::Nn, 64, 32_000, 768, wide(Wide::MsM64N64S3)),
             (
                 ResolvedGemmOp::Nn,
@@ -18150,7 +18208,17 @@ mod tf32_tests {
                 255,
                 1536,
                 768,
-                portable(Tf32PortableTile::M64N64, Tf32PortableStages::S2),
+                wide(Wide::NtMsM128N64S3),
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                64,
+                1536,
+                768,
+                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M16N32,
+                    stages: Tf32PortableStages::S3,
+                })),
             ),
         ] {
             let request = normalized_request(op, rows, columns, reduction);
