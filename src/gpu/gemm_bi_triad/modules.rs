@@ -8735,7 +8735,9 @@ pub(super) const SCALAR_TN_SPLITM_PARTIAL_SYMBOLS: &[&str] =
 
 pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "nn_big",
+    "nn_big_pieces4",
     "nn_m64n64_bk16_s2",
+    "nn_m64n64_pieces4",
     "nn_splitk32_m32n64_exact",
     "nn_d384_m64n64_bk16_s2",
     "nn_zero_reduction",
@@ -8755,6 +8757,7 @@ pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "nn_splitk_slim_partial",
     "tn_slim",
     "nt_slim",
+    "nt_slim_pieces4",
     "nn_ultra_thin",
     "nn_gemv",
     "tn_gemv",
@@ -10097,7 +10100,11 @@ pub struct GemmBiKernels {
     sm120_tensor_maps: Sm120MapCache,
 
     pub gemm_bi_nn: CudaFunction,
+    /// The 128 x 128 forward tile folding a cut layer's four pieces.
+    pub gemm_bi_nn_big_pieces4: CudaFunction,
     pub gemm_bi_nn_m64n64_bk16_s2: CudaFunction,
+    /// The 64 x 64 forward tile folding a cut layer's four pieces.
+    pub gemm_bi_nn_m64n64_pieces4: CudaFunction,
     pub gemm_bi_nn_splitk32_m32n64_exact: CudaFunction,
     pub gemm_bi_nn_d384_m64n64_bk16_s2: CudaFunction,
     pub gemm_bi_tn: CudaFunction,
@@ -10108,6 +10115,8 @@ pub struct GemmBiKernels {
     pub gemm_bi_nn_slim: CudaFunction,
     pub gemm_bi_tn_slim: CudaFunction,
     pub gemm_bi_nt_slim: CudaFunction,
+    /// The slim input-gradient tile folding a cut layer's four pieces.
+    pub gemm_bi_nt_slim_pieces4: CudaFunction,
     pub gemm_bi_nn_ultra_thin: CudaFunction,
     pub gemm_bi_nn_gemv: CudaFunction,
     pub gemm_bi_tn_gemv: CudaFunction,
@@ -10509,10 +10518,18 @@ impl GemmBiKernels {
         };
         let gemm_bi_nn = load("nn_big")?;
         set_dynamic_shared(&gemm_bi_nn, "nn_big", 34 * 1024)?;
+        let gemm_bi_nn_big_pieces4 = load("nn_big_pieces4")?;
+        set_dynamic_shared(&gemm_bi_nn_big_pieces4, "nn_big_pieces4", 34 * 1024)?;
         let gemm_bi_nn_m64n64_bk16_s2 = load("nn_m64n64_bk16_s2")?;
         set_dynamic_shared(
             &gemm_bi_nn_m64n64_bk16_s2,
             "nn_m64n64_bk16_s2",
+            super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES as i32,
+        )?;
+        let gemm_bi_nn_m64n64_pieces4 = load("nn_m64n64_pieces4")?;
+        set_dynamic_shared(
+            &gemm_bi_nn_m64n64_pieces4,
+            "nn_m64n64_pieces4",
             super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES as i32,
         )?;
         let gemm_bi_nn_splitk32_m32n64_exact = load("nn_splitk32_m32n64_exact")?;
@@ -10685,7 +10702,9 @@ impl GemmBiKernels {
             sm100_tensor_maps: Mutex::new(HashMap::new()),
             sm120_tensor_maps: Mutex::new(HashMap::new()),
             gemm_bi_nn,
+            gemm_bi_nn_big_pieces4,
             gemm_bi_nn_m64n64_bk16_s2,
+            gemm_bi_nn_m64n64_pieces4,
             gemm_bi_nn_splitk32_m32n64_exact,
             gemm_bi_nn_d384_m64n64_bk16_s2,
             gemm_bi_tn,
@@ -10696,6 +10715,7 @@ impl GemmBiKernels {
             gemm_bi_nn_slim: load("nn_slim")?,
             gemm_bi_tn_slim: load("tn_slim")?,
             gemm_bi_nt_slim: load("nt_slim")?,
+            gemm_bi_nt_slim_pieces4: load("nt_slim_pieces4")?,
             gemm_bi_nn_ultra_thin: load("nn_ultra_thin")?,
             gemm_bi_nn_gemv: load("nn_gemv")?,
             gemm_bi_tn_gemv: load("tn_gemv")?,
@@ -14783,7 +14803,7 @@ mod tests {
         const D768_TRANSPOSE_SYMBOL: &str = "transpose_f32_32x16_d768";
         const TN_M16N16_SYMBOL: &str = "tn_m16n16_bk16_s2_splitm16";
         let valid = synthetic_scalar_splitm_module_ptx();
-        assert_eq!(super::SCALAR_SYMBOLS.len(), 64);
+        assert_eq!(super::SCALAR_SYMBOLS.len(), 67);
         validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid)
             .expect("complete TriadScalar export inventory");
 
@@ -16127,7 +16147,9 @@ mod tests {
 
     const SCALAR_SYMBOLS: &[&str] = &[
         "nn_big",
+        "nn_big_pieces4",
         "nn_m64n64_bk16_s2",
+        "nn_m64n64_pieces4",
         "nn_splitk32_m32n64_exact",
         "nn_d384_m64n64_bk16_s2",
         "nn_zero_reduction",
@@ -16147,6 +16169,7 @@ mod tests {
         "nn_splitk_slim_partial",
         "tn_slim",
         "nt_slim",
+        "nt_slim_pieces4",
         "nn_ultra_thin",
         "nn_gemv",
         "tn_gemv",
@@ -16397,7 +16420,7 @@ mod tests {
 
         for (start_name, end_name, guards) in [
             (
-                "void nn_big(",
+                "void nn_big_impl(",
                 "void tn_impl(",
                 &["is_aligned_16(B)", "is_aligned_16(C)"][..],
             ),
@@ -16428,11 +16451,11 @@ mod tests {
             ),
             (
                 "void tn_slim(",
-                "void nt_slim(",
+                "void nt_slim_impl(",
                 &["is_aligned_16(A)", "is_aligned_16(B)", "is_aligned_16(C)"][..],
             ),
             (
-                "void nt_slim(",
+                "void nt_slim_impl(",
                 "void nn_ultra_thin(",
                 &["is_aligned_16(C)"][..],
             ),
@@ -16584,7 +16607,7 @@ mod tests {
 
         let scalar: BTreeSet<_> = SCALAR_SYMBOLS.iter().copied().collect();
         let sm80: BTreeSet<_> = SM80_SYMBOLS.iter().copied().collect();
-        assert_eq!(scalar.len(), 64);
+        assert_eq!(scalar.len(), 67);
         assert_eq!(sm80.len(), 16);
         let sm80_streamk: BTreeSet<_> = super::SM80_STREAMK_SYMBOLS.iter().copied().collect();
         assert_eq!(sm80_streamk.len(), 2);
@@ -16629,7 +16652,7 @@ mod tests {
         assert!(sm80.is_disjoint(&sm90a));
         assert!(sm80.is_disjoint(&sm100));
         assert!(sm90a.is_disjoint(&sm100));
-        assert_eq!(scalar.union(&sm80).count(), 80);
+        assert_eq!(scalar.union(&sm80).count(), 83);
         assert!(
             scalar
                 .union(&sm80)

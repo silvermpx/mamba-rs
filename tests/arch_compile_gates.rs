@@ -2405,7 +2405,7 @@ fn scalar_big_nn_and_tn_epilogues_have_no_terminal_cta_barrier() {
     let source = include_str!("../kernels/gemm_bi_triad/scalar.cu");
     let mut terminal_barriers = Vec::new();
     for (symbol, epilogue_marker, next_symbol) in [
-        ("nn_big", "#undef ISSUE_TILE", "tn_impl"),
+        ("nn_big_impl", "#undef ISSUE_TILE", "tn_impl"),
         ("tn_impl", "#undef ISSUE_TILE_TN", "tn_big"),
     ] {
         let start_marker = format!("void {symbol}(");
@@ -4414,7 +4414,9 @@ fn scalar_sm89_main_and_splitk_have_bounded_resources_without_reduction_instruct
     .expect("SM89 scalar PTX must be canonical UTF-8");
     let resource_contracts = [
         ("nn_big", 256, 2, 128),
+        ("nn_big_pieces4", 256, 2, 128),
         ("nn_m64n64_bk16_s2", 128, 3, 128),
+        ("nn_m64n64_pieces4", 128, 3, 128),
         ("tn_big", 256, 2, 128),
         ("tn_aligned", 256, 2, 128),
         ("nt_big", 256, 2, 128),

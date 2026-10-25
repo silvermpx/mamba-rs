@@ -32,8 +32,8 @@ static_assert(alignof(SgbNnM64N64Params) == 4,
 static_assert(__is_standard_layout(SgbNnM64N64Params),
               "M64N64 parameters must remain standard layout");
 
-extern "C" __global__ __launch_bounds__(EXACT_NN_M64N64_THREADS, 3)
-void nn_m64n64_bk16_s2(
+template <int PIECES>
+__device__ __forceinline__ void nn_m64n64_impl(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
@@ -84,7 +84,9 @@ void nn_m64n64_bk16_s2(
     float reg_n[EXACT_NN_M64N64_TN] = {0.0f};
     float threadResults[EXACT_NN_M64N64_TM * EXACT_NN_M64N64_TN];
 
-    if (bias != nullptr) {
+    // A cut layer starts every piece from +0.0 and adds the bias after the
+    // pieces instead of seeding the chain with it.
+    if (PIECES == 1 && bias != nullptr) {
         #pragma unroll
         for (int result_column = 0;
              result_column < EXACT_NN_M64N64_TN;
@@ -194,7 +196,15 @@ void nn_m64n64_bk16_s2(
         asm volatile("cp.async.commit_group;\n");                                     \
     } while (0)
 
-    int num_k_tiles = (params.k + EXACT_NN_M64N64_BK - 1) / EXACT_NN_M64N64_BK;
+    // A cut layer walks whole 32-deep groups, as the chunk partials do, so
+    // its last piece ends with the same zero products; fold_tile is the tile
+    // that closes the current piece.
+    int num_k_tiles = PIECES > 1
+        ? (params.k + 31) / 32 * (32 / EXACT_NN_M64N64_BK)
+        : (params.k + EXACT_NN_M64N64_BK - 1) / EXACT_NN_M64N64_BK;
+    int fold_tile = PIECES > 1
+        ? scalar_piece_groups<PIECES>(params.k) * (32 / EXACT_NN_M64N64_BK)
+        : num_k_tiles;
     ISSUE_EXACT_NN_M64N64_TILE(0, 0);
     int read_stage = 0;
     int write_stage = 1;
@@ -272,10 +282,41 @@ void nn_m64n64_bk16_s2(
             }
         }
 
+        if constexpr (PIECES > 1) {
+            if (tile + 1 == fold_tile && fold_tile < num_k_tiles) {
+                int piece_tiles =
+                    scalar_piece_groups<PIECES>(params.k) * (32 / EXACT_NN_M64N64_BK);
+                scalar_fold_piece<1, EXACT_NN_M64N64_TM, 1, EXACT_NN_M64N64_TN,
+                                  EXACT_NN_M64N64_WM, EXACT_NN_M64N64_WN>(
+                    threadResults, C, params.ldc, params.m, params.n,
+                    pid_m * EXACT_NN_M64N64_BM + warp_row * EXACT_NN_M64N64_WM
+                        + thread_row * EXACT_NN_M64N64_TM,
+                    pid_n * EXACT_NN_M64N64_BN + warp_column * EXACT_NN_M64N64_WN
+                        + thread_column * EXACT_NN_M64N64_TN,
+                    fold_tile == piece_tiles);
+                fold_tile += piece_tiles;
+            }
+        }
+
         read_stage = (read_stage + 1) % K_PIPE;
         write_stage = (write_stage + 1) % K_PIPE;
     }
     #undef ISSUE_EXACT_NN_M64N64_TILE
+
+    if constexpr (PIECES > 1) {
+        // The plan serves a cut layer with alpha 1 and beta 0 only, so the
+        // epilogue below stores the pieces' sum plus the bias as they are.
+        scalar_finish_pieces<1, EXACT_NN_M64N64_TM, 1, EXACT_NN_M64N64_TN,
+                             EXACT_NN_M64N64_WM, EXACT_NN_M64N64_WN>(
+            threadResults, C, params.ldc, params.m, params.n,
+            pid_m * EXACT_NN_M64N64_BM + warp_row * EXACT_NN_M64N64_WM
+                + thread_row * EXACT_NN_M64N64_TM,
+            pid_n * EXACT_NN_M64N64_BN + warp_column * EXACT_NN_M64N64_WN
+                + thread_column * EXACT_NN_M64N64_TN,
+            num_k_tiles
+                > scalar_piece_groups<PIECES>(params.k) * (32 / EXACT_NN_M64N64_BK),
+            bias);
+    }
 
     #pragma unroll
     for (int result_row = 0; result_row < EXACT_NN_M64N64_TM; ++result_row) {
@@ -330,6 +371,33 @@ void nn_m64n64_bk16_s2(
             reinterpret_cast<float4*>(destination)[0] = output;
         }
     }
+}
+
+extern "C" __global__ __launch_bounds__(EXACT_NN_M64N64_THREADS, 3)
+void nn_m64n64_bk16_s2(
+    float* __restrict__ C,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    SgbNnM64N64Params params
+) {
+    nn_m64n64_impl<1>(C, A, B, bias, params);
+}
+
+// The same tile for a layer whose fold cuts the reduction into four pieces:
+// each piece a chain from +0.0 over its whole 32-deep groups, added in order
+// to the sum the CTA keeps in its own output tile, the bias after the
+// pieces - the bits the chunk partials and their reduction write, without
+// the partial planes.
+extern "C" __global__ __launch_bounds__(EXACT_NN_M64N64_THREADS, 3)
+void nn_m64n64_pieces4(
+    float* __restrict__ C,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    SgbNnM64N64Params params
+) {
+    nn_m64n64_impl<4>(C, A, B, bias, params);
 }
 
 #undef EXACT_NN_M64N64_B_ROW_STRIDE

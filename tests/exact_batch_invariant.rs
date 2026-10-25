@@ -169,3 +169,93 @@ fn exact_input_gradient_rows_equal_their_cpu_fold() {
         }
     }
 }
+
+/// Cut layers wide enough that the 128 x 128 and 64 x 64 tiles fold their
+/// pieces through the output tile at some row counts and the chunk partials
+/// serve the others, a ragged reduction and ragged columns among them:
+/// every row still equals its CPU fold, forward and input gradient.
+const PIECES_LAYERS: [(usize, usize); 3] = [(768, 768), (768, 2112), (640, 833)];
+const PIECES_ROWS: [usize; 5] = [1, 65, 513, 1024, 4096];
+
+#[test]
+fn exact_pieces_tiles_rows_equal_their_cpu_fold() {
+    let Ok(device) = GpuDevice::new(0) else {
+        eprintln!("skip: no CUDA device");
+        return;
+    };
+    let ctx = GpuCtx::new(&device).unwrap();
+    ctx.route_controls()
+        .set_f32_policy(F32TriadPolicy::ExactFmaBatchInvariant);
+    for (index, (k, n)) in PIECES_LAYERS.into_iter().enumerate() {
+        assert!(chunked(k, n) && chunked(n, k), "{k}x{n} must cut both ways");
+        let seed = 0x9e3c_0000 + index as u64 * 16;
+        let w = synth(k * n, seed);
+        let bias = synth(n, seed + 1);
+        let w_buffer = upload(&ctx, &w);
+        let bias_buffer = upload(&ctx, &bias);
+        for rows in PIECES_ROWS {
+            let x = synth(rows * k, seed + 2 + rows as u64);
+            let x_buffer = upload(&ctx, &x);
+            let y = GpuBuffer::zeros(&ctx.stream, rows * n).unwrap();
+            unsafe {
+                gpu_gemm_f32_forward_ptrs(
+                    &ctx,
+                    y.cached_ptr(),
+                    x_buffer.cached_ptr(),
+                    w_buffer.cached_ptr(),
+                    Some(bias_buffer.cached_ptr()),
+                    (rows, k, n),
+                )
+                .unwrap_or_else(|error| panic!("{rows}x{k}x{n}: {error}"));
+            }
+            ctx.stream.synchronize().unwrap();
+            let got = y.to_cpu(&ctx.stream).unwrap();
+            for row in 0..rows {
+                let want = fold_row(&w, &x[row * k..(row + 1) * k], Some(&bias), k, n);
+                for (column, (g, e)) in got[row * n..(row + 1) * n].iter().zip(&want).enumerate() {
+                    assert_eq!(
+                        g.to_bits(),
+                        e.to_bits(),
+                        "{rows}x{k}x{n}: row {row} column {column}: {g} vs {e}",
+                    );
+                }
+            }
+            // The input gradient of the same layer: dX[m][i] sums dY[m][r] *
+            // W[i][r] over the layer's n outputs, cut as a forward of n
+            // inputs and k outputs.
+            let dy = synth(rows * n, seed + 3 + rows as u64);
+            let dy_buffer = upload(&ctx, &dy);
+            let dx = GpuBuffer::zeros(&ctx.stream, rows * k).unwrap();
+            unsafe {
+                gpu_gemm_f32_backward_dx_ptrs(
+                    &ctx,
+                    dx.cached_ptr(),
+                    dy_buffer.cached_ptr(),
+                    w_buffer.cached_ptr(),
+                    (rows, k, n),
+                )
+                .unwrap_or_else(|error| panic!("dX {rows}x{k}x{n}: {error}"));
+            }
+            ctx.stream.synchronize().unwrap();
+            let got = dx.to_cpu(&ctx.stream).unwrap();
+            for row in 0..rows {
+                for input in 0..k {
+                    let want = gemm_fold::exact_output(
+                        |r| dy[row * n + r],
+                        |r| w[input * n + r],
+                        None,
+                        n,
+                        k,
+                        BATCH_INVARIANT_FORWARD,
+                    );
+                    let got = got[row * k + input];
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "dX {rows}x{k}x{n}: row {row} input {input}: {got} vs {want}",
+                    );
+                }
+            }
+        }
+    }
+}

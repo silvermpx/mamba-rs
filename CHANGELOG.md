@@ -36,6 +36,16 @@
   model of the fold reproduces all of them. Forwards and input gradients
   change their bits once in this release. A scaled or accumulating forward
   keeps the plan of its shape.
+- A cut layer's exact forward or input gradient folds its four pieces inside
+  the block once its grid covers the card: the 128 x 128 and 64 x 64
+  forward tiles and the slim input-gradient tile keep the finished pieces'
+  sum in their own output tile and add the bias last, the bits the split
+  partials and their reduction write, without writing and reading four
+  output-sized planes. A smaller grid keeps the split partials, and where
+  the 32 x 64 partial's grid would leave a multiprocessor idle the 16 x 16
+  partial spreads the same pieces over eight times the blocks: on an RTX
+  6000 Ada, 510 cut products of 2 to 255 rows run in 0.84 of their former
+  time, the 32-row input gradient of a 256 x 2112 layer in 0.27.
 - A bf16 or f16 forward and input gradient pick their arithmetic by the
   layer's shape alone, so a row has the same bits at every batch size, with
   the tensor cores on or off. An input gradient takes the tensor-core tile

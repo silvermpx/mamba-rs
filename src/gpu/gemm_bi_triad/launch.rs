@@ -2353,7 +2353,10 @@ fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
 fn scalar_plan_requires_zero_beta(plan: ScalarDispatchPlan) -> bool {
     matches!(
         plan,
-        ScalarDispatchPlan::NnSplitKThinTail { .. }
+        ScalarDispatchPlan::NnExactPiecesBig
+            | ScalarDispatchPlan::NnExactPiecesM64
+            | ScalarDispatchPlan::NtExactPieces
+            | ScalarDispatchPlan::NnSplitKThinTail { .. }
             | ScalarDispatchPlan::NtSplitKTail { .. }
             | ScalarDispatchPlan::NnSplitKThin
             | ScalarDispatchPlan::NnSplitKSlim { .. }
@@ -2369,6 +2372,18 @@ fn scalar_plan_requires_zero_beta(plan: ScalarDispatchPlan) -> bool {
             | ScalarDispatchPlan::NtSlimViaTranspose
             | ScalarDispatchPlan::NtD384VectorQualified
             | ScalarDispatchPlan::NtM2N16SplitK32Qualified
+    )
+}
+
+/// The tiles that fold a cut layer's pieces through their output tile add
+/// the bias after the pieces, where the chunk fold's reduction scales the
+/// sum first, so they serve the unscaled forward alone.
+fn scalar_plan_requires_unit_alpha(plan: ScalarDispatchPlan) -> bool {
+    matches!(
+        plan,
+        ScalarDispatchPlan::NnExactPiecesBig
+            | ScalarDispatchPlan::NnExactPiecesM64
+            | ScalarDispatchPlan::NtExactPieces
     )
 }
 
@@ -2391,6 +2406,9 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NnExactNarrow16 => (51, 0, 0),
         ScalarDispatchPlan::NtExactThin => (54, 0, 0),
         ScalarDispatchPlan::NtExactNarrow16 => (55, 0, 0),
+        ScalarDispatchPlan::NnExactPiecesBig => (59, 4, 0),
+        ScalarDispatchPlan::NnExactPiecesM64 => (61, 4, 0),
+        ScalarDispatchPlan::NtExactPieces => (60, 4, 0),
         ScalarDispatchPlan::NtExactChunk {
             partial,
             chunks,
@@ -2491,6 +2509,7 @@ fn scalar_argument_layout(
         },
         (
             ScalarDispatchPlan::NnM64N64Qualified
+            | ScalarDispatchPlan::NnExactPiecesM64
             | ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified,
             _,
         ) => ScalarArgumentLayout {
@@ -2535,6 +2554,7 @@ fn scalar_argument_layout(
         | (ScalarDispatchPlan::NtSmallBatchWide, _)
         | (ScalarDispatchPlan::NtGemv, _)
         | (ScalarDispatchPlan::NtMidBatchWide, _)
+        | (ScalarDispatchPlan::NtExactPieces, _)
         | (ScalarDispatchPlan::NtFinal { .. }, _) => ScalarArgumentLayout::default(),
         (ScalarDispatchPlan::NtSplitKTail { k_main, .. }, tail) if tail >= 3 => {
             let column = k_main + tail - 3;
@@ -2859,6 +2879,22 @@ fn scalar_physical_nodes(
             (16, 4),
             cfg((n.div_ceil(16), m.div_ceil(16), 1), (64, 1, 1), 0),
         ),
+        ScalarDispatchPlan::NnExactPiecesBig => push_scalar_node(
+            &mut nodes,
+            context,
+            "nn_big_pieces4",
+            (128, 128),
+            (16, 2),
+            cfg(
+                (
+                    checked_grid_product(m.div_ceil(128), n.div_ceil(128), 1)?,
+                    1,
+                    1,
+                ),
+                (256, 1, 1),
+                34 * 1024,
+            ),
+        ),
         ScalarDispatchPlan::NnExactChunk {
             partial,
             chunks,
@@ -2938,6 +2974,22 @@ fn scalar_physical_nodes(
                 (k.div_ceil(32), m.div_ceil(16), 1),
                 (512, 1, 1),
                 super::contract::EXACT_THIN_DYNAMIC_SHARED_BYTES,
+            ),
+        ),
+        ScalarDispatchPlan::NtExactPieces => push_scalar_node(
+            &mut nodes,
+            context,
+            "nt_slim_pieces4",
+            (128, 64),
+            (32, 1),
+            cfg(
+                (
+                    checked_grid_product(m.div_ceil(128), k.div_ceil(64), 1)?,
+                    1,
+                    1,
+                ),
+                (128, 1, 1),
+                0,
             ),
         ),
         ScalarDispatchPlan::NtExactNarrow16 => push_scalar_node(
@@ -3025,22 +3077,28 @@ fn scalar_physical_nodes(
                 cfg((64, 1, 1), (256, 1, 1), 0),
             );
         }
-        ScalarDispatchPlan::NnM64N64Qualified => push_scalar_node(
-            &mut nodes,
-            context,
-            "nn_m64n64_bk16_s2",
-            (64, 64),
-            (16, 2),
-            cfg(
-                (
-                    checked_grid_product(m.div_ceil(64), n.div_ceil(64), 1)?,
-                    1,
-                    1,
+        ScalarDispatchPlan::NnM64N64Qualified | ScalarDispatchPlan::NnExactPiecesM64 => {
+            push_scalar_node(
+                &mut nodes,
+                context,
+                if plan == ScalarDispatchPlan::NnExactPiecesM64 {
+                    "nn_m64n64_pieces4"
+                } else {
+                    "nn_m64n64_bk16_s2"
+                },
+                (64, 64),
+                (16, 2),
+                cfg(
+                    (
+                        checked_grid_product(m.div_ceil(64), n.div_ceil(64), 1)?,
+                        1,
+                        1,
+                    ),
+                    (128, 1, 1),
+                    super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
                 ),
-                (128, 1, 1),
-                super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
-            ),
-        ),
+            );
+        }
         ScalarDispatchPlan::NnSm89InferenceCopyPlanQualified => push_scalar_node(
             &mut nodes,
             context,
@@ -3604,6 +3662,16 @@ fn scalar_route_contract(
             PhysicalGemmBackend::ScalarFmaSplitKPartial,
             ResolvedNumericContract::ScalarFmaSplitKPartial,
             ResolvedOutputOwnership::OneCtaPerOutputTilePerSplitKPartition,
+        );
+    }
+    if matches!(
+        symbol,
+        "nn_big_pieces4" | "nn_m64n64_pieces4" | "nt_slim_pieces4"
+    ) {
+        return (
+            PhysicalGemmBackend::ScalarFma,
+            ResolvedNumericContract::ScalarFmaFixedSplitFold,
+            ResolvedOutputOwnership::OneCtaPerOutputTile,
         );
     }
     if symbol == "splitk_reduce" {
@@ -4675,6 +4743,9 @@ fn prepare_scalar_f32_with_plan(
 ) -> Result<PreparedF32TriadLaunch, String> {
     if operands.beta != 0.0 && scalar_plan_requires_zero_beta(plan) {
         return Err("selected exact scalar plan requires beta == 0".into());
+    }
+    if operands.alpha.to_bits() != 1.0f32.to_bits() && scalar_plan_requires_unit_alpha(plan) {
+        return Err("selected exact scalar plan requires alpha == 1".into());
     }
     let allocation_domain = validated_allocation_domain(&ctx.stream, &ctx.kernels, "f32 Triad")?;
     let resources = output_resources.with_inputs(request, operands, allocation_domain)?;
@@ -10725,7 +10796,17 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
         return Ok(());
     }
 
-    if matches!(scalar_plan, ScalarDispatchPlan::NnM64N64Qualified) {
+    if matches!(
+        scalar_plan,
+        ScalarDispatchPlan::NnM64N64Qualified | ScalarDispatchPlan::NnExactPiecesM64
+    ) {
+        // The 64 x 64 tile also serves a cut layer, folding its pieces
+        // through the output tile, with the same launch.
+        let (function, symbol) = if scalar_plan == ScalarDispatchPlan::NnExactPiecesM64 {
+            (&kernels.gemm_bi_nn_m64n64_pieces4, "nn_m64n64_pieces4")
+        } else {
+            (&kernels.gemm_bi_nn_m64n64_bk16_s2, "nn_m64n64_bk16_s2")
+        };
         let params = SgbNnM64N64Params {
             alpha,
             beta,
@@ -10742,8 +10823,7 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             block_dim: (128, 1, 1),
             shared_mem_bytes: super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES,
         };
-        let mut builder =
-            scalar_launch_builder(stream, &kernels.gemm_bi_nn_m64n64_bk16_s2, &control);
+        let mut builder = scalar_launch_builder(stream, function, &control);
         builder.arg_buffer_mut(y);
         builder.arg(&x_ptr);
         builder.arg(&w_ptr);
@@ -10753,11 +10833,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            "nn_m64n64_bk16_s2",
+            symbol,
             cfg,
             &mut builder,
         )
-        .map_err(|error| error.with_driver_context(format_args!("nn_m64n64_bk16_s2 forward")))?;
+        .map_err(|error| error.with_driver_context(format_args!("{symbol} forward")))?;
         return Ok(());
     }
 
@@ -10766,14 +10846,23 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
     // Non-%4 K handled by kernel scalar K-fallback (runtime lda%4 check).
     // K<BK: kernel's scalar bounds check zero-fills smem for dotIdx≥K; wastes a few FMAs
     // but correct (handles Mamba-1 dt_proj K=4,8). dropped `n_in >= 16` guard.
-    if let ScalarDispatchPlan::NnFinal { slim } = scalar_plan {
+    // The 128 x 128 tile also serves a cut layer, folding its pieces
+    // through the output tile, with the same launch.
+    let final_tile = match scalar_plan {
+        ScalarDispatchPlan::NnFinal { slim } => Some((slim, false)),
+        ScalarDispatchPlan::NnExactPiecesBig => Some((false, true)),
+        _ => None,
+    };
+    if let Some((slim, pieces)) = final_tile {
         let m_i = checked_dims.m_i32;
         let n_i = checked_dims.n_i32;
         let k_i = checked_dims.k_i32;
-        let (func, bn) = if slim {
-            (&kernels.gemm_bi_nn_slim, 64)
+        let (func, bn, symbol) = if pieces {
+            (&kernels.gemm_bi_nn_big_pieces4, 128, "nn_big_pieces4")
+        } else if slim {
+            (&kernels.gemm_bi_nn_slim, 64, "nn_slim")
         } else {
-            (&kernels.gemm_bi_nn, 128)
+            (&kernels.gemm_bi_nn, 128, "nn_big")
         };
         // Opt1: Big uses 256 threads/block for TLP; Slim stays 128.
         let threads = if slim { 128u32 } else { 256u32 };
@@ -10805,16 +10894,11 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
             &mut control,
             request,
             actual_operands,
-            if slim { "nn_slim" } else { "nn_big" },
+            symbol,
             cfg,
             &mut builder,
         )
-        .map_err(|error| {
-            error.with_driver_context(format_args!(
-                "nn_big{} forward",
-                if slim { "_slim" } else { "" }
-            ))
-        })?;
+        .map_err(|error| error.with_driver_context(format_args!("{symbol} forward")))?;
         return Ok(());
     }
 
@@ -12583,14 +12667,23 @@ fn gemm_bi_backward_dx_with_control<
     // Envelope: M ≥ 128, K_out ≥ 1. Kernel has scalar N-fallback for non-%4 N,
     // scalar K-fallback for non-%4 K_out.
     // Dropped `n_in >= 128` — covers Mamba-1 dt_proj backward_dx (K_out=8).
-    if let ScalarDispatchPlan::NtFinal { slim } = scalar_plan {
+    // The slim tile also serves a cut layer, folding its pieces through the
+    // output tile, with the same launch.
+    let final_tile = match scalar_plan {
+        ScalarDispatchPlan::NtFinal { slim } => Some((slim, false)),
+        ScalarDispatchPlan::NtExactPieces => Some((true, true)),
+        _ => None,
+    };
+    if let Some((slim, pieces)) = final_tile {
         let m_i = checked_dims.m_i32;
         let n_i = checked_dims.n_i32;
         let k_i = checked_dims.k_i32;
-        let (func, bn) = if slim {
-            (&kernels.gemm_bi_nt_slim, 64)
+        let (func, bn, symbol) = if pieces {
+            (&kernels.gemm_bi_nt_slim_pieces4, 64, "nt_slim_pieces4")
+        } else if slim {
+            (&kernels.gemm_bi_nt_slim, 64, "nt_slim")
         } else {
-            (&kernels.gemm_bi_nt, 128)
+            (&kernels.gemm_bi_nt, 128, "nt_big")
         };
         // Opt1: Big uses 256 threads/block; Slim stays 128.
         let threads = if slim { 128u32 } else { 256u32 };
@@ -12615,14 +12708,8 @@ fn gemm_bi_backward_dx_with_control<
         builder.arg(&m_i);
         builder.arg(&n_i);
         builder.arg(&k_i);
-        let symbol = if slim { "nt_slim" } else { "nt_big" };
         enqueue_scalar_backward(&mut control, request, operands, symbol, cfg, &mut builder)
-            .map_err(|error| {
-                error.with_driver_context(format_args!(
-                    "nt_big{} backward_dx",
-                    if slim { "_slim" } else { "" }
-                ))
-            })?;
+            .map_err(|error| error.with_driver_context(format_args!("{symbol} backward_dx")))?;
         return Ok(());
     }
 
