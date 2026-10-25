@@ -1402,10 +1402,11 @@ impl Mamba3GpuEngineMixed {
         mode: Option<GemmMode>,
     ) -> Result<Self, String> {
         admit_decode(cpu_weights, (&cfg, input_dim, batch), (bulk_dtype, mode))?;
-        // The f32 engine's context, kernels and shapes without its weights:
-        // every kernel here reads `mixed_weights`, whose f32 arena holds the
+        // The f32 engine's context, in the family the bulk precision
+        // serves, its kernels and its shapes without its weights: every
+        // kernel here reads `mixed_weights`, whose f32 arena holds the
         // norms, biases and per-head coefficients.
-        let (ctx, kernels) = engine_ctx_and_kernels(device, &cfg, mode, WeightDtype::F32)?;
+        let (ctx, kernels) = engine_ctx_and_kernels(device, &cfg, mode, bulk_dtype)?;
         let mixed_weights = GpuMamba3MixedWeights::from_cpu(&ctx.stream, cpu_weights, bulk_dtype)?;
         let weights = GpuMamba3WeightsInf::empty(&ctx.stream)?;
         let engine = Mamba3GpuEngine::from_parts(
