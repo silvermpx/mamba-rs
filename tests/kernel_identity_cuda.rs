@@ -643,15 +643,19 @@ fn half_physical_trace_records_complete_upcast_routes() {
     ] {
         // The forward keeps its layer whole and runs one chain tile; the
         // input gradient's layer (512 outputs summed) is cut, so its four
-        // pieces come from the chunk partial and fold in the reducer.
+        // pieces come from a chunk partial and fold in the reducer. The 32 x
+        // 64 partial's grid over these 64 rows and 384 inputs is 48 CTAs; a
+        // card with more multiprocessors runs the 16 x 16 partial, which
+        // writes the same planes.
+        let nt_partial = if ctx.gemm_route().device.multiprocessor_count > 48 {
+            "nt_exact_chunk_partial_m16n16_bk16_s4"
+        } else {
+            "nt_exact_chunk_partial_m32n64"
+        };
         for (op, expected_gemms, has_downcast) in [
             (ResolvedGemmOp::Nn, &["nn_exact_m16n16_bk16_s4"][..], true),
             (ResolvedGemmOp::Tn, &["tn_slim"][..], false),
-            (
-                ResolvedGemmOp::Nt,
-                &["nt_exact_chunk_partial_m32n64", "splitk_reduce"][..],
-                true,
-            ),
+            (ResolvedGemmOp::Nt, &[nt_partial, "splitk_reduce"][..], true),
         ] {
             let expected_count = 2 + expected_gemms.len() + usize::from(has_downcast);
             let fallback = record_half_fixture(
