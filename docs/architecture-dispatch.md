@@ -5,6 +5,11 @@ the project, and it applies to every kernel family: the deterministic GEMM
 triad, the inference GEMMs, the Mamba scans and every kernel added later. The
 same rule binds any project that carries these kernels.
 
+For the GEMMs, [gemm-architecture.md](gemm-architecture.md) is the full
+contract: which bits a product writes, how the dispatcher chooses among the
+kernels that write them, and what a change proves before it merges. This page
+keeps the per-architecture rule for every family.
+
 ## The rule
 
 1. **SM80 is the base block.** The portable tier (`mma.sync`, `cp.async`,
