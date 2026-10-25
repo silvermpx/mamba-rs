@@ -39,6 +39,34 @@ __device__ __forceinline__ bool aligned_16(const void* pointer) {
     return ((unsigned long long)pointer & 15ULL) == 0ULL;
 }
 
+// A thread's fragment of consecutive floats from shared memory, as fixed PTX
+// vector loads. Given plain float4 or float2 loads, the NVRTC optimizer
+// sometimes re-loads part of a fragment later (an extra v2 load with a
+// used-bytes pragma) and decides differently from one compile to the next,
+// which moved this module's artifact identity between compiles of the same
+// source. An opaque asm value cannot be split or re-loaded, so every compile
+// emits the same instructions.
+template <int Count>
+__device__ __forceinline__ void load_shared_fragment(float (&values)[Count], const float* source) {
+    static_assert(Count == 1 || Count == 2 || Count == 4, "fragments are one, two or four floats");
+    if constexpr (Count == 1) {
+        values[0] = source[0];
+    } else {
+        unsigned address = (unsigned)__cvta_generic_to_shared(source);
+        if constexpr (Count == 2) {
+            asm volatile("ld.shared.v2.f32 {%0, %1}, [%2];"
+                         : "=f"(values[0]), "=f"(values[1])
+                         : "r"(address)
+                         : "memory");
+        } else {
+            asm volatile("ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];"
+                         : "=f"(values[0]), "=f"(values[1]), "=f"(values[2]), "=f"(values[3])
+                         : "r"(address)
+                         : "memory");
+        }
+    }
+}
+
 template <bool CacheGlobal>
 __device__ __forceinline__ void copy_16(unsigned destination, const float* source) {
     if (CacheGlobal) {
@@ -160,30 +188,12 @@ struct Kernel {
 
     static __device__ __forceinline__ void load_rows(
         const float* a_tile, int reduction, int row_base, float (&values)[RowsPerThread]) {
-        const float* p = a_tile + reduction * TileM + row_base;
-        if (RowsPerThread == 4) {
-            float4 v = *reinterpret_cast<const float4*>(p);
-            values[0] = v.x; values[1] = v.y; values[2] = v.z; values[3] = v.w;
-        } else if (RowsPerThread == 2) {
-            float2 v = *reinterpret_cast<const float2*>(p);
-            values[0] = v.x; values[1] = v.y;
-        } else {
-            values[0] = p[0];
-        }
+        load_shared_fragment<RowsPerThread>(values, a_tile + reduction * TileM + row_base);
     }
 
     static __device__ __forceinline__ void load_columns(
         const float* b_tile, int reduction, int column_base, float (&values)[ColsPerThread]) {
-        const float* p = b_tile + reduction * TileN + column_base;
-        if (ColsPerThread == 4) {
-            float4 v = *reinterpret_cast<const float4*>(p);
-            values[0] = v.x; values[1] = v.y; values[2] = v.z; values[3] = v.w;
-        } else if (ColsPerThread == 2) {
-            float2 v = *reinterpret_cast<const float2*>(p);
-            values[0] = v.x; values[1] = v.y;
-        } else {
-            values[0] = p[0];
-        }
+        load_shared_fragment<ColsPerThread>(values, b_tile + reduction * TileN + column_base);
     }
 
     static __device__ __forceinline__ void compute_round(
