@@ -593,6 +593,11 @@ enum PreparedF32Kind {
     },
     Tf32TnPreRna {
         route: Tf32PhysicalRoute,
+        // Resolved once here, with the GEMM kernel in the launch's
+        // `function`: looking a kernel up by name scans the spec tables and
+        // hashes the symbol, which cost a small product's call a third of a
+        // microsecond on the host.
+        transpose_function: cudarc::driver::CudaFunction,
         transpose_params: Sm89Tf32JointTransposeParams,
         gemm_params: Sm89Tf32JointGemmParams,
         transpose_config: cudarc::driver::LaunchConfig,
@@ -5326,6 +5331,16 @@ fn prepare_sm89_tf32_tn_pre_rna(
         tuning_table_revision: SM89_TF32_JOINT_TUNING_REVISION,
         schedule_revision: SCHEDULE_REVISION,
     };
+    let transpose_function = ctx
+        .kernels
+        .triad_sm89_tf32_joint_function(TN_PRE_RNA_TRANSPOSE_SYMBOL)
+        .cloned()
+        .ok_or_else(|| "qualified Ada TF32 transpose symbol is unavailable".to_string())?;
+    let gemm_function = ctx
+        .kernels
+        .triad_sm89_tf32_joint_function(spec.symbol)
+        .cloned()
+        .ok_or_else(|| format!("qualified Ada TF32 symbol {} is unavailable", spec.symbol))?;
     let routes = vec![resolved].into_boxed_slice();
     let resolved_launch_set = build_resolved_gemm_launch_set(&routes)?;
     let managed_epoch = resources.managed_epoch();
@@ -5338,9 +5353,10 @@ fn prepare_sm89_tf32_tn_pre_rna(
         managed_epoch,
         routes,
         resolved_launch_set,
-        function: None,
+        function: Some(gemm_function),
         kind: PreparedF32Kind::Tf32TnPreRna {
             route,
+            transpose_function,
             transpose_params,
             gemm_params,
             transpose_config,
@@ -8196,6 +8212,7 @@ unsafe fn enqueue_sm89_tf32_tn_pre_rna<O: PhysicalLaunchObserver>(
 ) -> Result<(), String> {
     let PreparedF32Kind::Tf32TnPreRna {
         route,
+        transpose_function: transpose,
         transpose_params,
         gemm_params,
         transpose_config,
@@ -8210,19 +8227,10 @@ unsafe fn enqueue_sm89_tf32_tn_pre_rna<O: PhysicalLaunchObserver>(
     let [resolved] = prepared.routes.as_ref() else {
         return Err("Ada TF32 pre-RNA pipeline requires exactly one GEMM route".into());
     };
-    let transpose = ctx
-        .kernels
-        .triad_sm89_tf32_joint_function(TN_PRE_RNA_TRANSPOSE_SYMBOL)
-        .ok_or_else(|| "qualified Ada TF32 transpose symbol is unavailable".to_string())?;
-    let gemm = ctx
-        .kernels
-        .triad_sm89_tf32_joint_function(resolved.symbol)
-        .ok_or_else(|| {
-            format!(
-                "qualified Ada TF32 symbol {} is unavailable",
-                resolved.symbol
-            )
-        })?;
+    let gemm = prepared
+        .function
+        .as_ref()
+        .ok_or_else(|| "Ada TF32 pre-RNA pipeline lost its prepared GEMM kernel".to_string())?;
     ctx.record_resolved_gemm_route(*resolved)?;
     let scratch_bytes = u64::try_from(*scratch_elements)
         .ok()
