@@ -9339,7 +9339,9 @@ pub(super) fn exact_batch_invariant_nn_plan(
     if m >= GEMM_CUSTOM_MIN && n >= GEMM_CUSTOM_MIN && rules.uncut.big.covered(big_grid, waves) {
         return Ok(ScalarDispatchPlan::NnFinal { slim: false });
     }
-    if m.div_ceil(64).saturating_mul(n.div_ceil(64)) >= waves / 2 {
+    if n >= rules.uncut.m64_min_columns
+        && m.div_ceil(64).saturating_mul(n.div_ceil(64)) >= waves / 2
+    {
         return Ok(ScalarDispatchPlan::NnM64N64Qualified);
     }
     // A thin batch: the chain's length sets the time. One row takes the thin
@@ -9502,7 +9504,9 @@ impl ExactChunkPartials {
 /// One architecture's tiles for an uncut exact layer: the 32 x 64 chain
 /// tile while its grid falls in its window (at 32 outputs or more), for a
 /// forward then the 128 x 128 tile from `big` of a wave of its grid (at 128
-/// rows and outputs); for an input gradient into 2 to 127 forward outputs
+/// rows and outputs) and the qualified 64 x 64 tile from half a wave of its
+/// grid at `m64_min_columns` outputs or more; for an input gradient into 2
+/// to 127 forward outputs
 /// the narrow tile while the 64 x 64 grid falls in `nt_narrow`, the native
 /// slim tile from `nt_slim` of a wave of its grid, and the 64 x 64 chain
 /// tile over the transposed weight from `nt_via` of a wave of its grid.
@@ -9510,6 +9514,7 @@ impl ExactChunkPartials {
 pub(super) struct ExactUncutTiles {
     pub(super) nn_km: WaveWindow,
     pub(super) big: WaveShare,
+    pub(super) m64_min_columns: usize,
     pub(super) nt_km: WaveWindow,
     pub(super) nt_narrow: Option<WaveWindow>,
     pub(super) nt_slim: WaveShare,
@@ -9570,6 +9575,7 @@ const EXACT_SM89: ExactRules = ExactRules {
     uncut: ExactUncutTiles {
         nn_km: WaveWindow::new(WaveShare::new(1, 2), WaveShare::new(3, 1)),
         big: WaveShare::new(3, 4),
+        m64_min_columns: 1,
         nt_km: WaveWindow::new(WaveShare::new(1, 3), WaveShare::new(3, 1)),
         nt_narrow: Some(WaveWindow::new(WaveShare::new(1, 4), WaveShare::new(1, 1))),
         nt_slim: WaveShare::new(1, 2),
@@ -9626,6 +9632,7 @@ const EXACT_SM120: ExactRules = ExactRules {
     uncut: ExactUncutTiles {
         nn_km: WaveWindow::new(WaveShare::new(1, 2), WaveShare::new(1, 1)),
         big: WaveShare::new(4, 1),
+        m64_min_columns: 1,
         nt_km: WaveWindow::new(WaveShare::new(1, 3), WaveShare::new(3, 1)),
         nt_narrow: None,
         nt_slim: WaveShare::new(3, 2),
@@ -9635,16 +9642,23 @@ const EXACT_SM120: ExactRules = ExactRules {
 
 /// SM80, from the same censuses on an A100 (SXM4, 108 SMs). Over the 788
 /// cut cells the register tiles came within 1.3% of the fastest route per
-/// cell in geometric mean on forwards and 1.6% on input gradients, where
+/// cell in geometric mean on forwards and 1.7% on input gradients, where
 /// SM89's table took 4.6% and 4.5%: the 128 x 128 tile almost never pays
-/// here, the 128 x 64 tile does from one and a half waves. Over the 585 cut
+/// here, the 128 x 64 tile does from one and a half waves, and the 32 x 64
+/// tile beside the slim partial only while the layer's outputs reach its
+/// rows (1024 rows of 256 inputs ran 1.15 times the slim partial's time on
+/// it). Over the 585 cut
 /// cells on the chunk partials the slim partial from 97 rows and one and a
 /// half waves and the 16 x 16 partial up to 16 rows and below one and a half
 /// waves, folded in the same launch (0.95 of the reducer's time here), came
 /// within 1.8% on forwards and 0.63% on input gradients (Ada's rule took
 /// 5.3% and 3.2%). Over the uncut cells the 32 x 64 chain tile from half a
 /// wave on forwards and a third of a wave on input gradients, with no upper
-/// end, came within 1.4% and 0.22% (3.9% and 3.6% before).
+/// end, came within 1.4% and 0.22% (3.9% and 3.6% before); over 224 forwards
+/// into at most 64 outputs the qualified 64 x 64 tile never won, and leaving
+/// it to layers of 64 outputs or more came within 2.3% where it took 16%
+/// (a 4096-row layer into 16 outputs ran 2.5 times the thin tile's time on
+/// it).
 const EXACT_SM80: ExactRules = ExactRules {
     forward: ExactCutTiles {
         big: WaveShare::new(16, 1),
@@ -9662,7 +9676,7 @@ const EXACT_SM80: ExactRules = ExactRules {
         km: WaveShare::new(3, 4),
         km_below: Some(WaveShare::new(6, 1)),
         km_max_pieces: 24,
-        km_beside_slim: KmBesideSlim::Always,
+        km_beside_slim: KmBesideSlim::WhileOutputsReachRows,
     },
     partials: ExactChunkPartials {
         slim_from: WaveShare::new(3, 2),
@@ -9674,6 +9688,7 @@ const EXACT_SM80: ExactRules = ExactRules {
     uncut: ExactUncutTiles {
         nn_km: WaveWindow::from(WaveShare::new(1, 2)),
         big: WaveShare::new(4, 1),
+        m64_min_columns: 64,
         nt_km: WaveWindow::from(WaveShare::new(1, 3)),
         nt_narrow: Some(WaveWindow::new(WaveShare::new(1, 4), WaveShare::new(1, 1))),
         nt_slim: WaveShare::new(1, 2),
