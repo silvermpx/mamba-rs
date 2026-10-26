@@ -4921,6 +4921,17 @@ pub(super) fn sm120_fma_layer_route(
         in_cta: splits > 1 && request.op == ResolvedGemmOp::Nn,
         layer_fold: true,
     };
+    if cut
+        && !sm120_layer_takes_cut(
+            request.op,
+            (shape.output_rows(request.op), columns),
+            tile,
+            splits,
+            qualified.device.multiprocessor_count,
+        )
+    {
+        return None;
+    }
     if qualified
         .sm120_fma_exclusions
         .is_excluded(request.op, route)
@@ -4929,6 +4940,38 @@ pub(super) fn sm120_fma_layer_route(
     }
     super::launch::sm120_fma_launch_plan(request, route).ok()?;
     Some(route)
+}
+
+/// Whether the SM120 layer kernels take a cut layer of `rows` x `columns`
+/// outputs on `tile`, cut into `splits` pieces. A forward's CTA folds its
+/// own pieces, and the kernels take it while their grid stays under three
+/// waves of the card. An input gradient deals a CTA to each piece, and the
+/// kernels take it while its rows fill three quarters of their tiles and
+/// its tiles times its pieces fall from three to eight waves. Past those
+/// bounds the portable register tiles and chunk partials, which write the
+/// same bits, run faster: over the census's 120 cut forwards and 132 cut
+/// input gradients on an RTX 5090, every route forced in two passes, the
+/// bounds came within 0.68% and 0.76% of the faster route per cell in
+/// geometric mean, where half a tile per multiprocessor alone took 2.3%
+/// and 3.2% (up to 1.28 and 1.25 times the faster route's time).
+fn sm120_layer_takes_cut(
+    op: ResolvedGemmOp,
+    (rows, columns): (usize, usize),
+    tile: Sm120FmaTile,
+    splits: u8,
+    multiprocessors: u32,
+) -> bool {
+    let waves = multiprocessors as usize;
+    let (bm, bn) = tile.dims();
+    let (bm, bn) = (bm as usize, bn as usize);
+    let tiles = rows.div_ceil(bm).saturating_mul(columns.div_ceil(bn));
+    if op == ResolvedGemmOp::Nn {
+        return tiles < waves.saturating_mul(3);
+    }
+    let dealt = tiles.saturating_mul(usize::from(splits));
+    rows.saturating_mul(4) >= rows.div_ceil(bm).saturating_mul(bm * 3)
+        && dealt >= waves.saturating_mul(3)
+        && dealt < waves.saturating_mul(8)
 }
 
 pub const SM90A_AUTO_CELLS: &[Sm90aForcedRoute] = &[];
@@ -14846,11 +14889,15 @@ mod tf32_tests {
             alpha: 1.0,
             beta: 0.0,
         };
+        // Wide cut layers deal more pieces than the layer kernels take and stay
+        // portable; the cut layers inside their window fold on them.
         let mut served = [0_usize; 2];
         for (m, n_in, n_out) in [
             (4_096, 512, 2_048),
             (4_096, 1_536, 3_072),
             (10_400, 768, 1_024),
+            (2_048, 384, 768),
+            (1_024, 768, 768),
             (4_096, 2_048, 256),
             (8_192, 1_024, 384),
         ] {
@@ -15166,15 +15213,20 @@ mod tf32_tests {
             exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, measured)]);
         let (request, operands) = nt_d768_out_request_and_operands();
 
-        // An input gradient folds by its layer, on the generic k-vector tile
-        // that no exclusion here names.
-        let layer = super::sm120_fma_layer_route(request, operands, availability)
-            .expect("the layer route binds the d768 input gradient");
+        // An input gradient inside the layer kernels' window on the test
+        // module's card folds by its layer, on the generic k-vector tile that
+        // no exclusion here names.
+        let inside = F32TriadRequest {
+            op: ResolvedGemmOp::Nt,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (1_024, 768, 768)),
+        };
+        let layer = super::sm120_fma_layer_route(inside, operands, availability)
+            .expect("the layer route binds the d768 input gradient of 1024 rows");
         assert!(layer.layer_fold && layer.tile == Sm120FmaTile::M128N64 && layer.kvec);
         assert_eq!(
             resolve_f32_triad_auto_with_operands(
                 F32TriadPolicy::ExactScalarFma,
-                request,
+                inside,
                 operands,
                 availability
             )
@@ -20149,6 +20201,58 @@ mod exact_batch_invariant_tests {
             exact_batch_invariant_nt_plan(nt(129, 1928, 768), 170, (12, 0), false).unwrap(),
             ScalarDispatchPlan::NtExactKmPieces
         );
+    }
+
+    #[test]
+    fn sm120_layer_kernels_take_a_cut_layer_inside_their_window() {
+        use super::super::contract::Sm120FmaTile;
+        use super::sm120_layer_takes_cut;
+        let pieces = |reduction: usize| u8::try_from(reduction.div_ceil(128)).unwrap();
+        // A forward's grid of 128 x 64 tiles under three waves of 170.
+        assert!(sm120_layer_takes_cut(
+            ResolvedGemmOp::Nn,
+            (4096, 256),
+            Sm120FmaTile::M128N64,
+            pieces(512),
+            170
+        ));
+        assert!(!sm120_layer_takes_cut(
+            ResolvedGemmOp::Nn,
+            (3136, 1536),
+            Sm120FmaTile::M128N64,
+            pieces(768),
+            170
+        ));
+        // An input gradient's tiles times pieces from three to eight waves.
+        assert!(sm120_layer_takes_cut(
+            ResolvedGemmOp::Nt,
+            (2048, 384),
+            Sm120FmaTile::M128N64,
+            pieces(768),
+            170
+        ));
+        assert!(!sm120_layer_takes_cut(
+            ResolvedGemmOp::Nt,
+            (4096, 256),
+            Sm120FmaTile::M128N64,
+            pieces(2112),
+            170
+        ));
+        // Rows that leave half their last tile empty stay portable.
+        assert!(!sm120_layer_takes_cut(
+            ResolvedGemmOp::Nt,
+            (129, 1928),
+            Sm120FmaTile::M128N64,
+            pieces(1536),
+            170
+        ));
+        assert!(sm120_layer_takes_cut(
+            ResolvedGemmOp::Nt,
+            (255, 1928),
+            Sm120FmaTile::M128N64,
+            pieces(1536),
+            170
+        ));
     }
 
     #[test]
