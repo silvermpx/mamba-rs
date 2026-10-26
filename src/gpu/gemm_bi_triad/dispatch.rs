@@ -2805,6 +2805,18 @@ fn rna_one_chain_selection(
     availability: F32TriadAvailability,
 ) -> Result<F32TriadSelection, String> {
     let keeps = |route: Tf32PhysicalRoute| rna_batch_invariant_route(request.op, route);
+    // The architecture's own chain rules, where a census measured them; an
+    // input gradient reads them once a measured specialized cell has not
+    // claimed its shape.
+    let chain_rule = || {
+        rna_chain_rule_route(request, operands, availability)
+            .and_then(|route| resolve_tf32_forced(request, availability, route).ok())
+    };
+    if request.op == ResolvedGemmOp::Nn
+        && let Some(bound) = chain_rule()
+    {
+        return Ok(F32TriadSelection::Tf32(bound));
+    }
     // The architecture's own forward table, where it has one: every tile it
     // names walks the portable tiles' chain, so it picks by speed alone.
     if let Some(route) = rna_forward_table_route(request, operands, availability) {
@@ -2859,6 +2871,11 @@ fn rna_one_chain_selection(
         && same_cut(route)
     {
         return Ok(F32TriadSelection::Tf32(route));
+    }
+    if request.op == ResolvedGemmOp::Nt
+        && let Some(bound) = chain_rule()
+    {
+        return Ok(F32TriadSelection::Tf32(bound));
     }
     let ruled = rna_backward_rule_route(request, operands, availability)
         .and_then(|route| resolve_tf32_forced(request, availability, route).ok())
@@ -2975,8 +2992,8 @@ const TF32_CUT_SM120: Tf32CutRules = Tf32CutRules {
 /// route forced in two passes: within 1.9% of the fastest route per cell over
 /// 365 cut forwards and 1.7% over 414 cut input gradients, where the split
 /// members it ran before took 42% and 25% (up to 4.6 and 3.2 times the
-/// fastest route's time). Its unaligned forwards keep the table until a
-/// census measures them.
+/// fastest route's time); over 240 unaligned forwards the four-byte tiles
+/// from half a wave each came within 1.6%, where the table alone took 25%.
 const TF32_CUT_SM80: Tf32CutRules = Tf32CutRules {
     forward_wide: Some(WaveShare::new(3, 2)),
     forward_work: Some(WaveShare::new(16, 1)),
@@ -2986,7 +3003,7 @@ const TF32_CUT_SM80: Tf32CutRules = Tf32CutRules {
     gradient_small: Some(WaveShare::new(1, 4)),
     gradient_wide: Some(WaveShare::new(1, 4)),
     gradient_work: Some(WaveShare::new(64, 1)),
-    unaligned: None,
+    unaligned: Some((WaveShare::new(1, 2), WaveShare::new(1, 2))),
 };
 
 /// The TF32 cut rules of the card's architecture: SM80, SM89 and SM120 by
@@ -2998,6 +3015,105 @@ fn tf32_cut_rules(compute_capability: Option<(u32, u32)>) -> Tf32CutRules {
         Some((12, _)) => TF32_CUT_SM120,
         _ => TF32_CUT_SM89,
     }
+}
+
+/// One architecture's one-chain TF32 tiles for a forward or an input
+/// gradient its layer keeps whole, where the operands stage: a forward takes
+/// the 128 x 128 wide tile from `forward_wide` of a wave of its grid, the
+/// multistage 128 x 64 tile (the persistent one where
+/// [`rna_persistent_forward`] says) from `forward_ms128` of its grid, the
+/// multistage 64 x 64 tile from `forward_ms64` of its grid, and the
+/// multistage 16 x 32 tile below; an input gradient takes the multistage
+/// 128 x 128, 64 x 128 and 64 x 64 tiles from their shares of their grids,
+/// the portable 16 x 16 tile up to `gradient_thin_rows` rows, and the
+/// multistage 16 x 32 tile otherwise. Every tile walks an output's reduction
+/// in one chain, so the choice moves time only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Tf32ChainRules {
+    forward_wide: Option<WaveShare>,
+    forward_ms128: Option<WaveShare>,
+    forward_ms64: Option<WaveShare>,
+    gradient_ms128x128: Option<WaveShare>,
+    gradient_ms64x128: Option<WaveShare>,
+    gradient_ms64: Option<WaveShare>,
+    gradient_thin_rows: usize,
+}
+
+/// SM120, from a census of every one-chain route forced in two passes on an
+/// RTX 5090: within 2.2% of the fastest route per cell in geometric mean over
+/// 309 uncut forwards and 3.6% over 414 uncut input gradients, where the
+/// tables it ran before took 24% and 13% (the multistage 16 x 32 tile, gated
+/// to Ada there, was the fastest route of 200 of the forwards, and the
+/// 144 x 96 tile ran 512 to 768 rows over 768 inputs up to 2.9 times slower
+/// than the multistage 64 x 64 one, which also ran 0.7 to 0.9 of the SM120
+/// TMA 64 x 64 tile's time wherever the table had named that tile).
+const TF32_CHAIN_SM120: Tf32ChainRules = Tf32ChainRules {
+    forward_wide: Some(WaveShare::new(4, 1)),
+    forward_ms128: Some(WaveShare::new(4, 3)),
+    forward_ms64: Some(WaveShare::new(1, 2)),
+    gradient_ms128x128: Some(WaveShare::new(4, 1)),
+    gradient_ms64x128: Some(WaveShare::new(8, 1)),
+    gradient_ms64: Some(WaveShare::new(1, 3)),
+    gradient_thin_rows: 48,
+};
+
+/// The one-chain rules of the card's architecture, where a census measured
+/// them; any other architecture keeps its forward table and gradient rules.
+fn tf32_chain_rules(compute_capability: Option<(u32, u32)>) -> Option<Tf32ChainRules> {
+    match compute_capability {
+        Some((12, _)) => Some(TF32_CHAIN_SM120),
+        _ => None,
+    }
+}
+
+/// The one-chain route of a staged forward or input gradient on an
+/// architecture with its own chain rules, or `None` for the tables.
+fn rna_chain_rule_route(
+    request: F32TriadRequest,
+    operands: Option<F32TriadOperands>,
+    availability: F32TriadAvailability,
+) -> Option<Tf32PhysicalRoute> {
+    use super::contract::Tf32RnaWideTile as W;
+    use super::contract::{Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile};
+    let rules = tf32_chain_rules(availability.rna.map(|rna| rna.device.compute_capability))?;
+    if request.op == ResolvedGemmOp::Tn || !rna_tiles_stage(request, operands, availability) {
+        return None;
+    }
+    let sms = availability.multiprocessors as usize;
+    let rows = request.shape.output_rows(request.op);
+    let columns = request.shape.output_columns(request.op);
+    let grid = |bm: usize, bn: usize| rows.div_ceil(bm).saturating_mul(columns.div_ceil(bn));
+    let covers =
+        |share: Option<WaveShare>, tiles: usize| share.is_some_and(|s| s.covered(tiles, sms));
+    let tile = if request.op == ResolvedGemmOp::Nn {
+        if covers(rules.forward_wide, grid(128, 128)) {
+            W::M128N128S3
+        } else if covers(rules.forward_ms128, grid(128, 64)) {
+            if rna_persistent_forward(request) {
+                W::MsPersistM128N64Bk16S3
+            } else {
+                W::MsM128N64S3
+            }
+        } else if covers(rules.forward_ms64, grid(64, 64)) {
+            W::MsM64N64S3
+        } else {
+            W::MsM16N32S4
+        }
+    } else if covers(rules.gradient_ms128x128, grid(128, 128)) {
+        W::NtMsM128N128Bk16S5
+    } else if covers(rules.gradient_ms64x128, grid(64, 128)) {
+        W::NtMsM64N128Bk16S6
+    } else if covers(rules.gradient_ms64, grid(64, 64)) {
+        W::NtMsM64N64S3
+    } else if rows <= rules.gradient_thin_rows {
+        return Some(Tf32PhysicalRoute::MmaTf32Rna(Tf32PortableRoute {
+            tile: Tf32PortableTile::M16N16,
+            stages: Tf32PortableStages::S4,
+        }));
+    } else {
+        W::NtMsM16N32S4
+    };
+    Some(Tf32PhysicalRoute::MmaTf32RnaWide(tile))
 }
 
 /// A forward or an input gradient that its layer's fold cuts, under the
@@ -3638,7 +3754,7 @@ fn rna_tiles_stage(
     operands.is_some_and(|operands| {
         availability.rna.is_some_and(|rna| {
             let cc = rna.device.compute_capability;
-            cc == (8, 9) || cc.0 == 12
+            cc == (8, 0) || cc == (8, 9) || cc.0 == 12
         }) && request.shape.lda.is_multiple_of(4)
             && request.shape.ldb.is_multiple_of(4)
             && [operands.a, operands.b]
