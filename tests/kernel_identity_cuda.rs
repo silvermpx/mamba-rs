@@ -650,10 +650,19 @@ fn half_physical_trace_records_complete_upcast_routes() {
         // The forward keeps its layer whole and runs one chain tile; the
         // input gradient's layer (512 outputs summed) is cut, so its four
         // pieces come from a chunk partial and fold in the reducer. The 32 x
-        // 64 partial's grid over these 64 rows and 384 inputs is 48 CTAs; a
-        // card with more multiprocessors runs the 16 x 16 partial, which
-        // writes the same planes and folds them in its last arriving CTAs.
-        let nt_gemms: &[&str] = if ctx.gemm_route().device.multiprocessor_count > 48 {
+        // 64 partial's grid over these 64 rows and 384 inputs is 48 CTAs. A
+        // CC 12.x card takes the 16 x 16 partial while that grid stays under
+        // three quarters of a wave and folds its planes in the reducer; any
+        // other card takes it under one and a half waves and folds them in
+        // its last arriving CTAs. All of them write the same planes.
+        let device = ctx.gemm_route().device;
+        let nt_gemms: &[&str] = if device.compute_capability.0 == 12 {
+            if 48 * 4 < device.multiprocessor_count * 3 {
+                &["nt_exact_chunk_partial_m16n16_bk16_s4", "splitk_reduce"]
+            } else {
+                &["nt_exact_chunk_partial_m32n64", "splitk_reduce"]
+            }
+        } else if device.multiprocessor_count > 48 {
             &["nt_exact_chunk_fused_m16n16_bk16_s4"]
         } else {
             &["nt_exact_chunk_partial_m32n64", "splitk_reduce"]
