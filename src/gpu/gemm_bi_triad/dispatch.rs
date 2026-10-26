@@ -2904,6 +2904,102 @@ fn rna_one_chain_selection(
         })
 }
 
+/// One architecture's tiles for a TF32 product its layer cuts into four
+/// pieces. Where the operands stage, a forward takes the multistage 128 x 64
+/// tile from `forward_wide` of a wave of its grid (at 128 rows or more), the
+/// 64 x 64 tile from `forward_work` of a wave of work (rows times 64-column
+/// strips) or `forward_small` of its own grid, the 32 x 32 tile that stages
+/// four bytes at a time from `forward_quarter` of its grid (at 32 rows or
+/// more), and the split members below; an input gradient takes the 64 x 64
+/// tile while the 128 x 64 grid stays under `gradient_small_below` of a wave
+/// and its own covers `gradient_small` (at 128 rows or more), the 128 x 64
+/// tile from `gradient_wide` of its grid, the portable 64 x 64 tile from
+/// `gradient_work` of a wave of work, and the split members below. Where the
+/// operands do not stage, a forward takes the four-byte 64 x 64 and 32 x 32
+/// tiles from the `unaligned` shares of their grids. Every tile walks the
+/// same pieces in the same order, so the choice moves time only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Tf32CutRules {
+    forward_wide: Option<WaveShare>,
+    forward_work: Option<WaveShare>,
+    forward_small: Option<WaveShare>,
+    forward_quarter: Option<WaveShare>,
+    gradient_small_below: WaveShare,
+    gradient_small: Option<WaveShare>,
+    gradient_wide: Option<WaveShare>,
+    gradient_work: Option<WaveShare>,
+    unaligned: Option<(WaveShare, WaveShare)>,
+}
+
+/// SM89, measured on an RTX 6000 Ada over the census's cut cells, each as
+/// the time of the chosen tile against the fastest same-bit route of the
+/// cell: within 0.23% of the best per cell in geometric mean over 674
+/// forwards (worst 1.19) and 0.3% over 828 input gradients (worst 1.33).
+/// The persistent tile, whose pieces still fold through its output tile,
+/// lost to the 128 x 64 tile by up to 1.32x once the multistage tiles walked
+/// their pieces in an outer loop. The 64 x 64 input-gradient tile ran 1024
+/// rows over 256 and 384 inputs in 0.62 and 0.69 of the 128 x 64 tile's
+/// time. The four-byte 64 x 64 tile ran unaligned forwards of a thousand to
+/// four thousand rows in 0.58 of the portable tiles' time.
+const TF32_CUT_SM89: Tf32CutRules = Tf32CutRules {
+    forward_wide: Some(WaveShare::new(1, 2)),
+    forward_work: Some(WaveShare::new(8, 1)),
+    forward_small: Some(WaveShare::new(1, 2)),
+    forward_quarter: None,
+    gradient_small_below: WaveShare::new(1, 2),
+    gradient_small: Some(WaveShare::new(1, 4)),
+    gradient_wide: Some(WaveShare::new(1, 5)),
+    gradient_work: None,
+    unaligned: Some((WaveShare::new(1, 2), WaveShare::new(1, 4))),
+};
+
+/// SM120, measured on an RTX 5090 over the census's cut cells, every route
+/// forced in two passes: within 0.71% of the fastest route per cell over 365
+/// cut forwards, where the rule without the 32 x 32 tile took 2.0%, and
+/// 0.78% over 414 cut input gradients, where the rule measured before the
+/// nested walk took 6.9%; over 240 unaligned forwards the four-byte tiles
+/// from half a wave each came within 1.0%, where the table alone took 9.4%.
+const TF32_CUT_SM120: Tf32CutRules = Tf32CutRules {
+    forward_wide: Some(WaveShare::new(3, 2)),
+    forward_work: Some(WaveShare::new(16, 1)),
+    forward_small: Some(WaveShare::new(1, 1)),
+    forward_quarter: Some(WaveShare::new(2, 3)),
+    gradient_small_below: WaveShare::new(4, 1),
+    gradient_small: Some(WaveShare::new(1, 4)),
+    gradient_wide: Some(WaveShare::new(1, 4)),
+    gradient_work: Some(WaveShare::new(32, 1)),
+    unaligned: Some((WaveShare::new(1, 2), WaveShare::new(1, 2))),
+};
+
+/// SM80, measured on an A100 (SXM4, 108 SMs) over the same cut cells, every
+/// route forced in two passes: within 1.9% of the fastest route per cell over
+/// 365 cut forwards and 1.7% over 414 cut input gradients, where the split
+/// members it ran before took 42% and 25% (up to 4.6 and 3.2 times the
+/// fastest route's time). Its unaligned forwards keep the table until a
+/// census measures them.
+const TF32_CUT_SM80: Tf32CutRules = Tf32CutRules {
+    forward_wide: Some(WaveShare::new(3, 2)),
+    forward_work: Some(WaveShare::new(16, 1)),
+    forward_small: Some(WaveShare::new(1, 3)),
+    forward_quarter: Some(WaveShare::new(2, 3)),
+    gradient_small_below: WaveShare::new(2, 3),
+    gradient_small: Some(WaveShare::new(1, 4)),
+    gradient_wide: Some(WaveShare::new(1, 4)),
+    gradient_work: Some(WaveShare::new(64, 1)),
+    unaligned: None,
+};
+
+/// The TF32 cut rules of the card's architecture: SM80, SM89 and SM120 by
+/// their own censuses; an architecture not yet measured on its own card
+/// runs SM89's, as its exact rules do.
+fn tf32_cut_rules(compute_capability: Option<(u32, u32)>) -> Tf32CutRules {
+    match compute_capability {
+        Some((8, 0)) => TF32_CUT_SM80,
+        Some((12, _)) => TF32_CUT_SM120,
+        _ => TF32_CUT_SM89,
+    }
+}
+
 /// A forward or an input gradient that its layer's fold cuts, under the
 /// strict policy: four pieces of whole 32-input groups at every batch size.
 /// Every route here takes the same partitions and folds them in the same
@@ -2970,25 +3066,15 @@ fn rna_layer_pieces_selection(
             )
         });
     }
-    // The multistage tiles copy whole 16-byte chunks and are qualified on
-    // the Ada and CC 12.x boards. A forward off those boundaries folds its
-    // pieces in a tile that stages four bytes at a time: the 64 x 64 one
-    // once its grid covers its architecture's share of the card, the 32 x 32
-    // one below that while its own grid covers its share. On an RTX 6000 Ada
-    // (half a wave and a quarter) the 64 x 64 tile ran such forwards, a
-    // thousand to four thousand rows over a few hundred unaligned inputs or
-    // outputs, in 0.58 of the portable tiles' time, and the 32 x 32 tile ran
-    // its own in 0.55 to 0.97 of the 64 x 64 tile's. On an RTX 5090 (half a
-    // wave each) the rule came within 1.0% of the fastest route per cell in
-    // geometric mean over 240 unaligned forwards, where the table alone took
-    // 9.4%. A smaller grid keeps the table, whose tiles ran a 64-row forward
-    // faster than either.
+    // The multistage tiles copy whole 16-byte chunks. A forward off those
+    // boundaries folds its pieces in a tile that stages four bytes at a time:
+    // the 64 x 64 one once its grid covers its architecture's share of the
+    // card, the 32 x 32 one below that while its own grid covers its share.
+    // A smaller grid keeps the table, whose tiles ran a 64-row forward faster
+    // than either on an RTX 6000 Ada.
+    let rules = tf32_cut_rules(availability.rna.map(|rna| rna.device.compute_capability));
     if !rna_tiles_stage(request, operands, availability) {
-        let shares = match availability.rna.map(|rna| rna.device.compute_capability) {
-            Some((8, 9)) => Some((WaveShare::new(1, 2), WaveShare::new(1, 4))),
-            Some((12, _)) => Some((WaveShare::new(1, 2), WaveShare::new(1, 2))),
-            _ => None,
-        };
+        let shares = rules.unaligned;
         let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
         let quarter_tiles = rows.div_ceil(32).saturating_mul(columns.div_ceil(32));
         let tile = shares.and_then(|(small, quarter)| {
@@ -3011,91 +3097,28 @@ fn rna_layer_pieces_selection(
     }
     let work = rows.saturating_mul(columns.div_ceil(64));
     let wide_tiles = rows.div_ceil(128).saturating_mul(columns.div_ceil(64));
+    let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
+    let quarter_tiles = rows.div_ceil(32).saturating_mul(columns.div_ceil(32));
     let multistage = |tile| Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile);
-    let ada = availability
-        .rna
-        .is_some_and(|rna| rna.device.compute_capability == (8, 9));
-    let sm120 = availability
-        .rna
-        .is_some_and(|rna| rna.device.compute_capability.0 == 12);
-    // The tiles the work fills, best first. The rules are measured per
-    // architecture over the census's cut cells, each as the time of the
-    // chosen tile against the fastest same-bit route of the cell. On an RTX
-    // 6000 Ada a forward takes the 128 x 64 multistage tile from half a wave
-    // of its grid, the 64 x 64 tile from eight waves of work or half a wave
-    // of its own grid, and the split members below; the persistent tile,
-    // whose pieces still fold through its output tile, lost to the 128 x 64
-    // tile by up to 1.32x once the multistage tiles walked their pieces in
-    // an outer loop. That came within 0.23% of the best per cell in
-    // geometric mean over 674 forwards (worst 1.19), where the persistent
-    // rule took 1.4% (worst 1.32); the input gradients' rule came within
-    // 0.3% over 828 (worst 1.33).
+    let covers =
+        |share: Option<WaveShare>, grid: usize| share.is_some_and(|s| s.covered(grid, sms));
+    // The tiles the work fills, best first, by the architecture's table.
     let filled = if forward && rows <= 16 && columns.div_ceil(32) >= sms.saturating_mul(4) {
         [Some(tile_16), None, None]
-    } else if ada && forward {
-        let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
-        if rows >= 128 && wide_tiles.saturating_mul(2) >= sms {
+    } else if forward {
+        if rows >= 128 && covers(rules.forward_wide, wide_tiles) {
             [
                 Some(multistage(Tf32RnaWideTile::MsM128N64S3)),
                 Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
                 None,
             ]
-        } else if work >= sms.saturating_mul(8) || small_tiles.saturating_mul(2) >= sms {
+        } else if covers(rules.forward_work, work) || covers(rules.forward_small, small_tiles) {
             [
                 Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
                 Some(tile_64),
                 None,
             ]
-        } else {
-            [None, None, None]
-        }
-    } else if ada {
-        // The 64 x 64 tile below half a wave of 128 x 64 tiles, from a quarter
-        // of a wave of its own: on an RTX 6000 Ada it ran input gradients of
-        // 1024 rows over 256 and 384 inputs (64 and 96 of its tiles) in 0.62
-        // and 0.69 of the 128 x 64 tile's time, with the same bits, while at
-        // nine tenths of a wave the 128 x 64 tile ran in 0.80 of its.
-        let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
-        if rows >= 128 && wide_tiles.saturating_mul(2) < sms && small_tiles.saturating_mul(4) >= sms
-        {
-            [
-                Some(multistage(Tf32RnaWideTile::NtMsM64N64S3)),
-                Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
-                Some(tile_64),
-            ]
-        } else if rows >= 128 && wide_tiles.saturating_mul(5) >= sms {
-            [
-                Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
-                Some(tile_64),
-                None,
-            ]
-        } else {
-            [None, None, None]
-        }
-    } else if sm120 && forward {
-        // On an RTX 5090 a forward takes the 128 x 64 multistage tile from
-        // one and a half waves of its grid, the 64 x 64 tile from sixteen
-        // waves of work or a wave of its own grid, and below that the 32 x 32
-        // tile that stages four bytes at a time, from two thirds of a wave of
-        // its grid, ahead of the split members. Over the census's 365 cut
-        // forwards, every route forced in two passes, that came within 0.71%
-        // of the fastest route per cell in geometric mean (25 cells more than
-        // 3% off), where the rule without the 32 x 32 tile took 2.0% (66).
-        let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
-        let quarter_tiles = rows.div_ceil(32).saturating_mul(columns.div_ceil(32));
-        if rows >= 128 && wide_tiles.saturating_mul(2) >= sms.saturating_mul(3) {
-            [
-                Some(multistage(Tf32RnaWideTile::MsM128N64S3)),
-                Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
-                None,
-            ]
-        } else if work >= sms.saturating_mul(16) || small_tiles >= sms {
-            [
-                Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
-                Some(tile_64),
-                None,
-            ]
-        } else if rows >= 32 && quarter_tiles.saturating_mul(3) >= sms.saturating_mul(2) {
+        } else if rows >= 32 && covers(rules.forward_quarter, quarter_tiles) {
             [
                 Some(multistage(Tf32RnaWideTile::MsM32N32S4AnyAlignment)),
                 None,
@@ -3104,53 +3127,22 @@ fn rna_layer_pieces_selection(
         } else {
             [None, None, None]
         }
-    } else if sm120 {
-        // On an RTX 5090 an input gradient takes the 64 x 64 tile while the
-        // 128 x 64 tile's grid stays under four waves and its own covers a
-        // quarter of the card, the 128 x 64 tile from four waves, the
-        // portable 64 x 64 tile from thirty-two waves of work, and the split
-        // members below. Over the census's 414 cut input gradients that came
-        // within 0.78% of the fastest route per cell in geometric mean (24
-        // cells more than 3% off), where the rule measured before the nested
-        // walk took 6.9% (93).
-        let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
-        if rows >= 128 && wide_tiles < sms.saturating_mul(4) && small_tiles.saturating_mul(4) >= sms
-        {
-            [
-                Some(multistage(Tf32RnaWideTile::NtMsM64N64S3)),
-                Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
-                Some(tile_64),
-            ]
-        } else if rows >= 128 && wide_tiles.saturating_mul(4) >= sms {
-            [
-                Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
-                Some(tile_64),
-                None,
-            ]
-        } else if work >= sms.saturating_mul(32) {
-            [Some(tile_64), None, None]
-        } else {
-            [None, None, None]
-        }
-    } else if forward {
-        // The rule an RTX 5090 took before the nested walk; the
-        // architectures not yet measured on their own cards run it.
-        if work >= sms.saturating_mul(16) {
-            [
-                Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
-                Some(tile_64),
-                None,
-            ]
-        } else {
-            [None, None, None]
-        }
-    } else if work >= sms.saturating_mul(64) {
+    } else if rows >= 128
+        && !rules.gradient_small_below.covered(wide_tiles, sms)
+        && covers(rules.gradient_small, small_tiles)
+    {
+        [
+            Some(multistage(Tf32RnaWideTile::NtMsM64N64S3)),
+            Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
+            Some(tile_64),
+        ]
+    } else if rows >= 128 && covers(rules.gradient_wide, wide_tiles) {
         [
             Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
             Some(tile_64),
             None,
         ]
-    } else if work >= sms.saturating_mul(32) {
+    } else if covers(rules.gradient_work, work) {
         [Some(tile_64), None, None]
     } else {
         [None, None, None]
