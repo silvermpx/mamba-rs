@@ -3021,11 +3021,14 @@ fn tf32_cut_rules(compute_capability: Option<(u32, u32)>) -> Tf32CutRules {
 /// gradient its layer keeps whole, where the operands stage: a forward into
 /// at most `forward_narrow_columns` outputs takes the portable 16 x 16 tile,
 /// any other the 128 x 128 wide tile from `forward_wide` of a wave of its
-/// grid, the multistage 128 x 64 tile (the persistent one where
-/// [`rna_persistent_forward`] says) from `forward_ms128` of its grid, the
-/// multistage 64 x 64 tile from `forward_ms64` of its grid or
-/// `forward_ms64_work` of a wave of work (rows times 64-column strips), and
-/// the multistage 16 x 32 tile below; an input gradient takes the multistage
+/// grid, the multistage 64 x 128 tile for at most 128 outputs from
+/// `forward_narrow_wide` of its grid, the persistent 128 x 64 tile (rows a
+/// multiple of 128, outputs of 64 and a reduction of 32, up to
+/// `forward_persist_reduction`) from `forward_persist` of its grid, the
+/// multistage 128 x 64 tile from `forward_ms128` of its grid, the multistage
+/// 64 x 64 tile from `forward_ms64` of its grid or `forward_ms64_work` of a
+/// wave of work (rows times 64-column strips), and the multistage 16 x 32
+/// tile below; an input gradient takes the multistage
 /// 128 x 128, 64 x 128 and 64 x 64 tiles from their shares of their grids,
 /// the portable 16 x 16 tile up to `gradient_thin_rows` rows, and the
 /// multistage 16 x 32 tile otherwise. Every tile walks an output's reduction
@@ -3034,6 +3037,9 @@ fn tf32_cut_rules(compute_capability: Option<(u32, u32)>) -> Tf32CutRules {
 struct Tf32ChainRules {
     forward_narrow_columns: usize,
     forward_wide: Option<WaveShare>,
+    forward_narrow_wide: Option<WaveShare>,
+    forward_persist: Option<WaveShare>,
+    forward_persist_reduction: usize,
     forward_ms128: Option<WaveShare>,
     forward_ms64: Option<WaveShare>,
     forward_ms64_work: Option<WaveShare>,
@@ -3044,7 +3050,7 @@ struct Tf32ChainRules {
 }
 
 /// SM120, from a census of every one-chain route forced in two passes on an
-/// RTX 5090, over the census's cells and a model's: within 2.0% of the
+/// RTX 5090, over the census's cells and a model's: within 1.5% of the
 /// fastest route per cell in geometric mean over 321 uncut forwards and 3.5%
 /// over 424 uncut input gradients, where the tables it ran before took 23%
 /// and 13% (the multistage 16 x 32 tile, gated
@@ -3054,7 +3060,10 @@ struct Tf32ChainRules {
 /// TMA 64 x 64 tile's time wherever the table had named that tile).
 const TF32_CHAIN_SM120: Tf32ChainRules = Tf32ChainRules {
     forward_narrow_columns: 16,
-    forward_wide: Some(WaveShare::new(4, 1)),
+    forward_wide: Some(WaveShare::new(8, 1)),
+    forward_narrow_wide: None,
+    forward_persist: Some(WaveShare::new(4, 3)),
+    forward_persist_reduction: 384,
     forward_ms128: Some(WaveShare::new(4, 3)),
     forward_ms64: Some(WaveShare::new(1, 2)),
     forward_ms64_work: Some(WaveShare::new(16, 1)),
@@ -3064,10 +3073,34 @@ const TF32_CHAIN_SM120: Tf32ChainRules = Tf32ChainRules {
     gradient_thin_rows: 48,
 };
 
+/// SM80, from the same census on an A100 (SXM4, 108 SMs) over the census's
+/// cells and a model's: within 0.43% of the fastest route per cell over 321
+/// uncut forwards and 2.2% over 424 uncut input gradients, where the
+/// portable tiles it ran before took 2.2 and 1.4 times the fastest route's
+/// time in geometric mean (up to 4.4 and 2.3 times): the persistent 128 x 64
+/// tile ran forwards of 2048 to 8192 rows in up to 0.87 of the multistage
+/// tiles' time, and the 64 x 128 tile ran 61440 rows into 128 outputs in 0.71
+/// of the 64 x 64 tile's.
+const TF32_CHAIN_SM80: Tf32ChainRules = Tf32ChainRules {
+    forward_narrow_columns: 0,
+    forward_wide: Some(WaveShare::new(12, 1)),
+    forward_narrow_wide: Some(WaveShare::new(8, 1)),
+    forward_persist: Some(WaveShare::new(4, 3)),
+    forward_persist_reduction: 384,
+    forward_ms128: Some(WaveShare::new(16, 1)),
+    forward_ms64: Some(WaveShare::new(1, 3)),
+    forward_ms64_work: None,
+    gradient_ms128x128: Some(WaveShare::new(3, 4)),
+    gradient_ms64x128: Some(WaveShare::new(2, 1)),
+    gradient_ms64: Some(WaveShare::new(1, 2)),
+    gradient_thin_rows: 0,
+};
+
 /// The one-chain rules of the card's architecture, where a census measured
 /// them; any other architecture keeps its forward table and gradient rules.
 fn tf32_chain_rules(compute_capability: Option<(u32, u32)>) -> Option<Tf32ChainRules> {
     match compute_capability {
+        Some((8, 0)) => Some(TF32_CHAIN_SM80),
         Some((12, _)) => Some(TF32_CHAIN_SM120),
         _ => None,
     }
@@ -3100,14 +3133,19 @@ fn rna_chain_rule_route(
         if columns <= rules.forward_narrow_columns {
             return Some(narrow);
         }
+        let (k, n) = (request.shape.k, request.shape.n);
+        let persists = rows.is_multiple_of(128)
+            && n.is_multiple_of(64)
+            && k.is_multiple_of(32)
+            && k <= rules.forward_persist_reduction;
         if covers(rules.forward_wide, grid(128, 128)) {
             W::M128N128S3
+        } else if columns <= 128 && covers(rules.forward_narrow_wide, grid(64, 128)) {
+            W::MsM64N128Bk16S6
+        } else if persists && covers(rules.forward_persist, grid(128, 64)) {
+            W::MsPersistM128N64Bk16S3
         } else if covers(rules.forward_ms128, grid(128, 64)) {
-            if rna_persistent_forward(request) {
-                W::MsPersistM128N64Bk16S3
-            } else {
-                W::MsM128N64S3
-            }
+            W::MsM128N64S3
         } else if covers(rules.forward_ms64, grid(64, 64))
             || covers(
                 rules.forward_ms64_work,
