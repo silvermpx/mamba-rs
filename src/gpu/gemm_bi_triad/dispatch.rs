@@ -2971,30 +2971,36 @@ fn rna_layer_pieces_selection(
         });
     }
     // The multistage tiles copy whole 16-byte chunks and are qualified on
-    // the Ada and CC 12.x boards. On SM89 a forward off those boundaries
-    // folds its pieces in a tile that stages four bytes at a time: the
-    // 64 x 64 one once its grid covers half the card, the 32 x 32 one below
-    // that while its own grid covers a quarter of the card. On an RTX 6000
-    // Ada the 64 x 64 tile ran such forwards, a thousand to four thousand
-    // rows over a few hundred unaligned inputs or outputs, in 0.58 of the
-    // portable tiles' time, and the 32 x 32 tile ran its own in 0.55 to 0.97
-    // of the 64 x 64 tile's; a smaller grid keeps the table, whose tiles ran
-    // a 64-row forward faster than either.
+    // the Ada and CC 12.x boards. A forward off those boundaries folds its
+    // pieces in a tile that stages four bytes at a time: the 64 x 64 one
+    // once its grid covers its architecture's share of the card, the 32 x 32
+    // one below that while its own grid covers its share. On an RTX 6000 Ada
+    // (half a wave and a quarter) the 64 x 64 tile ran such forwards, a
+    // thousand to four thousand rows over a few hundred unaligned inputs or
+    // outputs, in 0.58 of the portable tiles' time, and the 32 x 32 tile ran
+    // its own in 0.55 to 0.97 of the 64 x 64 tile's. On an RTX 5090 (half a
+    // wave each) the rule came within 1.0% of the fastest route per cell in
+    // geometric mean over 240 unaligned forwards, where the table alone took
+    // 9.4%. A smaller grid keeps the table, whose tiles ran a 64-row forward
+    // faster than either.
     if !rna_tiles_stage(request, operands, availability) {
-        let ada_rna = availability
-            .rna
-            .is_some_and(|rna| rna.device.compute_capability == (8, 9));
+        let shares = match availability.rna.map(|rna| rna.device.compute_capability) {
+            Some((8, 9)) => Some((WaveShare::new(1, 2), WaveShare::new(1, 4))),
+            Some((12, _)) => Some((WaveShare::new(1, 2), WaveShare::new(1, 2))),
+            _ => None,
+        };
         let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
         let quarter_tiles = rows.div_ceil(32).saturating_mul(columns.div_ceil(32));
-        let tile = if small_tiles.saturating_mul(2) >= sms {
-            Some(Tf32RnaWideTile::MsM64N64S4AnyAlignment)
-        } else if rows >= 32 && quarter_tiles.saturating_mul(4) >= sms {
-            Some(Tf32RnaWideTile::MsM32N32S4AnyAlignment)
-        } else {
-            None
-        };
+        let tile = shares.and_then(|(small, quarter)| {
+            if small.covered(small_tiles, sms) {
+                Some(Tf32RnaWideTile::MsM64N64S4AnyAlignment)
+            } else if rows >= 32 && quarter.covered(quarter_tiles, sms) {
+                Some(Tf32RnaWideTile::MsM32N32S4AnyAlignment)
+            } else {
+                None
+            }
+        });
         if forward
-            && ada_rna
             && operands.is_some_and(|operands| operands.a != 0 && operands.b != 0)
             && let Some(tile) = tile
             && let Some(route) = binds(Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile))
