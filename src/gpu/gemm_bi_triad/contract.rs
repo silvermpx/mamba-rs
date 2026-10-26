@@ -78,6 +78,9 @@ pub const ZERO_REDUCTION_MAP_REVISION: u16 = 1;
 pub const ZERO_REDUCTION_DIGEST_DOMAIN: &[u8] = b"tf32-zero-reduction-maps.v1";
 pub const SCALAR_BIG_NT_DYNAMIC_SHARED_BYTES: u32 = 33_376;
 pub const SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES: u32 = 17_408;
+/// The 128 x 64 register pieces tile's two stages of a 128 x 16 A slab and a
+/// 16 x 64 B slab, each row padded by four floats.
+pub const EXACT_NN_M128N64_DYNAMIC_SHARED_BYTES: u32 = 25_600;
 /// The batch-invariant exact thin tile's six stages of 64-deep slabs, A
 /// [16 x 64] and B [64 x 32] each; the kernel static_asserts the same.
 pub const EXACT_THIN_DYNAMIC_SHARED_BYTES: u32 = 73_728;
@@ -1973,10 +1976,12 @@ pub enum Tf32RnaWideTile {
     /// The multistage 64 x 64 tile over 32-deep slabs, four stages, staging
     /// operands off 16-byte boundaries four bytes at a time.
     MsM64N64S4AnyAlignment,
+    /// The same staging on a 32 x 32 tile, four times the CTAs.
+    MsM32N32S4AnyAlignment,
 }
 
 impl Tf32RnaWideTile {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::M128N96S3,
         Self::M96N96S3,
         Self::M128N128S3,
@@ -1991,6 +1996,7 @@ impl Tf32RnaWideTile {
         Self::MsM16N32S4,
         Self::NtMsM16N32S4,
         Self::MsM64N64S4AnyAlignment,
+        Self::MsM32N32S4AnyAlignment,
     ];
 
     pub const fn digest_code(self) -> u8 {
@@ -2009,13 +2015,17 @@ impl Tf32RnaWideTile {
             Self::MsM16N32S4 => 12,
             Self::NtMsM16N32S4 => 13,
             Self::MsM64N64S4AnyAlignment => 14,
+            Self::MsM32N32S4AnyAlignment => 15,
         }
     }
 
     /// Whether the tile stages whole 16-byte chunks, which needs aligned
     /// bases and rows of whole chunks.
     pub const fn stages_whole_chunks(self) -> bool {
-        !matches!(self, Self::MsM64N64S4AnyAlignment)
+        !matches!(
+            self,
+            Self::MsM64N64S4AnyAlignment | Self::MsM32N32S4AnyAlignment
+        )
     }
 
     /// The product the tile computes: the forward's or the input gradient's.
@@ -3113,7 +3123,7 @@ const fn tf32_rna_spec(
 /// The batch-invariant TF32 policy's own tiles walking one chain per
 /// output; the threads and shared memory are the source owner's launch
 /// table.
-const TF32_RNA_CHAIN_SPECS: [Tf32KernelSpec; 14] = [
+const TF32_RNA_CHAIN_SPECS: [Tf32KernelSpec; 15] = [
     tf32_rna_spec(
         Tf32RnaWideTile::M128N96S3,
         super::tf32_rna_source::NN_M128N96_S3_SYMBOL,
@@ -3212,6 +3222,13 @@ const TF32_RNA_CHAIN_SPECS: [Tf32KernelSpec; 14] = [
         (32, 4, 128),
         69_632,
     ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::MsM32N32S4AnyAlignment,
+        super::tf32_rna_source::NN_MS_M32N32_S4_ANY_SYMBOL,
+        (32, 32),
+        (32, 4, 128),
+        36_864,
+    ),
 ];
 
 /// The four-piece twin of a one-chain tile of the batch-invariant module:
@@ -3230,7 +3247,7 @@ const fn tf32_rna_pieces_spec(chain: Tf32KernelSpec, symbol: &'static str) -> Tf
 
 /// The batch-invariant TF32 policy's own tiles: the one-chain tiles, then
 /// their four-piece twins. The input gradient's 128 x 128 tile has none.
-pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 25] = [
+pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 27] = [
     TF32_RNA_CHAIN_SPECS[0],
     TF32_RNA_CHAIN_SPECS[1],
     TF32_RNA_CHAIN_SPECS[2],
@@ -3245,6 +3262,7 @@ pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 25] = [
     TF32_RNA_CHAIN_SPECS[11],
     TF32_RNA_CHAIN_SPECS[12],
     TF32_RNA_CHAIN_SPECS[13],
+    TF32_RNA_CHAIN_SPECS[14],
     tf32_rna_pieces_spec(
         TF32_RNA_CHAIN_SPECS[0],
         super::tf32_rna_source::NN_PIECES4_M128N96_S3_SYMBOL,
@@ -3288,6 +3306,10 @@ pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 25] = [
     tf32_rna_pieces_spec(
         TF32_RNA_CHAIN_SPECS[13],
         super::tf32_rna_source::NN_PIECES4_MS_M64N64_S4_ANY_SYMBOL,
+    ),
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[14],
+        super::tf32_rna_source::NN_PIECES4_MS_M32N32_S4_ANY_SYMBOL,
     ),
 ];
 
@@ -8129,7 +8151,7 @@ mod tests {
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
             (ModuleKind::TriadSm120, 30, [9, 10, 11]),
-            (ModuleKind::TriadTf32Rna, 25, [17, 0, 8]),
+            (ModuleKind::TriadTf32Rna, 27, [19, 0, 8]),
         ];
         let expected_total = expected.iter().map(|(_, count, _)| count).sum::<usize>();
         let mut all_symbols = std::collections::BTreeSet::new();

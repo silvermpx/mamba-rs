@@ -361,6 +361,7 @@ fn scalar_blob() -> String {
         include_str!("../kernels/gemm_bi_triad/scalar_nn_splitk_m32n64.cu"),
         include_str!("../kernels/gemm_bi_triad/scalar_nt_m2n16.cu"),
         include_str!("../kernels/gemm_bi_triad/scalar_tn_m16n16.cu"),
+        include_str!("../kernels/gemm_bi_triad/scalar_nn_m128n64.cu"),
     ])
 }
 
@@ -4417,6 +4418,7 @@ fn scalar_sm89_main_and_splitk_have_bounded_resources_without_reduction_instruct
         ("nn_big_pieces_keep", 256, 1, 255),
         ("nn_m64n64_bk16_s2", 128, 3, 128),
         ("nn_m64n64_pieces4", 128, 3, 168),
+        ("nn_m128n64_pieces_keep", 128, 1, 255),
         ("tn_big", 256, 2, 128),
         ("tn_aligned", 256, 2, 128),
         ("nt_big", 256, 2, 128),

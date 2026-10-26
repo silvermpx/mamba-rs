@@ -83,6 +83,22 @@
   window came within 0.45 percent of the faster tile per product over the
   census, where the older tiles alone were 6.5 percent behind. Every exact
   tile walks the same chain, so the bits do not change.
+- A thin cut exact layer whose chunk partials run on the 16 x 16 tile folds
+  its planes in the same launch: the last CTA to finish an output tile sums
+  that tile's planes in order and adds the bias, where a second kernel did
+  it after a gap. On an RTX 6000 Ada the 64-row layers measured run in 0.90
+  of their former time. The bits do not change.
+- A cut exact layer folds its pieces in registers on more tiles, picked by
+  rules measured on an RTX 6000 Ada over every cut product of the census
+  with every route forced, in two passes: a new 128 x 64 tile (the
+  128 x 128 tile's fold on half its columns) from half a wave of its grid,
+  over the transposed weight for an input gradient from two thirds; the
+  32 x 64 tile over a layer of up to six pieces; and the 128 x 128 tile from
+  half a wave of its grid instead of three quarters. Over the census's cut
+  forwards the rules came within 0.7 percent of the fastest route per
+  product, where the former ones were 3.1 percent behind; over its cut input
+  gradients within 0.34 percent, where they were 2.0 percent behind. A CC
+  12.x board keeps its thresholds. Every route writes the same bits.
 - On SM89 the strict TF32 policy picks its tiles by rules measured on an
   RTX 6000 Ada: a cut forward on the multistage 128 x 64 tile from half a
   wave of its grid and on the 64 x 64 tile from eight waves of work or half
@@ -95,8 +111,11 @@
   operands are off 16-byte boundaries on a 64 x 64 multistage tile that
   stages them four bytes at a time. Over the census's cut forwards the rule
   came within 0.23 percent of the fastest route per product; the new tiles
-  ran their products in 0.55 to 0.77 of the former routes' time. The bits
-  do not change.
+  ran their products in 0.55 to 0.77 of the former routes' time. Where the
+  64 x 64 grid of such an unaligned forward covers less than half the card,
+  a 32 x 32 four-byte tile serves while its own grid covers a quarter: on
+  the products measured it ran in 0.55 to 0.97 of the 64 x 64 tile's time.
+  The bits do not change.
 - A bf16 or f16 forward and input gradient pick their arithmetic by the
   layer's shape alone, so a row has the same bits at every batch size, with
   the tensor cores on or off. An input gradient takes the tensor-core tile

@@ -170,11 +170,12 @@ fn exact_input_gradient_rows_equal_their_cpu_fold() {
     }
 }
 
-/// Cut layers wide enough that the 128 x 128 and 64 x 64 tiles fold their
-/// pieces through the output tile at some row counts and the chunk partials
-/// serve the others, a ragged reduction and ragged columns among them:
-/// every row still equals its CPU fold, forward and input gradient.
-const PIECES_LAYERS: [(usize, usize); 3] = [(768, 768), (768, 2112), (640, 833)];
+/// Cut layers wide enough that the register pieces tiles (128 x 128,
+/// 128 x 64, 32 x 64, 64 x 64) fold their pieces at some row counts and the
+/// chunk partials serve the others, a ragged reduction and ragged columns
+/// among them: every row still equals its CPU fold, forward and input
+/// gradient.
+const PIECES_LAYERS: [(usize, usize); 4] = [(768, 768), (768, 2112), (640, 833), (512, 768)];
 const PIECES_ROWS: [usize; 5] = [1, 65, 513, 1024, 4096];
 
 #[test]

@@ -2215,6 +2215,22 @@ void nn_sm80_tf32_rna_pieces4_ms_m64n64_bk32_s4_any(
     tf32_ms_tile_kernel<SgbTf32Nn, 64, 64, 32, 2, 2, 4, 4, false>(output, a, b, bias, params);
 }
 
+// The same staging on a 32 x 32 tile, four times the CTAs of the 64 x 64
+// one, for a layer whose 64 x 64 grid leaves the card idle.
+extern "C" __global__ __launch_bounds__(128, 2)
+void nn_sm80_tf32_rna_ms_m32n32_bk32_s4_any(
+    float* output, const float* a, const float* b, const float* bias,
+    Sm80Tf32KernelParams params) {
+    tf32_ms_tile_kernel<SgbTf32Nn, 32, 32, 32, 2, 2, 4, 1, false>(output, a, b, bias, params);
+}
+
+extern "C" __global__ __launch_bounds__(128, 2)
+void nn_sm80_tf32_rna_pieces4_ms_m32n32_bk32_s4_any(
+    float* output, const float* a, const float* b, const float* bias,
+    Sm80Tf32KernelParams params) {
+    tf32_ms_tile_kernel<SgbTf32Nn, 32, 32, 32, 2, 2, 4, 4, false>(output, a, b, bias, params);
+}
+
 // The persistent forward: two resident CTAs a multiprocessor walk the
 // output tiles of a shape the 128 x 64 tile covers whole.
 #define TF32_RNA_MS_NN_PERSISTENT(NAME, BM, BN, BK, WARPS_M, WARPS_N, STAGES, MIN_BLOCKS) \

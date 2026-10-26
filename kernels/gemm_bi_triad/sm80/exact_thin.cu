@@ -93,6 +93,27 @@ __device__ __forceinline__ void exact_copy_bt(
                  :: "r"(dst), "l"(src), "r"(valid ? 4 : 0));
 }
 
+// Explicit-width shared loads for the thin tiles' fold. Over plain loads the
+// compiler's vectoriser chose how to split and merge them differently from
+// one compile to the next in the same process, which moved the module's
+// artifact identity; a fixed width pins the instructions.
+__device__ __forceinline__ float4 exact_thin_load4(const float* src) {
+    float4 value;
+    unsigned address = (unsigned)__cvta_generic_to_shared(src);
+    asm volatile("ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];"
+                 : "=f"(value.x), "=f"(value.y), "=f"(value.z), "=f"(value.w)
+                 : "r"(address)
+                 : "memory");
+    return value;
+}
+
+__device__ __forceinline__ float exact_thin_load1(const float* src) {
+    float value;
+    unsigned address = (unsigned)__cvta_generic_to_shared(src);
+    asm volatile("ld.shared.f32 %0, [%1];" : "=f"(value) : "r"(address) : "memory");
+    return value;
+}
+
 template <int ROWS, bool B_T>
 __device__ __forceinline__ void exact_thin_tile(
     float* __restrict__ C,
@@ -214,8 +235,7 @@ __device__ __forceinline__ void exact_thin_tile(
             for (int r = 0; r < ROWS; ++r) {
                 #pragma unroll
                 for (int i = 0; i < EXACT_THIN_GROUP; i += 4) {
-                    float4 word = *reinterpret_cast<const float4*>(
-                        a_rows + r * EXACT_THIN_BK + i);
+                    float4 word = exact_thin_load4(a_rows + r * EXACT_THIN_BK + i);
                     a_now[r][i] = word.x;
                     a_now[r][i + 1] = word.y;
                     a_now[r][i + 2] = word.z;
@@ -224,7 +244,7 @@ __device__ __forceinline__ void exact_thin_tile(
             }
             #pragma unroll
             for (int i = 0; i < EXACT_THIN_GROUP; ++i) {
-                b_now[i] = b_column[i * EXACT_THIN_BN];
+                b_now[i] = exact_thin_load1(b_column + i * EXACT_THIN_BN);
             }
             #pragma unroll
             for (int g = 0; g < EXACT_THIN_BK / EXACT_THIN_GROUP; ++g) {
@@ -236,8 +256,7 @@ __device__ __forceinline__ void exact_thin_tile(
                     for (int r = 0; r < ROWS; ++r) {
                         #pragma unroll
                         for (int i = 0; i < EXACT_THIN_GROUP; i += 4) {
-                            float4 word = *reinterpret_cast<const float4*>(
-                                a_rows + r * EXACT_THIN_BK + k1 + i);
+                            float4 word = exact_thin_load4(a_rows + r * EXACT_THIN_BK + k1 + i);
                             a_next[r][i] = word.x;
                             a_next[r][i + 1] = word.y;
                             a_next[r][i + 2] = word.z;
@@ -246,7 +265,7 @@ __device__ __forceinline__ void exact_thin_tile(
                     }
                     #pragma unroll
                     for (int i = 0; i < EXACT_THIN_GROUP; ++i) {
-                        b_next[i] = b_column[(k1 + i) * EXACT_THIN_BN];
+                        b_next[i] = exact_thin_load1(b_column + (k1 + i) * EXACT_THIN_BN);
                     }
                 }
                 #pragma unroll
@@ -848,6 +867,12 @@ void nt_exact_chunk_fused_m16n16_bk16_s4(
 // a forward. A thread reads a row's or a column's four consecutive k as one
 // 16-byte word and folds them in ascending k, so a slab costs eight 16-byte
 // reads per 64 products and no copy is split into 4-byte pieces.
+//
+// With Pieces the tile folds a cut layer instead: whole 32-deep groups,
+// zero-filled past the reduction, each piece of `piece_tiles` slabs a chain
+// from +0.0 added in order to a kept sum that starts at -0.0, the bias after
+// the pieces - the fold of the 64 x 64 and 128 x 128 pieces tiles. Pieces
+// walk outside and slabs inside, so no slab carries a test of the piece end.
 #define EXACT_KM_BM 32
 #define EXACT_KM_BN 64
 #define EXACT_KM_BK 16
@@ -883,21 +908,22 @@ __device__ __forceinline__ void exact_km_copy(
     }
 }
 
-template <bool B_T>
+template <bool B_T, bool Pieces>
 __device__ __forceinline__ void exact_km_m32n64_tile(
     float* __restrict__ C,
     const float* __restrict__ A,
     const float* __restrict__ B,
     const float* __restrict__ bias,
-    const ExactThinParams& params
+    const ExactThinParams& params,
+    int piece_tiles
 ) {
     __shared__ __align__(16) ExactKmStage<B_T> stages[EXACT_KM_STAGES];
 
-    const int k_begin = blockIdx.z * params.slab;
-    const int k_len = min(params.slab, params.k - k_begin);
+    const int k_begin = Pieces ? 0 : blockIdx.z * params.slab;
+    const int k_len = Pieces ? params.k : min(params.slab, params.k - k_begin);
     A += k_begin;
     B += B_T ? (long long)k_begin : (long long)k_begin * params.ldb;
-    C += (long long)blockIdx.z * params.m * params.ldc;
+    if (!Pieces) C += (long long)blockIdx.z * params.m * params.ldc;
 
     const int row_tile = blockIdx.y * EXACT_KM_BM;
     const int column_tile = blockIdx.x * EXACT_KM_BN;
@@ -909,17 +935,29 @@ __device__ __forceinline__ void exact_km_m32n64_tile(
     const int cg = t & 15;
 
     float acc[4][4];
+    // A chain's bias seeds it; a cut layer's pieces start from +0.0 and the
+    // bias follows them.
     #pragma unroll
     for (int j = 0; j < 4; ++j) {
         const int g_column = column_tile + (B_T ? cg + 16 * j : cg * 4 + j);
-        const float seed = (bias != nullptr && g_column < params.n) ? bias[g_column] : 0.0f;
+        const float seed =
+            (!Pieces && bias != nullptr && g_column < params.n) ? bias[g_column] : 0.0f;
         #pragma unroll
         for (int i = 0; i < 4; ++i) acc[i][j] = seed;
+    }
+    // The finished pieces' sum starts at -0.0, the one value whose sum with
+    // any chain is that chain, so every piece end is the same addition.
+    float kept[4][4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) kept[i][j] = -0.0f;
     }
 
     const bool a_vector = ((params.lda & 3) == 0) && is_aligned_16(A);
     const bool b_vector = ((params.ldb & 3) == 0) && is_aligned_16(B);
-    const int tiles = (k_len + EXACT_KM_BK - 1) / EXACT_KM_BK;
+    const int tiles = Pieces ? (k_len + 31) / 32 * (32 / EXACT_KM_BK)
+                             : (k_len + EXACT_KM_BK - 1) / EXACT_KM_BK;
 
     auto issue = [&](int stage, int k0) {
         ExactKmStage<B_T>& s = stages[stage];
@@ -965,56 +1003,95 @@ __device__ __forceinline__ void exact_km_m32n64_tile(
         if (s < tiles) issue(s, s * EXACT_KM_BK);
         asm volatile("cp.async.commit_group;\n");
     }
-    for (int tile = 0; tile < tiles; ++tile) {
-        asm volatile("cp.async.wait_group %0;\n" :: "n"(EXACT_KM_STAGES - 2));
-        __syncthreads();
-        const int next = tile + EXACT_KM_STAGES - 1;
-        if (next < tiles) issue(next % EXACT_KM_STAGES, next * EXACT_KM_BK);
-        asm volatile("cp.async.commit_group;\n");
-        const ExactKmStage<B_T>& s = stages[tile % EXACT_KM_STAGES];
-        #pragma unroll
-        for (int g = 0; g < EXACT_KM_BK / 4; ++g) {
-            float4 a[4];
+    int tile = 0;
+    int piece_end = Pieces ? min(piece_tiles, tiles) : tiles;
+    while (true) {
+        for (; tile < piece_end; ++tile) {
+            asm volatile("cp.async.wait_group %0;\n" :: "n"(EXACT_KM_STAGES - 2));
+            __syncthreads();
+            const int next = tile + EXACT_KM_STAGES - 1;
+            if (next < tiles) issue(next % EXACT_KM_STAGES, next * EXACT_KM_BK);
+            asm volatile("cp.async.commit_group;\n");
+            const ExactKmStage<B_T>& s = stages[tile % EXACT_KM_STAGES];
             #pragma unroll
-            for (int i = 0; i < 4; ++i) {
-                a[i] = *reinterpret_cast<const float4*>(&s.a[(rg + 8 * i) * EXACT_KM_ROW + 4 * g]);
-            }
-            if (B_T) {
-                float4 b[4];
+            for (int g = 0; g < EXACT_KM_BK / 4; ++g) {
+                float4 a[4];
                 #pragma unroll
-                for (int j = 0; j < 4; ++j) {
-                    b[j] = *reinterpret_cast<const float4*>(&s.b[(cg + 16 * j) * EXACT_KM_ROW + 4 * g]);
+                for (int i = 0; i < 4; ++i) {
+                    a[i] = *reinterpret_cast<const float4*>(&s.a[(rg + 8 * i) * EXACT_KM_ROW + 4 * g]);
                 }
-                #pragma unroll
-                for (int kk = 0; kk < 4; ++kk) {
+                if (B_T) {
+                    float4 b[4];
                     #pragma unroll
-                    for (int i = 0; i < 4; ++i) {
-                        const float av = kk == 0 ? a[i].x : kk == 1 ? a[i].y : kk == 2 ? a[i].z : a[i].w;
+                    for (int j = 0; j < 4; ++j) {
+                        b[j] = *reinterpret_cast<const float4*>(&s.b[(cg + 16 * j) * EXACT_KM_ROW + 4 * g]);
+                    }
+                    #pragma unroll
+                    for (int kk = 0; kk < 4; ++kk) {
                         #pragma unroll
-                        for (int j = 0; j < 4; ++j) {
-                            const float bv = kk == 0 ? b[j].x : kk == 1 ? b[j].y : kk == 2 ? b[j].z : b[j].w;
-                            acc[i][j] = __fmaf_rn(av, bv, acc[i][j]);
+                        for (int i = 0; i < 4; ++i) {
+                            const float av = kk == 0 ? a[i].x : kk == 1 ? a[i].y : kk == 2 ? a[i].z : a[i].w;
+                            #pragma unroll
+                            for (int j = 0; j < 4; ++j) {
+                                const float bv = kk == 0 ? b[j].x : kk == 1 ? b[j].y : kk == 2 ? b[j].z : b[j].w;
+                                acc[i][j] = __fmaf_rn(av, bv, acc[i][j]);
+                            }
                         }
                     }
-                }
-            } else {
-                #pragma unroll
-                for (int kk = 0; kk < 4; ++kk) {
-                    const float4 b = *reinterpret_cast<const float4*>(
-                        &s.b[(4 * g + kk) * EXACT_KM_B_NN_ROW + cg * 4]);
-                    const float bv[4] = {b.x, b.y, b.z, b.w};
+                } else {
                     #pragma unroll
-                    for (int i = 0; i < 4; ++i) {
-                        const float av = kk == 0 ? a[i].x : kk == 1 ? a[i].y : kk == 2 ? a[i].z : a[i].w;
+                    for (int kk = 0; kk < 4; ++kk) {
+                        const float4 b = *reinterpret_cast<const float4*>(
+                            &s.b[(4 * g + kk) * EXACT_KM_B_NN_ROW + cg * 4]);
+                        const float bv[4] = {b.x, b.y, b.z, b.w};
                         #pragma unroll
-                        for (int j = 0; j < 4; ++j) acc[i][j] = __fmaf_rn(av, bv[j], acc[i][j]);
+                        for (int i = 0; i < 4; ++i) {
+                            const float av = kk == 0 ? a[i].x : kk == 1 ? a[i].y : kk == 2 ? a[i].z : a[i].w;
+                            #pragma unroll
+                            for (int j = 0; j < 4; ++j) acc[i][j] = __fmaf_rn(av, bv[j], acc[i][j]);
+                        }
                     }
                 }
             }
         }
+        if constexpr (Pieces) {
+            if (tile >= tiles) break;
+            // A piece's chain joins the kept sum in order and the next one
+            // starts from +0.0.
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                #pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    kept[i][j] = __fadd_rn(kept[i][j], acc[i][j]);
+                    acc[i][j] = 0.0f;
+                }
+            }
+            piece_end = min(piece_end + piece_tiles, tiles);
+        } else {
+            break;
+        }
     }
     asm volatile("cp.async.wait_group 0;\n");
 
+    if constexpr (Pieces) {
+        // The last piece meets the earlier pieces' sum, then the bias: the
+        // order the chunk fold's reduction adds the planes and the bias in.
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int g_column = column_tile + (B_T ? cg + 16 * j : cg * 4 + j);
+            if (g_column >= params.n) continue;
+            const bool biased = bias != nullptr;
+            const float add = biased ? bias[g_column] : 0.0f;
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int g_row = row_tile + rg + 8 * i;
+                if (g_row >= params.m) continue;
+                const float value = __fadd_rn(kept[i][j], acc[i][j]);
+                C[(long long)g_row * params.ldc + g_column] = biased ? __fadd_rn(value, add) : value;
+            }
+        }
+        return;
+    }
     const bool close = params.close > 0 && (k_len % params.close) != 0;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
@@ -1040,7 +1117,7 @@ void nn_exact_km_m32n64_bk16_s4(
     const float* __restrict__ bias,
     ExactThinParams params
 ) {
-    exact_km_m32n64_tile<false>(C, A, B, bias, params);
+    exact_km_m32n64_tile<false, false>(C, A, B, bias, params, 0);
 }
 
 // The same tile of an input gradient, B the weight [n][k].
@@ -1052,7 +1129,34 @@ void nt_exact_km_m32n64_bk16_s4(
     const float* __restrict__ bias,
     ExactThinParams params
 ) {
-    exact_km_m32n64_tile<true>(C, A, B, bias, params);
+    exact_km_m32n64_tile<true, false>(C, A, B, bias, params, 0);
+}
+
+// The 32 x 64 tile over a cut layer's forward, the piece length in slabs
+// given at launch.
+extern "C" __global__ __launch_bounds__(128)
+void nn_exact_km_pieces_m32n64_bk16_s4(
+    float* __restrict__ C,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    ExactThinParams params,
+    int piece_tiles
+) {
+    exact_km_m32n64_tile<false, true>(C, A, B, bias, params, piece_tiles);
+}
+
+// The same over a cut layer's input gradient, B the weight [n][k].
+extern "C" __global__ __launch_bounds__(128)
+void nt_exact_km_pieces_m32n64_bk16_s4(
+    float* __restrict__ C,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    ExactThinParams params,
+    int piece_tiles
+) {
+    exact_km_m32n64_tile<true, true>(C, A, B, bias, params, piece_tiles);
 }
 
 #undef EXACT_KM_B_NN_ROW

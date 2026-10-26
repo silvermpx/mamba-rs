@@ -2385,6 +2385,8 @@ fn validate_tf32_rna_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             super::tf32_rna_source::TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL,
             super::tf32_rna_source::NN_MS_M64N64_S4_ANY_SYMBOL,
             super::tf32_rna_source::NN_PIECES4_MS_M64N64_S4_ANY_SYMBOL,
+            super::tf32_rna_source::NN_MS_M32N32_S4_ANY_SYMBOL,
+            super::tf32_rna_source::NN_PIECES4_MS_M32N32_S4_ANY_SYMBOL,
         ]
         .contains(&spec.symbol);
         let mut tokens = vec![
@@ -8616,10 +8618,15 @@ const SCALAR_SOURCE_FRAGMENTS: &[SourceFragment] = &[
         source: include_str!("../../../kernels/gemm_bi_triad/scalar_tn_m16n16.cu"),
         allowed_quoted_includes: &[],
     },
-    // Last, so the kernels composed before it keep the code they had.
+    // Last, so the kernels composed before them keep the code they had.
     SourceFragment {
         logical_name: "kernels/gemm_bi_triad/sm80/exact_thin.cu",
         source: include_str!("../../../kernels/gemm_bi_triad/sm80/exact_thin.cu"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/scalar_nn_m128n64.cu",
+        source: include_str!("../../../kernels/gemm_bi_triad/scalar_nn_m128n64.cu"),
         allowed_quoted_includes: &[],
     },
 ];
@@ -8742,6 +8749,7 @@ pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "nn_big_pieces_keep",
     "nn_m64n64_bk16_s2",
     "nn_m64n64_pieces4",
+    "nn_m128n64_pieces_keep",
     "nn_splitk32_m32n64_exact",
     "nn_d384_m64n64_bk16_s2",
     "nn_zero_reduction",
@@ -8799,12 +8807,14 @@ pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "nn_exact_thin_r1_m16n32_bk64_s6",
     "nn_exact_m16n16_bk16_s4",
     "nn_exact_km_m32n64_bk16_s4",
+    "nn_exact_km_pieces_m32n64_bk16_s4",
     "exact_chunk_partial_m32n64",
     "exact_chunk_partial_m16n16_bk16_s4",
     "exact_chunk_fused_m16n16_bk16_s4",
     "nt_exact_thin_r1_m16n32_bk64_s6",
     "nt_exact_m16n16_bk16_s4",
     "nt_exact_km_m32n64_bk16_s4",
+    "nt_exact_km_pieces_m32n64_bk16_s4",
     "nt_exact_chunk_partial_m32n64",
     "nt_exact_chunk_partial_m16n16_bk16_s4",
     "nt_exact_chunk_fused_m16n16_bk16_s4",
@@ -10114,6 +10124,8 @@ pub struct GemmBiKernels {
     /// The 64 x 64 forward tile folding a cut layer's pieces, their sum in
     /// registers.
     pub gemm_bi_nn_m64n64_pieces4: CudaFunction,
+    /// The 128 x 64 register pieces tile over a cut layer.
+    pub gemm_bi_nn_m128n64_pieces_keep: CudaFunction,
     pub gemm_bi_nn_splitk32_m32n64_exact: CudaFunction,
     pub gemm_bi_nn_d384_m64n64_bk16_s2: CudaFunction,
     pub gemm_bi_tn: CudaFunction,
@@ -10146,6 +10158,8 @@ pub struct GemmBiKernels {
     pub gemm_bi_nn_exact_m16n16: CudaFunction,
     /// Its 32 x 64 tile over operands staged along the reduction.
     pub gemm_bi_nn_exact_km: CudaFunction,
+    /// The same tile folding a cut layer's pieces in its registers.
+    pub gemm_bi_nn_exact_km_pieces: CudaFunction,
     /// Its 64-input chunk partials on a 32 x 64 tile.
     pub gemm_bi_exact_chunk_partial_m32n64: CudaFunction,
     /// Its 64-input chunk partials on the pipelined 16 x 16 tile.
@@ -10159,6 +10173,8 @@ pub struct GemmBiKernels {
     /// The input gradient's 32 x 64 tile, the weight staged along the
     /// reduction.
     pub gemm_bi_nt_exact_km: CudaFunction,
+    /// The same tile folding a cut layer's pieces in its registers.
+    pub gemm_bi_nt_exact_km_pieces: CudaFunction,
     /// The input gradient's chunk partials on a 32 x 64 tile.
     pub gemm_bi_nt_exact_chunk_partial_m32n64: CudaFunction,
     /// The input gradient's chunk partials on the pipelined 16 x 16 tile.
@@ -10548,6 +10564,12 @@ impl GemmBiKernels {
             "nn_m64n64_pieces4",
             super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES as i32,
         )?;
+        let gemm_bi_nn_m128n64_pieces_keep = load("nn_m128n64_pieces_keep")?;
+        set_dynamic_shared(
+            &gemm_bi_nn_m128n64_pieces_keep,
+            "nn_m128n64_pieces_keep",
+            super::contract::EXACT_NN_M128N64_DYNAMIC_SHARED_BYTES as i32,
+        )?;
         let gemm_bi_nn_splitk32_m32n64_exact = load("nn_splitk32_m32n64_exact")?;
         let gemm_bi_nn_d384_m64n64_bk16_s2 = load("nn_d384_m64n64_bk16_s2")?;
         set_dynamic_shared(
@@ -10721,6 +10743,7 @@ impl GemmBiKernels {
             gemm_bi_nn_big_pieces_keep,
             gemm_bi_nn_m64n64_bk16_s2,
             gemm_bi_nn_m64n64_pieces4,
+            gemm_bi_nn_m128n64_pieces_keep,
             gemm_bi_nn_splitk32_m32n64_exact,
             gemm_bi_nn_d384_m64n64_bk16_s2,
             gemm_bi_tn,
@@ -10750,12 +10773,14 @@ impl GemmBiKernels {
             gemm_bi_nn_exact_thin_r1,
             gemm_bi_nn_exact_m16n16: load("nn_exact_m16n16_bk16_s4")?,
             gemm_bi_nn_exact_km: load("nn_exact_km_m32n64_bk16_s4")?,
+            gemm_bi_nn_exact_km_pieces: load("nn_exact_km_pieces_m32n64_bk16_s4")?,
             gemm_bi_exact_chunk_partial_m32n64: load("exact_chunk_partial_m32n64")?,
             gemm_bi_exact_chunk_partial_m16n16: load("exact_chunk_partial_m16n16_bk16_s4")?,
             gemm_bi_exact_chunk_fused_m16n16: load("exact_chunk_fused_m16n16_bk16_s4")?,
             gemm_bi_nt_exact_thin_r1,
             gemm_bi_nt_exact_m16n16: load("nt_exact_m16n16_bk16_s4")?,
             gemm_bi_nt_exact_km: load("nt_exact_km_m32n64_bk16_s4")?,
+            gemm_bi_nt_exact_km_pieces: load("nt_exact_km_pieces_m32n64_bk16_s4")?,
             gemm_bi_nt_exact_chunk_partial_m32n64: load("nt_exact_chunk_partial_m32n64")?,
             gemm_bi_nt_exact_chunk_partial_m16n16: load("nt_exact_chunk_partial_m16n16_bk16_s4")?,
             gemm_bi_nt_exact_chunk_fused_m16n16: load("nt_exact_chunk_fused_m16n16_bk16_s4")?,
@@ -14826,7 +14851,7 @@ mod tests {
         const D768_TRANSPOSE_SYMBOL: &str = "transpose_f32_32x16_d768";
         const TN_M16N16_SYMBOL: &str = "tn_m16n16_bk16_s2_splitm16";
         let valid = synthetic_scalar_splitm_module_ptx();
-        assert_eq!(super::SCALAR_SYMBOLS.len(), 70);
+        assert_eq!(super::SCALAR_SYMBOLS.len(), 73);
         validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid)
             .expect("complete TriadScalar export inventory");
 
@@ -16129,6 +16154,7 @@ mod tests {
         "kernels/gemm_bi_triad/scalar_nt_m2n16.cu",
         "kernels/gemm_bi_triad/scalar_tn_m16n16.cu",
         "kernels/gemm_bi_triad/sm80/exact_thin.cu",
+        "kernels/gemm_bi_triad/scalar_nn_m128n64.cu",
     ];
 
     const SM80_FRAGMENTS: &[&str] = &[
@@ -16173,6 +16199,7 @@ mod tests {
         "nn_big_pieces_keep",
         "nn_m64n64_bk16_s2",
         "nn_m64n64_pieces4",
+        "nn_m128n64_pieces_keep",
         "nn_splitk32_m32n64_exact",
         "nn_d384_m64n64_bk16_s2",
         "nn_zero_reduction",
@@ -16230,12 +16257,14 @@ mod tests {
         "nn_exact_thin_r1_m16n32_bk64_s6",
         "nn_exact_m16n16_bk16_s4",
         "nn_exact_km_m32n64_bk16_s4",
+        "nn_exact_km_pieces_m32n64_bk16_s4",
         "exact_chunk_partial_m32n64",
         "exact_chunk_partial_m16n16_bk16_s4",
         "exact_chunk_fused_m16n16_bk16_s4",
         "nt_exact_thin_r1_m16n32_bk64_s6",
         "nt_exact_m16n16_bk16_s4",
         "nt_exact_km_m32n64_bk16_s4",
+        "nt_exact_km_pieces_m32n64_bk16_s4",
         "nt_exact_chunk_partial_m32n64",
         "nt_exact_chunk_partial_m16n16_bk16_s4",
         "nt_exact_chunk_fused_m16n16_bk16_s4",
@@ -16633,7 +16662,7 @@ mod tests {
 
         let scalar: BTreeSet<_> = SCALAR_SYMBOLS.iter().copied().collect();
         let sm80: BTreeSet<_> = SM80_SYMBOLS.iter().copied().collect();
-        assert_eq!(scalar.len(), 70);
+        assert_eq!(scalar.len(), 73);
         assert_eq!(sm80.len(), 16);
         let sm80_streamk: BTreeSet<_> = super::SM80_STREAMK_SYMBOLS.iter().copied().collect();
         assert_eq!(sm80_streamk.len(), 2);
@@ -16678,7 +16707,7 @@ mod tests {
         assert!(sm80.is_disjoint(&sm90a));
         assert!(sm80.is_disjoint(&sm100));
         assert!(sm90a.is_disjoint(&sm100));
-        assert_eq!(scalar.union(&sm80).count(), 86);
+        assert_eq!(scalar.union(&sm80).count(), 89);
         assert!(
             scalar
                 .union(&sm80)
