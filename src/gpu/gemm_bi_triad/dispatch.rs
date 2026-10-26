@@ -3578,6 +3578,29 @@ fn rna_backward_rule_route(
                 Tf32PortableStages::S3,
             )))
         }
+        // SM80 picks among the pre-rounded tiles and the portable 16 x 32
+        // tile by its own census: the 16 x 32 tile below half a wave of
+        // 64 x 64 tiles, the 64 x 96 tile from two waves, the 64 x 64 tile
+        // between. Over 883 one-chain weight gradients on an A100 that came
+        // within 2.2% of the fastest route of the same bits per cell in
+        // geometric mean, where the portable 64 x 64 tile took 23%.
+        ResolvedGemmOp::Tn
+            if rna_pre_tn_admits(request, operands, availability)
+                && availability.portable?.device.compute_capability == (8, 0) =>
+        {
+            let tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
+            let sms = availability.multiprocessors as usize;
+            Some(if !WaveShare::new(1, 2).covered(tiles, sms) {
+                Tf32PhysicalRoute::MmaTf32Rna(portable(
+                    Tf32PortableTile::M16N32,
+                    Tf32PortableStages::S4,
+                ))
+            } else if WaveShare::new(2, 1).covered(tiles, sms) {
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+            } else {
+                Tf32PhysicalRoute::Sm89TnPreRnaM64N64
+            })
+        }
         ResolvedGemmOp::Tn if rna_pre_tn_admits(request, operands, availability) => Some(
             if reduction >= 256
                 && rna_pre_tn_wide_pays(rows, columns, availability.multiprocessors as usize)
@@ -3818,7 +3841,7 @@ fn rna_tiles_stage(
 }
 
 /// Whether a weight gradient may run the pre-rounded tiles: the joint
-/// module is bound on an Ada or CC 12.x board, the gradient accumulates
+/// module is bound on an A100, Ada or CC 12.x board, the gradient accumulates
 /// with unit scales into 16-byte aligned operands, the saved activations'
 /// rows are whole 16-byte chunks, and the transposed copy fits its scratch.
 fn rna_pre_tn_admits(
@@ -3832,10 +3855,12 @@ fn rna_pre_tn_admits(
     let shape = request.shape;
     let copy_stride = shape.m.next_multiple_of(4);
     // The joint module composes on every SM80-tier board; its pre-rounding
-    // transpose and tiles are gated for the Ada and CC 12.x JITs.
+    // transpose and tiles serve where a census measured them: Ada, CC 12.x
+    // and an A100, where every one of them wrote the bits of the portable
+    // tiles of the same cut.
     availability.joint.is_some_and(|joint| {
         let cc = joint.device.compute_capability;
-        cc == (8, 9) || cc.0 == 12
+        cc == (8, 0) || cc == (8, 9) || cc.0 == 12
     }) && request.op == ResolvedGemmOp::Tn
         && shape == F32TriadShape::contiguous(ResolvedGemmOp::Tn, (shape.m, shape.k, shape.n))
         && shape.m > 0
